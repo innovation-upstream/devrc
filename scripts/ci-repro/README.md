@@ -108,6 +108,94 @@ seed/ordering hypothesis is the CI evidence itself: the suite's own classifier n
 `SERVER_BLOCKED_IN_FSYNC` on the failing run. The reproducer's job is to make that
 mechanism testable on demand rather than to eliminate rivals.
 
+### `SLOWFSYNC_SKIP_TMPFS=1` — measuring a SITING fix, which the default mode cannot
+
+🔴 **The default mode stalls tmpfs too, so it cannot tell a fixed store from a broken
+one.** The shim interposes on `fsync(2)` in libc; the filesystem behind the fd is not
+consulted. Measured, and it is the whole reason this mode exists:
+
+```
+default mode, fd on ext4   -> stalls 65.0s (fs magic=0xef53)
+default mode, fd on tmpfs  -> stalls 65.0s (fs magic=0x1021994)
+```
+
+So a run against a store that `testlib/store_siting.py` has moved onto tmpfs goes red
+in the default mode, and the red is the **shim's**, not the code's. Both arms of the
+comparison fail and the instrument answers nothing.
+
+`SLOWFSYNC_SKIP_TMPFS=1` models the mechanism this file documents — node-local
+**device** contention, which an fsync with no backing device does not wait for — by
+passing a `TMPFS_MAGIC` fd straight through and stalling everything else. Two
+properties are deliberate: the pass-through does **not** consume the one-shot latch (a
+pass-through that spent it would turn "the store moved to tmpfs" into "the shim ran out
+of ammunition", which is a green that means nothing), and a *failing* `fstatfs()`
+stalls rather than skips. The stall line prints the fd's fs magic so the filesystem
+that was stalled is readable from the run rather than inferred.
+
+🔴 **THE VALUE SELECTS THE MODE — `SLOWFSYNC_SKIP_TMPFS=0` USED TO TURN IT ON.** The
+shim tested `getenv(...) != NULL`, which is presence, not value, so the spelling an
+operator reaches for to switch the mode **off** switched it on instead. Measured on this
+branch, whose store is on tmpfs, at the test selection below:
+
+```
+before the fix:  SLOWFSYNC_SKIP_TMPFS=0  -> two pass-through lines, 1 passed in  3.18s
+after  the fix:  SLOWFSYNC_SKIP_TMPFS=0  -> stall line magic=0x1021994, 1 failed in 65.91s
+after  the fix:  SLOWFSYNC_SKIP_TMPFS=1  -> two pass-through lines, 1 passed in  5.10s
+```
+
+The `=0` row before the fix is exactly what the paragraph above warns about — a shim
+that quietly stopped firing, reporting a pass. The convention now is: **ON** for `1`,
+`true`, `yes`, `on` (case-insensitive); **OFF** for `0`, `false`, `no`, `off`, the empty
+string, and for the variable being unset; and an unrecognised value resolves **OFF** —
+i.e. the shim fires — with a one-shot line on stderr naming the value. Sixteen
+spellings were watched on a one-fsync tmpfs probe (`1 true TRUE yes YES on On` →
+pass-through in 0.00s; `0 false no off Off` and the empty string and the variable unset
+→ the 65s stall; `maybe` and `2` → the warning line, then the stall).
+
+```bash
+SO=/tmp/slowfsync-$USER-$$.so
+gcc -shared -fPIC -o "$SO" scripts/ci-repro/slowfsync.c -ldl
+T='scripts/tests/test_subsystem_store_api.py::TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference'
+
+# reproduction on a DISK-backed store — expect 1 failed, ~65s, fs magic=0xef53
+nix develop . --command env SLOWFSYNC_SKIP_TMPFS=1 LD_PRELOAD="$SO" \
+  python3 -m pytest "$T" -q -s
+
+# the same test with the store SITED — expect 1 passed, ~4s, two pass-through lines
+```
+
+🔴 **Use `-s`.** pytest captures stderr and only prints it for a FAILING test, so a
+passing run shows none of the shim's own output — which is indistinguishable from a
+shim that never attached. `-s` makes the pass-through lines visible, and they are the
+positive control: you should see exactly **two**, the file and its parent directory,
+which is `_replace_bytes`'s pair.
+
+**Measured on the store-siting branch** (`fix/site-every-store-off-the-contended-disk`),
+every row watched:
+
+| tree | mode | store lands on | result |
+|---|---|---|---|
+| `origin/main` | none (control) | ext4 | whole class `5 passed in 8.76s` |
+| `origin/main` | default | ext4 | `1 failed in 65.52s`, `TimeoutError` at `socket.py:720`, `MECHANISM = SERVER_BLOCKED_IN_FSYNC` |
+| `origin/main` | `SKIP_TMPFS=1` | ext4 | `1 failed in 63.96s`, same, stall line `fs magic=0xef53` |
+| branch | `SKIP_TMPFS=1` | tmpfs | **`1 passed in 3.67s`**, two `pass-through … magic=0x1021994` lines, latch untouched |
+| branch | default | tmpfs | `1 failed in 63.69s`, stall line `fs magic=0x1021994` |
+| branch | `SKIP_TMPFS=1`, siting forced to fall back | ext4 | `1 failed in 64.29s`, stall line `fs magic=0xef53` |
+
+The last two rows are the controls that make the fourth mean something, and they are
+different claims. Row 5 says the shim can **still** kill this test on the branch, so the
+green is not "the reproducer no longer reaches this code". Row 6 says forcing
+`store_siting.tmpfs_dir()` to `None` reproduces `main`'s red exactly, so the green is
+the **siting** and not a property of the branch's other edits. Row 6 was produced with a
+throwaway pytest plugin that sets `store_siting._DEFAULT_CANDIDATE` to a non-existent
+path and asserts `tmpfs_dir() is None` before any test runs; it is deliberately not in
+the repo, because a lever that forces the fallback is a lever that can be left on.
+
+⚠ **This does not measure CI.** It measures that the failure mode is filesystem-
+dependent on this host, at this test. The gate's own environment may have no usable
+tmpfs at all — `store_siting` then falls back to disk by design and the flake is
+untouched there. `store_root`'s docstring enumerates the five ways that happens.
+
 ### Why LD_PRELOAD and not the narrower tool already in the repo
 
 `test_subsystem_store_api.py` monkeypatches `api._fsync_dir` inside
