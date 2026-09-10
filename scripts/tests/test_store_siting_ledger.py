@@ -244,8 +244,11 @@ def test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once()
     'served'}` IS an `ast.Assign` and `_assignments` does yield it — and still
     measures 0, because `_path_base` returns None for the `ast.Subscript` at the
     consumer, so the binding is never reached. A `for` target and a comprehension
-    target fail the second condition. A CLOSURE fails NONE of the three and measures 0
-    anyway: it is the scope arm one level in, not a binding case. "Within one function
+    target fail the second condition. A CLOSURE fails the FIRST and neither of the
+    other two — its binding is a plain assignment and `_path_base` names its base —
+    because "one function scope" means `_walk_scope`'s scope, and that stops at a
+    nested `def` a reader sees as part of the same test. It is the scope arm one level
+    in, not a binding case. "Within one function
     scope, and nothing else" is what this sentence used to say, and it is wider than
     the code by exactly that set. The enumeration lives in
     `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s docstring, with the
@@ -932,8 +935,10 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
         arm does not model — `_ROOT_CONSUMERS` closes renames and not GROWTH into a
         new consumer name, which its own COMMENT records, including the
         `serve_store(served)` -> 0 measurement. A comment is not a guard;
-      * ONLY WRITTEN DOWN. 🔴 A root that reaches its consumer WITHIN ONE FUNCTION
-        SCOPE, with no fixture involved, and is still not counted. The three
+      * ONLY WRITTEN DOWN. 🔴 A root that reaches its consumer WITHIN ONE TEST
+        FUNCTION, with no fixture involved, and is still not counted — "test function"
+        and not "scope", because one of the rows below is precisely a case where those
+        two differ. The three
         bullets above did NOT cover
         this and the list read as complete — the fixture bullet is a scope boundary,
         the spelling bullet is not `tmp_path / X`, the consumer bullet is a name
@@ -943,7 +948,7 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
         BINDING ONE ("not through a binding form `_assignments` resolves"). Each row
         below carries the mechanism that actually stops it, established by widening
         ONE thing at a time and re-measuring rather than by reading the code. Measured,
-        all in one function scope, all reaching `running` (which IS in
+        all inside one `def test_probe(tmp_path)`, all reaching `running` (which IS in
         `_ROOT_CONSUMERS`), all spelled `tmp_path / 'served'`, no fixture anywhere:
 
             inline (control)                                              -> 1
@@ -1555,8 +1560,9 @@ def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
     from this sentence, and the third is what a `for` target and a comprehension target
     do NOT need: they fail on `_assignments` alone. A dict or list element passes
     `_assignments` and fails on `_path_base`, which returns None for an
-    `ast.Subscript`. A closure passes all three and still measures 0 — it is the scope
-    arm, `_walk_scope` stopping at the nested `def`, not a binding case at all.
+    `ast.Subscript`. A closure passes the last two and fails the FIRST — "one function
+    scope" is `_walk_scope`'s scope, which stops at the nested `def` a reader counts as
+    part of the same test. It is the scope arm, not a binding case at all.
     `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
     bullet enumerates them with the numbers. Nothing here pins that set; it is written
     down, not guarded.

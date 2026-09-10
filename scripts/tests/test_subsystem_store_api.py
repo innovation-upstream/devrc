@@ -19504,14 +19504,16 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         it.
       * ONLY WRITTEN DOWN — 🔴 AND THIS ONE WAS MISSING FROM THE LIST ENTIRELY, WHICH
         IS THE SAME DEFECT ONE LEVEL UP. A root reaching a REAL consumer, in ONE
-        function scope, with no fixture involved, and blocked by neither of the two
-        arms above. It is TWO mechanisms, not one, and an earlier revision of this
+        test function, with no fixture involved, and blocked by none of the three
+        arms above. It is THREE mechanisms, not one, and an earlier revision of this
         bullet grouped all of it under "a binding the census does not resolve":
         a `for` or comprehension TARGET is that binding case, closed by widening
         `_assignments`; a dict or list ELEMENT (`running(stores['a'])`) is a
-        `_path_base` case and is NOT — it stays 0 under a widened `_assignments`; and
-        a CLOSURE is the SCOPE case, `_walk_scope` stopping at the nested `def`, and
-        stays 0 under both. Measured 0 each against an inline control of 1; the
+        `_path_base` case and is NOT — it stays 0 under a widened `_assignments`, and
+        goes to 1 only when `_path_base` sees through an `ast.Subscript`; and a
+        CLOSURE is the SCOPE case — one test function to a reader, two scopes to
+        `_walk_scope`, which stops at the nested `def` — and stays 0 under both
+        widenings. Measured 0 each against an inline control of 1; the
         numbers are in
         `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
         bullet.
