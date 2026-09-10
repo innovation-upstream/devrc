@@ -266,37 +266,9 @@ def _env(**extra) -> dict:
     return e
 
 
-# 🔴 THE FIXTURE USED TO PLANT ITS OWN CO-TENANT. `git commit` calls
-# `run_auto_maintenance()`, which spawns `git maintenance run --auto --quiet
-# --detach`. The child DETACHES FIRST and decides whether there is anything to
-# do SECOND, so the loose-object threshold is irrelevant to whether the process
-# exists: for a few milliseconds a `git` with `ppid=1` and `cwd` = this brand-new
-# repo is sitting in it, and `live_cotenants` — correctly — reports it.
-#
-# That is the whole 2026-09-06 flake. MEASURED at load ~87 on 2026-09-09 over
-# 8,000 `_mkrepo`-and-probe cycles in two processes: 121 hits (~1.5%), ALL 121
-# `comm=git` with `ppid=1`, ZERO of any other kind. 78 of them were read before
-# the process exited and every one said `cmdline='git maintenance run --auto
-# --quiet --detach'`; the other 43 raced the read.
-#
-# The old comment called the mechanism REFUTED because `gc.auto` defaults to
-# 6700 loose objects and `_mkrepo` leaves three — true of whether gc does WORK,
-# and irrelevant to whether the process is SPAWNED. Its evidence was 80
-# iterations finding nothing; at 1.5% that sample has a ~70% chance of zero
-# hits, so "refuted" was a claim the sample could not support.
-#
-# `maintenance.auto=false` is the knob `run_auto_maintenance` itself reads, so
-# it suppresses the spawn rather than the work. Passed with `-c` on every
-# invocation instead of via the environment because these tests police `GIT_*`
-# env vars and a `GIT_CONFIG_COUNT` triple would leak into every runner
-# subprocess they spawn. Pinned by
-# `test_mkrepo_leaves_no_detached_git_child_behind`.
-_NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false")
-
-
 def _git(repo: Path, *args, env=None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *_NO_AUTO_MAINTENANCE, *args],
+        ["git", "-C", str(repo), *args],
         capture_output=True, text=True, env=env or _env(),
     )
 
@@ -304,7 +276,7 @@ def _git(repo: Path, *args, env=None) -> subprocess.CompletedProcess:
 def _mkrepo(path: Path, branch: str = "main") -> Path:
     """A real, committed repo at `path` — the stand-in for the operator's clone."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", *_NO_AUTO_MAINTENANCE, "init", "-q", "-b", branch, str(path)],
+    subprocess.run(["git", "init", "-q", "-b", branch, str(path)],
                    check=True, capture_output=True, env=_env())
     (path / "f.txt").write_text("base\n", encoding="utf-8")
     assert _git(path, "add", "f.txt").returncode == 0
@@ -1617,13 +1589,12 @@ def test_the_module_root_pin_does_not_depend_on_this_tree_being_a_checkout():
 # --------------------------------------------------------------------------- #
 # 4d. 🔴 THE CO-TENANT PROBE (finding A)
 # --------------------------------------------------------------------------- #
-# 🔴 `describe_cotenants` USED TO LIVE HERE, and that is precisely why the probe
-# was unexecutable when the red finally arrived: a helper private to one module
-# can only ever be wired into that module, and this family spans TWO
-# (`test_nogit_isolation.py` carries four more preconditions over the same
-# probe). It now lives beside `live_cotenants` in `testlib/gitenv.py` — one
-# rule, one place — and the two tests below pin the SHIPPED formatter, not a
-# copy of it.
+# 🔴 `describe_cotenants` USED TO LIVE HERE, PRIVATE TO THIS MODULE, and that
+# is why it was wired into one test of a family that spans TWO: a module-private
+# helper can only ever be called from its own module, and
+# `test_nogit_isolation.py` carries four more preconditions over the same probe.
+# It now sits beside `live_cotenants` in `testlib/gitenv.py` — one rule, one
+# place. The two tests below pin the SHIPPED formatter, not a copy of it.
 
 
 def test_describe_cotenants_names_cwd_and_cmdline(tmp_path):
@@ -1673,29 +1644,28 @@ def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
     _require_proc()
     repo = _mkrepo(tmp_path / "repo")
     git_dir = resolve_git_dir(repo)
-    # 🔴 THIS PRECONDITION FAILED ON 2026-09-06 (`['126220:git']`) AND 2026-09-08
-    # (`['125757:git']`) AND THE CAUSE IS NOW KNOWN: `_mkrepo` planted the
-    # intruder itself. `git commit` spawns `git maintenance run --auto --quiet
-    # --detach`, which detaches BEFORE deciding it has no work — see the banner
-    # over `_mkrepo`. Suppressed at the source with `maintenance.auto=false`.
+    # 🔴 THIS PRECONDITION HAS FAILED IN THE SANDBOX TIER AND THE FAILURE WAS
+    # UNATTRIBUTABLE. MEASURED 2026-09-06: `['126220:git']` on a brand-new tmp
+    # repo, dev-host tier green on the same tree, and a re-run of the identical
+    # derivation clean. The obvious mechanism is REFUTED, not merely
+    # unreproduced: `git commit` can fork a detached `gc --auto`, but `gc.auto`
+    # defaults to 6700 loose objects and `_mkrepo` leaves THREE, so it cannot
+    # fire — and 80 iterations at load 31, with a positive control proving the
+    # probe sees a spawned co-tenant, produced 0 hits.
     #
-    # The old note here called that mechanism REFUTED because 80 iterations
-    # found nothing. The measured rate is ~1% per cycle, so 80 iterations was
-    # never going to see it, and "refuted" was a claim the sample could not
-    # support. It is kept as a PRECONDITION rather than deleted because the
-    # suppression is a property of this fixture, and a future co-tenant from
-    # some other source must still be caught and NAMED — which is what
-    # `describe_cotenants` is for.
+    # So the cause is still unknown, and a message that only says "already has
+    # tenants?" cannot advance it. Name the intruder instead: its cwd and
+    # cmdline are what distinguish an xdist sibling from a stray host process
+    # from one of our own children, and they are gone by the time anyone reads
+    # the log. This costs nothing on the passing path.
     pre_existing = live_cotenants([git_dir])
     assert pre_existing == [], (
         "a brand-new tmp repo already has tenants: "
         f"{describe_cotenants(pre_existing)}\n"
         f"repo={repo} git_dir={git_dir}\n"
-        "The KNOWN cause (a detached `git maintenance run --auto` from "
-        "`_mkrepo`'s commit) is suppressed by `_NO_AUTO_MAINTENANCE`, so this "
-        "is a NEW writer. Read the cwd/cmdline above — they were captured at "
-        "assert time because /proc is gone seconds later — and diagnose from "
-        "those rather than re-running."
+        "This is the flake recorded in devrc/tests.md (2026-09-06). The "
+        "`gc --auto` theory is refuted; capture the cwd/cmdline above and the "
+        "xdist worker id, then diagnose from those rather than re-running."
     )
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                             cwd=str(repo), stdout=subprocess.DEVNULL,
@@ -1721,71 +1691,27 @@ def test_live_cotenants_does_not_count_this_process(tmp_path, monkeypatch):
     repo = _mkrepo(tmp_path / "repo")
     monkeypatch.chdir(repo)
     git_dir = resolve_git_dir(repo)
-    # 🔴 THIS IS THE SITE THAT WENT RED (2026-09-08, `['125757:git']`), AND IT
-    # HAD NO DIAGNOSTIC. #1340 shipped `describe_cotenants` and wired it into
-    # the SIBLING above only, so when the red the investigation was waiting for
-    # finally arrived, the probe it depended on could not run and all that
-    # survived was `pid:comm` again. A diagnostic wired into one member of a
-    # family is a diagnostic that fires on the wrong failure.
+    # 🔴 THE SIBLING ABOVE HAD THE DIAGNOSTIC AND THIS ONE DID NOT, THOUGH BOTH
+    # RED FOR THE SAME REASON. #1340 shipped `describe_cotenants` so the next
+    # co-tenant red would name its intruder, and wired it into ONE member of the
+    # family; #1453 then diagnosed the flake from a capture this site could not
+    # have produced. When this test reddened (2026-09-08, `['125757:git']`) all
+    # that survived was `pid:comm` — the same string as the 2026-09-06 sighting,
+    # and no more use than it had been then.
+    #
+    # It is still a live precondition after #1453: that fix suppresses the
+    # maintenance spawn via `_GIT_ENV`, so anything appearing HERE is a writer
+    # nobody has accounted for, and the fields that identify it are gone from
+    # /proc seconds later. Costs nothing on the passing path.
     seen = live_cotenants([git_dir])
     assert seen == [], (
         "the probe counted our own process (or an ancestor) as a co-tenant, or "
         "something else is sitting in this brand-new repo: "
         f"{describe_cotenants(seen)}\n"
         f"repo={repo} git_dir={git_dir} pid={os.getpid()} ppid={os.getppid()}\n"
-        "A `cmdline` naming `git maintenance run --auto` means "
-        "`_NO_AUTO_MAINTENANCE` stopped covering some git call in `_mkrepo`; "
-        "anything else is a new writer.")
-
-
-def test_mkrepo_leaves_no_detached_git_child_behind(tmp_path):
-    """🔴 THE REGRESSION TEST FOR THE 2026-09-06/08 CO-TENANT FLAKE, and it is
-    DELIBERATELY NOT A RACE.
-
-    Watching for the detached process itself would reproduce the flake's own
-    ~1%-per-cycle sampling problem — the child lives for milliseconds, so an
-    absence proves nothing about whether it was spawned. `GIT_TRACE2_EVENT` is
-    written by the PARENT at the moment it forks, so the record survives however
-    briefly the child lives: a deterministic read of the same fact.
-
-    The positive control is the other half. A `child_start`-free trace is
-    worthless unless an unsuppressed commit in the SAME tmp repo produces one —
-    otherwise a trace that was never written, or a git that stopped emitting the
-    event, reads identically to a suppression that works.
-    """
-    def _trace(extra_args):
-        repo = tmp_path / ("repo" + str(len(list(tmp_path.iterdir()))))
-        repo.mkdir(parents=True)
-        trace = tmp_path / (repo.name + "-trace.json")
-        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)],
-                       check=True, capture_output=True, env=_env())
-        (repo / "f.txt").write_text("base\n", encoding="utf-8")
-        assert _git(repo, "add", "f.txt").returncode == 0
-        done = subprocess.run(
-            ["git", "-C", str(repo), *extra_args, "commit", "-qm", "base"],
-            capture_output=True, text=True,
-            env=_env(GIT_TRACE2_EVENT=str(trace)))
-        assert done.returncode == 0, done.stderr
-        assert trace.is_file(), (
-            "git wrote no trace2 event file, so a zero below would be a fact "
-            "about the tracing, not about the child")
-        return trace.read_text(encoding="utf-8", errors="replace")
-
-    # POSITIVE CONTROL: the unsuppressed commit really does fork the child.
-    control = _trace(())
-    assert '"event":"child_start"' in control, (
-        "an unsuppressed `git commit` started no child at all, so this test "
-        "can no longer see the thing it exists to suppress — re-derive the "
-        "mechanism before trusting the suppressed case below")
-    assert "maintenance" in control, (
-        f"the child git forks is no longer `git maintenance`: {control[-2000:]}")
-
-    # UNDER TEST: `_mkrepo`'s own flags leave nothing behind.
-    suppressed = _trace(_NO_AUTO_MAINTENANCE)
-    assert '"event":"child_start"' not in suppressed, (
-        "`_mkrepo`'s commit forks a child process. If it is detached its cwd is "
-        "this repo, `live_cotenants` reports it, and every co-tenant "
-        f"PRECONDITION in this family flakes:\n{suppressed[-2000:]}")
+        "A `cmdline` naming `git maintenance run --auto` means the "
+        "`GIT_CONFIG_*` suppression in `_GIT_ENV` stopped reaching some git "
+        "call; anything else is a writer new to this family.")
 
 
 # --------------------------------------------------------------------------- #

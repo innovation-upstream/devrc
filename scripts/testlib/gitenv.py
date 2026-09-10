@@ -885,13 +885,19 @@ def describe_cotenants(cotenants: "list[str]") -> str:
     process, and we need them at failure time: /proc entries for a transient
     process are gone before anyone reads the log.
 
-    🔴 THIS IS NOT SPECULATIVE TOOLING — it is what identified the 2026-09-06
-    flake. `pid:comm` alone said `['126220:git']` for four days and the obvious
-    mechanism was refuted from the wrong end; the first run carrying cwd+cmdline
-    printed `cmdline='git maintenance run --auto --quiet --detach'` with
-    `ppid=1`, which named the writer outright. It lives HERE, next to
-    `live_cotenants`, so every caller of the probe can reach it — a second copy
-    in one test module is how only one site of a family ended up wired.
+    🔴 THIS IS NOT SPECULATIVE TOOLING — it is what broke the 2026-09-06 flake
+    open. `pid:comm` alone said `['126220:git']`, which is compatible with every
+    hypothesis and so selects none; the first capture carrying cwd+cmdline read
+    `git maintenance run --auto --quiet --detach` and named the writer outright
+    (#1453). Note what that did NOT overturn: `gc --auto` really was refuted, on
+    a threshold argument that still holds. `maintenance run --auto` is a
+    different code path from `git commit`, so the refutation was sound and
+    simply did not span the space — which is exactly the situation a `pid:comm`
+    list cannot get you out of, and a cmdline can.
+
+    It lives HERE, beside `live_cotenants`, so every caller of the probe can
+    reach it. Keeping it private to one test module is how a family spanning two
+    modules ended up with the diagnostic on a single site.
 
     Best-effort by construction — a process that exits between the scan and this
     call yields `<gone>`, which is itself the useful answer (it dates the
