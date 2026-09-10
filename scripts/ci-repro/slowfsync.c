@@ -39,6 +39,24 @@
  * The stall line prints the fd's fs magic, so which filesystem was stalled is
  * readable from the run rather than inferred.
  *
+ * 🔴 THE MODE IS SELECTED BY THE VARIABLE'S VALUE, NOT BY ITS PRESENCE, AND THAT
+ * IS A FIX RATHER THAN A STYLE CHOICE. This read `getenv(...) != NULL`, which
+ * tests presence: `SLOWFSYNC_SKIP_TMPFS=0` — the spelling an operator reaches
+ * for to turn the mode OFF — turned it ON. Measured on the store-siting branch,
+ * whose store is on tmpfs: `=0` gave two pass-through lines and `1 passed in
+ * 3.18s`, while the default (unset) mode on the same selection gave `1 failed
+ * in 64.38s`. So an operator disabling the mode got exactly what the paragraph
+ * above warns about — a shim that quietly stopped firing, reporting a pass.
+ *
+ * The convention, and it is enforced by `skip_tmpfs_enabled()` below:
+ *   * ON  for `1`, `true`, `yes`, `on` (case-insensitive);
+ *   * OFF for `0`, `false`, `no`, `off`, the empty string, and for the variable
+ *     being unset entirely;
+ *   * anything else is a TYPO, and it is resolved in the firing direction with a
+ *     one-shot line on stderr. Silently choosing either mode for an unrecognised
+ *     value re-creates this same defect one spelling over; choosing the
+ *     non-firing one would additionally hide it behind a pass.
+ *
  * Build:  gcc -shared -fPIC -o slowfsync.so slowfsync.c -ldl
  * Use:    LD_PRELOAD=/abs/path/slowfsync.so pytest ...
  *         SLOWFSYNC_SKIP_TMPFS=1 LD_PRELOAD=... pytest ...
@@ -50,6 +68,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <errno.h>
+#include <string.h>
+#include <strings.h>
 #include <sys/vfs.h>
 
 /* linux/magic.h is not guaranteed on every toolchain this may be built with,
@@ -63,6 +83,39 @@
 static volatile int stalled = 0;
 
 #define STALL_SECONDS 65
+
+/* Warned about an unrecognised SLOWFSYNC_SKIP_TMPFS value already? One line per
+ * process, not one per fsync: a stalling reproducer that prints a warning on
+ * every call buries the stall line it exists to make readable. */
+static volatile int warned_bad_value = 0;
+
+/* Is the filesystem-aware mode ON? Reads the VALUE, not the variable's presence.
+ *
+ * 🔴 `getenv(...) != NULL` was the bug: `SLOWFSYNC_SKIP_TMPFS=0` enabled the
+ * mode. Read on every call rather than cached, which is the pre-existing
+ * behaviour and keeps a mid-run `setenv` from being silently ignored. */
+static int skip_tmpfs_enabled(void) {
+    const char *v = getenv("SLOWFSYNC_SKIP_TMPFS");
+    if (v == NULL) {
+        return 0;
+    }
+    if (!strcasecmp(v, "1") || !strcasecmp(v, "true") || !strcasecmp(v, "yes")
+        || !strcasecmp(v, "on")) {
+        return 1;
+    }
+    if (v[0] == '\0' || !strcasecmp(v, "0") || !strcasecmp(v, "false")
+        || !strcasecmp(v, "no") || !strcasecmp(v, "off")) {
+        return 0;
+    }
+    if (!__atomic_test_and_set(&warned_bad_value, __ATOMIC_SEQ_CST)) {
+        fprintf(stderr, "[slowfsync] SLOWFSYNC_SKIP_TMPFS=%s is not a recognised "
+                "value; the filesystem-aware mode stays OFF and tmpfs fds WILL be "
+                "stalled. Use 1/true/yes/on to enable it, 0/false/no/off to "
+                "disable it. pid=%d\n", v, (int)getpid());
+        fflush(stderr);
+    }
+    return 0;
+}
 
 /* The fd's filesystem magic, or 0 when it could not be read. 0 is NOT tmpfs,
  * so an unreadable fd stalls — see the header comment. */
@@ -92,7 +145,7 @@ int fsync(int fd) {
         }
     }
     unsigned long magic = fs_magic(fd);
-    if (getenv("SLOWFSYNC_SKIP_TMPFS") != NULL && magic == TMPFS_MAGIC) {
+    if (skip_tmpfs_enabled() && magic == TMPFS_MAGIC) {
         /* Deliberately BEFORE the latch, and deliberately loud: a silent skip
          * is indistinguishable from a shim that never attached. */
         fprintf(stderr, "[slowfsync] pass-through fsync(%d): tmpfs (magic=0x%lx), "

@@ -132,6 +132,26 @@ of ammunition", which is a green that means nothing), and a *failing* `fstatfs()
 stalls rather than skips. The stall line prints the fd's fs magic so the filesystem
 that was stalled is readable from the run rather than inferred.
 
+🔴 **THE VALUE SELECTS THE MODE — `SLOWFSYNC_SKIP_TMPFS=0` USED TO TURN IT ON.** The
+shim tested `getenv(...) != NULL`, which is presence, not value, so the spelling an
+operator reaches for to switch the mode **off** switched it on instead. Measured on this
+branch, whose store is on tmpfs, at the test selection below:
+
+```
+before the fix:  SLOWFSYNC_SKIP_TMPFS=0  -> two pass-through lines, 1 passed in  3.18s
+after  the fix:  SLOWFSYNC_SKIP_TMPFS=0  -> stall line magic=0x1021994, 1 failed in 65.91s
+after  the fix:  SLOWFSYNC_SKIP_TMPFS=1  -> two pass-through lines, 1 passed in  5.10s
+```
+
+The `=0` row before the fix is exactly what the paragraph above warns about — a shim
+that quietly stopped firing, reporting a pass. The convention now is: **ON** for `1`,
+`true`, `yes`, `on` (case-insensitive); **OFF** for `0`, `false`, `no`, `off`, the empty
+string, and for the variable being unset; and an unrecognised value resolves **OFF** —
+i.e. the shim fires — with a one-shot line on stderr naming the value. Sixteen
+spellings were watched on a one-fsync tmpfs probe (`1 true TRUE yes YES on On` →
+pass-through in 0.00s; `0 false no off Off` and the empty string and the variable unset
+→ the 65s stall; `maybe` and `2` → the warning line, then the stall).
+
 ```bash
 SO=/tmp/slowfsync-$USER-$$.so
 gcc -shared -fPIC -o "$SO" scripts/ci-repro/slowfsync.c -ldl
