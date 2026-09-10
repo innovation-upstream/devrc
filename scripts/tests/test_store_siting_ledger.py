@@ -933,29 +933,50 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
         new consumer name, which its own COMMENT records, including the
         `serve_store(served)` -> 0 measurement. A comment is not a guard;
       * ONLY WRITTEN DOWN. 🔴 A root that reaches its consumer WITHIN ONE FUNCTION
-        SCOPE but not through a binding form `_assignments` resolves. The three
+        SCOPE, with no fixture involved, and is still not counted. The three
         bullets above did NOT cover
         this and the list read as complete — the fixture bullet is a scope boundary,
         the spelling bullet is not `tmp_path / X`, the consumer bullet is a name
-        outside `_ROOT_CONSUMERS`, and each of these is none of those. Measured, all
-        in one function scope, all reaching `running` (which IS in `_ROOT_CONSUMERS`),
-        all spelled `tmp_path / 'served'`, no fixture anywhere:
+        outside `_ROOT_CONSUMERS`, and each of these is none of those.
+
+        🔴 IT IS THREE MECHANISMS, NOT ONE, AND THIS BULLET USED TO NAME ONLY THE
+        BINDING ONE ("not through a binding form `_assignments` resolves"). Each row
+        below carries the mechanism that actually stops it, established by widening
+        ONE thing at a time and re-measuring rather than by reading the code. Measured,
+        all in one function scope, all reaching `running` (which IS in
+        `_ROOT_CONSUMERS`), all spelled `tmp_path / 'served'`, no fixture anywhere:
 
             inline (control)                                              -> 1
-            stores = {'a': tmp_path / 'served'}; running(stores['a'])      -> 0
-            stores = [tmp_path / 'served']; running(stores[0])             -> 0
-            for served in (tmp_path / 'served',): running(served)          -> 0
-            roots = [p for p in (tmp_path / 'served',)]; running(roots[0]) -> 0
-            served = tmp_path / 'served'; def go(): running(served); go()  -> 0
+            stores = {'a': tmp_path / 'served'}; running(stores['a'])      -> 0  base
+            stores = [tmp_path / 'served']; running(stores[0])             -> 0  base
+            for served in (tmp_path / 'served',): running(served)          -> 0  bind
+            out = [running(p) for p in (tmp_path / 'served',)]             -> 0  bind
+            served = tmp_path / 'served'; def go(): running(served); go()  -> 0  scope
 
-        `_assignments` resolves `Assign` / `AnnAssign` / `NamedExpr` / `withitem` and
-        nothing else, so a `for` target and a comprehension target bind invisibly; and
-        `_path_base` returns None for an `ast.Subscript`, so a container ELEMENT is
-        not a path expression it can name a base for. The closure is the scope arm one
-        level in — `_walk_scope` stops at every nested function, `def go()` included,
-        so it is not only pytest's injection that crosses a boundary. Widening
-        `_assignments` is a separate change and is NOT made here; it is written down
-        rather than guarded, which is the same deal the three bullets above get.
+        `bind` — `_assignments` resolves `Assign` / `AnnAssign` / `NamedExpr` /
+        `withitem` and nothing else, so a `for` target and a comprehension target bind
+        invisibly. Adding `ast.For` / `ast.comprehension` targets to it takes both rows
+        0 -> 1 and moves no other row.
+
+        `base` — `_path_base` returns None for an `ast.Subscript`, so the expression
+        the consumer is HANDED is one it cannot name a base for and the binding is
+        never reached. These two rows are unmoved by a widened `_assignments` and go
+        0 -> 1 when `_path_base` is taught to see through a Subscript.
+
+        `scope` — `_walk_scope` stops at every nested function, `def go()` included,
+        so it is not only pytest's injection that crosses a boundary. Unmoved by
+        either widening.
+
+        ⚠ ROW 4 USED TO BE `roots = [p for p in (tmp_path / 'served',)];
+        running(roots[0])`, filed under the comprehension target. It does not
+        demonstrate that mechanism: it is 0 under a widened `_assignments` and 1 under
+        a widened `_path_base` alone, i.e. the SUBSCRIPT is what stops it and the
+        comprehension target is not load-bearing there at all — `mark()` walks the
+        whole bound value, so once `roots` is reached the comprehension is transparent.
+        It is replaced above by a row that isolates the target.
+
+        None of the three widenings is made here; each is written down rather than
+        guarded, which is the same deal the three bullets above get.
 
     An empty census would therefore NOT prove these files are fully sited, and the
     `test_the_census_can_actually_SEE_a_disk_rooted_site` control below is what stops
