@@ -17,31 +17,31 @@ efforts, different docs: `handoff-find-session-live-first.md` (the `--live` inve
 `handoff-find-session-opencode.md` (the second corpus).
 
 ## State now
-- **Branch:** `fix/find-session-window-and-guards`, worktree `~/workspace/devrc-find-session-window`.
-- **PR:** innovation-upstream/devrc **#1388** — OPEN, `mergeable=MERGEABLE`, `UNSTABLE`.
-- **Base:** `5b564844` (rebased twice this session; see Gotchas).
-- **Gate: `GATE: RESULT=PASS exit=0`** — pytest **13,139 passed / 0 failed** (floor 12,927),
-  node **PASS 1449/1449**, dev-host tier, on `993a7564`. First fully green run of this branch.
-  ⚠ The **sandbox tier** (`nix build .#checks.x86_64-linux.{pytests,nodetests}`) was last run
-  at `0d44c562` (7 inherited failures, since fixed upstream) — **not re-run since the rebase.**
+🔴 **THIS EFFORT IS COMPLETE, MERGED AND SHIPPED.** Everything the earlier revision of this
+section described as open or in flight has landed. Nothing here is waiting on a human.
 
-DONE — five commits, each a round of the audit ladder:
-
-| sha | what |
-|---|---|
-| `3c38514e` | the window itself + the `live_scan` `hosts`-shape crash + `--tail < 1` |
-| `8d3f0cfa` | exit-2 table did not enumerate its own codes; cap size measured half of one leg |
-| `50404954` | round-1 guard walkable three ways; five fixes had no test |
-| `0e4876d0` | `--claude-only --opencode-only` searched nothing; three narrow guards |
-| `993a7564` | replaced a false "backstop" claim with a structural gate; pinned the seam |
-
-Shipped behaviour: `DEFAULT_SINCE_DAYS = 12`; `--all-time` lifts it; `--since` + `--all-time`
-refused; `--claude-only` + `--opencode-only` refused; `--skill` exempt from the default;
-window announced on stdout (human) / stderr (`--json`) / `archive.window` (`--live --json`),
-carrying the count of transcripts skipped unopened.
-
-IN FLIGHT — **audit round 5 is running** (delta, blind, `0e4876d0..993a7564`). Rounds 1–4 each
-returned findings; payload lines per round **155 → 90 → 33 → 12**. No clean round yet.
+- **Merged:** `#1388` (the window + audit rounds 1–5, 2026-09-09) and `#1438` (round 6,
+  squash `f241d7f7`). Both verified in `origin/main` **by CONTENT, not ancestry** — a squash
+  merge never makes the branch head an ancestor.
+- **Shipped and verified at the CONSUMER on both hosts**, `scripts/ship.sh` rc 0:
+  `converged + verified — 2 hosts compared, both at cdfd14ab (local=workbench remote=laptop)`.
+  Workbench 581 managed artifacts / 0 dangling / 0 stale; laptop 528 / 0 / 0. The deployed
+  `~/.claude/skills/find-session/SKILL.md` resolves to the **same store hash on both hosts**
+  (`y21wfbf3…`), which is what makes it a two-host claim rather than two single-host ones.
+- **The shipped behaviour was exercised, not inferred** — see "How to verify". `--tail 0` and
+  `--claude-only --opencode-only` both exit 2; the window notice lands on stdout.
+- **The audit ladder is CLOSED at 6 rounds**: 0 🔴, 23 🟡, ~16 🟢. Payload lines per round
+  155 → 90 → 33 → 12 → 8 → 2. Exactly ONE substantive correctness bug in the whole run
+  (`--claude-only --opencode-only` searching no corpus and exiting 0) — and it **predated the
+  PR**. Every finding from round 3 onward was a defect in a guard the ladder itself had
+  written, which is why stopping was right rather than merely convenient.
+- **Both gate tiers were green before merge**: dev-host `13,144 passed / 0 failed`; sandbox
+  `checks.pytests` `21,187 passed / 0 failed` and `checks.nodetests` `1449/1449`, each built
+  ONE AT A TIME with logs recovered from the derivations (so neither was a silent cached zero).
+- **`ship.sh`'s LAN-only remote address is FIXED** — `#1439`, authored by a DIFFERENT session.
+  Verified live here with a bare `ship.sh`, no override: it tried `192.168.50.155`, got
+  silence, announced `falling back to zach@10.42.0.100 for laptop`, and converged both hosts.
+- Open: **`#1418`, this doc.** Nothing else.
 
 ## Open investigations — live diagnosis state
 
@@ -82,25 +82,55 @@ returned findings; payload lines per round **155 → 90 → 33 → 12**. No clea
 - **Next probe:** run it under artificial load and read which tmux call times out; the fix is to
   remove the timing dependency, not to re-run. **Not this PR's file — do not fix it here.**
 
+### RESOLVED — argparse and the structural exit gate (was: "is the completeness claim true?")
+🔴 **CLOSED. Do not re-run the probe the earlier revision of this section left here.** The
+answer was NO, four times over, and it is fixed.
+- **Answer:** `parser.error()` was only one of SEVEN routes. Measured: `_bye = sys.exit;
+  _bye(…)`, `_e = SystemExit(…); raise _e`, `os._exit(…)`, `build_parser().error(…)`,
+  `build_parser().exit(…)`, `return X if … else …`, plus `quit(…)` and
+  `raise <recv>.SystemExit(…)` found in round 6. And argparse exits 2 with **no mutation at
+  all** — `--nope`, `--limit abc`, `--tail x`.
+- **Fixed by:** naming argparse's rejection in `EXIT_CONTRACT` / `EXIT_2_CAUSES` / the shipped
+  doc; widening the detector to any receiver; and — the load-bearing part — **deleting the
+  completeness claim rather than replacing it**. Four consecutive rounds wrote one and all
+  four were false; the docstring now records the measurement and instructs successors not to
+  assert a closed set.
+- **Ruled out:** "a wider enumeration will eventually be complete" — two rounds running, a
+  spelling nobody had thought of walked through, each with the whole suite green.
+  `via: measurement`
+
+### The tmux load flake — unchanged, still real, now correctly ranked
+- **Symptom + repro:** inside a full `gate.sh --tier both` under load, `open_window failed:
+  tmux did not report the new window's directory` (`test_tmux_reply_agent.py:2264`).
+- **Observed:** failed at load average 65 and again at 78–87; run wall time inflated to
+  26m30s and 48m53s against ~17–22m nominal; passes **3/3** in isolation; spawns a real tmux
+  server with 30s subprocess timeouts.
+- **Ruled out:** "PR #1388 caused it" — outside the six-file diff, and `main` has not touched
+  `scripts/tmux-reply-agent` since the base. `via: command`
+- **Ruled out:** "leaked load generators from the audit rounds" — only `tmux: server` and
+  `k3s-server` were reparented to init; the load was live, parented work from other sessions.
+  `via: measurement`
+- **Next probe:** run it under artificial load and read which tmux call times out. **Not this
+  effort's file** — fix it in its own PR.
+
 ## Next steps (ranked)
-1. **Read round 5's report and act on it.** If it returns findings, fix + re-gate + post the
-   claims block + dispatch round 6; if it is clean, the ladder ENDS — do not run another round to
-   confirm a clean one. `devrc`, files: the same six.
-   forcing: gate — the audit ladder is the only pre-merge gate this repo has; branch protection is
-   declared off (`CLAUDE.md`, marker `merge-gate: other`).
-2. **Re-run the SANDBOX tier before merging**, one derivation at a time:
-   `nix build ~/workspace/devrc-find-session-window#checks.x86_64-linux.pytests --no-link -L`
-   then `.nodetests`. It has not been run since the rebase onto `5b564844`.
-   forcing: gate — that tier is the one a merge is gated on when protection is restored, and it is
-   structurally blind to different things than the dev-host tier.
-3. **Merge #1388 and `scripts/ship.sh`.** The tool is `mkOutOfStoreSymlink`-live but
-   `~/.claude/skills/find-session/SKILL.md` resolves into `/nix/store`, so merge+pull leaves agents
-   reading the OLD doc against the NEW windowed tool until a switch runs.
-   forcing: regression — an agent following the stale doc will report a windowed empty result as a
-   corpus-wide absence, which is the exact failure this change exists to prevent.
-4. **File the tmux flake separately** (`scripts/tests/test_tmux_reply_agent.py`), closing condition:
-   the test no longer depends on wall-clock tmux responses and survives a full gate under load.
-   forcing: none
+1. **Merge this doc (`#1418`).** Its previous revision asserted `#1388 … OPEN`, "the sandbox
+   tier … not re-run since the rebase", and "audit round 5 is running" — all three false by
+   the time anyone would read them. A `/resume` reads this file FIRST, so a stale one costs a
+   re-run of a finished ladder and a re-measure of a measured tier.
+   forcing: regression — the doc is the artifact designed to be trusted, and it was wrong in
+   the direction that causes duplicated work.
+2. **Decide the tmux flake explicitly** — `scripts/tests/test_tmux_reply_agent.py`,
+   `test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude`. Either fix the timing dependency
+   or state on the test that it is knowingly load-fragile. Closing condition: it survives a
+   full `gate.sh --tier both` run at load ≥ 60, or carries a comment saying it is not
+   expected to.
+   forcing: gate — 🔴 **re-tagged from `forcing: none`, which was wrong.** It truncated TWO
+   full gate runs in this session (`gate.sh` SIGTERMed at its own 3600s cap), so it is not a
+   cosmetic nit; `none` would have made it permanently ineligible to be worked.
+3. **Remove two orphaned worktrees** whose branches were deleted upstream on merge:
+   `~/workspace/devrc-find-session-window`, `~/workspace/devrc-fs-guards`.
+   forcing: none — housekeeping; they cost disk and can confuse a later `worktree list`.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The base moved twice mid-ladder and both rebases mattered.** `main` fixed the **7 inherited
@@ -134,26 +164,52 @@ returned findings; payload lines per round **155 → 90 → 33 → 12**. No clea
   resolved) with its positive control confirming the board is reachable. Per the skill, an unknown
   id also answers 200 with an empty array, so that 0 is not a clean bill of health.
 
+- 🔴 **The `gh pr list` sweep is what stopped me duplicating a whole feature.** Asked to add
+  the nebula fallback, I found `fix/ship-nebula-fallback` already existed and `#1439` was
+  already at audit round 1. Its design was the one the constraints force (`remote_ssh_of`
+  kept pure, a separate `remote_ssh_candidates_of` + `first_reachable_ssh`) and it also fixed
+  `drift-check.sh`, which my sketch would have missed. **Two competing implementations of the
+  converger racing into `main` is the worst version of that mistake** — if they disagree, the
+  failure is invisible until a host silently stops converging.
+- 🔴 **`ship.sh` does `git checkout main` on the local host** (`ship.sh:1156`). When the
+  shared base clone is on another session's branch, that switches their tree under them. I
+  refused to run the local leg for that reason and shipped `--no-local` first; the blocker
+  cleared on its own when that session returned the checkout to `main`. **Re-check the branch
+  at the moment of acting, not from an earlier survey** — mine was 20 minutes stale and the
+  answer had already changed.
+- 🔴 **`gate.sh` has its OWN internal 3600s cap.** Under sustained load it is SIGTERMed
+  (`exit=124` → `RESULT: FAIL (exit=143)`), which is a **could-not-run, not a verdict** — one
+  such run completed 20 of 28 targets with **zero failures**. Recover by running the
+  unreached targets directly rather than re-running the whole sweep; say plainly when a
+  verdict is assembled from several runs.
+- **`run-tests.sh --targets` takes a SPACE-separated list**, not comma-separated — a comma
+  list is rejected as "not a target in the hermetic set", which reads like a missing target
+  rather than a syntax error. `scripts/devhost-tests` is in `DEVHOST_TARGETS` and needs
+  `--set all`.
+- ⚠ **`ship.sh`'s fallback prints its "did not answer" line twice** (once bare, once with the
+  "falling back" clause). Cosmetic; not worth its own PR.
+- **The duplicate-plan opencode session** (`scratch11:7`) is alive and still labelled
+  "Identify find-session command". Its plan is obsolete — its proposed 30-day default is
+  measured as a **no-op** (skips 0 of 924 files, because Claude Code prunes
+  `~/.claude/projects` on a 30-day retention). Its `--until` idea is the salvageable part.
+
 ## How to verify
 ```bash
-W=~/workspace/devrc-find-session-window
-# the four suites this PR touches
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  $W/scripts/tests/test_find_session_live.py \
-  $W/scripts/tests/test_find_session_skill_contract.py \
-  $W/scripts/tests/test_find_session_skill_cli.py \
-  $W/scripts/tests/test_transcript_search.py -q          # expect 244 passed
+# 1. the change is IN main (content, never ancestry — squash merges break ancestry)
+git -C ~/workspace/devrc show origin/main:scripts/find-session.py | grep -c 'DEFAULT_SINCE_DAYS = 12'
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_find_session_skill_contract.py \
+  | grep -c '"exit", "quit"'                       # round 6's guard
 
-# the shipped behaviour, streams kept SEPARATE (MULTIOS eats stderr otherwise)
-python3 $W/scripts/find-session.py zzzznomatch --claude-only >/tmp/o 2>/tmp/e
-command grep -c "ARCHIVE window" /tmp/o    # 1  — human path discloses on STDOUT
-python3 $W/scripts/find-session.py zzzznomatch --claude-only --json >/tmp/o 2>/tmp/e
-command grep -c "ARCHIVE window" /tmp/e    # 1  — --json discloses on STDERR
-python3 -c "import json;json.load(open('/tmp/o'))"   # stdout still parses
+# 2. both hosts SERVE it (identical store hash = a two-host claim)
+readlink -f ~/.claude/skills/find-session/SKILL.md
+ssh zach@10.42.0.100 'readlink -f ~/.claude/skills/find-session/SKILL.md'
 
-python3 $W/scripts/find-session.py x --claude-only --opencode-only; echo "rc=$?"   # 2
-python3 $W/scripts/find-session.py x --since 2026-01-01 --all-time; echo "rc=$?"   # 2
-python3 $W/scripts/find-session.py x --live --tail 0; echo "rc=$?"                 # 2
-python3 $W/scripts/find-session.py --skill find-session --limit 1 2>&1 >/dev/null \
-  | command grep "WHOLE corpus"            # --skill is unwindowed
+# 3. the shipped behaviour, streams SEPARATE (zsh MULTIOS eats stderr otherwise)
+python3 ~/workspace/devrc/scripts/find-session.py zzzznomatch --claude-only >/tmp/o 2>/tmp/e
+grep -c 'ARCHIVE window' /tmp/o                    # 1 — human path discloses on STDOUT
+python3 ~/workspace/devrc/scripts/find-session.py x --claude-only --opencode-only; echo $?  # 2
+python3 ~/workspace/devrc/scripts/find-session.py x --live --tail 0; echo $?                # 2
+
+# 4. ship.sh's nebula fallback, off-LAN, with NO override
+bash ~/workspace/devrc/scripts/ship.sh          # expect: "falling back to zach@10.42.0.100"
 ```
