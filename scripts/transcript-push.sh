@@ -137,12 +137,24 @@ fi
 #                so an oversized body was refused by the PROXY and the app never
 #                saw it — the app's limits are irrelevant once that happens.
 #
-# ⚠ THE PROXY'S ACTUAL BYTE LIMIT IS UNMEASURED. No `client_max_body_size` /
-# `proxy-body-size` is set for clawgate in homelab-talos, which SUGGESTS nginx's
-# 1 MiB default, but that is an inference from an absent annotation and the route
-# above was not traced to the config that serves it. What IS measured: 3 MiB was
-# refused, and 817,481 B went through with HTTP 200 on 2026-09-10. MAX_PUSH_BYTES
-# is set below that observed-good size rather than at any believed ceiling.
+# 🔴 THE PROXY'S BYTE LIMIT IS 1 MiB (1,048,576 B) — MEASURED 2026-09-10, and
+# this paragraph previously said it was UNMEASURED and inferred. Method, because
+# it is repeatable and writes NOTHING: POST bodies of increasing size to
+# `$API_URL/api/transcripts` with a DELIBERATELY INVALID bearer token. A body
+# under the proxy limit reaches the app and is refused with 401; a body over it
+# never reaches the app and nginx answers 413. From the laptop's route:
+#
+#      512 KiB -> HTTP 401          (reached the app; nothing stored)
+#     1024 KiB -> HTTP 413 nginx    (refused by the proxy)
+#     2048 KiB -> HTTP 413 nginx
+#
+# 🔴 MIND THE GAP BETWEEN THIS CAP AND THE WIRE BODY: MAX_PUSH_BYTES bounds the
+# aggregate TAIL bytes, NOT the request body. Measured on the same day, a push
+# with MAX_PUSH_BYTES=900000 put 922,643 B on the wire — about 2.5% of JSON and
+# per-session metadata on top, and 88% of the 1 MiB ceiling. That is the real
+# headroom; it is thinner than the cap alone suggests, and the failure past it is
+# TOTAL (every tick, silently, until someone reads the journal). Do not raise
+# MAX_PUSH_BYTES toward 1 MiB on the strength of the number below.
 #
 # 🔴 BEFORE RAISING EITHER OF THESE, VERIFY THE RUNNING SERVER — do not raise
 # them because a clawgate PR or release note says the cap moved. `merged` is not
