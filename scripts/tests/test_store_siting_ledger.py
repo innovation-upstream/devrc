@@ -237,12 +237,17 @@ def test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once()
     `TESTS / "test_subsystem_store_api.py"` under a docstring that talked about the
     ledger — and it now runs over all three, which is a real widening and still not
     coverage: `_is_disk_rooted_store_expr` sees a `tmp_path / X` or a
-    `tmp_path.joinpath(X)` that flows into a store consumer within one function scope
-    AND THROUGH A BINDING FORM `_assignments` RESOLVES — a dict or list element, a
-    `for` target, a comprehension target and a closure are each in one scope, reach a
-    real consumer, and each measure 0. "Within one function scope, and nothing else"
-    is what this sentence used to say, and it is wider than the code by exactly that
-    set. The enumeration lives in
+    `tmp_path.joinpath(X)` that flows into a store consumer within one function scope,
+    THROUGH A BINDING FORM `_assignments` RESOLVES, AND THROUGH AN EXPRESSION
+    `_path_base` CAN NAME A BASE FOR. The third condition is not a technicality: a
+    dict or list element satisfies the first two — `stores = {'a': tmp_path /
+    'served'}` IS an `ast.Assign` and `_assignments` does yield it — and still
+    measures 0, because `_path_base` returns None for the `ast.Subscript` at the
+    consumer, so the binding is never reached. A `for` target and a comprehension
+    target fail the second condition. A CLOSURE fails NONE of the three and measures 0
+    anyway: it is the scope arm one level in, not a binding case. "Within one function
+    scope, and nothing else" is what this sentence used to say, and it is wider than
+    the code by exactly that set. The enumeration lives in
     `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s docstring, with the
     numbers. So the honest statement is that this test's "at least once" weakness is
     REDUCED by the census over the sites the census can see, and the rest is written
@@ -1501,10 +1506,13 @@ def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
 
     So the honest statement, which replaces the one this PR shipped: the predicate does
     NOT cover the flow case generally. It covers the flow case within one function
-    scope AND THROUGH A BINDING FORM `_assignments` RESOLVES — the second half was
-    missing from this sentence too, and it is not a technicality: a dict or list
-    element, a `for` target, a comprehension target and a closure all sit inside one
-    function, reach a real consumer, and each measure 0.
+    scope, THROUGH A BINDING FORM `_assignments` RESOLVES, AND THROUGH AN EXPRESSION
+    `_path_base` CAN NAME A BASE FOR. The second and third halves were both missing
+    from this sentence, and the third is what a `for` target and a comprehension target
+    do NOT need: they fail on `_assignments` alone. A dict or list element passes
+    `_assignments` and fails on `_path_base`, which returns None for an
+    `ast.Subscript`. A closure passes all three and still measures 0 — it is the scope
+    arm, `_walk_scope` stopping at the nested `def`, not a binding case at all.
     `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
     bullet enumerates them with the numbers. Nothing here pins that set; it is written
     down, not guarded.

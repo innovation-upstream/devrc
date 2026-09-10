@@ -19469,8 +19469,11 @@ class TestTheStoreIsSitedOffTheContendedDisk:
     replacement written for it: a description wider than the implementation, which is
     exactly what stops anyone looking. What the census actually reads is a
     `tmp_path / X` or `tmp_path.joinpath(X)` expression that flows into a store
-    consumer within one function scope AND THROUGH A BINDING FORM ITS `_assignments`
-    RESOLVES.
+    consumer within one function scope, THROUGH A BINDING FORM ITS `_assignments`
+    RESOLVES, AND THROUGH AN EXPRESSION ITS `_path_base` CAN NAME A BASE FOR. That
+    third condition is load-bearing and was missing here: `stores = {'a': tmp_path /
+    'served'}; running(stores['a'])` satisfies the first two and still counts 0,
+    because `_path_base` returns None for the `ast.Subscript` the consumer is handed.
 
     🔴 THE HOLES, AND WHICH OF THEM A TEST RE-MEASURES ON EVERY RUN. This list used to
     say "each measured and each pinned by a named guard over there rather than left to
@@ -19496,19 +19499,26 @@ class TestTheStoreIsSitedOffTheContendedDisk:
       * ONLY WRITTEN DOWN — a root reaching a consumer whose name is not in
         `_ROOT_CONSUMERS`. Its own clause says it: recorded by "that set's own
         comment", which is a comment, not a guard. The `serve_store(served)` -> 0
-        control that comment cites appears once in that file, in the comment itself.
+        control it cites is prose in both places it appears in that file — the
+        `_ROOT_CONSUMERS` comment and the fourth residual bullet — and no test runs
+        it.
       * ONLY WRITTEN DOWN — 🔴 AND THIS ONE WAS MISSING FROM THE LIST ENTIRELY, WHICH
         IS THE SAME DEFECT ONE LEVEL UP. A root reaching a REAL consumer, in ONE
-        function scope, with no fixture involved, through a binding the census does
-        not resolve: a dict or list ELEMENT (`running(stores['a'])`), a `for` or
-        comprehension TARGET, or a CLOSURE. Measured 0 each against an inline control
-        of 1; the numbers are in
+        function scope, with no fixture involved, and blocked by neither of the two
+        arms above. It is TWO mechanisms, not one, and an earlier revision of this
+        bullet grouped all of it under "a binding the census does not resolve":
+        a `for` or comprehension TARGET is that binding case, closed by widening
+        `_assignments`; a dict or list ELEMENT (`running(stores['a'])`) is a
+        `_path_base` case and is NOT — it stays 0 under a widened `_assignments`; and
+        a CLOSURE is the SCOPE case, `_walk_scope` stopping at the nested `def`, and
+        stays 0 under both. Measured 0 each against an inline control of 1; the
+        numbers are in
         `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
         bullet.
 
     So: one hole of four is guarded. "WITHIN ONE FUNCTION SCOPE" is what the sentence
     above used to say, full stop, and that is wider than the code by the fourth
-    bullet — twice now a fix round's own explanatory sentence has been the next
+    bullet — a fix round's own explanatory sentence has repeatedly been the next
     round's defect, so read this one at the width its code has.
 
     Neither half is the guard. The pair is — and the pair is still not everything.
