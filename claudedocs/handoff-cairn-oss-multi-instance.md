@@ -37,21 +37,23 @@ is the PRIVATE proposal, not this doc.
 - **DONE in the previous session:** ranks 12, 13's path, 15, 16, 17, 19. **Rank 3 slice 2**
   merged by the session that owned it (#1406 `9300f234`).
 
-- 🔴 **2026-09-09 — THE THREE OPERATOR DECISIONS WERE TAKEN, AND ALL THREE ARE NOW PRs.**
-  The operator chose: **registry `harbor.homelab.lan`, tag `0.8.0`** (rank 13); **add the
-  `cairn` scope** (rank 11); **open the third-leg infra PR** (rank 20). All three land in
-  `ZacxDev/homelab-infra`, where merging the mainline IS deploying — so the PRs are the
-  unit and the merge is the operator's.
-  - **#785** — rank 11, the `cairn` scope in the token allowlist. `tekton/gitops-validate` **pass**.
-  - **#786** — rank 20, the third CI leg.
-  - **#787** — rank 13's deployment half + **rank 7** in the same commit.
-- 🔴 **A CAIRN-BUILT IMAGE IS NOW PUBLISHED — the line every earlier revision of this doc had
-  to negate.** `harbor.homelab.lan/library/subsystem-store-api:0.8.0`, digest
-  `sha256:55cbd1d6c186142c5fd5e4f3ca37ad0dfc3836db5e603374def041778080c7fd`, built by cairn's
-  own `server/build-push.sh` from `c84c142` (with `b25abb5` an ancestor, so SIGHUP is in).
-  **Verified against the copy PULLED BACK FROM THE REGISTRY, not the local build** — 11
-  occurrences of SIGHUP in `/app/server/server.py`, `/data` empty. It is published but **NOT
-  SERVING**: the deployment still names `0.7.0` until #787 merges.
+- ✅ **2026-09-10 — ALL THREE OPERATOR DECISIONS TAKEN, MERGED, AND VERIFIED LIVE.**
+  The operator chose registry `harbor.homelab.lan` + tag `0.8.0` (rank 13), adding the
+  `cairn` scope (rank 11), and opening the third-leg PR (rank 20). All landed in
+  `ZacxDev/homelab-infra`, verified on `trunk` BY CONTENT (a squash is never an ancestor):
+  - **#785** squash `37b5a71f8` — rank 11, the `cairn` scope, 23 → 24 scopes.
+  - **#787** squash `936692ec7` — rank 13's deployment half **+ rank 7**, image `0.8.0`.
+  - **#786** squash `4c890c7ac` — rank 20, the third CI leg.
+  🔴 **MERGE ORDER WAS LOAD-BEARING AND IS THE REUSABLE LESSON.** The deployed `0.7.0`
+  had NO SIGHUP reload — measured `grep -rl SIGHUP /app` → 0 in the running container,
+  with `def load_tokens` → 1 as the positive control proving the search saw the tree — so
+  the allowlist edit was INERT until a pod replacement. #787 *is* that replacement, on a
+  `Recreate`/`replicas: 1` deployment. Merging #785 FIRST meant one pod replacement picked
+  up both; the other order costs two read outages for one change.
+  **Verified against the RUNNING container after the roll, not inferred from it:**
+  SIGHUP `0 → 1` (positive control held at 1 throughout), allowlist `23 → 24` scopes with
+  `cairn` present, new pod 1/1 Ready, 0 restarts.
+
 - **Still open and still needing the operator:** 21 (the vestigial commit timer — re-verified
   live 2026-09-09, `analyze-service-index-commit.service` is `failed`, `ExecMainStatus=1`,
   firing hourly), 4 (§11 questions), 8 (§10 decisions), plus **merging #785/#786/#787**.
@@ -716,8 +718,11 @@ it routes the mandated check back at a client that does not run it, re-opening t
    pod REPLACEMENTS (startup is still `exit 78` on a malformed file, deliberately), and keeps
    the rule that the running container answers the question — with the positive control the
    original had, plus the `sh -c` that stops your own shell expanding the glob.
-   **Closing condition:** #787 merged and the store serving `0.8.0`.
-   forcing: none
+   ✅ **CLOSED 2026-09-10.** #787 squash `936692ec7`; the store serves `0.8.0` and the
+   RUNNING container carries SIGHUP (0 → 1, positive control held). The retired
+   paragraph's own rule survives it: which behaviour an image has is answered by the
+   running container, never by a comment's age.
+   forcing: none — done
 
 8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.**
    `claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`. Read §10 first.
@@ -749,9 +754,13 @@ it routes the mandated check back at a client that does not run it, re-opening t
     from the file path. Run from another checkout it loads that repo's rules and dies with
     `no matching creation rules found` on a file this repo's catch-all covers perfectly well.
     Pin it with `--config`, do not `cd`.
-    **Closing condition:** `cairn create --scope cairn …` exits 0 — **exercise it against the
-    live pod after #785 merges and reconciles; do NOT infer it from the merge.**
-    forcing: none
+    ✅ **CLOSED 2026-09-10 — CONDITION EXERCISED, NOT INFERRED.** After #785 merged and
+    the pod rolled, `cairn create --scope cairn --ref ci-leg --file <f>` returned
+    `created scope=cairn ref=ci-leg revision=dc4d8212`, **rc 0** — it had returned rc 6
+    `[not-found]` for this item's entire life. The rc was CAPTURED, not piped (a pipe
+    returns `tail`'s status and reads a refusal as a write). The scope now holds a real
+    first entry, verified round-tripping from the pod: `1 of 1 entry in cairn/`.
+    forcing: none — done
 
 12. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #6, squash `9d58f02`.** `leakscan.py`'s
     coverage is now DERIVED from content (a NUL within the first 8000 bytes, git's own rule)
@@ -810,9 +819,11 @@ it routes the mandated check back at a client that does not run it, re-opening t
     that certainly does not exist and read the ERROR SHAPE — `not found` means the daemon
     reaches and authenticates; `x509` means it cannot. **Never probe harbor with
     `docker manifest inspect` from this host.**
-    **Closing condition:** ✅ a tag built from cairn at or past `b25abb5` is in the registry;
-    `homelab-infra`'s `image:` line naming it is **#787, awaiting merge**.
-    forcing: none
+    ✅ **CLOSED 2026-09-10 — BOTH HALVES.** The tag is in the registry (verified by
+    pulling it BACK and re-running the controls, not by trusting the push), and
+    `homelab-infra`'s `image:` names it as of #787 squash `936692ec7`, with the store
+    serving it.
+    forcing: none — done
 
 14. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`** (same PR as rank 10).
     forcing: gate — it turned the public repo's only CI gate red on 2 of its first 26 runs
@@ -903,9 +914,16 @@ it routes the mandated check back at a client that does not run it, re-opening t
     would let its first infrastructure hiccup block every merge on a repo with
     `enforce_admins: true`. Promoting it in branch protection is a later, reversible operator
     action needing no change to the file.
-    **Closing condition:** #786 merged, after which `gh pr checks <any devrc PR>` lists a third
-    leg for `cairn-client-runs`, AND that leg goes red when the pinned client is stubbed to
-    print nothing. **Neither half is met by the merge alone — exercise both.**
+    🔨 **MERGED 2026-09-10 (squash `4c890c7ac`) AND LIVE IN-CLUSTER**: `devrc-ci-gate`'s
+    steps are now `clone capture-etc seed-nix pytests nodetests cairn-client-runs
+    verdict`, and `devrc-ci-notify` carries `cairn-context`. Flux applied
+    `trunk@4c890c7ac`.
+    🔴 **THE CLOSING CONDITION IS STILL ONLY HALF MET, AND THE REMAINING HALF NEEDS A
+    REAL RUN.** Wired is not gating: the leg must be SEEN on `gh pr checks <a devrc
+    PR>` and must go RED when the pinned client is stubbed to print nothing. The first
+    devrc PR to run after this merge is the one that answers half one.
+    ⚠ And the leg has never executed in-cluster: every measurement across six audit
+    rounds is one dev host plus a local `nixos/nix:2.24.15` container.
     forcing: none
 
 21. **`analyze-service-index-commit.service` is VESTIGIAL and fails on every firing — 603
@@ -959,6 +977,46 @@ it routes the mandated check back at a client that does not run it, re-opening t
     forcing: none
 
 ## Gotchas / decisions / dead-ends
+
+### 2026-09-10 — SIX AUDIT ROUNDS ON `homelab-infra#786`, AND WHAT ENDED THEM
+🔴 **A CLASSIFIER GRADED BY READING WILL BE REWRITTEN UNTIL SOMETHING EXECUTES IT.** The
+cairn leg's ~20 lines of verdict shell went through FOUR rewrites, and each fix shipped the
+OPPOSITE defect of the one before:
+
+| round | change | defect it shipped |
+|---|---|---|
+| 1 | every non-zero rc → `fail` | a broken gate blamed on the author |
+| 2 | marker-less non-zero → `error` | a broken PIN excused as infrastructure |
+| 3 | bare drv-name match | nix ANNOUNCES the build before any outcome, so it matched every run that built |
+| 4 | markers-first | nix emits `unable to download` at WARNING level while successfully RETRYING |
+
+Rounds 1–3 were each verified by careful reading. The fix was not a fifth reading: a 17-row
+table that lifts the SHIPPED shell out of the YAML and runs it under a real `sh`, asserting
+VERDICT AND DETAIL. All four historical classifiers were replayed into the pipeline and
+caught. **The transferable tell: when a fix and its predecessor keep swapping which
+direction they are wrong in, the missing thing is EXECUTION, not care.**
+
+🔴 **THE FIX ROUND'S OWN PROSE WAS THE RECURRING SECOND FINDING.** Across six rounds the
+audits caught, in commits written while fixing the previous round: a justification invented
+for a fallback that does not exist in that leg; a stale number four lines above the one just
+corrected; a generalisation ("per-step requests are sized well under p99") false for the
+step that dominates the pod; a trailer described as `last 10 log lines:` and UNPREFIXED when
+it is `Last N log lines:` with a `       > ` prefix; and TWO false verification figures in
+the PR body — one a filtered test run reported as full coverage, one a `RESULT: PASS` line
+belonging to an unrelated shell test. **Every one was caught by an audit, none by me.**
+
+⚠ **A LEDGER FIGURE PUBLISHED ON THAT PR WAS WRONG AND IS CORRECTED HERE**: the executable
+payload series is `22 → 16 → 7 → 5 → 4`, and total payload `95 → 95 → 56 → 49 → 47`. The
+"103 → 95 → 56 → 5 → 4" figure conflated the two. The trend that ended the ladder holds; the
+number did not.
+
+**How it ended, and why that is not the same as running out of steam:** the stopping
+criterion was published on the PR BEFORE the final round ran — no 🔴, no executable payload
+change, nothing reachable by CI ⇒ stop. Round 6 met it. Its one substantive finding (an
+extractor still narrowable by a preceding `if…fi`) was applied as a two-line structural
+guard rather than as a seventh round, which is the auditor's own recommendation and the
+difference between a ladder that converges and one that audits itself.
+
 
 **🔴 THE PATH THIS DOC'S OWN KICKOFF NAMES SERVES A STALE REVISION, AND IT LOOKS CURRENT.**
 The 2026-09-08 merge session was told to read `~/workspace/devrc/claudedocs/handoff-cairn-oss-
