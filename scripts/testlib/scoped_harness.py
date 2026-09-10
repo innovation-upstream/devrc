@@ -77,7 +77,14 @@ def scope_line(out: str) -> str | None:
     and one test drives that path — but this helper is reused by ~12 tests and
     was one reuse away from restating the bug it was written under.
     """
-    ms = re.findall(r"^SCOPE: (\w+) ", out, re.M)
+    # 🔴 The trailing space is OPTIONAL, because `gate.sh`'s own reader does not
+    # require one. This helper exists to mirror that reader's LAST-match rule,
+    # and requiring a detail made it STRICTER than the thing it mirrors: a
+    # runner printing a bare `SCOPE: FULL` would be honoured by the gate and be
+    # invisible here. The docstring says this helper exists because the rule
+    # "is exactly the kind of thing that drifts when copied" — the anchoring
+    # drifted instead.
+    ms = re.findall(r"^SCOPE: (\w+)\b", out, re.M)
     return ms[-1] if ms else None
 
 

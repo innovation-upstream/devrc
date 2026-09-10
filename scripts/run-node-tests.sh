@@ -126,8 +126,17 @@ _emit_verdict() {
 # having run ZERO tests. Printing `SCOPE: FULL` + `RESULT: PASS (exit=0)` there
 # is the full-gate-shaped pair off a run that tested nothing. NONE says what
 # actually happened; `gate.sh` treats anything other than FULL as not-a-gate.
-SCOPE_STATE="FULL"
-SCOPE_DETAIL="this runner has no selection flag; it always runs every suite"
+# 🔴 THE PRE-RESOLUTION DEFAULT IS UNKNOWN, NOT FULL — `run-tests.sh` does the
+# same, deliberately: "before the scope is resolved the honest answer is
+# UNKNOWN". This was `FULL`, so any early exit before the suite loop emitted a
+# whole-suite coverage claim from a run that collected nothing. Measured: an
+# unrecognised flag printed `SCOPE: FULL (…always runs every suite)` alongside
+# `RESULT: FAIL (exit=2)`. Not exploitable at the time — `--check-suites` was
+# the only zero-test exit-0 path and it sets NONE — but the next early exit
+# would have inherited the claim silently, which is the same shape as the
+# `SCOPE: NONE` state this very commit added.
+SCOPE_STATE="UNKNOWN"
+SCOPE_DETAIL="the scope has not been resolved yet"
 SCOPE_EMITTED=0
 _emit_scope() {
   [ "$SCOPE_EMITTED" -eq 0 ] || return 0
@@ -427,6 +436,13 @@ command -v node >/dev/null 2>&1 || {
   exit 2
 }
 echo "run-node-tests: node $(node --version)"
+
+# 🔴 FULL is claimed HERE — past every early exit, with node present and the
+# suite list validated, at the point this run actually commits to executing
+# every suite. Setting it as the pre-resolution default (as it was) meant any
+# early exit inherited a whole-suite coverage claim for free.
+SCOPE_STATE="FULL"
+SCOPE_DETAIL="this runner has no selection flag; it always runs every suite"
 
 # --- run each suite in its own invocation (GUARD 1, 2, 4) ----------------------
 sum() { grep -E "^# $2 [0-9]+$" "$1" | tail -1 | awk '{print $3}'; }

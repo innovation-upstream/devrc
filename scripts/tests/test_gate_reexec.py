@@ -61,6 +61,14 @@ _AMBIENT_GATE_VARS = (
     # driving a gate whose refusal is silently off, which is the one
     # condition none of these tests could then observe.
     "DEVRC_GATE_ALLOW_AMBIENT",
+    # 🔴 Read by gate.sh's ambient refusal through INDIRECT expansion
+    # (`for _v in … ; [ -n "${!_v+x}" ]`), so the derivation below could not see
+    # them and they sat unscrubbed — an exported value rode straight into every
+    # re-exec test. The two-way pin reported full coverage the whole time, which
+    # is exactly how it survived: the ledger read as coverage while providing
+    # none for the two variables the refusal was added to catch.
+    "DEVRC_TARGETS",
+    "MIN_TESTS",
 )
 
 
@@ -319,6 +327,17 @@ def _env_vars_gate_sh_reads() -> set[str]:
     first_read: dict[str, int] = {}
     for m in re.finditer(r"\$\{([A-Z][A-Z0-9_]*)(?::-|:\+|:=|:\?|-|\+)", body):
         first_read.setdefault(m.group(1), m.start())
+    # 🔴 INDIRECT EXPANSION IS A READ THIS REGEX CANNOT SEE, and the ambient
+    # refusal uses exactly that: `for _v in A B C D; do [ -n "${!_v+x}" ]`.
+    # The names never appear inside a `${…}`, so the loop above found NONE of
+    # them and the two-way pin below reported full coverage while `DEVRC_TARGETS`
+    # and `MIN_TESTS` were unscrubbed — the "reads as coverage while providing
+    # none" shape this very docstring warns about, reintroduced one indirection
+    # deeper. Harvest the loop's word list too.
+    for m in re.finditer(r"(?m)^\s*for\s+\w+\s+in\s+([A-Z][A-Z0-9_ \t]*?);?\s*do\b", body):
+        for name in m.group(1).split():
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+                first_read.setdefault(name, m.start())
     first_assign: dict[str, int] = {}
     for m in re.finditer(r"(?m)^[^\n]*?\b([A-Z][A-Z0-9_]*)=", body):
         first_assign.setdefault(m.group(1), m.start())

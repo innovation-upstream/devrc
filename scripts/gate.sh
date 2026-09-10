@@ -75,6 +75,13 @@
 # Env:
 #   DEVRC_GATE_TIMEOUT    default for --timeout, in seconds (default 3600). The
 #                         flag wins over it.
+#   MIN_TESTS             read by run-tests.sh as a one-off override of the
+#                         GLOBAL collected-test floor, and REFUSED here when set
+#                         in the ambient environment: it changes what this gate
+#                         will ACCEPT, so a green carrying it is not a full-gate
+#                         verdict. Listed because gate.sh reads it in that
+#                         refusal — see DEVRC_GATE_ALLOW_AMBIENT below.
+#   DEVRC_TARGETS         same: run-tests.sh's target narrowing, refused here.
 #   DEVRC_GATE_NO_REEXEC  =1 to run against the ambient PATH instead of
 #                         re-entering `nix develop`. See the RE-EXEC block.
 #   DEVRC_GATE_ENV        =1 means "already inside a sanctioned gate
@@ -191,7 +198,15 @@ _gate_ambient=()
 for _v in DEVRC_TARGETS DEVRC_GATE_PYTEST_RUNNER DEVRC_GATE_NODE_RUNNER MIN_TESTS; do
   [ -n "${!_v+x}" ] && _gate_ambient+=("$_v=${!_v}")
 done
-if [ "${#_gate_ambient[@]}" -gt 0 ] && [ -z "${DEVRC_GATE_ALLOW_AMBIENT:-}" ]; then
+# 🔴 COMPARE AGAINST THE STRING, not emptiness. `-z` accepted ANY non-empty
+# value, so `DEVRC_GATE_ALLOW_AMBIENT=0` — which anyone would read, and set, as
+# "off" — silently ENABLED the bypass. Measured: `=0` with a stub runner gave
+# `GATE: RESULT=PASS exit=0` having run nothing. Every other boolean in this
+# file already compares against "1" (`DEVRC_GATE_NO_REEXEC`, `DEVRC_GATE_ENV`,
+# `DEVRC_GATE_REEXEC`); this one was the odd spelling, and the header and the
+# FATAL below both document it as `=1`. Nothing pinned either spelling, which
+# is why a one-word divergence survived.
+if [ "${#_gate_ambient[@]}" -gt 0 ] && [ "${DEVRC_GATE_ALLOW_AMBIENT:-0}" != "1" ]; then
   echo "gate: FATAL — ${#_gate_ambient[@]} gate-weakening variable(s) set in this environment:" >&2
   for _a in "${_gate_ambient[@]}"; do echo "         $_a" >&2; done
   echo "  Each one changes what this gate RUNS or what it will ACCEPT, while" >&2
@@ -203,6 +218,18 @@ if [ "${#_gate_ambient[@]}" -gt 0 ] && [ -z "${DEVRC_GATE_ALLOW_AMBIENT:-}" ]; t
   echo "  DEVRC_GATE_ALLOW_AMBIENT=1 exists ONLY for this repo's own tests, which" >&2
   echo "  must drive the runner seam; it is not a way to run a real gate." >&2
   exit 2
+fi
+# 🔴 IF THE ESCAPE WAS HONOURED, SAY SO — IN THE VERDICT BLOCK, NOT ONLY HERE.
+# This commit added a whole announcement mechanism for suspended ledgers on the
+# doctrine that "a guard that quietly stops applying is the #276 shape this file
+# exists to refuse", and then added an escape hatch that did exactly that:
+# measured, `DEVRC_GATE_ALLOW_AMBIENT=1` with a stub runner produced output
+# BYTE-IDENTICAL to a real full gate. The data was already in hand and thrown
+# away unprinted. The realistic path is not exotic — the FATAL above advertises
+# the variable, so whoever hits the refusal reads two lines and exports it.
+GATE_AMBIENT_HONOURED=()
+if [ "${#_gate_ambient[@]}" -gt 0 ]; then
+  GATE_AMBIENT_HONOURED=("${_gate_ambient[@]}")
 fi
 unset _gate_ambient _v _a
 
@@ -449,6 +476,14 @@ fi
 echo "======================== GATE ========================"
 for l in "${TIER_LINES[@]}"; do echo "  $l"; done
 echo "  logs: $LOG_DIR"
+# The escape hatch, named where the verdict is read. Without this the block is
+# byte-identical to an unweakened run, and a replaced runner can print a green
+# verdict having executed nothing.
+if [ "${#GATE_AMBIENT_HONOURED[@]}" -gt 0 ]; then
+  echo "  🔴 AMBIENT WEAKENING HONOURED (DEVRC_GATE_ALLOW_AMBIENT=1) — this is NOT a full-gate verdict:"
+  for a in "${GATE_AMBIENT_HONOURED[@]}"; do echo "       $a"; done
+  echo "     Each of these changes what ran or what was accepted. Do not quote this run as a gate."
+fi
 
 # Precedence: "could not vouch" outranks "failed", which outranks "passed". A
 # gate that cannot trust its own instrument must never report a plain FAIL, let
