@@ -710,7 +710,7 @@ it routes the mandated check back at a client that does not run it, re-opening t
 6. ✅ **DONE AND MERGED 2026-09-07 — `ZacxDev/cairn` #3, `8e4ef84`.**
    forcing: none — done
 
-7. 🔨 **UNBLOCKED AND DONE IN A PR — `ZacxDev/homelab-infra` #787, awaiting merge.** The
+7. ✅ **CLOSED 2026-09-10 — `ZacxDev/homelab-infra` #787, squash `936692ec7`.** The
    no-reload paragraph is retired in the SAME commit that moves `image:` to `0.8.0`, which is
    what its own expiry clause required: retiring it early leaves the next operator waiting for
    a reload the image will never perform, retiring it late has them replace the pod for
