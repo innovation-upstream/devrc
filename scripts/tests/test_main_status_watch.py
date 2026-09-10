@@ -676,6 +676,51 @@ def test_the_watcher_is_not_wired_to_the_do_not_disturb_toast():
     )
 
 
+def test_every_env_var_the_code_reads_is_documented_in_the_header():
+    """🔴 TWO-WAY. An undocumented knob is a knob nobody can find; one named in
+    the header but no longer read is a lie in the `--help` output.
+
+    This exists because `MAIN_STATUS_WATCH_BUDGET` was read for a full commit
+    before anything mentioned it — the same shape as an undocumented `MIN_TESTS`.
+    The header IS the `--help` text, so this is the place a reader looks.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    read = set(re.findall(r'os\.environ\.get\(\s*"(MAIN_STATUS_WATCH_[A-Z_]+)"', src))
+    documented = set(re.findall(r"^#\s+(MAIN_STATUS_WATCH_[A-Z_]+)\s", src, re.M))
+    assert read, "found no env reads at all — this guard would pass vacuously"
+    assert read == documented, (
+        f"read but undocumented: {sorted(read - documented)}; "
+        f"documented but never read: {sorted(documented - read)}"
+    )
+
+
+def test_the_blind_ladder_default_lives_in_exactly_one_place():
+    """🔴 A CONSOLIDATION GUARD, not a style rule. The escalation default was
+    open-coded at BOTH ladder sites — literal and parsing guard duplicated. The
+    ladder's failure mode is SILENCE, so two copies drifting apart would not
+    announce themselves. Pinning the count is what stops the third copy."""
+    code = _code_only()
+    assert code.count("MAIN_STATUS_WATCH_BLIND_ESCALATE") == 1, (
+        "the escalation env var is read in more than one place — call "
+        "blind_escalate() instead of re-deriving it"
+    )
+    assert code.count("BLIND_ESCALATE_DEFAULT = 12") == 1
+    assert code.count("blind_escalate()") >= 2, "the helper must actually be used"
+
+
+def test_blind_escalate_parses_and_defaults(monkeypatch):
+    """The extraction is behaviour-preserving, so this pins the behaviour it
+    preserved rather than claiming new coverage."""
+    mod = _load()
+    monkeypatch.delenv("MAIN_STATUS_WATCH_BLIND_ESCALATE", raising=False)
+    assert mod.blind_escalate() == 12
+    monkeypatch.setenv("MAIN_STATUS_WATCH_BLIND_ESCALATE", "5")
+    assert mod.blind_escalate() == 5
+    # a bad value must fall back, never raise: this is called on the FAILURE path
+    monkeypatch.setenv("MAIN_STATUS_WATCH_BLIND_ESCALATE", "not-a-number")
+    assert mod.blind_escalate() == 12
+
+
 def test_a_context_typo_is_not_silent():
     """The context prefix is a literal contract with `devrc-ci-push-main`. A typo
     makes every walk find nothing — so an empty walk must SAY so, never pass as

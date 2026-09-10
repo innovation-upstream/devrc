@@ -61,7 +61,12 @@
 #   MAIN_STATUS_WATCH_CACHE     state directory
 #   MAIN_STATUS_WATCH_REPO      owner/name, overriding the origin remote
 #   MAIN_STATUS_WATCH_DEPTH     how many main commits to walk (default 20)
+#   MAIN_STATUS_WATCH_BUDGET    total wall-clock seconds for all API reads
 #   MAIN_STATUS_WATCH_BLIND_ESCALATE  consecutive unmeasured runs before rc 12
+# `test_every_env_var_the_code_reads_is_documented_in_the_header` pins that list
+# two-way — an undocumented knob is a knob nobody can find, and one named here
+# but no longer read is a lie. BUDGET was read for a full commit before anything
+# mentioned it; that is the shape this guard exists to stop recurring.
 """Start the main-green deadman early when main's own CI says main is red."""
 import json
 import os
@@ -272,6 +277,27 @@ class State:
 
 
 # ── IO ────────────────────────────────────────────────────────────────────────
+BLIND_ESCALATE_DEFAULT = 12
+
+
+def blind_escalate():
+    """How many consecutive unmeasured runs before rc 12 — ONE PLACE.
+
+    🔴 This was open-coded at BOTH ladder sites, literal `12` and parsing guard
+    duplicated. `claude/RULES.md`: one rule, one place — a predicate duplicated
+    across call sites regenerates the same bug at every site. The two copies
+    happened to agree; the hazard is the next edit touching one of them, and the
+    ladder is exactly the mechanism whose failure is SILENCE, so a divergence
+    would not announce itself.
+
+    Non-numeric or absent falls back to the default rather than raising: this is
+    called on the failure path, and a bad env var must not turn "could not
+    measure" into a traceback.
+    """
+    raw = os.environ.get("MAIN_STATUS_WATCH_BLIND_ESCALATE")
+    return int(raw) if (raw or "").isdigit() else BLIND_ESCALATE_DEFAULT
+
+
 class Unmeasured(Exception):
     """Raised for every reason the world could not be read. Never a verdict."""
 
@@ -431,8 +457,7 @@ def main(argv):
         depth = int(os.environ.get("MAIN_STATUS_WATCH_DEPTH") or 20)
     except ValueError:
         depth = 20
-    escalate = os.environ.get("MAIN_STATUS_WATCH_BLIND_ESCALATE")
-    escalate = int(escalate) if (escalate or "").isdigit() else 12
+    escalate = blind_escalate()
 
     try:
         repo = resolve_repo()
@@ -523,8 +548,7 @@ def _guarded_main(argv):
             st = State(root)
             st.mkdir()
             n = st.bump_streak()
-            escalate = os.environ.get("MAIN_STATUS_WATCH_BLIND_ESCALATE")
-            escalate = int(escalate) if (escalate or "").isdigit() else 12
+            escalate = blind_escalate()
             say(f"  recorded on the blind ladder (streak {n}/{escalate})")
             if n >= escalate:
                 return RC_BLIND
