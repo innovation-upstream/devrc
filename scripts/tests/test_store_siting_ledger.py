@@ -645,8 +645,31 @@ def _assignments(scope: ast.AST):
     `ast.Subscript`). Each measures 0 even inside one function scope with a real
     consumer — enumerated in
     `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
-    bullet. Widening this function would close them and is deliberately not done here;
-    doing it means re-running the census and recording whatever it starts seeing.
+    bullet.
+
+    🔴 AND SAY WHAT WIDENING THIS FUNCTION WOULD ACTUALLY CLOSE, BECAUSE IT IS NOT ALL
+    OF THAT BULLET AND THIS SENTENCE USED TO PROMISE IT WAS ("widening this function
+    would close them"). Measured by adding `ast.For` / `ast.AsyncFor` /
+    `ast.comprehension` targets to the yields below and re-running each probe, against
+    an inline control of 1:
+
+        for target                         0 -> 1   CLOSED by widening this
+        comprehension target (isolated)    0 -> 1   CLOSED by widening this
+        dict element                       0 -> 0   NOT — it is a `_path_base` case
+        list element                       0 -> 0   NOT — it is a `_path_base` case
+        closure                            0 -> 0   NOT — it is a `_walk_scope` case
+
+    So two rows of five, and the two it does not close are not this function's to
+    close: teaching `_path_base` to see through an `ast.Subscript` takes both element
+    rows 0 -> 1 with `_assignments` untouched, and the closure stays 0 under BOTH
+    widenings because `_walk_scope` stops at the nested `def`. That matters because a
+    maintainer told to widen, re-run the census and record what it starts seeing will
+    watch the census move and read the hole as closed while the element and closure
+    halves stay open with the suite green.
+
+    The widening is deliberately not done here; doing it means re-running the census
+    and recording whatever it starts seeing — which, per the table, is the first two
+    rows and nothing else.
 
     The walrus IS here, but it is an INVARIANT guard rather than regression coverage —
     it already counted before this function existed, because a consumer's argument is walked
