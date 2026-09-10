@@ -1020,11 +1020,35 @@ it routes the mandated check back at a client that does not run it, re-opening t
     GitHub-hosted with no single-node pin, so the trigger is weaker — but it is the same defect,
     in the copy the fork consolidates ONTO (rank 3 slice 3). Not fixed here to avoid duplicating
     work the consolidation may delete; **decide it when slice 3 is planned, not by default.**
+    🔴 **RETRACTED, MEASURED 2026-09-10: THE TEKTON CHECKS ARE NOT REQUIRED, AND THIS DOC HAS
+    BEEN ASSERTING THE OPPOSITE.** Earlier revisions of this item — and the rounds of PR
+    commentary built on them — said devrc requires both Tekton checks with
+    `enforce_admins: true`, so a red gate "blocks everyone". Two independent surfaces, read the
+    same minute, disagree: classic branch protection on `main` returns **no required status
+    checks and `enforce_admins: false`**, and the repository has **no rulesets and no rules
+    applying to `main`**. The gates are **advisory**. That does not make a red gate harmless —
+    it makes it the *other* hazard, the one nobody is forced to look at — but "nobody can merge"
+    was false, and it was inflating the urgency of every gate item in this doc. ⚠ A protection
+    setting is a point-in-time reading and can be changed without touching this repo: **re-read
+    it, do not cite this line.** via: measurement
     **Closing condition:** `#1458` merged, AND a flake-rate reading against a baseline whose PR
     heads postdate the merge — **not a single green run**. The OSS half closes separately, with
     rank 3 slice 3.
-    forcing: gate — it has turned the repo's required check red on four PRs, including a
-    docs-only one
+    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE NOW REDDENS THIS PR, AND IT IS NOT THIS ONE.**
+    `test_run_tests_targets.py::test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`
+    (added hours earlier by #1445's own audit ladder — its docstring reads "🟡 round-2 F5")
+    spawns a nested full `run-tests.sh` and bounds it at **120 s**; on `a6dd11eb` that
+    subprocess was **SIGKILLed at the bound** (`subprocess.TimeoutExpired`, returncode `-9`,
+    `test_run_tests_targets.py:756`). It is **not an assertion failure**, no part of #1458's
+    diff can reach that file, and #1462 — same base, same test — **passed minutes earlier**, so
+    it is non-deterministic. Wall-time discriminator, CI-to-CI: the failing and passing runs are
+    near-identical (1030.34 s vs 1065.64 s; 155.60 s vs 154.73 s — the failing run was
+    *faster*), so the node was not inflated; one bounded operation stalled while everything
+    around it ran normally. **Same signature, one layer up: a wall-clock bound inside a test on
+    a contended node.** Belongs with `handoff-gate-flake-store-api.md` rank 1, not with a
+    re-run. via: measurement
+    forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
+    Advisory, not blocking (see the retraction above)
 
 23. **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
     (a) `claude/skills/resume/SKILL.md:128` still spells the post-write check as a bare
