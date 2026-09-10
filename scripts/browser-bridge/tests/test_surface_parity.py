@@ -140,11 +140,13 @@ def parse_dispatched_ops(path: Path = BROWSER_CLI) -> set[str]:
         OFF     OFF      27   8 junk words: OP, already, can, dispatches,
                               in, inside, runs, splices
 
-    So on the corpus it is pointed at, the lexer detected NOTHING the
-    command-position anchor did not already reject. Its whole marginal
-    contribution was ONE comment -- `# substitution (`resp="$(cmd_op nav ...)"`)`
-    -- which the anchor accepts (a `$(` precedes) and which the one-line
-    comment filter above now rejects for a reason that cannot be got wrong.
+    So on the corpus it is pointed at, the lexer changed the parsed op set by
+    NOTHING. Below the set, it removed exactly ONE command-position hit that the
+    anchor accepts: `browser`'s own whole-line comment quoting a dispatch
+    verbatim, whose `$(` puts the mention in apparent command position. That hit
+    is invisible in the set only because the op it names is also really
+    dispatched. It is the one case worth keeping, and the whole-line comment
+    filter above now rejects it for a reason that cannot be got wrong.
 
     🔴 WHAT THIS PARSER THEREFORE CANNOT SEE, stated rather than implied: a
     `cmd_op <word>` mention at the START OF A LINE inside a multi-line quoted
