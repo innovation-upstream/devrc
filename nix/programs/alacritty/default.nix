@@ -8,11 +8,23 @@ let
   # notify-send. Pinning those to store paths makes the click work regardless of
   # what the session PATH happens to hold.
   #
-  # `$PATH` is APPENDED, not replaced: `rofi` is a SYSTEM package here (it is
-  # not in nix/pkgs — nix/i3/config.nix invokes it bare), so pulling
-  # `pkgs.rofi` in would install a second, independently-versioned copy whose
-  # theme could drift from the launcher's. The picker must look like every other
-  # picker on this desktop.
+  # `$PATH` is APPENDED, not replaced.
+  #
+  # ⚠ `rofi` USED TO BE THE DELIBERATE OMISSION HERE — a SYSTEM package invoked
+  # bare, kept off this list so a second independently-versioned copy could not
+  # drift from the launcher's theme. The handler no longer spawns it: the picker
+  # is now `fzf` inside a float `alacritty` (see `mention-open.py`'s `PICKER_SH`
+  # for the measurement that forced the change), and BOTH of those are pinned
+  # below rather than omitted. The theme argument does not transfer: fzf takes
+  # its palette from the terminal's own ANSI colours (`--color=16`), which this
+  # very file paints gruvbox, so there is nothing left to drift.
+  #
+  # ⚠ `fzf` is spawned by the picker's `/bin/sh -c` line rather than by the
+  # handler directly, and it is on this list for exactly the reason the two-way
+  # pin below exists: without it, `sh` reports `fzf: not found` into a terminal
+  # that then closes, and the click is a silent dead end. The test reads the
+  # FIRST WORD of that `-c` script out of the handler's AST, so this entry is
+  # pinned to a call site and not to a comment.
   # 🔴 THE LIST BELOW IS PINNED AGAINST THE HANDLER'S OWN AST by
   # `scripts/tests/test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_
   # every_executable_the_handler_spawns`. Adding a spawn to `mention-open.py`
@@ -34,6 +46,7 @@ let
       # relying on the inherited PATH is not enough: a click landing in that
       # window would find none of these by bare name.
       pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify
+      pkgs.alacritty pkgs.fzf
     ]}:$PATH
     exec ${pkgs.python312}/bin/python3 \
       ${config.home.homeDirectory}/workspace/devrc/scripts/mention-open.py "$@"

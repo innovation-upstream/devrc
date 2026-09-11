@@ -223,6 +223,7 @@ def test_the_stubbed_launcher_set_is_pinned():
     assert set(nolaunch.HOST_LAUNCHERS) == {
         "systemd-run", "notify-send", "dunstify", "dunstctl", "rofi", "yad",
         "openrgb", "ddcutil", "xdg-open", "i3-msg", "xdotool", "espanso",
+        "alacritty",
     }
     # systemctl is NOT record-only — it is verb-split, and lives in its own
     # tests below. Putting it here would swallow `is-active`, which scripts and
@@ -318,9 +319,14 @@ ACKNOWLEDGED_UNSTUBBED = {
         "as the one above did: "
         "test_mention_open.py::test_mention_open_SPAWNS_these_argv0_AND_NOTHING_"
         "ELSE walks the handler's AST and asserts its spawn argv[0] set is "
-        "exactly {git, tmux, notify-send, xdg-open, rofi}, grows-or-shrinks, "
-        "with a `<computed>` sentinel so a spawn built from a variable fails "
-        "loudly instead of leaving the set. "
+        "exactly {git, tmux, notify-send, xdg-open, alacritty}, "
+        "grows-or-shrinks, with a `<computed>` sentinel so a spawn built from a "
+        "variable fails loudly instead of leaving the set. ⚠ That set said "
+        "`rofi` until 2026-09-09 and the word was WRONG for a whole PR: the "
+        "mention picker became `fzf` inside a float `alacritty`, the pin moved "
+        "with it, and this sentence did not. A comment is a claim — it is "
+        "restated here rather than softened because the whole point of this "
+        "entry is that a reader can check it. "
         "test_systemctl_is_MENTIONED_but_never_SPAWNED asserts both halves of "
         "this justification directly — that the mention still EXISTS (so this "
         "entry cannot outlive the sentence it describes) and that systemctl is "
@@ -346,6 +352,7 @@ ACKNOWLEDGED_UNSTUBBED = {
         "moment the script grows one"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
+         "mention-open.py",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
@@ -372,6 +379,25 @@ ACKNOWLEDGED_UNSTUBBED = {
         "that raises on anything else — test_session_resolve.py pins that "
         "allowlist in both directions, so this justification cannot rot into "
         "a claim about a file that has grown a launcher. "
+        "mention-open.py (added 2026-09-10 with the fzf picker's missing-`fzf` "
+        "pre-flight) is the same PROSE-MENTION shape, re-justified rather than "
+        "reworded — and the words are the whole point of the change that added "
+        "them. A round-3 audit found the toast naming a FILE to edit "
+        "(`nix/programs/alacritty/default.nix`) whose `pkgs.fzf` entry is "
+        "enforced by test_mention_open.py::test_the_alacritty_wrapper_PATH_"
+        "covers_every_executable_the_handler_spawns — so in any tree that "
+        "passes this suite the named remedy is ALREADY applied and the operator "
+        "is sent somewhere fine. The causes that can actually raise it (a "
+        "deployed wrapper generation predating the entry, a GC'd store path, "
+        "the script run outside the wrapper) are all closed by a switch, so the "
+        "body now says `home-manager switch --flake ~/workspace/devrc "
+        "--impure` — one operator-facing NOTIFICATION STRING, not a call site. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard: "
+        "test_mention_open.py::test_mention_open_SPAWNS_these_argv0_AND_NOTHING_"
+        "ELSE walks the handler's AST and asserts its spawn argv[0] set is "
+        "exactly {git, tmux, notify-send, xdg-open, alacritty}, grows-or-"
+        "shrinks, with a `<computed>` sentinel — so a real `home-manager` spawn "
+        "added here fails THAT test rather than hiding behind this row. "
         "regen-known-repos.py (added 2026-09-07 with the picker universe) is "
         "the same PROSE-MENTION shape and is re-justified, not reworded. Its "
         "single occurrence is one clause of a comment explaining why the picker "
@@ -1612,7 +1638,8 @@ PINNED_PATH_CLOBBERS = {
         "contents are exactly that set — so it holds at most {sh, timeout, "
         "git} plus a fake `git` written by `testlib.mockbin.write_exec`. No "
         "HAZARD_VOCABULARY name is reachable through it: no systemd-run, "
-        "systemctl, notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, openrgb, "
+        "espanso, "
         "home-manager or nixos-rebuild"),
     "test_rig_control.py": (
         '"PATH"' + ': "/usr/bin/false"',
@@ -1649,7 +1676,8 @@ PINNED_PATH_CLOBBERS = {
         "ASSERTS is a superset of the directory's real contents, so this is a "
         "live invariant rather than prose that can rot. No HAZARD_VOCABULARY "
         "name is reachable from either: no systemd-run, systemctl, "
-        "notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "notify-send, rofi, yad, alacritty, xdotool, i3-msg, openrgb, "
+        "espanso, "
         "home-manager or nixos-rebuild. 🔴 REPLACING is the point: the case "
         "under test is `clawgatectl` NOT INSTALLED — resume-state.sh must emit "
         "a `!` gap rather than a clean reconcile — and clawgatectl IS "
@@ -1674,7 +1702,8 @@ PINNED_PATH_CLOBBERS = {
         "audited but CONSTRUCTED — it holds exactly one entry, a bash symlink, "
         "and nothing else can appear in a freshly-minted tmp dir. No "
         "HAZARD_VOCABULARY name is reachable from it: no systemd-run, "
-        "systemctl, notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, openrgb, "
+        "espanso, "
         "home-manager or nixos-rebuild. 🔴 REPLACING is the point, not an "
         "oversight: the fixture drives run-tests.sh's tool precondition, whose "
         "whole job is to react to binaries being ABSENT, and no amount of "
