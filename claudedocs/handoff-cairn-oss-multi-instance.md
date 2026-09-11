@@ -18,6 +18,35 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+- 🔨 **2026-09-11 — RANK 3 SLICE 3 IS CLAIMED AND IN FLIGHT. NO PR YET.** Claim
+  `cairn-oss-multi-instance-3` taken (rc 0 — nothing else held it); `gh pr list --state open`
+  on devrc swept at the same moment: 30 open PRs, **none** touching the consolidation. An
+  implementation agent is building it in its own worktree
+  (`/tmp/wt-cairn-slice3`, branch `chore/cairn-consolidate-onto-pin`, based on `origin/main`).
+  🔴 **Nothing is merged, nothing is deployed, and no suite has been read.** If you are
+  resuming and that branch has no PR, check whether the agent died before assuming the work
+  is half-landed.
+
+- 🔴 **The FORK ITSELF STAYS CLOSED: CONSOLIDATE ONTO THE PIN, decided by the operator
+  2026-09-08, explicitly not to be re-asked.** Slice 3 is the execution of that decision, not
+  a reopening of it. What changed today is only that its cost is now measured (below) and its
+  mechanism chosen.
+
+- **STILL IN FLIGHT from the previous session, re-checked 2026-09-11:**
+  `innovation-upstream/devrc` **#1472** (corrects three rank headings that contradicted their
+  own closure notes) is **still OPEN**, `mergedAt: null`.
+
+- **The mechanism was DECIDED this session, and the reason is measurable rather than
+  stylistic:** a new `scripts/lib/cairn_pin.py` resolves the pinned lib dir from `CAIRN_LIB`,
+  else from `shutil.which("cairn")` → `realpath` → `libexec/cairn/lib`, and **refuses loudly**
+  with no silent fallback (the devrc copies will not exist to fall back to). It **APPENDS**
+  the pinned dir after devrc's own `scripts/lib`, so devrc's `timeouts.py` — which is NOT one
+  of the five and is used by `cairn_who`, `claim-work` and browser-bridge — cannot be shadowed
+  by the store copy, with a seam guard asserting the overlap set is exactly `{timeouts}` and
+  failing when it GROWS or SHRINKS. 🔴 **An env var alone was rejected on evidence, not taste:**
+  `nix/sessionVariables.nix` lands in profile.d, which an agent's non-interactive `zsh -c` does
+  not source — the same caveat that file already records for `CAIRN_MIRROR_ROOT`.
+
 - ✅ **2026-09-10 — THE THREE OPERATOR-BLOCKED RANKS ARE MERGED, DEPLOYED AND EXERCISED.**
   Four PRs landed, each verified on its mainline BY CONTENT (a squash is never an
   ancestor, so `merge-base --is-ancestor` reads false forever and is not the check):
@@ -26,47 +55,37 @@ is the PRIVATE proposal, not this doc.
   - `ZacxDev/homelab-infra` **#786** squash `4c890c7ac` — rank 20, the third CI leg.
   - `innovation-upstream/devrc` **#1447** squash `719519fa9` — this doc + the cross-repo
     `flake.nix` retraction.
-  **IN FLIGHT:** `innovation-upstream/devrc` **#1472** — corrects three rank HEADINGS that
-  contradicted their own closure notes. Open, checks running.
+  Rank 20 remains **HALF**: the leg is live, listed on real PRs, and has PASSED in-cluster
+  emitting its classifier string — but the other half, the leg going RED when the pinned
+  client is stubbed, needs a deliberate red on shared CI and is an operator call.
 
-- **Closing conditions EXERCISED, not inferred from the merge:**
-  - rank 11 — `cairn create --scope cairn --ref ci-leg --file <f>` → `created scope=cairn
-    ref=ci-leg revision=dc4d8212`, **rc 0**. It returned rc 6 `[not-found]` for the item's
-    entire life. The scope now holds a real first entry, round-tripped from the pod.
-  - rank 13/7 — the store serves `0.8.0` and the RUNNING container carries SIGHUP: measured
-    `0 → 1`, with `def load_tokens` held at `1` throughout as the positive control proving
-    the search could see the tree. New pod 1/1 Ready, 0 restarts.
-  - rank 20 — **HALF.** The leg is live (`devrc-ci-gate` steps are now `clone capture-etc
-    seed-nix pytests nodetests cairn-client-runs verdict`), is listed on real PRs, and RAN
-    IN-CLUSTER FOR THE FIRST TIME AND PASSED, emitting the exact string the classifier was
-    written to emit: `cairn-client-runs verdict=pass nix_rc=0 :: the pinned cairn client
-    ran: validate and doctor both produced output`. 🔴 The OTHER half — the leg must go RED
-    when the pinned client is stubbed — is **NOT met** and needs a deliberate red on shared
-    CI, which is an operator call.
+- 🔴 **STILL OPEN AND UNTOUCHED, stated so the slice-3 dispatch does not read as completeness:**
+  rank 4 (`civitai/talos-infra#1414`), rank 8 (§10 session-capture decisions), rank 18 (three
+  deferred findings), rank 21, rank 23. **Rank 22 is claimed by ANOTHER SESSION**
+  (`cairn-oss-multi-instance-22`) — do not take it.
 
-- 🔴 **STILL OPEN AND UNTOUCHED THIS SESSION, stated so the merge flurry above does not read
-  as completeness:** rank 4 (`civitai/talos-infra#1414`, re-verified **OPEN**), rank 8
-  (§10 session-capture decisions), rank 18 (three deferred findings), rank 21 (re-verified
-  **still failing hourly**, `ExecMainStatus=1`), rank 23. **Rank 22 is claimed by ANOTHER
-  SESSION** (`cairn-oss-multi-instance-22`) — do not take it.
+- **Rank 3's OTHER residual, re-checked live 2026-09-11 and UNCHANGED: the laptop is still
+  unreachable.** `ping -c 2 192.168.50.155` → **2 transmitted, 0 received, 100% packet loss**;
+  `ssh -o ConnectTimeout=5` → **`No route to host`**. It is blocked on the host being powered
+  on, not on a decision, and cross-host agreement stays `NOT COMPARED — 1 of 2 hosts reported
+  a landed sha`. ⚠ Both readings were taken through `| tail`, so the printed `RC=0` is
+  `tail`'s status, not the probe's — the CONTENT is the evidence here, not the code.
 
-- 🔴 **RANK 3 SLICE 3 IS THE ONE AGENT-UNBLOCKED ITEM AND IT WAS NOT DONE.** Consolidating
-  onto the pin was decided by the operator 2026-09-08 and explicitly must not be re-asked.
-  Re-verified 2026-09-10: **all five duplicated modules are still present** in
-  `devrc/scripts/lib/` (`host_identity`, `subsystem_resolver`, `subsystem_recall`,
-  `cairn_doctor`, `subsystem_read_store`). The fork widens on its own while this sits.
+- **Carried forward (durable facts a REPLACE would otherwise drop):** the pinned client went
+  live via `home-manager switch --flake <origin/main worktree>#zach --impure` on 2026-09-09,
+  **generation 713, rollback point 712** — the only record of which generation to roll back to.
+  `ZacxDev/cairn` stood at **ELEVEN merged PRs, NONE open** (2026-09-09); the deployed pin is
+  `cairn-c84c142` (`readlink -f ~/.local/bin/cairn` →
+  `/nix/store/xxjx0h1mrszgl00sgscx54bkngfava86-cairn-c84c142/bin/cairn`, re-read 2026-09-11).
 
-- **Carried forward (durable facts the REPLACE would otherwise drop):** the pinned client
-  went live via `home-manager switch --flake <origin/main worktree>#zach --impure` on
-  2026-09-09, **generation 713, rollback point 712** — that is the only record of which
-  generation to roll back to. `ZacxDev/cairn` stands at **ELEVEN merged PRs, NONE open**
-  (re-verified 2026-09-09). ⚠ The **laptop is a SECOND, INDEPENDENT switch** and is still
-  NOT verified — this host is not evidence about it, and that is rank 3's last residual
-  beside slice 3.
+- **Claims:** `-11` and `-13` RELEASED; **`-20` still HELD** (half two of its closing condition
+  is unmet — release it if you decide not to pursue that half); **`-3` HELD by this session's
+  in-flight work.**
 
-- **Claims:** `cairn-oss-multi-instance-11` and `-13` RELEASED. **`-20` still HELD** — half
-  two of its closing condition is unmet, and an unreleased claim is the only thing that
-  blocks another session, so release it if you decide not to pursue that half.
+- ⚠ **No clawgate task was recorded for this session.** `clawgate_handoff.sh resolve` exited
+  **5** — 0 tasks — with its positive control green (the same endpoint returned 1 link for
+  another session id), so the board was reached and this zero is a real reading. It is NOT
+  proof the session id under test is right: a wrong id also answers 200 with an empty array.
 
 ## Open investigations — live diagnosis state
 
@@ -619,6 +638,55 @@ it routes the mandated check back at a client that does not run it, re-opening t
   established it does not reproduce on demand. If it recurs, capture whether another suite
   was running at the same instant BEFORE re-running anything; that is the only observation
   that separates the two mechanisms, and it is unrecoverable afterwards.
+
+### The cost of consolidating onto the pin is MEASURED — it is 2 real deltas, not 5 modules' worth
+🔴 This supersedes the fork block's per-module **raw-line** figures as the basis for planning
+slice 3. Those counts (`host_identity` 122, `cairn_doctor` 43, `subsystem_recall` 38 …) are
+RAW diffs and are dominated by the extraction's docstring rewrites; they say almost nothing
+about what devrc would gain or lose. Do not re-derive this — verify it still holds.
+- **Symptom + exact repro:** not a bug — the unmeasured half of a decided piece of work.
+  Repro: render both copies docstring- and comment-free and diff those.
+  `python3 -c 'import ast,sys; …'` — strip every `Module/FunctionDef/ClassDef` docstring, then
+  `ast.unparse`. **Both controls were watched**: the same file against itself → **0** diff
+  lines; one renamed identifier (`def this_host` → `this_hostX`) → **4**. An instrument that
+  cannot go red, and cannot see a rename, would have produced the same reassuring numbers.
+- **Observed (with values), 2026-09-11** — devrc `scripts/lib/` vs cairn `lib/`,
+  code-only diff lines (raw `diff -u` lines in parentheses):
+  `subsystem_resolver` **0** (164) · `subsystem_read_store` **0** (20) ·
+  `host_identity` **19** (175) · `cairn_doctor` **42** (73) · `subsystem_recall` **98** (318) ·
+  `timeouts` **8** (60). Two of the five modules are **behaviourally identical**; `subsystem_resolver`
+  is 2,814 lines in devrc and every one of the 164 differing lines is prose. via: measurement
+- **Observed: where the three non-zero modules differ, the PINNED side is the superset.**
+  `host_identity` adds `HOST_LABEL_ENV = ("CAIRN_HOST","ASIB_HOST","ACTIVITY_HOST")` and reads
+  it in `host_label()`; `cairn_doctor` takes `mirror_root: Path | None` and reports
+  `NOT_OBSERVABLE` instead of crashing when no mirror is configured; `subsystem_recall`
+  factors `main` into `recall_selection()` / `reject_recall_flags()` and takes its shared
+  vocabulary `from entry_shape import …` where devrc's takes the same names
+  `from subsystem_touch import …`. `timeouts` differs only by an unused `DEFAULT_TIMEOUT = 60`.
+  via: measurement
+- 🔴 **Observed: the WRITER's vocabulary is almost free, and the two exceptions are the whole
+  job.** Comparing `scripts/lib/subsystem_touch.py` against cairn's `lib/entry_shape.py`
+  per-name, normalised the same way: `STORE_IS_PER_HOST`, `SHAPE_HEADINGS`, `store_host`,
+  `store_host_line`, `derive_scope`, `scope_for_repo`, `_git`, `_toplevel` are **byte-identical**.
+  Only two move: (a) the exception base — cairn's is `CairnError` with `TouchError = CairnError`
+  as a compatibility alias, while devrc's `TouchError(Exception)` is the base that ~25 writer
+  errors subclass; (b) `repo_path_missing_message`. via: measurement
+- 🔴 **The one KNOWING REGRESSION, named rather than discovered later:** entry_shape's
+  `repo_path_missing_message` drops devrc's sentence naming the pre-exported handles
+  (`REPO_PATH_HANDLES = ("$DEVRC","$HOMELAB","$DATAPACKET","$CIVITAI")`) and hints
+  `Did you mean --scope X?` only when that scope dir exists. Because `scope_for_repo` — which
+  is byte-identical and IS imported from the pin — calls it, taking the pin takes the weaker
+  message with it. The brief's preferred remedy is devrc-side: catch `RepoPathMissingError` at
+  devrc's own CLI boundary and re-append the handles sentence, so nothing is lost and
+  `scope_for_repo` still comes from the pin. via: code
+- **Ruled out: that class identity can be left alone.** The pinned `subsystem_recall` catches
+  `entry_shape.StoreMissingError`; a writer that raises its own look-alike of the same name
+  would not be caught. Importing the vocabulary is not tidiness here — it is the thing that
+  makes the two halves interoperate. via: code
+- **Next probe:** none for the measurement. The open question is the agent's: whether devrc's
+  test files that assert the *unsanitised* strings (``subsystem_touch.py --validate`` where the
+  pin says ``a writer --validate``) should be updated or deleted as cairn-owned. The brief says
+  update the expectation to the PINNED string and never weaken an assertion to a substring.
 
 ## Next steps (ranked)
 
@@ -1795,6 +1863,17 @@ certainly-absent tag and read the error SHAPE (`not found` = reachable, `x509` =
 `sops` resolves `.sops.yaml` from the INVOKING CWD, not the file path, so running it from
 another checkout dies with `no matching creation rules found` on a file this repo's catch-all
 covers; pin it with `--config`, do not `cd`.
+
+- 🔴 **A `worktree` isolation flag dispatched from ANOTHER repo cuts a worktree of the WRONG
+  repo.** This session's cwd was `datapacket-talos` while the work is in devrc, so the
+  implementation agent was told to run `git -C ~/workspace/devrc worktree add …` itself rather
+  than being given `isolation: "worktree"`. The failure mode it avoids is quiet: the agent
+  either reports a briefed file missing, or silently works in a worktree of the wrong tree.
+- **The pinned package's layout is an assumption worth a test, not a comment.** `$out/bin/cairn`
+  is a `makeWrapper` shell wrapper; the real script and its siblings are
+  `$out/libexec/cairn/cairn` and `$out/libexec/cairn/lib/*.py`. Anything deriving the lib dir
+  from `which cairn` is depending on that shape, so a cairn layout change must fail a devrc
+  test rather than the operator's next `recall`.
 
 ## How to verify
 
