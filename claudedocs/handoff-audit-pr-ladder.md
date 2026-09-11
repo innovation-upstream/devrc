@@ -16,28 +16,22 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- Branch / PR: `main` at `c68750f6` (base clone **behind 1**). **`fix/shebang-guard` → PR #1461 OPEN and unmerged.**
-- 🔴 **`main` IS RED and it is this effort's fault.** `tekton/devrc-pytests` fails on `605b29ac`:
-  `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`, 1 of 21,455. #1461 is the fix.
-- **DONE — the ladder's stop condition now carves out nits.** `#1427` → squash **`7edcb1e0`**,
-  shipped to both hosts. `claude/skills/audit-pr/SKILL.md`: a round reporting only NITS THAT
-  CHANGE NOTHING A READER DOES is a stopping round; a 🟢 that DOES change what a reader does is
-  a finding and the ladder continues. The operator's opening ask was the stronger
-  "deploy-blocking only", which the evidence REFUTED and which is now recorded as rejected
-  beside the rule: `homelab-infra` #702 ran six rounds with ZERO deploy-blockers, so a
-  blocker-keyed ladder ends after round 1 and ships every one of them.
-- **DONE — the LAN/nebula gotcha this doc records is FIXED in the scripts.** `#1439` → squash
-  **`605b29ac`**, shipped; both hosts at it, 581/528 managed artifacts, 0 dangling, 0 stale.
-  `lib/host-role.sh` gained `remote_ssh_candidates_of` (pure) + `first_reachable_ssh` (probing,
-  stubbable via `$SSH_PROBE_CMD`); `ship.sh` and `drift-check.sh` try LAN then nebula, announce a
-  fallback, and name every address when none answers. Verified in production on the first real
-  run: `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop.`
-  then `2 hosts compared, both at 605b29ac`. **This is the one-env-var workaround this doc
-  prescribed, promoted into the scripts — see the duplication question below before treating it
-  as settled.**
-- IN FLIGHT: #1461 (un-red main). Issue **#1431** OPEN with a closing condition.
-- Deploy/verify status: `7edcb1e0` and `605b29ac` both deployed to BOTH hosts and verified by
-  the deployed artifact, not by the merge. `main` is red at `605b29ac`; #1461 is not shipped.
+- Branch / PR: `main` at `cace96d9`, base clone clean and level with `origin/main`. **No open PR from
+  this effort.**
+- ✅ **`main` IS NO LONGER RED.** `#1461` → squash **`30a1eb8b`**. Both #1439 stub writers now go
+  through `testlib.mockbin.write_exec`; `test_runtime_shebangs.py` passes **on `main` itself**
+  (9 passed). It also unblocked **#1460**, an unrelated PR that was failing on the same guard
+  because it branched off the red `main`.
+- ✅ **The handoff itself landed** — `#1463` → squash **`e8331ae3`**.
+- ✅ **Rank 15 CLOSED — every tree this arc created is gone.** Five audit clones
+  (`devrc-audit-1439-r1..r5`, each verified standalone before `rm` — a `.git` FILE would have
+  meant a worktree sharing the real git dir) plus `devrc-shipaddr` and `devrc-handoff-ladder`.
+  `git worktree list` shows 0 from this arc.
+- 🔴 **Issue `#1431` is CLOSED on the board and its defect is NOT fixed** — see the new
+  investigation below. Treat rank 16 as open despite the board.
+- Deploy/verify status: `7edcb1e0` (#1427) and `605b29ac` (#1439) are deployed to BOTH hosts and
+  verified by the deployed artifact. **`30a1eb8b` and `e8331ae3` are NOT deployed** — merged
+  only; no `ship.sh` run since. Both are test/docs-only, so nothing a consumer runs changed.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -113,13 +107,12 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–12 are
+🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–16 are
 retained as DONE/open markers; do not re-claim the DONE ones.
 
 1. **DONE (2026-08-31) — ship the laptop.**
    forcing: none
-2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ Successor
-   condition real and unowned; not filed — no checkable closing condition.
+2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.**
    forcing: none
 3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** `#1157` → `3e4c447f`.
    forcing: none
@@ -127,45 +120,43 @@ retained as DONE/open markers; do not re-claim the DONE ones.
    forcing: none
 5. **DONE (2026-09-07) — `90202ce5..2eaa3c62` audited.** Claim `audit-pr-ladder-5` RELEASED.
    forcing: none
-6. **DONE (2026-09-07) — the three 🟡s fixed + blind audit of the fix PR.** `#1342` →
-   `08ef1d5a`. Claim `audit-pr-ladder-6` RELEASED.
+6. **DONE (2026-09-07) — the three 🟡s fixed + blind audit of the fix PR.** `#1342` → `08ef1d5a`.
    forcing: none
 7. **DONE (2026-09-08) — `scripts/testlib/**` is SCAFFOLDING, by the REVERT TEST.** `#1396` →
-   `e9b665bd`. Shipped ONE NUMBER, ONE NAME. Claim `audit-pr-ladder-7` RELEASED.
+   `e9b665bd`. Shipped ONE NUMBER, ONE NAME.
    forcing: none
 8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`, `civit-datapacket-talos`,
    `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. *Closes when* each repo's in-window
-   ladders are churn-measured or reported UNMEASURABLE with a reason. **STILL OPEN.**
+   ladders are churn-measured or reported UNMEASURABLE with a reason. **STILL OPEN, untouched.**
    forcing: none
-9. **Mine the stop-rationale prose across all 42 block-carrying PRs.** *Closes when* the
-   terminal round's summary is classified for every carrier and the rate is published.
-   **STILL OPEN**, and this session is new evidence for it — see rank 13.
+9. **Mine the stop-rationale prose across all 42 block-carrying PRs.** *Closes when* the terminal
+   round's summary is classified for every carrier and the rate is published. **STILL OPEN** —
+   and #1439's five-round ladder is fresh input for it (payload 124/56/15/20/34, three rounds of
+   zero EXECUTABLE payload, stopped on the stated criterion).
    forcing: none
 10. **Fix the range-coverage hole** (blocks that skip a round leave churn in NO block's range).
-    *Closes when* the measurement reports, per ladder, the churn no block's range covers.
-    **STILL OPEN.**
+    **STILL OPEN, untouched.**
     forcing: none
-11. **DONE (2026-09-08) — #1342's controls are REACHABLE, and there are EIGHT.** Claim
-    `audit-pr-ladder-11` RELEASED.
+11. **DONE (2026-09-08) — #1342's controls are REACHABLE, and there are EIGHT.**
     forcing: none
-12. **DONE (2026-09-09) — both hosts converged and parity re-verified** at `7edcb1e0`. Claim
-    `audit-pr-ladder-12` RELEASED.
+12. **DONE (2026-09-09) — both hosts converged and parity re-verified** at `7edcb1e0`.
     forcing: none
-13. **Merge `#1461` and confirm the sandbox tier goes green.** `main` is RED at `605b29ac` on
-    `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`; the fix is two test files onto
-    `testlib.mockbin.write_exec`, 35 passed locally. *Closes when* `gh pr checks` on the merge
-    commit shows `tekton/devrc-pytests` PASS.
-    forcing: gate — CI red on `main`, `tekton/devrc-pytests` failing at `605b29ac`
-14. **Decide #1439 vs #1287 — one mechanism or two.** Read `scripts/workhost`, then either make
-    `first_reachable_ssh` a caller of it, close #1287, or record why both stay. *Closes when*
-    the decision is written on #1287 by the operator or a named reader.
+13. **DONE (2026-09-09) — `#1461` merged → `30a1eb8b`; `main` un-redded.**
+    `test_runtime_shebangs.py` green on `main` (9 passed). Closing condition MET. ⚠ #1461's own
+    CI reported a DIFFERENT failure — see the flake gotcha below.
     forcing: none
-15. **Remove this arc's six leftover trees** — `devrc-shipaddr` and `devrc-audit-1439-r1..r5`.
-    *Closes when* `git -C ~/workspace/devrc worktree list` and `ls ~/workspace/devrc-audit-*`
-    no longer show them.
+14. **Decide #1439 vs #1287 — one mechanism or two.** #1287 `feat/workhost` is **still OPEN**
+    (last updated 2026-09-05). Read `scripts/workhost`, then either make `first_reachable_ssh` a
+    caller of it, close #1287, or record why both stay. *Closes when* the decision is written on
+    #1287 by the operator or a named reader. **OPERATOR CALL — do not resolve unilaterally.**
     forcing: none
-16. **Close issue #1431** (the battery's `MIN_TESTS` pin reads a literal, so a conditional
-    override is invisible). Its own closing condition is written on the issue.
+15. **DONE (2026-09-09) — all seven trees this arc created are removed.** `git worktree list`
+    shows none of `devrc-shipaddr`, `devrc-handoff-ladder`, `devrc-audit-1439-r1..r5`.
+    forcing: none
+16. **Reopen `#1431`, or record its dismissal in writing.** It is CLOSED `COMPLETED` with zero
+    comments while `test_audit_ladder_stop_rule.py:1179` still reads the SOURCE literal and
+    neither file has been touched — its own body says *"Do not close silently."* *Closes when*
+    the issue is either reopened, or carries a written dismissal naming who dismissed it.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -955,21 +946,44 @@ retained as DONE/open markers; do not re-claim the DONE ones.
   (`ip` is a real command already in `UNIT_PATH_REQUIREMENTS`). Widening `_command_tokens` is the
   structural fix and was deliberately not bundled.
 
+- 🔴 **A CLOSED issue is a CLAIM, and this arc produced a worked example.** `#1431` went to
+  `COMPLETED` with **zero comments** while its defect sat untouched — verified two ways, the
+  regex at `test_audit_ladder_stop_rule.py:1179` and an empty `git log --since` over both files.
+  A closing condition only works if someone reads it at close time; nothing enforces that, so
+  **re-derive a closed item's substance before believing it**, exactly as for a green suite.
+- ⚠ **`#1461`'s CI went red on a test its diff could not reach, and the control said flake.**
+  `TestTheSpawnHarnessAndThePortRace.test_POSITIVE_CONTROL_a_port_lost_AFTER_it_is_picked_is_
+  retried_and_survived`, in `scripts/tests/test_subsystem_store_api.py`; #1461 changed two
+  ship-ssh test files. Discriminators run BEFORE merging: it passes locally on that branch
+  (14 passed, `-k "PortRace or port_lost"`), and #1458/#1459 were green in CI the same hour, so
+  it is neither universally broken nor reachable from the diff. **Scope: verified on the dev
+  host, NOT in the sandbox** — a sandbox-only reproduction was never obtained, so "flake" is the
+  best-supported reading rather than a proven one. Unrelated to `eeea9025`, which fixes a
+  DIFFERENT co-tenant flake (`git maintenance run --auto --detach`) in `test_git_repo_isolation.py`.
+- **A red `main` blocks OTHER people's PRs, and that is the cost that is easy to miss.** #1460 —
+  nothing to do with this effort — was failing on `test_no_test_writes_a_usr_bin_env_shebang_at_
+  runtime` purely because it branched off `605b29ac`. Merging #1461 cleared it. A PR whose red
+  check names a test its diff never touched is often inheriting, not breaking: compare its merge
+  base against the fix commit before debugging the diff.
+- **Docs-only PRs: update the branch, then judge.** #1463's red was inherited from base
+  `4dcd1fe2` (pre-fix); `gh pr update-branch` re-based it onto `30a1eb8b`, and it was merged
+  without waiting for the re-run because the diff is one markdown file with no code path. Stated
+  rather than glossed — it is a judgement under CLAUDE.md's change-scoped policy, not a green.
+
 ## How to verify
 ```bash
-# 1. the stop rule that shipped (both hosts serve it)
-grep -c "A round that reports only NITS THAT CHANGE NOTHING A READER DOES" \
-  ~/.claude/skills/audit-pr/SKILL.md            # expect 1
-# 2. the fallback, end to end, with the laptop off-LAN — ship.sh's own output
+# 1. main is not red on the guard this arc broke
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_runtime_shebangs.py -q      # expect 9 passed
+# 2. rank 16's claim — the #1431 defect is STILL present despite the CLOSED issue
+grep -n 're.findall(r"\^MIN_TESTS' ~/workspace/devrc/scripts/tests/test_audit_ladder_stop_rule.py
+gh issue view 1431 --repo innovation-upstream/devrc --json state,stateReason,comments
+# 3. rank 15 — no tree from this arc survives
+git -C ~/workspace/devrc worktree list | grep -E "shipaddr|audit-1439|handoff-ladder"   # expect none
+# 4. the shipped behaviour, end to end, with the laptop off-LAN
 env -u REMOTE_SSH -u LAPTOP_SSH SHIP_ROLE=workbench \
   bash ~/workspace/devrc/scripts/ship.sh --print-remote-target
-#    expect: "did not answer — falling back to zach@10.42.0.100", stdout zach@10.42.0.100
-# 3. main's red guard — the ONLY tier that can answer
-gh pr checks 1461 --repo innovation-upstream/devrc
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_runtime_shebangs.py -q      # expect all pass
-# 4. the drift-check state this session must NOT have touched
-md5sum ~/.local/state/drift-check/unreachable-laptop
+#    expect "falling back to zach@10.42.0.100" on stderr, that address on stdout
 ```
 ## Open investigations — live diagnosis state
 
@@ -1289,3 +1303,30 @@ is load-bearing rather than left standing as a live claim.
 - **Next probe:** read `scripts/workhost` in #1287 and decide whether `first_reachable_ssh`
   should become a thin caller of it, or whether #1287 should be closed. **Operator call — do not
   resolve unilaterally.**
+
+### RESOLVED — `main` red from #1439's test stubs
+Superseded: the "`main` is red: #1439's test stubs wrote their own shebang" block above is
+CLOSED. `#1461` → `30a1eb8b`; `test_runtime_shebangs.py` green on `main` (9 passed), and the
+guard's own stale-pin accounting passes with it. No ALLOWLIST entry was added — the offenders
+were removed, not pinned. Its "Next probe" is spent; do not re-run it.
+
+### `#1431` was closed COMPLETED with its stated closing condition unmet
+- **Symptom + exact repro:** `gh issue view 1431 --repo innovation-upstream/devrc --json
+  closedAt,stateReason,comments` → `stateReason: COMPLETED`, `closedAt 2026-09-09T20:19:24Z`,
+  **`comments: []`**. The issue body's own condition reads *"a PR that makes the pin read the
+  battery's effective `MIN_TESTS` (not its source text) is merged, and this control passes …
+  Until that control has been watched red, item 1 is open"*, and ends **"Do not close silently."**
+- **Observed (with values):** the defect is intact at `cace96d9` —
+  `scripts/tests/test_audit_ladder_stop_rule.py:1179` still reads
+  `literals = re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)`, i.e. the SOURCE literal. And
+  `git log --since=2026-09-09 -- scripts/tests/test_audit_ladder_stop_rule.py
+  scripts/tests/mutants-audit-ladder.sh` returns **nothing** — neither file has been touched
+  since the issue was filed.
+- **Ruled out:** *a PR fixed it and the issue tracked that* — no commit touches either file in
+  the window, and the regex is unchanged. via: command
+- **Ruled out:** *a reader dismissed it in writing* — the issue carries zero comments. via: command
+- **Leading hypothesis:** a bulk or accidental close. The residual exposure is unchanged and
+  small: a conditional or indirect override (`QUICK` fast path, `MIN_TESTS=$LOW`) is invisible to
+  the pin while the shell applies it. Deleting tests still moves `m` and IS caught.
+- **Next probe:** decide with the operator — reopen #1431, or record the dismissal in writing on
+  it. Do not silently treat CLOSED as done; that is the state this block exists to flag.
