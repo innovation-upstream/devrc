@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Media Download Router",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Files downloads into subject directories under a local media library, using page context, via a loopback token-authenticated sidecar. Local-only, authorized personal automation.",
   "permissions": [
     "downloads",
