@@ -672,7 +672,15 @@ lib.mkIf isNixOS {
     ++ lib.optional (!isLaptop) (pkgs.writeShellScriptBin "deep-search" ''
       exec ${pkgs.python3}/bin/python3 ${scriptsDir}/deep-search "$@"
     '');
-  fonts.fontconfig.enable = true;
+  fonts.fontconfig = {
+    enable = true;
+    # Ensure emoji characters fall back to NotoColorEmoji when the primary font
+    # is monospace (Alacritty's default). Without this, fontconfig's monospace
+    # fallback chain lands on DejaVu Sans — which covers U+1F600+ as monochrome
+    # outlines — and NotoColorEmoji is ranked too low (position 180/180) for
+    # crossfont's deduplication to reach it.
+    defaultFonts.monospace = [ "DejaVu Sans Mono" "Noto Color Emoji" ];
+  };
 
   # i3 config — raw string. INERT until the system cutover (apply-i3-to-hm.sh).
   xdg.configFile."i3/config".text = import ./i3/config.nix { inherit isLaptop; };
