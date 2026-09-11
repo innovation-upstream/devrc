@@ -125,7 +125,6 @@ plausible it looks. Both properties are pinned.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
@@ -779,88 +778,6 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
     return sorted(universe, key=key)
 
 
-# How long `record_pick` may wait for the pick log's lock before appending
-# anyway. 🔴 A BUDGET RATHER THAN A BLOCKING WAIT, AND THAT IS A CLICK-PATH
-# RULE. A plain `LOCK_EX` is the textbook answer and it is WRONG HERE: this runs
-# in a DETACHED handler with no terminal, so a lock held by a wedged process
-# would hang the click invisibly and forever — and a blocking version measurably
-# deadlocked a probe of this very function within one process. The only thing
-# waiting buys is not losing one learning row; a hang costs the operator the
-# open. 200ms is far longer than the critical section it waits on (a read plus a
-# write of at most `PICKS_COMPACT_AT` short lines) and far shorter than a human
-# notices.
-#
-# 🔴 THE NUMBERS, MEASURED RATHER THAN ASSERTED. A compaction of
-# `PICKS_COMPACT_AT + 10` rows takes a median **0.25 ms** and a max **1.19 ms**
-# on this host, so 200 ms is ~800x the critical section it waits on — the wait
-# is real exclusion, not a hopeful sleep. End-to-end against a real second
-# process: a 50 ms hold made the append WAIT 56 ms and then land; a 3 s hold
-# made it give up after **201 ms** and land anyway. Bounded in both directions.
-PICKS_LOCK_WAIT_S = 0.2
-
-
-@contextlib.contextmanager
-def _picks_lock(path: Path, *, wait_s: float = 0.0):
-    """Hold an advisory `flock` on the pick log; yields whether it was taken.
-
-    🔴 ONE LOCK, TWO WRITERS — AND THE SHARING IS THE WHOLE POINT. `record_pick`
-    APPENDS and `_compact_picks` does a read→replace; excluding only the latter
-    from itself leaves the measured race untouched, which is exactly what the
-    first version did while claiming otherwise. Both call this.
-
-    ⚠ IT NEVER BLOCKS INDEFINITELY. `wait_s` is a BUDGET of non-blocking
-    retries, never a `LOCK_EX` wait — see `PICKS_LOCK_WAIT_S` for why a detached
-    click handler must not be able to hang on a lock.
-
-    ⚠ AND IT NEVER RAISES AND NEVER COSTS THE WRITE. A platform without `fcntl`,
-    a filesystem that refuses the lock, a budget that ran out — all yield
-    `False` for "not held" rather than failing, because an unlocked write is
-    strictly better than no write. The exclusion is best-effort by construction,
-    and both callers are written to survive not getting it.
-    """
-    fd = -1
-    held = False
-    try:
-        import errno   # noqa: PLC0415 — only this path needs them
-        import fcntl   # noqa: PLC0415 — POSIX-only
-        # ⚠ `O_CREAT` MEANS THIS CAN CREATE THE LOG. Deliberate and harmless: the
-        # only callers are about to write it (`record_pick`) or have already
-        # found it long enough to compact, and 0600 is the mode it would get
-        # anyway. The visible consequence — noted because it is new — is that a
-        # `record_pick` whose APPEND then fails leaves a 0-byte 0600
-        # `picks.jsonl` where previously nothing existed. `load_picks` reads
-        # that as no history, which is what it is.
-        fd = os.open(path, os.O_RDONLY | os.O_CREAT, 0o600)
-        deadline = time.monotonic() + max(0.0, wait_s)
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
-                break
-            except OSError as exc:
-                # 🔴 RETRY ONLY ON *CONTENTION*. Treating every `OSError` as "somebody
-                # else holds it" makes a filesystem that CANNOT lock — NFS without
-                # a lock daemon, a container FS answering ENOLCK/EINVAL — burn the
-                # whole budget on every single click. MEASURED with `flock` stubbed
-                # to ENOLCK: 201 ms per `record_pick`, on a path that should cost
-                # nothing. A refusal is permanent; only EWOULDBLOCK/EAGAIN/EACCES
-                # mean "try again".
-                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN,
-                                     errno.EACCES):
-                    break
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.005)
-    except (OSError, ImportError):
-        held = False
-    try:
-        yield held
-    finally:
-        if fd >= 0:
-            try:
-                os.close(fd)             # closing releases the flock
-            except OSError:
-                pass
 
 
 def narrow_dir(directory: Path) -> None:
@@ -956,19 +873,23 @@ def record_pick(repo: str, num: str, path: Path | None = None,
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         narrow_dir(path.parent)
-        # 🔴 THE APPEND TAKES THE LOCK TOO — see `_picks_lock`. Without it the
-        # row can land inside `_compact_picks`' read→replace window and be
-        # silently overwritten, which is the race a round-2 fix claimed to have
-        # closed and a round-3 audit measured still open. ⚠ IT WAITS HERE ON A
-        # BOUNDED BUDGET — NOT "BLOCKING", which this comment said until round 4
-        # and which `_picks_lock` and `PICKS_LOCK_WAIT_S` both spend paragraphs
-        # forbidding. A comment contradicting the two blocks that explain it is
-        # exactly how a maintainer "simplifies" it back to the `LOCK_EX` that
-        # deadlocked a probe. Compaction does not wait at all: skipping it costs
-        # nothing, skipping this would drop the operator's pick.
-        with _picks_lock(path, wait_s=PICKS_LOCK_WAIT_S):
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, sort_keys=True) + "\n")
+        # 🔴 A PLAIN `O_APPEND` WRITE, AND THAT IS SUFFICIENT — MEASURED, after
+        # this carried an `flock` and a retry budget through four audit rounds.
+        # `open(..., "a")` is `O_APPEND`, and a single write to a regular file
+        # under it is atomic on Linux; one row is ~90 bytes. MEASURED with the
+        # lock REMOVED: 8 concurrent processes x 400 appends = 3200/3200 rows,
+        # 0 torn, 0 lost.
+        #
+        # ⚠ THE ONE RACE A LOCK WOULD STILL COVER IS PRICED, NOT IGNORED: an
+        # append landing inside `_compact_picks`' read->replace window loses
+        # that row. That window is a MEASURED 0.28 ms and opens once per
+        # `PICKS_COMPACT_AT - PICKS_MAX_ROWS` picks, so it needs a SECOND
+        # human click inside a quarter-millisecond — and the cost if it ever
+        # happened is one Tier-B learning row, a soft recency signal the next
+        # pick re-establishes. That is not worth a lock, a wait budget, an
+        # errno filter and a carry-over on a detached click path.
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
         os.chmod(path, 0o600)
     except OSError:
         return False
@@ -989,128 +910,49 @@ def record_pick(repo: str, num: str, path: Path | None = None,
 
 
 def _compact_picks(path: Path) -> None:
-    """Trim the pick log towards its most recent `PICKS_MAX_ROWS` rows.
+    """Trim the pick log to its most recent `PICKS_MAX_ROWS` rows.
 
-    ⚠ "TOWARDS", NOT "TO" — the result can exceed `PICKS_MAX_ROWS` by whatever
-    the carry-over below rescues, and the repo's own regression test asserts
-    `PICKS_MAX_ROWS + 1`. The cap bounds what is KEPT from the old file, not the
-    final line count.
+    🔴 IT EXISTS BECAUSE NOTHING ELSE BOUNDS THE FILE. `record_pick` only
+    appends and the age cap is applied on READ, so without this a 0600 file
+    naming private repositories grows forever. Past `PICKS_COMPACT_AT` the tail
+    is rewritten; trimming at a MULTIPLE of the read cap means the rewrite
+    happens once per `PICKS_MAX_ROWS` picks rather than on every one.
+
+    🔴 TMP-THEN-REPLACE, AND THE REASON IS NOT CONCURRENCY. `os.replace` is
+    atomic, so a process killed mid-compaction leaves the OLD log intact rather
+    than a truncated one — a real hazard on a detached click handler that can be
+    SIGKILLed, and the same shape `regen-known-repos.py`'s three writers use.
+    The tmp is created 0600 by `mkstemp` rather than chmod-ed afterwards: it
+    holds up to `PICKS_MAX_ROWS` private repository names, and write-then-chmod
+    leaves a window at the umask's mode (measured 0644).
+
+    ⚠ NO LOCK, AND THAT IS A DELETION MADE ON EVIDENCE. This function and
+    `record_pick` carried an `flock`, a retry budget, an errno filter and a
+    read-offset carry-over through four audit rounds. All of it defended one
+    ordering: a second click landing inside this function's read->replace
+    window. MEASURED — that window is 0.28 ms and opens once per
+    `PICKS_COMPACT_AT - PICKS_MAX_ROWS` picks, appends are `O_APPEND`-atomic
+    (8 processes x 400 rows, 0 lost, lock disabled), and the cost if it ever
+    struck is ONE Tier-B learning row. Clicks are human-paced; two inside a
+    quarter-millisecond is not a state this handler can reach. The scaffolding
+    was larger than the feature and is gone.
 
     Best-effort and SILENT on every failure: it runs after the row is already
-    durable, so a full disk costs a large file rather than the pick. See
-    `record_pick` and `PICKS_COMPACT_AT`.
-
-    🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS. A round-2 audit
-    measured a row appended between the read and the `replace` being silently
-    LOST, and both writers using one fixed `picks.jsonl.tmp` name.
-
-    🔴 IT TAKES THREE THINGS TO STOP THAT, AND I CLAIMED IT FIXED AFTER EACH OF
-    THE FIRST TWO. Written out because the same false claim survived two audit
-    rounds:
-      * round 2 locked only THIS function, which excludes two COMPACTIONS from
-        each other and does nothing about the append. Round 3 measured
-        `record_pick` returning True with its row on disk while a second process
-        held `LOCK_EX`.
-      * round 3 shared `_picks_lock` with the append — and that is a BUDGET, not
-        a wait, so a compaction slower than `PICKS_LOCK_WAIT_S` still had the
-        appender write unlocked onto the file about to be replaced. Round 4
-        measured exactly that: `record_pick` returned True, the row was on disk,
-        and it was gone after the replace.
-      * the carry-over below is what actually closes it: everything appended
-        past the byte offset this call read is copied into the tmp before the
-        replace.
-
-    ⚠ AND "CLOSED" IS SCOPED. FOUR SUCCESSIVE WORDINGS OF THIS PARAGRAPH WERE
-    WRONG — IN BOTH DIRECTIONS — SO IT IS A TABLE OF MEASURED ORDERINGS RATHER
-    THAN A SENTENCE. Each row was driven against this function:
-
-      the appending fd was …          its write(2) …        outcome
-      ------------------------------  --------------------  ----------------
-      open before the carry-over read completes before it   SURVIVES
-      open before `os.replace`        lands after the read  LOST WHOLE
-      opened AFTER `os.replace`       anything              SURVIVES
-
-    🔴 THE DISCRIMINATOR IS WHEN THE *FD* WAS OPENED, NOT WHEN THE WRITE LANDED,
-    and that is the correction a round-6 audit forced. The wording before it
-    said "the losing condition is the complement: a write(2) after that read",
-    which is FALSE — an fd opened after the replace writes to the NEW inode and
-    survives however late it is. Read literally the old sentence made appends
-    look unsafe for an unbounded period after any compaction, inviting a fix
-    (re-locking, fsync) for a residual whose real exposure is one appender's own
-    open->write interval. A lost row is a lost row; a wrong diagnosis is worse.
-
-    ⚠ AND IT IS "LOST WHOLE", NOT TORN — but only because of WHO writes. A
-    correction in between claimed a straddling write leaves a torn line, and it
-    does: measured with a two-`write(2)` append, `{"t": 1757009999, "rep` stayed
-    in the live file. `record_pick` cannot produce that shape — it writes one
-    row through one buffered `write` and flushes at close — so for THIS writer
-    the loss is always whole, and the torn case needs a different one.
-
-    In every losing case the cost is the same, one learning row, and
-    `record_pick` returns True — which its own docstring says plainly.
-
-    ⚠ NO WAIT HERE AND A BOUNDED BUDGET IN THE APPEND, AND THE ASYMMETRY IS THE
-    POINT. Skipping compaction costs nothing — the next pick trims instead — so
-    it never waits at all. An APPEND that skipped the lock could lose a row, so
-    it waits, but only for `PICKS_LOCK_WAIT_S` and then proceeds regardless:
-    neither caller can hang a detached click on a lock.
-
-    🔴 THE CLEANUP ONLY EVER REMOVES A TMP *THIS CALL* CREATED, AND THAT — NOT
-    THE NAMING — IS THE GUARD. A bug I measured in my own round-2 fix: the tmp
-    was named `.{os.getpid()}.tmp` and computed BEFORE the `try`, so a nested
-    `_compact_picks` (which correctly skipped on the lock) still ran a `finally`
-    that UNLINKED THE OUTER CALL'S TMP. The outer `os.replace` then raised
-    `FileNotFoundError` into the swallowing handler and the compaction silently
-    did nothing at all — the log stayed at 1011 rows instead of trimming to 500.
-    ⚠ `tmp` therefore starts as `None`, is set only once this call owns a file,
-    and is cleared the moment `os.replace` consumes it.
-
-    ⚠ AND `mkstemp` IS NOT WHAT FIXES THAT — MEASURED. Reverting the name to the
-    PID form while keeping the `tmp = None` discipline SURVIVES the regression
-    test, because the nested call never reaches its own assignment. `mkstemp`
-    earns its place for a different case (two genuinely concurrent processes,
-    where it also removes any dependence on PID reuse) and for creating at 0600
-    with no umask window — not for this one. Recorded because the obvious
-    reading of this block is that the unguessable name is the cure, and it is
-    not.
-
-    🔴 THE TMP IS CREATED 0600 rather than chmod-ed afterwards: it holds up to
-    `PICKS_MAX_ROWS` private repository names, and `write_text` then `chmod`
-    leaves a window at the umask's mode (measured 0644). `mkstemp` creates 0600.
+    durable, so a full disk costs a large file rather than the pick.
     """
     import tempfile  # noqa: PLC0415 — only this path needs it
-    try:
-        if len(path.read_text().splitlines()) <= PICKS_COMPACT_AT:
-            return                       # the cheap check, before any locking
-    except (OSError, ValueError):
-        return
     tmp = None
     try:
-        with _picks_lock(path) as held:
-            if not held:
-                return                   # another click is compacting; leave it
-            raw = path.read_bytes()
-            read_size = len(raw)
-            lines = raw.decode("utf-8", "replace").splitlines()
-            if len(lines) <= PICKS_COMPACT_AT:
-                return                   # it compacted while we waited
-            fd, name = tempfile.mkstemp(dir=str(path.parent),
-                                        prefix=path.name + ".", suffix=".tmp")
-            tmp = Path(name)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n").encode())
-                # 🔴 CARRY OVER ANYTHING APPENDED SINCE THE READ. An appender
-                # whose lock budget expired writes UNLOCKED, straight onto the
-                # end of the file we are about to replace — so without this its
-                # row is destroyed and `record_pick` still reports success.
-                # MEASURED before this line existed: a compaction slower than
-                # the budget lost the row every time. Appends are `O_APPEND`, so
-                # everything past `read_size` is new and belongs at the end.
-                with open(path, "rb") as live:
-                    live.seek(read_size)
-                    fh.write(live.read())
-            os.replace(tmp, path)
-            tmp = None                   # the replace consumed it
+        lines = path.read_text().splitlines()
+        if len(lines) <= PICKS_COMPACT_AT:
+            return
+        fd, name = tempfile.mkstemp(dir=str(path.parent),
+                                    prefix=path.name + ".", suffix=".tmp")
+        tmp = Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n")
+        os.replace(tmp, path)
+        tmp = None                       # the replace consumed it
     except (OSError, ValueError):
         return
     finally:

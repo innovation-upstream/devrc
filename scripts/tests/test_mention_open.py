@@ -5449,382 +5449,6 @@ def _watch_compaction_tmps(monkeypatch):
     return made
 
 
-def _lock_holder(path: Path, seconds: float):
-    """A REAL second process holding `LOCK_EX` on `path`. Returns once held."""
-    proc = subprocess.Popen(
-        [sys.executable, "-c",
-         "import fcntl,os,sys,time;"
-         "fd=os.open(sys.argv[1], os.O_RDONLY);"
-         "fcntl.flock(fd, fcntl.LOCK_EX);"
-         "print('held', flush=True); time.sleep(float(sys.argv[2]))",
-         str(path), str(seconds)],
-        stdout=subprocess.PIPE, text=True)
-    assert proc.stdout.readline().strip() == "held", "the holder never ran"
-    return proc
-
-
-def test_the_APPEND_takes_the_lock_too(tmp_path):
-    """🔴 THE RACE THE LOCK EXISTS FOR, AND THE FIRST VERSION DID NOT CLOSE IT.
-    Round 2 locked only `_compact_picks`, so it excluded two COMPACTIONS from
-    each other and left APPEND-vs-compaction — the race that was actually
-    measured — wide open, under a docstring claiming it was fixed. A round-3
-    audit caught that, and I reproduced it: `record_pick` returned True and its
-    row landed on disk while a second process held `LOCK_EX`.
-
-    So the append takes the lock as well.
-
-    🔴 A DIFFERENTIAL MEASUREMENT, NOT AN ABSOLUTE THRESHOLD — and that is a
-    flake this test already had. Its first version asserted `waited > 20ms`,
-    which is inside the noise of a box running dozens of concurrent suites: the
-    mutant that removes the lock entirely SURVIVED one battery run and was
-    KILLED by the next. So the wait is compared against an UNLOCKED append
-    timed in the SAME run, and against the budget itself — both of which move
-    with the load rather than against it."""
-    log = tmp_path / "picks.jsonl"
-    log.write_text(json.dumps({"t": _T0, "repo": "o/seed", "n": 1}) + "\n")
-
-    # BASELINE: the same append with nobody holding the lock.
-    start = time.monotonic()
-    assert MO.record_pick("o/baseline", "6", log) is True
-    baseline = time.monotonic() - start
-
-    holder = _lock_holder(log, 3)
-    try:
-        start = time.monotonic()
-        assert MO.record_pick("o/waited", "7", log) is True
-        waited = time.monotonic() - start
-    finally:
-        holder.terminate()
-        holder.wait(timeout=10)
-        holder.stdout.close()
-    assert waited >= MO.PICKS_LOCK_WAIT_S * 0.7, (
-        f"the append returned in {waited*1000:.0f} ms against a HELD lock, "
-        f"well under its {MO.PICKS_LOCK_WAIT_S*1000:.0f} ms budget — it is not "
-        f"taking the lock at all (unlocked baseline was "
-        f"{baseline*1000:.0f} ms)")
-    assert waited > baseline * 3, (
-        f"the held append ({waited*1000:.0f} ms) is not materially slower than "
-        f"the unlocked one ({baseline*1000:.0f} ms)")
-    assert "o/waited" in log.read_text()
-
-
-def test_a_filesystem_that_CANNOT_LOCK_does_not_burn_the_budget(tmp_path,
-                                                                monkeypatch):
-    """🔴 THE errno FILTER, WHICH SHIPPED WITH NO TEST AND NO BATTERY ROW — a
-    round-5 audit deleted the three-line guard outright and the suite reported
-    356 passed, 0 failed.
-
-    Retrying on EVERY `OSError` treats a PERMANENT refusal as contention: a
-    filesystem with no lock daemon (NFS without `rpc.statd`, some container
-    overlays) answers `ENOLCK`/`EINVAL` and never stops answering it, so every
-    single click burns the whole `PICKS_LOCK_WAIT_S` budget waiting for a lock
-    it can never have. MEASURED before the filter: 204 ms per `record_pick`;
-    after: 0.1 ms, one `flock` attempt.
-
-    Differential, like its sibling lock tests — an absolute millisecond
-    threshold is inside the noise of a loaded box."""
-    import fcntl
-    calls: list = []
-
-    def refuses(fd, flags):
-        calls.append(flags)
-        raise OSError(errno.ENOLCK, "No locks available")
-
-    monkeypatch.setattr(fcntl, "flock", refuses)
-    log = tmp_path / "picks.jsonl"
-    start = time.monotonic()
-    assert MO.record_pick("acme/widget", "12", log) is True, (
-        "an unlockable filesystem dropped the pick")
-    spent = time.monotonic() - start
-    assert calls, "POSITIVE CONTROL: flock was never attempted at all"
-    assert len(calls) == 1, (
-        f"a PERMANENT lock refusal was retried {len(calls)} times — the errno "
-        f"filter is gone, and every click now burns the whole budget")
-    assert spent < MO.PICKS_LOCK_WAIT_S * 0.5, (
-        f"an unlockable filesystem cost {spent*1000:.0f} ms of the "
-        f"{MO.PICKS_LOCK_WAIT_S*1000:.0f} ms budget")
-    assert "acme/widget" in log.read_text(), "the row did not land"
-
-
-def test_a_CONTENTION_errno_IS_still_retried(tmp_path, monkeypatch):
-    """The negative control on the filter: narrowing it must not turn a real
-    contention answer into an immediate give-up, or the lock stops excluding
-    anything. `EWOULDBLOCK` is what a held `LOCK_NB` actually returns."""
-    import fcntl
-    calls: list = []
-
-    def busy(fd, flags):
-        calls.append(flags)
-        raise OSError(errno.EWOULDBLOCK, "Resource temporarily unavailable")
-
-    monkeypatch.setattr(fcntl, "flock", busy)
-    log = tmp_path / "picks.jsonl"
-    assert MO.record_pick("acme/widget", "12", log) is True
-    assert len(calls) > 1, (
-        f"a CONTENTION errno was not retried ({len(calls)} attempt) — the "
-        f"filter is too narrow and the budget buys nothing")
-
-
-def test_the_APPENDS_wait_is_BOUNDED_and_the_row_still_lands(tmp_path):
-    """🔴 A DETACHED CLICK HANDLER MUST NOT BE ABLE TO HANG ON A LOCK, and the
-    textbook answer — a blocking `LOCK_EX` — is exactly what would. It is not
-    hypothetical: a blocking version measurably DEADLOCKED a probe of this
-    function within one process, and in production a wedged holder would hang
-    the click invisibly and forever, costing the operator the OPEN to save one
-    learning row.
-
-    So the wait is a BUDGET. Against a hold far longer than it, the append gives
-    up and writes anyway — bounded, and the pick is never lost to the lock."""
-    log = tmp_path / "picks.jsonl"
-    log.write_text(json.dumps({"t": _T0, "repo": "o/seed", "n": 1}) + "\n")
-    holder = _lock_holder(log, 30)
-    try:
-        start = time.monotonic()
-        assert MO.record_pick("o/gave-up", "8", log) is True
-        waited = time.monotonic() - start
-    finally:
-        holder.terminate()
-        holder.wait(timeout=10)
-        holder.stdout.close()
-    assert waited < MO.PICKS_LOCK_WAIT_S * 5, (
-        f"the append waited {waited:.2f}s against a 30s hold — the budget is "
-        f"not bounding it, and a detached click can hang")
-    assert "o/gave-up" in log.read_text(), (
-        "the append gave up on the lock AND dropped the pick — the budget must "
-        "cost exclusion, never the row")
-
-
-def test_two_compactions_do_not_DELETE_each_others_tmp(tmp_path):
-    """🔴 A BUG MY OWN ROUND-2 FIX INTRODUCED, found by tracing a probe that
-    unexpectedly did NOT reproduce the race it was written for.
-
-    The tmp was named `picks.jsonl.<pid>.tmp`, which collides on RE-ENTRY within
-    one process. A nested `_compact_picks` skipped on the lock, as designed —
-    and its `finally` then UNLINKED THE OUTER CALL'S TMP, so the outer
-    `os.replace` raised `FileNotFoundError` into the swallowing handler and the
-    compaction silently did nothing at all. Measured: the log stayed at 1011
-    rows where it should have been trimmed to 500.
-
-    `mkstemp` gives a name no other call can guess, and the cleanup only removes
-    a tmp still present after a FAILED replace."""
-    log = tmp_path / "picks.jsonl"
-    rows = [{"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1}
-            for i in range(MO.PICKS_COMPACT_AT + 10)]
-    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    real_replace = os.replace
-    nested: list = []
-
-    def replace_with_a_nested_compaction(a, b, *args, **kw):
-        # Exactly the shape that destroyed the outer tmp: a second call runs
-        # inside the first one's read->replace window.
-        nested.append(MO._compact_picks(log))
-        return real_replace(a, b, *args, **kw)
-
-    monkey = MO.os.replace
-    MO.os.replace = replace_with_a_nested_compaction
-    try:
-        MO._compact_picks(log)
-    finally:
-        MO.os.replace = monkey
-    assert nested, "POSITIVE CONTROL: the nested compaction never ran"
-    assert len(log.read_text().splitlines()) == MO.PICKS_MAX_ROWS, (
-        "the OUTER compaction silently did nothing — a nested call deleted its "
-        "tmp out from under it")
-
-
-def test_a_row_appended_DURING_a_compaction_is_CARRIED_OVER(tmp_path,
-                                                            monkeypatch):
-    """🔴 THE RACE ITSELF, AND I CLAIMED IT CLOSED TWICE BEFORE IT WAS.
-
-    Round 2 locked only `_compact_picks` (excludes compactions from each other,
-    not the append). Round 3 shared the lock with the append — but that is a
-    BUDGET, so a compaction slower than `PICKS_LOCK_WAIT_S` still had the
-    appender write UNLOCKED onto the file about to be replaced; round 4 measured
-    `record_pick` returning True, the row on disk, and gone after the replace.
-    What closes it is the CARRY-OVER: everything past the byte offset the
-    compaction read is copied into the tmp before the replace.
-
-    ⚠ THE FIRST PROBE FOR THIS COULD NOT SEE THE FIX, and that is why this test
-    drives the REAL function. It ran a hand-written "compactor" in a second
-    process, so it tested a fake and stayed red no matter what `_compact_picks`
-    did. Here the append is injected at `mkstemp`, which is exactly where a
-    budget-expired appender lands: after the initial read, before the carry-over
-    read.
-
-    ⚠ IT COVERS ONE POINT IN THAT WINDOW, NOT THE WINDOW. An earlier wording said
-    "exactly where a budget-expired appender lands", which is wider than this
-    test. The complement — a `write(2)` landing AFTER the carry-over read — is a
-    measured RESIDUAL and is documented on `_compact_picks`, not fixed here."""
-    log = tmp_path / "picks.jsonl"
-    log.write_text("\n".join(
-        json.dumps({"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1})
-        for i in range(MO.PICKS_COMPACT_AT + 10)) + "\n")
-
-    import tempfile as _tempfile
-    real_mkstemp = _tempfile.mkstemp
-    fired: list = []
-
-    def inject(*a, **k):
-        # An UNLOCKED append, exactly as a budget-expired `record_pick` makes.
-        with open(log, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"t": _T0 + 9999, "repo": "o/late",
-                                 "n": 4242}) + "\n")
-        fired.append(1)
-        return real_mkstemp(*a, **k)
-
-    monkeypatch.setattr(_tempfile, "mkstemp", inject)
-    MO._compact_picks(log)
-    assert fired, "POSITIVE CONTROL: the compaction never reached mkstemp"
-    rows = [json.loads(ln) for ln in log.read_text().splitlines()]
-    assert any(r["repo"] == "o/late" for r in rows), (
-        "a row appended during the compaction window was DESTROYED by the "
-        "replace — the carry-over is not covering it")
-    # …and it is at the END, where an append belongs.
-    assert rows[-1]["repo"] == "o/late", rows[-1]
-    # …and the compaction still did its job.
-    assert len(rows) == MO.PICKS_MAX_ROWS + 1, len(rows)
-
-
-def test_the_MEASURED_orderings_of_an_append_vs_a_compaction(tmp_path):
-    """🔴 THE RESIDUAL TABLE IN `_compact_picks`, MACHINE-CHECKED. FOUR
-    successive wordings of that paragraph were wrong, in BOTH directions, so the
-    orderings are asserted rather than described:
-
-        fd open before the carry-over read, write before it  -> survives
-        fd open before `os.replace`, write after the read    -> LOST WHOLE
-        fd opened AFTER `os.replace`                         -> survives
-
-    🔴 THE THIRD ROW IS THE ONE THAT KEEPS BEING GOT WRONG, and it is why this
-    test exists rather than a sentence. The wording before it said the loser was
-    "any write(2) after the carry-over read" — but an fd opened after the
-    replace writes to the NEW inode and survives however late. The discriminator
-    is WHEN THE FD WAS OPENED.
-
-    ⚠ WHAT IS PINNED IS THE TABLE, NOT A PROMISE. The losing row costs one
-    learning row and no click, and `load_picks` must stay readable throughout —
-    the property that actually matters, asserted last."""
-    row = json.dumps({"t": _T0 + 9999, "repo": "o/late", "n": 4242}) + "\n"
-
-    def seeded():
-        p = tmp_path / f"picks{len(list(tmp_path.iterdir()))}.jsonl"
-        p.write_text("\n".join(
-            json.dumps({"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1})
-            for i in range(MO.PICKS_COMPACT_AT + 10)) + "\n")
-        return p
-
-    # (1) BEFORE the carry-over read — via an fd opened and written up front.
-    log = seeded()
-    with open(log, "a", encoding="utf-8") as fh:
-        fh.write(row)
-    MO._compact_picks(log)
-    assert "o/late" in log.read_text(), (
-        "a write that COMPLETED before the carry-over read was lost — the "
-        "carry-over is not working")
-
-    # (2) ENTIRELY AFTER the replace, through an fd opened beforehand. Nothing
-    # interleaves; this is the shape a budget-expired record_pick produces.
-    log = seeded()
-    fh = open(log, "a", encoding="utf-8")
-    MO._compact_picks(log)
-    fh.write(row)
-    fh.close()
-    assert "o/late" not in log.read_text(), (
-        "the table says this ordering LOSES the row; it survived, so the "
-        "residual paragraph is now wrong in the other direction")
-
-    # (3) 🔴 THE ROW THE PARAGRAPH KEPT GETTING WRONG: an fd opened AFTER the
-    # replace writes to the NEW inode and SURVIVES, however late it is. Without
-    # this case the losing condition reads as "any write after the carry-over
-    # read", which is what four wordings said and which is false.
-    log = seeded()
-    MO._compact_picks(log)
-    with open(log, "a", encoding="utf-8") as fh:
-        fh.write(row)
-    assert "o/late" in log.read_text(), (
-        "an fd opened AFTER the replace lost its row — then the losing "
-        "condition really is 'any write after the read' and the table is wrong")
-
-    # 🔴 THE PROPERTY THAT ACTUALLY MATTERS, in every ordering: the reader
-    # survives. A lost row costs the learning and nothing else.
-    for p in (log,):
-        assert isinstance(MO.load_picks(p), list)
-
-    # ⚠ WHAT THIS TEST DELIBERATELY DOES *NOT* PIN, SAID RATHER THAN IMPLIED.
-    # `_compact_picks` claims the loss is always WHOLE rather than a torn line
-    # because `record_pick` writes one row through one buffered `write` and
-    # flushes at close — so it cannot STRADDLE the carry-over read. That claim
-    # is reasoned from the writer's shape, and it is NOT asserted here, because
-    # two attempts to assert it were each measured unable to fail:
-    #   * spying `os.write` and asserting `<= 1` — `record_pick` writes through
-    #     a buffered TEXT file whose flush does not surface there, so the spy
-    #     observed **0** and `0 <= 1` passed for free. (`io.FileIO.write` cannot
-    #     be patched either: immutable type.)
-    #   * injecting a REAL `record_pick` inside a compaction and asserting no
-    #     torn line — the injection lands BEFORE the carry-over read, so the
-    #     whole row is on disk by then. Measured: a mutant that makes
-    #     `record_pick` write the row in two flushed halves still PASSED.
-    # A straddling writer DOES tear — measured with a hand-rolled two-`write(2)`
-    # append — so the hazard is real and belongs to a writer this module does
-    # not have. Leaving a green assertion here would report coverage of a claim
-    # nothing checks, which is worse than the gap.
-
-
-def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
-                                                              monkeypatch):
-    """🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS — and without
-    the lock a row appended between the read and the `replace` is silently LOST.
-    A round-2 audit measured exactly that ("concurrent row survived? False").
-
-    The lock is `LOCK_NB` and SKIPS rather than waits, because blocking here
-    would cost the click while losing a row only costs a little learning. This
-    drives a REAL second process holding a REAL flock, because the claim is
-    about two processes and an in-process fake could not make it.
-
-    ⚠ The tmp name is unguessable (`mkstemp`), so two compactions cannot share
-    one buffer even on a filesystem that ignores the advisory lock. That belt is
-    asserted at the end: nothing is left behind."""
-    made = _watch_compaction_tmps(monkeypatch)
-    log = tmp_path / "picks.jsonl"
-    rows = [{"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1}
-            for i in range(MO.PICKS_COMPACT_AT + 10)]
-    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    holder = subprocess.Popen(
-        [sys.executable, "-c",
-         "import fcntl,os,sys,time;"
-         "fd=os.open(sys.argv[1], os.O_RDONLY);"
-         "fcntl.flock(fd, fcntl.LOCK_EX);"
-         "print('held', flush=True); time.sleep(6)", str(log)],
-        stdout=subprocess.PIPE, text=True)
-    try:
-        assert holder.stdout.readline().strip() == "held", "the holder never ran"
-        before = len(log.read_text().splitlines())
-        MO._compact_picks(log)
-        assert len(log.read_text().splitlines()) == before, (
-            "compaction ran while another writer held the lock — a row "
-            "appended in that window is silently lost")
-    finally:
-        holder.terminate()
-        holder.wait(timeout=10)
-        if holder.stdout:
-            holder.stdout.close()
-    # POSITIVE CONTROL: with the lock free it DOES compact, so the assertion
-    # above is about the lock and not about compaction being broken.
-    MO._compact_picks(log)
-    assert len(log.read_text().splitlines()) == MO.PICKS_MAX_ROWS
-    # ⚠ THE EXACT TMP PATH, NOT A GLOB OR A LISTING. Two reasons: the autouse
-    # redirect writes its own fixture files into this same `tmp_path`, so a bare
-    # listing is not a statement about compaction at all; and a `*.jsonl` glob
-    # here registers as a new walk site against
-    # `test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_pinned_two_way`
-    # — measured, it went red.
-    # ⚠ OBSERVED, NOT GUESSED. The tmp used to be `picks.jsonl.<pid>.tmp` and is
-    # now an unguessable `mkstemp` name, so an assertion naming either exact
-    # form is one that can never fail. See `_watch_compaction_tmps`.
-    assert made, "POSITIVE CONTROL: no compaction tmp was ever created"
-    assert [t for t in made if t.exists()] == [], (
-        f"a tmp outlived the compaction: {[str(t) for t in made]}")
-
-
 def test_a_RAISING_compaction_neither_LOSES_the_pick_nor_ESCAPES(tmp_path,
                                                                   monkeypatch):
     """🔴 THREE CLAIMS, AND THE FIRST VERSION OF THIS TEST PINNED THE OPPOSITE
@@ -6494,6 +6118,48 @@ def test_at_the_REAL_SIZE_a_LOW_number_still_RANKS_OUT_the_IMPOSSIBLE():
     assert sorted(ordered[-len(impossible):]) == sorted(impossible), (
         "the impossible rows are not exactly the TAIL of the list")
     assert sorted(ordered) == sorted(repos), "rows were dropped"
+
+
+def test_adding_index_to_the_TIEBREAK_would_change_NOTHING_on_a_TYPED_query():
+    """🔴 THE REASON `PICKER_SH` IS NOT CHANGED, PINNED SO NOBODY RE-DERIVES IT.
+    `--tiebreak=end,index` looks like the obvious way to make our pre-computed
+    order the final arbiter, and it is a NO-OP: fzf appends `index` implicitly.
+
+    ⚠ EVERY QUERY HERE IS TYPED, WHICH IS THE WHOLE POINT. An EMPTY query proves
+    nothing — fzf preserves input order when there is nothing to score — so a
+    test built on one would pass against an fzf that discarded our order the
+    moment the operator pressed a key. That trap is why this test exists beside
+    the tie test below rather than instead of it.
+
+    The positive control is asserted in the same run: `--tiebreak=length` MUST
+    differ, or the comparison is blind and a zero means nothing."""
+    _require_fzf()
+    owners = ["nimbusworks", "greenfielded", "hollowpoint", "q", "mm",
+              "aaaaaaaaaaaaaaaa", "quartzline", "sablefen"]
+    names = ["api", "web", "cli", "sdk", "nimbusworks", "console", "atlas"]
+    repos = sorted({f"{o}/{n}" for o in owners for n in names}, key=str.lower)
+    repos = repos[::-1]                 # NOT sorted, so `index` has a say
+    rows = [f"github 1291 — https://github.com/{r}/pull/1291" for r in repos]
+
+    def ranked(tiebreak, query):
+        out = subprocess.run(
+            ["fzf", "--filter", query, f"--tiebreak={tiebreak}", "-i"],
+            input="\n".join(rows), capture_output=True, text=True)
+        return [r for r in out.stdout.split("\n") if r]
+
+    differed_index = differed_length = 0
+    for query in ("api", "nimbus", "nimbusworks", "cli", "on", "a", "sd", "e"):
+        assert ranked("end", query), f"positive control: {query!r} matched none"
+        differed_index += ranked("end", query) != ranked("end,index", query)
+        differed_length += ranked("end", query) != ranked("length", query)
+    assert differed_index == 0, (
+        f"`--tiebreak=end,index` DIFFERED from `end` on {differed_index} typed "
+        f"queries — `index` is NOT implicit after all, and PICKER_SH must gain "
+        f"the flag")
+    assert differed_length > 0, (
+        "POSITIVE CONTROL FAILED: `length` did not differ from `end` either, "
+        "so this comparison cannot see a difference and the zero above means "
+        "nothing")
 
 
 def test_REAL_fzf_lets_our_PRECOMPUTED_ORDER_decide_a_TIE():
