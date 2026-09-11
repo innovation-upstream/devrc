@@ -80,10 +80,15 @@ remedy for "I cannot create into scope X" is an allowlist edit, **not** seeding.
 🔴 **That 404 is byte-identical for FOUR different causes** — a scope outside your
 allowlist, a scope that never existed, a ref that resolves to nothing, and an
 entry the loader could not parse (`server.py`, and the same list in its README).
-Deliberately, so an error cannot enumerate the store. ⚠ Do not read a 404 as
-"widen the allowlist": that is one of four, and an earlier version of this block
-listed only two after being rewritten to widen the CREATE claim — wider on one
-axis, narrower on another.
+Deliberately, so an error cannot enumerate the store. ⚠ That four-way ambiguity
+is about a **write 404 generally** (it reaches `append` and `If-Match` `PUT`
+through `_resolve_writable`). **On the CREATE path specifically only the
+allowlist arm can fire** — a ref resolving to nothing is the success case, a bad
+normalisation is 400, and the malformed-entry arm is not on that route — so for
+`cairn create`, "widen the allowlist" IS the right reading. ⚠ An earlier version
+of this block listed only two causes after being rewritten to widen the CREATE
+claim, and its replacement then told the reader to distrust the one reading that
+is correct here: wider on one axis, narrower on another, twice running.
 
 ⚠ **THIS FILE HAS NOW BEEN WRONG TWICE ABOUT THE SAME SENTENCE, IN OPPOSITE
 DIRECTIONS.** It used to say there was no create route at all (false since

@@ -85,7 +85,9 @@ SHA are NOT running the same ARTIFACT.** Pre-existing WIP from another thread; u
 has no create route"* — **RETRACTED 2026-09-11**: rank 24's owner, **devrc#1254 / `34d00d90`**,
 MERGED on 2026-09-03 and shipped `PUT … If-None-Match: *` plus the `cairn create` verb —
 which creates the scope DIRECTORY too, so a new scope's first entry needs no operator step.
-The only gate is the caller's token scope allowlist. See rank 24 below.
+The only **scope-level** gate is the caller's token scope allowlist — ⚠ "scope-level" is
+load-bearing: a ref must also be a bare `<slug>.md` (a kind-qualified `<slug>.<kind>` reaches
+no write route at all), so an allowlist edit cannot rescue every refusal. See rank 24 below.
 
 ## Open investigations — live diagnosis state
 
@@ -953,8 +955,10 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     because the rank 23 link reasons from it: verified in
     `server.py`, `If-Match` was **mandatory** on PUT, `*` was refused, and the handler resolved an
     existing entry — so `cairn put --file` on a new ref failed *"cannot derive a revision"*. A
-    scope's first record can only reach the pod through an operator `seed.sh`. So the only
-    create path available to a session is LOCAL, and nothing carries it onward.
+    scope's first record could then only reach the pod through an operator `seed.sh`, so the
+    only create path available to a session was LOCAL and nothing carried it onward. ⚠ ALL OF
+    THAT IS PAST TENSE AND RETRACTED — `cairn create` now creates the entry AND the scope
+    directory; do NOT reach for `seed.sh` on the strength of this paragraph.
     **Closing condition:** a merged PR adding a create route (or an explicit, recorded decision
     that seeding is permanently the only create path, with `subsystem-index` saying so).
     forcing: regression — the missing route is the upstream cause of rank 23

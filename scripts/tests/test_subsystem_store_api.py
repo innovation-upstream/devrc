@@ -4209,12 +4209,40 @@ _RETRACTED_BOUNDARY = (
     # phrase-scoped hand sweep could not see it: it searched the MECHANISM
     # ("walking the store root"), and this site states only the CONCLUSION.
     # Pinning the conclusion is what closes that gap.
-    # ⚠ Deliberately NOT needling "walking the store root": that phrase TRUELY
+    # ⚠ Deliberately NOT needling "walking the store root": that phrase TRULY
     # describes `snapshot_freshness`, which really does walk the root, so it
     # would fire on correct writing.
-    "remains an operator step",
-    "is still an operator step",
+    #
+    # 🔴 AND THE FIRST DRAFT OF THESE TWO NEEDLES BROKE THAT VERY RULE. They read
+    # "remains an operator step" / "is still an operator step" — no subject at
+    # all, i.e. ordinary English about any operator step anywhere. MEASURED: the
+    # repo carries 9 TRUE occurrences of "operator step" across 7 unrelated files
+    # (signal provisioning, nix disk cleanup, tmux-webapp, browser-bridge,
+    # cairn-oss-multi-instance), each ONE WORD from turning this gate red, and a
+    # round-3 audit turned it red by changing "is" to "remains" in a doc about
+    # `sudo`. `claude/RULES.md`: a permanently-red gate is worse than no gate.
+    # Subject-bearing, so they still kill the mutants but cannot fire on a
+    # sentence that is not about this claim:
+    "first entry remains an operator step",
+    "first entry is still an operator step",
+    # 🔴 THE SAME CLAIM, IN TWO SPELLINGS NEITHER OF THE ABOVE CAN SEE. A round-3
+    # audit found both still live and present-tense AFTER a round-2 commit had
+    # declared "All sites are corrected" — one of them 115 lines below that very
+    # claim. Needled because they are the exact sentences that send a reader to
+    # `seed.sh`, which is the DESTRUCTIVE remedy.
+    "structurally cannot accept a new entry",
+    "only path that ever created one",
+    "can only reach the pod through an operator",
 )
+
+# 🔴 A STRING NEEDLE CANNOT CLOSE THIS CLASS, AND FOUR ROUNDS OF TRYING IS THE
+# EVIDENCE. Round 1 swept by MECHANISM ("walking the store root") and missed a
+# site spelling the CONCLUSION; round 2 needled one conclusion phrase and missed
+# two more spellings; round 3 found those. Every pass swept by STRING, and the
+# claim has no canonical wording. Before declaring this class clean, sweep by
+# MEANING — e.g. `first (entry|record)` within ~120 chars of `seed|operator`,
+# plus "only create path" — and do not write "all sites are corrected" again
+# without showing the sweep that establishes it.
 
 # A retraction has to QUOTE the claim to retract it, so an occurrence with one
 # of these NEARBY is a correction, not an assertion. Kept deliberately short: a

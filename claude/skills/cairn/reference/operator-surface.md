@@ -98,11 +98,20 @@ client-side evidence that such entries exist. `cairn doctor` reads it.
 the wire they are the same bytes.
 
 ⚠ **This section used to say the two remedies are OPPOSITE — "seed the scope" vs
-"widen the allowlist" — and that is RETRACTED.** Under the real mechanism (below)
-the allowlist edit is the remedy in BOTH readings: an allowlisted scope with no
-directory is created by `cairn create`. Settling absent-vs-refused is still worth
-doing — it tells you whether to expect existing entries back — but it no longer
-selects between two different fixes.
+"widen the allowlist" — and that is RETRACTED.** Seeding is never the remedy.
+But the replacement overshot too, so precisely:
+
+| reading | remedy |
+|---|---|
+| **REFUSED** — the scope is not in your token row | edit the secret, replace the pod, then `cairn create` |
+| **ABSENT** — allowlisted already, but the store holds no entries for it | **`cairn create` alone.** No secret edit, no pod restart. |
+
+🔴 **Settle which one you are in BEFORE editing a secret**, or you will replace a
+production pod to fix something a one-line `create` would have handled. An
+earlier draft here said the allowlist edit is the remedy in BOTH readings —
+generalised from a pod where the allowlist happened to enumerate exactly the
+scopes on disk, which is the same coincidence that produced the original wrong
+diagnosis.
 
 1. **The count gap, off `doctor` alone.** `entry-files=` (store-wide, unfiltered —
    `snapshot_freshness` walks the root and takes no token) minus `X-Store-Entries`
@@ -120,7 +129,9 @@ PVC held, so it was refusing nothing. `civitai-app-requests` and
 `civitai-developer-docs` read as invisible because they had **never been seeded**,
 not because access was lost.
 
-🔴 **THE ALLOWLIST EDIT IS THE WHOLE FIX — SEEDING IS NOT REQUIRED.** An earlier
+🔴 **FOR A *REFUSED* SCOPE, THE ALLOWLIST EDIT IS THE WHOLE FIX — SEEDING IS
+NEVER REQUIRED.** (For a merely ABSENT one, skip straight to `cairn create` — see
+the table above.) An earlier
 version of this section said "editing the allowlist without seeding changes
 nothing at all, because the index is built from what is ON DISK". That is true of
 READS and **false for `cairn create`**: `create_entry` does

@@ -1078,8 +1078,9 @@ class TestTheFreezeIsWatchedNotAsserted:
         assert cc.survey(empty) == {"examined": 0, "writable": 0, "refused": 0, "other": 0}
 
     def test_the_freeze_leaves_SCOPE_DIRECTORIES_writable(self, cc, tmp_path):
-        """A deliberate asymmetry with a known cost — and the cost still stands,
-        for a NARROWER reason than this docstring used to give.
+        """`set_entry_mode` freezes entry FILES and leaves scope DIRECTORIES
+        writable. This test pins that mechanical fact and supplies no rationale
+        for it — see below, and do not restore one to this opening line.
 
         ⚠ RETRACTED: it used to argue "the hosted API has no CREATE route".
         devrc#1254 / `34d00d90` added one (`PUT` + `If-None-Match: *`, exposed as
@@ -1107,11 +1108,24 @@ class TestTheFreezeIsWatchedNotAsserted:
         entries dark to every reader on one host), and the create verb exists to
         close it.
 
-        🔴 NOTHING JUSTIFIES THIS AS A DESIGN CHOICE ANY MORE, AND SAYING SO IS
-        THE HONEST ANSWER. `cairn-cutover.py` frames it as "the mechanical
-        consequence … so `survey` can see a writable file on a store that has
-        been cut over" — a consequence, not a rationale. This test pins the
-        mechanical fact; it should not supply a purpose it does not have.
+        🔴 AND THE SENTENCE THAT REPLACED *THAT* MISQUOTED THE CODE — it said
+        "`cairn-cutover.py` frames it as the mechanical consequence … a
+        consequence, not a rationale", which is only that docstring's ⚠ THIRD
+        paragraph. Its FIRST paragraph asserts, in capitals, "THE ASYMMETRY IS A
+        DESIGN DECISION WITH A KNOWN COST … freezing the directories too would
+        also stop a genuinely NEW entry being created". Reading half a docstring
+        and reporting it as the whole is how this test and its subject came to
+        disagree in the first place.
+
+        ⚠ SO, ACCURATELY, AND WITHOUT SUPPLYING A FOURTH RATIONALE: the code DOES
+        assert a reason, and that reason is now WEAKER than when written but not
+        empty. Freezing directories would still block LOCAL creation; what
+        changed is that local creation is no longer the only route, since
+        `cairn create` has a hosted one. Whether the asymmetry is still worth
+        keeping is `cairn-cutover.py`'s call to make, not this test's — and note
+        the deployed mirror's directories were later frozen by hand anyway
+        (`1068 dirs 0555`), so the asymmetry may no longer describe the live
+        store at all. This test pins only the mechanical fact.
         Three drafts of a reason have now been retracted here; do not write a
         fourth.
         """
