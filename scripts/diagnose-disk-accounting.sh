@@ -243,26 +243,30 @@ _not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
 # 🔴 "ALL THREE OF THIS FUNCTION'S CALLERS", NOT "EVERY CALLER" — the wider
 # wording stood here for a round and was false.
 #
-# 🔴 AND THERE IS NOW A FIFTH SITE: `toplevel_accountable_entries()`, added
-# 2026-09-09, enumerates depth-1 with the same shape and sends its stderr NOWHERE
-# — not to `$DENIED_LOG`, not to a file. A top-level entry root cannot stat is
-# therefore dropped from section 2 with no tally, and section 3's residual — the
-# number that function exists to feed — absorbs it silently. This ledger is the
-# place a maintainer of that function looks, so it is recorded HERE and not only
-# in the test file's sweep-ledger comment, which is where it was written first.
-# It is not a regression (the glob it replaced dropped unstattable entries too,
-# and equally silently); it is the same debt at one more site.
+# 🔴 THE UNTALLIED-DROP SITES ARE NOT NUMBERED HERE ANY MORE, AND THAT IS THE
+# FIX. A prose register of them has now been SHORT TWICE in consecutive audit
+# rounds: one round found it missing `toplevel_accountable_entries()` and added
+# it as "the FIFTH site"; the next round found the ordinals themselves were the
+# defect, because a numbered list reads as CLOSED and the section-5 PVC loop had
+# never been in it. An ordinal is a claim about a SET, and nothing was checking
+# the set — so each fix made the register more confidently wrong.
 #
-# `split_by_device` below is the FOURTH such site, also with no count: its
-# `[ -d "$p" ] || continue` drops a directory root cannot stat (a gvfs
-# or sshfs mount under /home/<user>/… is exactly the root-reachable mechanism)
-# and nothing tallies it. It is recorded rather than fixed because bash's file
-# tests cannot separate the three reasons `[ -d "$p" ]` says no — not a
-# directory, stat refused, or an unmatched glob left the pattern itself — so a
-# count there needs a different enumeration, not a `+ 1`. What limits the damage
-# is that `report_foreign_mounts`'s empty branch does not read as a clean result:
-# it tells the reader outright that an empty list on a host with foreign mounts
-# under /home is a BUG.
+# The CRITERION, which is what a maintainer actually needs:
+#   a depth-1 enumeration that drops entries it cannot stat, WITHOUT tallying
+#   the drop — so the count it feeds is a FLOOR presented as a total.
+# The membership is enumerated and pinned two-way by
+# `scripts/tests/test_diagnose_disk_accounting.sh` ("UNTALLIED-DROP SITE
+# LEDGER"), which fails when the set GROWS or SHRINKS and prints the sites.
+# 🔴 READ THE TEST FOR THE LIST. Do not re-count them here; that is the mistake
+# this paragraph exists to stop.
+#
+# Why they are recorded rather than fixed: bash's file tests cannot separate the
+# three reasons `[ -d "$p" ]` says no — not a directory, stat refused, or an
+# unmatched glob left the pattern itself — so a count needs a different
+# enumeration, not a `+ 1`. What limits the damage at `split_by_device` is that
+# `report_foreign_mounts`'s empty branch does not read as a clean result: it
+# tells the reader outright that an empty list on a host with foreign mounts
+# under /home is a BUG. The section-5 PVC loop has no such backstop.
 #
 # The `|| true` here covers route (a) ONLY — find's own rc 1 — of the two aborts
 # `size_breakdown`'s comment describes. Route (b), `xargs` rc 123, happens one

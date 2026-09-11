@@ -1308,8 +1308,14 @@ has "pinned #1: section 2's process-substitution find" \
 # run continues, rc 0 both ways. Nothing reads the status (the only caller is a
 # process substitution, whose exit status bash does not check), and masking
 # requires a reader. The entry is here because the sweep COUNTS it, which is
-# bookkeeping and needs no justification; adding `|| true` would change nothing
-# observable either.
+# bookkeeping and needs no justification.
+#
+# 🔴 A clause saying "adding `|| true` would change nothing OBSERVABLE either"
+# stood here and was FALSE — six lines above the assertion that disproves it.
+# It makes THIS ledger go red: `sweep_n` drops to 1 and both the count and
+# `pinned #2` fail. Nothing BEHAVIOURAL changes; the ledger is an observation.
+# The overreach was one clause past a correct sentence, which is where these
+# keep happening.
 #
 # What IS true and is the thing to know: unlike #1, its stderr goes nowhere — not
 # to DENIED_LOG, not to a file — so a top-level entry that cannot be stat'd is
@@ -1399,7 +1405,10 @@ echo "== 12. SECTION 2 ACCOUNTS FOR TOP-LEVEL FILES, NOT ONLY DIRECTORIES =="
 # directory, a symlink, a fifo, and a skip-listed name. 🔴 The symlink and the
 # fifo MUST BE LISTED — see the assertions below and the reasoning with them.
 # An earlier version of this paragraph said the symlink "must not" be listed,
-# eleven lines above an assertion requiring that it is. A maintainer resolving
+# 25 lines above an assertion requiring that it is (MEASURED at ae2c2427: the
+# comment sat at 1383, the assertion at 1408 — an earlier retelling said
+# "eleven", a decorative specific inside a retraction about false specifics).
+# A maintainer resolving
 # that contradiction toward the comment would have reinstated an exclusion that
 # was measured to make section 3's residual WORSE.
 tl="$TMP/toplevel"
@@ -1407,13 +1416,21 @@ mkdir -p "$tl/realdir" "$tl/proc" "$tl/.hiddendir"
 printf 'x' > "$tl/swapfile"
 printf 'x' > "$tl/.hiddenfile"
 ln -s realdir "$tl/linkdir"
-# 🔴 NO `|| true` HERE — but note the reason CHANGED when the fifo assertion
-# flipped from `lacks` to `has`, and the old reason is no longer the one.
-# It used to be: with `|| true`, a host without mkfifo creates no path and a
-# `lacks` assertion passes vacuously. That is now backwards — a `has` assertion
-# FAILS when the entry is absent, so the suite would go red either way. The
-# reason to keep it unguarded today is only that it fails HERE, naming the
-# missing tool, instead of three lines later as a confusing assertion failure.
+# 🔴 NO `|| true` HERE, AND THERE IS NO BEHAVIOURAL REASON FOR THAT — this
+# comment supplies none, because the two it supplied before were both false.
+#   - draft 1: "with `|| true` a host without mkfifo creates no path and the
+#     assertion below passes vacuously." True when the assertion was `lacks`;
+#     it is `has` now, which FAILS on a missing entry either way.
+#   - draft 2: "it fails HERE, naming the missing tool, instead of three lines
+#     later as a confusing assertion failure." FALSE, and it assumed `set -e`.
+#     🔴 THIS SUITE IS `set -uo pipefail` (line 48) — NO `-e`. MEASURED with a
+#     stand-in returning 127: guarded and unguarded are byte-identical — rc 1,
+#     221 ok, the SAME single failure (`a fifo is counted …`), and the same
+#     `command not found` on stderr. Nothing fails "here"; the run continues
+#     through every remaining assertion, and the assertion failure arrives in
+#     BOTH variants, 15 lines later rather than three.
+# Keep it unguarded because `|| true` would add noise that buys nothing. That is
+# a style preference, not a mechanism, and it is stated as one.
 mkfifo "$tl/afifo"
 
 # The function emits NUL-separated names; render them one per line to assert on.
@@ -1497,6 +1514,47 @@ lacks "section 2 does NOT pipe the enumerator into while (subshell would drop th
     "$consumer_src" 'toplevel_accountable_entries / |'
 has "the consumer reads NUL-delimited records" \
     "$(grep -n 'read -r -d' "$SCRIPT")" "read -r -d '' d"
+
+# --------------------------------------------------------------------------- #
+echo "== 13. UNTALLIED-DROP SITE LEDGER — pinned two-way =="
+# 🔴 THIS REPLACES A PROSE REGISTER THAT WAS SHORT TWICE IN TWO ROUNDS.
+# The script used to carry a numbered list of the places that enumerate depth-1
+# and DROP entries they cannot stat without tallying the drop. Round N found it
+# missing one and added "the FIFTH site"; round N+1 found the ordinals were
+# themselves the defect — a numbered list reads as CLOSED, and the section-5 PVC
+# loop had never been in it. An ordinal is a claim about a SET; nothing checked
+# the set, so each fix made the register more confidently wrong.
+#
+# The criterion: a depth-1 enumeration that drops unstattable entries with no
+# tally, so the count it feeds is a FLOOR presented as a total.
+#
+# 🔴 THIS LEDGER FAILS WHEN THE SET GROWS *OR* SHRINKS. A new site is a new
+# untallied drop nobody wrote down; a vanished one means the shape changed and
+# the criterion needs re-reading. Either way a human must look. Adding a site
+# here is NOT the fix for finding one — recording it is the fix; tallying it is
+# a different, larger change (bash's `[ -d ]` cannot separate "not a directory"
+# from "stat refused" from "unmatched glob").
+bracket_sites="$(grep -n '\[ -d "\$p" \] || continue' "$SCRIPT" | cut -d: -f1 | tr '\n' ' ')"
+bracket_n="$(printf '%s' "$bracket_sites" | wc -w)"
+
+# POSITIVE CONTROL: the pattern must be able to match at all. A ledger whose
+# grep silently stopped matching would report a serene 0 and pin nothing —
+# the exact shape this file's other ledgers carry a control for.
+[ "$bracket_n" -ge 1 ] \
+  && pass "POSITIVE CONTROL: the untallied-drop pattern matches ($bracket_n site(s))" \
+  || fail "POSITIVE CONTROL FAILED: the pattern matched NOTHING — this ledger is wired to nothing and its count below is meaningless"
+
+[ "$bracket_n" -eq 2 ] \
+  && pass "exactly 2 untallied-drop sites, as pinned" \
+  || fail "the untallied-drop ledger found $bracket_n site(s), expected the 2 pinned below — a new one is a FLOOR presented as a total that nobody wrote down; a vanished one means the shape changed. Lines: [$bracket_sites]"
+
+# Name them, so the failure above is actionable and so a SWAP (one site removed,
+# another added) cannot pass on the count alone.
+sites_ctx="$(grep -n -B2 '\[ -d "\$p" \] || continue' "$SCRIPT")"
+has "pinned site: split_by_device's foreign-entry loop" \
+    "$sites_ctx" 'for p in "$base"/*/* "$base"/*/.*'
+has "pinned site: section 5's per-PVC inode loop" \
+    "$sites_ctx" 'for p in /var/lib/rancher/k3s/storage/*'
 
 # --------------------------------------------------------------------------- #
 # 🔴 DO NOT print `RESULT: PASS (exit=0)` here — that grammar is RESERVED to
