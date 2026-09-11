@@ -25,17 +25,17 @@ the feature.
 | `deploy.md` | **building + shipping a version**: manifest-vs-code + CSS-cwd traps; chart sync |
 | `task-api.md` | **writing/debugging a producer**; `clawgatectl` + exit codes; **the 23-route `/api/*` inventory with its auth**; tag grammar |
 | `agent-dispatch.md` | debugging the agent loop; `POST /agents`; the sandbox fixture; a silent non-start |
-| `extension.md` | you changed the extension, or need to know which build is loaded |
-| `changelog.md` | *when* a feature landed / why an old decision stands |
-| `architecture.md` | changing agents / repos / runbooks / privilege / native tools / e2e |
-| `internals.md` | changing Go code: markdown renderer, the two `taskTitle`s, migrations |
-| `telemetry.md` | metrics/logs missing; adding an event; a red CI check |
-| `troubleshooting.md` | symptoms: push, PWA icon, stale SW, RBAC, kubeconfig, agent model |
-| `hooks.md` | `PermissionRequest` semantics; the defer gates; installing hooks elsewhere; Stop / 💡 |
-| `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol needs Cilium) |
-| `cross-session-reach.md` | **reaching another Claude Code session**: query/resolve/read/message, the `(host, pane_id)` key, the `term` write surface |
-| `element-references.md` | a task body carries extension-picked element refs |
-| `prior-work-recall.md` | the `prior work` step: per-term hit counts, flags, why the guard is an `if` |
+| `extension.md` | you changed the extension, or need the loaded build |
+| `changelog.md` | *when* a feature landed / why a decision stands |
+| `architecture.md` | changing agents / repos / runbooks / privilege / native tools |
+| `internals.md` | Go code: markdown renderer, the two `taskTitle`s, migrations |
+| `telemetry.md` | metrics/logs missing; adding an event; red CI check |
+| `troubleshooting.md` | symptoms: push, PWA icon, stale SW, RBAC, kubeconfig |
+| `hooks.md` | `PermissionRequest` semantics; defer gates; installing hooks elsewhere; Stop / 💡 |
+| `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol: Cilium) |
+| `cross-session-reach.md` | reach another session; 🔴 `term send` RUNS what you type |
+| `element-references.md` | task body carries extension-picked element refs |
+| `prior-work-recall.md` | the `prior work` step: hit counts, flags, why the guard is an `if` |
 
 ## Flow files
 `flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
@@ -44,7 +44,7 @@ auto-fire — something must name it.
 | file | run it when |
 |---|---|
 | `task-authoring.md` | **CREATING a task** — pre-verify → interview → recommend → tags → confirm → create. 🔴 A PreToolUse hook DENIES a create with no `## Acceptance criteria`, or an unreadable body. Override `CLAWGATE_NO_INTERVIEW=1`. |
-| `task-pickup.md` | **PICKING UP a task** — "read and evaluate clawgate task N", then "local dispatch": read → evaluate → pre-start comment → `in_progress` → work → ONE completion comment → status. Carries the criteria detector, the ordering trap and the comment rules. 🔴 A Stop hook BLOCKS on a missing write-back and names this file. |
+| `task-pickup.md` | **PICKING UP a task** — "read and evaluate clawgate task N", then "local dispatch": read → evaluate → pre-start note → `in_progress` → work → ONE completion comment → status. Carries the criteria detector, ordering trap and comment rules. 🔴 A Stop hook BLOCKS on a missing write-back. |
 
 Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 `clawgate-loop-validation` · `authelia-passkey-sso`.
@@ -163,31 +163,6 @@ create** — a load-bearing wire contract producers key their retry on.
 
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
 409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.
-
-## reaching another Claude Code session
-Query (`tmux ls` / `tmux windows`) → resolve → read (`transcript query`) → message (`term send`).
-**Load `cross-session-reach.md` before using any of it.**
-
-- **Harness first.** `SendMessage`/`ListAgents` reaches a live peer *as an agent*. Use clawgate for
-  **cross-host** reach, a session this process never spawned, or to **read** one. Not a replacement.
-- 🔴 **`term send` is arbitrary command execution as the operator** — keystrokes into a live pane,
-  and `submit` (default) presses Enter, so it **runs**. Resolve **deliberately**: never a pattern
-  match, never "the first result"; confirm on `path`/`tmuxSessionName`/`label` before writing. It is
-  subject to **none** of this session's PreToolUse hooks — if a guard blocked you, typing that
-  command into a pane is the blocked action, not a workaround.
-- 🔴 **Target key is `(host, pane_id)`**; `pane_id` alone collides across hosts (87 windows, 56
-  distinct). `codename` is NOT unique (`Gold`=9). `--host` takes clawgate's label, not `hostname`.
-- 🔴 **200 = QUEUED, never RAN** (90 s TTL). `term ls` is the verdict, text in the pane the closing
-  evidence. Always pass `--idempotency-key`.
-- 🔴 **`term` needs `CLAWGATE_TERMINAL_TOKEN`** — a DIFFERENT secret, **fail-CLOSED**, no fallback
-  (rc 9 = server unarmed; rc 2 = none here, nothing sent). Agent pods hold the hook token only, so
-  reads work there and `term` refuses, by design.
-- 🔴 **Sends are NOT attributable per session** — `tier` discriminates the **door** (`token` vs
-  `browser`), not the caller; one shared token makes every machine caller identical. `claimedBy` is
-  the executing host agent, not the author.
-- **clawgate does NOT talk to tmux** — a collector pushes every **2 min** (transcripts 5). Reads are
-  as fresh as the last push and no fresher: **read `receivedAt`** (the SERVER's clock). A new window
-  is legitimately absent; a dead collector leaves a well-formed stale payload that says nothing.
 
 ## agent dispatch
 🔴 **Current STATUS of the loop lives in `HANDOFF.md`, not here** — claims here have been superseded
