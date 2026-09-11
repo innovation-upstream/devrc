@@ -177,21 +177,32 @@ validated preset; treat unvalidated ones as starting points.
 🔴 **`rows[].metric` (prometheus) and `rows[].stream` (loki streams) are RENDERED
 DISPLAY STRINGS** — `{a=1, b=2}` — built for the human-readable table. They are
 NOT objects and they are NOT Prometheus's `data.result[].metric`, despite the
-name. Field-accessing them returns nothing, silently, while `row_count` sits in
-the same document saying the query matched.
+name. Field-accessing them RAISES — `jq` prints `Cannot index string with string`
+and exits **5**, Python raises `TypeError` — and under a suppressor (`.metric.job?`,
+`// empty`, a bare `except`) it instead returns nothing silently, while `row_count`
+sits in the same document saying the query matched.
 
 **`rows[].labels` is the label set as a `{str: str}` dict.** Use it:
 
 ```bash
-obs-read --cluster dpprod --backend prometheus --kind instant --json \
+OBS=~/workspace/devrc/scripts/obs-read   # NOT on $PATH — see the rule above
+$OBS --cluster dpprod --backend prometheus --json \
   --query 'kube_job_status_start_time{cluster="dp-1"}' \
   | jq -r '.rows[] | "\(.labels.job_name) \(.labels.namespace)"'
 ```
 
 Present on prometheus **vector** and **matrix** rows and on loki **matrix** and
-**streams** rows. Absent on prometheus **scalar**/**string** results, which have
-no label set at all — so read it with `.get("labels", {})` / `.labels? // {}`
-rather than assuming every row carries one.
+**streams** rows. Absent on prometheus **scalar**/**string** results and on ALL
+**pyroscope** rows (`{function, self_samples, self_pct}` — a flamebearer has no
+label set) — so read it with `.get("labels", {})` / `.labels? // {}` rather than
+assuming every row carries one.
+
+⚠ **Cost, measured, so it is a choice and not a surprise:** each label set is
+serialised twice — rendered into `metric`/`stream` for the table, structured into
+`labels` for parsers — so `--json` is roughly **2x** larger on a label-rich query
+(measured on production loki: 235 streams, 141,096 -> 289,342 bytes). The
+duplication is what keeps `metric`/`stream` byte-identical for existing readers.
+Pipe through `jq` and select what you need; do not cat a wide `--json` raw.
 
 🔴 **Read `row_count` and `matched_nothing` before concluding anything from an
 empty parse.** A zero from your own parser is a fact about your parser; those two
