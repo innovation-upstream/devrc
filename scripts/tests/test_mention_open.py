@@ -412,6 +412,108 @@ HOST_STATE_CONSTANTS = {
 }
 
 
+def _host_state_constants(source: str) -> set[str]:
+    """Every module-level constant in `source` that points at a file under the
+    mention-open config directory.
+
+    🔴 FIVE SPELLINGS THIS USED TO MISS SILENTLY, each measured by a round-2
+    audit against a planted constant in the real handler source:
+
+      * `X: Path = …`   — `ast.AnnAssign`, not `ast.Assign`;
+      * `X, Y = …, …`   — a tuple target, not an `ast.Name`;
+      * an assignment inside a module-level `if` or `try` — `tree.body` only
+        sees the top level;
+      * a lowercase name — `isupper()` is itself a spelling pin, which is the
+        very thing this function was rewritten to stop relying on.
+
+    A missed spelling means an unredirected host-state file: a test reads — or,
+    since `record_pick`, WRITES — the operator's own 0600 data. So the walk is
+    over `Assign` AND `AnnAssign`, recursively through module-level `If`/`Try`/
+    `With` bodies (never into a function or class, where a local of the same
+    name is not a module constant), over flattened tuple/list targets, and with
+    no constraint on the name's case.
+
+    ⚠ THE TEST FOR *THIS* FUNCTION IS `test_the_host_state_DISCOVERY_sees_every_
+    spelling`, which plants each of the five in turn. A discovery nobody has
+    watched find something is not a discovery.
+    """
+    tree = ast.parse(source)
+
+    def statements(body):
+        for node in body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                yield node
+            elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                yield from statements(node.body)
+                yield from statements(getattr(node, "orelse", []))
+                yield from statements(getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    yield from statements(handler.body)
+
+    def targets(node):
+        raw = ([node.target] if isinstance(node, ast.AnnAssign)
+               else list(node.targets))
+        while raw:
+            tgt = raw.pop()
+            if isinstance(tgt, (ast.Tuple, ast.List)):
+                raw.extend(tgt.elts)
+            elif isinstance(tgt, ast.Name):
+                yield tgt.id
+
+    found: set[str] = set()
+    for node in statements(tree.body):
+        if node.value is None:                      # a bare `X: Path` annotation
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if "mention-open" not in segment:
+            continue
+        # …AND it must BUILD A PATH. `PICKER_CLASS = "float,mention-open"` is
+        # the i3 window class and names the directory only by coincidence of
+        # spelling — a bare string constant is not a file to redirect. The two
+        # shapes that ARE are a `Path(...)` call and a `/` join.
+        if not any(
+            (isinstance(n, ast.Call)
+             and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+             == "Path")
+            or (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div))
+            for n in ast.walk(node.value)
+        ):
+            continue
+        found.update(targets(node))
+    return found
+
+
+@pytest.mark.parametrize("planted,name", [
+    ('SPOOL_PATH = Path.home() / ".config" / "mention-open" / "spool.jsonl"',
+     "SPOOL_PATH"),
+    ('SPOOL_PATH: Path = Path.home() / ".config" / "mention-open" / "s.jsonl"',
+     "SPOOL_PATH"),
+    ('SPOOL_PATH, _OTHER = Path("/x/mention-open/s.jsonl"), 1', "SPOOL_PATH"),
+    ('if True:\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('try:\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")\nexcept OSError:\n'
+     '    SPOOL_PATH = Path("/y/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('spool_path = Path("/x/mention-open/s.jsonl")', "spool_path"),
+])
+def test_the_host_state_DISCOVERY_sees_every_spelling(planted, name):
+    """🔴 THE POSITIVE CONTROL ON THE LEDGER'S DISCOVERY, and every one of these
+    six was measured SILENTLY MISSED by its first `ast` version. A ledger is only
+    as two-way as the thing that enumerates the left-hand side: a spelling it
+    cannot see is an unredirected host-state file, which since `record_pick`
+    means a test WRITING the operator's own data."""
+    source = HANDLER.read_text() + "\n\n" + planted + "\n"
+    assert name in _host_state_constants(source), (
+        f"the discovery is blind to this spelling:\n{planted}")
+
+
+def test_the_host_state_discovery_does_NOT_fire_on_a_non_path():
+    """The negative control: a discovery that flagged everything would satisfy
+    all six cases above and be useless. `PICKER_CLASS` names the directory and
+    is an i3 window class, not a file."""
+    found = _host_state_constants(HANDLER.read_text())
+    assert "PICKER_CLASS" not in found, found
+    assert found, "POSITIVE CONTROL: the discovery found nothing at all"
+
+
 def test_the_HOST_STATE_path_ledger_is_pinned_two_way(tmp_path):
     """🔴 GROWS-OR-SHRINKS, AND IT COVERS BOTH REDIRECT MECHANISMS.
 
@@ -451,34 +553,10 @@ def test_the_HOST_STATE_path_ledger_is_pinned_two_way(tmp_path):
     #
     # ⚠ `ast`, NOT A REGEX — and the regex was tried. A pattern that had to span
     # a multi-line assignment backtracked badly enough to hang the run; walking
-    # the module's top-level `Assign` nodes and reading each one's own source
-    # segment asks the same question structurally, and cannot be fooled by
-    # a `mention-open` mention inside a nested function or a docstring.
-    source = HANDLER.read_text()
-    tree = ast.parse(source)
-    in_source = set()
-    for node in tree.body:                       # module level only
-        if not isinstance(node, ast.Assign):
-            continue
-        segment = ast.get_source_segment(source, node) or ""
-        if "mention-open" not in segment:
-            continue
-        # …AND it must BUILD A PATH. `PICKER_CLASS = "float,mention-open"` is
-        # the i3 window class and names the directory only by coincidence of
-        # spelling — a bare string constant is not a file to redirect. The two
-        # shapes that ARE are a `Path(...)` call and a `/` join, and this asks
-        # for either, anywhere in the value.
-        if not any(
-            (isinstance(n, ast.Call)
-             and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
-             == "Path")
-            or (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div))
-            for n in ast.walk(node.value)
-        ):
-            continue
-        for tgt in node.targets:
-            if isinstance(tgt, ast.Name) and tgt.id.isupper():
-                in_source.add(tgt.id)
+    # the assignment nodes and reading each one's own source segment asks the
+    # same question structurally, and cannot be fooled by a `mention-open`
+    # mention inside a nested function or a docstring.
+    in_source = _host_state_constants(HANDLER.read_text())
     assert in_source == set(HOST_STATE_CONSTANTS), (
         f"the host-state path ledger MOVED: the handler declares {sorted(in_source)}, "
         f"the ledger names {sorted(HOST_STATE_CONSTANTS)}. Every one of these "
@@ -4929,23 +5007,32 @@ def test_the_DISTANCE_term_is_INERT_outside_PLAUSIBLE():
     every other test here because no fixture had TWO rows in the same
     non-PLAUSIBLE class with different `max_ref` — which is exactly the gap.
 
-    🔴 THE FIXTURE IS BUILT SO ALL THREE CANDIDATE ORDERS DISAGREE: alphabetical
-    is near/far/mid, distance-ascending (the mutant) is far/mid/near, and the
-    correct answer — stable, i.e. incoming — is near/far/mid. A fixture where
-    two of those coincide could not tell the mutant from the fix."""
-    universe = ["acme/near", "acme/far", "acme/mid"]   # deliberately NOT sorted
-    ranges = {"acme/near": 1290, "acme/far": 5, "acme/mid": 400}
+    🔴 THE FIXTURE IS BUILT SO ALL THREE CANDIDATE ORDERS DISAGREE — and the
+    first version of this docstring CLAIMED that while the fixture did not have
+    it. A round-2 audit measured `acme/near, acme/far, acme/mid`: alphabetical
+    came out `far, mid, near` and the mutant came out `far, mid, near` too,
+    identical. The test still killed the mutant it names, but it could not have
+    separated that mutant from the ALPHABETISING one `order_universe`'s own
+    docstring warns about. The names below are prefixed so the three genuinely
+    differ, and the three-way disagreement is now ASSERTED rather than asserted
+    about."""
+    universe = ["b/near", "a/far", "c/mid"]            # deliberately NOT sorted
+    ranges = {"b/near": 1290, "a/far": 5, "c/mid": 400}
     got = MO.order_universe(universe, "1291", ranges)
     assert all(MO.plausibility_class("1291", ranges[r]) == MO.CLASS_BELOW
                for r in universe), "POSITIVE CONTROL: these are not all BELOW"
     assert got == universe, (
         f"BELOW rows were reordered by the distance term, which is negative "
         f"there and therefore ranks them WORST-FIRST: {got}")
-    # …and the mutant's order is asserted to be DIFFERENT, so this test cannot
-    # pass by the two happening to coincide.
-    mutant_order = sorted(universe, key=lambda r: ranges[r] - 1291)
-    assert mutant_order != universe, (
-        f"the fixture no longer distinguishes the mutant: {mutant_order}")
+    # 🔴 THE THREE ORDERS, ASSERTED PAIRWISE DISTINCT. Without this the test
+    # passes against an alphabetising sort whenever alphabetical happens to
+    # equal the incoming order — which is exactly how the previous fixture's
+    # claim became false without anything going red.
+    alphabetical = sorted(universe, key=str.lower)
+    mutant = sorted(universe, key=lambda r: ranges[r] - 1291)
+    assert len({tuple(universe), tuple(alphabetical), tuple(mutant)}) == 3, (
+        f"the fixture's three candidate orders are not pairwise distinct — "
+        f"incoming={universe} alphabetical={alphabetical} mutant={mutant}")
 
 
 def test_a_LOW_number_reorders_the_SAME_rows_DIFFERENTLY():
@@ -5253,22 +5340,106 @@ def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(tmp_path):
     assert not (tmp_path / "picks.jsonl.tmp").exists()
 
 
-def test_a_FAILED_compaction_still_RECORDS_the_pick(tmp_path, monkeypatch):
-    """Compaction runs after the row is durable, so its failure must cost a
-    large file, never the operator's pick."""
+def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path):
+    """🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS — and without
+    the lock a row appended between the read and the `replace` is silently LOST.
+    A round-2 audit measured exactly that ("concurrent row survived? False").
+
+    The lock is `LOCK_NB` and SKIPS rather than waits, because blocking here
+    would cost the click while losing a row only costs a little learning. This
+    drives a REAL second process holding a REAL flock, because the claim is
+    about two processes and an in-process fake could not make it.
+
+    ⚠ The `.tmp` name is PID-unique as well, so two compactions cannot share one
+    buffer even on a filesystem that ignores the advisory lock. That belt is
+    asserted at the end: nothing is left behind."""
+    log = tmp_path / "picks.jsonl"
+    rows = [{"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1}
+            for i in range(MO.PICKS_COMPACT_AT + 10)]
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl,os,sys,time;"
+         "fd=os.open(sys.argv[1], os.O_RDONLY);"
+         "fcntl.flock(fd, fcntl.LOCK_EX);"
+         "print('held', flush=True); time.sleep(6)", str(log)],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held", "the holder never ran"
+        before = len(log.read_text().splitlines())
+        MO._compact_picks(log)
+        assert len(log.read_text().splitlines()) == before, (
+            "compaction ran while another writer held the lock — a row "
+            "appended in that window is silently lost")
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+        if holder.stdout:
+            holder.stdout.close()
+    # POSITIVE CONTROL: with the lock free it DOES compact, so the assertion
+    # above is about the lock and not about compaction being broken.
+    MO._compact_picks(log)
+    assert len(log.read_text().splitlines()) == MO.PICKS_MAX_ROWS
+    # ⚠ THE EXACT TMP PATH, NOT A GLOB OR A LISTING. Two reasons: the autouse
+    # redirect writes its own fixture files into this same `tmp_path`, so a bare
+    # listing is not a statement about compaction at all; and a `*.jsonl` glob
+    # here registers as a new walk site against
+    # `test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_pinned_two_way`
+    # — measured, it went red. The tmp name is PID-unique by construction, and
+    # this process is the one that compacted.
+    leftover = tmp_path / f"picks.jsonl.{os.getpid()}.tmp"
+    assert not leftover.exists(), f"a .tmp file outlived the compaction: {leftover}"
+
+
+def test_a_RAISING_compaction_neither_LOSES_the_pick_nor_ESCAPES(tmp_path,
+                                                                  monkeypatch):
+    """🔴 THREE CLAIMS, AND THE FIRST VERSION OF THIS TEST PINNED THE OPPOSITE
+    OF ONE OF THEM. It wrapped the call in `pytest.raises(AssertionError)` —
+    asserting that `record_pick` PROPAGATES — while `record_pick`'s own
+    docstring says "IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE OPEN". A
+    round-2 audit caught it: a test made to pass for a new wrong reason, and the
+    escape it pinned would have skipped `open_url` entirely, turning the click
+    into "mention-open failed" with no browser.
+
+    So: the row is DURABLE before compaction runs, the raise does NOT escape,
+    and the return is still True — a compaction failure costs a large file, not
+    the operator's pick."""
     p = tmp_path / "picks.jsonl"
     rows = [{"t": _T0, "repo": f"o/r{i}", "n": i + 1}
             for i in range(MO.PICKS_COMPACT_AT + 5)]
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    monkeypatch.setattr(MO, "_compact_picks",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError("must not propagate")))
-    # The real function swallows; this proves `record_pick` calls it AFTER the
-    # append, so a raising compaction cannot lose the row.
-    with pytest.raises(AssertionError):
-        MO.record_pick("o/kept", "9", p, now=_T0)
+    fired: list = []
+    monkeypatch.setattr(
+        MO, "_compact_picks",
+        lambda *a, **k: fired.append(1) or (_ for _ in ()).throw(
+            RuntimeError("compaction exploded")))
+    assert MO.record_pick("o/kept", "9", p, now=_T0) is True, (
+        "a failed compaction flipped the return to False — the pick WAS "
+        "recorded")
+    assert fired, "POSITIVE CONTROL: compaction was never attempted"
     assert json.loads(p.read_text().splitlines()[-1])["repo"] == "o/kept", (
         "the row was not durable before compaction ran")
+
+
+def test_a_RAISING_compaction_does_not_cost_the_OPEN(monkeypatch):
+    """The behavioural half of the test above, at the call site that matters:
+    `record_pick` runs immediately before `return open_url(url)`."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/one"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "_compact_picks",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("compaction exploded")))
+    opened: list = []
+    said: list = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: said.append(a))
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": next(x["url"] for x in c
+                                                if "acme/one" in x["url"]))
+    assert MO.guarded_main(["#1291"]) == 0
+    assert opened, f"the click opened NOTHING because compaction raised: {said}"
+    assert not said, f"the click reported a failure: {said}"
 
 
 def test_record_pick_NARROWS_a_pre_existing_parent_that_others_can_read(tmp_path):
@@ -5310,6 +5481,66 @@ def test_record_pick_does_NOT_WIDEN_a_parent_the_operator_narrowed(tmp_path):
     os.chmod(e, 0o700)
     assert MO.record_pick("acme/widget", "12", e / "picks.jsonl")
     assert oct(os.stat(e).st_mode)[-3:] == "700"
+
+
+@pytest.mark.parametrize("start,keeps", [
+    (0o2755, 0o2000),   # setgid — common on shared dirs, and not ours to clear
+    (0o1777, 0o1000),   # sticky
+    (0o4755, 0o4000),   # setuid
+])
+def test_narrowing_a_parent_PRESERVES_setuid_setgid_and_sticky(tmp_path,
+                                                               start, keeps):
+    """🔴 THE BITS A `& 0o777` MASK SILENTLY DESTROYS. A round-2 audit measured
+    a `0o2755` parent coming back `0o0700` and a `0o1777` one likewise: the
+    narrowing read only the low nine bits, so re-writing them cleared everything
+    above. Those bits are not ours to clear — the rule is "nobody ELSE may read
+    this", which is a statement about group and other alone.
+
+    ⚠ ASSERTED ON THE FULL `st_mode & 0o7777`, because the sibling test above
+    compares `oct(...)[-3:]` and is therefore structurally blind to exactly this
+    — which is why it did not catch it."""
+    d = tmp_path / f"mode{start:o}"
+    d.mkdir()
+    os.chmod(d, start)
+    if os.stat(d).st_mode & 0o7000 != keeps:
+        pytest.skip(f"this filesystem did not honour {start:o}")
+    MO.narrow_dir(d)
+    mode = os.stat(d).st_mode & 0o7777
+    assert mode & 0o077 == 0, f"group/other survived: {mode:o}"
+    assert mode & 0o7000 == keeps, (
+        f"narrowing destroyed a non-permission bit: {start:o} -> {mode:o}")
+    assert mode & 0o700 == start & 0o700, (
+        f"owner bits changed: {start:o} -> {mode:o}")
+
+
+def test_a_parent_this_tool_CANNOT_chmod_does_not_cost_the_PICK(tmp_path,
+                                                                monkeypatch):
+    """🔴 A REGRESSION THE NARROWING ITSELF INTRODUCED, and it is reachable
+    through a redirected `MENTION_OPEN_PICKS`. The chmod started out inside the
+    same `try` as the append, so an `EPERM` on a directory this tool does not
+    own — `/tmp`, say — propagated into `record_pick`'s handler and DROPPED THE
+    PICK, on a path that worked before the narrowing existed.
+
+    The write must still land; the narrowing is defence in depth, not a
+    precondition."""
+    d = tmp_path / "not-ours"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    monkeypatch.setattr(MO.os, "chmod", _raise_eperm(MO.os.chmod, d))
+    assert MO.record_pick("acme/widget", "12", d / "picks.jsonl") is True, (
+        "an un-chmod-able parent dropped the pick")
+    assert (d / "picks.jsonl").exists()
+
+
+def _raise_eperm(real, only_for: Path):
+    """`os.chmod` that refuses for one directory and behaves for everything
+    else — so the file's own 0600 still happens and the test is about the
+    PARENT."""
+    def chmod(p, mode, *a, **k):
+        if str(p) == str(only_for):
+            raise PermissionError("not ours to chmod")
+        return real(p, mode, *a, **k)
+    return chmod
 
 
 def test_record_pick_RE_APPLIES_the_mode_to_a_file_it_did_NOT_create(tmp_path):

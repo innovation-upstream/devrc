@@ -778,6 +778,37 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
     return sorted(universe, key=key)
 
 
+def narrow_dir(directory: Path) -> None:
+    """Remove GROUP and OTHER access from `directory`, preserving every other
+    bit. Best-effort and silent.
+
+    🔴 STRIP, NEVER "SET 0700" — the rule is that nobody ELSE may read this
+    directory, not that it must have one exact mode. A flat `chmod(0o700)`
+    WIDENS as well as narrows, which is worse than the hole it closes: it
+    re-grants owner-write to a directory the operator deliberately made
+    read-only, and it measurably made
+    `test_record_pick_CANNOT_RAISE_when_the_log_is_UNWRITABLE` pass by removing
+    the very condition that test exists to exercise.
+
+    🔴 `& 0o7777`, NOT `& 0o777` — a round-2 audit measured the narrower mask
+    DESTROYING setuid/setgid/sticky: a `0o2755` parent came back `0o0700` and a
+    `0o1777` one likewise. Those bits are not ours to clear; only group and
+    other are.
+
+    🔴 ITS OWN `try`, SO IT CANNOT COST THE WRITE. This is defence in depth on a
+    directory the caller may not own — a redirected `MENTION_OPEN_PICKS` can
+    point anywhere, and `/tmp` is not chmod-able by us. Before this guard the
+    `EPERM` propagated into `record_pick`'s handler and DROPPED THE PICK, which
+    is a regression against a path that worked before the narrowing existed.
+    """
+    try:
+        mode = os.stat(directory).st_mode & 0o7777
+        if mode & 0o077:
+            os.chmod(directory, mode & ~0o077)
+    except OSError:
+        return
+
+
 def record_pick(repo: str, num: str, path: Path | None = None,
                 now: float | None = None) -> bool:
     """Append one `{"t","repo","n"}` line to the pick log. True if it landed.
@@ -802,9 +833,10 @@ def record_pick(repo: str, num: str, path: Path | None = None,
     🔴 IT COMPACTS, BECAUSE NOTHING ELSE DOES. `record_pick` only appends and
     the age cap is applied on READ, so without this the log grows without bound
     — an audit found `PICKS_MAX_ROWS`' comment claiming otherwise. Past
-    `PICKS_COMPACT_AT` the tail is rewritten atomically (tmp-then-`replace`,
-    the same shape `regen-known-repos.py` uses), so a reader that opens the
-    file mid-compaction sees the old content or the new, never a truncated one.
+    `PICKS_COMPACT_AT` the tail is rewritten tmp-then-`replace`, so a reader
+    that opens the file mid-compaction sees the old content or the new, never a
+    truncated one. ⚠ THAT LAST CLAIM IS ABOUT READERS ONLY; concurrent WRITERS
+    are handled separately and best-effort — see `_compact_picks`.
     ⚠ A FAILED COMPACTION IS NOT A FAILED WRITE: the row is already on disk and
     the operator's pick is recorded, so it returns True and the file is simply
     trimmed on some later pick.
@@ -826,42 +858,83 @@ def record_pick(repo: str, num: str, path: Path | None = None,
            "repo": repo, "n": n}
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # 🔴 STRIP GROUP/OTHER, NEVER "SET 0700" — the rule is that nobody else
-        # may read this directory, not that it must have one exact mode. A flat
-        # `chmod(0o700)` also WIDENS, which is worse than the hole it closes: it
-        # would silently re-grant owner-write to a directory the operator had
-        # deliberately made read-only, and it made
-        # `test_record_pick_CANNOT_RAISE_when_the_log_is_UNWRITABLE` pass by
-        # removing the very condition it tests. Owner bits are preserved.
-        parent_mode = os.stat(path.parent).st_mode & 0o777
-        if parent_mode & 0o077:
-            os.chmod(path.parent, parent_mode & ~0o077)
+        narrow_dir(path.parent)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
         os.chmod(path, 0o600)
     except OSError:
         return False
-    _compact_picks(path)
+    # 🔴 ITS OWN `try`, AND *NOT* INSIDE THE ONE ABOVE — TWO SEPARATE REASONS.
+    # Not inside: a compaction failure must not flip the return to False, since
+    # the row is already durable and the operator's pick IS recorded. Guarded at
+    # all: `record_pick` runs immediately before `return open_url(url)`, so
+    # anything escaping here skips the OPEN and `guarded_main` turns the click
+    # into "mention-open failed" with no browser — the same dead-click shape the
+    # `load_picks` decode fix closed one round earlier. `_compact_picks` catches
+    # its own OSError/ValueError today, so this is defence in depth against a
+    # future edit widening what it can raise.
+    try:
+        _compact_picks(path)
+    except Exception:  # noqa: BLE001 — see above; a pick must never cost a click
+        pass
     return True
 
 
 def _compact_picks(path: Path) -> None:
-    """Trim the pick log to its most recent `PICKS_MAX_ROWS` rows, atomically.
+    """Trim the pick log to its most recent `PICKS_MAX_ROWS` rows.
 
     Best-effort and SILENT on every failure: it runs after the row is already
     durable, so a full disk costs a large file rather than the pick. See
     `record_pick` and `PICKS_COMPACT_AT`.
+
+    🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS — AND THE FIRST
+    VERSION OF THIS WAS NOT SAFE FOR THAT. A round-2 audit measured a row
+    appended between the read and the `replace` being silently LOST, and both
+    writers using one fixed `picks.jsonl.tmp` name, so a truncate-then-write
+    could interleave and a mixed file be moved into place. Two fixes:
+      * an `flock` on the log across read→replace, so the two never overlap;
+      * a PID-unique tmp name, so even without the lock (a filesystem that does
+        not honour it, say) they cannot share one buffer.
+    ⚠ The lock is advisory and the exclusion is best-effort by design — losing a
+    pick row costs a little learning, and blocking a click would cost the click.
+    `LOCK_NB` therefore SKIPS compaction rather than waiting: the next pick
+    trims instead.
+
+    🔴 THE TMP FILE IS CREATED 0600, NOT CHMOD-ED AFTERWARDS. It holds up to
+    `PICKS_MAX_ROWS` private repository names, and `write_text` then `chmod`
+    leaves a window at the umask's mode (measured 0644). `os.open` with the mode
+    in the call has no window.
     """
+    import fcntl  # noqa: PLC0415 — only this path needs it
     try:
-        lines = path.read_text().splitlines()
-        if len(lines) <= PICKS_COMPACT_AT:
-            return
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n")
-        os.chmod(tmp, 0o600)
-        tmp.replace(path)
+        if len(path.read_text().splitlines()) <= PICKS_COMPACT_AT:
+            return                       # the cheap check, before any locking
     except (OSError, ValueError):
         return
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    lock_fd = -1
+    try:
+        lock_fd = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return                       # another click is compacting; leave it
+        lines = path.read_text().splitlines()
+        if len(lines) <= PICKS_COMPACT_AT:
+            return                       # it compacted while we waited
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n")
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        return
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def repo_of_github_url(url: str) -> str:

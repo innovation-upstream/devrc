@@ -197,6 +197,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "collector"))
 from mention_scan import OWNER_REPO_VALUE_RE as _OWNER_REPO_RE  # noqa: E402
 
 
+def narrow_dir(directory: Path) -> None:
+    """Remove GROUP and OTHER access from `directory`, preserving every other
+    bit. Best-effort and silent.
+
+    🔴 ALL FOUR WRITERS OF `~/.config/mention-open/` CALL THIS — the three here
+    and `record_pick` in `mention-open.py`. `Path.mkdir(mode=…, exist_ok=True)`
+    applies its mode ONLY at creation, so a pre-existing directory keeps
+    whatever mode it has; every one of these functions' docstrings said
+    "parent 0700" while leaving a `0755` parent at `0755`. Measured. And these
+    three run on the DAILY TIMER, i.e. usually long before any pick, so on a
+    host with a loose config dir the handler's own narrowing would not fire for
+    days.
+
+    🔴 STRIP, NEVER "SET 0700", AND MASK `0o7777` NOT `0o777`. A flat chmod also
+    WIDENS a directory the operator narrowed, and a nine-bit mask silently
+    destroys setuid/setgid/sticky. Both were measured on the sibling copy in
+    `mention-open.py`, whose docstring carries the numbers.
+
+    ⚠ TWO COPIES, ONE RULE, AND THAT IS DELIBERATE RATHER THAN AN OVERSIGHT.
+    `mention-open.py` imports NOTHING from this generator and vice versa — they
+    share only `mention_scan` — because the handler is a detached click path
+    that must not grow an import of a script carrying `gh` plumbing. The
+    duplication is pinned instead:
+    `test_the_two_narrow_dir_copies_are_the_SAME_RULE`.
+    """
+    try:
+        mode = os.stat(directory).st_mode & 0o7777
+        if mode & 0o077:
+            os.chmod(directory, mode & ~0o077)
+    except OSError:
+        return
+
+
 def parse_owner_repo(remote_url: str) -> str:
     """`owner/repo` from a git remote URL, else "". Mirrors mention-open.py."""
     url = (remote_url or "").strip()
@@ -437,19 +470,37 @@ def ranges_query(batch: list[str]) -> str:
     would manufacture exactly the false `IMPOSSIBLE` verdict the reader ranks
     last.
 
-    ⚠ DISCUSSIONS ARE IN THAT SEQUENCE TOO AND ARE DELIBERATELY NOT ASKED FOR.
-    MEASURED 2026-09-11 on four public repos with discussions enabled
-    (`vercel/next.js` 98550 vs 98580/98581, `astral-sh/ruff` 28504 vs
-    28519/28530, `vitejs/vite` 23457 vs 23470/23469): the newest discussion sits
-    interleaved just below the issue/PR head, which is the signature of ONE
-    shared counter. Including them would be WRONG FOR THIS PURPOSE, not merely
-    unnecessary: `mention-open.py` turns a chosen row into `/issues/<n>`, and
-    GitHub does not redirect that to a discussion — discussions live at
-    `/discussions/<n>`. Counting them would file a repo as PLAUSIBLE for a
-    number whose URL 404s, and a repo with ONLY discussions reports 0 and is
-    ranked last, which is the right answer for the same reason. So the sentence
-    above says "can open", not "has": those are different numbers and an
-    earlier draft conflated them.
+    ⚠ DISCUSSIONS SHARE THAT SEQUENCE AND ARE NOT ASKED FOR — AND THE REASON IS
+    COST, NOT CORRECTNESS. 🔴 AN EARLIER DRAFT OF THIS PARAGRAPH CLAIMED
+    OTHERWISE AND WAS FALSE IN THREE PLACES; it is written out because the file
+    already records the same class of error being corrected 400 lines above, on
+    2026-09-07, and it was committed again four days later.
+
+    What is TRUE, measured 2026-09-11 by GraphQL on three public repos with
+    discussions enabled: the newest discussion sits interleaved just below the
+    issue/PR head — `vercel/next.js` 98550 vs 98580/98581, `astral-sh/ruff`
+    28504 vs 28519/28530, `vitejs/vite` 23457 vs 23470/23469 — which is the
+    signature of ONE shared counter.
+
+    What the earlier draft asserted WITHOUT MEASURING, and what `curl -L`
+    actually answers:
+      * it said the handler builds `/issues/<n>`. It builds **`/pull/<n>`** —
+        `mention_scan.GITHUB_REF_URL`.
+      * it said GitHub does not redirect that to a discussion. It DOES:
+        `/pull/28504` → `/discussions/28504`, and `/issues/28504` likewise.
+      * it said such a number's URL 404s. It returns **200**. (Controls: a real
+        PR stays at `/pull/`, and `/pull/99999999` does 404.)
+
+    So omitting discussions cannot cause a wrong OPEN. What it causes is a mild
+    UNDER-ranking: a repo whose newest reference is a discussion reports a
+    slightly lower `max_ref`, and one with ONLY discussions reports 0 and is
+    ranked last though its URL would resolve. That is acceptable here because
+    the reader RANKS rather than filters (see `CLASS_IMPOSSIBLE` in
+    `mention-open.py`), because discussions are rare in this universe, and
+    because a third aliased list per repo is query cost for a case the ordering
+    already degrades gracefully on. It is a priced trade-off, not a guarantee —
+    and the sentence above says "can open" rather than "has" because those are
+    genuinely different numbers.
 
     ⚠ `orderBy: CREATED_AT DESC, first: 1` RATHER THAN `totalCount`. The count
     is how MANY, which is not the same number: a repo with 10 issues whose
@@ -588,6 +639,7 @@ def write_ranges(ranges: dict[str, int], path: Path) -> None:
     table and would silently fall back to an unordered picker.
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    narrow_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(ranges, indent=1, sort_keys=True) + "\n")
     os.chmod(tmp, 0o600)
@@ -603,6 +655,7 @@ def write_universe(universe: list[str], path: Path) -> None:
     empty universe, so a torn write would silently produce an empty picker.
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    narrow_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(universe, indent=1) + "\n")
     os.chmod(tmp, 0o600)
@@ -670,6 +723,7 @@ def read_local_repos(workspace: Path | None = None) -> dict[str, str]:
 def write_mapping(mapping: dict[str, str], path: Path) -> None:
     """Write 0600, parent 0700 — it names private repositories."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    narrow_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(mapping, indent=1, sort_keys=True) + "\n")
     os.chmod(tmp, 0o600)
@@ -755,11 +809,13 @@ def main(argv: list[str] | None = None) -> int:
     # ⚠ `except Exception`, DELIBERATELY BROAD AND DELIBERATELY NOT BARE — the
     # same posture as `mention-open.py`'s `guarded_main`. `KeyboardInterrupt`
     # and `SystemExit` derive from `BaseException` and must still terminate.
+    wrote_ranges = False
     if not args.no_ranges:
         try:
             ranges = build_ranges(universe, read_api_ranges(universe))
             if ranges:
                 write_ranges(ranges, args.ranges_path)
+                wrote_ranges = True
                 zero = sum(1 for v in ranges.values() if v == 0)
                 # 🔴 BOTH NUMBERS, ALWAYS. "answered 340" alone is the
                 # silent-zero shape: it is indistinguishable from a leg that
@@ -780,11 +836,20 @@ def main(argv: list[str] | None = None) -> int:
                       f"handler degrades to an unordered picker)",
                       file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 — see the block comment above
-            print(f"range table NOT written — the ranges leg failed with "
-                  f"{type(exc).__name__}: {exc}; {args.ranges_path} left as it "
-                  f"was (the handler degrades to an unordered picker). This is "
-                  f"NOT a run failure: the mapping and the universe above were "
-                  f"written", file=sys.stderr)
+            # ⚠ `wrote_ranges` IS READ HERE, NOT ASSUMED. This handler used to
+            # say "NOT written" unconditionally, which is FALSE for anything
+            # that raises AFTER `write_ranges` succeeded — a `BrokenPipeError`
+            # from the success `print` itself (an `OSError`, e.g.
+            # `regen-known-repos.py | head -1`) is the reachable one. Reporting
+            # a written table as unwritten is the same class of wrong claim as
+            # the silent zero this generator is written against.
+            what = ("was written, but the leg then failed"
+                    if wrote_ranges else "was NOT written")
+            print(f"range table {what} — {type(exc).__name__}: {exc}; "
+                  f"{args.ranges_path} (the handler degrades to an unordered "
+                  f"picker if it is stale). This is NOT a run failure: the "
+                  f"mapping and the universe above were written",
+                  file=sys.stderr)
     return 0
 
 

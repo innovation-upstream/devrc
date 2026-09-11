@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,26 @@ def looks_like_a_repo_range_table(text: str) -> int:
     return best
 
 
+# The pick log's row shape, and its OWN threshold — deliberately not
+# `MAPPING_KEY_THRESHOLD`.
+#
+# 🔴 THAT CONSTANT'S JUSTIFICATION DOES NOT TRANSFER, which is why borrowing it
+# was a finding rather than a tidy reuse. Its block argues "THE NUMBER IS NOT
+# THE GUARD — THE SHAPE IS", measured over 562 published files, about **20
+# distinct keys inside ONE dict literal**. That is a statement about dict
+# literals; a ROW COUNT over a far weaker predicate inherits none of it.
+#
+# 🔴 AND THE NUMBER IS LOW *BECAUSE* THE SHAPE IS NOW TIGHT. A row must have
+# EXACTLY the three keys `record_pick` writes, a value that IS an `owner/repo`,
+# a reference number in `\\d{1,5}`, and an epoch-shaped timestamp. Five such
+# lines in one file is not a coincidence any ordinary artefact produces —
+# measured 0 across all 582 tracked files — so the threshold buys coverage of a
+# SHORT pick log rather than headroom against false positives. A 19-row log used
+# to pass; five rows is a much smaller hole.
+PICK_ROW_KEYS = frozenset({"n", "repo", "t"})
+PICK_LOG_ROW_THRESHOLD = 5
+
+
 def looks_like_a_pick_log(text: str) -> int:
     """How many ROWS of a JSON-LINES document have a PICK-LOG FINGERPRINT: an
     object carrying a bare `owner/repo` string value AND a number.
@@ -279,15 +300,30 @@ def looks_like_a_pick_log(text: str) -> int:
     A line that is not a JSON object is skipped rather than failing the file —
     the real artefact is append-only and can carry one torn last line.
 
-    ⚠ IT LOOKS AT ANY DEPTH IN EACH ROW, not at today's `repo`/`n` field names.
-    A guard keyed on those would be walked past by tomorrow's rename, and the
-    hazard is the NAMES being in the tree, not which key holds them.
+    🔴 IT KEYS ON THE ROW'S EXACT KEY SET, AND THAT IS A RETREAT FROM A WIDER
+    FINGERPRINT THAT WAS MEASURED TOO WIDE. The first version asked only for "a
+    bare `owner/repo` value AND any number", and `_FULL_NAME_RE` matches any
+    one-level path — so a round-2 audit measured it firing on ordinary JSONL,
+    reproduced here: a lint report `{"file": "nix/home.nix", "line": i, …}`
+    scored 40, a telemetry row `{"ts": …, "cwd": "scripts/collector",
+    "dur_ms": 12}` scored 40, `{"id": i, "path": "docs/LAYOUT.md"}` scored 25, a
+    route log 30 — all against a threshold of 20. (Zero LIVE false positives in
+    the 582 tracked files, so the hazard was the next ordinary `.jsonl` somebody
+    adds, not today's tree.)
 
-    ⚠ THE `owner/repo` MATCH IS WHOLE-STRING, which is what keeps ordinary
-    transcripts out: a line of prose mentioning a repo is not a value that IS
-    one. The paired NUMBER is the second half — a pick is a repository AND a
-    reference, and requiring both is what separates this from any JSONL that
-    happens to carry a path-shaped value.
+    ⚠ SHAPE ALONE CANNOT SEPARATE THEM, AND SAYING SO IS HONEST RATHER THAN
+    DEFEATIST: a telemetry row carrying an epoch, a path and a small integer is
+    structurally ISOMORPHIC to a pick row. So the discriminator is the key set,
+    which is a narrower claim and is defensible only because it is BOUND TO THE
+    WRITER — `test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES`
+    loads `mention-open.py` and asserts the two agree, so renaming a field in
+    the writer reddens the suite instead of silently blinding this guard. That
+    is the trade the first version was trying to avoid by ignoring field names;
+    it is payable only with the binding test, which is why the two ship
+    together.
+
+    ⚠ RESIDUAL, STATED: a pick log shorter than `PICK_LOG_ROW_THRESHOLD` still
+    passes. The threshold is low precisely to shrink that gap.
     """
     rows = 0
     for line in text.splitlines():
@@ -298,22 +334,18 @@ def looks_like_a_pick_log(text: str) -> int:
             doc = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(doc, dict):
+        if not isinstance(doc, dict) or set(doc) != PICK_ROW_KEYS:
             continue
-        has_repo = has_number = False
-        stack = [doc]
-        while stack:
-            node = stack.pop()
-            if isinstance(node, dict):
-                stack.extend(node.values())
-            elif isinstance(node, list):
-                stack.extend(node)
-            elif isinstance(node, str) and _FULL_NAME_RE.match(node):
-                has_repo = True
-            elif isinstance(node, (int, float)) and not isinstance(node, bool):
-                has_number = True
-        if has_repo and has_number:
-            rows += 1
+        repo, num, when = doc.get("repo"), doc.get("n"), doc.get("t")
+        if not (isinstance(repo, str) and _FULL_NAME_RE.match(repo)):
+            continue
+        if not (isinstance(num, int) and not isinstance(num, bool)
+                and 0 < num <= 99999):
+            continue
+        if not (isinstance(when, (int, float)) and not isinstance(when, bool)
+                and when >= 1_000_000_000):          # epoch-shaped
+            continue
+        rows += 1
     return rows
 
 
@@ -486,10 +518,14 @@ def disclosure_offenders(files, root: Path) -> list[str]:
             offenders.append(
                 f"{path.relative_to(root)} ({ranged} repo keys in a range table)")
             continue
+        # ⚠ ITS OWN THRESHOLD — see `PICK_LOG_ROW_THRESHOLD`. This one counts
+        # ROWS matching a tight fingerprint, not distinct keys in a dict
+        # literal, and `MAPPING_KEY_THRESHOLD`'s measured justification is about
+        # the latter.
         picked = looks_like_a_pick_log(text)
-        if picked >= MAPPING_KEY_THRESHOLD:
+        if picked >= PICK_LOG_ROW_THRESHOLD:
             offenders.append(
-                f"{path.relative_to(root)} ({picked} repo names in a pick log)")
+                f"{path.relative_to(root)} ({picked} pick-log rows)")
     return offenders
 
 
@@ -586,7 +622,7 @@ def test_the_PICK_LOG_detector_FIRES_and_EVERY_OTHER_DETECTOR_is_BLIND_to_it():
     log = "\n".join(json.dumps({"n": 1200 + i, "repo": r, "t": 1757000000 + i},
                                sort_keys=True)
                     for i, r in enumerate(_synthetic_repos())) + "\n"
-    assert looks_like_a_pick_log(log) >= MAPPING_KEY_THRESHOLD
+    assert looks_like_a_pick_log(log) >= PICK_LOG_ROW_THRESHOLD
     for blind, why in ((looks_like_a_repo_mapping, "mapping"),
                        (looks_like_a_repo_universe, "universe"),
                        (looks_like_a_repo_range_table, "range table")):
@@ -601,24 +637,82 @@ def test_the_PICK_LOG_detector_FIRES_and_EVERY_OTHER_DETECTOR_is_BLIND_to_it():
     assert looks_like_a_repo_mapping(longer) == 1, (
         "the mapping detector is no longer capped at one JSONL line — re-read "
         "this test's docstring before changing it")
-    # …and it does NOT fire on an ordinary JSONL transcript that merely mentions
-    # a couple of repos, which is the shape every fixture in this tree has.
-    chatty = "\n".join(json.dumps({"text": "see acme/widget and o/b", "i": i})
-                       for i in range(50))
-    assert looks_like_a_pick_log(chatty) < MAPPING_KEY_THRESHOLD, (
-        "a prose mention is not a value that IS an owner/repo — the "
-        "whole-string match is what keeps transcripts out")
-
-    # 🔴 THE GAP THE ROW FINGERPRINT CLOSES, ASSERTED. A real log records the
+    # 🔴 THE GAP THE ROW COUNT CLOSES, ASSERTED. A real log records the
     # operator's picking diversity, not the universe size: 60 picks across
     # THREE repositories is a complete disclosure of those three and would have
     # scored 3 under the distinct-name count this replaced.
     narrow = "\n".join(
         json.dumps({"n": 1200 + i, "repo": f"gardenersguild/Trowelcast{i % 3}",
                     "t": 1757000000 + i}) for i in range(60))
-    assert looks_like_a_pick_log(narrow) >= MAPPING_KEY_THRESHOLD, (
+    assert looks_like_a_pick_log(narrow) >= PICK_LOG_ROW_THRESHOLD, (
         "a pick log with few DISTINCT repos is still a pick log — this is the "
         "case the distinct-name count could not see")
+
+
+@pytest.mark.parametrize("rows,why", [
+    ([{"text": "see acme/widget and o/b", "i": i} for i in range(50)],
+     "prose mentioning repos — a value that is not ITSELF an owner/repo"),
+    ([{"file": "nix/home.nix", "line": i, "msg": "x"} for i in range(40)],
+     "a LINT REPORT — a path-shaped value plus a number"),
+    ([{"ts": 1757000000 + i, "cwd": "scripts/collector", "dur_ms": 12}
+      for i in range(40)],
+     "TELEMETRY — an epoch, a path and a small int, structurally isomorphic "
+     "to a pick row and separable only by the key set"),
+    ([{"id": i, "path": "docs/LAYOUT.md"} for i in range(25)],
+     "an id+path index"),
+    ([{"n": i, "dest": "media/inbox", "bytes": 4096} for i in range(30)],
+     "a ROUTE LOG"),
+    ([{"n": 1200 + i, "repo": f"o/r{i}", "t": 1757000000 + i, "extra": 1}
+      for i in range(40)],
+     "a FOURTH key — not the shape record_pick writes"),
+])
+def test_the_pick_log_detector_does_NOT_fire_on_ordinary_JSONL(rows, why):
+    """🔴 SIX NEGATIVE CONTROLS, AND FIVE OF THEM WERE MEASURED FIRING. The
+    first fingerprint asked only for "a bare `owner/repo` value AND any number",
+    and `_FULL_NAME_RE` matches any one-level path — so a round-2 audit scored
+    the lint report at 40, telemetry at 40, the id+path index at 25 and the
+    route log at 30, all against a threshold of 20.
+
+    A guard that fires on ordinary files is a guard everyone learns to override,
+    which is the argument `looks_like_a_repo_universe`'s own docstring makes
+    about the nine false accusations its first version produced.
+
+    ⚠ THE TELEMETRY CASE IS THE IMPORTANT ONE: an epoch, a path and a small
+    integer IS a pick row structurally. Only the key set separates them, which
+    is why this detector keys on it and why that key set is bound to the writer
+    by the test below."""
+    blob = "\n".join(json.dumps(r) for r in rows) + "\n"
+    assert looks_like_a_pick_log(blob) < PICK_LOG_ROW_THRESHOLD, (
+        f"the pick-log detector fires on {why} — scored "
+        f"{looks_like_a_pick_log(blob)}")
+
+
+def test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES(tmp_path):
+    """🔴 THE BINDING THAT MAKES KEYING ON FIELD NAMES DEFENSIBLE. Keying a
+    disclosure guard on `{"n","repo","t"}` is walkable by a rename — unless the
+    rename is loud. This loads the REAL writer, has it write a REAL row, and
+    asserts the detector's key set is exactly what came out.
+
+    So `record_pick` changing a field name reddens this instead of silently
+    blinding the sweep. It is the only reason `looks_like_a_pick_log` is allowed
+    to ask about key names at all; without it the guard would be a spelling pin
+    with nothing holding the spelling."""
+    spec = importlib.util.spec_from_file_location(
+        "mention_open_for_fingerprint", ROOT / "scripts" / "mention-open.py")
+    mo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mo)
+    log = tmp_path / "picks.jsonl"
+    assert mo.record_pick("gardenersguild/trowelcast", "1291", log)
+    written = json.loads(log.read_text().splitlines()[0])
+    assert set(written) == PICK_ROW_KEYS, (
+        f"record_pick now writes {sorted(written)}, but the disclosure "
+        f"detector looks for {sorted(PICK_ROW_KEYS)} — the guard has gone "
+        f"BLIND to the artefact it exists to catch. Update PICK_ROW_KEYS.")
+    # …and the real artefact really does trip the detector at the threshold.
+    many = "\n".join(log.read_text().strip()
+                     for _ in range(PICK_LOG_ROW_THRESHOLD)) + "\n"
+    assert looks_like_a_pick_log(many) >= PICK_LOG_ROW_THRESHOLD, (
+        "rows the REAL writer produced do not trip the detector")
 
 
 def test_the_sweep_actually_LOOKS_at_jsonl_files(tmp_path):
@@ -1387,15 +1481,17 @@ def test_the_ranges_query_asks_for_BOTH_issues_AND_pull_requests():
     # different number from the highest.
     assert "orderBy: {field: CREATED_AT, direction: DESC}" in q
     assert "totalCount" not in q
-    # 🔴 AND NOT DISCUSSIONS, WHICH SHARE THE SAME COUNTER. Measured — the
-    # newest discussion sits interleaved just below the issue/PR head. Asking
-    # for them would file a repo PLAUSIBLE for a number whose `/issues/<n>` URL
-    # 404s, because discussions live at `/discussions/<n>` and GitHub does not
-    # redirect. See `ranges_query`'s docstring for the four measurements.
+    # 🔴 AND NOT DISCUSSIONS, WHICH SHARE THE SAME COUNTER — a priced trade-off,
+    # NOT a correctness guarantee. ⚠ THIS ASSERTION'S MESSAGE USED TO CARRY A
+    # FALSE JUSTIFICATION ("a URL that 404s"); `/pull/<discussion-n>` in fact
+    # redirects to `/discussions/<n>` and returns 200. Omitting them costs a
+    # mild UNDER-ranking, never a wrong open. `ranges_query`'s docstring carries
+    # the measurements and the retraction.
     assert "discussions" not in q, (
-        "discussions share the number sequence but are NOT openable as "
-        "/issues/<n> — counting them manufactures a PLAUSIBLE verdict for a "
-        "URL that 404s")
+        "discussions share the number sequence, and omitting them is a priced "
+        "trade-off (query cost vs a mild under-ranking of a discussion-only "
+        "repo) — if you add them, update ranges_query's docstring, which "
+        "explains why they are left out")
 
 
 def test_NO_REPOSITORY_NAME_reaches_the_gh_child_ARGV():
@@ -1533,6 +1629,56 @@ def test_build_ranges_OMITS_a_repo_the_api_could_not_answer_for():
     assert RG.build_ranges(["o/a", "o/unanswered"], {"o/a": 5}) == {"o/a": 5}
 
 
+@pytest.mark.parametrize("writer,arg", [
+    ("write_mapping", {"a": "o/a"}),
+    ("write_universe", ["o/a"]),
+    ("write_ranges", {"o/a": 12}),
+])
+def test_EVERY_writer_narrows_a_pre_existing_parent(tmp_path, writer, arg):
+    """🔴 ALL THREE, BECAUSE ALL THREE CLAIMED IT AND NONE DID IT. Each
+    docstring says "parent 0700"; `Path.mkdir(mode=…, exist_ok=True)` applies
+    that ONLY at creation, so a round-2 audit measured a pre-existing `0755`
+    parent coming back `0755` from every one of them.
+
+    These run on the DAILY TIMER, usually long before any pick, so leaving the
+    narrowing to `mention-open.py`'s `record_pick` alone would let a loose
+    config dir holding PRIVATE repository names stay loose for days."""
+    d = tmp_path / "preexisting"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    getattr(RG, writer)(arg, d / "out.json")
+    assert oct(os.stat(d).st_mode)[-3:] == "700", (
+        f"{writer} left a group/world-readable parent as it found it")
+    assert oct(os.stat(d / "out.json").st_mode)[-3:] == "600"
+
+
+def test_the_two_narrow_dir_copies_are_the_SAME_RULE(tmp_path):
+    """🔴 A PREDICATE AT TWO SITES IS WRONG AT ONE OF THEM — so the two copies
+    of `narrow_dir` are pinned to agree BEHAVIOURALLY, over every interesting
+    starting mode, rather than by a text comparison that a reflow would break.
+
+    They are two copies on purpose: `mention-open.py` is a detached click path
+    and must not import a script that carries `gh` plumbing. That choice is
+    payable only with this test."""
+    spec = importlib.util.spec_from_file_location(
+        "mention_open_for_narrow", ROOT / "scripts" / "mention-open.py")
+    mo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mo)
+    for start in (0o755, 0o700, 0o500, 0o2755, 0o1777, 0o777, 0o750):
+        a, b = tmp_path / f"a{start:o}", tmp_path / f"b{start:o}"
+        for d in (a, b):
+            d.mkdir()
+            os.chmod(d, start)
+        RG.narrow_dir(a)
+        mo.narrow_dir(b)
+        ma = os.stat(a).st_mode & 0o7777
+        mb = os.stat(b).st_mode & 0o7777
+        assert ma == mb, (
+            f"the two narrow_dir copies DISAGREE on {start:o}: "
+            f"generator -> {ma:o}, handler -> {mb:o}")
+        assert ma & 0o077 == 0, f"{start:o} left group/other bits: {ma:o}"
+
+
 def test_write_ranges_is_0600_because_its_KEYS_name_private_repositories(tmp_path):
     """The mirror of the mapping's disclosure: here the private names are the
     KEYS. Same mode, same reason."""
@@ -1623,13 +1769,63 @@ def test_a_ranges_leg_that_RAISES_still_exits_ZERO_and_keeps_the_old_table(
     assert rc == 0, f"{why}: the run exited {rc}, which reddens the unit"
     assert json.loads(ranges.read_text()) == {"o/previous": 12}, why
     err = capsys.readouterr().err
-    assert "range table NOT written" in err, (
-        f"{why}: the failure was swallowed silently — {err!r}")
+    assert "range table was NOT written" in err, (
+        f"{why}: the failure was swallowed silently, or the report claims the "
+        f"table WAS written — {err!r}")
     assert type(exc).__name__ in err, (
         f"{why}: the report does not name the cause — {err!r}")
     assert (tmp_path / "m.json").exists() and (tmp_path / "u.json").exists(), (
         f"{why}: the mapping/universe did not land, so this test would pass "
         f"against a main() that skipped everything")
+
+
+def test_a_leg_that_fails_AFTER_writing_does_not_claim_it_was_NOT_written(
+        monkeypatch, tmp_path, capsys):
+    """🔴 THE REPORT MUST NOT LIE IN EITHER DIRECTION. The handler used to say
+    "range table NOT written" unconditionally, which is FALSE for anything that
+    raises AFTER `write_ranges` succeeded — and the reachable one is the SUCCESS
+    `print` itself: a `BrokenPipeError` is an `OSError`, so
+    `regen-known-repos.py | head -1` would report a table that IS on disk as
+    missing. Telling the operator a fresh table is absent sends them to debug a
+    refresh that worked.
+
+    Driven by breaking `print` after the write, which is that exact shape."""
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    monkeypatch.setattr(RG, "read_api_ranges",
+                        lambda names, **k: {n: 5 for n in names})
+    ranges = tmp_path / "known_ranges.json"
+    real_print = print
+    state = {"wrote": False}
+
+    def boom(*a, **k):
+        # 🔴 STDOUT ONLY. `regen-known-repos.py | head -1` closes STDOUT; stderr
+        # is a different stream and stays open, which is exactly why the error
+        # report is written to `sys.stderr` and can still be read. A stub that
+        # broke both would be testing a situation the real pipeline cannot
+        # produce — and it did, first time round: the handler's own report then
+        # raised and the test failed for a reason that was its own.
+        if state["wrote"] and k.get("file") is not sys.stderr:
+            raise BrokenPipeError("stdout went away")
+        return real_print(*a, **k)
+
+    real_write = RG.write_ranges
+
+    def write_then_arm(table, path):
+        real_write(table, path)
+        state["wrote"] = True
+
+    monkeypatch.setattr(RG, "write_ranges", write_then_arm)
+    monkeypatch.setattr("builtins.print", boom)
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    monkeypatch.undo()
+    assert rc == 0
+    assert ranges.exists(), "POSITIVE CONTROL: the table was never written"
+    err = capsys.readouterr().err
+    assert "was written, but the leg then failed" in err, (
+        f"a table that IS on disk was reported as NOT written — {err!r}")
 
 
 def test_a_HEALTHY_run_writes_the_RANGE_TABLE_too(monkeypatch, tmp_path):
