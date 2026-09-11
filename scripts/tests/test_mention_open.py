@@ -492,11 +492,23 @@ def _host_state_constants(source: str) -> set[str]:
     # host-state path too, however many hops away. Without this,
     # `SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"` is invisible, and it is
     # the most natural way to add the next one.
+    #
+    # 🔴 AND THE FIXPOINT PASS DOES *NOT* REQUIRE `builds_a_path`, which the
+    # first version did. A round-4 audit measured the cost: `SPOOL_PATH =
+    # PICKS_PATH.with_name("spool.jsonl")` was MISSED, because `.with_name` is
+    # neither a `Path(` call nor a `/` — and it is exactly as idiomatic as
+    # `.parent /`. Referencing a known host-state path IS the signal here; the
+    # path-shape test is only needed for the SEED, where the evidence is a
+    # coincidence of spelling (`PICKER_CLASS = "float,mention-open"`).
+    #
+    # ⚠ IT OVER-MATCHES IN THE SAFE DIRECTION. `RATIO = len(str(PICKS_PATH)) / 2`
+    # would be pulled in — and that fails LOUD, as a ledger mismatch somebody
+    # reads, rather than silently dropping a file nobody redirects.
     while True:
         grew = False
         for node in assignments:
             names = set(targets(node))
-            if names <= found or not builds_a_path(node):
+            if names <= found:
                 continue
             refs = {n.id for n in ast.walk(node.value)
                     if isinstance(n, ast.Name)}
@@ -532,6 +544,12 @@ def _host_state_constants(source: str) -> set[str]:
     # …and two hops, to prove it is a fixpoint rather than one lookahead.
     ('_SPOOL_DIR = PICKS_PATH.parent / "spool"\n'
      'SPOOL_PATH = _SPOOL_DIR / "today.jsonl"', "SPOOL_PATH"),
+    # 🔴 `.with_name` — MEASURED MISSED by the fixpoint's first version, which
+    # also demanded a `Path(` call or a `/` in the derived node. It is exactly
+    # as idiomatic as `.parent /`, and the reference to a known host-state path
+    # is the signal; the path-shape test belongs to the SEED only.
+    ('SPOOL_PATH = PICKS_PATH.with_name("spool.jsonl")', "SPOOL_PATH"),
+    ('SPOOL_PATH = PICKS_PATH.with_suffix(".bak")', "SPOOL_PATH"),
 ])
 def test_the_host_state_DISCOVERY_sees_every_spelling(planted, name):
     """🔴 THE POSITIVE CONTROL ON THE LEDGER'S DISCOVERY, and every one of these
@@ -5104,8 +5122,13 @@ def test_COLD_START_leaves_the_incoming_order_EXACTLY_as_it_was():
     instead of preserving order goes red. The real incoming list is already
     sorted by `repo_universe`, which would have made such a mutant invisible."""
     shuffled = ["zulu/one", "alpha/two", "mike/three", "bravo/four"]
-    assert MO.order_universe(shuffled, "1291", {}) == shuffled
-    assert MO.order_universe(shuffled, "1291", {}, {}) == shuffled
+    for scores in ({}, None):
+        got = (MO.order_universe(shuffled, "1291", {}, scores) if scores
+               is not None else MO.order_universe(shuffled, "1291", {}))
+        assert got == shuffled, (
+            f"COLD START REGRESSION: with no ranges and no picks the "
+            f"incoming order must survive untouched, and it did not — "
+            f"{got} != {shuffled}")
 
 
 # --------------------------------------------------------------------------- #
@@ -5285,7 +5308,9 @@ def test_a_pick_log_that_is_NOT_UTF8_is_an_empty_list_not_a_DEAD_CLICK(tmp_path)
     p = tmp_path / "picks.jsonl"
     p.write_bytes(json.dumps({"t": _T0, "repo": "o/r", "n": 5}).encode()
                   + b"\n\xff\xfe not utf-8 at all\n")
-    assert MO.load_picks(p, now=_T0) == []
+    assert MO.load_picks(p, now=_T0) == [], (
+        "a pick log that is NOT UTF-8 must read as an empty list — a "
+        "UnicodeDecodeError escaping here is a DEAD CLICK")
 
 
 def test_a_NON_UTF8_pick_log_still_shows_the_PICKER(monkeypatch, tmp_path):
@@ -5361,8 +5386,7 @@ def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(
     Asserted in BOTH directions, because a compaction that fired on every write
     would be a write amplification and one that never fired would be no guard:
     below the threshold the file is untouched, above it the TAIL survives."""
-    stack = contextlib.ExitStack()
-    made = stack.enter_context(_watch_compaction_tmps(monkeypatch))
+    made = _watch_compaction_tmps(monkeypatch)
     p = tmp_path / "picks.jsonl"
     # One short, so the append lands the file EXACTLY on the threshold.
     rows = [{"t": _T0 - (5000 - i), "repo": f"o/r{i}", "n": i + 1}
@@ -5392,7 +5416,6 @@ def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(
         f"a compaction tmp outlived the call: {[str(t) for t in made]}")
 
 
-@contextlib.contextmanager
 def _watch_compaction_tmps(monkeypatch):
     """Yield a list that collects every tmp path compaction creates.
 
@@ -5417,7 +5440,13 @@ def _watch_compaction_tmps(monkeypatch):
         return fd, name
 
     monkeypatch.setattr(_tempfile, "mkstemp", spy)
-    yield made
+    # ⚠ A PLAIN FUNCTION, NOT A CONTEXT MANAGER. It was a
+    # `@contextlib.contextmanager` entered through a bare `ExitStack()`
+    # that nothing ever closed — so the generator never resumed past its
+    # `yield` and teardown happened only because `monkeypatch` undid the
+    # setattr anyway. `monkeypatch` owning the teardown is the whole
+    # reason no context manager is needed.
+    return made
 
 
 def _lock_holder(path: Path, seconds: float):
@@ -5546,6 +5575,54 @@ def test_two_compactions_do_not_DELETE_each_others_tmp(tmp_path):
         "tmp out from under it")
 
 
+def test_a_row_appended_DURING_a_compaction_is_CARRIED_OVER(tmp_path,
+                                                            monkeypatch):
+    """🔴 THE RACE ITSELF, AND I CLAIMED IT CLOSED TWICE BEFORE IT WAS.
+
+    Round 2 locked only `_compact_picks` (excludes compactions from each other,
+    not the append). Round 3 shared the lock with the append — but that is a
+    BUDGET, so a compaction slower than `PICKS_LOCK_WAIT_S` still had the
+    appender write UNLOCKED onto the file about to be replaced; round 4 measured
+    `record_pick` returning True, the row on disk, and gone after the replace.
+    What closes it is the CARRY-OVER: everything past the byte offset the
+    compaction read is copied into the tmp before the replace.
+
+    ⚠ THE FIRST PROBE FOR THIS COULD NOT SEE THE FIX, and that is why this test
+    drives the REAL function. It ran a hand-written "compactor" in a second
+    process, so it tested a fake and stayed red no matter what `_compact_picks`
+    did. Here the append is injected at `mkstemp`, which is exactly where a
+    budget-expired appender lands: after the initial read, before the carry-over
+    read."""
+    log = tmp_path / "picks.jsonl"
+    log.write_text("\n".join(
+        json.dumps({"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1})
+        for i in range(MO.PICKS_COMPACT_AT + 10)) + "\n")
+
+    import tempfile as _tempfile
+    real_mkstemp = _tempfile.mkstemp
+    fired: list = []
+
+    def inject(*a, **k):
+        # An UNLOCKED append, exactly as a budget-expired `record_pick` makes.
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"t": _T0 + 9999, "repo": "o/late",
+                                 "n": 4242}) + "\n")
+        fired.append(1)
+        return real_mkstemp(*a, **k)
+
+    monkeypatch.setattr(_tempfile, "mkstemp", inject)
+    MO._compact_picks(log)
+    assert fired, "POSITIVE CONTROL: the compaction never reached mkstemp"
+    rows = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert any(r["repo"] == "o/late" for r in rows), (
+        "a row appended during the compaction window was DESTROYED by the "
+        "replace — the carry-over is not covering it")
+    # …and it is at the END, where an append belongs.
+    assert rows[-1]["repo"] == "o/late", rows[-1]
+    # …and the compaction still did its job.
+    assert len(rows) == MO.PICKS_MAX_ROWS + 1, len(rows)
+
+
 def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
                                                               monkeypatch):
     """🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS — and without
@@ -5557,11 +5634,10 @@ def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
     drives a REAL second process holding a REAL flock, because the claim is
     about two processes and an in-process fake could not make it.
 
-    ⚠ The `.tmp` name is PID-unique as well, so two compactions cannot share one
-    buffer even on a filesystem that ignores the advisory lock. That belt is
+    ⚠ The tmp name is unguessable (`mkstemp`), so two compactions cannot share
+    one buffer even on a filesystem that ignores the advisory lock. That belt is
     asserted at the end: nothing is left behind."""
-    stack = contextlib.ExitStack()
-    made = stack.enter_context(_watch_compaction_tmps(monkeypatch))
+    made = _watch_compaction_tmps(monkeypatch)
     log = tmp_path / "picks.jsonl"
     rows = [{"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1}
             for i in range(MO.PICKS_COMPACT_AT + 10)]
@@ -5594,8 +5670,7 @@ def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
     # listing is not a statement about compaction at all; and a `*.jsonl` glob
     # here registers as a new walk site against
     # `test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_pinned_two_way`
-    # — measured, it went red. The tmp name is PID-unique by construction, and
-    # this process is the one that compacted.
+    # — measured, it went red.
     # ⚠ OBSERVED, NOT GUESSED. The tmp used to be `picks.jsonl.<pid>.tmp` and is
     # now an unguessable `mkstemp` name, so an assertion naming either exact
     # form is one that can never fail. See `_watch_compaction_tmps`.
@@ -5858,10 +5933,14 @@ def test_a_STALE_range_table_is_IGNORED_rather_than_TRUSTED():
     Measured AT the boundary and either side, because `>=` vs `>` is the
     mutation a single-point test cannot see."""
     ranges = {"o/r": 40}
-    assert MO.ordering_state(ranges, 1.0) == MO.ORDER_APPLIED
-    assert MO.ordering_state(ranges, MO.STALE_MAPPING_DAYS - 0.1) == MO.ORDER_APPLIED
-    assert MO.ordering_state(ranges, MO.STALE_MAPPING_DAYS) == MO.ORDER_STALE
-    assert MO.ordering_state(ranges, MO.STALE_MAPPING_DAYS + 5) == MO.ORDER_STALE
+    for age, want in ((1.0, MO.ORDER_APPLIED),
+                      (MO.STALE_MAPPING_DAYS - 0.1, MO.ORDER_APPLIED),
+                      (MO.STALE_MAPPING_DAYS, MO.ORDER_STALE),
+                      (MO.STALE_MAPPING_DAYS + 5, MO.ORDER_STALE)):
+        assert MO.ordering_state(ranges, age) == want, (
+            f"a STALE table is being TRUSTED (or a fresh one distrusted): "
+            f"age {age} gave {MO.ordering_state(ranges, age)!r}, want "
+            f"{want!r}")
 
 
 def test_an_ABSENT_table_is_no_table_and_an_UNDATEABLE_one_is_STALE():

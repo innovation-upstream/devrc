@@ -821,7 +821,15 @@ def _picks_lock(path: Path, *, wait_s: float = 0.0):
     fd = -1
     held = False
     try:
-        import fcntl  # noqa: PLC0415 — POSIX-only, and only this path needs it
+        import errno   # noqa: PLC0415 — only this path needs them
+        import fcntl   # noqa: PLC0415 — POSIX-only
+        # ⚠ `O_CREAT` MEANS THIS CAN CREATE THE LOG. Deliberate and harmless: the
+        # only callers are about to write it (`record_pick`) or have already
+        # found it long enough to compact, and 0600 is the mode it would get
+        # anyway. The visible consequence — noted because it is new — is that a
+        # `record_pick` whose APPEND then fails leaves a 0-byte 0600
+        # `picks.jsonl` where previously nothing existed. `load_picks` reads
+        # that as no history, which is what it is.
         fd = os.open(path, os.O_RDONLY | os.O_CREAT, 0o600)
         deadline = time.monotonic() + max(0.0, wait_s)
         while True:
@@ -829,7 +837,17 @@ def _picks_lock(path: Path, *, wait_s: float = 0.0):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 held = True
                 break
-            except OSError:
+            except OSError as exc:
+                # 🔴 RETRY ONLY ON *CONTENTION*. Treating every `OSError` as "somebody
+                # else holds it" makes a filesystem that CANNOT lock — NFS without
+                # a lock daemon, a container FS answering ENOLCK/EINVAL — burn the
+                # whole budget on every single click. MEASURED with `flock` stubbed
+                # to ENOLCK: 201 ms per `record_pick`, on a path that should cost
+                # nothing. A refusal is permanent; only EWOULDBLOCK/EAGAIN/EACCES
+                # mean "try again".
+                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN,
+                                     errno.EACCES):
+                    break
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.005)
@@ -878,7 +896,14 @@ def narrow_dir(directory: Path) -> None:
 
 def record_pick(repo: str, num: str, path: Path | None = None,
                 now: float | None = None) -> bool:
-    """Append one `{"t","repo","n"}` line to the pick log. True if it landed.
+    """Append one `{"t","repo","n"}` line to the pick log.
+
+    Returns True if the line was WRITTEN — which is not quite "survived". A
+    compaction racing this call carries over anything appended past its read
+    offset (see `_compact_picks`), so the row survives in every ordering but the
+    one where a write physically interleaves with the final `os.replace`. The
+    distinction is small and it is stated because an earlier version of this
+    line said "True if it landed" while a measured ordering destroyed the row.
 
     🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE OPEN. This runs after the
     operator has already chosen a URL; a full disk, a read-only home or a
@@ -932,9 +957,13 @@ def record_pick(repo: str, num: str, path: Path | None = None,
         # 🔴 THE APPEND TAKES THE LOCK TOO — see `_picks_lock`. Without it the
         # row can land inside `_compact_picks`' read→replace window and be
         # silently overwritten, which is the race a round-2 fix claimed to have
-        # closed and a round-3 audit measured still open. BLOCKING here, unlike
-        # in compaction: skipping compaction costs nothing, skipping this would
-        # drop the operator's pick.
+        # closed and a round-3 audit measured still open. ⚠ IT WAITS HERE ON A
+        # BOUNDED BUDGET — NOT "BLOCKING", which this comment said until round 4
+        # and which `_picks_lock` and `PICKS_LOCK_WAIT_S` both spend paragraphs
+        # forbidding. A comment contradicting the two blocks that explain it is
+        # exactly how a maintainer "simplifies" it back to the `LOCK_EX` that
+        # deadlocked a probe. Compaction does not wait at all: skipping it costs
+        # nothing, skipping this would drop the operator's pick.
         with _picks_lock(path, wait_s=PICKS_LOCK_WAIT_S):
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -966,13 +995,29 @@ def _compact_picks(path: Path) -> None:
 
     🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS. A round-2 audit
     measured a row appended between the read and the `replace` being silently
-    LOST, and both writers using one fixed `picks.jsonl.tmp` name. Both are
-    closed by the `_picks_lock` this shares with `record_pick`'s APPEND — and
-    that sharing is the correction a round-3 audit forced: the first version
-    locked only here, so it excluded two COMPACTIONS from each other and left
-    the append-vs-compaction race — the one actually measured — wide open, under
-    a docstring claiming it was fixed. MEASURED: `record_pick` returned True and
-    its row landed on disk while a second process held `LOCK_EX`.
+    LOST, and both writers using one fixed `picks.jsonl.tmp` name.
+
+    🔴 IT TAKES THREE THINGS TO STOP THAT, AND I CLAIMED IT FIXED AFTER EACH OF
+    THE FIRST TWO. Written out because the same false claim survived two audit
+    rounds:
+      * round 2 locked only THIS function, which excludes two COMPACTIONS from
+        each other and does nothing about the append. Round 3 measured
+        `record_pick` returning True with its row on disk while a second process
+        held `LOCK_EX`.
+      * round 3 shared `_picks_lock` with the append — and that is a BUDGET, not
+        a wait, so a compaction slower than `PICKS_LOCK_WAIT_S` still had the
+        appender write unlocked onto the file about to be replaced. Round 4
+        measured exactly that: `record_pick` returned True, the row was on disk,
+        and it was gone after the replace.
+      * the carry-over below is what actually closes it: everything appended
+        past the byte offset this call read is copied into the tmp before the
+        replace.
+
+    ⚠ AND "CLOSED" IS STILL SCOPED. An append that COMPLETES before the replace
+    survives, whether or not it got the lock. A write physically interleaving
+    with the final `os.replace` can still tear — the window is now microseconds
+    instead of a whole compaction, and `load_picks` skips a torn line — so this
+    is a residual, not a guarantee. Saying so is the point.
 
     ⚠ NO WAIT HERE AND A BOUNDED BUDGET IN THE APPEND, AND THE ASYMMETRY IS THE
     POINT. Skipping compaction costs nothing — the next pick trims instead — so
@@ -1014,14 +1059,26 @@ def _compact_picks(path: Path) -> None:
         with _picks_lock(path) as held:
             if not held:
                 return                   # another click is compacting; leave it
-            lines = path.read_text().splitlines()
+            raw = path.read_bytes()
+            read_size = len(raw)
+            lines = raw.decode("utf-8", "replace").splitlines()
             if len(lines) <= PICKS_COMPACT_AT:
                 return                   # it compacted while we waited
             fd, name = tempfile.mkstemp(dir=str(path.parent),
                                         prefix=path.name + ".", suffix=".tmp")
             tmp = Path(name)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n").encode())
+                # 🔴 CARRY OVER ANYTHING APPENDED SINCE THE READ. An appender
+                # whose lock budget expired writes UNLOCKED, straight onto the
+                # end of the file we are about to replace — so without this its
+                # row is destroyed and `record_pick` still reports success.
+                # MEASURED before this line existed: a compaction slower than
+                # the budget lost the row every time. Appends are `O_APPEND`, so
+                # everything past `read_size` is new and belongs at the end.
+                with open(path, "rb") as live:
+                    live.seek(read_size)
+                    fh.write(live.read())
             os.replace(tmp, path)
             tmp = None                   # the replace consumed it
     except (OSError, ValueError):

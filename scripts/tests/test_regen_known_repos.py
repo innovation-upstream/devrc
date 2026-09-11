@@ -49,7 +49,13 @@ _spec.loader.exec_module(RG)
 # ⚠ `MENTION_OPEN_*` IS READ AT THE HANDLER'S IMPORT TIME, which is why this is
 # an env redirect rather than a `monkeypatch.setattr`: the constants are bound
 # when `exec_module` runs, and a fixture cannot reach back before that.
-_MO_REDIRECT = Path(__file__).resolve().parent / "_never-the-operators"
+# ⚠ OUTSIDE THE CHECKOUT, NOT BESIDE THIS FILE. It pointed at
+# `scripts/tests/_never-the-operators` — harmless today, since every call site
+# passes explicit paths, but a future default-path `record_pick` in this process
+# would then `mkdir` into the SOURCE TREE. A path that cannot exist is a better
+# redirect than one inside the repo: nothing can be created there by accident,
+# and the positive assertion below still proves the redirect is in force.
+_MO_REDIRECT = Path("/nonexistent-mention-open-redirect")
 
 
 def load_mention_open(name: str):
@@ -62,12 +68,19 @@ def load_mention_open(name: str):
         name, ROOT / "scripts" / "mention-open.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    real = Path.home() / ".config" / "mention-open"
+    # 🔴 ASSERTED POSITIVELY — "is under the redirect" — NOT as an absence.
+    # A `not is_relative_to(~/.config/mention-open)` check goes VACUOUS the
+    # moment `XDG_CONFIG_HOME` is set, because the handler resolves through it:
+    # measured, with the redirect removed and `XDG_CONFIG_HOME=/tmp/x` all four
+    # constants land outside `~/.config` and the absence check passes while
+    # nothing is redirected at all. A guard that can quietly stop guarding is
+    # the shape this whole file is written against.
     for const in ("KNOWN_REPOS_PATH", "KNOWN_UNIVERSE_PATH",
                   "KNOWN_RANGES_PATH", "PICKS_PATH"):
         got = getattr(module, const)
-        assert not got.is_relative_to(real), (
-            f"{const} resolved to the operator's real host state: {got}")
+        assert got.is_relative_to(_MO_REDIRECT), (
+            f"{const} is NOT redirected — it resolved to {got}, which may be "
+            f"the operator's own 0600 host state")
     return module
 
 
@@ -388,19 +401,34 @@ def looks_like_a_pick_log(text: str) -> int:
         repo, num, when = doc.get("repo"), doc.get("n"), doc.get("t")
         if not (isinstance(repo, str) and _FULL_NAME_RE.match(repo)):
             continue
-        # 🔴 TYPES, NOT RANGES — AND THE RANGES WERE MEASURED TO BUY NOTHING AND
-        # COST REAL COVERAGE. A first version required `0 < n <= 99999` and an
-        # epoch-shaped `t`. Against this file's own six negative controls the
-        # relaxed rule (key set + whole-string `owner/repo`) scores **0 on all
-        # six** — telemetry and the 4th-key case included — so the bounds
-        # excluded nothing; meanwhile a pick log for a repo past 100,000
-        # references scored **0 instead of 10**, i.e. was completely invisible
-        # to a DISCLOSURE guard. `record_pick` imposes no upper bound on `n`.
-        # A guard that is narrower than the artefact it hunts is the worse
-        # error, so the range checks are gone and the type checks stay.
+        # 🔴 NO BOUND ON `n`, AN EPOCH FLOOR ON `t` — AND THE ASYMMETRY IS TWO
+        # SEPARATE MEASUREMENTS, NOT A STYLE.
+        #
+        # `n`: a first version required `0 < n <= 99999`, and that was a real
+        # coverage loss — a pick log for a repo past 100,000 references scored
+        # **0 instead of 10**, invisible to a DISCLOSURE guard, while
+        # `record_pick` imposes no upper bound at all. A guard narrower than the
+        # artefact it hunts is the worse error. Gone.
+        #
+        # `t`: dropping the epoch floor alongside it was an OVERCORRECTION, and
+        # a round-4 audit measured what it let in — duration-shaped telemetry
+        # scored 10 against a threshold of 5:
+        #     {"t": 0.5,   "repo": "nix/home.nix",      "n": 100}
+        #     {"t": 0.012, "repo": "scripts/collector", "n": 3}
+        # That is the one shape this detector's own docstring calls
+        # "structurally ISOMORPHIC to a pick row", and the floor is the only
+        # thing separating it. It costs ZERO coverage of the artefact:
+        # `record_pick` writes `round(time.time(), 3)` and can never emit a
+        # sub-epoch `t`.
+        #
+        # ⚠ "The bounds excluded nothing" was true of the SIX controls this file
+        # authors, and false in general. Scoping a claim to the sample it was
+        # measured on is the whole lesson here.
         if isinstance(num, bool) or not isinstance(num, int):
             continue
         if isinstance(when, bool) or not isinstance(when, (int, float)):
+            continue
+        if when < 1_000_000_000:                 # epoch-shaped, not a duration
             continue
         rows += 1
     return rows
@@ -722,6 +750,13 @@ def test_the_PICK_LOG_detector_FIRES_and_EVERY_OTHER_DETECTOR_is_BLIND_to_it():
     ([{"n": 1200 + i, "repo": f"o/r{i}", "t": 1757000000 + i, "extra": 1}
       for i in range(40)],
      "a FOURTH key — not the shape record_pick writes"),
+    # 🔴 THE TWO A ROUND-4 AUDIT MEASURED GETTING THROUGH once the epoch floor
+    # was dropped. Same three keys, same path-shaped value — only `t`'s
+    # MAGNITUDE separates a pick from a duration.
+    ([{"t": 0.5, "repo": "nix/home.nix", "n": 100} for _ in range(40)],
+     "a BENCHMARK row — `t` is a duration in seconds, not an epoch"),
+    ([{"t": 0.012, "repo": "scripts/collector", "n": 3} for _ in range(40)],
+     "a TIMING row with a sub-second `t`"),
 ])
 def test_the_pick_log_detector_does_NOT_fire_on_ordinary_JSONL(rows, why):
     """🔴 SIX NEGATIVE CONTROLS, AND FIVE OF THEM WERE MEASURED FIRING. The

@@ -632,6 +632,58 @@ MUTANTS: list[tuple] = [
      "      pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify\n",
      "      pkgs.python312 pkgs.tmux pkgs.xdg-utils pkgs.libnotify\n",
      "the wrapper's PATH is MISSING"),
+# --- the PICKER ORDERING (Tier A plausibility + Tier B picks) ----------
+    # 🔴 EIGHT ROWS FOR CODE THREE AUDIT ROUNDS TOUCHED, added because the
+    # sweeps quoted while building it ran from a SCRATCH harness nobody else can
+    # run. This file's own header calls that a claim rather than evidence.
+    ("K64", "deletion", "order_universe stops ordering — the picker goes back to "
+                        "one fixed alphabetical order whatever the number is",
+     "    return sorted(universe, key=key)\n",
+     "    return list(universe)\n",
+     "not doing its job"),
+    ("K65", "widening", "IMPOSSIBLE rows are FILTERED instead of ranked last, so "
+                        "a repo the day-old snapshot calls empty can no longer "
+                        "be typed at — unrecoverable from inside the picker",
+     "    return sorted(universe, key=key)\n",
+     "    return [u for u in sorted(universe, key=key)\n"
+     "            if plausibility_class(num, ranges.get(u.lower())) "
+     "!= CLASS_IMPOSSIBLE]\n",
+     "FILTERED, not ranked"),
+    ("K66", "widening", "Tier B is compared BEFORE the Tier A class, so a learned "
+                        "preference can float an IMPOSSIBLE repository to the top",
+     "        return (klass, -scores.get(low, 0.0), distance)\n",
+     "        return (-scores.get(low, 0.0), klass, distance)\n",
+     "promoted an IMPOSSIBLE"),
+    ("K67", "widening", "the sort key regains a NAME, so it ALPHABETISES instead "
+                        "of refining — a cold-start host silently loses the "
+                        "order repo_universe gave it",
+     "        return (klass, -scores.get(low, 0.0), distance)\n",
+     "        return (klass, -scores.get(low, 0.0), distance, low)\n",
+     "COLD START REGRESSION"),
+    ("K68", "deletion", "a STALE range table is trusted and ordered on anyway — "
+                        "its two misclassifications point in OPPOSITE directions, "
+                        "so the picker becomes confidently wrong",
+     "    if age is None or age >= STALE_MAPPING_DAYS:\n",
+     "    if age is None or age > STALE_MAPPING_DAYS * 1000:\n",
+     "STALE table is being TRUSTED"),
+    ("K69", "deletion", "load_picks catches OSError only, so a non-UTF-8 pick log "
+                        "raises UnicodeDecodeError (a ValueError) out to "
+                        "guarded_main and the click shows NO PICKER",
+     "    except (OSError, ValueError):\n        # \U0001f534 `ValueError` IS NOT REDUNDANT",
+     "    except OSError:\n        # \U0001f534 `ValueError` IS NOT REDUNDANT",
+     "UnicodeDecodeError"),
+    ("K70", "deletion", "the pick-log APPEND stops taking the lock, so a row "
+                        "written during a compaction's read->replace window is "
+                        "destroyed while record_pick reports success",
+     "        with _picks_lock(path, wait_s=PICKS_LOCK_WAIT_S):\n",
+     "        if True:\n",
+     "not taking the lock"),
+    ("K71", "deletion", "the parent-directory narrowing masks 0o777 again, "
+                        "silently destroying setuid/setgid/sticky on a directory "
+                        "holding PRIVATE repository names",
+     "        mode = os.stat(directory).st_mode & 0o7777\n",
+     "        mode = os.stat(directory).st_mode & 0o777\n",
+     "non-permission bit"),
 ]
 
 TARGETS: dict[str, pathlib.Path] = {
@@ -651,6 +703,8 @@ TARGETS: dict[str, pathlib.Path] = {
     "K48": OPEN_, "K49": OPEN_, "K50": OPEN_, "K51": OPEN_, "K52": OPEN_,
     "K54": OPEN_, "K55": OPEN_, "K56": OPEN_, "K57": OPEN_, "K58": OPEN_,
     "K59": OPEN_, "K60": OPEN_, "K61": OPEN_, "K62": OPEN_, "K63": OPEN_,
+    "K64": OPEN_, "K65": OPEN_, "K66": OPEN_, "K67": OPEN_,
+    "K68": OPEN_, "K69": OPEN_, "K70": OPEN_, "K71": OPEN_,
     "K53": ALACRITTY,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two
