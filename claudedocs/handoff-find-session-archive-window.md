@@ -17,31 +17,29 @@ efforts, different docs: `handoff-find-session-live-first.md` (the `--live` inve
 `handoff-find-session-opencode.md` (the second corpus).
 
 ## State now
-🔴 **THIS EFFORT IS COMPLETE, MERGED AND SHIPPED.** Everything the earlier revision of this
-section described as open or in flight has landed. Nothing here is waiting on a human.
+🔴 **CLOSED. Nothing in this effort is open, in flight, or waiting on a human.** The three
+items the previous revision listed as outstanding are all done:
 
-- **Merged:** `#1388` (the window + audit rounds 1–5, 2026-09-09) and `#1438` (round 6,
-  squash `f241d7f7`). Both verified in `origin/main` **by CONTENT, not ancestry** — a squash
-  merge never makes the branch head an ancestor.
-- **Shipped and verified at the CONSUMER on both hosts**, `scripts/ship.sh` rc 0:
-  `converged + verified — 2 hosts compared, both at cdfd14ab (local=workbench remote=laptop)`.
-  Workbench 581 managed artifacts / 0 dangling / 0 stale; laptop 528 / 0 / 0. The deployed
-  `~/.claude/skills/find-session/SKILL.md` resolves to the **same store hash on both hosts**
-  (`y21wfbf3…`), which is what makes it a two-host claim rather than two single-host ones.
-- **The shipped behaviour was exercised, not inferred** — see "How to verify". `--tail 0` and
-  `--claude-only --opencode-only` both exit 2; the window notice lands on stdout.
-- **The audit ladder is CLOSED at 6 rounds**: 0 🔴, 23 🟡, ~16 🟢. Payload lines per round
-  155 → 90 → 33 → 12 → 8 → 2. Exactly ONE substantive correctness bug in the whole run
-  (`--claude-only --opencode-only` searching no corpus and exiting 0) — and it **predated the
-  PR**. Every finding from round 3 onward was a defect in a guard the ladder itself had
-  written, which is why stopping was right rather than merely convenient.
-- **Both gate tiers were green before merge**: dev-host `13,144 passed / 0 failed`; sandbox
-  `checks.pytests` `21,187 passed / 0 failed` and `checks.nodetests` `1449/1449`, each built
-  ONE AT A TIME with logs recovered from the derivations (so neither was a silent cached zero).
-- **`ship.sh`'s LAN-only remote address is FIXED** — `#1439`, authored by a DIFFERENT session.
-  Verified live here with a bare `ship.sh`, no override: it tried `192.168.50.155`, got
-  silence, announced `falling back to zach@10.42.0.100 for laptop`, and converged both hosts.
-- Open: **`#1418`, this doc.** Nothing else.
+| was outstanding | now |
+|---|---|
+| this doc (`#1418`) open, and its content stale | **MERGED** `3a4a057d` — and its three false claims were corrected *before* the merge, not after |
+| the tmux gate flake, unfiled and tagged `forcing: none` | **filed as issue `#1473`**, re-tagged `forcing: gate` |
+| two orphaned worktrees | **removed**, with their three local branches |
+
+Shipped state, unchanged and re-verified: **`#1388`** (the window + audit rounds 1–5, merged
+2026-09-09) and **`#1438`** (round 6, squash `f241d7f7`); both hosts converged and
+verified at the CONSUMER (`ship.sh` rc 0, `2 hosts compared`), deployed `SKILL.md` resolving
+to the **same store hash on both**. `#1439` (ship.sh's nebula fallback, another session's)
+merged and verified live here with a bare `ship.sh`.
+
+⚠ **Worktree hygiene, verified by CONTENT not ancestry.** All three worktrees showed 7/1/2
+"commits not in main" — expected and meaningless, because **a squash merge never makes the
+branch head an ancestor**. The real check was `git diff origin/main <tip> -- <its own files>`:
+**0 lines** for each. Only then were they removed.
+
+⚠ **No `clawgate-task:` field**, again: `clawgate_handoff.sh resolve` exited **5**. Its
+positive control confirms the board is reachable, but an unknown session id also answers 200
+with an empty array — so that 0 is not a clean bill of health, and none is recorded.
 
 ## Open investigations — live diagnosis state
 
@@ -114,23 +112,13 @@ answer was NO, four times over, and it is fixed.
   effort's file** — fix it in its own PR.
 
 ## Next steps (ranked)
-1. **Merge this doc (`#1418`).** Its previous revision asserted `#1388 … OPEN`, "the sandbox
-   tier … not re-run since the rebase", and "audit round 5 is running" — all three false by
-   the time anyone would read them. A `/resume` reads this file FIRST, so a stale one costs a
-   re-run of a finished ladder and a re-measure of a measured tier.
-   forcing: regression — the doc is the artifact designed to be trusted, and it was wrong in
-   the direction that causes duplicated work.
-2. **Decide the tmux flake explicitly** — `scripts/tests/test_tmux_reply_agent.py`,
-   `test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude`. Either fix the timing dependency
-   or state on the test that it is knowingly load-fragile. Closing condition: it survives a
-   full `gate.sh --tier both` run at load ≥ 60, or carries a comment saying it is not
-   expected to.
-   forcing: gate — 🔴 **re-tagged from `forcing: none`, which was wrong.** It truncated TWO
-   full gate runs in this session (`gate.sh` SIGTERMed at its own 3600s cap), so it is not a
-   cosmetic nit; `none` would have made it permanently ineligible to be worked.
-3. **Remove two orphaned worktrees** whose branches were deleted upstream on merge:
-   `~/workspace/devrc-find-session-window`, `~/workspace/devrc-fs-guards`.
-   forcing: none — housekeeping; they cost disk and can confuse a later `worktree list`.
+1. **Nothing remains in this effort.** Its one descendant is tracked elsewhere:
+   **`IN FLIGHT: innovation-upstream/devrc#1473`** — the tmux gate flake
+   (`test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude`). It carries its own measured
+   evidence and closing condition; do not re-derive them from this doc.
+   forcing: gate — it truncated two full `gate.sh` runs at the 3600s cap. 🔴 Work it **on the
+   issue**, not from this queue: a second entry point is how two sessions end up fixing one
+   flake.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The base moved twice mid-ladder and both rebases mattered.** `main` fixed the **7 inherited
@@ -192,6 +180,35 @@ answer was NO, four times over, and it is fixed.
   "Identify find-session command". Its plan is obsolete — its proposed 30-day default is
   measured as a **no-op** (skips 0 of 924 files, because Claude Code prunes
   `~/.claude/projects` on a 30-day retention). Its `--until` idea is the salvageable part.
+
+- 🔴 **THE LADDER'S FINAL TALLY — carried here from `State now` on purpose**, because that
+  heading is REPLACED on every update and this is the arc's most durable fact. Six rounds:
+  **0 🔴, 23 🟡, ~16 🟢.** Payload lines changed per round **155 → 90 → 33 → 12 → 8 → 2**.
+  Exactly ONE substantive correctness bug in the whole run (`--claude-only --opencode-only`
+  searching no corpus and exiting 0) — and it **predated the PR**. Every finding from round 3
+  onward was a defect in a guard the ladder itself had written. 🔴 **The severity never
+  dropped while the payload did** — 🟡 counts stayed 3–5 every round — which is the signature
+  of a ladder that has left the PR and is auditing its own scaffolding. That, not the round
+  count, is what said stop.
+- 🔴 **A squash merge makes every worktree look like it holds unsaved work.** All three of
+  this effort's worktrees reported commits "not in main" (7, 1, 2) *after* their PRs had
+  merged. Ancestry is the wrong instrument by construction; `git diff origin/main <tip> --
+  <files it touched>` returning 0 lines is the right one. Checking ancestry here would have
+  either stranded three worktrees indefinitely or — worse — invited a `--force` removal on a
+  reading that was never evidence of anything.
+- 🔴 **The handoff doc was WRONG in the direction that costs the most, and only a grep caught
+  it.** Before this close-out it still asserted `#1388 … OPEN`, "the sandbox tier … not
+  re-run since the rebase" and "audit round 5 is running" — all false, in the one artifact a
+  `/resume` reads first. A stale handoff does not fail loudly; it silently buys a re-run of a
+  finished ladder. **Grep your own doc's claims against live state before merging it**, the
+  same way you would any other assertion.
+- **`forcing: none` is not a neutral tag — it is a decision that the item will never be
+  worked.** The tmux flake sat under it because it felt like a nit. It had truncated two full
+  gate runs, which is `forcing: gate`. If an item has a real external signal, mis-tagging it
+  `none` is how it disappears.
+- ⚠ The base clone `~/workspace/devrc` is 2 commits behind `origin/main` and is being moved
+  by another session; this close-out was written from a dedicated worktree instead. That is
+  the normal state on this box, not drift to fix.
 
 ## How to verify
 ```bash
