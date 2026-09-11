@@ -1400,16 +1400,30 @@ def test_the_shell_scanner_OVER_reports_rather_than_GOING_QUIET():
       HYPHENS   `host-role.sh` resolves — the character class and the `.sh`
                 alternative are both exercised against a file that exists
       JOINED    a name split by a backslash-newline INSIDE the token is returned.
-                🔴 This is the regression row, and it is the only one here that
-                was ever RED: without the `re.sub` join in the helper this scanner
-                returns the empty set for a dependency the deleted walk FOUND.
+                🔴 A regression row: with the JOINED arm dropped from the helper's
+                union this returns the empty set for a dependency the deleted walk
+                FOUND.
+      WELDED    a name that the JOIN would DESTROY is still returned. 🔴 The other
+                regression row, and the reason the helper unions rather than
+                joining: bash does not delete `\<newline>` inside single quotes, so
+                joining there welds two names into one unresolvable run. Against
+                the join-only helper that shipped in c5c60418 this returned the
+                empty set.
+
+    Both regression rows were watched RED, each against the specific arm it
+    guards, and each dies on its OWN assertion — neither is redundant.
     """
     libdir = REPO_ROOT / "scripts" / "lib"
     assert (libdir / "host_label.py").exists() and (libdir / "host-role.sh").exists(), (
         "the fixtures this test is built from are gone from scripts/lib — the rows "
         "below would pass or fail for reasons that have nothing to do with the scanner")
 
-    only_a_comment = '#!/usr/bin/env bash\necho hi   # see "$(dirname "$0")/lib/host_label.py"\n'
+    # 🔴 NO SHEBANG IN THIS FIXTURE. `test_runtime_shebangs.py` forbids a test from
+    # writing a `#!/usr/bin/env` line at runtime, and this file is not allowlisted —
+    # an earlier draft carried one here and turned that repo-wide guard RED on the
+    # merged tree while this file alone stayed 50/50 green. The scanner never reads
+    # a shebang, so the line was decoration; both forms return {host_label.py}.
+    only_a_comment = 'echo hi   # see "$(dirname "$0")/lib/host_label.py"\n'
     assert _lib_modules_a_shell_file_references(only_a_comment, libdir) == {"host_label.py"}, (
         "a scripts/lib module named only in a COMMENT is no longer reported. If that is "
         "comment stripping, it is the silent direction: an over-strip deletes executable "
