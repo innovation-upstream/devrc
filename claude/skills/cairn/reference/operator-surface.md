@@ -92,6 +92,31 @@ The store-wide `entry-files=` count in `X-Store-Snapshot` is **not** filtered by
 the allowlist — a deliberate, documented residual count leak — which is the only
 client-side evidence that such entries exist. `cairn doctor` reads it.
 
+### 🔴 Telling ABSENT from REFUSED — no client can, an operator can, two ways
+
+`doctor`'s `token-scopes` PROBLEM names both readings and stops there, because on
+the wire they are the same bytes. The remedies are opposite — **seed the scope**
+vs **widen the allowlist** — so settle it before acting, with either:
+
+1. **The count gap, off `doctor` alone.** `entry-files=` (store-wide, unfiltered —
+   `snapshot_freshness` walks the root and takes no token) minus `X-Store-Entries`
+   (your slice). **Gap 0 ⇒ nothing on the pod is hidden from you ⇒ the scope is
+   ABSENT**, and widening the allowlist would change nothing.
+2. **The pod's own disk**, which settles it outright:
+   `kubectl -n subsystem-store exec deploy/subsystem-store-api -- ls -1 /data`
+
+MEASURED 2026-09-11: `entry-files=237`, `X-Store-Entries=237`, and `find /data
+-mindepth 2 -maxdepth 2 -name '*.md' | wc -l` = **237** — three numbers, one
+store, gap zero. The token row's allowlist enumerated exactly the 24 scopes the
+PVC held, so it was refusing nothing. `civitai-app-requests` and
+`civitai-developer-docs` read as invisible because they had **never been seeded**,
+not because access was lost.
+
+🔴 **Order matters when you do widen it.** Seeding without the allowlist edit
+leaves the scope unreadable by that token (indistinguishable from absent);
+editing the allowlist without seeding changes nothing at all, because the index
+is built from what is ON DISK. Both, then replace the pod.
+
 ## The freeze
 
 `cairn-cutover.py --freeze --apply` chmods the pre-cutover mirror's entry files

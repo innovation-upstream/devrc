@@ -66,14 +66,31 @@ Typing it as a `cairn` subcommand is no longer valid: argparse exits 2 with an
 every writer; `prune-index` owns deletion, with its own confirmation gate. Load
 whichever applies rather than reconstructing their steps here.
 
-🔴 **There is no CREATE route, and the failure does not say so.** `PUT` demands
-an `If-Match` the caller derives from bytes that must already exist (`428` with
-none, and `If-Match: *` is refused because it is no precondition at all), and
-`POST …/bullets` appends to something. A ref the pod has never held answers
-`404 ref-unknown` — the same bytes as a ref outside your allowlist. So a scope's
-FIRST record cannot be made through the API at all; it is an operator step, and
-until somebody takes it the record does not exist anywhere the pod can serve.
-Measured 2026-09-03, on real entries stranded by exactly this.
+🔴 **A CREATE route EXISTS — `cairn create --scope S --ref R --file F` (`PUT`
+with `If-None-Match: *`, devrc#1254). It still cannot create a scope's FIRST
+entry, and the reason is NOT the one this file used to give.** The old text said
+there was no create verb at all; that has been false since #1254, and the
+conclusion it drew survived only by accident. The real mechanism is that the
+index is built by WALKING THE STORE ROOT narrowed by your allowlist
+(`subsystem_recall.load_store`), so a scope with no directory on the pod's disk
+resolves to nothing and the write is refused at the index, before any filesystem
+write. A new scope's first entry is therefore still an operator step — seeding —
+and until somebody takes it the record exists nowhere the pod can serve.
+
+MEASURED 2026-09-11, with the control that makes the reading mean something:
+
+| `cairn create` target | answer |
+|---|---|
+| absent + non-allowlisted scope | **rc 6** `[not-found] — not found` |
+| allowlisted, present scope, ref that already exists | **rc 9** `[already-exists]` |
+
+The two codes differ, so the `not-found` is a fact about that scope rather than a
+probe wired to nothing. ⚠ Both wrote nothing.
+
+🔴 **That 404 is byte-identical for "outside your allowlist", "never existed" and
+"ref resolves to nothing"** — deliberately, so an error cannot enumerate the
+store. `reference/operator-surface.md` carries the two ways an OPERATOR can still
+tell absent from refused; no client can.
 
 ## 🔴 The two different exit 4s
 
