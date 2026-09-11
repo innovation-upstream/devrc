@@ -6583,9 +6583,14 @@ def test_rc24_is_ranked_between_rc8_and_rc17_in_the_severity_table():
 # THE DECLARED EXPECTATION (rc 24 / rc 25)
 #
 # 🔴 THE DESIGN DECISION THESE TESTS EXIST TO PIN. Measured 2026-09-02: the merge
-# gate on innovation-upstream/devrc is OFF, DELIBERATELY — the operator turned it
-# off until the Tekton capacity issue is addressed, which a different session
-# owns. The bare-state arm therefore reported it as DRIFT on every run that
+# gate on innovation-upstream/devrc is OFF, DELIBERATELY — and as of 2026-09-10 it
+# is off as a STANDING preference (solo-contributor repo; the operator requires
+# the ability to ship immediately), not pending any event. ⚠ This block used to
+# say "until the Tekton capacity issue is addressed, which a different session
+# owns" — conditional, and the condition was already met, so it read as an
+# instruction to restore protection. The authoritative wording lives in
+# `bp_declared_off_reason()`; nothing here restates the reason.
+# The bare-state arm therefore reported it as DRIFT on every run that
 # reached it, and would have indefinitely, while `drift-check.service`'s
 # OnFailure is the ONE toast class deliberately wired to bypass do-not-disturb.
 # That is the permanently-red gate `claude/RULES.md` refuses, arrived at from a

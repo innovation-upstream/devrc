@@ -516,9 +516,14 @@
 # 🔴 THE ARM FIRES ON DISAGREEMENT, NOT ON THE BARE STATE. Measured 2026-09-02:
 # `required_status_checks` is absent from the protection object and
 # `enforce_admins` is false on innovation-upstream/devrc — and that is a DECISION,
-# not drift. The operator turned the Tekton merge gate off because it was slowing
-# work down, and it stays off until the Tekton capacity issue is addressed, which
-# a different session owns. A checker that keys on the bare state fires on every
+# not drift. It is OFF as a STANDING preference: a solo-contributor repo whose
+# operator requires the ability to ship immediately. ⚠ This paragraph used to say
+# "until the Tekton capacity issue is addressed, which a different session owns"
+# — conditional, and the condition was already met (capacity measured fine
+# 2026-09-10), so it read as an instruction to restore protection against the
+# operator's wishes. The authoritative wording is `bp_declared_off_reason()`'s;
+# this comment does not restate the reason, it points there. A checker that keys
+# on the bare state fires on every
 # 6-hourly run for as long as that decision stands: `drift-check.service`'s
 # OnFailure is `notify-failure@`, the ONE toast class deliberately wired to bypass
 # do-not-disturb. The measured breach rate and the arithmetic against the rate
