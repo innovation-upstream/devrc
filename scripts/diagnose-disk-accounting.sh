@@ -13,26 +13,32 @@
 # 🔴 THAT PREDECESSOR IS DELETED (2026-09-09) — do not go looking for it. It was
 # committed to main by #1412 without anyone noticing it had already been
 # superseded, then deleted once the question was actually asked. It had no tests,
-# no code referenced it, and it was never observed to run to completion.
+# and no code referenced it. (Its ROOT run was never seen to finish — it died at
+# /nix; `claudedocs/handoff-nix-disk-cleanup.md` is the record. Unprivileged runs
+# DID complete, so "never ran to completion" is wider than the evidence.)
 #
-# Most of it is subsumed here — its 1/3/4 by section 2, its 5 by section 7, its 7
-# by 6b, its 8 by 6c. 🔴 BUT NOT ALL OF IT, and an earlier draft of this comment
-# claimed "every one of its ten sections", which was wrong. What was NOT carried
-# over, so that nobody re-derives it as missing:
-#   - its section 2 grepped the FULL `dumpe2fs -h` output; section 1 here greps a
-#     fixed field list, so `Filesystem features` (bigalloc/64bit/metadata_csum —
-#     bigalloc changes block accounting outright), `Free blocks`, `Free inodes`,
-#     `Mount count` and `Reserved GDT blocks` are no longer reported.
-#   - its section 6 checked for an EXTERNAL ext4 journal at /proc/1/root/.journal.
-#   - its 6b-equivalent split /nix/store into dirs/files/symlinks.
-#   - its 8 resolved the invoking user's home via SUDO_USER instead of assuming
-#     /home (harmless while home is under /home, which it is on both hosts).
-# None of that argued for keeping the file; it argues for not claiming a total
-# subsumption nobody checked. Reserved-block COUNT and journal SIZE are still
-# reported by section 1, which is what the residual arithmetic actually consumes.
+# 🔴 NO SUBSUMPTION MAPPING IS GIVEN HERE, DELIBERATELY. Two have been written
+# and BOTH were wrong; a third is not worth your trust. Read the two files if you
+# need to know what moved — `git show c68750f6^:scripts/diagnose-nix-disk.sh`.
+# The retracted drafts, recorded so nobody derives a fourth:
+#   - draft 1: "every one of its ten sections is subsumed here." False — it
+#     claimed a total nobody had checked.
+#   - draft 2: a per-section map plus a loss list. Wrong in four places, measured
+#     2026-09-10: it said the predecessor grepped the FULL `dumpe2fs -h` output
+#     (it greps a fixed 10-term list, exactly like section 1 — only the LISTS
+#     differ); it listed `Free blocks`/`Free inodes` as lost, though both are read
+#     and USED here via `stat -f -c %f/%d`; it claimed "reserved-block count and
+#     journal size … is what the residual arithmetic actually consumes", when the
+#     only dumpe2fs field any arithmetic reads is `Inode size`; and it kept a
+#     sentence from draft 1 ("the one thing it displayed that this file does not
+#     is `swapon --show`") that its own loss list six lines above contradicted.
+# The lesson generalises past this comment: a hand-derived correspondence between
+# two programs is a CLAIM, and the fact that the previous draft of it was wrong is
+# better information than any new draft.
 #
-# The one thing it displayed that this file does not is `swapon --show` — chasing
-# exactly that difference is what surfaced the `/swapfile` defect fixed in
+# What IS solid, because it was measured rather than mapped: chasing the one
+# display difference — the predecessor ran `swapon --show` and `ls -lh /swapfile`
+# — is what surfaced the `/swapfile` defect fixed in
 # toplevel_accountable_entries().
 #
 # This script must run as root. It counts what the previous one could not, and it
@@ -235,9 +241,20 @@ _not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
 # presented as a total.
 #
 # 🔴 "ALL THREE OF THIS FUNCTION'S CALLERS", NOT "EVERY CALLER" — the wider
-# wording stood here for a round and was false. `split_by_device` below does not
-# use this enumeration and is a KNOWN FOURTH SITE with the same shape and NO
-# count: its `[ -d "$p" ] || continue` drops a directory root cannot stat (a gvfs
+# wording stood here for a round and was false.
+#
+# 🔴 AND THERE IS NOW A FIFTH SITE: `toplevel_accountable_entries()`, added
+# 2026-09-09, enumerates depth-1 with the same shape and sends its stderr NOWHERE
+# — not to `$DENIED_LOG`, not to a file. A top-level entry root cannot stat is
+# therefore dropped from section 2 with no tally, and section 3's residual — the
+# number that function exists to feed — absorbs it silently. This ledger is the
+# place a maintainer of that function looks, so it is recorded HERE and not only
+# in the test file's sweep-ledger comment, which is where it was written first.
+# It is not a regression (the glob it replaced dropped unstattable entries too,
+# and equally silently); it is the same debt at one more site.
+#
+# `split_by_device` below is the FOURTH such site, also with no count: its
+# `[ -d "$p" ] || continue` drops a directory root cannot stat (a gvfs
 # or sshfs mount under /home/<user>/… is exactly the root-reachable mechanism)
 # and nothing tallies it. It is recorded rather than fixed because bash's file
 # tests cannot separate the three reasons `[ -d "$p" ]` says no — not a
@@ -700,7 +717,14 @@ report_denials() {
 }
 
 # Enumerate the top-level entries of a filesystem root that section 2 must
-# account for, one per line.
+# account for, NUL-SEPARATED — not one per line.
+#
+# 🔴 CONSUME IT WITH `read -r -d ''`, NEVER a plain `read`. `find -print0` emits
+# NO newlines at all, so a `while IFS= read -r d` loop receives all 17 top-level
+# entries as ONE record: one garbage path gets walked, every other entry silently
+# vanishes, and section 3's residual becomes the whole filesystem. This comment
+# said "one per line" for a day while the body already emitted NUL — the sentence
+# that describes an interface is part of the interface.
 #
 # 🔴 THIS EXISTS BECAUSE SECTION 2 SKIPPED TOP-LEVEL *FILES*. The loop read
 # `[ -d "$d" ] || continue`, so every top-level entry that was not a directory
@@ -744,8 +768,9 @@ report_denials() {
 # `.journal` and its whole subtree were invisible — the same defect this function
 # exists to fix, one flag away); it emits NUL-separated names, so an entry
 # containing a newline cannot split into phantom paths that `find` then reports
-# as "vanished mid-scan (benign)"; and an empty root yields nothing rather than a
-# literal unmatched glob.
+# as "vanished mid-scan (benign)"; and an EMPTY DIRECTORY yields nothing rather
+# than a literal unmatched glob. (An empty *argument* is a different case: `find ""`
+# ERRORS, which is what the `[ -n "$root" ] || root=/` line below prevents.)
 toplevel_accountable_entries() {
   local root="${1:-/}"
   # "/" -> "" would make find's operand empty; "//" -> "/" normalises the
@@ -866,7 +891,8 @@ echo "      shortfall is unmeasured FILES, never metadata."
 
 echo
 echo "=== 2. Inodes and allocated bytes per top-level entry ==="
-echo "  EVERY top-level entry is listed, not just directories. /swapfile is a regular"
+echo "  Top-level FILES are listed, not just directories — /proc /sys /dev /run /mnt"
+echo "  are still pruned, so this is not literally every entry. /swapfile is a regular"
 echo "  file allocating 48.00 GiB on this fs (measured 2026-09-09) and used to be"
 echo "  dropped by a '[ -d ] || continue' guard, so it had NO ROW AT ALL here and its"
 echo "  48 GiB was absent from the byte column below — the column section 3 calls"
