@@ -322,6 +322,12 @@ Not a bug — a measurement that would mislead if run as written.
    appears in a `FAILING:` line" is not a check — that string is a 140-char GitHub status
    description that already truncates mid-token, and a rename, skip or deselect satisfies it
    with nothing fixed.
+   ⚠ **WHY IT IS KEYED TO ALL SIX SITES AND NOT TO A TEST — a retracted draft, kept so nobody
+   re-derives it.** An earlier version closed on one test name. A second exposed test
+   (`:988`, through `_run_env` rather than `_run`) would have walked straight past it, and a
+   later version keyed to `_run` alone would have missed that same test — which is **2 of the
+   3** observed occurrences. Narrowing this key is how the condition gets satisfied with the
+   hazard intact.
    forcing: gate — it reddened `#1454`, `#1458` and `#1462`, all merged with
    `tekton/devrc-pytests` RED because of it.
 
