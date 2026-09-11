@@ -18,79 +18,55 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- 🔴 **THE PINNED CLIENT IS NOW LIVE ON THIS HOST — the line every earlier revision of this
-  doc had to negate is finally true.** `home-manager switch --flake <origin/main worktree>#zach
-  --impure` ran 2026-09-09, **generation 713** (rollback point: 712).
-  Verified by EXECUTION, not by the store path alone:
-  - `readlink -f ~/.local/bin/cairn` → `/nix/store/…-cairn-c84c142/bin/cairn` (rank 3)
-  - `cairn recall --ref cairn --scope devrc` → rc **0**, one entry, 71 lines (rank 15; was rc 2)
-  - `cairn recall --repo <devrc>` → `resolved via claudedocs/handoff-…md — 16 of 64 quoted
-    path(s) name it` (rank 19; was `most-recent fallback`)
-  - `cairn validate --scope devrc` → `devrc: 33 of 33 entry file(s) parse, 0 malformed`
-    (cairn #11; was SILENT). 🔴 **CORRECTED: it is NOT the mandated post-write check.**
-    Re-measured on this same pin: the packaged verb emits **0 of 3 contract blocks** (56 B),
-    against `cairn-validate`'s **3 of 3** (6,119 B). #11 removed the SILENCE, not the
-    BLINDNESS — `dropped lines:`, whose non-zero means content is ALREADY LOST, still never
-    runs there. Keep the mandated check on `cairn-validate`. See the investigation block.
-- **`ZacxDev/cairn`: ELEVEN merged PRs, NONE open.** devrc: #1433 `4a362c8d` (pin bump +
-  `checks.cairn-client-runs`), plus the doc commits. Re-verified live 2026-09-09.
-- **DONE in the previous session:** ranks 12, 13's path, 15, 16, 17, 19. **Rank 3 slice 2**
-  merged by the session that owned it (#1406 `9300f234`).
+- ✅ **2026-09-10 — THE THREE OPERATOR-BLOCKED RANKS ARE MERGED, DEPLOYED AND EXERCISED.**
+  Four PRs landed, each verified on its mainline BY CONTENT (a squash is never an
+  ancestor, so `merge-base --is-ancestor` reads false forever and is not the check):
+  - `ZacxDev/homelab-infra` **#785** squash `37b5a71f8` — rank 11, the `cairn` scope.
+  - `ZacxDev/homelab-infra` **#787** squash `936692ec7` — rank 13's deploy half **+ rank 7**.
+  - `ZacxDev/homelab-infra` **#786** squash `4c890c7ac` — rank 20, the third CI leg.
+  - `innovation-upstream/devrc` **#1447** squash `719519fa9` — this doc + the cross-repo
+    `flake.nix` retraction.
+  **IN FLIGHT:** `innovation-upstream/devrc` **#1472** — corrects three rank HEADINGS that
+  contradicted their own closure notes. Open, checks running.
 
-- ✅ **2026-09-10 — ALL THREE OPERATOR DECISIONS TAKEN, MERGED, AND VERIFIED LIVE.**
-  The operator chose registry `harbor.homelab.lan` + tag `0.8.0` (rank 13), adding the
-  `cairn` scope (rank 11), and opening the third-leg PR (rank 20). All landed in
-  `ZacxDev/homelab-infra`, verified on `trunk` BY CONTENT (a squash is never an ancestor):
-  - **#785** squash `37b5a71f8` — rank 11, the `cairn` scope, 23 → 24 scopes.
-  - **#787** squash `936692ec7` — rank 13's deployment half **+ rank 7**, image `0.8.0`.
-  - **#786** squash `4c890c7ac` — rank 20, the third CI leg.
-  🔴 **MERGE ORDER WAS LOAD-BEARING AND IS THE REUSABLE LESSON.** The deployed `0.7.0`
-  had NO SIGHUP reload — measured `grep -rl SIGHUP /app` → 0 in the running container,
-  with `def load_tokens` → 1 as the positive control proving the search saw the tree — so
-  the allowlist edit was INERT until a pod replacement. #787 *is* that replacement, on a
-  `Recreate`/`replicas: 1` deployment. Merging #785 FIRST meant one pod replacement picked
-  up both; the other order costs two read outages for one change.
-  **Verified against the RUNNING container after the roll, not inferred from it:**
-  SIGHUP `0 → 1` (positive control held at 1 throughout), allowlist `23 → 24` scopes with
-  `cairn` present, new pod 1/1 Ready, 0 restarts.
+- **Closing conditions EXERCISED, not inferred from the merge:**
+  - rank 11 — `cairn create --scope cairn --ref ci-leg --file <f>` → `created scope=cairn
+    ref=ci-leg revision=dc4d8212`, **rc 0**. It returned rc 6 `[not-found]` for the item's
+    entire life. The scope now holds a real first entry, round-tripped from the pod.
+  - rank 13/7 — the store serves `0.8.0` and the RUNNING container carries SIGHUP: measured
+    `0 → 1`, with `def load_tokens` held at `1` throughout as the positive control proving
+    the search could see the tree. New pod 1/1 Ready, 0 restarts.
+  - rank 20 — **HALF.** The leg is live (`devrc-ci-gate` steps are now `clone capture-etc
+    seed-nix pytests nodetests cairn-client-runs verdict`), is listed on real PRs, and RAN
+    IN-CLUSTER FOR THE FIRST TIME AND PASSED, emitting the exact string the classifier was
+    written to emit: `cairn-client-runs verdict=pass nix_rc=0 :: the pinned cairn client
+    ran: validate and doctor both produced output`. 🔴 The OTHER half — the leg must go RED
+    when the pinned client is stubbed — is **NOT met** and needs a deliberate red on shared
+    CI, which is an operator call.
 
-- **Still open and still needing the operator:** 21 (the vestigial commit timer — re-verified
-  live 2026-09-09, `analyze-service-index-commit.service` is `failed`, `ExecMainStatus=1`,
-  firing hourly), 4 (§11 questions), 8 (§10 decisions), plus **merging #785/#786/#787**.
-- 🔴 **CORRECTION TO "nothing is left that an agent can advance unblocked" — RANK 3 SLICE 3
-  IS UNBLOCKED and always was.** Consolidating onto the pin was DECIDED by the operator
-  2026-09-08 and that decision explicitly says do not re-ask it; slice 3 is NOT STARTED and
-  needs no further input. The fork it closes is widening on its own (`cairn_doctor` 21 → 43
-  changed lines across two measurements a day apart). It is the one item an agent can pick up
-  today without asking anything.
-- 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits 5; board reachable (8 links for another
-  session) but a wrong id also answers 200 with an empty array.
+- 🔴 **STILL OPEN AND UNTOUCHED THIS SESSION, stated so the merge flurry above does not read
+  as completeness:** rank 4 (`civitai/talos-infra#1414`, re-verified **OPEN**), rank 8
+  (§10 session-capture decisions), rank 18 (three deferred findings), rank 21 (re-verified
+  **still failing hourly**, `ExecMainStatus=1`), rank 23. **Rank 22 is claimed by ANOTHER
+  SESSION** (`cairn-oss-multi-instance-22`) — do not take it.
 
-- 🔴 **THE SHARED CLONE `$DEVRC` IS ON ANOTHER SESSION'S BRANCH — `feat/audit-pr-round-0-algorithm`,
-  re-checked at hand-off time. ANY tool that commits to "the current branch" from that clone
-  lands there, `handoff_doc.py` INCLUDED.** This bit this session: a handoff update was
-  committed and PUSHED to that branch. Remediated without rewriting history — cherry-picked to
-  `main` (`f7242d83`) and REVERTED on their branch (`1c1a0f1f`), after which their branch
-  diffed EMPTY against their own last commit `d16bfd7a`. They had no PR open and my commit
-  touched only this doc. **Run `handoff_doc.py --repo <a worktree on `main`>`, not `$DEVRC`,
-  until that clone moves.**
-- **This hand-off itself was written from a `main` worktree for exactly that reason**, and
-  because the clone's copy of this doc sits at the reverted state — i.e. a STALE BASE that
-  would have merged into an out-of-date document.
-- ✅ **devrc #1432 MERGED — squash `c507d71d`** (this arc's last code change). devrc's fork
-  had **never received cairn #3**: `_free_port()` was the bare TOCTOU with no retry. Ported
-  (not cherry-picked — the two copies are 5,819 lines / 28 hunks apart). Re-measured here:
-  1000 trials x 20 binds recycled the released port **4** times; control with the socket still
-  OPEN, **0**. 16 mutants / 16 killed, **one survivor reported in the code**. Verified on
-  `origin/main` by content: `SPAWN_ATTEMPTS` x9, `_lost_the_port_race` x2.
-  ⚠ **`/audit-pr 1432` was offered, RECOMMENDED and NOT run** — recorded on the PR so it
-  reads as skipped, not clean. Same gap as rank 12's `/audit-pr 6`; that is now twice.
-- 🔴 **THE LAPTOP IS UNSWITCHED and it is blocked ON THE HOST, not on a decision.**
-  `ship.sh` exited 255 — `ssh: connect to host 192.168.50.155 port 22: Connection timed out`,
-  no ICMP either. Cross-host agreement `NOT COMPARED — 1 of 2 hosts reported a landed sha`.
-- ⚠ **`SECRETS.md:26` and `claude/skills/cairn/SKILL.md:89-92` still assert the pinned
-  client "is" deployed as settled fact.** True on the workbench now; **false on the laptop**.
-  Left as-is by an explicit scope decision (🟡5 of #1406's round-2 audit), not by oversight.
+- 🔴 **RANK 3 SLICE 3 IS THE ONE AGENT-UNBLOCKED ITEM AND IT WAS NOT DONE.** Consolidating
+  onto the pin was decided by the operator 2026-09-08 and explicitly must not be re-asked.
+  Re-verified 2026-09-10: **all five duplicated modules are still present** in
+  `devrc/scripts/lib/` (`host_identity`, `subsystem_resolver`, `subsystem_recall`,
+  `cairn_doctor`, `subsystem_read_store`). The fork widens on its own while this sits.
+
+- **Carried forward (durable facts the REPLACE would otherwise drop):** the pinned client
+  went live via `home-manager switch --flake <origin/main worktree>#zach --impure` on
+  2026-09-09, **generation 713, rollback point 712** — that is the only record of which
+  generation to roll back to. `ZacxDev/cairn` stands at **ELEVEN merged PRs, NONE open**
+  (re-verified 2026-09-09). ⚠ The **laptop is a SECOND, INDEPENDENT switch** and is still
+  NOT verified — this host is not evidence about it, and that is rank 3's last residual
+  beside slice 3.
+
+- **Claims:** `cairn-oss-multi-instance-11` and `-13` RELEASED. **`-20` still HELD** — half
+  two of its closing condition is unmet, and an unreleased claim is the only thing that
+  blocks another session, so release it if you decide not to pursue that half.
 
 ## Open investigations — live diagnosis state
 
@@ -623,6 +599,26 @@ it routes the mandated check back at a client that does not run it, re-opening t
   mandated post-write check pointed at `cairn-validate`. If someone wants ONE binary again,
   the closing condition is the packaged `validate` emitting all three blocks — measure it,
   do not read a changelog.
+
+### `test_check_sops_enc_payloads.py` failed once in `homelab-infra` CI and has not reproduced
+- **Symptom + exact repro:** no repro. One failure observed by a round-2 audit of
+  `ZacxDev/homelab-infra#786` at head `993643baa`, passing at the round-1 tip. Its message
+  was `exit 2: no tracked *.enc.yaml found under <tmpdir>` — the test's own refusal when its
+  fixture setup produced nothing, not an assertion about the tree.
+- **Observed (with values):** rc=0, **52 of 52**, in SIX separate full-suite runs on this
+  host, including at the same head, and including one run with nothing else executing.
+  via: measurement
+- **Ruled out: that this PR's diff caused it.** The suite runs at the round-1, round-2,
+  round-3, round-4 and round-5 tips all pass it, and no commit in the range touches that
+  test's fixture path. via: measurement
+- **Leading hypothesis:** contention between two concurrent full-suite runs. The audit ran
+  18:50–19:33Z while a suite of mine ran 19:00–19:32Z, and the failure message is the shape
+  a git operation in a shared tmpdir produces when another run has moved underneath it.
+  Concurrent suites on this box are a documented evidence-corruption shape.
+- **Next probe:** none scheduled, and re-running is NOT it — six passes have already
+  established it does not reproduce on demand. If it recurs, capture whether another suite
+  was running at the same instant BEFORE re-running anything; that is the only observation
+  that separates the two mechanisms, and it is unrecoverable afterwards.
 
 ## Next steps (ranked)
 
@@ -1645,49 +1641,97 @@ is what leaves `main` free to check out. The stale-base risk goes with it — th
 a doc can be behind, or as here, at a reverted state — so a worktree on `main` fixes the write
 target and the read base in one move.
 
+**🔴 ORDER TWO MERGES SO ONE POD REPLACEMENT SERVES BOTH.** The deployed store image at or
+before `0.7.0` loads its token file ONCE at startup and has NO reload, so the rank-11
+allowlist edit was INERT until a pod replacement — and the Deployment is `Recreate` at
+`replicas: 1`, so every replacement is a brief hard read outage. #787 (the image bump) IS
+that replacement, so #785 was merged FIRST and one replacement picked up both. The reverse
+order costs a second outage for a change already sitting in the Secret doing nothing.
+⚠ From `0.8.0` onward this stops applying to secret edits: it handles SIGHUP, so an
+allowlist change wants `kubectl exec … -- kill -HUP 1`, not a pod replacement. Startup
+stays deliberately fatal (`exit 78`) on a malformed file.
+
+**🔴 THE DOC MOVED UNDER A BRANCH MID-SESSION, AND `mergeable=UNKNOWN` WAS NOT "FINE".**
+`#1444` added ranks 22 and 23 to `main` after this session's branch was cut; the branch's
+copy had ZERO of them and carried a 223-line rewrite. Rebasing was not the lesson — READING
+the overlapping region afterwards was: the rebase was textually clean and rank 7's heading
+still said "awaiting merge" after #787 had merged. A clean rebase means "no textual
+conflict", never "coherent result". Ranks 22/23 were confirmed present and byte-untouched
+before merging.
+
+**🔴 A CLASSIFIER GRADED BY READING GETS REWRITTEN UNTIL SOMETHING EXECUTES IT.** #786's
+~20 lines of verdict shell went through FOUR rewrites across a six-round audit ladder, each
+fix shipping the OPPOSITE defect of the one before: every non-zero rc `fail` (a broken gate
+blamed on the author) → marker-less `error` (a broken PIN excused as infrastructure) → a
+bare drv-name match, which nix's PRE-OUTCOME `building '…drv'...` makes true on every run
+that builds → markers-first, which nix's RECOVERED `warning: unable to download … retrying`
+makes true while the build succeeds. Rounds 1–3 were each verified by careful reading. The
+fix was a 17-row table that lifts the SHIPPED shell out of the YAML and runs it under a real
+`sh`; all four historical classifiers were replayed into the pipeline and caught.
+**Transferable tell: when a fix and its predecessor keep swapping which direction they are
+wrong in, the missing thing is EXECUTION, not care.**
+
+**🔴 THE FIX ROUND'S OWN PROSE WAS THE RECURRING SECOND FINDING — five false claims across
+six rounds, every one caught by an audit and none by me:** a justification invented for a
+fallback that does not exist in that leg; a stale number four lines above the one just
+corrected; a generalisation ("per-step requests are sized well under p99") false for the
+step that dominates the pod; a trailer described as `last 10 log lines:` and UNPREFIXED when
+it is `Last N log lines:` with a `       > ` prefix; and TWO false verification figures in
+the PR body — one a filtered test run reported as full coverage, one a `RESULT: PASS` line
+belonging to an unrelated shell test. ⚠ And a sixth, found only when the operator asked what
+was outstanding: ranks 11/13/20 were closed with correct closure notes while their HEADINGS
+still read `🔴 OPERATOR ACTION` / `HAS NOT HAPPENED` / `runs only on demand`. The heading is
+the surface a reader hits first.
+
+**⚠ A LEDGER FIGURE PUBLISHED ON #786 WAS WRONG AND IS CORRECTED HERE:** the executable
+payload series is `22 → 16 → 7 → 5 → 4` and total payload `95 → 95 → 56 → 49 → 47`. The
+"103 → 95 → 56 → 5 → 4" figure conflated the two. The trend that ended the ladder holds; the
+number did not.
+
+**Two instrument traps that cost real time:** `docker manifest inspect` reports a LIVE,
+currently-deployed Harbor tag as ABSENT from this host (client-side trust store lacks the CA
+the daemon has) — the one-command discriminator that downloads nothing is to pull a
+certainly-absent tag and read the error SHAPE (`not found` = reachable, `x509` = not). And
+`sops` resolves `.sops.yaml` from the INVOKING CWD, not the file path, so running it from
+another checkout dies with `no matching creation rules found` on a file this repo's catch-all
+covers; pin it with `--config`, do not `cd`.
+
 ## How to verify
 
 🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
 
 ```bash
-# the four merges this session landed
-gh pr view 6 -R ZacxDev/cairn --json state,mergeCommit   # MERGED 9d58f02
-gh pr view 7 -R ZacxDev/cairn --json state,mergeCommit   # MERGED 059ec17
-gh pr view 8 -R ZacxDev/cairn --json state,mergeCommit   # MERGED 3167e44
-git -C ~/workspace/cairn grep -c 'reject_recall_flags\|recall_selection' origin/main -- lib/subsystem_recall.py cairn
-git -C ~/workspace/cairn grep -c CAIRN_REGISTRY origin/main -- server/build-push.sh   # 4
+# the four merges (all MERGED; content checks, not ancestry)
+gh pr view 785 -R ZacxDev/homelab-infra --json state,mergeCommit   # 37b5a71f8
+gh pr view 786 -R ZacxDev/homelab-infra --json state,mergeCommit   # 4c890c7ac
+gh pr view 787 -R ZacxDev/homelab-infra --json state,mergeCommit   # 936692ec7
+gh pr view 1447 -R innovation-upstream/devrc --json state,mergeCommit  # 719519fa9
 
-# 🔴 MERGED IS NOT LIVE — this is the line that matters
-readlink -f ~/.local/bin/cairn        # NOW /nix/store/…-cairn-c84c142/bin/cairn on THIS host
-cairn recall --ref cairn --scope devrc >/dev/null 2>&1; echo $?   # NOW 0 (was 2 for rank 15's life)
+# rank 13/7 — read the RUNNING container, never the manifest, and keep the control
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get deploy subsystem-store-api \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'          # expect 0.8.0
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec deploy/subsystem-store-api -- \
+  sh -c 'grep -rl SIGHUP /app | wc -l; grep -rc "def load_tokens" /app/server/server.py'
+#   expect 1 and 1 — the second is the POSITIVE CONTROL; a bare 0 on the first without it
+#   is indistinguishable from a grep that walked nothing. The `sh -c` is load-bearing.
 
-# the store writes, by the badge rather than by the write succeeding
-cairn recall --repo ~/workspace/devrc --no-sync | grep -a '^  cairn '
-```
-🔴 **THE TWO `readlink`/`recall` LINES WERE INVERTED UNTIL 2026-09-09 AND ARE CORRECTED ABOVE.**
-They said the pin was NOT live and that `recall --ref` still exited 2. The `home-manager switch`
-(generation 713) made both false, and the `## State now` section knew it while this block did
-not — **one document asserting both halves of a contradiction.** If you are reading a
-"How to verify" block, check it against `## State now` first; a verification recipe rots exactly
-like any other claim, and this one would have had a reader "confirm" a state that had already
-moved. ⚠ **The laptop is a SECOND, INDEPENDENT switch and is NOT verified here** — this host is
-not evidence about it.
+# rank 11 — the scope is writable, and the entry is really there
+cairn recall --ref ci-leg --scope cairn        # 1 of 1 entry in `cairn/`
 
-```bash
-# 2026-09-09 — the three PRs this session opened, all in ZacxDev/homelab-infra
-gh pr view 785 -R ZacxDev/homelab-infra --json state,title   # rank 11, the cairn scope
-gh pr view 786 -R ZacxDev/homelab-infra --json state,title   # rank 20, the third CI leg
-gh pr view 787 -R ZacxDev/homelab-infra --json state,title   # ranks 13 + 7, image 0.8.0
+# rank 20 — half one only
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get task devrc-ci-gate \
+  -o jsonpath='{range .spec.steps[*]}{.name}{" "}{end}{"\n"}'
+#   expect: clone capture-etc seed-nix pytests nodetests cairn-client-runs verdict
+gh pr checks <any open devrc PR>               # expect tekton/devrc-cairn-client-runs listed
+#   🔴 HALF TWO IS UNMET: nothing here shows the leg goes RED when the client is stubbed.
 
-# the published image — read it from the REGISTRY, not from a local build
-docker pull harbor.homelab.lan/library/subsystem-store-api:0.8.0
-docker run --rm --entrypoint sh harbor.homelab.lan/library/subsystem-store-api:0.8.0 \
-  -c 'grep -c SIGHUP /app/server/server.py; ls -A /data | wc -l'   # expect 11 and 0
-# 🔴 do NOT use `docker manifest inspect` against harbor from this host — it reports a
-# PRESENT tag as absent (client-side trust store lacks the CA the daemon has).
-
-# rank 21, still failing hourly
+# rank 21 — still failing, re-verified 2026-09-10
 systemctl --user show analyze-service-index-commit.service -p Result -p ExecMainStatus
+#   expect Result=exit-code ExecMainStatus=1
+
+# rank 3 slice 3 — NOT started; all five duplicated modules still present
+ls ~/workspace/devrc/scripts/lib/{host_identity,subsystem_resolver,subsystem_recall,cairn_doctor,subsystem_read_store}.py
 ```
-Expected: #785/#786/#787 OPEN until the operator merges them; the image controls at `11` and
-`0`; rank 21 at `Result=exit-code` / `ExecMainStatus=1`.
+Expected: four MERGED shas; store on `0.8.0` with SIGHUP `1` and control `1`; the cairn
+scope holding one entry; a seven-step gate Task; rank 21 still `ExecMainStatus=1`; five
+module files still present.
