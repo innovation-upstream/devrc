@@ -27,7 +27,8 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   - steps 4+5 merged into one ordering rule.
 - **IN FLIGHT:** `#1495` — `scripts/scoped-tests.sh`'s header justified the script with a figure `CLAUDE.md` had already retracted. Fix + a two-way-pinned count guard. **Not merged, not audited.**
 - **Deploy/verify status:** `#1440` deployed AND verified on both hosts. `#1495` is committed and pushed only — **not merged, not deployed.**
-- 🔴 **CARRIED FORWARD, not resolved by this session — issue `#1431` is CLOSED on the board and its defect is NOT fixed.** See its investigation block below; this line exists because `State now` is REPLACED on every update and the pointer would otherwise disappear while the defect stayed open.
+- ✅ **RESOLVED 2026-09-10 — `#1431` is REOPENED**, carrying a comment with a fresh red/green/positive-control matrix. The defect is unchanged and still open; what is closed is the *board lying about it*. This bullet stays (rather than being deleted) because the carried-forward pointer is what kept it findable across three `State now` replacements.
+- ✅ **RESOLVED 2026-09-10 — the `#1439` vs `#1287` question is DECIDED by the operator.** One mechanism: `first_reachable_ssh` stays, `#1287` (`scripts/workhost`) is CLOSED with the comparison written on it, and the one thing it did better — four-state failure reporting — is ported as **`#1505`** (open, unmerged, undeployed). Both investigation blocks below are marked RESOLVED.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -107,7 +108,7 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 1. **Audit and merge `#1495`** (devrc; `scripts/scoped-tests.sh`, `scripts/tests/test_retracted_contention_figure.py`). Its v1 guard SURVIVED its key mutant and was rebuilt — that history is exactly what an adversarial pass should re-check. `/audit-pr 1495`. forcing: gate — a false claim is on `main` in shipped code until this merges
 2. **Decide the `scoped-tests.sh` trigger list with `#1445`'s author** — implement `gate-inventory` §10 or decline it in the header. See the open investigation above for the measured numbers. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
 3. **Trials 3-5 of round 0**, on ordinary PRs, dispatched before merge-readiness. Delete the section if it ran and changed nothing. forcing: none
-4. **`ship.sh` cannot reach the laptop off-LAN** (devrc; `scripts/lib/host-role.sh`). `LAPTOP_SSH_DEFAULT="zach@192.168.50.155"`; the nebula address `10.42.0.100` is `LAPTOP_IP_SECONDARY`, used to IDENTIFY the host and never as an SSH fallback. Measured 2026-09-09: `ship.sh` timed out, rc 255, while `ssh zach@10.42.0.100` worked; shipped via the `LAPTOP_SSH` override. forcing: regression — the laptop silently stops converging whenever it is off-LAN, the exact silent-divergence hazard CLAUDE.md documents
+4. 🔴 **STALE — DO NOT WORK THIS. `#1439` fixed it, merged and deployed to both hosts.** The item read: *"`ship.sh` cannot reach the laptop off-LAN … the nebula address `10.42.0.100` is `LAPTOP_IP_SECONDARY`, used to IDENTIFY the host and never as an SSH fallback."* **That last clause is FALSE on `main`**, measured 2026-09-10 at `cc278b7a`: `host-role.sh:120` returns `LAPTOP_SSH_DEFAULT` *then* `LAPTOP_SSH_SECONDARY` (derived from `LAPTOP_IP_SECONDARY`), and `ship.sh:545` selects between them with `first_reachable_ssh`. The LAN→nebula fallback this item asks for **is the thing `#1439` shipped**, and this doc's own deploy line says `#1439` is deployed and verified on both hosts. Left in place, struck through, rather than deleted — an item that vanishes is indistinguishable from one that was never there. **Rank 4 is CLOSED.** forcing: none
 5. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~26 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deliberately deferred until the trial count resolves. forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -152,6 +153,31 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - 🔴 **A fix landing is not the same as a family closing** — and the tell is that the
   claim was written from the fix's *description* rather than from what it touched. Before
   writing "closed", name the mechanism and check the fix actually reaches it.
+- 🔴 **A RANK NUMBER IS NOT A STABLE HANDLE, AND THIS DOC SAYS IT IS.** The old list declared
+  *"Numbering is STABLE — the rank is half a `claim-work` slug's identity"*, and then `#1497`
+  (`e1cd9a38`) **REPLACED the whole 16-item list with a 5-item one**. So `audit-pr-ladder-16`
+  and `audit-pr-ladder-14` — slugs `claim-work` still derives, and which a session was handed
+  as its instructions on 2026-09-10 — now name items that **do not exist in this doc**. The
+  work was still open and still findable, but only because the *investigation blocks* survived;
+  the queue entries did not. **Identify an item by its SUBJECT (`#1431`, `#1287`), never by its
+  rank**, and treat a rank in a kickoff message as possibly pointing at a superseded list.
+  ⚠ Both readings of a replaced list are wrong in opposite directions: the numbers can go
+  stale (this case) *and* a resurrected item can re-open settled work (rank 4 of the NEW list,
+  struck through above, told the next session to re-do what `#1439` already shipped and
+  deployed). **One list replacement produced both failures at once.**
+- 🔴 **THE BASE CLONE MOVED UNDER A LIVE SESSION, AND NOTHING ANNOUNCED IT.** This session read
+  the handoff at `4ab87a64` (1369 lines, 16 ranked items) and later found the same working copy
+  clean at `cc278b7a` (1357 lines, 5 items) — another session had pulled `~/workspace/devrc`
+  mid-run. Everything downstream of that first read was reasoning about a superseded document.
+  **A doc you read at the start of a session is a snapshot, not a subscription** — re-derive the
+  sha before acting on a section you read a long time ago, and prefer a worktree pinned to an
+  explicit ref for anything you intend to EDIT.
+- ⚠ **The zsh history-modifier trap fired again, in a loop written to compare doc versions.**
+  `git show "$ref:claudedocs/…"` — zsh ate `:c` as a modifier, so every iteration ran
+  `git show 4ab87a64laudedocs/…`, printed `fatal:` to stderr, and the captured counts all came
+  back **`0`**. Read without the stderr, that is a clean, confident, WRONG table saying no
+  version of the doc had a 16-item list. `claude/RULES.md` names this and says **brace it**:
+  `${ref}:path`. The tell was a zero that disagreed with something already read by hand.
 
 - 🔴 **CARRIED FORWARD from the ranked list, which this update replaces — corrections to
   `#1023`'s own commit messages, kept because that history is MERGED and will not be
@@ -1295,9 +1321,24 @@ is load-bearing rather than left standing as a live claim.
 - **Leading hypothesis:** two mechanisms now exist for one job — a general `workhost` tool and a
   ship/drift-specific fallback. That is the "one rule, one place" hazard, not a bug: #1439 is
   live and proven in production, #1287 is unmerged and 4 days stale.
-- **Next probe:** read `scripts/workhost` in #1287 and decide whether `first_reachable_ssh`
-  should become a thin caller of it, or whether #1287 should be closed. **Operator call — do not
-  resolve unilaterally.**
+- ✅ **RESOLVED 2026-09-10 — decided by the OPERATOR: one mechanism, plus the port.** `#1287` is
+  CLOSED with the comparison written on it; `first_reachable_ssh` stays; its four-state reporting
+  is ported as `#1505`. The "Next probe" above is SPENT — do not re-run it.
+- 🔴 **Three deciding facts, none of which were in this block before, all measured 2026-09-10:**
+  **(a)** `workhost`'s `HOSTS` table covers **workbench only** — its own line 114 says `laptop`
+  and `production` "are not" specified — so it could not have served `ship.sh`'s laptop leg at
+  all. The block above compared the two as if they solved the same problem; they do not.
+  **(b)** The duplication that would actually have bitten is the **ADDRESS TABLE**, not the probe
+  logic: the workbench LAN and nebula addresses are written verbatim in BOTH `scripts/workhost`
+  and `lib/host-role.sh`, agreeing today with nothing keeping them agreed.
+  **(c)** ⚠ **This block's own "zero file overlap, so no merge conflict either way" HAD GONE
+  STALE.** It was true of `#1439`'s file set and was read as a claim about `main`: measured
+  2026-09-10, `#1287` is **211 commits behind** and `gh pr view --json mergeable` says
+  **`CONFLICTING`/`DIRTY`**, conflicting on `nix/home.nix`. **A no-conflict finding is a reading
+  with a timestamp, not a property of a branch** — the base moves underneath it.
+- **Not ported, recorded so nobody re-derives it as an oversight:** parallel probing, the
+  `tailscale` slot, `--json`, `--accept-key`, the standalone verb surface. `#1287`'s branch is
+  the reference if any of them is wanted later; it is closed, not deleted.
 
 ### RESOLVED — `main` red from #1439's test stubs
 Superseded: the "`main` is red: #1439's test stubs wrote their own shebang" block above is
@@ -1323,8 +1364,24 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 - **Leading hypothesis:** a bulk or accidental close. The residual exposure is unchanged and
   small: a conditional or indirect override (`QUICK` fast path, `MIN_TESTS=$LOW`) is invisible to
   the pin while the shell applies it. Deleting tests still moves `m` and IS caught.
-- **Next probe:** decide with the operator — reopen #1431, or record the dismissal in writing on
-  it. Do not silently treat CLOSED as done; that is the state this block exists to flag.
+- ✅ **RESOLVED 2026-09-10 — `#1431` is REOPENED** (`stateReason: REOPENED`, 1 comment). The
+  "Next probe" above is SPENT. 🔴 **The DEFECT is still open — only the board was fixed.** The pin
+  still reads the source literal; the issue is simply now visible as the open thing it is.
+- **Reopened rather than dismissed, deliberately.** A dismissal must name who dismissed it, and
+  the close carried **no reason at all** — so writing one would have meant inventing the closer's
+  reasoning, which is the fabricated-attribution failure this whole thread catalogues. The
+  operator can still close it with one sentence; that is cheap, and it is theirs to write.
+- 🔴 **Not a bulk close, measured:** `#1431` is the **only** issue closed in a full hour around
+  `20:19:24Z`. The "leading hypothesis: a bulk or accidental close" above is therefore **half
+  REFUTED** — whatever happened was individual. Actor was `ZacxDev`, which does **not**
+  discriminate human from agent, since every agent here uses that token.
+- **The defect was re-measured, not re-quoted**, at `4ab87a64` on 2026-09-10, in a throwaway
+  worktree restored byte-identical (`cmp` clean) after each run:
+  baseline **1 passed**; positive control `MIN_TESTS=15`→`99` **FAILED with the guard's own
+  message** (so the guard is reachable); the defect — `MIN_TESTS=15` plus
+  `if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi` — **1 passed** while the shell applies **3**.
+  🔴 **The positive control is the load-bearing half:** without it, the green on the third row is
+  indistinguishable from a guard that never ran.
 
 ### The scoped mapper has no trigger list — a `testlib` change runs 1 test file of 331
 
