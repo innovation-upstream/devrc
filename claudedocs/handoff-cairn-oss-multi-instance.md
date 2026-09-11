@@ -1109,19 +1109,28 @@ about what devrc would gain or lose. Do not re-derive this — verify it still h
     **Closing condition:** `#1458` merged, AND a flake-rate reading against a baseline whose PR
     heads postdate the merge — **not a single green run**. The OSS half closes separately, with
     rank 3 slice 3.
-    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE NOW REDDENS THIS PR, AND IT IS NOT THIS ONE.**
-    `test_run_tests_targets.py::test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`
-    (added hours earlier by #1445's own audit ladder — its docstring reads "🟡 round-2 F5")
-    spawns a nested full `run-tests.sh` and bounds it at **120 s**; on `a6dd11eb` that
-    subprocess was **SIGKILLed at the bound** (`subprocess.TimeoutExpired`, returncode `-9`,
-    `test_run_tests_targets.py:756`). It is **not an assertion failure**, no part of #1458's
-    diff can reach that file, and #1462 — same base, same test — **passed minutes earlier**, so
-    it is non-deterministic. Wall-time discriminator, CI-to-CI: the failing and passing runs are
-    near-identical (1030.34 s vs 1065.64 s; 155.60 s vs 154.73 s — the failing run was
-    *faster*), so the node was not inflated; one bounded operation stalled while everything
-    around it ran normally. **Same signature, one layer up: a wall-clock bound inside a test on
-    a contended node.** Belongs with `handoff-gate-flake-store-api.md` rank 1, not with a
-    re-run. via: measurement
+    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE REDDENED THIS PR, AND IT IS NOT THIS ONE.**
+    Tests in `scripts/tests/test_run_tests_targets.py` spawn a nested `run-tests.sh` bounded at
+    **120 s** and are SIGKILLed at it (`subprocess.TimeoutExpired`, rc `-9`) — **not** an
+    assertion failure, and no part of `#1458`'s diff can reach that file.
+    🔴 **FOUR CLAIMS THIS BLOCK ORIGINALLY MADE ARE RETRACTED — MEASURED FALSE 2026-09-11.
+    THE FULL ITEM IS NOW `handoff-gate-flake-store-api.md` RANK 7; READ THAT, NOT THIS.**
+    They are listed rather than deleted because each is the kind a reader re-derives:
+    (a) *"added by `#1445`'s audit ladder"* — `#1445` **never touched that file**; `ca088e70`
+    (`#289`) created it with the bound, `809486fa` (`#1073`) added the flaking tests;
+    (b) *"spawns a nested **full** run"* — both flaking spawns are **one-target** runs (argv
+    `--targets`, or `DEVRC_TARGETS` via `ENV_ONLY`);
+    (c) *"`#1462` — **same base**, same test — passed minutes earlier"* — the green head
+    predates `ce9b55c3` and the red one contains it, so the pair straddles an intervention and
+    isolates nothing; the later red was also a **different** test;
+    (d) the wall-time pair (1030.34 s vs 1065.64 s) read as *"the node was not inflated"* — it
+    compares per-target aggregates ACROSS runs and cannot see contention BETWEEN concurrent
+    runs, which is where a 120 s bound lives.
+    **What survives, re-measured:** six bound sites, four exposed tests, and a file whose total
+    wall time was observed at **137.69 s / 164.27 s / 205 s / 428.40 s — a 3.11x spread on one
+    tree**. A fixed 120 s bound sits inside that spread. 🔴 **The cause is NOT established**;
+    `#1429` was checked and **refuted** for this tier (`limits.cpu: "4"` makes the old and new
+    worker formulas both yield 4). via: measurement
     forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
     Advisory, not blocking (see the retraction above)
 
