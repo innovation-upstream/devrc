@@ -48,7 +48,6 @@ from __future__ import annotations
 import ast
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -98,25 +97,46 @@ def _require_check_targets(runner: Path) -> None:
 #: 🔴 IT WAS 120, AND 120 REDDENED THE GATE ON DIFFS THAT COULD NOT REACH THIS
 #: FILE. Measured 2026-09-11 on the dev host at load ~52: one nested run of
 #: `scripts/collector/i3/tests` — the SMALLEST target in the set, 13 tests —
-#: took **47 s**, i.e. 39% of the old bound, and almost all of it is the
-#: runner's fixed preflight rather than the tests. CI is documented at 27–50
-#: concurrent full-suite runs on one node (CLAUDE.md), where that overhead is
-#: multiplied, so the old bound was breached by CONTENTION and the failure read
-#: as a code failure: `subprocess.TimeoutExpired`, returncode -9, traceback
-#: ending in `_check_timeout` — reproduced here by lowering this constant.
-#: Occurrences: devrc#1458 and #1462, both merged with `tekton/devrc-pytests`
-#: RED because of it.
+#: took **47 s**, i.e. 39% of the old bound. CI is documented at 27–50
+#: concurrent full-suite runs on one node (CLAUDE.md), so the old bound was
+#: breached by CONTENTION and the failure read as a code failure:
+#: `subprocess.TimeoutExpired`, returncode -9, traceback ending in
+#: `_check_timeout` — reproduced here by lowering this constant. Occurrences:
+#: devrc#1450, #1458 and #1462, all three merged with `tekton/devrc-pytests`
+#: RED, and all three on diffs that cannot reach this file (#1462 and #1450 are
+#: docs-only).
 #:
-#: 600 s is ~12x the measured figure, which is headroom for contention, and it
-#: still bounds a genuine hang well inside the gate's own budget. Deliberately
-#: NOT env-overridable: a bound a run can widen for itself is a bound that
-#: cannot fail, and a green under it would mean nothing.
+#: 🔴 WHERE THOSE 47 SECONDS GO — AND AN EARLIER VERSION OF THIS COMMENT GOT IT
+#: WRONG IN THE WAY THAT MATTERS. It said "almost all of it is the runner's
+#: fixed preflight rather than the tests". Not preflight: a `--targets` run
+#: still executes the hook-test and shell-test families, which `--targets` does
+#: NOT narrow. Of ~54 s measured under `bash -x`, the SELECTED target's pytest
+#: was **2.9 s** and ~46 s was those two families. The discriminator, same box,
+#: same load ~52, minutes apart: `--targets scripts/collector/i3/tests` = **47 s**
+#: against `--files <one file in it>` = **4 s**, because `--files` sets
+#: `SCOPED_MODE` and `run-tests.sh:4518` drops the families under it.
+#:
+#: 🔴 SO THIS BOUND IS THE SYMPTOM FIX, AND IT SAYS SO. The root cause is that a
+#: `--targets` run pays for work it did not select; `run-tests.sh` already has
+#: the machinery to skip it and reaches it only via `--files`. Decoupling that
+#: would take the nested run to ~4 s and make even the ORIGINAL 120 s ~30x
+#: headroom. Calling the cost "preflight" is precisely what made a bigger
+#: timeout look like the only lever — do not re-derive that.
+#:
+#: 600 s is ~12x the measured 47 s. ⚠ It is not free: this file performs FOUR
+#: real nested runs, so the worst case moves from 4x120 s = 8 min to
+#: 4x600 s = 40 min, against a measured `timeouts.tasks` of 1h10m on
+#: `devrc-ci-pipeline` — 57% of the task budget. A run that hits that cap posts
+#: NOTHING and the checks stay `pending` forever (CLAUDE.md, measured on
+#: `devrc-ci-nnt6f`/`-9p6mf`). That is the trade this value makes: a readable
+#: red becomes less likely, an unclearable pending becomes more so.
+#:
+#: Deliberately NOT env-overridable: a bound a run can widen for itself is a
+#: bound that cannot fail.
 _RUNNER_TIMEOUT_S = 600
 
 
-def _spawn(
-    args: list[str], *, env: dict, cwd: Path | None = None
-) -> subprocess.CompletedProcess:
+def _spawn(args: list[str], *, env: dict) -> subprocess.CompletedProcess:
     """The ONE place this file bounds a nested `run-tests.sh`.
 
     🔴 ONE RULE, ONE PLACE — AND IT WAS SIX. `timeout=120` was open-coded at six
@@ -135,7 +155,7 @@ def _spawn(
     try:
         return subprocess.run(
             ["bash", *args],
-            cwd=str(cwd or REPO_ROOT),
+            cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
             timeout=_RUNNER_TIMEOUT_S,
@@ -160,7 +180,7 @@ def _spawn(
         ) from exc
 
 
-def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+def _run(args: list[str]) -> subprocess.CompletedProcess:
     """Run the runner with a SCRUBBED environment.
 
     🔴 `DEVRC_TARGETS` is removed, and that is not hygiene — it is what keeps
@@ -173,7 +193,7 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
     debugging a subset run — i.e. exactly when these guards matter.
     """
     env = {k: v for k, v in os.environ.items() if k != "DEVRC_TARGETS"}
-    return _spawn(args, env=env, cwd=cwd)
+    return _spawn(args, env=env)
 
 
 THIS_FILE = Path(__file__).resolve()
@@ -198,22 +218,47 @@ def test_no_call_site_open_codes_its_own_subprocess_bound():
     a call carrying no bound at all — which is the unbounded hang this file's
     bound exists to prevent, i.e. the guard would pass hardest on the worst
     outcome.
+
+    🔴 THE FIRST VERSION OF THIS GUARD WAS NARROWER THAN THIS DOCSTRING, WHICH IS
+    THE DEFECT IT IS SUPPOSED TO CATCH. It resolved `from subprocess import run
+    as r` and **not** `import subprocess as sp; sp.run(...)` — a sibling spelling
+    of the same aliasing the paragraph above claims to close — and it saw only
+    `run`, so `Popen(...).communicate()` with no bound was invisible while the
+    assertion below called exactly that "worse than the red it replaces". Both
+    were measured SURVIVING. Caught by a round-0 audit, not by the suite.
+    `_SPAWNING_CALLABLES` is therefore an enumerated set rather than the one name
+    that happened to be in use.
     """
     tree = ast.parse(THIS_FILE.read_text(encoding="utf-8"))
 
-    # Resolve every local name bound to subprocess.run, however it was imported.
-    aliases: set[str] = set()
+    #: Every `subprocess` entry point that can start a child. `run` is the one
+    #: this file uses; the rest are here because the guard must be as wide as its
+    #: docstring, and `communicate()` on an unbounded `Popen` is the exact hang
+    #: the second assertion below is about.
+    _SPAWNING_CALLABLES = frozenset(
+        {"run", "Popen", "call", "check_call", "check_output"}
+    )
+
+    # Resolve every local name that can reach one of those, however it was bound:
+    # `import subprocess`, `import subprocess as sp`, `from subprocess import run`,
+    # `from subprocess import run as r`.
+    module_aliases: set[str] = {"subprocess"}
+    direct_aliases: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+        if isinstance(node, ast.Import):
             for a in node.names:
-                if a.name == "run":
-                    aliases.add(a.asname or a.name)
+                if a.name == "subprocess":
+                    module_aliases.add(a.asname or a.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for a in node.names:
+                if a.name in _SPAWNING_CALLABLES:
+                    direct_aliases.add(a.asname or a.name)
 
     def _is_spawn_call(call: ast.Call) -> bool:
         fn = call.func
-        if isinstance(fn, ast.Attribute) and fn.attr == "run":
-            return isinstance(fn.value, ast.Name) and fn.value.id == "subprocess"
-        return isinstance(fn, ast.Name) and fn.id in aliases
+        if isinstance(fn, ast.Attribute) and fn.attr in _SPAWNING_CALLABLES:
+            return isinstance(fn.value, ast.Name) and fn.value.id in module_aliases
+        return isinstance(fn, ast.Name) and fn.id in direct_aliases
 
     # Which function does each spawn call live in?
     owner: dict[int, str] = {}
@@ -598,7 +643,12 @@ def test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count():
     # Through `_run`, NOT a bare subprocess.run: this test bypassed the scrub
     # and so inherited an ambient DEVRC_TARGETS, giving the developer debugging
     # a subset run a spurious RED — the mirror of the vacuous GREEN the scrub
-    # exists to prevent. `_run`'s 120s timeout is ample; this costs ~13s.
+    # exists to prevent. Bounded by `_RUNNER_TIMEOUT_S`, like every other spawn
+    # here. ⚠ The cost is NOT this target's 13 tests: a `--targets` run still
+    # executes the hook-test and shell-test families, which `--targets` does not
+    # narrow — measured 47 s wall against 4 s for the same work under `--files`.
+    # An earlier version of this comment said "`_run`'s 120s timeout is ample;
+    # this costs ~13s", and both halves were wrong.
     proc = _run([str(RUN_TESTS), "--targets", tiny, str(REPO_ROOT)])
     combined = proc.stdout + proc.stderr
     assert "pinned entries apply here" not in combined, (
