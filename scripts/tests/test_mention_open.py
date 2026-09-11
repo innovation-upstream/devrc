@@ -431,13 +431,11 @@ def test_the_HOST_STATE_path_ledger_is_pinned_two_way(tmp_path):
     `~/.config/mention-open/` that nobody added to this ledger fails here, which
     is the only thing that makes the next one impossible to forget.
     """
-    declared = {n for n in dir(MO)
-                if n.endswith(("_PATH", "_PICKS", "PICKS_PATH"))
-                and isinstance(getattr(MO, n), Path)
-                and getattr(MO, n).parent.name.startswith(("mention-open",))}
-    # The fixture has redirected them all into tmp_path, so their parents are no
-    # longer `mention-open` — ask the SOURCE instead, which is what a new
-    # constant would be added to.
+    # 🔴 ASKED OF THE SOURCE, NOT OF THE MODULE OBJECT. The autouse fixture has
+    # already rebound every one of these to a `tmp_path` file, so a check that
+    # inspected `dir(MO)` for paths under `mention-open/` would find NOTHING and
+    # pass vacuously — a ledger that is two-way against an empty set is not
+    # two-way. The source is also where a new constant actually gets added.
     source = HANDLER.read_text()
     in_source = set(re.findall(r"^([A-Z][A-Z0-9_]*(?:PATH|PICKS))\s*=\s*Path\(",
                                source, re.M))
@@ -446,7 +444,7 @@ def test_the_HOST_STATE_path_ledger_is_pinned_two_way(tmp_path):
         f"the ledger names {sorted(HOST_STATE_CONSTANTS)}. Every one of these "
         f"points at a 0600 file naming PRIVATE repositories — add it to the "
         f"autouse redirect AND to this ledger, or tests will read (or write) "
-        f"the operator's own data. (`declared` for reference: {sorted(declared)})")
+        f"the operator's own data.")
     for const, env in HOST_STATE_CONSTANTS.items():
         got = getattr(MO, const)
         assert got.is_relative_to(tmp_path), (

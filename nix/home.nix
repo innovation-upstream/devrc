@@ -4222,7 +4222,7 @@ in
   # host" and 3 only for a genuine failure.
   systemd.user.services.mention-known-repos-refresh = {
     Unit = {
-      Description = "Refresh the mention-open repo mapping and picker universe";
+      Description = "Refresh the mention-open repo mapping, universe and range table";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
       OnFailure = [ "notify-failure@%n.service" ];
@@ -4241,6 +4241,15 @@ in
       # A cold paginated run over ~400 repos is a few seconds; the `gh api` call
       # carries its own 120s timeout and `gh auth status` 30s. 300 is a ceiling
       # for a wedged network, not a budget.
+      #
+      # ⚠ THE RUN GREW A THIRD LEG AND THIS NUMBER DID NOT HAVE TO MOVE, which
+      # is worth stating rather than leaving the reader to re-derive. The range
+      # table is BATCHED GraphQL: MEASURED 2026-09-11 against public repos,
+      # 25/50/75/100 aliases in ONE request all answered in full at
+      # 2.15/2.14/2.27/2.28s, so ~400 repos is ~8 requests and ~20s, each
+      # carrying its own 60s cap (`RANGES_TIMEOUT`). The unbatched spelling —
+      # one REST call per repo — is what would have needed this raised, and is
+      # exactly why it is not written that way.
       TimeoutStartSec = 300;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.git pkgs.gh pkgs.coreutils ]}"

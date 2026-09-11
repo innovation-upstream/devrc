@@ -1943,7 +1943,15 @@ def _ordered_universe(universe: list[str],
     state = ordering_state(ranges, ranges_age_days())
     if state != ORDER_APPLIED:
         return (universe, state, (0, 0))
-    scores = pick_scores(load_picks(), num)
+    # 🔴 ONE CLOCK READING, TWO READERS — the same discipline `mapping_age_days`
+    # states for the mtime. `load_picks` decides which rows are inside the age
+    # cap and `pick_scores` decides how much each one decays; two independent
+    # `time.time()` calls would let a row sit on the boundary and be filtered by
+    # one while weighted by the other. The window is microseconds and the bug
+    # would be unreproducible, which is exactly why it is closed here rather
+    # than argued about.
+    now = time.time()
+    scores = pick_scores(load_picks(now=now), num, now=now)
     rows = order_universe(universe, num, ranges, scores)
     # Counted from the SAME `ranges` dict the sort used, not re-read: a header
     # that disagreed with the order beside it would read as a bug in the note.
