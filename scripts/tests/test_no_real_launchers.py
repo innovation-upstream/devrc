@@ -1828,6 +1828,31 @@ PINNED_PATH_CLOBBERS = {
         "unfindable. A prepending version measured a live call to the real "
         "board on this host while the nix sandbox (which has no clawgatectl) "
         "measured the intended case: two tiers, opposite blind spots"),
+    "test_analyze_service_index_backup.py": (
+        '"PATH": ' + "_closed_unit_path()",
+        "a clobber justified by ENUMERATION, and the enumeration is the POINT of "
+        "the test rather than a caveat on it. `_unit_shaped_env` models the "
+        "`analyze-service-index-backup` systemd unit, whose own `Environment=` "
+        "sets a CLOSED `PATH=${lib.makeBinPath [ git age kubectl coreutils ]}`; "
+        "`_closed_unit_path()` rebuilds exactly that set from `shutil.which`, so "
+        "the replacement holds the bin dirs of those four tools and nothing "
+        "else. No HAZARD_VOCABULARY name is reachable from it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, openrgb, "
+        "espanso, home-manager or nixos-rebuild — none is in that list, and the "
+        "function asserts the modelled PATH is non-empty so it cannot degrade to "
+        "a set that vacuously contains nothing. "
+        "🔴 REPLACING IS THE POINT AND PREPENDING WOULD DESTROY THE TEST. The "
+        "property under measurement is that the unit's PATH CANNOT reach "
+        "`cairn` — that is the deploy-blocker these probes exist for — and the "
+        "operator's PATH can, so prepending would leave the pinned client "
+        "findable and every pin-absence assertion would pass having measured "
+        "nothing. `_closed_unit_path` carries its own positive control for "
+        "exactly that: it asserts `shutil.which('cairn', path=...)` is None "
+        "before returning. "
+        "⚠ THIS ENTRY IS NEW BECAUSE THE LINE CHANGED MEANING. It used to read "
+        "`os.environ[\"PATH\"]` — a pass-through this scanner correctly did not "
+        "count as a clobber, and the reason the suite could not see that the "
+        "unit's PATH has no cairn in it."),
     "test_cairn_pin.py": (
         "dict(os.environ, PATH=" + "str(tmp_path))",
         "a clobber justified by EMPTINESS, and the emptiness is CONSTRUCTED "
