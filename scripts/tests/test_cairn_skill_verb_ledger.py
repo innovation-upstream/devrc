@@ -4,8 +4,8 @@ WHY THIS EXISTS
 ---------------
 From devrc#1254 (`34d00d90`, which added `PUT … If-None-Match: *` and the
 `cairn create` subcommand) until 2026-09-11, `claude/skills/cairn/SKILL.md`
-opened a 🔴 block with **"There is no CREATE route, and the failure does not
-say so."** The CLI had shipped `cairn create` the whole time.
+used to say **"There is no CREATE route, and the failure does not say so."**
+The CLI had shipped `cairn create` the whole time.
 
 🔴 THE REASON IT SURVIVED IS THE INTERESTING PART: the block's CONCLUSION was
 still true. A scope's FIRST entry genuinely cannot be made through the API — but
@@ -29,15 +29,30 @@ probe wired to nothing. Both wrote nothing.
 
 WHAT THIS GUARD ASSERTS, AND WHY IT IS NOT A WORD MATCH
 -------------------------------------------------------
-🔴 A guard on the refuted SENTENCE would be walkable by rewording, and worse, it
-would trip on this file's own retraction of that sentence — the exact regress
-`claude/RULES.md` records under "a prose guard mutates faster than the prose".
-
-So the guard pins STATE, not words: a two-way ledger of every subcommand
+This guard pins STATE, not words: a two-way ledger of every subcommand
 `scripts/cairn` declares. A verb the CLI gains with no ledger row fails; a
 ledger row naming no CLI verb fails. Rows marked ``NAMED`` must appear verbatim
 in the skill body, which is what makes "the skill silently omits a verb it also
 makes claims about" impossible to reintroduce.
+
+🔴 **IT IS HALF THE GUARD, AND AN EARLIER VERSION OF THIS DOCSTRING ARGUED IT
+WAS THE WHOLE OF IT — WRONGLY.** It said a guard on the refuted SENTENCE was
+rejected because it "would trip on this file's own retraction". Two things were
+wrong with that. First, the repo already owns a controlled instrument for the
+sentence half — `_unmarked_retractions` in `test_subsystem_store_api.py`, which
+normalises case, emphasis and LINE WRAPS, exempts a quote only when a retraction
+marker sits within 60 characters, and carries both a negative and a positive
+control. Second, the reason was self-serving: a hand sweep run while fixing
+`SKILL.md` reported the repo CLEAN, and it was case-sensitive — there were FOUR
+live copies of the sentence in other tracked files, one of them straddling a
+newline inside a docstring where no line-based grep could ever see it.
+
+So both guards now run, because they catch different failures: this ledger
+catches FORWARD drift (a new verb the skill never mentions), and the needle
+catches the SENTENCE being re-asserted anywhere in the tree. The docstrings in
+this file are phrased to carry a retraction marker beside every quotation of the
+refuted claim, which is the discipline that keeps them exempt — cheap, and not
+the impossibility the earlier wording claimed.
 
 ``DELEGATED`` is not a loophole — it carries its reason, and the reason is
 load-bearing: the skill says "Writes are not this skill's" and routes writers to
@@ -158,9 +173,9 @@ def test_a_named_verb_appears_in_the_skill_body(verb: str) -> None:
     """The skill must actually name each verb the ledger says it names.
 
     🔴 This is the assertion that would have caught the original defect: the
-    skill asserted "There is no CREATE route" while `cairn create` shipped, and
-    the word `create` appeared nowhere as a verb. It pins the verb NAME — state
-    the CLI decides — so a reword of the surrounding prose cannot walk it.
+    skill said "There is no CREATE route" while `cairn create` shipped, and the
+    word `create` appeared nowhere as a verb. It pins the verb NAME — state the
+    CLI decides — so a reword of the surrounding prose cannot walk it.
     """
     body = SKILL.read_text(encoding="utf-8")
     _mode, reason = VERB_LEDGER[verb]

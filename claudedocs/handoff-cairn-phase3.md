@@ -81,8 +81,11 @@ merge relieved. #1261 still earns its place: it stops the edit being re-made.
 generation is `origin/main` **PLUS** them while the laptop is clean. **Both hosts at the same
 SHA are NOT running the same ARTIFACT.** Pre-existing WIP from another thread; untouched.
 
-⚠ **The doc's Goal is met for READS and APPENDS, not for CREATES.** The store has no create
-route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it.
+✅ **The doc's Goal is met for READS, APPENDS and now CREATES.** This used to say *"The store
+has no create route"* — **RETRACTED 2026-09-11**: rank 24's owner, **devrc#1254 / `34d00d90`**,
+MERGED on 2026-09-03 and shipped `PUT … If-None-Match: *` plus the `cairn create` verb. See
+rank 24 below for what is still true (a new SCOPE's first entry remains an operator step, for
+a different reason).
 
 ## Open investigations — live diagnosis state
 
@@ -938,9 +941,16 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     (append / create-entry / create-scope) are exactly the three paths that mechanism predicts —
     but the mechanism was identified there, not here.
 
-24. 🔴 **THE API HAS NO CREATE ROUTE, which is very likely WHY rank 23 happened.** Verified in
-    `server.py`: `If-Match` is **mandatory** on PUT, `*` is refused, and the handler resolves an
-    existing entry — so `cairn put --file` on a new ref fails *"cannot derive a revision"*. A
+24. ✅ **CLOSED by devrc#1254 / `34d00d90` (2026-09-03).** This rank used to say *"THE API HAS
+    NO CREATE ROUTE, which is very likely WHY rank 23 happened"* — that sentence is wrong as of
+    #1254, which added `PUT` with `If-None-Match: *` and the `cairn create` verb. ⚠ What
+    remains TRUE is narrower and worth keeping: a new **SCOPE's** first entry still cannot be
+    created through the API, because the index is built by walking the store root narrowed by
+    the allowlist, so an absent scope resolves to nothing (measured 2026-09-11: **rc 6
+    `not-found`**, against **rc 9 `already-exists`** as the control). The original text, kept
+    because the rank 23 link reasons from it: verified in
+    `server.py`, `If-Match` was **mandatory** on PUT, `*` was refused, and the handler resolved an
+    existing entry — so `cairn put --file` on a new ref failed *"cannot derive a revision"*. A
     scope's first record can only reach the pod through an operator `seed.sh`. So the only
     create path available to a session is LOCAL, and nothing carries it onward.
     **Closing condition:** a merged PR adding a create route (or an explicit, recorded decision

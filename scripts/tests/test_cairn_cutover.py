@@ -1078,9 +1078,23 @@ class TestTheFreezeIsWatchedNotAsserted:
         assert cc.survey(empty) == {"examined": 0, "writable": 0, "refused": 0, "other": 0}
 
     def test_the_freeze_leaves_SCOPE_DIRECTORIES_writable(self, cc, tmp_path):
-        """A deliberate asymmetry with a known cost: the hosted API has no CREATE
-        route, so freezing the directories too would leave a brand-new
-        subsystem's first entry with nowhere to go at all."""
+        """A deliberate asymmetry with a known cost — and the cost still stands,
+        for a NARROWER reason than this docstring used to give.
+
+        ⚠ RETRACTED: it used to argue "the hosted API has no CREATE route".
+        devrc#1254 / `34d00d90` added one (`PUT` + `If-None-Match: *`, exposed as
+        `cairn create`), so that sentence is wrong. `cairn-cutover.py`'s own
+        docstring already retracts it; this one did not, so the code and its test
+        disagreed — which is why the retraction is written here rather than
+        deleted.
+
+        What survives, and what actually justifies leaving directories writable:
+        a new **SCOPE's** first entry still cannot be created through the API,
+        because the index is built by walking the store root narrowed by the
+        caller's allowlist, so a scope with no directory resolves to nothing and
+        the write is refused at the index. Freezing directories too would leave a
+        brand-new subsystem's first entry with nowhere to go.
+        """
         root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
         cc.set_entry_mode(root, 0o444)
         assert (root / "sc").stat().st_mode & 0o200, "the scope directory was frozen too"

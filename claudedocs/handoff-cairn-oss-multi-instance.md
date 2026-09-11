@@ -1264,7 +1264,7 @@ none, so the field was deleted rather than the assertion weakened.
 
 **🔴 A STALE BLOCKER COSTS MORE THAN AN UNKNOWN ONE.** Two of the proposal's five blockers
 evaporated on contact with the code, and both had been written down as facts. "The API has no
-create route" was quoted from a handoff note that predated the change closing it — `PUT` with
+create route" is wrong — it was quoted from a handoff note predating the change closing it — `PUT` with
 `If-None-Match: *` has created entries for some time, with 14 test references. "The authoring
 tool must become instance-aware" assumed a module had to come along that supplied 5.3% of what
 was needed. **Nobody re-checks a thing already written down**, so it survives every review and

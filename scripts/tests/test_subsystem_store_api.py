@@ -4176,6 +4176,21 @@ _RETRACTED_BOUNDARY = (
     # copies of the number drifted together, which is exactly what a repo-wide
     # needle catches and three hand-checked sites do not.
     "51 entries of headroom",
+    # 🔴 ALSO NOT A BOUNDARY CLAIM — SAME FAILURE MODE, SAME SCANNER, and this
+    # one is the argument for the scanner rather than an application of it.
+    # "there is no CREATE route" was true until devrc#1254 (`34d00d90`) shipped
+    # `PUT … If-None-Match: *` and the `cairn create` verb. `claude/skills/cairn/
+    # SKILL.md` then asserted it for 8 more days, and a hand sweep run while
+    # fixing THAT file reported the repo clean — it was case-sensitive, and of
+    # the four live copies it missed, one straddled a newline inside a
+    # docstring. A line-based grep structurally cannot see that one; this
+    # scanner normalises wraps and case, which is the whole point.
+    # ⚠ The refuted claim is about the ROUTE's existence only. That a new
+    # SCOPE's first entry still cannot be created through the API remains TRUE
+    # (the index is built by walking the store root, so an absent scope
+    # resolves to nothing) — do not "correct" that sentence into a falsehood in
+    # the other direction.
+    "no create route",
 )
 
 # A retraction has to QUOTE the claim to retract it, so an occurrence with one
