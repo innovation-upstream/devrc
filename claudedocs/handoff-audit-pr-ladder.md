@@ -970,6 +970,43 @@ retained as DONE/open markers; do not re-claim the DONE ones.
   without waiting for the re-run because the diff is one markdown file with no code path. Stated
   rather than glossed — it is a judgement under CLAUDE.md's change-scoped policy, not a green.
 
+- 🔴 **A GATE WAS DELIBERATELY SKIPPED, AND THE RECORD SAYS SO RATHER THAN IMPLYING A GREEN.**
+  `#1448` (rank 12's queue close, ONE `claudedocs/*.md` file) merged on a **PARTIAL** gate by
+  operator decision. Stated in its PR body and repeated here because a merged PR with no gate
+  note reads, later, exactly like a gated one. **Ran:** 693 passed across the six modules that
+  can actually read a `claudedocs/*.md` — `test_no_client_hostnames`, `test_no_captured_text`,
+  `test_no_captured_markup`, `test_no_public_ips`, `test_doc_path_rot`, `test_handoff_doc` — plus
+  the node tier (1449/1449) which had completed inside the timed-out run. **NOT run:** the full
+  pytest tier and both `nix` check derivations. **Nearest full evidence:** `#1416`, the same file
+  and the same kind of edit, four-leg green at base `03d7e0ad` hours earlier. 🔴 **The
+  generalisable part is the shape of the note, not the decision:** name the tier that ran, the
+  tier that did not, and the nearest full green — a subset reported without those three is
+  indistinguishable from a gate.
+- 🔴 **TWO 3600s GATE BUDGETS DIED TO BOX SATURATION, AND THE DISCRIMINATOR WAS `/proc`, NOT A
+  RE-RUN.** Both runs stalled with **no target completing**, and on a DIFFERENT target each time
+  (`scripts/dl-router/tests`, then `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`)
+  — which is the load signature, since a failed assertion inflates exactly one target and load
+  inflates all of them. Measured at the moment it mattered: **load 79.48 on 24 cores**, with three
+  OTHER sessions running full suites and `nix build` concurrently (`devrc-gate-base` running
+  `run-tests.sh`, session `3495c5a1…` running `nix build …#checks…pytests`, a third
+  `run-tests.sh --set hermetic`, plus two agent worktrees). 🔴 **The right response was NOT to
+  re-run**: a fourth concurrent suite degrades the other three sessions' runs as much as its own.
+  Read `/proc/<pid>/cmdline` + `cwd` for the competing work before deciding, and never let a `-f`
+  pattern reach `pkill`. ⚠ The stalled target passing in isolation (49.94s, and 67.18s under the
+  runner's exact plugin+xdist args) is **necessary and not sufficient** — it does not prove the
+  full suite can complete; only a completed run does.
+- 🔴 **I GREPPED THIS DOC FOR MY OWN SENTENCES AND READ "CONDENSED" AS "DELETED".** Checking that
+  ranks 7/11/12 survived, exact-string `grep -cF` on the wording I had committed returned **0**
+  for ranks 7 and 11 and for one gotcha — and the conclusion "another session dropped my entries"
+  was wrong. They were **rewritten shorter, with the numbering intact**; a looser pattern found
+  all of them. **A grep counts the string you typed, never the content you mean** — this doc
+  already says so twice about other people's numbers, and it was reproduced here on my own.
+  🔴 **The real hazard it points at is still live, though:** `Next steps (ranked)` and `State now`
+  are REPLACE sections in a doc that **several sessions write concurrently**, so a delta that
+  includes either one silently overwrites whatever another session put there since. This update
+  deliberately omits BOTH and touches only the append-only `Gotchas`, which is what "omit a
+  section and it is left alone" is for.
+
 ## How to verify
 ```bash
 # 1. main is not red on the guard this arc broke
