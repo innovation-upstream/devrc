@@ -1912,9 +1912,18 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
     return 1
 
 
-def _ordered_universe(universe: list[str],
-                      num: str) -> tuple[list[str], str, tuple[int, int]]:
-    """`(rows, ordering state, (plausible, impossible))` — the impure composer.
+def _ordered_universe(
+        universe: list[str],
+        num: str) -> tuple[list[str], str, tuple[int, int], float | None]:
+    """`(rows, state, (plausible, impossible), age_days)` — the impure composer.
+
+    🔴 THE AGE COMES BACK WITH THE STATE, AND THAT IS THE "ONE MEASUREMENT, TWO
+    READERS" RULE `mapping_age_days` states. The state is DECIDED from the
+    file's mtime and the header then REPORTS that mtime; a second `stat` for
+    the report can disagree with the first — the file is rewritten by a daily
+    unit — and a note whose age contradicted the verdict beside it would read
+    as a bug in the note. `universe_note` already makes exactly this argument
+    about its own date/age pair.
 
     🔴 THE ONLY I/O IN THE ORDERING, GATHERED IN ONE PLACE. Everything it calls
     is pure and separately testable (`order_universe`, `pick_scores`,
@@ -1940,9 +1949,10 @@ def _ordered_universe(universe: list[str],
     generator has run once.
     """
     ranges = load_known_ranges()
-    state = ordering_state(ranges, ranges_age_days())
+    age = ranges_age_days()
+    state = ordering_state(ranges, age)
     if state != ORDER_APPLIED:
-        return (universe, state, (0, 0))
+        return (universe, state, (0, 0), age)
     # 🔴 ONE CLOCK READING, TWO READERS — the same discipline `mapping_age_days`
     # states for the mtime. `load_picks` decides which rows are inside the age
     # cap and `pick_scores` decides how much each one decays; two independent
@@ -1957,7 +1967,8 @@ def _ordered_universe(universe: list[str],
     # that disagreed with the order beside it would read as a bug in the note.
     classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
     return (rows, state,
-            (classes.count(CLASS_PLAUSIBLE), classes.count(CLASS_IMPOSSIBLE)))
+            (classes.count(CLASS_PLAUSIBLE), classes.count(CLASS_IMPOSSIBLE)),
+            age)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2092,6 +2103,7 @@ def main(argv: list[str] | None = None) -> int:
                       if (may_offer_universe and num) else [])
     order_state = ORDER_NO_TABLE
     order_counts = (0, 0)
+    order_age: float | None = None
     _universe_rows: list[list[dict]] = []
 
     def universe_rows() -> list[dict]:
@@ -2111,9 +2123,9 @@ def main(argv: list[str] | None = None) -> int:
         ordering — should survive a fourth call site being added, and because
         the alternative is a reader re-deriving that three-way exclusivity from
         scratch. What it must NOT do is read as a live optimisation."""
-        nonlocal order_state, order_counts
+        nonlocal order_state, order_counts, order_age
         if not _universe_rows:
-            rows, order_state, order_counts = _ordered_universe(
+            rows, order_state, order_counts, order_age = _ordered_universe(
                 universe_repos, num)
             _universe_rows.append(universe_candidates(num, rows))
         return _universe_rows[0]
@@ -2299,8 +2311,10 @@ def main(argv: list[str] | None = None) -> int:
     # for its staleness clause, for the same reason. Substituting would drop
     # whichever half happened to be checked second.
     if universe_shown:
+        # `order_age` is the reading the STATE was decided from, not a second
+        # `stat` — see `_ordered_universe`.
         extra = ordering_note(num, order_state, order_counts[0],
-                              order_counts[1], ranges_age_days())
+                              order_counts[1], order_age)
         if extra:
             mesg = f"{mesg} · {extra}" if mesg else extra
 
