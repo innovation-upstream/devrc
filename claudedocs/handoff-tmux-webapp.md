@@ -3406,7 +3406,7 @@ are corrected in place.
   unusable as a selector. The wire key for the tmux session is camelCase **`tmuxSessionName`** —
   querying `session` returns a confident "88/88 missing".
 - 🔴 **`term send` is subject to NONE of the calling session's PreToolUse hooks.** Found live: a
-  `tmux kill-session` was blocked by a guard, and a send would have bypassed it. That is the
+  a wide tmux kill was blocked by a guard, and a send would have bypassed it. That is the
   blocked action, not a workaround.
 - 🔴 **The clawgate skill is a home-manager `home.file` COPY** (`readlink -f` lands in
   `/nix/store`), so merging #1515 does not make it live — that needs `home-manager switch`.
