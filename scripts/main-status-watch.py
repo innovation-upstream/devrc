@@ -78,9 +78,10 @@
 # this very paragraph did it.
 # ⚠ AND AN EARLIER WORDING OVERSTATED THE SEAM PINS above: it said the tests
 # pinned that the production path "resolves the operator's OWN origin". They did
-# not — every test set the repo override, so `resolve_repo` had NO coverage and
-# an enumerated mutation sweep found ten survivors inside it. No test reads the
-# real remote; what is pinned is the argv and the URL parsing.
+# not — every test set the repo override, so nothing exercised `resolve_repo`
+# past its first line: TEN of its ELEVEN enumerated mutants survived, the one
+# death being the override branch itself, which every test needs. No test reads
+# the real remote; what is pinned is the argv and the URL parsing.
 """Start the main-green deadman early when main's own CI says main is red."""
 import json
 import os
@@ -143,16 +144,20 @@ def print_header():
 # worse still, so it is classified as NOT-A-VERDICT and the walk continues past
 # it. That is the narrowest rule that can be wrong in only one direction.
 #
-# ⚠ `commit_verdict` BRANCHES ON `green` AND `red` ONLY. The finer classes below
-# are not consulted by anything — they exist so this function is TOTAL, with a
-# named answer for every shape a row can take, and they are pinned by
-# `test_classify_maps_a_row_to_its_documented_class`. Until that test existed
-# they had no consumer at all, and an enumerated mutation sweep found every arm
-# of this function undriven: the catch-all could be turned into `return "green"`
-# — i.e. a state GitHub adds tomorrow folded into "main is green" — while a
-# 61-test suite stayed fully green. A tuple named NOT_A_VERDICT used to sit here
-# enumerating the same classes; nothing read it either, so it was deleted rather
-# than left reading as a contract it could not enforce.
+# ⚠ `commit_verdict` BRANCHES ON `green` AND `red` ONLY, WHICH IS WHY THE FINER
+# CLASSES NEEDED A TEST OF THEIR OWN. Downstream, `superseded`/`killed`/
+# `no-gate-pod`/`error-other` are indistinguishable, so an end-to-end test can
+# only ever see "not a verdict" — measured, 35 of this function's 60 enumerated
+# mutants survived a fully green 61-test suite, and the 25 that died were
+# exactly the ones that moved an answer INTO green-or-red. Worse, the two
+# fall-through `return "error-other"`s are reached by no fixture at all: turning
+# either into `return "green"` survived. That is a state GitHub adds tomorrow
+# folded into "main is green", closing a red episode. They are now pinned by
+# `test_classify_maps_a_row_to_its_documented_class`, which drives this function
+# directly — the only way to see a distinction the caller cannot make.
+# A tuple named NOT_A_VERDICT used to sit here enumerating the same classes;
+# nothing read it, so it was deleted rather than left reading as a contract it
+# could not enforce.
 
 
 def classify(state, description):

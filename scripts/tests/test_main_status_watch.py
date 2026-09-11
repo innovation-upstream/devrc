@@ -661,10 +661,16 @@ def test_an_unexpected_exception_is_REPORTED_and_LADDERED_not_swallowed(h):
     NAMES ONE SCREEN AWAY. It asserted `returncode in (RC_UNMEASURED, RC_BLIND)`
     — the same disjunction `test_a_failed_episode_write_does_NOT_trigger`'s
     docstring condemns as unable to tell "ladders" from "never escalates".
-    Measured: it let TWENTY-ONE mutants of the net survive a fully green suite,
-    including every `RC_BLIND` in it swapped for `RC_OK` and `n >= escalate`
-    forced False — i.e. a net that can never escalate reads exactly like one
-    that can. One rule, two places; this was the copy left unfixed. Assert the
+    MEASURED: it let SIXTEEN mutants of the general net survive a fully green
+    suite, including both of its `RC_BLIND`s swapped for `RC_OK` and
+    `n >= escalate` forced False — i.e. a net that can never escalate reads
+    exactly like one that can. (⚠ The first version of this sentence said
+    TWENTY-ONE. That was the whole function's survivor count, 23, minus a
+    rounding-down nobody did: 3 were log-line deletions and 4 belonged to a
+    different arm, the `except Unmeasured` this PR deletes. A measured number
+    stated wider than what was measured is the same fault as a guard stated
+    wider than its implementation, in the file auditing exactly that.)
+    One rule, two places; this was the copy left unfixed. Assert the
     EXACT code on each run, and RUN THE LADDER so the escalation is observed
     rather than allowed.
     """
@@ -1321,13 +1327,22 @@ def test_an_unknown_argument_is_a_USAGE_error(h):
 
 # ── classify's vocabulary ─────────────────────────────────────────────────────
 # 🔴 THE SWEEP'S WORST FINDING, AND IT IS AN "ABSENCE READS AS GREEN" ONE.
-# `classify`'s docstring said the tests drive it directly. They did not — NOTHING
-# called it, and every mutant of its `pending` and `error` arms survived,
-# INCLUDING turning the final catch-all `return "error-other"` into
-# `return "green"`. That mutant is not cosmetic: the catch-all is what an
-# UNRECOGNISED state lands on, so a state GitHub adds tomorrow would be folded
-# into "main is green" — closing an open red episode and disarming the
-# accelerator on the strength of a word nobody has seen yet.
+# `classify`'s docstring said the tests drive it directly. No test called it at
+# all — and an end-to-end test STRUCTURALLY CANNOT see most of what it decides,
+# because `commit_verdict` branches on green/red only and folds every other
+# class into "not a verdict". MEASURED: 35 of its 60 enumerated mutants survived
+# a fully green suite, and the 25 that died were exactly those that moved an
+# answer INTO green-or-red. ⚠ Be precise about that — an earlier wording here
+# said "every mutant of its pending and error arms survived", and a quarter of
+# them did not. Overstating a measurement is the same fault as overstating a
+# guard, in the file that exists to catch it.
+#
+# The part that is not merely unobservable is the pair of fall-through
+# `return "error-other"`s: NO fixture reaches either, so turning one into
+# `return "green"` survived. The catch-all is what an UNRECOGNISED state lands
+# on, so a state GitHub adds tomorrow would be folded into "main is green" —
+# closing an open red episode and disarming the accelerator on the strength of a
+# word nobody has seen yet.
 
 @pytest.mark.parametrize(
     "state,description,expected",
@@ -1382,10 +1397,14 @@ def test_the_flake_screen_refuses_an_EMPTY_description_set():
 
 # ── the production repo path ──────────────────────────────────────────────────
 # 🔴 THE HEADER CLAIMED THIS WAS PINNED AND IT WAS NOT. Every behavioural test
-# sets MAIN_STATUS_WATCH_REPO, so `resolve_repo` had ZERO coverage: forcing
-# `if not m` to True or False, and `proc.returncode != 0` to either, all survived.
-# That is the same seam-drift hazard `test_the_production_trigger_...` exists for,
-# on the other production argv.
+# sets the repo override, so nothing exercised `resolve_repo` past its first
+# line: forcing `if not m` to True or False, and `proc.returncode != 0` to
+# either, all survived — TEN of its ELEVEN enumerated mutants. ⚠ Not "zero
+# coverage", which is what this comment said first: the ONE death is the
+# override branch itself, and it dies only because every other test in the file
+# depends on it. Incidental coverage of the line that bypasses the function is
+# not coverage of the function. That is the same seam-drift hazard
+# `test_the_production_trigger_...` exists for, on the other production argv.
 
 def _fake_git(monkeypatch, mod, *, rc=0, stdout="", calls=None):
     def run(cmd, **kw):
