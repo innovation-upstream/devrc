@@ -5,10 +5,23 @@
 #
 # 🔴 WHY THIS EXISTS — the measured problem, not a hunch. The pytest tier's
 # median wall time is 20.1 min over 237 real runs (p90 38 min). It is not slow
-# because any one thing is slow: it is slow because ~27 concurrent agent
-# sessions each run the FULL ~21k-test suite on one 24-core box, and runs
-# bucketed by overlap go 14.5 min (0 others) -> 48.9 min (6+). The lever is not
-# a faster suite. It is FEWER FULL SUITES.
+# because any one thing is slow: it is slow because dozens of concurrent agent
+# sessions each run the FULL ~21k-test suite on one 24-core box. The lever is
+# not a faster suite. It is FEWER FULL SUITES.
+#
+# ⚠ DO NOT PUT A SIZE ON THE CONTENTION EFFECT HERE. This header used to read
+# "runs bucketed by overlap go 14.5 min (0 others) -> 48.9 min (6+)", and that
+# figure is RETRACTED — `CLAUDE.md` retracted it and says in terms that
+# re-deriving it is the trap, while this file went on asserting it as the
+# measured reason for its own existence. Bucketing runs by how many others
+# overlapped them is LENGTH-BIASED: a long run overlaps more runs BY
+# CONSTRUCTION, and a null Monte Carlo with zero interaction reproduces the
+# shape, the 14.5-min baseline and ~2.06x of the 3.4x. Contention is real and
+# its mechanism is uncontroversial; that dataset cannot size it.
+#
+# The two numbers above and below this note are NOT retracted and are what
+# justify the script: the 20.1-min median, and the collection cost measured
+# next. Neither depends on the overlap bucketing.
 #
 # `run-tests.sh --targets` has existed for a while and buys little on its own,
 # because the target that matters is one monolith. MEASURED 2026-09-08 in this
