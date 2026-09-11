@@ -1303,10 +1303,36 @@ def _lib_modules_a_shell_file_references(src, libdir):
                   never opens — LOUD: a human sees a red test and either declares
                   the file or rewords the comment.
 
-    Reading the source raw is the MAXIMUM under-strip. What it returns is a
-    superset of the true code-derived set, structurally, for every shell
-    construct that exists or will exist — nothing enumerated, nothing to keep in
-    step with bash. It cannot fail silent.
+    Reading the source raw is the maximum under-strip for every construct that
+    DELETES a span: no deletion can hide a name a later read would have seen.
+
+    🔴 IT IS NOT AN ABSOLUTE, AND AN EARLIER DRAFT OF THIS PARAGRAPH CLAIMED IT
+    WAS — "a superset … for every shell construct that exists or will exist … it
+    cannot fail silent". That was measurably FALSE, and the sentence was the
+    entire stated justification for deleting a 230-line guard, so a maintainer
+    reading it would not have gone looking. Raw scanning misses a name that no
+    single literal span CONTAINS, because there is nothing to over-keep:
+
+      joined by a continuation   python3 "$H/lib/time\
+                                 outs.py"          <- FIXED, see the re.sub below
+      split across quotes        "$H"/lib/"timeouts.py"        -> still missed
+      libdir in a variable       LIB="$H/lib"; "$LIB/timeouts.py" -> still missed
+      filename in a variable     M=timeouts.py; "$H/lib/$M"    -> still missed
+
+    All four measured. The last three are missed by the DELETED WALK TOO, so they
+    are pre-existing and this change does not regress them — but they falsify the
+    absolute, and an unqualified claim is worse than the gap it hides.
+
+    🔴 THE CONTINUATION CASE WAS A STRICT REGRESSION, WHICH IS WHY THE `re.sub`
+    BELOW IS NOT OPTIONAL. The deleted walk's backslash-newline branch consumed
+    `\` and `\n` and appended NOTHING, so stripping JOINED the halves of a wrapped
+    token — meaning the walk FOUND `timeouts.py` where a raw read does not. Every
+    other span it removed ran to end-of-line with the `\n` preserved, so that
+    branch is the only one that could concatenate. Measured: base RED (`1 failed`,
+    naming the undeclared dependency), this file without the join GREEN over the
+    same injection. `transcript-push.sh` already carries 21 line-continuations.
+    The join restores the walk's behaviour in three characters of state and keeps
+    the never-lex property — it deletes nothing a later read could have used.
 
     🔴 MEASURED ON THE REAL INPUT BEFORE THE WALK WAS REMOVED. Arm (b)'s result
     on `scripts/transcript-push.sh` was `{build_transcript_push.py,
@@ -1331,6 +1357,11 @@ def _lib_modules_a_shell_file_references(src, libdir):
     costs nothing and narrowing it loses whole files. `.sh` as well as `.py`, for
     the same reason.
     """
+    # 🔴 JOIN CONTINUATIONS FIRST — this is a pure UNDER-strip and the one piece
+    # of state here. It deletes `\<newline>` only, which bash itself deletes, so
+    # it can never hide a name: it can only reveal one that was split across the
+    # join. Removing it reintroduces a SILENT miss that the walk did not have.
+    src = re.sub(r"\\\n", "", src)
     return {m for m in re.findall(r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))", src)
             if (libdir / m).exists()}
 
@@ -1356,13 +1387,27 @@ def test_the_shell_scanner_OVER_reports_rather_than_GOING_QUIET():
     The remaining rows are controls, because a scanner that returns everything
     and a scanner that returns nothing are both consistent with row one alone:
 
-      POSITIVE  executable text is read too (row 1 alone passes under a mutant
-                that scans ONLY comment lines — measured, that mutant dies here
-                and nowhere else in the suite)
+      POSITIVE  executable text is read too.
+                ⚠ THIS ROW IS NOT UNIQUELY KILLING, AND AN EARLIER DRAFT CLAIMED
+                IT WAS. That draft said row 1 alone passes under a mutant that
+                scans ONLY comment lines, and that such a mutant "dies here and
+                nowhere else in the suite". Both halves are false, measured:
+                row 1's fixture is a TRAILING comment on an `echo hi` line, so a
+                comment-LINES-only mutant drops that line and ROW 1 kills it; and
+                the same mutant also dies at HYPHENS, whose fixture is plain
+                executable shell. A drop-one sweep found no mutant that this row
+                kills and rows 1/3/4 do not. It is kept anyway — it pins a real
+                property directly, and a `.sh`-only mutant would kill rows 1+2
+                but not 4 — but it is a restatement, not a discriminator, and
+                nobody should cite it as one.
       NEGATIVE  a name that is not a real file is NOT returned — the `.exists()`
                 filter is live, so the set is grounded in the tree
       HYPHENS   `host-role.sh` resolves — the character class and the `.sh`
                 alternative are both exercised against a file that exists
+      JOINED    a name split by a backslash-newline INSIDE the token is returned.
+                🔴 This is the regression row, and it is the only one here that
+                was ever RED: without the `re.sub` join in the helper this scanner
+                returns the empty set for a dependency the deleted walk FOUND.
     """
     libdir = REPO_ROOT / "scripts" / "lib"
     assert (libdir / "host_label.py").exists() and (libdir / "host-role.sh").exists(), (
@@ -1392,6 +1437,20 @@ def test_the_shell_scanner_OVER_reports_rather_than_GOING_QUIET():
         "a HYPHENATED .sh helper is no longer matched. scripts/lib really holds "
         "host-role.sh, and an earlier `[a-z_][a-z0-9_]*` pattern could not match one — a "
         "mutant adding exactly that dependency SURVIVED")
+
+    # 🔴 THE REGRESSION ROW. The name is split by a backslash-newline INSIDE the
+    # path token, which bash joins before it ever resolves a filename — so this
+    # script really does depend on the joined file. `host_label.py` is split as
+    # `host_` + `label.py` so no substring of the raw source spells it: a scanner
+    # without the join returns the EMPTY set here, which is the silent direction.
+    joined = 'python3 "$(dirname "$0")/lib/host_\\\nlabel.py"\n'
+    assert _lib_modules_a_shell_file_references(joined, libdir) == {"host_label.py"}, (
+        "a dependency split across a backslash-newline is no longer reported. This is "
+        "the SILENT direction and it is a REGRESSION against the comment walk this "
+        "scanner replaced: that walk's continuation branch consumed `\\` and `\\n` and "
+        "appended nothing, so stripping JOINED the halves and it FOUND this file. If the "
+        "`re.sub(r'\\\\\\n', '', src)` join was removed from the helper, restore it — "
+        "transcript-push.sh carries 21 line-continuations today")
 
 
 def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
