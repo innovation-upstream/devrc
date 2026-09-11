@@ -15,55 +15,60 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE MACHINERY IS LIVE, ADOPTION HELD AT n=22, AND YIELD IS NOW ANSWERED: 1 of 20.** All
-three are separate claims and each was measured on its own. **Adoption 20 of 22 (91%)**
-post-fix on the workbench, against 2 of 11 (18%) before — the preliminary 4/4 was not a
-small-n fluke. **Yield: exactly one of those 20 sessions had a hit change what it did**, and
-the cause of the other 19 is now measured rather than guessed — see the block below and rank 1.
+🔴 **THE ARC IS CLOSED: yield ANSWERED (1 of 20), the structural cause FIXED, shipped to both
+hosts, and the doc's own stale open-blocks retired.** Adoption and yield are separate claims and
+each was measured on its own: **adoption 20 of 22 (91%)** post-fix on the workbench against 2 of
+11 (18%) before; **yield exactly 1 of 20**, with the cause of the other 19 measured rather than
+guessed. What remains is a WAIT, not work — see rank 1.
 
 - **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
   `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
   `#1295` (`3e7d79a4`) the `/resume` consumer · `#1307` (`bb6e46ee`) ARM the timer ·
-  `#1329` (`4ffb0cc6`) the adoption measurement · `#1332` (`8e9428ef`) the rank-1 fix.
-  Plus `homelab-infra` `d2c9c49a` — the rescued untracked handoff doc.
-- **Deployed and verified 2026-09-06 (`#1332`).** `ship.sh`: "converged + verified — 2 hosts
-  compared, both at `8e9428ef`". Both hosts' `readlink -f ~/.claude/skills/resume/SKILL.md`
-  resolve to the SAME new store path
-  (`/nix/store/sv3b3ylby1dc3wy8arhp0xmgg3dwpsva-devrc-claude-skills/resume/SKILL.md`) and the
-  deployed copy carries the query and the scope warning. Merged, deployed and live are three
-  claims; all three were checked. Supersedes the 2026-09-04 convergence at `bb6e46ee` (`#1307`),
-  which was verified the same way and is simply older.
-- 🔴 **The live-Postgres path is EXERCISED.** `--rebuild --write` → `wrote 4647 section row(s) …
-  (after DELETE of 4 repo label(s) — one transaction)`. The `GENERATED … STORED` `tsv` column was
-  accepted and the GIN index built for the first time; both had only ever been pinned as SQL text.
-- 🔴 **The TIMER has run on its own**, which is the only thing that tests the unit's environment:
-  `Result=success ExecMainStatus=0`, `wrote 4651 section row(s)`, `warnings: none`, 21 s. Read
-  from `journalctl --user -u handoff-index-sync.service`, not inferred from the flag.
-- **Query path live:** `backend=postgres`, `indexed_sections=4651`. 🔴 `backend=` IS the
-  discriminator; a silent fall-back to `memory` renders identically otherwise.
-- 🔴 **ADOPTION MEASURED POST-FIX, 2026-09-07T02:25Z — 8.6 h after `#1332` merged.**
-  **Workbench: 4 of 4** `/resume` runs invoked `handoff_search.py` (100%), matching the
-  co-located `cairn recall` control at 4/4. Pre-fix on the same host: **2 of 11 (18%)**.
-  🔴 **The pre-fix headline this replaces, kept because it is the baseline: 1 of 14 runs across
-  BOTH hosts, and that one fired off the staleness alarm rather than the step** — full evidence
-  in "Open investigations". The 2/11 here is a wider window on ONE host and includes the
-  measuring session, so treat 18% as an upper bound on the old rate, not a restatement of 1/14.
-  All four are INDEPENDENT sessions in `datapacket-talos`; none is the measuring session — that
-  contamination was checked for, because it distorted the first measurement.
-  All four queried a TOPIC, which is what the re-keying was for.
-  ⚠ **n=4, not the ~10 this doc asked for**, and the **laptop ran 0 resumes**, so this is a
-  workbench-only reading over a third of the pre-fix window.
-- 🔴 **YIELD IS ANSWERED — 1 of 20, AND THE CAUSE OF THE OTHER 19 IS MEASURED.** Adoption says
-  the command RAN; this says what the answer was worth. **23 of 60 hit slots were the
-  session's OWN handoff** — the doc it had just read in step 3 — and it was the **#1 hit in
-  13 of 20** queries. Fix shipped in `#1399` (`--exclude-slug`). Full block below.
-  ⚠ The 60 is the SUM OF HIT LINES ACTUALLY PARSED, not 20×3 assumed — every query used
-  `--limit 3` and the corpus returned three each time, so the two happen to coincide.
-- 🔴 **ADOPTION RE-MEASURED 2026-09-08T17:00Z at n=22 — 20 of 22 (91%), control 21/22.** The
-  laptop still contributes **0 runs**, measured over SSH rather than assumed, so this remains
-  a workbench-only reading. The measuring session is excluded from both halves by session id.
-- **Claim `handoff-search-index-1`: RELEASED** (`claim-work: RELEASED refs/heads/claim/…`), after
-  `#1332` merged. Merging does not release a claim; this one was released by hand.
+  `#1329` (`4ffb0cc6`) the adoption measurement · `#1332` (`8e9428ef`) the step-4 promotion ·
+  **`#1399` (`4a67ea73`) the yield answer + `--exclude-slug`** · **`#1476` (`723ed7c1`) the
+  close-out sweep**. Plus `homelab-infra` `d2c9c49a` — the rescued untracked handoff doc.
+- 🔴 **`#1399` DEPLOYED AND VERIFIED ON BOTH HOSTS 2026-09-09.** Merged, deployed and live are
+  three claims and all three were checked: content on `origin/main` (a squash makes the branch
+  head a permanent non-ancestor, so ancestry would read "not merged" forever, plus a negative
+  control that no mutant string leaked in); both hosts at `4a67ea73` resolving the IDENTICAL
+  store path `…-devrc-claude-skills/resume/SKILL.md`; the deployed copy carrying the flag; and
+  the deployed fence parsing (`bash -n` rc 0) on both.
+  ⚠ **`ship.sh` reached the laptop only under a manual `REMOTE_SSH=zach@10.42.0.100`** — its
+  default LAN address timed out. That split the run in two, so `ship.sh` printed
+  **`cross-host agreement NOT COMPARED` both times**; the agreement above was checked BY HAND,
+  not by the tool. Filed as rank 3.
+- **Live end-to-end on the deployed path:** `in_scope_docs=402` of 403, `excluded=handoff-search-index`,
+  and all three hit slots holding documents from a different repo — i.e. the slots the session's
+  own handoff used to occupy are now spent on documents it has not read.
+- 🔴 **FOUR AUDIT ROUNDS, 23 FINDINGS, ZERO DEPLOY-BLOCKING — and the shape is the lesson.**
+  Round 1 found the flag was deletable to **INERT** with 304/304 green (nothing pinned that
+  `main()` forwards `exclude`); round 2 found a backwards remedy verb and a cross-backend
+  divergence *inside the divergence guard*; rounds 3 and 4 found **no behavioural defect at
+  all**. **Three of the four rounds caught coverage CLAIMED and not held** — a seam nothing
+  pinned, a "consolidation" that was dead-code-able, a sweep that missed a fifth site, four
+  unscoped test counts. Not one was a logic bug; the mechanism has been correct since round 1.
+  The ladder was stopped on the **stated prose-payload criterion**, written onto the PR so that
+  ending-on-criterion is distinguishable from converging.
+- **The measurements, with their as-of stamps — carried forward because a figure without one
+  cannot be re-run against.** Adoption **2026-09-07T02:25Z: 4 of 4** post-`#1332` (control
+  `cairn recall` 4/4) — the first, small-n reading. Adoption **2026-09-08T17:00Z: 20 of 22 (91%),
+  control 21/22**, measuring session excluded from both halves by session id. Pre-fix on the same
+  host, `#1295`..`#1332`: **11 runs, 2 queried (18%), control 10**. Yield **2026-09-08: 1 of 20**.
+  ⚠ The corpus grows, so a later re-run reports LARGER numbers rather than contradicting these.
+- **`#1332`'s own deploy (2026-09-06, both hosts at `8e9428ef`) is SUPERSEDED by `#1399`'s above**
+  and was verified the same way — `readlink -f` on both hosts resolving one store path. Kept as a
+  pointer only; the method is what carries forward, not the sha.
+- **Claim `handoff-search-index-1`: RELEASED** (twice — after `#1332` and again after `#1399`).
+  Merging does not release a claim; both were released by hand.
+- **Housekeeping done:** the `fix/handoff-search-exclude-own-doc` worktree removed and the branch
+  deleted local+remote; base clone re-synced; the cairn `devrc/handoff-index` entry's `OPEN:`
+  bullet closed (entry now shows no badges, 26/26 parse).
+- ⚠ **NOT verified, and no further work changes it:** anything a real Postgres server does with
+  `slug <> ALL(%s)` — no test in this repo reaches a database, so those are structural pins over
+  code that was READ — and the transcript-derived `23/60`, `13/20`, `1/20` figures, which are
+  judgement calls made reading sessions. Both audits said the same.
+- ⚠ **The laptop contributed 0 `/resume` runs throughout**, measured over ssh rather than
+  assumed, so every adoption and yield number in this doc is **workbench-only**.
 
 ## Open investigations — live diagnosis state
 
@@ -499,6 +504,34 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   sentence above the fence, and a conditional comment inside it. Both re-create the hazard
   without moving the command. The docstring also says the mutant list is NOT closed — M5 (the
   command commented out) was found only after round 1 called the residual settled.
+
+- 🔴 **A `RESOLVED:` BULLET DOES NOT RETIRE AN `OPEN:` ONE — MEASURED ON THIS EFFORT'S OWN CAIRN
+  ENTRY, WHILE FIXING THE SAME CLASS IN THIS DOC.** The `devrc/handoff-index` entry carried
+  `OPEN: answer YIELD`. Appending a full `RESOLVED:` bullet answering it left the badge reading
+  **`🔴 1 OPEN`** — the store is append-mostly and prune-on-resolve is manual, so the marker sits
+  on the OLD bullet and nothing moves it. Closing it needs the OPEN bullet itself rewritten
+  (`cairn put`), which is a *second* edit nothing prompts. **Identical shape to the two stale
+  `### ` blocks in this doc**: writing the resolution and retiring the open marker are two edits,
+  and only the first feels like progress.
+- 🔴 **A CLOSURE THAT NAMES NO SHA IS `⚠ UNVERIFIABLE`, AND THE FIRST ATTEMPT SCORED IT.** The
+  first `RESOLVED:` bullet said "squash 4a67ea73" in prose; the validator wants a bare sha it can
+  `git cat-file -e`, so the entry showed `⚠ 1 UNVERIFIABLE` beside the still-open badge. Both
+  fixed in one `cairn put`. **Write `RESOLVED <full-sha>:` — the sha is what makes the closure
+  checkable rather than asserted**, and the badge is the only thing that will tell you.
+- 🔴 **A WORKTREE HOLDING A BRANCH DEFEATS `gh pr merge --delete-branch` — LOCALLY, AND SILENTLY.**
+  After `#1399` merged with `--delete-branch`, the REMOTE branch was gone but the local one
+  survived, because `/home/zach/workspace/devrc-selfhit` still had it checked out — a worktree
+  pins its branch repo-globally. The tell is confusing: `git branch -a` lists both the live local
+  branch and a STALE `remotes/origin/…` tracking ref, so it reads as "the delete failed
+  entirely". 🔴 **`git ls-remote --heads origin <branch>` is the authority** — it came back empty,
+  i.e. GitHub had deleted it and the push-delete error was deleting something already gone.
+  Remove the worktree first, then `branch -D`, then `fetch --prune`.
+- ⚠ **A `/handoff` or `/resume` run against this repo's BASE CLONE can be reading a stale doc.**
+  Measured at the start of this session: the working-tree copy was **553 lines with 0
+  `SUPERSEDED` headings** while `origin/main` held **584 and 2** — one commit behind, and
+  `handoff_doc.py` resolves its base from the working tree. Merging a delta there would have
+  classified every section as NEW and **replaced the committed doc**. `git rev-list --count
+  HEAD..origin/main` plus a content check before drafting; `merge --ff-only` to fix.
 
 ## How to verify
 ```bash
