@@ -1145,3 +1145,57 @@ def test_raw_labels_tolerates_a_missing_or_junk_label_set():
     assert obs._raw_labels(None) == {}
     assert obs._raw_labels("not-a-dict") == {}
     assert obs._raw_labels({}) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Loki — BOTH branches. Added after a round-1 audit mutation battery showed the
+# loki matrix `labels` could be deleted with the whole suite still green (the
+# prometheus tests above cannot see it), and that the loki STREAMS branch — the
+# highest-traffic path, log queries — still carried labels only as a rendered
+# display string, i.e. the very defect this change exists to fix.
+#
+# 🔴 Loki sends a streams label set under `stream` and a matrix one under
+# `metric`. Those are DIFFERENT KEYS in the API; conflating them is the same
+# class of bug. These pin each branch reading its own key.
+# --------------------------------------------------------------------------- #
+def test_loki_matrix_row_carries_structured_labels():
+    """Kills the mutant that drops `labels` from the loki matrix branch."""
+    payload = {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"namespace": "sr"}, "values": [[1, "1"], [2, "3"]]}]}}
+    qr = obs.parse_loki(payload)
+    assert qr.rows[0]["labels"] == {"namespace": "sr"}
+    assert qr.rows[0]["metric"] == "{namespace=sr}"   # display string intact
+    assert qr.rows[0]["points"] == 2
+
+
+def test_loki_streams_row_carries_structured_labels():
+    """The log path. Reads Loki's `stream` key, not `metric`."""
+    payload = {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"namespace": "civitai-dp-prod", "pod": "api-0"},
+         "values": [["1700000000000000000", "boom"]]}]}}
+    qr = obs.parse_loki(payload)
+    row = qr.rows[0]
+    assert row["labels"] == {"namespace": "civitai-dp-prod", "pod": "api-0"}
+    # the exact access that was impossible before: select one label, no regex
+    assert row["labels"]["pod"] == "api-0"
+    assert row["stream"] == "{namespace=civitai-dp-prod, pod=api-0}"
+    assert row["lines"] == 1 and row["sample"] == "boom"
+
+
+def test_loki_streams_labels_are_additive_and_stay_out_of_the_table():
+    """`columns` drives render_table, so the new key must not appear in it."""
+    payload = {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"pod": "api-0"}, "values": [["1", "x"]]}]}}
+    qr = obs.parse_loki(payload)
+    assert qr.columns == ["stream", "lines", "sample"]
+    assert "labels" not in qr.columns
+    assert "labels" in qr.rows[0]
+
+
+def test_loki_streams_labels_reach_the_json_document():
+    payload = {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"pod": "api-0"}, "values": [["1", "x"]]}]}}
+    qr = obs.parse_loki(payload)
+    out, _ = obs.render(qr, True, "q", "dpprod", "loki")
+    doc = json.loads(out)
+    assert doc["rows"][0]["labels"] == {"pod": "api-0"}

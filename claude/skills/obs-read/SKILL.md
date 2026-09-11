@@ -171,3 +171,29 @@ validated preset; treat unvalidated ones as starting points.
   `Handling connection for P` line per connection and blocks at 64 KiB unread).
 - Known limitation (documented, unchanged): a matched-nothing result still exits
   0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.
+
+## The `--json` row schema — read a label from `labels`, NEVER from `metric`
+
+🔴 **`rows[].metric` (prometheus) and `rows[].stream` (loki streams) are RENDERED
+DISPLAY STRINGS** — `{a=1, b=2}` — built for the human-readable table. They are
+NOT objects and they are NOT Prometheus's `data.result[].metric`, despite the
+name. Field-accessing them returns nothing, silently, while `row_count` sits in
+the same document saying the query matched.
+
+**`rows[].labels` is the label set as a `{str: str}` dict.** Use it:
+
+```bash
+obs-read --cluster dpprod --backend prometheus --kind instant --json \
+  --query 'kube_job_status_start_time{cluster="dp-1"}' \
+  | jq -r '.rows[] | "\(.labels.job_name) \(.labels.namespace)"'
+```
+
+Present on prometheus **vector** and **matrix** rows and on loki **matrix** and
+**streams** rows. Absent on prometheus **scalar**/**string** results, which have
+no label set at all — so read it with `.get("labels", {})` / `.labels? // {}`
+rather than assuming every row carries one.
+
+🔴 **Read `row_count` and `matched_nothing` before concluding anything from an
+empty parse.** A zero from your own parser is a fact about your parser; those two
+fields are the tool's own answer, and they disagreed with a hand-written parser
+three times in a row once.

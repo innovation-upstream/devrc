@@ -419,6 +419,11 @@ def parse_loki(payload) -> QueryResult:
     for stream in result:
         if not isinstance(stream, dict):
             continue
+        # Loki sends a streams label set under `stream`, NOT `metric` (that is
+        # the matrix/vector key). Same structured-labels contract as the
+        # prometheus rows above — `stream` keeps the rendered display string
+        # the table reads, `labels` carries the dict a parser reads.
+        labels = _raw_labels(stream.get("stream", {}))
         name = _fmt_labels(stream.get("stream", {}))
         values = stream.get("values", []) or []
         total_lines += len(values)
@@ -427,7 +432,8 @@ def parse_loki(payload) -> QueryResult:
             last = values[-1]
             if isinstance(last, list) and len(last) == 2:
                 sample = str(last[1])[:120]
-        rows.append({"stream": name, "lines": len(values), "sample": sample})
+        rows.append({"stream": name, "labels": labels,
+                     "lines": len(values), "sample": sample})
     matched_nothing = (total_lines == 0)
     detail = "" if matched_nothing else "%d log line(s) across %d stream(s)" % (
         total_lines, len(rows))
