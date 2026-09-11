@@ -89,8 +89,8 @@ probe wired to nothing. ⚠ Both wrote nothing.
 
 🔴 **That 404 is byte-identical for "outside your allowlist", "never existed" and
 "ref resolves to nothing"** — deliberately, so an error cannot enumerate the
-store. `reference/operator-surface.md` carries the two ways an OPERATOR can still
-tell absent from refused; no client can.
+store. `~/.claude/skills/cairn/reference/operator-surface.md` carries the two
+ways an OPERATOR can still tell absent from refused; no client can.
 
 ## 🔴 The two different exit 4s
 
