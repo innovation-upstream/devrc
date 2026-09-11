@@ -287,10 +287,11 @@ text executed in it. It shares the fail-closed tier with `term send` because it 
 ### 🔴 Attribution — what the ledger can and cannot tell you
 
 `tier` discriminates the **door**, not the caller: it holds exactly two values, `token` (any machine
-caller) and `browser` (the web UI). Measured over the whole ledger (11 rows): 7 `browser`, 4
-`token`. There is **one shared `CLAWGATE_TERMINAL_TOKEN`**, so every machine caller files
-`tier: "token"` and is **indistinguishable from every other machine caller** — including the send
-issued while writing this file.
+caller) and `browser` (the web UI). Measured over the whole ledger after this file's own probes
+landed — 13 rows: 7 `browser`, 6 `token`. There is **one shared `CLAWGATE_TERMINAL_TOKEN`**, so
+every machine caller files `tier: "token"` and is **indistinguishable from every other machine
+caller**. The two writes issued while writing this file sit in there as plain `token` rows: nothing
+in the ledger says they came from an agent, from this session, or from a doc probe.
 
 **Do not claim sends are attributable per session or per agent. They are not.** `claimedBy`
 (`workbench:3379836`) identifies the *host agent that executed* the write, never its author. A
