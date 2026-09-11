@@ -23,10 +23,16 @@ import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import sys
+
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.join(_HERE, "..")
+sys.path.insert(0, str(Path(_HERE).resolve().parents[0]))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
 _REPO = Path(_HERE).resolve().parents[1]
 _TABLE = os.path.join(_SCRIPTS, "tmux-scratch-slots.sh")
 _GRAPHICAL = _REPO / "nix" / "graphical.nix"
@@ -1348,16 +1354,27 @@ def _picker_sandbox(tmp_path, fzf_body, socket_root=None, tmux_env=None,
                      'esac\nexit 0\n' % (json.dumps(str(envlog)), session)),
             "fzf": fzf_body,
         }.get(name, 'exec %s "$@"\n' % real.get(name))
-        # 🔴 An ABSOLUTE shebang and a bash EXPANSION, not `/usr/bin/env bash`
-        # and `$(basename …)`: under `jail=True` the PATH holds only these
-        # shims, so `env` could not find bash and `basename` is not on it — the
-        # shims would fail to start and the run would log NOTHING while every
-        # "did it reach anything unexpected" assertion stayed green.
-        (bindir / name).write_text(
-            '#!%s\nprintf "%s\\n" "${0##*/}" >> %s\n%s'
-            % (shutil.which("bash"), "%s", json.dumps(str(calllog)), body),
-            encoding="utf-8")
-        os.chmod(bindir / name, 0o755)
+        # 🔴 `write_exec` OWNS the shebang, and it writes an ABSOLUTE `#!/bin/sh`.
+        # That is load-bearing here, not just convention: under `jail=True` the
+        # PATH holds only these shims, so a `/usr/bin/env bash` shebang could not
+        # resolve `bash` at all — the shims would fail to start and the run would
+        # log NOTHING while every "did it reach anything unexpected" assertion
+        # stayed green. An absolute interpreter is resolved by the kernel and
+        # never consults PATH, so the jail cannot break it.
+        #
+        # The bodies are POSIX sh for the same reason the helper is: `printf`,
+        # `case`/`esac`, `exit`, `exec <abspath>` and `${0##*/}` are all POSIX,
+        # so none of them needs bash. `${0##*/}` in particular replaces
+        # `$(basename …)` — `basename` is an external binary and is NOT on the
+        # jailed PATH.
+        #
+        # Going through the helper rather than writing the shebang here is what
+        # `test_runtime_shebangs.py::test_no_test_writes_a_usr_bin_env_shebang_
+        # at_runtime` enforces, so a call site cannot reintroduce `/usr/bin/env`.
+        write_exec(
+            bindir / name,
+            'printf "%s\\n" "${0##*/}" >> %s\n%s'
+            % ("%s", json.dumps(str(calllog)), body))
 
     env = {k: v for k, v in os.environ.items()
            if k not in ("TMUX", "TMUX_TMPDIR", "XDG_RUNTIME_DIR")}
