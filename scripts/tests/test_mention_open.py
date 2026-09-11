@@ -20,7 +20,7 @@ The two things worth pinning:
 from __future__ import annotations
 
 import ast
-import contextlib
+import errno
 import importlib.util
 import json
 import os
@@ -5417,7 +5417,7 @@ def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(
 
 
 def _watch_compaction_tmps(monkeypatch):
-    """Yield a list that collects every tmp path compaction creates.
+    """A list that collects every tmp path compaction creates.
 
     🔴 NOT A DIRECTORY LISTING, AND THAT IS FORCED RATHER THAN CHOSEN. The tmp
     name comes from `mkstemp` and is unguessable, so the obvious check is to
@@ -5508,6 +5508,63 @@ def test_the_APPEND_takes_the_lock_too(tmp_path):
     assert "o/waited" in log.read_text()
 
 
+def test_a_filesystem_that_CANNOT_LOCK_does_not_burn_the_budget(tmp_path,
+                                                                monkeypatch):
+    """🔴 THE errno FILTER, WHICH SHIPPED WITH NO TEST AND NO BATTERY ROW — a
+    round-5 audit deleted the three-line guard outright and the suite reported
+    356 passed, 0 failed.
+
+    Retrying on EVERY `OSError` treats a PERMANENT refusal as contention: a
+    filesystem with no lock daemon (NFS without `rpc.statd`, some container
+    overlays) answers `ENOLCK`/`EINVAL` and never stops answering it, so every
+    single click burns the whole `PICKS_LOCK_WAIT_S` budget waiting for a lock
+    it can never have. MEASURED before the filter: 204 ms per `record_pick`;
+    after: 0.1 ms, one `flock` attempt.
+
+    Differential, like its sibling lock tests — an absolute millisecond
+    threshold is inside the noise of a loaded box."""
+    import fcntl
+    calls: list = []
+
+    def refuses(fd, flags):
+        calls.append(flags)
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", refuses)
+    log = tmp_path / "picks.jsonl"
+    start = time.monotonic()
+    assert MO.record_pick("acme/widget", "12", log) is True, (
+        "an unlockable filesystem dropped the pick")
+    spent = time.monotonic() - start
+    assert calls, "POSITIVE CONTROL: flock was never attempted at all"
+    assert len(calls) == 1, (
+        f"a PERMANENT lock refusal was retried {len(calls)} times — the errno "
+        f"filter is gone, and every click now burns the whole budget")
+    assert spent < MO.PICKS_LOCK_WAIT_S * 0.5, (
+        f"an unlockable filesystem cost {spent*1000:.0f} ms of the "
+        f"{MO.PICKS_LOCK_WAIT_S*1000:.0f} ms budget")
+    assert "acme/widget" in log.read_text(), "the row did not land"
+
+
+def test_a_CONTENTION_errno_IS_still_retried(tmp_path, monkeypatch):
+    """The negative control on the filter: narrowing it must not turn a real
+    contention answer into an immediate give-up, or the lock stops excluding
+    anything. `EWOULDBLOCK` is what a held `LOCK_NB` actually returns."""
+    import fcntl
+    calls: list = []
+
+    def busy(fd, flags):
+        calls.append(flags)
+        raise OSError(errno.EWOULDBLOCK, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(fcntl, "flock", busy)
+    log = tmp_path / "picks.jsonl"
+    assert MO.record_pick("acme/widget", "12", log) is True
+    assert len(calls) > 1, (
+        f"a CONTENTION errno was not retried ({len(calls)} attempt) — the "
+        f"filter is too narrow and the budget buys nothing")
+
+
 def test_the_APPENDS_wait_is_BOUNDED_and_the_row_still_lands(tmp_path):
     """🔴 A DETACHED CLICK HANDLER MUST NOT BE ABLE TO HANG ON A LOCK, and the
     textbook answer — a blocking `LOCK_EX` — is exactly what would. It is not
@@ -5592,7 +5649,12 @@ def test_a_row_appended_DURING_a_compaction_is_CARRIED_OVER(tmp_path,
     process, so it tested a fake and stayed red no matter what `_compact_picks`
     did. Here the append is injected at `mkstemp`, which is exactly where a
     budget-expired appender lands: after the initial read, before the carry-over
-    read."""
+    read.
+
+    ⚠ IT COVERS ONE POINT IN THAT WINDOW, NOT THE WINDOW. An earlier wording said
+    "exactly where a budget-expired appender lands", which is wider than this
+    test. The complement — a `write(2)` landing AFTER the carry-over read — is a
+    measured RESIDUAL and is documented on `_compact_picks`, not fixed here."""
     log = tmp_path / "picks.jsonl"
     log.write_text("\n".join(
         json.dumps({"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1})

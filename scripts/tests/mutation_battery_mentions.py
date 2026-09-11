@@ -672,12 +672,24 @@ MUTANTS: list[tuple] = [
      "    except (OSError, ValueError):\n        # \U0001f534 `ValueError` IS NOT REDUNDANT",
      "    except OSError:\n        # \U0001f534 `ValueError` IS NOT REDUNDANT",
      "UnicodeDecodeError"),
-    ("K70", "deletion", "the pick-log APPEND stops taking the lock, so a row "
-                        "written during a compaction's read->replace window is "
-                        "destroyed while record_pick reports success",
+    # ⚠ RE-WORDED: the carry-over shipped in the same commit RESCUES a row
+    # written during the read->replace window, lock or no lock. What the
+    # lock still buys is a much smaller residual — see `_compact_picks`.
+    ("K70", "deletion", "the pick-log APPEND stops taking the lock, widening "
+                        "the residual loss window from the carry-over gap back "
+                        "out towards a whole compaction",
      "        with _picks_lock(path, wait_s=PICKS_LOCK_WAIT_S):\n",
      "        if True:\n",
      "not taking the lock"),
+    ("K72", "widening", "the lock retry treats EVERY OSError as contention, so "
+                        "a filesystem that can NEVER lock (ENOLCK/EINVAL) burns "
+                        "the whole budget on every single click",
+     # ⚠ THE GUARD ITSELF, NOT ITS TUPLE. A first version added `0` to the
+     # errno set, which is INERT — ENOLCK is 37 — and the row SURVIVED. A
+     # mutant must be able to change behaviour before it can test anything.
+     "                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN,\n                                     errno.EACCES):\n                    break\n",
+     "                if False:\n                    break\n",
+     "retried"),
     ("K71", "deletion", "the parent-directory narrowing masks 0o777 again, "
                         "silently destroying setuid/setgid/sticky on a directory "
                         "holding PRIVATE repository names",
@@ -705,6 +717,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K59": OPEN_, "K60": OPEN_, "K61": OPEN_, "K62": OPEN_, "K63": OPEN_,
     "K64": OPEN_, "K65": OPEN_, "K66": OPEN_, "K67": OPEN_,
     "K68": OPEN_, "K69": OPEN_, "K70": OPEN_, "K71": OPEN_,
+    "K72": OPEN_,
     "K53": ALACRITTY,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two

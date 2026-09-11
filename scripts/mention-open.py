@@ -900,10 +900,11 @@ def record_pick(repo: str, num: str, path: Path | None = None,
 
     Returns True if the line was WRITTEN — which is not quite "survived". A
     compaction racing this call carries over anything appended past its read
-    offset (see `_compact_picks`), so the row survives in every ordering but the
-    one where a write physically interleaves with the final `os.replace`. The
-    distinction is small and it is stated because an earlier version of this
-    line said "True if it landed" while a measured ordering destroyed the row.
+    offset (see `_compact_picks`), so the row survives whenever its `write(2)`
+    lands before that carry-over read, and is LOST WHOLE — not torn — when it
+    lands after. The distinction is stated because an earlier version of this
+    line said "True if it landed" while a measured ordering destroyed the row,
+    and the version after THAT described the losing case too narrowly.
 
     🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE OPEN. This runs after the
     operator has already chosen a URL; a full disk, a read-only home or a
@@ -987,7 +988,12 @@ def record_pick(repo: str, num: str, path: Path | None = None,
 
 
 def _compact_picks(path: Path) -> None:
-    """Trim the pick log to its most recent `PICKS_MAX_ROWS` rows.
+    """Trim the pick log towards its most recent `PICKS_MAX_ROWS` rows.
+
+    ⚠ "TOWARDS", NOT "TO" — the result can exceed `PICKS_MAX_ROWS` by whatever
+    the carry-over below rescues, and the repo's own regression test asserts
+    `PICKS_MAX_ROWS + 1`. The cap bounds what is KEPT from the old file, not the
+    final line count.
 
     Best-effort and SILENT on every failure: it runs after the row is already
     durable, so a full disk costs a large file rather than the pick. See
@@ -1013,11 +1019,22 @@ def _compact_picks(path: Path) -> None:
         past the byte offset this call read is copied into the tmp before the
         replace.
 
-    ⚠ AND "CLOSED" IS STILL SCOPED. An append that COMPLETES before the replace
-    survives, whether or not it got the lock. A write physically interleaving
-    with the final `os.replace` can still tear — the window is now microseconds
-    instead of a whole compaction, and `load_picks` skips a torn line — so this
-    is a residual, not a guarantee. Saying so is the point.
+    ⚠ AND "CLOSED" IS SCOPED — STATED AT THE WIDTH IT WAS MEASURED, WHICH TOOK
+    FOUR GOES. An append whose `write(2)` lands BEFORE this call's carry-over
+    read survives, lock or no lock. The losing condition is the complement:
+    a `write(2)` after that read. MEASURED, three orderings:
+        before the carry-over read            -> survives
+        after the read, before `os.replace`   -> LOST
+        fd opened before, written AFTER it    -> LOST
+    ⚠ TWO THINGS AN EARLIER WORDING GOT WRONG. It said the loser was "a write
+    physically INTERLEAVING with `os.replace`" — but the third row above
+    interleaves with nothing, and it is the LIKELY shape, because a
+    budget-expired `record_pick` holds its append fd open across its own
+    `json.dumps` and buffered write. And it offered "`load_picks` skips a torn
+    line" as mitigation: nothing tears. The bytes go to the unlinked inode and
+    the row VANISHES WHOLE while `record_pick` returns True — the same silent
+    loss, in a window now measured in microseconds rather than a whole
+    compaction. A residual, not a guarantee.
 
     ⚠ NO WAIT HERE AND A BOUNDED BUDGET IN THE APPEND, AND THE ASYMMETRY IS THE
     POINT. Skipping compaction costs nothing — the next pick trims instead — so

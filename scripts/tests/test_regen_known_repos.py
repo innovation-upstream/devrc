@@ -759,7 +759,7 @@ def test_the_PICK_LOG_detector_FIRES_and_EVERY_OTHER_DETECTOR_is_BLIND_to_it():
      "a TIMING row with a sub-second `t`"),
 ])
 def test_the_pick_log_detector_does_NOT_fire_on_ordinary_JSONL(rows, why):
-    """🔴 SIX NEGATIVE CONTROLS, AND FIVE OF THEM WERE MEASURED FIRING. The
+    """🔴 EIGHT NEGATIVE CONTROLS, AND SEVEN OF THEM WERE MEASURED FIRING. The
     first fingerprint asked only for "a bare `owner/repo` value AND any number",
     and `_FULL_NAME_RE` matches any one-level path — so a round-2 audit scored
     the lint report at 40, telemetry at 40, the id+path index at 25 and the
