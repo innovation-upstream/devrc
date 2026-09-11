@@ -309,9 +309,19 @@ def test_the_writer_raises_the_classes_the_PINNED_reader_catches():
         "CairnError", "TouchError", "GitError",
         "StoreMissingError", "RepoPathMissingError",
     ):
-        assert getattr(st, name) is getattr(entry_shape, name), (
-            f"subsystem_touch.{name} is not entry_shape.{name} — the writer "
-            f"raises a look-alike the pinned reader's `except` cannot match."
+        # 🔴 `getattr(..., None)` RATHER THAN A BARE LOOKUP, so a MISSING name
+        # fails on THIS guard's sentence instead of on an `AttributeError` raised
+        # while reaching the assertion. Measured at the pre-consolidation base:
+        # the bare form died with `module 'subsystem_touch' has no attribute
+        # 'CairnError'`, which is red for the right reason and says nothing about
+        # the property — and a red that does not name its own claim is how a
+        # regression matrix stops being evidence.
+        theirs = getattr(entry_shape, name, None)
+        ours = getattr(st, name, None)
+        assert ours is not None and ours is theirs, (
+            f"subsystem_touch.{name} is {ours!r}, not entry_shape.{name} "
+            f"({theirs!r}) — the writer either defines a look-alike the pinned "
+            f"reader's `except` cannot match, or does not expose the name at all."
         )
     assert entry_shape.TouchError is entry_shape.CairnError, (
         "`TouchError` stopped aliasing `CairnError` in the pin, so devrc's ~25 "
@@ -359,9 +369,14 @@ def test_the_writer_takes_its_shared_vocabulary_from_the_pin_not_from_itself():
         "derive_scope", "store_host", "store_host_line",
     }
     for name in sorted(shared):
-        assert getattr(st, name) is getattr(entry_shape, name), (
-            f"`subsystem_touch.{name}` is not the pinned `entry_shape.{name}` — "
-            f"the shared vocabulary has forked again at that name."
+        # Same `None` default, for the same reason as the class-identity guard
+        # above: a name that is simply absent must fail on this sentence.
+        theirs = getattr(entry_shape, name, None)
+        ours = getattr(st, name, None)
+        assert ours is not None and ours is theirs, (
+            f"`subsystem_touch.{name}` is {ours!r}, not the pinned "
+            f"`entry_shape.{name}` ({theirs!r}) — the shared vocabulary has "
+            f"forked again at that name, or the writer no longer exposes it."
         )
 
     # …and the names devrc deliberately KEEPS, because the pinned spellings are
@@ -422,7 +437,14 @@ def test_scope_derivation_still_comes_from_the_pin(tmp_path):
     import entry_shape  # noqa: PLC0415
     import subsystem_touch as st  # noqa: PLC0415
 
-    assert st.derive_scope is entry_shape.derive_scope
+    assert st.derive_scope is entry_shape.derive_scope, (
+        f"`subsystem_touch.derive_scope` is {st.derive_scope!r}, not the pinned "
+        f"`entry_shape.derive_scope` ({entry_shape.derive_scope!r}). The scope "
+        f"RULE is the one thing the reader and the writer absolutely must not "
+        f"have two copies of — disagree and the writer accrues entries under one "
+        f"name while the reader surfaces an empty scope under another, which "
+        f"renders as 'nothing recorded yet'."
+    )
 
     repo = tmp_path / "some-repo"
     repo.mkdir()
