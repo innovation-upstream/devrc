@@ -14,88 +14,156 @@ claims, with the live one justifying a script. Nothing noticed, because a
 retraction in prose cannot reach a comment in a shell script.
 
 🔴 THE RULE THIS ENFORCES IS A RELATIONSHIP, NOT A WORD. A plain "the string
-must not appear" guard is wrong in both directions: it would fail the three
-legitimate sites that quote the figure IN ORDER to retract it, and it would pass
-a file that re-derived the same claim in different digits. So: wherever the
-figure appears, a retraction must appear near it.
+must not appear" guard would fail the three legitimate sites that quote the
+figure IN ORDER to retract it. So the binding rule pins the normalised TEXT
+around every occurrence, two-way.
+
+🔴 WHAT THIS DOES NOT CATCH — stated, not solved. It is keyed on the literal
+digits, so a re-derivation of the same CLAIM in DIFFERENT digits ("11.2 min ->
+39.1 min at 5+ overlapping") passes untouched, exactly as the plain guard it
+replaces would. An earlier draft of this docstring said a plain guard was wrong
+"in both directions" and then resolved only one of them, which read as coverage
+this file does not provide. The defence against a re-derivation is the prose in
+CLAUDE.md and in `scoped-tests.sh`'s header telling you not to, not this test.
 
 An INVARIANT GUARD, not regression coverage — it pins a property no shipped bug
 violated once `scoped-tests.sh` was fixed in the same commit. Its evidence is
-the positive control below, which fails if the scanner is wired to nothing.
+the positive control below, which fails if the scanner is wired to nothing, and
+the mutation battery in the PR.
 """
+import hashlib
 import re
-import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+from testlib.public_ip_scan import repo_files  # noqa: E402
 
-# The figure, in the spellings it has actually been written in. Digits, not
-# prose: a reword is exactly what this must still catch.
-FIGURE = re.compile(r"\b48\.9\b|\b14\.5\s*min\b")
-RETRACTION = re.compile(r"RETRACTED|length-biased", re.I)
+# The figure, in the spellings it has actually been written in.
+#
+# 🔴 BOTH BRANCHES REQUIRE `min`, AND THAT IS THE POINT. A bare `\b48\.9\b`
+# matched "48.9% of runs", "an image 48.9 MB" and "cost $48.9" — this repo is
+# full of measured numbers in prose, and a hit on one produces a confident,
+# WRONG instruction to delete an unrelated measurement. The figure is always a
+# duration, so the unit is what separates it from every other 48.9.
+#
+# 🔴 `[-\s]*` because the HYPHENATED spelling is the one CLAUDE.md's own
+# retraction uses ("the 14.5-min baseline"), and so does this file's sibling
+# note in `scoped-tests.sh`. `\b14\.5\s*min\b` did not match it, so a
+# re-assertion written "14.5-min at 0 overlap" was invisible to the whole guard.
+FIGURE = re.compile(r"\b48\.9[-\s]*min\b|\b14\.5[-\s]*min\b", re.I)
 
-# How far from the figure a retraction may sit. The figure and its retraction
-# belong in one paragraph; 20 lines is generous for a wrapped shell comment and
-# still far too tight for an unrelated mention elsewhere in a long file.
-NEAR_LINES = 20
+# How much normalised text around each match is pinned.
+CONTEXT = 90
 
-# 🔴 THE COUNT LEDGER, AND WHY PROXIMITY ALONE WAS NOT ENOUGH.
-#
-# The first version of this guard asserted only "a retraction appears within
-# NEAR_LINES of the figure". It was MUTATION-TESTED and SURVIVED the one mutant
-# that matters: re-inserting the bare claim
-#
-#     "runs bucketed by overlap go 14.5 min (0 others) -> 48.9 min (6+)."
-#
-# into `scripts/scoped-tests.sh`'s header — which is EXACTLY where it was
-# re-derived before, and exactly where it would be re-derived again — passed,
-# because the retraction note now sits ten lines below it and satisfied the
-# proximity check. The guard was excusing the one site it exists to watch.
-#
-# So the binding assertion is a COUNT, pinned two-way: each file may carry
-# exactly the occurrences its retraction needs, and no more. A new assertion
-# anywhere moves a number, whatever words surround it. Update these counts only
-# when you have read the diff and the occurrence is part of a RETRACTION.
-EXPECTED_OCCURRENCES = {
-    # The canonical retraction. Quotes the figure once, in one prose line.
-    # (Counts are LINES carrying the figure, not regex matches: CLAUDE.md's
-    # retraction quotes both halves on one wrapped line.)
-    "CLAUDE.md": 1,
-    # The handoff that first retracted it.
-    "claudedocs/handoff-gate-speed-and-ci-signal.md": 1,
-    # The header that used to ASSERT it, now retracting it in place.
-    "scripts/scoped-tests.sh": 1,
-}
+# ⚠ A THIRD TEST WAS DELETED HERE, DELIBERATELY. It asserted "a retraction
+# appears near the figure" and was kept as a second angle after the count
+# version failed. Once the ledger pinned TEXT it became subsumed: the
+# `unledgered` check below fails for ANY file carrying the figure that the
+# ledger does not name, retraction or not — strictly wider than what a
+# proximity test could see. Keeping it bought nothing and cost a false failure
+# on legitimate sites whose retraction sits more than CONTEXT chars from the
+# match. Two guards asserting overlapping things, one wrong at the edges, is
+# worse than one that binds.
+
+# 🔴 BINARY FILES ARE SKIPPED BY EXTENSION, and `repo_files` does NOT do this —
+# it filters directories only. Read as text with `errors="replace"`, a byte run
+# inside a `.sqlite`/`.woff`/`.zip` can spell the figure between word boundaries
+# and produce a spurious hit nobody can diagnose.
+_BINARY_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".sqlite", ".db",
+    ".woff", ".woff2", ".ttf", ".zip", ".gz", ".tar", ".wasm",
+)
 
 
 def _tracked_text_files():
-    out = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files", "-z"],
-        capture_output=True, text=True, check=True,
-    ).stdout
-    for rel in out.split("\0"):
-        if not rel or rel.endswith((".png", ".jpg", ".gif", ".ico", ".pdf")):
+    """-> (relpath, lines) for every tracked text file.
+
+    🔴 VIA `repo_files`, NOT A HAND-ROLLED `git ls-files`. `flake.nix`'s
+    `checks.pytests` builds from a `cp -r` of the flake source with NO `.git`,
+    and `scripts/tests` is in `run-tests.sh`'s HERMETIC_TARGETS — so an
+    unguarded `git ls-files` exits 128 THERE while passing on the dev host.
+    MEASURED on this file's first version: 3 failed in a no-`.git` replica of
+    the head tree, while `test_doc_path_rot.py` — which carries the documented
+    fallback — passed 76/76 in the SAME replica. `repo_files` owns that
+    fallback; this is the one-rule-one-place call into it.
+    """
+    for path in repo_files(REPO):
+        if path.suffix.lower() in _BINARY_SUFFIXES:
             continue
-        p = REPO / rel
         try:
-            yield rel, p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+            rel = str(path.relative_to(REPO))
+            yield rel, path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except (OSError, ValueError):
             continue
+
+
+_COMMENT_LEAD = re.compile(r"^[ \t]*(?:#+|//+|\*)[ \t]?")
+_WS = re.compile(r"\s+")
+
+
+def _normalised(lines):
+    """The file as ONE whitespace-collapsed string, comment markers stripped.
+
+    🔴 THIS IS WHAT MAKES THE PIN REFLOW-SAFE. Stripping the leading `#`/`//`
+    makes a shell-comment rewrap invisible; collapsing whitespace makes a
+    markdown reflow invisible. Both are cosmetic and must not fail this test —
+    CLAUDE.md's retraction lives on one very long wrapped line in a file edited
+    daily, and an earlier line-counting version would have failed a routine
+    reflow with "A COUNT GOING UP IS THE REGRESSION THIS GUARD EXISTS FOR", a
+    false accusation. A REWORD is not cosmetic and must fail.
+    """
+    return _WS.sub(" ", " ".join(_COMMENT_LEAD.sub("", l) for l in lines)).strip()
 
 
 def _hits():
-    """-> [(relpath, lineno, line, retracted_nearby)]"""
+    """-> [(relpath, window)] — one entry per match, with its pinned context."""
     found = []
     for rel, lines in _tracked_text_files():
         if rel == "scripts/tests/test_retracted_contention_figure.py":
             continue  # this file quotes the figure to define it
-        for i, line in enumerate(lines):
-            if not FIGURE.search(line):
-                continue
-            lo, hi = max(0, i - NEAR_LINES), min(len(lines), i + NEAR_LINES + 1)
-            near = any(RETRACTION.search(l) for l in lines[lo:hi])
-            found.append((rel, i + 1, line.strip(), near))
+        text = _normalised(lines)
+        for m in FIGURE.finditer(text):
+            lo = max(0, m.start() - CONTEXT)
+            found.append((rel, text[lo:m.end() + CONTEXT]))
     return found
+
+
+# 🔴 THE LEDGER PINS NORMALISED TEXT, AND BOTH EARLIER VERSIONS WERE WALKABLE.
+#
+# v1 asserted "a RETRACTED marker appears within 20 lines of the figure". It
+# SURVIVED the mutant that matters — re-inserting the bare claim into
+# `scoped-tests.sh`'s header, the exact site it was re-derived at before —
+# because the retraction note the same commit added sat ten lines below and
+# satisfied the window. No window size fixes that: an in-place edit is always
+# adjacent to the note that excuses it.
+#
+# v2 asserted a per-file COUNT. It ALSO survived, for a different reason: the
+# killing mutant REPLACES the quoting line with an assertion built from the
+# SAME two tokens, so the count is identical whether you count lines or
+# matches. A count cannot tell quotation from assertion.
+#
+# So this pins the text, which is what `claude/RULES.md` prescribes for a prose
+# artifact: "when the artifact under test IS prose … pin the WHOLE normalised
+# string. A cosmetic reword then fails the test — pay it, for a machine-readable
+# claim."
+#
+# Digest of the sorted normalised windows around every occurrence in each file.
+# Regenerate ONLY after reading the text the failure prints — see that message.
+EXPECTED_SITES = {
+    "CLAUDE.md": "007080f0f6c54edb",
+    "claudedocs/handoff-gate-speed-and-ci-signal.md": "701dca06b11b1941",
+    "scripts/scoped-tests.sh": "fde2e081df2cd385",
+}
+
+
+def _digest(windows):
+    h = hashlib.sha256()
+    for w in sorted(windows):
+        h.update(w.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:16]
 
 
 def test_the_scanner_can_see_the_figure_at_all():
@@ -114,78 +182,60 @@ def test_the_scanner_can_see_the_figure_at_all():
     )
 
 
-def test_the_figure_appears_exactly_where_and_as_often_as_the_ledger_says():
-    """🔴 THE BINDING ASSERTION — a COUNT, because proximity was walkable.
+def test_each_ledgered_site_still_QUOTES_the_figure_rather_than_ASSERTING_it():
+    """🔴 THE BINDING ASSERTION — pinned TEXT, because two counts were walkable.
 
-    Pinned two-way: a file carrying the figure with no ledger entry fails, and
-    a ledger entry naming a file that no longer carries it fails. A
-    re-assertion inside an already-retracting file moves that file's count,
-    which is the mutant the proximity check slept through.
+    Pinned two-way: a file carrying the figure with no ledger entry fails, an
+    entry naming a file that no longer carries it fails, and any change to the
+    normalised text around an occurrence fails.
+
+    The last one is the point. The killing mutant rewrites the quoting line IN
+    PLACE into an assertion built from the same tokens — identical under any
+    count, adjacent to the retraction note under any proximity window, and
+    caught here only because the words changed.
     """
-    counts = {}
-    for rel, _ln, _text, _near in _hits():
-        counts[rel] = counts.get(rel, 0) + 1
+    sites = {}
+    for rel, window in _hits():
+        sites.setdefault(rel, []).append(window)
 
-    unledgered = {r: n for r, n in counts.items() if r not in EXPECTED_OCCURRENCES}
+    unledgered = sorted(r for r in sites if r not in EXPECTED_SITES)
     assert not unledgered, (
-        f"\n\nthe RETRACTED contention figure appears in file(s) with no "
-        f"ledger entry: {unledgered}.\n"
-        "  If this is a new RETRACTION, add it to EXPECTED_OCCURRENCES with "
-        "its count. If it is a new ASSERTION, delete it — bucketing runs by "
-        "overlap is length-biased and that dataset cannot size contention."
+        "\n\nthe RETRACTED contention figure appears in file(s) with no ledger "
+        f"entry: {unledgered}.\n"
+        "  If this is a new RETRACTION, add it with its digest. If it is a new "
+        "ASSERTION, delete it — bucketing runs by overlap is length-biased and "
+        "that dataset cannot size contention."
     )
-    stale = {r: n for r, n in EXPECTED_OCCURRENCES.items() if r not in counts}
+    stale = sorted(r for r in EXPECTED_SITES if r not in sites)
     assert not stale, (
-        f"\n\nledger entries naming a file that no longer carries the figure: "
-        f"{sorted(stale)}.\n  A ledger that names nothing reads as coverage "
-        "that no longer runs — drop the entry."
+        "\n\nledger entries naming a file that no longer carries the figure: "
+        f"{stale}.\n  A ledger that names nothing reads as coverage that no "
+        "longer runs — drop the entry."
     )
-    moved = {
-        r: (EXPECTED_OCCURRENCES[r], n)
-        for r, n in counts.items()
-        if r in EXPECTED_OCCURRENCES and n != EXPECTED_OCCURRENCES[r]
-    }
-    assert not moved, (
-        "\n\nthe number of times the RETRACTED contention figure appears has "
-        "changed (file: expected -> found):\n  "
-        + "\n  ".join(f"{r}: {exp} -> {got}" for r, (exp, got) in moved.items())
-        + "\n\n  A COUNT GOING UP IS THE REGRESSION THIS GUARD EXISTS FOR: the "
-          "figure was re-asserted, and a retraction sitting nearby does NOT "
-          "make it true. `scripts/scoped-tests.sh` once stated it as the "
-          "measured reason for its own existence while CLAUDE.md retracted "
-          "it.\n"
-          "  Say 'dozens of concurrent full suites' with no magnitude. The "
-          "20.1-min median and the 60.0s collection cost are NOT retracted "
-          "and are what justify scoping.\n"
-          "  A count going DOWN is fine if you deleted a retraction "
-          "deliberately — update the ledger in the same commit."
-    )
-
-
-def test_the_retracted_figure_is_never_asserted_without_its_retraction():
-    """Quote it to retract it; never state it as a measurement.
-
-    ⚠ WEAKER THAN IT LOOKS, AND KEPT ONLY AS A SECOND ANGLE. Mutation showed
-    this passes when the figure is re-asserted in a file whose retraction note
-    is within NEAR_LINES — which is every file in the ledger. The count test
-    above is what actually binds; this one catches the figure appearing in a
-    file with no retraction anywhere near it.
-    """
-    bare = [(rel, ln, text) for rel, ln, text, near in _hits() if not near]
-    assert not bare, (
-        "\n\nthe RETRACTED overlap-bucketing contention figure is stated "
-        f"without a retraction within {NEAR_LINES} lines:\n  "
-        + "\n  ".join(f"{rel}:{ln}: {text[:100]}" for rel, ln, text in bare)
-        + "\n\n  'runs bucketed by overlap go 14.5 min (0 others) -> 48.9 min "
-          "(6+)' is RETRACTED. Bucketing by overlap is length-biased — a long "
-          "run overlaps more runs BY CONSTRUCTION — and a null Monte Carlo "
-          "with zero interaction reproduces the shape, the 14.5-min baseline "
-          "and ~2.06x of the 3.4x. Contention is real; that dataset cannot "
-          "size it.\n"
-          "  `scripts/scoped-tests.sh` asserted it as the measured reason for "
-          "its own existence while CLAUDE.md retracted it, in the same tree.\n"
-          "  Say 'dozens of concurrent full suites' with no magnitude, or "
-          "quote the figure WITH its retraction. The 20.1-min median and the "
-          "60.0s collection cost are NOT retracted and are what justify "
-          "scoping."
-    )
+    moved = {r: (EXPECTED_SITES[r], _digest(w))
+             for r, w in sites.items() if _digest(w) != EXPECTED_SITES[r]}
+    if moved:
+        detail = []
+        for r in sorted(moved):
+            exp, got = moved[r]
+            detail.append(f"{r}: expected {exp}, found {got}")
+            detail += [f"    …{w}…" for w in sorted(sites[r])]
+        raise AssertionError(
+            "\n\nthe text around the RETRACTED contention figure CHANGED:\n  "
+            + "\n  ".join(detail)
+            + "\n\n  🔴 READ THE TEXT ABOVE BEFORE UPDATING THE DIGEST. The "
+              "failure this guard exists for is a quoting line rewritten IN "
+              "PLACE into an assertion — same tokens, same count, retraction "
+              "note still beside it. `scripts/scoped-tests.sh` once stated the "
+              "figure as the measured reason for its own existence while "
+              "CLAUDE.md retracted it.\n"
+              "  Still QUOTING it in order to retract it? Legitimate edit — "
+              "update the digest.\n"
+              "  ASSERTING it? Delete the assertion. Say 'dozens of concurrent "
+              "full suites' with no magnitude; the 20.1-min median and the "
+              "60.0s collection cost are NOT retracted and are what justify "
+              "scoping.\n"
+              "  Cosmetic reflow does NOT reach here: each file is collapsed to "
+              "one whitespace-normalised string with comment markers stripped "
+              "before matching."
+        )
