@@ -1283,8 +1283,10 @@ canary_n="$(printf '%s\n' "$canary_hits" | grep -c . || true)"
 lacks "the sweep does NOT flag a guarded canary line" "$canary_hits" "/guarded"
 lacks "the sweep does NOT flag a commented canary line" "$canary_hits" "/this-is-a-comment"
 
-# 🔴 A LEDGER, failing when the set GROWS *or* SHRINKS. One line in the script
-# is reported and is deliberately NOT guarded: section 2's
+# 🔴 A LEDGER, failing when the set GROWS *or* SHRINKS. TWO lines in the script
+# are reported and are not guarded — the count is asserted below, so read it
+# there rather than trusting this sentence, which said "One line" for a round
+# after the second was pinned seven lines down. The first is section 2's
 # `find "$d" … | awk …` is the body of a `read … < <(…)` process substitution,
 # and MEASURED 2026-09-07 a process substitution's status is NOT checked by
 # `set -e` — which is exactly why denials in section 2 do not kill the run. If
@@ -1295,16 +1297,24 @@ sweep_n="$(printf '%s\n' "$sweep_hits" | grep -c . || true)"
   || fail "the set -e sweep found $sweep_n unguarded statement-level commands, expected the 2 pinned below — a new one truncates the report with no message: [$sweep_hits]"
 has "pinned #1: section 2's process-substitution find" \
     "$sweep_hits" 'find "$d" -xdev -printf'
-# 🔴 PINNED #2, ADDED 2026-09-09, AND DELIBERATELY NOT GUARDED. It is the `find`
-# inside toplevel_accountable_entries(). Guarding it with `|| true` — the change
-# that would make this ledger go back to 1 — would MASK a short enumeration,
-# which is the precise failure the function exists to prevent: fewer top-level
-# entries means section 2 silently omits rows and section 3's residual is wrong.
-# It cannot abort the run either way: the only caller invokes it inside a process
-# substitution, whose exit status bash does not check. Unlike #1 its stderr is
-# NOT redirected into DENIED_LOG, so a failure here is loud on the terminal
-# rather than counted in section 4's blind-spot report — that is the trade, and
-# it is written down here rather than discovered later.
+# 🔴 PINNED #2, ADDED 2026-09-09: the `find` inside toplevel_accountable_entries().
+#
+# 🔴 THERE IS NO BEHAVIOURAL REASON TO LEAVE IT UNGUARDED, AND THIS COMMENT NO
+# LONGER OFFERS ONE. It previously claimed that `|| true` "would MASK a short
+# enumeration". That is FALSE, and it was the THIRD rationale supplied for this
+# function after two others were retracted as false — which is why none is
+# offered now. MEASURED, bash 5.3.15: a `find` that emits 2 records and then
+# exits non-zero is consumed IDENTICALLY with and without `|| true` — 2 records,
+# run continues, rc 0 both ways. Nothing reads the status (the only caller is a
+# process substitution, whose exit status bash does not check), and masking
+# requires a reader. The entry is here because the sweep COUNTS it, which is
+# bookkeeping and needs no justification; adding `|| true` would change nothing
+# observable either.
+#
+# What IS true and is the thing to know: unlike #1, its stderr goes nowhere — not
+# to DENIED_LOG, not to a file — so a top-level entry that cannot be stat'd is
+# dropped from section 2 with no tally. That debt is recorded where a maintainer
+# of the function will look, in the `_depth1_nul` site ledger in the script.
 has "pinned #2: the top-level enumerator's find" \
     "$sweep_hits" 'find "$root" -mindepth 1 -maxdepth 1'
 
@@ -1374,23 +1384,36 @@ has "the sort ledger names the inode-breakdown capture" "$sort_hits" '| sort -rn
 # --------------------------------------------------------------------------- #
 echo "== 12. SECTION 2 ACCOUNTS FOR TOP-LEVEL FILES, NOT ONLY DIRECTORIES =="
 # 🔴 The defect this pins: section 2's loop read `[ -d "$d" ] || continue`, so a
-# top-level entry that was not a directory never reached `find`. Section 3's
-# residual is that loop's total, so the miss shows up as unexplained space
-# rather than as an error. MEASURED on the workbench 2026-09-09: `/swapfile` is
-# a regular file of 100663328 512B blocks = 48.00 GiB on the same device as `/`.
+# top-level entry that was not a directory never reached `find`. MEASURED on the
+# workbench 2026-09-09: `/swapfile` is a regular file of 100663328 512B blocks =
+# 48.00 GiB on the same device as `/`, and it got NO ROW in section 2 at all.
+#
+# 🔴 WHICH NUMBER MOVED: section 2's BYTE COLUMN lost 48 GiB. Section 3's
+# residual is `INODES_USED - TOTAL_INODES` — a count of INODES — so it moved by
+# exactly ONE. This comment previously said the miss "shows up as unexplained
+# space", which is the same false mechanism the script's own banner was corrected
+# for; it survived here because the sweep that fixed the banner never reached the
+# test file.
 #
 # The fixture uses a REGULAR FILE at the top level (the /swapfile shape), a
-# directory (must still be listed), a symlink (must not — `-d`/`-f` follow them
-# and the target is walked on its own), a fifo (an inode with no data blocks),
-# and a skip-listed name.
+# directory, a symlink, a fifo, and a skip-listed name. 🔴 The symlink and the
+# fifo MUST BE LISTED — see the assertions below and the reasoning with them.
+# An earlier version of this paragraph said the symlink "must not" be listed,
+# eleven lines above an assertion requiring that it is. A maintainer resolving
+# that contradiction toward the comment would have reinstated an exclusion that
+# was measured to make section 3's residual WORSE.
 tl="$TMP/toplevel"
 mkdir -p "$tl/realdir" "$tl/proc" "$tl/.hiddendir"
 printf 'x' > "$tl/swapfile"
 printf 'x' > "$tl/.hiddenfile"
 ln -s realdir "$tl/linkdir"
-# 🔴 NO `|| true` HERE. With it, a host without mkfifo silently never creates the
-# path and the fifo assertion below passes because the entry does not exist —
-# green for the wrong reason. If mkfifo is missing this suite should say so.
+# 🔴 NO `|| true` HERE — but note the reason CHANGED when the fifo assertion
+# flipped from `lacks` to `has`, and the old reason is no longer the one.
+# It used to be: with `|| true`, a host without mkfifo creates no path and a
+# `lacks` assertion passes vacuously. That is now backwards — a `has` assertion
+# FAILS when the entry is absent, so the suite would go red either way. The
+# reason to keep it unguarded today is only that it fails HERE, naming the
+# missing tool, instead of three lines later as a confusing assertion failure.
 mkfifo "$tl/afifo"
 
 # The function emits NUL-separated names; render them one per line to assert on.

@@ -17,81 +17,64 @@ assertion. Fix that, and land the ops scripts that were sitting untracked in the
 workbench working tree where a `git checkout` would have deleted them unreported.
 
 ## State now
-- 🔴 **#1412 MERGED** as squash `f06b106f` (2026-09-09). Verified by CONTENT, never by
-  ancestry (a squash is never an ancestor of its base): all five files present in
-  `origin/main`, the two payload files byte-identical to the branch head, and the final
-  round-5 `SWITCH_ATTEMPTED` guard present — so the last revision landed, not an earlier one.
-- **#1436 OPEN, head `a1a37280`, branch `chore/journald-followup-corrections`, worktree
-  `~/workspace/devrc-followup`, `mergeable: MERGEABLE`.**
-- 🔴 **The head MOVED this session, and the previous session's evidence does NOT cover it.**
-  #1436 was **19 commits behind** `origin/main` at `807f98f0`. `origin/main` was merged in
-  (clean, no conflicts) and pushed as `a1a37280`, so the branch is now **0 behind / 3 ahead**
-  and the tree being gated IS the PR head. Those 19 commits added **~7,283 lines across 36
-  files**, mostly new tests (`test_subsystem_store_api.py` +1246, `test_fans_detail.py` +694,
-  `test_tmux_oom_protection_staged.py` +492, `test_handoff_index.py` +623). Any verdict taken
-  against `807f98f0` — including the previous session's targeted 861-test run — is a claim
-  about a tree that no longer exists.
-- **Semantic-conflict check on the merge: done, negative.** The two files #1436 touches
-  (`claudedocs/handoff-journald-26-11-migration.md`, `scripts/diagnose-nix-disk.sh`) are
-  touched by **none** of the 19 commits (`git log HEAD..origin/main -- <the two paths>` →
-  empty). The one plausible disjoint-file interaction was checked by hand rather than assumed:
-  `main` modified `scripts/tests/test_runtime_shebangs.py` (+16) while our side modifies a
-  `.sh` file — the change is **allowlist entries for `test_nebula_relay_apply.py` only**, and
-  `diagnose-nix-disk.sh` carries the required `#!/usr/bin/env bash`. No interaction.
-- **IN FLIGHT: `scripts/gate.sh --tier both` on the merged tree `a1a37280`**, background id
-  `bca7cvlbp`, run log `<scratchpad>/gate-run.txt`, tier logs `<scratchpad>/gate-logs/`.
-  Launched with **`--timeout 14400`** (4h) instead of the 3600s default. Invocation avoids a
-  `cd` by using gate.sh's ROOT positional:
-  `nix develop <worktree> --command <worktree>/scripts/gate.sh --tier both --timeout 14400 --log-dir <dir> <worktree>`.
-- **The sandbox tier has NOT been run on this branch.** `nix build
-  .#checks.x86_64-linux.pytests` and `…nodetests` are still pending, and must run **one at a
-  time and after gate.sh finishes** — concurrent nested `nix` contends on the store and
-  produces measured FALSE failures.
-- **The journald migration is APPLIED and VERIFIED on the workbench** (unchanged): live
-  `/etc/systemd/journald.conf` = `[Journal]` / `Audit=keep` / `SystemMaxUse=2G`;
-  `/run/current-system` → `nixos-system-nixos-26.11pre1068949.dc5d91f84032`.
-- **Claim held: `journald-26-11-migration-1`** (`claim-work`), subject "rank 1: gate both
-  tiers on the MERGED tree for devrc#1436 once the box is quiet, then merge". **Release it**
-  (`claim-work --release journald-26-11-migration-1`) when #1436 merges or the work is abandoned.
-- **No clawgate task.** `clawgate_handoff.sh resolve` → **rc 5**, positive control green (8
-  links for another session, so the board was genuinely read). An unknown session id also
-  answers 200 with an EMPTY ARRAY, so this cannot distinguish "touched no task" from "wrong
-  id" — not a clean bill of health, and no `clawgate-task:` field is recorded.
+- **#1412, #1436, #1455 all MERGED** (squashes `f06b106f`, `4e26ec9a`, `c68750f6`), each
+  verified by CONTENT rather than ancestry. **#1490 is OPEN** — the round-2 prose fixes for
+  #1455 — `MERGEABLE`, 0 behind `origin/main`.
+- **Both hosts converged and switched**, `ship.sh` → `converged + verified — 2 hosts compared,
+  both at 0150d71f` (a genuine two-host agreement claim, not a one-host run). Each host:
+  `VERIFIED — on branch main at origin/main (clean tree) + switched`, 0 dangling and 0 stale
+  managed artifacts.
+- **Rank 1 (runaway-menu) is DONE, and its premise was WRONG** — see the retired block below.
+  The laptop's copy was a stale orphan, not unsaved work; it was deleted, not committed.
+- **Rank 2 (round-2 delta audit of #1455) is DONE and produced #1490.** Five 🟡, no 🔴, and
+  **four of the five were sentences the round-1 fix wrote about itself.** 🔴 **The ladder is
+  NOT finished**: a round returning findings that needed fixing is followed by another round,
+  so round 3 on #1490's delta is the stop condition.
+- **Drift: rc=17, one item, pre-existing and not this arc's.** Both hosts `untracked: 0` and
+  `clean — main == origin/main`. The remaining rc17 is `homelab-talos/containers/clawgate`
+  being 1 behind `origin/trunk` — the `clawgatectl` build source. ⚠ It MOVED from the
+  workbench to the laptop when the ship advanced the laptop while its homelab-talos checkout
+  stayed put; it is the clawgate initiative's, not this one's.
+- **No clawgate task.** `resolve` → rc 5, positive control green (9 links for another session).
+  An unknown session id also answers 200 with an EMPTY ARRAY, so not a clean bill of health.
+- **Claim held: `journald-26-11-migration-2`.** Release it when #1490 merges and the ladder
+  terminates, or when the remainder is filed.
 
 ## Next steps (ranked)
-1. **Read the running gate's verdict, then run the two sandbox derivations ONE AT A TIME, then
-   merge #1436.** `<scratchpad>/gate-run.txt` (`GATE_RC=`) and `<scratchpad>/gate-logs/{pytest,node}.log`;
-   then `nix build .#checks.x86_64-linux.pytests` and `…nodetests` separately — never in one
-   invocation. Name the tier **and the base sha `a1a37280`** in the claim. On merge, release
-   `claim-work --release journald-26-11-migration-1`. `IN FLIGHT: devrc#1436`.
-   forcing: gate — #1436 carries a retraction of a false claim currently live on `main`
-   (`diagnose-nix-disk.sh`'s header understates its runtime by ~an order of magnitude), and
-   `main` is protected in name only, so nothing else blocks the merge.
-2. **Decide whether `scripts/diagnose-nix-disk.sh` should exist at all — BEFORE measuring its
-   runtime.** The index records it as superseded by `scripts/diagnose-disk-accounting.sh`,
-   and that successor's header names it as the thing being corrected (its unprivileged `find`
-   yields floors read as totals). Deleting it is the likely right answer; if it stays, its
-   header must point at the successor. Only if it stays is a clean runtime run worth doing.
-   forcing: none — but this INVERTS an earlier version of this list, which said to measure
-   the runtime. Measuring a script that should be deleted is the wrong work.
-3. **Migrate the laptop's journald config.** It carries
-   `services.journald.extraConfig = "SyncIntervalSec=30s";` at `configuration.nix:370`
-   (the ONE-LINE form) on `26.11pre1058091.ffb3c9b700e7`, so its next `nixos-rebuild` hits
-   the same assertion the workbench hit. The rewriter handles that form and is unit-tested
-   for it, but has NEVER been RUN on that host — different claims. ⚠ Measured 2026-09-08 by
-   an audit subagent over ssh; the laptop was UNREACHABLE on both nebula (10.42.0.100) and
-   LAN at close 2026-09-09, so this was not re-verified. Its `devrc` checkout must also be
-   current or the script will not exist there.
+1. **Merge #1490, then run ROUND 3 on its delta.** Merge **without `--delete-branch`** (see
+   the gotcha) and delete the branch after the checks post. Round 3 is the ladder's stop
+   condition — round 2 was not clean. If round 3 returns only prose findings with no 🔴, stop
+   on the stated criterion and **write the reason into the summary**.
+   forcing: gate — the ladder has not terminated and #1455's code is already on `main` with no
+   CI verdict of its own.
+2. **Migrate the laptop's journald config.** It carries
+   `services.journald.extraConfig = "SyncIntervalSec=30s";` at `configuration.nix:370` (the
+   ONE-LINE form) on `26.11pre1058091.ffb3c9b700e7`, so its next `nixos-rebuild` hits the same
+   assertion the workbench hit. The rewriter handles that form and is unit-tested for it, but
+   has NEVER been RUN on that host — different claims. ⚠ The `configuration.nix:370` reading
+   is from 2026-09-08 and has NOT been re-verified. The laptop IS reachable
+   (`zach@10.42.0.100`; the LAN address is same-network-only) and is now current with
+   `origin/main`.
    forcing: none
-4. **Give the shell half of `apply-journald-settings-migration.sh` automated coverage.**
-   Five audit rounds of trap-message fixes rest entirely on reading; a throwaway harness
-   built by an auditor caught a branch-ordering hazard in seconds and does not exist in the
-   repo. This is why that defect class recurred four times.
+3. **Give the shell half of `apply-journald-settings-migration.sh` automated coverage.**
+   Five audit rounds of trap-message fixes rest entirely on reading; a throwaway harness built
+   by an auditor caught a branch-ordering hazard in seconds and does not exist in the repo.
    forcing: none
-5. **Fix the three deprecated-option warnings** surfaced by the 26.11 eval of
+4. **Fix the three deprecated-option warnings** from the 26.11 eval of
    `/etc/nixos/configuration.nix`: `services.dnsmasq.servers` → `.settings.server`,
    `services.gnome.tracker.enable` → `.tinysparql.enable`,
    `services.gnome.tracker-miners.enable` → `.localsearch.enable`. They still work today.
+   forcing: none
+5. **`diagnose-disk-accounting.sh`: the enumerator's `find` feeds no `DENIED_LOG`.** A
+   top-level entry root cannot stat is dropped from section 2 with no tally, and section 3's
+   residual absorbs it silently. Now recorded in the `_depth1_nul` site ledger as the FIFTH
+   same-shape site. Not a regression — the glob it replaced did the same — so this is a debt,
+   not a defect.
+   forcing: none
+6. **A top-level directory that is a MOUNTPOINT for another fs is counted as root-fs.**
+   Flagged by round 2 as out of range and unaudited: `/boot` is emitted by the enumerator,
+   then walked by `find "$d" -xdev`, whose `-xdev` anchors to *that* filesystem — so its
+   inodes land in section 2's totals. Predates this arc and is unchanged by it.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -217,38 +200,126 @@ workbench working tree where a `git checkout` would have deleted them unreported
   rather than trusted from earlier in the session — a pre-push hook that runs the suite inside
   the worktree would have collided with the gate running in that same worktree.
 
+- 🔴 **`gh pr merge --delete-branch` while checks are PENDING guarantees they ERROR.** Measured
+  on #1455: merged `19:36:43Z`, Tekton started `19:40:14Z`, both legs
+  `step clone failed (rc 128)`. The branch was gone before CI could clone it. The result is
+  `ERROR`, not `FAILURE` — a broken gate, not a bad change — and it is indistinguishable at a
+  glance from a real red. **Either wait for checks to post before merging, or merge without
+  `--delete-branch` and delete the branch afterwards.**
+- 🔴 **A mutation sweep is an instrument, and BOTH of mine were wrong before they were right.**
+  (a) A mutant SURVIVED a fully green suite because my own assertion could not see it:
+  `lacks "//"` passes on EMPTY output, so deleting `[ -n "$root" ] || root=/` — which makes
+  `find ""` fail and emit nothing — was invisible. The fix was in the TEST: a positive control
+  now asserts the root enumerates ≥5 entries first. (b) A battery row scored SURVIVED against a
+  guard that was fine, because `-type d` placed after `-maxdepth 1` is INERT — in
+  `\( … \) -prune -o -print0` a non-directory fails that test and falls through to `-o -print0`
+  and is printed anyway. **Two sweeps of the same guard disagreed, and both times the
+  instrument was at fault, not the code.**
+- 🔴 **Retract a false rationale; do not replace it.** Two reasons given for excluding symlinks
+  and non-regular entries were both measured false — `find` without `-L` does not descend a
+  symlink (1 line vs 21953), and `-printf %b` is 0 for a fifo AND a symlink. Since section 3
+  reconciles INODES and each is a real used inode, the exclusion made the residual WORSE. The
+  type filter was deleted outright and both dead reasons are recorded in the source as
+  retracted, because reaching for a third justification is what produces the next false one.
+- 🔴 **Name WHICH NUMBER moved.** The first version of #1455 said "section 3's residual was
+  short by 48 GiB". Section 3 is `INODES_USED - TOTAL_INODES` — a count of INODES; there is no
+  byte residual at all (the TOTAL row prints an empty byte column). The omission cost section
+  2's BYTE COLUMN 48 GiB and moved the residual by exactly ONE. As written it taught an
+  operator to read a four-digit inode residual as gigabytes, in the one script whose section 3
+  exists to stop that misreading. Corrected in `ae2c2427` and publicly on the PR.
+- **The pre-merge full-suite ritual is RETIRED** (`CLAUDE.md`, changed 2026-09-09 mid-session):
+  the two-tier run before every merge is deleted, replaced by a change-scoped subset plus
+  reading CI. It was retired for exactly the contention this effort hit — 27–50 concurrent
+  full-suite runs on one 24-core box, the dev-host tier repeatedly hitting its own 3600s cap
+  and producing no verdict at all.
+- **A loaded box is a reason to RAISE the gate's cap, not to conclude anything.** Two
+  `gate.sh` runs died at `exit=124` / `RESULT: FAIL (exit=143)` — `Terminated`, not a test
+  failure. The successful run took **3882s** against a 3600s default, so both earlier attempts
+  died ~280s short of green. `--timeout SECS` / `DEVRC_GATE_TIMEOUT`, `0` disables.
+- **Do not write a handoff into a worktree that has a gate running in it.** `/handoff` commits,
+  and that mutated the tree mid-run, leaving the doc-reading content gates ambiguous for that
+  run. Same family as the byte-offset trap above. Draft in the scratchpad; land it after.
+
+- 🔴 **A "rescue this unsaved work" item can be exactly backwards — HASH IT FIRST.** Rank 1
+  said to rescue a 145-line laptop-only `scripts/runaway-menu` into a PR. It hashed to
+  `7ccb3d03`, **byte-identical to the blob added by wip commit `90ab4b61`**, which
+  `e2b338f2` then deliberately DELETED when the pill was refactored to render syshealth's
+  verdict instead of re-deriving it. `main` carries the post-refactor design. Committing it
+  would have reverted that refactor — the same trap this arc already hit with the two nebula
+  scripts. `git hash-object <file>` against the file's own history is what tells the two
+  apart, and `drift-check`'s "in no commit and no backup" cannot: it is true of an orphan too.
+  The delete was done with two guards that had to pass at the moment of acting (hash still
+  matching, file still untracked) and after confirming recovery from
+  `origin/zach/i3-runaways-bar-block`.
+- 🔴 **`gh pr merge --delete-branch` while checks are PENDING guarantees they ERROR.**
+  Measured on #1455: merged `19:36:43Z`, Tekton started `19:40:14Z`, both legs
+  `step clone failed (rc 128)`. `ERROR` is not `FAILURE` — a broken gate, not a bad change —
+  and it looks like a red at a glance. Merge without `--delete-branch` and delete afterwards.
+- 🔴 **A DELTA round is REFUSED without a claims block, and posting one retroactively is the
+  fix.** `audit-dispatch.py <pr> --round N` reads the prior round's fenced `audit-claims`
+  block from the PR's ISSUE comments; with none it refuses rather than silently degrading the
+  delta into a blind full audit that would then read as covered. Emit the skeleton with
+  `--round <prev> --emit-claims --audited <the tip that round READ>`, fill it in, post it as
+  an issue comment (a REVIEW comment is invisible to the script). ⚠ A MISSING INTERMEDIATE
+  block does NOT refuse — it silently widens the range across two rounds' fixes, and says so
+  only on stderr, once.
+- 🔴 **The dispatcher refuses `..HEAD` when the checkout is not standing on the PR**, and that
+  is load-bearing: this session's checkout was on `0150d71f` while the PR head was
+  `ae2c2427`. It pinned the explicit sha range instead. Branch deletion does not make the shas
+  unreachable — all three were still `git cat-file -t`-able after the branch was gone.
+- 🔴 **WHEN A RATIONALE TURNS OUT FALSE, WRITE THAT THERE IS NONE.** Measured across this
+  arc: the enumerator's exclusions got two rationales, both false; the sweep ledger then got a
+  THIRD ("`|| true` would mask a short enumeration"), also false. The subsumption ledger got
+  two drafts, both wrong. The ladder only stops regenerating them when the comment records the
+  retractions and declines to supply a replacement.
+- 🔴 **A sweep that fixes a claim must reach EVERY site, and the test file is a site.** Round
+  1 corrected the false residual-units phrase at its two script sites; the test file carried
+  the same claim in other words and was left, producing a comment that contradicted an
+  assertion eleven lines below it.
+- **"The laptop is unreachable" was FALSE and is retracted — it is reachable on nebula, and
+  the LAN address is same-network-only by design.** A prior version of the ranked list said
+  the laptop was unreachable on BOTH nebula (`10.42.0.100`) and LAN (`192.168.50.155`) at
+  close on 2026-09-09. `drift-check.sh` reached it on 2026-09-10 and again on 2026-09-11 at
+  the nebula address; `192.168.50.155` not answering is the documented same-network-only
+  caveat, not an outage. Recorded here rather than in the ranked list because a status line
+  gets replaced on the next update and this keeps being re-derived as an outage. **Every
+  laptop fact in this doc came over nebula.**
+
 ## How to verify
 ```bash
-# the running gate's verdict — read the CONTENT, never an exit code alone
-S=<scratchpad>
-grep -E 'GATE_RC=|RESULT:|panic: test timed out' $S/gate-run.txt $S/gate-logs/*.log
+# the three merged PRs, by CONTENT (a squash is never an ancestor)
+for n in 1412 1436 1455; do gh pr view $n --repo innovation-upstream/devrc \
+  --json number,state,mergeCommit --jq '"#\(.number) \(.state) \(.mergeCommit.oid)"'; done
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/diagnose-nix-disk.sh 2>/dev/null \
+  && echo "STILL PRESENT — #1455 did not land" || echo "absent, as expected"
 
-# the sandbox tier Tekton gates on — ONE AT A TIME, never in one invocation
-nix build ~/workspace/devrc-followup#checks.x86_64-linux.pytests
-nix build ~/workspace/devrc-followup#checks.x86_64-linux.nodetests
+# the guards, on whatever main is now (expect 222 ok / 0 FAIL / rc 0)
+nix develop ~/workspace/devrc -c bash ~/workspace/devrc/scripts/tests/test_diagnose_disk_accounting.sh
 
-# the gated tree is the PR head (expect the same sha on both sides)
-git -C ~/workspace/devrc-followup rev-parse HEAD
-gh pr view 1436 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid
+# #1455's CI is ERROR, not FAILURE — confirm before treating it as a red
+gh pr checks 1455 --repo innovation-upstream/devrc
 
-# the branch is not behind main (expect "0<TAB>3")
-git -C ~/workspace/devrc-followup rev-list --left-right --count origin/main...HEAD
+# the open round-2 PR
+gh pr view 1490 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
 
-# the migration is live on this host (all three are separate claims)
+# host + source drift (expect rc 17: the clawgate subtree only, now on the laptop)
+bash ~/workspace/devrc/scripts/drift-check.sh
+
+# the orphan is gone from the laptop, and is recoverable if that was wrong
+ssh zach@10.42.0.100 'ls ~/workspace/devrc/scripts/runaway-menu 2>&1'
+git -C ~/workspace/devrc show origin/zach/i3-runaways-bar-block:scripts/runaway-menu | head -5
+
+# the migration is live on the workbench (three separate claims)
 grep -A2 'services\.journald' /etc/nixos/configuration.nix
 cat /etc/systemd/journald.conf                 # expect SystemMaxUse=2G
 readlink -f /run/current-system                # expect nixos-system-nixos-26.11pre…
-
-# the rewriter's suite (37 tests, every audit-found edge case)
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_journald_migrate.py -q
-
-# #1412 landed by CONTENT (a squash is never an ancestor — do NOT check ancestry)
-git -C ~/workspace/devrc cat-file -e origin/main:scripts/lib/journald_migrate.py && echo present
 ```
 ## Open investigations — live diagnosis state
 
-### 🔴 `scripts/diagnose-nix-disk.sh` is a SUPERSEDED script that was merged anyway
+### ✅ RETIRED 2026-09-10 (answered by #1455, squash `c68750f6`) — `scripts/diagnose-nix-disk.sh` is a SUPERSEDED script that was merged anyway
+🔴 **CLOSED. The file is DELETED from `main`; do not act on the "Next probe" below.** The
+delete-vs-keep question it poses was decided DELETE and executed. Kept verbatim because the
+reasoning is the record of how it was decided, not because anything here is still open.
 - **Found at close-out, from `cairn recall` — which this doc's own header tells you to run
   FIRST, and which I did not run until the end.** `devrc/diagnose-disk-accounting.md:14`
   records: *"`scripts/diagnose-nix-disk.sh` — its predecessor, superseded. Untracked in the
@@ -273,7 +344,13 @@ git -C ~/workspace/devrc cat-file -e origin/main:scripts/lib/journald_migrate.py
   `diagnose-disk-accounting.sh` and say when to prefer which. `git log --diff-filter=A --
   scripts/diagnose-disk-accounting.sh` dates the supersession.
 
-### `scripts/diagnose-nix-disk.sh` has never been observed to finish; its runtime is unknown
+### ✅ RETIRED 2026-09-10 (moot — the file is deleted) — `scripts/diagnose-nix-disk.sh` has never been observed to finish; its runtime is unknown
+🔴 **CLOSED, and the "Next probe" below is MOOT — do NOT run it.** It asks for a clean
+end-to-end timing run on an idle box in order to replace the script's header paragraph with a
+real number. There is no header left to correct: #1455 deleted the file. The durable half of
+this block is the byte-offset trap (editing a script while a copy of it runs shifts the file
+underneath the interpreter), which is recorded in the Gotchas section and in the
+`diagnose-disk-accounting` index entry.
 - ⚠ SECONDARY to the block above — do not measure a script that may be deleted.
 - **Symptom + exact repro:** `bash scripts/diagnose-nix-disk.sh` on the workbench. Sections
   3 and 4 each walk `/nix` recursively (section 4 also stats every regular file);
@@ -298,7 +375,11 @@ git -C ~/workspace/devrc cat-file -e origin/main:scripts/lib/journald_migrate.py
   `cp scripts/diagnose-nix-disk.sh /tmp/diag-frozen.sh && time bash /tmp/diag-frozen.sh > /tmp/diag.txt 2>&1; grep -c '^=== ' /tmp/diag.txt`
   Expect 10. Then replace the runtime paragraph in the script's header with the real number.
 
-### Can #1436's gate be run to completion on this box at all?
+### ✅ RETIRED 2026-09-10 (ANSWERED: yes, at 3882s) — Can #1436's gate be run to completion on this box at all?
+🔴 **CLOSED.** It can, and the leading hypothesis below was right: raising the cap was
+sufficient. The run took **3882s** against the 3600s default, so both earlier attempts died
+~280s short of a green finish. Both tiers passed, and Tekton later posted GREEN on both legs
+independently. Kept for the load-vs-assertion reasoning; nothing here is open.
 - **Symptom + exact repro:** two prior `gate.sh --tier both` runs died at the **3600s default
   cap** — `exit=124`, `RESULT: FAIL (exit=143)`, i.e. `Terminated`, not a test failure.
 - **Observed (with values):** load is a **sustained plateau, not a spike**. Sampled every 20s
@@ -322,3 +403,72 @@ git -C ~/workspace/devrc cat-file -e origin/main:scripts/lib/journald_migrate.py
   debug the diff); gate **exit 90** = status/content disagreement or a truncated run, meaning
   "read the log", not a verdict; a `panic: test timed out` line anywhere. Only a clean
   `RESULT: PASS (exit=0)` on both tiers is a verdict.
+
+### #1455 merged with NO automated signal, and the audit ladder was stopped mid-flight
+- **Symptom:** `gh pr checks 1455` reports both Tekton legs as
+  `BROKEN GATE: … step clone failed (rc 128) before a verdict. Not a code failure.`
+- **Observed (with values):** checks started `2026-09-09T19:40:14Z`; the merge landed
+  `19:36:43Z` — **3m31s earlier**, with `--delete-branch`. Tekton had no branch left to clone.
+  State is `ERROR`, not `FAILURE`.
+- **Ruled out:** a defect in the change. The merged code passes on current `main` —
+  `test_diagnose_disk_accounting.sh` → 222 ok, 0 FAIL, rc 0, re-run 2026-09-10. `via: command`
+- **Also true, and separate:** round 1 of `/audit-pr 1455` returned **nine** findings, all
+  addressed in `ae2c2427`. **Round 2 was never run** — the ladder was stopped by operator
+  instruction, not by a clean round. So #1455 has neither CI nor a converged audit.
+- **Next probe:** dispatch a blind delta re-audit of `c68750f6` against `e8551af6`, framed as
+  *what was claimed fixed* and never *why it is correct*. Round 1's own findings were
+  disproportionately about prose the previous commit wrote while explaining itself — three of
+  nine — so that is where round 2's finding most likely sits.
+
+### A 145-line script exists only on the laptop, in no commit and no backup
+- **Symptom + exact repro:** `scripts/drift-check.sh` →
+  `[laptop] untracked: 1 file(s) — present on this host only, in no commit and no backup:
+  scripts/runaway-menu`.
+- **Observed (with values):** `-rwxr-xr-x 1 zach users 3909 Sep 9 11:47`, 145 lines, python3.
+  Docstring: *"Interactive fzf menu for the i3status-rust `runaways` block. Reads the cache file
+  written by bar-status-poll … Left-click on the pill opens this menu; right-click opens
+  syshealth in a float terminal."*
+- **Ruled out:** that it is covered by the nix-read set — `untracked-in-nix-read-paths: 0 of 1
+  … against 166 nix-read path(s)`, so nix does not read it and the flake is not shipping it.
+  `via: command`
+- **Leading hypothesis:** genuine unsaved work from the bar-pill effort, authored on the laptop
+  and never committed. One routine `git checkout` on that host loses it unreported.
+- **Next probe:** before committing it, check whether `main` already carries a successor — the
+  bar work has moved since Sep 9. `git -C $DEVRC log --oneline --all -- scripts/runaway-menu`
+  and `git grep -n runaway` on `origin/main`.
+
+### The audit ladder on the disk-accounting change has not terminated
+- **Where it stands:** round 1 on #1455 → 9 findings, fixed in `ae2c2427`. Round 2 on
+  `e8551af6..ae2c2427` → 5 🟡 / 0 🔴, fixed in #1490 (`f0172420`). **Round 3 has not run.**
+- **Observed (with values):** across both rounds, **7 of 14 findings were about prose the
+  previous round wrote while explaining itself** — not logic. Round 2's headline: the test
+  file said a top-level symlink *"must not"* be listed, **eleven lines above an assertion
+  requiring that it is**, because round 1 swept the false phrase at its two SCRIPT sites and
+  never looked in the TEST file, which carried the same claim in different words.
+- **Ruled out:** that the code is wrong. Both retracted rationales and all four mutation
+  claims were independently re-measured; #1490 changes no executable line (verified
+  mechanically: no non-comment, non-`echo` line in the diff). `via: measurement`
+- **Ruled out:** `|| true` on the enumerator's find as a masking hazard — MEASURED bash
+  5.3.15, a `find` emitting 2 records then exiting non-zero is consumed identically with and
+  without it (2 records, run continues, rc 0 both ways). Nothing reads the status, and masking
+  needs a reader. This was the THIRD rationale supplied for that one function after two were
+  retracted, and it was also false. `via: measurement`
+- **Leading hypothesis:** the remaining defect surface is prose, not behaviour, and the
+  `attribution gate` (two consecutive rounds changing zero PAYLOAD lines) cannot fire here
+  because for a comment-only PR the `.md`-equivalent — the comment text — IS the payload.
+  That is the documented non-terminating-ladder shape.
+- **Next probe:** run round 3 on #1490's delta. If it returns findings that are again only
+  prose with no 🔴 and no blast radius beyond "the document contains a false sentence", the
+  stated-criterion stop applies — **and the reason must be written into the round's summary,
+  or a report that ENDED on the escape hatch is indistinguishable from one that converged.**
+
+### #1455 carries no CI verdict and never will
+- **Symptom:** `gh pr checks 1455` → both legs `BROKEN GATE: … step clone failed (rc 128)
+  before a verdict. Not a code failure.` State is `ERROR`, not `FAILURE`.
+- **Observed (with values):** checks started `2026-09-09T19:40:14Z`; the merge landed
+  `19:36:43Z` with `--delete-branch` — **3m31s earlier**. Tekton had no branch to clone.
+- **Ruled out:** a defect in the change — the merged code passes on `main`, 222 assertions,
+  0 failures, re-run 2026-09-11. `via: command`
+- **Next probe:** none for #1455 (a merged PR's checks cannot be re-run without a fresh push).
+  The forward fix is procedural and is in the Gotchas: do not pass `--delete-branch` while
+  checks are pending.

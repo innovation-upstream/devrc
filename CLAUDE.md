@@ -254,6 +254,22 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `serverMode` unit, so it is running on the workbench and you should not assume it on any
   other host. This FILE named `drift-check` ten times and this zero times, which is how the
   sentence below came to be written wrong.
+  ⏳ **`scripts/main-status-watch.py` shortens that window, and it is NOT LIVE UNTIL A
+  SWITCH.** It reads `main`'s own `tekton/devrc-main-*` statuses every 10 min (a few API
+  calls, not a build) and, on an authoritative red, starts `main-green-check` EARLY instead
+  of waiting for the 4-hourly timer — so detection becomes ~20 min (CI) + ≤10 min (poll) +
+  ~20 min (the deadman's confirmation) rather than up to ~5.5h. 🔴 **It never decides
+  anything and never toasts**: every claim about main's health is still the deadman's, still
+  by reproduction, so a flake reaching it costs compute rather than the operator's
+  attention. If it breaks, coverage is exactly the 4-hourly deadman — which is why it has no
+  `OnFailure=notify-failure@`. Same `enableMainGreenDeadman` master switch. ⚠ **Read the
+  per-status `state`, never `/commits/{sha}/status`'s roll-up, if you ever query this leg by
+  hand**: MEASURED 2026-09-10 over the 100 newest main commits, the roll-up maps `error` onto
+  `failure`, so 48 of 60 pushes read RED when only 9 of 200 status rows were real failures —
+  the rest are `superseded by a newer run` (59.5%) and `KILLED: the gate pod died` (15%).
+  ⚠ **Only 21% of main commits get an authoritative verdict at all** (the rest are
+  superseded), so the newest verdict is a median 1.43h old — this accelerates detection, it
+  does not make it continuous.
   🔴 **BE HONEST ABOUT WHAT THIS IS: it is LESS SAFE, deliberately.** Protection is off and the
   local mandate is gone, so nothing PREVENTS a bad merge; what remains is an advisory check
   with a measured ~42% noise rate, whoever is reading the PR, and a 4-hourly deadman that

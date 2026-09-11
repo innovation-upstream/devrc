@@ -566,6 +566,16 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #   git     scripts/tests/test_ship_converge.py
 #   awk     scripts/browser-bridge/tests/test_browser_session_id.py
 #   jq,grep scripts/task-spec-drafter/tests/test_severity_and_gate_skip.py
+#   fzf     scripts/tests/test_mention_open.py — the mention picker IS fzf, and
+#           the four tests that pin its ranking (`--tiebreak=end`) run the REAL
+#           binary, two via `--filter` and two via a pty, because the property
+#           is fzf's algorithm and no argv assertion can reach it. MEASURED
+#           2026-09-09: these were `skipif`s first, the dev-host tier ran them,
+#           the check sandbox skipped all four, and this runner failed the
+#           derivation on the unpinned skips — i.e. the authoritative tier had
+#           zero coverage of the reason the picker was changed. They now FAIL on
+#           a missing fzf rather than skipping, which is what this entry makes
+#           an environment fault instead of a permanent red.
 #   setsid  scripts/browser-bridge/tests/test_browser_agent.py (process-group kill)
 #   python3 scripts/browser-bridge/tests/test_browser_agent.py
 #   nix-instantiate
@@ -647,7 +657,7 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
