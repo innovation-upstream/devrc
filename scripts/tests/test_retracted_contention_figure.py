@@ -116,9 +116,11 @@ def _tracked_text_files():
 # 🔴 THE `*` BRANCH REQUIRES A FOLLOWING SPACE. Without it this ate one star
 # of a markdown `**BOLD**` run landing at a line start, so rewrapping
 # CLAUDE.md's block changed the pinned window and failed the guard with
-# "the text CHANGED" over an edit that changed no words. MEASURED across 7
-# reflow widths: 3 produced a false failure. `* ` is a markdown bullet or a
-# C continuation line; `**` is emphasis and must survive untouched.
+# "the text CHANGED" over an edit that changed no words. `* ` is a markdown
+# bullet or a C continuation line; `**` is emphasis and must survive untouched.
+# ⚠ THIS FIXES THE STAR CAUSE ONLY, NOT ALL REFLOW SENSITIVITY — the hyphen
+# cause below survives it. Two blocks in this file used to credit the same
+# failures to different causes; they cannot both be right.
 _COMMENT_LEAD = re.compile(r"^[ \t]*(?:#+[ \t]?|//+[ \t]?|\*[ \t])")
 _WS = re.compile(r"\s+")
 
@@ -132,13 +134,23 @@ def _normalised(lines):
 
     ⚠ THIS IS NOT "REFLOW-SAFE BY CONSTRUCTION" — that claim was made in this
     file, in its sibling comments and in its commit message, and it is FALSE.
-    MEASURED over 7 reflow widths of CLAUDE.md's block: the digest moved at 3
-    of them — a `**BOLD**` run landing at a line start (fixed above), and a
-    hyphen break splitting `re-deriving`. The count version it replaced moved
-    at 1 of the 7, so the swap was justified with a comparison that ran the
-    wrong way. What the swap DOES buy is catching an in-place reword, which no
-    count can. Hyphen-break sensitivity is real and unfixed: if a reflow fails
-    this guard, read the printed text before assuming a reword.
+    Reproduce it: rewrap CLAUDE.md to width 80 and this normalisation's output
+    CHANGES, because a hyphen break splits a word (`re-deriving` -> `re-
+    deriving`) and no amount of whitespace collapsing rejoins it. The star
+    cause is fixed above; this one is not.
+
+    🔴 AN EARLIER DRAFT SAID "the digest moved at 3 of 7 reflow widths, the
+    count version at 1 of 7" AND NAMED NONE OF THE SEVEN. `claude/RULES.md`
+    requires naming the points you measured, so that pair was unreproducible as
+    written and is WITHDRAWN rather than restated — a wider independent sweep
+    agreed on the DIRECTION (the text pin is more reflow-sensitive than the
+    count it replaced, not less) and disagreed on the proportions. The
+    direction is what the retraction rests on and it stands; the numbers were
+    mine and I could not reproduce them.
+
+    What the text pin genuinely buys over a count is catching an in-place
+    reword, which no count can. If a reflow fails this guard, read the printed
+    text before assuming a reword.
     """
     return _WS.sub(" ", " ".join(_COMMENT_LEAD.sub("", l) for l in lines)).strip()
 
