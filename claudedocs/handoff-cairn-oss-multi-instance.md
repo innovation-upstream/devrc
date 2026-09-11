@@ -937,25 +937,125 @@ it routes the mandated check back at a client that does not run it, re-opening t
     firing exits 0.
     forcing: none
 
-22. 🔴 **The CI intermittent is DIAGNOSED but NOT FIXED — `SERVER_BLOCKED_IN_FSYNC`.**
-    `server.py:_replace_bytes` issues **two** `fsync`s — the file, then the parent directory —
-    **inside the request and before the response is written**. `fsync` blocks in
-    uninterruptible D-state, is bounded by nothing, and burns no CPU, so it is invisible to
-    every CPU-shaped metric; the handler's `timeout = 15` is a SOCKET timeout and does not
-    reach a syscall. Four occurrences, all in the write path, all
+22. ⚠ **REMEDIED AND MERGED — `#1458`, squash `ce9b55c3`, 2026-09-10. NOT YET VERIFIED BY THE
+    FLAKE RATE, which is the half that actually closes this. And the three remedies this item
+    recommended were all aimed at the wrong layer.**
+    🔴 **VERIFIED BY CONTENT ON `origin/main`, NEVER BY ANCESTRY** — a squash merge makes
+    `merge-base --is-ancestor` false forever, so that check reads "not merged" and is wrong.
+    On `origin/main`: the `sited_root` fixture is present, `_DISK_ROOTED_ALLOWLIST` is present,
+    `test_the_operand_NODE_TYPE_is_not_what_decides_either` is present, and `slowfsync.c`
+    carries `skip_tmpfs_enabled`. The one surviving `tmp_path / "store"` in the api file is at
+    `:367`, inside a docstring — prose, not a site. via: measurement
+    ⚠ **It was merged with `tekton/devrc-pytests` RED**, on the second, unrelated flake
+    described below — attributed, unreachable from the diff, and on an advisory rather than a
+    required check. Recorded because "merged" and "merged green" are different claims and only
+    the first is true here.
+    The DIAGNOSIS below stands and is unretracted. `server.py:_replace_bytes` issues **two**
+    `fsync`s — the file, then the parent directory — **inside the request and before the
+    response is written**. `fsync` blocks in uninterruptible D-state, is bounded by nothing,
+    and burns no CPU, so it is invisible to every CPU-shaped metric; the handler's
+    `timeout = 15` is a SOCKET timeout and does not reach a syscall. Four occurrences, all in
+    the write path, all
     `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_CONTROL…`.
     🔴 **THIS IS A REAL GATE RISK: devrc requires both Tekton checks with
-    `enforce_admins: true`, so when it fires nobody can merge.** Three remedies, none of them
-    a re-run: **(a) bound the write path** so a stalled `fsync` fails fast rather than hanging
-    past the client timeout — *recommended, and the only one that makes the SERVER correct*;
-    (b) raise this test's client timeout — trades a red gate for a slow one; (c) unpin the CI
-    pipelines so they stop sharing one node's disk. **Grep `MECHANISM =` FIRST on any
-    recurrence** — the instrument already exists and three occurrences were spent before
+    `enforce_admins: true`, so when it fires nobody can merge.** **Grep `MECHANISM =` FIRST on
+    any recurrence** — the instrument already exists and three occurrences were spent before
     anyone read it.
-    **Closing condition:** a merged PR after which the write path cannot block past the
-    client timeout, OR a documented decision that (b)/(c) is the accepted trade.
-    forcing: gate — it has turned the repo's required check red on four PRs, including a
-    docs-only one
+    🔴 **WHAT THIS ITEM GOT WRONG, MEASURED 2026-09-09 — THE REMEDY ALREADY EXISTED AND HAD
+    NEVER REACHED THE FAILING SITE.** It offered (a) bound the write path — *recommended, and
+    the only one that makes the SERVER correct* — (b) raise the client timeout, (c) unpin CI
+    from one node. **(a) is a production change to `server.py`'s crash-durability semantics
+    made to close what is a TEST-HARNESS SITING GAP**, and the in-file docstring argues neither
+    fsync is removable (without the directory fsync, a node losing power after `os.replace`
+    returns can come back with the old name on the old inode, **having already answered
+    `200 appended`**). (b) is banned in-file. What the tree actually said:
+    - `TestARefusedWriteIsIndistinguishableFromAnAbsentOne._phases` built its store at a bare
+      `tmp_path / "store"` — it never called `store_siting.store_root()`. **5** sites in
+      `scripts/tests/test_subsystem_store_api.py` were sited; **18** were not, and the failing
+      one was among the 18. The tmpfs fix (#1211/#1219/#1239) never covered it. via: code
+    - **The mechanism predicts WHICH test fails, which is what makes this more than
+      compatible-with-the-evidence.** Every sibling in that class asserts a 404 (refused or
+      absent), and a 404 never reaches `_replace_bytes`. `test_POSITIVE_CONTROL…` is the only
+      test in the class that gets `200 appended`, so it is the only one that executes the two
+      in-request fsyncs. via: code
+    - **`scripts/ci-repro/README.md` already carried the confirming measurement and nobody had
+      reconciled it against the siting fix:** the real CI traceback stalls on
+      `…/pytest-of-nixbld13/pytest-0/popen-gw3/…/store` — a `tmp_path`-derived path on the step
+      container's ephemeral layer, **not** a `devrc-store-*` tmpfs holder. The failing writer is
+      an unsited root. via: measurement
+    - ✅ **This also retires the `_HUNG_SERVER_RULES` path-sensitivity caveat FOR CI** (that
+      classifier matches the substring `fsync` against rendered filenames, so a worktree named
+      `*fsync*` makes it report `SERVER_BLOCKED_IN_FSYNC` unconditionally): the CI path contains
+      no `fsync`, so the verdict is genuine. The classifier defect itself is untouched and is
+      still `handoff-gate-flake-store-api.md` rank 2.
+    🔴 **THE GUARD THAT SHOULD HAVE CAUGHT THIS WAS ONE SITE WIDE — a description claiming
+    coverage the body did not provide.** `TestTheStoreIsSitedOffTheContendedDisk` says "a
+    fixture that silently fell back to disk **everywhere** would leave the suite exactly as
+    flaky while every test still passed", and its positive control takes only the `store`
+    fixture. The old ratchet was a COUNT (`_DISK_ROOTED_SITES = 33`) — a count of declarations,
+    not of what they cover.
+    **What `#1458` ships:** all 18 sites take a new `sited_root` fixture; the count-ratchet
+    becomes `_DISK_ROOTED_ALLOWLIST`, an enumerated set keyed `<Class.function> :: <expr>`
+    (never line numbers) asserted in BOTH directions, plus `_SITED_STORE_ROOT_CALLERS` pinning
+    the other side. 15 sites stay allowlisted with reasons — argued write-free **from the call
+    graph, not from a runtime trace**.
+    ⚠ **`slowfsync.c` in its shipped form CANNOT measure a siting fix** — it interposes on libc
+    `fsync`, so it stalls tmpfs too (65.0 s on ext4 *and* on tmpfs). `#1458` adds an opt-in
+    `SLOWFSYNC_SKIP_TMPFS=1`. Red-before-green with it: `origin/main` **1 failed in 63.96s**
+    (`TimeoutError` @ `socket.py:720`, `MECHANISM = SERVER_BLOCKED_IN_FSYNC`); branch **1 passed
+    in 3.67s**; branch with the fallback forced to disk **1 failed in 64.29s** — so the green is
+    the SITING, not an inert reproducer.
+    **Census guard mutation RE-RUN INDEPENDENTLY, not taken on the implementing agent's
+    report:** reverting the failing test to `tmp_path / "store"`, `__pycache__` cleared,
+    `PYTHONDONTWRITEBYTECODE=1` → `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`
+    RED **with its own message**, naming the exact site, **22 others still passing** — reachable
+    and specific, not a suite-wide break. Mutant reverted; tree clean.
+    ⚠ **NOT VERIFIED, and this is the whole residual:** nothing here was measured in CI. The dev
+    host has `/tmp` on ext4 and `/dev/shm` on tmpfs; **if the gate container has no usable
+    tmpfs, `store_root` falls back to disk BY DESIGN and this changes nothing there.** That is
+    the first thing to check if it recurs, and it is checkable directly — the `store:` path in a
+    failure log distinguishes the two by construction (`devrc-store-*` = sited, `pytest-of-*` =
+    fell back).
+    🔴 **A GREEN GATE ON `#1458` IS NOT THE VERIFIER, AND THIS TRAP IS ALREADY RECORDED ONCE** —
+    the gate validating a gate fix is not independent evidence, and one green cannot separate
+    "the fix worked" from "this run would not have flaked". The verifier is the flake RATE
+    against a fresh baseline: **`handoff-gate-flake-store-api.md` rank 1**, which this doc should
+    have been citing all along and was not.
+    ⚠ **THE SAME GAP EXISTS IN THE OSS REPO AND IS DELIBERATELY LEFT OPEN.** Measured
+    2026-09-09: `ZacxDev/cairn`'s `tests/test_subsystem_store_api.py` has the identical **18
+    open-coded / 5 sited** split and the same one-fixture guard (`:19716`). Its CI is
+    GitHub-hosted with no single-node pin, so the trigger is weaker — but it is the same defect,
+    in the copy the fork consolidates ONTO (rank 3 slice 3). Not fixed here to avoid duplicating
+    work the consolidation may delete; **decide it when slice 3 is planned, not by default.**
+    🔴 **RETRACTED, MEASURED 2026-09-10: THE TEKTON CHECKS ARE NOT REQUIRED, AND THIS DOC HAS
+    BEEN ASSERTING THE OPPOSITE.** Earlier revisions of this item — and the rounds of PR
+    commentary built on them — said devrc requires both Tekton checks with
+    `enforce_admins: true`, so a red gate "blocks everyone". Two independent surfaces, read the
+    same minute, disagree: classic branch protection on `main` returns **no required status
+    checks and `enforce_admins: false`**, and the repository has **no rulesets and no rules
+    applying to `main`**. The gates are **advisory**. That does not make a red gate harmless —
+    it makes it the *other* hazard, the one nobody is forced to look at — but "nobody can merge"
+    was false, and it was inflating the urgency of every gate item in this doc. ⚠ A protection
+    setting is a point-in-time reading and can be changed without touching this repo: **re-read
+    it, do not cite this line.** via: measurement
+    **Closing condition:** `#1458` merged, AND a flake-rate reading against a baseline whose PR
+    heads postdate the merge — **not a single green run**. The OSS half closes separately, with
+    rank 3 slice 3.
+    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE NOW REDDENS THIS PR, AND IT IS NOT THIS ONE.**
+    `test_run_tests_targets.py::test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`
+    (added hours earlier by #1445's own audit ladder — its docstring reads "🟡 round-2 F5")
+    spawns a nested full `run-tests.sh` and bounds it at **120 s**; on `a6dd11eb` that
+    subprocess was **SIGKILLed at the bound** (`subprocess.TimeoutExpired`, returncode `-9`,
+    `test_run_tests_targets.py:756`). It is **not an assertion failure**, no part of #1458's
+    diff can reach that file, and #1462 — same base, same test — **passed minutes earlier**, so
+    it is non-deterministic. Wall-time discriminator, CI-to-CI: the failing and passing runs are
+    near-identical (1030.34 s vs 1065.64 s; 155.60 s vs 154.73 s — the failing run was
+    *faster*), so the node was not inflated; one bounded operation stalled while everything
+    around it ran normally. **Same signature, one layer up: a wall-clock bound inside a test on
+    a contended node.** Belongs with `handoff-gate-flake-store-api.md` rank 1, not with a
+    re-run. via: measurement
+    forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
+    Advisory, not blocking (see the retraction above)
 
 23. **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
     (a) `claude/skills/resume/SKILL.md:128` still spells the post-write check as a bare
