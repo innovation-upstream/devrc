@@ -177,10 +177,16 @@ validated preset; treat unvalidated ones as starting points.
 🔴 **`rows[].metric` (prometheus) and `rows[].stream` (loki streams) are RENDERED
 DISPLAY STRINGS** — `{a=1, b=2}` — built for the human-readable table. They are
 NOT objects and they are NOT Prometheus's `data.result[].metric`, despite the
-name. Field-accessing them RAISES — `jq` prints `Cannot index string with string`
-and exits **5**, Python raises `TypeError` — and under a suppressor (`.metric.job?`,
-`// empty`, a bare `except`) it instead returns nothing silently, while `row_count`
-sits in the same document saying the query matched.
+name. Field-accessing them RAISES — `jq` prints `Cannot index string with string` and
+exits **5**; Python raises `TypeError` on `row["metric"]["job"]` and
+`AttributeError` on `row["metric"].get("job")`. Only `?` / `try…catch` (jq) or a
+bare `except` (Python) make it silent, and a silent miss is the dangerous one:
+`row_count` sits in the same document saying the query matched.
+
+🔴 **`// empty` is NOT an error suppressor** — jq's `//` is a null/false
+alternative, so the indexing error propagates before it can apply and the
+pipeline still exits 5 (measured, jq 1.8.1; `jq -n 'error("boom") // 1'` errors
+too). `.labels? // {}` is safe because of the **`?`**, not the `//`.
 
 **`rows[].labels` is the label set as a `{str: str}` dict.** Use it:
 
