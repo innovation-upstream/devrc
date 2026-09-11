@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,11 @@ class Harness:
 
     def triggered(self):
         return self.receipt.exists()
+
+    def responses_off(self):
+        """Make every API read fail, so the next run is UNMEASURED."""
+        for f in self.responses.iterdir():
+            f.unlink()
 
 
 @pytest.fixture
@@ -489,7 +495,7 @@ def test_a_GREEN_verdict_closes_the_episode_and_a_LATER_red_triggers_again(h):
     h.serve_statuses(green, [_status(CTX_PY, "success", REAL_SUCCESS)])
     recovered = h.run()
     assert recovered.returncode == RC_OK
-    assert "closing the red episode" in recovered.stdout
+    assert "closed the red episode" in recovered.stdout
 
     _red_commit(h, "c4" + "0" * 38)
     assert h.run().returncode == RC_TRIGGERED, "a NEW episode must be able to trigger"
@@ -730,16 +736,98 @@ def test_a_failed_episode_write_does_NOT_trigger(h, tmp_path):
     with the nix store — CORRELATED with the failure, since the disk pressure
     that breaks the write is produced by the very builds least worth re-kicking.
     So it now records FIRST and fails CLOSED.
+
+    🔴 THE FIRST VERSION OF THIS FIXTURE IS WHY THE REAL BUG SHIPPED GREEN. It
+    made `red-episode` a DIRECTORY, which leaves the state dir itself writable —
+    so `bump_streak()` succeeded and the ladder advanced (`11,12,12,12`). The
+    docstring described ENOSPC; the fixture exercised something else, and could
+    not reach the defect it claimed to cover. `test_an_ENOSPC_SHAPED_state_dir_
+    ESCALATES` below now exercises the shape this docstring names.
+
+    It also asserted `returncode in (RC_UNMEASURED, RC_BLIND)` — a disjunction
+    that passes whichever the arm returns, so it could not tell "ladders" from
+    "never escalates". Assert the exact code.
     """
     _red_commit(h, "d5" + "0" * 38)
     h.cache.mkdir(parents=True, exist_ok=True)
     # make the episode path unwritable by making it a directory
     (h.cache / "red-episode").mkdir()
-    proc = h.run()
-    assert proc.returncode in (RC_UNMEASURED, RC_BLIND), proc.stdout
+    proc = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=3)
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
     assert "cannot record the red episode" in proc.stdout
+    assert "streak 1/3" in proc.stdout
     assert "NOT triggering" in proc.stdout
     assert not h.triggered(), "it triggered without being able to record it"
+
+
+def _enospc_shaped(cache):
+    """The state dir exists but NOTHING in it can be written — the shape ENOSPC
+    actually produces, and the one that breaks the ladder along with everything
+    else. `exist_ok=True` means `mkdir()` succeeds, so this reaches the arms that
+    a missing directory never does."""
+    cache.mkdir(parents=True, exist_ok=True)
+    os.chmod(cache, 0o500)
+
+
+def test_an_ENOSPC_SHAPED_state_dir_ESCALATES_rather_than_reporting_success(h):
+    """🔴 THE ROUND-2 🔴, AND IT IS F1's SHAPE REBUILT INSIDE F2's FIX.
+
+    `open_episode`'s docstring names ENOSPC on ~/.cache as the realistic cause.
+    ENOSPC breaks EVERY write in that directory — including `bump_streak()`'s,
+    which swallowed its own OSError and returned a recomputed count nobody
+    saved. So `n` was 1 on every run and `n >= escalate` was never true.
+    Measured, escalate=2, six polls: rc `[11,11,11,11,11,11]`, `streak 1/2`
+    every time — byte-for-byte the sequence the F1 commit cites as the bug it
+    removed, and rc 11 is a systemd SUCCESS, so the unit stayed green forever.
+
+    🔴 The inversion is what made it bite: `state.mkdir()` uses `exist_ok=True`,
+    so the SAME root cause gave the loud rc 12 when the directory was missing
+    and the silent rc 11 when it existed — and in production it is created on
+    the first run and always exists afterwards, so the quiet branch is the one
+    that actually happens.
+    """
+    _red_commit(h, "e5" + "0" * 38)
+    _enospc_shaped(h.cache)
+    try:
+        rcs = [h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2).returncode for _ in range(3)]
+    finally:
+        os.chmod(h.cache, 0o700)
+    assert rcs == [RC_BLIND, RC_BLIND, RC_BLIND], (
+        f"got {rcs}; an arm whose ladder cannot be written must fail the unit "
+        "immediately, not report success forever"
+    )
+    assert not h.triggered()
+
+
+def test_an_ENOSPC_SHAPED_dir_does_not_falsely_claim_it_closed_the_episode(h):
+    """The green branch printed "closing the red episode" while the unlink had
+    failed and the file was still there — a log line asserting an action that
+    did not happen, leaving the accelerator disarmed for every later red."""
+    _red_commit(h, "f5" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    green = "a6" + "0" * 38
+    h.serve_commits([green])
+    h.serve_statuses(green, [_status(CTX_PY, "success", REAL_SUCCESS)])
+    # ⚠ 0o500 blocks CREATE and UNLINK, not modification of an existing file —
+    # so `close_episode`'s unlink fails while `bump_streak` (rewriting a file
+    # that already exists) still succeeds. That is the honest shape here: the
+    # episode cannot be cleared but the ladder DOES advance, so this arm
+    # escalates on the second run rather than the first.
+    os.chmod(h.cache, 0o500)
+    try:
+        first = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2)
+        second = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2)
+    finally:
+        os.chmod(h.cache, 0o700)
+    assert "closed the red episode" not in first.stdout, (
+        "it claimed a state change it did not achieve"
+    )
+    assert "could NOT" in first.stdout
+    assert "cannot clear the red episode" in first.stdout
+    assert (first.returncode, second.returncode) == (RC_UNMEASURED, RC_BLIND), (
+        f"got {first.returncode},{second.returncode} — an episode that cannot be "
+        "cleared must ladder to BLIND, not report success forever"
+    )
 
 
 def test_an_uncreatable_state_dir_is_BLIND_not_a_quiet_success(h, tmp_path):
@@ -760,6 +848,146 @@ def test_an_uncreatable_state_dir_is_BLIND_not_a_quiet_success(h, tmp_path):
     assert "cannot create the state dir" in proc.stdout
     assert "NOT 'main is green'" in proc.stdout
     assert not h.triggered()
+
+
+# 🔴 EACH TERMINAL SUCCESS PATH RESETS THE STREAK — PINNED INDIVIDUALLY.
+# The commit message claimed "the reset now happens on each TERMINAL SUCCESS
+# path only", and an independent sweep found that asserted for four paths and
+# ENFORCED for one: deleting the reset at the `none`, `episode-open` or
+# `triggered` site left the whole suite green. Each now has its own case, built
+# the same way — strand the streak at 1, take the path, and require that a
+# LATER unmeasured run reports 1 again rather than 2.
+
+def _strand_streak_at_one(h):
+    """One unmeasured run, so the streak is 1 and escalate=2 is one step away.
+
+    Turns the canned responses off itself — a caller that had just served a red
+    would otherwise take a SUCCESS path here and strand nothing, which is how the
+    first draft of these tests passed while measuring the wrong thing.
+    """
+    h.responses_off()
+    proc = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2)
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "streak 1/2" in proc.stdout
+
+
+def _assert_streak_was_reset(h, why):
+    """A following unmeasured run must say 1/2 again, not 2/2."""
+    h.responses_off()
+    proc = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2)
+    assert "streak 1/2" in proc.stdout, f"{why}: {proc.stdout}"
+
+
+def test_the_NO_VERDICT_path_resets_the_streak(h):
+    _strand_streak_at_one(h)
+    sha = "b6" + "0" * 38
+    h.serve_commits([sha])
+    h.serve_statuses(sha, [_status(CTX_PY, "error", REAL_SUPERSEDED)])
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2).returncode == RC_OK
+    _assert_streak_was_reset(h, "the no-verdict path did not reset the streak")
+
+
+def test_the_EPISODE_ALREADY_OPEN_path_resets_the_streak(h):
+    _red_commit(h, "c6" + "0" * 38)
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2).returncode == RC_TRIGGERED
+    _strand_streak_at_one(h)
+    _red_commit(h, "d6" + "0" * 38)
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2).returncode == RC_OK
+    _assert_streak_was_reset(h, "the episode-open path did not reset the streak")
+
+
+def test_the_TRIGGERED_path_resets_the_streak(h):
+    _strand_streak_at_one(h)
+    _red_commit(h, "e6" + "0" * 38)
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2).returncode == RC_TRIGGERED
+    _assert_streak_was_reset(h, "the triggered path did not reset the streak")
+
+
+def test_the_FLAKE_SCREENED_path_resets_the_streak(h):
+    _strand_streak_at_one(h)
+    sha = "f6" + "0" * 38
+    _red_commit(
+        h, sha,
+        desc=f"FAILED: pytests — FAILING: {KNOWN_FLAKE_NAME} | TOTAL failed=1  (f)",
+    )
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2).returncode == RC_OK
+    _assert_streak_was_reset(h, "the flake-screened path did not reset the streak")
+
+
+# ══ THE EPISODE AGE BOUND ═════════════════════════════════════════════════════
+
+def test_a_STUCK_episode_expires_instead_of_disarming_the_unit_forever(h):
+    """🔴 `close_episode` is reachable from exactly two places and nothing bounds
+    an episode's age. Measured paths where it stayed open indefinitely: main
+    never gets a GREEN verdict inside the walk (renamed context, disabled
+    pipeline, a red window longer than the walk); a crash between the record and
+    the trigger; a second distinct breakage with no green between. In each, later
+    reds returned rc 0 with no start and NO SIGNAL — and the `none` arm resets
+    the streak, so nothing accumulated either.
+
+    That is this file's own F1 argument applied to the state machine F5 added:
+    an arm that can never advance a ladder and never fails the unit is
+    permanently silent.
+    """
+    _red_commit(h, "a7" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    # a fresh episode suppresses
+    _red_commit(h, "b7" + "0" * 38)
+    assert h.run().returncode == RC_OK
+
+    # age it past the bound
+    mod = _load()
+    ep = h.cache / "red-episode"
+    sha_txt = ep.read_text().split()[0]
+    ep.write_text(f"{sha_txt} {int(time.time()) - mod.EPISODE_MAX_AGE_S - 60}\n")
+
+    _red_commit(h, "c7" + "0" * 38)
+    proc = h.run()
+    assert proc.returncode == RC_TRIGGERED, proc.stdout
+    assert "treating this as a new one" in proc.stdout
+
+
+def test_an_episode_file_with_no_timestamp_is_treated_as_ANCIENT(h):
+    """An episode written by an older version, or truncated, must not grant an
+    unbounded pass — an unreadable age is the one that most needs the bound."""
+    _red_commit(h, "d7" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    (h.cache / "red-episode").write_text("deadbeef\n", encoding="utf-8")
+    _red_commit(h, "e7" + "0" * 38)
+    proc = h.run()
+    assert proc.returncode == RC_TRIGGERED, proc.stdout
+
+
+def test_a_FRESH_episode_is_still_suppressed(h):
+    """The control for the two above: the bound must not defeat the debounce."""
+    _red_commit(h, "f7" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    _red_commit(h, "a8" + "0" * 38)
+    proc = h.run()
+    assert proc.returncode == RC_OK, proc.stdout
+    assert "not re-triggering" in proc.stdout
+
+
+def test_a_trigger_TIMEOUT_leaves_the_episode_open(h):
+    """`systemctl start --no-block` can time out AFTER queueing the job, so
+    closing the episode there would let the next poll start a run already under
+    way — the one path that broke the 'one extra run per window' bound."""
+    write_exec(h.trigger, "sleep 30\n")
+    _red_commit(h, "b8" + "0" * 38)
+    proc = h.run(MAIN_STATUS_WATCH_BUDGET="60", MAIN_STATUS_WATCH_BLIND_ESCALATE=9)
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "LEFT OPEN" in proc.stdout, proc.stdout
+    assert (h.cache / "red-episode").exists()
+
+
+def test_a_NON_timeout_trigger_failure_DROPS_the_episode_so_a_retry_is_possible(h):
+    write_exec(h.trigger, 'echo "Unit not found." >&2\nexit 5\n')
+    _red_commit(h, "c8" + "0" * 38)
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=9).returncode == RC_UNMEASURED
+    assert not (h.cache / "red-episode").exists()
+    # and once the trigger works again, it really does retry
+    write_exec(h.trigger, f'echo "$@" >> "{h.receipt}"\nexit 0\n')
+    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=9).returncode == RC_TRIGGERED
 
 
 def test_a_failing_trigger_is_UNMEASURED_not_a_silent_success(h):
@@ -817,9 +1045,19 @@ def test_the_trigger_verb_is_MUTATING_so_the_stub_fails_it_closed():
 
       1. the SEAM: every behavioural test above sets MAIN_STATUS_WATCH_TRIGGER,
          so none executes the production argv;
-      2. FAIL-CLOSED: `start` not being a read verb means the stub ERRORS rather
-         than starting a real unit, so a future test that forgets the seam
-         cannot kick off a 20-minute gate run on the operator's box.
+      2. FAIL-CLOSED: `start` not being a read verb means the stub SWALLOWS the
+         call rather than passing it to the host, so a future test that forgets
+         the seam cannot kick off a 20-minute gate run on the operator's box.
+
+    ⚠ BE PRECISE ABOUT LEG 2, because the obvious wording ("it would get an
+    error") is HALF RIGHT and is the same half-right sentence the ledger entry in
+    `test_no_real_launchers.py` was corrected for. The blocked stub does NOT
+    fail: it EXITS 0. So a seam-less test would see `trigger_deadman()` succeed,
+    print TRIGGERED, write an episode file and return rc 10 — passing VACUOUSLY
+    rather than failing loudly. The SAFETY claim is complete (nothing on the host
+    starts); what leg 2 does not give you is a signal that your test is inert.
+    That is leg 1's job, which is why it is stated first and not treated as
+    redundant. One rule, two places — and this was the copy left unfixed.
 
     Leg 2 is what protects against a test nobody has written yet, and it is only
     true while the verb stays mutating and stays the ONLY call site. Both are

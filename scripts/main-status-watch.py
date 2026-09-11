@@ -295,7 +295,34 @@ class State:
     # red and closes only when a GREEN verdict is observed. While it is open the
     # operator has already been told, and re-telling them adds no information.
     def episode_open(self):
-        return self._read(self.episode)
+        """-> (sha, age_seconds) for an open episode, else None.
+
+        🔴 AN EPISODE CARRIES ITS AGE BECAUSE AN UNBOUNDED ONE SILENTLY DISARMS
+        THIS UNIT. `close_episode` is reachable from exactly two places — a green
+        verdict and a failed trigger — and nothing else clears it. Measured
+        paths where it would otherwise stay open forever: main never gets a GREEN
+        verdict inside the walk (a renamed context, a disabled pipeline, or a red
+        window longer than 20 commits); a crash or reboot between the record and
+        the trigger; a second distinct breakage with no green between. In every
+        one, later reds returned rc 0 with no start and no signal at all — the
+        `none` arm even resets the streak, so nothing accumulates.
+
+        That is the same fault this file's F1 comment names: an arm that can
+        never advance a ladder and never fails the unit is permanently silent.
+        The bound is EPISODE_MAX_AGE_S; see it for why that number.
+        """
+        raw = self._read(self.episode)
+        if not raw:
+            return None
+        parts = raw.split()
+        sha = parts[0]
+        try:
+            ts = int(parts[1])
+        except (IndexError, ValueError):
+            # Written by an older version, or truncated. Treat as ANCIENT rather
+            # than as fresh: an unreadable age must not grant an unbounded pass.
+            return sha, EPISODE_MAX_AGE_S + 1
+        return sha, max(0, int(time.time()) - ts)
 
     def open_episode(self, sha):
         """Record the episode BEFORE triggering. Returns False if it cannot.
@@ -310,37 +337,59 @@ class State:
         it fails CLOSED — no record, no trigger.
         """
         try:
-            self.episode.write_text(sha + "\n", encoding="utf-8")
+            self.episode.write_text(f"{sha} {int(time.time())}\n", encoding="utf-8")
             return True
         except OSError:
             return False
 
     def close_episode(self):
+        """Returns False if the episode could NOT be cleared.
+
+        🔴 IT USED TO SWALLOW THE OSError, so a green verdict printed "closing
+        the red episode" while the file was still there — a log line asserting an
+        action that did not happen, and an accelerator left permanently disarmed
+        because every later red then saw an open episode. Never claim a state
+        change you did not achieve.
+        """
         try:
             self.episode.unlink(missing_ok=True)
+            return True
         except OSError:
-            pass
+            return False
 
     def read_streak(self):
         raw = self._read(self.streak)
-        return int(raw) if raw.isdigit() else 0
+        first = raw.split()[0] if raw.split() else ""
+        return int(first) if first.isdigit() else 0
 
     def bump_streak(self):
+        """Returns (count, persisted). The SECOND value is load-bearing.
+
+        🔴 IT USED TO SWALLOW ITS OWN OSError AND RETURN A COUNT NOBODY SAVED,
+        which re-created the exact bug F1 removed, in the exact scenario F2 was
+        written for: under ENOSPC every write in this directory fails, so `n` was
+        recomputed as 1 on every run and `n >= escalate` was never true. Measured
+        with escalate=2 over six polls: rc 11 six times, `streak 1/2` six times —
+        byte-for-byte the sequence the F1 commit cites as the bug it removed, and
+        rc 11 is a systemd SUCCESS, so the unit stayed green forever.
+
+        A ladder that cannot persist is not a ladder. The caller must treat
+        `persisted=False` as "this arm can never become loud later", which is
+        precisely the condition F3 already answers with rc 12.
+        """
         n = self.read_streak() + 1
         try:
             self.streak.write_text(f"{n}\n", encoding="utf-8")
+            return n, True
         except OSError:
-            # Cannot persist it — report the count we computed rather than
-            # pretending the ladder advanced. A silent 0 here would be the
-            # never-escalates bug this file already carries scars from.
-            say("  ⚠ could not persist the blind streak; it will not advance")
-        return n
+            return n, False
 
     def reset_streak(self):
         try:
             self.streak.write_text("0\n", encoding="utf-8")
+            return True
         except OSError:
-            pass
+            return False
 
 
 # ── IO ────────────────────────────────────────────────────────────────────────
@@ -365,6 +414,43 @@ def blind_escalate():
     return int(raw) if (raw or "").isdigit() else BLIND_ESCALATE_DEFAULT
 
 
+def ladder_exit(state, escalate, reason):
+    """The ONE place that turns "could not measure" into an exit code.
+
+    🔴 THIS WAS OPEN-CODED AT THREE SITES AND THE RULE CHANGED UNDER ALL THREE.
+    Each site bumped the streak and compared it to `escalate`; none of them could
+    see that a bump which FAILED TO PERSIST makes the comparison meaningless.
+    Consolidating is what made the missing case audible — a predicate open-coded
+    at N sites is typically wrong at N-1 of them in the same direction, and here
+    it was wrong at all three.
+
+    🔴 UN-PERSISTABLE MEANS LOUD NOW, NOT QUIET FOREVER. If the streak cannot be
+    written, this arm can never become loud later, and an arm that never advances
+    a ladder and never fails the unit is permanently silent — the exact shape
+    this file's F1 comment condemns. F3 already answers that condition with
+    rc 12; this applies the same answer to the same condition wherever it arises,
+    rather than only where the directory was missing outright.
+
+    ⚠ That corrects a second thing: F3's comment called the cause "structural,
+    not transient". ENOSPC — the cause `open_episode` itself names — is neither
+    permanent nor rare. The rc is not chosen because the fault cannot heal; it is
+    chosen because the ALARM cannot count.
+    """
+    n, persisted = state.bump_streak()
+    if not persisted:
+        say(f"COULD NOT MEASURE — {reason}")
+        say("  🔴 …and the blind streak could not be written either, so this arm")
+        say("  can never escalate on its own. Failing the unit NOW rather than")
+        say("  reporting success forever. (ENOSPC on the cache filesystem does")
+        say("  exactly this: it breaks the alarm and the thing the alarm watches.)")
+        return RC_BLIND
+    say(f"COULD NOT MEASURE — {reason} (streak {n}/{escalate})")
+    if n >= escalate:
+        say(f"  BLIND — {n} consecutive unmeasured runs. Failing the unit (no toast).")
+        return RC_BLIND
+    return RC_UNMEASURED
+
+
 class Unmeasured(Exception):
     """Raised for every reason the world could not be read. Never a verdict."""
 
@@ -387,6 +473,18 @@ TOTAL_BUDGET_S = 120
 # the exact outcome the constant exists to prevent.
 TRIGGER_TIMEOUT_S = 30
 UNIT_TIMEOUT_START_SEC = 180
+
+# 🔴 AN OPEN EPISODE EXPIRES, AND THE NUMBER IS AN ARGUMENT, NOT A TASTE.
+# The episode suppresses DUPLICATE confirmations inside one red window. Left
+# unbounded it also suppresses every future red once it gets stuck open, which
+# disarms this unit with no signal — so it needs a ceiling. 4h is chosen to
+# match main-green-check's own `OnUnitActiveSec=4h`: past that point the deadman
+# re-runs against the tip ANYWAY, so re-triggering adds no work that was not
+# already going to happen, and the duty cycle this unit can add is bounded above
+# by the deadman's existing cadence rather than by the verdict rate. Shorter
+# would re-introduce the toast amplification F5 removed; longer would leave a
+# stuck episode masking reds for more than one deadman cycle.
+EPISODE_MAX_AGE_S = 4 * 60 * 60
 _DEADLINE = None
 
 
@@ -523,8 +621,13 @@ def main(argv):
         # Refuses rather than printing nothing if the sentinel moves, for the
         # same reason main-green-check.sh does: a --help that silently prints
         # zero lines and exits 0 is the reassuring zero this file argues against.
-        print_header()
-        return RC_OK
+        # 🔴 THE RETURN VALUE IS CONSUMED. It used to be discarded, so a moved
+        # sentinel printed one diagnostic line and still exited 0 — a --help
+        # that silently prints nothing and reports success, which is the
+        # reassuring zero this file argues against. `main-green-check.sh` calls
+        # `die` (exit 2) in the same situation; matching it makes the comparison
+        # in this comment true rather than aspirational.
+        return RC_OK if print_header() else RC_USAGE
     if len(argv) > 1:
         say(f"unknown argument: {argv[1]}")
         return RC_USAGE
@@ -546,8 +649,14 @@ def main(argv):
         # waiting for anyway, so it reports it immediately.
         say(f"COULD NOT MEASURE — cannot create the state dir: {exc}")
         say("  🔴 This is NOT 'main is green'. Nothing was read.")
-        say("  Structural, not transient — there is nowhere to record a streak,")
-        say("  so this fails the unit now rather than laddering in silence.")
+        # ⚠ The rc is NOT chosen because the fault is permanent — an earlier
+        # version said "structural, not transient", and ENOSPC (the cause
+        # `open_episode` names) is neither. It is chosen because there is
+        # nowhere to record a streak, so this arm can never escalate on its own;
+        # `ladder_exit` applies the same rule wherever that condition arises.
+        say("  There is nowhere to record a streak, so this arm can never")
+        say("  escalate on its own. Failing the unit now beats reporting success")
+        say("  forever.")
         return RC_BLIND
 
     try:
@@ -560,15 +669,11 @@ def main(argv):
         repo = resolve_repo()
         sha, verdict, reds, walked = find_newest_verdict(repo, depth)
     except Unmeasured as exc:
-        n = state.bump_streak()
-        say(f"COULD NOT MEASURE — {exc}")
-        say(f"  🔴 This is NOT 'main is green'. Nothing was read. (streak {n}/{escalate})")
+        rc = ladder_exit(state, escalate, str(exc))
+        say("  🔴 This is NOT 'main is green'. Nothing was read.")
         say("  The 4-hourly main-green-check deadman is unaffected; only the")
         say("  early trigger is offline, so coverage is what it was before this unit.")
-        if n >= escalate:
-            say(f"  BLIND — {n} consecutive unmeasured runs. Failing the unit (no toast).")
-            return RC_BLIND
-        return RC_UNMEASURED
+        return rc
 
     # 🔴 NO `reset_streak()` HERE. It used to sit exactly here, and it made the
     # trigger-failure ladder STRUCTURALLY UNREACHABLE: the walk succeeding reset
@@ -592,14 +697,32 @@ def main(argv):
         return RC_OK
 
     if verdict == "green":
-        # A green verdict is the ONLY thing that closes a red episode — a red
-        # window ends when main is observed good again, not when it stops being
-        # re-verdicted.
-        if state.episode_open():
-            say(f"main is GREEN again at {sha[:8]} — closing the red episode.")
+        # A green verdict is the ordinary way a red episode ends — a red window
+        # closes when main is observed good again, not when it stops being
+        # re-verdicted. (The age bound below is the BACKSTOP for when no green
+        # verdict ever arrives, not the normal path.)
+        was_open = state.episode_open()
+        closed = state.close_episode()
+        if was_open and closed:
+            say(f"main is GREEN again at {sha[:8]} — closed the red episode.")
+        elif was_open:
+            # 🔴 NEVER CLAIM THE STATE CHANGE YOU DID NOT ACHIEVE. This branch
+            # used to print "closing the red episode" unconditionally while the
+            # unlink had failed and the file was still there — a log line
+            # asserting an action that did not happen, leaving the accelerator
+            # disarmed for every later red.
+            say(f"main is GREEN again at {sha[:8]} but the episode file could NOT")
+            say("  be removed — later reds will be suppressed until it is. Check"
+                f" {state.episode}")
+            # 🔴 NO `reset_streak()` HERE — a first draft of this very branch had
+            # one, and it rebuilt F1 exactly: resetting immediately before
+            # `ladder_exit` pins the count at 1 forever, so the arm can never
+            # escalate. Its own test caught it (got 11,11; wanted 11,12). This is
+            # NOT a success path — it is an unmeasured one that happens to have
+            # read a green verdict, so it must ladder like every other.
+            return ladder_exit(state, escalate, "cannot clear the red episode")
         else:
             say(f"newest main verdict: GREEN at {sha[:8]} (walked {walked}) — nothing to do.")
-        state.close_episode()
         state.reset_streak()
         return RC_OK
 
@@ -609,13 +732,23 @@ def main(argv):
         say(f"  {ctx}: {desc}")
 
     open_at = state.episode_open()
-    if open_at:
-        say(f"  red episode already open (since {open_at[:8]}) — not re-triggering.")
+    if open_at and open_at[1] <= EPISODE_MAX_AGE_S:
+        prev_sha, age = open_at
+        say(f"  red episode already open (since {prev_sha[:8]}, {age // 60}m ago)"
+            " — not re-triggering.")
         say("  The operator has already been told main is red; a second start")
         say("  would re-run the same tip, hit the deadman's memo, exit RC_RED and")
         say("  fire the toast again having measured nothing.")
+        say(f"  It expires after {EPISODE_MAX_AGE_S // 3600}h so a stuck episode")
+        say("  cannot disarm this unit indefinitely.")
         state.reset_streak()
         return RC_OK
+    if open_at:
+        say(f"  red episode from {open_at[0][:8]} is {open_at[1] // 3600}h old"
+            f" (bound {EPISODE_MAX_AGE_S // 3600}h) — treating this as a new one.")
+        say("  Past that age the deadman's own 4-hourly timer re-runs against the")
+        say("  tip anyway, so this adds no work that was not already going to")
+        say("  happen — and it is what stops a stuck episode masking reds forever.")
 
     if screen_all_known_flakes(list(reds.values())):
         say(f"  every failure is a PROVEN-COMPLETE known flake ({', '.join(names)}) —")
@@ -629,21 +762,26 @@ def main(argv):
     # must mean NO trigger, or an unwritable cache re-starts the deadman every
     # interval forever.
     if not state.open_episode(sha):
-        n = state.bump_streak()
-        say(f"COULD NOT MEASURE — cannot record the red episode (streak {n}/{escalate})")
+        rc = ladder_exit(state, escalate, "cannot record the red episode")
         say("  🔴 NOT triggering: without a record this would re-start the")
         say("  deadman every interval. Failing closed is the cheaper mistake.")
-        return RC_BLIND if n >= escalate else RC_UNMEASURED
+        return rc
 
     try:
         cmd = trigger_deadman()
     except Unmeasured as exc:
-        n = state.bump_streak()
-        say(f"COULD NOT MEASURE — {exc} (streak {n}/{escalate})")
-        # The episode was opened before the attempt; drop it so a retry is
-        # possible once whatever broke the trigger is fixed.
-        state.close_episode()
-        return RC_BLIND if n >= escalate else RC_UNMEASURED
+        rc = ladder_exit(state, escalate, str(exc))
+        # 🔴 A TIMEOUT IS NOT A FAILURE TO START. `systemctl start --no-block`
+        # can time out AFTER the job is queued, so closing the episode there
+        # would let the next poll trigger a run that is already under way — the
+        # one path that broke the "one extra deadman run per window" bound. Any
+        # OTHER error means nothing was queued, so the episode is dropped and a
+        # retry is possible once whatever broke the trigger is fixed.
+        if "timed out" in str(exc):
+            say("  episode LEFT OPEN: a timeout may have queued the job anyway.")
+        elif not state.close_episode():
+            say("  ⚠ could not drop the episode; the next poll will not retry.")
+        return rc
 
     state.reset_streak()
     say(f"  TRIGGERED the authoritative check early: {cmd}")
@@ -683,8 +821,12 @@ def _guarded_main(argv):
                 Path.home() / ".cache" / "main-status-watch"
             st = State(root)
             st.mkdir()
-            n = st.bump_streak()
+            n, persisted = st.bump_streak()
             escalate = blind_escalate()
+            if not persisted:
+                say("  the blind ladder could NOT be written — failing the unit now")
+                say("  rather than reporting success forever.")
+                return RC_BLIND
             say(f"  recorded on the blind ladder (streak {n}/{escalate})")
             if n >= escalate:
                 return RC_BLIND
