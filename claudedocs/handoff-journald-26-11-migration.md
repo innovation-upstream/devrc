@@ -275,7 +275,10 @@ readlink -f /run/current-system                # expect nixos-system-nixos-26.11
 ```
 ## Open investigations — live diagnosis state
 
-### 🔴 `scripts/diagnose-nix-disk.sh` is a SUPERSEDED script that was merged anyway
+### ✅ RETIRED 2026-09-10 (answered by #1455, squash `c68750f6`) — `scripts/diagnose-nix-disk.sh` is a SUPERSEDED script that was merged anyway
+🔴 **CLOSED. The file is DELETED from `main`; do not act on the "Next probe" below.** The
+delete-vs-keep question it poses was decided DELETE and executed. Kept verbatim because the
+reasoning is the record of how it was decided, not because anything here is still open.
 - **Found at close-out, from `cairn recall` — which this doc's own header tells you to run
   FIRST, and which I did not run until the end.** `devrc/diagnose-disk-accounting.md:14`
   records: *"`scripts/diagnose-nix-disk.sh` — its predecessor, superseded. Untracked in the
@@ -300,7 +303,13 @@ readlink -f /run/current-system                # expect nixos-system-nixos-26.11
   `diagnose-disk-accounting.sh` and say when to prefer which. `git log --diff-filter=A --
   scripts/diagnose-disk-accounting.sh` dates the supersession.
 
-### `scripts/diagnose-nix-disk.sh` has never been observed to finish; its runtime is unknown
+### ✅ RETIRED 2026-09-10 (moot — the file is deleted) — `scripts/diagnose-nix-disk.sh` has never been observed to finish; its runtime is unknown
+🔴 **CLOSED, and the "Next probe" below is MOOT — do NOT run it.** It asks for a clean
+end-to-end timing run on an idle box in order to replace the script's header paragraph with a
+real number. There is no header left to correct: #1455 deleted the file. The durable half of
+this block is the byte-offset trap (editing a script while a copy of it runs shifts the file
+underneath the interpreter), which is recorded in the Gotchas section and in the
+`diagnose-disk-accounting` index entry.
 - ⚠ SECONDARY to the block above — do not measure a script that may be deleted.
 - **Symptom + exact repro:** `bash scripts/diagnose-nix-disk.sh` on the workbench. Sections
   3 and 4 each walk `/nix` recursively (section 4 also stats every regular file);
@@ -325,7 +334,11 @@ readlink -f /run/current-system                # expect nixos-system-nixos-26.11
   `cp scripts/diagnose-nix-disk.sh /tmp/diag-frozen.sh && time bash /tmp/diag-frozen.sh > /tmp/diag.txt 2>&1; grep -c '^=== ' /tmp/diag.txt`
   Expect 10. Then replace the runtime paragraph in the script's header with the real number.
 
-### Can #1436's gate be run to completion on this box at all?
+### ✅ RETIRED 2026-09-10 (ANSWERED: yes, at 3882s) — Can #1436's gate be run to completion on this box at all?
+🔴 **CLOSED.** It can, and the leading hypothesis below was right: raising the cap was
+sufficient. The run took **3882s** against the 3600s default, so both earlier attempts died
+~280s short of a green finish. Both tiers passed, and Tekton later posted GREEN on both legs
+independently. Kept for the load-vs-assertion reasoning; nothing here is open.
 - **Symptom + exact repro:** two prior `gate.sh --tier both` runs died at the **3600s default
   cap** — `exit=124`, `RESULT: FAIL (exit=143)`, i.e. `Terminated`, not a test failure.
 - **Observed (with values):** load is a **sustained plateau, not a spike**. Sampled every 20s
