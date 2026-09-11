@@ -314,6 +314,104 @@ def test_the_rules_ceiling_is_read_from_the_test_that_owns_it():
     )
 
 
+def test_the_index_store_row_can_actually_be_MEASURED(tmp_path):
+    """🔴 REGRESSION COVERAGE — the MEASURED branch was DEAD and 50 tests passed.
+
+    `m_index_store` guarded itself with
+    `if not (lib / "subsystem_recall.py").is_file(): raise Unmeasurable(...)`.
+    devrc deleted that file when it consolidated onto the pinned `cairn` client,
+    so the guard went PERMANENTLY TRUE: the row was UNMEASURED on every host, the
+    `cairn_pin.ensure()` behind it could never execute, and the reason string
+    pointed a reader at a file that had been deleted on purpose.
+
+    🔴 NOTHING SAW IT, AND THE REASON IS THE LESSON. Every other `Env` in this
+    file points `index_store` at a directory that does not exist, so every one of
+    them takes the ABSENT branch and none has ever reached the parser. A suite
+    that only ever exercises the "cannot answer" path cannot tell a measurer that
+    is correctly silent from one that is structurally mute — which is this
+    module's own headline property, applied to itself.
+
+    So this builds a SYNTHETIC store and requires the row to come back MEASURED.
+    Red at the base of the consolidation branch? No — at that base the module was
+    not broken, so this is a guard on a hole the consolidation opened and the
+    consolidation closed. It is REGRESSION coverage against the shipped defect:
+    it fails on the tree as first pushed, and passes here.
+
+    🔴 PUBLIC-REPO NOTE, and it is why the store is built rather than borrowed:
+    the operator's real store holds client-confidential scope names. Nothing
+    below reads it. The fixture names are invented and share no substring with
+    any real scope.
+    """
+    store = tmp_path / "index-store"
+    (store / "widget-cfg").mkdir(parents=True)
+    (store / "widget-cfg" / "gizmo.md").write_text(
+        "---\n"
+        "service: gizmo\n"
+        "scope: widget-cfg\n"
+        "sensitivity: public\n"
+        "created_by: handoff\n"
+        "---\n"
+        "# gizmo\n\n"
+        "## What it is\n"
+        "A synthetic entry, invented for this test.\n\n"
+        "## Pointers\n"
+        "- `nowhere/real.py` — a pointer.\n\n"
+        "## Nuance / work-history\n"
+        "- 2026-01-01: a bullet.\n",
+        encoding="utf-8",
+    )
+
+    env = measure.Env(repo=REPO_ROOT, home=tmp_path,
+                      claude_dir=tmp_path / ".claude", index_store=store,
+                      allow_systemd=False, allow_network=False)
+    entry = next(e for e in measure.REGISTRY if e[0] == "index.store")
+    row = measure.take(env, _registry(entry)).by_key("index.store")
+
+    assert row.measured, (
+        f"the index.store row could not be measured against a store this test "
+        f"just built: {row.reason}. That is the shipped defect — a precondition "
+        f"naming a file the repo deliberately deleted — not a property of the "
+        f"store."
+    )
+    # A POSITIVE CONTROL on the number, not just on `measured`: a parser wired to
+    # nothing would also report a clean zero.
+    assert "1 entr" in row.value, (
+        f"the row is MEASURED but does not count the one entry built above "
+        f"({row.value!r}) — a measurer that answers without reading is the "
+        f"confident zero this module exists to catch"
+    )
+
+
+def test_the_index_store_row_is_UNMEASURED_when_the_pin_cannot_resolve(
+    tmp_path, monkeypatch
+):
+    """The other arm: the row degrades with its OWN reading, not the parser's.
+
+    🔴 A NEGATIVE CONTROL FOR THE TEST ABOVE. Without it, `measured=True` could be
+    a fact about this host rather than about the code, and the two branches of
+    `m_index_store` would be indistinguishable to the suite. It also pins the
+    SEPARATION: a host with no pinned client is a STATE, and reporting it as "the
+    index store did not load through its own parser" would claim a broken store
+    where there is only a missing client.
+    """
+    store = tmp_path / "index-store"
+    (store / "widget-cfg").mkdir(parents=True)
+
+    # Route 1 set-but-unusable REFUSES rather than falling through to PATH, which
+    # is what makes this reachable without touching PATH at all.
+    monkeypatch.setenv("CAIRN_LIB", str(tmp_path / "no-such-lib"))
+    env = measure.Env(repo=REPO_ROOT, home=tmp_path,
+                      claude_dir=tmp_path / ".claude", index_store=store,
+                      allow_systemd=False, allow_network=False)
+    entry = next(e for e in measure.REGISTRY if e[0] == "index.store")
+    row = measure.take(env, _registry(entry)).by_key("index.store")
+
+    assert not row.measured, "the row claimed a measurement with no pinned client"
+    assert "pinned cairn client is not available" in row.reason, (
+        f"the row degraded, but not with the pin's own reading: {row.reason!r}"
+    )
+
+
 def test_a_constant_is_read_by_PARSING_its_owner_not_by_importing_it(tmp_path):
     """🔴 REGRESSION COVERAGE — this was measurably broken and shipped an absence.
 

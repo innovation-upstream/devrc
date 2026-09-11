@@ -57,6 +57,11 @@ sys.path.insert(0, str(SCRIPTS / "analyze-service-index"))
 sys.path.insert(0, str(SCRIPTS))
 
 import backup as B  # noqa: E402
+# 🔴 WHERE THE PINNED cairn LIB IS, resolved by the SHIPPED resolver rather than
+# spelled here. The unit sets `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib`; the
+# probes below model that, and taking the value from `cairn_pin` means this file
+# cannot model a directory layout the real resolver does not use.
+from testlib.cairn_lib import PINNED_LIB  # noqa: E402,F401
 from testlib.mockbin import write_exec  # noqa: E402
 from testlib import hermetic_git, mockbin  # noqa: E402
 
@@ -2414,21 +2419,154 @@ def test_the_foreign_fingerprint_covers_the_categories_it_CLAIMS(tmp_path):
     assert "HEAD" in moved(before, _git_dir_fingerprint(git_dir))
 
 
-def _unit_shaped_env(home: Path, identity: Path) -> dict:
+#: The binaries `nix/home.nix` puts on the backup unit's PATH. The unit spells it
+#: `makeBinPath [ pkgs.git pkgs.age pkgs.kubectl pkgs.coreutils ]`; this is that
+#: list as command names, so the probe can resolve real store paths for them on
+#: whatever host it runs on without hardcoding a closure.
+_UNIT_PATH_TOOLS = ("git", "age", "kubectl", "coreutils")
+
+#: `coreutils` is a package, not a command — `cp` stands in for its bin dir.
+_TOOL_PROBE = {"coreutils": "cp"}
+
+
+def _closed_unit_path() -> str:
+    """A PATH holding ONLY the bin dirs of `_UNIT_PATH_TOOLS`. CLOSED, like the unit's.
+
+    🔴 THIS FUNCTION IS THE FIX FOR A GUARD THAT WAS WIDER IN ITS DESCRIPTION
+    THAN IN ITS BODY, AND THE GAP SHIPPED A DEPLOY-BLOCKER. `_unit_shaped_env`'s
+    docstring said "`env -i` plus exactly what nix/home.nix sets … NOT
+    `dict(os.environ)`" while its body passed `os.environ["PATH"]` straight
+    through. The operator's PATH carries `~/.local/bin`, so every probe in this
+    file ran with `cairn` findable — and when `backup.py` grew a hard dependency
+    on the pinned client resolving, this suite could not see that the UNIT's
+    closed PATH has no cairn in it at all. Measured on the live unit:
+    `systemctl --user show analyze-service-index-backup -p Environment` lists
+    four store bin dirs and none is cairn's.
+
+    🔴 RESOLVED FROM THE AMBIENT PATH, NOT HARDCODED. A literal `/nix/store/…`
+    would rot on the next nixpkgs bump and would make this test a claim about one
+    machine. What must be modelled is the CLOSEDNESS — that the unit sees these
+    tools and nothing else — and `shutil.which` gives that on any host.
+    """
+    dirs = []
+    for tool in _UNIT_PATH_TOOLS:
+        found = shutil.which(_TOOL_PROBE.get(tool, tool))
+        assert found, (
+            f"cannot model the unit's PATH: `{_TOOL_PROBE.get(tool, tool)}` is not "
+            f"resolvable here, so this probe would measure a PATH the unit does "
+            f"not have. It is in the unit's `makeBinPath` list and in "
+            f"flake.nix's gateTools."
+        )
+        d = str(Path(found).resolve().parent)
+        if d not in dirs:
+            dirs.append(d)
+    # POSITIVE CONTROL on the modelling itself: the whole point is that `cairn` is
+    # NOT reachable here, and a PATH that happened to include it would make every
+    # pin-absence test below vacuous.
+    assert shutil.which("cairn", path=os.pathsep.join(dirs)) is None, (
+        "the modelled unit PATH can reach `cairn`, so it does not model the unit "
+        "— every guard below that depends on the pin being unresolvable would "
+        "pass without measuring anything"
+    )
+    return os.pathsep.join(dirs)
+
+
+def _unit_shaped_env(home: Path, identity: Path, *, with_pin: bool = True) -> dict:
     """The systemd unit's environment SHAPE, not the operator's shell.
 
     🔴 `env -i` plus exactly what nix/home.nix sets: PATH, HOME, the age key
-    handle, ASIB_HOST. NOT `dict(os.environ)`. #721 shipped a measured table row
-    with the wrong exit code because its probe exported
+    handle, ASIB_HOST, CAIRN_LIB. NOT `dict(os.environ)`. #721 shipped a measured
+    table row with the wrong exit code because its probe exported
     GIT_AUTHOR_*/GIT_COMMITTER_*, fixing a dimension the unit does not have — a
-    probe built from the harness's own environment measures the harness.
+    probe built from the harness's own environment measures the harness. The PATH
+    half of that claim was FALSE until `_closed_unit_path` existed; read its
+    docstring before touching this.
+
+    `with_pin=False` drops `CAIRN_LIB`, which is how the tests below reach the
+    state this unit was in before nix/home.nix declared it.
     """
-    return {
-        "PATH": os.environ["PATH"],
+    env = {
+        "PATH": _closed_unit_path(),
         "HOME": str(home),
         "SOPS_AGE_KEY_FILE": str(identity),
         "ASIB_HOST": "synthetic-host",
     }
+    if with_pin:
+        # What `"CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"` resolves to at
+        # switch time. Taken from `cairn_pin` rather than spelled, so this cannot
+        # model a directory layout the shipped resolver does not use.
+        env["CAIRN_LIB"] = str(PINNED_LIB)
+    return env
+
+
+def test_the_producer_CANNOT_IMPORT_under_the_units_env_without_the_pin(
+    tmp_path, identity
+):
+    """🔴 THE DEPLOY-BLOCKER, AS A BEHAVIOURAL PAIR. Shipped once; this is what
+    would have caught it.
+
+    `backup.py` calls `cairn_pin.ensure()` at module scope, and that call RAISES
+    by design — there is no local copy of `host_identity` to degrade to. The
+    unit's PATH is a CLOSED list with no cairn in it, so the ONLY thing that can
+    answer is the `CAIRN_LIB` entry `nix/home.nix` sets. Without it the timer
+    does not run a degraded backup; it does not start at all.
+
+    🔴 AND IT BREAKS ON `git pull`, NOT ON A SWITCH. The unit `ExecStart`s the
+    WORKING-TREE copy of this script, so the failure arrives the moment the
+    consolidation lands on disk — which is why "no home-manager switch was
+    performed" is not a mitigation and why this is a test rather than a note.
+
+    Both arms run the REAL script in the REAL modelled environment. The negative
+    arm is the measurement; the positive arm is what stops it passing for an
+    unrelated reason (a syntax error would fail both).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+
+    without = _unit_shaped_env(home, identity, with_pin=False)
+    assert "CAIRN_LIB" not in without, "the negative arm is not negative"
+    p_no = subprocess.run(
+        [sys.executable, str(SCRIPT), "--print-plan"],
+        capture_output=True, text=True, env=without)
+    assert p_no.returncode != 0, (
+        f"backup.py STARTED with no pinned cairn client reachable. Either the "
+        f"pin resolution degraded silently — which would run the producer "
+        f"without the module that decides which HOST's key prefix it writes "
+        f"under — or this probe's PATH is not the unit's. stdout:\n{p_no.stdout[-600:]}")
+    assert "pinned cairn lib not found" in p_no.stderr, (
+        f"it failed, but not on the pin. This test would then be measuring some "
+        f"other breakage and would go on passing after the pin was fixed:\n"
+        f"{p_no.stderr[-900:]}")
+
+    with_pin = _unit_shaped_env(home, identity, with_pin=True)
+    p_yes = subprocess.run(
+        [sys.executable, str(SCRIPT), "--print-plan"],
+        capture_output=True, text=True, env=with_pin)
+    assert p_yes.returncode == 0, (
+        f"the POSITIVE control failed: with CAIRN_LIB set to what the unit sets, "
+        f"backup.py still did not run, so the negative arm above proves nothing "
+        f"about the pin.\nstderr:\n{p_yes.stderr[-900:]}")
+
+
+def test_the_backup_unit_DECLARES_the_cairn_lib_its_program_needs():
+    """The other half of the pair above: the unit must actually set it.
+
+    🔴 A BEHAVIOURAL TEST ALONE WOULD NOT CATCH THE REGRESSION — it models the
+    environment, so deleting the line from `nix/home.nix` leaves it green. This
+    reads what ships. `${cairnPackage}` is asserted rather than any store path:
+    the package is threaded in from `flake.nix`, so this spelling is the one that
+    cannot drift from the client `~/.local/bin/cairn` resolves to.
+    """
+    env = _environment_entries(_backup_block())
+    hits = [e for e in env if e.startswith("CAIRN_LIB=")]
+    assert hits == ["CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"], (
+        f"the backup unit's CAIRN_LIB entry is {hits!r}. Its program imports the "
+        f"pinned cairn reader modules at module scope and the unit's PATH is a "
+        f"closed list with no cairn in it, so without this exact entry the timer "
+        f"cannot start. Widening PATH is NOT an alternative here: "
+        f"`%h/.local/bin/cairn` is a symlink under $HOME and this unit runs "
+        f"`ProtectHome=tmpfs`, so it does not exist inside the namespace."
+    )
 
 
 def _run_isolated(store: Path, work: Path, home: Path, identity: Path,

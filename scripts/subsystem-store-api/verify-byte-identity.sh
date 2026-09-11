@@ -154,6 +154,19 @@ set -euo pipefail
 
 # CDPATH= : see build-push.sh — a set CDPATH makes `cd` echo its destination.
 HERE="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# 🔴 EXPECT A MISMATCH UNTIL THE POD IS REBUILT, AND IT IS NOT A DEFECT.
+# This script compares LOCAL reader output against the POD's. Since devrc
+# consolidated onto the pinned cairn client the local side runs the PINNED
+# reader, while the running pod still serves an image built from devrc's old
+# forked copy — so the two sides are no longer the same program and this check is
+# EXPECTED to report a difference until someone rebuilds and redeploys the image
+# (`build-push.sh`, which now stages the pinned modules).
+#
+# The difference is NARROW and known: the malformed-entry hint, which the OSS
+# extraction reworded from `subsystem_touch.py --validate <path>` to
+# `a writer --validate <path>` at two sites. A mismatch on ANY OTHER string is a
+# real finding, so do not blanket-ignore the run — read which line moved.
+#
 # 🔴 THE PINNED READER, NOT A `scripts/lib/` COPY — devrc deleted its fork when
 # it consolidated onto the `cairn` flake pin. `cairn_pin.py` prints the pinned
 # lib directory and REFUSES (non-zero, naming both routes and the remedy) when

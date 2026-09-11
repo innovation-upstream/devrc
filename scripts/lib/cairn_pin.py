@@ -46,9 +46,18 @@ so the failure reads as "the pinned client is not deployed here" rather than as
 a missing file.
 
 RESOLUTION ORDER
-  1. `$CAIRN_LIB` — an explicit override. This is what the hermetic `nix`
-     checks set, because a check derivation has no `~/.local/bin` and no
-     home-manager generation to derive anything from.
+  1. `$CAIRN_LIB` — an explicit override, for an environment that cannot ask
+     PATH. Two exist today and both are real: the three `systemd` user units in
+     `nix/home.nix` that run pin-importing code
+     (`analyze-service-index-backup`, `handoff-index-sync`, `present-regen`) set
+     it from `${cairnPackage}`, because each declares a CLOSED `PATH=` with no
+     cairn in it; and the store-api pod image sets it, because a container has
+     no `cairn` on PATH at all.
+     ⚠ THE HERMETIC `nix` CHECKS DO **NOT** SET IT. An earlier version of this
+     paragraph said they did — measured false: `CAIRN_LIB` appears 0 times in
+     `flake.nix` (positive control: `cairn` appears 42 times). They carry the
+     package on `gateTools`, so they take route 2, which is the route the hosts
+     use and therefore the better one for a gate to exercise.
   2. The deployed client: `shutil.which("cairn")` → `os.path.realpath` →
      `<store-path>/libexec/cairn/lib`. `bin/cairn` is a `makeWrapper` shell
      wrapper; the real script and its siblings live under `libexec/cairn/`.
@@ -165,12 +174,19 @@ def pinned_lib_dir() -> Path:
     changing the interpreter it asks from.
 
     🔴 A `CAIRN_LIB` THAT IS SET BUT UNUSABLE REFUSES — it does NOT fall through
-    to the PATH route. Falling through is the confident-wrong-answer shape: the
-    hermetic `nix` checks set this variable precisely so the leg tests the PINNED
-    client, and a typo there would silently hand them whatever `cairn` the
-    builder happens to carry, green and measuring something else. An UNSET or
-    empty value is not a mistake — it is the ordinary case on a host — so that
-    one does fall through.
+    to the PATH route. Falling through is the confident-wrong-answer shape:
+    everything that sets this variable does so because PATH CANNOT answer there
+    (a systemd unit with a closed `PATH=`, a container with no client on PATH),
+    so a typo in it must not resolve to something else — in those environments
+    "something else" is nothing, and the fall-through would merely move the
+    failure somewhere less legible. An UNSET or empty value is not a mistake — it
+    is the ordinary case on a host, and on a host route 2 is the right answer —
+    so that one does fall through.
+
+    ⚠ THE REASON ABOVE IS THE SECOND ONE THIS DOCSTRING HAS CARRIED. The first
+    said the hermetic `nix` checks set the variable "precisely so the leg tests
+    the PINNED client", and that was false: they do not set it at all. The
+    BEHAVIOUR is unchanged and still right; only its justification was wrong.
     """
     env_dir, env_why = _from_env()
     if env_dir is not None:

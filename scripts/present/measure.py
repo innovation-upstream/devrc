@@ -1034,8 +1034,16 @@ def m_index_store(env: Env) -> dict:
     `--sanitize` build swaps them for synthetic stand-ins.
     """
     lib = env.repo / "scripts" / "lib"
-    if not (lib / "subsystem_recall.py").is_file():
-        raise Unmeasurable(f"{lib / 'subsystem_recall.py'} does not exist")
+    # 🔴 THE PRECONDITION USED TO BE `(lib / "subsystem_recall.py").is_file()`,
+    # AND IT WENT PERMANENTLY TRUE. devrc deleted that file when it consolidated
+    # onto the pinned `cairn` client, so the check could never pass again: this
+    # row was UNMEASURED on every host, the `cairn_pin.ensure()` below was
+    # unreachable, and the reason string pointed a reader at a file that had been
+    # deleted on purpose. It is replaced rather than removed — the question it
+    # asked ("is the reader here?") is still the right one; only the place the
+    # reader lives has changed, and `cairn_pin` is the one thing that knows it.
+    if not (lib / "cairn_pin.py").is_file():
+        raise Unmeasurable(f"{lib / 'cairn_pin.py'} does not exist")
     if not env.index_store.is_dir():
         raise Unmeasurable(
             f"no index store at {env.index_store} — it is per-machine local "
@@ -1045,15 +1053,19 @@ def m_index_store(env: Env) -> dict:
     try:
         # 🔴 `subsystem_recall` IS THE PINNED MODULE, not a `scripts/lib/` copy —
         # devrc deleted its fork when it consolidated onto the `cairn` flake pin.
-        # `cairn_pin.ensure()` appends the packaged `lib/` to `sys.path`; it
-        # raises when the pin is not deployed, and that raise is CAUGHT as
-        # `Unmeasurable` below, which is the right reading for this page: a host
-        # without the pinned client cannot be measured for this row, and saying
-        # so is not the same as reporting zero scopes.
+        # `cairn_pin.ensure()` appends the packaged `lib/` to `sys.path`.
         import cairn_pin  # noqa: PLC0415
         cairn_pin.ensure()
         import subsystem_recall  # noqa: PLC0415
         _, idx = subsystem_recall.load_store(env.index_store, verb="present")
+    except cairn_pin.CairnPinUnresolved as exc:
+        # 🔴 ITS OWN READING, NOT "the parser failed". A host where the pinned
+        # client is not deployed is a STATE — the same shape as the absent-store
+        # branch above — and folding it into the parser's message would report a
+        # broken store where there is only a missing client. The unit that runs
+        # this page passes `CAIRN_LIB` for exactly this reason, so on the
+        # scheduled path this branch means the unit's environment regressed.
+        raise Unmeasurable(f"the pinned cairn client is not available here: {exc}")
     except Exception as exc:
         raise Unmeasurable(f"the index store did not load through its own parser: {exc!r}")
     finally:
@@ -1520,8 +1532,19 @@ def m_store_api_clients(env: Env) -> dict:
     # that directly contradicted the section it sat under. Caught by reading the
     # rendered page, not by any test, which is the whole argument for looking at
     # the artefact.
-    readers = ["scripts/lib/subsystem_recall.py", "scripts/lib/subsystem_resolver.py",
-               "scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py"]
+    # 🔴 THE devrc-SIDE READERS ONLY, AND THE LIST SHRANK ON PURPOSE. It used to
+    # name `scripts/lib/subsystem_recall.py` and `scripts/lib/subsystem_resolver.py`
+    # too; devrc deleted both when it consolidated onto the pinned `cairn` client,
+    # so those two rows would render `ABSENT` — this page asserting that half of
+    # devrc's store readers are missing files, which is false and is exactly the
+    # rendered-artefact defect the note above is about. They are not re-pointed at
+    # the pinned copies either: the question this row answers is "can a LOCAL
+    # reader speak HTTP", and a module inside a /nix/store closure is not a local
+    # reader anyone here can change. `scripts/cairn` is added because it IS the
+    # devrc-side thing that speaks to the server, and leaving it out while
+    # deleting the two would have understated the count.
+    readers = ["scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py",
+               "scripts/cairn", "scripts/cairn-validate"]
     rows = []
     clients = 0
     for rel in readers:

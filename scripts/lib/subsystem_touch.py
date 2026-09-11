@@ -328,8 +328,21 @@ from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 # `analyze-service-index/backup.py`, which keys its objects by it.
 #
 # 🔴 IMPORTED THROUGH `entry_shape.store_host`, NOT DIRECTLY — see the
-# `store_host` re-export below. `this_host` is still bound here because several
-# call sites and tests name it, but `store_host` is the seam both halves share.
+# `store_host` re-export below.
+#
+# ⚠ THIS BINDING NOW HAS NO CALL SITE IN THIS MODULE — measured CODE-ONLY
+# (`ast.unparse` with docstrings stripped): `this_host()` appears 0 times, every
+# use having moved behind `entry_shape.store_host`. Positive control, same pass:
+# `store_host()` appears 2 times. ⚠ A BARE `grep -c` DISAGREES and says 2 — both
+# hits are prose, one of them this very comment — so re-derive it code-only or
+# not at all.
+# An earlier version of this comment said "several call sites and tests name it",
+# and the call-site half was simply false. It is retained for ONE reason, and the
+# honest statement is that it is the only one: `test_subsystem_touch.py::
+# test_the_writer_calls_host_identitys_this_host_NOT_host_label` asserts
+# `st.this_host is host_identity.this_host`, which is what stops someone
+# "simplifying" the identity back to `host_label`. Removing the binding is a
+# defensible follow-up; it is not a comment fix, so it is not done here.
 from host_identity import this_host  # noqa: E402
 
 # 🔴 THE SHARED VOCABULARY COMES FROM THE PIN. `entry_shape` is the module the

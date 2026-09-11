@@ -402,12 +402,50 @@ class TestBothCliSurfaces:
         subprocess per bad argument and would still be a `GitError` underneath.
 
         So git is made UNCALLABLE and the refusal is required to arrive anyway.
+
+        🔴 BOTH `_git`s ARE PATCHED, AND UNTIL THIS COMMIT ONLY ONE WAS — which
+        made this guard VACUOUS. It patched `subsystem_touch._git` and claimed
+        git had been made uncallable; since devrc consolidated onto the pinned
+        client the READER resolves through `entry_shape.scope_for_repo` →
+        `entry_shape._git`, a DIFFERENT function object (measured:
+        `st._git is entry_shape._git` → False). With `st._git` raising,
+        `rc.scope_for_repo(<a real repo>)` still succeeded — so the premise the
+        assertion rests on was false while the assertion passed. A guard that
+        reads as coverage while providing none is worse than none.
+
+        ⚠ ONLY `entry_shape._git` IS PATCHED, AND THAT IS THE WHOLE SET. A first
+        attempt patched `subsystem_touch._git` as well "for strength"; its mutant
+        SURVIVED — measured — because after the consolidation the writer's
+        `scope_for_repo` DELEGATES to `entry_shape.scope_for_repo`, so
+        `subsystem_touch._git` is no longer on the scope path at all (it is still
+        used elsewhere in that module, by `collect_git_paths`). A patch whose
+        removal changes nothing is not extra safety; it is a line that makes the
+        set look bigger than the claim.
         """
 
         def _no_git(*_a, **_k):  # pragma: no cover - the point is that it is not hit
             raise AssertionError("git was invoked for a path that is not a directory")
 
-        monkeypatch.setattr(st, "_git", _no_git)
+        import entry_shape  # noqa: PLC0415
+
+        monkeypatch.setattr(entry_shape, "_git", _no_git)
+
+        # 🔴 PROVE THE INSTRUMENT IS LIVE BEFORE READING ITS VERDICT. A
+        # not-a-directory input never reaches EITHER `_git`, so the two patches
+        # above are unobservable from the assertion below — MEASURED: deleting
+        # the `entry_shape` patch leaves this test green. That is not redundancy
+        # to shrug at, it is the reason the pre-consolidation version of this
+        # guard was VACUOUS and passed for a year while patching a `_git` the
+        # reader had stopped using. So: first drive an input that MUST call git
+        # and require the sentinel to arrive. If this stops raising, the patches
+        # are inert and the "git was never invoked" claim below means nothing.
+        # BOTH CLIs, because both must be shown to reach the patched function —
+        # the writer through its wrapper, the reader directly.
+        with pytest.raises(AssertionError, match="git was invoked"):
+            rc.scope_for_repo(ROOT)
+        with pytest.raises(AssertionError, match="git was invoked"):
+            st.scope_for_repo(ROOT)
+
         code = rc.main(["--repo", SCOPE_IN_STORE, "--store", str(store)])
         err = capsys.readouterr().err.strip()
         assert code == 3

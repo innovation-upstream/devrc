@@ -1234,10 +1234,13 @@ def _cairn_doctor():
     lib = str(Path(__file__).resolve().parent / "lib")
     if lib not in sys.path:
         sys.path.insert(0, lib)
-    # `cairn_doctor` is the PINNED module — re-asserted here rather than relying
-    # on the module-level `ensure()`, because this function re-asserts the devrc
-    # lib above and the two must be restored in the same order.
-    cairn_pin.ensure()
+    # `cairn_doctor` is the PINNED module. There WAS a `cairn_pin.ensure()` call
+    # here, justified by a comment saying it "restored the ordering" after the
+    # `sys.path.insert` above. It could not: `ensure()` APPENDS, so it cannot
+    # change anything about a path entry inserted at the front, and the
+    # module-level call has already run by the time any subcommand builds its
+    # parser. It was inert, and its stated reason was a thing the function does
+    # not do — so it is deleted rather than re-justified.
     import cairn_doctor  # noqa: PLC0415
 
     return cairn_doctor

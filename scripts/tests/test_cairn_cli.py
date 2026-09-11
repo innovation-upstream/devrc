@@ -1325,10 +1325,15 @@ def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
 
     ⚠ THIS READS `scripts/cairn`, WHICH IS NO LONGER THE DEPLOYED FILE. It is
     still the right thing to read: the OSS client this repo now deploys is the
-    extraction OF this file and resolves its `lib/` the same way, and the two
-    are not yet consolidated (`scripts/lib/` is still imported by the writer and
-    by `cairn-who`). Upstream's own suite owns the packaged copy; this pins that
-    the constraint the deploy mode below exists for is still real HERE.
+    extraction OF this file and resolves its `lib/` the same way.
+
+    ⚠ AN EARLIER VERSION SAID "the two are not yet consolidated". That is now
+    false — the five reader modules ARE consolidated onto the pin. What survives
+    is narrower and is the whole reason this guard still applies: `scripts/lib/`
+    is still a real sibling directory holding devrc-ONLY modules (`cairn_pin`,
+    `timeouts`, `subsystem_touch`), and `scripts/cairn` still reaches them by
+    `__file__`-relative path — so the deploy mode below still cannot be a bare
+    store copy.
     """
     src = (REPO / "scripts" / "cairn").read_text()
     assert 'Path(__file__).resolve().parent / "lib"' in src, (
@@ -1336,11 +1341,22 @@ def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
         "deploy requirement below may be obsolete — re-derive it rather "
         "than editing the assertion."
     )
-    # …and that the path it builds is actually imported from, not dead code.
-    assert "import subsystem_recall" in src, (
-        "scripts/cairn no longer imports from its sibling lib/"
+    # …and that the path it builds is actually imported FROM, not dead code.
+    #
+    # 🔴 `cairn_pin`, NOT `subsystem_recall`. This used to name the reader, and
+    # after the consolidation that proved nothing about the sibling directory:
+    # `subsystem_recall` now resolves out of the PINNED package, so the import
+    # line could be present with `scripts/lib/` empty and this guard would still
+    # pass. `cairn_pin` is a devrc-only module that lives there and nowhere else.
+    assert "import cairn_pin" in src, (
+        "scripts/cairn no longer imports a devrc-only module from its sibling "
+        "lib/, so the __file__-relative path above may now be dead code and the "
+        "deploy requirement below unfounded."
     )
-    assert (pinned("subsystem_recall")).exists()
+    assert (REPO / "scripts" / "lib" / "cairn_pin.py").is_file(), (
+        "scripts/lib/cairn_pin.py is gone — the sibling directory this guard is "
+        "about no longer holds the module the assertion above names."
+    )
 
 
 def test_cairn_is_deployed_from_the_pinned_package_not_a_bare_store_copy():

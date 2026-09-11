@@ -30,7 +30,12 @@ ROOT = Path(__file__).resolve().parents[2]
 LIB = ROOT / "scripts" / "lib"
 
 sys.path.insert(0, str(LIB))
+sys.path.insert(0, str(ROOT / "scripts"))
 import cairn_pin  # noqa: E402
+
+# The one seam for tests that read PINNED module SOURCE — see
+# `scripts/testlib/cairn_lib.py`.
+from testlib.cairn_lib import pinned  # noqa: E402
 
 
 def _pin() -> Path:
@@ -38,9 +43,15 @@ def _pin() -> Path:
 
     ⚠ A SKIP, and it is the only one in this file: without the pinned client
     deployed there is no relationship to measure, and asserting one anyway would
-    be a guard that passes in an environment it cannot observe. The `nix` checks
-    set `CAIRN_LIB`, so the gating tier does NOT take this branch — see
-    `flake.nix`'s `checks.pytests`.
+    be a guard that passes in an environment it cannot observe.
+
+    ⚠ THE GATING TIER DOES NOT TAKE THIS BRANCH, and the reason is route 2, not
+    route 1. An earlier version of this docstring said "the `nix` checks set
+    `CAIRN_LIB`" — measured false, it appears 0 times in `flake.nix`. What the
+    checks do is carry `cairn.packages.${system}.cairn` on `gateTools`, so the
+    binary is on PATH inside the sandbox and `_from_client` answers. That is the
+    route the hosts use, so the gate exercises the one that has to work
+    unattended.
     """
     try:
         return cairn_pin.pinned_lib_dir()
@@ -460,6 +471,145 @@ def test_scope_derivation_still_comes_from_the_pin(tmp_path):
     assert st.scope_for_repo(repo) == entry_shape.scope_for_repo(repo) == "some-repo", (
         "devrc's wrapper and the pinned function disagree about a repo's scope — "
         "the silent, total failure the shared module exists to prevent."
+    )
+
+
+# =============================================================================
+# Wording the pin sanitised away — pinned so it cannot change unnoticed
+# =============================================================================
+
+#: 🔴 THE PINNED READER TELLS OPERATORS TO RUN A NON-COMMAND, AND devrc CANNOT
+#: REWRITE IT. Both strings below come from inside the packaged client. The OSS
+#: extraction replaced devrc's `subsystem_touch.py --validate <path>` with
+#: `a writer --validate <path>` — correct for a repo that ships no writer, and a
+#: REGRESSION here, because devrc does ship one and this is the store's most
+#: common failure path: an entry that will not parse.
+#:
+#: devrc's real equivalent is `cairn-validate <path>` — on PATH, and MEASURED to
+#: accept a file path (`subsystem-touch validate: <path>`, rc 0), not just
+#: `--scope`. Nothing devrc owns prints these strings, so this is pinned and
+#: documented rather than fixed.
+#:
+#: **Closing condition:** a `ZacxDev/cairn` change letting a consumer inject the
+#: remedy spelling (the same hook the `repo_path_missing_message` regression
+#: needs), merged and the pin bumped — at which point this guard goes red and
+#: both strings are replaced with devrc's command in the same commit.
+SANITISED_REMEDY = "a writer --validate <path>"
+DEVRC_REAL_REMEDY = "cairn-validate <path>"
+
+
+def test_the_pinned_readers_validate_remedy_is_a_NON_COMMAND_here():
+    """Pinned as OBSERVED. Two sites; both are user-facing.
+
+    🔴 THE COUNT IS PART OF THE CLAIM. Asserting only "the string appears" would
+    survive a pin that fixed ONE site and left the other, which is the half-fix
+    that reads as done — so the occurrences are counted, and a positive control
+    proves the reader source was actually read.
+    """
+    src = pinned("subsystem_recall").read_text(encoding="utf-8")
+    assert len(src) > 10_000, "the pinned reader source came back suspiciously short"
+    n = src.count(SANITISED_REMEDY)
+    assert n == 2, (
+        f"the pinned reader names `{SANITISED_REMEDY}` {n} time(s), expected 2. "
+        f"If this went to 0, upstream fixed the wording — replace both call "
+        f"sites' expectations with devrc's real command `{DEVRC_REAL_REMEDY}` "
+        f"and delete this guard. If it grew, a third user-facing site now tells "
+        f"an operator to run something that is not a command."
+    )
+    # The devrc-side remedy this regression costs a reader. Asserted so the
+    # alternative named in the comment above cannot quietly stop existing.
+    assert (ROOT / "scripts" / "cairn-validate").is_file(), (
+        "devrc's `cairn-validate` is gone, so the remedy this guard documents as "
+        "the real one no longer exists and the comment above is now false"
+    )
+
+
+# =============================================================================
+# The SCHEDULED consumers — the environment nobody measured
+# =============================================================================
+
+#: 🔴 EVERY systemd USER UNIT WHOSE `ExecStart` REACHES CODE THAT IMPORTS THE
+#: PIN, AND THE ENTRY POINT THAT DOES IT. Pinned two-way: a unit that grows such
+#: a dependency and is not listed here fails, and a listed unit that stops
+#: declaring `CAIRN_LIB` fails.
+#:
+#: 🔴 WHY THIS LEDGER EXISTS. The consolidation shipped with all three of these
+#: broken and every tier green, because every environment claim behind it was
+#: measured from a shell that has `cairn` on PATH. These units do not: each sets
+#: `Environment=PATH=${lib.makeBinPath [...]}`, a CLOSED list, and none of the
+#: three contains a cairn path — measured live with
+#: `systemctl --user show <unit> -p Environment`. `cairn_pin.ensure()` raises by
+#: design, so the units do not degrade, they fail to start.
+#:
+#: 🔴 AND THE FAILURE ARRIVES ON `git pull`, NOT ON A SWITCH: each unit
+#: `ExecStart`s the WORKING-TREE copy of its program, so "no home-manager switch
+#: was performed" is not a mitigation.
+#:
+#: ⚠ PATH IS NOT AN ALTERNATIVE REMEDY for the backup unit specifically —
+#: `%h/.local/bin/cairn` is a symlink under $HOME and that unit runs
+#: `ProtectHome=tmpfs`, so it is absent inside its namespace.
+PIN_REQUIRING_UNITS = {
+    "analyze-service-index-backup":
+        "scripts/analyze-service-index/backup.py imports host_identity",
+    "handoff-index-sync":
+        "scripts/lib/handoff_index.py -> handoff_doc.py imports subsystem_resolver",
+    "present-regen":
+        "scripts/present/measure.py::m_index_store imports subsystem_recall",
+}
+
+CAIRN_LIB_ENTRY = "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
+
+
+def _unit_environment(home_nix: str, unit: str) -> list[str]:
+    """The `Environment = [ … ]` entries of one `systemd.user.services.<unit>`.
+
+    Raises rather than returning `[]` on a miss: an empty list would satisfy
+    "contains no bad entry" forever and the guard would pass against nothing.
+    """
+    start = home_nix.find(f"systemd.user.services.{unit} =")
+    assert start != -1, f"nix/home.nix declares no `systemd.user.services.{unit}`"
+    m = re.search(r"^\s*Environment\s*=\s*\[(.*?)^\s*\];\s*$",
+                  home_nix[start:], re.M | re.S)
+    assert m, f"unit `{unit}` has no `Environment = [ … ];` list"
+    return [ln.strip().strip('"') for ln in m.group(1).splitlines() if ln.strip()]
+
+
+def test_every_scheduled_consumer_of_the_pin_declares_CAIRN_LIB():
+    """🔴 THE GUARD THE FIRST ROUND DID NOT HAVE. Read the ledger's comment.
+
+    A behavioural probe cannot cover this — it models an environment, so deleting
+    the line from `nix/home.nix` leaves it green. This reads what ships, for all
+    three units rather than the one whose test file happened to exist.
+    """
+    home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
+    for unit, why in sorted(PIN_REQUIRING_UNITS.items()):
+        entries = _unit_environment(home_nix, unit)
+        assert CAIRN_LIB_ENTRY in entries, (
+            f"`{unit}` does not set `{CAIRN_LIB_ENTRY}`, and it needs it: {why}. "
+            f"Its PATH is a closed list with no cairn in it, and "
+            f"`cairn_pin.ensure()` raises rather than degrading — so this unit "
+            f"will not start. It breaks on the next `git pull`, because the unit "
+            f"ExecStarts the working-tree copy."
+        )
+        # POSITIVE CONTROL on the parse: a reader that silently matched the wrong
+        # block would also "find" the entry. Every one of these units sets PATH.
+        assert any(e.startswith("PATH=") for e in entries), (
+            f"the Environment block parsed for `{unit}` has no PATH entry, so "
+            f"this reader is looking at the wrong block and the assertion above "
+            f"is about some other unit"
+        )
+
+
+def test_the_pin_requiring_unit_ledger_has_not_silently_SHRUNK():
+    """The other direction. A ledger that only ever grows cannot notice a unit
+    dropping out of it, and this one's whole value is enumerating a set nobody
+    can see from the code."""
+    assert set(PIN_REQUIRING_UNITS) == {
+        "analyze-service-index-backup", "handoff-index-sync", "present-regen",
+    }, (
+        "the pin-requiring unit set changed. If a unit genuinely no longer "
+        "reaches pin-importing code, say which import went away; if a new one "
+        "does, it needs the CAIRN_LIB entry in the SAME commit."
     )
 
 
