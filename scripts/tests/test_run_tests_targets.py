@@ -122,23 +122,28 @@ def _require_check_targets(runner: Path) -> None:
 #: against `--files <one file in it>` = **4 s**, because `--files` sets
 #: `SCOPED_MODE` and `run-tests.sh:4518` drops the families under it.
 #:
-#: 🔴 THE ROOT CAUSE IS FIXED IN THE SAME PR, SO THE VALUE IS DERIVED FROM THE
-#: WORLD AFTER THAT FIX, NOT BEFORE IT. `run-tests.sh` dropped the hook/shell
-#: families only under `--files`; it now drops them for any non-FULL run, so the
-#: same nested `--targets` run measures **9 s** at load ~46 — down from 47 s. A
-#: bound sized against the 47 s would be insurance against a defect that no
-#: longer exists.
-#:
-#: 🔴 THE VALUE ITSELF LIVES IN `testlib.scoped_harness`, NOT HERE. That module's
-#: `run()` already carried its own `timeout=600` default and is used by five
-#: other test files, so a constant private to THIS file would have been a fourth
-#: copy of the predicate while the docstring below claimed "one rule, one place".
-#: Read the reasoning for the number there; this name is an import so the two
+#: 🔴 THE VALUE LIVES IN `testlib.scoped_harness`, NOT HERE, AND THIS PR DOES NOT
+#: CHANGE IT. That module's `run()` already carried a `timeout=600` default used
+#: by five other test files, so a constant private to THIS file would have been a
+#: fourth copy of the predicate while the docstring below claimed "one rule, one
+#: place". Read the reasoning for the number there; this is an import so the two
 #: cannot drift.
+#:
+#: ⚠ A draft of this change RE-SIZED it to 300 on the strength of a measurement
+#: taken here — a narrowing of five other files on the evidence of this one. The
+#: reasoning and the measurements that rejected it are recorded beside the
+#: constant. What this PR removes is the six open-coded `timeout=120` copies,
+#: not the bound's value.
+#:
+#: 🔴 AND 120 WAS NEVER THE REAL DEFECT EITHER. The nested `--targets` runs this
+#: file spawns cost 47 s because `run-tests.sh` executed two whole test families
+#: that `--targets` cannot name; that is fixed in the same PR, and the same run
+#: now measures 2-9 s. A bound is the wrong instrument for work that should not
+#: have been running — do not re-derive a bigger number from the old cost.
 #:
 #: ⚠ NOT YET CONSOLIDATED, and this is the honest edge of the claim:
 #: `test_run_tests_preconditions.py:68` uses 300 and
-#: `test_devshell_satisfies_required_tools.py:105,436` use 120, each spawning a
+#: `test_devshell_satisfies_required_tools.py:110,438` use 120, each spawning a
 #: runner of its own. They drive fast precondition/PATH-stub aborts, so none is
 #: near its bound — this is about the thesis, not a live defect. The guard below
 #: is file-scoped and cannot see them.
@@ -329,15 +334,19 @@ def test_no_call_site_open_codes_its_own_subprocess_bound():
     # body with a delegation to a helper in `testlib/` — the natural shape of
     # "move the bound somewhere shared" — left zero spawn calls here and the
     # guard green. `>= 1`, not `== 1`: the count is not the property.
-    bounded_in_spawn = sum(
+    # ⚠ Counts spawn calls sited in `_spawn`, NOT ones already checked to carry
+    # the bound — the `unbounded` assertion above is what establishes that, and
+    # it has already run. Named for what it measures so the message cannot claim
+    # more than the expression does.
+    spawns_in_spawn = sum(
         1
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and _is_spawn_call(node)
         and owner.get(node.lineno) == "_spawn"
     )
-    assert bounded_in_spawn >= 1, (
-        "this guard found NO bounded spawn inside `_spawn`, so every assertion "
+    assert spawns_in_spawn >= 1, (
+        "this guard found NO spawn call inside `_spawn`, so every assertion "
         "above passed over an empty set and proved nothing. Either the spawn "
         "moved out of this file — in which case the bound moved with it and "
         "this guard no longer covers it — or `_spawn` was renamed and `owner` "

@@ -60,31 +60,49 @@ CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 #: a message rather than hanging until the gate's own cap, which is worse — no
 #: message, no exit code.
 #:
-#: 300 s is ~33x the measured cost of a narrowed nested run (9 s at load ~46,
-#: after `run-tests.sh` stopped executing the hook/shell families on non-FULL
-#: runs). ⚠ Headroom is not the only axis: `test_run_tests_targets.py` performs
-#: FOUR real nested runs, so this also sets a worst case — 4x300 s = 20 min.
+#: 🔴 600 IS THE VALUE THIS MODULE ALREADY HAD, AND THIS CHANGE DELIBERATELY
+#: DOES NOT MOVE IT. What moved is WHERE it is written, not what it is: six
+#: open-coded `timeout=120` sites in `test_run_tests_targets.py` now read this
+#: name instead of carrying their own copies.
 #:
-#: 🔴 AGAINST THE GATE **TASK**'s OWN `timeout: 60m`, NOT THE PIPELINE'S
-#: `timeouts.tasks: 70m`. The task cap is the lower of the two and therefore the
-#: only one a slow test can reach — an earlier draft of this paragraph quoted
-#: the pipeline budget and got the consequence BACKWARDS with it. The
-#: difference is not pedantry; the two fail in opposite directions, per that
-#: pipeline's own measured three-way probe (Tekton v1.12.0,
-#: `devrc-ci-pipeline.yaml`):
+#: ⚠ A draft of this change set it to 300, and that was a NARROWING OF FIVE
+#: FILES ON THE EVIDENCE OF A SIXTH. This default governs `run()`, which
+#: `test_scoped_runs.py`, `test_scoped_mapper.py`, `test_scoped_scope_marker.py`,
+#: `test_scoped_gate_contract.py` and `test_scoped_ledgers.py` use across ~47
+#: call sites — and their nested runs are not the 2-9 s narrowed ones the 300
+#: was sized against. Measured on the dev host: 28.9 s at load ~57 for
+#: `test_the_node_runner_reports_FULL_on_a_REAL_run`, and 70.5 s observed for a
+#: sibling under a different load. At 300 that is ~4-10x headroom, against the
+#: >2.55x contention inflation that caused this PR in the first place — i.e. the
+#: narrowing would have re-created the failure class here that the runner fix
+#: just removed elsewhere. Do not re-derive 300 from the 9 s figure; it is a
+#: measurement of ONE consumer.
+#:
+#: 🔴 THIS IS A HANG BOUND, NOT AN ASSERTION. Nothing any caller pins depends on
+#: the nested run being fast; the bound exists only so a wedged child fails with
+#: a message rather than hanging until the gate's own cap, which is worse — no
+#: message, no exit code.
+#:
+#: ⚠ On the worst case, stated because the 300 draft leant on it:
+#: `test_run_tests_targets.py` performs FOUR real nested runs, so 4x600 s = 40
+#: min in the pathological case. That requires all four to HANG — after the
+#: runner fix each measures 2-9 s — and a genuine hang is a defect you want
+#: surfaced, not absorbed. It is bounded by the gate TASK's own `timeout: 60m`
+#: (`devrc-ci-pipeline.yaml`), NOT the pipeline's `timeouts.tasks: 70m`: the task
+#: cap is the lower of the two and so the only one a slow test can reach. That
+#: distinction decides the OUTCOME, per that pipeline's own measured three-way
+#: probe (Tekton v1.12.0):
 #:
 #:     timeouts.tasks   -> PipelineRunTimeout, finally NEVER RAN -> posts nothing,
 #:                         checks stay `pending` forever
-#:     task-level 60m   -> Failed,             finally RAN       -> posts a red
+#:     task-level 60m   -> Failed,             finally RAN       -> posts a status
 #:
-#: So overrunning here yields a LEGIBLE RED, not the unclearable pending the
-#: earlier draft warned about. ⚠ The real budget is tighter than 60m anyway: that
-#: clock runs while the pod is Pending, and a worst-observed ~22.5m queue leaves
-#: ~37m of execution. 20 min of that is 54%; the rejected 600 would have been
-#: 40 min, i.e. MORE than the whole post-queue budget for one test file.
-#: 600 was the first value proposed and is REJECTED for that reason: it bought
-#: headroom the runner fix had already made unnecessary.
-RUNNER_TIMEOUT_S = 300
+#: So overrunning here posts SOMETHING a human can read — an `error` carrying
+#: `COULD NOT RUN`, which CLAUDE.md tells readers is a broken gate rather than a
+#: bad change — instead of the unclearable pending an earlier draft wrongly
+#: warned about. ⚠ The real budget is tighter than 60m: the clock runs while the
+#: pod is Pending, and a worst-observed ~22.5m queue leaves ~37m of execution.
+RUNNER_TIMEOUT_S = 600
 
 
 def run(args: list[str], timeout: int = RUNNER_TIMEOUT_S,
