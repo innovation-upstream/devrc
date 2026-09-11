@@ -53,9 +53,13 @@
 #  12   BLIND: too many consecutive unmeasured runs; fails the unit, no toast
 #   2   usage
 #
-# TEST SEAMS (none is read anywhere else, and `scripts/tests/
-# test_main_status_watch.py` pins that the production path still resolves the
-# operator's own origin and really invokes systemctl):
+# TEST SEAMS (none is read anywhere else). Every behavioural test drives the
+# seams, so `scripts/tests/test_main_status_watch.py` pins BOTH production argvs
+# textually AND drives their parsing directly — `git remote get-url origin` in
+# `test_resolve_repo_parses_every_origin_url_shape`, and
+# `systemctl … main-green-check` in
+# `test_the_production_trigger_is_systemctl_start_main_green_check` — so a seam
+# cannot drift away from what production does while the suite stays green.
 #   MAIN_STATUS_WATCH_GH        argv0 for the API reader (default: `gh`)
 #   MAIN_STATUS_WATCH_TRIGGER   full command to start the deadman
 #   MAIN_STATUS_WATCH_CACHE     state directory
@@ -67,6 +71,16 @@
 # two-way — an undocumented knob is a knob nobody can find, and one named here
 # but no longer read is a lie. BUDGET was read for a full commit before anything
 # mentioned it; that is the shape this guard exists to stop recurring.
+# ⚠ NOTHING ELSE IN THIS COMMENT MAY BEGIN A LINE WITH A KNOB NAME. That guard
+# reads the LEDGER above by matching `^#  <NAME> `, so an ordinary sentence
+# wrapping onto a line that happens to start with one would register as a ledger
+# entry for a knob that has none — a two-way pin satisfied by prose. A draft of
+# this very paragraph did it.
+# ⚠ AND AN EARLIER WORDING OVERSTATED THE SEAM PINS above: it said the tests
+# pinned that the production path "resolves the operator's OWN origin". They did
+# not — every test set the repo override, so `resolve_repo` had NO coverage and
+# an enumerated mutation sweep found ten survivors inside it. No test reads the
+# real remote; what is pinned is the argv and the URL parsing.
 """Start the main-green deadman early when main's own CI says main is red."""
 import json
 import os
@@ -128,11 +142,27 @@ def print_header():
 # is the roll-up mistake in a second spelling; treating it as GREEN would be
 # worse still, so it is classified as NOT-A-VERDICT and the walk continues past
 # it. That is the narrowest rule that can be wrong in only one direction.
-NOT_A_VERDICT = ("superseded", "killed", "no-gate-pod", "error-other", "pending")
+#
+# ⚠ `commit_verdict` BRANCHES ON `green` AND `red` ONLY. The finer classes below
+# are not consulted by anything — they exist so this function is TOTAL, with a
+# named answer for every shape a row can take, and they are pinned by
+# `test_classify_maps_a_row_to_its_documented_class`. Until that test existed
+# they had no consumer at all, and an enumerated mutation sweep found every arm
+# of this function undriven: the catch-all could be turned into `return "green"`
+# — i.e. a state GitHub adds tomorrow folded into "main is green" — while a
+# 61-test suite stayed fully green. A tuple named NOT_A_VERDICT used to sit here
+# enumerating the same classes; nothing read it either, so it was deleted rather
+# than left reading as a contract it could not enforce.
 
 
 def classify(state, description):
-    """One status row -> a verdict class. Pure; the tests drive it directly."""
+    """One status row -> a verdict class. Pure, and the tests drive it directly.
+
+    🔴 UNRECOGNISED MEANS `error-other`, WHICH MEANS NOT-A-VERDICT — never green.
+    Both fall-through returns below are the arm an unknown `state` lands on, and
+    "absence reads as green" is the single failure this whole file is built
+    against.
+    """
     desc = (description or "").strip()
     if state == "success":
         return "green"
@@ -385,6 +415,16 @@ class State:
             return n, False
 
     def reset_streak(self):
+        # ⚠ ITS RESULT IS DELIBERATELY NOT CONSULTED, unlike every other writer
+        # on this class — and that asymmetry is a decision, not an oversight a
+        # mutation sweep should re-file. `open_episode`, `close_episode` and
+        # `bump_streak` each return a flag the caller MUST branch on, because
+        # each of their failures is silent and dangerous. This one fails NOISY,
+        # not silent — and that is the whole distinction: a reset that does not
+        # land leaves the streak HIGH, so a later unmeasured run escalates
+        # SOONER than it should. That is a quiet false alarm (rc 12 fails the
+        # unit and does not toast), never a missed one. Flipping this return
+        # value is therefore an equivalent mutant, and the sweep says so.
         try:
             self.streak.write_text("0\n", encoding="utf-8")
             return True
@@ -412,6 +452,21 @@ def blind_escalate():
     """
     raw = os.environ.get("MAIN_STATUS_WATCH_BLIND_ESCALATE")
     return int(raw) if (raw or "").isdigit() else BLIND_ESCALATE_DEFAULT
+
+
+def cache_root():
+    """Where the two state files live — ONE PLACE.
+
+    🔴 THIS WAS OPEN-CODED AT TWO SITES, and the second one is the one that runs
+    when the first has already failed: `main` derives it, and so did the
+    outermost exception net. Two copies drifting apart would send the blind
+    streak to a different directory than the next run reads, which silently
+    un-ladders the net — and the ladder's failure mode is SILENCE, so the
+    divergence would not announce itself. Same rule, same reason, as
+    `blind_escalate()` directly above.
+    """
+    return Path(os.environ.get("MAIN_STATUS_WATCH_CACHE") or
+                Path.home() / ".cache" / "main-status-watch")
 
 
 def ladder_exit(state, escalate, reason):
@@ -460,9 +515,15 @@ class Unmeasured(Exception):
 # `TimeoutStartSec=180`. Being SIGTERM'd by systemd would fail the unit with no
 # message and no streak entry — the script would never get to say COULD NOT
 # MEASURE. So it owns its own deadline, set BELOW the unit's, and exits through
-# its normal unmeasured path instead. `test_the_total_budget_is_under_the_units_
-# timeout` pins the ordering of the two numbers so tightening one cannot silently
-# invert them.
+# its normal unmeasured path instead.
+# `test_the_total_budget_PLUS_the_trigger_timeout_is_under_the_units_timeout`
+# pins the ordering of those numbers so tightening one cannot silently invert
+# them. ⚠ That name is the THIRD-number version; this comment cited the
+# two-number name the same commit had already renamed, so the citation read as
+# authority and resolved to nothing. `test_every_test_this_script_names_
+# actually_exists` now fails on a dangling one. (A name wrapped across a comment
+# line-break is exactly what hid it from every grep, so that guard re-joins the
+# halves before looking — and this comment is deliberately wrapped that way.)
 TOTAL_BUDGET_S = 120
 # 🔴 A THIRD NUMBER, and the pin used to name only two. `trigger_deadman`'s
 # subprocess timeout is NOT charged against _DEADLINE — the budget covers the
@@ -618,22 +679,25 @@ def main(argv):
         # text" — the rationale the env-var guard was filed under — was simply
         # FALSE. `main-green-check.sh` already prints its own header for
         # --help; making that claim true is the better fix than deleting it.
-        # Refuses rather than printing nothing if the sentinel moves, for the
-        # same reason main-green-check.sh does: a --help that silently prints
-        # zero lines and exits 0 is the reassuring zero this file argues against.
-        # 🔴 THE RETURN VALUE IS CONSUMED. It used to be discarded, so a moved
-        # sentinel printed one diagnostic line and still exited 0 — a --help
-        # that silently prints nothing and reports success, which is the
-        # reassuring zero this file argues against. `main-green-check.sh` calls
-        # `die` (exit 2) in the same situation; matching it makes the comparison
-        # in this comment true rather than aspirational.
+        #
+        # 🔴 AND THE RETURN VALUE IS CONSUMED. It used to be discarded, so a
+        # moved sentinel printed ONE diagnostic line and still exited 0 — a
+        # --help that reports success having printed no help, the reassuring
+        # zero this file argues against. `main-green-check.sh` calls `die`
+        # (exit 2) in the same situation; matching it makes the comparison in
+        # this comment true rather than aspirational.
+        # ⚠ ONE RULE, ONE PLACE: this used to be TWO paragraphs stating the
+        # same rule, and the first described the pre-fix behaviour as
+        # "silently prints zero lines", which is not what it did. The arm is
+        # covered by `test_a_MOVED_docstring_sentinel_REFUSES_rather_than_
+        # dumping_the_file`; before that it had none, and three separate
+        # mutants of it survived a fully green suite.
         return RC_OK if print_header() else RC_USAGE
     if len(argv) > 1:
         say(f"unknown argument: {argv[1]}")
         return RC_USAGE
 
-    state = State(os.environ.get("MAIN_STATUS_WATCH_CACHE") or
-                  Path.home() / ".cache" / "main-status-watch")
+    state = State(cache_root())
     try:
         state.mkdir()
     except OSError as exc:
@@ -804,12 +868,20 @@ def _guarded_main(argv):
     the journal, and the blind ladder counts it — so a bug that recurs escalates
     to rc 12 exactly like a persistent outage. A run that cannot look is
     reported as a run that could not look, never as 'main is green'.
+
+    🔴 ONE ARM, NOT TWO — AND THE SECOND ONE WAS F1's SHAPE FOR THE THIRD TIME.
+    There used to be a dedicated `except Unmeasured` here that printed COULD NOT
+    MEASURE and returned rc 11 WITHOUT bumping the streak. rc 11 is a systemd
+    SUCCESS, so that arm could never advance a ladder and never fail the unit:
+    permanently silent, the exact fault this file's F1/F3 comments condemn and
+    that `ladder_exit` says it answers "wherever that condition arises". The
+    paragraph above was describing the net as a whole and was therefore FALSE
+    for the arm nearest to it — a coverage claim wider than its implementation.
+    `Unmeasured` is an `Exception`, so deleting the special case is the fix:
+    the general arm already reports it AND counts it.
     """
     try:
         return main(argv)
-    except Unmeasured as exc:            # a path that raised after the handler
-        say(f"COULD NOT MEASURE — {exc}")
-        return RC_UNMEASURED
     except Exception as exc:  # noqa: BLE001 — deliberate; see the docstring
         import traceback
         say(f"COULD NOT MEASURE — UNEXPECTED {type(exc).__name__}: {exc}")
@@ -817,9 +889,7 @@ def _guarded_main(argv):
         say("  Nothing is claimed about main; the 4-hourly deadman is unaffected.")
         traceback.print_exc()
         try:
-            root = os.environ.get("MAIN_STATUS_WATCH_CACHE") or \
-                Path.home() / ".cache" / "main-status-watch"
-            st = State(root)
+            st = State(cache_root())
             st.mkdir()
             n, persisted = st.bump_streak()
             escalate = blind_escalate()
