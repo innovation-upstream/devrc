@@ -75,6 +75,27 @@ FIRST record cannot be made through the API at all; it is an operator step, and
 until somebody takes it the record does not exist anywhere the pod can serve.
 Measured 2026-09-03, on real entries stranded by exactly this.
 
+🔴 **TWO SCOPES ARE STRANDED RIGHT NOW, AND THE SYMPTOM IS A WRITE REFUSAL RATHER
+THAN ANY WARNING ABOUT MISSING DATA.** Re-measured 2026-09-11:
+`civitai-developer-docs` and `civitai-app-requests` exist in the frozen mirror
+(`~/.claude/analyze-service-index/`, files `0444`) and in NEITHER
+`~/.cache/subsystem-store/` nor the pod. The docs one holds `apps.md`, 4,037 B,
+dated **2026-09-02** — the cutover day, which is the likely mechanism. Find them:
+
+```bash
+comm -23 <(ls ~/.claude/analyze-service-index/ | sort) <(ls ~/.cache/subsystem-store/ | sort)
+```
+
+Two consequences, both live and both silent until you hit them: `cairn create
+--scope civitai-developer-docs …` is REFUSED with
+`🔴 cairn: the store REFUSED the write [not-found]`, so a session holding a
+genuine new entry for that repo **cannot record anything at all** — measured, a
+`/handoff` hit exactly this; and a `/resume` there reads an EMPTY scope while a
+whole entry sits on that host's disk. 🔴 **Do NOT "fix" either by writing to the
+mirror** — an `Edit` rewrites-and-renames past the `0444` and a `Write` creates a
+fresh `0644` file; both succeed and both strand the content further. That IS the
+failure described above, not a workaround for it.
+
 ## 🔴 The two different exit 4s
 
 Confusing them sends you to re-run the command that just failed.
