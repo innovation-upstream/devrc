@@ -289,9 +289,14 @@ def _socket_roots():
     declaration with `/tmp`, reporting a DIFFERENT SERVER's sessions as the
     answer. A reading of the wrong server is exactly the false-reading class
     this block exists to refuse, so the declaration now ends the search. A
-    declared root with no socket yields (None, None), the ambient environment is
-    left alone, and tmux's own "no server running on <declared path>" is
-    accepted as the real zero it is.
+    declared root with no socket yields (None, None) and the ambient environment
+    is passed through untouched, so what the pill shows is whatever TMUX'S OWN
+    answer about the declared path was — never another server's. MEASURED
+    2026-09-11 against the live server with `TMUX_TMPDIR=/nonexistent-root`:
+    tmux says `error connecting to …` rather than `no server running on …`, so
+    the pill renders `?`. That is the honest outcome, and it is not the same as
+    the empty-directory case: `no server running` under a declared root with no
+    socket found anywhere is still accepted as a real zero by `fetch_sessions`.
 
     With NOTHING declared: `/run/user/<uid>` is listed as a LITERAL and not only
     via `$XDG_RUNTIME_DIR`, because that variable is not guaranteed in a bar
