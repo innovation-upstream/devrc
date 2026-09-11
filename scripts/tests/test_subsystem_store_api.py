@@ -4221,18 +4221,26 @@ _RETRACTED_BOUNDARY = (
     # cairn-oss-multi-instance), each ONE WORD from turning this gate red, and a
     # round-3 audit turned it red by changing "is" to "remains" in a doc about
     # `sudo`. `claude/RULES.md`: a permanently-red gate is worse than no gate.
-    # Subject-bearing, so they still kill the mutants but cannot fire on a
-    # sentence that is not about this claim:
-    "first entry remains an operator step",
-    "first entry is still an operator step",
-    # 🔴 THE SAME CLAIM, IN TWO SPELLINGS NEITHER OF THE ABOVE CAN SEE. A round-3
-    # audit found both still live and present-tense AFTER a round-2 commit had
-    # declared "All sites are corrected" — one of them 115 lines below that very
-    # claim. Needled because they are the exact sentences that send a reader to
-    # `seed.sh`, which is the DESTRUCTIVE remedy.
-    "structurally cannot accept a new entry",
-    "only path that ever created one",
-    "can only reach the pod through an operator",
+    # 🔴 AND NARROWING THEM ONCE WAS STILL NOT ENOUGH — THIS IS THE THIRD PASS.
+    # Round 3 rewrote them to "first entry remains/is still an operator step" and
+    # added three more taken verbatim from real sites. A round-4 audit built its
+    # own false-positive probe and SIX of ten TRUE sentences fired; my own probe,
+    # written independently, got SEVEN of eight. Worst of them fired on the
+    # supposedly-narrowed needle: "The first entry remains an operator step for
+    # the OSS multi-instance store" is TRUE — that store really has no create
+    # verb yet — so the needle was still unbound to WHICH store it is about.
+    # Every needle below now carries a token tying it to THIS pod/claim, and the
+    # pair is re-verified on every change: a false-positive probe of true
+    # sentences, and a mutation battery of real reassertions.
+    "scope's first entry remains an operator step",
+    "scope's first entry is still an operator step",
+    "the pod structurally cannot accept a new entry",
+    "seed.sh is the only path that ever created one",
+    "first record can only reach the pod through an operator",
+    # ⚠ The 9th site spelled the claim TWICE in one paragraph; round 3 needled
+    # only the first half. This is the second, and it was left uncaught until a
+    # round-4 audit ran a copy-back of it and watched it SURVIVE.
+    "only create path available to a session",
 )
 
 # 🔴 A STRING NEEDLE CANNOT CLOSE THIS CLASS, AND FOUR ROUNDS OF TRYING IS THE

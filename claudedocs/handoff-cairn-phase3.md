@@ -955,10 +955,11 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     because the rank 23 link reasons from it: verified in
     `server.py`, `If-Match` was **mandatory** on PUT, `*` was refused, and the handler resolved an
     existing entry — so `cairn put --file` on a new ref failed *"cannot derive a revision"*. A
-    scope's first record could then only reach the pod through an operator `seed.sh`, so the
-    only create path available to a session was LOCAL and nothing carried it onward. ⚠ ALL OF
-    THAT IS PAST TENSE AND RETRACTED — `cairn create` now creates the entry AND the scope
-    directory; do NOT reach for `seed.sh` on the strength of this paragraph.
+    scope's first record could then — RETRACTED, see below — only reach the pod through an
+    operator `seed.sh`, and it said the only create path available to a session was LOCAL with
+    nothing carrying it onward. ⚠ ALL OF THAT IS PAST TENSE AND RETRACTED: `cairn create` now
+    creates the entry AND the scope directory; do NOT reach for `seed.sh` on the strength of
+    this paragraph.
     **Closing condition:** a merged PR adding a create route (or an explicit, recorded decision
     that seeding is permanently the only create path, with `subsystem-index` saying so).
     forcing: regression — the missing route is the upstream cause of rank 23

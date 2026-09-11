@@ -101,24 +101,44 @@ the wire they are the same bytes.
 "widen the allowlist" — and that is RETRACTED.** Seeding is never the remedy.
 But the replacement overshot too, so precisely:
 
-| reading | remedy |
-|---|---|
-| **REFUSED** — the scope is not in your token row | edit the secret, replace the pod, then `cairn create` |
-| **ABSENT** — allowlisted already, but the store holds no entries for it | **`cairn create` alone.** No secret edit, no pod restart. |
+🔴 **NEITHER DISCRIMINATOR BELOW ANSWERS THE QUESTION THAT PICKS THE REMEDY.**
+Both measure the pod's DISK; the remedy turns on your token's ALLOWLIST, and a
+scope can be missing from either, or both. `civitai-app-requests` was missing
+from both — so it reads ABSENT on both discriminators while needing the allowlist
+fix.
 
-🔴 **Settle which one you are in BEFORE editing a secret**, or you will replace a
-production pod to fix something a one-line `create` would have handled. An
-earlier draft here said the allowlist edit is the remedy in BOTH readings —
-generalised from a pod where the allowlist happened to enumerate exactly the
-scopes on disk, which is the same coincidence that produced the original wrong
-diagnosis.
+**So do not route off them. Ask the create path itself — it is the cheapest,
+non-destructive probe, and its answer IS the remedy:**
+
+```bash
+cairn create --scope <scope> --ref <ref> --file <entry.md>
+```
+
+| answer | meaning | remedy |
+|---|---|---|
+| **201** | allowlisted; the scope simply had no entries | done — that WAS the fix. No secret edit, no pod restart. |
+| **rc 6 `[not-found]`** | not in your token row (on the create path, the allowlist arm is the ONLY 404 — see `SKILL.md`) | edit the secret, replace the pod, re-run |
+
+⚠ **Two earlier drafts of this block were wrong in OPPOSITE directions**, which is
+why it now routes off a probe rather than off a classification. The first said the
+allowlist edit is the remedy in BOTH readings — a safe superset, merely wasteful.
+The second added an ABSENT row prescribing `cairn create` alone, whose precondition
+("allowlisted already") **neither discriminator below can establish** — wrong and
+stuck, for the exact two scopes this page names as live.
+
+Both of the following answer **"does the pod hold entries for this scope?"** and
+**nothing else** — in particular neither can tell you whether the scope is in your
+token row, which is what selects the remedy above. Use them to know what to
+expect back, not to decide what to do.
 
 1. **The count gap, off `doctor` alone.** `entry-files=` (store-wide, unfiltered —
    `snapshot_freshness` walks the root and takes no token) minus `X-Store-Entries`
-   (your slice). **Gap 0 ⇒ nothing on the pod is hidden from you ⇒ the scope is
-   ABSENT.** ⚠ This line used to end "…and widening the allowlist would change
-   nothing" — RETRACTED: widening it is precisely what lets `cairn create` bring
-   the scope into existence.
+   (your slice). **Gap 0 ⇒ no entry on the pod is hidden from you.** ⚠ That is a
+   statement about ENTRIES, not about scopes: a scope with no entries is invisible
+   either way, so gap 0 leaves the allowlist question wide open. This line used to
+   end "…and widening the allowlist would change nothing" — RETRACTED twice over:
+   widening it is precisely what lets `cairn create` bring the scope into
+   existence.
 2. **The pod's own disk**, which settles it outright:
    `kubectl -n subsystem-store exec deploy/subsystem-store-api -- ls -1 /data`
 
