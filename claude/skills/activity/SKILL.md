@@ -151,6 +151,17 @@ On the workbench a `switch` + an extension reload is the whole procedure.
   `$__timeFilter` / range comparisons (they're UTC, aligned with `now()`).
 - **Both hosts are hostname `nixos`** → without `ACTIVITY_HOST` in the env, every row
   collides on `host=nixos`. Set it per host.
+- 🔴 **A `source='mentions'` row carries a BARE id (`#544`), and an id is unique only
+  within ITS OWN tracker — so "has a previous session already handled this?" gets a
+  CONFIDENT WRONG YES.** The trackers in play here (GitHub repos, clawgate tasks,
+  ClickUp) number independently, and the row records the string, not the tracker.
+  Measured 2026-09-11: searching for prior work on `civitai/cli#544`/`#545` returned
+  rows dated 2026-08-29 → 2026-09-09 that were **clawgate task ids** — the cli issues
+  did not exist until 2026-09-10 16:10Z, so every hit predated its own subject.
+  **Discriminate by the subject's CREATION TIME, not by the id**: bound the query with
+  `ts >= '<when the thing was created>'` and treat anything earlier as a different
+  tracker. The failure is silent and lands in the reassuring direction — it reads as
+  "already handled", which is the answer that makes you stop looking.
 - 🔴 **Never decide "is this source expected on this host?" from prose.** "keylog + browser
   + i3 are GUI-only → laptop-only; the workbench is headless" was FALSE for a long time —
   the workbench runs a real X/i3 session (see the source table above). Read the TABLE;
