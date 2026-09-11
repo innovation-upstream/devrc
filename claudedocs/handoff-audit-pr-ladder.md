@@ -16,22 +16,18 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- Branch / PR: `main` at `cace96d9`, base clone clean and level with `origin/main`. **No open PR from
-  this effort.**
-- ✅ **`main` IS NO LONGER RED.** `#1461` → squash **`30a1eb8b`**. Both #1439 stub writers now go
-  through `testlib.mockbin.write_exec`; `test_runtime_shebangs.py` passes **on `main` itself**
-  (9 passed). It also unblocked **#1460**, an unrelated PR that was failing on the same guard
-  because it branched off the red `main`.
-- ✅ **The handoff itself landed** — `#1463` → squash **`e8331ae3`**.
-- ✅ **Rank 15 CLOSED — every tree this arc created is gone.** Five audit clones
-  (`devrc-audit-1439-r1..r5`, each verified standalone before `rm` — a `.git` FILE would have
-  meant a worktree sharing the real git dir) plus `devrc-shipaddr` and `devrc-handoff-ladder`.
-  `git worktree list` shows 0 from this arc.
-- 🔴 **Issue `#1431` is CLOSED on the board and its defect is NOT fixed** — see the new
-  investigation below. Treat rank 16 as open despite the board.
-- Deploy/verify status: `7edcb1e0` (#1427) and `605b29ac` (#1439) are deployed to BOTH hosts and
-  verified by the deployed artifact. **`30a1eb8b` and `e8331ae3` are NOT deployed** — merged
-  only; no `ship.sh` run since. Both are test/docs-only, so nothing a consumer runs changed.
+
+- **Branch / PR:** `#1440` MERGED as `34da597d` (round 0). `#1495` OPEN, `MERGEABLE/CLEAN`, branch `fix/scoped-tests-retracted-figure`, unmerged and unaudited.
+- **DONE — "the algorithm" is integrated into `/audit-pr` as ROUND 0, shipped and deployed.**
+  - `claude/skills/audit-pr/SKILL.md` gained a `## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE` section, and `scripts/audit-dispatch.py` a `--round 0` mode that emits that section **INSTEAD of** the nine correctness axes (`render_checklist`, `_read_round_zero`, `ROUND_ZERO_HEADING`).
+  - Round 0 is the only round that can conclude *close this PR, do not audit it*. It is ON TRIAL and carries its own retirement condition.
+  - Deployed via `scripts/ship.sh`: workbench `4e26ec9a → 34da597d`, laptop `176f412b → 34da597d`, both VERIFIED + switched. Consumer path exercised on both: `~/.claude/skills/audit-pr/SKILL.md` → `/nix/store/y21wfbf3…-devrc-claude-skills/`, carries round 0.
+- **Operator decisions taken (both in `dcd84c73`, inside `#1440`):**
+  - step 2 no longer uses the REVERT TEST — replaced with the three adoption questions (*is it RUNNING / has it ever caught anything / does something else already check it*);
+  - steps 4+5 merged into one ordering rule.
+- **IN FLIGHT:** `#1495` — `scripts/scoped-tests.sh`'s header justified the script with a figure `CLAUDE.md` had already retracted. Fix + a two-way-pinned count guard. **Not merged, not audited.**
+- **Deploy/verify status:** `#1440` deployed AND verified on both hosts. `#1495` is committed and pushed only — **not merged, not deployed.**
+- 🔴 **CARRIED FORWARD, not resolved by this session — issue `#1431` is CLOSED on the board and its defect is NOT fixed.** See its investigation block below; this line exists because `State now` is REPLACED on every update and the pointer would otherwise disappear while the defect stayed open.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -107,57 +103,12 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–16 are
-retained as DONE/open markers; do not re-claim the DONE ones.
 
-1. **DONE (2026-08-31) — ship the laptop.**
-   forcing: none
-2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.**
-   forcing: none
-3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** `#1157` → `3e4c447f`.
-   forcing: none
-4. **DONE (2026-09-01) — the `nix log` port-back.** `#1185` → `76d20386`.
-   forcing: none
-5. **DONE (2026-09-07) — `90202ce5..2eaa3c62` audited.** Claim `audit-pr-ladder-5` RELEASED.
-   forcing: none
-6. **DONE (2026-09-07) — the three 🟡s fixed + blind audit of the fix PR.** `#1342` → `08ef1d5a`.
-   forcing: none
-7. **DONE (2026-09-08) — `scripts/testlib/**` is SCAFFOLDING, by the REVERT TEST.** `#1396` →
-   `e9b665bd`. Shipped ONE NUMBER, ONE NAME.
-   forcing: none
-8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`, `civit-datapacket-talos`,
-   `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. *Closes when* each repo's in-window
-   ladders are churn-measured or reported UNMEASURABLE with a reason. **STILL OPEN, untouched.**
-   forcing: none
-9. **Mine the stop-rationale prose across all 42 block-carrying PRs.** *Closes when* the terminal
-   round's summary is classified for every carrier and the rate is published. **STILL OPEN** —
-   and #1439's five-round ladder is fresh input for it (payload 124/56/15/20/34, three rounds of
-   zero EXECUTABLE payload, stopped on the stated criterion).
-   forcing: none
-10. **Fix the range-coverage hole** (blocks that skip a round leave churn in NO block's range).
-    **STILL OPEN, untouched.**
-    forcing: none
-11. **DONE (2026-09-08) — #1342's controls are REACHABLE, and there are EIGHT.**
-    forcing: none
-12. **DONE (2026-09-09) — both hosts converged and parity re-verified** at `7edcb1e0`.
-    forcing: none
-13. **DONE (2026-09-09) — `#1461` merged → `30a1eb8b`; `main` un-redded.**
-    `test_runtime_shebangs.py` green on `main` (9 passed). Closing condition MET. ⚠ #1461's own
-    CI reported a DIFFERENT failure — see the flake gotcha below.
-    forcing: none
-14. **Decide #1439 vs #1287 — one mechanism or two.** #1287 `feat/workhost` is **still OPEN**
-    (last updated 2026-09-05). Read `scripts/workhost`, then either make `first_reachable_ssh` a
-    caller of it, close #1287, or record why both stay. *Closes when* the decision is written on
-    #1287 by the operator or a named reader. **OPERATOR CALL — do not resolve unilaterally.**
-    forcing: none
-15. **DONE (2026-09-09) — all seven trees this arc created are removed.** `git worktree list`
-    shows none of `devrc-shipaddr`, `devrc-handoff-ladder`, `devrc-audit-1439-r1..r5`.
-    forcing: none
-16. **Reopen `#1431`, or record its dismissal in writing.** It is CLOSED `COMPLETED` with zero
-    comments while `test_audit_ladder_stop_rule.py:1179` still reads the SOURCE literal and
-    neither file has been touched — its own body says *"Do not close silently."* *Closes when*
-    the issue is either reopened, or carries a written dismissal naming who dismissed it.
-    forcing: none
+1. **Audit and merge `#1495`** (devrc; `scripts/scoped-tests.sh`, `scripts/tests/test_retracted_contention_figure.py`). Its v1 guard SURVIVED its key mutant and was rebuilt — that history is exactly what an adversarial pass should re-check. `/audit-pr 1495`. forcing: gate — a false claim is on `main` in shipped code until this merges
+2. **Decide the `scoped-tests.sh` trigger list with `#1445`'s author** — implement `gate-inventory` §10 or decline it in the header. See the open investigation above for the measured numbers. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
+3. **Trials 3-5 of round 0**, on ordinary PRs, dispatched before merge-readiness. Delete the section if it ran and changed nothing. forcing: none
+4. **`ship.sh` cannot reach the laptop off-LAN** (devrc; `scripts/lib/host-role.sh`). `LAPTOP_SSH_DEFAULT="zach@192.168.50.155"`; the nebula address `10.42.0.100` is `LAPTOP_IP_SECONDARY`, used to IDENTIFY the host and never as an SSH fallback. Measured 2026-09-09: `ship.sh` timed out, rc 255, while `ssh zach@10.42.0.100` worked; shipped via the `LAPTOP_SSH` override. forcing: regression — the laptop silently stops converging whenever it is off-LAN, the exact silent-divergence hazard CLAUDE.md documents
+5. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~26 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deliberately deferred until the trial count resolves. forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -1007,20 +958,27 @@ retained as DONE/open markers; do not re-claim the DONE ones.
   deliberately omits BOTH and touches only the append-only `Gotchas`, which is what "omit a
   section and it is left alone" is for.
 
+- 🔴 **`~/workspace/devrc` has concurrent writers, and it bit this session twice.** Another session committed onto local `main`, then switched my feature branch out from under me leaving me on `main` — `bash-guard.py` blocked the commit that would have landed there. Later it committed a handoff doc **on top of my commit, on my own branch**. Nothing was lost (its commit is on `origin/feat/audit-pr-round-0-algorithm`), and the fix was to cut a clean branch at my own sha. **`git branch --show-current` immediately before every commit is not optional here**, and `git reflog` is the one-command diagnosis.
+- 🔴 **A test run and a mutation sweep in the SAME worktree corrupt each other.** This session ran a full pytest tier in a worktree and then edited files under it during a fix round; the run had been reading a tree changing beneath it. Its reported `exit 0` was a `| tail` pipeline status, not a verdict. Killed by resolved PID and discarded. Use a worktree per concurrent activity, not per task.
+- **A proximity guard is walkable by the very text that fixes the thing.** `#1495`'s v1 asserted "a retraction appears within 20 lines of the figure"; re-asserting the figure in the same header SURVIVED, because the new retraction note satisfied the check. Rebuilt as a two-way pinned COUNT ledger; the mutant now dies. Its first ledger draft was ALSO wrong (guessed 2, actual 1 — the scanner counts lines, not regex matches) and the two-way pin caught that.
+- **Round 0's ledger deliberately carries NO add-back percentage.** An earlier draft asked for `deleted: X · re-added: Y (Y/X = Z%)` "from the same `--numstat` command"; `--numstat` gives per-file added/deleted counts and cannot identify a re-added line, so `Y` was undefined by the instrument named. Recorded in the section so it is not re-derived.
+- **The merge policy changed mid-session and it matters.** CLAUDE.md's local full-suite ritual before merge is DELETED — it produced 27-50 concurrent full-suite runs on one 24-core box while gating nothing. What replaces it: read CI (advisory, ~42% of reds are noise) and run a change-scoped subset. Measured here: load 60-96 for hours, 36 concurrent `run-tests.sh`, and one full pytest tier that hit the 3600s cap with NO verdict.
+
 ## How to verify
+
 ```bash
-# 1. main is not red on the guard this arc broke
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_runtime_shebangs.py -q      # expect 9 passed
-# 2. rank 16's claim — the #1431 defect is STILL present despite the CLOSED issue
-grep -n 're.findall(r"\^MIN_TESTS' ~/workspace/devrc/scripts/tests/test_audit_ladder_stop_rule.py
-gh issue view 1431 --repo innovation-upstream/devrc --json state,stateReason,comments
-# 3. rank 15 — no tree from this arc survives
-git -C ~/workspace/devrc worktree list | grep -E "shipaddr|audit-1439|handoff-ladder"   # expect none
-# 4. the shipped behaviour, end to end, with the laptop off-LAN
-env -u REMOTE_SSH -u LAPTOP_SSH SHIP_ROLE=workbench \
-  bash ~/workspace/devrc/scripts/ship.sh --print-remote-target
-#    expect "falling back to zach@10.42.0.100" on stderr, that address on stdout
+# round 0 is live on both hosts (not just merged)
+readlink -f ~/.claude/skills/audit-pr/SKILL.md          # must be a /nix/store path
+grep -c "ROUND 0 — QUESTION THE REQUIREMENT" ~/.claude/skills/audit-pr/SKILL.md   # 1
+ssh zach@10.42.0.100 'grep -c "is it RUNNING" ~/.claude/skills/audit-pr/SKILL.md' # 1
+
+# round 0 emits its section INSTEAD of the nine axes, and refuses to move the ladder
+nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/audit-dispatch.py <pr> --round 0 | grep -c "Audit for:"   # 0
+nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/audit-dispatch.py <pr> --round 0 --emit-claims --audited <sha>; echo $?   # 4
+
+# the guards
+nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests/test_audit_dispatch.py -q -k "round_zero or negative_round"
+nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests/test_retracted_contention_figure.py -q
 ```
 ## Open investigations — live diagnosis state
 
@@ -1367,3 +1325,33 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
   the pin while the shell applies it. Deleting tests still moves `m` and IS caught.
 - **Next probe:** decide with the operator — reopen #1431, or record the dismissal in writing on
   it. Do not silently treat CLOSED as done; that is the state this block exists to flag.
+
+### The scoped mapper has no trigger list — a `testlib` change runs 1 test file of 331
+
+- **Symptom + exact repro:** `scripts/scoped-tests.sh` maps a diff to test files. A change to shared test infrastructure maps as narrowly as a leaf change. Repro, in a worktree off `origin/main` (`c38c5484`):
+  `printf '\n# probe\n' >> scripts/testlib/nogit_plugin.py && nix develop . -c bash scripts/scoped-tests.sh --dry-run .`
+- **Observed (with values):** measured 2026-09-10, `universe=331 collectable test file(s) under 28 'hermetic' target(s)`:
+
+  | changed file | mapper selects | actually references it |
+  |---|---|---|
+  | `scripts/testlib/nogit_plugin.py` | **1** (`scripts/tests/test_nogit_isolation.py`) | **8** test files name `nogit` |
+  | `scripts/testlib/**` as a surface | — | **97** test files across **6** targets |
+  | `scripts/lib/claude_sessions.py` | 3 | — |
+  | `flake.nix` | 39 | — |
+
+  The 6 targets: `scripts/tests`, `scripts/browser-bridge/tests`, `scripts/claude-hooks/tests`, `scripts/collector/opencode/tests`, `scripts/dl-router/tests`, `scripts/opencode/tests`.
+- **Ruled out:** *"the mapper has a carve-out and I missed it"* — `git grep -nE "testlib|flake|conftest|TRIGGER|always" -- scripts/scoped-tests.sh` on `origin/main` returns nothing, and the measurement above is the behavioural confirmation. `via: measurement`
+- **Ruled out:** *"this is a defect the author overlooked"* — it may be a deliberate accepted cost; `scoped-tests.sh` is explicitly NOT a gate and its CI-gap block names the unrun targets. `via: code`
+- **Leading hypothesis:** a prior audit round already required exactly this and it was neither implemented nor declined. `claudedocs/gate-inventory-2026-09-08.md` §10 specifies an always-run TRIGGER list (`flake.nix`, `nix/**`, `scripts/lib/**`, `scripts/testlib/**`, the three runners, `**/conftest.py`) and flags `testlib` in red because it is referenced across many targets. CLAUDE.md now tells sessions to use `scoped-tests.sh` as the iteration loop, with no carve-out.
+- **Next probe:** decide with the author of `#1445` — implement the §10 trigger list in `scoped-tests.sh` (~15 lines: matched path ⇒ print "this change reaches shared surface — run the gate", exit 4), **or** decline it in writing in the script header. Do not silently leave it.
+
+### ROUND 0 is ON TRIAL — 2 of 3-5 trials done, and the trial has a cycle-time problem
+
+- **Symptom + exact repro:** the section's retirement condition requires `ran: R · changed the outcome: C` over 3-5 PRs; if it ran and changed nothing, delete the section.
+- **Observed (with values):** `round 0 · ran: 2 · changed the outcome: 2`.
+  - **Trial 1 — `#1440`, round 0 on its own diff.** Findings, both verified independently before acceptance: (a) `--round 0 --emit-claims` emitted a valid `audit-claims round=0` block a later `--round 2` would anchor on — the 🔴 "does not move the ladder" sentence was a comment, not a guard; measured `audit-claims round=0 audited=d16bfd7a..d16bfd7a`, rc 0. (b) the `## THE CHECKLIST` heading is load-bearing — deleting it runs `_read_round_zero`'s capture from 3,367 → 4,057 chars and leaks the nine axes into the round-0 brief, while the seam guard stayed GREEN. Both fixed in `97b03d8a`.
+  - **Trial 2 — `#1445` (another session's PR, 8 files, +1950/-29).** Verdict `requirement questioned`, ledger `requirements: 20 (unattributed: 4) · deletion candidates: 7`. Produced `#1495`.
+- **Ruled out:** *"trial 1 is evidence round 0 works"* — it audited its own change, the most favourable case available; discounted deliberately. `via: assumed`
+- **Ruled out:** *"trial 2's stale-premise and merge-conflict findings still stand"* — `#1445` MERGED at 2026-09-10T03:03Z and both it and `a0839ec4` (`#1429`) are on `origin/main`, so the conflict resolved. `via: measurement`
+- **Leading hypothesis:** round 0 yields, but is **too slow to matter on an active PR**. Trial 2's report landed after `#1445` merged; only the one finding that outlived the merge (the retracted figure) became actionable. Round 0 is most valuable EARLY, and nothing routes it there automatically.
+- **Next probe:** trials 3-5 on ordinary PRs, dispatched BEFORE the PR is ready to merge. Record `ran: R · changed the outcome: C` on each PR.
