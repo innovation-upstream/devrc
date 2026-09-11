@@ -8,13 +8,26 @@ import sqlite3
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from store import SCHEMA_VERSION, Store, is_busy_error  # noqa: E402
+# 🔴 THE RETRY CONSTANTS ARE IMPORTED, NEVER RESTATED. `_retry_budget_seconds`
+# below reconstructs the loop's wall-clock ceiling from them, and a literal copy
+# would keep reporting the old ceiling after someone tuned the real one — the
+# exact shape of a guard that reads as coverage while providing none.
+from store import (  # noqa: E402
+    RETRY_BASE,
+    RETRY_CAP,
+    SCHEMA_VERSION,
+    Store,
+    WRITE_ATTEMPTS,
+    WRITE_DEADLINE,
+    is_busy_error,
+)
 
 
 # --- schema ---------------------------------------------------------------- #
@@ -219,6 +232,117 @@ def test_without_the_retry_that_same_write_is_lost(tmp_path):
     st.close()
 
 
+class RetryBudgetOutrun(UserWarning):
+    """The box outran a bound production cannot reach. Not a durability result."""
+
+
+def _retry_budget_seconds(timeout: float) -> float:
+    """Ceiling on the wall time `Store._retry_busy` can spend on ONE write.
+
+    Derived from the store's own constants, never a literal — the whole point is
+    that it moves when they move. Mirrors the loop: `WRITE_ATTEMPTS - 1` sleeps
+    on an exponential ramp capped at `RETRY_CAP`, plus up to one `busy_timeout`
+    blocked inside SQLite per attempt, the sum clamped by `WRITE_DEADLINE`.
+    """
+    total, delay = 0.0, RETRY_BASE
+    for _ in range(max(0, WRITE_ATTEMPTS - 1)):
+        total += delay
+        delay = min(delay * 2, RETRY_CAP)
+    return min(WRITE_DEADLINE, total + WRITE_ATTEMPTS * timeout)
+
+
+def _outran_the_retry_budget(errors, slowest_failure: float, budget: float) -> bool:
+    """Did the BOX outrun the retry loop, or did the loop fail to retry?
+
+    The only thing standing between "report UNMEASURED" and "swallow a
+    durability regression", so it is a named function with its own test rather
+    than an `if` inside the one caller.
+
+    Half the budget as the line: a write that never retried dies after about one
+    busy_timeout (~5ms), three orders of magnitude below it, so the threshold
+    sits in empty space rather than being a tolerance anybody has to tune.
+    """
+    return (
+        bool(errors)
+        and all(is_busy_error(e) for e in errors)
+        and slowest_failure >= budget / 2
+    )
+
+
+def test_the_unmeasured_branch_fires_only_on_budget_exhaustion(store, tmp_path):
+    """🔴 REACHABLE **AND** NOT TOO WIDE — both halves, on REAL sqlite errors.
+
+    An UNMEASURED branch that cannot fire is decoration; one that fires on the
+    pre-fix shape has deleted the test. Hand-built `OperationalError`s carry no
+    `sqlite_errorcode` and would take `is_busy_error`'s message fallback rather
+    than the structural path, so both errors here are raised by SQLite itself —
+    the standard this file already sets in
+    `test_is_busy_error_reads_the_code_sqlite_set`.
+    """
+    with pytest.raises(sqlite3.OperationalError) as permanent_exc:
+        store.conn.execute("SELECT * FROM no_such_table")
+    permanent = permanent_exc.value
+
+    path = tmp_path / "classify.sqlite3"
+    st = Store(path, timeout=0.02, write_attempts=1)
+    acquired, released, stop = (threading.Event(), threading.Event(),
+                                threading.Event())
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 30.0, acquired, released, stop))
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the write lock"
+        with pytest.raises(sqlite3.OperationalError) as busy_exc:
+            st.upsert_alias("contended", "Jane Doe")
+    finally:
+        stop.set()
+        blocker.join(60)
+    busy = busy_exc.value
+    assert is_busy_error(busy) is True, "the fixture did not produce a BUSY error"
+    st.close()
+
+    budget = 10.0
+    # REACHABLE: every error is BUSY and the loop spent its whole budget.
+    assert _outran_the_retry_budget([busy], 9.0, budget) is True
+    # 🔴 THE PRE-FIX SHAPE IS NOT FORGIVEN. `write_attempts=1` dies at once —
+    # exactly what produced `busy` above — so a store that stopped retrying
+    # still REDS this test rather than reporting it unmeasured.
+    assert _outran_the_retry_budget([busy], 0.005, budget) is False
+    # A permanent error is never contention, however long the caller waited.
+    assert _outran_the_retry_budget([permanent], 9.0, budget) is False
+    # A mixed batch is not forgiven either: one real defect is enough.
+    assert _outran_the_retry_budget([busy, permanent], 9.0, budget) is False
+    # And a clean run is not an UNMEASURED result — it is a PASS.
+    assert _outran_the_retry_budget([], 0.0, budget) is False
+
+
+def test_the_attempt_cap_not_the_deadline_bounds_a_tiny_busy_timeout():
+    """🔴 PURE ARITHMETIC OVER THE SHIPPED CONSTANTS — no threads, no clock.
+
+    `WRITE_DEADLINE` is the budget the module documents; `WRITE_ATTEMPTS` is
+    described as a churn guard. At a tiny busy_timeout the guard SUPERSEDES the
+    budget — once the backoff saturates at `RETRY_CAP`, 64 attempts can only
+    cover ~11.7s of the 30s deadline, so a contended write gives up with two
+    thirds of its stated budget unspent. That asymmetry is what makes the
+    six-writer test below load-sensitive, and it was implicit in two comments
+    that were each true on their own. Pinned here so that raising `RETRY_CAP` or
+    lowering `WRITE_ATTEMPTS` cannot move it silently.
+    """
+    tiny = _retry_budget_seconds(0.005)
+    assert tiny < WRITE_DEADLINE, (
+        f"the attempt cap no longer binds at a tiny busy_timeout ({tiny:.1f}s "
+        f"vs deadline {WRITE_DEADLINE}s). If that is deliberate, the "
+        "six-writer test's UNMEASURED branch is now unreachable and should go.")
+    # And the mirror image: at the PRODUCTION timeout the cap is unreachable, so
+    # nothing shipped can hit the bound the test below forgives. `server.py`
+    # constructs `Store(cfg.db_path, clock=clock)` — the 10.0s default.
+    production_attempts_in_budget = WRITE_DEADLINE / 10.0
+    assert production_attempts_in_budget < WRITE_ATTEMPTS, (
+        "the production busy_timeout can now exhaust WRITE_ATTEMPTS, so "
+        "attempt-cap exhaustion is a real operational outcome and the "
+        "six-writer test must FAIL on it rather than report it UNMEASURED")
+
+
 def test_six_writers_with_a_tiny_busy_timeout_still_land_every_row(tmp_path):
     """The CI failure, reproduced by shrinking the timeout instead of the box.
 
@@ -226,23 +350,80 @@ def test_six_writers_with_a_tiny_busy_timeout_still_land_every_row(tmp_path):
     busy_timeout is 5ms rather than 10s. On the pre-fix store this failed 3/3
     with 5 errors and 25 of 150 rows; the CI failure is the same shape with a
     10-second threshold and an I/O-stalled node supplying the contention.
+
+    🔴 IT IS ALSO THE ONE TEST IN THIS SECTION THAT IS STILL A RACE, and the
+    banner above ("a CONTRACT rather than a race") does not cover it: the
+    siblings arrange contention with a held lock, this one lets six threads
+    generate it, so the retry count it needs is a function of the box's fsync
+    latency. MEASURED 2026-09-09 over 30 runs at load ~87: 0 failures, but the
+    worst single write burned **49 of the 64 attempts** and 10.77s of an ~11.7s
+    ceiling — a margin of 1.31x — while the 30s deadline went 19s unused. The
+    same suite at low load needed 10 attempts and 1.0s. So a red here has two
+    possible authors and they must be told apart.
+
+    THE DISCRIMINATOR IS *WHEN* THE LOOP GAVE UP, and the two causes are three
+    orders of magnitude apart:
+
+      * durability regression (the retry gone, as in `write_attempts=1`) — the
+        write dies on its FIRST attempt, after about one busy_timeout: ~5ms.
+      * the box outrunning the budget — the write dies having spent the WHOLE
+        retry budget: ~11.7s.
+
+    So exhausting the budget is reported UNMEASURED and anything else FAILS,
+    with both original assertions intact. This does not soften the contract:
+    every shape the pre-fix store produced still reds, and
+    `test_the_attempt_cap_not_the_deadline_bounds_a_tiny_busy_timeout` fails if
+    the bound being forgiven ever becomes reachable in production.
     """
     st = Store(tmp_path / "tiny-timeout.sqlite3", timeout=0.005)
     errors = []
+    slowest_failure = 0.0
 
     def writer(n):
-        try:
-            for i in range(25):
+        nonlocal slowest_failure
+        for i in range(25):
+            started = time.monotonic()
+            try:
                 st.upsert_alias(f"key{n}-{i}", "Jane Doe")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
+            except Exception as exc:  # noqa: BLE001
+                # The original code wrapped the whole loop, so a writer stopped
+                # at its first error. Same behaviour, but timing the CALL that
+                # failed rather than the whole writer.
+                elapsed = time.monotonic() - started
+                slowest_failure = max(slowest_failure, elapsed)
+                errors.append(exc)
+                return
 
     threads = [threading.Thread(target=writer, args=(n,)) for n in range(6)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert errors == []
+
+    budget = _retry_budget_seconds(0.005)
+    if _outran_the_retry_budget(errors, slowest_failure, budget):
+        rows = st.alias_count()
+        st.close()
+        msg = (
+            f"DURABILITY UNMEASURED [retry-budget-outrun]: {len(errors)} of 6 "
+            f"writers exhausted the retry budget ({budget:.1f}s ceiling; "
+            f"slowest failing write {slowest_failure:.2f}s) and {rows} of 150 "
+            "rows landed. Every error was SQLITE_BUSY and each one spent the "
+            "whole budget, so the retry ran and the box outran it — that is "
+            "contention, not a lost write. The bound reached is "
+            f"WRITE_ATTEMPTS={WRITE_ATTEMPTS}, which the production "
+            "busy_timeout (10.0s) cannot reach. The durability contract itself "
+            "is still pinned deterministically by "
+            "`test_a_write_blocked_past_its_busy_timeout_still_lands`."
+        )
+        print("\n" + msg)
+        warnings.warn(RetryBudgetOutrun(msg), stacklevel=2)
+        return
+
+    assert errors == [], (
+        f"writes failed for a reason that is NOT budget exhaustion "
+        f"(slowest failing write {slowest_failure:.3f}s against a {budget:.1f}s "
+        f"ceiling; busy={[is_busy_error(e) for e in errors]}): {errors}")
     assert st.alias_count() == 150
     st.close()
 

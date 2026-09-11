@@ -170,6 +170,7 @@ from testlib.gitenv import (  # noqa: E402
     VIOLATION_TOKEN,
     GitEnvConfigError,
     common_dir_of,
+    describe_cotenants,
     diff_snapshots,
     live_cotenants,
     protected_git_dirs,
@@ -1588,30 +1589,12 @@ def test_the_module_root_pin_does_not_depend_on_this_tree_being_a_checkout():
 # --------------------------------------------------------------------------- #
 # 4d. 🔴 THE CO-TENANT PROBE (finding A)
 # --------------------------------------------------------------------------- #
-def _describe_cotenants(cotenants: "list[str]") -> str:
-    """`pid:comm` is not enough to attribute an intruder — add cwd and cmdline.
-
-    `live_cotenants` returns a bounded `pid:comm` list by design (it is a
-    detector, not a debugger). When the PRECONDITION above fails we need the two
-    fields that actually identify the process, and we need them at failure time:
-    /proc entries for a transient process are gone before anyone reads the log.
-    Best-effort by construction — a process that exits between the scan and this
-    call yields `<gone>`, which is itself the useful answer.
-    """
-    out = []
-    for entry in cotenants:
-        pid = entry.split(":", 1)[0]
-        try:
-            cwd = os.readlink(f"/proc/{pid}/cwd")
-        except OSError:
-            cwd = "<gone>"
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                cmdline = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
-        except OSError:
-            cmdline = "<gone>"
-        out.append(f"{entry} cwd={cwd!r} cmdline={cmdline!r}")
-    return "; ".join(out) or "<none>"
+# 🔴 `describe_cotenants` USED TO LIVE HERE, PRIVATE TO THIS MODULE, and that
+# is why it was wired into one test of a family that spans TWO: a module-private
+# helper can only ever be called from its own module, and
+# `test_nogit_isolation.py` carries four more preconditions over the same probe.
+# It now sits beside `live_cotenants` in `testlib/gitenv.py` — one rule, one
+# place. The two tests below pin the SHIPPED formatter, not a copy of it.
 
 
 def test_describe_cotenants_names_cwd_and_cmdline(tmp_path):
@@ -1632,7 +1615,7 @@ def test_describe_cotenants_names_cwd_and_cmdline(tmp_path):
                 time.sleep(0.05)
         assert seen, "probe never saw the spawned process — nothing to describe"
 
-        described = _describe_cotenants(seen)
+        described = describe_cotenants(seen)
 
         assert str(repo) in described, (
             f"the description omits the intruder's cwd, which is the field that "
@@ -1648,10 +1631,10 @@ def test_describe_cotenants_degrades_rather_than_raising(tmp_path):
     """It runs INSIDE an assertion message, so raising there would replace the
     real failure with its own — the one place a helper must not throw."""
     # a pid that cannot exist: /proc/sys/kernel/pid_max is well below this
-    assert _describe_cotenants(["999999999:ghost"]) == (
+    assert describe_cotenants(["999999999:ghost"]) == (
         "999999999:ghost cwd='<gone>' cmdline='<gone>'")
     # and an empty set must not render as something that reads like a finding
-    assert _describe_cotenants([]) == "<none>"
+    assert describe_cotenants([]) == "<none>"
 
 
 def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
@@ -1678,7 +1661,7 @@ def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
     pre_existing = live_cotenants([git_dir])
     assert pre_existing == [], (
         "a brand-new tmp repo already has tenants: "
-        f"{_describe_cotenants(pre_existing)}\n"
+        f"{describe_cotenants(pre_existing)}\n"
         f"repo={repo} git_dir={git_dir}\n"
         "This is the flake recorded in devrc/tests.md (2026-09-06). The "
         "`gc --auto` theory is refuted; capture the cwd/cmdline above and the "
@@ -1708,8 +1691,27 @@ def test_live_cotenants_does_not_count_this_process(tmp_path, monkeypatch):
     repo = _mkrepo(tmp_path / "repo")
     monkeypatch.chdir(repo)
     git_dir = resolve_git_dir(repo)
-    assert live_cotenants([git_dir]) == [], (
-        "the probe counted our own process (or an ancestor) as a co-tenant")
+    # 🔴 THE SIBLING ABOVE HAD THE DIAGNOSTIC AND THIS ONE DID NOT, THOUGH BOTH
+    # RED FOR THE SAME REASON. #1340 shipped `describe_cotenants` so the next
+    # co-tenant red would name its intruder, and wired it into ONE member of the
+    # family; #1453 then diagnosed the flake from a capture this site could not
+    # have produced. When this test reddened (2026-09-08, `['125757:git']`) all
+    # that survived was `pid:comm` — the same string as the 2026-09-06 sighting,
+    # and no more use than it had been then.
+    #
+    # It is still a live precondition after #1453: that fix suppresses the
+    # maintenance spawn via `_GIT_ENV`, so anything appearing HERE is a writer
+    # nobody has accounted for, and the fields that identify it are gone from
+    # /proc seconds later. Costs nothing on the passing path.
+    seen = live_cotenants([git_dir])
+    assert seen == [], (
+        "the probe counted our own process (or an ancestor) as a co-tenant, or "
+        "something else is sitting in this brand-new repo: "
+        f"{describe_cotenants(seen)}\n"
+        f"repo={repo} git_dir={git_dir} pid={os.getpid()} ppid={os.getppid()}\n"
+        "A `cmdline` naming `git maintenance run --auto` means the "
+        "`GIT_CONFIG_*` suppression in `_GIT_ENV` stopped reaching some git "
+        "call; anything else is a writer new to this family.")
 
 
 # --------------------------------------------------------------------------- #
