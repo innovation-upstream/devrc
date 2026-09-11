@@ -426,14 +426,19 @@ nothing was recorded and no task was created.
 - ⚠ **`cairn create` EXISTS** (`34d00d90`/#1254, `PUT` + `If-None-Match: *`), so
   retiring P3 strands nothing. Two comments in the tree still said the API had
   "no create route" — that sentence is wrong, and it was what made this look
-  costly. ⚠ UPDATED 2026-09-11, and the count is MEASURED with the scanner at
-  base `8b2b960b` rather than asserted: **10 occurrences across 8 files**, of
-  which **6 were live assertions in 4 files** besides the `cairn` SKILL.md. One
+  costly. ⚠ UPDATED 2026-09-11. Measured by loading the repo's OWN scanner
+  (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`) against an
+  extracted `8b2b960b` tree, with a positive control returning 1 so the figures
+  are not a wired-to-nothing zero: **10 occurrences across 8 files; 9 live and
+  unmarked in 7 files; 8 live in 6 files besides the `cairn` SKILL.md.** One
   straddles a newline AND is uppercase, so case-sensitive and line-based greps
-  both miss it. 🔴 An earlier version of this very bullet said "four live sites in
-  four tracked files" — a drifting count, in the bullet about drifting counts,
-  caught by a round-1 audit. All are corrected and the sentence is now pinned
-  repo-wide as a needle in `_RETRACTED_BOUNDARY`.
+  both miss it.
+  🔴 **THIS BULLET'S COUNT HAS NOW BEEN WRONG TWICE, WHICH IS THE POINT OF IT.**
+  It first said "two comments", then "four live sites in four tracked files"
+  (round 1 caught it), then "6 live in 4 files" (round 2 caught that). Each wrong
+  figure was produced by a hand sweep and each read as precise. **Do not quote a
+  count here you have not re-derived with the scanner.** All sites are corrected
+  and the sentence is pinned repo-wide as a needle in `_RETRACTED_BOUNDARY`.
 - ⚠ **A mutation batch that reports a green may have applied NO mutant.** My first
   attempt at the round-4 verification had a non-matching anchor and printed "97
   passed" — indistinguishable from a survival. Only the traceback caught it.

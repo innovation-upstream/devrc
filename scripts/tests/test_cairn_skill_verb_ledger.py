@@ -62,9 +62,12 @@ the impossibility the earlier wording claimed.
 ``DELEGATED`` is not a loophole — it carries its reason, and the reason is
 load-bearing: the skill says "Writes are not this skill's" and routes writers to
 `subsystem-index`, so it owes no description of `append`/`put`. `create` is NOT
-delegated, because the skill makes an explicit CLAIM about creation; a file that
-claims a scope's first entry cannot be created must name the verb that claim is
-about.
+delegated, because the skill makes an explicit CLAIM about creation — in EITHER
+direction. ⚠ This sentence used to read "a file that claims a scope's first entry
+cannot be created must name the verb that claim is about", which had a false
+antecedent the moment the skill was corrected to say the opposite: SKILL.md now
+states that a first entry IS created. Stated direction-neutrally so the rule
+still reaches the file, matching the `VERB_LEDGER["create"]` row's own wording.
 """
 
 from __future__ import annotations

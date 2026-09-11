@@ -73,11 +73,17 @@ directory and all.** `create_entry` runs `path.parent.mkdir(exist_ok=True)`
 `test_a_scopes_FIRST_entry_creates_the_directory` asserts **201** plus the bytes
 on disk for a scope with no directory.
 
-🔴 **THE ONLY GATE IS YOUR TOKEN'S SCOPE ALLOWLIST.** A scope outside it answers
-**404**, byte-identical to one that never existed — deliberately, so an error
-cannot enumerate the store. A scope INSIDE it with no directory yet is created.
-So the remedy for "I cannot create into scope X" is an allowlist edit, **not**
-seeding.
+🔴 **THE ONLY SCOPE-LEVEL GATE IS YOUR TOKEN'S SCOPE ALLOWLIST.** A scope outside
+it answers **404**; a scope INSIDE it with no directory yet is created. So the
+remedy for "I cannot create into scope X" is an allowlist edit, **not** seeding.
+
+🔴 **That 404 is byte-identical for FOUR different causes** — a scope outside your
+allowlist, a scope that never existed, a ref that resolves to nothing, and an
+entry the loader could not parse (`server.py`, and the same list in its README).
+Deliberately, so an error cannot enumerate the store. ⚠ Do not read a 404 as
+"widen the allowlist": that is one of four, and an earlier version of this block
+listed only two after being rewritten to widen the CREATE claim — wider on one
+axis, narrower on another.
 
 ⚠ **THIS FILE HAS NOW BEEN WRONG TWICE ABOUT THE SAME SENTENCE, IN OPPOSITE
 DIRECTIONS.** It used to say there was no create route at all (false since

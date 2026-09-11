@@ -95,13 +95,21 @@ client-side evidence that such entries exist. `cairn doctor` reads it.
 ### 🔴 Telling ABSENT from REFUSED — no client can, an operator can, two ways
 
 `doctor`'s `token-scopes` PROBLEM names both readings and stops there, because on
-the wire they are the same bytes. The remedies are opposite — **seed the scope**
-vs **widen the allowlist** — so settle it before acting, with either:
+the wire they are the same bytes.
+
+⚠ **This section used to say the two remedies are OPPOSITE — "seed the scope" vs
+"widen the allowlist" — and that is RETRACTED.** Under the real mechanism (below)
+the allowlist edit is the remedy in BOTH readings: an allowlisted scope with no
+directory is created by `cairn create`. Settling absent-vs-refused is still worth
+doing — it tells you whether to expect existing entries back — but it no longer
+selects between two different fixes.
 
 1. **The count gap, off `doctor` alone.** `entry-files=` (store-wide, unfiltered —
    `snapshot_freshness` walks the root and takes no token) minus `X-Store-Entries`
    (your slice). **Gap 0 ⇒ nothing on the pod is hidden from you ⇒ the scope is
-   ABSENT**, and widening the allowlist would change nothing.
+   ABSENT.** ⚠ This line used to end "…and widening the allowlist would change
+   nothing" — RETRACTED: widening it is precisely what lets `cairn create` bring
+   the scope into existence.
 2. **The pod's own disk**, which settles it outright:
    `kubectl -n subsystem-store exec deploy/subsystem-store-api -- ls -1 /data`
 

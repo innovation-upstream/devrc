@@ -83,9 +83,9 @@ SHA are NOT running the same ARTIFACT.** Pre-existing WIP from another thread; u
 
 ✅ **The doc's Goal is met for READS, APPENDS and now CREATES.** This used to say *"The store
 has no create route"* — **RETRACTED 2026-09-11**: rank 24's owner, **devrc#1254 / `34d00d90`**,
-MERGED on 2026-09-03 and shipped `PUT … If-None-Match: *` plus the `cairn create` verb. See
-rank 24 below for what is still true (a new SCOPE's first entry remains an operator step, for
-a different reason).
+MERGED on 2026-09-03 and shipped `PUT … If-None-Match: *` plus the `cairn create` verb —
+which creates the scope DIRECTORY too, so a new scope's first entry needs no operator step.
+The only gate is the caller's token scope allowlist. See rank 24 below.
 
 ## Open investigations — live diagnosis state
 

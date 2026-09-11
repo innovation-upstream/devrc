@@ -1097,10 +1097,23 @@ class TestTheFreezeIsWatchedNotAsserted:
         `test_a_scopes_FIRST_entry_creates_the_directory` asserts 201 for an
         allowlisted scope with no directory.
 
-        What actually justifies leaving directories writable is narrower: local
-        work, and any caller whose token allowlist does not (yet) name the scope.
-        Freezing the directories too would stop a brand-new subsystem's first
-        entry being written LOCALLY, which is still a supported route.
+        ⚠ AND THE REPLACEMENT JUSTIFICATION WAS WRONG TOO — recorded, not
+        reworded again. It claimed the asymmetry is justified by "any caller
+        whose token allowlist does not yet name the scope", which explains
+        nothing: a REMOTE caller's allowlist has no bearing on the mode bits of
+        the operator's LOCAL pre-cutover mirror. It also called a local-only
+        first entry "still a supported route", which overstates it — `scripts/
+        cairn` records that local-only entries were a CONTENT-LOSS path (five
+        entries dark to every reader on one host), and the create verb exists to
+        close it.
+
+        🔴 NOTHING JUSTIFIES THIS AS A DESIGN CHOICE ANY MORE, AND SAYING SO IS
+        THE HONEST ANSWER. `cairn-cutover.py` frames it as "the mechanical
+        consequence … so `survey` can see a writable file on a store that has
+        been cut over" — a consequence, not a rationale. This test pins the
+        mechanical fact; it should not supply a purpose it does not have.
+        Three drafts of a reason have now been retracted here; do not write a
+        fourth.
         """
         root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
         cc.set_entry_mode(root, 0o444)

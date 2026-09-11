@@ -4201,6 +4201,19 @@ _RETRACTED_BOUNDARY = (
     # auditloop plugin push API has no create route") trips it. That is the
     # known cost; reword, or carry a retraction marker within `_MARKER_WINDOW`.
     "no create route",
+    # 🔴 THE SECOND RETRACTION NEEDS ITS OWN NEEDLE, and leaving it out is how
+    # the FIRST one drifted for eight days. The replacement claim — that a new
+    # scope's first entry still could not be created, so it "remains an operator
+    # step" — was ALSO false, and a round-2 audit found an 8th live site spelling
+    # it this way inside a file whose other copy had just been corrected. A
+    # phrase-scoped hand sweep could not see it: it searched the MECHANISM
+    # ("walking the store root"), and this site states only the CONCLUSION.
+    # Pinning the conclusion is what closes that gap.
+    # ⚠ Deliberately NOT needling "walking the store root": that phrase TRUELY
+    # describes `snapshot_freshness`, which really does walk the root, so it
+    # would fire on correct writing.
+    "remains an operator step",
+    "is still an operator step",
 )
 
 # A retraction has to QUOTE the claim to retract it, so an occurrence with one
