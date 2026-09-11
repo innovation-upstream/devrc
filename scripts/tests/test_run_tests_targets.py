@@ -137,9 +137,11 @@ def _require_check_targets(runner: Path) -> None:
 #: ⚠ SAY THE SCOPE, THOUGH: this PR removes the six open-coded `timeout=120`
 #: copies, which RAISES the effective bound at those six sites 120 -> 600. It is
 #: the SHARED CONSTANT that is unchanged, for the five files already reading it.
-#: An earlier draft here said the PR changes "not the bound's value" without that
-#: qualification, which would tell a maintainer no timeout was raised anywhere —
-#: and raising this one is the whole point of the change.
+#: That rise is a CONSEQUENCE of the consolidation, accepted — not the point of
+#: the change, and not evidence that 600 is a derived number. Two drafts here
+#: were wrong in opposite directions: one said "not the bound's value" without
+#: the scope, the other called raising it "the whole point of the change". The
+#: point is the runner fix below; this bound is unpinned either way.
 #:
 #: 🔴 AND 120 WAS NEVER THE REAL DEFECT EITHER. The nested `--targets` runs this
 #: file spawns cost 47 s because `run-tests.sh` executed two whole test families

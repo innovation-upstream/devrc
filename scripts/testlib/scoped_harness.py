@@ -63,10 +63,14 @@ CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 #: 🔴 600 IS THIS MODULE'S PRE-EXISTING VALUE AND IS UNCHANGED — BUT SAY WHICH
 #: SCOPE THAT IS TRUE OF. For the five files already using `run()` it is a no-op,
 #: 600 before and after. For the SIX sites in `test_run_tests_targets.py` that
-#: used to carry `timeout=120`, the effective bound RISES 120 -> 600, deliberately:
-#: that widening is the PR's headline fix. ⚠ An earlier draft of this paragraph
-#: said the change moves "WHERE it is written, not what it is" full stop, which
-#: would tell a maintainer no timeout was raised anywhere. One was.
+#: used to carry `timeout=120`, the effective bound RISES 120 -> 600 — a
+#: CONSEQUENCE of routing them through the shared default, accepted rather than
+#: derived. ⚠ Two drafts of this paragraph were wrong in OPPOSITE directions:
+#: one said the change moves "WHERE it is written, not what it is" full stop,
+#: which would tell a maintainer no timeout was raised anywhere; its replacement
+#: called the widening "the PR's headline fix", which oversells 600 as a measured
+#: value. It is neither. The headline fix is the runner scoping (see commit
+#: "the root cause, not the bound"); 600 remains an unpinned hang bound.
 #:
 #: ⚠ A draft also set this constant to 300, and that was a NARROWING OF FIVE
 #: FILES ON THE EVIDENCE OF A SIXTH. This default governs `run()`, which
@@ -75,10 +79,20 @@ CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 #: call sites (44 of them taking the default) — and their nested runs are not the
 #: 2-9 s narrowed ones the 300 was sized against. Measured on the dev host:
 #: `test_the_node_runner_reports_FULL_on_a_REAL_run` took 28.9 s at load ~57 and
-#: 16.5 s at load ~48. At 300 that is roughly 10-18x headroom against a >2.55x
-#: contention inflation (120 s bound / 47 s run, the ratio that caused this PR) —
-#: thinner than it looks, and for no measured benefit. Do not re-derive 300 from
-#: the 9 s figure; that is a measurement of ONE consumer.
+#: 16.5 s at load ~48, and an audit round separately observed **70.5 s** for a
+#: sibling under a load it did not record. At 300 that is between ~4x (on the
+#: 70.5 s observation) and ~18x (on the 16.5 s one) against a >2.55x contention
+#: inflation (120 s bound / 47 s run, the ratio that caused this PR) — thin at
+#: the bad end, and for no measured benefit.
+#:
+#: ⚠ THE 70.5 s IS KEPT DELIBERATELY, AND SO IS THIS SENTENCE. A revision of
+#: this paragraph DROPPED it — the single worst observation, i.e. the one most
+#: hostile to 300 — while adding a smaller new one, so the stated headroom
+#: improved from ~4-10x to ~10-18x with no note that evidence had been removed.
+#: That is the same selective-sweep mechanism this docstring elsewhere calls out,
+#: performed while fixing it. It is second-hand and its load is unrecorded, which
+#: is a reason to LABEL it, never to delete it. Do not re-derive 300 from the 9 s
+#: figure either; that is a measurement of ONE consumer.
 #:
 #: ⚠ WHAT 600 COSTS, STATED BECAUSE THE 300 DRAFT LEANT ON IT AND THE REVERT MUST
 #: NOT QUIETLY DROP IT. `test_run_tests_targets.py` performs FOUR real nested
