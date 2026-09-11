@@ -3046,14 +3046,38 @@ bp_slug_of() { # bp_slug_of <remote-url> -> owner/repo, or "" if not GitHub
 # keeps that guard's accounting honest instead of widening its ledger.
 bp_declared_off_reason() { # <owner/repo> -> why main's merge gate is DECLARED off, or "" if it must be ON
   if [ "$1" = innovation-upstream/devrc ]; then
-    # DECLARED 2026-09-02. The operator turned the Tekton merge gate off because
-    # it was slowing work down; it stays off until the Tekton capacity issue is
-    # addressed, which a DIFFERENT SESSION owns. Not drift, and not this
-    # deadman's to restore. Tekton still RUNS and still posts both checks on a PR
-    # head — they simply do not gate — so the local two-tier run is the only
-    # pre-merge evidence there is while this stands. Delete this arm the moment
-    # protection is restored; leaving it is rc 25, because it disarms rc 24.
-    echo "operator decision 2026-09-02: the Tekton merge gate is off until the Tekton capacity issue is addressed (a different session owns that)"
+    # DECLARED 2026-09-02, REASON REPLACED 2026-09-10 — and the replacement is
+    # the point of this edit, because the old reason had EXPIRED BY ITS OWN
+    # TERMS and nobody would have noticed.
+    #
+    # 🔴 IT USED TO READ "off until the Tekton capacity issue is addressed (a
+    # different session owns that)". That is CONDITIONAL, and the condition is
+    # already met: measured 2026-09-10 over ~18h of `tekton-ci` — ZERO exit-255
+    # (the preemption signature) across 2,179 recorded step terminations, zero
+    # OOMKilled, zero admission failures, the devrc-ci node at 14% CPU / 9%
+    # memory requests, and `NO CAPACITY` firing once in 80 heads. Capacity is not
+    # the binding constraint and has not been for some time. So a future session
+    # reading the old sentence would conclude the condition had been satisfied
+    # and restore protection — CORRECTLY, by the declaration, and AGAINST what
+    # the operator actually wants. A declaration whose stated reason has lapsed
+    # is not merely stale prose: it is an instruction to undo a live decision.
+    #
+    # THE REAL REASON, which is unconditional and is not waiting on anything:
+    # this is a SOLO-CONTRIBUTOR repo and the operator requires the ability to
+    # ship immediately without a gate in the way. That is a standing preference,
+    # not a temporary state, so there is no condition here to satisfy and no
+    # future event that should flip it back. Only the operator saying so should.
+    #
+    # ⚠ What is NOT claimed: that the merge is safe. Nothing blocks a bad merge.
+    # What remains is CI as an advisory signal (measured ~42-45% not-success plus
+    # ~10-17% never-resolving, so read the failing test's NAME, never the colour)
+    # and `main-green-check`, which re-runs the authoritative tier against main's
+    # tip and alerts — detection in hours, never prevention. The trade is
+    # deliberate and is documented in CLAUDE.md's merge-gate bullet.
+    #
+    # Delete this arm the moment protection is restored; leaving it is rc 25,
+    # because it disarms rc 24.
+    echo "operator decision, reaffirmed 2026-09-10: solo-contributor repo — the operator requires the ability to ship immediately, so the merge gate stays off as a STANDING preference. NOT conditional on Tekton capacity (measured fine 2026-09-10); only the operator reverses this"
   else
     echo ""
   fi
@@ -3449,8 +3473,19 @@ else
     echo "[protect]   same half-gate)."
     echo "[protect]   ⚠ It stays quiet for a ruleset parked in evaluate/disabled mode — that is"
     echo "[protect]   not a gate anybody built. See the asymmetry note in this script."
-    echo "[protect]   ⚠ Nothing gates a merge to $BP_SLUG main while this stands — run both"
-    echo "[protect]   tiers of the gate yourself, on the MERGED tree, and name the base sha."
+    # 🔴 THIS USED TO SAY "run both tiers of the gate yourself, on the MERGED
+    # tree" — the pre-merge ritual that was DELETED from CLAUDE.md's merge-gate
+    # bullet. Leaving it made this the THIRD copy of one rule, and the second one
+    # found stale by an audit rather than by a reader: the same sentence survived
+    # in CLAUDE.md 190 lines below its own deletion. One rule, one place — this
+    # arm reports the protection state and points at the owner of the policy
+    # instead of restating it.
+    echo "[protect]   ⚠ Nothing gates a merge to $BP_SLUG main while this stands, and the"
+    echo "[protect]   local full-suite ritual is NOT expected before every merge — that"
+    echo "[protect]   requirement is deleted. CI is advisory (read the failing test's NAME,"
+    echo "[protect]   not the colour) and main-green-check re-runs the authoritative tier"
+    echo "[protect]   against main's tip. Detection, never prevention. Policy lives in"
+    echo "[protect]   CLAUDE.md's merge-gate bullet; this line does not restate it."
   else
     echo "[protect] 🔴 DRIFT — STALE DECLARATION. drift-check.sh declares the merge gate on"
     if [ "$BP_OFF_KIND" = enforce-admins ]; then
