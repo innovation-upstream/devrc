@@ -7,8 +7,10 @@
 # `git show c1169e3b:scripts/diagnose-disk-accounting.sh | wc -l`. That is the
 # ONLY line count stated here, and it is stated because it is sha-anchored.
 # 🔴 A SECOND FIGURE — "by the end of that commit the file was 414 lines" —
-# stood here and is DELETED: 414 is the count at `16c3eeaa`, which is NOT an
-# ancestor of main, so nobody on main could check it. A positional or historical
+# stood here and is DELETED: 414 was the count at a PR-branch commit that is NOT
+# an ancestor of main, so nobody on main could ever check it. (The sha is not
+# reproduced here — by construction a reader cannot resolve it, and section 14
+# now fails on any cited sha that is unreachable, this one included.) A positional or historical
 # number is legal in this file only with a sha a reader can resolve; that rule is
 # what the last four audit rounds cost. For the current size, run
 # `wc -l scripts/diagnose-disk-accounting.sh` — no count is written down.)
@@ -528,15 +530,23 @@ echo "== 4b-ii. ROUTE (a): an UNSTATTABLE entry must be COUNTED, not erased =="
 # still printed the NAME of an entry whose stat failed; `-printf '%D\t%p\0'`
 # forces a stat to format the record and emits NOTHING when it fails.
 #
-# RE-MEASURED 2026-09-07 (round 3), one fixture, three implementations — the
-# figures that stood here (116 B / 119 B, "both rc 1") could not all have been
-# true, because `-print0` emits the paths it FOUND, so two builds cannot
-# disagree about one fixture, and `-print0` needs no stat, so it does not error.
-# Over a 35-character 0400 base holding three entries: GNU findutils 4.10.0
-# (the bash PATH), 4.11.0 (the nix dev shell) and bfs 4.1.1 (the interactive
-# alias) all gave `-print0` **114 B, rc 0** and `-printf '%D\t%p\0'` **0 B,
-# rc 1**. The load-bearing half — 0 bytes under `%D` — is identical on all
-# three. So the entry left the size
+# 🔴 A PER-IMPLEMENTATION TABLE OF BYTES AND EXIT CODES STOOD HERE AND IS
+# DELETED — it was wrong on every column, and it is the TWIN of one deleted from
+# scripts/diagnose-disk-accounting.sh in an earlier round. That round fixed the
+# copy it was looking at and never grepped for the other, so the two files
+# contradicted each other at one sha for a round. Sweep every site, not the site
+# you are in.
+# What it claimed, and what is actually true (measured against the real
+# invocation, which passes `-xdev`):
+#   - "`-print0` … rc 0 … needs no stat": FALSE. `-xdev` needs each entry's
+#     st_dev, so it stats and exits 1 on an unreadable directory.
+#   - "all three gave 114 B": FALSE. Byte counts are dominated by the fixture's
+#     PATH LENGTH, so they are a figure about one fixture on one machine, not
+#     about any implementation. Two builds measured 122 B and 38 B on one tree.
+#   - the version labels: wrong. See the note in the script's `_depth1_nul`.
+# The load-bearing half is the only thing worth stating, and it reproduced
+# everywhere: `%D` emits NOTHING for an entry whose stat fails, while `-print0`
+# still emits its NAME. So the entry left the size
 # breakdown, the inode breakdown AND the foreign-entry listing at once — and
 # `foreign_entries` then printed "none — every depth-1 entry is on the same
 # filesystem as …", an affirmative claim of absence produced by a blind scan.
@@ -656,8 +666,11 @@ echo "== 4b-iv. TEMP FILES: identifiable names, and ONE trap that covers them al
 # against a tree that has no `_scan_mktemp` at all. Without them the suite dies
 # on `set -u` at the first unset REPLY and every guard below it goes unmeasured
 # — which is exactly the truncated-run failure this file is about, in the file
-# that is about it. MEASURED: the red-at-`eb4e3a81` matrix stopped at 79 ok
-# before this gate, and reports the full set with it.
+# that is about it. MEASURED on the red baseline: without this gate the run
+# stopped partway through and reported only the guards it had reached; with it,
+# the full set is reported. (No sha and no count: the commit was a PR-branch one
+# that never became an ancestor of main, and the count is a running total that
+# every added assertion invalidates.)
 REPLY=
 if declare -F _scan_mktemp >/dev/null; then
   _scan_mktemp probe-4biv || fail "_scan_mktemp could not create a temp file"
@@ -1437,8 +1450,10 @@ echo "== 12. SECTION 2 ACCOUNTS FOR TOP-LEVEL FILES, NOT ONLY DIRECTORIES =="
 # directory, a symlink, a fifo, and a skip-listed name. 🔴 The symlink and the
 # fifo MUST BE LISTED — see the assertions below and the reasoning with them.
 # An earlier version of this paragraph said the symlink "must not" be listed,
-# 25 lines above an assertion requiring that it is (MEASURED at ae2c2427: the
-# comment sat at 1383, the assertion at 1408 — an earlier retelling said
+# 25 lines above an assertion requiring that it is (MEASURED at `c68750f6`, the
+# squash that landed on main: the comment sat at 1383, the assertion at 1408.
+# Re-anchored from a PR-branch sha that was NOT an ancestor of main, so the
+# figure it carried was unresolvable from a fresh clone — an earlier retelling said
 # "eleven", a decorative specific inside a retraction about false specifics).
 # A maintainer resolving
 # that contradiction toward the comment would have reinstated an exclusion that
@@ -1650,6 +1665,20 @@ canary_wide_n="$(drop_guard_sites "$canary_wide" | grep -c . || true)"
 [ "$canary_wide_n" -eq 0 ] \
   && pass "CANARY: a guard spread beyond the 3-line join window is NOT found — the documented residual limit, pinned" \
   || fail "CANARY FAILED: expected the wide-spread guard to escape the 3-line window, found $canary_wide_n"
+# 🔴 THE OTHER HALF OF THE WINDOW — without this the pin is one-sided and the
+# comment above overstates it. MEASURED: the window could be NARROWED from 3 to
+# 2 with the suite fully green (229 ok, 0 FAIL), because the 5-spelling canary's
+# widest shape puts `continue` at i+2 and the wide canary puts it at i+4 —
+# NOTHING exercised i+3. A narrowed window then made a real multi-line site
+# scan as absent while the ledger printed "exactly 2 … as pinned", which is
+# byte-for-byte the failure this section was built to close. This fixture puts
+# `continue` at EXACTLY i+3 and asserts it is FOUND.
+canary_edge="$TMP/dropguard-canary-edge.sh"
+printf '    if [ ! -d "$v" ]\n    then\n      : placeholder\n      continue\n    fi\n' > "$canary_edge"
+canary_edge_n="$(drop_guard_sites "$canary_edge" | grep -c . || true)"
+[ "$canary_edge_n" -eq 1 ] \
+  && pass "CANARY: a guard with continue at EXACTLY the window edge (i+3) IS found — the window cannot be narrowed" \
+  || fail "CANARY FAILED: the window-edge guard was not found ($canary_edge_n) — the join window has been narrowed, and a multi-line site now scans as absent"
 # 🔴 NEGATIVE half, and it pins the EXACT over-match that occurred. Widening the
 # pattern matched section 2's banner, which quotes the guard while describing the
 # defect. The filtered pipeline — not the bare regex — is what must reject it, so
@@ -1674,6 +1703,50 @@ has "pinned site: split_by_device's foreign-entry loop" \
     "$sites_ctx" 'for p in "$base"/*/* "$base"/*/.*'
 has "pinned site: section 5's per-PVC inode loop" \
     "$sites_ctx" 'for p in /var/lib/rancher/k3s/storage/*'
+
+# --------------------------------------------------------------------------- #
+echo "== 14. EVERY SHA THESE FILES CITE MUST BE REACHABLE FROM main =="
+# 🔴 THIS IS THE PROSE RULE, MACHINE-CHECKED. Both files carry the sentence "a
+# positional or historical number is legal only with a sha a reader can resolve".
+# That sentence is itself a claim nothing checked — which is the exact generator
+# five audit rounds were spent on. MEASURED: after the round that WROTE the rule,
+# THREE cited shas were not ancestors of main. Two survived in this very file,
+# 650 and 1430 lines from the one that was deleted for the same defect; they were
+# reachable from NO ref, surviving only as loose objects until the next `gc`. A
+# fresh clone of main resolves none of them, so the numbers they anchor cannot be
+# checked by the reader the rule exists to serve.
+#
+# A hex string is a candidate only if it contains a letter — that excludes the
+# decimal figures these files quote (block counts, inode counts) without an
+# allowlist anyone has to maintain.
+#
+# 🔴 IT DEGRADES TO "COULD NOT MEASURE", NEVER TO A PASS. The sandbox tier builds
+# from a store copy with NO .git, so this check cannot run there; a silent green
+# would be a claim about git's absence, not about the files.
+sha_files="$SCRIPT $BASH_SOURCE"
+if ! command -v git >/dev/null 2>&1; then
+  pass "COULD NOT MEASURE: git is not on PATH — sha reachability unchecked (expected in the sandbox tier)"
+elif ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  pass "COULD NOT MEASURE: $ROOT is not a git checkout — sha reachability unchecked (expected in the sandbox tier)"
+else
+  sha_bad=""; sha_seen=0
+  for f in $sha_files; do
+    for h in $(grep -oE '\b[0-9a-f]{8,40}\b' "$f" | grep -E '[a-f]' | sort -u); do
+      git -C "$ROOT" cat-file -e "${h}^{commit}" 2>/dev/null || continue
+      sha_seen=$((sha_seen + 1))
+      git -C "$ROOT" merge-base --is-ancestor "$h" HEAD 2>/dev/null || sha_bad="$sha_bad $h"
+    done
+  done
+  # POSITIVE CONTROL: a run that resolved NO sha proves nothing. If the files
+  # cite none, that is itself the reportable state, not a pass.
+  if [ "$sha_seen" -eq 0 ]; then
+    fail "the sha ledger resolved ZERO commit-shas in these files — either the extraction broke or every citation was removed; a zero here is not a clean result"
+  elif [ -z "$sha_bad" ]; then
+    pass "all $sha_seen cited sha(s) are ancestors of HEAD — resolvable from a fresh clone"
+  else
+    fail "cited sha(s) NOT reachable from HEAD:$sha_bad — a reader cannot resolve the number each one anchors, which is the defect the 'only with a sha' rule exists to stop. Re-anchor to a commit on the mainline, or delete the figure"
+  fi
+fi
 
 # --------------------------------------------------------------------------- #
 # 🔴 DO NOT print `RESULT: PASS (exit=0)` here — that grammar is RESERVED to
