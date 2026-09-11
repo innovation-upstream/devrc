@@ -3,12 +3,15 @@
 #
 # WHY THIS EXISTS. That script is ROOT-PRIVILEGED bash that had no test file, in
 # a repo with no shellcheck gate. (It was 282 lines at the merge base
-# `c1169e3b` — BEFORE this suite's own commit, which added the seam and most of
-# the comments. "When this suite was written" is the wrong anchor for that
-# figure and stood here for a round: by the end of that commit the file was 414
-# lines. No CURRENT count is quoted anywhere any more, because the last one went
-# stale within a round and was still being cited from run-tests.sh two rounds
-# later. `wc -l scripts/diagnose-disk-accounting.sh`.)
+# `c1169e3b`, BEFORE this suite's own commit — verifiable with
+# `git show c1169e3b:scripts/diagnose-disk-accounting.sh | wc -l`. That is the
+# ONLY line count stated here, and it is stated because it is sha-anchored.
+# 🔴 A SECOND FIGURE — "by the end of that commit the file was 414 lines" —
+# stood here and is DELETED: 414 is the count at `16c3eeaa`, which is NOT an
+# ancestor of main, so nobody on main could check it. A positional or historical
+# number is legal in this file only with a sha a reader can resolve; that rule is
+# what the last four audit rounds cost. For the current size, run
+# `wc -l scripts/diagnose-disk-accounting.sh` — no count is written down.)
 # Every defect pinned below was real,
 # shipped, and invisible to the merge gate — including a root COMMAND INJECTION
 # reachable by any local process (via a planted /tmp directory name) and an
@@ -1186,7 +1189,7 @@ top-level enumeration is NUL-safe find|xargs, and KEEPS find's stderr@find "$bas
 du keeps -x AND its || true in the /tmp size breakdown@xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true@INVARIANT PIN, not a regression guard, for the -x half: a second filesystem needs root, so -x cannot be checked behaviourally here and a mutant dropping it SURVIVED. The `|| true` half IS behaviourally covered, by route (b) in section 4b — this literal pins both, so read it as two claims. The redirection is part of the literal on purpose: it was `2>/dev/null` until round 3, and a du that cannot read a path is then an under-count with no marker (section 4b-iii).
 du keeps -x AND its || true in the /home size breakdown@xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>>"$DU_ERR" || true@same three claims for section 6c's call site; 6c is root-only, so its du-stderr capture is an INVARIANT PIN with no behavioural half
 section 5's PVC listing keeps du's stderr too@xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true@root-only INVARIANT PIN, about THIS pipeline and no other. A previous wording called it "the third du site", which asserted a COUNT of the file's du invocations; the count was wrong and the scope it implied was wider than any row here checks. `_report_unreadable`'s own comment declares which sites route du's stderr to a file and states that it says nothing about the rest.
-the du blind spot is REPORTED, not merely captured@_report_unreadable@capturing a stream nothing reads is worse than discarding it — it looks like coverage. Behaviourally covered for size_breakdown in section 4b-iii; this pins that the two root-only sites call it as well.
+the du blind spot reporter EXISTS@_report_unreadable@capturing a stream nothing reads is worse than discarding it — it looks like coverage. Behaviourally covered for size_breakdown in section 4b-iii. 🔴 THIS ROW PINS ONLY THAT THE NAME APPEARS, which the DEFINITION line satisfies on its own — an earlier wording claimed it pinned that the two root-only sites CALL it, and deleting BOTH call sites left the suite fully green. The call sites are counted below instead.
 section 6 BRANCHES on du's status instead of discarding it@if du_out=$(du -sh -x "$d" 2>/dev/null); then du_mark=; else du_mark=@a du that cannot read a tree prints a PARTIAL total and exits 1; this row rendered that floor exactly like a complete figure, and since `_report_unreadable` landed the absence of a marker reads as "nothing was missed". Root-only, so this is an INVARIANT PIN.
 section 6 PRINTS the marker it computed@"$(find "$d" -xdev -printf . 2>/dev/null | wc -c)" "$d" "$du_mark"@a variable that is set but never reaches the output is the field-that-is-not-a-guard shape: the branch above would look like coverage while every row still printed identically.
 every temp file this script opens carries an identifying name@mktemp "/tmp/disk-accounting-$1.XXXXXX"@a bare `mktemp` writes /tmp/tmp.XXXXXXXXXX — an unattributable file, in the directory this script exists to diagnose
@@ -1232,6 +1235,25 @@ case "${duerr_total:-x}${duerr_guarded:-x}" in
        pass "every ': > \$DU_ERR' truncation carries a guard ($duerr_guarded of $duerr_total)"
      else
        fail "not every ': > \$DU_ERR' truncation is guarded ($duerr_guarded of $duerr_total) — an unguarded one is fatal under set -e, and at section 6c it fires AFTER sections 1..6b have already printed"
+     fi ;;
+esac
+
+# 🔴 CALL SITES, NOT THE DEFINITION — the fixed-string row above cannot tell
+# them apart. MEASURED: deleting BOTH root-only `_report_unreadable` calls left
+# the suite green, because `grep -qF -- "_report_unreadable"` is satisfied by the
+# definition line alone. That is the declarations-vs-instances error: the row
+# counted a SITE and read as though it covered what the site COVERS.
+# Same shape as the DU_ERR ledger above — both numbers DERIVED, neither written
+# down, and the assertion is a RELATIONSHIP so it fails when the set shrinks.
+rru_total="$(grep -cE '_report_unreadable' "$CODE_FILE" || true)"
+rru_defs="$(grep -cE '^[[:space:]]*_report_unreadable\(\)' "$CODE_FILE" || true)"
+case "${rru_total:-x}${rru_defs:-x}" in
+  *[!0-9]*) fail "the _report_unreadable call-site ledger cannot be read (total=[${rru_total:-}] defs=[${rru_defs:-}])" ;;
+  *) rru_calls=$((rru_total - rru_defs))
+     if [ "$rru_defs" -eq 1 ] && [ "$rru_calls" -ge 2 ]; then
+       pass "_report_unreadable is CALLED, not merely defined ($rru_calls call site(s), 1 definition)"
+     else
+       fail "_report_unreadable has $rru_defs definition(s) and $rru_calls call site(s) — expected 1 and >=2. A stream captured and never reported looks exactly like coverage; the root-only sites are the ones nothing else can see"
      fi ;;
 esac
 
@@ -1433,7 +1455,9 @@ ln -s realdir "$tl/linkdir"
 #     it is `has` now, which FAILS on a missing entry either way.
 #   - draft 2: "it fails HERE, naming the missing tool, instead of three lines
 #     later as a confusing assertion failure." FALSE, and it assumed `set -e`.
-#     🔴 THIS SUITE IS `set -uo pipefail` (line 48) — NO `-e`. MEASURED with a
+#     🔴 THIS SUITE IS `set -uo pipefail` AT THE TOP — NO `-e`. (No line number:
+#     the file grows every round and the number would rot; `grep -n '^set -' on
+#     this file` answers it.) MEASURED with a
 #     stand-in returning 127: guarded and unguarded agree on every outcome that
 #     matters — same rc 1, same `ok:` count, the SAME single failure
 #     (`a fifo is counted …`), and the same
@@ -1551,25 +1575,48 @@ echo "== 13. UNTALLIED-DROP SITE LEDGER — pinned two-way =="
 # here is NOT the fix for finding one — recording it is the fix; tallying it is
 # a different, larger change (bash's `[ -d ]` cannot separate "not a directory"
 # from "stat refused" from "unmatched glob").
-# 🔴 THIS SCAN PINS SPELLINGS, NOT THE CRITERION — SAY SO, DO NOT CLAIM MORE.
-# The first version grepped the single literal `[ -d "$p" ] || continue`, and an
-# audit injected a site meeting the criterion exactly, spelled
-# `if [ ! -d "$entry" ]; then continue; fi`. The suite stayed GREEN over a live
-# hazard while this ledger printed "exactly 2 … as pinned". The pattern below is
-# an alternation covering the single-line spellings and ANY loop variable:
-#   [ -d "$p" ] || continue   ·   [ -d "${p}" ] || continue   ·   [[ -d $p ]] || continue
-#   if [ ! -d "$x" ]; then continue; fi
-# 🔴 KNOWN BLIND SPOTS, which no line-based scan can close: a MULTI-LINE `if`
-# (the `continue` on its own line), and a guard delegated to a helper function.
-# Those are why the script's paragraph now points at the CRITERION and calls this
-# a spelling scan, rather than telling a reader the list is authoritative.
+# 🔴 THE SCAN JOINS LINES, because a one-line-at-a-time version had a live hole.
+# Two earlier versions each shipped a hole and a sentence excusing it:
+#   v1 grepped the literal `[ -d "$p" ] || continue`. An audit injected
+#      `if [ ! -d "$entry" ]; then continue; fi` — suite GREEN over a live hazard.
+#   v2 widened to one permissive single-line pattern and declared a MULTI-LINE
+#      `if` to be a blind spot "no line-based scan can close". THAT WAS FALSE, and
+#      the hole was live: a site spelled across four lines scanned as absent while
+#      the ledger printed "exactly 2 … as pinned". It is closable by joining each
+#      candidate line with the next few — and THIS FILE ALREADY LINE-JOINS TWICE
+#      (the `sed -e ':a' -e '/\\$/N'` continuation handling in sections 7b/11), so
+#      the excuse was refuted by code 300 lines away.
+# The lesson, which is the reason this comment is long: a guard that names its own
+# blind spot is asserting something, and the assertion needs checking like any
+# other. "No scan can do this" is the single easiest claim to get wrong.
+#
+# 🔴 THE REMAINING BLIND SPOT IS ONE, NOT TWO: a guard delegated to a HELPER
+# FUNCTION, because no textual scan follows a call. The window is 3 lines, so a
+# guard spread wider than that also escapes — the canary below pins the window.
+#
 # 🔴 COMMENTS **AND** `echo` LINES ARE EXCLUDED, and the `echo` half is not
 # hypothetical: widening the pattern immediately matched section 2's own banner,
-# which QUOTES the guard (`dropped by a '[ -d ] || continue' guard`) while
-# explaining the defect. A ledger that counts a sentence about the hazard as an
-# instance of it is the declarations-vs-instances error in miniature.
-DROP_GUARD_RE='\[\[?.*-d.*\]\]?.*continue'
-bracket_sites="$(grep -nE "$DROP_GUARD_RE" "$SCRIPT" | grep -vE '^[0-9]+:[[:space:]]*(#|echo )' | cut -d: -f1 | tr '\n' ' ')"
+# which QUOTES the guard while explaining the defect. A ledger that counts a
+# sentence about the hazard as an instance of it is declarations-vs-instances.
+#
+# `drop_guard_sites <file>` → one line number per site. Shared by the ledger and
+# by both canaries, so a canary cannot pass against a different implementation
+# than the one under test.
+drop_guard_sites() {
+  awk '
+    { L[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        s = L[i]
+        if (s ~ /^[[:space:]]*#/ || s ~ /^[[:space:]]*echo /) continue
+        if (s !~ /\[\[?[^]]*-d[[:space:]]/) continue
+        j = s
+        for (k = i + 1; k <= i + 3 && k <= NR; k++) j = j " " L[k]
+        if (j ~ /continue/) print i
+      }
+    }' "$1"
+}
+bracket_sites="$(drop_guard_sites "$SCRIPT" | tr '\n' ' ')"
 bracket_n="$(printf '%s' "$bracket_sites" | wc -w)"
 
 # 🔴 A REAL CANARY, NOT A SELF-CHECK. The previous "positive control" asserted
@@ -1585,11 +1632,24 @@ canary_f="$TMP/dropguard-canary.sh"
   printf '    [ -d "${q}" ] || continue\n'
   printf '    [[ -d $r ]] || continue\n'
   printf '    if [ ! -d "$s" ]; then continue; fi\n'
+  # 🔴 THE MULTI-LINE SHAPE — the one a previous version declared unclosable and
+  # then failed to catch on a live site. It is the whole reason for the join.
+  printf '    if [ ! -d "$t" ]\n    then\n      continue\n    fi\n'
   printf '    echo "not a drop guard at all"\n'; } > "$canary_f"
-canary_n="$(grep -cE "$DROP_GUARD_RE" "$canary_f")"
-[ "$canary_n" -eq 4 ] \
-  && pass "CANARY: the pattern finds all 4 single-line spellings in a fixture holding exactly 4" \
-  || fail "CANARY FAILED: found $canary_n of 4 known spellings — the count over the real script means nothing until this passes"
+canary_n="$(drop_guard_sites "$canary_f" | grep -c .)"
+[ "$canary_n" -eq 5 ] \
+  && pass "CANARY: the scan finds all 5 spellings, multi-line included, in a fixture holding exactly 5" \
+  || fail "CANARY FAILED: found $canary_n of 5 known spellings — the count over the real script means nothing until this passes"
+# 🔴 WINDOW PIN. The join looks 3 lines ahead; a guard spread wider escapes, and
+# that is a real residual limit rather than a hypothetical. Pinning it means the
+# window cannot be narrowed without a red suite, and the number cannot rot into
+# prose that says one thing while the code does another.
+canary_wide="$TMP/dropguard-canary-wide.sh"
+printf '    if [ ! -d "$u" ]\n    then\n\n\n      continue\n    fi\n' > "$canary_wide"
+canary_wide_n="$(drop_guard_sites "$canary_wide" | grep -c . || true)"
+[ "$canary_wide_n" -eq 0 ] \
+  && pass "CANARY: a guard spread beyond the 3-line join window is NOT found — the documented residual limit, pinned" \
+  || fail "CANARY FAILED: expected the wide-spread guard to escape the 3-line window, found $canary_wide_n"
 # 🔴 NEGATIVE half, and it pins the EXACT over-match that occurred. Widening the
 # pattern matched section 2's banner, which quotes the guard while describing the
 # defect. The filtered pipeline — not the bare regex — is what must reject it, so
@@ -1598,7 +1658,7 @@ canary_negf="$TMP/dropguard-canary-neg.sh"
 { printf '%s\n' 'echo "  dropped by a '"'"'[ -d ] || continue'"'"' guard, so it had NO ROW"'
   printf '%s\n' '# a comment mentioning [ -d "$p" ] || continue while explaining it'
   printf '%s\n' '    echo "continue past the -d flag in prose"'; } > "$canary_negf"
-canary_neg="$(grep -nE "$DROP_GUARD_RE" "$canary_negf" | grep -vcE '^[0-9]+:[[:space:]]*(#|echo )' || true)"
+canary_neg="$(drop_guard_sites "$canary_negf" | grep -c . || true)"
 [ "$canary_neg" -eq 0 ] \
   && pass "CANARY: prose QUOTING the guard (banner echo, comment) is not counted as a site" \
   || fail "CANARY FAILED: $canary_neg line(s) of prose about the hazard were counted as instances of it — the count is inflated"
