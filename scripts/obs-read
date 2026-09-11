@@ -270,6 +270,27 @@ def _num(s):
     return int(f) if f.is_integer() else f
 
 
+def _raw_labels(labels) -> dict:
+    """The label set as STRUCTURED data, for --json consumers.
+
+    `_fmt_labels` renders a label set for the human-readable TABLE: it returns a
+    string like `{a=1, b=2}`, which is neither JSON nor Prometheus's own wire
+    shape. That string used to be the ONLY representation carried in `--json`
+    output, so every machine consumer had to regex a rendered display string to
+    recover one label — and a consumer that instead assumed Prometheus's native
+    `data.result[].metric` dict got nothing, silently, with `row_count` sitting
+    right there saying otherwise.
+
+    So `rows[].labels` carries the dict and `rows[].metric` keeps the rendered
+    string. Both are emitted: the table renderer reads `metric`, parsers read
+    `labels`, and neither has to know about the other. Values are coerced to
+    `str` because that is what both backends promise on the wire.
+    """
+    if not isinstance(labels, dict):
+        return {}
+    return {str(k): str(v) for k, v in labels.items()}
+
+
 def _fmt_labels(labels: dict) -> str:
     """Render a metric/stream label set compactly and deterministically."""
     if not isinstance(labels, dict) or not labels:
@@ -338,16 +359,18 @@ def parse_prometheus(payload) -> QueryResult:
     for series in (result or []):
         if not isinstance(series, dict):
             continue
+        labels = _raw_labels(series.get("metric", {}))
         name = _fmt_labels(series.get("metric", {}))
         if rtype == "matrix":
             values = series.get("values", []) or []
             last = values[-1] if values else None
             val = _num(last[1]) if isinstance(last, list) and len(last) == 2 else None
-            rows.append({"metric": name, "value": val, "points": len(values)})
+            rows.append({"metric": name, "labels": labels,
+                         "value": val, "points": len(values)})
         else:  # vector (default)
             v = series.get("value")
             val = _num(v[1]) if isinstance(v, list) and len(v) == 2 else None
-            rows.append({"metric": name, "value": val})
+            rows.append({"metric": name, "labels": labels, "value": val})
 
     cols = ["metric", "value"] + (["points"] if rtype == "matrix" else [])
     matched_nothing = (len(rows) == 0)
@@ -376,11 +399,13 @@ def parse_loki(payload) -> QueryResult:
         for series in result:
             if not isinstance(series, dict):
                 continue
+            labels = _raw_labels(series.get("metric", {}))
             name = _fmt_labels(series.get("metric", {}))
             values = series.get("values", []) or []
             last = values[-1] if values else None
             val = _num(last[1]) if isinstance(last, list) and len(last) == 2 else None
-            rows.append({"metric": name, "value": val, "points": len(values)})
+            rows.append({"metric": name, "labels": labels,
+                         "value": val, "points": len(values)})
         matched_nothing = (len(rows) == 0)
         detail = ""
         if not matched_nothing and _all_values_zero(rows):
@@ -394,6 +419,11 @@ def parse_loki(payload) -> QueryResult:
     for stream in result:
         if not isinstance(stream, dict):
             continue
+        # Loki sends a streams label set under `stream`, NOT `metric` (that is
+        # the matrix/vector key). Same structured-labels contract as the
+        # prometheus rows above — `stream` keeps the rendered display string
+        # the table reads, `labels` carries the dict a parser reads.
+        labels = _raw_labels(stream.get("stream", {}))
         name = _fmt_labels(stream.get("stream", {}))
         values = stream.get("values", []) or []
         total_lines += len(values)
@@ -402,7 +432,8 @@ def parse_loki(payload) -> QueryResult:
             last = values[-1]
             if isinstance(last, list) and len(last) == 2:
                 sample = str(last[1])[:120]
-        rows.append({"stream": name, "lines": len(values), "sample": sample})
+        rows.append({"stream": name, "labels": labels,
+                     "lines": len(values), "sample": sample})
     matched_nothing = (total_lines == 0)
     detail = "" if matched_nothing else "%d log line(s) across %d stream(s)" % (
         total_lines, len(rows))

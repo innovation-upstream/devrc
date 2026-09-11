@@ -254,8 +254,13 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `serverMode` unit, so it is running on the workbench and you should not assume it on any
   other host. This FILE named `drift-check` ten times and this zero times, which is how the
   sentence below came to be written wrong.
-  ⏳ **`scripts/main-status-watch.py` shortens that window, and it is NOT LIVE UNTIL A
-  SWITCH.** It reads `main`'s own `tekton/devrc-main-*` statuses every 10 min (a few API
+  ✅ **`scripts/main-status-watch.py` shortens that window, and it IS LIVE** — MEASURED
+  2026-09-11 on the workbench: `main-status-watch.timer` `ActiveState=active`,
+  `UnitFileState=enabled`, last run 00:45 CDT, `ExecMainStatus=0`. ⚠ This line read **NOT
+  LIVE UNTIL A SWITCH** for a day after `ship.sh` had converged both hosts to `86b1ddec` —
+  the sentence was written before the deploy and nothing re-read it, so re-measure rather
+  than trusting this paragraph's age: `systemctl --user list-timers main-status-watch.timer
+  --all`. It reads `main`'s own `tekton/devrc-main-*` statuses every 10 min (a few API
   calls, not a build) and, on an authoritative red, starts `main-green-check` EARLY instead
   of waiting for the 4-hourly timer — so detection becomes ~20 min (CI) + ≤10 min (poll) +
   ~20 min (the deadman's confirmation) rather than up to ~5.5h. 🔴 **It never decides

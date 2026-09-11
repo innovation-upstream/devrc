@@ -1,30 +1,59 @@
-{ pkgs, ... }:
+# `slotTablePath` is overridable so the tests can run THIS module — the real
+# artifact, not a re-spelling of it — over a synthetic slot table and read the
+# bindings it actually generates. Production never passes it.
+{ pkgs, slotTablePath ? ../../../scripts/tmux-scratch-slots.sh, ... }:
 let
-  inherit (pkgs) lib;
   # Generate the scratchpad popup toggles from the canonical slot table
   # (scripts/tmux-scratch-slots.sh) instead of hardcoding them — with their
   # per-slot color + codename — in .tmux.conf. One source of truth: the same file
   # the tmux HUDs source and initiative-scan.py parses. Add/rename a scratchpad by
   # editing the slot table only.
-  slotsText = builtins.readFile ../../../scripts/tmux-scratch-slots.sh;
-  # Slot entries look like:  "scratch4:V:#83a598:Vapor"  (session:key:color:name).
-  slotRe = "[[:space:]]*\"([^\":]+):([^\":]+):(#[0-9a-fA-F]+):([^\"]+)\"[[:space:]]*";
-  slotLines = builtins.filter (l: builtins.match slotRe l != null)
-    (lib.splitString "\n" slotsText);
-  parse = l: let m = builtins.match slotRe l; in {
-    sess = builtins.elemAt m 0;
-    key = builtins.elemAt m 1;
-    color = builtins.elemAt m 2;
-    name = builtins.elemAt m 3;
-  };
+  #
+  # 🔴 THIS FILE CANNOT CLASSIFY A LINE ITSELF, AND THAT IS THE POINT. It holds
+  # no `builtins.match` and no `builtins.split`: every verdict about what a slot
+  # IS comes from ./slot-table.nix, which reads the grammar out of the table's
+  # own `# SLOT_ENTRY_RE:` marker line — the single copy that
+  # scripts/i3status-scratchpads (the bar's colour legend) reads too. This file
+  # and that one used to carry a regex EACH and they disagreed in both
+  # directions: `#[0-9a-fA-F]+` here accepted a 9- or 12-digit hex colour (both
+  # valid pango) that the legend's `{3,8}` dropped, so a slot got a key binding
+  # and no legend entry; and the legend matched anywhere in the text while this
+  # one is whole-line, so a COMMENTED-OUT slot line got a legend entry
+  # advertising a hotkey bound to nothing. Slot entries look like
+  # "scratch4:V:#83a598:Vapor" (session:key:color:name).
+  #
+  # scripts/tests/test_scratchpads_block.py evaluates this module and compares
+  # the bindings it GENERATES against the legend's own parse of the same table,
+  # on the real table and on synthetic ones — a value, not a spelling.
+  slotTable = import ./slot-table.nix { path = slotTablePath; };
   # Byte-identical (per tmux's normalization) to the former hand-written bindings —
   # verified via a `tmux list-keys` diff before the cutover.
   mkBind = s: "bind -n M-${s.key} if-shell -F '#{==:#{session_name},${s.sess}}'"
     + " { detach-client }"
-    + " { display-popup -d \"#{pane_current_path}\" -xC -yC -w 80% -h 80%"
+    + " { display-popup -d \"#{pane_current_path}\" -xC -yC -w 90% -h 90%"
     + " -S 'fg=${s.color}' -T ' ${s.name} '"
     + " -E 'tmux attach-session -t ${s.sess} || tmux new-session -s ${s.sess}' }";
-  scratchBindings = builtins.concatStringsSep "\n" (map (s: mkBind (parse s)) slotLines);
+  # 🔴 A PARTIALLY-PARSEABLE TABLE MUST FAIL THE BUILD, NOT SHIP FEWER KEYS.
+  # The bar legend's counterpart of this renders `scratch ?`; here the only
+  # honest "unmeasured" is a build error, because the alternative is a switch
+  # that silently succeeds having generated 3 bindings out of 20 and an operator
+  # whose Alt-keys quietly stop working.
+  #
+  # `candidateLines` is deliberately WIDER than the grammar (see slot-table.nix)
+  # — a yardstick that narrows with the grammar cannot see a dropped entry.
+  scratchBindings =
+    if builtins.length slotTable.slotLines < builtins.length slotTable.candidateLines
+    then throw ("${toString slotTablePath} declares "
+      + toString (builtins.length slotTable.candidateLines)
+      + " slot entries but only "
+      + toString (builtins.length slotTable.slotLines)
+      + " match the `# SLOT_ENTRY_RE:` grammar — refusing to generate a partial "
+      + "set of scratchpad bindings. A slot entry is a quoted "
+      + "`session:key:#colour:name` string alone on its line, indented with "
+      + "spaces or tabs only; the colour must be 3, 6, 9 or 12 hex digits, and "
+      + "a trailing comment after the closing quote is NOT accepted. Fix the "
+      + "malformed entries or delete them outright.")
+    else builtins.concatStringsSep "\n" (map mkBind slotTable.slots);
 
   # 🔴 CONTINUUM'S 15-MINUTE AUTOSAVE IS A STATUS-LINE INTERPOLATION, AND
   # NOTHING ELSE DRIVES IT.  `continuum.tmux:main()` calls

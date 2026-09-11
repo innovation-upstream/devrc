@@ -17,17 +17,12 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
 
-- **Branch / PR:** `#1440` MERGED as `34da597d` (round 0). `#1495` OPEN, `MERGEABLE/CLEAN`, branch `fix/scoped-tests-retracted-figure`, unmerged and unaudited.
-- **DONE — "the algorithm" is integrated into `/audit-pr` as ROUND 0, shipped and deployed.**
-  - `claude/skills/audit-pr/SKILL.md` gained a `## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE` section, and `scripts/audit-dispatch.py` a `--round 0` mode that emits that section **INSTEAD of** the nine correctness axes (`render_checklist`, `_read_round_zero`, `ROUND_ZERO_HEADING`).
-  - Round 0 is the only round that can conclude *close this PR, do not audit it*. It is ON TRIAL and carries its own retirement condition.
-  - Deployed via `scripts/ship.sh`: workbench `4e26ec9a → 34da597d`, laptop `176f412b → 34da597d`, both VERIFIED + switched. Consumer path exercised on both: `~/.claude/skills/audit-pr/SKILL.md` → `/nix/store/y21wfbf3…-devrc-claude-skills/`, carries round 0.
-- **Operator decisions taken (both in `dcd84c73`, inside `#1440`):**
-  - step 2 no longer uses the REVERT TEST — replaced with the three adoption questions (*is it RUNNING / has it ever caught anything / does something else already check it*);
-  - steps 4+5 merged into one ordering rule.
-- **IN FLIGHT:** `#1495` — `scripts/scoped-tests.sh`'s header justified the script with a figure `CLAUDE.md` had already retracted. Fix + a two-way-pinned count guard. **Not merged, not audited.**
-- **Deploy/verify status:** `#1440` deployed AND verified on both hosts. `#1495` is committed and pushed only — **not merged, not deployed.**
-- 🔴 **CARRIED FORWARD, not resolved by this session — issue `#1431` is CLOSED on the board and its defect is NOT fixed.** See its investigation block below; this line exists because `State now` is REPLACED on every update and the pointer would otherwise disappear while the defect stayed open.
+- **Branch / PR:** all three of this arc's PRs are MERGED. `#1440` round 0 (`34da597d`), `#1497` handoff (`e1cd9a38`), `#1495` the retracted figure + its guard (`cc278b7a`).
+- **DONE — "the algorithm" is integrated into `/audit-pr` as ROUND 0, shipped and deployed.** `claude/skills/audit-pr/SKILL.md` carries a `## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE` section; `scripts/audit-dispatch.py` has a `--round 0` mode emitting it **INSTEAD of** the nine correctness axes. Operator decisions taken: step 2 uses the three adoption questions (*is it RUNNING / has it ever caught anything / does something else already check it*), not the revert test; steps 4+5 merged into one ordering rule.
+- **DONE — `#1495`**, found by round 0's trial 2: `scripts/scoped-tests.sh` justified its own existence with a figure `CLAUDE.md` had already retracted. Fixed, plus a guard (`scripts/tests/test_retracted_contention_figure.py`) that pins the normalised TEXT of every site.
+- **Deploy/verify status:** both hosts converged and VERIFIED at `3a0c77dd` — `ship.sh` compared them ("2 hosts compared"), and the artifacts were checked on each host directly. The laptop leg resolved its own nebula fallback with no override.
+- **CI at `760c8769`:** `tekton/devrc-pytests` **pass** — collected 22,083, passed 22,081, failed 0. That tier is what round 1's 🔴 was about, so it is the authoritative close of that finding.
+- ✅ **RESTORED — `#1431` is REOPENED (2026-09-10), carrying a comment with a fresh red/green/positive-control matrix. The defect is unchanged and still open; what is closed is the *board lying about it*.** 🔴 This bullet was written by a prior session which said in terms that it must STAY, because the carried-forward pointer is what kept it findable across three `State now` replacements — and the immediately preceding update of this doc DROPPED it anyway, while re-asserting the superseded "`#1431` is CLOSED on the board" it had corrected. Restored verbatim in meaning. **It stays.**
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -104,11 +99,11 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## Next steps (ranked)
 
-1. **Audit and merge `#1495`** (devrc; `scripts/scoped-tests.sh`, `scripts/tests/test_retracted_contention_figure.py`). Its v1 guard SURVIVED its key mutant and was rebuilt — that history is exactly what an adversarial pass should re-check. `/audit-pr 1495`. forcing: gate — a false claim is on `main` in shipped code until this merges
-2. **Decide the `scoped-tests.sh` trigger list with `#1445`'s author** — implement `gate-inventory` §10 or decline it in the header. See the open investigation above for the measured numbers. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
-3. **Trials 3-5 of round 0**, on ordinary PRs, dispatched before merge-readiness. Delete the section if it ran and changed nothing. forcing: none
-4. **`ship.sh` cannot reach the laptop off-LAN** (devrc; `scripts/lib/host-role.sh`). `LAPTOP_SSH_DEFAULT="zach@192.168.50.155"`; the nebula address `10.42.0.100` is `LAPTOP_IP_SECONDARY`, used to IDENTIFY the host and never as an SSH fallback. Measured 2026-09-09: `ship.sh` timed out, rc 255, while `ssh zach@10.42.0.100` worked; shipped via the `LAPTOP_SSH` override. forcing: regression — the laptop silently stops converging whenever it is off-LAN, the exact silent-divergence hazard CLAUDE.md documents
-5. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~26 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deliberately deferred until the trial count resolves. forcing: none
+1. **Round 0 trials 3-5, on ordinary PRs, dispatched BEFORE merge-readiness.** Ledger so far: `ran: 2 · changed the outcome: 2`. Both yielded, but trial 2's report landed *after* its PR merged, so the live question is whether round 0 is fast enough to matter, not whether it finds things. Delete the section if it ran and changed nothing. forcing: none
+2. **Decide the `scoped-tests.sh` trigger list with `#1445`'s author** — implement `gate-inventory-2026-09-08.md` §10 or decline it in the header. Measured first-hand, see the open investigation below. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
+3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** forcing: none
+4. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~27 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deferred by operator sequencing until the trial count resolves. forcing: none
+5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm` (a branch named after this arc's feature). Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -152,6 +147,31 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - 🔴 **A fix landing is not the same as a family closing** — and the tell is that the
   claim was written from the fix's *description* rather than from what it touched. Before
   writing "closed", name the mechanism and check the fix actually reaches it.
+- 🔴 **A RANK NUMBER IS NOT A STABLE HANDLE, AND THIS DOC SAYS IT IS.** The old list declared
+  *"Numbering is STABLE — the rank is half a `claim-work` slug's identity"*, and then `#1497`
+  (`e1cd9a38`) **REPLACED the whole 16-item list with a 5-item one**. So `audit-pr-ladder-16`
+  and `audit-pr-ladder-14` — slugs `claim-work` still derives, and which a session was handed
+  as its instructions on 2026-09-10 — now name items that **do not exist in this doc**. The
+  work was still open and still findable, but only because the *investigation blocks* survived;
+  the queue entries did not. **Identify an item by its SUBJECT (`#1431`, `#1287`), never by its
+  rank**, and treat a rank in a kickoff message as possibly pointing at a superseded list.
+  ⚠ Both readings of a replaced list are wrong in opposite directions: the numbers can go
+  stale (this case) *and* a resurrected item can re-open settled work (rank 4 of the NEW list,
+  struck through above, told the next session to re-do what `#1439` already shipped and
+  deployed). **One list replacement produced both failures at once.**
+- 🔴 **THE BASE CLONE MOVED UNDER A LIVE SESSION, AND NOTHING ANNOUNCED IT.** This session read
+  the handoff at `4ab87a64` (1369 lines, 16 ranked items) and later found the same working copy
+  clean at `cc278b7a` (1357 lines, 5 items) — another session had pulled `~/workspace/devrc`
+  mid-run. Everything downstream of that first read was reasoning about a superseded document.
+  **A doc you read at the start of a session is a snapshot, not a subscription** — re-derive the
+  sha before acting on a section you read a long time ago, and prefer a worktree pinned to an
+  explicit ref for anything you intend to EDIT.
+- ⚠ **The zsh history-modifier trap fired again, in a loop written to compare doc versions.**
+  `git show "$ref:claudedocs/…"` — zsh ate `:c` as a modifier, so every iteration ran
+  `git show 4ab87a64laudedocs/…`, printed `fatal:` to stderr, and the captured counts all came
+  back **`0`**. Read without the stderr, that is a clean, confident, WRONG table saying no
+  version of the doc had a 16-item list. `claude/RULES.md` names this and says **brace it**:
+  `${ref}:path`. The tell was a zero that disagreed with something already read by hand.
 
 - 🔴 **CARRIED FORWARD from the ranked list, which this update replaces — corrections to
   `#1023`'s own commit messages, kept because that history is MERGED and will not be
@@ -964,20 +984,27 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - **Round 0's ledger deliberately carries NO add-back percentage.** An earlier draft asked for `deleted: X · re-added: Y (Y/X = Z%)` "from the same `--numstat` command"; `--numstat` gives per-file added/deleted counts and cannot identify a re-added line, so `Y` was undefined by the instrument named. Recorded in the section so it is not re-derived.
 - **The merge policy changed mid-session and it matters.** CLAUDE.md's local full-suite ritual before merge is DELETED — it produced 27-50 concurrent full-suite runs on one 24-core box while gating nothing. What replaces it: read CI (advisory, ~42% of reds are noise) and run a change-scoped subset. Measured here: load 60-96 for hours, 36 concurrent `run-tests.sh`, and one full pytest tier that hit the 3600s cap with NO verdict.
 
+- 🔴 **A CLAIM CORRECTED ON ONE SURFACE STAYS FALSE ON THE OTHERS, AND THIS ARC DID IT FIVE TIMES.** The `#1495` ladder existed *because* `scoped-tests.sh` asserted a figure `CLAUDE.md` had retracted. Then: a commit message claimed it had corrected the PR body when no edit was made; the PR body kept a withdrawn "3 of 7" measurement after the docstring dropped it; the cairn entry taught the wrong remedy for a day; and this handoff said `#1495` was "OPEN, unmerged and unaudited" while ranking "audit and merge #1495" as the next step, hours after it merged. **Every one was caught by a sweep, none by reading.** The sharpest instance is ranked item 3 below: I wrote a ranked item from an observation that another PR had already fixed, then passed an override twice that made my own claim untestable, and a DIFFERENT session struck the item before I did. A stale observation plus a habitual workaround is indistinguishable from a live defect. The ladder re-audits the PR; nothing re-audits the artifacts a session writes *about* its own work — the handoff, the store entry, the PR body. Sweep those before ending a session.
+- 🔴 **A lesson recorded MID-LADDER records the wrong remedy.** The cairn bullet was written after round 1 and named the count ledger as "the remedy that held"; round 1's own next finding was that it did not hold. Write the durable lesson when the ladder STOPS, not when a fix feels right.
+- 🔴 **`git checkout -- <path>` to restore a mutated file reverts the COMMITTED version and destroys uncommitted work.** Done here mid-battery; it wiped the entire fix and was caught only because the final control printed `3 passed` where `2` was expected. `claude/RULES.md` says restore from a `cp -a` copy — this is what that rule is for. **Keep a control whose expected number you know**, or a silent revert reads as a pass.
+- **A guard's own remediation text can satisfy the guard.** v1's proximity window was satisfied by the retraction note the same commit added, so the hazard could be re-introduced immediately beside its own fix.
+
+- 🔴 **DO NOT QUOTE THE RETRACTED CONTENTION FIGURE IN A CHURNING DOC — `#1495`'s guard fires on it, correctly.** `test_retracted_contention_figure.py` fails any file carrying the figure that its ledger does not name. This doc quoted it once while DESCRIBING the guard's own history, and `tekton/devrc-pytests` went red on `#1511` — a TRUE positive. 🔴 **The fix is to reword, NOT to add this doc to the ledger:** the ledger pins a sha256 of the normalised text around each occurrence, and a handoff rewritten every session would move that digest constantly, making the guard permanently red — which `claude/RULES.md` says is worse than no gate. The ledger's three entries (`CLAUDE.md`, `handoff-gate-speed-and-ci-signal.md`, `scoped-tests.sh`) are stable prose; this doc is not. ⚠ The guard's failure message offers "add it with its digest" or "delete it" and does not yet name this third case — describing the figure without quoting it. Worth adding when someone next touches that file.
+- 🔴 **A `State now` REPLACE WILL EAT ANOTHER SESSION'S DELIBERATE CARRY-FORWARD, AND THE TOOL WARNS YOU IN A LINE THAT IS EASY TO SKIM.** Measured on this doc, 2026-09-11: an update dropped a bullet whose own text read *"This bullet stays (rather than being deleted) because the carried-forward pointer is what kept it findable across three `State now` replacements"* — and in the same edit re-asserted the stale claim that bullet existed to correct (`#1431` CLOSED, when it had been REOPENED the day before). `handoff_doc.py` printed `This replace DROPS 3 line(s) that look DURABLE` and the writer read it only after pushing. **Read the DROPS block BEFORE the confirm, and grep the dropped lines for `stays`/`carried forward`/`do not delete` — a bullet that argues for its own survival is the one a REPLACE is most likely to kill.**
+
 ## How to verify
 
 ```bash
-# round 0 is live on both hosts (not just merged)
-readlink -f ~/.claude/skills/audit-pr/SKILL.md          # must be a /nix/store path
-grep -c "ROUND 0 — QUESTION THE REQUIREMENT" ~/.claude/skills/audit-pr/SKILL.md   # 1
-ssh zach@10.42.0.100 'grep -c "is it RUNNING" ~/.claude/skills/audit-pr/SKILL.md' # 1
+# round 0 is live on both hosts (not merely merged)
+readlink -f ~/.claude/skills/audit-pr/SKILL.md                                   # a /nix/store path
+grep -c "ROUND 0 — QUESTION THE REQUIREMENT" ~/.claude/skills/audit-pr/SKILL.md  # 1
+ssh zach@10.42.0.100 'grep -c "is it RUNNING" ~/.claude/skills/audit-pr/SKILL.md'  # 1
 
-# round 0 emits its section INSTEAD of the nine axes, and refuses to move the ladder
+# round 0 emits its section INSTEAD of the nine axes, and cannot move the ladder
 nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/audit-dispatch.py <pr> --round 0 | grep -c "Audit for:"   # 0
 nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/audit-dispatch.py <pr> --round 0 --emit-claims --audited <sha>; echo $?   # 4
 
-# the guards
-nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests/test_audit_dispatch.py -q -k "round_zero or negative_round"
+# the #1495 guard, against whatever main is now (it pins digests of CLAUDE.md, which moves)
 nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests/test_retracted_contention_figure.py -q
 ```
 ## Open investigations — live diagnosis state
@@ -1295,9 +1322,24 @@ is load-bearing rather than left standing as a live claim.
 - **Leading hypothesis:** two mechanisms now exist for one job — a general `workhost` tool and a
   ship/drift-specific fallback. That is the "one rule, one place" hazard, not a bug: #1439 is
   live and proven in production, #1287 is unmerged and 4 days stale.
-- **Next probe:** read `scripts/workhost` in #1287 and decide whether `first_reachable_ssh`
-  should become a thin caller of it, or whether #1287 should be closed. **Operator call — do not
-  resolve unilaterally.**
+- ✅ **RESOLVED 2026-09-10 — decided by the OPERATOR: one mechanism, plus the port.** `#1287` is
+  CLOSED with the comparison written on it; `first_reachable_ssh` stays; its four-state reporting
+  is ported as `#1505`. The "Next probe" above is SPENT — do not re-run it.
+- 🔴 **Three deciding facts, none of which were in this block before, all measured 2026-09-10:**
+  **(a)** `workhost`'s `HOSTS` table covers **workbench only** — its own line 114 says `laptop`
+  and `production` "are not" specified — so it could not have served `ship.sh`'s laptop leg at
+  all. The block above compared the two as if they solved the same problem; they do not.
+  **(b)** The duplication that would actually have bitten is the **ADDRESS TABLE**, not the probe
+  logic: the workbench LAN and nebula addresses are written verbatim in BOTH `scripts/workhost`
+  and `lib/host-role.sh`, agreeing today with nothing keeping them agreed.
+  **(c)** ⚠ **This block's own "zero file overlap, so no merge conflict either way" HAD GONE
+  STALE.** It was true of `#1439`'s file set and was read as a claim about `main`: measured
+  2026-09-10, `#1287` is **211 commits behind** and `gh pr view --json mergeable` says
+  **`CONFLICTING`/`DIRTY`**, conflicting on `nix/home.nix`. **A no-conflict finding is a reading
+  with a timestamp, not a property of a branch** — the base moves underneath it.
+- **Not ported, recorded so nobody re-derives it as an oversight:** parallel probing, the
+  `tailscale` slot, `--json`, `--accept-key`, the standalone verb surface. `#1287`'s branch is
+  the reference if any of them is wanted later; it is closed, not deleted.
 
 ### RESOLVED — `main` red from #1439's test stubs
 Superseded: the "`main` is red: #1439's test stubs wrote their own shebang" block above is
@@ -1323,8 +1365,24 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 - **Leading hypothesis:** a bulk or accidental close. The residual exposure is unchanged and
   small: a conditional or indirect override (`QUICK` fast path, `MIN_TESTS=$LOW`) is invisible to
   the pin while the shell applies it. Deleting tests still moves `m` and IS caught.
-- **Next probe:** decide with the operator — reopen #1431, or record the dismissal in writing on
-  it. Do not silently treat CLOSED as done; that is the state this block exists to flag.
+- ✅ **RESOLVED 2026-09-10 — `#1431` is REOPENED** (`stateReason: REOPENED`, 1 comment). The
+  "Next probe" above is SPENT. 🔴 **The DEFECT is still open — only the board was fixed.** The pin
+  still reads the source literal; the issue is simply now visible as the open thing it is.
+- **Reopened rather than dismissed, deliberately.** A dismissal must name who dismissed it, and
+  the close carried **no reason at all** — so writing one would have meant inventing the closer's
+  reasoning, which is the fabricated-attribution failure this whole thread catalogues. The
+  operator can still close it with one sentence; that is cheap, and it is theirs to write.
+- 🔴 **Not a bulk close, measured:** `#1431` is the **only** issue closed in a full hour around
+  `20:19:24Z`. The "leading hypothesis: a bulk or accidental close" above is therefore **half
+  REFUTED** — whatever happened was individual. Actor was `ZacxDev`, which does **not**
+  discriminate human from agent, since every agent here uses that token.
+- **The defect was re-measured, not re-quoted**, at `4ab87a64` on 2026-09-10, in a throwaway
+  worktree restored byte-identical (`cmp` clean) after each run:
+  baseline **1 passed**; positive control `MIN_TESTS=15`→`99` **FAILED with the guard's own
+  message** (so the guard is reachable); the defect — `MIN_TESTS=15` plus
+  `if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi` — **1 passed** while the shell applies **3**.
+  🔴 **The positive control is the load-bearing half:** without it, the green on the third row is
+  indistinguishable from a guard that never ran.
 
 ### The scoped mapper has no trigger list — a `testlib` change runs 1 test file of 331
 
@@ -1355,3 +1413,14 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 - **Ruled out:** *"trial 2's stale-premise and merge-conflict findings still stand"* — `#1445` MERGED at 2026-09-10T03:03Z and both it and `a0839ec4` (`#1429`) are on `origin/main`, so the conflict resolved. `via: measurement`
 - **Leading hypothesis:** round 0 yields, but is **too slow to matter on an active PR**. Trial 2's report landed after `#1445` merged; only the one finding that outlived the merge (the retracted figure) became actionable. Round 0 is most valuable EARLY, and nothing routes it there automatically.
 - **Next probe:** trials 3-5 on ordinary PRs, dispatched BEFORE the PR is ready to merge. Record `ran: R · changed the outcome: C` on each PR.
+
+### RESOLVED — the `#1495` ladder ran to a clean stop; the guard took four versions
+
+- **Observed (with values):** rounds 0 → 1 → 2 → 3. Round 3 returned **no code defect**. Each guard version was defeated by a *different* mechanism, every one found by mutation rather than reading:
+  - **v1 proximity** ("a retraction within 20 lines") — SURVIVED an in-place re-assertion, because the retraction note the same commit added satisfied the window. No window size fixes it.
+  - **v2 per-file COUNT** — SURVIVED the same mutant for an unrelated reason: the edit replaces the quoting line with an assertion built from the same tokens, so the count is identical whether lines or matches are counted. **A count cannot tell quotation from assertion.**
+  - **v3 normalised TEXT pin** — closed that, but narrowed `FIGURE` to the literal `min`, re-opening the class the guard exists for: the SPELLED-OUT unit ("minutes"/"mins" rather than "min") became invisible. ⚠ The literal figure is deliberately NOT quoted in this doc — see the gotcha below.
+  - **v4** — `min(?:ute)?s?`, and the comment-lead strip's `*` branch requires a following space (it was eating one star of a markdown `**BOLD**` run).
+- **Ruled out:** *"the count ledger was the remedy"* — measured, M3 survived it. This was recorded as the lesson in the `devrc/tests` cairn entry and stood FALSE until a post-merge sweep; corrected at revision `64a2bba6`. `via: measurement`
+- **Ruled out:** *"the sandbox tier is fine because a no-`.git` replica passes"* — the replica is a proxy; the authoritative answer came from `tekton/devrc-pytests` at `760c8769`. `via: measurement`
+- **Stop grounds (two, independent):** round 3 clean, AND the attribution gate fired — `d6a5aa42..2d89291a` and `2d89291a..1c3b59b2` both touched the test file only, leaving `scripts/scoped-tests.sh` untouched, i.e. two consecutive zero-payload rounds.

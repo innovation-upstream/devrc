@@ -127,6 +127,33 @@ ROOT = Path(__file__).resolve().parents[2]
 # reproduced ON THE DEV HOST in ~70 s; see `scripts/ci-repro/`. Two corrections
 # to the framing above, both measured:
 #
+# ✅ AND THEN IT DID STOP — but read WHY before trusting it, because the zero on
+# its own does not carry the claim. The fix was NOT this constant: `#1458`
+# (`ce9b55c3`, 2026-09-10 15:56) sited the 18 remaining store roots — this class's
+# among them — on TMPFS via the `sited_root` fixture, which removes the mechanism
+# rather than widening the bound, since an fsync to RAM cannot stall on a
+# contended disk. MEASURED 2026-09-11 over `tekton/devrc-pytests`, newest verdict
+# per PR head, split on that commit's timestamp:
+#
+#     window     verdicts  genuine failures  THIS test
+#     pre-fix         125                29          4
+#     post-fix         45                 6          0
+#
+# 🔴 THE POWER IS WEAK AND SAYING SO IS THE POINT. At the pre-fix per-verdict rate
+# (4/125 = 3.2%) the expected count in 45 verdicts is ~1.4, so P(observing 0) ≈
+# 0.23 — roughly a one-in-four coincidence. The zero is CONSISTENT with the fix
+# and does not establish it; what establishes it is that the mechanism is gone.
+# Re-measure before deleting any of this, and do not upgrade the table into
+# "proven".
+#
+# ⚠ AND THIS TEST WAS NEVER THE WORST ONE, which matters because it was ranked and
+# worked as though it were. In the same pre-fix window
+# `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
+# (`test_analyze_service_index_escrow_verify.py`) failed 8 times to this test's 4 —
+# twice as often — and is also at 0 post-fix. A flake that is vivid because it has
+# a long diagnosis written about it is not thereby the most frequent one: COUNT
+# them before choosing which to chase.
+#
 #   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
 #     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …
 #     accept loop parked=True`. `server.py:_replace_bytes` fsyncs the file
@@ -7416,6 +7443,15 @@ class TestTheSpawnHarnessAndThePortRace:
     a connection REFUSED, not as a silent peer. Whether closing this race moves
     that intermittent's rate is UNKNOWN and is written down as unknown; do not
     let a later reader turn "ported alongside" into "caused by".
+
+    ✅ AND IT WAS SOMETHING ELSE, WHICH IS WHY THAT UNKNOWN WAS WORTH WRITING.
+    The intermittent was addressed by `#1458` siting the store on tmpfs — see the
+    measured before/after in the `HANG_TIMEOUT` block at the top of this file —
+    not by anything in this class. So this remains what its own first paragraph
+    says it is: an invariant guard on a mechanism that was live and unclosed, and
+    NOT regression coverage. 🔴 Had the two been merged into one story, the tmpfs
+    fix would have been credited to the port-race retry and the real mechanism
+    would still be in the request path.
 
     So: the retry is a hazard closed by construction, and the message is the
     instrument that makes the NEXT occurrence attributable. Ported from

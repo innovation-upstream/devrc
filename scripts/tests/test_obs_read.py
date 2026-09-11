@@ -1085,3 +1085,117 @@ def test_cli_no_cluster_subprocess():
                        text=True, timeout=15)
     assert r.returncode == 2
     assert "--cluster is REQUIRED" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# rows[].labels — STRUCTURED labels for --json consumers
+#
+# Regression: `rows[].metric` is a DISPLAY string (`{a=1, b=2}`) produced by
+# _fmt_labels for the table. It was the only representation carried in --json,
+# so a machine consumer had to regex a rendered string to recover one label, and
+# a consumer assuming Prometheus's own `data.result[].metric` dict silently got
+# nothing while `row_count` said otherwise. These pin the dict being present,
+# correct, and additive.
+# --------------------------------------------------------------------------- #
+def test_prometheus_vector_row_carries_structured_labels():
+    qr = obs.parse_prometheus(
+        prom_vector([({"job_name": "verify-b2-29818380", "namespace": "sr"}, "42")]))
+    row = qr.rows[0]
+    # the dict a parser should use
+    assert row["labels"] == {"job_name": "verify-b2-29818380", "namespace": "sr"}
+    # and it must be a real mapping, NOT the rendered string
+    assert isinstance(row["labels"], dict)
+    assert row["labels"]["job_name"] == "verify-b2-29818380"
+
+
+def test_structured_labels_are_additive_not_a_replacement():
+    """The table renderer reads `metric`; it must survive untouched."""
+    qr = obs.parse_prometheus(prom_vector([({"code": "5xx"}, "7")]))
+    row = qr.rows[0]
+    assert row["metric"] == "{code=5xx}"        # display string preserved
+    assert row["labels"] == {"code": "5xx"}     # dict added alongside
+    assert "metric" in qr.columns and "labels" not in qr.columns
+
+
+def test_structured_labels_reach_the_json_document():
+    """The defect was in --json specifically, so drive render(), not the parser."""
+    qr = obs.parse_prometheus(prom_vector([({"pod": "api-0"}, "1")]))
+    out, _ = obs.render(qr, True, "q", "dpprod", "prometheus")
+    doc = json.loads(out)
+    assert doc["rows"][0]["labels"] == {"pod": "api-0"}
+    # a consumer can now select a label without parsing a rendered string
+    assert [r["labels"]["pod"] for r in doc["rows"]] == ["api-0"]
+
+
+def test_prometheus_matrix_row_carries_structured_labels():
+    qr = obs.parse_prometheus(
+        prom_matrix([({"inst": "a"}, [[1, "1"], [2, "3"]])]))
+    assert qr.rows[0]["labels"] == {"inst": "a"}
+    assert qr.rows[0]["points"] == 2          # existing fields intact
+
+
+def test_label_values_are_coerced_to_str():
+    """Both backends promise strings on the wire; a non-str must not leak out
+    and make `labels[k] == "1"` fail for a caller comparing against the wire."""
+    assert obs._raw_labels({"n": 1, "b": True}) == {"n": "1", "b": "True"}
+
+
+def test_raw_labels_tolerates_a_missing_or_junk_label_set():
+    """A scalar/string Prometheus result has no metric dict; must not raise."""
+    assert obs._raw_labels(None) == {}
+    assert obs._raw_labels("not-a-dict") == {}
+    assert obs._raw_labels({}) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Loki — BOTH branches. Added after a round-1 audit mutation battery showed the
+# loki matrix `labels` could be deleted with the whole suite still green (the
+# prometheus tests above cannot see it), and that the loki STREAMS branch — the
+# highest-traffic path, log queries — still carried labels only as a rendered
+# display string, i.e. the very defect this change exists to fix.
+#
+# 🔴 Loki sends a streams label set under `stream` and a matrix one under
+# `metric`. Those are DIFFERENT KEYS in the API; conflating them is the same
+# class of bug. These pin each branch reading its own key.
+# --------------------------------------------------------------------------- #
+def test_loki_matrix_row_carries_structured_labels():
+    """Kills the mutant that drops `labels` from the loki matrix branch."""
+    payload = {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"namespace": "sr"}, "values": [[1, "1"], [2, "3"]]}]}}
+    qr = obs.parse_loki(payload)
+    assert qr.rows[0]["labels"] == {"namespace": "sr"}
+    assert qr.rows[0]["metric"] == "{namespace=sr}"   # display string intact
+    assert qr.rows[0]["points"] == 2
+
+
+def test_loki_streams_row_carries_structured_labels():
+    """The log path. Reads Loki's `stream` key, not `metric`."""
+    payload = {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"namespace": "civitai-dp-prod", "pod": "api-0"},
+         "values": [["1700000000000000000", "boom"]]}]}}
+    qr = obs.parse_loki(payload)
+    row = qr.rows[0]
+    assert row["labels"] == {"namespace": "civitai-dp-prod", "pod": "api-0"}
+    # the exact access that was impossible before: select one label, no regex
+    assert row["labels"]["pod"] == "api-0"
+    assert row["stream"] == "{namespace=civitai-dp-prod, pod=api-0}"
+    assert row["lines"] == 1 and row["sample"] == "boom"
+
+
+def test_loki_streams_labels_are_additive_and_stay_out_of_the_table():
+    """`columns` drives render_table, so the new key must not appear in it."""
+    payload = {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"pod": "api-0"}, "values": [["1", "x"]]}]}}
+    qr = obs.parse_loki(payload)
+    assert qr.columns == ["stream", "lines", "sample"]
+    assert "labels" not in qr.columns
+    assert "labels" in qr.rows[0]
+
+
+def test_loki_streams_labels_reach_the_json_document():
+    payload = {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"pod": "api-0"}, "values": [["1", "x"]]}]}}
+    qr = obs.parse_loki(payload)
+    out, _ = obs.render(qr, True, "q", "dpprod", "loki")
+    doc = json.loads(out)
+    assert doc["rows"][0]["labels"] == {"pod": "api-0"}
