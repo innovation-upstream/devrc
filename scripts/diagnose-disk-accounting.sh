@@ -229,13 +229,18 @@ _not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
 # 🔴 EVERYTHING ELSE THAT STOOD HERE WAS WRONG, and it is deleted rather than
 # re-measured, because a per-implementation table of byte counts and exit codes
 # is a claim nothing checks and everything invalidates. What it got wrong:
-#   - "`-print0` exits **0** … it needs no stat". FALSE for the form this
-#     function uses: `-xdev` needs each entry's st_dev, so it DOES stat, and it
-#     exits 1 on a directory it cannot read. (Without `-xdev` there is no stat
-#     and rc is 0 — which is how the wrong claim got written: the probe dropped
-#     the flag the function actually passes.) ⚠ That rc-0-without-`-xdev` half
-#     was measured on ONE implementation and does NOT generalise: GNU 4.11.0
-#     exits 1 either way. Name the binary or say nothing.
+#   - "`-print0` exits **0** … it needs no stat". FALSE — but so was the
+#     correction that replaced it, which blamed `-xdev`. 🔴 THE FLAG IS NOT THE
+#     DISCRIMINATOR. MEASURED, GNU findutils 4.11.0, mode-0400 base, each cell
+#     twice, WITH and WITHOUT `-xdev`:
+#         base holding 3 regular files      → rc 0, both ways
+#         base holding a SUBDIRECTORY       → rc 1, both ways
+#     So rc turns on whether the unreadable base contains a subdirectory find
+#     would otherwise consider descending into — not on `-xdev`, which changes
+#     nothing here. Two successive comments asserted a cause without varying the
+#     thing they blamed; the second was written by re-running with the flag added
+#     and reading the changed rc as the flag's doing, when the FIXTURE had changed
+#     too. Vary one thing.
 #   - "the byte counts AGREE across builds". FALSE — two implementations
 #     disagreed on one fixture. 🔴 NO FIGURE IS QUOTED NOW, because byte count is
 #     dominated by the fixture's PATH LENGTH: one implementation gave 122 B at a

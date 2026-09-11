@@ -2524,6 +2524,7 @@ def test_tmux_kill_prefix_matches_both_wide_kills_and_neither_narrow_one():
 # classify it. Paths only — line numbers are what rotted last time.
 _KILL_MENTION_LEDGER = {
     "claudedocs/handoff-tmux-restore-chain.md": "prose: the incident write-up",
+    "claudedocs/handoff-tmux-scratchpad-bar-statusline.md": "prose: a gotcha warning AGAINST it — \"Never `kill-server`; that destroys every session\"",
     "scripts/claude-hooks/bash-guard.py": "prose: the guard's own ban list",
     "scripts/claude-hooks/guard_core.py": "prose: this check, its docstring and its message",
     "scripts/claude-hooks/tests/test_guard_core.py": "prose: these tests' fixtures + this ledger",
