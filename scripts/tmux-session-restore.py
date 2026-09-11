@@ -32,6 +32,8 @@ Usage:
 Restore flags:
   --dry-run / -n          show what would happen without sending keys
   --plan PATH             use a custom plan file instead of the default. THIS IS
+  --best            use the generation the CURRENT plan replaced, when that
+                    one carried bound ids this plan has lost.
                           THE RECOVERY PATH: point it at any file in
                           ~/.config/initiatives/restore-plans/ to resume from an
                           older generation after a bad save. `save` prints the
@@ -902,8 +904,30 @@ def cmd_show() -> int:
 
 
 def tmux_session_exists(name: str) -> bool:
-    return subprocess.run(["tmux", "has-session", "-t", name],
-                          capture_output=True).returncode == 0
+    """Does a session named EXACTLY `name` exist?
+
+    🔴 `tmux has-session -t <name>` IS NOT AN EXACT TEST. tmux resolves the
+    target by prefix and fnmatch, so it answers rc 0 for a session that merely
+    STARTS WITH the name. MEASURED on a private socket holding only `sctest`:
+
+        has-session -t sct    -> rc 0      (prefix)
+        has-session -t 'sc*'  -> rc 0      (fnmatch)
+        has-session -t zzznope -> rc 1
+
+    On this operator's own plan that is live, not theoretical: `scratch2` and
+    `scratch20` both exist. If `scratch20` is restored and `scratch2` is not,
+    this returned True for `scratch2`, `new-session` was skipped, and every
+    `scratch2` conversation was silently dropped while `new-window -t scratch2:5`
+    created a window inside `scratch20`.
+
+    `list-sessions -F '#{session_name}'` enumerates instead of resolving, so the
+    comparison can be exact.
+    """
+    out = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return False
+    return name in out.stdout.split("\n")
 
 
 def window_state(target: str) -> tuple[bool, str]:
@@ -930,22 +954,47 @@ def window_state(target: str) -> tuple[bool, str]:
     last. Result: `relaunched 50 windows` and **one** conversation running.
     `_verify_sends` then re-read through this same lying predicate.
 
-    🔴 `list-windows` IS THE PREDICATE THAT CANNOT FALL BACK: it ENUMERATES the
-    session's windows instead of resolving a target against it. Compare an exact
-    index against that list and there is nothing for tmux to be helpful about.
-    Do not "simplify" this back to `display-message`; a target-resolving command
-    can never answer an existence question.
+    `list-windows` ENUMERATES a session's windows instead of resolving an index
+    against it, so the INDEX half of the question becomes exact.
+
+    🔴 BUT `-t <session>` IS STILL A TMUX TARGET, AND TMUX PREFIX- AND
+    FNMATCH-MATCHES SESSION NAMES. An earlier version of this docstring claimed
+    "there is nothing for tmux to be helpful about", and that was false for the
+    session component. MEASURED on a private socket where only `sctest` existed:
+
+        list-windows -t sct    -> sctest|1   rc=0     (prefix match)
+        list-windows -t 'sc*'  -> sctest|1   rc=0     (fnmatch)
+        has-session  -t sct    -> rc=0                (so new-session is skipped)
+
+    That is reachable on this operator's own plan, which holds BOTH `scratch2`
+    (windows 1-9) and `scratch20` (windows 1-3). In a partial continuum restore
+    where `scratch20` came back and `scratch2` did not, asking about
+    `scratch2:1` enumerates SCRATCH20's windows and answers `(True, ...)` — a
+    false PRESENT of exactly the class this function exists to remove, one level
+    up. `scratch2` is then never created and its conversations are silently
+    skipped, while `new-window -t scratch2:5` creates a window inside
+    `scratch20`.
+
+    So the session name is compared EXACTLY too, against `#{session_name}` from
+    the same output. tmux tells us which session it actually chose; we simply
+    stop believing it chose ours. Do not drop that field, and do not
+    "simplify" this back to `display-message` — a target-resolving command can
+    never answer an existence question.
     """
     sess, _, win = target.partition(":")
     if not win:
         return (False, "")
-    # Enumerate, then match exactly. `-F` keeps the pairing on one line so a
-    # window whose command contains whitespace cannot shift the parse.
+    # `-F` keeps the triple on one line so a window whose command contains
+    # whitespace cannot shift the parse; the session name is carried so the
+    # caller's name can be verified rather than assumed.
     out = run(["tmux", "list-windows", "-t", sess,
-               "-F", "#{window_index}\t#{pane_current_command}"])
+               "-F", "#{session_name}\t#{window_index}\t#{pane_current_command}"])
     for line in out.splitlines():
-        idx, tab, cmd = line.partition("\t")
-        if tab and idx == win:
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        got_sess, idx, cmd = parts[0], parts[1], parts[2]
+        if got_sess == sess and idx == win:
             return (True, cmd.strip())
     return (False, "")
 
@@ -1452,24 +1501,57 @@ def richer_generation(current: Path) -> tuple[Path, set[str]] | None:
     Generations are what make this recoverable at all (#1383) — but only if
     somebody looks. This is the looking.
 
-    Returns `(generation_path, ids_it_has_that_current_lacks)`, choosing the
-    generation that recovers the MOST missing ids and, among ties, the newest.
-    Returns None when nothing is missing, which is the ordinary case.
+    🔴 THE PREDICATE IS "THE PLAN THIS ONE REPLACED WAS RICHER", NOT "SOME
+    GENERATION SOMEWHERE HOLDS AN ID YOU NO LONGER HAVE." The second is what the
+    first draft asked, and it is TRUE FOREVER on a healthy workspace: ordinary
+    churn — closing a window, replacing a conversation — leaves every older
+    generation holding ids the current plan lacks. MEASURED on the live,
+    fully-recovered workspace: **137 of 137 generations** satisfied it, so the
+    warning fired on every single run. `claude/RULES.md` names that exactly — a
+    permanently-red gate trains everyone to click through — and it would have
+    been self-inflicted on the one alarm meant to catch the next incident.
+
+    Worse, the remedy it advertised was wrong in the ordinary case: the "richest"
+    generation is usually an OLD one, so `--best` would have restored a day-old
+    layout over a current one and reported success.
+
+    So the comparison is against the IMMEDIATELY PRECEDING generation only. That
+    is the incident's actual signature — a save fired mid-recovery and repointed
+    the plan from 52 entries to 37 — and it is the same shape as `cmd_save`'s
+    shrink report, which fired **21 times in 753 saves (2.8%)** rather than 100%.
+
+    Returns `(previous_generation, ids_it_has_that_current_lacks)` or None.
     """
+    cur_ids = bound_ids(read_plan(current) or [])
+    stamps = list_generations()
+    if len(stamps) < 2:
+        return None
+    # Which generation is the pointer on? Compare resolved paths, because
+    # `current` is normally the `restore-plan.json` SYMLINK.
     try:
-        cur_ids = bound_ids(read_plan(current) or [])
+        cur_real = current.resolve()
     except OSError:
         return None
-    best: tuple[Path, set[str]] | None = None
-    # Newest first, so a tie is resolved toward the most recent generation.
-    for stamp in reversed(list_generations()):
-        gplan = generation_paths(stamp)[0]
-        if gplan.resolve() == current.resolve():
+    idx = None
+    for i, stamp in enumerate(stamps):
+        try:
+            if generation_paths(stamp)[0].resolve() == cur_real:
+                idx = i
+                break
+        except OSError:
             continue
-        missing = bound_ids(read_plan(gplan) or []) - cur_ids
-        if missing and (best is None or len(missing) > len(best[1])):
-            best = (gplan, missing)
-    return best
+    # Pointer not on a generation (a pre-generations regular file, or a dangling
+    # link): there is no "the plan this replaced", so say nothing.
+    if idx is None or idx == 0:
+        return None
+    prev = generation_paths(stamps[idx - 1])[0]
+    # `bound_ids` reads dicts; a generation that is a JSON list of non-dicts
+    # would raise AttributeError out of a warning path and fail the unit.
+    try:
+        missing = bound_ids(read_plan(prev) or []) - cur_ids
+    except (AttributeError, TypeError):
+        return None
+    return (prev, missing) if missing else None
 
 
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
@@ -1493,6 +1575,12 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
                 print(f"🔴 --best: using {gplan.name} — it carries {len(missing)} bound "
                       f"session id(s) the current plan has LOST.", file=sys.stderr)
                 src = gplan
+                # 🔴 The staleness gate below measures PLAN, not `src`. Having
+                # explicitly chosen an OLDER generation, refusing it for being
+                # old is incoherent — and measuring the pointer would let a
+                # fresh pointer wave through an arbitrarily stale choice. Treat
+                # --best like --plan: the caller has chosen.
+                staleness_hours = None
             else:
                 print(f"🔴 A NEWER-BUT-POORER PLAN IS IN EFFECT. {gplan.name} carries "
                       f"{len(missing)} bound session id(s) this plan does not.",
@@ -1624,6 +1712,8 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
             print(f"🔴 workspace did NOT settle within {waited:.0f}s — sending anyway, "
                   "but panes may still be respawning and sends can be DISCARDED. "
                   "This run is best-effort, not a clean restore.", file=sys.stderr)
+    # One PATH scan, not one per entry.
+    cb = claude_command()
     for e in plan:
         sess, win, cwd, sid = e["session"], e["window"], e["cwd"], e["session_id"]
         target = f"{sess}:{win}"
@@ -1631,14 +1721,16 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
             run(["tmux", "new-session", "-d", "-s", sess, "-c", cwd])
         exists, cmd = window_state(target)
         if not exists and not dry_run:
-            run(["tmux", "new-window", "-t", target, "-c", cwd])
+            # `-d`: creating 33 windows must not yank the active window in every
+            # session it touches. Dormant until now only because the old
+            # predicate meant new-window was essentially never called.
+            run(["tmux", "new-window", "-d", "-t", target, "-c", cwd])
             cmd = ""
         # Never clobber a window that already has claude running (idempotent re-runs).
         if cmd == "claude":
             print(f"  skip {e['codename']}:{win} — claude already running")
             skipped += 1
             continue
-        cb = claude_command()
         resume = f"{cb} --resume {sid}" if sid else f"{cb} --resume"
         line = f"cd {cwd} && {resume}"
         if dry_run:

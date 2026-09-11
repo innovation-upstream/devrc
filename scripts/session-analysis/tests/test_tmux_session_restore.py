@@ -2355,6 +2355,17 @@ class _FakeTmux:
         self.windows = dict(windows)          # {"sess:idx": "command"}
         self.sent = []
 
+    def _session_for(self, name):
+        """The session tmux would pick for target `name`: exact first, else the
+        first PREFIX match — tmux's own precedence."""
+        names = sorted({k.partition(":")[0] for k in self.windows})
+        if name in names:
+            return name
+        for n in names:
+            if n.startswith(name):
+                return n
+        return None
+
     def _resolve(self, target):
         """Where tmux ACTUALLY delivers a target: the window if it exists, else
         the session's first window (the documented fallback)."""
@@ -2379,9 +2390,16 @@ class _FakeTmux:
             return ""
         if argv[:2] == ["tmux", "list-windows"]:
             sess = argv[argv.index("-t") + 1]
-            return "\n".join(f"{k.split(':')[1]}\t{v}"
+            # 🔴 MODEL TMUX'S LOOSE SESSION RESOLUTION, NOT AN EXACT MATCH.
+            # `list-windows -t sct` enumerates `sctest` (prefix), measured on a
+            # private socket. A double that matched exactly would make the
+            # session half of the fix untestable and would have hidden the
+            # scratch2/scratch20 hazard entirely — the same "double stricter
+            # than tmux" trap, one level up from the send-keys one.
+            owner = self._session_for(sess)
+            return "\n".join(f"{owner}\t{k.split(':')[1]}\t{v}"
                              for k, v in self.windows.items()
-                             if k.startswith(f"{sess}:"))
+                             if owner and k.startswith(f"{owner}:"))
         if argv[:2] == ["tmux", "send-keys"]:
             # 🔴 send-keys RESOLVES THE SAME WAY display-message DOES. Recording
             # the target as PASSED would make this double more forgiving than
@@ -2523,8 +2541,12 @@ def test_a_richer_generation_is_reported_when_the_pointer_moved_to_a_poorer_plan
              "codename": "Gold", "bind_source": "ledger"} for i in range(6)]
     poor = rich[:2]
     tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(rich))
-    tsr.generation_paths("20260911T001000")[0].write_text(json.dumps(poor))
-    tsr.PLAN.write_text(json.dumps(poor))
+    poor_gen = tsr.generation_paths("20260911T001000")[0]
+    poor_gen.write_text(json.dumps(poor))
+    # PLAN is a SYMLINK into restore-plans/ in production, and the predicate
+    # needs that to know which generation the pointer is on. A regular file here
+    # made this test green against an implementation that answers None.
+    tsr.PLAN.symlink_to(poor_gen)
 
     found = tsr.richer_generation(tsr.PLAN)
     assert found is not None, "a generation with 4 extra bound ids was not reported"
@@ -2540,8 +2562,9 @@ def test_no_richer_generation_is_reported_when_nothing_was_lost(state):
     tsr.generations_dir().mkdir(parents=True, exist_ok=True)
     plan = [{"session": "s", "window": "1", "cwd": "/tmp", "session_id": "sid-1",
              "codename": "Gold", "bind_source": "ledger"}]
-    tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(plan))
-    tsr.PLAN.write_text(json.dumps(plan))
+    g = tsr.generation_paths("20260911T000000")[0]
+    g.write_text(json.dumps(plan))
+    tsr.PLAN.symlink_to(g)
     assert tsr.richer_generation(tsr.PLAN) is None, (
         "reported a richer generation when the current plan carries every id")
 
@@ -2591,3 +2614,75 @@ def test_claude_resolves_under_the_SYSTEMD_UNITS_OWN_PATH_not_just_a_dev_shell(
     assert got == str(real), (
         f"returned the mutable profile symlink instead of its store target: {got!r} "
         f"(a home-manager switch blanks ~/.nix-profile for ~1s)")
+
+
+def test_the_richer_generation_warning_is_QUIET_on_an_ordinary_healthy_history(
+        state, monkeypatch):
+    """🔴 A PERMANENTLY-RED ALARM IS WORSE THAN NO ALARM, AND THE FIRST DRAFT
+    OF THIS FEATURE WAS ONE.
+
+    It asked "does ANY generation hold a bound id the current plan lacks?".
+    Ordinary churn — closing a window, replacing a conversation — makes that
+    true of every older generation forever. MEASURED on the live workspace
+    after a successful recovery: **137 of 137 generations** satisfied it, so the
+    warning fired on every single unit trigger.
+
+    This fixture is that shape: a long history whose older generations hold ids
+    that have since been retired, and a CURRENT plan that lost nothing to the
+    generation it replaced. The warning must say nothing.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+
+    def plan_of(ids):
+        return [{"session": "s", "window": str(i), "cwd": "/tmp", "session_id": x,
+                 "codename": "Gold", "bind_source": "ledger"} for i, x in enumerate(ids)]
+
+    # 🔴 THE FIXTURE HAS TO SEPARATE THE TWO PREDICATES, or it proves nothing.
+    # Generations 0-7 churn (each retires an id), so the ORIGINAL "any
+    # generation holds an id you lack" predicate fires loudly here — that is the
+    # behaviour under test. Generations 8 and 9 carry the SAME bound set, so the
+    # narrowed "the plan this one replaced was richer" predicate must be quiet.
+    # A fixture that churned all the way to the end would make the narrowed
+    # predicate fire too, correctly (a save that drops a bound id IS worth
+    # reporting) — and would have scored this test as a failure of the fix
+    # rather than of the fixture. Measured: it did, on the first draft.
+    for n in range(8):
+        tsr.generation_paths(f"2026091{n}T000000")[0].write_text(
+            json.dumps(plan_of([f"sid-{n}", f"sid-{n+1}", "sid-stable"])))
+    settled = ["sid-8", "sid-9", "sid-stable"]
+    tsr.generation_paths("20260918T000000")[0].write_text(json.dumps(plan_of(settled)))
+    newest = tsr.generation_paths("20260919T000000")[0]
+    newest.write_text(json.dumps(plan_of(settled)))
+    tsr.PLAN.symlink_to(newest)
+
+    # CONTROL: the old, unbounded predicate WOULD have fired on this fixture.
+    older_with_extras = [
+        st for st in tsr.list_generations()
+        if tsr.bound_ids(tsr.read_plan(tsr.generation_paths(st)[0]) or []) - set(settled)]
+    assert older_with_extras, (
+        "fixture does not reproduce the permanently-red condition: no older "
+        "generation holds a retired id, so this test cannot show the narrowing")
+
+    assert tsr.richer_generation(tsr.PLAN) is None, (
+        "the warning fired on a healthy history — a permanently-red alarm is "
+        "exactly what claude/RULES.md says trains everyone to click through")
+
+
+def test_window_state_does_not_accept_a_PREFIX_session_as_the_named_one(monkeypatch):
+    """🔴 `list-windows -t scratch2` ENUMERATES `scratch20` — tmux resolves a
+    session target by prefix. MEASURED on a private socket.
+
+    Live on this operator's plan: `scratch2` (windows 1-9) and `scratch20`
+    (windows 1-3) both exist. In a partial restore where `scratch20` came back
+    and `scratch2` did not, asking about `scratch2:1` must say MISSING — or
+    `scratch2` is never created, its conversations are silently skipped, and new
+    windows are created inside `scratch20`.
+    """
+    fake = _FakeTmux({"scratch20:1": "claude", "scratch20:2": "zsh"})
+    monkeypatch.setattr(tsr, "run", fake)
+    assert tsr.window_state("scratch20:1") == (True, "claude"), "the REAL session must resolve"
+    exists, cmd = tsr.window_state("scratch2:1")
+    assert exists is False, (
+        f"scratch2:1 was answered from scratch20 (got {(exists, cmd)!r}) — the "
+        "session half of the same resolution bug this fix closes for windows")
