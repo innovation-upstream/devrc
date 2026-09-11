@@ -98,24 +98,29 @@ let
   # here exits `inappropriate ioctl for device` and the click is a SILENT NO-OP.
   # So it is modelled on `syshealthCmd` above.
   #
-  # NO `read -n 1` HOLD, and that is a difference from syshealthCmd, not an
-  # omission — checked by reading scripts/tmux-scratch-picker.sh: every exit path
-  # is either long-lived (`tmux attach-session` / `exec tmux new-session`, which
-  # own the terminal until the operator detaches) or a deliberate instant exit
-  # (empty fzf selection, or already-inside-a-scratchpad -> `detach-client`). A
-  # hold would make the two instant paths demand a keypress to dismiss an empty
-  # window. syshealth needs one because it prints and exits in ~0.16 s.
+  # NO `read -n 1` HOLD IN THIS STRING, and that is a difference from
+  # syshealthCmd rather than an omission: the picker carries its OWN hold, on
+  # the only path that needs one. syshealth prints and exits in ~0.16 s, so
+  # every one of its runs would flash; the picker's normal exits are either
+  # long-lived (`tmux attach-session` / `tmux new-session` own the terminal
+  # until the operator detaches) or a DELIBERATE instant exit (the operator
+  # dismissed fzf). Its one accidental instant exit — attach failed AND create
+  # failed — holds, inside the script, where it can print why.
   #
-  # ⚠ HONEST CAVEAT, NOT A CLAIM THAT IT IS FINE. The picker opens with
+  # 🔴 AN EARLIER VERSION OF THIS COMMENT CLAIMED EVERY INSTANT EXIT WAS
+  # DELIBERATE, AND THAT WAS FALSE. The picker opened with
   # `tmux display-message -p '#{session_name}'`, which — run OUTSIDE any tmux
-  # client — answers with the server's most-recently-used session rather than
-  # "none". If that happens to be a `scratch*` session, the script takes its
-  # detach branch and exits immediately: the click would dismiss whatever
-  # scratchpad was last used instead of opening the picker. That behaviour is
-  # unchanged by this PR (the same script is already bound to Alt+Shift+T, where
-  # it is always inside a client so the question does not arise) and has NOT
-  # been exercised from a float terminal here. Fixing it belongs in the picker,
-  # not in this string.
+  # client, which is exactly what this click does — answers with the server's
+  # MOST-RECENTLY-USED session rather than "none". REPRODUCED on a private
+  # socket 2026-09-11: with `$TMUX` unset, one client attached to the
+  # NON-scratch session `work` and `scratch2` most recently used, the picker
+  # took its `scratch*` detach branch and `tmux detach-client` — which outside a
+  # client targets the server's best client, not "this" one — threw the `work`
+  # client off the server. Exit 0, no output: the click read as "did nothing"
+  # while damaging an unrelated session. FIXED IN THE PICKER, not here:
+  # scripts/tmux-scratch-picker.sh now requires `[ -n "$TMUX" ]` for that
+  # branch, and the outside-a-client path was then exercised end to end on a
+  # real pty (fzf renders, selecting a slot attaches a client to it).
   scratchPickerCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${home}/.config/tmux/scratch-picker.sh";
 
   # Python env for the decoupled bar-status poller (workbench systemd user timer):

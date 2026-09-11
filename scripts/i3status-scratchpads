@@ -39,13 +39,36 @@ missing `tmux`, or an unexplained `tmux` failure must NOT render that; they
 render `scratch ?`. Never an empty string either: an empty block is
 indistinguishable from a bar that dropped the block entirely.
 
+🔴 THREE WAYS THAT DISCRIMINANT WAS NARROWER THAN THIS PARAGRAPH, all closed
+here because each rendered a PLAUSIBLE legend off a reading nobody took:
+  * A PARTIALLY parseable slot table. `if slots:` accepted any non-empty parse,
+    so corrupting 17 of 20 colour fields yielded 3 entries and rendered
+    `g3 G v` — a short legend that looks like a design choice. `load_slots` now
+    carries a SLOT-COUNT FLOOR derived from the file itself.
+  * `tmux` exiting **0** with output this script cannot parse. Every line
+    failing to parse yielded `{}`, which is the MEASURED-ZERO value, so a tmux
+    format change rendered the full dim legend — the exact false zero the
+    non-zero-exit path is careful to avoid. `fetch_sessions` now returns None
+    when rc is 0, stdout is non-empty, and nothing parsed.
+  * WHERE THE SOCKET IS. tmux's compiled-in socket dir is `/tmp`, and this
+    host's real socket is `/run/user/1000/tmux-1000/default` only because the
+    interactive session exports `TMUX_TMPDIR=/run/user/1000` — a variable that
+    appears in no config file on this box (the same undeclared dependency
+    `nix/home.nix` records on its `tmux-restore` path unit). i3status-rust's
+    environment is not that shell's. So this script FINDS the socket itself
+    rather than inheriting the answer; see `_socket_roots`.
+
 🔴 PANGO. i3status-rust's `custom` block passes `text` through
 `$text.pango-str()`, so the emitted string IS markup — verified by positive
 control (a `<span foreground=…>` reaches the i3bar line unescaped with
-`"markup":"pango"`). Every value interpolated into it therefore goes through
-`html.escape`. Slot keys are `[A-Za-z]` today; escaping is defensive, because
-the slot table is edited by hand and a `<` there would otherwise silently break
-the whole bar line.
+`"markup":"pango"`, i3status-rs 0.36.1). Every value interpolated into it
+therefore goes through `html.escape`. Slot keys are `[A-Za-z]` today; escaping
+is defensive, because the slot table is edited by hand. MEASURED in the same
+control: a block emitting a raw `a < b & c` reaches the bar line VERBATIM —
+i3status-rs neither escapes nor validates it, so nothing downstream of here will
+do it for us. ⚠ What pango/i3bar then do with invalid markup — one broken block
+or a broken line — was NOT measured; observing it means rendering the operator's
+real bar.
 
 Unit-tested against fixture data in scripts/tests/test_scratchpads_block.py —
 no real tmux, no real slot table needed.
@@ -92,36 +115,141 @@ _SLOT_PATHS = (
 # Parsed by REGEX over the text, never by sourcing: this is a bash file, and
 # shelling out to `bash -c '. table; echo …'` would make a bar block spawn a
 # shell every interval to read four fields.
-_SLOT_RE = re.compile(
-    r'"([^":]+):([^":]+):(#[0-9a-fA-F]{3,8}):([^"]+)"')
+#
+# 🔴 THE PATTERN IS NOT WRITTEN HERE. It is read from the slot table's own
+# `# SLOT_ENTRY_RE:` marker line — the single copy that nix/programs/tmux/
+# default.nix also reads, so the legend and the tmux key bindings cannot
+# disagree about what a slot IS. They previously did, in both directions: a 9-
+# or 12-digit hex colour (valid pango) got a binding but no legend entry, and a
+# commented-out slot line got a legend entry but no binding. Anchoring is this
+# side's job — the marker holds the body, `^…$` under MULTILINE is what makes it
+# whole-line the way nix's `builtins.match` already is.
+_MARKER_RE = re.compile(r'^# SLOT_ENTRY_RE: (\S.*?)[ ]*$', re.M)
+# A slot entry is a quoted string alone on a line inside the array. This is the
+# FLOOR's yardstick, NOT a parser: it is deliberately blind to the fields, so it
+# still counts an entry whose colour (or any other field) has been corrupted.
+# A commented-out line does not start with `"`, so it is not counted — matching
+# what nix and a bash `source` both do with it.
+_CANDIDATE_RE = re.compile(r'^[ ]*"[^"]*"[ ]*$', re.M)
+
+
+def slot_pattern(text):
+    """The entry grammar carried by the slot table's own marker line, or None.
+
+    EXACTLY ONE marker, or this is not a table we can read: zero means the file
+    is not the canonical one (or the marker was edited away), and two would let
+    a stray copy silently win. Either way the honest answer is `?`, not a guess
+    at the grammar."""
+    found = _MARKER_RE.findall(text)
+    if len(found) != 1:
+        return None
+    try:
+        return re.compile("^" + found[0] + "$", re.M)
+    except re.error:
+        return None
 
 
 def load_slots(paths=_SLOT_PATHS):
     """Parse the canonical slot table → list of (session, key, color, name).
 
-    Returns None — NOT [] — if no copy is loadable or a copy parses to zero
-    entries. [] would render as an empty legend, which is a reading nobody can
-    take: the table always has slots in it. Never raises."""
-    sys.dont_write_bytecode = True
+    Returns None — NOT [] — if no copy is loadable, if a copy carries no usable
+    `# SLOT_ENTRY_RE:` marker, if a copy parses to zero entries, or if it parses
+    to FEWER entries than the file declares. Never raises.
+
+    🔴 THE SLOT-COUNT FLOOR IS THE POINT, AND `if slots:` WAS NOT IT. A table
+    that parses PARTIALLY renders a short legend that looks deliberate —
+    MEASURED: corrupt 17 of the 20 colour fields and the old code rendered
+    `g3 G v`, a perfectly plausible three-slot bar. So the entries the grammar
+    accepts are compared against the entries the file plausibly DECLARES (any
+    quoted string alone on a line, `_CANDIDATE_RE`), and a shortfall is
+    UNMEASURED. The expectation is derived from the file, never from a literal
+    20: adding a 21st slot must not need this line edited.
+
+    The floor is per-file and the loop continues to the next path on a
+    shortfall, so a corrupt deployed copy can still fall through to a good one
+    rather than blanking the pill."""
     for p in paths:
         try:
             with open(p, encoding="utf-8") as fh:
                 text = fh.read()
         except OSError:
             continue
-        slots = _SLOT_RE.findall(text)
-        if slots:
-            return [tuple(s) for s in slots]
+        rx = slot_pattern(text)
+        if rx is None:
+            continue
+        slots = [(m.group(1), m.group(2), m.group(3), m.group(5))
+                 for m in rx.finditer(text)]
+        if slots and len(slots) >= len(_CANDIDATE_RE.findall(text)):
+            return slots
     return None
 
 
-def fetch_sessions(run=None):
+# 🔴 WHERE TMUX'S SOCKET IS, AND WHY THIS SCRIPT MUST NOT INHERIT THE ANSWER.
+# tmux looks for `$TMUX_TMPDIR/tmux-$UID/default` and its COMPILED-IN DEFAULT IS
+# `/tmp` — the same formula `scripts/tmux-session-restore.py:tmux_socket_path()`
+# spells and `nix/home.nix`'s tmux-restore path unit spells in systemd
+# specifiers. This host's real socket is `/run/user/1000/tmux-1000/default`, and
+# it is there only because the INTERACTIVE session exports
+# `TMUX_TMPDIR=/run/user/1000`; that value appears in no /etc/nixos file, no
+# environment.d and no home-manager output, which `nix/home.nix` records at
+# length as a dependency on undeclared runtime state. i3status-rust does not run
+# in that shell.
+#
+# MEASURED on the workbench 2026-09-11, `TMUX_TMPDIR` unset:
+#   `tmux list-sessions` -> rc 1, `error connecting to /tmp/tmux-1000/default
+#   (No such file or directory)` — while 20 scratchpads were live on the
+#   /run/user socket. That is not a false zero (it does not say "no server
+#   running"), it is a PERMANENT `?`: the pill would never measure anything on
+#   this host again. And the false-zero variant is one stale socket away —
+#   MEASURED, same tmux 3.7c: a socket file left behind by a dead server makes
+#   tmux say `no server running on <path>`, which the real-zero branch accepts.
+# So: search the candidate roots for a socket and point tmux at the one we
+# found, and treat "no server running" as a real zero only when no socket was
+# found ANYWHERE.
+_SOCKET_NAME = "default"
+
+
+def _socket_roots():
+    """Candidate `TMUX_TMPDIR` roots, most specific first, de-duplicated.
+
+    `/run/user/<uid>` is listed as a LITERAL and not only via
+    `$XDG_RUNTIME_DIR`, because that variable is as absent from a bar block's
+    environment as `$TMUX_TMPDIR` is. `/tmp` last: it is tmux's own fallback."""
+    uid = os.getuid()
+    roots, seen = [], set()
+    for r in (os.environ.get("TMUX_TMPDIR"),
+              os.environ.get("XDG_RUNTIME_DIR"),
+              "/run/user/%d" % uid,
+              "/tmp"):
+        if r and r not in seen:
+            seen.add(r)
+            roots.append(r)
+    return roots
+
+
+def find_socket(roots=None, exists=None):
+    """(root, socket path) of the first candidate that has a tmux socket.
+
+    (None, None) when there is none anywhere — which is the only evidence that
+    makes "no server running" a REAL zero rather than "we looked in the wrong
+    place". Injectable for tests."""
+    ex = exists or os.path.exists
+    uid = os.getuid()
+    for r in (_socket_roots() if roots is None else roots):
+        p = os.path.join(r, "tmux-%d" % uid, _SOCKET_NAME)
+        if ex(p):
+            return r, p
+    return None, None
+
+
+def fetch_sessions(run=None, socket_finder=None):
     """tmux session name → window count, or None if it could not be measured.
 
     🔴 PARSING TOOL OUTPUT, and the fallback direction is deliberate. `tmux
     list-sessions` exits non-zero for TWO very different reasons:
-      * "no server running on /tmp/tmux-…"  — a REAL reading of zero sessions.
-        The operator has no tmux up; the legend should show every slot dim.
+      * "no server running on /tmp/tmux-…"  — POSSIBLY a real reading of zero
+        sessions: the operator has no tmux up and the legend should show every
+        slot dim.
       * anything else (a broken socket, a permissions error, a tmux that is
         wedged) — NOT a reading. That must surface as `?`.
     Nothing structured distinguishes them, so this matches `no server running`
@@ -129,7 +257,21 @@ def fetch_sessions(run=None):
     is `?` (unmeasured): a format change on tmux's side then costs a visible
     `?` rather than a silently false "nothing is running".
 
-    `run` is injectable so this is unit-testable without tmux."""
+    🔴 AND "no server running" ALONE IS NOT ENOUGH — it names the path tmux
+    LOOKED AT, which is not necessarily where the socket is (see `_socket_roots`
+    above). It is accepted as a zero only when `find_socket()` finds no socket
+    under any candidate root. A socket that exists while tmux reports no server
+    on some other path is UNMEASURED.
+
+    🔴 A ZERO EXIT IS NOT A READING EITHER, WHICH IS THE MIRROR IMAGE OF ALL
+    THAT. `tmux` exiting 0 with output whose FORMAT changed parses to zero
+    entries, and `{}` is the measured-zero value: the full dim legend, off
+    stdout this script could not read a single line of. So rc 0 + non-empty
+    stdout + nothing parsed → None. Genuinely empty stdout with rc 0 stays a
+    real zero, because that is what a server holding no sessions prints.
+
+    `run` and `socket_finder` are injectable so this is unit-testable without
+    tmux."""
     runner = run or _run_tmux
     try:
         rc, out, err = runner()
@@ -139,10 +281,14 @@ def fetch_sessions(run=None):
         return None
     if rc != 0:
         if "no server running" in (err or "").lower():
+            _root, sock = (socket_finder or find_socket)()
+            if sock is not None:
+                return None  # a socket EXISTS elsewhere — we looked wrong
             return {}        # a REAL zero: tmux is simply not up
         return None          # unexplained failure — refuse to call it zero
+    text = out or ""
     sessions = {}
-    for line in (out or "").splitlines():
+    for line in text.splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
@@ -150,13 +296,19 @@ def fetch_sessions(run=None):
             sessions[parts[0]] = int(parts[1])
         except ValueError:
             continue
+    if not sessions and text.strip():
+        return None          # rc 0, output we could not read a line of — not zero
     return sessions
 
 
 def _run_tmux():
+    env = dict(os.environ)
+    root, _sock = find_socket()
+    if root:
+        env["TMUX_TMPDIR"] = root
     p = subprocess.run(
         ["tmux", "list-sessions", "-F", "#{session_name} #{session_windows}"],
-        capture_output=True, text=True, timeout=5)
+        capture_output=True, text=True, timeout=5, env=env)
     return p.returncode, p.stdout, p.stderr
 
 

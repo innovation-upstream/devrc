@@ -7,15 +7,41 @@ let
   # the tmux HUDs source and initiative-scan.py parses. Add/rename a scratchpad by
   # editing the slot table only.
   slotsText = builtins.readFile ../../../scripts/tmux-scratch-slots.sh;
-  # Slot entries look like:  "scratch4:V:#83a598:Vapor"  (session:key:color:name).
-  slotRe = "[[:space:]]*\"([^\":]+):([^\":]+):(#[0-9a-fA-F]+):([^\"]+)\"[[:space:]]*";
-  slotLines = builtins.filter (l: builtins.match slotRe l != null)
-    (lib.splitString "\n" slotsText);
+  slotsLines = lib.splitString "\n" slotsText;
+  # 🔴 THE ENTRY GRAMMAR IS NOT WRITTEN HERE — it is read from the slot table's
+  # own `# SLOT_ENTRY_RE:` marker line, the single copy that
+  # scripts/i3status-scratchpads (the bar's colour legend) reads too. This file
+  # and that one used to carry a regex EACH and they disagreed in both
+  # directions: `#[0-9a-fA-F]+` here accepted a 9- or 12-digit hex colour (both
+  # valid pango) that the legend's `{3,8}` dropped, so a slot got a key binding
+  # and no legend entry; and the legend matched anywhere in the text while this
+  # one is whole-line, so a COMMENTED-OUT slot line got a legend entry
+  # advertising a hotkey bound to nothing. Slot entries look like
+  # "scratch4:V:#83a598:Vapor" (session:key:color:name).
+  markerMatches = builtins.filter (m: m != null)
+    (map (l: builtins.match "# SLOT_ENTRY_RE: (.*)" l) slotsLines);
+  slotRe =
+    if builtins.length markerMatches == 1
+    then builtins.elemAt (builtins.head markerMatches) 0
+    else throw ("scripts/tmux-scratch-slots.sh must carry EXACTLY ONE "
+      + "`# SLOT_ENTRY_RE:` marker line — it is the only copy of the slot entry "
+      + "grammar, shared with scripts/i3status-scratchpads. Found "
+      + toString (builtins.length markerMatches) + ".");
+  slotLines = builtins.filter (l: builtins.match slotRe l != null) slotsLines;
+  # What the file DECLARES: a quoted string alone on a line. Deliberately blind
+  # to the fields, so a slot whose colour was corrupted still counts here — that
+  # is what makes the shortfall check below able to see it. A commented-out line
+  # does not start with `"`, so it is not declared. Same yardstick as
+  # `_CANDIDATE_RE` in scripts/i3status-scratchpads.
+  candidateLines = builtins.filter
+    (l: builtins.match "[ ]*\"[^\"]*\"[ ]*" l != null) slotsLines;
+  # Group 4 is the colour's hex digits (the length alternation), so `name` is
+  # group 5 -> index 4.
   parse = l: let m = builtins.match slotRe l; in {
     sess = builtins.elemAt m 0;
     key = builtins.elemAt m 1;
     color = builtins.elemAt m 2;
-    name = builtins.elemAt m 3;
+    name = builtins.elemAt m 4;
   };
   # Byte-identical (per tmux's normalization) to the former hand-written bindings —
   # verified via a `tmux list-keys` diff before the cutover.
@@ -24,7 +50,21 @@ let
     + " { display-popup -d \"#{pane_current_path}\" -xC -yC -w 90% -h 90%"
     + " -S 'fg=${s.color}' -T ' ${s.name} '"
     + " -E 'tmux attach-session -t ${s.sess} || tmux new-session -s ${s.sess}' }";
-  scratchBindings = builtins.concatStringsSep "\n" (map (s: mkBind (parse s)) slotLines);
+  # 🔴 A PARTIALLY-PARSEABLE TABLE MUST FAIL THE BUILD, NOT SHIP FEWER KEYS.
+  # The bar legend's counterpart of this renders `scratch ?`; here the only
+  # honest "unmeasured" is a build error, because the alternative is a switch
+  # that silently succeeds having generated 3 bindings out of 20 and an operator
+  # whose Alt-keys quietly stop working.
+  scratchBindings =
+    if builtins.length slotLines < builtins.length candidateLines
+    then throw ("scripts/tmux-scratch-slots.sh declares "
+      + toString (builtins.length candidateLines)
+      + " slot entries but only "
+      + toString (builtins.length slotLines)
+      + " match the `# SLOT_ENTRY_RE:` grammar — refusing to generate a partial "
+      + "set of scratchpad bindings. Fix the malformed entries (a colour must "
+      + "be 3, 6, 9 or 12 hex digits) or delete them outright.")
+    else builtins.concatStringsSep "\n" (map (s: mkBind (parse s)) slotLines);
 
   # 🔴 CONTINUUM'S 15-MINUTE AUTOSAVE IS A STATUS-LINE INTERPOLATION, AND
   # NOTHING ELSE DRIVES IT.  `continuum.tmux:main()` calls

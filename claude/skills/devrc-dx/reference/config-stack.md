@@ -35,7 +35,7 @@ the scratch-slot system, the task-management wiring, and who owns which file.
 | tmux search | prefix+/ | fzf all windows by path |
 | tmux fuzzyclaw TUI | Alt+F | Go Bubble Tea dashboard: live table, search, preview, multi-select |
 | tmux copy mode | vi keys | Ctrl+hjkl for fast nav |
-| tmux scratch slots | Alt+g/G/v/V/p/P | 6 persistent popups (see below) |
+| tmux scratch slots | Alt+ 20 keys (g/G/v/V/p/P/o/O/n/N/w/W/m/M/i/I/u/U/y/Y) | 20 persistent popups (see below) |
 | tmux lazygit | prefix+g | 90% popup |
 | tmux k9s | prefix+K | 95% popup |
 
@@ -75,7 +75,9 @@ Border color set via `display-popup -S 'fg=COLOR'` — NOT `-s` (see `gotchas.md
 Title is the `-T ' name '` argument (renders at the top of the rounded border).
 
 **Monitor popup (Alt+m):** `scripts/tmux-scratch-monitor.sh` is a live HUD showing
-the last few lines from all 6 scratches at once (auto-refresh every 2s, dismiss
+the last few lines from every scratch session at once — it sources the slot
+table, so that is all 20, and its per-section line count adapts to the popup
+height (auto-refresh every 2s, dismiss
 with q/Esc). Each section has a colored header in its slot color and a line
 count that adapts to popup height. Strips Claude's input-box chrome (the two
 ───── separators wrapping the input prompt) so the visible content is
@@ -83,11 +85,17 @@ conversation/progress, not the model+ctx status bar. Use for monitoring
 parallel Claude sessions without cycling through scratch hotkeys. Like the
 slot hotkeys, M-m detaches first if pressed inside a scratch so popups don't nest.
 
-**Aggregate counters in status-right:** `scripts/tmux-claude-counters.sh`
-renders `N🔄 N⏸ N●` (running / paused / waiting Claude windows across all
-sessions) at the left of status-right. Each segment dim-grays when zero. Pairs
-with the per-slot `●` flag in status-left: the slot legend tells you *which*
-scratch needs attention; the counter tells you the *magnitude* of work in flight.
+**Aggregate counters in status-right — REMOVED 2026-08-14, and the thing they
+"paired with" is gone too.** `scripts/tmux-claude-counters.sh` rendered
+`N🔄 N⏸ N●` (running / paused / waiting Claude windows) at the left of
+status-right; all three counts came from fuzzyclaw's task `status`, which cannot
+answer (measured across 407 task files: 301 done, 87 paused, 18 running, ONE
+waiting — so the bar read `0●` while session-manager measured 5 windows waiting
+on the operator). The per-slot `●` flag in status-left that this paragraph used
+to pair it with is gone for the same reason. Today `status-right` expands to a
+single space: `idle-update.sh` and continuum's `continuum_save.sh` are both
+side-effect interpolations that print nothing. "Which window needs me" is the
+`session-manager` skill's question now, not the status line's.
 
 **agent-ops dashboard — RETIRED.** `scripts/agent-ops` was the read-only
 "mission-control" TUI (open PRs, live agent runs, momentum, health), launched

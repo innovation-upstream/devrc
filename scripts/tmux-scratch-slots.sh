@@ -40,6 +40,30 @@
 #   _d="$(dirname "$0")"
 #   if   [ -f "$_d/scratch-slots.sh" ];      then . "$_d/scratch-slots.sh"
 #   elif [ -f "$_d/tmux-scratch-slots.sh" ]; then . "$_d/tmux-scratch-slots.sh"; fi
+#
+# 🔴 THE ENTRY GRAMMAR LIVES ON THE MARKER LINE BELOW, AND IT IS THE ONLY COPY.
+# Two consumers do NOT source this file — they read it with a regex:
+#   * nix/programs/tmux/default.nix  (generates the `bind -n M-<key>` popups)
+#   * scripts/i3status-scratchpads   (the bar's colour legend)
+# They used to carry a regex EACH, and the two disagreed in both directions:
+# a 9- or 12-digit hex colour (both valid pango) got a tmux binding but was
+# dropped from the legend, and a COMMENTED-OUT slot line was ignored by nix but
+# matched by the legend, which then advertised a hotkey bound to nothing. So the
+# pattern is written here ONCE and both read it from this file — the same bytes
+# they already open for the table itself, so it needs no extra deploy.
+#
+# Written in the intersection of POSIX ERE (nix `builtins.match`) and Python
+# `re`: literal `[ ]` rather than `[ \t]` (a backslash inside a POSIX bracket
+# expression is LITERAL) or `[[:blank:]]` (which Python does not support).
+# Applied WHOLE-LINE by both: nix matches it against each split line, and the
+# Python side wraps it in `^…$` under `re.MULTILINE`. That anchoring is what
+# makes a commented-out entry a non-entry for everyone.
+#
+# The colour lengths are the ones pango accepts — #RGB, #RRGGBB, #RRRGGGBBB,
+# #RRRRGGGGBBBB — so 5- and 7-digit hex, which no pango parser accepts, is not
+# a slot to anybody. Capture groups, in order: session, key, colour (with `#`),
+# the colour's hex digits, name.
+# SLOT_ENTRY_RE: [ ]*"([^":]+):([^":]+):(#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{9}|[0-9a-fA-F]{12})):([^"]+)"[ ]*
 SCRATCH_SLOTS=(
     "scratch:g:#b8bb26:grove"
     "scratch2:G:#d79921:Gold"
