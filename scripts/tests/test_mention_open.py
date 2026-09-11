@@ -1,7 +1,8 @@
 """Tests for `scripts/mention-open.py` — the Alacritty hint handler.
 
 Scope: URL CONSTRUCTION and the resolution decision. Nothing here launches a
-browser, a picker or a notification — every impure edge (`xdg-open`, `rofi`,
+browser, a picker or a notification — every impure edge (`xdg-open`, the
+picker terminal,
 `notify-send`, `git`, `tmux`) is left untouched, and the one subprocess test
 runs the handler with `--print --no-discovery`, which by construction spawns
 nothing.
@@ -23,8 +24,12 @@ import importlib.util
 import json
 import os
 import re
+import select
+import shutil
+import stat
 import subprocess
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -788,8 +793,9 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
 
 # Every executable the module may ever spawn, from ANY function. Wider than
 # `RESOLUTION_PATH_COMMANDS` because it also covers the ACTION half — opening a
-# browser, raising rofi, sending a notification — which no resolution runs.
-SPAWNABLE_EXECUTABLES = {"git", "tmux", "rofi", "xdg-open", "notify-send"}
+# browser, raising the picker terminal, sending a notification — which no
+# resolution runs.
+SPAWNABLE_EXECUTABLES = {"git", "tmux", "alacritty", "xdg-open", "notify-send"}
 
 
 def _spawned_executables(source: str) -> set[str]:
@@ -819,6 +825,92 @@ def _spawned_executables(source: str) -> set[str]:
     return out
 
 
+def _shell_child_commands(source: str) -> set[str]:
+    """The binaries a spawn's `-c` SCRIPT runs — the first word of every string
+    constant that follows a literal `"-c"` inside a spawn's argv list.
+
+    🔴 IT EXISTS BECAUSE argv[0] IS NOT THE WHOLE ANSWER ANY MORE. The picker is
+    `alacritty -e /bin/sh -c 'fzf …'`: argv[0] is the terminal, and the binary
+    that actually has to be on PATH is one level down. Reading the first word
+    (rather than grepping the file for `fzf`) keeps this a claim about a CALL
+    SITE — a comment mentioning fzf cannot satisfy it, and moving the command
+    out of the script fails it.
+
+    Absolute paths are skipped: `/bin/sh` is not resolved through PATH, so it
+    needs no package.
+    """
+    out: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("run", "Popen") or not node.args:
+            continue
+        argv = node.args[0]
+        if not isinstance(argv, (ast.List, ast.Tuple)):
+            continue
+        elts = list(argv.elts)
+        for i, elt in enumerate(elts[:-1]):
+            if not (isinstance(elt, ast.Constant) and elt.value == "-c"):
+                continue
+            script = elts[i + 1]
+            # The script may be a NAME (a module constant, as `PICKER_SH` is),
+            # so resolve one level of module-level assignment.
+            text = None
+            if isinstance(script, ast.Constant) and isinstance(script.value, str):
+                text = script.value
+            elif isinstance(script, ast.Name):
+                text = _module_str_constant(source, script.id)
+            if not text:
+                out.add("<computed>")
+                continue
+            word = text.split()[0] if text.split() else ""
+            if word and not word.startswith("/"):
+                out.add(word)
+    return out
+
+
+def _module_str_constant(source: str, name: str) -> str | None:
+    """The value of a module-level `NAME = "…"` (implicit-concatenation
+    included), or None. Deliberately NOT `getattr(MO, name)`: reading it off the
+    imported module would make this reader agree with a runtime value the AST
+    cannot see, which is the loophole the AST is here to close."""
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name) and tgt.id == name:
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, SyntaxError, TypeError):  # pragma: no cover
+                    return None
+                return value if isinstance(value, str) else None
+    return None
+
+
+def test_the_shell_child_reader_can_actually_fire():
+    """POSITIVE **AND** NEGATIVE CONTROL on the second reader, before its
+    verdict is believed — a reader that matched nothing would report a clean
+    empty set forever, and `test_the_alacritty_wrapper_PATH_…` would then stop
+    covering fzf with no visible change."""
+    assert _shell_child_commands(
+        "import subprocess\n"
+        "subprocess.Popen(['alacritty', '-e', '/bin/sh', '-c', 'fzf --x <\"$1\"'])\n"
+    ) == {"fzf"}
+    # Through a module constant, which is how the handler actually spells it.
+    assert _shell_child_commands(
+        "import subprocess\n"
+        "S = 'fzf --tiebreak=end'\n"
+        "subprocess.Popen(['alacritty', '-e', '/bin/sh', '-c', S])\n"
+    ) == {"fzf"}
+    # A spawn with no `-c` contributes nothing…
+    assert _shell_child_commands(
+        "import subprocess\nsubprocess.run(['git', 'rev-parse'])\n") == set()
+    # …and a script it cannot read is reported, never silently dropped.
+    assert _shell_child_commands(
+        "import subprocess\n"
+        "subprocess.Popen(['sh', '-c', build()])\n") == {"<computed>"}
+
+
 def test_the_spawned_executable_LEDGER_can_actually_fire():
     """POSITIVE CONTROL on the reader, before its verdict is believed. An AST
     walk that matched nothing would report a clean empty set forever."""
@@ -846,17 +938,24 @@ def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns()
         and renumbered the rest, so a reader following the comment landed on the
         fuzzy universe, which spawns nothing.
 
-    `rofi` is the one deliberate omission and it is enumerated, not inferred:
-    it is a SYSTEM package here (`nix/i3/config.nix` invokes it bare), and
-    pulling `pkgs.rofi` in would install a second copy whose theme drifts from
-    the launcher's.
+    ⚠ `rofi` USED TO BE THE ONE DELIBERATE OMISSION — a system package invoked
+    bare, kept off the list so a second copy's theme could not drift from the
+    launcher's. The handler no longer spawns it; the picker is `fzf` inside a
+    float `alacritty`, and both are pinned rather than omitted.
+
+    🔴 AND `fzf` IS THE CASE THIS TEST HAD TO GROW A SECOND READER FOR. It is
+    spawned by the picker's `/bin/sh -c` line, not by the handler, so an argv[0]
+    scan cannot see it — and a missing `fzf` fails exactly the way the wrapper
+    exists to prevent: `sh` prints `not found` into a terminal that then closes,
+    and the click is a silent dead end with the whole suite green.
+    `_shell_child_commands` reads the FIRST WORD of the `-c` script out of the
+    SYNTAX TREE, so this is pinned to a call site rather than to a comment.
     """
     # executable -> the nix attribute that must provide it.
     PROVIDER = {"git": "pkgs.git", "tmux": "pkgs.tmux",
-                "xdg-open": "pkgs.xdg-utils", "notify-send": "pkgs.libnotify"}
-    # Not spawned by name from PATH: rofi is the system copy on purpose, and
+                "xdg-open": "pkgs.xdg-utils", "notify-send": "pkgs.libnotify",
+                "alacritty": "pkgs.alacritty", "fzf": "pkgs.fzf"}
     # python312 is the interpreter the wrapper `exec`s by store path.
-    NOT_FROM_THE_WRAPPER_PATH = {"rofi"}
     INTERPRETER = {"pkgs.python312"}
 
     nix_src = (ROOT / "nix" / "programs" / "alacritty" / "default.nix").read_text()
@@ -868,11 +967,15 @@ def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns()
     listed = set(re.findall(r"pkgs\.[A-Za-z0-9_-]+", body))
     assert listed, "positive control: the wrapper DOES pin a PATH"
 
-    spawned = _spawned_executables(HANDLER.read_text())
+    src = HANDLER.read_text()
+    spawned = _spawned_executables(src) | _shell_child_commands(src)
     assert spawned, "positive control: the module DOES spawn things"
-    needed = {PROVIDER[e] for e in spawned - NOT_FROM_THE_WRAPPER_PATH
-              if e in PROVIDER}
-    unknown = spawned - NOT_FROM_THE_WRAPPER_PATH - set(PROVIDER)
+    assert "fzf" in spawned, (
+        "positive control on the SECOND reader: the picker's `sh -c` line must "
+        "still be visible to _shell_child_commands, or this test silently stops "
+        "covering the binary the picker cannot run without")
+    needed = {PROVIDER[e] for e in spawned if e in PROVIDER}
+    unknown = spawned - set(PROVIDER)
     assert not unknown, (
         f"mention-open.py spawns {sorted(unknown)}, which this test cannot map "
         f"to a nix package — add it to PROVIDER and to the wrapper's PATH")
@@ -1146,8 +1249,8 @@ def test_a_WALL_of_repos_reaches_the_picker_because_it_can_be_TYPED_at(
     """🔴 THE REVERSAL, NOW OVER THE LOCAL UNIVERSE. This used to refuse above 8
     candidates, on the reasoning that "a 100-row list of URLs differing only by
     owner is not a choice, it is a wall". That is true of a list you can only
-    SCROLL and false of one you can TYPE AT, and `pick()` runs rofi with
-    `-matching fuzzy`. So the wall is a narrowing, and refusing would remove the
+    SCROLL and false of one you can TYPE AT, and `pick()` runs fzf, which
+    matches fuzzily. So the wall is a narrowing, and refusing would remove the
     operator's ability to choose — which matters far more now that the universe
     is the operator's own 369-repo mapping rather than a page of search results.
 
@@ -1173,97 +1276,1207 @@ def test_eight_repos_still_offer_the_picker(spy, monkeypatch):
     assert ("pick", 8) in spy
 
 
-def test_the_picker_asks_rofi_for_FUZZY_matching(monkeypatch):
+# --------------------------------------------------------------------------- #
+# THE PICKER'S ARGV AND ITS TRANSPORT
+#
+# 🔴 NOTHING BELOW RAISES A WINDOW. `subprocess.Popen` is replaced by a FAKE
+# TERMINAL — a thread that opens the same two FIFOs a real `alacritty -e sh -c
+# fzf …` would — so the transport is exercised end to end and the operator's
+# screen is never touched. `alacritty` is ALSO in `nolaunch.HOST_LAUNCHERS`, so
+# even a test that forgot to patch reaches a recording stub rather than a real
+# terminal.
+# --------------------------------------------------------------------------- #
+ONE_CANDIDATE = [{"platform": "github", "id": "7",
+                  "url": "https://github.com/gardenersguild/trowelcast/pull/7"}]
+
+
+class _FakeTerminal:
+    """Stands in for the terminal `pick()` spawns, doing what it really does.
+
+    A plain `lambda: None` Popen is NOT usable here and that is the point: with
+    nobody on the other end of the rows FIFO, `os.open(..., O_WRONLY|
+    O_NONBLOCK)` raises ENXIO forever and `run_picker` would spin to its
+    deadline. Reading the pipe is the only faithful fake — which makes every
+    test below an exercise of the real transport rather than of an argv builder.
+
+    🔴 IT OPENS BOTH FIFOs BEFORE READING EITHER, BECAUSE `/bin/sh` DOES.
+    `<"$1" >"$2"` are applied by the shell BEFORE fzf is exec'd, so the child is
+    holding an open read end of the rows FIFO and blocking on the write end of
+    the choice FIFO while nothing is draining the rows. A fake that read the
+    rows first would be a friendlier peer than the real one and would hide the
+    deadlock `test_a_payload_LARGER_than_a_pipe_buffer_still_reaches_the_picker`
+    exists for.
+    """
+
+    def __init__(self, choose: str | None = None, *, answer_early: bool = False):
+        self.choose = choose
+        # 🔴 `answer_early` MODELS WHAT fzf ACTUALLY DOES, and without it this
+        # fake is a FRIENDLIER PEER THAN THE REAL ONE. fzf answers the moment the
+        # operator presses a key — it does NOT wait to drain the list — and then
+        # closes its read end, so the writer's next `os.write` gets EPIPE. The
+        # default here reads the whole FIFO first, which is why every transport
+        # test below was blind to `BrokenPipeError` until this parameter existed.
+        self.answer_early = answer_early
+        self.argv: list[str] = []
+        self.payload = ""
+        self._thread = None
+        self._done = threading.Event()
+
+    def popen(self, argv, **kwargs):
+        self.argv = list(argv)
+        rows_fifo, choice_fifo = argv[-3], argv[-2]
+
+        def serve():
+            # The shell's own order: both redirections, THEN the program.
+            rfh = open(rows_fifo, "r", encoding="utf-8")
+            wfh = open(choice_fifo, "w", encoding="utf-8")
+            with wfh:
+                if self.answer_early:
+                    # Answer, then hang up WITHOUT draining — the real thing.
+                    if self.choose is not None:
+                        wfh.write(self.choose + "\n")
+                        wfh.flush()
+                    self.payload = rfh.read(4096)
+                    rfh.close()
+                else:
+                    with rfh:
+                        self.payload = rfh.read()
+                        if self.choose is not None:
+                            wfh.write(self.choose + "\n")
+            self._done.set()
+
+        self._thread = threading.Thread(target=serve, daemon=True)
+        self._thread.start()
+        return self
+
+    # --- the `subprocess.Popen` surface `run_picker` uses ------------------ #
+    def poll(self):
+        return 0 if self._done.is_set() else None
+
+    def terminate(self):  # pragma: no cover — only on the timeout path
+        self._done.set()
+
+    @property
+    def rows(self) -> list[str]:
+        return [r for r in self.payload.split("\n") if r]
+
+    def sh_script(self) -> str:
+        return self.argv[self.argv.index("-c") + 1]
+
+
+def _drive_picker(monkeypatch, candidates=None, mesg="", choose=None,
+                  answer_early=False):
+    term = _FakeTerminal(choose, answer_early=answer_early)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+    url = MO.pick(candidates if candidates is not None else ONE_CANDIDATE,
+                  mesg=mesg)
+    return term, url
+
+
+def test_the_picker_spawns_a_TERMINAL_running_fzf(monkeypatch):
     """🔴 THE SEAM BETWEEN THE DECISION AND THE TOOL. Every other test here
-    stubs `pick`, so none of them notices if the flag that makes a long list
-    usable is missing — and dropping it silently restores the wall the cap used
-    to guard against, with the whole suite green. This is the only test that
-    reads the argv `pick` actually builds.
-
-    NOTHING IS LAUNCHED: `subprocess.run` is replaced, so no window is ever
-    raised. Raising a window takes the operator's screen."""
-    seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        seen["input"] = kwargs.get("input", "")
-        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-
-    monkeypatch.setattr(MO.subprocess, "run", fake_run)
-    MO.pick([{"platform": "github", "id": "7",
-              "url": "https://github.com/gardenersguild/trowelcast/pull/7"}])
-    assert seen["cmd"][0] == "rofi"
-    assert "-matching" in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("-matching") + 1] == "fuzzy"
-    # `-no-custom` stops rofi handing back typed free text as a selection.
-    assert "-no-custom" in seen["cmd"]
+    stubs `pick`, so none of them notices if the picker stops being spawned at
+    all. This is the only family that reads the argv `pick` actually builds."""
+    term, _url = _drive_picker(monkeypatch)
+    assert term.argv[0] == "alacritty"
+    # `-e` must be LAST before the command, or alacritty eats the rest as its
+    # own options and the picker never runs.
+    assert term.argv[term.argv.index("-e") + 1] == "/bin/sh"
+    assert term.sh_script().split()[0] == "fzf", (
+        "the wrapper's PATH pin is derived from this first word — see "
+        "test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_"
+        "spawns")
 
 
-def test_fuzzy_matching_is_never_asked_for_WITHOUT_ranking(monkeypatch):
-    """🔴 THE RELATIONSHIP, NOT THE SPELLING — and the bug was the gap between
-    them. `-matching fuzzy` tells rofi WHICH rows survive; it says nothing about
-    their ORDER. With no `-sort`, rofi shows survivors in INPUT order, and
-    `repo_universe()` returns them alphabetically.
+def test_the_picker_ranks_by_TIEBREAK_END_which_is_the_whole_reason_for_fzf(
+        monkeypatch):
+    """🔴 THE FLAG THE SWAP EXISTS FOR, and the one whose loss is silent.
 
-    REPORTED FROM THE REAL PICKER 2026-09-08: typing `devrc` ranked
-    `civitai/developer-docs` and `civitai/dev-runner-config` ABOVE the actual
-    `devrc` repo. Every one of them genuinely contains d-e-v…r…c as a
-    subsequence, so the MATCH was correct and the ORDER was not — `c…` sorts
-    before `i…`. MEASURED on a 7-row corpus in the exact shape `picker_rows()`
-    builds: input order put the wanted repo **6th**, fzf scoring puts it
-    **1st**.
+    rofi ranked by score and then by ROW LENGTH. In `owner/repo` every row of
+    one owner matches at the same offset, so the scores tie and the LONGEST
+    row loses — MEASURED on the real 392-row universe, query `civitai`:
+    `civitai/civitai` 8th of 230, under seven shorter rows containing the
+    token once. `--tiebreak=end` prefers the match nearest the END of the line,
+    and the suffix after the repo is a constant, so that is exactly "the repo
+    name rather than the owner": same corpus, same query, rank 1 of 230.
 
-    This asserts the pair rather than two independent flags, because either one
-    alone is a defect: fuzzy without sort is the reported bug, and sort without
-    fuzzy silently narrows what can be found at all. A test that only checked
-    `"-sort" in cmd` would pass on an argv that had dropped `fuzzy`."""
-    seen = {}
-    monkeypatch.setattr(MO.subprocess, "run",
-                        lambda cmd, **kw: seen.update(cmd=cmd)
-                        or types.SimpleNamespace(returncode=1, stdout="", stderr=""))
-    MO.pick([{"platform": "github", "id": "7",
-              "url": "https://github.com/gardenersguild/trowelcast/pull/7"}])
-    cmd = seen["cmd"]
-    fuzzy = "-matching" in cmd and cmd[cmd.index("-matching") + 1] == "fuzzy"
-    assert fuzzy, "the picker must still MATCH fuzzily"
-    assert "-sort" in cmd, (
-        "`-matching fuzzy` without `-sort` filters but does not RANK — rofi "
-        "falls back to input order, which is alphabetical, and a scattered "
-        "subsequence outranks an exact name")
-    assert "-sorting-method" in cmd, "a sort with no method is rofi's levenshtein default"
-    assert cmd[cmd.index("-sorting-method") + 1] == "fzf", (
-        "fzf's scoring is what rewards CONSECUTIVE runs and word boundaries; "
-        "rofi's `normal` method is plain levenshtein and does not")
+    Dropping this flag leaves a picker that still WORKS — it just goes back to
+    ranking the wanted repo eighth — which is why it is asserted rather than
+    left to a reviewer."""
+    term, _url = _drive_picker(monkeypatch)
+    assert "--tiebreak=end" in term.sh_script(), (
+        "without --tiebreak=end fzf falls back to its LENGTH tiebreak, which "
+        "is the exact defect rofi could not be talked out of")
 
 
-def test_the_rofi_argv_stays_a_LIST_LITERAL_so_the_ledger_can_read_it():
-    """🔴 The AST ledger of spawnable executables reads `pick`'s argv as a list
-    literal whose first element is the constant `"rofi"`. Building it from a
-    variable reports `<computed>` and reddens the no-network guard for a reason
-    that has nothing to do with what is spawned — the module already carries
-    that warning in a comment, and this is the assertion behind it.
+@pytest.mark.parametrize("flag,why", [
+    ("--exact", "MEASURED not to fix the tie (rank 27 with it and 27 without, "
+                "same corpus) while narrowing the match set from 56 rows to 21 "
+                "on a 6-char prefix — the fuzzy narrowing is the whole reason a "
+                "392-row universe is usable"),
+    ("--select-1", "auto-accepts a single match, which is precisely the "
+                   "one-row GUESSED-repo picker that #1336 made unconfirmable"),
+    ("--print-query", "makes fzf hand back text the operator TYPED as if it "
+                      "were a selection — `row_to_url` matches nothing, so it "
+                      "is dismissal-shaped by accident. This is what rofi "
+                      "needed `-no-custom` for"),
+    ("--no-sort", "turns off ranking entirely, which is the pre-#1373 bug"),
+])
+def test_the_picker_does_NOT_pass(flag, why, monkeypatch):
+    """Four flags REJECTED, each with its measurement. Asserted on the argv
+    rather than left in a comment: every one of them is a plausible-looking
+    addition whose damage is invisible in a green suite."""
+    term, _url = _drive_picker(monkeypatch)
+    assert flag not in term.sh_script(), f"{flag}: {why}"
+
+
+def test_the_picker_argv_stays_a_LIST_LITERAL_so_the_ledger_can_read_it():
+    """🔴 The AST ledger of spawnable executables reads `run_picker`'s argv as a
+    list literal whose first element is the constant `"alacritty"`. Building it
+    from a variable reports `<computed>` and reddens the no-network guard for a
+    reason that has nothing to do with what is spawned — the module already
+    carries that warning in a comment, and this is the assertion behind it.
 
     Kept beside the flag tests because the tempting way to add a conditional
     flag is exactly the refactor that breaks it."""
-    import ast
-    src = HANDLER.read_text()
-    tree = ast.parse(src)
+    tree = ast.parse(HANDLER.read_text())
     found = False
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and node.args):
             continue
         name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-        if name != "run":
+        if name != "Popen":
             continue
         first = node.args[0]
         if (isinstance(first, ast.List) and first.elts
                 and isinstance(first.elts[0], ast.Constant)
-                and first.elts[0].value == "rofi"):
+                and first.elts[0].value == "alacritty"):
             found = True
-            literals = [e.value for e in first.elts if isinstance(e, ast.Constant)]
-            assert "-sort" in literals and "fzf" in literals, (
-                f"the rofi argv literal lost its ranking flags: {literals}")
-    assert found, "no `subprocess.run([\"rofi\", …])` list literal found in the handler"
+    assert found, (
+        "no `subprocess.Popen([\"alacritty\", …])` list literal found in the "
+        "handler")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 DISCLOSURE — THE NEW SURFACE A TERMINAL BRINGS
+#
+# The rows name PRIVATE repositories. Under rofi they went to `input=`, a pipe
+# nothing else could read. A terminal emulator does NOT proxy stdin, so the
+# transport had to change, and every alternative to a FIFO puts them somewhere
+# a second process can read: argv is world-readable in `/proc`, an env var
+# likewise, a temp file lands them on disk. These pin the choice.
+# --------------------------------------------------------------------------- #
+def test_NO_ROW_reaches_the_terminal_ARGV(monkeypatch):
+    """🔴 argv IS A SINK `_every_sink` CANNOT SEE. `/proc/<pid>/cmdline` is
+    readable for the whole lifetime of the picker, and a `--header` or an
+    inlined row list would put private repository names there.
+
+    The positive control comes first: the rows really did reach the picker, so
+    their absence from argv is a routing decision and not an empty fixture."""
+    cands = MO.universe_candidates("12", sorted(FAKE_UNIVERSE.values()))
+    term, _url = _drive_picker(monkeypatch, cands, mesg="pick a repository")
+    assert term.rows[int(term.argv[-1]):] == MO.picker_rows(cands), (
+        "positive control: the picker got the real rows")
+    blob = " ".join(term.argv)
+    _no_universe_token_anywhere(blob, "PICKER ARGV DISCLOSURE")
+
+
+def test_the_rows_go_down_a_FIFO_that_does_not_outlive_the_pick(monkeypatch):
+    """🔴 NOTHING IS LEFT ON DISK. A FIFO holds no content at rest — the bytes
+    live in a kernel pipe buffer between two processes — and the 0700 directory
+    holding the pair is removed in a `finally`.
+
+    Both halves are asserted: the paths really were FIFOs while the picker ran
+    (so this is not silently testing regular files), and the directory is gone
+    afterwards."""
+    kinds = {}
+
+    class Watcher(_FakeTerminal):
+        def popen(self, argv, **kwargs):
+            kinds["rows"] = stat.S_ISFIFO(os.stat(argv[-3]).st_mode)
+            kinds["choice"] = stat.S_ISFIFO(os.stat(argv[-2]).st_mode)
+            kinds["dir"] = os.path.dirname(argv[-3])
+            kinds["mode"] = stat.S_IMODE(os.stat(kinds["dir"]).st_mode)
+            return super().popen(argv, **kwargs)
+
+    term = Watcher(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+    MO.pick(ONE_CANDIDATE)
+    assert kinds["rows"] and kinds["choice"], "the transport is not a FIFO pair"
+    assert kinds["mode"] == 0o700, f"the picker's tmpdir is {kinds['mode']:o}"
+    assert not os.path.exists(kinds["dir"]), (
+        f"{kinds['dir']} outlived the pick — a private row list left on disk")
+
+
+# --------------------------------------------------------------------------- #
+# THE NOTE — rofi's `-mesg`, now fzf's `--header-lines`
+# --------------------------------------------------------------------------- #
+def test_the_note_is_prepended_to_the_INPUT_and_counted_exactly(monkeypatch):
+    """🔴 THE COUNT IS THE HAZARD, AND IT ONLY BITES IN ONE DIRECTION. A
+    `--header-lines` value too LOW leaves a note line selectable, which
+    `row_to_url` maps to nothing; too HIGH it swallows the FIRST REAL ROW — the
+    clawgate task on a bare `#N`. This asserts the count equals the number of
+    note lines actually prepended, and that every candidate row survived."""
+    note = ("nothing here knows widget#12 — pick a repository, or dismiss. "
+            "3 offered · mapping generated 2026-09-01 (8d ago) · refresh with "
+            "scripts/regen-known-repos.py")
+    cands = MO.universe_candidates("12", sorted(FAKE_UNIVERSE.values()))
+    term, _url = _drive_picker(monkeypatch, cands, mesg=note)
+    n = int(term.argv[-1])
+    assert n == len(MO.picker_header(note)) >= 2, (
+        "the note must be WRAPPED, not truncated by the terminal's width")
+    assert term.rows[n:] == MO.picker_rows(cands), (
+        "the header count does not line up with the rows — a too-high count "
+        "eats the first candidate")
+    assert " ".join(term.rows[:n]).split() == note.split(), (
+        "the note reached the picker with its words changed")
+
+
+def test_the_note_is_NOT_pango_escaped_because_fzf_renders_plain_text(monkeypatch):
+    """rofi's `-mesg` was PANGO markup, so `&`/`<`/`>` had to be escaped or the
+    line vanished. fzf's header is plain text: leaving that escaping in would
+    show the operator a literal `&amp;` in text THEY typed."""
+    term, _url = _drive_picker(monkeypatch, mesg="a & b <c> d")
+    assert "&amp;" not in term.payload and "&lt;" not in term.payload
+    assert "a & b <c> d" in term.payload
+
+
+def test_no_note_means_no_header_lines(monkeypatch):
+    """The `mesg=""` default must produce a count of 0, not an empty line that
+    eats the first row."""
+    term, _url = _drive_picker(monkeypatch)
+    assert term.argv[-1] == "0"
+    assert term.rows == MO.picker_rows(ONE_CANDIDATE)
+
+
+# --------------------------------------------------------------------------- #
+# THE ROUND TRIP
+# --------------------------------------------------------------------------- #
+def test_a_selection_comes_back_as_its_URL(monkeypatch):
+    """The positive control for every "returns nothing" assertion below: the
+    transport really can carry a choice back."""
+    row = MO.picker_rows(ONE_CANDIDATE)[0]
+    _term, url = _drive_picker(monkeypatch, choose=row)
+    assert url == ONE_CANDIDATE[0]["url"]
+
+
+def test_a_DISMISSAL_opens_nothing(monkeypatch):
+    """fzf exits without writing when the operator presses Esc. That must be ""
+    — never a guess at row 1."""
+    _term, url = _drive_picker(monkeypatch, choose=None)
+    assert url == ""
+
+
+def test_TYPED_FREE_TEXT_can_never_come_back_as_a_selection(monkeypatch):
+    """🔴 `-no-custom`'S REPLACEMENT, ASSERTED AT THE BOUNDARY RATHER THAN ON A
+    FLAG. fzf structurally cannot return the query (that would need
+    `--print-query`, whose absence is pinned above) — but the property that
+    matters is what `pick` does with a row it did not offer. Feed it one and it
+    must open NOTHING, exactly like a dismissal."""
+    _term, url = _drive_picker(monkeypatch, choose="kubectl-neat")
+    assert url == ""
+
+
+def test_a_payload_LARGER_than_a_pipe_buffer_still_reaches_the_picker(
+        monkeypatch):
+    """🔴 A DEADLOCK THE CURRENT UNIVERSE IS TOO SMALL TO HIT, WHICH IS EXACTLY
+    WHY IT IS PINNED AT A SIZE IT DOES.
+
+    `/bin/sh` applies `<"$1" >"$2"` BEFORE exec'ing fzf, and opening a FIFO for
+    writing blocks until a reader exists. So if `run_picker` opened the rows
+    FIFO and started writing before opening the choice FIFO for reading, the
+    child would be parked in `open("$2")` with nothing draining `$1`. Everything
+    works while the payload fits in one 64 KiB pipe buffer — today's ~392 rows
+    are ~27 KB — and the day it does not, the click hangs to the 120s timeout.
+
+    3,000 rows (~172 KB, measured) is deliberately several buffers past the
+    boundary rather than one byte over it: at 65,537 bytes this would still pass
+    on a kernel with a larger pipe buffer, and the point is the ORDER, not the
+    exact size. The wall-clock bound is what turns a hang into a failure."""
+    cands = [{"platform": "github", "id": "12",
+              "url": f"https://github.com/owner{i}/repo{i}/pull/12"}
+             for i in range(3000)]
+    payload_size = len("\n".join(MO.picker_rows(cands)))
+    assert payload_size > 150_000, (
+        f"the fixture no longer overshoots a pipe buffer: {payload_size}")
+    started = time.monotonic()
+    term, url = _drive_picker(monkeypatch, cands, choose=MO.picker_rows(cands)[-1])
+    assert time.monotonic() - started < 30, (
+        "the picker DEADLOCKED on a payload larger than a pipe buffer")
+    assert term.rows == MO.picker_rows(cands), "the rows were truncated"
+    assert url == cands[-1]["url"]
+
+
+def test_a_terminal_that_never_starts_returns_EMPTY_rather_than_hanging(
+        monkeypatch):
+    """🔴 THE ENXIO TRAP. A FIFO opened for writing fails with ENXIO until a
+    READER appears, so a blocking open against a terminal that died — a missing
+    binary, a stub, a crash — would hang for the whole 120s timeout on the
+    operator's click. `run_picker` polls and watches the child instead.
+
+    Measured rather than asserted structurally: this test would take two
+    minutes if the poll regressed, and the wall-clock bound is what says so."""
+    class DeadTerminal:
+        def poll(self):
+            return 1
+
+        def terminate(self):  # pragma: no cover — poll() already reports exit
+            pass
+
+    monkeypatch.setattr(MO.subprocess, "Popen", lambda *a, **k: DeadTerminal())
+    # `notify` is stubbed because THIS test is about the wall clock, not the
+    # toast — the real one would reach the patched `Popen` and blow up on a fake
+    # that is not a context manager. The toast itself is
+    # `test_a_terminal_that_DIED_before_showing_anything_says_so`.
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
+    started = time.monotonic()
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert time.monotonic() - started < 5, (
+        "pick() waited on a terminal that had already exited")
+
+
+def test_a_terminal_that_cannot_be_SPAWNED_says_so(monkeypatch):
+    """`alacritty` missing from the wrapper's PATH is a FileNotFoundError, which
+    is an OSError — silently answered with "" everywhere else in this file. The
+    picker is the one place that must TOAST, because the alternative is a click
+    that does nothing at all."""
+    said = []
+
+    def boom(*a, **k):
+        raise FileNotFoundError("alacritty")
+
+    monkeypatch.setattr(MO.subprocess, "Popen", boom)
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert said and "picker" in said[0][0], said
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ONE PROPERTY NO ARGV ASSERTION CAN REACH: WHAT REAL fzf DOES
+#
+# Everything above is a claim about the command line. These two run the REAL
+# binary, headlessly, with `--filter` — fzf's own non-interactive ranking mode —
+# because the two properties that matter most are properties of fzf's ALGORITHM
+# and would survive any argv check unchanged.
+# --------------------------------------------------------------------------- #
+def _require_fzf() -> None:
+    """🔴 NOT a `skipif`, and that was MEASURED rather than chosen on principle.
+
+    These four were `@pytest.mark.skipif(shutil.which("fzf") is None)` first. On
+    the dev host fzf is on PATH and all four ran; in the nix check sandbox — the
+    tier the merge is actually gated on — all four SKIPPED, and `run-tests.sh`
+    failed the derivation on the unpinned skips. Which is the guard doing its
+    job: the authoritative tier had zero coverage of the single property this
+    whole change exists for, and a `skipif` is what made that silent.
+
+    So fzf is declared in `run-tests.sh` REQUIRED_TOOLS and in flake.nix
+    `gateTools` (both, spelled differently — binary vs package), and its absence
+    is an environment fault to fix there, never a skip here.
+    """
+    assert shutil.which("fzf") is not None, (
+        "fzf is not on PATH. The mention picker IS fzf, so this is a broken "
+        "environment, not a reason to skip: add it to REQUIRED_TOOLS in "
+        "scripts/run-tests.sh and pkgs.fzf to gateTools in flake.nix, or enter "
+        "the repo's dev shell (`nix develop`), which carries both.")
+
+
+def test_REAL_fzf_ranks_the_eponymous_repo_FIRST_under_tiebreak_end():
+    """🔴 THE MEASUREMENT THE SWAP IS FOR, RE-RUN AS A TEST, on a corpus of the
+    SAME SHAPE as the operator's (an owner whose name is also one of its repos,
+    with shorter siblings). Synthetic names on purpose — this repo is public and
+    the real universe is private.
+
+    Both directions are asserted. Without the flag the wanted row is buried,
+    which is the NEGATIVE CONTROL: an assertion that only checked "rank 1 with
+    the flag" would pass against an fzf that ranked it first regardless, and
+    would then not be measuring the flag at all."""
+    _require_fzf()
+    rows, target = _eponymous_corpus()
+    plain = _fzf_rank(rows, "nimbusworks", target)
+    tiebreak = _fzf_rank(rows, "nimbusworks", target, "--tiebreak=end")
+    assert plain > 5, (
+        f"NEGATIVE CONTROL: default fzf put the wanted row at {plain}; if that "
+        "is already 1 this corpus no longer reproduces the defect and the "
+        "assertion below proves nothing")
+    assert tiebreak == 1, f"--tiebreak=end ranked it {tiebreak}, not 1"
+
+
+def test_REAL_fzf_does_not_reorder_rows_when_the_query_is_EMPTY():
+    """🔴 THE CLAWGATE ROW MUST STAY FIRST. A bare `#N` offers the clawgate task
+    and then the pane's repo, and several tests pin that order — but they all
+    stub `pick`, so none of them would notice a picker that re-sorted before the
+    operator typed anything. Ranking applies to a SCORED match set; an empty
+    query scores nothing, so input order survives. Asserted against the real
+    binary because it is a claim about fzf, not about our argv."""
+    _require_fzf()
+    rows, _target = _eponymous_corpus()
+    out = subprocess.run(["fzf", "--filter", "", "--tiebreak=end"],
+                         input="\n".join(rows), capture_output=True, text=True)
+    got = [r for r in out.stdout.split("\n") if r]
+    assert got == rows, "fzf reordered an unfiltered list"
+
+
+def _eponymous_corpus() -> tuple[list[str], str]:
+    """~200 picker rows in the exact shape `picker_rows()` builds, reproducing
+    the measured defect: `nimbusworks/nimbusworks` alongside sibling repos whose
+    names are SHORTER than the owner's, so a LENGTH tiebreak buries it."""
+    owner = "nimbusworks"
+    repos = [f"{owner}/{owner}"]
+    repos += [f"{owner}/{r}" for r in
+              ("api", "web", "cli", "sdk", "ops", "ui", "db", "docs", "auth",
+               "jobs", "charts", "runner", "gateway", "console")]
+    others = ("greenfielded", "hollowpoint", "quartzline", "sablefen",
+              "umbralabs", "verdantco", "wickerbay", "xenolith", "yarrowsoft",
+              "zephyrgate", "acrepitch", "brambleway")
+    names = ("atlas", "beacon", "cascade", "dossier", "eyrie", "fathom",
+             "girder", "harbour", "inkwell", "jetty", "kiln", "lantern",
+             "mortar", "nectar", "oxbow")
+    repos += [f"{o}/{n}" for o in others for n in names]
+    repos = sorted(set(repos), key=str.lower)
+    return ([f"github 1234 — https://github.com/{r}/pull/1234" for r in repos],
+            f"{owner}/{owner}")
+
+
+def _fzf_rank(rows: list[str], query: str, target: str, *flags) -> int:
+    """The 1-based rank `target` gets for `query`, via fzf's own `--filter`."""
+    out = subprocess.run(["fzf", "--filter", query, *flags],
+                         input="\n".join(rows), capture_output=True, text=True)
+    ranked = [r for r in out.stdout.split("\n") if r]
+    assert ranked, "positive control: fzf matched nothing at all"
+    for i, row in enumerate(ranked, 1):
+        if f"/{target}/pull/" in row:
+            return i
+    raise AssertionError(f"{target} did not survive the filter {query!r}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE INTERACTIVE INSTRUMENT — `--filter` IS A PROXY, AND IT HAD TO BE CHECKED
+#
+# The two tests above use `fzf --filter`, fzf's own non-interactive ranking
+# mode. That is a claim about `--filter`, not about the picker the operator
+# actually types into, and the difference is exactly the shape RULES.md warns
+# about: one measurement, quoted at a scope wider than it was taken.
+#
+# MEASURED 2026-09-09 while building this: an end-to-end run under Xvfb picked
+# the WRONG row and read as "interactive fzf ranks differently from --filter".
+# It does not — that run had read the working tree while the mutation battery
+# was rewriting it in place, so it was running mutant K49 (`--tiebreak=length`).
+# A pty-driven interactive fzf agrees with `--filter` on every variant tried:
+# typed character by character, pasted in one write, and `--query`.
+#
+# These two run the REAL binary interactively, under a pty, with NO window and
+# NO X server. `--query` is pre-filled rather than typed, so the only timing
+# dependency left is "fzf renders its prompt", which is waited for rather than
+# slept through — and a run that never gets there FAILS with the terminal output
+# it did see, because a skip here would be the vacuous green one level up.
+# --------------------------------------------------------------------------- #
+_PTY_PROMPT = "PICKERREADY>"
+
+
+def _picker_flags() -> list[str]:
+    """The picker's OWN fzf flags, read out of `PICKER_SH`.
+
+    🔴 DERIVED, NEVER RE-SPELLED. A pty test carrying its own `--tiebreak=end`
+    would be a fact about fzf and not about this handler: drop the flag from
+    `PICKER_SH` and such a test stays green while the picker ranks the wanted
+    repository 27th. Taking the flags from the string that is actually spawned
+    makes these two guards of the handler.
+
+    Everything the shell owns is dropped: the command word, the redirections,
+    and any flag whose value is a positional (`--header-lines="$3"` — there is
+    no shell here to expand it)."""
+    import shlex  # noqa: PLC0415
+    words = shlex.split(MO.PICKER_SH)
+    assert words and words[0] == "fzf", words
+    flags = [w for w in words[1:]
+             if not w.startswith(("<", ">")) and "$" not in w]
+    assert "--tiebreak=end" in flags, (
+        f"positive control on the reader: it lost the picker's flags: {flags}")
+    return flags
+
+
+def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
+    """The row a REAL interactive fzf selects on Enter, driven through a pty."""
+    import fcntl     # noqa: PLC0415 — only this pair needs them
+    import pty       # noqa: PLC0415
+    import struct    # noqa: PLC0415
+    import termios   # noqa: PLC0415
+
+    # The prompt override comes LAST so it wins over the picker's own — fzf
+    # takes the final occurrence — giving a readiness marker that does not move
+    # when the handler's prompt does.
+    flags = [*_picker_flags(), f"--prompt={_PTY_PROMPT} ", f"--query={query}"]
+    r_in, w_in = os.pipe()       # the candidate list
+    r_out, w_out = os.pipe()     # the selection
+    pid, master = pty.fork()
+    if pid == 0:                 # pragma: no cover — the child never returns
+        os.dup2(r_in, 0)
+        os.dup2(w_out, 1)
+        os.environ["TERM"] = "xterm-256color"
+        os.execvp("fzf", ["fzf", *flags])
+    os.close(r_in)
+    os.close(w_out)
+    # 🔴 `pty.fork()` LEAVES THE TERMINAL 0x0, AND fzf THEN DRAWS NOTHING. It
+    # still WORKS — it filters, and Enter still returns the right row — so a
+    # test that only checked the return value would pass while measuring a
+    # picker that rendered no prompt to wait for. Setting a size is what makes
+    # the readiness signal below exist at all.
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    with os.fdopen(w_in, "wb") as fh:
+        fh.write(("\n".join(rows) + "\n").encode())
+
+    def _drain(fd, until, deadline):
+        seen = b""
+        while time.monotonic() < deadline:
+            r, _w, _x = select.select([fd], [], [], 0.2)
+            if not r:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:       # pragma: no cover — pty hangup
+                break
+            if not chunk:
+                break
+            seen += chunk
+            if until(seen):
+                break
+        return seen
+
+    try:
+        drawn = _drain(master, lambda b: _PTY_PROMPT.encode() in b,
+                       time.monotonic() + 20)
+        assert _PTY_PROMPT.encode() in drawn, (
+            "fzf never drew its prompt in 20s — this test measured nothing. "
+            f"terminal saw: {drawn[-400:]!r}")
+        os.write(master, b"\r")
+        got = _drain(r_out, lambda b: b"\n" in b, time.monotonic() + 20)
+    finally:
+        os.close(r_out)
+        os.close(master)
+        try:
+            os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):  # pragma: no cover
+            pass
+    assert b"\n" in got, (
+        f"interactive fzf returned nothing for query {query!r} — the "
+        f"measurement did not happen, so neither did the assertion")
+    return got.decode("utf-8", "replace").split("\n")[0]
+
+
+def test_REAL_INTERACTIVE_fzf_opens_on_the_FIRST_INPUT_ROW_with_no_query():
+    """🔴 THE CLAWGATE ROW, AT THE INSTRUMENT THE OPERATOR ACTUALLY USES. A bare
+    `#N` offers the clawgate task first and the pane's repo second, and several
+    tests pin that order — every one of them by stubbing `pick`. This is the one
+    that presses Enter on a real fzf."""
+    _require_fzf()
+    rows, _target = _eponymous_corpus()
+    assert _fzf_interactive_first_row(rows, "") == rows[0]
+
+
+def test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor():
+    """The ranking claim at the same instrument: with the owner's name typed,
+    Enter must open `owner/owner` and not the shortest sibling."""
+    _require_fzf()
+    rows, target = _eponymous_corpus()
+    got = _fzf_interactive_first_row(rows, "nimbusworks")
+    assert f"/{target}/pull/" in got, got
+
+
+
+def test_the_picker_matches_CASE_INSENSITIVELY(monkeypatch):
+    """🔴 `-i`, AND ITS ABSENCE WAS SILENT FOR A WHOLE ROUND. fzf's default is
+    SMART-CASE: a query with any uppercase letter becomes case-SENSITIVE. rofi's
+    `-i` was unconditional, so dropping it changed behaviour with no test to say
+    so — the old suite asserted `-matching fuzzy` and `-no-custom` and never the
+    `-i` beside them, which is exactly how it was lost.
+
+    The consequence is the one this handler exists to prevent: an empty list is
+    indistinguishable from a dismissal inside `pick()`, so an operator who types
+    a capital letter gets SILENCE. `test_REAL_fzf_is_CASE_INSENSITIVE_only_with_
+    the_flag` measures the behaviour; this pins the flag reaching the picker."""
+    term, _url = _drive_picker(monkeypatch)
+    assert " -i " in f" {term.sh_script()} ", (
+        "the picker lost `-i`: fzf is SMART-CASE, so a query containing an "
+        "uppercase letter matches nothing and the operator sees an empty list "
+        "they cannot tell from a dismissal")
+
+
+def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
+    """🔴 THE BEHAVIOUR BEHIND THE FLAG, at the real binary, with BOTH
+    directions — an assertion that only checked "the flag matches" would pass
+    against an fzf that was case-insensitive anyway, and would not be measuring
+    the flag at all.
+
+    Measured on THIS corpus (195 rows): `NimbusWorks` → **0** matched without
+    `-i`, **15** with. Ranking is unaffected — measured on the LOWERCASE query,
+    the only one where both sides have a ranking to compare: `nimbusworks` → 15
+    matched and the eponymous repo 1st, either way. An earlier docstring said
+    "0 rows without, 41 with … the eponymous repo is 1 either way", which was
+    both wrong (41 came from a scratch corpus, and 392 is the real universe's
+    row count) and self-contradictory: rank is undefined on an empty set."""
+    _require_fzf()
+    rows, target = _eponymous_corpus()
+    mixed = "NimbusWorks"
+
+    def matched(*flags):
+        out = subprocess.run(["fzf", "--filter", mixed, "--tiebreak=end", *flags],
+                             input="\n".join(rows), capture_output=True, text=True)
+        return [r for r in out.stdout.split("\n") if r]
+
+    assert matched() == [], (
+        "NEGATIVE CONTROL: fzf already matched a mixed-case query without `-i`, "
+        "so this corpus cannot measure the flag")
+    with_i = matched("-i")
+    assert with_i, "`-i` matched nothing — the flag is not doing what this pins"
+    # …and the flag rescues the ranking too, not merely the membership.
+    assert f"/{target}/pull/" in with_i[0], with_i[0]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SHELL SCRIPT IS A SURFACE ROFI DID NOT HAVE
+# --------------------------------------------------------------------------- #
+# `_shell_child_commands` learns that `fzf` must be on the wrapper's PATH by
+# reading the FIRST WORD of the `-c` script. That is all it can see — so
+# `fzf … <"$1" | tee /tmp/picker.log >"$2"` or `notify-send "$(cat "$1")"; fzf …`
+# would write the PRIVATE rows to disk, or into a toast argv, with every ledger
+# in this file still green. Under rofi there was no shell at all; this PR is what
+# created the hole, so the shape is pinned rather than the first word alone.
+# --------------------------------------------------------------------------- #
+EXPECTED_PICKER_SH = (
+    'fzf -i --tiebreak=end --layout=reverse --info=inline '
+    '--prompt="mention > " --pointer=">" --color=16 '
+    '--header-lines="$3" <"$1" >"$2"'
+)
+
+
+def test_the_picker_SHELL_SCRIPT_stays_the_shape_it_is_pinned_to():
+    """🔴 THE WHOLE NORMALISED STRING, not a keyword search. A guard on WORDS is
+    walkable by REWORDING, and this artifact IS a shell script — the thing that
+    matters is what the SHELL will do with it, which no per-flag assertion can
+    answer. Rewording is expected to fail this; the diff is the review."""
+    assert MO.PICKER_SH == EXPECTED_PICKER_SH, (
+        "PICKER_SH changed shape. That is a SHELL SCRIPT running with the "
+        "private repository rows on its stdin, so the change needs reading, not "
+        "a test edit. If it is right, paste this in:\n\n"
+        f"EXPECTED_PICKER_SH = {MO.PICKER_SH!r}\n")
+
+
+@pytest.mark.parametrize("metachar,what", [
+    (";", "a second command"),
+    ("|", "a pipe — `| tee /tmp/x` writes the private rows to disk"),
+    ("&", "backgrounding, or `&&` chaining"),
+    ("`", "a backtick substitution"),
+    ("$(", "a command substitution — `notify-send \"$(cat \"$1\")\"` puts every "
+           "row in a toast argv"),
+    (">>", "an APPEND, which would accumulate rows across clicks"),
+])
+def test_the_picker_shell_script_carries_no(metachar, what):
+    """The exact-string pin above already forbids these — this says WHY in the
+    failure message, and keeps saying it if someone relaxes that pin to a
+    substring check. Two guards on one property, on purpose: the hazard here is
+    disclosure, and the exact-string pin is the kind a future edit "fixes"."""
+    assert metachar not in MO.PICKER_SH, f"PICKER_SH gained {metachar!r}: {what}"
+
+
+def test_the_picker_shell_script_has_EXACTLY_the_two_redirections():
+    """Both, and no more: stdin from the rows FIFO, stdout to the choice FIFO.
+    A third redirection is a third destination for the rows.
+
+    ⚠ SPLIT WITH THE SHELL'S OWN QUOTING RULES, NOT COUNTED AS CHARACTERS — the
+    first version of this did the latter and was WRONG: `>` also appears inside
+    `--prompt="mention > "` and `--pointer=">"`, so a raw `count(">")` is 3 and
+    says nothing about where the rows go. `shlex` is the same lexer
+    `_picker_flags()` uses, so a `>` that is quoted is data and a `>` that is
+    not is a destination.
+
+    🔴 FD-PREFIXED REDIRECTIONS COUNT TOO, and the first version of this missed
+    them: `shlex.split` yields `2>/tmp/leak` and `1>/tmp/leak` as single tokens
+    starting with a DIGIT, so a guard keyed on `startswith(("<", ">"))` passed
+    both while this docstring said "both, and no more". No live hazard — the
+    exact-string pin above catches them — but a guard whose description is wider
+    than its body reads as coverage while providing none."""
+    assert _redirections(MO.PICKER_SH) == ["<$1", ">$2"], (
+        f"PICKER_SH's redirections are {_redirections(MO.PICKER_SH)}, expected "
+        f"exactly the rows FIFO in and the choice FIFO out: {MO.PICKER_SH}")
+
+
+def _redirections(script: str) -> list[str]:
+    """Every redirection token in a `sh -c` script, in order.
+
+    🔴 ONE FUNCTION, CALLED BY BOTH THE GUARD AND ITS CONTROL — and that is a
+    round-3 audit finding, not a style preference. The control below used to
+    carry its OWN inline copy of this regex, so it certified a COPY rather than
+    the instrument: MEASURED by the auditor — narrowing the guard straight back
+    to the round-2 defect (`t.startswith(("<", ">"))`) and leaving the control
+    untouched left the whole file GREEN at 232 passed, including the very
+    control written to prevent that regression.
+
+    ⚠ WHAT THIS COVERS, STATED AT THE WIDTH IT WAS MEASURED. `shlex` splits a
+    redirection into one token, so the shapes are recognised by their prefix:
+    plain `<`/`>`/`>>`, an fd-prefixed `2>`/`1>`, and `&>`. 🔴 IT IS NOT "every
+    shape sh accepts" — the previous comment said that and was wrong. MEASURED
+    against this `/bin/sh` (bash 5.3p15): `&>` IS honoured (it wrote the leak
+    file), so it is included; `{fd}>/tmp/leak` is NOT honoured by this shell —
+    bash passed it through as a literal argument — so it is knowingly left out
+    rather than claimed. A shell that honoured it would need this widened.
+    """
+    import re as _re
+    import shlex
+    return [t for t in shlex.split(script) if _re.match(r"^(\d*|&)[<>]", t)]
+
+
+@pytest.mark.parametrize("leak,shape", [
+    ('fzf -i <"$1" >"$2" 2>/tmp/leak', "fd-prefixed stderr"),
+    ('fzf -i <"$1" >"$2" 1>/tmp/leak', "fd-prefixed stdout"),
+    ('fzf -i <"$1" >"$2" &>/tmp/leak', "`&>`, which THIS /bin/sh honours"),
+    ('fzf -i <"$1" >>"$2"', "an APPEND instead of a truncate"),
+])
+def test_the_redirection_reader_SEES(leak, shape):
+    """🔴 THE CONTROL DRIVES `_redirections` ITSELF. Every one of these sends the
+    private rows somewhere new (or accumulates them) while keeping `<$1` and
+    `>$2` intact, so the redirection LIST is the only thing that can notice —
+    and narrowing the reader must turn this red, which is the property the
+    previous version of this test did not have."""
+    got = _redirections(leak)
+    assert got != ["<$1", ">$2"], (
+        f"the redirection reader cannot see {shape} in {leak!r} — it yields "
+        f"{got}, which is indistinguishable from the real script")
+
+
+def test_the_redirection_reader_accepts_the_REAL_script():
+    """NEGATIVE CONTROL for the parametrised set above: a reader that flagged
+    everything would satisfy all four and be useless. The genuine script must
+    come back as exactly the two expected redirections."""
+    assert _redirections(MO.PICKER_SH) == ["<$1", ">$2"]
+
+
+def test_the_shell_script_pin_can_actually_FIRE():
+    """POSITIVE CONTROL on the three guards above, because a pin nobody has
+    watched reject anything is indistinguishable from one wired to nothing.
+
+    🔴 AND IT RECORDS WHICH GUARD CATCHES WHAT. The leaky mutant is the real
+    hazard — a pipe that copies every private row to a file — and it passes the
+    REDIRECTION check (still one `<$1`, one `>$2`). Only the exact-string pin
+    and the metacharacter check see it. That is the argument for keeping all
+    three rather than "simplifying" to the tidiest one."""
+    import shlex
+    leaky = 'fzf -i <"$1" | tee /tmp/picker.log >"$2"'
+    assert leaky != EXPECTED_PICKER_SH, "the exact-string pin catches it"
+    assert "|" in leaky, "the metacharacter check catches it"
+    redirs = [t for t in shlex.split(leaky) if t.startswith(("<", ">"))]
+    assert redirs == ["<$1", ">$2"], (
+        f"the redirection check does NOT catch this mutant ({redirs}) — which "
+        f"is why it is not the only guard")
+
+
+def test_the_picker_terminal_does_NOT_copy_a_selection_to_the_CLIPBOARD(
+        monkeypatch):
+    """🔴 A SINK ROFI NEVER HAD, AND ONE THE MODULE'S OWN ENUMERATION OMITS.
+    The picker inherits `~/.config/alacritty/alacritty.toml`, where this repo
+    sets `selection.save_to_clipboard = true` — so a drag across the list would
+    put PRIVATE repository names in the X CLIPBOARD, which OUTLIVES the pick and
+    is readable by every X client. fzf's mouse reporting makes a plain drag
+    fzf's rather than alacritty's, which is mitigation and not a guarantee."""
+    term, _url = _drive_picker(monkeypatch)
+    assert "selection.save_to_clipboard=false" in term.argv, (
+        "the picker terminal no longer disables clipboard-on-select: a "
+        "drag-selection would copy private repository names into the X "
+        "clipboard, where they outlive the pick")
+    # It must be an alacritty `-o` OVERRIDE, not a bare word somewhere.
+    i = term.argv.index("selection.save_to_clipboard=false")
+    assert term.argv[i - 1] == "-o", term.argv
+
+
+def test_a_selection_made_BEFORE_the_rows_are_drained_is_NOT_thrown_away(
+        monkeypatch):
+    """🔴 THE OPERATOR'S ANSWER, DISCARDED, PLUS A FALSE ERROR TOAST.
+
+    fzf answers on the first keypress; it does not wait to drain the list. It
+    then closes its read end, so the next `os.write` raises `BrokenPipeError` —
+    an `OSError`, which used to propagate to `pick()`'s handler, fire "could not
+    show the mention picker", and return "" while the chosen row was ALREADY
+    sitting in the choice FIFO.
+
+    MEASURED: invisible at 392 rows (~21 KB) and broken at 1,200 (~67 KB) and
+    3,000 (~172 KB). The boundary is the 64 KiB pipe buffer — below it the whole
+    payload lands in one write before fzf can answer — which is the SAME
+    threshold the open-order deadlock fix exists for.
+
+    🔴 AND THE FAKE HAD TO CHANGE TO SEE IT. `_FakeTerminal` drained the whole
+    FIFO before answering, i.e. it was a friendlier peer than fzf, so every
+    transport test here was structurally blind to this. `answer_early=True` is
+    what makes the case reachable at all."""
+    cands = [{"platform": "github", "id": "12",
+              "url": f"https://github.com/owner{i}/repo{i}/pull/12"}
+             for i in range(3000)]
+    payload = len("\n".join(MO.picker_rows(cands)))
+    assert payload > 150_000, f"fixture no longer overshoots a pipe buffer: {payload}"
+    chosen_row = MO.picker_rows(cands)[7]
+
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    _term, url = _drive_picker(monkeypatch, cands, choose=chosen_row,
+                               answer_early=True)
+    assert url == cands[7]["url"], (
+        "the selection was thrown away when fzf hung up before the payload was "
+        "fully written")
+    assert not said, f"a false error toast fired on a normal early answer: {said}"
+
+
+def test_the_early_answer_fixture_is_not_vacuous(monkeypatch):
+    """POSITIVE CONTROL on the fixture: at a SMALL payload the same early-answer
+    peer must also work. If this went red the test above would be measuring a
+    broken fake rather than the code."""
+    row = MO.picker_rows(ONE_CANDIDATE)[0]
+    _term, url = _drive_picker(monkeypatch, choose=row, answer_early=True)
+    assert url == ONE_CANDIDATE[0]["url"]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THREE SILENCES THAT USED TO LOOK ALIKE
+# --------------------------------------------------------------------------- #
+def test_a_TIMEOUT_still_toasts_the_way_rofi_did(monkeypatch):
+    """🔴 AN UNDECLARED BEHAVIOUR CHANGE, RESTORED. rofi's `timeout=120` raised
+    `TimeoutExpired`, which the old `except` turned into a toast. The first
+    version of this rewrite returned "" and said nothing, and the PR body
+    claimed "same behaviour as before" — it was not.
+
+    A dismissal stays silent; a timeout does not. They are different events and
+    only one of them means the operator decided something."""
+    class Wedged:
+        def poll(self):
+            return None      # alive, and never answers
+
+        def terminate(self):
+            pass
+
+    monkeypatch.setattr(MO, "PICKER_TIMEOUT", 0.3)
+    monkeypatch.setattr(MO.subprocess, "Popen", lambda *a, **k: Wedged())
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    # 🔴 THE TOKEN IS IN THE MESSAGE, NOT ONLY IN THE SOURCE LINE. The mutation
+    # battery scores a row by grepping pytest's `E ` lines for the phrase the
+    # row names, and `assert said and "timed out" in said[0][0]` short-circuits
+    # on an empty list — so the mutant died but was scored KILLED-WRONG-REASON,
+    # which is a scoring blind spot, not a passing guard.
+    assert said, ("the picker timed out and toasted NOTHING — an abandonment "
+                  "and a dismissal must not look the same")
+    assert "timed out" in said[0][0], said
+
+
+def test_a_terminal_that_DIED_before_showing_anything_says_so(monkeypatch):
+    """🔴 A CLICK THAT DID NOTHING, WITH NO EXPLANATION — the dead end this
+    whole handler replaced. rofi had no analogue (a missing binary is a
+    `FileNotFoundError` at spawn), but a terminal that starts and whose `fzf` is
+    missing from the wrapper's PATH exits instantly, and that used to be
+    swallowed as a dismissal."""
+    class DeadTerminal:
+        def poll(self):
+            return 1
+
+        def terminate(self):  # pragma: no cover — poll() already reports exit
+            pass
+
+    monkeypatch.setattr(MO.subprocess, "Popen", lambda *a, **k: DeadTerminal())
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    # Same short-circuit hazard as the timeout test above — see its comment.
+    assert said, ("the picker could not open and said nothing — the click "
+                  "produced no window and no explanation")
+    assert "could not open" in said[0][0], said
+
+
+def test_a_DISMISSAL_is_still_SILENT(monkeypatch):
+    """🔴 THE HALF THAT MUST NOT REGRESS while the two above were added. A toast
+    after a dismissal fires after EVERY dismissal, which is the noise the note
+    above the list exists to avoid making."""
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    _term, url = _drive_picker(monkeypatch, choose=None)
+    assert url == ""
+    assert not said, f"a dismissal toasted: {said}"
+
+
+def test_no_toast_body_can_name_a_REPOSITORY(monkeypatch, universe):
+    """🔴 THE NEW TOASTS ARE A NEW SINK, so they go through the same guard as
+    every other one. `notify()` prints to stderr AND to `notify-send` argv."""
+    for popen in (lambda *a, **k: _Dead(), lambda *a, **k: _Wedged()):
+        said = []
+        monkeypatch.setattr(MO, "notify", lambda s, b="": said.append(f"{s} {b}"))
+        monkeypatch.setattr(MO, "PICKER_TIMEOUT", 0.3)
+        monkeypatch.setattr(MO.subprocess, "Popen", popen)
+        cands = MO.universe_candidates("12", sorted(FAKE_UNIVERSE.values()))
+        assert MO.pick(cands, mesg="nothing here knows widget#12") == ""
+        assert said, "positive control: a toast really fired"
+        _no_universe_token_anywhere(" ".join(said), "PICKER TOAST DISCLOSURE")
+
+
+class _Dead:
+    def poll(self):
+        return 1
+
+    def terminate(self):  # pragma: no cover
+        pass
+
+
+class _Wedged:
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 2: THE TIMEOUT GUARD COVERED THE WRONG ARM
+#
+# `run_picker` can report `PICKED_TIMEOUT` from TWO places, and they are
+# different failures:
+#
+#   * the ENXIO loop — the terminal never opened the rows FIFO at all;
+#   * the READ loop — the picker is OPEN, the rows were delivered, and nobody
+#     ever answered.
+#
+# The second one IS rofi's `timeout=120`: "the picker is up and the operator
+# walked away". Round 1's finding was that this toast had been LOST; the guard
+# added to stop it being lost again used a peer that never opens the FIFOs, so
+# it only ever exercised the FIRST arm. MEASURED by the round-2 audit: mutating
+# the read loop's `outcome = PICKED_TIMEOUT` to `PICKED_DISMISSED` SURVIVED the
+# whole suite (225 passed).
+# --------------------------------------------------------------------------- #
+class _OpensThenWaits(_FakeTerminal):
+    """A peer that behaves like a REAL picker nobody answers.
+
+    It performs the shell's own redirections, drains the rows — so the operator
+    is looking at a full list — and then simply never writes a selection and
+    never exits. That is the ONLY shape that reaches the read loop's deadline.
+    """
+
+    def popen(self, argv, **kwargs):
+        self.argv = list(argv)
+        rows_fifo, choice_fifo = argv[-3], argv[-2]
+
+        def serve():
+            rfh = open(rows_fifo, "r", encoding="utf-8")
+            wfh = open(choice_fifo, "w", encoding="utf-8")
+            with rfh, wfh:
+                self.payload = rfh.read()
+                self._shown.set()
+                # …and now wait, holding both ends, answering nothing.
+                self._release.wait(timeout=30)
+
+        self._shown = threading.Event()
+        self._release = threading.Event()
+        self._thread = threading.Thread(target=serve, daemon=True)
+        self._thread.start()
+        return self
+
+    def poll(self):
+        return None          # ALIVE the whole time — this is the distinction
+
+    def terminate(self):
+        self._release.set()
+
+
+def test_a_timeout_with_the_LIST_ON_SCREEN_toasts(monkeypatch):
+    """🔴 THE ARM ROFI'S `timeout=` ACTUALLY WAS, pinned at last.
+
+    The sibling test drives the ENXIO arm (a terminal that never opens the
+    FIFOs). This one drives the arm that matters in production: the rows were
+    delivered, the picker is on screen, and the operator walked away.
+
+    The positive control is what separates the two — this asserts the payload
+    REACHED the peer, so a regression that made the terminal fail early would
+    fail here rather than quietly re-testing the other arm."""
+    monkeypatch.setattr(MO, "PICKER_TIMEOUT", 0.6)
+    term = _OpensThenWaits(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    try:
+        url = MO.pick(ONE_CANDIDATE)
+    finally:
+        term.terminate()
+    # POSITIVE CONTROL: the list really was delivered, so this is the
+    # picker-is-open arm and not the terminal-never-started one.
+    assert term._shown.is_set(), (
+        "the peer never received the rows — this exercised the ENXIO arm again, "
+        "which is the very substitution this test exists to stop")
+    assert term.rows == MO.picker_rows(ONE_CANDIDATE), term.rows
+    assert url == ""
+    assert said, ("the picker timed out with the list on screen and toasted "
+                  "NOTHING — that is rofi's `timeout=120` case, lost again")
+    assert "timed out" in said[0][0], said
+
+
+def test_the_two_TIMEOUT_arms_are_different_code_paths():
+    """🔴 STRUCTURAL, so the pair above cannot collapse into one. `run_picker`
+    must keep BOTH deadline checks — the ENXIO loop's and the read loop's.
+    Deleting either leaves a hang or a silent dismissal, and a single test can
+    only ever cover one of them."""
+    src = HANDLER.read_text()
+    body = src[src.index("def run_picker("):src.index("def pick(")]
+    assert body.count("PICKED_TIMEOUT") == 2, (
+        f"run_picker names PICKED_TIMEOUT {body.count('PICKED_TIMEOUT')}x — "
+        "expected 2: once when the terminal never opened the rows FIFO, once "
+        "when the list was on screen and nobody answered")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 2: A MISSING `fzf` IS NOT `never-shown`
+# --------------------------------------------------------------------------- #
+def test_a_missing_fzf_is_caught_BEFORE_a_window_is_raised(monkeypatch):
+    """🔴 THE PROSE THIS REPLACES WAS DISPROVED BY ITS OWN FILE. Four places
+    said `never-shown` is "what a missing fzf on the wrapper's PATH looks
+    like". It is not: `/bin/sh` applies `<"$1" >"$2"` BEFORE exec'ing — the very
+    fact `run_picker`'s open-order fix rests on — so a missing fzf gives the
+    rows FIFO a reader and the run ends as a SILENT dismissal.
+
+    MEASURED: `/bin/sh -c 'zzznosuchbinary <"$1" >"$2"'` exits 127 with the
+    redirections applied. And `proc.returncode` cannot rescue it: alacritty
+    0.17.0 exits **0** whether its `-e` command exits 0 or 127, so the 127 from
+    a shell that DID run is invisible in the terminal's status. (An earlier
+    docstring added "or does not exist at all" — FALSE, measured under Xvfb:
+    `-e zzznosuchbinary` exits 1. The conclusion is unchanged, because `-e` here
+    is always the existing `/bin/sh`.)
+
+    So it is caught BEFORE the spawn, which is better than any toast after it:
+    no window is raised at all."""
+    spawned = []
+    # `pick()` imports `shutil` locally, which binds the SAME module object this
+    # file imported — so patching it here is patching what the handler calls.
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+    monkeypatch.setattr(MO.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or _Dead())
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert not spawned, "a window was raised for a picker that cannot run"
+    assert said, "a missing fzf said nothing — the silent dead click"
+    assert "fzf" in said[0][1], said
+
+
+def test_the_missing_fzf_preflight_does_not_fire_when_fzf_IS_present(
+        monkeypatch):
+    """NEGATIVE CONTROL for the test above: with a real fzf on PATH the
+    pre-flight must be invisible, or it would break every ordinary pick."""
+    _require_fzf()
+    row = MO.picker_rows(ONE_CANDIDATE)[0]
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    _term, url = _drive_picker(monkeypatch, choose=row)
+    assert url == ONE_CANDIDATE[0]["url"]
+    assert not said, said
+
+
+def test_the_NEVER_SHOWN_toast_does_not_blame_a_cause_it_cannot_HAVE(
+        monkeypatch):
+    """🔴 A TOAST BODY IS A CLAIM, and this one named two causes that cannot
+    reach it — a missing alacritty raises `FileNotFoundError` at `Popen` and
+    takes the other branch, and a missing fzf is pre-flighted. Sending an
+    operator to check a PATH that is fine is worse than saying less."""
+    monkeypatch.setattr(MO.subprocess, "Popen", lambda *a, **k: _Dead())
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    body = said[0][1]
+    assert "fzf" not in body, (
+        f"the never-shown toast still blames fzf, which cannot produce it: {body}")
+    assert "PATH" not in body, (
+        f"the never-shown toast still blames the wrapper's PATH: {body}")
+    assert "DISPLAY" in body, body
+
+
+def test_the_missing_fzf_toast_names_a_SWITCH_not_a_file_to_edit(monkeypatch):
+    """🔴 A REMEDY THAT IS ALREADY APPLIED IS NOT A REMEDY. This body used to say
+    "add pkgs.fzf to the hint wrapper in nix/programs/alacritty/default.nix" —
+    but that entry is enforced by
+    `test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns`,
+    so in ANY tree that passes this suite it is already there and the operator is
+    sent to edit a correct file.
+
+    What can actually raise it: a deployed wrapper GENERATION predating the entry
+    (this repo's merged-≠-deployed trap), a GC'd store path, or the script run
+    outside the wrapper. All three are a `home-manager switch`, none an edit.
+
+    Same operator consequence as round 2's finding A — a diagnosis pointing
+    somewhere fine, in a module whose thesis is that an undiagnosed silence is
+    the bug."""
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+    monkeypatch.setattr(MO.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("a window was raised"))
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert said, "the missing-fzf pre-flight said nothing"
+    body = said[0][1]
+    assert "DEPLOY gap" in body and "home-manager switch" in body, (
+        f"the missing-fzf toast must name the DEPLOY gap and the switch that "
+        f"closes it, not a file to edit: {body!r}")
+    assert "default.nix" not in body, (
+        f"the toast sends the operator to edit a file whose pkgs.fzf entry is "
+        f"test-enforced and therefore already correct: {body!r}")
+
+
+def test_the_UNKNOWN_OUTCOME_toast_body_is_FIXED_never_interpolated(monkeypatch):
+    """🔴 THE ONE LINE THAT COULD CARRY AN ARBITRARY STRING INTO A FORBIDDEN
+    SURFACE. The module docstring says the universe may reach the picker window
+    and NOWHERE else — "never to a notification body" — and this catch-all used
+    to interpolate `str(outcome)`.
+
+    Not a live leak today (the four outcomes are literals and the branch is
+    unreachable from `run_picker`), which is exactly why it needs a test: the
+    day an outcome is built from data, the leak would be silent. Driven by
+    stubbing `run_picker`, because nothing else can reach the branch."""
+    monkeypatch.setattr(MO, "run_picker",
+                        lambda *_a, **_k: ("", "outcome-carrying-SECRETREPO"))
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert said, "an unknown outcome was dropped silently — round 1's defect"
+    summary, body = said[0]
+    assert "unknown outcome" in summary, said
+    assert "SECRETREPO" not in body and "SECRETREPO" not in summary, (
+        f"the unknown-outcome toast interpolates its outcome into a "
+        f"notification body, which the module docstring forbids: {said!r}")
+
+
+def test_every_KNOWN_outcome_is_reachable_through_pick(monkeypatch):
+    """NEGATIVE CONTROL for the test above: the catch-all must fire ONLY for an
+    outcome outside the ledger. A version that toasted on every outcome would
+    satisfy that test and break all four real paths."""
+    for outcome in MO.PICKED_OUTCOMES:
+        said = []
+        monkeypatch.setattr(MO, "run_picker", lambda *_a, **_k: ("", outcome))
+        monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+        MO.pick(ONE_CANDIDATE)
+        assert not any("unknown outcome" in s for s, _b in said), (
+            f"{outcome!r} is in PICKED_OUTCOMES but took the catch-all: {said}")
+
+
+def test_the_PICKED_outcome_set_is_pinned_and_every_one_is_HANDLED():
+    """🔴 TWO-WAY, and the reason is round 1's own finding. `pick()` branches on
+    these constants and its `else` used to be silence, so a fifth outcome added
+    later would be dropped without a sound — which is exactly how the timeout
+    toast went missing in the first place.
+
+    Both directions: the ledger names every `PICKED_*` constant the module
+    defines, and `pick()` accounts for every member of the ledger."""
+    defined = {n for n in dir(MO) if n.startswith("PICKED_")
+               and isinstance(getattr(MO, n), str)}
+    assert defined == {"PICKED_SELECTED", "PICKED_DISMISSED", "PICKED_TIMEOUT",
+                       "PICKED_NEVER_SHOWN"}, sorted(defined)
+    assert set(MO.PICKED_OUTCOMES) == {getattr(MO, n) for n in defined}, (
+        "PICKED_OUTCOMES and the PICKED_* constants disagree")
+    # …and `pick()` must not silently drop one.
+    src = HANDLER.read_text()
+    body = src[src.index("def pick("):]
+    assert "not in PICKED_OUTCOMES" in body, (
+        "pick() no longer has a catch-all for an outcome nobody taught it "
+        "about — that is round 1's lost-toast defect one layer up")
 
 
 @pytest.mark.parametrize("state,write,expected", [
@@ -1536,7 +2749,7 @@ def test_a_value_that_is_not_EXACTLY_owner_slash_repo_is_refused(tmp_path, value
 # every constant these assertions name (`kubectl-neat`, `zzznosuchrepo`,
 # `regen-known-repos.py`, `offered`), so no guard can pass by coincidence.
 #
-# 🔴 NOTHING HERE LAUNCHES ROFI. `pick` is stubbed by the `spy` fixture, or
+# 🔴 NOTHING HERE RAISES A WINDOW. `pick` is stubbed by the `spy` fixture, or
 # `subprocess.run` is replaced. Raising a window takes the operator's screen.
 # --------------------------------------------------------------------------- #
 FAKE_UNIVERSE = {
@@ -1552,6 +2765,22 @@ FAKE_UNIVERSE_TOKENS = (
     | {v.split("/")[0] for v in FAKE_UNIVERSE.values()}
     | {v.split("/")[1] for v in FAKE_UNIVERSE.values()}
 )
+
+# 🔴 THE PANE-GUESSED REPO IS A SECOND NAME THE NOTES MUST NOT CARRY, AND IT IS
+# NOT IN THE UNIVERSE. That is the point of it — a guess comes from the tmux
+# pane, not from the mapping — and it is exactly why
+# `_no_universe_token_anywhere` is STRUCTURALLY BLIND to a leak of it: every
+# token that check knows comes from `FAKE_UNIVERSE`, which by construction does
+# not contain this. So a mutant that spliced the guessed repo into the note
+# ("Row 1 is a guess from the tmux pane (wrongorg/wrongrepo)" — a natural-looking
+# improvement) passed every assertion in this file, under docstrings that said
+# the note "must not name a repository".
+PANE_GUESS = "wrongorg/wrongrepo"
+PANE_GUESS_TOKENS = {
+    PANE_GUESS,
+    PANE_GUESS.split("/")[0],
+    PANE_GUESS.split("/")[1],
+}
 
 
 def test_the_fixtures_KEYS_and_VALUES_are_pairwise_distinct():
@@ -1572,6 +2801,53 @@ def test_the_fixtures_KEYS_and_VALUES_are_pairwise_distinct():
                 assert a not in b, (
                     f"{a!r} is a substring of {b!r} — a leak of the first would "
                     f"be indistinguishable from a leak of the second")
+
+
+def test_the_pane_guess_is_OUTSIDE_the_universe_and_spelled_distinctly():
+    """🔴 THE GUARD ON THE SECOND LEDGER, and it pins the very property that
+    makes the second ledger necessary.
+
+    If `PANE_GUESS` were in `FAKE_UNIVERSE`, `_no_universe_token_anywhere` would
+    already cover it and `_no_guessed_repo_token_anywhere` would be decoration
+    that no mutation could kill. It is out, deliberately — and the two token sets
+    must stay disjoint, or a leak of one becomes indistinguishable from a leak of
+    the other.
+    """
+    assert PANE_GUESS not in FAKE_UNIVERSE.values(), PANE_GUESS
+    assert PANE_GUESS not in FAKE_UNIVERSE, PANE_GUESS
+    assert not (PANE_GUESS_TOKENS & FAKE_UNIVERSE_TOKENS), (
+        PANE_GUESS_TOKENS & FAKE_UNIVERSE_TOKENS)
+    assert len(PANE_GUESS_TOKENS) == 3, PANE_GUESS_TOKENS
+    for a in PANE_GUESS_TOKENS:
+        for b in PANE_GUESS_TOKENS:
+            if a != b and "/" not in a and "/" not in b:
+                assert a not in b, (
+                    f"{a!r} is a substring of {b!r} — a leak of the first would "
+                    f"be indistinguishable from a leak of the second")
+    # ...and no token may be a word the note legitimately uses, or the guard
+    # would be red on correct output rather than on a leak.
+    for token in PANE_GUESS_TOKENS:
+        assert token not in MO.guessed_note("audit-pr 1291", below=3, rank=1)
+        assert token not in MO.guessed_note("audit-pr 1291")
+
+
+def _no_guessed_repo_token_anywhere(everywhere: str, label: str) -> None:
+    """🔴 THE NOTE MUST NOT NAME THE GUESSED REPOSITORY EITHER.
+
+    `guessed_note`'s own docstring says it "names the clicked text and two
+    counts, NOTHING ELSE — never the repository", and until 2026-09-09 the only
+    check behind that sentence was `_no_universe_token_anywhere`, which cannot
+    see this name at all (see `PANE_GUESS`). A guard reading as coverage while
+    providing none is worse than none: it stops anyone looking.
+
+    The disclosure argument is the same one as for the universe. The candidate
+    ROW already shows the repository — that is what the operator is being asked
+    about — so the note repeating it buys nothing and adds a second place a name
+    can escape from. It is also the wrong claim: the note explains why a choice
+    is being offered, and the pane's repo is not part of that explanation.
+    """
+    for token in sorted(PANE_GUESS_TOKENS):
+        assert token not in everywhere, f"{label}: {token}"
 
 
 def _no_universe_token_anywhere(everywhere: str, label: str) -> None:
@@ -1693,7 +2969,7 @@ def test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape(monkeypatch, tex
 
 def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
     """A picker whose top row was GUESSED, with no explanation, reads as a broken
-    handler asking the operator to confirm the obvious. rofi cannot report a
+    handler asking the operator to confirm the obvious. The picker cannot report a
     reason after a dismissal (see `pick`), so the reason goes above the choice.
 
     ⚠ THIS TEST USED TO ASSERT `n == 1` AND WAS RENAMED FROM
@@ -1706,9 +2982,17 @@ def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
 
     The count is now pinned by
     `test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it`, which
-    is the regression for the report."""
+    is the regression for the report.
+
+    🔴 "IT MUST NOT NAME A REPOSITORY" IS NOW ACTUALLY CHECKED. The body used to
+    run `_no_universe_token_anywhere` alone, which knows only the tokens in
+    `FAKE_UNIVERSE` — and the repository this test is ABOUT is the pane guess,
+    which is deliberately NOT in it. So the sentence covered every repository
+    except the one at issue, and a mutant leaking the guess into the note passed
+    under a docstring claiming otherwise. Both ledgers are asserted now; see
+    `_no_guessed_repo_token_anywhere`."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
-    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
@@ -1718,6 +3002,7 @@ def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
     assert "audit-pr 1291" in seen["mesg"], seen
     assert "tmux pane" in seen["mesg"], seen
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+    _no_guessed_repo_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
 
 
 def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
@@ -1754,6 +3039,7 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
     assert "guess" in seen["mesg"].lower(), seen["mesg"]
     assert "nothing here knows" not in seen["mesg"], seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
+    _no_guessed_repo_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -1785,7 +3071,13 @@ def test_the_suppression_reads_mention_scans_OWN_source_constant():
     a hand-spelled `"default"` here would silently stop firing the day
     `mention_scan` renamed the constant — with every suite green, because the
     branch would simply never be taken."""
-    import mention_scan as MS  # noqa: PLC0415 — see `_load_handler`'s sys.path
+    # noqa: PLC0415 — deliberately local, and it binds the SAME module object
+    # the handler imported: `exec_module(MO)` at the top of this file already put
+    # `scripts/collector` on `sys.path` and left `mention_scan` in `sys.modules`.
+    # (This comment used to point at `_load_handler`, a function that does not
+    # exist in this file and, by `git log -S`, never has — the loader has always
+    # been the module-level block beside `MO`.)
+    import mention_scan as MS  # noqa: PLC0415
 
     assert MO.SOURCE_DEFAULT is MS.SOURCE_DEFAULT
     assert MO.SOURCE_DEFAULT == "default"
@@ -2134,9 +3426,9 @@ def test_a_FIVE_digit_number_still_reaches_the_picker(spy, universe, monkeypatch
 # 🔴 A DISMISSED PICKER CANNOT BE READ, SO THE DIAGNOSIS GOES ABOVE IT
 #
 # MEASURED: `kubectl-neat#1` resolved before this branch and now exits 1.
-# Interactively the operator gets the fuzzy picker, types the name, rofi
+# Interactively the operator gets the fuzzy picker, types the name, fzf
 # (`-no-custom`) matches nothing, presses Escape — and `pick()` returns "" for
-# BOTH that and a genuine "I changed my mind". rofi reports them identically;
+# BOTH that and a genuine "I changed my mind". The picker reports them identically;
 # there is no exit code, no stdout, nothing that separates them. So a toast
 # fired after a dismissal would fire after EVERY dismissal, which is noise the
 # handler must not make.
@@ -2177,7 +3469,7 @@ def test_the_picker_NOTE_never_names_a_universe_row(universe, monkeypatch,
                                                     tmp_path):
     """🔴 THE NOTE IS THE ONE NEW STRING BUILT WHILE THE WHOLE UNIVERSE IS IN
     HAND, so it is exactly where "did you mean one of these?" would be written
-    next. The rows themselves may go to rofi; the note may say only what the
+    next. The rows themselves may go to the picker; the note may say only what the
     operator already knows plus two numbers.
 
     ⚠ IT USED TO CHECK THE VALUE AND THE OWNER AND NOT THE KEY — two spellings
@@ -2215,33 +3507,109 @@ def test_the_ORDINARY_picker_gets_no_note(spy, monkeypatch):
     assert seen["mesg"] == "", seen
 
 
-def test_the_picker_passes_its_NOTE_to_rofi_as_mesg(monkeypatch):
-    """🔴 THE SEAM BETWEEN THE DECISION AND THE TOOL, again. Every test above
-    stubs `pick`, so none of them notices if the note is computed and then
-    dropped on the floor. This is the only one that reads the argv rofi is
-    actually handed.
+def test_the_NOTE_survives_all_the_way_from_main_to_the_picker(
+        monkeypatch, universe, tmp_path):
+    """🔴 THE WHOLE SEAM IN ONE RUN — `main()` computes the note, `pick()`
+    wraps it, and the transport carries it. Every OTHER test on this path stubs
+    `pick`, so none of them would notice a note computed and then dropped on the
+    floor; the three tests beside `_drive_picker` cover the second half but
+    start from a note handed in by hand.
 
-    NOTHING IS LAUNCHED: `subprocess.run` is replaced."""
-    seen = {}
+    ⚠ THE ESCAPING TEST THIS REPLACES IS GONE ON PURPOSE. It asserted
+    `widget<1> & co` arrived as `widget&lt;1&gt; &amp; co`, because rofi's
+    `-mesg` rendered PANGO. fzf's header is plain text, so that expectation is
+    now exactly backwards — see
+    `test_the_note_is_NOT_pango_escaped_because_fzf_renders_plain_text`."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 1.0))
+    term = _FakeTerminal(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    assert MO.main(["zzznosuchrepo#12"]) == 0
+    n = int(term.argv[-1])
+    header = " ".join(term.rows[:n])
+    # POSITIVE CONTROL: rows really were offered under it.
+    assert term.rows[n:], "the picker got a header and no candidates"
+    assert "zzznosuchrepo#12" in header, header
+    assert "3 offered" in header, header
+    # …and the header is STILL not a place a repository name may appear.
+    _no_universe_token_anywhere(header, "END-TO-END HEADER DISCLOSURE")
 
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = list(cmd)
-        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
 
-    monkeypatch.setattr(MO.subprocess, "run", fake_run)
-    cands = [{"platform": "github", "id": "7",
-              "url": "https://github.com/gardenersguild/trowelcast/pull/7"}]
-    MO.pick(cands, mesg="nothing here knows widget<1> & co")
-    assert "-mesg" in seen["cmd"], seen["cmd"]
-    body = seen["cmd"][seen["cmd"].index("-mesg") + 1]
-    # `-mesg` is rendered as PANGO MARKUP, so the three significant characters
-    # must arrive escaped or a stray `<` swallows the rest of the line.
-    assert body == "nothing here knows widget&lt;1&gt; &amp; co", body
 
-    # NEGATIVE CONTROL: no note, no flag. A `-mesg` with an empty argument
-    # renders an empty band above the list on every ordinary picker.
-    MO.pick(cands)
-    assert "-mesg" not in seen["cmd"], seen["cmd"]
+def test_the_GUESSED_note_reaches_the_picker_and_no_other_surface(
+        monkeypatch, capsys, real_notify):
+    """🔴 THE SEAM BETWEEN #1457 AND THE fzf SWAP, AND A CLEAN `git merge` LEFT
+    IT OPEN. Two changes landed on this file at once. #1457 added
+    `_no_guessed_repo_token_anywhere` because `_no_universe_token_anywhere`
+    knows `FAKE_UNIVERSE` and the pane guess is deliberately NOT in it — so the
+    universe guard covered every repository except the one at issue. This branch
+    replaced rofi with a terminal, adding surfaces rofi never had: the child's
+    ARGV and a FIFO directory.
+
+    The merge was textually clean and semantically short: every new sink guard
+    on this branch used the UNIVERSE token set alone, which is exactly the
+    blindness #1457 existed to close — so the guessed repo could have reached a
+    terminal argv with the whole suite green. This test is the join.
+
+    It asserts the SPLIT, not just absence: the guess MUST appear in the
+    candidate rows — offering it is the entire feature — and must appear nowhere
+    else at all."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
+    term = _FakeTerminal(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+
+    assert MO.main(["audit-pr 1291"]) == 0
+
+    n = int(term.argv[-1])
+    header = " ".join(term.rows[:n])
+    rows = term.rows[n:]
+
+    # POSITIVE CONTROLS FIRST — three of them, because each absence below is
+    # vacuous without the matching presence.
+    assert rows, "the picker got no candidate rows at all"
+    assert any(PANE_GUESS in r for r in rows), (
+        f"the guessed repo is NOT among the offered rows — offering it is the "
+        f"whole feature, so every absence asserted below would be vacuous: {rows}")
+    assert "audit-pr 1291" in header, f"the note never reached the picker: {header}"
+
+    # 1. THE NOTE names the click and counts, never either repository.
+    _no_universe_token_anywhere(header, "GUESSED E2E HEADER")
+    _no_guessed_repo_token_anywhere(header, "GUESSED E2E HEADER")
+
+    # 2. THE TERMINAL'S ARGV — the surface rofi did not have. It may carry flags
+    #    and the two FIFO paths and nothing else.
+    argv = " ".join(term.argv)
+    _no_universe_token_anywhere(argv, "GUESSED E2E TERMINAL ARGV")
+    _no_guessed_repo_token_anywhere(argv, "GUESSED E2E TERMINAL ARGV")
+
+    # 3. AND THE PUBLISHED SINKS, through the real `notify`.
+    blob = _every_sink(capsys, real_notify)
+    _no_universe_token_anywhere(blob, "GUESSED E2E EVERY SINK")
+    _no_guessed_repo_token_anywhere(blob, "GUESSED E2E EVERY SINK")
+
+
+def test_the_guessed_seam_guard_can_actually_FIRE():
+    """POSITIVE CONTROL on the pair of token guards the test above leans on —
+    both must reject the thing they are named for, or six absences prove
+    nothing. `_no_universe_token_anywhere` is already controlled elsewhere; this
+    pins that the GUESS guard is not wired to an empty set, which is the
+    specific way #1457's finding could regress."""
+    assert PANE_GUESS_TOKENS, "the guess token set is EMPTY — every check passes"
+    # 🔴 THE BLINDNESS ITSELF, PINNED — this is why both guards are needed at
+    # every site and why the clean merge was not a safe one. The UNIVERSE guard
+    # does NOT fire on a leaked pane guess: it knows `FAKE_UNIVERSE`, and the
+    # guess is deliberately outside it. Anyone tempted to "simplify" the pair
+    # back to one call reads this first.
+    _no_universe_token_anywhere(f"leaked {PANE_GUESS}", "BLINDNESS CONTROL")
+    with pytest.raises(AssertionError):
+        _no_guessed_repo_token_anywhere(f"leaked {PANE_GUESS}", "CONTROL")
+    with pytest.raises(AssertionError):
+        _no_guessed_repo_token_anywhere(
+            f"leaked {PANE_GUESS.split('/')[1]}", "CONTROL")
+    # …and it must NOT fire on an innocent string, or it would red everything.
+    _no_guessed_repo_token_anywhere("github 12 — clawgate task", "CONTROL")
 
 
 def test_a_bare_hash_N_that_the_PANE_attributes_gets_the_universe_BELOW_it(
@@ -2259,7 +3627,7 @@ def test_a_bare_hash_N_that_the_PANE_attributes_gets_the_universe_BELOW_it(
 
     🔴 WHAT SURVIVES OF THE OLD CLAIM IS PINNED HERE, NOT DROPPED. The two
     MEASURED rows stay first, in their old order — clawgate, then the pane's
-    GitHub repo — so the common case is still one Enter and rofi still opens on
+    GitHub repo — so the common case is still one Enter and the picker still opens on
     the clawgate row. The universe is strictly APPENDED."""
     assert MO.main(["#370"]) == 0
     # clawgate + the pane repo + the three FAKE_UNIVERSE repos, deduped.
@@ -2343,20 +3711,53 @@ def test_every_flag_refusal_the_handler_can_produce_survives_notify_send(
             f"got no `--`, so the toast never appears: {argv}")
 
 
-# The universe rows may reach the operator's rofi window and NOWHERE else, so
-# every sink the handler can write to is enumerated here rather than left to
+# The universe rows may reach the operator's own PICKER WINDOW and nowhere else,
+# so every sink the handler can write to is enumerated here rather than left to
 # whichever one a test happened to think of. A sink missing from this list is a
 # hole; adding one to the module means adding it here.
 #
-# 🔴 THE THREE SINKS ARE STDOUT, STDERR AND THE `notify-send` ARGV — and that is
-# the WHOLE list, because those are the only places `mention-open.py` writes.
-# It has no log file and no spool: it is a detached one-shot click handler. The
-# guard below used to be named `..._a_LOG_a_SPOOL_or_stderr`, which promised
-# coverage of two sinks that do not exist and understated the one that does (a
-# desktop toast is more public than either). A guard whose NAME is wider than
-# its body reads as coverage while providing none, which is worse than none —
-# it stops anyone looking. The tailer is the module with a spool, and its own
-# disclosure guards are in `test_session_tailer.py`.
+# 🔴 THE THREE SINKS THIS FOLDS ARE STDOUT, STDERR AND THE `notify-send` ARGV,
+# AND THAT IS NOT EVERY PLACE THE MODULE WRITES. There is a FOURTH destination —
+# the interactive picker: its rows, and the `mesg` line above them. This helper
+# cannot see it and never will, because the picker is reached through `pick()`,
+# which every test here replaces with a spy.
+#
+# 🔴 THAT EXCLUSION IS THE DESIGN, NOT A GAP. The picker is the ONE surface the
+# universe is allowed to reach — offering those rows is the entire feature —
+# so folding it in would make every disclosure assertion below red on correct
+# behaviour. The distinction is not "three sinks vs four": it is
+# PUBLISHED-vs-PRIVATE. stdout, stderr and a desktop toast outlive the click and
+# can be read by something other than the person who clicked; the picker is a
+# transient window on the operator's own screen, raised by this click, gone the
+# moment they choose or dismiss. The property is about the SINK, not about which
+# program draws it — swapping the picker implementation changes nothing here.
+#
+# ⚠ THAT SENTENCE SAID "drawn by this process" AND THE SWAP IT ANTICIPATED HAS
+# NOW HAPPENED, so the wording is corrected rather than left to rot: the picker
+# is fzf inside a float terminal, i.e. a CHILD process, not a call inside this
+# one. The published-vs-private property is untouched — a transient window on
+# the operator's own screen either way — but "this process" is no longer true,
+# and a child process brings two surfaces rofi did not have. Both are guarded,
+# and NEITHER is folded in here: the rows and `mesg` travel a FIFO pair in a
+# 0700 dir (`test_the_rows_go_down_a_FIFO_that_does_not_outlive_the_pick`), and
+# the terminal's argv carries only flags and those two paths
+# (`test_NO_ROW_reaches_the_terminal_ARGV`,
+# `test_the_GUESSED_note_reaches_the_picker_and_no_other_surface`).
+#
+# 🔴 AND "MAY SHOW THE UNIVERSE" IS NOT "MAY SHOW ANYTHING". The picker's own
+# `mesg` is guarded separately, at each site that builds one, by
+# `_no_universe_token_anywhere` and `_no_guessed_repo_token_anywhere` — see
+# `guessed_note`'s docstring in the handler, which says outright that this
+# helper "would not see this one".
+#
+# ⚠ THE PARAGRAPH ABOVE REPLACES ONE THAT READ "that is the WHOLE list, because
+# those are the only places `mention-open.py` writes". That was false in the
+# same shape it was written to warn about: the handler's own module docstring
+# and `guessed_note` both name the picker, and a reader who believed the
+# sentence would conclude a `mesg` leak was already covered here. It also still
+# holds for what it WAS about — this module has no log file and no spool (the
+# tailer is the module with a spool; its disclosure guards live in
+# `test_session_tailer.py`) — and that half is kept.
 def _every_sink(capsys, notify_argv: list[list[str]]) -> str:
     captured = capsys.readouterr()
     return "\n".join([captured.out, captured.err,
@@ -2366,7 +3767,7 @@ def _every_sink(capsys, notify_argv: list[list[str]]) -> str:
 def test_the_universe_never_reaches_STDOUT_STDERR_or_a_desktop_TOAST(
         spy, universe, monkeypatch, capsys, real_notify):
     """🔴 THE DISCLOSURE GUARD FOR PASS 4. The real universe names private
-    repositories; the ONLY place it may go is the operator's rofi window. This
+    repositories; the ONLY place it may go is the operator's picker window. This
     asserts the rows exist (a positive control — a test that only checked for
     absence would pass against a picker wired to nothing) and that none of them
     reached stdout, stderr or a desktop notification."""
@@ -2525,7 +3926,7 @@ def test_the_union_is_STRICTLY_WIDENING_neither_source_can_remove_a_row():
 def test_the_universe_dedupes_case_insensitively_and_keeps_ONE_row():
     """`acme/Widget` and `acme/widget` are ONE repository on GitHub — GitHub repo
     names are case-insensitive, which is why the mapping writes two spellings of
-    every key. Two identical-looking rows in rofi is a worse picker, and the
+    every key. Two identical-looking rows in the picker is a worse picker, and the
     operator cannot tell which one is 'right' because neither is."""
     out = MO.repo_universe({"w": "acme/Widget"}, ["acme/widget"])
     assert out == ["acme/Widget"], (
@@ -2648,7 +4049,7 @@ def test_the_staleness_note_names_the_UNIT_not_only_the_generator(tmp_path):
     _no_universe_token_anywhere(note, "STALENESS NOTE DISCLOSURE")
 
 
-def test_the_universe_reaches_NO_sink_but_rofi(monkeypatch, capsys):
+def test_the_universe_reaches_NO_sink_but_the_PICKER(monkeypatch, capsys):
     """🔴 THE DISCLOSURE GUARD FOR THE NEW CORPUS. `known_universe.json` names
     private repositories — MORE of them than the mapping does, because it is
     deliberately unfiltered — and it is read on the picker path. The existing
@@ -2666,7 +4067,7 @@ def test_the_universe_reaches_NO_sink_but_rofi(monkeypatch, capsys):
     for token in (UNIVERSE_ONLY, UNIVERSE_ONLY.split("/")[0],
                   UNIVERSE_ONLY.split("/")[1]):
         assert token not in blob, (
-            f"a universe row reached a sink that is not rofi: {token!r}")
+            f"a universe row reached a sink that is not the picker: {token!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -2701,8 +4102,14 @@ _SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
 #   tmux        — asking the pane for its repo
 #   notify-send — the refusal toast
 #   xdg-open    — opening the chosen URL
-#   rofi        — the picker
-EXPECTED_ARGV0 = {"git", "tmux", "notify-send", "xdg-open", "rofi"}
+#   alacritty   — the float terminal the fzf picker runs in (was `rofi` until
+#                 2026-09-09; see `PICKER_SH` for the ranking measurement that
+#                 forced the swap). ⚠ `fzf` itself is NOT here and must not be:
+#                 this set is argv[0] literals, and fzf is one level down, in
+#                 the `-c` script. `_shell_child_commands` is the reader that
+#                 sees it, and `test_the_alacritty_wrapper_PATH_covers_every_
+#                 executable_the_handler_spawns` is where it is pinned.
+EXPECTED_ARGV0 = {"git", "tmux", "notify-send", "xdg-open", "alacritty"}
 
 
 def _spawn_argv0_literals(path: Path) -> set[str]:
@@ -2712,7 +4119,7 @@ def _spawn_argv0_literals(path: Path) -> set[str]:
     spawn whose command comes from a variable is exactly how a ledger keyed on
     literals gets walked past, so it must fail this test loudly instead of
     vanishing from the set. `pick()` already carries a comment requiring its
-    rofi argv to stay a list literal for this reason.
+    terminal argv to stay a list literal for this reason.
     """
     tree = ast.parse(path.read_text())
     found = set()
@@ -2844,6 +4251,7 @@ def test_a_guessed_picker_is_NOT_described_as_nothing_here_knows(monkeypatch):
     # the old wording — is now false: neither is what the operator should do.
     assert "search" in seen["mesg"].lower(), seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+    _no_guessed_repo_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
 
 
 def test_the_ONE_ROW_wording_survives_for_an_EMPTY_universe(monkeypatch):
@@ -2923,7 +4331,7 @@ def test_the_bare_hash_N_ORDER_is_clawgate_then_the_guess_then_the_universe(
     """🔴 THE HALF OF THE SUPERSEDED TEST'S CLAIM THAT SURVIVES, PINNED AS AN
     ORDERING RATHER THAN AS A ROW COUNT.
 
-    The common case must stay one or two keystrokes: rofi opens on row 1, so the
+    The common case must stay one or two keystrokes: the picker opens on row 1, so the
     clawgate task is still one Enter and the pane's repo is one arrow key away.
     Every universe row must sit BELOW both.
 
@@ -3148,11 +4556,11 @@ def test_PRINT_mode_on_a_bare_hash_N_lists_the_CANDIDATES_not_the_universe(
     _no_universe_token_anywhere(out, "PRINT-MODE DISCLOSURE")
 
 
-def test_the_universe_reaches_ROFI_AND_NO_OTHER_SINK_on_the_bare_hash_N_path(
+def test_the_universe_reaches_THE_PICKER_AND_NO_OTHER_SINK_on_the_bare_hash_N_path(
         monkeypatch, capsys, real_notify):
     """🔴 THE WIDENED ARM'S DISCLOSURE GUARD, through the REAL `notify()`.
     `_every_sink` folds stdout, stderr and every `notify-send` argv into one
-    string; a universe row may appear in the rofi rows and NOWHERE in it.
+    string; a universe row may appear in the picker rows and NOWHERE in it.
 
     POSITIVE CONTROL: the same run's picker rows are asserted to CONTAIN a
     universe token, so a version of this test that scanned an empty universe
@@ -3174,4 +4582,4 @@ def test_the_universe_reaches_ROFI_AND_NO_OTHER_SINK_on_the_bare_hash_N_path(
     for token in (UNIVERSE_ONLY, UNIVERSE_ONLY.split("/")[0],
                   UNIVERSE_ONLY.split("/")[1]):
         assert token not in blob, (
-            f"a universe row reached a sink that is not rofi: {token!r}")
+            f"a universe row reached a sink that is not the picker: {token!r}")

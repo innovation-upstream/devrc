@@ -3014,75 +3014,125 @@ def test_parse_runaways_reports_a_BROKEN_detector_as_UNMEASURED_not_as_zero():
     assert not freshness.is_marker(quiet)
 
 
-def test_new_count_counts_only_pids_the_PREVIOUS_poll_did_not_have():
-    """🔴 The toast gates on this, not on `count` — see the `runaways` spec.
+def test_the_runaways_source_has_NO_TOAST_SPEC_because_cpu_monitor_owns_it():
+    """🔴 An ABSENCE is the invariant, so it needs a guard — nothing else fails
+    when a spec is added back, and adding one is the obvious "improvement".
 
-    A `nix build`'s cc1plus legitimately holds 100% for longer than the age
-    gate, so `count` sits pinned and a level latch would never re-arm. Watched
-    RED with `new_count` keyed to `count`: the third case below returned 2.
+    `scripts/cpu-monitor.sh` toasts `⚠ Runaway process: <comm>` at CRITICAL
+    urgency after a 6-sample sustain, capped by `CPU_MON_MAX_ALERTS_PER_DAY`
+    (default 8). A spec here fired a SECOND toast at normal urgency, UNCAPPED,
+    ~7 minutes later.
+
+    🔴 The cap is doing real work, and the evidence is the cap's OWN journal.
+    MEASURED 2026-09-09 over 30 days (`journalctl --user -u cpu-monitor` grepped
+    for `CPU_MON_MAX_ALERTS_PER_DAY`): the runaway cap demoted a toast on 8
+    separate days — 4, 7, 101, 73, 15, 13, 67, 3 — 283 demotions in total, the
+    three big days being 2026-08-30, 08-31 and 09-06. An uncapped second
+    announcer is exactly what that was holding back.
+    ⚠ A FLOOR, in one direction: cpu-monitor journals a DELIVERED toast only on
+    the no-desktop fallback path, so demotions are countable and deliveries are
+    not.
+    ⚠ NOT the `123-267/day -> 11-32/day` figure an earlier revision cited here:
+    that belongs to raising CPU_MON_THRESHOLD/RUNAWAY_PCT (PR #351, 2026-08-06),
+    six days BEFORE the cap landed (PR #430).
+
+    🔴 This is a TRADE, not a redundancy, and the `_toast_specs` comment carries
+    the measured detail: cpu-monitor inspects only `top`'s FIRST DATA ROW at
+    >=95% instantaneous, while syshealth flags EVERY eligible process at >=80%
+    lifetime-average — so the 80-95% band, the runner-up, rank churn, and
+    everything at all while an ignored process holds the top slot, lose their
+    interrupt (the pill still goes red). If those need interrupting, widen
+    cpu-monitor; do not add a second announcer here.
+    ⚠ Its `✓ Runaway process cleared` is JOURNAL-ONLY unless
+    `CPU_MON_CLEAR_TOASTS=1`, which nothing in this repo sets — so cpu-monitor
+    does NOT own a recovery toast, and neither did the spec removed here.
     """
-    rows = (_runaway_row(4242, 97.5, "cc1plus"),
-            _runaway_row(4243, 88.25, "node x.js"))
-    report = _syshealth_report(*rows)
-    # nothing seen before -> both are new
-    assert poll.parse_runaways(report, prev_pids=[])["new_count"] == 2
-    # both already announced -> none new, so the latch re-arms
-    assert poll.parse_runaways(report, prev_pids=[4242, 4243])["new_count"] == 0
-    # the pinned one persists, a genuinely new one appears -> exactly ONE
-    assert poll.parse_runaways(report, prev_pids=[4242])["new_count"] == 1
-    # unparseable previous pids are ignored, never counted as absent
-    assert poll.parse_runaways(report, prev_pids=[None, "x", 4242])["new_count"] == 1
+    specs = poll._toast_specs()
+    assert "runaways" not in specs, (
+        "a `runaways` toast spec is back: cpu-monitor.sh already owns this "
+        "event with a 6-sample sustain and a per-day cap, and this one has "
+        "neither. (Neither announcer has a recovery TOAST — cpu-monitor's "
+        "`✓ Runaway process cleared` is journal-only unless "
+        "CPU_MON_CLEAR_TOASTS=1, which nothing sets — so do not re-add this "
+        "one to get one.) If cpu-monitor is being retired, retire it FIRST "
+        "and say so here. specs=%r" % sorted(specs))
+    # The source is still POLLED — this is about the toast, not the pill.
+    assert "runaways" in [n for n, _fn in poll.SOURCES]
+    # Control: the guard can tell the two apart. A source WITH a spec is present.
+    assert "telemetry" in specs and "telemetry" in [n for n, _fn in poll.SOURCES]
 
 
-def test_the_runaways_toast_gates_on_new_count_and_opens_what_the_click_opens():
-    """Pins BOTH halves of the spec, because each was wrong once: it gated on
-    `count` (so a second runaway never toasted) and its action opened Grafana,
-    which has no view of local processes."""
-    spec = poll._toast_specs()["runaways"]
-    assert spec["count_key"] == "new_count", spec
-    assert "grafana" not in spec["action"].lower(), spec
-    # The dispatcher must actually READ that key — a spelled-but-unread
-    # count_key is the defect class this whole change is about.
-    fired = []
-    got = poll.evaluate_edge_toast(
-        "runaways", {"count": 9, "new_count": 0, "detail": "d"}, spec,
-        fire=lambda *a, **k: fired.append(a), read=lambda n: False,
-        write=lambda n, v: None)
-    assert got == (False, False), got
-    assert fired == [], "toasted on count while new_count was 0: %r" % (fired,)
+def test_the_runaways_CLICK_still_holds_its_terminal_open():
+    """The click survives the toast's removal and its shape is still
+    load-bearing: `syshealth` prints and exits in ~0.16 s, and `alacritty -e
+    CMD` closes when CMD does, so without the `read -n 1` hold the window
+    flashes and vanishes — indistinguishable from the click doing nothing,
+    which is a defect this pill shipped once already.
 
-
-def test_the_toast_action_and_the_CLICK_are_the_same_shape():
-    """🔴 Pins a RELATIONSHIP across TWO FILES, because the rule is spelled twice.
-
-    `_syshealth_action()` (Python) and `syshealthCmd` (Nix) cannot be collapsed
-    into one source — one carries store interpolations — so nothing but a test
-    can hold them together, and they HAD already drifted: the toast opened a
-    bare `alacritty -e syshealth`, which closes the instant syshealth prints and
-    exits (~0.16 s), while the click wrapped it in a `read -n 1` hold.
-
-    🔴 Watched RED against that drift, and against the guard this REPLACES.
-    The old assertion was `"syshealth" in spec["action"]` — a check on a WORD,
-    walkable by any string containing it. MEASURED: with the action mutated to
-    `xdg-open http://syshealth.invalid/not-a-terminal` the whole suite stayed
-    at 568 passed, MUTANT SURVIVED. It asserted a relationship its body never
-    inspected: it never opened `graphical.nix` at all. This reads both sides.
+    🔴 THIS ASSERTS THE STRING, NOT THE CLICK. It never opens `runawaysBlock`,
+    so a perfect `syshealthCmd` that nothing commands satisfies it —
+    `test_the_runaways_pill_CLICKS_are_wired_to_syshealthCmd` below is the other
+    half, and neither is sufficient alone.
     """
-    action = poll._toast_specs()["runaways"]["action"]
     nix = (Path(__file__).resolve().parents[2] / "nix" / "graphical.nix").read_text()
     m = re.search(r'^\s*syshealthCmd\s*=\s*"(?P<cmd>.*)";\s*$', nix, re.M)
     assert m, "syshealthCmd is gone or reshaped in graphical.nix — repin this test"
     click = m.group("cmd")
-    # The three properties that make either one WORK, asserted on BOTH sides.
-    for label, cmd in (("toast action", action), ("click", click)):
-        assert "syshealth" in cmd, (label, cmd)
-        assert cmd.lstrip().startswith("alacritty"), (
-            "%s must run in a TERMINAL — syshealth is a TUI, and i3status-rust "
-            "spawns a click with no controlling tty: %r" % (label, cmd))
-        assert "read -n 1" in cmd, (
-            "%s must HOLD THE WINDOW OPEN — syshealth prints and exits in ~0.16s, "
-            "so `alacritty -e syshealth` flashes and vanishes, which is "
-            "indistinguishable from the click doing nothing: %r" % (label, cmd))
+    assert "syshealth" in click, click
+    assert click.lstrip().startswith("alacritty"), (
+        "the click must run in a TERMINAL — i3status-rust spawns it with no "
+        "controlling tty: %r" % click)
+    assert "read -n 1" in click, (
+        "the click must HOLD THE WINDOW OPEN, or it flashes and vanishes: %r" % click)
+
+
+def test_the_runaways_pill_CLICKS_are_wired_to_syshealthCmd():
+    """🔴 THE MISSING HALF: the block must actually COMMAND `syshealthCmd`.
+
+    MEASURED: with only the string guard above, re-pointing `runawaysBlock`'s
+    left click from `syshealthCmd` to `btopCmd` left **568 passed, MUTANT
+    SURVIVED** — the pill silently opens a CPU/memory chart instead of the
+    runaway table, and every assertion about the string is still true because
+    the string is still there, just uncalled. (The fans pill shipped the mirror
+    image of this bug and its guard is the idiom followed here — see
+    `scripts/tests/test_fans_detail.py`, which arrived on `main` via #1430 and is
+    now on this branch too, via the merge in this PR.)
+
+    BOTH buttons are asserted because the block declares both. Why `right` was
+    added is not recorded here — only that it is wired, and that dropping it
+    would otherwise be silent.
+    """
+    nix = (Path(__file__).resolve().parents[2] / "nix" / "graphical.nix").read_text()
+    m = re.search(r"runawaysBlock = \{(.*?)^  \};", nix, re.S | re.M)
+    assert m, "runawaysBlock not found in nix/graphical.nix — repin this test"
+    body = m.group(1)
+
+    # `cmd = <expr>;` — an IDENTIFIER here, not a quoted literal like fansBlock's,
+    # so match the whole expression and compare it to the binding's name.
+    wired = dict(re.findall(r'button = "(\w+)";\s*cmd = ([^;]+);', body))
+    assert wired, "runawaysBlock declares no `button = ...; cmd = ...;` click: %r" % body
+    for button in ("left", "right"):
+        assert wired.get(button) == "syshealthCmd", (
+            "the runaways pill's %s-click does not run `syshealthCmd` — it is "
+            "wired to %r. The pill exists to open the runaway table; anything "
+            "else (btopCmd is the near miss) answers a different question, and "
+            "the syshealthCmd string being correct proves nothing about what "
+            "the block calls. wired=%r" % (button, wired.get(button), wired))
+
+    # …and the binding it names must resolve to something. A click wired to an
+    # identifier that no longer exists is a nix eval error, not a test failure,
+    # but a RENAMED binding would leave this passing against a stale name.
+    assert re.search(r'^\s*syshealthCmd\s*=\s*"', nix, re.M), (
+        "runawaysBlock commands `syshealthCmd` but graphical.nix defines no such "
+        "binding")
+    # Negative control: the regex CAN read a different value out of a block, so
+    # a green above is not the parser silently matching nothing.
+    fans = re.search(r"fansBlock = \{(.*?)^  \};", nix, re.S | re.M)
+    if fans:   # fansBlock is workbench-only and may be reshaped independently
+        other = dict(re.findall(r'button = "(\w+)";\s*cmd = ([^;]+);', fans.group(1)))
+        assert other.get("left") not in (None, "syshealthCmd"), (
+            "the control block reads as syshealthCmd/nothing — this parser is "
+            "not distinguishing blocks: %r" % other)
 
 
 def test_fetch_runaways_IGNORES_syshealths_EXIT_CODE(monkeypatch, tmp_path):
@@ -3152,6 +3202,82 @@ def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
     for spec_name, src in derived.items():
         assert specs[spec_name].get("count_key") != \
             specs[src].get("count_key", "count"), spec_name
+
+
+#: English number-words this repo spells its block count with. Used to pin the
+#: prose count below — the count itself is DERIVED, never written here.
+_NUMBER_WORDS = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
+                 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+
+#: (path relative to the repo root, sentence template) for every place the
+#: freshness-consumer count is stated IN PROSE. `{N}` = upper-case number word,
+#: `{n}` = lower-case. Whitespace is normalised before matching, so a reflow is
+#: free; a REWORD is not — repin the template here when you reword.
+_COUNT_PROSE = (
+    ("scripts/bar-status-poll", "is the one predicate all {N} use"),
+    ("scripts/bar-status-poll", "is the single predicate all {N} ask"),
+    ("scripts/bar-status-poll", "within `MAX_CACHE_AGE_SECS` all {N} blocks say"),
+    ("scripts/bar_freshness.py", "and {n} hand-copied freshness gates"),
+    ("scripts/bar_freshness.py", "so the {n} blocks cannot disagree"),
+    ("scripts/i3status-civitai", "the source most likely of the {n} to fail"),
+)
+
+
+def test_the_PROSE_COUNT_of_freshness_consumers_matches_the_SOURCES_ledger():
+    """🔴 An UNPINNED NUMBER IN A COMMENT is a claim like any other, and this one
+    was wrong at FOUR sites at once.
+
+    Every block script that renders a poller cache asks `bar_freshness` whether
+    that cache is a current measurement, and several comments state how many
+    there are. They all said SEVEN. MEASURED: eight call `fresh.unmeasured(` —
+    airvpn, alerts, civitai, clawgate, mail, media, runaways, telemetry — and
+    `i3status-runaways` renders the `?` exactly like the others; it was simply
+    never added to the sentence when the pill shipped. One wrong count copied to
+    four sites is the N-1 shape RULES.md names, so the number is now DERIVED
+    from the block scripts and read back against `SOURCES`, and the prose is
+    matched against it rather than maintained by hand.
+
+    ⚠ `i3status-fans`, `-load` and `-claude-runs` MENTION `bar_freshness` only to
+    say they do not need it (their readings are local and instant, not cached),
+    so a grep for the module name over-counts at 11. The predicate is the CALL.
+    """
+    root = Path(__file__).resolve().parents[2]
+    consumers = sorted(
+        p.name.split("-", 1)[1] for p in SCRIPTS.glob("i3status-*")
+        if "fresh.unmeasured(" in p.read_text())
+    assert consumers, (
+        "no block script calls `fresh.unmeasured(` — this test measured "
+        "nothing, so its count would be a vacuous 0")
+    # 🔴 The two ledgers must be the SAME SET, not merely the same size: a source
+    # polled with no block, or a block for no source, is a real defect and would
+    # otherwise cancel out in a bare count comparison.
+    assert consumers == sorted(n for n, _fn in poll.SOURCES), (
+        "the freshness consumers and the polled sources disagree:\n"
+        "  blocks  %r\n  SOURCES %r" % (consumers, sorted(n for n, _fn in poll.SOURCES)))
+
+    n = len(consumers)
+    word = _NUMBER_WORDS.get(n)
+    assert word, "no number word for %d — extend _NUMBER_WORDS" % n
+
+    def norm(s):
+        return re.sub(r"\s+", " ", s)
+
+    for rel, template in _COUNT_PROSE:
+        text = norm((root / rel).read_text())
+        want = template.format(N=word.upper(), n=word)
+        if want in text:
+            continue
+        # Which is it: a stale COUNT, or a reworded sentence? Say so — the fix
+        # differs, and "not found" alone sends a reader hunting the wrong one.
+        stale = [w for k, w in _NUMBER_WORDS.items()
+                 if k != n and template.format(N=w.upper(), n=w) in text]
+        assert not stale, (
+            "%s states the freshness-consumer count as %r; there are %d "
+            "(%s). Update the sentence." % (rel, stale[0], n, ", ".join(consumers)))
+        raise AssertionError(
+            "%s no longer contains the pinned sentence %r — it was reworded or "
+            "moved. Repin the template in `_COUNT_PROSE`; do NOT delete it, the "
+            "count is otherwise unchecked." % (rel, want))
 
 
 def test_the_LIVE_poll_path_dispatches_toasts_too(tmp_path, monkeypatch):

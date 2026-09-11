@@ -170,6 +170,7 @@ from testlib.gitenv import (  # noqa: E402
     VIOLATION_TOKEN,
     GitEnvConfigError,
     common_dir_of,
+    describe_cotenants,
     diff_snapshots,
     live_cotenants,
     protected_git_dirs,
@@ -231,6 +232,30 @@ _GIT_ENV = {
     "GIT_AUTHOR_EMAIL": "guard9@example.invalid",
     "GIT_COMMITTER_NAME": "guard nine",
     "GIT_COMMITTER_EMAIL": "guard9@example.invalid",
+    # 🔴 THE CO-TENANT FLAKE, DIAGNOSED FROM ITS OWN CAPTURE. `git commit` spawns
+    # `git maintenance run --auto --quiet --detach`. It is DETACHED, so
+    # `subprocess.run` returns when the commit exits while that process lives on
+    # with its cwd inside the just-created repo — and `live_cotenants` matches on
+    # exactly that. Observed in the sandbox tier 2026-09-09, cmdline and cwd
+    # captured by the diagnostic devrc#1340 added for this purpose:
+    #   127877:git cwd='…/test_live_cotenants_sees_anoth0/repo'
+    #   cmdline='…/git-core/git maintenance run --auto --quiet --detach'
+    #
+    # 🔴 THIS IS NOT `gc --auto`, AND THAT REFUTATION STANDS. The earlier theory
+    # was killed twice over — arithmetically (`_mkrepo` leaves 3 loose objects
+    # against a 6700 threshold) and empirically (0 hits in 80 iterations with
+    # `gc.auto=0` forced). Both were correct: `maintenance run --auto` is a
+    # DIFFERENT code path, reached from `git commit` regardless of `gc.auto`, and
+    # it decides per-task AFTER the process exists. So `gc.auto` is deliberately
+    # NOT set here — adding it would look like belt-and-braces and would quietly
+    # re-legitimise a theory the evidence disproved.
+    #
+    # Set through `GIT_CONFIG_*` rather than `-c` per call so it covers EVERY git
+    # invocation in this file, including ones added later; a `-c` on the three
+    # current call sites is one new call site away from the flake returning.
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "maintenance.auto",
+    "GIT_CONFIG_VALUE_0": "false",
 }
 
 
@@ -262,6 +287,66 @@ def _mkrepo(path: Path, branch: str = "main") -> Path:
 # --------------------------------------------------------------------------- #
 # 0. harness self-validation
 # --------------------------------------------------------------------------- #
+def test_mkrepo_spawns_no_detached_git_maintenance(tmp_path):
+    """🔴 THE CO-TENANT FLAKE, PINNED BY THE SPAWN RATHER THAN BY THE RACE.
+
+    `git commit` runs `git maintenance run --auto --quiet --detach`. Because it
+    is DETACHED, `subprocess.run` returns when the commit exits while that child
+    lives on with its cwd inside the repo just created — and `live_cotenants`
+    matches on cwd, so it reports a tenant in a repo microseconds old. That is
+    the whole mechanism, taken from the failure's own captured cmdline rather
+    than theorised.
+
+    Waiting for the race to recur is not a test: it went 0/80 in a deliberate
+    loop and then fired in the sandbox tier. `GIT_TRACE2_EVENT` makes it
+    DETERMINISTIC — git records every child it spawns, so the assertion is over
+    a spawn count, not over a timing window.
+
+    🔴 THE POSITIVE CONTROL IS THE HALF THAT MATTERS. A zero from a trace that
+    recorded nothing is indistinguishable from a zero from a suppressed spawn,
+    and this repo refuses that reading. So the same commit runs WITHOUT the
+    suppression first and must show the spawn.
+    """
+    def commit_and_trace(repo: Path, env: dict) -> tuple[int, str]:
+        trace = tmp_path / f"trace-{repo.name}.json"
+        repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)],
+                       check=True, capture_output=True, env=env)
+        (repo / "f.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "f.txt"],
+                       check=True, capture_output=True, env=env)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"],
+                       check=True, capture_output=True,
+                       env={**env, "GIT_TRACE2_EVENT": str(trace)})
+        text = trace.read_text(encoding="utf-8") if trace.exists() else ""
+        return text.count('"maintenance"'), text
+
+    # POSITIVE CONTROL — the suppression removed, so the spawn must be visible.
+    bare = {k: v for k, v in _env().items() if not k.startswith("GIT_CONFIG_")}
+    control_hits, control_text = commit_and_trace(tmp_path / "control", bare)
+    assert control_text, (
+        "GIT_TRACE2_EVENT wrote nothing — the instrument is not recording, so a "
+        "zero below would mean nothing at all"
+    )
+    assert control_hits > 0, (
+        f"the control did not spawn `git maintenance`, so this test cannot see "
+        f"the thing it exists to pin. git may have changed the trigger; "
+        f"re-derive it before trusting the assertion below.\n{control_text[:800]}"
+    )
+    assert "--detach" in control_text, (
+        f"the spawn is no longer DETACHED, which is what makes it outlive the "
+        f"parent and become a co-tenant. Re-read the mechanism.\n{control_text[:800]}"
+    )
+
+    # UNDER TEST — the harness env every git call in this file uses.
+    hits, text = commit_and_trace(tmp_path / "under-test", _env())
+    assert hits == 0, (
+        f"`_mkrepo`'s environment still spawns `git maintenance`: the detached "
+        f"child outlives the commit with its cwd in the new repo, and "
+        f"`live_cotenants` reports it as a tenant.\n{text[:800]}"
+    )
+
+
 def test_every_file_the_ledgers_read_exists():
     """Every ledger assertion below reads one of these. If one moved, the
     assertion would parse an empty string and pass while measuring nothing."""
@@ -640,10 +725,28 @@ def test_every_pytest_target_gets_the_detector():
     "seventeen" while `--check-targets` listed 25 at the time of the audit and
     26 today — a number nobody re-derives is a claim that rots, and the
     assertion below never depended on it.
+
+    🔴 THE SELECTOR NO LONGER NAMES A SHELL VARIABLE. It used to require `$d` on
+    the line, i.e. it identified the invocation by the name of the variable
+    holding the target. MEASURED 2026-09-09: adding `--files` renamed that
+    operand to `"${paths[@]}"` and the population went EMPTY — caught only by the
+    `assert pytest_lines` positive control two lines below, which is the whole
+    reason that line exists. A selector keyed on a name is one rename away from a
+    guard that inspects nothing.
+
+    The population is now every real `python -m pytest` RUN in the runner —
+    comments and the `--version` runnability probe excluded, and nothing else —
+    so a SECOND invocation added anywhere in the file is covered without an edit
+    here, which the `$d` version could never have promised.
     """
     text = re.sub(r"\\\n\s*", " ", RUN_TESTS.read_text(encoding="utf-8"))
-    pytest_lines = [ln for ln in text.splitlines()
-                    if "python -m pytest" in ln and "$d" in ln]
+    pytest_lines = [
+        ln for ln in text.splitlines()
+        if "python -m pytest" in ln
+        and not ln.lstrip().startswith("#")
+        and "--version" not in ln
+        and "echo " not in ln
+    ]
     assert pytest_lines, "could not find the per-target pytest invocation in run-tests.sh"
     for ln in pytest_lines:
         assert "-p testlib.gitenv_plugin" in ln, (
@@ -1486,30 +1589,12 @@ def test_the_module_root_pin_does_not_depend_on_this_tree_being_a_checkout():
 # --------------------------------------------------------------------------- #
 # 4d. 🔴 THE CO-TENANT PROBE (finding A)
 # --------------------------------------------------------------------------- #
-def _describe_cotenants(cotenants: "list[str]") -> str:
-    """`pid:comm` is not enough to attribute an intruder — add cwd and cmdline.
-
-    `live_cotenants` returns a bounded `pid:comm` list by design (it is a
-    detector, not a debugger). When the PRECONDITION above fails we need the two
-    fields that actually identify the process, and we need them at failure time:
-    /proc entries for a transient process are gone before anyone reads the log.
-    Best-effort by construction — a process that exits between the scan and this
-    call yields `<gone>`, which is itself the useful answer.
-    """
-    out = []
-    for entry in cotenants:
-        pid = entry.split(":", 1)[0]
-        try:
-            cwd = os.readlink(f"/proc/{pid}/cwd")
-        except OSError:
-            cwd = "<gone>"
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                cmdline = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
-        except OSError:
-            cmdline = "<gone>"
-        out.append(f"{entry} cwd={cwd!r} cmdline={cmdline!r}")
-    return "; ".join(out) or "<none>"
+# 🔴 `describe_cotenants` USED TO LIVE HERE, PRIVATE TO THIS MODULE, and that
+# is why it was wired into one test of a family that spans TWO: a module-private
+# helper can only ever be called from its own module, and
+# `test_nogit_isolation.py` carries four more preconditions over the same probe.
+# It now sits beside `live_cotenants` in `testlib/gitenv.py` — one rule, one
+# place. The two tests below pin the SHIPPED formatter, not a copy of it.
 
 
 def test_describe_cotenants_names_cwd_and_cmdline(tmp_path):
@@ -1530,7 +1615,7 @@ def test_describe_cotenants_names_cwd_and_cmdline(tmp_path):
                 time.sleep(0.05)
         assert seen, "probe never saw the spawned process — nothing to describe"
 
-        described = _describe_cotenants(seen)
+        described = describe_cotenants(seen)
 
         assert str(repo) in described, (
             f"the description omits the intruder's cwd, which is the field that "
@@ -1546,10 +1631,10 @@ def test_describe_cotenants_degrades_rather_than_raising(tmp_path):
     """It runs INSIDE an assertion message, so raising there would replace the
     real failure with its own — the one place a helper must not throw."""
     # a pid that cannot exist: /proc/sys/kernel/pid_max is well below this
-    assert _describe_cotenants(["999999999:ghost"]) == (
+    assert describe_cotenants(["999999999:ghost"]) == (
         "999999999:ghost cwd='<gone>' cmdline='<gone>'")
     # and an empty set must not render as something that reads like a finding
-    assert _describe_cotenants([]) == "<none>"
+    assert describe_cotenants([]) == "<none>"
 
 
 def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
@@ -1576,7 +1661,7 @@ def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
     pre_existing = live_cotenants([git_dir])
     assert pre_existing == [], (
         "a brand-new tmp repo already has tenants: "
-        f"{_describe_cotenants(pre_existing)}\n"
+        f"{describe_cotenants(pre_existing)}\n"
         f"repo={repo} git_dir={git_dir}\n"
         "This is the flake recorded in devrc/tests.md (2026-09-06). The "
         "`gc --auto` theory is refuted; capture the cwd/cmdline above and the "
@@ -1606,8 +1691,27 @@ def test_live_cotenants_does_not_count_this_process(tmp_path, monkeypatch):
     repo = _mkrepo(tmp_path / "repo")
     monkeypatch.chdir(repo)
     git_dir = resolve_git_dir(repo)
-    assert live_cotenants([git_dir]) == [], (
-        "the probe counted our own process (or an ancestor) as a co-tenant")
+    # 🔴 THE SIBLING ABOVE HAD THE DIAGNOSTIC AND THIS ONE DID NOT, THOUGH BOTH
+    # RED FOR THE SAME REASON. #1340 shipped `describe_cotenants` so the next
+    # co-tenant red would name its intruder, and wired it into ONE member of the
+    # family; #1453 then diagnosed the flake from a capture this site could not
+    # have produced. When this test reddened (2026-09-08, `['125757:git']`) all
+    # that survived was `pid:comm` — the same string as the 2026-09-06 sighting,
+    # and no more use than it had been then.
+    #
+    # It is still a live precondition after #1453: that fix suppresses the
+    # maintenance spawn via `_GIT_ENV`, so anything appearing HERE is a writer
+    # nobody has accounted for, and the fields that identify it are gone from
+    # /proc seconds later. Costs nothing on the passing path.
+    seen = live_cotenants([git_dir])
+    assert seen == [], (
+        "the probe counted our own process (or an ancestor) as a co-tenant, or "
+        "something else is sitting in this brand-new repo: "
+        f"{describe_cotenants(seen)}\n"
+        f"repo={repo} git_dir={git_dir} pid={os.getpid()} ppid={os.getppid()}\n"
+        "A `cmdline` naming `git maintenance run --auto` means the "
+        "`GIT_CONFIG_*` suppression in `_GIT_ENV` stopped reaching some git "
+        "call; anything else is a writer new to this family.")
 
 
 # --------------------------------------------------------------------------- #

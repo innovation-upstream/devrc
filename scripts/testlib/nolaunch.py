@@ -170,6 +170,12 @@ HOST_LAUNCHERS = (
     "dunstify",      # real desktop toast (dunst's own client)
     "dunstctl",      # mutes/clears/re-displays the operator's REAL notifications
     "rofi",          # opens a real menu over whatever they are doing
+    "alacritty",     # opens a real terminal WINDOW over whatever they are
+                     # doing — same hazard class as rofi, and reached from nine
+                     # top-level scripts (the bar's float-terminal click
+                     # handlers) plus mention-open.py's fzf picker. It was
+                     # unstubbed until 2026-09-09 purely because nothing in the
+                     # handler spawned it yet.
     "yad",           # opens a real GTK dialog (rig-control's panel)
     "openrgb",       # drives the chassis RGB headers
     "ddcutil",       # drives the panel backlight over DDC/CI

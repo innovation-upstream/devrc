@@ -157,6 +157,19 @@
         # tests drive a REAL tmux on a private `-L` socket, and this entry is what
         # stops them SKIPPING in the check sandbox, where a skip is an error.
         pkgs.tmux
+        # 🔴 fzf, for the SAME reason and it was learned the same way. The
+        # mention picker's ranking (`--tiebreak=end`, the whole point of
+        # replacing rofi) is a property of fzf's ALGORITHM, so the four tests
+        # that pin it run the REAL binary — two through `--filter`, two through
+        # a pty. MEASURED 2026-09-09: without this entry the dev-host tier ran
+        # them and the check sandbox SKIPPED all four, and `run-tests.sh` failed
+        # the derivation on the unpinned skips. That is the guard working: the
+        # authoritative tier would otherwise have carried zero coverage of the
+        # reason this change exists. It is also a PRODUCTION dependency now —
+        # `nix/programs/alacritty/default.nix` puts `pkgs.fzf` on the hint
+        # wrapper's PATH — so the gate environment carrying it is not a
+        # test-only convenience.
+        pkgs.fzf
       ];
     in
     {
@@ -546,18 +559,34 @@
             touch "$out"
           '';
 
-        # 🔴 NOTHING INVOKES THIS YET — IT IS AN OUTPUT, NOT A GATE, AND SAYING
-        # SO IS THE POINT. `devrc-ci-pipeline.yaml` in the infra repo hardcodes
-        # exactly two legs (`LEG` ∈ {pytests, nodetests}, built as
-        # `.#checks.x86_64-linux.${LEG}`); there is no `nix flake check` and no
-        # loop, so a third output is never built by CI. Landing it silently
-        # would ship something that READS like a gate and can never fail —
-        # precisely the defect class this check exists to catch, committed by
-        # the check itself.
+        # 🔴 WHETHER THIS IS A GATE OR ONLY AN OUTPUT IS DECIDED IN ANOTHER
+        # REPO, SO VERIFY IT — DO NOT TRUST THIS COMMENT'S TENSE.
+        # `devrc-ci-pipeline.yaml` lives in the infra repo. It hardcoded exactly
+        # two legs (`LEG` ∈ {pytests, nodetests}, built as
+        # `.#checks.x86_64-linux.${LEG}`) with no `nix flake check` and no loop,
+        # so a third output was never built by CI and this check could not fail
+        # a PR. An earlier revision of this block stated that as a flat fact —
+        # and it was falsified by a change in a repository no gate here can see,
+        # which is exactly why it is now written as something to check:
+        #
+        #     gh pr checks <any devrc PR>     # is a `cairn-client` leg listed?
+        #
+        # A `tekton/devrc-cairn-client-runs` context in that list means the leg
+        # is wired. ⚠ Wired is not REQUIRED: it was deliberately left out of
+        # branch protection so a brand-new leg could not block every merge on
+        # its first bad day, so it can be present and still block nothing.
+        # 🔴 Until you have checked, assume it gates NOTHING and do not weaken
+        # or delete this check on the strength of it being one — that is the
+        # defect class this check exists to catch, committed by the check itself.
+        # The wiring change is `ZacxDev/homelab-infra#786`.
+        #
         # Run it on demand: `nix build .#checks.x86_64-linux.cairn-client-runs`
-        # (~1.4 s; the cairn package is already in the home-manager closure, so
-        # it adds no build). Wiring a third leg is a separate change to a
-        # GitOps-reconciled repo and is deliberately not bundled here.
+        # (~1.4 s here; the cairn package is already in the home-manager
+        # closure). ⚠ "It adds no build" holds for THIS host and is NOT
+        # established for CI: `cairn` is a private flake input, absent from
+        # `cache.nixos.org` and from the pytests/nodetests closures, so on a cold
+        # `/nix` PVC — and on exactly the pin-bump PR this check exists for — the
+        # leg may pay a real build. Unmeasured; do not quote it as a cost.
         #
         # 🔴 THE ONLY CHECK THAT *EXECUTES* THE PINNED CLIENT. Every other cairn
         # guard in this repo reads `flake.nix` / `flake.lock` / `nix/home.nix` /

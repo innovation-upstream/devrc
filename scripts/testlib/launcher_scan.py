@@ -41,7 +41,7 @@ from pathlib import Path
 HAZARD_VOCABULARY = (
     "systemd-run", "systemctl", "loginctl",
     "notify-send", "dunstify", "dunstctl",
-    "rofi", "yad", "zenity", "wmctrl", "xdotool", "i3-msg",
+    "rofi", "yad", "zenity", "wmctrl", "xdotool", "i3-msg", "alacritty",
     "xdg-open", "openrgb", "ddcutil", "brightnessctl", "xset",
     "pactl", "playerctl", "espanso",
     "home-manager", "nixos-rebuild",

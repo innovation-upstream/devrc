@@ -380,45 +380,106 @@ hosts, so 3–7 became 2–6. The claim `index-store-claims-accuracy-2` was take
 and released on completion; a future session claiming rank 2 gets the **cairn-cutover P3**
 item, not the drift one.
 
-1. **The co-tenant flake is still UNFIXED — diagnosable, not diagnosed.** `devrc`,
-   `scripts/tests/test_git_repo_isolation.py`. Do not close it by re-running; do not
-   re-derive `gc --auto`. Wait for the next sandbox red and read the `cwd=`/`cmdline=` the
-   assertion now prints.
-   forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
-   #1304 merged through it was a human re-running and reading both results.
-
-2. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
-   (`cairn-cutover.py:1379-1382`) over an ADD + SUPERSEDES + MERGED set, where
-   SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes differ. 🔴 #1304 made this
-   WORSE: the new NAME-CHECK is a SECOND refusal P3 can hit. Either pass the flag or
-   declare P3 dead post-cutover.
-   forcing: regression — a shipped code path that can never complete.
-
-3. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed (squash
-   `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
-   `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED
-   opencode inherits the outer Claude session's id ⇒ exit 0 with **another session's
-   tasks**.
-   forcing: regression — the nested path silently misattributes today.
-
-4. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
-   `seed.sh` guard rests on `/bin/sh` being dash there; that was measured against the
-   `Dockerfile`'s `FROM`, never the running pod.
-   forcing: none
-
-5. **Decide the token allowlist for the 2 remaining local-only entries**
+1. **Decide the token allowlist for the 2 remaining local-only entries**
    (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
    neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
    pod delete (the token file is read ONCE at startup).
    forcing: none
 
-6. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
+2. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
    **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
    over an EXISTING entry prints the first-ever-file template and exits 0 silently,
    destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
+- ✅ **THE DASH PREMISE IS TRUE ON THE DEPLOYED POD, AND NO LONGER LOAD-BEARING.**
+  Measured 2026-09-10 against the RUNNING image (`subsystem-store-api:0.8.0`, not
+  the `Dockerfile`): `/bin/sh -> dash` (`/usr/bin/dash`), and its `echo "a\tb"`
+  emits a real TAB. Control: bash emits the literal `a\tb`, so the asymmetry is
+  real and the reading is not a no-op. **But every pod-side emit in `seed.sh` is
+  now `printf`, not `echo`** — `grep -nE "sh -c .*echo"` returns nothing — so the
+  dash-specific behaviour cannot reach the join key any more. The premise held
+  AND the code stopped depending on it; verifying it changed no decision, which
+  is the honest outcome for a `forcing: none` item.
+
+- ✅ **THE CO-TENANT FLAKE IS DIAGNOSED AND FIXED — `devrc#1453` → `eeea9025`. It
+  was `git maintenance run --auto --quiet --detach`, never `gc --auto`.**
+  Committing spawns it DETACHED, so `subprocess.run` returns when the parent exits
+  while that child lives on with its cwd inside the repo created microseconds
+  earlier — and `live_cotenants` matches on cwd. Fixed with
+  `maintenance.auto=false` via `GIT_CONFIG_*` in `_GIT_ENV`, so it covers every
+  git call in the file including ones added later.
+- 🔴 **THE `gc --auto` REFUTATION WAS RIGHT, AND THAT IS WHY THIS TOOK SO LONG.**
+  It was killed twice — 3 loose objects against a 6700 threshold, and 0/80 with
+  `gc.auto=0` forced. Both correct. `maintenance run --auto` is a DIFFERENT code
+  path, reached regardless of `gc.auto`, deciding per-task only after the process
+  exists. `gc.auto` is deliberately NOT set in the fix: it would read as
+  belt-and-braces while quietly re-legitimising a disproved theory.
+- 🔴 **SHIPPING THE DIAGNOSTIC INSTEAD OF A GUESS IS WHAT SOLVED IT.** `gc.auto=0`
+  was one line and would have looked like a resolution while the real mechanism
+  stayed open behind it. `#1340` instead made the assertion print the intruder's
+  `cwd=`/`cmdline=`, and the first recurrence named its own cause in one line.
+  **When the mechanism is unknown, ship the diagnostic.**
+- 🔴 **PIN A FLAKE BY ITS SPAWN, NOT BY ITS RACE.** Waiting for recurrence is not
+  a test — this went 0/80 in a deliberate loop and then fired in CI.
+  `GIT_TRACE2_EVENT` records every child git spawns, so the guard is a spawn
+  COUNT: deterministic, with a positive control proving the trace recorded
+  anything at all.
+- 🔴 **THIS RANKED LIST HAS NOW GONE STALE THREE TIMES, ONCE WITHIN A SINGLE
+  SESSION.** P3 and the opencode item were closed in `#1449` while rank 1 was
+  being fixed in `#1453`, so the doc shipped saying "still UNFIXED" about work
+  that had merged an hour earlier. Nothing closes these automatically; the next
+  writer is the only moment anyone looks. **Re-verify every ranked item against
+  `origin/main` by CONTENT before acting on it or quoting it.**
+- ⚠ **A failure-set comparison can be VACUOUS AND LOOK CLEAN.** Comparing which
+  tests fail on two trees: the sandbox log carries no `FAILED ` summary lines
+  (the runner uses `-q` without `-rf`), so a `FAILED`-based grep returned 0 for
+  BOTH trees and `comm` printed an empty, reassuring "no new failures". Only a
+  positive control (11 names on one side, 10 on the other) made it evidence.
+  Extract from pytest's traceback headers, and never quote an empty diff without
+  showing the extraction found something.
+
+- ✅ **THE OPENCODE BLINDNESS IS FIXED — `devrc#1365` → squash `14126d94`.**
+  `clawgate_resolve` reads `OPENCODE_SESSION_ID` before `CLAUDE_CODE_SESSION_ID`
+  (verified on `origin/main` by content: 9 occurrences where the item said 0), and
+  refuses outright when `$OPENCODE` is set with no opencode id, because the claude
+  id in scope there may be an ancestor's and nothing can tell. 🔴 **This item was
+  still telling the next session to do work that had already merged** — the ranked
+  list is not self-closing, and the only moment anyone checks is the next writer's.
+  ⚠ It buys CORRECTNESS, not capability: `clawgatectl` has no opencode tier
+  (measured 2026-09-07, `grep -rl OPENCODE containers/` = 0 against 5 for the claude
+  var), so opencode sessions resolve exit 5 rather than their own tasks until that
+  lands — a Go change in `homelab-talos`.
+
+- ✅ **P3 IS RETIRED — `devrc#1428` → squash `13c0791a`, and the framing in the old
+  ranked item was the wrong half of the choice.** It read "either pass the flag or
+  declare P3 dead", calling `--allow-overwrite` the one-line fix. That flag is the
+  DATA-LOSS path: `seed.sh`'s tar adds and overwrites but never deletes, so a push
+  from a frozen mirror silently reverts every pod-newer entry and reports success.
+  The exit-8 refusal was the last guard, not the bug. P3 now refuses with
+  `RC_CUTOVER_COMPLETE (19)`, conditioned on state (`refused > 0`) so a genuine
+  first cutover still passes through.
+- 🔴 **FOUR AUDIT ROUNDS, AND THE LAST THREE FOUND MY OWN PROSE, NOT MY CODE.** The
+  guard was right after round 1; rounds 2–4 each found that the *fix round* had
+  written something false or harmful. Round 2: the predicate `writable == 0` failed
+  in BOTH directions (a post-freeze creation disarmed it; EROFS tripped it falsely).
+  Round 3: `refused > 0` then failed OPEN on the `other` bucket — I traded one
+  direction for the other. Round 4: my ordering guard used `str.index`, which found
+  an earlier unrelated occurrence, so the defect it existed to stop passed it.
+- 🔴 **THE ADVICE WAS THE WORST DEFECT, AND IT WAS MINE.** A recovery route I
+  recommended (`--freeze --apply`) writes a SECOND mode ledger recording 0444;
+  `--unfreeze` takes the newest, so a 0600 entry is "restored" to 0444 and the
+  rollback exits 0. Reproduced end to end by the round-4 auditor, along with the
+  control proving the caveat is load-bearing. **Prose that tells an operator what to
+  do is payload — audit it like code.**
+- ⚠ **`cairn create` EXISTS** (`34d00d90`/#1254, `PUT` + `If-None-Match: *`), so
+  retiring P3 strands nothing. Two comments in the tree still claimed the API had
+  "no create route"; that stale sentence was what made this look costly.
+- ⚠ **A mutation batch that reports a green may have applied NO mutant.** My first
+  attempt at the round-4 verification had a non-matching anchor and printed "97
+  passed" — indistinguishable from a survival. Only the traceback caught it.
+
 - 🔴 **A VERSION STRING DERIVED FROM THE COMPILED SOURCE IS STILL NOT A CURRENCY SIGNAL.**
   `clawgatectl.nix` reads `version` out of the very `client.go` it compiles — the design that
   exists so a label cannot lie about its code — and the workbench STILL sat 2 commits stale at
@@ -499,14 +560,6 @@ item, not the drift one.
 - **`_MARKER_ANYWHERE` requires the colon on purpose.** `_NEAR_MISS_MARKER`'s shouted branch
   may skip the terminator because it is ANCHORED at a bullet head; unanchored over a whole
   line that same rule fires on `OPEN SOURCE`.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session — which cannot distinguish "touched no task" from "wrong session id", so no
-  `clawgate-task:` field was written and none was created.
-- ⚠ **Environment, unaddressed:** the shared `devrc` clone carries ~150 worktrees from
-  finished agent runs, and its working tree holds another session's uncommitted WIP
-  (`nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`,
-  `output.txt`, two `scripts/diagnose-*.sh`).
-
 - **Carried forward from the previous `State now` (it would otherwise be dropped by this
   update):** `devrc#1223 → 540e748d`, the `dropped lines:` advisory in `--validate`, was
   verified by content AND behaviour — run against the real 2026-08-19 blob it reports **13
@@ -534,14 +587,6 @@ item, not the drift one.
   "the THIRD frozen read surface — the one whose output drives deletions (rank 20)" — so more
   than one session is repointing read surfaces off this mirror. Check for overlap before
   editing `subsystem_audit`/`subsystem_recall`.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
-  session, with its positive control confirming the board was reachable. A wrong session id
-  answers 200/empty exactly like a session that touched nothing, so this is **not** a clean
-  reading; no field was written and no task was created.
-- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
-  uncommitted WIP (`nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`,
-  `output.txt`, two `scripts/diagnose-*.sh`). Nothing here touched them.
-
 - 🔴 **A COMMIT MESSAGE WRITTEN FROM MEMORY SHIPPED A FALSE CLAIM, AND THE DEFECT IT SAID WAS
   FIXED WENT WITH IT.** `3c8e37da` asserted a 🔴 fix; the pushed blob contained **none** of it
   (`grep -c OC_LOCK_PID_FILE` = 6 where it should have been 0). Cause: the red-at-base check
@@ -621,11 +666,6 @@ item, not the drift one.
 - **Concurrent agents corrupt each other's results on this box.** Load hit 62 on 24 cores; three
   failures investigated in this effort were other sessions' suites rather than code. Queue behind
   them rather than killing them, and treat any red above ~load 20 as needing a control.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **6** — one linked task
-  (`#477`, role=`read`, "Bot-account detection agent"), NONE worked. That task was read only to
-  verify another agent's claim about it and is definitively not this work, so per the flow no
-  field was written and none was created.
-
 - 🔴 **THE TEST HARNESS RUNS THE POD'S COMMAND UNDER BASH, AND THE POD IS DASH.** Every test in
   `test_subsystem_store_api.py` drives a fake `kubectl` whose `exec` runs the command locally.
   `echo "ABSENT  $1"` therefore behaves one way in all 723 green tests and a different way on
@@ -663,16 +703,6 @@ item, not the drift one.
 - **The handoff doc was 1 commit behind at session start** and `handoff_doc.py` resolves its
   base from the working tree, so the fast-forward had to happen BEFORE any draft. A stale base
   would have merged into an out-of-date document and reported success.
-- **No clawgate task recorded, again.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session, positive control confirming the board was reachable (2 links for another
-  session). A wrong session id answers 200/empty exactly like a session that touched nothing,
-  so this is **not** a clean reading; no field was written and none was created.
-- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
-  uncommitted WIP (`nix/programs/alacritty/default.nix`, `output.txt`,
-  `nix/system/apply-nebula-relay.sh`, `nix/system/check-nebula-relays.sh`,
-  `scripts/diagnose-nix-disk.sh`). Nothing here touched them. This session worked on `main` for
-  reads only and did every write in the worktree `~/workspace/devrc-ho-r3`.
-
 - **Two corrections to this doc, measured 2026-09-05, recorded HERE so a future `State now`
   replace cannot drop them.** (1) The old rank 8 — *"`main` is RED on
   `test_clawgate_task_interview_guard.py`"* — is **CLOSED**: it passes on `origin/main`
@@ -728,15 +758,6 @@ item, not the drift one.
 - **Two independent blind lenses beat one auditor run twice over.** Round 3's lenses found
   the same TAB defect by different routes without being told what the other sought; that
   agreement was the round's strongest evidence.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session, positive control confirming the board was reachable (2 links for a different
-  session). A wrong session id answers 200/empty exactly like a session that touched
-  nothing, so this is not a clean reading; no field written, none created.
-- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
-  uncommitted WIP (`output.txt`, `nix/system/apply-nebula-relay.sh`,
-  `nix/system/check-nebula-relays.sh`, `scripts/diagnose-nix-disk.sh`). Untouched. All work
-  here was done in worktrees; both have been removed and the base clone fast-forwarded.
-
 - 🔴 **A THEORY THAT EXPLAINS THE FAILURE IS NOT EVIDENCE FOR IT — and this one was
   arithmetically impossible the whole time.** `gc --auto` needs ~6700 loose objects;
   `_mkrepo` leaves 3. One `git config --get gc.auto` plus one `count-objects -v` would
@@ -766,14 +787,16 @@ item, not the drift one.
 - **`gh pr merge` rc is not the merge's verdict.** It returned **1** for a failure that was
   only about deleting a LOCAL branch still held by a worktree — the remote merge had
   already succeeded. Remove the worktree first, and verify by content either way.
-- ⚠ **Environment, unchanged:** the shared clone still holds another session's untracked
-  WIP (`output.txt`, `nix/system/apply-nebula-relay.sh`, `nix/system/check-nebula-relays.sh`,
-  `scripts/diagnose-nix-disk.sh`). Untouched. `drift-check` classifies all 4 as read by no
-  nix path, so what was deployed IS `origin/main`.
-- **No clawgate task recorded, third time.** `clawgate_handoff.sh resolve` exited **5** — 0
-  tasks for this session, positive control confirming the board was reachable (11 links for
-  a different session). A wrong session id answers 200/empty exactly like a session that
-  touched nothing, so this is not a clean reading; no field written, none created.
+- 🔴 **`clawgate_handoff.sh resolve` EXIT 5 CANNOT DISTINGUISH "THIS SESSION TOUCHED NO TASK" FROM "THE SESSION ID IS WRONG", and it answered that way on SIX separate
+  handoffs in this effort.** An unknown session returns `200 {"tasks":[]}`, not 404, so the
+  empty array is the same observation for both. Every time the positive control confirmed the
+  board was reachable (2, 11 and other link counts for OTHER sessions), which is what makes
+  the zero a reading about THIS id rather than about the board — and equally why it is not a
+  clean result. Per the flow no `clawgate-task:` field was written and none created, six
+  times. ⚠ One run exited **6** instead (one linked task, role=`read`, none worked) — a
+  different code for a different state, also correctly declining to write. **The six
+  near-identical bullets this replaces are MERGED, not lost: they differed only in the
+  control's link count.**
 
 ## How to verify
 
