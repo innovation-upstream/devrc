@@ -29,6 +29,49 @@ _spec.loader.exec_module(RG)
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THIS FILE NOW LOADS `mention-open.py` TOO, AND THAT IS A NEW SEAM WITH THE
+# OPERATOR'S HOST STATE.
+#
+# Two tests here need the real writer — the pick-log fingerprint binding and the
+# `narrow_dir` equality pin — and `mention-open.py` resolves FOUR host-state
+# paths at import: `known_repos.json`, `known_universe.json`,
+# `known_ranges.json` and `picks.jsonl`, all 0600 files naming PRIVATE
+# repositories, one of which this handler WRITES.
+#
+# `test_mention_open.py` has an autouse fixture and a two-way ledger for exactly
+# this, and its comment records that NINE tests were once measured reading the
+# operator's real mapping. None of that protection extends across files. Both
+# call sites pass explicit `tmp_path` arguments today, so nothing touches host
+# state — but "today's call sites happen to be careful" is precisely the shape
+# that fixture exists because it failed. So the loader below redirects at
+# IMPORT, before any module here can resolve a default.
+#
+# ⚠ `MENTION_OPEN_*` IS READ AT THE HANDLER'S IMPORT TIME, which is why this is
+# an env redirect rather than a `monkeypatch.setattr`: the constants are bound
+# when `exec_module` runs, and a fixture cannot reach back before that.
+_MO_REDIRECT = Path(__file__).resolve().parent / "_never-the-operators"
+
+
+def load_mention_open(name: str):
+    """Import `mention-open.py` with every host-state path pointed at a
+    directory that does not exist. See the block above."""
+    for var in ("MENTION_OPEN_KNOWN_REPOS", "MENTION_OPEN_KNOWN_UNIVERSE",
+                "MENTION_OPEN_KNOWN_RANGES", "MENTION_OPEN_PICKS"):
+        os.environ[var] = str(_MO_REDIRECT / var.lower())
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "scripts" / "mention-open.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    real = Path.home() / ".config" / "mention-open"
+    for const in ("KNOWN_REPOS_PATH", "KNOWN_UNIVERSE_PATH",
+                  "KNOWN_RANGES_PATH", "PICKS_PATH"):
+        got = getattr(module, const)
+        assert not got.is_relative_to(real), (
+            f"{const} resolved to the operator's real host state: {got}")
+    return module
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 The disclosure guard
 # --------------------------------------------------------------------------- #
 # What an `owner/repo` looks like. Shared by BOTH detectors below — the mapping
@@ -322,6 +365,12 @@ def looks_like_a_pick_log(text: str) -> int:
     it is payable only with the binding test, which is why the two ship
     together.
 
+    ⚠ WHAT THE NARROWING LOST, NAMED RATHER THAN LEFT TO BE DISCOVERED. All
+    measured at 0 where the old any-depth walk scored 40: a row nested under a
+    wrapper key (`{"pick": {"n":…,"repo":…,"t":…}}`), `n` serialised as a
+    string, and `t` serialised as an ISO timestamp. None is a shape
+    `record_pick` produces — which is exactly why the binding test below exists.
+
     ⚠ RESIDUAL, STATED: a pick log shorter than `PICK_LOG_ROW_THRESHOLD` still
     passes. The threshold is low precisely to shrink that gap.
     """
@@ -339,11 +388,19 @@ def looks_like_a_pick_log(text: str) -> int:
         repo, num, when = doc.get("repo"), doc.get("n"), doc.get("t")
         if not (isinstance(repo, str) and _FULL_NAME_RE.match(repo)):
             continue
-        if not (isinstance(num, int) and not isinstance(num, bool)
-                and 0 < num <= 99999):
+        # 🔴 TYPES, NOT RANGES — AND THE RANGES WERE MEASURED TO BUY NOTHING AND
+        # COST REAL COVERAGE. A first version required `0 < n <= 99999` and an
+        # epoch-shaped `t`. Against this file's own six negative controls the
+        # relaxed rule (key set + whole-string `owner/repo`) scores **0 on all
+        # six** — telemetry and the 4th-key case included — so the bounds
+        # excluded nothing; meanwhile a pick log for a repo past 100,000
+        # references scored **0 instead of 10**, i.e. was completely invisible
+        # to a DISCLOSURE guard. `record_pick` imposes no upper bound on `n`.
+        # A guard that is narrower than the artefact it hunts is the worse
+        # error, so the range checks are gone and the type checks stay.
+        if isinstance(num, bool) or not isinstance(num, int):
             continue
-        if not (isinstance(when, (int, float)) and not isinstance(when, bool)
-                and when >= 1_000_000_000):          # epoch-shaped
+        if isinstance(when, bool) or not isinstance(when, (int, float)):
             continue
         rows += 1
     return rows
@@ -697,10 +754,7 @@ def test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES(tmp_path):
     blinding the sweep. It is the only reason `looks_like_a_pick_log` is allowed
     to ask about key names at all; without it the guard would be a spelling pin
     with nothing holding the spelling."""
-    spec = importlib.util.spec_from_file_location(
-        "mention_open_for_fingerprint", ROOT / "scripts" / "mention-open.py")
-    mo = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mo)
+    mo = load_mention_open("mention_open_for_fingerprint")
     log = tmp_path / "picks.jsonl"
     assert mo.record_pick("gardenersguild/trowelcast", "1291", log)
     written = json.loads(log.read_text().splitlines()[0])
@@ -713,6 +767,21 @@ def test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES(tmp_path):
                      for _ in range(PICK_LOG_ROW_THRESHOLD)) + "\n"
     assert looks_like_a_pick_log(many) >= PICK_LOG_ROW_THRESHOLD, (
         "rows the REAL writer produced do not trip the detector")
+
+    # 🔴 AT THE EXTREMES THE WRITER ACCEPTS, NOT JUST AT ONE TIDY VALUE. The
+    # first version of this test wrote a single `n=1291` row and asserted only
+    # the key set, so the detector's VALUE predicates were pinned by nothing —
+    # and a range bound on `n` then made a six-figure pick log invisible to a
+    # disclosure guard, measured. `record_pick` imposes no upper bound
+    # (`int(num) > 0`), so the binding has to be driven at what it really lets
+    # through.
+    wide = tmp_path / "wide.jsonl"
+    for num in ("1", "99999", "100001", "999999999"):
+        assert mo.record_pick("gardenersguild/trowelcast", num, wide), num
+    assert looks_like_a_pick_log(wide.read_text()) == 4, (
+        f"the detector does not see every row the REAL writer accepts — "
+        f"scored {looks_like_a_pick_log(wide.read_text())} of 4. A guard "
+        f"narrower than the artefact it hunts is the worse error.")
 
 
 def test_the_sweep_actually_LOOKS_at_jsonl_files(tmp_path):
@@ -1659,12 +1728,44 @@ def test_the_two_narrow_dir_copies_are_the_SAME_RULE(tmp_path):
 
     They are two copies on purpose: `mention-open.py` is a detached click path
     and must not import a script that carries `gh` plumbing. That choice is
-    payable only with this test."""
-    spec = importlib.util.spec_from_file_location(
-        "mention_open_for_narrow", ROOT / "scripts" / "mention-open.py")
-    mo = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mo)
-    for start in (0o755, 0o700, 0o500, 0o2755, 0o1777, 0o777, 0o750):
+    payable only with this test.
+
+    ⚠ THE MODE ARITHMETIC IS COMPARED THROUGH A STUB, NOT A REAL `chmod`, and
+    that is a two-tier lesson rather than a preference: setting setuid/setgid on
+    a real directory raises `PermissionError: Operation not permitted` in the
+    `nix build` sandbox while working on the dev host, so the first version of
+    this test was green locally and RED in the authoritative tier. The ordinary
+    modes are still exercised against a real filesystem below."""
+    mo = load_mention_open("mention_open_for_narrow")
+
+    def would_set(module, start):
+        got = []
+        real_stat, real_chmod = module.os.stat, module.os.chmod
+
+        class _St:
+            st_mode = start
+
+        module.os.stat = lambda *a, **k: _St()
+        module.os.chmod = lambda p, m, *a, **k: got.append(m)
+        try:
+            module.narrow_dir(Path("/nonexistent-does-not-matter"))
+        finally:
+            module.os.stat, module.os.chmod = real_stat, real_chmod
+        return got[0] if got else None
+
+    for start in (0o755, 0o700, 0o500, 0o2755, 0o1777, 0o4755, 0o777, 0o750):
+        a, b = would_set(RG, start), would_set(mo, start)
+        assert a == b, (
+            f"the two narrow_dir copies DISAGREE on {start:o}: "
+            f"generator -> {a}, handler -> {b}")
+        if a is not None:
+            assert a & 0o077 == 0, f"{start:o} left group/other bits: {a:o}"
+    # POSITIVE CONTROL on the stub: at least one mode must actually chmod, or
+    # this loop is comparing two functions that both did nothing.
+    assert would_set(RG, 0o755) is not None
+
+    # …and the ORDINARY modes against a REAL filesystem, which every tier can do.
+    for start in (0o755, 0o750, 0o700):
         a, b = tmp_path / f"a{start:o}", tmp_path / f"b{start:o}"
         for d in (a, b):
             d.mkdir()
@@ -1673,10 +1774,8 @@ def test_the_two_narrow_dir_copies_are_the_SAME_RULE(tmp_path):
         mo.narrow_dir(b)
         ma = os.stat(a).st_mode & 0o7777
         mb = os.stat(b).st_mode & 0o7777
-        assert ma == mb, (
-            f"the two narrow_dir copies DISAGREE on {start:o}: "
-            f"generator -> {ma:o}, handler -> {mb:o}")
-        assert ma & 0o077 == 0, f"{start:o} left group/other bits: {ma:o}"
+        assert ma == mb == (start & ~0o077), (
+            f"on-disk disagreement at {start:o}: {ma:o} vs {mb:o}")
 
 
 def test_write_ranges_is_0600_because_its_KEYS_name_private_repositories(tmp_path):

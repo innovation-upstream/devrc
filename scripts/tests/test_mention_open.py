@@ -20,6 +20,7 @@ The two things worth pinning:
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -416,26 +417,33 @@ def _host_state_constants(source: str) -> set[str]:
     """Every module-level constant in `source` that points at a file under the
     mention-open config directory.
 
-    🔴 FIVE SPELLINGS THIS USED TO MISS SILENTLY, each measured by a round-2
-    audit against a planted constant in the real handler source:
+    🔴 SPELLINGS THIS HAS MISSED SILENTLY, each measured against a constant
+    planted in the real handler source:
 
       * `X: Path = …`   — `ast.AnnAssign`, not `ast.Assign`;
       * `X, Y = …, …`   — a tuple target, not an `ast.Name`;
-      * an assignment inside a module-level `if` or `try` — `tree.body` only
-        sees the top level;
+      * an assignment inside a module-level `if`/`try`/`with`/`for`/`while` —
+        `tree.body` only sees the top level;
       * a lowercase name — `isupper()` is itself a spelling pin, which is the
-        very thing this function was rewritten to stop relying on.
+        very thing this function was rewritten to stop relying on;
+      * 🔴 `SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"` — a constant DERIVED
+        from an already-ledgered one, whose own source segment never says
+        `mention-open`. A round-3 audit called this the most LIKELY spelling of
+        the lot, and it is the worst: because `HOST_STATE_CONSTANTS` is
+        hand-maintained, both sides of the two-way pin lose the entry together
+        and the ledger test stays GREEN.
 
     A missed spelling means an unredirected host-state file: a test reads — or,
     since `record_pick`, WRITES — the operator's own 0600 data. So the walk is
-    over `Assign` AND `AnnAssign`, recursively through module-level `If`/`Try`/
-    `With` bodies (never into a function or class, where a local of the same
-    name is not a module constant), over flattened tuple/list targets, and with
-    no constraint on the name's case.
+    over `Assign` AND `AnnAssign`, recursively through every module-level block
+    (never into a function or class, where a local of the same name is not a
+    module constant), over flattened tuple/list targets, with no constraint on
+    the name's case — and it is resolved to a FIXPOINT, so a constant built from
+    a known one is found however many hops away it is.
 
     ⚠ THE TEST FOR *THIS* FUNCTION IS `test_the_host_state_DISCOVERY_sees_every_
-    spelling`, which plants each of the five in turn. A discovery nobody has
-    watched find something is not a discovery.
+    spelling`, which plants each in turn. A discovery nobody has watched find
+    something is not a discovery.
     """
     tree = ast.parse(source)
 
@@ -443,7 +451,8 @@ def _host_state_constants(source: str) -> set[str]:
         for node in body:
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 yield node
-            elif isinstance(node, (ast.If, ast.Try, ast.With)):
+            elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For,
+                                   ast.While)):
                 yield from statements(node.body)
                 yield from statements(getattr(node, "orelse", []))
                 yield from statements(getattr(node, "finalbody", []))
@@ -460,27 +469,42 @@ def _host_state_constants(source: str) -> set[str]:
             elif isinstance(tgt, ast.Name):
                 yield tgt.id
 
-    found: set[str] = set()
-    for node in statements(tree.body):
-        if node.value is None:                      # a bare `X: Path` annotation
-            continue
-        segment = ast.get_source_segment(source, node) or ""
-        if "mention-open" not in segment:
-            continue
-        # …AND it must BUILD A PATH. `PICKER_CLASS = "float,mention-open"` is
-        # the i3 window class and names the directory only by coincidence of
-        # spelling — a bare string constant is not a file to redirect. The two
-        # shapes that ARE are a `Path(...)` call and a `/` join.
-        if not any(
+    def builds_a_path(node) -> bool:
+        # `PICKER_CLASS = "float,mention-open"` is the i3 window class and names
+        # the directory only by coincidence of spelling — a bare string constant
+        # is not a file to redirect. The two shapes that ARE are a `Path(...)`
+        # call and a `/` join.
+        return any(
             (isinstance(n, ast.Call)
              and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
              == "Path")
             or (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div))
-            for n in ast.walk(node.value)
-        ):
-            continue
-        found.update(targets(node))
-    return found
+            for n in ast.walk(node.value))
+
+    assignments = [n for n in statements(tree.body) if n.value is not None]
+    found: set[str] = set()
+    # Seed: the assignments that NAME the directory themselves.
+    for node in assignments:
+        segment = ast.get_source_segment(source, node) or ""
+        if "mention-open" in segment and builds_a_path(node):
+            found.update(targets(node))
+    # 🔴 THEN TO A FIXPOINT — anything built from something already found is a
+    # host-state path too, however many hops away. Without this,
+    # `SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"` is invisible, and it is
+    # the most natural way to add the next one.
+    while True:
+        grew = False
+        for node in assignments:
+            names = set(targets(node))
+            if names <= found or not builds_a_path(node):
+                continue
+            refs = {n.id for n in ast.walk(node.value)
+                    if isinstance(n, ast.Name)}
+            if refs & found:
+                found |= names
+                grew = True
+        if not grew:
+            return found
 
 
 @pytest.mark.parametrize("planted,name", [
@@ -492,14 +516,35 @@ def _host_state_constants(source: str) -> set[str]:
     ('if True:\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")', "SPOOL_PATH"),
     ('try:\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")\nexcept OSError:\n'
      '    SPOOL_PATH = Path("/y/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('try:\n    _X = 1\nexcept OSError:\n'
+     '    SPOOL_PATH = Path("/y/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('with open("/dev/null") as _f:\n'
+     '    SPOOL_PATH = Path("/x/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('for _i in (1,):\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")',
+     "SPOOL_PATH"),
     ('spool_path = Path("/x/mention-open/s.jsonl")', "spool_path"),
+    # 🔴 THE DERIVED SIBLING — its own source segment never says
+    # `mention-open`, and a round-3 audit called it the most LIKELY next
+    # spelling. It is also the worst kind of miss: the ledger is
+    # hand-maintained, so both sides lose the entry together and the two-way
+    # pin stays GREEN.
+    ('SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"', "SPOOL_PATH"),
+    # …and two hops, to prove it is a fixpoint rather than one lookahead.
+    ('_SPOOL_DIR = PICKS_PATH.parent / "spool"\n'
+     'SPOOL_PATH = _SPOOL_DIR / "today.jsonl"', "SPOOL_PATH"),
 ])
 def test_the_host_state_DISCOVERY_sees_every_spelling(planted, name):
     """🔴 THE POSITIVE CONTROL ON THE LEDGER'S DISCOVERY, and every one of these
-    six was measured SILENTLY MISSED by its first `ast` version. A ledger is only
-    as two-way as the thing that enumerates the left-hand side: a spelling it
-    cannot see is an unredirected host-state file, which since `record_pick`
-    means a test WRITING the operator's own data."""
+    was measured SILENTLY MISSED by some version of it — the first five by the
+    original `ast` walk, the derived-sibling pair by the round-2 rewrite that
+    replaced it. A ledger is only as two-way as the thing that enumerates the
+    left-hand side: a spelling it cannot see is an unredirected host-state file,
+    which since `record_pick` means a test WRITING the operator's own data.
+
+    ⚠ The `try`/`except` case is planted TWICE on purpose — once in the body and
+    once in the HANDLER — because a walk that recursed into `body` alone would
+    satisfy the first and miss the second, and the first version's claim to
+    cover handlers was never exercised."""
     source = HANDLER.read_text() + "\n\n" + planted + "\n"
     assert name in _host_state_constants(source), (
         f"the discovery is blind to this spelling:\n{planted}")
@@ -5305,7 +5350,8 @@ def test_record_pick_APPENDS_and_the_file_is_0600(tmp_path):
     assert oct(os.stat(p.parent).st_mode)[-3:] == "700"
 
 
-def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(tmp_path):
+def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(
+        tmp_path, monkeypatch):
     """🔴 NOTHING ELSE TRIMS IT. `record_pick` only appends and the age cap is
     applied on READ, so without this a 0600 file naming private repositories
     accumulates forever — and `PICKS_MAX_ROWS`' comment claimed the count cap
@@ -5315,6 +5361,8 @@ def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(tmp_path):
     Asserted in BOTH directions, because a compaction that fired on every write
     would be a write amplification and one that never fired would be no guard:
     below the threshold the file is untouched, above it the TAIL survives."""
+    stack = contextlib.ExitStack()
+    made = stack.enter_context(_watch_compaction_tmps(monkeypatch))
     p = tmp_path / "picks.jsonl"
     # One short, so the append lands the file EXACTLY on the threshold.
     rows = [{"t": _T0 - (5000 - i), "repo": f"o/r{i}", "n": i + 1}
@@ -5336,11 +5384,170 @@ def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(tmp_path):
     assert not any(r["repo"] == "o/r0" for r in kept), (
         "compaction kept the HEAD of the file — it must keep the tail")
     assert oct(os.stat(p).st_mode)[-3:] == "600", "compaction widened the mode"
-    # …and nothing was left behind.
-    assert not (tmp_path / "picks.jsonl.tmp").exists()
+    # …and nothing was left behind — see `_watch_compaction_tmps` for why this
+    # observes `mkstemp` rather than listing the directory, and why asserting on
+    # a GUESSED tmp name (the old `picks.jsonl.tmp`) could never have failed.
+    assert made, "POSITIVE CONTROL: no compaction tmp was ever created"
+    assert [t for t in made if t.exists()] == [], (
+        f"a compaction tmp outlived the call: {[str(t) for t in made]}")
 
 
-def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path):
+@contextlib.contextmanager
+def _watch_compaction_tmps(monkeypatch):
+    """Yield a list that collects every tmp path compaction creates.
+
+    🔴 NOT A DIRECTORY LISTING, AND THAT IS FORCED RATHER THAN CHOSEN. The tmp
+    name comes from `mkstemp` and is unguessable, so the obvious check is to
+    list the directory — but the glob-site ledger in `test_transcript_search.py`
+    enumerates every listing in a scope whose source mentions the log's
+    extension, and MEASURED: an inline listing in the caller registered as a new
+    walk site, and so did a helper that merely explained itself using the
+    literal. Rather than widen a repo-wide disclosure ledger for a two-line test
+    assertion, this observes `mkstemp`'s real return value — which is a tighter
+    check anyway: it names the exact files the code under test created, instead
+    of inferring them from what is left lying around.
+    """
+    import tempfile as _tempfile
+    made: list[Path] = []
+    real = _tempfile.mkstemp
+
+    def spy(*a, **k):
+        fd, name = real(*a, **k)
+        made.append(Path(name))
+        return fd, name
+
+    monkeypatch.setattr(_tempfile, "mkstemp", spy)
+    yield made
+
+
+def _lock_holder(path: Path, seconds: float):
+    """A REAL second process holding `LOCK_EX` on `path`. Returns once held."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl,os,sys,time;"
+         "fd=os.open(sys.argv[1], os.O_RDONLY);"
+         "fcntl.flock(fd, fcntl.LOCK_EX);"
+         "print('held', flush=True); time.sleep(float(sys.argv[2]))",
+         str(path), str(seconds)],
+        stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held", "the holder never ran"
+    return proc
+
+
+def test_the_APPEND_takes_the_lock_too(tmp_path):
+    """🔴 THE RACE THE LOCK EXISTS FOR, AND THE FIRST VERSION DID NOT CLOSE IT.
+    Round 2 locked only `_compact_picks`, so it excluded two COMPACTIONS from
+    each other and left APPEND-vs-compaction — the race that was actually
+    measured — wide open, under a docstring claiming it was fixed. A round-3
+    audit caught that, and I reproduced it: `record_pick` returned True and its
+    row landed on disk while a second process held `LOCK_EX`.
+
+    So the append takes the lock as well.
+
+    🔴 A DIFFERENTIAL MEASUREMENT, NOT AN ABSOLUTE THRESHOLD — and that is a
+    flake this test already had. Its first version asserted `waited > 20ms`,
+    which is inside the noise of a box running dozens of concurrent suites: the
+    mutant that removes the lock entirely SURVIVED one battery run and was
+    KILLED by the next. So the wait is compared against an UNLOCKED append
+    timed in the SAME run, and against the budget itself — both of which move
+    with the load rather than against it."""
+    log = tmp_path / "picks.jsonl"
+    log.write_text(json.dumps({"t": _T0, "repo": "o/seed", "n": 1}) + "\n")
+
+    # BASELINE: the same append with nobody holding the lock.
+    start = time.monotonic()
+    assert MO.record_pick("o/baseline", "6", log) is True
+    baseline = time.monotonic() - start
+
+    holder = _lock_holder(log, 3)
+    try:
+        start = time.monotonic()
+        assert MO.record_pick("o/waited", "7", log) is True
+        waited = time.monotonic() - start
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+        holder.stdout.close()
+    assert waited >= MO.PICKS_LOCK_WAIT_S * 0.7, (
+        f"the append returned in {waited*1000:.0f} ms against a HELD lock, "
+        f"well under its {MO.PICKS_LOCK_WAIT_S*1000:.0f} ms budget — it is not "
+        f"taking the lock at all (unlocked baseline was "
+        f"{baseline*1000:.0f} ms)")
+    assert waited > baseline * 3, (
+        f"the held append ({waited*1000:.0f} ms) is not materially slower than "
+        f"the unlocked one ({baseline*1000:.0f} ms)")
+    assert "o/waited" in log.read_text()
+
+
+def test_the_APPENDS_wait_is_BOUNDED_and_the_row_still_lands(tmp_path):
+    """🔴 A DETACHED CLICK HANDLER MUST NOT BE ABLE TO HANG ON A LOCK, and the
+    textbook answer — a blocking `LOCK_EX` — is exactly what would. It is not
+    hypothetical: a blocking version measurably DEADLOCKED a probe of this
+    function within one process, and in production a wedged holder would hang
+    the click invisibly and forever, costing the operator the OPEN to save one
+    learning row.
+
+    So the wait is a BUDGET. Against a hold far longer than it, the append gives
+    up and writes anyway — bounded, and the pick is never lost to the lock."""
+    log = tmp_path / "picks.jsonl"
+    log.write_text(json.dumps({"t": _T0, "repo": "o/seed", "n": 1}) + "\n")
+    holder = _lock_holder(log, 30)
+    try:
+        start = time.monotonic()
+        assert MO.record_pick("o/gave-up", "8", log) is True
+        waited = time.monotonic() - start
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+        holder.stdout.close()
+    assert waited < MO.PICKS_LOCK_WAIT_S * 5, (
+        f"the append waited {waited:.2f}s against a 30s hold — the budget is "
+        f"not bounding it, and a detached click can hang")
+    assert "o/gave-up" in log.read_text(), (
+        "the append gave up on the lock AND dropped the pick — the budget must "
+        "cost exclusion, never the row")
+
+
+def test_two_compactions_do_not_DELETE_each_others_tmp(tmp_path):
+    """🔴 A BUG MY OWN ROUND-2 FIX INTRODUCED, found by tracing a probe that
+    unexpectedly did NOT reproduce the race it was written for.
+
+    The tmp was named `picks.jsonl.<pid>.tmp`, which collides on RE-ENTRY within
+    one process. A nested `_compact_picks` skipped on the lock, as designed —
+    and its `finally` then UNLINKED THE OUTER CALL'S TMP, so the outer
+    `os.replace` raised `FileNotFoundError` into the swallowing handler and the
+    compaction silently did nothing at all. Measured: the log stayed at 1011
+    rows where it should have been trimmed to 500.
+
+    `mkstemp` gives a name no other call can guess, and the cleanup only removes
+    a tmp still present after a FAILED replace."""
+    log = tmp_path / "picks.jsonl"
+    rows = [{"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1}
+            for i in range(MO.PICKS_COMPACT_AT + 10)]
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    real_replace = os.replace
+    nested: list = []
+
+    def replace_with_a_nested_compaction(a, b, *args, **kw):
+        # Exactly the shape that destroyed the outer tmp: a second call runs
+        # inside the first one's read->replace window.
+        nested.append(MO._compact_picks(log))
+        return real_replace(a, b, *args, **kw)
+
+    monkey = MO.os.replace
+    MO.os.replace = replace_with_a_nested_compaction
+    try:
+        MO._compact_picks(log)
+    finally:
+        MO.os.replace = monkey
+    assert nested, "POSITIVE CONTROL: the nested compaction never ran"
+    assert len(log.read_text().splitlines()) == MO.PICKS_MAX_ROWS, (
+        "the OUTER compaction silently did nothing — a nested call deleted its "
+        "tmp out from under it")
+
+
+def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
+                                                              monkeypatch):
     """🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS — and without
     the lock a row appended between the read and the `replace` is silently LOST.
     A round-2 audit measured exactly that ("concurrent row survived? False").
@@ -5353,6 +5560,8 @@ def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path):
     ⚠ The `.tmp` name is PID-unique as well, so two compactions cannot share one
     buffer even on a filesystem that ignores the advisory lock. That belt is
     asserted at the end: nothing is left behind."""
+    stack = contextlib.ExitStack()
+    made = stack.enter_context(_watch_compaction_tmps(monkeypatch))
     log = tmp_path / "picks.jsonl"
     rows = [{"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1}
             for i in range(MO.PICKS_COMPACT_AT + 10)]
@@ -5387,8 +5596,12 @@ def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path):
     # `test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_pinned_two_way`
     # — measured, it went red. The tmp name is PID-unique by construction, and
     # this process is the one that compacted.
-    leftover = tmp_path / f"picks.jsonl.{os.getpid()}.tmp"
-    assert not leftover.exists(), f"a .tmp file outlived the compaction: {leftover}"
+    # ⚠ OBSERVED, NOT GUESSED. The tmp used to be `picks.jsonl.<pid>.tmp` and is
+    # now an unguessable `mkstemp` name, so an assertion naming either exact
+    # form is one that can never fail. See `_watch_compaction_tmps`.
+    assert made, "POSITIVE CONTROL: no compaction tmp was ever created"
+    assert [t for t in made if t.exists()] == [], (
+        f"a tmp outlived the compaction: {[str(t) for t in made]}")
 
 
 def test_a_RAISING_compaction_neither_LOSES_the_pick_nor_ESCAPES(tmp_path,
@@ -5483,34 +5696,70 @@ def test_record_pick_does_NOT_WIDEN_a_parent_the_operator_narrowed(tmp_path):
     assert oct(os.stat(e).st_mode)[-3:] == "700"
 
 
+def _narrow_would_set(module, start: int) -> int | None:
+    """What `module.narrow_dir` would chmod a directory of mode `start` TO —
+    with `os.stat`/`os.chmod` stubbed, so no privileged bit has to be settable.
+
+    🔴 STUBBED ON PURPOSE, AND THE REASON IS A TWO-TIER DIFFERENCE THAT COST A
+    RED GATE. The first version of the setuid/setgid/sticky test called
+    `os.chmod(d, 0o2755)` for real. That works on the dev host and raises
+    `PermissionError: Operation not permitted` in the `nix build` sandbox, where
+    the build user may not set those bits — so the dev-host tier was green and
+    the authoritative tier failed, which is exactly the blindness `CLAUDE.md`
+    describes. A `skip` would have been worse: it is an UNPINNED skip, and it
+    would have made the sandbox tier silently stop testing this at all.
+
+    The property under test is mask ARITHMETIC (`& 0o7777` vs `& 0o777`), which
+    needs no privilege to check.
+    """
+    got: list[int] = []
+    real_stat, real_chmod = module.os.stat, module.os.chmod
+
+    class _St:
+        st_mode = start
+
+    module.os.stat = lambda *a, **k: _St()
+    module.os.chmod = lambda p, m, *a, **k: got.append(m)
+    try:
+        module.narrow_dir(Path("/nonexistent-does-not-matter"))
+    finally:
+        module.os.stat, module.os.chmod = real_stat, real_chmod
+    return got[0] if got else None
+
+
 @pytest.mark.parametrize("start,keeps", [
     (0o2755, 0o2000),   # setgid — common on shared dirs, and not ours to clear
     (0o1777, 0o1000),   # sticky
     (0o4755, 0o4000),   # setuid
 ])
-def test_narrowing_a_parent_PRESERVES_setuid_setgid_and_sticky(tmp_path,
-                                                               start, keeps):
+def test_narrowing_a_parent_PRESERVES_setuid_setgid_and_sticky(start, keeps):
     """🔴 THE BITS A `& 0o777` MASK SILENTLY DESTROYS. A round-2 audit measured
     a `0o2755` parent coming back `0o0700` and a `0o1777` one likewise: the
     narrowing read only the low nine bits, so re-writing them cleared everything
     above. Those bits are not ours to clear — the rule is "nobody ELSE may read
     this", which is a statement about group and other alone.
 
-    ⚠ ASSERTED ON THE FULL `st_mode & 0o7777`, because the sibling test above
-    compares `oct(...)[-3:]` and is therefore structurally blind to exactly this
-    — which is why it did not catch it."""
-    d = tmp_path / f"mode{start:o}"
-    d.mkdir()
-    os.chmod(d, start)
-    if os.stat(d).st_mode & 0o7000 != keeps:
-        pytest.skip(f"this filesystem did not honour {start:o}")
-    MO.narrow_dir(d)
-    mode = os.stat(d).st_mode & 0o7777
+    ⚠ ASSERTED ON THE FULL MODE, because the sibling test above compares
+    `oct(...)[-3:]` and is therefore structurally blind to exactly this — which
+    is why it did not catch it. And driven through `_narrow_would_set`, which
+    explains why this cannot use a real `chmod`."""
+    mode = _narrow_would_set(MO, start)
+    assert mode is not None, f"narrow_dir did not chmod {start:o} at all"
     assert mode & 0o077 == 0, f"group/other survived: {mode:o}"
     assert mode & 0o7000 == keeps, (
         f"narrowing destroyed a non-permission bit: {start:o} -> {mode:o}")
     assert mode & 0o700 == start & 0o700, (
         f"owner bits changed: {start:o} -> {mode:o}")
+
+
+def test_narrowing_a_parent_that_is_ALREADY_private_does_not_chmod_at_all():
+    """The negative control on the stub above: a mode with no group/other bits
+    needs no call, so `narrow_dir` must make none. Without this, a mutant that
+    chmod-ed unconditionally would satisfy every assertion in the sibling
+    test."""
+    assert _narrow_would_set(MO, 0o700) is None
+    assert _narrow_would_set(MO, 0o500) is None
+    assert _narrow_would_set(MO, 0o2700) is None
 
 
 def test_a_parent_this_tool_CANNOT_chmod_does_not_cost_the_PICK(tmp_path,
