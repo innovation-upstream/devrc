@@ -755,6 +755,61 @@ def test_the_deployed_sibling_name_is_the_one_LEG_ONE_looks_for():
     assert '.config/i3status-rust/scripts/scratch-slots.sh' in nix
 
 
+def test_the_block_SPAWNS_TMUX_AND_NOTHING_ELSE():
+    """🔴 THE PIN BEHIND THIS FILE'S `home-manager` ACKNOWLEDGEMENT in
+    scripts/tests/test_no_real_launchers.py.
+
+    That scanner is a TEXT scan, so the one clause of comment prose above
+    `_socket_roots` naming home-manager reads as a hit. Acknowledging it is the
+    repo's convention — but an acknowledgement with no pin BLINDS the guard it
+    is filed under, which was MEASURED once on `tmux-reply-agent`: with the row
+    in place, injecting a real `subprocess.run(["systemctl", …])` left that
+    suite green.
+
+    So: walk the AST, collect every spawn's argv[0], and pin the set BOTH
+    WAYS — a new binary fails, and losing tmux fails too. A spawn built from a
+    variable becomes `<computed>` and fails rather than silently leaving the
+    set."""
+    import ast
+
+    src = open(os.path.join(_SCRIPTS, "i3status-scratchpads"),
+               encoding="utf-8").read()
+    tree = ast.parse(src)
+
+    SPAWNERS = {"run", "Popen", "call", "check_call", "check_output",
+                "getoutput", "getstatusoutput"}
+    FORBIDDEN = {"system", "popen", "execv", "execve", "execvp", "execvpe",
+                 "execl", "execlp", "execle", "spawnv", "spawnl", "posix_spawn"}
+    argv0, forbidden_hits = set(), []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else (
+            fn.id if isinstance(fn, ast.Name) else None)
+        if name in FORBIDDEN:
+            forbidden_hits.append(name)
+        if name not in SPAWNERS or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            argv0.add(first.value)
+        elif isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            argv0.add(head.value if isinstance(head, ast.Constant)
+                      and isinstance(head.value, str) else "<computed>")
+        else:
+            argv0.add("<computed>")
+
+    assert not forbidden_hits, (
+        "scripts/i3status-scratchpads reaches a raw exec/system primitive: %r"
+        % forbidden_hits)
+    assert argv0 == {"tmux"}, (
+        "the block's spawn set is %r, not {'tmux'} — the `home-manager` "
+        "acknowledgement in test_no_real_launchers.py rests on this file "
+        "having exactly one, read-only, tmux call site" % sorted(argv0))
+
+
 # --------------------------------------------------------------------------- #
 # The picker the click runs
 # --------------------------------------------------------------------------- #

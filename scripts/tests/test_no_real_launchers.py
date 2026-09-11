@@ -389,7 +389,8 @@ ACKNOWLEDGED_UNSTUBBED = {
         "passes, and a second injected call site fails with that test's own "
         "message"),
     "home-manager": (
-        {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
+        {"bar-status-poll", "drift-check.sh", "i3status-scratchpads",
+         "keylog-spin-capture.sh",
          "mention-open.py",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
@@ -489,7 +490,30 @@ ACKNOWLEDGED_UNSTUBBED = {
         "dodge the scanner. The set of binaries the script can spawn is "
         "`git`, `readlink`, `timeout`, `ssh` (only as git's transport, via "
         "GIT_SSH_COMMAND), `mktemp`, `stat`, `date`, `jq`, `awk`/`sed`/`grep` "
-        "and `clawgatectl`; the SKILL block adds only `git` and `readlink`"),
+        "and `clawgatectl`; the SKILL block adds only `git` and `readlink`. "
+        "i3status-scratchpads (added 2026-09-11 with the round-1 fix for the "
+        "bar legend's undeclared `TMUX_TMPDIR` dependency) is the same "
+        "PROSE-MENTION shape, and the words are the FINDING rather than "
+        "decoration: its single occurrence is one clause of the comment above "
+        "`_socket_roots` recording that `TMUX_TMPDIR=/run/user/1000` appears in "
+        "no /etc/nixos file, no environment.d and no home-manager output — the "
+        "same undeclared-runtime-state gap nix/home.nix records at length on "
+        "its tmux-restore path unit, and the reason this block has to FIND the "
+        "socket instead of inheriting the answer. Measured: with that variable "
+        "stripped, the shipped version of this script rendered `scratch ?` "
+        "while 20 scratchpads were live. Deleting the word would delete the "
+        "explanation for the whole mechanism. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard "
+        "(the `tmux-reply-agent` row above records that failure being MEASURED "
+        "on an acknowledgement that had no pin): "
+        "test_scratchpads_block.py::test_the_block_SPAWNS_TMUX_AND_NOTHING_ELSE "
+        "walks this script's AST and asserts its spawn argv[0] set is exactly "
+        "{tmux}, grows-or-shrinks, with a `<computed>` sentinel so a spawn "
+        "built from a variable fails rather than silently leaving the set — and "
+        "it also asserts the script imports none of os.system / os.exec* / "
+        "os.popen / os.spawn*. Both controls watched: clean tree passes, an "
+        "injected `subprocess.run([\"home-manager\", \"switch\"])` fails with "
+        "that test's own message"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
