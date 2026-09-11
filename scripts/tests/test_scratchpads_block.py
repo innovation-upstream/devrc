@@ -114,10 +114,14 @@ def test_the_sibling_deployed_leg_is_tried_FIRST():
 
 
 def test_load_slots_falls_through_a_missing_path_to_a_real_one(tmp_path):
+    """The expected count comes from bash, never from a literal — the same
+    reason `_bash_slot_entries` exists. This line read `== 20` until round 2,
+    which is precisely the self-agreeing assertion the docstring above warns
+    about: a 21st slot the regex silently dropped would have left it green."""
     missing = str(tmp_path / "nope" / "scratch-slots.sh")
     slots = blk.load_slots(
         [missing, os.path.join(_SCRIPTS, "tmux-scratch-slots.sh")])
-    assert slots is not None and len(slots) == 20
+    assert slots is not None and len(slots) == len(_bash_slot_entries())
 
 
 def test_load_slots_returns_NONE_not_empty_when_nothing_parses(tmp_path):
@@ -151,35 +155,206 @@ _GRAMMAR_CORPUS = [
      "8 hex digits: the legend's old {3,8} upper bound, not a pango colour"),
     ('"scratch21:z:#123456:zed"', True, "no indent"),
     ('  "scratch21:z:#123456:zed"  ', True, "trailing spaces"),
+    ('\t"scratch21:z:#123456:zed"', True,
+     "🔴 TAB-INDENTED. The grammar was `[ ]*` — space only — until round 2, so "
+     "this was a slot to NOBODY while bash still put it in SCRATCH_SLOTS. "
+     "MEASURED before the fix, one real entry re-indented with a tab: bash 20, "
+     "the legend 19 with no `?`, nix 19 bindings with no throw"),
+    ('\t "scratch21:z:#123456:zed" \t', True, "mixed leading/trailing tab+space"),
     ('    "scratch21:z:#123456:zed" # trailing comment', False,
-     "not the whole line — bash would not put it in the array either"),
+     "🔴 NOT the whole line — and the reason given here used to read `bash "
+     "would not put it in the array either`, which is FALSE. MEASURED: a "
+     "3-entry fixture whose middle line carried a trailing comment yields "
+     "${#SCRATCH_SLOTS[@]} = 3, with the element being the quoted string. So "
+     "this shape IS a real three-way disagreement. It is deliberately NOT a "
+     "slot to the grammar — but it IS a candidate (see _CANDIDATE_CORPUS), so "
+     "the shortfall floor fires and the table is refused LOUDLY rather than "
+     "half-read"),
     ('SCRATCH_SLOTS=(', False, "the array opener"),
+]
+
+#: 🔴 THE CANDIDATE PATTERNS ARE THE FLOOR'S YARDSTICK, AND THEY MUST BE WIDER
+#: THAN THE GRAMMAR. A yardstick that narrows in lockstep with the grammar
+#: cannot see a dropped entry — both counts fall together and the floor stays
+#: quiet, which is exactly how the TAB case above shipped silently. Expected
+#: candidate verdicts, classified by BOTH readers below.
+_CANDIDATE_CORPUS = [
+    # (line, is_a_candidate, why)
+    ('    "scratch4:V:#83a598:Vapor"', True, "a real entry"),
+    ('\t"scratch21:z:#123456:zed"', True, "tab-indented: leading whitespace"),
+    ('    "scratch21:z:#12345:zed"', True,
+     "a CORRUPT colour is still a declared entry — that is the whole point"),
+    ('    "scratch21:z:#123456:zed" # trailing comment', True,
+     "🔴 WIDER THAN THE GRAMMAR ON PURPOSE: bash accepts this line, the "
+     "grammar does not, so counting it is what turns a silent disagreement "
+     "into a refused table"),
+    ('#    "scratch21:z:#123456:zed"', False,
+     "commented out — not declared to anybody"),
+    ('SCRATCH_SLOTS=(', False, "the array opener"),
+    ('# SLOT_ENTRY_RE: [ ]*"x"', False, "the marker line is not an entry"),
 ]
 
 
 def _marker_lines():
     text = open(_TABLE, encoding="utf-8").read()
-    return re.findall(r"^# SLOT_ENTRY_RE: (\S.*?)[ ]*$", text, re.M)
+    return re.findall(r"^# SLOT_ENTRY_RE: (\S.*?)[ \t]*$", text, re.M)
 
 
-def test_the_slot_entry_grammar_has_EXACTLY_ONE_copy_and_both_readers_read_it():
-    """🔴 The fix for three grammars over one source of truth. The pattern lives
-    on the table's own `# SLOT_ENTRY_RE:` line; the bar block and
-    nix/programs/tmux/default.nix both READ it rather than spelling their own.
+# --------------------------------------------------------------------------- #
+# The nix side, EVALUATED. Everything below asks nix for a VALUE — never for a
+# spelling. The round-1 guard on this property was a regex over default.nix's
+# source text (`^\s*slotRe\s*=\s*$` OR NOT `^\s*slotRe\s*=\s*"`), whose first
+# disjunct matched the then-current formatting, so the second never ran: two
+# mutants that put a string literal back — one of them carrying the original
+# DISAGREEING grammar, i.e. a full regression of the bug this PR exists to fix —
+# SURVIVED the whole 47-test suite. A spelled guard cannot see a value.
+# --------------------------------------------------------------------------- #
+_SLOT_TABLE_NIX = _REPO / "nix" / "programs" / "tmux" / "slot-table.nix"
+#: A `pkgs` with exactly the attributes nix/programs/tmux/default.nix touches.
+#: Plain strings: `mkBind` and the plugin `extraConfig`s only interpolate them.
+_PKGS_STUB = ('{ tmuxPlugins = { continuum = "/STUB/continuum"; '
+              'resurrect = "/STUB/resurrect"; tmux-fzf = "/STUB/tmux-fzf"; }; }')
 
-    Two of the three measured disagreements were invisible precisely because
-    each side's regex was individually plausible — so this asserts the
-    SINGLE-COPY property, not any particular pattern text."""
-    assert len(_marker_lines()) == 1, _marker_lines()
+_NIX_MISSING = pytest.mark.skipif(
+    shutil.which("nix-instantiate") is None,
+    reason="nix-instantiate absent — `pkgs.nix` is in the flake's gateTools, "
+           "so this skipping means the environment is not a gate environment")
+
+
+def _nix_eval(expr):
+    """Evaluate a pure-`builtins` nix expression to a Python value.
+
+    No `<nixpkgs>`, no channel, no network. Raises with nix's own stderr so a
+    broken expression reads as a broken expression, not as a wrong verdict."""
+    proc = subprocess.run(
+        ["nix-instantiate", "--eval", "--strict", "--json", "--expr", expr],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    return json.loads(proc.stdout)
+
+
+def _nix_try(expr):
+    """`builtins.tryEval expr` → (success, value). For the fail-closed cases."""
+    r = _nix_eval("builtins.tryEval (%s)" % expr)
+    return r["success"], r["value"]
+
+
+def _slot_table_expr(path, attr):
+    return 'let t = import %s { path = %s; }; in t.%s' % (
+        json.dumps(str(_SLOT_TABLE_NIX)), json.dumps(str(path)), attr)
+
+
+def _tmux_module_extra_config(table_path=None):
+    """`.extraConfig` of the REAL tmux module — the text home-manager ships."""
+    args = "{ pkgs = %s;%s }" % (
+        _PKGS_STUB,
+        "" if table_path is None else " slotTablePath = %s;" % json.dumps(
+            str(table_path)))
+    return '(import %s %s).extraConfig' % (json.dumps(str(_TMUX_NIX)), args)
+
+
+_GENERATED_MARKER = "# --- generated scratchpad popup toggles"
+
+
+def _generated_bindings(extra_config):
+    """The generated `bind -n M-<key>` block, parsed back into slot tuples.
+
+    Only the lines AFTER the generator's own banner: `.tmux.conf` carries
+    hand-written `bind -n M-…` lines of its own and they are not slots."""
+    i = extra_config.index(_GENERATED_MARKER)
+    out = []
+    for ln in extra_config[i:].splitlines():
+        m = re.match(
+            r"bind -n M-(?P<key>\S+) if-shell -F '#\{==:#\{session_name\},"
+            r"(?P<sess>[^}]+)\}'.*-S 'fg=(?P<color>[^']+)' -T ' (?P<name>.*) ' ",
+            ln)
+        if m:
+            out.append((m.group("sess"), m.group("key"), m.group("color"),
+                        m.group("name")))
+    return out
+
+
+@_NIX_MISSING
+def test_the_grammar_NIX_USES_is_the_MARKER_STRING_ITSELF_evaluated(tmp_path):
+    """🔴 THE FLAGSHIP PROPERTY, ASSERTED AS A VALUE.
+
+    Ask nix for the grammar it actually binds — `slotRe`, evaluated out of the
+    reader nix/programs/tmux/default.nix imports — and compare it to the string
+    Python compiled from the same marker line. Not "the source text looks like
+    it reads the marker": the string itself.
+
+    A mutant that binds `slotRe` to a literal fails here whatever the literal
+    says, because the comparison is against the FILE's marker. A mutant that
+    binds it to a literal EQUAL to today's marker also fails the sibling
+    `…CANNOT_CLASSIFY_A_LINE_ITSELF` below, which is what covers the case a
+    value comparison structurally cannot see."""
+    marker = _marker_lines()
+    assert len(marker) == 1, marker
+    nix_re = _nix_eval(_slot_table_expr(_TABLE, "slotRe"))
+    assert nix_re == marker[0], (
+        "nix compiles a slot grammar that is NOT the table's marker line.\n"
+        "  nix:    %r\n  marker: %r" % (nix_re, marker[0]))
+
+    py_rx = blk.slot_pattern(open(_TABLE, encoding="utf-8").read())
+    assert py_rx is not None
+    assert py_rx.pattern == "^" + nix_re + "$", (
+        "the legend compiled a different grammar from the one nix uses.\n"
+        "  python: %r\n  nix:    %r" % (py_rx.pattern, nix_re))
+    # …and the grammar is not empty or trivially-everything.
+    assert len(nix_re) > 20 and nix_re != ".*", nix_re
+
+    # 🔴 THE DECISIVE HALF: nix must TRACK the marker, not happen to equal it
+    # today. A literal that matches the current marker byte for byte passes
+    # every comparison above — so change the marker in a synthetic table and
+    # require the value to follow. A hardcoded grammar cannot.
+    moved = marker[0].replace("([^\"]+)\"", "([^\"]+)!\"")
+    assert moved != marker[0]
+    table2 = tmp_path / "scratch-slots.sh"
+    table2.write_text(
+        open(_TABLE, encoding="utf-8").read().replace(marker[0], moved),
+        encoding="utf-8")
+    assert _nix_eval(_slot_table_expr(table2, "slotRe")) == moved, (
+        "nix's slot grammar did NOT follow the table's marker line — it is "
+        "bound to something other than what the file says")
+    assert blk.slot_pattern(table2.read_text()).pattern == "^" + moved + "$"
+
+
+def test_default_nix_CANNOT_CLASSIFY_A_LINE_ITSELF():
+    """🔴 THE SINGLE-COPY HALF, and the only one that cannot be a value check.
+
+    A second grammar that AGREES with the first today is invisible to every
+    behavioural test — it only bites when someone edits one copy. So assert the
+    property that makes a second copy impossible: default.nix holds no regex
+    PRIMITIVE. `builtins.match` and `builtins.split` are the only two ways nix
+    can classify a string against a pattern, so a file containing neither
+    cannot carry an entry grammar; the verdicts have to come from the reader it
+    imports.
+
+    ⚠ WHAT THIS DOES NOT COVER, stated rather than implied: nix could in
+    principle classify lines with `substring`/`stringLength` comparisons by
+    hand. Nobody has, it would be far more obvious in review than a regex, and
+    the behavioural tests below would catch it the moment it disagreed.
+
+    Comments are stripped first — both files discuss the primitives in prose,
+    and a guard a comment can trip is a guard a comment can also satisfy."""
+    src = _TMUX_NIX.read_text()
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    for prim in ("builtins.match", "builtins.split"):
+        assert prim not in code, (
+            "nix/programs/tmux/default.nix uses %s — it has grown a way to "
+            "classify slot table lines itself. The grammar's one home is the "
+            "`# SLOT_ENTRY_RE:` line in scripts/tmux-scratch-slots.sh, read by "
+            "nix/programs/tmux/slot-table.nix." % prim)
+    # Negative control: the stripper did not simply delete everything, and the
+    # primitives ARE findable where they legitimately live.
+    assert "scratchBindings" in code and "mkBind" in code, code[:400]
+    assert "builtins.match" in _SLOT_TABLE_NIX.read_text()
+    # …and default.nix imports the one reader, exactly once.
+    assert code.count("import ./slot-table.nix") == 1, code
 
     blk_src = open(os.path.join(_SCRIPTS, "i3status-scratchpads"),
                    encoding="utf-8").read()
-    nix_src = _TMUX_NIX.read_text()
-
-    # Neither reader may DEFINE an entry grammar any more. Asserted structurally
-    # rather than by scanning for `0-9a-fA-F`: both files discuss the old
-    # regexes in prose, and a guard that a comment can trip is a guard a comment
-    # can also satisfy.
     assert not hasattr(blk, "_SLOT_RE"), (
         "scripts/i3status-scratchpads defines a module-level entry regex again; "
         "the grammar's one home is the `# SLOT_ENTRY_RE:` line in "
@@ -188,14 +363,33 @@ def test_the_slot_entry_grammar_has_EXACTLY_ONE_copy_and_both_readers_read_it():
         pat = getattr(blk, name).pattern
         assert "0-9a-fA-F" not in pat, (
             "%s has grown a colour grammar: %r" % (name, pat))
-    assert re.search(r"^\s*slotRe\s*=\s*$", nix_src, re.M) or not re.search(
-        r'^\s*slotRe\s*=\s*"', nix_src, re.M), (
-        "nix/programs/tmux/default.nix assigns `slotRe` a string LITERAL again — "
-        "it must read the marker out of the slot table")
-    # …and both must actually consult the marker.
     assert "SLOT_ENTRY_RE" in blk_src, blk_src[:200]
-    assert 'builtins.match "# SLOT_ENTRY_RE: (.*)"' in nix_src, (
-        "nix/programs/tmux/default.nix no longer reads the marker line")
+    assert len(_marker_lines()) == 1, _marker_lines()
+
+
+@_NIX_MISSING
+def test_the_BINDINGS_NIX_GENERATES_are_exactly_the_LEGENDS_OWN_PARSE():
+    """🔴 THE RELATIONSHIP, END TO END, THROUGH BOTH REAL ARTIFACTS.
+
+    Evaluate the tmux module home-manager actually ships, read the
+    `bind -n M-<key>` block it GENERATED, and compare session/key/colour/name
+    against what the bar legend parses out of the same table. This is what
+    `slotRe` being shared is FOR, and it also pins the group-INDEX contract the
+    marker cannot carry: nix reads `elemAt m 4` for the name, Python reads
+    `group(5)`, and a swap shows up here as mismatched names/colours."""
+    cfg = _nix_eval(_tmux_module_extra_config())
+    generated = _generated_bindings(cfg)
+    slots = blk.load_slots([_TABLE])
+    assert slots is not None
+    # positive control: the parse really read something out of the nix output
+    assert len(generated) >= 20, (len(generated), cfg[:200])
+    assert generated == slots, (
+        "the tmux key bindings and the bar legend disagree about the real "
+        "table.\n  nix-only:    %r\n  legend-only: %r"
+        % (sorted(set(generated) - set(slots)),
+           sorted(set(slots) - set(generated))))
+    # …and the colours reached the binding as the popup border, not as a name.
+    assert all(c.startswith("#") for _s, _k, c, _n in generated), generated
 
 
 def test_the_colour_grammar_is_the_ONE_PANGO_ACCEPTS():
@@ -213,38 +407,48 @@ def test_the_colour_grammar_is_the_ONE_PANGO_ACCEPTS():
         assert got == want, "%r -> %s, expected %s (%s)" % (line, got, want, why)
 
 
-@pytest.mark.skipif(shutil.which("nix-instantiate") is None,
-                    reason="nix-instantiate absent — `pkgs.nix` is in the "
-                           "flake's gateTools, so this skipping means the "
-                           "environment is not a gate environment")
-def test_the_NIX_and_PYTHON_slot_grammars_CLASSIFY_THE_CORPUS_IDENTICALLY():
-    """🔴 THE CROSS-ARTIFACT COMPARISON. Both sides now read the same pattern
-    string, but they run it through DIFFERENT regex engines — nix's POSIX ERE
-    (`builtins.match`, whole-string) and Python's `re` (anchored with `^…$`
-    under MULTILINE). "Same bytes" is not "same verdict" until something
-    evaluates both, which is what this does.
+def _corpus_table(tmp_path, lines, name="scratch-slots.sh"):
+    """A synthetic slot table: the REAL marker line plus the corpus lines.
 
-    Pure `builtins` on the nix side: no `<nixpkgs>`, no channel, no network."""
-    marker = _marker_lines()
+    The marker is copied verbatim from the real file, so both readers get the
+    production grammar and the only variable is the corpus."""
+    marker = [ln for ln in open(_TABLE, encoding="utf-8").read().splitlines()
+              if ln.startswith("# SLOT_ENTRY_RE: ")]
     assert len(marker) == 1
-    pat = marker[0]
-    lines = [c[0] for c in _GRAMMAR_CORPUS]
-    nixlist = "[ " + " ".join(json.dumps(ln) for ln in lines) + " ]"
-    expr = ("let p = %s; c = %s; in map (l: builtins.match p l != null) c"
-            % (json.dumps(pat), nixlist))
-    proc = subprocess.run(
-        ["nix-instantiate", "--eval", "--strict", "--json", "--expr", expr],
-        capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr[:800]
-    nix_says = json.loads(proc.stdout)
-    assert len(nix_says) == len(lines)
+    p = tmp_path / name
+    p.write_text("\n".join(marker + ["SCRATCH_SLOTS=("] + list(lines) + [")"])
+                 + "\n", encoding="utf-8")
+    return p
 
-    rx = blk.slot_pattern(open(_TABLE, encoding="utf-8").read())
+
+@_NIX_MISSING
+def test_the_NIX_and_PYTHON_slot_grammars_CLASSIFY_THE_CORPUS_IDENTICALLY(
+        tmp_path):
+    """🔴 THE CROSS-ARTIFACT COMPARISON, THROUGH THE REAL READERS.
+
+    Both sides read the same pattern string, but they run it through DIFFERENT
+    regex engines — nix's POSIX ERE (`builtins.match`, whole-string) and
+    Python's `re` (anchored with `^…$` under MULTILINE). "Same bytes" is not
+    "same verdict" until something evaluates both.
+
+    🔴 AND IT MUST BE THE REAL READERS. This test used to build its own
+    `map (l: builtins.match p l != null) c` expression, which evaluated the
+    MARKER rather than the reader — so it never opened default.nix at all and
+    passed happily off a dead binding. It now imports
+    nix/programs/tmux/slot-table.nix, the file default.nix derives every one of
+    its bindings from, and feeds it a table on disk."""
+    lines = [c[0] for c in _GRAMMAR_CORPUS]
+    table = _corpus_table(tmp_path, lines)
+    nix_slot_lines = _nix_eval(_slot_table_expr(table, "slotLines"))
+    nix_says = [ln in nix_slot_lines for ln in lines]
+
+    rx = blk.slot_pattern(table.read_text())
+    assert rx is not None
     py_says = [rx.match(ln) is not None for ln in lines]
 
     # Positive control: the corpus is not all-False (a nix expression wired to
     # nothing would return all False and agree with a Python regex that also
-    # matched nothing).
+    # matched nothing) and not all-True.
     assert any(nix_says) and any(py_says), (nix_says, py_says)
     assert not all(nix_says), nix_says
 
@@ -254,6 +458,212 @@ def test_the_NIX_and_PYTHON_slot_grammars_CLASSIFY_THE_CORPUS_IDENTICALLY():
         "the tmux key bindings and the bar legend disagree about what a slot "
         "IS: %r" % disagreements)
     assert py_says == [c[1] for c in _GRAMMAR_CORPUS]
+
+
+@_NIX_MISSING
+def test_the_CANDIDATE_yardsticks_are_WIDER_than_the_grammar_on_BOTH_sides(
+        tmp_path):
+    """🔴 F(round-2)-2. THE FLOOR CANNOT FIRE IF ITS YARDSTICK NARROWS WITH THE
+    THING IT MEASURES.
+
+    The shortfall check compares "entries the grammar accepted" against
+    "entries the file declares". When both patterns were spelled `[ ]*`, a
+    TAB-indented entry fell out of BOTH counts at once — 19 of 19 — so nix shipped
+    19 bindings with no throw and the legend rendered 19 slots with no `?`,
+    while bash put 20 in `SCRATCH_SLOTS`. The floor was structurally blind to
+    the whole class of defects it exists for.
+
+    So both candidate patterns are now deliberately wider than the grammar, and
+    this pins BOTH directions: every grammar match is a candidate (or the floor
+    reads negative and means nothing), and specific non-matches ARE candidates
+    (or the floor cannot see them go missing)."""
+    lines = [c[0] for c in _CANDIDATE_CORPUS]
+    table = _corpus_table(tmp_path, lines)
+    nix_cands = _nix_eval(_slot_table_expr(table, "candidateLines"))
+    nix_says = [ln in nix_cands for ln in lines]
+    py_cands = set(blk._CANDIDATE_RE.findall(table.read_text()))
+    py_says = [ln in py_cands for ln in lines]
+
+    assert any(nix_says) and not all(nix_says), nix_says      # controls
+    assert nix_says == [c[1] for c in _CANDIDATE_CORPUS], list(
+        zip(lines, nix_says))
+    assert py_says == [c[1] for c in _CANDIDATE_CORPUS], list(
+        zip(lines, py_says))
+
+    # WIDTH, as an implication over the grammar corpus: slot ⇒ candidate.
+    gtable = _corpus_table(tmp_path, [c[0] for c in _GRAMMAR_CORPUS],
+                           name="g.sh")
+    rx = blk.slot_pattern(gtable.read_text())
+    g_cands = set(blk._CANDIDATE_RE.findall(gtable.read_text()))
+    narrower = [c[0] for c in _GRAMMAR_CORPUS
+                if rx.match(c[0]) and c[0] not in g_cands]
+    assert not narrower, (
+        "the Python candidate yardstick is NARROWER than the grammar on %r — "
+        "the floor would read negative" % narrower)
+    nix_g_slots = set(_nix_eval(_slot_table_expr(gtable, "slotLines")))
+    nix_g_cands = set(_nix_eval(_slot_table_expr(gtable, "candidateLines")))
+    assert not (nix_g_slots - nix_g_cands), (
+        "the nix candidate yardstick is NARROWER than the grammar on %r"
+        % sorted(nix_g_slots - nix_g_cands))
+    # …and STRICTLY wider: at least one declared line is not a slot, or the
+    # floor can never fire at all.
+    assert nix_g_cands - nix_g_slots, (nix_g_cands, nix_g_slots)
+
+
+@_NIX_MISSING
+def test_a_TAB_INDENTED_entry_is_a_slot_to_ALL_THREE_readers(tmp_path):
+    """🔴 F(round-2)-2, the behavioural half, on a table shaped like the real one.
+
+    BEFORE (measured on ffe4e5d0, one real entry re-indented with a tab):
+    bash 20 entries, the legend 19 slots and NO `?`, nix `nSlots=19
+    nCandidates=19` and NO throw — 19 key bindings shipped for a 20-entry table.
+    AFTER: all three read 20."""
+    real = open(_TABLE, encoding="utf-8").read()
+    tabbed = real.replace('    "scratch5:p:', '\t"scratch5:p:', 1)
+    assert tabbed != real and "\t\"scratch5:p:" in tabbed
+    p = tmp_path / "scratch-slots.sh"
+    p.write_text(tabbed, encoding="utf-8")
+
+    from_bash = subprocess.run(
+        ["bash", "-c", '. "$1"; printf "%s\\n" "${SCRATCH_SLOTS[@]}"', "_",
+         str(p)], capture_output=True, text=True, check=True)
+    bash_n = len([ln for ln in from_bash.stdout.splitlines() if ln.strip()])
+
+    slots = blk.load_slots([str(p)])
+    assert slots is not None, "the legend refused a table bash reads fine"
+    assert len(slots) == bash_n == len(_bash_slot_entries())
+    assert blk.render(slots, {})["text"] != blk.UNMEASURED
+
+    cfg = _nix_eval(_tmux_module_extra_config(p))
+    assert len(_generated_bindings(cfg)) == bash_n
+    # the tab-indented entry specifically got its binding
+    assert ("scratch5", "p", "#cc241d", "poppy") in _generated_bindings(cfg)
+
+
+@_NIX_MISSING
+def test_nix_REFUSES_a_table_whose_colour_the_OLD_grammar_would_have_taken(
+        tmp_path):
+    """🔴 FAIL-CLOSED, on the line that DISCRIMINATES the grammars.
+
+    A 5-hex-digit colour is not a pango colour and is not a slot. The grammar
+    this file used to carry on the nix side (`#[0-9a-fA-F]+`) accepted it, so a
+    regression to that grammar generates a binding here where the shared one
+    refuses the whole table. Run through the real module: the build must THROW,
+    not ship 20 bindings one of which is wrong.
+
+    `tryEval` rather than an expected exception, so the failure message is
+    nix's own."""
+    entries = ['    "scratch:g:#b8bb26:grove"',
+               '    "scratch2:G:#12345:Gold"']        # 5 hex digits
+    table = _corpus_table(tmp_path, entries)
+    ok, _v = _nix_try(_tmux_module_extra_config(table))
+    assert not ok, (
+        "nix generated bindings for a table containing a malformed colour "
+        "instead of refusing it — the shortfall floor did not fire")
+    # …and the legend refuses it the same way, for the same reason.
+    assert blk.load_slots([str(table)]) is None
+
+    # 🔴 CONTROL, and it is the whole reason this test is not vacuous: the SAME
+    # shape with a legal colour must BUILD. Without it, a module that threw
+    # unconditionally would pass the assertion above.
+    good = _corpus_table(tmp_path, ['    "scratch:g:#b8bb26:grove"',
+                                    '    "scratch2:G:#123456:Gold"'],
+                         name="good.sh")
+    ok2, cfg = _nix_try(_tmux_module_extra_config(good))
+    assert ok2, "the control table did not build"
+    assert len(_generated_bindings(cfg)) == 2
+
+
+@_NIX_MISSING
+def test_an_entry_with_a_TRAILING_COMMENT_is_refused_LOUDLY_by_both(tmp_path):
+    """⚠ THE SHAPE BASH AND THE GRAMMAR GENUINELY DISAGREE ABOUT.
+
+    `"a:b:#c:d" # note` is NOT a slot to the grammar. The corpus used to
+    justify that with "bash would not put it in the array either", which is
+    FALSE — MEASURED: `${#SCRATCH_SLOTS[@]}` counts it, and the element is the
+    quoted string. So it is a real disagreement, and what this pins is that it
+    is now LOUD: the wider candidate yardstick counts the line as declared, the
+    shortfall floor fires, nix throws and the legend renders `?`. It used to be
+    silently dropped by two of the three readers."""
+    entries = ['    "scratch:g:#b8bb26:grove"',
+               '    "scratch2:G:#d79921:Gold" # a trailing comment']
+    table = _corpus_table(tmp_path, entries)
+
+    from_bash = subprocess.run(
+        ["bash", "-c", '. "$1"; printf "%s\\n" "${SCRATCH_SLOTS[@]}"', "_",
+         str(table)], capture_output=True, text=True, check=True)
+    assert from_bash.stdout.split() == ["scratch:g:#b8bb26:grove",
+                                        "scratch2:G:#d79921:Gold"], (
+        "bash no longer accepts a trailing-comment entry — the corpus's stated "
+        "reason depends on this measurement: %r" % from_bash.stdout)
+
+    assert blk.load_slots([str(table)]) is None
+    ok, _v = _nix_try(_tmux_module_extra_config(table))
+    assert not ok
+
+
+@_NIX_MISSING
+def test_TRAILING_WHITESPACE_on_the_marker_line_is_stripped_by_BOTH(tmp_path):
+    """🟢 One trailing space used to break the nix build with a message blaming
+    twenty correct entries.
+
+    Python read the marker with `(\\S.*?)[ ]*$` — stripping — while nix read
+    `(.*)`, which does not. MEASURED: the compiled nix grammar then ended in
+    `[ ]* ` and matched nothing, so the shortfall threw `declares=20 matched=0`
+    and told the reader to fix the colour fields, while the legend rendered all
+    20 slots fine. Fails closed, but misdiagnoses — inside the mechanism built
+    to end disagreements. Both sides now strip trailing spaces AND tabs."""
+    real = open(_TABLE, encoding="utf-8").read()
+    marker = [ln for ln in real.splitlines()
+              if ln.startswith("# SLOT_ENTRY_RE: ")][0]
+    for pad in ("   ", "\t", " \t "):
+        p = tmp_path / ("m%d.sh" % len(pad))
+        p.write_text(real.replace(marker, marker + pad), encoding="utf-8")
+        nix_re = _nix_eval(_slot_table_expr(p, "slotRe"))
+        assert nix_re == _marker_lines()[0], (pad, nix_re)
+        slots = blk.load_slots([str(p)])
+        assert slots is not None and len(slots) == len(_bash_slot_entries()), (
+            "the legend lost entries to %r of trailing whitespace" % pad)
+        ok, cfg = _nix_try(_tmux_module_extra_config(p))
+        assert ok, "a trailing %r on the marker line broke the nix build" % pad
+        assert len(_generated_bindings(cfg)) == len(_bash_slot_entries())
+
+
+@_NIX_MISSING
+def test_the_GROUP_INDEX_contract_is_CHECKED_on_both_sides(tmp_path):
+    """🟢 The marker carries the grammar but NOT which group means what.
+
+    nix reads `elemAt m 4` for the name, Python reads `group(5)`. Nothing in the
+    marker expresses that, and a four-group grammar made `load_slots` raise
+    `IndexError: no such group` — falsifying its own "Never raises" docstring.
+    Both sides now assert the arity: Python returns None (the `?` discriminant)
+    and nix throws with a message that names the contract."""
+    assert blk._GROUP_COUNT == 5
+    real = open(_TABLE, encoding="utf-8").read()
+    marker = [ln for ln in real.splitlines()
+              if ln.startswith("# SLOT_ENTRY_RE: ")][0]
+    # A four-group grammar of the same shape: the colour's OUTER group (the one
+    # carrying the `#`) is dropped, so the alternation keeps its own capture and
+    # the arity falls to 4. Entries still match, so arity is the ONLY defect —
+    # and the edit uses no construct outside the POSIX-ERE/Python intersection
+    # (`(?:` is not POSIX, and would make nix fail for the wrong reason).
+    four = marker.replace(
+        "(#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{9}|[0-9a-fA-F]{12}))",
+        "#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{9}|[0-9a-fA-F]{12})")
+    assert four != marker
+    p = tmp_path / "scratch-slots.sh"
+    p.write_text(real.replace(marker, four), encoding="utf-8")
+
+    # control: the grammar still MATCHES the entries — arity is the only defect
+    body = four.split("# SLOT_ENTRY_RE: ", 1)[1]
+    probe = re.compile("^" + body + "$", re.M)
+    assert probe.groups == 4
+    assert probe.match('    "scratch4:V:#83a598:Vapor"')
+
+    assert blk.slot_pattern(p.read_text()) is None
+    assert blk.load_slots([str(p)]) is None          # and it does NOT raise
+    ok, _v = _nix_try(_tmux_module_extra_config(p))
+    assert not ok
 
 
 def test_BASH_and_the_regex_agree_on_the_REAL_table():
@@ -488,13 +898,23 @@ def test_no_server_running_is_a_real_zero_ONLY_WHEN_NO_SOCKET_EXISTS():
     """🔴 F5: `no server running on <path>` names the path tmux LOOKED AT, which
     is not necessarily where the socket is.
 
-    MEASURED on the workbench 2026-09-11 with `TMUX_TMPDIR` unset — which is the
-    bar's environment, since that variable is exported by the interactive shell
-    and appears in no config file on this box — tmux looked at
-    `/tmp/tmux-1000/default` while 20 scratchpads were live on
-    `/run/user/1000/tmux-1000/default`. A stale socket left in /tmp by any
-    process turns that into the `no server running` spelling, i.e. a FALSE
-    ZERO: a full dim legend over a full house."""
+    ⚠ THIS IS DEFENCE AGAINST A STATE NOT CURRENTLY OBSERVED, and the round-1
+    version of this docstring said otherwise. It claimed the bar's environment
+    HAS no `TMUX_TMPDIR` because the variable is exported by the interactive
+    shell. MEASURED 2026-09-11 on the LIVE `i3status-rs` process
+    (`/proc/<pid>/environ`): it carries `TMUX_TMPDIR=/run/user/1000`, and under
+    exactly that environment a bare `tmux list-sessions` answers correctly. The
+    old measurement was taken with the variable UNSET — a condition the bar is
+    not in. No live bug was demonstrated.
+
+    What IS true: `TMUX_TMPDIR` is undeclared runtime state whose source is
+    unestablished, so nothing guarantees the next process inherits it; and both
+    failure modes are real if it ever goes missing. MEASURED with it stripped,
+    same tmux 3.7c: tmux looks at `/tmp/tmux-1000/default` while the sessions
+    are on `/run/user/1000/tmux-1000/default` (a persistent `?`), and a stale
+    socket left in /tmp by any process turns that into the `no server running`
+    spelling — a FALSE ZERO, a full dim legend over a full house. That second
+    one is what this test pins."""
     err = "no server running on /tmp/tmux-1000/default\n"
     assert blk.fetch_sessions(run=lambda: (1, "", err),
                               socket_finder=_SOCKET_FOUND) is None
@@ -510,17 +930,54 @@ def test_fetch_sessions_no_server_running_match_is_case_insensitive():
 
 
 def test_socket_roots_name_run_user_LITERALLY_not_only_via_XDG(monkeypatch):
-    """🔴 `$XDG_RUNTIME_DIR` is as absent from a bar block's environment as
-    `$TMUX_TMPDIR` is, so `/run/user/<uid>` is listed as a literal. Measured
-    with BOTH variables stripped, which is the case that matters."""
+    """🔴 `$XDG_RUNTIME_DIR` is not guaranteed in a bar block's environment
+    either, so `/run/user/<uid>` is listed as a literal. Measured with BOTH
+    variables stripped, which is the case that matters."""
     monkeypatch.delenv("TMUX_TMPDIR", raising=False)
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     roots = blk._socket_roots()
     assert "/run/user/%d" % os.getuid() in roots, roots
     assert roots[-1] == "/tmp", roots          # tmux's own fallback, last
-    # …and an explicit TMUX_TMPDIR still wins
+
+
+def test_an_explicit_TMUX_TMPDIR_wins_the_OUTCOME_not_merely_the_ORDER(
+        monkeypatch):
+    """🟢 The comment here used to read "an explicit `TMUX_TMPDIR` still wins",
+    and it asserted `_socket_roots()[0]` — which is a claim about the ORDER.
+
+    Being first in a fall-through list is not winning. If the declared root held
+    no socket, `find_socket` fell past it and `_run_tmux` then OVERRODE the
+    operator's own declaration with `/tmp`, reporting a DIFFERENT server's
+    sessions as the answer — the false-reading class this whole block exists to
+    refuse. A declaration now ENDS the search: it is the only root, and a
+    declared root with no socket yields (None, None) so the ambient environment
+    is passed through untouched."""
     monkeypatch.setenv("TMUX_TMPDIR", "/somewhere/else")
-    assert blk._socket_roots()[0] == "/somewhere/else"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    assert blk._socket_roots() == ["/somewhere/else"], blk._socket_roots()
+
+    # THE OUTCOME: a declared root with no socket must not resolve to another.
+    assert blk.find_socket(exists=lambda p: p.startswith("/tmp/")) == (
+        None, None)
+    # control: the same lookup DOES find one under the declared root
+    root, sock = blk.find_socket(
+        exists=lambda p: p.startswith("/somewhere/else/"))
+    assert root == "/somewhere/else" and sock.startswith("/somewhere/else/")
+
+    # …and `_run_tmux` leaves the declaration alone when nothing was found.
+    captured = {}
+
+    class _P:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return _P()
+
+    monkeypatch.setattr(blk.subprocess, "run", fake_run)
+    monkeypatch.setattr(blk, "find_socket", lambda: (None, None))
+    blk._run_tmux()
+    assert captured["env"]["TMUX_TMPDIR"] == "/somewhere/else", captured["env"]
 
 
 def test_find_socket_returns_the_FIRST_root_that_has_one():
@@ -856,6 +1313,205 @@ def test_the_picker_HOLDS_the_terminal_open_when_it_can_do_NEITHER():
         "run: %s" % code)
     tail = code.split("new-session -s")[-1]
     assert "read -n 1" in tail, tail
+
+
+#: Every external binary scripts/tmux-scratch-picker.sh may invoke. Pinned BOTH
+#: WAYS by `test_the_picker_SPAWNS_these_AND_NOTHING_ELSE` below, which is the
+#: PIN behind this file's `home-manager` acknowledgement in
+#: scripts/tests/test_no_real_launchers.py.
+_PICKER_BINARIES = {"tmux", "fzf", "grep", "sort", "id", "date"}
+
+
+def _picker_sandbox(tmp_path, fzf_body, socket_root=None, tmux_env=None,
+                    jail=False, session="work"):
+    """Run the picker with FAKE binaries, no real tmux server.
+
+    `jail=True` replaces `$PATH` ENTIRELY with the shim directory, so any
+    binary outside `_PICKER_BINARIES` fails `command not found` — that is how
+    the spawn set is observed rather than guessed. `jail=False` keeps the
+    ambient PATH after the shims, for the tests that only care about tmux.
+
+    The fake tmux records the environment it was handed, which is how the
+    socket-finding half is observed at all."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    envlog = tmp_path / "tmux-env.txt"
+    calllog = tmp_path / "calls.txt"
+    real = {n: shutil.which(n) for n in ("grep", "sort", "id", "date")}
+    assert all(real.values()), real
+    for name in _PICKER_BINARIES:
+        body = {
+            "tmux": ('printf "%%s\\n" "TMUX_TMPDIR=${TMUX_TMPDIR-<unset>}" >> %s\n'
+                     'case "$1" in\n'
+                     '  display-message) printf "%s\\n" ;;\n'
+                     '  list-sessions) printf "scratch9\\n" ;;\n'
+                     'esac\nexit 0\n' % (json.dumps(str(envlog)), session)),
+            "fzf": fzf_body,
+        }.get(name, 'exec %s "$@"\n' % real.get(name))
+        # 🔴 An ABSOLUTE shebang and a bash EXPANSION, not `/usr/bin/env bash`
+        # and `$(basename …)`: under `jail=True` the PATH holds only these
+        # shims, so `env` could not find bash and `basename` is not on it — the
+        # shims would fail to start and the run would log NOTHING while every
+        # "did it reach anything unexpected" assertion stayed green.
+        (bindir / name).write_text(
+            '#!%s\nprintf "%s\\n" "${0##*/}" >> %s\n%s'
+            % (shutil.which("bash"), "%s", json.dumps(str(calllog)), body),
+            encoding="utf-8")
+        os.chmod(bindir / name, 0o755)
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TMUX", "TMUX_TMPDIR", "XDG_RUNTIME_DIR")}
+    env["PATH"] = str(bindir) if jail else "%s:%s" % (bindir,
+                                                      env.get("PATH", ""))
+    if socket_root is not None:
+        env["XDG_RUNTIME_DIR"] = str(socket_root)
+    if tmux_env is not None:
+        env["TMUX"] = tmux_env
+    proc = subprocess.run([shutil.which("bash"), _PICKER],
+                          capture_output=True, text=True, env=env,
+                          stdin=subprocess.DEVNULL, timeout=20)
+    logged = envlog.read_text() if envlog.exists() else ""
+    calls = set(calllog.read_text().split()) if calllog.exists() else set()
+    return proc, logged, calls
+
+
+def test_the_picker_SPAWNS_these_AND_NOTHING_ELSE(tmp_path):
+    """🔴 THE PIN BEHIND THIS FILE'S `home-manager` ACKNOWLEDGEMENT in
+    scripts/tests/test_no_real_launchers.py.
+
+    That scanner is a TEXT scan, so the comment above the picker's fzf-exit-code
+    branch — which names the `home-manager switch` that blanks `~/.nix-profile`
+    for ~1 s, the non-hypothetical reason a bare-name `fzf` can fail to launch —
+    reads as a hit. Acknowledging it is the repo's convention, and the words are
+    the FINDING rather than decoration. But an acknowledgement with NO PIN
+    blinds the guard it is filed under (MEASURED once on `tmux-reply-agent`).
+
+    So: run the script in a PATH JAIL containing only `_PICKER_BINARIES`, drive
+    EVERY branch, and assert both directions — nothing outside the set is
+    reached (a `command not found` would name it), and the set does not silently
+    shrink either.
+
+    ⚠ The jail observes what the RUN reached, so its strength is the branch
+    coverage below, not a proof about unexecuted lines. The companion assertion
+    — that the comment-stripped source names no host-affecting binary at all —
+    is what covers the rest."""
+    sock = tmp_path / "rt"
+    (sock / ("tmux-%d" % os.getuid())).mkdir(parents=True)
+    (sock / ("tmux-%d" % os.getuid()) / "default").write_text("", "utf-8")
+
+    seen, branches = set(), 0
+    for kw in (
+        # the bar-click path: fzf dismissed
+        dict(fzf_body="exit 130\n", socket_root=sock),
+        # the bar-click path: a selection, tmux attaches
+        dict(fzf_body="printf 'scratch9\\n'\n", socket_root=sock),
+        # the "[+ new scratchpad]" path
+        dict(fzf_body="printf '[+ new scratchpad]\\n'\n", socket_root=sock),
+        # fzf failed to launch -> the hold branch
+        dict(fzf_body="exit 127\n", socket_root=sock),
+        # inside a scratch client -> the detach branch
+        dict(fzf_body="exit 130\n", tmux_env="/sock,1,0", session="scratch9"),
+        # inside a NON-scratch client
+        dict(fzf_body="exit 130\n", tmux_env="/sock,1,0", session="work"),
+    ):
+        proc, _log, calls = _picker_sandbox(tmp_path, jail=True, **kw)
+        assert "command not found" not in proc.stderr, (kw, proc.stderr)
+        seen |= calls
+        branches += 1
+    assert branches == 6
+    assert seen <= _PICKER_BINARIES, sorted(seen - _PICKER_BINARIES)
+    # …and it does not SHRINK unnoticed: every pinned binary was really used.
+    assert seen == _PICKER_BINARIES, (
+        "the picker no longer invokes %r — the acknowledgement's pinned set is "
+        "stale in the other direction" % sorted(_PICKER_BINARIES - seen))
+
+    # The source half: no host-affecting binary appears outside comment prose.
+    src = open(_PICKER, encoding="utf-8").read()
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    for hazard in ("home-manager", "nixos-rebuild", "systemctl", "i3-msg",
+                   "nix-env", "pkill"):
+        assert hazard not in code, (
+            "scripts/tmux-scratch-picker.sh reaches %r in CODE, not prose — "
+            "its ACKNOWLEDGED_UNSTUBBED entry covers a comment only" % hazard)
+    # negative control: the stripper kept the code, and the word IS in the file
+    assert "detach-client" in code and "fzf" in code
+    assert "home-manager" in src, (
+        "the acknowledgement in test_no_real_launchers.py names this file for a "
+        "word it no longer contains — drop the entry")
+
+
+def test_the_picker_FINDS_THE_SAME_SOCKET_THE_LEGEND_DOES(tmp_path,
+                                                          monkeypatch):
+    """🔴 THE PILL AND ITS CLICK MUST TALK TO ONE SERVER.
+
+    The legend finds the tmux socket itself (`_socket_roots`/`find_socket`);
+    the picker behind its left-click called a bare `tmux list-sessions` with no
+    socket-finding at all, so the two could name different servers the moment
+    `TMUX_TMPDIR` went missing — a click that does not do what the thing it was
+    clicked on says. Observed through a FAKE tmux that records the environment
+    it was handed."""
+    root = tmp_path / "rt"
+    (root / ("tmux-%d" % os.getuid())).mkdir(parents=True)
+    (root / ("tmux-%d" % os.getuid()) / "default").write_text("", "utf-8")
+
+    proc, logged, _c = _picker_sandbox(tmp_path, "exit 130\n",
+                                       socket_root=root)
+    assert proc.returncode == 0, (proc.returncode, proc.stderr)
+    assert "TMUX_TMPDIR=%s" % root in logged, (logged, str(root))
+
+    # …and the legend, given the SAME environment, picks the SAME root. Pinned
+    # by running it, not by re-reading either file's source.
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(root))
+    assert blk._socket_roots()[0] == str(root), blk._socket_roots()
+    assert blk.find_socket()[0] == str(root)
+
+    # Negative control: with NO socket anywhere, the picker must NOT invent a
+    # root — it leaves the ambient environment alone.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (tmp_path / "tmux-env.txt").unlink()
+    proc2, logged2, _c2 = _picker_sandbox(tmp_path, "exit 130\n",
+                                          socket_root=empty)
+    assert "TMUX_TMPDIR=%s" % empty not in logged2, logged2
+
+
+def test_the_picker_HOLDS_when_FZF_FAILS_TO_LAUNCH(tmp_path):
+    """🔴 AN EMPTY SELECTION HAS TWO CAUSES AND ONLY ONE IS DELIBERATE.
+
+    `nix/graphical.nix` justified having no `read -n 1` hold in its click string
+    by enumerating the picker's instant exits as "long-lived, or a DELIBERATE
+    instant exit (the operator dismissed fzf)". An fzf that FAILS TO LAUNCH
+    yields the same empty `$selected` — and the float terminal vanishes, which
+    is the indistinguishable-from-nothing failure the hold exists for.
+    Non-hypothetical: a `home-manager switch` blanks `~/.nix-profile` for ~1 s,
+    killing bare-name invocations, and `fzf` is a bare name here."""
+    proc, _log, _c = _picker_sandbox(tmp_path, "exit 127\n")
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert "fzf exited 127" in proc.stderr, proc.stderr
+
+    # CONTROL — the two DELIBERATE empties must still exit 0, or every
+    # dismissal costs the operator a keypress.
+    for rc in ("130", "1"):
+        p, _l, _c = _picker_sandbox(tmp_path, "exit %s\n" % rc)
+        assert p.returncode == 0, (rc, p.returncode, p.stderr)
+        assert "could not run" not in p.stderr, (rc, p.stderr)
+
+    # ⚠ THE HOLD ITSELF CANNOT BE OBSERVED FROM HERE: with stdin on /dev/null
+    # bash suppresses `read -p`'s prompt and returns immediately, so the run
+    # above proves the BRANCH was taken and not that the terminal was held.
+    # Asserted structurally instead — `read -n 1` inside that branch's body —
+    # with a comment-stripped source so prose cannot satisfy it.
+    code = "\n".join(ln for ln in open(_PICKER, encoding="utf-8").read()
+                     .splitlines() if not ln.lstrip().startswith("#"))
+    arm = re.search(r'^\s*0\|1\|130\)\s*;;\s*\n\s*\*\)(?P<body>.*?)\n\s*esac',
+                    code, re.S | re.M)
+    assert arm, (
+        "the picker no longer branches on fzf's EXIT CODE — an empty selection "
+        "is then indistinguishable from an fzf that never ran:\n%s" % code)
+    assert "read -n 1" in arm.group("body"), arm.group("body")
+    assert "exit 1" in arm.group("body"), arm.group("body")
 
 
 def test_the_block_is_text_only_and_carries_no_icon_glyph():

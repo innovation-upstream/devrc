@@ -99,13 +99,25 @@ let
   # So it is modelled on `syshealthCmd` above.
   #
   # NO `read -n 1` HOLD IN THIS STRING, and that is a difference from
-  # syshealthCmd rather than an omission: the picker carries its OWN hold, on
-  # the only path that needs one. syshealth prints and exits in ~0.16 s, so
-  # every one of its runs would flash; the picker's normal exits are either
-  # long-lived (`tmux attach-session` / `tmux new-session` own the terminal
-  # until the operator detaches) or a DELIBERATE instant exit (the operator
-  # dismissed fzf). Its one accidental instant exit — attach failed AND create
-  # failed — holds, inside the script, where it can print why.
+  # syshealthCmd rather than an omission: the picker carries its OWN holds, on
+  # the paths that need them. syshealth prints and exits in ~0.16 s, so every
+  # one of its runs would flash. The picker's exits enumerate as:
+  #   * LONG-LIVED — `tmux attach-session` / `tmux new-session` own the terminal
+  #     until the operator detaches.
+  #   * DELIBERATE instant exit — the operator dismissed fzf (ESC/^C, fzf rc
+  #     130) or it had nothing to match (rc 1). No hold: a hold here would make
+  #     every dismissal cost a keypress.
+  #   * ACCIDENTAL instant exits, both of which HOLD inside the script where
+  #     they can print why:
+  #       - attach failed AND create failed;
+  #       - 🔴 fzf FAILED TO LAUNCH. An earlier version of this comment listed
+  #         only the dismissal and so read as if every empty selection were
+  #         deliberate — but an fzf that never ran yields the SAME empty
+  #         `$selected`, and exiting 0 on it is precisely the vanish this
+  #         paragraph is about. Non-hypothetical: a `home-manager switch`
+  #         blanks `~/.nix-profile` for ~1 s, killing bare-name invocations,
+  #         and `fzf` is invoked by bare name. The picker now branches on fzf's
+  #         exit code rather than on the emptiness of its output.
   #
   # 🔴 AN EARLIER VERSION OF THIS COMMENT CLAIMED EVERY INSTANT EXIT WAS
   # DELIBERATE, AND THAT WAS FALSE. The picker opened with

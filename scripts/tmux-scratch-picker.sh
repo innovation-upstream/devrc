@@ -24,6 +24,38 @@
 # makes the branch mean what its comment says; without it the guard is a
 # question about the SERVER, not about us.
 
+# 🔴 WHICH SERVER WE TALK TO — the same question scripts/i3status-scratchpads
+# answers in `_socket_roots`/`find_socket`, and the two MUST agree: the legend
+# pill and the picker behind its click are one feature, and a picker listing a
+# different server's sessions than the legend renders is a click that does not
+# do what the thing it was clicked on says.
+#
+# tmux's compiled-in socket dir is `/tmp`; this host's real socket is under
+# `$TMUX_TMPDIR=/run/user/1000`, a value with no established source (see the
+# long note in scripts/i3status-scratchpads). Inside a tmux client `$TMUX`
+# already names the socket, so this only runs for the bar-click caller.
+#
+# ⚠ DUPLICATED IN TWO LANGUAGES, deliberately: the legend is Python and this is
+# bash, and the alternative — shelling out to the block script — would make a
+# click depend on a bar internal. Both lists are pinned against each other by
+# scripts/tests/test_scratchpads_block.py, which runs THIS script with a fake
+# tmux and checks the root it picks.
+if [ -z "${TMUX:-}" ]; then
+    _uid=$(id -u)
+    if [ -n "${TMUX_TMPDIR:-}" ]; then
+        : # an explicit declaration is authoritative — do not search past it
+    else
+        for _root in "${XDG_RUNTIME_DIR:-}" "/run/user/$_uid" /tmp; do
+            [ -n "$_root" ] || continue
+            if [ -e "$_root/tmux-$_uid/default" ]; then
+                export TMUX_TMPDIR="$_root"
+                break
+            fi
+        done
+    fi
+    unset _uid _root
+fi
+
 # If we're inside a scratch session, just detach (the toggle half of M-T).
 if [ -n "${TMUX:-}" ]; then
     current_session=$(tmux display-message -p '#{session_name}' 2>/dev/null)
@@ -43,6 +75,29 @@ selected=$(
             --reverse \
             --height=100%
 )
+fzf_rc=$?
+
+# 🔴 AN EMPTY `$selected` HAS TWO CAUSES AND ONLY ONE OF THEM IS DELIBERATE.
+# fzf's documented codes: 0 = a selection, 1 = no match, 130 = interrupted (ESC
+# or ^C — the operator dismissed it). ANYTHING ELSE means fzf did not run: 127
+# when the binary is not on PATH, 2 on an fzf error. Those produce exactly the
+# same empty `$selected`, and exiting 0 on them makes the float terminal vanish
+# instantly — the indistinguishable-from-nothing failure this script's hold at
+# the bottom exists for.
+#
+# Non-hypothetical: a `home-manager switch` blanks `~/.nix-profile` for ~1s
+# while it writes the intermediate generation, so anything invoked by BARE
+# COMMAND NAME during a switch dies "command not found" (recorded in the
+# project's own memory). `fzf` here is a bare name.
+case "$fzf_rc" in
+    0|1|130) ;;
+    *)
+        printf '\nscratch-picker: fzf exited %s — the picker could not run.\n' \
+            "$fzf_rc" >&2
+        read -n 1 -r -s -p "[any key to close]"
+        exit 1
+        ;;
+esac
 
 [ -z "$selected" ] && exit 0
 

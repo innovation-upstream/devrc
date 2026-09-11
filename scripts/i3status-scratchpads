@@ -50,13 +50,16 @@ here because each rendered a PLAUSIBLE legend off a reading nobody took:
     format change rendered the full dim legend — the exact false zero the
     non-zero-exit path is careful to avoid. `fetch_sessions` now returns None
     when rc is 0, stdout is non-empty, and nothing parsed.
-  * WHERE THE SOCKET IS. tmux's compiled-in socket dir is `/tmp`, and this
-    host's real socket is `/run/user/1000/tmux-1000/default` only because the
-    interactive session exports `TMUX_TMPDIR=/run/user/1000` — a variable that
-    appears in no config file on this box (the same undeclared dependency
-    `nix/home.nix` records on its `tmux-restore` path unit). i3status-rust's
-    environment is not that shell's. So this script FINDS the socket itself
-    rather than inheriting the answer; see `_socket_roots`.
+  * WHERE THE SOCKET IS — ⚠ A DEFENCE AGAINST A STATE NOT CURRENTLY OBSERVED,
+    not a fix for an observed defect. tmux's compiled-in socket dir is `/tmp`,
+    and this host's real socket is `/run/user/1000/tmux-1000/default` only
+    because something exports `TMUX_TMPDIR=/run/user/1000`. That value appears
+    in no config file on this box and its source is UNESTABLISHED (the same
+    undeclared runtime state `nix/home.nix` records on its `tmux-restore` path
+    unit). The live bar process DOES carry it — see `_socket_roots` for the
+    measurement — so no live bug was demonstrated here. The script finds the
+    socket itself anyway, because "undeclared" means nothing guarantees the next
+    process gets it, and the two ways a missing value fails are both real.
 
 🔴 PANGO. i3status-rust's `custom` block passes `text` through
 `$text.pango-str()`, so the emitted string IS markup — verified by positive
@@ -124,13 +127,39 @@ _SLOT_PATHS = (
 # commented-out slot line got a legend entry but no binding. Anchoring is this
 # side's job — the marker holds the body, `^…$` under MULTILINE is what makes it
 # whole-line the way nix's `builtins.match` already is.
-_MARKER_RE = re.compile(r'^# SLOT_ENTRY_RE: (\S.*?)[ ]*$', re.M)
-# A slot entry is a quoted string alone on a line inside the array. This is the
-# FLOOR's yardstick, NOT a parser: it is deliberately blind to the fields, so it
-# still counts an entry whose colour (or any other field) has been corrupted.
-# A commented-out line does not start with `"`, so it is not counted — matching
-# what nix and a bash `source` both do with it.
-_CANDIDATE_RE = re.compile(r'^[ ]*"[^"]*"[ ]*$', re.M)
+# Trailing space AND tab are stripped off the marker's body. nix's counterpart
+# (`nix/programs/tmux/slot-table.nix`) strips the same two, and it has to: a
+# bare `(.*)` there once let ONE trailing space produce a grammar ending in
+# `[ <TAB>]* `, which then matched nothing — `declares=20 matched=0`, with a
+# message blaming twenty correct colour fields.
+_MARKER_RE = re.compile(r'^# SLOT_ENTRY_RE: (\S.*?)[ \t]*$', re.M)
+# A slot entry is a quoted string at the start of a line inside the array. This
+# is the FLOOR's yardstick, NOT a parser: it is deliberately blind to the
+# fields, so it still counts an entry whose colour (or any other field) has been
+# corrupted. A commented-out line does not start with `"`, so it is not counted
+# — matching what nix and a bash `source` both do with it.
+#
+# 🔴 DELIBERATELY WIDER THAN THE GRAMMAR, ON EVERY AXIS IT CAN BE. A yardstick
+# that narrows in lockstep with the grammar cannot detect a dropped entry: both
+# counts fall together and the floor never fires. MEASURED: when this and the
+# grammar were both spelled `[ ]*`, a TAB-indented entry gave 19 matches out of
+# 19 "declared" — a silently short legend, no `?`, while bash saw 20. So this
+# accepts any leading whitespace (`[ \t]`, wider than the grammar's, which is
+# also `[ \t]` today but need not stay so) and anything after the closing quote,
+# which is what makes an entry with a trailing comment — a shape bash DOES put
+# in `SCRATCH_SLOTS`, measured — count as declared and trip the floor instead of
+# vanishing. Mirrors `candidateLines` in nix/programs/tmux/slot-table.nix.
+_CANDIDATE_RE = re.compile(r'^[ \t]*"[^"]*".*$', re.M)
+
+#: Capture groups both readers require: session, key, colour, the colour's hex
+#: digits, name. 🔴 THE GROUP-INDEX CONTRACT IS NOT CARRIED BY THE MARKER — the
+#: marker holds the grammar, not which group means what — so each side checks
+#: the arity it depends on. This side reads `group(5)` for the name; nix reads
+#: `elemAt m 4` for the same field and asserts the same number in
+#: `slot-table.nix`. Without this check a four-group grammar raised
+#: `IndexError: no such group` out of `load_slots`, whose docstring promised it
+#: never raises.
+_GROUP_COUNT = 5
 
 
 def slot_pattern(text):
@@ -139,14 +168,21 @@ def slot_pattern(text):
     EXACTLY ONE marker, or this is not a table we can read: zero means the file
     is not the canonical one (or the marker was edited away), and two would let
     a stray copy silently win. Either way the honest answer is `?`, not a guess
-    at the grammar."""
+    at the grammar.
+
+    A grammar that does not carry `_GROUP_COUNT` capture groups is also None:
+    the field indices below are a contract the marker cannot express, and a
+    guess at them is how the two readers drifted apart in the first place."""
     found = _MARKER_RE.findall(text)
     if len(found) != 1:
         return None
     try:
-        return re.compile("^" + found[0] + "$", re.M)
+        rx = re.compile("^" + found[0] + "$", re.M)
     except re.error:
         return None
+    if rx.groups != _GROUP_COUNT:
+        return None
+    return rx
 
 
 def load_slots(paths=_SLOT_PATHS):
@@ -154,7 +190,18 @@ def load_slots(paths=_SLOT_PATHS):
 
     Returns None — NOT [] — if no copy is loadable, if a copy carries no usable
     `# SLOT_ENTRY_RE:` marker, if a copy parses to zero entries, or if it parses
-    to FEWER entries than the file declares. Never raises.
+    to FEWER entries than the file declares.
+
+    Never raises, and that claim is now CHECKED rather than inherited. It was
+    true while the grammar was a fixed literal in this file; once the grammar
+    came out of the table, a marker carrying four capture groups made
+    `m.group(5)` raise `IndexError: no such group` — `slot_pattern` rejects that
+    arity now (`_GROUP_COUNT`). The read is also guarded for
+    `UnicodeDecodeError`, which is a `ValueError` and so was NOT covered by the
+    `OSError` handler: a binary file on one of the three legs would have raised
+    straight out of here. `main()`'s blanket `except` would still have rendered
+    the `?` pill, so neither was ever a crash on screen — but a docstring is a
+    claim like any other.
 
     🔴 THE SLOT-COUNT FLOOR IS THE POINT, AND `if slots:` WAS NOT IT. A table
     that parses PARTIALLY renders a short legend that looks deliberate —
@@ -172,7 +219,7 @@ def load_slots(paths=_SLOT_PATHS):
         try:
             with open(p, encoding="utf-8") as fh:
                 text = fh.read()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         rx = slot_pattern(text)
         if rx is None:
@@ -184,25 +231,47 @@ def load_slots(paths=_SLOT_PATHS):
     return None
 
 
-# 🔴 WHERE TMUX'S SOCKET IS, AND WHY THIS SCRIPT MUST NOT INHERIT THE ANSWER.
-# tmux looks for `$TMUX_TMPDIR/tmux-$UID/default` and its COMPILED-IN DEFAULT IS
-# `/tmp` — the same formula `scripts/tmux-session-restore.py:tmux_socket_path()`
-# spells and `nix/home.nix`'s tmux-restore path unit spells in systemd
-# specifiers. This host's real socket is `/run/user/1000/tmux-1000/default`, and
-# it is there only because the INTERACTIVE session exports
-# `TMUX_TMPDIR=/run/user/1000`; that value appears in no /etc/nixos file, no
-# environment.d and no home-manager output, which `nix/home.nix` records at
-# length as a dependency on undeclared runtime state. i3status-rust does not run
-# in that shell.
+# WHERE TMUX'S SOCKET IS, AND WHY THIS SCRIPT DOES NOT SIMPLY INHERIT THE
+# ANSWER. tmux looks for `$TMUX_TMPDIR/tmux-$UID/default` and its COMPILED-IN
+# DEFAULT IS `/tmp` — the same formula
+# `scripts/tmux-session-restore.py:tmux_socket_path()` spells and
+# `nix/home.nix`'s tmux-restore path unit spells in systemd specifiers. This
+# host's real socket is `/run/user/1000/tmux-1000/default`, and it is there only
+# because something in the session exports `TMUX_TMPDIR=/run/user/1000`: that
+# value appears in no /etc/nixos file, no environment.d and no home-manager
+# output, which `nix/home.nix` records at length as a dependency on undeclared
+# runtime state. 🔴 WHAT EXPORTS IT IS UNESTABLISHED — not "the interactive
+# shell"; that was a guess, and it is written down here as unknown rather than
+# replaced with a better-sounding one.
 #
-# MEASURED on the workbench 2026-09-11, `TMUX_TMPDIR` unset:
-#   `tmux list-sessions` -> rc 1, `error connecting to /tmp/tmux-1000/default
-#   (No such file or directory)` — while 20 scratchpads were live on the
-#   /run/user socket. That is not a false zero (it does not say "no server
-#   running"), it is a PERMANENT `?`: the pill would never measure anything on
-#   this host again. And the false-zero variant is one stale socket away —
-#   MEASURED, same tmux 3.7c: a socket file left behind by a dead server makes
-#   tmux say `no server running on <path>`, which the real-zero branch accepts.
+# 🔴 NO LIVE BUG WAS DEMONSTRATED FOR THIS BLOCK, AND AN EARLIER VERSION OF THIS
+# COMMENT SAID OTHERWISE. It asserted that i3status-rust "does not run in that
+# shell" and that the pill therefore faced "a PERMANENT `?`". MEASURED
+# 2026-09-11 on the workbench, on the LIVE bar process (`/proc/<pid>/environ` of
+# the running `i3status-rs`): it carries `TMUX_TMPDIR=/run/user/1000`. Under
+# exactly that environment a bare `tmux list-sessions` answers correctly (19
+# sessions, 16 of them `scratch*`). The measurement the old comment rested on
+# was taken with `TMUX_TMPDIR` UNSET — a condition the bar is not in, and the
+# same `env -i`-is-stricter-than-systemd error `nix/home.nix` already records
+# itself making and retracting once.
+#
+# SO WHAT IS TRUE, AND NO MORE:
+#   * `TMUX_TMPDIR` is undeclared runtime state with no known source.
+#   * The live bar currently HAS it, so the socket search below is not fixing
+#     anything observed today.
+#   * Both failure modes are real and reachable if it ever goes missing, and
+#     both were MEASURED on 2026-09-11 with the variable stripped:
+#       - `tmux list-sessions` -> rc 1, `error connecting to
+#         /tmp/tmux-1000/default (No such file or directory)` while scratchpads
+#         were live on the /run/user socket. Not a false zero — it is a `?` —
+#         but a `?` that would persist for as long as the variable was absent.
+#       - the false-zero variant is one stale socket away: same tmux 3.7c, a
+#         socket file left behind by a dead server makes tmux say `no server
+#         running on <path>`, which the real-zero branch accepts.
+#   * Therefore this is DEFENCE against a state not currently observed. Keeping
+#     it is cheap and strictly better than inheriting an answer nothing
+#     guarantees; calling it a fix for a live defect would be false.
+#
 # So: search the candidate roots for a socket and point tmux at the one we
 # found, and treat "no server running" as a real zero only when no socket was
 # found ANYWHERE.
@@ -212,13 +281,27 @@ _SOCKET_NAME = "default"
 def _socket_roots():
     """Candidate `TMUX_TMPDIR` roots, most specific first, de-duplicated.
 
-    `/run/user/<uid>` is listed as a LITERAL and not only via
-    `$XDG_RUNTIME_DIR`, because that variable is as absent from a bar block's
-    environment as `$TMUX_TMPDIR` is. `/tmp` last: it is tmux's own fallback."""
+    🔴 AN EXPLICIT `$TMUX_TMPDIR` IS AUTHORITATIVE — IT IS THE ONLY ROOT WE
+    LOOK IN, not merely the first. The comment here used to say "an explicit
+    `TMUX_TMPDIR` still wins", and with a candidate LIST that was true of the
+    ORDER and false of the OUTCOME: if the declared root held no socket,
+    `find_socket` fell through and `_run_tmux` then overrode the operator's own
+    declaration with `/tmp`, reporting a DIFFERENT SERVER's sessions as the
+    answer. A reading of the wrong server is exactly the false-reading class
+    this block exists to refuse, so the declaration now ends the search. A
+    declared root with no socket yields (None, None), the ambient environment is
+    left alone, and tmux's own "no server running on <declared path>" is
+    accepted as the real zero it is.
+
+    With NOTHING declared: `/run/user/<uid>` is listed as a LITERAL and not only
+    via `$XDG_RUNTIME_DIR`, because that variable is not guaranteed in a bar
+    block's environment either. `/tmp` last: it is tmux's own fallback."""
     uid = os.getuid()
+    declared = os.environ.get("TMUX_TMPDIR")
+    if declared:
+        return [declared]
     roots, seen = [], set()
-    for r in (os.environ.get("TMUX_TMPDIR"),
-              os.environ.get("XDG_RUNTIME_DIR"),
+    for r in (os.environ.get("XDG_RUNTIME_DIR"),
               "/run/user/%d" % uid,
               "/tmp"):
         if r and r not in seen:
@@ -302,6 +385,12 @@ def fetch_sessions(run=None, socket_finder=None):
 
 
 def _run_tmux():
+    """Run `tmux list-sessions`, pointed at the socket `find_socket` located.
+
+    When nothing is found the ambient environment is passed through UNCHANGED —
+    including an explicit `$TMUX_TMPDIR`, which `_socket_roots` makes the only
+    root searched precisely so this function can never override the operator's
+    own declaration with a different server's socket."""
     env = dict(os.environ)
     root, _sock = find_socket()
     if root:
