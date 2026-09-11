@@ -75,7 +75,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+MODULE_PATH = pinned("subsystem_resolver")
 # Formerly `claude/commands/analyze-service.md`. Upstream merged custom commands
 # INTO skills, so `claude/commands/` was retired and every command became
 # `claude/skills/<name>/SKILL.md`; this is the SAME doc at its new path, and
@@ -102,7 +110,6 @@ WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
-
 from testlib.skills_mapping import (  # noqa: E402
     assert_skills_mapping_declared,
 )

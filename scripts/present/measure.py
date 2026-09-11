@@ -1043,6 +1043,15 @@ def m_index_store(env: Env) -> dict:
         )
     sys.path.insert(0, str(lib))
     try:
+        # 🔴 `subsystem_recall` IS THE PINNED MODULE, not a `scripts/lib/` copy —
+        # devrc deleted its fork when it consolidated onto the `cairn` flake pin.
+        # `cairn_pin.ensure()` appends the packaged `lib/` to `sys.path`; it
+        # raises when the pin is not deployed, and that raise is CAUGHT as
+        # `Unmeasurable` below, which is the right reading for this page: a host
+        # without the pinned client cannot be measured for this row, and saying
+        # so is not the same as reporting zero scopes.
+        import cairn_pin  # noqa: PLC0415
+        cairn_pin.ensure()
         import subsystem_recall  # noqa: PLC0415
         _, idx = subsystem_recall.load_store(env.index_store, verb="present")
     except Exception as exc:

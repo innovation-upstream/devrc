@@ -88,3 +88,29 @@ from testlib.gitenv_plugin import (  # noqa: E402,F401
 # conftests: that is what #399 and #614 each did, leaving 1 target of 17 and 1
 # directory of 13 protected while reading as systemic.
 from testlib.nogit_plugin import no_real_git  # noqa: E402,F401
+
+# 🔴 THE PINNED `cairn` LIB, ON `sys.path` FOR EVERY TEST IN THIS DIRECTORY.
+# devrc deleted its five forked reader modules and takes them from the pinned
+# flake input; `scripts/lib/cairn_pin.py` is the seam. Doing it here rather than
+# in each test file keeps ONE resolution rule — the same one the production
+# consumers use — instead of a per-file `sys.path.append` that would drift.
+#
+# 🔴 IT IS LOADED BY PATH, NOT BY PUTTING `scripts/lib` AT THE FRONT. Test
+# modules in this directory do their own `sys.path.insert(0, scripts/lib)`, and
+# several of them depend on what that ordering resolves; prepending it here as a
+# side effect of finding one module would change the environment they were
+# written against. `ensure()` only APPENDS, so devrc-local modules still win.
+#
+# It RAISES when the pin is not deployed, deliberately: without it every suite
+# that imports the reader or the writer fails at import anyway, and a collection
+# error naming `cairn_pin`'s remedy is a far better report than five
+# `ModuleNotFoundError`s naming files that were deleted on purpose.
+import importlib.util as _ilu  # noqa: E402
+
+_pin_spec = _ilu.spec_from_file_location(
+    "cairn_pin", Path(__file__).resolve().parents[1] / "lib" / "cairn_pin.py"
+)
+_cairn_pin = _ilu.module_from_spec(_pin_spec)
+sys.modules.setdefault("cairn_pin", _cairn_pin)
+_pin_spec.loader.exec_module(_cairn_pin)
+_cairn_pin.ensure()

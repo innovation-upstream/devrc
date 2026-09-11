@@ -10,7 +10,7 @@ visibility; this file covers what has no command.
 |---|---|---|
 | the pod | k8s ns `subsystem-store` | the canonical datastore. Serves `GET /api/v1/{recall,search,snapshot}` and accepts the two write routes |
 | the client | `scripts/cairn` | syncs a local cache and runs the **unmodified** local reader against it |
-| the resolver | `scripts/lib/subsystem_read_store.py` | the one answer to "where does this host read from" |
+| the resolver | `subsystem_read_store` in the PINNED package | the one answer to "where does this host read from". devrc has no copy — `scripts/lib/cairn_pin.py` resolves it, and `python3 scripts/lib/cairn_pin.py` prints the directory |
 | the seeder | `scripts/subsystem-store-api/seed.sh` | pushes a local tree into the pod's PVC |
 | the acceptance check | `scripts/subsystem-store-api/verify-byte-identity.sh` | compares pod bytes against a local store, scope by scope |
 | the image | `scripts/subsystem-store-api/build-push.sh` | `build-push.sh <version>` — the tag is an argument and has **no default** |

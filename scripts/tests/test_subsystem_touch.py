@@ -3895,13 +3895,61 @@ def _load_mutant(tmp_path: Path, name: str, replacements: list[tuple[str, str]])
     return module
 
 
+def _load_pinned_mutant(tmp_path: Path, name: str, module: str,
+                        replacements: list[tuple[str, str]]):
+    """`_load_mutant`, but for a module that lives in the PINNED cairn lib.
+
+    🔴 THE SAME ANCHOR-UNIQUENESS RULE APPLIES, and it is what makes a mutation
+    test survive a pin bump honestly: an upstream reword makes the anchor occur
+    0 times and this FAILS, rather than silently producing a mutant identical to
+    the original and scoring the guard as killed by a test that changed nothing.
+
+    The mutant is written into `tmp_path` and imported from there; the pinned
+    lib is on `sys.path` already (conftest), so the mutant's own sibling imports
+    resolve to the real pinned modules, which is what isolates the mutation to
+    the one file under test.
+    """
+    src = pinned(module).read_text(encoding="utf-8")
+    for old, new in replacements:
+        n = src.count(old)
+        assert n == 1, (
+            f"mutation anchor occurs {n}x in the PINNED {module}, expected "
+            f"exactly 1: {old!r}. A 0 usually means the pin moved and this "
+            f"guard is now anchored on text that no longer exists — re-read the "
+            f"upstream function before re-anchoring."
+        )
+        src = src.replace(old, new)
+    path = tmp_path / f"{name}.py"
+    path.write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return mod
+
+
 class TestMutationKillMatrix:
     """Each test deletes ONE guard and asserts the expectation above it dies —
     with THIS guard's own symptom, not a neighbour's error."""
 
     def test_kills_worktree_stable_scope(self, tmp_path: Path) -> None:
-        mod = _load_mutant(
-            tmp_path, "m_scope", [('    if common.name == ".git":', "    if False:")]
+        """⚠ MUTATES `entry_shape`, NOT `subsystem_touch`. `derive_scope` moved to
+        the pinned shared module when devrc consolidated onto the `cairn` flake
+        pin — the writer imports it and no longer carries a copy, which is the
+        point. The guard is kept HERE, pointed at its new home, rather than
+        deleted: the property it protects (a worktree must not become its own
+        scope) is one devrc's writer depends on, and `test_cairn_pin.py` asserts
+        the writer really takes the function from this module, so the pair
+        together still covers the behaviour end to end.
+        """
+        mod = _load_pinned_mutant(
+            tmp_path, "m_scope", "entry_shape",
+            [('    if common.name == ".git":', "    if False:")],
         )
         leaked = mod.derive_scope(
             "/w/some-repo/.claude/worktrees/agent-a9f80ada5bf8837e4", "/w/some-repo/.git"
@@ -11938,9 +11986,17 @@ class TestWindowEscalationMutationKills:
 # value differs between the dev host and the nix sandbox (and between the two
 # hosts), so letting it through would pin a moving string — and a real
 # `/etc/machine-id` is not something a PUBLIC repo should carry either. The seam
-# is `subsystem_touch.this_host`, deliberately the ONLY call site of
-# `host_identity.this_host` across both modules, so one patch moves the reader and
-# the writer together.
+# is `entry_shape.this_host`, deliberately the ONLY call site of
+# `host_identity.this_host` reachable from either half, so one patch moves the
+# reader and the writer together.
+#
+# ⚠ IT USED TO BE `subsystem_touch.this_host`. devrc's writer owned
+# `store_host`/`store_host_line` and the reader imported them from it; since the
+# consolidation onto the pinned `cairn` client both halves import them from the
+# SHARED `entry_shape`, so that module's globals are where the lookup happens.
+# Patching the writer's re-exported name moves NOTHING — the guards below would
+# then compare against this machine's real identity and fail, which is the
+# visible version of the failure. Silent vacuity would be worse.
 
 #: Synthetic. Shaped like the real thing without being any real machine's id.
 FIXTURE_HOST = "fixture-host-0123456789abcdef0123456789abcdef"
@@ -11959,8 +12015,14 @@ def pinned_host(monkeypatch):
     the seam does not exist yet, so the guards below fail on their ASSERTION —
     the sentence is wrong — rather than on an AttributeError during setup. That
     is what makes the red-at-base measurement mean something.
+
+    🔴 PATCHED ON `entry_shape` — see the block above. `entry_shape.store_host`
+    resolves `this_host` in `entry_shape`'s own globals, so that is the one
+    injection point for BOTH halves.
     """
-    monkeypatch.setattr(st, "this_host", lambda: FIXTURE_HOST, raising=False)
+    import entry_shape  # noqa: PLC0415
+
+    monkeypatch.setattr(entry_shape, "this_host", lambda: FIXTURE_HOST, raising=False)
     return FIXTURE_HOST
 
 

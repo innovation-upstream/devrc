@@ -56,7 +56,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_recall.py"
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+MODULE_PATH = pinned("subsystem_recall")
 TOUCH_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 RESUME_DOC = ROOT / "claude" / "skills" / "resume" / "SKILL.md"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
@@ -76,7 +84,6 @@ ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
-
 from testlib.skills_mapping import (  # noqa: E402
     assert_skills_mapping_declared,
 )
@@ -2984,12 +2991,40 @@ class TestRecallNeverWrites:
 
 
 class TestSharedPrimitivesAreReused:
-    def test_scope_derivation_is_the_WRITERS_function(self) -> None:
+    def test_scope_derivation_is_the_SHARED_function(self) -> None:
         """🔴 A reader and a writer that disagree about the scope directory is a
         silent total failure: the writer accrues entries under one name, the
         reader surfaces an empty scope under another, and that renders as
-        "nothing recorded yet"."""
-        assert rc.scope_for_repo is st.scope_for_repo
+        "nothing recorded yet".
+
+        ⚠ THE OWNER MOVED AND THE CLAIM NARROWED — say both. It used to be
+        `rc.scope_for_repo is st.scope_for_repo`: devrc's writer owned the
+        function and the reader imported it. Now the RULE lives in the pinned
+        `entry_shape`, the reader takes it verbatim, and the writer WRAPS it to
+        keep devrc's richer `--repo` refusal message (the pinned message drops
+        the pre-exported handle names and narrows the scope hint). So the two are
+        no longer the same object, and asserting identity would force devrc to
+        give up a message it deliberately keeps.
+
+        What still has to hold is what the identity was ever a proxy for: the
+        reader's function IS the shared one, the writer DELEGATES to the shared
+        one, and both answer the same for the same repo. All three are asserted —
+        the behavioural one is what a wrapper could break.
+        """
+        import entry_shape  # noqa: PLC0415
+
+        assert rc.scope_for_repo is entry_shape.scope_for_repo, (
+            "the reader no longer uses the shared scope rule"
+        )
+        assert st.derive_scope is entry_shape.derive_scope, (
+            "the writer re-spelled the scope-derivation rule instead of "
+            "importing it"
+        )
+        assert st.scope_for_repo(ROOT) == rc.scope_for_repo(ROOT), (
+            "the writer's wrapper and the reader disagree about this repo's "
+            "scope — the silent total failure above, arrived at through the "
+            "wrapper rather than through two copies"
+        )
 
     def test_the_worktree_rule_survives_the_extraction(self, tmp_path: Path) -> None:
         """`scope_for_repo` was extracted out of `subsystem_touch.main` so both
@@ -3026,9 +3061,13 @@ class TestSharedPrimitivesAreReused:
         assert rc.recall(store, "WORKBENCH_CFG").scope == SCOPE
 
     def test_the_module_imports_rather_than_respells(self) -> None:
+        """⚠ `entry_shape`, not `subsystem_touch`. The pinned reader takes its
+        shared vocabulary from the module BOTH halves import from; devrc's writer
+        does the same. Before the consolidation the reader imported it from the
+        writer, which only worked while the writer shipped beside it."""
         src = MODULE_PATH.read_text(encoding="utf-8")
         assert "from subsystem_resolver import" in src
-        assert "from subsystem_touch import" in src
+        assert "from entry_shape import" in src
         # It must not define its own copies of the shared predicates.
         for forbidden in ("def normalize_ref", "def resolve_ref", "def derive_scope"):
             assert forbidden not in src, f"the reader re-spelled a shared predicate: {forbidden}"
@@ -4499,14 +4538,20 @@ class TestMutationKillMatrix:
                     base + ["--search", "readiness", "--list"],
                 ],
             ),
+            # ⚠ THE ANCHORS ARE THE PINNED MODULE'S SPELLING. The pinned client
+            # refactored `main`'s inline flag checks into `reject_recall_flags`,
+            # so these read the parameter names rather than `args.*`. The harness
+            # asserts each anchor occurs EXACTLY ONCE, which is what turned the
+            # refactor into a failure here instead of a mutant that silently
+            # changed nothing — do not relax that assertion to a substring.
             (
                 "m_list_limit",
-                "    if args.listing and args.limit is not None:",
+                "    if listing and limit is not None:",
                 [base + ["--list", "--limit", "2"]],
             ),
             (
                 "m_page_body",
-                "    if args.page is not None and (args.ref is not None or args.limit is not None):",
+                "    if page is not None and (ref is not None or limit is not None):",
                 [base + ["--page", "2", "--ref", "collector"], base + ["--page", "2", "--limit", "2"]],
             ),
             (
@@ -6176,11 +6221,17 @@ class TestTheSearchReportCaveat:
 # the half that mattered — "no other host was consulted, and it may hold this" —
 # is exactly the half a keyword guard would let a reword delete.
 #
-# The host is INJECTED at `subsystem_touch.this_host`, the single call site of
-# `host_identity.this_host` shared by both modules. That the reader moves when
-# the WRITER's seam is patched is not incidental; it is the property being
-# asserted, and `claude/RULES.md` → "verified in isolation is the new vacuous
-# green" is why it gets its own test rather than being assumed.
+# 🔴 THE SEAM MOVED, AND THAT IS THE WHOLE POINT OF THE CONSOLIDATION. The host
+# used to be INJECTED at `subsystem_touch.this_host` — devrc's writer owned the
+# single call site and the reader imported `store_host` from it. Since devrc
+# consumes the pinned `cairn` client, the module both halves import from is
+# `entry_shape`, so `entry_shape.this_host` is the injection point. It is still
+# ONE seam shared by the reader and the writer; it is just in the shared module
+# rather than in one of the two halves, which is a strictly better place for it.
+# That the WRITER's output moves when the SHARED seam is patched is not
+# incidental; it is the property being asserted, and `claude/RULES.md` →
+# "verified in isolation is the new vacuous green" is why it gets its own test
+# rather than being assumed.
 
 FIXTURE_HOST = "fixture-host-0123456789abcdef0123456789abcdef"
 
@@ -6198,8 +6249,16 @@ def _norm(text: str) -> str:
 @pytest.fixture()
 def pinned_host(monkeypatch):
     """One seam, both modules. `raising=False` so a tree without the seam fails
-    these guards on their ASSERTION rather than during setup."""
-    monkeypatch.setattr(st, "this_host", lambda: FIXTURE_HOST, raising=False)
+    these guards on their ASSERTION rather than during setup.
+
+    🔴 PATCHED ON `entry_shape`, NOT ON `subsystem_touch`. `entry_shape.store_host`
+    looks `this_host` up in `entry_shape`'s own globals, so that is where the one
+    injection point lives now — patching the writer's re-exported name would move
+    nothing and every guard below would fail against this machine's real identity,
+    which is precisely how a seam test goes quietly vacuous.
+    """
+    import entry_shape  # noqa: PLC0415
+    monkeypatch.setattr(entry_shape, "this_host", lambda: FIXTURE_HOST, raising=False)
     return FIXTURE_HOST
 
 
@@ -6341,17 +6400,19 @@ class TestTheRecallCoversOneHostsStore:
         components each hermetically tested can still be broken TOGETHER, because
         every test was scoped to one surface. The reader and the writer describe
         the SAME directory, so they must derive "whose disk is this" from ONE
-        place — `subsystem_touch.store_host`, whose body is the only call of
-        `host_identity.this_host` in either module.
+        place — `entry_shape.store_host`, whose body is the only call of
+        `host_identity.this_host` reachable from either module.
 
-        This asserts the RELATIONSHIP, not a component: patching the writer's seam
-        must move the reader's output too. If the reader ever re-imports
-        `this_host` directly, this goes red while every other guard here stays
-        green, because they all patch the same name.
+        This asserts the RELATIONSHIP, not a component: patching the SHARED seam
+        must move BOTH outputs. If either half ever re-imports `this_host`
+        directly, this goes red while every other guard here stays green, because
+        they all patch the same name.
         """
+        import entry_shape  # noqa: PLC0415
+
         assert st.store_host() == FIXTURE_HOST
-        assert rc.store_host is st.store_host, (
-            "subsystem_recall no longer shares subsystem_touch's `store_host`. "
+        assert rc.store_host is st.store_host is entry_shape.store_host, (
+            "the reader and the writer no longer share `entry_shape.store_host`. "
             "Two derivations of the host WILL disagree the first time one is "
             "edited, and this test is the only thing that sees it."
         )

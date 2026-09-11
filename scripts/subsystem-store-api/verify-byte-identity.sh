@@ -154,7 +154,13 @@ set -euo pipefail
 
 # CDPATH= : see build-push.sh — a set CDPATH makes `cd` echo its destination.
 HERE="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-RECALL="$HERE/../lib/subsystem_recall.py"
+# 🔴 THE PINNED READER, NOT A `scripts/lib/` COPY — devrc deleted its fork when
+# it consolidated onto the `cairn` flake pin. `cairn_pin.py` prints the pinned
+# lib directory and REFUSES (non-zero, naming both routes and the remedy) when
+# the pin is not deployed, so `set -e` stops here rather than letting the
+# comparison run against nothing. This is the LOCAL side of a byte-identity
+# check against the pod, so it must be the same module the pod carries.
+RECALL="$(python3 "$HERE/../lib/cairn_pin.py")/subsystem_recall.py"
 
 STORE=""
 URL=""

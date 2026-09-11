@@ -185,6 +185,15 @@ ATTRIBUTION = re.compile(
 # reader that does not exist — it would miss a collision the write route hits,
 # and invent one it does not. There is no version of this worth having twice.
 sys.path.insert(0, str(HERE / "lib"))
+# 🔴 THE STORE-READER MODULES COME FROM THE PINNED `cairn` FLAKE INPUT, not
+# from `scripts/lib/` — devrc deleted its forked copies when it consolidated
+# onto the pin. `cairn_pin.ensure()` APPENDS the packaged `lib/` after the
+# line above and raises, naming both resolution routes and the remedy, when
+# the pin is not deployed. There is no local fallback.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 from subsystem_resolver import normalize_ref, split_kind  # noqa: E402
 
 

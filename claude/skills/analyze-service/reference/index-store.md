@@ -2,7 +2,9 @@
 
 Loaded on demand, not every run. `SKILL.md` calls `scripts/lib/service_recon.py`,
 which performs the READ half of this document deterministically (through
-`scripts/lib/subsystem_recall.py`, the store's one reader). Read this when you
+`subsystem_recall`, the store's one reader — it ships in the pinned `cairn`
+package now, not in `scripts/lib/`; `python3 scripts/lib/cairn_pin.py` prints
+where). Read this when you
 need to **resolve a ref by hand**, **write an entry** (see `write-back.md`), or
 **understand what the recon brief's `index:` line is telling you**.
 
@@ -25,7 +27,7 @@ never live state, never re-derived config values.
   1. **Filename tier** — normalized ref vs `<slug>.md` *and* every `<slug>.<kind>.md` in the scope. A ref naming its own kind (`repo-cos.process`) matches only that qualified file.
   2. **Alias tier** — normalized `aliases:` across the scope, consulted **only if tier 1 returned zero hits**.
   One hit → use it. **>1 in a tier → never pick: stop, call the ref ambiguous and list the candidates** (`repo-cos.md` vs `repo-cos.process.md`) for the user to choose. Zero in both → no index yet.
-- 🔴 **The EXECUTABLE authority for the two rules above is `scripts/lib/subsystem_resolver.py`** (`normalize_ref`, `split_kind`, `resolve_ref_tiered`). The prose here exists because *you* are the other implementation — but two implementations of one predicate drift, and here the drift is silent: a ref stops resolving and the miss reads as "no index yet". `scripts/tests/test_subsystem_resolver.py::TestCommandDocIsPinned` holds the sentences above as literal substrings alongside the behaviour each asserts, so **rewording either side without the other goes red naming the sentence that moved.** Change both in one commit.
+- 🔴 **The EXECUTABLE authority for the two rules above is `subsystem_resolver`** (`normalize_ref`, `split_kind`, `resolve_ref_tiered`) — the module in the pinned `cairn` package; devrc has no copy of it any more. The prose here exists because *you* are the other implementation — but two implementations of one predicate drift, and here the drift is silent: a ref stops resolving and the miss reads as "no index yet". `scripts/tests/test_subsystem_resolver.py::TestCommandDocIsPinned` holds the sentences above as literal substrings alongside the behaviour each asserts, so **rewording either side without the other goes red naming the sentence that moved.** Change both in one commit.
 - **Lazy** — a scope dir or service file may not exist yet; it appears only on a confirmed write-back (see "## Write-back (opt-in)").
 <!-- resolver-rules:end — deliberately AFTER the last bullet of this list, not before it: an editor appending a rule appends at the END, and a boundary that stops short of the append point leaves the likeliest drift outside the hash. -->
 

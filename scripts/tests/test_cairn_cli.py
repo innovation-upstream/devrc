@@ -37,6 +37,14 @@ from types import SimpleNamespace
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
 sys.path.insert(0, str(REPO / "scripts"))
 from testlib import store_siting  # noqa: E402
 CAIRN_CLI = REPO / "scripts" / "cairn"
@@ -1332,7 +1340,7 @@ def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
     assert "import subsystem_recall" in src, (
         "scripts/cairn no longer imports from its sibling lib/"
     )
-    assert (REPO / "scripts" / "lib" / "subsystem_recall.py").exists()
+    assert (pinned("subsystem_recall")).exists()
 
 
 def test_cairn_is_deployed_from_the_pinned_package_not_a_bare_store_copy():
