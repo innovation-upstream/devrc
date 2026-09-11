@@ -269,24 +269,34 @@ Not a bug — a measurement that would mislead if run as written.
    Ctrl+Space search path is broken.
 
 7. **A SECOND gate flake, same SHAPE as this doc's, different MECHANISM and different
-   SUBSYSTEM — `test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`** — devrc,
-   `scripts/tests/test_run_tests_targets.py:756`.
+   SUBSYSTEM. The unit is the FILE, not a test — devrc,
+   `scripts/tests/test_run_tests_targets.py`, and the defect is its shared helper `_run`'s
+   `timeout=120` at `:102`.**
    🔴 **DO NOT FOLD IT INTO THE STORE-API POPULATION.** It shares the observable — a check red
    on a diff that cannot reach it — and nothing else. The store-api flake is an `fsync` stalling
-   inside a request; this is a **nested full `run-tests.sh` run, spawned as a subprocess under a
-   hard `timeout=120`, SIGKILLed at the bound**: `subprocess.TimeoutExpired`, returncode `-9`,
+   inside a request; this is a **nested `run-tests.sh` run, spawned as a subprocess under a hard
+   `timeout=120`, SIGKILLed at the bound**: `subprocess.TimeoutExpired`, returncode `-9`,
    traceback ending in `_check_timeout`. **Not an assertion failure.** Grepping `MECHANISM =`
    finds nothing here, because no store server is involved.
-   - **Provenance:** added by **`#1445`**'s own audit ladder — the test's docstring opens
-     "🟡 round-2 F5" — and first observed red hours later. The test it guards is real (it pins
-     that the subset note reports N of the FULL set, a mutant that survived all 23 tests in its
-     file); the **120 s bound on a nested full run** is what is not survivable on a contended
-     node. via: code
-   - **Ruled out: that it is caused by any diff.** Observed on `#1458` at `a6dd11eb`, whose four
-     files (the store-api suite, the siting ledger, `ci-repro/**`) cannot reach
-     `test_run_tests_targets.py`. via: measurement
-   - **Ruled out: determinism.** `#1462` — same base, same test present, a docs-only diff —
-     **passed minutes earlier**. Locally the whole file is `31 passed` in 205 s. via: measurement
+   🔴 **THREE OCCURRENCES, TWO DIFFERENT TESTS — and the second is why this item is keyed to the
+   FILE.** `test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N` (`:756`) on `#1458` at
+   `a6dd11eb`; `test_the_SUMMARY_BANNER_names_the_real_selection_source` on `#1462` at
+   `dc972398`, whose log shows the **identical** `TimeoutExpired` — and whose spawned command is
+   a **bare `run-tests.sh <repo>` with NO `--targets`**, i.e. an entire suite run inside one
+   test, bounded at 120 s. Every test in this file that calls `_run` is exposed; naming one test
+   would send the next reader to fix the wrong line. via: measurement
+   - ⚠ **Provenance, and an earlier draft of this item got it wrong.** It said the flake was
+     "added by `#1445`'s own audit ladder". True of the subset-note TEST — its docstring opens
+     "🟡 round-2 F5" — and **false of the file and of `_run`**, both of which came from `#1073`
+     (`809486fa`), as did `test_the_SUMMARY_BANNER_…`. `#1445` added one more caller to a bound
+     that was already there. The properties these tests pin are real; the **120 s bound on a
+     nested full run** is what is not survivable on a contended node. via: code
+   - **Ruled out: that it is caused by any diff.** `#1458`'s four files (the store-api suite, the
+     siting ledger, `ci-repro/**`) cannot reach `test_run_tests_targets.py`; `#1462`'s diff is
+     **one markdown file**. via: measurement
+   - **Ruled out: determinism.** `#1462` **passed** this file at `8df1117a` and **failed** it at
+     `dc972398` — two docs-only commits, same base, different test failing. Locally the whole
+     file is `31 passed` in 205 s. via: measurement
    - 🔴 **Ruled out: general node load, by the wall-time discriminator at two points.** Load
      inflates every test in a run; a failed assertion inflates one. Failing run vs passing run,
      CI-to-CI: **1030.34 s vs 1065.64 s** on the big target and **155.60 s vs 154.73 s** on
@@ -302,11 +312,14 @@ Not a bug — a measurement that would mislead if run as written.
      nothing about the assertion — the timeout is a harness convenience), or stop the guard
      spawning a *full* nested run when a scoped one would prove the same property. **Re-running
      to green is what `claude/RULES.md` calls training everyone to click through.**
-   **Closing condition:** a merged PR after which this test cannot be killed by its own
-   subprocess bound — OR a documented decision that the bound stays and the flake is accepted,
-   named as such. Checked by the test no longer appearing in a `FAILING:` line.
-   forcing: gate — it reddened `#1458`, which merged with `tekton/devrc-pytests` RED because of
-   it. Advisory, not blocking (see rank 1's note on branch protection).
+   **Closing condition:** a merged PR after which **no test in this file** can be killed by
+   `_run`'s subprocess bound — OR a documented decision that the bound stays and the flake is
+   accepted, named as such. Checked by **no test from `test_run_tests_targets.py`** appearing in
+   a `FAILING:` line. ⚠ **Keyed to the file deliberately** — an earlier draft closed on one test
+   name, which a second exposed test would have walked straight past.
+   forcing: gate — it reddened `#1458` and `#1462`, **both of which merged with
+   `tekton/devrc-pytests` RED because of it**. Advisory, not blocking (see rank 1's note on
+   branch protection).
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
