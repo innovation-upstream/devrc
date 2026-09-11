@@ -32,12 +32,16 @@ Usage:
 Restore flags:
   --dry-run / -n          show what would happen without sending keys
   --plan PATH             use a custom plan file instead of the default. THIS IS
-  --best            use the generation the CURRENT plan replaced, when that
-                    one carried bound ids this plan has lost.
                           THE RECOVERY PATH: point it at any file in
                           ~/.config/initiatives/restore-plans/ to resume from an
                           older generation after a bad save. `save` prints the
                           exact command whenever a save drops bound session ids.
+  --best                  takes no argument. Restore from a RECENT generation
+                          that is strictly richer than the current plan, when
+                          one exists — i.e. when a save repointed the plan at a
+                          workspace that had lost conversations. `restore`
+                          reports that situation and names the file either way;
+                          this just saves you retyping it.
   --staleness-check [H]   refuse to restore unless the plan is BOTH in step with
                           the saved layout AND produced within H hours of running
                           time (default: 2h). NOT wall-clock age — powered-off
@@ -1045,7 +1049,11 @@ def claude_command() -> str:
     """
     found = shutil.which("claude")
     if found:
-        return found
+        # 🔴 realpath HERE TOO. On this host `which` returns
+        # /home/zach/.nix-profile/bin/claude — the MUTABLE profile symlink this
+        # function's own docstring warns about. Protecting only the fallback
+        # branch left the branch that actually fires interactively unprotected.
+        return os.path.realpath(found)
     profile = Path(os.path.expanduser("~/.nix-profile/bin/claude"))
     if profile.exists():
         # realpath: pin the store path, not the mutable profile symlink.
@@ -1486,72 +1494,108 @@ def uptime_hours() -> float:
         return float("inf")
 
 
+# 🔴 HOW MANY LOST BOUND IDS MAKE A SHRINK AN INCIDENT RATHER THAN CHURN.
+# Derived from this host's own 140-generation history, not chosen: the loss-size
+# histogram across 138 transitions is {1: 13, 2: 4, 3: 1, 4: 1, 15: 1}. Ordinary
+# churn — a conversation ending — loses one or two. The 2026-09-11 incident lost
+# FIFTEEN. There is a clean gap, and 5 sits in it: at this threshold the rule
+# fires on the incident and on nothing else in the whole retained chain.
+RECOVERY_ALERT_MIN_LOST = 5
+
+# 🔴 HOW FAR BACK TO LOOK, AND WHY IT IS BOUNDED AT ALL. Scanning the WHOLE
+# retained chain sounds safer and is not: an ancestor from a day ago legitimately
+# held conversations that have since ended, so an unbounded scan finds a
+# "richer" plan almost always — measured 134 of 140 pointer positions, i.e.
+# worse than the permanently-red predicate it replaced.
+#
+# MEASURED by replaying every pointer position against ONLY the generations that
+# existed AT THAT TIME. (Replaying against the full chain is the trap: it lets
+# the scan see the future, and that is how the 134/140 figure was produced.)
+#     window= 4 -> fires   4/140 (3%)    catches the incident
+#     window= 8 -> fires  11/140 (8%)    catches the incident
+#     window=16 -> fires  20/140 (14%)   catches the incident
+# Four is ~1h at the 15-minute autosave — long enough to span a recovery, short
+# enough that ordinary churn has not accumulated. It also fixes the visibility
+# problem the round-2 audit found in the consecutive-only predicate: the
+# incident fires at BOTH 052312 and 052314 (2s apart) and goes quiet at 053811,
+# the recovery save, instead of being visible for two seconds.
+RECOVERY_ALERT_WINDOW = 4
+
+
 def richer_generation(current: Path) -> tuple[Path, set[str]] | None:
-    """The newest generation carrying bound ids `current` has LOST, if any.
+    """A generation that is STRICTLY RICHER than the current plan by a lot.
 
-    🔴 THE POINTER CAN MOVE TO A WORSE PLAN *WHILE YOU ARE RECOVERING*, AND THAT
-    IS NOT HYPOTHETICAL. MEASURED 2026-09-11, during the recovery from a server
-    death: the pre-crash plan held 52 bound conversations; partway through, the
-    15-minute continuum autosave fired, saw the half-restored workspace, and
-    repointed `restore-plan.json` at a fresh 37-entry generation. A `restore`
-    run after that moment would have silently recovered 37 of 52 and reported
-    complete success, because it has no way to know the pointer used to be
-    richer. The 15 ids existed only in the older generation.
+    🔴 THE POINTER CAN MOVE TO A WORSE PLAN *WHILE YOU ARE RECOVERING*. MEASURED
+    2026-09-11: the pre-crash plan held 52 bound conversations; partway through
+    the recovery the 15-minute continuum autosave fired, saw the half-restored
+    workspace, and repointed `restore-plan.json` at a fresh 37-entry generation.
+    A restore after that moment recovers 37 of 52 and reports success. The 15 ids
+    existed only in the older generation. Generations make that recoverable
+    (#1383) — but only if somebody looks. This is the looking.
 
-    Generations are what make this recoverable at all (#1383) — but only if
-    somebody looks. This is the looking.
+    🔴 TWO EARLIER PREDICATES WERE BOTH WRONG, IN OPPOSITE DIRECTIONS, AND BOTH
+    WERE MEASURED WRONG ON THIS HOST'S REAL DATA RATHER THAN ARGUED:
 
-    🔴 THE PREDICATE IS "THE PLAN THIS ONE REPLACED WAS RICHER", NOT "SOME
-    GENERATION SOMEWHERE HOLDS AN ID YOU NO LONGER HAVE." The second is what the
-    first draft asked, and it is TRUE FOREVER on a healthy workspace: ordinary
-    churn — closing a window, replacing a conversation — leaves every older
-    generation holding ids the current plan lacks. MEASURED on the live,
-    fully-recovered workspace: **137 of 137 generations** satisfied it, so the
-    warning fired on every single run. `claude/RULES.md` names that exactly — a
-    permanently-red gate trains everyone to click through — and it would have
-    been self-inflicted on the one alarm meant to catch the next incident.
+      (a) "ANY generation holds an id you lack" — TRUE FOREVER. Ordinary churn
+          leaves every older generation holding retired ids: **137 of 137**
+          generations satisfied it, so the warning fired on every single run.
+          A permanently-red gate trains everyone to click through.
 
-    Worse, the remedy it advertised was wrong in the ordinary case: the "richest"
-    generation is usually an OLD one, so `--best` would have restored a day-old
-    layout over a current one and reported success.
+      (b) "the IMMEDIATELY PRECEDING generation was richer" — fires, but for
+          almost no time. Replaying the real chain, the incident was visible at
+          exactly ONE pointer position and the next save landed **2 seconds**
+          later, after which it was silent for the ~15 minutes that mattered.
+          The unit runs `restore` at BOOT, long after any such window, so in the
+          one automated caller it would essentially never fire.
 
-    So the comparison is against the IMMEDIATELY PRECEDING generation only. That
-    is the incident's actual signature — a save fired mid-recovery and repointed
-    the plan from 52 entries to 37 — and it is the same shape as `cmd_save`'s
-    shrink report, which fired **21 times in 753 saves (2.8%)** rather than 100%.
+    The signature is neither "different" nor "adjacent". It is **a large drop in
+    bound ids that the current plan has not recovered**, wherever it sits in the
+    retained chain. So: scan every generation, keep those that are STRICTLY
+    RICHER than the current plan, and report the one that recovers the most —
+    provided it recovers at least `RECOVERY_ALERT_MIN_LOST`.
 
-    Returns `(previous_generation, ids_it_has_that_current_lacks)` or None.
+    🔴 "STRICTLY RICHER" IS LOAD-BEARING AND ITS ABSENCE WAS A DEPLOY-BLOCKER.
+    Without it this returned any generation holding *some* id the current lacks,
+    including ones with FEWER conversations overall — so at the moment the
+    operator had just recovered to 52 windows, `--best` would have restored the
+    degraded **37**-entry plan and reported success. Measured on the real chain:
+    2 of 20 fire positions picked a poorer plan. Comparing totals is what makes
+    the remedy safe to follow.
+
+    Returns `(generation, ids_it_has_that_current_lacks)` or None.
     """
     cur_ids = bound_ids(read_plan(current) or [])
-    stamps = list_generations()
-    if len(stamps) < 2:
-        return None
-    # Which generation is the pointer on? Compare resolved paths, because
-    # `current` is normally the `restore-plan.json` SYMLINK.
     try:
         cur_real = current.resolve()
     except OSError:
-        return None
-    idx = None
-    for i, stamp in enumerate(stamps):
+        cur_real = None
+    stamps = list_generations()
+    # Where does the pointer sit? Everything before it is an ancestor; only the
+    # RECENT ones are candidates (see RECOVERY_ALERT_WINDOW).
+    idx = len(stamps)
+    for i, st in enumerate(stamps):
         try:
-            if generation_paths(stamp)[0].resolve() == cur_real:
+            if cur_real is not None and generation_paths(st)[0].resolve() == cur_real:
                 idx = i
                 break
         except OSError:
             continue
-    # Pointer not on a generation (a pre-generations regular file, or a dangling
-    # link): there is no "the plan this replaced", so say nothing.
-    if idx is None or idx == 0:
-        return None
-    prev = generation_paths(stamps[idx - 1])[0]
-    # `bound_ids` reads dicts; a generation that is a JSON list of non-dicts
-    # would raise AttributeError out of a warning path and fail the unit.
-    try:
-        missing = bound_ids(read_plan(prev) or []) - cur_ids
-    except (AttributeError, TypeError):
-        return None
-    return (prev, missing) if missing else None
+    best: tuple[Path, set[str]] | None = None
+    for stamp in stamps[max(0, idx - RECOVERY_ALERT_WINDOW):idx]:
+        gplan = generation_paths(stamp)[0]
+        try:
+            gids = bound_ids(read_plan(gplan) or [])
+        except (AttributeError, TypeError):
+            continue            # a malformed generation must not fail a restore
+        # STRICTLY richer overall — never offer a plan with fewer conversations.
+        if len(gids) <= len(cur_ids):
+            continue
+        missing = gids - cur_ids
+        if len(missing) < RECOVERY_ALERT_MIN_LOST:
+            continue            # churn, not an incident
+        if best is None or len(missing) > len(best[1]):
+            best = (gplan, missing)
+    return best
 
 
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,

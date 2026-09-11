@@ -2354,6 +2354,7 @@ class _FakeTmux:
     def __init__(self, windows):
         self.windows = dict(windows)          # {"sess:idx": "command"}
         self.sent = []
+        self.calls = []
 
     def _session_for(self, name):
         """The session tmux would pick for target `name`: exact first, else the
@@ -2378,6 +2379,7 @@ class _FakeTmux:
         return target
 
     def __call__(self, argv):
+        self.calls.append(list(argv))
         if argv[:2] == ["tmux", "display-message"]:
             target = argv[argv.index("-t") + 1]
             sess = target.partition(":")[0]
@@ -2537,9 +2539,13 @@ def test_a_richer_generation_is_reported_when_the_pointer_moved_to_a_poorer_plan
     """
     state.mkdir(parents=True, exist_ok=True)
     tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    # Magnitudes matter now: the alarm has a floor (RECOVERY_ALERT_MIN_LOST),
+    # derived from this host's own loss histogram. Model the real incident —
+    # 52 bound conversations down to 37, a loss of 15 — not a 4-id trim, which
+    # is ordinary churn and must stay quiet (pinned by the test below).
     rich = [{"session": "s", "window": str(i), "cwd": "/tmp", "session_id": f"sid-{i}",
-             "codename": "Gold", "bind_source": "ledger"} for i in range(6)]
-    poor = rich[:2]
+             "codename": "Gold", "bind_source": "ledger"} for i in range(52)]
+    poor = rich[:37]
     tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(rich))
     poor_gen = tsr.generation_paths("20260911T001000")[0]
     poor_gen.write_text(json.dumps(poor))
@@ -2552,7 +2558,7 @@ def test_a_richer_generation_is_reported_when_the_pointer_moved_to_a_poorer_plan
     assert found is not None, "a generation with 4 extra bound ids was not reported"
     gplan, missing = found
     assert gplan.name == "restore-plan_20260911T000000.json"
-    assert len(missing) == 4, f"expected the 4 lost ids, got {sorted(missing)}"
+    assert len(missing) == 15, f"expected the 15 lost ids, got {len(missing)}"
 
 
 def test_no_richer_generation_is_reported_when_nothing_was_lost(state):
@@ -2686,3 +2692,189 @@ def test_window_state_does_not_accept_a_PREFIX_session_as_the_named_one(monkeypa
     assert exists is False, (
         f"scratch2:1 was answered from scratch20 (got {(exists, cmd)!r}) — the "
         "session half of the same resolution bug this fix closes for windows")
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 audit, finding 🟡 C: four behavioural fixes shipped with NO guard.
+# A mutant restoring each original defect survived a 128-green suite. The
+# sharpest was `tmux_session_exists` — the round-1 🔴 3 fix — which could be
+# hardcoded to `return True`, restoring the exact defect its own docstring
+# describes, with nothing red. These are those guards.
+# --------------------------------------------------------------------------- #
+
+
+def _fake_tmux_cli(sessions):
+    """Stand in for `subprocess.run(['tmux', ...])` with tmux's real semantics."""
+    def run(argv, **kw):
+        import types as _t
+        if argv[:2] == ["tmux", "list-sessions"]:
+            return _t.SimpleNamespace(returncode=0 if sessions else 1,
+                                      stdout="\n".join(sessions))
+        if argv[:2] == ["tmux", "has-session"]:
+            # tmux resolves has-session by PREFIX — the defect being guarded.
+            name = argv[argv.index("-t") + 1]
+            hit = any(s == name or s.startswith(name) for s in sessions)
+            return _t.SimpleNamespace(returncode=0 if hit else 1, stdout="")
+        return _t.SimpleNamespace(returncode=0, stdout="")
+    return run
+
+
+def test_tmux_session_exists_is_exact_and_rejects_a_prefix(monkeypatch):
+    """🔴 The round-1 fix, which had no test at all until now.
+
+    `has-session -t scratch2` returns rc 0 when only `scratch20` exists, so the
+    session is never created and its conversations are silently dropped while
+    `new-window -t scratch2:5` lands inside `scratch20`. A mutant reverting this
+    to a prefix match — or to a bare `return True` — survived the whole suite.
+    """
+    monkeypatch.setattr(tsr.subprocess, "run", _fake_tmux_cli(["scratch20", "homelab"]))
+    assert tsr.tmux_session_exists("scratch20") is True, "the real session must be found"
+    assert tsr.tmux_session_exists("scratch2") is False, (
+        "a PREFIX of a live session was reported as existing — new-session is "
+        "then skipped and every conversation in it is silently dropped")
+    assert tsr.tmux_session_exists("scratch") is False, "shorter prefix must also be rejected"
+    assert tsr.tmux_session_exists("nope") is False
+
+
+def test_tmux_session_exists_says_NO_when_there_is_no_server(monkeypatch):
+    """False is the safe answer when the server is unreachable: the caller has
+    already refused that case (`wait_for_tmux_server`), and answering True would
+    skip creating a session that does not exist."""
+    monkeypatch.setattr(tsr.subprocess, "run", _fake_tmux_cli([]))
+    assert tsr.tmux_session_exists("anything") is False
+
+
+def test_a_created_window_does_not_steal_the_active_window(monkeypatch, state, capsys):
+    """🟢 11's guard. Creating 33 windows during a restore must not yank the
+    active window in every session it touches — `new-window` needs `-d`."""
+    fake = _FakeTmux({"s:1": "zsh"})
+    monkeypatch.setattr(tsr, "run", fake)
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 0.0))
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda s: True)
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.PLAN.write_text(json.dumps([{"session": "s", "window": "2", "cwd": "/tmp",
+                                     "session_id": "sid", "codename": "Gold",
+                                     "bind_source": "ledger"}]))
+    assert tsr.cmd_restore() == 0
+    capsys.readouterr()
+    created = [a for a in fake.calls if a[:2] == ["tmux", "new-window"]]
+    assert created, "no window was created — the fixture does not reach the branch"
+    assert "-d" in created[0], (
+        f"new-window without -d: {created[0]!r} — a 33-window restore would move "
+        "the active window in every session it touches")
+
+
+def test_best_does_not_let_the_staleness_gate_refuse_the_plan_it_chose(
+        monkeypatch, state, capsys):
+    """🟡 4's guard. Having explicitly asked for an older generation, refusing it
+    for being old is incoherent — and measuring the POINTER instead would let a
+    fresh pointer wave through an arbitrarily stale choice."""
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+
+    def plan_of(ids):
+        return [{"session": "s", "window": str(i), "cwd": "/tmp", "session_id": x,
+                 "codename": "Gold", "bind_source": "ledger"} for i, x in enumerate(ids)]
+
+    rich = [f"sid-{i}" for i in range(9)]
+    tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(plan_of(rich)))
+    poor = tsr.generation_paths("20260911T001000")[0]
+    poor.write_text(json.dumps(plan_of(rich[:2])))
+    tsr.PLAN.symlink_to(poor)
+
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 0.0))
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda s: True)
+    monkeypatch.setattr(tsr, "run", _FakeTmux({f"s:{i}": "zsh" for i in range(9)}))
+    # A staleness verdict that would REFUSE, if it were consulted.
+    monkeypatch.setattr(tsr, "plan_staleness_hours", lambda: (999.0, "layout"))
+
+    rc = tsr.cmd_restore(staleness_hours=2.0, prefer_best=True)
+    out = capsys.readouterr()
+    assert rc == 0, (
+        "--best was refused by the staleness gate it explicitly overrides:\n"
+        + out.out + out.err)
+    assert "--best" in out.err, "the switch must announce which generation it used"
+
+
+def test_an_ORDINARY_shrink_below_the_floor_stays_quiet(state):
+    """🔴 THE FLOOR IS WHAT MAKES THIS AN ALARM RATHER THAN A TICKER.
+
+    Derived from this host's 138 real transitions, whose loss-size histogram is
+    {1: 13, 2: 4, 3: 1, 4: 1, 15: 1}: a conversation ending loses one or two,
+    the incident lost fifteen. Without the floor the warning fires on ordinary
+    churn; the first draft of this feature fired on 137 of 137 generations.
+
+    A 3-id shrink is churn. It must not print.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+
+    def plan_of(n):
+        return [{"session": "s", "window": str(i), "cwd": "/tmp", "session_id": f"sid-{i}",
+                 "codename": "Gold", "bind_source": "ledger"} for i in range(n)]
+
+    tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(plan_of(52)))
+    poor = tsr.generation_paths("20260911T001000")[0]
+    poor.write_text(json.dumps(plan_of(49)))        # lost 3 — churn
+    tsr.PLAN.symlink_to(poor)
+    assert tsr.richer_generation(tsr.PLAN) is None, (
+        "a 3-id shrink was reported as an incident — below "
+        f"RECOVERY_ALERT_MIN_LOST={tsr.RECOVERY_ALERT_MIN_LOST} it is churn")
+
+
+def test_a_generation_with_FEWER_conversations_is_never_offered(state):
+    """🔴 DEPLOY-BLOCKER FROM ROUND 2, PINNED. Without a strictly-richer test,
+    `--best` handed back a plan with FEWER windows: on the operator's real data,
+    at the moment they had recovered to 52, it offered the degraded 37-entry
+    generation because that plan happened to hold a few ids the new one did not.
+    `--best` is the command the warning tells you to run; it must never make
+    things worse."""
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+
+    def plan_of(ids):
+        return [{"session": "s", "window": str(i), "cwd": "/tmp", "session_id": x,
+                 "codename": "Gold", "bind_source": "ledger"} for i, x in enumerate(ids)]
+
+    # Older: 37 conversations, 8 of which are gone from the current plan.
+    old_ids = [f"gone-{i}" for i in range(8)] + [f"keep-{i}" for i in range(29)]
+    tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(plan_of(old_ids)))
+    # Current: 52 conversations — strictly MORE, despite lacking those 8.
+    cur_ids = [f"keep-{i}" for i in range(29)] + [f"new-{i}" for i in range(23)]
+    cur = tsr.generation_paths("20260911T001000")[0]
+    cur.write_text(json.dumps(plan_of(cur_ids)))
+    tsr.PLAN.symlink_to(cur)
+
+    assert tsr.richer_generation(tsr.PLAN) is None, (
+        "offered a generation with FEWER conversations (37) than the current "
+        "plan (52) merely because it held 8 ids the current one lacks — "
+        "following that advice loses 15 windows")
+
+
+def test_a_claude_found_on_PATH_is_also_resolved_to_its_store_path(monkeypatch, tmp_path):
+    """🟢 F from round 2: the realpath protection was applied to the FALLBACK
+    branch only, leaving the branch that actually fires interactively exposed.
+
+    On this host `shutil.which('claude')` returns
+    /home/zach/.nix-profile/bin/claude — the mutable profile symlink the
+    docstring warns about, because a home-manager switch blanks it for ~1s. So
+    the PATH hit needs the same treatment as the profile hit.
+    """
+    store = tmp_path / "store" / "claude-code-9.9.9" / "bin"
+    store.mkdir(parents=True)
+    real = store / "claude"
+    real.write_text("#!/bin/sh\nexit 0\n"); real.chmod(0o755)
+
+    onpath = tmp_path / "bin"
+    onpath.mkdir()
+    (onpath / "claude").symlink_to(real)          # exactly the profile shape
+    monkeypatch.setenv("PATH", str(onpath))
+
+    got = tsr.claude_command()
+    assert got == str(real), (
+        f"returned the symlink found on PATH instead of its store target: {got!r} "
+        "— a home-manager switch blanks that path for ~1s")
