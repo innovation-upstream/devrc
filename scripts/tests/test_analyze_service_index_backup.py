@@ -2448,21 +2448,40 @@ def _closed_unit_path() -> str:
     machine. What must be modelled is the CLOSEDNESS — that the unit sees these
     tools and nothing else — and `shutil.which` gives that on any host.
     """
-    dirs = []
+    dirs, absent = [], []
     for tool in _UNIT_PATH_TOOLS:
-        found = shutil.which(_TOOL_PROBE.get(tool, tool))
-        assert found, (
-            f"cannot model the unit's PATH: `{_TOOL_PROBE.get(tool, tool)}` is not "
-            f"resolvable here, so this probe would measure a PATH the unit does "
-            f"not have. It is in the unit's `makeBinPath` list and in "
-            f"flake.nix's gateTools."
-        )
+        cmd = _TOOL_PROBE.get(tool, tool)
+        found = shutil.which(cmd)
+        if not found:
+            absent.append(cmd)
+            continue
         d = str(Path(found).resolve().parent)
         if d not in dirs:
             dirs.append(d)
+
+    # 🔴 A TOOL THIS HOST CANNOT SUPPLY IS A NAMED OMISSION, NOT A FATAL — and the
+    # first version of this function had it the other way round, with a message
+    # asserting the tool "is in flake.nix's gateTools". MEASURED FALSE in the
+    # authoritative tier: `kubectl` is NOT in gateTools, so every probe in this
+    # file aborted there while passing on the dev host. Two mistakes in one line —
+    # a false claim about the repo, and a precondition stricter than the property.
+    #
+    # The property is CLOSEDNESS, and specifically that `cairn` is unreachable.
+    # A missing `kubectl` narrows the modelled PATH, which can only make it MORE
+    # closed; it cannot make a pin-absence test pass spuriously. What WOULD break
+    # the model is a missing tool the probed program actually needs, so those are
+    # required by name below rather than by listing the whole unit.
+    for required in ("git", "cp"):
+        assert required not in absent, (
+            f"cannot model the unit's PATH: `{required}` is not resolvable here. "
+            f"Unlike the rest of the unit's tool list this one is load-bearing "
+            f"for the program under probe, so a PATH without it would measure a "
+            f"broken environment rather than a closed one."
+        )
     # POSITIVE CONTROL on the modelling itself: the whole point is that `cairn` is
     # NOT reachable here, and a PATH that happened to include it would make every
     # pin-absence test below vacuous.
+    assert dirs, "the modelled unit PATH came out EMPTY — it models nothing"
     assert shutil.which("cairn", path=os.pathsep.join(dirs)) is None, (
         "the modelled unit PATH can reach `cairn`, so it does not model the unit "
         "— every guard below that depends on the pin being unresolvable would "

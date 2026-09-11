@@ -3070,7 +3070,7 @@ in
         # `analyze-service-index-backup` for why PATH cannot substitute. devrc's
         # store-reader modules resolve through `scripts/lib/cairn_pin.py`, which
         # RAISES rather than degrading, and the PATH above is a CLOSED list with
-        # no cairn in it (measured on the live unit). This unit ExecStarts the
+        # no cairn in it (measured on the live unit). This unit runs the
         # WORKING-TREE copy, so without this entry it breaks on the operator's
         # next `git pull`, not on a switch.
         "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
@@ -4263,7 +4263,7 @@ in
         # `analyze-service-index-backup` for why PATH cannot substitute. devrc's
         # store-reader modules resolve through `scripts/lib/cairn_pin.py`, which
         # RAISES rather than degrading, and the PATH above is a CLOSED list with
-        # no cairn in it (measured on the live unit). This unit ExecStarts the
+        # no cairn in it (measured on the live unit). This unit runs the
         # WORKING-TREE copy, so without this entry it breaks on the operator's
         # next `git pull`, not on a switch.
         "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
@@ -4898,10 +4898,18 @@ in
           # is the exact closure this configuration pins.
           #
           # 🔴 THE FAILURE IT PREVENTS BREAKS ON `git pull`, NOT ON A SWITCH.
-          # These units ExecStart the WORKING-TREE copy of the script, so the
-          # moment the consolidation lands on disk the timer runs code that
+          # These units run the WORKING-TREE copy of the script, so the moment
+          # the consolidation lands on disk the timer runs code that
           # hard-requires the pin — before any switch. Measured, same closed env
           # both arms: base `IMPORT OK`, head `CairnPinUnresolved`.
+          #
+          # ⚠ DO NOT WRITE THE LITERAL WORD "Exec"+"Start" IN A COMMENT INSIDE A
+          # UNIT BLOCK. Guards in `scripts/tests/` read these blocks as TEXT:
+          # `test_handoff_index.py` counts lines containing it (a comment made
+          # the count 2) and slices the Environment block at its first
+          # occurrence (a comment truncated the block, hiding the handle lines
+          # from the check that they are derived rather than listed). Both went
+          # red in the authoritative tier and green on the dev host.
           "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
           "HOME=%h"
           "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
