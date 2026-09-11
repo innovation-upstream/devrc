@@ -842,6 +842,16 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     Nothing here stubs `discover_repos` or `tmux_pane_repo`: those ARE the
     subject. A fixture that replaced them would leave this test green against a
     handler that phoned home from either one.
+
+    🔴 THE ORDERING RUNS TOO, AND IT HAD TO BE MADE TO. The autouse redirect
+    points the range table at a path that does NOT exist, so without the file
+    written below `load_known_ranges` returns {} and `_ordered_universe` takes
+    its early `ORDER_NO_TABLE` return — which means the pick log is never read
+    and the sort never runs. This guard would then have been asserting "the
+    ordering spawns nothing" about an ordering that never happened, which is
+    the vacuous-green shape the whole file is written against. With a FRESH
+    table and a real pick log present, every leg of the ordering executes
+    inside the recording window.
     """
     # A real mapping and a real checkout, so both measurement legs do work.
     mapping = tmp_path / "known_repos.json"
@@ -852,6 +862,17 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     pane.mkdir()
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", mapping)
     monkeypatch.setattr(MO, "WORKSPACE", ws)
+    # A FRESH range table and a real pick log, so the ordering is ACTIVE — see
+    # the docstring. `universe` must hold the repo the checkout supplies, or
+    # there are no rows to order.
+    ranges = tmp_path / "known_ranges.json"
+    ranges.write_text(json.dumps({"rivalorg/spadeworks": 99,
+                                  "hobbyist/plotwidget": 0}))
+    monkeypatch.setattr(MO, "KNOWN_RANGES_PATH", ranges)
+    picks = tmp_path / "picks.jsonl"
+    picks.write_text(json.dumps({"t": time.time(), "repo": "rivalorg/spadeworks",
+                                 "n": 11}) + "\n")
+    monkeypatch.setattr(MO, "PICKS_PATH", picks)
 
     seen: list[list[str]] = []
 
@@ -875,12 +896,29 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
     monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
 
+    ordered: list[str] = []
+    real_ordering = MO._ordered_universe
+    monkeypatch.setattr(
+        MO, "_ordered_universe",
+        lambda rows, num: ordered.append(num) or real_ordering(rows, num))
+
     assert MO.main(["zzznosuchrepo#12"]) == 0
     _assert_only_local_commands(seen)
     # POSITIVE CONTROL: the fan-out really ran over the real workspace, so the
     # ledger above is a fact about a path that did the work, not about a
     # short-circuit. One checkout ⇒ one `git remote` call.
     assert [c for c in seen if c[:2] == ["git", "remote"]], seen
+    # 🔴 SECOND POSITIVE CONTROL — the ORDERING ran, and ran ACTIVE. Without
+    # this the ledger is a claim about a code path the test never entered: an
+    # absent range table short-circuits `_ordered_universe` before it reads the
+    # pick log or sorts anything. See the docstring.
+    assert ordered == ["12"], ordered
+    rows, state, _counts, _age = real_ordering(
+        MO.repo_universe(MO.discover_repos(), []), "12")
+    assert state == MO.ORDER_APPLIED, (
+        f"the ordering DEGRADED to {state!r}, so the ledger above says nothing "
+        f"about an active ordering — the range table is missing or stale")
+    assert rows, "there were no universe rows to order"
 
 
 # Every executable the module may ever spawn, from ANY function. Wider than
