@@ -7,25 +7,30 @@ From devrc#1254 (`34d00d90`, which added `PUT … If-None-Match: *` and the
 used to say **"There is no CREATE route, and the failure does not say so."**
 The CLI had shipped `cairn create` the whole time.
 
-🔴 THE REASON IT SURVIVED IS THE INTERESTING PART: the block's CONCLUSION was
-still true. A scope's FIRST entry genuinely cannot be made through the API — but
-not for the reason given. The real mechanism is that the index is built by
-WALKING THE STORE ROOT narrowed by the caller's allowlist
-(`subsystem_recall.load_store`), so a scope with no directory on the pod's disk
-resolves to nothing and the write is refused at the index. A reader checking the
-conclusion against reality found it held and moved on; nothing checked the
-premise. **A doc claim that is right by accident reads exactly like one that is
-right.**
+🔴 THE FIRST CORRECTION WAS ALSO WRONG, AND THAT IS THE REAL LESSON HERE. It
+claimed the conclusion survived — that a scope's FIRST entry still could not be
+made through the API — "because the index is built by WALKING THE STORE ROOT
+narrowed by the caller's allowlist". **False.** `create_entry` runs
+`path.parent.mkdir(exist_ok=True)`, and
+`test_subsystem_store_api.py::test_a_scopes_FIRST_entry_creates_the_directory`
+asserts **201** plus the bytes on disk for an allowlisted scope with no
+directory. The only gate is the caller's **token scope allowlist**.
 
-MEASURED 2026-09-11, with the control that makes the reading mean something:
+🔴 HOW THE WRONG MECHANISM GOT MEASURED, because the shape recurs: the probe used
+a scope that was absent AND non-allowlisted, on a pod whose allowlist enumerated
+exactly the scopes it held — so the two sets coincided and the experiment was
+structurally incapable of separating them. The 404 came from the allowlist check,
+which returns before the index is ever loaded, and it was credited to the index
+walk. `claude/RULES.md`: *"An EMPTY RESULT cannot distinguish two mechanisms — go
+find the step that differs."* The discriminating control was available and not
+run: allowlist a scope, do NOT seed it, `cairn create` → 201.
+
+MEASURED 2026-09-11. Both wrote nothing:
 
     cairn create --scope civitai-app-requests --ref app-requests --file F
-        -> rc 6  [not-found] — not found          (absent + non-allowlisted)
+        -> rc 6  [not-found]        (non-allowlisted — THE ALLOWLIST, not the walk)
     cairn create --scope civitai --ref health --file F
-        -> rc 9  [already-exists]                 (allowlisted, present, exists)
-
-Two different codes, so the `not-found` is a fact about that scope rather than a
-probe wired to nothing. Both wrote nothing.
+        -> rc 9  [already-exists]   (allowlisted, present, ref exists)
 
 WHAT THIS GUARD ASSERTS, AND WHY IT IS NOT A WORD MATCH
 -------------------------------------------------------

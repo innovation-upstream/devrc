@@ -943,11 +943,13 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 
 24. ✅ **CLOSED by devrc#1254 / `34d00d90` (2026-09-03).** This rank used to say *"THE API HAS
     NO CREATE ROUTE, which is very likely WHY rank 23 happened"* — that sentence is wrong as of
-    #1254, which added `PUT` with `If-None-Match: *` and the `cairn create` verb. ⚠ What
-    remains TRUE is narrower and worth keeping: a new **SCOPE's** first entry still cannot be
-    created through the API, because the index is built by walking the store root narrowed by
-    the allowlist, so an absent scope resolves to nothing (measured 2026-09-11: **rc 6
-    `not-found`**, against **rc 9 `already-exists`** as the control). The original text, kept
+    #1254, which added `PUT` with `If-None-Match: *` and the `cairn create` verb. 🔴 A first
+    correction of this rank then claimed a new **SCOPE's** first entry still could not be
+    created "because the index is built by walking the store root" — **that was also false**
+    and is retracted: `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+    `test_a_scopes_FIRST_entry_creates_the_directory` asserts **201** for an allowlisted scope
+    with no directory. The only gate is the caller's **token scope allowlist**; a scope outside
+    it answers 404, byte-identical to one that never existed. The original text, kept
     because the rank 23 link reasons from it: verified in
     `server.py`, `If-Match` was **mandatory** on PUT, `*` was refused, and the handler resolved an
     existing entry — so `cairn put --file` on a new ref failed *"cannot derive a revision"*. A

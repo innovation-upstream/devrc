@@ -67,30 +67,37 @@ every writer; `prune-index` owns deletion, with its own confirmation gate. Load
 whichever applies rather than reconstructing their steps here.
 
 🔴 **A CREATE route EXISTS — `cairn create --scope S --ref R --file F` (`PUT`
-with `If-None-Match: *`, devrc#1254). It still cannot create a scope's FIRST
-entry, and the reason is NOT the one this file used to give.** The old text said
-there was no create verb at all; that has been false since #1254, and the
-conclusion it drew survived only by accident. The real mechanism is that the
-index is built by WALKING THE STORE ROOT narrowed by your allowlist
-(`subsystem_recall.load_store`), so a scope with no directory on the pod's disk
-resolves to nothing and the write is refused at the index, before any filesystem
-write. A new scope's first entry is therefore still an operator step — seeding —
-and until somebody takes it the record exists nowhere the pod can serve.
+with `If-None-Match: *`, devrc#1254) — and it DOES create a scope's first entry,
+directory and all.** `create_entry` runs `path.parent.mkdir(exist_ok=True)`
+(`server.py`), commented *"how the store gained EVERY scope it has"*, and
+`test_a_scopes_FIRST_entry_creates_the_directory` asserts **201** plus the bytes
+on disk for a scope with no directory.
 
-MEASURED 2026-09-11, with the control that makes the reading mean something:
+🔴 **THE ONLY GATE IS YOUR TOKEN'S SCOPE ALLOWLIST.** A scope outside it answers
+**404**, byte-identical to one that never existed — deliberately, so an error
+cannot enumerate the store. A scope INSIDE it with no directory yet is created.
+So the remedy for "I cannot create into scope X" is an allowlist edit, **not**
+seeding.
 
-| `cairn create` target | answer |
-|---|---|
-| absent + non-allowlisted scope | **rc 6** `[not-found] — not found` |
-| allowlisted, present scope, ref that already exists | **rc 9** `[already-exists]` |
+⚠ **THIS FILE HAS NOW BEEN WRONG TWICE ABOUT THE SAME SENTENCE, IN OPPOSITE
+DIRECTIONS.** It used to say there was no create route at all (false since
+#1254). The correction then said a first entry "is still an operator step —
+seeding", blaming an index walk — **also false**, and caught by a round-1 audit.
+The measurement behind it probed a scope that was absent *and* non-allowlisted,
+on a pod where those two sets are identical, so it could not tell the allowlist
+gate from the index walk and credited the wrong one. `claude/RULES.md`: *"An
+EMPTY RESULT cannot distinguish two mechanisms — go find the step that differs."*
+The discriminating control is: allowlist a scope, do NOT seed it, `cairn create`
+→ expect **201**.
 
-The two codes differ, so the `not-found` is a fact about that scope rather than a
-probe wired to nothing. ⚠ Both wrote nothing.
+⚠ The failure a caller actually sees, measured 2026-09-11: `cairn create` into a
+non-allowlisted scope is **rc 6** `[not-found]`; into an allowlisted scope at a
+ref that exists is **rc 9** `[already-exists]`. Both wrote nothing. The codes
+differ, so rc 6 is a real reading — **but it is about the ALLOWLIST**, which is
+what the earlier version of this block got wrong.
 
-🔴 **That 404 is byte-identical for "outside your allowlist", "never existed" and
-"ref resolves to nothing"** — deliberately, so an error cannot enumerate the
-store. `~/.claude/skills/cairn/reference/operator-surface.md` carries the two
-ways an OPERATOR can still tell absent from refused; no client can.
+`~/.claude/skills/cairn/reference/operator-surface.md` carries the two ways an
+OPERATOR can tell a refused scope from an absent one; no client can.
 
 ## 🔴 The two different exit 4s
 

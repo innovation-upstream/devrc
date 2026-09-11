@@ -1088,12 +1088,19 @@ class TestTheFreezeIsWatchedNotAsserted:
         disagreed — which is why the retraction is written here rather than
         deleted.
 
-        What survives, and what actually justifies leaving directories writable:
-        a new **SCOPE's** first entry still cannot be created through the API,
-        because the index is built by walking the store root narrowed by the
-        caller's allowlist, so a scope with no directory resolves to nothing and
-        the write is refused at the index. Freezing directories too would leave a
-        brand-new subsystem's first entry with nowhere to go.
+        🔴 A first correction of this docstring replaced that with "a new SCOPE's
+        first entry still cannot be created through the API, because the index is
+        built by walking the store root" — ALSO false, and retracted here rather
+        than quietly overwritten, because this docstring has now been wrong twice
+        in opposite directions. `create_entry` runs
+        `path.parent.mkdir(exist_ok=True)` and
+        `test_a_scopes_FIRST_entry_creates_the_directory` asserts 201 for an
+        allowlisted scope with no directory.
+
+        What actually justifies leaving directories writable is narrower: local
+        work, and any caller whose token allowlist does not (yet) name the scope.
+        Freezing the directories too would stop a brand-new subsystem's first
+        entry being written LOCALLY, which is still a supported route.
         """
         root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
         cc.set_entry_mode(root, 0o444)

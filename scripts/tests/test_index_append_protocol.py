@@ -280,9 +280,9 @@ class TestTheMandatedToolIsThePreApprovedOne:
     🔴 THE MANDATED TOOLS CHANGED AT THE 2026-09-01 CUTOVER, so this assertion
     did too. The write is now `cairn append` / `cairn put` — a CLI, so `Bash` —
     plus `Write` for the two local files that remain: a first-ever entry (this
-    used to say "the API has no create route" — RETRACTED, devrc#1254 added one;
-    what blocks it is that a new SCOPE resolves to nothing in an index built by
-    walking the store root) and the scratch file `cairn put --file` reads. `Edit` is
+    used to say "the API has no create route" — RETRACTED, devrc#1254 added one,
+    and it creates the scope directory too; what gates it is only the caller's
+    token scope allowlist) and the scratch file `cairn put --file` reads. `Edit` is
     NO LONGER REQUIRED here: entry files are `0444` and an `Edit` against one
     fails with `EACCES`. Asserting it anyway would have been a pin that reads as
     coverage of a rule nothing follows, which is worse than none.

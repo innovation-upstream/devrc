@@ -112,10 +112,21 @@ PVC held, so it was refusing nothing. `civitai-app-requests` and
 `civitai-developer-docs` read as invisible because they had **never been seeded**,
 not because access was lost.
 
-🔴 **Order matters when you do widen it.** Seeding without the allowlist edit
-leaves the scope unreadable by that token (indistinguishable from absent);
-editing the allowlist without seeding changes nothing at all, because the index
-is built from what is ON DISK. Both, then replace the pod.
+🔴 **THE ALLOWLIST EDIT IS THE WHOLE FIX — SEEDING IS NOT REQUIRED.** An earlier
+version of this section said "editing the allowlist without seeding changes
+nothing at all, because the index is built from what is ON DISK". That is true of
+READS and **false for `cairn create`**: `create_entry` does
+`path.parent.mkdir(exist_ok=True)`, and
+`test_a_scopes_FIRST_entry_creates_the_directory` pins **201** for an allowlisted
+scope with no directory. So the sequence is:
+
+1. add the scope to the token row in the secret,
+2. replace the pod (the token file is read ONCE — see above),
+3. `cairn create --scope <new> --ref <ref> --file <path>` → **201**.
+
+`seed.sh` is for pushing a whole local tree and carries the overwrite hazard
+above; reach for it when you have many entries, not to bring one scope into
+existence.
 
 ## The freeze
 

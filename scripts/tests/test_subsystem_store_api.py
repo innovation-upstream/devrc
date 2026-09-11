@@ -4185,11 +4185,21 @@ _RETRACTED_BOUNDARY = (
     # the four live copies it missed, one straddled a newline inside a
     # docstring. A line-based grep structurally cannot see that one; this
     # scanner normalises wraps and case, which is the whole point.
-    # ⚠ The refuted claim is about the ROUTE's existence only. That a new
-    # SCOPE's first entry still cannot be created through the API remains TRUE
-    # (the index is built by walking the store root, so an absent scope
-    # resolves to nothing) — do not "correct" that sentence into a falsehood in
-    # the other direction.
+    # 🔴 THIS COMMENT ITSELF CARRIED A FALSE CLAIM AND TOLD READERS NOT TO FIX
+    # IT — the worst shape a note in a guard can take, and it is recorded rather
+    # than deleted. It read: "a new SCOPE's first entry still cannot be created
+    # through the API (the index is built by walking the store root) — do not
+    # 'correct' that sentence into a falsehood in the other direction."
+    # MEASURED FALSE: `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+    # `test_a_scopes_FIRST_entry_creates_the_directory` (this file) asserts 201
+    # for an allowlisted scope with NO directory. The only gate is the token's
+    # scope allowlist. The probe that produced the wrong claim used a scope that
+    # was absent AND non-allowlisted on a pod where those sets coincide, so it
+    # could not separate the two mechanisms.
+    # ⚠ FALSE-POSITIVE RANGE: this needle is a short, generic phrase, unlike the
+    # long sentences above it. A TRUE statement about some OTHER API ("the
+    # auditloop plugin push API has no create route") trips it. That is the
+    # known cost; reword, or carry a retraction marker within `_MARKER_WINDOW`.
     "no create route",
 )
 
