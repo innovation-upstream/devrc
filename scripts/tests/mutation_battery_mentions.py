@@ -179,10 +179,15 @@ MUTANTS: list[tuple] = [
      '        notify("cannot resolve it", ", ".join(repo_universe(discovered)))\n'
      "        return refuse(span, text, args)\n",
      "REFUSAL-PATH DISCLOSURE"),
+    # ⚠ RE-ANCHORED: the line used to read `candidates = universe`. The universe
+    # is now built LAZILY by `universe_rows()` (the ordering must not tax the
+    # `owner/repo#N` fast path), so that exact text no longer occurs and the row
+    # was scoring `PATTERN OCCURS 0x — NOT APPLIED`, i.e. surviving without
+    # testing anything. Re-run the battery after any further move of this line.
     ("K12", "disclosure", "the picker path logs the universe to stdout",
-     "        candidates = universe\n",
+     "        candidates = universe_rows()\n",
      '        print("universe:", repo_universe(discovered))\n'
-     "        candidates = universe\n",
+     "        candidates = universe_rows()\n",
      "PICKER-PATH DISCLOSURE"),
     # 🔴 K11/K12 LEAK `repo_universe(...)`, WHICH IS THE MAPPING'S *VALUES*. The
     # mapping is `{checkout name: "owner/repo"}`, so a leak has TWO spellings and

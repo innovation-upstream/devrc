@@ -259,34 +259,48 @@ def looks_like_a_repo_range_table(text: str) -> int:
 
 
 def looks_like_a_pick_log(text: str) -> int:
-    """How many DISTINCT `owner/repo` names a JSON-LINES document carries.
+    """How many ROWS of a JSON-LINES document have a PICK-LOG FINGERPRINT: an
+    object carrying a bare `owner/repo` string value AND a number.
 
     🔴 A DIFFERENT PARSE, NOT A DIFFERENT PATTERN. `picks.jsonl` is one JSON
     object per LINE: `json.loads` of the whole text raises `ValueError`, so
     `_json_dicts` yields nothing and every detector above returns 0 however many
     private names the file holds. The fix is to read it the way it is written.
 
+    🔴 ROWS, NOT DISTINCT NAMES — AND THAT CORRECTION IS THE POINT. The first
+    version counted distinct `owner/repo` names against
+    `MAPPING_KEY_THRESHOLD`, a threshold calibrated for ~390-entry DUMPS. This
+    file is the one member of the family whose cardinality is the OPERATOR'S
+    PICKING DIVERSITY, not the universe size: 500 rows naming the same three
+    repositories scored 3 and sailed past a guard whose block claims "a COPY of
+    either, committed under any name, fails the suite". The fingerprint does not
+    care how many distinct repos there are.
+
     A line that is not a JSON object is skipped rather than failing the file —
     the real artefact is append-only and can carry one torn last line.
 
-    ⚠ IT COUNTS NAMES AT ANY DEPTH IN EACH ROW, not just a `repo` field. A guard
-    keyed on today's field name would be walked past by tomorrow's rename, and
-    the hazard is the NAMES being in the tree, not which key holds them.
+    ⚠ IT LOOKS AT ANY DEPTH IN EACH ROW, not at today's `repo`/`n` field names.
+    A guard keyed on those would be walked past by tomorrow's rename, and the
+    hazard is the NAMES being in the tree, not which key holds them.
+
+    ⚠ THE `owner/repo` MATCH IS WHOLE-STRING, which is what keeps ordinary
+    transcripts out: a line of prose mentioning a repo is not a value that IS
+    one. The paired NUMBER is the second half — a pick is a repository AND a
+    reference, and requiring both is what separates this from any JSONL that
+    happens to carry a path-shaped value.
     """
-    names: set[str] = set()
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    # Two or more object lines, or it is not a JSON-LINES document — a single
-    # JSON object spread over one line is the other detectors' business, and a
-    # one-line file cannot be a log.
     rows = 0
-    for line in lines:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
-            doc = json.loads(line.strip())
+            doc = json.loads(line)
         except ValueError:
             continue
         if not isinstance(doc, dict):
             continue
-        rows += 1
+        has_repo = has_number = False
         stack = [doc]
         while stack:
             node = stack.pop()
@@ -295,8 +309,12 @@ def looks_like_a_pick_log(text: str) -> int:
             elif isinstance(node, list):
                 stack.extend(node)
             elif isinstance(node, str) and _FULL_NAME_RE.match(node):
-                names.add(node)
-    return len(names) if rows >= 2 else 0
+                has_repo = True
+            elif isinstance(node, (int, float)) and not isinstance(node, bool):
+                has_number = True
+        if has_repo and has_number:
+            rows += 1
+    return rows
 
 
 def test_the_mapping_detector_FIRES_on_a_realistic_mapping():
@@ -402,7 +420,8 @@ _SWEPT_SUFFIXES = (".json", ".py", ".jsonl")
 
 
 def candidate_files(root: Path | None = None) -> tuple[str, list[Path]]:
-    """(how, files) — every `.json`/`.py` this repo would publish.
+    """(how, files) — every file this repo would publish whose suffix is in
+    `_SWEPT_SUFFIXES` (`.json`, `.py`, `.jsonl`).
 
     🔴 TWO TIERS, TWO VIEWS, AND THE GUARD MUST WORK IN BOTH. `git ls-files` is
     the view the other content gates use, but the sandbox check derivation
@@ -430,7 +449,8 @@ def candidate_files(root: Path | None = None) -> tuple[str, list[Path]]:
 
 
 def disclosure_offenders(files, root: Path) -> list[str]:
-    """Every file in `files` that IS a repo mapping or a picker universe.
+    """Every file in `files` that IS one of the four generated artefacts — a
+    repo mapping, a picker universe, a reference-range table or a pick log.
 
     Lifted out of the guard below so the guard's own negative control can drive
     the SAME loop over a planted tree. It used to be inline, which left the only
@@ -583,9 +603,22 @@ def test_the_PICK_LOG_detector_FIRES_and_EVERY_OTHER_DETECTOR_is_BLIND_to_it():
         "this test's docstring before changing it")
     # …and it does NOT fire on an ordinary JSONL transcript that merely mentions
     # a couple of repos, which is the shape every fixture in this tree has.
-    chatty = "\n".join(json.dumps({"text": "see acme/widget and o/b"})
-                       for _ in range(50))
-    assert looks_like_a_pick_log(chatty) < MAPPING_KEY_THRESHOLD
+    chatty = "\n".join(json.dumps({"text": "see acme/widget and o/b", "i": i})
+                       for i in range(50))
+    assert looks_like_a_pick_log(chatty) < MAPPING_KEY_THRESHOLD, (
+        "a prose mention is not a value that IS an owner/repo — the "
+        "whole-string match is what keeps transcripts out")
+
+    # 🔴 THE GAP THE ROW FINGERPRINT CLOSES, ASSERTED. A real log records the
+    # operator's picking diversity, not the universe size: 60 picks across
+    # THREE repositories is a complete disclosure of those three and would have
+    # scored 3 under the distinct-name count this replaced.
+    narrow = "\n".join(
+        json.dumps({"n": 1200 + i, "repo": f"gardenersguild/Trowelcast{i % 3}",
+                    "t": 1757000000 + i}) for i in range(60))
+    assert looks_like_a_pick_log(narrow) >= MAPPING_KEY_THRESHOLD, (
+        "a pick log with few DISTINCT repos is still a pick log — this is the "
+        "case the distinct-name count could not see")
 
 
 def test_the_sweep_actually_LOOKS_at_jsonl_files(tmp_path):
@@ -1320,10 +1353,12 @@ class _Reply:
         self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
 
 
-def _graphql(answers: dict, *, returncode=0, errors=None):
+def _graphql(answers: dict, *, returncode=0, errors=None, seen=None):
     """A runner that answers `{alias_index: highest_number_or_None}`."""
     def run(argv, **kwargs):
         assert argv[:3] == ["gh", "api", "graphql"], argv
+        if seen is not None:
+            seen.append({"argv": list(argv), "stdin": kwargs.get("input")})
         data = {}
         for i, value in answers.items():
             data[f"r{i}"] = None if value is None else {
@@ -1352,6 +1387,47 @@ def test_the_ranges_query_asks_for_BOTH_issues_AND_pull_requests():
     # different number from the highest.
     assert "orderBy: {field: CREATED_AT, direction: DESC}" in q
     assert "totalCount" not in q
+    # 🔴 AND NOT DISCUSSIONS, WHICH SHARE THE SAME COUNTER. Measured — the
+    # newest discussion sits interleaved just below the issue/PR head. Asking
+    # for them would file a repo PLAUSIBLE for a number whose `/issues/<n>` URL
+    # 404s, because discussions live at `/discussions/<n>` and GitHub does not
+    # redirect. See `ranges_query`'s docstring for the four measurements.
+    assert "discussions" not in q, (
+        "discussions share the number sequence but are NOT openable as "
+        "/issues/<n> — counting them manufactures a PLAUSIBLE verdict for a "
+        "URL that 404s")
+
+
+def test_NO_REPOSITORY_NAME_reaches_the_gh_child_ARGV():
+    """🔴 A DISCLOSURE SURFACE THIS LEG INTRODUCED, and it is one the sibling
+    call does NOT have: `gh api user/repos` names nothing, while this query
+    interpolates up to 50 PRIVATE `owner/repo` names. A process's argv is
+    world-readable in `/proc/<pid>/cmdline` and in `ps` for the life of the call
+    — ~2.3s × 8 requests — which is the same reason `mention-open.py` routes the
+    picker rows through a FIFO instead of an argument.
+
+    So the document travels on STDIN. This asserts both halves: the names are
+    IN the stdin (the positive control — a test that found no names in argv
+    because the query was empty would prove nothing) and NOWHERE in argv."""
+    repos = ["gardenersguild/trowelcast", "hobbyist/PlotWidget"]
+    seen: list = []
+    RG.read_api_ranges(repos, runner=_graphql({0: 1, 1: 2}, seen=seen))
+    assert len(seen) == 1, seen
+    argv_blob = " ".join(seen[0]["argv"])
+    stdin = seen[0]["stdin"] or ""
+    for full in repos:
+        owner, name = full.split("/", 1)
+        assert name in stdin, (
+            f"POSITIVE CONTROL FAILED — {name!r} is not in the stdin document "
+            f"either, so this test would pass against a query that names "
+            f"nothing: {stdin[:200]!r}")
+        for token in (full, owner, name):
+            assert token not in argv_blob, (
+                f"a repository name reached the child's ARGV: {token!r} in "
+                f"{argv_blob!r}")
+    # `-F`, not `-f`: MEASURED, the two differ exactly here — `-f query=@-`
+    # sends the literal `@-` and gh answers a parse error.
+    assert seen[0]["argv"] == ["gh", "api", "graphql", "-F", "query=@-"], seen[0]
 
 
 def test_a_NONZERO_exit_still_yields_every_answer_in_the_batch():
@@ -1484,7 +1560,13 @@ def test_a_FAILED_ranges_leg_does_NOT_fail_the_run_or_clobber_the_table(
     toast — is the objection that kept this timer unwritten for months.
 
     The existing table is LEFT ALONE rather than replaced with an empty one, so
-    it ages, and that staleness is this leg's deadman."""
+    it ages, and that staleness is this leg's deadman.
+
+    ⚠ THIS COVERS THE *EMPTY-TABLE* SHAPE ONLY, AND SAYING SO IS THE POINT. Its
+    name claims a relationship — "a failed ranges leg" — and a leg fails in more
+    than one way; the sibling test below covers the RAISING shapes, which this
+    one structurally cannot see and which had no guard at all until an audit
+    measured `write_ranges` raising straight out of `main()`."""
     _stub_run(monkeypatch, api_out=_enough_repos())
     monkeypatch.setattr(RG, "read_api_ranges", lambda *a, **k: {})
     monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
@@ -1497,6 +1579,57 @@ def test_a_FAILED_ranges_leg_does_NOT_fail_the_run_or_clobber_the_table(
     assert json.loads(ranges.read_text()) == {"o/previous": 12}, (
         "the previous table was clobbered by an empty one — it must be left to "
         "AGE instead, which is what the handler's staleness note reads")
+
+
+def _raises(exc):
+    def go(*a, **k):
+        raise exc
+    return go
+
+
+@pytest.mark.parametrize("target,exc,why", [
+    ("read_api_ranges", RuntimeError("gh exploded"), "the API leg raises"),
+    ("build_ranges", AttributeError("a non-dict node"), "building raises"),
+    ("write_ranges", PermissionError("read-only home"),
+     "WRITING raises — the shape the audit measured"),
+])
+def test_a_ranges_leg_that_RAISES_still_exits_ZERO_and_keeps_the_old_table(
+        monkeypatch, tmp_path, capsys, target, exc, why):
+    """🔴 THE OTHER SIDE OF THE RELATIONSHIP THE TEST ABOVE NAMES. Whatever goes
+    wrong in the ranges leg, the run must exit 0 — a non-zero exit makes
+    `mention-known-repos-refresh` red and fires `notify-failure@`, the
+    DND-defeating toast class, EVERY DAY, for an ordering accelerator the
+    handler degrades cleanly without. That objection is why the timer went
+    unwritten for months; re-earning it with a `PermissionError` would be a
+    straight regression.
+
+    MEASURED before the fix: the block had no `try` at all, so `write_ranges`
+    into a read-only directory propagated out of `main()`.
+
+    Each case also asserts the failure is REPORTED. Swallowing it silently
+    would be the silent zero this generator is written against — and asserts
+    the mapping and universe still landed, so a mutant that skipped the whole
+    tail of `main()` cannot pass."""
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    monkeypatch.setattr(RG, "read_api_ranges",
+                        lambda names, **k: {n: 5 for n in names})
+    ranges = tmp_path / "known_ranges.json"
+    ranges.write_text(json.dumps({"o/previous": 12}))
+    monkeypatch.setattr(RG, target, _raises(exc))
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    assert rc == 0, f"{why}: the run exited {rc}, which reddens the unit"
+    assert json.loads(ranges.read_text()) == {"o/previous": 12}, why
+    err = capsys.readouterr().err
+    assert "range table NOT written" in err, (
+        f"{why}: the failure was swallowed silently — {err!r}")
+    assert type(exc).__name__ in err, (
+        f"{why}: the report does not name the cause — {err!r}")
+    assert (tmp_path / "m.json").exists() and (tmp_path / "u.json").exists(), (
+        f"{why}: the mapping/universe did not land, so this test would pass "
+        f"against a main() that skipped everything")
 
 
 def test_a_HEALTHY_run_writes_the_RANGE_TABLE_too(monkeypatch, tmp_path):

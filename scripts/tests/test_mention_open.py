@@ -436,9 +436,49 @@ def test_the_HOST_STATE_path_ledger_is_pinned_two_way(tmp_path):
     # inspected `dir(MO)` for paths under `mention-open/` would find NOTHING and
     # pass vacuously — a ledger that is two-way against an empty set is not
     # two-way. The source is also where a new constant actually gets added.
+    # 🔴 KEYED ON THE DIRECTORY, NOT ON A SPELLING — and the first version was
+    # keyed on a spelling. It required the literal `Path(` and a name ending
+    # `PATH`/`PICKS`, which an audit MEASURED walkable: the sibling
+    # `regen-known-repos.py` spells all three of ITS host-state paths as
+    # `X = _CONFIG_DIR / "y.json"`, so the next author following the
+    # neighbouring file's style adds an unredirected host-state file and this
+    # ledger stays green. A guard on WORDS is walkable by REWORDING.
+    #
+    # What is asked instead is the thing that matters: does this module-level
+    # assignment name the mention-open config directory at all? That catches
+    # `Path(...)`, `_CONFIG_DIR / …`, an f-string, and anything else that has to
+    # mention the directory to point at it.
+    #
+    # ⚠ `ast`, NOT A REGEX — and the regex was tried. A pattern that had to span
+    # a multi-line assignment backtracked badly enough to hang the run; walking
+    # the module's top-level `Assign` nodes and reading each one's own source
+    # segment asks the same question structurally, and cannot be fooled by
+    # a `mention-open` mention inside a nested function or a docstring.
     source = HANDLER.read_text()
-    in_source = set(re.findall(r"^([A-Z][A-Z0-9_]*(?:PATH|PICKS))\s*=\s*Path\(",
-                               source, re.M))
+    tree = ast.parse(source)
+    in_source = set()
+    for node in tree.body:                       # module level only
+        if not isinstance(node, ast.Assign):
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if "mention-open" not in segment:
+            continue
+        # …AND it must BUILD A PATH. `PICKER_CLASS = "float,mention-open"` is
+        # the i3 window class and names the directory only by coincidence of
+        # spelling — a bare string constant is not a file to redirect. The two
+        # shapes that ARE are a `Path(...)` call and a `/` join, and this asks
+        # for either, anywhere in the value.
+        if not any(
+            (isinstance(n, ast.Call)
+             and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+             == "Path")
+            or (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div))
+            for n in ast.walk(node.value)
+        ):
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name) and tgt.id.isupper():
+                in_source.add(tgt.id)
     assert in_source == set(HOST_STATE_CONSTANTS), (
         f"the host-state path ledger MOVED: the handler declares {sorted(in_source)}, "
         f"the ledger names {sorted(HOST_STATE_CONSTANTS)}. Every one of these "
@@ -4877,6 +4917,37 @@ def test_within_PLAUSIBLE_the_NEARER_head_wins():
         "this test would now pass under a mutant that ignored the distance")
 
 
+def test_the_DISTANCE_term_is_INERT_outside_PLAUSIBLE():
+    """🔴 THE CONDITION THE SORT KEY'S COMMENT CALLS LOAD-BEARING, PINNED — it
+    had NO test, and an adversarial audit measured the mutant (drop
+    `klass == CLASS_PLAUSIBLE`, keep `max_ref - target`) SURVIVING every
+    ordering fixture in this file.
+
+    Outside PLAUSIBLE the distance is NEGATIVE, so leaving it live sorts BELOW
+    rows WORST-FIRST: for `#1291`, a repo whose head is `#5` (d = -1286) would
+    outrank one whose head is `#1290` (d = -1). Backwards, and invisible to
+    every other test here because no fixture had TWO rows in the same
+    non-PLAUSIBLE class with different `max_ref` — which is exactly the gap.
+
+    🔴 THE FIXTURE IS BUILT SO ALL THREE CANDIDATE ORDERS DISAGREE: alphabetical
+    is near/far/mid, distance-ascending (the mutant) is far/mid/near, and the
+    correct answer — stable, i.e. incoming — is near/far/mid. A fixture where
+    two of those coincide could not tell the mutant from the fix."""
+    universe = ["acme/near", "acme/far", "acme/mid"]   # deliberately NOT sorted
+    ranges = {"acme/near": 1290, "acme/far": 5, "acme/mid": 400}
+    got = MO.order_universe(universe, "1291", ranges)
+    assert all(MO.plausibility_class("1291", ranges[r]) == MO.CLASS_BELOW
+               for r in universe), "POSITIVE CONTROL: these are not all BELOW"
+    assert got == universe, (
+        f"BELOW rows were reordered by the distance term, which is negative "
+        f"there and therefore ranks them WORST-FIRST: {got}")
+    # …and the mutant's order is asserted to be DIFFERENT, so this test cannot
+    # pass by the two happening to coincide.
+    mutant_order = sorted(universe, key=lambda r: ranges[r] - 1291)
+    assert mutant_order != universe, (
+        f"the fixture no longer distinguishes the mutant: {mutant_order}")
+
+
 def test_a_LOW_number_reorders_the_SAME_rows_DIFFERENTLY():
     """🔴 THE ORDER IS A FUNCTION OF THE CLICKED NUMBER, not a fixed ranking.
     `#3` is plausible for every repo with any references at all, and the one
@@ -5069,6 +5140,43 @@ def test_a_MALFORMED_pick_row_is_SKIPPED(tmp_path, row, why):
     assert [r["repo"] for r in MO.load_picks(p, now=_T0)] == ["o/keeper"], why
 
 
+def test_a_pick_log_that_is_NOT_UTF8_is_an_empty_list_not_a_DEAD_CLICK(tmp_path):
+    """🔴 THE ONE THAT WAS A LIVE DEFECT, AND IT IS A ONE-WORD ASYMMETRY.
+    `Path.read_text()` DECODES, and a decode failure raises
+    `UnicodeDecodeError` — a `ValueError`, NOT an `OSError`. Caught only by
+    `guarded_main`, the click produced "mention-open failed: UnicodeDecodeError"
+    and NO PICKER, while `load_picks`' own docstring said "EVERY failure is []"
+    and its sibling `load_known_ranges` already caught both.
+
+    Driven through `guarded_main` rather than `load_picks` alone, because the
+    claim is about the CLICK: the operator must still get a picker."""
+    p = tmp_path / "picks.jsonl"
+    p.write_bytes(json.dumps({"t": _T0, "repo": "o/r", "n": 5}).encode()
+                  + b"\n\xff\xfe not utf-8 at all\n")
+    assert MO.load_picks(p, now=_T0) == []
+
+
+def test_a_NON_UTF8_pick_log_still_shows_the_PICKER(monkeypatch, tmp_path):
+    """The behavioural half of the test above — the guard is about the click,
+    not about a return value. A corrupted accelerator must cost the operator a
+    worse ORDER, never a dead end."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/one": 9000})
+    bad = tmp_path / "picks-bad.jsonl"
+    bad.write_bytes(b"\xff\xfe\x00not utf-8\n")
+    monkeypatch.setattr(MO, "PICKS_PATH", bad)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/one"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    shown = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": shown.update(n=len(c)) or "")
+    said: list = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: said.append(a))
+    assert MO.guarded_main(["#1291"]) == 0
+    assert shown.get("n"), f"the click showed NO picker: {said}"
+    assert not said, f"the click reported a failure: {said}"
+
+
 def test_load_picks_caps_by_AGE_and_by_COUNT(tmp_path):
     """Both caps, closing different ways for old data to mislead: a repository
     that was the answer three months ago may not exist now, and an unbounded
@@ -5108,6 +5216,100 @@ def test_record_pick_APPENDS_and_the_file_is_0600(tmp_path):
     assert rows[0]["n"] == 1291 and isinstance(rows[0]["n"], int)
     assert oct(os.stat(p).st_mode)[-3:] == "600", oct(os.stat(p).st_mode)
     assert oct(os.stat(p.parent).st_mode)[-3:] == "700"
+
+
+def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(tmp_path):
+    """🔴 NOTHING ELSE TRIMS IT. `record_pick` only appends and the age cap is
+    applied on READ, so without this a 0600 file naming private repositories
+    accumulates forever — and `PICKS_MAX_ROWS`' comment claimed the count cap
+    prevented that, which an audit measured false: `load_picks` reads the whole
+    file and only then slices.
+
+    Asserted in BOTH directions, because a compaction that fired on every write
+    would be a write amplification and one that never fired would be no guard:
+    below the threshold the file is untouched, above it the TAIL survives."""
+    p = tmp_path / "picks.jsonl"
+    # One short, so the append lands the file EXACTLY on the threshold.
+    rows = [{"t": _T0 - (5000 - i), "repo": f"o/r{i}", "n": i + 1}
+            for i in range(MO.PICKS_COMPACT_AT - 1)]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    # AT the threshold: untouched. (`<=` vs `<` is the mutation a one-sided
+    # test cannot see, which is why this arm exists at all.)
+    before = p.read_text()
+    assert MO.record_pick("o/newest", "42", p, now=_T0)
+    assert len(p.read_text().splitlines()) == MO.PICKS_COMPACT_AT, (
+        "the log was trimmed AT the threshold rather than past it")
+    assert p.read_text().startswith(before), "existing rows were rewritten early"
+
+    # PAST it: trimmed to the most recent PICKS_MAX_ROWS, newest kept.
+    assert MO.record_pick("o/newer-still", "43", p, now=_T0 + 1)
+    kept = [json.loads(ln) for ln in p.read_text().splitlines()]
+    assert len(kept) == MO.PICKS_MAX_ROWS, len(kept)
+    assert kept[-1]["repo"] == "o/newer-still", kept[-1]
+    assert not any(r["repo"] == "o/r0" for r in kept), (
+        "compaction kept the HEAD of the file — it must keep the tail")
+    assert oct(os.stat(p).st_mode)[-3:] == "600", "compaction widened the mode"
+    # …and nothing was left behind.
+    assert not (tmp_path / "picks.jsonl.tmp").exists()
+
+
+def test_a_FAILED_compaction_still_RECORDS_the_pick(tmp_path, monkeypatch):
+    """Compaction runs after the row is durable, so its failure must cost a
+    large file, never the operator's pick."""
+    p = tmp_path / "picks.jsonl"
+    rows = [{"t": _T0, "repo": f"o/r{i}", "n": i + 1}
+            for i in range(MO.PICKS_COMPACT_AT + 5)]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    monkeypatch.setattr(MO, "_compact_picks",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("must not propagate")))
+    # The real function swallows; this proves `record_pick` calls it AFTER the
+    # append, so a raising compaction cannot lose the row.
+    with pytest.raises(AssertionError):
+        MO.record_pick("o/kept", "9", p, now=_T0)
+    assert json.loads(p.read_text().splitlines()[-1])["repo"] == "o/kept", (
+        "the row was not durable before compaction ran")
+
+
+def test_record_pick_NARROWS_a_pre_existing_parent_that_others_can_read(tmp_path):
+    """🔴 THE HALF THAT WAS ONLY CLAIMED. `Path.mkdir(mode=…, exist_ok=True)`
+    applies the mode ONLY at creation, so a pre-existing
+    `~/.config/mention-open/` keeps whatever mode it has — while the docstring
+    paired the parent with the file mode, which IS re-applied every write. The
+    original test created its parent fresh and so could not see this."""
+    d = tmp_path / "preexisting"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    assert MO.record_pick("acme/widget", "12", d / "picks.jsonl")
+    assert oct(os.stat(d).st_mode)[-3:] == "700", (
+        "a pre-existing group/world-readable config dir was left that way, and "
+        "it holds files naming PRIVATE repositories")
+
+
+def test_record_pick_does_NOT_WIDEN_a_parent_the_operator_narrowed(tmp_path):
+    """🔴 THE OTHER DIRECTION, AND IT IS WHY THE FIX IS "STRIP GROUP/OTHER"
+    RATHER THAN "SET 0700". A flat `chmod(0o700)` closes the hole above and
+    opens a worse one: it re-grants owner-write to a directory made read-only on
+    purpose. Measured — it made
+    `test_record_pick_CANNOT_RAISE_when_the_log_is_UNWRITABLE` pass by removing
+    the condition that test exists to exercise.
+
+    Owner bits must survive untouched; only group and other are stripped."""
+    d = tmp_path / "narrowed"
+    d.mkdir()
+    os.chmod(d, 0o500)                    # r-x------ : owner cannot write
+    try:
+        MO.record_pick("acme/widget", "12", d / "picks.jsonl")
+        assert oct(os.stat(d).st_mode)[-3:] == "500", (
+            "record_pick WIDENED a directory the operator had narrowed")
+    finally:
+        os.chmod(d, 0o700)
+    # …and a mode with no group/other bits at all is left completely alone.
+    e = tmp_path / "already-fine"
+    e.mkdir()
+    os.chmod(e, 0o700)
+    assert MO.record_pick("acme/widget", "12", e / "picks.jsonl")
+    assert oct(os.stat(e).st_mode)[-3:] == "700"
 
 
 def test_record_pick_RE_APPLIES_the_mode_to_a_file_it_did_NOT_create(tmp_path):

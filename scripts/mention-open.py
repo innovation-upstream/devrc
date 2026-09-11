@@ -473,7 +473,12 @@ ORDER_STATES = (ORDER_APPLIED, ORDER_NO_TABLE, ORDER_STALE)
 # TIER B — the operator's own picks. Three caps, and each closes a different way
 # for old data to mislead:
 #   * AGE — a repository that was the answer three months ago may not exist now.
-#   * COUNT — an unbounded file would be read in full on the picker path.
+#   * COUNT — how many rows are PARSED and SCORED on the picker path. ⚠ THIS
+#     USED TO SAY "an unbounded file would be read in full", WHICH WAS FALSE and
+#     an audit caught it: `load_picks` reads the whole file and then slices, so
+#     the cap has never bounded the READ. What bounds the file is
+#     `record_pick`'s compaction (see `PICKS_COMPACT_AT`); this cap bounds the
+#     work done per click.
 #   * HALF-LIFE — inside the window, last week outweighs last month smoothly
 #     rather than at a cliff.
 # None of them is tuned; they are "a season", "more than anyone clicks", and "a
@@ -482,6 +487,18 @@ ORDER_STATES = (ORDER_APPLIED, ORDER_NO_TABLE, ORDER_STALE)
 PICKS_MAX_AGE_DAYS = 90.0
 PICKS_MAX_ROWS = 500
 PICKS_HALF_LIFE_DAYS = 30.0
+
+# 🔴 WHEN THE LOG IS TRIMMED, AND WHY IT IS TRIMMED AT ALL. `record_pick` only
+# APPENDS and the age cap is applied on READ, so without this the file grows
+# forever — a 0600 file naming private repositories, accumulating rows no reader
+# will ever use. An audit found the comment above claiming the count cap
+# prevented that; it never did.
+#
+# Trimming at a MULTIPLE of the read cap rather than at the cap itself is the
+# whole point: rewriting on every pick would be a write amplification, while
+# 2x means the rewrite happens once per `PICKS_MAX_ROWS` picks and the tail it
+# keeps is always at least what a reader would use.
+PICKS_COMPACT_AT = PICKS_MAX_ROWS * 2
 
 # How far apart two reference numbers have to be before proximity stops helping.
 # `#1290` and `#1291` in one repo are the same week's work; `#3` and `#1291` are
@@ -626,7 +643,15 @@ def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]
     now = time.time() if now is None else now
     try:
         lines = path.read_text().splitlines()
-    except OSError:
+    except (OSError, ValueError):
+        # 🔴 `ValueError` IS NOT REDUNDANT — IT IS `UnicodeDecodeError`, AND ITS
+        # ABSENCE WAS A DEAD CLICK. `Path.read_text()` decodes, and a decode
+        # failure raises `UnicodeDecodeError`, which subclasses `ValueError` and
+        # NOT `OSError`. Caught only by `guarded_main`, it became
+        # "mention-open failed: UnicodeDecodeError…" with NO picker — reproduced
+        # end-to-end against a `picks.jsonl` whose second line held `\xff\xfe`.
+        # `load_known_ranges` one screen up already catches both; the asymmetry
+        # was the bug, and this docstring's "EVERY failure is []" was false.
         return []
     out: list[dict] = []
     for line in lines[-PICKS_MAX_ROWS:]:
@@ -762,11 +787,27 @@ def record_pick(repo: str, num: str, path: Path | None = None,
     permission change must cost the learning, not the click. Every failure is a
     quiet `False`.
 
-    🔴 0600, PARENT 0700, AND THE MODE IS SET ON EVERY WRITE RATHER THAN AT
-    CREATION. `open(..., "a")` does not re-apply a mode to a file that already
-    exists, so a file created before this rule — or by a hand-run — would keep
-    whatever umask it was born with, forever. It names PRIVATE repositories;
-    see the module docstring.
+    🔴 0600 ON THE FILE, AND NO GROUP/OTHER ACCESS ON THE PARENT, BOTH ENFORCED
+    ON EVERY WRITE RATHER THAN AT CREATION — AND THE PARENT HALF WAS THE ONE
+    THAT WAS ONLY CLAIMED. Neither `open(..., "a")` nor
+    `Path.mkdir(mode=…, exist_ok=True)` re-applies a mode to something that
+    already exists, so a file OR a directory created before this rule, by a
+    hand-run, or under a looser umask kept it forever while this sentence said
+    otherwise. Both name PRIVATE repositories; see the module docstring.
+
+    ⚠ THE PARENT IS NARROWED, NOT SET. See the comment at the `chmod` — the rule
+    is that nobody else may read it, and a flat `chmod(0o700)` would also WIDEN
+    a directory the operator made read-only on purpose.
+
+    🔴 IT COMPACTS, BECAUSE NOTHING ELSE DOES. `record_pick` only appends and
+    the age cap is applied on READ, so without this the log grows without bound
+    — an audit found `PICKS_MAX_ROWS`' comment claiming otherwise. Past
+    `PICKS_COMPACT_AT` the tail is rewritten atomically (tmp-then-`replace`,
+    the same shape `regen-known-repos.py` uses), so a reader that opens the
+    file mid-compaction sees the old content or the new, never a truncated one.
+    ⚠ A FAILED COMPACTION IS NOT A FAILED WRITE: the row is already on disk and
+    the operator's pick is recorded, so it returns True and the file is simply
+    trimmed on some later pick.
 
     ⚠ IT RECORDS ONLY WELL-FORMED `owner/repo` AND A POSITIVE INTEGER. A row the
     reader would discard is not worth writing, and a log full of them would
@@ -785,12 +826,42 @@ def record_pick(repo: str, num: str, path: Path | None = None,
            "repo": repo, "n": n}
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 🔴 STRIP GROUP/OTHER, NEVER "SET 0700" — the rule is that nobody else
+        # may read this directory, not that it must have one exact mode. A flat
+        # `chmod(0o700)` also WIDENS, which is worse than the hole it closes: it
+        # would silently re-grant owner-write to a directory the operator had
+        # deliberately made read-only, and it made
+        # `test_record_pick_CANNOT_RAISE_when_the_log_is_UNWRITABLE` pass by
+        # removing the very condition it tests. Owner bits are preserved.
+        parent_mode = os.stat(path.parent).st_mode & 0o777
+        if parent_mode & 0o077:
+            os.chmod(path.parent, parent_mode & ~0o077)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
         os.chmod(path, 0o600)
     except OSError:
         return False
+    _compact_picks(path)
     return True
+
+
+def _compact_picks(path: Path) -> None:
+    """Trim the pick log to its most recent `PICKS_MAX_ROWS` rows, atomically.
+
+    Best-effort and SILENT on every failure: it runs after the row is already
+    durable, so a full disk costs a large file rather than the pick. See
+    `record_pick` and `PICKS_COMPACT_AT`.
+    """
+    try:
+        lines = path.read_text().splitlines()
+        if len(lines) <= PICKS_COMPACT_AT:
+            return
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("\n".join(lines[-PICKS_MAX_ROWS:]) + "\n")
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+    except (OSError, ValueError):
+        return
 
 
 def repo_of_github_url(url: str) -> str:

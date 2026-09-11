@@ -431,10 +431,25 @@ def ranges_query(batch: list[str]) -> str:
 
     🔴 BOTH LISTS, NOT JUST ISSUES. GitHub numbers issues and pull requests out
     of ONE sequence per repository, so the highest of the two is the highest
-    reference the repo has — and a repo with issues DISABLED (48 of them on this
-    host, see `build_universe`) would report 0 from the issues list alone while
-    its PR numbers run into the thousands. Asking only one list would
-    manufacture exactly the false `IMPOSSIBLE` verdict the reader ranks last.
+    reference THIS HANDLER CAN OPEN — and a repo with issues DISABLED (48 of
+    them on this host, see `build_universe`) would report 0 from the issues list
+    alone while its PR numbers run into the thousands. Asking only one list
+    would manufacture exactly the false `IMPOSSIBLE` verdict the reader ranks
+    last.
+
+    ⚠ DISCUSSIONS ARE IN THAT SEQUENCE TOO AND ARE DELIBERATELY NOT ASKED FOR.
+    MEASURED 2026-09-11 on four public repos with discussions enabled
+    (`vercel/next.js` 98550 vs 98580/98581, `astral-sh/ruff` 28504 vs
+    28519/28530, `vitejs/vite` 23457 vs 23470/23469): the newest discussion sits
+    interleaved just below the issue/PR head, which is the signature of ONE
+    shared counter. Including them would be WRONG FOR THIS PURPOSE, not merely
+    unnecessary: `mention-open.py` turns a chosen row into `/issues/<n>`, and
+    GitHub does not redirect that to a discussion — discussions live at
+    `/discussions/<n>`. Counting them would file a repo as PLAUSIBLE for a
+    number whose URL 404s, and a repo with ONLY discussions reports 0 and is
+    ranked last, which is the right answer for the same reason. So the sentence
+    above says "can open", not "has": those are different numbers and an
+    earlier draft conflated them.
 
     ⚠ `orderBy: CREATED_AT DESC, first: 1` RATHER THAN `totalCount`. The count
     is how MANY, which is not the same number: a repo with 10 issues whose
@@ -497,8 +512,21 @@ def read_api_ranges(full_names: list[str],
     for start in range(0, len(full_names), RANGES_BATCH):
         batch = full_names[start:start + RANGES_BATCH]
         try:
-            r = runner(["gh", "api", "graphql", "-f",
-                        f"query={ranges_query(batch)}"],
+            # 🔴 THE DOCUMENT GOES ON *STDIN*, NEVER ON argv, AND THAT IS A
+            # DISCLOSURE RULE RATHER THAN A STYLE. `ranges_query` interpolates
+            # up to 50 PRIVATE `owner/repo` names into it, and a process's argv
+            # is world-readable in `/proc/<pid>/cmdline` and in `ps` for the
+            # life of the call — ~2.3s × 8 requests. The pre-existing
+            # `gh api user/repos` names nothing, so this leg introduced the
+            # surface; `mention-open.py` already routes the picker rows through
+            # a FIFO for exactly this reason.
+            #
+            # ⚠ `-F`, NOT `-f` — MEASURED, because the two differ precisely
+            # here. `-F query=@-` reads the value from stdin; `-f query=@-`
+            # sends the literal two characters `@-` and `gh` answers
+            # `Expected one of SCHEMA, SCALAR, TYPE, … actual: DIR_SIGN`.
+            r = runner(["gh", "api", "graphql", "-F", "query=@-"],
+                       input=ranges_query(batch),
                        capture_output=True, text=True, timeout=RANGES_TIMEOUT)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -711,27 +739,52 @@ def main(argv: list[str] | None = None) -> int:
     # docstring: the two files above are what make a click RESOLVE; this one
     # only ORDERS rows that are offered either way. A red unit every day for an
     # ordering accelerator is the objection that kept this timer unwritten.
+    #
+    # 🔴 AND "CANNOT FAIL THE RUN" IS NOW ENFORCED RATHER THAN ASSERTED. The
+    # first version of this block had no `try`, so an exception ANYWHERE in the
+    # leg propagated out of `main()` — a non-zero exit, a red unit, and the
+    # DND-defeating `notify-failure@` toast, which is precisely what the
+    # paragraph above says must not happen. MEASURED by an adversarial audit:
+    # `write_ranges` into a read-only directory raises `PermissionError`, and
+    # `_highest_ref` raises `AttributeError` on a non-dict `issues` — neither
+    # was caught by `read_api_ranges`' narrower `except (ValueError, TypeError)`.
+    # The guard's own test named "a failed ranges leg" while exercising only the
+    # EMPTY-TABLE branch: a docstring naming a relationship over a body
+    # inspecting one side.
+    #
+    # ⚠ `except Exception`, DELIBERATELY BROAD AND DELIBERATELY NOT BARE — the
+    # same posture as `mention-open.py`'s `guarded_main`. `KeyboardInterrupt`
+    # and `SystemExit` derive from `BaseException` and must still terminate.
     if not args.no_ranges:
-        ranges = build_ranges(universe, read_api_ranges(universe))
-        if ranges:
-            write_ranges(ranges, args.ranges_path)
-            zero = sum(1 for v in ranges.values() if v == 0)
-            # 🔴 BOTH NUMBERS, ALWAYS. "answered 340" alone is the silent-zero
-            # shape: it is indistinguishable from a leg that asked about 340
-            # repos when the universe holds 392. The gap IS the UNKNOWN class.
-            print(f"wrote {args.ranges_path} — {len(ranges)} of "
-                  f"{len(universe)} repo(s) answered "
-                  f"({len(universe) - len(ranges)} unknown, {zero} with no "
-                  f"references at all)")
-        else:
-            # Deliberately NOT exit 3 — and deliberately not silent either. The
-            # existing table is left in place rather than replaced by an empty
-            # one; it then AGES, and `mention-open.py` degrades to today's order
-            # and says so in the picker header. That staleness is this leg's
-            # deadman.
-            print(f"range table NOT written — 0 of {len(universe)} repo(s) "
-                  f"answered; {args.ranges_path} left as it was (the handler "
-                  f"degrades to an unordered picker)", file=sys.stderr)
+        try:
+            ranges = build_ranges(universe, read_api_ranges(universe))
+            if ranges:
+                write_ranges(ranges, args.ranges_path)
+                zero = sum(1 for v in ranges.values() if v == 0)
+                # 🔴 BOTH NUMBERS, ALWAYS. "answered 340" alone is the
+                # silent-zero shape: it is indistinguishable from a leg that
+                # asked about 340 repos when the universe holds 392. The gap IS
+                # the UNKNOWN class.
+                print(f"wrote {args.ranges_path} — {len(ranges)} of "
+                      f"{len(universe)} repo(s) answered "
+                      f"({len(universe) - len(ranges)} unknown, {zero} with no "
+                      f"references at all)")
+            else:
+                # Deliberately NOT exit 3 — and deliberately not silent either.
+                # The existing table is left in place rather than replaced by an
+                # empty one; it then AGES, and `mention-open.py` degrades to
+                # today's order and says so in the picker header. That staleness
+                # is this leg's deadman.
+                print(f"range table NOT written — 0 of {len(universe)} repo(s) "
+                      f"answered; {args.ranges_path} left as it was (the "
+                      f"handler degrades to an unordered picker)",
+                      file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 — see the block comment above
+            print(f"range table NOT written — the ranges leg failed with "
+                  f"{type(exc).__name__}: {exc}; {args.ranges_path} left as it "
+                  f"was (the handler degrades to an unordered picker). This is "
+                  f"NOT a run failure: the mapping and the universe above were "
+                  f"written", file=sys.stderr)
     return 0
 
 
