@@ -900,11 +900,12 @@ def record_pick(repo: str, num: str, path: Path | None = None,
 
     Returns True if the line was WRITTEN — which is not quite "survived". A
     compaction racing this call carries over anything appended past its read
-    offset (see `_compact_picks`), so the row survives whenever its `write(2)`
-    lands before that carry-over read, and is LOST WHOLE — not torn — when it
-    lands after. The distinction is stated because an earlier version of this
-    line said "True if it landed" while a measured ordering destroyed the row,
-    and the version after THAT described the losing case too narrowly.
+    offset, so the row is lost only when THIS call's append fd was opened before
+    that compaction's `os.replace` AND its write landed after the carry-over
+    read. `_compact_picks` carries the measured table, including the ordering
+    that survives however late it writes. The distinction is stated because this
+    line first said "True if it landed" while a measured ordering destroyed the
+    row, and every later version described the losing case at the wrong width.
 
     🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE OPEN. This runs after the
     operator has already chosen a URL; a full disk, a read-only home or a
@@ -1019,22 +1020,34 @@ def _compact_picks(path: Path) -> None:
         past the byte offset this call read is copied into the tmp before the
         replace.
 
-    ⚠ AND "CLOSED" IS SCOPED — STATED AT THE WIDTH IT WAS MEASURED, WHICH TOOK
-    FOUR GOES. An append whose `write(2)` lands BEFORE this call's carry-over
-    read survives, lock or no lock. The losing condition is the complement:
-    a `write(2)` after that read. MEASURED, three orderings:
-        before the carry-over read            -> survives
-        after the read, before `os.replace`   -> LOST
-        fd opened before, written AFTER it    -> LOST
-    ⚠ TWO THINGS AN EARLIER WORDING GOT WRONG. It said the loser was "a write
-    physically INTERLEAVING with `os.replace`" — but the third row above
-    interleaves with nothing, and it is the LIKELY shape, because a
-    budget-expired `record_pick` holds its append fd open across its own
-    `json.dumps` and buffered write. And it offered "`load_picks` skips a torn
-    line" as mitigation: nothing tears. The bytes go to the unlinked inode and
-    the row VANISHES WHOLE while `record_pick` returns True — the same silent
-    loss, in a window now measured in microseconds rather than a whole
-    compaction. A residual, not a guarantee.
+    ⚠ AND "CLOSED" IS SCOPED. FOUR SUCCESSIVE WORDINGS OF THIS PARAGRAPH WERE
+    WRONG — IN BOTH DIRECTIONS — SO IT IS A TABLE OF MEASURED ORDERINGS RATHER
+    THAN A SENTENCE. Each row was driven against this function:
+
+      the appending fd was …          its write(2) …        outcome
+      ------------------------------  --------------------  ----------------
+      open before the carry-over read completes before it   SURVIVES
+      open before `os.replace`        lands after the read  LOST WHOLE
+      opened AFTER `os.replace`       anything              SURVIVES
+
+    🔴 THE DISCRIMINATOR IS WHEN THE *FD* WAS OPENED, NOT WHEN THE WRITE LANDED,
+    and that is the correction a round-6 audit forced. The wording before it
+    said "the losing condition is the complement: a write(2) after that read",
+    which is FALSE — an fd opened after the replace writes to the NEW inode and
+    survives however late it is. Read literally the old sentence made appends
+    look unsafe for an unbounded period after any compaction, inviting a fix
+    (re-locking, fsync) for a residual whose real exposure is one appender's own
+    open->write interval. A lost row is a lost row; a wrong diagnosis is worse.
+
+    ⚠ AND IT IS "LOST WHOLE", NOT TORN — but only because of WHO writes. A
+    correction in between claimed a straddling write leaves a torn line, and it
+    does: measured with a two-`write(2)` append, `{"t": 1757009999, "rep` stayed
+    in the live file. `record_pick` cannot produce that shape — it writes one
+    row through one buffered `write` and flushes at close — so for THIS writer
+    the loss is always whole, and the torn case needs a different one.
+
+    In every losing case the cost is the same, one learning row, and
+    `record_pick` returns True — which its own docstring says plainly.
 
     ⚠ NO WAIT HERE AND A BOUNDED BUDGET IN THE APPEND, AND THE ASYMMETRY IS THE
     POINT. Skipping compaction costs nothing — the next pick trims instead — so

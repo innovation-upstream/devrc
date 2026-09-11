@@ -5685,6 +5685,89 @@ def test_a_row_appended_DURING_a_compaction_is_CARRIED_OVER(tmp_path,
     assert len(rows) == MO.PICKS_MAX_ROWS + 1, len(rows)
 
 
+def test_the_MEASURED_orderings_of_an_append_vs_a_compaction(tmp_path):
+    """🔴 THE RESIDUAL TABLE IN `_compact_picks`, MACHINE-CHECKED. FOUR
+    successive wordings of that paragraph were wrong, in BOTH directions, so the
+    orderings are asserted rather than described:
+
+        fd open before the carry-over read, write before it  -> survives
+        fd open before `os.replace`, write after the read    -> LOST WHOLE
+        fd opened AFTER `os.replace`                         -> survives
+
+    🔴 THE THIRD ROW IS THE ONE THAT KEEPS BEING GOT WRONG, and it is why this
+    test exists rather than a sentence. The wording before it said the loser was
+    "any write(2) after the carry-over read" — but an fd opened after the
+    replace writes to the NEW inode and survives however late. The discriminator
+    is WHEN THE FD WAS OPENED.
+
+    ⚠ WHAT IS PINNED IS THE TABLE, NOT A PROMISE. The losing row costs one
+    learning row and no click, and `load_picks` must stay readable throughout —
+    the property that actually matters, asserted last."""
+    row = json.dumps({"t": _T0 + 9999, "repo": "o/late", "n": 4242}) + "\n"
+
+    def seeded():
+        p = tmp_path / f"picks{len(list(tmp_path.iterdir()))}.jsonl"
+        p.write_text("\n".join(
+            json.dumps({"t": _T0 + i, "repo": f"o/r{i}", "n": i + 1})
+            for i in range(MO.PICKS_COMPACT_AT + 10)) + "\n")
+        return p
+
+    # (1) BEFORE the carry-over read — via an fd opened and written up front.
+    log = seeded()
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(row)
+    MO._compact_picks(log)
+    assert "o/late" in log.read_text(), (
+        "a write that COMPLETED before the carry-over read was lost — the "
+        "carry-over is not working")
+
+    # (2) ENTIRELY AFTER the replace, through an fd opened beforehand. Nothing
+    # interleaves; this is the shape a budget-expired record_pick produces.
+    log = seeded()
+    fh = open(log, "a", encoding="utf-8")
+    MO._compact_picks(log)
+    fh.write(row)
+    fh.close()
+    assert "o/late" not in log.read_text(), (
+        "the table says this ordering LOSES the row; it survived, so the "
+        "residual paragraph is now wrong in the other direction")
+
+    # (3) 🔴 THE ROW THE PARAGRAPH KEPT GETTING WRONG: an fd opened AFTER the
+    # replace writes to the NEW inode and SURVIVES, however late it is. Without
+    # this case the losing condition reads as "any write after the carry-over
+    # read", which is what four wordings said and which is false.
+    log = seeded()
+    MO._compact_picks(log)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(row)
+    assert "o/late" in log.read_text(), (
+        "an fd opened AFTER the replace lost its row — then the losing "
+        "condition really is 'any write after the read' and the table is wrong")
+
+    # 🔴 THE PROPERTY THAT ACTUALLY MATTERS, in every ordering: the reader
+    # survives. A lost row costs the learning and nothing else.
+    for p in (log,):
+        assert isinstance(MO.load_picks(p), list)
+
+    # ⚠ AND `record_pick` CANNOT STRADDLE THE READ, which is why the loss is
+    # always WHOLE rather than a torn line for THIS writer: it writes one row
+    # through one buffered `write` and flushes at close. A straddling writer
+    # would tear — measured with a hand-rolled two-`write(2)` append — so the
+    # claim is about the writer, not about the filesystem.
+    probe = seeded()
+    real_write, calls = os.write, []
+    os.write = lambda fd, b, *a, **k: (calls.append(len(b)),
+                                       real_write(fd, b))[1]
+    try:
+        MO.record_pick("gardenersguild/trowelcast", "1291", probe)
+    finally:
+        os.write = real_write
+    assert len(calls) <= 1, (
+        f"record_pick made {len(calls)} write(2) calls for one row — it can "
+        f"now STRADDLE a carry-over read, so the loss is no longer always "
+        f"whole and `_compact_picks`' table needs a torn row")
+
+
 def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
                                                               monkeypatch):
     """🔴 ONE CLICK IS ONE PROCESS, SO TWO CLICKS ARE TWO WRITERS — and without

@@ -675,9 +675,11 @@ MUTANTS: list[tuple] = [
     # ⚠ RE-WORDED: the carry-over shipped in the same commit RESCUES a row
     # written during the read->replace window, lock or no lock. What the
     # lock still buys is a much smaller residual — see `_compact_picks`.
-    ("K70", "deletion", "the pick-log APPEND stops taking the lock, widening "
-                        "the residual loss window from the carry-over gap back "
-                        "out towards a whole compaction",
+    ("K70", "deletion", "the pick-log APPEND stops taking the lock, so EVERY "
+                        "concurrent append writes unlocked into the "
+                        "read->replace window instead of only budget-expired "
+                        "ones — the RATE of exposure to the residual rises; "
+                        "the window itself is the carry-over gap either way",
      "        with _picks_lock(path, wait_s=PICKS_LOCK_WAIT_S):\n",
      "        if True:\n",
      "not taking the lock"),
@@ -689,7 +691,7 @@ MUTANTS: list[tuple] = [
      # mutant must be able to change behaviour before it can test anything.
      "                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN,\n                                     errno.EACCES):\n                    break\n",
      "                if False:\n                    break\n",
-     "retried"),
+     "burns the whole budget"),
     ("K71", "deletion", "the parent-directory narrowing masks 0o777 again, "
                         "silently destroying setuid/setgid/sticky on a directory "
                         "holding PRIVATE repository names",
