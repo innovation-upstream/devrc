@@ -30,18 +30,109 @@ _spec.loader.exec_module(RG)
 # --------------------------------------------------------------------------- #
 # 🔴 The disclosure guard
 # --------------------------------------------------------------------------- #
-_PAIR_RE = re.compile(
-    r"""["']([A-Za-z0-9][A-Za-z0-9._-]*)["']\s*:\s*["']([A-Za-z0-9-]+/[A-Za-z0-9._-]+)["']""")
+# What an `owner/repo` looks like. Shared by BOTH detectors below — the mapping
+# one asks it of a dict's VALUES, the universe one of a list's ELEMENTS — so the
+# two arms cannot drift on what a repository name is.
+_FULL_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 # A repo mapping is many DISTINCT names pointing at `owner/repo`. Counting
 # occurrences instead flagged a dl-router fixture that repeats ONE key 45 times
 # (`dupRelPath: "john-smith/75936.mov"`); the leaked file had 420 distinct keys.
+#
+# 🔴 THE NUMBER IS NOT THE GUARD — THE SHAPE IS, AND THAT IS WHY THIS ONE IS
+# SAFE TO LEAVE ALONE. `looks_like_a_repo_mapping` counts keys inside ONE dict
+# literal, so reaching 20 takes a single object mapping 20 distinct names at
+# `owner/repo` — which is a repo mapping, not a coincidence. MEASURED across all
+# 562 published `.json`/`.py` files on 2026-09-09: largest score **9**
+# (`scripts/check-clickup-addressed/check-completion.py`, a hand-curated
+# vocabulary), i.e. 11 keys of headroom in ONE literal. Under the text sweep this
+# replaced, the largest was **19** — one added fixture from reddening a
+# DISCLOSURE guard, because unrelated pairs anywhere in a 700-line file were
+# summed together.
+#
+# ⚠ NO RATCHET IS ASSERTED ON THAT HEADROOM, DELIBERATELY. A "largest ordinary
+# file must stay under N" test is a second fixed threshold, and the curated
+# vocabulary above is a legitimate mapping that may grow — the guard would go
+# red on an honest edit, which is the failure mode this change removed. The
+# measurement is recorded here; the enforcement is the shape.
 MAPPING_KEY_THRESHOLD = 20
 
 
+def _json_dicts(text: str):
+    """Every `dict` in `text` read as a JSON document, at any depth."""
+    try:
+        doc = json.loads(text.strip())
+    except ValueError:
+        return
+    stack = [doc]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            yield node
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+
+
 def looks_like_a_repo_mapping(text: str) -> int:
-    """How many DISTINCT `name: "owner/repo"` keys `text` carries."""
-    return len({k for k, _ in _PAIR_RE.findall(text)})
+    """How many DISTINCT `name -> "owner/repo"` keys the BIGGEST single MAPPING
+    LITERAL in `text` carries.
+
+    🔴 ONE LITERAL, NOT THE WHOLE FILE — AND THAT IS THE FIX, NOT A RELAXATION.
+    This used to `re.findall` a `"key": "owner/repo"` pattern across the entire
+    text and count the distinct keys, which sums pairs that have nothing to do
+    with each other: unrelated fixtures, several small dicts, a docstring and a
+    parametrize list all added into one number. MEASURED 2026-09-09, this very
+    file scored **19** against a threshold of 20 — one added fixture from
+    reddening a DISCLOSURE guard, and the fixes that come to hand under pressure
+    (raise the number, exclude the file) are the ones that gut it. The number was
+    never the guard; the SHAPE is. `looks_like_a_repo_universe` had already
+    reached the same conclusion for the list shape and used `ast` for exactly
+    this reason — this is that argument applied to the dict shape.
+
+    🔴 BOTH INCIDENT SPELLINGS ARE STILL CAUGHT, and they are the whole point:
+      * a `.py` module holding `KNOWN_REPOS = {...}` — the ORIGINAL incident, a
+        generator writing its output into a module that was then committed. It
+        is an `ast.Dict` literal, counted here.
+      * a `.json` file of the same mapping — what the generator emits today. It
+        is a JSON object, counted here, at ANY depth, so wrapping it in
+        `{"repos": {...}}` does not hide it.
+    A dict-literal count on the artefact is if anything TIGHTER than the old
+    text sweep: 420 keys in one literal is 420 either way, and no ordinary file
+    reaches 20 by accident (measurement beside `MAPPING_KEY_THRESHOLD`).
+
+    ⚠ WHAT IT CANNOT SEE, stated rather than papered over:
+      * a mapping SPLIT across several smaller literals, or built by a
+        comprehension, a `dict(...)` call, or key-by-key assignment. That is the
+        same residual `looks_like_a_repo_universe` already documents, and it is
+        deliberate: this detects the DUMP, which is how this has gone wrong.
+      * a mapping embedded as an escaped JSON string inside another document.
+      * anything outside `.json`/`.py` — the sweep's file filter, unchanged.
+    """
+    best = 0
+    for node in _json_dicts(text):
+        best = max(best, len({k for k, v in node.items()
+                              if isinstance(v, str) and _FULL_NAME_RE.match(v)}))
+    # The Python-literal spelling. `ast` rather than a regex, so a dict is
+    # recognised as a dict rather than as "some quoted strings near a colon" —
+    # and a non-constant key (`'X'.lower()`, a variable) is skipped instead of
+    # being scraped out of the source text.
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return best
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = set()
+        for k, v in zip(node.keys, node.values):
+            if (isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    and isinstance(v, ast.Constant) and isinstance(v.value, str)
+                    and _FULL_NAME_RE.match(v.value)):
+                keys.add(k.value)
+        best = max(best, len(keys))
+    return best
 
 
 # 🔴 A SECOND SHAPE, BECAUSE THE GENERATOR NOW EMITS A SECOND FILE — AND THE
@@ -51,9 +142,8 @@ def looks_like_a_repo_mapping(text: str) -> int:
 # that is a WIDER disclosure than the mapping (it is deliberately unfiltered, so
 # it names MORE private repositories). Committing one would have sailed past the
 # guard that exists precisely to stop that — the same structural blindness that
-# let the original incident through, in a new shape.
-_FULL_NAME_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# let the original incident through, in a new shape. (`_FULL_NAME_RE` is defined
+# above `looks_like_a_repo_mapping`, which now shares it.)
 
 
 def _owner_repo_count(items) -> int:
@@ -121,6 +211,55 @@ def test_the_mapping_detector_FIRES_on_a_realistic_mapping():
         "{'a': 'o/a', 'b': 'o/b', 'c': 'o/c'}") < MAPPING_KEY_THRESHOLD
 
 
+def test_the_mapping_detector_FIRES_on_the_JSON_the_generator_ACTUALLY_WRITES():
+    """🔴 THE SECOND POSITIVE CONTROL, AND IT IS THE ONE THAT MATTERS TODAY.
+
+    The `.py` control above is the ORIGINAL incident's shape — a generator's
+    output pasted into a module. What the generator emits NOW is a JSON object,
+    and a detector that only understood Python would score it 0 while the file
+    sat in the tree. Built by `write_mapping` itself rather than by hand, so
+    this cannot drift from the artefact it is about.
+
+    ⚠ AT DEPTH TOO. A committed copy is as likely to arrive wrapped
+    (`{"generated": …, "repos": {…}}`) as bare, and a top-level-only reader
+    would score that 0.
+    """
+    mapping = {f"{n}{i}": f"gardenersguild/{n}{i}"
+               for i, n in enumerate(["Trowelcast", "SledgeHorn",
+                                      "PloughShare"] * 9)}
+    bare = json.dumps(mapping, indent=1)
+    assert looks_like_a_repo_mapping(bare) >= MAPPING_KEY_THRESHOLD
+    wrapped = json.dumps({"generated": "2026-09-09T00:00:00Z", "repos": mapping})
+    assert looks_like_a_repo_mapping(wrapped) >= MAPPING_KEY_THRESHOLD, (
+        "a mapping nested one level down scored below the threshold — the JSON "
+        "reader is looking at the top level only")
+
+
+def test_the_mapping_detector_counts_ONE_LITERAL_not_the_whole_file():
+    """🔴 THE STRUCTURAL PROPERTY, ASSERTED — this is what replaced a threshold
+    the next fixture was going to trip.
+
+    Pairs scattered across many unrelated small dicts are not a repo mapping,
+    however many of them a long file happens to contain. Summing them is what
+    put THIS file at 19 of 20 on 2026-09-09; the arithmetic said "one fixture
+    from red" while nothing in the tree was anywhere near being a dump.
+
+    ⚠ THIS IS A DELIBERATE NARROWING AND IT IS NAMED IN
+    `looks_like_a_repo_mapping`'s docstring. What it gives up — a mapping split
+    across several literals — has never been how this went wrong; what it buys
+    is a guard that fires on the artefact and on nothing else, which is the only
+    kind anyone leaves switched on.
+    """
+    scattered = "\n".join(
+        f"CASE_{i} = {{'name{i}': 'gardenersguild/thing{i}'}}"
+        for i in range(3 * MAPPING_KEY_THRESHOLD)
+    )
+    # The old text sweep counted 60 distinct keys here.
+    assert len(re.findall(r"'name\d+':", scattered)) == 3 * MAPPING_KEY_THRESHOLD
+    assert looks_like_a_repo_mapping(scattered) == 1, (
+        "unrelated one-entry dicts are being summed into one score again")
+
+
 def test_the_UNIVERSE_detector_FIRES_and_the_mapping_one_is_BLIND_to_it():
     """🔴 THE NEGATIVE CONTROL FOR THE SECOND SHAPE — and it asserts the BLIND
     SPOT explicitly, because that is the finding rather than a side note.
@@ -180,16 +319,15 @@ def candidate_files(root: Path | None = None) -> tuple[str, list[Path]]:
     return "filesystem walk (no .git — sandbox tier)", found
 
 
-def test_the_generated_mapping_is_NOT_published_anywhere_in_this_repo():
-    """🔴 THE INCIDENT GUARD. This repo is public and the mapping names private
-    repositories. Keyed on CONTENT rather than on a filename, so a copy under
-    any name or in any directory fails it: the claim is 'no published file IS
-    this mapping', not 'the old path is absent'.
+def disclosure_offenders(files, root: Path) -> list[str]:
+    """Every file in `files` that IS a repo mapping or a picker universe.
+
+    Lifted out of the guard below so the guard's own negative control can drive
+    the SAME loop over a planted tree. It used to be inline, which left the only
+    evidence that the sweep can go red as a synthetic call to
+    `looks_like_a_repo_mapping` — a claim about the detector, never about the
+    loop that reads files and assembles the verdict.
     """
-    how, files = candidate_files()
-    assert len(files) > 100, (
-        f"the sweep examined only {len(files)} file(s) via {how} — a zero from "
-        f"a sweep that walked nothing is the failure, not the all-clear")
     offenders = []
     for path in files:
         try:
@@ -198,7 +336,7 @@ def test_the_generated_mapping_is_NOT_published_anywhere_in_this_repo():
             continue
         keys = looks_like_a_repo_mapping(text)
         if keys >= MAPPING_KEY_THRESHOLD:
-            offenders.append(f"{path.relative_to(ROOT)} ({keys} distinct repo keys)")
+            offenders.append(f"{path.relative_to(root)} ({keys} distinct repo keys)")
             continue
         # 🔴 THE UNIVERSE SHAPE, CHECKED ON THE SAME SWEEP RATHER THAN IN A
         # SECOND TEST — one walk, one `len(files) > 100` floor, one place for a
@@ -207,7 +345,59 @@ def test_the_generated_mapping_is_NOT_published_anywhere_in_this_repo():
         fulls = looks_like_a_repo_universe(text)
         if fulls >= MAPPING_KEY_THRESHOLD:
             offenders.append(
-                f"{path.relative_to(ROOT)} ({fulls} distinct owner/repo names)")
+                f"{path.relative_to(root)} ({fulls} distinct owner/repo names)")
+    return offenders
+
+
+def test_the_incident_guard_CAN_GO_RED_on_both_incident_spellings(tmp_path):
+    """🔴 THE NEGATIVE CONTROL FOR THE GUARD BELOW, on a PLANTED tree.
+
+    The guard's passing verdict is an empty list, which is indistinguishable
+    from a loop wired to nothing — so this feeds it the two artefacts it exists
+    to catch and watches the number move. Both spellings, because the detector
+    was rewritten to be structural and "still catches the incident" is the claim
+    that rewrite has to keep:
+
+      * `.py` — a module holding `KNOWN_REPOS = {...}`. THE ORIGINAL INCIDENT: a
+        generator's output pasted into a committed module.
+      * `.json` — the mapping file the generator writes today, verbatim.
+
+    Both are built by `RG.write_mapping`/`json.dumps` from a realistic 27-entry
+    mapping rather than by hand, and an ordinary file sits beside them so the
+    result is a SELECTION and not "everything is an offender".
+    """
+    mapping = {f"{n}{i}": f"gardenersguild/{n}{i}"
+               for i, n in enumerate(["Trowelcast", "SledgeHorn",
+                                      "PloughShare"] * 9)}
+    (tmp_path / "leaked.json").write_text(json.dumps(mapping, indent=1))
+    (tmp_path / "pasted.py").write_text(
+        "KNOWN_REPOS = " + repr(mapping) + "\n")
+    (tmp_path / "ordinary.py").write_text(
+        "# mentions gardenersguild/trowelcast in passing\nX = {'a': 'o/a'}\n")
+
+    how, files = candidate_files(tmp_path)
+    assert len(files) == 3, sorted(f.name for f in files)
+    named = sorted(o.split(" ")[0] for o in disclosure_offenders(files, tmp_path))
+    assert named == ["leaked.json", "pasted.py"], (
+        f"the guard did not flag both incident spellings, and only them: "
+        f"{disclosure_offenders(files, tmp_path)}")
+
+
+def test_the_generated_mapping_is_NOT_published_anywhere_in_this_repo():
+    """🔴 THE INCIDENT GUARD. This repo is public and the mapping names private
+    repositories. Keyed on CONTENT rather than on a filename, so a copy under
+    any name or in any directory fails it: the claim is 'no published file IS
+    this mapping', not 'the old path is absent'.
+
+    ⚠ Its passing verdict is an EMPTY LIST, so the proof that it can go red is
+    `test_the_incident_guard_CAN_GO_RED_on_both_incident_spellings`, which
+    drives the same `disclosure_offenders` loop over a planted tree.
+    """
+    how, files = candidate_files()
+    assert len(files) > 100, (
+        f"the sweep examined only {len(files)} file(s) via {how} — a zero from "
+        f"a sweep that walked nothing is the failure, not the all-clear")
+    offenders = disclosure_offenders(files, ROOT)
     assert offenders == [], (
         f"file(s) look like a repo mapping or picker universe (via {how}): "
         f"{offenders}. Both name PRIVATE repositories and this repo is PUBLIC — "
