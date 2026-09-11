@@ -365,6 +365,10 @@ __all__ = [
     "MAX_TRANSCRIPT_AGE_SECONDS",
     "JOURNAL_BULLETS_SHOWN",
     "JOURNAL_BULLET_MAX_LINES",
+    # 🔴 `CairnError` is the PINNED base and `TouchError` is its alias — both are
+    # exported so a consumer can name either, and so `__all__` records that this
+    # module no longer OWNS the taxonomy it re-exports.
+    "CairnError",
     "TouchError",
     "StoreMissingError",
     "EntryUnreadableError",

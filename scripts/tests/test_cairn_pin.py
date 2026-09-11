@@ -193,11 +193,28 @@ def test_a_candidate_is_REJECTED_on_CONTENT_not_on_being_a_directory(
     could green against the wrong client. The control for the other direction —
     that an UNSET variable does fall through — is `test_route_1_BEATS_route_2`
     plus `_pin()` resolving at all in this file.
+
+    🔴 THE MARKER SET IS SPELLED LITERALLY HERE, NOT READ OFF THE MODULE, and
+    that is not style. Iterating `cairn_pin.MARKER_MODULES` derives the test's
+    expectation from the implementation it tests: MEASURED — shrinking the tuple
+    to `("entry_shape.py",)` SURVIVED a fully green run of this file, because the
+    loop shrank with it and never built the case the deletion exposes. The
+    literal below is the claim; the equality assert is what makes a deliberate
+    change to the set fail HERE rather than silently narrow the guard.
     """
-    for held_back in cairn_pin.MARKER_MODULES:
+    expected = {"entry_shape.py", "subsystem_resolver.py"}
+    assert set(cairn_pin.MARKER_MODULES) == expected, (
+        f"the pin's marker set is {sorted(cairn_pin.MARKER_MODULES)}, not "
+        f"{sorted(expected)}. TWO markers are deliberate: one cannot tell a real "
+        f"lib dir from a directory that happens to hold a single file with that "
+        f"name. If this is an intended change, change the literal here in the "
+        f"same commit and say which half-built directory the new set still "
+        f"rejects."
+    )
+    for held_back in sorted(expected):
         lib = tmp_path / f"lib-without-{held_back}"
         lib.mkdir()
-        for m in cairn_pin.MARKER_MODULES:
+        for m in sorted(expected):
             if m != held_back:
                 (lib / m).write_text("")
         monkeypatch.setenv(cairn_pin.CAIRN_LIB_ENV, str(lib))
