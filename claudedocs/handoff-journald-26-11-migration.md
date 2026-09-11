@@ -67,9 +67,12 @@ workbench working tree where a `git checkout` would have deleted them unreported
    forcing: none
 5. **`diagnose-disk-accounting.sh`: the enumerator's `find` feeds no `DENIED_LOG`.** A
    top-level entry root cannot stat is dropped from section 2 with no tally, and section 3's
-   residual absorbs it silently. Now recorded in the `_depth1_nul` site ledger as the FIFTH
-   same-shape site. Not a regression — the glob it replaced did the same — so this is a debt,
-   not a defect.
+   residual absorbs it silently. 🔴 **RETRACTED 2026-09-11 — this item was FALSE and is
+   closed.** The enumerator never stats its entries (`-name` + `-print0` at `-maxdepth 1` need
+   only the readdir name), so there is nothing to drop: MEASURED over a fixture holding a
+   mode-000 directory, a dangling symlink, a regular file and a directory, all four were
+   emitted with ZERO bytes on stderr. The claim began as "a FIFTH same-shape site" and reached
+   four separate places before anyone checked the shape it was said to share.
    forcing: none
 6. **A top-level directory that is a MOUNTPOINT for another fs is counted as root-fs.**
    Flagged by round 2 as out of range and unaudited: `/boot` is emitted by the enumerator,
