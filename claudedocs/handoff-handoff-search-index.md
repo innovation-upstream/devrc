@@ -67,7 +67,14 @@ the cause of the other 19 is now measured rather than guessed — see the block 
 
 ## Open investigations — live diagnosis state
 
-### A repo that MEASURES but whose every doc is unreadable has its rows deleted, rc 0, no PARTIAL notice
+### SUPERSEDED — a repo whose every doc is unreadable has its rows deleted, rc 0, no PARTIAL notice
+🔴 **CLOSED by `#1267`. Read "RESOLVED — the unreadable-docs delete path" below instead; this
+block is kept only for its values.** It sat here in the present tense, under a heading that says
+`live diagnosis state`, while its own resolution sat 55 lines further down — so a `/resume`
+following step 3 would have re-derived work that shipped weeks ago. That is precisely the hazard
+this doc's own gotcha names ("THE STATUS HEADER IS THE PART THAT GOES STALE AND THE PART NOBODY
+SWEEPS"), left standing in the doc that records it. Retired 2026-09-09.
+
 - **Symptom + exact repro:** two repos, one healthy, one whose doc blob is deleted from
   `.git/objects`; then
   `handoff_index.py --repo <good> --repo <bad> --rebuild --write`.
@@ -87,7 +94,11 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   sites (`rebuild_delete_labels`, `partial_scope_warnings`) plus the global zero-rows refusal
   in `rebuild_refusal` are the whole surface.
 
-### The same hazard has now appeared in FOUR spellings — the shape, not the instances, is the open question
+### SUPERSEDED — the same hazard in FOUR spellings: is the shape the open question?
+🔴 **ANSWERED by `#1267`. Read "RESOLVED — the four-spelling shape" immediately below**; its
+`Next probe` ("ask whether any single invariant would have prevented all four") is the question
+that block answers. Kept for the enumeration of the four spellings. Retired 2026-09-09.
+
 - **Symptom + exact repro:** each round of review found one more way for a rebuild to delete
   rows it should not.
 - **Observed (with values):** (1) unpredicated `TRUNCATE` — emptied the table when every repo
@@ -290,12 +301,25 @@ the cause of the other 19 is now measured rather than guessed — see the block 
    **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
    with a test that watches it fail at the previous commit.
    forcing: none
-3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
+3. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
+   unused.** `host-role.sh` defines `LAPTOP_IP_SECONDARY=10.42.0.100` (nebula) beside the primary
+   `192.168.50.155`, but the SSH default derives from the primary only — so from off-network the
+   remote leg dies `Connection timed out`, rc 255, and the run reports `incomplete`. Measured
+   2026-09-09 shipping `4a67ea73`: the laptop converged only after a manual
+   `REMOTE_SSH=zach@10.42.0.100`. It fails honestly rather than silently, so this is an
+   ergonomics gap, not a correctness one — **but it splits the run in two, and `ship.sh` then
+   prints `cross-host agreement NOT COMPARED`, which is the check that exists to catch the two
+   hosts landing on different commits.**
+   **Closing condition:** a merged PR where the remote leg falls back to the secondary address
+   when the primary is unreachable (or the rc-255 message names `REMOTE_SSH` and the nebula
+   address), with a test that watches the fallback fire.
+   forcing: none
+4. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
    does it, which is the intended signal.
    forcing: none
-4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
+5. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
    rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
    re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.
@@ -419,6 +443,13 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   slug, printed a confident `excluded=<garbage>`, matched nothing and returned the document the
   caller was dropping. **A filter that declines to filter renders identically to one that
   worked** — which is why the skill now tells the reader to check the COUNT, not just the tell.
+- 🔴 **TWO OF THIS DOC'S OWN `Open investigations` BLOCKS WERE ANSWERED WEEKS AGO AND STILL READ
+  AS LIVE.** Both were closed by `#1267`; both kept a present-tense heading and a `Next probe`
+  under a section titled *live diagnosis state*, with their own `RESOLVED —` counterparts 16 and
+  55 lines below them. Four `/resume` runs read this doc during the arc and none caught it,
+  including mine. **A RESOLVED block does not retire the OPEN one — deleting or re-heading the
+  OPEN one is a separate edit, and nothing prompts it.** When you answer an open investigation,
+  re-head the block in the SAME commit; `grep -n '^### '` over this file is the whole check.
 - 🔴 **AN UNSCOPED TEST COUNT IS A COVERAGE CLAIM, AND THIS PR MADE IT FOUR TIMES.** "the whole
   suite green at 304", "SURVIVED all 314 tests", "a 306-test green suite", "304 of 304 tests
   passed" — every one numerically TRUE and every one naming a two-file scope of ~300 against a
