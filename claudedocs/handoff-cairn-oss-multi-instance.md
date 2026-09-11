@@ -941,8 +941,19 @@ it routes the mandated check back at a client that does not run it, re-opening t
     firing exits 0.
     forcing: none
 
-22. ⚠ **REMEDIED IN `#1458` (open), NOT YET VERIFIED BY THE GATE — and the three remedies
-    this item recommended were all aimed at the wrong layer.**
+22. ⚠ **REMEDIED AND MERGED — `#1458`, squash `ce9b55c3`, 2026-09-10. NOT YET VERIFIED BY THE
+    FLAKE RATE, which is the half that actually closes this. And the three remedies this item
+    recommended were all aimed at the wrong layer.**
+    🔴 **VERIFIED BY CONTENT ON `origin/main`, NEVER BY ANCESTRY** — a squash merge makes
+    `merge-base --is-ancestor` false forever, so that check reads "not merged" and is wrong.
+    On `origin/main`: the `sited_root` fixture is present, `_DISK_ROOTED_ALLOWLIST` is present,
+    `test_the_operand_NODE_TYPE_is_not_what_decides_either` is present, and `slowfsync.c`
+    carries `skip_tmpfs_enabled`. The one surviving `tmp_path / "store"` in the api file is at
+    `:367`, inside a docstring — prose, not a site. via: measurement
+    ⚠ **It was merged with `tekton/devrc-pytests` RED**, on the second, unrelated flake
+    described below — attributed, unreachable from the diff, and on an advisory rather than a
+    required check. Recorded because "merged" and "merged green" are different claims and only
+    the first is true here.
     The DIAGNOSIS below stands and is unretracted. `server.py:_replace_bytes` issues **two**
     `fsync`s — the file, then the parent directory — **inside the request and before the
     response is written**. `fsync` blocks in uninterruptible D-state, is bounded by nothing,
