@@ -228,7 +228,20 @@ Not a bug — a measurement that would mislead if run as written.
    failures among 14 open PRs, 2026-09-01) is **not comparable** — it was measured against a
    partially-sited suite. Record a FRESH baseline with its date, and wait until a substantial
    fraction of open PR heads postdate `65f7325b` before reading anything into the number.
-   forcing: gate — a required check has been failing PRs whose diff cannot reach it.
+   🔴 **THE ANCHOR MOVED AGAIN — `65f7325b` IS NO LONGER THE LAST INTERVENTION.** `#1458`
+   (squash **`ce9b55c3`**, 2026-09-10) found that `#1211`/`#1219`/`#1239` sited **5** store
+   roots in `test_subsystem_store_api.py` and left **18** open-coded on disk, including the one
+   test that kept reddening the gate — and sited all 18. So a rate measured against heads that
+   postdate `65f7325b` but predate `ce9b55c3` spans **two** interventions and attributes the
+   result to the first. Use `ce9b55c3` as the anchor, and say which one any recorded number is
+   against. Full evidence: `handoff-cairn-oss-multi-instance.md` rank 22.
+   ⚠ **AND THE POPULATION IS NO LONGER ONE MECHANISM — see rank 7.** A store-api red and a
+   `run-tests.sh` subprocess timeout are both "a required-looking check red on a diff that
+   cannot reach it", so a rate that counts reds without classifying them will read #1445's new
+   flake as this one failing to close. Classify by the failing TEST before counting.
+   forcing: gate — a check has been failing PRs whose diff cannot reach it. ⚠ **Not a REQUIRED
+   check: measured 2026-09-10, `main` has no required status checks, no rulesets, and
+   `enforce_admins: false`. Advisory. Re-read the setting rather than citing this line.**
 2. **Fix the hung-server classifier's path sensitivity** — devrc,
    `scripts/tests/test_subsystem_store_api.py`, `_HUNG_SERVER_RULES` /
    `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Reproduction in
@@ -254,6 +267,46 @@ Not a bug — a measurement that would mislead if run as written.
    keylog tests, which are the deterministic check.**
    forcing: regression — `main` is red on `tekton/devrc-main-pytests` and a real
    Ctrl+Space search path is broken.
+
+7. **A SECOND gate flake, same SHAPE as this doc's, different MECHANISM and different
+   SUBSYSTEM — `test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`** — devrc,
+   `scripts/tests/test_run_tests_targets.py:756`.
+   🔴 **DO NOT FOLD IT INTO THE STORE-API POPULATION.** It shares the observable — a check red
+   on a diff that cannot reach it — and nothing else. The store-api flake is an `fsync` stalling
+   inside a request; this is a **nested full `run-tests.sh` run, spawned as a subprocess under a
+   hard `timeout=120`, SIGKILLed at the bound**: `subprocess.TimeoutExpired`, returncode `-9`,
+   traceback ending in `_check_timeout`. **Not an assertion failure.** Grepping `MECHANISM =`
+   finds nothing here, because no store server is involved.
+   - **Provenance:** added by **`#1445`**'s own audit ladder — the test's docstring opens
+     "🟡 round-2 F5" — and first observed red hours later. The test it guards is real (it pins
+     that the subset note reports N of the FULL set, a mutant that survived all 23 tests in its
+     file); the **120 s bound on a nested full run** is what is not survivable on a contended
+     node. via: code
+   - **Ruled out: that it is caused by any diff.** Observed on `#1458` at `a6dd11eb`, whose four
+     files (the store-api suite, the siting ledger, `ci-repro/**`) cannot reach
+     `test_run_tests_targets.py`. via: measurement
+   - **Ruled out: determinism.** `#1462` — same base, same test present, a docs-only diff —
+     **passed minutes earlier**. Locally the whole file is `31 passed` in 205 s. via: measurement
+   - 🔴 **Ruled out: general node load, by the wall-time discriminator at two points.** Load
+     inflates every test in a run; a failed assertion inflates one. Failing run vs passing run,
+     CI-to-CI: **1030.34 s vs 1065.64 s** on the big target and **155.60 s vs 154.73 s** on
+     another — the failing run was *faster*. One target ran ~23 % long and the rest were flat.
+     Nothing was inflated; one bounded operation stalled. via: measurement
+   - ⚠ **NOT established:** what the nested run was blocked ON. No disk, CPU or PSI figure was
+     taken at the moment of the kill, and the pipelinerun and its pods were **pruned within the
+     hour** (`keep: 20` per pipeline). The `#1458` log was captured in time; `#1462`'s was not.
+     🔴 **If it recurs, pull the log IMMEDIATELY** — `kubectl -n tekton-ci get pipelineruns -o
+     json`, filter `.spec.params[] | select(.name=="revision")`, then `kubectl -n tekton-ci logs
+     pod/<run>-gate-pod -c step-pytests`.
+   - **Next probe — and it is NOT a re-run.** Either raise or remove the 120 s bound (it guards
+     nothing about the assertion — the timeout is a harness convenience), or stop the guard
+     spawning a *full* nested run when a scoped one would prove the same property. **Re-running
+     to green is what `claude/RULES.md` calls training everyone to click through.**
+   **Closing condition:** a merged PR after which this test cannot be killed by its own
+   subprocess bound — OR a documented decision that the bound stays and the flake is accepted,
+   named as such. Checked by the test no longer appearing in a `FAILING:` line.
+   forcing: gate — it reddened `#1458`, which merged with `tekton/devrc-pytests` RED because of
+   it. Advisory, not blocking (see rank 1's note on branch protection).
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
