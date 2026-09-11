@@ -60,36 +60,40 @@ CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 #: a message rather than hanging until the gate's own cap, which is worse — no
 #: message, no exit code.
 #:
-#: 🔴 600 IS THE VALUE THIS MODULE ALREADY HAD, AND THIS CHANGE DELIBERATELY
-#: DOES NOT MOVE IT. What moved is WHERE it is written, not what it is: six
-#: open-coded `timeout=120` sites in `test_run_tests_targets.py` now read this
-#: name instead of carrying their own copies.
+#: 🔴 600 IS THIS MODULE'S PRE-EXISTING VALUE AND IS UNCHANGED — BUT SAY WHICH
+#: SCOPE THAT IS TRUE OF. For the five files already using `run()` it is a no-op,
+#: 600 before and after. For the SIX sites in `test_run_tests_targets.py` that
+#: used to carry `timeout=120`, the effective bound RISES 120 -> 600, deliberately:
+#: that widening is the PR's headline fix. ⚠ An earlier draft of this paragraph
+#: said the change moves "WHERE it is written, not what it is" full stop, which
+#: would tell a maintainer no timeout was raised anywhere. One was.
 #:
-#: ⚠ A draft of this change set it to 300, and that was a NARROWING OF FIVE
+#: ⚠ A draft also set this constant to 300, and that was a NARROWING OF FIVE
 #: FILES ON THE EVIDENCE OF A SIXTH. This default governs `run()`, which
 #: `test_scoped_runs.py`, `test_scoped_mapper.py`, `test_scoped_scope_marker.py`,
-#: `test_scoped_gate_contract.py` and `test_scoped_ledgers.py` use across ~47
-#: call sites — and their nested runs are not the 2-9 s narrowed ones the 300
-#: was sized against. Measured on the dev host: 28.9 s at load ~57 for
-#: `test_the_node_runner_reports_FULL_on_a_REAL_run`, and 70.5 s observed for a
-#: sibling under a different load. At 300 that is ~4-10x headroom, against the
-#: >2.55x contention inflation that caused this PR in the first place — i.e. the
-#: narrowing would have re-created the failure class here that the runner fix
-#: just removed elsewhere. Do not re-derive 300 from the 9 s figure; it is a
-#: measurement of ONE consumer.
+#: `test_scoped_gate_contract.py` and `test_scoped_ledgers.py` use across ~45
+#: call sites (44 of them taking the default) — and their nested runs are not the
+#: 2-9 s narrowed ones the 300 was sized against. Measured on the dev host:
+#: `test_the_node_runner_reports_FULL_on_a_REAL_run` took 28.9 s at load ~57 and
+#: 16.5 s at load ~48. At 300 that is roughly 10-18x headroom against a >2.55x
+#: contention inflation (120 s bound / 47 s run, the ratio that caused this PR) —
+#: thinner than it looks, and for no measured benefit. Do not re-derive 300 from
+#: the 9 s figure; that is a measurement of ONE consumer.
 #:
-#: 🔴 THIS IS A HANG BOUND, NOT AN ASSERTION. Nothing any caller pins depends on
-#: the nested run being fast; the bound exists only so a wedged child fails with
-#: a message rather than hanging until the gate's own cap, which is worse — no
-#: message, no exit code.
+#: ⚠ WHAT 600 COSTS, STATED BECAUSE THE 300 DRAFT LEANT ON IT AND THE REVERT MUST
+#: NOT QUIETLY DROP IT. `test_run_tests_targets.py` performs FOUR real nested
+#: runs, so the pathological case is 4x600 s = 40 min — and the post-queue budget
+#: is about 37 min (the gate task's `timeout: 60m` clock runs while the pod is
+#: Pending, and a worst-observed queue is ~22.5m). So 40 > 37: four SIMULTANEOUS
+#: hangs would exhaust the task rather than report. That is the strongest
+#: argument against 600 and it is kept here rather than deleted with the draft
+#: that made it. It is accepted because it requires all four runs to hang — after
+#: the runner fix each measures 2-9 s — and because a genuine hang is a defect
+#: you want surfaced, not absorbed by a tighter bound.
 #:
-#: ⚠ On the worst case, stated because the 300 draft leant on it:
-#: `test_run_tests_targets.py` performs FOUR real nested runs, so 4x600 s = 40
-#: min in the pathological case. That requires all four to HANG — after the
-#: runner fix each measures 2-9 s — and a genuine hang is a defect you want
-#: surfaced, not absorbed. It is bounded by the gate TASK's own `timeout: 60m`
-#: (`devrc-ci-pipeline.yaml`), NOT the pipeline's `timeouts.tasks: 70m`: the task
-#: cap is the lower of the two and so the only one a slow test can reach. That
+#: 🔴 AND THE CAP THAT BINDS IS THE GATE TASK'S OWN `timeout: 60m`
+#: (`devrc-ci-pipeline.yaml`), NOT the pipeline's `timeouts.tasks: 70m` — the
+#: task cap is lower, so a slow test can only ever reach that one. The
 #: distinction decides the OUTCOME, per that pipeline's own measured three-way
 #: probe (Tekton v1.12.0):
 #:
@@ -97,11 +101,15 @@ CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 #:                         checks stay `pending` forever
 #:     task-level 60m   -> Failed,             finally RAN       -> posts a status
 #:
-#: So overrunning here posts SOMETHING a human can read — an `error` carrying
-#: `COULD NOT RUN`, which CLAUDE.md tells readers is a broken gate rather than a
-#: bad change — instead of the unclearable pending an earlier draft wrongly
-#: warned about. ⚠ The real budget is tighter than 60m: the clock runs while the
-#: pod is Pending, and a worst-observed ~22.5m queue leaves ~37m of execution.
+#: So overrunning here posts SOMETHING a human can read, rather than the
+#: unclearable pending an earlier draft wrongly warned about. ⚠ The status is
+#: `error` describing **`KILLED: <leg> — the gate pod died at or after step
+#: <phase> (preempted/evicted/OOM/timeout). Not a code failure.`** — NOT
+#: `COULD NOT RUN`, which a further draft cited: that arm is guarded by
+#: `BUILD_STATUS = "Succeeded"` and a timed-out task does not satisfy it. The
+#: pipeline says so itself: "A task-level `timeout:` expiring while a step is
+#: EXECUTING also SIGKILLs it, so it reads as KILLED". Grep for the right string
+#: after a real overrun.
 RUNNER_TIMEOUT_S = 600
 
 

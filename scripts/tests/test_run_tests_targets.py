@@ -132,8 +132,14 @@ def _require_check_targets(runner: Path) -> None:
 #: ⚠ A draft of this change RE-SIZED it to 300 on the strength of a measurement
 #: taken here — a narrowing of five other files on the evidence of this one. The
 #: reasoning and the measurements that rejected it are recorded beside the
-#: constant. What this PR removes is the six open-coded `timeout=120` copies,
-#: not the bound's value.
+#: constant.
+#:
+#: ⚠ SAY THE SCOPE, THOUGH: this PR removes the six open-coded `timeout=120`
+#: copies, which RAISES the effective bound at those six sites 120 -> 600. It is
+#: the SHARED CONSTANT that is unchanged, for the five files already reading it.
+#: An earlier draft here said the PR changes "not the bound's value" without that
+#: qualification, which would tell a maintainer no timeout was raised anywhere —
+#: and raising this one is the whole point of the change.
 #:
 #: 🔴 AND 120 WAS NEVER THE REAL DEFECT EITHER. The nested `--targets` runs this
 #: file spawns cost 47 s because `run-tests.sh` executed two whole test families
@@ -334,10 +340,12 @@ def test_no_call_site_open_codes_its_own_subprocess_bound():
     # body with a delegation to a helper in `testlib/` — the natural shape of
     # "move the bound somewhere shared" — left zero spawn calls here and the
     # guard green. `>= 1`, not `== 1`: the count is not the property.
-    # ⚠ Counts spawn calls sited in `_spawn`, NOT ones already checked to carry
-    # the bound — the `unbounded` assertion above is what establishes that, and
-    # it has already run. Named for what it measures so the message cannot claim
-    # more than the expression does.
+    # ⚠ Counts spawn calls SITED in `_spawn`; it does not check they carry the
+    # bound. That is `assert not unbounded`'s job, and note it runs BELOW this —
+    # a previous revision of this comment said "above … it has already run",
+    # which was simply backwards and would have justified deleting the very
+    # check it leaned on. The two are independent: this one refuses an EMPTY
+    # set, that one refuses a BOUNDLESS call, and neither implies the other.
     spawns_in_spawn = sum(
         1
         for node in ast.walk(tree)
