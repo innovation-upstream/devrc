@@ -5749,23 +5749,24 @@ def test_the_MEASURED_orderings_of_an_append_vs_a_compaction(tmp_path):
     for p in (log,):
         assert isinstance(MO.load_picks(p), list)
 
-    # ⚠ AND `record_pick` CANNOT STRADDLE THE READ, which is why the loss is
-    # always WHOLE rather than a torn line for THIS writer: it writes one row
-    # through one buffered `write` and flushes at close. A straddling writer
-    # would tear — measured with a hand-rolled two-`write(2)` append — so the
-    # claim is about the writer, not about the filesystem.
-    probe = seeded()
-    real_write, calls = os.write, []
-    os.write = lambda fd, b, *a, **k: (calls.append(len(b)),
-                                       real_write(fd, b))[1]
-    try:
-        MO.record_pick("gardenersguild/trowelcast", "1291", probe)
-    finally:
-        os.write = real_write
-    assert len(calls) <= 1, (
-        f"record_pick made {len(calls)} write(2) calls for one row — it can "
-        f"now STRADDLE a carry-over read, so the loss is no longer always "
-        f"whole and `_compact_picks`' table needs a torn row")
+    # ⚠ WHAT THIS TEST DELIBERATELY DOES *NOT* PIN, SAID RATHER THAN IMPLIED.
+    # `_compact_picks` claims the loss is always WHOLE rather than a torn line
+    # because `record_pick` writes one row through one buffered `write` and
+    # flushes at close — so it cannot STRADDLE the carry-over read. That claim
+    # is reasoned from the writer's shape, and it is NOT asserted here, because
+    # two attempts to assert it were each measured unable to fail:
+    #   * spying `os.write` and asserting `<= 1` — `record_pick` writes through
+    #     a buffered TEXT file whose flush does not surface there, so the spy
+    #     observed **0** and `0 <= 1` passed for free. (`io.FileIO.write` cannot
+    #     be patched either: immutable type.)
+    #   * injecting a REAL `record_pick` inside a compaction and asserting no
+    #     torn line — the injection lands BEFORE the carry-over read, so the
+    #     whole row is on disk by then. Measured: a mutant that makes
+    #     `record_pick` write the row in two flushed halves still PASSED.
+    # A straddling writer DOES tear — measured with a hand-rolled two-`write(2)`
+    # append — so the hazard is real and belongs to a writer this module does
+    # not have. Leaving a green assertion here would report coverage of a claim
+    # nothing checks, which is worse than the gap.
 
 
 def test_compaction_SKIPS_while_another_writer_holds_the_lock(tmp_path,
