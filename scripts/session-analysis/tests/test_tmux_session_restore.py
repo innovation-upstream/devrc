@@ -15,6 +15,7 @@ tmux/grep/capture-pane I/O and the ledger directory are stubbed; nothing here re
 or writes the real `~/.cache/agent-ledger`, `~/.claude/projects` or
 `~/.config/initiatives/restore-plan.json`.
 """
+import ast
 import importlib.util
 import json
 import os
@@ -2878,3 +2879,109 @@ def test_a_claude_found_on_PATH_is_also_resolved_to_its_store_path(monkeypatch, 
     assert got == str(real), (
         f"returned the symlink found on PATH instead of its store target: {got!r} "
         "— a home-manager switch blanks that path for ~1s")
+
+
+# --------------------------------------------------------------------------- #
+# THE PIN behind this file's `ACKNOWLEDGED_UNSTUBBED["home-manager"]` row
+#
+# `scripts/tests/test_no_real_launchers.py` acknowledges tmux-session-restore.py
+# under `home-manager` on an UNREACHABILITY claim: the name appears only as
+# docstring prose. That table's own standing lesson — written twice in it, after
+# an audit measured the gap — is that an acknowledgement arriving WITHOUT a pin
+# BLINDS the guard it is filed under: `hazard_hits` returns a FILE set, so once
+# this file is in that set, a real `home-manager` spawn added here would be
+# absorbed silently. These two tests are that pin, and they arrive WITH the row.
+# --------------------------------------------------------------------------- #
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_call", "check_output",
+                "system", "popen", "execv", "execvp", "execve"}
+
+# The module-local one-line wrapper every read in this script goes through.
+_WRAPPER = "run"
+
+EXPECTED_ARGV0 = {"tmux", "grep"}
+
+
+def _spawn_argv0_literals(path: Path) -> set[str]:
+    """Every literal argv[0] in a spawn-shaped call, from the SYNTAX TREE.
+
+    `<computed>` rather than a skip for a non-literal argv[0]: a command built
+    from a variable is how a literal-keyed ledger gets walked past, so it must
+    fail loudly instead of leaving the set.
+
+    🔴 ONE level of indirection is resolved, and ONLY one. This script routes
+    almost every call through a module-local `run(cmd)` helper, so a naive walk
+    reports `<computed>` for the helper's own `subprocess.run(cmd)` and learns
+    NOTHING about the 11 literal-headed call sites feeding it — a pin that
+    reports `<computed>` for a clean tree cannot also report it for a dirty one.
+    So the helper's single internal spawn is skipped and its CALL SITES are read
+    instead. The skip is proven, not assumed: the helper must contain exactly
+    ONE spawn and its argv must be exactly the helper's own parameter. Grow the
+    helper a second spawn, or make it build a command, and the assertion below
+    fails rather than widening the hole.
+    """
+    tree = ast.parse(path.read_text())
+
+    def _spawn_calls(node):
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call) or not sub.args:
+                continue
+            name = (getattr(sub.func, "attr", None)
+                    or getattr(sub.func, "id", None))
+            if name in _SPAWN_FUNCS:
+                yield sub
+
+    wrapper = next((n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == _WRAPPER), None)
+    assert wrapper is not None, (
+        f"the module-local {_WRAPPER}() helper is gone — this extractor was "
+        "built around it, so re-derive the spawn set before trusting this pin")
+
+    inner = list(_spawn_calls(wrapper))
+    param = wrapper.args.args[0].arg if wrapper.args.args else None
+    assert len(inner) == 1, (
+        f"{_WRAPPER}() now contains {len(inner)} spawn-shaped calls, not 1 — "
+        "the single-passthrough assumption this extractor skips on is false")
+    assert isinstance(inner[0].args[0], ast.Name) and inner[0].args[0].id == param, (
+        f"{_WRAPPER}() no longer passes its own parameter straight through to "
+        "the spawn — it is now BUILDING a command, which this extractor would "
+        "skip without reading. Re-derive the spawn set.")
+
+    skip = {id(inner[0])}
+    found = set()
+    for node in _spawn_calls(tree):
+        if id(node) in skip:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            found.add(head.value if isinstance(head, ast.Constant)
+                      else "<computed>")
+        else:
+            found.add("<not-a-list>")
+    return found
+
+
+def test_the_restore_script_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """GROWS-OR-SHRINKS. A new binary is the hazard the acknowledgement would
+    otherwise hide; a vanished one means the justification has stopped
+    describing the file.
+
+    `realpath` and `which` are deliberately NOT in this set and must not be
+    added: `claude_command()` uses `os.path.realpath` and `shutil.which`, which
+    are library calls, not spawns. The thing this script sends INTO a pane is a
+    resolved store path, not a command it executes itself.
+    """
+    assert _spawn_argv0_literals(SCRIPT) == EXPECTED_ARGV0
+
+
+def test_home_manager_is_MENTIONED_but_never_SPAWNED():
+    """Both halves of the acknowledgement's claim, asserted rather than left to
+    a reader of prose: the mention must still EXIST (or the table entry has
+    outlived the sentence it describes), and it must remain a mention."""
+    text = SCRIPT.read_text()
+    assert re.search(r"(?<![\w-])home-manager(?![\w-])", text), (
+        "the ACKNOWLEDGED_UNSTUBBED entry for this file exists BECAUSE it names "
+        "home-manager; if that prose is gone, remove the acknowledgement too")
+    assert "home-manager" not in _spawn_argv0_literals(SCRIPT), (
+        "tmux-session-restore.py now SPAWNS home-manager — the acknowledgement "
+        "covering it is an unreachability claim and is now FALSE")
