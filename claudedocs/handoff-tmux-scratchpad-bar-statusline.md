@@ -11,26 +11,25 @@ Two UX improvements to the scratchpad and tmux statusline:
 2. Remove time/host from tmux status-right, and move the scratchpad status legend (currently in tmux status-left) to the i3status-rust bar — with the full 20-slot list since there's more space there
 
 ## State now
-- **SHIPPED, DEPLOYED AND VERIFIED LIVE on the workbench.** PR #1485 merged (squash `fe4460d6`); PR #1484 merged (squash `799d966c`). Both verified by CONTENT on `origin/main`, never by ancestry — a squash merge never makes the branch head an ancestor.
-- Base clone on `main` at `fe4460d6`. `home-manager switch --flake ~/workspace/devrc --impure` → exit 0. Claim `tmux-scratchpad-bar-statusline-1` RELEASED.
-- ⚠ **The laptop has NOT been shipped.** Only the workbench was switched. Run `LAPTOP_SSH=zach@10.42.0.100 scripts/ship.sh` (the laptop is nebula-only; a bare `ship.sh` dials its LAN IP and half-ships).
-- **Verified live, by observation not inference:**
-  - Bar legend **screenshotted on the real bar**: all 20 slots, per-slot colour, live slots `key+count` bold, absent slots (`p`,`n`,`M`) dim `#504945` with no count, positioned between the disk and net pills. This closes the round-2 caveat that pango rendering "needs the operator's real bar" — it renders, no tofu, no markup leakage.
-  - `tmux show -g status-right` → `idle-update.sh` + continuum only; `%H:%M` and `#H` gone. `status-left` → session name only; `scratch-status.sh` gone. Continuum interpolation present **exactly once** after the reload.
-  - Popups: `tmux list-keys -T root` → **0 at 80%**, 23 display-popup bindings at 90% width. The one remaining `-h "70%"` is the pre-existing fuzzyclaw popup, correctly untouched. Positive control confirmed the counting pattern CAN match 80%.
-  - Bar restart confirmed by **PID change** 934021 → 1132952 (never by `pgrep -x`, which returns empty for the wrapped binary).
-- **Audit ladder: 2 rounds, ended by operator intervention, NOT on a clean round.** Round 1 (full) found 1 🔴 + 4 🟡 + 4 🟢; round 2 (delta) found 5 🟡 + 4 🟢, all fixed. Round 3 was dispatched and **stopped by the operator**, so the round-3 fixes — the new `nix/programs/tmux/slot-table.nix` and its three replacement guards, the largest structural change in the PR — **shipped unaudited**. Nothing outstanding was deploy-blocking; round 2's verdict was safe-to-merge after 🟡1/🟡4, both fixed.
-- ⚠ `drift-check.service` exits **17** (a package's `nix/pkgs/**` source subtree is behind on some host). Pre-existing, unrelated to this work, still open.
+- **DONE — shipped, deployed and VERIFIED LIVE ON BOTH HOSTS.** PR #1485 (`fe4460d6`) and #1484 (`799d966c`) merged; both verified by CONTENT on `origin/main`, never by ancestry.
+- `LAPTOP_SSH=zach@10.42.0.100 scripts/ship.sh` → **converged + verified, both hosts at `3a0c77dd`**. Read per-host, not the verdict: workbench and laptop each `✅ VERIFIED — on branch main at origin/main + switched`, 586/532 managed artifacts resolve, **0 dangling, 0 stale** on both.
+- Both hosts' bars restarted (workbench PID 934021→1132952, laptop 2568→3736632) and both tmux servers reloaded via `source-file`. Workspace and focus recorded before each restart and **unchanged after** on both — nothing restored because nothing moved.
+- **Screenshotted on both real bars**: 20 slots, per-slot colour, live slots `key+count` bold, absent slots dim `#504945` with no count, positioned between the disk and net pills. The laptop's 2256px bar carries it comfortably.
+- Both hosts: `tmux show -g status-right` has no `%H:%M`/`#H`, continuum interpolation exactly **1**; `tmux list-keys -T root` → **0 popups at 80%**, 23 at 90% width.
+- Claim `tmux-scratchpad-bar-statusline-1` RELEASED.
+- 🔴 **The workbench tree is DIRTY with ANOTHER SESSION's uncommitted work** — `nix/graphical.nix` carries a fontconfig emoji-fallback change (`defaultFonts.monospace`) that is not this effort's. `ship.sh` reports `DIRTY AND IN THE ARTIFACT`: nix reads that path at eval time, so the workbench generation is `origin/main` PLUS that hunk. Left untouched deliberately (no stash, no revert — it is live WIP). **The scratchpad work is unaffected**: it was verified present on `origin/main` independently, and the dirty hunk is fontconfig only. The laptop tree is clean, and its bar renders identically — which is the cross-check that rules the dirty hunk out.
+- ⚠ `drift-check.service` exits **17** (a `nix/pkgs/**` source subtree behind on some host). Pre-existing, unrelated, still open.
+- **Audit ladder ended by operator intervention, NOT on a clean round.** Round 3 was stopped, so `nix/programs/tmux/slot-table.nix` and its three replacement guards shipped unaudited.
 
 ## Open investigations — live diagnosis state
 _(none — this is a planned feature, not a bug investigation)_
 
 ## Next steps (ranked)
-1. **Ship to the laptop**: `LAPTOP_SSH=zach@10.42.0.100 scripts/ship.sh`, then restart its bar. 🔴 Read every per-host line, not the final verdict — one skip hides among greens. The block is unconditional, so the laptop gets it too, and `TMUX_TMPDIR` was **never measured there**.
+1. **Click the bar legend once** on either host and confirm the picker opens. Never exercised from a real bar; the picker's terminal hold is pinned structurally only (stdin on `/dev/null` suppresses `read -p`, so the test proves the branch was taken, not that the terminal stayed open). This is the last unverified surface of this effort.
    forcing: none
-2. **Click the bar legend once** and confirm the picker opens. It has still never been clicked from the real bar; the picker's terminal hold is pinned structurally only (stdin on `/dev/null` suppresses `read -p`, so the test proves the branch was taken, not that the terminal stayed open).
+2. **Resolve `drift-check.service` rc 17** — a package built from another repo's working tree is behind on a host. Pre-existing, predates this work.
    forcing: none
-3. **Resolve `drift-check.service` rc 17** — a package built from another repo's working tree is behind on a host. Pre-existing.
+3. **If the unaudited round-3 machinery ever misbehaves**, the delta to audit is `ffe4e5d0..7c449cdd` and the round-2 claims block is posted on PR #1485. Not scheduled; recorded so it is cheap to resume.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -59,6 +58,11 @@ _(none — this is a planned feature, not a bug investigation)_
 - **`bash-guard.py` evaluates the branch statically, BEFORE the command runs.** A single call doing `git checkout -b X && … && git commit` is refused, because the guard sees `git commit` while the checkout is still on `main`. Split the checkout and the commit into separate calls. It also cannot resolve a shell variable in `git -C $W` and falls back to judging the caller's cwd — **pass `-C` a literal absolute path**.
 - **`${PIPESTATUS[0]}` is empty in zsh** — it is `$pipestatus` (lowercase array). A `cmd | tail; echo "EXIT=${PIPESTATUS[0]}"` printed nothing and a `status=behind` refusal read as success until the repo was checked directly. Capture with `out=$(cmd 2>&1); rc=$?` instead.
 - **`handoff_doc.py`'s Gotchas section is an APPEND bucket.** A follow-up run that re-sends the whole delta to correct one line in a REPLACE section duplicates every appended bullet (that is what PR #1484 cleaned up). **A correction run must omit the APPEND sections** — a section the delta omits is left untouched.
+
+- 🔴 **`ship.sh` rc 19 on a first pass is NORMAL when a PR merges mid-run, and the remedy is literally "run it again".** MEASURED 2026-09-11: pass 1 landed the workbench on `bc67b177` and the laptop on `3a0c77dd` — `origin/main` moved between the two legs' fetches. **Every per-host check passed on both**; each host really was at origin/main *as it saw it*. The fleet was in two states and only the cross-host comparison could see it. Pass 2 converged both. This is exactly why the final line is a claim about the two hosts AGREEING on one sha, and why reading the per-host greens alone is not enough.
+- 🔴 **`ship.sh` re-execs itself when the run ships a change to `ship.sh`** — it says so (`re-executing the NEW copy (generation 1 of 1)`) and warns that everything printed above it was computed by the OLD copy, because the CONVERGE payload is expanded before the fast-forward. Not an error; do not re-run on account of it.
+- **A dirty tracked file that nix READS at eval time changes what a switch builds**, and `ship.sh` classifies this explicitly (`DIRTY AND IN THE ARTIFACT`, 1 of 169 nix-read paths derived from 30 nix files). The honest reading of a live probe on that host is "this is evidence about the DEPLOYED artifact, not about `main`". **The cheap discriminator is the OTHER host**: the laptop's tree was clean and its bar rendered identically, which is what actually rules the dirty hunk out — not reasoning about the diff.
+- **A `home-manager switch` does not restart the consumer, and there are TWO consumers here.** The bar needs a restart (i3status-rs reads its TOML once at startup) *and* a running tmux server needs `tmux source-file ~/.config/tmux/tmux.conf` — the statusline is server state, so every file-level check passes while `tmux show -g status-right` still returns the old value. Never `kill-server`; that destroys every session.
 
 ## How to verify
 Post-deploy, all of these were run and passed on the workbench:
