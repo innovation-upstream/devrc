@@ -45,6 +45,7 @@ as regression coverage"):
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shutil
@@ -86,6 +87,79 @@ def _require_check_targets(runner: Path) -> None:
     )
 
 
+#: How long any nested `run-tests.sh` spawned by this file may take before the
+#: harness kills it.
+#:
+#: 🔴 THIS IS A HANG BOUND, NOT AN ASSERTION. Nothing any test here pins depends
+#: on the nested run being fast; the bound exists only so a wedged child fails
+#: with a message instead of hanging until the gate's own cap, which is strictly
+#: worse (no message, no exit code).
+#:
+#: 🔴 IT WAS 120, AND 120 REDDENED THE GATE ON DIFFS THAT COULD NOT REACH THIS
+#: FILE. Measured 2026-09-11 on the dev host at load ~52: one nested run of
+#: `scripts/collector/i3/tests` — the SMALLEST target in the set, 13 tests —
+#: took **47 s**, i.e. 39% of the old bound, and almost all of it is the
+#: runner's fixed preflight rather than the tests. CI is documented at 27–50
+#: concurrent full-suite runs on one node (CLAUDE.md), where that overhead is
+#: multiplied, so the old bound was breached by CONTENTION and the failure read
+#: as a code failure: `subprocess.TimeoutExpired`, returncode -9, traceback
+#: ending in `_check_timeout` — reproduced here by lowering this constant.
+#: Occurrences: devrc#1458 and #1462, both merged with `tekton/devrc-pytests`
+#: RED because of it.
+#:
+#: 600 s is ~12x the measured figure, which is headroom for contention, and it
+#: still bounds a genuine hang well inside the gate's own budget. Deliberately
+#: NOT env-overridable: a bound a run can widen for itself is a bound that
+#: cannot fail, and a green under it would mean nothing.
+_RUNNER_TIMEOUT_S = 600
+
+
+def _spawn(
+    args: list[str], *, env: dict, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
+    """The ONE place this file bounds a nested `run-tests.sh`.
+
+    🔴 ONE RULE, ONE PLACE — AND IT WAS SIX. `timeout=120` was open-coded at six
+    call sites here, so raising the bound meant finding all six, and the two
+    occurrences that reddened the gate were fixed at neither. A predicate copied
+    per call site is wrong at every site it was not copied to; routing every
+    spawn through here is what makes a seventh site impossible to add silently —
+    see `test_no_call_site_open_codes_its_own_subprocess_bound`.
+
+    🔴 AND THE TIMEOUT IS TRANSLATED, NOT PROPAGATED. A bare `TimeoutExpired`
+    names a bash command line and a number of seconds; it says nothing about
+    which of those two things is wrong, so the reader debugs their own diff.
+    That is exactly what happened on #1458 and #1462. The failure below states
+    the classification instead.
+    """
+    try:
+        return subprocess.run(
+            ["bash", *args],
+            cwd=str(cwd or REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=_RUNNER_TIMEOUT_S,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"the nested run-tests.sh exceeded this harness's {_RUNNER_TIMEOUT_S}s "
+            "bound and was KILLED.\n\n"
+            "🔴 THIS IS NOT AN ASSERTION FAILURE AND IT IS PROBABLY NOT YOUR DIFF. "
+            "No property this file pins was contradicted — a bounded subprocess "
+            "ran out of wall time. The bound is a hang guard (see "
+            "`_RUNNER_TIMEOUT_S`), and the historical cause is node contention, "
+            "not a code defect: this file reddened devrc#1458 and #1462 on diffs "
+            "that could not reach it.\n\n"
+            "Before changing anything here, check what else was running. If the "
+            "nested run is genuinely wedged rather than slow, that IS a real "
+            "defect in run-tests.sh — read the captured output below.\n\n"
+            f"command: {exc.cmd}\n"
+            f"stdout tail:\n{(exc.stdout or b'').decode(errors='replace')[-2000:]}\n"
+            f"stderr tail:\n{(exc.stderr or b'').decode(errors='replace')[-2000:]}"
+        ) from exc
+
+
 def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     """Run the runner with a SCRUBBED environment.
 
@@ -99,13 +173,84 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
     debugging a subset run — i.e. exactly when these guards matter.
     """
     env = {k: v for k, v in os.environ.items() if k != "DEVRC_TARGETS"}
-    return subprocess.run(
-        ["bash", *args],
-        cwd=str(cwd or REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=env,
+    return _spawn(args, env=env, cwd=cwd)
+
+
+THIS_FILE = Path(__file__).resolve()
+
+
+def test_no_call_site_open_codes_its_own_subprocess_bound():
+    """🔴 THE SEVENTH SITE. `timeout=120` was open-coded at SIX call sites here,
+    and the bound that reddened devrc#1458 and #1462 was raised at none of them,
+    because raising it meant finding all six by hand.
+
+    So this pins the RELATIONSHIP, not a number: every spawn in this file goes
+    through `_spawn`, and `_spawn` is the only place a bound is written. Adding a
+    seventh raw `subprocess.run` fails here by name.
+
+    🔴 PARSED, NOT GREPPED — the same correction `test_store_siting_ledger.py`
+    already had to make. A regex for `timeout=120` is walked past by `timeout =
+    120`, by a different literal, and by `from subprocess import run as r;
+    r(...)`. None of those survive an AST.
+
+    🔴 AND IT ASSERTS THE BOUND EXISTS, not merely that it is spelled right. A
+    check that only inspected `timeout=` keywords it FOUND would be satisfied by
+    a call carrying no bound at all — which is the unbounded hang this file's
+    bound exists to prevent, i.e. the guard would pass hardest on the worst
+    outcome.
+    """
+    tree = ast.parse(THIS_FILE.read_text(encoding="utf-8"))
+
+    # Resolve every local name bound to subprocess.run, however it was imported.
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for a in node.names:
+                if a.name == "run":
+                    aliases.add(a.asname or a.name)
+
+    def _is_spawn_call(call: ast.Call) -> bool:
+        fn = call.func
+        if isinstance(fn, ast.Attribute) and fn.attr == "run":
+            return isinstance(fn.value, ast.Name) and fn.value.id == "subprocess"
+        return isinstance(fn, ast.Name) and fn.id in aliases
+
+    # Which function does each spawn call live in?
+    owner: dict[int, str] = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and _is_spawn_call(node):
+                    owner.setdefault(node.lineno, fn.name)
+
+    offenders, unbounded = [], []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _is_spawn_call(node)):
+            continue
+        where = owner.get(node.lineno, "<module level>")
+        if where != "_spawn":
+            offenders.append(f"line {node.lineno}, in {where}()")
+            continue
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        bound = kw.get("timeout")
+        if not (isinstance(bound, ast.Name) and bound.id == "_RUNNER_TIMEOUT_S"):
+            unbounded.append(
+                f"line {node.lineno}: timeout is "
+                f"{ast.dump(bound) if bound is not None else 'ABSENT'}"
+            )
+
+    assert not offenders, (
+        "these spawn the runner without going through `_spawn`, so they carry "
+        "their own bound and will not move when `_RUNNER_TIMEOUT_S` moves:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nThat is how the 120s bound survived two gate reds: it was written "
+        "at six sites and raised at none. Route the call through `_spawn`."
+    )
+    assert not unbounded, (
+        "`_spawn` must pass `timeout=_RUNNER_TIMEOUT_S` — not a literal, and not "
+        "nothing:\n  " + "\n  ".join(unbounded)
+        + "\n\nA spawn with NO timeout hangs until the gate's own cap, with no "
+        "message and no exit code, which is worse than the red it replaces."
     )
 
 
@@ -653,9 +798,8 @@ def test_DEVRC_TARGETS_is_equivalent_to_the_flag_and_names_itself():
     assert "DEVRC_TARGETS" in src, "the env override is gone from run-tests.sh"
 
     flag = _run([str(RUN_TESTS), "--targets", t, "--check-floors", str(REPO_ROOT)])
-    env = subprocess.run(
-        ["bash", str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+    env = _spawn(
+        [str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
         env={**os.environ, "DEVRC_TARGETS": t},
     )
     assert flag.returncode == 0 and env.returncode == 0, (flag.stderr, env.stderr)
@@ -798,10 +942,9 @@ def test_the_flag_OVERRIDES_an_ambient_env_var_and_says_so():
     flagged = "scripts/collector/i3/tests"
     ambient = "scripts/opencode/tests"
     env = {**os.environ, "DEVRC_TARGETS": ambient}
-    proc = subprocess.run(
-        ["bash", str(RUN_TESTS), "--targets", flagged, "--check-floors",
-         str(REPO_ROOT)],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
+    proc = _spawn(
+        [str(RUN_TESTS), "--targets", flagged, "--check-floors", str(REPO_ROOT)],
+        env=env,
     )
     assert proc.returncode == 0, (
         "a single --targets alongside an ambient DEVRC_TARGETS must not be "
@@ -825,10 +968,7 @@ def test_a_set_but_EMPTY_env_var_names_the_env_var_in_its_remedy():
     The only remedy is `unset DEVRC_TARGETS`, so it has to appear."""
     _require_targets_flag(RUN_TESTS)
     env = {**os.environ, "DEVRC_TARGETS": ""}
-    proc = subprocess.run(
-        ["bash", str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
-    )
+    proc = _spawn([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)], env=env)
     assert proc.returncode == 3, f"expected 3, got {proc.returncode}"
     # 🔴 The FATAL LINE ITSELF, not just the string somewhere in stderr. The
     # remedy line below it mentions DEVRC_TARGETS independently, so a bare
@@ -857,10 +997,7 @@ ENV_ONLY = {"DEVRC_TARGETS": "scripts/collector/i3/tests"}
 
 def _run_env(args: list[str], extra: dict) -> subprocess.CompletedProcess:
     """Run the runner with EXTRA env, bypassing `_run`'s scrub on purpose."""
-    return subprocess.run(
-        ["bash", *args], cwd=str(REPO_ROOT), capture_output=True, text=True,
-        timeout=120, env={**os.environ, **extra},
-    )
+    return _spawn(args, env={**os.environ, **extra})
 
 
 def test_no_message_hardcodes_the_flag_when_the_ENVIRONMENT_selected():
@@ -956,9 +1093,8 @@ def test_the_empty_selection_remedy_names_EVERY_knob_that_is_set():
         f"told to omit a flag that was never passed.\n{env_only}")
 
     # flag empty, NO env -> must name the flag, never the env var
-    flag_only = subprocess.run(
-        ["bash", str(RUN_TESTS), "--targets", "", "--check-floors", str(REPO_ROOT)],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+    flag_only = _spawn(
+        [str(RUN_TESTS), "--targets", "", "--check-floors", str(REPO_ROOT)],
         env={k: v for k, v in os.environ.items() if k != "DEVRC_TARGETS"},
     ).stderr
     assert "Omit --targets" in flag_only, flag_only
