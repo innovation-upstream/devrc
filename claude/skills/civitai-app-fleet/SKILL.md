@@ -116,6 +116,47 @@ Never report a submit from `civitai app status <slug>` alone — use
 curl -sS -o /dev/null -w '%{http_code}\n' https://<slug>.civit.ai/
 ```
 
+A 200 says the app serves, not that **your** build serves. To claim a change is
+live, show the artefact MOVED and the change is in it — grep the served JS:
+
+```bash
+APP="https://<slug>.civit.ai"                      # substitute the slug ONCE, here
+B=$(curl -sS "$APP/" | command grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1)
+echo "$B"                                          # must DIFFER from the previous release's
+curl -sS "$APP/$B" > /tmp/b.js
+for t in a-testid-you-expect a-testid-you-retired; do
+  printf '%-28s %s\n' "$t" "$(command grep -oF -- "\`$t\`" /tmp/b.js | wc -l)"
+done
+```
+
+⚠ `<slug>` rather than a shell variable you set: this repo is PUBLIC, and
+`scripts/testlib/client_host_scan.py` strips the `$` off a `$VAR`-prefixed host
+and reads the result as a client SUBDOMAIN — so that spelling fails
+`test_no_client_hostnames.py`. (Writing the failing form here, even as an
+example, fails it too — this note is why.) Keep the URL **inside double
+quotes**: there `<` and `>` are literal, not redirections.
+
+🔴 **Two ways that grep returns a confident ZERO, and both read as a pass.**
+
+1. **This toolchain minifies to BACKTICK template literals**, so a double-quoted
+   probe matches nothing — the bundle carries the id between backticks, never
+   between double quotes, which is why the recipe above greps for a backticked
+   token. Measured: a double-quoted probe returned **0 for six tokens including
+   one seen present two commands earlier**, and would have "proved" a set of
+   retired controls gone while proving nothing. **Put a token you KNOW is present
+   in every absence probe and report the pair**, never the zeros alone.
+2. **A testid built from a template literal never appears concatenated**, so its
+   VALUES are ungreppable and only the static prefix survives:
+
+   ```
+   source:  data-testid={ `tip-target-${r}` }
+   bundle:  "data-testid":`tip-target-${e}`
+   grep:    tip-target-creator -> 0     tip-target- -> 1
+   ```
+
+   The control is plainly on screen at the same time. A bundle grep therefore
+   cannot confirm a dynamic testid's values — drive a browser for those.
+
 The real Buzz spend loop is Turnstile + auth gated and is **not** verifiable
 from here by any local run or test. Say so rather than implying coverage.
 

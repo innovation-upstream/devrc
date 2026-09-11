@@ -108,24 +108,50 @@ else
   fi
 fi
 
-# 🔴 THESE BOUNDS MUST STAY UNDER THE SERVER'S OWN, NOT AT THEM. The server
-# enforces MaxTailBytes=262144, MaxSessionsPerPush=128 and MaxPushTailBytes=4 MiB
-# and REJECTS a push that exceeds any of them — a rejection changes nothing
-# server-side, so a client tuned exactly to a limit turns any rounding
-# disagreement into a feeder that fails every single tick while looking correctly
-# configured.
+# 🔴 THESE BOUNDS MUST STAY UNDER THE **DEPLOYED** SERVER'S OWN, AND "DEPLOYED"
+# IS THE WORD THAT COST US THE FEATURE. A rejection changes nothing server-side,
+# so a client tuned above a limit is a feeder that fails EVERY SINGLE TICK while
+# looking correctly configured.
 #
-# 🔴 MAX_PER_PUSH WAS 6 AGAINST A SERVER CAP OF 8, AND THAT PAIR WAS A COVERAGE
-# CAP, NOT A SAFETY BOUND. Measured 2026-09-07 against ~93 live windows: at most
-# six sessions could carry a transcript per tick, so most session cards had no
-# conversation to show at all. The server now bounds the AGGREGATE tail bytes
-# directly — which is the ceiling the count was only ever approximating — so the
-# count is free to rise to what coverage needs. 48 sessions x 192 KiB is 9 MiB in
-# the worst case, so MAX_PUSH_BYTES below is what actually holds, and the builder
-# stops adding sessions when it is reached.
-TAIL_BYTES="${TRANSCRIPT_PUSH_TAIL_BYTES:-196608}"     # 192 KiB; server cap 256 KiB
-MAX_PER_PUSH="${TRANSCRIPT_PUSH_MAX_SESSIONS:-48}"     # server cap 128
-MAX_PUSH_BYTES="${TRANSCRIPT_PUSH_MAX_BYTES:-3145728}" # 3 MiB; server cap 4 MiB
+# 🔴 THE PREVIOUS VALUES WERE TUNED TO A SERVER THAT IS NOT RUNNING, AND
+# TRANSCRIPT PUSH WAS 100% DEAD ON BOTH HOSTS FOR ~19 HOURS. The comment here
+# asserted "the server enforces MaxSessionsPerPush=128 and MaxPushTailBytes=4
+# MiB" and raised the client to 48/3 MiB to match. Measured 2026-09-10, from the
+# live server's own refusals:
+#
+#   workbench: HTTP 413 {"error":"transcript: too many sessions in one push:
+#              16 > 8"}          <- the APP's cap is 8, not 128
+#   laptop:    HTTP 413 <html>…413 Request Entity Too Large…nginx/1.29.4</html>
+#                                <- rejected by the INGRESS, before the app
+#
+# 228 consecutive failures on the workbench alone, beginning 2026-09-09
+# 19:38:52Z — four minutes after #1408 merged (19:34:12Z) and shipped.
+#
+# 🔴 TWO CEILINGS, NOT ONE, THEY FAIL DIFFERENTLY, AND THE TWO HOSTS DO NOT TAKE
+# THE SAME ROUTE — which is why the two hosts failed for two different reasons
+# and either one alone would have given a misleading diagnosis:
+#
+#   workbench -> http://192.168.50.250:30302   (NodePort; no proxy in front)
+#                so it reached the app and hit the APP's session cap.
+#   laptop    -> http://10.42.0.10:8109        (nebula; an nginx IS in this path)
+#                so an oversized body was refused by the PROXY and the app never
+#                saw it — the app's limits are irrelevant once that happens.
+#
+# ⚠ THE PROXY'S ACTUAL BYTE LIMIT IS UNMEASURED. No `client_max_body_size` /
+# `proxy-body-size` is set for clawgate in homelab-talos, which SUGGESTS nginx's
+# 1 MiB default, but that is an inference from an absent annotation and the route
+# above was not traced to the config that serves it. What IS measured: 3 MiB was
+# refused, and 817,481 B went through with HTTP 200 on 2026-09-10. MAX_PUSH_BYTES
+# is set below that observed-good size rather than at any believed ceiling.
+#
+# 🔴 BEFORE RAISING EITHER OF THESE, VERIFY THE RUNNING SERVER — do not raise
+# them because a clawgate PR or release note says the cap moved. `merged` is not
+# `deployed`, and that is exactly the distinction this block got wrong. The cheap
+# check is to run this script by hand and read the response body: the app names
+# its own cap in the refusal.
+TAIL_BYTES="${TRANSCRIPT_PUSH_TAIL_BYTES:-196608}"     # 192 KiB; server cap believed 256 KiB (UNVERIFIED)
+MAX_PER_PUSH="${TRANSCRIPT_PUSH_MAX_SESSIONS:-8}"      # deployed app cap 8, MEASURED from its refusal
+MAX_PUSH_BYTES="${TRANSCRIPT_PUSH_MAX_BYTES:-900000}"  # ~879 KiB, under the ingress's inferred 1 MiB
 # How far back to consider a transcript at all. 24h keeps a session readable the
 # morning after; older ones are past the server's retention anyway.
 MAX_AGE_HOURS="${TRANSCRIPT_PUSH_MAX_AGE_HOURS:-24}"

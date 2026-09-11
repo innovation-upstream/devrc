@@ -928,8 +928,16 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
     🔴 IT NAMES THE CLICKED TEXT AND TWO COUNTS, NOTHING ELSE — never the
     repository, never the mapping. The candidate ROW already shows the repo,
     which is the whole point of asking; the note must not become a second place
-    a name can leak from, and `_every_sink`'s guards would not see this one (it
-    goes to rofi).
+    a name can leak from.
+
+    ⚠ AND THE TEST SUITE'S `_every_sink` HELPER CANNOT SEE THIS STRING. It folds
+    stdout, stderr and the `notify-send` argv — the sinks that outlive the click;
+    this line goes to the picker, which is a transient window on the operator's
+    own screen and is reached through `pick()`, which the tests replace. So the
+    rule above is enforced by the per-site guards on `mesg` instead —
+    `_no_universe_token_anywhere` for the mapping, and
+    `_no_guessed_repo_token_anywhere` for the pane's own repo, which the first
+    one is structurally blind to (a guess never comes from the mapping).
     """
     if below <= 0:
         return (f"{subject} names no repository — the GitHub row offered was "

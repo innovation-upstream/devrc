@@ -876,6 +876,50 @@ def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
     return found
 
 
+def describe_cotenants(cotenants: "list[str]") -> str:
+    """`pid:comm` is not enough to attribute an intruder — add cwd and cmdline.
+
+    `live_cotenants` returns a bounded `pid:comm` list by design (it is a
+    detector, not a debugger). When a test's "nothing is in here yet"
+    PRECONDITION fails we need the two fields that actually identify the
+    process, and we need them at failure time: /proc entries for a transient
+    process are gone before anyone reads the log.
+
+    🔴 THIS IS NOT SPECULATIVE TOOLING — it is what broke the 2026-09-06 flake
+    open. `pid:comm` alone said `['126220:git']`, which is compatible with every
+    hypothesis and so selects none; the first capture carrying cwd+cmdline read
+    `git maintenance run --auto --quiet --detach` and named the writer outright
+    (#1453). Note what that did NOT overturn: `gc --auto` really was refuted, on
+    a threshold argument that still holds. `maintenance run --auto` is a
+    different code path from `git commit`, so the refutation was sound and
+    simply did not span the space — which is exactly the situation a `pid:comm`
+    list cannot get you out of, and a cmdline can.
+
+    It lives HERE, beside `live_cotenants`, so every caller of the probe can
+    reach it. Keeping it private to one test module is how a family spanning two
+    modules ended up with the diagnostic on a single site.
+
+    Best-effort by construction — a process that exits between the scan and this
+    call yields `<gone>`, which is itself the useful answer (it dates the
+    intruder's lifetime to under one scan). It runs INSIDE assertion messages,
+    so it must never raise.
+    """
+    out = []
+    for entry in cotenants:
+        pid = entry.split(":", 1)[0]
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = "<gone>"
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmdline = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            cmdline = "<gone>"
+        out.append(f"{entry} cwd={cwd!r} cmdline={cmdline!r}")
+    return "; ".join(out) or "<none>"
+
+
 def attribution_evidence(git_dirs: "list[Path]") -> "list[str]":
     """Reasons this session cannot attribute a delta to a test. Empty == it can.
 

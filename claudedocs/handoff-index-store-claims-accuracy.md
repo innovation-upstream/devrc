@@ -380,31 +380,66 @@ hosts, so 3–7 became 2–6. The claim `index-store-claims-accuracy-2` was take
 and released on completion; a future session claiming rank 2 gets the **cairn-cutover P3**
 item, not the drift one.
 
-1. **The co-tenant flake is still UNFIXED — diagnosable, not diagnosed.** `devrc`,
-   `scripts/tests/test_git_repo_isolation.py`. Do not close it by re-running; do not
-   re-derive `gc --auto`. Wait for the next sandbox red and read the `cwd=`/`cmdline=` the
-   assertion now prints.
-   forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
-   #1304 merged through it was a human re-running and reading both results.
-
-2. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
-   `seed.sh` guard rests on `/bin/sh` being dash there; that was measured against the
-   `Dockerfile`'s `FROM`, never the running pod.
-   forcing: none
-
-3. **Decide the token allowlist for the 2 remaining local-only entries**
+1. **Decide the token allowlist for the 2 remaining local-only entries**
    (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
    neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
    pod delete (the token file is read ONCE at startup).
    forcing: none
 
-4. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
+2. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
    **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
    over an EXISTING entry prints the first-ever-file template and exits 0 silently,
    destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
+- ✅ **THE DASH PREMISE IS TRUE ON THE DEPLOYED POD, AND NO LONGER LOAD-BEARING.**
+  Measured 2026-09-10 against the RUNNING image (`subsystem-store-api:0.8.0`, not
+  the `Dockerfile`): `/bin/sh -> dash` (`/usr/bin/dash`), and its `echo "a\tb"`
+  emits a real TAB. Control: bash emits the literal `a\tb`, so the asymmetry is
+  real and the reading is not a no-op. **But every pod-side emit in `seed.sh` is
+  now `printf`, not `echo`** — `grep -nE "sh -c .*echo"` returns nothing — so the
+  dash-specific behaviour cannot reach the join key any more. The premise held
+  AND the code stopped depending on it; verifying it changed no decision, which
+  is the honest outcome for a `forcing: none` item.
+
+- ✅ **THE CO-TENANT FLAKE IS DIAGNOSED AND FIXED — `devrc#1453` → `eeea9025`. It
+  was `git maintenance run --auto --quiet --detach`, never `gc --auto`.**
+  Committing spawns it DETACHED, so `subprocess.run` returns when the parent exits
+  while that child lives on with its cwd inside the repo created microseconds
+  earlier — and `live_cotenants` matches on cwd. Fixed with
+  `maintenance.auto=false` via `GIT_CONFIG_*` in `_GIT_ENV`, so it covers every
+  git call in the file including ones added later.
+- 🔴 **THE `gc --auto` REFUTATION WAS RIGHT, AND THAT IS WHY THIS TOOK SO LONG.**
+  It was killed twice — 3 loose objects against a 6700 threshold, and 0/80 with
+  `gc.auto=0` forced. Both correct. `maintenance run --auto` is a DIFFERENT code
+  path, reached regardless of `gc.auto`, deciding per-task only after the process
+  exists. `gc.auto` is deliberately NOT set in the fix: it would read as
+  belt-and-braces while quietly re-legitimising a disproved theory.
+- 🔴 **SHIPPING THE DIAGNOSTIC INSTEAD OF A GUESS IS WHAT SOLVED IT.** `gc.auto=0`
+  was one line and would have looked like a resolution while the real mechanism
+  stayed open behind it. `#1340` instead made the assertion print the intruder's
+  `cwd=`/`cmdline=`, and the first recurrence named its own cause in one line.
+  **When the mechanism is unknown, ship the diagnostic.**
+- 🔴 **PIN A FLAKE BY ITS SPAWN, NOT BY ITS RACE.** Waiting for recurrence is not
+  a test — this went 0/80 in a deliberate loop and then fired in CI.
+  `GIT_TRACE2_EVENT` records every child git spawns, so the guard is a spawn
+  COUNT: deterministic, with a positive control proving the trace recorded
+  anything at all.
+- 🔴 **THIS RANKED LIST HAS NOW GONE STALE THREE TIMES, ONCE WITHIN A SINGLE
+  SESSION.** P3 and the opencode item were closed in `#1449` while rank 1 was
+  being fixed in `#1453`, so the doc shipped saying "still UNFIXED" about work
+  that had merged an hour earlier. Nothing closes these automatically; the next
+  writer is the only moment anyone looks. **Re-verify every ranked item against
+  `origin/main` by CONTENT before acting on it or quoting it.**
+- ⚠ **A failure-set comparison can be VACUOUS AND LOOK CLEAN.** Comparing which
+  tests fail on two trees: the sandbox log carries no `FAILED ` summary lines
+  (the runner uses `-q` without `-rf`), so a `FAILED`-based grep returned 0 for
+  BOTH trees and `comm` printed an empty, reassuring "no new failures". Only a
+  positive control (11 names on one side, 10 on the other) made it evidence.
+  Extract from pytest's traceback headers, and never quote an empty diff without
+  showing the extraction found something.
+
 - ✅ **THE OPENCODE BLINDNESS IS FIXED — `devrc#1365` → squash `14126d94`.**
   `clawgate_resolve` reads `OPENCODE_SESSION_ID` before `CLAUDE_CODE_SESSION_ID`
   (verified on `origin/main` by content: 9 occurrences where the item said 0), and

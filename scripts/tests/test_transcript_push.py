@@ -98,6 +98,16 @@ def transcript(session_id: str, *lines: str) -> str:
 
 # --- the stub server ----------------------------------------------------------
 
+# 🔴 THE DEPLOYED SERVER'S SESSION CAP — MEASURED, NOT READ OFF A RELEASE NOTE.
+# 2026-09-10, from the running clawgate's own refusal:
+#     HTTP 413 {"error":"transcript: too many sessions in one push: 16 > 8"}
+#
+# It lives here so the stub server can REFUSE what production refuses. Raise it
+# only after re-measuring against the RUNNING server — `merged` is not
+# `deployed`, and treating a clawgate change as live is what made transcript push
+# 100% dead on both hosts for ~19 hours while this suite stayed green.
+DEPLOYED_MAX_SESSIONS_PER_PUSH = 8
+
 
 class _Recorder(HTTPServer):
     """An HTTPServer that records every request and serves a scripted digest."""
@@ -111,6 +121,11 @@ class _Recorder(HTTPServer):
         # What POST /api/transcripts answers with.
         self.push_status = 200
         self.push_body = b'{"ok":true}'
+        # The DEPLOYED clawgate's cap, measured 2026-09-10 from its own refusal:
+        # `transcript: too many sessions in one push: 16 > 8`. Set to None to
+        # model a server with no session cap — but do NOT make that the default
+        # again; see `_Handler.do_POST`.
+        self.max_sessions = DEPLOYED_MAX_SESSIONS_PER_PUSH
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -138,7 +153,27 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
-        self._record(self.rfile.read(length))
+        raw = self.rfile.read(length)
+        self._record(raw)
+        # 🔴 THE DOUBLE ENFORCES THE DEPLOYED SERVER'S SESSION CAP, AND THAT IS
+        # THE WHOLE POINT OF IT BEING HERE. Without this the double was strictly
+        # MORE PERMISSIVE than production: it accepted any number of sessions, so
+        # a client tuned above the real cap passed every test and then failed
+        # every single tick in the field. Measured 2026-09-10 — 228 consecutive
+        # 413s on the workbench, transcript push 100% dead on both hosts for ~19
+        # hours, against a suite that was green.
+        #
+        # A test double that accepts what production refuses is not a test.
+        if self.server.max_sessions is not None:
+            try:
+                n = len(json.loads(raw)["sessions"])
+            except (ValueError, KeyError, TypeError):
+                n = 0
+            if n > self.server.max_sessions:
+                self._reply(413, json.dumps({
+                    "error": f"transcript: too many sessions in one push: "
+                             f"{n} > {self.server.max_sessions}"}).encode())
+                return
         self._reply(self.server.push_status, self.server.push_body)
 
     def log_message(self, format, *args):  # noqa: A002
@@ -533,17 +568,33 @@ def test_a_truncated_tail_reports_the_WHOLE_file_size_not_the_tail_length(server
     )
 
 
-def test_coverage_is_not_capped_at_eight_sessions(server, projects, tmp_path):
-    """🔴 RED ON PRE-CHANGE CODE. The default was MAX_PER_PUSH=6 against a server
-    cap of 8, so a host with 21 changed sessions carried SIX of them per
-    five-minute tick — which is why most session cards had no conversation to
-    show at all (~93 live windows, measured 2026-09-07).
+def test_a_push_is_never_refused_for_carrying_more_sessions_than_the_server_takes(
+    server, projects, tmp_path
+):
+    """🔴 THE INVARIANT THAT ACTUALLY HOLDS, replacing a coverage assertion the
+    DEPLOYED server cannot satisfy.
 
-    21 is deliberately NOT a multiple of 8 or 6: a fixture of 8, 16 or 12 could be
-    passed by a mutant restoring the old cap by landing exactly on a boundary.
+    This test used to be `test_coverage_is_not_capped_at_eight_sessions` and
+    asserted that all 21 changed sessions ride in ONE push. That is a statement
+    about a server enforcing MaxSessionsPerPush=128 — which is not the server
+    that is running. #1408 raised the client to 48 to satisfy it, and four
+    minutes after that merged, every tick began failing:
+
+        HTTP 413 {"error":"transcript: too many sessions in one push: 16 > 8"}
+
+    228 consecutive failures on the workbench, transcript push dead on both hosts
+    for ~19 hours, suite green throughout — because the stub server accepted what
+    production refuses. It no longer does (see `DEPLOYED_MAX_SESSIONS_PER_PUSH`).
+
+    Coverage per tick is bounded by the SERVER, not by client preference. What the
+    client owes is that it never gets REFUSED. If coverage is the goal, raise the
+    server first and re-measure; the constant above is the single place to change.
+
+    21 is deliberately not a multiple of 8: a mutant landing exactly on a boundary
+    would otherwise pass.
     """
     n = 21
-    assert n % 8 != 0 and n % 6 != 0
+    assert n % DEPLOYED_MAX_SESSIONS_PER_PUSH != 0
     for i in range(n):
         projects(f"sess-{i:02d}", transcript(f"sess-{i:02d}", human_turn(f"turn {i}", f"sess-{i:02d}")))
 
@@ -552,10 +603,15 @@ def test_coverage_is_not_capped_at_eight_sessions(server, projects, tmp_path):
         tmp_path=tmp_path,
         env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        "the push was REFUSED by a server enforcing the deployed session cap:\n"
+        + proc.stdout + proc.stderr)
     sent = json.loads(pushes(server)[0]["body"])["sessions"]
-    assert len(sent) == n, f"one push carried {len(sent)} of {n} changed sessions"
-    assert len({s["sessionId"] for s in sent}) == n
+    assert len(sent) <= DEPLOYED_MAX_SESSIONS_PER_PUSH, (
+        f"one push carried {len(sent)} sessions against a deployed cap of "
+        f"{DEPLOYED_MAX_SESSIONS_PER_PUSH} — this is refused in the field")
+    assert len({s["sessionId"] for s in sent}) == len(sent), "duplicate sessionIds in one push"
+    assert sent, "the push carried no sessions at all"
 
 
 def test_the_aggregate_byte_bound_stops_the_push_before_the_session_count_does(
