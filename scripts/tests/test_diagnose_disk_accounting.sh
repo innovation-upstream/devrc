@@ -1317,10 +1317,20 @@ has "pinned #1: section 2's process-substitution find" \
 # The overreach was one clause past a correct sentence, which is where these
 # keep happening.
 #
-# What IS true and is the thing to know: unlike #1, its stderr goes nowhere — not
-# to DENIED_LOG, not to a file — so a top-level entry that cannot be stat'd is
-# dropped from section 2 with no tally. That debt is recorded where a maintainer
-# of the function will look, in the `_depth1_nul` site ledger in the script.
+# 🔴 RETRACTED: this comment used to say the enumerator's stderr goes nowhere,
+# "so a top-level entry that cannot be stat'd is dropped from section 2 with no
+# tally", and pointed at the site ledger as recording that debt. BOTH HALVES WERE
+# FALSE. The enumerator DOES NOT DROP unstattable entries, because it never stats
+# them: `-name` and `-print0` at `-maxdepth 1` need only the readdir NAME, so
+# there is nothing to fail. MEASURED over a fixture holding a mode-000 directory,
+# a dangling symlink, a regular file and a directory — all four emitted, ZERO
+# bytes on stderr. And the ledger it pointed at never listed the enumerator, so
+# the pointer was circular: it sent a reader to a register that does not name it.
+# The claim originated as "a FIFTH same-shape site" and propagated to four places
+# before anyone checked the shape it was said to share.
+# Its stderr genuinely is unredirected — that is true and is why the sweep counts
+# it — but an unredirected stderr on a command that cannot fail per-entry is not
+# a silent drop.
 has "pinned #2: the top-level enumerator's find" \
     "$sweep_hits" 'find "$root" -mindepth 1 -maxdepth 1'
 
@@ -1424,8 +1434,15 @@ ln -s realdir "$tl/linkdir"
 #   - draft 2: "it fails HERE, naming the missing tool, instead of three lines
 #     later as a confusing assertion failure." FALSE, and it assumed `set -e`.
 #     🔴 THIS SUITE IS `set -uo pipefail` (line 48) — NO `-e`. MEASURED with a
-#     stand-in returning 127: guarded and unguarded are byte-identical — rc 1,
-#     221 ok, the SAME single failure (`a fifo is counted …`), and the same
+#     stand-in returning 127: guarded and unguarded agree on every outcome that
+#     matters — same rc 1, same `ok:` count, the SAME single failure
+#     (`a fifo is counted …`), and the same
+#     🔴 NOT "byte-identical", and NOT a fixed ok-count. An earlier version of
+#     this comment said both, and both were wrong: stdout differs at the lines
+#     carrying random `mktemp` names, and the quoted count (221) was stale the
+#     moment it was written — the same commit added assertions. Quote the
+#     INVARIANT (the two variants agree), never a running total that the next
+#     assertion invalidates.
 #     `command not found` on stderr. Nothing fails "here"; the run continues
 #     through every remaining assertion, and the assertion failure arrives in
 #     BOTH variants, 15 lines later rather than three.
@@ -1534,15 +1551,57 @@ echo "== 13. UNTALLIED-DROP SITE LEDGER — pinned two-way =="
 # here is NOT the fix for finding one — recording it is the fix; tallying it is
 # a different, larger change (bash's `[ -d ]` cannot separate "not a directory"
 # from "stat refused" from "unmatched glob").
-bracket_sites="$(grep -n '\[ -d "\$p" \] || continue' "$SCRIPT" | cut -d: -f1 | tr '\n' ' ')"
+# 🔴 THIS SCAN PINS SPELLINGS, NOT THE CRITERION — SAY SO, DO NOT CLAIM MORE.
+# The first version grepped the single literal `[ -d "$p" ] || continue`, and an
+# audit injected a site meeting the criterion exactly, spelled
+# `if [ ! -d "$entry" ]; then continue; fi`. The suite stayed GREEN over a live
+# hazard while this ledger printed "exactly 2 … as pinned". The pattern below is
+# an alternation covering the single-line spellings and ANY loop variable:
+#   [ -d "$p" ] || continue   ·   [ -d "${p}" ] || continue   ·   [[ -d $p ]] || continue
+#   if [ ! -d "$x" ]; then continue; fi
+# 🔴 KNOWN BLIND SPOTS, which no line-based scan can close: a MULTI-LINE `if`
+# (the `continue` on its own line), and a guard delegated to a helper function.
+# Those are why the script's paragraph now points at the CRITERION and calls this
+# a spelling scan, rather than telling a reader the list is authoritative.
+# 🔴 COMMENTS **AND** `echo` LINES ARE EXCLUDED, and the `echo` half is not
+# hypothetical: widening the pattern immediately matched section 2's own banner,
+# which QUOTES the guard (`dropped by a '[ -d ] || continue' guard`) while
+# explaining the defect. A ledger that counts a sentence about the hazard as an
+# instance of it is the declarations-vs-instances error in miniature.
+DROP_GUARD_RE='\[\[?.*-d.*\]\]?.*continue'
+bracket_sites="$(grep -nE "$DROP_GUARD_RE" "$SCRIPT" | grep -vE '^[0-9]+:[[:space:]]*(#|echo )' | cut -d: -f1 | tr '\n' ' ')"
 bracket_n="$(printf '%s' "$bracket_sites" | wc -w)"
 
-# POSITIVE CONTROL: the pattern must be able to match at all. A ledger whose
-# grep silently stopped matching would report a serene 0 and pin nothing —
-# the exact shape this file's other ledgers carry a control for.
-[ "$bracket_n" -ge 1 ] \
-  && pass "POSITIVE CONTROL: the untallied-drop pattern matches ($bracket_n site(s))" \
-  || fail "POSITIVE CONTROL FAILED: the pattern matched NOTHING — this ledger is wired to nothing and its count below is meaningless"
+# 🔴 A REAL CANARY, NOT A SELF-CHECK. The previous "positive control" asserted
+# `bracket_n >= 1`, which is strictly IMPLIED by the `-eq 2` below — there is no
+# state where it fires and the count passes, so it detected nothing. Worse, it
+# PASSED on the degradation it named: rewording one site to `[ -d "${p}" ]` left
+# it green at "1 site(s)" while the count misreported a rewording as a deletion.
+# This builds an INDEPENDENT fixture with a known answer, the way section 11's
+# control does — running the suspect instrument over the file under test is a
+# second sample of the same unknown, not a control.
+canary_f="$TMP/dropguard-canary.sh"
+{ printf '    [ -d "$p" ] || continue\n'
+  printf '    [ -d "${q}" ] || continue\n'
+  printf '    [[ -d $r ]] || continue\n'
+  printf '    if [ ! -d "$s" ]; then continue; fi\n'
+  printf '    echo "not a drop guard at all"\n'; } > "$canary_f"
+canary_n="$(grep -cE "$DROP_GUARD_RE" "$canary_f")"
+[ "$canary_n" -eq 4 ] \
+  && pass "CANARY: the pattern finds all 4 single-line spellings in a fixture holding exactly 4" \
+  || fail "CANARY FAILED: found $canary_n of 4 known spellings — the count over the real script means nothing until this passes"
+# 🔴 NEGATIVE half, and it pins the EXACT over-match that occurred. Widening the
+# pattern matched section 2's banner, which quotes the guard while describing the
+# defect. The filtered pipeline — not the bare regex — is what must reject it, so
+# the canary exercises the pipeline.
+canary_negf="$TMP/dropguard-canary-neg.sh"
+{ printf '%s\n' 'echo "  dropped by a '"'"'[ -d ] || continue'"'"' guard, so it had NO ROW"'
+  printf '%s\n' '# a comment mentioning [ -d "$p" ] || continue while explaining it'
+  printf '%s\n' '    echo "continue past the -d flag in prose"'; } > "$canary_negf"
+canary_neg="$(grep -nE "$DROP_GUARD_RE" "$canary_negf" | grep -vcE '^[0-9]+:[[:space:]]*(#|echo )' || true)"
+[ "$canary_neg" -eq 0 ] \
+  && pass "CANARY: prose QUOTING the guard (banner echo, comment) is not counted as a site" \
+  || fail "CANARY FAILED: $canary_neg line(s) of prose about the hazard were counted as instances of it — the count is inflated"
 
 [ "$bracket_n" -eq 2 ] \
   && pass "exactly 2 untallied-drop sites, as pinned" \
