@@ -67,9 +67,12 @@ workbench working tree where a `git checkout` would have deleted them unreported
    forcing: none
 5. **`diagnose-disk-accounting.sh`: the enumerator's `find` feeds no `DENIED_LOG`.** A
    top-level entry root cannot stat is dropped from section 2 with no tally, and section 3's
-   residual absorbs it silently. Now recorded in the `_depth1_nul` site ledger as the FIFTH
-   same-shape site. Not a regression — the glob it replaced did the same — so this is a debt,
-   not a defect.
+   residual absorbs it silently. 🔴 **RETRACTED 2026-09-11 — this item was FALSE and is
+   closed.** The enumerator never stats its entries (`-name` + `-print0` at `-maxdepth 1` need
+   only the readdir name), so there is nothing to drop: MEASURED over a fixture holding a
+   mode-000 directory, a dangling symlink, a regular file and a directory, all four were
+   emitted with ZERO bytes on stderr. The claim began as "a FIFTH same-shape site" and reached
+   four separate places before anyone checked the shape it was said to share.
    forcing: none
 6. **A top-level directory that is a MOUNTPOINT for another fs is counted as root-fs.**
    Flagged by round 2 as out of range and unaudited: `/boot` is emitted by the enumerator,
@@ -275,7 +278,8 @@ workbench working tree where a `git checkout` would have deleted them unreported
 - 🔴 **A sweep that fixes a claim must reach EVERY site, and the test file is a site.** Round
   1 corrected the false residual-units phrase at its two script sites; the test file carried
   the same claim in other words and was left, producing a comment that contradicted an
-  assertion eleven lines below it.
+  assertion 25 lines below it (measured at `ae2c2427`: lines 1383 and 1408 — an
+  earlier retelling of this said "eleven" and it propagated to three sites).
 - **"The laptop is unreachable" was FALSE and is retracted — it is reachable on nebula, and
   the LAN address is same-network-only by design.** A prior version of the ranked list said
   the laptop was unreachable on BOTH nebula (`10.42.0.100`) and LAN (`192.168.50.155`) at
@@ -442,7 +446,7 @@ independently. Kept for the load-vs-assertion reasoning; nothing here is open.
   `e8551af6..ae2c2427` → 5 🟡 / 0 🔴, fixed in #1490 (`f0172420`). **Round 3 has not run.**
 - **Observed (with values):** across both rounds, **7 of 14 findings were about prose the
   previous round wrote while explaining itself** — not logic. Round 2's headline: the test
-  file said a top-level symlink *"must not"* be listed, **eleven lines above an assertion
+  file said a top-level symlink *"must not"* be listed, **25 lines above an assertion
   requiring that it is**, because round 1 swept the false phrase at its two SCRIPT sites and
   never looked in the TEST file, which carried the same claim in different words.
 - **Ruled out:** that the code is wrong. Both retracted rationales and all four mutation
