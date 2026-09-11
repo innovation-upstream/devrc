@@ -21,19 +21,32 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-**Merged and verified by content on `origin/main`:**
-
-| PR | what it shipped |
-|---|---|
-| `#1429` a0839ec4 | xdist workers sized from the **cgroup quota** (not `nproc`, which lies in a container), cap 8; `gate.sh` re-execs into `nix develop` itself; merge-gate policy rewritten |
-| `#1445` cace96d9 | `run-tests.sh --files` change-scoped runs + `scripts/scoped-tests.sh`; `SCOPE: FULL\|PARTIAL\|SCOPED\|NONE\|UNKNOWN` machine contract that `gate.sh` refuses to emit a PASS off |
-| `#1469` 86b1ddec | `scripts/main-status-watch.py` + user timer: watches `main`'s own CI status, starts the `main-green-check` deadman early on an authoritative red |
-| `#1471` 4ab87a64 | the declared reason protection is off — **was conditional and had expired**; now unconditional |
-| `#1482` 972fbcbd | two more stale copies of that reason, one in the file #1471 edited |
-
-**Open:** `ZacxDev/homelab-infra#792` — cancels CI runs whose PR already merged. Ships `DRY_RUN`/
-`dry-run`, **not armed**; the literal is pinned by a test so arming costs a visible line. GitOps —
-merging deploys. **Needs operator review.**
+- **Branch / PR:** nothing in flight in `devrc`. Six PRs merged this arc — `#1429` a0839ec4,
+  `#1445` cace96d9, `#1469` 86b1ddec, `#1471` 4ab87a64, `#1482` 972fbcbd, `#1488` d835fe51 (this doc).
+- **DEPLOYED AND VERIFIED LIVE**, which the first version of this doc could only pose as a question.
+  `scripts/ship.sh` rc 0, both hosts at `86b1ddec`:
+  - workbench — `✅ VERIFIED — on branch main at origin/main (clean tree) + switched`; 584 managed
+    artifacts checked, 0 dangling; 409 repo-sourced examined, 0 stale.
+  - laptop (over nebula `10.42.0.100`; LAN `192.168.50.155` did not answer, which is normal) —
+    `fast-forwarded main 0150d71f -> 86b1ddec`, same VERIFIED line; 530 checked, 0 dangling.
+  - ⚠ Both legs read individually AND the shas compared — `ship.sh` returns rc 19 when the two hosts
+    land on different shas, and every per-host line can be green while that happens.
+- 🔴 **The CONSUMER is live, not just the deploy.** A deploy reporting success is a claim about the
+  deploy; this is the unit:
+  ```
+  main-status-watch.timer   ActiveState=active   next 2026-09-11 00:05 CDT
+  main-status-watch: newest main verdict: GREEN at ce9b55c3 (walked 20) — nothing to do.
+  ```
+  It walked 20 commits, found green, did nothing, exited 0. `SuccessExitStatus=10 11`, so the rc 12
+  the round-2 fix introduced will correctly FAIL the unit.
+- **`#1469` shipped WITH its round-2 fix, narrowly.** The agent that wrote those fixes finished them,
+  reported 61 tests passing, deliberately left them UNCOMMITTED so a claims block would record a real
+  range — and then died on a session limit. Two modified files sat unstaged in a dead agent worktree,
+  one `git checkout` from silent deletion. Rescued and pushed as `3e8d4315`, which became the PR head,
+  so the 🔴 fix is on `main` (verified by content: `ladder_exit` ×7, `EPISODE_MAX_AGE_S` ×6).
+- **`clawgate-task:` deliberately NOT recorded.** `clawgate_handoff.sh resolve` exited **5** —
+  nothing resolved. An unknown session id answers `200` with an empty array, so that result cannot
+  distinguish "this session touched no task" from "the id is wrong". It is not a clean bill of health.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -97,34 +110,37 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 
 ## Next steps (ranked)
 
-🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END; inserting mid-list silently re-points every live claim.
+🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting on one. New items
+go at the END; inserting mid-list silently re-points every live claim.
 
-1. **Review `ZacxDev/homelab-infra#792`** and decide whether to arm it (`CLOSED_PR_MODE: on`). GitOps
-   — merging deploys. Its dry run over 254 live objects cancelled nothing, with `states_read=1`
-   beside `closed=0` proving GitHub was actually asked.
-   forcing: operator
-2. **Close #1469's audit ladder.** Round 3 never ran, and its 95-mutant enumerated sweep **died
-   mid-run with its verdict unknown** — it had already surfaced one genuine survivor. The 🔴 is
-   fixed and verified (138 passed, fail-loud rc 12), but the ladder is open.
-   forcing: none
-3. **The one genuine flake: `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_
-   CONTROL…`** in `scripts/tests/test_subsystem_store_api.py` — 5 of 26 failure heads. Its own
-   docstring (`:7360`) says **#1432 is NOT a fix** and that whether the port race affects its rate is
-   UNKNOWN. Needs a real diagnosis, not another ported retry. Load-sensitive.
-   forcing: none
-4. **Stale PR bases re-report already-fixed reds** — 8 of 8 failing open PRs were 5–42 commits
-   behind. A rebase cured 4 of them outright (proven: the fix commit is on `main` and not an ancestor
-   of their heads). A bot comment naming the fix would stop humans triaging cured reds. `strict:true`
-   is deliberately off and correctly so.
+1. **Review `ZacxDev/homelab-infra#792`** and decide whether to arm it (`CLOSED_PR_MODE: on`).
+   Ships `dry-run`, with the literal pinned by a test so arming costs a visible line. Its dry run over
+   254 live objects cancelled nothing, `states_read=1` beside `closed=0` proving GitHub was asked.
+   GitOps — merging deploys.
+   forcing: user — the operator asked for it as a PR to review, not to merge.
+2. **Close `#1469`'s audit ladder.** Round 3 never ran, and its **95-mutant enumerated sweep died
+   mid-run with its verdict unknown** after already surfacing one genuine survivor
+   (`print_header`'s sentinel branch) that its hand-written sweeps would never have included.
+   🔴 This is now running unattended on both hosts every 10 min, so the ladder is open on LIVE code.
+   Files: `scripts/main-status-watch.py`, `scripts/tests/test_main_status_watch.py`.
+   forcing: gate — an audit fix resets the verification gate; the ladder is not closed.
+3. **The one genuine flake:** `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_
+   CONTROL…` in `scripts/tests/test_subsystem_store_api.py` — 5 of 26 failure heads. Its own
+   docstring (`:7360`) states **#1432 is NOT a fix** and that whether the port race moves its rate is
+   UNKNOWN. Needs a diagnosis, not another ported retry. Load-sensitive.
+   forcing: gate — it reddens the only automated signal at random.
+4. **Stale PR bases re-report already-fixed reds** — 8 of 8 failing open PRs were 5–42 commits behind;
+   a rebase cured 4 outright (proven: the fix commit is on `main` and not an ancestor of their heads).
+   A bot comment naming the fix would stop humans triaging cured reds. `strict: true` is deliberately
+   off and correctly so.
    forcing: none
 5. **The 19-min CI median.** `pytests` is 90–95% of it. The local loop is solved; CI still pays full
-   freight on every push. Note `devrc-ci-5m64b` ran `pytests` in **52s** on a nix cache hit — an
-   unchanged derivation is already near-free, so the cost is entirely rebuild-on-change.
+   freight per push. ⚠ `devrc-ci-5m64b` ran `pytests` in **52s** on a nix cache hit, so an unchanged
+   derivation is already near-free — the cost is entirely rebuild-on-change.
    forcing: none
 6. **The flake screen in `main-status-watch.py` is probably inert** — at current status-description
-   lengths (140-char cap) it will likely never fire. Its author proposed deleting it if still dead in
-   a month. Decide on/after **2026-10-11**; the deadman's double-run is the real defence.
+   lengths (140-char cap) it will likely never fire; its author proposed deleting it if still dead in
+   a month. Decide on/after **2026-10-11**. The deadman's double-run is the real defence.
    forcing: none
 
 ## Decisions, so they are not re-litigated
@@ -144,3 +160,47 @@ the END; inserting mid-list silently re-points every live claim.
   60s.
 - **The local full-suite pre-merge ritual is DELETED.** It produced dozens of concurrent full-suite
   runs on one 24-core box, running the same ~22k tests twice per change while gating nothing.
+## How to verify
+
+```bash
+# the consumer, not the deploy — this is what "#1469 is live" means
+systemctl --user list-timers main-status-watch.timer --all
+journalctl --user -u main-status-watch.service -n 5 --no-pager
+
+# both hosts on one sha (rc 19 if they disagree; read EVERY per-host line, not the verdict)
+bash ~/workspace/devrc/scripts/ship.sh
+
+# the 18-second claim, on main
+nix develop ~/workspace/devrc --command bash -c \
+  "cd ~/workspace/devrc && bash scripts/run-tests.sh --files 'scripts/dl-router/tests/test_store.py' ."
+#  expect: SCOPE: SCOPED (1 file(s) across 1 of 28 …) + RESULT: PASS, ~18s
+
+# protection is off BY DECISION, and the declaration is unconditional
+bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep '^\[protect\]'
+#  expect: DECLARED OFF, and live OFF … why: … STANDING preference
+```
+
+## Gotchas / decisions / dead-ends
+
+- 🔴 **An agent worktree is where unsaved work goes to die.** Three agents on this arc were killed by
+  session limits mid-task; one had finished its fixes and deliberately not committed them. **Check
+  `git -C <agent-worktree> status --short` for every dead agent before concluding its work is lost or
+  landed** — `ListAgents` showing no subagents does not mean their trees are empty.
+- 🔴 **A resumed agent will wait forever on a background job that died with it.** Every resume message
+  on this arc had to say so explicitly. Tell it: whatever you had in flight is gone, re-run it.
+- 🔴 **`git worktree add <dir>` against an existing dir fails, but a subsequent `mv` into that dir
+  SUCCEEDS.** Measured here: `/home/zach/workspace/devrc-handoff` already existed as ANOTHER session's
+  worktree on `docs/handoff-cairn-slice2` with its own unpushed commit, and this session dropped a
+  file into it. Caught before committing. **Check `git -C <dir> branch --show-current` before writing
+  into any worktree path you did not just create.**
+- `claim-work --release <slug>` answering `nothing to release — <ref> does not exist` means **the slug
+  is wrong**, not that it was already released. A claim from this arc stayed held for two days on that
+  misreading. Copy the slug from `--list`, never retype it.
+- **Protection stays OFF permanently — solo-contributor repo, the operator requires the ability to
+  ship immediately.** 🔴 It is NOT conditional on Tekton capacity. An earlier declaration said so and
+  had **expired by its own terms** (capacity measured fine), which would have led a future session to
+  restore protection *correctly by the declaration and against what the operator wants*. Fixed in
+  `#1471`/`#1482`; `bp_declared_off_reason()` is the authoritative text and every other site points at
+  it rather than restating it. rc 24/25 remain armed for an accidental restore.
+- **The ten-reporter change is RETIRED** — its only justification was "protection would block on
+  artefact statuses", which the permanent-off decision removes.
