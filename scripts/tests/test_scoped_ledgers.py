@@ -103,6 +103,53 @@ def test_a_full_run_still_runs_the_hook_and_shell_families(tmp_path):
     assert re.search(r"^     NOT RUN in this mode", out, re.M) is None, out
 
 
+def test_a_TARGETS_run_also_skips_the_families_and_SAYS_SO(tmp_path):
+    """🔴 THE `--targets` HALF, which was NOT covered and cost three gate reds.
+
+    The skip above was keyed on `SCOPED_MODE`, which only `--files` sets — so a
+    `--targets` run still executed BOTH families, and no `--targets` value can
+    name either. MEASURED on the dev host at load ~52, same box minutes apart:
+
+        --targets scripts/collector/i3/tests   47 s   (families ran)
+        --files   <one file in that target>     4 s   (families skipped)
+
+    and after this change the same `--targets` run is **9 s**. That ~12x is what
+    breached the nested-subprocess bound in `test_run_tests_targets.py` under CI
+    contention, reddening `tekton/devrc-pytests` on devrc#1450, #1458 and #1462 —
+    every one a diff that cannot reach either file.
+
+    🔴 BOTH HALVES, for the same reason the SCOPED test asserts both: a silent
+    skip is the #276 shape. And the THIRD assertion is the one that keeps this
+    from being a `--files` test in disguise — a PARTIAL run must still report
+    `SCOPE: PARTIAL`, never `SCOPED`. Reusing `SCOPED_MODE` wholesale would have
+    passed the first two and failed this one, and it would have silently
+    suspended GUARD 3's floors with it.
+    """
+    d, runner = scoped_fixture(tmp_path, floor=1)
+    runner.write_text(patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 1}, ack=[],
+        hook_tests=[CHEAP_HOOK_TEST], shell_tests=[CHEAP_SHELL_TEST]))
+    proc = run([str(runner), str(REPO_ROOT), "--targets", str(d)],
+               env={"MIN_TESTS": "1"})
+    out = out_of(proc)
+    assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
+    # It SAYS so — on the PARTIAL surface, which carried no such line before.
+    assert re.search(r"^     NOT RUN in this mode", out, re.M), (
+        "a --targets run dropped the families without naming them anywhere — "
+        f"that is the silent narrowing the skip's own comment forbids.\n{out[-3000:]}")
+    assert re.search(r"^       - \d+ hand-rolled hook test script\(s\)$", out, re.M), out
+    assert re.search(r"^       - \d+ shell test script\(s\)$", out, re.M), out
+    # And they really did not run.
+    assert not re.search(r"^=== script scripts/claude-hooks/", out, re.M), out[-3000:]
+    assert not re.search(r"^=== script scripts/tests/.*\.sh ", out, re.M), out[-3000:]
+    # 🔴 …while STAYING a PARTIAL run. This is the assertion that separates
+    # "skip the two unselectable families" from "become a --files run".
+    assert re.search(r"^SCOPE: PARTIAL", out, re.M), (
+        "a --targets run must keep reporting PARTIAL — SCOPED would mean the "
+        f"per-target floors stopped being enforced too.\n{out[-3000:]}")
+    assert not re.search(r"^SCOPE: SCOPED", out, re.M), out[-3000:]
+
+
 def test_a_narrowed_run_NAMES_the_work_it_left_for_ci(tmp_path):
     """🔴 THE POINT OF A NARROWED RUN, now that there is no local full-suite
     mandate and branch protection is off: the advisory `tekton/devrc-*` checks

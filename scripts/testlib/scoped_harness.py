@@ -45,7 +45,50 @@ CHEAP_HOOK_TEST = "scripts/claude-hooks/tests/test_claude_notify.py"
 CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 
 
-def run(args: list[str], timeout: int = 600, env: dict | None = None,
+#: How long any nested `run-tests.sh` spawned by a test may take before the
+#: harness kills it. THE one place this bound is written.
+#:
+#: 🔴 IT LIVES HERE, NOT IN A TEST FILE, BECAUSE "one rule, one place" WAS
+#: FILE-LOCAL AND THAT IS HOW THE LAST ONE ROTTED. `test_run_tests_targets.py`
+#: open-coded `timeout=120` at SIX sites; consolidating those into a constant
+#: private to that file would have left a FOURTH copy of the same predicate —
+#: this default — untouched, and a guard scoped to one file could never see it.
+#: Both now read this name.
+#:
+#: 🔴 THIS IS A HANG BOUND, NOT AN ASSERTION. Nothing any caller pins depends on
+#: the nested run being fast; the bound exists only so a wedged child fails with
+#: a message rather than hanging until the gate's own cap, which is worse — no
+#: message, no exit code.
+#:
+#: 300 s is ~33x the measured cost of a narrowed nested run (9 s at load ~46,
+#: after `run-tests.sh` stopped executing the hook/shell families on non-FULL
+#: runs). ⚠ Headroom is not the only axis: `test_run_tests_targets.py` performs
+#: FOUR real nested runs, so this also sets a worst case — 4x300 s = 20 min.
+#:
+#: 🔴 AGAINST THE GATE **TASK**'s OWN `timeout: 60m`, NOT THE PIPELINE'S
+#: `timeouts.tasks: 70m`. The task cap is the lower of the two and therefore the
+#: only one a slow test can reach — an earlier draft of this paragraph quoted
+#: the pipeline budget and got the consequence BACKWARDS with it. The
+#: difference is not pedantry; the two fail in opposite directions, per that
+#: pipeline's own measured three-way probe (Tekton v1.12.0,
+#: `devrc-ci-pipeline.yaml`):
+#:
+#:     timeouts.tasks   -> PipelineRunTimeout, finally NEVER RAN -> posts nothing,
+#:                         checks stay `pending` forever
+#:     task-level 60m   -> Failed,             finally RAN       -> posts a red
+#:
+#: So overrunning here yields a LEGIBLE RED, not the unclearable pending the
+#: earlier draft warned about. ⚠ The real budget is tighter than 60m anyway: that
+#: clock runs while the pod is Pending, and a worst-observed ~22.5m queue leaves
+#: ~37m of execution. 20 min of that is 54%; the rejected 600 would have been
+#: 40 min, i.e. MORE than the whole post-queue budget for one test file.
+#: 600 was the first value proposed and is REJECTED for that reason: it bought
+#: headroom the runner fix had already made unnecessary.
+RUNNER_TIMEOUT_S = 300
+
+
+def run(args: list[str], timeout: int = RUNNER_TIMEOUT_S,
+        env: dict | None = None,
         cwd: Path | None = None) -> subprocess.CompletedProcess:
     full_env = None
     if env is not None:

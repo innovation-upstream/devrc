@@ -49,11 +49,15 @@ import ast
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from testlib.scoped_harness import RUNNER_TIMEOUT_S  # noqa: E402
 RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
 
 # The entry #276 added and the gate then silently refused to run.
@@ -102,9 +106,11 @@ def _require_check_targets(runner: Path) -> None:
 #: breached by CONTENTION and the failure read as a code failure:
 #: `subprocess.TimeoutExpired`, returncode -9, traceback ending in
 #: `_check_timeout` — reproduced here by lowering this constant. Occurrences:
-#: devrc#1450, #1458 and #1462, all three merged with `tekton/devrc-pytests`
-#: RED, and all three on diffs that cannot reach this file (#1462 and #1450 are
-#: docs-only).
+#: devrc#1450, #1458 and #1462, each red on `tekton/devrc-pytests` naming one of
+#: this file's four real-run tests, and each on a diff that cannot reach it
+#: (#1450 is a SKILL.md, #1462 a handoff doc). ⚠ **#1458 and #1462 merged over
+#: that red; #1450 was still OPEN when this was written** — an earlier draft
+#: said "all three merged", which was wrong about #1450.
 #:
 #: 🔴 WHERE THOSE 47 SECONDS GO — AND AN EARLIER VERSION OF THIS COMMENT GOT IT
 #: WRONG IN THE WAY THAT MATTERS. It said "almost all of it is the runner's
@@ -116,24 +122,30 @@ def _require_check_targets(runner: Path) -> None:
 #: against `--files <one file in it>` = **4 s**, because `--files` sets
 #: `SCOPED_MODE` and `run-tests.sh:4518` drops the families under it.
 #:
-#: 🔴 SO THIS BOUND IS THE SYMPTOM FIX, AND IT SAYS SO. The root cause is that a
-#: `--targets` run pays for work it did not select; `run-tests.sh` already has
-#: the machinery to skip it and reaches it only via `--files`. Decoupling that
-#: would take the nested run to ~4 s and make even the ORIGINAL 120 s ~30x
-#: headroom. Calling the cost "preflight" is precisely what made a bigger
-#: timeout look like the only lever — do not re-derive that.
+#: 🔴 THE ROOT CAUSE IS FIXED IN THE SAME PR, SO THE VALUE IS DERIVED FROM THE
+#: WORLD AFTER THAT FIX, NOT BEFORE IT. `run-tests.sh` dropped the hook/shell
+#: families only under `--files`; it now drops them for any non-FULL run, so the
+#: same nested `--targets` run measures **9 s** at load ~46 — down from 47 s. A
+#: bound sized against the 47 s would be insurance against a defect that no
+#: longer exists.
 #:
-#: 600 s is ~12x the measured 47 s. ⚠ It is not free: this file performs FOUR
-#: real nested runs, so the worst case moves from 4x120 s = 8 min to
-#: 4x600 s = 40 min, against a measured `timeouts.tasks` of 1h10m on
-#: `devrc-ci-pipeline` — 57% of the task budget. A run that hits that cap posts
-#: NOTHING and the checks stay `pending` forever (CLAUDE.md, measured on
-#: `devrc-ci-nnt6f`/`-9p6mf`). That is the trade this value makes: a readable
-#: red becomes less likely, an unclearable pending becomes more so.
+#: 🔴 THE VALUE ITSELF LIVES IN `testlib.scoped_harness`, NOT HERE. That module's
+#: `run()` already carried its own `timeout=600` default and is used by five
+#: other test files, so a constant private to THIS file would have been a fourth
+#: copy of the predicate while the docstring below claimed "one rule, one place".
+#: Read the reasoning for the number there; this name is an import so the two
+#: cannot drift.
+#:
+#: ⚠ NOT YET CONSOLIDATED, and this is the honest edge of the claim:
+#: `test_run_tests_preconditions.py:68` uses 300 and
+#: `test_devshell_satisfies_required_tools.py:105,436` use 120, each spawning a
+#: runner of its own. They drive fast precondition/PATH-stub aborts, so none is
+#: near its bound — this is about the thesis, not a live defect. The guard below
+#: is file-scoped and cannot see them.
 #:
 #: Deliberately NOT env-overridable: a bound a run can widen for itself is a
 #: bound that cannot fail.
-_RUNNER_TIMEOUT_S = 600
+_RUNNER_TIMEOUT_S = RUNNER_TIMEOUT_S
 
 
 def _spawn(args: list[str], *, env: dict) -> subprocess.CompletedProcess:
@@ -231,12 +243,30 @@ def test_no_call_site_open_codes_its_own_subprocess_bound():
     """
     tree = ast.parse(THIS_FILE.read_text(encoding="utf-8"))
 
-    #: Every `subprocess` entry point that can start a child. `run` is the one
-    #: this file uses; the rest are here because the guard must be as wide as its
-    #: docstring, and `communicate()` on an unbounded `Popen` is the exact hang
-    #: the second assertion below is about.
+    #: The `subprocess` entry points this guard recognises. `run` is the one this
+    #: file uses; the rest are here because `communicate()` on an unbounded
+    #: `Popen` is the exact hang the second assertion below is about.
+    #:
+    #: 🔴 THIS IS AN ENUMERATION, NOT "EVERY WAY TO START A CHILD" — an earlier
+    #: version of this comment claimed the latter and was wider than the set.
+    #: `getoutput`/`getstatusoutput` are included because they are the SHARP
+    #: case: real `subprocess` spawn points that take **no `timeout` parameter
+    #: at all**, i.e. unbounded by construction. Measured NOT covered, and left
+    #: so deliberately: `os.system(...)` (not `subprocess`), `from subprocess
+    #: import *` (a star-import binds names this AST walk cannot enumerate), and
+    #: assignment aliasing (`_SP = subprocess.run; _SP(...)`). Each would need a
+    #: different mechanism, and none has ever appeared in this file — the claim
+    #: is "these spellings are closed", never "no spelling escapes".
     _SPAWNING_CALLABLES = frozenset(
-        {"run", "Popen", "call", "check_call", "check_output"}
+        {
+            "run",
+            "Popen",
+            "call",
+            "check_call",
+            "check_output",
+            "getoutput",
+            "getstatusoutput",
+        }
     )
 
     # Resolve every local name that can reach one of those, however it was bound:
@@ -288,8 +318,30 @@ def test_no_call_site_open_codes_its_own_subprocess_bound():
         "these spawn the runner without going through `_spawn`, so they carry "
         "their own bound and will not move when `_RUNNER_TIMEOUT_S` moves:\n  "
         + "\n  ".join(offenders)
-        + "\n\nThat is how the 120s bound survived two gate reds: it was written "
+        + "\n\nThat is how the 120s bound survived three gate reds: it was written "
         "at six sites and raised at none. Route the call through `_spawn`."
+    )
+    # 🔴 THE POSITIVE CONTROL, AND WITHOUT IT EVERY ASSERTION HERE IS VACUOUS.
+    # Both lists are accumulated over calls the walk FOUND, so a file containing
+    # no spawn call at all satisfies them by finding nothing — the same "passes
+    # hardest on the worst outcome" shape the bound-ABSENT check below closes,
+    # one level up. Measured SURVIVING before this line: replacing `_spawn`'s
+    # body with a delegation to a helper in `testlib/` — the natural shape of
+    # "move the bound somewhere shared" — left zero spawn calls here and the
+    # guard green. `>= 1`, not `== 1`: the count is not the property.
+    bounded_in_spawn = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _is_spawn_call(node)
+        and owner.get(node.lineno) == "_spawn"
+    )
+    assert bounded_in_spawn >= 1, (
+        "this guard found NO bounded spawn inside `_spawn`, so every assertion "
+        "above passed over an empty set and proved nothing. Either the spawn "
+        "moved out of this file — in which case the bound moved with it and "
+        "this guard no longer covers it — or `_spawn` was renamed and `owner` "
+        "no longer resolves. Both need a human, not a green."
     )
     assert not unbounded, (
         "`_spawn` must pass `timeout=_RUNNER_TIMEOUT_S` — not a literal, and not "
