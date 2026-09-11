@@ -84,21 +84,27 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   **own** upstream (never a hardcoded `main`/`trunk`), the repo-wide numbers are
   printed beside it as information, and the cross-host comparison diffs **subtree
   tree OIDs** rather than repo HEADs.
-  🔴 **rc 16 is NOT drift** — it is the fuzzyclaw phase-2 gate reporting that zero rows
-  still take their age from fuzzyclaw alone, i.e. the readers can now be deleted; the
-  final line says `ACTIONABLE (not drift)` and it is the least severe code, so it can
-  only ever be the verdict on an otherwise-clean run — which is also printed, since
-  "no drift" and "a cleanup is possible" are independent claims. It is a **success** to
-  systemd (`SuccessExitStatus = 16`): it stays set until the cleanup happens, so failing
-  the unit on it would fire the DND-defeating failure toast 4×/day forever. Every way
-  that gate can fail to measure prints `COULD NOT MEASURE` with a reason and sets **no**
-  rc — a `0` there is never a pass, because the answer it hands over is a deletion. That
-  last claim is **enforced, not asserted**: `test_drift_check.py::test_the_phase2_reason_
-  token_ledger_is_pinned_to_the_fields_read` pins the emitted reason-token set against
-  the report fields `lib/drift_phase2.py` reads, so consulting a new field without giving
-  its absence a token fails the suite. It exists because the prose version was false for
-  three days — `summary.age_sources` was read with no presence check, and a report
-  missing it printed a `READY` byte-identical to a real one.
+  🔴 **rc 16 is RETIRED, and the code is UNALLOCATED on both sides of the ladder.** It was
+  the fuzzyclaw phase-2 gate — an `ACTIONABLE (not drift)` code meaning "0 rows still take
+  their age from fuzzyclaw, so the readers can be deleted". They were deleted, so the gate
+  answered its only question and was removed with them — its reader module under
+  `scripts/lib/` is gone, along with the whole `=== fuzzyclaw phase-2 readiness ===` block.
+  🔴 **It was retired in the SAME change as the readers, and had to be**: the arm
+  called `session-manager … --fuzzyclaw`, a flag that change removes, so leaving it would
+  have left a gate permanently unable to measure — reporting `COULD NOT MEASURE (reason:
+  no-json:JSONDecodeError)`, which reads as "session-manager is broken", forever. `RULES.md`
+  is explicit that a permanently-red gate is worse than no gate.
+  ⚠ **16 is deliberately NOT recycled.** `ship.sh`'s `RESERVED-TO-DRIFT-CHECK` ledger drops
+  it rather than claiming it, because the two ledgers name only codes ONE script can return
+  and the other cannot — and 16 is now returned by neither. A new code on either side takes
+  **26**. Recycling it would make every journal line and handoff older than the recycling
+  silently wrong about what it meant. The reciprocal pin is machine-checked by
+  `test_drift_check.py::test_the_two_rc_ladders_reserve_each_others_codes`, which derives
+  both sets from the two scripts — so this paragraph cannot drift from them unnoticed.
+  ⚠ **The drift-check unit now has NO `SuccessExitStatus` at all**, and that is asserted
+  (`test_NO_exit_code_is_excused_from_failing_the_unit`), not merely absent: the setting
+  takes a LIST, so any entry on it is a drift verdict systemd reports as success. Every code
+  the script can still return is a real finding that SHOULD toast.
   🔴 **rc 22 — a host's deployed `skillOverrides` disagree with `claude/skill-tiers.json`.**
   A host with NO overrides prints **NOT ADOPTED and sets no rc**: the tier mechanism
   shipped applied to zero hosts on purpose (nothing is being truncated today), and

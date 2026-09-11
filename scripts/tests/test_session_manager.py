@@ -2077,8 +2077,11 @@ def test_json_golden_schema_and_values():
         #
         # 🔴 `"none"` is a STRING, not `None`: a null JSON key serialises to
         # `"null"` and would read as a source called null. And the histogram
-        # creates a key only for a value it OBSERVED, which is what lets
-        # `scripts/lib/drift_phase2.py` read an ABSENT key as a real zero.
+        # creates a key only for a value it OBSERVED — an absent key means
+        # "no row had that writer", never "unmeasured". (That property was what
+        # let the since-retired `lib/drift_phase2.py` read an absent `fuzzyclaw`
+        # key as a real zero; it is a property of the histogram, so it outlives
+        # that reader and any future one.)
         "age_sources": {"none": 3},
         # The entity axis, DERIVED from the rows. All three are tmux. Pinned
         # literally for the same reason as `age_sources`: it is the number that
@@ -6434,10 +6437,12 @@ def test_the_RETIRED_fuzzyclaw_flags_are_REJECTED_not_silently_ignored(
     A caller passing `--fuzzyclaw` today believes it is getting a task-file
     join, and it must find out.
 
-    `scripts/drift-check.sh`'s phase-2 arm is such a caller (it passes
-    `--fuzzyclaw`), which is why this is loud rather than tolerant: it makes the
-    arm report COULD NOT MEASURE, never a fabricated `ok … 0` that would read as
-    "phase 2 is ready" — the deletion that gate is guarding.
+    ⚠ There is no caller left. `scripts/drift-check.sh`'s phase-2 arm WAS one —
+    it passed `--fuzzyclaw` and its own comment called the flag REQUIRED — which
+    is precisely why that arm could not outlive this removal and was retired in
+    the same change. Had it survived, argparse rejecting the flag would have
+    left it permanently reporting COULD NOT MEASURE: a gate structurally unable
+    to answer, which `claude/RULES.md` rates worse than no gate at all.
 
     argparse exits 2 and writes to stderr; both are asserted, because an exit
     code with no message is only half the signal.
@@ -6744,9 +6749,9 @@ def test_the_ledger_IS_THE_ONLY_WRITER_and_age_source_still_names_it():
     collapsed into "age is not null".
 
     That field is not decoration at one value: `summary.age_sources` is built
-    from it, it is the meter that made #419 visible, and
-    `scripts/lib/drift_phase2.py` reads the histogram it produces. KILLS:
-    deleting `age_source`, or hardcoding it beside a null age.
+    from it, and it is the meter that made #419 visible — the one number that
+    separates "nothing is stale" from "nothing has an age". KILLS: deleting
+    `age_source`, or hardcoding it beside a null age.
     """
     rep = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
                         laptop=[])
@@ -6777,7 +6782,7 @@ def test_a_window_NO_WRITER_RECORDED_has_a_NULL_age_AND_a_NULL_source():
     assert row["age_secs"] is None and row["age_source"] is None
     assert rep["summary"]["age_sources"]["none"] >= 1
     assert "fuzzyclaw" not in rep["summary"]["age_sources"], (
-        "the writer vocabulary drift_phase2.py reads must no longer contain it")
+        "the writer vocabulary must no longer contain a source nothing reads")
 
 
 def test_a_record_from_an_OLDER_TMUX_SERVER_never_reaches_a_row():
@@ -10067,8 +10072,8 @@ def _gather_report_keys() -> set:
 
 def test_the_not_measured_ledger_is_PINNED_to_the_keys_gather_actually_WRITES():
     """🔴 THE STRUCTURAL FIX FOR THE WHOLE CLASS, not for the one instance —
-    the same shape as `test_drift_check.py::test_the_phase2_reason_token_ledger_
-    is_pinned_to_the_fields_read`, and here for the same reason.
+    the same shape as the reason-token ledger drift-check.sh's retired phase-2
+    arm carried, and here for the same reason.
 
     Two sets, both extracted from the source, pinned two-way:
 

@@ -342,7 +342,8 @@ populations it produced nothing about.
 #419 switched the fuzzyclaw task-file join off, which also switched off the only supplier of
 `age_secs`, the `stale` bucket derived from it, and the `claude_session_id` the ClickHouse
 join needs. Its readers have since been **deleted** (drift-check's phase-2 gate measured 0
-rows still taking an age from them), so the ledger is now the sole writer.
+rows still taking an age from them, then was retired alongside them — see drift-check rc 16),
+so the ledger is now the sole writer.
 Measured 2026-08-12 on the shipped default view: **0 rows with an age, 0 with a session id,
 no `stale` bucket at all** — and nothing in the output said so.
 

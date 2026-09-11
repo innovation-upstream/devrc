@@ -490,7 +490,6 @@ def test_an_unset_repo_override_still_defaults(tmp_path, script, var):
                GIT_CONFIG_GLOBAL=str(tmp_path / "gc"))
     env.pop(var, None)
     env["DRIFT_STATE_DIR"] = str(tmp_path / "state")
-    env["DRIFT_SESSION_MANAGER"] = str(tmp_path / "no-such-session-manager")
     p = subprocess.run(["bash", str(script), "--no-remote"], env=env,
                        capture_output=True, text=True)
     out = p.stdout + p.stderr

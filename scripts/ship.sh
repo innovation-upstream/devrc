@@ -171,14 +171,22 @@
 # 🔴 THE LADDER IS SHARED WITH scripts/drift-check.sh, RECIPROCALLY. That script
 # is the passive deadman for the same fleet and deliberately uses the same
 # vocabulary, so a number must not mean two things across the pair. It owns
-# 10, 14, 15, 16, 17, 18, 22, 23, 24 and 25 — DRIFT meanings this script does
+# 10, 14, 15, 17, 18, 22, 23, 24 and 25 — DRIFT meanings this script does
 # not take — and reserves them here; this script owns 5, 7, 9, 11, 19, 20 and 21
 # and they are reserved there. Its header says "a new DRIFT code has nowhere to
 # go but upward", which points the next one at 19 unless the reservation is
 # written down on both sides: so the next free code for THIS script is 26, and so
 # is the next free code for that one.
 #
-# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22 23 24 25
+# 🔴 16 IS GONE FROM THIS LEDGER AND IS NOW UNALLOCATED ON BOTH SIDES. It was
+# drift-check's fuzzyclaw phase-2 gate; that gate was retired with the readers it
+# gated, so drift-check can no longer return it and this ledger — which names
+# only codes THAT script can return and this one cannot — must not keep it. It is
+# deliberately NOT claimed by this script either: recycling a retired code makes
+# every journal line and handoff older than the recycling silently wrong about
+# what it meant. A new code on either side takes 26.
+#
+# RESERVED-TO-DRIFT-CHECK: 10 14 15 17 18 22 23 24 25
 #
 # That line is a LEDGER, machine-read, not a comment: it must equal exactly the
 # set of codes drift-check.sh can return and this script cannot, so it fails when

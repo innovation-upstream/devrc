@@ -201,7 +201,8 @@ window demonstrably running an agent). It was off by default from #419 and the r
 deleted once `scripts/drift-check.sh`'s phase-2 gate measured **0 rows** still taking an age
 from it. `--fuzzyclaw` / `--no-fuzzyclaw` no longer exist and argparse rejects them — they
 were deliberately not kept as no-ops, because a silently-ignored flag is how a caller
-concludes it was honoured.
+concludes it was honoured. ⚠ **That gate is gone too** (drift-check rc 16, retired in the
+same change — its arm passed the flag, so it could not have survived it).
 
 ## The agent activity ledger — the ONLY source of age / `stale` / `claude_session_id`
 

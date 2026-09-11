@@ -920,7 +920,7 @@ UNSENT_STATUSES = ("ok", "no_input_box", "uncaptured", "not_claude",
 # adding an estimate to a baseline (an earlier revision of this comment carried
 # the estimate, 2.9x, and it was wrong by a tenth — the two forms are one
 # command apart, so there was never a reason to project it).
-# Every other consumer (`drift_phase2`, `cairn_who`, the skills) reads
+# Every other consumer (`cairn_who`, the skills) reads
 # a handful of scalar fields and would pay that for nothing, so the text rides
 # an explicit `--pane-preview` and nothing else changes shape.
 #
@@ -5294,7 +5294,11 @@ def build_parser():
     # measured 0 rows still taking an age from it; an accepted-and-ignored flag
     # would let a caller conclude it was honoured, which is the exact failure
     # the "off wins and say so on stderr" handling used to exist for. argparse
-    # rejects them loudly instead — see `scripts/lib/drift_phase2.py`.
+    # rejects them loudly instead.
+    # ⚠ That gate was drift-check.sh's rc 16, and it is RETIRED — its only
+    # caller was the arm that passed `--fuzzyclaw`, so it could not have
+    # survived this removal. Nothing reads these flags any more; there is no
+    # consumer left to keep a no-op for.
     # 🔴 The ledger is ON by default and this flag is the ESCAPE HATCH, not the
     # switch — it exists so a scan can be run against a host whose ledger read is
     # misbehaving, and so a test can prove the ledger is what supplies the age.
