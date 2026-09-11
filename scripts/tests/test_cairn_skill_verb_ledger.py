@@ -64,7 +64,7 @@ about.
 
 from __future__ import annotations
 
-import ast
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -104,26 +104,41 @@ VERB_LEDGER: dict[str, tuple[str, str]] = {
 }
 
 
-def _declared_verbs() -> set[str]:
-    """Every `sub.add_parser("<name>")` literal in the CLI, via AST not grep.
+def _load_cairn_cli():
+    """Exec `scripts/cairn` as a module — it has no `.py` extension."""
+    spec = importlib.util.spec_from_loader(
+        "cairn_cli_verb_ledger", loader=None, origin=str(CAIRN_CLI)
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__file__ = str(CAIRN_CLI)
+    exec(  # noqa: S102 — the file under test IS the thing being read
+        compile(CAIRN_CLI.read_text(encoding="utf-8"), str(CAIRN_CLI), "exec"),
+        mod.__dict__,
+    )
+    return mod
 
-    A regex over the source would also match the string inside a comment or a
-    docstring — including this module's own prose if it were ever vendored — and
-    would miss a call spread across lines. The parse is the structural read.
+
+def _declared_verbs() -> set[str]:
+    """Every subcommand the REAL argparse parser registers.
+
+    🔴 THIS READS THE PARSER, NOT THE SOURCE, AND THE DIFFERENCE IS THE GUARD'S
+    STRENGTH. The first version of this file walked the AST for
+    `sub.add_parser("<literal>")` calls, which is blind to a verb registered
+    through anything but an attribute call with a constant first argument — a
+    loop over a table, a name built at run time, a helper wrapper. The parser
+    cannot be fooled that way: it is what the CLI actually dispatches on.
+
+    `test_cairn_split.py::…_cairn_who_is_NOT_a_cairn_subcommand` already reads
+    the verb set exactly this way. Using a second, weaker technique here is the
+    duplicated-predicate shape `claude/RULES.md` warns about under "One rule,
+    one place" — a predicate open-coded at two sites is typically wrong at one
+    of them. Both sites now ask argparse.
     """
-    tree = ast.parse(CAIRN_CLI.read_text(encoding="utf-8"))
+    parser = _load_cairn_cli().build_parser()
     verbs: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr != "add_parser":
-            continue
-        if not node.args:
-            continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            verbs.add(first.value)
+    for action in parser._actions:
+        if getattr(action, "choices", None) and hasattr(action, "_name_parser_map"):
+            verbs |= set(action.choices)
     return verbs
 
 
@@ -131,10 +146,17 @@ def test_the_verb_extraction_found_something() -> None:
     """POSITIVE CONTROL — a zero here would make every assertion below vacuous.
 
     `claude/RULES.md`: a reassuring zero from a check that could not see
-    anything is indistinguishable from a clean result. If `scripts/cairn` is
-    ever restructured so `add_parser` is no longer called on an attribute, this
+    anything is indistinguishable from a clean result. If `build_parser` is ever
+    renamed, or the subparsers stop being reachable through `_actions`, this
     test is what says so, instead of the ledger silently passing over an empty
     set.
+
+    ⚠ INVARIANT-GUARD DISCLOSURE, because a guard that reads as regression
+    coverage while providing none is worse than none: measured at base
+    `8b2b960b`, **9 of this file's 10 tests were already green** before the fix.
+    Only `test_a_named_verb_appears_in_the_skill_body[create]` was red. The other
+    rows pin invariants the bug never violated — they are what make the ledger
+    two-way, and they are NOT evidence that the ledger caught anything.
     """
     verbs = _declared_verbs()
     assert verbs, f"no subcommands parsed out of {CAIRN_CLI} — the extraction is broken"
