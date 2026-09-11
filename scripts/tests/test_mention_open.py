@@ -5351,6 +5351,91 @@ def test_a_CLAWGATE_pick_is_NOT_recorded_as_a_repository(monkeypatch):
     assert not MO.PICKS_PATH.exists(), MO.PICKS_PATH.read_text()
 
 
+def test_an_EXPLICIT_click_pays_NOTHING_for_the_ORDERING(monkeypatch, tmp_path):
+    """🔴 THE FAST PATH MUST NOT PAY FOR A LIST IT DISCARDS, AND THE FIRST
+    VERSION OF THIS CHANGE DID — found by a latency probe, not by review, under
+    a comment that CLAIMED the opposite.
+
+    The trap is that `may_offer_universe and num` is TRUE for an explicit
+    `owner/repo#N`: that click carries a number and bars no picker, it simply
+    never reaches an arm that shows one. So "inside the conditional" is not the
+    same as "only on the picker path", and the ordering reads landed on the
+    commonest, fastest shape in the handler. MEASURED at 392 rows and a 400-row
+    pick log: a median 1.94 ms (0.26 ranges + 1.09 picks + 0.20 sort) against a
+    ~30 ms click.
+
+    Counted rather than timed: a 2 ms claim would drown in this box's load,
+    while "did it open the file" is exact."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/onlyone": 9000})
+    (tmp_path / "picks-for-this-test.jsonl").write_text(
+        json.dumps({"t": time.time(), "repo": "acme/onlyone", "n": 1}) + "\n")
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "picks-for-this-test.jsonl")
+    reads: list[str] = []
+    monkeypatch.setattr(MO, "load_known_ranges",
+                        lambda *a, **k: reads.append("ranges") or {})
+    monkeypatch.setattr(MO, "load_picks", lambda *a, **k: reads.append("picks") or [])
+    monkeypatch.setattr(MO, "ranges_age_days",
+                        lambda *a, **k: reads.append("age") or 1.0)
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/onlyone"])
+
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    assert reads == [], (
+        f"an explicit owner/repo#N click paid for the ordering it never uses: "
+        f"{reads}")
+
+    # 🔴 POSITIVE CONTROL ON THE COUNTER, in the same test. An assertion that
+    # only ever checks for an EMPTY list is indistinguishable from one watching
+    # a variable nothing writes to — so the very next call, on a shape that DOES
+    # show a picker, must move the number.
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
+    assert MO.main(["#1291"]) == 0
+    assert "ranges" in reads, (
+        f"POSITIVE CONTROL FAILED — the picker path did not read the range "
+        f"table either, so the assertion above proves nothing: {reads}")
+
+
+def test_the_ordered_universe_is_computed_AT_MOST_ONCE_per_click(monkeypatch,
+                                                                 tmp_path):
+    """⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST, AND IT IS LABELLED ONE
+    BECAUSE A MUTATION SWEEP PROVED IT CANNOT FAIL TODAY.
+
+    It was written believing the guessed arm asks for the rows a SECOND time,
+    so that `universe_rows`' memo was load-bearing. It is not: the three call
+    sites are mutually exclusive (dead end 1 and 2 are an `if`/`elif`; dead
+    end 1 sets `offered_universe`, which clears `guessed_offer`; dead end 2
+    requires NO GitHub candidate while `guessed` requires one). A mutant
+    defeating the memo SURVIVED this test and the whole suite — recorded here
+    rather than quietly deleted, because "I could not kill it" is a fact about
+    the guard that the next reader needs.
+
+    What it still buys: if a fourth call site is ever added, this goes red
+    rather than the click silently paying twice. It counts one click's calls,
+    with a positive control that the guessed arm ran at all — so it cannot pass
+    by the ordering never happening."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/one": 9000, "acme/two": 0})
+    calls: list[int] = []
+    real = MO._ordered_universe
+    monkeypatch.setattr(MO, "_ordered_universe",
+                        lambda rows, num: calls.append(1) or real(rows, num))
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/one", "acme/two"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(n=len(c)) or "")
+    assert MO.main(["#1291"]) == 0
+    # POSITIVE CONTROL: the guessed arm really did run, or "at most once" would
+    # be satisfied by "never".
+    assert seen["n"] >= 3, seen
+    assert calls == [1], (
+        f"_ordered_universe ran {len(calls)} times for one click — the memo is "
+        f"not holding")
+
+
 def test_a_PLAUSIBLE_universe_row_that_is_the_ONLY_one_is_still_NOT_auto_opened(
         spy, monkeypatch, tmp_path):
     """🔴 ORDER ONLY, NEVER AUTO-OPEN — the invariant this change was most

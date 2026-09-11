@@ -2071,33 +2071,65 @@ def main(argv: list[str] | None = None) -> int:
     # `stat` + `read` + `json.loads` on every `owner/repo#N` click, the exact
     # class of tax the lazy `concurrent.futures` import was moved to avoid.
     #
-    # 🔴 THE THREE ORDERING READS OBEY THE SAME RULE, AND THAT IS WHY THIS IS
-    # STILL ONE CONDITIONAL EXPRESSION RATHER THAN A TIDIER BLOCK OF STATEMENTS.
-    # `_ordered_universe` is only CALLED on the branch that shows a picker, so
-    # `known_ranges.json`, `picks.jsonl` and the two `stat`s cost nothing on an
-    # `owner/repo#N` click. Pulling them out to plain statements would put five
-    # more file operations on every click — exactly the tax the comment above is
-    # about, three files further along.
+    # 🔴 AND THE ORDERING IS LAZIER STILL — IT IS DEFERRED PAST THIS CONDITION,
+    # WHICH IS NOT THE SAME THING AS BEING INSIDE IT. THAT IS A MEASUREMENT.
+    # The condition above is `may_offer_universe and num`, which is TRUE for an
+    # explicit `owner/repo#N` — that click carries a number and bars no picker,
+    # it simply never reaches an arm that shows one. So putting the ordering
+    # reads inside it taxes the fastest path in the handler for a list it
+    # discards. MEASURED on this host, 392 rows and a 400-row pick log:
+    # `_ordered_universe` costs a median **1.94 ms** (0.26 load_known_ranges +
+    # 1.09 load_picks + 0.20 the sort), against a ~30 ms click. The first
+    # version of this change paid it on every `owner/repo#N`, and the comment
+    # right above this one CLAIMED it did not — found by a latency probe, not
+    # by review.
+    #
+    # `universe_rows()` therefore computes the rows AT MOST ONCE and only when
+    # an arm is actually about to show them. The arms branch on
+    # `universe_repos` — the cheap list — which is exactly as truthy as the
+    # candidate list it maps 1:1 onto, so no predicate changed.
+    universe_repos = (repo_universe(discovered, load_known_universe())
+                      if (may_offer_universe and num) else [])
     order_state = ORDER_NO_TABLE
     order_counts = (0, 0)
-    if may_offer_universe and num:
-        universe_repos, order_state, order_counts = _ordered_universe(
-            repo_universe(discovered, load_known_universe()), num)
-        universe = universe_candidates(num, universe_repos)
-    else:
-        universe = []
-    if not candidates and universe:
+    _universe_rows: list[list[dict]] = []
+
+    def universe_rows() -> list[dict]:
+        """The universe as ORDERED openable candidates, computed at most once.
+
+        ⚠ THE MEMO IS AN INVARIANT GUARD, NOT AN OPTIMISATION — AND THE COMMENT
+        HERE SAID THE OPPOSITE UNTIL A MUTATION SWEEP CAUGHT IT. It claimed "the
+        guessed arm below can ask a second time", and that is FALSE: the three
+        call sites are mutually exclusive. Dead end 1 and dead end 2 are an
+        `if`/`elif`; dead end 1 sets `offered_universe`, which clears
+        `guessed_offer`; and dead end 2 requires NO GitHub candidate while
+        `guessed` requires one (a `default`-sourced repo IS a GitHub candidate).
+        So exactly one site can fire per click, and the memo saves nothing
+        today. Measured: a mutant defeating it SURVIVED the whole suite.
+
+        It stays because the property it protects — one click, at most one
+        ordering — should survive a fourth call site being added, and because
+        the alternative is a reader re-deriving that three-way exclusivity from
+        scratch. What it must NOT do is read as a live optimisation."""
+        nonlocal order_state, order_counts
+        if not _universe_rows:
+            rows, order_state, order_counts = _ordered_universe(
+                universe_repos, num)
+            _universe_rows.append(universe_candidates(num, rows))
+        return _universe_rows[0]
+
+    if not candidates and universe_repos:
         # Dead end 1 — an unresolvable `repo#N`, or text the scanner refused
         # outright. Either way the operator now gets a choice instead of a toast.
         offered_universe = True
         universe_shown = True
-        candidates = universe
-    elif (span is not None and span["ambiguous"] and universe
+        candidates = universe_rows()
+    elif (span is not None and span["ambiguous"] and universe_repos
             and not any(c["platform"] == PLATFORM_GITHUB for c in candidates)):
         # Dead end 2 — a bare `#N` nothing could attribute. The clawgate
         # candidate STAYS FIRST so the common case is still one Enter away; the
         # universe is appended as the way to say "no, GitHub, this repo".
-        candidates = candidates + universe
+        candidates = candidates + universe_rows()
         universe_shown = True
 
     if not candidates:
@@ -2200,12 +2232,12 @@ def main(argv: list[str] | None = None) -> int:
     # append added nothing, and `guessed_note` needs that rather than a row
     # count — see its docstring.
     below = 0
-    if guessed_offer and universe:
+    if guessed_offer and universe_repos:
         seen = {c["url"] for c in candidates}
         # Deduped: the pane's repo is usually IN the universe too, and offering
         # it twice makes the recommended row look like a rendering bug rather
         # than a recommendation.
-        extra = [c for c in universe if c["url"] not in seen]
+        extra = [c for c in universe_rows() if c["url"] not in seen]
         # 🔴 GUARDED ON `extra`, NOT ON `universe`. A host whose whole universe
         # is the pane's own repo dedupes to nothing, and setting
         # `offered_universe` there would claim rows that are not in the list —
