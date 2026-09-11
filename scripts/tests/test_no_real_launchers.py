@@ -784,6 +784,16 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
         (root / "tests").mkdir(parents=True)
         shutil.copytree(SCRIPTS / "testlib", root / "testlib",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        # 🔴 THE REAL CONFTEST IS COPIED, SO ITS REAL IMPORTS MUST RESOLVE HERE.
+        # It loads `scripts/lib/cairn_pin.py` BY PATH — the seam devrc reaches the
+        # pinned `cairn` reader modules through — and that import deliberately
+        # raises rather than degrading. Omitting the file made this probe die with
+        # `FileNotFoundError` while loading the conftest, i.e. BOTH halves failed
+        # for a reason that has nothing to do with autouse: the pair had stopped
+        # being a control/mutant measurement at all. Copied, not stubbed, for the
+        # same reason the conftest itself is copied rather than paraphrased.
+        (root / "lib").mkdir(parents=True, exist_ok=True)
+        shutil.copy(SCRIPTS / "lib" / "cairn_pin.py", root / "lib" / "cairn_pin.py")
         (root / plugin_rel).write_text(plugin_text, encoding="utf-8")
         (root / "tests" / "conftest.py").write_text(conftest_src, encoding="utf-8")
         probe = root / "tests" / "test_probe.py"
@@ -1818,6 +1828,29 @@ PINNED_PATH_CLOBBERS = {
         "unfindable. A prepending version measured a live call to the real "
         "board on this host while the nix sandbox (which has no clawgatectl) "
         "measured the intended case: two tiers, opposite blind spots"),
+    "test_cairn_pin.py": (
+        "dict(os.environ, PATH=" + "str(tmp_path))",
+        "a clobber justified by EMPTINESS, and the emptiness is CONSTRUCTED "
+        "rather than audited: the replacement is pytest's own `tmp_path` for "
+        "that test, freshly minted and never written to, so it holds no entries "
+        "at all — no HAZARD_VOCABULARY name is reachable from it (no "
+        "systemd-run, systemctl, notify-send, rofi, yad, alacritty, xdotool, "
+        "i3-msg, openrgb, espanso, home-manager or nixos-rebuild), because "
+        "nothing is. 🔴 REPLACING is the point and PREPENDING could not work: "
+        "the case under test is `cairn` NOT ON PATH — `cairn_pin` must REFUSE "
+        "with both resolution routes named rather than fall back — and the "
+        "pinned client IS on PATH in both tiers (it is in flake.nix's "
+        "`gateTools`), so no amount of prepending can make it unfindable. A "
+        "prepending version would resolve the real client and the refusal "
+        "branch would never execute, which is the unreachable-guard trap: the "
+        "test would pass having measured nothing. ⚠ THIS IS THE SUBPROCESS "
+        "SPELLING, and it is the only one the scanner sees in this file: the "
+        "sibling in-process site uses `monkeypatch.setenv(\"PATH\", ...)`, which "
+        "`launcher_scan.path_clobbers` does not classify as a clobber. Both are "
+        "the same claim about the same refusal and both replace the same freshly "
+        "-minted empty `tmp_path`, so the justification above covers each — but "
+        "do not read this entry as evidence that the monkeypatch form is "
+        "scanned."),
     "test_devshell_satisfies_required_tools.py": (
         '{"PATH"' + ': str(stub)',
         "a clobber justified by ENUMERATION rather than emptiness, and the "

@@ -3697,11 +3697,19 @@ class TestSkillDocsArePinned:
     RESUME_SENTENCES: list[tuple[str, str]] = [
         # 🔴 The step's prescribed command became `cairn recall` on 2026-09-02 —
         # `cairn` syncs the read cache and then runs THIS module against it, so
-        # the step still calls it, one hop away. The path stays pinned because
-        # the module is where every flag, exit code and output shape documented
-        # below actually lives; a step naming only `cairn` would leave a reader
-        # with nowhere to check them.
-        ("scripts/lib/subsystem_recall.py", "the step drives this module, via `cairn`"),
+        # the step still calls it, one hop away. The MODULE stays pinned because
+        # it is where every flag, exit code and output shape documented below
+        # actually lives; a step naming only `cairn` would leave a reader with
+        # nowhere to check them.
+        #
+        # ⚠ THE PIN IS NOW THE MODULE NAME, NOT A REPO PATH. devrc deleted its
+        # forked copy when it consolidated onto the `cairn` flake pin, so
+        # `scripts/lib/subsystem_recall.py` names nothing — `test_doc_path_rot.py`
+        # would (correctly) call it a dead path in a SKILL.md, which is an
+        # instruction to a place that is not there. The property this pin
+        # protects is unchanged: the step must still name the module a reader can
+        # go and check, and `claude/skills/resume/SKILL.md` says where it lives.
+        ("`subsystem_recall`", "the step drives this module, via `cairn`"),
         ("cairn recall", "the prescribed command — it syncs first, so the read is dateable"),
         (
             "read half",

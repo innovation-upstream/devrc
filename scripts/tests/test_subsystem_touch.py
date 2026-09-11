@@ -60,6 +60,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# `_load_pinned_mutant` below mutates `entry_shape`, which devrc deleted its
+# copy of when it consolidated onto the `cairn` flake pin. `pinned("<module>")`
+# is where that source now is — one seam, `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
 MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 # 🔴 THE PROTOCOL MOVED 2026-08-24. `/handoff` step 4 was ~26 KB of index
@@ -5089,8 +5097,15 @@ class TestPrNegativeControls:
         entry here would never be asserted ABSENT, and every `_only` above would
         quietly stop being a measurement for it. Derived from the module's own
         `__all__` rather than trusted."""
+        # ⚠ `CairnError` IS EXCLUDED, and for the same reason `TouchError` always
+        # was: it is the BASE, not a condition. `TouchError` is `entry_shape`'s
+        # own alias for it since devrc consolidated onto the pinned client, so the
+        # two names are one class and excluding only one of them would leave this
+        # map demanding a sentinel for a class nothing raises — a ledger entry
+        # that can never be exercised, which is worse than none.
         declared = {
-            name for name in st.__all__ if name.endswith("Error") and name != "TouchError"
+            name for name in st.__all__
+            if name.endswith("Error") and name not in {"TouchError", "CairnError"}
         }
         covered = {
             "RepoRemoteError", "GhMissingError", "GhAuthError", "GhRateLimitError",
