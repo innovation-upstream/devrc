@@ -5273,9 +5273,18 @@ def test_main_says_the_rows_are_ORDERED_in_the_PICKER_HEADER(monkeypatch,
 def test_main_says_the_rows_are_UNORDERED_when_the_table_is_STALE(monkeypatch,
                                                                   tmp_path):
     """🔴 IT DEGRADES *AND SAYS SO*. A silently-unordered picker would let the
-    operator keep trusting a top-of-list habit the host has stopped earning."""
-    universe = ["zulu/one", "alpha/two", "mike/three"]
-    _ranges_on_disk(monkeypatch, tmp_path, {"zulu/one": 0, "alpha/two": 9000},
+    operator keep trusting a top-of-list habit the host has stopped earning.
+
+    🔴 THE FIXTURE'S NAMES ARE CHOSEN SO THE TWO ORDERS DISAGREE, and that is
+    the whole reason this test can see anything. Its first version used
+    `zulu/one` / `alpha/two` / `mike/three`, whose ALPHABETICAL order happens to
+    equal their PLAUSIBILITY order for `#1291` — so a mutant that ordered a
+    stale table anyway produced a byte-identical list and SURVIVED a green run.
+    Measured in this change's own mutation sweep (M9). The names below put the
+    plausible repo in the middle of the alphabet and the impossible one first."""
+    universe = ["alpha/zeroref", "mike/highhead", "zulu/unmeasured"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"alpha/zeroref": 0, "mike/highhead": 9000},
                     age_days=MO.STALE_MAPPING_DAYS + 3)
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
@@ -5287,11 +5296,19 @@ def test_main_says_the_rows_are_UNORDERED_when_the_table_is_STALE(monkeypatch,
     assert "rows unordered" in seen["mesg"], seen["mesg"]
     assert "mention-known-repos-refresh" in seen["mesg"], seen["mesg"]
     # …and the rows really ARE in the pre-change order. `repo_universe` sorts
-    # case-insensitively, so an ordering applied anyway would have put
-    # `alpha/two` FIRST (9000 >= 1291) and `zulu/one` LAST (0 references).
+    # case-insensitively, so an ordering applied anyway would have led with
+    # `mike/highhead` (9000 >= 1291) and ended on `alpha/zeroref` (0 refs).
     repos = [MO.repo_of_github_url(c["url"]) for c in seen["cands"]
              if MO.repo_of_github_url(c["url"])]
     assert repos == sorted(universe, key=str.lower), repos
+    # POSITIVE CONTROL ON THE FIXTURE: the two orders must genuinely disagree,
+    # or the assertion above is satisfied by a coincidence rather than by the
+    # degrade. This is the check whose absence let mutant M9 survive.
+    ordered = MO.order_universe(universe, "1291",
+                                {"alpha/zeroref": 0, "mike/highhead": 9000})
+    assert ordered != sorted(universe, key=str.lower), (
+        f"the fixture's alphabetical order EQUALS its plausibility order "
+        f"({ordered}) — this test cannot see a stale table being ordered")
 
 
 def test_main_RECORDS_the_repository_the_operator_PICKED(monkeypatch):

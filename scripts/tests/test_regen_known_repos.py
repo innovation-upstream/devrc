@@ -1432,11 +1432,24 @@ def test_build_ranges_is_keyed_off_the_UNIVERSE_and_LOWERCASED():
 
     🔴 LOWERCASED: the reader looks up a universe row by `.lower()`, and the row
     keeps whatever casing the API returned — a table keyed on the canonical
-    spelling would miss every row cloned through a lowercase URL."""
+    spelling would miss every row cloned through a lowercase URL.
+
+    🔴 THE API KEYS HERE ARE MIXED-CASE ON PURPOSE. The first version of this
+    test fed already-lowercase keys, which makes the fold a no-op — so a mutant
+    that dropped `.lower()` entirely produced an IDENTICAL table and SURVIVED a
+    green run (measured in this change's own sweep, M18). The keys come from
+    `build_universe`, which preserves the API's canonical spelling, so mixed
+    case is the REALISTIC input and the lowercase one was the artificial one."""
     universe = ["Acme/Widget", "acme/other"]
-    api = {"acme/widget": 40, "acme/other": 0, "nobody/asked": 999}
+    api = {"Acme/Widget": 40, "acme/other": 0, "Nobody/Asked": 999}
     assert RG.build_ranges(universe, api) == {"acme/widget": 40,
                                               "acme/other": 0}
+    # …and a universe row whose casing differs from the API's still resolves,
+    # in BOTH directions — the fold has two sides and only one was exercised.
+    assert RG.build_ranges(["acme/widget"], {"Acme/Widget": 7}) == {
+        "acme/widget": 7}
+    assert RG.build_ranges(["Acme/Widget"], {"acme/widget": 7}) == {
+        "acme/widget": 7}
 
 
 def test_build_ranges_OMITS_a_repo_the_api_could_not_answer_for():
