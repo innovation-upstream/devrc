@@ -11,25 +11,31 @@ Two UX improvements to the scratchpad and tmux statusline:
 2. Remove time/host from tmux status-right, and move the scratchpad status legend (currently in tmux status-left) to the i3status-rust bar — with the full 20-slot list since there's more space there
 
 ## State now
-- **DONE — shipped, deployed and VERIFIED LIVE ON BOTH HOSTS.** PR #1485 (`fe4460d6`) and #1484 (`799d966c`) merged; both verified by CONTENT on `origin/main`, never by ancestry.
-- `LAPTOP_SSH=zach@10.42.0.100 scripts/ship.sh` → **converged + verified, both hosts at `3a0c77dd`**. Read per-host, not the verdict: workbench and laptop each `✅ VERIFIED — on branch main at origin/main + switched`, 586/532 managed artifacts resolve, **0 dangling, 0 stale** on both.
-- Both hosts' bars restarted (workbench PID 934021→1132952, laptop 2568→3736632) and both tmux servers reloaded via `source-file`. Workspace and focus recorded before each restart and **unchanged after** on both — nothing restored because nothing moved.
-- **Screenshotted on both real bars**: 20 slots, per-slot colour, live slots `key+count` bold, absent slots dim `#504945` with no count, positioned between the disk and net pills. The laptop's 2256px bar carries it comfortably.
-- Both hosts: `tmux show -g status-right` has no `%H:%M`/`#H`, continuum interpolation exactly **1**; `tmux list-keys -T root` → **0 popups at 80%**, 23 at 90% width.
-- Claim `tmux-scratchpad-bar-statusline-1` RELEASED.
-- 🔴 **The workbench tree is DIRTY with ANOTHER SESSION's uncommitted work** — `nix/graphical.nix` carries a fontconfig emoji-fallback change (`defaultFonts.monospace`) that is not this effort's. `ship.sh` reports `DIRTY AND IN THE ARTIFACT`: nix reads that path at eval time, so the workbench generation is `origin/main` PLUS that hunk. Left untouched deliberately (no stash, no revert — it is live WIP). **The scratchpad work is unaffected**: it was verified present on `origin/main` independently, and the dirty hunk is fontconfig only. The laptop tree is clean, and its bar renders identically — which is the cross-check that rules the dirty hunk out.
-- ⚠ `drift-check.service` exits **17** (a `nix/pkgs/**` source subtree behind on some host). Pre-existing, unrelated, still open.
-- **Audit ladder ended by operator intervention, NOT on a clean round.** Round 3 was stopped, so `nix/programs/tmux/slot-table.nix` and its three replacement guards shipped unaudited.
+🔴 **THIS ARC IS COMPLETE.** Three PRs merged, feature deployed and verified live on BOTH hosts, doc-rot closed. Nothing is in flight. The only unexercised surface is rank 1 below.
+
+- **Merged** (all verified by CONTENT on `origin/main`, never by ancestry — a squash merge never makes the branch head an ancestor):
+  - **#1485** `fe4460d6` — the feature: 90%×90% popups, legend moved to the i3 bar.
+  - **#1484** `799d966c` — de-duplicated a Gotchas block this doc's own correction run appended twice.
+  - **#1526** `3ca6e098` — doc rot: `scripts/README.md` indexed `tmux-claude-counters.sh`, deleted 4 weeks earlier in `059b7fbe` (#475); `tmux-scratch-slots.sh` carried stale positive-control counts.
+- **Deployed:** `LAPTOP_SSH=zach@10.42.0.100 scripts/ship.sh` → converged + verified, both hosts at `3a0c77dd`, 586/532 managed artifacts resolving, **0 dangling, 0 stale** on each. Bars restarted (workbench 934021→1132952, laptop 2568→3736632), both tmux servers reloaded. Workspace and focus recorded before each restart and **unchanged after** on both.
+- **Verified live on both bars by screenshot**: 20 slots, per-slot colour, live slots `key+count` bold, absent slots dim `#504945` with no count, positioned between the disk and net pills. Re-verified against live state at close-out: 23 popups at 90%, **0 at 80%**; `status-right` has no `%H:%M`/`#H`; `status-left` has no `scratch-status`; legend emits 20 spans.
+- Claim `tmux-scratchpad-bar-statusline-1` RELEASED. No open PRs from this arc; both feature branches deleted.
+- No clawgate task: `clawgate_handoff.sh resolve` → **rc 5 (NOTHING RESOLVED)**. Its positive control proved the board reachable, but an unknown session id also returns an empty array, so that is **not** a clean bill of health. No field written.
+
+### Carried forward — real, and NOT closed by this arc
+- 🔴 **The audit ladder never returned a clean round.** Round 1 (full) → 1 🔴 + 4 🟡 + 4 🟢; round 2 (delta) → 5 🟡 + 4 🟢; all fixed. **Round 3 was dispatched and stopped by the operator**, so `nix/programs/tmux/slot-table.nix` and its three replacement guards — the largest structural change in the PR — **shipped unaudited**. Not a defect claim; simply unexamined. Delta range `ffe4e5d0..7c449cdd`; the round-2 `audit-claims` block is posted on PR #1485.
+- ⚠ `drift-check.service` exits **17** (a `nix/pkgs/**` source subtree behind on some host). Pre-existing, predates this arc.
+- ⚠ The workbench tree may still carry **another session's** uncommitted `nix/graphical.nix` emoji-fontconfig WIP. Not this effort's; left untouched (no stash, no revert).
 
 ## Open investigations — live diagnosis state
 _(none — this is a planned feature, not a bug investigation)_
 
 ## Next steps (ranked)
-1. **Click the bar legend once** on either host and confirm the picker opens. Never exercised from a real bar; the picker's terminal hold is pinned structurally only (stdin on `/dev/null` suppresses `read -p`, so the test proves the branch was taken, not that the terminal stayed open). This is the last unverified surface of this effort.
+1. **Click the bar legend once** (either host) and confirm the picker opens rather than flashing and vanishing. The click was fixed in round 1 (it used to run `tmux detach-client` with `$TMUX` unset and detach a live client, including one on an *unrelated* session) but **has never been exercised from a real bar**, and the picker's terminal hold is pinned STRUCTURALLY only — with stdin on `/dev/null` bash suppresses `read -p`, so the test proves the branch was taken, not that the terminal stayed open. This is the last unverified surface of the whole arc.
    forcing: none
-2. **Resolve `drift-check.service` rc 17** — a package built from another repo's working tree is behind on a host. Pre-existing, predates this work.
+2. **Resolve `drift-check.service` rc 17.** Pre-existing, unrelated to this arc.
    forcing: none
-3. **If the unaudited round-3 machinery ever misbehaves**, the delta to audit is `ffe4e5d0..7c449cdd` and the round-2 claims block is posted on PR #1485. Not scheduled; recorded so it is cheap to resume.
+3. **If the unaudited round-3 machinery misbehaves**, audit `ffe4e5d0..7c449cdd`. Recorded so it is cheap to resume; not scheduled.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -64,11 +70,18 @@ _(none — this is a planned feature, not a bug investigation)_
 - **A dirty tracked file that nix READS at eval time changes what a switch builds**, and `ship.sh` classifies this explicitly (`DIRTY AND IN THE ARTIFACT`, 1 of 169 nix-read paths derived from 30 nix files). The honest reading of a live probe on that host is "this is evidence about the DEPLOYED artifact, not about `main`". **The cheap discriminator is the OTHER host**: the laptop's tree was clean and its bar rendered identically, which is what actually rules the dirty hunk out — not reasoning about the diff.
 - **A `home-manager switch` does not restart the consumer, and there are TWO consumers here.** The bar needs a restart (i3status-rs reads its TOML once at startup) *and* a running tmux server needs `tmux source-file ~/.config/tmux/tmux.conf` — the statusline is server state, so every file-level check passes while `tmux show -g status-right` still returns the old value. Never `kill-server`; that destroys every session.
 
+- 🔴 **CI caught a real defect that THREE audit rounds did not, and it was in the audits' own scaffolding.** `test_runtime_shebangs.py::test_no_test_writes_a_usr_bin_env_shebang_at_runtime` went red at `7c449cdd`: the new test file wrote its own shebang inline. The fix round had already reasoned its way to the right INTERPRETER (absolute bash, because the test's PATH jail holds only shims and `env` cannot resolve bash) but wrote it at the call site, which the guard forbids. Fixed via `testlib.mockbin.write_exec`, which owns the shebang and rejects a body carrying one. **The audits were reading for defects; CI was reading for repo invariants — different questions, and the ladder cannot substitute for the gate.**
+- 🔴 **Verify a shebang-guard fix with BOTH controls, or a green is meaningless.** The guard going red-before/green-after only proves the scanner stopped matching — it does not prove the shims still RUN. The discriminator here was already in the suite: the jail test asserts `seen == _PICKER_BINARIES`, which can only hold if every shim started and logged its own name; a shim that fails to start leaves that set empty. Negative control: reintroducing `#!/usr/bin/env bash` at the same site turned the guard red again naming that line, and the file was restored byte-identical (`cmp`).
+- 🔴 **Fix a stale COUNT in prose by fixing the FORM, not the number.** `tmux-scratch-slots.sh` hardcoded "79 live `bindsym` lines" and "22 `M-<key>` entries" as the positive controls behind its load-bearing claim that no i3 binding exists for any slot. Live values were **84** and **26**; nothing asserts on them, so they drifted silently. Renumbering regenerates the defect on the next drift — the controls are now the COMMANDS that re-derive them. (The zero needs a non-empty corpus at all because a zero against an empty corpus is indistinguishable from a grep wired to nothing.)
+- **When a doc index is stale, measure the WHOLE index, not the row you were told about.** `scripts/README.md` listed one deleted script; checking all **72** rows showed exactly 1 dangling, so the index was otherwise sound — and that is a different report from "found a bug". 🔴 `scripts/README.md` has **0** entries in `doc-path-baseline.tsv`, i.e. `test_doc_path_rot.py` does not scan it at all, which is why nothing caught this. **No test pins README rows to files that exist** — gap named, not closed.
+- **Not every reference to a deleted file is rot.** Of 9 live references to `tmux-claude-counters.sh`, only the README row was wrong: `config-stack.md` describes it in the PAST tense as REMOVED (and is baselined), `drift-check.sh`/`drift_phase2.py` name it as a phase-2 reader awaiting deletion, and two `claudedocs/` files are dated historical records. **Read each hit before "fixing" it.**
+- ⚠ **`git grep` vs the `grep` function.** A `find | grep` sweep for the deleted script returned hits that were all inside stale `.claude/worktrees/` copies — a real-looking result about files nobody reads. `git -C <repo> grep -n <pat>` sees tracked files at HEAD only and answered the actual question.
+
 ## How to verify
-Post-deploy, all of these were run and passed on the workbench:
-1. `readlink -f ~/.config/i3status-rust/scripts/{i3status-scratchpads,scratch-slots.sh}` → both resolve into `/nix/store` (they are `home.file` copies, so they change only on a switch).
-2. `~/.config/i3status-rust/scripts/i3status-scratchpads` → valid JSON, `"state":"Idle"`, 20 `<span>` elements.
-3. Bar restart: `pgrep -a i3status-rs` **before and after**, confirm the **PID changed**. 🔴 Never `pgrep -x` — home-manager wraps the binary so `comm` is `.i3status-rs-wr` and `-x` always returns empty.
-4. `tmux source-file ~/.config/tmux/tmux.conf`, then `tmux show -g status-right` / `status-left`, and `tmux show -g status-right | grep -c continuum_save` → exactly 1.
-5. `tmux list-keys -T root | grep -oE '\-[wh] "?[0-9]+%"?' | sort | uniq -c` → zero at 80%.
-6. Screenshot the bar (`nix-shell -p maim --run "maim -u out.png"`, `DISPLAY=:0 XAUTHORITY=~/.Xauthority`) and LOOK at it — the legend sits between the disk and net pills. This is the only check that proves pango actually renders.
+Re-verified at close-out, on the workbench, all passing:
+1. `tmux list-keys -T root | grep -cE '\-[wh] "?90%"?'` → 23; the same with `80%` → **0**. 🔴 tmux QUOTES and re-orders these flags (`-h "90%" -w "90%"`), so an unquoted `-w 90%` pattern matches 1 of 23 and reads as "the change did not land". Run a positive control proving the pattern CAN match the value you claim is absent.
+2. `tmux show -g status-right` / `status-left` → no `%H:%M`, no `#H`, no `scratch-status`; `tmux show -g status-right | grep -c continuum_save` → exactly **1**.
+3. `grep -c i3status-scratchpads ~/.config/i3status-rust/config-top.toml` → 1; `~/.config/i3status-rust/scripts/i3status-scratchpads | grep -o '<span' | wc -l` → **20**.
+4. Bar restart: `pgrep -a i3status-rs` before/after, confirm the **PID changed**. 🔴 Never `pgrep -x` — home-manager wraps the binary so `comm` is `.i3status-rs-wr` and `-x` always returns empty.
+5. Screenshot and LOOK: `DISPLAY=:0 XAUTHORITY=~/.Xauthority nix-shell -p maim --run "maim -u out.png"`. The only check that proves pango actually renders.
+6. All three slot-table readers agree after any edit to `scripts/tmux-scratch-slots.sh`: bash `source` → 20, `i3status-scratchpads` → 20 spans, and `nix-instantiate --eval` on `nix/programs/tmux/slot-table.nix { path = …; }` → 20.
