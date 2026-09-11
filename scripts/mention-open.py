@@ -96,6 +96,31 @@ repos into this PUBLIC repository. It may go to the operator's own screen and
 NOWHERE ELSE: never to a log, never to activity.events, never to a test fixture,
 never to stderr. `notify()` prints, so the refusal paths below name only the
 clicked text — never a row from the universe.
+
+🔴 THE SAME RULE COVERS TWO MORE FILES THIS HANDLER NOW TOUCHES, and both are
+0600 under the same directory, outside every checkout:
+  * `known_ranges.json` — `{"owner/repo": <highest issue-or-PR number>}`, whose
+    KEYS are the private names (the mirror of the two files above, where the
+    values are). Written by `regen-known-repos.py`.
+  * `picks.jsonl`       — one `{"t","repo","n"}` line per repository the
+    OPERATOR chose from the picker. Written HERE, by `record_pick`.
+
+ORDERING, AND WHY IT IS ONLY ORDERING
+The picker offers ~392 rows for a clicked `#N`, and they used to arrive in one
+fixed alphabetical order whatever the number was. MEASURED over a 120-repo
+sample of this host's universe: **54 (45%) have no issues and no pull requests
+at all**, 40 top out at 1-9, 19 at 10-99, 5 at 100-999 and 2 at 1000+. So `#1291`
+is plausible for about two repositories and `#12` for about sixty-six, and
+nearly half the list can satisfy NO numeric click. `order_universe` sorts on
+that (see it for the classes and for why a learned preference can never cross
+one).
+
+🔴 IT RANKS, IT NEVER FILTERS, AND IT NEVER OPENS. Hiding a row on a day-old
+snapshot is unrecoverable from inside the picker — the operator cannot type at a
+row that is not there — while ranking it last costs a scroll. And the ordering
+is not evidence about the REFERENCE, so it cannot promote a row past the
+`offered_universe` guard: a universe row is still never auto-opened, however
+plausible it looks. Both properties are pinned.
 """
 from __future__ import annotations
 
@@ -162,6 +187,31 @@ KNOWN_UNIVERSE_PATH = Path(
     os.environ.get("MENTION_OPEN_KNOWN_UNIVERSE")
     or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "mention-open" / "known_universe.json")
+
+# The generated RANGE TABLE — `{"owner/repo": <highest issue-or-PR number>}`,
+# lowercased keys, same directory, same 0600, same disclosure rules. It answers
+# a THIRD question: given a clicked `#N`, could this repository plausibly have
+# it? `regen-known-repos.py` writes it from batched GraphQL; its absence is a
+# supported state and means "every repo is UNKNOWN".
+#
+# 🔴 SAME ENV DOOR AS ITS TWO SIBLINGS, FOR THE SAME MEASURED REASON — a
+# `monkeypatch.setattr` on a module constant is invisible to the child process a
+# subprocess test spawns, and nine tests were once measured reading the
+# OPERATOR'S REAL files because of it. A new host-state file without this door
+# re-opens that hole.
+KNOWN_RANGES_PATH = Path(
+    os.environ.get("MENTION_OPEN_KNOWN_RANGES")
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "mention-open" / "known_ranges.json")
+
+# The operator's own PICK LOG — append-only JSONL, one `{"t","repo","n"}` object
+# per repository chosen from the picker. 🔴 THIS IS THE ONE FILE IN THE SET THIS
+# HANDLER *WRITES*, and it names private repositories exactly as the others do:
+# 0600, parent 0700, outside every checkout, never logged, never in a toast.
+PICKS_PATH = Path(
+    os.environ.get("MENTION_OPEN_PICKS")
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "mention-open" / "picks.jsonl")
 
 # 🔴 A TIMER NOW CONVERGES THE MAPPING, AND THIS PARAGRAPH USED TO SAY THE
 # OPPOSITE — do not re-derive the old reasoning from a stale copy of it. It read
@@ -384,6 +434,63 @@ def repo_universe(repos: dict | None,
     return sorted(by_key.values(), key=str.lower)
 
 
+# --------------------------------------------------------------------------- #
+# TIER A — PLAUSIBILITY. Which of these repositories could have a `#N` at all?
+#
+# The four classes, most plausible first. They are ORDINALS and the numbers are
+# read by `sorted`, so the sequence is the behaviour — not a label.
+#
+# 🔴 `IMPOSSIBLE` IS RANKED LAST, NOT EXCLUDED, AND THAT IS THE WHOLE POSTURE.
+# The table is a DAY-OLD SNAPSHOT: a repo that had no references yesterday can
+# have `#1` today, and a repo whose head was `#40` can be at `#45`. Dropping a
+# row on that evidence is unrecoverable from inside the picker — fzf cannot
+# match a line that is not in the list, so the operator's only move is to
+# dismiss and type a URL by hand, which is the dead end this whole handler
+# exists to remove. Ranking it last costs a scroll. Pinned by
+# `test_an_IMPOSSIBLE_repo_is_RANKED_LAST_and_never_DROPPED`.
+CLASS_PLAUSIBLE = 0     # max_ref >= N — this repo has reached the number
+CLASS_BELOW = 1         # 0 < max_ref < N — it has references, just not that far
+CLASS_UNKNOWN = 2       # no entry — never measured, or measured and unanswerable
+CLASS_IMPOSSIBLE = 3    # max_ref == 0 — no issues and no pull requests at all
+
+# 🔴 PINNED TWO-WAY by `test_the_plausibility_CLASS_set_is_pinned_and_ORDERED`.
+# `order_universe` sorts on these, so a fifth class added later would take a
+# position nobody chose — the same defect the `PICKED_OUTCOMES` ledger below
+# exists for, one concept along.
+PLAUSIBILITY_CLASSES = (CLASS_PLAUSIBLE, CLASS_BELOW, CLASS_UNKNOWN,
+                        CLASS_IMPOSSIBLE)
+
+# What `ordering_state` reports, and what the picker header says. A THREE-WAY
+# split rather than a boolean, because "there is no table yet" and "the table
+# stopped being refreshed" need different next moves from the operator: the
+# first is a host that has not run the new generator, the second is a unit that
+# is failing.
+ORDER_APPLIED = "applied"
+ORDER_NO_TABLE = "no-table"
+ORDER_STALE = "stale"
+ORDER_STATES = (ORDER_APPLIED, ORDER_NO_TABLE, ORDER_STALE)
+
+# TIER B — the operator's own picks. Three caps, and each closes a different way
+# for old data to mislead:
+#   * AGE — a repository that was the answer three months ago may not exist now.
+#   * COUNT — an unbounded file would be read in full on the picker path.
+#   * HALF-LIFE — inside the window, last week outweighs last month smoothly
+#     rather than at a cliff.
+# None of them is tuned; they are "a season", "more than anyone clicks", and "a
+# month". They are not env-overridable, for the same reason `STALE_MAPPING_DAYS`
+# is not: a run must not be able to excuse itself.
+PICKS_MAX_AGE_DAYS = 90.0
+PICKS_MAX_ROWS = 500
+PICKS_HALF_LIFE_DAYS = 30.0
+
+# How far apart two reference numbers have to be before proximity stops helping.
+# `#1290` and `#1291` in one repo are the same week's work; `#3` and `#1291` are
+# not. A soft 1/(1+d/SCALE) curve rather than a window, so nothing falls off a
+# cliff — the bonus is in (0, 1] and merely REORDERS repos that already share a
+# Tier A class.
+PICKS_PROXIMITY_SCALE = 100.0
+
+
 def universe_candidates(num: str, universe: list[str]) -> list[dict]:
     """One openable GitHub candidate per repository in `universe`.
 
@@ -394,6 +501,312 @@ def universe_candidates(num: str, universe: list[str]) -> list[dict]:
     return [{"platform": PLATFORM_GITHUB, "id": num,
              "url": GITHUB_REF_URL.format(repo=full, id=num)}
             for full in universe]
+
+
+def plausibility_class(num: str, max_ref: int | None) -> int:
+    """Which of the four classes a repository falls in for a clicked `#num`.
+
+    `max_ref is None` is UNKNOWN — the table has no entry, because the repo was
+    added since the last refresh, or the GraphQL alias came back `null`, or
+    there is no table at all.
+
+    🔴 `None` AND `0` ARE DIFFERENT ANSWERS AND THIS IS WHERE THAT IS DECIDED.
+    `0` is the strongest signal in the scheme — it is the only value that says a
+    numeric reference is impossible here — so collapsing "I could not ask" into
+    it would rank a perfectly good repository below every measured one on no
+    evidence at all. `regen-known-repos.py` keeps them apart on the write side
+    by OMITTING an unanswered repo rather than writing a 0; this keeps them
+    apart on the read side.
+    """
+    if max_ref is None:
+        return CLASS_UNKNOWN
+    try:
+        n = int(num)
+    except (TypeError, ValueError):
+        # A non-numeric subject cannot be compared to a range at all. UNKNOWN is
+        # the honest class: it is neither ruled in nor ruled out, and it leaves
+        # the order alone rather than inventing one.
+        return CLASS_UNKNOWN
+    if max_ref <= 0:
+        return CLASS_IMPOSSIBLE
+    return CLASS_PLAUSIBLE if max_ref >= n else CLASS_BELOW
+
+
+def load_known_ranges(path: Path | None = None) -> dict[str, int]:
+    """{"owner/repo" (lowercased): highest ref} from the generated table, or {}.
+
+    🔴 EVERY failure is {} — absent, unreadable, malformed, wrong shape, wrong
+    value type. Identical posture to `load_known_repos` and
+    `load_known_universe`, for the identical reason: this runs on a detached
+    click handler with nowhere to print a traceback, and an empty table means
+    "every repo is UNKNOWN", which is exactly the pre-change ordering. A
+    corrupted file must cost the operator a worse ORDER, never a dead click.
+
+    ⚠ A DICT OF INTS, AND THE VALUE CHECK IS NOT A FORMALITY: `json.loads` of
+    the universe file beside it returns a LIST, and a `--ranges-path`/
+    `--universe-path` mix-up at generation time would otherwise be read as a
+    table of nothing. `bool` is rejected explicitly — it is an `int` subclass in
+    Python, so `True` would otherwise sail in as the number 1.
+    """
+    # 🔴 RESOLVED AT CALL TIME, NOT BOUND AS A DEFAULT — the defect that made
+    # `load_known_repos`' own override test inert. See its comment.
+    path = path or KNOWN_RANGES_PATH
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k.lower(): v for k, v in raw.items()
+            if isinstance(k, str) and _OWNER_REPO_RE.match(k)
+            and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+
+
+def ranges_age_days(path: Path | None = None) -> float | None:
+    """How long ago the range table was written, in days, or None.
+
+    Separate from `mapping_age_days` and measured on its OWN file rather than
+    inferred from the mapping's: the two are written by one run today, but a
+    host deployed before the ranges leg existed has a fresh mapping and NO
+    table, and reading one mtime for the other would report that host as having
+    a fresh range table. None means "could not be measured" and every caller
+    must treat it as UNKNOWN, never as fresh.
+    """
+    path = path or KNOWN_RANGES_PATH
+    try:
+        return max(0.0, (time.time() - path.stat().st_mtime) / 86400.0)
+    except OSError:
+        return None
+
+
+def ordering_state(ranges: dict[str, int], age: float | None) -> str:
+    """One of `ORDER_STATES`, from the table and its age. No I/O.
+
+    🔴 STALE MEANS THE TABLE IS IGNORED, NOT TRUSTED-WITH-A-WARNING. Past
+    `STALE_MAPPING_DAYS` the daily refresh has missed SEVERAL runs, and the two
+    misclassifications that follow point in opposite directions: a repo that has
+    advanced past `N` is filed BELOW, and a repo that gained its first reference
+    is filed IMPOSSIBLE. Ordering on that is worse than not ordering — it is
+    confident and wrong — while ordering on nothing is merely what shipped
+    before. So the handler degrades to the old order and SAYS SO above the
+    picker, which is the same posture the mapping's own staleness note takes.
+
+    ⚠ AN EMPTY TABLE IS `no-table`, WHATEVER THE MTIME SAYS. A file that exists
+    and parses to nothing orders nothing, and reporting it as `applied` would
+    tell the operator the rows were ranked when they were not.
+
+    ⚠ AN UNMEASURABLE AGE OVER A NON-EMPTY TABLE IS `stale`, NOT `no-table`.
+    `None` means "could not be measured" and every caller must treat it as
+    UNKNOWN rather than fresh — the same contract `mapping_age_days` states —
+    and the operator-facing difference is real: `no-table` sends them to run the
+    generator, which would not help when the table is sitting right there.
+    """
+    if not ranges:
+        return ORDER_NO_TABLE
+    if age is None or age >= STALE_MAPPING_DAYS:
+        return ORDER_STALE
+    return ORDER_APPLIED
+
+
+def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]:
+    """The operator's recent picks as `[{"t": float, "repo": str, "n": int}]`.
+
+    Newest LAST, capped by `PICKS_MAX_ROWS` and filtered to
+    `PICKS_MAX_AGE_DAYS`. 🔴 EVERY failure is [] — absent, unreadable, and
+    per-line, a malformed row is SKIPPED rather than killing the file. This is
+    an append-only log written by a detached handler that can be killed
+    mid-write; one torn last line must not cost the whole history.
+
+    ⚠ THE CAP IS APPLIED TO THE TAIL, NOT THE HEAD. The file grows at one line
+    per pick, so the rows that matter are the last ones; taking the first 500
+    would freeze the preference at whatever the operator liked when the file was
+    new and never move again.
+    """
+    path = path or PICKS_PATH
+    now = time.time() if now is None else now
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines[-PICKS_MAX_ROWS:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        repo, t, n = row.get("repo"), row.get("t"), row.get("n")
+        if not (isinstance(repo, str) and _OWNER_REPO_RE.match(repo)):
+            continue
+        if not isinstance(t, (int, float)) or isinstance(t, bool):
+            continue
+        if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+            continue
+        if (now - float(t)) / 86400.0 > PICKS_MAX_AGE_DAYS:
+            continue
+        out.append({"t": float(t), "repo": repo, "n": n})
+    return out
+
+
+def pick_scores(picks: list[dict], num: str,
+                now: float | None = None) -> dict[str, float]:
+    """{"owner/repo" (lowercased): score} — recency-weighted frequency, warmed
+    by how close `num` is to the numbers picked in that repo before. No I/O.
+
+    Each row contributes `half_life(age) * (1 + proximity)`, so:
+      * picking a repo MORE OFTEN raises it (the terms sum);
+      * picking it RECENTLY raises it (the half-life weight);
+      * picking a NEARBY number in it raises it (the proximity term), bounded so
+        a distant number still counts as a pick rather than being discarded.
+
+    🔴 A SCORE ONLY EVER ORDERS *WITHIN* ONE TIER A CLASS — `order_universe` puts
+    the class first in its sort key, and this function never sees the class at
+    all. That separation is structural rather than promised: there is no code
+    path on which a learned preference can lift an IMPOSSIBLE repository above a
+    PLAUSIBLE one, because the two numbers are never compared.
+
+    ⚠ A REPO WITH NO PICKS SCORES 0 AND KEEPS ITS TIER A PLACE. On a host that
+    has never picked anything this returns {}, every score is 0, and the order
+    is Tier A's alone — which is the cold-start behaviour, not a special case.
+    """
+    now = time.time() if now is None else now
+    try:
+        target = int(num)
+    except (TypeError, ValueError):
+        target = None
+    scores: dict[str, float] = {}
+    for row in picks:
+        age = max(0.0, (now - row["t"]) / 86400.0)
+        weight = 0.5 ** (age / PICKS_HALF_LIFE_DAYS)
+        if target is None:
+            proximity = 0.0
+        else:
+            distance = abs(row["n"] - target)
+            proximity = 1.0 / (1.0 + distance / PICKS_PROXIMITY_SCALE)
+        key = row["repo"].lower()
+        scores[key] = scores.get(key, 0.0) + weight * (1.0 + proximity)
+    return scores
+
+
+def order_universe(universe: list[str], num: str, ranges: dict[str, int],
+                   scores: dict[str, float] | None = None) -> list[str]:
+    """The picker's universe rows, ordered by whether each repo could plausibly
+    have `#num`. Pure — no I/O, no clock.
+
+    THE SORT KEY, IN ORDER OF AUTHORITY:
+      1. the Tier A CLASS — plausible, below, unknown, impossible;
+      2. the Tier B SCORE, descending — the operator's own picks;
+      3. `max_ref - num` ascending, for PLAUSIBLE rows only — a repository whose
+         head is just past `N` is a better fit than one that passed it a
+         thousand references ago.
+
+    🔴 AND THAT IS THE WHOLE KEY — THERE IS DELIBERATELY NO NAME IN IT. A
+    trailing `name.lower()` was tried and REMOVED: it makes the function
+    ALPHABETISE rather than REFINE, so a caller handing it rows in any other
+    order silently loses that order even when the table answers nothing. The
+    cold-start test caught it. `sorted` is stable, so leaving the name out means
+    equal rows keep the order they arrived in — which is what makes this a
+    refinement of `repo_universe`'s sort rather than a second, competing one.
+    Determinism is unaffected: the input is deterministic and the sort is
+    stable.
+
+    🔴 TIER B SITS *UNDER* THE CLASS AND *OVER* THE DISTANCE, AND BOTH HALVES OF
+    THAT ARE DELIBERATE. Under the class, because a learned preference is
+    evidence about the OPERATOR and the class is evidence about the REPOSITORY —
+    no number of past picks makes a repo with zero references able to answer
+    `#1291`. Over the distance, because an actual past pick at a nearby number
+    is a measurement, while `max_ref - num` is a heuristic about heads; and
+    because only rows the operator has really chosen carry a non-zero score, so
+    this reorders a handful of rows rather than the list.
+
+    🔴 IT RETURNS EVERY ROW IT WAS GIVEN. Ranking is the whole intervention —
+    see `CLASS_IMPOSSIBLE` for why filtering is not. Pinned by
+    `test_ordering_is_a_PERMUTATION_and_never_a_filter`.
+
+    ⚠ `sorted` IS STABLE, SO A TABLE THAT ANSWERS NOTHING IS A NO-OP. With no
+    ranges and no scores every key is `(CLASS_UNKNOWN, 0.0, 0)`, which
+    reproduces the incoming order EXACTLY — the cold-start requirement, met by
+    construction rather than by a branch.
+    """
+    scores = scores or {}
+    try:
+        target = int(num)
+    except (TypeError, ValueError):
+        target = None
+
+    def key(full: str):
+        low = full.lower()
+        max_ref = ranges.get(low)
+        klass = plausibility_class(num, max_ref)
+        # Only meaningful for PLAUSIBLE, and 0 everywhere else so it cannot
+        # reorder a class whose members were never compared on it.
+        distance = (max_ref - target
+                    if klass == CLASS_PLAUSIBLE and target is not None
+                       and max_ref is not None
+                    else 0)
+        return (klass, -scores.get(low, 0.0), distance)
+
+    return sorted(universe, key=key)
+
+
+def record_pick(repo: str, num: str, path: Path | None = None,
+                now: float | None = None) -> bool:
+    """Append one `{"t","repo","n"}` line to the pick log. True if it landed.
+
+    🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE OPEN. This runs after the
+    operator has already chosen a URL; a full disk, a read-only home or a
+    permission change must cost the learning, not the click. Every failure is a
+    quiet `False`.
+
+    🔴 0600, PARENT 0700, AND THE MODE IS SET ON EVERY WRITE RATHER THAN AT
+    CREATION. `open(..., "a")` does not re-apply a mode to a file that already
+    exists, so a file created before this rule — or by a hand-run — would keep
+    whatever umask it was born with, forever. It names PRIVATE repositories;
+    see the module docstring.
+
+    ⚠ IT RECORDS ONLY WELL-FORMED `owner/repo` AND A POSITIVE INTEGER. A row the
+    reader would discard is not worth writing, and a log full of them would
+    push real history past `PICKS_MAX_ROWS`.
+    """
+    if not (isinstance(repo, str) and _OWNER_REPO_RE.match(repo)):
+        return False
+    try:
+        n = int(num)
+    except (TypeError, ValueError):
+        return False
+    if n <= 0:
+        return False
+    path = path or PICKS_PATH
+    row = {"t": round(time.time() if now is None else now, 3),
+           "repo": repo, "n": n}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+        os.chmod(path, 0o600)
+    except OSError:
+        return False
+    return True
+
+
+def repo_of_github_url(url: str) -> str:
+    """`owner/repo` from a github.com reference URL, or "".
+
+    Used to turn the row the operator SELECTED back into something
+    `record_pick` can store. It is deliberately narrow — `github.com` and a
+    two-segment path — so a clawgate or ClickUp URL yields "" and is not
+    recorded as a repository.
+    """
+    m = re.match(r"^https?://(?:www\.)?github\.com/"
+                 r"(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/", url or "")
+    if not m:
+        return ""
+    full = f"{m.group('owner')}/{m.group('repo')}"
+    return full if _OWNER_REPO_RE.match(full) else ""
 
 
 def row_to_url(row: str, candidates: list[dict]) -> str:
@@ -1230,6 +1643,53 @@ def staleness_note(path: Path | None = None) -> str:
             f"or run scripts/regen-known-repos.py")
 
 
+def ordering_note(num: str, state: str, plausible: int = 0,
+                  impossible: int = 0, age: float | None = None) -> str:
+    """The clause appended to the picker header saying HOW the rows below are
+    ordered — or that they are not. "" when there is nothing to say.
+
+    🔴 THE OPERATOR MUST BE ABLE TO TELL AN ORDERED LIST FROM AN UNORDERED ONE,
+    because the two look identical and only one is worth trusting. Once the top
+    rows are the plausible ones, "the first few rows are the likely ones"
+    becomes a habit — and a host whose range table is absent or stale silently
+    stops earning it. Saying which state this is costs one clause and is the
+    only signal the operator will ever get: the picker cannot report anything
+    after the fact (see `pick()`), and a toast after every click is the noise
+    this handler must not make.
+
+    🔴 IT NAMES THE CLICKED NUMBER AND TWO COUNTS — NEVER A ROW. Same rule as
+    `universe_note` and `guessed_note` beside it, and the same reason: this
+    string reaches the picker, and the picker's input is the one surface the
+    universe may already touch. `num` is what the operator clicked.
+
+    ⚠ THE `no-table` WORDING NAMES THE GENERATOR, NOT A FILE TO EDIT. A host
+    that has never run the ranges leg is one refresh away from an ordered
+    picker; sending the operator to look at a file they cannot usefully write by
+    hand would be the same wrong-remedy defect `pick()`'s fzf branch records.
+
+    🔴 `no-table` IS DELIBERATELY THE QUIETEST OF THE THREE, AND THAT IS A
+    FREQUENCY ARGUMENT RATHER THAN A STYLE ONE. It fires on EVERY picker until
+    the generator has run once — and on a host where `gh` is absent or not
+    logged in, which `regen-known-repos.py` exits 4 for as a legitimate state,
+    it fires forever. A shouty clause on the commonest path is the noise that
+    gets learned past, which is the same objection that kept the refresh timer
+    unwritten for months. `stale` is the one that means something is BROKEN, so
+    it is the one that names a unit to look at.
+    """
+    if state == ORDER_NO_TABLE:
+        return ("rows unordered — no reference-range table on this host yet "
+                "(scripts/regen-known-repos.py builds one)")
+    if state == ORDER_STALE:
+        aged = f"{age:.0f} days old" if age is not None else "of unknown age"
+        return (f"rows unordered — the reference-range table is {aged}, so "
+                f"ordering on it would be confidently wrong; check "
+                f"`systemctl --user status mention-known-repos-refresh`")
+    if state == ORDER_APPLIED:
+        return (f"ordered by plausibility for #{num}: {plausible} could have "
+                f"it, {impossible} have no references at all")
+    return ""
+
+
 def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
     """The line shown ABOVE the fuzzy picker when the universe is the last resort.
 
@@ -1452,6 +1912,46 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
     return 1
 
 
+def _ordered_universe(universe: list[str],
+                      num: str) -> tuple[list[str], str, tuple[int, int]]:
+    """`(rows, ordering state, (plausible, impossible))` — the impure composer.
+
+    🔴 THE ONLY I/O IN THE ORDERING, GATHERED IN ONE PLACE. Everything it calls
+    is pure and separately testable (`order_universe`, `pick_scores`,
+    `plausibility_class`, `ordering_state`); this reads the two files and the
+    clock, so a test that wants the ordering does not have to own a filesystem
+    and a test that wants the DEGRADE path does not have to own a sorter.
+
+    🔴 A STALE OR MISSING TABLE RETURNS THE INPUT UNTOUCHED — not a
+    best-effort ordering, not a partial one. See `ordering_state`: past the
+    staleness threshold the two misclassifications point in opposite directions,
+    so an order built on it is confidently wrong, while leaving the rows alone
+    is exactly what shipped before this existed. The state token travels back
+    with the rows so the header can say which of the two the operator is
+    looking at.
+
+    ⚠ TIER B IS APPLIED IN BOTH ORDERED *AND* DEGRADED STATES? NO — and this is
+    the one place that could have gone either way. It is applied only when Tier
+    A is, because `order_universe`'s whole contract is that a learned preference
+    orders WITHIN a class; with no classes to sit inside, picks alone would be
+    free to float any repository to the top of the list, which is precisely the
+    promotion the tier split forbids. A host with picks and no range table
+    therefore gets the old order, and gets the ordered one as soon as the
+    generator has run once.
+    """
+    ranges = load_known_ranges()
+    state = ordering_state(ranges, ranges_age_days())
+    if state != ORDER_APPLIED:
+        return (universe, state, (0, 0))
+    scores = pick_scores(load_picks(), num)
+    rows = order_universe(universe, num, ranges, scores)
+    # Counted from the SAME `ranges` dict the sort used, not re-read: a header
+    # that disagreed with the order beside it would read as a bug in the note.
+    classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
+    return (rows, state,
+            (classes.count(CLASS_PLAUSIBLE), classes.count(CLASS_IMPOSSIBLE)))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # 🔴 THE ALACRITTY CONTRACT: the matched text is the LAST argument. Taking
@@ -1544,6 +2044,15 @@ def main(argv: list[str] | None = None) -> int:
     # unresolvable `repo#N`. Do not delete it on the reasoning that the
     # six-digit path no longer needs it.
     offered_universe = False
+    # 🔴 A SECOND, WIDER PREDICATE — AND IT IS NOT A DUPLICATE OF THE ONE ABOVE.
+    # `offered_universe` means "suppress the auto-open shortcut"; this means
+    # "there are universe rows in this picker". They differ on the bare-`#N`
+    # arm, which APPENDS the universe beneath the clawgate row and deliberately
+    # leaves `offered_universe` False (two candidates, so the shortcut cannot
+    # fire anyway). Keying the ordering note on the narrower one was the first
+    # version of this change and it was WRONG on the commonest path: the whole
+    # universe was ordered and the header said nothing at all.
+    universe_shown = False
     may_offer_universe = (not args.print_only and not args.no_discovery
                           and not colour)
     num = span["id"] if (span is not None and span["id"].isdigit()) else offer_num
@@ -1553,13 +2062,27 @@ def main(argv: list[str] | None = None) -> int:
     # are the common ones. Hoisting it to its own statement above would put a
     # `stat` + `read` + `json.loads` on every `owner/repo#N` click, the exact
     # class of tax the lazy `concurrent.futures` import was moved to avoid.
-    universe = (universe_candidates(
-                    num, repo_universe(discovered, load_known_universe()))
-                if (may_offer_universe and num) else [])
+    #
+    # 🔴 THE THREE ORDERING READS OBEY THE SAME RULE, AND THAT IS WHY THIS IS
+    # STILL ONE CONDITIONAL EXPRESSION RATHER THAN A TIDIER BLOCK OF STATEMENTS.
+    # `_ordered_universe` is only CALLED on the branch that shows a picker, so
+    # `known_ranges.json`, `picks.jsonl` and the two `stat`s cost nothing on an
+    # `owner/repo#N` click. Pulling them out to plain statements would put five
+    # more file operations on every click — exactly the tax the comment above is
+    # about, three files further along.
+    order_state = ORDER_NO_TABLE
+    order_counts = (0, 0)
+    if may_offer_universe and num:
+        universe_repos, order_state, order_counts = _ordered_universe(
+            repo_universe(discovered, load_known_universe()), num)
+        universe = universe_candidates(num, universe_repos)
+    else:
+        universe = []
     if not candidates and universe:
         # Dead end 1 — an unresolvable `repo#N`, or text the scanner refused
         # outright. Either way the operator now gets a choice instead of a toast.
         offered_universe = True
+        universe_shown = True
         candidates = universe
     elif (span is not None and span["ambiguous"] and universe
             and not any(c["platform"] == PLATFORM_GITHUB for c in candidates)):
@@ -1567,6 +2090,7 @@ def main(argv: list[str] | None = None) -> int:
         # candidate STAYS FIRST so the common case is still one Enter away; the
         # universe is appended as the way to say "no, GitHub, this repo".
         candidates = candidates + universe
+        universe_shown = True
 
     if not candidates:
         # 🔴 SAY WHICH EMPTY THIS IS. A toast is now correct in exactly one
@@ -1681,6 +2205,7 @@ def main(argv: list[str] | None = None) -> int:
         if extra:
             candidates = candidates + extra
             offered_universe = True
+            universe_shown = True
             below = len(extra)
 
     # 🔴 `and not offered_universe`: see PASS 3. One candidate is enough to open
@@ -1720,8 +2245,43 @@ def main(argv: list[str] | None = None) -> int:
             else universe_note(span["raw"] if span is not None else text,
                                len(candidates)) if offered_universe
             else "")
+
+    # 🔴 APPENDED, NEVER SUBSTITUTED, AND KEYED ON `universe_shown` RATHER THAN
+    # `offered_universe` — see the comment where that variable is declared. It
+    # is set by ALL THREE arms that put universe rows into `candidates` and by
+    # none that does not, so a picker holding only measured rows (the ordinary
+    # clawgate/GitHub pair) never claims an ordering it did not do, while the
+    # bare-`#N` arm — which is the commonest shape and the one with several
+    # hundred rows under the clawgate task — finally does.
+    #
+    # Both notes above already end in a sentence, and this is a second,
+    # independent fact about the SAME list: the additive shape `refuse()` uses
+    # for its staleness clause, for the same reason. Substituting would drop
+    # whichever half happened to be checked second.
+    if universe_shown:
+        extra = ordering_note(num, order_state, order_counts[0],
+                              order_counts[1], ranges_age_days())
+        if extra:
+            mesg = f"{mesg} · {extra}" if mesg else extra
+
     url = pick(candidates, mesg=mesg)
-    return open_url(url) if url else 0
+    if not url:
+        return 0
+    # 🔴 RECORDED *AFTER* THE CHOICE AND *BEFORE* THE OPEN, AND IT CANNOT BLOCK
+    # EITHER. `record_pick` swallows every OSError (see it), so a read-only home
+    # costs the learning rather than the click. Only a github.com reference URL
+    # yields a repository — a clawgate or ClickUp row returns "" from
+    # `repo_of_github_url` and is not recorded as one.
+    #
+    # ⚠ IT RECORDS EVERY GITHUB ROW THE OPERATOR SELECTED, not only universe
+    # rows. A pick is a pick: choosing the pane-guessed repo over the clawgate
+    # task is the same evidence about what this operator means by a number, and
+    # scoping the log to one arm would throw away the signal from the shape that
+    # produces it most often.
+    picked_repo = repo_of_github_url(url)
+    if picked_repo:
+        record_pick(picked_repo, num)
+    return open_url(url)
 
 
 def guarded_main(argv: list[str] | None = None) -> int:
