@@ -2328,3 +2328,212 @@ def test_the_shrink_report_never_names_a_file_this_save_just_pruned(
     assert named.exists(), (
         f"the shrink report names {named}, which this same save deleted — a "
         "dangling recovery command is worse than none")
+
+
+# --------------------------------------------------------------------------- #
+# 2026-09-11 INCIDENT — a tmux server died with 52 bound conversations, and the
+# automated restore recovered ONE. Three defects, each pinned below on the
+# behaviour that actually failed, not on the shape of the fix.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeTmux:
+    """A tmux stand-in that reproduces the REAL `display-message` fallback.
+
+    🔴 THE WHOLE POINT: `display-message -t <session>:<missing>` does NOT fail.
+    It answers about the session's CURRENT window and exits 0. A double that
+    returned '' for a missing window would make the old code look correct and
+    the regression untestable — the same class as #1467's stub server accepting
+    what production refuses.
+
+    Measured on the live server (scratch3 had only window 1):
+        display-message -p -t scratch3:1  -> '1:zsh'  rc=0
+        display-message -p -t scratch3:87 -> '1:zsh'  rc=0   <- the lie
+    """
+
+    def __init__(self, windows):
+        self.windows = dict(windows)          # {"sess:idx": "command"}
+        self.sent = []
+
+    def _resolve(self, target):
+        """Where tmux ACTUALLY delivers a target: the window if it exists, else
+        the session's first window (the documented fallback)."""
+        if target in self.windows:
+            return target
+        sess = target.partition(":")[0]
+        for k in self.windows:
+            if k.startswith(f"{sess}:"):
+                return k
+        return target
+
+    def __call__(self, argv):
+        if argv[:2] == ["tmux", "display-message"]:
+            target = argv[argv.index("-t") + 1]
+            sess = target.partition(":")[0]
+            if target in self.windows:
+                return self.windows[target]
+            # THE FALLBACK: any index in a live session resolves to its first.
+            for k, v in self.windows.items():
+                if k.startswith(f"{sess}:"):
+                    return v
+            return ""
+        if argv[:2] == ["tmux", "list-windows"]:
+            sess = argv[argv.index("-t") + 1]
+            return "\n".join(f"{k.split(':')[1]}\t{v}"
+                             for k, v in self.windows.items()
+                             if k.startswith(f"{sess}:"))
+        if argv[:2] == ["tmux", "send-keys"]:
+            # 🔴 send-keys RESOLVES THE SAME WAY display-message DOES. Recording
+            # the target as PASSED would make this double more forgiving than
+            # tmux: on the pre-fix code every send is addressed to a missing
+            # window and tmux delivers them ALL to the session's first window,
+            # overwriting each other. That collapse IS the incident, so the
+            # double has to reproduce it or the end-to-end test is vacuous —
+            # measured: it passed at base until this resolution was added.
+            target = argv[argv.index("-t") + 1]
+            self.sent.append((self._resolve(target), argv[-2]))
+            return ""
+        if argv[:2] == ["tmux", "new-window"]:
+            t = argv[argv.index("-t") + 1]
+            self.windows[t] = "zsh"
+            return ""
+        return ""
+
+
+def test_window_state_does_not_report_a_MISSING_window_as_present(monkeypatch):
+    """🔴 THE 2026-09-11 ROOT CAUSE, pinned directly.
+
+    `scratch3` has one window. Asking about index 87 must say MISSING. The old
+    implementation asked `display-message`, which answered about window 1 and
+    exited 0, so the predicate returned `(True, 'zsh')` for a window that does
+    not exist — `new-window` was therefore never called and 50 resumes piled
+    into the windows that did exist.
+    """
+    fake = _FakeTmux({"scratch3:1": "zsh"})
+    monkeypatch.setattr(tsr, "run", fake)
+
+    assert tsr.window_state("scratch3:1") == (True, "zsh"), "a REAL window must be found"
+    exists, cmd = tsr.window_state("scratch3:87")
+    assert exists is False, (
+        f"window_state said a MISSING window exists (got {(exists, cmd)!r}) — this is the "
+        "defect that cost 51 of 52 conversations on 2026-09-11")
+
+
+def test_window_state_is_exact_and_not_a_prefix_match(monkeypatch):
+    """A session with windows 1 and 12 must not let `:1` answer for `:12`.
+
+    Guards the enumerate-then-compare against a future 'simplification' to a
+    substring or prefix test, which would reintroduce the same class.
+    """
+    fake = _FakeTmux({"s:1": "zsh", "s:12": "claude"})
+    monkeypatch.setattr(tsr, "run", fake)
+    assert tsr.window_state("s:1") == (True, "zsh")
+    assert tsr.window_state("s:12") == (True, "claude")
+    assert tsr.window_state("s:2")[0] is False, "':2' must not match ':12'"
+
+
+def test_a_missing_window_is_CREATED_before_the_resume_is_sent(monkeypatch, state, capsys):
+    """🔴 THE END-TO-END CONSEQUENCE — the assertion that would have caught it.
+
+    continuum restored one window per session; the plan wanted several. Every
+    absent window must be created, and each resume must land on its OWN target.
+    On the pre-fix code all sends collapse onto the single existing window.
+    """
+    fake = _FakeTmux({"scratch3:1": "zsh"})
+    monkeypatch.setattr(tsr, "run", fake)
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 0.0))
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (list(t), []))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda s: True)
+    plan = [{"session": "scratch3", "window": str(w), "cwd": "/tmp",
+             "session_id": f"sid-{w}", "codename": "Gold", "bind_source": "ledger"}
+            for w in (1, 2, 3, 4)]
+    (state).mkdir(parents=True, exist_ok=True)
+    tsr.PLAN.write_text(json.dumps(plan))
+
+    assert tsr.cmd_restore() == 0
+    capsys.readouterr()
+    targets = [t for t, _ in fake.sent]
+    assert sorted(targets) == ["scratch3:1", "scratch3:2", "scratch3:3", "scratch3:4"], (
+        f"the resumes did not land on four distinct windows: {targets} — on the "
+        "pre-fix predicate they all collapse onto scratch3:1")
+
+
+def test_the_resume_uses_an_ABSOLUTE_claude_path(monkeypatch, state, capsys):
+    """🔴 THE SECOND 2026-09-11 FAILURE. Even correct sends died with
+    `claude: command not found`: a continuum-restored pane does not re-run the
+    login profile, so its PATH can predate the current generation. Resolve the
+    binary in THIS process, which systemd starts with a known-good PATH.
+    """
+    fake = _FakeTmux({"s:1": "zsh"})
+    monkeypatch.setattr(tsr, "run", fake)
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 0.0))
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (list(t), []))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda s: True)
+    # 🔴 RED AT BASE *BEHAVIOURALLY*, not via an AttributeError on a new symbol.
+    # A real `claude` on PATH means the pre-fix code still sends the bare name,
+    # so this fails on the SEND LINE — the thing that actually broke — rather
+    # than on the import surface. (The two tests below this one are new-symbol
+    # tests and are red at base with AttributeError; labelled, not counted as
+    # behavioural coverage.)
+    bindir = state.parent / "fakebin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    fake_claude = bindir / "claude"
+    fake_claude.write_text("#!/bin/sh\nexit 0\n")
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH','')}")
+    (state).mkdir(parents=True, exist_ok=True)
+    tsr.PLAN.write_text(json.dumps([{"session": "s", "window": "1", "cwd": "/tmp",
+                                     "session_id": "sid", "codename": "Gold",
+                                     "bind_source": "ledger"}]))
+    assert tsr.cmd_restore() == 0
+    capsys.readouterr()
+    line = fake.sent[0][1]
+    assert f"{fake_claude} --resume sid" in line, (
+        f"the send used a bare binary name and would die 'command not found' in a "
+        f"pane with a stale PATH: {line!r}")
+
+
+def test_an_unresolvable_claude_falls_back_to_the_bare_name(monkeypatch):
+    """The fallback is load-bearing: a bare `claude` is what shipped for months
+    and works wherever PATH is intact. An unresolvable lookup must not turn a
+    working restore into no restore."""
+    monkeypatch.setattr(tsr.shutil, "which", lambda n: None)
+    assert tsr.claude_command() == "claude"
+
+
+def test_a_richer_generation_is_reported_when_the_pointer_moved_to_a_poorer_plan(
+        state, monkeypatch, capsys):
+    """🔴 THE THIRD 2026-09-11 FAILURE, and the one that nearly ended recovery
+    at 37 of 52. Mid-recovery the 15-minute autosave saw a half-restored
+    workspace and repointed the plan at a fresh, POORER generation. A restore
+    after that moment recovers the smaller set and reports success.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    rich = [{"session": "s", "window": str(i), "cwd": "/tmp", "session_id": f"sid-{i}",
+             "codename": "Gold", "bind_source": "ledger"} for i in range(6)]
+    poor = rich[:2]
+    tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(rich))
+    tsr.generation_paths("20260911T001000")[0].write_text(json.dumps(poor))
+    tsr.PLAN.write_text(json.dumps(poor))
+
+    found = tsr.richer_generation(tsr.PLAN)
+    assert found is not None, "a generation with 4 extra bound ids was not reported"
+    gplan, missing = found
+    assert gplan.name == "restore-plan_20260911T000000.json"
+    assert len(missing) == 4, f"expected the 4 lost ids, got {sorted(missing)}"
+
+
+def test_no_richer_generation_is_reported_when_nothing_was_lost(state):
+    """POSITIVE CONTROL for the test above: it must stay quiet in the ordinary
+    case, or the warning becomes noise and stops being read."""
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    plan = [{"session": "s", "window": "1", "cwd": "/tmp", "session_id": "sid-1",
+             "codename": "Gold", "bind_source": "ledger"}]
+    tsr.generation_paths("20260911T000000")[0].write_text(json.dumps(plan))
+    tsr.PLAN.write_text(json.dumps(plan))
+    assert tsr.richer_generation(tsr.PLAN) is None, (
+        "reported a richer generation when the current plan carries every id")

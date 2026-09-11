@@ -53,6 +53,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -906,9 +907,74 @@ def tmux_session_exists(name: str) -> bool:
 
 
 def window_state(target: str) -> tuple[bool, str]:
-    """(window exists?, its pane_current_command) for a `session:window` target."""
-    out = run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"])
-    return (bool(out.strip()), out.strip())
+    """(window exists?, its pane_current_command) for a `session:window` target.
+
+    🔴 `tmux display-message -t <session>:<MISSING-INDEX>` DOES NOT FAIL. IT
+    ANSWERS ABOUT THE SESSION'S CURRENT WINDOW AND EXITS 0. That is what this
+    function used, and it made the predicate report `(True, 'zsh')` for a window
+    that does not exist.
+
+    MEASURED 2026-09-11 on the live server, with a control — `scratch3` had
+    exactly one window, index 1:
+
+        tmux display-message -p -t scratch3:1  -> '1:zsh'  rc=0
+        tmux display-message -p -t scratch3:87 -> '1:zsh'  rc=0   <- the lie
+        tmux display-message -p -t scratch3:99 -> '1:zsh'  rc=0   <- the lie
+
+    THE COST, measured the same night. A tmux server died with 52 bound
+    conversations. continuum restored the SESSIONS but only ONE WINDOW each, so
+    33 of the plan's windows were absent. `cmd_restore` asked this predicate,
+    was told every window existed, therefore never called `new-window`, and
+    `send-keys -t <session>:<missing>` ALSO resolves to the current window — so
+    50 resumes piled into the ~18 windows that did exist, each overwriting the
+    last. Result: `relaunched 50 windows` and **one** conversation running.
+    `_verify_sends` then re-read through this same lying predicate.
+
+    🔴 `list-windows` IS THE PREDICATE THAT CANNOT FALL BACK: it ENUMERATES the
+    session's windows instead of resolving a target against it. Compare an exact
+    index against that list and there is nothing for tmux to be helpful about.
+    Do not "simplify" this back to `display-message`; a target-resolving command
+    can never answer an existence question.
+    """
+    sess, _, win = target.partition(":")
+    if not win:
+        return (False, "")
+    # Enumerate, then match exactly. `-F` keeps the pairing on one line so a
+    # window whose command contains whitespace cannot shift the parse.
+    out = run(["tmux", "list-windows", "-t", sess,
+               "-F", "#{window_index}\t#{pane_current_command}"])
+    for line in out.splitlines():
+        idx, tab, cmd = line.partition("\t")
+        if tab and idx == win:
+            return (True, cmd.strip())
+    return (False, "")
+
+
+def claude_command() -> str:
+    """The `claude` binary to send, resolved to an ABSOLUTE path when possible.
+
+    🔴 A BARE `claude` IS RESOLVED BY THE TARGET PANE'S PATH, NOT BY OURS, AND
+    THAT PATH IS ROUTINELY BROKEN IN EXACTLY THE PANES THIS SCRIPT WRITES TO.
+    MEASURED 2026-09-11: after a server death, every pane tmux-continuum had
+    restored answered
+
+        claude: command not found
+        hostname: command not found
+
+    — a restored pane does not re-run the login shell's profile, so it can come
+    back with a PATH that predates the current home-manager generation (the
+    `~/.nix-profile` blanking this repo's MEMORY.md documents is the same
+    family). The sends were correct; the panes could not run them.
+
+    Resolving here fixes that for every send, because THIS process is started by
+    the systemd unit with a known-good PATH. `shutil.which` follows that PATH and
+    returns a `/nix/store/...` path that does not depend on the pane at all.
+
+    Falls back to the bare name when it cannot be resolved — a bare `claude` is
+    what shipped for months and works wherever PATH is intact, so an
+    unresolvable lookup must not turn a working restore into no restore.
+    """
+    return shutil.which("claude") or "claude"
 
 
 def no_tmux_server_to_restore_into() -> bool:
@@ -1344,12 +1410,70 @@ def uptime_hours() -> float:
         return float("inf")
 
 
+def richer_generation(current: Path) -> tuple[Path, set[str]] | None:
+    """The newest generation carrying bound ids `current` has LOST, if any.
+
+    🔴 THE POINTER CAN MOVE TO A WORSE PLAN *WHILE YOU ARE RECOVERING*, AND THAT
+    IS NOT HYPOTHETICAL. MEASURED 2026-09-11, during the recovery from a server
+    death: the pre-crash plan held 52 bound conversations; partway through, the
+    15-minute continuum autosave fired, saw the half-restored workspace, and
+    repointed `restore-plan.json` at a fresh 37-entry generation. A `restore`
+    run after that moment would have silently recovered 37 of 52 and reported
+    complete success, because it has no way to know the pointer used to be
+    richer. The 15 ids existed only in the older generation.
+
+    Generations are what make this recoverable at all (#1383) — but only if
+    somebody looks. This is the looking.
+
+    Returns `(generation_path, ids_it_has_that_current_lacks)`, choosing the
+    generation that recovers the MOST missing ids and, among ties, the newest.
+    Returns None when nothing is missing, which is the ordinary case.
+    """
+    try:
+        cur_ids = bound_ids(read_plan(current) or [])
+    except OSError:
+        return None
+    best: tuple[Path, set[str]] | None = None
+    # Newest first, so a tie is resolved toward the most recent generation.
+    for stamp in reversed(list_generations()):
+        gplan = generation_paths(stamp)[0]
+        if gplan.resolve() == current.resolve():
+            continue
+        missing = bound_ids(read_plan(gplan) or []) - cur_ids
+        if missing and (best is None or len(missing) > len(best[1])):
+            best = (gplan, missing)
+    return best
+
+
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
-                 staleness_hours: float | None = None) -> int:
+                 staleness_hours: float | None = None,
+                 prefer_best: bool = False) -> int:
     src = plan_path or PLAN
     if not src.exists():
         print(f"no restore plan at {src} — run `save` before rebooting", file=sys.stderr)
         return 1
+    # 🔴 WARN ALWAYS, SWITCH ONLY ON `--best`. A restore that silently used a
+    # different plan than the one the pointer names would be a worse surprise
+    # than the problem it solves — but a restore that says NOTHING while 15
+    # conversations sit in a generation one command away is how the 2026-09-11
+    # recovery nearly stopped at 37 of 52. Skipped when `--plan` was given: the
+    # caller has already chosen, explicitly.
+    if plan_path is None:
+        richer = richer_generation(src)
+        if richer is not None:
+            gplan, missing = richer
+            if prefer_best:
+                print(f"🔴 --best: using {gplan.name} — it carries {len(missing)} bound "
+                      f"session id(s) the current plan has LOST.", file=sys.stderr)
+                src = gplan
+            else:
+                print(f"🔴 A NEWER-BUT-POORER PLAN IS IN EFFECT. {gplan.name} carries "
+                      f"{len(missing)} bound session id(s) this plan does not.",
+                      file=sys.stderr)
+                print("   A save can repoint mid-recovery; the ids are not lost, "
+                      "they are in that generation. To use it:", file=sys.stderr)
+                print(f"     tmux-session-restore.py restore --plan {gplan}", file=sys.stderr)
+                print("   …or re-run with --best to pick it automatically.", file=sys.stderr)
     if staleness_hours is not None and plan_path is None:
         measured = plan_staleness_hours()
         if measured is not None:
@@ -1487,7 +1611,8 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
             print(f"  skip {e['codename']}:{win} — claude already running")
             skipped += 1
             continue
-        resume = f"claude --resume {sid}" if sid else "claude --resume"
+        cb = claude_command()
+        resume = f"{cb} --resume {sid}" if sid else f"{cb} --resume"
         line = f"cd {cwd} && {resume}"
         if dry_run:
             print(f"{tag}send to {e['codename']}:{win}: {line}")
@@ -1575,10 +1700,11 @@ def main(argv: list[str]) -> int:
             if i + 1 < len(rest):
                 plan_path = Path(os.path.expanduser(rest[i + 1]))
         return cmd_restore(dry_run=dry, plan_path=plan_path,
-                           staleness_hours=staleness)
+                           staleness_hours=staleness,
+                           prefer_best="--best" in rest)
     print(__doc__.strip().split("\n\n")[0])
     print("\nusage: tmux-session-restore.py "
-          "{save | restore [--dry-run] [--plan PATH] | show}", file=sys.stderr)
+          "{save | restore [--dry-run] [--plan PATH] [--best] | show}", file=sys.stderr)
     return 2
 
 
