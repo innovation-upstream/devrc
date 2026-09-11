@@ -109,6 +109,15 @@ HUMAN identity here, so an agent closing a ticket is indistinguishable from the 
 doing it. Two comments per task, never per turn. ⚠️ **Nothing enforces any of it** —
 there is no ClickUp hook; it is a convention, and the flow says so first.
 
+🔴 **Work that ALREADY has a `clawgate` task does not get a hand-filed ClickUp ticket —
+route it through the mirror's reverse-create instead.** Filing one here by hand writes no
+row in the mirror's ledger, so its next inbound run reads a ticket it has never seen. That
+no longer produces a SECOND task for the same work — an adoption guard now adopts the
+existing one — but adoption hands ClickUp ownership of that task's **title and body** from
+its next edit onward, replacing authored markdown with ClickUp's lossy `description`
+projection. Reverse-create seeds the ledger correctly and avoids both outcomes; this path
+does neither. ⚠️ Nothing enforces this one either.
+
 ## Going deeper — load ONE only when its trigger fires
 
 - **Credentials, `accounts.json`, multi-account, the JWT fields, first-time setup**
