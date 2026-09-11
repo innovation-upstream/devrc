@@ -5866,7 +5866,14 @@ class TestTheCLIActuallyHandsTheExclusionToTheSearch:
     by passing `--limit 0`, which returns rc 2 before any store is built.
     `claude/RULES.md` → "verified in isolation is the new vacuous green: the
     defect lives in the SEAM nobody owns", and "a count of DECLARATIONS is not a
-    count of INSTANCES"."""
+    count of INSTANCES".
+
+    ⚠ HISTORICAL: `test_resume_handoff_search_wiring.py` no longer exists. The
+    `/resume` step it pinned was retired on 2026-09-11 (yield measured 0 of 16),
+    and it was replaced by `test_resume_handoff_search_retired.py`, which pins the
+    opposite claim. The 304-test scope above is left as written because it is what
+    was measured at the time; it does not describe today's tree. THIS class is
+    unaffected — it guards the CLI seam, which is still live for ad-hoc callers."""
 
     def test_the_offline_CLI_path_really_excludes(self, tmp_path, capsys):
         repo = tmp_path / "alpharepo"

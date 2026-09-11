@@ -15,11 +15,42 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE ARC IS CLOSED: yield ANSWERED (1 of 20), the structural cause FIXED, shipped to both
-hosts, and the doc's own stale open-blocks retired.** Adoption and yield are separate claims and
-each was measured on its own: **adoption 20 of 22 (91%)** post-fix on the workbench against 2 of
-11 (18%) before; **yield exactly 1 of 20**, with the cause of the other 19 measured rather than
-guessed. What remains is a WAIT, not work — see rank 1.
+🔴 **THE EFFORT IS OVER AND THE ANSWER IS NEGATIVE: the `/resume` step has been RETIRED on the
+re-measurement it was waiting for.** The machinery works, adoption is near-total, the self-hit
+defect is fully fixed — and yield is **0 of 16**. The falsifier rank 1 wrote down in advance
+fired, and it was honoured rather than argued with.
+
+🔴 **THE THREE CLAIMS, EACH MEASURED SEPARATELY — every fix did what it promised, and the thing
+they were all in service of never arrived:**
+- **Adoption: 16 of 16** post-`#1399` resuming sessions ran the command, all with `--exclude-slug`
+  (2 of 11 → 20 of 22 → 16 of 16 across the three fixes).
+- **Self-hits: 0 of 48** hit slots were the session's own handoff, against **23 of 60 (38%)**
+  before; own doc was the **#1 hit 0 of 16** times, against **13 of 20**. `--exclude-slug` works
+  exactly as designed.
+- **Yield: 0 of 16.** No session opened, mentioned or acted on a hit. Every one went straight from
+  the tool result to `claim-work` / `gh pr view`. Pre-fix this was 1 of 20.
+
+🔴 **THE CAUSE IS RETRIEVAL RECALL, NOT AN EMPTY CORPUS — and that correction matters, because the
+falsifier's own stated reason was wrong.** Rank 1 predicted that low yield would mean *"the corpus
+has little to offer a resuming session"*. It has plenty; the ranker cannot reach it. **44 of the
+48 hits were `[gotcha#0]`** — the same first section of a Gotchas block — with **29 distinct docs
+filling 48 slots**, two of them appearing **5× each** across unrelated repos, and ranks clustered
+0.97–1.75 (no separation between a good match and a bad one). The decisive case: session
+`d775cf17` asked about a store-api fsync stall in the Tekton tier; the corpus **holds that exact
+doc** (`devrc/gate-flake-store-api`); `handoff_search` ranked it **11th** — unreachable at the
+prescribed `--limit 3` — while `cairn search 'fsync'` had handed the session the right doc
+thirteen records earlier. **The surviving step-4 surface is the one that delivered.**
+
+⚠ **SO THE HONEST SUMMARY IS NOT "THE CORPUS IS WORTHLESS".** It is: a section-grained BM25-ish
+ranker over 5,500 sections returns generic long sections for topic-shaped queries, and three slots
+is not enough budget to survive that. Retiring the step is the response rank 1 pre-committed to
+(*"stop paying for the step rather than tune the ranker again"*); it is **not** evidence that a
+better retrieval over this corpus would fail. Nobody has tested that, and nobody should start
+without a new reason.
+
+- **The tool is NOT deleted.** `scripts/lib/handoff_search.py`, the index, the timer and
+  `--exclude-slug` all remain and are supported for ad-hoc use. What was retired is paying ~4 KB
+  of every `/resume` for it.
 
 - **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
   `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
@@ -36,7 +67,7 @@ guessed. What remains is a WAIT, not work — see rank 1.
   ⚠ **`ship.sh` reached the laptop only under a manual `REMOTE_SSH=zach@10.42.0.100`** — its
   default LAN address timed out. That split the run in two, so `ship.sh` printed
   **`cross-host agreement NOT COMPARED` both times**; the agreement above was checked BY HAND,
-  not by the tool. Filed as rank 3.
+  not by the tool. Filed as rank 2 (was rank 3 before the old rank 1 closed).
 - **Live end-to-end on the deployed path:** `in_scope_docs=402` of 403, `excluded=handoff-search-index`,
   and all three hit slots holding documents from a different repo — i.e. the slots the session's
   own handoff used to occupy are now spent on documents it has not read.
@@ -266,10 +297,10 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
 - **Leading hypothesis:** yield is low because the retrieval budget is spent on the one
   document guaranteed to be redundant. Excluding it frees a third of the slots — and the top
   slot two times in three — for documents the session has not read.
-- **Next probe:** re-run the yield read after `--exclude-slug` has been live for ~20 further
-  queries. The prediction is a rise off 1/20; the falsifier is that yield stays ~1/20 with
-  foreign hits in every slot, which would mean the corpus itself has little to offer a
-  resuming session and the honest response is to stop paying for the step.
+- **Next probe:** RUN — 2026-09-11, at n=16. **The prediction (a rise off 1/20) was WRONG and the
+  falsifier fired: yield 0 of 16.** See "RESOLVED — the re-measurement" immediately below, which
+  supersedes this block's hypothesis; the exclusion did free the slots exactly as predicted and
+  yield did not move.
 - 🔴 **THE INSTRUMENT HAD TO BE REBUILT MID-MEASUREMENT, and the tell was a perfect number.**
   The first self-hit pass scanned transcripts for `claudedocs/handoff-<slug>.md` and reported
   **100%** — because the search's own output prints each hit's doc path, so the needle was
@@ -277,24 +308,58 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   verdict". The 38% is rebuilt from two sources the search cannot write: `resume-state.sh`'s
   `handoff:` line and `claim-work --slug-for` arguments. **A 100% or a 0% is a reason to
   re-check the needle before writing it down.**
-- **Residual, NOT measured:** whether the freed slots are USED — this closes the "the top hit
-  is the doc you already read" defect, and says nothing about whether the corpus's second and
-  third choices are worth reading. That is the next probe above, and it is the real question.
+- **Residual, SINCE MEASURED:** whether the freed slots are USED. Answered below — they are not.
+
+### RESOLVED — the re-measurement: the slots were freed and yield went to ZERO. Step retired.
+- **Answer:** the fix worked and the feature did not. `--exclude-slug` removed the self-hit
+  entirely (**0 of 48** slots, **0 of 16** top slots), adoption was total (**16 of 16** sessions
+  ran it with the flag), and **0 of 16** sessions opened, mentioned or acted on a hit — down from
+  1 of 20. The falsifier written into the previous rank 1 fired, and the step was retired rather
+  than the ranker tuned, because that is what the pre-commitment said to do.
+- **Symptom + exact repro:** count `--exclude-slug` queries since `#1399` merged
+  (`2026-09-09T07:29:22Z`); for each, read the turns AFTER the tool result and record whether a
+  hit DOCUMENT was opened. Derive the session's own slug from `resume-state.sh`'s `handoff:` line
+  and `claim-work --slug-for` arguments — **never** from the search's own output.
+- **Observed (with values):** 19 query calls / 18 with the flag / 16 sessions, across 5 repos.
+  48 hit slots. 0 self-hits. 0 sessions acted. **44 of 48 hits were `[gotcha#0]`**; 29 distinct
+  docs filled 48 slots; `appblock-tool-calling` and `app-taste-rollout` appeared **5× each**
+  across unrelated topics; ranks 0.97–1.75, mean 1.40.
+- 🔴 **THE DECISIVE CASE, because it separates "empty corpus" from "bad recall".** `d775cf17`
+  queried *"cairn CI intermittent store-api test fails on fsync stall in Tekton pytests tier"*.
+  The corpus contains `devrc/gate-flake-store-api`, which is about exactly that. Reproduced live:
+  it ranks **11th**. The session got it anyway — from `cairn search 'fsync'`, run 13 records
+  BEFORE the handoff_search call. Two retrieval surfaces, same question, one answered it.
+- **Ruled out:** that the corpus has nothing to offer (the falsifier's own stated reason) — the
+  on-topic document existed and a sibling tool retrieved it. via: measurement
+- **Ruled out:** that low yield is an adoption failure in disguise — 16 of 16 sessions ran the
+  command, all with the flag, and 0 of 48 slots were self-hits. via: measurement
+- **Ruled out:** that the 0 is a dead needle. 🔴 **POSITIVE CONTROL, and it is what makes the
+  zero reportable:** the same parser and needle over the PRE-fix window returns **37% self-slots**
+  — reproducing the independently-recorded 38%. The instrument can see self-hits; there are none.
+  via: measurement
+- **Ruled out:** that any session did act and was missed — two apparent hits were substring
+  collisions (`clickup-mirror` inside `clickup-mirror-check`, each session's OWN handoff). On an
+  exact-filename match it is 0 of 16. via: measurement
+- **Leading hypothesis (NOT acted on, and deliberately left as a hypothesis):** a section-grained
+  ranker returns long generic sections for topic-shaped queries, and 3 slots cannot survive that.
+  A larger `--limit`, or down-weighting the Gotchas block, might move it. **Nobody should start
+  that without a new reason** — see the ⚠ in "State now".
+- **Shipped:** the `/resume` step-4 command removed; `test_resume_handoff_search_wiring.py`
+  replaced by `test_resume_handoff_search_retired.py`, which fails if the command returns and
+  hands over the measurement that must be redone first.
 
 ## Next steps (ranked)
-1. **RE-MEASURE YIELD ONCE `--exclude-slug` HAS ~20 QUERIES BEHIND IT.** Rank 1 as it stood is
-   ANSWERED (1 of 20) and the structural cause is fixed, not diagnosed-and-filed — do NOT re-run
-   the old read as if it were open. Wait for the queries, then repeat the yield read exactly as
-   the RESOLVED block describes it, and report the pair: yield, and how many hit slots were
-   still the session's own doc (should be ~0; if it is not, the skill wiring is not being
-   followed and that is an ADOPTION finding, not a yield one). 🔴 **This is the question the
-   whole effort rides on** — an index queried by every session and never useful is a cost, not
-   a capability, and adoption cannot distinguish the two. ⚠ **The falsifier is real and should
-   be honoured:** if yield stays ~1/20 with foreign hits filling every slot, the corpus has
-   little to offer a resuming session, and the right response is to stop paying for the step
-   rather than to tune the ranker again.
-   forcing: none
-2. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
+🔴 **THE OLD RANK 1 IS CLOSED — DO NOT RE-RUN IT.** "Re-measure yield once `--exclude-slug` has
+~20 queries behind it" was run on 2026-09-11 at n=16: **yield 0 of 16, self-hits 0 of 48**, the
+falsifier fired, and the `/resume` step was retired. Full evidence in "RESOLVED — the
+re-measurement". Nothing below is waiting on it.
+
+⚠ **AND NOTHING BELOW IS LOAD-BEARING ANY MORE.** With the step retired, ranks 1–4 are all
+polish on a tool that now has only ad-hoc callers. They are kept because each is a real, measured
+defect and cheap to close — **not** because anything depends on them. If the answer to "should I
+work this?" is not obvious, the honest one is **no**.
+
+1. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
    `--exclude-slug "  "` normalises to `""`, prints `excluded=` with nothing after it, leaves
    `in_scope_docs == indexed_docs`, and returns the document the caller meant to drop — the exact
    class three audit rounds closed everywhere else. The library layer accepts `[""]` too. Round 4
@@ -306,7 +371,7 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
    **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
    with a test that watches it fail at the previous commit.
    forcing: none
-3. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
+2. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
    unused.** `host-role.sh` defines `LAPTOP_IP_SECONDARY=10.42.0.100` (nebula) beside the primary
    `192.168.50.155`, but the SSH default derives from the primary only — so from off-network the
    remote leg dies `Connection timed out`, rc 255, and the run reports `incomplete`. Measured
@@ -319,12 +384,12 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
    when the primary is unreachable (or the rc-255 message names `REMOTE_SSH` and the nebula
    address), with a test that watches the fallback fire.
    forcing: none
-4. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
+3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
    does it, which is the intended signal.
    forcing: none
-5. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
+4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
    rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
    re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.
@@ -533,9 +598,61 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   classified every section as NEW and **replaced the committed doc**. `git rev-list --count
   HEAD..origin/main` plus a content check before drafting; `merge --ff-only` to fix.
 
+- 🔴 **A FALSIFIER'S CONDITION AND ITS STATED REASON ARE TWO CLAIMS — THE CONDITION FIRED AND THE
+  REASON WAS WRONG.** Rank 1 pre-committed: *"if yield stays ~1/20 with foreign hits filling every
+  slot, the corpus has little to offer and the right response is to stop paying for the step."*
+  The condition fired exactly (0/16, 48/48 foreign). The reason did not: the corpus HELD the
+  on-topic doc and ranked it 11th, while a sibling tool retrieved it on the same question.
+  **Honour the condition — a pre-commitment you renegotiate after seeing the data is not one —
+  but do NOT inherit its reasoning**, because the recorded reason is what the next session will
+  quote. Here the difference decides whether "retrieval over this corpus is worthless" (false and
+  discouraging) or "this ranker at limit 3 is" (true and narrow).
+- 🔴 **A GUARD SCOPED TO FENCED BLOCKS MATCHED **ZERO** FENCES, AND PASSED.** The retirement guard
+  scanned ```` ^``` ```` anchored at column 0 — but every fence in `resume/SKILL.md` is indented
+  three spaces inside a numbered list item, so the scanner returned an EMPTY list and "no
+  invocation among the blocks" was vacuously true forever. It went green on the mutant that
+  re-added the command verbatim. **The only thing that caught it was the mutation test**, which is
+  the whole argument for running one: the guard's own logic, its message and its needle were all
+  correct. Fixed, plus a **scanner positive control** (`test_the_fence_scanner_actually_finds_this
+  _skills_fences`) that fails if the block list is ever empty again. **When a guard is scoped to a
+  SLICE of a document, pin that the slice is non-empty — a scoper that selects nothing turns every
+  assertion inside it green.**
+- 🔴 **AN OFF-BY-ONE READ WINDOW MANUFACTURED FOUR "NO RESULT" SESSIONS.** The transcript extractor
+  looked for each query's `tool_result` in `recs[i:i+6]`; every result sits at delta **6**, which
+  that slice excludes. Four of sixteen sessions reported an empty result, and an empty result reads
+  as *"the query returned nothing"* — a substantive finding — rather than *"my reader missed it"*.
+  `claude/RULES.md` → "an EMPTY RESULT cannot distinguish two mechanisms". **A zero from your own
+  extractor is a claim about the extractor first.** The tell was that the zeros were all-or-nothing
+  per session rather than distributed.
+- 🔴 **SLUG MATCHING BY SUBSTRING GAVE TWO FALSE "A SESSION ACTED ON A HIT" READINGS, BOTH WAYS.**
+  `clickup-mirror` (a hit doc) is a prefix of `clickup-mirror-check` (the session's OWN handoff),
+  and it is also the name of a script DIRECTORY both sessions were already working in. So a loose
+  needle scored a session as acting on recall when it was reading its own doc and its own code.
+  **Match the full filename (`handoff-<slug>.md`), and remember that slugs in this corpus nest.**
+- 🔴 **TWO RETRIEVAL SURFACES WERE ASKED THE SAME QUESTION AND ONLY ONE ANSWERED — that comparison
+  is what made the diagnosis possible.** Session `d775cf17` ran `cairn search 'fsync'` and
+  `handoff_search` on the same fsync-stall question, thirteen records apart. Cairn returned the
+  right doc; the search ranked it 11th. **A co-located control is worth more than any amount of
+  reasoning about a ranker's output** — it separates "nothing to find" from "found by the other
+  tool", which no amount of reading the hit list can do.
+- 🔴 **ADOPTION AT 100% IS NOT EVIDENCE OF VALUE, AND THIS IS THE CLEANEST DEMONSTRATION OF IT.**
+  Three PRs each fixed a real, measured defect — the step did not fire, so it was moved (2/11 →
+  20/22); it retrieved the caller's own document, so that was excluded (38% → 0%). Both fixes
+  worked completely. Yield went 1/20 → 0/16. **Every intermediate metric can improve while the
+  thing they are proxies FOR does not move**, and only the end-to-end read can say so. The
+  intermediate metrics are still worth measuring — they are how you know the retirement is about
+  the feature's value and not about a broken deployment.
+
 ## How to verify
+🔴 **READ THIS BEFORE RUNNING CHECK 1 OR 3b: THE STEP IS RETIRED, SO BOTH NOW MEASURE A HISTORICAL
+WINDOW, NOT A LIVE ONE.** `/resume` no longer invokes `handoff_search.py`, so after the retirement
+ships, adoption goes to **0 by design** and a future run of check 1 reporting `queried=0` is the
+system working, not a regression. They are kept because the closed window
+(`#1399`..2026-09-11) is what the retirement rests on and must stay re-derivable. **Check 6 is the
+one that verifies the retirement itself.**
+
 ```bash
-# 1. ADOPTION — the live question. THIS HOST only; run on both.
+# 1. ADOPTION — HISTORICAL after the retirement (see the note above). THIS HOST only; run on both.
 #    🔴 CUT is now #1332's merge, NOT #1295's. Left at #1295's, the 14 pre-fix runs stay in the
 #    denominator and a fully successful fix reports ~10/24 and reads as a FAILURE.
 #    Controls watched to work: a MENTION is not an invocation (needle on `handoff_search.py --`,
@@ -606,12 +723,39 @@ python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" -
 #    🔴 `excluded=` proves the flag PARSED; the COUNT proves it MATCHED — read both, because an
 #    unnormalisable value used to print a confident `excluded=<garbage>` and filter nothing.
 
-# 4. The consumer is LIVE, not merely merged (readlink is the arbiter):
+# 4. The RETIREMENT is LIVE, not merely merged (readlink is the arbiter).
+#    🔴 THE SENSE OF THIS CHECK IS INVERTED FROM WHAT IT WAS: the count must now be ZERO.
 readlink -f ~/.claude/skills/resume/SKILL.md          # must resolve into /nix/store
-grep -c 'handoff_search.py --offline' ~/.claude/skills/resume/SKILL.md   # must be >=1
-#    🔴 Proves the text is DEPLOYED. Says NOTHING about whether it is FOLLOWED — that is check 1.
+grep -c 'handoff_search.py --offline' ~/.claude/skills/resume/SKILL.md   # must be 0
+grep -c 'WAS RETIRED ON A MEASUREMENT' ~/.claude/skills/resume/SKILL.md  # must be >=1
+#    🔴 A 0 from the first grep with a 0 from the second is NOT a pass — that is a skill that
+#    lost the command AND the explanation, which is how it gets re-added. Read the pair.
+#    ⚠ `grep -c` on a nix-store symlink reads the DEPLOYED copy; `merge → pull → switch` first,
+#    or you are grepping the previous generation (CLAUDE.md → "Merged ≠ deployed").
 
 # 5. The guard still holds (and its own mutants still die):
 nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_resume_handoff_search_wiring.py -q -p no:cacheprovider
+  ~/workspace/devrc/scripts/tests/test_resume_handoff_search_retired.py -q -p no:cacheprovider
+#    🔴 MUTATE IT, don't just run it. Re-add the command to step 4's fence and watch
+#    test_no_fenced_command_in_the_resume_skill_invokes_the_corpus_search go RED with its own
+#    message. The FIRST draft of this guard survived that mutation — it scanned for fences at
+#    column 0 while every fence in the skill is indented three spaces inside a list item, so it
+#    asserted over an EMPTY block list. `test_the_fence_scanner_actually_finds_this_skills_fences`
+#    is the control that now stops that recurring; a green run without it proves little.
+
+# 6. 🔴 THE YIELD READ — the measurement the retirement rests on, and the only one that could
+#    reverse it. Re-derivable because the window is closed: #1399's merge .. 2026-09-11.
+#    Method (full script in this session's transcript; the shape is what matters):
+#      a. collect every Bash tool_use whose command contains `handoff_search.py --` after the CUT,
+#         EXCLUDING your own session id — your measuring commands contain the needle.
+#      b. for each, find its tool_result — 🔴 it sits at delta 6 from the tool_use; a window of
+#         recs[i:i+6] EXCLUDES it and manufactures four false "no result" sessions.
+#      c. parse the `^──` hit lines; derive the session's OWN slug from `resume-state.sh`'s
+#         `handoff:` line and `claim-work --slug-for` args — NEVER from the search's own output.
+#      d. read the turns AFTER the result: was a hit DOCUMENT opened (exact `handoff-<slug>.md`,
+#         not a substring — `clickup-mirror` is a prefix of `clickup-mirror-check`)?
+#    🔴 POSITIVE CONTROL, MANDATORY: run the same parser over the PRE-fix window
+#    (#1332..#1399). It must return ~37-38% self-hit slots. If it returns 0 there too, your
+#    needle is dead and the post-fix 0 means nothing.
+#    2026-09-11 result: 16 sessions, 48 slots, 0 self-hits, 0 acted. Control: 37% (recorded 38%).
 ```
