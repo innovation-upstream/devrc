@@ -560,14 +560,6 @@ item, not the drift one.
 - **`_MARKER_ANYWHERE` requires the colon on purpose.** `_NEAR_MISS_MARKER`'s shouted branch
   may skip the terminator because it is ANCHORED at a bullet head; unanchored over a whole
   line that same rule fires on `OPEN SOURCE`.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session — which cannot distinguish "touched no task" from "wrong session id", so no
-  `clawgate-task:` field was written and none was created.
-- ⚠ **Environment, unaddressed:** the shared `devrc` clone carries ~150 worktrees from
-  finished agent runs, and its working tree holds another session's uncommitted WIP
-  (`nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`,
-  `output.txt`, two `scripts/diagnose-*.sh`).
-
 - **Carried forward from the previous `State now` (it would otherwise be dropped by this
   update):** `devrc#1223 → 540e748d`, the `dropped lines:` advisory in `--validate`, was
   verified by content AND behaviour — run against the real 2026-08-19 blob it reports **13
@@ -595,14 +587,6 @@ item, not the drift one.
   "the THIRD frozen read surface — the one whose output drives deletions (rank 20)" — so more
   than one session is repointing read surfaces off this mirror. Check for overlap before
   editing `subsystem_audit`/`subsystem_recall`.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
-  session, with its positive control confirming the board was reachable. A wrong session id
-  answers 200/empty exactly like a session that touched nothing, so this is **not** a clean
-  reading; no field was written and no task was created.
-- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
-  uncommitted WIP (`nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`,
-  `output.txt`, two `scripts/diagnose-*.sh`). Nothing here touched them.
-
 - 🔴 **A COMMIT MESSAGE WRITTEN FROM MEMORY SHIPPED A FALSE CLAIM, AND THE DEFECT IT SAID WAS
   FIXED WENT WITH IT.** `3c8e37da` asserted a 🔴 fix; the pushed blob contained **none** of it
   (`grep -c OC_LOCK_PID_FILE` = 6 where it should have been 0). Cause: the red-at-base check
@@ -682,11 +666,6 @@ item, not the drift one.
 - **Concurrent agents corrupt each other's results on this box.** Load hit 62 on 24 cores; three
   failures investigated in this effort were other sessions' suites rather than code. Queue behind
   them rather than killing them, and treat any red above ~load 20 as needing a control.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **6** — one linked task
-  (`#477`, role=`read`, "Bot-account detection agent"), NONE worked. That task was read only to
-  verify another agent's claim about it and is definitively not this work, so per the flow no
-  field was written and none was created.
-
 - 🔴 **THE TEST HARNESS RUNS THE POD'S COMMAND UNDER BASH, AND THE POD IS DASH.** Every test in
   `test_subsystem_store_api.py` drives a fake `kubectl` whose `exec` runs the command locally.
   `echo "ABSENT  $1"` therefore behaves one way in all 723 green tests and a different way on
@@ -724,16 +703,6 @@ item, not the drift one.
 - **The handoff doc was 1 commit behind at session start** and `handoff_doc.py` resolves its
   base from the working tree, so the fast-forward had to happen BEFORE any draft. A stale base
   would have merged into an out-of-date document and reported success.
-- **No clawgate task recorded, again.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session, positive control confirming the board was reachable (2 links for another
-  session). A wrong session id answers 200/empty exactly like a session that touched nothing,
-  so this is **not** a clean reading; no field was written and none was created.
-- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
-  uncommitted WIP (`nix/programs/alacritty/default.nix`, `output.txt`,
-  `nix/system/apply-nebula-relay.sh`, `nix/system/check-nebula-relays.sh`,
-  `scripts/diagnose-nix-disk.sh`). Nothing here touched them. This session worked on `main` for
-  reads only and did every write in the worktree `~/workspace/devrc-ho-r3`.
-
 - **Two corrections to this doc, measured 2026-09-05, recorded HERE so a future `State now`
   replace cannot drop them.** (1) The old rank 8 — *"`main` is RED on
   `test_clawgate_task_interview_guard.py`"* — is **CLOSED**: it passes on `origin/main`
@@ -789,15 +758,6 @@ item, not the drift one.
 - **Two independent blind lenses beat one auditor run twice over.** Round 3's lenses found
   the same TAB defect by different routes without being told what the other sought; that
   agreement was the round's strongest evidence.
-- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session, positive control confirming the board was reachable (2 links for a different
-  session). A wrong session id answers 200/empty exactly like a session that touched
-  nothing, so this is not a clean reading; no field written, none created.
-- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
-  uncommitted WIP (`output.txt`, `nix/system/apply-nebula-relay.sh`,
-  `nix/system/check-nebula-relays.sh`, `scripts/diagnose-nix-disk.sh`). Untouched. All work
-  here was done in worktrees; both have been removed and the base clone fast-forwarded.
-
 - 🔴 **A THEORY THAT EXPLAINS THE FAILURE IS NOT EVIDENCE FOR IT — and this one was
   arithmetically impossible the whole time.** `gc --auto` needs ~6700 loose objects;
   `_mkrepo` leaves 3. One `git config --get gc.auto` plus one `count-objects -v` would
@@ -827,14 +787,16 @@ item, not the drift one.
 - **`gh pr merge` rc is not the merge's verdict.** It returned **1** for a failure that was
   only about deleting a LOCAL branch still held by a worktree — the remote merge had
   already succeeded. Remove the worktree first, and verify by content either way.
-- ⚠ **Environment, unchanged:** the shared clone still holds another session's untracked
-  WIP (`output.txt`, `nix/system/apply-nebula-relay.sh`, `nix/system/check-nebula-relays.sh`,
-  `scripts/diagnose-nix-disk.sh`). Untouched. `drift-check` classifies all 4 as read by no
-  nix path, so what was deployed IS `origin/main`.
-- **No clawgate task recorded, third time.** `clawgate_handoff.sh resolve` exited **5** — 0
-  tasks for this session, positive control confirming the board was reachable (11 links for
-  a different session). A wrong session id answers 200/empty exactly like a session that
-  touched nothing, so this is not a clean reading; no field written, none created.
+- 🔴 **`clawgate_handoff.sh resolve` EXIT 5 CANNOT DISTINGUISH "THIS SESSION TOUCHED NO TASK" FROM "THE SESSION ID IS WRONG", and it answered that way on SIX separate
+  handoffs in this effort.** An unknown session returns `200 {"tasks":[]}`, not 404, so the
+  empty array is the same observation for both. Every time the positive control confirmed the
+  board was reachable (2, 11 and other link counts for OTHER sessions), which is what makes
+  the zero a reading about THIS id rather than about the board — and equally why it is not a
+  clean result. Per the flow no `clawgate-task:` field was written and none created, six
+  times. ⚠ One run exited **6** instead (one linked task, role=`read`, none worked) — a
+  different code for a different state, also correctly declining to write. **The six
+  near-identical bullets this replaces are MERGED, not lost: they differed only in the
+  control's link count.**
 
 ## How to verify
 
