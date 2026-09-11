@@ -175,9 +175,16 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   MEASURED 2026-09-02: `required_status_checks` is **absent from the protection object
   entirely** and `enforce_admins: false`, while `GET /branches/main` still reports
   `protected: true`. A PR merges with both Tekton checks red, or with none posted at all.
-  🔴 **DELIBERATE AND CURRENT — not drift, and not yours to "restore".** The operator turned
-  it off because the gate was slowing work down; it stays off until the Tekton capacity
-  issue is addressed, which a different session owns. 🔴 **That decision is now DECLARED IN
+  🔴 **DELIBERATE, STANDING, AND NOT YOURS TO "RESTORE" — and it is NOT waiting on anything.**
+  This is a solo-contributor repo and the operator requires the ability to ship immediately,
+  so the gate stays off as a standing preference. ⚠ **An earlier wording said "until the
+  Tekton capacity issue is addressed", and that was a trap**: it is conditional, and the
+  condition is already MET — measured 2026-09-10, zero exit-255 across 2,179 recorded step
+  terminations in ~18h, zero OOMKills, zero admission failures, the devrc-ci node at 14% CPU
+  requests, `NO CAPACITY` once in 80 heads. Capacity is not the constraint. So that sentence
+  had expired by its own terms, and a session reading it would have restored protection
+  *correctly by the declaration and against what the operator wants*. There is no condition
+  here to satisfy; only the operator reverses it. 🔴 **That decision is DECLARED IN
   CODE, and the declaration is load-bearing.** `bp_declared_off_reason()` in
   `scripts/drift-check.sh` names this repo with the reason above, so rc 24 fires on
   DISAGREEMENT rather than on the bare state: declared-off/live-off is printed plainly and
