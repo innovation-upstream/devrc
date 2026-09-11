@@ -22,7 +22,11 @@
 # This file is SOURCED (not executed). Consumers — keep in sync by reading THIS,
 # never a private copy:
 #   - tmux-scratch-monitor.sh   (Alt+m HUD)
-#   - tmux-scratch-status.sh    (status-left legend)
+#   - scripts/i3status-scratchpads  (the LIVE colour legend — an i3status-rust
+#                                    bar block; parses this file with a regex,
+#                                    it does not source it)
+#   - tmux-scratch-status.sh    (the legend's retired tmux status-left renderer,
+#                                kept only for debugging — nothing calls it)
 #   - scripts/session-analysis/initiative-scan.py  (parses this file's entries)
 #
 # Field order per entry:  session:key:color:name

@@ -40,15 +40,24 @@ the scratch-slot system, the task-management wiring, and who owns which file.
 | tmux k9s | prefix+K | 95% popup |
 
 ## Scratch slots
-Six persistent popup sessions, each with a color-themed border and a memorable title
-(name starts with the hotkey letter and evokes the slot's color). The status-left
-indicator (`scripts/tmux-scratch-status.sh`) shows all 6 slots as their hotkey
-letter colored to match the slot's popup border; dimmed when the session doesn't
-exist yet. A leading `●` (in slot color) marks any scratch whose windows include
-one in fuzzyclaw `status="waiting"` (permission prompt or other input request),
-filtered against currently-existing tmux window IDs so stale state files don't
-flag dead windows. Output: `g G v V p P` becomes `g ●G v V p P` when scratch2
-has a waiting prompt.
+Twenty persistent popup sessions, each with a color-themed border and a memorable
+title (name starts with the hotkey letter and evokes the slot's color). The slot
+table is `scripts/tmux-scratch-slots.sh` — the single source of truth; the popup
+bindings are GENERATED from it by `nix/programs/tmux/default.nix`, so the six
+rows below are an excerpt, not the set.
+
+**The colour legend lives in the i3status-rust BAR, not in tmux.** The block
+script is `scripts/i3status-scratchpads` (wired up as `scratchpadsBlock` in
+`nix/graphical.nix`): it shows every slot as its hotkey letter in the slot's own
+colour with the session's window count (`g2`), dimmed to `#504945` with no count
+when that session does not exist, and `scratch ?` when it could not measure at
+all. Left-click opens the scratchpad picker in a float terminal.
+
+It USED to be a `status-left` interpolation (`scripts/tmux-scratch-status.sh`),
+which could fit only 14 of the 20 slots inside `status-left-length 90`. That
+script is retained as a debugging/fallback renderer but is no longer called from
+anywhere. The old leading `●` "waiting" marker is GONE — it keyed on fuzzyclaw
+`status`, which cannot answer (see `scripts/tmux-scratch-status.sh`'s header).
 
 | Key | Session | Title | Color | Hex |
 |-----|---------|-------|-------|-----|

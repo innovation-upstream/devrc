@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: the scratchpad COLOUR LEGEND.
+
+Renders all 20 scratchpad slots from the canonical table
+(`scripts/tmux-scratch-slots.sh`) in table order, space-separated:
+
+    g2 G v V3 p P …
+
+  * slot's tmux session EXISTS  ->  `<key><window_count>` in the slot's own
+    colour, bold. The colour is the same hex as the popup border in
+    `.tmux.conf`, so the bar reads as a legend: popup colour -> hotkey.
+  * slot's session is ABSENT    ->  `<key>` alone, no count, dim `#504945`.
+  * could not measure           ->  `scratch ?`  (see the discriminant below).
+
+WHY IT IS HERE AND NOT IN TMUX. This legend used to be a `status-left`
+interpolation (`scripts/tmux-scratch-status.sh`). `status-left-length` is 90 and
+the `#S` session-name segment eats into it, so that renderer hardcoded a
+`for i = 7` start and could only ever show 14 of the 20 slots. The bar has room
+for all 20 and is on screen from every workspace, not only inside a tmux client.
+
+NO ICON GLYPH, deliberately — this block is text-only. Every other custom block
+here leads with a nerd-font codepoint, and an unverified codepoint renders as
+tofu on a host whose bar font lacks it. The slot keys ARE the content; there is
+nothing an icon would add that a wrong icon could not take away.
+
+STATE IS ALWAYS `Idle`. A legend never demands attention. The bar is CALM —
+colour means "look at me" — and per-slot colour here is the legend's whole
+point, carried inside the pango markup rather than by the block's state.
+
+Local + cheap (one `tmux list-sessions`), so this block needs NO poller / cache /
+signal: it just re-renders on its own `interval`, and `bar_freshness` (a
+cache-staleness gate for the poller-backed pills) does not apply to it.
+
+🔴 THE `scratch ?` DISCRIMINANT. A reading that COULD NOT BE TAKEN must never
+render as a reading that WAS taken — the same rule `i3status-claude-runs`
+carries. "No scratchpad sessions running" is a real and common reading, and it
+renders as the full legend with every slot dim. So a broken slot table, a
+missing `tmux`, or an unexplained `tmux` failure must NOT render that; they
+render `scratch ?`. Never an empty string either: an empty block is
+indistinguishable from a bar that dropped the block entirely.
+
+🔴 PANGO. i3status-rust's `custom` block passes `text` through
+`$text.pango-str()`, so the emitted string IS markup — verified by positive
+control (a `<span foreground=…>` reaches the i3bar line unescaped with
+`"markup":"pango"`). Every value interpolated into it therefore goes through
+`html.escape`. Slot keys are `[A-Za-z]` today; escaping is defensive, because
+the slot table is edited by hand and a `<` there would otherwise silently break
+the whole bar line.
+
+Unit-tested against fixture data in scripts/tests/test_scratchpads_block.py —
+no real tmux, no real slot table needed.
+"""
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+
+DIM = "#504945"           # session not started — matches the tmux renderer
+UNMEASURED = "scratch ?"  # the discriminant: this is NOT a reading
+# The last-resort pill for an exception that escaped `main()`. It carries the
+# `?` DISCRIMINANT — an empty or bare-legend fallback would be a silent lie.
+_UNMEASURED_PILL = {"text": UNMEASURED, "state": "Idle"}
+
+# Three legs, in the order they are true:
+#   1. SIBLING — at runtime this script's directory is
+#      ~/.config/i3status-rust/scripts, and nix/graphical.nix symlinks the slot
+#      table in beside it as `scratch-slots.sh`. This is the leg that runs on a
+#      live host.
+#   2. ./tmux-scratch-slots.sh — this script's directory is the repo's
+#      scripts/, so the table is its sibling under its REPO name. This is the
+#      leg that runs from ANY checkout or worktree, including CI, without
+#      depending on $DEVRC_DIR pointing at this one.
+#   3. $DEVRC_DIR — an explicit override for anything else.
+# Leg 2 is not redundant with leg 3: with only 1 and 3, running this file out of
+# a worktree resolves the BASE clone's table, which is a different file that can
+# disagree with the one under test — a green that is about the wrong tree.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SLOT_PATHS = (
+    os.path.join(_HERE, "scratch-slots.sh"),
+    os.path.join(_HERE, "tmux-scratch-slots.sh"),
+    os.path.join(
+        os.environ.get("DEVRC_DIR", os.path.join(
+            os.path.expanduser("~"), "workspace", "devrc")),
+        "scripts", "tmux-scratch-slots.sh"),
+)
+
+# Slot entries look like:  "scratch4:V:#83a598:Vapor"  (session:key:color:name).
+# Parsed by REGEX over the text, never by sourcing: this is a bash file, and
+# shelling out to `bash -c '. table; echo …'` would make a bar block spawn a
+# shell every interval to read four fields.
+_SLOT_RE = re.compile(
+    r'"([^":]+):([^":]+):(#[0-9a-fA-F]{3,8}):([^"]+)"')
+
+
+def load_slots(paths=_SLOT_PATHS):
+    """Parse the canonical slot table → list of (session, key, color, name).
+
+    Returns None — NOT [] — if no copy is loadable or a copy parses to zero
+    entries. [] would render as an empty legend, which is a reading nobody can
+    take: the table always has slots in it. Never raises."""
+    sys.dont_write_bytecode = True
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        slots = _SLOT_RE.findall(text)
+        if slots:
+            return [tuple(s) for s in slots]
+    return None
+
+
+def fetch_sessions(run=None):
+    """tmux session name → window count, or None if it could not be measured.
+
+    🔴 PARSING TOOL OUTPUT, and the fallback direction is deliberate. `tmux
+    list-sessions` exits non-zero for TWO very different reasons:
+      * "no server running on /tmp/tmux-…"  — a REAL reading of zero sessions.
+        The operator has no tmux up; the legend should show every slot dim.
+      * anything else (a broken socket, a permissions error, a tmux that is
+        wedged) — NOT a reading. That must surface as `?`.
+    Nothing structured distinguishes them, so this matches `no server running`
+    in stderr, case-insensitively. Matching is the narrow case and the DEFAULT
+    is `?` (unmeasured): a format change on tmux's side then costs a visible
+    `?` rather than a silently false "nothing is running".
+
+    `run` is injectable so this is unit-testable without tmux."""
+    runner = run or _run_tmux
+    try:
+        rc, out, err = runner()
+    except (FileNotFoundError, OSError):
+        return None          # no tmux executable at all — not a reading
+    except Exception:
+        return None
+    if rc != 0:
+        if "no server running" in (err or "").lower():
+            return {}        # a REAL zero: tmux is simply not up
+        return None          # unexplained failure — refuse to call it zero
+    sessions = {}
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            sessions[parts[0]] = int(parts[1])
+        except ValueError:
+            continue
+    return sessions
+
+
+def _run_tmux():
+    p = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name} #{session_windows}"],
+        capture_output=True, text=True, timeout=5)
+    return p.returncode, p.stdout, p.stderr
+
+
+def render(slots, sessions) -> dict:
+    """Pure: (slot table, session→windows map) → i3status-rust block dict.
+
+    `slots is None` or `sessions is None` → the `?` discriminant. An empty
+    `sessions` dict is a MEASURED zero and renders the full dim legend — the two
+    must not be confusable, which is why this branches on `is None` and never on
+    truthiness. Never raises; state is always Idle."""
+    if slots is None or sessions is None:
+        return {"text": UNMEASURED, "state": "Idle"}
+    parts = []
+    for sess, key, color, _name in slots:
+        k = html.escape(key)
+        if sess in sessions:
+            parts.append(
+                '<span foreground="%s" weight="bold">%s%d</span>'
+                % (html.escape(color), k, sessions[sess]))
+        else:
+            parts.append('<span foreground="%s">%s</span>'
+                         % (DIM, k))
+    if not parts:
+        return {"text": UNMEASURED, "state": "Idle"}
+    return {"text": " ".join(parts), "state": "Idle"}
+
+
+def main() -> int:
+    sys.stdout.write(
+        json.dumps(render(load_slots(), fetch_sessions())) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.stdout.write(json.dumps(_UNMEASURED_PILL) + "\n")
+        sys.exit(0)

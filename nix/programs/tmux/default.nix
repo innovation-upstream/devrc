@@ -21,7 +21,7 @@ let
   # verified via a `tmux list-keys` diff before the cutover.
   mkBind = s: "bind -n M-${s.key} if-shell -F '#{==:#{session_name},${s.sess}}'"
     + " { detach-client }"
-    + " { display-popup -d \"#{pane_current_path}\" -xC -yC -w 80% -h 80%"
+    + " { display-popup -d \"#{pane_current_path}\" -xC -yC -w 90% -h 90%"
     + " -S 'fg=${s.color}' -T ' ${s.name} '"
     + " -E 'tmux attach-session -t ${s.sess} || tmux new-session -s ${s.sess}' }";
   scratchBindings = builtins.concatStringsSep "\n" (map (s: mkBind (parse s)) slotLines);
