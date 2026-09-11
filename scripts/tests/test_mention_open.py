@@ -2766,6 +2766,22 @@ FAKE_UNIVERSE_TOKENS = (
     | {v.split("/")[1] for v in FAKE_UNIVERSE.values()}
 )
 
+# 🔴 THE PANE-GUESSED REPO IS A SECOND NAME THE NOTES MUST NOT CARRY, AND IT IS
+# NOT IN THE UNIVERSE. That is the point of it — a guess comes from the tmux
+# pane, not from the mapping — and it is exactly why
+# `_no_universe_token_anywhere` is STRUCTURALLY BLIND to a leak of it: every
+# token that check knows comes from `FAKE_UNIVERSE`, which by construction does
+# not contain this. So a mutant that spliced the guessed repo into the note
+# ("Row 1 is a guess from the tmux pane (wrongorg/wrongrepo)" — a natural-looking
+# improvement) passed every assertion in this file, under docstrings that said
+# the note "must not name a repository".
+PANE_GUESS = "wrongorg/wrongrepo"
+PANE_GUESS_TOKENS = {
+    PANE_GUESS,
+    PANE_GUESS.split("/")[0],
+    PANE_GUESS.split("/")[1],
+}
+
 
 def test_the_fixtures_KEYS_and_VALUES_are_pairwise_distinct():
     """🔴 THE GUARD ON THE GUARDS. Every disclosure assertion below is only as
@@ -2785,6 +2801,53 @@ def test_the_fixtures_KEYS_and_VALUES_are_pairwise_distinct():
                 assert a not in b, (
                     f"{a!r} is a substring of {b!r} — a leak of the first would "
                     f"be indistinguishable from a leak of the second")
+
+
+def test_the_pane_guess_is_OUTSIDE_the_universe_and_spelled_distinctly():
+    """🔴 THE GUARD ON THE SECOND LEDGER, and it pins the very property that
+    makes the second ledger necessary.
+
+    If `PANE_GUESS` were in `FAKE_UNIVERSE`, `_no_universe_token_anywhere` would
+    already cover it and `_no_guessed_repo_token_anywhere` would be decoration
+    that no mutation could kill. It is out, deliberately — and the two token sets
+    must stay disjoint, or a leak of one becomes indistinguishable from a leak of
+    the other.
+    """
+    assert PANE_GUESS not in FAKE_UNIVERSE.values(), PANE_GUESS
+    assert PANE_GUESS not in FAKE_UNIVERSE, PANE_GUESS
+    assert not (PANE_GUESS_TOKENS & FAKE_UNIVERSE_TOKENS), (
+        PANE_GUESS_TOKENS & FAKE_UNIVERSE_TOKENS)
+    assert len(PANE_GUESS_TOKENS) == 3, PANE_GUESS_TOKENS
+    for a in PANE_GUESS_TOKENS:
+        for b in PANE_GUESS_TOKENS:
+            if a != b and "/" not in a and "/" not in b:
+                assert a not in b, (
+                    f"{a!r} is a substring of {b!r} — a leak of the first would "
+                    f"be indistinguishable from a leak of the second")
+    # ...and no token may be a word the note legitimately uses, or the guard
+    # would be red on correct output rather than on a leak.
+    for token in PANE_GUESS_TOKENS:
+        assert token not in MO.guessed_note("audit-pr 1291", below=3, rank=1)
+        assert token not in MO.guessed_note("audit-pr 1291")
+
+
+def _no_guessed_repo_token_anywhere(everywhere: str, label: str) -> None:
+    """🔴 THE NOTE MUST NOT NAME THE GUESSED REPOSITORY EITHER.
+
+    `guessed_note`'s own docstring says it "names the clicked text and two
+    counts, NOTHING ELSE — never the repository", and until 2026-09-09 the only
+    check behind that sentence was `_no_universe_token_anywhere`, which cannot
+    see this name at all (see `PANE_GUESS`). A guard reading as coverage while
+    providing none is worse than none: it stops anyone looking.
+
+    The disclosure argument is the same one as for the universe. The candidate
+    ROW already shows the repository — that is what the operator is being asked
+    about — so the note repeating it buys nothing and adds a second place a name
+    can escape from. It is also the wrong claim: the note explains why a choice
+    is being offered, and the pane's repo is not part of that explanation.
+    """
+    for token in sorted(PANE_GUESS_TOKENS):
+        assert token not in everywhere, f"{label}: {token}"
 
 
 def _no_universe_token_anywhere(everywhere: str, label: str) -> None:
@@ -2919,9 +2982,17 @@ def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
 
     The count is now pinned by
     `test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it`, which
-    is the regression for the report."""
+    is the regression for the report.
+
+    🔴 "IT MUST NOT NAME A REPOSITORY" IS NOW ACTUALLY CHECKED. The body used to
+    run `_no_universe_token_anywhere` alone, which knows only the tokens in
+    `FAKE_UNIVERSE` — and the repository this test is ABOUT is the pane guess,
+    which is deliberately NOT in it. So the sentence covered every repository
+    except the one at issue, and a mutant leaking the guess into the note passed
+    under a docstring claiming otherwise. Both ledgers are asserted now; see
+    `_no_guessed_repo_token_anywhere`."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
-    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
@@ -2931,6 +3002,7 @@ def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
     assert "audit-pr 1291" in seen["mesg"], seen
     assert "tmux pane" in seen["mesg"], seen
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+    _no_guessed_repo_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
 
 
 def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
@@ -2967,6 +3039,7 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
     assert "guess" in seen["mesg"].lower(), seen["mesg"]
     assert "nothing here knows" not in seen["mesg"], seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
+    _no_guessed_repo_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -2998,7 +3071,13 @@ def test_the_suppression_reads_mention_scans_OWN_source_constant():
     a hand-spelled `"default"` here would silently stop firing the day
     `mention_scan` renamed the constant — with every suite green, because the
     branch would simply never be taken."""
-    import mention_scan as MS  # noqa: PLC0415 — see `_load_handler`'s sys.path
+    # noqa: PLC0415 — deliberately local, and it binds the SAME module object
+    # the handler imported: `exec_module(MO)` at the top of this file already put
+    # `scripts/collector` on `sys.path` and left `mention_scan` in `sys.modules`.
+    # (This comment used to point at `_load_handler`, a function that does not
+    # exist in this file and, by `git log -S`, never has — the loader has always
+    # been the module-level block beside `MO`.)
+    import mention_scan as MS  # noqa: PLC0415
 
     assert MO.SOURCE_DEFAULT is MS.SOURCE_DEFAULT
     assert MO.SOURCE_DEFAULT == "default"
@@ -3456,6 +3535,83 @@ def test_the_NOTE_survives_all_the_way_from_main_to_the_picker(
     _no_universe_token_anywhere(header, "END-TO-END HEADER DISCLOSURE")
 
 
+
+def test_the_GUESSED_note_reaches_the_picker_and_no_other_surface(
+        monkeypatch, capsys, real_notify):
+    """🔴 THE SEAM BETWEEN #1457 AND THE fzf SWAP, AND A CLEAN `git merge` LEFT
+    IT OPEN. Two changes landed on this file at once. #1457 added
+    `_no_guessed_repo_token_anywhere` because `_no_universe_token_anywhere`
+    knows `FAKE_UNIVERSE` and the pane guess is deliberately NOT in it — so the
+    universe guard covered every repository except the one at issue. This branch
+    replaced rofi with a terminal, adding surfaces rofi never had: the child's
+    ARGV and a FIFO directory.
+
+    The merge was textually clean and semantically short: every new sink guard
+    on this branch used the UNIVERSE token set alone, which is exactly the
+    blindness #1457 existed to close — so the guessed repo could have reached a
+    terminal argv with the whole suite green. This test is the join.
+
+    It asserts the SPLIT, not just absence: the guess MUST appear in the
+    candidate rows — offering it is the entire feature — and must appear nowhere
+    else at all."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
+    term = _FakeTerminal(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+
+    assert MO.main(["audit-pr 1291"]) == 0
+
+    n = int(term.argv[-1])
+    header = " ".join(term.rows[:n])
+    rows = term.rows[n:]
+
+    # POSITIVE CONTROLS FIRST — three of them, because each absence below is
+    # vacuous without the matching presence.
+    assert rows, "the picker got no candidate rows at all"
+    assert any(PANE_GUESS in r for r in rows), (
+        f"the guessed repo is NOT among the offered rows — offering it is the "
+        f"whole feature, so every absence asserted below would be vacuous: {rows}")
+    assert "audit-pr 1291" in header, f"the note never reached the picker: {header}"
+
+    # 1. THE NOTE names the click and counts, never either repository.
+    _no_universe_token_anywhere(header, "GUESSED E2E HEADER")
+    _no_guessed_repo_token_anywhere(header, "GUESSED E2E HEADER")
+
+    # 2. THE TERMINAL'S ARGV — the surface rofi did not have. It may carry flags
+    #    and the two FIFO paths and nothing else.
+    argv = " ".join(term.argv)
+    _no_universe_token_anywhere(argv, "GUESSED E2E TERMINAL ARGV")
+    _no_guessed_repo_token_anywhere(argv, "GUESSED E2E TERMINAL ARGV")
+
+    # 3. AND THE PUBLISHED SINKS, through the real `notify`.
+    blob = _every_sink(capsys, real_notify)
+    _no_universe_token_anywhere(blob, "GUESSED E2E EVERY SINK")
+    _no_guessed_repo_token_anywhere(blob, "GUESSED E2E EVERY SINK")
+
+
+def test_the_guessed_seam_guard_can_actually_FIRE():
+    """POSITIVE CONTROL on the pair of token guards the test above leans on —
+    both must reject the thing they are named for, or six absences prove
+    nothing. `_no_universe_token_anywhere` is already controlled elsewhere; this
+    pins that the GUESS guard is not wired to an empty set, which is the
+    specific way #1457's finding could regress."""
+    assert PANE_GUESS_TOKENS, "the guess token set is EMPTY — every check passes"
+    # 🔴 THE BLINDNESS ITSELF, PINNED — this is why both guards are needed at
+    # every site and why the clean merge was not a safe one. The UNIVERSE guard
+    # does NOT fire on a leaked pane guess: it knows `FAKE_UNIVERSE`, and the
+    # guess is deliberately outside it. Anyone tempted to "simplify" the pair
+    # back to one call reads this first.
+    _no_universe_token_anywhere(f"leaked {PANE_GUESS}", "BLINDNESS CONTROL")
+    with pytest.raises(AssertionError):
+        _no_guessed_repo_token_anywhere(f"leaked {PANE_GUESS}", "CONTROL")
+    with pytest.raises(AssertionError):
+        _no_guessed_repo_token_anywhere(
+            f"leaked {PANE_GUESS.split('/')[1]}", "CONTROL")
+    # …and it must NOT fire on an innocent string, or it would red everything.
+    _no_guessed_repo_token_anywhere("github 12 — clawgate task", "CONTROL")
+
+
 def test_a_bare_hash_N_that_the_PANE_attributes_gets_the_universe_BELOW_it(
         spy, universe):
     """🔴 SUPERSEDES `test_a_bare_hash_N_that_the_PANE_already_attributes_does_
@@ -3555,20 +3711,53 @@ def test_every_flag_refusal_the_handler_can_produce_survives_notify_send(
             f"got no `--`, so the toast never appears: {argv}")
 
 
-# The universe rows may reach the operator's picker window and NOWHERE else, so
-# every sink the handler can write to is enumerated here rather than left to
+# The universe rows may reach the operator's own PICKER WINDOW and nowhere else,
+# so every sink the handler can write to is enumerated here rather than left to
 # whichever one a test happened to think of. A sink missing from this list is a
 # hole; adding one to the module means adding it here.
 #
-# 🔴 THE THREE SINKS ARE STDOUT, STDERR AND THE `notify-send` ARGV — and that is
-# the WHOLE list, because those are the only places `mention-open.py` writes.
-# It has no log file and no spool: it is a detached one-shot click handler. The
-# guard below used to be named `..._a_LOG_a_SPOOL_or_stderr`, which promised
-# coverage of two sinks that do not exist and understated the one that does (a
-# desktop toast is more public than either). A guard whose NAME is wider than
-# its body reads as coverage while providing none, which is worse than none —
-# it stops anyone looking. The tailer is the module with a spool, and its own
-# disclosure guards are in `test_session_tailer.py`.
+# 🔴 THE THREE SINKS THIS FOLDS ARE STDOUT, STDERR AND THE `notify-send` ARGV,
+# AND THAT IS NOT EVERY PLACE THE MODULE WRITES. There is a FOURTH destination —
+# the interactive picker: its rows, and the `mesg` line above them. This helper
+# cannot see it and never will, because the picker is reached through `pick()`,
+# which every test here replaces with a spy.
+#
+# 🔴 THAT EXCLUSION IS THE DESIGN, NOT A GAP. The picker is the ONE surface the
+# universe is allowed to reach — offering those rows is the entire feature —
+# so folding it in would make every disclosure assertion below red on correct
+# behaviour. The distinction is not "three sinks vs four": it is
+# PUBLISHED-vs-PRIVATE. stdout, stderr and a desktop toast outlive the click and
+# can be read by something other than the person who clicked; the picker is a
+# transient window on the operator's own screen, raised by this click, gone the
+# moment they choose or dismiss. The property is about the SINK, not about which
+# program draws it — swapping the picker implementation changes nothing here.
+#
+# ⚠ THAT SENTENCE SAID "drawn by this process" AND THE SWAP IT ANTICIPATED HAS
+# NOW HAPPENED, so the wording is corrected rather than left to rot: the picker
+# is fzf inside a float terminal, i.e. a CHILD process, not a call inside this
+# one. The published-vs-private property is untouched — a transient window on
+# the operator's own screen either way — but "this process" is no longer true,
+# and a child process brings two surfaces rofi did not have. Both are guarded,
+# and NEITHER is folded in here: the rows and `mesg` travel a FIFO pair in a
+# 0700 dir (`test_the_rows_go_down_a_FIFO_that_does_not_outlive_the_pick`), and
+# the terminal's argv carries only flags and those two paths
+# (`test_NO_ROW_reaches_the_terminal_ARGV`,
+# `test_the_GUESSED_note_reaches_the_picker_and_no_other_surface`).
+#
+# 🔴 AND "MAY SHOW THE UNIVERSE" IS NOT "MAY SHOW ANYTHING". The picker's own
+# `mesg` is guarded separately, at each site that builds one, by
+# `_no_universe_token_anywhere` and `_no_guessed_repo_token_anywhere` — see
+# `guessed_note`'s docstring in the handler, which says outright that this
+# helper "would not see this one".
+#
+# ⚠ THE PARAGRAPH ABOVE REPLACES ONE THAT READ "that is the WHOLE list, because
+# those are the only places `mention-open.py` writes". That was false in the
+# same shape it was written to warn about: the handler's own module docstring
+# and `guessed_note` both name the picker, and a reader who believed the
+# sentence would conclude a `mesg` leak was already covered here. It also still
+# holds for what it WAS about — this module has no log file and no spool (the
+# tailer is the module with a spool; its disclosure guards live in
+# `test_session_tailer.py`) — and that half is kept.
 def _every_sink(capsys, notify_argv: list[list[str]]) -> str:
     captured = capsys.readouterr()
     return "\n".join([captured.out, captured.err,
@@ -4062,6 +4251,7 @@ def test_a_guessed_picker_is_NOT_described_as_nothing_here_knows(monkeypatch):
     # the old wording — is now false: neither is what the operator should do.
     assert "search" in seen["mesg"].lower(), seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+    _no_guessed_repo_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
 
 
 def test_the_ONE_ROW_wording_survives_for_an_EMPTY_universe(monkeypatch):

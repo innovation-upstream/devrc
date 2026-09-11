@@ -1299,8 +1299,26 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
     🔴 IT NAMES THE CLICKED TEXT AND TWO COUNTS, NOTHING ELSE — never the
     repository, never the mapping. The candidate ROW already shows the repo,
     which is the whole point of asking; the note must not become a second place
-    a name can leak from, and `_every_sink`'s guards would not see this one (it
-    goes to the picker).
+    a name can leak from.
+
+    ⚠ AND THE TEST SUITE'S `_every_sink` HELPER CANNOT SEE THIS STRING. It folds
+    stdout, stderr and the `notify-send` argv — the sinks that outlive the click;
+    this line goes to the picker, which is a transient window on the operator's
+    own screen and is reached through `pick()`, which the tests replace. So the
+    rule above is enforced by the per-site guards on `mesg` instead —
+    `_no_universe_token_anywhere` for the mapping, and
+    `_no_guessed_repo_token_anywhere` for the pane's own repo, which the first
+    one is structurally blind to (a guess never comes from the mapping).
+
+    ⚠ THE PICKER IS NOW A SEPARATE PROCESS, WHICH ADDS SURFACES THE SENTENCE
+    ABOVE DOES NOT COVER — a terminal running fzf rather than an in-process rofi
+    call. Neither is a leak and both are guarded, but they are guarded
+    SEPARATELY and a reader should not take "the picker" as one opaque thing:
+    the rows and this note travel a FIFO pair in a 0700 dir (never argv, never a
+    file — see `PICKER_SH`), and the terminal's own argv carries only flags and
+    those two paths. `test_NO_ROW_reaches_the_terminal_ARGV` and
+    `test_the_GUESSED_note_reaches_the_picker_and_no_other_surface` hold that
+    line, with BOTH token guards.
     """
     if below <= 0:
         return (f"{subject} names no repository — the GitHub row offered was "

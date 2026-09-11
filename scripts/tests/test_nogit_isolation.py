@@ -101,7 +101,7 @@ from testlib import nogit_plugin  # noqa: E402
 # A second copy of "is another process sitting in this repo?" would agree with
 # the first until the day one of them changed, and the control below would then
 # be asserting its own opinion instead of the guard's.
-from testlib.gitenv import live_cotenants  # noqa: E402
+from testlib.gitenv import describe_cotenants, live_cotenants  # noqa: E402
 from testlib.runner_patch import runner_with_targets, write_pytest_suite  # noqa: E402
 
 RUN_TESTS = SCRIPTS / "run-tests.sh"
@@ -1238,13 +1238,25 @@ class _cotenant:
         # runner will call ACTUALLY sees it, before the run whose verdict
         # depends on it. Without this a run that passed for some unrelated
         # reason would be scored as "the downgrade worked".
+        #
+        # 🔴 IT MUST SEE **THIS** PROCESS, NOT MERELY SOMETHING. A truthy list
+        # was accepted here, which made the control pass on any co-tenant at
+        # all — including a transient one the fixture did not start. That is not
+        # hypothetical: `_mkrepo` in the sibling module planted exactly such a
+        # process (a detached `git maintenance run --auto`, ~1% of cycles) and
+        # nobody could see it for four days. A control that confirms "someone is
+        # here" while claiming "my writer is here" is the guard-that-checks-one-
+        # side shape, and it fails open.
+        seen: list[str] = []
         for _ in range(50):
-            if live_cotenants([self.root / ".git"]):
+            seen = live_cotenants([self.root / ".git"])
+            if any(s.startswith(f"{self.proc.pid}:") for s in seen):
                 return self
             time.sleep(0.1)
         raise AssertionError(
-            f"no co-tenant was visible in {self.root} after starting one — the "
-            "evidence this test depends on was never established")
+            f"the co-tenant probe never saw pid {self.proc.pid} in {self.root} "
+            "after starting it — the evidence this test depends on was never "
+            f"established. What it DID see: {describe_cotenants(seen)}")
 
     def __exit__(self, *exc):
         if self.proc is not None:
@@ -1355,9 +1367,10 @@ def test_a_repo_local_change_still_FAILS_when_no_cotenant_is_proven(tmp_path):
     name = _plant_repo_local_write(scratch)
     runner = _runner_over(tmp_path, scratch, [name])
 
-    assert not live_cotenants([scratch / ".git"]), (
+    intruders = live_cotenants([scratch / ".git"])
+    assert not intruders, (
         "something is already sitting in this scratch root, so the 'no proven "
-        "writer' arm of this control does not hold")
+        f"writer' arm of this control does not hold: {describe_cotenants(intruders)}")
     proc = _run_at(runner, scratch, tmp_path)
     out = proc.stdout + proc.stderr
 
@@ -1443,9 +1456,11 @@ def test_an_ORDINARY_git_delta_does_not_blame_the_target(tmp_path):
         ("branch.topic-x.merge", "refs/heads/topic-x"))
     runner = _runner_over(tmp_path, scratch, [name])
 
-    assert not live_cotenants([scratch / ".git"]), (
+    intruders = live_cotenants([scratch / ".git"])
+    assert not intruders, (
         "something is already sitting in this scratch root, so this run would "
-        "take the DOWNGRADE arm and measure a different message")
+        "take the DOWNGRADE arm and measure a different message: "
+        f"{describe_cotenants(intruders)}")
     proc = _run_at(runner, scratch, tmp_path)
     out = proc.stdout + proc.stderr
 
@@ -2200,9 +2215,10 @@ def test_a_stray_print_on_the_probes_pythonpath_is_NOT_evidence(tmp_path):
         "live processes are sitting inside a protected repository (cwd), "
         "and none of them is ours: 1:fake\n")
 
-    assert not live_cotenants([scratch / ".git"]), (
+    intruders = live_cotenants([scratch / ".git"])
+    assert not intruders, (
         "something is already sitting in this scratch root, so the 'no proven "
-        "writer' premise of this test does not hold")
+        f"writer' premise of this test does not hold: {describe_cotenants(intruders)}")
     proc = _run_at_with_env(runner, scratch, tmp_path,
                             {"PYTHONPATH": str(noisy)})
     out = proc.stdout + proc.stderr
@@ -2235,7 +2251,10 @@ def test_whitespace_only_probe_stdout_is_NOT_evidence(tmp_path):
     runner = _runner_over(tmp_path, scratch, [name])
     noisy, witness = _plant_chatty_import(tmp_path, "   \n\t\n\n")
 
-    assert not live_cotenants([scratch / ".git"])
+    intruders = live_cotenants([scratch / ".git"])
+    assert not intruders, (
+        "something is already sitting in this scratch root, so the 'no proven "
+        f"writer' premise of this test does not hold: {describe_cotenants(intruders)}")
     proc = _run_at_with_env(runner, scratch, tmp_path,
                             {"PYTHONPATH": str(noisy)})
     out = proc.stdout + proc.stderr
@@ -2266,7 +2285,13 @@ def test_a_LINKED_WORKTREE_protects_the_COMMON_config(tmp_path):
     exists in the non-worktree shape and every test here would still pass.
     """
     main = _scratch_root(tmp_path)
-    # A worktree needs a commit to check out.
+    # A worktree needs a commit to check out. This commit DOES fork a detached
+    # `git maintenance run --auto` into `main` (#1453's mechanism; that fix is
+    # scoped to `test_git_repo_isolation.py::_GIT_ENV` and does not reach here),
+    # and it is deliberately NOT suppressed: this test wants a co-tenant, and
+    # `_cotenant` now waits for its OWN pid rather than for anyone, so a stray
+    # one can no longer satisfy the control. Suppressing it as well would be
+    # belt-and-braces against a hazard that is already closed.
     for cmd in (["git", "-C", str(main), "commit", "-q", "--allow-empty",
                  "-m", "base", "--no-gpg-sign"],):
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
