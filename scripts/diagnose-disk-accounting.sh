@@ -217,18 +217,28 @@ _not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
 # One fixture, `/tmp/…/fix/denied` (a 35-character base, mode 0400, holding
 # three entries), THREE implementations, each run twice:
 #
-#   implementation                        -print0        -printf '%D\t%p\0'
-#   GNU findutils 4.10.0 (the bash PATH)  114 B, rc 0    0 B, rc 1
-#   GNU findutils 4.11.0 (nix dev shell)  114 B, rc 0    0 B, rc 1
-#   bfs 4.1.1 (the interactive alias)     114 B, rc 0    0 B, rc 1
+# THE LOAD-BEARING CONTRAST, and it is the only thing stated here because it is
+# the only part that reproduced on every implementation tried:
 #
-# Two corrections to what stood here, both against this round's own evidence:
-# the byte counts AGREE across builds (the 114 scales with the fixture path, so
-# it is a figure about that fixture and nothing else), and `-print0` exits **0**,
-# not 1 — it needs no stat, which is exactly why it still emits the names. Only
-# the `%D` form errors. bfs was measured this round and agrees, so the parenthesis
-# that said "not measured on bfs" is gone; the load-bearing half — `0 bytes` under
-# `%D` — reproduces identically on all three and was never in doubt.
+#   -printf '%D\t%p\0'  →  ZERO bytes. The entry is ERASED from the output.
+#   -print0             →  the names are still emitted.
+#
+# Both forms exit non-zero and both write to stderr; `%D` is what loses the DATA,
+# which is why this function captures stderr rather than discarding it.
+#
+# 🔴 EVERYTHING ELSE THAT STOOD HERE WAS WRONG, and it is deleted rather than
+# re-measured, because a per-implementation table of byte counts and exit codes
+# is a claim nothing checks and everything invalidates. What it got wrong:
+#   - "`-print0` exits **0** … it needs no stat". FALSE for the form this
+#     function uses: `-xdev` needs each entry's st_dev, so it DOES stat, and it
+#     exits 1 on a directory it cannot read. (Without `-xdev` there is no stat
+#     and rc is 0 — which is how the wrong claim got written: the probe dropped
+#     the flag the function actually passes.)
+#   - "the byte counts AGREE across builds". FALSE — measured on one fixture,
+#     GNU findutils emitted 332 B and bfs 108 B.
+#   - the version labels. The bash PATH resolves `find` to **bfs**, not GNU, and
+#     both GNU builds on this host are 4.11.0, not 4.10.0.
+# A figure about one fixture on one build is not evidence about this function.
 #
 # Root is NOT immune, which is what makes this worth code rather than a note. A
 # FUSE mountpoint not mounted `allow_other` (an AppImage's /tmp/.mount_*, gvfs,
@@ -646,8 +656,11 @@ foreign_entries() {
 # shellcheck SC2030/SC2031 flags exactly this; the repo has no shellcheck gate,
 # so nothing caught it.
 #
-# 🔴 KNOWN, DECLARED BLIND SPOT — the fourth site of the shape `_depth1_nul`'s
-# comment describes, and the one this round did NOT fix. `[ -d "$p" ]` says no
+# 🔴 KNOWN, DECLARED BLIND SPOT — a site of the shape `_depth1_nul`'s comment
+# describes, and one this round did NOT fix. (NO ORDINAL: the membership of that
+# set is machine-checked in the test suite's UNTALLIED-DROP SITE LEDGER, and a
+# number written here is exactly the stale claim that ledger replaced. An earlier
+# version said "the fourth site" — 260 lines below the paragraph forbidding it.) `[ -d "$p" ]` says no
 # for three different reasons — not a directory, `stat` refused, or the glob
 # matched nothing and left its own pattern — and bash's file tests cannot tell
 # them apart, so `continue` silently drops a /home directory root cannot stat (a
