@@ -1282,356 +1282,116 @@ def _lib_modules_a_python_file_imports(path, libdir):
     return found
 
 
-def _strip_shell_comments(src):
-    r"""Shell source with comments removed, so a scanner over it sees CODE.
+def _lib_modules_a_shell_file_references(src, libdir):
+    r"""Every `scripts/lib` module a shell script names — read RAW, comments and all.
 
-    🔴 READ THE DIRECTIONS BEFORE CHANGING ANYTHING HERE. An OVER-strip deletes
-    text bash would execute, so a `scripts/lib/<x>.py` inside it disappears and
-    the ledger PASSES over an undeclared dependency — silent, and the exact
-    failure the ledger exists to prevent. An UNDER-strip keeps a comment, minting
-    a requirement for a file the script never opens — LOUD, a human sees it.
-    Every judgement call below resolves toward under-stripping.
+    🔴 THIS DELIBERATELY DOES NOT LEX SHELL, AND THAT IS THE FIX RATHER THAN THE
+    GAP. What stood here was a ~230-line hand-rolled comment walk. Twenty audit
+    rounds ran against it: rounds 13/15/17/19 each found a real OVER-strip and
+    14/16/18/20 each fixed one and uncovered more. The defect rate never fell,
+    because the subject is a lexer — bash's word-start rules around `#`, across
+    heredocs, `$( )`, backticks, `$'…'`, `<( )` and backslash-newline joins — and
+    every round enumerated shapes instead of removing the need to enumerate.
 
-    🔴 ONE PASS OVER THE WHOLE SOURCE, NOT LINE BY LINE. Three separate defects
-    were all the per-line architecture, and each was an over-strip:
+    THE TWO DIRECTIONS ARE NOT SYMMETRIC, WHICH IS WHY NOT LEXING IS CORRECT:
 
-      * a `#`-leading line INSIDE a multi-line string was read as a comment;
-      * `sub_depth` reset per line, so a `$( … )` spanning a real newline left
-        its `)` looking like a word start (`X=$(echo a\ntrue)#x` is one word);
-      * a pre-pass that JOINED backslash-newline continuations swallowed the
-        next line when the first was a COMMENT — bash ends a comment at the
-        newline whatever the backslash does. That one was INTRODUCED by the fix
-        for the third over-strip, which is why the join now lives inside the
-        walk, where comment state is known.
+      OVER-strip  deletes text bash would execute, so a `scripts/lib/<x>.py`
+                  inside it disappears, `missing` comes back empty and the ledger
+                  PASSES over an undeclared dependency — SILENT, and the exact
+                  failure the ledger exists to prevent.
+      UNDER-strip keeps a comment, minting a requirement for a file the script
+                  never opens — LOUD: a human sees a red test and either declares
+                  the file or rewords the comment.
 
-    WORD-START SET, each character measured against bash in a realistic shape.
-    Two entries were REMOVED after their justifications were refuted:
+    Reading the source raw is the MAXIMUM under-strip. What it returns is a
+    superset of the true code-derived set, structurally, for every shell
+    construct that exists or will exist — nothing enumerated, nothing to keep in
+    step with bash. It cannot fail silent.
 
-        ; | & and whitespace      -> comment start          (in)
-        bare `(`                  -> comment start          (in)
-        `)` closing $( or $((     -> NOT a word start       (tracked, not listed)
-        `}`                       -> REMOVED. `{ echo a; }#` is a SYNTAX ERROR,
-                                     not a comment; `${V}#x` and `{a,b}#x` both
-                                     keep the text. The shape that justified it
-                                     does not parse.
-        ` (backtick)              -> REMOVED from the flat set and TRACKED: an
-                                     OPENING backtick starts a comment context,
-                                     a CLOSING one is mid-word (`echo `true`#x`
-                                     keeps `#x`) — the same asymmetry as `(`/`)`.
-        < >                       -> left OUT. bash DOES comment after them, so
-                                     this is a deliberate under-strip; see the
-                                     divergence test.
+    🔴 MEASURED ON THE REAL INPUT BEFORE THE WALK WAS REMOVED. Arm (b)'s result
+    on `scripts/transcript-push.sh` was `{build_transcript_push.py,
+    host_label.py}` five ways: under the walk, under NO stripping at all, and
+    under the walk with each of its two fail-safes (`saw_subst`, `unmodelled`)
+    disabled and with both disabled. The walk changed nothing it was pointed at.
+    The comparison that says so is not wired to nothing: with a `scripts/lib`
+    module injected into a COMMENT the two answers diverge (the walk drops it,
+    raw keeps it), and with the same module injected as executable CODE they
+    agree again. That divergence is pinned as a live test below.
 
-    HEREDOC BODIES ARE CONTENT AND ARE KEPT VERBATIM. A `#` line inside `<<EOF`
-    is data, not a comment, and stripping it was an over-strip. Keeping it can
-    only over-report a dependency, which is the loud direction — and a heredoc
-    carrying a python script is exactly where a real `scripts/lib` import hides.
+    ⚠ WHAT THIS COSTS: a comment in a scanned shell script that names a real
+    `scripts/lib/<x>.py` now demands that file be a restart trigger. There is one
+    such comment in `transcript-push.sh` today — the `host_label.py` rule near
+    the top — and it names a file that IS declared, so the cost today is zero.
+    When it is not zero it shows up as a red test, never as a green one.
 
-    `$'…'` IS ITS OWN QUOTE STATE, because backslash escapes there and does not
-    in plain `'…'`. Treating them alike mis-paired the quotes and over-stripped.
-
-    ⚠ STILL NOT MODELLED, and both are the LOUD direction: a `#` inside `$(…)`
-    or backticks nested within double quotes (bash resets the quoting context
-    there; this walk does not), and `splitlines()`-only separators such as \x0c
-    which bash treats as ordinary characters.
+    🔴 HYPHENS. `scripts/lib` really holds `host-role.sh`, and an early version of
+    this pattern was `[a-z_][a-z0-9_]*`, which cannot match one — a mutant adding
+    exactly that dependency SURVIVED. A filename character class is a place to be
+    generous: the `.exists()` filter is what makes a match real, so widening it
+    costs nothing and narrowing it loses whole files. `.sh` as well as `.py`, for
+    the same reason.
     """
-    out = []
-    i, n = 0, len(src)
-    in_single = in_double = in_ansi = False
-    in_comment = False
-    sub_depth = 0
-    tick_depth = 0
-    heredoc_terms = []       # set at `<<WORD`, consumed at the next newline
-    heredoc_active = None
-    heredoc_dash = False
-    unmodelled = False       # a construct this walk cannot lex -> refuse to strip
-    prev_closed_group = False   # a `)` or backtick that CLOSED — mid-word
-    saw_subst = False           # a substitution opened on this line (see below)
-    prev_was_escape = False
-    after_join = False          # a backslash-newline was just consumed
-
-    while i < n:
-        c = src[i]
-
-        # --- inside a heredoc body: copy verbatim until the terminator line ---
-        if heredoc_active is not None:
-            j = src.find("\n", i)
-            if j == -1:
-                j = n
-            line = src[i:j]
-            out.append(line)
-            # 🔴 EXACT MATCH, not `.strip()`. bash allows leading whitespace on the
-            # terminator ONLY under `<<-`, and then only TABS. `.strip()` ended a
-            # heredoc early on a space-indented `  EOF`, after which the remaining
-            # BODY was lexed as shell and its `#` lines removed — an over-strip.
-            if (line.lstrip("\t") if heredoc_dash else line) == heredoc_active:
-                # `cmd <<A <<B` runs the bodies BACK TO BACK, with no intervening
-                # newline for the main loop to pop the queue at — so the second
-                # body was lexed as shell. Pull the next terminator right here.
-                heredoc_active = heredoc_terms.pop(0) if heredoc_terms else None
-            if j < n:
-                out.append("\n")
-            i = j + 1
-            continue
-
-        if c == "\n":
-            # A comment ENDS at the newline no matter what preceded it.
-            in_comment = False
-            if heredoc_terms:
-                heredoc_active = heredoc_terms.pop(0)
-            out.append(c)
-            prev_closed_group = prev_was_escape = after_join = False
-            saw_subst = False
-            i += 1
-            continue
-
-        if in_comment:
-            i += 1
-            continue
-
-        # --- backslash-newline continuation, OUTSIDE a comment: bash joins ---
-        if c == "\\" and i + 1 < n and src[i + 1] == "\n" and not in_single:
-            i += 2
-            prev_was_escape = True
-            prev_closed_group = False
-            # 🔴 THE JOIN MUST NOT LOOK LIKE A LINE START. `prev` is read from the
-            # RAW source, where the character before is the newline we just
-            # consumed — so without this flag `echo abc\<nl>#x` saw a line start
-            # and stripped a word bash keeps joined. Measured as an over-strip.
-            after_join = True
-            continue
-
-        if in_single:
-            out.append(c)
-            if c == "'":
-                in_single = False
-            i += 1
-            continue
-
-        if in_ansi:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(src[i + 1])
-                i += 2
-                continue
-            if c == "'":
-                in_ansi = False
-            i += 1
-            continue
-
-        if in_double:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(src[i + 1])
-                i += 2
-                continue
-            if c == '"':
-                in_double = False
-            i += 1
-            continue
-
-        prev = src[i - 1] if i else None
-        at_word_start = not after_join and (
-            i == 0
-            or prev == "\n"
-            # `)` is included but gated on prev_closed_group below: a SUBSHELL's
-            # `)` is a word start (`(true)# x` is a comment), while a `)` that
-            # closed `$(`/`$((` is mid-word (`$(true)#x` is one word).
-            or (prev in " \t;|&()" and not prev_was_escape)
-            or (prev == "`" and not prev_closed_group and not prev_was_escape)
-        )
-        was_escape, closed_group = prev_was_escape, prev_closed_group
-        prev_was_escape = prev_closed_group = after_join = False
-
-        if c == "$" and i + 1 < n and src[i + 1] == "'":
-            in_ansi = True
-            out.append(c)
-            out.append(src[i + 1])
-            i += 2
-            continue
-        if c == "'":
-            in_single = True
-            out.append(c)
-        elif c == '"':
-            in_double = True
-            out.append(c)
-        elif c == "\\" and i + 1 < n:
-            out.append(c)
-            out.append(src[i + 1])
-            i += 2
-            prev_was_escape = True
-            continue
-        elif c == "<" and src[i : i + 2] == "<<" and src[i : i + 3] != "<<<":
-            # 🔴 A QUEUE, BECAUSE `cmd <<A <<B` IS TWO HEREDOCS. The single-slot
-            # version armed only the first, and the SECOND body was lexed as
-            # shell — an over-strip on data.
-            m = re.match(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", src[i:])
-            out.append(c)
-            if m:
-                heredoc_dash = bool(m.group(1))
-                heredoc_terms.append(m.group(3))
-            else:
-                # `<<\EOF`, `<<$VAR`, `<< "a b"` … forms this walk cannot resolve.
-                # Refusing to strip the WHOLE source is the loud direction; lexing
-                # a body we failed to arm is the silent one.
-                unmodelled = True
-        elif c == "`":
-            tick_depth ^= 1
-            if tick_depth == 0:
-                prev_closed_group = True
-            out.append(c)
-        elif c == "(" and (prev == "$" or sub_depth or (prev is not None and prev in "<>")):
-            # Every `(` inside a substitution counts, and `<(`/`>(` open one too.
-            # Counting only `$(`/`((` left a plain subshell `$( (cd /) )` and a
-            # process substitution `<(echo z)` with an UNPAIRED closer.
-            sub_depth += 1
-            saw_subst = True
-            out.append(c)
-        elif c == ")" and (sub_depth or saw_subst):
-            # 🔴 `saw_subst` IS THE FAIL-SAFE, AND IT IS DELIBERATELY ONE-WAY. A
-            # `case` pattern's `)` inside `$( … )` is genuinely unbalanced, so no
-            # counter can pair it. Once a substitution has opened on this line,
-            # EVERY later `)` is treated as mid-word — which KEEPS a following
-            # `#`. That is the loud direction; the alternative was a silent
-            # over-strip on ordinary shell.
-            if sub_depth:
-                sub_depth -= 1
-            prev_closed_group = True
-            out.append(c)
-        elif c == "#" and at_word_start and not closed_group:
-            in_comment = True
-        else:
-            out.append(c)
-        i += 1
-
-    if unmodelled:
-        # Every unmodelled construct becomes an UNDER-strip (a phantom
-        # requirement — loud) instead of a silent over-strip. Structural, so it
-        # covers shapes nobody enumerated.
-        return src
-    return "".join(out)
+    return {m for m in re.findall(r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))", src)
+            if (libdir / m).exists()}
 
 
-@pytest.mark.parametrize(
-    "name,text,marker_survives",
-    [
-        # --- bash COMMENTS these out, so the stripper must remove the marker ---
-        ("a full-line comment", "# /lib/MARK.py", False),
-        ("a trailing comment", "echo hi   # /lib/MARK.py", False),
-        ("`;#` with no space", "echo A;# /lib/MARK.py", False),
-        ("`|#` with no space", "echo B |# /lib/MARK.py", False),
-        ("`&&#` with no space", "true &&# /lib/MARK.py", False),
-        ("a SUBSHELL's `)#`", "(true)# /lib/MARK.py", False),
-        ("a comment after a multi-line string closes",
-         'echo "one\ntwo" # /lib/MARK.py', False),
-        # 🔴 THREE MECHANISMS THE DOCSTRING ASSERTED AS MEASURED AND NO ROW
-        # COVERED. Each was found by mutating the walk and watching every row
-        # stay green: deleting `(` from the word-start set, deleting the opening-
-        # backtick clause, and replacing `prev == "\n"` with `or False` — the
-        # last of which does almost all the real work on the actual script.
-        ("a full-line comment on line >= 2", "echo one\n# /lib/MARK.py", False),
-        ("a bare `(` is a word start", "echo a (# /lib/MARK.py", False),
-        ("an unquoted OPENING backtick", "echo `#/lib/MARK.py`", False),
-        # --- bash KEEPS these as executable text: removing the marker would be
-        #     an OVER-strip, which hides a dependency and passes the ledger ---
-        ("`X=y#foo` is one word", "F=/lib/MARK.py#tag", True),
-        # 🔴 THE MIRROR OF THE ROW ABOVE, AND THE ROW ABOVE IS VACUOUS WITHOUT IT.
-        # There the marker sits BEFORE the `#`, and the walk keeps everything
-        # accumulated before it breaks — so that row passes even under a mutant
-        # where EVERY `#` starts a comment. Here the marker sits after.
-        ("`X=#tag/lib/x` — marker AFTER the hash", "F=#tag/lib/MARK.py", True),
-        ("a QUOTED # then real code", 'printf "a #b\\n"; R=/lib/MARK.py', True),
-        ("an ESCAPED word-separator", "echo a\\ #/lib/MARK.py", True),
-        ("`)` closing a $(...)", "echo $(true)#/lib/MARK.py", True),
-        ("`)` closing a $((...))", "echo $((1+2))#/lib/MARK.py", True),
-        ("`}` of ${V} — NOT a comment start", "V=1; echo ${V}#/lib/MARK.py", True),
-        ("`}` of a brace expansion", "echo {a,b}#/lib/MARK.py", True),
-        ("a CLOSING backtick", "echo `true`#/lib/MARK.py", True),
-        ("a HEREDOC body is content", "cat <<EOF\n# /lib/MARK.py\nEOF", True),
-        ("$'...' escapes its own quote", "echo $'a\\'b #/lib/MARK.py'", True),
-        ("a COMMENT ending in a backslash does NOT continue",
-         "# c \\\necho /lib/MARK.py", True),
-        ("a $( ) spanning a real newline", "X=$(echo a\ntrue)#/lib/MARK.py", True),
-        ("inside a multi-line \"...\"", 'echo "one\n# /lib/MARK.py\nthree"', True),
-        ("inside a multi-line '...'", "echo 'one\n# /lib/MARK.py\nthree'", True),
-        ("a backslash-newline continuation joins", "echo abc\\\n#/lib/MARK.py", True),
-        # 🔴 SEVEN MEASURED OVER-STRIPS FROM ONE AUDIT ROUND, EVERY ONE A GROUP
-        # DELIMITER THE COUNTER COULD NOT PAIR. They are the reason the walk now
-        # fails SAFE (see `saw_subst` and `unmodelled`) instead of enumerating.
-        ("a plain subshell inside $( )", "V=$( (cd / && pwd) )#/lib/MARK.py", True),
-        ("a case pattern's ) inside $( )",
-         "V=$(case a in b) echo Z;; esac)#/lib/MARK.py", True),
-        ("a nested ( inside $(( ))", "echo $(( (1+2)*3 ))#/lib/MARK.py", True),
-        ("a process substitution <( )", "wc -l <(echo z)#/lib/MARK.py", True),
-        ("an ESCAPED backtick is not an opening one", "echo x\\`#/lib/MARK.py", True),
-        ("TWO heredocs on one line", "cat <<A <<B\nx\nA\n# /lib/MARK.py\nB", True),
-        ("a backslash-quoted heredoc terminator",
-         "cat <<\\EOF\n# /lib/MARK.py\nEOF", True),
-        ("a variable heredoc terminator", "T=EOF; cat <<$T\n# /lib/MARK.py\nEOF", True),
-        ("a space-indented terminator does NOT end <<EOF",
-         "cat <<EOF\nbody\n  EOF\n# /lib/MARK.py\nEOF", True),
-    ],
-)
-def test_the_shell_comment_stripper_AGREES_WITH_BASH(name, text, marker_survives):
-    """🔴 THE STRIPPER IS A NO-OP ON THE REAL SCRIPT TODAY, SO NOTHING EXERCISED
-    IT. `transcript-push.sh` yields the same module set stripped, unstripped, and
-    under every previous version — so its worth is entirely prospective, which is
-    precisely the code that rots unwatched. Three rewrites and three audit rounds
-    produced these rows; each is a shape where some version disagreed with bash.
+def test_the_shell_scanner_OVER_reports_rather_than_GOING_QUIET():
+    """🔴 THE DIRECTION IS THE WHOLE GUARANTEE, SO IT IS PINNED BEHAVIOURALLY.
 
-    🔴 EVERY EXPECTATION CAME FROM BASH, AND THE ORACLE THAT PRODUCED THEM WAS
-    ITSELF WRONG TWICE BEFORE IT WAS TRUSTED. Probe: `<line-with-MARK>; echo SAW`
-    on ONE line — if bash swallows the same-line `; echo SAW` and never prints
-    the marker, it is a comment. Putting `; echo SAW` on the NEXT line measures
-    nothing (it always runs), and `declare -f` is unreliable for backtick CONTENT
-    because bash stores those verbatim. The harness asserts a known-comment and a
-    known-code control before any row's expectation is read.
+    `_lib_modules_a_shell_file_references` feeds arm (b) of the restart-trigger
+    ledger below. If it ever stops reporting a `scripts/lib` module that a
+    scanned script names, `missing` comes back empty and the ledger passes GREEN
+    over an undeclared dependency. That is the only failure mode that matters
+    here, and it has exactly one plausible cause: someone re-introduces comment
+    stripping, because a comment-only reference reads like noise.
 
-    Two rows were REMOVED as refuted rather than kept and re-explained: `{ …; }#`
-    (a syntax error, so bash has no verdict) and `>#` (bash DOES comment there —
-    see the divergence test below).
+    The first row is that row. It asserts the noisy answer — a module named ONLY
+    in a trailing comment IS returned — so any stripper added later fails HERE,
+    with this message, rather than quietly shrinking the ledger. Measured against
+    the comment walk this replaced: on row 1's exact fixture it returned the EMPTY
+    set where this scanner returns `{host_label.py}`, and on rows 2-4 the two
+    agreed exactly. So row 1 is a real discriminator against the thing that was
+    here, not a restatement of the code that is here now.
+
+    The remaining rows are controls, because a scanner that returns everything
+    and a scanner that returns nothing are both consistent with row one alone:
+
+      POSITIVE  executable text is read too (row 1 alone passes under a mutant
+                that scans ONLY comment lines — measured, that mutant dies here
+                and nowhere else in the suite)
+      NEGATIVE  a name that is not a real file is NOT returned — the `.exists()`
+                filter is live, so the set is grounded in the tree
+      HYPHENS   `host-role.sh` resolves — the character class and the `.sh`
+                alternative are both exercised against a file that exists
     """
-    kept = "MARK.py" in _strip_shell_comments(text)
-    assert kept is marker_survives, (
-        f"{name}: bash {'keeps' if marker_survives else 'comments out'} the marker, "
-        f"but the stripper {'kept' if kept else 'removed'} it. "
-        + ("An OVER-strip hides a real dependency and the ledger passes GREEN."
-           if marker_survives else
-           "An UNDER-strip mints a requirement for a file the script never opens."))
+    libdir = REPO_ROOT / "scripts" / "lib"
+    assert (libdir / "host_label.py").exists() and (libdir / "host-role.sh").exists(), (
+        "the fixtures this test is built from are gone from scripts/lib — the rows "
+        "below would pass or fail for reasons that have nothing to do with the scanner")
 
+    only_a_comment = '#!/usr/bin/env bash\necho hi   # see "$(dirname "$0")/lib/host_label.py"\n'
+    assert _lib_modules_a_shell_file_references(only_a_comment, libdir) == {"host_label.py"}, (
+        "a scripts/lib module named only in a COMMENT is no longer reported. If that is "
+        "comment stripping, it is the silent direction: an over-strip deletes executable "
+        "text, the dependency inside it vanishes, and the restart-trigger ledger below "
+        "passes GREEN over an undeclared dependency. Twenty audit rounds of measured "
+        "over-strips are why this scanner does not lex shell — see the helper's docstring "
+        "before changing it")
 
-@pytest.mark.parametrize("name,text", [
-    ("`>` before a comment", "echo hi ># /lib/MARK.py"),
-    ("`<` before a comment", ": <# /lib/MARK.py"),
-    # 🔴 A BACKTICK SUBSTITUTION NESTED INSIDE DOUBLE QUOTES. bash resets the
-    # quoting context inside `…`, so the `#` there IS a comment — measured, the
-    # script prints `[]`. This walk treats `"` as suppressing comments outright
-    # and keeps it. Same loud direction, same trade, and it is the one shape
-    # whose verdict the `; echo SAW` probe gets WRONG: that `echo` sits OUTSIDE
-    # the substitution, so it runs either way. Read stdout for this family.
-    ("a backtick substitution inside double quotes", 'echo "[`#/lib/MARK.py`]"'),
-])
-def test_the_stripper_DELIBERATELY_UNDER_STRIPS_after_a_redirect(name, text):
-    """🔴 A KNOWN DIVERGENCE FROM BASH, PINNED SO IT STAYS DELIBERATE.
+    executable = 'P="$(dirname "$(readlink -f "$0")")/lib/host_label.py"\n'
+    assert _lib_modules_a_shell_file_references(executable, libdir) == {"host_label.py"}, (
+        "positive control: the scanner does not read executable shell either, so the row "
+        "above is a fact about a scanner wired to nothing")
 
-    bash DOES start a comment after `<` or `>` — `echo hi > a#foo` creates the
-    file `a#foo`, so `#` is legal mid-word, while `echo hi >#foo` is a syntax
-    error and creates NO file: the redirect lost its target because `#foo` was
-    eaten as a comment. An earlier version of this suite asserted the opposite
-    and called it measured.
+    assert _lib_modules_a_shell_file_references("X=/lib/no_such_module_here.py\n", libdir) == set(), (
+        "negative control: the scanner reported a module that does not exist in "
+        "scripts/lib, so its `.exists()` filter is dead and every result it returns is "
+        "ungrounded text rather than a file")
 
-    They are still left OUT of the word-start set, because the two directions
-    are not symmetric. Omitting them UNDER-strips: a `/lib/<x>.py` in such a
-    comment mints a requirement for a file the script never opens — wrong, but
-    LOUD, and a human sees the failure. Including them would OVER-strip any
-    executable text after a redirect, which hides a real dependency and passes
-    the ledger GREEN. When the shapes are this rare (0 in `transcript-push.sh`),
-    take the loud error.
-    """
-    assert "MARK.py" in _strip_shell_comments(text), (
-        f"{name}: the stripper now removes text after a redirect. That is the "
-        "SILENT direction — a real dependency there would vanish and the ledger "
-        "would pass. If this was deliberate, the reasoning above must be rewritten.")
+    assert _lib_modules_a_shell_file_references(". /lib/host-role.sh\n", libdir) == {"host-role.sh"}, (
+        "a HYPHENATED .sh helper is no longer matched. scripts/lib really holds "
+        "host-role.sh, and an earlier `[a-z_][a-z0-9_]*` pattern could not match one — a "
+        "mutant adding exactly that dependency SURVIVED")
 
 
 def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
@@ -1646,8 +1406,10 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
     than the body and one file short:
 
       (a) `build_transcript_push.py` — every import, by AST, at any depth;
-      (b) `transcript-push.sh` — literal `lib/<name>.{py,sh}` references, with
-          COMMENTS STRIPPED first;
+      (b) `transcript-push.sh` — literal `lib/<name>.{py,sh}` references, read
+          RAW: comments are NOT stripped, so this arm deliberately OVER-reports
+          (see `_lib_modules_a_shell_file_references` for why that direction, and
+          for the measurement that showed stripping changed nothing here);
       (c) `host_label.py` — the unit's THIRD runnable file (`transcript-push.sh`
           execs it directly), whose own imports were previously never read.
 
@@ -1679,6 +1441,22 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
     that: measured, with the shell arm reading prose, deleting the only executable
     `host_label.py` reference left a union control fully green.
 
+    ⚠ ARM (b)'s CONTROL NARROWED WHEN THE COMMENT WALK WENT, AND THE MESSAGE WAS
+    REWRITTEN TO MATCH. Stated at the width it actually works:
+
+      COVERED    arm (b) is alive — it read `transcript-push.sh` and the pattern
+                 resolved a real `scripts/lib` file out of it. `host_label.py` is
+                 still arm-EXCLUSIVE: the builder never imports it and arm (c)'s
+                 subject imports only stdlib, so blinding arm (b) fails here.
+      NOT COVERED whether the hit came from executable shell or from prose. The
+                 scanner no longer draws that line anywhere (deliberately — see
+                 `_lib_modules_a_shell_file_references`), and `transcript-push.sh`
+                 names `scripts/lib/host_label.py` in a comment as well as in
+                 code, so deleting the executable reference alone would leave this
+                 control green. That is the price of the loud direction, and it is
+                 bounded: the consequence is a trigger declared for a file the
+                 script stopped using, never a dependency the ledger cannot see.
+
     ⚠ ARM (c) HAS NO ARM-EXCLUSIVE SENTINEL AND CANNOT BE GIVEN ONE HONESTLY —
     its subject, `host_label.py`, imports only stdlib, so its correct result is
     the empty set, and `assert from_host_label == set()` is satisfied identically
@@ -1709,17 +1487,12 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
     from_builder = _lib_modules_a_python_file_imports(
         libdir / "build_transcript_push.py", libdir)
 
-    # (b) what the SHELL resolves out of lib/, comments removed. `.sh` too:
-    #     scripts/lib holds shell helpers, and the old `\.py`-only pattern could
-    #     never have matched one.
-    shell = _strip_shell_comments((REPO_ROOT / "scripts" / "transcript-push.sh").read_text())
-    # 🔴 HYPHENS. `scripts/lib` really holds `host-role.sh`, and the first version
-    # of this pattern was `[a-z_][a-z0-9_]*`, which cannot match one — a mutant
-    # adding exactly that dependency SURVIVED. A filename character class is a
-    # place to be generous: the `.exists()` filter below is what makes a match
-    # real, so widening it costs nothing and narrowing it loses whole files.
-    from_shell = {m for m in re.findall(r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))", shell)
-                  if (libdir / m).exists()}
+    # (b) what the SHELL names out of lib/, read RAW — an over-report is loud, an
+    #     under-report is silent, and that asymmetry is the whole design. `.sh`
+    #     too: scripts/lib holds shell helpers, and the old `\.py`-only pattern
+    #     could never have matched one.
+    from_shell = _lib_modules_a_shell_file_references(
+        (REPO_ROOT / "scripts" / "transcript-push.sh").read_text(), libdir)
 
     # (c) the third runnable file's own imports.
     from_host_label = _lib_modules_a_python_file_imports(libdir / "host_label.py", libdir)
@@ -1730,8 +1503,11 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
         f"the BUILDER arm found {sorted(from_builder)} — it is not reading the "
         "builder's imports, so its verdict is about the parser")
     assert "host_label.py" in from_shell, (
-        f"the SHELL arm found {sorted(from_shell)} — it is not reading executable "
-        "shell code (the builder never imports host_label, so no other arm covers it)")
+        f"the SHELL arm found {sorted(from_shell)} — it did not read "
+        "transcript-push.sh, or its pattern no longer resolves a scripts/lib file out "
+        "of it. The sentinel is arm-exclusive (the builder never imports host_label and "
+        "arm (c)'s subject imports only stdlib), but it does NOT distinguish executable "
+        "shell from prose — see the docstring's COVERED/NOT COVERED note")
     # 🔴 A SYNTHETIC PROBE, NOT AN ARM-EXCLUSIVE CONTROL — see the docstring for
     # exactly what it does and does not cover. It runs the same helper, with the
     # same `libdir` this call site passes, over a file that provably imports a lib
