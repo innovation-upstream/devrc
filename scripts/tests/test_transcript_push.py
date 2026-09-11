@@ -1303,36 +1303,21 @@ def _lib_modules_a_shell_file_references(src, libdir):
                   never opens — LOUD: a human sees a red test and either declares
                   the file or rewords the comment.
 
-    Reading the source raw is the maximum under-strip for every construct that
-    DELETES a span: no deletion can hide a name a later read would have seen.
+    🔴 THIS SCANNER IS DELIBERATELY INCOMPLETE, AND TWO EARLIER DRAFTS CLAIMED IT
+    WAS NOT. Both claimed an absolute — "cannot fail silent … for every shell
+    construct that exists or will exist", then "the join can never hide a name" —
+    and both were measurably false. Do not write a third. These shapes return the
+    empty set, all measured, all missed by the DELETED WALK too (pre-existing, not
+    regressed by this change):
 
-    🔴 IT IS NOT AN ABSOLUTE, AND AN EARLIER DRAFT OF THIS PARAGRAPH CLAIMED IT
-    WAS — "a superset … for every shell construct that exists or will exist … it
-    cannot fail silent". That was measurably FALSE, and the sentence was the
-    entire stated justification for deleting a 230-line guard, so a maintainer
-    reading it would not have gone looking. Raw scanning misses a name that no
-    single literal span CONTAINS, because there is nothing to over-keep:
+      "$H"/lib/"x.py"                 split across quotes
+      LIB="$H/lib"; "$LIB/x.py"       libdir in a variable
+      M=x.py; "$H/lib/$M"             filename in a variable
+      cd "$H" && . lib/host-role.sh   no leading slash
 
-      joined by a continuation   python3 "$H/lib/time\
-                                 outs.py"          <- FIXED, see the re.sub below
-      split across quotes        "$H"/lib/"timeouts.py"        -> still missed
-      libdir in a variable       LIB="$H/lib"; "$LIB/timeouts.py" -> still missed
-      filename in a variable     M=timeouts.py; "$H/lib/$M"    -> still missed
-
-    All four measured. The last three are missed by the DELETED WALK TOO, so they
-    are pre-existing and this change does not regress them — but they falsify the
-    absolute, and an unqualified claim is worse than the gap it hides.
-
-    🔴 THE CONTINUATION CASE WAS A STRICT REGRESSION, WHICH IS WHY THE `re.sub`
-    BELOW IS NOT OPTIONAL. The deleted walk's backslash-newline branch consumed
-    `\` and `\n` and appended NOTHING, so stripping JOINED the halves of a wrapped
-    token — meaning the walk FOUND `timeouts.py` where a raw read does not. Every
-    other span it removed ran to end-of-line with the `\n` preserved, so that
-    branch is the only one that could concatenate. Measured: base RED (`1 failed`,
-    naming the undeclared dependency), this file without the join GREEN over the
-    same injection. `transcript-push.sh` already carries 21 line-continuations.
-    The join restores the walk's behaviour in three characters of state and keeps
-    the never-lex property — it deletes nothing a later read could have used.
+    What IS true, and is the only property this guard rests on: the union below
+    is a superset of both reads, so no name found by either is lost. That is
+    structural, not an argument.
 
     🔴 MEASURED ON THE REAL INPUT BEFORE THE WALK WAS REMOVED. Arm (b)'s result
     on `scripts/transcript-push.sh` was `{build_transcript_push.py,
@@ -1357,12 +1342,22 @@ def _lib_modules_a_shell_file_references(src, libdir):
     costs nothing and narrowing it loses whole files. `.sh` as well as `.py`, for
     the same reason.
     """
-    # 🔴 JOIN CONTINUATIONS FIRST — this is a pure UNDER-strip and the one piece
-    # of state here. It deletes `\<newline>` only, which bash itself deletes, so
-    # it can never hide a name: it can only reveal one that was split across the
-    # join. Removing it reintroduces a SILENT miss that the walk did not have.
-    src = re.sub(r"\\\n", "", src)
-    return {m for m in re.findall(r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))", src)
+    # 🔴 READ IT BOTH WAYS AND UNION. Joining `\<newline>` finds a name split
+    # across a continuation; NOT joining finds a name the join would destroy. The
+    # union is a superset of both, so neither read can lose to the other — which
+    # is the non-lossy property stated as fact, not argued.
+    #
+    # Why the join ALONE was wrong, measured: bash does not delete `\<newline>`
+    # inside single quotes, a comment, or a quoted-delimiter heredoc. Where the
+    # join fires and bash would not, it concatenates the halves into one
+    # name-class run and the greedy `[A-Za-z0-9_.-]*` then swallows past the real
+    # name to the LAST `.py`/`.sh` in it — `host_label.pyhost-role.sh` — which
+    # fails `.exists()` and is dropped, taking the real name with it. On
+    # `grep 'x/lib/host_label.py\<newline>host-role.sh' f` the deleted walk
+    # returned `{host_label.py}` and join-only returned `set()`: a silent loss,
+    # the same direction this whole guard exists to prevent.
+    pat = r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))"
+    return {m for m in re.findall(pat, src) + re.findall(pat, re.sub(r"\\\n", "", src))
             if (libdir / m).exists()}
 
 
@@ -1449,8 +1444,26 @@ def test_the_shell_scanner_OVER_reports_rather_than_GOING_QUIET():
         "the SILENT direction and it is a REGRESSION against the comment walk this "
         "scanner replaced: that walk's continuation branch consumed `\\` and `\\n` and "
         "appended nothing, so stripping JOINED the halves and it FOUND this file. If the "
-        "`re.sub(r'\\\\\\n', '', src)` join was removed from the helper, restore it — "
-        "transcript-push.sh carries 21 line-continuations today")
+        "joined read was removed from the helper's union, restore it. "
+        "⚠ transcript-push.sh carries 21 line-continuations today but NONE of them has a "
+        "non-whitespace char before the backslash, so no CURRENT line can split a path "
+        "token — this row guards the shape, not a live occurrence, and the 21 is not "
+        "evidence of exposure")
+
+    # 🔴 THE MIRROR ROW, and it is why the helper UNIONS instead of just joining.
+    # bash does NOT delete `\<newline>` inside single quotes, so a join here is
+    # something bash would never do: it welds the halves into one name-class run,
+    # the greedy class swallows to the LAST `.py`/`.sh` in it, and the resulting
+    # `host_label.pyhost-role.sh` fails `.exists()` — taking the real name with
+    # it. Measured: the deleted walk returned {host_label.py} here and a
+    # join-ONLY scanner returns set(). Pinning both directions is what makes the
+    # union's non-lossy property a fact rather than an argument.
+    welded = "grep 'x/lib/host_label.py\\\nhost-role.sh' f\n"
+    assert _lib_modules_a_shell_file_references(welded, libdir) == {"host_label.py"}, (
+        "joining a backslash-newline DESTROYED a name that the unjoined read finds. If "
+        "the helper now joins WITHOUT unioning the raw read, restore the union: the join "
+        "alone is lossy in exactly the silent direction this guard exists to prevent, and "
+        "the deleted comment walk did NOT have this defect")
 
 
 def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
