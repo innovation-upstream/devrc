@@ -1605,9 +1605,24 @@ echo "== 13. UNTALLIED-DROP SITE LEDGER — pinned two-way =="
 # blind spot is asserting something, and the assertion needs checking like any
 # other. "No scan can do this" is the single easiest claim to get wrong.
 #
-# 🔴 THE REMAINING BLIND SPOT IS ONE, NOT TWO: a guard delegated to a HELPER
-# FUNCTION, because no textual scan follows a call. The window is 3 lines, so a
-# guard spread wider than that also escapes — the canary below pins the window.
+# 🔴 WHAT THIS SCAN COVERS, MEASURED — not "the remaining blind spot is one",
+# which is what stood here and was wrong by five. It finds a `[ -d ]` or
+# `[[ -d ]]` test whose line, joined with the next 3, reaches a `continue`. Each
+# of these meets the CRITERION and is MISSED (each measured in isolation, because
+# a shared fixture lets one line's `continue` mask another's absence — my first
+# attempt at this list was wrong for exactly that reason):
+#     test -d "$p" || continue        (no brackets)
+#     [ -e "$p" ] || continue         (different test operator)
+#     [ -f "$p" ] || continue
+#     [ -d "$p" ] || break            (different loop control)
+#     echo skip; [ -d "$p" ] || continue   (the `echo ` exclusion drops the line)
+# plus a guard delegated to a HELPER FUNCTION, since no textual scan follows a
+# call, and one spread wider than the 3-line window (pinned by a canary below).
+# 🔴 SO THE LEDGER'S COVERAGE IS NARROWER THAN THE CRITERION THE SCRIPT STATES,
+# and that gap is the honest position rather than a defect to hide: widening the
+# pattern costs false positives on prose, and each widening so far has found a
+# real over-match. What must NOT happen again is a sentence claiming the set is
+# closed when it is not — that has now been written, and refuted, three times.
 #
 # 🔴 COMMENTS **AND** `echo` LINES ARE EXCLUDED, and the `echo` half is not
 # hypothetical: widening the pattern immediately matched section 2's own banner,
@@ -1729,22 +1744,72 @@ if ! command -v git >/dev/null 2>&1; then
 elif ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   pass "COULD NOT MEASURE: $ROOT is not a git checkout — sha reachability unchecked (expected in the sandbox tier)"
 else
-  sha_bad=""; sha_seen=0
-  for f in $sha_files; do
-    for h in $(grep -oE '\b[0-9a-f]{8,40}\b' "$f" | grep -E '[a-f]' | sort -u); do
-      git -C "$ROOT" cat-file -e "${h}^{commit}" 2>/dev/null || continue
-      sha_seen=$((sha_seen + 1))
-      git -C "$ROOT" merge-base --is-ancestor "$h" HEAD 2>/dev/null || sha_bad="$sha_bad $h"
-    done
+  # 🔴 THE MAINLINE REF, NOT `HEAD` — this was the first version's headline bug.
+  # A citation is AUTHORED on a feature branch, where HEAD is that branch's tip,
+  # so a sha from the same branch always passed. The guard was blind at exactly
+  # the moment a citation is written, and could only ever catch a reference to a
+  # DIFFERENT, already-dead branch. This repo squash-merges, so a branch sha is
+  # on no mainline the moment it lands — which is the whole defect.
+  sha_base=""
+  for cand in origin/main main origin/master master; do
+    if git -C "$ROOT" rev-parse --verify --quiet "${cand}^{commit}" >/dev/null 2>&1; then
+      sha_base="$cand"; break
+    fi
   done
-  # POSITIVE CONTROL: a run that resolved NO sha proves nothing. If the files
-  # cite none, that is itself the reportable state, not a pass.
-  if [ "$sha_seen" -eq 0 ]; then
-    fail "the sha ledger resolved ZERO commit-shas in these files — either the extraction broke or every citation was removed; a zero here is not a clean result"
-  elif [ -z "$sha_bad" ]; then
-    pass "all $sha_seen cited sha(s) are ancestors of HEAD — resolvable from a fresh clone"
+  if [ -z "$sha_base" ]; then
+    pass "COULD NOT MEASURE: no mainline ref (origin/main|main|origin/master|master) in this checkout — sha reachability unchecked"
   else
-    fail "cited sha(s) NOT reachable from HEAD:$sha_bad — a reader cannot resolve the number each one anchors, which is the defect the 'only with a sha' rule exists to stop. Re-anchor to a commit on the mainline, or delete the figure"
+    sha_bad=""; sha_unres=""; sha_seen=0
+    for f in $sha_files; do
+      # 🔴 CASE-INSENSITIVE AND FROM 7, because git accepts an UPPERCASE sha and
+      # a 7-character prefix, and the first version's `[0-9a-f]{8,40}` exempted
+      # both spellings.
+      # 🔴 NO EXAMPLE SHA IS WRITTEN HERE, and that is not fastidiousness: the
+      # first draft of THIS comment illustrated the two spellings with a real
+      # commit, which resolved only from a stray local ref and was not an
+      # ancestor of the mainline. The guard below failed on its own author's
+      # explanation, first run. Describe the SHAPE; never paste a sha into prose
+      # that is not itself a citation you intend a reader to resolve.
+      for h in $(grep -oE '\b[0-9a-fA-F]{7,40}\b' "$f" | tr 'A-F' 'a-f' | sort -u); do
+        case "$h" in
+          *[a-f]*)
+            # Contains a letter ⇒ it is a sha CITATION, not a decimal figure.
+            # 🔴 UNRESOLVABLE IS A FAILURE, NOT A SKIP. The first version did
+            # `cat-file -e … || continue`, so a sha this machine does not hold was
+            # silently EXEMPT — and the check then returned OPPOSITE verdicts on
+            # byte-identical files depending on which stray local refs happened to
+            # exist. Unresolvable here is exactly what the reader experiences.
+            sha_seen=$((sha_seen + 1))
+            if ! git -C "$ROOT" cat-file -e "${h}^{commit}" 2>/dev/null; then
+              sha_unres="$sha_unres $h"
+            elif ! git -C "$ROOT" merge-base --is-ancestor "$h" "$sha_base" 2>/dev/null; then
+              sha_bad="$sha_bad $h"
+            fi ;;
+          *)
+            # All digits: ambiguous with the decimal figures these files quote
+            # (block counts, inode counts). Count it ONLY if git resolves it as a
+            # commit — which is how an all-digit sha prefix (~1 in 43) gets
+            # checked instead of silently exempted, without an allowlist.
+            if git -C "$ROOT" cat-file -e "${h}^{commit}" 2>/dev/null; then
+              sha_seen=$((sha_seen + 1))
+              git -C "$ROOT" merge-base --is-ancestor "$h" "$sha_base" 2>/dev/null \
+                || sha_bad="$sha_bad $h"
+            fi ;;
+        esac
+      done
+    done
+    # POSITIVE CONTROL: a run that resolved NO sha proves nothing.
+    if [ "$sha_seen" -eq 0 ]; then
+      fail "the sha ledger found ZERO commit-sha citations in these files — either the extraction broke or every citation was removed; a zero here is not a clean result"
+    elif [ -n "$sha_unres" ] || [ -n "$sha_bad" ]; then
+      [ -n "$sha_unres" ] && fail "cited sha(s) this checkout cannot resolve at all:$sha_unres — a reader cannot look them up, which is the defect the 'only with a sha' rule exists to stop. Re-anchor to a commit on $sha_base, or delete the figure"
+      [ -n "$sha_bad" ] && fail "cited sha(s) NOT ancestors of $sha_base:$sha_bad — they resolve HERE but not from the mainline, so a fresh clone cannot check the number each one anchors. Re-anchor, or delete the figure"
+    else
+      # 🔴 SAY WHAT WAS CHECKED. The first version's pass line claimed the shas
+      # were "resolvable from a fresh clone" — an assertion it never tested, and
+      # measured FALSE in an actual fresh clone.
+      pass "all $sha_seen cited sha(s) resolve here AND are ancestors of $sha_base"
+    fi
   fi
 fi
 
