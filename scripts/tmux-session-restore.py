@@ -970,11 +970,38 @@ def claude_command() -> str:
     the systemd unit with a known-good PATH. `shutil.which` follows that PATH and
     returns a `/nix/store/...` path that does not depend on the pane at all.
 
-    Falls back to the bare name when it cannot be resolved — a bare `claude` is
-    what shipped for months and works wherever PATH is intact, so an
-    unresolvable lookup must not turn a working restore into no restore.
+    🔴 `shutil.which` ALONE IS NOT ENOUGH, AND RELYING ON IT SHIPPED THIS FIX
+    INERT IN THE ONE CONTEXT THAT MATTERS. The systemd unit pins its own PATH —
+    `nix/home.nix`: `makeBinPath [ python312 tmux coreutils ]` — and `claude` is
+    not on it. MEASURED under exactly that PATH:
+
+        env -i PATH=<the unit's three entries> python3 -c 'shutil.which("claude")'
+        -> None
+
+    So under the unit — which is how a restore runs after a crash or a boot —
+    `which` finds nothing and the bare name goes back on the wire, which is the
+    very failure this function exists to remove.
+
+    🔴 THE PROFILE SYMLINK IS RESOLVED TO ITS STORE PATH, NOT SENT AS-IS.
+    `~/.nix-profile/bin/claude` is correct but MUTABLE: this repo's MEMORY.md
+    records that a home-manager switch writes two generations and the
+    intermediate one drops every `home.packages` binary for ~1s, so a command
+    naming the profile path can miss. `realpath` pins the immutable
+    `/nix/store/...` target at the moment we build the line.
+
+    Order: PATH first (honours an override and a dev shell), then the profile,
+    then the bare name — because a bare `claude` is what shipped for months and
+    works wherever PATH is intact, so an unresolvable lookup must not turn a
+    working restore into no restore.
     """
-    return shutil.which("claude") or "claude"
+    found = shutil.which("claude")
+    if found:
+        return found
+    profile = Path(os.path.expanduser("~/.nix-profile/bin/claude"))
+    if profile.exists():
+        # realpath: pin the store path, not the mutable profile symlink.
+        return os.path.realpath(profile)
+    return "claude"
 
 
 def no_tmux_server_to_restore_into() -> bool:

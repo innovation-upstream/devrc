@@ -2495,11 +2495,18 @@ def test_the_resume_uses_an_ABSOLUTE_claude_path(monkeypatch, state, capsys):
         f"pane with a stale PATH: {line!r}")
 
 
-def test_an_unresolvable_claude_falls_back_to_the_bare_name(monkeypatch):
+def test_an_unresolvable_claude_falls_back_to_the_bare_name(monkeypatch, tmp_path):
     """The fallback is load-bearing: a bare `claude` is what shipped for months
     and works wherever PATH is intact. An unresolvable lookup must not turn a
-    working restore into no restore."""
+    working restore into no restore.
+
+    BOTH routes must be unresolvable for this to mean anything — PATH *and* the
+    profile. An earlier version stubbed only `shutil.which` and then failed once
+    the profile fallback landed, because it found the REAL claude on this host:
+    the test was asserting "no PATH entry" while the code had a second route.
+    """
     monkeypatch.setattr(tsr.shutil, "which", lambda n: None)
+    monkeypatch.setenv("HOME", str(tmp_path / "no-such-home"))
     assert tsr.claude_command() == "claude"
 
 
@@ -2537,3 +2544,50 @@ def test_no_richer_generation_is_reported_when_nothing_was_lost(state):
     tsr.PLAN.write_text(json.dumps(plan))
     assert tsr.richer_generation(tsr.PLAN) is None, (
         "reported a richer generation when the current plan carries every id")
+
+
+def test_claude_resolves_under_the_SYSTEMD_UNITS_OWN_PATH_not_just_a_dev_shell(
+        monkeypatch, tmp_path):
+    """🔴 THE FIX SHIPPED INERT IN THE ONE CONTEXT THAT MATTERS, AND THIS IS THE
+    GUARD THAT CATCHES THAT CLASS.
+
+    `claude_command` first used `shutil.which` alone. That resolves under the
+    PATH of the *restore process* — and the systemd unit pins its own:
+    `nix/home.nix` sets `PATH=makeBinPath [ python312 tmux coreutils ]`, which
+    does NOT contain claude. MEASURED against exactly those three entries,
+    `shutil.which('claude')` returned None, so the bare name went back on the
+    wire in precisely the situation (a crash or boot restore, run BY THE UNIT)
+    that the incident happened in. The unit tests passed the whole time, because
+    they ran under a dev shell where claude IS on PATH.
+
+    So this test models the unit: a PATH with NO claude on it, plus a profile
+    symlink, and asserts we still produce an absolute path. It fails on the
+    which-only implementation.
+
+    It also pins that the PROFILE SYMLINK IS RESOLVED rather than sent as-is —
+    MEMORY.md records that a home-manager switch blanks `~/.nix-profile` for
+    ~1s, so a command naming that path can miss where a store path cannot.
+    """
+    store = tmp_path / "nix-store" / "claude-code-1.2.3" / "bin"
+    store.mkdir(parents=True)
+    real = store / "claude"
+    real.write_text("#!/bin/sh\nexit 0\n"); real.chmod(0o755)
+
+    profile_bin = tmp_path / "home" / ".nix-profile" / "bin"
+    profile_bin.mkdir(parents=True)
+    link = profile_bin / "claude"
+    link.symlink_to(real)
+
+    empty = tmp_path / "unit-path"      # stands in for the unit's three entries
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    got = tsr.claude_command()
+    assert got != "claude", (
+        "fell back to the BARE NAME under a unit-like PATH — this is the shape "
+        "that shipped inert: green in a dev shell, useless in the unit")
+    assert os.path.isabs(got), f"not an absolute path: {got!r}"
+    assert got == str(real), (
+        f"returned the mutable profile symlink instead of its store target: {got!r} "
+        f"(a home-manager switch blanks ~/.nix-profile for ~1s)")
