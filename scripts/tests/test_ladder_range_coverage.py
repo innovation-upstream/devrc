@@ -193,6 +193,38 @@ def test_the_tail_after_the_last_block_is_its_own_gap(lrc, ad, base_repo):
 # The three labels that must NOT become a GAP with a number
 # --------------------------------------------------------------------------- #
 
+def test_interior_and_tail_gaps_are_reported_as_SEPARATE_totals(lrc, ad,
+                                                                base_repo):
+    """🔴 The two gap kinds are different claims and must not share a headline.
+
+    An INTERIOR gap is unambiguous — a round's churn nobody audited. A TAIL gap
+    conflates post-last-block fixes with development that continued after the
+    ladder ended. Measured over the 2026-09-04 review's 20 ladders the tail is
+    3,727 of 4,382 lines, so a single total invites being quoted as an
+    under-count it does not support. This fixture has one of each, with
+    DELIBERATELY DIFFERENT sizes so a mutant that reports one in place of the
+    other cannot pass: an interior gap of 7 and a tail of 4 are distinct from
+    each other AND from their sum.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    skipped = _commit(repo, "interior.py", 7, "round 2's unledgered fix")
+    r3_to = _commit(repo, "c.py", 10, "round 3 fix")
+    tail = _commit(repo, "tail.py", 4, "after the last block")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 9, tail, "main",
+                           [_block(1, base, r1_to), _block(3, skipped, r3_to)])
+
+    assert sum(L.interior) == 7, [(a.label, a.to_round, a.added)
+                                  for a in L.adjacencies]
+    assert sum(L.tail) == 4
+    assert L.uncovered_added + L.uncovered_deleted == 11
+
+    rendered = lrc.render([L], [])
+    assert "INTERIOR  7 line(s)" in rendered
+    assert "TAIL      4 line(s)" in rendered
+
+
 def test_an_overlap_is_labelled_OVERLAP_and_given_no_size(lrc, ad, base_repo):
     """Two ranges covering the same commits double-count, which is the OPPOSITE
     error from a gap. Reporting it as a 0-line gap would hide it."""
@@ -429,6 +461,53 @@ def test_the_script_runs_and_its_usage_does_not_require_a_network():
                        capture_output=True, text=True, check=False)
     assert p.returncode == 0, p.stderr
     assert "--facts-file" in p.stdout
+
+
+def test_the_batterys_floor_is_re_derived_from_this_modules_size():
+    """🔴 `mutants-ladder-range-coverage.sh`'s `MIN_TESTS` must track THIS module.
+
+    That battery reads pytest's own count and calls anything below `MIN_TESTS`
+    a broken harness. A floor left behind as the module grows never complains —
+    it is invisible precisely because it only fires downward — and
+    `mutants-audit-ladder.sh` has recorded that happening TWICE, the second time
+    tolerating the silent loss of both guards the growth had added. So the number
+    is pinned here from this battery's first commit rather than maintained by
+    memory, and this test prints the replacement value on failure.
+
+    The formula is `run-tests.sh`'s own: `m - min(50, max(1, m // 20))`.
+    """
+    battery = SCRIPTS / "tests" / "mutants-ladder-range-coverage.sh"
+    assert battery.exists(), "the battery this floor belongs to is gone"
+
+    declared = None
+    for line in battery.read_text(encoding="utf-8").splitlines():
+        if line.startswith("MIN_TESTS="):
+            declared = int(line.split("=", 1)[1].strip())
+            break
+    assert declared is not None, "no MIN_TESTS= literal in the battery"
+
+    p = subprocess.run(
+        [sys.executable, "-m", "pytest", str(Path(__file__).resolve()),
+         "--collect-only", "-q", "--no-header", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, check=False, cwd=str(REPO_ROOT),
+    )
+    assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
+    collected = len([
+        ln for ln in p.stdout.splitlines()
+        if "::" in ln and ln.startswith("scripts/tests/")
+    ])
+    # 🔴 A positive control on the COUNT, not just on the comparison: a parse
+    # that silently yields 0 would make any floor look generous.
+    assert collected > 5, (
+        f"--collect-only parsed {collected} test(s) from this module, which is "
+        f"not a credible count — the floor below would be vacuous.\n{p.stdout[-2000:]}"
+    )
+    expected = collected - min(50, max(1, collected // 20))
+    assert declared == expected, (
+        f"this module now collects {collected} test(s), so the battery's floor "
+        f"should be {expected}, not {declared}. Set `MIN_TESTS={expected}` in "
+        f"{battery.name} — do not compute it by hand."
+    )
 
 
 def test_it_imports_the_churn_command_rather_than_carrying_a_copy():

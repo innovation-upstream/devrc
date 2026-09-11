@@ -136,7 +136,8 @@ Adjacency = namedtuple(
 Ladder = namedtuple(
     "Ladder",
     "pr head base blocks_total blocks_used first_round adjacencies "
-    "control_churn uncovered_added uncovered_deleted reason malformed bare",
+    "control_churn uncovered_added uncovered_deleted interior tail "
+    "reason malformed bare",
 )
 
 
@@ -216,6 +217,7 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
     if not usable:
         return Ladder(
             pr, head, base, len(blocks), 0, None, [], None, None, None,
+            (0, 0), (0, 0),
             f"no `audit-claims` block carrying a TWO-SHA `audited=<from>..<to>` "
             f"({len(blocks)} block(s) parsed). A bare `audited=<sha>` names no "
             "range, so it cannot be chained and this report has nothing to "
@@ -224,6 +226,7 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
         )
 
     adjacencies, uncovered_a, uncovered_d = [], 0, 0
+    interior_a = interior_d = tail_a = tail_d = 0
     # THE POSITIVE CONTROL: a block's OWN range. A ladder's rounds changed
     # something by construction, so if every one of these measures empty the
     # commits are not here and the uncovered total below would be a zero from
@@ -249,13 +252,31 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
         if label == GAP:
             uncovered_a += added or 0
             uncovered_d += deleted or 0
+            # 🔴 INTERIOR AND TAIL ARE DIFFERENT CLAIMS AND MUST NOT BE SUMMED
+            # INTO ONE HEADLINE. An INTERIOR gap is unambiguous: a round posted a
+            # block, a later round posted one anchored past it, and the churn
+            # between them was audited by nobody — #1233's round 3. A TAIL gap is
+            # churn after the LAST block, which conflates two things this script
+            # cannot separate: fixes made after the final block was posted (which
+            # the ladder should have seen) and ordinary development that continued
+            # after the ladder ended (which it should not). Measured over the
+            # 2026-09-04 review's 20 ladders, the tail is 3,727 of 4,382 lines —
+            # so a single total would be quoted as an under-count it does not
+            # support.
+            if r_to is None:
+                tail_a += added or 0
+                tail_d += deleted or 0
+            else:
+                interior_a += added or 0
+                interior_d += deleted or 0
         adjacencies.append(
             Adjacency(label, frm, to, r_from, r_to, added, deleted, commits, reason)
         )
 
     return Ladder(
         pr, head, base, len(blocks), len(usable), usable[0].round_no,
-        adjacencies, control, uncovered_a, uncovered_d, None, malformed, bare,
+        adjacencies, control, uncovered_a, uncovered_d,
+        (interior_a, interior_d), (tail_a, tail_d), None, malformed, bare,
     )
 
 
@@ -322,6 +343,7 @@ def render(ladders, notes):
         out.append("")
 
     total_a = total_d = 0
+    int_a = int_d = tl_a = tl_d = 0
     measured = 0
     for L in ladders:
         out.append(f"### PR #{L.pr}  head={L.head[:8] or '?'}  base={L.base or '?'}")
@@ -374,19 +396,50 @@ def render(ladders, notes):
             else:
                 out.append(f"  {a.label}  {where}: {a.reason}")
         out.append(f"  UNCOVERED: {L.uncovered_added + L.uncovered_deleted} line(s)"
-                   f" (+{L.uncovered_added}/-{L.uncovered_deleted})")
+                   f" (+{L.uncovered_added}/-{L.uncovered_deleted})"
+                   f" = interior {sum(L.interior)} + tail {sum(L.tail)}")
         total_a += L.uncovered_added
         total_d += L.uncovered_deleted
+        int_a += L.interior[0]
+        int_d += L.interior[1]
+        tl_a += L.tail[0]
+        tl_d += L.tail[1]
         out.append("")
 
     out.append(f"TOTAL uncovered across {measured} measured ladder(s): "
                f"{total_a + total_d} line(s) (+{total_a}/-{total_d})")
+    out.append("")
+    out.append("🔴 READ THE SPLIT, NOT THE TOTAL — they are different claims and "
+               "only the first is")
+    out.append("   unambiguous:")
+    out.append(f"   INTERIOR  {int_a + int_d} line(s) (+{int_a}/-{int_d}) — a "
+               "round posted a block, a later")
+    out.append("             round anchored past it, and NOBODY audited the churn "
+               "between. This is")
+    out.append("             the #1233 defect, and it is the number the review's "
+               "table is short by.")
+    out.append(f"   TAIL      {tl_a + tl_d} line(s) (+{tl_a}/-{tl_d}) — churn "
+               "after the LAST block. This")
+    out.append("             conflates two things this script cannot separate: "
+               "fixes posted after the")
+    out.append("             final block (the ladder should have seen them) and "
+               "development that")
+    out.append("             continued after the ladder ended (it should not). "
+               "Do NOT quote it as")
+    out.append("             unaudited ladder work without reading the commits.")
+    out.append("")
     out.append("⚠ RAW lines, NOT split payload/scaffolding. That split was made "
                "BY HAND, per PR, in")
     out.append("  the 2026-09-04 review; no pathspec can make it (a docs PR's "
                "payload IS the `.md`). So")
     out.append("  this total is the SIZE of the hole, not the payload the review "
                "under-counted by.")
+    out.append("⚠ A COMMIT COUNT IS NOT A CHURN COUNT. A GAP of many commits and "
+               "0 lines is `--not")
+    out.append("  <base>` working: those commits are an upstream bring-in already "
+               "in the base, which is")
+    out.append("  shape A of the reference file's range table. Three of the 20 "
+               "ladders look like that.")
     return "\n".join(out)
 
 
@@ -441,6 +494,7 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
         if not f.get("head"):
             ladders.append(Ladder(
                 f.get("pr", "?"), "", base, 0, 0, None, [], None, None, None,
+                (0, 0), (0, 0),
                 "no head sha — the TAIL adjacency (last block → head) cannot be "
                 "measured, and that is where a ladder's final round's fixes sit",
                 [], [],
