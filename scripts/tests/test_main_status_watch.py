@@ -1566,3 +1566,164 @@ def test_every_test_this_script_names_actually_exists():
     assert "test_a_context_typo_is_not_silent" in defined
     missing = sorted(referenced - defined - stems)
     assert not missing, f"the script cites tests that do not exist: {missing}"
+
+
+# ══ ROUND 4: WHAT THE ROUND-3 DELTA'S OWN SWEEP FOUND ═════════════════════════
+# 🔴 AN AUDIT FIX RESETS THE VERIFICATION GATE, and re-running the sweep against
+# the FIXED tree is what makes that concrete. It cut survivors 155 -> 73 and then
+# found three arms round 3 had not reached — one of them an arm round 3's own PR
+# body claimed it had covered. That claim was written from the finding list, not
+# from the diff.
+
+def test_a_commit_with_ONLY_FOREIGN_contexts_is_no_verdict_not_green(h):
+    """🔴 THE ONE ROUND 3 SAID IT HAD CLOSED AND HAD NOT.
+
+    `commit_verdict` returns `"none"` when NO row carries the main-gate prefix,
+    and mutating that return to `"green"` survived both sweeps: the existing
+    foreign-context test always serves a real leg alongside the foreign one, so
+    the empty-`per_ctx` arm is never reached. A commit carrying only
+    `tekton/devrc-cairn-client-runs` rows would then report main GREEN off
+    another pipeline's verdict — and a green CLOSES an open red episode, so the
+    accelerator would be disarmed by a status it must not read at all.
+    """
+    sha = "b9" + "0" * 38
+    h.serve_commits([sha])
+    h.serve_statuses(sha, [
+        _status("tekton/devrc-cairn-client-runs", "success", "all good elsewhere"),
+        _status("tekton/devrc-something-else", "failure", "FAILED: a different pipeline"),
+    ])
+    proc = h.run()
+    assert proc.returncode == RC_OK, proc.stdout
+    assert "no authoritative" in proc.stdout, proc.stdout
+    assert "GREEN" not in proc.stdout, "another pipeline's verdict was read as main's"
+    assert not h.triggered()
+
+
+def test_an_OPEN_episode_SURVIVES_a_foreign_only_commit(h):
+    """The consequence that makes the case above matter rather than merely be
+    wrong: if a foreign-only commit read as green it would close the episode,
+    and the next red in the same window would re-trigger the deadman."""
+    _red_commit(h, "c9" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    foreign = "d9" + "0" * 38
+    h.serve_commits([foreign])
+    h.serve_statuses(foreign, [_status("tekton/devrc-cairn-client-runs", "success", "ok")])
+    assert h.run().returncode == RC_OK
+    assert (h.cache / "red-episode").exists(), "a foreign verdict closed the episode"
+
+
+def test_the_NETs_own_ladder_FAILS_THE_UNIT_when_it_cannot_PERSIST(h, monkeypatch):
+    """🔴 F2's SHAPE INSIDE THE NET — THE ONE COPY NOTHING DROVE.
+
+    `ladder_exit` handles an unwritable streak by failing the unit NOW, and
+    `test_an_ENOSPC_SHAPED_state_dir_ESCALATES_rather_than_reporting_success`
+    pins it. The outermost net re-implements the same rule, and its copy had no
+    test: mutating its `RC_BLIND` to `RC_OK`, or forcing `not persisted` to
+    False, all survived. Under ENOSPC — the cause `open_episode`'s docstring
+    names — the net would then report SUCCESS while permanently blind, which is
+    the exact pair of bugs (F1's silence, F2's uncountable alarm) this file was
+    built to remove.
+
+    The directory is made 0o500 AFTER it exists and BEFORE any streak file is
+    written, so `mkdir(exist_ok=True)` succeeds and the write is what fails —
+    the shape ENOSPC actually produces.
+    """
+    mod = _load()
+    cache = h.tmp / "net-cache"
+    cache.mkdir()
+    monkeypatch.setenv("MAIN_STATUS_WATCH_CACHE", str(cache))
+
+    def boom(argv):
+        raise ValueError("a shape nobody predicted")
+
+    monkeypatch.setattr(mod, "main", boom)
+    os.chmod(cache, 0o500)
+    try:
+        rc = mod._guarded_main(["main-status-watch.py"])
+    finally:
+        os.chmod(cache, 0o700)
+    assert rc == RC_BLIND, (
+        f"got {rc} — a net whose ladder cannot be written must fail the unit now, "
+        "not report success forever"
+    )
+    assert not (cache / "blind-streak").exists(), "fixture is wrong: the write succeeded"
+
+
+def test_the_episode_bound_matches_the_deadmans_OWN_cadence():
+    """🔴 A CROSS-FILE RELATIONSHIP ASSERTED IN PROSE AND PINNED BY NOTHING.
+
+    `EPISODE_MAX_AGE_S`'s comment argues the number is not a taste: 4h is chosen
+    to equal `main-green-check`'s own `OnUnitActiveSec`, because past that point
+    the deadman re-runs against the tip ANYWAY, so re-triggering adds no work
+    that was not already going to happen. Change the deadman's cadence and that
+    argument is silently false — the same failure
+    `test_the_total_budget_PLUS_the_trigger_timeout_is_under_the_units_timeout`
+    exists to stop for TimeoutStartSec, one file over. Mutating the `4` survived
+    both sweeps, because the behavioural test reads the constant out of the
+    implementation it is testing.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    m = re.search(r"^EPISODE_MAX_AGE_S = (\d+) \* 60 \* 60", src, re.M)
+    assert m, "EPISODE_MAX_AGE_S is no longer written in hours; re-read this guard"
+    episode_hours = int(m.group(1))
+    home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
+    start = home_nix.index("systemd.user.timers.main-green-check")
+    end = home_nix.index("systemd.user.services.main-status-watch")
+    block = home_nix[start:end]
+    cadence = re.search(r'OnUnitActiveSec = "(\d+)h"', block)
+    assert cadence, "the deadman timer's cadence is no longer stated in whole hours"
+    assert episode_hours == int(cadence.group(1)), (
+        f"the episode bound is {episode_hours}h but main-green-check re-runs every "
+        f"{cadence.group(1)}h — the bound's whole argument is that they are equal"
+    )
+
+
+def test_a_commit_entry_with_NO_sha_is_skipped_not_walked(h):
+    """A malformed entry must be stepped over, not turned into a request for
+    `/commits//statuses`. Forcing `if not sha: continue` off survived: the walk
+    then asks for an empty sha, gets nothing, and the whole run is UNMEASURED —
+    one bad element in the list costing the verdict that was two entries down.
+    """
+    good = "e9" + "0" * 38
+    h.serve("/repos/o/r/commits?sha=main&per_page=20", [{"sha": ""}, {"sha": good}])
+    h.serve_statuses(good, [_status(CTX_PY, "failure", REAL_SEVEN_FAILED_ONE_NAMED),
+                            _status(CTX_NODE, "success", REAL_SUCCESS)])
+    proc = h.run()
+    assert proc.returncode == RC_TRIGGERED, proc.stdout
+    assert "(walked 1)" in proc.stdout, "the sha-less entry was counted as walked"
+
+
+def test_an_EMPTY_stderr_still_produces_a_readable_diagnostic(h):
+    """The `(no stderr)` fallback: forcing the conditional the other way makes
+    `err[0]` raise IndexError on an empty list, turning a clean COULD NOT
+    MEASURE into an UNEXPECTED IndexError — a bug report about the watcher
+    instead of a report about `gh`."""
+    write_exec(h.gh, "exit 7\n")
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "exited 7" in proc.stdout
+    assert "(no stderr)" in proc.stdout, proc.stdout
+    assert "UNEXPECTED" not in proc.stdout, "the fallback raised instead of reporting"
+
+
+def test_a_failing_triggers_stderr_reaches_the_operator(h):
+    """`systemctl`'s own words are the only clue why the start failed — a unit
+    that is not loaded says so. Dropping them survived the sweep."""
+    write_exec(h.trigger, 'echo "Failed to start: Unit not found." >&2\nexit 5\n')
+    _red_commit(h, "f9" + "0" * 38)
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "Unit not found" in proc.stdout, proc.stdout
+
+
+def test_the_flake_screen_refuses_a_row_that_NAMES_NOTHING_with_a_zero_count():
+    """The `not names` guard, made reachable. Every other fixture reaches it with
+    a count that DISAGREES anyway, so the next guard decides and this one never
+    runs — the "isolate the mutation" trap in its natural habitat. Here the
+    count agrees with the empty name set, which is the one shape where removing
+    this guard flips the answer to SUPPRESS.
+    """
+    mod = _load()
+    assert mod.parse_failing_names("FAILED: pytests — failed=0 FAILING: |") == []
+    assert mod.screen_all_known_flakes(
+        ["FAILED: pytests — failed=0 FAILING: |"]) is False
