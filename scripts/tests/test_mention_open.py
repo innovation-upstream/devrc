@@ -1995,27 +1995,59 @@ def test_the_picker_shell_script_has_EXACTLY_the_two_redirections():
     both while this docstring said "both, and no more". No live hazard — the
     exact-string pin above catches them — but a guard whose description is wider
     than its body reads as coverage while providing none."""
-    import re as _re
-    import shlex
-    tokens = shlex.split(MO.PICKER_SH)
-    # `[fd]<…` / `[fd]>…` / `>>` — every redirection shape sh accepts.
-    redirs = [t for t in tokens if _re.match(r"^\d*[<>]", t)]
-    assert redirs == ["<$1", ">$2"], (
-        f"PICKER_SH's redirections are {redirs}, expected exactly the rows FIFO "
-        f"in and the choice FIFO out: {MO.PICKER_SH}")
+    assert _redirections(MO.PICKER_SH) == ["<$1", ">$2"], (
+        f"PICKER_SH's redirections are {_redirections(MO.PICKER_SH)}, expected "
+        f"exactly the rows FIFO in and the choice FIFO out: {MO.PICKER_SH}")
 
 
-def test_the_redirection_guard_sees_an_FD_PREFIXED_redirection():
-    """POSITIVE CONTROL on the widening above — the exact shape that walked past
-    it. Both of these send the private rows somewhere new while keeping `<$1`
-    and `>$2` intact, so the redirection LIST is what has to notice."""
+def _redirections(script: str) -> list[str]:
+    """Every redirection token in a `sh -c` script, in order.
+
+    🔴 ONE FUNCTION, CALLED BY BOTH THE GUARD AND ITS CONTROL — and that is a
+    round-3 audit finding, not a style preference. The control below used to
+    carry its OWN inline copy of this regex, so it certified a COPY rather than
+    the instrument: MEASURED by the auditor — narrowing the guard straight back
+    to the round-2 defect (`t.startswith(("<", ">"))`) and leaving the control
+    untouched left the whole file GREEN at 232 passed, including the very
+    control written to prevent that regression.
+
+    ⚠ WHAT THIS COVERS, STATED AT THE WIDTH IT WAS MEASURED. `shlex` splits a
+    redirection into one token, so the shapes are recognised by their prefix:
+    plain `<`/`>`/`>>`, an fd-prefixed `2>`/`1>`, and `&>`. 🔴 IT IS NOT "every
+    shape sh accepts" — the previous comment said that and was wrong. MEASURED
+    against this `/bin/sh` (bash 5.3p15): `&>` IS honoured (it wrote the leak
+    file), so it is included; `{fd}>/tmp/leak` is NOT honoured by this shell —
+    bash passed it through as a literal argument — so it is knowingly left out
+    rather than claimed. A shell that honoured it would need this widened.
+    """
     import re as _re
     import shlex
-    for leak in ('fzf -i <"$1" >"$2" 2>/tmp/leak',
-                 'fzf -i <"$1" >"$2" 1>/tmp/leak'):
-        redirs = [t for t in shlex.split(leak) if _re.match(r"^\d*[<>]", t)]
-        assert redirs != ["<$1", ">$2"], (
-            f"the redirection guard cannot see {leak!r} — it yields {redirs}")
+    return [t for t in shlex.split(script) if _re.match(r"^(\d*|&)[<>]", t)]
+
+
+@pytest.mark.parametrize("leak,shape", [
+    ('fzf -i <"$1" >"$2" 2>/tmp/leak', "fd-prefixed stderr"),
+    ('fzf -i <"$1" >"$2" 1>/tmp/leak', "fd-prefixed stdout"),
+    ('fzf -i <"$1" >"$2" &>/tmp/leak', "`&>`, which THIS /bin/sh honours"),
+    ('fzf -i <"$1" >>"$2"', "an APPEND instead of a truncate"),
+])
+def test_the_redirection_reader_SEES(leak, shape):
+    """🔴 THE CONTROL DRIVES `_redirections` ITSELF. Every one of these sends the
+    private rows somewhere new (or accumulates them) while keeping `<$1` and
+    `>$2` intact, so the redirection LIST is the only thing that can notice —
+    and narrowing the reader must turn this red, which is the property the
+    previous version of this test did not have."""
+    got = _redirections(leak)
+    assert got != ["<$1", ">$2"], (
+        f"the redirection reader cannot see {shape} in {leak!r} — it yields "
+        f"{got}, which is indistinguishable from the real script")
+
+
+def test_the_redirection_reader_accepts_the_REAL_script():
+    """NEGATIVE CONTROL for the parametrised set above: a reader that flagged
+    everything would satisfy all four and be useless. The genuine script must
+    come back as exactly the two expected redirections."""
+    assert _redirections(MO.PICKER_SH) == ["<$1", ">$2"]
 
 
 def test_the_shell_script_pin_can_actually_FIRE():
@@ -2304,9 +2336,12 @@ def test_a_missing_fzf_is_caught_BEFORE_a_window_is_raised(monkeypatch):
     rows FIFO a reader and the run ends as a SILENT dismissal.
 
     MEASURED: `/bin/sh -c 'zzznosuchbinary <"$1" >"$2"'` exits 127 with the
-    redirections applied. And `proc.returncode` cannot rescue it — alacritty
-    0.17.0 exits 0 whether its `-e` command exits 127, exits 0, or does not
-    exist.
+    redirections applied. And `proc.returncode` cannot rescue it: alacritty
+    0.17.0 exits **0** whether its `-e` command exits 0 or 127, so the 127 from
+    a shell that DID run is invisible in the terminal's status. (An earlier
+    docstring added "or does not exist at all" — FALSE, measured under Xvfb:
+    `-e zzznosuchbinary` exits 1. The conclusion is unchanged, because `-e` here
+    is always the existing `/bin/sh`.)
 
     So it is caught BEFORE the spawn, which is better than any toast after it:
     no window is raised at all."""
@@ -2353,6 +2388,73 @@ def test_the_NEVER_SHOWN_toast_does_not_blame_a_cause_it_cannot_HAVE(
     assert "PATH" not in body, (
         f"the never-shown toast still blames the wrapper's PATH: {body}")
     assert "DISPLAY" in body, body
+
+
+def test_the_missing_fzf_toast_names_a_SWITCH_not_a_file_to_edit(monkeypatch):
+    """🔴 A REMEDY THAT IS ALREADY APPLIED IS NOT A REMEDY. This body used to say
+    "add pkgs.fzf to the hint wrapper in nix/programs/alacritty/default.nix" —
+    but that entry is enforced by
+    `test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns`,
+    so in ANY tree that passes this suite it is already there and the operator is
+    sent to edit a correct file.
+
+    What can actually raise it: a deployed wrapper GENERATION predating the entry
+    (this repo's merged-≠-deployed trap), a GC'd store path, or the script run
+    outside the wrapper. All three are a `home-manager switch`, none an edit.
+
+    Same operator consequence as round 2's finding A — a diagnosis pointing
+    somewhere fine, in a module whose thesis is that an undiagnosed silence is
+    the bug."""
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+    monkeypatch.setattr(MO.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("a window was raised"))
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert said, "the missing-fzf pre-flight said nothing"
+    body = said[0][1]
+    assert "DEPLOY gap" in body and "home-manager switch" in body, (
+        f"the missing-fzf toast must name the DEPLOY gap and the switch that "
+        f"closes it, not a file to edit: {body!r}")
+    assert "default.nix" not in body, (
+        f"the toast sends the operator to edit a file whose pkgs.fzf entry is "
+        f"test-enforced and therefore already correct: {body!r}")
+
+
+def test_the_UNKNOWN_OUTCOME_toast_body_is_FIXED_never_interpolated(monkeypatch):
+    """🔴 THE ONE LINE THAT COULD CARRY AN ARBITRARY STRING INTO A FORBIDDEN
+    SURFACE. The module docstring says the universe may reach the picker window
+    and NOWHERE else — "never to a notification body" — and this catch-all used
+    to interpolate `str(outcome)`.
+
+    Not a live leak today (the four outcomes are literals and the branch is
+    unreachable from `run_picker`), which is exactly why it needs a test: the
+    day an outcome is built from data, the leak would be silent. Driven by
+    stubbing `run_picker`, because nothing else can reach the branch."""
+    monkeypatch.setattr(MO, "run_picker",
+                        lambda *_a, **_k: ("", "outcome-carrying-SECRETREPO"))
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert said, "an unknown outcome was dropped silently — round 1's defect"
+    summary, body = said[0]
+    assert "unknown outcome" in summary, said
+    assert "SECRETREPO" not in body and "SECRETREPO" not in summary, (
+        f"the unknown-outcome toast interpolates its outcome into a "
+        f"notification body, which the module docstring forbids: {said!r}")
+
+
+def test_every_KNOWN_outcome_is_reachable_through_pick(monkeypatch):
+    """NEGATIVE CONTROL for the test above: the catch-all must fire ONLY for an
+    outcome outside the ledger. A version that toasted on every outcome would
+    satisfy that test and break all four real paths."""
+    for outcome in MO.PICKED_OUTCOMES:
+        said = []
+        monkeypatch.setattr(MO, "run_picker", lambda *_a, **_k: ("", outcome))
+        monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+        MO.pick(ONE_CANDIDATE)
+        assert not any("unknown outcome" in s for s, _b in said), (
+            f"{outcome!r} is in PICKED_OUTCOMES but took the catch-all: {said}")
 
 
 def test_the_PICKED_outcome_set_is_pinned_and_every_one_is_HANDLED():

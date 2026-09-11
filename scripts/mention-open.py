@@ -816,9 +816,13 @@ def picker_header(mesg: str) -> list[str]:
 # open-order deadlock fix in `run_picker` — so a MISSING fzf still gives the rows
 # FIFO a reader, the ENXIO loop still exits normally, and the run ends as a
 # silent `DISMISSED`. MEASURED: `/bin/sh -c 'zzznosuchbinary <"$1" >"$2"'` exits
-# 127 with the redirections APPLIED. ⚠ And `proc.returncode` cannot rescue it —
-# alacritty 0.17.0 exits 0 whether its `-e` command exits 127, exits 0, or does
-# not exist at all.
+# 127 with the redirections APPLIED. ⚠ And `proc.returncode` cannot rescue it:
+# alacritty 0.17.0 exits **0** whether its `-e` command exits 0 or exits 127, so
+# `fzf: not found` — which is a 127 from a shell that DID run — is invisible in
+# the terminal's status. (An earlier version of this note added "or does not
+# exist at all"; that limb is FALSE — measured under Xvfb, `-e zzznosuchbinary`
+# exits **1**. It does not change the conclusion, because `-e` here is always the
+# existing `/bin/sh`, so the 0-vs-0 case is the only one this code can be in.)
 #
 # So a missing `fzf` is caught BEFORE the spawn instead, by `pick()`'s
 # `shutil.which` pre-flight — which is strictly better than a post-hoc toast: it
@@ -1036,12 +1040,26 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     # only, and it never raises a window to say so. `alacritty` needs no
     # equivalent: it is `Popen`'s argv[0], so its absence is a
     # `FileNotFoundError` the handler below already names.
+    # 🔴 THE BODY NAMES `home-manager switch`, NOT A FILE TO EDIT — a round-3
+    # audit finding, and the SAME operator consequence as round 2's finding A: a
+    # diagnosis pointing somewhere that is already fine, in a module whose whole
+    # thesis is that an undiagnosed silence is the bug. It used to say "add
+    # pkgs.fzf to the hint wrapper in nix/programs/alacritty/default.nix". But
+    # that entry is already there AND CANNOT BE REMOVED —
+    # `test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_
+    # spawns` fails the suite without it — so in any tree that passes, the named
+    # remedy is already applied and the operator is sent to edit a correct file.
+    #
+    # What can ACTUALLY raise this: a deployed wrapper GENERATION predating the
+    # entry (this repo's own merged-≠-deployed trap), a GC'd store path, or this
+    # script run outside the wrapper altogether. All three are fixed by a
+    # switch, none by an edit.
     import shutil  # noqa: PLC0415 — see run_picker's import comment
     if shutil.which("fzf") is None:
-        notify("the mention picker is not installed",
-               "fzf is not on this handler's PATH, so the picker cannot run — "
-               "add pkgs.fzf to the hint wrapper in "
-               "nix/programs/alacritty/default.nix")
+        notify("the mention picker cannot run",
+               "fzf is not on this handler's PATH. The hint wrapper pins it, so "
+               "this is a DEPLOY gap, not a config one — run "
+               "`home-manager switch --flake ~/workspace/devrc --impure`")
         return ""
     rows = picker_rows(candidates)
     header = picker_header(mesg)
@@ -1074,7 +1092,16 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
         # 🔴 NOT A SILENT `else`. An outcome nobody taught this function about
         # is the same defect round 1 found in the timeout arm, one layer up, so
         # it says so instead of dropping it.
-        notify("the mention picker returned an unknown outcome", str(outcome))
+        #
+        # ⚠ A FIXED BODY — it used to interpolate `str(outcome)`. The module
+        # docstring says the universe may reach the picker window and NOWHERE
+        # else, "never to a notification body", and this was the one line that
+        # could carry an arbitrary string into that surface. Not a live leak
+        # (the four outcomes are literals and this branch is unreachable from
+        # `run_picker`), but the guard is cheaper than the argument, and a
+        # future outcome built from data would have leaked through it silently.
+        notify("the mention picker returned an unknown outcome",
+               "see PICKED_OUTCOMES in scripts/mention-open.py")
     return row_to_url(chosen, candidates)
 
 

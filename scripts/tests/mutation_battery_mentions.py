@@ -43,6 +43,17 @@ READ BEFORE TRUSTING A VERDICT:
   * A mutant whose pattern is NOT FOUND is reported as such and counted as a
     problem. Silent non-application is how a battery reports a clean sweep of
     mutations it never made.
+  * 🔴 WRITING AN `expected` TOKEN: it is grepped CASE-SENSITIVELY against
+    pytest's `E ` lines, which is narrower than it looks and has now cost THREE
+    rows across three audit rounds (K58, K60, K63) — every one a real kill
+    scored KILLED-WRONG-REASON. The three ways it goes wrong: the token lives
+    only in the assertion's SOURCE line and `assert x and y` short-circuits
+    before the message is built (K58); the mutant trips an EARLIER assertion
+    than the one whose message carries the token (K60); or the message spells
+    the word in a different case (K63 — "INTERPOLATES" does not contain
+    "interpolat"). Put the token verbatim in the message of the assertion that
+    ACTUALLY fires first, and re-run the single row to confirm — no text check
+    can substitute, because two of the three failures are runtime ordering.
   * 🔴 A MUTANT THAT COLLECTED NOTHING CANNOT SCORE `SURVIVED`. This was a real
     hole in this instrument: the `npass < 200` sanity check ran on the CONTROL
     only, and the per-mutant verdict was `if not nfail: SURVIVED`. A mutant that
@@ -591,6 +602,24 @@ MUTANTS: list[tuple] = [
      '               "the terminal exited before the list was shown — check that "\n'
      '               "alacritty and fzf are on the hint wrapper\'s PATH")\n',
      "still blames"),
+    # ---- F17: the round-3 audit's findings, as mutants ----------------------
+    ("K62", "widening", "the missing-`fzf` toast goes back to naming a FILE to "
+                        "edit — but that file's `pkgs.fzf` is enforced by the "
+                        "wrapper-PATH test, so in any tree that passes the suite "
+                        "the named remedy is ALREADY applied and the operator is "
+                        "sent somewhere fine. The real causes are all a switch",
+     '               "this is a DEPLOY gap, not a config one — run "\n'
+     '               "`home-manager switch --flake ~/workspace/devrc --impure`")\n',
+     '               "add pkgs.fzf to the hint wrapper in "\n'
+     '               "nix/programs/alacritty/default.nix")\n',
+     "DEPLOY gap"),
+    ("K63", "widening", "the unknown-outcome toast interpolates its outcome into "
+                        "the BODY again — the one line that could carry an "
+                        "arbitrary string into a surface the module docstring "
+                        "says the universe may never reach",
+     '               "see PICKED_OUTCOMES in scripts/mention-open.py")\n',
+     "               str(outcome))\n",
+     "interpolat"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -616,7 +645,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K45": OPEN_, "K46": OPEN_, "K47": OPEN_,
     "K48": OPEN_, "K49": OPEN_, "K50": OPEN_, "K51": OPEN_, "K52": OPEN_,
     "K54": OPEN_, "K55": OPEN_, "K56": OPEN_, "K57": OPEN_, "K58": OPEN_,
-    "K59": OPEN_, "K60": OPEN_, "K61": OPEN_,
+    "K59": OPEN_, "K60": OPEN_, "K61": OPEN_, "K62": OPEN_, "K63": OPEN_,
     "K53": ALACRITTY,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two

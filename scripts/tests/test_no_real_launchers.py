@@ -352,6 +352,7 @@ ACKNOWLEDGED_UNSTUBBED = {
         "moment the script grows one"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
+         "mention-open.py",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
@@ -378,6 +379,25 @@ ACKNOWLEDGED_UNSTUBBED = {
         "that raises on anything else — test_session_resolve.py pins that "
         "allowlist in both directions, so this justification cannot rot into "
         "a claim about a file that has grown a launcher. "
+        "mention-open.py (added 2026-09-10 with the fzf picker's missing-`fzf` "
+        "pre-flight) is the same PROSE-MENTION shape, re-justified rather than "
+        "reworded — and the words are the whole point of the change that added "
+        "them. A round-3 audit found the toast naming a FILE to edit "
+        "(`nix/programs/alacritty/default.nix`) whose `pkgs.fzf` entry is "
+        "enforced by test_mention_open.py::test_the_alacritty_wrapper_PATH_"
+        "covers_every_executable_the_handler_spawns — so in any tree that "
+        "passes this suite the named remedy is ALREADY applied and the operator "
+        "is sent somewhere fine. The causes that can actually raise it (a "
+        "deployed wrapper generation predating the entry, a GC'd store path, "
+        "the script run outside the wrapper) are all closed by a switch, so the "
+        "body now says `home-manager switch --flake ~/workspace/devrc "
+        "--impure` — one operator-facing NOTIFICATION STRING, not a call site. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard: "
+        "test_mention_open.py::test_mention_open_SPAWNS_these_argv0_AND_NOTHING_"
+        "ELSE walks the handler's AST and asserts its spawn argv[0] set is "
+        "exactly {git, tmux, notify-send, xdg-open, alacritty}, grows-or-"
+        "shrinks, with a `<computed>` sentinel — so a real `home-manager` spawn "
+        "added here fails THAT test rather than hiding behind this row. "
         "regen-known-repos.py (added 2026-09-07 with the picker universe) is "
         "the same PROSE-MENTION shape and is re-justified, not reworded. Its "
         "single occurrence is one clause of a comment explaining why the picker "
