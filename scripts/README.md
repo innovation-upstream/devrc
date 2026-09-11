@@ -54,7 +54,6 @@ Click actions for those blocks:
 | `tmux-scratch-picker.sh` | list/toggle/create `scratch-*` sessions |
 | `tmux-scratch-monitor.sh` | live HUD of the last N lines across all scratch sessions |
 | `tmux-scratch-status.sh` | RETIRED `status-left` scratch indicator — kept as a debugging renderer; the live legend is the bar block `i3status-scratchpads` |
-| `tmux-claude-counters.sh` | aggregate Claude-window counters for `status-right` |
 | `tmux-idle-update.sh` | batch-update window tab colours by idle time |
 | `tmux-pipe-activity.sh` | manage `pipe-pane` for background activity tracking |
 | `tmux-activity-emit.sh` | activity-telemetry shipper for tmux |

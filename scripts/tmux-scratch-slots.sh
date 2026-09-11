@@ -6,11 +6,18 @@
 # Example: `Alt+Shift+V` -> tmux session `scratch4` -> codename `Vapor`.
 #
 # 🔴 The binding is tmux's ROOT key table, NOT i3. There is no i3 binding for any
-# slot — measured: `grep -rE 'mod\+Shift\+(V|G|P)' nix/i3/` -> 0, against 79 live
-# `bindsym` lines in nix/i3/config.nix, and 22 `M-<key>` entries in
-# `tmux list-keys -T root`. A previous version of this comment spelled the hotkey
-# `$mod+Shift+V` (i3 syntax); a reader following it presses a chord that is bound
-# to nothing.
+# slot — measured: `grep -rE 'mod\+Shift\+(V|G|P)' nix/i3/` -> 0. A previous
+# version of this comment spelled the hotkey `$mod+Shift+V` (i3 syntax); a reader
+# following it presses a chord that is bound to nothing.
+#
+# That ZERO is the claim, and it is only worth anything against a NON-EMPTY
+# corpus — otherwise it is indistinguishable from a grep wired to nothing. Two
+# positive controls, written as COMMANDS rather than as numbers so they cannot go
+# stale (an earlier revision hardcoded "79 bindsym lines" and "22 M-<key>
+# entries"; by 2026-09-11 the live counts were 84 and 26, and nothing had told
+# anyone):
+#     command grep -c bindsym nix/i3/config.nix          # i3 bindings that DO exist
+#     tmux list-keys -T root | grep -cE '^bind-key +-T root M-'   # the M- table
 #
 # 🔴 CASE IS SIGNIFICANT and is not a shift-modifier convention: `M-v` -> scratch3
 # (`violet`) and `M-V` -> scratch4 (`Vapor`) are DIFFERENT sessions. Never
