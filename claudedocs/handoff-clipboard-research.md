@@ -18,32 +18,48 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## State now
 
-- **Rank 8 is MERGED and CLOSED OUT.** `#1159` → **`dae5ac23`**, verified by
-  CONTENT on `origin/main` (a squash makes ancestry read FALSE): re-anchor
-  clause present, the `RELATIVE ONLY` restriction present, the surviving-mutant
-  annotation present, all 3 named tests present.
-- ✅ **VERIFIED LIVE, not merely merged.** The ORIGINAL failing input, run
-  against the copy on `main` from the repo root:
+- **Rank 6 is BUILT and VERIFIED LIVE — but NOT MERGED.** `scripts/break-glass-merge.sh`
+  + `scripts/tests/test_break_glass_merge.py` + a `CLAUDE.md` pointer, on
+  `feat/break-glass-merge` → **PR #1194**, both required checks **PENDING** at
+  time of writing. Branch head `84d320fb` (merge of `d86e5f81` in, so the
+  MERGED tree is what Tekton is gating).
+- 🔴 **The operator overrode the recommendation and it was the right call.** The
+  offered options were scratch-repo / read-only-verifier / decline / stubs-only;
+  the answer was *"its fine, open the protection window on devrc"*. So the
+  script was proven against **real `main`**, not a proxy.
+- ✅ **VERIFIED END-TO-END, 2026-09-01T01:50Z.** Real `DELETE`, real `PUT`,
+  script exit **0**, window open a few seconds. The verdict is from a capture
+  taken **before the script existed** — the script's own read-back shares the
+  step under doubt:
   ```
-  before: handoff: handoff-mention-detection.md   + NO SUCH FILE gap
-  after:  handoff: handoff-clipboard-research.md  + no gap
+  INDEPENDENT key-by-key diff (pre-session capture vs now):
+    ok  × 11   (enforce_admins, required_status_checks, restrictions, …)
+  VERDICT: IDENTICAL to the capture taken before any of this ran
   ```
-  `readlink -f scripts/resume-state.sh` terminates in `~/workspace/devrc`, so it
-  is the working-tree copy — **live with no `home-manager switch`**, and the base
-  clone is fast-forwarded, so this host already has it.
-- **Gated on the MERGED tree, not the branch.** `origin/main` had moved 4
-  commits with no file overlap — and one was
-  `8e8ee3bc fix(nogit_plugin): serialise the config control`, the GUARD 9 plugin
-  whose output corruption had broken the dev-host gate an hour earlier, plus 354
-  new lines of its tests. Merged `main` in and let Tekton gate the result: both
-  required checks green.
-- **Rank 2 (#1128 → `c06a56a1`), its close-out (#1151 → `16cfa342`) and rank 8
-  (#1159 → `dae5ac23`) are all MERGED.** Ranks 1/3/4/5/6 untouched.
-- **Claim `clipboard-research-8` RELEASED**; both worktrees removed; branch
-  deleted. Nothing of this session's remains.
-- ⚠ **NOT SHIPPED.** `nix/pkgs/default.nix` carries another session's
-  uncommitted `inxi`/`cpu-x` additions, so a `home-manager switch` would build
-  unreviewed WIP. The laptop is behind. **Re-measure before shipping.**
+- **Nothing merged through the open window.** Afterwards #1191 and #1169 were
+  both still open and blocked; #1192 had merged at `01:47:57Z` with both checks
+  `SUCCESS`, **over two minutes before** the window opened.
+- **Rank 8 close-out (#1173) LANDED** → `9741ef5f`, confirmed an ancestor of
+  `origin/main`. `main`'s copy of this doc is byte-identical to the branch tip,
+  so the "doc is one step stale" caveat is gone. Worktree
+  `devrc-close8-beb749f5` removed, `docs/rank8-closeout` deleted.
+- **Rank 7 MEASURED, then RELEASED — it is not this effort's to build.** The
+  devrc-side fix **#1193 MERGED at 01:54:36Z → `48a5540e`**, mid-session,
+  confirmed by CONTENT on the new base: `scripts/ci-repro/slow_arm.py` present
+  and `SERVER_STALL` gone as code (its 3 remaining hits are comments naming the
+  removal). The infra half is still open under the `ci-speedup-7` claim +
+  **#1182**. Claim `clipboard-research-7` released; `clipboard-research-6` taken.
+  ⚠ **#1193 landing does NOT close rank 7** — its closing condition is 5
+  consecutive clean `devrc-pytests` runs read from PipelineRun logs, and the
+  first of those runs had not happened when this was written.
+- ⚠ **`nix/pkgs/default.nix` is now CLEAN** — the inxi/cpu-x WIP that blocked
+  shipping is gone (re-measured this session). Only `output.txt` and
+  `scripts/diagnose-nix-disk.sh` remain untracked, and untracked files are not
+  in a flake build. **Shipping is unblocked; nothing was shipped this session.**
+- **No `clawgate-task:` recorded, deliberately.** `resolve` exited **5** —
+  0 tasks for this session. Its own positive control proves the board is
+  reachable, which is a NARROWER claim than "this session touched nothing":
+  a wrong session id also answers 200 with an empty array.
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -146,23 +162,17 @@ of by a human happening to look.
 
 ## Next steps (ranked)
 
-🔴 **Numbering stays STABLE.** Rank 8 has moved to the closed block; its number
-is retired, NOT reused.
+🔴 **Numbering stays STABLE.** Ranks 2 and 8 are retired, NOT reused.
 
 **Closed by this effort — kept so a resume does not re-open them:**
-- ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**: it routes every
-  `d`/`c`/`x`/`s` through the `+` register, so `dd` clobbers the system clipboard.
+- ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**.
 - ~~install a clipboard manager for history~~ — **investigated, nothing installed.**
   Evidence and the **RETRACTED** greenclip security argument are under Gotchas.
-- ~~migrate to Wayland~~ — not applicable: measured `XDG_SESSION_TYPE=x11`.
-- ~~**unprotected-`main` arm for `drift-check.sh`**~~ — **SHIPPED** as rc 24,
-  #1065 → `ebbe5eaa`, verified live under the real unit.
+- ~~migrate to Wayland~~ — measured `XDG_SESSION_TYPE=x11`.
+- ~~**unprotected-`main` arm**~~ — **SHIPPED** as rc 24, #1065 → `ebbe5eaa`.
 - ~~**Rank 2 — `CLAUDE.md`'s break-glass note**~~ — **MERGED**, #1128 → `c06a56a1`.
-  Guard: `scripts/tests/test_break_glass_note.py`.
-- ~~**Rank 8 — the kickoff path that did not resolve**~~ — **MERGED 2026-08-31**,
-  #1159 → `dae5ac23`, verified live on the real input. Fixed in the CONSUMER
-  (`embedded_md_path`), which repaired all existing docs' kickoffs rather than
-  only future ones.
+- ~~**Rank 8 — the kickoff path that did not resolve**~~ — **MERGED**, #1159 →
+  `dae5ac23`; close-out #1173 → `9741ef5f`.
 
 1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). THREE could-not-measure
    states, and a lapsed/expired `gh` token leaves it blind **forever** while the
@@ -184,31 +194,25 @@ is retired, NOT reused.
    so the cost is a test edit, not safety. Files:
    `scripts/tests/test_drift_check.py`.
    forcing: none
-6. **OFFERED, NOT BUILT — `scripts/break-glass-merge.sh`** (devrc). The
-   deterministic version of rank 2's prose recipe: capture, open, merge, full
-   `PUT`, read back, and **refuse to exit 0 unless the read-back diff matches
-   key-by-key**. Not built deliberately: shipping an *untested* command into a
-   break-glass path is the failure rank 2 corrects, and it cannot be tested
-   end-to-end without opening the window on `main`. **Needs an operator decision
-   on what would make it trustworthy.** Files: `scripts/break-glass-merge.sh`.
+6. **`scripts/break-glass-merge.sh` — BUILT, `IN FLIGHT: devrc#1194`.** No longer
+   an open design question: the operator authorised proving it on real `main`
+   and it was, key-by-key against an independent capture. What remains is
+   landing it — watch the two required checks, and re-verify `main`'s protection
+   if the run is ever interrupted. ⚠ `/audit-pr 1194` was **offered and not yet
+   run**; it writes to branch protection, the highest-consequence surface here.
+   Files: `scripts/break-glass-merge.sh`, `scripts/tests/test_break_glass_merge.py`,
+   `CLAUDE.md`.
    forcing: none
-7. **Tekton CAPACITY — `devrc-pytests` fails a localhost round-trip under load**
-   (homelab, NOT devrc). 🔴 **STILL OPEN, and now THREE occurrences by TWO
-   sessions.** Mine: #1128 and #1151, both `[record0-…-zach]`. **Another
-   session's, landed as #1172 → `ef71733b` while this session worked rank 8:**
-   `[record1-…-dana]` on `devrc-ci-ddrxx`, rev `857fc3f5`, node `talos-xr6-r7p`.
-   That commit REFINES the mechanism and corroborates the capacity reading
-   independently: `socket.py:720` is `self._sock.recv_into(b)` in
-   `SocketIO.readinto`, so it is a **READ timeout on an ESTABLISHED connection**
-   — not an RST, not a backlog/accept-queue problem — and `HANG_TIMEOUT` was
-   already `60.0` at that revision. Files it touched:
-   `scripts/tests/test_subsystem_store_api.py` (+324),
-   `claudedocs/handoff-cairn-phase3.md`. **Read #1172 before re-deriving
-   anything here.**
-   **CLOSING CONDITION:** `devrc-pytests` completes 5 consecutive runs with no
-   `socket.py` `TimeoutError`, read from the PipelineRun logs, not inferred from
-   PRs happening to merge.
-   forcing: gate — it has now cost merge cycles on #1128, #1151 and #1172.
+7. **Tekton CAPACITY / the store-api hang — `IN FLIGHT ELSEWHERE, DO NOT
+   DUPLICATE.`** devrc-side fix **#1193 MERGED → `48a5540e`** (2026-09-01
+   01:54Z). Infra half still open: the `ci-speedup-7` claim + **#1182**. Read
+   both before touching anything; this effort's claim is released. **The next
+   useful act is measurement, not code** — count clean runs against the closing
+   condition below.
+   **CLOSING CONDITION (unchanged):** `devrc-pytests` completes 5 consecutive
+   runs with no `socket.py` `TimeoutError`, read from the PipelineRun logs.
+   **NOT MET** — measured this session at 4 red in 19 completed runs.
+   forcing: gate — it has cost merge cycles on #1128, #1151, #1172 and #1147.
 
 ## Gotchas / decisions / dead-ends
 - OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
@@ -644,44 +648,133 @@ the status line that carried them. The ranked item is now a pointer to this.
   those commits was the GUARD 9 plugin itself. Overlap answers *will git
   conflict*, never *will the merged tree behave*. Read what the commits DID.
 
+### Rank 8 — the live verification, CARRIED FORWARD out of `State now`
+
+Moved here verbatim in substance because it sat under a REPLACE heading and the
+write gate flagged it as durable content about to be deleted. This is the
+*evidence* rank 8 shipped correctly; the status line that carried it is gone.
+
+- **#1159 → `dae5ac23`**, verified by **CONTENT** on `origin/main` — a squash
+  makes `merge-base --is-ancestor` read FALSE forever, so ancestry is not the
+  check. Re-anchor clause present, the `RELATIVE ONLY` restriction present, the
+  surviving-mutant annotation present, all 3 named tests present.
+- ✅ **VERIFIED LIVE, not merely merged.** The ORIGINAL failing input, run
+  against the copy on `main` from the repo root:
+  ```
+  before: handoff: handoff-mention-detection.md   + NO SUCH FILE gap
+  after:  handoff: handoff-clipboard-research.md  + no gap
+  ```
+  `readlink -f scripts/resume-state.sh` terminates in `~/workspace/devrc`, so it
+  is the working-tree copy — **live with no `home-manager switch`**.
+- **Close-out #1173 → `9741ef5f`** (confirmed an ancestor of `origin/main`;
+  `main`'s copy byte-identical to the branch tip). That closes the loop the doc
+  itself names below as a PROCESS bug: the doc went stale twice by landing
+  BEFORE the merge it described.
+
+### Rank 6 — what made an "untestable" script testable (2026-09-01)
+
+- 🔴 **THE SCRIPT WAS NEVER THE UNTESTABLE PART — THE WINDOW WAS, AND THAT WAS AN
+  OPERATOR DECISION, NOT AN ENGINEERING ONE.** Rank 6 sat open for days framed as
+  *"needs an operator decision on what would make it trustworthy"*. Four options
+  were offered (scratch repo / read-only verifier / decline / stubs-only); the
+  answer was to open the window on the real `main`. **The item was blocked on a
+  question nobody had asked out loud**, and the moment it was asked it cost one
+  reply. Offer the choice early — do not keep re-deriving why a thing is hard.
+- 🔴 **A `has()` GUARD OVER A jq PROJECTION IS VACUOUS BY CONSTRUCTION.** The
+  capture filter names all 11 keys unconditionally, so jq emits
+  `allow_force_pushes: null` for a source object that lacks it and
+  `has("allow_force_pushes")` is **always true**. The loop could never fire. It
+  read as the central safety check on the restore body. Replaced with a **type**
+  check on the 8 booleans — the real hazard is PUTting a `null` and letting
+  GitHub choose its own default — and the two-key presence loop was **deleted**,
+  its invariant pinned in the filter's own test instead. Both were found by a
+  sweep, not by reading.
+- 🔴 **A LATER GUARD CAN MASK AN EARLIER ONE, AND THE SUITE STAYS GREEN.**
+  `required-keys-loop-removed` SURVIVED at first because every bad-capture
+  fixture was ALSO caught by the zero-checks guard that runs after it. The fix
+  was a fixture that reaches only the loop: two app_id-pinned checks (so it
+  walks past every other guard) and exactly one of the other ten keys missing.
+  Same family as the documented "an earlier check always wins" trap, one
+  direction over.
+- 🔴 **RE-MEASURING IMMEDIATELY BEFORE THE DESTRUCTIVE STEP CAUGHT A REAL
+  CHANGE.** The pre-flight survey found one armed auto-merge PR (#1169), and it
+  was conflict-blocked, i.e. harmless. Minutes later, re-run at the moment of
+  acting, **#1191 had become armed and MERGEABLE** — blocked only by the checks
+  the window was about to remove. It did not slip, but the survey that motivated
+  the action was already wrong when the action ran.
+- **`PIPESTATUS` is a bashism.** `cmd | head; echo $PIPESTATUS` prints EMPTY under
+  zsh (it is `$pipestatus`), so three exit-code checks read as blank rather than
+  as the codes they were. Capture `rc=$?` directly instead of piping.
+- **The restore is ONE function called from the normal path AND the EXIT trap.**
+  Not style: the 2026-08-30 failure was an untested command *inside* the safety
+  net, so the trap must only ever call code an ordinary run has just executed.
+
+### Rank 7 — the red is NOT the flake the doc describes (measured 2026-09-01)
+
+- 🔴 **THE FAILING TEST IS #1172'S OWN REPORTER GUARD, NOT THE ORIGINAL FLAKE.**
+  All four reds measured this session are
+  `TestAHungRoundTripSAYSWhichSideBlocked::test_a_stall_in_the_FSYNC_region_is_NAMED`,
+  byte-identical, on PRs whose diffs cannot reach it. The original flake was
+  `test_a_FORGED_actor_in_the_body_is_DISCARDED`.
+- **Mechanism, and it is a much tighter race than the 60 s one:** `CLIENT_BOUND
+  = 0.25 s`, but `_replace_bytes` does the **real** `os.fsync(file)` *before* the
+  monkeypatched `_fsync_dir`. When the real fsync exceeds 250 ms the client gives
+  up before the server ever reaches the test's own stall site, `stalled` is
+  unset, and the guard **correctly refuses to attribute** — the failure message
+  says exactly that. #1172's own data puts CI write-await max at **1.264 s, 5×
+  the bound**.
+- **Rate:** 4 red / 19 completed non-superseded runs (**21%**) since `ef71733b`.
+  Cancelled runs are `tekton-supersede`, not failures.
+- **The greens are NOT vacuous — controlled.** Green `devrc-ci-tmfx5` collected
+  **20076**, identical to failing `devrc-ci-b246g`'s 20076, with **0**
+  `MECHANISM` lines. Same test set, genuinely clean.
+- ⚠ **The instrument is working as designed.** `MECHANISM =
+  SERVER_BLOCKED_IN_FSYNC` printed on every failure, and the server really was
+  blocked in a real fsync — just not the patched one. The verdict was right; the
+  test could not prove the stall was *its* stall.
+- **Fixed elsewhere: #1193**, which deletes `SERVER_STALL`, makes both sides wait
+  on Events, and ships `scripts/ci-repro/slow_arm.py` as a red/green reproducer.
+  **Read it before re-deriving any of the above.**
+
 ## How to verify
 
-- 🔴 **The rc-24 arm, under the real unit** — not by reading the file. Carried
-  forward from the rank-1 close-out; still the only honest check for that arm:
+- **The break-glass script, without touching `main`** — the self-test is the
+  same code path as a real run, and the suite drives it against a `gh` stub that
+  shells out to REAL `jq`:
+  ```bash
+  PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
+    python3 -m pytest ~/workspace/devrc/scripts/tests/test_break_glass_merge.py -q
+  # expect: 13 passed
+  ```
+- **The mutation sweep must SELF-CHECK before its verdict is readable** —
+  control GREEN *and* `POSITIVE-CONTROL-delete-removed` KILLED, else it prints
+  `SWEEP-INVALID` and every other row is void. Last run: **6/6 killed,
+  survivors none.**
+- **If the script is ever run against `main` again, verify INDEPENDENTLY** — not
+  from its own read-back:
+  ```bash
+  R=innovation-upstream/devrc
+  gh api /repos/$R/branches/main/protection --jq \
+    '{checks:[.required_status_checks.checks[]|{context,app_id}],enforce_admins:.enforce_admins.enabled}'
+  # expect: 2 checks, both app_id 4320115, enforce_admins true
+  ```
+- **Before opening the window, re-measure what could slip through** — this
+  changed *between* the survey and the act this session:
+  ```bash
+  gh pr list --repo innovation-upstream/devrc --state open --limit 100 \
+    --json number,autoMergeRequest,mergeable,mergeStateStatus \
+    --jq '[.[]|select(.autoMergeRequest != null)]'
+  ```
+- **The rc-24 arm, under the real unit** — a file that CONTAINS the arm proves
+  nothing; it needs `pkgs.gh` on the unit's PATH, which arrives only with a switch:
   ```
   systemctl --user start drift-check
   journalctl --user -u drift-check --since '5 minutes ago' | grep '\[protect\]'
   ```
-  Healthy reads `2 required status check(s) — tekton/devrc-pytests,tekton/devrc-nodetests`
-  then `enforce_admins=true`. A file that merely CONTAINS the arm proves nothing:
-  it needs `pkgs.gh` on the unit's PATH, which arrives only with a switch.
-- **That gh resolves where the unit will look** (the failure that reads as
-  COULD NOT MEASURE forever from a unit that looks correct):
-  ```
-  P=$(systemctl --user show drift-check -p Environment --value | tr ' ' '\n' | grep ^PATH= | cut -d= -f2-)
-  env PATH="$P" sh -c 'command -v gh'
-  ```
 - **Both hosts agree:** `scripts/ship.sh` must end `2 hosts compared, both at <sha>` —
   a one-host run says `cross-host agreement NOT COMPARED`, a different claim.
-- **The break-glass guard, red at base and green at HEAD** — the claim is the
-  MATRIX, not either half:
-  ```bash
-  git -C ~/workspace/devrc worktree add --detach /tmp/bg-base 53f523ed
-  cp <branch>/scripts/tests/test_break_glass_note.py /tmp/bg-base/scripts/tests/
-  PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
-    python3 -m pytest /tmp/bg-base/scripts/tests/test_break_glass_note.py -q
-  # expect: 1 failed (test_the_break_glass_note_round_trips, "carries no -X PUT")
-  PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
-    python3 -m pytest ~/workspace/devrc/scripts/tests/test_break_glass_note.py -q
-  # expect: all passed
-  ```
-- **The vacuity control is the one that matters** — if
-  `test_the_note_still_offers_the_escape_hatch` fails, the round-trip assertion
-  is passing on a document with no DELETE in it and proves nothing.
-- **The `<!-- merge-gate: other -->` marker must survive the edit** — it sits
-  three lines above the changed region and is parsed by
-  `scripts/tests/test_ci_claim_matches_reality.py`, which must stay green.
 - **Both tiers, one at a time** (the dev-host tier is NOT the tier Tekton gates
-  on): `nix develop <repo> --command bash <repo>/scripts/gate.sh --tier both`,
-  then `nix build .#checks.x86_64-linux.pytests` and
-  `.#checks.x86_64-linux.nodetests` **separately**.
+  on, and a combined `nix build` of both derivations produces FALSE failures):
+  `nix develop <repo> --command bash <repo>/scripts/gate.sh --tier both`, then
+  `nix build .#checks.x86_64-linux.pytests` and `.#checks.x86_64-linux.nodetests`
+  **separately**.
