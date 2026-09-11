@@ -124,6 +124,27 @@ remote_ssh_candidates_of() {
   esac
 }
 
+# probe_failure_state <stderr-text> -> untrusted-key | unreachable
+#
+# 🔴 WHY THIS EXISTS: "did not answer" was the ONE message every failure got,
+# and an empty result cannot distinguish the mechanisms that produce it. A host
+# that is powered off and a host whose key CHANGED — a reinstall, or a squatter
+# on the LAN address — were reported identically, so the second read as the
+# first and the operator went looking for a network fault. Ported from the
+# four-state reporting in PR #1287 (`scripts/workhost`), which was closed in
+# favour of keeping ONE mechanism; this is the part of it worth keeping.
+#
+# Classification is by ssh's own STDERR, not by exit status: ssh exits 255 for
+# every one of these, so the status cannot tell them apart.
+probe_failure_state() {
+  case "$1" in
+    *"REMOTE HOST IDENTIFICATION HAS CHANGED"*|*"Host key verification failed"*|\
+    *"differs from the key for the IP address"*|*"key for"*"has changed"*)
+      echo "untrusted-key" ;;
+    *) echo "unreachable" ;;
+  esac
+}
+
 # first_reachable_ssh <target>... -> the first target that answers, or empty.
 #
 # Probes with BatchMode (never prompts) and a bounded ConnectTimeout, running
@@ -132,16 +153,36 @@ remote_ssh_candidates_of() {
 # cleanly. Returns 1 when NOTHING answered — the caller must treat that as a
 # genuinely unreachable host, not as "use the first one anyway".
 #
+# 🔴 Each failing target is reported in ONE OF FOUR STATES, never collapsed:
+#   ok              answered (printed on stdout, nothing on stderr)
+#   unreachable     an address exists for this path, but it did not answer
+#   untrusted-key   it answered, and ssh refused the HOST KEY
+#   not-configured  no address exists for this path at all
+# `unreachable` deliberately keeps the original "did not answer" wording: it is
+# the common case, it is what the callers' own tests read, and re-spelling it
+# would have been churn. The state token is appended so the line is greppable.
+#
 # 🔴 $SSH_PROBE_CMD replaces the probe wholesale (it receives the target as $1
 # and signals reachability by exit status). It exists so the selection logic can
 # be tested without a network — a probe that always fails, or one that answers
-# only for a named address, is how the fallback is driven red.
+# only for a named address, is how the fallback is driven red. It signals
+# `untrusted-key` the same way ssh does, by PRINTING the refusal to stderr, so
+# that state is reachable in tests without a real changed key.
 first_reachable_ssh() {
-  local timeout="${SSH_PROBE_TIMEOUT:-5}" target
+  local timeout="${SSH_PROBE_TIMEOUT:-5}" target err
   for target in "$@"; do
-    [ -n "$target" ] || continue
+    if [ -z "$target" ]; then
+      echo "${SSH_PROBE_LOG_PREFIX:-ship}: no address configured for this path (not-configured)" >&2
+      continue
+    fi
     if [ -n "${SSH_PROBE_CMD:-}" ]; then
-      if "$SSH_PROBE_CMD" "$target"; then echo "$target"; return 0; fi
+      # 🔴 `2>&1 >/dev/null` IS THE ORDER THAT CAPTURES STDERR ALONE: stderr is
+      # dup'ed to the substitution pipe FIRST, then stdout is sent to /dev/null.
+      # Reversing it captures stdout instead and classification silently reads
+      # the wrong stream. Pinned by `test_the_classification_reads_STDERR_and_
+      # not_stdout`, which drives a probe that prints the host-key refusal on
+      # stdout and must still be classified `unreachable`.
+      err="$("$SSH_PROBE_CMD" "$target" 2>&1 >/dev/null)" && { echo "$target"; return 0; }
     # 🔴 ONE LINE, not a continuation. `test_drift_check.py`'s command extractor
     # reads the first token of each line as a command, so a wrapped invocation
     # makes it see the continuation's leading word (`target`) as a program and
@@ -163,7 +204,7 @@ first_reachable_ssh() {
     # the LAN address still fails the probe, and the run falls back rather than
     # trusting it. The cost is that a first-ever address is TOFU-adopted without
     # the operator being asked.
-    elif ssh -n -o BatchMode=yes -o ConnectTimeout="$timeout" -o StrictHostKeyChecking=accept-new "$target" true >/dev/null 2>&1; then
+    elif err="$(ssh -n -o BatchMode=yes -o ConnectTimeout="$timeout" -o StrictHostKeyChecking=accept-new "$target" true 2>&1 >/dev/null)"; then
       echo "$target"; return 0
     fi
     # 🔴 The prefix is the CALLER's, not a hardcoded "ship:". This lib is shared,
@@ -181,7 +222,15 @@ first_reachable_ssh() {
     # probing and defaulted DRIFT_SKIP_SSH_PROBE=1 in the fixture. Deleting the
     # default scored 594 passed against it. Cited here so nobody restores the
     # dead pointer.
-    echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target did not answer" >&2
+    # 🔴 An `if`, NOT a `case`, and that is load-bearing: `test_drift_check.py`'s
+    # reverse-PATH guard reads the first token of every line as a command, so a
+    # `untrusted-key)` case LABEL is reported as an unaccounted-for program on
+    # the unit PATH. Measured — it failed exactly that way before this shape.
+    if [ "$(probe_failure_state "$err")" = "untrusted-key" ]; then
+      echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target answered but ssh refused its HOST KEY — not trusting it (untrusted-key)" >&2
+    else
+      echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target did not answer (unreachable)" >&2
+    fi
   done
   return 1
 }
