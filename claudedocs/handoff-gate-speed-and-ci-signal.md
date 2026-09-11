@@ -21,34 +21,26 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- **RANKS 1 AND 2 ARE BOTH CLOSED, MERGED, SHIPPED AND VERIFIED LIVE.** Both claims released.
+- **RANKS 1, 2 AND 3 ARE ALL CLOSED, MERGED AND VERIFIED.** All three claims released.
 - **The arc's commit ledger, carried forward** (`State now` is REPLACED every update, so this
   list must be re-carried or it is lost): `#1429` a0839ec4, `#1445` cace96d9, `#1469` 86b1ddec,
-  `#1471` 4ab87a64, `#1482` 972fbcbd, `#1488` d835fe51, `#1489` b315cdd3, `#1502` ffef57bc.
-- **RANK 1 — `ZacxDev/homelab-infra#792` MERGED IN DRY-RUN** (operator's decision; NOT armed).
-  Merge `dbe47814`, 06:19:03Z, off the rebased head `cc362946` — all 5 Tekton contexts green,
-  read per-status. Four separate claims, each measured:
-  - on `trunk` **by content** (`CLOSED_PR_MODE: "dry-run"`) — ancestry is useless, the repo squashes;
-  - **reconciled** — Kustomization `tekton-triggers` `f364c499` → `dbe47814` at 06:21:06Z;
-  - **consumer running it** — sweep logs `mode=dry-run`;
-  - **wrote nothing** — 0 of 329 PipelineRuns carry `ci.zacx.dev/cancelled-because`, and all three
-    runs named in DRY-RUN lines have empty `spec.status`. Pass 1 stays armed (`dry_run=False`).
-- 🔴 **RANK 1's ARMING EVIDENCE ARRIVED ON THE FIRST TICK, not in 3–7 days.** Two sweeps so far:
-  `resolvable=10 states_read=10 closed=3` and `resolvable=16 states_read=16 closed=3`, each naming
-  devrc #1499 / #1497 / #1500, all three hand-verified as genuinely merged, zero naming an open PR.
-  So criteria (i), (ii), (iii) are met NON-VACUOUSLY. ⚠ **Still do not arm on this**: (iv) needs
-  sustained observation, it is two samples, and — see Gotchas — the one case it exercised is
-  precisely the one dry-run structurally CANNOT validate.
-- **RANK 2 — `#1502` MERGED as `ffef57bc`**, and the defect it fixes was LIVE on `main` until then.
-  `ship.sh` rc 0, **both hosts at `ffef57bc` and the two shas actually COMPARED** (not
-  `NOT COMPARED`): workbench ff `f76f3c11`→`ffef57bc`, 586 artifacts / 0 dangling, 411 / 0 stale;
-  laptop ff `cc278b7a`→`ffef57bc`, 532 / 0 dangling, 393 / 0 stale; both `✅ VERIFIED … + switched`.
-- 🔴 **The CONSUMER is verified, and this unit has an unusual deploy path worth knowing.**
-  `ExecStart=…%h/workspace/devrc/scripts/main-status-watch.py` — it runs **directly from the
-  working tree**, so a host's checkout advancing IS the deploy; there is no `/nix/store` copy to
-  go stale. Verified in the executed file: bare `return RC_UNMEASURED` count **3 → 2**, the fix's
-  own comment present, timer active on its 10-min cadence, last run `ExecMainStatus=0`,
-  `NRestarts=0`. (`ActiveState=inactive/dead` between firings is correct for a oneshot.)
+  `#1471` 4ab87a64, `#1482` 972fbcbd, `#1488` d835fe51, `#1489` b315cdd3, `#1502` ffef57bc,
+  `#1512` 189689c1.
+- **RANK 1 — `ZacxDev/homelab-infra#792` MERGED IN DRY-RUN** (`dbe47814`), NOT armed. Four claims
+  each measured separately: on `trunk` by content; Flux-reconciled at 06:21:06Z; consumer running
+  `mode=dry-run`; and **wrote nothing** (0 of 329 PipelineRuns annotated). Arming is now rank 8.
+- **RANK 2 — `#1502` MERGED (`ffef57bc`), shipped, consumer verified.** `ship.sh` rc 0, both hosts
+  at `ffef57bc` **and the two shas actually COMPARED**. The unit runs **directly from the working
+  tree** (`ExecStart=…%h/workspace/devrc/scripts/main-status-watch.py`), so a host's checkout
+  advancing IS the deploy — verified in the executed file: bare `return RC_UNMEASURED` **3 → 2**.
+- **RANK 3 — CLOSED BY MEASUREMENT, NOT BY A FIX. `#1512` `189689c1`.** Its premise was wrong
+  twice over; see the Gotchas entry. ⚠ Merged with CI still pending (comment-only, one file, full
+  file re-run at 760 passed on the exact branch content, 0 behind main) — stated because that is a
+  decision, not a nil event.
+- 🔴 **THE QUEUE NOW HAS NO ELIGIBLE ITEM.** Ranks 4–7 all declare `forcing: none`, which this doc's
+  own rule says is "**not eligible to be worked**"; rank 8 is the operator's and is parked on soak
+  evidence. ⚠ **Rank 4 arguably now HAS a forcing function** — see its entry — but promoting it is a
+  judgement a future session should make deliberately rather than inherit.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -113,23 +105,27 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting on one. New items
-go at the END; inserting mid-list silently re-points every live claim. **Ranks 1 and 2 are CLOSED
-and deliberately left in place as tombstones** — renumbering would re-point every live claim on
-this doc.
+go at the END; inserting mid-list silently re-points every live claim. **Ranks 1–3 are CLOSED and
+deliberately left as tombstones** — renumbering would re-point every live claim on this doc.
 
-1. **CLOSED — `homelab-infra#792` merged in dry-run.** ⚠ What remains is the ARMING decision, which
-   is a NEW item at rank 8, not this one. Do not re-open this rank.
+1. **CLOSED — `homelab-infra#792` merged in dry-run.** Arming is rank 8, not this.
    forcing: none
-2. **CLOSED — `#1469`'s audit ladder, merged as `#1502` `ffef57bc`, shipped and verified live.**
+2. **CLOSED — `#1469`'s audit ladder, merged as `#1502`, shipped and verified live.**
    forcing: none
-3. **The one genuine flake:** `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_
-   CONTROL…` in `scripts/tests/test_subsystem_store_api.py` — 5 of 26 failure heads. Its own
-   docstring (`:7360`) states **#1432 is NOT a fix** and that whether the port race moves its rate is
-   UNKNOWN. Needs a diagnosis, not another ported retry. Load-sensitive.
-   forcing: gate — it reddens the only automated signal at random.
-4. **Stale PR bases re-report already-fixed reds** — 8 of 8 failing open PRs were 5–42 commits behind;
-   a rebase cured 4 outright. A bot comment naming the fix would stop humans triaging cured reds.
-   `strict: true` is deliberately off and correctly so.
+3. **CLOSED — the store-api flake was already fixed by `#1458`'s tmpfs siting; `#1512` records the
+   measurement.** 0 of 45 post-fix PR-head verdicts vs 4 of 125 pre-fix. 🔴 Do NOT re-open on a
+   single recurrence: P(0) ≈ 0.23 at the old rate, so the zero was never the proof — the mechanism's
+   removal is. Re-open only if the *classifier* prints `SERVER_BLOCKED_IN_FSYNC` again.
+   forcing: none
+4. **Stale PR bases re-report already-fixed reds.** 🔴 **NEW EVIDENCE 2026-09-11, and it is stronger
+   than when this was filed:** of the 6 genuine `tekton/devrc-pytests` failures in the whole post-fix
+   window, **3 — half — were `test_the_SUMMARY_BANNER_names_the_real_selection_source` on PRs 17, 40
+   and 40 commits behind main**, all since merged, and that test passes on current main. So stale
+   bases are not a tidiness issue: they are **50% of the current genuine-failure signal**, i.e. the
+   thing most degrading the only automated gate. A bot comment naming the fix commit would stop
+   humans triaging cured reds. `strict: true` is deliberately off and correctly so.
+   ⚠ Promoting this to `forcing: gate` is defensible on the above and is left as an explicit
+   judgement for the next session rather than done here.
    forcing: none
 5. **The 19-min CI median.** `pytests` is 90–95% of it. ⚠ `devrc-ci-5m64b` ran `pytests` in **52s**
    on a nix cache hit, so an unchanged derivation is already near-free — the cost is entirely
@@ -138,16 +134,15 @@ this doc.
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**.
    ⚠ `#1502` did NOT delete it; round 6 left it in place. The deadman's double-run is the real defence.
    forcing: none
-7. **Pin the `repo-full-name` invariant in `homelab-infra`'s supersede tests.** Now that #792 is
-   merged, pass 2's correctness rests on `repo-full-name` naming the repo the PR number belongs to,
-   and `test_supersede_wiring.py` contains **zero** occurrences of the string. 15/15 supersede-capable
-   resourcetemplates wire it correctly today and `SUPERSEDE_TEMPLATES` is a two-way ledger, so the gap
-   is a *ledger-registered* template that hardcodes the repo. 🔴 That fails as a FALSE `"closed"`, not
-   a clean 404 — devrc has 1400+ and homelab-infra 790+ mostly-closed PRs. Fix: extend
+7. **Pin the `repo-full-name` invariant in `homelab-infra`'s supersede tests.** `test_supersede_
+   wiring.py` contains **zero** occurrences of the string that pass 2's correctness rests on. 15/15
+   supersede-capable resourcetemplates wire it correctly today and `SUPERSEDE_TEMPLATES` is a two-way
+   ledger, so the gap is a *ledger-registered* template hardcoding the repo. 🔴 That fails as a FALSE
+   `"closed"`, not a clean 404 — devrc 1400+ and homelab-infra 790+ mostly-closed PRs. Fix: extend
    `test_vetr_crossrepo_e2e_wiring.py:184-189` over all of `SUPERSEDE_TEMPLATES`. Repo:
    `ZacxDev/homelab-infra` (clone `~/workspace/homelab-talos`).
    forcing: none
-8. **Decide whether to ARM `#792` (`CLOSED_PR_MODE: on`).** Criteria (i)–(iii) are already met
+8. **Decide whether to ARM `#792` (`CLOSED_PR_MODE: on`).** Criteria (i)–(iii) already met
    non-vacuously on the first two post-deploy sweeps; (iv) needs sustained observation. Read
    `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and `|= "closed-pr pass:"` in Loki.
    🔴 Zero `DRY-RUN would cancel` lines after 7 days of normal merging is NOT a clean bill — it is
@@ -331,6 +326,40 @@ bash ~/workspace/devrc/scripts/ship.sh
   guard exists for. Dry-run short-circuits `cancel_all` BEFORE the re-read, so the soak shows the
   SELECTOR is right while structurally never exercising the WRITE-path guard. Weigh that when
   deciding rank 8.
+
+### 2026-09-11 — rank 3: a ranked item whose premise was wrong in both directions
+
+- 🔴 **"Needs a diagnosis" was FALSE — the diagnosis was already in the file, and excellent.** The
+  suite's own classifier had printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`
+  on run `devrc-ci-86zxj`: `server.py:_replace_bytes` fsyncs the file and then the parent dir
+  **inside the request, before the response is written**, and fsync blocks in uninterruptible sleep
+  — which is exactly the captured `TimeoutError` inside `socket.recv_into` (connection ESTABLISHED,
+  never answered). **Read the target file before believing a handoff's characterisation of it.**
+- 🔴 **AND IT WAS ALREADY FIXED, by a PR nobody connected to it.** `#1458` (`ce9b55c3`) sited the 18
+  remaining store roots — this class's among them — on **tmpfs** via `sited_root`. That removes the
+  mechanism rather than widening a bound: an fsync to RAM cannot stall on a contended disk. Nothing
+  recorded that the fix had LANDED, so the item stayed on the queue reading as live.
+  **A fix that is not written down where the symptom is described has not finished landing.**
+- **Measured, `tekton/devrc-pytests`, newest verdict per PR head, split on `ce9b55c3`:** pre-fix 125
+  verdicts / 29 genuine failures / **4** this test; post-fix 45 / 6 / **0**. `failure` and `error`
+  counted separately throughout — `error` is a broken gate, not a bad change.
+- 🔴 **THE ZERO WAS NEVER THE PROOF, and the comment now says so in the file.** At the pre-fix
+  per-verdict rate (3.2%) the expected count in 45 verdicts is ~1.4, so **P(observing 0) ≈ 0.23** —
+  a one-in-four coincidence. The mechanism's removal is what carries the claim. **A before/after
+  table is the easiest thing in this repo to over-read; state the power beside it or it will be
+  upgraded to "proven" by the next reader.**
+- 🔴 **IT WAS NEVER THE WORST FLAKE — it was the best-DOCUMENTED one.** Same pre-fix window:
+  `test_every_decrypt_family_VERDICT_is_pinned_WHOLE` failed **8** times to this test's **4**, and
+  is also at 0 post-fix. It had no long diagnosis attached and was never ranked. **Vividness is not
+  frequency: COUNT the failures before choosing which flake to chase.** This is the same error as
+  ranking by a memorable incident rather than by a census.
+- **`main` is a useless population for this question and that is structural.** Of 43 post-fix
+  pytests verdicts on `main`, **40 were artefacts** (~31 `superseded`, 4 `KILLED: the gate pod
+  died`, 4 `NO GATE POD`, 1 pending) leaving **3** authoritative successes. Use PR heads.
+- ⚠ **UNMEASURED, recorded rather than guessed:** the 760-test verification run emitted **3
+  warnings**, and this suite warns on `the spawn lost the port race and retried`. Only the tail was
+  captured, so whether those were port-race retries is **unknown**. If they were, the race is live
+  on this host — but nothing here claims that.
 ## Open investigations — live diagnosis state
 
 ### RANK 2: #1469's audit ladder has not reached a clean round
