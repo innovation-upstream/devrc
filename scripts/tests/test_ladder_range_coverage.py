@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""Guards for `scripts/ladder-range-coverage.py` — the report that finds churn
+no `audit-claims` block range covers.
+
+WHY THESE ARE SHAPED THIS WAY
+-----------------------------
+The thing under test is a CLASSIFIER over real git reachability, so the fixtures
+are real repositories with real commits. A fake runner would let the classifier
+agree with a model of `merge-base --is-ancestor` that git does not share — and
+the whole defect this script addresses (#1233's round 3) is a reachability
+fact, not a parsing one.
+
+🔴 EVERY ASSERTION HERE HAS A CONTROL ON THE OTHER SIDE, because the headline
+number this script prints is a ZERO for a healthy ladder. "0 uncovered" and "the
+instrument is wired to nothing" are the same output, so:
+
+  * `test_a_tight_chain_reports_zero_uncovered` is only meaningful beside
+    `test_the_1233_shape_reports_the_skipped_rounds_churn`, which MUST produce a
+    non-zero count off a fixture built to contain one;
+  * `test_absent_commits_are_REFUSED_not_reported_as_zero` is the negative
+    control for the positive control itself.
+
+The `#1233` fixture is named for the real case in
+`claudedocs/audit-ladder-review-2026-09-04.md`: blocks for rounds 1, 2 and 4,
+round 3's fixes between `to(2)` and `from(4)`, in no block's range.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from testlib.hermetic_git import hermetic_git_env  # noqa: E402
+
+SCRIPT = SCRIPTS / "ladder-range-coverage.py"
+DISPATCH = SCRIPTS / "audit-dispatch.py"
+
+
+def _load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def lrc():
+    return _load(SCRIPT, "ladder_range_coverage")
+
+
+@pytest.fixture(scope="module")
+def ad():
+    return _load(DISPATCH, "audit_dispatch_under_test")
+
+
+# --------------------------------------------------------------------------- #
+# Fixture repositories
+# --------------------------------------------------------------------------- #
+
+def _git(repo, *args, check=True):
+    p = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, env=hermetic_git_env(), check=False,
+    )
+    if check:
+        assert p.returncode == 0, f"git {args} failed: {p.stderr or p.stdout}"
+    return p.stdout.strip()
+
+
+def _init(repo):
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "--quiet", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.invalid")
+    _git(repo, "config", "user.name", "T")
+    return repo
+
+
+def _commit(repo, path, lines, msg):
+    """Write `lines` lines into `path` and commit. Returns the new sha."""
+    f = repo / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("\n".join(f"line {i}" for i in range(lines)) + "\n",
+                 encoding="utf-8")
+    _git(repo, "add", "--", path)
+    _git(repo, "commit", "--quiet", "-m", msg)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _block(round_no, frm, to, claim="a claim"):
+    return (f"```audit-claims round={round_no} audited={frm}..{to}\n"
+            f"1. {claim}\n"
+            "```\n")
+
+
+@pytest.fixture
+def base_repo(tmp_path):
+    """`main` at a base commit, plus a `feat` branch off it. The base branch is
+    `main`, so `--not main` matches the review's `--not origin/main` shape."""
+    repo = _init(tmp_path / "repo")
+    _commit(repo, "README.md", 3, "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--quiet", "-b", "feat")
+    return repo, base
+
+
+# --------------------------------------------------------------------------- #
+# The positive control — the #1233 shape MUST produce a number
+# --------------------------------------------------------------------------- #
+
+def test_the_1233_shape_reports_the_skipped_rounds_churn(lrc, ad, base_repo):
+    """Blocks for rounds 1, 2 and 4; round 3's fixes in NO block's range.
+
+    This is the whole point of the script, and it is the positive control for
+    every zero the other tests assert. If this ever reports 0, the instrument is
+    measuring nothing and the tight-chain tests below are vacuous.
+    """
+    repo, base = base_repo
+    r1_from = base
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    # ── round 3's fixes: committed, and NO block will name them ──
+    r3_a = _commit(repo, "skipped_one.py", 7, "round 3 fix, part 1")
+    r3_b = _commit(repo, "skipped_two.py", 5, "round 3 fix, part 2")
+    r4_to = _commit(repo, "d.py", 4, "round 4 fix")
+
+    comments = [
+        _block(1, r1_from, r1_to),
+        _block(2, r1_to, r2_to),
+        _block(4, r3_b, r4_to),      # round 4 anchors AFTER round 3's commits
+    ]
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 1233, r4_to, "main",
+                           comments)
+
+    assert L.reason is None
+    assert L.blocks_used == 3
+    assert L.control_churn > 0, "positive control: the blocks' own ranges move"
+
+    gaps = [a for a in L.adjacencies if a.label == lrc.GAP]
+    assert len(gaps) == 1, [(a.label, a.from_round, a.to_round)
+                            for a in L.adjacencies]
+    gap = gaps[0]
+    assert (gap.from_round, gap.to_round) == (2, 4)
+    assert gap.commits == 2, "round 3 landed two commits"
+    # 7 + 5 added lines, nothing deleted. Asserted as a LITERAL, derived from
+    # the fixture's own arguments and never from the script's output.
+    assert (gap.added, gap.deleted) == (12, 0)
+    assert L.uncovered_added + L.uncovered_deleted == 12
+    assert r3_a  # the first skipped commit is inside the measured gap
+
+
+def test_a_tight_chain_reports_zero_uncovered(lrc, ad, base_repo):
+    """The negative control. Only meaningful beside the test above."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    comments = [_block(1, base, r1_to), _block(2, r1_to, r2_to)]
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 1, r2_to, "main",
+                           comments)
+
+    assert L.reason is None
+    assert L.control_churn > 0
+    assert [a.label for a in L.adjacencies] == [lrc.TIGHT, lrc.TIGHT]
+    assert L.uncovered_added + L.uncovered_deleted == 0
+
+
+def test_the_tail_after_the_last_block_is_its_own_gap(lrc, ad, base_repo):
+    """A ladder's FINAL round's fixes land after its last block is posted, so
+    the tail is exactly where a terminal round's churn hides."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    tail = _commit(repo, "after.py", 6, "fixes posted after the last block")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 2, tail, "main",
+                           [_block(1, base, r1_to)])
+
+    assert [a.label for a in L.adjacencies] == [lrc.GAP]
+    tail_adj = L.adjacencies[0]
+    assert tail_adj.to_round is None, "the tail adjacency has no next round"
+    assert (tail_adj.added, tail_adj.deleted) == (6, 0)
+
+
+# --------------------------------------------------------------------------- #
+# The three labels that must NOT become a GAP with a number
+# --------------------------------------------------------------------------- #
+
+def test_interior_and_tail_gaps_are_reported_as_SEPARATE_totals(lrc, ad,
+                                                                base_repo):
+    """🔴 The two gap kinds are different claims and must not share a headline.
+
+    An INTERIOR gap is unambiguous — a round's churn nobody audited. A TAIL gap
+    conflates post-last-block fixes with development that continued after the
+    ladder ended. Measured over the 2026-09-04 review's 20 ladders the tail is
+    3,727 of 4,382 lines, so a single total invites being quoted as an
+    under-count it does not support. This fixture has one of each, with
+    DELIBERATELY DIFFERENT sizes so a mutant that reports one in place of the
+    other cannot pass: an interior gap of 7 and a tail of 4 are distinct from
+    each other AND from their sum.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    skipped = _commit(repo, "interior.py", 7, "round 2's unledgered fix")
+    r3_to = _commit(repo, "c.py", 10, "round 3 fix")
+    tail = _commit(repo, "tail.py", 4, "after the last block")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 9, tail, "main",
+                           [_block(1, base, r1_to), _block(3, skipped, r3_to)])
+
+    assert sum(L.interior) == 7, [(a.label, a.to_round, a.added)
+                                  for a in L.adjacencies]
+    assert sum(L.tail) == 4
+    assert L.uncovered_added + L.uncovered_deleted == 11
+
+    rendered = lrc.render([L], [])
+    assert "INTERIOR  7 line(s)" in rendered
+    assert "TAIL      4 line(s)" in rendered
+
+
+def test_an_overlap_is_labelled_OVERLAP_and_given_no_size(lrc, ad, base_repo):
+    """Two ranges covering the same commits double-count, which is the OPPOSITE
+    error from a gap. Reporting it as a 0-line gap would hide it."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    # Round 2 claims to have audited `base` — BEFORE round 1's range ended.
+    comments = [_block(1, base, r1_to), _block(2, base, r2_to)]
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 3, r2_to, "main",
+                           comments)
+
+    labels = [a.label for a in L.adjacencies]
+    assert labels[0] == lrc.OVERLAP, labels
+    overlap = L.adjacencies[0]
+    assert overlap.added is None and overlap.commits is None
+    assert "ANCESTOR" in overlap.reason
+    assert L.uncovered_added + L.uncovered_deleted == 0
+
+
+def test_unrelated_histories_are_UNMEASURABLE_not_zero(lrc, ad, base_repo):
+    """A rebase mid-ladder leaves two shas neither of which reaches the other.
+    There is no gap SIZE; saying 0 would be a claim nobody measured."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    # An orphan branch: a real commit in this repo, reachable from nothing here.
+    _git(repo, "checkout", "--quiet", "--orphan", "other")
+    _git(repo, "rm", "-rf", "--quiet", ".")
+    orphan = _commit(repo, "z.py", 3, "unrelated history")
+    _git(repo, "checkout", "--quiet", "feat")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 4, r1_to, "main",
+                           [_block(1, base, orphan), _block(2, r1_to, r1_to)])
+
+    assert any(a.label == lrc.UNRELATED for a in L.adjacencies), \
+        [(a.label, a.reason) for a in L.adjacencies]
+    for a in L.adjacencies:
+        if a.label == lrc.UNRELATED:
+            assert a.added is None, "an unmeasurable adjacency carries no number"
+
+
+def test_a_sha_git_cannot_resolve_is_UNMEASURABLE_not_a_gap(lrc, ad, base_repo):
+    """Reaches `_is_ancestor`'s ERROR return, which no other test here does.
+
+    🔴 Written because the other UNRELATED case (two real but unrelated commits)
+    exercises the rc-1 path only, so `_is_ancestor`'s rc-128 branch was
+    UNREACHABLE from this suite — a guard a mutation sweep would score as
+    surviving while production hits it on every merged PR whose head is not
+    fetched. The discriminator: `frm` resolves, `to` does not, and they differ,
+    so the classifier cannot take the TIGHT short-circuit.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    unfetched_head = "9" * 40
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 8, unfetched_head,
+                           "main", [_block(1, base, r1_to)])
+
+    assert L.control_churn > 0, "the block's own range is real — not a refusal"
+    tail = L.adjacencies[-1]
+    assert tail.label == lrc.UNRELATED, (tail.label, tail.reason)
+    assert "could not answer" in tail.reason
+    assert tail.added is None and tail.commits is None
+    assert L.uncovered_added + L.uncovered_deleted == 0
+
+
+def test_absent_commits_are_REFUSED_not_reported_as_zero(lrc, ad, base_repo):
+    """The negative control for the positive control.
+
+    A merged PR's commits are routinely absent from a local checkout. Every
+    range then measures empty and the uncovered total is 0 — identical to a
+    perfect ladder. The script must refuse instead.
+    """
+    repo, base = base_repo
+    _commit(repo, "a.py", 10, "a commit that exists")
+    absent_a = "0" * 40
+    absent_b = "1" * 40
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 5, absent_b, "main",
+                           [_block(1, absent_a, absent_b)])
+
+    assert not L.control_churn, "the control must read zero for absent commits"
+    rendered = lrc.render([L], [])
+    assert "REFUSED" in rendered
+    assert "zero" in rendered.lower()
+    assert base  # the repo itself is fine; only the ladder's shas are absent
+
+
+def test_exit_code_4_when_a_ladder_is_refused(lrc, tmp_path, base_repo):
+    """The refusal must reach the EXIT STATUS, not only the text — a caller
+    piping this report would otherwise read a clean 0."""
+    repo, _base = base_repo
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({
+        "pr": 5, "head": "1" * 40, "base": "main",
+        "comments": [_block(1, "0" * 40, "1" * 40)],
+    }), encoding="utf-8")
+
+    rc = lrc.main(
+        ["--facts-file", str(facts), "--repo-dir", str(repo)],
+        out_stream=open("/dev/null", "w"),
+    )
+    assert rc == lrc.EXIT_REFUSED
+
+
+# --------------------------------------------------------------------------- #
+# Holes with no size — the other two routes to #1233's shape
+# --------------------------------------------------------------------------- #
+
+def test_a_bare_audited_sha_is_reported_as_a_hole_with_no_size(lrc, ad,
+                                                               base_repo):
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    comments = [
+        _block(1, base, r1_to),
+        f"```audit-claims round=2 audited={r2_to}\n1. a claim\n```\n",
+    ]
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 6, r2_to, "main",
+                           comments)
+
+    assert L.bare == [2]
+    assert L.blocks_used == 1
+    rendered = lrc.render([L], [])
+    assert "BARE" in rendered
+    assert "No SIZE is reportable" in rendered
+
+
+def test_an_unparsed_block_is_reported_rather_than_dropped(lrc, ad, base_repo):
+    """`parse_claims_blocks` reports a malformed block; dropping that report
+    would make an unreadable round look like a round that never happened."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    comments = [
+        _block(1, base, r1_to),
+        "```audit-claims round=2 audited=aaaaaaa..bbbbbbb\n1. never closed\n",
+    ]
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 7, r1_to, "main",
+                           comments)
+
+    assert L.malformed, "the unclosed fence must be reported"
+    assert "UNPARSED BLOCK" in lrc.render([L], [])
+
+
+def test_a_ledger_starting_at_round_2_says_round_1_is_out_of_window(lrc, ad,
+                                                                    base_repo):
+    """The #1108 / #1219 case. The window starts at the first block's `from`, so
+    round 1's churn is outside it — that must be SAID, not silently excluded."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix, never ledgered")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 1108, r2_to, "main",
+                           [_block(2, r1_to, r2_to)])
+
+    assert L.first_round == 2
+    rendered = lrc.render([L], [])
+    assert "STARTS at round 2" in rendered
+    assert "outside the window" in rendered
+    assert base
+
+
+# --------------------------------------------------------------------------- #
+# The shared core — the extraction must not have changed `measure_ledger`
+# --------------------------------------------------------------------------- #
+
+def test_measure_range_churn_does_NOT_refuse_an_empty_range(ad, base_repo):
+    """The inverted read rule, asserted directly.
+
+    `measure_ledger` treats an empty range as a defect; the gap scanner needs
+    the opposite, and a shared core enforcing the delta round's rule would
+    report every TIGHT chain as unmeasurable.
+    """
+    repo, base = base_repo
+    _commit(repo, "a.py", 4, "one commit")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    rep = ad.measure_range_churn(
+        ad.real_runner, str(repo), head, head, "main")
+
+    assert rep.reason is None, "an empty range is NOT an error for this caller"
+    assert (rep.commits, rep.added, rep.deleted) == (0, 0, 0)
+    assert base
+
+
+def test_measure_ledger_still_refuses_an_empty_range(ad, base_repo):
+    """The delegation's behaviour control: the fourth read rule still lives in
+    the caller, so `measure_ledger` must still fail on a self-range."""
+    repo, base = base_repo
+    _commit(repo, "a.py", 4, "one commit")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    rep = ad.measure_ledger(ad.real_runner, str(repo), head, "main")
+
+    assert rep.reason is not None, "an empty delta range is still a defect"
+    assert "EMPTY" in rep.reason
+    assert rep.added is None and rep.commits is None
+    assert base
+
+
+def test_measure_ledger_still_measures_a_real_range(ad, base_repo):
+    """…and the positive control for that one: it must still return numbers."""
+    repo, base = base_repo
+    _commit(repo, "a.py", 9, "the fix")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    rep = ad.measure_ledger(ad.real_runner, str(repo), base, "main")
+
+    assert rep.reason is None, rep.reason
+    assert rep.commits == 1
+    assert rep.added == 9 and rep.deleted == 0
+    assert head
+
+
+def test_a_failed_git_call_is_a_reason_not_a_zero(ad, base_repo):
+    """rc != 0 must not become churn 0 — the rule the core exists to hold."""
+    repo, _base = base_repo
+
+    rep = ad.measure_range_churn(
+        ad.real_runner, str(repo), "no-such-ref", "HEAD", "main")
+
+    assert rep.reason is not None
+    assert rep.added is None and rep.commits is None
+
+
+# --------------------------------------------------------------------------- #
+# The script is reachable as a script, and reuses rather than re-implements
+# --------------------------------------------------------------------------- #
+
+def test_the_script_runs_and_its_usage_does_not_require_a_network():
+    p = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                       capture_output=True, text=True, check=False)
+    assert p.returncode == 0, p.stderr
+    assert "--facts-file" in p.stdout
+
+
+def test_the_batterys_floor_is_re_derived_from_this_modules_size():
+    """🔴 `mutants-ladder-range-coverage.sh`'s `MIN_TESTS` must track THIS module.
+
+    That battery reads pytest's own count and calls anything below `MIN_TESTS`
+    a broken harness. A floor left behind as the module grows never complains —
+    it is invisible precisely because it only fires downward — and
+    `mutants-audit-ladder.sh` has recorded that happening TWICE, the second time
+    tolerating the silent loss of both guards the growth had added. So the number
+    is pinned here from this battery's first commit rather than maintained by
+    memory, and this test prints the replacement value on failure.
+
+    The formula is `run-tests.sh`'s own: `m - min(50, max(1, m // 20))`.
+    """
+    battery = SCRIPTS / "tests" / "mutants-ladder-range-coverage.sh"
+    assert battery.exists(), "the battery this floor belongs to is gone"
+
+    declared = None
+    for line in battery.read_text(encoding="utf-8").splitlines():
+        if line.startswith("MIN_TESTS="):
+            declared = int(line.split("=", 1)[1].strip())
+            break
+    assert declared is not None, "no MIN_TESTS= literal in the battery"
+
+    p = subprocess.run(
+        [sys.executable, "-m", "pytest", str(Path(__file__).resolve()),
+         "--collect-only", "-q", "--no-header", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, check=False, cwd=str(REPO_ROOT),
+    )
+    assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
+    collected = len([
+        ln for ln in p.stdout.splitlines()
+        if "::" in ln and ln.startswith("scripts/tests/")
+    ])
+    # 🔴 A positive control on the COUNT, not just on the comparison: a parse
+    # that silently yields 0 would make any floor look generous.
+    assert collected > 5, (
+        f"--collect-only parsed {collected} test(s) from this module, which is "
+        f"not a credible count — the floor below would be vacuous.\n{p.stdout[-2000:]}"
+    )
+    expected = collected - min(50, max(1, collected // 20))
+    assert declared == expected, (
+        f"this module now collects {collected} test(s), so the battery's floor "
+        f"should be {expected}, not {declared}. Set `MIN_TESTS={expected}` in "
+        f"{battery.name} — do not compute it by hand."
+    )
+
+
+def test_it_imports_the_churn_command_rather_than_carrying_a_copy():
+    """🔴 A SECOND COPY OF THE CHURN COMMAND IS THE DEFECT THIS GUARDS.
+
+    The review's hole was found because the per-block measurement was correct
+    and incomplete. A re-typed `--remerge-diff` line here could drift from
+    `audit-dispatch.py`'s — which is the one the SKILL tells an auditor to run —
+    and the two would disagree silently. Asserted structurally: this script must
+    not contain the command, and must call the shared function.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    command_lines = [
+        ln for ln in src.splitlines()
+        if "--remerge-diff" in ln and not ln.lstrip().startswith("#")
+        and '"""' not in ln
+    ]
+    assert not command_lines, (
+        "this script re-types the churn command instead of importing it: "
+        f"{command_lines}"
+    )
+    assert "measure_range_churn" in src
+    assert "parse_claims_blocks" in src
