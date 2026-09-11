@@ -171,3 +171,46 @@ validated preset; treat unvalidated ones as starting points.
   `Handling connection for P` line per connection and blocks at 64 KiB unread).
 - Known limitation (documented, unchanged): a matched-nothing result still exits
   0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.
+
+## The `--json` row schema — read a label from `labels`, NEVER from `metric`
+
+🔴 **`rows[].metric` (prometheus) and `rows[].stream` (loki streams) are RENDERED
+DISPLAY STRINGS** — `{a=1, b=2}` — built for the human-readable table. They are
+NOT objects and they are NOT Prometheus's `data.result[].metric`, despite the
+name. Field-accessing them RAISES — `jq` prints `Cannot index string with string` and
+exits **5**; Python raises `TypeError` on `row["metric"]["job"]` and
+`AttributeError` on `row["metric"].get("job")`. Only `?` / `try…catch` (jq) or a
+bare `except` (Python) make it silent, and a silent miss is the dangerous one:
+`row_count` sits in the same document saying the query matched.
+
+🔴 **`// empty` is NOT an error suppressor** — jq's `//` is a null/false
+alternative, so the indexing error propagates before it can apply and the
+pipeline still exits 5 (measured, jq 1.8.1; `jq -n 'error("boom") // 1'` errors
+too). `.labels? // {}` is safe because of the **`?`**, not the `//`.
+
+**`rows[].labels` is the label set as a `{str: str}` dict.** Use it:
+
+```bash
+OBS=~/workspace/devrc/scripts/obs-read   # NOT on $PATH — see the rule above
+$OBS --cluster dpprod --backend prometheus --json \
+  --query 'kube_job_status_start_time{cluster="dp-1"}' \
+  | jq -r '.rows[] | "\(.labels.job_name) \(.labels.namespace)"'
+```
+
+Present on prometheus **vector** and **matrix** rows and on loki **matrix** and
+**streams** rows. Absent on prometheus **scalar**/**string** results and on ALL
+**pyroscope** rows (`{function, self_samples, self_pct}` — a flamebearer has no
+label set) — so read it with `.get("labels", {})` / `.labels? // {}` rather than
+assuming every row carries one.
+
+⚠ **Cost, measured, so it is a choice and not a surprise:** each label set is
+serialised twice — rendered into `metric`/`stream` for the table, structured into
+`labels` for parsers — so `--json` is roughly **2x** larger on a label-rich query
+(measured on production loki: 235 streams, 141,096 -> 289,342 bytes). The
+duplication is what keeps `metric`/`stream` byte-identical for existing readers.
+Pipe through `jq` and select what you need; do not cat a wide `--json` raw.
+
+🔴 **Read `row_count` and `matched_nothing` before concluding anything from an
+empty parse.** A zero from your own parser is a fact about your parser; those two
+fields are the tool's own answer, and they disagreed with a hand-written parser
+three times in a row once.
