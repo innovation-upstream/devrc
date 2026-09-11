@@ -18,74 +18,73 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- 🔨 **2026-09-11 — RANK 3 SLICE 3 IS CLAIMED AND IN FLIGHT. NO PR YET.** Claim
-  `cairn-oss-multi-instance-3` taken (rc 0 — nothing else held it); `gh pr list --state open`
-  on devrc swept at the same moment: 30 open PRs, **none** touching the consolidation. An
-  implementation agent is building it in its own worktree
-  (`/tmp/wt-cairn-slice3`, branch `chore/cairn-consolidate-onto-pin`, based on `origin/main`).
-  🔴 **Nothing is merged, nothing is deployed, and no suite has been read.** If you are
-  resuming and that branch has no PR, check whether the agent died before assuming the work
-  is half-landed.
+- 🔨 **2026-09-11 — RANK 3 SLICE 3 IS BUILT, AUDITED ONCE, FIXED AND PUSHED. NOT MERGED.**
+  `innovation-upstream/devrc` **#1508**, branch `chore/cairn-consolidate-onto-pin`, head
+  **`0a331066`** (was `acc9ee6a` before the fix round). 47 files. The five forked reader
+  modules are DELETED and resolved from the pinned flake through a new
+  `scripts/lib/cairn_pin.py`; the writer takes its vocabulary from the pinned `entry_shape`.
+  Claim `cairn-oss-multi-instance-3` is **still HELD** — correct, the work has not landed.
 
-- 🔴 **The FORK ITSELF STAYS CLOSED: CONSOLIDATE ONTO THE PIN, decided by the operator
-  2026-09-08, explicitly not to be re-asked.** Slice 3 is the execution of that decision, not
-  a reopening of it. What changed today is only that its cost is now measured (below) and its
-  mechanism chosen.
+- 🔴 **THE MERGE IS BLOCKED BY `main`'s OWN RED, NOT BY THIS PR — and that is an operator
+  decision, not something to click through.** `tekton/devrc-pytests` fails
+  `test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_classified` and
+  `::test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`. Both name
+  `claudedocs/handoff-tmux-webapp.md`. **Measured at the merge base with this branch absent:
+  `2 failed, 1534 passed`** — and #1508's 47-file diff touches **no** `claudedocs/` and no
+  `claude-hooks/` file. Corroborated from two independent artifacts on `main`: **#1520**
+  fixed the SIBLING doc, and **#1525**'s own subject says *"I fixed one doc and left the other
+  on main"*. With `enforce_admins: true` a red required check blocks everyone, so the three
+  options are: wait for someone to classify that second doc, land a small separate PR that
+  does it, or merge #1508 with a `pytests` red attributable to `main`. **Recommendation: the
+  middle one.** Un-decided as of this write.
 
-- **STILL IN FLIGHT from the previous session, re-checked 2026-09-11:**
-  `innovation-upstream/devrc` **#1472** (corrects three rank headings that contradicted their
-  own closure notes) is **still OPEN**, `mergedAt: null`.
+- **The audit ladder, round 1 — BLIND, and it earned its keep: TWO 🔴 DEPLOY-BLOCKERS that a
+  green suite could not see.** Both were re-verified independently before any fix was made.
+  - **🔴1 — three live systemd timers would have broken on the operator's next `git pull`,
+    before any `home-manager switch`.** `analyze-service-index-backup`, `handoff-index-sync`
+    and `present-regen` each set a **closed** `Environment=PATH=…`; measured live with
+    `systemctl --user show <u> -p Environment`, **none contained any `cairn` path**, while the
+    PR had added an unguarded module-level `cairn_pin.ensure()` (which raises by design) to
+    `backup.py` and `handoff_doc.py`. Matrix: base `IMPORT OK` → head `CairnPinUnresolved`.
+    The units `ExecStart` the WORKING-TREE copy, which is why "no switch was performed" did
+    not scope the risk away.
+  - **🔴2 — the PR's own new code was unreachable on every host.** `present/measure.py:1037`
+    still gated on the deleted `scripts/lib/subsystem_recall.py`, so the `cairn_pin.ensure()`
+    16 lines below could never run. #2 was MASKING a third instance of #1.
+  - Fixed at `0a331066`; round-1 claims block posted to the PR as an **issue** comment
+    (`#issuecomment-5641736094` — a REVIEW comment would be invisible to `audit-dispatch.py`).
+  - **Round 2 (delta, blind, `acc9ee6a..0a331066`) was IN FLIGHT at this write.** Its result
+    is not in this doc. Per the ladder, the first round that returns no finding needing a fix
+    is the last.
 
-- **The mechanism was DECIDED this session, and the reason is measurable rather than
-  stylistic:** a new `scripts/lib/cairn_pin.py` resolves the pinned lib dir from `CAIRN_LIB`,
-  else from `shutil.which("cairn")` → `realpath` → `libexec/cairn/lib`, and **refuses loudly**
-  with no silent fallback (the devrc copies will not exist to fall back to). It **APPENDS**
-  the pinned dir after devrc's own `scripts/lib`, so devrc's `timeouts.py` — which is NOT one
-  of the five and is used by `cairn_who`, `claim-work` and browser-bridge — cannot be shadowed
-  by the store copy, with a seam guard asserting the overlap set is exactly `{timeouts}` and
-  failing when it GROWS or SHRINKS. 🔴 **An env var alone was rejected on evidence, not taste:**
-  `nix/sessionVariables.nix` lands in profile.d, which an agent's non-interactive `zsh -c` does
-  not source — the same caveat that file already records for `CAIRN_MIRROR_ROOT`.
+- **Still true and carried forward:** the fork decision stands — **CONSOLIDATE ONTO THE PIN,
+  operator, 2026-09-08, not to be re-asked.** The pinned client went live via
+  `home-manager switch` on 2026-09-09, **generation 713, rollback point 712** — the only record
+  of which generation to roll back to. Deployed pin is `cairn-c84c142`. The **laptop is still
+  unreachable** (2026-09-11: 100% packet loss, `ssh: No route to host` on 192.168.50.155), so
+  cross-host agreement stays `NOT COMPARED — 1 of 2 hosts`.
 
-- ✅ **2026-09-10 — THE THREE OPERATOR-BLOCKED RANKS ARE MERGED, DEPLOYED AND EXERCISED.**
-  Four PRs landed, each verified on its mainline BY CONTENT (a squash is never an
-  ancestor, so `merge-base --is-ancestor` reads false forever and is not the check):
-  - `ZacxDev/homelab-infra` **#785** squash `37b5a71f8` — rank 11, the `cairn` scope.
-  - `ZacxDev/homelab-infra` **#787** squash `936692ec7` — rank 13's deploy half **+ rank 7**.
-  - `ZacxDev/homelab-infra` **#786** squash `4c890c7ac` — rank 20, the third CI leg.
-  - `innovation-upstream/devrc` **#1447** squash `719519fa9` — this doc + the cross-repo
-    `flake.nix` retraction.
-  Rank 20 remains **HALF**: the leg is live, listed on real PRs, and has PASSED in-cluster
-  emitting its classifier string — but the other half, the leg going RED when the pinned
-  client is stubbed, needs a deliberate red on shared CI and is an operator call.
+- **Carried forward so the REPLACE does not drop them:**
+  - The **mechanism**, which the PR implements and which is not re-litigated: `cairn_pin.py`
+    resolves the pinned lib from `CAIRN_LIB`, else `shutil.which("cairn")` → `realpath` →
+    `libexec/cairn/lib`, validated on a two-file marker set, and **refuses loudly** — no silent
+    fallback, because the devrc copies no longer exist to fall back to. It **APPENDS** after
+    devrc's own `scripts/lib` so devrc's `timeouts.py` cannot be shadowed, with a seam guard
+    asserting the overlap set is exactly `{timeouts}` and failing if it GROWS or SHRINKS. An env
+    var alone was rejected on evidence: `nix/sessionVariables.nix` lands in profile.d, which a
+    non-interactive `zsh -c` does not source. 🔴 Round 1 proved the corollary the hard way — a
+    **systemd unit** does not source it either, which is 🔴1 above.
+  - **The three operator-blocked ranks merged 2026-09-10**, each verified on its mainline BY
+    CONTENT (a squash is never an ancestor): `ZacxDev/homelab-infra` **#785** `37b5a71f8`
+    (rank 11, the `cairn` scope), **#787** `936692ec7` (rank 13 deploy + rank 7), **#786**
+    `4c890c7ac` (rank 20, the third CI leg), `innovation-upstream/devrc` **#1447** `719519fa9`.
+  - **`innovation-upstream/devrc` #1472** (three rank headings contradicting their own closure
+    notes) re-checked 2026-09-11: **still OPEN**, `mergedAt: null`.
+  - This doc's own previous update merged as **`21f2c162`** (#1492).
 
-- 🔴 **STILL OPEN AND UNTOUCHED, stated so the slice-3 dispatch does not read as completeness:**
-  rank 4 (`civitai/talos-infra#1414`), rank 8 (§10 session-capture decisions), rank 18 (three
-  deferred findings), rank 21, rank 23. **Rank 22 is claimed by ANOTHER SESSION**
-  (`cairn-oss-multi-instance-22`) — do not take it.
-
-- **Rank 3's OTHER residual, re-checked live 2026-09-11 and UNCHANGED: the laptop is still
-  unreachable.** `ping -c 2 192.168.50.155` → **2 transmitted, 0 received, 100% packet loss**;
-  `ssh -o ConnectTimeout=5` → **`No route to host`**. It is blocked on the host being powered
-  on, not on a decision, and cross-host agreement stays `NOT COMPARED — 1 of 2 hosts reported
-  a landed sha`. ⚠ Both readings were taken through `| tail`, so the printed `RC=0` is
-  `tail`'s status, not the probe's — the CONTENT is the evidence here, not the code.
-
-- **Carried forward (durable facts a REPLACE would otherwise drop):** the pinned client went
-  live via `home-manager switch --flake <origin/main worktree>#zach --impure` on 2026-09-09,
-  **generation 713, rollback point 712** — the only record of which generation to roll back to.
-  `ZacxDev/cairn` stood at **ELEVEN merged PRs, NONE open** (2026-09-09); the deployed pin is
-  `cairn-c84c142` (`readlink -f ~/.local/bin/cairn` →
-  `/nix/store/xxjx0h1mrszgl00sgscx54bkngfava86-cairn-c84c142/bin/cairn`, re-read 2026-09-11).
-
-- **Claims:** `-11` and `-13` RELEASED; **`-20` still HELD** (half two of its closing condition
-  is unmet — release it if you decide not to pursue that half); **`-3` HELD by this session's
-  in-flight work.**
-
-- ⚠ **No clawgate task was recorded for this session.** `clawgate_handoff.sh resolve` exited
-  **5** — 0 tasks — with its positive control green (the same endpoint returned 1 link for
-  another session id), so the board was reached and this zero is a real reading. It is NOT
-  proof the session id under test is right: a wrong id also answers 200 with an empty array.
+- 🔴 **STILL OPEN AND UNTOUCHED:** rank 4 (`civitai/talos-infra#1414`), rank 8, rank 18,
+  rank 21, rank 23. **Rank 22 is claimed by ANOTHER SESSION** — do not take it. Rank 20
+  remains HALF (the leg must be watched to go RED when the pinned client is stubbed).
 
 ## Open investigations — live diagnosis state
 
@@ -687,6 +686,46 @@ about what devrc would gain or lose. Do not re-derive this — verify it still h
   test files that assert the *unsanitised* strings (``subsystem_touch.py --validate`` where the
   pin says ``a writer --validate``) should be updated or deleted as cairn-owned. The brief says
   update the expectation to the PINNED string and never weaken an assertion to a substring.
+
+### The root cause behind BOTH round-1 blockers — an environment claim measured from the wrong shell
+🔴 One sentence, and it generalises past this PR: **every environment claim in #1508's body was
+measured from a shell that has `cairn` on PATH, and the three environments that decide whether
+this repo's SCHEDULED work runs do not.** That is why a 22,000-test green suite and three green
+Tekton legs sat on top of two deploy-blockers.
+- **Symptom + exact repro:** `env -i PATH=<the unit's own closed PATH> HOME=… python3 -c
+  'import handoff_doc'`, and the same for `scripts/analyze-service-index/backup.py`. Read the
+  PATH from the LIVE unit — `systemctl --user show <unit> -p Environment` — never from
+  `nix/home.nix`, and never from your own shell.
+- **Observed (with values):** base `IMPORT OK` / head `CairnPinUnresolved`, both modules, same
+  env each arm. The three units' PATHs contain git/age/kubectl/coreutils/nix/bash and **no
+  `cairn`**. `handoff-index-sync.timer` fires hourly, so the window was ~5 h at discovery.
+  via: measurement
+- 🔴 **Ruled out: that a `home-manager switch` was the trigger, i.e. that "we did not switch"
+  bounded the risk.** All three units `ExecStart` `%h/workspace/devrc/scripts/…` — the working
+  tree — so the break lands on `git pull`, not on switch. via: code
+- 🔴 **Ruled out: that widening PATH to `%h/.local/bin` is the fix for all three.**
+  `analyze-service-index-backup.service` sets `ProtectHome=tmpfs`, so that symlink does not
+  exist inside its namespace. The fix is `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib` in each
+  unit's `Environment`. via: measurement
+- 🔴 **The guard that let it ship green is the durable lesson.** `_unit_shaped_env`
+  (`scripts/tests/test_analyze_service_index_backup.py:2417`) had the docstring *"`env -i` plus
+  exactly what nix/home.nix sets … NOT `dict(os.environ)`"* over a body reading
+  `{"PATH": os.environ["PATH"], …}` — **a description wider than its implementation, on the only
+  probe claiming to model that environment**, so the one dimension that decided the outcome was
+  a pass-through. via: code
+- **Next probe:** none for the diagnosis. The generalisable check: when a change adds a hard
+  import-time requirement, enumerate every **scheduled** consumer (systemd unit, cron, container
+  ENTRYPOINT) and re-run the import under that consumer's OWN environment, not yours.
+
+### `--emit-claims`, and why a delta round can be structurally impossible
+- **Symptom + exact repro:** `audit-dispatch.py <pr> --round 2` REFUSES when no parseable
+  `audit-claims` block exists on the PR.
+- **Observed:** round 1 produced no block because `--emit-claims` was never run, so round 2 had
+  to be unblocked by posting one by hand. 🔴 It must be an **ISSUE** comment:
+  `gh pr view --json comments` does not return REVIEW comments, so a block posted as a review is
+  invisible to the script while looking perfectly present to a human. via: command
+- **Next probe:** none. Run `--round N --emit-claims --audited <the tip that round READ>` as part
+  of closing every round, not as a separate remembered step.
 
 ## Next steps (ranked)
 
@@ -1883,6 +1922,20 @@ covers; pin it with `--config`, do not `cd`.
   `$out/libexec/cairn/cairn` and `$out/libexec/cairn/lib/*.py`. Anything deriving the lib dir
   from `which cairn` is depending on that shape, so a cairn layout change must fail a devrc
   test rather than the operator's next `recall`.
+
+- 🔴 **`audit-dispatch.py`'s `WHERE TO WORK` says "dispatch with `isolation: worktree`" — and
+  that is WRONG whenever the session's cwd is a different repo than the PR.** The script reports
+  on the checkout IT was run in; the flag worktrees the CALLER's cwd. Run from a
+  `datapacket-talos` session against a devrc PR, following it hands the auditor a worktree of the
+  wrong repository. Both audit rounds here were dispatched with an explicit override and a
+  hand-written `refs/pull/<n>/head` fetch + detached `worktree add`.
+- **A handoff branch can merge under you mid-session.** #1492 merged as `21f2c162` while this
+  work was in flight and its branch was deleted upstream, so a `worktree add` on that branch
+  silently checked out the stale PRE-SQUASH local ref. `git fetch origin <branch>` failing with
+  `couldn't find remote ref` is the tell — always re-base a doc update on fresh `origin/main`.
+- ⚠ **Left behind deliberately:** `refs/remotes/origin/pr/1508` in `~/workspace/devrc` (created
+  by the audit worktrees; inert, `git update-ref -d` when the arc closes), and the worktree
+  `/tmp/wt-cairn-slice3`, kept in case CI comes back red.
 
 ## How to verify
 
