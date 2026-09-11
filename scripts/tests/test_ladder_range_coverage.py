@@ -225,6 +225,42 @@ def test_interior_and_tail_gaps_are_reported_as_SEPARATE_totals(lrc, ad,
     assert "TAIL      4 line(s)" in rendered
 
 
+def test_the_zero_line_gap_caveat_is_DERIVED_from_this_run(lrc, ad, base_repo):
+    """🔴 Regression. That caveat shipped as the literal "Three of the 20 ladders
+    look like that" — the figure from the devrc run it was written during — and
+    then printed verbatim under a 5-ladder run of a different repo. A count in
+    prose beside a measurement it is not computed from is the defect class this
+    whole report exists to find.
+
+    The fixture makes a gap of real COMMITS with ZERO churn, which is what an
+    upstream bring-in looks like: commits that `--not <base>` excludes entirely.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    # Commits already in `main`, so `--not main` excludes every line of them:
+    # reachable from the branch, contributing no churn.
+    _git(repo, "checkout", "--quiet", "main")
+    upstream = _commit(repo, "upstream.py", 12, "an upstream commit")
+    _git(repo, "checkout", "--quiet", "feat")
+    _git(repo, "merge", "--quiet", "--no-edit", "main")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 10, head, "main",
+                           [_block(1, base, r1_to)])
+
+    tail = L.adjacencies[-1]
+    assert tail.label == lrc.GAP, (tail.label, tail.reason)
+    assert tail.commits and tail.commits > 0, "the gap has real commits"
+    assert (tail.added, tail.deleted) == (0, 0), \
+        "`--not main` must exclude the bring-in's lines"
+
+    rendered = lrc.render([L], [])
+    assert "1 gap(s) in THIS run look like that" in rendered
+    assert "the 20 ladders" not in rendered, \
+        "a hardcoded corpus figure is being printed for an unrelated run"
+    assert upstream
+
+
 def test_an_overlap_is_labelled_OVERLAP_and_given_no_size(lrc, ad, base_repo):
     """Two ranges covering the same commits double-count, which is the OPPOSITE
     error from a gap. Reporting it as a 0-line gap would hide it."""
