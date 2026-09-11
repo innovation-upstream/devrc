@@ -49,6 +49,7 @@ import importlib.util
 import json
 import os
 from testlib import hermetic_git  # noqa: E402
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
@@ -3020,11 +3021,30 @@ class TestSharedPrimitivesAreReused:
             "the writer re-spelled the scope-derivation rule instead of "
             "importing it"
         )
-        assert st.scope_for_repo(ROOT) == rc.scope_for_repo(ROOT), (
-            "the writer's wrapper and the reader disagree about this repo's "
-            "scope — the silent total failure above, arrived at through the "
-            "wrapper rather than through two copies"
-        )
+        # ⚠ A THROWAWAY `git init`, NOT THIS REPO — the authoritative tier runs
+        # against a `cp -r` with no `.git`, so naming ROOT here would make this
+        # guard red in the tier that gates and green in the one that does not.
+        # `test_scope_for_repo_agrees_with_the_cli_it_was_extracted_from` below
+        # builds its subject the same way, for the same reason.
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "some-repo"
+            repo.mkdir()
+            env = {
+                "HOME": td,
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                **hermetic_git.MAINTENANCE_OFF,
+                "PATH": __import__("os").environ.get("PATH", ""),
+            }
+            subprocess.run(
+                ["git", "-C", str(repo), "init", "-q", "-b", "main"],
+                env=env, check=True,
+            )
+            assert st.scope_for_repo(repo) == rc.scope_for_repo(repo) == "some-repo", (
+                "the writer's wrapper and the reader disagree about a repo's "
+                "scope — the silent total failure above, arrived at through the "
+                "wrapper rather than through two copies"
+            )
 
     def test_the_worktree_rule_survives_the_extraction(self, tmp_path: Path) -> None:
         """`scope_for_repo` was extracted out of `subsystem_touch.main` so both

@@ -407,15 +407,35 @@ def test_devrc_refusal_message_keeps_the_handle_sentence_the_pin_dropped():
     )
 
 
-def test_scope_derivation_still_comes_from_the_pin():
-    """The other half: enriching the message must not have re-forked the RULE."""
+def test_scope_derivation_still_comes_from_the_pin(tmp_path):
+    """The other half: enriching the message must not have re-forked the RULE.
+
+    ⚠ THE SUBJECT IS A THROWAWAY `git init`, NOT THIS REPO. The authoritative
+    tier runs against a `cp -r` of the source tree with NO `.git` in it, so
+    `scope_for_repo(ROOT)` would raise `GitError` there and this guard would be
+    red in the tier that gates rather than in the one that does not. It also
+    keeps the assertion about the RULE instead of about whatever this checkout
+    happens to be called.
+    """
     _pin()
     cairn_pin.ensure()
     import entry_shape  # noqa: PLC0415
     import subsystem_touch as st  # noqa: PLC0415
 
     assert st.derive_scope is entry_shape.derive_scope
-    assert st.scope_for_repo(ROOT) == entry_shape.scope_for_repo(ROOT), (
+
+    repo = tmp_path / "some-repo"
+    repo.mkdir()
+    env = dict(
+        os.environ,
+        HOME=str(tmp_path),
+        GIT_CONFIG_GLOBAL="/dev/null",
+        GIT_CONFIG_SYSTEM="/dev/null",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "init", "-q", "-b", "main"], env=env, check=True
+    )
+    assert st.scope_for_repo(repo) == entry_shape.scope_for_repo(repo) == "some-repo", (
         "devrc's wrapper and the pinned function disagree about a repo's scope — "
         "the silent, total failure the shared module exists to prevent."
     )
