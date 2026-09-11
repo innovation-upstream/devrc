@@ -467,6 +467,42 @@ Both directions, and they do not cancel.
   churn count — shape A of the reference file's range table, working.
 - **The waste audit is devrc-only.** Ladders ran in homelab-talos, civit-datapacket-talos,
   vetr, auditloop, civitai-gpu-fleet and naida-ai; none were churn-measured.
+  ✅ **MEASURED 2026-09-11 — and the population outside devrc is LARGER than devrc's.**
+  `scripts/ladder-range-coverage.py --find-carriers` over each repo (limit 400, all states):
+
+  | repo | PRs scanned | carriers | measured | refused | INTERIOR | TAIL |
+  |---|---|---|---|---|---|---|
+  | homelab-talos | 400 ⚠ hit limit | 68 | 67 | 1 | **88** | 7,314 |
+  | civit-datapacket-talos | 400 ⚠ hit limit | 37 | 37 | 0 | **0** | 2,107 |
+  | vetr (api) | 152 | 13 | 11 | 2 | **0** | 115 |
+  | vetr (app) | 168 | 5 | 5 | 0 | **0** | 18 |
+  | civitai-gpu-fleet | 282 | 6 | 6 | 0 | **0** | 498 |
+  | naida-ai | 214 | **0** | — | — | UNMEASURABLE | — |
+  | auditloop | **0 PRs** | 0 | — | — | UNMEASURABLE | — |
+
+  **129 carriers outside devrc against 70 inside it** (devrc's newest 400 PRs, same command) —
+  so the repo this review measured holds about a third of the ladder work, and the other
+  two-thirds were unmeasured until now.
+  🔴 **THE HEADLINE FINDING INVERTS WHAT devrc SUGGESTS: the interior hole is essentially a
+  devrc phenomenon.** 655 uncovered interior lines across 20 devrc ladders, against **88
+  across 126 external ones** — and all 88 sit in a single repo (homelab-talos, 2 adjacencies).
+  Four of the five measured repos have **zero** interior gaps. The likely mechanism is a devrc
+  *authoring* habit rather than a property of the ladder: titling one comment "rounds N and
+  N+1" and posting a single block for both, which is exactly #1233's shape.
+  ⚠ **TAIL churn is large everywhere (10,052 lines externally) and is NOT a finding yet.** It
+  conflates post-final-block fixes with development that continued after the ladder ended;
+  nothing in the ranges separates them, and classifying it needs the commits read. Do not
+  quote it as unaudited ladder work.
+  ⚠ **Two repos are UNMEASURABLE, each for its own reason, and neither is a pass.** naida-ai
+  ran 214 PRs and posted **no ledger at all**, so there is nothing to measure coverage
+  against — "no ladders ran here" and "ladders ran without blocks" are the same observation
+  from this instrument, and so is "they were fine". auditloop has no PR history in scope.
+  ⚠ **Three caveats on the counts.** (a) Every carrier count is a **FLOOR** — `gh` does not
+  return REVIEW comments, so a block posted as a review is invisible, the same blind spot
+  `audit-dispatch.py` warns about. (b) Two repos **hit the 400-PR scan limit**, so their
+  carrier counts are partial and the real totals are higher. (c) This measures **ALL**
+  carriers, not this review's 2026-08-28 → 09-05 window, so it is a superset and not
+  comparable to the table above row-for-row.
 
 **Over-counts:**
 
