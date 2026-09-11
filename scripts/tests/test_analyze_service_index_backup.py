@@ -2858,18 +2858,25 @@ def _transplant(root: Path, with_ledger: bool) -> Path:
     `Path(__file__).resolve().parents[1] / "testlib"`, so the copy has to sit
     one level under a scripts-like root for either outcome to mean anything.
 
-    🔴 `lib/host_identity.py` GOES IN ON BOTH ARMS, ALWAYS. It is the producer's
-    OTHER hard import (the one owner of `host_label`, shared with the
-    /analyze-service reader and writer), and it is deliberately NOT the variable
-    under test here: omitting it from the `with_ledger=True` arm would make the
-    control fail for the wrong reason and quietly turn the pair below into a
-    measurement of the transplant rather than of the pointer ledger.
+    🔴 THE PRODUCER'S *OTHER* HARD IMPORT GOES IN ON BOTH ARMS, ALWAYS, and it is
+    deliberately NOT the variable under test: omitting it from the
+    `with_ledger=True` arm would make the control fail for the wrong reason and
+    quietly turn the pair below into a measurement of the transplant rather than
+    of the pointer ledger.
+
+    ⚠ THAT IMPORT MOVED. It used to be `lib/host_identity.py`, copied straight
+    out of `scripts/lib/`. devrc deleted its forked copy when it consolidated onto
+    the `cairn` flake pin, so the producer now reaches `host_identity` THROUGH
+    `lib/cairn_pin.py` — which is what has to be transplanted, and which resolves
+    the real module out of the pinned package by itself. Copying a non-existent
+    `host_identity.py` was a `FileNotFoundError` in the fixture, i.e. the pair
+    failed to be a measurement at all rather than failing its claim.
     """
     area = root / "analyze-service-index"
     area.mkdir(parents=True)
     shutil.copy(SCRIPT, area / SCRIPT.name)
     (root / "lib").mkdir(parents=True, exist_ok=True)
-    shutil.copy(SCRIPTS / "lib" / "host_identity.py", root / "lib" / "host_identity.py")
+    shutil.copy(SCRIPTS / "lib" / "cairn_pin.py", root / "lib" / "cairn_pin.py")
     if with_ledger:
         shutil.copytree(SCRIPTS / "testlib", root / "testlib")
     return area / SCRIPT.name

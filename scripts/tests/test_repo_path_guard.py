@@ -18,12 +18,31 @@ with two writers and no reader; a prescribed first command that answers with git
 internals is how it goes back to unread. #965 fixed the DOCS. This file pins the
 deterministic half.
 
-🔴 THE GUARD LIVES IN THE WRITER'S `scope_for_repo`, WHICH IS THE SEAM.
-`subsystem_recall` imports that function precisely so a reader and a writer can
-never disagree about the scope. A second copy of the guard in the reader would
-re-introduce exactly what the shared function exists to prevent, so
-`TestBothCliSurfaces` asserts the two CLIs emit ONE byte-identical message and
-`TestTheWordingLivesInOnePlace` scans the repo for a second copy of the prose.
+🔴 THE GUARD LIVES IN `scope_for_repo`, WHICH IS THE SEAM. The reader and the
+writer both reach it precisely so they can never disagree about the SCOPE. A
+second copy of the guard would re-introduce exactly what the shared function
+exists to prevent, so `TestTheWordingLivesInOnePlace` scans the repo for a second
+copy of the prose.
+
+🔴 THE TWO CLIs NO LONGER PRINT ONE BYTE-IDENTICAL MESSAGE, AND THAT IS A KNOWN,
+DELIBERATE REGRESSION — NOT A DRIFT. devrc consolidated onto the pinned `cairn`
+package (operator decision 2026-09-08), so the READER is now upstream's module
+and prints upstream's SANITISED wording: no sentence naming the pre-exported repo
+handles, and a single "Did you mean --scope X?" that appears only when the scope
+directory exists. devrc's WRITER keeps the fuller message — the handle names, and
+a scope hint with FOUR readings including two distinct `NOT CHECKED` branches —
+by answering the non-directory case at its own boundary before delegating. It
+raises the PINNED `RepoPathMissingError` class, so nothing that matches on the
+class is affected.
+
+Both halves are pinned below as whole hand-written strings:
+`TestTheRefusalNamesTheMistake` is the READER (upstream's words),
+`TestTheWriterKeepsTheFULLERRefusal` is devrc's, and
+`TestBothCliSurfaces::test_the_two_cli_bodies_DIVERGE_and_the_divergence_is_ENUMERATED`
+asserts what the two still share and exactly what they no longer do.
+**Closing condition for the regression:** a `ZacxDev/cairn` change that lets a
+consumer inject an extra remedy/hint into `repo_path_missing_message`, merged and
+the pin bumped — at which point the reader's literals here go back to devrc's.
 
 🔴 EVERY EXPECTATION HERE IS A WHOLE NORMALISED STRING, WRITTEN BY HAND. A
 `"scope" in msg` guard is walkable by a reword that drops the load-bearing half —
@@ -108,14 +127,15 @@ class TestTheRefusalNamesTheMistake:
         code = rc.main(["--repo", SCOPE_IN_STORE, "--store", str(store)])
         err = capsys.readouterr().err.strip()
         assert code == 3
+        # ⚠ UPSTREAM'S WORDING. devrc's own CLI says more — see
+        # `TestTheWriterKeepsTheFULLERRefusal` for the same case, and the module
+        # docstring for why the two diverge.
         assert err == (
             f"subsystem-recall: repo path does not exist: 'ghost-repo' → "
             f"'{cwd}/ghost-repo' (a bare name is resolved against the current "
             f"directory). --repo takes a PATH, not a repo NAME. Pass an absolute "
-            f"path, one of the pre-exported handles ($DEVRC, $HOMELAB, "
-            f"$DATAPACKET, $CIVITAI), or --scope <name>, which names the store "
-            f"directory directly and runs no git at all. The store HAS a "
-            f"`ghost-repo/` scope — you probably meant `--scope ghost-repo`."
+            f"path, or --scope <name>, which names the store directory directly "
+            f"and runs no git at all. Did you mean --scope ghost-repo?"
         )
 
     def test_a_bare_name_with_NO_scope_says_so_instead_of_suggesting_one(
@@ -127,15 +147,16 @@ class TestTheRefusalNamesTheMistake:
         code = rc.main(["--repo", SCOPE_NOT_IN_STORE, "--store", str(store)])
         err = capsys.readouterr().err.strip()
         assert code == 3
+        # ⚠ UPSTREAM'S WORDING: it says NOTHING rather than saying the scope is
+        # absent. That IS the discrimination — the suggestion fires only on a hit
+        # — but it is weaker than devrc's, which says so out loud. devrc's half
+        # is pinned in `TestTheWriterKeepsTheFULLERRefusal`.
         assert err == (
             f"subsystem-recall: repo path does not exist: 'absent-widget' → "
             f"'{cwd}/absent-widget' (a bare name is resolved against the current "
             f"directory). --repo takes a PATH, not a repo NAME. Pass an absolute "
-            f"path, one of the pre-exported handles ($DEVRC, $HOMELAB, "
-            f"$DATAPACKET, $CIVITAI), or --scope <name>, which names the store "
-            f"directory directly and runs no git at all. The store has no "
-            f"`absent-widget/` scope, so `--scope absent-widget` would not help "
-            f"either."
+            f"path, or --scope <name>, which names the store directory directly "
+            f"and runs no git at all."
         )
 
     def test_an_UNREADABLE_store_says_NOT_CHECKED_rather_than_no(
@@ -149,15 +170,18 @@ class TestTheRefusalNamesTheMistake:
         code = rc.main(["--repo", SCOPE_IN_STORE, "--store", str(missing_store)])
         err = capsys.readouterr().err.strip()
         assert code == 3
+        # 🔴 THIS IS THE HALF THE PIN COSTS, AND IT IS THE ONE THIS DOCSTRING IS
+        # ABOUT. Upstream prints the SAME bytes here as for "the store has no
+        # such scope" — so from the reader alone, a store that was never looked
+        # at is indistinguishable from one that was looked at and had nothing.
+        # devrc's writer still says NOT CHECKED and why; see
+        # `TestTheWriterKeepsTheFULLERRefusal::test_an_UNREADABLE_store_still_says_NOT_CHECKED`.
         assert err == (
             f"subsystem-recall: repo path does not exist: 'ghost-repo' → "
             f"'{cwd}/ghost-repo' (a bare name is resolved against the current "
             f"directory). --repo takes a PATH, not a repo NAME. Pass an absolute "
-            f"path, one of the pre-exported handles ($DEVRC, $HOMELAB, "
-            f"$DATAPACKET, $CIVITAI), or --scope <name>, which names the store "
-            f"directory directly and runs no git at all. Whether the store has a "
-            f"`ghost-repo/` scope was NOT CHECKED: store root "
-            f"'{missing_store}' is not a directory."
+            f"path, or --scope <name>, which names the store directory directly "
+            f"and runs no git at all."
         )
 
     def test_an_ABSOLUTE_path_drops_the_cwd_clause(
@@ -172,11 +196,9 @@ class TestTheRefusalNamesTheMistake:
         assert code == 3
         assert err == (
             f"subsystem-recall: repo path does not exist: '{target}'. --repo "
-            f"takes a PATH, not a repo NAME. Pass an absolute path, one of the "
-            f"pre-exported handles ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI), or "
-            f"--scope <name>, which names the store directory directly and runs "
-            f"no git at all. The store has no `not-there/` scope, so `--scope "
-            f"not-there` would not help either."
+            f"takes a PATH, not a repo NAME. Pass an absolute path, or --scope "
+            f"<name>, which names the store directory directly and runs no git "
+            f"at all."
         )
 
     def test_an_ABSOLUTE_path_that_RESOLVES_ELSEWHERE_still_drops_the_clause(
@@ -229,11 +251,9 @@ class TestTheRefusalNamesTheMistake:
         assert code == 3
         assert err == (
             f"subsystem-recall: repo path is not a directory: '{target}'. --repo "
-            f"takes a PATH, not a repo NAME. Pass an absolute path, one of the "
-            f"pre-exported handles ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI), or "
-            f"--scope <name>, which names the store directory directly and runs "
-            f"no git at all. The store has no `notes.md/` scope, so `--scope "
-            f"notes.md` would not help either."
+            f"takes a PATH, not a repo NAME. Pass an absolute path, or --scope "
+            f"<name>, which names the store directory directly and runs no git "
+            f"at all."
         )
 
     def test_a_value_that_NORMALIZES_AWAY_says_NOT_CHECKED_too(
@@ -246,14 +266,25 @@ class TestTheRefusalNamesTheMistake:
         code = rc.main(["--repo", "!!!", "--store", str(store)])
         err = capsys.readouterr().err.strip()
         assert code == 3
+        # 🔴 A DEFECT IN THE PINNED CLIENT, FOUND BY THIS GUARD AND PINNED AS
+        # OBSERVED RATHER THAN PAPERED OVER. `normalize_ref("!!!")` folds to the
+        # EMPTY string, and upstream's hint asks `(store_root / "").is_dir()` —
+        # which is the store root itself, so it is always true and the message
+        # ends `Did you mean --scope ?`. That names no scope at all, and
+        # `--scope ""` recalls nothing. devrc's own version guards `if not name`
+        # and says NOT CHECKED instead, pinned in
+        # `TestTheWriterKeepsTheFULLERRefusal::test_a_value_that_NORMALIZES_AWAY_still_says_NOT_CHECKED_too`.
+        #
+        # It is pinned AS IT BEHAVES so the suite states the truth about the
+        # deployed client. **Closing condition:** a `ZacxDev/cairn` PR making the
+        # hint require a non-empty normalised name, merged and the pin bumped —
+        # at which point this literal goes red and is updated in the same commit.
         assert err == (
             f"subsystem-recall: repo path does not exist: '!!!' → '{cwd}/!!!' (a "
             f"bare name is resolved against the current directory). --repo takes "
-            f"a PATH, not a repo NAME. Pass an absolute path, one of the "
-            f"pre-exported handles ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI), or "
-            f"--scope <name>, which names the store directory directly and runs "
-            f"no git at all. Whether the store has a matching scope was NOT "
-            f"CHECKED: that value does not normalize to a scope name."
+            f"a PATH, not a repo NAME. Pass an absolute path, or --scope <name>, "
+            f"which names the store directory directly and runs no git at all. "
+            f"Did you mean --scope ?"
         )
 
 
@@ -293,17 +324,28 @@ class TestBothCliSurfaces:
             f"`ghost-repo/` scope — you probably meant `--scope ghost-repo`."
         )
 
-    def test_the_two_cli_bodies_differ_ONLY_by_their_program_prefix(
+    def test_the_two_cli_bodies_DIVERGE_and_the_divergence_is_ENUMERATED(
         self, store: Path, cwd: Path, capsys
     ) -> None:
-        """INVARIANT GUARD — measured green at `9bc7f5eb` too, because the raw
-        `GitError` it used to print was also identical across the two CLIs. It is
-        counted as one, not as regression coverage.
+        """🔴 THE REGRESSION, PINNED AS A RELATIONSHIP RATHER THAN HIDDEN.
 
-        It earns its place anyway: the pin above is two hand-written literals, so
-        it would survive the two CLIs drifting apart as long as somebody updated
-        both. This one compares the emitted bytes to each other, and so fails on
-        a drift no literal was updated for.
+        This test used to assert the two CLI bodies were byte-identical bar the
+        program prefix. They are not, since devrc consolidated onto the pinned
+        `cairn` package: the READER is upstream's module and prints upstream's
+        SANITISED wording. Weakening the old assertion to a substring would have
+        made the loss invisible, and deleting it would have left nothing watching
+        the seam at all. So it asserts THREE things instead:
+
+          1. what the two still SHARE — the whole diagnosis up to the remedy,
+             which is what `scope_for_repo` guarantees and is the part that
+             matters for "which mistake did I make";
+          2. exactly what devrc's carries and upstream's does NOT — enumerated,
+             so a future pin that restores one of them fails here and tells the
+             reader to simplify;
+          3. that upstream's is a strict PREFIX-sharing subset in content, not a
+             different diagnosis — the two must never disagree about the FACT.
+
+        Closing condition for the divergence is in the module docstring.
         """
         rc.main(["--repo", SCOPE_IN_STORE, "--store", str(store)])
         read_err = capsys.readouterr().err.strip()
@@ -315,10 +357,41 @@ class TestBothCliSurfaces:
              "--writer", "handoff"]
         )
         write_err = capsys.readouterr().err.strip()
-        assert read_err.removeprefix("subsystem-recall: ") == write_err.removeprefix(
-            "subsystem-touch: "
+
+        shared = (
+            f"repo path does not exist: 'ghost-repo' → '{cwd}/ghost-repo' (a bare "
+            f"name is resolved against the current directory). --repo takes a "
+            f"PATH, not a repo NAME. Pass an absolute path, "
         )
-        assert read_err != write_err, "premise gone: the prefixes are identical"
+        assert read_err == "subsystem-recall: " + shared + (
+            "or --scope <name>, which names the store directory directly and "
+            "runs no git at all. Did you mean --scope ghost-repo?"
+        ), "the PINNED reader's wording moved — re-read it before editing this"
+        assert write_err == "subsystem-touch: " + shared + (
+            "one of the pre-exported handles ($DEVRC, $HOMELAB, $DATAPACKET, "
+            "$CIVITAI), or --scope <name>, which names the store directory "
+            "directly and runs no git at all. The store HAS a `ghost-repo/` "
+            "scope — you probably meant `--scope ghost-repo`."
+        ), "devrc's own wording moved — that is a devrc regression, not a pin one"
+
+        # (2) the enumerated delta. Each of these is a devrc-specific fact the
+        # packaged client cannot state, so its absence upstream is expected.
+        for devrc_only in ("$DEVRC", "$HOMELAB", "$DATAPACKET", "$CIVITAI"):
+            assert devrc_only in write_err
+            assert devrc_only not in read_err, (
+                f"the PINNED reader now names {devrc_only}. If upstream grew a "
+                f"way to inject the handle sentence, this divergence is CLOSED — "
+                f"point the reader literals in this file back at devrc's wording "
+                f"and delete this loop."
+            )
+
+        # (3) same diagnosis, different remedy depth.
+        assert read_err.startswith("subsystem-recall: " + shared)
+        assert write_err.startswith("subsystem-touch: " + shared), (
+            "the two CLIs disagree about WHAT WENT WRONG, not merely about how "
+            "much help to offer. That is the reader/writer disagreement "
+            "`scope_for_repo` exists to make impossible."
+        )
 
     def test_git_is_NEVER_INVOKED_for_a_path_that_is_not_a_directory(
         self, store: Path, cwd: Path, capsys, monkeypatch: pytest.MonkeyPatch
@@ -413,6 +486,90 @@ class TestPreservedBehaviour:
         # green if this path started failing for a different reason.
         assert code == 0
         assert f"scope={SCOPE_IN_STORE}" in out
+
+
+class TestTheWriterKeepsTheFULLERRefusal:
+    """🔴 THE HALF devrc STILL OWNS, and the reason `scope_for_repo` is a wrapper.
+
+    Upstream's message drops the repo-handle sentence and collapses devrc's
+    four-reading scope hint to one branch. devrc answers the non-directory case
+    at its own boundary before delegating, so its CLIs keep both. Every literal
+    here is a whole hand-written string, for the reason in the module docstring:
+    a keyword guard is walkable by a reword that drops the load-bearing half, and
+    the load-bearing half is the LAST sentence.
+
+    The MATCHES-a-scope branch is pinned by
+    `TestBothCliSurfaces::test_the_WRITER_cli_refuses_with_THE_SAME_SENTENCE`;
+    this class covers the three branches upstream no longer distinguishes.
+    """
+
+    @staticmethod
+    def _writer(args: list[str]) -> int:
+        # `--template` refuses without `--writer` (exit 2) BEFORE the repo path
+        # is resolved, so both are supplied to reach the check under test.
+        return st.main(args + ["--template", "widget", "--writer", "handoff"])
+
+    def test_a_bare_name_with_NO_scope_still_says_so(
+        self, store: Path, cwd: Path, capsys
+    ) -> None:
+        """A suggestion that fires either way is decoration. Upstream prints
+        nothing here; devrc says the scope is absent, which is a different and
+        more actionable statement than silence."""
+        code = self._writer(["--repo", SCOPE_NOT_IN_STORE, "--store", str(store)])
+        err = capsys.readouterr().err.strip()
+        assert code == 3
+        assert err == (
+            f"subsystem-touch: repo path does not exist: 'absent-widget' → "
+            f"'{cwd}/absent-widget' (a bare name is resolved against the current "
+            f"directory). --repo takes a PATH, not a repo NAME. Pass an absolute "
+            f"path, one of the pre-exported handles ($DEVRC, $HOMELAB, "
+            f"$DATAPACKET, $CIVITAI), or --scope <name>, which names the store "
+            f"directory directly and runs no git at all. The store has no "
+            f"`absent-widget/` scope, so `--scope absent-widget` would not help "
+            f"either."
+        )
+
+    def test_an_UNREADABLE_store_still_says_NOT_CHECKED(
+        self, tmp_path: Path, cwd: Path, capsys
+    ) -> None:
+        """🔴 THE CONFIDENT ZERO THIS REPO IS MOSTLY ABOUT, and the single most
+        valuable sentence the pin dropped. "the store has no such scope" and "the
+        store was never looked at" are different facts with different next moves;
+        upstream's message renders them identically."""
+        missing_store = tmp_path / "no-store-here"
+        code = self._writer(["--repo", SCOPE_IN_STORE, "--store", str(missing_store)])
+        err = capsys.readouterr().err.strip()
+        assert code == 3
+        assert err == (
+            f"subsystem-touch: repo path does not exist: 'ghost-repo' → "
+            f"'{cwd}/ghost-repo' (a bare name is resolved against the current "
+            f"directory). --repo takes a PATH, not a repo NAME. Pass an absolute "
+            f"path, one of the pre-exported handles ($DEVRC, $HOMELAB, "
+            f"$DATAPACKET, $CIVITAI), or --scope <name>, which names the store "
+            f"directory directly and runs no git at all. Whether the store has a "
+            f"`ghost-repo/` scope was NOT CHECKED: store root "
+            f"'{missing_store}' is not a directory."
+        )
+
+    def test_a_value_that_NORMALIZES_AWAY_still_says_NOT_CHECKED_too(
+        self, store: Path, cwd: Path, capsys
+    ) -> None:
+        """The fourth reading. `normalize_ref` returns "" for input that folds
+        away entirely, and "" is not a ref — so checking the store for it, or
+        claiming a `/` scope is absent, would both answer a question nobody
+        asked."""
+        code = self._writer(["--repo", "!!!", "--store", str(store)])
+        err = capsys.readouterr().err.strip()
+        assert code == 3
+        assert err == (
+            f"subsystem-touch: repo path does not exist: '!!!' → '{cwd}/!!!' (a "
+            f"bare name is resolved against the current directory). --repo takes "
+            f"a PATH, not a repo NAME. Pass an absolute path, one of the "
+            f"pre-exported handles ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI), or "
+            f"--scope <name>, which names the store directory directly and runs "
+            f"no git at all. Whether the store has a matching scope was NOT "
+            f"CHECKED: that value does not normalize to a scope name."
+        )
 
 
 # =============================================================================
