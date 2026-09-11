@@ -735,7 +735,7 @@ it routes the mandated check back at a client that does not run it, re-opening t
 10. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`.**
     forcing: none — done
 
-11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.**
+11. ✅ **DONE 2026-09-10 — the `cairn` scope is in the store token's allowlist.**
     **RE-VERIFIED LIVE 2026-09-08, still refused:** `cairn create --scope cairn --ref
     rank11-probe --file <f>` → **rc 6**, `🔴 cairn: the store REFUSED the write [not-found]`.
     Nothing was written. The local cache still holds **23** scopes with `cairn` absent, and
@@ -778,8 +778,8 @@ it routes the mandated check back at a client that does not run it, re-opening t
     belongs to that session, so it was not removed here.
     forcing: security — the repo is public and this gate is the reason it can be
 
-13. 🔨 **PUBLISH PATH BUILT AND MERGED — `ZacxDev/cairn` #8, squash `3167e44`. THE PUBLISH
-    ITSELF IS AN OPERATOR STEP AND HAS NOT HAPPENED.** ⚠ **The "decide nix vs Dockerfile"
+13. ✅ **DONE 2026-09-10 — PUBLISHED AND SERVING.** The path was `ZacxDev/cairn` #8 squash
+    `3167e44`; the publish itself happened 2026-09-10 and the store now runs the result.** ⚠ **The "decide nix vs Dockerfile"
     premise was the WRONG FORK** and is retired: the deployed image is
     `harbor.homelab.lan/library/subsystem-store-api:0.7.0`, built by **devrc's**
     `scripts/subsystem-store-api/build-push.sh` from the **pre-extraction** server — and
@@ -884,7 +884,7 @@ it routes the mandated check back at a client that does not run it, re-opening t
     (`mode == DEFAULT_MODE and args.scope is None`), so `--scope` still falls back — correct,
     not a bug.
     forcing: none — done
-20. **Wire `checks.cairn-client-runs` into CI — it currently runs only on demand.**
+20. 🔨 **WIRED AND RUNNING 2026-09-10; ONE HALF OF THE CLOSING CONDITION REMAINS.**
     `devrc-ci-pipeline.yaml` (in the infra repo, NOT devrc) hardcodes exactly two legs:
     `LEG` ∈ {`pytests`, `nodetests`}, built as `.#checks.x86_64-linux.${LEG}`. Measured
     2026-09-09: **2** static `value:` assignments, no `nix flake check`, no loop — so a third
