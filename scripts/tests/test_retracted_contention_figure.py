@@ -38,7 +38,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
-from testlib.public_ip_scan import repo_files  # noqa: E402
+from testlib.public_ip_scan import SKIP_SUFFIXES, repo_files  # noqa: E402
 
 # The figure, in the spellings it has actually been written in.
 #
@@ -48,33 +48,47 @@ from testlib.public_ip_scan import repo_files  # noqa: E402
 # WRONG instruction to delete an unrelated measurement. The figure is always a
 # duration, so the unit is what separates it from every other 48.9.
 #
+# 🔴 `min(?:ute)?s?` BECAUSE `min\b` IS A SPELLING, NOT A UNIT. An earlier
+# draft demanded exactly `min` while its own comment said "the unit is what
+# separates it" — so `48.9 minutes at 6+ overlapping`, `14.5 minutes alone`,
+# `48.9 mins` and `the 48.9-minute figure` were ALL invisible, every one of
+# which the pre-fix pattern had caught. That is the regression this guard
+# exists for, re-opened by the fix that narrowed it. Measured: all four now
+# match, and the three false positives above still do not.
+#
 # 🔴 `[-\s]*` because the HYPHENATED spelling is the one CLAUDE.md's own
 # retraction uses ("the 14.5-min baseline"), and so does this file's sibling
 # note in `scoped-tests.sh`. `\b14\.5\s*min\b` did not match it, so a
 # re-assertion written "14.5-min at 0 overlap" was invisible to the whole guard.
-FIGURE = re.compile(r"\b48\.9[-\s]*min\b|\b14\.5[-\s]*min\b", re.I)
+FIGURE = re.compile(
+    r"\b48\.9[-\s]*min(?:ute)?s?\b|\b14\.5[-\s]*min(?:ute)?s?\b", re.I)
 
 # How much normalised text around each match is pinned.
 CONTEXT = 90
 
-# ⚠ A THIRD TEST WAS DELETED HERE, DELIBERATELY. It asserted "a retraction
-# appears near the figure" and was kept as a second angle after the count
-# version failed. Once the ledger pinned TEXT it became subsumed: the
-# `unledgered` check below fails for ANY file carrying the figure that the
-# ledger does not name, retraction or not — strictly wider than what a
-# proximity test could see. Keeping it bought nothing and cost a false failure
-# on legitimate sites whose retraction sits more than CONTEXT chars from the
-# match. Two guards asserting overlapping things, one wrong at the edges, is
-# worse than one that binds.
+# ⚠ A THIRD TEST WAS DELETED HERE, DELIBERATELY — AND THE COVERAGE OVERLAPS
+# RATHER THAN NESTS. It asserted "a retraction appears within NEAR_LINES=20
+# LINES of the figure". The `unledgered` check below catches what mattered: any
+# file carrying the figure that the ledger does not name. But "strictly wider"
+# was FALSE and is retracted — constructed and measured: a ledgered site whose
+# retraction sits beyond CONTEXT normalised chars can lose that retraction with
+# the digest UNCHANGED, which the deleted test would have caught. Not reachable
+# for the three current sites (their markers fall inside the 90-char windows),
+# so it is latent. 🔴 A FOURTH LEDGER ENTRY INHERITS IT — if you add one, check
+# its retraction marker lands inside the window.
 
 # 🔴 BINARY FILES ARE SKIPPED BY EXTENSION, and `repo_files` does NOT do this —
 # it filters directories only. Read as text with `errors="replace"`, a byte run
-# inside a `.sqlite`/`.woff`/`.zip` can spell the figure between word boundaries
-# and produce a spurious hit nobody can diagnose.
-_BINARY_SUFFIXES = (
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".sqlite", ".db",
-    ".woff", ".woff2", ".ttf", ".zip", ".gz", ".tar", ".wasm",
-)
+# inside a binary can spell the figure between word boundaries and produce a
+# spurious hit nobody can diagnose.
+#
+# 🔴 `testlib`'s OWN SET, not a fourth hand-rolled copy. An earlier draft of
+# this file wrote its own tuple in the same commit whose headline was a
+# one-rule-one-place consolidation, and it diverged both ways (added
+# .sqlite/.db/.tar, omitted .webp/.xz/.zst/.otf/.so/.bin). The two extras this
+# tree actually tracks are kept as a named local addition.
+_EXTRA_BINARY = frozenset({".sqlite", ".db", ".tar"})
+_BINARY_SUFFIXES = SKIP_SUFFIXES | _EXTRA_BINARY
 
 
 def _tracked_text_files():
@@ -99,20 +113,32 @@ def _tracked_text_files():
             continue
 
 
-_COMMENT_LEAD = re.compile(r"^[ \t]*(?:#+|//+|\*)[ \t]?")
+# 🔴 THE `*` BRANCH REQUIRES A FOLLOWING SPACE. Without it this ate one star
+# of a markdown `**BOLD**` run landing at a line start, so rewrapping
+# CLAUDE.md's block changed the pinned window and failed the guard with
+# "the text CHANGED" over an edit that changed no words. MEASURED across 7
+# reflow widths: 3 produced a false failure. `* ` is a markdown bullet or a
+# C continuation line; `**` is emphasis and must survive untouched.
+_COMMENT_LEAD = re.compile(r"^[ \t]*(?:#+[ \t]?|//+[ \t]?|\*[ \t])")
 _WS = re.compile(r"\s+")
 
 
 def _normalised(lines):
     """The file as ONE whitespace-collapsed string, comment markers stripped.
 
-    🔴 THIS IS WHAT MAKES THE PIN REFLOW-SAFE. Stripping the leading `#`/`//`
-    makes a shell-comment rewrap invisible; collapsing whitespace makes a
-    markdown reflow invisible. Both are cosmetic and must not fail this test —
-    CLAUDE.md's retraction lives on one very long wrapped line in a file edited
-    daily, and an earlier line-counting version would have failed a routine
-    reflow with "A COUNT GOING UP IS THE REGRESSION THIS GUARD EXISTS FOR", a
-    false accusation. A REWORD is not cosmetic and must fail.
+    Stripping the leading `#`/`//` makes a shell-comment rewrap invisible;
+    collapsing whitespace absorbs a rewrap's newlines. A REWORD is not cosmetic
+    and must fail.
+
+    ⚠ THIS IS NOT "REFLOW-SAFE BY CONSTRUCTION" — that claim was made in this
+    file, in its sibling comments and in its commit message, and it is FALSE.
+    MEASURED over 7 reflow widths of CLAUDE.md's block: the digest moved at 3
+    of them — a `**BOLD**` run landing at a line start (fixed above), and a
+    hyphen break splitting `re-deriving`. The count version it replaced moved
+    at 1 of the 7, so the swap was justified with a comparison that ran the
+    wrong way. What the swap DOES buy is catching an in-place reword, which no
+    count can. Hyphen-break sensitivity is real and unfixed: if a reflow fails
+    this guard, read the printed text before assuming a reword.
     """
     return _WS.sub(" ", " ".join(_COMMENT_LEAD.sub("", l) for l in lines)).strip()
 
@@ -235,7 +261,10 @@ def test_each_ledgered_site_still_QUOTES_the_figure_rather_than_ASSERTING_it():
               "full suites' with no magnitude; the 20.1-min median and the "
               "60.0s collection cost are NOT retracted and are what justify "
               "scoping.\n"
-              "  Cosmetic reflow does NOT reach here: each file is collapsed to "
-              "one whitespace-normalised string with comment markers stripped "
-              "before matching."
+              "  ⚠ A REFLOW CAN REACH HERE. Most rewrapping is absorbed (the "
+              "file is collapsed to one whitespace-normalised string with "
+              "comment markers stripped), but a hyphen break inside a word "
+              "moves the text. Read the printed window: if the WORDS are "
+              "unchanged and only the breaks moved, it is a reflow — update "
+              "the digest."
         )
