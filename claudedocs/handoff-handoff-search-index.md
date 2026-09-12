@@ -119,6 +119,15 @@ was crowded out.
   judgement calls made reading sessions. Both audits said the same.
 - ⚠ **The laptop contributed 0 `/resume` runs throughout**, measured over ssh rather than
   assumed, so every adoption and yield number in this doc is **workbench-only**.
+  🔴 **UPDATE 2026-09-12: "throughout" is bounded by this doc's own measurement windows, not
+  a permanent state — it has since expired.** Both checkpoints this doc made were correct
+  when made (see the "Residual, NOT measured" bullet below for the exact dates); laptop
+  `/resume` runs resumed afterwards. That does **not** weaken the workbench-only caveat on
+  THIS doc's own adoption/yield numbers, which remain workbench-only exactly as stated —
+  it only means "0 laptop runs" is no longer the live state going forward. A different doc,
+  `claudedocs/handoff-handoff-resume-skill-trace.md`, separately measured laptop `/resume`
+  directly against ClickHouse `activity.events` (a different instrument, a different
+  window) and found a nonzero laptop rate — see that doc rather than re-deriving it here.
 
 ## Open investigations — live diagnosis state
 
@@ -280,6 +289,17 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   below, which supersedes this one's residual.
 - **Residual, NOT measured:** the laptop (still 0 runs) and any repo other than
   `datapacket-talos`.
+  🔴 **EXPIRED 2026-09-12 — this residual no longer holds.** Both of this doc's own
+  checkpoints were correct at the time they were made: post-`#1332` through its ~8.6 h
+  window (2026-09-07T02:25Z baseline, line ~691 below) the laptop genuinely was 0, and the
+  2026-09-08T17:00Z re-run's "laptop STILL 0 runs" (line ~692) was also correct — the first
+  laptop `/resume` session post-`#1332` was **2026-09-08 22:45 UTC**, about 5.8 h after that
+  re-run. Since then, four laptop `/resume` sessions have landed: 2026-09-08 22:45,
+  2026-09-09 06:11, 2026-09-09 16:35, 2026-09-12 06:11 (all UTC) — session id prefixes
+  `fcbe7381`, `11cb641d`, `93b78ca8`, `50c962d8`. ⚠ **Whether any of the four actually
+  invoked `handoff_search.py` is NOT measured here** — say so rather than implying the
+  yield question is answered; this only closes the "0 laptop runs" residual, not the yield
+  one.
 
 ### 🔴 RETRACTED (the yield NUMBER) — does a hit change what a session does? `1 of 20` was an
 ### INSTRUMENT ARTIFACT; the self-hit half of this block still stands
