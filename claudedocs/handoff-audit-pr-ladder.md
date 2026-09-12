@@ -16,14 +16,14 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- Branch / PR: base clone on `main` at `622fc2d8`. **THREE PRs OPEN, NONE MERGED, NOTHING DEPLOYED.**
-- 🔴 **`main` IS RED, and it is NOT this arc's doing.** `scripts/claude-hooks/tests/test_guard_core.py` fails two tests on a clean detached worktree of `origin/main` itself (measured at `3161851b`): `test_every_kill_server_call_site_in_the_repo_is_classified` and `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`. One root cause — two handoff docs from other efforts (`handoff-tmux-webapp.md`, `handoff-mention-system-repos.md`) carry wide-tmux-kill prose and were entered in NEITHER of two separate allowlists. Fix open as **`#1543`**.
-- **`#1532`** — rank 2 shipped: `scoped-tests.sh` now REFUSES to produce a scoped verdict for a shared-surface diff (exit 4). 13 new tests, 3 mutants killed. CI re-running after a fix.
-- **`#1533`** — the `#1431` defect fixed: the battery gained `--print-min-tests` and the guard EXECUTES it instead of regexing source. CI red **only** on the two `main`-inherited failures above.
+- Branch / PR: base clone on `main` at `622fc2d8`. ****ALL FOUR PRs MERGED** (`#1543`→`0b5ee924`, `#1532`→`6fa09466`, `#1533`→`f3e27aa3`, this doc). 🔴 **MERGED WITHOUT CI at the operator's explicit instruction** — not deployed yet.**
+- 🔴 **`main` IS RED, and it is NOT this arc's doing.** `scripts/claude-hooks/tests/test_guard_core.py` fails two tests on a clean detached worktree of `origin/main` itself (measured at `3161851b`): `test_every_kill_server_call_site_in_the_repo_is_classified` and `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`. One root cause — two handoff docs from other efforts (`handoff-tmux-webapp.md`, `handoff-mention-system-repos.md`) carry wide-tmux-kill prose and were entered in NEITHER of two separate allowlists. **FIXED — `#1543` merged (`0b5ee924`).**
+- **`#1532`** — rank 2 shipped: `scoped-tests.sh` now REFUSES to produce a scoped verdict for a shared-surface diff (exit 4). 13 new tests, 3 mutants killed. **MERGED `6fa09466`.**
+- **`#1533`** — the `#1431` defect fixed: the battery gained `--print-min-tests` and the guard EXECUTES it instead of regexing source. **MERGED `f3e27aa3`.** Its CI red was **only** the two `main`-inherited failures above.
 - **Earlier in this session, already MERGED and DEPLOYED:** `#1505` (four-state ssh probe) → `bc67b177`, `#1507` (handoff corrections) → `3a0c77dd`; `ship.sh` converged both hosts to `3a0c77dd` and all four probe states were verified on each host against the deployed artifact.
 - **`#1287`** (`feat/workhost`) is **CLOSED** with the operator's comparison written on it.
 - ✅ **`#1431` is REOPENED (2026-09-10), carrying a comment with a fresh red/green/positive-control matrix. The defect is unchanged and still open; what is closed is the *board lying about it*.** 🔴 This bullet was written by a prior session which said in terms that it must STAY, because the carried-forward pointer is what kept it findable across `State now` replacements — and one update of this doc DROPPED it anyway while re-asserting the superseded claim it had corrected. **It stays.** ⚠ **UPDATE 2026-09-11:** the defect now has a fix open as **`#1533`** (unmerged) — item 1 closes when that merges; **item 2 still needs a human's written dismissal** and no PR can satisfy it. The bullet stays until BOTH are closed.
-- Deploy/verify status: `bc67b177`+`3a0c77dd` deployed AND verified on both hosts. **`#1532`/`#1533`/`#1543` are unmerged and undeployed.**
+- Deploy/verify status: `bc67b177`+`3a0c77dd` deployed AND verified on both hosts. 🔴 **`#1532`/`#1533`/`#1543` are MERGED but NOT DEPLOYED — no `ship.sh` run since.**
 - No `clawgate-task:` recorded: `clawgate_handoff.sh resolve` exited **5** (nothing resolved). Its positive control answered 8 links for another session, so the board is reachable and the token accepted — but a wrong id also answers 200 with an empty array, so this is NOT a clean bill of health.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
@@ -101,14 +101,20 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## Next steps (ranked)
 1. **Round 0 trials 3-5, on ordinary PRs, dispatched BEFORE merge-readiness.** Ledger so far: `ran: 2 · changed the outcome: 2`. Both yielded, but trial 2's report landed *after* its PR merged, so the live question is whether round 0 is fast enough to matter, not whether it finds things. Delete the section if it ran and changed nothing. forcing: none
-2. ✅ **DONE (2026-09-11) — operator DECIDED: implement §10. Shipped as `#1532`** (open, unmerged). A shared-surface diff now refuses a scoped verdict rather than under-running silently. 🔴 **The item's own headline figure was STALE**: it said "a `testlib` change runs 1 of 331 test files"; re-measured across all 24 `scripts/testlib/` modules the range is **0–10, median 1** — `mockbin.py` selects 10 while 69 files across 7 targets reference it; `gitenv.py` selects 2 while spanning 8. Substance right, number wrong, and understated. forcing: none
-3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** ⚠ **A SECOND session (2026-09-11, this one) independently re-derived the same finding** before reading this line — two sessions have now spent time refuting the same false item, which is the cost of leaving a struck item phrased as a task. forcing: none
+2. ✅ **DONE — operator DECIDED 2026-09-11: IMPLEMENT §10. `#1532` is MERGED (`6fa09466`).** A shared-surface diff now REFUSES to produce a scoped verdict (exit 4, naming the path and pointing at `scripts/gate.sh --tier both`) rather than under-running silently. Re-measured first-hand at `018e483b` — and **the item's own headline figure was stale**: it said *"a `testlib` change runs 1 of 331 test files"*; the real range across all 24 `scripts/testlib/` modules is **0–10, median 1**. The substance was right and understated: `mockbin.py` selected **10** while **69** files across **7** targets reference it, and `gitenv.py` selected **2** while spanning **8**. 🔴 **The zero-select cases were already SAFE** (exit 4, verified) — the dangerous ones are the middle, because a run that executes *something* prints `RESULT: PASS`. ⚠ Deliberately NOT covered, and now tracked as item 8: `scripts/scoped-tests.sh` itself is not a trigger, so a change to the mapper is still validated by the mapper. forcing: none
+3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** ⚠ **A SECOND session (2026-09-11) independently re-derived the same finding** before reading this line — two sessions have now spent time refuting the same false item, which is the cost of leaving a struck item phrased as a task. forcing: none
 4. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~27 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deferred by operator sequencing until the trial count resolves. forcing: none
 5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm`. Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
-6. **Merge `#1543` FIRST — it un-reds `main`.** Then `#1532` and `#1533` must be brought onto the fixed base before their CI means anything (`#1533`'s only red is the inherited one).
-   forcing: regression — `main` is red for every contributor until this lands
-7. **Then merge `#1532` + `#1533`, run `scripts/ship.sh`, and verify.** Verification for `#1532` is behavioural, not a green suite: a `scripts/testlib/**` edit must exit 4 naming the trigger, and an ordinary subsystem edit must still scope.
-   forcing: user — the operator asked for merge and ship; it is owed and unfinished
+6. ✅ **DONE — `#1543` merged (`0b5ee924`), `main` un-redded.** It was red on two `guard_core` tests from two handoff docs classified in NEITHER of two separate allowlists.
+   forcing: none
+7. **Ship and verify — `scripts/ship.sh` has NOT been run since these merged.**
+   🔴 **The operator explicitly chose to MERGE WITHOUT CI** (2026-09-11, stated as
+   worth the risk because the queue was blocking other work), so `#1532`, `#1533`
+   and `#1543` landed on **unread checks**. That makes the post-merge verification
+   the only evidence there is, and it is behavioural rather than a green suite:
+   a `scripts/testlib/**` edit must exit 4 naming the trigger, an ordinary
+   subsystem edit must still scope, and the `#1431` `QUICK` control must go red.
+   forcing: user — the operator asked for merge and ship; the ship half is unfinished
 8. **Decide whether `scripts/scoped-tests.sh` itself should be a shared-surface trigger.** Today it is not, so a change to the mapper is validated by the mapper. Flagged on `#1532` rather than added, because it is outside the list the operator approved.
    forcing: none
 9. **`#1431` item 2 needs a human's written dismissal** — item 1 closes when `#1533` merges, but item 2 ("a reader confirms in writing that `5ab273bf`'s mis-named control will not be inherited") can only be satisfied by a person.
@@ -1413,6 +1419,30 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
   `if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi` — **1 passed** while the shell applies **3**.
   🔴 **The positive control is the load-bearing half:** without it, the green on the third row is
   indistinguishable from a guard that never ran.
+- ✅ **THE DEFECT IS NOW FIXED — `#1533`** (open, unmerged). The battery gained
+  `--print-min-tests`, emitted after every assignment and immediately before the run, and the
+  guard EXECUTES it instead of regexing the source. `#1431`'s stated closing condition is MET:
+  with the `QUICK` override present, `test_the_batterys_floor_is_re_derived_from_this_modules_size`
+  **was watched RED**. Control matrix, each mutant isolated, battery restored byte-identical:
+  baseline **1 passed**; `QUICK` conditional override **1 failed**; `MIN_TESTS=$LOW` **1 failed**;
+  floor drift `15`→`9` **1 failed**.
+- 🔴 **AND THE ISSUE'S OWN PRESCRIBED REMEDY WAS NOT SUFFICIENT — found only by RUNNING the
+  control it demanded, instead of assuming the fix satisfied it.** `#1431` proposed *"have the
+  battery print its effective `MIN_TESTS` and assert on that"* as the whole fix. Implemented
+  exactly as written, it closes `MIN_TESTS=$LOW` (the battery reports 4, the guard reddens) and
+  **leaves the `QUICK` case GREEN** — because `--print-min-tests` runs with `QUICK` unset, so the
+  effective floor honestly IS 15 for that invocation, while a `QUICK=1` run floors at 3.
+  **"Effective" is environment-dependent, and no probe can enumerate the environments.** The
+  closing half is therefore STRUCTURAL: exactly one `MIN_TESTS=` assignment anywhere in the file,
+  matched with `^\s*` rather than `^`. 🔴 **The old guard's column-0 anchor is the whole story of
+  why this slipped** — the issue itself recorded that a second numeric assignment "fires the
+  `len(literals) == 1` check", and it does, but only UNINDENTED; the override that beat it was
+  indented inside an `if`. **A remediation written into an issue is a HYPOTHESIS, not a spec.**
+- ⚠ **A mutation in this same run reported `MUTATION DID NOT APPLY (count=2)`** — the literal
+  `MIN_TESTS=15` had become non-unique because the COMMENT explaining the fix quotes it. The
+  `1 passed` printed alongside was meaningless, not a survivor. Re-run against a unique anchor it
+  came back **1 failed**. The battery's own `apply` refuses the same way; an inline mutator needs
+  the same assert or it manufactures false greens.
 
 ### The scoped mapper has no trigger list — a `testlib` change runs 1 test file of 331
 
