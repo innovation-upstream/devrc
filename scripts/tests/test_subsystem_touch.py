@@ -6582,6 +6582,268 @@ def _colliding_blob_pair(bound: int = 20000) -> tuple[bytes, bytes, str]:
     )
 
 
+# -----------------------------------------------------------------------------
+# The SHORT-SHA fixture precondition — devrc#432.
+#
+# 🔴 THE DEFECT THIS CLOSES, because the fix is not obvious from the code it
+# touches. Three tests below feed a THREE-character prefix on purpose: 3 is
+# BELOW `COMMIT_SHA_MIN_CHARS`, which is the entire point of the guard they
+# exercise, so "use more characters" is NOT an available remedy — it would
+# delete the coverage.
+#
+# But a 3-hex prefix has only 4096 values and the fixture repo holds EIGHT
+# objects, so ~1 run in 585 drew a HEAD prefix that named two of them. git then
+# raised `CommitAmbiguousError`, the mutant died of the WRONG guard, and the
+# assertion under test NEVER RAN. Measured by exhaustive enumeration over the
+# only randomness source (the commit timestamp, which is what moves the sha):
+# 7001 of 4,096,000 timestamps = 0.1709%, matching the analytic 7/4096 — and the
+# object model behind that enumeration was validated object-for-object against
+# real git first. It reddened PRs whose diffs could not reach this file, which
+# `claude/RULES.md` names as strictly worse than no gate.
+#
+# THE REMEDY IS BOTH HALVES, deliberately, because neither alone is enough:
+#   * RE-MINT so an ambiguous draw is CORRECTED rather than merely reported — a
+#     precondition alone would convert a 0.17% silent flake into a 0.17% loud
+#     one, which still reddens CI for changes that cannot reach it;
+#   * ASSERT THE PRECONDITION so a draw that re-minting somehow failed to fix
+#     can never masquerade as the guard passing or failing. Re-minting alone
+#     leaves a rare draw silently changing what the test proves.
+# -----------------------------------------------------------------------------
+
+#: How many times `_remint_until_short_sha_is_UNIQUE` may amend HEAD. Each
+#: attempt is an independent ~1-in-585 draw, so the loop's own failure
+#: probability is under 1e-60 — orders of magnitude below anything else that can
+#: fail this suite. It is a bound on a search, not a retry-until-green.
+_SHORT_SHA_REMINTS = 24
+
+#: The sentinel `_assert_short_sha_is_UNIQUE` refuses with. DISTINCT from every
+#: production sentinel on purpose: an ambiguous FIXTURE and an ambiguous
+#: ARGUMENT are different findings, and the whole defect was the second reading
+#: being applied to the first.
+AMBIGUOUS_FIXTURE_SENTINEL = "FIXTURE PRECONDITION: short sha is AMBIGUOUS"
+
+
+def _object_names(repo: Path) -> list[str]:
+    """Every object name in `repo`'s database, loose and packed. READ-ONLY.
+
+    🔴 DELIBERATELY NOT `rev-parse --disambiguate`: that is the very call the
+    module under test makes, and `claude/RULES.md` — "a control that SHARES the
+    step you doubt is a second sample of the same unknown, not a control". It is
+    also documented to require at least 4 hex digits, and the prefix this
+    precondition has to inspect is THREE. `test_the_two_object_oracles_AGREE`
+    pins the two readings against each other so this one cannot go silently
+    narrower than the one production uses.
+    """
+    return _run_git(
+        repo, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"
+    ).split()
+
+
+def _objects_sharing_prefix(repo: Path, prefix: str) -> list[str]:
+    """Every object in `repo` whose name starts with `prefix`, at ANY length."""
+    p = prefix.lower()
+    return [o for o in _object_names(repo) if o.startswith(p)]
+
+
+def _blob_colliding_with(prefix: str, bound: int = 400_000) -> bytes:
+    """Bytes whose blob sha starts with `prefix`.
+
+    Deterministic for a given prefix — sha1 over fixed bytes is fixed forever —
+    so this manufactures the 1-in-585 draw ON DEMAND rather than waiting for it.
+    A 3-hex target needs ~4096 candidates on average; the bound leaves a miss
+    probability around e^-98.
+    """
+    p = prefix.lower()
+    for i in range(bound):
+        c = b"short-sha-collision-fixture-%d\n" % i
+        if _blob_sha(c).startswith(p):
+            return c
+    raise AssertionError(  # pragma: no cover - the search is deterministic
+        f"no blob sha starting with {prefix!r} within {bound} candidates, so the "
+        f"ambiguity this fixture exists to FORCE was never created and every "
+        f"assertion built on it would be vacuous."
+    )
+
+
+def _write_object_colliding_with(repo: Path, prefix: str) -> str:
+    """Put a loose object into `repo` whose name starts with `prefix`.
+
+    Written with `hash-object -w`, so it joins the object database WITHOUT
+    joining any commit — the fixture's history, trees and diffs are untouched
+    and only the ambiguity changes.
+    """
+    _write(repo, "collision-scratch.txt", _blob_colliding_with(prefix).decode())
+    return _run_git(repo, "hash-object", "-w", "--", "collision-scratch.txt").strip()
+
+
+def _assert_short_sha_is_UNIQUE(repo: Path, sha: str, chars: int = 3) -> None:
+    """Refuse, BY NAME, a fixture whose `chars`-hex prefix names >1 object."""
+    sharing = _objects_sharing_prefix(repo, sha[:chars])
+    if len(sharing) != 1:
+        raise AssertionError(
+            f"{AMBIGUOUS_FIXTURE_SENTINEL}: {sha[:chars]!r} names {len(sharing)} "
+            f"object(s) in {repo} ({', '.join(sharing) or 'none'}). A test feeding "
+            f"that prefix would die of `CommitAmbiguousError` BEFORE reaching the "
+            f"guard it exists to exercise, so a green run would prove nothing and a "
+            f"red one would name the wrong guard. Re-mint the fixture — do NOT "
+            f"lengthen the prefix, which is 3 precisely because 3 is below "
+            f"`COMMIT_SHA_MIN_CHARS`."
+        )
+
+
+def _remint_until_short_sha_is_UNIQUE(
+    repo: Path, sha: str, *, chars: int = 3, attempts: int = _SHORT_SHA_REMINTS
+) -> str:
+    """Amend HEAD's message until its `chars`-hex prefix names exactly one object.
+
+    Amending rewrites the COMMIT object only: the tree and the parent are
+    carried over untouched, so the commit's DIFF — the thing every caller here
+    asserts on — cannot move. Returns the (possibly new) full sha.
+    """
+    for i in range(attempts):
+        if len(_objects_sharing_prefix(repo, sha[:chars])) == 1:
+            return sha
+        _run_git(repo, "commit", "--amend", "-m", f"w (re-mint {i})")
+        sha = _run_git(repo, "rev-parse", "HEAD").strip()
+    return sha
+
+
+def _repo_with_unique_short_sha(
+    tmp_path: Path, *rel: str, chars: int = 3
+) -> tuple[Path, str]:
+    """A fixture repo plus a HEAD whose `chars`-hex prefix is UNAMBIGUOUS in it.
+
+    The one construction every short-prefix test in this file goes through —
+    `claude/RULES.md` "one rule, one place": the same latent ambiguity sat
+    open-coded at three sites, and only one of them had ever been seen to fire.
+    """
+    repo = _init_repo(tmp_path, SCOPE)
+    sha = _commit(repo, *rel)
+    sha = _remint_until_short_sha_is_UNIQUE(repo, sha, chars=chars)
+    _assert_short_sha_is_UNIQUE(repo, sha, chars=chars)
+    return repo, sha
+
+
+class TestShortShaFixturePrecondition:
+    """devrc#432 — the 0.17% flake that reddened PRs which could not reach it.
+
+    🔴 EVERY TEST HERE IS DETERMINISTIC. The ambiguity is MANUFACTURED with a
+    brute-forced colliding blob rather than waited for, so the reproduction does
+    not depend on a 1-in-585 draw and neither does the proof that the remedy
+    removes it.
+    """
+
+    def test_the_COLLISION_fixture_really_DOES_collide(self, tmp_path: Path) -> None:
+        """🔴 POSITIVE CONTROL on the instrument. `_objects_sharing_prefix`
+        returning a reassuring 1 is indistinguishable from a reader wired to
+        nothing, so it is shown to MOVE: 1 before the colliding object exists, 2
+        after, on the same repo and the same prefix."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        assert len(_objects_sharing_prefix(repo, sha[:3])) == 1
+        other = _write_object_colliding_with(repo, sha[:3])
+        assert other != sha
+        assert sorted(_objects_sharing_prefix(repo, sha[:3])) == sorted([other, sha])
+
+    def test_the_two_object_oracles_AGREE(self, tmp_path: Path) -> None:
+        """🔴 THE SEAM. The precondition reads `cat-file --batch-all-objects`;
+        production counts candidates with `rev-parse --disambiguate`. A
+        precondition NARROWER than the call it protects would certify a fixture
+        that still flakes, and nothing else in this file would notice."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        _write_object_colliding_with(repo, sha[:3])
+        mine = sorted(_objects_sharing_prefix(repo, sha[:3]))
+        gits = sorted(_run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split())
+        assert len(mine) == 2, mine
+        assert mine == gits, (mine, gits)
+
+    def test_the_PRECONDITION_refuses_an_ambiguous_fixture_BY_NAME(
+        self, tmp_path: Path
+    ) -> None:
+        """The guard itself, reached with NOTHING able to win ahead of it: the
+        repo is well-formed, the sha is a real 40-hex commit, and the ONLY thing
+        wrong is the ambiguity — so the refusal can be attributed to this guard
+        and to no neighbour."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        _write_object_colliding_with(repo, sha[:3])
+        with pytest.raises(AssertionError) as exc:
+            _assert_short_sha_is_UNIQUE(repo, sha)
+        # 🔴 THE LITERAL, not `AMBIGUOUS_FIXTURE_SENTINEL`. Asserting the
+        # constant against a message built from that same constant is an
+        # expectation derived from the implementation — `claude/RULES.md` — and
+        # a mutation sweep proved it: rewriting the constant left this test
+        # GREEN. The literal is what makes the wording a pinned contract.
+        assert "FIXTURE PRECONDITION: short sha is AMBIGUOUS" in str(exc.value)
+        assert AMBIGUOUS_FIXTURE_SENTINEL == "FIXTURE PRECONDITION: short sha is AMBIGUOUS"
+        assert "names 2 object(s)" in str(exc.value)
+
+    def test_the_PRECONDITION_is_SILENT_on_a_clean_fixture(self, tmp_path: Path) -> None:
+        """The other half of the pair: a guard that refused everything would pass
+        the test above while making every fixture unusable."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
+        _assert_short_sha_is_UNIQUE(repo, sha)  # must not raise
+
+    def test_the_REMINT_CONVERGES_from_a_forced_collision(self, tmp_path: Path) -> None:
+        """🔴 THE REGRESSION TEST. Pre-fix there was no re-mint, so this repo —
+        the exact state the 1-in-585 draw produced — went straight into the guard
+        tests and died of `CommitAmbiguousError`. Here the collision is forced,
+        so the failure is reproduced on EVERY run rather than 1 in 585."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        # Forced at FOUR characters, which is the stronger collision: it makes
+        # the 3-hex prefix ambiguous too (the defect's own shape) while staying
+        # observable through the production entry point, whose length guard
+        # refuses 3 before any git runs.
+        _write_object_colliding_with(repo, sha[:4])
+        assert len(_objects_sharing_prefix(repo, sha[:3])) == 2
+        # PRE-FIX STATE, asserted rather than assumed: git really does refuse.
+        with pytest.raises(st.CommitAmbiguousError):
+            st.collect_commit_paths(repo, [sha[:4]])
+        reminted = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        # 🔴 THE PRECONDITION FIRST, on purpose: a re-mint that did nothing must
+        # die of THIS guard's own sentinel, which is what makes the guard
+        # REACHABLE-in-fact rather than merely present. `reminted != sha` would
+        # fail first and attribute the breakage to a different claim.
+        _assert_short_sha_is_UNIQUE(repo, reminted)
+        assert reminted != sha
+        assert st.collect_commit_paths(repo, [reminted[:4]]).commits == (reminted,)
+
+    def test_the_REMINT_does_NOT_change_what_the_commit_CHANGED(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE ANTI-WEAKENING GUARD. A re-mint that moved the tree would leave
+        every caller's path assertion describing a different commit, and each
+        would still be green. The diff and the parent must be identical."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        before = st.collect_commit_paths(repo, [sha])
+        tree_before = _run_git(repo, "rev-parse", f"{sha}^{{tree}}").strip()
+        _write_object_colliding_with(repo, sha[:3])
+        reminted = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        assert reminted != sha
+        assert _run_git(repo, "rev-parse", f"{reminted}^{{tree}}").strip() == tree_before
+        assert st.collect_commit_paths(repo, [reminted]).paths == before.paths
+        assert before.paths == ("src/collector/a.py", "src/collector/b.py")
+
+    def test_the_reminted_fixture_STILL_feeds_a_THREE_character_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The fix must not buy determinism by testing something else. The
+        prefix handed to the guard is still 3 characters, still BELOW
+        `COMMIT_SHA_MIN_CHARS`, and the production module still refuses it."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
+        assert len(sha[:3]) == 3 < st.COMMIT_SHA_MIN_CHARS
+        with pytest.raises(st.CommitRefMalformedError):
+            st.collect_commit_paths(repo, [sha[:3]])
+
+
 class TestCommitPositiveControl:
     """🔴 `claude/RULES.md` → "Positive control — can it ever observe the thing?"
 
@@ -7018,16 +7280,22 @@ class TestCommitNegativeControls:
         """🔴 The measurement behind the bound. `rev-parse --disambiguate` expands
         a 3-character prefix in a small repo — so without the bound a typo
         RESOLVES to a real commit and is reported as a deliberate argument. The
-        guard is not restating git's own refusal; git does not refuse."""
-        repo = _init_repo(tmp_path, SCOPE)
-        sha = _commit(repo, "src/collector/a.py")
+        guard is not restating git's own refusal; git does not refuse.
+
+        ⚠ The fixture comes from `_repo_with_unique_short_sha`, not from a bare
+        `_commit`: a 3-hex prefix has 4096 values against this repo's 8 objects,
+        so ~1 run in 585 drew one that named TWO of them and `expanded == [sha]`
+        was false for a reason with nothing to do with the bound. devrc#432."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
         expanded = _run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split()
         assert expanded == [sha], expanded
 
     def test_the_boundary_is_a_boundary_not_a_slope(self, tmp_path: Path) -> None:
-        """4 is accepted and 3 is not, at the same repo, on the same sha."""
-        repo = _init_repo(tmp_path, SCOPE)
-        sha = _commit(repo, "src/collector/a.py")
+        """4 is accepted and 3 is not, at the same repo, on the same sha.
+
+        ⚠ Same fixture precondition (devrc#432): an ambiguous 4-hex prefix would
+        raise `CommitAmbiguousError` here and read as the boundary having moved."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
         assert st.collect_commit_paths(repo, [sha[:4]]).commits == (sha,)
         with pytest.raises(st.CommitRefMalformedError):
             st.collect_commit_paths(repo, [sha[:3]])
@@ -7549,9 +7817,21 @@ class TestCommitMutationKillMatrix:
     """
 
     def _repo_with(self, tmp_path: Path) -> tuple[Path, str]:
-        repo = _init_repo(tmp_path, SCOPE)
-        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
-        return repo, sha
+        """🔴 devrc#432 — goes through `_repo_with_unique_short_sha`, so HEAD's
+        THREE-hex prefix names exactly one object in this repo.
+
+        `test_kills_the_LENGTH_guard` feeds that 3-character prefix on purpose
+        (3 is below `COMMIT_SHA_MIN_CHARS`, which is the guard's whole point, so
+        "use more characters" would delete the coverage). 4096 prefixes against
+        8 objects made ~1 run in 585 AMBIGUOUS: git raised `CommitAmbiguousError`,
+        the mutant died of the WRONG guard, and the assertion under test never
+        ran. The precondition is applied to the WHOLE class rather than to that
+        one test — `claude/RULES.md` "one rule, one place" — because every
+        sibling reaching git through a prefix inherits the same hazard.
+        """
+        return _repo_with_unique_short_sha(
+            tmp_path, "src/collector/a.py", "src/collector/b.py"
+        )
 
     def test_the_commit_mutant_harness_WORKS(self, tmp_path: Path) -> None:
         """🔴 THE NO-OP CONTROL. An unmutated copy must reach the commit source
