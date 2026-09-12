@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """peer-host — WHICH MACHINE is a given Claude Code peer session running on.
 
-    peer-host <selector> [--json] [--strict] [--host all|workbench|laptop]
+    peer-host <selector> [--json] [--host all|workbench|laptop]
 
 Prints ONE host label (`workbench` / `laptop`) on stdout and exits 0. Nothing
 else goes to stdout, ever — diagnostics are stderr — so a caller can do:
@@ -84,7 +84,9 @@ name really is not live anywhere.
 
 When a UNIQUE match IS found while another host went unread, the answer is a
 positive measurement rather than a default, so it is returned (exit 0) with a
-loud stderr warning; `--strict` turns that case into exit 4 as well.
+loud stderr warning and `hosts_unsearched` set in `--json`. A caller that must
+refuse on incomplete coverage reads that field — there is deliberately no flag
+for it, because a flag would be a second spelling of a published fact.
 
 
 🔴 THE BRACKETED `[ref]` IS NOT SUPPORTED, AND IS NOT DERIVABLE FROM HERE
@@ -103,8 +105,15 @@ this tool exists to prevent. Pass the NAME (or a session id, pid or tmux
 address) instead; `--json` echoes which key matched.
 
 
-SELECTOR KINDS (a superset of the brief's "name or ref")
----------------------------------------------------------
+SELECTOR KINDS
+--------------
+The acceptance criterion asked for "a peer name or ref". The wider set below is
+ATTRIBUTED, not invented: the task's dispatch brief said to "satisfy criterion 1
+via the peer NAME, and additionally accept session-id prefix, tmux coordinates
+and pid (a wider key set than the criterion asks for)". It also matches
+`session-resolve`, which accepts eight selector kinds for the same reason — the
+caller has whichever handle it has.
+
   name         exact match on the registry `name` — the string the listing shows
   session_id   full session id, or a hex prefix of >= MIN_SESSION_ID_PREFIX
   pid          the process id, exactly
@@ -122,8 +131,7 @@ EXIT CODES
   0  resolved    exactly one live peer matched; its host is on stdout
   2  ambiguous   more than one live peer matched (candidates on stderr)
   3  unmatched   zero matched, and EVERY in-scope host was read successfully
-  4  incomplete  zero matched but a host could not be read — or, under
-                 --strict, a unique match while a host could not be read
+  4  incomplete  zero matched but a host could not be read
  64  usage       bad arguments (EX_USAGE; deliberately NOT 2, so a caller can
                  never read a typo'd flag as "ambiguous")
 """
@@ -451,10 +459,28 @@ def read_host(host: str, *, local_host: str, registry_dir: str,
 
 
 def _read_local(host: str, *, registry_dir: str, proc_dir: str = "/proc") -> dict:
+    """This machine's own registry.
+
+    🔴 `reported_label` IS None HERE, DELIBERATELY, AND THE ASYMMETRY IS REAL.
+    The remote leg's label is an INDEPENDENT measurement — the far end computes
+    it for itself — which is what lets a wrong address be caught. The local leg
+    has no such second source: `local_host` was itself derived from
+    `local_host_label()`, so echoing it back would be a tautology wearing the
+    costume of a check, and a reader comparing the two columns would conclude
+    the local leg is guarded when it is not.
+
+    ⚠ THE CONSEQUENCE, STATED RATHER THAN GUARDED: if `local_host_label()` is
+    wrong about this machine, this leg mislabels every record on it and nothing
+    here can tell. That is reachable only when neither `ACTIVITY_HOST` nor the
+    collector env file supplies a value, so `host_label` falls back to its
+    `workbench` default — measured 2026-09-12 as NOT the case on either host
+    (both set it explicitly). The fix belongs in `host_label`, which every
+    fleet consumer shares, not as a fourth private copy here.
+    """
     ns = _reader_namespace()
     directory = os.path.expanduser(registry_dir)
     base = {"records": [], "stale_dropped": 0, "unreadable": 0,
-            "reported_label": host, "dir": directory, "error": None,
+            "reported_label": None, "dir": directory, "error": None,
             "via": "local"}
     try:
         payload = ns["_peerhost_read_registry"](directory, proc_dir)
@@ -535,7 +561,7 @@ def find_matches(selector: str, legs: dict) -> list:
 
 
 def lookup(selector: str, *, hosts=HOST_NAMES, local_host=None,
-           registry_dir=DEFAULT_REGISTRY_DIR, runner=None, strict=False,
+           registry_dir=DEFAULT_REGISTRY_DIR, runner=None,
            ssh_timeout=DEFAULT_SSH_TIMEOUT,
            host_label_source=None, proc_dir="/proc") -> dict:
     """The whole answer, as data. The CLI is a thin renderer over this."""
@@ -562,13 +588,12 @@ def lookup(selector: str, *, hosts=HOST_NAMES, local_host=None,
     if len(matches) > 1:
         status, host = STATUS_AMBIGUOUS, None
     elif len(matches) == 1:
-        if unsearched and strict:
-            # 🔴 --strict: a unique match is still only unique among the hosts
-            # that ANSWERED. Refusing is the caller's choice, not the default,
-            # because the match itself is a positive measurement.
-            status, host = STATUS_INCOMPLETE, None
-        else:
-            status, host = STATUS_RESOLVED, matches[0]["host"]
+        # 🔴 A unique match is only unique among the hosts that ANSWERED, and
+        # that caveat is REPORTED (a stderr warning, plus `hosts_unsearched` in
+        # `--json`) rather than turned into a second exit code. A caller that
+        # needs to refuse on incomplete coverage reads that field; a flag would
+        # be a second spelling of a fact already published.
+        status, host = STATUS_RESOLVED, matches[0]["host"]
     elif unsearched:
         status, host = STATUS_INCOMPLETE, None
     else:
@@ -587,7 +612,6 @@ def lookup(selector: str, *, hosts=HOST_NAMES, local_host=None,
                      for h in HOST_NAMES},
         "records_seen": {h: len(legs[h].get("records") or [])
                          for h in HOST_NAMES},
-        "strict": bool(strict),
     }
 
 
@@ -616,15 +640,9 @@ def render_diagnostics(result: dict) -> str:
                       ", ".join("%s=%d records" % (h, result["records_seen"][h])
                                 for h in result["hosts_searched"]) or "none"))
     elif status == STATUS_INCOMPLETE:
-        if result["matches"]:
-            out.append("peer-host: --strict — %r resolved to %s, but %s could "
-                       "not be searched, so uniqueness is UNPROVEN"
-                       % (sel, result["matches"][0]["host"],
-                          ", ".join(result["hosts_unsearched"])))
-        else:
-            out.append("peer-host: no live peer matches %r, but %s could not "
-                       "be searched — this is NOT 'not found'"
-                       % (sel, ", ".join(result["hosts_unsearched"])))
+        out.append("peer-host: no live peer matches %r, but %s could not "
+                   "be searched — this is NOT 'not found'"
+                   % (sel, ", ".join(result["hosts_unsearched"])))
     elif result["hosts_unsearched"]:
         out.append("peer-host: WARNING — answered from %s, but %s could not be "
                    "searched; a same-named peer there would be invisible"
@@ -653,14 +671,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "tmux address (scratch2:@62 or scratch2:@62.%%62)"))
     p.add_argument("--json", action="store_true",
                    help="full result on stdout instead of the bare label")
-    p.add_argument("--strict", action="store_true",
-                   help="refuse (exit 4) even a unique match when some host "
-                        "could not be searched")
     p.add_argument("--host", default=HOST_ALL, choices=(HOST_ALL, *HOST_NAMES),
                    help="restrict the search (default: all)")
-    p.add_argument("--local-host", default=None, choices=HOST_NAMES,
-                   help="override which host is read off the local filesystem "
-                        "(default: host_label.local_host_label())")
     p.add_argument("--registry-dir", default=DEFAULT_REGISTRY_DIR,
                    help="registry directory, on EVERY host (default: %(default)s)")
     p.add_argument("--ssh-timeout", type=float, default=DEFAULT_SSH_TIMEOUT)
@@ -679,8 +691,13 @@ def main(argv=None) -> int:
         return 0 if exc.code == 0 else EXIT_USAGE
 
     hosts = HOST_NAMES if args.host == HOST_ALL else (args.host,)
-    result = lookup(args.selector, hosts=hosts, local_host=args.local_host,
-                    registry_dir=args.registry_dir, strict=args.strict,
+    # 🔴 NO `--local-host` FLAG. `lookup()` still takes the kwarg so tests can
+    # pin the split, but it is not user-reachable: it was unattributed surface
+    # AND the only hand-hold for creating the mislabelling `_read_local`'s
+    # docstring describes. Which machine this is comes from `host_label`, the
+    # one place the fleet already agrees on.
+    result = lookup(args.selector, hosts=hosts,
+                    registry_dir=args.registry_dir,
                     ssh_timeout=args.ssh_timeout)
 
     diag = render_diagnostics(result)

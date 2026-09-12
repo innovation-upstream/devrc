@@ -395,6 +395,14 @@ AL = _load_agent_ledger()
 # worktree and absent in the nix build sandbox.
 # --------------------------------------------------------------------------- #
 sys.path.insert(0, os.path.join(_HERE, "validation"))
+# `scripts/lib` joins it for the same reason: `host_label` is a LIBRARY, and the
+# path is resolved relative to THIS file so it survives a worktree and the nix
+# build sandbox. Unlike chquery this import is NOT optional — the laptop SSH
+# target is derived from it, and a degraded fallback would be a second copy of
+# exactly the constant it exists to deduplicate.
+sys.path.insert(0, os.path.join(_HERE, "lib"))
+import host_label as _host_label  # noqa: E402
+
 try:
     import chquery as _chq  # noqa: E402
     CH_IMPORT_ERROR = None
@@ -411,12 +419,19 @@ ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
 # `10.42.0.10` is the homelab GATEWAY. Getting this wrong does not fail loudly —
 # SSH succeeds against a real host and reports the gateway's tmux state as the
 # laptop's. It matched `claude/skills/standup/standup.sh:26`, the repo's only
-# other precedent, until that skill was retired (2026-09-07); this constant is
-# now the precedent. The LAN address is same-network-only, so a LAN-first probe
-# buys a timeout on every scan of a laptop that usually is not on this network.
-# Pinned by a test.
+# other precedent, until that skill was retired (2026-09-07). The LAN address is
+# same-network-only, so a LAN-first probe buys a timeout on every scan of a
+# laptop that usually is not on this network. Pinned by a test.
+#
+# 🔴 DERIVED, NOT DECLARED, since 2026-09-12. This was the literal string, and
+# `scripts/peer-host` needed the same address — which is the moment a duplicated
+# constant becomes one that can DISAGREE, and this is the one constant in the
+# repo whose disagreement is silent by construction (see above: the wrong host
+# answers). It now comes from `scripts/lib/host_label.py`, the module that
+# already owns the host vocabulary these addresses pair with. The value is
+# unchanged and its own literal test still pins it.
 # --------------------------------------------------------------------------- #
-LAPTOP_SSH_TARGET = "zach@10.42.0.100"
+LAPTOP_SSH_TARGET = _host_label.ssh_target("laptop")
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
             "-o", "StrictHostKeyChecking=accept-new")
 SSH_TIMEOUT = 12.0

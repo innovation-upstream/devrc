@@ -171,6 +171,14 @@ ALLOWLIST = [
     ("scripts/tests/test_nebula_relay_apply.py", "original.startswith",
      "shape (b) — ASSERTS the copied verifier still has a shebang before the line "
      "above replaces it; writes nothing"),
+    # Shape (b) again: `scripts/peer-host` is a real committed script, and this
+    # line ASSERTS its interpreter line has the `#!` prefix. It writes no file
+    # and execs nothing, so no unresolvable interpreter can be introduced. The
+    # pin names the assertion, not a shebang, so this file's own
+    # test_this_guards_source_does_not_match_itself stays green.
+    ("scripts/tests/test_peer_host.py", "first.startswith",
+     "shape (b) — ASSERTS the committed peer-host script's interpreter line has "
+     "a shebang prefix; writes nothing and execs nothing"),
 ]
 
 

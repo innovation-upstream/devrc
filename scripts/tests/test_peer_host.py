@@ -363,12 +363,22 @@ def test_a_unique_LOCAL_match_still_answers_when_the_laptop_is_down(world):
     assert "WARNING" in ph.render_diagnostics(r)
 
 
-def test_strict_refuses_that_same_unique_match(world):
-    world.state["raise"] = OSError("no route to host")
-    r = world("alpha-11", strict=True)
-    assert r["status"] == ph.STATUS_INCOMPLETE
-    assert r["host"] is None
-    assert "UNPROVEN" in ph.render_diagnostics(r)
+def test_the_local_leg_reports_NO_self_label(world):
+    """🔴 THE ASYMMETRY IS THE POINT, and it must not be tidied away.
+
+    The REMOTE leg's `reported_label` is an INDEPENDENT measurement — the far
+    end computes it for itself — which is what lets a wrong SSH address be
+    caught. The LOCAL leg has no second source: `local_host` was itself derived
+    from `local_host_label()`, so echoing it back would be a tautology wearing
+    the costume of a check, and a reader comparing the two columns would
+    conclude the local leg is guarded when it is not.
+
+    This asserts the honest `None`. A future edit that "fills in" the local
+    label to make the two columns look uniform fails here.
+    """
+    r = world("alpha-11")
+    assert r["coverage"]["workbench"]["reported_label"] is None
+    assert r["coverage"]["laptop"]["reported_label"] == "laptop"
 
 
 def test_a_nonzero_ssh_exit_is_UNREACHABLE_and_carries_the_stderr(world):
@@ -779,27 +789,115 @@ def test_opencode_search_and_peer_host_share_ONE_peer_table():
     assert ocs.PEERS is hl.PEER_SSH
 
 
-def test_session_manager_laptop_target_agrees_with_the_peer_table():
-    """🔴 THE LEDGER GUARD. `scripts/session-manager` still carries its own
-    `LAPTOP_SSH_TARGET`. This does not fold it in — it makes the two copies'
-    DISAGREEMENT audible, which is the property that matters. Parsed out of the
-    source rather than imported, because importing session-manager pulls in its
-    whole dependency stack for one constant.
+def test_session_manager_DERIVES_its_laptop_target_from_the_peer_table():
+    """🔴 THE FOLD-IN, PINNED STRUCTURALLY — not just "the two values agree".
 
-    If session-manager's copy is ever folded into `host_label.PEER_SSH`, delete
-    this test with it.
+    `session-manager` used to declare its own `LAPTOP_SSH_TARGET = "zach@…"`.
+    An equality guard between two literals is nearly worthless: it only fires
+    for an edit that changes ONE of them, and both were already pinned to the
+    same literal by their own tests. So the constant was folded in instead, and
+    what is asserted here is that it is DERIVED — an `ast.Call`, not an
+    `ast.Constant`. A future edit that re-declares the literal fails here even
+    if it happens to type the correct address.
     """
     src = (_SCRIPTS / "session-manager").read_text(encoding="utf-8")
     tree = ast.parse(src)
-    found = [n.value.value for n in ast.walk(tree)
-             if isinstance(n, ast.Assign)
-             and any(isinstance(t, ast.Name) and t.id == "LAPTOP_SSH_TARGET"
-                     for t in n.targets)
-             and isinstance(n.value, ast.Constant)]
-    assert found, "session-manager no longer defines LAPTOP_SSH_TARGET"
-    assert found == [hl.ssh_target("laptop")], (
-        "session-manager's laptop SSH target %r has drifted from "
-        "host_label.PEER_SSH %r" % (found, hl.ssh_target("laptop")))
+    assigns = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Assign)
+               and any(isinstance(x, ast.Name) and x.id == "LAPTOP_SSH_TARGET"
+                       for x in n.targets)]
+    assert len(assigns) == 1, "expected exactly one LAPTOP_SSH_TARGET assignment"
+    value = assigns[0].value
+    assert not isinstance(value, ast.Constant), (
+        "session-manager re-declared the laptop address as a literal; it must "
+        "derive it from host_label.ssh_target()")
+    assert isinstance(value, ast.Call)
+    assert ast.unparse(value).endswith('ssh_target(\'laptop\')'), ast.unparse(value)
+
+
+def _scan_for_address_literals(root):
+    """(scanned_files, offenders) for a scripts/ tree. PURE apart from reads.
+
+    🔴 EXTRACTED so the guard's two assertions are INDEPENDENTLY REACHABLE. When
+    both lived in one test body the file-count control ran first, so in the
+    negative control's small fake tree it always won and the offender assertion
+    never executed — the "an earlier check always wins so the guard never runs"
+    shape exactly, caught by that control on its first run.
+
+    Reads the SYNTAX TREE, not the text: the first cut flagged a COMMENT that
+    quoted the literal while explaining why the literal had been removed, i.e.
+    it fired on the documentation of its own fix. Comments may name the address;
+    a string constant may not. Non-Python files fall back to a text scan.
+    """
+    targets = {"zach@%s" % addr for _, addr, _ in hl.PEER_SSH}
+    owner = (root / "lib" / "host_label.py").resolve()
+    offenders, scanned = [], 0
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.resolve() == owner:
+            continue
+        parts = set(path.parts)
+        if "tests" in parts or "__pycache__" in parts or path.suffix == ".md":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            continue
+        scanned += 1
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            for t_ in targets:
+                if ('"%s"' % t_) in text or ("'%s'" % t_) in text:
+                    offenders.append("%s: %s" % (path.relative_to(root), t_))
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and node.value in targets:
+                offenders.append("%s:%s: %s" % (path.relative_to(root),
+                                                node.lineno, node.value))
+    return scanned, offenders
+
+
+def test_no_module_redeclares_a_peer_address_literal():
+    """🔴 THE LEDGER GUARD, and it counts INSTANCES rather than declarations.
+
+    A ledger in a comment is a claim; this makes it checkable. `host_label.py`
+    is the one permitted home for a peer SSH target. A literal in a TEST is
+    expected — that is the pin, not a copy.
+
+    On its FIRST run this found a fourth copy nobody had listed:
+    `scripts/session-analysis/espanso-usage.py:90`, a hardcoded
+    `DEFAULT_REMOTE`. It is derived now.
+    """
+    scanned, offenders = _scan_for_address_literals(_SCRIPTS)
+    assert not offenders, (
+        "these modules re-declare a peer SSH target instead of deriving it from "
+        "host_label.PEER_SSH: %s" % offenders)
+    # 🔴 POSITIVE CONTROL, asserted AFTER the offender check so it can never
+    # mask it: a zero is only meaningful if the walk reached files at all.
+    assert scanned > 100, "the scan reached only %d files — it is not looking" % scanned
+
+
+def test_that_ledger_guard_can_actually_fire(tmp_path):
+    """🔴 NEGATIVE CONTROL. The test above passes when the tree is clean AND
+    when it is wired to nothing. This proves the scan can go red — and that it
+    discriminates a STRING CONSTANT from the same text inside a comment."""
+    fake = tmp_path / "scripts"
+    (fake / "lib").mkdir(parents=True)
+    (fake / "lib" / "host_label.py").write_text('OWNER = "zach@10.42.0.100"\n')
+    (fake / "offender.py").write_text('TARGET = "zach@10.42.0.100"\n')
+    (fake / "innocent.py").write_text('# was "zach@10.42.0.100" once\nY = 2\n')
+    (fake / "tests").mkdir()
+    (fake / "tests" / "test_x.py").write_text('PIN = "zach@10.42.0.100"\n')
+    scanned, offenders = _scan_for_address_literals(fake)
+    joined = " ".join(offenders)
+    assert "offender.py" in joined, offenders
+    assert "innocent.py" not in joined, "a comment must not trip the guard"
+    assert "host_label.py" not in joined, "the owner must be exempt"
+    assert "test_x.py" not in joined, "a test pin must not trip the guard"
+    # 2, not 4: the owner and anything under tests/ are skipped BEFORE the
+    # counter, so `scanned` means "files actually inspected".
+    assert scanned == 2, scanned
 
 
 def test_every_host_name_has_an_ssh_target():
@@ -841,24 +939,82 @@ def test_the_module_never_writes_to_disk():
 
 
 def test_the_module_is_executable_and_has_a_python_shebang():
-    assert os.access(_SCRIPT, os.X_OK), "peer-host is not executable"
-    assert _SCRIPT.read_text(encoding="utf-8").splitlines()[0] \
-        == "#!/usr/bin/env python3"
+    """🔴 THE SHEBANG IS CHECKED BY SHAPE, NOT BY ITS LITERAL TEXT.
+
+    This pinned the env-form interpreter line exactly and went RED in the
+    nix-build tier while passing on the dev host — `flake.nix` runs nixpkgs'
+    `patchShebangs src/scripts` over the copied tree, so the env form becomes an
+    absolute store path there. Pinning the exact string asserts something about
+    ONE tree, which is the config-blind-suite failure in miniature: a test whose
+    environment decides its answer. What is load-bearing is the `#!` prefix plus
+    a python3 interpreter, and that holds in both tiers.
+
+    🔴 THE DOCSTRING DELIBERATELY DOES NOT SPELL THE ENV FORM either —
+    `test_runtime_shebangs.py` is a repo-wide TEXT scan and flagged this prose on
+    its first run after the fix, correctly by its own rules. The resolution
+    `test_handoff_index.py` prescribes for exactly this is to stop carrying the
+    literal, not to pin an exemption for it.
+
+    Same reasoning and the same shape as
+    `test_handoff_index.py::test_a_module_documenting_bare_invocation_is_executable`.
+    """
+    first = _SCRIPT.read_text(encoding="utf-8").splitlines()[0]
+    assert first.startswith("#!"), first
+    assert "python3" in first, first
+    assert os.stat(_SCRIPT).st_mode & 0o111, "peer-host is not executable"
 
 
 def test_no_ref_selector_is_implemented():
-    """🔴 A GUARD AGAINST A FUTURE GUESS, not against today's code.
+    """The bracketed `[ref]` from the peer listing is deliberately unsupported.
 
-    The bracketed `[ref]` in the peer listing survived two independent
-    derivation sweeps. The tempting shortcut is "the ref's first two characters
-    look like the name's suffix" — n=1, 1-in-256 by chance, and if wrong it
-    answers the WRONG HOST silently, which is the single outcome this tool
-    exists to prevent. If a real derivation is ever established, implement it as
-    its own kind and delete this test deliberately.
+    ⚠ LABELLED HONESTLY: this is an INVARIANT GUARD, not regression coverage and
+    not a discriminating check. It cannot tell a CORRECT ref derivation from a
+    wrong one — nothing here can, because no derivation is known. What it pins is
+    the deliberate ABSENCE, so that adding a ref kind is a conscious act with a
+    test to delete rather than a quiet afternoon's guess.
+
+    Why the absence: the ref survived two independent sweeps (11 registry inputs
+    x 6 hash algorithms x 3 offsets x 48 records; then 9 inputs including the raw
+    UUID bytes in both orders and `bridgeSessionId`, x 11 algorithms). The
+    tempting shortcut is "the ref's first two characters look like the name's
+    suffix" — n=1, 1-in-256 by chance, and if wrong it answers the WRONG HOST
+    silently, the one outcome this tool exists to prevent.
     """
     assert "ref" not in ph.ALL_KINDS
-    # A 6-char hex ref must not accidentally resolve via the name suffix.
+    # The second assertion IS discriminating: it fails if a name-suffix rule is
+    # ever implemented, which is the specific wrong guess this guards against.
     assert ph.match_kinds("ef79ae", _shaped(dict(WB_ALPHA, name="repo-ef"))) == []
+
+
+def test_peer_host_is_on_PATH_as_a_bare_command():
+    """🔴 THE DELIVERABLE IS THE ANSWER BEING OBTAINABLE, NOT THE SCRIPT EXISTING.
+
+    The caller this tool is for is a session in ANOTHER REPO deciding where to
+    route work, and such a session cannot resolve an absolute devrc path — the
+    rationale `nix/home.nix` already states for `claim-work` and `cairn`. Without
+    a PATH entry the tool answers correctly and its intended caller cannot reach
+    it. Found by the round-0 requirements pass, not by any correctness axis.
+    """
+    home_nix = (_SCRIPTS.parent / "nix" / "home.nix").read_text(encoding="utf-8")
+    assert '.local/bin/peer-host' in home_nix, (
+        "peer-host has no PATH entry — a cross-repo caller cannot invoke it")
+    entry = home_nix[home_nix.index('.local/bin/peer-host'):]
+    entry = entry[:entry.index(";") + 1]
+    # 🔴 mkOutOfStoreSymlink is REQUIRED, not stylistic: peer-host reaches
+    # `lib/host_label.py` through `Path(__file__).resolve().parent / "lib"`, and
+    # `.resolve()` follows symlinks — so the directory holding the REAL file must
+    # also hold `lib/`. A `home.file` store copy resolves into /nix/store and
+    # dies on import, which is a runtime failure no unit test would see.
+    assert "mkOutOfStoreSymlink" in entry, entry
+    assert "scripts/peer-host" in entry, entry
+
+
+def test_the_module_resolves_its_lib_relative_to_the_RESOLVED_file():
+    """The property the line above depends on, asserted against the source: the
+    sibling lookup must use `resolve()`, or a PATH symlink would look for `lib/`
+    next to the symlink instead of next to the real file."""
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert 'Path(__file__).resolve().parent / "lib"' in src
 
 
 def test_read_statuses_are_all_distinct_and_only_READ_counts_as_searched():
@@ -887,8 +1043,6 @@ MUTATION_MATRIX = {
         "test_an_unreachable_laptop_yields_INCOMPLETE_not_the_local_host",
     "STATUS_INCOMPLETE aliased to STATUS_UNMATCHED":
         "test_INCOMPLETE_and_UNMATCHED_are_different_answers",
-    "strict ignored":
-        "test_strict_refuses_that_same_unique_match",
     # find_matches(): which legs contribute
     "SEARCHED_STATUSES widened to include every status":
         "test_a_host_that_identifies_as_someone_else_is_REFUSED",
@@ -952,13 +1106,25 @@ MUTATION_MATRIX = {
         "test_an_unknown_host_label_RAISES_rather_than_returning_a_falsy_target",
     "opencode_search re-declares its own PEERS literal":
         "test_opencode_search_and_peer_host_share_ONE_peer_table",
-    "session-manager's LAPTOP_SSH_TARGET edited to another address":
-        "test_session_manager_laptop_target_agrees_with_the_peer_table",
+    "session-manager re-declares the laptop address as a literal":
+        "test_session_manager_DERIVES_its_laptop_target_from_the_peer_table",
+    "a new module hardcodes zach@<peer address>":
+        "test_no_module_redeclares_a_peer_address_literal",
+    "the ledger scan is wired to nothing / stops discriminating comments":
+        "test_that_ledger_guard_can_actually_fire",
     # CLI
     "diagnostics printed to stdout":
         "test_stdout_carries_ONLY_the_label",
+    "the local leg echoes local_host as a fake self-report":
+        "test_the_local_leg_reports_NO_self_label",
     "any STATUS_* or READ_* string value renamed":
         "test_the_status_vocabulary_is_pinned_to_LITERALS",
+    "the .local/bin PATH entry is dropped (tool unreachable cross-repo)":
+        "test_peer_host_is_on_PATH_as_a_bare_command",
+    "the PATH entry becomes a home.file store copy":
+        "test_peer_host_is_on_PATH_as_a_bare_command",
+    "resolve() dropped from the lib lookup (breaks the PATH symlink)":
+        "test_the_module_resolves_its_lib_relative_to_the_RESOLVED_file",
     "the host is printed even on a refusal":
         "test_a_refusal_puts_NOTHING_on_stdout",
     "EXIT_USAGE 64 -> 2":

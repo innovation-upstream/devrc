@@ -1486,6 +1486,25 @@ in
   # here together precisely so the difference is read as deliberate.
   home.file.".local/bin/cairn-who".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-who";
+
+  # 🔴 `peer-host` — "which MACHINE is this peer session on", ON PATH for exactly
+  # the rationale `claim-work` states above: the caller is A SESSION IN ANOTHER
+  # REPO deciding where to route work, and such a session cannot resolve an
+  # absolute devrc path. Without this line the tool exists and answers correctly
+  # and its intended caller cannot reach it — the deliverable is the ANSWER being
+  # obtainable, not the script existing.
+  #
+  # ⚠ It is deliberately NOT like `session-resolve` / `waiting-windows`, which
+  # sit in `scripts/` with no PATH entry. Those are operator tools invoked from a
+  # devrc checkout; this one's whole purpose is cross-repo invocation.
+  #
+  # 🔴 mkOutOfStoreSymlink is REQUIRED, not a preference — the same constraint
+  # spelled out for `cairn-who` above: `peer-host` reaches its siblings through
+  # `Path(__file__).resolve().parent / "lib"` (for `host_label`), `.resolve()`
+  # follows symlinks, so the directory holding the REAL file must also hold
+  # `lib/`. A store copy resolves into /nix/store and dies on import.
+  home.file.".local/bin/peer-host".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/peer-host";
   # 🔴 `cairn-validate` — the WRITE-PROTOCOL parse check, and the THIRD member of
   # the pair above rather than a variant of either. It is not `cairn validate`:
   # once a host has switched, `~/.local/bin/cairn` is the pinned OSS package,

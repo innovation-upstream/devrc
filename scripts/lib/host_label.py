@@ -43,13 +43,18 @@ DEFAULT_LOCAL_HOST = "workbench"
 #: gateway's state as the laptop's. That is why the address belongs next to the
 #: label vocabulary it is meant to agree with, rather than being retyped per tool.
 #:
-#: 🔴 THE LEDGER OF COPIES. This table is not yet the only spelling of these
-#: addresses — `scripts/session-manager:LAPTOP_SSH_TARGET` still carries its own,
-#: pinned by its own test. `scripts/tests/test_peer_host.py::
-#: test_session_manager_laptop_target_agrees_with_the_peer_table` asserts the two
-#: are EQUAL, so a future edit to either one is caught rather than silently
-#: creating the disagreement this module exists to prevent. Fold that copy in here
-#: when session-manager is next touched, and delete the seam guard with it.
+#: 🔴 THE LEDGER OF READERS — every place these addresses are spelled, so a new
+#: one is a deliberate act rather than an accident:
+#:
+#:   * `scripts/peer-host`                        -> `ssh_target(host)`
+#:   * `scripts/lib/opencode_search.py:PEERS`     -> this tuple, by identity
+#:   * `scripts/session-manager:LAPTOP_SSH_TARGET`-> `ssh_target("laptop")`
+#:
+#: All three DERIVE; none declares. `test_peer_host.py::
+#: test_no_module_redeclares_a_peer_address_literal` scans for a re-declared
+#: literal, so a fourth copy is caught rather than silently creating the
+#: disagreement this module exists to prevent. An address literal in a TEST is
+#: fine and expected — that is the pin, not a copy.
 PEER_SSH = (
     ("workbench", "10.42.0.30", "zach"),
     ("laptop", "10.42.0.100", "zach"),
