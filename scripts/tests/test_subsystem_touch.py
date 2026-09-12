@@ -1572,9 +1572,12 @@ class TestCli:
     def test_the_SAME_slug_is_free_in_a_DIFFERENT_scope(
         self, store: Path, capsys
     ) -> None:
-        """The scope is part of the address. `collector` exists in SCOPE and not
-        in OTHER_SCOPE, so a check that ignored scope would refuse both — and a
-        check that ignored the store would refuse neither."""
+        """⚠ INVARIANT GUARD — it passes at base, where everything exits 0.
+
+        The scope is part of the address. `collector` exists in SCOPE and not in
+        OTHER_SCOPE, so a check that ignored scope would refuse both — and a
+        check that ignored the store would refuse neither. It constrains the FIX,
+        not the bug."""
         rc, _cap = self._run(
             ["--store", str(store), "--scope", OTHER_SCOPE, "--template", "collector",
              "--today", TODAY, "--writer", "handoff"],
@@ -1583,11 +1586,15 @@ class TestCli:
         assert rc == 0
 
     def test_the_WRITER_refusal_still_comes_first(self, store: Path, capsys) -> None:
-        """Ordering, asserted rather than assumed: a missing `--writer` must not
-        be reported as a collision, and a collision must not be reported as a
-        missing writer. This is also what makes the collision guard's own
-        mutation test meaningful — an earlier check that always won would make it
-        unreachable."""
+        """⚠ INVARIANT GUARD — it passes at base, where the writer refusal was
+        the only refusal there was.
+
+        Ordering, asserted rather than assumed: a missing `--writer` must not be
+        reported as a collision, and a collision must not be reported as a
+        missing writer. It also carries the REACHABILITY half of the collision
+        guard's mutation test — an earlier check that always won would make that
+        guard unexecutable while its mutant still died on someone else's
+        error."""
         rc, cap = self._run(
             ["--store", str(store), "--scope", SCOPE, "--template", "collector",
              "--today", TODAY],
@@ -4083,6 +4090,137 @@ def _load_mutant(tmp_path: Path, name: str, replacements: list[tuple[str, str]])
         sys.modules.pop(name, None)
         raise
     return module
+
+
+class TestTemplateCollisionMutationKills:
+    """devrc#1170 🟡6 — four mutants, each isolating ONE decision.
+
+    🔴 EACH MUST DIE OF THIS GUARD'S OWN SYMPTOM. The kill assertion is "the
+    mutant exits 0 and prints the clobbering body, the real module exits
+    `TEMPLATE_EXISTS_EXIT` and prints the refusal" — not "some test went red",
+    which a neighbour's error would also produce.
+
+    🔴 REACHABILITY IS SEPARATELY PINNED by
+    `TestCli::test_the_WRITER_refusal_still_comes_first`: the `--writer` check
+    sits above this one and would make every mutant here die of the wrong error
+    if it ever started winning.
+    """
+
+    #: One argv, reused: the slug `collector` HAS an entry in `SCOPE`, so every
+    #: mutant below is asked the question the guard exists to answer.
+    def _argv(self, store: Path, slug: str = "collector") -> list[str]:
+        return ["--store", str(store), "--scope", SCOPE, "--template", slug,
+                "--today", TODAY, "--writer", "handoff"]
+
+    def test_kills_the_collision_branch(self, tmp_path: Path, capsys) -> None:
+        """The guard itself. Without it, exit 0 over curated content."""
+        mod = _load_mutant(
+            tmp_path, "m_tpl_branch",
+            [("            if collision is not None:", "            if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        capsys.readouterr()
+        assert mod.main(self._argv(store)) == 0
+        leaked = capsys.readouterr()
+        assert "service: collector" in leaked.out, (
+            "the mutant produced no template — the kill would be vacuous"
+        )
+        assert st.main(self._argv(store)) == st.TEMPLATE_EXISTS_EXIT
+        real = capsys.readouterr()
+        assert real.out.strip() == ""
+        assert "DESTROYS" in real.err
+
+    def test_kills_the_FILENAME_tier(self, tmp_path: Path, capsys) -> None:
+        """🔴 ISOLATED AGAINST A MALFORMED ENTRY, deliberately.
+
+        Against a well-formed entry this mutant SURVIVES — the alias-tier call
+        runs `resolve_ref_tiered`, which does its own filename tier and refuses
+        anyway. The filename check earns its place only where parsing fails, so
+        that is the fixture it is mutated against. Mutating it against a
+        well-formed entry would have reported a false SURVIVED and read as "this
+        check is redundant".
+        """
+        mod = _load_mutant(
+            tmp_path, "m_tpl_filename",
+            [("    if by_filename:", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / SCOPE / "collector.md").write_text(
+            "no front matter\n\n## Nuance / work-history\n- 2026-01-01: OPEN: x\n",
+            encoding="utf-8",
+        )
+        capsys.readouterr()
+        assert mod.main(self._argv(store)) == 0
+        assert "service: collector" in capsys.readouterr().out
+        assert st.main(self._argv(store)) == st.TEMPLATE_EXISTS_EXIT
+        assert "filename tier" in capsys.readouterr().err
+
+    def test_the_filename_mutant_SURVIVES_a_well_formed_entry(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The control for the reasoning above, asserted rather than asserted-about.
+
+        If this ever goes red the two tiers have stopped overlapping, and the
+        test above is no longer isolating what its docstring claims.
+        """
+        mod = _load_mutant(
+            tmp_path, "m_tpl_filename_ctl",
+            [("    if by_filename:", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        capsys.readouterr()
+        assert mod.main(self._argv(store)) == mod.TEMPLATE_EXISTS_EXIT, (
+            "the two tiers no longer overlap on a well-formed entry, so the "
+            "isolation argument in the test above has stopped holding"
+        )
+        assert "collector.md" in capsys.readouterr().err
+
+    def test_kills_the_ITERDIR_choice(self, tmp_path: Path, capsys) -> None:
+        """🔴 `glob` SWALLOWS the OSError and yields nothing, so an unreadable
+        scope reports every slug free. The mutant is the one-word change a
+        maintainer would plausibly make."""
+        if os.geteuid() == 0:  # pragma: no cover — root ignores the mode bits
+            pytest.skip("root can list a 0o000 directory")
+        mod = _load_mutant(
+            tmp_path, "m_tpl_iterdir",
+            [('for path in sorted(p for p in scope_dir.iterdir() if p.suffix == ".md"):',
+              'for path in sorted(scope_dir.glob("*.md")):')],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / SCOPE).chmod(0o000)
+        try:
+            capsys.readouterr()
+            assert mod.main(self._argv(store)) == 0
+            leaked = capsys.readouterr()
+            assert "COULD NOT CHECK" not in leaked.err, (
+                "the mutant reported the slug free with no caveat — that is the "
+                "silent answer this decision exists to prevent"
+            )
+            assert st.main(self._argv(store)) == 0
+            real = capsys.readouterr()
+            assert "COULD NOT CHECK" in real.err
+        finally:
+            (store / SCOPE).chmod(0o755)
+
+    def test_kills_the_UNCHECKED_report(self, tmp_path: Path, capsys) -> None:
+        """The third state must reach the caller. Without this branch a store
+        that could not be read is indistinguishable from a free slug."""
+        if os.geteuid() == 0:  # pragma: no cover
+            pytest.skip("root can list a 0o000 directory")
+        mod = _load_mutant(
+            tmp_path, "m_tpl_unchecked",
+            [("            if unchecked is not None:", "            if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / SCOPE).chmod(0o000)
+        try:
+            capsys.readouterr()
+            assert mod.main(self._argv(store)) == 0
+            assert capsys.readouterr().err.strip() == ""
+            assert st.main(self._argv(store)) == 0
+            assert "COULD NOT CHECK" in capsys.readouterr().err
+        finally:
+            (store / SCOPE).chmod(0o755)
 
 
 class TestMutationKillMatrix:

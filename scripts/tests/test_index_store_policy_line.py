@@ -101,8 +101,12 @@ class TestTheTwoDocumentsAgree:
         )
 
     def test_the_sentence_is_not_a_stub(self) -> None:
-        """A locator that matched an empty remainder would make the equality
-        above vacuous — two empty strings agree perfectly."""
+        """⚠ INVARIANT GUARD — it passes at base too (SKILL.md already carried
+        the sentence; it was the REFERENCE that disagreed).
+
+        It guards the equality test's premise: a locator that matched an empty
+        remainder would make that assertion vacuous — two empty strings agree
+        perfectly."""
         assert len(_sentence_from(SKILL_DOC)) > len(SENTENCE_HEAD) + 20
 
     def test_the_superseded_scope_README_instruction_is_in_NEITHER(self) -> None:
