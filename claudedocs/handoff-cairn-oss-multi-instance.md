@@ -2094,8 +2094,11 @@ covers; pin it with `--config`, do not `cd`.
   worth carrying forward: the gate's remaining red is not a flake.** Deterministic ledger
   censuses over tracked text account for **27 of 99** post-fix verdicts (22 the kill-mention
   ledger, all of them before `#1561` exempted `claudedocs/`; **5 the runner-bound ledger, 4 of
-  those AFTER it** — the same design class in a second ledger, and the live one). Table and
-  residuals in `handoff-gate-flake-store-api.md` rank 1.
+  those AFTER it** — the same design class in a second ledger, which is the THIRD instance in two
+  days). ⚠ **Both instances are now fixed** (`#1561` `c0bbd6d9`, `#1567` `6f1867b1`); this bullet
+  called the second "the live one" and that was true for about an hour. **The CLASS is what
+  survives: nothing stops a fourth census reddening `main` for everyone.** Table and residuals in
+  `handoff-gate-flake-store-api.md` rank 1.
   The pre-verification wording, kept for the provenance it names:
 - ~~**RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.**~~ **SUPERSEDED 2026-09-12 — the
   verification it asks for HAS BEEN RUN; see the bullet directly above.** Retained only for the

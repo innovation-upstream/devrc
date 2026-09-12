@@ -4,15 +4,15 @@
 ```bash
 cairn recall --repo ~/workspace/devrc
 ```
-⚠ **This block used to prescribe `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py`, and
-`#1508` DELETED that file** — the cairn consolidation moved the reader into the pinned package, so
-the old spelling now fails with a file-not-found. 🔴 **It is not just this doc: `63` files under
-`claudedocs/` still prescribe that path (`71` occurrences), plus `5` source comments
-(`scripts/lib/handoff_search.py`, `scripts/tests/test_subsystem_recall.py`,
-`test_repo_path_guard.py`, `test_store_root_ledger.py`, `scripts/present/measure.py` — all PROSE,
-no code path).** Only this doc's occurrence is fixed here; the sweep is filed as rank 9, because
-fixing one site and implying the rest is the partial-sweep failure. Counts measured 2026-09-12 at
-`origin/main` `8114a124`.
+⚠ **This block used to prescribe the deleted `scripts/lib/subsystem_recall.py`** — `#1508` moved the
+reader into the pinned package, so the old spelling now fails with a file-not-found. **It is not
+just this doc: see rank 9 for the population, which is the single place those counts live.** Only
+this doc's invocation is fixed here; fixing one site and implying the rest is the partial-sweep
+failure. ⚠ **This block previously restated the counts and got two of them wrong in the direction
+rank 9 exists to prevent** — `63`/`71` are the BARE-PATH figures, not the *prescribing* ones
+(`61`/`65`), and it listed `5` source files while rank 9, in the same commit, said `6` and named the
+Dockerfile the list had dropped. **Two copies of a count are how one of them becomes wrong; rank 9
+owns them.**
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
 reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
@@ -110,26 +110,50 @@ Found by accident while doing the tmpfs work. Documented on `main` in
 🔴 **This block's heading read "UNMEASURED" and its "Next probe, verbatim" below told the next
 session to run a probe that HAS NOW BEEN RUN.** Read rank 1 for the reading — 0 of 99 verdicts on
 heads carrying `ce9b55c3` against 12 of 298 that do not, P(0) ≈ 0.017 — and do **not** re-run the
-snippet below. It is retained for two reasons and neither is "use it": its `grep -c` classifier
-names the right test families, and its **predicate is a LIMIT, not a baseline** — `--limit 40`
-newest-first with no ancestry test at all, which is the date-shaped sampling rank 1 says gives a
-wrong denominator. The closing reading used ancestry over 400 heads instead.
+snippet below. It is retained for ONE reason and it is not "use it": its **predicate is a LIMIT, not
+a baseline** — `--limit 40` newest-first with no ancestry test at all, which is the date-shaped
+sampling rank 1 says gives a wrong denominator. The closing reading used ancestry over 400 heads.
+🔴 **AND ITS CLASSIFIER IS BROKEN FOR THE ONE TEST THIS DOC IS ABOUT — an earlier revision of this
+very paragraph praised it, which would have sent someone to re-use it.** The snippet greps status
+DESCRIPTIONS for `subsystem_store_api\|TestTheActor\|TestAHungRoundTrip\|TestTheBackstop`, but a
+description carries `Class.test_name` and **never a filename**, so `subsystem_store_api` cannot fire
+at all. Measured over the 101 failure verdicts rank 1 collected: the 12 store-api rows — rank 1's
+entire pre-window count — are matched **0** times. ⚠ **It is not wired to nothing, and the
+distinction matters:** a positive control over the same 101 rows matches **4** (`TestTheActor…` ×3,
+`TestAHungRoundTrip…` ×1), so the grep works and the *token list* is simply missing
+`TestARefusedWrite…`. **Re-run as written it would return 0 in BOTH arms — a vacuous zero read as
+"the fix worked".** via: measurement
 ⚠ **What is still UNMEASURED is the block's own hypothesis at its second point:** it predicted the
 rate "drops to ~0 where a tmpfs is available, and is **unchanged where the fallback fires**". The
 reading confirms the first half and says nothing about the second — **nothing has measured whether
 the GATE container has a usable tmpfs**, so a 0 is consistent with both "sited" and "the mechanism
 stopped firing for some other reason". That is rank 1's `[0, 22]` bound's sibling: recorded, not
 closed.
-✅ **The residual is much NARROWER than "it might change nothing in CI", and the narrowing is
-MEASURED on the manifest, not argued from defaults.** `store_siting.py:67` makes the only candidate
-`/dev/shm` and `:221` sets `_MIN_FREE_BYTES = 4 MiB`. The gate pipeline
-(`homelab-talos` `origin/trunk:clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml`,
-2,482 lines) contains **0 occurrences of `shm` and 0 of `medium:`** — positive controls on the same
-read: `pytests` 59, `emptyDir` 3, all three in comments — so **nothing overrides `/dev/shm` for the
-`pytests` step** and it gets the container runtime's default. ⚠ **Two halves, and only the first is
-a reading of this cluster:** "nothing in the manifest overrides it" is measured; "therefore 64 MiB"
-is the *containerd/Docker* default that `store_siting.py`'s own docstring cites, and **no node on
-this cluster was read for it** — a runtime or node setting can change it. Against a 4 MiB floor the
+✅ **The residual is NARROWER than "it might change nothing in CI" — but read the three corrections
+below before quoting the narrowing, because the first version of this paragraph overstated what it
+had read.** `store_siting.py:221` sets `_MIN_FREE_BYTES = 4 MiB`.
+🔴 **(a) `/dev/shm` is the DEFAULT candidate, not the only one.** `:270` is
+`for candidate in (os.environ.get(_CANDIDATE_ENV), _DEFAULT_CANDIDATE)` and `_CANDIDATE_ENV` at
+`:66` is **`DEVRC_TEST_TMPFS`**, consulted FIRST. An earlier revision here said `:67` "makes the only
+candidate `/dev/shm`" — wrong, and it made the grep below look exhaustive when it could not match
+the env override at all.
+🔴 **(b) The read must cover TWO manifests, and the first version named one.** Besides
+`devrc-ci-pipeline.yaml`, the `pytests` pod spec also lives in
+`devrc-ci-triggertemplate.yaml` (it carries its own `podTemplate:`). Both were re-read: **0
+occurrences of `shm`, 0 of `medium:`, and 0 of `DEVRC_TEST_TMPFS` across both** — so the conclusion
+*"nothing overrides `/dev/shm` for the `pytests` step"* **holds**, but on the wider read, not the
+first one. ⚠ **The strong control was available and unused:** sibling pipelines DO set
+`medium: Memory` (`clawgate-ci-pipeline.yaml`, `auditloop-ci-pipeline.yaml` and three others), so the
+zero is a real absence rather than a pattern that never matches anything.
+🔴 **(c) The manifest read is itself unpinned and HAS ALREADY MOVED** — the same defect as the
+verdict census above. Verified exactly at `homelab-talos` **`b2f42ef5`** (2,482 lines, `pytests` 59,
+`emptyDir` 3, all three in comments). `origin/trunk` has since taken `3c53d618` — *"/nix becomes a
+per-run emptyDir"* — and now reads **2,584 lines, `pytests` 62, `emptyDir` 12**, i.e. it added real
+emptyDirs where the control had found only comments. **Re-read both manifests at a named sha; do not
+quote these numbers.**
+⚠ **And two halves, only the first a reading of this cluster:** "nothing overrides it" is measured;
+"therefore 64 MiB" is the *containerd/Docker* default that `store_siting.py`'s own docstring cites,
+and **no node on this cluster was read for it** — a runtime or node setting can change it. Against a 4 MiB floor the
 check passes by 16× if that default holds, so the fallback needs `/dev/shm` **absent, read-only, or
 already ~94% consumed** — and the last of those is the concurrent-writer case the docstring already
 says cannot be closed from in-process. **What stays owed is one reading of a real gate container**;
@@ -347,40 +371,65 @@ Not a bug — a measurement that would mislead if run as written.
    closed at the source, so that 22 does not forecast. **5** are
    `scripts/tests/test_runner_bound_ledger.py`, and **4 of those POSTDATE `c0bbd6d9`**
    (03:16:50Z–03:46:19Z): the same design class, in a second ledger `#1561` does not cover.
-   🔴 **That one is neither a flake nor a stale-base echo — `main` ITSELF IS RED ON IT**, run
-   directly at `origin/main` in a clean worktree at THREE successive tips — `4e970998` (**1 failed,
-   1655 passed**), `8114a124` and `61f41adf` (**1 failed, 4 passed** each, that file alone) —
-   the only diff being two `claudedocs/` files these scanners do not read. It is **rank 8**.
-   via: measurement
+   🔴 **EVERY NUMBER IN THIS WHOLE ITEM IS READ-TIME-ONLY AND CANNOT BE RE-DERIVED LATER — say so
+   wherever you quote it.** GitHub keeps **one** status per context per commit and a superseding run
+   overwrites it, so the rows this reading counted are progressively destroyed as PRs re-run. A
+   re-read hours later already disagreed: 20 kill-ledger reds rather than 22, and 9 runner-bound with
+   8 after the fix rather than 5 with 4 — **same direction, strengthening, different values**, with
+   the original rows gone. So `27 of 99` is a reading taken 2026-09-12 ~04:00Z over 400 PR heads and
+   is **not** a quantity a later session can check. **That is an argument for citing this paragraph
+   rather than re-measuring, and for never treating a disagreement with it as a refutation.**
+   ✅ **That one was neither a flake nor a stale-base echo — `main` ITSELF WAS RED ON IT, and it is
+   now FIXED: `#1567` merged `6f1867b1` at 2026-09-12T05:07:06Z.** Red measured at three successive
+   tips (`4e970998` **1 failed, 1655 passed**; `8114a124` and `61f41adf` **1 failed, 4 passed**
+   each, that file alone), then **5 passed** at `origin/main` after the merge. It is **rank 8**,
+   closed. via: measurement
 
    ⚠ **THE GATE'S OWN OBSERVABILITY IS WORSE THAN ITS RED RATE: `error` is 29 of 99 post-window
    verdicts (29%) against 41 of 298 (14%) pre. A gate producing no verdict is not a green one, and
    a rate computed over verdicts cannot see the runs that never reported.**
    🔴 **THIS IS NOT A NEW OBSERVATION AND THIS DOC SHOULD NOT RE-MEASURE IT — it is
-   `handoff-gate-speed-and-ci-signal.md`'s, at a larger sample and with the decomposition:**
-   *"Only ~21–22 of 100 `main` commits get an authoritative verdict (59.5% superseded, 15%
-   KILLED, 5% NO GATE POD)"* (`:54`), and split on this very fix, *"Of 43 post-fix pytests
-   verdicts on `main`, **40 were artefacts** … leaving **3** authoritative successes. Use PR
-   heads."* (`:363`). **Read those, not a count taken here.** The four artefact strings
-   (`NO CAPACITY` / `NO GATE POD` / `KILLED` / `BROKEN GATE`) are a SHIPPED mechanism, not
-   undiagnosed noise — `handoff-cairn-task-linkage.md:37`; they make the loss legible rather
-   than recovering it.
-   ⚠ **A paragraph here previously reported `main`'s "last 8 commits" with its own breakdown, and
-   it was wrong twice over — the count (`six superseded`; it was FOUR, plus one `KILLED` and one
-   pending, re-derived over the named range `457a5dc7~1..8114a124`) and the FRAME. "The last N
-   commits" is a moving window: `main` took two commits between writing it and checking it, so
-   the sentence was unfalsifiable by construction. Name a sha range or do not quote a window.**
+   `handoff-gate-speed-and-ci-signal.md`'s, at a larger sample and with the decomposition** — its
+   bullet beginning *"Only ~21–22 of 100 `main` commits get an authoritative verdict"* (59.5%
+   superseded, 15% KILLED, 5% NO GATE POD), and, split on this very fix, the one beginning
+   *"`main` is a useless population for this question and that is structural"* (of 43 post-fix
+   verdicts, **40 artefacts**, **3** authoritative — *"Use PR heads."*). **Read those, not a count
+   taken here.** The four artefact strings (`NO CAPACITY` / `NO GATE POD` / `KILLED` /
+   `BROKEN GATE`) are a SHIPPED mechanism, not undiagnosed noise — see
+   `handoff-cairn-task-linkage.md`'s bullet *"Four mechanisms now post four strings"*; they make the
+   loss legible rather than recovering it.
+   🔴 **Those are quoted by their OPENING WORDS, not by line number, and that is deliberate** — an
+   earlier revision of this paragraph cited `:363`, having just "corrected" it from `:365`, and then
+   **invalidated its own citation by inserting 25 lines above the target in the same commit**. A
+   line number in a sibling doc that the same PR edits is an expiring claim. Quote the sentence.
+
+   🔴 **THE CENSUS THAT REPLACED A WRONG COUNT WAS ALSO WRONG, AND THE SECOND MISS IS THE
+   INSTRUCTIVE ONE.** The original said `main`'s "last 8 commits" held *six* `superseded`, two
+   `NO GATE POD`, newest pending. Its first correction said **four**, one `KILLED`, one pending.
+   **Re-read 2026-09-12T05:2xZ over the same named range `457a5dc7~1..8114a124`: FIVE superseded,
+   two `NO GATE POD`, one `KILLED`, and ZERO pending.** The headline — *no completed verdict across
+   those 8* — held every time; the breakdown was wrong twice.
+   ⚠ **Naming a sha range fixed the wrong axis.** A range pins the COMMITS; it does not pin their
+   VERDICTS, and the verdict is the mutable thing: `8114a124` read `pending` when the first
+   correction was written and had flipped to `superseded` by 04:32:10Z — **24 minutes before that
+   commit was even authored**. GitHub overwrites a status per context, so the earlier rows are
+   *gone* and no later reader can reproduce either number. 🔴 **So a verdict census needs a READ
+   TIME as well as a range, and it is never re-derivable afterwards — which is the argument for not
+   writing one here at all.** Kept only as the worked example of the class.
 
    **What this does NOT close:** nothing here was measured on the OSS copy
    (`ZacxDev/cairn`'s identical 18-open-coded / 5-sited split), and the `[0, 22]` bound above is
    the residual this instrument cannot narrow — the pipelineruns that could have are pruned.
    ⚠ **And the item's own placement is now wrong, stated plainly rather than left as a mood:** a
-   store-api fsync flake measured at 0 is no longer this doc's Goal, and ranks 8 and 9 are not
-   either — they are "what is CI's signal worth", which `handoff-gate-speed-and-ci-signal.md`
-   owns and already tracks (`:28-33` the census family, `:115-130` the 140-byte cap). **Moving
-   them is a doc-surgery task with a real closing condition** — the three items live in ONE doc
-   with `forcing:` lines intact and nothing cross-referencing them twice — and it is not done
-   here. Rank numbering stays stable regardless; claims are keyed to it.
+   store-api fsync flake measured at 0 is no longer this doc's Goal, and rank 9 is not either — it
+   is "what is CI's signal worth", which `handoff-gate-speed-and-ci-signal.md` owns and already
+   tracks (its Open-investigation on the census family, and its own 140-byte-cap finding).
+   🔴 **This is NOT a work item and is deliberately not dressed as one.** An earlier revision called
+   moving them *"a doc-surgery task with a real closing condition"* — it named no doc, no owner and
+   no mechanical check, and *"nothing cross-referencing them twice"* is not decidable, so by
+   `claude/RULES.md`'s own test it was an object nobody could close. **It is an observation for
+   whoever next restructures these two docs.** Rank numbering stays stable regardless; claims are
+   keyed to it.
 
    🔴 **THE PRESCRIPTIVE HALF OF THIS ITEM NOW LIVES IN `## How to verify`, NOT HERE.** The
    runnable form — anchor, ancestry predicate, the three positive-control PRs — is one block, at
@@ -513,13 +562,17 @@ Not a bug — a measurement that would mislead if run as written.
    forcing: gate — it reddened `#1454`, `#1458` and `#1462`, all merged with
    `tekton/devrc-pytests` RED because of it.
 
-8. 🔴 **`main` IS RED, DETERMINISTICALLY, ON THE RUNNER-BOUND LEDGER — and it is the class rank
-   1's measurement found has replaced the flake it was written to chase.** Measured 2026-09-12
-   by running the file directly at `origin/main` `4e970998` in a clean worktree:
-   `scripts/tests/test_runner_bound_ledger.py::test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger`
+8. ✅ **CLOSED 2026-09-12 — `main` WAS RED, DETERMINISTICALLY, ON THE RUNNER-BOUND LEDGER, AND
+   `#1567` FIXED IT (`6f1867b1`, merged 05:07:06Z).** Closing condition met and checked the
+   mechanical way: `scripts/tests/test_runner_bound_ledger.py` → **5 passed** at `origin/main` after
+   the merge, against **1 failed, 4 passed** before it. 🔴 **Kept at full length because the CLASS is
+   what matters — it is the class rank 1's measurement found has replaced the flake this doc was
+   written to chase, and it is the third census in this family in two days.**
+   Measured 2026-09-12 by running the file directly at `origin/main` `4e970998` in a clean worktree:
+   `…::test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger`
    → **1 failed, 1655 passed in 251.49s**, and re-measured after each of the two times `main` moved
    under this work — `8114a124` (**1 failed, 4 passed in 19.56s**) and `61f41adf` (**1 failed, 4
-   passed in 17.57s**), that file alone — so the red is a property of the tree across THREE points,
+   passed in 17.57s**), that file alone — so the red was a property of the tree across THREE points,
    not of one run. On the `new` arm:
    `{('scripts/tests/test_scoped_tests_shared_surface.py', 'ABSENT'): 1}`. That file spawns a
    runner with **no bound of its own** and has no `_OWN_BOUND_LEDGER` row, so the two-way seam
@@ -530,9 +583,9 @@ Not a bug — a measurement that would mislead if run as written.
      carrying `ce9b55c3`, **4 of them after `c0bbd6d9`** (`#1561`) closed the *sibling* census —
      `#1524`@03:16:50Z, `#1556`/`#1559`/`#1522`@03:40–03:46Z — plus `#1494`@03:14:37Z.
      via: measurement
-   - ✅ **ALREADY OWNED — `#1567` (`fix/scoped-surface-runner-bound`, opened 2026-09-12T03:58:34Z,
-     head `57030bfd`) has the same diagnosis and takes the right arm. Do not start a second
-     fix.** 🔴 **The pre-create sweep is what caught this** — the red was measured and filed here
+   - ✅ **FIXED BY `#1567`** (`fix/scoped-surface-runner-bound`, opened 2026-09-12T03:58:34Z, head
+     `57030bfd`, **merged `6f1867b1` at 05:07:06Z** — 56 minutes later), which had the same diagnosis
+     and took the right arm. 🔴 **The pre-create sweep is what caught this** — the red was measured and filed here
      at the same hour `#1567` was opened, and the lock could not have seen it, because nothing
      was claimed. This is the class `design-claim-by-push.md` lists as NOT covered.
    - **The fork in the fix, and `#1567` resolves it the right way.** The assertion offers two
@@ -542,11 +595,16 @@ Not a bug — a measurement that would mislead if run as written.
      positive-controls the fix by reverting to the unbounded spawn and watching the guard return
      to `[ABSENT] x1`. Provenance it also names: the file arrived with `#1532` and reddened the
      guard on landing.
-   **Closing condition:** `#1567` merged, AND
-   `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` green on `origin/main` —
-   mechanically checkable by running that one file. Checked by whoever next reads this doc.
-   forcing: regression — `main` is red, and `claude/RULES.md`'s "a permanently-red gate is worse
-   than no gate" applies to the third census in this family in two days.
+   ✅ **Closing condition MET 2026-09-12:** `#1567` merged (`6f1867b1`) **and**
+   `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` green on `origin/main` — run, not
+   assumed: **5 passed**. ⚠ **The window from filing to closed was 1 h 10 m, and this item spent
+   most of it asserting `main` is red "RIGHT NOW" in four places.** That is the same defect class as
+   the tip-sha line in `State now`: a present-tense claim about a mutable state, with nothing to
+   expire it. **Write the measurement and its timestamp; let the closing condition carry the
+   present tense.**
+   forcing: none — fixed. It reddened the gate on 5 PR heads and `main` itself; retained because the
+   CLASS (a census over tracked text reddening `main` for everyone) is `claude/RULES.md`'s
+   "a permanently-red gate is worse than no gate" and recurred three times in two days.
 
 9. ⚠ **`#1508` DELETED `scripts/lib/subsystem_recall.py` AND 61 HANDOFF DOCS STILL PRESCRIBE
    RUNNING IT.** Measured 2026-09-12 at `origin/main` `8114a124`, by `git grep` against the ref
@@ -554,7 +612,10 @@ Not a bug — a measurement that would mislead if run as written.
    `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py` appears **65** times in **61** files
    under `claudedocs/` — each a "Run this first" block that now fails file-not-found. (The bare
    PATH appears 71 times in 63 files; the extra 6 are prose about the path, not invocations, which
-   is why the closing condition below is keyed to the command form.) The replacement is
+   is why the closing condition below is keyed to the command form.) **After the PR that filed this
+   item, the condition's own grep counts 64 across 60 files** — this doc's invocation fixed, its
+   remaining prose mentions excluded by path. Quote whichever you mean; they are not the same number.
+   The replacement is
    `cairn recall --repo <path>`. Positive control on the same read: `cairn recall` already appears
    54 times in `claudedocs/`, so the corrected spelling is in use and the grep can see it.
    via: measurement
@@ -586,10 +647,20 @@ Not a bug — a measurement that would mislead if run as written.
      close either by the other's grep.
    - 🔴 **A doc's "Run this first" line is the one command a resuming session runs before anything
      else**, so this fails at the moment it is least expected and reads as a broken environment.
-   **Closing condition:** `git grep -c 'python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py'
-   origin/main -- 'claudedocs/*'` sums to **0**. Keyed to the invocation, not the bare path —
-   docs that merely *discuss* the dead path (including this item) must not make the condition
-   unsatisfiable. Mechanical; checked by running that grep.
+   **Closing condition:**
+   ```
+   git grep -c 'python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py' origin/main \
+     -- 'claudedocs/*' ':(exclude)claudedocs/handoff-gate-flake-store-api.md'
+   ```
+   sums to **0**. 🔴 **THE EXCLUDE IS LOAD-BEARING AND AN EARLIER VERSION OF THIS CONDITION WAS
+   UNSATISFIABLE WITHOUT IT — while asserting, in the same breath, that it was not.** That version
+   read *"keyed to the invocation, not the bare path — docs that merely discuss the dead path
+   (including this item) must not make the condition unsatisfiable"*, which was false: this item
+   discusses the dead path **using the full invocation spelling**, three times. Measured at that
+   revision: the grep returned **67** across 61 files, of which **3** were this file's own prose.
+   **A condition keyed on a literal string that the item MUST print can never reach zero** — the
+   invocation-vs-path rewrite moved the defect between spellings instead of removing it. Mechanical;
+   checked by running that grep, and re-check the exclude still names this file if it is renamed.
    forcing: none — nothing is broken at runtime; it wastes a session's first command.
 
 ## Gotchas / decisions / dead-ends
@@ -764,17 +835,26 @@ git -C $DEVRC show origin/main:scripts/testlib/store_siting.py \
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   $DEVRC/scripts/tests/test_store_siting_ledger.py -q -p no:cacheprovider
 
-# 🔴 main's OWN red — expected until rank 6 is fixed; it is NOT this effort's
+# rank 6's keylog red — NO LONGER RED. Measured 2026-09-12 at origin/main: 104 passed.
+#   ⚠ This line read `# 1 failed, 100 passed` with "expected until rank 6 is fixed"; rank 6 itself
+#   still says `main` IS RED on it. Re-verify rank 6 before acting on it — this is the fourth
+#   present-tense red claim in these docs found stale in one session.
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  $DEVRC/scripts/collector/keylog/tests -q -p no:cacheprovider    # 1 failed, 100 passed
+  $DEVRC/scripts/collector/keylog/tests -q -p no:cacheprovider    # expect 104 passed
 gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/main)/status \
   --jq '.statuses[]|"\(.context) \(.state): \(.description[0:100])"'
-#   ⚠ This can show NO completed verdict at all, and that is the NORMAL case, measured at n=100
-#   in handoff-gate-speed-and-ci-signal.md:54 (~21-22 of 100 main commits get an authoritative
-#   verdict). A gate producing no verdict is not a green one — read the state, never just the
-#   absence of a `failure`, and prefer PR heads to main for any rate (that doc's :363).
+#   ⚠ This can show NO completed verdict at all, and that is the NORMAL case, measured at n=100 in
+#   handoff-gate-speed-and-ci-signal.md — its bullet "Only ~21-22 of 100 main commits get an
+#   authoritative verdict". A gate producing no verdict is not a green one: read the state, never
+#   just the absence of a `failure`, and prefer PR heads to main for any rate (that doc's bullet
+#   "main is a useless population for this question"). Quoted by opening words, not line number —
+#   both targets moved when this PR edited that file.
 
-# rank 8 — main's CURRENT own red, and the reproduction is one file (expect 1 failed)
+# rank 8 — CLOSED by #1567 (6f1867b1). This is its closing condition, so expect 5 PASSED.
+#   A `1 failed` here means the census has regressed, NOT that the recipe is stale.
+#   ⚠ This line said `expect 1 failed` for the 70 minutes rank 8 was open, which would have read
+#   as a broken recipe the moment it was fixed. A verify-block expectation must track the
+#   closing condition, not the state at the time of writing.
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   $DEVRC/scripts/tests/test_runner_bound_ledger.py -q -p no:cacheprovider
 
