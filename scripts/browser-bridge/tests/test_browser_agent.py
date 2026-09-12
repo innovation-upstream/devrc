@@ -1636,6 +1636,67 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
         "the ~120 s stall this change removes")
 
 
+# How long the fake holds the warm open, and how many times a starved attempt is
+# retried before the test gives up. 🔴 THE RETRY IS NOT FLAKE-PAPERING — a lost
+# window produces NO observation of the handler at all, so retrying is what keeps
+# a machine-load event from being reported as a code defect. The give-up path is
+# a LOUD failure that says which it was; nothing here can turn a real regression
+# green, because a wrapper that resumes after the signal is alive and inside the
+# warm at kill time, which is exactly when the attempt counts.
+_WARM_HOLD_S = 3
+_WARM_WINDOW_ATTEMPTS = 3
+
+
+def _warm_window_lost(proc, lock: Path):
+    """-> None if a signal sent NOW lands on a wrapper still inside the warm,
+    else the reason it would not.
+
+    🔴 MEASURED 2026-09-12, and it is the whole reason this function exists.
+    With the wrapper's `FAKE_OC_DEBUG_SLEEP` hold at 3 s, injecting a stall
+    between "the warm marker appeared" and the `killpg` splits into three bands,
+    and only the first is a verdict on the handler:
+
+      stall < ~3 s   rc 143 / 130   the trap ran — the real observation
+      ~3 s .. ~12 s  rc 2           the wrapper had LEFT the warm; the signal
+                                    killed its tool-set gate instead, so the
+                                    `rc != 0` assertion PASSES for the wrong
+                                    reason and proves nothing
+      > ~12 s        rc 0           the wrapper had already exited. It is a
+                                    ZOMBIE, so `os.getpgid` still resolves and
+                                    `killpg` still succeeds — the signal is
+                                    discarded — and `proc.wait()` hands back the
+                                    stored status 0. The assertion then fails
+                                    with "exited 0 … the handler released the
+                                    lock and let the run CONTINUE", naming a
+                                    regression that did not happen.
+
+    That third band is the reported `[INT]` split verdict: red under the suite's
+    own `-n 4 --dist loadfile` on a loaded dev host, green alone, green in the
+    nix sandbox — with no commit to the wrapper or this file in between.
+
+    ⚠ `proc.poll()` MUST NOT be used for this. It REAPS an exited child, which
+    removes the zombie and makes the very next `os.getpgid` raise
+    ProcessLookupError — a third failure shape, manufactured by the instrument.
+    Read `/proc/<pid>/stat` instead; it observes without reaping.
+    """
+    stat = Path(f"/proc/{proc.pid}/stat")
+    try:
+        # `comm` may contain spaces and parens, so the state field is the first
+        # token AFTER the final ')' — never `split()[2]`.
+        state = stat.read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        return "the wrapper was already gone before the signal"
+    if state == "Z":
+        return ("the wrapper was already a ZOMBIE before the signal — killpg "
+                "would succeed and the discarded signal would be read back as "
+                "the stored exit status")
+    if not lock.is_dir():
+        return (f"the warm lock '{lock.name}' was already released — the "
+                f"wrapper had left the warm (process state {state!r}), so the "
+                f"signal would hit a later stage, not the handler under test")
+    return None
+
+
 @pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "TERM"), (signal.SIGINT, "INT")],
                          ids=["TERM", "INT"])
 def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
@@ -1650,49 +1711,72 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
     all, so TERM uses the default disposition and the process dies. Green both
     sides. It is kept because it is the only thing that fails when the handler
     stops exiting — dropping `exit 143` leaves every other test green."""
-    shutil.rmtree(rig.oc_config_dir)
-    rig.oc_config_dir.mkdir()
     lock = Path(str(rig.oc_config_dir) + ".lock")
+    lost, rc, out, err, attempt = [], None, None, None, 0
+    for attempt in range(1, _WARM_WINDOW_ATTEMPTS + 1):
+        shutil.rmtree(rig.oc_config_dir)
+        rig.oc_config_dir.mkdir()
 
-    # 🔴 DETERMINISM, via the ONE hook that can provide it. The warm runs
-    # `opencode debug agent build` UNDER the lock, so holding THAT open is what
-    # widens the window in which the wrapper holds the lock.
-    # ⚠ `mode="slow"`/`FAKE_OC_SLEEP` CANNOT do it, and an earlier version of
-    # this comment claimed they did: the fake's `debug agent` branch exits ~70
-    # lines ABOVE where `mode` is read, so that invocation returned in 0.015 s
-    # and these tests completed in 0.03-0.09 s — a 5 s hold was arithmetically
-    # impossible. They passed anyway, on the ~100 ms of bootstrap left after the
-    # claim, which is a margin nobody chose.
-    # 🔴 The margin matters because the failure it guards is SILENT: for the
-    # RELEASE test, a TERM landing after the release finds the lock already gone,
-    # so `not lock.exists()` passes for the WRONG REASON. Measured under the full
-    # gate (8 m 45 s) the first version did exactly that.
-    in_warm = rig.scratch_root / f"in-warm-{os.getpid()}"
-    proc = rig.spawn(["read the page"],
-                     extra_env={"FAKE_OC_DEBUG_SLEEP": "3",
-                                "FAKE_OC_DEBUG_MARKER": str(in_warm),
-                                "BROWSER_AGENT_WARM_TIMEOUT": "30"})
-    try:
-        # 🔴 GATE ON BEING INSIDE THE WARM, NOT ON THE LOCK EXISTING. Waiting for
-        # the lock catches it ~20 ms after `mkdir`, which is BEFORE the warm
-        # starts — so the kill landed in whatever the bootstrap happened to be
-        # doing, on a margin of ~30 ms that nobody chose. The marker is written
-        # by the fake's `debug agent` branch, which IS the warm and DOES run
-        # under the lock, so this makes the window real rather than asserted.
-        _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
-               slice_s=20.0, poll=0.02)
-        assert lock.is_dir(), "precondition: the warm must run UNDER the lock"
-        os.killpg(os.getpgid(proc.pid), sig)
-        rc = proc.wait(timeout=45)
-        proc.communicate()
-    finally:
-        if proc.poll() is None:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait(timeout=10)
+        # 🔴 DETERMINISM, via the ONE hook that can provide it. The warm runs
+        # `opencode debug agent build` UNDER the lock, so holding THAT open is
+        # what widens the window in which the wrapper holds the lock.
+        # ⚠ `mode="slow"`/`FAKE_OC_SLEEP` CANNOT do it, and an earlier version of
+        # this comment claimed they did: the fake's `debug agent` branch exits ~70
+        # lines ABOVE where `mode` is read, so that invocation returned in 0.015 s
+        # and these tests completed in 0.03-0.09 s — a 5 s hold was arithmetically
+        # impossible. They passed anyway, on the ~100 ms of bootstrap left after the
+        # claim, which is a margin nobody chose.
+        # 🔴 The margin matters because the failure it guards is SILENT: for the
+        # RELEASE test, a TERM landing after the release finds the lock already gone,
+        # so `not lock.exists()` passes for the WRONG REASON. Measured under the full
+        # gate (8 m 45 s) the first version did exactly that.
+        in_warm = rig.scratch_root / f"in-warm-{os.getpid()}-{name}-{attempt}"
+        proc = rig.spawn(["read the page"],
+                         extra_env={"FAKE_OC_DEBUG_SLEEP": str(_WARM_HOLD_S),
+                                    "FAKE_OC_DEBUG_MARKER": str(in_warm),
+                                    "BROWSER_AGENT_WARM_TIMEOUT": "30"})
+        try:
+            # 🔴 GATE ON BEING INSIDE THE WARM, NOT ON THE LOCK EXISTING. Waiting
+            # for the lock catches it ~20 ms after `mkdir`, which is BEFORE the
+            # warm starts — so the kill landed in whatever the bootstrap happened
+            # to be doing, on a margin of ~30 ms that nobody chose. The marker is
+            # written by the fake's `debug agent` branch, which IS the warm and
+            # DOES run under the lock, so this makes the window real rather than
+            # asserted.
+            _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
+                   slice_s=20.0, poll=0.02)
+            why = _warm_window_lost(proc, lock)
+            if why:
+                lost.append(f"attempt {attempt}: {why}")
+                continue
+            os.killpg(os.getpgid(proc.pid), sig)
+            rc = proc.wait(timeout=45)
+            out, err = proc.communicate()
+            break
+        finally:
+            if proc.poll() is None:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait(timeout=10)
+    else:
+        pytest.fail(
+            f"the {name} never landed inside the warm in "
+            f"{_WARM_WINDOW_ATTEMPTS} attempts, so this run says NOTHING about "
+            f"the handler — it is a STARVED INSTRUMENT, not a verdict.\n  "
+            + "\n  ".join(lost) + "\n"
+            f"🔴 Read this as machine load, not as a code defect: the warm is "
+            f"held open for only {_WARM_HOLD_S}s and this process has to issue "
+            f"the signal inside it. MEASURED 2026-09-12 — a box that starves "
+            f"this test past the hold reports the wrapper as a zombie whose "
+            f"stored status is 0, and the `exited 0` assertion below then reads "
+            f"as a handler regression that did not happen.")
 
+    diag = (f"\n  the {name} landed inside the warm (attempt {attempt}; "
+            f"hold {_WARM_HOLD_S}s), so this IS a verdict on the handler."
+            f"\n  wrapper stdout tail: {(out or '')[-400:]!r}"
+            f"\n  wrapper stderr tail: {(err or '')[-400:]!r}")
     assert rc != 0, (
         f"exited {rc} after a {name} — the handler released the lock and let the "
         "run CONTINUE unserialised instead of terminating. 🔴 BOTH signals are "
         "parametrised because guarding only TERM left `exit 130` free: a "
         "mutation dropping it SURVIVED the whole suite, reintroducing exactly "
-        "the hazard the handler comment marks 🔴.")
+        "the hazard the handler comment marks 🔴." + diag)
