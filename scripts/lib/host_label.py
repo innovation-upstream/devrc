@@ -35,6 +35,43 @@ import os
 HOST_NAMES = ("workbench", "laptop")
 DEFAULT_LOCAL_HOST = "workbench"
 
+#: 🔴 EVERY host in HOST_NAMES with the Nebula address and user an SSH leg to it
+#: needs — `(label, addr, user)`, in HOST_NAMES order.
+#:
+#: `10.42.0.100` is the LAPTOP; `10.42.0.10` is the homelab GATEWAY. Getting that
+#: wrong DOES NOT FAIL LOUDLY: SSH succeeds against a real host and reports the
+#: gateway's state as the laptop's. That is why the address belongs next to the
+#: label vocabulary it is meant to agree with, rather than being retyped per tool.
+#:
+#: 🔴 THE LEDGER OF COPIES. This table is not yet the only spelling of these
+#: addresses — `scripts/session-manager:LAPTOP_SSH_TARGET` still carries its own,
+#: pinned by its own test. `scripts/tests/test_peer_host.py::
+#: test_session_manager_laptop_target_agrees_with_the_peer_table` asserts the two
+#: are EQUAL, so a future edit to either one is caught rather than silently
+#: creating the disagreement this module exists to prevent. Fold that copy in here
+#: when session-manager is next touched, and delete the seam guard with it.
+PEER_SSH = (
+    ("workbench", "10.42.0.30", "zach"),
+    ("laptop", "10.42.0.100", "zach"),
+)
+
+
+def ssh_target(label: str) -> str:
+    """`user@addr` for a host label. Raises on an unknown label.
+
+    Raising is deliberate. A miss that returned None or "" would be spliced into
+    an `ssh` argv and produce a connection to the LOCAL machine or to whatever
+    the caller's default host is — i.e. the wrong machine's answer, reported as
+    that label's. There is no safe fallback here, so there is none.
+    """
+    for lbl, addr, user in PEER_SSH:
+        if lbl == label:
+            return f"{user}@{addr}"
+    raise KeyError(
+        "no SSH target for host label %r — known labels: %s"
+        % (label, ", ".join(l for l, _, _ in PEER_SSH)))
+
+
 #: Where the collector records this machine's label.
 #:
 #: `HOST_LABEL_ENV_FILE` redirects it. That override exists so a test can point

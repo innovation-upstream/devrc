@@ -1,0 +1,699 @@
+#!/usr/bin/env python3
+"""peer-host — WHICH MACHINE is a given Claude Code peer session running on.
+
+    peer-host <selector> [--json] [--strict] [--host all|workbench|laptop]
+
+Prints ONE host label (`workbench` / `laptop`) on stdout and exits 0. Nothing
+else goes to stdout, ever — diagnostics are stderr — so a caller can do:
+
+    host=$(peer-host datapacket-talos-ef) || exit   # route work to $host
+
+
+🔴 THE PROBLEM THIS SOLVES, AND WHY THE OBVIOUS SOURCE IS THE WRONG ONE
+------------------------------------------------------------------------------
+The live peer listing (the harness's own agent list) renders rows like
+
+    datapacket-talos-ef [ef79ae] · interactive · idle · tmux scratch2:@62.%62 · 38m
+
+— name, ref, kind, state, tmux coordinates, age, and NO HOST. A session reading
+that listing cannot tell which machine a peer is on, so it cannot route work to
+the right one. Session names derive from the REPO, which is orthogonal to the
+machine, and tmux window names collide across hosts.
+
+The brief pointed at `session-manager`, which does claim the cross-host tmux
+view. Measured on 2026-09-12, it cannot answer this question, for a STRUCTURAL
+reason and not a coverage one:
+
+  * `session-manager` never reads the harness session registry at all
+    (`grep -c 'claude/sessions' scripts/session-manager` -> 0). Its rows carry
+    `session`, `window_id`, `label`, `claude_session_id` … and no harness peer
+    NAME. There is nothing in its output to match a peer name against, on any
+    host, so no amount of coverage would make the lookup possible.
+  * Its `claude_session_id` is the only field that could bridge to a registry
+    record, and its coverage is asymmetric where it matters most: measured in
+    one `--json --no-ch` run, **laptop 7 of 31 windows, workbench 50 of 53**.
+    Even at 100% it would still need the registry to map name -> sessionId.
+
+So this tool reads the registries directly, one per host, which is both the
+complete source (49/49 local, 9/9 laptop in that same measurement) and the
+cheap one — no tmux scan, no ClickHouse, one SSH round trip.
+
+
+🔴 THE REGISTRY IS PER-HOST, AND THAT IS THE WHOLE MECHANISM
+-------------------------------------------------------------
+Records live at `~/.claude/sessions/<pid>.json` on the machine the session runs
+on. There is no host dimension in that path — which is exactly WHY the listing
+has no host column, and also exactly what makes the answer derivable: a record's
+host is the host whose filesystem it was found on. Nothing is inferred from the
+name, and there is no static name->host map to go stale. Start a session on
+either box and it is answerable immediately, with no file edited anywhere.
+
+`session-resolve` reads the same registry and documents the same fact, but only
+for the LOCAL host (its `PRESENCE_EXCLUDED` state is precisely "this window is
+on another machine, so it can never carry a record here"). This tool is the
+cross-host half of that: it reads every peer's registry, local one off disk and
+the rest over SSH.
+
+
+🔴 THE REMOTE LEG SELF-IDENTIFIES — a wrong address cannot be mislabelled
+--------------------------------------------------------------------------
+`10.42.0.100` is the LAPTOP; `10.42.0.10` is the homelab GATEWAY. An SSH leg
+pointed at the wrong one does not fail: it succeeds against a real host and
+reports that host's state under the label we asked for. A constant alone cannot
+catch that, because the constant is the thing that would be wrong.
+
+So the remote program **computes its own label** — using the very same
+`scripts/lib/host_label.py` source, shipped over stdin rather than reimplemented
+— and prints it in a sentinel line. If the answer is not the label we dialled,
+the leg is REFUSED (`label_mismatch`) rather than recorded. One rule, executed
+on both machines, and a positive control on which machine answered.
+
+The sentinel is also the difference between "answered with nothing" and "the
+command was swallowed": stdout with no sentinel is `no_sentinel`, never an empty
+success. (Same vocabulary as `session-manager`'s `_host_ledger`.)
+
+
+🔴 NEVER THE LOCAL HOST AS A DEFAULT
+--------------------------------------
+The dangerous failure for a routing caller is answering "workbench" for a laptop
+session because the laptop probe failed. It cannot happen here: a host that was
+not searched contributes NO matches, so a laptop-only name yields ZERO matches,
+and zero matches with an unsearched host is `incomplete` (exit 4) — a distinct
+code from `unmatched` (exit 3), which means every host really was read and the
+name really is not live anywhere.
+
+When a UNIQUE match IS found while another host went unread, the answer is a
+positive measurement rather than a default, so it is returned (exit 0) with a
+loud stderr warning; `--strict` turns that case into exit 4 as well.
+
+
+🔴 THE BRACKETED `[ref]` IS NOT SUPPORTED, AND IS NOT DERIVABLE FROM HERE
+--------------------------------------------------------------------------
+Two independent sweeps failed to derive it: the brief's (11 candidate registry
+inputs x 6 hash algorithms x 3 offsets x 48 records) and this one's (9 inputs
+including the raw UUID bytes, both byte orders, and `bridgeSessionId`, x 11
+algorithms including CRC32/Adler32, against the one ground-truth
+`(name=datapacket-talos-ef, ref=ef79ae)` pair). Zero hits.
+
+An observation that is NOT built on: in that single pair the ref's first two
+characters equal the name's suffix (`ef79ae` / `…-ef`). n=1, and 1-in-256 by
+chance, so it is recorded here and used for nothing. Guessing a ref->peer rule
+off one sample would answer the WRONG HOST silently, which is the one outcome
+this tool exists to prevent. Pass the NAME (or a session id, pid or tmux
+address) instead; `--json` echoes which key matched.
+
+
+SELECTOR KINDS (a superset of the brief's "name or ref")
+---------------------------------------------------------
+  name         exact match on the registry `name` — the string the listing shows
+  session_id   full session id, or a hex prefix of >= MIN_SESSION_ID_PREFIX
+  pid          the process id, exactly
+  tmux         `session:@window.%pane`, or the `session:@window` prefix
+
+Every kind is tried and the MATCHES ARE UNIONED, so one record hit by two kinds
+is still one match. `tmux` is absent from many records (all 9 laptop records
+carried none when measured) and a record with no address simply cannot match
+that kind — it is not an error and it does not exclude the record from the
+others.
+
+
+EXIT CODES
+----------
+  0  resolved    exactly one live peer matched; its host is on stdout
+  2  ambiguous   more than one live peer matched (candidates on stderr)
+  3  unmatched   zero matched, and EVERY in-scope host was read successfully
+  4  incomplete  zero matched but a host could not be read — or, under
+                 --strict, a unique match while a host could not be read
+ 64  usage       bad arguments (EX_USAGE; deliberately NOT 2, so a caller can
+                 never read a typo'd flag as "ambiguous")
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+_LIB = str(Path(__file__).resolve().parent / "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+import host_label as _hl  # noqa: E402
+
+HOST_NAMES = _hl.HOST_NAMES
+HOST_ALL = "all"
+
+DEFAULT_REGISTRY_DIR = "~/.claude/sessions"
+
+#: 🔴 The protocol's positive control. The remote prints this token plus the
+#: label it computed FOR ITSELF; stdout without it is `no_sentinel`, never an
+#: empty success. Versioned so a future payload change cannot be read by an old
+#: client as a well-formed empty answer.
+SENTINEL = "PEERHOST1"
+
+SSH_OPTS = ("-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            "-o", "StrictHostKeyChecking=accept-new")
+#: The laptop answers over nebula at ~140 ms RTT, so the budget is generous
+#: relative to the work (a directory of small JSON files).
+DEFAULT_SSH_TIMEOUT = 25.0
+
+#: 🔴 A session-id prefix shorter than this is refused as a session_id selector.
+#: 4 hex chars over ~50 live sessions is a coin-flip for a collision, and a
+#: collision here resolves to `ambiguous` at best and the wrong host at worst.
+#: 6 keeps the false-match rate negligible while still being copy-pasteable.
+MIN_SESSION_ID_PREFIX = 6
+
+# --- selector kinds --------------------------------------------------------- #
+KIND_NAME = "name"
+KIND_SESSION_ID = "session_id"
+KIND_PID = "pid"
+KIND_TMUX = "tmux"
+ALL_KINDS = (KIND_NAME, KIND_SESSION_ID, KIND_PID, KIND_TMUX)
+
+# --- per-host read statuses -------------------------------------------------- #
+READ_OK = "read"
+READ_UNREACHABLE = "unreachable"        # the leg never answered
+READ_NO_SENTINEL = "no_sentinel"        # answered, but not with our protocol
+READ_LABEL_MISMATCH = "label_mismatch"  # answered as a DIFFERENT machine
+READ_ERROR = "error"                    # the registry itself could not be read
+READ_OUT_OF_SCOPE = "out-of-scope"      # excluded by --host
+ALL_READ_STATUSES = (READ_OK, READ_UNREACHABLE, READ_NO_SENTINEL,
+                     READ_LABEL_MISMATCH, READ_ERROR, READ_OUT_OF_SCOPE)
+
+#: The only status that counts as "this host was searched". Everything else
+#: leaves the host UNSEARCHED, which is what turns a zero into `incomplete`.
+SEARCHED_STATUSES = (READ_OK,)
+
+# --- results ------------------------------------------------------------------ #
+STATUS_RESOLVED = "resolved"
+STATUS_AMBIGUOUS = "ambiguous"
+STATUS_UNMATCHED = "unmatched"
+STATUS_INCOMPLETE = "incomplete"
+
+EXIT_RESOLVED = 0
+EXIT_AMBIGUOUS = 2
+EXIT_UNMATCHED = 3
+EXIT_INCOMPLETE = 4
+#: sysexits(3) EX_USAGE. 🔴 NOT argparse's default of 2 — that is EXIT_AMBIGUOUS
+#: here, and a mistyped flag reported as "ambiguous" is a wrong answer, not an
+#: error message.
+EXIT_USAGE = 64
+
+_EXIT_FOR = {
+    STATUS_RESOLVED: EXIT_RESOLVED,
+    STATUS_AMBIGUOUS: EXIT_AMBIGUOUS,
+    STATUS_UNMATCHED: EXIT_UNMATCHED,
+    STATUS_INCOMPLETE: EXIT_INCOMPLETE,
+}
+
+
+# =========================================================================== #
+# The registry reader — runs on BOTH sides of the SSH seam
+# =========================================================================== #
+#
+# 🔴 THIS SOURCE IS SHIPPED TO THE REMOTE VERBATIM, concatenated with
+# `scripts/lib/host_label.py` and piped to `python3 -`. That is why it is a
+# string and not an imported function: there is exactly ONE implementation of
+# "read this machine's registry and say which machine I am", and both the local
+# and the remote leg execute it. A second, remote-only copy is precisely how the
+# two would drift, and a drift here reads as a real difference between hosts.
+#
+# It must stay stdlib-only and Python-3.9-compatible, and it must not import
+# anything from this repo beyond the host_label source prepended to it.
+_READER_SOURCE = r'''
+def _peerhost_read_registry(directory, proc_dir="/proc"):
+    """[record, ...] for every live session in `directory`. Raises on OSError.
+
+    STALE RECORDS ARE DROPPED. The file is named for the pid, so a record whose
+    pid is gone describes a session that has exited; counting it could invent an
+    ambiguity, or answer with a host the peer left. Measured 2026-09-12: 0 stale
+    of 49 locally and 0 of 9 on the laptop — the harness prunes — so this is a
+    guard, not a hot path. It is a `/proc` check, which pid reuse can only make
+    too PERMISSIVE (a record kept that should have gone), never too strict, so
+    it is never worse than not filtering.
+
+    `proc_dir` is the seam that makes the drop TESTABLE — a suite cannot create
+    entries under the real `/proc`, so without it every hermetic fixture record
+    would look stale and the reader would return an empty list for reasons that
+    have nothing to do with the code under test.
+    """
+    import json as _json
+    import os as _os
+    out, stale, unreadable = [], 0, 0
+    for entry in sorted(_os.listdir(directory)):
+        if not entry.endswith(".json"):
+            continue
+        path = _os.path.join(directory, entry)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                raw = _json.load(fh)
+        except (OSError, ValueError, UnicodeDecodeError):
+            unreadable += 1
+            continue
+        if not isinstance(raw, dict):
+            unreadable += 1
+            continue
+        pid = raw.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            unreadable += 1
+            continue
+        if not _os.path.isdir(_os.path.join(proc_dir, str(pid))):
+            stale += 1
+            continue
+        out.append({
+            "name": raw.get("name"),
+            "session_id": raw.get("sessionId"),
+            "pid": pid,
+            # 🔴 MAY BE ABSENT. All 9 laptop records carried no `tmux` field
+            # when measured; a reader that assumed the key would have raised on
+            # the whole host and reported the laptop as unreadable.
+            "tmux": raw.get("tmux"),
+            "cwd": raw.get("cwd"),
+            "kind": raw.get("kind"),
+            "status": raw.get("status"),
+        })
+    return {"records": out, "stale_dropped": stale, "unreadable": unreadable}
+
+
+def _peerhost_main(directory):
+    import json as _json
+    import os as _os
+    import sys as _sys
+    label = local_host_label()
+    directory = _os.path.expanduser(directory)
+    try:
+        payload = _peerhost_read_registry(directory)
+        payload["error"] = None
+    except OSError as exc:
+        payload = {"records": [], "stale_dropped": 0, "unreadable": 0,
+                   "error": "%s: %s" % (type(exc).__name__, exc)}
+    payload["dir"] = directory
+    # The sentinel FIRST, on its own line, carrying the label this machine
+    # computed for itself. The caller refuses the leg if either is missing.
+    _sys.stdout.write("%s %s\n" % (_PEERHOST_SENTINEL, label))
+    _sys.stdout.write(_json.dumps(payload) + "\n")
+'''
+
+
+def _reader_namespace():
+    """Exec the shipped reader locally and hand back its two functions.
+
+    🔴 THE LOCAL LEG RUNS THE SHIPPED SOURCE, not a hand-written twin. If the
+    two legs ever disagree it is because the machines disagree, which is the only
+    difference this tool is allowed to report.
+    """
+    ns = {"local_host_label": _hl.local_host_label,
+          "_PEERHOST_SENTINEL": SENTINEL}
+    exec(compile(_READER_SOURCE, "<peer-host reader>", "exec"), ns)  # noqa: S102
+    return ns
+
+
+_FUTURE_LINE = "from __future__ import annotations"
+
+
+def remote_program(host_label_source: str) -> str:
+    """The complete program piped to the remote `python3 -`.
+
+    `host_label.py`'s source is PREPENDED rather than reimplemented, so
+    `local_host_label()` means the same thing on both machines. Two things about
+    splicing a real module body into a larger program, both of which are hard
+    SyntaxErrors or silent stdout corruption rather than soft failures:
+
+      * 🔴 `from __future__` MUST be the first statement in the compiled unit,
+        so the module's own copy is stripped and ONE is emitted at the top.
+        Leaving it in place makes the whole remote program a SyntaxError, which
+        arrives as an unreachable-looking host.
+      * 🔴 `python3 -` runs this as `__main__`, which DEFEATS the module's
+        `if __name__ == "__main__"` guard — its main block prints the bare label
+        and would land on stdout ahead of our payload. `__name__` is rebound
+        around the spliced body so the guard holds. (`parse_leg_output` scans
+        for the sentinel rather than assuming line 1, so a stray line would be
+        survivable — but "survivable" is not "correct", and a future payload
+        that needs line-1 framing must not inherit the mess.)
+    """
+    body = "\n".join(line for line in host_label_source.splitlines()
+                     if line.strip() != _FUTURE_LINE)
+    return "\n".join([
+        _FUTURE_LINE,
+        "__name__ = '_peerhost_hostlabel'",
+        body,
+        "__name__ = '__main__'",
+        "_PEERHOST_SENTINEL = %r" % SENTINEL,
+        _READER_SOURCE,
+        "import sys as _s",
+        "_peerhost_main(_s.argv[1] if len(_s.argv) > 1 else %r)"
+        % DEFAULT_REGISTRY_DIR,
+    ])
+
+
+# =========================================================================== #
+# Reading one host
+# =========================================================================== #
+def _default_runner(argv, *, input_text=None, timeout=None):
+    """(returncode, stdout, stderr). argv is a LIST — never a shell string."""
+    proc = subprocess.run(list(argv), input=input_text, capture_output=True,
+                          text=True, timeout=timeout)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def parse_leg_output(stdout: str, expected_label: str) -> dict:
+    """The remote/local program's stdout -> `{status, records, …}`. PURE.
+
+    Four outcomes, none of which collapse into "empty":
+      * no sentinel line          -> no_sentinel  (the command was swallowed)
+      * sentinel, WRONG label     -> label_mismatch (we dialled another machine)
+      * sentinel + payload error  -> error        (the registry itself failed)
+      * sentinel + payload        -> read
+    """
+    base = {"records": [], "stale_dropped": 0, "unreadable": 0,
+            "reported_label": None, "dir": None, "error": None}
+    lines = (stdout or "").splitlines()
+    head = None
+    body = None
+    for i, line in enumerate(lines):
+        if line.startswith(SENTINEL + " "):
+            head = line
+            body = "\n".join(lines[i + 1:])
+            break
+    if head is None:
+        base["status"] = READ_NO_SENTINEL
+        base["error"] = "no %s sentinel in output" % SENTINEL
+        return base
+    reported = head[len(SENTINEL) + 1:].strip()
+    base["reported_label"] = reported
+    if reported != expected_label:
+        base["status"] = READ_LABEL_MISMATCH
+        base["error"] = (
+            "dialled %r but the host answering identifies as %r — refusing to "
+            "label its sessions %r" % (expected_label, reported, expected_label))
+        return base
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        base["status"] = READ_NO_SENTINEL
+        base["error"] = "sentinel present but payload unparseable: %s" % exc
+        return base
+    if not isinstance(payload, dict):
+        base["status"] = READ_NO_SENTINEL
+        base["error"] = "payload is %s, not an object" % type(payload).__name__
+        return base
+    base.update({k: payload.get(k, base.get(k))
+                 for k in ("records", "stale_dropped", "unreadable", "dir")})
+    if payload.get("error"):
+        base["status"] = READ_ERROR
+        base["error"] = payload["error"]
+        base["records"] = []
+        return base
+    base["status"] = READ_OK
+    return base
+
+
+def read_host(host: str, *, local_host: str, registry_dir: str,
+              runner=None, ssh_timeout=DEFAULT_SSH_TIMEOUT,
+              host_label_source=None, proc_dir: str = "/proc") -> dict:
+    """One host's registry -> a leg result. Never raises for a host problem."""
+    runner = runner or _default_runner
+    if host == local_host:
+        return _read_local(host, registry_dir=registry_dir, proc_dir=proc_dir)
+    try:
+        target = _hl.ssh_target(host)
+    except KeyError as exc:
+        return {"status": READ_ERROR, "records": [], "stale_dropped": 0,
+                "unreadable": 0, "reported_label": None, "dir": None,
+                "error": str(exc), "via": None}
+    if host_label_source is None:
+        host_label_source = Path(_hl.__file__).read_text(encoding="utf-8")
+    program = remote_program(host_label_source)
+    argv = ["ssh", *SSH_OPTS, target,
+            "python3 - " + shlex.quote(registry_dir)]
+    try:
+        rc, out, err = runner(argv, input_text=program, timeout=ssh_timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"status": READ_UNREACHABLE, "records": [], "stale_dropped": 0,
+                "unreadable": 0, "reported_label": None, "dir": None,
+                "error": "%s: %s" % (type(exc).__name__, exc), "via": target}
+    leg = parse_leg_output(out, host)
+    leg["via"] = target
+    # 🔴 A non-zero rc may ONLY override a `no_sentinel` verdict. A leg that
+    # produced a correct sentinel and payload WAS read, whatever the shell's exit
+    # status did afterwards; and a `label_mismatch` must keep its own name,
+    # because "unreachable" would invite a retry against the very address that is
+    # wrong. Without this narrowing, the ssh-said-non-zero branch would erase the
+    # one diagnosis nobody can guess from the outside.
+    if rc != 0 and leg["status"] == READ_NO_SENTINEL:
+        leg["status"] = READ_UNREACHABLE
+        leg["error"] = "ssh exit %d: %s" % (
+            rc, (err or "").strip()[:300] or "(no stderr)")
+    return leg
+
+
+def _read_local(host: str, *, registry_dir: str, proc_dir: str = "/proc") -> dict:
+    ns = _reader_namespace()
+    directory = os.path.expanduser(registry_dir)
+    base = {"records": [], "stale_dropped": 0, "unreadable": 0,
+            "reported_label": host, "dir": directory, "error": None,
+            "via": "local"}
+    try:
+        payload = ns["_peerhost_read_registry"](directory, proc_dir)
+    except OSError as exc:
+        base["status"] = READ_ERROR
+        base["error"] = "%s: %s" % (type(exc).__name__, exc)
+        return base
+    base.update(payload)
+    base["status"] = READ_OK
+    return base
+
+
+# =========================================================================== #
+# Matching
+# =========================================================================== #
+def _is_hex(text: str) -> bool:
+    return bool(text) and all(c in "0123456789abcdefABCDEF-" for c in text)
+
+
+def match_kinds(selector: str, record: dict) -> list:
+    """Which selector kinds this record satisfies. PURE, and ORDER-STABLE.
+
+    🔴 A record is matched by the UNION of kinds, so a selector that is both a
+    valid name and a valid pid does not double-count one record — and a record
+    missing the field a kind reads simply does not match THAT kind. `tmux` is the
+    field that is routinely absent; see the reader's note.
+    """
+    sel = (selector or "").strip()
+    kinds = []
+    if not sel:
+        return kinds
+
+    if record.get("name") == sel:
+        kinds.append(KIND_NAME)
+
+    sid = record.get("session_id")
+    if isinstance(sid, str) and sid:
+        low = sel.lower()
+        if low == sid.lower():
+            kinds.append(KIND_SESSION_ID)
+        elif (len(low) >= MIN_SESSION_ID_PREFIX and _is_hex(low)
+                and sid.lower().startswith(low)):
+            kinds.append(KIND_SESSION_ID)
+
+    pid = record.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        if sel.isdigit() and int(sel) == pid:
+            kinds.append(KIND_PID)
+
+    addr = record.get("tmux")
+    if isinstance(addr, str) and addr:
+        if sel == addr or addr.startswith(sel + "."):
+            kinds.append(KIND_TMUX)
+
+    return kinds
+
+
+def find_matches(selector: str, legs: dict) -> list:
+    """Every (host, record) pair the selector hits, across every leg that READ.
+
+    A leg that did not reach READ_OK contributes nothing — which is the whole
+    reason `incomplete` exists as a separate outcome: an unsearched host is
+    silent, not empty.
+    """
+    out = []
+    for host in HOST_NAMES:
+        leg = legs.get(host) or {}
+        if leg.get("status") not in SEARCHED_STATUSES:
+            continue
+        for rec in leg.get("records") or []:
+            kinds = match_kinds(selector, rec)
+            if kinds:
+                hit = dict(rec)
+                hit["host"] = host
+                hit["matched_by"] = kinds
+                out.append(hit)
+    return out
+
+
+def lookup(selector: str, *, hosts=HOST_NAMES, local_host=None,
+           registry_dir=DEFAULT_REGISTRY_DIR, runner=None, strict=False,
+           ssh_timeout=DEFAULT_SSH_TIMEOUT,
+           host_label_source=None, proc_dir="/proc") -> dict:
+    """The whole answer, as data. The CLI is a thin renderer over this."""
+    local_host = local_host or _hl.local_host_label()
+    in_scope = tuple(h for h in HOST_NAMES if h in hosts)
+
+    legs = {}
+    for host in HOST_NAMES:
+        if host not in in_scope:
+            legs[host] = {"status": READ_OUT_OF_SCOPE, "records": [],
+                          "stale_dropped": 0, "unreadable": 0,
+                          "reported_label": None, "dir": None,
+                          "error": None, "via": None}
+            continue
+        legs[host] = read_host(
+            host, local_host=local_host, registry_dir=registry_dir,
+            runner=runner, ssh_timeout=ssh_timeout,
+            host_label_source=host_label_source, proc_dir=proc_dir)
+
+    matches = find_matches(selector, legs)
+    searched = [h for h in in_scope if legs[h]["status"] in SEARCHED_STATUSES]
+    unsearched = [h for h in in_scope if legs[h]["status"] not in SEARCHED_STATUSES]
+
+    if len(matches) > 1:
+        status, host = STATUS_AMBIGUOUS, None
+    elif len(matches) == 1:
+        if unsearched and strict:
+            # 🔴 --strict: a unique match is still only unique among the hosts
+            # that ANSWERED. Refusing is the caller's choice, not the default,
+            # because the match itself is a positive measurement.
+            status, host = STATUS_INCOMPLETE, None
+        else:
+            status, host = STATUS_RESOLVED, matches[0]["host"]
+    elif unsearched:
+        status, host = STATUS_INCOMPLETE, None
+    else:
+        status, host = STATUS_UNMATCHED, None
+
+    return {
+        "selector": selector,
+        "status": status,
+        "host": host,
+        "matches": matches,
+        "local_host": local_host,
+        "hosts_in_scope": list(in_scope),
+        "hosts_searched": searched,
+        "hosts_unsearched": unsearched,
+        "coverage": {h: {k: v for k, v in legs[h].items() if k != "records"}
+                     for h in HOST_NAMES},
+        "records_seen": {h: len(legs[h].get("records") or [])
+                         for h in HOST_NAMES},
+        "strict": bool(strict),
+    }
+
+
+# =========================================================================== #
+# CLI
+# =========================================================================== #
+def _describe(m: dict) -> str:
+    return "  %-9s %-34s %s  pid=%s  tmux=%s  [matched by %s]" % (
+        m.get("host"), m.get("name"),
+        (m.get("session_id") or "")[:8], m.get("pid"),
+        m.get("tmux") or "-", ",".join(m.get("matched_by") or []))
+
+
+def render_diagnostics(result: dict) -> str:
+    """Everything a human needs, on STDERR. Never touches stdout."""
+    out = []
+    status = result["status"]
+    sel = result["selector"]
+    if status == STATUS_AMBIGUOUS:
+        out.append("peer-host: %r matches %d live peers — refusing to guess:"
+                   % (sel, len(result["matches"])))
+        out.extend(_describe(m) for m in result["matches"])
+    elif status == STATUS_UNMATCHED:
+        out.append("peer-host: no live peer matches %r on %s (searched: %s)"
+                   % (sel, " or ".join(result["hosts_in_scope"]),
+                      ", ".join("%s=%d records" % (h, result["records_seen"][h])
+                                for h in result["hosts_searched"]) or "none"))
+    elif status == STATUS_INCOMPLETE:
+        if result["matches"]:
+            out.append("peer-host: --strict — %r resolved to %s, but %s could "
+                       "not be searched, so uniqueness is UNPROVEN"
+                       % (sel, result["matches"][0]["host"],
+                          ", ".join(result["hosts_unsearched"])))
+        else:
+            out.append("peer-host: no live peer matches %r, but %s could not "
+                       "be searched — this is NOT 'not found'"
+                       % (sel, ", ".join(result["hosts_unsearched"])))
+    elif result["hosts_unsearched"]:
+        out.append("peer-host: WARNING — answered from %s, but %s could not be "
+                   "searched; a same-named peer there would be invisible"
+                   % (", ".join(result["hosts_searched"]),
+                      ", ".join(result["hosts_unsearched"])))
+    for host in result["hosts_unsearched"]:
+        cov = result["coverage"][host]
+        out.append("  %s: %s — %s" % (host, cov["status"],
+                                      cov.get("error") or "(no detail)"))
+    return "\n".join(out)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="peer-host",
+        description="Print which host a Claude Code peer session is running on.",
+        epilog="exit: 0 resolved · 2 ambiguous · 3 unmatched · 4 incomplete "
+               "· 64 usage")
+    # 🔴 `%` is DOUBLED because argparse interpolates help strings itself
+    # (`help % params`). An f-string that emitted a bare `%62` made every
+    # invocation die in `add_argument` with "badly formed help string" — before
+    # any lookup ran, so the tool was 100% dead, not degraded.
+    p.add_argument("selector",
+                   help=("peer name (datapacket-talos-ef) | session id or a "
+                         f">={MIN_SESSION_ID_PREFIX}-char hex prefix | pid | "
+                         "tmux address (scratch2:@62 or scratch2:@62.%%62)"))
+    p.add_argument("--json", action="store_true",
+                   help="full result on stdout instead of the bare label")
+    p.add_argument("--strict", action="store_true",
+                   help="refuse (exit 4) even a unique match when some host "
+                        "could not be searched")
+    p.add_argument("--host", default=HOST_ALL, choices=(HOST_ALL, *HOST_NAMES),
+                   help="restrict the search (default: all)")
+    p.add_argument("--local-host", default=None, choices=HOST_NAMES,
+                   help="override which host is read off the local filesystem "
+                        "(default: host_label.local_host_label())")
+    p.add_argument("--registry-dir", default=DEFAULT_REGISTRY_DIR,
+                   help="registry directory, on EVERY host (default: %(default)s)")
+    p.add_argument("--ssh-timeout", type=float, default=DEFAULT_SSH_TIMEOUT)
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    # 🔴 argparse exits 2 on a usage error, and 2 is EXIT_AMBIGUOUS here. Remap
+    # so a mistyped flag can never be read as a real answer about a peer.
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        # `--help` / `--version` exit 0 and must stay 0; every other argparse
+        # exit is a usage error and becomes EX_USAGE.
+        return 0 if exc.code == 0 else EXIT_USAGE
+
+    hosts = HOST_NAMES if args.host == HOST_ALL else (args.host,)
+    result = lookup(args.selector, hosts=hosts, local_host=args.local_host,
+                    registry_dir=args.registry_dir, strict=args.strict,
+                    ssh_timeout=args.ssh_timeout)
+
+    diag = render_diagnostics(result)
+    if diag:
+        print(diag, file=sys.stderr)
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    elif result["status"] == STATUS_RESOLVED:
+        # 🔴 THE ONLY THING THAT EVER REACHES STDOUT on the success path.
+        print(result["host"])
+    return _EXIT_FOR[result["status"]]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
