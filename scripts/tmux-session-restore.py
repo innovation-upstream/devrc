@@ -81,31 +81,60 @@ CHEAT = STATE_DIR / "restore-cheatsheet.md"
 #     recovery state — the exact thing this change exists to protect.
 #   * one derivation means the two can never disagree.
 GENERATIONS_DIRNAME = "restore-plans"
-# 🔴 RETENTION IS A COUNT, NOT AN AGE, and 192 is 48h at continuum's 15-minute
-# save interval (`nix/programs/tmux/default.nix` -> `tmux-post-save.sh`).
+# 🔴 RETENTION IS A COUNT, NOT AN AGE, and 672 is 7 DAYS at continuum's
+# 15-minute save interval (`nix/programs/tmux/default.nix` -> `tmux-post-save.sh`).
 #
 # WHY A COUNT. The writer is hook-driven, so an age bound gives NO bound on disk
-# at all — turn the save interval down and an "keep 48h" rule keeps unboundedly
+# at all — turn the save interval down and an "keep 7 days" rule keeps unboundedly
 # many files. A count bounds disk deterministically whatever the cadence does.
 # The price is that the SPAN is cadence-dependent, and that is stated rather
-# than hidden: at 15 min it is 48h, at 1 min it is 3.2h, and on a host where
-# tmux is rarely up it is weeks.
+# than hidden: at 15 min it is 7 days, at 1 min it is 11.2h, and on a host where
+# tmux is rarely up it is months.
 #
-# WHY 48h AND NOT LESS. The recovery window has to outlast the interval between
-# a bad save and a human NOTICING it. The 2026-09-06 incident was noticed in
-# ~20 minutes; a crash at 22:00 noticed the following evening is ~20h, and a
-# Friday-night crash noticed Sunday is ~40h. 48h covers the realistic worst case
-# with headroom, and the failure mode of being too small is total loss of the
-# thing this file exists to preserve.
+# WHY 7 DAYS, AND WHY 48h (192) WAS NOT ENOUGH. The recovery window has to
+# outlast the interval between a bad save and a human NOTICING it. The 48h
+# argument was built on a worst case of "a Friday-night crash noticed Sunday"
+# (~40h). That is the wrong worst case: on 2026-09-11 the tmux server died twice
+# in 24h, and the recovery for the second one leaned on generations from BEFORE
+# the first. A window that can be consumed by a single bad weekend leaves no
+# margin for a second incident inside it, and the failure mode of being too
+# small is total loss of the thing this file exists to preserve. The operator
+# asked for 7 days on 2026-09-11.
 #
-# WHY NOT MORE. Disk. MEASURED 2026-09-07 on the live 10-entry plan: 3,820 B of
-# JSON + 3,267 B of cheat-sheet = 382/327 B per entry. Extrapolated to the
-# 47-entry workspace of the incident that is ~18 KB + ~15 KB = ~33 KB per
-# generation, so 192 generations is ~6.3 MB. Ten times the retention would still
-# be small, but 48h is where the RECOVERY argument stops paying for itself: a
-# plan older than the last two days describes a workspace the operator no longer
-# wants back.
-KEEP_GENERATIONS = 192
+# ⚠ WHAT THIS IS NOT. Storing every save rather than only the most recent is
+# ALREADY SHIPPED — that is #1383, which introduced generations at all. This
+# constant is PURELY the retention window; nothing about what gets written
+# changes.
+#
+# WHAT IT COSTS. Disk, and it was MEASURED at the new bound rather than
+# extrapolated. 2026-09-12, synthesising 672 generations of the live 53-entry
+# shape (~20 KB of plan JSON + ~15 KB of cheat-sheet, ~34 KiB each):
+#   672 generations = 22.6 MiB on disk   (192 = 6.5 MiB; the live dir is AT the
+#                                         old cap today — 192 generations,
+#                                         6.53 MiB, MEASURED 2026-09-12)
+# The scan cost was measured at the same three points, because a retention bound
+# is also a bound on how much `richer_generation` walks on every `restore`:
+#   n=138   richer_generation  5–8 ms
+#   n=192                      7–8 ms
+#   n=672                     25–38 ms   (two runs, host at load ~78)
+# `prune_generations` is unaffected in the steady state — one save prunes exactly
+# one generation whatever the cap is — and a no-op prune at 672 measured 0.6–0.9 ms.
+# ⚠ Those figures are WARM: the directory had just been written. The previously
+# recorded 0.26s at 138 generations was a genuinely cold page cache, and the
+# ratio measured here (~3–7x from 138 to 672) puts a cold scan at 672 in the
+# region of ~1–2s. That is an extrapolation from a measured ratio, not a measured
+# number, and it is a once-per-restore cost on a path that already waits up to
+# 30s for a tmux server.
+#
+# 🔴 WHAT THE EXTRA RETENTION DOES AND DOES NOT BUY. It buys MANUAL recovery:
+# `restore --plan <generation>` can now reach a week back instead of two days.
+# It does NOT widen the automatic remedy — `richer_generation` scans at most
+# `RECOVERY_ALERT_WINDOW` (4) generations behind the pointer, so `--best` reaches
+# exactly as far at 672 as it did at 192. That bound is deliberate and measured
+# (see `RECOVERY_ALERT_WINDOW`: an unbounded scan fired on 134 of 140 pointer
+# positions), so this constant and that one are independent knobs. If the ask
+# had been "make --best reach further", this is the wrong constant.
+KEEP_GENERATIONS = 672
 # `restore-plan_20260907T221535.json` — resurrect's own stamp format, so the two
 # sets of generations sort and read alike. Lexicographic order IS chronological
 # order for this format, which is what lets pruning sort on the NAME rather than
