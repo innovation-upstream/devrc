@@ -742,10 +742,13 @@ MUTANTS += [
      "    picked_rank = next((i for i, c in enumerate(candidates, 1)\n"
      '                        if c["url"] == url), None)\n',
      "0-based position in the list AS PRESENTED"),
+    # ⚠ RE-ANCHORED when the `picked_ordered` gate was added to this line (the
+    # F3 fix). The anchors test caught it at 0x rather than letting the row
+    # score a silent SURVIVED.
     ("K80", "deletion", "a click with NO range table reports the class "
                         "`unknown` instead of omitting it — \"could not ask\" "
                         "collapses into \"asked, no answer\"",
-     "                    if picked_repo and order_ranges else None)\n",
+     "                    if picked_repo and order_ranges and picked_ordered else None)\n",
      "                    if picked_repo else None)\n",
      "claims a measurement that did not happen"),
     ("K81", "narrowing", "`emit_click` stops swallowing — a telemetry failure "
@@ -757,16 +760,69 @@ MUTANTS += [
     ("K82", "operand swap", "the PICKER arm reports BEFORE the browser is "
                             "launched, so its ~3.7 ms import lands in front of "
                             "the thing the operator is waiting for",
+     # ⚠ RE-ANCHORED alongside K80 — the emit gained the F2/F3 dims.
      "    rc = open_url(url)\n"
      "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
-     "               picker_shown=True, offered_total=len(candidates),\n"
-     "               rank=picked_rank, plausibility=picked_class)\n"
+     "               picker_shown=picker_was_shown(reason),\n"
+     "               offered_total=len(candidates),\n"
+     "               rank=picked_rank, plausibility=picked_class,\n"
+     "               ordered=picked_ordered if picked_rank is not None else None,\n"
+     "               pinned_above=pinned_above, reason=reason)\n"
      "    return rc\n",
      "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
-     "               picker_shown=True, offered_total=len(candidates),\n"
-     "               rank=picked_rank, plausibility=picked_class)\n"
+     "               picker_shown=picker_was_shown(reason),\n"
+     "               offered_total=len(candidates),\n"
+     "               rank=picked_rank, plausibility=picked_class,\n"
+     "               ordered=picked_ordered if picked_rank is not None else None,\n"
+     "               pinned_above=pinned_above, reason=reason)\n"
      "    return open_url(url)\n",
      "PICKER click did not record"),
+
+    # ---- F15: the audit's three findings, each with its own mutant ----------
+    ("K85", "widening", "every empty `pick()` return is reported as a "
+                        "DISMISSAL again — including the three where NO PICKER "
+                        "WAS EVER SHOWN, which pads the ordering's own "
+                        "denominator with clicks that saw nothing",
+     "        emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED\n"
+     "                   else CLICK_NO_SELECTION,\n"
+     "                   picker_shown=picker_was_shown(reason),\n",
+     "        emit_click(CLICK_DISMISSED,\n"
+     "                   picker_shown=True,\n",
+     "was reported as"),
+    ("K86", "operand swap", "`picker_was_shown` claims a list was on screen for "
+                            "the endings where nothing was displayed",
+     "    if reason in PICK_REASONS_SHOWN:\n        return True\n",
+     "    if reason in PICK_REASONS_SHOWN:\n        return True\n"
+     "    if reason in PICK_REASONS_NOT_SHOWN:\n        return True\n",
+     "reported picker_shown="),
+    ("K87", "deletion", "`pick()` stops recording WHY it returned nothing, so "
+                        "every ending collapses back to `unattributed`",
+     "        set_pick_reason(PICK_REASON_DISMISSED)\n",
+     "        pass\n",
+     # ⚠ THE TOKEN MOVED WITH THE KILLER. This row SURVIVED its first sweep —
+     # every dismissal test stubbed `pick` and set the reason itself, so nothing
+     # exercised the real seam. The test written to close it
+     # (`test_the_REAL_pick_records_the_reason_at_every_one_of_its_exits`) is
+     # now the killer, and this is ITS message.
+     "for this ending, expected"),
+    ("K88", "widening", "a PINNED row claims the ordering ranked it — the F3 "
+                        "bias, restored: `rank` then mixes ordered rows with "
+                        "rows that were never placed",
+     "    picked_ordered = (pinned_above is not None and picked_rank is not None\n"
+     "                      and picked_rank >= pinned_above)\n",
+     "    picked_ordered = True\n",
+     "but the row claims it was"),
+    ("K89", "operand swap", "`pinned_above` is reported as 0 on the arms that "
+                            "APPEND the universe, so `rank - pinned_above` "
+                            "silently treats a pinned row as ranked",
+     "        pinned_above = len(candidates)\n"
+     "        candidates = candidates + universe_rows()\n",
+     "        pinned_above = 0\n"
+     "        candidates = candidates + universe_rows()\n",
+     # ⚠ SAME STORY AS K87: this row SURVIVED its first sweep because the F3
+     # test drove the GUESSED arm and this mutant is on DEAD END 2. The token
+     # belongs to the test written to cover that second arm.
+     "one clawgate row is pinned above"),
     # 🔴 THE SAME MUTATION ON THE *OTHER* CALL SITE, AND IT IS NOT A DUPLICATE.
     # An earlier version of the ordering test drove the AUTO arm only, so K82
     # SURVIVED it — two record-then-open sites, one covered. Both rows stay, so
@@ -793,6 +849,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K72": OPEN_, "K73": OPEN_, "K74": OPEN_, "K75": OPEN_, "K76": OPEN_,
     "K77": OPEN_, "K78": OPEN_, "K79": OPEN_, "K80": OPEN_, "K81": OPEN_,
     "K82": OPEN_, "K83": OPEN_, "K84": OPEN_,
+    "K85": OPEN_, "K86": OPEN_, "K87": OPEN_, "K88": OPEN_, "K89": OPEN_,
     "P1": SCAN,
     "K1": TAILER, "K2": TAILER, "K3": TAILER, "K43": TAILER, "K44": TAILER,
     "K4": SCAN, "K5": SCAN, "K6": SCAN,

@@ -525,8 +525,25 @@ PICKS_COMPACT_AT = PICKS_MAX_ROWS * 2
 # ratified by not complaining. A later scoring change may weight or exclude one
 # of them — the tag is what makes that possible without having thrown the data
 # away. Nothing reads it today: `pick_scores` is unchanged and counts every row
-# the same, which is the pre-change behaviour for picker rows and strictly more
-# data for auto rows.
+# the same.
+#
+# 🔴 THIS IS NOT A PURE ADDITION, AND AN EARLIER DRAFT OF THIS PARAGRAPH SAID IT
+# WAS ("strictly more data for auto rows"). That was WRONG AT THE CAPS. The log
+# is bounded twice and both bounds are FIFO with no `via` filtering:
+# `load_picks` scores the last `PICKS_MAX_ROWS` rows and `_compact_picks`
+# truncates the FILE to the same tail past `PICKS_COMPACT_AT`. Auto-opens are
+# the COMMON shape, so at real volume they do not sit beside the picker rows —
+# they PUSH THEM OUT. A host that clicks mostly `owner/repo#N` ends up with
+# permanently FEWER picker rows on disk than before this change.
+#
+# 🔴 SO THIS CHANGES THE LIVE PICKER ORDER, NOT ONLY THE DATASET. `pick_scores`
+# feeds `order_universe`, so recording auto-opens re-weights what the operator
+# is offered on their next ambiguous click — toward repositories they reach by
+# unambiguous reference. That is defensible (it is still evidence about what
+# this operator means by a number, which is what Tier B is for) and it is a
+# BEHAVIOUR CHANGE that must be stated rather than discovered. If it turns out
+# to crowd out the picker signal, the fix is a `via`-aware cap or weight — which
+# is exactly what the tag exists to make possible.
 PICK_VIA_AUTO = "auto"
 PICK_VIA_PICKER = "picker"
 
@@ -1104,9 +1121,16 @@ CLICK_TOOL = "mention-open"
 # something, and a picker the operator walked away from.
 CLICK_AUTO_OPEN = "auto-open"
 CLICK_PICKED = "picked"
+# 🔴 `dismissed` MEANS A LIST WAS ON SCREEN AND THE OPERATOR WALKED AWAY — AND
+# NOTHING ELSE. It used to be emitted for all six of `pick()`'s empty returns,
+# three of which never displayed a picker at all; see the `PICK_REASON_*` block
+# for the measurement. Everything that is not a real dismissal is
+# `no-selection`, which carries the reason.
 CLICK_DISMISSED = "dismissed"
+CLICK_NO_SELECTION = "no-selection"
 # Pinned two-way by `test_the_click_OUTCOME_vocabulary_is_pinned_two_way`.
-CLICK_OUTCOMES = (CLICK_AUTO_OPEN, CLICK_PICKED, CLICK_DISMISSED)
+CLICK_OUTCOMES = (CLICK_AUTO_OPEN, CLICK_PICKED, CLICK_DISMISSED,
+                  CLICK_NO_SELECTION)
 
 # 🔴 THE CLASS GOES OUT AS A NAME, NEVER AS ITS ORDINAL. `CLASS_PLAUSIBLE` is
 # `0`, and a consumer reading the payload with ClickHouse's `JSONExtractInt`
@@ -1127,13 +1151,17 @@ CLASS_NAMES = {
 # a ledger entry, or an entry naming no field, fails the suite — the shape of a
 # telemetry row is a contract with a consumer that is not in this repo.
 CLICK_DIM_FIELDS = ("repo", "platform", "picker_shown", "offered_total",
-                    "rank", "plausibility")
+                    "rank", "plausibility", "reason", "ordered", "pinned_above")
 
 
 def click_dims(repo: str = "", platform: str = "",
-               picker_shown: bool = False, offered_total: int | None = None,
+               picker_shown: bool | None = False,
+               offered_total: int | None = None,
                rank: int | None = None,
-               plausibility: int | None = None) -> dict:
+               plausibility: int | None = None,
+               reason: str | None = None,
+               ordered: bool | None = None,
+               pinned_above: int | None = None) -> dict:
     """The payload dims for one click outcome. Pure, no I/O, no clock.
 
     🔴 AN UNMEASURABLE FIELD IS OMITTED, NEVER ZEROED — AND THIS IS THE WHOLE
@@ -1159,15 +1187,47 @@ def click_dims(repo: str = "", platform: str = "",
     and a dismissed picker opened nothing at all. `""` is the honest value and
     it is one a consumer can test; omitting the key would make a clawgate pick
     indistinguishable from a row this handler never filled in.
+
+    🔴 `picker_shown` IS THREE-VALUED: `True`, `False`, or ABSENT when it was
+    not measured (a stubbed picker — see `picker_was_shown`). `None` OMITS the
+    key rather than shipping a `False` a consumer would count.
+
+    🔴 `ordered` IS WHAT MAKES `rank` READABLE, AND WITHOUT IT THE HEADLINE
+    QUERY IS BIASED BY CONSTRUCTION. `candidates` is `[evidence rows] +
+    [universe rows]`: the clawgate task, the pane-guessed repo and a mapping hit
+    are PINNED above the block `order_universe` actually ranked. So a click that
+    picks the pinned pane repo emits `rank=1` — indistinguishable from a
+    universe row the ordering genuinely placed second — and "chosen rank
+    clusters near 0" then reads as "the ordering works" on the commonest picker
+    shape (a bare `#N` with a pane repo), whether or not it does. `ordered` says
+    whether THIS row was placed by the ordering; `pinned_above` says how many
+    rows sat above the ranked block, so `rank - pinned_above` is the row's
+    position WITHIN it. **A consumer measuring the ordering must filter
+    `ordered = true`.**
+
+    This is the same argument as the auto-path's missing `rank`, one arm over:
+    a number that is only meaningful for some rows must carry the field that
+    says which rows those are.
+
+    ⚠ `plausibility` IS GATED ON `ordered` AT THE CALL SITE for the same reason
+    — it was previously emitted whenever the ordering RAN, which is not the same
+    as "this row was ordered".
     """
-    dims: dict = {"repo": repo, "platform": platform,
-                  "picker_shown": bool(picker_shown)}
+    dims: dict = {"repo": repo, "platform": platform}
+    if picker_shown is not None:
+        dims["picker_shown"] = bool(picker_shown)
     if offered_total is not None:
         dims["offered_total"] = int(offered_total)
     if rank is not None:
         dims["rank"] = int(rank)
     if plausibility is not None and plausibility in CLASS_NAMES:
         dims["plausibility"] = CLASS_NAMES[plausibility]
+    if reason is not None:
+        dims["reason"] = str(reason)
+    if ordered is not None:
+        dims["ordered"] = bool(ordered)
+    if pinned_above is not None:
+        dims["pinned_above"] = int(pinned_above)
     return dims
 
 
@@ -1184,12 +1244,19 @@ def emit_click(outcome: str, **dims) -> str:
     a broken one. A telemetry helper that can do that is worse than no
     telemetry.
 
-    ⚠ WHAT IS STILL OUTSIDE, STATED RATHER THAN IMPLIED: the three pure lookups
-    the picker arm does to find the chosen row's rank, platform and plausibility
-    class. They are not moved in here because doing so would mean handing this
-    function the CANDIDATE LIST — the offered universe — which is the one thing
-    the disclosure rule says must never reach the sink. A narrower guarded
-    surface is the right trade against a wider disclosure surface.
+    ⚠ WHAT IS STILL OUTSIDE, ENUMERATED RATHER THAN SUMMARISED — and the
+    enumeration was itself incomplete on its first draft, which is worth
+    recording in the one paragraph whose subject is completeness:
+      * the picker arm's `picked_rank`, `picked_platform`, `picked_class` and
+        `picked_ordered` lookups;
+      * the AUTO arm's `candidates[0]["platform"]` subscript;
+      * `repo_of_github_url(...)` on both arms.
+    None is moved in here, because doing so would mean handing this function the
+    CANDIDATE LIST — the offered universe — which is the one thing the
+    disclosure rule says must never reach the sink. A narrower guarded surface
+    is the right trade against a wider disclosure surface. All of them are pure
+    and total on the values `main()` can hold at those points; that is an
+    argument, not a guarantee, and it is stated as one.
 
     🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE CLICK — the same contract
     `record_pick` carries and for the same reason, except that this one is
@@ -1666,6 +1733,87 @@ PICKED_NEVER_SHOWN = "never-shown"
 PICKED_OUTCOMES = (PICKED_SELECTED, PICKED_DISMISSED, PICKED_TIMEOUT,
                    PICKED_NEVER_SHOWN)
 
+# 🔴 WHY `pick()` RETURNED "", AND WHY THIS HOLDER EXISTS AT ALL. `pick()`
+# collapses SIX different endings into one empty string: fzf missing, the spawn
+# raising, a timeout, a terminal that never showed, a genuine dismissal, and a
+# row that did not map back to a URL. `run_picker` already knows which — it
+# returns a `PICKED_*` outcome — and `pick()` was throwing that away one line
+# before the caller needed it.
+#
+# The telemetry then reported all six as `dismissed picker_shown=True`, and in
+# THREE of them no picker was ever displayed, so `picker_shown` was factually
+# false in the exact rows that form the denominator for "did the ordering help?".
+# A denominator padded with clicks that never saw a list is worse than no
+# denominator.
+#
+# ⚠ A MODULE-LEVEL HOLDER RATHER THAN A CHANGED RETURN TYPE, DELIBERATELY.
+# `pick()` returning `(url, reason)` is the cleaner signature and it is NOT
+# worth it here: roughly thirty tests stub `MO.pick` with
+# `lambda c, mesg="": <url>`, so widening the contract would rewrite all of them
+# and — worse — a stub that kept the old shape would silently feed `main()` a
+# string where it expected a tuple. The handler is a one-shot process that calls
+# `pick()` at most once, so a holder has no lifetime to get wrong.
+#
+# 🔴 `UNATTRIBUTED` IS THE STUBBED-PICKER VALUE AND IT MUST NOT BE GUESSED AT.
+# `main()` resets the holder before calling `pick()`, so a test stub that never
+# goes through the real `pick()` leaves it here. The telemetry then OMITS
+# `picker_shown` rather than asserting one — see `click_dims`.
+PICK_REASON_SELECTED = "selected"
+PICK_REASON_DISMISSED = "dismissed"
+PICK_REASON_TIMEOUT = "timeout"
+PICK_REASON_NEVER_SHOWN = "never-shown"
+PICK_REASON_FZF_MISSING = "fzf-missing"
+PICK_REASON_SPAWN_FAILED = "spawn-failed"
+PICK_REASON_UNMAPPED_ROW = "unmapped-row"
+PICK_REASON_UNATTRIBUTED = "unattributed"
+
+# Pinned two-way by `test_the_pick_REASON_vocabulary_is_pinned_two_way`.
+PICK_REASONS = (PICK_REASON_SELECTED, PICK_REASON_DISMISSED,
+                PICK_REASON_TIMEOUT, PICK_REASON_NEVER_SHOWN,
+                PICK_REASON_FZF_MISSING, PICK_REASON_SPAWN_FAILED,
+                PICK_REASON_UNMAPPED_ROW, PICK_REASON_UNATTRIBUTED)
+
+# 🔴 WHICH REASONS MEAN A LIST WAS ACTUALLY ON SCREEN. This is the whole point
+# of the split: `fzf-missing`, `spawn-failed` and `never-shown` are clicks where
+# the operator saw NOTHING, and reporting `picker_shown=True` for them puts rows
+# into the ordering's denominator that never had an ordering to judge.
+# `unattributed` is deliberately in NEITHER set — it is "we did not measure",
+# which omits the field instead of picking a side.
+PICK_REASONS_SHOWN = (PICK_REASON_SELECTED, PICK_REASON_DISMISSED,
+                      PICK_REASON_TIMEOUT, PICK_REASON_UNMAPPED_ROW)
+PICK_REASONS_NOT_SHOWN = (PICK_REASON_FZF_MISSING, PICK_REASON_SPAWN_FAILED,
+                          PICK_REASON_NEVER_SHOWN)
+
+# A one-slot list rather than a `global` — same effect, no rebinding.
+_PICK_REASON: list[str] = [PICK_REASON_UNATTRIBUTED]
+
+
+def set_pick_reason(reason: str) -> None:
+    """Record why `pick()` is about to return what it returns. Total: anything
+    outside `PICK_REASONS` becomes `unattributed` rather than being stored, so a
+    future spelling cannot invent a vocabulary the consumers do not know."""
+    _PICK_REASON[0] = (reason if reason in PICK_REASONS
+                       else PICK_REASON_UNATTRIBUTED)
+
+
+def last_pick_reason() -> str:
+    """The reason recorded by the most recent `pick()` in this process."""
+    return _PICK_REASON[0]
+
+
+def picker_was_shown(reason: str) -> bool | None:
+    """Did the operator actually see a list? `None` means NOT MEASURED.
+
+    🔴 THREE-VALUED ON PURPOSE. A bool here would have to guess for
+    `unattributed`, and both guesses are wrong in the direction that matters:
+    `True` pads the ordering's denominator with clicks that saw nothing, `False`
+    silently drops real pickers out of it."""
+    if reason in PICK_REASONS_SHOWN:
+        return True
+    if reason in PICK_REASONS_NOT_SHOWN:
+        return False
+    return None
+
 
 def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
     """Show `payload` in a terminal running fzf. Returns `(row, outcome)`, where
@@ -1879,6 +2027,9 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     # switch, none by an edit.
     import shutil  # noqa: PLC0415 — see run_picker's import comment
     if shutil.which("fzf") is None:
+        # 🔴 NO PICKER WAS SHOWN. Recorded rather than collapsed into the same
+        # empty string as a dismissal — see the `PICK_REASON_*` block.
+        set_pick_reason(PICK_REASON_FZF_MISSING)
         notify("the mention picker cannot run",
                "fzf is not on this handler's PATH. The hint wrapper pins it, so "
                "this is a DEPLOY gap, not a config one — run "
@@ -1890,6 +2041,7 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
         chosen, outcome = run_picker("\n".join([*header, *rows]) + "\n",
                                      len(header))
     except (OSError, subprocess.SubprocessError) as exc:
+        set_pick_reason(PICK_REASON_SPAWN_FAILED)
         notify("could not show the mention picker",
                f"{type(exc).__name__}: {exc}")
         return ""
@@ -1925,7 +2077,25 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
         # future outcome built from data would have leaked through it silently.
         notify("the mention picker returned an unknown outcome",
                "see PICKED_OUTCOMES in scripts/mention-open.py")
-    return row_to_url(chosen, candidates)
+    url = row_to_url(chosen, candidates)
+    # 🔴 THE REASON IS DERIVED FROM WHAT HAPPENED, NOT FROM THE OUTCOME ALONE.
+    # `row_to_url` can return "" for a row that WAS selected — it matches on the
+    # URL suffix so a decorated or reordered row that does not map yields
+    # nothing — and reporting that as a dismissal would be a third way to say
+    # "the operator walked away" about a click where they did not.
+    if url:
+        set_pick_reason(PICK_REASON_SELECTED)
+    elif outcome == PICKED_SELECTED:
+        set_pick_reason(PICK_REASON_UNMAPPED_ROW)
+    elif outcome == PICKED_DISMISSED:
+        set_pick_reason(PICK_REASON_DISMISSED)
+    elif outcome == PICKED_TIMEOUT:
+        set_pick_reason(PICK_REASON_TIMEOUT)
+    elif outcome == PICKED_NEVER_SHOWN:
+        set_pick_reason(PICK_REASON_NEVER_SHOWN)
+    else:
+        set_pick_reason(PICK_REASON_UNATTRIBUTED)
+    return url
 
 
 # --------------------------------------------------------------------------- #
@@ -2499,6 +2669,14 @@ def main(argv: list[str] | None = None) -> int:
     # version of this change and it was WRONG on the commonest path: the whole
     # universe was ordered and the header said nothing at all.
     universe_shown = False
+    # 🔴 HOW MANY ROWS SIT ABOVE THE BLOCK `order_universe` ACTUALLY RANKED.
+    # `candidates` is `[evidence rows] + [universe rows]`, and only the tail was
+    # ordered — so a `rank` with no `pinned_above` beside it cannot tell a
+    # ranked row from a pinned one. Defaults to `None` = NOT MEASURED, which is
+    # what a picker holding no universe rows at all should report: there is no
+    # ordered block for a position to be relative to. The three arms that append
+    # universe rows each set it.
+    pinned_above: int | None = None
     may_offer_universe = (not args.print_only and not args.no_discovery
                           and not colour)
     num = span["id"] if (span is not None and span["id"].isdigit()) else offer_num
@@ -2567,12 +2745,17 @@ def main(argv: list[str] | None = None) -> int:
         # outright. Either way the operator now gets a choice instead of a toast.
         offered_universe = True
         universe_shown = True
+        # Nothing is pinned above: the whole list IS the ordered block.
+        pinned_above = 0
         candidates = universe_rows()
     elif (span is not None and span["ambiguous"] and universe_repos
             and not any(c["platform"] == PLATFORM_GITHUB for c in candidates)):
         # Dead end 2 — a bare `#N` nothing could attribute. The clawgate
         # candidate STAYS FIRST so the common case is still one Enter away; the
         # universe is appended as the way to say "no, GitHub, this repo".
+        # The clawgate row stays on top and was never ranked — so the ordered
+        # block starts below it. See `click_dims`' `ordered` paragraph.
+        pinned_above = len(candidates)
         candidates = candidates + universe_rows()
         universe_shown = True
 
@@ -2687,6 +2870,9 @@ def main(argv: list[str] | None = None) -> int:
         # `offered_universe` there would claim rows that are not in the list —
         # both to the auto-open guard below and to the note.
         if extra:
+            # The measured rows (the clawgate task, the pane's guess) stay on
+            # top and were never ranked — same as dead end 2.
+            pinned_above = len(candidates)
             candidates = candidates + extra
             offered_universe = True
             universe_shown = True
@@ -2781,7 +2967,12 @@ def main(argv: list[str] | None = None) -> int:
         if extra:
             mesg = f"{mesg} · {extra}" if mesg else extra
 
+    # 🔴 RESET BEFORE THE CALL, SO A STUBBED `pick` CANNOT INHERIT A STALE
+    # REASON. `main()` runs once per process, but a test calling it twice would
+    # otherwise read the first click's reason on the second.
+    set_pick_reason(PICK_REASON_UNATTRIBUTED)
     url = pick(candidates, mesg=mesg)
+    reason = last_pick_reason()
     if not url:
         # 🔴 A DISMISSAL IS A MEASUREMENT, NOT A NON-EVENT — and it is the
         # DENOMINATOR the ordering question needs. "Did the plausibility
@@ -2791,8 +2982,20 @@ def main(argv: list[str] | None = None) -> int:
         # good. `offered_total` rides along because the list size is the other
         # half of that reading; there is no rank or class, because nothing was
         # chosen.
-        emit_click(CLICK_DISMISSED, picker_shown=True,
-                   offered_total=len(candidates))
+        #
+        # 🔴 BUT ONLY A REAL DISMISSAL IS `dismissed`. `pick()` returns "" from
+        # SIX endings and three of them never put a list on screen; this arm
+        # used to report all six as `dismissed picker_shown=True`, which is
+        # factually false for half of them and pads the very denominator above.
+        # `pick()` now records WHICH — see the `PICK_REASON_*` block — and
+        # `picker_was_shown` is three-valued so an unmeasured case omits the
+        # field rather than guessing.
+        emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
+                   else CLICK_NO_SELECTION,
+                   picker_shown=picker_was_shown(reason),
+                   offered_total=len(candidates),
+                   pinned_above=pinned_above,
+                   reason=reason)
         return 0
     # 🔴 RECORDED *AFTER* THE CHOICE AND *BEFORE* THE OPEN, AND IT CANNOT BLOCK
     # EITHER. `record_pick` swallows every OSError (see it), so a read-only home
@@ -2827,14 +3030,25 @@ def main(argv: list[str] | None = None) -> int:
     # The class the ROW THE OPERATOR SAW was in, from the table that ordering
     # actually used — `{}` when no ordering ran, which omits the field. See
     # `_ordered_universe` and `click_dims` for why absent ≠ `unknown` here.
+    # 🔴 WAS THIS ROW ACTUALLY PLACED BY THE ORDERING? The pinned rows above the
+    # universe block were never ranked, so a `rank` without this is a number
+    # that means two different things — see `click_dims`.
+    picked_ordered = (pinned_above is not None and picked_rank is not None
+                      and picked_rank >= pinned_above)
+    # ...and the class is reported only for a row the ordering actually placed.
+    # It used to be emitted whenever the ordering RAN, which made a pinned pane
+    # repo indistinguishable from a universe row ranked at the same position.
     picked_class = (plausibility_class(num, order_ranges.get(picked_repo.lower()))
-                    if picked_repo and order_ranges else None)
+                    if picked_repo and order_ranges and picked_ordered else None)
     picked_platform = next((c["platform"] for c in candidates
                             if c["url"] == url), "")
     rc = open_url(url)
     emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,
-               picker_shown=True, offered_total=len(candidates),
-               rank=picked_rank, plausibility=picked_class)
+               picker_shown=picker_was_shown(reason),
+               offered_total=len(candidates),
+               rank=picked_rank, plausibility=picked_class,
+               ordered=picked_ordered if picked_rank is not None else None,
+               pinned_above=pinned_above, reason=reason)
     return rc
 
 

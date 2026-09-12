@@ -23,6 +23,7 @@ import ast
 import base64
 import errno
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -40,6 +41,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 HANDLER = ROOT / "scripts" / "mention-open.py"
+# This file, read as SOURCE by `test_no_test_in_this_file_calls_monkeypatch_undo`
+# — the one hazard class no runtime assertion in here can see.
+THIS_FILE = Path(__file__).resolve()
 
 _spec = importlib.util.spec_from_file_location("mention_open_under_test", HANDLER)
 MO = importlib.util.module_from_spec(_spec)
@@ -377,12 +381,17 @@ def _mapping_is_never_the_operators(monkeypatch, tmp_path):
     # `main()` to an open would otherwise write rows into the operator's own
     # dataset.
     #
-    # ⚠ `scripts/run-tests.sh`'s GUARD 8 already exports this for every target,
-    # and this does NOT make that redundant: the guard covers the runner, this
-    # covers a bare `python3 -m pytest` on this file, which is how it is
-    # iterated. Two mechanisms, and the cheaper one is the one you are using
-    # while you work. Same `setenv`-not-`setattr` reasoning as the four above —
-    # `_run()` spawns a real child and only the environment reaches it.
+    # ⚠ THERE ARE THREE MECHANISMS HERE, NOT TWO, AND THIS LINE IS THE THIRD —
+    # an earlier version of this comment named two and claimed to close the
+    # bare-pytest case, which was already covered. In order of coverage:
+    # `scripts/run-tests.sh`'s GUARD 8 exports it for every target;
+    # `scripts/tests/conftest.py`'s session-scoped `no_real_activity_spool`
+    # covers a bare `python3 -m pytest` on this directory; and this per-test
+    # redirect narrows it to `tmp_path` so a row COUNT in one test cannot see
+    # another's. MUTATION-PROVEN: deleting this line leaves 375 passed with both
+    # traps empty — so it buys per-test isolation, NOT the leak protection its
+    # first comment claimed. Same `setenv`-not-`setattr` reasoning as the four
+    # above — `_run()` spawns a real child and only the environment reaches it.
     monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "autouse-spool"))
     return p
 
@@ -404,6 +413,92 @@ def test_the_autouse_redirect_is_IN_FORCE(tmp_path):
     # And it really is loadable — an unreadable redirect would make every
     # mapping-state assertion below pass for the wrong reason.
     assert MO.load_known_repos() == FAKE_UNIVERSE
+
+
+def _monkeypatch_undo_sites(source: str) -> list[tuple[str, int]]:
+    """Every `monkeypatch.undo()` called on a function's OWN `monkeypatch`
+    parameter, as `(function name, line)`. Pure — AST, no import.
+
+    Keyed on the PARAMETER, not on the spelling `undo`: a `MonkeyPatch.context()`
+    object calling its own `.undo()` is scoped and harmless, and banning that
+    would push people back onto the shared fixture. What is dangerous is calling
+    it on the fixture-injected object, which is shared with every OTHER fixture
+    in the same test."""
+    tree = ast.parse(source)
+    out: list[tuple[str, int]] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        params = {a.arg for a in list(fn.args.args) + list(fn.args.kwonlyargs)}
+        if "monkeypatch" not in params:
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "undo"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "monkeypatch"):
+                out.append((fn.name, node.lineno))
+    return sorted(set(out))
+
+
+def test_no_test_in_this_file_calls_monkeypatch_undo():
+    """🔴 THE ONLY GUARD THAT CAN SEE THE CLASS THAT WROTE TO THE OPERATOR'S
+    REAL `picks.jsonl` — and it is a SOURCE guard for exactly that reason.
+
+    `monkeypatch` is ONE function-scoped object shared by a test and every
+    fixture it uses, so `monkeypatch.undo()` reverts the autouse
+    `_mapping_is_never_the_operators` redirect along with the caller's own
+    patches. A `main()` call after it runs against the operator's real host
+    state; with the auto-open arm this PR adds, it APPENDS to their real 0600
+    pick log. MEASURED: 36 rows, one repo, one number, 5 of them carrying a
+    `via` tag a mutation mutant wrote.
+
+    🔴 WHY THE EXISTING GUARDS ARE STRUCTURALLY BLIND TO IT, which is the reason
+    this one has to exist rather than being a second opinion:
+    `test_the_autouse_redirect_is_IN_FORCE` and
+    `test_the_autouse_redirect_REACHES_A_SUBPROCESS` both assert state at THEIR
+    OWN runtime. pytest tears the fixture down between tests, so both are green
+    no matter what a DIFFERENT test did to the shared object. No runtime
+    assertion inside test A can observe test B's `undo()`; only reading the
+    source can.
+
+    ⚠ SCOPED TO THIS FILE, DELIBERATELY, AND THAT IS A REAL GAP. Measured
+    2026-09-12: SIX files under `scripts/` call `monkeypatch.undo()`
+    (`test_subsystem_store_api.py`, `test_clawgate_writeback_guard.py`,
+    `dl-router/tests/test_dedupe.py` and others), and most are probably fine —
+    the hazard needs an autouse fixture redirecting HOST STATE, which is what
+    this file has and what makes a leak here land in the operator's private
+    data. Widening this to every test file carrying such a fixture is a real
+    follow-up, and it is not this PR's to make: it would red other people's
+    files on a rule they were never given. FOLLOW-UP: add the repo-wide version
+    as its own PR, CLOSED when that PR merges or when a reader dismisses it in
+    writing on this thread."""
+    sites = _monkeypatch_undo_sites(THIS_FILE.read_text(encoding="utf-8"))
+    assert not sites, (
+        "`monkeypatch.undo()` in this file reverts the AUTOUSE host-state "
+        "redirect too — every later line runs against the operator's REAL "
+        f"`~/.config/mention-open/*` and their real activity spool: {sites}\n"
+        "Use `with pytest.MonkeyPatch.context() as mp:` instead; it reverts "
+        "only what is set inside the block.")
+    # 🔴 POSITIVE CONTROL — without it, a detector that matched nothing at all
+    # (a renamed attribute, a walk that never descends into a function body)
+    # would report this file clean forever. The planted source is the EXACT
+    # shape that was removed from `test_the_TELEMETRY_can_never_cost_the_CLICK`.
+    planted = _monkeypatch_undo_sites(
+        "def test_planted(spy, monkeypatch):\n"
+        "    monkeypatch.setattr(M, 'x', 1)\n"
+        "    monkeypatch.undo()\n")
+    assert planted == [("test_planted", 3)], (
+        f"the detector cannot see a planted `monkeypatch.undo()`, so its zero "
+        f"above says nothing: {planted}")
+    # ...and a NEGATIVE control: the scoped form this file now uses must NOT be
+    # reported, or the guard would be red on the fix it exists to require.
+    assert _monkeypatch_undo_sites(
+        "def test_ok(monkeypatch):\n"
+        "    with pytest.MonkeyPatch.context() as mp:\n"
+        "        mp.setattr(M, 'x', 1)\n"
+        "        mp.undo()\n") == [], "the scoped form is being flagged"
 
 
 # What a child prints: the path IT resolved, from its own import, with no help
@@ -746,9 +841,17 @@ def spy(monkeypatch):
     # show above the list when the universe is the answer. A stub that took only
     # `candidates` would raise TypeError on that path — which is a kill, but for
     # the wrong reason, and it would hide whatever the note actually said.
+    # 🔴 THE STUB RECORDS THE PICK REASON, BECAUSE THE REAL `pick` DOES. Since
+    # `pick()` stopped collapsing its six endings into one empty string, the
+    # reason it records is what tells `main()` whether a list was ever on
+    # screen. A stub that returns a URL without setting it is an UNFAITHFUL
+    # stub: the handler then honestly reports "not measured" and omits
+    # `picker_shown`, and a telemetry assertion here would be testing the stub's
+    # omission rather than the handler's behaviour.
     monkeypatch.setattr(
         MO, "pick",
-        lambda c, mesg="": calls.append(("pick", len(c))) or c[0]["url"])
+        lambda c, mesg="": calls.append(("pick", len(c)))
+        or MO.set_pick_reason(MO.PICK_REASON_SELECTED) or c[0]["url"])
     monkeypatch.setattr(MO, "notify", lambda *a, **k: calls.append(("notify", a[0])))
     return calls
 
@@ -6663,6 +6766,7 @@ def test_no_universe_token_can_reach_the_TELEMETRY_payload(
 
     def _pick_last(c, mesg=""):
         chosen["url"] = c[-1]["url"]
+        MO.set_pick_reason(MO.PICK_REASON_SELECTED)   # a FAITHFUL stub
         return chosen["url"]
 
     monkeypatch.setattr(MO, "pick", _pick_last)
@@ -6726,11 +6830,58 @@ def test_the_click_OUTCOME_vocabulary_is_pinned_two_way():
     refuses — fails here."""
     # Literal spellings, for the reason `test_the_pick_VIA_vocabulary_is_
     # pinned_two_way` records: a consumer outside this repo groups on these.
-    assert (MO.CLICK_AUTO_OPEN, MO.CLICK_PICKED, MO.CLICK_DISMISSED) == (
-        "auto-open", "picked", "dismissed")
-    assert set(MO.CLICK_OUTCOMES) == {"auto-open", "picked", "dismissed"}
-    assert len(set(MO.CLICK_OUTCOMES)) == 3, MO.CLICK_OUTCOMES
+    assert (MO.CLICK_AUTO_OPEN, MO.CLICK_PICKED, MO.CLICK_DISMISSED,
+            MO.CLICK_NO_SELECTION) == (
+        "auto-open", "picked", "dismissed", "no-selection")
+    assert set(MO.CLICK_OUTCOMES) == {"auto-open", "picked", "dismissed",
+                                      "no-selection"}
+    assert len(set(MO.CLICK_OUTCOMES)) == 4, MO.CLICK_OUTCOMES
     assert MO.CLICK_TOOL == "mention-open"
+
+    # 🔴 THE SECOND DIRECTION, AND IT WAS MISSING. Everything above compares the
+    # ledger to CONSTANTS THIS FILE SPELLS, so an outcome that `main()` EMITS
+    # without ever being added to `CLICK_OUTCOMES` stayed green — the tuple and
+    # the literals would simply agree with each other while the handler shipped
+    # a fourth value. This reads the HANDLER'S SOURCE for every `CLICK_*`
+    # constant and every string handed to `emit_click`, and requires both to be
+    # in the ledger.
+    src = HANDLER.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    declared = {
+        t.id: node.value.value
+        for node in tree.body if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Name) and t.id.startswith("CLICK_")
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    # `CLICK_TOOL` is the tool NAME, not an outcome — the only CLICK_ constant
+    # that is legitimately outside the ledger, and it is named rather than
+    # pattern-excluded.
+    outcome_consts = {k: v for k, v in declared.items() if k != "CLICK_TOOL"}
+    assert set(outcome_consts.values()) == set(MO.CLICK_OUTCOMES), (
+        f"a `CLICK_*` outcome constant is not in `CLICK_OUTCOMES` (or vice "
+        f"versa): declared={sorted(outcome_consts)} "
+        f"ledger={sorted(MO.CLICK_OUTCOMES)}")
+    # ...and every constant NAME actually reaching `emit_click` is one of them.
+    emitted = {
+        node.args[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "emit_click" and node.args
+        and isinstance(node.args[0], ast.Name)
+    }
+    assert emitted, "no `emit_click` call site was discovered — the scan broke"
+    assert emitted <= set(outcome_consts), (
+        f"`emit_click` is called with a name that is not a ledgered CLICK_* "
+        f"outcome constant: {sorted(emitted - set(outcome_consts))}")
+    # POSITIVE CONTROL on the discovery: it must find a planted extra outcome.
+    planted = ast.parse('CLICK_AUTO_OPEN = "auto-open"\n'
+                        'CLICK_INVENTED = "invented"\n')
+    found = {t.id for n in planted.body if isinstance(n, ast.Assign)
+             for t in n.targets
+             if isinstance(t, ast.Name) and t.id.startswith("CLICK_")}
+    assert found == {"CLICK_AUTO_OPEN", "CLICK_INVENTED"}, found
     # Two-way, driven through the emitter rather than asserted about the tuple:
     # every ledger entry is accepted...
     tmp = {}
@@ -6741,7 +6892,7 @@ def test_the_click_OUTCOME_vocabulary_is_pinned_two_way():
     # row a consumer would have to guess at.
     for bad in ("opened", "", None, "AUTO-OPEN", "picked "):
         assert MO.emit_click(bad) == "", bad
-    assert len(tmp) == 3
+    assert len(tmp) == len(MO.CLICK_OUTCOMES) == 4
 
 
 def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
@@ -6752,7 +6903,8 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     argument supplied — so the ledger describes what can actually appear."""
     widest = MO.click_dims(repo="acme/widget", platform="github",
                            picker_shown=True, offered_total=7, rank=3,
-                           plausibility=MO.CLASS_BELOW)
+                           plausibility=MO.CLASS_BELOW, reason="selected",
+                           ordered=True, pinned_above=2)
     assert set(widest) == set(MO.CLICK_DIM_FIELDS), (
         f"`click_dims` produces {sorted(widest)} but the ledger names "
         f"{sorted(MO.CLICK_DIM_FIELDS)} — update CLICK_DIM_FIELDS in the SAME "
@@ -6762,10 +6914,19 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     # when something is absent, which would be a shape nothing pins.
     assert set(MO.click_dims()) <= set(MO.CLICK_DIM_FIELDS)
     # ...and the values really do arrive intact, so the ledger is about a
-    # payload rather than about a dict literal.
+    # payload rather than about a dict literal. Every value is distinct from
+    # every other, so no field can be satisfied by a neighbour's.
     assert widest == {"repo": "acme/widget", "platform": "github",
                       "picker_shown": True, "offered_total": 7, "rank": 3,
-                      "plausibility": "below"}
+                      "plausibility": "below", "reason": "selected",
+                      "ordered": True, "pinned_above": 2}
+    # 🔴 THE LEDGER IS PINNED AGAINST THE FUNCTION'S OWN SIGNATURE TOO, so a
+    # parameter added without a ledger row fails here rather than on the day a
+    # consumer notices a column it was never told about.
+    params = set(inspect.signature(MO.click_dims).parameters)
+    assert params == set(MO.CLICK_DIM_FIELDS), (
+        f"`click_dims` takes {sorted(params)} but the ledger names "
+        f"{sorted(MO.CLICK_DIM_FIELDS)}")
 
 
 def test_the_plausibility_CLASS_NAMES_ledger_is_pinned_two_way():
@@ -6839,7 +7000,9 @@ def test_a_PICKED_row_carries_its_RANK_its_CLASS_and_the_TOTAL(
     doomed = ordered[-1]
     _ranges_on_disk(monkeypatch, tmp_path,
                     {r: 9000 for r in ordered if r != doomed} | {doomed: 0})
-    monkeypatch.setattr(MO, "pick", lambda c, mesg="": c[-1]["url"])
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[-1]["url"])
     assert MO.main(["zzznosuchrepo#12"]) == 0
 
     events = _click_events(spool)
@@ -6856,6 +7019,129 @@ def test_a_PICKED_row_carries_its_RANK_its_CLASS_and_the_TOTAL(
         f"IMPOSSIBLE — which is exactly the reading that says the ordering "
         f"was RIGHT and the operator overrode it: {payload}")
     assert payload["repo"] == doomed, payload
+    # This click's whole list IS the ordered block — nothing is pinned above it.
+    assert payload["ordered"] is True, payload
+    assert payload["pinned_above"] == 0, payload
+
+
+def test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked(
+        monkeypatch, tmp_path, spool):
+    """🔴 `rank` MIXES TWO POPULATIONS UNLESS SOMETHING SAYS WHICH. `candidates`
+    is `[evidence rows] + [universe rows]`: the clawgate task, the pane-guessed
+    repo and a mapping hit are PINNED above the block `order_universe` actually
+    ranked. Picking the pinned pane repo emitted `rank=1, plausibility=...`,
+    indistinguishable from a universe row the ordering genuinely placed second.
+
+    🔴 THAT BIASES THE HEADLINE QUERY BY CONSTRUCTION. "Chosen rank clusters
+    near 0" would read as "the ordering works" on the commonest picker shape — a
+    bare `#N` with a pane repo — whether or not it does, because the rows that
+    land near 0 are the ones that were never ranked. It is the same hazard as
+    `rank=0` on the auto path, one arm over.
+
+    So the row now carries `ordered` (was THIS row placed by the ordering) and
+    `pinned_above` (how many rows sat above the ranked block); a consumer
+    measuring the ordering filters `ordered = true`, and `rank - pinned_above`
+    is the position within the block."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: sorted(FAKE_UNIVERSE.values()))
+    monkeypatch.setattr(MO, "open_url", lambda u: 0)
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {v: 9000 for v in FAKE_UNIVERSE.values()})
+    # A bare `#N` the pane attributes: row 0 is the clawgate task and row 1 is
+    # the PINNED pane repo; the ordered universe starts at row 2.
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[1]["url"])
+    assert MO.main(["#1291"]) == 0
+
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["rank"] == 1, (
+        f"this test is about the row at position 1; the fixture moved: {payload}")
+    assert payload["repo"] == PANE_GUESS, payload
+    assert payload["ordered"] is False, (
+        f"the PANE-GUESSED repo is pinned above the ordered block and was never "
+        f"placed by `order_universe`, but the row claims it was: {payload}")
+    assert payload["pinned_above"] == 2, (
+        f"two measured rows (clawgate + the pane guess) sit above the ordered "
+        f"block: {payload}")
+    assert "plausibility" not in payload, (
+        f"a class was reported for a row the ordering never ranked — that is "
+        f"the conflation this test exists for: {payload}")
+
+    # 🔴 POSITIVE CONTROL, SAME CLICK SHAPE: a row from the ORDERED block must
+    # come back `ordered=True` WITH a class. Without this the assertions above
+    # are satisfied by a mutant that hardcodes `ordered=False` and drops
+    # `plausibility` entirely.
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[2]["url"])
+    assert MO.main(["#1291"]) == 0
+    ordered_payload = _click_events(spool)[1]["payload"]
+    assert ordered_payload["rank"] == 2, ordered_payload
+    assert ordered_payload["ordered"] is True, (
+        f"a row from the ordered block was reported as pinned: {ordered_payload}")
+    assert ordered_payload["pinned_above"] == 2, ordered_payload
+    assert ordered_payload["plausibility"] == "plausible", ordered_payload
+    # ...and the two rows are genuinely different repos, so neither assertion
+    # above can be satisfied by the other click's row.
+    assert ordered_payload["repo"] != payload["repo"], (payload, ordered_payload)
+
+
+def test_the_BARE_hash_N_arm_also_reports_what_is_pinned_above(monkeypatch,
+                                                               tmp_path, spool):
+    """🔴 THE SECOND ARM THAT APPENDS THE UNIVERSE, AND A MUTATION SWEEP PROVED
+    NOTHING COVERED IT. The test above drives the GUESSED arm (a pane repo
+    attributes the click); this drives DEAD END 2 — a bare `#N` with no pane
+    repo, where the clawgate task is pinned on top and the universe is appended
+    beneath it. They are different branches setting `pinned_above`
+    independently, and zeroing it on this one survived the whole suite (mutant
+    K89, SURVIVED).
+
+    One clawgate row is pinned, so `pinned_above` is 1 and the universe row at
+    list position 1 is the FIRST ordered row — `rank - pinned_above == 0`."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")   # nothing to guess
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: sorted(FAKE_UNIVERSE.values()))
+    monkeypatch.setattr(MO, "open_url", lambda u: 0)
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {v: 9000 for v in FAKE_UNIVERSE.values()})
+
+    # Row 0 is the clawgate task — PINNED, never ranked.
+    seen: dict = {}
+
+    def _pick_row_one(c, mesg=""):
+        seen["rows"] = [x["platform"] for x in c]
+        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+        return c[1]["url"]
+
+    monkeypatch.setattr(MO, "pick", _pick_row_one)
+    assert MO.main(["#1291"]) == 0
+    assert seen["rows"][0] == "clawgate", (
+        f"row 0 is not the clawgate task, so this is not dead end 2: {seen}")
+
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["rank"] == 1, payload
+    assert payload["pinned_above"] == 1, (
+        f"one clawgate row is pinned above the ordered block; reporting 0 here "
+        f"makes `rank - pinned_above` treat a pinned row as ranked: {payload}")
+    assert payload["ordered"] is True, payload
+    assert payload["plausibility"] == "plausible", payload
+
+    # NEGATIVE CONTROL on the same click shape: the PINNED clawgate row itself
+    # must come back `ordered=False` with no class — otherwise `pinned_above=1`
+    # above could be a constant nothing derives.
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[0]["url"])
+    assert MO.main(["#1291"]) == 0
+    pinned = _click_events(spool)[1]["payload"]
+    assert pinned["rank"] == 0 and pinned["pinned_above"] == 1, pinned
+    assert pinned["ordered"] is False, pinned
+    assert pinned["platform"] == "clawgate" and pinned["repo"] == "", pinned
+    assert "plausibility" not in pinned, pinned
 
 
 def test_a_DISMISSED_picker_emits_the_TOTAL_and_no_rank(spy, monkeypatch, spool):
@@ -6864,8 +7150,12 @@ def test_a_DISMISSED_picker_emits_the_TOTAL_and_no_rank(spy, monkeypatch, spool)
     the shape where the offered rows were wrong, and counting only the successes
     makes any ordering look good. There is no rank and no class, because nothing
     was chosen; `offered_total` rides along because the list size is the other
-    half of the reading."""
-    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
+    half of the reading.
+
+    ⚠ THE STUB RECORDS A REAL DISMISSAL. `pick()` returns "" from six endings
+    and only one of them is this; the test below covers the other five."""
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_DISMISSED) or "")
     assert MO.main(["#370"]) == 0
     events = _click_events(spool)
     assert len(events) == 1, events
@@ -6873,9 +7163,184 @@ def test_a_DISMISSED_picker_emits_the_TOTAL_and_no_rank(spy, monkeypatch, spool)
     assert payload["outcome"] == MO.CLICK_DISMISSED, payload
     assert payload["picker_shown"] is True, payload
     assert payload["offered_total"] == 2, payload
+    assert payload["reason"] == "dismissed", payload
     assert payload["repo"] == "" and payload["platform"] == "", payload
     for absent in ("rank", "plausibility"):
         assert absent not in payload, payload
+
+
+@pytest.mark.parametrize("reason,shown", [
+    # The three endings where the operator saw NOTHING. Reporting these as a
+    # dismissal with `picker_shown=True` was the measured defect: it pads the
+    # ordering's own denominator with clicks that never had an ordering to
+    # judge.
+    (MO.PICK_REASON_FZF_MISSING, False),
+    (MO.PICK_REASON_SPAWN_FAILED, False),
+    (MO.PICK_REASON_NEVER_SHOWN, False),
+    # Shown, but nothing came back — not a dismissal either.
+    (MO.PICK_REASON_TIMEOUT, True),
+    (MO.PICK_REASON_UNMAPPED_ROW, True),
+])
+def test_a_NON_dismissal_empty_pick_is_NOT_reported_as_a_dismissal(
+        spy, monkeypatch, spool, reason, shown):
+    """🔴 `pick()` RETURNS "" FROM SIX PLACES AND ONLY ONE IS A DISMISSAL. The
+    first version of this arm treated all six identically and emitted
+    `outcome=dismissed picker_shown=True`. In three of them **no picker was ever
+    displayed** — fzf absent, the spawn raising, a terminal that exited before
+    it could show anything — so `picker_shown=True` was factually false, and
+    those rows land in the exact denominator this feature exists to build.
+
+    `pick()` already held the discriminator (`run_picker` returns a `PICKED_*`
+    outcome) and was discarding it one line before the caller needed it."""
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(reason) or "")
+    assert MO.main(["#370"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["outcome"] == MO.CLICK_NO_SELECTION, (
+        f"a {reason!r} ending was reported as {payload['outcome']!r}: {payload}")
+    assert payload["reason"] == reason, payload
+    assert payload["picker_shown"] is shown, (
+        f"{reason!r} reported picker_shown={payload.get('picker_shown')!r}; "
+        f"the operator {'saw' if shown else 'saw NOTHING'}: {payload}")
+    assert "rank" not in payload and "plausibility" not in payload, payload
+
+
+def test_an_UNMEASURED_pick_omits_picker_shown_rather_than_guessing(
+        monkeypatch, spool, universe):
+    """🔴 THREE-VALUED, AND THE THIRD VALUE IS AN ABSENCE. A stub (or a future
+    code path) that never records a reason leaves `unattributed`, and BOTH
+    guesses are wrong in the direction that matters: `True` pads the ordering's
+    denominator with clicks that saw nothing, `False` drops real pickers out of
+    it. So the field is omitted.
+
+    This is the same rule as `rank` on the auto path and `plausibility` with no
+    range table — an unmeasured dimension is absent, never defaulted."""
+    monkeypatch.setattr(MO, "open_url", lambda u: 0)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    # A deliberately UNFAITHFUL stub: returns a URL, records nothing.
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": c[0]["url"])
+    assert MO.main(["zzznosuchrepo#12"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["outcome"] == MO.CLICK_PICKED, payload
+    assert "picker_shown" not in payload, (
+        f"an unmeasured picker asserted `picker_shown`: {payload}")
+    assert payload["reason"] == MO.PICK_REASON_UNATTRIBUTED, payload
+    # POSITIVE CONTROL: the row is otherwise complete, so the omission above is
+    # about the measurement and not about a dead emitter.
+    assert payload["rank"] == 0, payload
+
+
+_PICK_SEAM_ROW = "github 12 — https://github.com/acme/widget/pull/12"
+_PICK_SEAM_CANDS = [{"platform": "github", "id": "12",
+                     "url": "https://github.com/acme/widget/pull/12"}]
+
+
+# (shutil.which result, run_picker result-or-exception, reason, returned url)
+_PICK_SEAM_CASES = [
+    # fzf absent — the pre-flight refuses before anything is spawned.
+    (None, None, "fzf-missing", ""),
+    # the spawn itself raising.
+    ("/usr/bin/fzf", OSError("no pty"), "spawn-failed", ""),
+    # shown, and the ways `run_picker` can come back.
+    ("/usr/bin/fzf", ("", MO.PICKED_DISMISSED), "dismissed", ""),
+    ("/usr/bin/fzf", ("", MO.PICKED_TIMEOUT), "timeout", ""),
+    ("/usr/bin/fzf", ("", MO.PICKED_NEVER_SHOWN), "never-shown", ""),
+    ("/usr/bin/fzf", (_PICK_SEAM_ROW, MO.PICKED_SELECTED), "selected",
+     "https://github.com/acme/widget/pull/12"),
+    # A row came back but does NOT map to any candidate URL — `row_to_url`
+    # matches on the suffix, so a decorated or reordered row yields nothing.
+    # This is a SELECTION that produced no URL, and calling it a dismissal would
+    # be a third way to say "the operator walked away" about a click where they
+    # did not.
+    ("/usr/bin/fzf", ("a row from somewhere else", MO.PICKED_SELECTED),
+     "unmapped-row", ""),
+]
+
+
+@pytest.mark.parametrize("which,run,expected_reason,expected_url",
+                         _PICK_SEAM_CASES)
+def test_the_REAL_pick_records_the_reason_at_every_one_of_its_exits(
+        monkeypatch, which, run, expected_reason, expected_url):
+    """🔴 THE SEAM, AND A MUTATION SWEEP PROVED NOTHING WAS TESTING IT. Every
+    other test about the reason STUBS `MO.pick` and sets the reason itself, so
+    deleting `set_pick_reason(...)` from the REAL `pick()` left the whole suite
+    green (mutant K87, SURVIVED). The tests verified `main()`'s USE of the
+    reason and the reason VOCABULARY — two components, each hermetic — and
+    nobody built the combined state where `pick()` actually writes it.
+
+    So this drives the real `pick()` at all seven of its exits with `run_picker`
+    and `shutil.which` stubbed, and asserts the pair `(returned url, recorded
+    reason)`. Nothing is spawned and no window is raised.
+
+    ⚠ EACH CASE ASSERTS THE PAIR, not just the reason: a mutant that recorded
+    the right reason while returning the wrong URL — or vice versa — is exactly
+    the shape that makes the row's provenance a lie."""
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
+    # 🔴 PATCHED ON THE `shutil` MODULE, NOT ON `MO`. `pick()` does `import
+    # shutil` INSIDE the function (a measured startup-cost decision), which
+    # binds a LOCAL name — there is no `MO.shutil` to patch. The function-level
+    # import resolves through `sys.modules` at call time, so patching the module
+    # object this file already imported is what reaches it.
+    monkeypatch.setattr(shutil, "which", lambda _n: which)
+
+    def fake_run_picker(payload, header_lines):
+        if isinstance(run, Exception):
+            raise run
+        return run
+
+    monkeypatch.setattr(MO, "run_picker", fake_run_picker)
+    # Poisoned beforehand, so a `pick()` that records NOTHING is visible rather
+    # than inheriting whatever the previous test happened to leave.
+    MO.set_pick_reason(MO.PICK_REASON_UNATTRIBUTED)
+
+    got = MO.pick(list(_PICK_SEAM_CANDS))
+    assert got == expected_url, (
+        f"the real `pick()` returned {got!r}, expected {expected_url!r}")
+    assert MO.last_pick_reason() == expected_reason, (
+        f"the real `pick()` recorded {MO.last_pick_reason()!r} for this ending, "
+        f"expected {expected_reason!r} — `main()` reads exactly this to decide "
+        f"whether a picker was ever on screen")
+
+
+def test_the_pick_seam_cases_cover_every_reason_the_REAL_pick_can_record():
+    """🔴 THE LEDGER ON THE TEST ABOVE. Seven cases is a number; what matters is
+    that they cover every reason `pick()` itself can produce. `unattributed` is
+    the only one it cannot — that value exists for a STUBBED picker, which by
+    construction never runs this code — so it is excluded by name rather than
+    by the set happening to come out one short."""
+    covered = {reason for _which, _run, reason, _url in _PICK_SEAM_CASES}
+    expected = set(MO.PICK_REASONS) - {MO.PICK_REASON_UNATTRIBUTED}
+    assert covered == expected, (
+        f"the seam test does not cover every reason the real `pick()` can "
+        f"record: missing {sorted(expected - covered)}, "
+        f"unknown {sorted(covered - expected)}")
+
+
+def test_the_pick_REASON_vocabulary_is_pinned_two_way():
+    """Every reason `pick()` can record is in the ledger, every ledger entry is
+    classified as shown/not-shown or deliberately neither, and the two halves do
+    not overlap. Literal spellings — a consumer groups on them."""
+    assert set(MO.PICK_REASONS) == {
+        "selected", "dismissed", "timeout", "never-shown", "fzf-missing",
+        "spawn-failed", "unmapped-row", "unattributed"}
+    assert len(set(MO.PICK_REASONS)) == len(MO.PICK_REASONS)
+    shown, not_shown = set(MO.PICK_REASONS_SHOWN), set(MO.PICK_REASONS_NOT_SHOWN)
+    assert not (shown & not_shown), shown & not_shown
+    assert shown | not_shown == set(MO.PICK_REASONS) - {"unattributed"}, (
+        "every reason except `unattributed` must be classified — an unclassified "
+        "one silently omits `picker_shown` for a case that HAS an answer")
+    # ...and the classifier agrees with the ledgers, in all three directions.
+    for r in MO.PICK_REASONS_SHOWN:
+        assert MO.picker_was_shown(r) is True, r
+    for r in MO.PICK_REASONS_NOT_SHOWN:
+        assert MO.picker_was_shown(r) is False, r
+    assert MO.picker_was_shown(MO.PICK_REASON_UNATTRIBUTED) is None
+    assert MO.picker_was_shown("something-invented-later") is None
+    # `set_pick_reason` is total: an unknown value never enters the vocabulary.
+    MO.set_pick_reason("not-a-real-reason")
+    assert MO.last_pick_reason() == MO.PICK_REASON_UNATTRIBUTED
+    MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+    assert MO.last_pick_reason() == "selected"
 
 
 def test_an_ABSENT_class_is_NOT_the_same_as_the_class_named_unknown(
@@ -6904,6 +7369,49 @@ def test_an_ABSENT_class_is_NOT_the_same_as_the_class_named_unknown(
     assert MO.CLASS_NAMES[MO.CLASS_UNKNOWN] == "unknown"
 
 
+def test_the_OTHER_half_of_unknown_is_emitted_end_to_end(monkeypatch, tmp_path,
+                                                         spool):
+    """🔴 THE SECOND HALF OF THE ABSENT-vs-`unknown` DISTINCTION, DRIVEN THROUGH
+    THE HANDLER. The test above pins "the ordering did not run, so the field is
+    ABSENT". This pins the other side: the ordering DID run and this repository
+    had no row in the range table, so the field is PRESENT and reads `unknown`.
+
+    Asserting only the absent half, with `CLASS_NAMES[CLASS_UNKNOWN] ==
+    "unknown"` as its partner, proves the string exists — not that any code path
+    can ever emit it. A value nothing has been watched to produce is a claim.
+
+    The table names ONE of the three universe repos, so the ordering is ACTIVE
+    (a non-empty, fresh table) while the chosen row is genuinely unmeasured."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: sorted(FAKE_UNIVERSE.values()))
+    monkeypatch.setattr(MO, "open_url", lambda u: 0)
+    known, *rest = sorted(FAKE_UNIVERSE.values())
+    _ranges_on_disk(monkeypatch, tmp_path, {known: 9000})
+    # Pick a repo the table does NOT name. It sorts after the known one, and
+    # `order_universe` ranks PLAUSIBLE above UNKNOWN, so it is not row 0.
+    unmeasured = rest[0]
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": MO.set_pick_reason(MO.PICK_REASON_SELECTED) or next(
+            x["url"] for x in c if f"/{unmeasured}/" in x["url"]))
+    assert MO.main(["zzznosuchrepo#12"]) == 0
+
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["repo"] == unmeasured, payload
+    assert payload["ordered"] is True, (
+        f"the chosen row was not in the ordered block, so its class says "
+        f"nothing about this distinction: {payload}")
+    assert payload["plausibility"] == "unknown", (
+        f"the ordering RAN and this repo had no table entry — that is "
+        f"`unknown`, PRESENT, and it is a different fact from the field being "
+        f"absent: {payload}")
+    # POSITIVE CONTROL that the table really was active — otherwise `unknown`
+    # would be arriving from a degraded ordering, which is the ABSENT case.
+    assert MO.ordering_state(MO.load_known_ranges(), 1.0) == MO.ORDER_APPLIED
+
+
 def test_the_TELEMETRY_can_never_cost_the_CLICK(spy, monkeypatch):
     """🔴 SAME CONTRACT AS `record_pick`, ONE LAYER ALONG, AND WIDER: the
     collector may not be deployed on this host at all, so the import itself can
@@ -6912,30 +7420,69 @@ def test_the_TELEMETRY_can_never_cost_the_CLICK(spy, monkeypatch):
 
     Two mutants, both driven through `guarded_main` because its report is what
     the symptom would look like: an emitter that RAISES, and one whose import is
-    unavailable."""
+    unavailable.
+
+    🔴 EACH MUTANT IS SCOPED WITH `MonkeyPatch.context()`, AND THAT IS NOT A
+    STYLE CHOICE — THE `monkeypatch.undo()` THIS REPLACES WROTE TO THE
+    OPERATOR'S REAL HOST STATE. `monkeypatch` is ONE function-scoped object
+    shared with the autouse `_mapping_is_never_the_operators` fixture, so
+    `undo()` does not revert "my patches" — it reverts EVERY patch that fixture
+    installed: `PICKS_PATH`, `KNOWN_REPOS_PATH`, `KNOWN_UNIVERSE_PATH`,
+    `KNOWN_RANGES_PATH`, all four `MENTION_OPEN_*` env vars, `DEVRC_WORKSPACE`,
+    `ACTIVITY_SPOOL_DIR` — and the `spy` fixture with them. The `guarded_main`
+    call that followed then ran against REAL host state, took the new auto-open
+    arm, and APPENDED A ROW TO `~/.config/mention-open/picks.jsonl`.
+
+    MEASURED, not reasoned about: the operator's log — absent earlier the same
+    night — held 36 rows, ONE repository, ONE reference number, 31 tagged `auto`
+    and 5 tagged `picker` by a mutation-battery mutant, i.e. deliberately false
+    provenance in an append-only 0600 file that feeds `load_picks` ->
+    `pick_scores` -> `order_universe`. It was biasing the operator's live picker
+    toward one repository for references near 1065.
+
+    A `context()` block reverts only what is set INSIDE it, on exit, and cannot
+    reach another fixture's patches. 🔴 **`monkeypatch.undo()` is banned in this
+    file** — pinned by `test_no_test_in_this_file_calls_monkeypatch_undo`, which
+    is the only guard that can see this class at all (see its docstring)."""
+    real_dims = MO.click_dims          # captured BEFORE anything patches it
+
     def boom(*a, **k):
         raise RuntimeError("the spool is on fire")
 
-    monkeypatch.setattr(MO, "click_dims", boom)
-    # 🔴 THE MESSAGE LIVES ON *THIS* ASSERTION, WHICH IS THE ONE THAT FIRES. A
-    # mutation sweep scored the `except Exception:` narrowing as
-    # KILLED-WRONG-REASON because the token was on the NEXT assert and this bare
-    # `== 0` reddened first with no message at all.
-    assert MO.guarded_main(["civitai/talos-infra#1065"]) == 0, (
-        "a raising telemetry path cost the OPEN: the exception escaped "
-        "`emit_click` and `guarded_main` turned a working click into "
-        "`mention-open failed`")
-    assert spy == [("open", "https://github.com/civitai/talos-infra/pull/1065")], (
-        f"a raising telemetry path cost the OPEN: {spy}")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(MO, "click_dims", boom)
+        # 🔴 THE MESSAGE LIVES ON *THIS* ASSERTION, WHICH IS THE ONE THAT FIRES.
+        # A mutation sweep scored the `except Exception:` narrowing as
+        # KILLED-WRONG-REASON because the token was on the NEXT assert and this
+        # bare `== 0` reddened first with no message at all.
+        assert MO.guarded_main(["civitai/talos-infra#1065"]) == 0, (
+            "a raising telemetry path cost the OPEN: the exception escaped "
+            "`emit_click` and `guarded_main` turned a working click into "
+            "`mention-open failed`")
+        assert spy == [
+            ("open", "https://github.com/civitai/talos-infra/pull/1065")], (
+            f"a raising telemetry path cost the OPEN: {spy}")
+
+    # POSITIVE CONTROL on the scoping itself: leaving the block really did put
+    # the REAL `click_dims` back, so the second mutant below is testing the
+    # import and not still sitting behind `boom`.
+    assert MO.click_dims is real_dims, (
+        "the scoped block did not restore `click_dims` — the second mutant "
+        "below would be exercising the FIRST one's failure")
 
     # ...and the import-is-missing shape, which is the one a host without the
-    # collector actually hits.
-    monkeypatch.undo()
-    monkeypatch.setattr(MO, "open_url", lambda u: 0)
-    monkeypatch.setitem(sys.modules, "invocation", None)
-    assert MO.emit_click(MO.CLICK_AUTO_OPEN) == "", (
-        "an unimportable emitter did not degrade to a quiet no-op")
-    assert MO.guarded_main(["civitai/talos-infra#1065"]) == 0
+    # collector actually hits. Scoped too, for the same reason.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "invocation", None)
+        assert MO.emit_click(MO.CLICK_AUTO_OPEN) == "", (
+            "an unimportable emitter did not degrade to a quiet no-op")
+        assert MO.guarded_main(["civitai/talos-infra#1065"]) == 0
+
+    # 🔴 THE AUTOUSE REDIRECT IS STILL IN FORCE — asserted, not assumed. This is
+    # the assertion the `undo()` version could not have passed, and it is what
+    # makes "scoped" a measurement rather than a claim about syntax.
+    assert MO.PICKS_PATH.name == "autouse-picks.jsonl", MO.PICKS_PATH
+    assert MO.PICKS_PATH != Path.home() / ".config/mention-open/picks.jsonl"
 
 
 def test_the_telemetry_is_emitted_AFTER_the_browser_is_LAUNCHED(monkeypatch,
