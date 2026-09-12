@@ -16,7 +16,7 @@ authority, and a match the scanner rejects opens nothing.
 
 RESOLUTION
 ----------
-  1 openable candidate   -> xdg-open it, UNLESS the repository was guessed from
+  1 openable candidate   -> open it, UNLESS the repository was guessed from
                             the tmux pane — see `repo_source` in `main()`.
   2+ (a bare `#N`)       -> the picker, one row per platform, showing the URL.
   any of the above whose repository was GUESSED
@@ -29,8 +29,26 @@ RESOLUTION
                             literal here, so every row a picker could offer
                             would 404. See `colour_literal_offer`.
 
+WHERE IT OPENS
+--------------
+Resolution says WHICH reference; `open_target` says on WHICH SURFACE. A GitHub
+issue or pull request can open in `nvim-octo` — neovim with octo.nvim, a full
+review-and-merge TUI packaged at `nix/pkgs/tools/nvim-octo/` — instead of a
+browser tab. Everything else (a clawgate task, a ClickUp id, any GitHub URL
+that is not `/issues/N` or `/pull/N`) is always `xdg-open`.
+
+The TUI is taken only when this host HAS it, and the browser stays reachable
+from three directions: `--browser` on the command line, `browser` in the marker
+file at `~/.config/mention-open/target`, and `open_tui`'s own pre-flight, which
+falls back and says so. Read `open_target`'s docstring for the rung order.
+
 🔴 THE CLICK PATH MAKES NO NETWORK CALL. This is a hard property, not a target,
 and it is pinned by `test_the_resolution_path_spawns_ONLY_these_local_commands`.
+⚠ THE TUI IS NOT PART OF THAT CLAIM AND MUST NOT BE READ INTO IT. octo.nvim
+resolves a reference with a GraphQL call — that is the entire reason the NUMBER
+is passed rather than a `/pull/` URL — but it happens inside a detached child
+process, after this handler has exited. What is pinned is that THIS module
+spawns nothing that talks to a network.
 
 🔴 THE CANDIDATE UNIVERSE IS THE REPOS THE OPERATOR CONTRIBUTES TO — NEVER ALL
 OF GITHUB, AND A GITHUB-WIDE NAMESAKE SEARCH USED TO LIVE HERE. `gh api
@@ -212,6 +230,39 @@ PICKS_PATH = Path(
     os.environ.get("MENTION_OPEN_PICKS")
     or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "mention-open" / "picks.jsonl")
+
+# Where the operator PINS which surface a GitHub mention opens in. Same
+# directory as its four siblings above, and read the same way: a file, not an
+# environment variable.
+#
+# 🔴 AN ENV VAR STRUCTURALLY CANNOT WORK HERE, AND THAT IS THE WHOLE REASON THIS
+# IS A FILE. Alacritty spawns the hint handler with ITS OWN environment, which
+# came from the DISPLAY MANAGER at login — the same fact the wrapper's pinned
+# `PATH` in `nix/programs/alacritty/default.nix` exists for. A variable exported
+# in a shell, an `.envrc`, or even `~/.zshenv` is therefore invisible to every
+# click: the operator would set it, see nothing change, and have no way to tell
+# a broken feature from an unread variable. `~/.server-mode` is the precedent in
+# this repo for exactly that shape.
+#
+# ⚠ THE ENV DOOR BELOW REDIRECTS THE *PATH*, NEVER THE VALUE, and it exists for
+# the reason its four siblings' doors do: a `monkeypatch.setattr` on a module
+# constant is invisible to a child process that re-imports this file, and nine
+# tests were once measured reading the operator's real host state because of it.
+# It is not a second way to choose the target — pointing it at a file is still
+# the only way to say "tui".
+MENTION_TARGET_PATH = Path(
+    os.environ.get("MENTION_OPEN_TARGET")
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "mention-open" / "target")
+
+# The two surfaces a resolved mention can be opened on.
+#
+# `TARGET_BROWSER` is `xdg-open`, which is what every click did before the
+# review TUI existed and what every click still does for a clawgate task, a
+# ClickUp id, or a GitHub reference this host cannot open in `nvim-octo`.
+TARGET_TUI = "tui"
+TARGET_BROWSER = "browser"
+TARGET_VALUES = (TARGET_TUI, TARGET_BROWSER)
 
 # 🔴 A TIMER NOW CONVERGES THE MAPPING, AND THIS PARAGRAPH USED TO SAY THE
 # OPPOSITE — do not re-derive the old reasoning from a stale copy of it. It read
@@ -979,6 +1030,45 @@ def repo_of_github_url(url: str) -> str:
     return full if _OWNER_REPO_RE.match(full) else ""
 
 
+# `owner/repo` AND the reference NUMBER, from a github.com issue-or-pull URL.
+#
+# 🔴 STRICTER THAN `repo_of_github_url` ON PURPOSE, AND THE EXTRA STRICTNESS IS
+# THE POINT. That function answers "which repository should the pick log
+# record", so a two-segment path is enough for it. This one answers "what may I
+# hand to `Octo <N> <owner/repo>`", and handing that a number the URL does not
+# carry — or a path that is a release, a commit or a repo root — is a wrong
+# buffer rather than a missing log line. So the kind segment and the digits are
+# both REQUIRED, and the pattern is anchored at both ends.
+#
+# ⚠ BOTH `issues` AND `pull` ARE ACCEPTED, AND THE HANDLER CANNOT TELL THEM
+# APART ANYWAY. `mention-open.py` builds `/pull/{id}` for EVERY GitHub mention
+# (see `openable`), and github.com redirects `/pull/<issue-number>` to
+# `/issues/<n>` server-side — so the URL's kind segment is a guess this module
+# has never been able to make. That is exactly why `open_tui` passes the NUMBER
+# to octo rather than the URL: `Octo <N> <repo>` fires one `issueOrPullRequest`
+# GraphQL query and dispatches on the `__typename` the SERVER returns. Accepting
+# `issues` here costs nothing and keeps a hand-typed URL working.
+_GITHUB_REF_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/"
+    r"(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/(?:issues|pull)/(?P<num>[0-9]+)/?$")
+
+
+def github_ref(url: str) -> tuple[str, str]:
+    """`("owner/repo", "N")` for a github.com issue/pull URL, else `("", "")`.
+
+    Returns a PAIR rather than raising, so every caller's failure branch is the
+    same shape as the "this is a clawgate task" branch — there is no exceptional
+    case here, only a URL this surface cannot open.
+    """
+    m = _GITHUB_REF_RE.match(url or "")
+    if not m:
+        return "", ""
+    full = f"{m.group('owner')}/{m.group('repo')}"
+    if not _OWNER_REPO_RE.match(full):
+        return "", ""
+    return full, m.group("num")
+
+
 def row_to_url(row: str, candidates: list[dict]) -> str:
     """Map a picker row back to its URL. Matches on the URL suffix rather than
     the row index, so a picker that decorates or reorders rows cannot open the
@@ -1226,7 +1316,13 @@ def notify(summary: str, body: str = "") -> None:
         pass
 
 
-def open_url(url: str) -> int:
+def open_browser(url: str) -> int:
+    """`xdg-open`, which is what EVERY click did before the review TUI existed.
+
+    Renamed from `open_url`, which is now the dispatcher above it. The body is
+    unchanged: this is the fallback every other arm returns to, so it must keep
+    working for a URL no other surface can open at all.
+    """
     try:
         subprocess.Popen(["xdg-open", url],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1234,6 +1330,170 @@ def open_url(url: str) -> int:
         notify("could not open the link", f"{type(exc).__name__}: {exc}")
         return 1
     return 0
+
+
+# The float terminal the review TUI runs in, and its geometry.
+#
+# `--class float,mention-review` puts it under `for_window [class="float"]
+# floating enable` in `nix/i3/config.nix` — the same rule the fzf picker's
+# terminal uses — while the instance half names THIS window specifically, so an
+# i3 rule can size or place a review without catching the picker.
+#
+# Bigger than `PICKER_*` because the two windows hold different things: the
+# picker is a list, a review is a diff beside a file panel.
+REVIEW_CLASS = "float,mention-review"
+REVIEW_COLUMNS = 200
+REVIEW_LINES = 50
+
+# The wrapper that runs neovim with octo.nvim configured. Packaged as
+# `nix/pkgs/tools/nvim-octo/` and pinned onto the hint wrapper's PATH by
+# `nix/programs/alacritty/default.nix`.
+#
+# 🔴 A MODULE CONSTANT AND NOT A LITERAL IN TWO PLACES. It is both the name
+# `tui_available()` looks up and the `-e` payload below; two spellings of one
+# name is how a rename leaves a pre-flight checking a binary nobody spawns.
+# `test_mention_open.py` resolves this constant out of the SYNTAX TREE for the
+# same reason `PICKER_SH` is resolved — see `_exec_payload_commands`.
+REVIEW_EXE = "nvim-octo"
+
+
+def tui_available() -> bool:
+    """Is the review TUI on THIS handler's PATH?
+
+    🔴 THE ONE PLACE THAT QUESTION IS ASKED. `open_target` asks it to decide
+    whether the TUI is the DEFAULT, and `open_tui` asks it again immediately
+    before the spawn — deliberately twice, because they are different questions
+    about different moments and a `which` result from the decision is a
+    hypothesis about the spawn, not a fact. Consolidating the PREDICATE is what
+    stops the two rungs disagreeing about what "available" means.
+    """
+    import shutil  # noqa: PLC0415 — see run_picker's import comment
+    return shutil.which(REVIEW_EXE) is not None
+
+
+def read_target_marker(path: Path | None = None) -> str:
+    """The operator's pinned target, or `""` when they have not pinned one.
+
+    Anything that is not exactly one of `TARGET_VALUES` — an empty file, a typo,
+    a stray newline-only write, a directory — reads as UNPINNED rather than as
+    an error. A marker file that cannot be understood must not be able to wedge
+    a click: the default rung below is always reachable.
+
+    The path is read at CALL time, never bound as a default argument, for the
+    reason `load_known_repos` is: a `path: Path = MENTION_TARGET_PATH` default
+    is evaluated once at import, and `monkeypatch.setattr` on the module
+    constant would then be inert.
+    """
+    p = MENTION_TARGET_PATH if path is None else path
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    value = raw.strip().lower()
+    return value if value in TARGET_VALUES else ""
+
+
+def open_target(url: str, *, browser: bool = False) -> str:
+    """Which surface this URL opens on. One of `TARGET_VALUES`, always.
+
+    The rungs, in order, and why each sits where it does:
+
+      0. THE URL'S OWN SHAPE. A clawgate task, a ClickUp id, a GitHub release —
+         anything `github_ref` cannot turn into `(repo, number)` — is BROWSER,
+         and no marker file can override that. This is first rather than last
+         because "whatever the marker says" is not a meaningful instruction for
+         a URL the TUI has no way to open: honouring it would produce a window
+         that fails, where the browser would simply have worked.
+      1. `--browser`. The operator's per-click escape hatch, and it wins over
+         their own marker: a flag typed NOW is newer evidence than a file
+         written once.
+      2. THE MARKER FILE. See `MENTION_TARGET_PATH` for why it is a file and
+         can never be an environment variable.
+      3. THE DEFAULT: the TUI when this host actually has it, the browser when
+         it does not. SILENT in the second case, deliberately — a host with no
+         `nvim-octo` has not lost anything it had, and toasting on every click
+         to say so is the noise this handler must not make. The announcement
+         belongs where the TUI was actually ASKED for and could not run, which
+         is `open_tui`'s pre-flight.
+    """
+    if not github_ref(url)[0]:
+        return TARGET_BROWSER
+    if browser:
+        return TARGET_BROWSER
+    marked = read_target_marker()
+    if marked:
+        return marked
+    return TARGET_TUI if tui_available() else TARGET_BROWSER
+
+
+def open_tui(url: str) -> int:
+    """Open a GitHub reference in the review TUI. Falls back to the browser.
+
+    🔴 THE `which` PRE-FLIGHT IS LOAD-BEARING, NOT DEFENSIVE POLISH, AND A
+    POST-SPAWN FALLBACK STRUCTURALLY CANNOT REPLACE IT. Alacritty exits 0
+    whether its `-e` command exits 0 or 127, and `Popen` never waits — so a
+    missing or broken `nvim-octo` is a window that flashes and vanishes, with
+    nothing for this process to observe. That is the identical silent dead end
+    `pick()` pre-flights `fzf` for, one surface over.
+
+    🔴 THE NUMBER IS PASSED, NOT THE URL, AND THAT IS A CORRECTNESS FIX RATHER
+    THAN A STYLE CHOICE. `openable()` builds `/pull/{id}` for every GitHub
+    mention because the handler cannot know whether `#N` is an issue or a pull
+    request — github.com resolves that by redirecting. Handing octo a `/pull/`
+    URL asserts the kind, and it would assert it WRONGLY for every issue
+    mention. `Octo <N> <owner/repo>` instead fires one `issueOrPullRequest`
+    GraphQL query and opens whatever the server says it is.
+
+    ⚠ `repo` IS PASSED EXPLICITLY so the invocation is cwd-independent: the
+    float terminal's working directory is whatever the display manager handed
+    the hint wrapper, which is not a checkout of anything in particular.
+    """
+    repo, num = github_ref(url)
+    if not repo:
+        # Unreachable through `open_target` (rung 0 answers it), and kept
+        # because a direct caller is not unreachable. Silent: the browser IS
+        # the right answer for this URL and nothing went wrong.
+        return open_browser(url)
+    if not tui_available():
+        notify("the mention opened in the browser instead",
+               f"{REVIEW_EXE} is not on this handler's PATH. The hint wrapper "
+               f"pins it, so this is a DEPLOY gap, not a config one — run "
+               f"`home-manager switch --flake ~/workspace/devrc --impure`")
+        return open_browser(url)
+    try:
+        # 🔴 A LIST LITERAL WHOSE argv[0] IS THE CONSTANT `"alacritty"`, for the
+        # reason `run_picker`'s argv carries at length: the AST ledger in
+        # `test_mention_open.py` reads exactly that, and a variable there
+        # reports `<computed>` and reddens a guard about something else
+        # entirely.
+        #
+        # 🔴 THE `-c "Octo …"` STRING IS BUILT INSIDE THE NIX WRAPPER, NOT HERE.
+        # `nvim-octo` takes `<owner/repo> <number>` as two ordinary argv
+        # entries and assembles the ex-command itself, so no quoting hazard
+        # reaches this file and argv[0] stays the constant the ledger needs.
+        subprocess.Popen(
+            ["alacritty", "--class", REVIEW_CLASS,
+             "-o", f"window.dimensions.columns={REVIEW_COLUMNS}",
+             "-o", f"window.dimensions.lines={REVIEW_LINES}",
+             "-e", REVIEW_EXE, repo, num],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        notify("could not open the review TUI",
+               f"{type(exc).__name__}: {exc} — opening the browser instead")
+        return open_browser(url)
+    return 0
+
+
+def open_url(url: str, *, browser: bool = False) -> int:
+    """Open a resolved mention on whichever surface `open_target` names.
+
+    🔴 THE DISPATCH LIVES HERE AND NOWHERE ELSE. `main()` has two call sites —
+    the single-candidate auto-open and the post-picker open — and a predicate
+    open-coded at both is wrong at one of them. Both still call `open_url`.
+    """
+    if open_target(url, browser=browser) == TARGET_TUI:
+        return open_tui(url)
+    return open_browser(url)
 
 
 # --------------------------------------------------------------------------- #
@@ -1700,6 +1960,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "the repository picker: it is non-interactive, so an "
                         "unresolvable reference exits 1 with a named reason "
                         "rather than listing every repo on the host")
+    p.add_argument("--browser", action="store_true",
+                   help="open in the browser even when this host would have "
+                        "used the review TUI. The per-click escape hatch; the "
+                        "durable one is the marker file at "
+                        "~/.config/mention-open/target")
     p.add_argument("--no-discovery", action="store_true",
                    help="do not read git remotes or ask tmux — resolve only "
                         "what the text itself carries")
@@ -2436,7 +2701,7 @@ def main(argv: list[str] | None = None) -> int:
     # and a host that happens to know exactly one repository must not have that
     # option opened for it.
     if len(candidates) == 1 and not offered_universe and not guessed:
-        return open_url(candidates[0]["url"])
+        return open_url(candidates[0]["url"], browser=args.browser)
 
     # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
     # UNEXPLAINED, and there are exactly two such pickers: one carrying a GUESS
@@ -2505,7 +2770,7 @@ def main(argv: list[str] | None = None) -> int:
     picked_repo = repo_of_github_url(url)
     if picked_repo:
         record_pick(picked_repo, num)
-    return open_url(url)
+    return open_url(url, browser=args.browser)
 
 
 def guarded_main(argv: list[str] | None = None) -> int:
