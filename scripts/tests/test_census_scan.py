@@ -38,6 +38,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from testlib import census_scan  # noqa: E402
+# 🔴 `mockbin.write_exec` OWNS the shebang (`/bin/sh`) and RAISES if a call site
+# supplies its own. The controls below need a file on disk that is merely
+# PRESENT and executable — they never run it — but giving a runtime-written stub
+# an env-resolved shebang is still a defect: that resolver does not exist in the
+# nix build sandbox, and `patchShebangs` cannot reach a file a test writes while
+# running. That is the SAME tier-blindness this block was added to fix, one
+# level in — it went red here on exactly that, after the fix above.
+# Pinned repo-wide by `test_runtime_shebangs.py`.
+# 🔴 The prose above deliberately does NOT spell the offending token: this repo
+# has reddened `main` repeatedly because a guard matching "a file mentions X" is
+# tripped by the documentation of that guard.
+from testlib import mockbin  # noqa: E402
 
 LEDGER_CHECK = REPO_ROOT / "scripts" / "ledger-check.sh"
 
@@ -539,9 +551,8 @@ def test_a_NON_EXECUTABLE_runner_is_reported_in_either_tier(tmp_path: Path):
     contract is an executable script; a lost mode bit is a real regression the
     sandbox CAN observe, so it is asserted there too.
     """
-    script = tmp_path / "ledger-check.sh"
-    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    script.chmod(0o644)
+    script = mockbin.write_exec(tmp_path / "ledger-check.sh", "exit 0\n")
+    script.chmod(0o644)          # write_exec leaves 0755; this is the point
     assert runner_ship_problems(tmp_path, "ledger-check.sh", False) == \
         ["ledger-check.sh is not executable — `chmod +x` it"]
 
@@ -552,9 +563,7 @@ def test_an_untracked_runner_is_reported_when_git_is_present(tmp_path: Path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True,
                    capture_output=True)
     for name in ("tracked.sh", "untracked.sh"):
-        p = tmp_path / name
-        p.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-        p.chmod(0o755)
+        mockbin.write_exec(tmp_path / name, "exit 0\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.sh"], check=True,
                    capture_output=True)
     assert runner_ship_problems(tmp_path, "tracked.sh", True) == []
@@ -569,9 +578,7 @@ def test_a_present_executable_runner_in_a_GIT_FREE_tree_reports_NOTHING(
     It fails in an ORDINARY checkout the moment the `.git` guard is deleted,
     which is what stops the CI-red from silently coming back.
     """
-    script = tmp_path / "ledger-check.sh"
-    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    script.chmod(0o755)
+    mockbin.write_exec(tmp_path / "ledger-check.sh", "exit 0\n")
     assert not (tmp_path / ".git").exists()
     assert runner_ship_problems(tmp_path, "ledger-check.sh", False) == []
 
