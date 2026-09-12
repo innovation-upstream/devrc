@@ -2551,6 +2551,23 @@ _KILL_MENTION_LEDGER = {
     # re-redding `main`: this doc quotes THIS SCANNER'S OWN OUTPUT (its
     # `offenders=` list) inside a write-up ABOUT this very failure. Writing
     # the incident down reproduced it, within an hour of the last fix.
+    #
+    # Added by the mid-session-refusal PR. BOTH are prose, and the prose is the
+    # FINDING rather than decoration: a tmux socket file OUTLIVES its server, so
+    # `ConditionPathExists=` keeps passing after the operator's server dies. That
+    # is the whole reason the loud arm needed a once-per-incident latch instead of
+    # relying on the trigger to fire once — MEASURED on a private socket, and on
+    # the live host where 7 of 8 runtime sockets were orphans. Deleting either
+    # sentence to get this guard green would delete the reason the latch exists.
+    # Verified NOT call sites: the script's complete spawn argv[0] set is
+    # {tmux, grep} (AST walk) and no `kill-s…` subcommand appears in any argv;
+    # the sibling scanner `test_no_tracked_shell_text_writes_a_kill_this_guard_
+    # would_deny` passes on both files, i.e. neither carries shell text this
+    # guard would deny.
+    "scripts/tmux-session-restore.py":
+        "prose: why the socket outliving its server forces a latch",
+    "scripts/session-analysis/tests/test_tmux_session_restore.py":
+        "prose: the same measurement, in the test that pins the latch",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is
