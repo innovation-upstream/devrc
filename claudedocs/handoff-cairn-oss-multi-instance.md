@@ -18,62 +18,62 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- 🔨 **2026-09-12 — RANK 3 SLICE 3: THE AUDIT LADDER IS CLOSED WITH A MERGE VERDICT. NOT MERGED,
-  AND THE ONLY THING LEFT IS `main`'s OWN RED.** `innovation-upstream/devrc` **#1508**, branch
-  `chore/cairn-consolidate-onto-pin`, pushed head **`918e62e5`**; **rebased locally onto the new
-  `main` as `6205faec` and the PUSH IS DELIBERATELY HELD** (see the red below — pushing now spends
-  a gate run that is guaranteed red for a reason that is not ours). Claim
-  `cairn-oss-multi-instance-3` still **HELD**.
+- 🔨 **2026-09-12 — RANK 3 SLICE 3: BUILT, FOUR-ROUND AUDITED, MERGE-APPROVED, NOT MERGED.**
+  `innovation-upstream/devrc` **#1508**, branch `chore/cairn-consolidate-onto-pin`, pushed head
+  **`918e62e5`**; **rebased locally onto the new `main` as `6205faec` in `/tmp/wt-cairn-slice3`
+  and the PUSH IS DELIBERATELY HELD** — pushing now spends a gate run guaranteed red for a reason
+  that is not ours. Claim `cairn-oss-multi-instance-3` still **HELD** (correct while unmerged;
+  release it on merge).
+  **Gate state, now TERMINAL rather than pending:** `tekton/devrc-pytests` **fail**,
+  `tekton/devrc-nodetests` **pass**, `tekton/devrc-cairn-client-runs` **pass**. The one failure is
+  `main`'s (below), and `scripts/tests` — the target this PR changes — was `14038 passed / 0 failed`.
 
-- **FOUR AUDIT ROUNDS, and the shape of what they found is the durable part:**
-  - **Round 1 (blind, full) — TWO 🔴 DEPLOY-BLOCKERS a 22,000-test green suite and three green
-    Tekton legs could not see.** Both re-verified independently before any fix.
-  - **Rounds 2, 3 and 4 found ZERO further logic defects** and eleven sentence-level ones.
-  - **Round 4's verdict: MERGE.** It could not break a single claim the delta makes about code;
-    every count, size, date, path and cross-reference re-derived true, including two
-    self-reported defects it reproduced rather than accepted. Its findings were one 🟡
-    pre-existing with no reachable consequence and two 🟢 it named as nits. **A stopping round.**
-  - Claims blocks for rounds 1–3 are on the PR as ISSUE comments (`#issuecomment-5641736094`,
-    `-5642199099`, `-5642481146`).
+- ⚠ **`cairn-oss-multi-instance-20` is ALSO still HELD**, from an earlier session. Its closing
+  condition's second half (the CI leg must be watched to go RED when the pinned client is stubbed)
+  is unmet and nobody is pursuing it. **An unreleased claim is the only thing that blocks another
+  session from an item** — release it or pursue it; do not leave it silently held.
 
-- 🔴 **THE MERGE IS BLOCKED BY A TREADMILL, NOT BY THIS PR — and it is worth someone's attention
-  as a DESIGN problem.** `test_guard_core.py`'s kill-mention ledger scans tracked PROSE and reds
-  `main` until a human classifies each new mention, so **every handoff doc that merely NAMES a
-  wide tmux kill breaks the build for everyone**. Three different docs tripped it in one day:
-  #1520 fixed one; **#1534 fixed two more plus a real scanner bug** (it matched `kill-session`
-  INSIDE `skill-session`); and within minutes of #1534 merging, `main` was red again on a newly
-  merged `claudedocs/handoff-mention-system-repos.md`. **#1543 is open for that one.** Every
-  per-instance fix is correct; the design regenerates the work. `claude/RULES.md`'s "a
-  permanently-red gate is worse than no gate" applies.
+- ✅ **The subsystem-index write for this arc is DONE** — `devrc/cairn`, revision
+  `389daf17211c0dcf`, validated at the writer (`32 of 32 entry file(s) parse, 0 malformed`,
+  `dropped lines: 0`, `marker reachability: 0 out-of-reach`). Earlier revisions of this doc
+  recorded it as an OUTSTANDING step; it is no longer.
 
-- 🔴 **A MEASUREMENT DISCIPLINE THAT PAID OFF TWICE HERE: a merge is a claim about the PR's fix,
-  never about the tree.** After #1534 merged I ran the two previously-failing tests at the new
-  `main` instead of assuming — `2 failed, 1534 deselected`, a DIFFERENT file. Had I trusted the
-  merge, #1508 would have been rebased and pushed into a gate that was still red, and the red
-  would have looked like ours. ⚠ The run reported `exit code 0` while its content read
-  `2 failed`: the `| tail` pipe returns **tail's** status. Read the content.
+- 🔴 **STILL BLOCKED ON `main`'s OWN RED, which is a TREADMILL rather than an incident.**
+  `test_guard_core.py`'s kill-mention ledger scans tracked PROSE, so every handoff doc that merely
+  NAMES a wide tmux kill reds `main` for everyone. #1520 fixed one; **#1534 fixed two more plus a
+  real scanner bug** (it matched `kill-session` INSIDE `skill-session`); within minutes of #1534
+  merging `main` was red again on a newly merged `claudedocs/handoff-mention-system-repos.md`, and
+  **#1543 is open for that**. Every per-instance fix is correct; the design regenerates the work.
 
-- **Carried forward (durable, a REPLACE would drop them):** the fork decision stands —
-  **CONSOLIDATE ONTO THE PIN**, operator, 2026-09-08, not to be re-asked. The pinned client went
-  live 2026-09-09, **generation 713, rollback point 712** — the only record of which generation to
-  roll back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable** (2026-09-11:
-  100% packet loss, `ssh: No route to host`), so cross-host agreement stays `NOT COMPARED — 1 of
-  2 hosts`. The three operator-blocked ranks merged 2026-09-10 (`ZacxDev/homelab-infra` **#785**
+- **The sequence to finish this, in order — step 2 is NOT optional:**
+  1. `#1543` merges.
+  2. 🔴 **RE-RUN the two `test_guard_core.py` tests at the new `main` before trusting it.** After
+     #1534 merged I did exactly this and got `2 failed, 1534 deselected` on a DIFFERENT file. A
+     merge is a claim about that PR's fix, never about the tree.
+  3. Push the held rebase, let the gate run genuinely green, merge.
+  4. Release claim `-3`; consider `-20`.
+  5. **Publish a store-api image built from the merged tree** — the build path was rewired but
+     **no image was pushed**, so the live pod keeps running the old forked reader and
+     `verify-byte-identity.sh` is EXPECTED to mismatch until then.
+
+- **Carried forward (durable; a REPLACE would drop them):** the fork decision stands —
+  **CONSOLIDATE ONTO THE PIN**, operator, 2026-09-08, not to be re-asked. Pinned client live since
+  2026-09-09, **generation 713, rollback point 712** — the only record of which generation to roll
+  back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable** (2026-09-11: 100%
+  packet loss, `ssh: No route to host`), so cross-host agreement stays `NOT COMPARED — 1 of 2
+  hosts`. The three operator-blocked ranks merged 2026-09-10 (`ZacxDev/homelab-infra` **#785**
   `37b5a71f8`, **#787** `936692ec7`, **#786** `4c890c7ac`; `innovation-upstream/devrc` **#1447**
-  `719519fa9`). Rank 20 remains HALF. This doc's own prior updates merged as **`21f2c162`**
-  (#1492) and **`5c93440d`** (#1530).
+  `719519fa9`). This doc's own updates merged as **`21f2c162`** (#1492), **`5c93440d`** (#1530)
+  and **`4ded76cf`** (#1546).
 
-- 🔴 **STILL OPEN AND UNTOUCHED:** rank 4 (`civitai/talos-infra#1414`), rank 8, rank 18, rank 21,
-  rank 23. **Rank 22 is claimed by ANOTHER SESSION** — do not take it.
+- 🔴 **STILL OPEN AND UNTOUCHED, as instructed:** rank 4 (`civitai/talos-infra#1414`), rank 8,
+  rank 18, rank 21, rank 23. **Rank 22 is claimed by ANOTHER SESSION.**
 
-- **The ONE item filed rather than fixed, with a mechanical closing condition:** `m_index_store`
-  restores `sys.path` to its exact pre-call value on the **success** path as well as the failure
-  path. **Closes when** a test asserting `sys.path == before` after a successful call is shown RED
-  against today's conditional `finally` and GREEN after the fix. (Real: the pinned
-  `subsystem_recall` PREPENDS its own directory at import, so the `finally`'s
-  `if sys.path[0] == str(lib)` guard is false when it runs and both entries survive. Blast radius
-  today is nil — `timeouts` is the only overlapping name and nothing in `scripts/present/`
-  imports it.)
+- **Filed rather than fixed, with a mechanical closing condition:** `m_index_store` restores
+  `sys.path` to its exact pre-call value on the **success** path as well as the failure path.
+  **Closes when** a test asserting `sys.path == before` after a successful call is shown RED
+  against today's conditional `finally` and GREEN after the fix. It lives in THIS DOC, not as an
+  issue — stated plainly so nobody looks for a ticket that does not exist.
 
 ## Open investigations — live diagnosis state
 
@@ -2048,6 +2048,20 @@ covers; pin it with `--config`, do not `cd`.
 - 🔴 **The pre-create sweep only works as a SEPARATE step.** I piped `gh pr list` into the same
   command as `gh pr create` and shipped `#1529`, a duplicate of `#1522`; closed it. The sweep ran
   and I never read it.
+
+- 🔴 **`subsystem_touch.py --session` is STRUCTURALLY BLIND to a dispatch-hub session, and `--pr`
+  is the window that sees it.** Measured twice this arc: from a session whose cwd was
+  `datapacket-talos`, `--repo <devrc> --session <uuid>` refused with *"transcript cwd does not
+  match … of 3 distinct path(s) this session named, 0 … under this repo"* — and the tool's own
+  advice is NOT to fall back to the git window (that repo's branch window is empty too). With PRs
+  in hand, `--pr 1508,1546` resolved **48 paths** and nominated real entries. **So an index write
+  that is impossible early in a dispatch-hub session becomes possible the moment a PR exists** —
+  re-run it after opening one instead of recording the step as declined.
+- ⚠ **Left behind deliberately:** `refs/remotes/origin/pr/1508` in `~/workspace/devrc` (inert;
+  `git update-ref -d` when the arc closes), and the worktrees `/tmp/wt-cairn-slice3` (holds the
+  rebased-but-unpushed `6205faec` — **do not remove before the push**) and `/tmp/wt-mainctl` (a
+  detached `main` checkout used as the red-vs-ours control). `~/workspace/devrc-mainctl` is
+  ANOTHER session's worktree — not ours to remove.
 
 ## How to verify
 
