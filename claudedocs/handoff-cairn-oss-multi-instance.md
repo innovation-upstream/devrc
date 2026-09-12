@@ -805,6 +805,47 @@ Tekton legs sat on top of two deploy-blockers.
   `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
   measured **1536 passed, 0 failed** locally.
 
+### CLOSED 2026-09-12 — the kill-ledger treadmill, and why three of my PRs were the wrong altitude
+🔴 **THIS RETIRES THE `#1522` BLOCK ABOVE.** That block's diagnosis was right and its remedy was
+wrong: it treated each offending doc as a thing to classify. The class was closed structurally by
+someone else while I was still classifying instances.
+
+- **Resolved by:** `#1561` (`c0bbd6d9`) — *"stop the kill scanners reading `claudedocs/` — SIX docs
+  red-ed main in two hours and every fix was itself a doc"*. On `origin/main`:
+  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` at `:2624`, consumed by `_is_prose_only()` at `:2634`.
+  A prefix predicate, not row deletions. `#1557` was an intermediate step.
+- **`main` is GREEN**, measured at `b1abf6b1` with `__pycache__` cleared and
+  `PYTHONDONTWRITEBYTECODE=1`: **`1537 passed`**, 0 failed. via: measurement
+- 🔴 **My own merged handoff became an offender, and eliding my mention was NOT enough.**
+  `#1548`'s text quoted the wide-kill verb while documenting the breakage. `#1556` (`b62d1bf1`)
+  fixed it in two measured steps — elide my line: 2 failed → 1 failed; ledger the doc in both
+  allowlists: → **1536 passed**. The residual failure was at `:43` and `:2020`, **written by other
+  sessions** documenting the same breakage: with several authors writing at once, no one can elide
+  their way out. via: measurement
+- 🔴 **`#1556` was obsolete within the hour and is what made `#1549` conflict.** It added rows to
+  both allowlists shortly before `#1561` made every `claudedocs/` row unreachable. `git rebase
+  origin/main` on `#1549` conflicts in three hunks, and the HEAD side of the second IS `#1561`'s
+  landed implementation — resolving toward `#1549` would delete it. **Recommended closure as
+  superseded; not closed, it is not mine.** via: measurement
+- **Ruled out: that rebasing and merging `#1549` was the right move**, which is what I was asked to
+  do. Its fix is older and narrower than what landed: it scoped the *mention ledger*, `#1561`
+  scopes *both* scanners. Merging it regresses `main`. via: measurement
+- **Ruled out: that another ledger row would have worked.** After `#1556` merged, `main` went red
+  again on a **fourth** doc (`claudedocs/handoff-gate-speed-and-ci-signal.md`) inside the same
+  window, from a session unrelated to any of the three fixes. via: measurement
+- ⚠ **NOT established: whether scoping BOTH scanners is intended.** `#1561` exempts prose from the
+  ARGV scanner too, not just the mention census. A real call site inside a `claudedocs/` file would
+  now be unread. Flagged on `#1549`; nobody has answered it.
+- **The transferable rule:** *when a guard fires repeatedly and every fix is itself an instance of
+  what it guards, the guard's SCOPE is the defect — stop classifying and re-scope.* Three
+  locally-correct PRs of mine (`#1556` plus two earlier attempts) were each the wrong altitude.
+
+### Rank 3 slice 3 MERGED 2026-09-12 — `#1508`, correcting this doc's own carried-forward line
+`origin/main` `44bd8b0e`: *"consolidate onto the pinned client — delete the five forked reader
+modules"*. **`State now`'s carried-forward block still calls it BUILT, NOT MERGED** — that line was
+true when I wrote it and is now false. Recorded here rather than by replacing `State now`, which
+belongs to that arc's own session. via: measurement
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -2057,6 +2098,23 @@ covers; pin it with `--config`, do not `cd`.
 - 🔴 **The pre-create sweep only works as a SEPARATE step.** I piped `gh pr list` into the same
   command as `gh pr create` and shipped `#1529`, a duplicate of `#1522`; closed it. The sweep ran
   and I never read it.
+
+- 🔴 **A census over PROSE turns every write-up of the census into a new entry.** Six docs red-lined
+  `main` in roughly two hours from at least four sessions, including one quoting the scanner's own
+  `offenders=` output and one that was my own merged handoff. The fix is scope
+  (`_PROSE_ONLY_PREFIXES`), never classification. **If you are about to add the seventh row, stop.**
+- 🔴 **`main` moved under me four separate times this session** — twice invalidating a doc I was
+  editing (`#1540` conflicted after `#1546`; `#1549`'s base moved past its own fix), once merging my
+  `#1548` while I was elsewhere, once landing `#1561`. **Re-read the conflict instead of resolving
+  it mechanically**: that is what caught the `#1529` duplicate, the stale `#1540`, and the `#1549`
+  regression. A `-X theirs` on the last one would have deleted the landed fix.
+- ⚠ **I over-removed while trying to hand another session a verified recipe** — stripped every
+  `"claudedocs/…",` line programmatically, which also hit `quoting_is_the_point` and took the suite
+  to `2 failed`. I reported the census's own output instead and said plainly it was not a working
+  recipe. **Do not hand over a fix you have not watched pass.**
+- 🔴 **The pre-create sweep only works as a SEPARATE step** — see `#1529`, a duplicate of `#1522`
+  that I opened because I piped `gh pr list` into the same command as `gh pr create`. The sweep ran;
+  I never read it.
 
 ## How to verify
 
