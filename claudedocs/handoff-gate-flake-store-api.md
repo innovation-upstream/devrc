@@ -25,62 +25,35 @@ removing the tests' dependence on disk latency rather than by tuning bounds. Dis
 from `handoff-ci-speedup.md`, which is about gate SPEED and is owned elsewhere.
 
 ## State now
-✅ **2026-09-12 — RANK 1 HAS BEEN RUN. The verifier this doc was written for finally has a
-number, and the number relocates the problem.** The store-api fsync flake is named in **0 of 99**
+✅ **2026-09-12 — RANK 1 IS RUN AND THE ARC AROUND IT IS CLOSED. Five PRs merged, all verified by
+CONTENT (a squash is never an ancestor).** The store-api fsync flake is named in **0 of 99**
 `tekton/devrc-pytests` verdicts on heads that CARRY `ce9b55c3` against **12 of 298** that do not
-(P(0) ≈ 0.017), measured by **ancestry**. 🔴 **And what the same read found instead: the gate's
-remaining red is dominated by DETERMINISTIC ledger censuses over tracked text — 27 of 99 post-fix
-verdicts, ~7× this flake at its worst — of which 22 were the kill-mention ledger, closed at the
-source by `#1561` (`c0bbd6d9`), and 5 the runner-bound ledger, closed by `#1567` (`6f1867b1`).**
-Both reddened `main` itself; both are fixed, confirmed at `origin/main` `337114e0` (**5 passed** on
-`test_runner_bound_ledger.py`, **1 passed** on the kill guard). 🔴 **The CLASS is not fixed: at least
-two instances in two days, and nothing prevents the next.** That is rank 8 — closed as an instance,
-retained for the class. ⚠ **The 27 / 22 / 5 figures are a READ-TIME population that cannot be
-re-derived** (rank 1 says why); do not treat a later disagreement as a refutation.
-⚠ **This paragraph said `main` IS RED RIGHT NOW for about an hour after `#1567` merged**, while rank
-8 five hundred lines below already said CLOSED — and `State now` is the block a resuming session
-reads first. **Four other sites were swept for that phrasing and this one, the most-read, was
-missed.** Full table, controls and residuals in rank 1; claim `gate-flake-store-api-1` released.
+(P(0) ≈ 0.017), measured by **ancestry** — `#1568` (`8114a124`). ⚠ **Every per-test count is a LOWER
+BOUND**: 100 of 101 failure descriptions are truncated at 138 of the 140-char cap, so the true post
+count is in **[0, 22]**; the bias runs the right way (1.83 failures per failing run post vs 3.60
+pre). 🔴 **The zero is not what establishes the fix — the mechanism being gone is**, content-checked.
+⚠ **The 27 / 22 / 5 classification figures are a READ-TIME population and cannot be re-derived**
+(GitHub keeps one status per context; supersedes overwrite it) — a later disagreement is not a
+refutation.
 
-🔴 **THE AUDIT LADDER IS CLOSED — by decision, not by a clean round.** `#1219` and its
-successor `#1239` are both MERGED. The ladder ran **8 rounds on `#1219` + 2 on `#1239`**;
-every round but the last produced findings, and the last was ended deliberately because the
-findings had converged on prose accuracy inside a test guard while the effort's actual
-verifier (rank 1) had still never been run.
-
-- 🔴 **There is deliberately NO "devrc `main` @ \<sha\>" line here any more.** It read `65f7325b` —
-  the `#1239` squash — until 2026-09-12, by which point this doc's own later text had moved past it
-  twice. The replacement was written as `8114a124` and **was stale before it was pushed**: `main`
-  took `#1564` in the interval, which is the second time in one session. **A bare tip sha in a
-  State-now section is a claim that expires on the next merge, and nothing in this repo updates
-  it.** Every sha here is instead pinned to the commit it is ABOUT — `ce9b55c3`, `c0bbd6d9`, and
-  `8114a124`/`4e970998` as named measurement POINTS, never as "the tip". Claims:
-  `gate-flake-store-api-5` **RELEASED**; `gate-flake-store-api-1` released 2026-09-12 once the
-  measurement landed.
-- `#1219` → squash `b4fde334`. `#1234` (doc) → `3d0695c7`. `#1239` → squash **`65f7325b`**.
-- Content-verified on `origin/main`: the gap guard
-  `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` is present; the three dead
-  `PEAK_STORE_*` globals are gone.
-
-**What the last three rounds actually did:**
-- **round 6 delta audit** (owed before the merge, run after it): 7 findings, 4 🔴 — the
-  worst being `_LARGEST_STORE_BYTES` pinned with **zero headroom** against a file-wide
-  write-call census that moved 6 times in 19 commits, plus a nested-loop shape that
-  under-reported 1,200 entries as 443 (2.7×). Together: the gate goes red on an unrelated
-  commit, someone bumps the constant to unblock, and the ENOSPC guard silently dies.
-- **round 7** (`#1239`): stopped parsing source and made `_check_store_budget` **walk the
-  real store directory** at every `store_root` teardown. F2/F3/F4/F9 ceased to exist rather
-  than being patched. Site count 20 → 33 with no site added.
-- **round 8**: its own round-1 audit returned 8 findings (2 🔴); 7 fixed, 1 **disclosed**.
-
-🔴 **GATE EVIDENCE, AT THE SCOPE IT WAS MEASURED — three tiers, base named.**
-Merged tree `eaf2c0ca` (= `5a3d7fe7` + `origin/main` `146770ef`), derivations built ONE AT
-A TIME, backgrounded, redirected, never piped:
-- `nix build …#pytests` (sandbox, the gated tier): `RESULT: PASS (exit=0)`,
-  `collected=20504 passed=20501 skipped=3 failed=0`, floor 18404, no timeout panic
-- `nix build …#nodetests`: `RESULT: PASS (exit=0)`, `tests=1449 pass=1449 fail=0`, floor 1367
-- `scripts/gate.sh --tier both` (dev-host): `GATE: RESULT=PASS exit=0`, both legs' exit
-  codes agreeing with the runners' own `RESULT:` lines
+- **Merged this session:** `#1568` `8114a124` (the measurement) · `#1570` `f013ac50` (six audit
+  rounds of corrections to it) · `#1591` `5f492f99` (un-red `main`) · `#1590` `0e397c20` (rank 10) ·
+  `#1605` `5c407916` (cross-host compared). Two `cairn append` writes landed on the pod:
+  `devrc/subsystem-store-api` (the verifier was still recorded OPEN, and the index is read BEFORE
+  this doc) and `devrc/espanso-audit` (the label-vs-`search_terms` trap).
+- **Ranks: 1, 5, 6, 8, 10 CLOSED. OPEN: 2, 3, 4, 7, 9** — 2/3/4/7 predate this arc and were never in
+  scope; **9 is new and open BY DESIGN** (61 docs prescribe a command `#1508` deleted; fixed only the
+  site in a doc being edited, filed the rest rather than half-sweeping).
+- **Claims: all RELEASED** — `gate-flake-store-api-1`, `-10` and `doc-path-rot-false-positive` this
+  session; `-5` was released when rank 5 closed. **Nothing on this doc is held.**
+- ✅ **Both hosts converged and VERIFIED AT THE CONSUMER, not at the deploy.** `ship.sh` rc 0, both
+  at devrc `c337765e`; the deployed `/resume` blob now equals `origin/main` (`7be699b4`) and the store
+  path moved — it had been stale since `#1508` and only a `home-manager switch` moves it, never a
+  pull. Cross-host cairn pin read directly on each host: identical `…-cairn-562a6ea/bin/cairn`.
+- **Residuals that cannot be closed from here, both stated in rank 1:** the `[0, 22]` bound (the
+  status rows that would narrow it are destroyed by design), and one reading of a REAL gate
+  container's `/dev/shm` — obtainable only from a future store-api failure log (`devrc-store-*` =
+  sited, `pytest-of-*` = fell back).
 
 ## Open investigations — live diagnosis state
 
@@ -947,6 +920,83 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
   reporting it is EXPECTED, not a finding, and it is **not yours to restore**. Now documented
   in `CLAUDE.md`. Consequence: **you are the gate** — a green Tekton check is information, not
   permission.
+
+### CARRIED FORWARD from `State now` — durable content a REPLACE would have dropped
+🔴 **Moved here rather than deleted, because `handoff_doc.py` flagged all four as durable under a
+REPLACE heading.** `State now` is current status; these are findings, so this is where they live.
+
+- **THE `#1219`/`#1239` AUDIT LADDER (a DIFFERENT ladder from `#1570`'s) WAS CLOSED BY DECISION, NOT
+  BY A CLEAN ROUND.** It ran **8 rounds on `#1219` + 2 on `#1239`**; every round but the last
+  produced findings, and the last was ended deliberately because the findings had converged on prose
+  accuracy inside a test guard **while the effort's actual verifier — rank 1 — had still never been
+  run.** ⚠ That is the cautionary half: ten rounds of polish on the guard, zero on the measurement
+  the effort existed to produce. `#1219` → `b4fde334`; `#1234` (doc) → `3d0695c7`; `#1239` →
+  `65f7325b`. Content-verified then: `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`
+  present, the three dead `PEAK_STORE_*` globals gone.
+- **Its gate evidence, at the scope it was measured — three tiers, base named.** Merged tree
+  `eaf2c0ca` (= `5a3d7fe7` + `origin/main` `146770ef`), derivations built ONE AT A TIME,
+  backgrounded, redirected, **never piped**: `nix build …#pytests` (sandbox, the gated tier)
+  `RESULT: PASS (exit=0)`, `collected=20504 passed=20501 skipped=3 failed=0`, floor 18404, no
+  timeout panic · `…#nodetests` `tests=1449 pass=1449 fail=0`, floor 1367 · `scripts/gate.sh --tier
+  both` `GATE: RESULT=PASS exit=0`, both legs' exit codes agreeing with the runners' own `RESULT:`
+  lines. **Three tiers and a named base is what makes "the gate passed" a claim with a scope.**
+- 🔴 **NEVER WRITE A BARE "devrc `main` @ \<sha\>" LINE IN A STATUS SECTION.** It read `65f7325b`
+  until 2026-09-12, by which point this doc's own later text had moved past it twice; the
+  replacement was written as `8114a124` and **was stale before it was pushed** (`main` took `#1564`
+  in the interval — the second time in one session). **A bare tip sha is a claim that expires on the
+  next merge and nothing in this repo updates it.** Pin every sha to the commit it is ABOUT, never
+  to "the tip".
+- ⚠ **A PRESENT-TENSE RED SURVIVED IN `State now` FOR AN HOUR AFTER THE FIX MERGED, WITH RANK 8 FIVE
+  HUNDRED LINES BELOW ALREADY SAYING CLOSED.** Four other sites were swept for that phrasing and
+  **the most-read one was missed** — `State now` is the block a resuming session reads first. **When
+  you close a rank, grep the doc for its subject; the ranked list is not the only place it is
+  asserted.**
+
+### 2026-09-12 — SIX AUDIT ROUNDS ON `#1570`, AND WHERE THE DEFECTS ACTUALLY WERE
+🔴 **NOT ONE FINDING IN SIX ROUNDS WAS IN THE MEASUREMENT. All of them were in prose ABOUT it** —
+attributions, counts, citations, closing conditions, present-tense claims about mutable state. Three
+were a fix round correcting the previous fix round, which is the shape `audit-pr/SKILL.md` predicts
+for a prose payload. Rounds: 1 (3🔴/4🟡) · 2 (2🔴/5🟡) · 3 (2🔴/5🟡) · 4 (1🔴/1🟡) · 5 (2🔴/2🟡) ·
+6 **clean, ladder ended**. Payload 248 · 103 · 100 · 109 · **149 (36+/113−, the cut)**.
+
+🔴 **THE CONTROL WORTH REUSING: THE DOC GATES ARE BLIND TO *PATHS* IN `claudedocs/`, NOT MERELY TO
+LINE NUMBERS.** `test_doc_path_rot.py`'s `CORPUS_DIRS = ("claude", "CLAUDE.md")` excludes
+`claudedocs/` deliberately. Measured pair: a nonexistent path injected into a `claudedocs/` file left
+**802 passed**; the same token injected into `claude/RULES.md` turned `test_no_new_dead_paths` RED.
+**1 on the positive control, 0 under test.** So every citation in every `claudedocs/` file is
+unverified by construction — which is why five rounds of hand-checking found what a green suite
+structurally could not see. **Never read a green suite as evidence about a handoff doc's citations.**
+
+🔴 **A CHECK THAT CANNOT DISTINGUISH THE TWO STATES IS VACUOUS WHETHER IT IS A TEST OR A HUMAN
+READING A FIELD — and I shipped both spellings, the second as the fix for the first.** Closing rank 6
+cited "the keylog suite → 104 passed"; that suite returns **104 passed with `nix/home.nix` DELETED**
+(`#1265` dropped the live-config guards on purpose). The fix for that cited "`:acq`/`:rna`'s
+`search_terms` — disjoint"; those lists are **byte-identical on the red trees and the green one** and
+never contained the terms, so the prescribed read returns "closed" on the broken tree. The real
+discriminator was `:acq`'s **`label`**. **Ask what a passing check would look like if the bug were
+present, before citing it.**
+
+⚠ **A COUNT, A WINDOW AND A CITATION ARE EACH CLAIMS THAT EXPIRE, AND THIS DOC CARRIED ALL THREE.**
+"`main`'s last 8 commits" is a moving window — `main` took two commits between writing and checking,
+so the sentence was unfalsifiable; naming a sha range fixes the wrong axis, because a range pins the
+COMMITS and the VERDICT is the mutable part (one flipped `pending`→`superseded` 24 min before the
+commit asserting it). A corrected cross-doc line citation was invalidated by its own commit's +25
+lines. **Quote a sibling doc by its OPENING WORDS, stamp a verdict census with a READ TIME, and
+delete a tip-sha line rather than updating it** — the replacement was stale before it was pushed.
+
+🔴 **AND THE SAME ERROR IN THE OPERATIONAL HALF: I CALLED A HOST DOWN FROM ONE ROUTE.** A ping to the
+laptop's LAN address returned 100% loss and I reported it unreachable; `ship.sh` hit the identical
+failure and **fell back to the nebula address, which answered**. The host was up and the PATH was
+down. This doc's sibling carried that same error in two places for a day. **A `NOT COMPARED` verdict
+ages into a false claim the moment its blocker clears and nothing re-checks it — re-measure before
+citing one, and measure against every route, not the first that fails.**
+
+⚠ **WHEN A FIX ROUND'S PROSE IS WRONG FOR THE FOURTH TIME, CUT IT — that was a pre-committed decision,
+not a reaction.** Round 5's espanso archaeology had no closing condition (its correctness condition was
+"every sentence is true", unbounded) while the record it duplicated already lived in
+`espanso_detect.py:344-372` and `test_espanso_detect.py:727-757`, where it stays correct as the code
+moves. 65→29 lines and 49→8, durable lesson moved to the index. **A doc is the wrong artifact for a
+five-commit two-mechanism history.**
 
 ## How to verify
 ```bash
