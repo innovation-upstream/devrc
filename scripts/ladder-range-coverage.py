@@ -248,7 +248,14 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
         label, churn, reason = _classify(ad, runner, repo_dir, frm, to, base)
         added = churn.added if churn else None
         deleted = churn.deleted if churn else None
-        commits = churn.commits if churn else None
+        # 🔴 `churn_commits`, NEVER `commits` — the count must come from the same
+        # population as the lines beside it. MEASURED on devrc #1046's tail: this
+        # report printed `55 commit(s), 1105 line(s)` when the churn population
+        # was TWO commits (a 66-line fix and a 1,039-line semantic-conflict
+        # resolution). 53 were an upstream bring-in that `--not <base>` excludes
+        # from the churn and that the raw count included. The wrong number is the
+        # flattering one: it makes a real finding look like routine drift.
+        commits = churn.churn_commits if churn else None
         if label == GAP:
             uncovered_a += added or 0
             uncovered_d += deleted or 0
