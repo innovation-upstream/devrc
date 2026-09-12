@@ -286,13 +286,27 @@ Not a bug — a measurement that would mislead if run as written.
 - **Next probe:** re-run the date comparison above; when most heads postdate `b4fde334`, run the
   probe from the doc's earlier block and **record the new baseline date beside the count**.
 
-### 🔴 `main` IS RED, and it is NOT this effort's doing — espanso `:acq` shadows `:rna`
-- **Symptom + exact repro:** `scripts/collector/keylog/tests/test_espanso_detect.py:929`,
-  `test_live_existing_resolutions_not_made_ambiguous`, fails on **plain `origin/main`**:
+### CLOSED 2026-09-12 — espanso `:acq` shadowed `:rna`; the terms are disjoint and nothing is red
+🔴 **THIS BLOCK READ "`main` IS RED" IN THE PRESENT TENSE, WITH A "Next probe, verbatim" TELLING THE
+NEXT SESSION TO GO FIX IT — 220 lines above the rank 6 that the SAME COMMIT marked CLOSED.** It is
+the second time in this one PR that a rank was retired and its Open-investigations block left
+live (round 2 caught the first, on rank 8). **When you close a rank, grep the doc for its subject;
+the ranked list is not the only place it is asserted.** Status: see rank 6 — evidence is a direct
+read of `nix/home.nix`, NOT the suite cited below.
+⚠ **TWO THINGS IN THIS BLOCK ARE NOW WRONG AND ARE KEPT ONLY AS THE WORKED EXAMPLE.**
+(a) The repro's stated expectation `# 1 failed, 100 passed` is **104 passed** today.
+(b) 🔴 **The test it names does not exist** — `test_live_existing_resolutions_not_made_ambiguous`
+was deleted by `#1265` (`68d10b19`, *"drop the 10 live-config guards"*), and `:929` is now an
+unrelated docstring line. **The suite named here is structurally blind to `nix/home.nix`: deleting
+that file outright still gives 104 passed.** So this repro could never have re-confirmed the
+collision, and the eliminations below are about the RULE, not the live config.
+- **Symptom + the repro AS IT WAS WRITTEN (do not run it — see above):**
+  `scripts/collector/keylog/tests/test_espanso_detect.py:929`,
+  `test_live_existing_resolutions_not_made_ambiguous`, was said to fail on plain `origin/main`:
   ```bash
   git -C $DEVRC worktree add --detach /tmp/ctl origin/main
   nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-    /tmp/ctl/scripts/collector/keylog/tests -q -p no:cacheprovider   # 1 failed, 100 passed
+    /tmp/ctl/scripts/collector/keylog/tests -q -p no:cacheprovider   # CLAIMED 1 failed, 100 passed
   ```
 - **Observed (with values):** `AssertionError: search terms regressed (term -> (expected,
   actual, matching snippets)): {'recom': (':rna', None, [':acq', ':rna']), 'recommend':
@@ -311,11 +325,12 @@ Not a bug — a measurement that would mislead if run as written.
   and the control on plain `main` fails identically. via: measurement
 - **Ruled out:** *"a load flake"* — it fails in 0.22s, deterministically, with a value-bearing
   assertion naming the colliding snippets. via: measurement
-- **Leading hypothesis:** `:acq`'s `search_terms` need narrowing so they stop matching
-  `recom`/`recommend`, OR `:rna`'s need a disambiguating term. The fix is in `nix/home.nix`,
-  and it belongs to whoever added `:acq`.
-- **Next probe, verbatim:** `git -C $DEVRC show a720d30d -- nix/home.nix` to read the added
-  snippet, then decide which side's `search_terms` move.
+- **Leading hypothesis — CONFIRMED AND ACTED ON BY SOMEONE ELSE:** `:acq`'s `search_terms` needed
+  narrowing so they stop matching `recom`/`recommend`. That is what shipped; `:acq` is now
+  `ask clarify clarifying questions` and no longer contains either term.
+- **Next probe: NONE.** ⚠ The probe here was *"`git -C $DEVRC show a720d30d -- nix/home.nix`, then
+  decide which side's `search_terms` move"* — that decision has been made and merged. **Read
+  `nix/home.nix:419`/`:431` if you want to confirm it; do not re-open the question.**
 
 ## Next steps (ranked)
 🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
@@ -512,17 +527,31 @@ Not a bug — a measurement that would mislead if run as written.
    `#1239` (`65f7325b`) both merged and content-verified; ladder ended by decision after 10
    rounds. Five residuals are disclosed in-source and listed under Gotchas. Nothing to do.
    forcing: none — done; retained so the rank numbering stays stable.
-6. ✅ **CLOSED 2026-09-12 — the espanso `:acq`/`:rna` collision is GONE and `main` is NOT red on it.**
-   Measured at `origin/main` `337114e0` by the criterion this item itself names as the deterministic
-   check: the keylog suite → **104 passed** at `origin/main` `337114e0`. The underlying terms are now disjoint in `nix/home.nix`
-   (`:acq` = ask/clarify/clarifying/questions; `:rna` = recommend/recom/next/actions/rank/leverage).
-   Not fixed by this effort — it was someone else's one-line `search_terms` change; recorded because
-   the item asserted a live red.
-   ⚠ **It carried `forcing: regression — `main` is red` while the test was green, and `forcing:` is
-   the machine-readable field a `claim-work` session sorts on** — so the stale value was not cosmetic,
-   it advertised a gate-forcing regression with nothing to fix behind it. A bash comment 300 lines
-   away telling the reader to re-verify does not undo that. **Retire the `forcing:` in the same edit
-   as the red.**
+6. ✅ **CLOSED 2026-09-12 — the espanso `:acq`/`:rna` collision is GONE.** Evidence is a DIRECT READ
+   of the live config at `origin/main` `337114e0`: `nix/home.nix:419` `:acq` =
+   `ask clarify clarifying questions`, `:431` `:rna` = `recommend recom next actions rank leverage`
+   — **disjoint**. Not fixed by this effort; it was someone else's one-line `search_terms` change,
+   recorded because the item asserted a live red.
+   🔴 **AN EARLIER REVISION OF THIS CLOSURE NAMED THE KEYLOG SUITE AS "THE DETERMINISTIC CHECK", AND
+   THAT SUITE CANNOT SEE `nix/home.nix` AT ALL — a vacuous green used as a closing condition, which
+   is the exact failure this doc exists to catch.** Controls, run on a `cp -a` copy with its `.git`
+   removed first: re-introducing the collision in full → **104 passed**; **deleting `nix/home.nix`
+   outright → 104 passed**. The suite tests the RULE against hand-copied fixtures, not the live file.
+   ⚠ **And it is blind BY DECISION, which is the part worth carrying:** `#1265` (`68d10b19`) *"drop
+   the 10 live-config guards — they re-break on every snippet edit"*. So there is **no automated
+   check on this interface**, and the next `search_terms` collision lands with the suite green.
+   **Read the config; do not run the suite and believe it.**
+   ✅ **THE OTHER CLOSING CONDITIONS IN THIS DOC WERE SWEPT FOR THE SAME DEFECT — one instance, not a
+   pattern.** Rank 7's already does it right and says so (*"Verify with the detector's own positive
+   control, not an absence … a rename, skip or deselect satisfies it with nothing fixed"*); rank 8's
+   was run rather than assumed; rank 9's was mechanically exercised in both directions. **Rank 6 was
+   the only one resting on an instrument that cannot observe its subject.** Swept because a defect
+   found at one site is a hypothesis about the others — not because a second was expected.
+   ⚠ **It also carried `forcing: regression — `main` is red` after the red was gone, and `forcing:`
+   is the machine-readable field a `claim-work` session sorts on** — so the stale value was not
+   cosmetic, it advertised a gate-forcing regression with nothing behind it. **Retire the `forcing:`
+   in the same edit as the red**, and do not delegate the correction to a comment elsewhere in the
+   file: one was left 300 lines below and went on contradicting this item for a further round.
    forcing: none — fixed; the diagnosis above is retained as the worked example.
 
 7. **A FIXED 120 s SUBPROCESS BOUND IN A FILE WHOSE WALL TIME IS NOT STABLE —
@@ -585,8 +614,8 @@ Not a bug — a measurement that would mislead if run as written.
 
 8. ✅ **CLOSED 2026-09-12 — `main` WAS RED, DETERMINISTICALLY, ON THE RUNNER-BOUND LEDGER, AND
    `#1567` FIXED IT (`6f1867b1`, merged 05:07:06Z).** Closing condition met and checked the
-   mechanical way: `scripts/tests/test_runner_bound_ledger.py` → **5 passed** at `origin/main` after
-   the merge, against **1 failed, 4 passed** before it. 🔴 **Kept at full length because the CLASS is
+   mechanical way: `scripts/tests/test_runner_bound_ledger.py` → **5 passed** at `origin/main`
+   `337114e0`, against **1 failed, 4 passed** at `61f41adf` before the merge. 🔴 **Kept at full length because the CLASS is
    what matters — it is the class rank 1's measurement found has replaced the flake this doc was
    written to chase. At least TWO instances in two days, both enumerated in rank 1 (kill-mention 22, runner-bound 5); no third is enumerated anywhere, so do not write one.**
    Measured 2026-09-12 by running the file directly at `origin/main` `4e970998` in a clean worktree:
@@ -618,7 +647,7 @@ Not a bug — a measurement that would mislead if run as written.
      guard on landing.
    ✅ **Closing condition MET 2026-09-12:** `#1567` merged (`6f1867b1`) **and**
    `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` green on `origin/main` `337114e0`
-   — run, not assumed: **5 passed**. ⚠ **The window from filing to closed was 1 h 08 m, and this item spent
+   — run, not assumed: **5 passed**. ⚠ **The window from filing to closed was 57 m (rank 8 filed in `029e801c`, authored 04:10:02Z; `#1567` merged 05:07:06Z), and this item spent
    most of it asserting `main` is red "RIGHT NOW" in four places.** That is the same defect class as
    the tip-sha line in `State now`: a present-tense claim about a mutable state, with nothing to
    expire it. **Write the measurement and its timestamp; let the closing condition carry the
@@ -865,9 +894,10 @@ nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
 
 # rank 6's keylog red — NO LONGER RED. Measured 2026-09-12 at origin/main 337114e0: 104 passed.
 #   The sha is the point: an unpinned origin/main reading is the defect rank 1 names.
-#   ⚠ This line read `# 1 failed, 100 passed` with "expected until rank 6 is fixed"; rank 6 itself
-#   still says `main` IS RED on it. Re-verify rank 6 before acting on it — this is the fourth
-#   present-tense red claim in these docs found stale in one session.
+#   ⚠ This line read `# 1 failed, 100 passed` with "expected until rank 6 is fixed". Rank 6 is now
+#   CLOSED and so is its Open-investigations block — both were left asserting a live red for a
+#   round after the red was gone. 🔴 And this suite CANNOT see nix/home.nix: deleting that file
+#   outright still gives 104 passed, so do not read a green here as evidence about espanso.
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   $DEVRC/scripts/collector/keylog/tests -q -p no:cacheprovider    # expect 104 passed
 gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/main)/status \
@@ -881,7 +911,7 @@ gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/
 
 # rank 8 — CLOSED by #1567 (6f1867b1). This is its closing condition, so expect 5 PASSED.
 #   A `1 failed` here means the census has regressed, NOT that the recipe is stale.
-#   ⚠ This line said `expect 1 failed` for the 70 minutes rank 8 was open, which would have read
+#   ⚠ This line said `expect 1 failed` for the 57 minutes rank 8 was open, which would have read
 #   as a broken recipe the moment it was fixed. A verify-block expectation must track the
 #   closing condition, not the state at the time of writing.
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \

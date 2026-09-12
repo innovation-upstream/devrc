@@ -136,9 +136,12 @@ the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points ever
    to skip re-runs on KNOWN FLAKES, and the store-api flake it was written around is now at **0 of
    99** verdicts on heads carrying `ce9b55c3` (`handoff-gate-flake-store-api.md` rank 1). The same
    read independently re-derived this file's own truncation finding from scratch — **100 of 101
-   failure descriptions truncated at 138 characters** — which is what makes the screen unsatisfiable
+   failure descriptions truncated at 138 of the 140-character cap** — which is what makes the screen unsatisfiable
    (the measurement sits beside `_FAILING_RE` in that file). So the screen now guards a flake that has
-   stopped occurring, using a completeness proof a 138-byte field cannot supply. ⚠ **Not a decision —
+   stopped occurring, using a completeness proof a 140-byte field cannot supply. ⚠ **Both figures are
+   a READ-TIME population that cannot be re-derived** (GitHub keeps one status per context and
+   supersedes overwrite it) — see `handoff-gate-flake-store-api.md` rank 1; a later disagreement is
+   not a refutation. ⚠ **Not a decision —
    the 2026-10-11 date and "decide them together" both stand**; this is the datum to decide ON, and it
    did not exist when the date was set.
    forcing: none
