@@ -16,14 +16,15 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-
-- **Branch / PR:** the arc's four PRs are all MERGED — `#1440` round 0 (`34da597d`), `#1497` handoff (`e1cd9a38`), `#1495` the retracted figure + its guard (`cc278b7a`), `#1511` closeout (`bfcc3b20`, CI green: 22,148 collected / 0 failed). **Nothing from this arc is in flight.**
-- **DONE — "the algorithm" is integrated into `/audit-pr` as ROUND 0, shipped and deployed.** `claude/skills/audit-pr/SKILL.md` carries a `## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE` section; `scripts/audit-dispatch.py` has a `--round 0` mode emitting it **INSTEAD of** the nine correctness axes. Operator decisions taken: step 2 uses the three adoption questions (*is it RUNNING / has it ever caught anything / does something else already check it*), not the revert test; steps 4+5 merged into one ordering rule.
-- **DONE — `#1495`**, found by round 0's trial 2: `scripts/scoped-tests.sh` justified its own existence with a figure `CLAUDE.md` had already retracted. Fixed, plus a guard (`scripts/tests/test_retracted_contention_figure.py`) that pins the normalised TEXT of every site.
-- ✅ **RE-VERIFIED ON CURRENT `main` (`018e483b`), not carried from memory** — `#1519` landed **+137 lines into `scripts/audit-dispatch.py`** during this arc, so the round-0 claims were re-measured against the tree as it stands: `--round 0` still emits its section with the nine axes ABSENT, and `--round 0 --emit-claims` still refuses with **rc 4**. The feature survived another session's substantial edit to the same file.
-- **Deploy/verify status:** both hosts converged and VERIFIED at `3a0c77dd`, compared by `ship.sh`, artifacts checked on each host directly. ⚠ `main` has moved several commits since (`018e483b` at time of writing) — that deploy claim is a point-in-time reading, not a current one; re-run `ship.sh` before relying on host state.
-- **Cleanup:** all five scratch worktrees removed; my three merged branches deleted. 🔴 **Two branches deliberately PRESERVED because they carry other sessions' unmerged work** — `feat/audit-pr-round-0-algorithm` (`1e844f1e`, a cairn handoff commit) and `docs/handoff-ladder-closeout` (`c875eca6`). Neither is mine to delete; the first is named after this arc's feature, which is exactly why it looks disposable.
-- ✅ **`#1431` is REOPENED (2026-09-10), carrying a comment with a fresh red/green/positive-control matrix. The defect is unchanged and still open; what is closed is the *board lying about it*.** 🔴 This bullet was written by a prior session which said in terms that it must STAY, because the carried-forward pointer is what kept it findable across `State now` replacements — and one update of this doc DROPPED it anyway while re-asserting the superseded claim it had corrected. **It stays.**
+- Branch / PR: base clone on `main` at `622fc2d8`. **THREE PRs OPEN, NONE MERGED, NOTHING DEPLOYED.**
+- 🔴 **`main` IS RED, and it is NOT this arc's doing.** `scripts/claude-hooks/tests/test_guard_core.py` fails two tests on a clean detached worktree of `origin/main` itself (measured at `3161851b`): `test_every_kill_server_call_site_in_the_repo_is_classified` and `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`. One root cause — two handoff docs from other efforts (`handoff-tmux-webapp.md`, `handoff-mention-system-repos.md`) carry wide-tmux-kill prose and were entered in NEITHER of two separate allowlists. Fix open as **`#1543`**.
+- **`#1532`** — rank 2 shipped: `scoped-tests.sh` now REFUSES to produce a scoped verdict for a shared-surface diff (exit 4). 13 new tests, 3 mutants killed. CI re-running after a fix.
+- **`#1533`** — the `#1431` defect fixed: the battery gained `--print-min-tests` and the guard EXECUTES it instead of regexing source. CI red **only** on the two `main`-inherited failures above.
+- **Earlier in this session, already MERGED and DEPLOYED:** `#1505` (four-state ssh probe) → `bc67b177`, `#1507` (handoff corrections) → `3a0c77dd`; `ship.sh` converged both hosts to `3a0c77dd` and all four probe states were verified on each host against the deployed artifact.
+- **`#1287`** (`feat/workhost`) is **CLOSED** with the operator's comparison written on it.
+- ✅ **`#1431` is REOPENED (2026-09-10), carrying a comment with a fresh red/green/positive-control matrix. The defect is unchanged and still open; what is closed is the *board lying about it*.** 🔴 This bullet was written by a prior session which said in terms that it must STAY, because the carried-forward pointer is what kept it findable across `State now` replacements — and one update of this doc DROPPED it anyway while re-asserting the superseded claim it had corrected. **It stays.** ⚠ **UPDATE 2026-09-11:** the defect now has a fix open as **`#1533`** (unmerged) — item 1 closes when that merges; **item 2 still needs a human's written dismissal** and no PR can satisfy it. The bullet stays until BOTH are closed.
+- Deploy/verify status: `bc67b177`+`3a0c77dd` deployed AND verified on both hosts. **`#1532`/`#1533`/`#1543` are unmerged and undeployed.**
+- No `clawgate-task:` recorded: `clawgate_handoff.sh resolve` exited **5** (nothing resolved). Its positive control answered 8 links for another session, so the board is reachable and the token accepted — but a wrong id also answers 200 with an empty array, so this is NOT a clean bill of health.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -99,12 +100,19 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-
 1. **Round 0 trials 3-5, on ordinary PRs, dispatched BEFORE merge-readiness.** Ledger so far: `ran: 2 · changed the outcome: 2`. Both yielded, but trial 2's report landed *after* its PR merged, so the live question is whether round 0 is fast enough to matter, not whether it finds things. Delete the section if it ran and changed nothing. forcing: none
-2. **Decide the `scoped-tests.sh` trigger list with `#1445`'s author** — implement `gate-inventory-2026-09-08.md` §10 or decline it in the header. Measured first-hand, see the open investigation below. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
-3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** forcing: none
+2. ✅ **DONE (2026-09-11) — operator DECIDED: implement §10. Shipped as `#1532`** (open, unmerged). A shared-surface diff now refuses a scoped verdict rather than under-running silently. 🔴 **The item's own headline figure was STALE**: it said "a `testlib` change runs 1 of 331 test files"; re-measured across all 24 `scripts/testlib/` modules the range is **0–10, median 1** — `mockbin.py` selects 10 while 69 files across 7 targets reference it; `gitenv.py` selects 2 while spanning 8. Substance right, number wrong, and understated. forcing: none
+3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** ⚠ **A SECOND session (2026-09-11, this one) independently re-derived the same finding** before reading this line — two sessions have now spent time refuting the same false item, which is the cost of leaving a struck item phrased as a task. forcing: none
 4. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~27 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deferred by operator sequencing until the trial count resolves. forcing: none
-5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm` (a branch named after this arc's feature). Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
+5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm`. Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
+6. **Merge `#1543` FIRST — it un-reds `main`.** Then `#1532` and `#1533` must be brought onto the fixed base before their CI means anything (`#1533`'s only red is the inherited one).
+   forcing: regression — `main` is red for every contributor until this lands
+7. **Then merge `#1532` + `#1533`, run `scripts/ship.sh`, and verify.** Verification for `#1532` is behavioural, not a green suite: a `scripts/testlib/**` edit must exit 4 naming the trigger, and an ordinary subsystem edit must still scope.
+   forcing: user — the operator asked for merge and ship; it is owed and unfinished
+8. **Decide whether `scripts/scoped-tests.sh` itself should be a shared-surface trigger.** Today it is not, so a change to the mapper is validated by the mapper. Flagged on `#1532` rather than added, because it is outside the list the operator approved.
+   forcing: none
+9. **`#1431` item 2 needs a human's written dismissal** — item 1 closes when `#1533` merges, but item 2 ("a reader confirms in writing that `5ab273bf`'s mis-named control will not be inherited") can only be satisfied by a person.
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -993,20 +1001,41 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - 🔴 **DO NOT QUOTE THE RETRACTED CONTENTION FIGURE IN A CHURNING DOC — `#1495`'s guard fires on it, correctly.** `test_retracted_contention_figure.py` fails any file carrying the figure that its ledger does not name. This doc quoted it once while DESCRIBING the guard's own history, and `tekton/devrc-pytests` went red on `#1511` — a TRUE positive. 🔴 **The fix is to reword, NOT to add this doc to the ledger:** the ledger pins a sha256 of the normalised text around each occurrence, and a handoff rewritten every session would move that digest constantly, making the guard permanently red — which `claude/RULES.md` says is worse than no gate. The ledger's three entries (`CLAUDE.md`, `handoff-gate-speed-and-ci-signal.md`, `scoped-tests.sh`) are stable prose; this doc is not. ⚠ The guard's failure message offers "add it with its digest" or "delete it" and does not yet name this third case — describing the figure without quoting it. Worth adding when someone next touches that file.
 - 🔴 **A `State now` REPLACE WILL EAT ANOTHER SESSION'S DELIBERATE CARRY-FORWARD, AND THE TOOL WARNS YOU IN A LINE THAT IS EASY TO SKIM.** Measured on this doc, 2026-09-11: an update dropped a bullet whose own text read *"This bullet stays (rather than being deleted) because the carried-forward pointer is what kept it findable across three `State now` replacements"* — and in the same edit re-asserted the stale claim that bullet existed to correct (`#1431` CLOSED, when it had been REOPENED the day before). `handoff_doc.py` printed `This replace DROPS 3 line(s) that look DURABLE` and the writer read it only after pushing. **Read the DROPS block BEFORE the confirm, and grep the dropped lines for `stays`/`carried forward`/`do not delete` — a bullet that argues for its own survival is the one a REPLACE is most likely to kill.**
 
+- 🔴 **A REMEDIATION WRITTEN INTO AN ISSUE IS A HYPOTHESIS, NOT A SPEC — and only RUNNING the control it demanded revealed that.** `#1431` prescribed *"have the battery print its effective `MIN_TESTS` and assert on that"*. Implemented exactly as written it closes `MIN_TESTS=$LOW` and **leaves the `QUICK` case GREEN**, because `--print-min-tests` runs with `QUICK` unset so the effective floor honestly IS 15 for that invocation while a `QUICK=1` run floors at 3. **"Effective" is environment-dependent and no probe can enumerate the environments.** The closing half had to be STRUCTURAL: exactly one `MIN_TESTS=` assignment, matched `^\s*` not `^`. The old guard's column-0 anchor is the whole reason an INDENTED override beat it — and the issue itself asserted that a second assignment "fires the `len(literals) == 1` check", which is true only unindented.
+- 🔴 **TWO SEPARATE ALLOWLISTS OVER ONE HAZARD KEPT `main` RED ON TWO TESTS FOR ONE ROOT CAUSE.** `_KILL_MENTION_LEDGER` and `quoting_is_the_point` both enumerate files carrying wide-tmux-kill text, and a file classified in one is still an offender to the other. Fixing the first alone left the module red — which is how the second was found. A "one rule, one place" smell nobody has consolidated.
+- 🔴 **A RED CHECK ON YOUR PR CAN BE `main`'s RED, AND THE CONTROL IS CHEAP.** `#1533` went red on a test in a directory its diff cannot reach. The discriminating control — the same test on a clean detached `origin/main` worktree — cost one `worktree add` and settled it in two minutes. **Run it before debugging your diff**, and before quoting the documented ~42% noise rate as the explanation: this was neither noise nor the diff.
+- 🔴 **THE GUARD THAT FORBIDS A HAND-WRITTEN SHEBANG CAUGHT A NEW TEST FILE ON ITS FIRST CI RUN.** `#1532`'s fixture wrote a stub runner with a literal `#!/bin/sh`; `env` is absent from the nix build sandbox, so such a stub is unrunnable in the tier the merge is gated on. Use `testlib.mockbin.write_exec`, which owns the shebang and refuses a body carrying one. **And re-run the mutation controls after that fix** — the fixture is what the negative control depends on, so an audit fix resets the gate.
+- 🔴 **A GUARD TEST THAT ALLOWLISTS FILES MUST BE RE-CONTROLLED AFTER YOU ADD TO IT.** Adding entries to a safety allowlist is exactly the move that silences a guard. The control that settles it: introduce a tracked file that SHOULD offend and confirm the guard still fails, then remove it and confirm green. Both directions, or the additions are unproven.
+- 🔴 **`| head -N` DESTROYS A RUNNER'S VERDICT AND HANDS YOU `head`'s EXIT CODE.** A backgrounded `scoped-tests.sh` run was piped through `grep | head -25`; the `RESULT:` line fell outside the first 25 matches, and the reported `exit 0` was `head`'s. The run proved nothing. Documented trap, reproduced anyway, in the command whose verdict mattered.
+- 🔴 **`pgrep -f <pattern>` MATCHES THE SHELL RUNNING IT.** Checking whether a background job was alive with `pgrep -f "scoped-tests.sh"` returned "still running" because the pattern appears in the checking command's own argv. It answers about the instrument, not the job.
+- 🔴 **THE BASH-GUARD PARSES HEREDOC LINES AS COMMANDS, SO QUOTING A BANNED COMMAND IN A PR BODY IS BLOCKED.** Writing a PR description that quoted a wide tmux kill via `gh pr create --body-file <(cat <<'EOF' …)` was refused by the hook. The remedy is the one the hook prints and the RULES already prefer: write the text with the Write tool and pass `--body-file <path>`.
+- ⚠ **A MUTATION STOPPED APPLYING BECAUSE THE FIX'S OWN COMMENT QUOTED THE LITERAL.** `MIN_TESTS=15` became non-unique once the explanatory comment cited it, and the mutator reported `MUTATION DID NOT APPLY (count=2)`. The `1 passed` printed alongside was **meaningless, not a survivor** — re-run against a unique anchor it came back red. An inline mutator without that assert manufactures false greens.
+- ⚠ **THE RANKED LIST WAS RENUMBERED TWICE MORE DURING THIS SESSION**, by other sessions. Items this session was handed as "rank 14" and "rank 16" no longer exist under those numbers; the work was found only via the investigation blocks. **Identify an item by its SUBJECT, never by its rank** — and the current list's items 1–5 were carried forward verbatim here rather than re-ranked, because re-ranking silently re-points every live `claim-work` claim.
+
 ## How to verify
-
 ```bash
-# round 0 is live on both hosts (not merely merged)
-readlink -f ~/.claude/skills/audit-pr/SKILL.md                                   # a /nix/store path
-grep -c "ROUND 0 — QUESTION THE REQUIREMENT" ~/.claude/skills/audit-pr/SKILL.md  # 1
-ssh zach@10.42.0.100 'grep -c "is it RUNNING" ~/.claude/skills/audit-pr/SKILL.md'  # 1
+# 1. main is no longer red (the reason #1543 exists)
+git -C ~/workspace/devrc worktree add /tmp/mainctl --detach origin/main
+cd /tmp/mainctl && nix develop ~/workspace/devrc -c python3 -m pytest \
+  scripts/claude-hooks/tests/test_guard_core.py -q     # expect: 1536 passed
 
-# round 0 emits its section INSTEAD of the nine axes, and cannot move the ladder
-nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/audit-dispatch.py <pr> --round 0 | grep -c "Audit for:"   # 0
-nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/audit-dispatch.py <pr> --round 0 --emit-claims --audited <sha>; echo $?   # 4
+# 2. #1532 — behavioural, not a green suite
+cd <a worktree with #1532>
+printf '\n# probe\n' >> scripts/testlib/mockbin.py
+bash scripts/scoped-tests.sh --dry-run; echo "exit=$?"   # expect 4 + "SHARED SURFACE"
+git checkout -- scripts/testlib/mockbin.py
+printf '\n# probe\n' >> scripts/dl-router/server.py
+bash scripts/scoped-tests.sh --dry-run                   # expect a normal selection, NO refusal
+git checkout -- scripts/dl-router/server.py
 
-# the #1495 guard, against whatever main is now (it pins digests of CLAUDE.md, which moves)
-nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests/test_retracted_contention_figure.py -q
+# 3. #1533 — the control #1431's closing condition names, watched RED
+#    add `if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi` under MIN_TESTS=15, then:
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  'scripts/tests/test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_this_modules_size' -q
+#    expect: 1 failed.  Restore the battery from a `cp -a` copy, never `git checkout --`.
+
+# 4. after ship.sh, confirm the hosts agree AND read every per-host line
+bash ~/workspace/devrc/scripts/ship.sh
 ```
 ## Open investigations — live diagnosis state
 
@@ -1425,3 +1454,12 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 - **Ruled out:** *"the count ledger was the remedy"* — measured, M3 survived it. This was recorded as the lesson in the `devrc/tests` cairn entry and stood FALSE until a post-merge sweep; corrected at revision `64a2bba6`. `via: measurement`
 - **Ruled out:** *"the sandbox tier is fine because a no-`.git` replica passes"* — the replica is a proxy; the authoritative answer came from `tekton/devrc-pytests` at `760c8769`. `via: measurement`
 - **Stop grounds (two, independent):** round 3 clean, AND the attribution gate fired — `d6a5aa42..2d89291a` and `2d89291a..1c3b59b2` both touched the test file only, leaving `scripts/scoped-tests.sh` untouched, i.e. two consecutive zero-payload rounds.
+
+### `main` is RED on two guard_core tests — fix open as `#1543`, unmerged
+- **Symptom + exact repro:** `nix develop ~/workspace/devrc -c python3 -m pytest scripts/claude-hooks/tests/test_guard_core.py -q` in a **clean detached worktree of `origin/main`** → `2 failed, 1534 passed`. Not a PR-branch artefact.
+- **Observed (with values):** `AssertionError: the set of files mentioning a wide tmux kill has changed. Classify the new one(s) in _KILL_MENTION_LEDGER` with `added: ['claudedocs/handoff-mention-system-repos.md', 'claudedocs/handoff-tmux-webapp.md']`. Both mentions are prose: `handoff-tmux-webapp.md:1991` quotes a wide kill-window *read from a log* and `:3409` records a session-kill that a guard BLOCKED; `handoff-mention-system-repos.md:46` only quotes that the other doc "landed carrying" such text.
+- **Ruled out:** *`#1533` caused it* — that PR's diff is a handoff doc plus two audit-ladder files and cannot reach `scripts/claude-hooks/`; the same two tests fail on a clean `origin/main` worktree. via: measurement
+- **Ruled out:** *one ledger entry is enough* — fixing `_KILL_MENTION_LEDGER` alone left the module red on the second test, which has its OWN separate allowlist (`quoting_is_the_point`). via: command
+- **Ruled out:** *the allowlist additions defang the guard* — positive control: a tracked file carrying a real wide-kill command and named in neither list makes BOTH tests fail; removing it returns both to green. via: measurement
+- **Leading hypothesis:** none needed — cause identified and fixed in `#1543` (`1536 passed`). ⚠ `handoff-tmux-webapp.md:2043` already *names* `_KILL_MENTION_LEDGER`, so a prior session met this guard and did not complete the entry.
+- **Next probe:** `gh pr checks 1543`, merge it FIRST, then re-run CI on `#1532`/`#1533` from the fixed base.
