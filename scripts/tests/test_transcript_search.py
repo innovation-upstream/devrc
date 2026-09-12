@@ -803,6 +803,11 @@ JSONL_GLOB_SITES = {
             "purpose"),
     ("scripts/collector/claude/tests/test_session_tailer.py", "ENUMERATING"):
         (1, "test: globs its own tmp fixture tree, not the corpus"),
+    ("scripts/audit-rule-firing-sweep.py", "ENUMERATING"):
+        (1, "per-rule firing sweep: needs BOTH tiers and says so in iter_corpus — the "
+            "shared walk EXCLUDES subagents/ because a subagent is not a resumable "
+            "session, which is right for /find-session and wrong here, since an AUDITOR "
+            "IS a subagent and its own transcript is where a rule gets applied"),
     ("scripts/session-analysis/extract_genesis.py", "ENUMERATING"):
         (1, "session-analysis one-shot: wants EVERY jsonl including subagents"),
     ("scripts/session-analysis/extract_user_msgs.py", "ENUMERATING"):
