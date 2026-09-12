@@ -2523,8 +2523,6 @@ def test_tmux_kill_prefix_matches_both_wide_kills_and_neither_narrow_one():
 # Two-way: a new file, or a removed one, fails this test and forces a human to
 # classify it. Paths only — line numbers are what rotted last time.
 _KILL_MENTION_LEDGER = {
-    "claudedocs/handoff-tmux-restore-chain.md": "prose: the incident write-up",
-    "claudedocs/handoff-tmux-scratchpad-bar-statusline.md": "prose: a gotcha warning AGAINST it — \"Never `kill-server`; that destroys every session\"",
     "scripts/claude-hooks/bash-guard.py": "prose: the guard's own ban list",
     "scripts/claude-hooks/guard_core.py": "prose: this check, its docstring and its message",
     "scripts/claude-hooks/tests/test_guard_core.py": "prose: these tests' fixtures + this ledger",
@@ -2590,6 +2588,34 @@ def _tracked_files():
     return [str(p.relative_to(_REPO)) for p in _public_ip_scan.repo_files(_REPO)]
 
 
+# 🔴 THE LEDGER IS SCOPED TO EXECUTABLE TEXT, AND PROSE IS NOT LEFT UNGUARDED.
+#
+# The mention half used to scan EVERY tracked file, so any doc that merely says
+# the words "kill-server" red-lined `main` until a human classified it. Measured
+# 2026-09-11: it fired THREE times in one day, all three from handoff docs, and
+# one of them was a doc whose only content was DOCUMENTING THIS GUARD — writing
+# about it tripped it. That is the permanently-red-gate shape: every PR in the
+# repo blocked on an unrelated doc, which trains people to click through.
+#
+# Composition at that point: 11 of 13 entries were real `scripts/` call sites;
+# all three failures came from the 2-entry `claudedocs/` half.
+#
+# What still guards prose, and why it is BETTER at it:
+# `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` scans every
+# tracked file INCLUDING claudedocs, matches only text in real shell-command
+# shape, and runs each hit through `check_tmux_kill_shared_server` itself. So a
+# doc that actually spells a dangerous command is still caught — by the check
+# built for that — while a doc that merely discusses one is not. It already
+# allowlists `claudedocs/handoff-tmux-restore-chain.md` and carries its own
+# positive control.
+_LEDGER_SCOPE_EXCLUDES = ("claudedocs/",)
+
+
+def _in_ledger_scope(rel):
+    """Is `rel` executable text the ledger is meant to classify?"""
+    return not rel.startswith(_LEDGER_SCOPE_EXCLUDES)
+
+
 def _scan_kill_sites():
     mentions, argvs = {}, {}
     for rel in _tracked_files():
@@ -2597,7 +2623,7 @@ def _scan_kill_sites():
             body = (_REPO / rel).read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        if _MENTION_RE.search(body):
+        if _in_ledger_scope(rel) and _MENTION_RE.search(body):
             mentions[rel] = body
         for m in _TMUX_ARGV_RE.finditer(body):
             argvs.setdefault(rel, []).append(" ".join(m.group(0).split()))
@@ -2680,6 +2706,11 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
     shell_text = re.compile(r"tmux(?:\s+-{1,2}[^\s'\"]+)*\s+kill-s[a-z-]*")
     quoting_is_the_point = {
         "claudedocs/handoff-tmux-restore-chain.md",
+        # Quotes the command while WRITING UP the incident where a handoff doc
+        # tripped this very guard. Caught here after the ledger was scoped to
+        # executable paths — which is the coverage argument working: prose that
+        # SPELLS a dangerous command is still caught, by the check built for it.
+        "claudedocs/handoff-mention-system-repos.md",
         "scripts/claude-hooks/bash-guard.py",
         "scripts/claude-hooks/guard_core.py",
         "scripts/claude-hooks/tests/test_guard_core.py",
