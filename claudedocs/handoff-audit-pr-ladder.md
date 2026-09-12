@@ -101,7 +101,7 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 ## Next steps (ranked)
 
 1. **Round 0 trials 3-5, on ordinary PRs, dispatched BEFORE merge-readiness.** Ledger so far: `ran: 2 · changed the outcome: 2`. Both yielded, but trial 2's report landed *after* its PR merged, so the live question is whether round 0 is fast enough to matter, not whether it finds things. Delete the section if it ran and changed nothing. forcing: none
-2. **Decide the `scoped-tests.sh` trigger list with `#1445`'s author** — implement `gate-inventory-2026-09-08.md` §10 or decline it in the header. Measured first-hand, see the open investigation below. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
+2. ✅ **DECIDED 2026-09-11 by the operator: IMPLEMENT §10. Shipped as `#1532`** (open, unmerged). A shared-surface diff now REFUSES to produce a scoped verdict (exit 4, naming the path and pointing at `scripts/gate.sh --tier both`) rather than under-running silently. Re-measured first-hand at `018e483b` — and **the doc's own headline figure was stale**: it said *"a `testlib` change runs 1 of 331 test files"*; the real range across all 24 `scripts/testlib/` modules is **0–10, median 1**. The substance was right and understated: `mockbin.py` selected **10** while **69** files across **7** targets reference it, and `gitenv.py` selected **2** while spanning **8**. 🔴 **The zero-select cases were already SAFE** (exit 4, verified) — the dangerous ones are the middle, because a run that executes *something* prints `RESULT: PASS`. ⚠ Deliberately NOT covered, flagged on the PR rather than silently added because it is outside the approved list: `scripts/scoped-tests.sh` itself is not a trigger, so a change to the mapper is still validated by the mapper. *Closes when* `#1532` merges. **Original item, for the record:** implement `gate-inventory-2026-09-08.md` §10 or decline it in the header. forcing: regression — a `testlib` change runs 1 of 331 test files while CLAUDE.md names this the iteration loop
 3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** forcing: none
 4. **Track two — run the algorithm on `audit-pr/SKILL.md` itself** (~27 KB, almost entirely accreted from prior rounds' findings, i.e. the highest-scrutiny "requirements from smart people" class). Deferred by operator sequencing until the trial count resolves. forcing: none
 5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm` (a branch named after this arc's feature). Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
@@ -1384,6 +1384,30 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
   `if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi` — **1 passed** while the shell applies **3**.
   🔴 **The positive control is the load-bearing half:** without it, the green on the third row is
   indistinguishable from a guard that never ran.
+- ✅ **THE DEFECT IS NOW FIXED — `#1533`** (open, unmerged). The battery gained
+  `--print-min-tests`, emitted after every assignment and immediately before the run, and the
+  guard EXECUTES it instead of regexing the source. `#1431`'s stated closing condition is MET:
+  with the `QUICK` override present, `test_the_batterys_floor_is_re_derived_from_this_modules_size`
+  **was watched RED**. Control matrix, each mutant isolated, battery restored byte-identical:
+  baseline **1 passed**; `QUICK` conditional override **1 failed**; `MIN_TESTS=$LOW` **1 failed**;
+  floor drift `15`→`9` **1 failed**.
+- 🔴 **AND THE ISSUE'S OWN PRESCRIBED REMEDY WAS NOT SUFFICIENT — found only by RUNNING the
+  control it demanded, instead of assuming the fix satisfied it.** `#1431` proposed *"have the
+  battery print its effective `MIN_TESTS` and assert on that"* as the whole fix. Implemented
+  exactly as written, it closes `MIN_TESTS=$LOW` (the battery reports 4, the guard reddens) and
+  **leaves the `QUICK` case GREEN** — because `--print-min-tests` runs with `QUICK` unset, so the
+  effective floor honestly IS 15 for that invocation, while a `QUICK=1` run floors at 3.
+  **"Effective" is environment-dependent, and no probe can enumerate the environments.** The
+  closing half is therefore STRUCTURAL: exactly one `MIN_TESTS=` assignment anywhere in the file,
+  matched with `^\s*` rather than `^`. 🔴 **The old guard's column-0 anchor is the whole story of
+  why this slipped** — the issue itself recorded that a second numeric assignment "fires the
+  `len(literals) == 1` check", and it does, but only UNINDENTED; the override that beat it was
+  indented inside an `if`. **A remediation written into an issue is a HYPOTHESIS, not a spec.**
+- ⚠ **A mutation in this same run reported `MUTATION DID NOT APPLY (count=2)`** — the literal
+  `MIN_TESTS=15` had become non-unique because the COMMENT explaining the fix quotes it. The
+  `1 passed` printed alongside was meaningless, not a survivor. Re-run against a unique anchor it
+  came back **1 failed**. The battery's own `apply` refuses the same way; an inline mutator needs
+  the same assert or it manufactures false greens.
 
 ### The scoped mapper has no trigger list — a `testlib` change runs 1 test file of 331
 
