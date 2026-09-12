@@ -230,6 +230,8 @@ class CodeFacts:
     not_found_wire_token: str
     allowlist_gates_the_404: bool
     creates_the_parent_directory: bool
+    # `X-Store-Status` token -> every HTTP code `server.py` pairs it with.
+    token_codes: dict[str, frozenset[int]]
     classify: Callable[[int, str, str], object]
 
 
@@ -261,8 +263,30 @@ def read_code_facts() -> CodeFacts:
         not_found_wire_token=wire,
         allowlist_gates_the_404=_allowlist_gates_the_404(handler),
         creates_the_parent_directory=_makes_the_parent_directory(create_fn),
+        token_codes=_token_codes(tree),
         classify=_load_cairn_cli()._classify,
     )
+
+
+def _token_codes(tree: ast.Module) -> dict[str, frozenset[int]]:
+    """Every `X-Store-Status` token `server.py` sends, and with which codes.
+
+    🔴 THIS IS WHAT KEEPS THE GUARD FROM BECOMING A PERMANENTLY-RED GATE, which
+    `claude/RULES.md` calls worse than no gate. The first cut classified every
+    refusal row the doc quotes as if it were the create path's 404 — so adding a
+    perfectly correct third row (`rc 9 [already-exists]`, which the create path
+    really does answer, at 412) would have gone red against a doc that had just
+    got BETTER. The token is now looked up in the server's own emissions, so each
+    row is checked against the code that row's token actually rides on.
+    """
+    out: dict[str, set[int]] = {}
+    for call in _calls(tree, "_respond"):
+        code = _const_int(call)
+        token = _header_literal(call, "X-Store-Status")
+        if code is None or not token:
+            continue
+        out.setdefault(token, set()).add(code)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def _const_int(call: ast.Call) -> int | None:
@@ -370,14 +394,23 @@ def disagreements(doc_text: str, facts: CodeFacts) -> list[str]:
             )
 
     for rc, token in table.refusals:
-        refused = facts.classify(404, facts.not_found_wire_token, "")
-        actual = (refused.exit_code, refused.status)
-        if (rc, token) != actual:
+        codes = facts.token_codes.get(token)
+        if not codes:
             out.append(
-                f"the doc quotes `rc {rc} [{token}]` for the create path's 404, "
-                f"but `scripts/cairn` produces rc {actual[0]} [{actual[1]}] from "
-                f"the token `server.py::{NOT_FOUND_HANDLER}` actually puts on the "
-                f"wire ({facts.not_found_wire_token!r})"
+                f"the doc tells the operator to expect `[{token}]`, but "
+                f"`server.py` never sends that `X-Store-Status` token — it sends "
+                f"{sorted(facts.token_codes)}"
+            )
+            continue
+        produced = {
+            (r.exit_code, r.status)
+            for r in (facts.classify(code, token, "") for code in sorted(codes))
+        }
+        if produced != {(rc, token)}:
+            out.append(
+                f"the doc quotes `rc {rc} [{token}]`, but `scripts/cairn` "
+                f"produces {sorted(produced)} for that token on the HTTP "
+                f"code(s) `server.py` pairs it with ({sorted(codes)})"
             )
 
     if not facts.creates_the_parent_directory:
@@ -455,6 +488,10 @@ def test_the_code_facts_were_actually_read(facts: CodeFacts) -> None:
     assert facts.create_not_found_audit_tokens, (
         f"`{CREATE_HANDLER}` appears to reach `{NOT_FOUND_HANDLER}` from no arm "
         f"at all — suspect the AST read, not the server"
+    )
+    assert facts.not_found_wire_token in facts.token_codes, (
+        f"the token map does not even contain "
+        f"{facts.not_found_wire_token!r} — suspect `_token_codes`, not the server"
     )
     assert callable(facts.classify), "`scripts/cairn::_classify` did not load"
 
@@ -604,6 +641,16 @@ CODE_DRIFTS: tuple[tuple[str, dict, str], ...] = (
         {"create_not_found_audit_tokens": ("scope-unknown", "ref-unknown")},
         "exactly one",
     ),
+    (
+        "the server renames the wire token",
+        {"token_codes": {"gone": frozenset({404})}},
+        "never sends that",
+    ),
+    (
+        "the token starts riding on a second code the client maps differently",
+        {"token_codes": {"not-found": frozenset({404, 429})}},
+        "[404, 429]",
+    ),
 )
 
 
@@ -626,6 +673,35 @@ def test_each_code_drift_is_reported(
     assert any(needle in f for f in found), (
         f"the drift died for the WRONG REASON ({label}): nothing in {found} "
         f"names {needle!r}"
+    )
+
+
+def test_a_CORRECT_extra_refusal_row_does_not_go_red(
+    doc_text: str, facts: CodeFacts
+) -> None:
+    """The false-red control, and it is the reason `_token_codes` exists.
+
+    🔴 `claude/RULES.md`: *a permanently-red gate is worse than no gate*. The
+    first cut of this file classified EVERY refusal row as if it were the create
+    path's 404, so a correct third row — `rc 9 [already-exists]`, which
+    `_entry_exists` really does answer at 412 — would have failed the guard
+    against a doc that had just got BETTER. This pins that it does not.
+    """
+    anchor = "| **rc 6 `[not-found]`**"
+    assert anchor in doc_text, "control anchor missing — the control is broken"
+    widened = doc_text.replace(
+        anchor,
+        "| **rc 9 `[already-exists]`** | the ref is taken | `cairn append` |\n"
+        + anchor,
+        1,
+    )
+    table = parse_probe_table(widened)
+    assert table is not None and len(table.refusals) == 2, (
+        f"the control did not actually widen the table: {table}"
+    )
+    assert disagreements(widened, facts) == [], (
+        "a correct second refusal row is reported as a disagreement — this guard "
+        "would go red against a doc improvement"
     )
 
 
