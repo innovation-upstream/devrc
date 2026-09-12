@@ -8699,7 +8699,7 @@ class TestValidateCli:
 
 
 def _recovery_commands(message: str) -> list[list[str]]:
-    """Every `python3 <self> …` line in a refusal, as argv.
+    """Every `cairn-validate …` line in a refusal, as argv.
 
     Parsed with `shlex`, not sliced with string ops, so a command that is not
     actually well-formed shell fails HERE rather than being asserted about.
@@ -8707,9 +8707,35 @@ def _recovery_commands(message: str) -> list[list[str]]:
     out = []
     for line in message.splitlines():
         line = line.strip()
-        if line.startswith("python3 "):
+        if line.startswith("cairn-validate "):
             out.append(shlex.split(line))
     return out
+
+
+# 🔴 THE LAUNCHER'S PREPEND, MODELLED IN EXACTLY ONE PLACE. `scripts/cairn-validate`
+# hands `--store <the synced cache> --validate` + the caller's own argv to
+# `subsystem_touch.main()` unread. The tests below run `main()` IN-PROCESS, so
+# they must apply the same prepend or they would be executing something no
+# operator ever runs.
+#
+# 🔴 MODELLED RATHER THAN EXEC'd, DELIBERATELY. Running the real launcher as a
+# subprocess would resolve the PINNED cairn lib and the synced cache — neither of
+# which the `nix build` tier's `$HOME` has — so that guard would be structurally
+# incapable of passing in one of the two tiers while staying green on a dev host.
+# This repo has already shipped exactly that defect once. The seam is pinned
+# instead by `test_the_LAUNCHER_still_prepends_what_this_command_omits`, which
+# reds if the launcher stops prepending either flag or stops appending argv.
+#
+# The store here is a SENTINEL the caller's own `--store` must override. Using
+# the test's real store would make a DROPPED `--store` invisible — measured: that
+# mutant survived a fully green assertion until this value was made distinct.
+_LAUNCHER_DEFAULT_STORE = "/nonexistent/LAUNCHER-DEFAULT-STORE"
+
+
+def _writer_argv(argv: list[str]) -> list[str]:
+    """argv as `subsystem_touch.main` receives it when `cairn-validate` runs `argv`."""
+    assert argv[0] == "cairn-validate", f"not a launcher invocation: {argv[0]!r}"
+    return ["--store", _LAUNCHER_DEFAULT_STORE, "--validate"] + argv[1:]
 
 
 class TestMalformedRefusalNamesTheRecovery:
@@ -8772,14 +8798,17 @@ class TestMalformedRefusalNamesTheRecovery:
         assert len(cmds) == 1
 
         argv = cmds[0]
-        # The path component is real — a command naming a file that does not
-        # exist is not actionable however well it parses.
-        assert Path(argv[1]).is_file(), f"the recovery command names a missing script: {argv[1]}"
-        assert argv[1].endswith("subsystem_touch.py")
-        assert "--validate" in argv
+        # The launcher it names is real — a command naming a file that does not
+        # exist is not actionable however well it parses. It is checked in the
+        # CHECKOUT rather than on PATH: `~/.local/bin/cairn-validate` is a
+        # home-manager symlink that the `nix build` tier has no reason to carry,
+        # and asserting on PATH here would make this guard unable to pass there.
+        launcher = ROOT / "scripts" / argv[0]
+        assert launcher.is_file(), f"the recovery command names a missing launcher: {launcher}"
+        assert "--validate" in _writer_argv(argv)
 
         capsys.readouterr()
-        code = st.main(argv[2:])          # everything after `python3 <script>`
+        code = st.main(_writer_argv(argv))   # as `cairn-validate` would run it
         out = capsys.readouterr().out
         assert code == 3, "the recovery command did not reproduce the failure"
         assert bad.name in out, "the recovery command ran but named a different file"
@@ -8827,7 +8856,7 @@ class TestMalformedRefusalNamesTheRecovery:
         assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
         # …while the emitted one reproduces the failure.
         capsys.readouterr()
-        assert st.main(cmds[0][2:]) == 3
+        assert st.main(_writer_argv(cmds[0])) == 3
 
     def test_rejects_in_BOTH_gives_a_command_per_scope_this_repo_FIRST(
         self, store: Path
@@ -8852,7 +8881,7 @@ class TestMalformedRefusalNamesTheRecovery:
         assert len(cmds) == 2
         for argv in cmds:
             capsys.readouterr()
-            assert st.main(argv[2:]) == 3
+            assert st.main(_writer_argv(argv)) == 3
             assert "widget-index.md" in capsys.readouterr().out
 
     def test_the_enumeration_NEVER_masks_the_original_diagnosis(
@@ -8906,8 +8935,70 @@ class TestMalformedRefusalNamesTheRecovery:
             "malformed_refusal spells the flag itself instead of building the command"
         )
         # …and what it builds is parseable by THIS parser, derived not asserted.
+        # 🔴 THE LAUNCHER'S OWN PREPEND IS PART OF THE PARSE, so model it rather
+        # than slicing a fixed number of leading tokens off: `cairn-validate`
+        # hands `--store <synced cache> --validate` + the caller's argv to
+        # `main()` unread. Slicing was what coupled this assertion to the old
+        # `python3 <path>` spelling being exactly two tokens long.
         argv = shlex.split(st.validate_command(store, SCOPE))
-        st._build_parser().parse_args(argv[2:])  # must not SystemExit
+        assert argv[0] == "cairn-validate", (
+            f"the emitted command leads with {argv[0]!r}. It must be the bare "
+            f"PATH-resolved launcher: an absolute checkout path is true only on "
+            f"the machine that printed it (rank 23(b))"
+        )
+        # 🔴 THE LAUNCHER'S DEFAULT IS A DISTINCT SENTINEL, NOT `store`. Modelling
+        # it with the same value the command emits makes a DROPPED `--store`
+        # invisible: the parse yields the right root either way, so the mutant
+        # survives a fully green assertion. Measured — it did, until this value
+        # was made one `store` can never equal.
+        launcher_default = "/nonexistent/LAUNCHER-DEFAULT-STORE"
+        assert str(store) != launcher_default
+        args = st._build_parser().parse_args(
+            ["--store", launcher_default, "--validate"] + argv[1:]
+        )  # must not SystemExit
+        assert args.validate is not None, "the parse is not a validate run at all"
+        assert args.store == str(store), (
+            "the caller's --store did not win — the command would check a "
+            "DIFFERENT store than the refusal came from, and report it clean"
+        )
+        assert args.scope == SCOPE
+
+    def test_the_command_names_NO_absolute_checkout_path(self, store: Path) -> None:
+        """🔴 RANK 23(b). The old spelling was `python3 <abs path to this file>`,
+        which is true for the machine that PRINTED it and false for anyone who
+        pastes it elsewhere — and a reader cannot tell those apart. Pin the
+        RELATIONSHIP (no interpreter, no path into the checkout), not one string
+        another spelling could walk around."""
+        cmd = st.validate_command(store, SCOPE)
+        assert "python3" not in cmd, "an interpreter invocation is back"
+        assert str(MODULE_PATH) not in cmd and "subsystem_touch.py" not in cmd, (
+            "the command names this module's own path again — that is exactly the "
+            "exit-127-elsewhere spelling rank 23 retired"
+        )
+        assert str(ROOT) not in cmd, (
+            f"the command embeds the checkout root {ROOT} — it must resolve off "
+            f"home.sessionPath instead"
+        )
+
+    def test_the_LAUNCHER_still_prepends_what_this_command_omits(self) -> None:
+        """🔴 SEAM LEDGER, not a component test. `validate_command` deliberately
+        does NOT spell `--validate`, because `scripts/cairn-validate` prepends it.
+        That is a relationship between two files, and nothing else asserts it: a
+        launcher that stopped prepending would make every emitted RECOVER command
+        parse fine and check NOTHING, which is a silent green."""
+        launcher = (ROOT / "scripts" / "cairn-validate").read_text(encoding="utf-8")
+        assert '"--validate"' in launcher, (
+            "scripts/cairn-validate no longer prepends --validate, so the command "
+            "validate_command() emits is no longer a validate run"
+        )
+        assert '"--store"' in launcher, (
+            "scripts/cairn-validate no longer prepends --store, so its default is "
+            "the writer's FROZEN mirror rather than the synced cache"
+        )
+        assert "sys.argv[1:]" in launcher, (
+            "the launcher no longer APPENDS the caller's argv after its own "
+            "defaults — last-occurrence-wins is what lets --store be overridden"
+        )
 
 
 class TestValidatorReusesTheReadersParser:

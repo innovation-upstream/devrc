@@ -5964,19 +5964,35 @@ def _carries_marker(line: str) -> bool:
 
 
 def validate_command(store_root: str | Path, scope: str) -> str:
-    """The literal, runnable `--validate` invocation for one scope. ONE spelling.
+    """The literal, runnable write-protocol check for one scope. ONE spelling.
 
     🔴 IT IS BUILT, NEVER TYPED INTO PROSE. Every place that tells a caller how to
     recover emits this, so a flag rename cannot leave a skill or an error message
     quoting a command that no longer parses — the exact failure a "just run
-    --validate" sentence has no defence against. `Path(__file__)` rather than a
-    hardcoded path so a copy of this module names ITSELF and the command stays
-    true wherever it is running from.
+    --validate" sentence has no defence against.
+
+    🔴 IT NAMES `cairn-validate`, NOT `python3 <this file>`. The absolute checkout
+    path this used to emit was baked into a protocol whose whole point is that
+    agents work in OTHER repos: `Path(__file__)` makes the command true for the
+    machine that PRINTED it and false for anyone who pastes it anywhere else, and
+    a reader has no way to tell those apart. `cairn-validate` is a bare command on
+    `home.sessionPath`, so it resolves from any cwd in either runtime, and it is
+    the spelling the launcher's own docstring declares as its interface. This is
+    rank 23(b) of `claudedocs/handoff-cairn-oss-multi-instance.md`.
+
+    🔴 `--store` IS EMITTED EXPLICITLY, AND THAT IS NOT REDUNDANT. The launcher
+    prepends the SYNCED CACHE as its default store; this function's contract is to
+    check the store the caller actually read, which is the one the refusal came
+    from. Passing it means argparse's last-occurrence-wins gives this value, so
+    the command cannot silently report a DIFFERENT store clean — the exact
+    failure mode `malformed_refusal` exists to prevent. Measured: with an explicit
+    `--store`, the run's own `store:` line names it, not the launcher's default.
+
+    `--validate` is NOT spelled here: the launcher prepends it with no value, which
+    is the check-every-entry form. `test_the_command_is_BUILT_not_typed` pins that
+    seam so a launcher that stopped prepending it cannot go unnoticed.
     """
-    return (
-        f"python3 {Path(__file__).resolve()} --store {store_root} "
-        f"--scope {normalize_ref(scope)} --validate"
-    )
+    return f"cairn-validate --store {store_root} --scope {normalize_ref(scope)}"
 
 
 def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryError) -> str:
