@@ -1157,11 +1157,24 @@ def test_the_guard_evaluator_and_the_parsers_are_not_wired_to_nothing():
     # and not the only value this parser is able to produce…
     guards = {v["guard"] for v in files.values()}
     assert "" in guards and any("isLaptop" in g for g in guards), guards
-    # …specifically: disk-explore is ungated, while bar_freshness.py — the
-    # sibling-module idiom this one is modelled on — is (!isLaptop).
+    # …specifically: disk-explore is ungated, while i3status-fans is (!isLaptop).
+    #
+    # ⚠ THE GATED EXAMPLE USED TO BE `bar_freshness.py`, AND IT MOVED. That
+    # entry was widened to both hosts when a LAPTOP-only block started loading
+    # the sibling, so its guard became "" and this control went red — correctly:
+    # its named example had stopped being an example. Caught by CI, in a file
+    # the change never touched, which is the whole point of a control.
+    #
+    # `i3status-fans` is chosen as the replacement because its gate is anchored
+    # to HARDWARE, not to policy: the NCT6687D is the workbench board's Super
+    # I/O and the laptop has no such chip, so nothing short of new hardware can
+    # ungate it. A pair of NAMED entries is kept rather than derived, because
+    # the generic assertion above ("both shapes occur somewhere") does not prove
+    # the parser maps the right guard to the right KEY — which is the thing
+    # being controlled for.
     assert files[".config/i3status-rust/scripts/disk-explore"]["guard"] == ""
     assert "isLaptop" in files[
-        ".config/i3status-rust/scripts/bar_freshness.py"]["guard"]
+        ".config/i3status-rust/scripts/i3status-fans"]["guard"]
     # sources are read per entry, not one value echoed back
     assert len({v["source"] for v in files.values() if v["source"]}) > 5
 
