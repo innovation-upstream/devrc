@@ -225,6 +225,42 @@ def test_interior_and_tail_gaps_are_reported_as_SEPARATE_totals(lrc, ad,
     assert "TAIL      4 line(s)" in rendered
 
 
+def test_the_zero_line_gap_caveat_is_DERIVED_from_this_run(lrc, ad, base_repo):
+    """🔴 Regression. That caveat shipped as the literal "Three of the 20 ladders
+    look like that" — the figure from the devrc run it was written during — and
+    then printed verbatim under a 5-ladder run of a different repo. A count in
+    prose beside a measurement it is not computed from is the defect class this
+    whole report exists to find.
+
+    The fixture makes a gap of real COMMITS with ZERO churn, which is what an
+    upstream bring-in looks like: commits that `--not <base>` excludes entirely.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    # Commits already in `main`, so `--not main` excludes every line of them:
+    # reachable from the branch, contributing no churn.
+    _git(repo, "checkout", "--quiet", "main")
+    upstream = _commit(repo, "upstream.py", 12, "an upstream commit")
+    _git(repo, "checkout", "--quiet", "feat")
+    _git(repo, "merge", "--quiet", "--no-edit", "main")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 10, head, "main",
+                           [_block(1, base, r1_to)])
+
+    tail = L.adjacencies[-1]
+    assert tail.label == lrc.GAP, (tail.label, tail.reason)
+    assert tail.commits and tail.commits > 0, "the gap has real commits"
+    assert (tail.added, tail.deleted) == (0, 0), \
+        "`--not main` must exclude the bring-in's lines"
+
+    rendered = lrc.render([L], [])
+    assert "1 gap(s) in THIS run look like that" in rendered
+    assert "the 20 ladders" not in rendered, \
+        "a hardcoded corpus figure is being printed for an unrelated run"
+    assert upstream
+
+
 def test_an_overlap_is_labelled_OVERLAP_and_given_no_size(lrc, ad, base_repo):
     """Two ranges covering the same commits double-count, which is the OPPOSITE
     error from a gap. Reporting it as a 0-line gap would hide it."""
@@ -392,6 +428,58 @@ def test_a_ledger_starting_at_round_2_says_round_1_is_out_of_window(lrc, ad,
 # --------------------------------------------------------------------------- #
 # The shared core — the extraction must not have changed `measure_ledger`
 # --------------------------------------------------------------------------- #
+
+def test_the_commit_count_beside_the_lines_is_the_CHURN_population(lrc, ad,
+                                                                   base_repo):
+    """🔴 Regression, and the wrong number was the FLATTERING one.
+
+    MEASURED on devrc #1046's tail: this report printed `55 commit(s), 1105
+    line(s)` when the churn population was TWO commits — a 66-line fix and a
+    1,039-line semantic-conflict resolution. The other 53 were an upstream
+    bring-in that `--not <base>` excludes from the churn and that the raw
+    `rev-list --count` included. Pairing them makes a real finding ("two commits
+    nobody audited, one of them a conflict resolution") read as routine drift
+    across 55 commits.
+
+    The fixture reproduces that shape: a gap whose commits are MOSTLY already in
+    the base. **FOUR** upstream commits, not one, so the two counts differ by a
+    margin no off-by-one can explain — 6 in the range, 2 contributing churn.
+
+    ⚠ The churn population is 2, not 1, and that is CORRECT: the merge commit is
+    not reachable from `main` either, so it belongs to the population while
+    contributing zero lines. My first version of this test asserted 1 and the
+    code was right — the same shape as #1046, where that merge contributed 1,039
+    lines of conflict resolution rather than none.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    # Four commits that land on `main` — excluded from churn by `--not main`.
+    _git(repo, "checkout", "--quiet", "main")
+    for i in range(4):
+        _commit(repo, f"up{i}.py", 8, f"upstream {i}")
+    _git(repo, "checkout", "--quiet", "feat")
+    _git(repo, "merge", "--quiet", "--no-edit", "main")
+    # …and ONE that does not.
+    head = _commit(repo, "mine.py", 5, "the only churn-contributing commit")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 11, head, "main",
+                           [_block(1, base, r1_to)])
+
+    tail = L.adjacencies[-1]
+    assert tail.label == lrc.GAP
+    assert (tail.added, tail.deleted) == (5, 0), "only `mine.py` is churn"
+    assert tail.commits == 2, (
+        f"the reported count is {tail.commits}; it must be the churn population "
+        "(2 — the merge plus `mine.py`), not the raw range"
+    )
+
+    raw = ad.measure_range_churn(ad.real_runner, str(repo), r1_to, head, "main")
+    assert raw.commits == 6 and raw.churn_commits == 2, (
+        "the fixture must make the two populations differ by more than one, or "
+        f"this guard cannot see the bug (commits={raw.commits}, "
+        f"churn_commits={raw.churn_commits})"
+    )
+
 
 def test_measure_range_churn_does_NOT_refuse_an_empty_range(ad, base_repo):
     """The inverted read rule, asserted directly.

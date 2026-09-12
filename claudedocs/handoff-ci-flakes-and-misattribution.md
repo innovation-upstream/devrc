@@ -299,6 +299,8 @@ read the root cause first; the design is what failed, not the code.
    count a run as KILLED if ANY step's `terminated.exitCode` is `255` or `137`, GENUINE if
    `verdict` exits non-zero without one. **Reproduce `30/121` on the pre-`06:00Z 2026-08-25`
    window first** — that is the instrument's positive control, and it matches to the digit.
+   forcing: none
+
 2. ✅ **DONE 2026-08-25 — NEITHER OF THE "TWO FLAKY TESTS" WAS EVER A FLAKE.** Both were
    already diagnosed AND closed, and — 🔴 the part worth carrying — **both were recorded as
    closed in THIS DOC'S OWN LINEAGE and then carried forward as "UNDIAGNOSED" anyway.** The
@@ -329,6 +331,8 @@ read the root cause first; the design is what failed, not the code.
      `origin/main`** (`git cat-file -e` → never committed, so the gate did its job); under
      test the committed tree gives **0 unpinned**; feeding the same assertion path the leak
      file gives **6**, all from that one path. Instrument proven able to go red; the zero is real.
+   forcing: none
+
 3. 🔴 **`broken-gate-tail` CANNOT name a failing test — do not reach for it expecting one.**
    Measured over every `devrc-ci-*-report` TaskRun: **24 of 139 populated**, but only **1 of
    the 24 genuine failures**. It is the *broken-gate* instrument (kills), and its content is
@@ -338,12 +342,16 @@ read the root cause first; the design is what failed, not the code.
    carries counts and no name, which is why the two tests above were unattributable rather
    than unexplained. 17 of the window's 24 genuine failures are named; all 17 are read and
    **neither test above appears**.
+   forcing: none
+
 4. ✅ **RESOLVED 2026-08-26 — the `failed=0` leg is NOT a verdict bug.** A guard fired, not a
    test; mechanism and evidence under `State now`. Of the two possibilities this entry
    originally offered, the FIRST was right. **What remains open is one level up and belongs to
    `homelab-infra`:** the commit-status description carries only test counts, so a
    guard-caused failure reads as a contradiction. Which guard fired on `1ca46a80` is
    **unrecoverable** (pods GC'd, `broken-gate-tail` empty for it — see 3).
+   forcing: none
+
 5. ✅ **DONE 2026-08-26 — #841's xdist race on `launches.log`, closed as #868 (`1a4eb70a`).**
    `loadfile` pins a FILE's tests to one worker, but ~8 sibling files in the same target also
    invoke launchers, run on sibling workers, and append to the same run-wide log that
@@ -363,6 +371,8 @@ read the root cause first; the design is what failed, not the code.
    the assertion compared against `worker_tag()`, which **in a serial run collapses to the
    same constant `main`** the shell stub falls back to, so the fixture could never detect a
    mutant hardcoding that literal — on the one branch the change existed to pin.
+   forcing: none
+
 6. ✅ **DONE 2026-08-26 — `DEVRC_TEST_JOBS=1` was permanently RED; closed as #884 (`53b5ebce`).**
    #841 added `test_gitenv_sibling_exclusion.py::test_a_real_worker_reports_a_run_id`, which
    `skipif`s outside a real worker — i.e. every serial run — with no `EXPECTED_SKIPS` entry, so
@@ -382,17 +392,25 @@ read the root cause first; the design is what failed, not the code.
    so on a genuinely 1-core builder the gating tier runs SERIAL, the pin applies, and GUARD 9's
    positive control does not run behind a green gate. Fix direction if it ever matters: make
    the CONTROL independent of the runner's mode — do not delete the entry.
+   forcing: none
+
 7. **Re-check `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** —
    `scripts/browser-bridge/tests/`. It shares #802's dropped-emit mechanism and **#802 has
    merged (`d09038d8`)**; the prior agent said verify rather than assume it is covered.
    **Now the top open flake item**, since 1 and 2 are closed.
+   forcing: none
+
 8. **A ninth flake, UNCONFIRMED:** `test_live_cotenants_does_not_count_this_process`
    (`scripts/tests/test_git_repo_isolation.py:1479`). Leading suspect `git commit`'s detached
    `run_auto_maintenance`. 0/25 reproductions across three load conditions, **and the /proc
    watcher used failed its own positive control — so those zeros are not evidence.**
+   forcing: none
+
 9. **#810's two remaining cosmetic nits:** `scripts/lib/agent_ledger.py:261` still says "a 2s
    timeout under load" (a second spelling of the budget), and the narrow arm's failure message
    in `test_agent_ledger.py` names the wrong cause. Neither merits its own PR.
+   forcing: none
+
 10. **Housekeeping, none urgent:** `homelab-talos` has **53 stash entries** and a repo-local
    `core.hooksPath` nobody set deliberately; `devrc` has **46 worktrees**, many on merged
    branches. And `ecc4332e` references the capacity question as `#1205`, which is **not** a
@@ -404,6 +422,76 @@ read the root cause first; the design is what failed, not the code.
    the leak (the tracked `apply-nebula-443.sh` takes the IP at runtime), so it is not stranded
    work and deleting it loses nothing. **Left in place — removing an operator's untracked file
    is their call, not an agent's.**
+   forcing: none
+
+
+11. ✅ **CLOSED 2026-09-12 by devrc#1561 (`c0bbd6d9`) — NOT by this thread, and what
+   landed is WIDER than this rank asked for.** The ask was: exclude `claudedocs/`
+   from the wide-kill MENTION scan in `scripts/claude-hooks/tests/test_guard_core.py`,
+   because the guard exists to catch CALL SITES and prose is never one.
+   - **What shipped:** ONE predicate — `_is_prose_only()` over
+     `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` — consulted by **BOTH** scanners.
+     This rank asked for the mention half only; #1561 also exempted the shell-text
+     guard. That is the better shape and it is the consolidation this thread kept
+     asking for: the two guards' SEPARATE allowlists were the reason one fix left
+     `main` red on the other test, so a single predicate is what actually ends the
+     loop. No `quoting_is_the_point` row was needed either.
+   - **Re-measured live on `origin/main` 2026-09-12, not read off the PR:** 189
+     tracked `claudedocs/` files, **6** of which the mention pattern matches TODAY
+     — so without the exemption `main` would be red on six docs right now, not the
+     five this rank estimated. Still scanned: **11** executable-tree files by the
+     mention half, **7** by the argv half, **0** `claudedocs/` in either.
+     `pytest -k kill` → **98 passed**.
+   - 🔴 **The closing condition this rank wrote is MET by a NAMED COMMIT, not by
+     argument.** `457a5dc7` (#1560) landed a handoff doc carrying the trigger
+     spelling in prose **74 seconds after** `c0bbd6d9` (22:17:50 vs 22:16:36
+     -0500), and **no commit has touched `test_guard_core.py` since**. A doc naming
+     the hazard landed on `main` with zero ledger edits and the gate stayed green —
+     which is exactly the test this rank demanded, run by the repo rather than by me.
+   - 🔴 **The hazard this rank flagged is REAL, knowingly accepted, and covered
+     somewhere else — verified rather than assumed.** Because BOTH static scanners
+     now skip `claudedocs/`, a doc that literally spells the command is caught by
+     NEITHER. The cover is the runtime hook, and it was exercised directly:
+     `guard_core.check_tmux_kill_shared_server` **refused both** wide spellings and
+     returned `None` for the `-L <literal-socket>` form. `bash-guard.py` gates the
+     Bash tool and #1561 did not touch it, so a fence in a doc is inert unless a
+     human runs it in their own unhooked terminal.
+   - **Residual, stated because it is silent:** the static guards no longer cover
+     documentation at all, so nothing fails if a doc grows a copy-pasteable
+     dangerous fence. Fix direction if it ever matters — scan `claudedocs/` for
+     FENCED CODE BLOCKS only, never prose. 🔴 Do not re-add a whole-file scan; that
+     is the treadmill this closed.
+   forcing: none — was "gate" (9 of 10 open PRs red at once); the gate is clear.
+12. **devrc#1522 is the only one of the three still open.** #1543 merged as
+   `0b5ee924`, and the ledger it edited was then made unreachable by #1561, so
+   nothing there needs re-landing. `IN FLIGHT: innovation-upstream/devrc#1522`.
+   🔴 **devrc#1549 (`fix/kill-ledger-scope`) is SUPERSEDED — close it, do not merge
+   it.** It scoped the mention half only and added a `quoting_is_the_point` row,
+   both older and narrower than what landed; it is now `CONFLICTING` against `main`
+   and one of its three conflict hunks is #1561's own text. Its claim
+   `devrc-kill-ledger-scope-executables` was still LIVE under another session at
+   the time of writing, so closing it is that session's call or the operator's.
+   forcing: none — `main` is green; this is cleanup, not an unblock.
+13. **devrc#1516** — the cairn-skill note on the two scopes stranded local-only
+   (`civitai-developer-docs`, `civitai-app-requests`). Its only failure was
+   `test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor`, which
+   PASSES on a pristine `main` worktree, so it needs re-judging on a green base
+   rather than a fix. `IN FLIGHT: innovation-upstream/devrc#1516`.
+   forcing: none
+14. **`test_mjs_parses[attachments.mjs]` fails in Tekton and passes locally.**
+   Seen on devrc#1534 and #1536; 34 passed on a pristine `main` worktree. An
+   environment difference in the runner, and it will keep making PRs look red for
+   reasons that are not theirs. Owned by the `tekton` skill.
+   forcing: none
+15. **Tekton latency and the `ERROR` state.** Runs took 21.5–46+ min tonight
+   against a few minutes earlier in the day, and devrc#1528 showed
+   `ERROR,ERROR,ERROR`. Do not call a devrc run stalled before ~25 min.
+   forcing: none
+16. **Nothing makes `main` going red VISIBLE before PRs inherit it.** Every red
+   above was found by a PR author wondering why their unrelated diff failed. A
+   push-to-`main` job that announces a red — or an issue opened on first failure —
+   is the missing signal. This is the generalisation of ranks 1–5.
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`scripts/gate.sh` runs the DEV-HOST tier only** — `run-tests.sh` + `run-node-tests.sh`.
@@ -511,7 +599,252 @@ read the root cause first; the design is what failed, not the code.
   containing `<`. Sibling `triggers/…` citations passed only because devrc has no `triggers/`
   top-level.
 
+### Added 2026-09-11 — a red inherited from `main`, found from a docs-only PR
+
+- 🔴 **A PR's red is not the PR's red, and the control is one worktree.** A
+  docs-only change to a SKILL.md came back with `tekton/devrc-pytests FAILURE`.
+  The failing test — `test_every_kill_server_call_site_in_the_repo_is_classified`
+  — has nothing to do with markdown, which is the tell worth acting on: **when a
+  failure names a subject your diff does not touch, run it on pristine `main`
+  BEFORE reading anything else.** `git worktree add --detach /tmp/ctrl
+  origin/main` and run the one test. It was red there with zero changes applied.
+  This is the thread's own subject: a guard blaming the wrong thing, where the
+  wrong thing is whichever PR happens to be open.
+- 🔴 **THIS HAS NOW HAPPENED THREE TIMES IN ABOUT A DAY, AND THE THIRD TIME WAS
+  ME.** `handoff-tmux-scratchpad-bar-statusline.md` broke it (fixed by devrc#1520);
+  `handoff-tmux-webapp.md` merged hours later and broke it AGAIN, on two guards;
+  and the handoff recording all of that — this document — broke it a third time by
+  QUOTING the warning it was written to give. That is not three accidents. A
+  `claudedocs/` scan plus a set-equality assertion means **routine `/handoff`
+  output is load-bearing on CI**, and `/handoff` has no idea.
+- 🔴 **THE TWO GUARDS HAVE SEPARATE ALLOWLISTS, SO FIXING ONE LEAVES THE OTHER
+  RED.** `test_every_kill_server_call_site_in_the_repo_is_classified` reads
+  `_KILL_MENTION_LEDGER`; `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`
+  reads a local `quoting_is_the_point` set inside the test body. A doc in shell-text
+  shape (the shell-text form (a `tmux` invocation naming the wide kill)) trips BOTH; a doc that only names the wide-kill spelling in
+  prose trips only the first. Measured: classifying `handoff-tmux-webapp.md` in the
+  ledger left the second guard failing, and the failure LOOKED like a new
+  regression rather than the other half of the same one. **Run
+  `pytest -k kill` — not `-k kill_server` — before believing either is fixed.**
+  🔴 **AND THIS DOCUMENT THEN MADE THE SAME MISTAKE, ONE PARAGRAPH AFTER WRITING
+  IT DOWN.** The sentence above quotes the shell-text form to explain the split,
+  and that quote is itself shell-text shape — so it trips the SECOND guard. The
+  first fix added this file to `_KILL_MENTION_LEDGER` only, and CI went red on
+  exactly the half the paragraph had just warned about. **Knowing the rule did
+  not prevent the error; running `pytest -k kill` is what caught it.** Treat the
+  local run as the gate, not the understanding.
+- 🔴 **FOUR DOCS NOW, AND THE PATTERN IS SELF-REPRODUCING — THIS NEEDS A
+  STRUCTURAL FIX, NOT A FIFTH LEDGER ROW.** The sequence, all inside about a day:
+  `handoff-tmux-scratchpad-bar-statusline.md` broke it → devrc#1520 classified it;
+  `handoff-tmux-webapp.md` broke it → devrc#1534 found the real bug (the mention
+  regex matched INSIDE `skill-session`) and fixed it; THIS doc broke it by quoting
+  the warning it gives; and `handoff-mention-system-repos.md` broke it by
+  **narrating the previous doc breaking it**. Each write-up of the failure
+  recreates the failure. 🔴 **That is not four accidents, it is a feedback loop**,
+  and the allowlist treadmill cannot exit it: every incident report about the
+  guard is itself a new offender. A FIFTH layer appeared while committing the
+  fix — `bash-guard.py` blocked the commit because the message quoted the banned
+  command; its own remedy is `git commit -F <file>`.
+  Measured cost: **9 of 10 open PRs red at once** on a failure none of them
+  caused — `claude/RULES.md`'s "a permanently-red gate trains everyone to click
+  through", happening rather than being warned about, and two sessions came close
+  to merging past it.
+  **The lever is the SCAN SET, not the ledger.** The guard exists to catch CALL
+  SITES; `claudedocs/` prose is never one, and the second guard already concedes
+  this with its `quoting_is_the_point` set. Excluding `claudedocs/` from the
+  mention scan — or treating a doc as prose unless it carries an executable
+  shape — ends the loop, and keeps the ledger doing what it was built for over
+  `scripts/`. ⚠ **Not done here:** that changes the guard's contract and belongs
+  with whoever owns it. What IS done is the fourth classification, so `main` is
+  green.
+- ✅ **THE BETTER ESCAPE, AND THIS DOC NOW USES IT: DON'T QUOTE THE TRIGGER.**
+  Every fix above added an allowlist row — which is what makes the treadmill turn.
+  This document instead **reworded itself** so it contains neither pattern: no
+  `kill-s…` mention spelling, and no `tmux`-adjacent shell-text form. Measured
+  after the reword: **0 matches on both regexes**, and the doc needs **no ledger
+  entry and no `quoting_is_the_point` entry at all** — devrc#1522 became
+  docs-only, with zero guard edits.
+  🔴 **This generalises to every future write-up:** a doc explaining a dangerous
+  command does not need to contain it. Name it descriptively ("the wide kill",
+  "the shell-text form"), and the doc stops being an offender instead of being
+  excused as one. That is strictly better than a row, because a row has to be
+  maintained and re-argued every time the scan changes — and it is what makes
+  this doc safe under devrc#1549, which REMOVES the `claudedocs/` rows from the
+  ledger and would have made any row here stale.
+- 🔴 **A derived ledger over `claudedocs/` means a HANDOFF DOC can break the
+  build.** `_KILL_MENTION_LEDGER` scans the whole repo for mentions of a wide
+  tmux kill, so a handoff that merely WARNS against the wide-kill spelling — *"Never
+  the wide-kill spelling; that destroys every session"* — trips it until someone writes
+  down what kind of site it is. Working as designed, and a genuinely surprising
+  coupling: `/handoff` writes prose into `claudedocs/`, and that prose is inside a
+  test's scan set. **Anyone writing a handoff that names a dangerous command
+  should expect to classify it in the same PR.**
+- **Fixing someone else's red belongs in its OWN PR.** devrc#1520 is the one-line
+  classification; devrc#1516 is the docs change that surfaced it. Mixing them
+  would have buried a `main`-unblock inside an unrelated diff and made the
+  bisect worse. The cost is that #1516 stays red until #1520 lands and it picks
+  up the new base.
+- ⚠ **Polling `gh` check state: Tekton reports COMMIT STATUSES, not check-runs.**
+  `.conclusion` is `null` and `.status` is absent; the state lives in `.state`
+  (`PENDING`/`SUCCESS`/`FAILURE`). A poll filtering on `.status != "COMPLETED"`
+  counts them as settled and reports a stuck PR as green-and-done. Measured here
+  twice in a row, in both directions. Read `.state // .conclusion`, and treat
+  `PENDING` and empty as non-terminal.
+
 ## How to verify
+
+Reproduce the scan-set measurement that rank 1 rests on:
+
+```bash
+cd $DEVRC && python3 - <<'PY'
+import re, pathlib, subprocess
+mention = re.compile(r"(?<![A-Za-z0-9_])kill-s(?:erver|ession)")
+files = subprocess.run(['git','ls-files'], capture_output=True, text=True).stdout.split()
+docs  = [f for f in files if f.startswith('claudedocs/')]
+hit   = [f for f in docs if mention.search(pathlib.Path(f).read_text(errors='ignore'))]
+code  = [f for f in files if not f.startswith('claudedocs/')
+         and f.endswith(('.py','.sh','.mjs','.js'))
+         and mention.search(pathlib.Path(f).read_text(errors='ignore'))]
+print(len(docs), "docs;", len(hit), "match;", len(code), "code files match")
+PY
+```
+
+Both kill guards, on any branch — 🔴 `-k kill`, NOT `-k kill_server`; the two
+guards keep SEPARATE allowlists and the narrower filter hides half the answer:
+
+```bash
+cd $DEVRC && nix-shell -p python3Packages.pytest --run \
+  "python3 -m pytest -q scripts/claude-hooks/tests/test_guard_core.py -k kill"
+# green = 95 passed, 1441 deselected
+```
+
+Is `main` itself red? Never infer it from a PR:
+
+```bash
+git -C $DEVRC worktree add --detach /tmp/ctrl origin/main
+cd /tmp/ctrl && nix-shell -p python3Packages.pytest --run \
+  "python3 -m pytest -q scripts/claude-hooks/tests/test_guard_core.py -k kill"
+```
+## Findings
+
+### Added 2026-09-11 — two live diagnosis blocks
+
+🔴 Deliberately filed here rather than under this doc's `## Investigations —
+live diagnosis state (…)` heading: that heading buckets to REPLACE, and a delta
+carrying it would have DROPPED 176 lines including four ✅ DECIDED entries. A
+second `## Open investigations` heading would instead have split the doc's
+investigations across two sections. `Findings` is on the append allowlist, so
+these land without touching either.
+
+### `devrc` `main` is RED on `test_every_kill_server_call_site_in_the_repo_is_classified`, and every PR inherits it
+
+- **Symptom + exact repro:** any PR opened against `devrc` `main` shows
+  `tekton/devrc-pytests FAILURE`. Reproduce WITHOUT a PR:
+  ```bash
+  git -C $DEVRC worktree add --detach /tmp/ctrl origin/main
+  cd /tmp/ctrl && nix-shell -p python3Packages.pytest --run \
+    "python3 -m pytest -q scripts/claude-hooks/tests/test_guard_core.py -k kill_server"
+  ```
+- **Observed (with values):** on pristine `origin/main` (`687dd7a7`), zero changes
+  applied — `1 failed, 1535 deselected`:
+  ```
+  AssertionError: the set of files mentioning a wide tmux kill has changed.
+    added:   ['claudedocs/handoff-tmux-scratchpad-bar-statusline.md']
+    removed: []
+  ```
+  The mention is line 65 of that doc: *"Never the wide-kill spelling; that destroys every
+  session."* — prose warning AGAINST the kill, the same class as the ledger's
+  existing `handoff-tmux-restore-chain.md: "prose: the incident write-up"`. The
+  CI job reports `TOTAL collected=22148 passed=22145` — **one** failure in 22k.
+- **Ruled out:** that it was caused by the PR that surfaced it (devrc#1516, a
+  docs-only edit to `claude/skills/cairn/SKILL.md`) — reproduced on a pristine
+  `origin/main` worktree with nothing applied. `via: command` · That it is a
+  flake — it is a deterministic set-comparison over files in the tree, with no
+  timing or network input, and it failed identically on two separate runs.
+  `via: code` · That the guard is wrong to fire — it is a DERIVED ledger that
+  fails when the tree grows a mention, which is its stated purpose; the missing
+  thing is the human classification. `via: code`
+- **Leading hypothesis:** the doc merged without its ledger row, so `main` has
+  been red since that merge. **Not measured: WHEN, or how many PRs have been
+  merged through it since.** That is the part worth knowing — a gate everyone has
+  been clicking through is a different problem from one that broke an hour ago.
+- **Next probe:** date the breakage and count what merged through it —
+  ```bash
+  git -C $DEVRC log --oneline --diff-filter=A -- claudedocs/handoff-tmux-scratchpad-bar-statusline.md
+  git -C $DEVRC log --oneline --merges <that-sha>..origin/main | wc -l
+  ```
+  A non-trivial count means the red was being merged through, which is the
+  `claude/RULES.md` "permanently-red gate trains everyone to click through"
+  failure actually happening rather than being warned about.
+
+### Tekton has not reported on devrc#1520 for ~17 minutes
+
+- **Symptom + exact repro:** `gh pr view 1520 --repo innovation-upstream/devrc
+  --json statusCheckRollup` — all three contexts `PENDING`, empty descriptions.
+- **Observed (with values):** PR created `2026-09-11T21:51:57Z`; still all
+  `PENDING` at `22:03Z` and at ~22:09Z. By contrast devrc#1516, opened minutes
+  earlier, had all three terminal within a few minutes.
+- **Ruled out:** that the checks are absent — three contexts ARE registered
+  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`), so the
+  EventListener fired and created them. `via: command`
+- **Leading hypothesis:** a queued/stuck TaskRun rather than a webhook miss —
+  registered-but-never-started is the shape the `tekton` skill's host-port
+  collision note describes.
+- **Next probe:** the `tekton` skill owns this. `kubectl -n tekton-pipelines get
+  pipelinerun --sort-by=.metadata.creationTimestamp | tail`, then describe the
+  newest for an unschedulable pod.
+- ✅ **RESOLVED — it was SLOW, not stuck.** All three settled **SUCCESS** after
+  **~1,290 s (21.5 min)** from PR creation. So the "registered but never started"
+  shape was the wrong read: the contexts were queued the whole time. 🔴 The
+  transferable number is the SPREAD, not the mean — devrc#1516 settled in a few
+  minutes and devrc#1520 took 21.5 on the same pipeline the same evening. Do not
+  call a devrc PR's Tekton run stalled before ~25 minutes; a poll budget shorter
+  than that reports a healthy run as a stall.
+
+### Added 2026-09-12 — the scan-set fix, measured
+
+- 🔴 **THE NUMBERS THAT SETTLE IT, measured on the tree at `9a4411c8`.** The
+  wide-kill mention scan runs over every tracked file, and its populations are
+  lopsided:
+
+  | population | count |
+  |---|---|
+  | `claudedocs/` files total | 189 |
+  | `claudedocs/` files MATCHING the wide-kill pattern | **5** |
+  | non-doc code files matching — the guard's real population | **10** |
+
+  Four of those five docs appeared **in a single day**. Excluding `claudedocs/`
+  from the mention scan removes all 5 and keeps all 10 genuine call-site files.
+  Reproduce with the snippet under *How to verify*.
+- 🔴 **FIVE DOCS, AND THE FIFTH LANDED WHILE THE FOURTH WAS BEING CLASSIFIED.**
+  Sequence, all inside ~a day: `handoff-tmux-scratchpad-bar-statusline` →
+  devrc#1520; `handoff-tmux-webapp` → devrc#1534 (the real bug: the mention regex
+  matched INSIDE `skill-session`); `handoff-ci-flakes-and-misattribution` (this
+  doc) by quoting the warning it gives; `handoff-mention-system-repos` by
+  NARRATING the doc above breaking it; and `handoff-cairn-oss-multi-instance`,
+  which appeared mid-session. **Every incident report about the guard becomes a
+  new offender**, so the ledger cannot converge.
+- 🔴 **A FIFTH LAYER, at a different tool.** `bash-guard.py` blocked the `git
+  commit` carrying the fix, because the commit MESSAGE quoted the banned command.
+  Its own remedy is `git commit -F <file>`. The same recursion reaches the
+  PreToolUse hook, not just the pytest guard — so "write about the dangerous
+  command" is a hazard at every layer that scans text for it.
+- 🔴 **THREE INDEPENDENT SESSIONS RACED ON THIS ONE GUARD IN ONE EVENING**, and
+  the shared-queue lock did not help because none of them drew from a ranked
+  list: devrc#1534 (the regex bug), devrc#1543 (`fix/kill-mention-ledger-two-docs`),
+  and this one. #1534 was strictly better than what this PR was doing — it fixed
+  the CAUSE while this PR was allowlisting an effect that **did not exist** — and
+  #1543 beat this PR to the fourth doc by ~10 minutes. **Deferring was right both
+  times**, and the tell each time was the same: read the other PR's diff before
+  assuming your own fix is the one to keep.
+- ⚠ **Merging past a red that is not yours is a real decision, and it was taken
+  once here.** devrc#1534 was merged while its own `pytests` showed
+  `test_mjs_parses[attachments.mjs]` failing — verified NOT a main red (34 passed
+  on a pristine `main` worktree) and gone on its next head. The alternative was
+  leaving nine PRs blocked. Record the check, not just the merge.
+
+### Carried forward from earlier sessions in this thread
+
 ```bash
 # the three devrc changes are on main, and production behaviour did NOT change
 git -C ~/workspace/devrc show origin/main:scripts/lib/agent_ledger.py \

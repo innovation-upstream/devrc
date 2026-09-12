@@ -244,9 +244,11 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"airvpn-menu", "keylog-spin-capture.sh", "main-status-watch.py",
+        {"airvpn-menu", "bar-remote-snapshot", "keylog-spin-capture.sh",
+         "main-status-watch.py",
          "mention-open.py",
-         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
+         "monitor-blackout.sh", "remote-host-detail", "run-tests.sh",
+         "sync-claude-permissions.py",
          "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
@@ -254,16 +256,42 @@ ACKNOWLEDGED_UNSTUBBED = {
         "`systemctl(read)` LINES IN THE LAUNCH LOG (`grep -c '^systemctl(read)'`) "
         "and reports them per target. It never invokes systemctl — it reads the "
         "record of calls the stub already classified. "
-        "sync-claude-permissions.py is a DIFFERENT case from the other four and "
+        "bar-remote-snapshot and remote-host-detail are re-justified rather than "
+        "absorbed, because they are different KINDS from each other. "
+        "bar-remote-snapshot is a VERB case -- it GENUINELY SPAWNS `systemctl --user is-active "
+        "bar-status-poll.timer` (local_poller_is_running) -- a read-only "
+        "is-active query, never a start/stop/restart, whose ONLY effect is to "
+        "decide whether to install a relayed cache. It is unstubbed because "
+        "nothing in scripts/tests reaches it: every test that exercises the "
+        "install monkeypatches `local_poller_is_running` itself, and the one "
+        "test of the probe forces the exception path. remote-host-detail is a "
+        "SCANNER FALSE POSITIVE -- its only occurrence of the name is inside a "
+        "user-facing help string telling the operator which timer to check. It "
+        "invokes nothing -- an UNREACHABILITY case, and specifically a scanner "
+        "false positive. Both are listed because this ledger is pinned TWO-WAY "
+        "and a file set that silently grows is exactly what it exists to catch. "
+        "🔴 KNOWN GAP, stated rather than left implicit: unlike syshealth, "
+        "main-status-watch.py and tmux-restore-observe.sh, bar-remote-snapshot "
+        "arrives WITHOUT an argv pin asserting its verb stays on "
+        "nolaunch.SYSTEMCTL_READ_VERBS. Its acknowledgement therefore rests on "
+        "a reachability claim nothing enforces: change `is-active` to `stop` and "
+        "the file set is unchanged, so this ledger stays green. See "
+        "test_bar_remote_snapshot.py for the pin that closes it. "
+        "sync-claude-permissions.py is acknowledged on its own ground and "
         "is re-justified rather than absorbed: its only occurrence of the name "
         "is the literal string `Bash(systemctl status:*)` inside its CURATED "
         "table of permission RULES, and the script spawns no subprocess at all — "
         "it imports none of subprocess / os.system / os.exec* / os.popen, which "
         "test_sync_claude_permissions.py asserts STRUCTURALLY so this "
         "justification cannot rot into a claim about a file that has changed. "
-        "syshealth (added 2026-09-04) is the ONLY one of the six that genuinely "
-        "INVOKES systemctl, and is acknowledged on a different ground from the "
-        "other five: not unreachability, but the VERB. Its single call site is "
+        "⚠ THE ENTRIES HERE ARE DESCRIBED BY KIND, NOT COUNTED. An earlier "
+        "version numbered them ('a THIRD case', 'the other four', 'the six') "
+        "and the chain was already incoherent once two more were added; a count "
+        "kept beside what it counts drifts on the next addition, so the form is "
+        "fixed rather than the number. TWO KINDS exist: acknowledged for "
+        "UNREACHABILITY (nothing in scripts/tests can reach the call), and "
+        "acknowledged for the VERB (the call is reached but is a READ). "
+        "syshealth (added 2026-09-04) is a VERB case. Its single call site is "
         "`systemctl --user list-units --state=failed --no-legend --plain "
         "--no-pager`, and `list-units` is on nolaunch.SYSTEMCTL_READ_VERBS, so "
         "the verb-splitting stub PASSES IT THROUGH as a read rather than "
@@ -391,11 +419,12 @@ ACKNOWLEDGED_UNSTUBBED = {
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "i3status-scratchpads",
          "keylog-spin-capture.sh",
-         "mention-open.py",
+         "main-status-watch.py", "mention-open.py",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
-         "tmux-scratch-picker.sh", "tmux-scratch-slots.sh"},
+         "tmux-scratch-picker.sh", "tmux-scratch-slots.sh",
+         "tmux-session-restore.py"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
         "neither can reach the binary: notify-failure.sh names home-manager in "
@@ -453,6 +482,29 @@ ACKNOWLEDGED_UNSTUBBED = {
         "set. Both controls watched: clean tree passes, an injected "
         "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
         "test's own message. "
+        "main-status-watch.py (added 2026-09-11 with the shared-predicate "
+        "module scripts/lib/ci_status.py) is the same PROSE-MENTION shape and "
+        "is re-justified, not reworded. Its SINGLE occurrence is one clause of "
+        "a comment on the import block, explaining that the systemd unit runs "
+        "this file straight out of the CHECKOUT (ExecStart names "
+        "%h/workspace/devrc/scripts/main-status-watch.py), so a `git pull` "
+        "delivers BOTH files and no switch is involved — which is the whole "
+        "reason importing a sibling module is safe here rather than a new "
+        "deploy dependency. Deleting the word would delete the reason the "
+        "import is safe. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard: "
+        "test_main_status_watch.py::test_main_status_watch_SPAWNS_these_argv0_"
+        "AND_NOTHING_ELSE walks the AST and asserts the spawn argv[0] set is "
+        "exactly {git, <computed>, <not-a-list>}, grows-or-shrinks — and its "
+        "companion test_home_manager_is_MENTIONED_but_never_SPAWNED asserts "
+        "BOTH halves: the mention still EXISTS (or this row has outlived the "
+        "sentence it describes) and the name reaches NO executable line, "
+        "comments and docstrings stripped by AST. The two opaque argv[0] "
+        "entries are named rather than waved at: <computed> is [gh, 'api', "
+        "path] behind the MAIN_STATUS_WATCH_GH stub seam, and <not-a-list> is "
+        "trigger_deadman's `cmd`, whose production literal is pinned exactly — "
+        "and refused a --force — by "
+        "test_the_production_trigger_is_systemctl_start_main_green_check. "
         "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
         "and carries the STRONGEST form of the justification: the other three "
         "merely lack a call site, whereas this file has no executable "
@@ -544,7 +596,46 @@ ACKNOWLEDGED_UNSTUBBED = {
         "nix-env / pkill, i.e. that every occurrence in the file is prose. "
         "Negative control watched, and it fired for real during "
         "development: the jail caught `date`, a binary the pinned set had "
-        "omitted"),
+        "omitted. "
+        "tmux-session-restore.py (added 2026-09-11 with the send-an-absolute-"
+        "store-path fix) is the PROSE-MENTION shape again and is "
+        "re-justified rather than reworded. ⚠ This sentence carries NO ordinal "
+        "on purpose: it said `the SIXTH` when written, and the very merge that "
+        "landed it added i3status-scratchpads alongside — which is the drift the "
+        "`wmctrl` entry below warns about in capitals, reproduced within hours. "
+        "Its TWO occurrences are both inside "
+        "`claude_command()`'s docstring, and both are load-bearing: one records "
+        "the MEASURED failure that function exists to remove — after a server "
+        "death every continuum-restored pane answered `claude: command not "
+        "found`, because a restored pane does not re-run the login shell's "
+        "profile and so can carry a PATH predating the current home-manager "
+        "generation — and the other records WHY the resolved path is realpath'd "
+        "to its store target rather than sent as `~/.nix-profile/bin/claude`: "
+        "this repo's MEMORY.md documents that a switch writes two generations "
+        "and the intermediate one drops every `home.packages` binary for ~1s, "
+        "so a command naming the profile path can miss. Deleting either word to "
+        "get green would delete the reason the function is shaped as it is. "
+        "It is not a call site: `realpath` and `which` here are "
+        "`os.path.realpath` and `shutil.which`, which are LIBRARY calls, not "
+        "spawns — the store path is what gets SENT INTO a pane, not executed by "
+        "this script. "
+        "🔴 THE PIN, arriving WITH the entry rather than after an audit: "
+        "test_tmux_session_restore.py::test_the_restore_script_SPAWNS_these_"
+        "argv0_AND_NOTHING_ELSE walks the script's AST and asserts its spawn "
+        "argv[0] set is exactly {tmux, grep}, grows-or-shrinks, with a "
+        "`<computed>` sentinel so a command built from a variable fails loudly "
+        "instead of leaving the set — and "
+        "test_home_manager_is_MENTIONED_but_never_SPAWNED asserts BOTH halves "
+        "of this justification, that the prose still exists and that the name "
+        "is still not spawned. ⚠ That extractor resolves ONE level of "
+        "indirection, because this script routes nearly every call through a "
+        "module-local `run(cmd)` helper whose own spawn would otherwise read as "
+        "`<computed>` and teach the pin nothing; the skip is PROVEN rather than "
+        "assumed — the helper must hold exactly one spawn passing its own "
+        "parameter straight through, or the extractor fails instead of widening "
+        "the hole. Both controls WATCHED: clean tree passes, and an injected "
+        "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
+        "test's own message"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
@@ -744,6 +835,16 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
         (root / "tests").mkdir(parents=True)
         shutil.copytree(SCRIPTS / "testlib", root / "testlib",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        # 🔴 THE REAL CONFTEST IS COPIED, SO ITS REAL IMPORTS MUST RESOLVE HERE.
+        # It loads `scripts/lib/cairn_pin.py` BY PATH — the seam devrc reaches the
+        # pinned `cairn` reader modules through — and that import deliberately
+        # raises rather than degrading. Omitting the file made this probe die with
+        # `FileNotFoundError` while loading the conftest, i.e. BOTH halves failed
+        # for a reason that has nothing to do with autouse: the pair had stopped
+        # being a control/mutant measurement at all. Copied, not stubbed, for the
+        # same reason the conftest itself is copied rather than paraphrased.
+        (root / "lib").mkdir(parents=True, exist_ok=True)
+        shutil.copy(SCRIPTS / "lib" / "cairn_pin.py", root / "lib" / "cairn_pin.py")
         (root / plugin_rel).write_text(plugin_text, encoding="utf-8")
         (root / "tests" / "conftest.py").write_text(conftest_src, encoding="utf-8")
         probe = root / "tests" / "test_probe.py"
@@ -1778,6 +1879,54 @@ PINNED_PATH_CLOBBERS = {
         "unfindable. A prepending version measured a live call to the real "
         "board on this host while the nix sandbox (which has no clawgatectl) "
         "measured the intended case: two tiers, opposite blind spots"),
+    "test_analyze_service_index_backup.py": (
+        '"PATH": ' + "_closed_unit_path()",
+        "a clobber justified by ENUMERATION, and the enumeration is the POINT of "
+        "the test rather than a caveat on it. `_unit_shaped_env` models the "
+        "`analyze-service-index-backup` systemd unit, whose own `Environment=` "
+        "sets a CLOSED `PATH=${lib.makeBinPath [ git age kubectl coreutils ]}`; "
+        "`_closed_unit_path()` rebuilds exactly that set from `shutil.which`, so "
+        "the replacement holds the bin dirs of those four tools and nothing "
+        "else. No HAZARD_VOCABULARY name is reachable from it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, openrgb, "
+        "espanso, home-manager or nixos-rebuild — none is in that list, and the "
+        "function asserts the modelled PATH is non-empty so it cannot degrade to "
+        "a set that vacuously contains nothing. "
+        "🔴 REPLACING IS THE POINT AND PREPENDING WOULD DESTROY THE TEST. The "
+        "property under measurement is that the unit's PATH CANNOT reach "
+        "`cairn` — that is the deploy-blocker these probes exist for — and the "
+        "operator's PATH can, so prepending would leave the pinned client "
+        "findable and every pin-absence assertion would pass having measured "
+        "nothing. `_closed_unit_path` carries its own positive control for "
+        "exactly that: it asserts `shutil.which('cairn', path=...)` is None "
+        "before returning. "
+        "⚠ THIS ENTRY IS NEW BECAUSE THE LINE CHANGED MEANING. It used to read "
+        "`os.environ[\"PATH\"]` — a pass-through this scanner correctly did not "
+        "count as a clobber, and the reason the suite could not see that the "
+        "unit's PATH has no cairn in it."),
+    "test_cairn_pin.py": (
+        "dict(os.environ, PATH=" + "str(tmp_path))",
+        "a clobber justified by EMPTINESS, and the emptiness is CONSTRUCTED "
+        "rather than audited: the replacement is pytest's own `tmp_path` for "
+        "that test, freshly minted and never written to, so it holds no entries "
+        "at all — no HAZARD_VOCABULARY name is reachable from it (no "
+        "systemd-run, systemctl, notify-send, rofi, yad, alacritty, xdotool, "
+        "i3-msg, openrgb, espanso, home-manager or nixos-rebuild), because "
+        "nothing is. 🔴 REPLACING is the point and PREPENDING could not work: "
+        "the case under test is `cairn` NOT ON PATH — `cairn_pin` must REFUSE "
+        "with both resolution routes named rather than fall back — and the "
+        "pinned client IS on PATH in both tiers (it is in flake.nix's "
+        "`gateTools`), so no amount of prepending can make it unfindable. A "
+        "prepending version would resolve the real client and the refusal "
+        "branch would never execute, which is the unreachable-guard trap: the "
+        "test would pass having measured nothing. ⚠ THIS IS THE SUBPROCESS "
+        "SPELLING, and it is the only one the scanner sees in this file: the "
+        "sibling in-process site uses `monkeypatch.setenv(\"PATH\", ...)`, which "
+        "`launcher_scan.path_clobbers` does not classify as a clobber. Both are "
+        "the same claim about the same refusal and both replace the same freshly "
+        "-minted empty `tmp_path`, so the justification above covers each — but "
+        "do not read this entry as evidence that the monkeypatch form is "
+        "scanned."),
     "test_devshell_satisfies_required_tools.py": (
         '{"PATH"' + ': str(stub)',
         "a clobber justified by ENUMERATION rather than emptiness, and the "

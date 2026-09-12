@@ -185,6 +185,15 @@ ATTRIBUTION = re.compile(
 # reader that does not exist — it would miss a collision the write route hits,
 # and invent one it does not. There is no version of this worth having twice.
 sys.path.insert(0, str(HERE / "lib"))
+# 🔴 THE STORE-READER MODULES COME FROM THE PINNED `cairn` FLAKE INPUT, not
+# from `scripts/lib/` — devrc deleted its forked copies when it consolidated
+# onto the pin. `cairn_pin.ensure()` APPENDS the packaged `lib/` after the
+# line above and raises, naming both resolution routes and the remedy, when
+# the pin is not deployed. There is no local fallback.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 from subsystem_resolver import normalize_ref, split_kind  # noqa: E402
 
 
@@ -1879,6 +1888,29 @@ def _acceptance_refusal(verified: Ran) -> str:
 
     if fails:
         where = f"Read its {len(fails)} per-scope FAIL line(s) above."
+        # 🔴 A KNOWN, EXPECTED CLASS OF FAIL RIGHT NOW — say so, or this refusal
+        # sends an operator to diagnose a difference that is not a defect. devrc
+        # consolidated onto the pinned `cairn` client, so the LOCAL side of the
+        # comparison runs the PINNED reader while the running pod still serves an
+        # image built from devrc's old forked copy. Until the image is rebuilt
+        # (`build-push.sh`, which stages the pinned modules), the two sides are
+        # not the same program.
+        #
+        # ⚠ NARROW, AND THE NARROWNESS IS THE POINT: the only known difference is
+        # the malformed-entry hint, which the OSS extraction reworded from
+        # `subsystem_touch.py --validate <path>` to `a writer --validate <path>`
+        # at two sites. A FAIL naming any OTHER string is a real finding, so this
+        # note must not be read as "ignore the FAILs".
+        where += (
+            " ⚠ ONE CLASS OF DIFFERENCE IS CURRENTLY EXPECTED AND IS NOT A "
+            "DEFECT: the local side now runs the PINNED cairn reader while the "
+            "pod still serves the pre-consolidation image, and the pinned "
+            "reader words the malformed-entry hint differently ('a writer "
+            "--validate <path>' where the old one said 'subsystem_touch.py "
+            "--validate <path>'). Check WHICH line moved before diagnosing: a "
+            "difference on any other string is real, and this note expires the "
+            "moment the pod image is rebuilt."
+        )
         if timed_out:
             # 🔴 THE FAILS ARE REAL *AND* THE SWEEP IS INCOMPLETE. Reporting
             # only the first half is what sends an operator to diagnose five

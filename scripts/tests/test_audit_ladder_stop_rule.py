@@ -392,6 +392,7 @@ which proves that assertion executes rather than restating the pins beside it.
 
 import importlib.util
 import re
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -869,18 +870,31 @@ SKILL_ASSEMBLER_ROUTER = (
     "`audit-claims` block ONLY, and carries the invariant clauses verbatim. "
     "**A delta round with no parseable block is REFUSED.**"
 )
+# 🔴 RE-POINTED 2026-09-12, AND THE OLD PIN IS WHY. This constant used to hold
+# the skill's "Brief the auditor on the environment" paragraph, and the test
+# below calls that an instruction "a reader ACTS on". It was not one: the
+# paragraph told the DISPATCHER to retype four environment warnings into the
+# Agent prompt, and a probe of two real briefs found all four absent from both
+# (0/0, against controls that moved). So a green suite certified the SENTENCE
+# EXISTED while no auditor had ever received it — the "a guard's DESCRIPTION
+# claims COVERAGE" shape, in the pin rather than in the code.
+#
+# The warnings now live in `audit-dispatch.py` as the `cold-checkout-is-not-the-
+# diff` and `own-what-you-spawn` invariant clauses, where `CLAUSE_LEDGER` in
+# test_audit_dispatch.py pins them two-way and every brief carries them in every
+# round. What is pinned HERE is only the half no brief can discharge: the
+# dispatcher must not retype them, and must still sweep for leaks and check its
+# own worktree afterwards, because the auditor's own claim is not evidence.
 SKILL_ENVIRONMENT_BRIEF = (
-    "**Brief the auditor on the environment, or it will report false findings** "
-    "— a fresh worktree is not a working checkout, and an auditor hitting this "
-    "cold blames the PR. Whichever apply: **submodules are unpopulated** in a "
-    "new worktree (one made 4 test files \"fail to collect\"); **monorepo "
-    "`node_modules`** may need linking per package, not just at the root; "
-    "**whether the base branch is already red** and *at which file*; and that "
-    "**zsh does not word-split unquoted parameters**, so `eslint $FILES` checks "
-    "**zero** files and prints a confident PASS. Have it mutate only in a `cp "
-    "-a` copy — **`rm -f <copy>/.git` first**, since a worktree's is a FILE "
-    "pointing at the real git dir, so a commit in the copy lands on your branch "
-    "— and verify your worktree clean yourself at the end."
+    "🔴 **Do NOT re-type the auditor's environment and cleanup warnings into the "
+    "prompt — `audit-dispatch.py` now carries them as invariant clauses "
+    "(`cold-checkout-is-not-the-diff`, `own-what-you-spawn`), so every brief has "
+    "them in every round.**"
+)
+SKILL_DISPATCHER_STILL_SWEEPS = (
+    "**Still yours, because no brief can do it:** sweep for leaked processes "
+    "yourself afterwards and verify your own worktree is clean at the end — an "
+    "auditor's \"cleaned up\" claim is not evidence."
 )
 SKILL_LEDGER = (
     "**Carry the ledger in every round's summary**: `round N · payload lines "
@@ -1175,14 +1189,64 @@ def test_the_batterys_floor_is_re_derived_from_this_modules_size():
         "re-point BATTERY_SH; if you deleted it, delete this guard in the same "
         "commit rather than leaving a pin on a file that no longer exists."
     )
-    battery = _read(BATTERY_SH)
-    literals = re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)
-    assert len(literals) == 1, (
-        f"expected exactly one `MIN_TESTS=` assignment in {BATTERY_SH}, "
-        f"found {len(literals)}: {literals}. This guard reads the literal, so "
-        "a second assignment makes which one the battery uses ambiguous."
+    # 🔴 ASK THE BATTERY, DO NOT READ ITS SOURCE (devrc #1431). This used to be
+    # `re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)`, which reads the source
+    # TEXT and is therefore blind to anything the SHELL applies. MEASURED — with
+    #     MIN_TESTS=15
+    #     if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi
+    # that regex reported `1 passed` while the battery floored at 3, and
+    # `MIN_TESTS=$LOW` is the same hole: a non-numeric right-hand side simply
+    # does not match, so the guard silently pins nothing. `--print-min-tests`
+    # is emitted after every assignment and immediately before the run, so it
+    # is the value `failing()` will actually compare against.
+    proc = subprocess.run(
+        ["bash", str(BATTERY_SH), "--print-min-tests"],
+        capture_output=True, text=True,
     )
-    floor = int(literals[0])
+    assert proc.returncode == 0, (
+        f"`{BATTERY_SH.name} --print-min-tests` exited {proc.returncode}; this "
+        f"guard cannot read the effective floor, and an unreadable floor must "
+        f"NOT be treated as a passing one.\nstdout={proc.stdout!r}\n"
+        f"stderr={proc.stderr!r}"
+    )
+    reported = proc.stdout.strip()
+    assert re.fullmatch(r"\d+", reported), (
+        f"`{BATTERY_SH.name} --print-min-tests` printed {reported!r}, which is "
+        "not a bare integer. The handler must print the effective MIN_TESTS and "
+        "nothing else -- a guard that parses prose here is the source-reading "
+        "defect in a new costume."
+    )
+    floor = int(reported)
+
+    # 🔴 AND THE EFFECTIVE VALUE ALONE IS NOT ENOUGH -- MEASURED, and it is why
+    # this second half exists. #1431 proposed "print the effective MIN_TESTS and
+    # assert on that" as the whole fix. It closes `MIN_TESTS=$LOW` (the battery
+    # reports 4 and this guard goes red), but it does NOT close the CONDITIONAL
+    # override the issue actually names:
+    #     MIN_TESTS=15
+    #     if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi
+    # `--print-min-tests` runs with QUICK unset, so the effective floor honestly
+    # IS 15 for that invocation, and the guard passes -- while a `QUICK=1` run
+    # floors at 3. "Effective" is environment-dependent, and no probe can
+    # enumerate the environments.
+    #
+    # So the environment-independence is asserted STRUCTURALLY instead: exactly
+    # one assignment, anywhere in the file. 🔴 `^\s*` and not `^` -- the old
+    # guard anchored at column 0, which is precisely why an INDENTED override
+    # inside an `if` was invisible to it while a second top-level one was
+    # caught. The issue even recorded that a second numeric assignment "fires
+    # the len(literals) == 1 check"; it does, but only unindented.
+    assignments = re.findall(r"^\s*MIN_TESTS=", _read(BATTERY_SH), re.M)
+    assert len(assignments) == 1, (
+        f"expected exactly ONE `MIN_TESTS=` assignment in {BATTERY_SH}, found "
+        f"{len(assignments)}. A second one -- including an indented override "
+        f"inside an `if`, which is the shape that slipped past the previous "
+        f"column-0 regex -- makes the floor depend on the environment, so no "
+        f"single number this guard reads can be the one a given run uses.\n\n"
+        f"If the battery genuinely needs a conditional floor, this guard has to "
+        f"be re-thought rather than relaxed: pin every branch, or have the "
+        f"battery refuse to run when the override is active."
+    )
 
     src = _read(SELF_PY)
     assert not re.search(r"^\s*@[\w.]*parametrize", src, re.M), (
@@ -1564,7 +1628,16 @@ def test_the_operator_instructions_the_gate_depends_on_are_pinned():
         SKILL_MD, SKILL_REWORD_REGRESSION, "the reworded-rule regression shape"
     )
     _assert_pinned_once(
-        SKILL_MD, SKILL_ENVIRONMENT_BRIEF, "the environment brief"
+        SKILL_MD, SKILL_ENVIRONMENT_BRIEF, "the do-not-retype directive"
+    )
+    # 🔴 BOTH HALVES, because the re-point split one paragraph into two claims and
+    # a constant nobody asserts on is unpinned by construction — the shape this
+    # very module exists to catch. The half above says the dispatcher must NOT
+    # retype the clauses; this one says what is still theirs to do afterwards.
+    # Pinning only the first would let the sweep obligation be deleted silently
+    # while the suite stayed green, which is how the OLD pin failed.
+    _assert_pinned_once(
+        SKILL_MD, SKILL_DISPATCHER_STILL_SWEEPS, "the dispatcher's own sweep"
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_CROSS_REPO_WORKTREE, "the cross-repo worktree hazard"

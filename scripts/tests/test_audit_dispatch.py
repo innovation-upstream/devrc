@@ -715,6 +715,33 @@ CLAUSE_LEDGER = {
         "scaffolding is the tests, fixtures and notes a round wrote to guard "
         "it."
     ),
+    # 🔴 ADDED 2026-09-12 when these two moved OUT of the skill body. They were
+    # prose telling the DISPATCHER to retype them into the Agent prompt, and a
+    # probe of two real briefs found them 0/0 — so the auditor got them only when
+    # the dispatcher remembered. Only the audit-specific CONSEQUENCE moved:
+    # `claude/RULES.md` is in every subagent's prompt and already carries
+    # `pkill -f`, resolved PIDs, per-agent scratch names, unpopulated submodules
+    # and zsh word-splitting (verified, one hit each, against a control). What it
+    # does not carry is that a cold checkout's breakage gets blamed on the DIFF,
+    # and that a leaked process corrupts the NEXT round's evidence.
+    "cold-checkout-is-not-the-diff": (
+        "**A fresh worktree is not a working checkout, and an auditor hitting "
+        "that cold blames the PR.** Before attributing anything to the diff, "
+        "establish whether the base branch is ALREADY red and at which file — "
+        "and expect unpopulated submodules, per-package `node_modules` that need "
+        "linking, and a shell that does not word-split an unquoted `$FILES` "
+        "(which checks zero files and prints a confident PASS). Report an "
+        "environment defect as one; do not file it against the change."
+    ),
+    "own-what-you-spawn": (
+        "**Record the PID of anything you start and kill THOSE pids; give every "
+        "container, port and scratch dir a name unique to you.** 🔴 A process you "
+        "leak does not merely waste CPU — it corrupts the NEXT round's evidence: "
+        "a stress probe that outlived its audit left the following round "
+        "measuring its timings under that load and reporting the degraded "
+        "numbers as a finding. Your own \"cleaned up\" claim is not evidence; "
+        "check the pids are gone."
+    ),
     "do-not-merge": (
         "**Do not merge — report only.** No pushes, no PR comments, no "
         "`gh pr merge`. Hand the findings back and let the operator act on "
@@ -7635,15 +7662,24 @@ def test_a_failed_cumulative_measurement_does_not_print_a_false_cause():
     Two mechanisms, one observable — the exact rule this module cites everywhere
     else to justify its own COULD-NOT-MEASURE design.
 
-    Driven by failing the SECOND `rev-list` only: the per-round measurement
+    Driven by failing the SECOND `measure_ledger` only: the per-round measurement
     succeeds (so a ledger is rendered) and the cumulative one, from the anchor,
-    does not.
+    does not. Both use the SAME range here (`aaaa1111..HEAD`), so they cannot be
+    told apart by their arguments — only by which call they are.
+
+    🔴 KEYED ON THE PLAIN `rev-list`, NOT AN ABSOLUTE ORDINAL. This said
+    `calls["n"] > 1` and broke the moment `measure_range_churn` grew a second
+    `rev-list` (the `--not <base>` churn-population count): call 2 became the
+    PER-ROUND measurement's, so the per-round failed, no ledger rendered, and the
+    test failed for a reason that had nothing to do with what it guards. Counting
+    only the calls WITHOUT `--not` means one per `measure_ledger`, so this
+    survives either measurement gaining or losing helper calls.
     """
     calls = {"n": 0}
     base = make_runner(comments=[CLAIMS_BLOCK_R2])
 
     def runner(cmd, cwd=None):
-        if cmd[:2] == ["git", "-C"] and cmd[3] == "rev-list":
+        if cmd[:2] == ["git", "-C"] and cmd[3] == "rev-list" and "--not" not in cmd:
             calls["n"] += 1
             if calls["n"] > 1:
                 return 128, "", "fatal: bad revision 'aaaa1111..HEAD'"
@@ -8259,10 +8295,43 @@ def test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships():
             "the middle of the section, the brief now carries only its head "
             f"while the skill still reads complete:\n{section[:600]}"
         )
-    assert "RETIREMENT CONDITION" in section, (
-        "the retirement condition is not in the text the script inlines. It "
-        "is the only thing standing between a trial and a permanent rule, and "
-        "an auditor who never sees it cannot apply it."
+    # 🔴 THE TRIAL IS CLOSED, SO WHAT THE AUDITOR MUST SEE HAS CHANGED. This
+    # used to assert "RETIREMENT CONDITION" was inlined, on the grounds that it
+    # "is the only thing standing between a trial and a permanent rule". That
+    # trial closed 2026-09-12 at `ran: 6 · changed the outcome: 3` and the
+    # condition was replaced by the TRIAL RECORD. Asserting the old string now
+    # would pin a sentence the skill deliberately retired; asserting nothing
+    # would let the section drift back to claiming it is on trial, which is the
+    # state that makes a standing rule re-litigable on every invocation.
+    # 🔴 ASSERT THE RECORD'S SUBSTANCE, NOT ITS NAME — measured, because the
+    # first draft of this guard asserted `"TRIAL RECORD" in section` and a
+    # mutation sweep SURVIVED it: renaming the record's own heading left the
+    # phrase in the banner ABOVE it ("read the TRIAL RECORD at the end of this
+    # section"), so a POINTER to the record satisfied a check meant to prove the
+    # record was there. Same shape as test_audit_pr_nudge.py's first routing
+    # guard. The pair is the thing that cannot be faked by a cross-reference.
+    assert "ran: 6" in section and "changed the outcome: 3" in section, (
+        "the section does not inline the trial's PAIR (`ran: 6 · changed the "
+        "outcome: 3`). That pair IS the record: `C` alone cannot distinguish "
+        "'it ran and was useless' from 'nobody invoked it', and those have "
+        "opposite conclusions. A heading naming a record it does not carry, or "
+        "a pointer to one elsewhere, is not the record."
+    )
+    assert "ROUTING" in section, (
+        "the section inlines the pair but not the FINDING it produced — that "
+        "the dispatch ROUTING was the defect, not the pass. Without it the next "
+        "session reads three zeros and re-derives the retirement question from "
+        "more ordinary trials, which is exactly what the record exists to stop."
+    )
+    assert "RETIREMENT CONDITION" not in section, (
+        "the section still inlines a RETIREMENT CONDITION. The trial is closed; "
+        "a condition left standing invites a future session to retire a rule "
+        "that has already earned its place — and it cannot be satisfied twice."
+    )
+    assert "ON TRIAL, NOT A STANDING RULE" not in section, (
+        "the section still announces itself as ON TRIAL. It is a standing rule "
+        "now; telling an auditor otherwise makes them weigh whether to run it "
+        "instead of running it."
     )
     # 🔴 THE HALF THAT WAS MISSING, AND THE ONLY ONE THAT CAN FAIL FOR THE
     # CAUSE THAT MATTERS. Every assertion above is a PRESENCE check, and the

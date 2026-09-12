@@ -15,11 +15,59 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE ARC IS CLOSED: yield ANSWERED (1 of 20), the structural cause FIXED, shipped to both
-hosts, and the doc's own stale open-blocks retired.** Adoption and yield are separate claims and
-each was measured on its own: **adoption 20 of 22 (91%)** post-fix on the workbench against 2 of
-11 (18%) before; **yield exactly 1 of 20**, with the cause of the other 19 measured rather than
-guessed. What remains is a WAIT, not work — see rank 1.
+🔴 **THE YIELD FIGURE IN THIS DOC WAS WRONG — `1 of 20` IS RETRACTED, AND SO IS THE `0 of 16` THAT
+REPLACED IT. THE STEP STAYS WIRED.** Rank 1's re-measurement ran on 2026-09-11 and produced
+`0 of 16`; two independent audits then falsified it, and re-deriving it falsified the original
+`1 of 20` as well — **both came from the same broken instrument**. `#1518`, which retired the
+`/resume` step on the strength of that zero, was **closed unmerged**.
+
+🔴 **WHAT THE INSTRUMENT COULD NOT SEE.** Its method step read *"was a hit DOCUMENT **opened**"*
+while the sentence it was quoted for read *"opened, **mentioned** or acted on"* — `claude/RULES.md`
+→ *"a guard's DESCRIPTION claims COVERAGE — check the implementation is as wide as the sentence."*
+Three compounding flaws in the transcript reader: the needle required a `handoff-` prefix the
+sessions' reports never use (they write `<repo>/<slug>`); assistant text was truncated at 400
+chars while the mentions sit at offset ~3,100; and for `Write`/`Edit` it captured `file_path` only,
+never the content — so a hit written INTO a handoff doc was structurally invisible.
+
+🔴 **CORRECTED, SAME CRITERION ON BOTH WINDOWS (as of 2026-09-11T23:30Z).** A session counts if it
+referenced a hit slug afterwards that it had not mentioned BEFORE the query:
+- **pre-fix (`#1332`..`#1399`): 12 of 38 (32%)**
+- **post-fix (`#1399`..): 9 of 17 (53%)**
+
+⚠ **That criterion OVERCOUNTS and must not be quoted as "yield".** Step 5 *requires* reporting what
+step 4 recalled, so several of the nine are compliance — their own text says "nothing bears on
+this". The strict count (a hit delivered information the session did not have AND a decision, probe
+or durable doc moved) is **3 firm of 17**, hand-verified:
+- `5320d1bf` — hit `cnpg-alerting-hardening` gave it the same `maxmemory` asymmetry from the other
+  side **with ticket `868kurzhm`**, which it reported and then wrote into its committed handoff as
+  a recall pointer. Zero mentions before the query; the search is the only possible source.
+- `8152b7fc` — hit `apps-build-consolidation` told it a DIFFERENT doc's "one line to public-launch"
+  item is **now false** after #4685. A hit correcting a stale belief is the value proposition.
+- `9b6235dd` — hit `gate-flake-store-api` supplied the tmpfs fixture's positive-control argument.
+
+**So the falsifier's condition never fired**, and the honest reading is the opposite of the one this
+doc carried for a day: yield is low-but-real and the `--exclude-slug` fix did not reduce it.
+
+🔴 **AND THE COST QUESTION IS NOW CLOSED BY DELETION (2026-09-12).** The command is **180 bytes**;
+the prose defending it was **6,220** — a 34:1 ratio, and almost all of it this arc's own changelog
+sitting in an instruction file. It is deleted; `resume/SKILL.md` drops 47,762 → 44,834 B. **The
+step stays, the cost objection is gone, and no yield number was needed to get there.** Two
+attempts at that number cost a shipped-then-closed PR, two audits and a correction PR, to
+adjudicate one line — see rank 1 for why it must not be re-opened.
+
+🔴 **WHAT SURVIVES UNCHANGED — the descriptive half was sound.** `--exclude-slug` works exactly as
+designed: **0 self-hit slots** post-fix against 23 of 60 (38%) before, and the session's own doc was
+the #1 hit **0 times** against 13 of 20. Adoption is near-total: every resuming session runs it with
+the flag. Those are the claims that were measured correctly.
+
+⚠ **The ranker observation is real but was over-read.** `[gotcha#0]` dominates the slots (**52 of
+60** as of 2026-09-11T23:30Z; the corpus grows, so re-derive rather than quoting this). That is
+worth fixing. It does NOT support "nothing useful is reachable" — **the one confirmed yielding hit
+was `[investigation#3]`**, i.e. it came through exactly the channel the generic-sections story said
+was crowded out.
+
+- **Adoption** is a separate claim and was measured on its own: **20 of 22 (91%)** post-fix on the
+  workbench against 2 of 11 (18%) before.
 
 - **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
   `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
@@ -36,7 +84,7 @@ guessed. What remains is a WAIT, not work — see rank 1.
   ⚠ **`ship.sh` reached the laptop only under a manual `REMOTE_SSH=zach@10.42.0.100`** — its
   default LAN address timed out. That split the run in two, so `ship.sh` printed
   **`cross-host agreement NOT COMPARED` both times**; the agreement above was checked BY HAND,
-  not by the tool. Filed as rank 3.
+  not by the tool. Filed as rank 2 (it was rank 3 until rank 1 closed).
 - **Live end-to-end on the deployed path:** `in_scope_docs=402` of 403, `excluded=handoff-search-index`,
   and all three hit slots holding documents from a different repo — i.e. the slots the session's
   own handoff used to occupy are now spent on documents it has not read.
@@ -53,7 +101,9 @@ guessed. What remains is a WAIT, not work — see rank 1.
   cannot be re-run against.** Adoption **2026-09-07T02:25Z: 4 of 4** post-`#1332` (control
   `cairn recall` 4/4) — the first, small-n reading. Adoption **2026-09-08T17:00Z: 20 of 22 (91%),
   control 21/22**, measuring session excluded from both halves by session id. Pre-fix on the same
-  host, `#1295`..`#1332`: **11 runs, 2 queried (18%), control 10**. Yield **2026-09-08: 1 of 20**.
+  host, `#1295`..`#1332`: **11 runs, 2 queried (18%), control 10**. 🔴 Yield **2026-09-08: 1 of 20
+  — RETRACTED**, see "State now"; the instrument counted only hit docs OPENED and could not see a
+  hit MENTIONED or written into a doc. Corrected same-criterion figures are in "State now".
   ⚠ The corpus grows, so a later re-run reports LARGER numbers rather than contradicting these.
 - **`#1332`'s own deploy (2026-09-06, both hosts at `8e9428ef`) is SUPERSEDED by `#1399`'s above**
   and was verified the same way — `readlink -f` on both hosts resolving one store path. Kept as a
@@ -231,9 +281,15 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
 - **Residual, NOT measured:** the laptop (still 0 runs) and any repo other than
   `datapacket-talos`.
 
-### RESOLVED — does a hit change what a session does? YIELD = 1 of 20, and the cause is structural
-- **Answer:** yes, once, and the single case is genuinely the thing the index was built for —
-  but 19 of 20 sessions did nothing with the result, and the reason is now measured.
+### 🔴 RETRACTED (the yield NUMBER) — does a hit change what a session does? `1 of 20` was an
+### INSTRUMENT ARTIFACT; the self-hit half of this block still stands
+- 🔴 **Answer (CORRECTED 2026-09-11):** the `1 of 20` here is an INSTRUMENT ARTIFACT — it counted
+  only sessions that OPENED a hit document, so every session that MENTIONED a hit, reported it
+  under step 5's own `from handoff docs` label, or wrote it into its own handoff was scored zero.
+  The true rate is higher; see "State now" for the corrected figures and the three hand-verified
+  cases. **The self-hit half of this block (23 of 60 slots, #1 hit in 13 of 20) was measured a
+  different way and STANDS** — it is parsed from the search's own hit lines, which no truncation
+  or prefix bug touched. Keep reading this block for that half only.
 - **Symptom + exact repro:** for every post-fix session that invoked `handoff_search.py --`,
   read the turns AFTER the tool result and record (a) whether the output was reported to the
   operator, (b) whether a hit document was subsequently opened, (c) whether a decision, probe
@@ -256,10 +312,14 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
     of three slots in two of them. Arithmetic, not luck: step 4 says query the handoff's
     TOPIC, and the best text match for a doc's topic is that doc. **The re-keying that made
     the step unconditional is the same thing that aimed it at itself.**
-- **Ruled out:** that the hits were merely *unreported* while still informing the work — the
-  check is not "was it mentioned" but "was a hit DOCUMENT opened", and outside `d1a30b84` no
-  session touched a hit doc that was not its own handoff or its own `/handoff` write-back.
-  via: measurement
+- 🔴 **NOT ruled out — THIS BULLET IS THE ERROR, and it is the one that cost the most.** It read:
+  *"that the hits were merely unreported while still informing the work — the check is not 'was it
+  mentioned' but 'was a hit DOCUMENT opened'."* **That is a definition being used to dismiss the
+  case it defines away.** Narrowing the check to "opened" is exactly what made every yielding
+  session invisible, because sessions do not open a recalled doc — they report it under step 5's
+  `from handoff docs` label and write a pointer into their own handoff. **Both hand-verified
+  yielding cases were "mentioned", never "opened".** A `Ruled out:` bullet that rules something out
+  BY DEFINITION has ruled out nothing; it has only renamed the question. Retracted 2026-09-11.
 - **Ruled out:** that the self-hits are an artifact of the fixtures or of one repo — the 38%
   spans 20 sessions across four repos, and the two 3-of-3 cases are different repos.
   via: measurement
@@ -282,19 +342,25 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   third choices are worth reading. That is the next probe above, and it is the real question.
 
 ## Next steps (ranked)
-1. **RE-MEASURE YIELD ONCE `--exclude-slug` HAS ~20 QUERIES BEHIND IT.** Rank 1 as it stood is
-   ANSWERED (1 of 20) and the structural cause is fixed, not diagnosed-and-filed — do NOT re-run
-   the old read as if it were open. Wait for the queries, then repeat the yield read exactly as
-   the RESOLVED block describes it, and report the pair: yield, and how many hit slots were
-   still the session's own doc (should be ~0; if it is not, the skill wiring is not being
-   followed and that is an ADOPTION finding, not a yield one). 🔴 **This is the question the
-   whole effort rides on** — an index queried by every session and never useful is a cost, not
-   a capability, and adoption cannot distinguish the two. ⚠ **The falsifier is real and should
-   be honoured:** if yield stays ~1/20 with foreign hits filling every slot, the corpus has
-   little to offer a resuming session, and the right response is to stop paying for the step
-   rather than to tune the ranker again.
-   forcing: none
-2. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
+🔴 **RANK 1 IS CLOSED — AND IT WAS CLOSED BY DELETION, NOT BY MEASURING IT.** The question was
+*"is the corpus query worth what it costs?"* Measured 2026-09-12: **the command is 180 bytes and
+the prose defending it was 6,220 — a 34:1 ratio.** Almost the whole cost was this arc's own
+changelog living in an instruction file: the 5/6-vs-0/6 placement history, the
+denominators-that-reconcile paragraph, a byte-budget figure falsified twice. That prose is now
+deleted (−2,928 B from `resume/SKILL.md`, 47,762 → 44,834), the command stays, and the cost
+objection is gone without a yield number ever being needed.
+
+🔴 **DO NOT RE-OPEN THE YIELD MEASUREMENT.** It was attempted twice and was wrong both times, in
+opposite directions, for structurally different reasons — and each attempt cost far more than the
+line it was adjudicating: a shipped-then-closed PR (`#1518`), two adversarial audits, and a
+correction PR (`#1541`). **A measurement that costs orders of magnitude more than the thing it
+measures is the wrong instrument, however rigorous.** Three hand-verified cases where a hit
+changed what a session did are on record; that is enough to keep a 180-byte line.
+⚠ **If the question ever genuinely matters again, ASK THE OPERATOR** — he reads the
+`from handoff docs` line in every `/resume` report and is the single consumer. A thirty-second
+human answer beats transcript archaeology that has now failed twice.
+
+1. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
    `--exclude-slug "  "` normalises to `""`, prints `excluded=` with nothing after it, leaves
    `in_scope_docs == indexed_docs`, and returns the document the caller meant to drop — the exact
    class three audit rounds closed everywhere else. The library layer accepts `[""]` too. Round 4
@@ -306,7 +372,7 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
    **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
    with a test that watches it fail at the previous commit.
    forcing: none
-3. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
+2. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
    unused.** `host-role.sh` defines `LAPTOP_IP_SECONDARY=10.42.0.100` (nebula) beside the primary
    `192.168.50.155`, but the SSH default derives from the primary only — so from off-network the
    remote leg dies `Connection timed out`, rc 255, and the run reports `incomplete`. Measured
@@ -319,12 +385,12 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
    when the primary is unreachable (or the rc-255 message names `REMOTE_SSH` and the nebula
    address), with a test that watches the fallback fire.
    forcing: none
-4. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
+3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
    does it, which is the intended signal.
    forcing: none
-5. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
+4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
    rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
    re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.
@@ -532,6 +598,43 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   `handoff_doc.py` resolves its base from the working tree. Merging a delta there would have
   classified every section as NEW and **replaced the committed doc**. `git rev-list --count
   HEAD..origin/main` plus a content check before drafting; `merge --ff-only` to fix.
+
+- 🔴 **THIS METRIC WAS WRONG TWICE, IN OPPOSITE DIRECTIONS, AND THE INSTRUMENT WAS THE CAUSE BOTH
+  TIMES.** `1 of 20`, then `0 of 16`, then — with the needle fixed — 32% and 53% on the same two
+  windows. Nothing about the system changed between readings; only the reader did. **When a
+  measurement drives a RETIREMENT decision, the instrument deserves the same adversarial pass as
+  the code**: the PR that retired the step was written, tested, mutation-verified, audited and
+  merged-ready before anyone checked whether the number underneath it was real.
+- 🔴 **THE CLAIM WAS STATED WIDER THAN THE INSTRUMENT, AND THE GAP IS WHERE THE TRUTH LIVED.** The
+  method step read *"was a hit DOCUMENT **opened**"*; the sentence everyone quoted read *"opened,
+  **mentioned** or acted on"*. Sessions do not OPEN a recalled doc — they report it under step 5's
+  `from handoff docs` label and write a pointer into their own handoff. **Every single yielding
+  case lived in the two verbs the instrument did not implement.** `claude/RULES.md` → "a guard's
+  DESCRIPTION claims COVERAGE — check the implementation is as wide as the sentence." **Read your
+  own claim back and underline each verb; then point at the line that implements it.**
+- 🔴 **A TRANSCRIPT READER THAT TRUNCATES IS A SILENT FILTER ON WHAT YOU CAN CONCLUDE.** Three
+  flaws compounded: a needle requiring a `handoff-` prefix the reports never use (they write
+  `<repo>/<slug>`); assistant text cut at 400 chars while the mentions sat at offset ~3,100; and
+  `Write`/`Edit` captured by `file_path` only, so a hit written INTO a doc was invisible. Each
+  looks like a reasonable budget. Together they made a 53% read as 0%. **Never truncate the
+  haystack in a pass whose output is a count — truncate the DISPLAY, search the whole record.**
+- 🔴 **A ZERO AND A PERFECT SCORE ARE THE SAME TELL, AND THIS DOC ALREADY SAID SO.** It carried
+  "A PERFECT 100% (OR 0%) IS A REASON TO SUSPECT THE NEEDLE" — written after the self-hit needle
+  matched its own instrument — and then a `0 of 16` was written down, shipped into a skill, a
+  README, a commit message and a test's failure message without that rule firing. **A lesson in
+  the same document is not a control.** The positive control that DID run covered the self-hit
+  half (37% pre-fix, reproducing 38%) and I treated it as validating the whole read; it validated
+  one half. **A control validates the needle it was run on, and nothing else.**
+- 🔴 **THE CO-LOCATED COMPARISON CUTS BOTH WAYS, AND ONE INSTANCE IS NOT A DIRECTION.** `d775cf17`
+  (cairn found the fsync doc, the search ranked it 11th) became "cairn is the surviving surface and
+  it is the one that delivered". `5320d1bf` is the exact mirror: it recorded `cairn recall` as
+  returning nothing relevant and the handoff-corpus hit as the useful one. **Two instances, opposite
+  directions — which is no direction at all.** The first was generalised because it agreed with the
+  conclusion already forming.
+- ⚠ **AN AUDIT CAUGHT THIS, AND ONLY BECAUSE IT RE-DERIVED THE HEADLINE RATHER THAN CHECKING THE
+  DIFF.** Both rounds found the same counterexample independently, in a PR whose code was correct
+  and whose tests passed. **The finding was not in the diff at all** — it was in the sentence the
+  diff existed to act on. When a change's whole justification is one number, audit the NUMBER.
 
 ## How to verify
 ```bash

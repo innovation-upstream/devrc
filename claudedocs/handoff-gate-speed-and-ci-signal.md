@@ -21,26 +21,23 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- **RANKS 1, 2 AND 3 ARE ALL CLOSED, MERGED AND VERIFIED.** All three claims released.
-- **The arc's commit ledger, carried forward** (`State now` is REPLACED every update, so this
-  list must be re-carried or it is lost): `#1429` a0839ec4, `#1445` cace96d9, `#1469` 86b1ddec,
-  `#1471` 4ab87a64, `#1482` 972fbcbd, `#1488` d835fe51, `#1489` b315cdd3, `#1502` ffef57bc,
-  `#1512` 189689c1.
-- **RANK 1 — `ZacxDev/homelab-infra#792` MERGED IN DRY-RUN** (`dbe47814`), NOT armed. Four claims
-  each measured separately: on `trunk` by content; Flux-reconciled at 06:21:06Z; consumer running
-  `mode=dry-run`; and **wrote nothing** (0 of 329 PipelineRuns annotated). Arming is now rank 8.
-- **RANK 2 — `#1502` MERGED (`ffef57bc`), shipped, consumer verified.** `ship.sh` rc 0, both hosts
-  at `ffef57bc` **and the two shas actually COMPARED**. The unit runs **directly from the working
-  tree** (`ExecStart=…%h/workspace/devrc/scripts/main-status-watch.py`), so a host's checkout
-  advancing IS the deploy — verified in the executed file: bare `return RC_UNMEASURED` **3 → 2**.
-- **RANK 3 — CLOSED BY MEASUREMENT, NOT BY A FIX. `#1512` `189689c1`.** Its premise was wrong
-  twice over; see the Gotchas entry. ⚠ Merged with CI still pending (comment-only, one file, full
-  file re-run at 760 passed on the exact branch content, 0 behind main) — stated because that is a
-  decision, not a nil event.
-- 🔴 **THE QUEUE NOW HAS NO ELIGIBLE ITEM.** Ranks 4–7 all declare `forcing: none`, which this doc's
-  own rule says is "**not eligible to be worked**"; rank 8 is the operator's and is parked on soak
-  evidence. ⚠ **Rank 4 arguably now HAS a forcing function** — see its entry — but promoting it is a
-  judgement a future session should make deliberately rather than inherit.
+- **THE ARC IS CLOSED. Ranks 1, 2, 3, 4 merged + shipped + consumer-verified; rank 9 closed by
+  another session. Ranks 5, 7, 10, 11 are IN FLIGHT. Rank 8 is DATED, not done.**
+- **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
+  `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
+  `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
+  `#1524` 58bfb747. Closed unmerged on purpose: `#1558`, `#1559` (superseded by `#1561`).
+- **`#1524` (rank 4) merged `58bfb747`** after round 0 → round 1 → round 2, CI green on all three
+  including the sandbox tier (22,516 passed / 0 failed). `ship.sh` rc 0, both hosts at `58bfb747`
+  **and the two shas compared**. 🔴 **Consumer verified separately**: the PR changed a live unit's
+  import graph, and `main-status-watch` fired twice post-ship (`from ci_status import` present in
+  the executed file, `ExecMainStatus=0`, `Result=success`, real verdict read).
+- **`main` was RED twice this session, both fixed** — `#1567` (`_OWN_BOUND_LEDGER`) and `#1561`
+  (the kill-mention treadmill, by another session). Verified green on the post-merge tip, 20 passed.
+- **IN FLIGHT — four agents, all claimed:** rank 5 (CI median, investigation), rank 7
+  (`repo-full-name` pin, `ZacxDev/homelab-infra`), rank 10 (timer for the triage tool — commit
+  `f360783b` exists on `feat/route-stale-base-triage`, **unpushed** at the time of writing), rank 11
+  (fast ledger check). **If a rank has no PR when you read this, its work did not land — redo it.**
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -104,52 +101,81 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 
 ## Next steps (ranked)
 
-🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting on one. New items
-go at the END; inserting mid-list silently re-points every live claim. **Ranks 1–3 are CLOSED and
-deliberately left as tombstones** — renumbering would re-point every live claim on this doc.
+🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
+the END. **Ranks 1–4 and 9 are CLOSED tombstones**; renumbering re-points every live claim.
 
-1. **CLOSED — `homelab-infra#792` merged in dry-run.** Arming is rank 8, not this.
+1. **CLOSED** — `homelab-infra#792` merged in dry-run (`dbe47814`). Arming is rank 8.
    forcing: none
-2. **CLOSED — `#1469`'s audit ladder, merged as `#1502`, shipped and verified live.**
+2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.
    forcing: none
-3. **CLOSED — the store-api flake was already fixed by `#1458`'s tmpfs siting; `#1512` records the
-   measurement.** 0 of 45 post-fix PR-head verdicts vs 4 of 125 pre-fix. 🔴 Do NOT re-open on a
-   single recurrence: P(0) ≈ 0.23 at the old rate, so the zero was never the proof — the mechanism's
-   removal is. Re-open only if the *classifier* prints `SERVER_BLOCKED_IN_FSYNC` again.
+3. **CLOSED — the store-api flake was already fixed by `#1458`. ⚠ `#1512` is NO LONGER the
+   measurement of record**: it split on `ce9b55c3`'s TIMESTAMP and its zero was underpowered
+   (4/125 → 0/45, P(0) ≈ 0.23). Superseded 2026-09-12 by an ANCESTRY split over 400 PR heads —
+   **0 of 99** verdicts on heads carrying the sha against **12 of 298** that do not, P(0) ≈
+   **0.017** — recorded in `devrc#1568` (`8114a124`), full table at
+   `handoff-gate-flake-store-api.md` rank 1. ⚠ **`#1512`'s table is not WRONG**: re-splitting the
+   same 397 verdicts by date reclassified 5 and **0 of 101 failures**, so its predicate was the
+   wrong test and changed nothing at this sample. Cite the newer read; keep `#1512` for its
+   "it was never the worst flake" finding, which stands.
    forcing: none
-4. **Stale PR bases re-report already-fixed reds.** 🔴 **NEW EVIDENCE 2026-09-11, and it is stronger
-   than when this was filed:** of the 6 genuine `tekton/devrc-pytests` failures in the whole post-fix
-   window, **3 — half — were `test_the_SUMMARY_BANNER_names_the_real_selection_source` on PRs 17, 40
-   and 40 commits behind main**, all since merged, and that test passes on current main. So stale
-   bases are not a tidiness issue: they are **50% of the current genuine-failure signal**, i.e. the
-   thing most degrading the only automated gate. A bot comment naming the fix commit would stop
-   humans triaging cured reds. `strict: true` is deliberately off and correctly so.
-   ⚠ Promoting this to `forcing: gate` is defensible on the above and is left as an explicit
-   judgement for the next session rather than done here.
+4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.
    forcing: none
-5. **The 19-min CI median.** `pytests` is 90–95% of it. ⚠ `devrc-ci-5m64b` ran `pytests` in **52s**
-   on a nix cache hit, so an unchanged derivation is already near-free — the cost is entirely
-   rebuild-on-change.
+5. **The 19-min CI median — IN FLIGHT.** `pytests` is 90–95% of it; `devrc-ci-5m64b` ran it in **52s**
+   on a nix cache hit, so the cost is entirely rebuild-on-change. The live question: does a docs-only
+   commit bust the derivation (`cp -r ${./.}`)? If so that is both the answer and a small fix.
    forcing: none
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**.
-   ⚠ `#1502` did NOT delete it; round 6 left it in place. The deadman's double-run is the real defence.
+   🔴 Decide it TOGETHER with rank 4: `main-status-watch.py`'s flake screen already implements the same
+   completeness-proving screen in **15 lines**, and `#1524` rebuilds that gate at ~885. Same question.
+   🔴 **NEW EVIDENCE FOR THAT DECISION, 2026-09-12 — and it cuts toward DELETE.** The screen exists
+   to skip re-runs on KNOWN FLAKES, and the store-api flake it was written around is now at **0 of
+   99** verdicts on heads carrying `ce9b55c3` (`handoff-gate-flake-store-api.md` rank 1). The same
+   read independently re-derived this file's own truncation finding from scratch — **100 of 101
+   failure descriptions truncated at 138 of the 140-character cap** — which is what makes the screen unsatisfiable
+   (the measurement sits beside `_FAILING_RE` in that file). So the screen now guards a flake that has
+   stopped occurring, using a completeness proof a 140-byte field cannot supply. ⚠ **Both figures are
+   a READ-TIME population that cannot be re-derived** (GitHub keeps one status per context and
+   supersedes overwrite it) — see `handoff-gate-flake-store-api.md` rank 1; a later disagreement is
+   not a refutation. ⚠ **Not a decision —
+   the 2026-10-11 date and "decide them together" both stand**; this is the datum to decide ON, and it
+   did not exist when the date was set.
    forcing: none
-7. **Pin the `repo-full-name` invariant in `homelab-infra`'s supersede tests.** `test_supersede_
-   wiring.py` contains **zero** occurrences of the string that pass 2's correctness rests on. 15/15
-   supersede-capable resourcetemplates wire it correctly today and `SUPERSEDE_TEMPLATES` is a two-way
-   ledger, so the gap is a *ledger-registered* template hardcoding the repo. 🔴 That fails as a FALSE
-   `"closed"`, not a clean 404 — devrc 1400+ and homelab-infra 790+ mostly-closed PRs. Fix: extend
-   `test_vetr_crossrepo_e2e_wiring.py:184-189` over all of `SUPERSEDE_TEMPLATES`. Repo:
-   `ZacxDev/homelab-infra` (clone `~/workspace/homelab-talos`).
+7. **Pin `repo-full-name` across `SUPERSEDE_TEMPLATES` — IN FLIGHT.** `test_supersede_wiring.py` has
+   ZERO occurrences of the string pass 2's correctness rests on. 🔴 The failure is a false `"closed"`
+   (devrc 1400+, homelab-infra 790+ mostly-closed PRs), not a clean 404. Repo: `ZacxDev/homelab-infra`,
+   clone `~/workspace/homelab-talos`, default branch `trunk`, **merging DEPLOYS**.
    forcing: none
-8. **Decide whether to ARM `#792` (`CLOSED_PR_MODE: on`).** Criteria (i)–(iii) already met
-   non-vacuously on the first two post-deploy sweeps; (iv) needs sustained observation. Read
-   `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and `|= "closed-pr pass:"` in Loki.
-   🔴 Zero `DRY-RUN would cancel` lines after 7 days of normal merging is NOT a clean bill — it is
-   the instrument failing to see the bucket it was built for. Arming is one line in
-   `supersede-cronjob.yaml` plus the pinned literal at `test_supersede_logic.py:2251`, which forces
-   both into one commit. **Operator's call.**
-   forcing: user — the operator chose merge-in-dry-run-arm-later and owns the arming decision.
+8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK UNTIL ~2026-09-18, THEN ARM.** Operator decided this
+   date. Criteria (i)–(iii) were already met non-vacuously on the first two post-deploy sweeps;
+   (iv) needs the sustained window. Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and
+   `|= "closed-pr pass:"` in Loki, hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` +
+   the pinned literal at `test_supersede_logic.py:2251` (one commit, by construction).
+   🔴 Zero `DRY-RUN would cancel` lines after a week of normal merging is NOT a clean bill — it is
+   the instrument failing to see its bucket. ⚠ Dry-run short-circuits BEFORE the re-read guard, so
+   the soak cannot exercise the mid-tick race (devrc #1500 merged 14s after a sweep started).
+   forcing: deadline — the operator set 2026-09-18.
+9. **CLOSED by `#1561`** — the kill scanners no longer read `claudedocs/`, which ends the treadmill
+   rather than paying another round of it. **Rate evidence that the close is real and not merely
+   merged:** the kill-mention ledger accounts for **22** `tekton/devrc-pytests` reds across PR heads
+   and **every one predates `c0bbd6d9`** — read 2026-09-12 ~04:00Z in `devrc#1568`; see rank 1 of
+   `handoff-gate-flake-store-api.md` for why that population is read-time-only and cannot be
+   re-derived.
+   🔴 **Both instances of the CLASS are now fixed and the class itself is not.** The same design — a
+   census over tracked text reddening `main` for everyone — fired next from
+   `scripts/tests/test_runner_bound_ledger.py` (**5** reds, **4** after `c0bbd6d9`), closed by
+   `#1567` `6f1867b1` (**5 passed** at `origin/main` `337114e0`). **At least two instances in two days, both measured here, and nothing prevents
+   the next one.** Tracked as `handoff-gate-flake-store-api.md` rank 8, closed as an instance and
+   retained for the class.
+   forcing: none — both instances shipped; the class is unaddressed and owned by nobody.
+10. **Route `scripts/stale-base-triage.py` — IN FLIGHT.** Operator chose: own systemd-user timer,
+   shipped in `--comment-mode dry-run`, armed after a short soak (the `#792` shape). It merged with
+   `58bfb747` invoked by nothing.
+   forcing: none
+11. **Fast pre-merge ledger check — IN FLIGHT.** Both of this session's `main` reds were a two-way
+   ledger pin broken by a file landing without its row, each red for hours. The ledger tests run in
+   seconds; the 20-min gate is what nobody runs. 🔴 The set of ledger tests must be DERIVED — a
+   hardcoded list is itself a ledger that goes stale.
+   forcing: gate — it reddens `main`, and every branch cut from a red `main` inherits it.
 
 ## Decisions, so they are not re-litigated
 
@@ -171,17 +197,21 @@ deliberately left as tombstones** — renumbering would re-point every live clai
 ## How to verify
 
 ```bash
-# rank 2's consumer — this unit runs from the WORKING TREE, so the checkout IS the deploy
-grep -c 'return RC_UNMEASURED' ~/workspace/devrc/scripts/main-status-watch.py   # 2 = fixed, 3 = pre-fix
+# rank 4's consumer — the unit runs from the WORKING TREE, so the checkout IS the deploy
+grep -c 'from ci_status import' ~/workspace/devrc/scripts/main-status-watch.py   # 1
 systemctl --user list-timers main-status-watch.timer --all
 journalctl --user -u main-status-watch.service -n 6 --no-pager
-#  a "no authoritative … verdict in the newest 20 commits" line is a HEALTHY arm, not a fault
+#  a "no authoritative … verdict" line is a HEALTHY arm, not a fault
 
-# rank 1 — merged AND reconciled AND running are three claims; make them separately
-gh pr view 792 --repo ZacxDev/homelab-infra --json state,mergeCommit
+# rank 8's arming evidence (soak to ~2026-09-18)
+#   {app="tekton-supersede"} |= "DRY-RUN would cancel"     <- must be NON-zero
+#   {app="tekton-supersede"} |= "closed-pr pass:"          <- states_read == resolvable, resolvable>=1
 KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get cronjob tekton-supersede -o yaml | grep -A1 CLOSED_PR_MODE
-KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci logs -l app=tekton-supersede --tail=20 | grep 'closed-pr pass'
-#  and the write-nothing control: 0 PipelineRuns should carry ci.zacx.dev/cancelled-because
+
+# main is green on both ledgers this session reddened
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  scripts/tests/test_runner_bound_ledger.py \
+  scripts/claude-hooks/tests/test_guard_core.py -q -p no:cacheprovider
 
 # both hosts on one sha — read EVERY per-host line, and that it says hosts were COMPARED
 bash ~/workspace/devrc/scripts/ship.sh
@@ -360,6 +390,69 @@ bash ~/workspace/devrc/scripts/ship.sh
   warnings**, and this suite warns on `the spawn lost the port race and retried`. Only the tail was
   captured, so whether those were port-race retries is **unknown**. If they were, the race is live
   on this host — but nothing here claims that.
+
+### 2026-09-12 — rank 4's ladder, and a red `main` nobody had fixed
+
+- 🔴 **A `-k` FILTER THAT MATCHES NOTHING PRINTS `N deselected` AND EXITS 0.** Checking whether `main`
+  was red, `-k 'kill_server_call_site' scripts/tests/` printed **`14194 deselected`** — the test lives
+  in `scripts/claude-hooks/tests/`, which that path never covered. "Deselected" is not "passed", and
+  the exit code cannot tell them apart. **Same silent-zero family as `pytest $VAR` under zsh** (one
+  argument, zero tests, exit 0), which I also hit today.
+- 🔴 **TWO AGENTS GAVE TWO DIFFERENT, BOTH-WRONG ANSWERS ABOUT THE SAME RED.** One said the test was
+  cured on `main` by `7344e76f`; the other named `f3e27aa3` as failing. Current `main` fails on a
+  THIRD file neither mentioned. Neither was lying — each measured a different tip of a moving branch.
+  **A claim about `main` decays in hours; re-measure at the moment you act.**
+- 🔴 **`pgrep -af <pattern>` MATCHED ITS OWN SHELL**, live, while I checked whether another worktree's
+  run was still going — the command line containing the pattern appeared in its own output. Harmless
+  on a read; it is exactly why a `-f` pattern must never reach `pkill`.
+- 🔴 **A GUARD IS TRIPPED BY ITS OWN DOCUMENTATION.** `_KILL_MENTION_LEDGER` pins every file mentioning
+  a wide tmux kill, so every handoff written ABOUT it becomes a new unclassified file. Three of its
+  four `claudedocs/` rows exist for that reason alone, and `main` went red again **within minutes** of
+  the PR that fixed the previous two. Generalise: **a guard whose trip condition is "a file mentions
+  X" will be tripped by the documentation of that guard.**
+- **A Pyright "Invalid character `\ud83d` in token" diagnostic was a FALSE POSITIVE** — the bytes were
+  a valid `f0 9f 94 b4` (U+1F534 🔴) and the file parsed fine. An IDE diagnostic is a claim like any
+  other; `ast.parse` is the arbiter.
+- **I destroyed one of my own controls by removing its worktree while it ran** (`FileNotFoundError:
+  …/wt-control`, exit **0** anyway). The decision did not change because the discriminating run had
+  already finished — luck, not justification. **Check for live processes before removing any worktree**
+  (`pgrep -af <path>`, reading the result rather than acting on a pattern).
+- **Round 0 earned its trial slot: `ran: 1 · changed the outcome: 1`.** Its F1/F2 are unreachable from
+  any of the nine correctness axes — a full checklist round would have passed a tool that fired on none
+  of its justifying cases. Recorded on `#1524` as a comment.
+
+### 2026-09-12 — closing out: what I got wrong, and what the session actually proved
+
+- 🔴 **I INVESTED TWO PRs IN A PROBLEM ANOTHER SESSION WAS ALREADY SOLVING.** `#1558` and `#1559` both
+  targeted the kill-mention treadmill; `#1561` closed it structurally while I was arguing about
+  split-token forms, and I closed both unmerged. Three sessions were visibly active in those files —
+  `claim-work --list` and `gh pr list` would have shown it. **Sweep for concurrent work BEFORE
+  investing in a fix, not only before claiming a ranked item.** My net contribution to that problem
+  was becoming an offender myself.
+- 🔴 **MY OWN HANDOFF BROKE `main`.** The paragraph documenting "this guard is tripped by its own
+  documentation" spelled the token literally, matched `_MENTION_RE`, and became the next offender the
+  moment `58c03a77` landed. Three sessions did this concurrently inside one hour (`#1556`, `#1557`,
+  mine). **A doc describing a text-matching guard is a file that guard will match.**
+- 🔴 **A `-k` FILTER THAT MATCHES NOTHING PRINTS `N deselected` AND EXITS 0.** Checking whether main
+  was red, `-k 'kill_server_call_site' scripts/tests/` printed **`14194 deselected`** — the test lives
+  under `scripts/claude-hooks/tests/`. Deselected is not passed, and the exit code cannot tell them
+  apart. Same family as `pytest $VAR` under zsh (one arg, zero tests, exit 0), also hit today.
+- 🔴 **I NEARLY COMMITTED ANOTHER PROCESS'S MUTANT.** Copying a "verified" file out of a worktree
+  where a background positive-control run was mid-swap produced a copy containing
+  `UNCLASSIFIED-CONTROL`. Caught only by asserting expected marker counts before staging. **Never
+  copy from a tree another process is writing; rebuild from the pristine ref.**
+- 🔴 **`pgrep -af <pattern>` matched its OWN shell**, live, while checking whether a worktree was busy.
+  Harmless on a read; it is exactly why a `-f` pattern must never reach `pkill`.
+- **A Pyright "Invalid character `\ud83d`" diagnostic was a FALSE POSITIVE** — valid `f0 9f 94 b4`
+  (U+1F534) and the file parsed. An IDE diagnostic is a claim; `ast.parse` is the arbiter.
+- **ROUND 0 EARNED ITS TRIAL SLOT: `ran: 1 · changed the outcome: 1`.** On `#1524` it found the tool
+  fired on **0 of the 3 cases that justify its existence** — unreachable from any of the nine
+  correctness axes. A full checklist round would have passed it.
+- **Three agents corrected MY briefs, and each correction was right:** the status-fold premise (first-
+  wins over newest-first yields the NEWEST row, not the oldest); `FAILED_COUNT_RE` had the identical
+  defect to `TOTALS_RE` and the auditor had not filed it; and a `scoped-tests.sh PASS` claim was
+  withdrawn as measured against a pre-rebase base. **Brief an agent with your reasoning and it may
+  fix your reasoning — read the corrections rather than the conclusions.**
 ## Open investigations — live diagnosis state
 
 ### RANK 2: #1469's audit ladder has not reached a clean round
@@ -391,3 +484,23 @@ bash ~/workspace/devrc/scripts/ship.sh
 - **Sweep, enumerated from the AST:** 440 mutants → **155 survivors** on the merged code, against
   two earlier hand-written sweeps that self-reported 24/24 and 31/31. After fixes 73, then 58 —
   each remaining one justified (23 are `say()` log-narration deletions, deliberately unpinned).
+
+### `main` goes red every time someone writes a handoff ABOUT the tmux-kill ledger
+- **Symptom + exact repro:** `nix develop ~/workspace/devrc -c python3 -m pytest
+  scripts/claude-hooks/tests/test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_
+  classified` on a clean `origin/main` worktree. Fails with the unclassified file named.
+- **Observed (with values):** `_KILL_MENTION_LEDGER` (`test_guard_core.py:2525`) is a two-way pin over
+  every file mentioning a wide tmux kill. Four `claudedocs/` rows now; **three exist purely because
+  someone documented the guard.** `#1520` classified one, `#1534` classified two more **plus a real
+  scanner bug** (it matched `kill-session` inside `sk`+`ill-session`), and `main` went red again on a
+  new doc **within minutes of #1534 merging**.
+- **Ruled out:** "carelessness / a one-off" — the recurrence is STRUCTURAL: a write-up of this
+  incident is a new unclassified file *by construction*. via: measurement
+- **Ruled out:** "#1544 fixed it" — `#1544` is a handoff commit; the ledger still lacks the file, and
+  the test still fails on its tip. via: command
+- **Leading hypothesis:** any guard whose trip condition is "a file mentions X" will be tripped by the
+  documentation of that guard. This is the "permanently-red gate trains everyone to click through"
+  shape in slow motion.
+- **Next probe:** decide the design fix — scope the scanner off `claudedocs/`, or auto-classify a
+  prose-only file that executes no tmux command. 🔴 Deliberately NOT taken unilaterally; classifying
+  the doc unblocks `main` but does not close the loop.

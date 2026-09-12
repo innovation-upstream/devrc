@@ -81,17 +81,18 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED. The floor catches COLLAPSE, not growth; `run-tests.sh`'s own
-# formula is `m - min(50, max(1, m/20))`, which at m=19 is 18.
-# 🔴 IT ALREADY FIRED ONCE, BEFORE THIS FILE WAS COMMITTED: the module grew
-# 18 → 19 while this literal still said 17, and the pin failed with
-# `should be 18, not 17`. One growth was enough. That is the argument for pinning
-# it from the first commit rather than after the second silent widening.
+# formula is `m - min(50, max(1, m/20))`, which at m=20 is 19.
+# 🔴 IT FIRED TWICE BEFORE THIS FILE WAS EVEN MERGED, which is the whole argument:
+# the module grew 18 → 19 (pin said 17, failed with `should be 18, not 17`), then
+# 19 → 20 one commit later (pin said 18, failed with `should be 19, not 18`).
+# Neither growth was a refactor — each was a single test added while fixing
+# something — and a hand-maintained floor would have silently tolerated both.
 # 🔴 DO NOT maintain this by memory — `test_ladder_range_coverage.py::
 # test_the_batterys_floor_is_re_derived_from_this_modules_size` reads the literal
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=18
+MIN_TESTS=20
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -206,6 +207,27 @@ run "the interior bucket never accumulates" \
     '                interior_a += added or 0' \
     '                interior_a += 0'
 
+# 🔴 The regression row. This caveat shipped as a LITERAL ("Three of the 20
+# ladders") and printed that devrc figure under a 5-ladder run of another repo.
+# The mutant restores the literal; the guard must notice.
+run "the zero-line-gap caveat goes back to a literal" \
+    test_the_zero_line_gap_caveat_is_DERIVED_from_this_run "$LRC" \
+    '                   f"{zero_line_gaps} gap(s) in THIS run look like that.")' \
+    '                   "Three of the 20 ladders look like that.")'
+
+# 🔴 The regression that made a real finding read as routine drift: pairing a raw
+# range count with a `--not <base>` line count. devrc #1046's tail printed
+# `55 commit(s), 1105 line(s)` when the churn population was TWO.
+run "the commit count reverts to the RAW range population" \
+    test_the_commit_count_beside_the_lines_is_the_CHURN_population "$LRC" \
+    '        commits = churn.churn_commits if churn else None' \
+    '        commits = churn.commits if churn else None'
+
+run "the churn-population count is never computed" \
+    test_the_commit_count_beside_the_lines_is_the_CHURN_population "$DISP" \
+    '        churn_commits = int(out2.strip())' \
+    '        churn_commits = int(out.strip())'
+
 echo
 echo "== the labels that must NOT become a sized GAP =="
 run "an OVERLAP is reported as a GAP instead" \
@@ -258,7 +280,7 @@ echo "== the shared core, and the rule that must differ per caller =="
 # directions have their own row, because one mutant cannot show both.
 run "the shared core starts refusing an empty range" \
     test_measure_range_churn_does_NOT_refuse_an_empty_range "$DISP" \
-    '        return RangeChurn({}, 0, 0, 0, None)' \
+    '        return RangeChurn({}, 0, 0, 0, 0, None)' \
     '        return fail("the range is EMPTY")'
 
 run "measure_ledger stops refusing an empty range" \
@@ -271,10 +293,12 @@ run "measure_ledger stops refusing an empty range" \
 run "the churn numbers are dropped on the way back out" \
     test_measure_ledger_still_measures_a_real_range "$DISP" \
     '    return LedgerReport(
-        churn.files, churn.added, churn.deleted, churn.commits, None, None, None
+        churn.files, churn.added, churn.deleted, churn.commits,
+        churn.churn_commits, None, None, None
     )' \
     '    return LedgerReport(
-        churn.files, 0, 0, churn.commits, None, None, None
+        churn.files, 0, 0, churn.commits,
+        churn.churn_commits, None, None, None
     )'
 
 run "a failed git call becomes a zero instead of a reason" \

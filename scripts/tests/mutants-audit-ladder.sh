@@ -284,6 +284,29 @@ run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
   FAILURES=$((FAILURES+1))
 }
 
+# --- report the EFFECTIVE floor, for the guard that pins it -------------------
+# 🔴 PLACED HERE ON PURPOSE: after every top-level assignment and immediately
+# before the run begins, so it reports the value `failing()` will actually
+# compare against. Moving it up to sit beside `MIN_TESTS=` would reintroduce
+# exactly the defect it closes.
+#
+# WHY IT EXISTS (devrc #1431): the guard used to pin this floor by regexing
+# `^MIN_TESTS=(\d+)` out of this file's SOURCE TEXT. Any override the shell
+# applies is invisible to that. MEASURED — with
+#     MIN_TESTS=15
+#     if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi
+# the guard reported `1 passed` while the battery floored at 3. `MIN_TESTS=$LOW`
+# is the same hole. The issue was closed COMPLETED with the defect intact and
+# had to be reopened; this is the fix its closing condition names.
+#
+# The guard EXECUTES this rather than reading it, which is the whole point: a
+# value the shell computes is the only thing that can answer "what floor will
+# this run use".
+if [ "${1:-}" = "--print-min-tests" ]; then
+  printf '%s\n' "$MIN_TESTS"
+  exit 0
+fi
+
 echo "== baseline =="
 base="$(failing)"
 if grep -q __HARNESS_BROKE__ <<<"$base"; then

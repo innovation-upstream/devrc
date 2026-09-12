@@ -58,9 +58,35 @@
 #                  nothing. Exit 0 only if the selection is non-empty.
 #   ROOT defaults to the git repo root.
 #
+# 🔴 AND THE SECOND REFUSAL: a diff touching a SHARED SURFACE — the build, a
+# shared library, a shared TEST library, a runner, a conftest — gets no scoped
+# verdict at all. Scoping such a change is not merely incomplete, it is
+# MISLEADING: the mapping finds the handful of test files that NAME the changed
+# module and silently drops every target that reaches it through an import.
+# MEASURED at 018e483b, `scripts/testlib/` only:
+#
+#     module            selected   files referencing it   targets spanned
+#     mockbin.py            10              69                  7
+#     gitenv.py              2              17                  8
+#     hermetic_git.py        4              15                  1
+#     store_siting.py        0               6                  3
+#
+# A `mockbin.py` edit ran 10 files, printed `RESULT: PASS`, and never executed
+# 59 of the 69 files that reference it. The zero-select cases were already safe
+# (exit 4); these middle ones are the dangerous shape, because a run that
+# executes SOMETHING reads as a successful scoped run. Sourced from
+# `claudedocs/gate-inventory-2026-09-08.md` §10, whose own §11 risk 1 — "a
+# target that stops running because a rule missed a path looks exactly like a
+# target that passed" — is why the trigger REFUSES rather than widening the
+# selection: a refusal cannot be mistaken for coverage.
+#
 # Exit: whatever run-tests.sh exits (its verdict is the verdict), or
 #       2 = a usage/precondition problem here
-#       4 = the mapping selected no test files. NOT a pass — run the full gate.
+#       4 = NO SCOPED VERDICT IS AVAILABLE. NOT a pass — run the full gate.
+#           Two distinct reasons, named in the message, sharing one code
+#           because they demand the same action:
+#             (a) the mapping selected no test files;
+#             (b) the diff touches a shared surface (see the trigger list).
 
 set -uo pipefail
 
@@ -181,6 +207,53 @@ if [ "${#CHANGED[@]}" -eq 0 ]; then
   echo "scoped-tests: FATAL — the diff is EMPTY: nothing changed against $BASE" >&2
   echo "  and the working tree is clean. There is nothing to scope a run to." >&2
   echo "  This is not a pass. If you want a verdict, run scripts/gate.sh." >&2
+  exit 4
+fi
+
+# --- SHARED-SURFACE TRIGGERS (gate-inventory §10) ------------------------------
+# 🔴 A `case` glob, NOT a pathname glob: in `case`, `*` matches `/` as well, so
+# `nix/*` means `nix/**` and covers `nix/a/b.nix`. Writing these as find-style
+# patterns would silently cover only the top level — the exact "a rule missed a
+# path" failure §11 names.
+#
+# 🔴 THIS LIST IS THE GUARD, so it must not be reachable only through the
+# happy path: `test_scoped_tests_shared_surface.py` drives a real diff for EVERY
+# entry below and asserts exit 4 with this block's own message, plus a NEGATIVE
+# control (an ordinary subsystem file that must still scope normally). Without
+# the negative control, a trigger matching EVERYTHING would score green.
+SHARED_SURFACE_GLOBS=(
+  'flake.nix'                 # changes the build for every target
+  'flake.lock'
+  'nix/*'                     # ditto — every derivation
+  'scripts/lib/*'             # shared library, imported across subsystems
+  'scripts/testlib/*'         # shared TEST library — the measured case above
+  'scripts/run-tests.sh'      # the runners themselves decide what "ran" means
+  'scripts/run-node-tests.sh'
+  'scripts/gate.sh'
+  'conftest.py'               # top level
+  '*/conftest.py'             # and every nested one
+)
+SHARED_HITS=()
+for _f in "${CHANGED[@]}"; do
+  for _g in "${SHARED_SURFACE_GLOBS[@]}"; do
+    # shellcheck disable=SC2254  # $_g is a deliberate case pattern, not a literal
+    case "$_f" in
+      $_g) SHARED_HITS+=("$_f <- $_g"); break ;;
+    esac
+  done
+done
+if [ "${#SHARED_HITS[@]}" -gt 0 ]; then
+  echo "scoped-tests: this change reaches SHARED SURFACE — run the gate." >&2
+  echo "  No scoped verdict is available for these paths, and this is NOT a pass." >&2
+  echo "  Scoping them is not merely incomplete, it is MISLEADING: the mapping" >&2
+  echo "  selects the few test files that NAME the changed module and drops every" >&2
+  echo "  target that reaches it through an import. Measured on scripts/testlib/:" >&2
+  echo "  a mockbin.py edit selected 10 files and never ran 59 of the 69 that" >&2
+  echo "  reference it, while printing RESULT: PASS." >&2
+  echo "" >&2
+  for _h in "${SHARED_HITS[@]}"; do echo "    trigger: $_h" >&2; done
+  echo "" >&2
+  echo "  Run the full gate instead:  scripts/gate.sh --tier both" >&2
   exit 4
 fi
 

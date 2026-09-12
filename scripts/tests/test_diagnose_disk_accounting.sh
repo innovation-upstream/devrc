@@ -1728,8 +1728,20 @@ echo "== 14. EVERY SHA THESE FILES CITE MUST BE REACHABLE FROM THE MAINLINE =="
 # tag, a date, or a prose description of a commit — all of which are positional
 # anchors a reader cannot resolve, and all of which pass. An audit demonstrated
 # each. Closing that would mean parsing intent out of English, which is not a
-# thing a grep does; what is written here instead is the boundary. Both files carry the sentence "a
-# positional or historical number is legal only with a sha a reader can resolve".
+# thing a grep does; what is written here instead is the boundary.
+# 🔴 THE RULE IS DECLARED IN ONE FILE — THIS ONE — AND IT IS SELF-ATTRIBUTED.
+# An earlier version of this paragraph read "Both files carry the sentence", which
+# asserted a second, INDEPENDENT declarer that does not exist and made the rule's
+# attribution look stronger than it is. MEASURED 2026-09-12:
+# `scripts/diagnose-disk-accounting.sh` does not carry that sentence and never has
+# — `git log -S'reader can resolve' -- scripts/diagnose-disk-accounting.sh` is
+# EMPTY across all history, while the same `-S` on THIS file returns three commits.
+# Positive control, so that zero is an absence and not a blind instrument:
+# `grep -c sha scripts/diagnose-disk-accounting.sh` -> 9 over 1,169 lines.
+# The only declarer is this file's own header, and it is correctly scoped there
+# ("legal IN THIS FILE only with a sha a reader can resolve") — a qualifier this
+# paragraph used to drop. So this file writes the rule, about itself, and then
+# checks it; nothing outside it asserts the rule at all.
 # That sentence is itself a claim nothing checked — which is the exact generator
 # five audit rounds were spent on. MEASURED: after the round that WROTE the rule,
 # THREE cited shas were not ancestors of main. Two survived in this very file,

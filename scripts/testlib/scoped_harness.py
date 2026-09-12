@@ -45,15 +45,33 @@ CHEAP_HOOK_TEST = "scripts/claude-hooks/tests/test_claude_notify.py"
 CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 
 
-#: How long any nested `run-tests.sh` spawned by a test may take before the
-#: harness kills it. THE one place this bound is written.
+#: How long a nested `run-tests.sh` routed through `run()` may take before the
+#: harness kills it. The bound for THIS path, and the one to route new callers
+#: through.
+#:
+#: 🔴 IT DOES *NOT* SAY "THE ONE PLACE THIS BOUND IS WRITTEN" ANY MORE — IT SAID
+#: THAT, AND IT WAS FALSE THE DAY IT WAS WRITTEN. Measured 2026-09-11 on
+#: `e5f4e2f0`: eight further sites across four files spawn a runner with a bound
+#: of their own, at three distinct values (30, 120, 300) — plus a fourth
+#: (`test_run_tests_preconditions.py`'s `timeout: int = 300`) that no scan of a
+#: call's argv can even see, because the runner path arrives as a parameter.
+#: They are now enumerated, each with the reason it has its own number, in
+#: `scripts/tests/test_runner_bound_ledger.py`, which fails when that set GROWS
+#: *or* SHRINKS. 🔴 **Several of them are legitimate** — a test asserting the
+#: runner ABORTS in seconds wants a short bound, not 600 — so the ledger
+#: explains them rather than forbidding them. What was wrong was the sentence,
+#: not the code.
 #:
 #: 🔴 IT LIVES HERE, NOT IN A TEST FILE, BECAUSE "one rule, one place" WAS
 #: FILE-LOCAL AND THAT IS HOW THE LAST ONE ROTTED. `test_run_tests_targets.py`
 #: open-coded `timeout=120` at SIX sites; consolidating those into a constant
 #: private to that file would have left a FOURTH copy of the same predicate —
 #: this default — untouched, and a guard scoped to one file could never see it.
-#: Both now read this name.
+#: Both now read this name. ⚠ That fix was right and INCOMPLETE: it moved the
+#: bound out of one file's scope, and the guard enforcing it
+#: (`test_run_tests_targets.py`'s AST walk) is still scoped to that one file, so
+#: it remains structurally unable to see any of the eight above. The ledger is
+#: what covers them; this constant is not, and never was.
 #:
 #: 🔴 THIS IS A HANG BOUND, NOT AN ASSERTION. Nothing any caller pins depends on
 #: the nested run being fast; the bound exists only so a wedged child fails with

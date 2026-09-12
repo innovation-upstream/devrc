@@ -38,6 +38,14 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 import cairn_doctor as cd  # noqa: E402
@@ -804,10 +812,20 @@ class TestTheCliWiring:
     def test_the_doctor_subcommand_is_TRACKED_and_the_module_ships(self) -> None:
         """🔴 A new file must be `git add`ed or the flake silently omits it from
         the deploy — the switch succeeds and the module is simply absent, which
-        would make `cairn doctor` an ImportError on both hosts."""
+        would make `cairn doctor` an ImportError on both hosts.
+
+        ⚠ `cairn_doctor.py` IS NO LONGER ONE OF THEM. devrc deleted its forked
+        copy when it consolidated onto the `cairn` flake pin, so the module now
+        arrives through `flake.lock` rather than through `git add` — and its
+        presence is asserted by `pinned("cairn_doctor")` at the top of this file
+        plus `test_cairn_pin.py`, not here. What still has to be tracked is the
+        devrc-side pair: the CLI, and the seam that finds the pinned module. A
+        `cairn_pin.py` that was never staged is exactly the original defect in
+        its new position — the switch succeeds and every reader import fails.
+        """
         if not (REPO / ".git").exists():
             return
-        for rel in ("scripts/lib/cairn_doctor.py", "scripts/cairn"):
+        for rel in ("scripts/lib/cairn_pin.py", "scripts/cairn"):
             out = subprocess.run(
                 ["git", "-C", str(REPO), "ls-files", "--error-unmatch", "--", rel],
                 capture_output=True, text=True,
