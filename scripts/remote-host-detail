@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""The drill-down behind the remote-host pill: a peer's whole bar, plus this one.
+
+Opened by left-clicking the `wb` pill (a float terminal, as every TUI on this
+bar is -- i3status-rust runs clicks through `sh -c` with NO controlling
+terminal, so a bare TUI there exits `inappropriate ioctl for device` and the
+click is a silent no-op).
+
+Shows, for the REMOTE host: every relayed block with its own verdict, and the
+vitals i3status-rust renders internally (which have no command to relay). Then
+the SAME view of THIS host, gathered live, so the two are comparable side by
+side and it is never ambiguous which machine a number belongs to.
+
+🔴 HOST IDENTITY IS CARRIED BY THREE THINGS AT ONCE, ON PURPOSE: the name, a
+per-host colour, and position (remote first, local second, always). The
+operator's own note on this repo is that colour alone is unreadable in their
+font, so colour is never the only discriminator here -- every coloured heading
+also spells the host out in words.
+"""
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+
+# 256-colour, matching the pill's pango palette closely enough to read as the
+# same system. Words carry the meaning; colour only speeds up the scan.
+HOST_ANSI = {"workbench": "\033[38;5;214m", "laptop": "\033[38;5;109m"}
+HOST_ANSI_FALLBACK = "\033[38;5;245m"
+
+STATE_ANSI = {
+    "Critical": "\033[38;5;203m",
+    "Warning": "\033[38;5;214m",
+    "Info": "\033[38;5;109m",
+    "Good": "\033[38;5;142m",
+    "Idle": "\033[38;5;245m",
+}
+_SEVERITY = {"Critical": 4, "Warning": 3, "Info": 2, "Good": 1, "Idle": 0}
+
+MAX_CACHE_AGE_SECS = 600  # mirrors bar_freshness; see note in `freshness()`
+
+
+def plain(text: str) -> str:
+    """Relayed pill text as plain characters (it may carry pango spans)."""
+    return html.unescape(re.sub(r"<[^>]*>", "", text or "")).strip()
+
+
+def cache_path(host: str) -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "bar-remote", f"{host}.json")
+
+
+def load_remote(host: str):
+    try:
+        with open(cache_path(host), "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def gather_local(label: str):
+    """Run the gather for THIS host, so the comparison is live on both sides."""
+    script = os.path.join(_HERE, "bar-remote-snapshot")
+    if not os.path.exists(script):
+        return None
+    try:
+        proc = subprocess.run(
+            [sys.executable, script, "--gather", "--label", label],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ago(ts) -> str:
+    if not isinstance(ts, int):
+        return "unknown age"
+    delta = max(0, int(time.time()) - ts)
+    if delta < 90:
+        return f"{delta}s ago"
+    if delta < 5400:
+        return f"{delta // 60}m ago"
+    return f"{delta // 3600}h {(delta % 3600) // 60}m ago"
+
+
+def fmt_uptime(secs) -> str:
+    if not isinstance(secs, int):
+        return "?"
+    d, rem = divmod(secs, 86400)
+    h, m = divmod(rem // 60, 60)
+    return f"{d}d {h}h {m}m" if d else f"{h}h {m}m"
+
+
+def host_heading(host: str, role: str, ts, extra: str = "",
+                 label_source: str | None = None) -> str:
+    colour = HOST_ANSI.get(host, HOST_ANSI_FALLBACK)
+    line = f"{colour}{BOLD}{host.upper()}{RESET}  {DIM}({role}){RESET}"
+    if ts is not None:
+        line += f"  {DIM}snapshot {ago(ts)}{RESET}"
+    if label_source == "hostname":
+        # 🔴 Both of this operator's machines are named `nixos`, so a label
+        # taken from the hostname does NOT identify the host. Say so, rather
+        # than print a confident name that is the same on either machine.
+        line += f"  {STATE_ANSI['Warning']}(name GUESSED from hostname -- " \
+                f"not an identity on this fleet){RESET}"
+    if extra:
+        line += f"  {extra}"
+    return line
+
+
+def render_blocks(blocks: list, out: list) -> None:
+    if not blocks:
+        out.append(f"  {STATE_ANSI['Warning']}no blocks reported{RESET}"
+                   f"  {DIM}(the gather asked nothing -- this is not 'all quiet'){RESET}")
+        return
+    shown = [b for b in blocks if isinstance(b, dict)]
+    shown.sort(key=lambda b: -_SEVERITY.get(b.get("state", "Idle"), 0))
+    for b in shown:
+        state = b.get("state", "Idle")
+        colour = STATE_ANSI.get(state, STATE_ANSI["Idle"])
+        text = plain(b.get("text", ""))
+        name = b.get("name", "?").replace("i3status-", "").replace("i3blocks-", "")
+        if b.get("error"):
+            text = f"{text} [{b['error']}]".strip()
+        if not text:
+            # Correct and common: every count pill is hide-at-zero.
+            text = f"{DIM}-- quiet --{RESET}"
+        out.append(f"  {colour}{state:<9}{RESET} {name:<14} {text}")
+
+
+def render_vitals(v: dict, out: list) -> None:
+    if not v:
+        out.append(f"  {DIM}no vitals{RESET}")
+        return
+    # 🔴 NO LOAD LINE HERE. The relayed `load` block above already carries the
+    # remote host's load average WITH its own Warning/Critical verdict; printing
+    # a second, locally-recomputed one made the same number appear twice with
+    # two different opinions attached. `cpus` is kept because no relayed block
+    # reports it, and it is what makes the relayed load readable as a ratio.
+    if v.get("cpus"):
+        out.append(f"  cpus      {v['cpus']}   {DIM}(divide the `load` pill "
+                   f"above by this for saturation){RESET}")
+    if v.get("mem_total_gb"):
+        out.append(f"  mem       {v.get('mem_used_gb')} / {v['mem_total_gb']} GB"
+                   f"   {DIM}{v.get('mem_used_pct')}%{RESET}")
+    if v.get("swap_total_gb"):
+        out.append(f"  swap      {v.get('swap_used_gb')} / {v['swap_total_gb']} GB")
+    for d in v.get("disk", []) or []:
+        out.append(f"  disk {str(d.get('mount')):<7}{d.get('free_gb')} GB free"
+                   f"   {DIM}{d.get('used_pct')}% used of {d.get('total_gb')} GB{RESET}")
+    if v.get("uptime_secs") is not None:
+        out.append(f"  uptime    {fmt_uptime(v.get('uptime_secs'))}")
+
+
+def build(remote_host: str, local_label: str) -> list:
+    out: list = []
+    payload = load_remote(remote_host)
+
+    out.append("")
+    if payload is None:
+        out.append(host_heading(remote_host, "remote", None,
+                                f"{STATE_ANSI['Warning']}NO SNAPSHOT{RESET}"))
+        out.append(f"  {DIM}Nothing has ever been pulled for this host. Check"
+                   f" `systemctl --user status bar-remote-pull.timer`.{RESET}")
+    else:
+        unreachable = payload.get("state") == "unreachable"
+        body = payload
+        note = ""
+        if unreachable:
+            note = (f"{STATE_ANSI['Warning']}UNREACHABLE{RESET} "
+                    f"{DIM}{payload.get('detail', '')}{RESET}")
+            if isinstance(payload.get("last_good"), dict):
+                body = payload["last_good"]
+                note += f"  {DIM}-- showing LAST GOOD below{RESET}"
+        elif isinstance(payload.get("ts"), int) and \
+                int(time.time()) - payload["ts"] > MAX_CACHE_AGE_SECS:
+            note = f"{STATE_ANSI['Warning']}STALE{RESET}"
+        out.append(host_heading(remote_host, "remote", body.get("ts"), note,
+                                body.get("label_source")))
+        if body.get("error"):
+            out.append(f"  {STATE_ANSI['Warning']}gather error:{RESET} {body['error']}")
+        # A version skew no longer blanks the pill, so this is the only place it
+        # is visible. Without a reader `schema_note` would be the same DTO field
+        # the schema check was criticised for being.
+        if payload.get("schema_note"):
+            out.append(f"  {STATE_ANSI['Info']}note:{RESET} {payload['schema_note']}")
+        out.append("")
+        render_blocks(body.get("blocks") or [], out)
+        out.append("")
+        render_vitals(body.get("vitals") or {}, out)
+        # `not_relayed` was recorded by the gather with NO reader anywhere, so a
+        # block present in the observed host's bar but absent from the relay was
+        # dropped silently. This is that reader.
+        withheld = body.get("not_relayed") or []
+        if withheld:
+            names = ", ".join(n.replace("i3status-", "").replace("i3blocks-", "")
+                              for n in withheld)
+            out.append("")
+            out.append(f"  {DIM}not relayed (shown natively on this host, or "
+                       f"withheld): {names}{RESET}")
+
+    out.append("")
+    out.append(f"{DIM}{'-' * 66}{RESET}")
+    local = gather_local(local_label)
+    if local is None:
+        out.append(host_heading(local_label, "this host", None,
+                                f"{STATE_ANSI['Warning']}gather failed{RESET}"))
+    else:
+        out.append(host_heading(local_label, "this host", local.get("ts"),
+                                label_source=local.get("label_source")))
+        out.append("")
+        render_blocks(local.get("blocks") or [], out)
+        out.append("")
+        render_vitals(local.get("vitals") or {}, out)
+    out.append("")
+    return out
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--host", default="workbench", help="remote snapshot label")
+    ap.add_argument("--local-label", default=None,
+                    help="name for THIS host (default: $BAR_HOST_LABEL/$ACTIVITY_HOST; "
+                         "NOT the hostname -- both hosts here are named `nixos`)")
+    ap.add_argument("--no-hold", action="store_true",
+                    help="do not wait for a keypress before exiting")
+    args = ap.parse_args(argv)
+
+    # 🔴 NOT `os.uname().nodename`. Measured: that is `nixos` on the workbench
+    # AND on the laptop, so it names neither. `this-host` is honest -- it makes
+    # no claim about WHICH machine, and the section's position (always second)
+    # plus the remote heading above it already carry that.
+    local_label = (args.local_label or os.environ.get("BAR_HOST_LABEL")
+                   or os.environ.get("ACTIVITY_HOST") or "this-host")
+    for line in build(args.host, local_label):
+        print(line)
+
+    # 🔴 HOLD THE TERMINAL. Launched from a bar click this is a float that
+    # closes the instant the process exits -- indistinguishable from the click
+    # doing nothing, which is the exact defect class the other float TUIs on
+    # this bar carry their own `read` for.
+    if not args.no_hold and sys.stdin.isatty():
+        try:
+            input("[enter to close] ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
