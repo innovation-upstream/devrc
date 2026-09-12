@@ -130,7 +130,7 @@ Proven live by the retired `repo-cos` weekly digest, and still used by the task-
 # minimal send-as-Zach (workbench; needs the SOPS age key on PATH via nix-shell)
 export SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key
 nix-shell -p 'python3.withPackages(p:[p.requests])' sops --run 'python3 - <<PY
-import sys; sys.path.insert(0, "/home/zach/workspace/devrc/scripts/task-spec-drafter")
+import os, sys; sys.path.insert(0, os.environ["DEVRC"] + "/scripts/task-spec-drafter")  # $VAR does NOT expand in python
 import email_send
 user, pw = email_send.load_credentials()          # SOPS-decrypts IMAP_USER/IMAP_APP_PASSWORD
 msg = email_send.build_message(subject="hi", body="test", from_addr=user, to_addr="someone@example.com")

@@ -83,7 +83,7 @@ cairn is absent reads as this step FAILING; a bare `if` skips SILENTLY). `prior-
 
 ## status
 ```bash
-KC=$(ls /home/zach/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
+KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
 kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate -o wide
 clawgatectl health   # live version + uptime; rc 6 = unreachable, rc 8 = you hit the public host
 ```

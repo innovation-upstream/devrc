@@ -1,0 +1,29 @@
+# absolute-handle-path-ignore.list — explicit exceptions for
+# scripts/tests/test_absolute_handle_paths.py.
+#
+# FORMAT: one entry per line, `<corpus-doc>\t<the literal absolute path>`,
+# followed by a `#` comment giving the REASON. The reason is NOT optional —
+# `test_every_ignore_entry_carries_a_reason` fails on a line without one. An
+# ignore list of unexplained entries stops being an exception list and quietly
+# becomes the coverage mechanism, which is worse than no gate.
+#
+# 🔴 NOT a `.txt`: `test_no_captured_markup.py` gates every tracked `.txt` for
+# pasted prose, and a header like this one is exactly what trips it.
+#
+# THE KEY IS `(doc, literal)`, NOT the literal alone. An exemption licenses the
+# spelling IN THE DOC THAT CARRIES IT and nowhere else, so a justified sample
+# payload here cannot silently license the same string in a doc that copies it.
+#
+# USE THIS ONLY WHERE THE ABSOLUTE LITERAL IS THE CORRECT CONTENT — a recorded
+# wire payload, a per-host probe whose whole point is that the handle is absent.
+# Everywhere else there is a one-token fix that leaves the doc MORE correct:
+#   * a shell command        -> `$DEVRC/scripts/x.py`
+#   * PYTHON                 -> `os.environ["DEVRC"]` ($VAR does not expand)
+#   * a pointer at a devrc skill -> `~/.claude/skills/<name>/reference/<x>.md`
+#   * a path being CREATED   -> derive it: `$(dirname $HOMELAB)/homelab-trunk`
+#
+# The list may only SHRINK: `test_no_stale_ignore_entries` fails on an entry that
+# no longer names a live site, so a fixed doc cannot leave a stale licence behind.
+#
+# --- entries ---------------------------------------------------------------
+claude/skills/clawgate/reference/cross-session-reach.md	/home/zach/workspace/civit/datapacket-talos  # RECORDED WIRE PAYLOAD, not an instruction: two pretty-printed `clawgatectl tmux windows` / `transcript query` JSON responses showing the `path` and `cwd` fields as the API actually returns them (absolute, host-expanded). Rewriting them to `$DATAPACKET` would MISREPRESENT the wire format and teach a reader to grep for a string the API never emits.

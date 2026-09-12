@@ -37,8 +37,8 @@ Axes (live objects, cross-repo paths, metrics, load-bearing claims) and the trap
 
 ## 1. Audit (deterministic — no edits)
 ```bash
-python3 /home/zach/workspace/devrc/scripts/skill-audit.py            # $PWD/.claude/skills
-python3 /home/zach/workspace/devrc/scripts/skill-audit.py path/to/SKILL.md
+python3 $DEVRC/scripts/skill-audit.py            # $PWD/.claude/skills
+python3 $DEVRC/scripts/skill-audit.py path/to/SKILL.md
 ```
 Prints: per-skill size vs budget, per-section byte weights, dated-history blocks, fat lines (>500 B), **reference integrity both directions**, **numbered-corpus integrity**, unclosed fences, and a verdict.
 
@@ -89,7 +89,7 @@ Per-repo workflow (worktree recipes, the deployed-path branch, the ff-merge bloc
 
 ## 7. Verify (don't trust — measure)
 ```bash
-python3 /home/zach/workspace/devrc/scripts/skill-audit.py "$SKILL_DIR"
+python3 $DEVRC/scripts/skill-audit.py "$SKILL_DIR"
 ```
 **Structural**: under target, every routing path resolves, no orphans, no unclosed fences, numbered-corpus integrity intact.
 
