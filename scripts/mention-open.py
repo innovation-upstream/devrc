@@ -1132,6 +1132,25 @@ CLICK_NO_SELECTION = "no-selection"
 CLICK_OUTCOMES = (CLICK_AUTO_OPEN, CLICK_PICKED, CLICK_DISMISSED,
                   CLICK_NO_SELECTION)
 
+# 🔴 WHERE THE REFERENCE ACTUALLY LANDED. Today every open is a browser, and
+# that is exactly why this exists NOW rather than later: a second surface is
+# arriving (#1582 routes a GitHub mention to a neovim review buffer instead of
+# `xdg-open`), and without this dim a TUI open and a browser open emit an
+# IDENTICAL row. The new surface would be invisible to the very telemetry built
+# to answer "is this being used?" — each PR's suite green in isolation, the
+# defect living in the seam neither owns.
+#
+# ⚠ IT IS NOT A PLACEHOLDER AND IT IS NOT SPECULATIVE. `browser` is emitted
+# because the browser is what opened the reference, measured by `open_reference`
+# from the opener that actually ran — not asserted by a literal at the call
+# site, and never a "not asked" sentinel. A clawgate or ClickUp row is
+# `browser` for the same reason and will stay `browser`: those never route to a
+# TUI.
+CLICK_SURFACE_BROWSER = "browser"
+CLICK_SURFACE_TUI = "tui"
+# Pinned two-way by `test_the_click_SURFACE_vocabulary_is_pinned_two_way`.
+CLICK_SURFACES = (CLICK_SURFACE_BROWSER, CLICK_SURFACE_TUI)
+
 # 🔴 THE CLASS GOES OUT AS A NAME, NEVER AS ITS ORDINAL. `CLASS_PLAUSIBLE` is
 # `0`, and a consumer reading the payload with ClickHouse's `JSONExtractInt`
 # gets `0` for a key that is ABSENT as well as for one that says "plausible" —
@@ -1151,7 +1170,8 @@ CLASS_NAMES = {
 # a ledger entry, or an entry naming no field, fails the suite — the shape of a
 # telemetry row is a contract with a consumer that is not in this repo.
 CLICK_DIM_FIELDS = ("repo", "platform", "picker_shown", "offered_total",
-                    "rank", "plausibility", "reason", "ordered", "pinned_above")
+                    "rank", "plausibility", "reason", "ordered", "pinned_above",
+                    "surface")
 
 
 def click_dims(repo: str = "", platform: str = "",
@@ -1161,7 +1181,8 @@ def click_dims(repo: str = "", platform: str = "",
                plausibility: int | None = None,
                reason: str | None = None,
                ordered: bool | None = None,
-               pinned_above: int | None = None) -> dict:
+               pinned_above: int | None = None,
+               surface: str | None = None) -> dict:
     """The payload dims for one click outcome. Pure, no I/O, no clock.
 
     🔴 AN UNMEASURABLE FIELD IS OMITTED, NEVER ZEROED — AND THIS IS THE WHOLE
@@ -1212,6 +1233,15 @@ def click_dims(repo: str = "", platform: str = "",
     ⚠ `plausibility` IS GATED ON `ordered` AT THE CALL SITE for the same reason
     — it was previously emitted whenever the ordering RAN, which is not the same
     as "this row was ordered".
+
+    🔴 `surface` SAYS *WHERE* THE REFERENCE LANDED, AND IT IS ABSENT ONLY WHEN
+    NOTHING WAS OPENED. It comes back from `open_reference` — measured from the
+    opener that ran — so a browser open and a TUI open stop being the same row.
+    A dismissal opened nothing, so it carries no surface; that is a different
+    fact from "opened, somewhere unrecorded", and conflating them is the same
+    absence-vs-zero error as `rank` on the auto path. Values are pinned to
+    `CLICK_SURFACES`; an unledgered one is DROPPED rather than shipped, because
+    a surface no consumer has been told about is worse than a missing field.
     """
     dims: dict = {"repo": repo, "platform": platform}
     if picker_shown is not None:
@@ -1228,6 +1258,13 @@ def click_dims(repo: str = "", platform: str = "",
         dims["ordered"] = bool(ordered)
     if pinned_above is not None:
         dims["pinned_above"] = int(pinned_above)
+    # 🔴 LEDGERED OR DROPPED. Unlike `reason` — whose vocabulary `pick()` owns
+    # and `set_pick_reason` already normalises — a surface arrives from whatever
+    # opener ran, so this is the boundary that keeps an unannounced value out of
+    # the dataset. `test_every_surface_open_reference_can_return_is_LEDGERED` is
+    # the other half: it fails rather than letting the drop be silent.
+    if surface is not None and surface in CLICK_SURFACES:
+        dims["surface"] = surface
     return dims
 
 
@@ -1541,6 +1578,37 @@ def open_url(url: str) -> int:
         notify("could not open the link", f"{type(exc).__name__}: {exc}")
         return 1
     return 0
+
+
+def open_reference(url: str) -> tuple[int, str]:
+    """Open `url` and report `(exit code, WHICH SURFACE it landed on)`.
+
+    🔴 THE SURFACE IS MEASURED FROM THE OPENER THAT RAN, NOT ASSERTED AT THE
+    CALL SITE — and that is the whole reason this one-line wrapper exists rather
+    than the two emit sites each passing `surface=CLICK_SURFACE_BROWSER`. A
+    literal at the call site is a CLAIM about what happened; a value returned by
+    the code that did the opening is a MEASUREMENT of it. When a second opener
+    arrives the literal version would keep reporting `browser` from a branch
+    that no longer uses one, and every suite would stay green.
+
+    🔴 THIS IS THE SINGLE INTEGRATION POINT FOR A SECOND SURFACE. #1582 routes a
+    GitHub mention to a neovim review buffer instead of `xdg-open`; when it
+    lands, the branch goes HERE and returns `CLICK_SURFACE_TUI`, and both emit
+    sites report it with no edit. Nothing else in this handler needs to change,
+    and `test_every_surface_open_reference_can_return_is_LEDGERED` fails if the
+    new value is not in `CLICK_SURFACES`.
+
+    ⚠ IT DEGRADES HONESTLY BY CONSTRUCTION. Without #1582 this returns
+    `browser` because the browser is genuinely what opened the reference — not a
+    placeholder, not a "not measured" sentinel. The dim is absent only where
+    nothing was opened at all (a dismissal), which is a different fact and is
+    reported as one.
+
+    ⚠ THE EXIT CODE IS `open_url`'s, UNCHANGED. A failed open still returns 1
+    and still reports the surface it TRIED, because "the browser failed" and
+    "there was no browser involved" are different rows.
+    """
+    return open_url(url), CLICK_SURFACE_BROWSER
 
 
 # --------------------------------------------------------------------------- #
@@ -2912,9 +2980,10 @@ def main(argv: list[str] | None = None) -> int:
         # THEM RATHER THAN ZEROING THEM. Nothing was offered here, so there is
         # no list to have been ranked in. `picker_shown=False` is what a
         # consumer filters on; see `click_dims`.
-        rc = open_url(auto_url)
+        rc, surface = open_reference(auto_url)
         emit_click(CLICK_AUTO_OPEN, repo=auto_repo,
-                   platform=candidates[0]["platform"], picker_shown=False)
+                   platform=candidates[0]["platform"], picker_shown=False,
+                   surface=surface)
         return rc
 
     # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
@@ -3042,13 +3111,13 @@ def main(argv: list[str] | None = None) -> int:
                     if picked_repo and order_ranges and picked_ordered else None)
     picked_platform = next((c["platform"] for c in candidates
                             if c["url"] == url), "")
-    rc = open_url(url)
+    rc, surface = open_reference(url)
     emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,
                picker_shown=picker_was_shown(reason),
                offered_total=len(candidates),
                rank=picked_rank, plausibility=picked_class,
                ordered=picked_ordered if picked_rank is not None else None,
-               pinned_above=pinned_above, reason=reason)
+               pinned_above=pinned_above, reason=reason, surface=surface)
     return rc
 
 

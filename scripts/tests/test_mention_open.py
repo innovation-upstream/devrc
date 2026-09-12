@@ -6496,8 +6496,8 @@ def test_the_two_paths_are_tagged_DIFFERENTLY_in_ONE_log(spy, monkeypatch,
     # A ClickUp id never reaches discovery at all.
     ("868abc123", "https://app.clickup.com/t/868abc123"),
 ])
-def test_a_clawgate_or_clickup_AUTO_OPEN_records_NOTHING(monkeypatch, text,
-                                                         expected_url):
+def test_a_clawgate_or_clickup_AUTO_OPEN_records_NOTHING(monkeypatch, spool,
+                                                         text, expected_url):
     """🔴 AN INVARIANT GUARD, LABELLED AS ONE. Base recorded nothing here either
     — it recorded nothing on any auto path — so this is not regression coverage
     for the defect. It exists because the fix's obvious over-reach is to record
@@ -6519,6 +6519,18 @@ def test_a_clawgate_or_clickup_AUTO_OPEN_records_NOTHING(monkeypatch, text,
     assert _pick_rows(MO.PICKS_PATH) == [], (
         f"a non-GitHub row was recorded as a repository pick: "
         f"{_pick_rows(MO.PICKS_PATH)}")
+    # 🔴 A CLAWGATE OR CLICKUP ROW IS ALWAYS THE BROWSER, AND IT IS DERIVABLE
+    # TODAY — those never route to a TUI. So the surface dim is a real
+    # measurement on this arm rather than a field waiting for #1582.
+    payload = _click_events(spool)[0]["payload"]
+    # `.get`, for the reason recorded on the auto-open test's own surface
+    # assertion: a subscript on a MISSING dim raises `KeyError` and renders no
+    # message, so the mutant that drops the dim cannot be attributed.
+    assert payload.get("surface") == "browser", (
+        f"NO SURFACE DIM on a clawgate/ClickUp row — these never route to a "
+        f"TUI, so `browser` is derivable today and a missing value is a gap, "
+        f"not a pending question: {payload}")
+    assert payload["repo"] == "", payload
 
 
 def test_a_clawgate_PICKER_selection_records_NOTHING_either(spy):
@@ -6855,10 +6867,18 @@ def test_the_click_OUTCOME_vocabulary_is_pinned_two_way():
         and isinstance(node.value, ast.Constant)
         and isinstance(node.value.value, str)
     }
-    # `CLICK_TOOL` is the tool NAME, not an outcome — the only CLICK_ constant
-    # that is legitimately outside the ledger, and it is named rather than
-    # pattern-excluded.
-    outcome_consts = {k: v for k, v in declared.items() if k != "CLICK_TOOL"}
+    # 🔴 THE NON-OUTCOME `CLICK_*` CONSTANTS ARE EXCLUDED **BY NAME**, NEVER BY
+    # A PATTERN. `CLICK_TOOL` is the tool name and the `CLICK_SURFACE_*` pair is
+    # a different vocabulary with its own two-way pin below. A prefix rule like
+    # "skip anything with SURFACE in it" would silently swallow a future
+    # `CLICK_SURFACE_OUTCOME`-ish name; an enumeration cannot, and a new
+    # `CLICK_*` constant is an outcome BY DEFAULT — it has to be classified
+    # here deliberately or the assertion below fails.
+    not_outcomes = {"CLICK_TOOL", "CLICK_SURFACE_BROWSER", "CLICK_SURFACE_TUI"}
+    assert not_outcomes <= set(declared), (
+        f"a non-outcome CLICK_* constant named in this exclusion list no longer "
+        f"exists: {sorted(not_outcomes - set(declared))}")
+    outcome_consts = {k: v for k, v in declared.items() if k not in not_outcomes}
     assert set(outcome_consts.values()) == set(MO.CLICK_OUTCOMES), (
         f"a `CLICK_*` outcome constant is not in `CLICK_OUTCOMES` (or vice "
         f"versa): declared={sorted(outcome_consts)} "
@@ -6904,7 +6924,7 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     widest = MO.click_dims(repo="acme/widget", platform="github",
                            picker_shown=True, offered_total=7, rank=3,
                            plausibility=MO.CLASS_BELOW, reason="selected",
-                           ordered=True, pinned_above=2)
+                           ordered=True, pinned_above=2, surface="tui")
     assert set(widest) == set(MO.CLICK_DIM_FIELDS), (
         f"`click_dims` produces {sorted(widest)} but the ledger names "
         f"{sorted(MO.CLICK_DIM_FIELDS)} — update CLICK_DIM_FIELDS in the SAME "
@@ -6919,7 +6939,7 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     assert widest == {"repo": "acme/widget", "platform": "github",
                       "picker_shown": True, "offered_total": 7, "rank": 3,
                       "plausibility": "below", "reason": "selected",
-                      "ordered": True, "pinned_above": 2}
+                      "ordered": True, "pinned_above": 2, "surface": "tui"}
     # 🔴 THE LEDGER IS PINNED AGAINST THE FUNCTION'S OWN SIGNATURE TOO, so a
     # parameter added without a ledger row fails here rather than on the day a
     # consumer notices a column it was never told about.
@@ -6927,6 +6947,69 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     assert params == set(MO.CLICK_DIM_FIELDS), (
         f"`click_dims` takes {sorted(params)} but the ledger names "
         f"{sorted(MO.CLICK_DIM_FIELDS)}")
+
+
+def test_the_click_SURFACE_vocabulary_is_pinned_two_way():
+    """🔴 WHERE THE REFERENCE LANDED, PINNED THE SAME WAY THE OUTCOMES ARE.
+    Today every open is a browser; #1582 adds a neovim review buffer, and
+    without this dim a TUI open and a browser open emit an IDENTICAL row — the
+    new surface invisible to the telemetry built to answer "is this used?".
+
+    Two-way and AST-driven: a `CLICK_SURFACE_*` constant missing from
+    `CLICK_SURFACES`, or a ledger entry naming no constant, fails here."""
+    assert (MO.CLICK_SURFACE_BROWSER, MO.CLICK_SURFACE_TUI) == ("browser", "tui")
+    assert set(MO.CLICK_SURFACES) == {"browser", "tui"}
+    assert len(set(MO.CLICK_SURFACES)) == len(MO.CLICK_SURFACES)
+    # ...and the handler's own source agrees, so a constant added without a
+    # ledger row cannot hide behind this file's literals.
+    tree = ast.parse(HANDLER.read_text(encoding="utf-8"))
+    declared = {
+        node.value.value
+        for node in tree.body if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Name) and t.id.startswith("CLICK_SURFACE_")
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    assert declared == set(MO.CLICK_SURFACES), (
+        f"declared CLICK_SURFACE_* values {sorted(declared)} != ledger "
+        f"{sorted(MO.CLICK_SURFACES)}")
+    # An unledgered surface is DROPPED rather than shipped — a value no consumer
+    # was told about is worse than a missing field.
+    assert "surface" not in MO.click_dims(surface="teletype")
+    assert MO.click_dims(surface="browser")["surface"] == "browser"
+
+
+def test_every_surface_open_reference_can_return_is_LEDGERED(monkeypatch):
+    """🔴 THE SEAM GUARD, AND IT PINS A RELATIONSHIP RATHER THAN A COMPONENT.
+    `open_reference` is the ONE place a second opener will branch (#1582). This
+    asserts what it actually RETURNS is in `CLICK_SURFACES` — so a new surface
+    added there without a ledger row fails the suite instead of shipping a value
+    no consumer has been told about.
+
+    ⚠ IT IS NOT A STRUCTURAL CHECK ALONE. A test that only read the constants
+    would type-check past an `open_reference` returning a string nobody
+    declared, which is exactly how a seam defect survives two green suites."""
+    opened: list[str] = []
+    monkeypatch.setattr(MO, "open_url", lambda u: opened.append(u) or 0)
+    rc, surface = MO.open_reference("https://github.com/acme/widget/pull/12")
+    assert rc == 0
+    assert opened == ["https://github.com/acme/widget/pull/12"], (
+        "`open_reference` did not delegate to the opener — the surface it "
+        "reports would be a claim about code that never ran")
+    assert surface in MO.CLICK_SURFACES, (
+        f"`open_reference` returned the surface {surface!r}, which is not in "
+        f"CLICK_SURFACES {MO.CLICK_SURFACES} — add it to the ledger in the SAME "
+        f"commit as the opener")
+    assert surface == MO.CLICK_SURFACE_BROWSER, (
+        f"with no TUI opener present this must report the browser, because the "
+        f"browser is what ran: {surface!r}")
+    # 🔴 A FAILED OPEN STILL REPORTS THE SURFACE IT TRIED. "the browser failed"
+    # and "no browser was involved" are different rows, and collapsing them
+    # would make an `xdg-open` outage read as a missing instrument.
+    monkeypatch.setattr(MO, "open_url", lambda u: 1)
+    rc, surface = MO.open_reference("https://github.com/acme/widget/pull/12")
+    assert (rc, surface) == (1, MO.CLICK_SURFACE_BROWSER), (rc, surface)
 
 
 def test_the_plausibility_CLASS_NAMES_ledger_is_pinned_two_way():
@@ -6971,6 +7054,16 @@ def test_an_AUTO_OPEN_emits_NO_rank_NO_class_and_NO_total(spy, spool):
     assert payload["repo"] == "civitai/talos-infra", payload
     assert payload["platform"] == "github", payload
     assert payload["picker_shown"] is False, payload
+    # 🔴 `.get`, NOT `[...]` — AND THAT IS A MUTATION-TESTING FIX, NOT A STYLE
+    # ONE. A subscript raises `KeyError: 'surface'` when the dim is MISSING,
+    # which is exactly the mutant this assertion exists to catch; pytest then
+    # renders no assertion message, the battery cannot attribute the kill, and
+    # the row scores KILLED-WRONG-REASON. Measured on K90. A `.get` turns the
+    # missing case into this message.
+    assert payload.get("surface") == "browser", (
+        f"NO SURFACE DIM: the reference was opened by `xdg-open`, so the "
+        f"surface is the browser — and a row without it cannot be told from "
+        f"the TUI open #1582 adds: {payload}")
     for absent in ("rank", "plausibility", "offered_total"):
         assert absent not in payload, (
             f"the auto path emitted {absent}={payload[absent]!r}; there was no "
@@ -7022,6 +7115,9 @@ def test_a_PICKED_row_carries_its_RANK_its_CLASS_and_the_TOTAL(
     # This click's whole list IS the ordered block — nothing is pinned above it.
     assert payload["ordered"] is True, payload
     assert payload["pinned_above"] == 0, payload
+    assert payload.get("surface") == "browser", (
+        f"NO SURFACE DIM: a picked row must say WHERE it landed, or it is "
+        f"indistinguishable from the TUI open #1582 adds: {payload}")
 
 
 def test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked(
@@ -7167,6 +7263,12 @@ def test_a_DISMISSED_picker_emits_the_TOTAL_and_no_rank(spy, monkeypatch, spool)
     assert payload["repo"] == "" and payload["platform"] == "", payload
     for absent in ("rank", "plausibility"):
         assert absent not in payload, payload
+    # 🔴 NOTHING WAS OPENED, SO THERE IS NO SURFACE. Absent is the honest value:
+    # "opened, somewhere unrecorded" is a different fact, and defaulting to
+    # `browser` here would put a never-opened click into any per-surface count.
+    assert "surface" not in payload, (
+        f"a dismissal reported a surface for a reference that was never "
+        f"opened: {payload}")
 
 
 @pytest.mark.parametrize("reason,shown", [
