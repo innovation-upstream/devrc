@@ -6594,12 +6594,23 @@ def _colliding_blob_pair(bound: int = 20000) -> tuple[bytes, bytes, str]:
 # But a 3-hex prefix has only 4096 values and the fixture repo holds EIGHT
 # objects, so ~1 run in 585 drew a HEAD prefix that named two of them. git then
 # raised `CommitAmbiguousError`, the mutant died of the WRONG guard, and the
-# assertion under test NEVER RAN. Measured by exhaustive enumeration over the
-# only randomness source (the commit timestamp, which is what moves the sha):
-# 7001 of 4,096,000 timestamps = 0.1709%, matching the analytic 7/4096 — and the
-# object model behind that enumeration was validated object-for-object against
-# real git first. It reddened PRs whose diffs could not reach this file, which
-# `claude/RULES.md` names as strictly worse than no gate.
+# assertion under test NEVER RAN.
+#
+# THE RATE, AT THE SCOPE IT WAS ACTUALLY MEASURED: 7001 hits in a window of
+# 4,096,000 CONSECUTIVE commit timestamps = 0.1709%. The timestamp is the only
+# thing that moves the sha here — content, identity and message are all fixed —
+# so enumerating timestamps enumerates the randomness rather than sampling the
+# test. ⚠ But the WINDOW is still a sample of all timestamps: the analytic value
+# is 7/4096 = 0.17090% (7 sibling objects over 4096 prefixes), the window's
+# expectation is 7000 and σ ≈ 84, so 7001 sits about 0.01σ away. That is
+# CONSISTENT WITH the analytic value and is not a confirmation of it to four
+# digits — re-run the window and expect a number near 7000, not 7001. The object
+# model behind the enumeration was validated object-for-object against real git
+# (2.55.0) before any of it was believed.
+#
+# It reddened PRs whose diffs could not reach this file. `claude/RULES.md`: "A
+# flaky test is also fixable — remove the timing dependency rather than
+# re-running."
 #
 # THE REMEDY IS BOTH HALVES, deliberately, because neither alone is enough:
 #   * RE-MINT so an ambiguous draw is CORRECTED rather than merely reported — a
