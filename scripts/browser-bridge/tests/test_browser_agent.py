@@ -174,7 +174,18 @@ if argv[:2] == ["debug", "agent"]:
     # UNDER the lock — so this is the only hook that can widen the window in
     # which the wrapper holds it. `FAKE_OC_SLEEP`/`mode="slow"` cannot: they are
     # read ~70 lines below, after this branch has already exited.
-    _dbg = float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0"))
+    # 🔴 SCOPED TO `build` — i.e. to the WARM — AND THAT IS LOAD-BEARING.
+    # This branch serves BOTH invocations the wrapper makes: the warm
+    # (`debug agent build`, UNDER the lock) and the tool-set gate
+    # (`debug agent browser-agent`, AFTER `_oc_lock_release`). Unscoped, the
+    # gate re-writes the marker ~0.2s after the lock is gone, so a test timing
+    # "how long has the warm been running?" from the marker's mtime sees the
+    # clock reset to ~0 with the lock already released — and a purely starved
+    # run is then reported as a lock-ORDERING REGRESSION that did not happen.
+    # MEASURED: a 3.5s stall produced exactly that false verdict. It also made
+    # the hold be paid TWICE per wrapper run, which is where a "~2x the hold"
+    # cost reading came from.
+    _dbg = float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0")) if argv[2:3] == ["build"] else 0.0
     if _dbg:
         _mk = os.environ.get("FAKE_OC_DEBUG_MARKER")
         if _mk:                       # announce that we are INSIDE the warm...
@@ -1646,11 +1657,16 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
 # so the happy path never waits for it. It is NOT free: GNU `timeout` puts the
 # warm's child in its OWN process group (`browser-agent` runs
 # `timeout "$OC_WARM_TIMEOUT" … debug agent build`), so the test's `killpg` to
-# the WRAPPER's group never reaches the fake — it sleeps out the whole hold while
-# bash defers the trap until that foreground command returns. Measured on this
-# pair: hold 3 s -> 6.78 s, hold 8 s -> 16.73 s, i.e. ~2x the hold, paid on the
-# KILL path every run. A 20 s hold would cost ~40 s per run to save a retry that
-# only executes when the box is already starving.
+# the WRAPPER's group never reaches the fake — it sleeps out the rest of the hold
+# while bash defers the trap until that foreground command returns.
+# MEASURED per test (`--durations`), NOT per pair: hold 3 s -> 3.12 / 3.25 s,
+# hold 8 s -> 8.08 / 8.13 s. So the cost is ~1x the hold PER TEST and ~2x for the
+# parametrised pair; a 20 s hold would cost ~20 s per test, ~40 s per pair, up
+# from ~6 s today — to save a retry that only executes when the box is already
+# starving. ⚠ An earlier revision of this comment read "~2x the hold … per run"
+# off the PAIR total and was wrong twice over: it also predated scoping the
+# fake's hold to the warm, which removed a SECOND sleep the tool-set gate used
+# to pay. Re-measure per test, never off the suite line.
 #
 # 🔴 THE RETRY IS NOT FLAKE-PAPERING — a lost window produces NO observation of
 # the handler at all, so retrying is what keeps a lost window from being reported
@@ -1776,36 +1792,60 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                          extra_env={"FAKE_OC_DEBUG_SLEEP": str(_WARM_HOLD_S),
                                     "FAKE_OC_DEBUG_MARKER": str(in_warm),
                                     "BROWSER_AGENT_WARM_TIMEOUT": "30"})
+        def _abandon(reason):
+            """Give this attempt up, draining first. An undrained pipe leaks the
+            fd AND discards the wrapper's own account of why the window went."""
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                _, drained = proc.communicate(timeout=10)
+            except (subprocess.TimeoutExpired, ValueError):
+                drained = "(could not drain)"
+            lost.append(f"attempt {attempt}: {reason}\n      wrapper stderr tail: "
+                        f"{(drained or '')[-200:]!r}")
+
         try:
             # 🔴 GATE ON BEING INSIDE THE WARM, NOT ON THE LOCK EXISTING. Waiting
             # for the lock catches it ~20 ms after `mkdir`, which is BEFORE the
             # warm starts — so the kill landed in whatever the bootstrap happened
             # to be doing, on a margin of ~30 ms that nobody chose. The marker is
-            # written by the fake's `debug agent` branch, which IS the warm and
-            # DOES run under the lock, so this makes the window real rather than
-            # asserted.
-            _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
-                   slice_s=20.0, poll=0.02)
+            # written by the fake's `debug agent build` branch, which IS the warm
+            # and DOES run under the lock, so this makes the window real rather
+            # than asserted.
+            try:
+                _await(lambda: in_warm.exists(),
+                       what="the wrapper to enter the warm", slice_s=20.0, poll=0.02)
+            except pytest.fail.Exception as exc:
+                # 🔴 A FOURTH STARVATION SHAPE, and it used to bypass this loop
+                # entirely. `_await` fails in its OWN wording — which probes the
+                # machine AFTER the stall, so it can report "the machine is not
+                # the explanation" about a box that has since recovered — and it
+                # is terminal, so there was no retry and none of the framing
+                # below. Route it through the same lost-window path as every
+                # other way of failing to reach the warm.
+                _abandon(f"the wrapper never reached the warm — "
+                         f"{str(exc).splitlines()[0]}")
+                continue
             # 🔴 The hold starts when the fake WRITES the marker, not when
             # `_await` notices it — a stall inside `_await`'s own poll loop is
             # exactly the starvation under test, and timing from here would
             # measure 0.00s every time and call every lost window a defect.
-            # The file's mtime is the only honest zero for this clock.
+            # The marker's mtime is the only honest zero for this clock, and it
+            # is trustworthy ONLY because the fake writes it for the WARM alone:
+            # the tool-set gate re-enters the same branch of the fake AFTER the
+            # lock is released, and while the marker was unscoped a 3.5s stall
+            # reset this clock to ~0 with the lock already gone and was reported
+            # as a lock-ordering regression that had not happened.
             verdict, why = _warm_window(
                 proc, lock, max(0.0, time.time() - in_warm.stat().st_mtime))
             if verdict == "defect":
-                pytest.fail(
-                    f"precondition: the warm must run UNDER the lock.\n  {why}")
+                _abandon(why)
+                pytest.fail("precondition: the warm must run UNDER the lock.\n  "
+                            + lost[-1].split(": ", 1)[1])
             if verdict == "lost":
-                # Drain before abandoning: an undrained pipe leaks the fd AND
-                # throws away the wrapper's own account of why the window went.
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                try:
-                    lost_out, lost_err = proc.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    lost_out = lost_err = "(could not drain)"
-                lost.append(f"attempt {attempt}: {why}\n      wrapper stderr tail: "
-                            f"{(lost_err or '')[-200:]!r}")
+                _abandon(why)
                 continue
             os.killpg(os.getpgid(proc.pid), sig)
             rc = proc.wait(timeout=45)
