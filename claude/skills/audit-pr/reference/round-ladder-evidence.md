@@ -588,3 +588,47 @@ committed in prose.
 
 **And the `| tail` trap, on the battery's own output.** 28 verdicts piped through `tail -8`; four
 were read as the whole run and the missing 24 as "did not run". Redirect to a file and read the file.
+
+## 2026-09-12 · the ROUND 0 trial — the full record, demoted from the skill body
+
+The skill carries the pair and the finding; this is the evidence behind them. Demoted because
+round 0 on the skill itself measured that **40% of every `--round 0` brief's inlined payload was
+editor-facing history** — a retraction addressed to a future editor of the file, a closed trial's
+decomposition, and a maintainer comment about a capture regex — none of which changes anything the
+auditor does, all of it billed per dispatch.
+
+**The pair: `ran: 6 · changed the outcome: 3`.** Decomposition, because `C` alone is meaningless:
+trials 1–2 → 2/2 · trials 3–5 → **3/0** · a peer session's round 0 on `#1518` → 1/1 (it closed that
+PR unmerged).
+
+**Every zero was a post-decision dispatch, and that is the whole finding.** All three of trials 3–5
+produced a verdict and none could act: `#1523` merged **27 min BEFORE** its audit was dispatched,
+`#1510` merged **+6 min after**, `#1518` was closed **5 min before** the report returned. Audit
+runtimes were 459 / 920 / 776 s, so no achievable speedup reaches any of them. Round 0's question —
+should this change EXIST — is actionable only while the merge decision is open, so the fix was a
+TRIGGER, not an edit to the section: `scripts/claude-hooks/audit-pr-nudge.py` routes round 0 as step
+1 of the nudge it fires on `gh pr create`, pinned by
+`scripts/claude-hooks/tests/test_audit_pr_nudge.py`.
+
+⚠ **A FOURTH independent instance, corroborating from outside the trial — and deliberately NOT
+folded into `R`.** A different session hit it after the record closed: `#1568` merged **6 min** after
+opening (`04:11:19Z` → `04:17:24Z`, re-derived rather than taken from its PR body), so its round-0
+audit landed after the merge and every candidate it found became a follow-up. It is evidence about
+the ROUTING, not a seventh trial. A record that grows every time someone hits the same thing is not
+a record.
+
+✅ **The trigger then worked on its first real test.** Round 0 fired at create time on `#1581`, ~16
+min after open with the PR still OPEN and CI pending, returned `deletion candidate`, and **three of
+that PR's seven appended bullets were cut as restatements** — the first pre-decision instance in the
+whole arc.
+
+## 2026-09-12 · why there is NO add-back percentage in the deletion pass
+
+An earlier draft of ROUND 0 asked for `deleted: X · re-added: Y (Y/X = Z%)` "from the same
+`--numstat` command the attribution gate already runs". That was **false**: `--numstat` reports added
+and deleted counts per file and cannot tell you that an added line is one previously deleted, so `Y`
+is undefined by the instrument named. The 10% add-back heuristic needs a measurement nothing in the
+skill performs — and the sentence that followed it ("an add-back of 0% means the deletion pass was
+too timid") asserted a direction measured nowhere, which is the shape the skill tells you to delete
+rather than reverse. Recorded here so nobody derives it again; it was cut from the body because it
+addresses a future EDITOR of the skill, not an auditor.
