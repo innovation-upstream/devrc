@@ -354,7 +354,9 @@ let
       { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/airvpn-detail"; }
     ];
   };
-  # Decoupled status-count blocks (workbench only). These NEVER query a remote
+  # Decoupled status-count blocks. The six GLOBAL-SERVICE ones render on BOTH
+  # hosts (the laptop from a synced cache); only their CLICKS are workbench-only,
+  # because the targets are LAN-bound. airvpn + runaways stay workbench-only. These NEVER query a remote
   # system per bar tick — they read a small JSON cache file written every ~45s by
   # the bar-status-poll systemd user timer (see below) and render it instantly, so
   # a slow/down source can never hang the bar. CALM: each is empty+invisible at
@@ -918,8 +920,16 @@ lib.mkIf isNixOS {
   # network. The poller itself (scripts/bar-status-poll) is NOT symlinked here: it
   # is run from the repo working tree by the systemd unit below so it can resolve
   # its sibling scripts/mail-actions/_db.py (cf. mail-actions/run-archive.sh).
-  # The clawgate/mail/alerts block scripts + poller are workbench-only, so their
-  # symlinks are !isLaptop-gated too (they'd be dead files on the laptop otherwise).
+  # 🔴 THE POLLER IS WORKBENCH-ONLY; THE BLOCK SCRIPTS ARE NO LONGER. DO NOT
+  # "RESTORE" THEIR !isLaptop GATES -- this comment used to say they were
+  # workbench-only "or they'd be dead files on the laptop", and it stayed that
+  # way ~50 lines above the change that falsified it.
+  # The six GLOBAL-SERVICE scripts (clawgate/mail/alerts/telemetry/civitai/
+  # media) deploy on BOTH hosts: the laptop renders them from a poller cache
+  # that `bar-remote-pull` syncs. Re-adding `!isLaptop` here would leave the
+  # laptop carrying six blocks with no script behind them -- six dead pills on a
+  # host reporting a perfectly clean switch, which is the exact defect the
+  # original sentence was written to prevent, inverted.
   #
   # 🔴 bar_freshness.py is a CO-LOCATED SIBLING MODULE, not a block. Every count/
   # state block below loads it by explicit path out of its OWN directory (the

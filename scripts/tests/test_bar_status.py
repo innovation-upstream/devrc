@@ -1025,11 +1025,21 @@ def _home_file_gates(nix: str) -> dict:
     """
     gates = {}
     prefix = 'home.file.".config/i3status-rust/scripts/'
-    for line in nix.splitlines():
+    lines = nix.splitlines()
+    for idx, line in enumerate(lines):
         stripped = line.strip()
         if not stripped.startswith(prefix):
             continue
         name = stripped[len(prefix):].split('"', 1)[0]
+        # 🔴 A WRAPPED ENTRY MUST NOT READ AS UNGATED. Classifying on the key's
+        # own line alone means `home.file."…" =` / `  lib.mkIf (!isLaptop) {`
+        # returns "both" — the permissive default the comment below says must
+        # never happen, arrived at by formatting rather than by intent. So when
+        # the key line does not itself open a brace, the continuation is read
+        # too. Every entry is one line today; this keeps that from being
+        # load-bearing.
+        if not stripped.rstrip().endswith("{") and idx + 1 < len(lines):
+            stripped = stripped + " " + lines[idx + 1].strip()
         if "mkIf (!isLaptop)" in stripped or "mkIf !isLaptop" in stripped:
             gates[name] = "!isLaptop"
         elif "mkIf isLaptop" in stripped:
@@ -1105,9 +1115,35 @@ def test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it():
     gates = _home_file_gates(nix)
     sibling_gate = gates.get("bar_freshness.py")
     assert sibling_gate is not None, "no home.file entry for bar_freshness.py"
-    for name, script in BLOCK_SOURCE_FILES:
+
+    # 🔴 CONSUMERS ARE DERIVED FROM THE TREE, NOT FROM `BLOCK_SOURCE_FILES`.
+    #
+    # This loop used to iterate `BLOCK_SOURCE_FILES`, which is pinned two-way
+    # against `ALL_BLOCKS` — the eight POLLER blocks. `i3status-remote-host`
+    # loads the sibling and is not in that list and CANNOT be, so the guard's
+    # docstring said "every block that loads the sibling" while the code checked
+    # eight of nine. MEASURED: with the narrowing mutant applied
+    # (sibling `!isLaptop`, consumer `isLaptop`) the assertion still PASSED.
+    #
+    # That is not hypothetical — it is one `mkIf` from real. Reverting the
+    # "six global blocks on both hosts" half would narrow the sibling back while
+    # the laptop-only pill stayed, leaving `fresh = None` on the laptop and the
+    # `wb` pill stuck on Warning-`?` FOREVER on a healthy fleet, with a green
+    # suite and a guard whose sentence claimed it was covered.
+    consumers = sorted(
+        p.name for p in SCRIPTS.glob("i3status-*")
+        if "_load_freshness" in p.read_text())
+    assert consumers, "no block script loads the sibling — this test is vacuous"
+    assert len(consumers) >= len(BLOCK_SOURCE_FILES), (
+        "derived %d sibling consumers but BLOCK_SOURCE_FILES names %d — the "
+        "derivation is missing blocks it used to cover"
+        % (len(consumers), len(BLOCK_SOURCE_FILES)))
+
+    for script in consumers:
         consumer_gate = gates.get(script)
-        assert consumer_gate is not None, "%s has no home.file entry" % name
+        assert consumer_gate is not None, (
+            "%s loads bar_freshness.py but has no home.file entry — it would "
+            "not be deployed at all" % script)
         assert _gate_contains(sibling_gate, consumer_gate), (
             "bar_freshness.py is deployed on gate %r, which does NOT cover "
             "consumer %s on gate %r — that host would carry the block with no "

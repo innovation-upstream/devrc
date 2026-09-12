@@ -199,6 +199,16 @@ def build(remote_host: str, local_label: str) -> list:
         render_blocks(body.get("blocks") or [], out)
         out.append("")
         render_vitals(body.get("vitals") or {}, out)
+        # `not_relayed` was recorded by the gather with NO reader anywhere, so a
+        # block present in the observed host's bar but absent from the relay was
+        # dropped silently. This is that reader.
+        withheld = body.get("not_relayed") or []
+        if withheld:
+            names = ", ".join(n.replace("i3status-", "").replace("i3blocks-", "")
+                              for n in withheld)
+            out.append("")
+            out.append(f"  {DIM}not relayed (shown natively on this host, or "
+                       f"withheld): {names}{RESET}")
 
     out.append("")
     out.append(f"{DIM}{'-' * 66}{RESET}")

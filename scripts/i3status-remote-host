@@ -182,8 +182,16 @@ def render(payload, now: int, label: str, host: str,
             t = plain(b.get("text", ""))
             if not t and b.get("error"):
                 t = f"{b.get('name', '?')}:{b['error']}"
-            if t:
-                toks.append(html.escape(t))
+            if not t:
+                # 🔴 AN ALARMING BLOCK WITH NO TEXT STILL NEEDS A NAME.
+                # Without this the token is dropped and `more` renders a bare
+                # `+1` with nothing to be more THAN. Reachable in production:
+                # `i3status-airvpn`'s stale pill is literally
+                # `{"text": "", "state": "Warning"}`, so a stale airvpn source
+                # on the observed host painted the observer `wb +1`.
+                t = (b.get("name", "?").replace("i3status-", "")
+                     .replace("i3blocks-", "")) + "!"
+            toks.append(html.escape(t))
         more = len(bad) - len(toks)
         if more > 0:
             toks.append(f"+{more}")

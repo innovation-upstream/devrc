@@ -244,9 +244,11 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"airvpn-menu", "keylog-spin-capture.sh", "main-status-watch.py",
+        {"airvpn-menu", "bar-remote-snapshot", "keylog-spin-capture.sh",
+         "main-status-watch.py",
          "mention-open.py",
-         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
+         "monitor-blackout.sh", "remote-host-detail", "run-tests.sh",
+         "sync-claude-permissions.py",
          "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
@@ -254,7 +256,20 @@ ACKNOWLEDGED_UNSTUBBED = {
         "`systemctl(read)` LINES IN THE LAUNCH LOG (`grep -c '^systemctl(read)'`) "
         "and reports them per target. It never invokes systemctl — it reads the "
         "record of calls the stub already classified. "
-        "sync-claude-permissions.py is a DIFFERENT case from the other four and "
+        "bar-remote-snapshot and remote-host-detail are TWO FURTHER cases and "
+        "are re-justified rather than absorbed, because they differ from each "
+        "other. bar-remote-snapshot GENUINELY SPAWNS `systemctl --user is-active "
+        "bar-status-poll.timer` (local_poller_is_running) -- a read-only "
+        "is-active query, never a start/stop/restart, whose ONLY effect is to "
+        "decide whether to install a relayed cache. It is unstubbed because "
+        "nothing in scripts/tests reaches it: every test that exercises the "
+        "install monkeypatches `local_poller_is_running` itself, and the one "
+        "test of the probe forces the exception path. remote-host-detail is a "
+        "SCANNER FALSE POSITIVE -- its only occurrence of the name is inside a "
+        "user-facing help string telling the operator which timer to check. It "
+        "invokes nothing. Both are listed because this ledger is pinned TWO-WAY "
+        "and a file set that silently grows is exactly what it exists to catch. "
+                "sync-claude-permissions.py is a DIFFERENT case from the other four and "
         "is re-justified rather than absorbed: its only occurrence of the name "
         "is the literal string `Bash(systemctl status:*)` inside its CURATED "
         "table of permission RULES, and the script spawns no subprocess at all — "

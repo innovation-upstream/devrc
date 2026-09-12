@@ -362,14 +362,40 @@ def _pill_dir(tmp_path: Path, with_sibling: bool = True) -> Path:
     return d
 
 
+def _hermetic_env(tmp_path: Path) -> dict:
+    """A subprocess env that cannot reach the OPERATOR'S OWN deployed bar.
+
+    🔴 WITHOUT `XDG_CONFIG_HOME` THESE TESTS EXECUTE THE REAL BAR. The detail
+    view calls `gather_local()`, which spawns `bar-remote-snapshot --gather`,
+    which reads `$XDG_CONFIG_HOME|~/.config/i3status-rust/config-top.toml` and
+    runs every RELAY_BLOCKS command it finds there through `sh -c`. Setting only
+    `XDG_CACHE_HOME` left that half live: MEASURED, the suite shelled out to the
+    developer's tmux server, `/sys/class/hwmon` and `/proc` on every run, via
+    ABSOLUTE paths that `nolaunch`'s PATH stubbing cannot intercept.
+
+    It also made the local-gather half assert nothing anywhere: on the dev host
+    it ran unasserted (every assertion targets the remote fixture), and in the
+    `nix build` sandbox there is no `~/.config` at all, so it short-circuited to
+    an empty block list. Executed in one tier, absent in the other, asserted in
+    neither.
+    """
+    cfg = tmp_path / "config"
+    (cfg / "i3status-rust").mkdir(parents=True, exist_ok=True)
+    (cfg / "i3status-rust" / "config-top.toml").write_text(
+        '[[block]]\nblock = "custom"\njson = true\ncommand = "/bin/echo {}"\n')
+    return dict(os.environ,
+                XDG_CACHE_HOME=str(tmp_path / "cache"),
+                XDG_CONFIG_HOME=str(cfg),
+                PYTHONDONTWRITEBYTECODE="1")
+
+
 def _run_pill(tmp_path: Path, payload, *args, with_sibling: bool = True) -> dict:
     d = _pill_dir(tmp_path, with_sibling)
     cache = tmp_path / "cache" / "bar-remote"
     cache.mkdir(parents=True, exist_ok=True)
     if payload is not None:
         (cache / "workbench.json").write_text(json.dumps(payload))
-    env = dict(os.environ, XDG_CACHE_HOME=str(tmp_path / "cache"),
-               PYTHONDONTWRITEBYTECODE="1")
+    env = _hermetic_env(tmp_path)
     proc = subprocess.run([sys.executable, str(d / PILL), *args],
                           capture_output=True, text=True, env=env, timeout=30)
     assert proc.returncode == 0, proc.stderr
@@ -512,8 +538,7 @@ def test_the_detail_view_names_BOTH_hosts_and_holds_nothing_back(tmp_path):
     (cache / "workbench.json").write_text(json.dumps(_live([
         {"name": "i3status-clawgate", "text": "234!11", "state": "Critical"},
         {"name": "i3status-mail", "text": "", "state": "Idle"}])))
-    env = dict(os.environ, XDG_CACHE_HOME=str(tmp_path / "cache"),
-               PYTHONDONTWRITEBYTECODE="1")
+    env = _hermetic_env(tmp_path)
     proc = subprocess.run(
         [sys.executable, str(tgt), "--host", "workbench",
          "--local-label", "laptop", "--no-hold"],
@@ -522,6 +547,15 @@ def test_the_detail_view_names_BOTH_hosts_and_holds_nothing_back(tmp_path):
     body = proc.stdout
     assert "WORKBENCH" in body and "LAPTOP" in body, \
         "both hosts must be NAMED -- colour alone is unreadable in this font"
+    # 🔴 POSITIVE CONTROL FOR HERMETICITY. `_hermetic_env` points
+    # XDG_CONFIG_HOME at a fixture whose only custom block is `/bin/echo {}`,
+    # so the LOCAL half of this view must show that and nothing else. If the
+    # real deployed bar leaked in, its block names appear here instead -- which
+    # is exactly what happened before, unnoticed, because every assertion above
+    # targets the REMOTE fixture and none looked at the local half at all.
+    for leaked in ("fans", "scratchpads", "rigcontrol", "claude-runs"):
+        assert leaked not in body.split("this host")[-1], (
+            "the local gather reached the OPERATOR'S REAL BAR: found %r" % leaked)
     assert "234!11" in body
     assert "clawgate" in body
 
@@ -537,8 +571,7 @@ def test_the_detail_view_says_LAST_GOOD_rather_than_presenting_it_as_current(tmp
         {"schema": 1, "host": "workbench", "ts": int(time.time()),
          "state": "unreachable", "detail": "ssh timeout",
          "last_good": _live([{"name": "x", "text": "ALARM", "state": "Critical"}])}))
-    env = dict(os.environ, XDG_CACHE_HOME=str(tmp_path / "cache"),
-               PYTHONDONTWRITEBYTECODE="1")
+    env = _hermetic_env(tmp_path)
     proc = subprocess.run(
         [sys.executable, str(tgt), "--host", "workbench", "--no-hold"],
         capture_output=True, text=True, env=env, timeout=60)
@@ -568,8 +601,7 @@ def test_the_detail_view_does_not_invent_a_hostname_for_THIS_host(tmp_path):
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "workbench.json").write_text(json.dumps(
         _live([{"name": "x", "text": "", "state": "Idle"}])))
-    env = dict(os.environ, XDG_CACHE_HOME=str(tmp_path / "cache"),
-               PYTHONDONTWRITEBYTECODE="1")
+    env = _hermetic_env(tmp_path)
     env.pop("BAR_HOST_LABEL", None)
     env.pop("ACTIVITY_HOST", None)
     proc = subprocess.run(
@@ -755,8 +787,9 @@ def test_the_global_service_blocks_render_on_BOTH_hosts():
     """They are not one host's facts, so both bars show them."""
     nix = _nix()
     assert "++ [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock ]" in nix
-    for script in ("i3status-clawgate", "i3status-mail", "i3status-alerts",
-                   "i3status-telemetry", "i3status-civitai", "i3status-media"):
+    # Derived from the classification, not retyped: a hardcoded list lets a
+    # seventh native block stay workbench-only with the suite green.
+    for script in sorted(snap.NATIVE_BLOCKS):
         line = 'home.file.".config/i3status-rust/scripts/%s" = {' % script
         assert line in nix, "%s is not deployed on both hosts — dead pill" % script
 
@@ -820,3 +853,51 @@ def test_the_relayed_cache_dir_MATCHES_what_the_block_scripts_actually_read():
     assert checked, "no NATIVE block scripts found — this test measured nothing"
     assert ours == os.path.join(os.path.expanduser("~"), ".cache", "bar-status"), \
         "POLLER_CACHE_DIR (%r) is not the path the blocks read" % ours
+
+
+def test_the_relayed_cache_set_is_DERIVED_from_NATIVE_BLOCKS():
+    """🔴 The classification must govern the CACHE too, not only the blocks.
+
+    `gather_poller_cache` filtered on `.json` alone and carried all eight poller
+    sources — including `airvpn.json` and `runaways.json`, whose blocks this
+    same module lists in RELAY_BLOCKS as "genuinely this host's own state". The
+    block split was pinned; the cache one layer down was not, so the category
+    error the whole feature exists to fix was still live there.
+
+    Not merely untidy: `i3status-airvpn` is one `mkIf` from the laptop, and the
+    moment it lands there the observer's airvpn pill would report the OBSERVED
+    host's tunnel as its own — fresh `ts`, no `wb` label, no `?`.
+    """
+    wanted = snap.native_cache_filenames()
+    assert wanted == {n.split("-", 1)[1] + ".json" for n in snap.NATIVE_BLOCKS}
+    for relayed in snap.RELAY_BLOCKS:
+        if "-" not in relayed:
+            continue
+        assert relayed.split("-", 1)[1] + ".json" not in wanted, \
+            "%s is a HOST-LOCAL block; its poller cache must not be installed " \
+            "on the observer, where its pill would read as the observer's own" \
+            % relayed
+
+
+def test_a_HOST_LOCAL_source_is_not_carried(tmp_path, monkeypatch):
+    src = tmp_path / "bar-status"
+    src.mkdir()
+    for f in ("clawgate.json", "airvpn.json", "runaways.json", "mail.json"):
+        (src / f).write_text('{"ts": 1789000000}')
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(src))
+    got = set(snap.gather_poller_cache())
+    assert "clawgate.json" in got and "mail.json" in got
+    assert "airvpn.json" not in got, "a RELAY_BLOCKS source leaked into the cache relay"
+    assert "runaways.json" not in got
+
+
+def test_the_global_service_block_deploy_list_is_DERIVED_not_hardcoded():
+    """A seventh NATIVE block must not be able to stay workbench-only silently:
+    it would be neither deployed on the observer nor relayed, so it would
+    vanish from that bar entirely — no pill, no `?`, nothing."""
+    nix = _nix()
+    for name in sorted(snap.NATIVE_BLOCKS):
+        line = 'home.file.".config/i3status-rust/scripts/%s" = {' % name
+        assert line in nix, (
+            "%s is a NATIVE block but is not deployed on both hosts — on the "
+            "observer it would be absent rather than showing a `?`" % name)

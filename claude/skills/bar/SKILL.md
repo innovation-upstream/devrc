@@ -165,6 +165,18 @@ must be a real i3status-rust icon key, **not** an XDG desktop-icon name — an u
 degrade to a missing glyph, it renders the whole pill as a red `Failed to render full text`
 (`test_every_block_ICON_is_a_REAL_i3status_rust_icon_key`).
 
+🔴 **THAT PARAGRAPH IS NOW PARTLY STALE AND THIS IS THE CORRECTION.** Since the
+remote-host relay landed, the six GLOBAL-SERVICE count blocks — `clawgate`, `mail`,
+`alerts`, `telemetry`, `civitai`, `media` — render on **BOTH** hosts, not the workbench
+only. They are not one machine's facts (they are homelab/client-prod Alertmanager, the
+clawgate board, shared ClickHouse, a homelab qBittorrent pod), so both bars show them.
+On the laptop they read a poller cache **synced by `bar-remote-pull`** rather than a local
+poller — the poller itself is still workbench-only — and their **clicks are withheld**
+(`lib.optionals (!isLaptop)`), because the targets are `grafana.homelab.lan`,
+`qbittorrent.workbench.lan` and a LAN IP that do not resolve from a nebula-only host.
+`airvpn` + `runaways` remain workbench-only and reach the laptop through the `wb` pill.
+⚠ **Off nebula the laptop's six go `?`/Warning**, since nothing refreshes that cache.
+
 ## Deploy / apply
 - **Single host (validate an edit end-to-end):** `home-manager switch --flake ~/workspace/devrc --impure`.
   This DOES restart the poller on a script change (`X-Restart-Triggers`).

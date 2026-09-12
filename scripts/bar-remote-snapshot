@@ -137,8 +137,17 @@ LOCAL_ONLY_BLOCKS = frozenset({
 # pinned not to do (it must stay /proc + statvfs so it cannot hang).
 
 # Where a pulled snapshot lands on the OBSERVING host. Deliberately NOT
-# ~/.cache/bar-status: that directory is the poller's, every file in it is a
-# local measurement, and mixing a relayed one in would break that invariant.
+# ~/.cache/bar-status, which holds per-source poller payloads in a format the
+# block scripts read directly -- a different shape from this whole-host
+# snapshot, and one that would collide with the relayed sources below.
+#
+# ⚠ TO BE EXACT, because an earlier version of this comment was FALSE about its
+# own file: `~/.cache/bar-status` on the observer is NOT untouched by the relay.
+# `install_poller_cache` writes the NATIVE_BLOCKS sources into it on purpose --
+# that is what lets the observer's global-service pills run unchanged. What this
+# path keeps separate is the SNAPSHOT (relayed host-local blocks + vitals), not
+# the poller directory. The old wording said the relay mixes nothing in there,
+# 430 lines above the function that does.
 CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
     "bar-remote",
@@ -439,8 +448,20 @@ def gather_poller_cache() -> dict:
         names = sorted(os.listdir(POLLER_CACHE_DIR))
     except OSError:
         return out
+    wanted = native_cache_filenames()
     for fname in names:
-        if not fname.endswith(".json"):
+        # 🔴 CLASSIFIED, NOT "EVERY .json". This filtered on the extension alone
+        # and carried all eight sources -- including `airvpn.json` and
+        # `runaways.json`, whose blocks this very file lists in RELAY_BLOCKS as
+        # "genuinely this host's own state". The block classification governed
+        # blocks; the cache was ungoverned, so the same category error the split
+        # exists to fix was still live one layer down.
+        #
+        # It was not merely untidy. `i3status-airvpn` is one `mkIf` from the
+        # laptop -- this change widened six such gates -- and the moment it lands
+        # there, the laptop's airvpn pill would report the WORKBENCH's tunnel as
+        # its own: fresh `ts`, no `wb` label, no `?`, nothing to tell them apart.
+        if fname not in wanted:
             continue
         try:
             with open(os.path.join(POLLER_CACHE_DIR, fname), "r",
@@ -453,12 +474,37 @@ def gather_poller_cache() -> dict:
     return out
 
 
+def native_cache_filenames() -> frozenset:
+    """The cache files the observer's OWN blocks need, DERIVED from NATIVE_BLOCKS.
+
+    Derived rather than listed so the two cannot drift: a block promoted to or
+    demoted from NATIVE_BLOCKS moves its cache file with it, in one edit.
+    `i3status-clawgate` -> `clawgate.json`.
+    """
+    return frozenset(
+        name.split("-", 1)[1] + ".json"
+        for name in NATIVE_BLOCKS if "-" in name
+    )
+
+
 def gather(host_label: str | None = None) -> dict:
+    # 🔴 NO DISPLAY/XAUTHORITY INJECTION, and its removal is the finding.
+    # This used to set both, justified by "the blocks that ask X a question
+    # (game mode) would report 'cannot answer'". That justification was FALSE
+    # when written: `i3status-gamemode` is in LOCAL_ONLY_BLOCKS and is never
+    # gathered. MEASURED by grepping every RELAY_BLOCKS member for the whole
+    # window-control family the hazard ledger tracks, plus the display
+    # environment variables: zero hits. A gather with both unset produced seven
+    # clean blocks, zero errors, 1.58s.
+    #
+    # ⚠ The family is described rather than spelled, deliberately:
+    # `test_no_real_launchers.py` scans script TEXT, so naming those binaries in
+    # a comment makes this file "reach" them. It did -- this very comment turned
+    # the ledger red on its first run, in the same way `remote-host-detail`'s
+    # help string does for a different binary.
+    # Handing an SSH'd gather a live X cookie for no reason is a wider
+    # environment than the work needs.
     env = dict(os.environ)
-    # Over SSH there is no DISPLAY, and the blocks that ask X a question
-    # (game mode) would report "cannot answer" on a perfectly healthy host.
-    env.setdefault("DISPLAY", ":0")
-    env.setdefault("XAUTHORITY", os.path.join(os.path.expanduser("~"), ".Xauthority"))
 
     label, label_source = resolve_label(host_label)
     snapshot: dict = {
@@ -537,6 +583,20 @@ def pull(host_label: str, ssh_dest: str, remote_cmd: str) -> int:
     if not isinstance(payload, dict) or "ts" not in payload:
         return _write_unreachable(dest, host_label, "remote payload has no ts")
 
+    # 🔴 BRANCH ON THE SCHEMA -- a version field nothing reads is a DTO field,
+    # not a guard, and this one was exactly that: a payload claiming schema 999
+    # rendered `wb ok` / Idle. During a rollout the two hosts genuinely differ
+    # (the observer switches before the observed, or vice versa), so a
+    # newer-or-unknown snapshot must be reported as unreadable rather than
+    # rendered as calm. Older is accepted: fields are additive, and refusing a
+    # peer that is merely behind would blank the pill for the whole rollout.
+    remote_schema = payload.get("schema")
+    if not isinstance(remote_schema, int) or remote_schema > SCHEMA:
+        return _write_unreachable(
+            dest, host_label,
+            f"snapshot schema {remote_schema!r} is newer than this host "
+            f"understands ({SCHEMA}) -- the peer is on a newer generation")
+
     install_poller_cache(payload.pop("poller_cache", None) or {})
     _atomic_write(dest, payload)
     return 0
@@ -554,9 +614,16 @@ def local_poller_is_running() -> bool:
 
     Today nix makes that impossible (the poller is `!isLaptop`, the pull is
     `isLaptop`) and a test pins those gates mutually exclusive. This is the
-    runtime half: cheap, and it fails SAFE -- if systemd cannot be asked, we
-    assume no local poller and proceed, because refusing on an unanswerable
-    question would break the pull on every host that has no systemd at all.
+    runtime half.
+
+    ⚠ IT FAILS **OPEN**, NOT SAFE, AND THE EARLIER WORDING HAD THAT BACKWARDS.
+    If systemd cannot be asked we assume no local poller and proceed -- which
+    with respect to the hazard this guards (two writers on one cache) is the
+    PERMISSIVE direction. That is the deliberate choice, because refusing on an
+    unanswerable question would break the pull on any host without systemd,
+    and the structural gate above is what actually prevents the collision. But
+    "fails safe" named the opposite of what it does, and a reader trusting that
+    label would have believed this stopped a case it waves through.
     """
     try:
         proc = subprocess.run(
