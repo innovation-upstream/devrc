@@ -375,17 +375,17 @@ def test_drift_check_makes_no_ssh_connection_under_no_remote(tmp_path):
     env["DRIFT_REPO"] = str(tmp_path / "norepo")
     env["DRIFT_STATE_DIR"] = str(tmp_path / "state")
     env["DRIFT_GH"] = str(tmp_path / "no-gh")   # absent -> the arm takes its no-gh branch
-    # 🔴 AND THE OTHER TWO. Pinning the three above was measured INSUFFICIENT:
-    # `DRIFT_SESSION_MANAGER` defaults to the real 352 KB program, which the
-    # phase-2 gate execs to scan the operator's LIVE tmux (57 rows, measured) --
-    # `drift-check.sh` says of that scan "which no test may do", and
-    # `test_drift_check.py` pins it as its FOURTH hermeticity seam for the same
-    # reason. `$HOME` is the other: unredirected, each run walks the real
-    # ~/.claude and ~/.config/opencode (344 managed symlinks) and reads
-    # settings.json. Read-only, but the verdict then depends on the operator's
-    # live session state -- and pinning both is FASTER: 3 session-manager execs
-    # to 0, these tests 8.28s to 0.84s.
-    env["DRIFT_SESSION_MANAGER"] = str(tmp_path / "no-session-manager")
+    # 🔴 AND `$HOME`. Pinning the three above was measured INSUFFICIENT:
+    # unredirected, each run walks the real ~/.claude and ~/.config/opencode
+    # (344 managed symlinks) and reads settings.json. Read-only, but the verdict
+    # then depends on the operator's live session state.
+    #
+    # ⚠ `DRIFT_SESSION_MANAGER` was pinned here too and is GONE with the thing it
+    # defended. It defaulted to the real 352 KB program, which the retired
+    # phase-2 gate exec'd to scan the operator's LIVE tmux (57 rows, measured).
+    # `drift-check.sh` no longer execs any child and reads no such variable, so
+    # setting it would pin a name the subject does not have. The speed-up it
+    # bought (3 session-manager execs to 0) is now structural.
     env["HOME"] = str(tmp_path / "home")
 
     subprocess.run(["bash", str(drift), "--no-remote"], capture_output=True,
@@ -431,10 +431,8 @@ def test_drift_checks_probe_output_is_journal_clean(tmp_path):
            "DRIFT_REPO": str(tmp_path / "norepo"),
            "DRIFT_STATE_DIR": str(tmp_path / "state2"),
            "DRIFT_GH": str(tmp_path / "no-gh"),
-           # Same five seams as the test above -- see its note. The real
-           # session-manager scans live tmux; an unredirected HOME walks the
-           # operator's ~/.claude.
-           "DRIFT_SESSION_MANAGER": str(tmp_path / "no-session-manager"),
+           # Same seams as the test above -- see its note. An unredirected
+           # HOME walks the operator's ~/.claude.
            "HOME": str(tmp_path / "home2")}
     for var in ("REMOTE_SSH", "LAPTOP_SSH"):
         env.pop(var, None)

@@ -34,9 +34,8 @@ column — **how it is counted**) are different, and `caveats.kind_scope` carrie
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-ups `null`, never `0`) |
 | `--no-ledger` | skip the ledger read → **no age, no session id** on any row |
 | `--no-repo` | skip the per-host repo probe; every `repo` becomes `null` with `repo_status: skipped` — never `not_a_repo` |
-| `--fuzzyclaw` | the task-file join, **OFF by default** (see below) |
 
-`--json`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:
+`--json`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:
 `~/.claude/skills/session-manager/reference/payload-contract.md`.
 
 ## 🔴 Which output to ask for — you are the only consumer
@@ -174,7 +173,7 @@ operator to press something and land nowhere. 🔴 **`label` is NOT an address �
 So read them from the run, not from here. `report["caveats"]` is structured and the table
 prints one footer line each **unconditionally**, so an agent that runs the script cold gets
 them anyway. The vocabulary is the keys of `CAVEATS` in `scripts/session-manager` —
-`claude_detection`, `fuzzyclaw_scope`, `kind_scope`, `ledger_scope`, `waiting_signal`,
+`claude_detection`, `kind_scope`, `ledger_scope`, `waiting_signal`,
 `unsent_prompt`, `pane_preview` — which `measured_caveats` fills in per scan. That list is
 gated both ways against the script's own `CAVEATS`.
 
@@ -194,19 +193,23 @@ Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
 measurements, and one succeeding says nothing about the others. `clickhouse.status` must be
 `ok` before `rows: []` is believable. **Never read a bare count without its status.**
 
-## fuzzyclaw is OFF by default
+## 🔴 fuzzyclaw is GONE — there is no task-file join
 
-Measured 2026-08-12: 29 live of 401 task files and **every one read `paused`**, including a
-window demonstrably running an agent — a source `CLAUDE.md` marks UNTRUSTED. Opt in with
-`--fuzzyclaw`; off, every count is `null` rather than `0`. The intersection guard still runs
-when you do: a task file survives only when its `window_id` is live **and** that live window's
-real `(session, index)` equals the one the file recorded.
+`~/.tmux/tasks/*.json` was a second, UNTRUSTED supplier of age and `claude_session_id`
+(measured 2026-08-12: 29 live of 401 files, **every one reading `paused`**, one of them a
+window demonstrably running an agent). It was off by default from #419 and the readers were
+deleted once `scripts/drift-check.sh`'s phase-2 gate measured **0 rows** still taking an age
+from it. `--fuzzyclaw` / `--no-fuzzyclaw` no longer exist and argparse rejects them — they
+were deliberately not kept as no-ops, because a silently-ignored flag is how a caller
+concludes it was honoured. ⚠ **That gate is gone too** (drift-check rc 16, retired in the
+same change — its arm passed the flag, so it could not have survived it).
 
-## The agent activity ledger — where age / `stale` / `claude_session_id` come from
+## The agent activity ledger — the ONLY source of age / `stale` / `claude_session_id`
 
 Two writers record one file per tmux PANE into `~/.cache/agent-ledger/` — a devrc-owned Claude
 hook and an opencode plugin — read per host (locally and over SSH). Row fields: `age_secs`,
-`age_source` (`ledger`/`fuzzyclaw`/null — which SOURCE answered; the ledger wins), `runtime`
+`age_source` (`ledger`/null — PROVENANCE, kept at one value so a null age reads as *no writer*
+rather than as a broken ledger), `runtime`
 (`claude`/`opencode`/null — which AGENT recorded it), `ledger`, `claude_session_id`.
 
 🔴 **Read `report["ledger"]`, never just the row.** `status` is `ok` / `partial` / `error` /
@@ -228,8 +231,7 @@ opencode window reads `shell` — an agent counted as a bare prompt in every buc
 `scripts/tests/test_session_manager.py` is the hermetic suite (mocks tmux, SSH, CH, FS);
 `scripts/lib/agent_ledger.py` owns the ledger record shape. State it reads:
 `~/.cache/agent-ledger/*.json` (the ledger), `~/.cache/bar-status/clawgate.json` (the queue
-cache, written by `scripts/bar-status-poll`), `~/.tmux/tasks/*.json` (fuzzyclaw, UNTRUSTED),
-`scripts/tmux-scratch-slots.sh` (codenames).
+cache, written by `scripts/bar-status-poll`), `scripts/tmux-scratch-slots.sh` (codenames).
 
 **Reference topics** — each costs nothing until you open it:
 
@@ -239,7 +241,6 @@ cache, written by `scripts/bar-status-poll`), `~/.tmux/tasks/*.json` (fuzzyclaw,
 | changing or doubting the `waiting` / `unsent_prompt` detector | `~/.claude/skills/session-manager/reference/waiting-signal.md` |
 | a caller must branch on an exit code | `~/.claude/skills/session-manager/reference/exit-codes.md` |
 | reading the approval queue field by field | `~/.claude/skills/session-manager/reference/clawgate-queue.md` |
-| touching the fuzzyclaw task-file join | `~/.claude/skills/session-manager/reference/fuzzyclaw-guard.md` |
 | writing a ClickHouse query over the session history | `~/.claude/skills/session-manager/reference/clickhouse-queries.md` |
 | the SSH call, its failure taxonomy, or which host is which | `~/.claude/skills/session-manager/reference/cross-host.md` |
 

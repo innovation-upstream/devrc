@@ -49,8 +49,8 @@ too when warranted — this one is the fast, always-run floor.
 > build/test commands and honours a repo-local `.verify-agent.json` — that is
 > code execution BY DESIGN. Do **not** point it at a repo whose contents or
 > `.verify-agent.json` you do not trust; it will execute them. Per this repo's
-> CLAUDE.md, agent-handed worktrees and fuzzyclaw task data are **UNTRUSTED** —
-> treat a worktree you did not create the same way (glance at it first).
+> CLAUDE.md, agent-handed worktrees are **UNTRUSTED** — treat a worktree you
+> did not create the same way (glance at it first).
 
 ## Run
 

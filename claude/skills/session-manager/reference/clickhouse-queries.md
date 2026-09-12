@@ -71,18 +71,16 @@ did not exist. `test_sql_session_history_IS_reachable_from_main` now names the c
 | status | reason | means |
 |---|---|---|
 | `skipped` | `--no-ch` | the query was never run |
-| `skipped` | `fuzzyclaw was skipped (--no-fuzzyclaw) …` | the task files were never read — **not** a measured absence |
-| `skipped` | `fuzzyclaw is read on the LOCAL host only …` | **any** matched window is remote — fuzzyclaw is local-only, so no task file was searched for it. Fires on a mixed local+remote row set too: with the default `--host all`, one `session:index` living on both machines yields a row from each, and the shared half must not be reported as a measured absence — **not** a measured absence |
-| `skipped` | `the fuzzyclaw intersection never ran …` | the live-window set was never measured — **not** a measured absence |
-| `skipped` | `this window's slot was claimed by N task files and ALL were dropped …` | contested slot; no id is trusted — **not** a measured absence |
+| `skipped` | `the agent ledger was skipped (--no-ledger) …` | no record was read — **not** a measured absence |
+| `skipped` | `the agent ledger did not answer for every host this target matches …` | **any** matched row sits on a host whose ledger read is not `ok` (`error` / `no_sentinel` / `unmeasured`, or no block at all), so nothing was searched for it. Fires on a mixed row set too: with the default `--host all`, one `session:index` living on both machines yields a row from each, and the unanswered half must not be reported as a measured absence. Names the host and its status — **not** a measured absence |
 | `skipped` | `no window in this report matched the requested target …` | nothing to carry an id — **not** a measured absence |
-| `skipped` | `fuzzyclaw reported status '<x>' …` | a status this reader does not recognise — the measured absence below is GATED on `ok` rather than reached by fallthrough, so a status added later cannot silently become one — **not** a measured absence |
-| `skipped` | `this window carries no claude_session_id (no live fuzzyclaw task file joined to it)` | **the one genuine measured absence**: fuzzyclaw ran, this local window simply has no task |
+| `skipped` | `the agent ledger reported status '<x>' …` | a roll-up status this reader does not recognise — the measured absence below is GATED on `ok`/`partial` rather than reached by fallthrough, so a status added later cannot silently become one — **not** a measured absence |
+| `skipped` | `this window carries no claude_session_id (the agent ledger was read on its host and holds no live record for it)` | **the one genuine measured absence**: the ledger answered for this row's host and simply has no live record |
 | `ok`, `rows: []` | — | the query ran and this session has no prompts in 24h |
 | `unreachable` / `query_error` / `unavailable` | — | the query did not answer |
 
 🔴 **Only the last `skipped` row is a measured negative.** A single hardcoded reason used to
-answer *all* of them, so one `detail --json` could print `LIVE COUNT UNMEASURED` and then
+answer *all* of them, so one `detail --json` could print an UNMEASURED banner and then
 assert a measured absence over that same unmeasured set a few lines later. Every
 non-measured reason now ends with **"this is NOT a measured absence"**, and
 `no_session_reason()` — pure, unit-tested, branching only on facts the report already
@@ -113,24 +111,29 @@ as "telemetry unavailable" with exit 0.
 
 Two joins, in sequence. Only the second one touches ClickHouse.
 
-**1. pane row ← fuzzyclaw task.** `filter_live_tasks()` keeps a task file only when its
-`window_id` is live *and* that live window's real `(session, index)` equals the one the file
-records; `index_tasks_by_window()` then looks the task up by that already-verified slot and
-**drops any slot two files both claim**. So the task attached to a row is one whose window
-identity has been checked, not assumed. `row.window_id == row.fuzzyclaw.window_id` holds for
-every joined row and is asserted end-to-end.
+**1. pane row ← agent-ledger record.** `_host_ledger()` keeps a record only when its
+`window_id` is live **on that host** *and* the record's tmux server pid matches the live
+server's, so a stale `@41` from before a reboot cannot hand a fresh `@41` a dead session's
+id. The row's own `window_id` is the key the lookup used, so the join is auditable in the
+output rather than only inside `fold_windows`.
 
-🔴 This is the join that was wrong. The guard checked `window_id` while the lookup keyed on
-`(session, index)`, so a file could pass the guard and then attach to whatever window had
-since taken its slot — measured: 7 of 43 survivors, plus 5 contested slots resolved by
-silent last-wins.
+⚠ Where two records claim one `window_id`, `agent_ledger.index_records_by_window()` resolves
+by **last activity** and reports the conflict — it does not drop the window. That is
+deliberately different from the fuzzyclaw join this replaced, which dropped a contested slot
+outright; so there is no "contested" reason in the table above, because no such row exists.
 
-**2. task → ClickHouse.** `fuzzyclaw.claude_session` → `activity.events.session` is the only
+🔴 The fuzzyclaw join this replaced was WRONG, and it is why the guard above is keyed the way
+it is: its liveness check used `window_id` while its lookup keyed on `(session, index)`, so a
+task file could pass the guard and then attach to whatever window had since taken its slot —
+measured 2026-08-11: 7 of 43 survivors, plus 5 contested slots resolved by silent last-wins.
+Those readers are now deleted.
+
+**2. record → ClickHouse.** The ledger's `session_id` → `activity.events.session` is the only
 carrier of the session id from a tmux pane to ClickHouse; the `/proc` detector
 (`scripts/lib/claude_sessions.py`) sees *that* Claude runs in a pane but never learns
 *which* session. Measured 2026-08-11:
 `activity.events.session` is 36 chars in 100% of `source='claude'` rows (1107/1107 over 2
-days) and fuzzyclaw's `claude_session` is a 36-char UUID, so the join is structurally sound
-— **provided** the task file survived join 1. That proviso is load-bearing: a wrong
+days) and the recorded `session_id` is a 36-char UUID, so the join is structurally sound
+— **provided** the record survived join 1. That proviso is load-bearing: a wrong
 `claude_session_id` here pulls a *different session's* prompt history and renders it as this
 window's. See the SKILL body.

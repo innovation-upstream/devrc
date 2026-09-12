@@ -7,8 +7,7 @@ collector pipeline does NOT produce, so reconcile.py can diff the collected
 
   * zsh history   (~/.zsh_history)           ↔ source=zsh
   * Chrome/Brave  (…/Default/History sqlite) ↔ source=browser
-  * tmux          (~/.tmux/tasks/*.json,
-                   ~/.tmux/activity/*)        ↔ source=tmux
+  * tmux          (~/.tmux/activity/*)       ↔ source=tmux
   * Claude        (~/.claude/projects/**/*.jsonl) ↔ source=claude
 
 Design rules:
@@ -142,22 +141,12 @@ def _query_chrome(read_path: Path, since_epoch: float | None) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # tmux task / activity files
 # --------------------------------------------------------------------------- #
-def read_tmux_tasks(tasks_dir: Path) -> list[dict]:
-    """Read ~/.tmux/tasks/*.json → list of task dicts (robust to bad json)."""
-    d = Path(tasks_dir)
-    if not d.exists():
-        return []
-    out = []
-    for p in sorted(d.glob("*.json")):
-        try:
-            obj = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-        except (ValueError, OSError):
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
-
-
+# 🔴 `read_tmux_tasks` (`~/.tmux/tasks/*.json`) IS DELETED AND MUST NOT COME
+# BACK. It was the fuzzyclaw task-file reader — a source `CLAUDE.md` marks
+# UNTRUSTED, measured 89% stale — and it was the only supplier of the PROJECT
+# reference `reconcile_tmux` diffed against. `~/.tmux/activity/*` below is a
+# DIFFERENT source with a different writer (`scripts/tmux-activity-emit.sh`)
+# and is unaffected; do not conflate the two directories.
 def read_tmux_activity(activity_dir: Path) -> list[dict]:
     """Read ~/.tmux/activity/* → [{window: str, last_activity: float}, ...].
 

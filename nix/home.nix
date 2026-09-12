@@ -3261,12 +3261,15 @@ in
   # remote leg contributes nothing to the exit code — so a local rc 8 with the
   # laptop shut still exits 8, still fails the unit, and still toasts.
   #
-  # 🔴 THE SECOND THING THAT DOES **NOT** TOAST: rc 16, the fuzzyclaw phase-2
-  # gate. Same hazard, arrived at from the other direction — that code means a
-  # CLEANUP became possible and stays set until somebody does the cleanup, so
-  # failing the unit on it would fire the DND-bypassing toast 4× a day forever
-  # over a run where nothing is wrong. `SuccessExitStatus = 16` on the service
-  # below; the full argument is there.
+  # 🔴 THERE IS NO SECOND NON-TOASTING CASE ANY MORE, and the one there was is
+  # worth recording because the hazard recurs. rc 16 — the fuzzyclaw phase-2
+  # gate — meant a CLEANUP became possible and stayed set until somebody did the
+  # cleanup, so failing the unit on it would have fired the DND-bypassing toast
+  # 4× a day forever over a run where nothing was wrong. It was excused with
+  # `SuccessExitStatus = 16`. The gate is retired and the excusal is removed with
+  # it, so EVERY code this unit can now exit non-zero on is a real finding that
+  # SHOULD toast. Any future ACTIONABLE-not-drift code faces the same choice, and
+  # the answer is the same: excuse it explicitly, and nothing else with it.
   #
   # 🔴 rc 17 DOES TOAST, and that is the point. It means a repo devrc BUILDS A
   # PACKAGE FROM (`nix/pkgs/**` derivations with a `${workspace}/…` src) is not
@@ -3275,9 +3278,9 @@ in
   # 24 commits behind, so its clawgatectl had no `task status`/`task comment`
   # while devrc's version literal stamped 0.7.95 onto it; the command printed
   # help and exited 0. This deadman was green on that host throughout. Unlike
-  # rc 13 and rc 16 this is a real divergence with a real fix (a pull plus a
-  # switch), so it must reach OnFailure like rc 8 does — it is NOT on
-  # SuccessExitStatus. It cannot become permanently red off a single run:
+  # rc 13 this is a real divergence with a real fix (a pull plus a
+  # switch), so it must reach OnFailure like rc 8 does. It cannot become
+  # permanently red off a single run:
   # `fetch failed`, `absent` and `detached` are all reported as UNMEASURED and
   # set no code on the run that observes them.
   #
@@ -3336,9 +3339,11 @@ in
   # so unlike the LADDER codes rc 13/18/23 it is closable the moment it is seen.
   # (rc 13 = DRIFT_UNREACHABLE_ESCALATE, rc 18 = DRIFT_UNMEASURED_ESCALATE and
   # _FETCH_ESCALATE, rc 23 = DRIFT_NIXDIRT_ESCALATE. An earlier wording named
-  # "rc 13/16/18" here: rc 16 has NO ladder and is the single code on
+  # "rc 13/16/18" here: rc 16 had NO ladder and was the single code on
   # SuccessExitStatus, so naming it muddled the very paragraph arguing about the
-  # excuse list, and it disagreed with drift-check.sh's own correct list.)
+  # excuse list, and it disagreed with drift-check.sh's own correct list. rc 16
+  # is retired now and the excuse list is empty, which makes that wording wrong
+  # twice over.)
   # ⚠ The unit's ExecStart is `%h/workspace/devrc/scripts/drift-check.sh` — the
   # WORKING TREE — so that one-line repair takes effect on a merge + pull and
   # needs no home-manager switch. The X-Restart-Triggers below only re-run the
@@ -3363,43 +3368,33 @@ in
     };
     Service = {
       Type = "oneshot";
-      # 🔴 rc 16 IS A SUCCESS TO systemd, AND THIS LINE IS LOAD-BEARING. rc 16 is
-      # the fuzzyclaw phase-2 gate reporting that a CLEANUP became possible —
-      # ACTIONABLE, not drift, nothing broken, nothing to repair. Without this
-      # `Type = "oneshot"` fails the unit on any non-zero code, OnFailure above
-      # fires, and the toast is the ONE class deliberately wired to defeat
-      # do-not-disturb (`zz_notify_failure_bypass`, override_pause_level = 100).
+      # 🔴 THERE IS DELIBERATELY NO `SuccessExitStatus` HERE, AND THAT IS THE
+      # POINT. It carried `= 16` for the fuzzyclaw phase-2 gate: an
+      # ACTIONABLE-not-drift code meaning "a cleanup became possible", which
+      # stayed set until somebody did the cleanup. Failing the unit on it would
+      # have fired OnFailure above — the ONE toast class deliberately wired to
+      # defeat do-not-disturb (`zz_notify_failure_bypass`,
+      # override_pause_level = 100) — 4x a day, forever, over a run where nothing
+      # was wrong.
       #
-      # And it would not fire once: the gate stays open until somebody deletes
-      # the readers, and the timer runs every 6h — so the DND-bypassing alert
-      # would fire 4× a day, forever, on a run where nothing is wrong. The DND
-      # bypass is justified in this file by a MEASURED rate of ~1 firing in 9
-      # days — see the `zz_notify_failure_bypass` block for that measurement and
-      # the arithmetic against it, which is stated ONCE and nowhere else. This is
-      # exactly the "permanently-red gate trains you to click through the one
-      # alert that must keep its meaning" hazard the unreachable-remote note
-      # below already refuses. The script's own header refuses it for rc 13 for the same
-      # reason. Correct about a printed LINE, wrong about an EXIT CODE.
-      #
-      # NOTHING IS HIDDEN. The script still exits 16, still prints the
-      # `ACTIONABLE (not drift)` verdict plus the READY block, and a hand-run
-      # (`scripts/drift-check.sh`, or `systemctl --user start drift-check` then
-      # `journalctl --user -u drift-check`) surfaces both. 🔴 READ THE JOURNAL,
-      # NOT THE EXIT STATUS: systemd ZEROES `ExecMainStatus` for a code it has
-      # been told is a success, so `systemctl show drift-check
-      # -p ExecMainStatus` reads **0** on such a run, not 16 — measured on
-      # systemd 258.3, with the no-`SuccessExitStatus` control reading 16. An
-      # earlier revision of this comment asserted the opposite and would have
-      # led an operator to conclude the gate never opened. `journalctl --user
-      # -u drift-check | grep ACTIONABLE` is the check that works. Pinned by
-      # `test_the_unit_does_not_fail_on_the_phase2_actionable_code`.
-      SuccessExitStatus = 16;
+      # That gate is retired, so the excusal is dead and is REMOVED rather than
+      # left pointing at a code nothing returns. 🔴 It must not come back for a
+      # code that is a real finding: `SuccessExitStatus` takes a LIST, and every
+      # entry on it is a drift verdict systemd will report as success — which is
+      # exactly the deadman's whole purpose defeated. `Type = "oneshot"` now
+      # fails the unit on ANY non-zero code, which is correct, because every code
+      # drift-check can still return means a host needs attention. Pinned by
+      # `test_NO_exit_code_is_excused_from_failing_the_unit`.
       # 🔴 THE BUDGET IS A FUNCTION OF WHAT THE SCRIPT FETCHES, and that grew.
       # It was 180 for "two `git fetch`es plus one ssh round trip" — the two
       # devrc checkouts. The source-repo leg (rc 17) fetches EVERY repo nix/pkgs
       # builds a package from, on BOTH hosts, so the worst case is now
       #   2 hosts x N source repos x DRIFT_SRC_FETCH_TIMEOUT (30s)
-      # on top of the devrc fetches, the ssh round trip and the 60s phase-2 cap.
+      # on top of the devrc fetches and the ssh round trip. (It also used to
+      # carry a 60s phase-2 scan; that gate is retired, so the budget now has
+      # that much MORE headroom than the arithmetic below assumes — deliberately
+      # not tightened, because the worst case is a function of N source repos,
+      # which grows.)
       # At today's N=2 that is 120s of new worst case, which 180 could not
       # absorb: the cgroup would be killed mid-run and the deadman would report
       # NOTHING, on a schedule, looking like a unit that merely takes a while.
@@ -3437,20 +3432,21 @@ in
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
         # Without it detection returns "unknown" and the script exits 6.
         #
-        # 🔴 tmux IS FOR THE CHILD; python3 IS NOW FOR BOTH.
-        # The fuzzyclaw phase-2 gate execs `scripts/session-manager`, whose
-        # shebang resolves `python3` from PATH and which shells out to `tmux
-        # list-panes`. Under systemd there is none of the login shell's PATH, so
-        # without these the gate reports COULD NOT MEASURE on every timer run
+        # 🔴 python3 IS FOR THE DRIVER ITSELF. drift-check.sh runs
+        # `python3 lib/skill_tier_facts.py` for the skill-tier arm (rc 22), to
+        # read `claude/skill-tiers.json` through the ledger's own parser instead
+        # of a second sed. Under systemd there is none of the login shell's PATH,
+        # so without it that arm reports COULD NOT MEASURE on every timer run
         # forever — from a unit that looks correct, which is the exact shape the
-        # iproute2 note above records. Pinned by
-        # `test_the_phase2_child_binaries_are_on_the_unit_path`.
-        # ⚠ This block used to say python3 was for the child ONLY. That stopped
-        # being true when the skill-tier arm (rc 22) landed: drift-check.sh now
-        # runs `python3 lib/skill_tier_facts.py` itself, in the driver, to read
-        # `claude/skill-tiers.json` through the ledger's own parser instead of a
-        # second sed. Without python3 that arm reports COULD NOT MEASURE — no rc,
-        # but also no coverage.
+        # iproute2 note above records.
+        # ⚠ `pkgs.tmux` WAS HERE AND IS NOW GONE, deliberately. It was never for
+        # this script: the retired fuzzyclaw phase-2 gate exec'd
+        # `scripts/session-manager`, which shelled out to `tmux list-panes`, and
+        # the CHILD resolved it from this same PATH. drift-check.sh execs no
+        # child now and never runs tmux itself — `grep -n '\btmux\b'` over it
+        # returns only two prose mentions of the `tmux-fuzzyclaw` REPO. Leaving
+        # it would be an unaccounted entry in a PATH whose whole point is that it
+        # is accounted.
         # 🔴 gh IS FOR THE BRANCH-PROTECTION ARM (rc 24), and leaving it off this
         # PATH is the same silent failure iproute2 and python3 already record:
         # the arm prints COULD NOT MEASURE on every timer run, forever, from a
@@ -3460,7 +3456,7 @@ in
         # ⚠ gh needs credentials, which are NOT on this PATH: under the user
         # manager it reads ~/.config/gh (HOME is set below). If that is ever
         # absent the arm says COULD NOT MEASURE rather than reporting drift.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux pkgs.gh ]}"
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.gh ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
@@ -3469,7 +3465,6 @@ in
       X-Restart-Triggers = [
         "${../scripts/drift-check.sh}"
         "${../scripts/lib/host-role.sh}"
-        "${../scripts/lib/drift_phase2.py}"
         # The rc-22 skill-tier arm: the reader, the parser it delegates to, and
         # the ledger itself. The ledger is listed because a re-tiering changes
         # what the unit would REPORT without any script changing at all.

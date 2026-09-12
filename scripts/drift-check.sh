@@ -187,11 +187,15 @@
 #       and the detector for the second-most-severe code in this table is
 #       switched off. See "THE DECLARED EXPECTATION" below. It ranks between rc 17
 #       and rc 14 — see severity().
-#   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
-#       still take their `age_secs` from fuzzyclaw alone, so the readers can be
-#       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
-#       code this file owns, so it can only ever be the verdict when nothing
-#       else is wrong, and the final line says ACTIONABLE rather than DRIFT.
+#   16  RETIRED, and deliberately NOT reallocated. It was the fuzzyclaw phase-2
+#       gate — ACTIONABLE-not-drift, "the readers can now be deleted". They were
+#       deleted, so the gate answered its one question and went with them. It is
+#       left UNALLOCATED rather than reserved to ship.sh, because ship.sh cannot
+#       return 16 either: the reciprocal ledgers below name only codes one script
+#       can return and the other cannot, and 16 is now returned by neither. A
+#       future DRIFT code should take 26 (see below), not recycle this one — a
+#       recycled code makes every journal line and every handoff older than the
+#       recycling silently wrong about what it meant.
 #
 # ── SOURCE-REPO PARITY (rc 17) ────────────────────────────────────────────────
 # 🔴 A THIRD KIND OF PARITY, AND THE FIRST TWO ARE BLIND TO IT. devrc builds some
@@ -407,48 +411,6 @@
 # only for a scope that was unevaluable before it left and is unevaluable again
 # for the SAME reason, which is a state worth saying out loud at whatever count.
 #
-# ── THE FUZZYCLAW PHASE-2 GATE (rc 16) ────────────────────────────────────────
-# "Is it safe to delete the fuzzyclaw readers yet?" was answered by somebody
-# remembering to run a probe, which is the same failure mode as "nothing runs
-# ship.sh on a schedule" that this whole file exists to fix. So it is a
-# measurement: `session-manager scan --json` reports `age_source` per row, and
-# `summary.age_sources.fuzzyclaw` counts the rows whose age NO OTHER WRITER
-# supplied. Those are pre-deploy sessions the agent ledger has no record of, and
-# the count decays as they restart. At 0, phase 2 is unblocked.
-#
-# 🔴 LOCAL HOST ONLY, and that is not a shortcut. fuzzyclaw task files are LOCAL
-# state — `gather()` passes its task index only for `host == local_host` — so a
-# remote row structurally CANNOT carry a fuzzyclaw age. Scanning one host gives
-# the identical numerator with no ssh. Measured 2026-08-15: 7 of 47 rows locally,
-# and the same 7 in a two-host scan of 75.
-#
-# 🔴 IT OBEYS THE EXAMINED-BESIDE-DANGLING RULE, one subsystem over. The count is
-# NEVER printed alone: `N of M row(s) EXAMINED` is the claim, and a 0 over M=0 is
-# reported as COULD NOT MEASURE, never as ready. Every way this can fail to
-# measure — no session-manager, a crash, unparseable output, a scan of the wrong
-# host, fuzzyclaw not actually read, the age histogram ABSENT or in a writer
-# vocabulary this gate does not recognise — is its own reason token from
-# lib/drift_phase2.py and lands in the same COULD-NOT-MEASURE branch. None of
-# them sets rc 16, and none of them is a zero.
-#
-# 🔴 THAT LAST SENTENCE WAS FALSE ON ARRIVAL, which is why the ledger below
-# exists. `summary.age_sources` shipped with no presence or type check, so a
-# report without it — including one from a session-manager older than the field,
-# i.e. exactly the stale host this deadman is FOR — printed `READY — 0 of 47`
-# byte-identical to a real one. The claim is now MACHINE-CHECKED rather than
-# restated: `test_drift_check.py::test_the_phase2_reason_token_ledger_is_pinned_
-# to_the_fields_read` ast-extracts the emitted token set AND the set of report
-# fields the reader consults, and fails when either grows or shrinks — so a
-# newly-read field with no reason token of its own is a red test.
-#
-# It is NON-FATAL to the rest of the run by construction: it is the last block
-# before the summary, it only ever raises rc from 0 to 16, and a failure to
-# measure raises nothing at all. 🔴 rc 16 is a SUCCESS to systemd
-# (`SuccessExitStatus = 16` on the unit in nix/home.nix): it stays set until
-# somebody does the cleanup, so failing the unit on it would fire the
-# DND-defeating failure toast 4× a day forever — the same permanently-red-gate
-# refusal this file already makes for an unreachable remote, below.
-#
 # ── BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24) ─────────────────────────
 # 🔴 A FOURTH KIND OF PARITY, AND THE OTHER THREE CANNOT SEE IT. Git parity asks
 # "is this checkout still tracking origin/main?"; host parity asks "is what it
@@ -481,8 +443,8 @@
 # field, printing the first beside it because the two states need different
 # repairs (restore the sub-resource vs create protection from nothing).
 #
-# 🔴 EVERY NON-ANSWER IS A REASON, NEVER A ZERO — the same rule the phase-2 gate
-# and the tier arm already apply, and it matters more here because the failure
+# 🔴 EVERY NON-ANSWER IS A REASON, NEVER A ZERO — the same rule the tier arm
+# already applies, and it matters more here because the failure
 # mode of a credentials-less `gh` is an empty string, and an empty string parsed
 # as a count is 0, and 0 is the value that means DRIFT. That would make this arm
 # fire on every timer run the moment `gh` lost its token: a permanently-red gate,
@@ -713,20 +675,11 @@
 #   DRIFT_STATE_DIR  where the unreachable, unmeasured and nix-dirt streaks are
 #                    persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)
-#   DRIFT_SESSION_MANAGER  path to the session-manager used by the phase-2 gate
-#                    (default: the copy beside this script). Exists so the test
-#                    suite can drive every branch of that gate against a stub —
-#                    the real one scans the operator's live tmux, which no test
-#                    may do. Deliberately NOT forwarded to the remote host: the
-#                    gate is local-only, and every value sent over ssh is one
-#                    that has to be proved safe.
-#   DRIFT_PHASE2_TIMEOUT  seconds the phase-2 scan may take (default 60, integer)
 #   DRIFT_GH          the `gh` binary the branch-protection arm (rc 24) runs
 #                    (default `gh`, resolved from PATH). Exists so the suite can
 #                    drive that arm against a stub, and — pointed at a path that
 #                    does not exist — keep every OTHER test from reaching the
-#                    operator's real credentials and the network. Same role as
-#                    DRIFT_SESSION_MANAGER, and for the same measured reason.
+#                    operator's real credentials and the network.
 #   DRIFT_GH_TIMEOUT  seconds that probe may take (default 20, integer)
 #   DRIFT_GH_RULESET_MAX  how many rulesets the rc-24 arm will examine before it
 #                    stops and reports COULD NOT MEASURE (default 5, >=1). The
@@ -789,7 +742,6 @@ _drift_resolved="$(readlink -f "$_drift_self" 2>/dev/null || true)"
 [ -n "$_drift_resolved" ] && _drift_self="$_drift_resolved"
 _drift_dir="$(cd "$(dirname "$_drift_self")" 2>/dev/null && pwd)"
 _drift_lib="$_drift_dir/lib/host-role.sh"
-_drift_phase2_py="$_drift_dir/lib/drift_phase2.py"
 if [ ! -r "$_drift_lib" ]; then
   echo "drift-check: cannot read $_drift_lib — host identity cannot be resolved." >&2
   exit 6
@@ -851,17 +803,14 @@ DRIFT_NIXDIRT_ESCALATE="${DRIFT_NIXDIRT_ESCALATE:-12}"
 # why it alone is floored at 1. See the require_positive_int call below.
 DRIFT_NIXDIRT_MAX="${DRIFT_NIXDIRT_MAX:-10}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
-DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
-DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
 DRIFT_SRC_FETCH_TIMEOUT="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
 # The branch-protection arm (rc 24). Spelled as an explicit unset-test rather
 # than `${DRIFT_GH:-gh}` so the word `gh` survives word-bounded as a COMMAND
 # NAME: this binary is resolved from the unit's PATH, and
 # `test_every_command_the_checker_runs_is_on_the_unit_path` looks for exactly
-# that spelling. Overridable for the same reason DRIFT_SESSION_MANAGER is — the
-# suite must be able to point the arm at a stub, and at a path that does not
-# exist, without the operator's real credentials or the network ever being
-# reachable from a test.
+# that spelling. Overridable so the suite can point the arm at a stub, and at a
+# path that does not exist, without the operator's real credentials or the
+# network ever being reachable from a test.
 if [ -z "${DRIFT_GH+set}" ]; then DRIFT_GH=gh; fi
 DRIFT_GH_TIMEOUT="${DRIFT_GH_TIMEOUT:-20}"
 # 🔴 A BOUND on the ruleset loop, like every sibling listing here. The rules
@@ -980,11 +929,7 @@ require_int DRIFT_NIXDIRT_ESCALATE "$DRIFT_NIXDIRT_ESCALATE"
 # [0,0,0,0] this floor exists to refuse.
 require_positive_int DRIFT_NIXDIRT_MAX "$DRIFT_NIXDIRT_MAX"
 # Not interpolated into a remote payload — but it IS handed to `timeout`, where a
-# non-integer would make the phase-2 scan fail in a way that reads as "the tool
-# is broken" rather than "you passed nonsense".
-require_int DRIFT_PHASE2_TIMEOUT "$DRIFT_PHASE2_TIMEOUT"
-# Same reasoning as DRIFT_PHASE2_TIMEOUT: not interpolated into a remote payload,
-# but handed to `timeout`, where a non-integer reads as "the tool is broken".
+# non-integer reads as "the tool is broken" rather than "you passed nonsense".
 require_int DRIFT_SRC_FETCH_TIMEOUT "$DRIFT_SRC_FETCH_TIMEOUT"
 # Same again for the branch-protection probe's cap.
 require_int DRIFT_GH_TIMEOUT "$DRIFT_GH_TIMEOUT"
@@ -1203,17 +1148,18 @@ severity() {
     #   a stale checkout can PRODUCE this finding as a symptom, so the code that
     #   names the cause must outrank the one that names the effect. Shipping the
     #   host is also the first thing to try.
-    #   ABOVE 16, because 16 is not a fault at all. This one is a real
-    #   divergence: the always-on skill listing on that host is not the listing
-    #   the repo describes, which degrades routing silently and in exactly the
-    #   way the tier mechanism exists to control.
+    #   ABOVE the floor, because this one is a real divergence: the always-on
+    #   skill listing on that host is not the listing the repo describes, which
+    #   degrades routing silently and in exactly the way the tier mechanism
+    #   exists to control.
+    #
+    # 🔴 22 IS NOW THE FLOOR OF THE OWNED CODES. rc 16 used to sit below it at
+    # rank 20 — the fuzzyclaw phase-2 gate, an ACTIONABLE-not-drift code that was
+    # deliberately last so it could only ever BE the verdict on an otherwise
+    # clean run. That gate is retired, so its rank went with it. Nothing else
+    # moved: every remaining rank is unchanged, so no code's relative severity
+    # changed as a side effect of the removal.
     22) echo 25 ;;
-    # 16 is the FLOOR of the owned codes, deliberately. It is not a fault at all
-    # — it says an optional cleanup became possible — so it must never outrank a
-    # host that is behind, let alone one with un-pushed commits. Being last also
-    # means it can only ever BE the verdict on an otherwise-clean run, which is
-    # the only run on which "go do this now" is useful advice.
-    16) echo 20 ;;
     *)  echo 99 ;;
   esac
 }
@@ -2301,8 +2247,8 @@ _streak_file_bump() { # _streak_file_bump <counter-file> <reason> -> streak, or 
   PCOUNT=0
   # 🔴 TWO FIELDS OR NOTHING. `${x%% *}` and `${x##* }` BOTH fall back to the
   # WHOLE STRING when there is no space, so a one-field file would set the reason
-  # and the count from the same token — the exact shape that made the phase-2
-  # gate print `47 of 47` off a two-field line. Require the space before reading
+  # and the count from the same token — the exact shape that made the retired
+  # phase-2 gate print `47 of 47` off a two-field line. Require the space before reading
   # either, and treat anything else as "no prior state".
   case "$PREV" in
     *' '*) PREASON="${PREV%% *}"; PCOUNT="${PREV##* }" ;;
@@ -2805,8 +2751,8 @@ for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
   N_REPORTING=$(( N_REPORTING + 1 ))
 
   # 🔴 READ BY KEY, NOT BY POSITION, and the path pairs are matched FIRST, by
-  # their VALUE. `${x#* }` positional parsing is what made the phase-2 gate print
-  # `47 of 47`. The ORDER of these arms is load-bearing and was wrong once: with
+  # their VALUE. `${x#* }` positional parsing is what made the retired phase-2
+  # gate print `47 of 47`. The ORDER of these arms is load-bearing and was wrong once: with
   # `reason=*` ahead of the pair arm, an untracked repo-root file literally named
   # `reason` produced a `reason=<REACH>` token that was read as this line's
   # REASON field — so the host came out COULD NOT MEASURE and the file it named
@@ -3535,102 +3481,15 @@ else
 fi
 echo
 
-# ── FUZZYCLAW PHASE-2 GATE ────────────────────────────────────────────────────
-# See "THE FUZZYCLAW PHASE-2 GATE" in the header for what this measures and why
-# it is local-only. Here: how it refuses to produce a silent zero.
-#
-# 🔴 EVERY NON-MEASUREMENT IS A REASON, NEVER A COUNT. The gate reads ONE line
-# from lib/drift_phase2.py whose first field is `ok` or a reason token, and it
-# branches on THAT — not on the numbers beside it. Without the token every
-# failure here (no session-manager on this checkout, a crashed scan, a scan of
-# the wrong host, fuzzyclaw not actually read) arrives as `0`, and `0` is the
-# value that means "phase 2 is ready". A checker whose broken state and whose
-# all-clear are the same output is the vacuous green this whole file exists to
-# refuse, and it would be handing over a DELETION.
-#
-# 🔴 AND A REAL ZERO IS ONLY REAL OVER A NON-ZERO DENOMINATOR — the same rule
-# the managed-symlink scan applies with `examined=` beside `dangling=`. `0 of 0`
-# is a scan that walked nothing; it prints as COULD NOT MEASURE and sets no rc.
-echo "=== fuzzyclaw phase-2 readiness ($LOCAL_ROLE) ==="
-if [ "$DO_LOCAL" = 0 ]; then
-  # The remote leg cannot answer this: fuzzyclaw is local state, so a scan of
-  # the other host reports 0 for a reason that has nothing to do with readiness.
-  echo "[phase2] NOT EVALUATED — --no-local, and this gate is LOCAL-ONLY (fuzzyclaw"
-  echo "[phase2]   task files are local state). Not a zero, and not a pass."
-elif [ ! -x "$DRIFT_SESSION_MANAGER" ]; then
-  echo "[phase2] COULD NOT MEASURE — no executable session-manager at $DRIFT_SESSION_MANAGER."
-  echo "[phase2]   This is NOT a zero and NOT 'phase 2 is ready'."
-elif [ ! -r "$_drift_phase2_py" ]; then
-  echo "[phase2] COULD NOT MEASURE — cannot read $_drift_phase2_py."
-  echo "[phase2]   This is NOT a zero and NOT 'phase 2 is ready'."
-else
-  # `--no-capture` and `--no-ch`: this needs `age_source` only, and the pane
-  # capture is the expensive part of a scan. `--fuzzyclaw` is REQUIRED — the
-  # index is opt-in, and without it every age falls to the ledger and the count
-  # is a guaranteed zero. drift_phase2.py re-checks that it was actually read.
-  p2_out="$(timeout "$DRIFT_PHASE2_TIMEOUT" "$DRIFT_SESSION_MANAGER" scan --json --no-ch --no-capture --fuzzyclaw --host "$LOCAL_ROLE" 2>/dev/null | python3 "$_drift_phase2_py" "$LOCAL_ROLE" 2>/dev/null)"
-  p2_token="${p2_out%% *}"
-  p2_rest="${p2_out#* }"
-  p2_rows="${p2_rest%% *}"
-  p2_fz="${p2_rest##* }"
-  # A reader that printed nothing, or something that is not `<token> <int> <int>`,
-  # is itself a could-not-measure — not a zero. Checked before any comparison,
-  # because `[ "" -gt 0 ]` is an error, not a false.
-  #
-  # 🔴 THE FIELD **COUNT** IS PART OF THAT, AND CHECKING ONLY THE FIELDS' SHAPE
-  # WAS NOT ENOUGH. These expansions read positionally, and `${x%% *}` / `${x##
-  # * }` both fall back to the WHOLE STRING when there is no space — so a
-  # two-field line `ok 47` set BOTH counts from the same field and rendered
-  # `47 of 47 row(s) EXAMINED`, a well-formed-looking measurement that is one
-  # number read twice. It is fail-safe by luck (it reads as NOT READY, never
-  # READY) and it is still a fabricated denominator. `p2_rest` must therefore
-  # contain a space (>=3 fields) and must not contain a second one (<=3).
-  case "$p2_rest" in *' '*) ;; *) p2_rows=-1 ;; esac
-  case "${p2_rest#* }" in *' '*) p2_rows=-1 ;; esac
-  case "$p2_rows" in ''|*[!0-9-]*) p2_rows=-1 ;; esac
-  case "$p2_fz" in ''|*[!0-9-]*) p2_fz=-1 ;; esac
-  if [ -z "$p2_out" ] || [ "$p2_rows" = -1 ] || [ "$p2_fz" = -1 ]; then
-    echo "[phase2] COULD NOT MEASURE — the scan produced no usable counts (reason: ${p2_token:-no-output})."
-    echo "[phase2]   This is NOT a zero and NOT 'phase 2 is ready'."
-  elif [ "$p2_token" != ok ]; then
-    # The counts EXIST but the reader says they cannot be trusted (fuzzyclaw was
-    # not actually read, or the scan hit the wrong host). Printed anyway, beside
-    # the reason, so the finding is legible without being acted on.
-    echo "[phase2] COULD NOT MEASURE — reason: $p2_token (raw: $p2_fz of $p2_rows row(s))."
-    echo "[phase2]   This is NOT a zero and NOT 'phase 2 is ready'."
-  else
-    echo "[phase2] fuzzyclaw-only ages: $p2_fz of $p2_rows row(s) EXAMINED"
-    if [ "$p2_rows" = 0 ]; then
-      echo "[phase2] COULD NOT MEASURE — 0 rows examined. A zero over zero rows is a scan"
-      echo "[phase2]   that walked nothing, not a measurement. NOT 'phase 2 is ready'."
-    elif [ "$p2_fz" -gt 0 ]; then
-      echo "[phase2] NOT READY — $p2_fz of $p2_rows row(s) still take their age ONLY from"
-      echo "[phase2]   fuzzyclaw. Removing the readers now would blank those ages. The count"
-      echo "[phase2]   decays as those pre-deploy sessions restart; nothing to do but wait."
-    else
-      echo "[phase2] 🔴 READY — 0 of $p2_rows rows depend on fuzzyclaw for an age."
-      echo "[phase2]   Phase 2 is UNBLOCKED: remove the fuzzyclaw readers from"
-      echo "[phase2]   session-manager, tmux-claude-counters.sh, verify-agent-work and"
-      echo "[phase2]   validation/reconcile.py + refsources.py. This stays reported until"
-      echo "[phase2]   they are gone — that is the gate working, not the gate stuck."
-      note_rc 16
-    fi
-  fi
-fi
-echo
-
-# 🔴 The summary states WHAT WAS CHECKED. It previously said "both hosts on
-# branch main at origin/main" regardless — including for a --no-remote run that
-# looked at one host, and for a --no-local --no-remote run that looked at none.
-#
-# 🔴 rc 16 TAKES **BOTH** BRANCHES, and that is not a convenience. It is the one
-# owned code that is NOT a statement about host health — nothing is out of sync
-# — so suppressing the affirmative line for it withheld the very finding the run
-# DID make ("no drift on the host(s) CHECKED") and printed only the cleanup
-# notice. An operator then cannot tell an rc 16 over a clean host from an rc 16
-# over a host nobody vouched for. Both claims are true and independent, so both
-# are printed. Pinned by `test_the_phase2_ready_run_still_prints_the_no_drift_line`.
-if [ "$rc" = 0 ] || [ "$rc" = 16 ]; then
+# 🔴 rc 0 ONLY. This used to read `rc = 0 || rc = 16`, because rc 16 was the one
+# owned code that made no claim about host health — a cleanup became possible,
+# nothing was out of sync — so it had to print the affirmative line too or the
+# run withheld the finding it actually made. That gate is retired, and with it
+# the only code that could ever reach here non-zero. Narrowing back to rc 0 is
+# therefore a REMOVAL of a special case, not a change of behaviour: every code
+# this script can still return is a real finding, and a real finding must not
+# print "no drift on the host(s) CHECKED".
+if [ "$rc" = 0 ]; then
   if [ -n "$CHECKED" ]; then
     # 🔴 No phrasing here may name a host this run did not contact — the wording
     # it replaced said "both hosts" unconditionally, and read as coverage the run
@@ -3648,18 +3507,19 @@ if [ "$rc" = 0 ] || [ "$rc" = 16 ]; then
     # `--no-local --no-remote` refusal above is already rc 2 for, so it gets the
     # same code: a run that observed no host is a usage outcome, not a verdict.
     #
-    # 🔴 GUARDED ON rc IN {0, 16}, deliberately. This can only ever turn a
-    # "nothing is wrong" code into a 2 — it can never rewrite a DRIFT verdict,
-    # so an rc 8 stays 8 and still reaches OnFailure.
+    # 🔴 GUARDED ON rc 0, deliberately. This can only ever turn a "nothing is
+    # wrong" code into a 2 — it can never rewrite a DRIFT verdict, so an rc 8
+    # stays 8 and still reaches OnFailure.
     # (`test_local_rc8_still_wins_when_the_remote_is_unreachable` and
     # `test_checked_nothing_does_not_rewrite_a_real_verdict`.)
     #
-    # rc 16 reaching here is unreachable rather than handled: 16 is the LEAST
-    # severe owned code, so it survives `note_rc` only when the local leg was
-    # clean, and a clean local leg is what puts the host in $CHECKED. If that
-    # ever changes, 2 ("observed no host") is the right answer over 16 ("a
-    # cleanup is safe") — the reason this branch exists is that a run which
-    # vouched for nothing must not hand systemd a code that reads as fine.
+    # The guard used to read `rc in {0, 16}` for the retired phase-2 gate, whose
+    # code was the least severe owned one and so could survive `note_rc` over a
+    # clean local leg. No remaining code can: every one of them is a real
+    # finding, and a real finding leaves the host OUT of $CHECKED or is severe
+    # enough that rewriting it to 2 would be wrong. The principle is unchanged —
+    # a run which vouched for nothing must not hand systemd a code that reads as
+    # fine.
     #
     # NOT reachable from the timer, whose ExecStart passes no flags — with both
     # legs on, an unreachable remote still leaves the local host CHECKED. This
@@ -3671,12 +3531,15 @@ if [ "$rc" = 0 ] || [ "$rc" = 16 ]; then
   fi
 fi
 if [ "$rc" != 0 ]; then
-  # 🔴 THE VERDICT WORD IS ITSELF A CLAIM. rc 16 is not drift — nothing is out of
-  # sync and no host needs repairing; a cleanup became possible. Printing "DRIFT"
-  # for it would send the operator hunting a divergence that does not exist, and
-  # would blunt the word for the codes that DO mean it.
+  # 🔴 THE VERDICT WORD IS ITSELF A CLAIM, and every code that reaches here now
+  # earns it. There used to be an exception — rc 16, the retired phase-2 gate,
+  # printed "ACTIONABLE (not drift)" because nothing was out of sync and no host
+  # needed repairing. With that gate gone every remaining code IS a divergence,
+  # so the word is unconditional again. 🔴 If a future ACTIONABLE-not-drift code
+  # is ever added, it needs this branch back: printing "DRIFT" for it would send
+  # the operator hunting a divergence that does not exist, and would blunt the
+  # word for the codes that do mean it.
   verdict="DRIFT"
-  [ "$rc" = 16 ] && verdict="ACTIONABLE (not drift)"
   echo "drift-check: $verdict (rc=$rc) — see per-host lines above."
   echo "  checked: ${CHECKED:-none}"
   echo "  rc3=no-repo  rc4=fetch/origin-main-unavailable  rc6=host-unidentified"
@@ -3685,7 +3548,6 @@ if [ "$rc" != 0 ]; then
   echo "  rc13=remote unreachable for >=$DRIFT_UNREACHABLE_ESCALATE consecutive runs"
   echo "  rc14=managed symlinks resolve to nothing (needs a home-manager switch on that host)"
   echo "  rc15=host parity: settings.json key sets / enabledPlugins differ, or enabled-but-not-installed"
-  echo "  rc16=NOT drift: the fuzzyclaw phase-2 gate OPENED (0 rows depend on fuzzyclaw for an age)"
   echo "  rc17=the srcDir SUBTREE a nix/pkgs package is BUILT FROM is behind/ahead its own upstream"
   echo "       on that host. A repo that is behind OUTSIDE every srcDir is reported, never rc 17."
   echo "       (ranks between rc8 and rc14 — the digit is not the severity; see severity() )"

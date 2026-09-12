@@ -2002,7 +2002,7 @@ def test_the_shape_ledger_is_pinned_two_way():
     """🔴 THE CLASSIFIER'S TWO SETS ARE A LEDGER, not prose plus a regex.
 
     Same shape this repo already uses for `EXPECTED_PLUGINS`, `TARGET_FLOORS`
-    and drift-check's phase-2 reason tokens. The sets decide which writes get
+    and the two reciprocal rc ladders in `ship.sh`/`drift-check.sh`. The sets decide which writes get
     the reassuring headline, so silently widening `ordinary` — or narrowing
     `hazard` — must fail the suite, not merely change a message nobody reads
     until the next incident.
