@@ -715,6 +715,33 @@ CLAUSE_LEDGER = {
         "scaffolding is the tests, fixtures and notes a round wrote to guard "
         "it."
     ),
+    # 🔴 ADDED 2026-09-12 when these two moved OUT of the skill body. They were
+    # prose telling the DISPATCHER to retype them into the Agent prompt, and a
+    # probe of two real briefs found them 0/0 — so the auditor got them only when
+    # the dispatcher remembered. Only the audit-specific CONSEQUENCE moved:
+    # `claude/RULES.md` is in every subagent's prompt and already carries
+    # `pkill -f`, resolved PIDs, per-agent scratch names, unpopulated submodules
+    # and zsh word-splitting (verified, one hit each, against a control). What it
+    # does not carry is that a cold checkout's breakage gets blamed on the DIFF,
+    # and that a leaked process corrupts the NEXT round's evidence.
+    "cold-checkout-is-not-the-diff": (
+        "**A fresh worktree is not a working checkout, and an auditor hitting "
+        "that cold blames the PR.** Before attributing anything to the diff, "
+        "establish whether the base branch is ALREADY red and at which file — "
+        "and expect unpopulated submodules, per-package `node_modules` that need "
+        "linking, and a shell that does not word-split an unquoted `$FILES` "
+        "(which checks zero files and prints a confident PASS). Report an "
+        "environment defect as one; do not file it against the change."
+    ),
+    "own-what-you-spawn": (
+        "**Record the PID of anything you start and kill THOSE pids; give every "
+        "container, port and scratch dir a name unique to you.** 🔴 A process you "
+        "leak does not merely waste CPU — it corrupts the NEXT round's evidence: "
+        "a stress probe that outlived its audit left the following round "
+        "measuring its timings under that load and reporting the degraded "
+        "numbers as a finding. Your own \"cleaned up\" claim is not evidence; "
+        "check the pids are gone."
+    ),
     "do-not-merge": (
         "**Do not merge — report only.** No pushes, no PR comments, no "
         "`gh pr merge`. Hand the findings back and let the operator act on "

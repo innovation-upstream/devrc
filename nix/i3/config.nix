@@ -83,6 +83,32 @@ floating_modifier $mod
 # Float any window explicitly launched with WM_CLASS "float" (e.g. the VPN detail
 # terminal: `alacritty --class float,float`). No such rule existed pre-migration.
 for_window [class="float"] floating enable
+# 🔴 THE RULE ABOVE DELIBERATELY SETS NO POSITION, AND THIS ONE IS NARROWER FOR
+# THAT REASON. `class="float"` is shared by every float terminal in the system —
+# a dozen bar-click detail windows in nix/graphical.nix, plus media-menu and
+# airvpn-menu — so hanging `move position center` off it would relocate windows
+# nobody asked to move. alacritty's `--class` is `<general>,<instance>`, so the
+# mention-open picker names ITSELF in the instance half (`PICKER_CLASS` in
+# scripts/mention-open.py), and i3 matches that with `instance=`: this rule
+# catches exactly that one window.
+#
+# Without it the picker takes i3's default placement for a new float, which pins
+# it to the LEFT edge of the screen — the wrong place for a modal the operator
+# has just summoned and is about to read.
+#
+# `floating enable` is REPEATED rather than inherited. i3 runs every matching
+# `for_window` in file order, so today the rule above has already floated the
+# window by the time this line runs — but `move position center` on a still-TILED
+# window is a silent no-op, and this rule should not be able to become one if the
+# rule above is ever reordered or narrowed. Repeating it is idempotent.
+#
+# NO `resize set` HERE, ON PURPOSE. The picker already sizes itself from
+# `PICKER_COLUMNS`/`PICKER_LINES` via `-o window.dimensions.{columns,lines}` on
+# the alacritty command line, in CHARACTER CELLS. An i3 `resize set` would
+# restate that geometry in PIXELS, in a second file that cannot see those
+# constants — so changing the picker's size would silently leave i3 forcing the
+# old one. One geometry decision, one place: alacritty sizes, i3 only centres.
+for_window [class="float" instance="mention-open"] floating enable, move position center
 # 🔴 `(?i)` IS LOAD-BEARING, not decoration. i3 criteria are PCRE and
 # CASE-SENSITIVE by default (the userguide's "case-insensitive" examples are
 # showing you how to opt IN with `(?i)`), and `class` matches the SECOND field

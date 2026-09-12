@@ -16,7 +16,7 @@ authority, and a match the scanner rejects opens nothing.
 
 RESOLUTION
 ----------
-  1 openable candidate   -> xdg-open it, UNLESS the repository was guessed from
+  1 openable candidate   -> open it, UNLESS the repository was guessed from
                             the tmux pane — see `repo_source` in `main()`.
   2+ (a bare `#N`)       -> the picker, one row per platform, showing the URL.
   any of the above whose repository was GUESSED
@@ -29,8 +29,35 @@ RESOLUTION
                             literal here, so every row a picker could offer
                             would 404. See `colour_literal_offer`.
 
+WHERE IT OPENS
+--------------
+Resolution says WHICH reference; `open_target` says on WHICH SURFACE. A GitHub
+issue or pull request can open in `nvim-octo` — neovim with octo.nvim, a full
+review-and-merge TUI packaged at `nix/pkgs/tools/nvim-octo/` — instead of a
+browser tab. Everything else (a clawgate task, a ClickUp id, any GitHub URL
+that is not `/issues/N` or `/pull/N`) is always `xdg-open`.
+
+The TUI is taken only when this host HAS it, and the browser stays reachable
+from two directions: `browser` in the marker file at
+`~/.config/mention-open/target`, and `open_tui`'s own pre-flight, which falls
+back and says so. Read `open_target`'s docstring for the rung order.
+
+⚠ A `--browser` FLAG WAS BUILT HERE AND DELETED BEFORE IT SHIPPED, AND THE
+REASON IS WORTH KEEPING SO IT IS NOT RE-ADDED. It called itself "the operator's
+per-click escape hatch", and it was UNREACHABLE FROM A CLICK: the only
+production caller is the Alacritty hint, whose `command` gets the matched text
+and nothing else, and whose regex cannot produce a token starting with `-`. So
+its sole caller was a human typing it in a shell — a second spelling of what the
+marker file already does, reachable from strictly fewer places. The marker file
+is the one rung, and it is the reachable one.
+
 🔴 THE CLICK PATH MAKES NO NETWORK CALL. This is a hard property, not a target,
 and it is pinned by `test_the_resolution_path_spawns_ONLY_these_local_commands`.
+⚠ THE TUI IS NOT PART OF THAT CLAIM AND MUST NOT BE READ INTO IT. octo.nvim
+resolves a reference with a GraphQL call — that is the entire reason the NUMBER
+is passed rather than a `/pull/` URL — but it happens inside a detached child
+process, after this handler has exited. What is pinned is that THIS module
+spawns nothing that talks to a network.
 
 🔴 THE CANDIDATE UNIVERSE IS THE REPOS THE OPERATOR CONTRIBUTES TO — NEVER ALL
 OF GITHUB, AND A GITHUB-WIDE NAMESAKE SEARCH USED TO LIVE HERE. `gh api
@@ -95,15 +122,27 @@ move. A silent empty picker would be the same silent zero one layer up.
 repos into this PUBLIC repository. It may go to the operator's own screen and
 NOWHERE ELSE: never to a log, never to activity.events, never to a test fixture,
 never to stderr. `notify()` prints, so the refusal paths below name only the
-clicked text — never a row from the universe.
+clicked text — never a row from the universe. ⚠ THE TELEMETRY SINK ADDED IN
+2026-09 DOES NOT WEAKEN THIS. It reports the one row the operator opened and
+three scalars about the list (rank, size, class); `click_dims` is never handed
+the candidate list at all, so there is no argument through which an offered row
+could reach it.
 
 🔴 THE SAME RULE COVERS TWO MORE FILES THIS HANDLER NOW TOUCHES, and both are
 0600 under the same directory, outside every checkout:
   * `known_ranges.json` — `{"owner/repo": <highest issue-or-PR number>}`, whose
     KEYS are the private names (the mirror of the two files above, where the
     values are). Written by `regen-known-repos.py`.
-  * `picks.jsonl`       — one `{"t","repo","n"}` line per repository the
-    OPERATOR chose from the picker. Written HERE, by `record_pick`.
+  * `picks.jsonl`       — one `{"t","repo","n","via"}` line per repository the
+    OPERATOR opened, from the picker AND from the single-candidate auto-open,
+    tagged with which. Written HERE, by `record_pick`.
+
+🔴 AND ONE SINK THAT IS *NOT* A FILE: the handler reports the OUTCOME of a click
+to the activity-telemetry spool (`source=tool`, `kind=invocation`,
+`text=mention-open`). The rule above is unchanged and the distinction is the
+whole of it — what leaves this process is what the operator TOUCHED (the repo
+whose page opened, the rank their row sat at, how many rows were offered), never
+what they were OFFERED. See the CLICK-PATH TELEMETRY block.
 
 ORDERING, AND WHY IT IS ONLY ORDERING
 The picker offers ~392 rows for a clicked `#N`, and they used to arrive in one
@@ -212,6 +251,39 @@ PICKS_PATH = Path(
     os.environ.get("MENTION_OPEN_PICKS")
     or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "mention-open" / "picks.jsonl")
+
+# Where the operator PINS which surface a GitHub mention opens in. Same
+# directory as its four siblings above, and read the same way: a file, not an
+# environment variable.
+#
+# 🔴 AN ENV VAR STRUCTURALLY CANNOT WORK HERE, AND THAT IS THE WHOLE REASON THIS
+# IS A FILE. Alacritty spawns the hint handler with ITS OWN environment, which
+# came from the DISPLAY MANAGER at login — the same fact the wrapper's pinned
+# `PATH` in `nix/programs/alacritty/default.nix` exists for. A variable exported
+# in a shell, an `.envrc`, or even `~/.zshenv` is therefore invisible to every
+# click: the operator would set it, see nothing change, and have no way to tell
+# a broken feature from an unread variable. `~/.server-mode` is the precedent in
+# this repo for exactly that shape.
+#
+# ⚠ THE ENV DOOR BELOW REDIRECTS THE *PATH*, NEVER THE VALUE, and it exists for
+# the reason its four siblings' doors do: a `monkeypatch.setattr` on a module
+# constant is invisible to a child process that re-imports this file, and nine
+# tests were once measured reading the operator's real host state because of it.
+# It is not a second way to choose the target — pointing it at a file is still
+# the only way to say "tui".
+MENTION_TARGET_PATH = Path(
+    os.environ.get("MENTION_OPEN_TARGET")
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "mention-open" / "target")
+
+# The two surfaces a resolved mention can be opened on.
+#
+# `TARGET_BROWSER` is `xdg-open`, which is what every click did before the
+# review TUI existed and what every click still does for a clawgate task, a
+# ClickUp id, or a GitHub reference this host cannot open in `nvim-octo`.
+TARGET_TUI = "tui"
+TARGET_BROWSER = "browser"
+TARGET_VALUES = (TARGET_TUI, TARGET_BROWSER)
 
 # 🔴 A TIMER NOW CONVERGES THE MAPPING, AND THIS PARAGRAPH USED TO SAY THE
 # OPPOSITE — do not re-derive the old reasoning from a stale copy of it. It read
@@ -500,6 +572,62 @@ PICKS_HALF_LIFE_DAYS = 30.0
 # keeps is always at least what a reader would use.
 PICKS_COMPACT_AT = PICKS_MAX_ROWS * 2
 
+# 🔴 WHICH CODE PATH PRODUCED A PICK. Until 2026-09-11 the log recorded only the
+# rows the operator selected in the PICKER, and `main()`'s single-candidate
+# shortcut — the common, fast path — returned without recording anything. So
+# Tier B learned from the AMBIGUOUS clicks alone: every click the handler could
+# answer outright was invisible to it, and the scores described the minority of
+# clicks that were hard rather than what this operator means by a number.
+#
+# Both paths are recorded now, and the row says WHICH, because they are not the
+# same evidence. A picker pick is a CHOICE among rows the operator read; an
+# auto-open is the handler's own resolution, which the operator only implicitly
+# ratified by not complaining. A later scoring change may weight or exclude one
+# of them — the tag is what makes that possible without having thrown the data
+# away. Nothing reads it today: `pick_scores` is unchanged and counts every row
+# the same.
+#
+# 🔴 THIS IS NOT A PURE ADDITION, AND AN EARLIER DRAFT OF THIS PARAGRAPH SAID IT
+# WAS ("strictly more data for auto rows"). That was WRONG AT THE CAPS. The log
+# is bounded twice and both bounds are FIFO with no `via` filtering:
+# `load_picks` scores the last `PICKS_MAX_ROWS` rows and `_compact_picks`
+# truncates the FILE to the same tail past `PICKS_COMPACT_AT`. Auto-opens are
+# the COMMON shape, so at real volume they do not sit beside the picker rows —
+# they PUSH THEM OUT. A host that clicks mostly `owner/repo#N` ends up with
+# permanently FEWER picker rows on disk than before this change.
+#
+# 🔴 SO THIS CHANGES THE LIVE PICKER ORDER, NOT ONLY THE DATASET. `pick_scores`
+# feeds `order_universe`, so recording auto-opens re-weights what the operator
+# is offered on their next ambiguous click — toward repositories they reach by
+# unambiguous reference. That is defensible (it is still evidence about what
+# this operator means by a number, which is what Tier B is for) and it is a
+# BEHAVIOUR CHANGE that must be stated rather than discovered. If it turns out
+# to crowd out the picker signal, the fix is a `via`-aware cap or weight — which
+# is exactly what the tag exists to make possible.
+PICK_VIA_AUTO = "auto"
+PICK_VIA_PICKER = "picker"
+
+# 🔴 WHAT AN UNTAGGED ROW BECOMES, AND WHY IT IS NOT BACK-LABELLED `picker`.
+# Rows written before the tag existed carry no `via` at all (7 of them on the
+# laptop when this shipped; the workbench had no log). They were in FACT picker
+# picks — that was the only writer — but the ROW does not say so, and a reader
+# cannot tell a pre-change row from a future writer that forgot the field. So
+# they load as `unknown`: a third value a consumer must handle deliberately,
+# rather than a claim about provenance the data cannot support. An unrecognised
+# value (a corrupt row, or a tag written by a NEWER version of this handler)
+# lands here too — it is never a reason to DROP the row, because `repo`/`n`/`t`
+# are what the scoring reads and those are still good.
+PICK_VIA_UNKNOWN = "unknown"
+
+# What `record_pick` may WRITE. Deliberately narrower than what `load_picks` may
+# RETURN — a writer must name one of the two real paths, while a reader must be
+# total over whatever is on disk.
+PICK_VIA_RECORDED = (PICK_VIA_AUTO, PICK_VIA_PICKER)
+# What `load_picks` may return. Pinned two-way by
+# `test_the_pick_VIA_vocabulary_is_pinned_two_way`.
+PICK_VIA_VALUES = (PICK_VIA_AUTO, PICK_VIA_PICKER, PICK_VIA_UNKNOWN)
+
+
 # How far apart two reference numbers have to be before proximity stops helping.
 # `#1290` and `#1291` in one repo are the same week's work; `#3` and `#1291` are
 # not. A soft 1/(1+d/SCALE) curve rather than a window, so nothing falls off a
@@ -625,8 +753,27 @@ def ordering_state(ranges: dict[str, int], age: float | None) -> str:
     return ORDER_APPLIED
 
 
+def pick_via(row: dict) -> str:
+    """Which path produced a pick row — one of `PICK_VIA_VALUES`. Pure, total.
+
+    🔴 TOTAL ON PURPOSE, AND THAT IS THE BACKWARDS-COMPATIBILITY RULE IN ONE
+    PLACE. Every way a row can fail to name a path it wrote — the field absent
+    (a row written before the tag existed), the wrong type, a value this version
+    does not know (a NEWER writer) — is `unknown`. None of them is a reason to
+    discard the row: `load_picks` already decided the row is well-formed on the
+    three fields the scoring actually reads, and dropping it over a label would
+    silently delete history the operator earned.
+
+    🔴 ONE DEFINITION, because `load_picks` is not the only reader that will
+    want this. A predicate open-coded at two sites is wrong at one of them.
+    """
+    via = row.get("via") if isinstance(row, dict) else None
+    return via if via in PICK_VIA_VALUES else PICK_VIA_UNKNOWN
+
+
 def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]:
-    """The operator's recent picks as `[{"t": float, "repo": str, "n": int}]`.
+    """The operator's recent picks as
+    `[{"t": float, "repo": str, "n": int, "via": str}]`.
 
     Newest LAST, capped by `PICKS_MAX_ROWS` and filtered to
     `PICKS_MAX_AGE_DAYS`. 🔴 EVERY failure is [] — absent, unreadable, and
@@ -638,6 +785,11 @@ def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]
     per pick, so the rows that matter are the last ones; taking the first 500
     would freeze the preference at whatever the operator liked when the file was
     new and never move again.
+
+    🔴 `via` IS ALWAYS PRESENT ON THE WAY OUT AND NEVER REQUIRED ON THE WAY IN.
+    A row that does not name a path is `unknown`, not dropped — see `pick_via`,
+    which owns that rule. Every caller therefore gets a four-key row whatever the
+    file's vintage, so nothing downstream has to `.get` around a missing field.
     """
     path = path or PICKS_PATH
     now = time.time() if now is None else now
@@ -673,7 +825,7 @@ def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]
             continue
         if (now - float(t)) / 86400.0 > PICKS_MAX_AGE_DAYS:
             continue
-        out.append({"t": float(t), "repo": repo, "n": n})
+        out.append({"t": float(t), "repo": repo, "n": n, "via": pick_via(row)})
     return out
 
 
@@ -812,8 +964,17 @@ def narrow_dir(directory: Path) -> None:
 
 
 def record_pick(repo: str, num: str, path: Path | None = None,
-                now: float | None = None) -> bool:
-    """Append one `{"t","repo","n"}` line to the pick log.
+                now: float | None = None, *, via: str) -> bool:
+    """Append one `{"t","repo","n","via"}` line to the pick log.
+
+    🔴 `via` IS A REQUIRED KEYWORD AND HAS NO DEFAULT, WHICH IS THE WHOLE POINT
+    OF THE FIELD. A default would make the tag a thing a call site can forget:
+    the auto-open path — the one this field exists to make visible — would then
+    record itself as whatever the default said, and the mislabelling would be
+    silent and permanent in a 0600 append-only log. Two call sites exist and
+    both must state which they are. A value outside `PICK_VIA_RECORDED` is a
+    quiet `False` and NO write, for the same reason a malformed repo is: a row
+    whose provenance is wrong is worse than no row.
 
     Returns True if the line was WRITTEN — which is not quite "survived". A
     compaction racing this call carries over anything appended past its read
@@ -859,6 +1020,8 @@ def record_pick(repo: str, num: str, path: Path | None = None,
     reader would discard is not worth writing, and a log full of them would
     push real history past `PICKS_MAX_ROWS`.
     """
+    if via not in PICK_VIA_RECORDED:
+        return False
     if not (isinstance(repo, str) and _OWNER_REPO_RE.match(repo)):
         return False
     try:
@@ -869,7 +1032,7 @@ def record_pick(repo: str, num: str, path: Path | None = None,
         return False
     path = path or PICKS_PATH
     row = {"t": round(time.time() if now is None else now, 3),
-           "repo": repo, "n": n}
+           "repo": repo, "n": n, "via": via}
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         narrow_dir(path.parent)
@@ -977,6 +1140,284 @@ def repo_of_github_url(url: str) -> str:
         return ""
     full = f"{m.group('owner')}/{m.group('repo')}"
     return full if _OWNER_REPO_RE.match(full) else ""
+
+
+# `owner/repo` AND the reference NUMBER, from a github.com issue-or-pull URL.
+#
+# 🔴 STRICTER THAN `repo_of_github_url` ON PURPOSE, AND THE EXTRA STRICTNESS IS
+# THE POINT. That function answers "which repository should the pick log
+# record", so a two-segment path is enough for it. This one answers "what may I
+# hand to `Octo <N> <owner/repo>`", and handing that a number the URL does not
+# carry — or a path that is a release, a commit or a repo root — is a wrong
+# buffer rather than a missing log line. So the kind segment and the digits are
+# both REQUIRED, and the pattern is anchored at both ends.
+#
+# ⚠ BOTH `issues` AND `pull` ARE ACCEPTED, AND THE HANDLER CANNOT TELL THEM
+# APART ANYWAY. `mention-open.py` builds `/pull/{id}` for EVERY GitHub mention
+# (see `openable`), and github.com redirects `/pull/<issue-number>` to
+# `/issues/<n>` server-side — so the URL's kind segment is a guess this module
+# has never been able to make. That is exactly why `open_tui` passes the NUMBER
+# to octo rather than the URL: `Octo <N> <repo>` fires one `issueOrPullRequest`
+# GraphQL query and dispatches on the `__typename` the SERVER returns. Accepting
+# `issues` here costs nothing and keeps a hand-typed URL working.
+_GITHUB_REF_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/"
+    r"(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/(?:issues|pull)/(?P<num>[0-9]+)/?$")
+
+
+def github_ref(url: str) -> tuple[str, str]:
+    """`("owner/repo", "N")` for a github.com issue/pull URL, else `("", "")`.
+
+    Returns a PAIR rather than raising, so every caller's failure branch is the
+    same shape as the "this is a clawgate task" branch — there is no exceptional
+    case here, only a URL this surface cannot open.
+    """
+    m = _GITHUB_REF_RE.match(url or "")
+    if not m:
+        return "", ""
+    full = f"{m.group('owner')}/{m.group('repo')}"
+    if not _OWNER_REPO_RE.match(full):
+        return "", ""
+    return full, m.group("num")
+# --------------------------------------------------------------------------- #
+# CLICK-PATH TELEMETRY
+#
+# 🔴 WHAT LEAVES THIS PROCESS, AND WHAT MAY NEVER. The handler now reports the
+# OUTCOME of a click to the personal activity pipeline. The line is exactly the
+# one `mention_scan`'s telemetry already sets: emit what the operator TOUCHED,
+# never what they were OFFERED. A `source=mentions` row has carried a plain
+# `owner/repo` since that leg shipped, and this carries the same — the repository
+# whose page was opened, which the operator is looking at.
+#
+# 🔴 THE OFFERED SET IS THE HAZARD AND IT IS EXCLUDED STRUCTURALLY, NOT BY
+# CONVENTION. `known_universe.json` names PRIVATE repositories and its committed
+# ancestor disclosed 232 of them into this PUBLIC repo. Nothing below is ever
+# handed the candidate list: `click_dims` takes SCALARS — a repo, a platform, a
+# rank, a class NAME, a count — so there is no argument through which a row the
+# operator did not choose could reach the spool. `test_no_universe_token_can_
+# reach_the_TELEMETRY_payload` is the guard, with a control that proves it fires.
+#
+# 🔴 IT CANNOT COST THE CLICK. Same posture as `record_pick`, one layer along:
+# `invocation.emit_invocation` swallows every failure and returns "", the import
+# is LAZY so a click that emits nothing pays nothing, the write is a single
+# `O_APPEND` line to a local spool — no network, no subprocess, no new verb on
+# the path `test_the_resolution_path_spawns_ONLY_these_local_commands` pins.
+# MEASURED on this host, 7 fresh-process runs: the FIRST emit of a click costs a
+# median 3.7 ms (range 3.3-6.8 under load, and the spread is box load, not this
+# code), essentially all of it the lazy import; a second emit in the same process
+# is 0.05 ms, which no click reaches because a click emits at most once. It is
+# paid AFTER `open_url` has already launched the browser.
+# --------------------------------------------------------------------------- #
+CLICK_TOOL = "mention-open"
+
+# The three outcomes a click can reach once the handler has something to show.
+# ⚠ DELIBERATELY NOT EVERY EXIT. The refusal paths (`refuse()`, `--print`, the
+# six-digit colour toast) emit nothing: they are several distinct arms with
+# their own toasts, and adding them is a separate change with its own argument.
+# What is here is the set the ORDERING question needs — a click that opened
+# something, and a picker the operator walked away from.
+CLICK_AUTO_OPEN = "auto-open"
+CLICK_PICKED = "picked"
+# 🔴 `dismissed` MEANS A LIST WAS ON SCREEN AND THE OPERATOR WALKED AWAY — AND
+# NOTHING ELSE. It used to be emitted for all six of `pick()`'s empty returns,
+# three of which never displayed a picker at all; see the `PICK_REASON_*` block
+# for the measurement. Everything that is not a real dismissal is
+# `no-selection`, which carries the reason.
+CLICK_DISMISSED = "dismissed"
+CLICK_NO_SELECTION = "no-selection"
+# Pinned two-way by `test_the_click_OUTCOME_vocabulary_is_pinned_two_way`.
+CLICK_OUTCOMES = (CLICK_AUTO_OPEN, CLICK_PICKED, CLICK_DISMISSED,
+                  CLICK_NO_SELECTION)
+
+# 🔴 WHERE THE REFERENCE ACTUALLY LANDED. Today every open is a browser, and
+# that is exactly why this exists NOW rather than later: a second surface is
+# arriving (#1582 routes a GitHub mention to a neovim review buffer instead of
+# `xdg-open`), and without this dim a TUI open and a browser open emit an
+# IDENTICAL row. The new surface would be invisible to the very telemetry built
+# to answer "is this being used?" — each PR's suite green in isolation, the
+# defect living in the seam neither owns.
+#
+# ⚠ IT IS NOT A PLACEHOLDER AND IT IS NOT SPECULATIVE. `browser` is emitted
+# because the browser is what opened the reference, measured by `open_reference`
+# from the opener that actually ran — not asserted by a literal at the call
+# site, and never a "not asked" sentinel. A clawgate or ClickUp row is
+# `browser` for the same reason and will stay `browser`: those never route to a
+# TUI.
+CLICK_SURFACE_BROWSER = "browser"
+CLICK_SURFACE_TUI = "tui"
+# Pinned two-way by `test_the_click_SURFACE_vocabulary_is_pinned_two_way`.
+CLICK_SURFACES = (CLICK_SURFACE_BROWSER, CLICK_SURFACE_TUI)
+
+# 🔴 THE CLASS GOES OUT AS A NAME, NEVER AS ITS ORDINAL. `CLASS_PLAUSIBLE` is
+# `0`, and a consumer reading the payload with ClickHouse's `JSONExtractInt`
+# gets `0` for a key that is ABSENT as well as for one that says "plausible" —
+# so shipping the ordinal would make "we never measured the class" and "the best
+# possible class" the same value, in the reassuring direction. A name makes the
+# absent case `''`, which is the one test the pipeline's own conventions say is
+# safe. Pinned two-way against `PLAUSIBILITY_CLASSES`.
+CLASS_NAMES = {
+    CLASS_PLAUSIBLE: "plausible",
+    CLASS_BELOW: "below",
+    CLASS_UNKNOWN: "unknown",
+    CLASS_IMPOSSIBLE: "impossible",
+}
+
+# Every dim `click_dims` can put in the payload, pinned two-way by
+# `test_the_click_telemetry_DIM_ledger_is_pinned_two_way`. A field added without
+# a ledger entry, or an entry naming no field, fails the suite — the shape of a
+# telemetry row is a contract with a consumer that is not in this repo.
+CLICK_DIM_FIELDS = ("repo", "platform", "picker_shown", "offered_total",
+                    "rank", "plausibility", "reason", "ordered", "pinned_above",
+                    "surface")
+
+
+def click_dims(repo: str = "", platform: str = "",
+               picker_shown: bool | None = False,
+               offered_total: int | None = None,
+               rank: int | None = None,
+               plausibility: int | None = None,
+               reason: str | None = None,
+               ordered: bool | None = None,
+               pinned_above: int | None = None,
+               surface: str | None = None) -> dict:
+    """The payload dims for one click outcome. Pure, no I/O, no clock.
+
+    🔴 AN UNMEASURABLE FIELD IS OMITTED, NEVER ZEROED — AND THIS IS THE WHOLE
+    REASON THE FUNCTION EXISTS RATHER THAN A DICT LITERAL AT EACH CALL SITE.
+    The single-candidate AUTO-OPEN shows no list at all, so it has no rank, no
+    class and no total. Emitting `rank=0` there would read as "the operator
+    chose the top row", which is the SUCCESS value for the ordering this
+    telemetry exists to evaluate: every average would be dragged toward a
+    conclusion by rows that never ranked anything. So `picker_shown` is the
+    field a consumer must filter on, and `rank`/`plausibility`/`offered_total`
+    are simply ABSENT when there was nothing to rank.
+
+    ⚠ TWO DIFFERENT ABSENCES, AND THEY ARE NOT THE SAME QUESTION. A MISSING
+    `plausibility` means the plausibility ordering did not run for this click —
+    no range table, a stale one, or a picker holding no universe rows. A
+    `plausibility` of `"unknown"` means it DID run and this repository had no
+    entry in the table. `plausibility_class` keeps `None` and `0` apart on the
+    read side for the same reason; this keeps "could not ask" and "asked, no
+    answer" apart one layer further out.
+
+    ⚠ `repo` AND `platform` ARE ALWAYS PRESENT, INCLUDING EMPTY. A clawgate or
+    ClickUp row has no `owner/repo` — `repo_of_github_url` returns "" for it —
+    and a dismissed picker opened nothing at all. `""` is the honest value and
+    it is one a consumer can test; omitting the key would make a clawgate pick
+    indistinguishable from a row this handler never filled in.
+
+    🔴 `picker_shown` IS THREE-VALUED: `True`, `False`, or ABSENT when it was
+    not measured (a stubbed picker — see `picker_was_shown`). `None` OMITS the
+    key rather than shipping a `False` a consumer would count.
+
+    🔴 `ordered` IS WHAT MAKES `rank` READABLE, AND WITHOUT IT THE HEADLINE
+    QUERY IS BIASED BY CONSTRUCTION. `candidates` is `[evidence rows] +
+    [universe rows]`: the clawgate task, the pane-guessed repo and a mapping hit
+    are PINNED above the block `order_universe` actually ranked. So a click that
+    picks the pinned pane repo emits `rank=1` — indistinguishable from a
+    universe row the ordering genuinely placed second — and "chosen rank
+    clusters near 0" then reads as "the ordering works" on the commonest picker
+    shape (a bare `#N` with a pane repo), whether or not it does. `ordered` says
+    whether THIS row was placed by the ordering; `pinned_above` says how many
+    rows sat above the ranked block, so `rank - pinned_above` is the row's
+    position WITHIN it. **A consumer measuring the ordering must filter
+    `ordered = true`.**
+
+    This is the same argument as the auto-path's missing `rank`, one arm over:
+    a number that is only meaningful for some rows must carry the field that
+    says which rows those are.
+
+    ⚠ `plausibility` IS GATED ON `ordered` AT THE CALL SITE for the same reason
+    — it was previously emitted whenever the ordering RAN, which is not the same
+    as "this row was ordered".
+
+    🔴 `surface` SAYS *WHERE* THE REFERENCE LANDED, AND IT IS ABSENT ONLY WHEN
+    NOTHING WAS OPENED. It comes back from `open_reference` — measured from the
+    opener that ran — so a browser open and a TUI open stop being the same row.
+    A dismissal opened nothing, so it carries no surface; that is a different
+    fact from "opened, somewhere unrecorded", and conflating them is the same
+    absence-vs-zero error as `rank` on the auto path. Values are pinned to
+    `CLICK_SURFACES`; an unledgered one is DROPPED rather than shipped, because
+    a surface no consumer has been told about is worse than a missing field.
+    """
+    dims: dict = {"repo": repo, "platform": platform}
+    if picker_shown is not None:
+        dims["picker_shown"] = bool(picker_shown)
+    if offered_total is not None:
+        dims["offered_total"] = int(offered_total)
+    if rank is not None:
+        dims["rank"] = int(rank)
+    if plausibility is not None and plausibility in CLASS_NAMES:
+        dims["plausibility"] = CLASS_NAMES[plausibility]
+    if reason is not None:
+        dims["reason"] = str(reason)
+    if ordered is not None:
+        dims["ordered"] = bool(ordered)
+    if pinned_above is not None:
+        dims["pinned_above"] = int(pinned_above)
+    # 🔴 LEDGERED OR DROPPED. Unlike `reason` — whose vocabulary `pick()` owns
+    # and `set_pick_reason` already normalises — a surface arrives from whatever
+    # opener ran, so this is the boundary that keeps an unannounced value out of
+    # the dataset. `test_every_surface_open_reference_can_return_is_LEDGERED` is
+    # the other half: it fails rather than letting the drop be silent.
+    if surface is not None and surface in CLICK_SURFACES:
+        dims["surface"] = surface
+    return dims
+
+
+def emit_click(outcome: str, **dims) -> str:
+    """Report one click outcome to the activity spool. Best-effort, returns the
+    line written or "" on ANY failure.
+
+    🔴 IT TAKES THE DIMS AS KEYWORDS AND BUILDS THEM *INSIDE* ITS OWN GUARD,
+    WHICH IS NOT A STYLE CHOICE — IT CLOSES A MEASURED HOLE. The first version
+    took an already-built dict, so `click_dims(...)` was evaluated at the CALL
+    SITE, outside this `try`. MEASURED with `click_dims` made to raise: the
+    browser still opened, and then `guarded_main` caught the exception, returned
+    **1** and fired a "mention-open failed" toast — a working click reported as
+    a broken one. A telemetry helper that can do that is worse than no
+    telemetry.
+
+    ⚠ WHAT IS STILL OUTSIDE, ENUMERATED RATHER THAN SUMMARISED — and the
+    enumeration was itself incomplete on its first draft, which is worth
+    recording in the one paragraph whose subject is completeness:
+      * the picker arm's `picked_rank`, `picked_platform`, `picked_class` and
+        `picked_ordered` lookups;
+      * the AUTO arm's `candidates[0]["platform"]` subscript;
+      * `repo_of_github_url(...)` on both arms.
+    None is moved in here, because doing so would mean handing this function the
+    CANDIDATE LIST — the offered universe — which is the one thing the
+    disclosure rule says must never reach the sink. A narrower guarded surface
+    is the right trade against a wider disclosure surface. All of them are pure
+    and total on the values `main()` can hold at those points; that is an
+    argument, not a guarantee, and it is stated as one.
+
+    🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE CLICK — the same contract
+    `record_pick` carries and for the same reason, except that this one is
+    strictly weaker evidence: a lost pick costs the learning, a lost telemetry
+    row costs a data point. The `except Exception` is deliberately wider than
+    `record_pick`'s `OSError` because the failure surface is wider: the
+    collector may not be deployed on this host at all, in which case
+    `scripts/collector/invocation.py` or `spool_emit` simply is not importable
+    and this must be a silent no-op rather than a dead click.
+
+    🔴 THE IMPORT IS LAZY, AND THAT IS MEASURED RATHER THAN STYLISTIC — the same
+    argument the module docstring makes for `concurrent.futures`. `spool_emit`
+    drags in `base64`, `datetime` and `socket`, none of which this handler
+    otherwise loads: a median 3.7 ms on this host. Every click that refuses,
+    prints or is barred by `--no-discovery` would pay it for nothing.
+    """
+    if outcome not in CLICK_OUTCOMES:
+        return ""
+    try:
+        # `scripts/collector` is already on `sys.path` — the module-level insert
+        # at the top of this file put it there for `mention_scan`. Re-inserting
+        # here would grow the path on every click for no gain.
+        import invocation  # noqa: PLC0415 — see the docstring
+        return invocation.emit_invocation(CLICK_TOOL, outcome,
+                                          dims=click_dims(**dims))
+    except Exception:  # noqa: BLE001 — telemetry must never cost a click
+        return ""
 
 
 def row_to_url(row: str, candidates: list[dict]) -> str:
@@ -1226,7 +1667,13 @@ def notify(summary: str, body: str = "") -> None:
         pass
 
 
-def open_url(url: str) -> int:
+def open_browser(url: str) -> int:
+    """`xdg-open`, which is what EVERY click did before the review TUI existed.
+
+    Renamed from `open_url`, which is now the dispatcher above it. The body is
+    unchanged: this is the fallback every other arm returns to, so it must keep
+    working for a URL no other surface can open at all.
+    """
     try:
         subprocess.Popen(["xdg-open", url],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1234,6 +1681,228 @@ def open_url(url: str) -> int:
         notify("could not open the link", f"{type(exc).__name__}: {exc}")
         return 1
     return 0
+
+
+# The float terminal the review TUI runs in, and its geometry.
+#
+# `--class float,mention-review` puts it under `for_window [class="float"]
+# floating enable` in `nix/i3/config.nix` — the same rule the fzf picker's
+# terminal uses — while the instance half names THIS window specifically, so an
+# i3 rule can size or place a review without catching the picker.
+#
+# Bigger than `PICKER_*` because the two windows hold different things: the
+# picker is a list, a review is a diff beside a file panel.
+REVIEW_CLASS = "float,mention-review"
+REVIEW_COLUMNS = 200
+REVIEW_LINES = 50
+
+# The wrapper that runs neovim with octo.nvim configured. Packaged as
+# `nix/pkgs/tools/nvim-octo/` and pinned onto the hint wrapper's PATH by
+# `nix/programs/alacritty/default.nix`.
+#
+# 🔴 A MODULE CONSTANT AND NOT A LITERAL IN TWO PLACES. It is both the name
+# `tui_available()` looks up and the `-e` payload below; two spellings of one
+# name is how a rename leaves a pre-flight checking a binary nobody spawns.
+# `test_mention_open.py` resolves this constant out of the SYNTAX TREE for the
+# same reason `PICKER_SH` is resolved — see `_exec_payload_commands`.
+REVIEW_EXE = "nvim-octo"
+
+
+def tui_available() -> bool:
+    """Is the review TUI on THIS handler's PATH?
+
+    🔴 THE ONE PLACE THAT QUESTION IS ASKED. `open_target` asks it to decide
+    whether the TUI is the DEFAULT, and `open_tui` asks it again immediately
+    before the spawn — deliberately twice, because they are different questions
+    about different moments and a `which` result from the decision is a
+    hypothesis about the spawn, not a fact. Consolidating the PREDICATE is what
+    stops the two rungs disagreeing about what "available" means.
+    """
+    import shutil  # noqa: PLC0415 — see run_picker's import comment
+    return shutil.which(REVIEW_EXE) is not None
+
+
+def read_target_marker(path: Path | None = None) -> str:
+    """The operator's pinned target, or `""` when they have not pinned one.
+
+    Anything that is not exactly one of `TARGET_VALUES` — an empty file, a typo,
+    a stray newline-only write, a directory — reads as UNPINNED rather than as
+    an error. A marker file that cannot be understood must not be able to wedge
+    a click: the default rung below is always reachable.
+
+    The path is read at CALL time, never bound as a default argument, for the
+    reason `load_known_repos` is: a `path: Path = MENTION_TARGET_PATH` default
+    is evaluated once at import, and `monkeypatch.setattr` on the module
+    constant would then be inert.
+    """
+    p = MENTION_TARGET_PATH if path is None else path
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    value = raw.strip().lower()
+    return value if value in TARGET_VALUES else ""
+
+
+def open_target(url: str) -> str:
+    """Which surface this URL opens on. One of `TARGET_VALUES`, always.
+
+    The rungs, in order, and why each sits where it does:
+
+      0. THE URL'S OWN SHAPE. A clawgate task, a ClickUp id, a GitHub release —
+         anything `github_ref` cannot turn into `(repo, number)` — is BROWSER,
+         and no marker file can override that. This is first rather than last
+         because "whatever the marker says" is not a meaningful instruction for
+         a URL the TUI has no way to open: honouring it would produce a window
+         that fails, where the browser would simply have worked.
+      1. THE MARKER FILE. See `MENTION_TARGET_PATH` for why it is a file and
+         can never be an environment variable — and see the module docstring
+         for why the `--browser` FLAG that used to sit above this rung was
+         deleted rather than shipped: it could not be reached from a click, so
+         it was a second spelling of this rung with a strictly smaller reach.
+      2. THE DEFAULT: the TUI when this host actually has it, the browser when
+         it does not. SILENT in the second case, deliberately — a host with no
+         `nvim-octo` has not lost anything it had, and toasting on every click
+         to say so is the noise this handler must not make. The announcement
+         belongs where the TUI was actually ASKED for and could not run, which
+         is `open_tui`'s pre-flight.
+    """
+    if not github_ref(url)[0]:
+        return TARGET_BROWSER
+    marked = read_target_marker()
+    if marked:
+        return marked
+    return TARGET_TUI if tui_available() else TARGET_BROWSER
+
+
+def open_tui(url: str) -> tuple[int, str]:
+    """Open a GitHub reference in the review TUI. Falls back to the browser.
+
+    Returns `(exit code, the surface that ACTUALLY opened it)` — one of
+    `CLICK_SURFACES`. 🔴 THE SURFACE IS RETURNED BY THE ARM THAT RAN, NEVER
+    RE-DERIVED FROM `open_target()`, AND THAT IS THE WHOLE POINT OF
+    RETURNING IT AT ALL. Three arms below fall back to the browser after
+    the TUI has already been SELECTED — a URL this surface cannot open, a
+    failed `which` pre-flight, a terminal that will not spawn. In every one
+    of them `open_target(url)` still says `tui` while `xdg-open` is what
+    opened the link, so a caller deriving the surface from the routing
+    decision would record a CLAIM about what should have happened rather
+    than a MEASUREMENT of what did. `open_reference`'s docstring states
+    that rule; this signature is what lets it be obeyed.
+
+    🔴 THE `which` PRE-FLIGHT IS LOAD-BEARING, NOT DEFENSIVE POLISH, AND A
+    POST-SPAWN FALLBACK STRUCTURALLY CANNOT REPLACE IT. Alacritty exits 0
+    whether its `-e` command exits 0 or 127, and `Popen` never waits — so a
+    missing or broken `nvim-octo` is a window that flashes and vanishes, with
+    nothing for this process to observe. That is the identical silent dead end
+    `pick()` pre-flights `fzf` for, one surface over.
+
+    🔴 THE NUMBER IS PASSED, NOT THE URL, AND THAT IS A CORRECTNESS FIX RATHER
+    THAN A STYLE CHOICE. `openable()` builds `/pull/{id}` for every GitHub
+    mention because the handler cannot know whether `#N` is an issue or a pull
+    request — github.com resolves that by redirecting. Handing octo a `/pull/`
+    URL asserts the kind, and it would assert it WRONGLY for every issue
+    mention. `Octo <N> <owner/repo>` instead fires one `issueOrPullRequest`
+    GraphQL query and opens whatever the server says it is.
+
+    ⚠ `repo` IS PASSED EXPLICITLY so the invocation is cwd-independent: the
+    float terminal's working directory is whatever the display manager handed
+    the hint wrapper, which is not a checkout of anything in particular.
+    """
+    repo, num = github_ref(url)
+    if not repo:
+        # Unreachable through `open_target` (rung 0 answers it), and kept
+        # because a direct caller is not unreachable. Silent: the browser IS
+        # the right answer for this URL and nothing went wrong.
+        return open_browser(url), CLICK_SURFACE_BROWSER
+    if not tui_available():
+        notify("the mention opened in the browser instead",
+               f"{REVIEW_EXE} is not on this handler's PATH. The hint wrapper "
+               f"pins it, so this is a DEPLOY gap, not a config one — run "
+               f"`home-manager switch --flake ~/workspace/devrc --impure`")
+        return open_browser(url), CLICK_SURFACE_BROWSER
+    try:
+        # 🔴 A LIST LITERAL WHOSE argv[0] IS THE CONSTANT `"alacritty"`, for the
+        # reason `run_picker`'s argv carries at length: the AST ledger in
+        # `test_mention_open.py` reads exactly that, and a variable there
+        # reports `<computed>` and reddens a guard about something else
+        # entirely.
+        #
+        # 🔴 THE `-c "Octo …"` STRING IS BUILT INSIDE THE NIX WRAPPER, NOT HERE.
+        # `nvim-octo` takes `<owner/repo> <number>` as two ordinary argv
+        # entries and assembles the ex-command itself, so no quoting hazard
+        # reaches this file and argv[0] stays the constant the ledger needs.
+        subprocess.Popen(
+            ["alacritty", "--class", REVIEW_CLASS,
+             "-o", f"window.dimensions.columns={REVIEW_COLUMNS}",
+             "-o", f"window.dimensions.lines={REVIEW_LINES}",
+             "-e", REVIEW_EXE, repo, num],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        notify("could not open the review TUI",
+               f"{type(exc).__name__}: {exc} — opening the browser instead")
+        return open_browser(url), CLICK_SURFACE_BROWSER
+    return 0, CLICK_SURFACE_TUI
+
+
+def open_url(url: str) -> int:
+    """Open a resolved mention on whichever surface `open_target` names.
+
+    🔴 THE EXIT CODE ONLY, AND THE SIGNATURE IS THE ONE EVERY CALLER HAD BEFORE
+    EITHER THE TUI OR THE CLICK LEDGER EXISTED — so neither feature forced an
+    unrelated call site to change.
+
+    ⚠ `open_reference` ROUTES TOO, AND THAT DUPLICATION IS DELIBERATE RATHER
+    THAN OVERLOOKED. It cannot delegate to this function wholesale: its own seam
+    guard (`test_every_surface_open_reference_can_return_is_LEDGERED`) stubs
+    `open_url` and asserts the browser arm still delegates to it, so making that
+    arm bypass this function turns a real guard inert. Routing here as well is
+    the cheaper of the two costs — and the drift it risks is closed by
+    `test_open_url_and_open_reference_ROUTE_THE_SAME_WAY`, which drives both
+    over one table and fails if they ever disagree.
+    """
+    if open_target(url) == TARGET_TUI:
+        # The surface is dropped, never re-derived: this contract is an int.
+        return open_tui(url)[0]
+    return open_browser(url)
+def open_reference(url: str) -> tuple[int, str]:
+    """Open `url` and report `(exit code, WHICH SURFACE it landed on)`.
+
+    🔴 THE SURFACE IS MEASURED FROM THE OPENER THAT RAN, NOT ASSERTED AT THE
+    CALL SITE — and that is the whole reason this one-line wrapper exists rather
+    than the two emit sites each passing `surface=CLICK_SURFACE_BROWSER`. A
+    literal at the call site is a CLAIM about what happened; a value returned by
+    the code that did the opening is a MEASUREMENT of it. When a second opener
+    arrives the literal version would keep reporting `browser` from a branch
+    that no longer uses one, and every suite would stay green.
+
+    🔴 THIS IS THE SINGLE INTEGRATION POINT FOR A SECOND SURFACE. #1582 routes a
+    GitHub mention to a neovim review buffer instead of `xdg-open`; when it
+    lands, the branch goes HERE and returns `CLICK_SURFACE_TUI`, and both emit
+    sites report it with no edit. Nothing else in this handler needs to change,
+    and `test_every_surface_open_reference_can_return_is_LEDGERED` fails if the
+    new value is not in `CLICK_SURFACES`.
+
+    ⚠ IT DEGRADES HONESTLY BY CONSTRUCTION. Without #1582 this returns
+    `browser` because the browser is genuinely what opened the reference — not a
+    placeholder, not a "not measured" sentinel. The dim is absent only where
+    nothing was opened at all (a dismissal), which is a different fact and is
+    reported as one.
+
+    ⚠ THE EXIT CODE IS `open_url`'s, UNCHANGED. A failed open still returns 1
+    and still reports the surface it TRIED, because "the browser failed" and
+    "there was no browser involved" are different rows.
+    """
+    # 🔴 THE TUI ARM RETURNS ITS OWN SURFACE; THIS DOES NOT SECOND-GUESS IT.
+    # `open_tui` falls back to the browser in three cases AFTER the TUI has been
+    # selected (an unopenable URL, a failed `which` pre-flight, a terminal that
+    # will not spawn), and in every one `open_target(url)` still says `tui`.
+    # Writing `CLICK_SURFACE_TUI` here — or deriving it from `open_target` —
+    # would report a surface that did not open the link, which is exactly the
+    # CLAIM-vs-MEASUREMENT distinction this function's docstring exists for.
+    if open_target(url) == TARGET_TUI:
+        return open_tui(url)
+    return open_url(url), CLICK_SURFACE_BROWSER
 
 
 # --------------------------------------------------------------------------- #
@@ -1276,9 +1945,20 @@ def open_url(url: str) -> int:
 # `--class float,mention-open` puts it under `for_window [class="float"]
 # floating enable` in `nix/i3/config.nix` — the SAME rule every other float
 # terminal in `nix/graphical.nix` relies on — while the instance half names this
-# window specifically, so a future i3 rule can size or place it without catching
-# every other float. (alacritty's `--class` is `<general>,<instance>`; i3's
-# `class=` matches the general half.)
+# window specifically. (alacritty's `--class` is `<general>,<instance>`; i3's
+# `class=` matches the general half and `instance=` the second.)
+#
+# That instance half is LOAD-BEARING, not decorative: a second, narrower rule
+# `for_window [class="float" instance="mention-open"] … move position center`
+# centres the picker, which the shared `class="float"` rule deliberately does
+# not do for anybody. Rename the instance here and the picker silently goes back
+# to opening pinned to the LEFT edge — which is why
+# `scripts/tests/test_i3_picker_centering.py` derives the instance FROM this
+# constant rather than spelling it, and goes red on the disagreement.
+#
+# The SIZE stays here and only here. i3 centres the window alacritty sized; the
+# config carries no `resize set`, so `PICKER_COLUMNS`/`PICKER_LINES` below are
+# the single source of the picker's geometry.
 PICKER_CLASS = "float,mention-open"
 PICKER_COLUMNS = 120
 PICKER_LINES = 22
@@ -1425,6 +2105,87 @@ PICKED_NEVER_SHOWN = "never-shown"
 # deliberate act.
 PICKED_OUTCOMES = (PICKED_SELECTED, PICKED_DISMISSED, PICKED_TIMEOUT,
                    PICKED_NEVER_SHOWN)
+
+# 🔴 WHY `pick()` RETURNED "", AND WHY THIS HOLDER EXISTS AT ALL. `pick()`
+# collapses SIX different endings into one empty string: fzf missing, the spawn
+# raising, a timeout, a terminal that never showed, a genuine dismissal, and a
+# row that did not map back to a URL. `run_picker` already knows which — it
+# returns a `PICKED_*` outcome — and `pick()` was throwing that away one line
+# before the caller needed it.
+#
+# The telemetry then reported all six as `dismissed picker_shown=True`, and in
+# THREE of them no picker was ever displayed, so `picker_shown` was factually
+# false in the exact rows that form the denominator for "did the ordering help?".
+# A denominator padded with clicks that never saw a list is worse than no
+# denominator.
+#
+# ⚠ A MODULE-LEVEL HOLDER RATHER THAN A CHANGED RETURN TYPE, DELIBERATELY.
+# `pick()` returning `(url, reason)` is the cleaner signature and it is NOT
+# worth it here: roughly thirty tests stub `MO.pick` with
+# `lambda c, mesg="": <url>`, so widening the contract would rewrite all of them
+# and — worse — a stub that kept the old shape would silently feed `main()` a
+# string where it expected a tuple. The handler is a one-shot process that calls
+# `pick()` at most once, so a holder has no lifetime to get wrong.
+#
+# 🔴 `UNATTRIBUTED` IS THE STUBBED-PICKER VALUE AND IT MUST NOT BE GUESSED AT.
+# `main()` resets the holder before calling `pick()`, so a test stub that never
+# goes through the real `pick()` leaves it here. The telemetry then OMITS
+# `picker_shown` rather than asserting one — see `click_dims`.
+PICK_REASON_SELECTED = "selected"
+PICK_REASON_DISMISSED = "dismissed"
+PICK_REASON_TIMEOUT = "timeout"
+PICK_REASON_NEVER_SHOWN = "never-shown"
+PICK_REASON_FZF_MISSING = "fzf-missing"
+PICK_REASON_SPAWN_FAILED = "spawn-failed"
+PICK_REASON_UNMAPPED_ROW = "unmapped-row"
+PICK_REASON_UNATTRIBUTED = "unattributed"
+
+# Pinned two-way by `test_the_pick_REASON_vocabulary_is_pinned_two_way`.
+PICK_REASONS = (PICK_REASON_SELECTED, PICK_REASON_DISMISSED,
+                PICK_REASON_TIMEOUT, PICK_REASON_NEVER_SHOWN,
+                PICK_REASON_FZF_MISSING, PICK_REASON_SPAWN_FAILED,
+                PICK_REASON_UNMAPPED_ROW, PICK_REASON_UNATTRIBUTED)
+
+# 🔴 WHICH REASONS MEAN A LIST WAS ACTUALLY ON SCREEN. This is the whole point
+# of the split: `fzf-missing`, `spawn-failed` and `never-shown` are clicks where
+# the operator saw NOTHING, and reporting `picker_shown=True` for them puts rows
+# into the ordering's denominator that never had an ordering to judge.
+# `unattributed` is deliberately in NEITHER set — it is "we did not measure",
+# which omits the field instead of picking a side.
+PICK_REASONS_SHOWN = (PICK_REASON_SELECTED, PICK_REASON_DISMISSED,
+                      PICK_REASON_TIMEOUT, PICK_REASON_UNMAPPED_ROW)
+PICK_REASONS_NOT_SHOWN = (PICK_REASON_FZF_MISSING, PICK_REASON_SPAWN_FAILED,
+                          PICK_REASON_NEVER_SHOWN)
+
+# A one-slot list rather than a `global` — same effect, no rebinding.
+_PICK_REASON: list[str] = [PICK_REASON_UNATTRIBUTED]
+
+
+def set_pick_reason(reason: str) -> None:
+    """Record why `pick()` is about to return what it returns. Total: anything
+    outside `PICK_REASONS` becomes `unattributed` rather than being stored, so a
+    future spelling cannot invent a vocabulary the consumers do not know."""
+    _PICK_REASON[0] = (reason if reason in PICK_REASONS
+                       else PICK_REASON_UNATTRIBUTED)
+
+
+def last_pick_reason() -> str:
+    """The reason recorded by the most recent `pick()` in this process."""
+    return _PICK_REASON[0]
+
+
+def picker_was_shown(reason: str) -> bool | None:
+    """Did the operator actually see a list? `None` means NOT MEASURED.
+
+    🔴 THREE-VALUED ON PURPOSE. A bool here would have to guess for
+    `unattributed`, and both guesses are wrong in the direction that matters:
+    `True` pads the ordering's denominator with clicks that saw nothing, `False`
+    silently drops real pickers out of it."""
+    if reason in PICK_REASONS_SHOWN:
+        return True
+    if reason in PICK_REASONS_NOT_SHOWN:
+        return False
+    return None
 
 
 def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
@@ -1639,6 +2400,9 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     # switch, none by an edit.
     import shutil  # noqa: PLC0415 — see run_picker's import comment
     if shutil.which("fzf") is None:
+        # 🔴 NO PICKER WAS SHOWN. Recorded rather than collapsed into the same
+        # empty string as a dismissal — see the `PICK_REASON_*` block.
+        set_pick_reason(PICK_REASON_FZF_MISSING)
         notify("the mention picker cannot run",
                "fzf is not on this handler's PATH. The hint wrapper pins it, so "
                "this is a DEPLOY gap, not a config one — run "
@@ -1650,6 +2414,7 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
         chosen, outcome = run_picker("\n".join([*header, *rows]) + "\n",
                                      len(header))
     except (OSError, subprocess.SubprocessError) as exc:
+        set_pick_reason(PICK_REASON_SPAWN_FAILED)
         notify("could not show the mention picker",
                f"{type(exc).__name__}: {exc}")
         return ""
@@ -1685,7 +2450,25 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
         # future outcome built from data would have leaked through it silently.
         notify("the mention picker returned an unknown outcome",
                "see PICKED_OUTCOMES in scripts/mention-open.py")
-    return row_to_url(chosen, candidates)
+    url = row_to_url(chosen, candidates)
+    # 🔴 THE REASON IS DERIVED FROM WHAT HAPPENED, NOT FROM THE OUTCOME ALONE.
+    # `row_to_url` can return "" for a row that WAS selected — it matches on the
+    # URL suffix so a decorated or reordered row that does not map yields
+    # nothing — and reporting that as a dismissal would be a third way to say
+    # "the operator walked away" about a click where they did not.
+    if url:
+        set_pick_reason(PICK_REASON_SELECTED)
+    elif outcome == PICKED_SELECTED:
+        set_pick_reason(PICK_REASON_UNMAPPED_ROW)
+    elif outcome == PICKED_DISMISSED:
+        set_pick_reason(PICK_REASON_DISMISSED)
+    elif outcome == PICKED_TIMEOUT:
+        set_pick_reason(PICK_REASON_TIMEOUT)
+    elif outcome == PICKED_NEVER_SHOWN:
+        set_pick_reason(PICK_REASON_NEVER_SHOWN)
+    else:
+        set_pick_reason(PICK_REASON_UNATTRIBUTED)
+    return url
 
 
 # --------------------------------------------------------------------------- #
@@ -2084,8 +2867,25 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
 
 def _ordered_universe(
         universe: list[str],
-        num: str) -> tuple[list[str], str, tuple[int, int], float | None]:
-    """`(rows, state, (plausible, impossible), age_days)` — the impure composer.
+        num: str) -> tuple[list[str], str, tuple[int, int], float | None,
+                           dict[str, int]]:
+    """`(rows, state, (plausible, impossible), age_days, ranges)` — the impure
+    composer.
+
+    🔴 THE `ranges` DICT COMES BACK FOR THE SAME "ONE MEASUREMENT, TWO READERS"
+    REASON THE AGE DOES, and it is the FIFTH element rather than a second
+    `load_known_ranges()` at the caller. The click telemetry reports which
+    plausibility class the row the operator CHOSE was in, and a class computed
+    from a second read can disagree with the order the operator was actually
+    looking at — the table is rewritten by a daily unit. A telemetry row that
+    describes a different ordering from the one on screen is worse than no row.
+
+    ⚠ IT IS `{}` IN EVERY DEGRADED STATE, AND THAT IS LOAD-BEARING RATHER THAN
+    TIDY. `ordering_state` returns `no-table` for an empty table and `stale`
+    past the threshold, and in both the rows come back UNORDERED — so an empty
+    `ranges` is exactly the predicate "no plausibility ordering happened here",
+    which is what the telemetry must report as an ABSENT class rather than as
+    `unknown`.
 
     🔴 THE AGE COMES BACK WITH THE STATE, AND THAT IS THE "ONE MEASUREMENT, TWO
     READERS" RULE `mapping_age_days` states. The state is DECIDED from the
@@ -2122,7 +2922,7 @@ def _ordered_universe(
     age = ranges_age_days()
     state = ordering_state(ranges, age)
     if state != ORDER_APPLIED:
-        return (universe, state, (0, 0), age)
+        return (universe, state, (0, 0), age, {})
     # 🔴 ONE CLOCK READING, TWO READERS — the same discipline `mapping_age_days`
     # states for the mtime. `load_picks` decides which rows are inside the age
     # cap and `pick_scores` decides how much each one decays; two independent
@@ -2138,7 +2938,7 @@ def _ordered_universe(
     classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
     return (rows, state,
             (classes.count(CLASS_PLAUSIBLE), classes.count(CLASS_IMPOSSIBLE)),
-            age)
+            age, ranges)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2242,6 +3042,14 @@ def main(argv: list[str] | None = None) -> int:
     # version of this change and it was WRONG on the commonest path: the whole
     # universe was ordered and the header said nothing at all.
     universe_shown = False
+    # 🔴 HOW MANY ROWS SIT ABOVE THE BLOCK `order_universe` ACTUALLY RANKED.
+    # `candidates` is `[evidence rows] + [universe rows]`, and only the tail was
+    # ordered — so a `rank` with no `pinned_above` beside it cannot tell a
+    # ranked row from a pinned one. Defaults to `None` = NOT MEASURED, which is
+    # what a picker holding no universe rows at all should report: there is no
+    # ordered block for a position to be relative to. The three arms that append
+    # universe rows each set it.
+    pinned_above: int | None = None
     may_offer_universe = (not args.print_only and not args.no_discovery
                           and not colour)
     num = span["id"] if (span is not None and span["id"].isdigit()) else offer_num
@@ -2274,6 +3082,11 @@ def main(argv: list[str] | None = None) -> int:
     order_state = ORDER_NO_TABLE
     order_counts = (0, 0)
     order_age: float | None = None
+    # The table the ordering ACTUALLY used, kept so the click telemetry can name
+    # the chosen row's plausibility class without a second, possibly disagreeing
+    # read — see `_ordered_universe`. It stays `{}` when no ordering ran, which
+    # is the predicate the telemetry reads.
+    order_ranges: dict[str, int] = {}
     _universe_rows: list[list[dict]] = []
 
     def universe_rows() -> list[dict]:
@@ -2293,10 +3106,10 @@ def main(argv: list[str] | None = None) -> int:
         ordering — should survive a fourth call site being added, and because
         the alternative is a reader re-deriving that three-way exclusivity from
         scratch. What it must NOT do is read as a live optimisation."""
-        nonlocal order_state, order_counts, order_age
+        nonlocal order_state, order_counts, order_age, order_ranges
         if not _universe_rows:
-            rows, order_state, order_counts, order_age = _ordered_universe(
-                universe_repos, num)
+            (rows, order_state, order_counts, order_age,
+             order_ranges) = _ordered_universe(universe_repos, num)
             _universe_rows.append(universe_candidates(num, rows))
         return _universe_rows[0]
 
@@ -2305,12 +3118,17 @@ def main(argv: list[str] | None = None) -> int:
         # outright. Either way the operator now gets a choice instead of a toast.
         offered_universe = True
         universe_shown = True
+        # Nothing is pinned above: the whole list IS the ordered block.
+        pinned_above = 0
         candidates = universe_rows()
     elif (span is not None and span["ambiguous"] and universe_repos
             and not any(c["platform"] == PLATFORM_GITHUB for c in candidates)):
         # Dead end 2 — a bare `#N` nothing could attribute. The clawgate
         # candidate STAYS FIRST so the common case is still one Enter away; the
         # universe is appended as the way to say "no, GitHub, this repo".
+        # The clawgate row stays on top and was never ranked — so the ordered
+        # block starts below it. See `click_dims`' `ordered` paragraph.
+        pinned_above = len(candidates)
         candidates = candidates + universe_rows()
         universe_shown = True
 
@@ -2425,6 +3243,9 @@ def main(argv: list[str] | None = None) -> int:
         # `offered_universe` there would claim rows that are not in the list —
         # both to the auto-open guard below and to the note.
         if extra:
+            # The measured rows (the clawgate task, the pane's guess) stay on
+            # top and were never ranked — same as dead end 2.
+            pinned_above = len(candidates)
             candidates = candidates + extra
             offered_universe = True
             universe_shown = True
@@ -2436,7 +3257,39 @@ def main(argv: list[str] | None = None) -> int:
     # and a host that happens to know exactly one repository must not have that
     # option opened for it.
     if len(candidates) == 1 and not offered_universe and not guessed:
-        return open_url(candidates[0]["url"])
+        # 🔴 THIS PATH USED TO RETURN WITHOUT RECORDING ANYTHING, AND THAT WAS
+        # THE DEFECT. It is the COMMON, fast shape — an `owner/repo#N`, a
+        # mapping hit, a measured checkout — so Tier B's pick log only ever saw
+        # the clicks the handler could NOT answer. The scores therefore
+        # described the operator's ambiguous minority and called it their
+        # preference. It is recorded now, tagged `auto` so a later scoring
+        # change can weight it differently from a row the operator read and
+        # selected; see `PICK_VIA_AUTO`.
+        #
+        # Same three properties as the picker arm below, which is the point of
+        # them being one function: only a github.com reference URL yields a
+        # repository, `record_pick` swallows every OSError so a read-only home
+        # costs the learning rather than the click, and neither can raise.
+        auto_url = candidates[0]["url"]
+        auto_repo = repo_of_github_url(auto_url)
+        if auto_repo:
+            record_pick(auto_repo, num, via=PICK_VIA_AUTO)
+        # 🔴 EMITTED *AFTER* THE OPEN, WHICH IS THE OPPOSITE OF `record_pick`'S
+        # ORDER AND IS DELIBERATE. The browser launch is what the operator is
+        # waiting for and `open_url` is a non-blocking `Popen`, so paying the
+        # telemetry import (a measured ~3.7 ms) behind it costs the click
+        # nothing. `record_pick` stays in front because it is the signal that
+        # must survive — it is what the NEXT click reads.
+        #
+        # 🔴 NO RANK, NO CLASS, NO TOTAL — AND THAT IS THE POINT OF OMITTING
+        # THEM RATHER THAN ZEROING THEM. Nothing was offered here, so there is
+        # no list to have been ranked in. `picker_shown=False` is what a
+        # consumer filters on; see `click_dims`.
+        rc, surface = open_reference(auto_url)
+        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,
+                   platform=candidates[0]["platform"], picker_shown=False,
+                   surface=surface)
+        return rc
 
     # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
     # UNEXPLAINED, and there are exactly two such pickers: one carrying a GUESS
@@ -2488,8 +3341,35 @@ def main(argv: list[str] | None = None) -> int:
         if extra:
             mesg = f"{mesg} · {extra}" if mesg else extra
 
+    # 🔴 RESET BEFORE THE CALL, SO A STUBBED `pick` CANNOT INHERIT A STALE
+    # REASON. `main()` runs once per process, but a test calling it twice would
+    # otherwise read the first click's reason on the second.
+    set_pick_reason(PICK_REASON_UNATTRIBUTED)
     url = pick(candidates, mesg=mesg)
+    reason = last_pick_reason()
     if not url:
+        # 🔴 A DISMISSAL IS A MEASUREMENT, NOT A NON-EVENT — and it is the
+        # DENOMINATOR the ordering question needs. "Did the plausibility
+        # ordering help?" cannot be answered from the picks alone: a picker the
+        # operator walked away from is the shape where the rows on offer were
+        # wrong, and counting only the successes would make any ordering look
+        # good. `offered_total` rides along because the list size is the other
+        # half of that reading; there is no rank or class, because nothing was
+        # chosen.
+        #
+        # 🔴 BUT ONLY A REAL DISMISSAL IS `dismissed`. `pick()` returns "" from
+        # SIX endings and three of them never put a list on screen; this arm
+        # used to report all six as `dismissed picker_shown=True`, which is
+        # factually false for half of them and pads the very denominator above.
+        # `pick()` now records WHICH — see the `PICK_REASON_*` block — and
+        # `picker_was_shown` is three-valued so an unmeasured case omits the
+        # field rather than guessing.
+        emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
+                   else CLICK_NO_SELECTION,
+                   picker_shown=picker_was_shown(reason),
+                   offered_total=len(candidates),
+                   pinned_above=pinned_above,
+                   reason=reason)
         return 0
     # 🔴 RECORDED *AFTER* THE CHOICE AND *BEFORE* THE OPEN, AND IT CANNOT BLOCK
     # EITHER. `record_pick` swallows every OSError (see it), so a read-only home
@@ -2504,8 +3384,46 @@ def main(argv: list[str] | None = None) -> int:
     # produces it most often.
     picked_repo = repo_of_github_url(url)
     if picked_repo:
-        record_pick(picked_repo, num)
-    return open_url(url)
+        record_pick(picked_repo, num, via=PICK_VIA_PICKER)
+    # 🔴 WHERE THE CHOSEN ROW SAT, WHICH IS THE MEASUREMENT THE ORDERING WAS
+    # SHIPPED WITHOUT. #1509 ranks the universe by whether a repository could
+    # plausibly hold `#N`, and nothing has ever recorded where in that list the
+    # operator's row actually was — so the feature could not be evaluated by
+    # anything except impression. `rank` is 0-based IN THE LIST AS PRESENTED
+    # (`candidates` is exactly what went to `pick`), so a working ordering shows
+    # as a rank distribution clustered near 0.
+    #
+    # ⚠ THE RANK IS LOOKED UP, NOT REMEMBERED. `row_to_url` maps a picker row
+    # back to a URL by SUFFIX rather than by index, precisely so a picker that
+    # decorates or reorders rows cannot open the wrong one — so an index carried
+    # from the row text would be the one thing that arrangement refuses to
+    # trust. `None` if the URL is somehow not in the list, which omits the field
+    # rather than inventing a position.
+    picked_rank = next((i for i, c in enumerate(candidates)
+                        if c["url"] == url), None)
+    # The class the ROW THE OPERATOR SAW was in, from the table that ordering
+    # actually used — `{}` when no ordering ran, which omits the field. See
+    # `_ordered_universe` and `click_dims` for why absent ≠ `unknown` here.
+    # 🔴 WAS THIS ROW ACTUALLY PLACED BY THE ORDERING? The pinned rows above the
+    # universe block were never ranked, so a `rank` without this is a number
+    # that means two different things — see `click_dims`.
+    picked_ordered = (pinned_above is not None and picked_rank is not None
+                      and picked_rank >= pinned_above)
+    # ...and the class is reported only for a row the ordering actually placed.
+    # It used to be emitted whenever the ordering RAN, which made a pinned pane
+    # repo indistinguishable from a universe row ranked at the same position.
+    picked_class = (plausibility_class(num, order_ranges.get(picked_repo.lower()))
+                    if picked_repo and order_ranges and picked_ordered else None)
+    picked_platform = next((c["platform"] for c in candidates
+                            if c["url"] == url), "")
+    rc, surface = open_reference(url)
+    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,
+               picker_shown=picker_was_shown(reason),
+               offered_total=len(candidates),
+               rank=picked_rank, plausibility=picked_class,
+               ordered=picked_ordered if picked_rank is not None else None,
+               pinned_above=pinned_above, reason=reason, surface=surface)
+    return rc
 
 
 def guarded_main(argv: list[str] | None = None) -> int:

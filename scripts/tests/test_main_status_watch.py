@@ -68,7 +68,15 @@ RC_OK, RC_TRIGGERED, RC_UNMEASURED, RC_BLIND, RC_USAGE = 0, 10, 11, 12, 2
 # hazard the flake screen turns on is only demonstrable with real ones — every
 # synthetic description anybody would write by hand is conveniently complete.
 #
-# The known flake, cut MID-WORD by GitHub's 140-char description cap:
+# The known flake, cut MID-WORD at the 140-BYTE description cap. BYTES, not
+# characters: the `—` in `FAILED: pytests —` is three UTF-8 bytes, which is why
+# every real row measured on this repo reads `len(desc)=138`. Anyone building a
+# fixture from a CHARACTER cap lands two bytes late and quietly leaves `failed=`
+# readable — see `cut_at_the_byte_cap` in `scripts/tests/test_stale_base_triage.py`.
+# ⚠ WHOSE CUT IT IS — GitHub's cap or the posting pipeline's own truncation — is
+# NOT determined; the two are indistinguishable on every row sampled. The
+# boundary is the measurement, and it is the only claim made about it.
+REAL_DESC_BYTE_CAP = 140
 REAL_FLAKE_DESC = (
     "FAILED: pytests — FAILING: TestARefusedWriteIsIndistinguishableFromAnAbsentOne"
     ".test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_dif"
@@ -333,8 +341,33 @@ def test_a_foreign_context_is_ignored(h):
 # ══ THE FLAKE SCREEN ══════════════════════════════════════════════════════════
 # 🔴 THE COUNTERINTUITIVE HALF FIRST: the REAL known-flake row must TRIGGER.
 
+def test_CONTROL_the_real_truncated_rows_land_on_the_BYTE_cap_not_the_CHAR_cap():
+    """🔴 THE DISTINCTION THIS FILE'S PROSE HAD WRONG, MADE MACHINE-CHECKED.
+
+    The cap is 140 BYTES, and the two rows above that it actually cut are 138
+    CHARACTERS long, because the `—` in `FAILED: pytests —` is three UTF-8
+    bytes. A comment saying "140 characters" is an invitation to build a fixture
+    by slicing at `[:140]` — which lands two bytes late, quietly leaves `failed=`
+    readable, and turns a truncated row into a complete one. Every assertion
+    resting on that fixture then passes for the wrong reason.
+
+    ⚠ WHAT THIS DOES NOT RESOLVE, AND MUST NOT BE READ AS RESOLVING: whether the
+    cut is GitHub's or the posting pipeline's. Every sampled row carries exactly
+    one multi-byte character, so at 138 chars / 140 bytes the two are
+    indistinguishable. This pins the MEASUREMENT, not a mechanism.
+    """
+    for desc in (REAL_FLAKE_DESC, REAL_SEVEN_FAILED_ONE_NAMED):
+        assert len(desc.encode("utf-8")) == REAL_DESC_BYTE_CAP, desc
+        assert len(desc) == 138, (len(desc), desc)
+        assert len(desc) < REAL_DESC_BYTE_CAP, desc   # chars ≠ bytes, and that is the point
+    # POSITIVE CONTROL: a row that was NOT cut sits well inside the cap, so the
+    # equality above is a property of the truncated rows and not of every string
+    # in this file.
+    assert len(REAL_NO_NAME.encode("utf-8")) < REAL_DESC_BYTE_CAP, REAL_NO_NAME
+
+
 def test_the_REAL_known_flake_row_still_triggers_because_it_is_truncated(h):
-    """The row that named the known flake was cut MID-WORD at GitHub's 140-char
+    """The row that named the known flake was cut MID-WORD at the 140-BYTE
     cap, so it proves neither the full name nor that it was the only failure.
     Skipping on it would skip real reds hiding behind the truncation.
 
@@ -1079,6 +1112,84 @@ def _code_only():
     return "\n".join(out)
 
 
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
+                "execv", "execvp", "execve", "spawnv", "spawnvp"}
+
+# 🔴 WHAT THIS SET MEANS, ENTRY BY ENTRY, because two of the three are opaque on
+# purpose and an opaque entry is exactly where a launcher hides:
+#   git            — `git -C <repo> remote get-url origin`, a literal list.
+#   <computed>     — `[gh, "api", path]`; `gh` is the MAIN_STATUS_WATCH_GH seam,
+#                    which is what lets every test point it at a stub.
+#   <not-a-list>   — `subprocess.run(cmd, …)` in `trigger_deadman`, where `cmd`
+#                    is either the MAIN_STATUS_WATCH_TRIGGER override or the
+#                    systemctl literal. That literal is pinned separately and
+#                    exactly by `test_the_production_trigger_is_systemctl_start_
+#                    main_green_check`, which also refuses `--force`.
+# So this pin is not the whole story by itself, and does not pretend to be — it
+# is the half that catches a NEW literal spawn appearing.
+EXPECTED_ARGV0 = {"git", "<computed>", "<not-a-list>"}
+
+
+def _spawn_argv0_literals(path):
+    """Every literal argv[0] in a spawn-shaped call, from the SYNTAX TREE.
+
+    `<computed>` / `<not-a-list>` rather than a skip: a command built from a
+    variable is precisely how a literal-keyed ledger gets walked past, so it
+    must land in the set and fail loudly instead of leaving it.
+    """
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            found.add(head.value if isinstance(head, ast.Constant) else "<computed>")
+        else:
+            found.add("<not-a-list>")
+    return found
+
+
+def test_main_status_watch_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """GROWS-OR-SHRINKS. A new binary is the hazard the `home-manager`
+    acknowledgement in `test_no_real_launchers.py` would otherwise hide; a
+    vanished one means that justification has stopped describing this file."""
+    assert _spawn_argv0_literals(SCRIPT) == EXPECTED_ARGV0
+
+
+def test_home_manager_is_MENTIONED_but_never_SPAWNED():
+    """🔴 THE PIN UNDER THIS FILE'S ROW IN `ACKNOWLEDGED_UNSTUBBED`.
+
+    `launcher_scan.hazard_hits` is a TEXT scan and says so, so a prose mention
+    is a hit. This file acquired one when the shared-module import landed: a
+    comment explaining that the unit runs out of the CHECKOUT, so a `git pull`
+    is the whole deploy and no home-manager switch is involved. That sentence is
+    the reason the import is safe, so it is re-justified rather than reworded to
+    dodge the scanner — which is this repo's stated convention.
+
+    Both halves of the acknowledgement's claim are asserted rather than left to
+    a reader of prose: the mention must still EXIST (or the table entry has
+    outlived the sentence it describes), and it must remain a MENTION.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert re.search(r"(?<![\w-])home-manager(?![\w-])", text), (
+        "the ACKNOWLEDGED_UNSTUBBED entry for this file exists BECAUSE it names "
+        "home-manager; if that is gone, remove the acknowledgement too")
+    assert "home-manager" not in _spawn_argv0_literals(SCRIPT), (
+        "main-status-watch.py now SPAWNS home-manager — the acknowledgement "
+        "covering it is an unreachability claim and is now FALSE")
+    # …and the name appears in NO executable line at all, comments and
+    # docstrings stripped. This is the assertion that would catch it reaching
+    # the binary through the trigger override's literal rather than through a
+    # spawn head.
+    assert "home-manager" not in _code_only(), (
+        "home-manager reached an executable line in main-status-watch.py")
+
+
 def test_code_only_really_strips_the_prose_it_claims_to():
     """The instrument behind four static guards, with both controls.
 
@@ -1092,9 +1203,55 @@ def test_code_only_really_strips_the_prose_it_claims_to():
     only_in_a_docstring = "Raised for every reason the world could not be read"
     assert only_in_a_docstring in raw, "fixture phrase moved; this guard is blind"
     assert only_in_a_docstring not in code, "docstring prose still reaches the guards"
-    assert "def classify(state, description):" in code, (
+    # ⚠ The positive-control phrase must be a line this file still EXECUTES.
+    # It used to be `def classify(state, description):`, which moved to
+    # `scripts/lib/ci_status.py` when the duplicated predicates were
+    # consolidated — at which point this control started asserting the absence
+    # of a function that is simply elsewhere, i.e. it would have failed for a
+    # reason that has nothing to do with `_code_only`.
+    assert "def commit_verdict(rows):" in code, (
         "_code_only stripped executable lines too — every guard reading it is vacuous"
     )
+
+
+def _sys_path_mutations(src):
+    """(lineno, method) for every `sys.path.<method>(…)` call in a source."""
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)):
+            continue
+        owner = node.func.value
+        if (isinstance(owner, ast.Attribute) and owner.attr == "path"
+                and isinstance(owner.value, ast.Name) and owner.value.id == "sys"):
+            out.append((node.lineno, node.func.attr))
+    return out
+
+
+def test_the_shared_lib_is_APPENDED_to_sys_path_and_never_PREPENDED():
+    """🔴 A 🔴-MARKED COMMENT IS NOT A GUARD. The paragraph above this script's
+    `sys.path.append` says `append`, NEVER `insert(0, …)`, and reverting it to
+    `sys.path.insert(0, …)` SURVIVED the whole suite.
+
+    `scripts/lib/` grows freely; prepending it puts EVERY module in it ahead of
+    the standard library for every LATER import this process makes — including
+    the lazy `import traceback` on the unattended-crash path at the bottom of
+    this file, which is the one import that runs when something has already gone
+    wrong.
+
+    ⚠ THIS FILE'S SCRIPT ONLY. `stale-base-triage.py` carries the same comment
+    and the same hazard; its copy is pinned by `test_stale_base_triage.py`,
+    which owns that file.
+    """
+    got = _sys_path_mutations(SCRIPT.read_text(encoding="utf-8"))
+    assert got, "the sys.path scan matched nothing — this guard is inert"
+    assert [m for _, m in got] == ["append"], got
+    # POSITIVE CONTROL: the scan CAN see the spelling this forbids, so the
+    # equality above is not a comparison against a scan wired to nothing.
+    assert _sys_path_mutations(
+        'import sys\nsys.path.insert(0, "x")\n') == [(2, "insert")]
+    # …and it does not fire on an unrelated `.append`.
+    assert _sys_path_mutations('rows = []\nrows.append(1)\n') == []
 
 
 def test_the_script_never_reads_the_rollup_status_endpoint():
@@ -1297,8 +1454,17 @@ def test_a_MOVED_docstring_sentinel_REFUSES_rather_than_dumping_the_file(tmp_pat
     assert moved != src, "the docstring sentinel is not where this test thinks"
     copy = tmp_path / "moved-sentinel.py"
     copy.write_text(moved, encoding="utf-8")
+    # 🔴 THE COPY HAS NO SIBLING `lib/`, so the shared `ci_status` import must be
+    # satisfied explicitly. The script resolves it relative to its OWN file,
+    # which is right for production — the unit runs it out of the checkout — and
+    # is exactly why a copy-and-run test has to say where the module is. Without
+    # this the copy dies on ImportError and the assertions below would be
+    # measuring a missing module, not a moved sentinel.
+    env = dict(os.environ,
+               PYTHONPATH=os.pathsep.join(
+                   [str(ROOT / "scripts" / "lib"), os.environ.get("PYTHONPATH", "")]))
     proc = subprocess.run([sys.executable, str(copy), "--help"],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == RC_USAGE, proc.stdout + proc.stderr
     assert "cannot locate the end of the header" in proc.stdout
     # and it must NOT fall back to dumping the source: a header knob name would
@@ -1362,6 +1528,97 @@ def test_an_unknown_argument_is_a_USAGE_error(h):
 )
 def test_classify_maps_a_row_to_its_documented_class(state, description, expected):
     assert _load().classify(state, description) == expected
+
+
+def test_newest_per_context_is_ORDER_INDEPENDENT_which_first_wins_was_not():
+    """🔴 THE BEHAVIOUR CHANGE THAT CAME WITH THE CONSOLIDATION, DRIVEN BOTH WAYS.
+
+    This file used to fold to the FIRST row per context. That is right only
+    because GitHub returns the array newest-first — an assumption about someone
+    else's response ordering, load-bearing, unstated, and untested. The shared
+    `newest_per_context` folds on `max(created_at)` instead.
+
+    The OLD rule is reimplemented below and shown to return the WRONG row on the
+    order it does not expect, beside the new one returning the right row on
+    BOTH. Without the old rule present in the test, "the new one is right" is a
+    claim about one implementation and says nothing about what changed.
+    """
+    mod = _load()
+    old = {"context": CTX_PY, "state": "pending", "description": "running",
+           "created_at": "2026-09-11T10:00:00Z"}
+    new = {"context": CTX_PY, "state": "failure", "description": REAL_NO_NAME,
+           "created_at": "2026-09-11T17:00:00Z"}
+
+    def first_wins(rows):                 # the rule this file used to carry
+        seen = {}
+        for row in rows:
+            if row["context"] not in seen:
+                seen[row["context"]] = row
+        return seen
+
+    newest_first, oldest_first = [new, old], [old, new]
+    # On GitHub's CURRENT ordering the two rules agree — which is exactly why
+    # the old one survived unnoticed.
+    assert first_wins(newest_first)[CTX_PY]["state"] == "failure"
+    # On the OTHER ordering the old rule reports the superseded `pending` row,
+    # i.e. a head whose gate has already failed reads as still running.
+    assert first_wins(oldest_first)[CTX_PY]["state"] == "pending"
+    # The shared fold is right on both, because the array's order is not an
+    # input to it at all.
+    for order in (newest_first, oldest_first):
+        assert mod.newest_per_context(order)[CTX_PY]["state"] == "failure", order
+    # …and a second context is kept independently rather than overwritten.
+    both = mod.newest_per_context(
+        [new, old, {"context": CTX_NODE, "state": "success",
+                    "description": REAL_SUCCESS,
+                    "created_at": "2026-09-11T17:00:00Z"}])
+    assert set(both) == {CTX_PY, CTX_NODE}
+
+
+def test_newest_per_context_returns_FOREIGN_contexts_and_the_POLICY_filters_them():
+    """🔴 THE FILTER MOVED OUT OF THE FOLD AND INTO `commit_verdict`, so pin
+    where it now lives. The shared fold is about GitHub's data and returns every
+    context; "only `tekton/devrc-main-*` may speak about main" is THIS file's
+    rule. If the filter were lost in the move, a foreign pipeline's green would
+    close an open red episode — `test_a_commit_with_ONLY_FOREIGN_contexts_is_no_
+    verdict_not_green` is the end-to-end half of the same guard."""
+    mod = _load()
+    rows = [_status("tekton/devrc-cairn-client-runs", "success", "all good elsewhere"),
+            _status(CTX_PY, "failure", REAL_NO_NAME)]
+    assert set(mod.newest_per_context(rows)) == {
+        "tekton/devrc-cairn-client-runs", CTX_PY}
+    verdict, reds = mod.commit_verdict(rows)
+    assert verdict == "red" and set(reds) == {CTX_PY}
+    # The foreign row ALONE is no verdict — never green.
+    assert mod.commit_verdict(rows[:1]) == ("none", {})
+
+
+def test_the_shared_predicates_are_NOT_re_declared_in_either_consumer():
+    """🔴 ONE RULE, ONE PLACE — ENFORCED, NOT ASSERTED IN PROSE. These four
+    predicates were open-coded in this file AND in `stale-base-triage.py`, and
+    the copies had already diverged before anybody noticed: only one stripped
+    the `TOTAL` truncation fragment, only one folded by timestamp. A comment
+    saying "shared" does not stop the next copy; a test that fails on a local
+    `def` does.
+    """
+    shared = ("classify", "newest_per_context", "parse_failing_names",
+              "parse_failed_count", "derived_failure_upper_bound")
+    consumers = [ROOT / "scripts" / "main-status-watch.py",
+                 ROOT / "scripts" / "stale-base-triage.py"]
+    lib = ROOT / "scripts" / "lib" / "ci_status.py"
+    lib_src = lib.read_text(encoding="utf-8")
+    for name in shared:
+        assert f"def {name}(" in lib_src, f"{name} is not defined in {lib}"
+    for path in consumers:
+        src = path.read_text(encoding="utf-8")
+        for name in shared:
+            assert f"\ndef {name}(" not in src, (
+                f"{path.name} re-declares `{name}` — it belongs to "
+                f"scripts/lib/ci_status.py")
+    # POSITIVE CONTROL on the scan itself: the pattern DOES match a real local
+    # definition, so the assertions above are not vacuous on a pattern that
+    # never matches anything.
+    assert "\ndef screen_all_known_flakes(" in consumers[0].read_text(encoding="utf-8")
 
 
 def test_an_UNRECOGNISED_state_is_never_green_end_to_end(h):
@@ -1572,6 +1829,14 @@ def test_every_test_this_script_names_actually_exists():
     a FUNCTION body stayed split and read as a name nobody defined. It failed on
     its own first run against a citation this very PR added, which is the
     cheapest possible way to learn that a pattern is narrower than its claim.
+
+    ⚠ SCOPED TO THIS SCRIPT FILE, AND THAT IS NOT THE WHOLE SURFACE. Citations
+    inside `scripts/lib/ci_status.py` — the module this file's script imports —
+    are checked by `test_stale_base_triage.py`, whose copy of this guard follows
+    its script's `scripts/lib` imports. That widening exists because the FIRST
+    citation written into `ci_status.py` dangled and neither copy, each scoped to
+    one script, could see it. One owner is enough for one file; what is NOT safe
+    is assuming this guard covers it.
     """
     src = SCRIPT.read_text(encoding="utf-8")
     joined = re.sub(r"_\n[ \t]*#[ \t]*", "_", src)

@@ -21,25 +21,23 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- **RANKS 1, 2, 3 CLOSED AND VERIFIED. RANK 9 CLOSED BY ANOTHER SESSION. RANK 4 IS OPEN AND OWES A
-  DELTA RE-AUDIT. `main` IS GREEN AGAIN.**
-- **The arc's commit ledger, carried forward** (`State now` is REPLACED every update — re-carry it or
-  it is lost): `#1429` a0839ec4, `#1445` cace96d9, `#1469` 86b1ddec, `#1471` 4ab87a64,
-  `#1482` 972fbcbd, `#1488` d835fe51, `#1489` b315cdd3, `#1502` ffef57bc, `#1512` 189689c1,
-  `#1567` 6f1867b1. Closed unmerged and deliberately: `#1558`, `#1559`.
-- **`main` was RED TWICE this session, from two INDEPENDENT causes, and both are now fixed.**
-  ✅ Verified on the post-merge tip `6f1867b1` itself, not inferred from the merge succeeding:
-  `test_runner_bound_ledger.py` + `test_scoped_tests_shared_surface.py` + both kill guards =
-  **20 passed**.
-  - the kill-mention treadmill → closed **structurally by `#1561`** (scanners stopped reading
-    `claudedocs/`). 🔴 **NOT by me** — my `#1558` went CONFLICTING when two other sessions fixed
-    their own instances mid-flight, and `#1559` was superseded. Both closed unmerged.
-  - `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` → `#1567` `6f1867b1`.
-- **RANK 4 — `#1524` OPEN, head `d1c4d39f`.** Round 0 + round 1 + both fix rounds done; 18 of 19
-  mutants killed with the survivor PROVEN equivalent. ⚠ **Its CI red was INHERITED from main's**
-  runner-bound red — the same test — so it should go green on a rebase now that `6f1867b1` has
-  landed. That is rank 4's own thesis demonstrating itself for the third time.
-- **Claim `gate-speed-and-ci-signal-4` is STILL HELD** (rank 4 is unfinished). All others released.
+- **THE ARC IS CLOSED. Ranks 1, 2, 3, 4 merged + shipped + consumer-verified; rank 9 closed by
+  another session. Ranks 5, 7, 10, 11 are IN FLIGHT. Rank 8 is DATED, not done.**
+- **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
+  `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
+  `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
+  `#1524` 58bfb747. Closed unmerged on purpose: `#1558`, `#1559` (superseded by `#1561`).
+- **`#1524` (rank 4) merged `58bfb747`** after round 0 → round 1 → round 2, CI green on all three
+  including the sandbox tier (22,516 passed / 0 failed). `ship.sh` rc 0, both hosts at `58bfb747`
+  **and the two shas compared**. 🔴 **Consumer verified separately**: the PR changed a live unit's
+  import graph, and `main-status-watch` fired twice post-ship (`from ci_status import` present in
+  the executed file, `ExecMainStatus=0`, `Result=success`, real verdict read).
+- **`main` was RED twice this session, both fixed** — `#1567` (`_OWN_BOUND_LEDGER`) and `#1561`
+  (the kill-mention treadmill, by another session). Verified green on the post-merge tip, 20 passed.
+- **IN FLIGHT — four agents, all claimed:** rank 5 (CI median, investigation), rank 7
+  (`repo-full-name` pin, `ZacxDev/homelab-infra`), rank 10 (timer for the triage tool — commit
+  `f360783b` exists on `feat/route-stale-base-triage`, **unpushed** at the time of writing), rank 11
+  (fast ledger check). **If a rank has no PR when you read this, its work did not land — redo it.**
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -104,51 +102,79 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points every live claim.
+the END. **Ranks 1–4 and 9 are CLOSED tombstones**; renumbering re-points every live claim.
 
-1. **CLOSED — `homelab-infra#792` merged in dry-run** (`dbe47814`). Arming is rank 8.
+1. **CLOSED** — `homelab-infra#792` merged in dry-run (`dbe47814`). Arming is rank 8.
    forcing: none
-2. **CLOSED — `#1469`'s audit ladder, `#1502`, shipped and consumer-verified.**
+2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.
    forcing: none
-3. **CLOSED — the store-api flake was already fixed by `#1458`; `#1512` records it.**
+3. **CLOSED — the store-api flake was already fixed by `#1458`. ⚠ `#1512` is NO LONGER the
+   measurement of record**: it split on `ce9b55c3`'s TIMESTAMP and its zero was underpowered
+   (4/125 → 0/45, P(0) ≈ 0.23). Superseded 2026-09-12 by an ANCESTRY split over 400 PR heads —
+   **0 of 99** verdicts on heads carrying the sha against **12 of 298** that do not, P(0) ≈
+   **0.017** — recorded in `devrc#1568` (`8114a124`), full table at
+   `handoff-gate-flake-store-api.md` rank 1. ⚠ **`#1512`'s table is not WRONG**: re-splitting the
+   same 397 verdicts by date reclassified 5 and **0 of 101 failures**, so its predicate was the
+   wrong test and changed nothing at this sample. Cite the newer read; keep `#1512` for its
+   "it was never the worst flake" finding, which stands.
    forcing: none
-4. **`#1524` — OPEN, and it OWES A DELTA RE-AUDIT before merge.** Round 1's fix round produced six
-   fixes, and the ladder rule is explicit: a round that produced findings needing fixes is followed
-   by another round. **Do not merge it on the strength of the fix round's own report.** Re-audit
-   `ebd6b436..d1c4d39f`, framed as *what was claimed fixed*, never *why it is correct*.
-   ⚠ Rebase first — its red was inherited from main's runner-bound red, cured by `6f1867b1`.
-   forcing: gate — an audit fix resets the verification gate; the ladder is not closed.
-5. **The 19-min CI median.** `pytests` is 90–95% of it. ⚠ `devrc-ci-5m64b` ran it in **52s** on a nix
-   cache hit — the cost is entirely rebuild-on-change.
+4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.
+   forcing: none
+5. **The 19-min CI median — IN FLIGHT.** `pytests` is 90–95% of it; `devrc-ci-5m64b` ran it in **52s**
+   on a nix cache hit, so the cost is entirely rebuild-on-change. The live question: does a docs-only
+   commit bust the derivation (`cp -r ${./.}`)? If so that is both the answer and a small fix.
    forcing: none
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**.
-   🔴 Decide it TOGETHER with rank 4: `main-status-watch.py:232-286` already implements the same
+   🔴 Decide it TOGETHER with rank 4: `main-status-watch.py`'s flake screen already implements the same
    completeness-proving screen in **15 lines**, and `#1524` rebuilds that gate at ~885. Same question.
+   🔴 **NEW EVIDENCE FOR THAT DECISION, 2026-09-12 — and it cuts toward DELETE.** The screen exists
+   to skip re-runs on KNOWN FLAKES, and the store-api flake it was written around is now at **0 of
+   99** verdicts on heads carrying `ce9b55c3` (`handoff-gate-flake-store-api.md` rank 1). The same
+   read independently re-derived this file's own truncation finding from scratch — **100 of 101
+   failure descriptions truncated at 138 of the 140-character cap** — which is what makes the screen unsatisfiable
+   (the measurement sits beside `_FAILING_RE` in that file). So the screen now guards a flake that has
+   stopped occurring, using a completeness proof a 140-byte field cannot supply. ⚠ **Both figures are
+   a READ-TIME population that cannot be re-derived** (GitHub keeps one status per context and
+   supersedes overwrite it) — see `handoff-gate-flake-store-api.md` rank 1; a later disagreement is
+   not a refutation. ⚠ **Not a decision —
+   the 2026-10-11 date and "decide them together" both stand**; this is the datum to decide ON, and it
+   did not exist when the date was set.
    forcing: none
-7. **Pin the `repo-full-name` invariant in `homelab-infra`'s supersede tests.** `test_supersede_
-   wiring.py` has **zero** occurrences of the string pass 2's correctness rests on. Fix: extend
-   `test_vetr_crossrepo_e2e_wiring.py:184-189` over all of `SUPERSEDE_TEMPLATES`.
+7. **Pin `repo-full-name` across `SUPERSEDE_TEMPLATES` — IN FLIGHT.** `test_supersede_wiring.py` has
+   ZERO occurrences of the string pass 2's correctness rests on. 🔴 The failure is a false `"closed"`
+   (devrc 1400+, homelab-infra 790+ mostly-closed PRs), not a clean 404. Repo: `ZacxDev/homelab-infra`,
+   clone `~/workspace/homelab-talos`, default branch `trunk`, **merging DEPLOYS**.
    forcing: none
-8. **Decide whether to ARM `#792` (`CLOSED_PR_MODE: on`).** Criteria (i)–(iii) met non-vacuously on
-   the first two sweeps; (iv) needs sustained observation. 🔴 Zero `DRY-RUN would cancel` lines after
-   7 days of normal merging is NOT a clean bill — it is the instrument failing to see its bucket.
-   forcing: user — the operator chose merge-in-dry-run-arm-later.
+8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK UNTIL ~2026-09-18, THEN ARM.** Operator decided this
+   date. Criteria (i)–(iii) were already met non-vacuously on the first two post-deploy sweeps;
+   (iv) needs the sustained window. Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and
+   `|= "closed-pr pass:"` in Loki, hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` +
+   the pinned literal at `test_supersede_logic.py:2251` (one commit, by construction).
+   🔴 Zero `DRY-RUN would cancel` lines after a week of normal merging is NOT a clean bill — it is
+   the instrument failing to see its bucket. ⚠ Dry-run short-circuits BEFORE the re-read guard, so
+   the soak cannot exercise the mid-tick race (devrc #1500 merged 14s after a sweep started).
+   forcing: deadline — the operator set 2026-09-18.
 9. **CLOSED by `#1561`** — the kill scanners no longer read `claudedocs/`, which ends the treadmill
-   rather than paying another round of it.
+   rather than paying another round of it. **Rate evidence that the close is real and not merely
+   merged:** the kill-mention ledger accounts for **22** `tekton/devrc-pytests` reds across PR heads
+   and **every one predates `c0bbd6d9`** — read 2026-09-12 ~04:00Z in `devrc#1568`; see rank 1 of
+   `handoff-gate-flake-store-api.md` for why that population is read-time-only and cannot be
+   re-derived.
+   🔴 **Both instances of the CLASS are now fixed and the class itself is not.** The same design — a
+   census over tracked text reddening `main` for everyone — fired next from
+   `scripts/tests/test_runner_bound_ledger.py` (**5** reds, **4** after `c0bbd6d9`), closed by
+   `#1567` `6f1867b1` (**5 passed** at `origin/main` `337114e0`). **At least two instances in two days, both measured here, and nothing prevents
+   the next one.** Tracked as `handoff-gate-flake-store-api.md` rank 8, closed as an instance and
+   retained for the class.
+   forcing: none — both instances shipped; the class is unaddressed and owned by nobody.
+10. **Route `scripts/stale-base-triage.py` — IN FLIGHT.** Operator chose: own systemd-user timer,
+   shipped in `--comment-mode dry-run`, armed after a short soak (the `#792` shape). It merged with
+   `58bfb747` invoked by nothing.
    forcing: none
-10. **ROUTE `scripts/stale-base-triage.py`, OR DECIDE NOT TO SHIP IT.** Nothing invokes it — no timer,
-   hook, CI step, skill or nix entry. ~885 payload lines + ~1,350 test lines that run only if someone
-   remembers the path. Round 0 raised it, round 1 restated it, no fix round addresses it because it is
-   not a defect. **This is the 145 KB-listener shape.** Candidate homes each rejected *as built*:
-   `audit-pr-nudge.py` (fires before CI exists), `main-status-watch.py` (narrowed to
-   `tekton/devrc-main-`), `audit-dispatch.py` (reads no check state), a skill (needs an eviction in
-   the same commit), or its own timer.
-   forcing: user — shipping an unrouted tool is the operator's call, not a defect to fix.
-11. **A file can land on `main` breaking a two-way ledger pin, and nothing stops it.** Both of this
-   session's reds were that shape: `_KILL_MENTION_LEDGER` and `_OWN_BOUND_LEDGER`, each broken by a
-   new file arriving without its row, each red for hours. `#1561` fixed one instance by scoping its
-   scanner; **the CLASS is open.** A pre-merge check that runs only the ledger tests would catch it
-   in seconds. Repo: devrc.
+11. **Fast pre-merge ledger check — IN FLIGHT.** Both of this session's `main` reds were a two-way
+   ledger pin broken by a file landing without its row, each red for hours. The ledger tests run in
+   seconds; the 20-min gate is what nobody runs. 🔴 The set of ledger tests must be DERIVED — a
+   hardcoded list is itself a ledger that goes stale.
    forcing: gate — it reddens `main`, and every branch cut from a red `main` inherits it.
 
 ## Decisions, so they are not re-litigated
@@ -171,17 +197,21 @@ the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points ever
 ## How to verify
 
 ```bash
-# rank 2's consumer — this unit runs from the WORKING TREE, so the checkout IS the deploy
-grep -c 'return RC_UNMEASURED' ~/workspace/devrc/scripts/main-status-watch.py   # 2 = fixed, 3 = pre-fix
+# rank 4's consumer — the unit runs from the WORKING TREE, so the checkout IS the deploy
+grep -c 'from ci_status import' ~/workspace/devrc/scripts/main-status-watch.py   # 1
 systemctl --user list-timers main-status-watch.timer --all
 journalctl --user -u main-status-watch.service -n 6 --no-pager
-#  a "no authoritative … verdict in the newest 20 commits" line is a HEALTHY arm, not a fault
+#  a "no authoritative … verdict" line is a HEALTHY arm, not a fault
 
-# rank 1 — merged AND reconciled AND running are three claims; make them separately
-gh pr view 792 --repo ZacxDev/homelab-infra --json state,mergeCommit
+# rank 8's arming evidence (soak to ~2026-09-18)
+#   {app="tekton-supersede"} |= "DRY-RUN would cancel"     <- must be NON-zero
+#   {app="tekton-supersede"} |= "closed-pr pass:"          <- states_read == resolvable, resolvable>=1
 KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get cronjob tekton-supersede -o yaml | grep -A1 CLOSED_PR_MODE
-KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci logs -l app=tekton-supersede --tail=20 | grep 'closed-pr pass'
-#  and the write-nothing control: 0 PipelineRuns should carry ci.zacx.dev/cancelled-because
+
+# main is green on both ledgers this session reddened
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  scripts/tests/test_runner_bound_ledger.py \
+  scripts/claude-hooks/tests/test_guard_core.py -q -p no:cacheprovider
 
 # both hosts on one sha — read EVERY per-host line, and that it says hosts were COMPARED
 bash ~/workspace/devrc/scripts/ship.sh
