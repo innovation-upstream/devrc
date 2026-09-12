@@ -28,6 +28,13 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent.parent / "tmux-session-restore.py"
+
+# `scripts/` on the path so the shared test helpers are importable, same as the
+# other suites. `write_exec` OWNS the shebang: a test that writes its own is how
+# `#!/usr/bin/env` — which does not exist in the nix build sandbox — comes back,
+# and `test_runtime_shebangs.py` fails the suite for it.
+sys.path.insert(0, str(HERE.parent.parent))
+from testlib.mockbin import write_exec  # noqa: E402
 _spec = importlib.util.spec_from_file_location("tmux_session_restore", SCRIPT)
 tsr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(tsr)
@@ -2501,8 +2508,7 @@ def test_the_resume_uses_an_ABSOLUTE_claude_path(monkeypatch, state, capsys):
     bindir = state.parent / "fakebin"
     bindir.mkdir(parents=True, exist_ok=True)
     fake_claude = bindir / "claude"
-    fake_claude.write_text("#!/bin/sh\nexit 0\n")
-    fake_claude.chmod(0o755)
+    write_exec(fake_claude, "exit 0\n")
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH','')}")
     (state).mkdir(parents=True, exist_ok=True)
     tsr.PLAN.write_text(json.dumps([{"session": "s", "window": "1", "cwd": "/tmp",
@@ -2601,7 +2607,7 @@ def test_claude_resolves_under_the_SYSTEMD_UNITS_OWN_PATH_not_just_a_dev_shell(
     store = tmp_path / "nix-store" / "claude-code-1.2.3" / "bin"
     store.mkdir(parents=True)
     real = store / "claude"
-    real.write_text("#!/bin/sh\nexit 0\n"); real.chmod(0o755)
+    write_exec(real, "exit 0\n")
 
     profile_bin = tmp_path / "home" / ".nix-profile" / "bin"
     profile_bin.mkdir(parents=True)
@@ -2868,7 +2874,7 @@ def test_a_claude_found_on_PATH_is_also_resolved_to_its_store_path(monkeypatch, 
     store = tmp_path / "store" / "claude-code-9.9.9" / "bin"
     store.mkdir(parents=True)
     real = store / "claude"
-    real.write_text("#!/bin/sh\nexit 0\n"); real.chmod(0o755)
+    write_exec(real, "exit 0\n")
 
     onpath = tmp_path / "bin"
     onpath.mkdir()
