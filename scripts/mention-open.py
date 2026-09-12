@@ -1276,9 +1276,20 @@ def open_url(url: str) -> int:
 # `--class float,mention-open` puts it under `for_window [class="float"]
 # floating enable` in `nix/i3/config.nix` — the SAME rule every other float
 # terminal in `nix/graphical.nix` relies on — while the instance half names this
-# window specifically, so a future i3 rule can size or place it without catching
-# every other float. (alacritty's `--class` is `<general>,<instance>`; i3's
-# `class=` matches the general half.)
+# window specifically. (alacritty's `--class` is `<general>,<instance>`; i3's
+# `class=` matches the general half and `instance=` the second.)
+#
+# That instance half is LOAD-BEARING, not decorative: a second, narrower rule
+# `for_window [class="float" instance="mention-open"] … move position center`
+# centres the picker, which the shared `class="float"` rule deliberately does
+# not do for anybody. Rename the instance here and the picker silently goes back
+# to opening pinned to the LEFT edge — which is why
+# `scripts/tests/test_i3_picker_centering.py` derives the instance FROM this
+# constant rather than spelling it, and goes red on the disagreement.
+#
+# The SIZE stays here and only here. i3 centres the window alacritty sized; the
+# config carries no `resize set`, so `PICKER_COLUMNS`/`PICKER_LINES` below are
+# the single source of the picker's geometry.
 PICKER_CLASS = "float,mention-open"
 PICKER_COLUMNS = 120
 PICKER_LINES = 22
