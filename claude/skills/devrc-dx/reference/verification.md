@@ -7,12 +7,35 @@ need to see *why*. Running them all is ~20 extra tool round-trips for no new sig
 ```bash
 tmux show-option -g automatic-rename-format   # should include ● indicator
 tmux show-option -g focus-events              # should be on
-tmux show-option -g status-right              # should contain idle-update.sh
-tmux show-option -g status-left               # should call scratch-status.sh
+tmux show-option -g status-right              # idle-update.sh + continuum_save.sh only
+                                              # (the %H:%M clock + #H host were removed —
+                                              #  the bar's timeBlock already has both)
+tmux show-option -g status-left               # `#S` only — the scratchpad colour legend
+                                              # MOVED to the i3status-rust bar block
+                                              # (scripts/i3status-scratchpads)
 tmux list-keys | grep fuzzyclaw               # Alt+F binding (the dashboard)
 tmux list-keys | grep "prefix.*/"             # fuzzy search binding
-tmux list-keys -T root | grep -E "M-[gGvVpP]" # 6 scratch slot bindings, must use -S not -s
-~/.config/tmux/scratch-status.sh              # render the 6-slot indicator (should run <10ms)
+tmux list-keys -T root | grep -cE "^bind-key +-T root +M-[gGvVpPoOnNwWmMiIuUyY] " # 20
+                                              # ALL TWENTY scratch slot bindings, one per
+                                              # entry in scripts/tmux-scratch-slots.sh. This
+                                              # line read `M-[gGvVpP]` + "6 scratch slot
+                                              # bindings" long after the table grew to 20 —
+                                              # a reader running it saw 6, was told 6 was
+                                              # right, and could not have detected 14
+                                              # missing. If the count is not 20, compare it
+                                              # against the table itself:
+                                              #   grep -c '^[[:space:]]*"scratch' \
+                                              #     ~/.config/tmux/scratch-slots.sh
+                                              # (the bindings are GENERATED from that file —
+                                              # nix/programs/tmux/slot-table.nix — so the two
+                                              # numbers agreeing is the actual check, and a
+                                              # hardcoded expectation here would rot again).
+                                              # The popups must use -S (border style), not -s.
+~/.config/i3status-rust/scripts/i3status-scratchpads   # the LIVE legend: one JSON line,
+                                              # 20 pango spans, state "Idle" (`scratch ?`
+                                              # means it could not measure — check that
+                                              # scratch-slots.sh is symlinked beside it)
+~/.config/tmux/scratch-status.sh              # retired tmux renderer, kept for debugging
 ls ~/.tmux/activity/.prev_*                   # pipe switch state tracking
 ```
 

@@ -127,6 +127,72 @@ ROOT = Path(__file__).resolve().parents[2]
 # reproduced ON THE DEV HOST in ~70 s; see `scripts/ci-repro/`. Two corrections
 # to the framing above, both measured:
 #
+# ✅ AND THEN IT DID STOP — but read WHY before trusting it, because the zero on
+# its own does not carry the claim. The fix was NOT this constant: `#1458`
+# (`ce9b55c3`, 2026-09-10 15:56) sited the 18 remaining store roots — this class's
+# among them — on TMPFS via the `sited_root` fixture, which removes the mechanism
+# rather than widening the bound, since an fsync to RAM cannot stall on a
+# contended disk. MEASURED 2026-09-11 over `tekton/devrc-pytests`, newest verdict
+# per PR head, split on that commit's timestamp:
+#
+#     window     verdicts  genuine failures  THIS test
+#     pre-fix         125                29          4
+#     post-fix         45                 6          0
+#
+# 🔴 THE POWER IS WEAK AND SAYING SO IS THE POINT. At the pre-fix per-verdict rate
+# (4/125 = 3.2%) the expected count in 45 verdicts is ~1.4, so P(observing 0) ≈
+# 0.23 — roughly a one-in-four coincidence. The zero is CONSISTENT with the fix
+# and does not establish it; what establishes it is that the mechanism is gone.
+# Re-measure before deleting any of this, and do not upgrade the table into
+# "proven".
+#
+# 🔴 THE COMPARISON THAT USED TO SIT HERE WAS WRONG — RETRACTED 2026-09-11. It
+# read: `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
+# (`test_analyze_service_index_escrow_verify.py`) "failed 8 times to this test's
+# 4 — twice as often — and is also at 0 post-fix", concluding COUNT them before
+# choosing which to chase. The count was right; the conclusion was wrong. THAT
+# TEST IS NOT A FLAKE, AND `ce9b55c3` NEVER TOUCHED IT. Three measurements, same
+# instrument as the table above (200 PR heads, 2026-09-05..09-11, 197 terminal
+# verdicts):
+#
+#   * MECHANISM — it is not on this fix's path. That file imports no store
+#     server, no `store_siting`, no `build_server`; it drives `escrow-verify.py`
+#     against an in-memory `FakeDownloader`, so `_replace_bytes`'s in-request
+#     fsync is never reached. `ce9b55c3`'s diff names the file ZERO times, and
+#     the test runs in 1.71 s.
+#   * TIME — all 8 failures fall inside ONE 14-hour window on 2026-09-08
+#     (05:44Z..19:44Z) across 8 distinct heads, and EVERY run reports `failed=7`
+#     or `failed=8`: a whole-suite red hitting every open PR at once.
+#   * CAUSE — nixpkgs moved `age` to 1.3.2, and that test pins age's tamper
+#     verdicts by exact string equality. Re-keyed by #1392 (`94f82796`,
+#     09-08T18:26Z) and #1403 (`4f49f5dc`, 20:32Z) — TWO DAYS BEFORE `ce9b55c3`
+#     (09-10T20:56Z) existed. The two failures after 18:26Z are stale-base heads
+#     that had not yet picked up #1392.
+#
+# 🔴 SO COUNTING IS NOT THE RULE — COUNTING IS WHAT PRODUCED THE ERROR. A raw
+# verdict count ranked a one-day toolchain outage as this repo's worst flake.
+# Before a count means anything, split the population with two mechanical tests:
+#
+#   (a) SCATTER — a flake's failures spread across days; an environment red
+#       clusters in one window. THIS test: 5 failures on 5 distinct heads across
+#       4 separate days (09-06, 09-07, 09-08, 09-09 x2). The escrow one: 8 in 14
+#       hours. ⚠ That 5 is from the 200-head sample read 2026-09-11 and the
+#       table above says 4 from a differently-drawn one — which is the point:
+#       the SCATTER is the claim, not the count, because the count moves with
+#       the sample and the shape does not.
+#   (b) `failed=N` — a flake takes down ONE test (`failed=1`); an environment
+#       change takes down the same N>1 on every head at once.
+#
+# Only count what survives both.
+#
+# ⚠ AND EVERY COUNT HERE IS A LOWER BOUND — THE TABLE ABOVE INHERITS THIS.
+# GitHub truncates a status description at 138 characters, so only the FIRST
+# failing test is ever named; a run where a test failed behind an
+# alphabetically earlier one is invisible to this instrument. Bounded by
+# arithmetic on the same rows (`collected - passed - skipped`): of the 14
+# post-fix failures, 12 derive `failed=1`, one derives 2, and one is
+# unparseable — so at most two post-fix runs could be concealing anything.
+#
 #   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
 #     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …
 #     accept loop parked=True`. `server.py:_replace_bytes` fsyncs the file
@@ -4176,7 +4242,81 @@ _RETRACTED_BOUNDARY = (
     # copies of the number drifted together, which is exactly what a repo-wide
     # needle catches and three hand-checked sites do not.
     "51 entries of headroom",
+    # 🔴 ALSO NOT A BOUNDARY CLAIM — SAME FAILURE MODE, SAME SCANNER, and this
+    # one is the argument for the scanner rather than an application of it.
+    # "there is no CREATE route" was true until devrc#1254 (`34d00d90`) shipped
+    # `PUT … If-None-Match: *` and the `cairn create` verb. `claude/skills/cairn/
+    # SKILL.md` then asserted it for 8 more days, and a hand sweep run while
+    # fixing THAT file reported the repo clean — it was case-sensitive, and of
+    # the four live copies it missed, one straddled a newline inside a
+    # docstring. A line-based grep structurally cannot see that one; this
+    # scanner normalises wraps and case, which is the whole point.
+    # 🔴 THIS COMMENT ITSELF CARRIED A FALSE CLAIM AND TOLD READERS NOT TO FIX
+    # IT — the worst shape a note in a guard can take, and it is recorded rather
+    # than deleted. It read: "a new SCOPE's first entry still cannot be created
+    # through the API (the index is built by walking the store root) — do not
+    # 'correct' that sentence into a falsehood in the other direction."
+    # MEASURED FALSE: `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+    # `test_a_scopes_FIRST_entry_creates_the_directory` (this file) asserts 201
+    # for an allowlisted scope with NO directory. The only gate is the token's
+    # scope allowlist. The probe that produced the wrong claim used a scope that
+    # was absent AND non-allowlisted on a pod where those sets coincide, so it
+    # could not separate the two mechanisms.
+    # ⚠ FALSE-POSITIVE RANGE: this needle is a short, generic phrase, unlike the
+    # long sentences above it. A TRUE statement about some OTHER API ("the
+    # auditloop plugin push API has no create route") trips it. That is the
+    # known cost; reword, or carry a retraction marker within `_MARKER_WINDOW`.
+    "no create route",
+    # 🔴 THE SECOND RETRACTION NEEDS ITS OWN NEEDLE, and leaving it out is how
+    # the FIRST one drifted for eight days. The replacement claim — that a new
+    # scope's first entry still could not be created, so it "remains an operator
+    # step" — was ALSO false, and a round-2 audit found an 8th live site spelling
+    # it this way inside a file whose other copy had just been corrected. A
+    # phrase-scoped hand sweep could not see it: it searched the MECHANISM
+    # ("walking the store root"), and this site states only the CONCLUSION.
+    # Pinning the conclusion is what closes that gap.
+    # ⚠ Deliberately NOT needling "walking the store root": that phrase TRULY
+    # describes `snapshot_freshness`, which really does walk the root, so it
+    # would fire on correct writing.
+    #
+    # 🔴 AND THE FIRST DRAFT OF THESE TWO NEEDLES BROKE THAT VERY RULE. They read
+    # "remains an operator step" / "is still an operator step" — no subject at
+    # all, i.e. ordinary English about any operator step anywhere. MEASURED: the
+    # repo carries 9 TRUE occurrences of "operator step" across 7 unrelated files
+    # (signal provisioning, nix disk cleanup, tmux-webapp, browser-bridge,
+    # cairn-oss-multi-instance), each ONE WORD from turning this gate red, and a
+    # round-3 audit turned it red by changing "is" to "remains" in a doc about
+    # `sudo`. `claude/RULES.md`: a permanently-red gate is worse than no gate.
+    # 🔴 AND NARROWING THEM ONCE WAS STILL NOT ENOUGH — THIS IS THE THIRD PASS.
+    # Round 3 rewrote them to "first entry remains/is still an operator step" and
+    # added three more taken verbatim from real sites. A round-4 audit built its
+    # own false-positive probe and SIX of ten TRUE sentences fired; my own probe,
+    # written independently, got SEVEN of eight. Worst of them fired on the
+    # supposedly-narrowed needle: "The first entry remains an operator step for
+    # the OSS multi-instance store" is TRUE — that store really has no create
+    # verb yet — so the needle was still unbound to WHICH store it is about.
+    # Every needle below now carries a token tying it to THIS pod/claim, and the
+    # pair is re-verified on every change: a false-positive probe of true
+    # sentences, and a mutation battery of real reassertions.
+    "scope's first entry remains an operator step",
+    "scope's first entry is still an operator step",
+    "the pod structurally cannot accept a new entry",
+    "seed.sh is the only path that ever created one",
+    "first record can only reach the pod through an operator",
+    # ⚠ The 9th site spelled the claim TWICE in one paragraph; round 3 needled
+    # only the first half. This is the second, and it was left uncaught until a
+    # round-4 audit ran a copy-back of it and watched it SURVIVE.
+    "only create path available to a session",
 )
+
+# 🔴 A STRING NEEDLE CANNOT CLOSE THIS CLASS, AND FOUR ROUNDS OF TRYING IS THE
+# EVIDENCE. Round 1 swept by MECHANISM ("walking the store root") and missed a
+# site spelling the CONCLUSION; round 2 needled one conclusion phrase and missed
+# two more spellings; round 3 found those. Every pass swept by STRING, and the
+# claim has no canonical wording. Before declaring this class clean, sweep by
+# MEANING — e.g. `first (entry|record)` within ~120 chars of `seed|operator`,
+# plus "only create path" — and do not write "all sites are corrected" again
+# without showing the sweep that establishes it.
 
 # A retraction has to QUOTE the claim to retract it, so an occurrence with one
 # of these NEARBY is a correction, not an assertion. Kept deliberately short: a
@@ -7416,6 +7556,15 @@ class TestTheSpawnHarnessAndThePortRace:
     a connection REFUSED, not as a silent peer. Whether closing this race moves
     that intermittent's rate is UNKNOWN and is written down as unknown; do not
     let a later reader turn "ported alongside" into "caused by".
+
+    ✅ AND IT WAS SOMETHING ELSE, WHICH IS WHY THAT UNKNOWN WAS WORTH WRITING.
+    The intermittent was addressed by `#1458` siting the store on tmpfs — see the
+    measured before/after in the `HANG_TIMEOUT` block at the top of this file —
+    not by anything in this class. So this remains what its own first paragraph
+    says it is: an invariant guard on a mechanism that was live and unclosed, and
+    NOT regression coverage. 🔴 Had the two been merged into one story, the tmpfs
+    fix would have been credited to the port-race retry and the real mechanism
+    would still be in the request path.
 
     So: the retry is a hazard closed by construction, and the message is the
     instrument that makes the NEXT occurrence attributable. Ported from

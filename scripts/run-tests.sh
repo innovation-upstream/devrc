@@ -4515,7 +4515,33 @@ SKIPPED_FAMILIES=()
 # file exists to refuse; the point is that the reader can see which expectations
 # this run did not evaluate.
 SCOPED_SUSPENDED=()
-if [ "$SCOPED_MODE" -eq 1 ]; then
+# 🔴 KEYED ON `SCOPE_STATE != FULL`, NOT ON `SCOPED_MODE` — i.e. a `--targets`
+# (PARTIAL) run drops these families exactly as a `--files` (SCOPED) run does.
+# This was `SCOPED_MODE` alone, so a narrowed `--targets` run executed BOTH
+# whole families that no `--targets` value can name. MEASURED 2026-09-11, dev
+# host, load ~52, same box minutes apart:
+#
+#     --targets scripts/collector/i3/tests   47 s   (families ran)
+#     --files   <one file in that target>     4 s   (families skipped)
+#
+# Under `bash -x`, of ~54 s the SELECTED target's pytest was 2.9 s and ~46 s was
+# these two families — `test_base_clone_staleness.sh` 19.3 s,
+# `test_diagnose_disk_accounting.sh` 13.2 s, `test_bash_guard.py` 8.7 s. That
+# ~12x is what reddened `tekton/devrc-pytests` on devrc#1450, #1458 and #1462:
+# `scripts/tests/test_run_tests_targets.py` spawns nested `--targets` runs, and
+# under CI contention they breached that harness's subprocess bound. The bound
+# was the symptom; this is the cause.
+#
+# 🔴 THE SUSPENSION IS ANNOUNCED ON THE PARTIAL SURFACE TOO — see the PARTIAL
+# RUN block in the SUMMARY. Widening the skip without widening the announcement
+# would be a run silently executing two families fewer than the reader believes,
+# which is the #276 shape this file exists to refuse. The two must move together.
+#
+# ⚠ This does NOT bring the rest of SCOPED_MODE with it. A PARTIAL run still
+# enforces every per-target floor (GUARD 3), GUARD 7's REQUIRED direction and
+# GUARD 2's skip TOTAL, and still reports `SCOPE: PARTIAL`, never `SCOPED`.
+# Only the two unselectable families move.
+if [ "$SCOPE_STATE" != "FULL" ]; then
   SKIPPED_FAMILIES+=("${#HOOK_TESTS[@]} hand-rolled hook test script(s)")
   HOOK_TESTS=()
 fi
@@ -4609,8 +4635,16 @@ SHELL_TESTS=(
   # returns before the root check, and the suite drives the pure transforms
   # against fixtures — an lsof header in two different column layouts, a
   # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
-  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
-  # network and no git.
+  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher and no
+  # network. 🔴 IT DOES READ GIT, since section 14 — the sha-citation ledger —
+  # resolves refs and tests ancestry with `git -C "$ROOT"`. That sentence said "no
+  # git" for two commits after the reads landed: the change that added them
+  # touched only the two diagnose-disk files and never grepped for a note
+  # describing them. A property asserted in ONE file about code in ANOTHER goes
+  # stale silently, which is the whole reason this registry carries notes at all.
+  # The reads are all read-only (rev-parse/cat-file/merge-base), the target never
+  # fetches, and it degrades to COULD NOT MEASURE where there is no .git — which
+  # is why it still runs in the sandbox tier.
   # 🔴 THIS COMMENT HAS NOW CARRIED A WRONG LINE COUNT TWICE, in the commit
   # correcting the previous wrong one each time. It said "282 lines"; round 2
   # replaced that with "282 at the merge base (567 after round 1, 730 after
@@ -4660,8 +4694,10 @@ _run_shell_test_body() {
 }
 
 # See the SKIPPED_FAMILIES note above the hook loop: these five were 101s of a
-# measured 172s subset run, and no `--files` selection can name any of them.
-if [ "$SCOPED_MODE" -eq 1 ]; then
+# measured 172s subset run, and NEITHER a `--files` NOR a `--targets` selection
+# can name any of them — which is why this is keyed on `SCOPE_STATE != FULL`
+# rather than on `SCOPED_MODE`.
+if [ "$SCOPE_STATE" != "FULL" ]; then
   SKIPPED_FAMILIES+=("${#SHELL_TESTS[@]} shell test script(s)")
   SHELL_TESTS=()
 fi
@@ -4733,9 +4769,14 @@ _print_ci_gap() {
   fi
   if [ "$SCOPED_MODE" -eq 1 ]; then
     echo "       - ${other_files} other collectable file(s) inside the selected target(s)"
-    if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
-      for s in "${SKIPPED_FAMILIES[@]}"; do echo "       - $s"; done
-    fi
+  fi
+  # 🔴 OUTSIDE the SCOPED_MODE branch above, because the families are now
+  # dropped by any non-FULL run and this is the CI-gap surface a reader checks
+  # to learn what did not execute. Leaving it inside would have made a PARTIAL
+  # run's two skipped families invisible on the one surface that exists to name
+  # them — the silent narrowing the skip's own comment forbids.
+  if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
+    for s in "${SKIPPED_FAMILIES[@]}"; do echo "       - $s"; done
   fi
   echo "       - the NODE tier (scripts/run-node-tests.sh) — a separate derivation"
   echo "         this runner does not invoke at all"
@@ -4772,6 +4813,14 @@ elif [ -n "$SUBSET_NOTE" ]; then
   echo "     Every count below is for the SELECTED targets only. The unselected"
   echo "     ones were NOT executed and this verdict says nothing about them."
   echo "     Selected: ${TARGETS[*]}"
+  if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
+    # 🔴 THE SAME STATEMENT THE SCOPED BRANCH MAKES, because a PARTIAL run now
+    # drops the same families. It carried no such line while the skip was keyed
+    # on SCOPED_MODE, and adding the skip without this would make a `--targets`
+    # run quietly narrower than its own SUMMARY claims.
+    echo "     NOT RUN in this mode (no --targets selection can name them):"
+    for _skipped in "${SKIPPED_FAMILIES[@]}"; do echo "       - $_skipped"; done
+  fi
   _print_ci_gap
 fi
 for r in "${RESULTS[@]}"; do echo "  $r"; done

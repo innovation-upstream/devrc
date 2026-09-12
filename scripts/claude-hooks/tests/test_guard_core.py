@@ -2524,6 +2524,7 @@ def test_tmux_kill_prefix_matches_both_wide_kills_and_neither_narrow_one():
 # classify it. Paths only — line numbers are what rotted last time.
 _KILL_MENTION_LEDGER = {
     "claudedocs/handoff-tmux-restore-chain.md": "prose: the incident write-up",
+    "claudedocs/handoff-tmux-scratchpad-bar-statusline.md": "prose: a gotcha warning AGAINST it — \"Never `kill-server`; that destroys every session\"",
     "scripts/claude-hooks/bash-guard.py": "prose: the guard's own ban list",
     "scripts/claude-hooks/guard_core.py": "prose: this check, its docstring and its message",
     "scripts/claude-hooks/tests/test_guard_core.py": "prose: these tests' fixtures + this ledger",
@@ -2541,6 +2542,15 @@ _KILL_MENTION_LEDGER = {
     # Prose about the event, not a call: that file executes no tmux kill.
     "scripts/tests/test_tmux_restore_trigger.py": "prose: why the service needs ConditionPathExists",
     "scripts/tests/test_waiting_windows.py": "prose: forbidden-verb list",
+    # Two handoff docs that landed on `main` unclassified, turning this guard
+    # RED for the whole repo. Both are prose in a write-up; neither file
+    # executes any tmux command at all.
+    "claudedocs/handoff-tmux-webapp.md":
+        "prose: incident write-up — a `tmux kill-window -t @58` that was READ "
+        "from a log, and a `tmux kill-session` recorded as BLOCKED by a guard",
+    "claudedocs/handoff-mention-system-repos.md":
+        "prose: a META-mention — it only quotes that the doc above 'landed "
+        "carrying `tmux kill-server` text', i.e. it is about this ledger",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is
@@ -2562,7 +2572,14 @@ _ARGV_WITHOUT_SOCKET_THAT_NEVER_RUNS = {
         "prose example from a call, so the classification has to be written down",
 }
 
-_MENTION_RE = re.compile(r"kill-s(?:erver|ession)")
+# 🔴 THE LEFT BOUNDARY IS LOAD-BEARING — without it this matches INSIDE another
+# word. `skill-session` contains `kill-session`, so a doc naming a claim slug
+# like `clawgate-skill-session-verbs` was scored as mentioning a wide tmux kill
+# and had to be classified in the ledger below — recording a mention that does
+# not exist. Measured across the tree: the boundary removes exactly ONE file and
+# loses NONE of the 13 genuine mentions.
+# A word char only, NOT `-`: `foo-kill-session` is still a real mention.
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])kill-s(?:erver|ession)")
 _TMUX_ARGV_RE = re.compile(
     r"""\[\s*(?:"tmux"|'tmux'|tmux_exe)[^\[\]]*kill-s(?:erver|ession)[^\[\]]*\]""", re.S)
 
@@ -2607,6 +2624,14 @@ def test_the_kill_site_scanner_can_see_anything_at_all():
     """
     assert _MENTION_RE.search("subprocess.run(['tmux', 'kill-server'])")
     assert not _MENTION_RE.search("tmux kill-pane -t %1")
+    # 🔴 THE SUBSTRING CASE, and it really happened. Without a left word boundary
+    # this pattern matches INSIDE `skill-session`, so an ordinary doc naming a
+    # claim slug scored as a wide-kill mention and demanded a ledger entry for a
+    # mention that does not exist. Two live spellings, both from real slugs.
+    assert not _MENTION_RE.search("clawgate-skill-session-verbs")
+    assert not _MENTION_RE.search("the skill-session boundary")
+    # ...and the boundary must not swallow a REAL mention that follows a hyphen.
+    assert _MENTION_RE.search("run tmux-kill-session by hand")
     assert _TMUX_ARGV_RE.search('subprocess.run(["tmux", "-L", s, "kill-server"])')
     assert not _TMUX_ARGV_RE.search('subprocess.run(["tmux", "-L", s, "kill-pane"])')
     mentions, argvs = _scan_kill_sites()
@@ -2669,6 +2694,13 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         "scripts/claude-hooks/tests/test_guard_core.py",
         "scripts/session-write-harness/real_pane_check.py",  # a docstring line
         "scripts/tests/test_tmux_restore_trigger.py",  # a docstring line; see the ledger
+        # The same two handoff docs as the ledger above, for the same reason:
+        # prose in a write-up, in files that execute nothing. 🔴 This allowlist
+        # and `_KILL_MENTION_LEDGER` are SEPARATE and both had to be updated —
+        # a file classified in one is still an offender to the other, which is
+        # how `main` stayed red on TWO tests for one root cause.
+        "claudedocs/handoff-tmux-webapp.md",
+        "claudedocs/handoff-mention-system-repos.md",
     }
     seen_in_allowlisted, offenders = 0, []
     for rel in _tracked_files():

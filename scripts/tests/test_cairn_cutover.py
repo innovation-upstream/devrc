@@ -1078,9 +1078,57 @@ class TestTheFreezeIsWatchedNotAsserted:
         assert cc.survey(empty) == {"examined": 0, "writable": 0, "refused": 0, "other": 0}
 
     def test_the_freeze_leaves_SCOPE_DIRECTORIES_writable(self, cc, tmp_path):
-        """A deliberate asymmetry with a known cost: the hosted API has no CREATE
-        route, so freezing the directories too would leave a brand-new
-        subsystem's first entry with nowhere to go at all."""
+        """`set_entry_mode` freezes entry FILES and leaves scope DIRECTORIES
+        writable. This test pins that mechanical fact and supplies no rationale
+        for it — see below, and do not restore one to this opening line.
+
+        ⚠ RETRACTED: it used to argue "the hosted API has no CREATE route".
+        devrc#1254 / `34d00d90` added one (`PUT` + `If-None-Match: *`, exposed as
+        `cairn create`), so that sentence is wrong. `cairn-cutover.py`'s own
+        docstring already retracts it; this one did not, so the code and its test
+        disagreed — which is why the retraction is written here rather than
+        deleted.
+
+        🔴 A first correction of this docstring replaced that with "a new SCOPE's
+        first entry still cannot be created through the API, because the index is
+        built by walking the store root" — ALSO false, and retracted here rather
+        than quietly overwritten, because this docstring has now been wrong twice
+        in opposite directions. `create_entry` runs
+        `path.parent.mkdir(exist_ok=True)` and
+        `test_a_scopes_FIRST_entry_creates_the_directory` asserts 201 for an
+        allowlisted scope with no directory.
+
+        ⚠ AND THE REPLACEMENT JUSTIFICATION WAS WRONG TOO — recorded, not
+        reworded again. It claimed the asymmetry is justified by "any caller
+        whose token allowlist does not yet name the scope", which explains
+        nothing: a REMOTE caller's allowlist has no bearing on the mode bits of
+        the operator's LOCAL pre-cutover mirror. It also called a local-only
+        first entry "still a supported route", which overstates it — `scripts/
+        cairn` records that local-only entries were a CONTENT-LOSS path (five
+        entries dark to every reader on one host), and the create verb exists to
+        close it.
+
+        🔴 AND THE SENTENCE THAT REPLACED *THAT* MISQUOTED THE CODE — it said
+        "`cairn-cutover.py` frames it as the mechanical consequence … a
+        consequence, not a rationale", which is only that docstring's ⚠ THIRD
+        paragraph. Its FIRST paragraph asserts, in capitals, "THE ASYMMETRY IS A
+        DESIGN DECISION WITH A KNOWN COST … freezing the directories too would
+        also stop a genuinely NEW entry being created". Reading half a docstring
+        and reporting it as the whole is how this test and its subject came to
+        disagree in the first place.
+
+        ⚠ SO, ACCURATELY, AND WITHOUT SUPPLYING A FOURTH RATIONALE: the code DOES
+        assert a reason, and that reason is now WEAKER than when written but not
+        empty. Freezing directories would still block LOCAL creation; what
+        changed is that local creation is no longer the only route, since
+        `cairn create` has a hosted one. Whether the asymmetry is still worth
+        keeping is `cairn-cutover.py`'s call to make, not this test's — and note
+        the deployed mirror's directories were later frozen by hand anyway
+        (`1068 dirs 0555`), so the asymmetry may no longer describe the live
+        store at all. This test pins only the mechanical fact.
+        Three drafts of a reason have now been retracted here; do not write a
+        fourth.
+        """
         root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
         cc.set_entry_mode(root, 0o444)
         assert (root / "sc").stat().st_mode & 0o200, "the scope directory was frozen too"

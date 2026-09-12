@@ -306,10 +306,18 @@ disjointness as a set, and a mutant that collides them is killed.
 
 ### What criterion 9 does NOT close — read this before believing the cutover is complete
 
-1. **There is no CREATE route.** `POST` and `PUT` both resolve an *existing* ref; a ref that
-   resolves to nothing is 404. So a brand-new subsystem's first entry cannot be written
-   through the API at all. The freeze therefore targets entry **files** (0444) and leaves
-   scope **directories** writable, so a new file can still be created locally and pushed.
+1. ✅ **CLOSED — a new scope's first entry CAN be written through the API.** ⚠ This item used
+   to read *"There is no CREATE route"* — **RETRACTED 2026-09-11**, and its own closing
+   condition ("a merged devrc PR adding a create route, deployed, and `cairn` gaining the
+   verb") was met by **devrc#1254 / `34d00d90`** on 2026-09-03.
+   🔴 A first correction of this item claimed the conclusion survived "because the index is
+   built by walking the store root" — **that was ALSO false** and is retracted too:
+   `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+   `test_a_scopes_FIRST_entry_creates_the_directory` asserts **201** for an allowlisted scope
+   with no directory. The only gate is the caller's **token scope allowlist**.
+   The freeze still targets entry **files** (0444) and leaves scope **directories** writable —
+   that remains correct, but it is now a convenience for local work, not the sole route a new
+   scope has.
    That is a deliberate asymmetry with a known cost, not an oversight.
    *Closing condition: a merged devrc PR adding a create route to `server.py`, deployed, and
    `cairn` gaining the verb that uses it.*

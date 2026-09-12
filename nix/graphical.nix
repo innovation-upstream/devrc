@@ -90,6 +90,51 @@ let
   # through a shell.
   syshealthCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${pkgs.bash}/bin/bash -c '${home}/workspace/devrc/scripts/syshealth; echo; read -n 1 -r -s -p \"[any key to close]\"'";
 
+  # The scratchpad legend pill's left-click: the same fzf picker tmux binds to
+  # Alt+Shift+T (`~/.config/tmux/scratch-picker.sh`, deployed by nix/home.nix).
+  # 🔴 THE FLOAT TERMINAL IS NOT OPTIONAL, for exactly the reason spelled out on
+  # `runawaysBlock` below: i3status-rust runs a click through `sh -c` with NO
+  # CONTROLLING TERMINAL, and scratch-picker.sh is an fzf TUI — a bare invocation
+  # here exits `inappropriate ioctl for device` and the click is a SILENT NO-OP.
+  # So it is modelled on `syshealthCmd` above.
+  #
+  # NO `read -n 1` HOLD IN THIS STRING, and that is a difference from
+  # syshealthCmd rather than an omission: the picker carries its OWN holds, on
+  # the paths that need them. syshealth prints and exits in ~0.16 s, so every
+  # one of its runs would flash. The picker's exits enumerate as:
+  #   * LONG-LIVED — `tmux attach-session` / `tmux new-session` own the terminal
+  #     until the operator detaches.
+  #   * DELIBERATE instant exit — the operator dismissed fzf (ESC/^C, fzf rc
+  #     130) or it had nothing to match (rc 1). No hold: a hold here would make
+  #     every dismissal cost a keypress.
+  #   * ACCIDENTAL instant exits, both of which HOLD inside the script where
+  #     they can print why:
+  #       - attach failed AND create failed;
+  #       - 🔴 fzf FAILED TO LAUNCH. An earlier version of this comment listed
+  #         only the dismissal and so read as if every empty selection were
+  #         deliberate — but an fzf that never ran yields the SAME empty
+  #         `$selected`, and exiting 0 on it is precisely the vanish this
+  #         paragraph is about. Non-hypothetical: a `home-manager switch`
+  #         blanks `~/.nix-profile` for ~1 s, killing bare-name invocations,
+  #         and `fzf` is invoked by bare name. The picker now branches on fzf's
+  #         exit code rather than on the emptiness of its output.
+  #
+  # 🔴 AN EARLIER VERSION OF THIS COMMENT CLAIMED EVERY INSTANT EXIT WAS
+  # DELIBERATE, AND THAT WAS FALSE. The picker opened with
+  # `tmux display-message -p '#{session_name}'`, which — run OUTSIDE any tmux
+  # client, which is exactly what this click does — answers with the server's
+  # MOST-RECENTLY-USED session rather than "none". REPRODUCED on a private
+  # socket 2026-09-11: with `$TMUX` unset, one client attached to the
+  # NON-scratch session `work` and `scratch2` most recently used, the picker
+  # took its `scratch*` detach branch and `tmux detach-client` — which outside a
+  # client targets the server's best client, not "this" one — threw the `work`
+  # client off the server. Exit 0, no output: the click read as "did nothing"
+  # while damaging an unrelated session. FIXED IN THE PICKER, not here:
+  # scripts/tmux-scratch-picker.sh now requires `[ -n "$TMUX" ]` for that
+  # branch, and the outside-a-client path was then exercised end to end on a
+  # real pty (fzf renders, selecting a slot attaches a client to it).
+  scratchPickerCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${home}/.config/tmux/scratch-picker.sh";
+
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
   # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
   # go over stdlib urllib, so psycopg2 is the only non-stdlib dep.
@@ -461,6 +506,48 @@ let
     json = true;
     interval = 15;
   };
+  # scratchpads: the scratchpad COLOUR LEGEND — all 20 slots from the canonical
+  # table (scripts/tmux-scratch-slots.sh) as `<hotkey><window count>` in the
+  # slot's own colour when its tmux session is live, or the bare hotkey dimmed
+  # to #504945 when it is not. The colours are the popup border colours set in
+  # .tmux.conf, so the pill answers "which Alt-key gets me back to the orange
+  # popup". `scratch ?` when it could not be measured — the same discriminant
+  # grammar as claudeRunsBlock, and the reason the script is not a one-liner:
+  # "no scratchpad sessions" is a REAL reading here (every slot dim) and must
+  # not be confusable with a broken slot table or a missing tmux.
+  #
+  # MIGRATED OFF THE TMUX STATUS LINE. This was `#(scratch-status.sh)` in
+  # `status-left`, where `status-left-length 90` minus the `#S` segment left
+  # room for 14 of the 20 slots (its renderer hardcoded a `for i = 7` start to
+  # drop the first six). The bar fits all 20 and is on screen from every
+  # workspace, not only inside a tmux client.
+  #
+  # STATE IS ALWAYS Idle: a legend never demands attention. The bar is CALM —
+  # colour means "look at me" — and the per-slot colour here rides inside pango
+  # markup rather than in the block's state, so it colours letters without ever
+  # claiming the whole pill is an alert.
+  #
+  # NO poller / cache / signal, exactly like loadBlock and claudeRunsBlock: one
+  # local `tmux list-sessions` per tick is instant and never touches the
+  # network, so there is nothing to go stale and `bar_freshness` (the
+  # cache-staleness gate the count pills share) does not apply. 30s because a
+  # scratchpad's window count is not a fast-moving number.
+  #
+  # 🔴 UNCONDITIONAL on both hosts, on purpose, in BOTH places — this entry and
+  # the two `home.file`s below. Unlike the poller-backed count pills (workbench
+  # only, they need credentials and a timer) the scratchpads are plain tmux
+  # sessions and the Alt-key bindings are generated on every host, so the laptop
+  # wants this legend just as much. Gating only ONE of the two is what ships a
+  # block pointing at a script that was never deployed.
+  scratchpadsBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-scratchpads";
+    json = true;
+    interval = 30;
+    click = [
+      { button = "left"; cmd = scratchPickerCmd; }
+    ];
+  };
   # gamemode (BOTH hosts): the toggle for i3's empty `mode "game"` binding mode.
   #   in game mode -> ` 󰊗 GAME `  Critical
   #   otherwise    -> ` 󰊗 `       Idle, ALWAYS VISIBLE
@@ -530,7 +617,7 @@ let
   };
 
   blocks =
-    [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
+    [ memoryBlock diskBlock scratchpadsBlock netBlock cpuBlock loadBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) fansBlock
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
@@ -585,7 +672,15 @@ lib.mkIf isNixOS {
     ++ lib.optional (!isLaptop) (pkgs.writeShellScriptBin "deep-search" ''
       exec ${pkgs.python3}/bin/python3 ${scriptsDir}/deep-search "$@"
     '');
-  fonts.fontconfig.enable = true;
+  fonts.fontconfig = {
+    enable = true;
+    # Ensure emoji characters fall back to NotoColorEmoji when the primary font
+    # is monospace (Alacritty's default). Without this, fontconfig's monospace
+    # fallback chain lands on DejaVu Sans — which covers U+1F600+ as monochrome
+    # outlines — and NotoColorEmoji is ranked too low (position 180/180) for
+    # crossfont's deduplication to reach it.
+    defaultFonts.monospace = [ "DejaVu Sans Mono" "Noto Color Emoji" ];
+  };
 
   # i3 config — raw string. INERT until the system cutover (apply-i3-to-hm.sh).
   xdg.configFile."i3/config".text = import ./i3/config.nix { inherit isLaptop; };
@@ -697,6 +792,37 @@ lib.mkIf isNixOS {
   # `test_the_shared_module_is_DEPLOYED_beside_the_block_that_loads_it`.
   home.file.".config/i3status-rust/scripts/claude_sessions.py" = {
     source = ../scripts/lib/claude_sessions.py;
+  };
+
+  # scratchpads: see `scratchpadsBlock` above. UNCONDITIONAL, matching the
+  # block's presence in the unconditional half of `blocks` — a narrower gate
+  # here than there means a host renders a `custom` block whose command does not
+  # exist. Scratchpads are plain tmux sessions and the Alt-key bindings are
+  # generated on both hosts, so there is nothing host-specific to gate on.
+  home.file.".config/i3status-rust/scripts/i3status-scratchpads" = {
+    source = ../scripts/i3status-scratchpads;
+    executable = true;
+  };
+  # 🔴 scratch-slots.sh is a CO-LOCATED SIBLING DATA FILE, not a block — the
+  # same shape as claude_sessions.py above, and for the same reason: the block
+  # script is deployed as a lone nix-store symlink into scriptsDir, so anything
+  # it reads must be symlinked BESIDE it. This is leg 1 of `_SLOT_PATHS` in
+  # scripts/i3status-scratchpads, and the only leg that is true on a live host.
+  # Without this entry the pill cannot load the slot table and renders
+  # `scratch ?` — correctly, but permanently.
+  #
+  # It is the SAME canonical file nix/home.nix already deploys to
+  # ~/.config/tmux/scratch-slots.sh for the tmux consumers; this is a second
+  # symlink to the one source of truth, NOT a copy. Deployed under its DEPLOYED
+  # name (`scratch-slots.sh`, not `tmux-scratch-slots.sh`) to match that
+  # convention and the block's leg-1 lookup.
+  #
+  # UNGATED, matching the block script above — the deploy must never be
+  # NARROWER than its consumer. And like every managed path, a new file must be
+  # `git add`ed or the flake omits it from the deploy with a perfectly green
+  # switch.
+  home.file.".config/i3status-rust/scripts/scratch-slots.sh" = {
+    source = ../scripts/tmux-scratch-slots.sh;
   };
 
   # Decoupled status-count block scripts (workbench blocks reference these by

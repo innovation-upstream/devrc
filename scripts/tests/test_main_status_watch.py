@@ -8,10 +8,7 @@ lands p50 ~19.6 min after the commit — so the signal to look sooner already
 exists. The script under test converts that signal into an early start of the
 deadman, and claims nothing about main itself.
 
-🔴 WHAT THESE TESTS ARE, HONESTLY LABELLED. The script is new, so NOTHING here is
-regression coverage for a defect observed at a base containing it; a test that
-passes before and after is an invariant guard and is not counted as coverage.
-They are:
+🔴 WHAT THESE TESTS ARE, HONESTLY LABELLED. They are:
 
   * two CONTROLS, first in the file, because every behavioural test below is a
     reassuring zero if the harness cannot go red or cannot see a trigger;
@@ -20,10 +17,23 @@ They are:
   * REAL-FIXTURE guards built from status descriptions this repo actually
     posted, which is the only reason the truncation hazard below is provable
     rather than imagined;
-  * two STATIC guards pinning relationships the behavioural tests structurally
-    cannot see — that the script never reads the roll-up endpoint, and that the
-    production trigger really is `systemctl … main-green-check` with no
-    `--force`.
+  * STATIC guards pinning relationships the behavioural tests structurally
+    cannot see — the roll-up endpoint, both production argvs, the DND wiring,
+    the env-knob ledger, the two consolidated one-place rules, and that every
+    test the script CITES exists;
+  * MUTATION-DERIVED guards (the round-3 block at the end), each carrying the
+    mutant id it kills instead of a base ref.
+
+⚠ TWO CLAIMS THAT USED TO SIT HERE WERE FALSIFIED BY THE FILE'S OWN GROWTH, and
+both are the "a fix round's own prose is the likeliest next finding" shape:
+"NOTHING here is regression coverage for a defect observed at a base containing
+it" stopped being true the moment round 2 landed — `test_an_ENOSPC_SHAPED_state_
+dir_ESCALATES_rather_than_reporting_success`, `test_a_REPEATEDLY_failing_trigger_
+ESCALATES_to_blind` and `test_a_failed_episode_write_does_NOT_trigger` each
+carry a measured pre-fix sequence in their own docstring. And "two STATIC
+guards" counted that section when it held two; it has grown several times
+since. Neither sentence was re-read when the thing it counted changed, which
+is the argument for describing a section rather than counting it.
 
 🔴 THE SEAM THESE TESTS DRIVE IS NOT THE PRODUCTION TRIGGER. Every behavioural
 test sets MAIN_STATUS_WATCH_TRIGGER, so none of them ever starts a real systemd
@@ -31,12 +41,14 @@ unit. `test_the_production_trigger_is_systemctl_start_main_green_check` pins the
 real command textually so the seam cannot drift away from what production does
 while every behavioural test stays green.
 """
+import ast
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -185,6 +197,12 @@ def test_NEGATIVE_CONTROL_the_harness_can_go_red(h):
     assert proc.returncode == RC_TRIGGERED, proc.stdout + proc.stderr
     with pytest.raises(AssertionError):
         assert proc.returncode == RC_OK, "deliberately wrong: a red must not read as OK"
+    # 🔴 A FIRST RED MUST NOT REPORT A PRE-EXISTING EPISODE. `State._read`
+    # returns "" when the file is absent, and every mutant returning a WORD
+    # there instead survived the sweep: the run then announces an ancient
+    # episode "since <that word>" on a box that has never seen a red. Same rc,
+    # same trigger, a log that describes a state the machine was never in.
+    assert "red episode" not in proc.stdout, proc.stdout
 
 
 def test_POSITIVE_CONTROL_the_trigger_receipt_can_move_off_zero(h):
@@ -638,19 +656,44 @@ def test_an_unexpected_exception_is_REPORTED_and_LADDERED_not_swallowed(h):
     check and then explodes deep inside `classify`, where `.strip()` meets a
     dict — a genuinely UNANTICIPATED failure, which is the only kind the net is
     for.
+
+    🔴 AND IT HAD TO BE REBUILT A SECOND TIME, FOR A FAULT THIS FILE ALREADY
+    NAMES ONE SCREEN AWAY. It asserted `returncode in (RC_UNMEASURED, RC_BLIND)`
+    — the same disjunction `test_a_failed_episode_write_does_NOT_trigger`'s
+    docstring condemns as unable to tell "ladders" from "never escalates".
+    MEASURED: it let SIXTEEN mutants of the general net survive a fully green
+    suite, including both of its `RC_BLIND`s swapped for `RC_OK` and
+    `n >= escalate` forced False — i.e. a net that can never escalate reads
+    exactly like one that can. (⚠ The first version of this sentence said
+    TWENTY-ONE. That was the whole function's survivor count, 23, minus a
+    rounding-down nobody did: 3 were log-line deletions and 4 belonged to a
+    different arm, the `except Unmeasured` this PR deletes. A measured number
+    stated wider than what was measured is the same fault as a guard stated
+    wider than its implementation, in the file auditing exactly that.)
+    One rule, two places; this was the copy left unfixed. Assert the
+    EXACT code on each run, and RUN THE LADDER so the escalation is observed
+    rather than allowed.
     """
     sha = "b3" + "0" * 38
     h.serve_commits([sha])
     h.serve_statuses(sha, [
         {"context": CTX_PY, "state": "failure", "description": {"nested": "object"}},
     ])
-    proc = h.run()
-    assert proc.returncode in (RC_UNMEASURED, RC_BLIND), proc.stdout
+    proc = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2)
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
     assert "UNEXPECTED AttributeError" in proc.stdout, proc.stdout
     assert "BUG in main-status-watch" in proc.stdout
-    assert "blind ladder (streak" in proc.stdout, "an unexpected failure must be counted"
+    assert "blind ladder (streak 1/2" in proc.stdout, "an unexpected failure must be counted"
     assert "GREEN" not in proc.stdout
     assert not h.triggered()
+    # the ladder must actually ADVANCE — and the traceback must survive to the
+    # journal, which is stderr, not stdout.
+    assert "Traceback" in proc.stderr, "the net swallowed the traceback"
+    second = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=2)
+    assert second.returncode == RC_BLIND, (
+        f"got {second.returncode} — a recurring bug must escalate exactly like a "
+        "persistent outage, or rc 11 reports success forever"
+    )
 
 
 def test_a_NON_VERDICT_is_never_treated_as_green(h):
@@ -983,8 +1026,15 @@ def test_a_trigger_TIMEOUT_leaves_the_episode_open(h):
 def test_a_NON_timeout_trigger_failure_DROPS_the_episode_so_a_retry_is_possible(h):
     write_exec(h.trigger, 'echo "Unit not found." >&2\nexit 5\n')
     _red_commit(h, "c8" + "0" * 38)
-    assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=9).returncode == RC_UNMEASURED
+    proc = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=9)
+    assert proc.returncode == RC_UNMEASURED
     assert not (h.cache / "red-episode").exists()
+    # 🔴 THE MIRROR IMAGE OF "never claim a state change you did not achieve":
+    # never report a FAILURE that did not happen either. Dropping the `not` from
+    # `if not state.close_episode():` survived the sweep — the episode really was
+    # dropped while the run warned that it had not been, which would send an
+    # operator looking for a stuck file that is not there.
+    assert "could not drop the episode" not in proc.stdout, proc.stdout
     # and once the trigger works again, it really does retry
     write_exec(h.trigger, f'echo "$@" >> "{h.receipt}"\nexit 0\n')
     assert h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=9).returncode == RC_TRIGGERED
@@ -1004,13 +1054,47 @@ def test_a_failing_trigger_is_UNMEASURED_not_a_silent_success(h):
 
 def _code_only():
     """Executable lines only. A static guard that reads prose is walkable by
-    rewording AND breakable by documenting the very hazard it forbids."""
+    rewording AND breakable by documenting the very hazard it forbids.
+
+    ⚠ THE NAME USED TO OVER-CLAIM: it stripped `#` comments and kept every
+    DOCSTRING, so each guard below still read a large amount of prose — and this
+    file's own docstrings discuss `/status`, `--force` and `systemctl` at
+    length. Nothing tripped yet, which is the point: the guard was one
+    explanatory sentence away from a false red, in a file whose habit is to
+    explain its hazards next to them. Docstrings are stripped by AST now, so
+    the sentence is true rather than aspirational.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    drop = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)) and ast.get_docstring(node) is not None:
+            first = node.body[0]
+            drop.update(range(first.lineno, first.end_lineno + 1))
     out = []
-    for line in SCRIPT.read_text(encoding="utf-8").splitlines():
-        if line.lstrip().startswith("#"):
+    for i, line in enumerate(src.splitlines(), 1):
+        if i in drop or line.lstrip().startswith("#"):
             continue
         out.append(line)
     return "\n".join(out)
+
+
+def test_code_only_really_strips_the_prose_it_claims_to():
+    """The instrument behind four static guards, with both controls.
+
+    NEGATIVE: a phrase that exists ONLY in a docstring must be gone.
+    POSITIVE: a phrase that exists only in executable code must survive — or
+    `_code_only` could satisfy the first assertion by returning nothing at all,
+    and every guard reading it would pass vacuously.
+    """
+    code = _code_only()
+    raw = SCRIPT.read_text(encoding="utf-8")
+    only_in_a_docstring = "Raised for every reason the world could not be read"
+    assert only_in_a_docstring in raw, "fixture phrase moved; this guard is blind"
+    assert only_in_a_docstring not in code, "docstring prose still reaches the guards"
+    assert "def classify(state, description):" in code, (
+        "_code_only stripped executable lines too — every guard reading it is vacuous"
+    )
 
 
 def test_the_script_never_reads_the_rollup_status_endpoint():
@@ -1179,3 +1263,486 @@ def test_a_context_typo_is_not_silent():
     src = SCRIPT.read_text(encoding="utf-8")
     assert 'CONTEXT_PREFIX = "tekton/devrc-main-"' in src
     assert "no authoritative" in src
+
+
+# ══ ROUND 3: THE ARMS AN ENUMERATED SWEEP PROVED UNCOVERED ════════════════════
+# 🔴 HONESTLY LABELLED. Every case in this block was found by MUTATION, not by a
+# defect anyone observed running: the 440-mutant enumerated sweep that produced
+# them is described in the PR. So each is a MUTATION-DERIVED guard — the matrix
+# it carries is "red on mutant M<nnn>, green at HEAD", not "red at a base".
+# `test_an_Unmeasured_that_ESCAPES_mains_handler_still_LADDERS` is the one
+# exception: it is red at the pre-change source, because that one was a defect.
+
+
+def test_a_MOVED_docstring_sentinel_REFUSES_rather_than_dumping_the_file(tmp_path):
+    """🔴 THE SURVIVOR THE ROUND-2 SWEEP FOUND AND NOBODY CLOSED.
+
+    `print_header` bounds the header by the module docstring's opening line, and
+    the whole arm that fires when that sentinel MOVES had no coverage at all:
+    three separate mutants of it survived a fully green 61-test suite —
+
+      * `return False` -> `return True`  (the refusal becomes a silent rc 0)
+      * `if end is None:` -> `if False:`  (`src[1:None]` DUMPS THE WHOLE FILE)
+      * deleting the diagnostic `say(...)` (the operator's only clue)
+
+    Every behavioural test reaches this function on the HAPPY path only, where
+    the sentinel is always found, so none of them can see any of the three. The
+    file argues at length that a `--help` printing nothing and exiting 0 is the
+    reassuring zero it exists to prevent — this is the test that makes the
+    argument enforceable.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    moved = src.replace('"""Start the main-green deadman early',
+                        '"""Begin the main-green deadman early', 1)
+    assert moved != src, "the docstring sentinel is not where this test thinks"
+    copy = tmp_path / "moved-sentinel.py"
+    copy.write_text(moved, encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(copy), "--help"],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == RC_USAGE, proc.stdout + proc.stderr
+    assert "cannot locate the end of the header" in proc.stdout
+    # and it must NOT fall back to dumping the source: a header knob name would
+    # appear in the output if `src[1:None]` had printed the whole file.
+    assert "MAIN_STATUS_WATCH_BUDGET" not in proc.stdout, (
+        "a moved sentinel dumped the file instead of refusing"
+    )
+    # POSITIVE CONTROL for the line above: the UNmoved script really does print
+    # that knob, so its absence is evidence rather than a pattern that never
+    # matches anything.
+    ok = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                        capture_output=True, text=True, timeout=60)
+    assert "MAIN_STATUS_WATCH_BUDGET" in ok.stdout
+
+
+def test_an_unknown_argument_is_a_USAGE_error(h):
+    """The other half of the argv arm, and it was uncovered too: mutating
+    `RC_USAGE = 2` to 3, and forcing `if len(argv) > 1` to False, both survived.
+    """
+    proc = subprocess.run([sys.executable, str(SCRIPT), "--not-a-flag"],
+                          capture_output=True, text=True, timeout=60, env=h.env())
+    assert proc.returncode == RC_USAGE, proc.stdout + proc.stderr
+    assert "unknown argument: --not-a-flag" in proc.stdout
+    assert not h.triggered()
+
+
+# ── classify's vocabulary ─────────────────────────────────────────────────────
+# 🔴 THE SWEEP'S WORST FINDING, AND IT IS AN "ABSENCE READS AS GREEN" ONE.
+# `classify`'s docstring said the tests drive it directly. No test called it at
+# all — and an end-to-end test STRUCTURALLY CANNOT see most of what it decides,
+# because `commit_verdict` branches on green/red only and folds every other
+# class into "not a verdict". MEASURED: 35 of its 60 enumerated mutants survived
+# a fully green suite, and the 25 that died were exactly those that moved an
+# answer INTO green-or-red. ⚠ Be precise about that — an earlier wording here
+# said "every mutant of its pending and error arms survived", and a quarter of
+# them did not. Overstating a measurement is the same fault as overstating a
+# guard, in the file that exists to catch it.
+#
+# The part that is not merely unobservable is the pair of fall-through
+# `return "error-other"`s: NO fixture reaches either, so turning one into
+# `return "green"` survived. The catch-all is what an UNRECOGNISED state lands
+# on, so a state GitHub adds tomorrow would be folded into "main is green" —
+# closing an open red episode and disarming the accelerator on the strength of a
+# word nobody has seen yet.
+
+@pytest.mark.parametrize(
+    "state,description,expected",
+    [
+        ("success", REAL_SUCCESS, "green"),
+        ("failure", REAL_NO_NAME, "red"),
+        ("pending", "devrc gate running", "pending"),
+        ("error", REAL_SUPERSEDED, "superseded"),
+        ("error", REAL_KILLED, "killed"),
+        ("error", REAL_NO_GATE_POD, "no-gate-pod"),
+        ("error", "something this pipeline has never posted", "error-other"),
+        # the arms nothing drove: an unrecognised state, and a missing one.
+        ("queued", "a state this leg does not post today", "error-other"),
+        ("", "", "error-other"),
+        (None, None, "error-other"),
+    ],
+)
+def test_classify_maps_a_row_to_its_documented_class(state, description, expected):
+    assert _load().classify(state, description) == expected
+
+
+def test_an_UNRECOGNISED_state_is_never_green_end_to_end(h):
+    """The behavioural half of the case above, because a unit test on `classify`
+    alone cannot see what the walk does with its answer. A state neither this
+    leg nor this script knows must leave `main` UNCLAIMED — not green, not red.
+    """
+    sha = "a9" + "0" * 38
+    h.serve_commits([sha])
+    h.serve_statuses(sha, [_status(CTX_PY, "queued", "a state nobody predicted")])
+    proc = h.run()
+    assert proc.returncode == RC_OK, proc.stdout
+    assert "no authoritative" in proc.stdout
+    assert "GREEN" not in proc.stdout
+    assert not h.triggered()
+
+
+def test_the_flake_screen_refuses_an_EMPTY_description_set():
+    """`screen_all_known_flakes([])` returns True if its first guard is removed —
+    i.e. it would SUPPRESS a confirmation run having been told nothing at all.
+    The caller cannot reach that today, which is exactly why the guard needs a
+    test rather than a caller: an unreachable guard nobody drives is one refactor
+    away from being deleted as dead.
+    """
+    mod = _load()
+    assert mod.screen_all_known_flakes([]) is False
+    # POSITIVE CONTROL: the function CAN return True, so the assertion above is
+    # not passing because it always returns False.
+    assert mod.screen_all_known_flakes(
+        [f"FAILED: pytests — FAILING: {KNOWN_FLAKE_NAME} | TOTAL failed=1"]
+    ) is True
+
+
+# ── the production repo path ──────────────────────────────────────────────────
+# 🔴 THE HEADER CLAIMED THIS WAS PINNED AND IT WAS NOT. Every behavioural test
+# sets the repo override, so nothing exercised `resolve_repo` past its first
+# line: forcing `if not m` to True or False, and `proc.returncode != 0` to
+# either, all survived — TEN of its ELEVEN enumerated mutants. ⚠ Not "zero
+# coverage", which is what this comment said first: the ONE death is the
+# override branch itself, and it dies only because every other test in the file
+# depends on it. Incidental coverage of the line that bypasses the function is
+# not coverage of the function. That is the same seam-drift hazard
+# `test_the_production_trigger_...` exists for, on the other production argv.
+
+def _fake_git(monkeypatch, mod, *, rc=0, stdout="", calls=None):
+    def run(cmd, **kw):
+        if calls is not None:
+            calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, rc, stdout, "")
+    monkeypatch.setattr(mod, "subprocess", types.SimpleNamespace(
+        run=run,
+        TimeoutExpired=subprocess.TimeoutExpired,
+        CompletedProcess=subprocess.CompletedProcess,
+    ))
+
+
+@pytest.mark.parametrize("url", [
+    "git@github.com:owner/name.git",
+    "https://github.com/owner/name.git",
+    "https://github.com/owner/name",
+    "ssh://git@github.com/owner/name.git",
+])
+def test_resolve_repo_parses_every_origin_url_shape(monkeypatch, url):
+    mod = _load()
+    monkeypatch.delenv("MAIN_STATUS_WATCH_REPO", raising=False)
+    calls = []
+    _fake_git(monkeypatch, mod, stdout=url + "\n", calls=calls)
+    assert mod.resolve_repo() == "owner/name"
+    # and it asked the question production asks — the seam cannot drift away
+    # from `git remote get-url origin` while the behavioural tests stay green.
+    assert calls[0][:2] == ["git", "-C"]
+    assert calls[0][-3:] == ["remote", "get-url", "origin"]
+
+
+def test_the_repo_override_wins_and_does_not_shell_out(monkeypatch):
+    mod = _load()
+    monkeypatch.setenv("MAIN_STATUS_WATCH_REPO", "o/r")
+    calls = []
+    _fake_git(monkeypatch, mod, stdout="git@github.com:other/thing.git\n", calls=calls)
+    assert mod.resolve_repo() == "o/r"
+    assert calls == [], "the override must short-circuit before running git"
+
+
+def test_an_unparseable_origin_url_is_UNMEASURED_not_a_guess(monkeypatch):
+    mod = _load()
+    monkeypatch.delenv("MAIN_STATUS_WATCH_REPO", raising=False)
+    _fake_git(monkeypatch, mod, stdout="not-a-url\n")
+    with pytest.raises(mod.Unmeasured) as exc:
+        mod.resolve_repo()
+    assert "cannot parse owner/name" in str(exc.value)
+
+
+def test_a_FAILING_git_is_UNMEASURED_not_an_empty_repo_name(monkeypatch):
+    mod = _load()
+    monkeypatch.delenv("MAIN_STATUS_WATCH_REPO", raising=False)
+    _fake_git(monkeypatch, mod, rc=128, stdout="")
+    with pytest.raises(mod.Unmeasured) as exc:
+        mod.resolve_repo()
+    assert "cannot read origin remote" in str(exc.value)
+
+
+# ── the API reader's own failure reporting ────────────────────────────────────
+
+def test_a_NON_ZERO_gh_exit_is_reported_with_its_code_and_stderr(h):
+    """Forcing `if proc.returncode != 0:` to False survived, because the fake gh
+    printed NOTHING on failure — so `json.loads("")` raised and the run was
+    unmeasured either way, for the wrong reason. `gh api` really does print a
+    JSON error body on stdout, and with it the returncode check is the ONLY
+    thing standing between an HTTP 403 and a confident 'no commits returned'.
+    """
+    write_exec(h.gh,
+               'echo "{\\"message\\": \\"API rate limit exceeded\\"}"\n'
+               'echo "gh: rate limited" >&2\nexit 1\n')
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "exited 1" in proc.stdout, proc.stdout
+    assert "rate limited" in proc.stdout, "the operator's only clue is dropped"
+    assert not h.triggered()
+
+
+def test_an_EMPTY_commit_list_is_UNMEASURED_not_a_quiet_nothing_to_do(h):
+    """`if not isinstance(commits, list) or not commits:` forced to False
+    survived: with the guard gone an empty list walks zero commits and reports
+    rc 0, 'no authoritative verdict in the newest 0 commits'. An API that
+    returned no commits at all has told us nothing, and 'nothing to do' is the
+    reassuring zero — it must ladder like every other unreadable answer.
+    """
+    h.serve("/repos/o/r/commits?sha=main&per_page=20", [])
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "no commits returned" in proc.stdout
+    assert not h.triggered()
+
+
+# ── the outermost net ─────────────────────────────────────────────────────────
+
+def test_an_Unmeasured_that_ESCAPES_mains_handler_still_LADDERS(tmp_path, monkeypatch):
+    """🔴 THE ONE ROUND-3 FINDING THAT IS A DEFECT, NOT A COVERAGE GAP, AND IT IS
+    F1's SHAPE FOR THE THIRD TIME.
+
+    `_guarded_main` had a dedicated `except Unmeasured` arm that printed COULD
+    NOT MEASURE and returned rc 11 — WITHOUT bumping the blind streak. rc 11 is
+    a systemd SUCCESS, so an `Unmeasured` raised anywhere outside `main`'s own
+    handler was an arm that can never advance a ladder and never fails the unit:
+    permanently silent, which is precisely what this file's F1/F3 comments
+    condemn and what `ladder_exit`'s docstring says it applies "wherever that
+    condition arises".
+
+    Its own docstring asserted the opposite — "the blind ladder counts it — so a
+    bug that recurs escalates to rc 12 exactly like a persistent outage" — a
+    coverage claim wider than the implementation, for the arm the sentence was
+    describing. The fix deletes the special case: `Unmeasured` is an `Exception`,
+    so the general arm already reports it AND ladders it.
+
+    RED at the pre-change source (11, 11); GREEN here (11, 12).
+    """
+    mod = _load()
+    monkeypatch.setenv("MAIN_STATUS_WATCH_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("MAIN_STATUS_WATCH_BLIND_ESCALATE", "2")
+
+    def boom(argv):
+        raise mod.Unmeasured("a path that raised after the handler")
+
+    monkeypatch.setattr(mod, "main", boom)
+    first = mod._guarded_main(["main-status-watch.py"])
+    second = mod._guarded_main(["main-status-watch.py"])
+    assert (first, second) == (RC_UNMEASURED, RC_BLIND), (
+        f"got {first},{second} — an arm whose failures are never counted can "
+        "never escalate, and rc 11 is a systemd SUCCESS"
+    )
+    assert (tmp_path / "cache" / "blind-streak").exists(), (
+        "nothing was recorded, so this arm is permanently silent"
+    )
+
+
+def test_the_state_directory_default_lives_in_exactly_one_place():
+    """🔴 A CONSOLIDATION GUARD, the same one the escalation default already has.
+
+    The cache root was open-coded at TWO sites — `main` and the outermost net —
+    and the second is the one that runs when the first has already failed. Two
+    copies drifting apart would send the blind streak to a different directory
+    than the one the next run reads, which silently un-ladders the net: the
+    failure mode is SILENCE, so it would not announce itself.
+    """
+    code = _code_only()
+    assert code.count("MAIN_STATUS_WATCH_CACHE") == 1, (
+        "the cache env var is read in more than one place — call cache_root()"
+    )
+    assert code.count('".cache"') == 1, "the default path is derived twice"
+    assert code.count("cache_root()") >= 2, "the helper must actually be used"
+
+
+def test_every_test_this_script_names_actually_exists():
+    """🔴 THE PROSE FINDING THAT REPEATED AT EVERY ROUND OF THIS ARC: a comment
+    pointing at a test by name, where the test was renamed and only one copy of
+    the rule moved.
+
+    Measured: `main-status-watch.py:463` named
+    `test_the_total_budget_is_under_the_units_timeout`, which the round-2 fix had
+    renamed to `..._PLUS_the_trigger_timeout_...` when it added the third number.
+    The pointer read as a citation and resolved to nothing.
+
+    The name is joined across comment line-breaks first, because that wrap is
+    exactly what hid it from every grep anyone ran.
+
+    ⚠ THE JOIN MUST ALLOW AN INDENTED `#`, and the first version of this guard
+    did not — it anchored the continuation at column 0, so a wrapped name inside
+    a FUNCTION body stayed split and read as a name nobody defined. It failed on
+    its own first run against a citation this very PR added, which is the
+    cheapest possible way to learn that a pattern is narrower than its claim.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    joined = re.sub(r"_\n[ \t]*#[ \t]*", "_", src)
+    referenced = set(re.findall(r"\btest_[a-z][A-Za-z0-9_]+", joined))
+    defined, stems = set(), set()
+    for p in sorted((ROOT / "scripts" / "tests").glob("test_*.py")):
+        stems.add(p.stem)
+        defined |= set(re.findall(r"^def (test_[A-Za-z0-9_]+)", p.read_text(encoding="utf-8"), re.M))
+    assert referenced, "the script names no tests at all — this guard is vacuous"
+    # POSITIVE CONTROL: the comparison set is real and CAN match.
+    assert "test_a_context_typo_is_not_silent" in defined
+    missing = sorted(referenced - defined - stems)
+    assert not missing, f"the script cites tests that do not exist: {missing}"
+
+
+# ══ ROUND 4: WHAT THE ROUND-3 DELTA'S OWN SWEEP FOUND ═════════════════════════
+# 🔴 AN AUDIT FIX RESETS THE VERIFICATION GATE, and re-running the sweep against
+# the FIXED tree is what makes that concrete. It cut survivors 155 -> 73 and then
+# found three arms round 3 had not reached — one of them an arm round 3's own PR
+# body claimed it had covered. That claim was written from the finding list, not
+# from the diff.
+
+def test_a_commit_with_ONLY_FOREIGN_contexts_is_no_verdict_not_green(h):
+    """🔴 THE ONE ROUND 3 SAID IT HAD CLOSED AND HAD NOT.
+
+    `commit_verdict` returns `"none"` when NO row carries the main-gate prefix,
+    and mutating that return to `"green"` survived both sweeps: the existing
+    foreign-context test always serves a real leg alongside the foreign one, so
+    the empty-`per_ctx` arm is never reached. A commit carrying only
+    `tekton/devrc-cairn-client-runs` rows would then report main GREEN off
+    another pipeline's verdict — and a green CLOSES an open red episode, so the
+    accelerator would be disarmed by a status it must not read at all.
+    """
+    sha = "b9" + "0" * 38
+    h.serve_commits([sha])
+    h.serve_statuses(sha, [
+        _status("tekton/devrc-cairn-client-runs", "success", "all good elsewhere"),
+        _status("tekton/devrc-something-else", "failure", "FAILED: a different pipeline"),
+    ])
+    proc = h.run()
+    assert proc.returncode == RC_OK, proc.stdout
+    assert "no authoritative" in proc.stdout, proc.stdout
+    assert "GREEN" not in proc.stdout, "another pipeline's verdict was read as main's"
+    assert not h.triggered()
+
+
+def test_an_OPEN_episode_SURVIVES_a_foreign_only_commit(h):
+    """The consequence that makes the case above matter rather than merely be
+    wrong: if a foreign-only commit read as green it would close the episode,
+    and the next red in the same window would re-trigger the deadman."""
+    _red_commit(h, "c9" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    foreign = "d9" + "0" * 38
+    h.serve_commits([foreign])
+    h.serve_statuses(foreign, [_status("tekton/devrc-cairn-client-runs", "success", "ok")])
+    assert h.run().returncode == RC_OK
+    assert (h.cache / "red-episode").exists(), "a foreign verdict closed the episode"
+
+
+def test_the_NETs_own_ladder_FAILS_THE_UNIT_when_it_cannot_PERSIST(h, monkeypatch):
+    """🔴 F2's SHAPE INSIDE THE NET — THE ONE COPY NOTHING DROVE.
+
+    `ladder_exit` handles an unwritable streak by failing the unit NOW, and
+    `test_an_ENOSPC_SHAPED_state_dir_ESCALATES_rather_than_reporting_success`
+    pins it. The outermost net re-implements the same rule, and its copy had no
+    test: mutating its `RC_BLIND` to `RC_OK`, or forcing `not persisted` to
+    False, all survived. Under ENOSPC — the cause `open_episode`'s docstring
+    names — the net would then report SUCCESS while permanently blind, which is
+    the exact pair of bugs (F1's silence, F2's uncountable alarm) this file was
+    built to remove.
+
+    The directory is made 0o500 AFTER it exists and BEFORE any streak file is
+    written, so `mkdir(exist_ok=True)` succeeds and the write is what fails —
+    the shape ENOSPC actually produces.
+    """
+    mod = _load()
+    cache = h.tmp / "net-cache"
+    cache.mkdir()
+    monkeypatch.setenv("MAIN_STATUS_WATCH_CACHE", str(cache))
+
+    def boom(argv):
+        raise ValueError("a shape nobody predicted")
+
+    monkeypatch.setattr(mod, "main", boom)
+    os.chmod(cache, 0o500)
+    try:
+        rc = mod._guarded_main(["main-status-watch.py"])
+    finally:
+        os.chmod(cache, 0o700)
+    assert rc == RC_BLIND, (
+        f"got {rc} — a net whose ladder cannot be written must fail the unit now, "
+        "not report success forever"
+    )
+    assert not (cache / "blind-streak").exists(), "fixture is wrong: the write succeeded"
+
+
+def test_the_episode_bound_matches_the_deadmans_OWN_cadence():
+    """🔴 A CROSS-FILE RELATIONSHIP ASSERTED IN PROSE AND PINNED BY NOTHING.
+
+    `EPISODE_MAX_AGE_S`'s comment argues the number is not a taste: 4h is chosen
+    to equal `main-green-check`'s own `OnUnitActiveSec`, because past that point
+    the deadman re-runs against the tip ANYWAY, so re-triggering adds no work
+    that was not already going to happen. Change the deadman's cadence and that
+    argument is silently false — the same failure
+    `test_the_total_budget_PLUS_the_trigger_timeout_is_under_the_units_timeout`
+    exists to stop for TimeoutStartSec, one file over. Mutating the `4` survived
+    both sweeps, because the behavioural test reads the constant out of the
+    implementation it is testing.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    m = re.search(r"^EPISODE_MAX_AGE_S = (\d+) \* 60 \* 60", src, re.M)
+    assert m, "EPISODE_MAX_AGE_S is no longer written in hours; re-read this guard"
+    episode_hours = int(m.group(1))
+    home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
+    start = home_nix.index("systemd.user.timers.main-green-check")
+    end = home_nix.index("systemd.user.services.main-status-watch")
+    block = home_nix[start:end]
+    cadence = re.search(r'OnUnitActiveSec = "(\d+)h"', block)
+    assert cadence, "the deadman timer's cadence is no longer stated in whole hours"
+    assert episode_hours == int(cadence.group(1)), (
+        f"the episode bound is {episode_hours}h but main-green-check re-runs every "
+        f"{cadence.group(1)}h — the bound's whole argument is that they are equal"
+    )
+
+
+def test_a_commit_entry_with_NO_sha_is_skipped_not_walked(h):
+    """A malformed entry must be stepped over, not turned into a request for
+    `/commits//statuses`. Forcing `if not sha: continue` off survived: the walk
+    then asks for an empty sha, gets nothing, and the whole run is UNMEASURED —
+    one bad element in the list costing the verdict that was two entries down.
+    """
+    good = "e9" + "0" * 38
+    h.serve("/repos/o/r/commits?sha=main&per_page=20", [{"sha": ""}, {"sha": good}])
+    h.serve_statuses(good, [_status(CTX_PY, "failure", REAL_SEVEN_FAILED_ONE_NAMED),
+                            _status(CTX_NODE, "success", REAL_SUCCESS)])
+    proc = h.run()
+    assert proc.returncode == RC_TRIGGERED, proc.stdout
+    assert "(walked 1)" in proc.stdout, "the sha-less entry was counted as walked"
+
+
+def test_an_EMPTY_stderr_still_produces_a_readable_diagnostic(h):
+    """The `(no stderr)` fallback: forcing the conditional the other way makes
+    `err[0]` raise IndexError on an empty list, turning a clean COULD NOT
+    MEASURE into an UNEXPECTED IndexError — a bug report about the watcher
+    instead of a report about `gh`."""
+    write_exec(h.gh, "exit 7\n")
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "exited 7" in proc.stdout
+    assert "(no stderr)" in proc.stdout, proc.stdout
+    assert "UNEXPECTED" not in proc.stdout, "the fallback raised instead of reporting"
+
+
+def test_a_failing_triggers_stderr_reaches_the_operator(h):
+    """`systemctl`'s own words are the only clue why the start failed — a unit
+    that is not loaded says so. Dropping them survived the sweep."""
+    write_exec(h.trigger, 'echo "Failed to start: Unit not found." >&2\nexit 5\n')
+    _red_commit(h, "f9" + "0" * 38)
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "Unit not found" in proc.stdout, proc.stdout
+
+
+def test_the_flake_screen_refuses_a_row_that_NAMES_NOTHING_with_a_zero_count():
+    """The `not names` guard, made reachable. Every other fixture reaches it with
+    a count that DISAGREES anyway, so the next guard decides and this one never
+    runs — the "isolate the mutation" trap in its natural habitat. Here the
+    count agrees with the empty name set, which is the one shape where removing
+    this guard flips the answer to SUPPRESS.
+    """
+    mod = _load()
+    assert mod.parse_failing_names("FAILED: pytests — failed=0 FAILING: |") == []
+    assert mod.screen_all_known_flakes(
+        ["FAILED: pytests — failed=0 FAILING: |"]) is False

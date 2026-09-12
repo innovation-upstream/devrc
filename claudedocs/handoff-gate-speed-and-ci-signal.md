@@ -21,32 +21,26 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- **Branch / PR:** nothing in flight in `devrc`. Six PRs merged this arc — `#1429` a0839ec4,
-  `#1445` cace96d9, `#1469` 86b1ddec, `#1471` 4ab87a64, `#1482` 972fbcbd, `#1488` d835fe51 (this doc).
-- **DEPLOYED AND VERIFIED LIVE**, which the first version of this doc could only pose as a question.
-  `scripts/ship.sh` rc 0, both hosts at `86b1ddec`:
-  - workbench — `✅ VERIFIED — on branch main at origin/main (clean tree) + switched`; 584 managed
-    artifacts checked, 0 dangling; 409 repo-sourced examined, 0 stale.
-  - laptop (over nebula `10.42.0.100`; LAN `192.168.50.155` did not answer, which is normal) —
-    `fast-forwarded main 0150d71f -> 86b1ddec`, same VERIFIED line; 530 checked, 0 dangling.
-  - ⚠ Both legs read individually AND the shas compared — `ship.sh` returns rc 19 when the two hosts
-    land on different shas, and every per-host line can be green while that happens.
-- 🔴 **The CONSUMER is live, not just the deploy.** A deploy reporting success is a claim about the
-  deploy; this is the unit:
-  ```
-  main-status-watch.timer   ActiveState=active   next 2026-09-11 00:05 CDT
-  main-status-watch: newest main verdict: GREEN at ce9b55c3 (walked 20) — nothing to do.
-  ```
-  It walked 20 commits, found green, did nothing, exited 0. `SuccessExitStatus=10 11`, so the rc 12
-  the round-2 fix introduced will correctly FAIL the unit.
-- **`#1469` shipped WITH its round-2 fix, narrowly.** The agent that wrote those fixes finished them,
-  reported 61 tests passing, deliberately left them UNCOMMITTED so a claims block would record a real
-  range — and then died on a session limit. Two modified files sat unstaged in a dead agent worktree,
-  one `git checkout` from silent deletion. Rescued and pushed as `3e8d4315`, which became the PR head,
-  so the 🔴 fix is on `main` (verified by content: `ladder_exit` ×7, `EPISODE_MAX_AGE_S` ×6).
-- **`clawgate-task:` deliberately NOT recorded.** `clawgate_handoff.sh resolve` exited **5** —
-  nothing resolved. An unknown session id answers `200` with an empty array, so that result cannot
-  distinguish "this session touched no task" from "the id is wrong". It is not a clean bill of health.
+- **RANKS 1, 2 AND 3 ARE ALL CLOSED, MERGED AND VERIFIED.** All three claims released.
+- **The arc's commit ledger, carried forward** (`State now` is REPLACED every update, so this
+  list must be re-carried or it is lost): `#1429` a0839ec4, `#1445` cace96d9, `#1469` 86b1ddec,
+  `#1471` 4ab87a64, `#1482` 972fbcbd, `#1488` d835fe51, `#1489` b315cdd3, `#1502` ffef57bc,
+  `#1512` 189689c1.
+- **RANK 1 — `ZacxDev/homelab-infra#792` MERGED IN DRY-RUN** (`dbe47814`), NOT armed. Four claims
+  each measured separately: on `trunk` by content; Flux-reconciled at 06:21:06Z; consumer running
+  `mode=dry-run`; and **wrote nothing** (0 of 329 PipelineRuns annotated). Arming is now rank 8.
+- **RANK 2 — `#1502` MERGED (`ffef57bc`), shipped, consumer verified.** `ship.sh` rc 0, both hosts
+  at `ffef57bc` **and the two shas actually COMPARED**. The unit runs **directly from the working
+  tree** (`ExecStart=…%h/workspace/devrc/scripts/main-status-watch.py`), so a host's checkout
+  advancing IS the deploy — verified in the executed file: bare `return RC_UNMEASURED` **3 → 2**.
+- **RANK 3 — CLOSED BY MEASUREMENT, NOT BY A FIX. `#1512` `189689c1`.** Its premise was wrong
+  twice over; see the Gotchas entry. ⚠ Merged with CI still pending (comment-only, one file, full
+  file re-run at 760 passed on the exact branch content, 0 behind main) — stated because that is a
+  decision, not a nil event.
+- 🔴 **THE QUEUE NOW HAS NO ELIGIBLE ITEM.** Ranks 4–7 all declare `forcing: none`, which this doc's
+  own rule says is "**not eligible to be worked**"; rank 8 is the operator's and is parked on soak
+  evidence. ⚠ **Rank 4 arguably now HAS a forcing function** — see its entry — but promoting it is a
+  judgement a future session should make deliberately rather than inherit.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -111,37 +105,51 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting on one. New items
-go at the END; inserting mid-list silently re-points every live claim.
+go at the END; inserting mid-list silently re-points every live claim. **Ranks 1–3 are CLOSED and
+deliberately left as tombstones** — renumbering would re-point every live claim on this doc.
 
-1. **Review `ZacxDev/homelab-infra#792`** and decide whether to arm it (`CLOSED_PR_MODE: on`).
-   Ships `dry-run`, with the literal pinned by a test so arming costs a visible line. Its dry run over
-   254 live objects cancelled nothing, `states_read=1` beside `closed=0` proving GitHub was asked.
-   GitOps — merging deploys.
-   forcing: user — the operator asked for it as a PR to review, not to merge.
-2. **Close `#1469`'s audit ladder.** Round 3 never ran, and its **95-mutant enumerated sweep died
-   mid-run with its verdict unknown** after already surfacing one genuine survivor
-   (`print_header`'s sentinel branch) that its hand-written sweeps would never have included.
-   🔴 This is now running unattended on both hosts every 10 min, so the ladder is open on LIVE code.
-   Files: `scripts/main-status-watch.py`, `scripts/tests/test_main_status_watch.py`.
-   forcing: gate — an audit fix resets the verification gate; the ladder is not closed.
-3. **The one genuine flake:** `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_
-   CONTROL…` in `scripts/tests/test_subsystem_store_api.py` — 5 of 26 failure heads. Its own
-   docstring (`:7360`) states **#1432 is NOT a fix** and that whether the port race moves its rate is
-   UNKNOWN. Needs a diagnosis, not another ported retry. Load-sensitive.
-   forcing: gate — it reddens the only automated signal at random.
-4. **Stale PR bases re-report already-fixed reds** — 8 of 8 failing open PRs were 5–42 commits behind;
-   a rebase cured 4 outright (proven: the fix commit is on `main` and not an ancestor of their heads).
-   A bot comment naming the fix would stop humans triaging cured reds. `strict: true` is deliberately
-   off and correctly so.
+1. **CLOSED — `homelab-infra#792` merged in dry-run.** Arming is rank 8, not this.
    forcing: none
-5. **The 19-min CI median.** `pytests` is 90–95% of it. The local loop is solved; CI still pays full
-   freight per push. ⚠ `devrc-ci-5m64b` ran `pytests` in **52s** on a nix cache hit, so an unchanged
-   derivation is already near-free — the cost is entirely rebuild-on-change.
+2. **CLOSED — `#1469`'s audit ladder, merged as `#1502`, shipped and verified live.**
    forcing: none
-6. **The flake screen in `main-status-watch.py` is probably inert** — at current status-description
-   lengths (140-char cap) it will likely never fire; its author proposed deleting it if still dead in
-   a month. Decide on/after **2026-10-11**. The deadman's double-run is the real defence.
+3. **CLOSED — the store-api flake was already fixed by `#1458`'s tmpfs siting; `#1512` records the
+   measurement.** 0 of 45 post-fix PR-head verdicts vs 4 of 125 pre-fix. 🔴 Do NOT re-open on a
+   single recurrence: P(0) ≈ 0.23 at the old rate, so the zero was never the proof — the mechanism's
+   removal is. Re-open only if the *classifier* prints `SERVER_BLOCKED_IN_FSYNC` again.
    forcing: none
+4. **Stale PR bases re-report already-fixed reds.** 🔴 **NEW EVIDENCE 2026-09-11, and it is stronger
+   than when this was filed:** of the 6 genuine `tekton/devrc-pytests` failures in the whole post-fix
+   window, **3 — half — were `test_the_SUMMARY_BANNER_names_the_real_selection_source` on PRs 17, 40
+   and 40 commits behind main**, all since merged, and that test passes on current main. So stale
+   bases are not a tidiness issue: they are **50% of the current genuine-failure signal**, i.e. the
+   thing most degrading the only automated gate. A bot comment naming the fix commit would stop
+   humans triaging cured reds. `strict: true` is deliberately off and correctly so.
+   ⚠ Promoting this to `forcing: gate` is defensible on the above and is left as an explicit
+   judgement for the next session rather than done here.
+   forcing: none
+5. **The 19-min CI median.** `pytests` is 90–95% of it. ⚠ `devrc-ci-5m64b` ran `pytests` in **52s**
+   on a nix cache hit, so an unchanged derivation is already near-free — the cost is entirely
+   rebuild-on-change.
+   forcing: none
+6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**.
+   ⚠ `#1502` did NOT delete it; round 6 left it in place. The deadman's double-run is the real defence.
+   forcing: none
+7. **Pin the `repo-full-name` invariant in `homelab-infra`'s supersede tests.** `test_supersede_
+   wiring.py` contains **zero** occurrences of the string that pass 2's correctness rests on. 15/15
+   supersede-capable resourcetemplates wire it correctly today and `SUPERSEDE_TEMPLATES` is a two-way
+   ledger, so the gap is a *ledger-registered* template hardcoding the repo. 🔴 That fails as a FALSE
+   `"closed"`, not a clean 404 — devrc 1400+ and homelab-infra 790+ mostly-closed PRs. Fix: extend
+   `test_vetr_crossrepo_e2e_wiring.py:184-189` over all of `SUPERSEDE_TEMPLATES`. Repo:
+   `ZacxDev/homelab-infra` (clone `~/workspace/homelab-talos`).
+   forcing: none
+8. **Decide whether to ARM `#792` (`CLOSED_PR_MODE: on`).** Criteria (i)–(iii) already met
+   non-vacuously on the first two post-deploy sweeps; (iv) needs sustained observation. Read
+   `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and `|= "closed-pr pass:"` in Loki.
+   🔴 Zero `DRY-RUN would cancel` lines after 7 days of normal merging is NOT a clean bill — it is
+   the instrument failing to see the bucket it was built for. Arming is one line in
+   `supersede-cronjob.yaml` plus the pinned literal at `test_supersede_logic.py:2251`, which forces
+   both into one commit. **Operator's call.**
+   forcing: user — the operator chose merge-in-dry-run-arm-later and owns the arming decision.
 
 ## Decisions, so they are not re-litigated
 
@@ -163,21 +171,20 @@ go at the END; inserting mid-list silently re-points every live claim.
 ## How to verify
 
 ```bash
-# the consumer, not the deploy — this is what "#1469 is live" means
+# rank 2's consumer — this unit runs from the WORKING TREE, so the checkout IS the deploy
+grep -c 'return RC_UNMEASURED' ~/workspace/devrc/scripts/main-status-watch.py   # 2 = fixed, 3 = pre-fix
 systemctl --user list-timers main-status-watch.timer --all
-journalctl --user -u main-status-watch.service -n 5 --no-pager
+journalctl --user -u main-status-watch.service -n 6 --no-pager
+#  a "no authoritative … verdict in the newest 20 commits" line is a HEALTHY arm, not a fault
 
-# both hosts on one sha (rc 19 if they disagree; read EVERY per-host line, not the verdict)
+# rank 1 — merged AND reconciled AND running are three claims; make them separately
+gh pr view 792 --repo ZacxDev/homelab-infra --json state,mergeCommit
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get cronjob tekton-supersede -o yaml | grep -A1 CLOSED_PR_MODE
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci logs -l app=tekton-supersede --tail=20 | grep 'closed-pr pass'
+#  and the write-nothing control: 0 PipelineRuns should carry ci.zacx.dev/cancelled-because
+
+# both hosts on one sha — read EVERY per-host line, and that it says hosts were COMPARED
 bash ~/workspace/devrc/scripts/ship.sh
-
-# the 18-second claim, on main
-nix develop ~/workspace/devrc --command bash -c \
-  "cd ~/workspace/devrc && bash scripts/run-tests.sh --files 'scripts/dl-router/tests/test_store.py' ."
-#  expect: SCOPE: SCOPED (1 file(s) across 1 of 28 …) + RESULT: PASS, ~18s
-
-# protection is off BY DECISION, and the declaration is unconditional
-bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep '^\[protect\]'
-#  expect: DECLARED OFF, and live OFF … why: … STANDING preference
 ```
 
 ## Gotchas / decisions / dead-ends
@@ -204,3 +211,183 @@ bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep '^\[protect\]'
   it rather than restating it. rc 24/25 remain armed for an accidental restore.
 - **The ten-reporter change is RETIRED** — its only justification was "protection would block on
   artefact statuses", which the permanent-off decision removes.
+
+### 2026-09-11 — the `#792` review, and the operator's arming decision
+
+- 🔴 **DECIDED by the operator: merge `#792` in dry-run, arm later. Not arm now.** Do not
+  re-litigate this, and do not treat the merge as arming. `CLOSED_PR_MODE: on` is a separate,
+  later, evidence-gated one-line change (rank 1 carries the four criteria).
+- **The dry-run pin is REAL, and was proven rather than read.** Script default `off`, manifest
+  ships `dry-run`, pinned at `scripts/tests/test_supersede_logic.py:2251` through a `_container()`
+  helper that also asserts `len(containers) == 1` — so arming by appending a second container
+  fails too. A 12-mutant battery killed 12/12, each by a named test, **with a negative control**
+  (a comment-only edit reported SURVIVED) proving the harness could distinguish at all.
+- **`states_read=1 / closed=0` is a genuine positive control, not a silent zero.** `states[ref]`
+  is written only after a 2xx JSON body carrying a string `state`; every failure mode (urllib
+  error, rate limit, 404, non-JSON, missing field, budget exhausted, failed mint) leaves the ref
+  ABSENT, which the selector reads as "do not cancel". So a non-zero `states_read` cannot be
+  produced without GitHub answering. Corroborated independently of the PR body from Loki: three
+  probe runs, `states_read == resolvable` in all three.
+- ⚠ **The manifest cites `resolvable=4` and the PR body `resolvable=1` — that is NOT a
+  contradiction**, it is two different probe runs, both real and both still in Loki. Do not file
+  it as a finding.
+- 🔴 **A PR body claiming "all 5 Tekton checks green" was FALSE and nearly became evidence.**
+  Measured on head `60b7b8f81`: `/check-runs` → `total_count: 0`; `/statuses` → exactly ONE
+  context, `tekton/gitops-validate success`. The other four are *push*-triggered pipelines on
+  **other repos** and structurally cannot post on a homelab-infra PR. The change IS gated
+  (gitops-validate ran all 9 legs incl. `scripts-tests` and kubeconform, covering both the script
+  and the 10 reporter edits) — but the sentence overstated how that was obtained. **Generalise:
+  a PR body's own list of green checks is a claim, and it is the one nobody re-measures.**
+- **`#792` does NOT move CI's ~42–48% not-success rate** — a *cancelled* run's `finally` reporter
+  posts `error` too. It buys compute and legibility (`superseded` instead of `BROKEN GATE`, which
+  today is indistinguishable from a real break). Do not sell it as a red-rate fix.
+- **Blast radius when armed, traced rather than assumed:** namespaced `Role` on
+  `tekton.dev/pipelineruns` in `tekton-ci` only — `get, list, patch`, **no `delete`**. A cancel
+  requires ~9 conjunctive conditions including exact equality on GitHub's `state == "closed"`
+  (never `!= "open"`), re-read immediately before the write and re-checked to still name the same
+  PR. A run on `main`/a push is unreachable (its key is `branch-…`). Cross-repo mistakes are
+  prevented by reading the repo from the `repo-full-name` **param**, not the `ci.zacx.dev/repo`
+  label — which matters live, since `vetr-app-e2e-pipeline` currently carries runs for **both**
+  `vetrllc/vetr-api` and `vetrllc/vetr-app`.
+- **Rollback ≈ 2–7 min** (Flux GitRepository 1m, Kustomization `tekton-triggers` 5m, CronJob tick
+  ≤60s), or ~1 min with `flux reconcile kustomization tekton-triggers --with-source`. A wrong
+  cancel destroys nothing — no `delete` verb, the object and its `ci.zacx.dev/cancelled-because`
+  annotation survive, a push re-triggers. **Reversible, not costly.**
+  ⚠ `kubectl -n tekton-ci patch cronjob tekton-supersede -p '{"spec":{"suspend":true}}'` is the
+  instant out-of-band stop and kills BOTH passes — but whether Flux SSA reverts it was **not
+  tested**. Do not count on it persisting.
+- **Accepted trade, stated so it is not rediscovered as a bug:** `devrc` and `homelab-infra` each
+  keep an *unkeyed* push leg (`devrc-ci-push-main`, `gitops-validate-push-trunk`) that pass 2 can
+  never reach, so post-merge coverage survives. **`vetr-app` has no push leg** — a cancelled
+  vetr-app PR run therefore leaves no post-merge verdict.
+- **The reopen argument holds, measured:** all 7 `pull_request` triggers in the EventListener
+  carry a `body.action` allowlist and all 7 include `reopened`.
+- ⚠ **Dry-run short-circuits `cancel_all` before the re-read**, so the soak exercises neither the
+  re-read guard nor the `expect` coordinate re-check. Both fail safe and both are mutation-covered
+  — but **do not read the soak as evidence about them.**
+- ⚠ **No cross-sweep caching:** GitHub is re-asked every 60s per in-flight PR-keyed run. At today's
+  volume (4 such runs, 3 owners) that is ~600 req/hr against a 5,000/hr installation limit. ~80
+  concurrent PR runs would exhaust it; the failure is fail-closed plus log noise, never a wrong
+  cancel.
+- **A stale PR base expires a "merged tree" claim silently.** `#792`'s body argued "0 commits
+  behind trunk, so the tree these gates ran on *is* the tree the merge creates" — correct when
+  written, and by review time the branch was **6 behind**. Zero file overlap and
+  `mergeStateStatus: CLEAN`, so the risk was low, but the gated tree was no longer the merged
+  tree. **A merged-tree claim carries an expiry that nothing prints.**
+
+### 2026-09-11 — verifying rank 2, and four instrument failures in one session
+
+- 🔴 **`git rev-parse $ref:path` in zsh returns a CONFIDENT WRONG 40-char sha.** `$r` followed by
+  `:s` is eaten as a **history substitute modifier**, so the command never asks what you think.
+  It printed a plausible blob id that made a file look CHANGED across three refs when
+  `git ls-tree` showed one identical blob (`c342720d`). **Brace it (`${r}:path`) or use
+  `git ls-tree`.** This is the documented unbraced-var trap, hit while actively reading the rule.
+- 🔴 **A mutation that edits a COMMENT reports SURVIVED having never run.** `classify`'s
+  fall-through was mutated with `.replace('return "error-other"', …, 1)` — and the FIRST
+  occurrence in the file is inside a comment *quoting that literal as prose*. The sweep was green
+  and meaningless. **Mutate by LINE NUMBER with an assert on the line's exact content.** Redone
+  properly, both fall-throughs are KILLED by named tests
+  (`test_an_UNRECOGNISED_state_is_never_green_end_to_end`).
+- 🔴 **zsh does not word-split, so `pytest $SEL` passed 50 paths as ONE argument** — pytest errored
+  `file or directory not found`, ran **`no tests ran in 0.00s`**, and the pipeline still **exited
+  0**. A merged-tree gate that observed nothing and reported success. Use an array, or `${=SEL}`,
+  and **assert the collected count moved** before believing a green.
+- 🔴 **I destroyed my own control by removing its worktree while it was still running**
+  (`FileNotFoundError: …/wt-control`, and it exited **0** anyway). The decision did not change
+  because the discriminating run had already finished — but that is luck, not justification.
+  **Do not tear down a tree a background job depends on.**
+- **A 1-of-4049 merged-tree failure was LOAD, and the mechanism was identified rather than
+  re-run-until-green.** `test_no_real_launchers.py::test_autouse_is_what_protects_a_test_that_
+  never_asks` died on a 300s `TimeoutExpired` on a *nested* pytest inside a run that took 3090s;
+  the same file alone on the same merged tree passes **80/80 in 254s**. ⚠ It was NOT dismissed on
+  shape: that file references `main-status-watch` four times, #1469 added its `NOLAUNCH_ACK` row,
+  and `ffe4e5d0` is precedent for this exact file breaking on a merge with main. The launcher
+  ledger's one real citation into the rewritten test file
+  (`test_the_trigger_verb_is_MUTATING_so_the_stub_fails_it_closed`) was checked and RESOLVES.
+- 🔴 **A PR green on its own branch is not a merged-tree claim, and #1502 was 12 commits behind.**
+  Zero file overlap and a clean textual merge — which is NOT safety — so the at-risk surfaces
+  (every test reading `CLAUDE.md`, the disk-accounting ledger, `scoped-tests`) were run on the
+  actual merged tree before merging.
+- **`#1502`'s own ladder repeated the arc's headline lesson twice more.** Round 4 caught round 3
+  **claiming a fix it had not made** — the PR body had been written from the finding list rather
+  than the diff. Round 5 then found three of round 3's own measured numbers stated **wider than
+  measured** ("21 mutants" → 16; "every mutant of classify's arms" → 35 of 60; "ZERO coverage" →
+  10 of 11). A fix round's own prose remains the likeliest next finding.
+- **A 100% kill rate is a broken harness, and was reported as such.** One verification sweep
+  returned 439/439 KILLED **with a RED negative control**; the whole 457-run sweep was voided
+  rather than reported. A span self-check also caught 1 mutant of 440 whose edit landed inside an
+  f-string and never made the change it claimed — reported VOID, not SURVIVED.
+- 🔴 **CLAUDE.md said `main-status-watch` was "NOT LIVE UNTIL A SWITCH" for a full day after
+  `ship.sh` had converged both hosts to `86b1ddec`.** The sentence was written before the deploy
+  and nothing re-read it. Corrected in `#1502` to a MEASURED liveness claim that names its own
+  re-measurement command. **A ⏳ "not live yet" note is a claim with an expiry that nothing prints.**
+- ⚠ **#792's dry-run soak cannot validate the guard its own best evidence needs.** devrc **#1500**
+  merged **14 seconds after** the sweep pod started — i.e. mid-tick, exactly the race the re-read
+  guard exists for. Dry-run short-circuits `cancel_all` BEFORE the re-read, so the soak shows the
+  SELECTOR is right while structurally never exercising the WRITE-path guard. Weigh that when
+  deciding rank 8.
+
+### 2026-09-11 — rank 3: a ranked item whose premise was wrong in both directions
+
+- 🔴 **"Needs a diagnosis" was FALSE — the diagnosis was already in the file, and excellent.** The
+  suite's own classifier had printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`
+  on run `devrc-ci-86zxj`: `server.py:_replace_bytes` fsyncs the file and then the parent dir
+  **inside the request, before the response is written**, and fsync blocks in uninterruptible sleep
+  — which is exactly the captured `TimeoutError` inside `socket.recv_into` (connection ESTABLISHED,
+  never answered). **Read the target file before believing a handoff's characterisation of it.**
+- 🔴 **AND IT WAS ALREADY FIXED, by a PR nobody connected to it.** `#1458` (`ce9b55c3`) sited the 18
+  remaining store roots — this class's among them — on **tmpfs** via `sited_root`. That removes the
+  mechanism rather than widening a bound: an fsync to RAM cannot stall on a contended disk. Nothing
+  recorded that the fix had LANDED, so the item stayed on the queue reading as live.
+  **A fix that is not written down where the symptom is described has not finished landing.**
+- **Measured, `tekton/devrc-pytests`, newest verdict per PR head, split on `ce9b55c3`:** pre-fix 125
+  verdicts / 29 genuine failures / **4** this test; post-fix 45 / 6 / **0**. `failure` and `error`
+  counted separately throughout — `error` is a broken gate, not a bad change.
+- 🔴 **THE ZERO WAS NEVER THE PROOF, and the comment now says so in the file.** At the pre-fix
+  per-verdict rate (3.2%) the expected count in 45 verdicts is ~1.4, so **P(observing 0) ≈ 0.23** —
+  a one-in-four coincidence. The mechanism's removal is what carries the claim. **A before/after
+  table is the easiest thing in this repo to over-read; state the power beside it or it will be
+  upgraded to "proven" by the next reader.**
+- 🔴 **IT WAS NEVER THE WORST FLAKE — it was the best-DOCUMENTED one.** Same pre-fix window:
+  `test_every_decrypt_family_VERDICT_is_pinned_WHOLE` failed **8** times to this test's **4**, and
+  is also at 0 post-fix. It had no long diagnosis attached and was never ranked. **Vividness is not
+  frequency: COUNT the failures before choosing which flake to chase.** This is the same error as
+  ranking by a memorable incident rather than by a census.
+- **`main` is a useless population for this question and that is structural.** Of 43 post-fix
+  pytests verdicts on `main`, **40 were artefacts** (~31 `superseded`, 4 `KILLED: the gate pod
+  died`, 4 `NO GATE POD`, 1 pending) leaving **3** authoritative successes. Use PR heads.
+- ⚠ **UNMEASURED, recorded rather than guessed:** the 760-test verification run emitted **3
+  warnings**, and this suite warns on `the spawn lost the port race and retried`. Only the tail was
+  captured, so whether those were port-race retries is **unknown**. If they were, the race is live
+  on this host — but nothing here claims that.
+## Open investigations — live diagnosis state
+
+### RANK 2: #1469's audit ladder has not reached a clean round
+- **Symptom + exact repro:** `scripts/main-status-watch.py` (839 lines) ships and runs every 10
+  minutes on both hosts, but its audit ladder never terminated. Round 3 never ran, and a
+  95-mutant enumerated sweep died mid-run with its verdict unknown.
+- **Observed (with values):** the dead sweep had already surfaced one genuine survivor —
+  `print_header`'s sentinel branch — which the two earlier hand-written sweeps (self-reported
+  24/24 and 31/31) would never have included. Whether that survivor is fixed is **unknown as of
+  this writing**; confirming it is the first step of the in-flight agent's task.
+- **Ruled out:** "the hand-written sweeps were adequate, just unlucky" — falsified twice:
+  independent samples found survivors after both self-reported perfect scores, and one audit
+  found two survivors the author's own table did not contain. via: measurement
+- **Ruled out:** "capacity/load explains the sweep dying" — not investigated, and not assumed
+  either; the verdict was simply never read. via: assumed
+- **Leading hypothesis:** the enumerated sweep will find further survivors in the RC-code and
+  state-mutation families, because those are exactly what a hand-picked list omits.
+- **Next probe:** read the in-flight agent's survivor table when it reports. If it did not
+  finish, re-run the enumerated sweep under `PYTHONDONTWRITEBYTECODE=1` with a known-killed
+  positive-control mutant in every batch, and report the table rather than a score.
+
+### RESOLVED — #1469's audit ladder (was rank 2)
+- **Closed at round 6.** Rounds 3/4/5 each produced findings; round 6 found none, so it ended
+  there — the first clean round ends the ladder, and no confirmation round was run.
+- **The defect:** `_guarded_main`'s `except Unmeasured` returned rc 11 **without bumping the blind
+  streak**. `SuccessExitStatus=10 11` makes rc 11 a systemd success, so the OUTERMOST net could
+  never escalate and never fail the unit — permanently silent, in the net whose own docstring
+  claimed the ladder counted it. Third appearance of that shape in this file.
+- **Sweep, enumerated from the AST:** 440 mutants → **155 survivors** on the merged code, against
+  two earlier hand-written sweeps that self-reported 24/24 and 31/31. After fixes 73, then 58 —
+  each remaining one justified (23 are `say()` log-narration deletions, deliberately unpinned).

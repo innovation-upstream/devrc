@@ -1808,6 +1808,29 @@ def test_the_age_precondition_runs_BEFORE_the_store_is_opened(escrow_world,
     assert d.gets == [], "the store was opened before the precondition was checked"
 
 
+# 🔴 THIS TEST IS NOT A CI FLAKE — DO NOT RE-RANK IT AS ONE. Measured
+# 2026-09-11: it failed `tekton/devrc-pytests` 8 times, which for a while made it
+# look like this repo's most frequent intermittent. It is not intermittent. All 8
+# failures land inside ONE 14-hour window on 2026-09-08 (05:44Z..19:44Z) across 8
+# distinct PR heads, and every one of those runs reports `failed=7` or `failed=8`
+# — a whole-suite red hitting every open PR at once, not a per-run flake.
+#
+# The cause was a toolchain bump: nixpkgs moved `age` to 1.3.2, which changed its
+# tamper classification, and this test pins those verdict sentences by EXACT
+# string equality (that is the whole point of it). Re-keyed by #1392
+# (`94f82796`) and #1403 (`4f49f5dc`), both on 2026-09-08; #1409 (`50b384c0`)
+# followed. ⚠ It was briefly credited to #1458's tmpfs store siting (`ce9b55c3`,
+# 2026-09-10) purely because a CI count was split on that commit's timestamp.
+# That is impossible by mechanism: nothing in this file stands up the store
+# server — no `store_siting`, no `build_server`, an in-memory `FakeDownloader`
+# — so the in-request fsync that `ce9b55c3` removes is never on this path, and
+# `ce9b55c3`'s diff names this file zero times. Full retraction and the
+# flake-vs-environment discriminator: the comment block above
+# `HANG_TIMEOUT` in `scripts/tests/test_subsystem_store_api.py`.
+#
+# 🔴 What that means for a FUTURE red here: a red on this test is a claim about
+# the `age` binary, not about CI load. Check `age --version` against the
+# verdicts pinned below before treating it as anything else.
 def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
     """🔴 FOUR OWNED SENTENCES, BY EXACT EQUALITY, IN ONE PLACE.
 

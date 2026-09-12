@@ -2924,6 +2924,86 @@ in
     };
   };
 
+  # ── vetr.com DMARC WATCH ─────────────────────────────────────────────────────
+  # Daily check for forged mail wearing the vetr.com domain, notifying on STATE
+  # CHANGE only. Context: a 2026-09-08 audit found an ACTIVE spoofing campaign —
+  # 95% of mail claiming to be vetr.com was forged — and `_dmarc.vetr.com` was
+  # moved to `p=quarantine` in response. This unit is what makes the campaign
+  # visible without a human running API calls. Full audit + the abuse report:
+  # ~/workspace/scratch/vetr/claudedocs/mail-dns-audit-2026-09-08.md
+  #
+  # These were hand-written under ~/.config/systemd/user and would not have
+  # survived a machine rebuild — which is the whole reason they are here.
+  #
+  # 🔴 THE INTERPRETER IS `pkgs.python3`, AND THAT IS A CORRECTION, NOT A
+  # TRANSCRIPTION. The hand-written unit hardcoded `~/.nix-profile/bin/python3`
+  # with a comment forbidding a `/nix/store/...` path as garbage-collectable.
+  # That reasoning held for a unit nothing referenced; it does NOT hold here.
+  # A `${pkgs.python3}` interpolation makes the store path a DEPENDENCY of the
+  # home generation, so it is a live gcroot and cannot be collected — while the
+  # profile symlink it replaces is repointed by any unrelated `nix profile`
+  # operation. Do not "restore" the profile path. (`dmarc-watch.py` and
+  # `dmarc-alert.py` import stdlib only — argparse/json/urllib/smtplib — so a
+  # bare python3 is sufficient; adding a dependency to either script means
+  # adding it here too.)
+  systemd.user.services.dmarc-watch = {
+    Unit = {
+      Description = "vetr.com DMARC watch — notify on FIRING/RESOLVED/BROKEN state change";
+      Documentation = [ "file://${workspace}/scratch/vetr/claudedocs/mail-dns-audit-2026-09-08.md" ];
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      # Catches the unit being UNABLE TO RUN (missing checkout, broken
+      # interpreter). It does NOT cover the monitor being broken while running:
+      # dmarc-alert.py deliberately exits 0 in every path and reports that state
+      # in-band as a "[BROKEN] vetr.com DMARC monitor is not working" email,
+      # precisely so a dead monitor cannot read as a clean result. Do not infer
+      # from a green unit that spoofing is being observed.
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      Environment = [
+        # A user unit inherits no login-shell PATH. libnotify supplies
+        # notify-send; the toast is best-effort (i3 is not systemd-integrated,
+        # so DBUS may not be reachable here) and EMAIL is the durable channel.
+        "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.libnotify pkgs.coreutils ]}"
+        "DISPLAY=:0"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 ${workspace}/scratch/vetr/scripts/dmarc-alert.py";
+      TimeoutStartSec = 300;
+    };
+  };
+
+  # 🔴 GATED ON THE CHECKOUT EXISTING, and the failure mode is a SILENT DISABLE.
+  # The scripts and their credentials (~/.config/vetr/cloudflare-dns.env) live in
+  # a vetr working copy, not in this repo, so on a host without one the timer
+  # would fire daily into a missing file and toast a failure every morning — the
+  # permanently-red gate everyone learns to ignore. Gating trades that for the
+  # opposite hazard: MOVE OR DELETE THAT CHECKOUT AND THE MONITOR VANISHES WITH
+  # NO NOTICE. Nothing detects it. After relocating the vetr workspace, confirm
+  # with `systemctl --user list-timers dmarc-watch.timer`.
+  # The SERVICE above is emitted unconditionally so `systemctl --user start
+  # dmarc-watch` still works by hand (same idiom as handoff-index-sync).
+  systemd.user.timers.dmarc-watch = lib.mkIf
+    (builtins.pathExists "${workspace}/scratch/vetr/scripts/dmarc-alert.py")
+    {
+      Unit = {
+        Description = "Daily vetr.com DMARC spoofing check";
+      };
+      Timer = {
+        # Mid-morning local, so an alert is seen the same day. The spoofing
+        # bursts are day-scale, so anything more frequent is noise.
+        OnCalendar = "*-*-* 09:30:00";
+        RandomizedDelaySec = "15m";
+        # A missed run is an unobserved day; catch up after the host was off.
+        Persistent = true;
+      };
+      Install = {
+        WantedBy = [ "timers.target" ];
+      };
+    };
+
   # ── HANDOFF-DOC SECTION INDEX (scripts/lib/handoff_index.py) ─────────────────
   # Derives a SECTION-grained full-text index of the handoff corpus into
   # `initiatives.handoff_section` (re-measured 2026-09-01: devrc 94 docs / 968
@@ -4222,7 +4302,7 @@ in
   # host" and 3 only for a genuine failure.
   systemd.user.services.mention-known-repos-refresh = {
     Unit = {
-      Description = "Refresh the mention-open repo mapping and picker universe";
+      Description = "Refresh the mention-open repo mapping, universe and range table";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
       OnFailure = [ "notify-failure@%n.service" ];
@@ -4241,6 +4321,15 @@ in
       # A cold paginated run over ~400 repos is a few seconds; the `gh api` call
       # carries its own 120s timeout and `gh auth status` 30s. 300 is a ceiling
       # for a wedged network, not a budget.
+      #
+      # ⚠ THE RUN GREW A THIRD LEG AND THIS NUMBER DID NOT HAVE TO MOVE, which
+      # is worth stating rather than leaving the reader to re-derive. The range
+      # table is BATCHED GraphQL: MEASURED 2026-09-11 against public repos,
+      # 25/50/75/100 aliases in ONE request all answered in full at
+      # 2.15/2.14/2.27/2.28s, so ~400 repos is ~8 requests and ~20s, each
+      # carrying its own 60s cap (`RANGES_TIMEOUT`). The unbatched spelling —
+      # one REST call per repo — is what would have needed this raised, and is
+      # exactly why it is not written that way.
       TimeoutStartSec = 300;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.git pkgs.gh pkgs.coreutils ]}"

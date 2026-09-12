@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,62 @@ GENERATOR = ROOT / "scripts" / "regen-known-repos.py"
 _spec = importlib.util.spec_from_file_location("regen_known_repos_under_test", GENERATOR)
 RG = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(RG)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THIS FILE NOW LOADS `mention-open.py` TOO, AND THAT IS A NEW SEAM WITH THE
+# OPERATOR'S HOST STATE.
+#
+# Two tests here need the real writer — the pick-log fingerprint binding and the
+# `narrow_dir` equality pin — and `mention-open.py` resolves FOUR host-state
+# paths at import: `known_repos.json`, `known_universe.json`,
+# `known_ranges.json` and `picks.jsonl`, all 0600 files naming PRIVATE
+# repositories, one of which this handler WRITES.
+#
+# `test_mention_open.py` has an autouse fixture and a two-way ledger for exactly
+# this, and its comment records that NINE tests were once measured reading the
+# operator's real mapping. None of that protection extends across files. Both
+# call sites pass explicit `tmp_path` arguments today, so nothing touches host
+# state — but "today's call sites happen to be careful" is precisely the shape
+# that fixture exists because it failed. So the loader below redirects at
+# IMPORT, before any module here can resolve a default.
+#
+# ⚠ `MENTION_OPEN_*` IS READ AT THE HANDLER'S IMPORT TIME, which is why this is
+# an env redirect rather than a `monkeypatch.setattr`: the constants are bound
+# when `exec_module` runs, and a fixture cannot reach back before that.
+# ⚠ OUTSIDE THE CHECKOUT, NOT BESIDE THIS FILE. It pointed at
+# `scripts/tests/_never-the-operators` — harmless today, since every call site
+# passes explicit paths, but a future default-path `record_pick` in this process
+# would then `mkdir` into the SOURCE TREE. A path that cannot exist is a better
+# redirect than one inside the repo: nothing can be created there by accident,
+# and the positive assertion below still proves the redirect is in force.
+_MO_REDIRECT = Path("/nonexistent-mention-open-redirect")
+
+
+def load_mention_open(name: str):
+    """Import `mention-open.py` with every host-state path pointed at a
+    directory that does not exist. See the block above."""
+    for var in ("MENTION_OPEN_KNOWN_REPOS", "MENTION_OPEN_KNOWN_UNIVERSE",
+                "MENTION_OPEN_KNOWN_RANGES", "MENTION_OPEN_PICKS"):
+        os.environ[var] = str(_MO_REDIRECT / var.lower())
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "scripts" / "mention-open.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    # 🔴 ASSERTED POSITIVELY — "is under the redirect" — NOT as an absence.
+    # A `not is_relative_to(~/.config/mention-open)` check goes VACUOUS the
+    # moment `XDG_CONFIG_HOME` is set, because the handler resolves through it:
+    # measured, with the redirect removed and `XDG_CONFIG_HOME=/tmp/x` all four
+    # constants land outside `~/.config` and the absence check passes while
+    # nothing is redirected at all. A guard that can quietly stop guarding is
+    # the shape this whole file is written against.
+    for const in ("KNOWN_REPOS_PATH", "KNOWN_UNIVERSE_PATH",
+                  "KNOWN_RANGES_PATH", "PICKS_PATH"):
+        got = getattr(module, const)
+        assert got.is_relative_to(_MO_REDIRECT), (
+            f"{const} is NOT redirected — it resolved to {got}, which may be "
+            f"the operator's own 0600 host state")
+    return module
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +253,187 @@ def looks_like_a_repo_universe(text: str) -> int:
     return best
 
 
+# 🔴 A THIRD AND FOURTH SHAPE, AND THE TWO DETECTORS ABOVE ARE BLIND TO BOTH —
+# WHICH IS THE WHOLE FINDING, NOT A FOOTNOTE. The generator now emits
+# `known_ranges.json` and `mention-open.py` now writes `picks.jsonl`, and:
+#
+#   * `known_ranges.json` is `{"owner/repo": 1291}` — the private names are the
+#     KEYS and the values are INTEGERS. `looks_like_a_repo_mapping` counts keys
+#     whose VALUE matches `_FULL_NAME_RE`, so it scores this file **0**; it is
+#     the exact MIRROR IMAGE of the shape that guard was built for.
+#   * `picks.jsonl` is one JSON OBJECT PER LINE. It is not a JSON document at
+#     all — `json.loads` of the whole file raises — so both detectors return 0,
+#     AND `.jsonl` was not even in the sweep's file filter, so no detector would
+#     ever have been handed its text.
+#
+# Both are 0600 files under `~/.config/mention-open/`, outside every checkout,
+# for the same reason as their two siblings. These detectors exist so that a
+# COPY of either, committed under any name, fails the suite — the same
+# content-keyed claim the incident guard has always made, extended to the shapes
+# that now exist. Proved able to fire by
+# `test_the_incident_guard_CAN_GO_RED_on_the_TWO_NEWER_shapes`.
+
+
+def looks_like_a_repo_range_table(text: str) -> int:
+    """How many DISTINCT `"owner/repo" -> <number>` KEYS the biggest single dict
+    literal in `text` carries.
+
+    🔴 KEYS, NOT VALUES — AND THAT ONE WORD IS THE ENTIRE REASON THIS FUNCTION
+    EXISTS. `looks_like_a_repo_mapping` asks "does a key point AT a repo name?",
+    which is the resolution mapping's shape. A range table points FROM one, so
+    that detector returns 0 on a file that names every private repository the
+    operator has. Two detectors, two directions; neither subsumes the other.
+
+    The value must be a NUMBER. That is what separates a range table from an
+    arbitrary dict keyed by path-like strings — an npm lockfile's
+    `"node_modules/x/y": {...}` maps to an OBJECT, and a `{"a/b": "c/d"}`
+    mapping is the other detector's business.
+
+    ⚠ SAME RESIDUALS AS ITS TWO SIBLINGS, and they are not restated here: split
+    literals, comprehensions, and anything outside the sweep's file filter. This
+    detects the DUMP.
+    """
+    best = 0
+
+    def count(pairs) -> int:
+        return len({k for k, v in pairs
+                    if isinstance(k, str) and _FULL_NAME_RE.match(k)
+                    and isinstance(v, (int, float)) and not isinstance(v, bool)})
+
+    for node in _json_dicts(text):
+        best = max(best, count(node.items()))
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return best
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        best = max(best, count(
+            (k.value, v.value) for k, v in zip(node.keys, node.values)
+            if isinstance(k, ast.Constant) and isinstance(v, ast.Constant)))
+    return best
+
+
+# The pick log's row shape, and its OWN threshold — deliberately not
+# `MAPPING_KEY_THRESHOLD`.
+#
+# 🔴 THAT CONSTANT'S JUSTIFICATION DOES NOT TRANSFER, which is why borrowing it
+# was a finding rather than a tidy reuse. Its block argues "THE NUMBER IS NOT
+# THE GUARD — THE SHAPE IS", measured over 562 published files, about **20
+# distinct keys inside ONE dict literal**. That is a statement about dict
+# literals; a ROW COUNT over a far weaker predicate inherits none of it.
+#
+# 🔴 AND THE NUMBER IS LOW *BECAUSE* THE SHAPE IS NOW TIGHT. A row must have
+# EXACTLY the three keys `record_pick` writes, a value that IS an `owner/repo`,
+# a reference number in `\\d{1,5}`, and an epoch-shaped timestamp. Five such
+# lines in one file is not a coincidence any ordinary artefact produces —
+# measured 0 across all 582 tracked files — so the threshold buys coverage of a
+# SHORT pick log rather than headroom against false positives. A 19-row log used
+# to pass; five rows is a much smaller hole.
+PICK_ROW_KEYS = frozenset({"n", "repo", "t"})
+PICK_LOG_ROW_THRESHOLD = 5
+
+
+def looks_like_a_pick_log(text: str) -> int:
+    """How many ROWS of a JSON-LINES document have a PICK-LOG FINGERPRINT: an
+    object carrying a bare `owner/repo` string value AND a number.
+
+    🔴 A DIFFERENT PARSE, NOT A DIFFERENT PATTERN. `picks.jsonl` is one JSON
+    object per LINE: `json.loads` of the whole text raises `ValueError`, so
+    `_json_dicts` yields nothing and every detector above returns 0 however many
+    private names the file holds. The fix is to read it the way it is written.
+
+    🔴 ROWS, NOT DISTINCT NAMES — AND THAT CORRECTION IS THE POINT. The first
+    version counted distinct `owner/repo` names against
+    `MAPPING_KEY_THRESHOLD`, a threshold calibrated for ~390-entry DUMPS. This
+    file is the one member of the family whose cardinality is the OPERATOR'S
+    PICKING DIVERSITY, not the universe size: 500 rows naming the same three
+    repositories scored 3 and sailed past a guard whose block claims "a COPY of
+    either, committed under any name, fails the suite". The fingerprint does not
+    care how many distinct repos there are.
+
+    A line that is not a JSON object is skipped rather than failing the file —
+    the real artefact is append-only and can carry one torn last line.
+
+    🔴 IT KEYS ON THE ROW'S EXACT KEY SET, AND THAT IS A RETREAT FROM A WIDER
+    FINGERPRINT THAT WAS MEASURED TOO WIDE. The first version asked only for "a
+    bare `owner/repo` value AND any number", and `_FULL_NAME_RE` matches any
+    one-level path — so a round-2 audit measured it firing on ordinary JSONL,
+    reproduced here: a lint report `{"file": "nix/home.nix", "line": i, …}`
+    scored 40, a telemetry row `{"ts": …, "cwd": "scripts/collector",
+    "dur_ms": 12}` scored 40, `{"id": i, "path": "docs/LAYOUT.md"}` scored 25, a
+    route log 30 — all against a threshold of 20. (Zero LIVE false positives in
+    the 582 tracked files, so the hazard was the next ordinary `.jsonl` somebody
+    adds, not today's tree.)
+
+    ⚠ SHAPE ALONE CANNOT SEPARATE THEM, AND SAYING SO IS HONEST RATHER THAN
+    DEFEATIST: a telemetry row carrying an epoch, a path and a small integer is
+    structurally ISOMORPHIC to a pick row. So the discriminator is the key set,
+    which is a narrower claim and is defensible only because it is BOUND TO THE
+    WRITER — `test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES`
+    loads `mention-open.py` and asserts the two agree, so renaming a field in
+    the writer reddens the suite instead of silently blinding this guard. That
+    is the trade the first version was trying to avoid by ignoring field names;
+    it is payable only with the binding test, which is why the two ship
+    together.
+
+    ⚠ WHAT THE NARROWING LOST, NAMED RATHER THAN LEFT TO BE DISCOVERED. All
+    measured at 0 where the old any-depth walk scored 40: a row nested under a
+    wrapper key (`{"pick": {"n":…,"repo":…,"t":…}}`), `n` serialised as a
+    string, and `t` serialised as an ISO timestamp. None is a shape
+    `record_pick` produces — which is exactly why the binding test below exists.
+
+    ⚠ RESIDUAL, STATED: a pick log shorter than `PICK_LOG_ROW_THRESHOLD` still
+    passes. The threshold is low precisely to shrink that gap.
+    """
+    rows = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(doc, dict) or set(doc) != PICK_ROW_KEYS:
+            continue
+        repo, num, when = doc.get("repo"), doc.get("n"), doc.get("t")
+        if not (isinstance(repo, str) and _FULL_NAME_RE.match(repo)):
+            continue
+        # 🔴 NO BOUND ON `n`, AN EPOCH FLOOR ON `t` — AND THE ASYMMETRY IS TWO
+        # SEPARATE MEASUREMENTS, NOT A STYLE.
+        #
+        # `n`: a first version required `0 < n <= 99999`, and that was a real
+        # coverage loss — a pick log for a repo past 100,000 references scored
+        # **0 instead of 10**, invisible to a DISCLOSURE guard, while
+        # `record_pick` imposes no upper bound at all. A guard narrower than the
+        # artefact it hunts is the worse error. Gone.
+        #
+        # `t`: dropping the epoch floor alongside it was an OVERCORRECTION, and
+        # a round-4 audit measured what it let in — duration-shaped telemetry
+        # scored 10 against a threshold of 5:
+        #     {"t": 0.5,   "repo": "nix/home.nix",      "n": 100}
+        #     {"t": 0.012, "repo": "scripts/collector", "n": 3}
+        # That is the one shape this detector's own docstring calls
+        # "structurally ISOMORPHIC to a pick row", and the floor is the only
+        # thing separating it. It costs ZERO coverage of the artefact:
+        # `record_pick` writes `round(time.time(), 3)` and can never emit a
+        # sub-epoch `t`.
+        #
+        # ⚠ "The bounds excluded nothing" was true of the SIX controls this file
+        # authors, and false in general. Scoping a claim to the sample it was
+        # measured on is the whole lesson here.
+        if isinstance(num, bool) or not isinstance(num, int):
+            continue
+        if isinstance(when, bool) or not isinstance(when, (int, float)):
+            continue
+        if when < 1_000_000_000:                 # epoch-shaped, not a duration
+            continue
+        rows += 1
+    return rows
+
+
 def test_the_mapping_detector_FIRES_on_a_realistic_mapping():
     """🔴 THE NEGATIVE CONTROL — without it, the sweep below is a zero that may
     be indistinguishable from a detector wired to nothing. Built from realistic
@@ -290,9 +528,17 @@ def test_the_UNIVERSE_detector_FIRES_and_the_mapping_one_is_BLIND_to_it():
 _WALK_SKIP = {".git", "node_modules", "__pycache__", ".venv", ".direnv",
               "result", ".mypy_cache", ".pytest_cache"}
 
+# 🔴 `.jsonl` IS IN THE FILTER BECAUSE A DETECTOR THAT IS NEVER HANDED THE TEXT
+# IS NOT A DETECTOR. `picks.jsonl` is the fourth artefact in this family and the
+# first with an extension this sweep did not look at, so `looks_like_a_pick_log`
+# would have scored a committed copy exactly as often as it was called: never.
+# Pinned by `test_the_sweep_actually_LOOKS_at_jsonl_files`.
+_SWEPT_SUFFIXES = (".json", ".py", ".jsonl")
+
 
 def candidate_files(root: Path | None = None) -> tuple[str, list[Path]]:
-    """(how, files) — every `.json`/`.py` this repo would publish.
+    """(how, files) — every file this repo would publish whose suffix is in
+    `_SWEPT_SUFFIXES` (`.json`, `.py`, `.jsonl`).
 
     🔴 TWO TIERS, TWO VIEWS, AND THE GUARD MUST WORK IN BOTH. `git ls-files` is
     the view the other content gates use, but the sandbox check derivation
@@ -308,19 +554,20 @@ def candidate_files(root: Path | None = None) -> tuple[str, list[Path]]:
     if tracked.returncode == 0 and tracked.stdout.strip():
         return "git ls-files", [
             root / r for r in tracked.stdout.split("\0")
-            if r.endswith((".json", ".py"))]
+            if r.endswith(_SWEPT_SUFFIXES)]
 
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _WALK_SKIP]
         for fn in filenames:
-            if fn.endswith((".json", ".py")):
+            if fn.endswith(_SWEPT_SUFFIXES):
                 found.append(Path(dirpath) / fn)
     return "filesystem walk (no .git — sandbox tier)", found
 
 
 def disclosure_offenders(files, root: Path) -> list[str]:
-    """Every file in `files` that IS a repo mapping or a picker universe.
+    """Every file in `files` that IS one of the four generated artefacts — a
+    repo mapping, a picker universe, a reference-range table or a pick log.
 
     Lifted out of the guard below so the guard's own negative control can drive
     the SAME loop over a planted tree. It used to be inline, which left the only
@@ -346,6 +593,24 @@ def disclosure_offenders(files, root: Path) -> list[str]:
         if fulls >= MAPPING_KEY_THRESHOLD:
             offenders.append(
                 f"{path.relative_to(root)} ({fulls} distinct owner/repo names)")
+            continue
+        # …and the third and fourth shapes, on the SAME sweep, as that comment
+        # promised. `known_ranges.json` names its repositories in the KEYS and
+        # `picks.jsonl` in a per-line object — both score 0 under the two
+        # detectors above.
+        ranged = looks_like_a_repo_range_table(text)
+        if ranged >= MAPPING_KEY_THRESHOLD:
+            offenders.append(
+                f"{path.relative_to(root)} ({ranged} repo keys in a range table)")
+            continue
+        # ⚠ ITS OWN THRESHOLD — see `PICK_LOG_ROW_THRESHOLD`. This one counts
+        # ROWS matching a tight fingerprint, not distinct keys in a dict
+        # literal, and `MAPPING_KEY_THRESHOLD`'s measured justification is about
+        # the latter.
+        picked = looks_like_a_pick_log(text)
+        if picked >= PICK_LOG_ROW_THRESHOLD:
+            offenders.append(
+                f"{path.relative_to(root)} ({picked} pick-log rows)")
     return offenders
 
 
@@ -380,6 +645,231 @@ def test_the_incident_guard_CAN_GO_RED_on_both_incident_spellings(tmp_path):
     named = sorted(o.split(" ")[0] for o in disclosure_offenders(files, tmp_path))
     assert named == ["leaked.json", "pasted.py"], (
         f"the guard did not flag both incident spellings, and only them: "
+        f"{disclosure_offenders(files, tmp_path)}")
+
+
+def _synthetic_repos(n: int = 27) -> list[str]:
+    """`n` realistic-looking `owner/repo` names. Synthetic on purpose — this repo
+    is PUBLIC and the real universe is private (see the module docstring)."""
+    return [f"gardenersguild/{n_}{i}" for i, n_ in
+            enumerate(["Trowelcast", "SledgeHorn", "PloughShare"] * ((n + 2) // 3))][:n]
+
+
+def test_the_RANGE_TABLE_detector_FIRES_and_the_OTHER_TWO_are_BLIND_to_it():
+    """🔴 THE NEGATIVE CONTROL FOR THE THIRD SHAPE — and it asserts the BLIND
+    SPOT explicitly, because the blind spot IS the finding.
+
+    Built from the exact JSON `RG.write_ranges` emits, not a hand-typed fixture.
+    `known_ranges.json` names its private repositories in the KEYS and maps them
+    to INTEGERS, which is the mirror image of the mapping's shape — so the
+    mapping detector, which asks whether a VALUE is a repo name, returns 0, and
+    the universe detector, which wants a list, returns 0 too. Before this
+    detector existed, committing the range table to this public repo would have
+    sailed past both guards that exist to stop exactly that.
+    """
+    table = json.dumps({r.lower(): 1291 - i * 7
+                        for i, r in enumerate(_synthetic_repos())},
+                       indent=1, sort_keys=True)
+    assert looks_like_a_repo_range_table(table) >= MAPPING_KEY_THRESHOLD
+    assert looks_like_a_repo_mapping(table) == 0, (
+        "the mapping detector must be shown BLIND to a KEYED-BY-REPO table — "
+        "if it ever fires here, this detector's justification has changed and "
+        "this test is the one that should say so")
+    assert looks_like_a_repo_universe(table) == 0, (
+        "the universe detector must be shown BLIND to a dict shape")
+    # …and it does NOT fire on an ordinary small dict, nor on a lockfile-shaped
+    # dict whose path-like keys map to OBJECTS rather than numbers.
+    assert looks_like_a_repo_range_table('{"a/b": 1, "c/d": 2}') < MAPPING_KEY_THRESHOLD
+    lockish = json.dumps({f"node_modules/pkg{i}": {"version": "1.0.0"}
+                          for i in range(60)})
+    assert looks_like_a_repo_range_table(lockish) == 0, (
+        "a lockfile whose path-like keys map to OBJECTS is not a range table")
+
+
+def test_the_PICK_LOG_detector_FIRES_and_EVERY_OTHER_DETECTOR_is_BLIND_to_it():
+    """🔴 THE NEGATIVE CONTROL FOR THE FOURTH SHAPE, and the one with TWO blind
+    spots stacked: the detectors could not read it, and the sweep would never
+    have opened it (see `_SWEPT_SUFFIXES`).
+
+    JSON-LINES is not a JSON document — `json.loads` of the whole text raises —
+    so every detector that starts by parsing the file is blind to it however
+    many private repository names it holds. Built the way `record_pick` actually
+    writes, one object per line.
+
+    ⚠ THE MAPPING DETECTOR SCORES **1**, NOT 0, AND THE MECHANISM IS WORTH
+    KNOWING. Its `ast` half parses the text as PYTHON, where each JSONL line is
+    a separate one-key dict literal expression — and it takes the biggest SINGLE
+    literal, so its score is capped at 1 for a log of ANY length. That is the
+    blindness exactly: not that it cannot see the names, but that it structurally
+    cannot count them. The claim asserted is therefore "would not flag this
+    file", which is the operative one.
+    """
+    log = "\n".join(json.dumps({"n": 1200 + i, "repo": r, "t": 1757000000 + i},
+                               sort_keys=True)
+                    for i, r in enumerate(_synthetic_repos())) + "\n"
+    assert looks_like_a_pick_log(log) >= PICK_LOG_ROW_THRESHOLD
+    for blind, why in ((looks_like_a_repo_mapping, "mapping"),
+                       (looks_like_a_repo_universe, "universe"),
+                       (looks_like_a_repo_range_table, "range table")):
+        assert blind(log) < MAPPING_KEY_THRESHOLD, (
+            f"the {why} detector would now FLAG a JSON-LINES pick log "
+            f"(scored {blind(log)}) — its justification has changed and this "
+            f"test is the one that should say so")
+    # …and the mapping detector's cap is asserted rather than described: a log
+    # ten times longer must still score 1, or the sentence above is wrong.
+    longer = "\n".join(json.dumps({"n": 1200 + i, "repo": f"o/r{i}"})
+                       for i in range(300)) + "\n"
+    assert looks_like_a_repo_mapping(longer) == 1, (
+        "the mapping detector is no longer capped at one JSONL line — re-read "
+        "this test's docstring before changing it")
+    # 🔴 THE GAP THE ROW COUNT CLOSES, ASSERTED. A real log records the
+    # operator's picking diversity, not the universe size: 60 picks across
+    # THREE repositories is a complete disclosure of those three and would have
+    # scored 3 under the distinct-name count this replaced.
+    narrow = "\n".join(
+        json.dumps({"n": 1200 + i, "repo": f"gardenersguild/Trowelcast{i % 3}",
+                    "t": 1757000000 + i}) for i in range(60))
+    assert looks_like_a_pick_log(narrow) >= PICK_LOG_ROW_THRESHOLD, (
+        "a pick log with few DISTINCT repos is still a pick log — this is the "
+        "case the distinct-name count could not see")
+
+
+@pytest.mark.parametrize("rows,why", [
+    ([{"text": "see acme/widget and o/b", "i": i} for i in range(50)],
+     "prose mentioning repos — a value that is not ITSELF an owner/repo"),
+    ([{"file": "nix/home.nix", "line": i, "msg": "x"} for i in range(40)],
+     "a LINT REPORT — a path-shaped value plus a number"),
+    ([{"ts": 1757000000 + i, "cwd": "scripts/collector", "dur_ms": 12}
+      for i in range(40)],
+     "TELEMETRY — an epoch, a path and a small int, structurally isomorphic "
+     "to a pick row and separable only by the key set"),
+    ([{"id": i, "path": "docs/LAYOUT.md"} for i in range(25)],
+     "an id+path index"),
+    ([{"n": i, "dest": "media/inbox", "bytes": 4096} for i in range(30)],
+     "a ROUTE LOG"),
+    ([{"n": 1200 + i, "repo": f"o/r{i}", "t": 1757000000 + i, "extra": 1}
+      for i in range(40)],
+     "a FOURTH key — not the shape record_pick writes"),
+    # 🔴 THE TWO A ROUND-4 AUDIT MEASURED GETTING THROUGH once the epoch floor
+    # was dropped. Same three keys, same path-shaped value — only `t`'s
+    # MAGNITUDE separates a pick from a duration.
+    ([{"t": 0.5, "repo": "nix/home.nix", "n": 100} for _ in range(40)],
+     "a BENCHMARK row — `t` is a duration in seconds, not an epoch"),
+    ([{"t": 0.012, "repo": "scripts/collector", "n": 3} for _ in range(40)],
+     "a TIMING row with a sub-second `t`"),
+])
+def test_the_pick_log_detector_does_NOT_fire_on_ordinary_JSONL(rows, why):
+    """🔴 EIGHT NEGATIVE CONTROLS, AND SEVEN OF THEM WERE MEASURED FIRING. The
+    first fingerprint asked only for "a bare `owner/repo` value AND any number",
+    and `_FULL_NAME_RE` matches any one-level path — so a round-2 audit scored
+    the lint report at 40, telemetry at 40, the id+path index at 25 and the
+    route log at 30, all against a threshold of 20.
+
+    A guard that fires on ordinary files is a guard everyone learns to override,
+    which is the argument `looks_like_a_repo_universe`'s own docstring makes
+    about the nine false accusations its first version produced.
+
+    ⚠ THE TELEMETRY CASE IS THE IMPORTANT ONE: an epoch, a path and a small
+    integer IS a pick row structurally. Only the key set separates them, which
+    is why this detector keys on it and why that key set is bound to the writer
+    by the test below."""
+    blob = "\n".join(json.dumps(r) for r in rows) + "\n"
+    assert looks_like_a_pick_log(blob) < PICK_LOG_ROW_THRESHOLD, (
+        f"the pick-log detector fires on {why} — scored "
+        f"{looks_like_a_pick_log(blob)}")
+
+
+def test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES(tmp_path):
+    """🔴 THE BINDING THAT MAKES KEYING ON FIELD NAMES DEFENSIBLE. Keying a
+    disclosure guard on `{"n","repo","t"}` is walkable by a rename — unless the
+    rename is loud. This loads the REAL writer, has it write a REAL row, and
+    asserts the detector's key set is exactly what came out.
+
+    So `record_pick` changing a field name reddens this instead of silently
+    blinding the sweep. It is the only reason `looks_like_a_pick_log` is allowed
+    to ask about key names at all; without it the guard would be a spelling pin
+    with nothing holding the spelling."""
+    mo = load_mention_open("mention_open_for_fingerprint")
+    log = tmp_path / "picks.jsonl"
+    assert mo.record_pick("gardenersguild/trowelcast", "1291", log)
+    written = json.loads(log.read_text().splitlines()[0])
+    assert set(written) == PICK_ROW_KEYS, (
+        f"record_pick now writes {sorted(written)}, but the disclosure "
+        f"detector looks for {sorted(PICK_ROW_KEYS)} — the guard has gone "
+        f"BLIND to the artefact it exists to catch. Update PICK_ROW_KEYS.")
+    # …and the real artefact really does trip the detector at the threshold.
+    many = "\n".join(log.read_text().strip()
+                     for _ in range(PICK_LOG_ROW_THRESHOLD)) + "\n"
+    assert looks_like_a_pick_log(many) >= PICK_LOG_ROW_THRESHOLD, (
+        "rows the REAL writer produced do not trip the detector")
+
+    # 🔴 AT THE EXTREMES THE WRITER ACCEPTS, NOT JUST AT ONE TIDY VALUE. The
+    # first version of this test wrote a single `n=1291` row and asserted only
+    # the key set, so the detector's VALUE predicates were pinned by nothing —
+    # and a range bound on `n` then made a six-figure pick log invisible to a
+    # disclosure guard, measured. `record_pick` imposes no upper bound
+    # (`int(num) > 0`), so the binding has to be driven at what it really lets
+    # through.
+    wide = tmp_path / "wide.jsonl"
+    for num in ("1", "99999", "100001", "999999999"):
+        assert mo.record_pick("gardenersguild/trowelcast", num, wide), num
+    assert looks_like_a_pick_log(wide.read_text()) == 4, (
+        f"the detector does not see every row the REAL writer accepts — "
+        f"scored {looks_like_a_pick_log(wide.read_text())} of 4. A guard "
+        f"narrower than the artefact it hunts is the worse error.")
+
+
+def test_the_sweep_actually_LOOKS_at_jsonl_files(tmp_path):
+    """🔴 THE POSITIVE CONTROL ON THE FILE FILTER, WHICH IS A SEPARATE CLAIM
+    FROM THE DETECTOR WORKING.
+
+    `looks_like_a_pick_log` going red on a string proves nothing about whether
+    the sweep ever hands it one: `.jsonl` was absent from the suffix tuple, so a
+    committed `picks.jsonl` would have been invisible to a perfectly good
+    detector. This plants one in a tree and asserts the WHOLE LOOP names it.
+    """
+    log = "\n".join(json.dumps({"n": 1200 + i, "repo": r, "t": 1757000000 + i})
+                    for i, r in enumerate(_synthetic_repos())) + "\n"
+    (tmp_path / "picks.jsonl").write_text(log)
+    (tmp_path / "ordinary.jsonl").write_text(
+        '{"text": "mentions acme/widget"}\n{"text": "and o/b"}\n')
+    how, files = candidate_files(tmp_path)
+    assert sorted(f.name for f in files) == ["ordinary.jsonl", "picks.jsonl"], (
+        f"the sweep did not collect .jsonl via {how}: "
+        f"{sorted(f.name for f in files)}")
+    named = [o.split(" ")[0] for o in disclosure_offenders(files, tmp_path)]
+    assert named == ["picks.jsonl"], (
+        f"the sweep flagged {named}, not the planted pick log alone")
+
+
+def test_the_incident_guard_CAN_GO_RED_on_the_TWO_NEWER_shapes(tmp_path):
+    """🔴 THE NEGATIVE CONTROL FOR THE GUARD ITSELF on the third and fourth
+    artefacts, driving the SAME `disclosure_offenders` loop over a planted tree
+    — the sibling of `test_the_incident_guard_CAN_GO_RED_on_both_incident_
+    spellings`, and written separately rather than folded into it because a
+    control built only from shapes the old detectors already caught proves
+    nothing about the detectors that were added for the new ones.
+
+    Both artefacts are produced by the real writers (`RG.write_ranges`, and the
+    line format `record_pick` emits), and an ordinary file of each extension
+    sits beside them so the result is a SELECTION rather than "everything is an
+    offender".
+    """
+    repos = _synthetic_repos()
+    RG.write_ranges({r.lower(): 1291 - i * 7 for i, r in enumerate(repos)},
+                    tmp_path / "ranges.json")
+    (tmp_path / "picks.jsonl").write_text("\n".join(
+        json.dumps({"n": 1200 + i, "repo": r, "t": 1757000000 + i},
+                   sort_keys=True) for i, r in enumerate(repos)) + "\n")
+    (tmp_path / "ordinary.json").write_text(json.dumps({"a/b": 1, "c/d": 2}))
+    (tmp_path / "ordinary.jsonl").write_text(
+        '{"text": "mentions acme/widget"}\n{"text": "and o/b"}\n')
+
+    how, files = candidate_files(tmp_path)
+    assert len(files) == 4, sorted(f.name for f in files)
+    named = sorted(o.split(" ")[0] for o in disclosure_offenders(files, tmp_path))
+    assert named == ["picks.jsonl", "ranges.json"], (
+        f"the guard did not flag both NEW artefacts, and only them: "
         f"{disclosure_offenders(files, tmp_path)}")
 
 
@@ -1047,6 +1537,462 @@ def test_print_mode_writes_NOTHING_and_reports_the_universe(monkeypatch,
     assert RG.main(["--print", "--path", str(m), "--universe-path", str(u)]) == 0
     assert not m.exists() and not u.exists()
     assert "picker universe" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# THE RANGE TABLE — batched GraphQL
+#
+# 🔴 EVERY TEST HERE STUBS THE RUNNER. `read_api_ranges` takes its subprocess
+# runner as an argument precisely so this file never has to reach the network to
+# test the parsing, which is where all the hazards are.
+# --------------------------------------------------------------------------- #
+class _Reply:
+    def __init__(self, stdout, returncode=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+
+def _graphql(answers: dict, *, returncode=0, errors=None, seen=None):
+    """A runner that answers `{alias_index: highest_number_or_None}`."""
+    def run(argv, **kwargs):
+        assert argv[:3] == ["gh", "api", "graphql"], argv
+        if seen is not None:
+            seen.append({"argv": list(argv), "stdin": kwargs.get("input")})
+        data = {}
+        for i, value in answers.items():
+            data[f"r{i}"] = None if value is None else {
+                "issues": {"nodes": []},
+                "pullRequests": {"nodes": [{"number": value}]},
+            }
+        doc = {"data": data}
+        if errors:
+            doc["errors"] = errors
+        return _Reply(json.dumps(doc), returncode)
+    return run
+
+
+def test_the_ranges_query_asks_for_BOTH_issues_AND_pull_requests():
+    """🔴 ASKING ONLY `issues` WOULD MANUFACTURE FALSE `IMPOSSIBLE` VERDICTS.
+    GitHub numbers issues and pull requests out of ONE sequence per repository,
+    and 48 of this host's repos have issues DISABLED — every one of them would
+    report 0 from the issues list while its PR numbers run into the thousands,
+    and the reader ranks 0 dead last."""
+    q = RG.ranges_query(["gardenersguild/trowelcast", "hobbyist/PlotWidget"])
+    assert "issues(" in q and "pullRequests(" in q
+    # One aliased selection per repo, positional — the caller re-pairs by index.
+    assert "r0: repository(" in q and "r1: repository(" in q
+    assert 'owner: "hobbyist", name: "PlotWidget"' in q, q
+    # Newest-CREATED, not a count: `totalCount` is how MANY, which is a
+    # different number from the highest.
+    assert "orderBy: {field: CREATED_AT, direction: DESC}" in q
+    assert "totalCount" not in q
+    # 🔴 AND NOT DISCUSSIONS, WHICH SHARE THE SAME COUNTER — a priced trade-off,
+    # NOT a correctness guarantee. ⚠ THIS ASSERTION'S MESSAGE USED TO CARRY A
+    # FALSE JUSTIFICATION ("a URL that 404s"); `/pull/<discussion-n>` in fact
+    # redirects to `/discussions/<n>` and returns 200. Omitting them costs a
+    # mild UNDER-ranking, never a wrong open. `ranges_query`'s docstring carries
+    # the measurements and the retraction.
+    assert "discussions" not in q, (
+        "discussions share the number sequence, and omitting them is a priced "
+        "trade-off (query cost vs a mild under-ranking of a discussion-only "
+        "repo) — if you add them, update ranges_query's docstring, which "
+        "explains why they are left out")
+
+
+def test_NO_REPOSITORY_NAME_reaches_the_gh_child_ARGV():
+    """🔴 A DISCLOSURE SURFACE THIS LEG INTRODUCED, and it is one the sibling
+    call does NOT have: `gh api user/repos` names nothing, while this query
+    interpolates up to 50 PRIVATE `owner/repo` names. A process's argv is
+    world-readable in `/proc/<pid>/cmdline` and in `ps` for the life of the call
+    — ~2.3s × 8 requests — which is the same reason `mention-open.py` routes the
+    picker rows through a FIFO instead of an argument.
+
+    So the document travels on STDIN. This asserts both halves: the names are
+    IN the stdin (the positive control — a test that found no names in argv
+    because the query was empty would prove nothing) and NOWHERE in argv."""
+    repos = ["gardenersguild/trowelcast", "hobbyist/PlotWidget"]
+    seen: list = []
+    RG.read_api_ranges(repos, runner=_graphql({0: 1, 1: 2}, seen=seen))
+    assert len(seen) == 1, seen
+    argv_blob = " ".join(seen[0]["argv"])
+    stdin = seen[0]["stdin"] or ""
+    for full in repos:
+        owner, name = full.split("/", 1)
+        assert name in stdin, (
+            f"POSITIVE CONTROL FAILED — {name!r} is not in the stdin document "
+            f"either, so this test would pass against a query that names "
+            f"nothing: {stdin[:200]!r}")
+        for token in (full, owner, name):
+            assert token not in argv_blob, (
+                f"a repository name reached the child's ARGV: {token!r} in "
+                f"{argv_blob!r}")
+    # `-F`, not `-f`: MEASURED, the two differ exactly here — `-f query=@-`
+    # sends the literal `@-` and gh answers a parse error.
+    assert seen[0]["argv"] == ["gh", "api", "graphql", "-F", "query=@-"], seen[0]
+
+
+def test_a_NONZERO_exit_still_yields_every_answer_in_the_batch():
+    """🔴 THE MEASURED TRAP, AND IT IS THE REASON THIS FUNCTION DOES NOT LOOK AT
+    `returncode` AT ALL. MEASURED 2026-09-11: a 21-alias request containing ONE
+    deleted repository exited **1**, printed `errors: [{type: NOT_FOUND, path:
+    ["r20"]}]`, and carried all **20** other answers in `data`. Branching on the
+    exit code would have thrown the whole batch away on one bad row.
+
+    `claude/RULES.md` names this shape: an exit code is a claim about the TOOL,
+    never about your data."""
+    repos = ["o/a", "o/b", "o/c"]
+    runner = _graphql({0: 40, 1: None, 2: 1291}, returncode=1,
+                      errors=[{"type": "NOT_FOUND", "path": ["r1"]}])
+    got = RG.read_api_ranges(repos, runner=runner)
+    assert got == {"o/a": 40, "o/c": 1291}, got
+
+
+def test_an_UNANSWERABLE_repo_is_ABSENT_rather_than_ZERO():
+    """🔴 THE DISTINCTION THE WHOLE ORDERING RESTS ON. `0` is the strongest
+    signal in the scheme — the only value that rules a repository out — so
+    writing it for "I could not ask" would rank a perfectly good repository last
+    on no evidence. Absence is what the reader maps to UNKNOWN."""
+    got = RG.read_api_ranges(["o/a", "o/gone"], runner=_graphql({0: 7, 1: None}))
+    assert "o/gone" not in got, got
+    assert got["o/a"] == 7
+    # …and a repo with genuinely no references IS recorded, as 0. Measured on
+    # `torvalds/linux`, where both totalCounts are really 0.
+    got = RG.read_api_ranges(["o/empty"], runner=_graphql({0: 0}))
+    assert got == {"o/empty": 0}, got
+
+
+def test_the_HIGHEST_of_the_two_lists_wins():
+    assert RG._highest_ref({"issues": {"nodes": [{"number": 12}]},
+                            "pullRequests": {"nodes": [{"number": 99}]}}) == 99
+    assert RG._highest_ref({"issues": {"nodes": [{"number": 99}]},
+                            "pullRequests": {"nodes": [{"number": 12}]}}) == 99
+    assert RG._highest_ref({"issues": {"nodes": []},
+                            "pullRequests": {"nodes": []}}) == 0
+    assert RG._highest_ref({}) == 0
+
+
+def test_a_batch_that_FAILS_OUTRIGHT_costs_only_ITS_OWN_repos():
+    """One transient `gh` failure must not abandon the leg — the repos in that
+    batch are UNKNOWN and the rest of the run continues. Driven at a batch size
+    of 1 so the partition is visible."""
+    calls = {"n": 0}
+
+    def flaky(argv, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("gh died")
+        return _Reply(json.dumps({"data": {"r0": {
+            "issues": {"nodes": []},
+            "pullRequests": {"nodes": [{"number": calls["n"] * 10}]}}}}))
+
+    import unittest.mock
+    with unittest.mock.patch.object(RG, "RANGES_BATCH", 1):
+        got = RG.read_api_ranges(["o/a", "o/b", "o/c"], runner=flaky)
+    assert sorted(got) == ["o/a", "o/c"], got
+
+
+@pytest.mark.parametrize("body,why", [
+    ("", "empty stdout"),
+    ("not json", "an unparseable body"),
+    ('{"errors": [{"message": "x"}]}', "errors with no data at all"),
+    ('{"data": null}', "a null data object"),
+    ('[1, 2]', "a JSON array where an object belongs"),
+])
+def test_an_UNREADABLE_graphql_reply_leaves_every_repo_UNKNOWN(body, why):
+    got = RG.read_api_ranges(["o/a"], runner=lambda *a, **k: _Reply(body))
+    assert got == {}, why
+
+
+def test_build_ranges_is_keyed_off_the_UNIVERSE_and_LOWERCASED():
+    """🔴 KEYED OFF THE UNIVERSE: a range for a repo the picker can never offer
+    is dead weight in a 0600 file that names private repositories.
+
+    🔴 LOWERCASED: the reader looks up a universe row by `.lower()`, and the row
+    keeps whatever casing the API returned — a table keyed on the canonical
+    spelling would miss every row cloned through a lowercase URL.
+
+    🔴 THE API KEYS HERE ARE MIXED-CASE ON PURPOSE. The first version of this
+    test fed already-lowercase keys, which makes the fold a no-op — so a mutant
+    that dropped `.lower()` entirely produced an IDENTICAL table and SURVIVED a
+    green run (measured in this change's own sweep, M18). The keys come from
+    `build_universe`, which preserves the API's canonical spelling, so mixed
+    case is the REALISTIC input and the lowercase one was the artificial one."""
+    universe = ["Acme/Widget", "acme/other"]
+    api = {"Acme/Widget": 40, "acme/other": 0, "Nobody/Asked": 999}
+    assert RG.build_ranges(universe, api) == {"acme/widget": 40,
+                                              "acme/other": 0}
+    # …and a universe row whose casing differs from the API's still resolves,
+    # in BOTH directions — the fold has two sides and only one was exercised.
+    assert RG.build_ranges(["acme/widget"], {"Acme/Widget": 7}) == {
+        "acme/widget": 7}
+    assert RG.build_ranges(["Acme/Widget"], {"acme/widget": 7}) == {
+        "acme/widget": 7}
+
+
+def test_build_ranges_OMITS_a_repo_the_api_could_not_answer_for():
+    """The write side of the UNKNOWN contract: no entry, never a 0."""
+    assert RG.build_ranges(["o/a", "o/unanswered"], {"o/a": 5}) == {"o/a": 5}
+
+
+@pytest.mark.parametrize("writer,arg", [
+    ("write_mapping", {"a": "o/a"}),
+    ("write_universe", ["o/a"]),
+    ("write_ranges", {"o/a": 12}),
+])
+def test_EVERY_writer_narrows_a_pre_existing_parent(tmp_path, writer, arg):
+    """🔴 ALL THREE, BECAUSE ALL THREE CLAIMED IT AND NONE DID IT. Each
+    docstring says "parent 0700"; `Path.mkdir(mode=…, exist_ok=True)` applies
+    that ONLY at creation, so a round-2 audit measured a pre-existing `0755`
+    parent coming back `0755` from every one of them.
+
+    These run on the DAILY TIMER, usually long before any pick, so leaving the
+    narrowing to `mention-open.py`'s `record_pick` alone would let a loose
+    config dir holding PRIVATE repository names stay loose for days."""
+    d = tmp_path / "preexisting"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    getattr(RG, writer)(arg, d / "out.json")
+    assert oct(os.stat(d).st_mode)[-3:] == "700", (
+        f"{writer} left a group/world-readable parent as it found it")
+    assert oct(os.stat(d / "out.json").st_mode)[-3:] == "600"
+
+
+def test_the_two_narrow_dir_copies_are_the_SAME_RULE(tmp_path):
+    """🔴 A PREDICATE AT TWO SITES IS WRONG AT ONE OF THEM — so the two copies
+    of `narrow_dir` are pinned to agree BEHAVIOURALLY, over every interesting
+    starting mode, rather than by a text comparison that a reflow would break.
+
+    They are two copies on purpose: `mention-open.py` is a detached click path
+    and must not import a script that carries `gh` plumbing. That choice is
+    payable only with this test.
+
+    ⚠ THE MODE ARITHMETIC IS COMPARED THROUGH A STUB, NOT A REAL `chmod`, and
+    that is a two-tier lesson rather than a preference: setting setuid/setgid on
+    a real directory raises `PermissionError: Operation not permitted` in the
+    `nix build` sandbox while working on the dev host, so the first version of
+    this test was green locally and RED in the authoritative tier. The ordinary
+    modes are still exercised against a real filesystem below."""
+    mo = load_mention_open("mention_open_for_narrow")
+
+    def would_set(module, start):
+        got = []
+        real_stat, real_chmod = module.os.stat, module.os.chmod
+
+        class _St:
+            st_mode = start
+
+        module.os.stat = lambda *a, **k: _St()
+        module.os.chmod = lambda p, m, *a, **k: got.append(m)
+        try:
+            module.narrow_dir(Path("/nonexistent-does-not-matter"))
+        finally:
+            module.os.stat, module.os.chmod = real_stat, real_chmod
+        return got[0] if got else None
+
+    for start in (0o755, 0o700, 0o500, 0o2755, 0o1777, 0o4755, 0o777, 0o750):
+        a, b = would_set(RG, start), would_set(mo, start)
+        assert a == b, (
+            f"the two narrow_dir copies DISAGREE on {start:o}: "
+            f"generator -> {a}, handler -> {b}")
+        if a is not None:
+            assert a & 0o077 == 0, f"{start:o} left group/other bits: {a:o}"
+    # POSITIVE CONTROL on the stub: at least one mode must actually chmod, or
+    # this loop is comparing two functions that both did nothing.
+    assert would_set(RG, 0o755) is not None
+
+    # …and the ORDINARY modes against a REAL filesystem, which every tier can do.
+    for start in (0o755, 0o750, 0o700):
+        a, b = tmp_path / f"a{start:o}", tmp_path / f"b{start:o}"
+        for d in (a, b):
+            d.mkdir()
+            os.chmod(d, start)
+        RG.narrow_dir(a)
+        mo.narrow_dir(b)
+        ma = os.stat(a).st_mode & 0o7777
+        mb = os.stat(b).st_mode & 0o7777
+        assert ma == mb == (start & ~0o077), (
+            f"on-disk disagreement at {start:o}: {ma:o} vs {mb:o}")
+
+
+def test_write_ranges_is_0600_because_its_KEYS_name_private_repositories(tmp_path):
+    """The mirror of the mapping's disclosure: here the private names are the
+    KEYS. Same mode, same reason."""
+    out = tmp_path / "sub" / "known_ranges.json"
+    RG.write_ranges({"acme/widget": 1291}, out)
+    assert json.loads(out.read_text()) == {"acme/widget": 1291}
+    assert oct(os.stat(out).st_mode)[-3:] == "600"
+    assert oct(os.stat(out.parent).st_mode)[-3:] == "700"
+
+
+def test_the_ranges_output_path_is_outside_every_checkout():
+    p = RG.DEFAULT_RANGES_PATH
+    assert p.is_absolute()
+    assert p.name == "known_ranges.json"
+    assert "workspace" not in p.parts, p
+    assert p.parent.name == "mention-open"
+
+
+def test_a_FAILED_ranges_leg_does_NOT_fail_the_run_or_clobber_the_table(
+        monkeypatch, tmp_path):
+    """🔴 NOT EXIT 3, AND NOT AN EMPTY FILE EITHER. The mapping and the universe
+    are what make a click RESOLVE; the range table only ORDERS rows offered
+    either way, and the handler degrades to the old order without it. Failing
+    the unit daily for an ordering accelerator — and firing the DND-defeating
+    toast — is the objection that kept this timer unwritten for months.
+
+    The existing table is LEFT ALONE rather than replaced with an empty one, so
+    it ages, and that staleness is this leg's deadman.
+
+    ⚠ THIS COVERS THE *EMPTY-TABLE* SHAPE ONLY, AND SAYING SO IS THE POINT. Its
+    name claims a relationship — "a failed ranges leg" — and a leg fails in more
+    than one way; the sibling test below covers the RAISING shapes, which this
+    one structurally cannot see and which had no guard at all until an audit
+    measured `write_ranges` raising straight out of `main()`."""
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_api_ranges", lambda *a, **k: {})
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    ranges = tmp_path / "known_ranges.json"
+    ranges.write_text(json.dumps({"o/previous": 12}))
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    assert rc == 0, "a failed ranges leg must not fail the run"
+    assert json.loads(ranges.read_text()) == {"o/previous": 12}, (
+        "the previous table was clobbered by an empty one — it must be left to "
+        "AGE instead, which is what the handler's staleness note reads")
+
+
+def _raises(exc):
+    def go(*a, **k):
+        raise exc
+    return go
+
+
+@pytest.mark.parametrize("target,exc,why", [
+    ("read_api_ranges", RuntimeError("gh exploded"), "the API leg raises"),
+    ("build_ranges", AttributeError("a non-dict node"), "building raises"),
+    ("write_ranges", PermissionError("read-only home"),
+     "WRITING raises — the shape the audit measured"),
+])
+def test_a_ranges_leg_that_RAISES_still_exits_ZERO_and_keeps_the_old_table(
+        monkeypatch, tmp_path, capsys, target, exc, why):
+    """🔴 THE OTHER SIDE OF THE RELATIONSHIP THE TEST ABOVE NAMES. Whatever goes
+    wrong in the ranges leg, the run must exit 0 — a non-zero exit makes
+    `mention-known-repos-refresh` red and fires `notify-failure@`, the
+    DND-defeating toast class, EVERY DAY, for an ordering accelerator the
+    handler degrades cleanly without. That objection is why the timer went
+    unwritten for months; re-earning it with a `PermissionError` would be a
+    straight regression.
+
+    MEASURED before the fix: the block had no `try` at all, so `write_ranges`
+    into a read-only directory propagated out of `main()`.
+
+    Each case also asserts the failure is REPORTED. Swallowing it silently
+    would be the silent zero this generator is written against — and asserts
+    the mapping and universe still landed, so a mutant that skipped the whole
+    tail of `main()` cannot pass."""
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    monkeypatch.setattr(RG, "read_api_ranges",
+                        lambda names, **k: {n: 5 for n in names})
+    ranges = tmp_path / "known_ranges.json"
+    ranges.write_text(json.dumps({"o/previous": 12}))
+    monkeypatch.setattr(RG, target, _raises(exc))
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    assert rc == 0, f"{why}: the run exited {rc}, which reddens the unit"
+    assert json.loads(ranges.read_text()) == {"o/previous": 12}, why
+    err = capsys.readouterr().err
+    assert "range table was NOT written" in err, (
+        f"{why}: the failure was swallowed silently, or the report claims the "
+        f"table WAS written — {err!r}")
+    assert type(exc).__name__ in err, (
+        f"{why}: the report does not name the cause — {err!r}")
+    assert (tmp_path / "m.json").exists() and (tmp_path / "u.json").exists(), (
+        f"{why}: the mapping/universe did not land, so this test would pass "
+        f"against a main() that skipped everything")
+
+
+def test_a_leg_that_fails_AFTER_writing_does_not_claim_it_was_NOT_written(
+        monkeypatch, tmp_path, capsys):
+    """🔴 THE REPORT MUST NOT LIE IN EITHER DIRECTION. The handler used to say
+    "range table NOT written" unconditionally, which is FALSE for anything that
+    raises AFTER `write_ranges` succeeded — and the reachable one is the SUCCESS
+    `print` itself: a `BrokenPipeError` is an `OSError`, so
+    `regen-known-repos.py | head -1` would report a table that IS on disk as
+    missing. Telling the operator a fresh table is absent sends them to debug a
+    refresh that worked.
+
+    Driven by breaking `print` after the write, which is that exact shape."""
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    monkeypatch.setattr(RG, "read_api_ranges",
+                        lambda names, **k: {n: 5 for n in names})
+    ranges = tmp_path / "known_ranges.json"
+    real_print = print
+    state = {"wrote": False}
+
+    def boom(*a, **k):
+        # 🔴 STDOUT ONLY. `regen-known-repos.py | head -1` closes STDOUT; stderr
+        # is a different stream and stays open, which is exactly why the error
+        # report is written to `sys.stderr` and can still be read. A stub that
+        # broke both would be testing a situation the real pipeline cannot
+        # produce — and it did, first time round: the handler's own report then
+        # raised and the test failed for a reason that was its own.
+        if state["wrote"] and k.get("file") is not sys.stderr:
+            raise BrokenPipeError("stdout went away")
+        return real_print(*a, **k)
+
+    real_write = RG.write_ranges
+
+    def write_then_arm(table, path):
+        real_write(table, path)
+        state["wrote"] = True
+
+    monkeypatch.setattr(RG, "write_ranges", write_then_arm)
+    monkeypatch.setattr("builtins.print", boom)
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    monkeypatch.undo()
+    assert rc == 0
+    assert ranges.exists(), "POSITIVE CONTROL: the table was never written"
+    err = capsys.readouterr().err
+    assert "was written, but the leg then failed" in err, (
+        f"a table that IS on disk was reported as NOT written — {err!r}")
+
+
+def test_a_HEALTHY_run_writes_the_RANGE_TABLE_too(monkeypatch, tmp_path):
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    monkeypatch.setattr(
+        RG, "read_api_ranges",
+        lambda names, **k: {n: 100 + i for i, n in enumerate(names)})
+    ranges = tmp_path / "known_ranges.json"
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    assert rc == 0
+    table = json.loads(ranges.read_text())
+    assert table, "no range table was written by a healthy run"
+    assert all(isinstance(v, int) for v in table.values()), table
+    assert all(k == k.lower() for k in table), table
+
+
+def test_no_ranges_SKIPS_the_leg_entirely(monkeypatch, tmp_path):
+    """The opt-out must not merely write an empty table — it must not ask."""
+    _stub_run(monkeypatch, api_out=_enough_repos())
+    monkeypatch.setattr(RG, "read_local_repos", lambda *a, **k: {})
+    asked = []
+    monkeypatch.setattr(RG, "read_api_ranges",
+                        lambda names, **k: asked.append(names) or {})
+    ranges = tmp_path / "known_ranges.json"
+    rc = RG.main(["--no-ranges", "--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json"),
+                  "--ranges-path", str(ranges)])
+    assert rc == 0
+    assert asked == [], asked
+    assert not ranges.exists()
 
 
 # --------------------------------------------------------------------------- #

@@ -18,55 +18,62 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- ✅ **2026-09-10 — THE THREE OPERATOR-BLOCKED RANKS ARE MERGED, DEPLOYED AND EXERCISED.**
-  Four PRs landed, each verified on its mainline BY CONTENT (a squash is never an
-  ancestor, so `merge-base --is-ancestor` reads false forever and is not the check):
-  - `ZacxDev/homelab-infra` **#785** squash `37b5a71f8` — rank 11, the `cairn` scope.
-  - `ZacxDev/homelab-infra` **#787** squash `936692ec7` — rank 13's deploy half **+ rank 7**.
-  - `ZacxDev/homelab-infra` **#786** squash `4c890c7ac` — rank 20, the third CI leg.
-  - `innovation-upstream/devrc` **#1447** squash `719519fa9` — this doc + the cross-repo
-    `flake.nix` retraction.
-  **IN FLIGHT:** `innovation-upstream/devrc` **#1472** — corrects three rank HEADINGS that
-  contradicted their own closure notes. Open, checks running.
+- 🔨 **2026-09-12 — RANK 3 SLICE 3: THE AUDIT LADDER IS CLOSED WITH A MERGE VERDICT. NOT MERGED,
+  AND THE ONLY THING LEFT IS `main`'s OWN RED.** `innovation-upstream/devrc` **#1508**, branch
+  `chore/cairn-consolidate-onto-pin`, pushed head **`918e62e5`**; **rebased locally onto the new
+  `main` as `6205faec` and the PUSH IS DELIBERATELY HELD** (see the red below — pushing now spends
+  a gate run that is guaranteed red for a reason that is not ours). Claim
+  `cairn-oss-multi-instance-3` still **HELD**.
 
-- **Closing conditions EXERCISED, not inferred from the merge:**
-  - rank 11 — `cairn create --scope cairn --ref ci-leg --file <f>` → `created scope=cairn
-    ref=ci-leg revision=dc4d8212`, **rc 0**. It returned rc 6 `[not-found]` for the item's
-    entire life. The scope now holds a real first entry, round-tripped from the pod.
-  - rank 13/7 — the store serves `0.8.0` and the RUNNING container carries SIGHUP: measured
-    `0 → 1`, with `def load_tokens` held at `1` throughout as the positive control proving
-    the search could see the tree. New pod 1/1 Ready, 0 restarts.
-  - rank 20 — **HALF.** The leg is live (`devrc-ci-gate` steps are now `clone capture-etc
-    seed-nix pytests nodetests cairn-client-runs verdict`), is listed on real PRs, and RAN
-    IN-CLUSTER FOR THE FIRST TIME AND PASSED, emitting the exact string the classifier was
-    written to emit: `cairn-client-runs verdict=pass nix_rc=0 :: the pinned cairn client
-    ran: validate and doctor both produced output`. 🔴 The OTHER half — the leg must go RED
-    when the pinned client is stubbed — is **NOT met** and needs a deliberate red on shared
-    CI, which is an operator call.
+- **FOUR AUDIT ROUNDS, and the shape of what they found is the durable part:**
+  - **Round 1 (blind, full) — TWO 🔴 DEPLOY-BLOCKERS a 22,000-test green suite and three green
+    Tekton legs could not see.** Both re-verified independently before any fix.
+  - **Rounds 2, 3 and 4 found ZERO further logic defects** and eleven sentence-level ones.
+  - **Round 4's verdict: MERGE.** It could not break a single claim the delta makes about code;
+    every count, size, date, path and cross-reference re-derived true, including two
+    self-reported defects it reproduced rather than accepted. Its findings were one 🟡
+    pre-existing with no reachable consequence and two 🟢 it named as nits. **A stopping round.**
+  - Claims blocks for rounds 1–3 are on the PR as ISSUE comments (`#issuecomment-5641736094`,
+    `-5642199099`, `-5642481146`).
 
-- 🔴 **STILL OPEN AND UNTOUCHED THIS SESSION, stated so the merge flurry above does not read
-  as completeness:** rank 4 (`civitai/talos-infra#1414`, re-verified **OPEN**), rank 8
-  (§10 session-capture decisions), rank 18 (three deferred findings), rank 21 (re-verified
-  **still failing hourly**, `ExecMainStatus=1`), rank 23. **Rank 22 is claimed by ANOTHER
-  SESSION** (`cairn-oss-multi-instance-22`) — do not take it.
+- 🔴 **THE MERGE IS BLOCKED BY A TREADMILL, NOT BY THIS PR — and it is worth someone's attention
+  as a DESIGN problem.** `test_guard_core.py`'s kill-mention ledger scans tracked PROSE and reds
+  `main` until a human classifies each new mention, so **every handoff doc that merely NAMES a
+  wide tmux kill breaks the build for everyone**. Three different docs tripped it in one day:
+  #1520 fixed one; **#1534 fixed two more plus a real scanner bug** (it matched `kill-session`
+  INSIDE `skill-session`); and within minutes of #1534 merging, `main` was red again on a newly
+  merged `claudedocs/handoff-mention-system-repos.md`. **#1543 is open for that one.** Every
+  per-instance fix is correct; the design regenerates the work. `claude/RULES.md`'s "a
+  permanently-red gate is worse than no gate" applies.
 
-- 🔴 **RANK 3 SLICE 3 IS THE ONE AGENT-UNBLOCKED ITEM AND IT WAS NOT DONE.** Consolidating
-  onto the pin was decided by the operator 2026-09-08 and explicitly must not be re-asked.
-  Re-verified 2026-09-10: **all five duplicated modules are still present** in
-  `devrc/scripts/lib/` (`host_identity`, `subsystem_resolver`, `subsystem_recall`,
-  `cairn_doctor`, `subsystem_read_store`). The fork widens on its own while this sits.
+- 🔴 **A MEASUREMENT DISCIPLINE THAT PAID OFF TWICE HERE: a merge is a claim about the PR's fix,
+  never about the tree.** After #1534 merged I ran the two previously-failing tests at the new
+  `main` instead of assuming — `2 failed, 1534 deselected`, a DIFFERENT file. Had I trusted the
+  merge, #1508 would have been rebased and pushed into a gate that was still red, and the red
+  would have looked like ours. ⚠ The run reported `exit code 0` while its content read
+  `2 failed`: the `| tail` pipe returns **tail's** status. Read the content.
 
-- **Carried forward (durable facts the REPLACE would otherwise drop):** the pinned client
-  went live via `home-manager switch --flake <origin/main worktree>#zach --impure` on
-  2026-09-09, **generation 713, rollback point 712** — that is the only record of which
-  generation to roll back to. `ZacxDev/cairn` stands at **ELEVEN merged PRs, NONE open**
-  (re-verified 2026-09-09). ⚠ The **laptop is a SECOND, INDEPENDENT switch** and is still
-  NOT verified — this host is not evidence about it, and that is rank 3's last residual
-  beside slice 3.
+- **Carried forward (durable, a REPLACE would drop them):** the fork decision stands —
+  **CONSOLIDATE ONTO THE PIN**, operator, 2026-09-08, not to be re-asked. The pinned client went
+  live 2026-09-09, **generation 713, rollback point 712** — the only record of which generation to
+  roll back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable** (2026-09-11:
+  100% packet loss, `ssh: No route to host`), so cross-host agreement stays `NOT COMPARED — 1 of
+  2 hosts`. The three operator-blocked ranks merged 2026-09-10 (`ZacxDev/homelab-infra` **#785**
+  `37b5a71f8`, **#787** `936692ec7`, **#786** `4c890c7ac`; `innovation-upstream/devrc` **#1447**
+  `719519fa9`). Rank 20 remains HALF. This doc's own prior updates merged as **`21f2c162`**
+  (#1492) and **`5c93440d`** (#1530).
 
-- **Claims:** `cairn-oss-multi-instance-11` and `-13` RELEASED. **`-20` still HELD** — half
-  two of its closing condition is unmet, and an unreleased claim is the only thing that
-  blocks another session, so release it if you decide not to pursue that half.
+- 🔴 **STILL OPEN AND UNTOUCHED:** rank 4 (`civitai/talos-infra#1414`), rank 8, rank 18, rank 21,
+  rank 23. **Rank 22 is claimed by ANOTHER SESSION** — do not take it.
+
+- **The ONE item filed rather than fixed, with a mechanical closing condition:** `m_index_store`
+  restores `sys.path` to its exact pre-call value on the **success** path as well as the failure
+  path. **Closes when** a test asserting `sys.path == before` after a successful call is shown RED
+  against today's conditional `finally` and GREEN after the fix. (Real: the pinned
+  `subsystem_recall` PREPENDS its own directory at import, so the `finally`'s
+  `if sys.path[0] == str(lib)` guard is false when it runs and both entries survive. Blast radius
+  today is nil — `timeouts` is the only overlapping name and nothing in `scripts/present/`
+  imports it.)
 
 ## Open investigations — live diagnosis state
 
@@ -620,6 +627,175 @@ it routes the mandated check back at a client that does not run it, re-opening t
   was running at the same instant BEFORE re-running anything; that is the only observation
   that separates the two mechanisms, and it is unrecoverable afterwards.
 
+### The cost of consolidating onto the pin is MEASURED — it is 2 real deltas, not 5 modules' worth
+🔴 This supersedes the fork block's per-module **raw-line** figures as the basis for planning
+slice 3. Those counts (`host_identity` 122, `cairn_doctor` 43, `subsystem_recall` 38 …) are
+RAW diffs and are dominated by the extraction's docstring rewrites; they say almost nothing
+about what devrc would gain or lose. Do not re-derive this — verify it still holds.
+- **Symptom + exact repro:** not a bug — the unmeasured half of a decided piece of work.
+  Repro: render both copies docstring- and comment-free and diff those.
+  `python3 -c 'import ast,sys; …'` — strip every `Module/FunctionDef/ClassDef` docstring, then
+  `ast.unparse`. **Both controls were watched**: the same file against itself → **0** diff
+  lines; one renamed identifier (`def this_host` → `this_hostX`) → **4**. An instrument that
+  cannot go red, and cannot see a rename, would have produced the same reassuring numbers.
+- **Observed (with values), 2026-09-11** — devrc `scripts/lib/` vs cairn `lib/`,
+  code-only diff lines (raw `diff -u` lines in parentheses):
+  `subsystem_resolver` **0** (164) · `subsystem_read_store` **0** (20) ·
+  `host_identity` **19** (175) · `cairn_doctor` **42** (73) · `subsystem_recall` **98** (318) ·
+  `timeouts` **8** (60). Two of the five modules are **behaviourally identical**; `subsystem_resolver`
+  is 2,814 lines in devrc and every one of the 164 differing lines is prose. via: measurement
+- **Observed: where the three non-zero modules differ, the PINNED side is the superset.**
+  `host_identity` adds `HOST_LABEL_ENV = ("CAIRN_HOST","ASIB_HOST","ACTIVITY_HOST")` and reads
+  it in `host_label()`; `cairn_doctor` takes `mirror_root: Path | None` and reports
+  `NOT_OBSERVABLE` instead of crashing when no mirror is configured; `subsystem_recall`
+  factors `main` into `recall_selection()` / `reject_recall_flags()` and takes its shared
+  vocabulary `from entry_shape import …` where devrc's takes the same names
+  `from subsystem_touch import …`. `timeouts` differs only by an unused `DEFAULT_TIMEOUT = 60`.
+  via: measurement
+- 🔴 **Observed: the WRITER's vocabulary is almost free, and the two exceptions are the whole
+  job.** Comparing `scripts/lib/subsystem_touch.py` against cairn's `lib/entry_shape.py`
+  per-name, normalised the same way: `STORE_IS_PER_HOST`, `SHAPE_HEADINGS`, `store_host`,
+  `store_host_line`, `derive_scope`, `scope_for_repo`, `_git`, `_toplevel` are **byte-identical**.
+  Only two move: (a) the exception base — cairn's is `CairnError` with `TouchError = CairnError`
+  as a compatibility alias, while devrc's `TouchError(Exception)` is the base that ~25 writer
+  errors subclass; (b) `repo_path_missing_message`. via: measurement
+- 🔴 **The one KNOWING REGRESSION, named rather than discovered later:** entry_shape's
+  `repo_path_missing_message` drops devrc's sentence naming the pre-exported handles
+  (`REPO_PATH_HANDLES = ("$DEVRC","$HOMELAB","$DATAPACKET","$CIVITAI")`) and hints
+  `Did you mean --scope X?` only when that scope dir exists. Because `scope_for_repo` — which
+  is byte-identical and IS imported from the pin — calls it, taking the pin takes the weaker
+  message with it. The brief's preferred remedy is devrc-side: catch `RepoPathMissingError` at
+  devrc's own CLI boundary and re-append the handles sentence, so nothing is lost and
+  `scope_for_repo` still comes from the pin. via: code
+- **Ruled out: that class identity can be left alone.** The pinned `subsystem_recall` catches
+  `entry_shape.StoreMissingError`; a writer that raises its own look-alike of the same name
+  would not be caught. Importing the vocabulary is not tidiness here — it is the thing that
+  makes the two halves interoperate. via: code
+- **Next probe:** none for the measurement. The open question is the agent's: whether devrc's
+  test files that assert the *unsanitised* strings (``subsystem_touch.py --validate`` where the
+  pin says ``a writer --validate``) should be updated or deleted as cairn-owned. The brief says
+  update the expectation to the PINNED string and never weaken an assertion to a substring.
+
+### The root cause behind BOTH round-1 blockers — an environment claim measured from the wrong shell
+🔴 One sentence, and it generalises past this PR: **every environment claim in #1508's body was
+measured from a shell that has `cairn` on PATH, and the three environments that decide whether
+this repo's SCHEDULED work runs do not.** That is why a 22,000-test green suite and three green
+Tekton legs sat on top of two deploy-blockers.
+- **Symptom + exact repro:** `env -i PATH=<the unit's own closed PATH> HOME=… python3 -c
+  'import handoff_doc'`, and the same for `scripts/analyze-service-index/backup.py`. Read the
+  PATH from the LIVE unit — `systemctl --user show <unit> -p Environment` — never from
+  `nix/home.nix`, and never from your own shell.
+- **Observed (with values):** base `IMPORT OK` / head `CairnPinUnresolved`, both modules, same
+  env each arm. The three units' PATHs contain git/age/kubectl/coreutils/nix/bash and **no
+  `cairn`**. `handoff-index-sync.timer` fires hourly, so the window was ~5 h at discovery.
+  via: measurement
+- 🔴 **Ruled out: that a `home-manager switch` was the trigger, i.e. that "we did not switch"
+  bounded the risk.** All three units `ExecStart` `%h/workspace/devrc/scripts/…` — the working
+  tree — so the break lands on `git pull`, not on switch. via: code
+- 🔴 **Ruled out: that widening PATH to `%h/.local/bin` is the fix for all three.**
+  `analyze-service-index-backup.service` sets `ProtectHome=tmpfs`, so that symlink does not
+  exist inside its namespace. The fix is `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib` in each
+  unit's `Environment`. via: measurement
+- 🔴 **The guard that let it ship green is the durable lesson.** `_unit_shaped_env`
+  (`scripts/tests/test_analyze_service_index_backup.py:2417`) had the docstring *"`env -i` plus
+  exactly what nix/home.nix sets … NOT `dict(os.environ)`"* over a body reading
+  `{"PATH": os.environ["PATH"], …}` — **a description wider than its implementation, on the only
+  probe claiming to model that environment**, so the one dimension that decided the outcome was
+  a pass-through. via: code
+- **Next probe:** none for the diagnosis. The generalisable check: when a change adds a hard
+  import-time requirement, enumerate every **scheduled** consumer (systemd unit, cron, container
+  ENTRYPOINT) and re-run the import under that consumer's OWN environment, not yours.
+
+### `--emit-claims`, and why a delta round can be structurally impossible
+- **Symptom + exact repro:** `audit-dispatch.py <pr> --round 2` REFUSES when no parseable
+  `audit-claims` block exists on the PR.
+- **Observed:** round 1 produced no block because `--emit-claims` was never run, so round 2 had
+  to be unblocked by posting one by hand. 🔴 It must be an **ISSUE** comment:
+  `gh pr view --json comments` does not return REVIEW comments, so a block posted as a review is
+  invisible to the script while looking perfectly present to a human. via: command
+- **Next probe:** none. Run `--round N --emit-claims --audited <the tip that round READ>` as part
+  of closing every round, not as a separate remembered step.
+
+### What four audit rounds actually caught — the ONE 🔴 class, and the ten sentences
+🔴 Keep this: it is the argument for running the ladder at all, and for what to point it at.
+- **Symptom + exact repro:** not a bug — the record of an audit ladder on a 47-file, −7,493-line
+  consolidation that was gate-green when the ladder started.
+- **Observed (with values):** round 1 returned **2 🔴 + 7 🟡**; rounds 2/3/4 returned
+  **0 🔴 and 0 logic defects**, with 6, 4 and 3 findings respectively, essentially all prose or
+  rendered strings. Round 4 could not falsify any claim the delta made about code. via: measurement
+- 🔴 **Ruled out: that a green suite bounds the risk.** Both round-1 🔴s shipped under
+  `collected=22153 failed=0` plus three green Tekton legs. The root cause was one sentence:
+  **every environment claim in the PR body was measured from a shell that has `cairn` on PATH,
+  and the three environments that decide whether this repo's SCHEDULED work runs do not.**
+  Three systemd units set a CLOSED `Environment=PATH=` with no `cairn` in it and `ExecStart` the
+  WORKING-TREE copy — so the break lands on `git pull`, before any `home-manager switch`.
+  via: measurement
+- 🔴 **Ruled out: that the guard covering that environment was doing so.**
+  `_unit_shaped_env` carried the docstring *"`env -i` plus exactly what nix/home.nix sets … NOT
+  `dict(os.environ)`"* over a body reading `{"PATH": os.environ["PATH"], …}` — the one dimension
+  that decided the outcome was a pass-through. **A description wider than its implementation, on
+  the only probe claiming to model that environment.** via: code
+- **Leading hypothesis, and it held for three rounds:** once the logic is right, the remaining
+  defects are the SENTENCES the fixes write about themselves. Worked examples: a comment naming a
+  mutation failure mode that **cannot occur** (the sentinel is structurally unable to arrive once
+  the patch is deleted — that absence IS the mechanism); a retraction that fixed one blanket claim
+  and left its sibling seventeen lines up; a `grep` figure invalidated by the very edit that
+  asserted it; a rendered page whose headline number contradicted the paragraph beneath it.
+- **Next probe:** none. Scope a late round to SENTENCES explicitly — round 3 was, and it worked.
+
+### The audit range is WRONG at every round on a rebased branch, and both auditors caught it
+- **Symptom + exact repro:** `audit-dispatch.py --round N` derives its range from the
+  previously-audited tip. On a branch rebased between rounds that tip is **not an ancestor** of
+  the head, so the range silently spans main's movement.
+- **Observed (with values):** round 2's literal range would have attributed **41 files / +3,803
+  lines** to a round whose true delta was **14 / +645**; round 4's would have pulled
+  `claude/skills/activity/SKILL.md` in. Counterparts were resolved BY SUBJECT and verified with
+  `merge-base --is-ancestor`: `acc9ee6a`→`bfbebcff`, `0a331066`→`e992dba4`,
+  `15b17ae3`→`c0a55a32`. via: measurement
+- 🔴 **Ruled out: that the author's own ancestry check settles it.** The implementer reported
+  "ancestry checked, not assumed → YES" for `15b17ae3`; measured against the real PR head it was
+  **false** — it had rebased again after checking. Its NUMBERS were right, only the ancestry
+  statement was stale. via: measurement
+- **Next probe:** resolve the counterpart by subject and verify with `merge-base --is-ancestor`
+  against the **PR head**, not against a worktree HEAD, every round.
+
+### The `FAILING:` line is a 140-char status description and CANNOT be read as a complete failure list
+- **Symptom + exact repro:** `gh pr checks <n>` prints one failing test while the same line's own
+  counts imply more. Observed on `#1525`:
+  `FAILING: test_every_kill_server_call_site_in_the_repo_is_classified | TOTAL collected=22167 passed=22163 skipped=2` — arithmetic gives **2 failed**, and the second name was truncated mid-token.
+- **Observed (with values):** three distinct bites in one session. (a) It hid
+  `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` from me; found only by running
+  the file locally after fixing the named one. (b) It is why `handoff-gate-flake-store-api.md`
+  rank 7's closing condition must **not** key on "no test appears in a `FAILING:` line" — a
+  rename, skip or deselect satisfies that with nothing fixed. (c) It appears to have produced a
+  regression in another session's PR: `#1522`'s `480b014f` removed two correct ledger rows on the
+  premise "a mention that does not exist" — a reasonable inference from a truncated line, and
+  false against the file.
+- **Ruled out: that the truncation is cosmetic.** It changes conclusions in both directions —
+  hiding a live failure, and satisfying an absence-based check. via: measurement
+- **Next probe:** none needed for diagnosis. **Read the file, not the status line** —
+  `grep -n '<pattern>' <file>` settled the `#1522` case in one command.
+
+### `#1522` (not mine) is red on BOTH kill guards, and its latest commit made it worse
+- **Symptom + exact repro:** at head `480b014f`, detached worktree, `__pycache__` cleared,
+  `PYTHONDONTWRITEBYTECODE=1`:
+  `nix develop <wt> --command python3 -m pytest <wt>/scripts/claude-hooks/tests/test_guard_core.py -q`
+  → **`2 failed, 1534 passed`**.
+- **Observed (with values):** census — `added: ['claudedocs/handoff-tmux-webapp.md'], removed: []`;
+  scanner — `offenders: [('claudedocs/handoff-tmux-webapp.md', 'tmux kill-session')]`. The mention
+  is real, at `handoff-tmux-webapp.md:3409`, and is on `origin/main` too.
+- **Ruled out: that the rows it deleted were wrong.** Its commit says they "recorded a mention
+  that does not exist"; `grep -n` finds it at `:3409` at that same head. via: measurement
+- **Ruled out: that `f346ba28` was already green.** It was **1 failed** — only its own new doc
+  missing from `quoting_is_the_point`. So `480b014f` went 1 → 2. via: measurement
+- **Leading hypothesis:** the shape is **two allowlists, one file** — `_KILL_MENTION_LEDGER` and
+  `quoting_is_the_point` must BOTH be edited, and three separate attempts today each populated
+  one. The durable fix is to have the scanner read the ledger directly: an entry classified
+  `prose:` IS the set `quoting_is_the_point` names.
+- **Next probe:** restore both `handoff-tmux-webapp.md` rows and add
+  `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
+  measured **1536 passed, 0 failed** locally.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -1041,19 +1217,28 @@ it routes the mandated check back at a client that does not run it, re-opening t
     **Closing condition:** `#1458` merged, AND a flake-rate reading against a baseline whose PR
     heads postdate the merge — **not a single green run**. The OSS half closes separately, with
     rank 3 slice 3.
-    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE NOW REDDENS THIS PR, AND IT IS NOT THIS ONE.**
-    `test_run_tests_targets.py::test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`
-    (added hours earlier by #1445's own audit ladder — its docstring reads "🟡 round-2 F5")
-    spawns a nested full `run-tests.sh` and bounds it at **120 s**; on `a6dd11eb` that
-    subprocess was **SIGKILLed at the bound** (`subprocess.TimeoutExpired`, returncode `-9`,
-    `test_run_tests_targets.py:756`). It is **not an assertion failure**, no part of #1458's
-    diff can reach that file, and #1462 — same base, same test — **passed minutes earlier**, so
-    it is non-deterministic. Wall-time discriminator, CI-to-CI: the failing and passing runs are
-    near-identical (1030.34 s vs 1065.64 s; 155.60 s vs 154.73 s — the failing run was
-    *faster*), so the node was not inflated; one bounded operation stalled while everything
-    around it ran normally. **Same signature, one layer up: a wall-clock bound inside a test on
-    a contended node.** Belongs with `handoff-gate-flake-store-api.md` rank 1, not with a
-    re-run. via: measurement
+    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE REDDENED THIS PR, AND IT IS NOT THIS ONE.**
+    Tests in `scripts/tests/test_run_tests_targets.py` spawn a nested `run-tests.sh` bounded at
+    **120 s** and are SIGKILLed at it (`subprocess.TimeoutExpired`, rc `-9`) — **not** an
+    assertion failure, and no part of `#1458`'s diff can reach that file.
+    🔴 **FOUR CLAIMS THIS BLOCK ORIGINALLY MADE ARE RETRACTED — MEASURED FALSE 2026-09-11.
+    THE FULL ITEM IS NOW `handoff-gate-flake-store-api.md` RANK 7; READ THAT, NOT THIS.**
+    They are listed rather than deleted because each is the kind a reader re-derives:
+    (a) *"added by `#1445`'s audit ladder"* — `#1445` **never touched that file**; `ca088e70`
+    (`#289`) created it with the bound, `809486fa` (`#1073`) added the flaking tests;
+    (b) *"spawns a nested **full** run"* — both flaking spawns are **one-target** runs (argv
+    `--targets`, or `DEVRC_TARGETS` via `ENV_ONLY`);
+    (c) *"`#1462` — **same base**, same test — passed minutes earlier"* — the green head
+    predates `ce9b55c3` and the red one contains it, so the pair straddles an intervention and
+    isolates nothing; the later red was also a **different** test;
+    (d) the wall-time pair (1030.34 s vs 1065.64 s) read as *"the node was not inflated"* — it
+    compares per-target aggregates ACROSS runs and cannot see contention BETWEEN concurrent
+    runs, which is where a 120 s bound lives.
+    **What survives, re-measured:** six bound sites, four exposed tests, and a file whose total
+    wall time was observed at **137.69 s / 164.27 s / 205 s / 428.40 s — a 3.11x spread on one
+    tree**. A fixed 120 s bound sits inside that spread. 🔴 **The cause is NOT established**;
+    `#1429` was checked and **refuted** for this tier (`limits.cpu: "4"` makes the old and new
+    worker formulas both yield 4). via: measurement
     forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
     Advisory, not blocking (see the retraction above)
 
@@ -1196,7 +1381,7 @@ none, so the field was deleted rather than the assertion weakened.
 
 **🔴 A STALE BLOCKER COSTS MORE THAN AN UNKNOWN ONE.** Two of the proposal's five blockers
 evaporated on contact with the code, and both had been written down as facts. "The API has no
-create route" was quoted from a handoff note that predated the change closing it — `PUT` with
+create route" is wrong — it was quoted from a handoff note predating the change closing it — `PUT` with
 `If-None-Match: *` has created entries for some time, with 14 test references. "The authoring
 tool must become instance-aware" assumed a module had to come along that supplied 5.3% of what
 was needed. **Nobody re-checks a thing already written down**, so it survives every review and
@@ -1795,6 +1980,74 @@ certainly-absent tag and read the error SHAPE (`not found` = reachable, `x509` =
 `sops` resolves `.sops.yaml` from the INVOKING CWD, not the file path, so running it from
 another checkout dies with `no matching creation rules found` on a file this repo's catch-all
 covers; pin it with `--config`, do not `cd`.
+
+- 🔴 **A `worktree` isolation flag dispatched from ANOTHER repo cuts a worktree of the WRONG
+  repo.** This session's cwd was `datapacket-talos` while the work is in devrc, so the
+  implementation agent was told to run `git -C ~/workspace/devrc worktree add …` itself rather
+  than being given `isolation: "worktree"`. The failure mode it avoids is quiet: the agent
+  either reports a briefed file missing, or silently works in a worktree of the wrong tree.
+- **The pinned package's layout is an assumption worth a test, not a comment.** `$out/bin/cairn`
+  is a `makeWrapper` shell wrapper; the real script and its siblings are
+  `$out/libexec/cairn/cairn` and `$out/libexec/cairn/lib/*.py`. Anything deriving the lib dir
+  from `which cairn` is depending on that shape, so a cairn layout change must fail a devrc
+  test rather than the operator's next `recall`.
+
+- 🔴 **`audit-dispatch.py`'s `WHERE TO WORK` says "dispatch with `isolation: worktree`" — and
+  that is WRONG whenever the session's cwd is a different repo than the PR.** The script reports
+  on the checkout IT was run in; the flag worktrees the CALLER's cwd. Run from a
+  `datapacket-talos` session against a devrc PR, following it hands the auditor a worktree of the
+  wrong repository. Both audit rounds here were dispatched with an explicit override and a
+  hand-written `refs/pull/<n>/head` fetch + detached `worktree add`.
+- **A handoff branch can merge under you mid-session.** #1492 merged as `21f2c162` while this
+  work was in flight and its branch was deleted upstream, so a `worktree add` on that branch
+  silently checked out the stale PRE-SQUASH local ref. `git fetch origin <branch>` failing with
+  `couldn't find remote ref` is the tell — always re-base a doc update on fresh `origin/main`.
+- ⚠ **Left behind deliberately:** `refs/remotes/origin/pr/1508` in `~/workspace/devrc` (created
+  by the audit worktrees; inert, `git update-ref -d` when the arc closes), and the worktree
+  `/tmp/wt-cairn-slice3`, kept in case CI comes back red.
+
+- 🔴 **`--emit-claims` must be run as part of CLOSING a round, and the block must be an ISSUE
+  comment.** `gh pr view --json comments` does not return REVIEW comments, so a claims block
+  posted as a review is invisible to `audit-dispatch.py` while looking perfectly present to a
+  human — and a delta round with no parseable block is REFUSED.
+- 🔴 **Check `claim-work` AND `gh pr list` before "just fixing" a red `main`.** Twice this session
+  the obvious one-line fix was already owned by another session with a BETTER diagnosis: the first
+  time #1534 had found the scanner was matching `kill-session` inside `skill-session` — my planned
+  ledger row would have papered over a real scanner defect; the second time #1543 was already
+  open. The branch name being taken was the only tell.
+- ⚠ **Left behind deliberately:** `refs/remotes/origin/pr/1508` in `~/workspace/devrc` (inert,
+  `git update-ref -d` when the arc closes), the worktrees `/tmp/wt-cairn-slice3` (holds the
+  rebased-but-unpushed `6205faec`) and `/tmp/wt-mainctl` (the `main` control checkout).
+
+- 🔴 **RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.** `#1458` squash **`ce9b55c3`** merged and
+  content-verified; recorded by `#1462` (`60033d1e`) and corrected by `#1525` (`018e483b`). The
+  second flake it uncovered is filed as **`handoff-gate-flake-store-api.md` rank 7** (`#1477`,
+  `50e8a71a`), which also corrects that doc's rank 1. **The verifier is the flake RATE against
+  heads that CARRY `ce9b55c3` — `git merge-base --is-ancestor`, never a date comparison.**
+- 🔴 **`cairn recall --repo <cairn>` is `scope-absent`; the scope is `devrc`.** The OSS repo has no
+  store scope. `cairn search --scope devrc '<term>'` is what surfaced `ci-repro/` and the
+  `#1211`/`#1219`/`#1239` history that made rank 22's whole diagnosis possible.
+- 🔴 **The OSS `cairn` repo carries the IDENTICAL 18-open-coded / 5-sited store split** and the
+  same one-fixture guard (`tests/test_subsystem_store_api.py:19716`). Deliberately not fixed: its
+  CI is GitHub-hosted with no single-node pin, and the fork consolidates ONTO that copy (rank 3
+  slice 3). **Decide it with slice 3, not by default.**
+- ⚠ **A PR merged with a red gate is not a PR that passed.** `#1458` and `#1462` both merged with
+  `tekton/devrc-pytests` RED on an attributed, unreachable flake. The gates are **advisory** —
+  measured twice: no required status checks, no rulesets, `enforce_admins: false`.
+  `claude/skills/tekton/SKILL.md` asserts the opposite and is STALE; `#1452` retracts it, and two
+  sites its sweep missed are commented there.
+- 🔴 **Four audit rounds across two PRs found essentially ONE defect class: a claim wider than
+  what was measured, written by the fix round correcting the previous one.** The provenance
+  sentence on gate-flake rank 7 was wrong **three consecutive times** — original, retraction, and
+  the retraction's correction — before being deleted rather than corrected a fourth time. **If a
+  sentence cannot be made true and precise, delete the claim.**
+- ⚠ **I took an auditor's timings on report and wrote them into a doc as measurements.** Round 2
+  caught it; re-measuring gave `:418` **43.48 s** against its 70.94 s, and the file **137.69 s**
+  against its 428.40 s. Nothing reproduced — and **that** became the finding: a 3.11x observed
+  spread means no point wall time from that file is quotable.
+- 🔴 **The pre-create sweep only works as a SEPARATE step.** I piped `gh pr list` into the same
+  command as `gh pr create` and shipped `#1529`, a duplicate of `#1522`; closed it. The sweep ran
+  and I never read it.
 
 ## How to verify
 

@@ -22,82 +22,35 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-**RANK 1 REMAINS CLOSED** (`devrc#1304` → squash `c5a445d8`). Since the last update this
-session closed the three items that were outstanding from it, and **refuted its own
-leading hypothesis about the flake**.
+**Every ranked item this doc carried is now CLOSED except two `forcing: none` ones.**
+Both hosts converged and VERIFIED at `05985792` (workbench + laptop agree on one sha;
+0 dangling, 0 stale artefacts each). Merged this session, each verified on `origin/main`
+BY CONTENT rather than by ancestry:
 
-- 🔴 **`devrc#1340` → squash `6ae9fef9`** — the co-tenant precondition now NAMES the
-  intruder (cwd + cmdline) when it fails. **This is a diagnostic, NOT a fix**: the
-  `gc --auto` theory this doc carried is REFUTED (see the block below), so no remedy was
-  shipped for a mechanism that does not exist. Gated both tiers on the merged tree
-  (`fe050a11`, base `88f1bda4`): dev-host 21876/21873/**0 failed** + node 1449/1449;
-  sandbox `pytests` 21869/21866/**0 failed** + `nodetests` 1449/1449. Verified on
-  `origin/main` by content. 116 tests in that file, was 114.
-- **`scripts/ship.sh` RUN — both hosts converged and VERIFIED at `88f1bda4`** (workbench
-  from `c5a445d8`, laptop from `3f4d9c0f`, closing its 5-commit gap). Read per-host, not
-  the verdict: no skips; artefacts 593/535 resolve with **0 dangling**, 409/394
-  repo-sourced with **0 stale**. This was the doc's old rank 4 and it is done.
-- **The subsystem index was written** — the `/handoff` step 4 that two earlier runs in this
-  session skipped. It also repaid the detour: it closed the PREVIOUS session's `OPEN:` for
-  #1304 (`RESOLVED c5a445d8`), closed one whose own stated condition — *"stays OPEN only
-  until #1222 merges"* — had been met **five days** earlier (`RESOLVED 7d9da8f5`, verified
-  by content on `main`, not by the merge alone), and repaired a bullet whose
-  `RESOLVED be3084f0 (homelab-infra):` marker carried a parenthetical that breaks the
-  grammar, so a real closure was declaring nothing and showing no badge.
-  `cairn validate --scope devrc`: **30 of 30 parse, 0 malformed**.
+- **rc 17 cleared on BOTH hosts** — `homelab-talos` pulled + `home-manager switch`.
+  The doc named only the laptop; the workbench was 2 commits stale too, and rc 17 is
+  per-host, so fixing the named host alone would have left the arm firing.
+- **`devrc#1365` → `14126d94`** — `clawgate_resolve` reads `OPENCODE_SESSION_ID` before
+  `CLAUDE_CODE_SESSION_ID`, and REFUSES when `$OPENCODE` is set with no opencode id.
+  ⚠ Buys CORRECTNESS, not capability: `clawgatectl` has no opencode tier (measured,
+  `grep -rl OPENCODE containers/` = 0 vs 5 for the claude var), so opencode sessions
+  resolve exit 5 rather than their own tasks until a Go change lands in `homelab-talos`.
+- **`devrc#1428` → `13c0791a`** — P3 retired, refusing with `RC_CUTOVER_COMPLETE (19)`
+  keyed on `refused > 0`. Four audit rounds.
+- **`devrc#1453` → `eeea9025`** — the co-tenant flake, DIAGNOSED: `git maintenance run
+  --auto --quiet --detach`. Fixed with `maintenance.auto=false` in `_GIT_ENV`.
+- **#1449, #1465, #1470, #1475** → `6f9eb6a2`, `c6700447`, `2a4fe326`, `05985792` —
+  handoff closures, the dash-premise verification, and the prune.
 
-✅ **CLOSED 2026-09-06 — the old rank 2, `drift-check.sh` rc 17.** Both hosts pulled
-`homelab-talos` and switched; `drift-check.sh` now reports `stale=0 / SRC-RC=0` on BOTH,
-and the cross-host comparison went `differing=1` → **`same=2 differing=0`** (both hosts
-now on subtree tree OID `b91ee22de0a3`). The run exits **16**, which is `ACTIONABLE (not
-drift)` — the fuzzyclaw phase-2 gate, the least severe code, so it can only be the verdict
-on an otherwise-clean run.
+**Deploy/verify status, honestly:** all four tiers green on the final merged trees; where
+the dev-host `pytest` tier hit its 3600s wall clock under ambient load (80–90 on 24 cores
+from other sessions), the control was the killed target run STANDALONE on the same tree,
+and that is a different claim from a completed run. It is stated as such on each PR.
 
-🔴 **TWO CORRECTIONS TO WHAT THIS DOC RECORDED — found by re-measuring before acting, and
-both would have left the defect half-fixed.**
-- **The WORKBENCH was stale too.** This doc named only the laptop; at 2026-09-06 the
-  workbench's `containers/clawgate` subtree was **2 behind** and its `homelab-talos` tree
-  DIRTY (11 paths, all untracked, none under `containers/clawgate`). Fixing only the
-  ranked host would have cleared nothing — rc 17 is set per-host and the workbench arm
-  would still have fired.
-- **The laptop had drifted further:** **24** behind on the subtree (repo-wide **245**), not
-  the 18 / 223 recorded here on 09-01. The number in a handoff ages; re-read it.
-
-🔴 **MEASURED: the version string is NOT a currency signal, and the workbench proves it.**
-`clawgatectl.nix` derives `version` from the compiled source's own `var buildVersion`, which
-is exactly what makes a version label look authoritative. On the workbench the label did
-**not move** — `0.8.27` before and after — while the store path changed
-`m9f7lv7gnry112rys3vlm8xg7dach09h` → `pmj808bsn79my8w47gqj0mhahm0hsi2r`. So the workbench had
-been running **different code under an identical version label**, and any check comparing
-version strings across hosts would have called it converged. The laptop moved visibly
-(`0r1g23jm…-0.8.23` → `l1yqi1vi…-0.8.27`) only because a version bump happened to fall inside
-its 24-commit gap. **The store path is the discriminating evidence; the version string is
-not.**
-
-**Verified at the CONSUMER, not at the deploy** (a switch reporting success is a claim about
-the switch): on both hosts the resolved store path changed, `task --help` works (the exact
-capability whose absence was the 0.7.95 incident), and a live API round-trip returns
-**rc 0 with stderr 0 bytes** — no version-skew notice, so both binaries match the server's
-`/health` version by the exact equality `client.go` enforces. Both hosts' stdout was
-byte-identical in size (4,224,053). ⚠ The first skew reading was taken from a merged
-`2>&1 >/dev/null` capture and was **not evidence** — JSON appeared in the supposed stderr.
-Redone with each stream to its own file, which is the only reading quoted above.
-
-⚠ **The workbench's 11 untracked paths were preserved** (`git status --porcelain | wc -l`
-= 11 before and after the pull). The 4 incoming commits were checked against them first;
-`containers/comic-flex-pwa/go.mod` is a different path from the untracked root `go.mod`.
-
-🔴 **NOT VERIFIED, and not claimed:**
-- **The flake is NOT fixed.** #1340 makes the next occurrence diagnosable; it did not
-  recur on the one sandbox run after the change, and **one green run of a
-  non-deterministic failure is not evidence of a fix.**
-- **Nothing has touched the LIVE pod** across all six audit rounds and this follow-up. The
-  `/bin/sh = dash` premise the whole `seed.sh` guard rests on is measured against the
-  `Dockerfile`'s own base image under local docker, never the deployed one.
-- **`main` moved between gate and merge, twice.** #1304 gated at `f0b9c474`/merged at
-  `eb68d7c1`; #1340 gated at `88f1bda4`/merged at `e8143452`. Intervening commits touched
-  none of the changed files — but that is REASONED, not measured, and with `strict: false`
-  and `main` moving every few minutes it is not reachable to close.
+**No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **6**: one linked task
+(`#503 role=read`, "Replace /dev/sda in talos-uvh-gtj"), NONE worked. I recognise it — I
+read it to test a CI theory — and it is definitively not this effort, so per the flow
+nothing was recorded and no task was created.
 
 ## Open investigations — live diagnosis state
 
@@ -373,23 +326,20 @@ Redone with each stream to its own file, which is the only reading quoted above.
 
 ## Next steps (ranked)
 
-🔴 **Renumbered TWICE — check a rank against the item's TEXT, never against a number you
-remember.** First pass: old rank 4 (`ship.sh`) DONE and old rank 8 already closed. Second
-pass (2026-09-06): old rank 2 (`clawgatectl` built-source drift, rc 17) is CLOSED on both
-hosts, so 3–7 became 2–6. The claim `index-store-claims-accuracy-2` was taken for that work
-and released on completion; a future session claiming rank 2 gets the **cairn-cutover P3**
-item, not the drift one.
-
-1. **Decide the token allowlist for the 2 remaining local-only entries**
-   (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
-   neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
-   pod delete (the token file is read ONCE at startup).
+1. **Decide the token allowlist for the 2 remaining local-only entries** (`devrc`,
+   the k8s secret in ns `subsystem-store`). RE-VERIFIED 2026-09-10: both
+   `civitai-app-requests` and `civitai-developer-docs` read local=yes pod=NO, with
+   `civitai` as a yes/yes positive control, so the comparison can see a difference.
+   Widening the allowlist edits the secret and needs a pod delete (the token file is
+   read ONCE at startup). ⚠ The doc's sub-claim "`cairn create` answers `not-found`"
+   is UNVERIFIED — my probe was malformed (it requires `--file`); re-derive before
+   quoting it.
    forcing: none
 
-2. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
-   **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
-   over an EXISTING entry prints the first-ever-file template and exits 0 silently,
-   destroying an `OPEN:` bullet.
+2. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Never started. 🟡5 RE-VERIFIED 2026-09-10:
+   still **0** occurrences of `policy:` in `scripts/lib/service_recon.py` on
+   `origin/main`. 🟡6: `--template` over an EXISTING entry prints the first-ever-file
+   template and exits 0 silently, destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -474,8 +424,28 @@ item, not the drift one.
   control proving the caveat is load-bearing. **Prose that tells an operator what to
   do is payload — audit it like code.**
 - ⚠ **`cairn create` EXISTS** (`34d00d90`/#1254, `PUT` + `If-None-Match: *`), so
-  retiring P3 strands nothing. Two comments in the tree still claimed the API had
-  "no create route"; that stale sentence was what made this look costly.
+  retiring P3 strands nothing. Two comments in the tree still said the API had
+  "no create route" — that sentence is wrong, and it was what made this look
+  costly. ⚠ UPDATED 2026-09-11. Measured by loading the repo's OWN scanner
+  (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`) against an
+  extracted `8b2b960b` tree, with a positive control returning 1 so the figures
+  are not a wired-to-nothing zero: **10 occurrences across 8 files; 9 live and
+  unmarked in 7 files; 8 live in 6 files besides the `cairn` SKILL.md.** One
+  straddles a newline AND is uppercase, so case-sensitive and line-based greps
+  both miss it.
+  🔴 **THIS BULLET'S COUNT HAS NOW BEEN WRONG TWICE, WHICH IS THE POINT OF IT.**
+  It first said "two comments", then "four live sites in four tracked files"
+  (round 1 caught it), then "6 live in 4 files" (round 2 caught that). Each wrong
+  figure was produced by a hand sweep and each read as precise. **Do not quote a
+  count here you have not re-derived with the scanner.**
+  🔴 **AND "ALL SITES ARE CORRECTED" WAS ITSELF FALSE WHEN WRITTEN — round 3 found
+  TWO more live, present-tense sites, one of them 115 lines below that claim in
+  this very file.** Four sweeps, four spellings: mechanism → one conclusion phrase
+  → two more. **A string needle cannot close this class**, because the claim has
+  no canonical wording; the needles in `_RETRACTED_BOUNDARY` catch the five
+  spellings seen so far and nothing guarantees a sixth. Sweep by MEANING before
+  claiming this class is clean, and do not write "all sites are corrected" again
+  without showing the sweep that establishes it.
 - ⚠ **A mutation batch that reports a green may have applied NO mutant.** My first
   attempt at the round-4 verification had a non-matching anchor and printed "97
   passed" — indistinguishable from a survival. Only the traceback caught it.
@@ -576,10 +546,13 @@ item, not the drift one.
 - 🔴 **A line-based bullet scan under-counts against a multi-line corpus.** `^- YYYY-MM-DD:`
   found 24; block-aware parsing found 25, and the extra one was a stranded in-place EDIT of an
   existing pod bullet — a case that must be REPLACED, never inserted, or it duplicates.
-- **The `cairn` write verbs are `append` and `put` only.** `PUT` requires `If-Match` (428
-  without) and explicitly REFUSES `If-Match: *`; `replace_entry` opens `path.read_bytes()`. So
-  the pod structurally cannot accept a new entry, and `seed.sh` is the only path that ever
-  created one. That is why item 1 is a code change, not an operation.
+- ⚠ **RETRACTED — this bullet described the PRE-#1254 world and read as current.** It said the
+  write verbs were `append` and `put` only; it said the pod *"structurally cannot accept a new
+  entry"*; and it said `seed.sh` was *"the only path that ever created one"*. Each of those
+  is wrong today — **devrc#1254 / `34d00d90`** added `create`, which makes the scope directory
+  too. 🔴 This bullet survived a sweep that had just declared "All sites are corrected"
+  — **115 lines above it** — because that sweep matched strings and these sentences spell the
+  claim differently. Do not reach for `seed.sh` on the strength of a paragraph like this one.
 - **Front-matter/`## Pointers` divergence was checked and was ZERO** — all 10 shared entries
   were byte-identical above `## Nuance / work-history`, which is what made a bullet-level
   insert safe. Do not assume that holds next time; it was measured, not reasoned.
@@ -798,35 +771,54 @@ item, not the drift one.
   near-identical bullets this replaces are MERGED, not lost: they differed only in the
   control's link count.**
 
+- ⚠ **CARRIED FORWARD from the old `State now` so this REPLACE cannot drop them** (the two
+  the merge flagged as durable-and-orphaned): the original rank 1 closed as **devrc#1304**,
+  squash **c5a445d8** — the number survives in Open investigations, the sha did not. And the
+  laptop's built-source drift was measured at **24 commits behind** when it was finally fixed,
+  against the **18** this doc had recorded five days earlier: 🔴 **a count in a handoff AGES —
+  re-measure it before acting on it, never quote the stored number.**
+- 🔴 **`handoff_doc.py` HANGS — CPU-SPINS FOREVER — ON BACKTICK-QUOTED TOKENS SEPARATED BY
+  `/` INSIDE `**bold**`.** MINIMAL REPRO, measured 2026-09-10: a delta whose only content is
+  ``- **`#1449`/`#1465`/`#1470`/`#1475`** → …`` never returns (killed at 540s, 0 bytes of
+  output, process state `RN` with NO child processes — so it is pure-Python backtracking, not
+  git, `gh`, network or stdin). The SAME line with the slashes flattened to
+  `- **#1449, #1465, #1470, #1475** → …` completes in under a second. The base doc is NOT the
+  trigger — a trivial delta against this same 64 KB doc returns fine — so it is the DELTA's
+  text, and any session can hit it while writing an ordinary PR list. Workaround: do not put
+  slash-separated backticked tokens inside bold. 🔴 It produces NO output and NO error, so it
+  reads as a wedged terminal rather than a defect; bisect the delta by section, then by line.
+
+- 🔴 **A BULLET-LEVEL SURVIVAL CHECK IS STRUCTURALLY BLIND TO A WHOLE SECTION VANISHING
+  — COUNT THE HEADINGS.** Pruning this doc, the last bullet of an evicted class sat
+  immediately before `## How to verify`, so discarding that block took the entire
+  section with it. The survival check reported **93 → 83 bullets, 11 missing, all 11
+  accounted for, 0 unexplained losses** — a clean-looking pass over a real loss, because
+  it only ever compared bullets. Only an H2 COUNT caught it. Verify a prune on
+  STRUCTURE (H2/H3/fence/ranked-item counts) as well as on content, and split any
+  trailing section off BEFORE block-splitting the one you are cutting.
+- ⚠ **`ship.sh` NO LONGER NEEDS THE `REMOTE_SSH` OVERRIDE — measured 2026-09-10.** It
+  probes `192.168.50.155`, prints `did not answer — falling back to zach@10.42.0.100`,
+  and converges. Earlier sessions (this one included) carried
+  `REMOTE_SSH=zach@10.42.0.100` as a workaround; that is obsolete and should not be
+  inherited. `605b29ac`/#1439 landed it — ⚠ and that PR merged with **10 of its own
+  tests red** on the tier a merge gates on, fixed upstream later the same day.
+
 ## How to verify
 
 ```bash
-# both merges landed, by CONTENT (a squash is never an ancestor)
-git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/seed.sh | grep -c 'NAME-CHECK'          # 2
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py | grep -c '_describe_cotenants'  # 7
+# every closure landed, BY CONTENT (a squash is never an ancestor)
+git -C ~/workspace/devrc show origin/main:scripts/lib/clawgate_handoff.sh | grep -c OPENCODE_SESSION_ID   # 9
+git -C ~/workspace/devrc show origin/main:scripts/cairn-cutover.py | grep -c 'RC_CUTOVER_COMPLETE = 19'   # 1
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py | grep -c maintenance.auto  # 1
 
-# the refutation is recorded in the test file itself, not only in a commit message
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py \
-  | grep -c 'defaults to 6700 loose objects'                                        # 1
+# the co-tenant fix, by the SPAWN rather than the race (deterministic; positive control included)
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_git_repo_isolation.py -q -p no:cacheprovider \
+  -k maintenance                                                   # passes, and its control asserts the spawn IS visible without the fix
 
-# the arithmetic that refuted it — two commands, no loop needed
-d=$(mktemp -d); git init -q "$d" && (cd "$d" && touch f && git add f && git -c user.email=a@b -c user.name=a commit -qm x)
-git -C "$d" config --get gc.auto || echo "(unset -> default 6700)"
-git -C "$d" count-objects -v | head -2                                              # count: 3
+# both hosts agree on ONE sha — the claim that matters
+bash ~/workspace/devrc/scripts/ship.sh 2>&1 | tail -3              # converged + verified, 2 hosts compared
 
-# both hosts converged, and AGREEING on one sha is the claim that matters
-bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep -E '^\[(workbench|laptop)\].*(BEHIND|VERIFIED|DRIFT)'
-
-# the closed rank 2: built-source currency. Expect stale=0 on BOTH hosts and same=2 differing=0.
-# rc 16 (fuzzyclaw phase-2) is ACTIONABLE-not-drift and is the least severe code, so seeing it
-# means the run was otherwise clean. rc 17 here would mean a host regressed.
-bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep -E 'source repos:|^\[srcrepo\] compared='
-
-# the binary is the code, NOT the label — the label did not move on the workbench.
-# Compare the resolved store path, and require an empty stderr (a skew note would appear there).
-P=$(readlink -f ~/.nix-profile/bin/clawgatectl); echo "$P"                          # …-clawgatectl-0.8.27
-"$P" task ls > /tmp/cg.out 2> /tmp/cg.err; echo "rc=$? stderr=$(wc -c < /tmp/cg.err)"   # rc=0 stderr=0
-
-# the index is well-formed after this session's writes
-cairn sync && cairn validate --scope devrc 2>&1 | grep -E '^OK|malformed'           # OK — N of N parse
+# the doc's own structure survived the prune
+git -C ~/workspace/devrc show origin/main:claudedocs/handoff-index-store-claims-accuracy.md | grep -c '^## '  # 7
 ```

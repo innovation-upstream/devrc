@@ -17,6 +17,7 @@ Custom blocks for i3status-rust — each prints one block's state; the bar polls
 | script | purpose |
 |---|---|
 | `i3status-claude-runs` | live count of Claude-Code-in-tmux runs (bar pill) |
+| `i3status-scratchpads` | scratchpad colour legend (all 20 slots, hotkey + window count); parses `tmux-scratch-slots.sh`, which `nix/graphical.nix` symlinks beside it as `scratch-slots.sh` |
 | `i3status-airvpn` | host AirVPN WireGuard tunnel state |
 | `i3status-alerts` | firing cluster-alert count |
 | `i3status-civitai` | firing civitai-prod alert count (client cluster) |
@@ -52,8 +53,7 @@ Click actions for those blocks:
 | `tmux-scratch-slots.sh` | canonical scratchpad slot table — the single source of truth |
 | `tmux-scratch-picker.sh` | list/toggle/create `scratch-*` sessions |
 | `tmux-scratch-monitor.sh` | live HUD of the last N lines across all scratch sessions |
-| `tmux-scratch-status.sh` | scratch slot indicator for `status-left` |
-| `tmux-claude-counters.sh` | aggregate Claude-window counters for `status-right` |
+| `tmux-scratch-status.sh` | RETIRED `status-left` scratch indicator — kept as a debugging renderer; the live legend is the bar block `i3status-scratchpads` |
 | `tmux-idle-update.sh` | batch-update window tab colours by idle time |
 | `tmux-pipe-activity.sh` | manage `pipe-pane` for background activity tracking |
 | `tmux-activity-emit.sh` | activity-telemetry shipper for tmux |

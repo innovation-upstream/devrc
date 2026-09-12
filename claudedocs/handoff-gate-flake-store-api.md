@@ -228,7 +228,31 @@ Not a bug — a measurement that would mislead if run as written.
    failures among 14 open PRs, 2026-09-01) is **not comparable** — it was measured against a
    partially-sited suite. Record a FRESH baseline with its date, and wait until a substantial
    fraction of open PR heads postdate `65f7325b` before reading anything into the number.
-   forcing: gate — a required check has been failing PRs whose diff cannot reach it.
+   🔴 **THE ANCHOR MOVED AGAIN — `65f7325b` IS NO LONGER THE LAST INTERVENTION.** `#1458`
+   (squash **`ce9b55c3`**, 2026-09-10) found that `#1211`/`#1219`/`#1239` sited **5** store
+   roots in `test_subsystem_store_api.py` and left **18** open-coded on disk, including the one
+   test that kept reddening the gate — and sited all 18. **Verified: `ce9b55c3^` has exactly 5
+   `store_siting.store_root(` sites and 18 `tmp_path / "store"`; after it, 1 remains (a
+   docstring).** Use **`ce9b55c3`** as the anchor. 🔴 **The contaminated set is "carries
+   `65f7325b`" with NO upper bound** — it mixes heads carrying one intervention with heads
+   carrying two. Heads carrying the first and not the second are fine to count *as* the first.
+   🔴 **AND THE PREDICATE IS ANCESTRY, NOT DATE — every "postdates" in this doc, including rank
+   1's own sentence above, is the wrong test.** A branch cut before an intervention and never
+   rebased has commits dated after it and does **not** carry it, so a date filter gives a wrong
+   denominator on the one measurement this rank exists to produce. Use
+   `git merge-base --is-ancestor <sha> <head>`. Say which anchor any recorded number is against.
+   Full evidence: `handoff-cairn-oss-multi-instance.md` rank 22.
+   ⚠ **AND THE POPULATION IS NO LONGER ONE BOUND — see rank 7.** A store-api red and a
+   `run-tests.sh` subprocess timeout are both "a check red on a diff that cannot reach it", so a
+   rate that counts reds without classifying them will read rank 7's flake as this one failing
+   to close. **Classify by the failing TEST before counting.** ⚠ Do **not** read that as "and
+   the causes are unrelated" — rank 7 records why that is unestablished.
+   forcing: gate — a check has been failing PRs whose diff cannot reach it. ⚠ **Advisory, not
+   required: measured 2026-09-10 and re-measured 2026-09-11 — `main` has no required status
+   checks, no rulesets, `enforce_admins: false`.** See this doc's Gotchas for the qualifiers
+   (the state is deliberate and is not yours to restore). 🔴 **`claude/skills/tekton/SKILL.md`
+   says the OPPOSITE** — "requires both", "`enforce_admins: true`" — and is STALE; an earlier
+   draft of this line cited it as corroboration. Re-read the setting live; cite no doc for it.
 2. **Fix the hung-server classifier's path sensitivity** — devrc,
    `scripts/tests/test_subsystem_store_api.py`, `_HUNG_SERVER_RULES` /
    `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Reproduction in
@@ -254,6 +278,58 @@ Not a bug — a measurement that would mislead if run as written.
    keylog tests, which are the deterministic check.**
    forcing: regression — `main` is red on `tekton/devrc-main-pytests` and a real
    Ctrl+Space search path is broken.
+
+7. **A FIXED 120 s SUBPROCESS BOUND IN A FILE WHOSE WALL TIME IS NOT STABLE —
+   `scripts/tests/test_run_tests_targets.py`.** Its tests spawn a nested `run-tests.sh`,
+   SIGKILLed at the bound (`TimeoutExpired`, rc `-9`). **Six bound sites** — `_run` `:107`,
+   `_run_env` `:862`, inline `:658`/`:804`/`:830`/`:961` — reaching 26 of 29 test functions
+   (31 collected). via: code
+   - 🔴 **THE CAUSE IS NOT ESTABLISHED, AND THREE EARLIER DRAFTS OF THIS ITEM ASSERTED ONE
+     ANYWAY.** Do not write a cause in here without a signal that DISCRIMINATES. Rivals
+     checked so far: **`#1429` (`a0839ec4`, 2026-09-09) is REFUTED for this tier** — it changed
+     the worker budget from `min(nproc, 4)` to `min(nproc, cgroup quota, 8)`, and the
+     `devrc-ci-gate` `pytests` step sets `limits.cpu: "4"`, so both formulas yield **4**. It
+     doubled the ceiling only on an unquotaed host. Node contention at the moment of a kill was
+     never measured, and the pipelineruns were pruned. via: measurement
+   - 🔴 **THE OBSERVED SPREAD IS THE HAZARD — DO NOT QUOTE A POINT WALL TIME FROM HERE.**
+     Four measurements of this file: **137.69 s, 164.27 s, 205 s, 428.40 s — a 3.11x spread**,
+     same tree, no code change. The four spawn-bearing tests, each observed twice or more:
+     `:418` `test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count` **43-71 s** (the worst),
+     `:988` SUMMARY_BANNER **41-57 s**, `:723` subset-note **39-84 s** (two spawns),
+     `:582` `test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS` **38-70 s**.
+     **A fixed 120 s bound sits inside that spread.** via: measurement
+   - 🔴 **RAISE EVERY SITE; DO NOT REMOVE THE BOUND, AND DO NOT MAKE THE NESTED RUNS
+     CONCURRENT.** The bound is a detector — `:74`/`:274` cite it as what caught the original
+     defect, a swallowed flag making every spawn run the FULL set, which `run-tests.sh:3836`
+     measures at **1194 s serial** against these ~40-70 s one-target spawns. A raised bound
+     still catches that; removing it does not. And `run-tests.sh:3889` is 🔴 **"NESTED RUNS MUST
+     BE SERIAL"**, enforced at `:4043` and guarded by
+     `test_a_nested_pytest_session_does_not_write_into_the_targets_ledger` — so concurrency is
+     not available as a remedy. via: code
+   - **Three occurrences, two tests, all merged red:** `#1458`@`a6dd11eb` (subset-note),
+     `#1462`@`dc972398` and `#1454`@`c5e3123e` (SUMMARY_BANNER); the last two posted **4 s
+     apart**. ⚠ The test FILE has not changed since 2026-08-30 (`ca088e70` `#289`, `809486fa`
+     `#1073`) — but **`scripts/run-tests.sh`, which the spawns execute, has 21 commits since**,
+     so "nothing changed" is false and was wrongly asserted here once. via: measurement
+   - ⚠ **If it recurs, pull the log before the hourly pruner (`keep: 20`):**
+     `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelineruns -o json`, filter
+     `.spec.params[] | select(.name=="revision")`, then `KUBECONFIG=$KC_HOMELAB kubectl -n
+     tekton-ci logs pod/<run>-gate-pod -c step-pytests`. There is **deliberately no default
+     `KUBECONFIG`**; a copy of this recipe without the prefix does not run.
+   **Closing condition:** all six sites raised — sized against the **upper** end of the observed
+   spread, not a point value. 🔴 **Verify with the detector's own positive control, not an
+   absence:** after raising, confirm a **full-set** spawn still breaches the new bound. "No test
+   appears in a `FAILING:` line" is not a check — that string is a 140-char GitHub status
+   description that already truncates mid-token, and a rename, skip or deselect satisfies it
+   with nothing fixed.
+   ⚠ **WHY IT IS KEYED TO ALL SIX SITES AND NOT TO A TEST — a retracted draft, kept so nobody
+   re-derives it.** An earlier version closed on one test name. A second exposed test
+   (`:988`, through `_run_env` rather than `_run`) would have walked straight past it, and a
+   later version keyed to `_run` alone would have missed that same test — which is **2 of the
+   3** observed occurrences. Narrowing this key is how the condition gets satisfied with the
+   hazard intact.
+   forcing: gate — it reddened `#1454`, `#1458` and `#1462`, all merged with
+   `tekton/devrc-pytests` RED because of it.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES

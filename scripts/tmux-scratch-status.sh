@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Scratch slot indicator for tmux status-left.
-# Renders the 20 scratch slots as their hotkey letter + window count, colored
-# to match the popup border color set in .tmux.conf, so the status bar acts
+# Scratch slot indicator — RETAINED AS A DEBUGGING / FALLBACK RENDERER. It is
+# no longer called from anywhere: the LIVE legend is now the i3status-rust bar
+# block (scripts/i3status-scratchpads, wired up as `scratchpadsBlock` in
+# nix/graphical.nix), which renders all 20 slots instead of the 14 this script
+# can fit inside tmux's `status-left-length`. Nothing reads this output today;
+# run it by hand to eyeball the slot table against live tmux sessions.
+#
+# Renders the scratch slots as their hotkey letter + window count, colored
+# to match the popup border color set in .tmux.conf, so the output acts
 # as a legend mapping popup color -> hotkey. First 6 (g/G/v/V/p/P) are
 # excluded -- the original slots predate the legend and don't need visual
-# reminder.
+# reminder. (That exclusion is the width compromise the bar block does NOT
+# make: `i3status-scratchpads` renders every slot.)
 #
 # 🔴 THE ● WAITING MARKER IS GONE, and this is the note that stops it coming
 # back. It keyed on fuzzyclaw's `status == "waiting"`, and that field could not

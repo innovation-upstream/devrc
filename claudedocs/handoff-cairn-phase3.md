@@ -81,8 +81,13 @@ merge relieved. #1261 still earns its place: it stops the edit being re-made.
 generation is `origin/main` **PLUS** them while the laptop is clean. **Both hosts at the same
 SHA are NOT running the same ARTIFACT.** Pre-existing WIP from another thread; untouched.
 
-⚠ **The doc's Goal is met for READS and APPENDS, not for CREATES.** The store has no create
-route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it.
+✅ **The doc's Goal is met for READS, APPENDS and now CREATES.** This used to say *"The store
+has no create route"* — **RETRACTED 2026-09-11**: rank 24's owner, **devrc#1254 / `34d00d90`**,
+MERGED on 2026-09-03 and shipped `PUT … If-None-Match: *` plus the `cairn create` verb —
+which creates the scope DIRECTORY too, so a new scope's first entry needs no operator step.
+The only **scope-level** gate is the caller's token scope allowlist — ⚠ "scope-level" is
+load-bearing: a ref must also be a bare `<slug>.md` (a kind-qualified `<slug>.<kind>` reaches
+no write route at all), so an allowlist edit cannot rescue every refusal. See rank 24 below.
 
 ## Open investigations — live diagnosis state
 
@@ -938,11 +943,23 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     (append / create-entry / create-scope) are exactly the three paths that mechanism predicts —
     but the mechanism was identified there, not here.
 
-24. 🔴 **THE API HAS NO CREATE ROUTE, which is very likely WHY rank 23 happened.** Verified in
-    `server.py`: `If-Match` is **mandatory** on PUT, `*` is refused, and the handler resolves an
-    existing entry — so `cairn put --file` on a new ref fails *"cannot derive a revision"*. A
-    scope's first record can only reach the pod through an operator `seed.sh`. So the only
-    create path available to a session is LOCAL, and nothing carries it onward.
+24. ✅ **CLOSED by devrc#1254 / `34d00d90` (2026-09-03).** This rank used to say *"THE API HAS
+    NO CREATE ROUTE, which is very likely WHY rank 23 happened"* — that sentence is wrong as of
+    #1254, which added `PUT` with `If-None-Match: *` and the `cairn create` verb. 🔴 A first
+    correction of this rank then claimed a new **SCOPE's** first entry still could not be
+    created "because the index is built by walking the store root" — **that was also false**
+    and is retracted: `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+    `test_a_scopes_FIRST_entry_creates_the_directory` asserts **201** for an allowlisted scope
+    with no directory. The only gate is the caller's **token scope allowlist**; a scope outside
+    it answers 404, byte-identical to one that never existed. The original text, kept
+    because the rank 23 link reasons from it: verified in
+    `server.py`, `If-Match` was **mandatory** on PUT, `*` was refused, and the handler resolved an
+    existing entry — so `cairn put --file` on a new ref failed *"cannot derive a revision"*. A
+    scope's first record could then — RETRACTED, see below — only reach the pod through an
+    operator `seed.sh`, and it said the only create path available to a session was LOCAL with
+    nothing carrying it onward. ⚠ ALL OF THAT IS PAST TENSE AND RETRACTED: `cairn create` now
+    creates the entry AND the scope directory; do NOT reach for `seed.sh` on the strength of
+    this paragraph.
     **Closing condition:** a merged PR adding a create route (or an explicit, recorded decision
     that seeding is permanently the only create path, with `subsystem-index` saying so).
     forcing: regression — the missing route is the upstream cause of rank 23

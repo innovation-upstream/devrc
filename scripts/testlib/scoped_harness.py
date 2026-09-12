@@ -45,7 +45,108 @@ CHEAP_HOOK_TEST = "scripts/claude-hooks/tests/test_claude_notify.py"
 CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
 
 
-def run(args: list[str], timeout: int = 600, env: dict | None = None,
+#: How long a nested `run-tests.sh` routed through `run()` may take before the
+#: harness kills it. The bound for THIS path, and the one to route new callers
+#: through.
+#:
+#: 🔴 IT DOES *NOT* SAY "THE ONE PLACE THIS BOUND IS WRITTEN" ANY MORE — IT SAID
+#: THAT, AND IT WAS FALSE THE DAY IT WAS WRITTEN. Measured 2026-09-11 on
+#: `e5f4e2f0`: eight further sites across four files spawn a runner with a bound
+#: of their own, at three distinct values (30, 120, 300) — plus a fourth
+#: (`test_run_tests_preconditions.py`'s `timeout: int = 300`) that no scan of a
+#: call's argv can even see, because the runner path arrives as a parameter.
+#: They are now enumerated, each with the reason it has its own number, in
+#: `scripts/tests/test_runner_bound_ledger.py`, which fails when that set GROWS
+#: *or* SHRINKS. 🔴 **Several of them are legitimate** — a test asserting the
+#: runner ABORTS in seconds wants a short bound, not 600 — so the ledger
+#: explains them rather than forbidding them. What was wrong was the sentence,
+#: not the code.
+#:
+#: 🔴 IT LIVES HERE, NOT IN A TEST FILE, BECAUSE "one rule, one place" WAS
+#: FILE-LOCAL AND THAT IS HOW THE LAST ONE ROTTED. `test_run_tests_targets.py`
+#: open-coded `timeout=120` at SIX sites; consolidating those into a constant
+#: private to that file would have left a FOURTH copy of the same predicate —
+#: this default — untouched, and a guard scoped to one file could never see it.
+#: Both now read this name. ⚠ That fix was right and INCOMPLETE: it moved the
+#: bound out of one file's scope, and the guard enforcing it
+#: (`test_run_tests_targets.py`'s AST walk) is still scoped to that one file, so
+#: it remains structurally unable to see any of the eight above. The ledger is
+#: what covers them; this constant is not, and never was.
+#:
+#: 🔴 THIS IS A HANG BOUND, NOT AN ASSERTION. Nothing any caller pins depends on
+#: the nested run being fast; the bound exists only so a wedged child fails with
+#: a message rather than hanging until the gate's own cap, which is worse — no
+#: message, no exit code.
+#:
+#: 🔴 600 IS THIS MODULE'S PRE-EXISTING VALUE AND IS UNCHANGED — BUT SAY WHICH
+#: SCOPE THAT IS TRUE OF. For the five files already using `run()` it is a no-op,
+#: 600 before and after. For the SIX sites in `test_run_tests_targets.py` that
+#: used to carry `timeout=120`, the effective bound RISES 120 -> 600 — a
+#: CONSEQUENCE of routing them through the shared default, accepted rather than
+#: derived. ⚠ Two drafts of this paragraph were wrong in OPPOSITE directions:
+#: one said the change moves "WHERE it is written, not what it is" full stop,
+#: which would tell a maintainer no timeout was raised anywhere; its replacement
+#: called the widening "the PR's headline fix", which oversells 600 as a measured
+#: value. It is neither. The headline fix is the runner scoping (see commit
+#: "the root cause, not the bound"); 600 remains an unpinned hang bound.
+#:
+#: ⚠ A draft also set this constant to 300, and that was a NARROWING OF FIVE
+#: FILES ON THE EVIDENCE OF A SIXTH. This default governs `run()`, which
+#: `test_scoped_runs.py`, `test_scoped_mapper.py`, `test_scoped_scope_marker.py`,
+#: `test_scoped_gate_contract.py` and `test_scoped_ledgers.py` use across ~45
+#: call sites (44 of them taking the default) — and their nested runs are not the
+#: 2-9 s narrowed ones the 300 was sized against. Measured on the dev host:
+#: `test_the_node_runner_reports_FULL_on_a_REAL_run` took 28.9 s at load ~57 and
+#: 16.5 s at load ~48, and an audit round separately observed **70.5 s** for a
+#: sibling under a load it did not record. At 300 that is between ~4x (on the
+#: 70.5 s observation) and ~18x (on the 16.5 s one) against a >2.55x contention
+#: inflation (120 s bound / 47 s run, the ratio that caused this PR) — thin at
+#: the bad end, and for no measured benefit.
+#:
+#: ⚠ THE 70.5 s IS KEPT DELIBERATELY, AND SO IS THIS SENTENCE. A revision of
+#: this paragraph DROPPED it — the single worst observation, i.e. the one most
+#: hostile to 300 — while adding a smaller new one, so the stated headroom
+#: improved from ~4-10x to ~10-18x with no note that evidence had been removed.
+#: That is the same selective-sweep mechanism this docstring elsewhere calls out,
+#: performed while fixing it. It is second-hand and its load is unrecorded, which
+#: is a reason to LABEL it, never to delete it. Do not re-derive 300 from the 9 s
+#: figure either; that is a measurement of ONE consumer.
+#:
+#: ⚠ WHAT 600 COSTS, STATED BECAUSE THE 300 DRAFT LEANT ON IT AND THE REVERT MUST
+#: NOT QUIETLY DROP IT. `test_run_tests_targets.py` performs FOUR real nested
+#: runs, so the pathological case is 4x600 s = 40 min — and the post-queue budget
+#: is about 37 min (the gate task's `timeout: 60m` clock runs while the pod is
+#: Pending, and a worst-observed queue is ~22.5m). So 40 > 37: four SIMULTANEOUS
+#: hangs would exhaust the task rather than report. That is the strongest
+#: argument against 600 and it is kept here rather than deleted with the draft
+#: that made it. It is accepted because it requires all four runs to hang — after
+#: the runner fix each measures 2-9 s — and because a genuine hang is a defect
+#: you want surfaced, not absorbed by a tighter bound.
+#:
+#: 🔴 AND THE CAP THAT BINDS IS THE GATE TASK'S OWN `timeout: 60m`
+#: (`devrc-ci-pipeline.yaml`), NOT the pipeline's `timeouts.tasks: 70m` — the
+#: task cap is lower, so a slow test can only ever reach that one. The
+#: distinction decides the OUTCOME, per that pipeline's own measured three-way
+#: probe (Tekton v1.12.0):
+#:
+#:     timeouts.tasks   -> PipelineRunTimeout, finally NEVER RAN -> posts nothing,
+#:                         checks stay `pending` forever
+#:     task-level 60m   -> Failed,             finally RAN       -> posts a status
+#:
+#: So overrunning here posts SOMETHING a human can read, rather than the
+#: unclearable pending an earlier draft wrongly warned about. ⚠ The status is
+#: `error` describing **`KILLED: <leg> — the gate pod died at or after step
+#: <phase> (preempted/evicted/OOM/timeout). Not a code failure.`** — NOT
+#: `COULD NOT RUN`, which a further draft cited: that arm is guarded by
+#: `BUILD_STATUS = "Succeeded"` and a timed-out task does not satisfy it. The
+#: pipeline says so itself: "A task-level `timeout:` expiring while a step is
+#: EXECUTING also SIGKILLs it, so it reads as KILLED". Grep for the right string
+#: after a real overrun.
+RUNNER_TIMEOUT_S = 600
+
+
+def run(args: list[str], timeout: int = RUNNER_TIMEOUT_S,
+        env: dict | None = None,
         cwd: Path | None = None) -> subprocess.CompletedProcess:
     full_env = None
     if env is not None:

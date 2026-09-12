@@ -17,97 +17,69 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**The mention effort is COMPLETE and SHIPPED — seven PRs.** `#1291` (`fd68d48c`) resolver ·
-`#1313` (`3c324156`) detection widening + attribution · `#1322` (`a75ffc6a`) alacritty
-copy-on-select · `#1328` (`3f4d9c0f`) local-first click path · `#1336` (`d790786a`)
-disclosure guard on KEYS + `audit-pr N` clickable · `#1331` (`8b173b05`) handoff ·
-**`#1369` (`156b4927`) the picker universe + daily refresh timer**.
+**The mention effort is COMPLETE and SHIPPED — eleven PRs merged.** `#1291` resolver ·
+`#1313` detection+attribution · `#1322` copy-on-select · `#1328` local-first click ·
+`#1336` KEYS guard + `audit-pr N` · `#1331` handoff · **`#1369` (`156b4927`) picker
+universe + daily timer** · **`#1380` (`bc9b900a`) a guessed repo is overridable** ·
+**`#1387` (`72e59dff`) bare `#N` too** · **`#1421` (`a6a1c6f3`) fzf RANKING** ·
+**`#1426` (`3d02eea6`) `/pull` URLs** · **`#1454` (`e62d58ba`) fzf REPLACES rofi**.
+Adjacent, merged the same arc: `#1403` (`4f49f5dc`) three false toolchain claims ·
+`#1439` (`605b29ac`) ship.sh nebula fallback · `#1453` (`eeea9025`) co-tenant flake
+root cause · `#1441` (`0972d1d6`) its diagnostic wiring · `#1457` (`0fb5b6b1`)
+coverage guards.
 
-**Rank 9 is DONE — merged, shipped and verified live on BOTH hosts (2026-09-07).**
-Claim `mention-system-repos-9` RELEASED. Worktree removed.
+**IN FLIGHT: `#1509`** — plausibility ordering (Tier A ranges + Tier B picks). Open,
+NOT merged, NOT shipped. See rank 1.
 
-**Verified end-to-end by DRIVING THE REAL UNIT on each host**, not by reading config:
-`systemctl --user start mention-known-repos-refresh.service` → `Result=success
-ExecMainStatus=0` on both. Workbench wrote **392 universe rows, 52 picker-only**;
-laptop **391 / 52**. ⚠ The 1-row difference is CORRECT, not drift: the universe unions
-LOCAL CHECKOUTS, and the two hosts hold different ones — it is a per-host measurement.
-Timer `active/waiting` on both, next fire 07:04 (workbench) / 07:14 (laptop) — the
-`RandomizedDelaySec` spread. `SuccessExitStatus=4` present in both rendered units.
+**Live and verified on both hosts** (`ship.sh` converged + COMPARED; deployed wrapper
+carries `alacritty-0.17.0` + `fzf-0.74.3`). Measured through the deployed wrapper,
+headless, no window raised:
 
-`ship.sh`: converged + **compared**, 2 hosts both at `71ba922b`, 0 dangling / 0 stale
-managed artifacts on each. Every per-host line read, not just the verdict.
+    typing `civitai`  -> civitai/civitai      (was 8th of 230)
+    typing `devrc`    -> innovation-upstream/devrc
+    typing `Civitai`  -> civitai/civitai      (the round-1 case regression, fixed)
 
-**Gates, on the exact final merged tree `a556d78c`** (`merge-base --is-ancestor` CONFIRMED):
-dev-host `gate.sh --tier both` **PASS** (22,036 pytest + 1,449 node, 0 failed, all 30
-floors met); sandbox tier built ONE DERIVATION AT A TIME from a `git archive` extract —
-`pytests` **PASS** (22,036 passed, 0 failed), `nodetests` **PASS** (1,449).
-⚠ `main` moved **2 commits** between that gate run and the merge (other sessions), so the
-tree now on `main` is not byte-identical to the one proved green. `strict:false` is
-deliberate here; stated rather than glossed.
+🔴 **`main` IS RED and it is nobody's in this arc.** Two tests, reproduced by me on a
+pristine `origin/main` export with none of #1509 present:
+`test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_classified` and
+`::test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` — 2 failed / 1534
+passed. `claudedocs/handoff-tmux-webapp.md` landed carrying `tmux kill-server` text
+without an entry in `_KILL_MENTION_LEDGER`. NEEDS AN OWNER.
 
-⚠ **Still NOT verified: the Alacritty click path.** `--print` cannot distinguish
-auto-open from a one-row picker. Rank 1 below is unchanged and still needs a human.
-
-**This session resolved no clawgate task** — `clawgate_handoff.sh resolve` exited 5 with
-its positive control passing (11 links for another session). 🔴 NOT evidence this session
-touched no task: a wrong session id also answers 200 with an empty array.
+**This session resolved no clawgate task** — `resolve` exited 5 with its positive
+control passing (8 links for another session). 🔴 NOT evidence this session touched no
+task: a wrong session id also answers 200 with an empty array.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. **Exercise the Alacritty click path** — the ONLY end-to-end evidence still missing, and
-   the code has changed three times since the last operator test. Plain left-click.
-   `talos-infra#1065` → opens. `dashboard#12` → picker in ~80 ms from YOUR repos.
-   `#282828` → named toast, no window. Bare `#N` with no pane repo → picker, clawgate first.
-   🔴 **`audit-pr 1291` → a ONE-ROW PICKER, not a direct open** — this is the change most
-   worth eyeballing: it trades a keystroke for the "never a confident wrong page" invariant.
-   ⚠ NEW since #1369: the picker now offers **392 rows instead of 339**, so a repo that
-   used to be absent should now be typeable — that is the other thing worth eyeballing.
-   🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
+1. **Land or close `#1509`** (plausibility ordering). Open, gated (22,322 passed, the
+   2 inherited failures above), claim released, 0 behind at its last gate. Decide, then
+   `ship.sh`. ⚠ Its author DELETED a six-round concurrency ladder after measuring the
+   lock unnecessary (−513 lines); do not re-add one without a measurement.
    forcing: none
-2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**; **REPURPOSED in #1369**:
-   a daily timer now converges the file, so the note is that timer's DEADMAN rather than a
-   reminder to run the generator by hand, and it names the unit.
+2. **Classify `claudedocs/handoff-tmux-webapp.md` in `_KILL_MENTION_LEDGER`** — `main`
+   is red until someone does. Two tests, reproducible on a clean export.
+   forcing: gate — `claude/RULES.md` calls a permanently-red gate worse than none.
+3. **Fix `test_kills_the_LENGTH_guard`** (`scripts/tests/test_subsystem_touch.py`) — a
+   **0.195%** flake on `main` since 2026-08-12 (#432). A 3-hex sha prefix (4096 values)
+   is sometimes ambiguous among the fixture repo's 9 objects; the mutant then raises
+   `CommitAmbiguousError` and the assertion is never reached. 3 chars is deliberate
+   (`COMMIT_SHA_MIN_CHARS = 4`), so "use more characters" is unavailable — regenerate
+   until unambiguous, or assert the precondition. Closing condition: the 600-iteration
+   loop returns 0 failures.
+   forcing: gate — it reddens CI intermittently and trains everyone to click through.
+4. ~~Exercise the Alacritty click path~~ — **DONE by the operator**, and it produced two
+   real defects (the `audit-pr` one-row picker, the civitai ranking). Residual: the
+   operator has not re-clicked since `#1454` swapped rofi for fzf.
    forcing: none
-3. ~~Commit the `save_to_clipboard` WIP~~ — **DONE in #1322** (`a75ffc6a`).
-   forcing: none
-4. ~~Review, gate and merge the detection/attribution PR~~ — **DONE** (#1313).
-   forcing: none
-5. ~~Fix `scripts/collector/README.md`~~ — **DONE in #1321**.
-   forcing: none
-6. ~~Close the two guard gaps round 2 found~~ — **DONE in #1336** (`d790786a`).
-   forcing: none
-7. **Clear the remaining 🟢 from #1336's round-2 audit** (devrc; `scripts/tests/
-   test_mention_open.py`). ⚠ **(d) CLOSED by #1369** — the autouse fixture now pins
-   `DEVRC_WORKSPACE` as well as both mapping paths. **(b) PARTLY closed** — the
-   `mention-open.py:135` citation is fixed (it named a DIFFERENT variable, `WORKSPACE`,
-   while reading as precise); the `_load_handler` reference and the "four tests drive
-   `_run()`" count are NOT. **(a) and (c) still open**: the `SAYS_WHY` docstring claims the
-   note "NEVER names a repository" but only checks universe tokens, so a mutant naming the
-   PANE-GUESSED repo passes; and a comment calls three sinks "the WHOLE list" thirty lines
-   after another says the note "goes to rofi".
-   forcing: none
-8. **Fix or retire Tekton's `devrc-pytests` leg** (not this effort's; needs an owner).
-   MEASURED 2026-09-05: red on `test_mjs_parses[attachments.mjs]` for PR #1328 **and** for
-   #1326, a single markdown file that cannot reach `.mjs` parsing. Passes on clean `main`,
-   on the PR branch head, and in the local nix sandbox tier — three environments.
-   forcing: gate — a check red for every PR trains everyone to click through, which a
-   session then did; `claude/RULES.md` calls a permanently-red gate worse than none.
-9. ~~Finish and land the picker-universe PR~~ — **DONE**: #1369, `156b4927`, merged,
-   shipped, verified live on both hosts. Claim released.
-   forcing: none
-10. **Make the disclosure guard's own threshold non-fragile** (devrc;
-   `scripts/tests/test_regen_known_repos.py`). MEASURED 2026-09-07: the file sat at **19
-   distinct keys against its own threshold of 20**, so ONE new fixture key reddened a
-   DISCLOSURE guard. Worked around by reusing an existing key (`mirror`); the next person
-   adding a fixture hits it again, and the tempting fix under pressure — raise the
-   threshold, or exclude the file — guts the guard. The structural fix is the one #1369
-   already used for the universe arm: count a single dict/list LITERAL, not distinct pairs
-   scattered across a 700-line file. 🔴 Deliberately NOT done inside #1369: the text
-   detector catches shapes the structural one would not, and narrowing a disclosure guard
-   as a side effect of a feature is how the #1283 incident happened.
+5. ~~Everything else from the old ranked list~~ — ranks 2-10 all **DONE**: staleness
+   signal repurposed as the timer's deadman (#1328/#1369), clipboard WIP (#1322),
+   detection/attribution (#1313), README (#1321), round-2 guard gaps (#1336), the four
+   🟢 (#1387/#1457), picker universe (#1369), disclosure threshold now structural and
+   19/20 → 9/20 (#1457).
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -451,45 +423,147 @@ diagnosis in progress.)
   the unit's own journal line, which is the only thing that tests the environment the
   timer will actually run in.
 
+- 🔴 **A HANDFUL OF GREEN RUNS IS NOT EVIDENCE AGAINST A RARE FLAKE — FOUR TIMES IN ONE
+  SESSION.** (1) The 2026-09-06 `gc --auto` refutation: 80 iterations against a ~1.5%
+  event, ~70% chance of zero hits — *but see the retraction below, the refutation was
+  sound for a different reason*. (2) An agent's "3/3 passed on both trees" for a 0.195%
+  flake. (3) MY OWN claim that green CI on two sibling PRs "ruled out" that flake — at
+  0.195%, two greens are expected **99.6%** of the time. (4) An isolation control run
+  while the box was at load 58, which reds BOTH trees and reads as "pre-existing".
+  🔴 **The fix is arithmetic, not care: size N to the rate you are testing for, and
+  state the power.** An auditor declined a 3-run experiment on exactly this ground
+  (~0.6% power) and measured 600 instead — that is what found the defect.
+- 🔴 **AN ISOLATION CONTROL RUN UNDER LOAD DOES NOT ISOLATE FROM LOAD.** Both trees go
+  red and it reads as "inherited". This produced a false "red on main" claim about a
+  SIGTERM/SIGINT timing test that passes 3/3 on a quiet box. The discriminator is a
+  quiet box, not a second tree.
+- 🔴 **THE `gc --auto` REFUTATION WAS SOUND — THE RETRACTION OF THE RETRACTION.** An
+  agent first called it "unsound on statistical power", then retracted: `git maintenance
+  run --auto` is a DIFFERENT CODE PATH from what the gc probe tested. With 3 loose
+  objects against a 6700 threshold `gc --auto` genuinely cannot fire. The refutation
+  answered a NARROWER question than everyone thought was open. **An eliminated
+  hypothesis was read as a closed question** — that is the lesson, not "beware weak
+  probes".
+- 🔴 **ROOT CAUSE OF THE CO-TENANT FLAKE — `git commit` SPAWNS `git maintenance run
+  --auto --quiet --detach`, AND THE CHILD DETACHES FIRST, DECIDES IT HAS NO WORK
+  SECOND.** So `gc.auto`'s loose-object threshold governs whether gc does WORK, never
+  whether the PROCESS EXISTS; the fixture planted its own co-tenant. Verified
+  independently with `GIT_TRACE2_EVENT` on a throwaway repo at 0 loose objects:
+  `category=maintenance label='detach'`, suppressed by `-c maintenance.auto=false`.
+  Fixed in #1453; the DIAGNOSTIC that could have found it three days earlier was wired
+  into only ONE site of a six-site family (#1441 closed that).
+- 🔴 **A CLEAN `git merge` IS NOT A CLEAN MERGE — MEASURED ON THIS ARC'S OWN PRs.**
+  #1454 and #1457 conflicted textually in two files; resolving the text was trivial and
+  the SEMANTIC conflict was the real one. Every sink guard #1454 added used
+  `_no_universe_token_anywhere` ALONE — and that guard knows `FAKE_UNIVERSE`, which
+  deliberately EXCLUDES the pane guess, which is exactly the blindness #1457 existed to
+  close. A textually clean merge would have re-created that blindness in the NEW
+  surfaces #1454 introduces (terminal argv, FIFO header, toast bodies) **with the whole
+  suite green.**
+- 🔴 **`--tiebreak=end` ALREADY IS `end,index` — fzf appends `index` IMPLICITLY.** I
+  instructed an agent to add `,index` as "load-bearing", claiming the computed order
+  would be "discarded the moment the operator types". FALSE. It measured 560 typed
+  trials, **0 differences**, positive control (`length`) differing in 518, and declined
+  to churn a whole-string-pinned constant for zero behaviour change. Independently
+  confirmed. **Pre-ranking DOES survive a keystroke.**
+- 🔴 **ROFI WAS NOT A WEAK IMPLEMENTATION — fzf's OWN default tiebreak is `length`.**
+  rofi was faithfully reproducing upstream fzf. The fix was choosing a different
+  tiebreak (`end` — in `…/owner/repo/pull/<id>` the suffix is constant, so "nearest the
+  end" means "in the repo name rather than the owner"), not a better library. rofi
+  simply cannot express it: no `--tiebreak`, `-display-columns` is DISPLAY-only
+  (matching still runs over the whole row, verified headless), and reordering the row
+  changes nothing (three shapes, all rank 8).
+- 🔴 **A TERMINAL DOES NOT PROXY STDIN — it hands its child a PTY.** That is why the
+  fzf picker uses a FIFO PAIR: argv is world-readable via `/proc`, env vars likewise, a
+  temp file lands private repo names on disk. A FIFO holds nothing at rest. The header
+  rides the same pipe as `--header-lines` rather than on argv, making "nothing carrying
+  a universe token is ever an argument" STRUCTURAL. ⚠ A related defect was caught in
+  #1509's own round 1: **50 private repo names were riding the `gh` child's argv.**
+- 🔴 **A GUARD'S POSITIVE CONTROL THAT RE-IMPLEMENTS THE GUARD CERTIFIES A COPY.**
+  #1454 round 3: the control built `redirs` with its own inline copy of the guard's
+  regex. MEASURED by me — narrowing the real guard straight back to the round-2 defect
+  left **232 passed**, including the control written to prevent exactly that. Drive
+  guard and control through ONE function. (This is the SECOND recorded instance in this
+  repo; the first walked `ast.Attribute` while the guard walked `Attribute` and `Name`.)
+- 🔴 **`/bin/sh` APPLIES REDIRECTIONS BEFORE COMMAND LOOKUP.** `sh -c 'missing <"$1"
+  >"$2"'` exits 127 **with the FIFOs opened**, so a missing `fzf` gives the rows FIFO a
+  reader and the run ends as a SILENT dismissal — not the `never-shown` arm. A toast
+  that named "check alacritty and fzf are on the PATH" could be reached by NEITHER of
+  those causes. Fixed with a `shutil.which` pre-flight BEFORE the spawn, so no window is
+  raised for a picker that cannot run. ⚠ `proc.returncode` is NOT a remedy — alacritty
+  0.17.0 exits **0** whether its `-e` command exits 127 or 0 (but **1** if the `-e`
+  binary itself does not exist).
+- 🔴 **A PICKER'S `-i` IS LOAD-BEARING AND ITS LOSS IS SILENT.** rofi forced
+  case-insensitive; fzf defaults to SMART CASE, so `Civitai` returned **0 rows** — and
+  an empty list is indistinguishable from a dismissal, which is the exact silent wall
+  the subsystem exists to remove. No test caught it: the old test pinned `-matching
+  fuzzy` and `-no-custom`, never `-i`.
+- 🔴 **A DISPLAY LIST READ OUT OF A LOOKUP TABLE INHERITS THE LOOKUP'S FILTERS.**
+  `repo_universe()` read the RESOLUTION mapping's `.values()`, so the picker silently
+  obeyed filters that mapping needs and a picker does not. MEASURED: 388 repos, 339
+  offered, **53 unreachable**. And the `has_issues` filter's stated reason ("404s for
+  EVERY N") is FALSE for pull requests — 6/6 issues-disabled repos resolved
+  `/issues/<pr>` to the PR, with a positive control. ⚠ My FIRST probe (unauthenticated
+  `curl`, 3 of 4 → 404) *confirmed the false version*: an unauthenticated request 404s
+  on a PRIVATE repo whatever the redirect does.
+- 🔴 **`user/repos` IS ALREADY "EVERY REPO I CONTRIBUTE TO" — MEASURED, so nobody adds
+  a second source.** `search/issues?q=author:<login> type:pr` returned **28** repos,
+  **all 28** already in `user/repos`, **0 new**.
+- **BOTH GitHub URL forms normalise in BOTH directions** — `/issues/<pr>` → `/pull/<pr>`
+  AND `/pull/<issue>` → `/issues/<issue>`. So neither is safer and the choice is what
+  the operator READS. ⚠ A blind find-replace would have been GREEN AND WRONG: the
+  scanner matches `(?:pull|issues)` on INPUT, so rewriting every `/issues/` in the tests
+  would have converted the one input fixture and **silently deleted coverage of that
+  form**. Nothing fails when coverage disappears.
+- 🔴 **`ship.sh` IS LAN-ONLY FOR THE LAPTOP UNTIL #1439 — and it bit twice.** rc 255
+  with **one host silently converged** and `cross-host agreement NOT COMPARED`. The
+  laptop answers on nebula (`zach@10.42.0.100`) the whole time. Also seen: **rc 19**,
+  main moving BETWEEN the two legs' fetches so each host landed on a different sha with
+  every per-host line green — read the final verdict, not the greens.
+- 🔴 **THE REPO AUTO-DELETES BRANCHES, SO A DOCUMENTED RULE CANNOT DO WHAT IT CLAIMS.**
+  `delete_branch_on_merge=true` (verified). So *"never `--delete-branch` a stacked
+  parent"* **cannot protect a stacked child here** — the setting overrides the flag. A
+  stacked child must be RETARGETED before the parent merges.
+- **Harness traps measured this session:** creating a new background task **EVICTS the
+  oldest** (`RESULT: FAIL (exit=143)`, zero FAILED lines — reads as an unexplained
+  failure; `setsid` avoids it). `ls -t /tmp/nix-shell.*/devrc-gate-*/pytest.log` reaches
+  **sibling agents' gates** — one agent took another's red for its own. `nix build
+  --rebuild` does NOT re-run a failed derivation and `nix log` then serves the OLD log.
+- ⚠ **CARRIED FORWARD from the old ranked list, because a REPLACE heading would have
+  eaten the measurement.** (a) **Tekton's `devrc-pytests` leg has a history of reddening
+  on tests a PR cannot reach** — MEASURED 2026-09-05: red on
+  `test_mjs_parses[attachments.mjs]` for `#1328` **and** for `#1326`, which is a single
+  markdown file and cannot reach `.mjs` parsing, while the same test passed on clean
+  `main`, on the PR head, and in the local sandbox tier. Re-measured 2026-09-09 across
+  this arc: pass / fail / fail / pass, so it is INTERMITTENT rather than permanently
+  red, and the systematic half was #1392's toolchain drift. Do not read a single red
+  Tekton leg as a verdict on your diff. (b) **The disclosure guard in
+  `test_regen_known_repos.py` sat at 19 distinct fixture keys against its own threshold
+  of 20** before #1457 made it structural (now 9/20) — one added fixture key would have
+  reddened a DISCLOSURE guard, and the fixes that come to hand under pressure (raise the
+  threshold, exclude the file) gut it.
+
 ## How to verify
 ```bash
-# The click path, on the deployed artifact (mention-open runs from the WORKING TREE,
-# so `git pull` alone changes it — only the telemetry half needs a switch)
-time python3 ~/workspace/devrc/scripts/mention-open.py --print 'dashboard#12'   # ~0.09s, REFUSES
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'talos-infra#1065'    # civitai/talos-infra
-python3 ~/workspace/devrc/scripts/mention-open.py --print '#1291'               # clawgate task
-python3 ~/workspace/devrc/scripts/mention-open.py --print '#282828'             # names the colour reason
+# The click path, on the deployed artifact. NOTE: mention-open runs from the WORKING
+# TREE, but the PICKER now needs a nix-store wrapper carrying fzf+alacritty, so a
+# `git pull` alone is NOT enough since #1454 — it needs a `home-manager switch`.
+python3 ~/workspace/devrc/scripts/mention-open.py --print 'civitai/talos-infra#1065'  # /pull/ URL
+python3 ~/workspace/devrc/scripts/mention-open.py --print '#1291'                     # clawgate first
+python3 ~/workspace/devrc/scripts/mention-open.py --print '#282828'                   # colour reason
 
-# The picker universe — counts only, NEVER paste the rows anywhere
-python3 ~/workspace/devrc/scripts/regen-known-repos.py --print   # "N repo(s) in the picker universe"
-ls -l ~/.config/mention-open/known_repos.json ~/.config/mention-open/known_universe.json  # both 0600
+# The wrapper actually carries the picker's binaries
+W=$(grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' ~/.config/alacritty/alacritty.toml | head -1)
+grep -oE "(alacritty|fzf)-[0-9.]+" "$W"      # expect alacritty-0.17.0 and fzf-0.74.3
 
-# 🔴 THAT THE GENERATED FILES ARE UNTRACKED — and the OBVIOUS grep is WRONG.
-# `git ls-files | grep -c 'known_repos'` returns 1 on a CLEAN tree, because
-# `scripts/tests/test_regen_known_repos.py` matches its own name. An earlier version of
-# this block said "must be 0" and would have sent the reader chasing a phantom — or,
-# worse, taught them to ignore a disclosure check. Ask for the ARTIFACT, not the string:
-git -C ~/workspace/devrc ls-files | grep -E '(known_repos|known_universe)\.json$'   # must print NOTHING
-# The authoritative check is content-based, not name-based, and it is a test:
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_regen_known_repos.py -k NOT_published -q
+# Ranking, headless — NEVER raise a window
+fzf -i --tiebreak=end --filter=civitai < <rows>   # civitai/civitai must be first
 
-# The not-configured arm — the whole reason the timer is safe. Want rc 4, NOT 3.
-PY=$(dirname $(readlink -f $(command -v python3)))
-env PATH="$PY" python3 ~/workspace/devrc/scripts/regen-known-repos.py --print; echo "rc=$?"
+# The generated per-host files: counts only, NEVER paste the rows
+ls -l ~/.config/mention-open/            # known_repos.json, known_universe.json (+ ranges/picks after #1509)
+git -C ~/workspace/devrc ls-files | grep -E '(known_repos|known_universe|known_ranges|picks)\.jsonl?$'   # must print NOTHING
 
-# The timer — DRIVE IT, do not just read that it is scheduled
-systemctl --user list-timers mention-known-repos-refresh
-systemctl --user cat mention-known-repos-refresh.service | grep SuccessExitStatus  # =4
-systemctl --user start mention-known-repos-refresh.service
-systemctl --user show mention-known-repos-refresh.service -p Result -p ExecMainStatus
-journalctl --user -u mention-known-repos-refresh.service -n 3 --no-pager -o cat
-
-# Which half needs a switch — readlink is the arbiter, never a diff
-readlink -f ~/.config/alacritty/alacritty.toml            # /nix/store/... -> needs a switch
-readlink -f ~/.config/activity-collector/mention_scan.py  # /nix/store/... -> needs a switch
-
-# Both hosts on the same sha
+# Both hosts
 git -C ~/workspace/devrc rev-parse --short HEAD
-ssh zach@192.168.50.155 'git -C ~/workspace/devrc rev-parse --short HEAD'
+ssh zach@10.42.0.100 'git -C ~/workspace/devrc rev-parse --short HEAD'   # nebula; LAN is often down
 ```

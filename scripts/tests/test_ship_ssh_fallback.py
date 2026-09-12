@@ -207,3 +207,124 @@ def test_the_secondary_targets_are_derived_from_the_ip_constants(tmp_path):
         "the ORIGINAL nebula address survived a renumber, so it is spelled "
         f"somewhere else too: {lines}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The FOUR failure states -- ported from the closed PR #1287 (`scripts/workhost`)
+#
+# 🔴 WHY: until this landed, every failing target got the SAME line, "did not
+# answer". A powered-off host and a host whose key CHANGED (a reinstall, or a
+# squatter on the LAN address) were reported identically, so the second read as
+# the first. An empty result cannot distinguish the mechanisms that produce it;
+# these tests pin that each one is NAMED.
+# --------------------------------------------------------------------------- #
+
+def _probe_saying(tmp_path: Path, text: str, stream: str = "stderr") -> str:
+    """A prober that always FAILS, emitting `text` on the named stream.
+
+    ssh exits 255 for a refused host key and for a dead host alike, so the state
+    is carried by the message, not the status -- which is exactly why the stub
+    signals the same way rather than inventing a private exit code.
+    """
+    redirect = ">&2" if stream == "stderr" else ""
+    return str(write_exec(tmp_path / f"probe_{stream}.sh",
+                          'printf "%%s\\n" %s %s\nexit 255\n'
+                          % (repr(text).replace("'", '"'), redirect)))
+
+
+def _probe_stderr_of(tmp_path: Path, stub: str, targets: str) -> str:
+    env = {**os.environ, "SSH_PROBE_CMD": stub}
+    env.pop("REMOTE_SSH", None)
+    res = subprocess.run(
+        ["bash", "-c",
+         f'set -uo pipefail\nsource "{LIB}"\nfirst_reachable_ssh {targets}'],
+        capture_output=True, text=True, env=env,
+    )
+    return res.stderr
+
+
+def test_a_refused_host_key_is_reported_as_untrusted_key_not_as_silence(tmp_path):
+    """🔴 THE POINT OF THE PORT. `accept-new` refuses a CHANGED key by design,
+    and that refusal used to be indistinguishable from the host being off."""
+    stub = _probe_saying(tmp_path, "Host key verification failed.")
+    err = _probe_stderr_of(tmp_path, stub, LAPTOP_LAN)
+    assert "untrusted-key" in err, (
+        f"a refused host key was not named as such: {err!r}. This is the state "
+        "that reads as a network fault and sends the operator to the wrong place."
+    )
+    assert "did not answer" not in err, (
+        f"the refused key was ALSO reported as silence, so the states are still "
+        f"collapsed rather than distinguished: {err!r}"
+    )
+
+
+def test_a_changed_identification_banner_is_also_untrusted_key(tmp_path):
+    """The other spelling ssh uses -- a reinstalled host, not an unknown one."""
+    stub = _probe_saying(
+        tmp_path, "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!")
+    err = _probe_stderr_of(tmp_path, stub, LAPTOP_LAN)
+    assert "untrusted-key" in err, err
+
+
+def test_a_silent_address_is_still_named_unreachable(tmp_path):
+    """The common case keeps its wording AND gains its state token."""
+    stub = _probe_saying(tmp_path, "")
+    err = _probe_stderr_of(tmp_path, stub, LAPTOP_LAN)
+    assert "did not answer" in err, err
+    assert "unreachable" in err, (
+        f"the silent case lost its state token, so the four states are no longer "
+        f"greppable as a set: {err!r}"
+    )
+    assert "untrusted-key" not in err, (
+        f"a plain timeout was classified as a key problem: {err!r}"
+    )
+
+
+def test_an_unconfigured_path_is_NAMED_rather_than_skipped_in_silence(tmp_path):
+    """🔴 `not-configured` was previously a bare `continue`.
+
+    A path with no address produced no output at all, so "we never tried" and
+    "we tried and it was down" looked the same from the log.
+    """
+    stub = _probe_saying(tmp_path, "")
+    err = _probe_stderr_of(tmp_path, stub, '"" ')
+    assert "not-configured" in err, (
+        f"an empty target was skipped silently: {err!r}"
+    )
+
+
+def test_the_classification_reads_STDERR_and_not_stdout(tmp_path):
+    """🔴 PINS THE REDIRECTION ORDER. `2>&1 >/dev/null` captures stderr alone;
+    reversed, it captures stdout and classification reads the wrong stream.
+
+    A probe shouting the host-key banner on STDOUT is NOT a key problem -- ssh
+    writes that diagnostic to stderr. If this goes red with `untrusted-key`, the
+    redirection was flipped and every classification is now reading stdout.
+    """
+    stub = _probe_saying(
+        tmp_path, "Host key verification failed.", stream="stdout")
+    err = _probe_stderr_of(tmp_path, stub, LAPTOP_LAN)
+    assert "unreachable" in err, (
+        f"stdout was classified as if it were ssh's diagnostic: {err!r}"
+    )
+    assert "untrusted-key" not in err, (
+        f"the classifier read STDOUT -- the `2>&1 >/dev/null` order is flipped, "
+        f"so a target that merely prints on stdout is reported as a key "
+        f"refusal: {err!r}"
+    )
+
+
+def test_a_reachable_target_still_wins_and_says_nothing(tmp_path):
+    """The success path must stay quiet -- stdout is the winner, alone."""
+    stub = str(write_exec(tmp_path / "ok.sh", '[ "$1" = "%s" ]\n' % LAPTOP_NEBULA))
+    env = {**os.environ, "SSH_PROBE_CMD": stub}
+    env.pop("REMOTE_SSH", None)
+    res = subprocess.run(
+        ["bash", "-c",
+         f'set -uo pipefail\nsource "{LIB}"\nfirst_reachable_ssh {LAPTOP_LAN} {LAPTOP_NEBULA}'],
+        capture_output=True, text=True, check=True, env=env,
+    )
+    assert res.stdout.strip() == LAPTOP_NEBULA
+    assert LAPTOP_NEBULA not in res.stderr, (
+        f"the winning target was also reported as a failure: {res.stderr!r}"
+    )
