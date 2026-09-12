@@ -18,68 +18,69 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- ✅ **2026-09-12 — RANK 3 SLICE 3 IS MERGED. `innovation-upstream/devrc` #1508, squash
-  `44bd8b0e`.** The block this replaces said *"NOT MERGED, AND THE ONLY THING LEFT IS `main`'s
-  OWN RED"*, named a held rebase `6205faec`, and said the claim was still HELD. **All three are
-  now false** — it was pushed and merged by a later session at 2026-09-12T03:42:52Z, and claim
-  `cairn-oss-multi-instance-3` is RELEASED (absent from `claim-work --list`).
-  🔴 **VERIFIED BY CONTENT, NEVER BY ANCESTRY** — a squash makes `merge-base --is-ancestor` false
-  forever. On `origin/main` all five forked reader modules are GONE:
-  `scripts/lib/{subsystem_resolver,subsystem_read_store,host_identity,cairn_doctor,subsystem_recall}.py`
-  each return `ABSENT` to `git cat-file -e`, and `44bd8b0e`'s diffstat deletes them (3392 + 2814 +
-  586 + 207 + 143 lines) while adding `scripts/lib/cairn_pin.py` (246) and
-  `scripts/tests/test_cairn_pin.py` (680). `scripts/lib/timeouts.py` REMAINS by design — it was
-  never one of the five.
-  ⚠ **`scripts/lib/subsystem_touch.py` still exists and must**: it is the devrc-only WRITER,
+- ✅ **2026-09-12 — THE RANK-23 ARC IS CLOSED. Two PRs merged, both verified BY CONTENT.**
+  `innovation-upstream/devrc` **#1583** squash **`c1ecc830`** (rank 23(a)+(b)) and **#1597** squash
+  **`a66b6fb3`** (the status line #1583 left stale, plus the open-items ledger). Claim
+  `cairn-oss-multi-instance-23` **RELEASED**. Closing condition re-derived at `origin/main`:
+  `grep -c 'subsystem_touch.py --validate' claude/skills/` → **0**; `validate_command` emits
+  `cairn-validate --store … --scope …`; the RECOVER remedy carries
+  `--flake ~/workspace/devrc --impure`; both new guards present.
+  🔴 **Ancestry cannot answer any of this — a squash makes `merge-base --is-ancestor` false
+  forever. Every check above is a CONTENT check.**
+
+- 🔴 **THE DURABLE OUTPUT OF THIS SESSION IS NOT THE CODE — IT IS WHAT THREE AUDIT ROUNDS FOUND.
+  Zero 🔴 in any round; every finding was a FALSE CLAIM ABOUT THE CODE, and two were in my own
+  prose.** Round 0 refuted the PR's *stated rationale* (the old spelling's defect was
+  `Path(__file__)` naming the **running copy** — stale after `worktree remove` — not
+  cross-machine portability, which was measurably backwards: `nix/home.nix` deploys into
+  `${home}/workspace/devrc`, so any host resolving `cairn-validate` has the checkout at that same
+  path). Round 0 also **deleted a guard I wrote**, on measurement: the pre-existing
+  `test_cairn_flake_pin.py` already killed all three of its mutants behaviourally, in both tiers.
+  Round 2 found the remedy I added was **unrunnable** (bare `home-manager switch` cannot evaluate
+  `nix/home.nix`, which takes a required `cairnPackage`) and that I had **cited a guard that does
+  not guard** — `test_the_command_is_BUILT_not_typed` asserts the flag as a quoted ARGUMENT TOKEN,
+  not inside a message string, so the withdrawn fallback passed it. **The fix rounds, not the
+  original change, were where every finding lived.**
+
+- 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
+  **23(c)** (upstream PR in `ZacxDev/cairn`); **the CLASS rank 23 did not close** — 21 absolute
+  checkout paths across 9 skill files, incl. four live `python3 /home/zach/workspace/devrc/…`
+  invocations in `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`, no scanner gating
+  them (rank 23's own condition was a **grep**, which is why it could be met while the class
+  stands); **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
+  rank 18 predicted it would); **20 half two** (that CI leg has only ever been watched **pass**,
+  so its red path is unproven); **4, 8, 21**; and the `m_index_store` `sys.path` item.
+  **Rank 22 belongs to another session — do not take it.**
+
+- ⚠ **ONE INSTRUCTED STEP WAS NEVER RUN, recorded so it is not mistaken for done.** The kickoff
+  said to re-run the two `test_guard_core.py` tests at `main` before trusting it and then push the
+  held rebase. **Those tests were never run.** Their purpose evaporated — #1508 was already merged
+  by another session as `44bd8b0e` before this session started, so there was nothing left to gate
+  — but the premise disappeared, the check did not pass. If an independent read of `main` was
+  wanted, it is still outstanding.
+
+- ✅ **RANK 3 SLICE 3 MERGED — #1508, squash `44bd8b0e`** (by another session, 03:42:52Z; claim
+  `cairn-oss-multi-instance-3` released). Verified by content: all five forked reader modules
+  `ABSENT` on `origin/main`; `scripts/lib/timeouts.py` REMAINS by design (never one of the five).
+  ⚠ `scripts/lib/subsystem_touch.py` still exists and **must** — it is the devrc-only WRITER,
   deliberately absent from the OSS repo. Slice 3 consolidated the READER half only.
 
-- 🔴 **THE BLOCKER THIS DOC SPENT A DAY ON IS CLOSED, AND NOT BY ANYONE WORKING THIS ARC.** The
-  kill-mention-ledger treadmill was closed STRUCTURALLY by **#1561** (`c0bbd6d9`) —
-  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose entirely,
-  instead of classifying each offending doc. `main` measured GREEN at `b1abf6b1` (`1537 passed`).
-  **The lesson this arc paid for twice: three PRs of per-instance classification were the wrong
-  altitude, and the design fix landed while they were still being written.**
+- ✅ **The kill-mention-ledger treadmill is CLOSED STRUCTURALLY by #1561 (`c0bbd6d9`)** —
+  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose, instead of
+  classifying each offending doc. ⚠ **This RETIRES the "THE MERGE IS BLOCKED BY A TREADMILL"
+  block that used to stand here**, and its instruction to go classify mentions. The lesson that
+  survives: three PRs of per-instance classification were the wrong altitude, and the design fix
+  landed while they were still being written.
 
-- **FOUR AUDIT ROUNDS, and the shape of what they found is the durable part:**
-  - **Round 1 (blind, full) — TWO 🔴 DEPLOY-BLOCKERS a 22,000-test green suite and three green
-    Tekton legs could not see.** Both re-verified independently before any fix.
-  - **Rounds 2, 3 and 4 found ZERO further logic defects** and eleven sentence-level ones.
-  - **Round 4's verdict: MERGE.** It could not break a single claim the delta makes about code;
-    every count, size, date, path and cross-reference re-derived true, including two
-    self-reported defects it reproduced rather than accepted. Its findings were one 🟡
-    pre-existing with no reachable consequence and two 🟢 it named as nits. **A stopping round.**
-  - Claims blocks for rounds 1–3 are on the PR as ISSUE comments (`#issuecomment-5641736094`,
-    `-5642199099`, `-5642481146`).
-
-- 🔴 **THE MERGE IS BLOCKED BY A TREADMILL, NOT BY THIS PR — and it is worth someone's attention
-  as a DESIGN problem.** `test_guard_core.py`'s kill-mention ledger scans tracked PROSE and reds
-  `main` until a human classifies each new mention, so **every handoff doc that merely NAMES a
-  wide tmux kill breaks the build for everyone**. Three different docs tripped it in one day:
-  #1520 fixed one; **#1534 fixed two more plus a real scanner bug** (it matched `kill-session`
-  INSIDE `skill-session`); and within minutes of #1534 merging, `main` was red again on a newly
-  merged `claudedocs/handoff-mention-system-repos.md`. **#1543 is open for that one.** Every
-  per-instance fix is correct; the design regenerates the work. `claude/RULES.md`'s "a
-  permanently-red gate is worse than no gate" applies.
-
-- 🔴 **A MEASUREMENT DISCIPLINE THAT PAID OFF TWICE HERE: a merge is a claim about the PR's fix,
-  never about the tree.** After #1534 merged I ran the two previously-failing tests at the new
-  `main` instead of assuming — `2 failed, 1534 deselected`, a DIFFERENT file. Had I trusted the
-  merge, #1508 would have been rebased and pushed into a gate that was still red, and the red
-  would have looked like ours. ⚠ The run reported `exit code 0` while its content read
-  `2 failed`: the `| tail` pipe returns **tail's** status. Read the content.
-
-- **Carried forward (durable, a REPLACE would drop them):** the fork decision stands —
-  **CONSOLIDATE ONTO THE PIN**, operator, 2026-09-08, not to be re-asked. The pinned client went
-  live 2026-09-09, **generation 713, rollback point 712** — the only record of which generation to
-  roll back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable** (2026-09-11:
-  100% packet loss, `ssh: No route to host`), so cross-host agreement stays `NOT COMPARED — 1 of
-  2 hosts`. The three operator-blocked ranks merged 2026-09-10 (`ZacxDev/homelab-infra` **#785**
-  `37b5a71f8`, **#787** `936692ec7`, **#786** `4c890c7ac`; `innovation-upstream/devrc` **#1447**
-  `719519fa9`). Rank 20 remains HALF. This doc's own prior updates merged as **`21f2c162`**
-  (#1492) and **`5c93440d`** (#1530).
-
-- 🔴 **STILL OPEN AND UNTOUCHED:** rank 4 (`civitai/talos-infra#1414`), rank 8, rank 18, rank 21,
-  rank 23. **Rank 22 is claimed by ANOTHER SESSION** — do not take it.
+- **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
+  **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. The pinned client
+  went live 2026-09-09, **generation 713, rollback point 712** — the only record of which
+  generation to roll back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable**
+  (2026-09-11: 100% packet loss, `ssh: No route to host`), so cross-host agreement stays
+  `NOT COMPARED — 1 of 2 hosts`. Operator-blocked ranks merged 2026-09-10
+  (`ZacxDev/homelab-infra` **#785** `37b5a71f8`, **#787** `936692ec7`, **#786** `4c890c7ac`;
+  `innovation-upstream/devrc` **#1447** `719519fa9`). This doc's own prior updates merged as
+  **`21f2c162`** (#1492), **`5c93440d`** (#1530), **`a66b6fb3`** (#1597).
 
 - **The ONE item filed rather than fixed, with a mechanical closing condition:** `m_index_store`
   restores `sys.path` to its exact pre-call value on the **success** path as well as the failure
@@ -1386,8 +1387,19 @@ belongs to that arc's own session. via: measurement
     not devrc, so it needs an upstream PR.
     **Closing condition:** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 on
     `origin/main`, and an upstream PR for (c).
-    🔨 **(a) AND (b) BUILT 2026-09-12 — devrc PR (branch `fix/cairn-validate-spellings`). (c) is
-    NOT in it and stays open: it lives in `ZacxDev/cairn`.**
+    ✅ **(a) AND (b) MERGED 2026-09-12 — devrc #1583, squash `c1ecc830`. (c) is NOT in it and
+    stays OPEN: it lives in `ZacxDev/cairn` and needs an upstream PR.**
+    **Closing condition MET, verified by CONTENT at `origin/main`** (a squash makes
+    `merge-base --is-ancestor` false forever, so ancestry cannot answer this):
+    `grep -c 'subsystem_touch.py --validate' claude/skills/` → **0**; `validate_command` emits
+    `cairn-validate --store … --scope …`; the RECOVER remedy carries
+    `--flake ~/workspace/devrc --impure`; both new guards present.
+    ⚠ **This line read "🔨 BUILT" for the first hours after the merge** — the same
+    status-drift class this very PR existed to fix, reintroduced by the PR that fixed it.
+    Written down rather than quietly corrected: a doc edited in the same commit as the work
+    it describes cannot record that work's own merge, so the status line is stale by
+    construction until someone comes back for it. **Do not treat a merged handoff edit as
+    self-updating.**
     ⚠ **The line numbers in this item were STALE** — the two sites are `:135` and `:157`, not
     `:128`/`:150`. Found by grepping the string, not by opening the named line.
     - **(a)** both now spell `cairn-validate`. The `:157` site is the single-FILE form, so it
@@ -2296,6 +2308,76 @@ covers; pin it with `--config`, do not `cd`.
 - 🔴 **The pre-create sweep only works as a SEPARATE step** — see `#1529`, a duplicate of `#1522`
   that I opened because I piped `gh pr list` into the same command as `gh pr create`. The sweep ran;
   I never read it.
+
+- ⚠ **RETIRED — the two "Left behind deliberately" bullets above are now WRONG, and their
+  instruction is spent.** The arc has closed: `refs/remotes/origin/pr/1508` was deleted with
+  `git update-ref -d`, and the worktree **`/tmp/wt-cairn-slice3` has been REMOVED**. Before
+  removing it I checked it held nothing unique — clean tree, `cairn_pin.py` / `cairn-validate` /
+  `flake.nix` byte-identical to `origin/main`. 🔴 **Its `git log origin/main..HEAD` showed five
+  "unique" commits and that is the SQUASH ARTIFACT, not stranded work**: #1508 landed as
+  `44bd8b0e`, so its commits are non-ancestors of `main` forever. Do not read that list as work
+  to rescue. `/tmp/wt-mainctl` is ANOTHER session's and was left alone.
+
+- 🔴 **A GUARD'S OWN DOCSTRING IS A COVERAGE CLAIM, AND MINE WAS FALSE — check it by running the
+  mutants against the OTHER file alone.** I added a seam ledger whose docstring said "nothing else
+  asserts it … which is a silent green". Control: each of its three mutations run against
+  `test_cairn_flake_pin.py` with `test_subsystem_touch.py` **deselected** — `--validate` prepend
+  dropped → 3 failed; `--store` dropped → 1 failed; caller argv dropped → 2 failed; pristine
+  control green at 15 first. All three already covered, behaviourally, in both tiers. The guard
+  was deleted. **A second, weaker copy of an existing guard reads as coverage while providing
+  none.**
+
+- 🔴 **A SPELLED GUARD CATCHES THE COMMENT THAT DESCRIBES IT.** After widening
+  `test_the_refusal_NAMES_NO_running_copy_path`, the comment explaining the withdrawn draft could
+  not quote the token it was about — the guard reads that function's own source, so spelling it
+  reds the suite. Measured. The comment says so instead of quoting it.
+
+- 🔴 **A FIXTURE WHOSE TWO SIDES CAN BE EQUAL CANNOT SEE THE MUTANT THAT COLLAPSES THEM.** My
+  first battery scored "drop `--store`" as SURVIVED because the test modelled the launcher's
+  default with the SAME value the command emits — the parse yielded the right root either way. It
+  dies only against a sentinel the caller's store can never equal. Pick fixture values pairwise
+  distinct, and distinct from any constant the assertion names.
+
+- 🔴 **TWO INSTRUMENTS LIED ABOUT A RUNNING TEST SUITE, IN OPPOSITE DIRECTIONS, IN ONE SESSION.**
+  (a) `pgrep -f 'run-tests.sh'` matched **another session's** runs out of `devrc-gate-base`, so a
+  wait-loop never exited. (b) `grep -q` on `/proc/<pid>/cmdline` returns NOTHING because the file
+  is NUL-separated and therefore "binary", so a liveness guard reported my healthy suite as
+  **GONE**. Use `tr '\0' ' ' < /proc/<pid>/cmdline | grep -q`, and wait on a RESOLVED PID whose
+  cmdline you have confirmed — never a box-wide pattern.
+
+- ⚠ **`scripts/run-tests.sh` REFUSES outside its dev shell, and that refusal is correct.** Missing
+  `logrotate`/`dash` → exit **3**, "the suites SKIP the tests that need these, so the run would go
+  green while testing less". Run it as
+  `nix develop <repo> --command bash <repo>/scripts/run-tests.sh <repo>`. Also: a wrapper's
+  trailing `echo`/`tail` eats the status — the harness printed `[exited with code 0]` over a real
+  exit 3.
+
+- 🔴 **`audit-dispatch.py`'s WHERE TO WORK section can be WRONG, and it is wrong in the dangerous
+  direction.** Run via a subshell `cd` from another repo, it concludes "the repository this
+  session is standing in" and tells you to dispatch with `isolation: "worktree"` — which worktrees
+  the **dispatching session's cwd repo**, not the PR's. Hit three times here (this is a dispatch
+  hub; cwd was `datapacket-talos` while every PR was in `devrc`). Override it: have the agent
+  `git -C <repo> fetch origin refs/pull/<n>/head:refs/audit/prN` then `worktree add --detach`
+  itself.
+
+- ✅ **The claims-block refusal and the HEAD check both EARNED their keep.** `audit-dispatch.py`
+  refused a round-2 brief because no `audit-claims` block existed — rather than silently
+  degrading a delta re-audit into a blind full audit that would then read as covered. And it
+  detected that the shared checkout's HEAD was not the PR head and refused to use `..HEAD` in the
+  range. **Post the block as an ISSUE comment** (`--json comments` does not return review
+  comments).
+
+- ⚠ **A rebase re-parents commits, so a sha-anchored claim in an audit ladder goes stale.** Round 1
+  read `e4e3b930`; the rebase made it unreachable, so round 2 was anchored on `899f0de8`, its
+  post-rebase equivalent. Say so in the claims block rather than letting the sha silently stand in.
+  Same class bit a figure IN this doc: "6,693 lines at that PR's first commit" was re-parented by a
+  rebase one commit later **in the same range**.
+
+- 🔴 **A HANDOFF EDIT CANNOT RECORD ITS OWN MERGE.** #1583 fixed the doc's stale status lines and
+  then left its own entry reading "🔨 BUILT" after merging — the same class, one entry lower,
+  reintroduced by the PR that fixed it. A doc edited in the same commit as the work it describes
+  is stale **by construction** until someone comes back for it. **Do not treat a merged handoff
+  edit as self-updating** (#1597 is the follow-up that closed it).
 
 ## How to verify
 

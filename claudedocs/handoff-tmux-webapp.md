@@ -39,11 +39,13 @@ returns *tail's* status, so an `rc=0` read that way says nothing about the merge
 🔴 **The laptop stream IS delivering** — the absence is a missing measurement, not a fault.
 
 **Cards 517 / 518 / 519 after the browser work:** 518 **PASS** (behaviourally: toggled, reloaded,
-state persisted, 27 `data-tool-detail` disclosures). 517 **advanced but NOT closed** — the
-`disabled` state was a cross-site navigation artifact and same-site yields `ready`, but the
-delivery axis (`queued`/`sending`/`sent`/`failed`) is **unverified and cannot be verified
-read-only by construction**; the authorised scratch-pane test was built and never ran (rank 55).
-519 as above.
+state persisted, 27 `data-tool-detail` disclosures). 517 — **the delivery axis WAS driven
+2026-09-12 (rank 55): a reply typed in the UI reached a real pane and the shell ran it.**
+Criteria 2 and 3 measured live; criterion 1 passes `ready`→`queued` and **FAILS `queued`→`sent`,
+which needs a reload** — a successful delivery renders "has not picked it up" indefinitely
+(rank 58, card comment 1314). The `disabled` state was a cross-site navigation artifact and
+same-site yields `ready`. The `/tmux` mount specifically is still unexercised and is unreachable
+with a disposable pane. 519 as above.
 
 ⚠ **This Status block has now been stale TWICE in one arc.** It was ~551b4902-era at session
 start, and the version written at `6d6dfd0c` was already wrong an hour later (it said #1515 was
@@ -1207,6 +1209,11 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     because closing was not what was asked for.
     forcing: none
 53. **Measure criterion 1 of task 519 on the LAPTOP — WORKBENCH IS NOW DONE, laptop is not.**
+    ⏳ **RE-VERIFIED STILL BLOCKED 2026-09-12T17:3xZ, and the block is unchanged:** the laptop's
+    freshest Claude pane is `%29` (`vetr`) at **35,378s ≈ 9.8h** old (`last_activity_ts`
+    07:32:49Z); 9 claude panes there, next freshest 15.7h. Nothing to measure until a human types
+    on that machine — an idle host still cannot demonstrate stream latency, so this needs the
+    operator, not a fix.
     🔴 The workbench number exists: **2.0s and 3.1s**, induced-append, measured twice with
     `.opencode-dispatch/tmux-ui-verify/scratch/measure519.py` (in devrc, git-ignored) — it uses
     THIS KIND OF SESSION as the subject, because a Claude Code session appends to its own
@@ -1229,19 +1236,42 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     (reply-delivery state renders, `#754` merged), 518 (JSONL chat view renders, `#753` merged).
     forcing: user — all three cards name an operator observation in their closing condition.
 
-55. **Card 517's delivery axis — the test was BUILT AND AUTHORISED BUT NEVER RAN.** The operator
-    approved a real reply into a scratch pane. The harness was created (`term launch` -> pane
-    `%75` on workbench; `attention raise` -> entry `13178`, priority `low`) and the dispatch was
-    QUEUED behind another browser run to avoid two agents fighting one Brave. Before it fired,
-    the operator closed the window and the entry was resolved at 06:17:43Z, destroying both
-    preconditions. 🔴 **Nothing about 517 was learned from the scratch pane.** The un-run brief,
-    annotated with why it is dead and the exact three commands to rebuild the harness, is
-    `.opencode-dispatch/tmux-ui-verify/brief4-NOT-DISPATCHED.md`. Rebuild before reusing it — and
-    note the CODENAME IS NOT UNIQUE (`mango` named three panes, one of them a live working pane),
-    so disambiguate by host + window index, and select the control by `data-reply-entry`, never
-    by position.
-    forcing: user — the operator explicitly authorised the scratch pane to close this card, and
-    the authorisation was spent without the measurement being taken.
+55. ✅ **DONE 2026-09-12 — THE REPLY WAS DRIVEN, AND IT FOUND A DEFECT.** A reply typed in the
+    web UI reached a real tmux pane and the shell executed it (`%77` shows the probe text then
+    `scratch: command not found` — typed **and** Enter pressed). Card 517's criteria 2 and 3 are
+    now measured LIVE rather than in a fake; criterion 1 holds for its first hop and **fails for
+    its second**. Recorded as comment **1314 on card 517**; run report (gitignored, so not the
+    durable copy) `.opencode-dispatch/tmux-ui-verify/findings-run4.md`.
+    🔴 **THE DEFECT — ONE REFETCH, AND IT CAN FIRE BEFORE THE OUTCOME EXISTS.** `#panel-attention`
+    refetches on `load, sse:attention.changed, clawgate:resync, clawgate:termwrite from:body`, and
+    **nothing broadcasts when the host agent claims or completes a write** — so the POST triggers
+    exactly ONE refetch and the final screen is decided by a race. Reply to a real pane went
+    terminal at **+2.65s** *after* its refetch at **+1.17s** → froze on `queued` for a full 50s
+    sample and only read `sent` after a reload. Reply to a nonexistent pane went terminal at
+    **+0.17s** *before* its refetch at **+1.79s** → rendered the true `failed`. The timings make
+    **the broken side the normal one** (healthy agent ~2.6s vs refetch ~1.2s), and the frozen text
+    is not stale but FALSE: *"Queued, not typed yet … workbench's agent has not picked it up"* for
+    a reply that landed 1.5s later. See rank 58.
+    🔴 **NO TEST CAN SEE IT, STRUCTURALLY:** e2e has no host agent, so `queued` is terminal there
+    by construction and `reply-delivery.spec.ts:106-110` asserts exactly that, correctly; the Go
+    tests move the row in a fake. #754's own comment listed *"No host-side agent was involved
+    anywhere"* under NOT-verified. This is that gap — the isolation seam, both halves green alone.
+    🔴 **TWO HARNESS FACTS THAT BLOCK ANY REPEAT, neither known to the brief.** (a) **An entry
+    raised with the DEFAULT `--session` is invisible on EVERY surface** — `QuestionIsStale`
+    (`internal/attention/staleness.go:182`) suppresses a question whose session's pane was observed
+    after the entry and is not waiting, and the raising session is busy by definition. The first
+    entry (13301) rendered nowhere for this reason. Raise with
+    `env -u CLAUDE_CODE_SESSION_ID … --session ''`. (b) **`/tmux` joins questions to windows by
+    `SessionID`, NEVER by pane** (`api/tmux_ui.go:244`), so a session-less entry cannot render
+    there at all — **the `/tmux` mount stays UNEXERCISED, and is unreachable with a disposable
+    pane**. The axis was driven on `/attention`, same control, same `ReplyDeliveryState`.
+    🔴 **`hx-confirm` DEFEATS A TRUSTED CLICK FROM A BACKGROUND TAB, and fails SILENTLY.** The
+    first attempt enqueued NOTHING — 0 `/ui/term` requests against **25 `GET /ui/attention`** as a
+    positive control — because the panel re-renders the control server-side and REVERTED the
+    attribute mutation before the click 236ms later. Fire set-value + drop-confirm + `.click()` in
+    ONE synchronous expression. NOT verified as a result: the trusted-click path, `sending`, and
+    `unknown`. The old brief is spent — its ids (entry `13178`, pane `%75`) were already dead.
+    forcing: none — the measurement was taken.
 56. **Decide whether 519's criterion 1 should keep naming the RENDER hop.** What is measured is
     propagation to clawgate's READ MODEL (2.0s/3.1s). The criterion says "visible on
     `/session/<id>`". The page carries `hx-trigger="… sse:transcript.changed …"` but the render
@@ -1253,6 +1283,21 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     host activity). Inducing a real gap means stopping the host agent or rolling the pod, which
     is a deploy-class action; decide whether it is worth it before doing it.
     forcing: none
+58. 🔴 **The reply control freezes on `queued` after a SUCCESSFUL delivery — fix the missing
+    broadcast.** Found by rank 55's drive; full measurements there and in card 517 comment 1314.
+    The row transitions to `delivered` in the claim/complete handlers and **nothing tells the
+    browser**, so `#panel-attention`'s single post-POST refetch is the only read and it usually
+    fires first. Fix direction: broadcast `clawgate:termwrite` (or an SSE `termwrite.changed`)
+    from the handlers where the row actually transitions, or poll while any rendered delivery is
+    non-terminal. ⚠ A test for it cannot live in e2e as it stands — e2e has no host agent, so the
+    fixture must move the row *after* the POST's refetch, which is the case no current test
+    builds.
+    CLOSING CONDITION: on an armed deployment with a live host agent, a reply into a disposable
+    pane reaches `data-reply-state="sent"` **without a reload**, with the queue row's
+    `completedAt` later than the POST. Checked by: re-running rank 55's drive (the harness recipe
+    is in that rank, including the two facts that make the entry render at all).
+    forcing: gate — card 517's criterion 1 names "visible without a page reload", and the hop
+    that matters on a healthy host does not satisfy it.
 
 ## Open investigations — live diagnosis state
 
@@ -2225,7 +2270,32 @@ are corrected in place.
   `clawgatectl tmux windows` + `clawgatectl transcript ls`, match on `claude_session_id`,
   compute `ledger.last_activity_ts - updatedAt`. Expect 0-5s, as the workbench sessions show.
 
-### Card 517's delivery axis — authorised, built, never exercised
+### ✅ RESOLVED 2026-09-12 — card 517's delivery axis WAS driven, and the axis sticks at `queued`
+
+- **What was run:** scratch pane `%77` (workbench, tmux `scratch15` w6, `/tmp`, plain `zsh`) +
+  entry **13317**; a second entry **13337** bound to `%999999` for the failure branch. Both
+  resolved, window killed, browser tab closed. No real session's reply control was touched, and
+  the operator's screen was never taken (`wake` only, never `activate`).
+- **Observed (with values):** the pane received `scratch 517 delivery axis probe` and the shell
+  ran it (`scratch: command not found`) — typed **and** Enter pressed. Queue row
+  `4mvvGhpX_qxjXiGosgSnLw`, tier `browser`: created→claimed **1.81s**, created→completed
+  **2.65s**, `delivered`. Rendered `ready` → `queued` @ **+1.17s**, then **unchanged for 50s**;
+  `sent` only after a reload. The failure arm: terminal `failed` @ **+0.17s**, rendered `failed`
+  @ **+1.79s**, notice *"NOT delivered. The pane did not receive…"*.
+- **Ruled out:** *the state is an optimistic client flip.* At +1.17s the row was still `pending`
+  and the control said `queued`, not delivered — criterion 2's discriminating case, live.
+  via: measurement
+- **Ruled out:** *the `queued` freeze is a wrong state mapping.* A reload of the same entry
+  rendered `sent` from the same row. The mapping is right; nothing re-reads it. via: measurement
+- **Ruled out:** *the first (trusted-click) attempt failed because the feature is broken.* It
+  enqueued nothing because no POST was made — 0 `/ui/term` against 25 `GET /ui/attention` as a
+  positive control — the panel having reverted the `hx-confirm` removal before the click.
+  via: measurement
+- **Leading hypothesis:** no broadcast exists for a termwrite state change, so the single
+  post-POST refetch is the only read and usually precedes the outcome. See rank 58.
+- **Next probe:** rank 58's closing condition.
+
+### ⚠ SUPERSEDED by the entry above — card 517's delivery axis — authorised, built, never exercised
 
 - **Symptom + exact repro:** the reply control's delivery states cannot be observed without
   submitting a reply, and submitting types into a real tmux pane. Load `https://clawgate.zacx.dev`,
