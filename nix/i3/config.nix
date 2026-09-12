@@ -109,6 +109,39 @@ for_window [class="float"] floating enable
 # constants — so changing the picker's size would silently leave i3 forcing the
 # old one. One geometry decision, one place: alacritty sizes, i3 only centres.
 for_window [class="float" instance="mention-open"] floating enable, move position center
+# 🔴 THE REVIEW TUI IS THE ONE FLOAT i3 DOES SIZE — IN PERCENT OF THE WORKSPACE,
+# and that is not a contradiction of the paragraph above but its consequence.
+# `window.dimensions` is a count of CHARACTER CELLS, and a cell is not a length:
+# its pixel size is a function of the font size and the display's DPI. The picker
+# is small enough that no display makes its cell count overflow, so leaving its
+# geometry in one place costs nothing. The review window is not: at 200x50 cells it
+# opened bigger than the screen and was unusable. MEASURED — the workbench's usable
+# workspace is 3440x1413 at ~96 DPI; the laptop's is 2256x1480 on a 285mm eDP-1
+# panel, ~201 DPI. Both hosts resolve the SAME alacritty.toml out of the nix store
+# and it carries no `[font]` section, so the font size is alacritty's default on
+# both and the laptop's cell is roughly twice the workbench's in each axis — one
+# constant asking for roughly four times the area. No cell count satisfies both.
+#
+# `ppt` is a percentage of the workspace i3 is placing the window on, so it is
+# correct on both hosts by construction, and on any display added later. That makes
+# THIS line authoritative for the review window's size whenever i3 is running;
+# `REVIEW_COLUMNS`/`REVIEW_LINES` in scripts/mention-open.py survive only as the
+# pre-resize hint for what alacritty maps first, and as the standalone fallback if
+# this rule is absent. The percentage is a taste call and may be tuned; the UNIT is
+# not — `resize set 90 90` is legal i3 meaning 90 PIXELS, because the unit defaults
+# to px when omitted.
+#
+# `floating enable` is REPEATED, exactly as in the picker's rule and for a sharper
+# reason: `resize set` on a still-TILED window is a silent no-op, so this rule must
+# not depend on the shared rule above still being reached first.
+#
+# `instance="mention-review"` and NOT `class="float"`: the general half is shared by
+# every float terminal in the system, so sizing there would resize a dozen bar-click
+# detail windows, media-menu, airvpn-menu — and the picker, undoing the paragraph
+# above. The instance half is `REVIEW_CLASS` in scripts/mention-open.py, and
+# scripts/tests/test_i3_picker_centering.py derives it from that constant rather
+# than spelling it, so a rename there reddens instead of leaving this rule inert.
+for_window [class="float" instance="mention-review"] floating enable, resize set 90 ppt 90 ppt, move position center
 # 🔴 `(?i)` IS LOAD-BEARING, not decoration. i3 criteria are PCRE and
 # CASE-SENSITIVE by default (the userguide's "case-insensitive" examples are
 # showing you how to opt IN with `(?i)`), and `class` matches the SECOND field

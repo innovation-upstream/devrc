@@ -1683,18 +1683,33 @@ def open_browser(url: str) -> int:
     return 0
 
 
-# The float terminal the review TUI runs in, and its geometry.
+# The float terminal the review TUI runs in, and its PRE-RESIZE size HINT.
 #
 # `--class float,mention-review` puts it under `for_window [class="float"]
 # floating enable` in `nix/i3/config.nix` — the same rule the fzf picker's
-# terminal uses — while the instance half names THIS window specifically, so an
-# i3 rule can size or place a review without catching the picker.
+# terminal uses — while the instance half names THIS window specifically, and a
+# second, narrower rule keys on exactly that: `for_window [class="float"
+# instance="mention-review"] floating enable, resize set 90 ppt 90 ppt, move
+# position center`.
 #
-# Bigger than `PICKER_*` because the two windows hold different things: the
-# picker is a list, a review is a diff beside a file panel.
+# 🔴 THAT i3 RULE IS AUTHORITATIVE FOR THE SIZE. THESE TWO NUMBERS ARE A HINT.
+# They are a count of CHARACTER CELLS, and a cell is not a length — its pixel size
+# depends on the font size and the display's DPI, so no single pair can fit two
+# displays. At 200x50 this window opened bigger than the laptop's screen and was
+# unusable: the workbench's usable workspace is 3440x1413 at ~96 DPI, the laptop's
+# 2256x1480 on a 285mm panel at ~201 DPI, so the laptop's cell is roughly twice the
+# workbench's in each axis. i3 resizes to a percentage of the ACTUAL workspace the
+# moment the window maps, which is host-independent by construction; these values
+# only decide what alacritty maps FIRST, and are the standalone fallback for the
+# case where that rule is absent or i3 is not the window manager. So they are
+# deliberately conservative rather than large — an over-large hint is a visible
+# flash before the resize with i3, and an unusable window without it.
+#
+# Still bigger than `PICKER_*`: the picker is a list, a review is a diff beside a
+# file panel.
 REVIEW_CLASS = "float,mention-review"
-REVIEW_COLUMNS = 200
-REVIEW_LINES = 50
+REVIEW_COLUMNS = 140
+REVIEW_LINES = 40
 
 # The wrapper that runs neovim with octo.nvim configured. Packaged as
 # `nix/pkgs/tools/nvim-octo/` and pinned onto the hint wrapper's PATH by
@@ -1957,8 +1972,14 @@ def open_reference(url: str) -> tuple[int, str]:
 # constant rather than spelling it, and goes red on the disagreement.
 #
 # The SIZE stays here and only here. i3 centres the window alacritty sized; the
-# config carries no `resize set`, so `PICKER_COLUMNS`/`PICKER_LINES` below are
-# the single source of the picker's geometry.
+# picker's rule carries no `resize set`, so `PICKER_COLUMNS`/`PICKER_LINES` below
+# are the single source of the picker's geometry. 🔴 THE CONFIG DOES CARRY ONE
+# NOW, for the review window — `resize set 90 ppt 90 ppt` on
+# `instance="mention-review"` — so this is a claim about the PICKER's rule, not
+# about the file. The two windows differ on purpose: the picker is small enough
+# that no display makes its cell count overflow, the review window was not.
+# Giving the picker an i3 resize would restate its geometry in a second file that
+# cannot see these constants.
 PICKER_CLASS = "float,mention-open"
 PICKER_COLUMNS = 120
 PICKER_LINES = 22
