@@ -1,9 +1,18 @@
 # Handoff: gate-flake-store-api — 2026-09-01
 
-## Run this first — the index, one read-only command
+## Run this first — the index, one command
 ```bash
-python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
+cairn recall --repo ~/workspace/devrc
 ```
+⚠ **This block used to prescribe `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py`, and
+`#1508` DELETED that file** — the cairn consolidation moved the reader into the pinned package, so
+the old spelling now fails with a file-not-found. 🔴 **It is not just this doc: `63` files under
+`claudedocs/` still prescribe that path (`71` occurrences), plus `5` source comments
+(`scripts/lib/handoff_search.py`, `scripts/tests/test_subsystem_recall.py`,
+`test_repo_path_guard.py`, `test_store_root_ledger.py`, `scripts/present/measure.py` — all PROSE,
+no code path).** Only this doc's occurrence is fixed here; the sweep is filed as rank 9, because
+fixing one site and implying the rest is the partial-sweep failure. Counts measured 2026-09-12 at
+`origin/main` `8114a124`.
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
 reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
@@ -32,7 +41,15 @@ every round but the last produced findings, and the last was ended deliberately 
 findings had converged on prose accuracy inside a test guard while the effort's actual
 verifier (rank 1) had still never been run.
 
-- devrc `main` @ `65f7325b`. Claim `gate-flake-store-api-5` **RELEASED**.
+- 🔴 **There is deliberately NO "devrc `main` @ \<sha\>" line here any more.** It read `65f7325b` —
+  the `#1239` squash — until 2026-09-12, by which point this doc's own later text had moved past it
+  twice. The replacement was written as `8114a124` and **was stale before it was pushed**: `main`
+  took `#1564` in the interval, which is the second time in one session. **A bare tip sha in a
+  State-now section is a claim that expires on the next merge, and nothing in this repo updates
+  it.** Every sha here is instead pinned to the commit it is ABOUT — `ce9b55c3`, `c0bbd6d9`, and
+  `8114a124`/`4e970998` as named measurement POINTS, never as "the tip". Claims:
+  `gate-flake-store-api-5` **RELEASED**; `gate-flake-store-api-1` released 2026-09-12 once the
+  measurement landed.
 - `#1219` → squash `b4fde334`. `#1234` (doc) → `3d0695c7`. `#1239` → squash **`65f7325b`**.
 - Content-verified on `origin/main`: the gap guard
   `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` is present; the three dead
@@ -89,7 +106,40 @@ Found by accident while doing the tmpfs work. Documented on `main` in
   (`TestAHungRoundTripSAYSWhichSideBlocked`), so they must be re-run, and the fix
   must be shown RED at a `devrc-fsync`-style path before and GREEN after.
 
-### Whether the tmpfs siting actually reduces the flake rate — UNMEASURED
+### CLOSED 2026-09-12 — whether the tmpfs siting reduces the flake rate: MEASURED, and it did
+🔴 **This block's heading read "UNMEASURED" and its "Next probe, verbatim" below told the next
+session to run a probe that HAS NOW BEEN RUN.** Read rank 1 for the reading — 0 of 99 verdicts on
+heads carrying `ce9b55c3` against 12 of 298 that do not, P(0) ≈ 0.017 — and do **not** re-run the
+snippet below. It is retained for two reasons and neither is "use it": its `grep -c` classifier
+names the right test families, and its **predicate is a LIMIT, not a baseline** — `--limit 40`
+newest-first with no ancestry test at all, which is the date-shaped sampling rank 1 says gives a
+wrong denominator. The closing reading used ancestry over 400 heads instead.
+⚠ **What is still UNMEASURED is the block's own hypothesis at its second point:** it predicted the
+rate "drops to ~0 where a tmpfs is available, and is **unchanged where the fallback fires**". The
+reading confirms the first half and says nothing about the second — **nothing has measured whether
+the GATE container has a usable tmpfs**, so a 0 is consistent with both "sited" and "the mechanism
+stopped firing for some other reason". That is rank 1's `[0, 22]` bound's sibling: recorded, not
+closed.
+✅ **The residual is much NARROWER than "it might change nothing in CI", and the narrowing is
+MEASURED on the manifest, not argued from defaults.** `store_siting.py:67` makes the only candidate
+`/dev/shm` and `:221` sets `_MIN_FREE_BYTES = 4 MiB`. The gate pipeline
+(`homelab-talos` `origin/trunk:clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml`,
+2,482 lines) contains **0 occurrences of `shm` and 0 of `medium:`** — positive controls on the same
+read: `pytests` 59, `emptyDir` 3, all three in comments — so **nothing overrides `/dev/shm` for the
+`pytests` step** and it gets the container runtime's default. ⚠ **Two halves, and only the first is
+a reading of this cluster:** "nothing in the manifest overrides it" is measured; "therefore 64 MiB"
+is the *containerd/Docker* default that `store_siting.py`'s own docstring cites, and **no node on
+this cluster was read for it** — a runtime or node setting can change it. Against a 4 MiB floor the
+check passes by 16× if that default holds, so the fallback needs `/dev/shm` **absent, read-only, or
+already ~94% consumed** — and the last of those is the concurrent-writer case the docstring already
+says cannot be closed from in-process. **What stays owed is one reading of a real gate container**;
+`kubectl` cannot take it after the fact (gate pods are ephemeral, pipelineruns pruned hourly), so
+the other surface is a `store:` path in any FUTURE store-api failure log — `devrc-store-*` = sited,
+`pytest-of-*` = fell back.
+
+The original block, unchanged below.
+
+#### Whether the tmpfs siting actually reduces the flake rate — as written before the measurement
 - **Symptom + exact repro:** none yet; this is an open measurement, not a bug.
 - **Observed (with values):** disk vs tmpfs, replaying `_replace_bytes`'s sequence
   (mkstemp → write → fsync file → `os.replace` → fsync dir), MAX reported because
@@ -268,7 +318,7 @@ Not a bug — a measurement that would mislead if run as written.
    🔴 **EVERY PER-TEST COUNT HERE IS A LOWER BOUND, AND THAT IS ALREADY MEASURED IN-REPO —
    do not upgrade the 0 into "it did not fail".** A GitHub status description is capped at 140
    characters; **100 of the 101 failure descriptions in this population are 138 characters, i.e.
-   truncated**, and `scripts/main-status-watch.py:236-239` records the measurement that matters: a
+   truncated**, and `scripts/main-status-watch.py:232-239` records the measurement that matters: a
    row described `failed=7` while naming ONE test, a row named none, and the row that named
    *this* flake was cut mid-word at `…_CAN_see_the_dif`. A description can prove "at least one
    test failed and here is its name"; it can never prove "these are all of them".
@@ -298,24 +348,53 @@ Not a bug — a measurement that would mislead if run as written.
    `scripts/tests/test_runner_bound_ledger.py`, and **4 of those POSTDATE `c0bbd6d9`**
    (03:16:50Z–03:46:19Z): the same design class, in a second ledger `#1561` does not cover.
    🔴 **That one is neither a flake nor a stale-base echo — `main` ITSELF IS RED ON IT**, run
-   directly at `origin/main` `4e970998` in a clean worktree: **1 failed, 1655 passed in 251s**,
+   directly at `origin/main` in a clean worktree at THREE successive tips — `4e970998` (**1 failed,
+   1655 passed**), `8114a124` and `61f41adf` (**1 failed, 4 passed** each, that file alone) —
    the only diff being two `claudedocs/` files these scanners do not read. It is **rank 8**.
    via: measurement
 
-   ⚠ **AND THE GATE'S OWN OBSERVABILITY IS WORSE THAN ITS RED RATE — noticed here, not
-   diagnosed.** `error` is **29 of 99** post-window verdicts (29%) against 41 of 298 (14%)
-   pre, and `main`'s last **8** commits carry **no completed `tekton/devrc-main-pytests`
-   verdict at all**: six `superseded by a newer run or a closed pull request`, two
-   `NO GATE POD: … the gate never started`, newest pending. A gate producing no verdict is not
-   a green one, and a rate computed over verdicts cannot see the runs that never reported.
+   ⚠ **THE GATE'S OWN OBSERVABILITY IS WORSE THAN ITS RED RATE: `error` is 29 of 99 post-window
+   verdicts (29%) against 41 of 298 (14%) pre. A gate producing no verdict is not a green one, and
+   a rate computed over verdicts cannot see the runs that never reported.**
+   🔴 **THIS IS NOT A NEW OBSERVATION AND THIS DOC SHOULD NOT RE-MEASURE IT — it is
+   `handoff-gate-speed-and-ci-signal.md`'s, at a larger sample and with the decomposition:**
+   *"Only ~21–22 of 100 `main` commits get an authoritative verdict (59.5% superseded, 15%
+   KILLED, 5% NO GATE POD)"* (`:54`), and split on this very fix, *"Of 43 post-fix pytests
+   verdicts on `main`, **40 were artefacts** … leaving **3** authoritative successes. Use PR
+   heads."* (`:363`). **Read those, not a count taken here.** The four artefact strings
+   (`NO CAPACITY` / `NO GATE POD` / `KILLED` / `BROKEN GATE`) are a SHIPPED mechanism, not
+   undiagnosed noise — `handoff-cairn-task-linkage.md:37`; they make the loss legible rather
+   than recovering it.
+   ⚠ **A paragraph here previously reported `main`'s "last 8 commits" with its own breakdown, and
+   it was wrong twice over — the count (`six superseded`; it was FOUR, plus one `KILLED` and one
+   pending, re-derived over the named range `457a5dc7~1..8114a124`) and the FRAME. "The last N
+   commits" is a moving window: `main` took two commits between writing it and checking it, so
+   the sentence was unfalsifiable by construction. Name a sha range or do not quote a window.**
 
    **What this does NOT close:** nothing here was measured on the OSS copy
    (`ZacxDev/cairn`'s identical 18-open-coded / 5-sited split), and the `[0, 22]` bound above is
    the residual this instrument cannot narrow — the pipelineruns that could have are pruned.
-   Kept at rank 1 only until someone re-words it as the census item it has become.
+   ⚠ **And the item's own placement is now wrong, stated plainly rather than left as a mood:** a
+   store-api fsync flake measured at 0 is no longer this doc's Goal, and ranks 8 and 9 are not
+   either — they are "what is CI's signal worth", which `handoff-gate-speed-and-ci-signal.md`
+   owns and already tracks (`:28-33` the census family, `:115-130` the 140-byte cap). **Moving
+   them is a doc-surgery task with a real closing condition** — the three items live in ONE doc
+   with `forcing:` lines intact and nothing cross-referencing them twice — and it is not done
+   here. Rank numbering stays stable regardless; claims are keyed to it.
 
-   — superseded text, kept because its caveat is still true of any FUTURE baseline: the old
-   baseline (5 store-api failures among 14 open PRs, 2026-09-01) is **not comparable**; it was
+   🔴 **THE PRESCRIPTIVE HALF OF THIS ITEM NOW LIVES IN `## How to verify`, NOT HERE.** The
+   runnable form — anchor, ancestry predicate, the three positive-control PRs — is one block, at
+   the bottom of this doc. What follows below is kept as PROVENANCE (why the anchor is
+   `ce9b55c3` and not `65f7325b`, and why a date filter is wrong), not as instructions: the
+   measurement has been taken, so read it as the record of a decision rather than a recipe.
+   Duplicating a recipe is what `claude/RULES.md` calls one rule in two places.
+
+   — superseded text. ⚠ **Its stated justification did NOT survive re-reading and is corrected
+   here:** this was kept as "a caveat still true of any FUTURE baseline", but it is a warning about
+   one specific PAST baseline, and rank 1's reading now supplies its own pre-window baseline
+   (12/298), so the 2026-09-01 figure is no longer anything's comparison point. The NUMBER is kept
+   because `supersede.md` says values age well; the claim about its scope is withdrawn. The old
+   baseline (5 store-api failures among 14 open PRs, 2026-09-01) was **not comparable** — it was
    measured against a partially-sited suite.
    🔴 **THE ANCHOR MOVED AGAIN — `65f7325b` IS NO LONGER THE LAST INTERVENTION.** `#1458`
    (squash **`ce9b55c3`**, 2026-09-10) found that `#1211`/`#1219`/`#1239` sited **5** store
@@ -338,9 +417,15 @@ Not a bug — a measurement that would mislead if run as written.
    rate that counts reds without classifying them will read rank 7's flake as this one failing
    to close. **Classify by the failing TEST before counting.** ⚠ Do **not** read that as "and
    the causes are unrelated" — rank 7 records why that is unestablished.
-   forcing: gate — a check has been failing PRs whose diff cannot reach it. ⚠ **Advisory, not
-   required: measured 2026-09-10 and re-measured 2026-09-11 — `main` has no required status
-   checks, no rulesets, `enforce_admins: false`.** See this doc's Gotchas for the qualifiers
+   forcing: **none — done.** ⚠ **This read `forcing: gate — a check has been failing PRs whose diff
+   cannot reach it` until 2026-09-12, and rank 1's OWN payload disproves it for this flake: 0 of 99.
+   A forcing function that survives the measurement retiring it keeps the item at position 1 of a
+   ranked list and is exactly how a finished item attracts a session.** The forcing claim did not
+   vanish, it MOVED — it is now rank 8's (`main` red on the runner-bound census) and rank 9's, both
+   below. Retained, unrenumbered, so live `claim-work` refs keep resolving — see rank 5's precedent.
+   ⚠ **And the advisory qualifier still applies to every gate item here, so it is kept:** measured
+   2026-09-10 and re-measured 2026-09-11 — `main` has no required status
+   checks, no rulesets, `enforce_admins: false`. See this doc's Gotchas for the qualifiers
    (the state is deliberate and is not yours to restore). 🔴 **`claude/skills/tekton/SKILL.md`
    says the OPPOSITE** — "requires both", "`enforce_admins: true`" — and is STALE; an earlier
    draft of this line cited it as corroboration. Re-read the setting live; cite no doc for it.
@@ -432,7 +517,10 @@ Not a bug — a measurement that would mislead if run as written.
    1's measurement found has replaced the flake it was written to chase.** Measured 2026-09-12
    by running the file directly at `origin/main` `4e970998` in a clean worktree:
    `scripts/tests/test_runner_bound_ledger.py::test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger`
-   → **1 failed, 1655 passed in 251.49s**, on the `new` arm:
+   → **1 failed, 1655 passed in 251.49s**, and re-measured after each of the two times `main` moved
+   under this work — `8114a124` (**1 failed, 4 passed in 19.56s**) and `61f41adf` (**1 failed, 4
+   passed in 17.57s**), that file alone — so the red is a property of the tree across THREE points,
+   not of one run. On the `new` arm:
    `{('scripts/tests/test_scoped_tests_shared_surface.py', 'ABSENT'): 1}`. That file spawns a
    runner with **no bound of its own** and has no `_OWN_BOUND_LEDGER` row, so the two-way seam
    ledger fires exactly as designed. **Not a flake, not a stale-base echo** — the control is that
@@ -459,6 +547,50 @@ Not a bug — a measurement that would mislead if run as written.
    mechanically checkable by running that one file. Checked by whoever next reads this doc.
    forcing: regression — `main` is red, and `claude/RULES.md`'s "a permanently-red gate is worse
    than no gate" applies to the third census in this family in two days.
+
+9. ⚠ **`#1508` DELETED `scripts/lib/subsystem_recall.py` AND 61 HANDOFF DOCS STILL PRESCRIBE
+   RUNNING IT.** Measured 2026-09-12 at `origin/main` `8114a124`, by `git grep` against the ref
+   rather than a working tree: the **command** spelling
+   `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py` appears **65** times in **61** files
+   under `claudedocs/` — each a "Run this first" block that now fails file-not-found. (The bare
+   PATH appears 71 times in 63 files; the extra 6 are prose about the path, not invocations, which
+   is why the closing condition below is keyed to the command form.) The replacement is
+   `cairn recall --repo <path>`. Positive control on the same read: `cairn recall` already appears
+   54 times in `claudedocs/`, so the corrected spelling is in use and the grep can see it.
+   via: measurement
+   - ✅ **No code path is broken — all 6 source-file references are comments or docstrings**:
+     `scripts/lib/handoff_search.py`, `scripts/present/measure.py`,
+     `scripts/tests/test_subsystem_recall.py`, `scripts/tests/test_repo_path_guard.py`,
+     `scripts/tests/test_store_root_ledger.py`, and `scripts/subsystem-store-api/Dockerfile` —
+     whose `:36` is **already correct** (*"there is nothing at `scripts/lib/subsystem_recall.py` to
+     COPY"*) and whose `COPY` at `:61` takes a vendored `.cairn-lib/` copy. ⚠ **An earlier count
+     here said 5 and missed the Dockerfile**, because the sweep was an extension-filtered `find`
+     rather than a `git grep` over the ref. Enumerate from the ref.
+   - 🔴 **THIS IS NOT NEW — the index has carried it as an `OPEN:` bullet since 2026-09-01, and
+     that bullet names this exact remedy.** `cairn recall --ref subsystem-store-api --scope devrc`,
+     the `2026-09-01: OPEN:` bullet *"THE CUTOVER LEFT TWO STORES AND `/resume` READS THE DEAD
+     ONE"*, whose third listed fix is *"rewrite the prescribed command in the
+     `resume`/`subsystem-index` skills and both handoff docs to `cairn recall`"*. **Read that
+     bullet before working this** — it also records the frozen-mirror half, which this item does
+     not, and it is the older object. What this rank adds is only the POPULATION (65 invocations /
+     61 files, re-counted at `8114a124`) and the fact that `#1508` has since made the command fail
+     outright rather than merely read a stale store. ⚠ **Found by `cairn recall` at resume time,
+     not by searching** — the recall surface answered a question this doc had not asked.
+   - **Found while editing one of those docs, not by looking for it.** Only
+     `handoff-gate-flake-store-api.md`'s own invocation is fixed (in the PR that filed this); the
+     other 64 are untouched, deliberately — a one-site fix that reads as a sweep is the failure
+     `claude/RULES.md` names under "one rule, one place".
+   - ⚠ **Same CLASS as `handoff-cairn-oss-multi-instance.md` rank 23 (stale spellings the
+     consolidation left behind), DIFFERENT population** — rank 23 is `subsystem_touch.py
+     --validate` under `claude/skills/`; this is `subsystem_recall.py` under `claudedocs/`. Do not
+     close either by the other's grep.
+   - 🔴 **A doc's "Run this first" line is the one command a resuming session runs before anything
+     else**, so this fails at the moment it is least expected and reads as a broken environment.
+   **Closing condition:** `git grep -c 'python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py'
+   origin/main -- 'claudedocs/*'` sums to **0**. Keyed to the invocation, not the bare path —
+   docs that merely *discuss* the dead path (including this item) must not make the condition
+   unsatisfiable. Mechanical; checked by running that grep.
+   forcing: none — nothing is broken at runtime; it wastes a session's first command.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
@@ -637,9 +769,10 @@ nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   $DEVRC/scripts/collector/keylog/tests -q -p no:cacheprovider    # 1 failed, 100 passed
 gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/main)/status \
   --jq '.statuses[]|"\(.context) \(.state): \(.description[0:100])"'
-#   ⚠ This can show NO completed verdict at all: on 2026-09-12 main's last 8 commits carried
-#   six `superseded by a newer run…` and two `NO GATE POD`. A gate producing no verdict is
-#   not a green one — read the state, never just the absence of a `failure`.
+#   ⚠ This can show NO completed verdict at all, and that is the NORMAL case, measured at n=100
+#   in handoff-gate-speed-and-ci-signal.md:54 (~21-22 of 100 main commits get an authoritative
+#   verdict). A gate producing no verdict is not a green one — read the state, never just the
+#   absence of a `failure`, and prefer PR heads to main for any rate (that doc's :363).
 
 # rank 8 — main's CURRENT own red, and the reproduction is one file (expect 1 failed)
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \

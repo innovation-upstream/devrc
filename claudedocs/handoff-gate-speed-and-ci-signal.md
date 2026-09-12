@@ -110,7 +110,15 @@ the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points ever
    forcing: none
 2. **CLOSED — `#1469`'s audit ladder, `#1502`, shipped and consumer-verified.**
    forcing: none
-3. **CLOSED — the store-api flake was already fixed by `#1458`; `#1512` records it.**
+3. **CLOSED — the store-api flake was already fixed by `#1458`. ⚠ `#1512` is NO LONGER the
+   measurement of record**: it split on `ce9b55c3`'s TIMESTAMP and its zero was underpowered
+   (4/125 → 0/45, P(0) ≈ 0.23). Superseded 2026-09-12 by an ANCESTRY split over 400 PR heads —
+   **0 of 99** verdicts on heads carrying the sha against **12 of 298** that do not, P(0) ≈
+   **0.017** — recorded in `devrc#1568` (`8114a124`), full table at
+   `handoff-gate-flake-store-api.md` rank 1. ⚠ **`#1512`'s table is not WRONG**: re-splitting the
+   same 397 verdicts by date reclassified 5 and **0 of 101 failures**, so its predicate was the
+   wrong test and changed nothing at this sample. Cite the newer read; keep `#1512` for its
+   "it was never the worst flake" finding, which stands.
    forcing: none
 4. **`#1524` — OPEN, and it OWES A DELTA RE-AUDIT before merge.** Round 1's fix round produced six
    fixes, and the ladder rule is explicit: a round that produced findings needing fixes is followed
@@ -122,8 +130,17 @@ the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points ever
    cache hit — the cost is entirely rebuild-on-change.
    forcing: none
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**.
-   🔴 Decide it TOGETHER with rank 4: `main-status-watch.py:232-286` already implements the same
+   🔴 Decide it TOGETHER with rank 4: `main-status-watch.py`'s flake screen already implements the same
    completeness-proving screen in **15 lines**, and `#1524` rebuilds that gate at ~885. Same question.
+   🔴 **NEW EVIDENCE FOR THAT DECISION, 2026-09-12 — and it cuts toward DELETE.** The screen exists
+   to skip re-runs on KNOWN FLAKES, and the store-api flake it was written around is now at **0 of
+   99** verdicts on heads carrying `ce9b55c3` (`handoff-gate-flake-store-api.md` rank 1). The same
+   read independently re-derived this file's own truncation finding from scratch — **100 of 101
+   failure descriptions truncated at 138 characters** — which is what makes the screen unsatisfiable
+   (the measurement sits beside `_FAILING_RE` in that file). So the screen now guards a flake that has
+   stopped occurring, using a completeness proof a 138-byte field cannot supply. ⚠ **Not a decision —
+   the 2026-10-11 date and "decide them together" both stand**; this is the datum to decide ON, and it
+   did not exist when the date was set.
    forcing: none
 7. **Pin the `repo-full-name` invariant in `homelab-infra`'s supersede tests.** `test_supersede_
    wiring.py` has **zero** occurrences of the string pass 2's correctness rests on. Fix: extend
@@ -134,8 +151,18 @@ the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points ever
    7 days of normal merging is NOT a clean bill — it is the instrument failing to see its bucket.
    forcing: user — the operator chose merge-in-dry-run-arm-later.
 9. **CLOSED by `#1561`** — the kill scanners no longer read `claudedocs/`, which ends the treadmill
-   rather than paying another round of it.
-   forcing: none
+   rather than paying another round of it. **Rate evidence that the close is real and not merely
+   merged:** the kill-mention ledger accounts for **22** `tekton/devrc-pytests` reds across PR heads
+   and **every one predates `c0bbd6d9`** — read 2026-09-12 ~04:00Z in `devrc#1568`; see rank 1 of
+   `handoff-gate-flake-store-api.md` for why that population is read-time-only and cannot be
+   re-derived.
+   🔴 **Both instances of the CLASS are now fixed and the class itself is not.** The same design — a
+   census over tracked text reddening `main` for everyone — fired next from
+   `scripts/tests/test_runner_bound_ledger.py` (**5** reds, **4** after `c0bbd6d9`), closed by
+   `#1567` `6f1867b1`. **At least two instances in two days, both measured here, and nothing prevents
+   the next one.** Tracked as `handoff-gate-flake-store-api.md` rank 8, closed as an instance and
+   retained for the class.
+   forcing: none — both instances shipped; the class is unaddressed and owned by nobody.
 10. **ROUTE `scripts/stale-base-triage.py`, OR DECIDE NOT TO SHIP IT.** Nothing invokes it — no timer,
    hook, CI step, skill or nix entry. ~885 payload lines + ~1,350 test lines that run only if someone
    remembers the path. Round 0 raised it, round 1 restated it, no fix round addresses it because it is
