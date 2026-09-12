@@ -14,14 +14,66 @@ checkout* and reloading Brave. It runs on **two hosts**, at the **same path on b
 
 That path is a **linked worktree** of the host's `homelab-talos` clone, on a local branch
 `clawgate-ext-local` tracking `origin/trunk`. Hosts: **workbench** (this host / `192.168.50.250`)
-and **laptop** (`ssh zach@192.168.50.155`). Both must be updated — doing one leaves the other on the
-old build.
+and **laptop**. Both must be updated — doing one leaves the other on the old build.
+
+🔴 **The laptop's LAN address is not reliable — reach it at `ssh zach@10.42.0.100` (mesh).**
+Measured 2026-09-12: the LAN address `zach@192.168.50.155` (which this file used to prescribe
+everywhere) returned **no route to host**, while the mesh address `zach@10.42.0.100`
+answered immediately. An unreachable host reads as "checked, nothing there" if you let the ssh
+failure scroll past — it is **unmeasured**, not clean. Say which of the two you got.
 
 A worktree is used deliberately, **not** the `homelab-talos` base clone. The base clone is
 permanently dirty and chronically behind (14 commits on 2026-08-12), so loading it directly makes
 the deployed extension hostage to that drift — and it cannot be fast-forwarded while its WIP
 collides. The worktree advances with a plain `merge --ff-only` regardless of what the base clone is
 doing.
+
+### 🔴 The worktree can VANISH, and the base clone silently takes over
+Measured 2026-09-12 on workbench: `~/workspace/clawgate-extension` **did not exist** — no worktree
+record, though the `clawgate-ext-local` branch survived, orphaned and stale at `a39ed0c5`. `Default`
+had been re-pointed at the **base clone** (`~/workspace/homelab-talos/containers/clawgate/extension`)
+and was the only enabled install; `Profile 2` still named the missing worktree path and sat
+**disabled** (`disable_reasons: [4]`).
+
+This is the failure this file exists to prevent, and it announces itself **not at all**: the loaded
+build was byte-identical to `trunk` that day, so every version check read correct. The hazard is
+latent — it detonates on the next extension commit landed while the base clone stays behind.
+
+So the sweep below is **not only** "which version" — read the **paths**, and treat *any* path that
+is not the worktree as a finding even when the version matches. The cheap standing check:
+```bash
+ls -d ~/workspace/clawgate-extension || echo "!! worktree GONE — base clone is probably loaded"
+git -C ~/workspace/homelab-talos diff --stat origin/trunk -- containers/clawgate/extension
+#   non-empty while the base clone is what Brave loads = the deployed extension is NOT trunk
+```
+Recreating it: the branch usually still exists, so `worktree add -b` fails. Prove the branch holds
+no unique commits (`git log --oneline origin/trunk..clawgate-ext-local` → empty), then reset it:
+```bash
+git -C ~/workspace/homelab-talos worktree add ~/workspace/clawgate-extension \
+    -B clawgate-ext-local origin/trunk      # -B resets the orphaned branch
+```
+
+### 🔴 Re-pointing a profile STRANDS that install's storage — it is not a free move
+The extension ID is derived from the **load path**, so moving a profile from the base clone to the
+worktree creates a **different install with empty `chrome.storage.local`**: the configured
+`baseURL`, the **`hookToken`**, `defaultTags`/`defaultPrivileges`/`defaultRepo`, `projectOrigins`
+and **every saved draft** stay behind under the old ID and simply stop existing for the new one.
+Measured 2026-09-12 on workbench `Default`: 748K of storage, 4 live `clawgate.draft.*` keys, all
+config keys set — all of it keyed to the base-clone path's ID.
+
+A re-point that skips this reads as "the extension broke" (submits 401 with no token) plus silent
+draft loss. Either accept re-entering the config, or migrate the storage **with Brave fully closed**
+— it is a LevelDB directory per ID:
+```bash
+# Brave CLOSED. IDs: sha256 of the absolute load path, hex mapped 0-f -> a-p.
+printf '%s' "<load-path>" | sha256sum | cut -c1-32 | tr '0-9a-f' 'a-p'
+cp -a ~/.config/BraveSoftware/Brave-Browser/<profile>/"Local Extension Settings"/<OLD_ID> \
+      ~/.config/BraveSoftware/Brave-Browser/<profile>/"Local Extension Settings"/<NEW_ID>
+```
+🔴 **Do not hand-edit `Preferences` to re-point a profile.** Brave rewrites it on exit (so an edit
+made while it runs is discarded), and `extensions.settings` is covered by preference MACs — a
+mismatch gets the entry disabled or reset. Re-pointing is a `brave://extensions` UI action, and
+agents cannot drive `brave://`: hand it to Zach with the exact path.
 
 ## 🔴 Brave has MULTIPLE PROFILES, and each loads extensions independently
 
@@ -66,7 +118,7 @@ must not read as "no extensions". Quote `"$(dirname "$p")"`: profile dirs contai
 
 For the laptop, pipe the same script over ssh rather than trying to escape it inline:
 ```bash
-ssh zach@192.168.50.155 'bash -s' <<'SWEEP'
+ssh zach@10.42.0.100 'bash -s' <<'SWEEP'
   ...same loop...
 SWEEP
 ```
@@ -93,20 +145,31 @@ repoint: workbench `Default` had `open-capture-pick` at `assigned=false` and lap
 missing the command entirely — i.e. the picker hotkey was dead in two places while the extension
 itself reported perfectly healthy. Re-bind at `brave://extensions/shortcuts`.
 
+⚠ **This is not a one-off that got fixed — re-measured 2026-09-12, laptop `Profile 1` is STILL
+`open-capture-pick: assigned=false`.** A dead picker hotkey is the steady state unless someone
+re-binds it, and nothing in a version check or a profile sweep surfaces it. Run the command map
+every time, on **both** hosts.
+
+⚠ **Also read `_execute_action`, not just the two named commands.** Laptop `Default` has it bound to
+**`Ctrl+Shift+K` — the same accelerator as `open-capture`** (workbench `Default` has it `UNSET`,
+which is the sane state). Two commands claiming one chord means one of them loses; which one is
+**unmeasured from `Preferences` alone**, and the loser fails silently. Check it at
+`brave://extensions/shortcuts` before concluding a hotkey "works".
+
 ## Deploying a merged extension change
 
 ```bash
 # BOTH hosts — the worktree is dedicated and normally clean, so this fast-forwards
 git -C ~/workspace/clawgate-extension fetch -q origin trunk
 git -C ~/workspace/clawgate-extension merge --ff-only origin/trunk
-ssh zach@192.168.50.155 'git -C ~/workspace/clawgate-extension fetch -q origin trunk &&
+ssh zach@10.42.0.100 'git -C ~/workspace/clawgate-extension fetch -q origin trunk &&
   git -C ~/workspace/clawgate-extension merge --ff-only origin/trunk'
 
 # VERIFY per host — version on disk + identity against trunk + tree is clean
 jq -r .version ~/workspace/clawgate-extension/containers/clawgate/extension/manifest.json
 git -C ~/workspace/clawgate-extension diff --stat origin/trunk -- containers/clawgate/extension  # empty = identical
 git -C ~/workspace/clawgate-extension status -s     # empty = no out-of-band edits
-ssh zach@192.168.50.155 'jq -r .version ~/workspace/clawgate-extension/containers/clawgate/extension/manifest.json;
+ssh zach@10.42.0.100 'jq -r .version ~/workspace/clawgate-extension/containers/clawgate/extension/manifest.json;
   git -C ~/workspace/clawgate-extension status -s'
 ```
 
