@@ -689,6 +689,105 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
    checked by running that grep, and re-check the exclude still names this file if it is renamed.
    forcing: none — nothing is broken at runtime; it wastes a session's first command.
 
+10. ✅ **CLOSED AS A DECISION 2026-09-12 — "the prose-census class" is ONE instance, already fixed at
+    the source, and the rule worth keeping is the DISCRIMINATOR below rather than any new guard.**
+    🔴 **THE DISCRIMINATOR, which is the whole durable content of this item:** a census over tracked
+    prose is **fine** when it enforces a CONTENT RULE — a new document simply must not contain the
+    thing (no public IP, no captured text, no unfollowable path). It is a **hazard** when a new
+    document requires a hand LEDGER ENTRY, because then someone must *classify* each new mention and
+    until they do, a doc nobody has triaged blocks a branch nobody else can unblock. **A
+    ledger whose population grows with every document must declare its prose exemption at birth.**
+    ⚠ **This item was filed asserting a live class of three instances. Classifying each by WHAT IT
+    SCANS collapsed that to one** — and the collapse is the finding, so it is recorded rather than
+    quietly rewritten:
+    | instance | scans | verdict |
+    |---|---|---|
+    | (a) kill-mention ledger | `claudedocs/` **prose**, ledger grows per document | **the only real instance** — 22 reds + `main`, ≥4 sessions, ~2 h |
+    | (b) runner-bound ledger | `scripts/**/*.py` by AST — **code, not prose** | true positive: a genuine new unbounded spawn |
+    | (c) `test_doc_path_rot` | `claude/` + `CLAUDE.md`, and already EXCLUDES `claudedocs/` | true positive: a genuinely unfollowable reference |
+    ✅ **And the convention is already applied everywhere it applies:** `_PROSE_ONLY_PREFIXES =
+    ("claudedocs/",)` in (a) after `#1561`; `CORPUS_DIRS = ("claude", "CLAUDE.md")` in (c), which
+    never scanned `claudedocs/`. Measured on the other prose scanners: `test_no_public_ips` and
+    `test_doc_path_rot` carry **0** hand-ledger constants — they are content rules, so a new doc
+    needs no triage. **No second growth-ledger over prose exists today.** via: measurement
+    🔴 **A THIRD INSTANCE LANDED WHILE THIS ITEM WAS BEING WRITTEN — and it cuts AGAINST the class
+    complaint, which is why it stays in.** `main` went RED on
+    `scripts/tests/test_doc_path_rot.py::test_no_new_dead_paths` — a census over tracked prose in
+    `claude/` (`CORPUS_DIRS = ("claude", "CLAUDE.md")`, `:170`) — reporting
+    `claude/skills/audit-pr/SKILL.md:144  DEAD PATH: reference/round-ladder-evidence.md`. Fixed in
+    **`#1591`**: `#1587` (`e8ee277e`) added that line with a BARE relative spelling while the same
+    file spells the same sidecar correctly at `:11`.
+    🔴 **I FIRST RECORDED THIS AS A FALSE POSITIVE BECAUSE THE TARGET FILE EXISTS. THAT WAS WRONG,
+    AND THE ERROR IS THE INSTRUCTIVE PART — "the file is there" is not this rule's test.**
+    `_resolve`'s rule 1c (`test_doc_path_rot.py:306-315`) resolves a `reference/<file>` token to
+    `REPO_ROOT / BARE_REF_MARKER / token` **on purpose**, and
+    `BARE_REF_MARKER = "<bare-ref-unopenable-write-the-deployed-~-.claude-path>"` — a deliberately
+    unopenable segment **whose name states the remedy**. The in-source comment says why: resolving it
+    against the citing doc's directory *"would always succeed and reproduce exactly the false-clean
+    this rule exists to kill"*. A `SKILL.md` is loaded as authoritative guidance from an arbitrary
+    cwd, so the property is **followability, not existence**. ⚠ **I asserted the verdict from the
+    file's existence without reading the resolver** — the same shape as rank 6's two vacuous checks,
+    and it is why the gate's own error text names the fix.
+    ✅ **So (c) is the census WORKING, and it is evidence FOR arm (b) of the closing condition, not
+    against it:** a census over prose caught a real, one-line, agent-facing defect **22 minutes**
+    after it merged. **Do not cite (c) as over-firing.** via: measurement
+    - **THREE instances, measured.** ⚠ An earlier draft said three and could not name the third; it
+      was corrected to two, and then a third arrived. **State the count with its date or do not state
+      it.** (a) `scripts/claude-hooks/tests/test_guard_core.py`'s kill-mention ledger:
+      **22** `tekton/devrc-pytests` reds on PR heads, plus `main` itself, across at least four
+      sessions in roughly two hours; closed by **`#1561`** (`c0bbd6d9`) scoping the scanner off
+      `claudedocs/` (`_PROSE_ONLY_PREFIXES`). (b) `scripts/tests/test_runner_bound_ledger.py`: **5**
+      reds, 4 of them AFTER `c0bbd6d9`, plus `main`; closed by **`#1567`** (`6f1867b1`) routing the
+      unbounded spawn through the harness. (c) the `test_doc_path_rot` red above — **a TRUE positive**,
+      fixed by `#1591`. ⚠ Those counts are a read-time status population and are
+      not re-derivable — see rank 1. via: measurement
+    - 🔴 **THE FIXES ARE DIFFERENT KINDS, WHICH IS WHY NONE GENERALISES.** `#1561` narrowed the
+      SCANNER's scope; `#1567` removed the thing being counted; `#1591` corrected the PROSE, which is
+      the only one of the three where the census was pointing at a real defect. Neither of the first
+      two touches the pattern — *a guard whose population grows every time someone writes a
+      document* — so the class is untouched by them.
+      🔴 **AND (c) IS THE REASON THIS ITEM MUST NOT BE READ AS "SCOPE THE CENSUSES OFF PROSE".** Two
+      of three instances were the guard over-reaching; the third was the guard earning its place, on a
+      defect nothing else would have caught and within half an hour. **A remedy that silences the
+      class silences (c) too.** That is the whole substance of the decision below.
+    - 🔴 **THE CLASS HAS NO CENSUS OF ITSELF, AND THE ATTEMPT TO BUILD ONE BY GREP FAILED IN TWO
+      INDEPENDENT WAYS — that is the discovery step, not a formality.** Measured on `origin/main`:
+      **47** test files under `scripts/` enumerate tracked files via `git ls-files`, and a regex for
+      the ledger constant (`^_<NAME>_(LEDGER|ALLOWLIST) = {`) matches **2** of them. **Known instance
+      (b) is caught by NEITHER.** (i) Its constant is `_OWN_BOUND_LEDGER: dict[...] = {` at `:66` — a
+      **type annotation** between the name and the `=`, so the regex cannot see it; (ii) it does not
+      use `git ls-files` at all — `_discover()` walks `REPO_ROOT.glob("scripts/**/*.py")`, so it is
+      not in the 47 either. **Two orthogonal escapes from one grep, found by checking the one file I
+      already knew belonged.** So neither spelling nor enumeration method defines this population,
+      any count of "how many such guards exist" is unfounded, and arm (a) of the closing condition
+      cannot be satisfied by a pattern match — it needs an AST walk over what the guards DO.
+      **Do not quote a population figure.** via: measurement
+    - **Why it is filed rather than fixed:** the remedy is a judgement about what these guards are
+      FOR. A census over prose catches a real hazard (`#1561`'s own history shows docs quoting a
+      kill command); scoping every one off `claudedocs/` would close this class and reopen that.
+      That trade is not mine to make silently.
+    ✅ **CLOSED by arm (b) — the operator's decision, 2026-09-12, over the evidence above: per-instance
+    is the accepted cost, and the DISCRIMINATOR is the deliverable.** Arm (a) — a derived guard
+    enumerating the repo's ledger-style censuses — was **proposed and rejected**, for reasons that are
+    the point of the item:
+    - 🔴 **It would be a census over censuses, i.e. this class one level up.** The item's own arm (a)
+      forbade hand-listing the population, and the grep evidence shows why that matters: the
+      population escaped a pattern match in **two orthogonal ways**, so the guard would need an AST
+      walk over what each test DOES.
+    - **It would police a population of one, already remediated.** (a) is fixed at the source and is
+      the only growth-ledger over prose that exists; (b) does not scan prose; (c) already excludes
+      `claudedocs/`. A derived guard would have nothing left to catch today.
+    - 🔴 **And (c) is the argument against silencing the class at all** — a prose census caught a real
+      agent-facing defect **within half an hour** of it merging. A remedy that scoped every census
+      off prose would have lost that.
+    ⚠ **RESIDUAL, stated because it is the one thing this decision rests on and cannot prove:** the
+    population is **not enumerable by grep** (see above), so "no second growth-ledger exists" is a
+    claim about the instances checked — the three known ones plus the obvious prose scanners — **not a
+    census.** A fourth, behind a third spelling, would not have been found. **If one surfaces, it does
+    not reopen this decision; apply the discriminator to it at birth.**
+    forcing: none — closed as a decision. All three instances are fixed (`#1561`, `#1567`, `#1591`)
+    and nothing is red on this class.
+
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
   NOTHING.** The tmpfs fixture falls back to `tmp_path` on every failure mode, which is
