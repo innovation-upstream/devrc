@@ -134,6 +134,15 @@ deleted is the waste this exists to catch. Work them in order; do not skip ahead
    "report, do not act" while pointing at a gate that already acts. What survives is the ORDERING
    claim, which is the half that does work. Recorded so the pair is not re-derived as ceremony.
 
+✅ **TRIAL RECORD — CLOSED 2026-09-12 at `ran: 6 · changed the outcome: 3`. The section STAYS; do
+not re-open the question.** 🔴 **The finding was the ROUTING, not the pass** — every zero was a
+dispatch that arrived after the merge decision was already taken, so the fix was a TRIGGER
+(`audit-pr-nudge.py` routes round 0 at `gh pr create`), not an edit to this section. ⚠ **Keep
+reporting the pair on each PR** — not to re-decide this section, but because it is now the only
+signal for whether that trigger works; `C` alone cannot distinguish "it ran and was useless" from
+"nobody invoked it". Decomposition, the per-PR timings, the fourth corroborating instance and the
+trigger's first pre-decision catch: `reference/round-ladder-evidence.md`.
+
 🔴 **ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER.** Its verdict is one of `proceed to the
 checklist` / `requirement questioned — <which>` / `deletion candidate — <what>` / `close, do not
 audit`. It is **not** a finding for the findings-keyed stop rule, it cannot end a ladder, and it
@@ -142,47 +151,7 @@ cannot license skipping a round. Every stop rule below is unchanged by it.
 **Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
 nothing at all is reportable — say what you examined to get there.
 
-⚠ **There is deliberately NO add-back percentage here.** An earlier draft asked for `deleted: X ·
-re-added: Y (Y/X = Z%)` "from the same `--numstat` command the attribution gate already runs", and
-that was **false**: `--numstat` reports added and deleted counts per file and cannot tell you that
-an added line is one previously deleted, so `Y` is undefined by the instrument named. The 10%
-add-back heuristic needs a measurement nothing here performs — and the sentence that followed it
-("an add-back of 0% means the deletion pass was too timid") asserted a direction measured nowhere,
-which is the shape this skill tells you to delete rather than reverse. Recorded so nobody derives
-it again.
-
-✅ **TRIAL RECORD — CLOSED 2026-09-12 at `ran: 6 · changed the outcome: 3`. The section STAYS. Do
-not re-open the question; read what it found instead.** The retirement condition that stood here
-said *"if it ran and changed nothing, DELETE this section"*. It ran and it changed things, so the
-condition is spent and is recorded rather than left standing — a trial nobody can close is how a
-judgement call becomes permanent by attrition.
-
-Decomposition, because the PAIR is the record and `C` alone is meaningless: trials 1–2 → 2/2 ·
-trials 3–5 → **3/0** · a peer session's round 0 on `#1518` → 1/1 (it closed that PR unmerged).
-
-🔴 **THE FINDING WAS THE ROUTING, NOT THE SECTION — and every zero above says so.** All three of
-trials 3–5 produced a verdict and none could act, because each was dispatched after the decision
-was already taken: `#1523` merged **27 min BEFORE** its audit was dispatched, `#1510` merged **+6
-min after**, `#1518` was closed **5 min before** the report returned. Audit runtimes were
-459/920/776 s, so no speedup reaches any of them. **Round 0's question is only actionable while the
-merge decision is open**, so the fix was a trigger, not an edit to this section:
-`scripts/claude-hooks/audit-pr-nudge.py` now routes round 0 as step 1 of the nudge it fires on
-`gh pr create` (pinned by `scripts/claude-hooks/tests/test_audit_pr_nudge.py`). Full evidence:
-`claudedocs/handoff-audit-pr-ladder.md`.
-
-⚠ **CORROBORATED FROM OUTSIDE THE TRIAL, which is why the pair is not re-opened to count it.** A
-different session hit the same thing after this record closed: `#1568` merged **6 min** after it
-opened (`04:11:19Z` → `04:17:24Z`, re-derived here, not taken from its PR body), so its round-0
-audit landed **after** the merge and every candidate it found became a follow-up. That is a
-FOURTH independent instance of the post-decision dispatch, and it is evidence about the ROUTING,
-not a seventh trial — **do not fold it into `R`.** It is here because the thing most likely to
-happen next is someone re-deriving this finding from fresh trials instead of reading it.
-
-⚠ **Keep reporting `ran: R · changed the outcome: C` on each PR** — not to decide this section's
-fate, which is settled, but because it is the only record of whether the TRIGGER is working. A bare
-`C` cannot distinguish "it ran and was useless" from "nobody invoked it", and those have opposite
-conclusions; `--round` still defaults to 1, so a silent zero is more likely a routing failure than a
-verdict about the pass.
+## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 <!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
      scripts/audit-dispatch.py captures the ROUND 0 section up to the next
@@ -191,8 +160,6 @@ verdict about the pass.
      correctness axes it exists to withhold — measured: 3,367 chars -> 4,057.
      Pinned by test_the_round_zero_section_the_script_reads_is_the_one_the_
      skill_ships. Reword it freely; keep it a `## `. -->
-
-## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 **Audit for:**
 1. **Risks** — what breaks in production.
