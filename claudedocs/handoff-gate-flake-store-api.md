@@ -286,70 +286,34 @@ Not a bug — a measurement that would mislead if run as written.
 - **Next probe:** re-run the date comparison above; when most heads postdate `b4fde334`, run the
   probe from the doc's earlier block and **record the new baseline date beside the count**.
 
-### CLOSED 2026-09-12 — espanso `:acq` shadowed `:rna`; the terms are disjoint and nothing is red
-🔴 **THIS BLOCK READ "`main` IS RED" IN THE PRESENT TENSE, WITH A "Next probe, verbatim" TELLING THE
-NEXT SESSION TO GO FIX IT — 226 lines above the rank 6 that the SAME COMMIT marked CLOSED.** It is
-the second time in this one PR that a rank was retired and a live claim about it left standing
-elsewhere in the doc (round 2 caught the first, in `State now`). **When you close a rank, grep the
-doc for its subject; the ranked list is not the only place it is asserted.** Status and the correct
-evidence: **rank 6** — the discriminating field is `:acq`'s **`label`**, not its `search_terms`, and
-not the suite cited below.
-⚠ **FOUR THINGS IN THIS BLOCK ARE WRONG; IT IS KEPT ONLY AS THE WORKED EXAMPLE. An earlier revision
-said "TWO" and enumerated two — a closed count that was short, which is the defect this doc keeps
-finding.**
-(a) The repro's stated expectation `# 1 failed, 100 passed` is **104 passed** today.
-(b) 🔴 **The test it names does not exist** — `test_live_existing_resolutions_not_made_ambiguous`
-was deleted by `#1265` (`68d10b19`, *"drop the 10 live-config guards"*), and nothing sits at `:929`
-that relates to it.
-(c) 🔴 **"both `recom` and `recommend` now resolve to NOTHING" is NOT REACHABLE on today's code.**
-Driving the real `EspansoDetector._attribute` against configs rebuilt from the actual `nix/home.nix`
-lines: green tree → `recom` resolves to `:rna`; **the RED-shaped config also resolves to `:rna`**,
-because `_attribute`'s declared-interface precedence now decides it. Only a genuine *declared*
-`search_terms` collision still yields `None`.
-(d) 🔴 **"This is a REAL user-facing regression" therefore describes no state the current code can
-produce.** The label-shadowing class is closed in code, not merely in the config. **The suite named here is structurally blind to `nix/home.nix`: deleting
-that file outright still gives 104 passed.** So this repro could never have re-confirmed the
-collision, and the eliminations below are about the RULE, not the live config.
-- **Symptom + the repro AS IT WAS WRITTEN (do not run it — see above):**
-  `scripts/collector/keylog/tests/test_espanso_detect.py:929`,
-  `test_live_existing_resolutions_not_made_ambiguous`, was said to fail on plain `origin/main`:
-  ```bash
-  git -C $DEVRC worktree add --detach /tmp/ctl origin/main
-  nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-    /tmp/ctl/scripts/collector/keylog/tests -q -p no:cacheprovider   # CLAIMED 1 failed, 100 passed
-  ```
-- **Observed (with values):** `AssertionError: search terms regressed (term -> (expected,
-  actual, matching snippets)): {'recom': (':rna', None, [':acq', ':rna']), 'recommend':
-  (':rna', None, [':acq', ':rna'])}`. A new `:acq` snippet's search terms collide with
-  `:rna`, so both `recom` and `recommend` now resolve to **nothing** instead of `:rna`.
-  ⚠ **NOT REACHABLE on today's code — see (c) in the header.** Measured against the real
-  `_attribute`: the red-shaped config resolves `recom` to `:rna` anyway.
-  Introduced by `a720d30d` (`espanso`) touching `nix/home.nix` — a bare commit straight to
-  `main`, no PR.
-- ~~🔴 **This is a REAL user-facing regression, not a test being fussy.**~~ **WITHDRAWN — see (d).**
-  The espanso audit
-  established Zach fires ~100% via Ctrl+Space SEARCH, so `search_terms` ARE the interface:
-  typing "recommend" used to reach `:rna` and now reaches an ambiguous set.
-- **Confirmed three independent ways:** the merged-tree `gate.sh` run; a control run on
-  plain `origin/main`; and Tekton's own `tekton/devrc-main-pytests` on `5a82aaa9` —
-  `failure: FAILING: test_live_existing_resolutions_not_made_ambiguous`.
-- **Ruled out:** *"`#1239` caused it"* — `#1239` touches only `scripts/testlib/store_siting.py`
-  and `scripts/tests/test_store_siting_ledger.py`, which cannot reach espanso resolution;
-  and the control on plain `main` fails identically. via: measurement
-- **Ruled out:** *"a load flake"* — it fails in 0.22s, deterministically, with a value-bearing
-  assertion naming the colliding snippets. via: measurement
-- 🔴 **Leading hypothesis — REFUTED IN BOTH ARMS; the fix was a third option outside the fork.** It
-  read: narrow `:acq`'s `search_terms`, OR give `:rna`'s a disambiguator. **Neither happened.**
-  `:acq`'s `search_terms` are `["ask" "clarify" "clarifying" "questions"]` on `a720d30d`,
-  `a451abc0^`, `a451abc0` and `337114e0` — byte-identical across the red trees AND the green one, and
-  they never contained `recom`/`recommend`. What shipped (`a451abc0`) moved the offending phrase out
-  of `:acq`'s **`label`** and into its `replace`, which `_token_matches` does not read.
-  ⚠ **An earlier revision of this line said CONFIRMED.** The conclusion came true; the hypothesis was
-  wrong. **Do not mark a hypothesis confirmed from its outcome.** via: measurement
-- **Next probe: NONE.** ⚠ The probe here was *"`git -C $DEVRC show a720d30d -- nix/home.nix`, then
-  decide which side's `search_terms` move"* — and it would have answered nothing, because the
-  `search_terms` are the same on both sides. 🔴 **If you confirm anything, read `:acq`'s `label`**
-  (`nix/home.nix:419`) — that is the field that moved. Do not re-open the question.
+### CLOSED 2026-09-03 — espanso `:acq` shadowed `:rna`; fixed in CODE, not in the config
+🔴 **THIS BLOCK WAS 65 LINES OF COMMIT-BY-COMMIT ATTRIBUTION AND IT WAS WRONG FOUR TIMES IN FOUR
+AUDIT ROUNDS — so it is CUT rather than corrected a fifth time.** Each round's replacement was
+written with more care than the last and was still wrong: a test suite that cannot read the file
+(round 3), a `search_terms` read that is byte-identical on the red and green trees (round 4), then
+the wrong fix commit AND four guard tests that stay green when the mechanism is deleted (round 5).
+**The error rate did not fall. That is the signature of a claim nobody can satisfy, not of
+insufficient diligence** — a handoff doc has no way to stay correct about a five-commit, two-mechanism
+history as the code moves, and no test here can check it (the doc gates cannot see even a bogus path
+in this file).
+✅ **What is true, and mechanically checkable:** the collision is gone — `recom` resolves to `:rna` on
+`origin/main`. It was fixed in the DETECTOR, not the config: **`#1247` (`b9b2493d`, 2026-09-02T17:16,
+*"declare :rna the owner of recom/recommend — unbreaks main, red since `a720d30d`"*, touching only
+`espanso_detect.py` + its tests), generalised by `#1252` (`de677683`, *"a snippet's declared
+`search_terms` outbid another's LABEL"*).** `a720d30d` caused it; `a451abc0` landed 23 h after it was
+already fixed and is what `#1265`'s body says reddened `main` next.
+🔴 **THE RECORD LIVES IN THE CODE, WHICH IS WHERE IT STAYS CORRECT** — `espanso_detect.py:344-372`
+(the precedence rule and why), `test_espanso_detect.py:727-757` (the operator's ruling and the owner
+table), and its FIX 7 block. **Read those, not a doc's copy of them.** The durable lesson is one
+sentence and is in the index under `devrc/espanso-audit`: *a matcher reads the LABEL, so a cosmetic
+reword can shadow another snippet's declared search route — and the field that looks discriminating
+(`search_terms`) is identical on the red and green trees, so reading it cannot tell them apart.*
+⚠ **The one residual, measured and narrower than "this interface is unguarded":** precedence is inert
+when NO candidate declares the term, so a label-only collision still resolves to `None`, and the
+keylog suite cannot see it (deleting `nix/home.nix` outright still gives 104 passed — `#1265`
+dropped the live-config guards deliberately). Two routes, not one.
+✅ **What survives from the method, because it is about the method and not about espanso:** *a check
+that cannot distinguish the two states is vacuous whether it is a test or a human reading a field.*
 
 ## Next steps (ranked)
 🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
@@ -546,55 +510,14 @@ collision, and the eliminations below are about the RULE, not the live config.
    `#1239` (`65f7325b`) both merged and content-verified; ladder ended by decision after 10
    rounds. Five residuals are disclosed in-source and listed under Gotchas. Nothing to do.
    forcing: none — done; retained so the rank numbering stays stable.
-6. ✅ **CLOSED 2026-09-12 — the espanso `:acq`/`:rna` collision is GONE, and the FIELD THAT FIXED IT
-   IS NOT THE ONE TWO EARLIER REVISIONS OF THIS ITEM NAMED.** `a451abc0` swapped `:acq`'s `replace`
-   and `label`: the string *"ask clarifying questions and recommend improvements and anything useful
-   to include"* moved OUT of `label` and INTO `replace`. `_token_matches`
-   (`scripts/collector/keylog/espanso_detect.py:440-452`) reads trigger + **label** + `search_terms`
-   and **never `replace`**, so that one swap removed `recommend`/`recom` from the matcher's view.
-   `a720d30d` is what put the phrase in the label in the first place. The repo already said so, at
-   `test_espanso_detect.py:728-732` and `espanso_detect.py:350-357`.
-   ✅ **And the class is ALSO closed in CODE, independently of the config:** `_attribute`'s
-   declared-interface precedence means a snippet declaring a term in `search_terms` outbids one that
-   merely SPELLS it in a label — `espanso_detect.py:349-353`, guarded by four tests
-   (`test_declared_owner_resolves_a_term_both_snippets_spell`,
-   `test_declared_owner_does_not_reach_the_picker`, `…_cannot_invent_a_resolution`,
-   `…_never_repoints_a_unique_match`).
-   🔴 **THIS ITEM'S CLOSING EVIDENCE WAS VACUOUS TWICE, IN DIFFERENT WAYS, AND THE SECOND WAS THE FIX
-   FOR THE FIRST.** (a) It named the keylog suite as *"the deterministic check"* — that suite cannot
-   see `nix/home.nix` at all: on a `cp -a` copy with its `.git` removed, re-introducing the collision
-   gives **104 passed** and **deleting `nix/home.nix` outright** gives **104 passed**. (b) The fix for
-   (a) replaced it with *"a DIRECT READ of `:acq`/`:rna`'s `search_terms` — disjoint"*, and **those
-   two lists are byte-identical on the red trees (`a720d30d`, `a451abc0^`) and the green one
-   (`337114e0`)**: `:acq` is `["ask" "clarify" "clarifying" "questions"]` throughout and never
-   contained either term. **So the prescribed read returns "disjoint — closed" on the tree this doc
-   calls RED.** A check that cannot distinguish the two states is vacuous whether it is a test or a
-   human reading a field. **Read the `label`, not the `search_terms`.** via: measurement
-   ⚠ **An earlier revision also labelled the old hypothesis CONFIRMED.** It offered two arms — narrow
-   `:acq`'s terms, or add a disambiguator to `:rna`'s — and **neither happened**; the fix was a third
-   option outside the fork. Do not mark a hypothesis confirmed because its conclusion came true.
-   ⚠ **The suite is blind to the live config BY DECISION:** `#1265` (`68d10b19`) *"drop the 10
-   live-config guards — they re-break on every snippet edit"* (the title says 10; the commit deletes
-   9 `def test_` functions — the commit's own count, quoted as written). 🔴 **So state the residual at
-   its real scope, which is narrower than "this interface is unguarded":** the label-shadowing route
-   is closed in code and tested (above); what nothing covers is a genuine **declared** `search_terms`
-   collision between two snippets, which resolves to `None` and leaves the suite at **104 passed**.
-   That is the one case to read the config for.
-   ✅ **THE OTHER CLOSING CONDITIONS IN THIS DOC WERE SWEPT FOR THE SAME DEFECT.** Rank 7's already
-   does it right and says so (*"Verify with the detector's own positive control, not an absence … a
-   rename, skip or deselect satisfies it with nothing fixed"*); rank 8's was run rather than assumed;
-   rank 9's was mechanically exercised in both directions; ranks 1–5 carry no live condition.
-   ⚠ **That sweep's own blind spot, recorded: it exempted THIS item's replacement evidence**, which
-   was the defect's new home — so "rank 6 was the only one" was true of the text the sweep read and
-   false of the text the same commit wrote. **When you fix a vacuous check, put the replacement
-   through the sweep too.**
-   ⚠ **It also carried `forcing: regression — `main` is red` after the red was gone, and `forcing:`
-   is the machine-readable field a `claim-work` session sorts on** — so the stale value was not
-   cosmetic, it advertised a gate-forcing regression with nothing behind it. **Retire the `forcing:`
-   in the same edit as the red**, and do not delegate the correction to a comment elsewhere in the
-   file: one was left 300 lines below and went on contradicting this item for a further round.
-   forcing: none — fixed; the diagnosis above is retained as the worked example.
-
+6. ✅ **CLOSED — the espanso `:acq`/`:rna` collision is gone: `recom` resolves to `:rna` on
+   `origin/main`.** Fixed in the DETECTOR by `#1247` (`b9b2493d`) and generalised by `#1252`
+   (`de677683`) — **not** by a config edit, and not by this effort. Recorded only because this item
+   asserted a live red and carried `forcing: regression` after the red was gone.
+   ⚠ **The causal archaeology that used to sit here is CUT** — it was wrong in four successive audit
+   rounds, each time in a new way. See the superseded Open-investigations block above for why cutting
+   beat correcting, and read `espanso_detect.py:344-372` for the mechanism.
+   forcing: none — fixed.
 7. **A FIXED 120 s SUBPROCESS BOUND IN A FILE WHOSE WALL TIME IS NOT STABLE —
    `scripts/tests/test_run_tests_targets.py`.** Its tests spawn a nested `run-tests.sh`,
    SIGKILLed at the bound (`TimeoutExpired`, rc `-9`). **Six bound sites** — `_run` `:107`,
