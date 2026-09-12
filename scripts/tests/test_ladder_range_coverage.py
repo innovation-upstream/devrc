@@ -601,9 +601,19 @@ def test_the_census_does_NOT_call_the_remainder_development(lrc, ad, base_repo):
     assert "GAP-COMMIT CENSUS" in rendered
     assert "unclassified   1" in rendered
     assert "NOT 'ordinary development'" in rendered
-    assert "FLOOR ON MISSED AUDIT SURFACE, NEVER A RATE" in rendered
+    assert "FLOOR ON UNLEDGERED ROUNDS, NEVER A RATE" in rendered
     # the un-declared commit must NOT be counted as a round reference
     assert "ROUND-REF     0" in rendered
+    # 🔴 ROUND-REF must be described as an UNLEDGERED ROUND, never as evidence
+    # the code was unaudited. Round 0 of #1576 found the original wording
+    # asserted the opposite of what the commit subject says.
+    assert "UNLEDGERED ROUND" in rendered
+    assert "NOT evidence the code" in rendered
+    # 🔴 and the census must SPLIT interior from tail — this file forbids summing
+    # them for lines, and the first census summed them for commits anyway.
+    assert "🔴 INTERIOR  round-ref" in rendered
+    assert "TAIL      round-ref" in rendered
+    assert "READ THE SPLIT, NOT THE TOTAL" in rendered
 
 
 def test_measure_range_churn_does_NOT_refuse_an_empty_range(ad, base_repo):

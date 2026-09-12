@@ -242,11 +242,6 @@ run "the gap listing stops excluding the base" \
 
 # 🔴 THE MUTANT MUST REMOVE THE REASON, NOT REWORD IT. My first version swapped
 # the message for a different string that still contained "exited", so the guard
-# could not see it and the row SURVIVED — a mutant that proves nothing, caught
-# only because the row was expected to die. Mutate the narrowest thing that can
-# actually be wrong: the reason itself going None, which is the hazard.
-# 🔴 THE MUTANT MUST REMOVE THE REASON, NOT REWORD IT. My first version swapped
-# the message for a different string that still contained "exited", so the guard
 # could not see it and the row SURVIVED — a mutant proving nothing, caught only
 # because the row was expected to die. And the second version tried to replace a
 # two-line f-string, whose embedded quotes broke the DRIVER's own shell parsing.

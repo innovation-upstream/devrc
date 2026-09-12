@@ -557,34 +557,70 @@ Both directions, and they do not cancel.
   ✅ **SAMPLING SUPERSEDED BY A CENSUS, 2026-09-11 — `--find-carriers` now classifies every gap
   commit in every repo that carries ladders.** The sample's own by-product is the instrument:
   a commit whose subject names the audit round it belongs to, sitting in a range no round
-  covered, is self-declared missed audit surface. **186 gap commits:**
+  covered, is an UNLEDGERED ROUND (see below — not unaudited churn). **186 gap commits:**
 
-  | repo | gap commits | ROUND-REF | MERGE | unclassified | gaps with a ROUND-REF |
-  |---|---|---|---|---|---|
-  | devrc | 69 | **11** | 23 | 35 | 9 |
-  | homelab-talos | 79 | **16** | 17 | 46 | 16 |
-  | civit-datapacket-talos | 25 | **7** | 2 | 16 | 7 |
-  | civitai-gpu-fleet | 10 | **5** | 0 | 5 | 5 |
-  | vetr-app | 1 | **1** | 0 | 0 | 1 |
-  | vetr-api | 2 | 0 | 0 | 2 | 0 |
-  | **TOTAL** | **186** | **40** | 42 | 104 | **38** |
+  Split INTERIOR / TAIL as `round-ref · merge · unclassified`, because only the interior half is
+  unambiguous — see the 🔴 under the table:
 
-  **40 commits across 38 gaps say in their own subject which audit round they belong to, while
-  sitting in a range no round's ledger covers.** That is the finding this whole arc was after,
-  and it needs no judgement: the commits assert it themselves.
-  🔴 **ZERO false positives on the real corpus, verified by reading all 11 devrc hits** — every
-  one is a genuine round commit, including one whose reference is a trailing parenthetical
-  (`… (round-2 audit)`). And the control that matters: **`eb947328` is among them** — the exact
-  commit this review identified BY HAND as #1233's uncovered round 3. The classifier found it
-  independently.
-  🔴 **THE CENSUS IS A FLOOR, NEVER A RATE, AND THE OUTPUT SAYS SO.** It sees only a round
-  reference a commit chose to write down; a round's fix with an ordinary subject lands in
-  `unclassified`, indistinguishable from a feature. Measured against the 32 hand-classified
-  commits: **8 self-declared where the hand pass found 20 fixes.** So the 104 `unclassified`
-  are **not** development — they are unread, and the tool refuses to guess. An earlier draft
-  had five heuristic buckets keyed on commit types and correction verbs; it was deleted,
-  because `claude/RULES.md` is explicit that a guard spelled over WORDS is walkable by
-  rewording, and a classifier is no different.
+  | repo | gap commits | INTERIOR | TAIL | gaps w/ round-ref |
+  |---|---|---|---|---|
+  | devrc | 69 | **1** · 0 · 1 | 10 · 23 · 34 | 9 |
+  | homelab-talos | 79 | **3** · 0 · 2 | 13 · 17 · 44 | 16 |
+  | civit-datapacket-talos | 25 | 0 · 0 · 0 | 7 · 2 · 16 | 7 |
+  | civitai-gpu-fleet | 10 | 0 · 0 · 0 | 5 · 0 · 5 | 5 |
+  | vetr-app | 1 | 0 · 0 · 0 | 1 · 0 · 0 | 1 |
+  | vetr-api | 2 | 0 · 0 · 0 | 0 · 0 · 2 | 0 |
+  | **TOTAL** | **186** | **4** · 0 · 7 | **36** · 42 · 101 | **38** |
+
+  🔴 **FOUR, NOT FORTY — and an earlier revision of this section headlined the 40.** Forty
+  commits name their round; only **4 are INTERIOR**, the class where the reading is unambiguous.
+  The other **36 are TAIL**, which conflates a fix posted after the final block with work that
+  simply continued after the ladder ended — nothing in the ranges separates them. Summing the
+  two is the error the line-count banner above forbids in capitals, committed inside the census
+  that was meant to honour it. **Quote the 4.**
+
+  🔴 **WHAT THOSE 40 ARE IS AN *UNLEDGERED ROUND*, NOT UNAUDITED CHURN — and this paragraph
+  asserted the opposite until round 0 of `#1576` caught it.** A subject reading `audit round 5 —
+  <what was fixed>` is EVIDENCE THAT ROUND 5 RAN; the commit IS that round's fix. What the gap
+  proves is that the round posted no two-sha `audited=` block, so its delta chains into nobody's
+  range and nothing re-audited it. That is a **ledgering** defect. Reading "an audit happened
+  here" as "no audit covered this" applies judgement in the direction the text contradicts.
+  🔴 **THE CASE THAT SETTLES IT IS THE ONE THIS SECTION CALLED ITS CONTROL.** `eb947328` is
+  #1233's round 3 — and the CANNOT-SEE bullet above says in terms that #1233's round-4 comment
+  is **titled "rounds 3 and 4"**. Round 3 *was* audited, inside round 4's comment; what was
+  missing was its block. The mechanism hypothesis two paragraphs up says the same thing. So it
+  is a real find and a real defect, and it is **not** evidence the code went unread — and it is
+  not an independent control either: `_ROUND_REF_POSITIVES` already pins the identical
+  `round-3 audit` form, so the regex matched a shape its own ledger carries. It confirms one
+  case; it validates nothing about the inference.
+  **The residual hazard, stated narrowly because it is the true one:** round N's fix has no
+  successor block, so the gate-reset rule was not honoured and no round ever diffed that delta.
+  ✅ **ZERO false positives for what it does claim, verified by reading all 11 devrc hits** —
+  every one genuinely names a round, including a trailing parenthetical (`… (round-2 audit)`).
+  **Base-rate control:** the pattern matches **4 of 624** devrc `main` squash subjects (0.6%)
+  against 11 of 69 devrc gap commits (16%) — **~26× enriched** in the gap population, so it is not
+  firing on everything.
+  🔴 **READ THE SPLIT, NOT THE 40.** Measured on devrc: **10 of 11 ROUND-REF commits are TAIL
+  and exactly ONE is interior**, so the combined headline is ~91% the ambiguous class — and the
+  line counts three paragraphs up carry a 🔴 banner forbidding exactly this sum. The census now
+  prints interior and tail separately for the same reason.
+  🔴 **IT IS A FLOOR, NEVER A RATE, AND THE OUTPUT SAYS SO.** It sees only a round reference a
+  commit chose to write down. Measured against the 32 hand-classified commits: **8 self-declared
+  where the hand pass found 20 fixes**, so it is ~40% sensitive. The 104 `unclassified` are
+  **not** development — they are unread, and the tool refuses to guess. An earlier draft had
+  five heuristic buckets keyed on commit types and correction verbs; deleted, because
+  `claude/RULES.md` is explicit that a guard spelled over WORDS is walkable by rewording and a
+  classifier is no different.
+  🔴 **AND IT DOES NOT SUPERSEDE THE HAND SAMPLING — 63 of 79 adjacencies REMAIN UNREAD BY A
+  HUMAN.** An earlier wording said the census "supersedes sampling" and deleted the `63 of 79`
+  caveat in the same edit; that is a different and weaker claim wearing the stronger one's
+  words. The census classifies a **proxy** at ~40% sensitivity over a different unit (commits,
+  not adjacencies). Both are needed and neither is complete.
+  ⚠ **OVERLAP and UNRELATED have never fired** — 0 occurrences across every recorded run plus a
+  64-carrier devrc re-run. Kept deliberately: `_is_ancestor` returns `None` on an unresolvable
+  sha, and deleting that path makes such a sha read as a GAP *with a size*. A never-fired
+  refusal is cheaper than the number it stops anyone inventing — but it is untested by adoption,
+  and this line is the record of that.
   ⚠ **Two repos are UNMEASURABLE, each for its own reason, and neither is a pass.** naida-ai
   ran 214 PRs and posted **no ledger at all**, so there is nothing to measure coverage
   against — "no ladders ran here" and "ladders ran without blocks" are the same observation
@@ -667,3 +703,16 @@ Both directions, and they do not cancel.
    #1108, #1219 here) still has its round-1 churn unmeasured. The script says so per ladder
    rather than inventing a number, because what "round 1" means for a ledger that begins at 2
    is a judgement about that PR, not arithmetic.
+6. **Decide what happens to the 40 UNLEDGERED ROUNDS the census names** — its own output says
+   *"Read them; the subjects are printed above"*, and nothing owns doing that. Two acceptable
+   closures, and a third that is not:
+   - ✅ *Closes when* a session reads the **interior** ones — **1 of the 40 on devrc**, so this
+     is small — and records per PR whether the round's delta was ever re-audited under another
+     round's block. The TAIL ones are the ambiguous class and are deliberately NOT in scope.
+   - ✅ Or *closes when* the operator writes on this item that the 40 will not be read, which is
+     a legitimate answer and cheaper than a census nobody acts on.
+   - 🔴 It does **not** close by the census being re-run with a bigger number. Producing the
+     list again is not reading it.
+   ⚠ Filed because round 0 of `#1576` found the list had been produced with no owner:
+   `claude/RULES.md` requires a closing condition and a named checker, and a measurement whose
+   product is 40 named commits that nobody reads is a cost, not a capability.

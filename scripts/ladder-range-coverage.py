@@ -171,9 +171,29 @@ def _is_ancestor(runner, repo_dir, a, b):
 # Measured over 32 hand-classified tail commits (2026-09-11, devrc +
 # homelab-talos + civit-datapacket-talos): EIGHT of them name the audit round
 # they belong to, in their own subject line — `audit round 5`, `audit r3`,
-# `round-2 audit`, `round-3 audit`, `audit round 9`. A commit that says it is a
-# round's fix IS missed audit surface when it sits in a gap; no judgement is
-# needed and none is applied.
+# `round-2 audit`, `round-3 audit`, `audit round 9`.
+#
+# 🔴 WHAT IT MEASURES IS AN **UNLEDGERED ROUND**, NOT UNAUDITED CHURN — and the
+# first version of this file asserted the opposite, which is backwards. A commit
+# subject reading `audit round 5 — <what was fixed>` is EVIDENCE THAT ROUND 5
+# RAN; it is that round's own fix. What the gap proves is that the round posted
+# no two-sha `audited=<from>..<to>` block, so its churn chains into nobody's
+# range. That is a LEDGERING defect, and reading "an audit happened here" as
+# "no audit covered this" applies judgement in the direction the text
+# contradicts.
+#
+# 🔴 THE CASE THAT SETTLES IT IS THE ONE THIS FILE FIRST CALLED ITS CONTROL.
+# `eb947328` is devrc #1233's round 3 — and
+# `claudedocs/audit-ladder-review-2026-09-04.md` says in terms that #1233's
+# round-4 comment is TITLED "rounds 3 and 4". Round 3 was audited, inside round
+# 4's comment; what was missing was its block. The review's own mechanism
+# hypothesis says the same thing — "a devrc authoring habit: titling one comment
+# 'rounds N and N+1' and posting a single block for both".
+#
+# So the residual hazard is narrower, true, and still machine-checkable:
+# **round N's fix has no successor block, so the gate-reset rule was not
+# honoured and nothing re-audited that delta.** State that; do not state that
+# the code was never looked at.
 #
 # 🔴 EVERYTHING ELSE IS REPORTED UNCLASSIFIED ON PURPOSE. An earlier draft of
 # this had five buckets keyed on conventional-commit types and correction verbs
@@ -611,25 +631,53 @@ def render(ladders, notes):
     )
     # 🔴 The census. Counts only what is SELF-DECLARED or STRUCTURAL; everything
     # else is handed over by name rather than guessed at.
-    gc = [c for L in ladders if L.reason is None
-          for a in L.adjacencies if a.label == GAP
-          for c in a.gap_commits if c.sha]
+    # 🔴 SPLIT BY INTERIOR/TAIL, because this file forbids summing them thirty
+    # lines up and the first census did it anyway. Measured on devrc: 10 of 11
+    # ROUND-REF commits are TAIL and exactly ONE is interior, so a single
+    # headline is ~91% the ambiguous class — the number that would get quoted.
+    def _bucket(tail_only):
+        return [c for L in ladders if L.reason is None
+                for a in L.adjacencies if a.label == GAP
+                and ((a.to_round is None) == tail_only)
+                for c in a.gap_commits if c.sha]
+
+    gc_int, gc_tail = _bucket(False), _bucket(True)
+    gc = gc_int + gc_tail
     if gc:
-        ref = sum(1 for c in gc if c.round_ref)
-        mrg = sum(1 for c in gc if c.is_merge and not c.round_ref)
-        rest = len(gc) - ref - mrg
+        def _counts(rows):
+            r = sum(1 for c in rows if c.round_ref)
+            m = sum(1 for c in rows if c.is_merge and not c.round_ref)
+            return r, m, len(rows) - r - m
+
+        ref, mrg, rest = _counts(gc)
+        i_ref, i_mrg, i_rest = _counts(gc_int)
+        t_ref, t_mrg, t_rest = _counts(gc_tail)
         gaps_with_ref = sum(
             1 for L in ladders if L.reason is None
             for a in L.adjacencies
             if a.label == GAP and any(c.round_ref for c in a.gap_commits))
         out.append("")
         out.append(f"GAP-COMMIT CENSUS over {len(gc)} commit(s) in the gaps above:")
+        out.append(f"  🔴 INTERIOR  round-ref {i_ref} · merge {i_mrg} · "
+                   f"unclassified {i_rest}   (of {len(gc_int)} commit(s))")
+        out.append(f"     TAIL      round-ref {t_ref} · merge {t_mrg} · "
+                   f"unclassified {t_rest}   (of {len(gc_tail)} commit(s))")
+        out.append("  🔴 READ THE SPLIT, NOT THE TOTAL — the same rule the line "
+                   "counts carry. An INTERIOR")
+        out.append("     round-ref is unambiguous; a TAIL one may be a fix posted "
+                   "after the final block")
+        out.append("     OR work that continued after the ladder ended, and "
+                   "nothing here separates them.")
         out.append(f"  🔴 ROUND-REF     {ref} — the commit's own subject names the "
                    "audit round it belongs to.")
-        out.append("                      A round's fix sitting in a gap IS "
-                   "missed audit surface, self-declared;")
-        out.append("                      no judgement was applied and none is "
-                   "needed.")
+        out.append("                      That is an UNLEDGERED ROUND: the round "
+                   "RAN (this is its own fix)")
+        out.append("                      and posted no two-sha `audited=` block, "
+                   "so its delta chains into")
+        out.append("                      nobody's range and nothing re-audited "
+                   "it. 🔴 NOT evidence the code")
+        out.append("                      was never looked at — the subject says "
+                   "the opposite.")
         out.append(f"  MERGE          {mrg} — structural (>=2 parents). Read its "
                    "remerge-diff: a SEMANTIC")
         out.append("                      conflict resolution hides here, and is "
@@ -640,7 +688,7 @@ def render(ladders, notes):
                    "above.")
         out.append(f"  → {gaps_with_ref} of the gaps carry at least one ROUND-REF "
                    "commit.")
-        out.append("⚠ THE CENSUS IS A FLOOR ON MISSED AUDIT SURFACE, NEVER A RATE. "
+        out.append("⚠ THE CENSUS IS A FLOOR ON UNLEDGERED ROUNDS, NEVER A RATE. "
                    "It can only see a round")
         out.append("  reference a commit chose to write down — a round's fix with "
                    "an ordinary subject is")
