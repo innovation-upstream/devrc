@@ -51,9 +51,17 @@
 # the change, and folding the two together is the roll-up mistake in a second
 # spelling.
 #
-# 🔴 COMPLETENESS IS THE HARD PART. GitHub caps a status description at 140
-# characters and the gate's `FAILING: a | b | TOTAL … failed=N …` line overruns
-# it constantly. MEASURED on this repo's own rows: one described `failed=7`
+# 🔴 COMPLETENESS IS THE HARD PART. A status description is capped at 140 and
+# the gate's `FAILING: a | b | TOTAL … failed=N …` line overruns it constantly.
+# ⚠ 140 BYTES, NOT CHARACTERS — measured, and it matters to anyone building a
+# fixture. Every real row sampled on this repo is 138 CHARACTERS long, which is
+# 140 bytes once the `—` in `FAILED: pytests —` is counted as the three UTF-8
+# bytes it is. Whether the byte cut is GitHub's or the posting pipeline's own
+# truncation is NOT determined here; every row sampled carries exactly one
+# multi-byte character, so the two hypotheses were never separated. What is
+# measured is the boundary, and a fixture has to land on it.
+#
+# MEASURED on this repo's own rows: one described `failed=7`
 # while naming ONE test; one named NO test at all; one was cut MID-WORD inside a
 # test name. So a description can prove "at least one test failed and here is
 # its name"; it can NEVER prove "these are all of them" on the names alone.
@@ -226,7 +234,7 @@ def names_provably_complete(description):
     Returns (complete, reason). False on any doubt. TWO independent routes, and
     the DIRECT one is tried first because it is the stronger claim:
 
-      1. `failed=N` survived the 140-char cap and equals the number of names.
+      1. `failed=N` survived the 140-byte cap and equals the number of names.
       2. `failed=N` did not survive, but `collected − passed − skipped` did —
          an upper bound on `failed` (see `derived_failure_upper_bound`) — and it
          equals the number of names, squeezing `failed` to that number too.
@@ -268,7 +276,7 @@ def names_provably_complete(description):
         return False, (f"the description was truncated before `failed=N`, and "
                        f"collected−passed−skipped={derived} does not equal the "
                        f"{len(names)} named")
-    return True, (f"`failed=N` was cut by the 140-char cap, but "
+    return True, (f"`failed=N` was cut by the 140-byte cap, but "
                   f"collected−passed−skipped={derived} — an upper bound on the "
                   f"failures — equals the {len(names)} named")
 
@@ -376,7 +384,7 @@ def resolve_test_file(repo, ref, raw_name):
     so a short name cannot match a longer one that starts with it — the way
     test_foo would otherwise match test_foobar. Only when phase 1 finds NOTHING
     does phase 2 drop the paren — which is the truncation case, and nothing
-    else: GitHub's 140-char cap lands mid-name often enough that this repo has
+    else: the 140-byte cap lands mid-name often enough that this repo has
     a real row ending `…_CAN_see_the_dif`. Running phase 2 unconditionally would
     turn every short name into a false `ambiguous`; see
     `test_a_COMPLETE_name_is_not_made_ambiguous_by_a_longer_sibling`.
@@ -723,7 +731,7 @@ def render(result):
         say(f"   • {t['name']}")
         if t.get("file"):
             say(f"       file: {t['file']}"
-                + ("   (name was truncated by GitHub's 140-char cap)"
+                + ("   (name was truncated by the 140-byte cap)"
                    if t.get("truncated_name") else ""))
         say(f"       {t['verdict']}: {t['reason']}")
         for c in t.get("candidates", []):

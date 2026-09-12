@@ -798,7 +798,7 @@ def test_ONE_unexplained_name_makes_the_WHOLE_PR_a_real_red(repo):
 
 def test_an_inherited_name_on_a_TRUNCATED_row_is_UNMEASURED_not_INHERITED(repo):
     """🔴 THE COMPLETENESS GUARD AT PR LEVEL. Every NAMED failure is inherited,
-    but the count did not survive the 140-char cap, so other failures may remain
+    but the count did not survive the 140-byte cap, so other failures may remain
     and the PR must not be dismissed. The per-test line still says what it
     found, which is the useful half."""
     got = M.triage_pr(repo.path, "main", pr_meta(repo), pr_row(
