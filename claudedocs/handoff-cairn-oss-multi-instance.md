@@ -2094,14 +2094,24 @@ covers; pin it with `--config`, do not `cd`.
   worth carrying forward: the gate's remaining red is not a flake.** Deterministic ledger
   censuses over tracked text account for **27 of 99** post-fix verdicts (22 the kill-mention
   ledger, all of them before `#1561` exempted `claudedocs/`; **5 the runner-bound ledger, 4 of
-  those AFTER it** — the same design class in a second ledger, and the live one). Table and
-  residuals in `handoff-gate-flake-store-api.md` rank 1.
+  those AFTER it** — the same design class in a second ledger, the SECOND instance enumerated). ⚠ **Both instances are now fixed** (`#1561` `c0bbd6d9`, `#1567` `6f1867b1`); this bullet
+  called the second "the live one" and that was true for about an hour. ⚠ **It also called this the
+  THIRD instance while saying "both instances are now fixed" two lines later; only TWO are
+  enumerated anywhere** (rank 1 of the gate-flake doc). **The CLASS is what survives: nothing stops
+  the NEXT census reddening `main` for everyone.** Table and residuals in
+  `handoff-gate-flake-store-api.md` rank 1.
   The pre-verification wording, kept for the provenance it names:
-- 🔴 **RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.** `#1458` squash **`ce9b55c3`** merged and
-  content-verified; recorded by `#1462` (`60033d1e`) and corrected by `#1525` (`018e483b`). The
-  second flake it uncovered is filed as **`handoff-gate-flake-store-api.md` rank 7** (`#1477`,
-  `50e8a71a`), which also corrects that doc's rank 1. **The verifier is the flake RATE against
-  heads that CARRY `ce9b55c3` — `git merge-base --is-ancestor`, never a date comparison.**
+- ~~**RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.**~~ **SUPERSEDED 2026-09-12 — the
+  verification it asks for HAS BEEN RUN; see the bullet directly above.** Retained only for the
+  provenance shas it uniquely names: `#1458` squash **`ce9b55c3`** merged and content-verified;
+  recorded by `#1462` (`60033d1e`) and corrected by `#1525` (`018e483b`). The second flake it
+  uncovered is filed as **`handoff-gate-flake-store-api.md` rank 7** (`#1477`, `50e8a71a`), which
+  also corrects that doc's rank 1. 🔴 **Its closing sentence — an INSTRUCTION to go run the
+  flake-rate read — is DELETED rather than preserved**, per
+  `claude/skills/handoff/reference/supersede.md`: keeping a corrected *reading* is the point,
+  keeping a corrected *instruction* arms a landmine for whoever greps `rank 22` in a 2,200-line doc
+  and lands on this hit instead of the bullet above. The predicate it stated was correct and
+  survives above — ancestry, never a date.
 - 🔴 **`cairn recall --repo <cairn>` is `scope-absent`; the scope is `devrc`.** The OSS repo has no
   store scope. `cairn search --scope devrc '<term>'` is what surfaced `ci-repro/` and the
   `#1211`/`#1219`/`#1239` history that made rank 22's whole diagnosis possible.
