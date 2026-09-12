@@ -395,7 +395,8 @@ ACKNOWLEDGED_UNSTUBBED = {
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
-         "tmux-scratch-picker.sh", "tmux-scratch-slots.sh"},
+         "tmux-scratch-picker.sh", "tmux-scratch-slots.sh",
+         "tmux-session-restore.py"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
         "neither can reach the binary: notify-failure.sh names home-manager in "
@@ -544,7 +545,46 @@ ACKNOWLEDGED_UNSTUBBED = {
         "nix-env / pkill, i.e. that every occurrence in the file is prose. "
         "Negative control watched, and it fired for real during "
         "development: the jail caught `date`, a binary the pinned set had "
-        "omitted"),
+        "omitted. "
+        "tmux-session-restore.py (added 2026-09-11 with the send-an-absolute-"
+        "store-path fix) is the PROSE-MENTION shape again and is "
+        "re-justified rather than reworded. ⚠ This sentence carries NO ordinal "
+        "on purpose: it said `the SIXTH` when written, and the very merge that "
+        "landed it added i3status-scratchpads alongside — which is the drift the "
+        "`wmctrl` entry below warns about in capitals, reproduced within hours. "
+        "Its TWO occurrences are both inside "
+        "`claude_command()`'s docstring, and both are load-bearing: one records "
+        "the MEASURED failure that function exists to remove — after a server "
+        "death every continuum-restored pane answered `claude: command not "
+        "found`, because a restored pane does not re-run the login shell's "
+        "profile and so can carry a PATH predating the current home-manager "
+        "generation — and the other records WHY the resolved path is realpath'd "
+        "to its store target rather than sent as `~/.nix-profile/bin/claude`: "
+        "this repo's MEMORY.md documents that a switch writes two generations "
+        "and the intermediate one drops every `home.packages` binary for ~1s, "
+        "so a command naming the profile path can miss. Deleting either word to "
+        "get green would delete the reason the function is shaped as it is. "
+        "It is not a call site: `realpath` and `which` here are "
+        "`os.path.realpath` and `shutil.which`, which are LIBRARY calls, not "
+        "spawns — the store path is what gets SENT INTO a pane, not executed by "
+        "this script. "
+        "🔴 THE PIN, arriving WITH the entry rather than after an audit: "
+        "test_tmux_session_restore.py::test_the_restore_script_SPAWNS_these_"
+        "argv0_AND_NOTHING_ELSE walks the script's AST and asserts its spawn "
+        "argv[0] set is exactly {tmux, grep}, grows-or-shrinks, with a "
+        "`<computed>` sentinel so a command built from a variable fails loudly "
+        "instead of leaving the set — and "
+        "test_home_manager_is_MENTIONED_but_never_SPAWNED asserts BOTH halves "
+        "of this justification, that the prose still exists and that the name "
+        "is still not spawned. ⚠ That extractor resolves ONE level of "
+        "indirection, because this script routes nearly every call through a "
+        "module-local `run(cmd)` helper whose own spawn would otherwise read as "
+        "`<computed>` and teach the pin nothing; the skip is PROVEN rather than "
+        "assumed — the helper must hold exactly one spawn passing its own "
+        "parameter straight through, or the extractor fails instead of widening "
+        "the hole. Both controls WATCHED: clean tree passes, and an injected "
+        "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
+        "test's own message"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "

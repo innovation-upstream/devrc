@@ -489,14 +489,46 @@ Both directions, and they do not cancel.
   Four of the five measured repos have **zero** interior gaps. The likely mechanism is a devrc
   *authoring* habit rather than a property of the ladder: titling one comment "rounds N and
   N+1" and posting a single block for both, which is exactly #1233's shape.
-  ⚠ **TAIL churn is large everywhere (10,052 lines externally) and is NOT a finding yet.** It
-  conflates post-final-block fixes with development that continued after the ladder ended;
-  nothing in the ranges separates them, and classifying it needs the commits read. Do not
-  quote it as unaudited ladder work.
+  🔴 **TAIL churn IS MOSTLY MISSED AUDIT SURFACE — classified 2026-09-11, and the earlier
+  "probably ordinary development" reading was WRONG.** This bullet previously said the tail
+  conflates post-final-block fixes with development that continued after the ladder ended and
+  must not be quoted as unaudited work. The conflation is real; the *proportion* is not what
+  was guessed. Read every commit in the five largest devrc tails (#1046, #1000, #1209, #1121,
+  #998 — **3,349 of devrc's 3,727 tail lines, 17 commits**) plus the largest external one
+  (homelab-talos #707, 1,276 lines):
+
+  | what the commit is | commits |
+  |---|---|
+  | fixes / audit responses (one says *"audit round 5"* in its subject) | 9 |
+  | **merge-conflict RESOLUTIONS** | 4 |
+  | docs, handoff and a CI re-trigger | 3 |
+  | **ordinary development (a feature)** | **1** |
+
+  **One of seventeen is a feature.** homelab #707's single tail commit is *"withdraw the
+  doc-orphan guard, keep the seven orphan fixes"* — an audit response too.
+  🔴 **AND BY LINES THE BIGGEST SINGLE ITEM IS A SEMANTIC-CONFLICT RESOLUTION INSIDE A
+  `merge main`: 1,039 of #1046's 1,105 lines.** Its own commit message documents renumbering a
+  collided exit constant and rewriting 515/487 lines of one test file. That is exactly the
+  hazard `claude/RULES.md` names — *a clean git merge is not a clean merge; a semantic conflict
+  survives it* — landing in a region no audit round's range covered. `--remerge-diff` is what
+  makes it visible at all (shape B of the reference file's range table, working as designed).
+  ⚠ **SCOPE: this is the top of the distribution, not all of it** — 6 of 79 tail adjacencies,
+  ~34% of the 13,779 tail lines. The remaining 73 are unclassified, and a long tail of small
+  gaps may well be more development-heavy than these.
   ⚠ **Two repos are UNMEASURABLE, each for its own reason, and neither is a pass.** naida-ai
   ran 214 PRs and posted **no ledger at all**, so there is nothing to measure coverage
   against — "no ladders ran here" and "ladders ran without blocks" are the same observation
   from this instrument, and so is "they were fine". auditloop has no PR history in scope.
+  🔴 **A COMMIT COUNT IN THE 2026-09-11 TABLE ABOVE WAS WRONG IN THE FLATTERING DIRECTION, and
+  the same defect is in the SHIPPED BRIEF.** `measure_ledger` takes its commit count from
+  `rev-list --count <frm>..<to>` and its line count from the numstat **`--not <base>`** — two
+  different populations — and `audit-dispatch.py` printed the first as *"over N commit(s)"*
+  directly beside the second's command. MEASURED on #1046's tail: **55 commits reported, 2
+  contributing churn.** The other 53 were an upstream bring-in the churn correctly excludes.
+  Corrected figures: #1046 55→**2**, #1000 32→**7**, #1209 12→**3**, #1064 125→0-churn,
+  #1274 10→0-churn, #1110 7→0-churn. **Every LINE count in this review is unaffected** — the
+  churn command always had the exclusion. `RangeChurn` now carries both counts under separate
+  names and the brief prints both with the excluded number stated.
   ⚠ **Three caveats on the counts.** (a) Every carrier count is a **FLOOR** — `gh` does not
   return REVIEW comments, so a block posted as a review is invisible, the same blind spot
   `audit-dispatch.py` warns about. (b) Two repos **hit the 400-PR scan limit**, so their
