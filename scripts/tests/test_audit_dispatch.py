@@ -8268,10 +8268,43 @@ def test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships():
             "the middle of the section, the brief now carries only its head "
             f"while the skill still reads complete:\n{section[:600]}"
         )
-    assert "RETIREMENT CONDITION" in section, (
-        "the retirement condition is not in the text the script inlines. It "
-        "is the only thing standing between a trial and a permanent rule, and "
-        "an auditor who never sees it cannot apply it."
+    # 🔴 THE TRIAL IS CLOSED, SO WHAT THE AUDITOR MUST SEE HAS CHANGED. This
+    # used to assert "RETIREMENT CONDITION" was inlined, on the grounds that it
+    # "is the only thing standing between a trial and a permanent rule". That
+    # trial closed 2026-09-12 at `ran: 6 · changed the outcome: 3` and the
+    # condition was replaced by the TRIAL RECORD. Asserting the old string now
+    # would pin a sentence the skill deliberately retired; asserting nothing
+    # would let the section drift back to claiming it is on trial, which is the
+    # state that makes a standing rule re-litigable on every invocation.
+    # 🔴 ASSERT THE RECORD'S SUBSTANCE, NOT ITS NAME — measured, because the
+    # first draft of this guard asserted `"TRIAL RECORD" in section` and a
+    # mutation sweep SURVIVED it: renaming the record's own heading left the
+    # phrase in the banner ABOVE it ("read the TRIAL RECORD at the end of this
+    # section"), so a POINTER to the record satisfied a check meant to prove the
+    # record was there. Same shape as test_audit_pr_nudge.py's first routing
+    # guard. The pair is the thing that cannot be faked by a cross-reference.
+    assert "ran: 6" in section and "changed the outcome: 3" in section, (
+        "the section does not inline the trial's PAIR (`ran: 6 · changed the "
+        "outcome: 3`). That pair IS the record: `C` alone cannot distinguish "
+        "'it ran and was useless' from 'nobody invoked it', and those have "
+        "opposite conclusions. A heading naming a record it does not carry, or "
+        "a pointer to one elsewhere, is not the record."
+    )
+    assert "ROUTING" in section, (
+        "the section inlines the pair but not the FINDING it produced — that "
+        "the dispatch ROUTING was the defect, not the pass. Without it the next "
+        "session reads three zeros and re-derives the retirement question from "
+        "more ordinary trials, which is exactly what the record exists to stop."
+    )
+    assert "RETIREMENT CONDITION" not in section, (
+        "the section still inlines a RETIREMENT CONDITION. The trial is closed; "
+        "a condition left standing invites a future session to retire a rule "
+        "that has already earned its place — and it cannot be satisfied twice."
+    )
+    assert "ON TRIAL, NOT A STANDING RULE" not in section, (
+        "the section still announces itself as ON TRIAL. It is a standing rule "
+        "now; telling an auditor otherwise makes them weigh whether to run it "
+        "instead of running it."
     )
     # 🔴 THE HALF THAT WAS MISSING, AND THE ONLY ONE THAT CAN FAIL FOR THE
     # CAUSE THAT MATTERS. Every assertion above is a PRESENCE check, and the
