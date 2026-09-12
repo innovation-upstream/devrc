@@ -18,7 +18,7 @@ picker window, (3) ship click telemetry to `activity.events`, (4) open PRs in a 
 instead of a browser.
 
 ## State now
-🔴 **THE ARC IS COMPLETE, MERGED AND SHIPPED TO BOTH HOSTS.** Four PRs landed, each
+🔴 **THE ARC IS COMPLETE, MERGED AND SHIPPED TO BOTH HOSTS.** Five PRs landed, each
 verified by CONTENT on `origin/main` (never by ancestry — a squash merge never makes the
 branch head an ancestor):
 
@@ -28,26 +28,28 @@ branch head an ancestor):
 | **#1594** | `21db164c` | the 0.1709% sha-prefix fixture flake, fixed at all THREE sites |
 | **#1562** | `4d9aee4c` | picker window centering |
 | **#1582** | `cfdb3899` | octo.nvim review TUI behind a browser fallback |
+| **#1563** | `1e0cca03` | this doc |
 
 **Shipped**: `scripts/ship.sh` rc=0, both hosts converged and **COMPARED** at `3ae5945a`
-(workbench 590 managed artifacts / laptop 550, 0 dangling, 0 stale on each). It fell back
-to nebula (`zach@10.42.0.100`) for the laptop, as #1439 provides.
+(workbench 590 managed artifacts / laptop 550, 0 dangling, 0 stale on each), falling back to
+nebula for the laptop. ⚠ `origin/main` has moved well past that sha since (other sessions);
+the SHIPPED state is `3ae5945a`, not whatever `main` reads today.
 
 **Verified LIVE on the deployed artifacts** (not from rendered config):
 - `i3-msg reload` succeeded; the rule is in i3's **running** config:
   `for_window [class="float" instance="mention-open"] floating enable, move position center`
 - The shared `class="float"` rule (line 47) carries **no position** — nothing else moved.
-- A window with the picker's exact properties measured **1324x488 at +1058+489**, against
-  a workspace usable area of `3440x1413 at +0+27` → **delta x=+0 y=+0, exactly centred.**
-  🔴 A first verdict of "NOT centred" was MY OWN arithmetic error — expectation computed
-  against the full output (3440x1440) instead of the workspace area, which excludes the
-  27px bar. The rule was right; the reference was wrong.
-- `nvim-octo` is on the CLICK path via the wrapper's `makeBinPath`
-  (`/nix/store/…-nvim-octo/bin/nvim-octo`), and deliberately NOT on the interactive PATH.
-- Screen state restored: workspace 1 + window `115343363`, both **re-read** after, not
-  merely re-issued. One raise, one restore.
+- A window with the picker's exact properties measured **1324x488 at +1058+489**, against a
+  workspace usable area of `3440x1413 at +0+27` → **delta x=+0 y=+0, exactly centred.**
+- `nvim-octo` is on the CLICK path via the wrapper's `makeBinPath`, and deliberately NOT on
+  the interactive PATH (the D2 deletion).
+- Screen state restored: workspace 1 + window `115343363`, both **re-read** after.
 
-**All six claims RELEASED.** Zero `mention-*` claims outstanding.
+**All six claims RELEASED** — zero `mention-*` claims outstanding.
+
+🔴 **NOT verified, and no agent can verify it: the real click path has never been driven by
+a human.** See rank 1. Three of the four operator objectives are shipped-but-unexercised;
+only the centering is closed end-to-end.
 
 ## Open investigations — live diagnosis state
 
@@ -87,31 +89,39 @@ to nebula (`zach@10.42.0.100`) for the laptop, as #1439 provides.
 diagnosis but an unexercised path: see rank 1.)
 
 ## Next steps (ranked)
-1. 🔴 **THE ONLY THING LEFT: exercise the real click path once.** Everything below is
-   shipped and structurally verified; none of it has been driven end-to-end by a human.
-   Click a `repo#N` mention, then:
+1. 🔴 **THE ONLY SUBSTANTIVE THING LEFT: exercise the real click path once.** Click a
+   `repo#N` mention, then:
    - `wc -l < ~/.config/mention-open/picks.jsonl` — **must now EXIST and GROW.** That file
-     appearing is the single fact proving the arc's premise, because it was absent all
-     night and the whole effort exists because auto-opens were never recorded.
-   - a **review buffer** should open in a centred terminal (not a browser).
+     appearing is the single fact proving the arc's premise: it was absent all night, and
+     the whole effort exists because auto-opens were never recorded.
+   - a **review buffer** should open in a centred terminal, not a browser.
    - in that buffer, `:map <localleader>pm` **must report `No mapping found`** — the
      merge-safety assertion. A config asserting it is a claim; only a live buffer is proof.
-   forcing: user — the operator asked for all four behaviours and none is human-verified.
-2. **Confirm a click row reaches `activity.events`.** The rail is live (spool at
-   `~/.local/state/activity/spool`, `activity-collector.service` active → ClickHouse) but
-   NO real click row has been observed end-to-end. Deliberately not faked: writing a
-   synthetic row would pollute the operator's real dataset, which is the same contamination
+   forcing: user — the operator asked for all four behaviours; three are unexercised.
+2. **Add the `adoption-scan` registry row for the new click telemetry.** Flagged by #1569's
+   author as not done. Until it exists the new dims (`surface`, `rank`, `plausibility`,
+   `offered_total`, `via`) are invisible to adoption sweeps, so "is this being used?" cannot
+   be answered by the tool built to answer it. Repo: devrc.
+   forcing: none
+3. **Confirm a click row reaches `activity.events`.** The rail is live — spool at
+   `~/.local/state/activity/spool`, `activity-collector.service` **active running** →
+   ClickHouse — but NO real click row has been observed end-to-end. Deliberately not faked:
+   a synthetic row would pollute the operator's dataset, which is exactly the contamination
    this arc had to clean out of `picks.jsonl`.
    forcing: none
-3. **Decide whether Tier A ranking actually helps**, now that rank/class/total-offered are
-   recorded. That question was unanswerable before this arc and is answerable after a few
-   weeks of real clicks. Query: chosen `rank` should cluster near 0 and chosen
-   `plausibility` skew PLAUSIBLE.
+4. **Decide whether Tier A ranking actually helps**, now that rank/class/total-offered are
+   recorded. Unanswerable before this arc; answerable after a few weeks of real clicks.
+   Query: chosen `rank` should cluster near 0 and chosen `plausibility` skew PLAUSIBLE.
    forcing: none
-4. **#1582 merged WITHOUT a sandbox-tier CI verdict** (operator instruction: "skip ci,
-   merge and ship"). Its dev-host evidence was strong — 7/7 behavioural mutation kills,
-   580 passed on the real merge — but the `nix build` tier never reported on `afb0d3d2`.
+5. **#1582 merged WITHOUT a sandbox-tier CI verdict** (operator instruction: "skip ci, merge
+   and ship"). Dev-host evidence was strong — 7/7 behavioural mutation kills, 580 passed on
+   the real merge — but the `nix build` tier never reported on `afb0d3d2`.
    `main-green-check` (4-hourly, reproduces before alerting) is the backstop.
+   forcing: none
+6. **Prune this arc's five agent worktrees** under `.claude/worktrees/agent-*` (ids
+   `a489445`, `a6b7160`, `a254aa5`, `a7271e3`, `a68b437`). Cosmetic — all their work is
+   merged. ⚠ The repo holds ~150 agent worktrees in total, most belonging to other sessions;
+   prune only these five.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -343,28 +353,32 @@ diagnosis but an unexercised path: see rank 1.)
   assert state at their OWN runtime and are structurally blind to another test's `undo()`.
   Verified fixed by reproducing the exact failing path: trap empty, real file untouched.
 
+- 🔴 **`clawgate_handoff.sh resolve` now prints a POSITIVE CONTROL, and it is worth reading
+  rather than skimming.** This session got rc=5 alongside *"the SAME endpoint answered 11
+  link(s) for session 85a6e6ff…, so the board is reachable, the base URL is right and the
+  token is accepted."* That control proves the instrument is wired to something — and the
+  tool says in the same breath that it **does NOT prove the session id under test is
+  right**, because a wrong id also answers 200 with an empty array. A zero beside a working
+  control is still not evidence the session touched no task.
+- **The `adoption-scan` gap is the shape this repo has been bitten by before**: a tool that
+  answers "is this used?" cannot answer it for the feature built to make usage visible,
+  because nobody registered it. Recorded as rank 2 rather than left as a note.
+
 ## How to verify
 ```bash
-# Tier A ranging, headless, counts only — NEVER paste the rows (private repo names)
-cd ~/workspace/devrc && nix develop . -c python3 -c '
-import importlib.util,collections
-s=importlib.util.spec_from_file_location("mo","scripts/mention-open.py")
-mo=importlib.util.module_from_spec(s); s.loader.exec_module(mo)
-r=mo.load_known_ranges(); print("rows",len(r))
-for N in ("12","1291"):
-    print(N, collections.Counter(mo.plausibility_class(N,r.get(k)) for k in r))'
+# THE one check that closes this arc — after a real click on a `repo#N` mention
+wc -l < ~/.config/mention-open/picks.jsonl        # must EXIST and GROW (was absent)
 
-# Tier B is recording (the whole point of this arc) — after agent 1 lands + a switch
-wc -l < ~/.config/mention-open/picks.jsonl        # must GROW after clicking a mention
-# and an auto-open must now appear, tagged, not only picker selections
+# Centering, live, without launching the picker (raises ONE window; restore after)
+i3-msg -t get_config | grep 'class="float"'       # line 47 no position; the instance rule centres
+# NB: i3-msg needs DISPLAY=:0, XAUTHORITY and I3SOCK from /proc/$(pgrep -x i3)/environ
 
-# The two kill-scanner guards that were red (now green)
-nix develop . -c python3 -m pytest scripts/claude-hooks/tests/test_guard_core.py \
-  -k "every_kill_server_call_site_in_the_repo_is_classified or no_tracked_shell_text_writes_a_kill_this_guard_would_deny" -q
+# The click path reaches the TUI binary (NOT the interactive PATH — that is by design)
+W=$(readlink -f ~/.config/alacritty/alacritty.toml)
+H=$(grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' "$W" | head -1)
+grep -o '/nix/store/[a-z0-9]*-nvim-octo' "$H"     # ⚠ do NOT require a version suffix
 
-# Picker centering — RENDERED CONFIG ONLY, never raise a window
-grep -n 'mention-open' nix/i3/config.nix
-
-# Claims still held by this arc
-claim-work --list | grep -E 'mention-(pick|picker|click|pr-tui)'
+# What actually shipped, per host
+git -C ~/workspace/devrc rev-parse --short HEAD
+ssh zach@10.42.0.100 'git -C ~/workspace/devrc rev-parse --short HEAD'
 ```
