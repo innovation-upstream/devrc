@@ -2573,11 +2573,33 @@ _SCRIPT_RECURSION_LIMIT = 3
 #   * this cap skips the DESCENT parse for a body over 8 KiB. That one IS a
 #     coverage trade, stated plainly: a nested `bash <other>` inside a script
 #     larger than 8 KiB is not followed. The script itself is still read and
-#     still checked at any size up to the read cap. 8 KiB is where the parser
-#     costs ~5 ms; 16 KiB already costs ~34 ms and 88 KiB ~211 ms.
+#     still checked at any size up to the read cap.
 # Agent-written scratch scripts — the population both 2026-09-11 incidents came
 # from — are a few hundred bytes, so multi-hop still works where it was needed.
+#
+# ⚠ THE COST AT THE CAP WAS UNDERSTATED ~4x HERE, AND THE CORRECTION MATTERS
+# BECAUSE THIS NUMBER IS WHAT THE CAP IS ARGUED FROM. The line used to say
+# "8 KiB is where the parser costs ~5 ms", measured on ONE synthetic body of
+# repeated `echo hello world; ls -la /tmp`. Re-measured at exactly 8 KiB across
+# shapes: plain `echo` 7.1 ms, HEREDOCS 21.2 ms, HERE-STRINGS 39.2 ms, and the
+# repo's real `scripts/tests/test_release_wrapper.sh` (6,568 B) 23.5 ms. So the
+# residual worst case under the cap is tens of milliseconds, not ~5, and 38 of
+# the repo's 86 shell programs sit under it. It is still ~10x better than the
+# 211 ms an 88 KiB body cost, which is why the cap stays — but "5 ms" was a
+# measurement of the easiest possible input quoted as a property of the cap.
 _SCRIPT_DESCEND_MAX_BYTES = 8 * 1024
+
+# 🔴 THE FAN-OUT BOUND — total bytes this ONE `evaluate()` will hand to the
+# parser, across every body at every depth. The per-body cap above bounds one
+# file; nothing bounded how MANY, and the difference was measured in seconds:
+# 1 wrapper → 100 helpers of 8 KiB = 2,858 ms; a two-level 30×30 = 18,453 ms.
+#
+# 64 KiB is eight bodies at the per-body cap, or ~128 of the few-hundred-byte
+# scratch scripts this arm exists for, so it cannot bite a real script running
+# a handful of helpers. What it bounds is a SEARCH, never a check: see
+# `check_executed_script_file` — every file reached is still read and still
+# sentinel-tested however many preceded it.
+_SCRIPT_DESCEND_BUDGET_BYTES = 64 * 1024
 
 # 🔴 KNOWN GAP, AND A DELIBERATE ONE: `source x.sh` / `. x.sh` is NOT read.
 #
@@ -2611,7 +2633,21 @@ _SCRIPT_DESCEND_MAX_BYTES = 8 * 1024
 # were missing and each one was a live bypass: `bash -O extglob x.sh` returned
 # `extglob` as the script path (no such file → ALLOW), and `+`-prefixed tokens
 # were not recognised as flags at all, so `+O` itself was returned.
-_SHELL_VALUE_FLAGS = ("-o", "+o", "-O", "+O", "--rcfile", "--init-file")
+#
+# 🔴 MATCHED BY LAST LETTER, NOT BY EXACT SPELLING — an exact-match tuple was
+# HALF A FIX. Short flags CLUSTER, and `bash -eo pipefail x.sh` is the shape
+# this repo's own scripts are written in: `-eo` is not `-o`, so the operand scan
+# returned `pipefail` and every one of these ALLOWED a file containing a kill:
+#     bash -eo pipefail x.sh   bash -euo pipefail x.sh   bash -xo pipefail x.sh
+#     sh   -eo pipefail x.sh   bash -eO extglob x.sh
+# The sweep that "covered" `-o`/`-O`/`+o`/`+O` iterated each flag ALONE, which is
+# the one shape that cannot expose a clustering bug.
+#
+# The rule is bash's: in a cluster the value-taking letter consumes the NEXT
+# word only when it is LAST (`-eo pipefail`). A value letter mid-cluster takes
+# its value from the rest of the cluster, so the next word is still the operand.
+_SHELL_VALUE_SHORT = "oO"
+_SHELL_VALUE_LONG = ("--rcfile", "--init-file")
 
 # A redirection token as this tokeniser hands it over: `>`, `2>`, `>>`, `&>`,
 # `<`, `<<EOF`, `2>&1`, `>/tmp/o.log`. Group 2 is the operator, group 3 whatever
@@ -2629,6 +2665,15 @@ def _redirection(tok):
     shell does not interpret, so its target must be SKIPPED rather than read:
     `bash 2>/dev/null x.sh` used to return `2>/dev/null` as the script path and
     ALLOW the file that actually ran.
+
+    ⚠ THE `&` FORMS NEVER REACH THIS FUNCTION, AND THIS DOCSTRING USED TO IMPLY
+    THEY DID by listing `2>&1` among the tokens handled. MEASURED: the segment
+    splitter cuts on `&` first, so `bash 2>&1 x.sh` arrives as TWO argvs —
+    `['bash', '2>']` and `['1', 'x.sh']` — and neither yields an operand. Same
+    for `3>&1` and `&>/tmp/o`. That is a property of `split_commands`, one layer
+    below this parser, so it is DECLARED as a gap here rather than papered over
+    with a pattern that cannot fire. Pinned by
+    `test_the_ampersand_redirect_forms_are_a_DECLARED_gap`.
     """
     m = _REDIR_RE.match(tok)
     if not m:
@@ -2704,16 +2749,28 @@ def _script_operand(argv, _depth=0):
                 i += 1 if attached else 2
                 continue
             if tok.startswith("-") or tok.startswith("+"):
+                if tok.startswith("--"):
+                    i += 2 if tok in _SHELL_VALUE_LONG else 1
+                    continue
+                letters = tok[1:]
                 # `-c` carries inline text, not a file; `_nested_shell_text` owns it.
-                if tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]:
+                if tok.startswith("-") and "c" in letters:
                     return None
-                i += 2 if tok in _SHELL_VALUE_FLAGS else 1
+                # Last letter only — see `_SHELL_VALUE_SHORT`.
+                i += 2 if letters and letters[-1] in _SHELL_VALUE_SHORT else 1
                 continue
             return (tok, False)
         return None
     # Direct execution. Require a path separator: a bare word here is either a
     # PATH lookup (see the docstring) or not a script at all.
-    if "/" in argv[0]:
+    #
+    # …and reject a token that is really a REDIRECTION. `bash &>/tmp/o x.sh` is
+    # split on `&` one layer below this parser, so `>/tmp/o` arrives as argv[0];
+    # it contains `/`, so without this it became a "directly executed script"
+    # and the guard went looking for a file named `>/tmp/o`. Harmless today —
+    # no such file exists — but it is a candidate path invented out of
+    # punctuation, and this arm's whole discipline is not guessing.
+    if "/" in argv[0] and _redirection(argv[0])[0] is None:
         return (argv[0], True)
     return None
 
@@ -2817,10 +2874,22 @@ def _script_checks_for(body):
     is tested raw first (the common case, no copy) and then with quoting
     stripped.
 
-    ⚠ RESIDUAL, declared: a line-continuation splice (`kill-\\` + newline +
-    `server`) still hides the sentinel, because deleting the backslash leaves
-    the newline between the halves. Pinned by
-    `test_a_line_continuation_splice_is_a_DECLARED_gap_in_the_pre_gate`.
+    ⚠ A LINE-CONTINUATION SPLICE (`kill-\\` + newline + `server`) IS ALLOWED,
+    AND IT IS **NOT** A COST OF THIS PRE-GATE. That attribution was wrong here
+    for one round and the wrong remedy was written down with it. MEASURED with
+    the pre-gate bypassed entirely — `check_tmux_kill_shared_server` called
+    directly on the spliced text — the splice STILL allows:
+    `commands("tmux kill-\\\\\\nserver\\n")` yields the single token
+    `kill-\\nserver`, so the tokeniser never produces a `kill-s…` word and the
+    MATCHER never matches. It is a tokeniser/matcher gap that predates this
+    function, and the pre-gate is faithful to the matcher on it, as everywhere
+    else.
+    🔴 So the remedy this comment used to prescribe — "normalise line
+    continuations before the substring test, cheap" — WOULD NOT WORK: it makes
+    the check RUN and the check still returns None. Closing it means teaching
+    `_tokenise` to splice continuations, which is a change to the shared parser
+    every check depends on, not a change here. Pinned, with that control, by
+    `test_a_line_continuation_splice_is_a_TOKENISER_gap_not_a_pre_gate_one`.
     """
     stripped = None
     for chk, sentinel in _SCRIPT_TEXT_CHECKS:
@@ -2843,9 +2912,17 @@ _SCRIPT_ARM_REMEDY = (
     "checks that gate command TEXT and is backwards for this one: a file is what you just "
     "ran. What clears this deny: (a) fix the SCRIPT — `tmux -L my-probe-$$ new-session -d …` "
     "then `tmux -L my-probe-$$ kill-server`, or `kill-pane`/`kill-window` if you only meant "
-    "to remove what you named; (b) if the script only DOCUMENTS the command in a comment or a "
-    "heredoc, move that prose out of the executable file; (c) if a shared `kill-server` is "
-    "genuinely needed, ask the operator to run it in their own terminal."
+    # 🔴 (b) USED TO SAY "in a comment or a heredoc", and the comment half was FALSE —
+    # measured, a `# tmux kill-server` comment line ALLOWS (`#` becomes argv[0], so the
+    # checks never see a tmux argv), while a HEREDOC BODY denies because its lines are
+    # parsed as real commands. Naming a cause that cannot produce the deny sends the
+    # caller to edit something irrelevant and then distrust the guard.
+    "to remove what you named; (b) if the script only DOCUMENTS the command — inside a "
+    "heredoc body, whose lines this guard parses as real commands — move that prose out of "
+    "the executable file. (A plain `#` comment does NOT trigger this deny, so if that is all "
+    "your script has, the kill is somewhere else: search it for `kill-s`.) "
+    "(c) if a shared `kill-server` is genuinely needed, ask the operator to run it in their "
+    "own terminal."
 )
 
 
@@ -2857,20 +2934,68 @@ def check_executed_script_file(cmd, cwd=None):
     line does not contain the offending text and a bare "tmux kill-server is
     blocked" would read as a guard malfunction.
 
-    Bounded three ways, because this runs on every Bash call: a recursion depth,
-    a per-body descent cap (`_SCRIPT_DESCEND_MAX_BYTES`), and a visited set — so
-    a script that runs itself, or a cycle between two, terminates.
+    🔴 WHAT IS BOUNDED, STATED PRECISELY — an earlier version of this docstring
+    said "bounded three ways" and that was a claim about ONE BODY, not about the
+    walk. Nothing bounded the NUMBER of bodies, and it showed: MEASURED on a
+    single `evaluate()`, one wrapper naming 100 helpers of 8 KiB each cost
+    **2,858 ms**, a two-level 30×30 fan-out **18,453 ms**, and 300 scripts on one
+    command line **5,307 ms**. An 18-second hook call on the operator's primary
+    tool is the same defect this arm's latency fix was for, one axis over.
 
-    🔴 THE VISITED SET IS KEYED ON `(realpath, depth)`, NOT ON THE PATH. Keyed
-    on the path alone it was ORDER-DEPENDENT AND UNSOUND: `depth` is per-branch
-    but `seen` is global to the walk, so a file first reached at depth 3 (where
-    the next hop is over the limit) was then SKIPPED when the same file came up
-    again at depth 0, taking its whole subtree with it. Measured on a chain
-    `A→B→C→X→K` with the kill in `K`: `bash A.sh; bash X.sh` ALLOWED while
-    `bash X.sh; bash A.sh` DENIED — the same two commands, the same files, the
-    verdict decided by the order they appeared in.
+    So the bounds are now:
+      * RECURSION DEPTH — `_SCRIPT_RECURSION_LIMIT`, per branch.
+      * PER-BODY DESCENT CAP — `_SCRIPT_DESCEND_MAX_BYTES`; a body over it is
+        still READ and still CHECKED, it is simply not parsed for children.
+      * A GLOBAL DESCENT BUDGET — `_SCRIPT_DESCEND_BUDGET_BYTES`, the total
+        bytes this one `evaluate()` will hand to the parser. This is the bound
+        on FAN-OUT.
+      * A VISITED SET, keyed `(realpath, depth, direct)`.
+    🔴 THE BUDGET DELIBERATELY NEVER GATES THE CHECK. Every file this walk
+    reaches is read and sentinel-tested however many came before it, so a kill
+    in a file the command NAMES is found regardless of fan-out; only the descent
+    into that file's own children is budgeted. That is why the budget's
+    order-dependence is a bound on a SEARCH and not a repeat of the soundness
+    bug below.
+
+    🔴 THE VISITED SET IS KEYED ON `(realpath, depth, direct)` AND IS ONLY
+    WRITTEN AFTER A SUCCESSFUL READ. Both halves are load-bearing and both were
+    wrong, in two separate rounds:
+
+      1. Keyed on the PATH alone it was order-dependent: `depth` is per-branch
+         but `seen` is global, so a file first reached at depth 3 (where the
+         next hop is over the limit) was SKIPPED when it came up again at depth
+         0, taking its whole subtree with it. Measured on `A→B→C→X→K`:
+         `bash A.sh; bash X.sh` ALLOWED, `bash X.sh; bash A.sh` DENIED.
+      2. Fixing that introduced a NEW order-dependent ALLOW, because the key
+         omitted `direct` and the insert happened BEFORE the read. `direct` is
+         what decides whether a file is read as shell at all — so a path whose
+         read returns None (non-shell shebang, no shebang and not executable, a
+         FIFO, over the cap) POISONED `seen`, and a later `bash <same path>` at
+         the same depth was skipped. Measured, with the 2026-09-11 incident body
+         in a mode-0644 file with no shebang — exactly what the Write tool
+         produces:
+             bash repro.sh                       DENY
+             ./repro.sh                          ALLOW  (intended; see F7)
+             ./repro.sh || bash repro.sh         ALLOW  🔴  the ordinary
+             ./repro.sh; bash repro.sh           ALLOW  🔴  "not executable,
+             bash repro.sh || ./repro.sh         DENY       fall back" idiom
+         Recording a file as visited before knowing whether it was even LOOKED
+         AT is the general shape.
+
+    ⚠ AND AN HONEST NEGATIVE: those were prescribed as two INDEPENDENT halves
+    and they are not. A mutation sweep scored "key omits `direct`" as SURVIVED,
+    for a structural reason — once the insert is after the read, a path whose
+    read returned None never enters `seen`, and when the read SUCCEEDS
+    `_read_script` returns the SAME bytes either way; `direct` only ever decides
+    None vs the body. So `direct` in the key is DEFENCE IN DEPTH, not a second
+    fix, and it is labelled as such rather than counted as covered.
+    `test_the_direct_element_of_the_visited_key_is_DEFENCE_not_a_fix` pins the
+    invariant that makes it redundant, so the day it stops being redundant that
+    test goes red.
     """
     seen = set()
+    read_memo = {}
+    budget = [_SCRIPT_DESCEND_BUDGET_BYTES]
 
     def walk(text, depth):
         if depth > _SCRIPT_RECURSION_LIMIT:
@@ -2880,15 +3005,30 @@ def check_executed_script_file(cmd, cwd=None):
             if not operand:
                 continue
             path, direct = operand
+            # Memoised on the RAW path string: no syscall, cannot raise, and it
+            # is what stops a body that names one helper 100 times re-reading it
+            # 100 times now that `seen` is written after the read.
+            if (path, direct) in read_memo:
+                body = read_memo[(path, direct)]
+            else:
+                body = read_memo[(path, direct)] = _read_script(path, cwd, direct)
+            if body is None:
+                continue
+            # 🔴 AFTER the read, never before — and `realpath` runs only on a
+            # path `_read_script` has already OPENED. It used to run on the raw
+            # operand, where a NUL byte raised an UNCAUGHT `ValueError: lstat:
+            # embedded null character in path` straight out of `evaluate()`.
+            # Measured reachable from 12 tracked `icon-*.png` files: a binary
+            # body is walked, and a NUL-bearing token becomes a candidate path.
+            # It failed CLOSED (bash-guard.py catches BaseException and denies
+            # "bash-guard crashed"), so it was a confusing false deny rather
+            # than a bypass — but it was a crash that did not exist before.
             key = (os.path.realpath(
                 path if os.path.isabs(path) else os.path.join(cwd or ".", path)),
-                depth)
+                depth, direct)
             if key in seen:
                 continue
             seen.add(key)
-            body = _read_script(path, cwd, direct)
-            if body is None:
-                continue
             for chk in _script_checks_for(body):
                 reason = chk(body)
                 if reason:
@@ -2902,7 +3042,8 @@ def check_executed_script_file(cmd, cwd=None):
                         "caused the incident. Fix the SCRIPT: give it its own "
                         "server with `-L my-probe-$$` and kill that."
                         + _SCRIPT_ARM_REMEDY)
-            if len(body) <= _SCRIPT_DESCEND_MAX_BYTES:
+            if len(body) <= _SCRIPT_DESCEND_MAX_BYTES and budget[0] >= len(body):
+                budget[0] -= len(body)
                 nested = walk(body, depth + 1)
                 if nested:
                     return nested

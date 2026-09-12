@@ -5013,19 +5013,33 @@ def test_the_pre_gate_survives_a_QUOTE_SPLIT_spelling(script, tmp_path):
             f"the pre-gate skipped a quote-split spelling: {body!r}")
 
 
-def test_a_line_continuation_splice_is_a_DECLARED_gap_in_the_pre_gate(script, tmp_path):
-    """🔴 NOT a passing grade. Deleting the backslash leaves the NEWLINE between
-    the halves, so `kill-\\<newline>server` still hides the sentinel.
+def test_a_line_continuation_splice_is_a_TOKENISER_gap_not_a_pre_gate_one(script, tmp_path):
+    """🔴 NOT a passing grade — and the ATTRIBUTION is the point of this test.
 
-    It is recorded here because the pre-gate's whole claim is "implied by the
-    matcher", and this is the one place that implication is weaker over text
-    than over tokens. Closing it means normalising line continuations before the
-    substring test — cheap, but it has not been measured on the hot path, so it
-    is declared instead of guessed at.
+    ⚠ This was first recorded as a cost of the sentinel pre-gate, with the
+    remedy "normalise line continuations before the substring test — cheap".
+    Both halves were wrong, and the remedy was the dangerous half: doing it
+    makes the check RUN and the check still returns None, so a maintainer would
+    land a change, see this test still assert ALLOW, and have no signal that the
+    prescription was mistaken.
+
+    The CONTROL below is what settles it: calling the matcher DIRECTLY — no
+    pre-gate involved at all — on the spliced text still returns None, because
+    `commands()` yields the single token `kill-\\nserver` and the tokeniser never
+    produces a `kill-s…` word. It is a tokeniser/matcher gap that predates the
+    pre-gate. Closing it means teaching `_tokenise` to splice continuations,
+    which changes the parser EVERY check shares.
     """
-    path = script("#!/usr/bin/env bash\ntmux kill-\\\nserver\n", "splice.sh")
-    assert gc.evaluate(f"bash {path}", "claude-code", str(tmp_path)) is None, (
-        "the splice now denies — good; delete this test on purpose and say so")
+    body = "#!/usr/bin/env bash\ntmux kill-\\\nserver\n"
+    # 🔴 THE ATTRIBUTION CONTROL. The pre-gate is not on this path.
+    assert gc.check_tmux_kill_shared_server(body) is None, (
+        "the matcher now catches the splice on its own — so this was never a "
+        "pre-gate gap, and if it is closed, delete this test deliberately")
+    assert any("kill-\nserver" in tok for argv in gc.commands(body) for tok in argv), (
+        "the tokeniser no longer splices the continuation into one token — the "
+        "mechanism this test documents has changed; re-derive it")
+    path = script(body, "splice.sh")
+    assert gc.evaluate(f"bash {path}", "claude-code", str(tmp_path)) is None
 
 
 def test_the_arm_does_not_PARSE_a_body_that_cannot_be_denied(tmp_path, monkeypatch):
@@ -5054,6 +5068,25 @@ def test_the_arm_does_not_PARSE_a_body_that_cannot_be_denied(tmp_path, monkeypat
     assert len(calls) == 1, (
         f"a benign body was parsed {len(calls) - 1} extra time(s). The sentinel "
         "pre-gate or the descent cap has been removed; this is the 1-second hook.")
+
+    # 🔴 AND THE UNDER-CAP POPULATION, WHICH THE ASSERTION ABOVE CANNOT SEE.
+    # The fixture above is OVER `_SCRIPT_DESCEND_MAX_BYTES`, so `len(calls) == 1`
+    # is guaranteed by the descent cap alone and says nothing about the sentinel
+    # pre-gate. Under the cap the body IS parsed once for the descent — and
+    # exactly once, never twice, because the check's own parse stays gated. That
+    # second parse is where the residual cost lives (38 of the repo's 86 shell
+    # programs are under the cap, and a heredoc-heavy 8 KiB body costs ~21 ms).
+    # (named `tiny.sh`, not `small.sh` — the killer fixture above already owns
+    # that name, and shadowing it made the positive control below assert on a
+    # benign file and pass for the wrong reason.)
+    tiny = tmp_path / "tiny.sh"
+    tiny.write_text("#!/usr/bin/env bash\necho hi\n")
+    calls.clear()
+    assert gc.check_executed_script_file(f"bash {tiny}", str(tmp_path)) is None
+    assert len(calls) == 2, (
+        f"an under-cap benign body cost {len(calls)} parses, not 2 (the command "
+        "line + one descent). 3 means the sentinel pre-gate stopped gating the "
+        "check's own parse.")
 
     calls.clear()
     assert gc.check_executed_script_file(f"bash {killer}", str(tmp_path))
@@ -5387,6 +5420,23 @@ def test_a_value_flags_ARGUMENT_is_not_the_script(tmp_path):
         assert gc.evaluate(f"bash {flag} {arg} {victim}", "claude-code",
                            str(tmp_path)), f"{flag} swallowed the script operand"
 
+    # 🔴 AND THE CLUSTERED SPELLINGS, which the loop above structurally cannot
+    # reach. Short flags bundle, and `set -eo pipefail` is how this repo's own
+    # scripts are written — `-eo` is not `-o`, so an exact-match table let every
+    # one of these through with `_script_operand` returning `('pipefail', …)`.
+    # Measured ALLOW at 5aedd14c with a file containing the incident body.
+    for prefix in ("bash -eo pipefail", "bash -euo pipefail", "bash -xo pipefail",
+                   "sh -eo pipefail", "bash -eO extglob"):
+        sh, flag, arg = prefix.split()
+        assert gc._script_operand([sh, flag, arg, str(victim)]) == (str(victim), False), (
+            f"{prefix!r} swallowed the script operand")
+        assert gc.evaluate(f"{prefix} {victim}", "claude-code", str(tmp_path)), (
+            f"ALLOWED: {prefix} <file containing a kill>")
+    # …and the boundary: a cluster whose LAST letter is not value-taking must
+    # NOT eat the next word, or the operand is skipped and the guard goes blind.
+    assert gc._script_operand(["bash", "-eu", str(victim)]) == (str(victim), False)
+    assert gc._script_operand(["bash", "-x", str(victim)]) == (str(victim), False)
+
 
 def test_a_path_carrying_an_unexpanded_expansion_is_NEVER_read(tmp_path):
     """M4 — deleting the `"*?$`"` rejection in `_read_script`.
@@ -5450,3 +5500,302 @@ def test_a_FIFO_is_never_OPENED(tmp_path, monkeypatch):
     real = tmp_path / "real.sh"
     real.write_text(_CRASH1_BODY)
     assert gc._read_script(str(real), str(tmp_path)) is not None
+
+
+# =========================================================================== #
+# 16g. 🔴 ROUND-2 — the fix for the round-1 order bug introduced TWO OF ITS OWN.
+#
+# Moving `seen.add` BEFORE `_read_script` and keying on `(realpath, depth)` —
+# a three-line edit — produced:
+#   1. a NEW order-dependent ALLOW on the exact shape this PR exists to block,
+#      because the key omitted `direct` and a file whose read returned None
+#      POISONED the set for a later `bash <same path>`;
+#   2. an UNCAUGHT ValueError out of `evaluate()`, because `os.path.realpath`
+#      moved ahead of the `except (OSError, ValueError)` that used to swallow it.
+# Both are one fix and two independent halves. Neither was covered by any test.
+# =========================================================================== #
+# The 2026-09-11 incident body, in the file mode the Write tool actually
+# produces: 0644, NO shebang. That combination is what makes `./x` unreadable-
+# as-shell and therefore what poisons the visited set.
+_WRITE_TOOL_BODY = "TMUX_TMPDIR=$PWD/run tmux kill-server\n"
+
+
+@pytest.fixture
+def unreadable_kill(tmp_path):
+    p = tmp_path / "repro.sh"
+    p.write_text(_WRITE_TOOL_BODY)
+    p.chmod(0o644)
+    return p
+
+
+@pytest.mark.parametrize("template", [
+    "./repro.sh || bash repro.sh",
+    "./repro.sh 2>/dev/null || bash repro.sh",
+    "./repro.sh; bash repro.sh",
+    "./repro.sh && bash repro.sh",
+    "bash repro.sh || ./repro.sh",
+])
+def test_a_SKIPPED_read_does_not_poison_the_visited_set(unreadable_kill, template, tmp_path):
+    """🔴 MEASURED ALLOW at 5aedd14c for the first four; the fifth denied.
+
+    `./x || bash x` is the ordinary "it wasn't executable, fall back" idiom, and
+    `./x` is correctly NOT read (F7: no shebang, not executable, so running it
+    directly fails). But that non-read recorded the path as VISITED, so the
+    `bash x` half — which would have been parsed, and denies on its own — was
+    skipped. The verdict was decided by which spelling came first.
+
+    The two independent halves of the fix are asserted here behaviourally and in
+    `test_the_visited_key_includes_the_INVOCATION_not_just_the_path` structurally.
+    """
+    assert gc.evaluate(template, "claude-code", str(tmp_path)), (
+        f"ALLOWED: {template!r} — a read that never happened poisoned `seen`")
+
+
+def test_the_visited_key_includes_the_INVOCATION_not_just_the_path(tmp_path):
+    """The structural half. `direct` decides whether a file is read as shell at
+    all, so two entries differing only in `direct` are two different questions
+    and must not share a key. Asserted through behaviour one level down, where
+    the command line itself contains only ONE spelling — so this cannot be
+    satisfied by anything that merely special-cases a top-level `||`."""
+    py = tmp_path / "py.sh"
+    py.write_text("#!/usr/bin/env python3\ntmux kill-server\n")
+    py.chmod(0o755)
+    wrap = tmp_path / "wrap.sh"
+    wrap.write_text(f"#!/usr/bin/env bash\n{py}\nbash {py}\n")
+    assert gc.evaluate(f"bash {py}", "claude-code", str(tmp_path)), (
+        "CONTROL: the inner file denies when run through `bash` on its own")
+    assert gc.evaluate(f"bash {wrap}", "claude-code", str(tmp_path)), (
+        "a wrapper that runs the same path BOTH ways ALLOWED — the direct "
+        "invocation's skipped read poisoned the key for the `bash` one")
+
+
+def test_the_direct_element_of_the_visited_key_is_DEFENCE_not_a_fix(tmp_path):
+    """🔴 AN HONEST NEGATIVE RESULT, recorded because the alternative is a false
+    coverage claim.
+
+    The round-2 audit prescribed two "independent halves": put `direct` in the
+    visited key AND move `seen.add` after a successful read. They are NOT
+    independent. A mutation sweep scored "visited key omits `direct`" as
+    SURVIVED, and the reason is structural rather than a missing test: once the
+    insert happens after the read, a path whose read returned None never enters
+    `seen` at all, and when the read SUCCEEDS `_read_script` returns the SAME
+    bytes whichever way it was invoked — `direct` only ever decides None vs the
+    body, never which body.
+
+    So `direct` in the key is defence in depth, and no test can currently
+    distinguish it. That invariant is what this test pins: the day the two reads
+    can differ, `direct` in the key stops being redundant and starts being
+    load-bearing, and this goes red to say so.
+    """
+    p = tmp_path / "both.sh"
+    p.write_text("#!/usr/bin/env bash\necho hi\n")
+    p.chmod(0o755)
+    as_operand = gc._read_script(str(p), str(tmp_path), False)
+    as_direct = gc._read_script(str(p), str(tmp_path), True)
+    assert as_operand is not None and as_direct is not None, "fixture is not readable both ways"
+    assert as_operand == as_direct, (
+        "`_read_script` now returns DIFFERENT bytes for the same path depending "
+        "on `direct`. `direct` in the visited key is no longer redundant — write "
+        "a real test for it and delete this one.")
+
+
+def test_the_visited_set_is_written_only_AFTER_a_successful_read(tmp_path, monkeypatch):
+    """Belt to the behavioural braces: pin the ORDER directly, because the two
+    halves of the fix are independently revertible and the behavioural tests
+    above can be satisfied by either one alone."""
+    p = tmp_path / "x.sh"
+    p.write_text("#!/usr/bin/env bash\necho hi\n")
+    order = []
+    real_read = gc._read_script
+    real_realpath = os.path.realpath
+    monkeypatch.setattr(gc, "_read_script",
+                        lambda *a, **k: (order.append("read"), real_read(*a, **k))[1])
+    monkeypatch.setattr(gc.os.path, "realpath",
+                        lambda q: (order.append("key"), real_realpath(q))[1])
+    gc.check_executed_script_file(f"bash {p}", str(tmp_path))
+    assert order[:2] == ["read", "key"], (
+        f"the walk resolved the visited key before reading: {order[:4]}. A path "
+        "recorded as visited before it is known to have been LOOKED AT is the "
+        "round-2 defect, and `realpath` ahead of the read is also the NUL crash.")
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash a\0b.sh",
+    "bash scripts/collector/browser-ext/icons/icon-48.png",
+])
+def test_a_NUL_bearing_path_does_not_raise_out_of_evaluate(cmd, tmp_path):
+    """🔴 MEASURED at 5aedd14c: `ValueError: lstat: embedded null character in
+    path`, escaping `evaluate()` entirely.
+
+    `os.path.realpath` had moved ahead of `_read_script`'s
+    `except (OSError, ValueError)`. Reachable without any crafted input: a
+    tracked binary (12 `icon-*.png` files) is read, its body walked, and a
+    NUL-bearing token becomes a candidate path.
+
+    It failed CLOSED — bash-guard.py catches BaseException and denies with
+    "bash-guard crashed" — so it was a confusing false deny, not a bypass. A
+    guard that crashes on the operator's primary tool is still a defect.
+
+    ⚠ The repo sweep is green on this only because it restricts its `bash {p}`
+    half to shell programs, which excludes all 12 pngs. That restriction is
+    load-bearing for that green, which is why this case is asserted separately.
+    """
+    root = Path(__file__).resolve().parents[3]
+    cwd = str(root) if "icons" in cmd else str(tmp_path)
+    assert gc.evaluate(cmd, "claude-code", cwd) is None
+
+
+def test_the_twelve_tracked_icons_are_all_walkable(tmp_path):
+    """Non-vacuity for the case above: if the pngs vanished or stopped
+    containing NULs, that parametrisation would pass by naming nothing."""
+    root = Path(__file__).resolve().parents[3]
+    icons = sorted((root / "scripts/collector/browser-ext/icons").glob("icon-*.png"))
+    assert len(icons) >= 3, f"only {len(icons)} icon pngs — fixture population gone"
+    assert any(b"\x00" in p.read_bytes() for p in icons), "no NUL bytes to trip on"
+    for p in icons:
+        assert gc.evaluate(f"bash {p}", "claude-code", str(root)) is None
+
+
+# --------------------------------------------------------------------------- #
+# 16h. 🔴 FAN-OUT — "bounded three ways" bounded ONE BODY, not the walk.
+# --------------------------------------------------------------------------- #
+def _fanout_tree(tmp_path, n_helpers, helper_bytes, tail=""):
+    pad = "cat <<EOF\nhello world\nEOF\n"
+    body = "#!/usr/bin/env bash\n" + pad * (helper_bytes // len(pad))
+    helpers = []
+    for i in range(n_helpers):
+        h = tmp_path / f"h{i}.sh"
+        h.write_text(body)
+        h.chmod(0o755)
+        helpers.append(h)
+    wrap = tmp_path / "wrap.sh"
+    wrap.write_text("#!/usr/bin/env bash\n"
+                    + "".join(f"bash {h}\n" for h in helpers) + tail)
+    return wrap
+
+
+def test_the_walk_bounds_TOTAL_parsed_bytes_not_just_one_body(tmp_path, monkeypatch):
+    """🔴 MEASURED at 5aedd14c on a SINGLE `evaluate()`: one wrapper naming 100
+    helpers of 8 KiB cost 1,610 ms, and a two-level 30x30 fan-out 16,381 ms —
+    on a hook that runs on every Bash call. The per-body cap bounds one file;
+    nothing bounded how many.
+
+    Pinned as PARSED BYTES rather than wall clock, because a timing assertion on
+    a 24-core box shared with dozens of test runs is a flake generator.
+    """
+    wrap = _fanout_tree(tmp_path, 40, 8000)
+    parsed = []
+    real = gc.commands
+    monkeypatch.setattr(gc, "commands",
+                        lambda t, *a, **k: (parsed.append(len(t)), real(t, *a, **k))[1])
+    assert gc.check_executed_script_file(f"bash {wrap}", str(tmp_path)) is None
+    # The wrapper's own body is one descent; the budget caps everything after it.
+    descended = sum(parsed[1:])
+    assert descended <= gc._SCRIPT_DESCEND_BUDGET_BYTES + gc._SCRIPT_DESCEND_MAX_BYTES, (
+        f"the walk handed {descended} bytes to the parser against a budget of "
+        f"{gc._SCRIPT_DESCEND_BUDGET_BYTES} — fan-out is unbounded again")
+    # POSITIVE CONTROL: without a cap this tree WOULD be ~40x8 KiB of parsing,
+    # so the bound above is a fact about the budget and not about a walk that
+    # never ran.
+    assert descended > 0, "nothing was descended into at all — the probe is dead"
+
+
+def test_the_fan_out_budget_NEVER_gates_the_CHECK(tmp_path):
+    """🔴 THE SOUNDNESS HALF, and the reason the budget is defensible at all.
+
+    A budget consumed by earlier siblings is order-dependent by construction —
+    the very shape round 1 fixed. It is acceptable here ONLY because it bounds
+    the SEARCH for nested scripts and never the check itself: every file the
+    walk reaches is read and sentinel-tested however many came before it.
+
+    So: 120 benign 8 KiB helpers, then the kill, in one command. The budget is
+    long exhausted by the time the last helper is reached, and it must still
+    deny.
+    """
+    # 🔴 THE KILLER MUST BE BIG, and that is the whole isolation of this test.
+    # A first draft used a 40-byte `kill.sh`; the mutant "gate the check on
+    # `budget >= len(body)`" SURVIVED, because 40 bytes still fitted in the
+    # budget left over after the helpers. Only a killer LARGER than the residue
+    # can tell "the budget gates the descent" from "the budget gates the check".
+    killer = tmp_path / "kill.sh"
+    killer.write_text("#!/usr/bin/env bash\n"
+                      + "echo hello world; ls -la /tmp\n" * 250
+                      + "tmux kill-server\n")
+    killer.chmod(0o755)
+    assert len(killer.read_text()) > gc._SCRIPT_DESCEND_MAX_BYTES // 2, (
+        "the killer is small enough to fit the leftover budget, so this test "
+        "cannot see a check that is wrongly budget-gated")
+    # ⚠ FEW LINES, BIG HELPERS. A first draft used 120 helpers and the WRAPPER
+    # itself came to ~9 KiB of `bash <long tmp path>` lines — over
+    # `_SCRIPT_DESCEND_MAX_BYTES`, so the walk never descended into it and the
+    # test failed for a reason that had nothing to do with the budget. 12
+    # helpers of 8 KiB exhaust a 64 KiB budget with a wrapper under 1 KiB.
+    n = 2 + gc._SCRIPT_DESCEND_BUDGET_BYTES // gc._SCRIPT_DESCEND_MAX_BYTES
+    wrap = _fanout_tree(tmp_path, n, 8000, tail=f"bash {killer}\n")
+    assert len(wrap.read_text()) <= gc._SCRIPT_DESCEND_MAX_BYTES, (
+        "the wrapper itself is over the per-body descent cap, so this test is "
+        "about that cap and not about the budget")
+    total = sum(len((tmp_path / f"h{i}.sh").read_text()) for i in range(n))
+    assert total > gc._SCRIPT_DESCEND_BUDGET_BYTES, (
+        "the fixture no longer exhausts the budget, so this proves nothing")
+    assert gc.evaluate(f"bash {wrap}", "claude-code", str(tmp_path)), (
+        "the kill was missed because 120 benign files came first — the budget "
+        "is gating the CHECK, not just the descent")
+
+
+# --------------------------------------------------------------------------- #
+# 16i. 🟡 Declared gaps found in round 2, pinned so they cannot close silently.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("template", [
+    "bash 2>&1 {p}",
+    "bash 3>&1 {p}",
+    "bash &>/tmp/guard-probe.log {p}",
+])
+def test_the_ampersand_redirect_forms_are_a_DECLARED_gap(script, template, tmp_path):
+    """🔴 NOT a passing grade, and the reason is one layer below this parser.
+
+    `split_commands` cuts on `&` before `_redirection` ever sees the token, so
+    `bash 2>&1 x.sh` arrives as TWO argvs — `['bash', '2>']` and `['1', 'x.sh']`
+    — and neither yields an operand. `_redirection`'s docstring used to list
+    `2>&1` among the tokens it handles, which was a claim about a pattern that
+    cannot fire.
+
+    Closing this means changing the shared segment splitter, which every check
+    in this file depends on. Declared rather than attempted.
+    """
+    path = script(_CRASH1_BODY)
+    assert gc.evaluate(template.format(p=path), "claude-code", str(tmp_path)) is None, (
+        f"{template} now DENIES — an improvement; delete this row on purpose")
+    # The mechanism, asserted, so a reader does not have to take it on trust.
+    assert len(gc.commands(template.format(p=path))) > 1
+
+
+def test_a_redirection_token_is_not_a_directly_executed_script(tmp_path):
+    """`bash &>/tmp/o x.sh` splits on `&`, leaving `>/tmp/o` as argv[0] — a
+    token containing `/`, which the direct-execution branch used to accept as a
+    script path. Nothing is ever named that, so it denied nothing; it is fixed
+    because inventing a candidate path out of punctuation is the opposite of
+    this arm's discipline."""
+    assert gc._script_operand([">/tmp/o", "x.sh"]) is None
+    assert gc._script_operand(["2>/dev/null"]) is None
+    # CONTROL: an ordinary path in the same position still resolves.
+    assert gc._script_operand(["/tmp/real.sh"]) == ("/tmp/real.sh", True)
+
+
+def test_a_COMMENT_only_script_is_allowed_and_the_deny_says_so(script, tmp_path):
+    """🟢 The deny's remedy (b) used to say "if the script only DOCUMENTS the
+    command in a comment or a heredoc, move that prose out". MEASURED: a `#`
+    comment line ALLOWS — `#` becomes argv[0], so no check ever sees a tmux argv
+    — while a HEREDOC BODY denies, because its lines are parsed as commands.
+    Naming a cause that cannot produce the deny sends the reader to edit
+    something irrelevant and then distrust the guard."""
+    commented = script("#!/usr/bin/env bash\n# tmux kill-server\necho hi\n", "c.sh")
+    assert gc.evaluate(f"bash {commented}", "claude-code", str(tmp_path)) is None
+
+    heredoc = script("#!/usr/bin/env bash\ncat <<EOF\ntmux kill-server\nEOF\n", "h.sh")
+    reason = gc.evaluate(f"bash {heredoc}", "claude-code", str(tmp_path))
+    assert reason, "a heredoc BODY is parsed as commands and must still deny"
+    assert "heredoc body" in reason, "the remedy must name the cause that can fire"
+    assert "A plain `#` comment does NOT trigger this deny" in reason, (
+        "the remedy must say which cause CANNOT fire, or the reader edits the "
+        "wrong thing")
