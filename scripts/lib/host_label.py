@@ -54,8 +54,16 @@ DEFAULT_LOCAL_HOST = "workbench"
 #: and stops pretending to a census.
 #:
 #: ENFORCED — `test_peer_host.py::test_no_module_redeclares_a_peer_address_literal`:
-#:     no `user@addr` STRING CONSTANT for a peer, in any non-test file under
-#:     `scripts/`, outside this module.
+#:     no string constant EQUAL to a peer's `user@addr`, in a file under
+#:     `scripts/` that is not inside a `tests/` directory and does not end in
+#:     `.md`, outside this module.
+#:
+#: 🔴 EVERY CLAUSE OF THAT WAS MEASURED AGAINST THE SCANNER, not inferred from
+#: its name. It does NOT catch a constant that merely CONTAINS the address
+#: (`"ssh zach@… uptime"`), an f-string, a bare unquoted address in a `.sh`
+#: file, or anything in a `.md` — `scripts/browser-bridge/README.md` spells one
+#: today. This is the THIRD attempt at this paragraph; the first two described
+#: the guard more widely than it works, which is the same defect in a new place.
 #:
 #: OUT OF SCOPE, and therefore NOT enumerated anywhere: a target COMPOSED at
 #: runtime from parts (shell does this); a BARE IP; and anything outside
@@ -78,7 +86,8 @@ DEFAULT_LOCAL_HOST = "workbench"
 #: draft of this comment carried four, and one had already gone stale within the
 #: same PR.
 #:
-#: These modules DERIVE from this table (all were literals):
+#: These modules DERIVE from this table (three of the four were literals;
+#: `scripts/peer-host` is new and never carried one):
 #:   `scripts/peer-host`, `scripts/lib/opencode_search.py`,
 #:   `scripts/session-manager`, `scripts/session-analysis/espanso-usage.py`.
 #:

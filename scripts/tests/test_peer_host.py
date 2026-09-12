@@ -539,7 +539,32 @@ def test_the_remote_program_actually_runs_and_emits_the_protocol(tmp_path):
 SHIPPABLE_IMPORTS = {
     "host_label.py": {"__future__", "os"},
     "_READER_SOURCE": {"json", "os", "sys"},
+    # 🔴 THE THIRD CONTRIBUTOR, AND THE ONLY ONE THAT COVERS THE REAL ARTEFACT.
+    # `remote_program()` does not just concatenate the two sources above — it
+    # also emits a TRAILER (`import sys as _s`, the `_peerhost_main` call). A
+    # ledger over the two named sources left that trailer unpinned: measured,
+    # adding `import tomllib as _t` to it SURVIVED a fully green suite, and a
+    # 3.11-only import there kills the SSH leg with a ModuleNotFoundError that
+    # `parse_leg_output` records as `unreachable` — the "purely local bug that
+    # reads as a DEAD LAPTOP" this whole guard exists to prevent.
+    #
+    # This entry is the union over the ASSEMBLED program, so it cannot be
+    # outflanked by a fourth contributor either.
+    "remote_program()": {"__future__", "json", "os", "sys"},
 }
+
+
+def _shippable_source(which: str) -> str:
+    """The source behind one SHIPPABLE_IMPORTS key. One resolver, so the guard
+    and its negative control cannot read different things."""
+    hl_src = (_SCRIPTS / "lib" / "host_label.py").read_text(encoding="utf-8")
+    if which == "host_label.py":
+        return hl_src
+    if which == "_READER_SOURCE":
+        return ph._READER_SOURCE
+    if which == "remote_program()":
+        return ph.remote_program(hl_src)
+    raise KeyError(which)
 
 
 def _imported_roots(source: str) -> set:
@@ -573,10 +598,7 @@ def test_both_spliced_sources_stay_SHIPPABLE_over_the_wire(which):
     The end-to-end test cannot catch it: the package would be present on the dev
     host, so the splice would run there and fail only on the remote.
     """
-    if which == "host_label.py":
-        source = (_SCRIPTS / "lib" / "host_label.py").read_text(encoding="utf-8")
-    else:
-        source = ph._READER_SOURCE
+    source = _shippable_source(which)
     assert _imported_roots(source) == SHIPPABLE_IMPORTS[which], (
         "%s's imports changed. Every module here is spliced into the program "
         "piped to the remote `python3 -`, so each one must exist on the REMOTE "
@@ -584,20 +606,39 @@ def test_both_spliced_sources_stay_SHIPPABLE_over_the_wire(which):
         % which)
 
 
-def test_that_shippable_ledger_can_actually_fire():
-    """🔴 NEGATIVE CONTROL, and it uses the mutant that DEFEATED the old guard.
+def test_that_shippable_ledger_can_actually_fire(monkeypatch):
+    """🔴 NEGATIVE CONTROL THAT CALLS THE GUARD ITSELF.
 
-    `tomllib` is stdlib on this interpreter, so the previous
-    `in sys.stdlib_module_names` check passed it while it would break a 3.9
-    remote. An exact-set ledger must reject it — and must equally reject a
-    module being REMOVED, which a subset check would not see.
+    The first version of this control re-performed the comparison on synthetic
+    strings (`assert _imported_roots(src) != base`). That proves `_imported_roots`
+    and the ledger constant can discriminate — it does NOT exercise the guard,
+    so the guard's own operator was unprotected. Measured: mutating the guard's
+    `==` to `<=` (or `>=`) SURVIVED a fully green suite, while a MUTATION_MATRIX
+    row claimed that mutant was killed. A control that cannot see the operator is
+    exactly the false-coverage class the last two rounds existed to remove.
+
+    So this drives the real `test_both_spliced_sources_stay_SHIPPABLE_over_the_wire`
+    through the source resolver, and asserts it goes red BOTH ways:
+      * a GROWN set — the `tomllib` mutant that defeated the previous guard;
+      * a SHRUNK set — which a `<=` subset check would wave through.
     """
-    base = SHIPPABLE_IMPORTS["host_label.py"]
-    assert _imported_roots("from __future__ import annotations\nimport os\n") == base
-    for mutant in ("import tomllib\n", "import requests\n"):
-        src = "from __future__ import annotations\nimport os\n" + mutant
-        assert _imported_roots(src) != base, mutant
-    assert _imported_roots("import os\n") != base, "a REMOVED import must fail too"
+    real = ph._READER_SOURCE
+
+    def _run():
+        test_both_spliced_sources_stay_SHIPPABLE_over_the_wire("_READER_SOURCE")
+
+    _run()                                    # positive control: green as-is
+
+    monkeypatch.setattr(ph, "_READER_SOURCE", real + "\nimport tomllib\n")
+    with pytest.raises(AssertionError, match="imports changed"):
+        _run()                                # GROWN
+
+    monkeypatch.setattr(ph, "_READER_SOURCE", "import json\nimport os\n")
+    with pytest.raises(AssertionError, match="imports changed"):
+        _run()                                # SHRUNK — a subset check misses this
+
+    monkeypatch.setattr(ph, "_READER_SOURCE", real)
+    _run()                                    # and it comes back green
 
 
 def test_the_shipped_reader_is_the_one_the_local_leg_runs():
@@ -999,9 +1040,16 @@ def _scan_for_address_literals(root):
 def test_no_module_redeclares_a_peer_address_literal():
     """🔴 THE LEDGER GUARD — AND ITS DOCSTRING IS DELIBERATELY NARROW.
 
-    It enforces exactly ONE property: no `user@addr` STRING CONSTANT for a peer
-    outside `host_label.py`, under `scripts/`. A literal in a TEST is expected —
-    that is the pin, not a copy.
+    It enforces exactly ONE property: no string constant EQUAL to a peer's
+    `user@addr`, in a file under `scripts/` that is not inside a `tests/`
+    directory and does not end in `.md`, outside `host_label.py`.
+
+    🔴 EVERY CLAUSE OF THAT SENTENCE WAS MEASURED AGAINST THE SCANNER, because
+    two earlier drafts described it more widely than it works. It does NOT catch
+    a constant that merely CONTAINS the address (`"ssh zach@… uptime"`), an
+    f-string, a bare unquoted address in a `.sh` file, or anything in a `.md`
+    (`scripts/browser-bridge/README.md` spells one today). "Not under a `tests/`
+    directory" is the real predicate — not "non-test file".
 
     🔴 WHAT IT CANNOT SEE, stated here because an earlier draft of this docstring
     (and of `host_label.py`'s ledger comment) claimed "every place these
@@ -1165,26 +1213,37 @@ def test_the_cairn_home_nix_entries_stay_ADJACENT():
     """🔴 PINS THE THING THIS PR BROKE, because nothing else does.
 
     `nix/home.nix`'s `cairn-validate` comment says "the THIRD member of the pair
-    above" and "read all three lines together". Those are POSITIONAL references:
+    above" and "Read all three lines together". Those are POSITIONAL references:
     the first draft of this PR wedged `.local/bin/peer-host` between `cairn-who`
     and `cairn-validate`, and both phrases silently began resolving to the wrong
     entries. It was moved below the trio — but that fix is positional and, until
-    this test, unguarded, so the next `home.file` entry could re-wedge it exactly
-    the same way.
+    this test, unguarded.
 
-    `test_cairn_split.py` pins the comment's TEXT; nothing pinned the ADJACENCY
-    the text depends on. Two pins, two different claims — this is the second.
+    🔴 THE SCAN IS OVER EVERY `home.file."..."` KEY, NOT JUST `.local/bin/`.
+    The first cut only indexed `.local/bin/` entries, and a mutation sweep showed
+    it SURVIVED a `home.file.".config/zzz".text` wedged into the same gap —
+    which breaks "the pair above" exactly as the guarded case does. The docstring
+    said "the next `home.file` entry could re-wedge it", so the check was
+    measurably narrower than its own sentence.
+
+    ⚠ AND THE PREMISE THE FIRST CUT STATED WAS FALSE. It claimed
+    `test_cairn_split.py` pins that comment's TEXT, so this was "the second of
+    two pins". It does not: `test_cairn_split.py` anchors on the
+    `.local/bin/cairn` entry and pins the WHY paragraph above THAT one. The
+    positional phrases live above `cairn-validate` and — measured by rewording
+    each and re-running three cairn suites — are pinned by NOTHING. This is the
+    ONLY pin, and it guards position, not wording.
     """
     home_nix = (_SCRIPTS.parent / "nix" / "home.nix").read_text(encoding="utf-8")
-    order = re.findall(r'home\.file\."\.local/bin/([A-Za-z0-9_-]+)"', home_nix)
-    trio = ["cairn", "cairn-who", "cairn-validate"]
-    assert all(name in order for name in trio), order
-    idx = [order.index(name) for name in trio]
-    assert idx == sorted(idx), "the cairn entries are out of order: %s" % order
+    keys = re.findall(r'home\.file\."([^"]+)"', home_nix)
+    trio = [".local/bin/cairn", ".local/bin/cairn-who", ".local/bin/cairn-validate"]
+    assert all(name in keys for name in trio), keys
+    idx = [keys.index(name) for name in trio]
+    assert idx == sorted(idx), "the cairn entries are out of order: %s" % keys
     assert idx[-1] - idx[0] == len(trio) - 1, (
-        "something was inserted between the cairn entries, so that block's "
-        "'the pair above' / 'read all three lines together' now resolve to the "
-        "wrong lines: %s" % order[idx[0]:idx[-1] + 1])
+        "a home.file entry was inserted between the cairn entries, so that "
+        "block's 'the pair above' / 'Read all three lines together' now resolve "
+        "to the wrong lines: %s" % keys[idx[0]:idx[-1] + 1])
 
 
 def test_the_module_resolves_its_lib_relative_to_the_RESOLVED_file():
