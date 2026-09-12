@@ -8,11 +8,11 @@ cairn recall --repo ~/workspace/devrc
 reader into the pinned package, so the old spelling now fails with a file-not-found. **It is not
 just this doc: see rank 9 for the population, which is the single place those counts live.** Only
 this doc's invocation is fixed here; fixing one site and implying the rest is the partial-sweep
-failure. ⚠ **This block previously restated the counts and got two of them wrong in the direction
-rank 9 exists to prevent** — `63`/`71` are the BARE-PATH figures, not the *prescribing* ones
-(`61`/`65`), and it listed `5` source files while rank 9, in the same commit, said `6` and named the
-Dockerfile the list had dropped. **Two copies of a count are how one of them becomes wrong; rank 9
-owns them.**
+failure. ⚠ **This block deliberately carries NO counts.** It previously restated them and got two wrong in
+the direction rank 9 exists to prevent — quoting the bare-path figures for *prescribing*, and listing
+five source files where rank 9, in the same commit, said six and named the Dockerfile the list had
+dropped. **A second copy of a count is how one of them becomes wrong, and the fix is to have one
+copy, not two agreeing ones: rank 9 owns these.**
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
 reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
@@ -30,10 +30,17 @@ number, and the number relocates the problem.** The store-api fsync flake is nam
 `tekton/devrc-pytests` verdicts on heads that CARRY `ce9b55c3` against **12 of 298** that do not
 (P(0) ≈ 0.017), measured by **ancestry**. 🔴 **And what the same read found instead: the gate's
 remaining red is dominated by DETERMINISTIC ledger censuses over tracked text — 27 of 99 post-fix
-verdicts, ~7× this flake at its worst — of which 22 were closed at the source by `#1561` and
-5 are the runner-bound ledger, on which `main` IS RED RIGHT NOW — already owned by `#1567`.**
-That is the new rank 8. Full
-table, controls and residuals in rank 1; claim `gate-flake-store-api-1` was held for the read.
+verdicts, ~7× this flake at its worst — of which 22 were the kill-mention ledger, closed at the
+source by `#1561` (`c0bbd6d9`), and 5 the runner-bound ledger, closed by `#1567` (`6f1867b1`).**
+Both reddened `main` itself; both are fixed, confirmed at `origin/main` `337114e0` (**5 passed** on
+`test_runner_bound_ledger.py`, **1 passed** on the kill guard). 🔴 **The CLASS is not fixed: at least
+two instances in two days, and nothing prevents the next.** That is rank 8 — closed as an instance,
+retained for the class. ⚠ **The 27 / 22 / 5 figures are a READ-TIME population that cannot be
+re-derived** (rank 1 says why); do not treat a later disagreement as a refutation.
+⚠ **This paragraph said `main` IS RED RIGHT NOW for about an hour after `#1567` merged**, while rank
+8 five hundred lines below already said CLOSED — and `State now` is the block a resuming session
+reads first. **Four other sites were swept for that phrasing and this one, the most-read, was
+missed.** Full table, controls and residuals in rank 1; claim `gate-flake-store-api-1` released.
 
 🔴 **THE AUDIT LADDER IS CLOSED — by decision, not by a clean round.** `#1219` and its
 successor `#1239` are both MERGED. The ladder ran **8 rounds on `#1219` + 2 on `#1239`**;
@@ -113,16 +120,24 @@ heads carrying `ce9b55c3` against 12 of 298 that do not, P(0) ≈ 0.017 — and 
 snippet below. It is retained for ONE reason and it is not "use it": its **predicate is a LIMIT, not
 a baseline** — `--limit 40` newest-first with no ancestry test at all, which is the date-shaped
 sampling rank 1 says gives a wrong denominator. The closing reading used ancestry over 400 heads.
-🔴 **AND ITS CLASSIFIER IS BROKEN FOR THE ONE TEST THIS DOC IS ABOUT — an earlier revision of this
-very paragraph praised it, which would have sent someone to re-use it.** The snippet greps status
-DESCRIPTIONS for `subsystem_store_api\|TestTheActor\|TestAHungRoundTrip\|TestTheBackstop`, but a
-description carries `Class.test_name` and **never a filename**, so `subsystem_store_api` cannot fire
-at all. Measured over the 101 failure verdicts rank 1 collected: the 12 store-api rows — rank 1's
-entire pre-window count — are matched **0** times. ⚠ **It is not wired to nothing, and the
-distinction matters:** a positive control over the same 101 rows matches **4** (`TestTheActor…` ×3,
-`TestAHungRoundTrip…` ×1), so the grep works and the *token list* is simply missing
-`TestARefusedWrite…`. **Re-run as written it would return 0 in BOTH arms — a vacuous zero read as
-"the fix worked".** via: measurement
+🔴 **AND ITS CLASSIFIER CANNOT SEE THE ONE TEST THIS DOC IS ABOUT — an earlier revision of this very
+paragraph praised it, which would have sent someone to re-use it.** The snippet greps status
+DESCRIPTIONS for `subsystem_store_api\|TestTheActor\|TestAHungRoundTrip\|TestTheBackstop`. A
+description **never carries a filename**, so `subsystem_store_api` cannot fire at all; and it carries
+a `Class.test_name` only sometimes — over the 101 failure verdicts rank 1 collected, **27 of the 100
+named rows are `Class.test_name` and 73 are a bare `test_…` name**, so a class-keyed token misses a
+test reported bare even when its class is listed.
+🔴 **TWO DIFFERENT POPULATIONS, AND AN EARLIER REVISION OF THIS PARAGRAPH CONFLATED THEM AND
+CONTRADICTED ITSELF.** The **12** rows naming the fsync flake (`TestARefusedWrite…`) — rank 1's entire
+pre-window count — match **0**. The **21** rows naming *any* class that lives in
+`test_subsystem_store_api.py` match **4** (`TestTheActor…` ×3, `TestAHungRoundTrip…` ×1). Calling the
+first set "the store-api rows" while quoting the second as a positive control asserted 0 and 4 about
+the same thing.
+⚠ So the grep is **not** wired to nothing, and **"it returns 0 in both arms" was wrong** — on the
+pre-window it returns **4** and on the post-window **0**, which is worse than a flat zero: it reads
+as a rate that fell to nil while being blind to the only test in question. ⚠ **Adding
+`TestARefusedWrite…` to the token list does not fix it** — that is the fix-direction trap, because
+73 of 100 rows name no class at all. via: measurement
 ⚠ **What is still UNMEASURED is the block's own hypothesis at its second point:** it predicted the
 rate "drops to ~0 where a tmpfs is available, and is **unchanged where the fallback fires**". The
 reading confirms the first half and says nothing about the second — **nothing has measured whether
@@ -148,7 +163,7 @@ zero is a real absence rather than a pattern that never matches anything.
 🔴 **(c) The manifest read is itself unpinned and HAS ALREADY MOVED** — the same defect as the
 verdict census above. Verified exactly at `homelab-talos` **`b2f42ef5`** (2,482 lines, `pytests` 59,
 `emptyDir` 3, all three in comments). `origin/trunk` has since taken `3c53d618` — *"/nix becomes a
-per-run emptyDir"* — and now reads **2,584 lines, `pytests` 62, `emptyDir` 12**, i.e. it added real
+per-run emptyDir"* — and AT `3c53d618` reads **2,584 lines, `emptyDir` 12**, i.e. it added real
 emptyDirs where the control had found only comments. **Re-read both manifests at a named sha; do not
 quote these numbers.**
 ⚠ **And two halves, only the first a reading of this cluster:** "nothing overrides it" is measured;
@@ -382,7 +397,7 @@ Not a bug — a measurement that would mislead if run as written.
    ✅ **That one was neither a flake nor a stale-base echo — `main` ITSELF WAS RED ON IT, and it is
    now FIXED: `#1567` merged `6f1867b1` at 2026-09-12T05:07:06Z.** Red measured at three successive
    tips (`4e970998` **1 failed, 1655 passed**; `8114a124` and `61f41adf` **1 failed, 4 passed**
-   each, that file alone), then **5 passed** at `origin/main` after the merge. It is **rank 8**,
+   each, that file alone), then **5 passed** at `origin/main` `337114e0` after the merge. It is **rank 8**,
    closed. via: measurement
 
    ⚠ **THE GATE'S OWN OBSERVABILITY IS WORSE THAN ITS RED RATE: `error` is 29 of 99 post-window
@@ -497,12 +512,18 @@ Not a bug — a measurement that would mislead if run as written.
    `#1239` (`65f7325b`) both merged and content-verified; ladder ended by decision after 10
    rounds. Five residuals are disclosed in-source and listed under Gotchas. Nothing to do.
    forcing: none — done; retained so the rank numbering stays stable.
-6. **Fix the espanso `:acq`/`:rna` collision — `main` IS RED** — devrc, `nix/home.nix`. Full
-   diagnosis in the Open-investigations block above. Not this effort's change and deliberately
-   not fixed here; it is one snippet's `search_terms`. **Whoever fixes it should run the
-   keylog tests, which are the deterministic check.**
-   forcing: regression — `main` is red on `tekton/devrc-main-pytests` and a real
-   Ctrl+Space search path is broken.
+6. ✅ **CLOSED 2026-09-12 — the espanso `:acq`/`:rna` collision is GONE and `main` is NOT red on it.**
+   Measured at `origin/main` `337114e0` by the criterion this item itself names as the deterministic
+   check: the keylog suite → **104 passed** at `origin/main` `337114e0`. The underlying terms are now disjoint in `nix/home.nix`
+   (`:acq` = ask/clarify/clarifying/questions; `:rna` = recommend/recom/next/actions/rank/leverage).
+   Not fixed by this effort — it was someone else's one-line `search_terms` change; recorded because
+   the item asserted a live red.
+   ⚠ **It carried `forcing: regression — `main` is red` while the test was green, and `forcing:` is
+   the machine-readable field a `claim-work` session sorts on** — so the stale value was not cosmetic,
+   it advertised a gate-forcing regression with nothing to fix behind it. A bash comment 300 lines
+   away telling the reader to re-verify does not undo that. **Retire the `forcing:` in the same edit
+   as the red.**
+   forcing: none — fixed; the diagnosis above is retained as the worked example.
 
 7. **A FIXED 120 s SUBPROCESS BOUND IN A FILE WHOSE WALL TIME IS NOT STABLE —
    `scripts/tests/test_run_tests_targets.py`.** Its tests spawn a nested `run-tests.sh`,
@@ -567,7 +588,7 @@ Not a bug — a measurement that would mislead if run as written.
    mechanical way: `scripts/tests/test_runner_bound_ledger.py` → **5 passed** at `origin/main` after
    the merge, against **1 failed, 4 passed** before it. 🔴 **Kept at full length because the CLASS is
    what matters — it is the class rank 1's measurement found has replaced the flake this doc was
-   written to chase, and it is the third census in this family in two days.**
+   written to chase. At least TWO instances in two days, both enumerated in rank 1 (kill-mention 22, runner-bound 5); no third is enumerated anywhere, so do not write one.**
    Measured 2026-09-12 by running the file directly at `origin/main` `4e970998` in a clean worktree:
    `…::test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger`
    → **1 failed, 1655 passed in 251.49s**, and re-measured after each of the two times `main` moved
@@ -584,7 +605,7 @@ Not a bug — a measurement that would mislead if run as written.
      `#1524`@03:16:50Z, `#1556`/`#1559`/`#1522`@03:40–03:46Z — plus `#1494`@03:14:37Z.
      via: measurement
    - ✅ **FIXED BY `#1567`** (`fix/scoped-surface-runner-bound`, opened 2026-09-12T03:58:34Z, head
-     `57030bfd`, **merged `6f1867b1` at 05:07:06Z** — 56 minutes later), which had the same diagnosis
+     `57030bfd`, **merged `6f1867b1` at 05:07:06Z** — 1 h 08 m later), which had the same diagnosis
      and took the right arm. 🔴 **The pre-create sweep is what caught this** — the red was measured and filed here
      at the same hour `#1567` was opened, and the lock could not have seen it, because nothing
      was claimed. This is the class `design-claim-by-push.md` lists as NOT covered.
@@ -596,15 +617,15 @@ Not a bug — a measurement that would mislead if run as written.
      to `[ABSENT] x1`. Provenance it also names: the file arrived with `#1532` and reddened the
      guard on landing.
    ✅ **Closing condition MET 2026-09-12:** `#1567` merged (`6f1867b1`) **and**
-   `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` green on `origin/main` — run, not
-   assumed: **5 passed**. ⚠ **The window from filing to closed was 1 h 10 m, and this item spent
+   `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` green on `origin/main` `337114e0`
+   — run, not assumed: **5 passed**. ⚠ **The window from filing to closed was 1 h 08 m, and this item spent
    most of it asserting `main` is red "RIGHT NOW" in four places.** That is the same defect class as
    the tip-sha line in `State now`: a present-tense claim about a mutable state, with nothing to
    expire it. **Write the measurement and its timestamp; let the closing condition carry the
    present tense.**
    forcing: none — fixed. It reddened the gate on 5 PR heads and `main` itself; retained because the
    CLASS (a census over tracked text reddening `main` for everyone) is `claude/RULES.md`'s
-   "a permanently-red gate is worse than no gate" and recurred three times in two days.
+   "a permanently-red gate is worse than no gate" and recurred at least twice in two days.
 
 9. ⚠ **`#1508` DELETED `scripts/lib/subsystem_recall.py` AND 61 HANDOFF DOCS STILL PRESCRIBE
    RUNNING IT.** Measured 2026-09-12 at `origin/main` `8114a124`, by `git grep` against the ref
@@ -652,7 +673,14 @@ Not a bug — a measurement that would mislead if run as written.
    git grep -c 'python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py' origin/main \
      -- 'claudedocs/*' ':(exclude)claudedocs/handoff-gate-flake-store-api.md'
    ```
-   sums to **0**. 🔴 **THE EXCLUDE IS LOAD-BEARING AND AN EARLIER VERSION OF THIS CONDITION WAS
+   sums to **0**. ⚠ **READ THAT AS "60 of the 61 docs", NOT "no doc prescribes the dead path".** The
+   exclude buys satisfiability at the cost of coverage, and the excluded file is the very one whose
+   "Run this first" block was the motivating instance — so this condition can read 0 while THIS doc
+   prescribes it. Mechanically confirmed in both directions on a throwaway copy: adding the dead
+   invocation to any OTHER `claudedocs/` file moves it 64 → 65; adding it to this file leaves 64.
+   A narrower exclusion (key on the fenced block rather than the path) would close that; the two
+   surviving occurrences here genuinely must be printed.
+   🔴 **THE EXCLUDE IS LOAD-BEARING AND AN EARLIER VERSION OF THIS CONDITION WAS
    UNSATISFIABLE WITHOUT IT — while asserting, in the same breath, that it was not.** That version
    read *"keyed to the invocation, not the bare path — docs that merely discuss the dead path
    (including this item) must not make the condition unsatisfiable"*, which was false: this item
@@ -835,7 +863,8 @@ git -C $DEVRC show origin/main:scripts/testlib/store_siting.py \
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   $DEVRC/scripts/tests/test_store_siting_ledger.py -q -p no:cacheprovider
 
-# rank 6's keylog red — NO LONGER RED. Measured 2026-09-12 at origin/main: 104 passed.
+# rank 6's keylog red — NO LONGER RED. Measured 2026-09-12 at origin/main 337114e0: 104 passed.
+#   The sha is the point: an unpinned origin/main reading is the defect rank 1 names.
 #   ⚠ This line read `# 1 failed, 100 passed` with "expected until rank 6 is fixed"; rank 6 itself
 #   still says `main` IS RED on it. Re-verify rank 6 before acting on it — this is the fourth
 #   present-tense red claim in these docs found stale in one session.
@@ -844,10 +873,10 @@ nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
 gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/main)/status \
   --jq '.statuses[]|"\(.context) \(.state): \(.description[0:100])"'
 #   ⚠ This can show NO completed verdict at all, and that is the NORMAL case, measured at n=100 in
-#   handoff-gate-speed-and-ci-signal.md — its bullet "Only ~21-22 of 100 main commits get an
+#   handoff-gate-speed-and-ci-signal.md — its bullet "Only ~21–22 of 100 `main` commits get an
 #   authoritative verdict". A gate producing no verdict is not a green one: read the state, never
 #   just the absence of a `failure`, and prefer PR heads to main for any rate (that doc's bullet
-#   "main is a useless population for this question"). Quoted by opening words, not line number —
+#   "`main` is a useless population for this question"). Quoted by opening words, not line number —
 #   both targets moved when this PR edited that file.
 
 # rank 8 — CLOSED by #1567 (6f1867b1). This is its closing condition, so expect 5 PASSED.

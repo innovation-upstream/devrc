@@ -159,7 +159,7 @@ the END. **Ranks 1–3 and 9 are CLOSED tombstones**; renumbering re-points ever
    🔴 **Both instances of the CLASS are now fixed and the class itself is not.** The same design — a
    census over tracked text reddening `main` for everyone — fired next from
    `scripts/tests/test_runner_bound_ledger.py` (**5** reds, **4** after `c0bbd6d9`), closed by
-   `#1567` `6f1867b1`. **At least two instances in two days, both measured here, and nothing prevents
+   `#1567` `6f1867b1` (**5 passed** at `origin/main` `337114e0`). **At least two instances in two days, both measured here, and nothing prevents
    the next one.** Tracked as `handoff-gate-flake-store-api.md` rank 8, closed as an instance and
    retained for the class.
    forcing: none — both instances shipped; the class is unaddressed and owned by nobody.
