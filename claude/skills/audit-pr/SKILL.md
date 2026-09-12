@@ -170,6 +170,14 @@ merge decision is open**, so the fix was a trigger, not an edit to this section:
 `gh pr create` (pinned by `scripts/claude-hooks/tests/test_audit_pr_nudge.py`). Full evidence:
 `claudedocs/handoff-audit-pr-ladder.md`.
 
+⚠ **CORROBORATED FROM OUTSIDE THE TRIAL, which is why the pair is not re-opened to count it.** A
+different session hit the same thing after this record closed: `#1568` merged **6 min** after it
+opened (`04:11:19Z` → `04:17:24Z`, re-derived here, not taken from its PR body), so its round-0
+audit landed **after** the merge and every candidate it found became a follow-up. That is a
+FOURTH independent instance of the post-decision dispatch, and it is evidence about the ROUTING,
+not a seventh trial — **do not fold it into `R`.** It is here because the thing most likely to
+happen next is someone re-deriving this finding from fresh trials instead of reading it.
+
 ⚠ **Keep reporting `ran: R · changed the outcome: C` on each PR** — not to decide this section's
 fate, which is settled, but because it is the only record of whether the TRIGGER is working. A bare
 `C` cannot distinguish "it ran and was useless" from "nobody invoked it", and those have opposite
