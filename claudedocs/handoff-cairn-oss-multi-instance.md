@@ -18,12 +18,27 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- 🔨 **2026-09-12 — RANK 3 SLICE 3: THE AUDIT LADDER IS CLOSED WITH A MERGE VERDICT. NOT MERGED,
-  AND THE ONLY THING LEFT IS `main`'s OWN RED.** `innovation-upstream/devrc` **#1508**, branch
-  `chore/cairn-consolidate-onto-pin`, pushed head **`918e62e5`**; **rebased locally onto the new
-  `main` as `6205faec` and the PUSH IS DELIBERATELY HELD** (see the red below — pushing now spends
-  a gate run that is guaranteed red for a reason that is not ours). Claim
-  `cairn-oss-multi-instance-3` still **HELD**.
+- ✅ **2026-09-12 — RANK 3 SLICE 3 IS MERGED. `innovation-upstream/devrc` #1508, squash
+  `44bd8b0e`.** The block this replaces said *"NOT MERGED, AND THE ONLY THING LEFT IS `main`'s
+  OWN RED"*, named a held rebase `6205faec`, and said the claim was still HELD. **All three are
+  now false** — it was pushed and merged by a later session at 2026-09-12T03:42:52Z, and claim
+  `cairn-oss-multi-instance-3` is RELEASED (absent from `claim-work --list`).
+  🔴 **VERIFIED BY CONTENT, NEVER BY ANCESTRY** — a squash makes `merge-base --is-ancestor` false
+  forever. On `origin/main` all five forked reader modules are GONE:
+  `scripts/lib/{subsystem_resolver,subsystem_read_store,host_identity,cairn_doctor,subsystem_recall}.py`
+  each return `ABSENT` to `git cat-file -e`, and `44bd8b0e`'s diffstat deletes them (3392 + 2814 +
+  586 + 207 + 143 lines) while adding `scripts/lib/cairn_pin.py` (246) and
+  `scripts/tests/test_cairn_pin.py` (680). `scripts/lib/timeouts.py` REMAINS by design — it was
+  never one of the five.
+  ⚠ **`scripts/lib/subsystem_touch.py` still exists and must**: it is the devrc-only WRITER,
+  deliberately absent from the OSS repo. Slice 3 consolidated the READER half only.
+
+- 🔴 **THE BLOCKER THIS DOC SPENT A DAY ON IS CLOSED, AND NOT BY ANYONE WORKING THIS ARC.** The
+  kill-mention-ledger treadmill was closed STRUCTURALLY by **#1561** (`c0bbd6d9`) —
+  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose entirely,
+  instead of classifying each offending doc. `main` measured GREEN at `b1abf6b1` (`1537 passed`).
+  **The lesson this arc paid for twice: three PRs of per-instance classification were the wrong
+  altitude, and the design fix landed while they were still being written.**
 
 - **FOUR AUDIT ROUNDS, and the shape of what they found is the durable part:**
   - **Round 1 (blind, full) — TWO 🔴 DEPLOY-BLOCKERS a 22,000-test green suite and three green
@@ -188,9 +203,19 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   `validate` re-implemented on the resolver instead of shelling a writer's `--validate`.
   Per-module changed-line counts: `host_identity` **113**, `subsystem_resolver` **40**,
   `subsystem_recall` **38**, `cairn_doctor` **21**, `subsystem_read_store` **4**.
-  devrc additionally has `scripts/lib/subsystem_touch.py` at **6,654 lines** — the whole
-  writer half — against the OSS `lib/entry_shape.py` at **264**, which holds only the shared
+  devrc additionally has `scripts/lib/subsystem_touch.py` — the whole writer half, an order of
+  magnitude larger — against the OSS `lib/entry_shape.py`, which holds only the shared
   vocabulary. devrc has **15** cairn/subsystem test files; OSS has **7**. via: measurement
+  🔴 **THE TWO RAW LINE COUNTS THAT USED TO BE HERE (`6,654` and `264`) ARE GONE ON PURPOSE —
+  BOTH WENT STALE, AND ONE OF THEM WAS STALED BY THIS DOC'S OWN PR.** Measured 2026-09-12:
+  `subsystem_touch.py` read **6,693** at that PR's first commit and **6,855** two commits later
+  (its own docstring edits), against a doc asserting 6,654; `entry_shape.py` is **330**, not 264.
+  A raw line count of a file under active edit restales within the same PR, it is the cross-round
+  class this ladder already names — true when written, falsified by a later commit, inside no
+  round's diff range — and **nothing asserts on either number, so no test can ever catch it**.
+  The ORDER-OF-MAGNITUDE claim is what the argument actually rests on and it is robust; if you
+  need the figures, derive them: `wc -l scripts/lib/subsystem_touch.py` and
+  `git -C ~/workspace/cairn show HEAD:lib/entry_shape.py | wc -l`. **Do not re-insert them.**
 - **Ruled out: that the fork is behavioural and therefore expensive to reconcile.** I read
   every module diff: **~90% is sanitisation prose** — docstrings rewriting `subsystem_touch`
   to "the writer half"/`entry_shape` and removing named hosts and dates. The only real
@@ -895,9 +920,12 @@ belongs to that arc's own session. via: measurement
    **Never read ahead/behind without fetching first, and never let it outrank content.**
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
    - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
-     slice 2 ✅ MERGED as #1406 `9300f234`; slice 3 (point the writer at the pinned
-     `entry_shape`, delete devrc's five duplicated `lib/` modules) NOT STARTED.** The fork was
-     DECIDED 2026-09-08 — CONSOLIDATE ONTO THE PIN — and is not to be re-asked.
+     slice 2 ✅ MERGED as #1406 `9300f234`; slice 3 ✅ MERGED 2026-09-12 as #1508, squash
+     `44bd8b0e`** (point the writer at the pinned `entry_shape`, delete devrc's five duplicated
+     `lib/` modules). ⚠ **This line read "NOT STARTED" for ~9 h after the work merged** — the
+     State-now block and this one are separate sentences about the same fact and drifted apart.
+     Verified by content, not ancestry; see State now. The fork was DECIDED 2026-09-08 —
+     CONSOLIDATE ONTO THE PIN — and is not to be re-asked.
    **What #1406 shipped:** `cairn.url = "github:ZacxDev/cairn"` (lock rev `9213726`),
    deliberately **NOT** `inputs.nixpkgs.follows` — cairn pins `python312` on purpose; the
    package threaded through `extraSpecialArgs` as `cairnPackage` (required, no default, so a
@@ -1091,7 +1119,20 @@ belongs to that arc's own session. via: measurement
     today (nothing sets it), and it would make `cairn recall`'s host banner disagree with the
     writer's. (c) `claude/skills/cairn/SKILL.md`'s "consolidated in a later slice" names no
     owner and no mechanism. (a) and (b) both disappear if rank 3 slice 3 lands.
-    **Closing condition:** rank 3 slice 3 merges, or a PR that addresses (a)–(c) explicitly.
+    🔴 **THAT LAST SENTENCE IS HALF WRONG, MEASURED AT `origin/main` AFTER SLICE 3 MERGED
+    (2026-09-12).** Slice 3 was this item's stated closing condition, so the item would have been
+    closed unread. Re-measured:
+    - **(b) IS closed.** `scripts/lib/host_identity.py` is ABSENT — devrc deleted its copy, so the
+      only `host_identity` in play is the packaged one that honours `CAIRN_HOST`. The two copies
+      can no longer disagree because there is only one copy.
+    - **(a) IS NOT closed, and slice 3 could not have closed it.**
+      `nix/sessionVariables.nix:36` still reads
+      `CAIRN_MIRROR_ROOT = "${homePath}/.claude/analyze-service-index"`. Slice 3 deleted duplicated
+      PYTHON modules; this is a `.nix` literal — a different surface — and
+      `test_store_root_ledger.py` still cannot see it for the reason this item already gives.
+      **A closing condition that names another PR closes only what that PR's diff actually
+      touched**, which is not what "both disappear if X lands" predicted.
+    **Closing condition (revised):** a PR that addresses (a) and (c) explicitly; (b) is done.
     forcing: none
 
 
@@ -1146,6 +1187,22 @@ belongs to that arc's own session. via: measurement
     devrc PR to run after this merge is the one that answers half one.
     ⚠ And the leg has never executed in-cluster: every measurement across six audit
     rounds is one dev host plus a local `nixos/nix:2.24.15` container.
+    ✅ **HALF ONE IS MET, OBSERVED 2026-09-12 — and the "never executed in-cluster" caveat
+    above is RETIRED.** `tekton/devrc-cairn-client-runs` reported on PR **#1583** with
+    `pass` and its own verdict text — *"the pinned cairn client ran: validate and doctor
+    both produced output"* — alongside `devrc-nodetests` and `devrc-pytests` in a
+    3-check rollup. So it is visible on `gh pr checks`, it executes in-cluster, and it
+    reports a real verdict rather than a placeholder.
+    ⚠ **Do NOT read this as "the first PR to answer it".** #786 merged 2026-09-10 and
+    devrc has merged many PRs since, so earlier runs almost certainly exist; this is an
+    observation, not a first. The sentence above predicting "the first devrc PR to run
+    after this merge" was written before any of them and nobody recorded the answer.
+    🔴 **HALF TWO IS STILL UNMET and is the half that matters:** the leg must be shown
+    to go **RED when the pinned client is stubbed to print nothing**. A leg that has only
+    ever been watched pass is a leg whose red path is unproven — `claude/RULES.md`'s
+    "a verdict you have never watched go red is a claim about your command line".
+    **Closing condition:** stub the pinned client to emit nothing, push to a throwaway
+    branch, and watch THIS leg report `fail`; record the run name.
     forcing: none
 
 21. **`analyze-service-index-commit.service` is VESTIGIAL and fails on every firing — 603
@@ -1324,6 +1381,87 @@ belongs to that arc's own session. via: measurement
     not devrc, so it needs an upstream PR.
     **Closing condition:** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 on
     `origin/main`, and an upstream PR for (c).
+    🔨 **(a) AND (b) BUILT 2026-09-12 — devrc PR (branch `fix/cairn-validate-spellings`). (c) is
+    NOT in it and stays open: it lives in `ZacxDev/cairn`.**
+    ⚠ **The line numbers in this item were STALE** — the two sites are `:135` and `:157`, not
+    `:128`/`:150`. Found by grepping the string, not by opening the named line.
+    - **(a)** both now spell `cairn-validate`. The `:157` site is the single-FILE form, so it
+      reads `cairn-validate --validate <path>`: the launcher prepends `--validate` with no value
+      and argparse's last occurrence wins, which its own docstring states.
+    - **(b)** `validate_command()` now emits `cairn-validate --store <root> --scope <scope>`.
+      🔴 **`--store` is emitted explicitly and that is NOT redundant** — the launcher's own
+      prepend is the SYNCED CACHE, while this function's contract is to check the store the
+      refusal actually came from. **Measured both ways** on the deployed pin: with an explicit
+      `--store`, the run's `store:` line names it, not the launcher's default; and a malformed
+      entry still exits **3**, untranslated.
+    - 🔴 **THE COST RANK 23 DID NOT ANTICIPATE, and it is the reusable part.** Six neighbouring
+      tests broke, because `test_the_recovery_command_ACTUALLY_RUNS_and_reproduces_the_diagnosis`
+      **executes** the emitted command. `python3 <abs path>` is runnable in BOTH tiers; a bare
+      `cairn-validate` is on `home.sessionPath` and the `nix build` tier has no reason to carry
+      it. **Exec'ing the real launcher would have made that guard structurally incapable of
+      passing in one tier while staying green on this host — the defect this repo already shipped
+      once.** So the launcher's prepend is MODELLED in one helper (`_writer_argv`), and the seam
+      is pinned by a new ledger test that reds if the launcher stops prepending `--validate`,
+      stops prepending `--store`, or stops appending the caller's argv.
+    - **Mutation battery: 6/6 killed BY THEIR INTENDED TEST**, each required to fail with its own
+      assertion's message; harness positive-control watched green on the pristine tree first;
+      `PYTHONDONTWRITEBYTECODE=1`; tree restored byte-identical.
+      🔴 **One mutant SURVIVED the first run and the fix is the lesson:** dropping `--store` was
+      invisible because the test modelled the launcher's default with the SAME value the command
+      emits, so the parse yielded the right root either way. It dies only against a sentinel the
+      caller's store can never equal. A fixture whose fields are not pairwise distinct cannot see
+      the mutant that collapses them.
+    🔴 **ROUND 0 OF THIS PR'S OWN AUDIT REFUTED THIS ITEM'S STATED RATIONALE. The fix stands; the
+    REASON printed on it was wrong, and it is retracted in the code, the PR and here.** The claim
+    was that `Path(__file__)` makes the command *"true for the machine that printed it and false
+    for anyone who pastes it elsewhere"*. Both halves fail:
+    - the old spelling emitted an **absolute** path, so cwd was never the failure mode; and
+    - `nix/home.nix` deploys the launcher as an `mkOutOfStoreSymlink` into
+      `${homePath}/workspace/devrc`, so **any host where `cairn-validate` resolves at all
+      necessarily has this checkout at that same absolute path** — the old command would have
+      worked there too. The new spelling's precondition is if anything **stronger**: it needs a
+      home-manager switch and a deployed pin, where the old one needed only python.
+    **The real defect, measured:** `Path(__file__).resolve()` names the **running copy**. Run from
+    a throwaway worktree — this repo's standing default for any file-modifying agent — it emitted
+    `python3 /tmp/wt-cairn-rank23/scripts/lib/subsystem_touch.py …`, a path about to be
+    `worktree remove`d. The recovery command went stale the moment the session that printed it
+    ended. **That is the durable reason; do not re-derive the portability one from this doc.**
+    🔴 **AND A GUARD I WROTE WAS DELETED BY THAT ROUND, ON MEASUREMENT.**
+    `test_the_LAUNCHER_still_prepends_what_this_command_omits` grepped the launcher's SOURCE TEXT
+    and its docstring asserted *"nothing else asserts it … which is a silent green"* — **false**.
+    Control: each of its three mutations run against `test_cairn_flake_pin.py` ALONE, with
+    `test_subsystem_touch.py` deselected — `--validate` prepend dropped → **3 failed**; `--store`
+    prepend dropped → **1 failed**; caller argv dropped → **2 failed**; pristine control green at
+    **15 passed** first. Those tests run the REAL launcher as a subprocess and read BOTH streams,
+    so they hold in the `nix build` tier; mine was SPELLED (baked double quotes ⇒ falsely red on a
+    legal refactor, green on a literal in a comment). **A second, weaker copy of a guard that
+    already exists reads as coverage while providing none.**
+    ⚠ **`--store` SURVIVED the round but is no longer claimed to be free.** `store` here is
+    `args.store`, whose default is `DEFAULT_STORE_ROOT` — the **frozen pre-cutover mirror**, not
+    the synced cache the launcher would otherwise pick (measured: mirror **161** entries, cache
+    **244**), and the mandated invocations in `subsystem-index/SKILL.md` pass no `--store`. Keeping
+    it is FAITHFUL (the malformed file really is in the store that was read) but it inherits an
+    unanswered question — why does the writer default to the frozen mirror at all? — which this
+    change must not be read as settling.
+    🔴 **ROUND 0's OTHER FINDING, FILED NOT FIXED: this item's closing condition is SPELLED, and
+    the CLASS is still open.** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 is
+    genuinely met, but `command grep -rn '/home/zach/workspace/devrc' claude/skills/` returns **21
+    occurrences across 9 files**, including **four literal
+    `python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py …` invocations in
+    `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`** — the write-protocol skill itself,
+    the primary consumer. No scanner gates this class. **Closing condition:** a mechanical gate
+    over `claude/skills/**` rejecting any quoted or emitted command that embeds an absolute
+    checkout path, plus those 21 sites cleared — merged, and watched red-then-green on a planted
+    violation. **Owner: unassigned; this is a new ranked item, not part of rank 23.**
+    ⚠ **A THIRD SITE OF THE SAME CLASS, FOUND WHILE FIXING (b) AND DELIBERATELY NOT FIXED:**
+    `scripts/lib/subsystem_touch.py:3991` and `:4712` emit
+    `python3 {SELF_PATH} --template <slug> --scope …` — the same absolute-checkout-path spelling,
+    in the `--template` command rather than `--validate`. It is outside this item's stated scope,
+    and unlike `--validate` it has **no one-word remedy**: there is no `cairn-template` launcher
+    to move it to, so closing it means first deciding whether to add one. **Closing condition:**
+    either a launcher exists and both sites name it, or a decision is recorded here that the
+    writer's `--template` path is meant to stay checkout-absolute. Named so it reads as
+    known-and-open rather than missed.
     forcing: none
 
 ## Gotchas / decisions / dead-ends

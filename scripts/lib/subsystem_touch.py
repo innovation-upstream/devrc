@@ -5964,19 +5964,57 @@ def _carries_marker(line: str) -> bool:
 
 
 def validate_command(store_root: str | Path, scope: str) -> str:
-    """The literal, runnable `--validate` invocation for one scope. ONE spelling.
+    """The literal, runnable write-protocol check for one scope. ONE spelling.
 
     🔴 IT IS BUILT, NEVER TYPED INTO PROSE. Every place that tells a caller how to
     recover emits this, so a flag rename cannot leave a skill or an error message
     quoting a command that no longer parses — the exact failure a "just run
-    --validate" sentence has no defence against. `Path(__file__)` rather than a
-    hardcoded path so a copy of this module names ITSELF and the command stays
-    true wherever it is running from.
+    --validate" sentence has no defence against.
+
+    🔴 IT NAMES `cairn-validate`, NOT `python3 <this file>` — AND THE REASON IS
+    THE RUNNING COPY, NOT THE MACHINE. ⚠ An earlier draft of this docstring (and
+    of the commit and PR that introduced it) said `Path(__file__)` "makes the
+    command true for the machine that PRINTED it and false for anyone who pastes
+    it anywhere else". **That was wrong twice over and is RETRACTED**, by round 0
+    of this PR's own audit: the old spelling emitted an ABSOLUTE path, so cwd was
+    never the failure; and `nix/home.nix` deploys the launcher as an
+    `mkOutOfStoreSymlink` into `${home}/workspace/devrc`, so any host on which
+    `cairn-validate` resolves AT ALL necessarily has this checkout at that same
+    absolute path — the old command would have worked there too. If anything the
+    new spelling's precondition is STRONGER: it needs a home-manager switch and a
+    deployed pin, where the old one needed only python.
+
+    The real defect, MEASURED: `Path(__file__).resolve()` names the RUNNING COPY.
+    Run out of a throwaway worktree — which is this repo's standing default for
+    any file-modifying agent — it emitted
+    `python3 /tmp/wt-<topic>/scripts/lib/subsystem_touch.py …`, a path that is
+    about to be `worktree remove`d. The recovery command went stale the moment the
+    session that printed it finished. `cairn-validate` is a bare command on
+    `home.sessionPath` and is the spelling the launcher's own docstring declares
+    as its interface. Rank 23(b) of
+    `claudedocs/handoff-cairn-oss-multi-instance.md`.
+
+    🔴 `--store` IS EMITTED EXPLICITLY: it pins the command to the store THIS
+    refusal came from, so it cannot report a DIFFERENT store clean — the failure
+    `malformed_refusal` exists to prevent, and the one
+    `test_a_reject_in_ANOTHER_scope_gets_a_command_for_THAT_scope` guards.
+    ⚠ **But it is not the free choice an earlier draft implied, and the trade is
+    real.** `store` here is `build_report`'s argument, which in the ordinary path
+    is `args.store` — whose default is `DEFAULT_STORE_ROOT`, the FROZEN
+    pre-cutover mirror, NOT the synced cache the launcher would otherwise pick
+    (measured: mirror 161 entries, cache 244). The mandated invocations in
+    `claude/skills/subsystem-index/SKILL.md` pass no `--store`, so this emits a
+    command pointing at the frozen mirror. That is FAITHFUL — the malformed file
+    really is the one that was read — but it inherits a pre-existing question
+    this function does not answer and must not be read as settling: why does the
+    writer default to the frozen mirror at all? Do not "tidy" this by dropping
+    `--store`; that trades fidelity for freshness silently.
+
+    `--validate` is NOT spelled here: the launcher prepends it with no value,
+    which is the check-every-entry form. That seam is pinned BEHAVIOURALLY by
+    `scripts/tests/test_cairn_flake_pin.py`, which runs the real launcher.
     """
-    return (
-        f"python3 {Path(__file__).resolve()} --store {store_root} "
-        f"--scope {normalize_ref(scope)} --validate"
-    )
+    return f"cairn-validate --store {store_root} --scope {normalize_ref(scope)}"
 
 
 def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryError) -> str:
@@ -6060,6 +6098,26 @@ def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryErr
     affected += sorted({m.scope for m in theirs})
     lines.append("  RECOVER — fix the file(s) named above, then re-run this probe. Check with:")
     lines += [f"    {validate_command(store, s)}" for s in affected]
+    # 🔴 NAME THE REMEDY FOR THE COMMAND ITSELF FAILING. The whole point of this
+    # message is that a refusal must not be a dead end, and moving to a bare
+    # PATH-resolved command introduced one it did not have before: on a checkout
+    # whose host has not `home-manager switch`ed since the launcher was added,
+    # the line above exits 127 `command not found` and says nothing further. The
+    # sibling failure — the pin undeployed — is already exemplary, because
+    # `cairn_pin.ensure()` names both resolution routes and the fix; this closes
+    # the one that reaches the operator as a bare shell error instead.
+    # 🔴 AND IT SPELLS NO FLAG AND NO CHECKOUT PATH. A first draft of this line
+    # offered "or run the writer directly with `python3 <devrc>/scripts/lib/
+    # subsystem_touch.py --store … --scope … --validate`" as a fallback. That was
+    # wrong twice: it re-introduced the absolute-checkout spelling this whole
+    # change removes, and it spelled `--validate` inside this function, which
+    # `test_the_command_is_BUILT_not_typed` forbids precisely so a flag rename
+    # cannot stale the text here. The deploy IS the remedy; a fallback that
+    # routes around it is how the old spelling comes back.
+    lines.append(
+        "  If that exits 127 (`cairn-validate: command not found`), this host has not "
+        "deployed the launcher yet — `home-manager switch` this checkout and re-run it."
+    )
     return "\n".join(lines)
 
 
