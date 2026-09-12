@@ -26,7 +26,6 @@ would satisfy every positive case here and be catastrophically wrong. So
 direction, and without it this module would be green for a broken guard.
 """
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +41,11 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 # forbidden by `test_runtime_shebangs.py`, because `env` is absent from the nix
 # build sandbox -- so such a stub cannot run in the tier the merge is gated on.
 from testlib.mockbin import write_exec  # noqa: E402
+
+# 🔴 The ONE bound for runner traffic. Importing the harness rather than
+# spawning `bash` here is what keeps this file out of `_OWN_BOUND_LEDGER` —
+# see `_run_scoped` below for why a ledger row would have been the wrong fix.
+from testlib import scoped_harness  # noqa: E402
 
 # Every glob the script declares, as a concrete path a diff could contain.
 # 🔴 Pinned as a LEDGER, two-way: `test_every_declared_trigger_is_exercised`
@@ -76,12 +80,25 @@ def _declared_globs() -> list[str]:
 
 
 def _run_scoped(repo: Path) -> subprocess.CompletedProcess:
-    env = {**os.environ}
     # `--base HEAD` so the comparison is against the fixture's own commit and
     # the result cannot depend on how far the real origin/main has moved.
-    return subprocess.run(
-        ["bash", str(SCOPED), "--base", "HEAD", "--dry-run", str(repo)],
-        capture_output=True, text=True, env=env, cwd=str(repo),
+    #
+    # 🔴 ROUTED THROUGH `scoped_harness.run`, NOT SPAWNED DIRECTLY, and that is
+    # the whole reason this function exists in this shape. The direct
+    # `subprocess.run([...])` it replaced carried NO `timeout=` at all, so
+    # `_spell_bound` scored it `ABSENT` and `test_every_site_writing_its_OWN_
+    # runner_bound_is_in_the_ledger` went red the moment this file landed —
+    # `main` was red on it for hours. The harness supplies `RUNNER_TIMEOUT_S`,
+    # which is the ONE bound for this predicate.
+    #
+    # ⚠ The alternative the guard offers — a `_OWN_BOUND_LEDGER` row — would be
+    # wrong here. A row is for a site that genuinely needs its own bound (or is
+    # the documented non-runner false positive); this is real runner traffic
+    # with no bound, i.e. a suite that can hang forever. A row would have
+    # recorded the hazard instead of removing it.
+    return scoped_harness.run(
+        [str(SCOPED), "--base", "HEAD", "--dry-run", str(repo)],
+        cwd=repo,
     )
 
 
