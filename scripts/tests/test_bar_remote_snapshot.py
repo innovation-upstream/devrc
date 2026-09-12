@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from testlib import mockbin
+
 SCRIPTS = Path(__file__).resolve().parents[1]
 
 
@@ -128,16 +130,21 @@ def test_an_empty_config_yields_no_blocks_rather_than_raising():
 # ---------------------------------------------------------------------------
 
 def _script(tmp_path: Path, body: str, name: str = "blk") -> str:
-    p = tmp_path / name
-    p.write_text(body)
-    p.chmod(0o755)
-    return str(p)
+    """Write an executable fixture block command.
+
+    🔴 THE SHEBANG IS NOT OURS TO WRITE. `test_runtime_shebangs.py` forbids a
+    test writing one at runtime, and this helper did it at six call sites —
+    exactly the defect a previous arc in this repo hit and fixed the same way.
+    `mockbin.write_exec` owns the shebang and REJECTS a body that carries one,
+    so a call site cannot reintroduce it.
+    """
+    return str(mockbin.write_exec(tmp_path / name, body))
 
 
 def test_run_block_relays_the_blocks_OWN_state_verbatim(tmp_path):
     """The verdict travels; the predicate does not. A relayed Critical must
     arrive as Critical without this code knowing what a threshold is."""
-    cmd = _script(tmp_path, '#!/bin/sh\necho \'{"text":"234!11","state":"Critical"}\'\n')
+    cmd = _script(tmp_path, 'echo \'{"text":"234!11","state":"Critical"}\'\n')
     out = snap.run_block(cmd, dict(os.environ), is_json=True)
     assert out["text"] == "234!11"
     assert out["state"] == "Critical"
@@ -145,7 +152,7 @@ def test_run_block_relays_the_blocks_OWN_state_verbatim(tmp_path):
 
 
 def test_run_block_plain_text_takes_stdout_as_the_pill_and_stays_Idle(tmp_path):
-    cmd = _script(tmp_path, "#!/bin/sh\necho '☀'\n")
+    cmd = _script(tmp_path, "echo '☀'\n")
     out = snap.run_block(cmd, dict(os.environ), is_json=False)
     assert out["text"] == "☀"
     assert out["state"] == "Idle"
@@ -155,7 +162,7 @@ def test_run_block_plain_text_takes_stdout_as_the_pill_and_stays_Idle(tmp_path):
 def test_run_block_plain_text_keeps_only_the_first_line(tmp_path):
     """i3blocks' 2nd/3rd lines are short-text and colour; i3status-rust ignores
     them, so relaying them would show text the remote bar does not."""
-    cmd = _script(tmp_path, "#!/bin/sh\nprintf 'full\\nshort\\n#ff0000\\n'\n")
+    cmd = _script(tmp_path, "printf 'full\\nshort\\n#ff0000\\n'\n")
     out = snap.run_block(cmd, dict(os.environ), is_json=False)
     assert out["text"] == "full"
 
@@ -163,7 +170,7 @@ def test_run_block_plain_text_keeps_only_the_first_line(tmp_path):
 def test_an_EMPTY_pill_is_Idle_not_an_error(tmp_path):
     """Every count pill is hide-at-zero: measured-and-quiet prints nothing.
     Scoring that as a failure would make a healthy quiet bar look broken."""
-    cmd = _script(tmp_path, "#!/bin/sh\nexit 0\n")
+    cmd = _script(tmp_path, "exit 0\n")
     out = snap.run_block(cmd, dict(os.environ), is_json=True)
     assert out["text"] == ""
     assert out["state"] == "Idle"
@@ -172,7 +179,7 @@ def test_an_EMPTY_pill_is_Idle_not_an_error(tmp_path):
 
 def test_a_failing_block_is_RECORDED_not_dropped(tmp_path):
     """🔴 A dropped block is an alarm that silently stops being relayed."""
-    cmd = _script(tmp_path, "#!/bin/sh\necho 'not json at all'\n")
+    cmd = _script(tmp_path, "echo 'not json at all'\n")
     out = snap.run_block(cmd, dict(os.environ), is_json=True)
     assert out["error"] == "unparseable"
     assert out["state"] == "Warning"
@@ -180,7 +187,7 @@ def test_a_failing_block_is_RECORDED_not_dropped(tmp_path):
 
 def test_a_block_that_hangs_cannot_hang_the_gather(tmp_path, monkeypatch):
     monkeypatch.setattr(snap, "BLOCK_TIMEOUT_SECS", 1)
-    cmd = _script(tmp_path, "#!/bin/sh\nsleep 30\n")
+    cmd = _script(tmp_path, "sleep 30\n")
     started = time.time()
     out = snap.run_block(cmd, dict(os.environ), is_json=True)
     assert out["error"] == "timeout"
