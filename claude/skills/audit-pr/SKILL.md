@@ -58,31 +58,7 @@ you get round to auditing** — that is the one finding the trial produced, and 
 
 **Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
-**Brief the auditor on the environment, or it will report false findings** — a fresh worktree is
-not a working checkout, and an auditor hitting this cold blames the PR. Whichever apply:
-**submodules are unpopulated** in a new worktree (one made 4 test files "fail to collect");
-**monorepo `node_modules`** may need linking per package, not just at the root; **whether the base
-branch is already red** and *at which file*; and that **zsh does not word-split unquoted
-parameters**, so `eslint $FILES` checks **zero** files and prints a confident PASS. Have it mutate
-only in a `cp -a` copy — **`rm -f <copy>/.git` first**, since a worktree's is a FILE pointing at the
-real git dir, so a commit in the copy lands on your branch — and verify your worktree clean
-yourself at the end.
-
-🔴 **Tell it to reap its LOAD GENERATORS by resolved PID, and sweep for them yourself afterwards —
-an auditor's own "cleaned up" claim is not evidence.** Measured twice in ONE session, from two
-different rounds: a timing/stress probe spawned `while :; do :; done` shells whose cleanup
-(`kill %1 %2 …` in one, `kill $LOADPIDS` in the other) reaped nothing, so they reparented to init
-and ran on — **74 orphans saturating ~11 cores for 45 minutes**, then **20 more at ~87% CPU each
-for 6h17m**. Both rounds reported cleanly. 🔴 The cost is not the CPU: the first batch was still
-running during the NEXT round, which measured its timings under that load and reported the
-degraded numbers as a finding — **a leak from round N silently corrupts round N+1's evidence**.
-So brief it to record each PID it spawns and kill those exact PIDs, and at session end sweep
-yourself: `ps -eo pid,ppid,comm` for `ppid==1` shells, confirm each via `/proc/<pid>/cmdline`,
-kill by **resolved PID**. Never let a pattern reach `pkill -f` — it matches your own shell.
-
-🔴 **And give it a UNIQUE name/port for any container or scratch dir it creates.** Subagents share
-one scratchpad path and the branch namespace, so two audit rounds that both pick `cgpg` or port
-55432 collide silently and one reports a green computed against the other's database.
+🔴 **Do NOT re-type the auditor's environment and cleanup warnings into the prompt — `audit-dispatch.py` now carries them as invariant clauses (`cold-checkout-is-not-the-diff`, `own-what-you-spawn`), so every brief has them in every round.** They lived here as prose telling YOU to remember them, and a probe of two real briefs found them absent from both (0/0) — the precise failure that module exists to end. The rules they rest on — the process-pattern ban, killing by resolved PID, per-agent scratch names, unpopulated submodules, zsh's lack of word-splitting — are in `claude/RULES.md`, which every subagent already receives; only the audit-specific consequences moved. **Still yours, because no brief can do it:** sweep for leaked processes yourself afterwards and verify your own worktree is clean at the end — an auditor's "cleaned up" claim is not evidence.
 
 ## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE (runs BEFORE the checklist)
 
