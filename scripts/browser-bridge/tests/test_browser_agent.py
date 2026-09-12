@@ -1882,6 +1882,17 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                 # ~46 min per parametrisation on exactly the starving box the
                 # retry exists for, against a dev-host tier already observed
                 # hitting its own cap and producing no verdict at all.
+                # ⚠ STATE THE COST, because this is a trade and not a free win.
+                # The extension only ever fires on a box `_stall_extends`
+                # MEASURES as stalled, so this does not touch a healthy run at
+                # all; what it changes is that a stalled one now gets ~60s per
+                # attempt instead of 900s. Aggregate worst case falls 900s ->
+                # ~180s, but a box that genuinely needed 300s to reach a warm
+                # that normally takes ~0.5s will now be reported as a STARVED
+                # INSTRUMENT rather than waited out. That is the intended
+                # direction — an honest "no verdict" beats a verdict nobody
+                # waited for — and the retry does add load to an already-loaded
+                # box, which is the half of the trade worth remembering.
                 _await(lambda: in_warm.exists(),
                        what="the wrapper to enter the warm", slice_s=20.0,
                        stall_cap=60.0, poll=0.02)
