@@ -49,13 +49,28 @@
 # script FAILS (exit 4). It never reports "nothing to do" and exits 0 — a
 # wrapper that says that is precisely how a false green gets believed here.
 #
+# 🔴 ONE HOLE IN "it finds tests that NAME what you changed" IS NOW CLOSED, and
+# it is worth naming because it cost `main` two red windows in one session: a
+# BRAND-NEW FILE NAMES NOTHING, so it maps to zero covering tests while a
+# repo-CENSUS guard elsewhere goes red the moment it lands
+# (`_KILL_MENTION_LEDGER`, `_OWN_BOUND_LEDGER`). When the tracked file SET moves
+# — a file added, deleted or renamed — this script now runs
+# `scripts/ledger-check.sh` FIRST and stops on its failure. An edit-only
+# iteration pays nothing. This does NOT make the run a gate, and it does not
+# cover a census guard reddened by a content edit alone; run `ledger-check.sh`
+# by hand for that.
+#
 # Usage:
-#   scripts/scoped-tests.sh [--base REF] [--set hermetic|all] [--dry-run] [ROOT]
+#   scripts/scoped-tests.sh [--base REF] [--set hermetic|all] [--dry-run]
+#                           [--no-ledgers] [ROOT]
 #     --base REF   compare against REF as well as the working tree.
 #                  Default: origin/<main-branch> if it resolves, else HEAD.
 #     --set        passed through to run-tests.sh.
 #     --dry-run    print the mapping and the exact run-tests.sh command; run
 #                  nothing. Exit 0 only if the selection is non-empty.
+#     --no-ledgers skip the repo-census guards even when the file set moved.
+#                  Prints a loud line saying so — a skipped check that says
+#                  nothing is how the next red window starts.
 #   ROOT defaults to the git repo root.
 #
 # 🔴 AND THE SECOND REFUSAL: a diff touching a SHARED SURFACE — the build, a
@@ -94,6 +109,7 @@ BASE=""
 SET="hermetic"
 DRY=0
 ROOT=""
+LEDGERS=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -102,6 +118,7 @@ while [ $# -gt 0 ]; do
     --set) SET="${2:-hermetic}"; shift; [ $# -gt 0 ] && shift ;;
     --set=*) SET="${1#*=}"; shift ;;
     --dry-run) DRY=1; shift ;;
+    --no-ledgers) LEDGERS=0; shift ;;
     -h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) ROOT="$1"; shift ;;
   esac
@@ -255,6 +272,62 @@ if [ "${#SHARED_HITS[@]}" -gt 0 ]; then
   echo "" >&2
   echo "  Run the full gate instead:  scripts/gate.sh --tier both" >&2
   exit 4
+fi
+
+# --- THE FILE SET CHANGED -> run the repo-census guards ------------------------
+# 🔴 THE BLIND SPOT THIS CLOSES IS THIS SCRIPT'S OWN. The mapping below selects
+# the test files that NAME what you changed, and a BRAND-NEW FILE NAMES NOTHING
+# — so it maps to zero covering tests while a repo-census guard somewhere else
+# goes red the moment it lands. That is not hypothetical: `main` went red twice
+# in one session, hours each, from exactly that
+#   (`_KILL_MENTION_LEDGER`, `_OWN_BOUND_LEDGER`).
+#
+# The trigger is the tracked FILE SET moving — added, deleted or renamed — which
+# is the mechanical signature of the class and was the cause both times. An
+# edit-only iteration pays NOTHING, which is the point: a check that taxed every
+# save is one that gets switched off.
+#
+# ⚠ IT RUNS BEFORE THE SCOPED RUN, NOT AFTER. The script ends in `exec`, so
+# nothing can run after the runner; and a census failure is about the tree, not
+# about the change, so learning it first is strictly better.
+SETCHANGE_RAW="$(
+  {
+    git diff --name-only --diff-filter=ADR "$BASE...HEAD" 2>/dev/null || true
+    git diff --name-only --diff-filter=ADR HEAD 2>/dev/null || true
+    git diff --name-only --diff-filter=ADR --cached 2>/dev/null || true
+    git ls-files --others --exclude-standard 2>/dev/null || true
+  } | sort -u
+)"
+SETCHANGE=()
+while IFS= read -r _l; do [ -n "$_l" ] && SETCHANGE+=("$_l"); done <<EOF
+$SETCHANGE_RAW
+EOF
+
+if [ "$LEDGERS" -eq 0 ]; then
+  echo "scoped-tests: ⚠ repo-census guards SKIPPED (--no-ledgers), and ${#SETCHANGE[@]}"
+  echo "  file(s) entered or left the tree. That is the shape that reddens main."
+elif [ "${#SETCHANGE[@]}" -eq 0 ]; then
+  echo "scoped-tests: the tracked file SET is unchanged — repo-census guards not run."
+  echo "  (They fire on files ARRIVING or LEAVING. A content-only edit can still"
+  echo "   redden one; scripts/ledger-check.sh runs them on demand.)"
+elif [ "$DRY" -eq 1 ]; then
+  echo "scoped-tests: DRY RUN — would run scripts/ledger-check.sh first because"
+  echo "  ${#SETCHANGE[@]} file(s) entered or left the tree."
+else
+  echo "scoped-tests: ${#SETCHANGE[@]} file(s) entered or left the tree — running the"
+  echo "  repo-census guards first (scripts/ledger-check.sh)."
+  for _s in "${SETCHANGE[@]}"; do echo "    set-change: $_s"; done
+  bash "$ROOT/scripts/ledger-check.sh"
+  _lrc=$?
+  if [ "$_lrc" -ne 0 ]; then
+    echo "" >&2
+    echo "scoped-tests: STOPPED at the repo-census guards (ledger-check rc=$_lrc)." >&2
+    echo "  A file entered or left the tree and a guard that enumerates the repo" >&2
+    echo "  disagrees with its ledger. Nothing scoped ran, so this is NOT a pass." >&2
+    echo "  Fix the ledger row — do not widen the guard — then re-run." >&2
+    echo "  To scope anyway (and own that):  scripts/scoped-tests.sh --no-ledgers" >&2
+    exit "$_lrc"
+  fi
 fi
 
 # --- is a path a test file inside a declared target? ---------------------------

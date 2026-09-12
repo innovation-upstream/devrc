@@ -59,6 +59,11 @@ MIN_NODEIDS="${DEVRC_LEDGER_MIN_NODEIDS:-60}"
 JOBS="${DEVRC_LEDGER_JOBS:-12}"
 LIST_ONLY=0
 EXTRA=()
+# 🔴 CAPTURED BEFORE THE PARSER SHIFTS THEM AWAY. The re-exec below passed `$@`,
+# which by then was EMPTY — so `--list` re-exec'd into a full RUN and printed a
+# 215-second "listing". An argument-consuming parser in front of an `exec` is
+# always this bug.
+ORIG_ARGS=("$@")
 
 usage() {
   sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -102,7 +107,7 @@ if ! python3 -m pytest --version >/dev/null 2>&1; then
   fi
   echo "ledger-check: no pytest here — re-execing into the repo dev shell."
   export DEVRC_LEDGER_NO_REEXEC=1
-  exec nix develop "$ROOT" -c bash "${BASH_SOURCE[0]}" "$@"
+  exec nix develop "$ROOT" -c bash "${BASH_SOURCE[0]}" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
 fi
 
 # --- derive --------------------------------------------------------------------
