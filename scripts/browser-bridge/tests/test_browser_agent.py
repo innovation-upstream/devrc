@@ -163,8 +163,12 @@ sys.exit(0)
 # so the test reports STARVED INSTRUMENT and a WRAPPER CHANGE is misattributed to
 # machine load — the exact class this file exists to stop. Pinned BEHAVIOURALLY by
 # `test_the_fake_takes_the_warm_hold_ONLY_for_the_warm_argv` (runs the fake and
-# observes what it does) and `test_a_BROKEN_COUPLING_is_reported_as_one_and_NOT_
-# as_starvation` (drives the real failure path with the coupling broken).
+# observes what it does) and, for the diagnosis itself,
+# `test_a_BROKEN_COUPLING_is_reported_as_one_and_NOT_as_starvation`.
+# 🔴 Identifiers go on their OWN line, never hard-wrapped mid-word: an earlier
+# revision split that name across a line break, so grepping for it found the
+# `def` and MISSED this reference — the stale-reference class this very comment
+# exists to prevent.
 # ⚠ An earlier source-grep guard was DELETED, not weakened: it passed while the
 # hazard existed in 4 of 6 mutant shapes, and its docstring claimed to assert
 # "the RELATIONSHIP (both sides)" while only ever reading the wrapper.
@@ -198,8 +202,11 @@ argv = sys.argv[1:]
 # argv, so it cannot be walked by a change of SPELLING.
 _argv_log = os.environ.get("FAKE_OC_DEBUG_MARKER")
 if _argv_log and os.environ.get("FAKE_OC_DEBUG_SLEEP"):
+    _held = (argv[:2] == ["debug", "agent"]
+             and argv[2:3] == ["@@WARM_SUBCOMMAND@@"]
+             and float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0")) > 0)
     with open(_argv_log + ".argv", "a") as _f:
-        _f.write(json.dumps(argv) + "\n")
+        _f.write(json.dumps({"argv": argv, "held": _held}) + "\n")
 
 # `opencode debug agent browser-agent` — the wrapper's fail-closed tool-set gate.
 # Answer with a resolved `tools` map (model-free); NEVER touch FAKE_OC_LOG /
@@ -1678,7 +1685,7 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
         # by the fake's `debug agent` branch, which IS the warm and DOES run
         # under the lock, so this makes the window real rather than asserted.
         _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
-               slice_s=20.0, poll=0.02)
+               slice_s=_WARM_AWAIT_SLICE_S, poll=0.02)
         assert lock.is_dir(), "precondition: the warm must run UNDER the lock"
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.communicate(timeout=45)
@@ -1693,9 +1700,13 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
         "the ~120 s stall this change removes")
 
 
-# How long the fake holds the warm open, how much of that hold must still be
-# running for a missing lock to be a DEFECT rather than a lost window, and how
-# many starved attempts are retried before the test gives up.
+# FOUR constants: how long the fake holds the warm open; how much of that hold
+# must still be running for a missing lock to be a DEFECT rather than a lost
+# window; how many starved attempts are retried before the test gives up; and the
+# `_await` slice/stall bound those attempts wait on. `20.0`/`60.0` restate
+# `_await`'s own shape and exist so a test can shrink them — see
+# `test_a_BROKEN_COUPLING_is_reported_as_one_and_NOT_as_starvation`, which drives
+# the wait to exhaustion BY CONSTRUCTION and would otherwise pay the full ladder.
 #
 # 🔴 WHY NOT JUST WIDEN THE HOLD — the obvious simplification, MEASURED and
 # REJECTED. A wider hold would put starvation out of reach and delete the retry
@@ -1728,6 +1739,7 @@ _WARM_HOLD_S = 3
 _WARM_WINDOW_SLACK_S = 1.0
 _WARM_WINDOW_ATTEMPTS = 3
 _WARM_AWAIT_SLICE_S = 20.0
+_WARM_AWAIT_STALL_CAP_S = 60.0
 
 
 def _warm_window(proc, lock: Path, since_marker: float):
@@ -1741,7 +1753,7 @@ def _warm_window(proc, lock: Path, since_marker: float):
     handler:
 
       stall < ~3 s   rc 143 / 130   the trap ran — the real observation
-      ~3 s .. ~12 s  rc 2           the wrapper had LEFT the warm; the signal
+      ~3 s .. ~8 s   rc 2           the wrapper had LEFT the warm; the signal
                                     killed its tool-set gate instead, so the
                                     `rc != 0` assertion PASSES for the wrong
                                     reason and proves nothing
@@ -1758,11 +1770,16 @@ def _warm_window(proc, lock: Path, since_marker: float):
     own `-n 4 --dist loadfile` on a loaded dev host, green alone, green in the
     nix sandbox — with no commit to the wrapper or this file in between.
 
-    ⚠ The third row originally read `> ~12 s`; re-measured against the unscoped
-    fake it is `~8 s` (rc 2 at 4s and 6s, rc 0 at 8s and 12s), so the boundary
-    quoted here IS re-derived rather than as-first-written — an earlier revision
-    annotated this table with "~8s" while leaving "~12 s" in the row above it,
-    handing the reader two values for one boundary ten lines apart.
+    ⚠ BOTH rows originally read `~12 s`; re-measured against the unscoped fake the
+    boundary is `~8 s` (rc 2 at 4s and 6s, rc 0 at 8s and 12s). 🔴 THIS ONE NUMBER
+    TOOK FOUR ROUNDS TO CORRECT, and the record is the lesson: round A annotated
+    the table "~8s" and left `> ~12 s` in the row; round B fixed that row and left
+    `~3 s .. ~12 s` in the row above, so the bands OVERLAPPED 8-12s with mutually
+    exclusive outcomes; round C's commit message CLAIMED both rows were fixed
+    while its edit never landed (a multi-edit script asserted every change and
+    wrote only at the end, so one failed assertion silently discarded the rest).
+    When a number appears twice, change it twice — and VERIFY the file, not the
+    script's exit.
 
     🔴 THE TABLE ABOVE IS THE ORIGINAL DIAGNOSIS, MEASURED AGAINST THE UNSCOPED
     FAKE — DO NOT RE-RUN IT EXPECTING THOSE BOUNDARIES. Since the hold was scoped
@@ -1844,7 +1861,8 @@ def _coupling_diagnosis(in_warm: Path) -> str:
                 f"the coupling is intact.")
     try:
         raw = [ln for ln in log.read_text().splitlines() if ln.strip()]
-        seen = [json.loads(ln) for ln in raw]
+        rows = [json.loads(ln) for ln in raw]
+        seen = [r["argv"] for r in rows]
     except (OSError, ValueError) as exc:
         return (f"\n⚠ COULD NOT MEASURE the coupling: argv log unreadable ({exc}).")
     if not seen:
@@ -1912,8 +1930,23 @@ def test_the_fake_takes_the_warm_hold_ONLY_for_the_warm_argv(rig, tmp_path):
     # claim and kills the same mutants, so the timing one bought nothing but a
     # flake. `warm_took >= 0.9` stays: it is a lower bound on a sleep(1), which
     # load can only help.
-    # 🔴 The argv log is the coupling's other half, and it has to be OBSERVED
-    # here or `_coupling_diagnosis` reads a file nothing guarantees is written.
+    # 🔴 THE DETERMINISTIC FORM OF "the gate must not take the hold". The
+    # timing assertion this replaces (`gate_took < 0.9`) was deleted for being
+    # load-sensitive — correctly — but the claim that `not marker.exists()`
+    # "kills the same mutants" was FALSE, and an audit measured it: unscope the
+    # SLEEP while leaving the MARKER write scoped and the gate sleeps the whole
+    # hold after `_oc_lock_release` with the file fully green. The fake now
+    # records whether it TOOK the hold, so this is observed, not timed.
+    rows = [json.loads(ln) for ln in
+            (marker.parent / (marker.name + ".argv")).read_text().splitlines()
+            if ln.strip()]
+    gate_rows = [r for r in rows if r["argv"][2:3] == ["browser-agent"]]
+    assert gate_rows and not any(r["held"] for r in gate_rows), (
+        f"the tool-set gate TOOK the warm hold: {gate_rows!r}. It runs after "
+        f"`_oc_lock_release`, so holding there re-sleeps the whole hold on the "
+        f"lost-window path — the bug this scoping exists to fix.")
+    assert any(r["held"] for r in rows if r["argv"][2:3] == [_WARM_SUBCOMMAND]), (
+        "the warm invocation did not take the hold")
     assert (marker.parent / (marker.name + ".argv")).exists(), (
         f"the fake wrote no argv log beside {marker.name} — `_coupling_diagnosis` "
         f"reads `<marker>.argv`, so deleting or renaming that write silently turns "
@@ -1940,6 +1973,12 @@ def test_a_BROKEN_COUPLING_is_reported_as_one_and_NOT_as_starvation(rig, monkeyp
     monkeypatch.setattr(mod, "_WARM_SUBCOMMAND", "nosuchsubcommand")
     monkeypatch.setattr(mod, "_WARM_WINDOW_ATTEMPTS", 1)
     monkeypatch.setattr(mod, "_WARM_AWAIT_SLICE_S", 1.0)
+    # 🔴 `slice_s` alone does NOT bound this test. It drives `_await` to
+    # exhaustion by construction, so on a box `_stall_extends` judges stalled it
+    # pays the whole ladder — and shrinking the slice makes that WORSE, turning 3
+    # baseline probes into 60 (measured: 70.96s at slice 1.0 vs 60.86s at 20.0,
+    # load ~52). The stall cap is the knob that actually bounds it.
+    monkeypatch.setattr(mod, "_WARM_AWAIT_STALL_CAP_S", 2.0)
     # rebuild the fake so its hold is keyed on a subcommand the wrapper never
     # sends — a coupling break, without touching the wrapper.
     _fake_opencode(rig.opencode_bin)
@@ -2035,7 +2074,10 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                 # MEASURES as stalled, so this does not touch a healthy run at
                 # all; what it changes is that a stalled one now gets ~60s per
                 # attempt instead of 900s. Aggregate worst case falls 900s ->
-                # ~180s, but a box that genuinely needed 300s to reach a warm
+                # ~180s. ⚠ 900s is the PER-ATTEMPT cap, so the OLD aggregate was
+                # ~2700s across three attempts, not 900s — an earlier revision
+                # quoted the per-attempt figure as the aggregate and understated
+                # the win ~15x. The box that genuinely needed 300s to reach a warm
                 # that normally takes ~0.5s will now be reported as a STARVED
                 # INSTRUMENT rather than waited out. That is the intended
                 # direction — an honest "no verdict" beats a verdict nobody
@@ -2043,7 +2085,8 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                 # box, which is the half of the trade worth remembering.
                 _await(lambda: in_warm.exists(),
                        what="the wrapper to enter the warm",
-                       slice_s=_WARM_AWAIT_SLICE_S, stall_cap=60.0, poll=0.02)
+                       slice_s=_WARM_AWAIT_SLICE_S,
+                       stall_cap=_WARM_AWAIT_STALL_CAP_S, poll=0.02)
             except pytest.fail.Exception as exc:
                 # 🔴 A FOURTH STARVATION SHAPE, and it used to bypass this loop
                 # entirely. `_await` fails in its OWN wording — which probes the
