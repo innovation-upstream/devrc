@@ -330,7 +330,16 @@ def test_a_census_FIXTURE_pulls_in_the_tests_that_request_it(tmp_path):
 
 
 def test_a_NON_test_module_is_never_emitted_as_a_nodeid(tmp_path):
-    """The library that does the scanning is not itself a selectable test."""
+    """The library that does the scanning is not itself a selectable test.
+
+    🔴 THE FIXTURE CARRIES BOTH SIDES ON PURPOSE, and the first version did not.
+    Asserting `== []` over a tree containing only the non-test module is
+    VACUOUS: a mutant that widened the filter so nothing at all was selected
+    produced exactly `[]` and SURVIVED a green run. Measured — it is mutant M9
+    of this change's battery, and it survived until this fixture gained a module
+    that MUST be selected, so the expectation can no longer equal the broken
+    answer.
+    """
     root = _mini_repo(tmp_path, {
         "scripts/lib/scanner.py": """
             from pathlib import Path
@@ -339,8 +348,17 @@ def test_a_NON_test_module_is_never_emitted_as_a_nodeid(tmp_path):
             def test_shaped_name_but_not_a_test_module():
                 return list(REPO_ROOT.rglob("*"))
         """,
+        "scripts/tests/test_real_one.py": """
+            from pathlib import Path
+            REPO_ROOT = Path(__file__).resolve().parents[2]
+
+            def test_the_ledger_is_two_way():
+                assert list(REPO_ROOT.rglob("*")) is not None
+        """,
     })
-    assert census_scan.census_nodeids(root) == []
+    assert census_scan.census_nodeids(root) == [
+        "scripts/tests/test_real_one.py::test_the_ledger_is_two_way"
+    ]
 
 
 def test_an_unparseable_module_is_REPORTED_not_swallowed(tmp_path):
