@@ -1177,6 +1177,22 @@ belongs to that arc's own session. via: measurement
     devrc PR to run after this merge is the one that answers half one.
     ⚠ And the leg has never executed in-cluster: every measurement across six audit
     rounds is one dev host plus a local `nixos/nix:2.24.15` container.
+    ✅ **HALF ONE IS MET, OBSERVED 2026-09-12 — and the "never executed in-cluster" caveat
+    above is RETIRED.** `tekton/devrc-cairn-client-runs` reported on PR **#1583** with
+    `pass` and its own verdict text — *"the pinned cairn client ran: validate and doctor
+    both produced output"* — alongside `devrc-nodetests` and `devrc-pytests` in a
+    3-check rollup. So it is visible on `gh pr checks`, it executes in-cluster, and it
+    reports a real verdict rather than a placeholder.
+    ⚠ **Do NOT read this as "the first PR to answer it".** #786 merged 2026-09-10 and
+    devrc has merged many PRs since, so earlier runs almost certainly exist; this is an
+    observation, not a first. The sentence above predicting "the first devrc PR to run
+    after this merge" was written before any of them and nobody recorded the answer.
+    🔴 **HALF TWO IS STILL UNMET and is the half that matters:** the leg must be shown
+    to go **RED when the pinned client is stubbed to print nothing**. A leg that has only
+    ever been watched pass is a leg whose red path is unproven — `claude/RULES.md`'s
+    "a verdict you have never watched go red is a claim about your command line".
+    **Closing condition:** stub the pinned client to emit nothing, push to a throwaway
+    branch, and watch THIS leg report `fail`; record the run name.
     forcing: none
 
 21. **`analyze-service-index-commit.service` is VESTIGIAL and fails on every firing — 603
