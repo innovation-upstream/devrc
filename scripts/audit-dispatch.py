@@ -249,6 +249,46 @@ INVARIANT_CLAUSES = (
         "scaffolding is the tests, fixtures and notes a round wrote to guard "
         "it.",
     ),
+    # 🔴 MIGRATED FROM THE SKILL 2026-09-12, BECAUSE THE SKILL'S COPY WAS AN
+    # INSTRUCTION TO THE *DISPATCHER* TO RETYPE IT — the exact failure this
+    # module's own docstring exists to end. Round 0 on the skill probed two real
+    # briefs: `reap its LOAD GENERATORS`, `UNIQUE name/port`, `submodules are
+    # unpopulated` and `checks **zero** files` were all 0/0, with controls that
+    # moved (1/0 and 0/1). So an auditor was briefed on any of it only when the
+    # dispatcher remembered — measured at 5/14 to 11/14 for the clauses that
+    # prompted this module in the first place. Worse, `SKILL_ENVIRONMENT_BRIEF`
+    # was pinned whole, so a green suite certified the SENTENCE existed and never
+    # that an auditor received it.
+    #
+    # 🔴 ONLY THE AUDIT-SPECIFIC HALVES MOVED. `claude/RULES.md` is in every
+    # subagent's system prompt, and it already carries — verified 2026-09-12, one
+    # hit each, against a positive control — `pkill -f`, killing by `resolved
+    # PID`, naming a scratch dir per agent, `worktree add` populating no
+    # submodules, and zsh's lack of word-splitting. Restating those here would
+    # pay twice for the same rule. What RULES.md does NOT carry is the
+    # CONSEQUENCE that makes each one matter to an AUDIT: a cold checkout's
+    # breakage gets attributed to the diff, and a leaked load generator corrupts
+    # the NEXT round's evidence rather than merely wasting CPU.
+    Clause(
+        "cold-checkout-is-not-the-diff",
+        "**A fresh worktree is not a working checkout, and an auditor hitting "
+        "that cold blames the PR.** Before attributing anything to the diff, "
+        "establish whether the base branch is ALREADY red and at which file — "
+        "and expect unpopulated submodules, per-package `node_modules` that need "
+        "linking, and a shell that does not word-split an unquoted `$FILES` "
+        "(which checks zero files and prints a confident PASS). Report an "
+        "environment defect as one; do not file it against the change.",
+    ),
+    Clause(
+        "own-what-you-spawn",
+        "**Record the PID of anything you start and kill THOSE pids; give every "
+        "container, port and scratch dir a name unique to you.** 🔴 A process you "
+        "leak does not merely waste CPU — it corrupts the NEXT round's evidence: "
+        "a stress probe that outlived its audit left the following round "
+        "measuring its timings under that load and reporting the degraded "
+        "numbers as a finding. Your own \"cleaned up\" claim is not evidence; "
+        "check the pids are gone.",
+    ),
     Clause(
         "do-not-merge",
         "**Do not merge — report only.** No pushes, no PR comments, no "
