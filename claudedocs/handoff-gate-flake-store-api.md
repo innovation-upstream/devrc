@@ -689,11 +689,27 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
    checked by running that grep, and re-check the exclude still names this file if it is renamed.
    forcing: none — nothing is broken at runtime; it wastes a session's first command.
 
-10. 🔴 **THE PROSE-CENSUS CLASS: a hand-maintained ledger asserted over TRACKED TEXT reddens the
-    shared branch for EVERYONE, and both fixes so far have been per-instance.** Ranks 8 and 9, and
-    the whole 27-of-99 finding in rank 1, are instances. **Nothing prevents the next one**, and the
-    cost is not the red — it is that a doc nobody has classified yet blocks a branch nobody else
-    can unblock. `claude/RULES.md`: *"a permanently-red gate is worse than no gate."*
+10. ✅ **CLOSED AS A DECISION 2026-09-12 — "the prose-census class" is ONE instance, already fixed at
+    the source, and the rule worth keeping is the DISCRIMINATOR below rather than any new guard.**
+    🔴 **THE DISCRIMINATOR, which is the whole durable content of this item:** a census over tracked
+    prose is **fine** when it enforces a CONTENT RULE — a new document simply must not contain the
+    thing (no public IP, no captured text, no unfollowable path). It is a **hazard** when a new
+    document requires a hand LEDGER ENTRY, because then someone must *classify* each new mention and
+    until they do, a doc nobody has triaged blocks a branch nobody else can unblock. **A
+    ledger whose population grows with every document must declare its prose exemption at birth.**
+    ⚠ **This item was filed asserting a live class of three instances. Classifying each by WHAT IT
+    SCANS collapsed that to one** — and the collapse is the finding, so it is recorded rather than
+    quietly rewritten:
+    | instance | scans | verdict |
+    |---|---|---|
+    | (a) kill-mention ledger | `claudedocs/` **prose**, ledger grows per document | **the only real instance** — 22 reds + `main`, ≥4 sessions, ~2 h |
+    | (b) runner-bound ledger | `scripts/**/*.py` by AST — **code, not prose** | true positive: a genuine new unbounded spawn |
+    | (c) `test_doc_path_rot` | `claude/` + `CLAUDE.md`, and already EXCLUDES `claudedocs/` | true positive: a genuinely unfollowable reference |
+    ✅ **And the convention is already applied everywhere it applies:** `_PROSE_ONLY_PREFIXES =
+    ("claudedocs/",)` in (a) after `#1561`; `CORPUS_DIRS = ("claude", "CLAUDE.md")` in (c), which
+    never scanned `claudedocs/`. Measured on the other prose scanners: `test_no_public_ips` and
+    `test_doc_path_rot` carry **0** hand-ledger constants — they are content rules, so a new doc
+    needs no triage. **No second growth-ledger over prose exists today.** via: measurement
     🔴 **A THIRD INSTANCE LANDED WHILE THIS ITEM WAS BEING WRITTEN — and it cuts AGAINST the class
     complaint, which is why it stays in.** `main` went RED on
     `scripts/tests/test_doc_path_rot.py::test_no_new_dead_paths` — a census over tracked prose in
@@ -750,17 +766,27 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
       FOR. A census over prose catches a real hazard (`#1561`'s own history shows docs quoting a
       kill command); scoping every one off `claudedocs/` would close this class and reopen that.
       That trade is not mine to make silently.
-    **Closing condition — either arm closes it, and both are checkable.** (a) A guard exists that
-    enumerates the repo's ledger-style censuses and FAILS when one of them scans tracked PROSE
-    without declaring an exemption — shown RED against today's tree and GREEN after, with the
-    enumeration derived rather than hand-listed (rank 1's `leakscan` lesson: a hand-written
-    allowlist is the same defect one level up). **OR** (b) the operator records in writing that
-    per-instance fixing is the accepted cost, having read this item's two measured instances —
-    in which case this rank closes as a decision and the forcing stays `none`.
-    forcing: none — all three instances are fixed (`#1561`, `#1567`, `#1591`) and nothing is red on
-    this class today. **Latent, not live:** it has taken the shared branch down three times in three
-    days and the mechanism is unchanged — but one of those three was the mechanism doing its job, so
-    this is a decision to take, not a gate to unblock.
+    ✅ **CLOSED by arm (b) — the operator's decision, 2026-09-12, over the evidence above: per-instance
+    is the accepted cost, and the DISCRIMINATOR is the deliverable.** Arm (a) — a derived guard
+    enumerating the repo's ledger-style censuses — was **proposed and rejected**, for reasons that are
+    the point of the item:
+    - 🔴 **It would be a census over censuses, i.e. this class one level up.** The item's own arm (a)
+      forbade hand-listing the population, and the grep evidence shows why that matters: the
+      population escaped a pattern match in **two orthogonal ways**, so the guard would need an AST
+      walk over what each test DOES.
+    - **It would police a population of one, already remediated.** (a) is fixed at the source and is
+      the only growth-ledger over prose that exists; (b) does not scan prose; (c) already excludes
+      `claudedocs/`. A derived guard would have nothing left to catch today.
+    - 🔴 **And (c) is the argument against silencing the class at all** — a prose census caught a real
+      agent-facing defect **within half an hour** of it merging. A remedy that scoped every census
+      off prose would have lost that.
+    ⚠ **RESIDUAL, stated because it is the one thing this decision rests on and cannot prove:** the
+    population is **not enumerable by grep** (see above), so "no second growth-ledger exists" is a
+    claim about the instances checked — the three known ones plus the obvious prose scanners — **not a
+    census.** A fourth, behind a third spelling, would not have been found. **If one surfaces, it does
+    not reopen this decision; apply the discriminator to it at birth.**
+    forcing: none — closed as a decision. All three instances are fixed (`#1561`, `#1567`, `#1591`)
+    and nothing is red on this class.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
