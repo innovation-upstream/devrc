@@ -6106,17 +6106,37 @@ def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryErr
     # sibling failure — the pin undeployed — is already exemplary, because
     # `cairn_pin.ensure()` names both resolution routes and the fix; this closes
     # the one that reaches the operator as a bare shell error instead.
-    # 🔴 AND IT SPELLS NO FLAG AND NO CHECKOUT PATH. A first draft of this line
-    # offered "or run the writer directly with `python3 <devrc>/scripts/lib/
-    # subsystem_touch.py --store … --scope … --validate`" as a fallback. That was
-    # wrong twice: it re-introduced the absolute-checkout spelling this whole
-    # change removes, and it spelled `--validate` inside this function, which
-    # `test_the_command_is_BUILT_not_typed` forbids precisely so a flag rename
-    # cannot stale the text here. The deploy IS the remedy; a fallback that
-    # routes around it is how the old spelling comes back.
+    # 🔴 AND IT SPELLS NO FLAG AND NO CHECKOUT PATH. A first draft offered "or run
+    # the writer directly with `python3 <devrc>/scripts/lib/subsystem_touch.py …
+    # --validate`" as a fallback. That re-introduced the running-copy spelling
+    # this function's own RECOVER command just moved away from, so it was
+    # withdrawn. ⚠ Scoped deliberately to THIS emission: the module still emits
+    # `python3 {SELF_PATH} --template …` elsewhere and two tests REQUIRE it, so
+    # "the spelling this change removes" is true of the RECOVER command and false
+    # of the file. That wider cleanup is a separate ranked item. ⚠ The withdrawal was RIGHT and the reason I first gave for it was
+    # WRONG: I wrote that `test_the_command_is_BUILT_not_typed` forbids it. It
+    # does not — that test asserts the flag as a QUOTED ARGUMENT TOKEN in the
+    # source, not the flag inside a message string, and round 2 of this PR's
+    # audit spliced the draft back in and watched the assertion PASS. (This
+    # comment cannot quote that token to show you: the guard reads THIS function's
+    # source, so spelling it here reds the suite — measured.)
+    # A comment claiming a guard that does not exist is worse than no comment, so
+    # the guard below was WIDENED to actually forbid it rather than the sentence
+    # being softened: `test_the_refusal_NAMES_NO_running_copy_path`.
+    #
+    # 🔴 THE REMEDY IS SPELLED EXACTLY AS `cairn_pin.ensure()` SPELLS IT. A bare
+    # `home-manager switch` is not this repo's invocation — every runnable
+    # spelling in the tree carries `--flake … --impure`, and without them the
+    # evaluation cannot succeed (`nix/home.nix` takes a required `cairnPackage`
+    # with no default). And it must not say "this checkout": the launcher is an
+    # `mkOutOfStoreSymlink` to a HARDCODED `~/workspace/devrc`, so which tree you
+    # switch changes nothing — and the tree this message is printed from is
+    # typically a throwaway worktree about to be removed, which is the very
+    # deixis rank 23(b) exists to retire.
     lines.append(
         "  If that exits 127 (`cairn-validate: command not found`), this host has not "
-        "deployed the launcher yet — `home-manager switch` this checkout and re-run it."
+        "deployed the launcher yet — `home-manager switch --flake ~/workspace/devrc "
+        "--impure`, then re-run it."
     )
     return "\n".join(lines)
 

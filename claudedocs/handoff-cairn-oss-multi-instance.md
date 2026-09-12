@@ -207,15 +207,20 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   magnitude larger — against the OSS `lib/entry_shape.py`, which holds only the shared
   vocabulary. devrc has **15** cairn/subsystem test files; OSS has **7**. via: measurement
   🔴 **THE TWO RAW LINE COUNTS THAT USED TO BE HERE (`6,654` and `264`) ARE GONE ON PURPOSE —
-  BOTH WENT STALE, AND ONE OF THEM WAS STALED BY THIS DOC'S OWN PR.** Measured 2026-09-12:
-  `subsystem_touch.py` read **6,693** at that PR's first commit and **6,855** two commits later
-  (its own docstring edits), against a doc asserting 6,654; `entry_shape.py` is **330**, not 264.
-  A raw line count of a file under active edit restales within the same PR, it is the cross-round
-  class this ladder already names — true when written, falsified by a later commit, inside no
-  round's diff range — and **nothing asserts on either number, so no test can ever catch it**.
-  The ORDER-OF-MAGNITUDE claim is what the argument actually rests on and it is robust; if you
-  need the figures, derive them: `wc -l scripts/lib/subsystem_touch.py` and
-  `git -C ~/workspace/cairn show HEAD:lib/entry_shape.py | wc -l`. **Do not re-insert them.**
+  BOTH WENT STALE, AND ONE OF THEM WAS STALED BY THIS DOC'S OWN PR.** The doc asserted 6,654
+  against a `subsystem_touch.py` that moved three times during this one PR — and 🔴 **the
+  replacement figures a first draft of THIS paragraph quoted went stale before it was even
+  merged, which is the argument, not an aside**: it said "6,693 at that PR's first commit", and a
+  REBASE one commit later re-parented that commit so it reads ~6,833. `entry_shape.py` is not one
+  number either — the local clone's HEAD and the rev `flake.lock` actually pins differ (330 vs
+  314), so even the derive command has to name WHICH rev. A raw line count of a file under active
+  edit restales within the same PR; it is the cross-round class this ladder already names — true
+  when written, falsified by a later commit, inside no round's diff range — and **nothing asserts
+  on any of these numbers, so no test can ever catch one.** The ORDER-OF-MAGNITUDE claim (≈20×)
+  is what the argument rests on and it is robust. If you need a figure, derive it AND say which
+  rev you measured: `wc -l scripts/lib/subsystem_touch.py`, and for the pinned side
+  `git -C ~/workspace/cairn show $(…flake.lock's cairn rev…):lib/entry_shape.py | wc -l` —
+  `HEAD` there is your clone's, not what devrc consumes. **Do not re-insert a bare count.**
 - **Ruled out: that the fork is behavioural and therefore expensive to reconcile.** I read
   every module diff: **~90% is sanitisation prose** — docstrings rewriting `subsystem_touch`
   to "the writer half"/`entry_shape` and removing named hosts and dates. The only real
@@ -233,9 +238,9 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   duplicated `lib/` modules and takes them from the pinned flake; the writer takes its shared
   vocabulary from the pinned `entry_shape` instead of its own copies. **The fork is CLOSED —
   do not re-ask it**, and do not read the paragraph above as a live question. It was put with
-  the re-measured numbers below and with this trade named: the cost is that devrc's 6,654-line
-  `subsystem_touch.py` must take its vocabulary from the 264-line `entry_shape`, which is the
-  real work and the part that can surprise us.
+  the re-measured numbers below and with this trade named: the cost is that devrc's
+  `subsystem_touch.py` must take its vocabulary from the far smaller `entry_shape`, which is the
+  real work and the part that can surprise us. (Counts removed here too — see the block above.)
 - **RE-MEASURED 2026-09-08, after `cairn-who` merged (devrc #1381). The figures above are from
   09-07 and have moved in BOTH directions.** This item says verify rather than re-derive; this
   is that verification, and it changed the picture:

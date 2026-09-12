@@ -8964,6 +8964,59 @@ class TestMalformedRefusalNamesTheRecovery:
         )
         assert args.scope == SCOPE
 
+    def test_the_refusal_NAMES_NO_running_copy_path(self, store: Path) -> None:
+        """🔴 THE WHOLE MESSAGE, not just the built command. Round 2 of this PR's
+        audit showed the neighbouring guard does NOT cover this: it asserts
+        `--validate` as a QUOTED ARGUMENT TOKEN in the source, so a fallback
+        offering `python3 <abs path>/subsystem_touch.py … --validate` inside a
+        MESSAGE STRING passes it. The draft that did exactly that was withdrawn
+        by hand; nothing would have stopped the next one.
+
+        This pins the RELATIONSHIP the change is about — no line the operator is
+        told to run may name the running copy — over the rendered refusal rather
+        than over one function's return value."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        assert "subsystem_touch.py" not in msg, (
+            "the refusal names this module's own file again. `Path(__file__)` "
+            "resolves the RUNNING COPY, so in a throwaway worktree that is a path "
+            "about to be `worktree remove`d — rank 23(b)"
+        )
+        assert str(MODULE_PATH.resolve()) not in msg
+        assert str(ROOT) not in msg, (
+            f"the refusal embeds the checkout root {ROOT}; it must name only "
+            f"PATH-resolved commands"
+        )
+
+    def test_the_refusal_NAMES_THE_REMEDY_for_the_command_itself_failing(
+        self, store: Path
+    ) -> None:
+        """🔴 THE DEAD END THE PATH MOVE INTRODUCED. A bare PATH-resolved command
+        exits 127 on a host that has not deployed the launcher, and the refusal
+        used to stop there — from the one function whose entire purpose is that a
+        refusal must name the way out.
+
+        The remedy is pinned to the spelling `cairn_pin.ensure()` already emits:
+        a bare `home-manager switch` cannot evaluate here (`nix/home.nix` takes a
+        required `cairnPackage`), so the flags are load-bearing, not decoration.
+        Deleting the line leaves 900+ tests green without this."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        assert "127" in msg, "the refusal does not name the symptom of a missing launcher"
+        assert "--flake" in msg and "--impure" in msg, (
+            "the remedy is spelled without the flags that make it work — a bare "
+            "`home-manager switch` cannot evaluate this flake"
+        )
+        pin_src = (ROOT / "scripts" / "lib" / "cairn_pin.py").read_text(encoding="utf-8")
+        assert "home-manager switch --flake " in pin_src, (
+            "cairn_pin.py no longer spells the remedy this way, so the two "
+            "operator-facing messages have drifted apart"
+        )
+
     def test_the_command_names_NO_absolute_checkout_path(self, store: Path) -> None:
         """🔴 RANK 23(b). The old spelling was `python3 <abs path to this file>`,
         which is true for the machine that PRINTED it and false for anyone who
