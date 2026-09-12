@@ -694,20 +694,27 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
     the whole 27-of-99 finding in rank 1, are instances. **Nothing prevents the next one**, and the
     cost is not the red — it is that a doc nobody has classified yet blocks a branch nobody else
     can unblock. `claude/RULES.md`: *"a permanently-red gate is worse than no gate."*
-    🔴 **A THIRD INSTANCE LANDED WHILE THIS ITEM WAS BEING WRITTEN, AND IT IS THE BEST EVIDENCE IN
-    THE ITEM.** `main` is RED right now on
+    🔴 **A THIRD INSTANCE LANDED WHILE THIS ITEM WAS BEING WRITTEN — and it cuts AGAINST the class
+    complaint, which is why it stays in.** `main` went RED on
     `scripts/tests/test_doc_path_rot.py::test_no_new_dead_paths` — a census over tracked prose in
     `claude/` (`CORPUS_DIRS = ("claude", "CLAUDE.md")`, `:170`) — reporting
-    `claude/skills/audit-pr/SKILL.md:144  DEAD PATH: reference/round-ladder-evidence.md`.
-    ⚠ **AND IT IS A FALSE POSITIVE: the target EXISTS on `origin/main`**
-    (`git cat-file -e origin/main:claude/skills/audit-pr/reference/round-ladder-evidence.md` → 0).
-    The gate resolved the relative reference against a placeholder segment, rendering
-    `…/<bare-ref-unopenable-write-the-deployed-~-.claude-path>/reference/round-ladder-evidence.md`
-    — so the prose around the reference changed (`e8ee277e`, `#1587`, which cut 36% of the round-0
-    brief) and the census's resolution base went with it. **The guard reddens the shared branch for a
-    file that is there.** Measured in a clean worktree whose only diff is this `claudedocs/` file,
-    which that gate does not read. **Not claimed by anyone and no open PR addresses it** (swept).
-    via: measurement
+    `claude/skills/audit-pr/SKILL.md:144  DEAD PATH: reference/round-ladder-evidence.md`. Fixed in
+    **`#1591`**: `#1587` (`e8ee277e`) added that line with a BARE relative spelling while the same
+    file spells the same sidecar correctly at `:11`.
+    🔴 **I FIRST RECORDED THIS AS A FALSE POSITIVE BECAUSE THE TARGET FILE EXISTS. THAT WAS WRONG,
+    AND THE ERROR IS THE INSTRUCTIVE PART — "the file is there" is not this rule's test.**
+    `_resolve`'s rule 1c (`test_doc_path_rot.py:306-315`) resolves a `reference/<file>` token to
+    `REPO_ROOT / BARE_REF_MARKER / token` **on purpose**, and
+    `BARE_REF_MARKER = "<bare-ref-unopenable-write-the-deployed-~-.claude-path>"` — a deliberately
+    unopenable segment **whose name states the remedy**. The in-source comment says why: resolving it
+    against the citing doc's directory *"would always succeed and reproduce exactly the false-clean
+    this rule exists to kill"*. A `SKILL.md` is loaded as authoritative guidance from an arbitrary
+    cwd, so the property is **followability, not existence**. ⚠ **I asserted the verdict from the
+    file's existence without reading the resolver** — the same shape as rank 6's two vacuous checks,
+    and it is why the gate's own error text names the fix.
+    ✅ **So (c) is the census WORKING, and it is evidence FOR arm (b) of the closing condition, not
+    against it:** a census over prose caught a real, one-line, agent-facing defect **22 minutes**
+    after it merged. **Do not cite (c) as over-firing.** via: measurement
     - **THREE instances, measured.** ⚠ An earlier draft said three and could not name the third; it
       was corrected to two, and then a third arrived. **State the count with its date or do not state
       it.** (a) `scripts/claude-hooks/tests/test_guard_core.py`'s kill-mention ledger:
@@ -715,15 +722,18 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
       sessions in roughly two hours; closed by **`#1561`** (`c0bbd6d9`) scoping the scanner off
       `claudedocs/` (`_PROSE_ONLY_PREFIXES`). (b) `scripts/tests/test_runner_bound_ledger.py`: **5**
       reds, 4 of them AFTER `c0bbd6d9`, plus `main`; closed by **`#1567`** (`6f1867b1`) routing the
-      unbounded spawn through the harness. (c) the `test_doc_path_rot` false positive above — **OPEN**. ⚠ Those counts are a read-time status population and are
+      unbounded spawn through the harness. (c) the `test_doc_path_rot` red above — **a TRUE positive**,
+      fixed by `#1591`. ⚠ Those counts are a read-time status population and are
       not re-derivable — see rank 1. via: measurement
     - 🔴 **THE FIXES ARE DIFFERENT KINDS, WHICH IS WHY NONE GENERALISES.** `#1561` narrowed the
-      SCANNER's scope; `#1567` removed the thing being counted; (c) will need a third kind again —
-      a resolution fix, since nothing is even wrong with the tree. Neither touches the pattern —
-      *a guard whose population grows every time someone writes a document* — so the class is
-      untouched by all of them. ⚠ **(c) also widens the class beyond "an unclassified mention":** a
-      census can redden the branch over a reference that is CORRECT, which no amount of classifying
-      would have prevented.
+      SCANNER's scope; `#1567` removed the thing being counted; `#1591` corrected the PROSE, which is
+      the only one of the three where the census was pointing at a real defect. Neither of the first
+      two touches the pattern — *a guard whose population grows every time someone writes a
+      document* — so the class is untouched by them.
+      🔴 **AND (c) IS THE REASON THIS ITEM MUST NOT BE READ AS "SCOPE THE CENSUSES OFF PROSE".** Two
+      of three instances were the guard over-reaching; the third was the guard earning its place, on a
+      defect nothing else would have caught and within half an hour. **A remedy that silences the
+      class silences (c) too.** That is the whole substance of the decision below.
     - 🔴 **THE CLASS HAS NO CENSUS OF ITSELF, AND THE ATTEMPT TO BUILD ONE BY GREP FAILED IN TWO
       INDEPENDENT WAYS — that is the discovery step, not a formality.** Measured on `origin/main`:
       **47** test files under `scripts/` enumerate tracked files via `git ls-files`, and a regex for
@@ -747,9 +757,10 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
     allowlist is the same defect one level up). **OR** (b) the operator records in writing that
     per-instance fixing is the accepted cost, having read this item's two measured instances —
     in which case this rank closes as a decision and the forcing stays `none`.
-    forcing: **gate — `main` IS RED on instance (c) as of 2026-09-12**, on a census false positive,
-    and `claude/RULES.md` says a permanently-red gate is worse than none. Instances (a) and (b) are
-    fixed; the mechanism that produced all three is unchanged.
+    forcing: none — all three instances are fixed (`#1561`, `#1567`, `#1591`) and nothing is red on
+    this class today. **Latent, not live:** it has taken the shared branch down three times in three
+    days and the mechanism is unchanged — but one of those three was the mechanism doing its job, so
+    this is a decision to take, not a gate to unblock.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
