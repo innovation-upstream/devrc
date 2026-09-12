@@ -220,12 +220,18 @@ def commit_verdict(rows):
 
 # ── the flake screen ──────────────────────────────────────────────────────────
 # 🔴 THIS SCREEN IS SOUND AND ALMOST NEVER SATISFIABLE, AND BOTH HALVES ARE THE
-# POINT. GitHub caps a status description at 140 BYTES and the pipeline's
+# POINT. A status description arrives cut at 140 BYTES and the pipeline's
 # `FAILING: a | b | c | TOTAL …` line overruns it constantly. MEASURED on real
 # rows: one described `failed=7` while naming ONE test; one named NO test at all;
 # and the row that named the known flake was cut MID-WORD
 # (`…_CAN_see_the_dif`). So a description can prove "at least one test failed and
 # here is its name" — it can NEVER prove "these are all of them".
+# ⚠ WHOSE CUT IT IS — GitHub's own 140-byte cap, or the posting pipeline's own
+# truncation — IS NOT DETERMINED and must not be asserted either way: every row
+# sampled carries exactly one multi-byte character, so at 138 chars / 140 bytes
+# the two hypotheses are indistinguishable. What is measured is the BOUNDARY,
+# pinned by `test_CONTROL_the_real_truncated_rows_land_on_the_BYTE_cap_not_the_
+# CHAR_cap`.
 #
 # A screen that skipped on a name match would therefore skip real reds. This one
 # skips only when the description PROVES the named set is complete: every failing

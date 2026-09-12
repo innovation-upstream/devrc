@@ -332,19 +332,25 @@ def test_names_are_provably_complete_only_when_the_count_agrees():
 # ══ PURE: the DERIVED completeness proof ══════════════════════════════════════
 # 🔴 WHY SYNTHETIC, AND WHY THEY STILL LAND ON THE REAL BOUNDARY. This repo is
 # PUBLIC, so the rows below are BUILT, not pasted. What is copied from the
-# measurement is only the SHAPE: a banner cut by GitHub's cap at 140 BYTES —
-# which is 138 CHARACTERS once the `—` in `FAILED: pytests —` is counted as the
-# three UTF-8 bytes it is, and that is exactly why every real row measured on
+# measurement is only the SHAPE: a banner cut at 140 BYTES — which is 138
+# CHARACTERS once the `—` in `FAILED: pytests —` is counted as the three UTF-8
+# bytes it is, and that is exactly why every real row measured on
 # this repo reads `len(desc)=138` rather than 140. Cutting on bytes is what puts
 # a synthetic fixture on the same boundary a real one lands on; cutting on
 # characters would land two bytes late and quietly leave `failed=` readable,
 # which is the whole hazard these tests are about.
-GITHUB_DESCRIPTION_BYTE_CAP = 140
+# ⚠ WHO DOES THE CUTTING IS NOT DETERMINED — GitHub's own status-description cap
+# and the posting pipeline's truncation are indistinguishable in everything
+# sampled, because every row carries exactly one multi-byte character. These
+# names say BYTE CAP rather than naming an actor on purpose; the measurement is
+# the boundary and nothing else. See `test_CONTROL_the_real_truncated_rows_land_
+# on_the_BYTE_cap_not_the_CHAR_cap`.
+DESCRIPTION_BYTE_CAP = 140
 
 
-def cut_like_github(desc):
+def cut_at_the_byte_cap(desc):
     """Truncate to the 140-BYTE cap, never splitting a character."""
-    raw = desc.encode("utf-8")[:GITHUB_DESCRIPTION_BYTE_CAP]
+    raw = desc.encode("utf-8")[:DESCRIPTION_BYTE_CAP]
     while raw:
         try:
             return raw.decode("utf-8")
@@ -366,7 +372,7 @@ def synth_row(name, collected, passed, skipped, failed):
 # kept as the (uncut, cut) PAIR so the control below can prove the cap really
 # landed inside `failed=` rather than merely that the row is short.
 UNCUT_AND_CUT = [
-    (lambda d: (d, cut_like_github(d)))(synth_row(name, c, p, s, 1))
+    (lambda d: (d, cut_at_the_byte_cap(d)))(synth_row(name, c, p, s, 1))
     for name, c, p, s in (
         ("test_the_alpha_invariant_holds_when_the_ledger_is_empty", 22021, 22018, 2),
         ("test_the_delta_ledger_is_rebuilt_from_the_spool_on_boot", 21964, 21960, 3),
@@ -391,7 +397,7 @@ def test_CONTROL_the_synthetic_rows_land_on_the_real_140_BYTE_boundary():
         assert "  failed=1" in full, full
         assert full.startswith(desc) and len(desc) < len(full), (desc, full)
         assert len(desc) == 138, (len(desc), desc)
-        assert len(desc.encode("utf-8")) == GITHUB_DESCRIPTION_BYTE_CAP, desc
+        assert len(desc.encode("utf-8")) == DESCRIPTION_BYTE_CAP, desc
         # The cut landed AFTER `skipped=` and BEFORE a readable `failed=N`.
         assert M._TOTALS_RE.search(desc) is not None, desc
         assert M.parse_failed_count(desc) is None, desc
@@ -462,7 +468,7 @@ def test_a_genuine_MULTI_failure_red_is_STILL_could_not_measure():
     is the one that could newly get this wrong."""
     full = synth_row("test_the_alpha_invariant_holds_when_the_ledger_is_empty",
                       21500, 21450, 11, 39)
-    cut = cut_like_github(full)
+    cut = cut_at_the_byte_cap(full)
     assert M.parse_failed_count(full) == 39
     assert M.parse_failed_count(cut) is None, cut     # the row the cap produces
     for desc in (full, cut):
@@ -962,8 +968,9 @@ def test_a_row_CUT_INSIDE_failed_with_MORE_failures_than_names_is_withheld(repo)
 
 
 def test_end_to_end_a_row_cut_inside_failed_exits_10_and_names_the_fix(harness, repo):
-    """The whole F2 path through the real script: a description GitHub cut
-    inside `failed=` now produces the INHERITED exit code and the evidence."""
+    """The whole F2 path through the real script: a description cut at the byte
+    cap inside `failed=` now produces the INHERITED exit code and the
+    evidence."""
     harness.serve_default(repo, desc=ROW_CUT_INSIDE_FAILED)
     proc = harness.run(repo, "--pr", "7")
     assert proc.returncode == RC_INHERITED, proc.stdout + proc.stderr
@@ -1276,6 +1283,91 @@ def test_the_write_screen_SEES_the_shapes_the_word_POST_did_not(harness, repo):
     assert all(c.startswith("api ") for c in recorded), recorded
 
 
+def test_the_write_screen_reads_an_ARGUMENT_VALUE_as_DATA_not_as_A_FLAG():
+    """🔴 THE FIVE MEASURED ROWS, PLUS THE CONTROLS THEY NEED. The previous
+    version tokenised the whole flattened argv as flags and took the LAST method
+    it saw, so a `--method GET` or `-X GET` spelled inside a comment BODY turned
+    the real `-X POST` into a read. Same call shape as `post_comment`'s in the
+    write rows; the last five are reads, so the table can go both ways.
+
+    Reachable, not hypothetical: `comment_body` interpolates `c['subject']` —
+    an arbitrary `main` commit subject — and the harness receipt flattens one
+    argv to one space-joined line, so the body's words arrive as bare tokens.
+    The end-to-end half is the next test.
+    """
+    post = "api -X POST /repos/o/r/issues/7/comments"
+    rows = [
+        # (recorded argv line, is it a write)                    what it exercises
+        (f"{post} -f body=hello", True),                       # the control
+        (f"{post} -f body=switch to --method GET now", True),  # body says --method
+        (f"{post} -f body=use -X GET here", True),             # body says -X
+        ("api /repos/o/r/x --input=payload.json", True),       # attached --input=
+        ("api /repos/o/r/x -fbody=hello", True),               # attached -f
+        # 🔴 THE SHARPEST ROW: a POST with NO method flag at all, whose BODY
+        # spells a read method. Only stopping the method scan at the first field
+        # flag saves this one — first-wins alone reads it as a GET.
+        ("api /repos/o/r/issues/7/comments -f body=see -X GET for details", True),
+        # 🔴 THE CASE THAT RULES OUT "STOP AT THE FIRST `/`-PREFIXED POSITIONAL":
+        # a legal write whose METHOD comes after the endpoint.
+        ("api /repos/o/r/x -X POST", True),
+        # 🔴 THE ROW FIRST-WINS IS FOR, and the reason the body-stop alone is not
+        # enough: a field flag is not the only argument that carries a VALUE.
+        # `-H`'s does too, and it is scanned, so a read method spelled inside a
+        # header would overrule the real one under a last-wins rule.
+        ("api -X POST /repos/o/r/x -H X-Note: -X GET", True),
+        # NEGATIVE CONTROLS, so the table is not "everything is a write".
+        ("api /repos/o/r/pulls/7", False),
+        ("api /repos/o/r/commits/deadbeef/statuses?per_page=100", False),
+        ("api -X GET /repos/o/r/x", False),
+        ("api --method HEAD /repos/o/r/x", False),
+        ("api -X GET /repos/o/r/x?q=a-file-named--method-POST", False),
+    ]
+    for line, is_write in rows:
+        assert gh_write_calls([line]) == ([line] if is_write else []), line
+    # …and mixed together, exactly the writes come back, in order.
+    assert gh_write_calls([ln for ln, _ in rows]) == [ln for ln, w in rows if w]
+
+
+def test_EVERY_field_flag_is_seen_in_BOTH_spellings_gh_accepts():
+    """🔴 TWO-WAY, AND DERIVED RATHER THAN RETYPED. `_GH_FIELD_FLAGS` named five
+    flags while the screen recognised the attached form of only two of them, so
+    the ledger read as coverage it did not provide. Both spellings of every
+    entry are built here from the entry itself, so a sixth flag cannot be added
+    to the set and left half-handled.
+    """
+    for flag in sorted(_GH_FIELD_FLAGS):
+        attached = f"{flag}=k=v" if flag.startswith("--") else f"{flag}k=v"
+        for spelling in ([flag, "k=v"], [attached]):
+            line = " ".join(["api", "/repos/o/r/x", *spelling])
+            assert gh_write_calls([line]) == [line], (flag, line)
+    # NEGATIVE CONTROL on the derivation: a flag-shaped token that is NOT a
+    # field flag stays a read, so the sweep above is not passing because every
+    # `-`-prefixed token is treated as a body.
+    assert gh_write_calls(["api /repos/o/r/x --paginate"]) == []
+    assert gh_write_calls(["api /repos/o/r/x -q .name"]) == []
+
+
+def test_a_hostile_COMMIT_SUBJECT_reaching_the_BODY_is_still_seen_as_a_WRITE(
+        harness, repo):
+    """🔴 THE REACHABILITY HALF, THROUGH THE REAL SCRIPT. The rows above are
+    strings this file wrote; this drives the same hazard the only way it can
+    actually arrive — a `main` commit subject that spells a read method, copied
+    into the comment body by `comment_body` and flattened into the receipt.
+
+    Without this the table is a claim about the classifier and not about the
+    shape the harness really produces.
+    """
+    repo.git("commit", "--amend", "-m",
+             "repair alpha: prefer -X GET over --method POST when probing")
+    harness.serve_default(repo)
+    harness.run(repo, "--pr", "7", "--comment-mode", "on")
+    recorded = harness.calls()
+    # POSITIVE CONTROL: the hostile text really did reach the recorded argv, so
+    # a green below is not "the body never contained it".
+    assert any("--method POST" in c for c in recorded), recorded
+    assert len(gh_write_calls(recorded)) == 1, recorded
+
+
 def test_DRY_RUN_says_what_it_would_do_and_writes_nothing(harness, repo):
     harness.serve_default(repo)
     proc = harness.run(repo, "--pr", "7", "--comment-mode", "dry-run")
@@ -1488,6 +1580,38 @@ def _spawn_argv0(src=SRC):
     return out
 
 
+def _computed_spawn_heads(src=SRC):
+    """(lineno, name) for every spawn whose argv0 is NOT a string constant.
+
+    🔴 THE HOLE `_spawn_argv0` CANNOT SEE. It folds every computed head into the
+    ONE set member `<computed>`, so a SECOND computed spawn — `binary = "git"`
+    then `subprocess.run([binary, "push"])` — leaves the argv0 set unchanged and
+    still equal to its pin. The pin's docstring justifies that member as
+    `[gh, "api", …]` and points at the `gh` ledger; but `_gh_argv_shapes` only
+    ever sees heads that are the Name `gh`, so the justification was WIDER than
+    the implementation and the extra spawn was covered by neither.
+
+    A head that is not a plain Name at all (`self.gh`, `cmds[0]()`) comes back
+    as `<not-a-name>` rather than being dropped — same sentinel discipline.
+    """
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if not (isinstance(first, (ast.List, ast.Tuple)) and first.elts):
+            continue
+        head = first.elts[0]
+        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+            continue
+        out.append((node.lineno,
+                    head.id if isinstance(head, ast.Name) else "<not-a-name>"))
+    return out
+
+
 def _gh_argv_shapes(src=SRC):
     """The constant argv head of every spawn whose argv0 is the `gh` seam.
 
@@ -1532,7 +1656,19 @@ EXPECTED_GH_ARGV = {("api",), ("api", "-X", "POST")}
 
 # `gh api` is the only surface, and only these methods are reads.
 GH_READ_METHODS = frozenset({"GET", "HEAD"})
+# The five flags that give `gh api` a REQUEST BODY, and therefore a POST with or
+# without a method flag. `gh` takes each one's value ATTACHED as well as
+# separated, and the first version of this screen knew only three of the ten
+# spellings — `--input=…` and `-fbody=…` both read as clean. The two collections
+# are pinned against each other by
+# `test_EVERY_field_flag_is_seen_in_BOTH_spellings_gh_accepts`.
 _GH_FIELD_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+_GH_FIELD_PREFIXES = ("-f", "-F", "--field=", "--raw-field=", "--input=")
+
+
+def _gh_is_field_flag(tok):
+    """Either spelling of any of the five body-carrying flags."""
+    return tok in _GH_FIELD_FLAGS or tok.startswith(_GH_FIELD_PREFIXES)
 
 
 def gh_write_calls(calls):
@@ -1544,8 +1680,33 @@ def gh_write_calls(calls):
     is complete in today's tree; this is about what the guard catches next time.
 
     🔴 A MISSING `-X` IS NOT A READ. `gh api` with any field flag (`-f`, `-F`,
-    `--field`, `--raw-field`, `--input`) defaults to POST, so a write needs no
-    method flag at all — the one shape a method-only screen would call clean.
+    `--field`, `--raw-field`, `--input`, in either spelling) defaults to POST,
+    so a write needs no method flag at all — the one shape a method-only screen
+    would call clean.
+
+    🔴 THE ARGUMENT **VALUES** ARE DATA, NOT FLAGS, AND THE RECEIPT CANNOT SAY SO.
+    The harness flattens one argv to one space-joined line, so a comment BODY
+    arrives as bare tokens indistinguishable from flags — and the body here
+    interpolates `c['subject']`, an arbitrary `main` commit subject. Measured on
+    the previous version, same call shape as the real write:
+
+        -f body=switch to --method GET now   -> read   (a later method WON)
+        -f body=use -X GET here              -> read   (a later method WON)
+
+    So the method is FIRST-WINS and is scanned only up to the first field flag:
+    everything from there on is body text, and a method spelled inside it must
+    not overrule the one the caller actually passed. Field flags ARE scanned to
+    the end, because `gh api /repos/… -f k=v` puts the body after the endpoint.
+
+    ⚠ WHY NOT "STOP AT THE FIRST `/`-PREFIXED POSITIONAL", which is the shape
+    `_gh_argv_shapes` uses: `gh api /repos/o/r/x -X POST` is legal and puts the
+    METHOD after the endpoint, so a scan that stopped at the path would read
+    that real write as clean — a regression in the one direction that matters.
+    The body, by contrast, can only ever begin at a field flag.
+
+    The residual error is in the safe direction: `gh api -f k=v -X GET /…` (a
+    read whose fields precede its method) is reported as a write. This tool
+    emits no such call, and a false write fails loudly rather than quietly.
 
     Anything whose first token is not `api` is reported as a write too: it is a
     `gh` surface nobody enumerated, and an allowlist must fail on those.
@@ -1556,18 +1717,22 @@ def gh_write_calls(calls):
         if not toks or toks[0] != "api":
             writes.append(c)
             continue
-        method, fields, i = None, False, 0
+        method, fields, body, i = None, False, False, 1
         while i < len(toks):
             t = toks[i]
-            if t in ("-X", "--method") and i + 1 < len(toks):
-                method, i = toks[i + 1].upper(), i + 2
+            if _gh_is_field_flag(t):
+                fields, body = True, True
+                i += 1
                 continue
-            if t.startswith("-X") and len(t) > 2:
-                method = t[2:].upper()
-            elif t.startswith("--method="):
-                method = t.split("=", 1)[1].upper()
-            elif t in _GH_FIELD_FLAGS or t.startswith(("--field=", "--raw-field=")):
-                fields = True
+            if not body:
+                if t in ("-X", "--method") and i + 1 < len(toks):
+                    method = toks[i + 1].upper() if method is None else method
+                    i += 2
+                    continue
+                if t.startswith("-X") and len(t) > 2:
+                    method = t[2:].upper() if method is None else method
+                elif t.startswith("--method=") and method is None:
+                    method = t.split("=", 1)[1].upper()
             i += 1
         if method is None:
             if fields:
@@ -1584,6 +1749,47 @@ def test_path_existence_is_proved_with_cat_file_not_diff_quiet():
     assert subs, "the AST scan found no git invocations — this guard is inert"
     assert any(a[:2] == ["cat-file", "-e"] for a in subs), subs
     assert not [a for a in subs if a[0] == "diff"], subs
+
+
+def _sys_path_mutations(src):
+    """(lineno, method) for every `sys.path.<method>(…)` call in a source."""
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)):
+            continue
+        owner = node.func.value
+        if (isinstance(owner, ast.Attribute) and owner.attr == "path"
+                and isinstance(owner.value, ast.Name) and owner.value.id == "sys"):
+            out.append((node.lineno, node.func.attr))
+    return out
+
+
+def test_the_shared_lib_is_APPENDED_to_sys_path_and_never_PREPENDED():
+    """🔴 A 🔴-MARKED COMMENT IS NOT A GUARD. This script and
+    `main-status-watch.py` each carry a paragraph saying `append`, NEVER
+    `insert(0, …)` — and reverting either one to `sys.path.insert(0, …)`
+    SURVIVED the whole suite.
+
+    `scripts/lib/` is this repo's shared-module dumping ground and grows freely;
+    prepending it puts EVERY module in it ahead of the standard library for
+    every LATER import the process makes, including the lazy ones that only run
+    once something has already gone wrong. Appending removes the shadowing class
+    outright and costs nothing.
+
+    ⚠ THIS FILE'S SCRIPT ONLY. `main-status-watch.py`'s copy is pinned by
+    `test_main_status_watch.py`, which owns that file — see the note there.
+    """
+    got = _sys_path_mutations(SRC)
+    assert got, "the sys.path scan matched nothing — this guard is inert"
+    assert [m for _, m in got] == ["append"], got
+    # POSITIVE CONTROL: the scan CAN see the spelling this forbids, so the
+    # equality above is not a comparison against a scan wired to nothing.
+    assert _sys_path_mutations(
+        'import sys\nsys.path.insert(0, "x")\n') == [(2, "insert")]
+    # …and it does not fire on an unrelated `.append`, so a future
+    # `results.append(…)` in the script cannot satisfy it by accident.
+    assert _sys_path_mutations('rows = []\nrows.append(1)\n') == []
 
 
 def test_every_env_var_the_code_reads_is_documented_in_the_header():
@@ -1734,8 +1940,83 @@ def test_stale_base_triage_SPAWNS_these_argv0_AND_NOTHING_ELSE():
                      which is what lets every test point it at a stub. Its own
                      argv is enumerated by the `gh` guard below, so `<computed>`
                      here is not an unexamined hole.
+
+    🔴 THAT LAST SENTENCE USED TO BE WIDER THAN WHAT WAS ENFORCED. A set member
+    is not a count: every computed head folds into the ONE `<computed>` entry,
+    so a second one — `binary = "git"; subprocess.run([binary, "push"])` —
+    passed this pin, the `gh` ledger, the `_git` allowlist and the
+    literal-`git`-outside-the-helper check, all four, unchanged. So the computed
+    heads are now asserted BY NAME AND BY COUNT, which is what makes the
+    justification above true rather than merely stated.
     """
     assert {a0 for _, a0 in _spawn_argv0()} == {"git", SUB_COMPUTED}
+    computed = _computed_spawn_heads()
+    assert computed, "no computed spawn found at all — this half is inert"
+    assert {n for _, n in computed} == {"gh"}, computed
+    # 🔴 AND BY COUNT, CROSS-CHECKED AGAINST THE OTHER SCAN. `_gh_argv_shapes`
+    # counts exactly the spawns whose head is the Name `gh`, so these two
+    # disagree the moment a computed spawn is built from anything else — which
+    # is the case a SET of argv0 sentinels absorbs without moving.
+    assert len(computed) == len(_gh_argv_shapes()), (computed, _gh_argv_shapes())
+
+
+def test_a_SECOND_computed_spawn_cannot_HIDE_INSIDE_the_computed_member():
+    """🔴 THE GUARD ABOVE, DRIVEN OVER SOURCE THAT VIOLATES IT — and the four
+    guards it walked past, each re-run here on the same source so the claim is a
+    measurement rather than a summary of one.
+
+    The violation is two lines appended to the REAL file, which is what makes
+    the four greens below meaningful: the argv0 SET is unchanged because
+    `<computed>` already has a member, the `gh` shape ledger is unchanged
+    because the new head is not the Name `gh`, the `_git` allowlist is unchanged
+    because the call never goes near `_git`, and the literal-`git`-outside-the-
+    helper check is unchanged because the head is a variable, not `"git"`.
+    """
+    hidden = SRC + '\nbinary = "git"\nsubprocess.run([binary, "push"])\n'
+    # The four that stay green — the finding, restated as assertions.
+    assert {a0 for _, a0 in _spawn_argv0(hidden)} == {"git", SUB_COMPUTED}
+    assert _gh_argv_shapes(hidden) == _gh_argv_shapes()
+    assert _git_unenumerated(_git_subcommands(hidden)) == []
+    helpers = [n for n in ast.walk(ast.parse(hidden))
+               if isinstance(n, ast.FunctionDef) and n.name == "_git"]
+    lo, hi = helpers[0].lineno, helpers[0].end_lineno
+    assert all(lo <= ln <= hi for ln, a0 in _spawn_argv0(hidden) if a0 == "git")
+    # …and the one that goes red. Source order, so the appended spawn is last.
+    assert [n for _, n in sorted(_computed_spawn_heads(hidden))] == (
+        [n for _, n in sorted(_computed_spawn_heads())] + ["binary"])
+    # NEGATIVE CONTROL on the new scan: the unmodified file's computed heads are
+    # ALL the `gh` seam, so the rejection above is about the appended spawn and
+    # not about a scan that reports every spawn it sees.
+    assert {n for _, n in _computed_spawn_heads()} == {"gh"}
+    # …and a head that is not a plain Name lands as a sentinel rather than
+    # raising or vanishing.
+    assert [n for _, n in _computed_spawn_heads(
+        'import subprocess\nsubprocess.run([self.gh, "api"])\n')] == ["<not-a-name>"]
+
+
+def test_a_spawn_whose_ARGV_IS_NOT_A_LIST_is_a_SENTINEL_rather_than_a_SKIP():
+    """🔴 THE NET FOR `os.system("git push")` AND ANY argv BUILT ELSEWHERE, and
+    it was never exercised: the mutant replacing `out.append((node.lineno,
+    SUB_NOT_A_LIST))` with `pass` SURVIVED the whole suite. The real file
+    contains no such call, so no assertion against the real file can tell ABSENT
+    from DENIED — the same reason `_git_subcommands`' sentinels are driven over
+    synthetic source rather than asserted in place.
+    """
+    for src, lineno in (
+            ('import os\nos.system("git push --force")\n', 2),      # a bare string
+            ('import subprocess\ncmd = ["git", "push"]\n'
+             'subprocess.run(cmd)\n', 3),                           # built elsewhere
+            ('import subprocess\nsubprocess.run([])\n', 2)):        # an empty argv
+        assert _spawn_argv0(src) == [(lineno, SUB_NOT_A_LIST)], src
+    # NEGATIVE CONTROL: a literal list head is NOT the sentinel, so the three
+    # above are about the unreadable argv and not about a scan that labels
+    # everything it sees.
+    assert _spawn_argv0('import subprocess\nsubprocess.run(["git", "push"])\n') == [
+        (2, "git")]
+    # …and the sentinel really does REJECT at the ledger that consumes it, which
+    # is what makes it a guard rather than a label.
+    assert {a0 for _, a0 in _spawn_argv0('import os\nos.system("git push")\n')
+            } != {"git", SUB_COMPUTED}
 
 
 def test_every_git_SPAWN_goes_through_the_one_helper():

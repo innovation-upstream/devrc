@@ -68,11 +68,14 @@ RC_OK, RC_TRIGGERED, RC_UNMEASURED, RC_BLIND, RC_USAGE = 0, 10, 11, 12, 2
 # hazard the flake screen turns on is only demonstrable with real ones — every
 # synthetic description anybody would write by hand is conveniently complete.
 #
-# The known flake, cut MID-WORD by GitHub's 140-BYTE description cap. BYTES, not
+# The known flake, cut MID-WORD at the 140-BYTE description cap. BYTES, not
 # characters: the `—` in `FAILED: pytests —` is three UTF-8 bytes, which is why
 # every real row measured on this repo reads `len(desc)=138`. Anyone building a
 # fixture from a CHARACTER cap lands two bytes late and quietly leaves `failed=`
-# readable — see `cut_like_github` in `scripts/tests/test_stale_base_triage.py`.
+# readable — see `cut_at_the_byte_cap` in `scripts/tests/test_stale_base_triage.py`.
+# ⚠ WHOSE CUT IT IS — GitHub's cap or the posting pipeline's own truncation — is
+# NOT determined; the two are indistinguishable on every row sampled. The
+# boundary is the measurement, and it is the only claim made about it.
 REAL_DESC_BYTE_CAP = 140
 REAL_FLAKE_DESC = (
     "FAILED: pytests — FAILING: TestARefusedWriteIsIndistinguishableFromAnAbsentOne"
@@ -364,7 +367,7 @@ def test_CONTROL_the_real_truncated_rows_land_on_the_BYTE_cap_not_the_CHAR_cap()
 
 
 def test_the_REAL_known_flake_row_still_triggers_because_it_is_truncated(h):
-    """The row that named the known flake was cut MID-WORD at GitHub's 140-BYTE
+    """The row that named the known flake was cut MID-WORD at the 140-BYTE
     cap, so it proves neither the full name nor that it was the only failure.
     Skipping on it would skip real reds hiding behind the truncation.
 
@@ -1209,6 +1212,46 @@ def test_code_only_really_strips_the_prose_it_claims_to():
     assert "def commit_verdict(rows):" in code, (
         "_code_only stripped executable lines too — every guard reading it is vacuous"
     )
+
+
+def _sys_path_mutations(src):
+    """(lineno, method) for every `sys.path.<method>(…)` call in a source."""
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)):
+            continue
+        owner = node.func.value
+        if (isinstance(owner, ast.Attribute) and owner.attr == "path"
+                and isinstance(owner.value, ast.Name) and owner.value.id == "sys"):
+            out.append((node.lineno, node.func.attr))
+    return out
+
+
+def test_the_shared_lib_is_APPENDED_to_sys_path_and_never_PREPENDED():
+    """🔴 A 🔴-MARKED COMMENT IS NOT A GUARD. The paragraph above this script's
+    `sys.path.append` says `append`, NEVER `insert(0, …)`, and reverting it to
+    `sys.path.insert(0, …)` SURVIVED the whole suite.
+
+    `scripts/lib/` grows freely; prepending it puts EVERY module in it ahead of
+    the standard library for every LATER import this process makes — including
+    the lazy `import traceback` on the unattended-crash path at the bottom of
+    this file, which is the one import that runs when something has already gone
+    wrong.
+
+    ⚠ THIS FILE'S SCRIPT ONLY. `stale-base-triage.py` carries the same comment
+    and the same hazard; its copy is pinned by `test_stale_base_triage.py`,
+    which owns that file.
+    """
+    got = _sys_path_mutations(SCRIPT.read_text(encoding="utf-8"))
+    assert got, "the sys.path scan matched nothing — this guard is inert"
+    assert [m for _, m in got] == ["append"], got
+    # POSITIVE CONTROL: the scan CAN see the spelling this forbids, so the
+    # equality above is not a comparison against a scan wired to nothing.
+    assert _sys_path_mutations(
+        'import sys\nsys.path.insert(0, "x")\n') == [(2, "insert")]
+    # …and it does not fire on an unrelated `.append`.
+    assert _sys_path_mutations('rows = []\nrows.append(1)\n') == []
 
 
 def test_the_script_never_reads_the_rollup_status_endpoint():

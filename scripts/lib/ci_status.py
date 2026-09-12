@@ -117,7 +117,11 @@ def newest_per_context(rows):
 # The line `run-tests.sh` prints and the pipeline posts:
 #   FAILED: pytests — FAILING: a | b | TOTAL collected=N  passed=N  skipped=N
 #                                     failed=N  (floor: …)
-# GitHub caps a status description at 140 BYTES, so most real rows arrive cut.
+# A status description arrives cut at 140 BYTES, so most real rows are partial.
+# ⚠ WHO CUTS IT IS NOT DETERMINED — GitHub's own cap and the posting pipeline's
+# truncation are indistinguishable in everything sampled. The BOUNDARY is what
+# was measured; see `test_CONTROL_the_real_truncated_rows_land_on_the_BYTE_cap_
+# not_the_CHAR_cap`.
 FAILING_RE = re.compile(r"FAILING:\s*(.+?)(?:\s*\|\s*TOTAL\b|$)")
 
 # 🔴 ANCHORED ON `TOTAL`, AND THE ANCHOR IS THE SOUNDNESS ARGUMENT, NOT TIDINESS.
