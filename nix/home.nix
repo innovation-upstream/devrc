@@ -93,6 +93,18 @@ let
   # a NEW source of `notify-failure@`, which is the one toast class deliberately
   # wired to defeat do-not-disturb.
   enableMainGreenDeadman = true;
+
+  # Stale-base PR-triage master switch (scripts/stale-base-triage.py) — gates
+  # ONLY whether the TIMER is wired into timers.target. The SERVICE definition is
+  # always emitted, so `systemctl --user start stale-base-triage` works by hand
+  # on either host regardless. Set false to stop the sweep without reverting
+  # anything.
+  # ⚠ THIS IS NOT THE ARMING SWITCH, and confusing the two would be the
+  # expensive mistake. The unit ships `--comment-mode dry-run` and writes
+  # NOTHING to GitHub at any setting of this flag. Arming is a separate,
+  # deliberate, one-token edit on the unit's ExecStart, with its evidence
+  # criteria written beside it there.
+  enableStaleBaseTriage = true;
   # tmux-snapshot pusher master switch (scripts/tmux-snapshot-push.sh) — feeds
   # clawgate's cross-host tmux read model. Gates ONLY whether the timer is wired into
   # timers.target; the SERVICE definition is always emitted, so
@@ -3704,6 +3716,159 @@ in
       # the same reason: accelerating a check nobody has enabled is meaningless,
       # and a single switch cannot leave the pair half-armed.
       WantedBy = lib.optionals (serverMode && enableMainGreenDeadman) [ "timers.target" ];
+    };
+  };
+
+  # ── IS THIS PR'S RED INHERITED? (scripts/stale-base-triage.py) ───────────────
+  # The two units above are about `main`. This one is about everything branched
+  # FROM it. `tekton/devrc-pytests` is the only automated signal on a PR here and
+  # nothing blocks a merge on it, so its entire value is whether a human believes
+  # a red — and MEASURED on this repo, roughly HALF the genuine-failure signal is
+  # a PR re-reporting a failure `main` has already fixed. A human then triages a
+  # failure their own diff cannot reach. The script's header carries the
+  # measurement, the method and the completeness proof; this block is only the
+  # ROUTING, which is what the tool shipped without.
+  #
+  # 🔴 IT IS A REPORTER, NOT A DETECTOR, AND THE FAILURE POLICY FOLLOWS FROM
+  # THAT — it is not copied from the two units above, and it deliberately differs
+  # from them in the one place that matters.
+  #   * NO `OnFailure = notify-failure@`, and that absence is PINNED
+  #     (`test_stale_base_triage.py::test_the_unit_is_NOT_wired_to_the_do_not_
+  #     disturb_toast`). That toast class is wired to DEFEAT do-not-disturb, and
+  #     every red this unit observes belongs to somebody's PR — none of them is
+  #     an incident on this host, and none of them is made more urgent by being
+  #     shouted at the operator. A reporter that can take the operator's
+  #     attention is exactly how `claude/RULES.md`'s permanently-red gate gets
+  #     built.
+  #   * `SuccessExitStatus = 10`. rc 10 is "at least one PR is INHERITED" — the
+  #     tool working as designed and its headline result. MEASURED 2026-09-12 at
+  #     merge time: 59 PRs read, 28 red, 4 INHERITED, rc 10. Failing the unit on
+  #     its own finding would leave `systemctl --user --failed` permanently dirty
+  #     and train everyone to ignore it.
+  #   * 🔴 rc 11 (COULD NOT MEASURE) DELIBERATELY FAILS THE UNIT — the opposite
+  #     of main-green-check and main-status-watch, and the difference is that
+  #     both of those carry a blind LADDER and this script does not. rc 11 here
+  #     is never a per-PR miss (those are ordinary rows inside a run that still
+  #     exits 0 or 10); it means the run could not look AT ALL — no `gh`, no
+  #     repo, `origin/main` unresolvable, or an unreadable PR listing. With no
+  #     ladder, calling that a success is "blind in permanent silence", the shape
+  #     drift-check's rc 18 exists to prevent. Failing is the right volume for a
+  #     reporter: visible in `systemctl --user --failed`, SILENT because there is
+  #     no OnFailure, and self-clearing on the next fire 2h later.
+  #
+  # 🔴 IT DOES NOT `git fetch`, AND THAT IS A DECISION RATHER THAN AN OVERSIGHT.
+  # The script's absolute safety claim is that it runs no `git` subcommand that
+  # writes — pinned as an ALLOWLIST by `test_no_git_subcommand_that_WRITES_is_
+  # ever_invoked` — and a fetch bolted on in an ExecStartPre would make this UNIT
+  # weaker than the script whose header a reader would check, on a surface
+  # (`refs/` lives in the COMMON git dir) where a worktree gives zero isolation.
+  # A stale `origin/main` fails SAFE in the only direction that matters: BOTH
+  # halves of an INHERITED verdict require `main` to have MOVED a file, so an old
+  # ref can only find FEWER candidate commits and WITHHOLD a verdict — it cannot
+  # manufacture one. The run prints the main-ref sha it compared against on its
+  # first line, so the journal records what it actually read rather than leaving
+  # you to assume.
+  systemd.user.services.stale-base-triage = {
+    Unit = {
+      Description = "Is each red PR's failure inherited from a stale base?";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      SuccessExitStatus = 10;
+      # The script's own API budget (STALE_BASE_TRIAGE_BUDGET, default
+      # TOTAL_BUDGET_S_DEFAULT = 300s) converts exhaustion into COULD NOT MEASURE
+      # rows rather than a kill, so this timeout must sit ABOVE it or systemd
+      # would SIGTERM a run that was about to report. Pinned against the script's
+      # own constant by `test_the_scripts_own_budget_expires_BEFORE_the_units_
+      # timeout`. MEASURED 2026-09-12: a full 59-PR sweep took 43s wall.
+      TimeoutStartSec = 600;
+      Environment = [
+        # 🔴 `gh` IS THE WHOLE JOB and `git` is the evidence half — without
+        # either, every run reports COULD NOT MEASURE from a unit that looks
+        # perfectly correct. That is the silent shape drift-check's and
+        # main-green-check's PATH notes both record.
+        "PATH=${lib.makeBinPath [ pkgs.gh pkgs.git pkgs.python3 pkgs.coreutils ]}"
+        "HOME=%h"
+      ];
+      # 🔴 THE ARMING LINE IS THE ExecStart BELOW, AND ARMING IS THE ONE-TOKEN
+      # EDIT `dry-run` -> `on`. It is deliberately NOT taken here. The operator's
+      # standing decision on the identical `homelab-infra#792` change was
+      # merge-in-dry-run, arm later on evidence, and this ships the same shape.
+      # The literal is pinned by `test_the_unit_ships_the_writer_DISARMED`, so
+      # arming costs a visible line in the nix AND in the test — which is the
+      # point, not friction to route around.
+      #
+      # WHAT WOULD JUSTIFY FLIPPING IT. Each is something a dry-run soak can
+      # actually show, and each is a claim about the VERDICTS, never about the
+      # unit being green:
+      #   (i)   every `DRY-RUN would comment on #N` line named a PR whose red
+      #         really was inherited — spot-check by rebasing one and watching
+      #         the check go green. ONE false INHERITED is disqualifying: this
+      #         bot would be telling a human to ignore a real red.
+      #   (ii)  the eligible set is neither empty nor everything. A soak naming
+      #         0 PRs is the instrument failing to see its own bucket, not a
+      #         clean bill; a soak naming every red PR proves the completeness
+      #         gate is inert. At merge time: 59 read, 28 red, 4 eligible.
+      #   (iii) the same PR is not re-named on every sweep with nothing having
+      #         changed — armed, that is one comment per PR per 2h.
+      #         ⚠ `already_commented()` suppresses duplicates by marker, but
+      #         only AFTER a first post exists, so a dry-run soak structurally
+      #         CANNOT exercise it. Read it as a code claim, not as soak
+      #         evidence — the same gap #792's soak has against its re-read
+      #         guard.
+      #   (iv)  the run's exit code has been stable. A soak spent mostly in
+      #         rc 11 is evidence about `gh`, not about the verdicts.
+      # 🔴 WHERE TO READ IT: `journalctl --user -u stale-base-triage -S -7d`, ON
+      # THE WORKBENCH, and nowhere else. This is NOT like `tekton-supersede`,
+      # whose pod logs reach Loki. A systemd-user unit's own stdout carries
+      # `_TRANSPORT=stdout` (MEASURED on main-status-watch.service), and
+      # `scripts/obs/alloy.alloy`'s journal source applies a DEFAULT-DENY
+      # transport allowlist of `kernel|journal|syslog` — so these lines are
+      # dropped before they ship. Loki sees only systemd's own Started/Finished
+      # records and the exit code, never a verdict. Do not go looking in Grafana.
+      ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/stale-base-triage.py --sweep --comment-mode dry-run";
+      X-Restart-Triggers = [ "${../scripts/stale-base-triage.py}" ];
+    };
+  };
+
+  # 2-hourly, and the interval is ARGUED rather than copied off a sibling. This
+  # is triage, not incident detection: a PR's verdict can only change when a new
+  # `tekton/devrc-pytests` status lands on its head (MEASURED p50 ~19.6 min after
+  # a push) or when `main` moves a file the red names. Neither is something
+  # anyone needs told about within minutes — the consumer is whoever is deciding
+  # whether to believe a red, and they read it when they come to the PR.
+  #
+  # WHY NOT 6h, like drift-check: this tool's SUBJECT is `main` moving, and
+  # `main` moved 11+ times in a single session on this repo. A 6-hourly verdict
+  # would routinely be computed against a `main` that has since moved several
+  # times, which is the exact staleness the tool exists to report on.
+  # WHY NOT 10min, like main-status-watch: that unit races CI to shorten an
+  # INCIDENT window. This one has no incident to shorten and cannot go below CI's
+  # own ~20-min latency anyway. The cost is what makes it matter: one sweep is
+  # 1 + N API reads for N open PRs (MEASURED: 60 reads, 43s wall, 59 open PRs),
+  # so 2h is ~30 reads/hr against GitHub's 5,000/hr installation limit — 0.6%.
+  # At 10 min it would be ~360 reads/hr buying freshness nobody consumes.
+  # No Persistent — it only applies to OnCalendar timers, not monotonic ones.
+  systemd.user.timers.stale-base-triage = {
+    Unit = {
+      Description = "Periodic timer for the stale-base PR triage reporter";
+    };
+    Timer = {
+      OnStartupSec = "20min";
+      OnUnitActiveSec = "2h";
+    };
+    Install = {
+      # 🔴 serverMode-GATED, AND NOT MERELY FOR TIDINESS. Both hosts build the
+      # same flake. A sweep running on two machines doubles the API cost for
+      # byte-identical output today, and ONCE ARMED the two hosts race to post
+      # the same comment: `already_commented()` reads the marker before posting,
+      # so the second host suppresses only if the first host's comment has
+      # already landed. One host — the workbench.
+      # The master switch acts HERE and only here, so the unit file still exists
+      # for a hand-run on either host.
+      WantedBy = lib.optionals (serverMode && enableStaleBaseTriage) [ "timers.target" ];
     };
   };
 
