@@ -424,6 +424,20 @@ def test_a_label_mismatch_KEEPS_ITS_NAME_even_when_ssh_also_exits_nonzero(world)
     assert r["coverage"]["laptop"]["status"] == ph.READ_LABEL_MISMATCH
 
 
+def test_a_missing_host_label_source_is_a_leg_ERROR_not_a_traceback(world, monkeypatch):
+    """`read_host` promises it never raises for a host problem. An unreadable
+    `host_label.py` is a LOCAL problem, but letting it escape still exits 1 —
+    outside the documented vocabulary — so it becomes this leg's error instead."""
+    class _Boom:
+        __file__ = "/nonexistent/host_label.py"
+    monkeypatch.setattr(ph, "_hl", _Boom, raising=False)
+    monkeypatch.setattr(ph._hl, "ssh_target", lambda h: "zach@example", raising=False)
+    leg = ph.read_host("laptop", local_host="workbench", registry_dir="/x",
+                       runner=lambda *a, **k: (0, "", ""))
+    assert leg["status"] == ph.READ_ERROR
+    assert "host_label source" in leg["error"]
+
+
 def test_a_registry_error_on_the_remote_is_ERROR_not_an_empty_read(world):
     world.state["stdout"] = _leg_stdout("laptop", [],
                                         error="FileNotFoundError: /nope")
@@ -480,14 +494,14 @@ def test_the_remote_program_actually_runs_and_emits_the_protocol(tmp_path):
     """END-TO-END on the SHIPPED source, in a subprocess, against a fixture
     registry — the positive control that the thing we send over SSH works at
     all. It runs `python3 -` exactly as the SSH leg does, but locally."""
-    reg, proc = _registry(tmp_path, "e2e", [WB_ALPHA, LT_BETA])
+    reg, _unused_proc = _registry(tmp_path, "e2e", [WB_ALPHA, LT_BETA])
     env_file = tmp_path / "collector-env"
     env_file.write_text("ACTIVITY_HOST=laptop\n")
     src = (_SCRIPTS / "lib" / "host_label.py").read_text(encoding="utf-8")
     program = ph.remote_program(src)
-    # The reader's `proc_dir` defaults to the real /proc, which holds none of
-    # these pids — so point host_label at the fixture env file and let the
-    # liveness filter drop everything; the PROTOCOL is what is under test here.
+    # `_unused_proc`: this leg deliberately runs against the real /proc (the
+    # reader's default), because what is under test is the shipped PROTOCOL, not
+    # the liveness filter. The fixture /proc is built by the helper and not used.
     out = subprocess.run(
         [sys.executable, "-", reg], input=program, capture_output=True,
         text=True, timeout=60,
@@ -497,12 +511,58 @@ def test_the_remote_program_actually_runs_and_emits_the_protocol(tmp_path):
     leg = ph.parse_leg_output(out.stdout, "laptop")
     assert leg["status"] == ph.READ_OK
     assert leg["reported_label"] == "laptop"
-    # 🔴 The liveness filter is what makes this ZERO, and the payload SAYS so —
-    # `stale_dropped` is the positive control distinguishing "read a directory
-    # of dead sessions" from "read nothing".
-    assert leg["records"] == []
-    assert leg["stale_dropped"] == 2
-    assert proc  # the fixture /proc is deliberately NOT used by this leg
+    # 🔴 THE ASSERTION IS A SUM, NOT A ZERO, AND THAT IS THE WHOLE POINT.
+    # This leg uses the reader's DEFAULT `proc_dir` — the machine's real /proc —
+    # so whether pids 910001/910003 are live is a property of the host, not of
+    # the code. `pid_max` here is 4194304 and current pids run near it, so those
+    # values are ordinary allocatable ones: an equality-to-zero assertion passes
+    # by accident of the environment and can flake on the dev host while never
+    # flaking in the sandbox. The two tiers would then disagree structurally —
+    # the same trap the shebang pin fell into.
+    #
+    # The sum keeps the positive control intact (both records were SEEN and
+    # accounted for, so the protocol really carried them) without depending on
+    # which side of the liveness filter they landed on.
+    assert leg["stale_dropped"] + len(leg["records"]) == 2
+    assert leg["unreadable"] == 0
+
+
+def test_host_label_stays_SHIPPABLE_over_the_wire():
+    """🔴 THE CONSTRAINT IS STATED ABOUT THE WRONG MODULE WITHOUT THIS.
+
+    `_READER_SOURCE`'s comment says "stdlib-only and Python-3.9-compatible", but
+    the source actually spliced into the remote program is `host_label.py`, which
+    carried no such pin. A future third-party import there breaks the remote leg
+    as `unreachable` — a purely local bug that reads as a DEAD LAPTOP, which is
+    exactly the failure class `test_the_remote_program_puts_from_future_first`
+    exists for. The end-to-end test cannot catch it either: the package would be
+    installed on the dev host, so the splice would run fine there.
+
+    Imports only; a stdlib-only module is what "shippable" means here.
+
+    ⚠ THERE IS NO RELATIVE-IMPORT BRANCH, AND THAT IS DELIBERATE. One was written
+    and then DELETED after a mutation sweep showed it could never execute: a
+    `from . import x` in `host_label.py` breaks the flat `import host_label` that
+    this very file does at module scope, so the mutant kills COLLECTION and the
+    assertion is never reached. The hazard is real but it is caught earlier and
+    far louder than any guard here could manage — by every importer at once — so
+    a branch for it would be dead code claiming coverage it cannot provide.
+    """
+    src = (_SCRIPTS / "lib" / "host_label.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            roots.add(node.module.split(".")[0])
+    stdlib = set(getattr(sys, "stdlib_module_names", ())) | {"__future__"}
+    assert stdlib, "no stdlib_module_names on this interpreter — cannot judge"
+    non_stdlib = sorted(r for r in roots if r not in stdlib)
+    assert not non_stdlib, (
+        "host_label.py imports %s, which will not exist on the remote host — "
+        "the peer-host SSH leg would report the laptop as UNREACHABLE"
+        % non_stdlib)
 
 
 def test_the_shipped_reader_is_the_one_the_local_leg_runs():
@@ -566,6 +626,34 @@ def test_a_record_matched_by_two_kinds_is_still_ONE_match(world, tmp_path):
     assert r["status"] == ph.STATUS_RESOLVED
     assert len(r["matches"]) == 1
     assert set(r["matches"][0]["matched_by"]) == {ph.KIND_NAME, ph.KIND_PID}
+
+
+@pytest.mark.parametrize("selector", ["\u00b2", "\u0661\u0662\u0663", "\uff11\uff12\uff13"])
+def test_a_non_ascii_digit_is_not_a_pid(selector):
+    """🔴 TWO DISTINCT DEFECTS, AND `isdecimal()` FIXES ONLY ONE.
+
+    `str.isdigit()` is True for characters `int()` refuses and for characters
+    `int()` ACCEPTS AS A DIFFERENT SPELLING:
+
+      * `"\u00b2"` (superscript two) — isdigit, NOT isdecimal, `int()` raises.
+        It escaped `match_kinds` as a ValueError and exited **1**, a code outside
+        this tool's entire documented vocabulary (0/2/3/4/64), with a traceback
+        on stderr — and it happened AFTER the SSH round trip.
+      * `"\u0661\u0662\u0663"` (Arabic-Indic) — isdigit AND isdecimal, and
+        `int()` maps it to 123. So a second spelling of a pid silently RESOLVED
+        a peer. Only the ASCII test rejects this one.
+
+    Both must be non-matches, not crashes and not matches.
+    """
+    rec = _shaped(dict(WB_ALPHA, pid=123))
+    assert ph.match_kinds(selector, rec) == []
+
+
+def test_the_exit_code_for_a_weird_selector_stays_IN_the_vocabulary(world):
+    """The consequence the unit test above cannot see: an unclassifiable exit."""
+    r = world("\u00b2")
+    assert r["status"] == ph.STATUS_UNMATCHED
+    assert ph._EXIT_FOR[r["status"]] in (0, 2, 3, 4)
 
 
 def test_a_bool_pid_is_not_an_integer_pid():
@@ -648,6 +736,21 @@ def test_an_out_of_scope_host_is_not_reported_as_a_failed_search(world):
     r = world("beta-22", hosts=("workbench", "laptop"))
     assert r["status"] == ph.STATUS_INCOMPLETE
     assert r["hosts_unsearched"] == ["laptop"]
+
+
+def test_an_EMPTY_host_scope_RAISES_rather_than_answering_unmatched(world):
+    """🔴 UNMATCHED (exit 3) IS THE STRONGEST NEGATIVE ANSWER THIS TOOL GIVES.
+
+    `hosts` is membership-tested, so a string (`"all"`), a mis-cased label or
+    `()` selects NO host — and every downstream branch then reads "zero matches,
+    nothing unsearched" and returns UNMATCHED from a search that dialled nothing.
+    A routing caller is entitled to trust exit 3; it must never come from an
+    empty scope. Not reachable through the CLI (argparse `choices` guards
+    `--host`), but `lookup()` is the documented API.
+    """
+    for hosts in ("all", ("Workbench",), (), ("homelab",)):
+        with pytest.raises(ValueError, match="empty scope"):
+            world("alpha-11", hosts=hosts)
 
 
 def test_scoping_to_the_local_host_makes_no_ssh_call(world):
@@ -859,13 +962,23 @@ def _scan_for_address_literals(root):
 
 
 def test_no_module_redeclares_a_peer_address_literal():
-    """🔴 THE LEDGER GUARD, and it counts INSTANCES rather than declarations.
+    """🔴 THE LEDGER GUARD — AND ITS DOCSTRING IS DELIBERATELY NARROW.
 
-    A ledger in a comment is a claim; this makes it checkable. `host_label.py`
-    is the one permitted home for a peer SSH target. A literal in a TEST is
-    expected — that is the pin, not a copy.
+    It enforces exactly ONE property: no `user@addr` STRING CONSTANT for a peer
+    outside `host_label.py`, under `scripts/`. A literal in a TEST is expected —
+    that is the pin, not a copy.
 
-    On its FIRST run this found a fourth copy nobody had listed:
+    🔴 WHAT IT CANNOT SEE, stated here because an earlier draft of this docstring
+    (and of `host_label.py`'s ledger comment) claimed "every place these
+    addresses are spelled" and was FALSE when written:
+      * a target COMPOSED at runtime — `scripts/lib/host-role.sh` builds
+        `zach@10.42.0.100` from two shell variables and never spells it whole;
+      * a BARE IP — `scripts/browser-bridge/server.py:653-654`;
+      * anything outside `scripts/` — a literal in `nix/` is invisible.
+    Both known cases are named in `host_label.PEER_SSH`'s comment. The values
+    agree today; this is a duplication hazard, not a live defect.
+
+    On its FIRST run it found a copy nobody had listed:
     `scripts/session-analysis/espanso-usage.py:90`, a hardcoded
     `DEFAULT_REMOTE`. It is derived now.
     """
@@ -1112,6 +1225,14 @@ MUTATION_MATRIX = {
         "test_no_module_redeclares_a_peer_address_literal",
     "the ledger scan is wired to nothing / stops discriminating comments":
         "test_that_ledger_guard_can_actually_fire",
+    "a non-ASCII digit selector crashes out of match_kinds (exit 1)":
+        "test_a_non_ascii_digit_is_not_a_pid",
+    "an empty/bogus host scope answers UNMATCHED instead of raising":
+        "test_an_EMPTY_host_scope_RAISES_rather_than_answering_unmatched",
+    "host_label.py grows a third-party import (remote leg dies as unreachable)":
+        "test_host_label_stays_SHIPPABLE_over_the_wire",
+    "an unreadable host_label.py escapes read_host as a traceback (exit 1)":
+        "test_a_missing_host_label_source_is_a_leg_ERROR_not_a_traceback",
     # CLI
     "diagnostics printed to stdout":
         "test_stdout_carries_ONLY_the_label",

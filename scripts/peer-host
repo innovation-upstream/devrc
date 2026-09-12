@@ -371,6 +371,12 @@ def parse_leg_output(stdout: str, expected_label: str) -> dict:
     """The remote/local program's stdout -> `{status, records, …}`. PURE.
 
     Four outcomes, none of which collapse into "empty":
+    ⚠ LEADING noise is tolerated (the sentinel is SCANNED for, so a login banner
+    cannot hide a good answer); TRAILING noise is NOT — everything after the
+    sentinel line must parse as the JSON payload, or the leg reads `no_sentinel`.
+    That asymmetry is deliberate but it is not obvious, so it is written down
+    rather than left for the next reader to discover from a puzzling status.
+
       * no sentinel line          -> no_sentinel  (the command was swallowed)
       * sentinel, WRONG label     -> label_mismatch (we dialled another machine)
       * sentinel + payload error  -> error        (the registry itself failed)
@@ -433,7 +439,17 @@ def read_host(host: str, *, local_host: str, registry_dir: str,
                 "unreadable": 0, "reported_label": None, "dir": None,
                 "error": str(exc), "via": None}
     if host_label_source is None:
-        host_label_source = Path(_hl.__file__).read_text(encoding="utf-8")
+        # The docstring promises this never raises for a host problem; an
+        # unreadable `host_label.py` is a LOCAL problem, but letting it escape as
+        # a traceback still exits 1 — outside the documented code vocabulary. It
+        # becomes this leg's error instead, which is both classifiable and true.
+        try:
+            host_label_source = Path(_hl.__file__).read_text(encoding="utf-8")
+        except OSError as exc:
+            return {"status": READ_ERROR, "records": [], "stale_dropped": 0,
+                    "unreadable": 0, "reported_label": None, "dir": None,
+                    "error": "cannot read host_label source to ship: %s: %s"
+                             % (type(exc).__name__, exc), "via": target}
     program = remote_program(host_label_source)
     argv = ["ssh", *SSH_OPTS, target,
             "python3 - " + shlex.quote(registry_dir)]
@@ -527,7 +543,15 @@ def match_kinds(selector: str, record: dict) -> list:
 
     pid = record.get("pid")
     if isinstance(pid, int) and not isinstance(pid, bool):
-        if sel.isdigit() and int(sel) == pid:
+        # 🔴 `isascii()` IS LOAD-BEARING, TWICE, AND `isdecimal()` FIXES ONLY ONE
+        # HALF. `str.isdigit()` is True for non-decimal digits that `int()`
+        # refuses: `"²"` raised ValueError out of `match_kinds` and escaped as a
+        # traceback with **exit 1** — a code outside this tool's whole documented
+        # vocabulary, which a caller branching on the exit code cannot classify.
+        # And `"١٢٣"` (Arabic-Indic) is BOTH isdigit and isdecimal, and
+        # `int()` maps it to 123 — so a second spelling of a number silently
+        # resolved a peer. Only the ASCII test rejects both.
+        if sel.isascii() and sel.isdigit() and int(sel) == pid:
             kinds.append(KIND_PID)
 
     addr = record.get("tmux")
@@ -567,6 +591,19 @@ def lookup(selector: str, *, hosts=HOST_NAMES, local_host=None,
     """The whole answer, as data. The CLI is a thin renderer over this."""
     local_host = local_host or _hl.local_host_label()
     in_scope = tuple(h for h in HOST_NAMES if h in hosts)
+    # 🔴 AN EMPTY SCOPE MUST NOT PRODUCE AN ANSWER. `hosts` is membership-tested,
+    # so a string (`"all"`), a mis-cased label (`"Workbench"`) or `()` all yield
+    # NO hosts — and every downstream branch then reads "zero matches, nothing
+    # unsearched" and returns UNMATCHED (exit 3). That is the tool's strongest
+    # negative answer, the one a routing caller is entitled to trust, produced by
+    # a search that dialled nothing. Raising is the only safe reading: there is
+    # no host this could be about. Not reachable from the CLI (argparse `choices`
+    # guards `--host`), but `lookup()` is the documented API and this is the
+    # premise the whole module rests on.
+    if not in_scope:
+        raise ValueError(
+            "no known host in scope: %r selects none of %r — an empty scope "
+            "cannot produce an answer" % (hosts, HOST_NAMES))
 
     legs = {}
     for host in HOST_NAMES:

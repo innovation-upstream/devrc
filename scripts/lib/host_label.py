@@ -43,18 +43,31 @@ DEFAULT_LOCAL_HOST = "workbench"
 #: gateway's state as the laptop's. That is why the address belongs next to the
 #: label vocabulary it is meant to agree with, rather than being retyped per tool.
 #:
-#: 🔴 THE LEDGER OF READERS — every place these addresses are spelled, so a new
-#: one is a deliberate act rather than an accident:
+#: 🔴 THE LEDGER — AND ITS EXACT SCOPE, WHICH IS NARROWER THAN "EVERY SPELLING".
+#: This comment used to say "every place these addresses are spelled". That was
+#: FALSE when written, and an over-claiming ledger is worse than none: it is the
+#: thing the next reader trusts INSTEAD of looking.
 #:
-#:   * `scripts/peer-host`                        -> `ssh_target(host)`
-#:   * `scripts/lib/opencode_search.py:PEERS`     -> this tuple, by identity
-#:   * `scripts/session-manager:LAPTOP_SSH_TARGET`-> `ssh_target("laptop")`
+#: DERIVE from this table (were literals, now are not):
+#:   * `scripts/peer-host`                         -> `ssh_target(host)`
+#:   * `scripts/lib/opencode_search.py:PEERS`      -> this tuple, by identity
+#:   * `scripts/session-manager:LAPTOP_SSH_TARGET` -> `ssh_target("laptop")`
+#:   * `scripts/session-analysis/espanso-usage.py` -> `ssh_target("laptop")`
 #:
-#: All three DERIVE; none declares. `test_peer_host.py::
-#: test_no_module_redeclares_a_peer_address_literal` scans for a re-declared
-#: literal, so a fourth copy is caught rather than silently creating the
-#: disagreement this module exists to prevent. An address literal in a TEST is
-#: fine and expected — that is the pin, not a copy.
+#: 🔴 STILL SPELL THESE ADDRESSES INDEPENDENTLY, and are NOT covered by the guard:
+#:   * `scripts/lib/host-role.sh:32-35,47-48` — bare IPs in shell, composed into
+#:     `zach@…` at RUNTIME. It is live (sourced by `ship.sh` and `drift-check.sh`)
+#:     and `scripts/README.md` calls it "the ONE host-identity predicate" — so two
+#:     modules currently each claim to be the single home of these addresses. It
+#:     is shell and it answers a different question (which role am I, from a list
+#:     of interface addresses), so folding it in is a design change, not a rename.
+#:   * `scripts/browser-bridge/server.py:653-654` — bare IPs in `_HOST_IP_ORDER`.
+#:
+#: The values all AGREE today; this is a duplication hazard, not a live defect.
+#: `test_peer_host.py::test_no_module_redeclares_a_peer_address_literal` enforces
+#: exactly one thing — no `user@addr` STRING CONSTANT outside this file, under
+#: `scripts/`. It cannot see a runtime-composed target or a bare IP, and the two
+#: entries above are why that limit is written here rather than left implicit.
 PEER_SSH = (
     ("workbench", "10.42.0.30", "zach"),
     ("laptop", "10.42.0.100", "zach"),
