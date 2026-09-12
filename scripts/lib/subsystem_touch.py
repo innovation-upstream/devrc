@@ -3697,8 +3697,17 @@ def template_collision(
     An absent store root and an absent scope directory are a genuine PASS, not an
     unchecked: they are the first-entry case this flag exists for, and both are
     ordinary (`scope-absent` is the normal first run in every repo that is not the
-    infra repo). The claim is about THIS HOST's mirror either way — the store is
-    per-host and unreplicated, and no local read can speak for the pod.
+    infra repo). The claim is about THIS HOST's cache either way — the store is
+    read through a per-host cache, only as fresh as its last `cairn sync`, and no
+    local read can speak for the pod.
+
+    ⚠ This sentence read "the store is per-host and unreplicated" when it landed
+    (#1554), which contradicted its own next clause: if a pod holds the content,
+    the store is not unreplicated. Retracted 2026-09-11 — the hosted pod IS the
+    datastore and the hosts converge through it (measured: entry-files 232 -> 239
+    between two reads in one write-free session). The conclusion is unchanged and
+    is if anything better supported: a local read still cannot speak for the pod,
+    because it is bounded by the last sync.
     """
     store = Path(store_root)
     nref = normalize_ref(ref)
