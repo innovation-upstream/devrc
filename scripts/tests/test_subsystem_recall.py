@@ -6235,19 +6235,36 @@ class TestTheSearchReportCaveat:
 
 
 # =============================================================================
-# THE READER COVERS ONE HOST'S STORE, AND MUST SAY WHICH
+# THE READER COVERS ONE HOST'S CACHE OF THE STORE, AND MUST SAY WHICH
 # =============================================================================
 #
-# 🔴 SAME DEFECT AS THE WRITER'S, SAME MEASUREMENT (2026-08-27): the store under
-# `~/.claude/analyze-service-index/` is PER-HOST with no replication — workbench
-# 115 entries / 14 scopes, laptop 33 / 11, exactly ONE entry name in common
-# across the four scopes both machines have, seven scopes only on the laptop and
-# ten only on the workbench. `scope-absent` therefore reports one disk, and the
-# old wording ("the store has no `<scope>/` directory") stated it as the fleet's.
+# 🔴 SAME DEFECT AS THE WRITER'S: `scope-absent` reports ONE DISK, and the old
+# wording ("the store has no `<scope>/` directory") stated it as the fleet's.
+# Measured 2026-08-27, pre-cutover: workbench 115 entries / 14 scopes, laptop
+# 33 / 11, seven scopes only on the laptop and ten only on the workbench.
+#
+# 🔴 BUT THE *REASON* THESE GUARDS GIVE WAS RETRACTED 2026-09-11, AND THE
+# RETRACTION IS WHY HALF OF THEM WERE REWRITTEN RATHER THAN REBASELINED. The
+# guards used to pin the claim that the store is "PER-HOST and unreplicated", so
+# that an entry elsewhere is permanently invisible and "an absence below is an
+# absence HERE". That is FALSE: the Cairn cutover made a hosted pod
+# (`store.zacx.dev`) the datastore, and the local tree is a SYNCED READ-THROUGH
+# CACHE of it. Measured in one write-free session, between two `fetched … just
+# now` reads ~1h apart, the pod's snapshot moved entry-files 232 -> 239 —
+# content from the other machine demonstrably arrives.
+#
+# What survives is a FRESHNESS bound, not an ISOLATION one: the read is served
+# from a local cache, so it is only as complete as the last `cairn sync` on THIS
+# machine, and an entry written elsewhere but not yet synced here is invisible.
+# A guard whose NAME asserted the isolation premise was renamed, not just
+# rebaselined — a future reader takes a test name as a specification, and a test
+# called `…_CANNOT_see` that now asserts the opposite is worse than no test.
+# Upstream `ZacxDev/cairn` carries the matching wording as of `1e7aedf`.
 #
 # The guards pin WHOLE NORMALISED STRINGS: prose is walkable by rewording, and
-# the half that mattered — "no other host was consulted, and it may hold this" —
-# is exactly the half a keyword guard would let a reword delete.
+# the half that matters — "this read is bounded by THIS machine's last sync, and
+# the other machine may already hold it" — is exactly the half a keyword guard
+# would let a reword delete.
 #
 # 🔴 THE SEAM MOVED, AND THAT IS THE WHOLE POINT OF THE CONSOLIDATION. The host
 # used to be INJECTED at `subsystem_touch.this_host` — devrc's writer owned the
@@ -6263,9 +6280,12 @@ class TestTheSearchReportCaveat:
 
 FIXTURE_HOST = "fixture-host-0123456789abcdef0123456789abcdef"
 
-PER_HOST_CLAUSE = (
-    "the store is PER-HOST and unreplicated; this run read THIS machine's disk "
-    "and consulted no other"
+#: 🔴 TYPED BY HAND FROM THE PINNED CLIENT'S SOURCE, never derived by calling
+#: the code under test. The name changed with the claim: this is a statement
+#: about the CACHE, not about the store.
+PER_HOST_CACHE_CLAUSE = (
+    "the store is read through a PER-HOST CACHE, only as fresh as its last sync; "
+    "this run read THIS machine's disk and consulted no other"
 )
 
 
@@ -6290,9 +6310,9 @@ def pinned_host(monkeypatch):
     return FIXTURE_HOST
 
 
-class TestTheRecallCoversOneHostsStore:
+class TestTheRecallCoversOneHostsCacheOfTheStore:
 
-    EXPECTED_HOST_LINE = _norm(f"host: {FIXTURE_HOST} ({PER_HOST_CLAUSE})")
+    EXPECTED_HOST_LINE = _norm(f"host: {FIXTURE_HOST} ({PER_HOST_CACHE_CLAUSE})")
 
     EXPECTED_RECALL_ABSENT = _norm(
         f"NOTHING RECORDED YET ON THIS HOST — {FIXTURE_HOST}'s store has no "
@@ -6310,14 +6330,17 @@ class TestTheRecallCoversOneHostsStore:
     )
 
     EXPECTED_NOT_THE_FLEET = _norm(
-        f"NOT A FACT ABOUT THE FLEET — {PER_HOST_CLAUSE}. The other host keeps a "
-        f"DIFFERENT store, not a copy, and it may hold `never-indexed/`."
+        f"NOT A FACT ABOUT THE FLEET — {PER_HOST_CACHE_CLAUSE}. The other host "
+        f"syncs the SAME hosted store through its own cache, and may already hold "
+        f"`never-indexed/` where this one has not synced it yet."
     )
 
     EXPECTED_CAVEAT_CLAUSE = (
-        "This store is PER-HOST and unreplicated, so this window also CANNOT see "
-        "any scope or entry that exists only on the OTHER machine — nothing here "
-        "consulted it, and an absence below is an absence HERE."
+        "This window read a LOCAL CACHE of the hosted store, not the store "
+        "itself, so it is only as complete as the last `cairn sync` on THIS "
+        "machine: an entry written on the OTHER machine that has not synced here "
+        "yet is invisible, and an absence below is an absence AS OF THAT SYNC, "
+        "not a fact about the store."
     )
 
     def test_recall_scope_absent_is_qualified_to_this_host(
@@ -6325,19 +6348,27 @@ class TestTheRecallCoversOneHostsStore:
     ) -> None:
         """🔴 THE REGRESSION GUARD on the reader. `scope-absent` is the status
         `/resume` reports as an ordinary non-finding; stating it of "the store"
-        turns one machine's gap into a claim that nobody has ever recorded the
-        repo. Measured false 2026-08-27."""
+        turns one CACHE's gap into a claim that nobody has ever recorded the
+        repo. Measured false 2026-08-27.
+
+        The QUALIFICATION is what this pins, and it survived the 2026-09-11
+        retraction — what changed is what qualifies it. It is no longer "the
+        other machine keeps a different store"; it is "the other machine syncs
+        the SAME store and this cache has not caught up". Both make the bare
+        verdict unsafe to report as the fleet's; only the second is true."""
         report = rc.recall(store, "never-indexed")
         assert report.status == "scope-absent", "the fixture must reach the branch"
         lines = [_norm(ln) for ln in rc.render_text(report).splitlines()]
         assert self.EXPECTED_RECALL_ABSENT in lines, (
             "the recall `scope-absent` verdict is not the pinned sentence.\n"
             f"  expected: {self.EXPECTED_RECALL_ABSENT}\n"
-            "It must name THIS HOST; 'the store' names a thing that does not exist."
+            "It must name THIS HOST. A bare 'the store' names the HOSTED store, "
+            "which this run did not read — it read one cache of it."
         )
         assert self.EXPECTED_NOT_THE_FLEET in lines, (
-            "the recall `scope-absent` verdict no longer says no other host was "
-            "consulted and that the other machine may hold the scope.\n"
+            "the recall `scope-absent` verdict no longer says that this read was "
+            "bounded by THIS machine's last sync and that the other machine may "
+            "already hold the scope through its own cache of the same store.\n"
             f"  expected: {self.EXPECTED_NOT_THE_FLEET}"
         )
 
@@ -6392,21 +6423,52 @@ class TestTheRecallCoversOneHostsStore:
                 f"  got:      {following!r}"
             )
 
-    def test_the_caveat_names_the_other_machine_as_something_it_CANNOT_see(
+    def test_the_caveat_bounds_the_read_by_the_LAST_SYNC_not_by_isolation(
         self,
     ) -> None:
         """🔴 THE CAVEAT IS THE ONE BLOCK PRINTED ON EVERY STATUS, INCLUDING THE
         ONES THAT SURFACE ENTRIES. `scope-absent` is not the only place the
         boundary matters: a `recalled` run showing three entries is ALSO silent
-        about a fourth that lives on the other machine, and only the caveat
-        speaks on that path."""
+        about a fourth written on the other machine and not yet synced here, and
+        only the caveat speaks on that path.
+
+        🔴 THIS TEST WAS RENAMED, NOT REBASELINED — and the old name is the
+        reason. It read
+        `test_the_caveat_names_the_other_machine_as_something_it_CANNOT_see`,
+        and it pinned the sentence "This store is PER-HOST and unreplicated, so
+        this window also CANNOT see any scope or entry that exists only on the
+        OTHER machine … an absence below is an absence HERE." That is FALSE
+        post-cutover: the hosted pod is the datastore and the local tree is a
+        synced read-through cache of it, so the other machine's entries DO
+        arrive (measured 2026-09-11 — the pod's snapshot moved entry-files
+        232 -> 239 between two reads in one write-free session). A test name is
+        read as a specification, so leaving the name while inverting the body
+        would have gone on teaching the retracted claim from the summary line of
+        every green run. The TRUE bound is freshness: this read is only as
+        complete as the last `cairn sync` on THIS machine."""
         text = rc.caveat_text("example-scope/", frozenset())
         assert self.EXPECTED_CAVEAT_CLAUSE in text, (
-            "the reader's caveat no longer states the per-host boundary.\n"
+            "the reader's caveat no longer states the FRESHNESS bound.\n"
             f"  expected: {self.EXPECTED_CAVEAT_CLAUSE}\n"
-            "It lists what this window CANNOT see; the other host's store is on "
-            "that list and is the only item nothing else in the output mentions."
+            "It lists what this window CANNOT see; an unsynced entry from the "
+            "other machine is on that list and is the only item nothing else in "
+            "the output mentions. 🔴 Do NOT 'restore' the older, stronger "
+            "isolation wording ('a DIFFERENT store', 'an absence HERE') — it was "
+            "measured false, and it is a worse error than saying nothing."
         )
+        # 🔴 THE RETRACTED CLAIM MUST NOT COME BACK BY ANY SPELLING. Pinning the
+        # true sentence does not, on its own, stop a future edit from ALSO
+        # printing the isolation claim beside it; a caveat that says both is read
+        # as the stronger one.
+        for retracted in (
+            "PER-HOST and unreplicated",
+            "DIFFERENT store",
+            "an absence HERE",
+        ):
+            assert retracted not in text, (
+                f"the caveat printed the RETRACTED isolation claim {retracted!r}. "
+                "The store is hosted and shared; only the CACHE is per-host."
+            )
         assert "in THIS HOST's store" in text, (
             "the CANNOT-see list still says 'in this store', which reads as one "
             "store for the fleet."
