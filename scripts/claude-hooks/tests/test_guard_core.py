@@ -2542,6 +2542,15 @@ _KILL_MENTION_LEDGER = {
     # Prose about the event, not a call: that file executes no tmux kill.
     "scripts/tests/test_tmux_restore_trigger.py": "prose: why the service needs ConditionPathExists",
     "scripts/tests/test_waiting_windows.py": "prose: forbidden-verb list",
+    # Two handoff docs that landed on `main` unclassified, turning this guard
+    # RED for the whole repo. Both are prose in a write-up; neither file
+    # executes any tmux command at all.
+    "claudedocs/handoff-tmux-webapp.md":
+        "prose: incident write-up — a `tmux kill-window -t @58` that was READ "
+        "from a log, and a `tmux kill-session` recorded as BLOCKED by a guard",
+    "claudedocs/handoff-mention-system-repos.md":
+        "prose: a META-mention — it only quotes that the doc above 'landed "
+        "carrying `tmux kill-server` text', i.e. it is about this ledger",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is
@@ -2670,6 +2679,13 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         "scripts/claude-hooks/tests/test_guard_core.py",
         "scripts/session-write-harness/real_pane_check.py",  # a docstring line
         "scripts/tests/test_tmux_restore_trigger.py",  # a docstring line; see the ledger
+        # The same two handoff docs as the ledger above, for the same reason:
+        # prose in a write-up, in files that execute nothing. 🔴 This allowlist
+        # and `_KILL_MENTION_LEDGER` are SEPARATE and both had to be updated —
+        # a file classified in one is still an offender to the other, which is
+        # how `main` stayed red on TWO tests for one root cause.
+        "claudedocs/handoff-tmux-webapp.md",
+        "claudedocs/handoff-mention-system-repos.md",
     }
     seen_in_allowlisted, offenders = 0, []
     for rel in _tracked_files():
