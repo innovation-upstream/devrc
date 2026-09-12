@@ -18,6 +18,22 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+- ✅ **2026-09-12 — RANK 23 (a)+(b) MERGED: devrc #1583, squash `c1ecc830`.** Three sites that
+  quoted commands resolving only on the machine that printed them now name `cairn-validate`;
+  closing condition verified by content. **(c) stays open upstream in `ZacxDev/cairn`.** Claim
+  `cairn-oss-multi-instance-23` RELEASED. Ladder: round 0 → 1 → 2, **zero 🔴 in any round**; what
+  it caught was three FALSE CLAIMS ABOUT THE CODE, two of them in my own prose — a rationale that
+  did not hold, a remedy that could not run, and a guard cited that did not guard. Full record at
+  rank 23 below; the durable lesson is that the fix rounds, not the original change, were where
+  every finding lived.
+- 🔴 **STILL OPEN AFTER THIS ARC, none blocking, none owned:** rank 23(c) (upstream cairn PR);
+  the **class-level** gap rank 23 did not close — **21** absolute checkout paths across 9 skill
+  files, including four live `python3 /home/zach/workspace/devrc/...` invocations in
+  `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`, with no scanner gating them; rank 18(a)
+  (`nix/sessionVariables.nix:36`, which slice 3 provably did NOT close); rank 20 **half two** (the
+  CI leg has only ever been watched PASS — its red path is unproven); ranks 4, 8, 21; and the
+  `m_index_store` `sys.path` item. Rank 22 belongs to another session.
+
 - ✅ **2026-09-12 — RANK 3 SLICE 3 IS MERGED. `innovation-upstream/devrc` #1508, squash
   `44bd8b0e`.** The block this replaces said *"NOT MERGED, AND THE ONLY THING LEFT IS `main`'s
   OWN RED"*, named a held rebase `6205faec`, and said the claim was still HELD. **All three are
@@ -1386,8 +1402,19 @@ belongs to that arc's own session. via: measurement
     not devrc, so it needs an upstream PR.
     **Closing condition:** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 on
     `origin/main`, and an upstream PR for (c).
-    🔨 **(a) AND (b) BUILT 2026-09-12 — devrc PR (branch `fix/cairn-validate-spellings`). (c) is
-    NOT in it and stays open: it lives in `ZacxDev/cairn`.**
+    ✅ **(a) AND (b) MERGED 2026-09-12 — devrc #1583, squash `c1ecc830`. (c) is NOT in it and
+    stays OPEN: it lives in `ZacxDev/cairn` and needs an upstream PR.**
+    **Closing condition MET, verified by CONTENT at `origin/main`** (a squash makes
+    `merge-base --is-ancestor` false forever, so ancestry cannot answer this):
+    `grep -c 'subsystem_touch.py --validate' claude/skills/` → **0**; `validate_command` emits
+    `cairn-validate --store … --scope …`; the RECOVER remedy carries
+    `--flake ~/workspace/devrc --impure`; both new guards present.
+    ⚠ **This line read "🔨 BUILT" for the first hours after the merge** — the same
+    status-drift class this very PR existed to fix, reintroduced by the PR that fixed it.
+    Written down rather than quietly corrected: a doc edited in the same commit as the work
+    it describes cannot record that work's own merge, so the status line is stale by
+    construction until someone comes back for it. **Do not treat a merged handoff edit as
+    self-updating.**
     ⚠ **The line numbers in this item were STALE** — the two sites are `:135` and `:157`, not
     `:128`/`:150`. Found by grepping the string, not by opening the named line.
     - **(a)** both now spell `cairn-validate`. The `:157` site is the single-FILE form, so it
