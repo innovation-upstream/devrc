@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""One pill summarising ANOTHER host's whole bar, from a pulled snapshot.
+
+Reads `~/.cache/bar-remote/<host>.json` (written by `bar-remote-snapshot
+--pull`) and renders a single i3status-rust `custom` pill. Click it to open
+`remote-host-detail`, which shows every relayed block in full.
+
+WHY THIS IS ALWAYS VISIBLE, UNLIKE EVERY COUNT PILL ON THIS BAR
+---------------------------------------------------------------
+The count pills are hide-at-zero: measured-and-quiet renders as nothing. That
+is right for them, because they sit on the bar of the machine they describe --
+if the poller dies, EVERY pill goes `?` at once and the operator sees it.
+
+This pill describes a machine the operator is not looking at. Its quiet state
+and its "I have not heard from that host in an hour" state would both be
+invisible if it hid at zero, and the second one is exactly when you need to
+know. So it always renders: `wb ok` when the peer is current and quiet.
+
+🔴 THE VERDICTS ARE RELAYED, NOT RECOMPUTED. Every state below comes from the
+remote block's own `state`, produced by the remote bar's own command with its
+own `--red-above`. This file contains no threshold and must never grow one --
+that is what keeps the pill from disagreeing with the bar it mirrors. The only
+judgement here is the ROLLUP (worst state wins) and the ordering of what to
+show first when the text has to be truncated.
+
+GRAMMAR (the same one the rest of this bar speaks)
+--------------------------------------------------
+  wb ok              peer current, nothing alarming
+  wb 234!11 tlm 4    peer current, relaying its alarming pills verbatim
+  wb ok?             NOT a current measurement, nothing alarming last time
+  wb 234!11?         NOT current; the alarms it last reported are CARRIED
+  wb ?               never heard from this peer at all
+
+A trailing `?` means exactly what it means everywhere else on this bar: this is
+not a current reading. It does NOT mean "quiet".
+"""
+from __future__ import annotations
+
+import argparse
+import html
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Ranked worst-first. The rollup takes the max; the detail view sorts by it.
+_SEVERITY = {"Critical": 4, "Warning": 3, "Info": 2, "Good": 1, "Idle": 0}
+
+# Per-host identity colour, so "which machine is this" is answerable at a
+# glance without reading the label. Pango, which this bar already renders
+# (the scratchpad legend proved it end to end).
+_HOST_COLOURS = {
+    "workbench": "#fabd2f",   # gold
+    "laptop": "#83a598",      # blue
+}
+_HOST_COLOUR_FALLBACK = "#928374"
+
+#: Most relayed readings to show before collapsing the rest to `+N`. A constant,
+#: not a flag: it was a `--max-tokens` argument that nothing -- not nix, not any
+#: test -- ever passed.
+MAX_TOKENS = 3
+
+
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
+
+    Same shape as every other cache-backed block here -- see the long note in
+    `i3status-clawgate`. `dont_write_bytecode` keeps a `__pycache__` out of the
+    operator's ~/.config/i3status-rust/scripts.
+    """
+    sys.dont_write_bytecode = True
+    path = os.path.join(_HERE, "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 Deferred, never answered -- identical to the other blocks, and for the
+    # same measured reason: a bare load dies at import with EMPTY stdout, so the
+    # `?` fallback everyone documents is unreachable. None cannot be permissive,
+    # because it cannot answer at all; every use raises and `__main__` turns
+    # that into the VISIBLE `?` pill.
+    fresh = None
+
+
+def cache_path(host: str) -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "bar-remote", f"{host}.json")
+
+
+def load(host: str):
+    try:
+        with open(cache_path(host), "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def plain(text: str) -> str:
+    """A relayed pill's text as PLAIN characters.
+
+    Relayed text may already carry pango (the scratchpad legend is a row of
+    coloured spans). Passing it through would nest markup inside ours and let a
+    remote block's formatting decide how this pill renders; escaping it raw
+    would print literal `<span ...>` on the bar. So: strip tags, resolve
+    entities, and let the caller re-escape once for our own output.
+    """
+    return html.unescape(re.sub(r"<[^>]*>", "", text or "")).strip()
+
+
+def alarming(blocks: list) -> list:
+    """Relayed blocks that are not Idle, worst first, order-stable within a rank.
+
+    A block carrying an `error` counts as alarming even if it somehow reported
+    Idle -- "the gather could not run this block" is a fact about the peer the
+    operator should see, not one to smooth away.
+    """
+    out = [b for b in blocks
+           if isinstance(b, dict)
+           and (_SEVERITY.get(b.get("state", "Idle"), 0) > 0 or b.get("error"))]
+    out.sort(key=lambda b: -_SEVERITY.get(b.get("state", "Idle"), 0))
+    return out
+
+
+def rollup(blocks: list) -> str:
+    worst = "Idle"
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        state = b.get("state", "Idle")
+        if b.get("error") and _SEVERITY.get(state, 0) < _SEVERITY["Warning"]:
+            state = "Warning"
+        if _SEVERITY.get(state, 0) > _SEVERITY.get(worst, 0):
+            worst = state
+    return worst
+
+
+def render(payload, now: int, label: str, host: str,
+           max_tokens: int = 3) -> dict:
+    colour = _HOST_COLOURS.get(host, _HOST_COLOUR_FALLBACK)
+    tag = f'<span foreground="{colour}" weight="bold">{html.escape(label)}</span>'
+
+    if payload is None:
+        # Never heard from the peer. Warning, not Critical: nothing is known to
+        # be wrong over there -- what is wrong is that we cannot see it.
+        return {"text": f"{tag} ?", "state": "Warning"}
+
+    # `unmeasured` raises if the sibling failed to load; __main__ catches it.
+    stale = fresh.unmeasured(payload, now)
+    unreachable = payload.get("state") == "unreachable"
+
+    # On an unreachable pull the live body is empty, so read the preserved
+    # `last_good`. 🔴 This is the carry: an outage may make a reading less
+    # trusted, it may never make a recorded alarm quieter.
+    body = payload
+    if unreachable and isinstance(payload.get("last_good"), dict):
+        body = payload["last_good"]
+
+    blocks = body.get("blocks")
+    if not isinstance(blocks, list):
+        blocks = []
+
+    bad = alarming(blocks)
+    state = rollup(blocks)
+    not_current = stale or unreachable
+
+    if bad:
+        toks = []
+        for b in bad[:max_tokens]:
+            t = plain(b.get("text", ""))
+            if not t and b.get("error"):
+                t = f"{b.get('name', '?')}:{b['error']}"
+            if not t:
+                # 🔴 AN ALARMING BLOCK WITH NO TEXT STILL NEEDS A NAME.
+                # Without this the token is dropped and `more` renders a bare
+                # `+1` with nothing to be more THAN. Reachable in production:
+                # `i3status-airvpn`'s stale pill is literally
+                # `{"text": "", "state": "Warning"}`, so a stale airvpn source
+                # on the observed host painted the observer `wb +1`.
+                t = (b.get("name", "?").replace("i3status-", "")
+                     .replace("i3blocks-", "")) + "!"
+            toks.append(html.escape(t))
+        more = len(bad) - len(toks)
+        if more > 0:
+            toks.append(f"+{more}")
+        text = f"{tag} " + " ".join(toks)
+    elif not blocks:
+        # Current, reachable, and reporting NO blocks at all is not "ok" -- it
+        # means the gather asked nothing. Saying ok here is the silent-zero.
+        return {"text": f"{tag} ?{'?' if not_current else ''}", "state": "Warning"}
+    else:
+        text = f"{tag} ok"
+
+    if not_current:
+        text += "?"
+        # A `?` is at least a Warning: a reading we cannot refresh is never
+        # better news than a quiet one we can.
+        if _SEVERITY.get(state, 0) < _SEVERITY["Warning"]:
+            state = "Warning"
+
+    return {"text": text, "state": state}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--host", default="workbench",
+                    help="snapshot label to read (default: %(default)s)")
+    ap.add_argument("--label", default=None,
+                    help="short text shown on the pill (default: the host name)")
+    args = ap.parse_args(argv)
+
+    label = args.label or args.host
+    try:
+        payload = load(args.host)
+        out = render(payload, int(time.time()), label, args.host, MAX_TOKENS)
+    except Exception:
+        # 🔴 Built from literals so it cannot depend on whatever just failed --
+        # including the sibling module, `payload`, or `html`.
+        out = {"text": label + " ?", "state": "Warning"}
+    json.dump(out, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

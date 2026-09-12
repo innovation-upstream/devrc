@@ -244,9 +244,11 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"airvpn-menu", "keylog-spin-capture.sh", "main-status-watch.py",
+        {"airvpn-menu", "bar-remote-snapshot", "keylog-spin-capture.sh",
+         "main-status-watch.py",
          "mention-open.py",
-         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
+         "monitor-blackout.sh", "remote-host-detail", "run-tests.sh",
+         "sync-claude-permissions.py",
          "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
@@ -254,16 +256,42 @@ ACKNOWLEDGED_UNSTUBBED = {
         "`systemctl(read)` LINES IN THE LAUNCH LOG (`grep -c '^systemctl(read)'`) "
         "and reports them per target. It never invokes systemctl — it reads the "
         "record of calls the stub already classified. "
-        "sync-claude-permissions.py is a DIFFERENT case from the other four and "
+        "bar-remote-snapshot and remote-host-detail are re-justified rather than "
+        "absorbed, because they are different KINDS from each other. "
+        "bar-remote-snapshot is a VERB case -- it GENUINELY SPAWNS `systemctl --user is-active "
+        "bar-status-poll.timer` (local_poller_is_running) -- a read-only "
+        "is-active query, never a start/stop/restart, whose ONLY effect is to "
+        "decide whether to install a relayed cache. It is unstubbed because "
+        "nothing in scripts/tests reaches it: every test that exercises the "
+        "install monkeypatches `local_poller_is_running` itself, and the one "
+        "test of the probe forces the exception path. remote-host-detail is a "
+        "SCANNER FALSE POSITIVE -- its only occurrence of the name is inside a "
+        "user-facing help string telling the operator which timer to check. It "
+        "invokes nothing -- an UNREACHABILITY case, and specifically a scanner "
+        "false positive. Both are listed because this ledger is pinned TWO-WAY "
+        "and a file set that silently grows is exactly what it exists to catch. "
+        "🔴 KNOWN GAP, stated rather than left implicit: unlike syshealth, "
+        "main-status-watch.py and tmux-restore-observe.sh, bar-remote-snapshot "
+        "arrives WITHOUT an argv pin asserting its verb stays on "
+        "nolaunch.SYSTEMCTL_READ_VERBS. Its acknowledgement therefore rests on "
+        "a reachability claim nothing enforces: change `is-active` to `stop` and "
+        "the file set is unchanged, so this ledger stays green. See "
+        "test_bar_remote_snapshot.py for the pin that closes it. "
+        "sync-claude-permissions.py is acknowledged on its own ground and "
         "is re-justified rather than absorbed: its only occurrence of the name "
         "is the literal string `Bash(systemctl status:*)` inside its CURATED "
         "table of permission RULES, and the script spawns no subprocess at all — "
         "it imports none of subprocess / os.system / os.exec* / os.popen, which "
         "test_sync_claude_permissions.py asserts STRUCTURALLY so this "
         "justification cannot rot into a claim about a file that has changed. "
-        "syshealth (added 2026-09-04) is the ONLY one of the six that genuinely "
-        "INVOKES systemctl, and is acknowledged on a different ground from the "
-        "other five: not unreachability, but the VERB. Its single call site is "
+        "⚠ THE ENTRIES HERE ARE DESCRIBED BY KIND, NOT COUNTED. An earlier "
+        "version numbered them ('a THIRD case', 'the other four', 'the six') "
+        "and the chain was already incoherent once two more were added; a count "
+        "kept beside what it counts drifts on the next addition, so the form is "
+        "fixed rather than the number. TWO KINDS exist: acknowledged for "
+        "UNREACHABILITY (nothing in scripts/tests can reach the call), and "
+        "acknowledged for the VERB (the call is reached but is a READ). "
+        "syshealth (added 2026-09-04) is a VERB case. Its single call site is "
         "`systemctl --user list-units --state=failed --no-legend --plain "
         "--no-pager`, and `list-units` is on nolaunch.SYSTEMCTL_READ_VERBS, so "
         "the verb-splitting stub PASSES IT THROUGH as a read rather than "
@@ -391,7 +419,7 @@ ACKNOWLEDGED_UNSTUBBED = {
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "i3status-scratchpads",
          "keylog-spin-capture.sh",
-         "mention-open.py",
+         "main-status-watch.py", "mention-open.py",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
@@ -454,6 +482,29 @@ ACKNOWLEDGED_UNSTUBBED = {
         "set. Both controls watched: clean tree passes, an injected "
         "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
         "test's own message. "
+        "main-status-watch.py (added 2026-09-11 with the shared-predicate "
+        "module scripts/lib/ci_status.py) is the same PROSE-MENTION shape and "
+        "is re-justified, not reworded. Its SINGLE occurrence is one clause of "
+        "a comment on the import block, explaining that the systemd unit runs "
+        "this file straight out of the CHECKOUT (ExecStart names "
+        "%h/workspace/devrc/scripts/main-status-watch.py), so a `git pull` "
+        "delivers BOTH files and no switch is involved — which is the whole "
+        "reason importing a sibling module is safe here rather than a new "
+        "deploy dependency. Deleting the word would delete the reason the "
+        "import is safe. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard: "
+        "test_main_status_watch.py::test_main_status_watch_SPAWNS_these_argv0_"
+        "AND_NOTHING_ELSE walks the AST and asserts the spawn argv[0] set is "
+        "exactly {git, <computed>, <not-a-list>}, grows-or-shrinks — and its "
+        "companion test_home_manager_is_MENTIONED_but_never_SPAWNED asserts "
+        "BOTH halves: the mention still EXISTS (or this row has outlived the "
+        "sentence it describes) and the name reaches NO executable line, "
+        "comments and docstrings stripped by AST. The two opaque argv[0] "
+        "entries are named rather than waved at: <computed> is [gh, 'api', "
+        "path] behind the MAIN_STATUS_WATCH_GH stub seam, and <not-a-list> is "
+        "trigger_deadman's `cmd`, whose production literal is pinned exactly — "
+        "and refused a --force — by "
+        "test_the_production_trigger_is_systemctl_start_main_green_check. "
         "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
         "and carries the STRONGEST form of the justification: the other three "
         "merely lack a call site, whereas this file has no executable "

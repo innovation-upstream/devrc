@@ -292,6 +292,7 @@ from subsystem_resolver import (  # noqa: E402
     JournalBullet,
     MalformedEntry,
     MalformedEntryError,
+    KINDS,
     ResolverError,
     SubsystemEntry,
     SubsystemIndex,
@@ -309,6 +310,7 @@ from subsystem_resolver import (  # noqa: E402
     path_refs,
     resolve_ref_tiered,
     scan_headings,
+    split_kind,
 )
 
 # 🔴 ONE RULE, ONE PLACE — "what is this repo's mainline?". Same `sys.path`
@@ -3623,6 +3625,144 @@ def new_entry_template(slug: str, scope: str, *, today: str, created_by: str) ->
     )
 
 
+# --- `--template` over an ENTRY THAT ALREADY EXISTS -----------------------------
+#
+# 🔴 THE FLAG PRINTS A FIRST-EVER-FILE BODY AND SAID NOTHING WHEN ONE EXISTED.
+# `--template <slug>` emitted the pristine template and exited **0** whether or
+# not `<scope>/<slug>.md` was already on disk carrying a curated history, and the
+# whole protocol downstream of it is "write this body to that address". So the
+# two-command demonstration is: create an entry with an `OPEN:` bullet, re-run
+# `--template` for the same slug, write what it prints — and the bullet is gone,
+# with every exit code in the sequence 0.
+#
+# ⚠ IT NEEDS NO RACE. The audit that found this framed it as two concurrent
+# writers; that framing is wrong and re-deriving it costs a harness nobody needs.
+# A single writer reproduces it in two commands.
+#
+# The check mirrors `resolve_ref_tiered`'s FILENAME tier by NAME rather than by
+# parsing, on purpose: a malformed entry file is exactly the one a writer is most
+# likely to "fix" by re-templating, and a parse-based check would drop it from the
+# index and report the slug free. The ALIAS tier is checked too, but only when the
+# index loads — an alias lives inside the file's front matter and there is no way
+# to read it without parsing.
+TEMPLATE_EXISTS_EXIT = 2
+"""Exit code for the refusal. **2, not a new code.** `--template`'s other refusal
+(a missing `--writer`) already exits 2 at the same call site, 3 is spoken for by
+"the store is broken", and `claude/skills/subsystem-index/SKILL.md` branches on
+`non-zero ⇒ print the line and write NOTHING` — which is the correct handling
+here. A fourth code would need every consumer to learn it before it changed any
+behaviour."""
+
+
+def _filename_tier_collisions(scope_dir: Path, nref: str) -> tuple[str, ...]:
+    """Filenames in `scope_dir` that `resolve_ref_tiered`'s tier 1 would match.
+
+    Same rule, one tier, no parsing: a bare ref matches `<slug>.md` **and** every
+    `<slug>.<kind>.md`; a kind-qualified ref matches only its own qualified file.
+    `README.md` is skipped — it is the scope's policy sheet, never an entry, the
+    same exclusion `load_index` makes.
+
+    🔴 `iterdir`, NEVER `glob`. `Path.glob` SWALLOWS an `OSError` from the
+    directory walk and yields nothing, so an unreadable scope directory would
+    report every slug free — an empty result standing in for "I could not look",
+    which is the one answer this function must never give. `iterdir` raises, and
+    the caller turns that into a named `unchecked` reason.
+    """
+    slug, kind = split_kind(nref)
+    hits: list[str] = []
+    for path in sorted(p for p in scope_dir.iterdir() if p.suffix == ".md"):
+        if path.name == "README.md":
+            continue
+        fslug, fkind = split_kind(normalize_ref(path.stem))
+        if kind is not None:
+            matched = fslug == slug and fkind == kind
+        else:
+            matched = fslug == nref
+        if matched:
+            hits.append(path.name)
+    return tuple(hits)
+
+
+def template_collision(
+    store_root: str | Path, scope: str, ref: str
+) -> tuple[str | None, str | None]:
+    """`(refusal, unchecked_reason)` — at most one is not None; both None is a pass.
+
+    A refusal names the file(s) that already exist and what writing the template
+    over one of them would destroy. `unchecked_reason` is the third state and is
+    NOT folded into the pass: a store that could not be read cannot say a slug is
+    free, and an empty result that cannot distinguish "no entry" from "no read"
+    is the failure `claude/RULES.md` names. READ-ONLY.
+
+    An absent store root and an absent scope directory are a genuine PASS, not an
+    unchecked: they are the first-entry case this flag exists for, and both are
+    ordinary (`scope-absent` is the normal first run in every repo that is not the
+    infra repo). The claim is about THIS HOST's mirror either way — the store is
+    per-host and unreplicated, and no local read can speak for the pod.
+    """
+    store = Path(store_root)
+    nref = normalize_ref(ref)
+    scope_dir = store / normalize_ref(scope)
+    if not scope_dir.is_dir():
+        return None, None
+
+    try:
+        by_filename = _filename_tier_collisions(scope_dir, nref)
+    except OSError as exc:
+        return None, (
+            f"{scope_dir} could not be listed ({type(exc).__name__}: {exc}), so whether "
+            f"`{nref}` already has an entry is UNKNOWN — not 'it has none'. ⚠ This is "
+            f"the branch `Path.glob` could not reach: glob SWALLOWS a permission error "
+            f"and yields nothing, which is indistinguishable from an empty directory"
+        )
+    if by_filename:
+        return _template_refusal(scope, nref, by_filename, "filename"), None
+
+    # The alias tier needs the front matter, so it is the half that can fail to
+    # run. `COLLECT` keeps one malformed entry from taking the whole scope down —
+    # and a malformed entry cannot carry a usable alias anyway, while its
+    # FILENAME was already checked above without parsing anything.
+    try:
+        index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)
+        entry, tier = resolve_ref_tiered(nref, index, scope)
+    except AmbiguousRefError as exc:
+        return (
+            f"`{nref}` is already AMBIGUOUS in scope `{scope}` ({exc}) — a third file "
+            f"cannot be the fix. Resolve the existing candidates first."
+        ), None
+    except (ResolverError, OSError) as exc:
+        # 🔴 `UnknownScopeError` lands here TOO, and reporting it as unchecked is
+        # deliberate. `load_index` REGISTERS an existing scope dir even when it
+        # holds no entries, and this function has already returned for a scope
+        # dir that does not exist — so the raise means the loader and the
+        # filesystem disagree about which scopes exist, which is precisely a
+        # state that must not be reported as "the slug is free".
+        return None, (
+            f"the alias tier was not checked: the store under {store} would not load "
+            f"({type(exc).__name__}: {exc}). The filename tier found no `{nref}` entry, "
+            f"which is a claim about FILENAMES only"
+        )
+    if entry is not None:
+        return _template_refusal(scope, nref, (entry.filename,), tier or "alias"), None
+    return None, None
+
+
+def _template_refusal(
+    scope: str, nref: str, filenames: tuple[str, ...], tier: str
+) -> str:
+    """One wording, one place — the CLI prints it and every test reads it here."""
+    named = ", ".join(f"`{scope}/{name}`" for name in filenames)
+    return (
+        f"--template refuses: {named} already exists ({tier} tier), so `{nref}` is not "
+        f"a new entry. --template prints the FIRST-EVER-file body — identity front "
+        f"matter plus placeholder sections — and writing it to that address DESTROYS "
+        f"every dated bullet the entry carries, `OPEN:` markers included, with nothing "
+        f"in the output saying so. To add to that entry append a bullet; to change it, "
+        f"read the body back and `cairn put` the whole of it. Re-run --template only "
+        f"with a slug that has no entry."
+    )
+
+
 # --- Rendering -----------------------------------------------------------------
 # 🔴 THE ROUTE OUT OF A DEAD END. A window that resolved nothing is a fact about
 # THE WINDOW READ, never about the session — and the four windows are blind in
@@ -5843,19 +5983,57 @@ def _carries_marker(line: str) -> bool:
 
 
 def validate_command(store_root: str | Path, scope: str) -> str:
-    """The literal, runnable `--validate` invocation for one scope. ONE spelling.
+    """The literal, runnable write-protocol check for one scope. ONE spelling.
 
     🔴 IT IS BUILT, NEVER TYPED INTO PROSE. Every place that tells a caller how to
     recover emits this, so a flag rename cannot leave a skill or an error message
     quoting a command that no longer parses — the exact failure a "just run
-    --validate" sentence has no defence against. `Path(__file__)` rather than a
-    hardcoded path so a copy of this module names ITSELF and the command stays
-    true wherever it is running from.
+    --validate" sentence has no defence against.
+
+    🔴 IT NAMES `cairn-validate`, NOT `python3 <this file>` — AND THE REASON IS
+    THE RUNNING COPY, NOT THE MACHINE. ⚠ An earlier draft of this docstring (and
+    of the commit and PR that introduced it) said `Path(__file__)` "makes the
+    command true for the machine that PRINTED it and false for anyone who pastes
+    it anywhere else". **That was wrong twice over and is RETRACTED**, by round 0
+    of this PR's own audit: the old spelling emitted an ABSOLUTE path, so cwd was
+    never the failure; and `nix/home.nix` deploys the launcher as an
+    `mkOutOfStoreSymlink` into `${home}/workspace/devrc`, so any host on which
+    `cairn-validate` resolves AT ALL necessarily has this checkout at that same
+    absolute path — the old command would have worked there too. If anything the
+    new spelling's precondition is STRONGER: it needs a home-manager switch and a
+    deployed pin, where the old one needed only python.
+
+    The real defect, MEASURED: `Path(__file__).resolve()` names the RUNNING COPY.
+    Run out of a throwaway worktree — which is this repo's standing default for
+    any file-modifying agent — it emitted
+    `python3 /tmp/wt-<topic>/scripts/lib/subsystem_touch.py …`, a path that is
+    about to be `worktree remove`d. The recovery command went stale the moment the
+    session that printed it finished. `cairn-validate` is a bare command on
+    `home.sessionPath` and is the spelling the launcher's own docstring declares
+    as its interface. Rank 23(b) of
+    `claudedocs/handoff-cairn-oss-multi-instance.md`.
+
+    🔴 `--store` IS EMITTED EXPLICITLY: it pins the command to the store THIS
+    refusal came from, so it cannot report a DIFFERENT store clean — the failure
+    `malformed_refusal` exists to prevent, and the one
+    `test_a_reject_in_ANOTHER_scope_gets_a_command_for_THAT_scope` guards.
+    ⚠ **But it is not the free choice an earlier draft implied, and the trade is
+    real.** `store` here is `build_report`'s argument, which in the ordinary path
+    is `args.store` — whose default is `DEFAULT_STORE_ROOT`, the FROZEN
+    pre-cutover mirror, NOT the synced cache the launcher would otherwise pick
+    (measured: mirror 161 entries, cache 244). The mandated invocations in
+    `claude/skills/subsystem-index/SKILL.md` pass no `--store`, so this emits a
+    command pointing at the frozen mirror. That is FAITHFUL — the malformed file
+    really is the one that was read — but it inherits a pre-existing question
+    this function does not answer and must not be read as settling: why does the
+    writer default to the frozen mirror at all? Do not "tidy" this by dropping
+    `--store`; that trades fidelity for freshness silently.
+
+    `--validate` is NOT spelled here: the launcher prepends it with no value,
+    which is the check-every-entry form. That seam is pinned BEHAVIOURALLY by
+    `scripts/tests/test_cairn_flake_pin.py`, which runs the real launcher.
     """
-    return (
-        f"python3 {Path(__file__).resolve()} --store {store_root} "
-        f"--scope {normalize_ref(scope)} --validate"
-    )
+    return f"cairn-validate --store {store_root} --scope {normalize_ref(scope)}"
 
 
 def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryError) -> str:
@@ -5939,6 +6117,46 @@ def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryErr
     affected += sorted({m.scope for m in theirs})
     lines.append("  RECOVER — fix the file(s) named above, then re-run this probe. Check with:")
     lines += [f"    {validate_command(store, s)}" for s in affected]
+    # 🔴 NAME THE REMEDY FOR THE COMMAND ITSELF FAILING. The whole point of this
+    # message is that a refusal must not be a dead end, and moving to a bare
+    # PATH-resolved command introduced one it did not have before: on a checkout
+    # whose host has not `home-manager switch`ed since the launcher was added,
+    # the line above exits 127 `command not found` and says nothing further. The
+    # sibling failure — the pin undeployed — is already exemplary, because
+    # `cairn_pin.ensure()` names both resolution routes and the fix; this closes
+    # the one that reaches the operator as a bare shell error instead.
+    # 🔴 AND IT SPELLS NO FLAG AND NO CHECKOUT PATH. A first draft offered "or run
+    # the writer directly with `python3 <devrc>/scripts/lib/subsystem_touch.py …
+    # --validate`" as a fallback. That re-introduced the running-copy spelling
+    # this function's own RECOVER command just moved away from, so it was
+    # withdrawn. ⚠ Scoped deliberately to THIS emission: the module still emits
+    # `python3 {SELF_PATH} --template …` elsewhere and two tests REQUIRE it, so
+    # "the spelling this change removes" is true of the RECOVER command and false
+    # of the file. That wider cleanup is a separate ranked item. ⚠ The withdrawal was RIGHT and the reason I first gave for it was
+    # WRONG: I wrote that `test_the_command_is_BUILT_not_typed` forbids it. It
+    # does not — that test asserts the flag as a QUOTED ARGUMENT TOKEN in the
+    # source, not the flag inside a message string, and round 2 of this PR's
+    # audit spliced the draft back in and watched the assertion PASS. (This
+    # comment cannot quote that token to show you: the guard reads THIS function's
+    # source, so spelling it here reds the suite — measured.)
+    # A comment claiming a guard that does not exist is worse than no comment, so
+    # the guard below was WIDENED to actually forbid it rather than the sentence
+    # being softened: `test_the_refusal_NAMES_NO_running_copy_path`.
+    #
+    # 🔴 THE REMEDY IS SPELLED EXACTLY AS `cairn_pin.ensure()` SPELLS IT. A bare
+    # `home-manager switch` is not this repo's invocation — every runnable
+    # spelling in the tree carries `--flake … --impure`, and without them the
+    # evaluation cannot succeed (`nix/home.nix` takes a required `cairnPackage`
+    # with no default). And it must not say "this checkout": the launcher is an
+    # `mkOutOfStoreSymlink` to a HARDCODED `~/workspace/devrc`, so which tree you
+    # switch changes nothing — and the tree this message is printed from is
+    # typically a throwaway worktree about to be removed, which is the very
+    # deixis rank 23(b) exists to retire.
+    lines.append(
+        "  If that exits 127 (`cairn-validate: command not found`), this host has not "
+        "deployed the launcher yet — `home-manager switch --flake ~/workspace/devrc "
+        "--impure`, then re-run it."
+    )
     return "\n".join(lines)
 
 
@@ -6528,6 +6746,28 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            # 🔴 REFUSE OVER AN EXISTING ENTRY. Reached only once `--writer` is
+            # satisfied, which is why it needs its own test: the refusal above
+            # short-circuits it, so a mutation that guts this branch survives any
+            # run that forgot the writer.
+            collision, unchecked = template_collision(
+                args.store, scope_of(), args.template
+            )
+            if collision is not None:
+                print(f"subsystem-touch: {collision}", file=sys.stderr)
+                return TEMPLATE_EXISTS_EXIT
+            if unchecked is not None:
+                # NOT a refusal: the first-entry case must still work on a host
+                # whose store is unreadable. But it is not silence either — a
+                # template printed without the check having run is a different
+                # artefact from one printed after a clean check, and only this
+                # line tells them apart.
+                print(
+                    f"subsystem-touch: ⚠ COULD NOT CHECK whether this slug already has "
+                    f"an entry — {unchecked}. The template below is printed anyway; "
+                    f"confirm the address is empty before writing it.",
+                    file=sys.stderr,
+                )
             print(
                 new_entry_template(
                     normalize_ref(args.template),
