@@ -82,9 +82,36 @@
       system = "x86_64-linux";
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
       # build without relying on an ambient NIXPKGS_ALLOW_UNFREE / --impure.
+      # ---------------------------------------------------------------------
+      # 🔴 THE OVERLAY EXISTS SO ONE PACKAGE IS SPELLED `pkgs.nvim-octo`, AND
+      # THAT SPELLING IS LOAD-BEARING RATHER THAN COSMETIC.
+      #
+      # `nvim-octo` is consumed in two places: `nix/pkgs/tools/default.nix`
+      # (so the operator has it on PATH) and — the one that matters — the hint
+      # wrapper's `lib.makeBinPath` in `nix/programs/alacritty/default.nix`.
+      # That list is pinned against `mention-open.py`'s own syntax tree by
+      # `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_every_
+      # executable_the_handler_spawns`, which reads the block TEXTUALLY and
+      # matches `pkgs\.[A-Za-z0-9_-]+`. A local `let`-bound derivation is not
+      # spelled that way, so it would be INVISIBLE to the reader: the wrapper
+      # would look like it pins nothing for `nvim-octo`, and the seam that test
+      # exists to hold — "everything the handler spawns is on the wrapper's
+      # PATH" — would quietly stop covering the review TUI.
+      #
+      # So the package is put into the package set instead of being threaded as
+      # an argument. `callPackage` is not used: the derivation takes `pkgs`
+      # whole (it reaches `pkgs.vimPlugins`, `pkgs.neovim` and
+      # `pkgs.writeShellApplication`), so it is called with `final` directly —
+      # which also means a later overlay can still override it.
+      # ---------------------------------------------------------------------
+      nvimOctoOverlay = final: _prev: {
+        nvim-octo = import ./nix/pkgs/tools/nvim-octo { pkgs = final; };
+      };
+
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
+        overlays = [ nvimOctoOverlay ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the

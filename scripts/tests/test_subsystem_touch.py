@@ -6582,6 +6582,350 @@ def _colliding_blob_pair(bound: int = 20000) -> tuple[bytes, bytes, str]:
     )
 
 
+# -----------------------------------------------------------------------------
+# The SHORT-SHA fixture precondition — devrc#432.
+#
+# 🔴 THE DEFECT THIS CLOSES, because the fix is not obvious from the code it
+# touches. Three tests below feed a THREE-character prefix on purpose: 3 is
+# BELOW `COMMIT_SHA_MIN_CHARS`, which is the entire point of the guard they
+# exercise, so "use more characters" is NOT an available remedy — it would
+# delete the coverage.
+#
+# But a 3-hex prefix has only 4096 values and the fixture repo holds EIGHT
+# objects, so ~1 run in 585 drew a HEAD prefix that named two of them. git then
+# raised `CommitAmbiguousError`, the mutant died of the WRONG guard, and the
+# assertion under test NEVER RAN.
+#
+# THE RATE, AT THE SCOPE IT WAS ACTUALLY MEASURED: 7001 hits in a window of
+# 4,096,000 CONSECUTIVE commit timestamps = 0.1709%. The timestamp is the only
+# thing that moves the sha here — content, identity and message are all fixed —
+# so enumerating timestamps enumerates the randomness rather than sampling the
+# test. ⚠ But the WINDOW is still a sample of all timestamps: the analytic value
+# is 7/4096 = 0.17090% (7 sibling objects over 4096 prefixes), the window's
+# expectation is 7000 and σ ≈ 84, so 7001 sits about 0.01σ away. That is
+# CONSISTENT WITH the analytic value and is not a confirmation of it to four
+# digits — re-run the window and expect a number near 7000, not 7001. The object
+# model behind the enumeration was validated object-for-object against real git
+# (2.55.0) before any of it was believed.
+#
+# It reddened PRs whose diffs could not reach this file. `claude/RULES.md`: "A
+# flaky test is also fixable — remove the timing dependency rather than
+# re-running."
+#
+# THE REMEDY IS BOTH HALVES, deliberately, because neither alone is enough:
+#   * RE-MINT so an ambiguous draw is CORRECTED rather than merely reported — a
+#     precondition alone would convert a 0.17% silent flake into a 0.17% loud
+#     one, which still reddens CI for changes that cannot reach it;
+#   * ASSERT THE PRECONDITION so a draw that re-minting somehow failed to fix
+#     can never masquerade as the guard passing or failing. Re-minting alone
+#     leaves a rare draw silently changing what the test proves.
+# -----------------------------------------------------------------------------
+
+#: How many AMENDS `_remint_until_short_sha_is_UNIQUE` may make. It checks
+#: `_SHORT_SHA_REMINTS + 1` draws — the initial one plus the result of every
+#: amend — and each is an independent ~1-in-585 draw, so the search's own
+#: failure probability is under 1e-60: orders of magnitude below anything else
+#: that can fail this suite. A bound on a search, not a retry-until-green, and
+#: exhausting it RAISES rather than returning something unchecked.
+_SHORT_SHA_REMINTS = 24
+
+
+def _object_names(repo: Path) -> list[str]:
+    """Every object name in `repo`'s database, loose and packed. READ-ONLY.
+
+    🔴 DELIBERATELY NOT `rev-parse --disambiguate`: that is the very call the
+    module under test makes, and `claude/RULES.md` — "a control that SHARES the
+    step you doubt is a second sample of the same unknown, not a control". It is
+    also documented to require at least 4 hex digits, and the prefix this
+    precondition has to inspect is THREE. `test_the_two_object_oracles_AGREE`
+    pins the two readings against each other so this one cannot go silently
+    narrower than the one production uses.
+    """
+    return _run_git(
+        repo, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"
+    ).split()
+
+
+def _objects_sharing_prefix(repo: Path, prefix: str) -> list[str]:
+    """Every object in `repo` whose name starts with `prefix`, at ANY length."""
+    p = prefix.lower()
+    return [o for o in _object_names(repo) if o.startswith(p)]
+
+
+def _blob_colliding_with(prefix: str, bound: int = 400_000) -> bytes:
+    """Bytes whose blob sha starts with `prefix`.
+
+    Deterministic for a given prefix — sha1 over fixed bytes is fixed forever —
+    so this manufactures the 1-in-585 draw ON DEMAND rather than waiting for it.
+    A 3-hex target needs ~4096 candidates on average; the bound leaves a miss
+    probability around e^-98.
+    """
+    p = prefix.lower()
+    for i in range(bound):
+        c = b"short-sha-collision-fixture-%d\n" % i
+        if _blob_sha(c).startswith(p):
+            return c
+    raise AssertionError(  # pragma: no cover - the search is deterministic
+        f"no blob sha starting with {prefix!r} within {bound} candidates, so the "
+        f"ambiguity this fixture exists to FORCE was never created and every "
+        f"assertion built on it would be vacuous."
+    )
+
+
+def _write_object_colliding_with(repo: Path, prefix: str) -> str:
+    """Put a loose object into `repo` whose name starts with `prefix`.
+
+    Written with `hash-object -w`, so it joins the object database WITHOUT
+    joining any commit — the fixture's history, trees and diffs are untouched
+    and only the ambiguity changes.
+    """
+    _write(repo, "collision-scratch.txt", _blob_colliding_with(prefix).decode())
+    return _run_git(repo, "hash-object", "-w", "--", "collision-scratch.txt").strip()
+
+
+def _remint_until_short_sha_is_UNIQUE(
+    repo: Path, sha: str, *, chars: int = 3, attempts: int = _SHORT_SHA_REMINTS
+) -> str:
+    """Amend HEAD until its `chars`-hex prefix names exactly ONE object, or RAISE.
+
+    🔴 IT CANNOT RETURN AN AMBIGUOUS SHA — that is the entire contract, and it is
+    why there is no separate precondition helper beside it. A function whose one
+    job is to GUARANTEE a property must not own a path that returns without it,
+    and the earlier shape had exactly that: it fell through to a silent
+    `return sha` on exhaustion, with six call sites not asserting afterwards.
+    Collapsing the assert INTO the search is what makes the guarantee
+    unforgettable rather than merely available.
+
+    🔴 `attempts` bounds the AMENDS; `attempts + 1` DRAWS are checked — the
+    initial one, plus the result of every amend, THE LAST ONE INCLUDED. A loop
+    that amends and then returns without re-checking verifies at most `attempts`
+    draws and hands back the final one unexamined; that one unchecked draw is
+    precisely the hole the separate precondition call used to cover, so removing
+    the call without adding the post-loop check would have LOST a property while
+    looking like a simplification.
+
+    Amending rewrites the COMMIT object only: the tree and the parent are
+    carried over untouched, so the commit's DIFF — the thing every caller here
+    asserts on — cannot move.
+    """
+    for i in range(attempts):
+        if len(_objects_sharing_prefix(repo, sha[:chars])) == 1:
+            return sha
+        _run_git(repo, "commit", "--amend", "-m", f"w (re-mint {i})")
+        sha = _run_git(repo, "rev-parse", "HEAD").strip()
+    # 🔴 THE LAST DRAW, CHECKED. See the second paragraph above: without this the
+    # final amend's result is returned unexamined and the contract is false for
+    # one draw in `attempts + 1`. Pinned by
+    # `test_the_LAST_draw_is_checked_and_the_amends_are_BOUNDED`.
+    sharing = _objects_sharing_prefix(repo, sha[:chars])
+    if len(sharing) == 1:
+        return sha
+    raise AssertionError(
+        f"FIXTURE PRECONDITION: short sha is AMBIGUOUS after {attempts} re-mint(s): "
+        f"{sha[:chars]!r} names {len(sharing)} object(s) in {repo} "
+        f"({', '.join(sharing) or 'none'}). A test feeding that prefix would die of "
+        f"`CommitAmbiguousError` BEFORE reaching the guard it exists to exercise, so "
+        f"a green run would prove nothing and a red one would name the wrong guard. "
+        f"Do NOT lengthen the prefix — it is 3 precisely because 3 is below "
+        f"`COMMIT_SHA_MIN_CHARS`."
+    )
+
+
+def _repo_with_unique_short_sha(
+    tmp_path: Path, *rel: str, chars: int = 3
+) -> tuple[Path, str]:
+    """A fixture repo plus a HEAD whose `chars`-hex prefix is UNAMBIGUOUS in it.
+
+    The one construction every short-prefix test in this file goes through —
+    `claude/RULES.md` "one rule, one place": the same latent ambiguity sat
+    open-coded at three sites, and only one of them had ever been seen to fire.
+
+    There is no precondition call after the re-mint because there is nothing
+    left to check: `_remint_until_short_sha_is_UNIQUE` raises rather than
+    returning an ambiguous sha, so reaching this `return` IS the guarantee.
+    """
+    repo = _init_repo(tmp_path, SCOPE)
+    sha = _commit(repo, *rel)
+    return repo, _remint_until_short_sha_is_UNIQUE(repo, sha, chars=chars)
+
+
+class TestShortShaFixturePrecondition:
+    """devrc#432 — the 0.17% flake that reddened PRs which could not reach it.
+
+    🔴 EVERY TEST HERE IS DETERMINISTIC. The ambiguity is MANUFACTURED with a
+    brute-forced colliding blob rather than waited for, so the reproduction does
+    not depend on a 1-in-585 draw and neither does the proof that the remedy
+    removes it.
+    """
+
+    def test_the_COLLISION_fixture_really_DOES_collide(self, tmp_path: Path) -> None:
+        """🔴 POSITIVE CONTROL on the instrument. `_objects_sharing_prefix`
+        returning a reassuring count is indistinguishable from a reader wired to
+        nothing, so it is shown to MOVE — by exactly one — when a colliding
+        object is added to the same repo under the same prefix.
+
+        🔴 DELIBERATELY NO `_remint_...` CALL, and asserted as a DELTA rather
+        than against absolute values. Both choices exist so a broken ORACLE dies
+        HERE, on this test's own assertion. Calling the re-mint first would make
+        a broken oracle raise before the control ever ran, and the mutant would
+        then be killed by the raise — a guard that kills everything distinguishes
+        nothing. The delta is also what removes this test's OWN residual 1-in-585
+        dependency: it holds whether or not the prefix already collided."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        before = _objects_sharing_prefix(repo, sha[:3])
+        assert sha in before, "the commit must answer to its own prefix"
+        other = _write_object_colliding_with(repo, sha[:3])
+        assert other != sha
+        after = _objects_sharing_prefix(repo, sha[:3])
+        assert len(after) == len(before) + 1, (before, after)
+        assert other in after and sha in after, (other, after)
+
+    def test_the_two_object_oracles_AGREE(self, tmp_path: Path) -> None:
+        """🔴 THE SEAM. This file's precondition reads
+        `cat-file --batch-all-objects`; production counts candidates with
+        `rev-parse --disambiguate`. An oracle NARROWER than the call it protects
+        would certify a fixture that still flakes, and nothing else here would
+        notice.
+
+        Same two choices as the control above, for the same reason: no re-mint
+        call, and no assertion on an absolute count — so a narrowed oracle dies
+        on the set comparison rather than on the re-mint's raise."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        other = _write_object_colliding_with(repo, sha[:3])
+        mine = sorted(_objects_sharing_prefix(repo, sha[:3]))
+        gits = sorted(_run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split())
+        assert mine == gits, (mine, gits)
+        # Non-vacuous by construction: the commit and the forced object both
+        # answer to this prefix, so the agreed set cannot be the empty one.
+        assert {sha, other} <= set(mine), (sha, other, mine)
+
+    def test_the_REMINT_RAISES_rather_than_returning_an_AMBIGUOUS_sha(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE CONTRACT. `attempts=0` makes the post-loop check the ONLY code
+        that can run, so the refusal is attributable to it and to no neighbour:
+        the repo is well-formed, the sha is a real 40-hex commit, and the single
+        thing wrong is the ambiguity.
+
+        This also proves the post-loop check is REACHABLE with zero amends —
+        nothing earlier can win, because there is nothing earlier."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        _write_object_colliding_with(repo, sha[:3])
+        with pytest.raises(AssertionError) as exc:
+            _remint_until_short_sha_is_UNIQUE(repo, sha, attempts=0)
+        # 🔴 THE LITERAL, never a constant the message is also built from.
+        # Asserting a shared constant against itself is an expectation derived
+        # from the implementation (`claude/RULES.md`), and a mutation sweep
+        # proved it here: rewording the old constant left this test GREEN. Two
+        # independent spellings is what makes the wording a pinned contract.
+        assert "FIXTURE PRECONDITION: short sha is AMBIGUOUS" in str(exc.value)
+        assert "names 2 object(s)" in str(exc.value)
+        assert "after 0 re-mint(s)" in str(exc.value)
+
+    def test_the_REMINT_returns_a_clean_fixture_UNCHANGED(self, tmp_path: Path) -> None:
+        """The other half of the pair: a search that refused everything, or that
+        amended a fixture needing no amendment, would satisfy the test above
+        while making every fixture unusable or its sha unstable."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
+        assert _remint_until_short_sha_is_UNIQUE(repo, sha) == sha
+        assert _run_git(repo, "rev-parse", "HEAD").strip() == sha
+
+    def test_the_LAST_draw_is_checked_and_the_amends_are_BOUNDED(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 THE STRUCTURAL PIN, and the property the collapse would otherwise
+        have LOST. `attempts` bounds the AMENDS while `attempts + 1` DRAWS are
+        checked — so the result of the FINAL amend is examined rather than
+        returned unseen.
+
+        Counted rather than reasoned about: the oracle is replaced with one that
+        always reports ambiguity, so the search must exhaust. With `attempts=3`
+        it must consult the oracle FOUR times (three inside the loop, one after)
+        and amend exactly THREE times. A loop missing the post-loop check
+        consults it three times and returns the third amend's sha unchecked."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        calls: list[str] = []
+
+        def _always_ambiguous(r: Path, prefix: str) -> list[str]:
+            calls.append(prefix)
+            return ["deadbeef" * 5, "cafebabe" * 5]
+
+        monkeypatch.setattr(
+            sys.modules[__name__], "_objects_sharing_prefix", _always_ambiguous
+        )
+        objects_before = len(_object_names(repo))
+        with pytest.raises(AssertionError) as exc:
+            _remint_until_short_sha_is_UNIQUE(repo, sha, attempts=3)
+
+        assert len(calls) == 4, f"checked {len(calls)} draws, expected attempts+1=4"
+        # Each amend ORPHANS the commit it replaced, so the object database grows
+        # by exactly one per amend — an amend count that does not depend on the
+        # function reporting its own work.
+        assert len(_object_names(repo)) - objects_before == 3, "expected 3 amends"
+        assert "after 3 re-mint(s)" in str(exc.value)
+        assert "FIXTURE PRECONDITION: short sha is AMBIGUOUS" in str(exc.value)
+
+    def test_the_REMINT_CONVERGES_from_a_forced_collision(self, tmp_path: Path) -> None:
+        """🔴 THE REGRESSION TEST. Pre-fix there was no re-mint, so this repo —
+        the exact state the 1-in-585 draw produced — went straight into the guard
+        tests and died of `CommitAmbiguousError`. Here the collision is forced,
+        so the failure is reproduced on EVERY run rather than 1 in 585."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        # Forced at FOUR characters, which is the stronger collision: it makes
+        # the 3-hex prefix ambiguous too (the defect's own shape) while staying
+        # observable through the production entry point, whose length guard
+        # refuses 3 before any git runs.
+        _write_object_colliding_with(repo, sha[:4])
+        assert len(_objects_sharing_prefix(repo, sha[:3])) == 2
+        # PRE-FIX STATE, asserted rather than assumed: git really does refuse.
+        with pytest.raises(st.CommitAmbiguousError):
+            st.collect_commit_paths(repo, [sha[:4]])
+        # 🔴 A re-mint that did nothing now RAISES here rather than returning an
+        # ambiguous sha for a later line to catch — which is what makes the guard
+        # REACHABLE-in-fact rather than merely present, and why this call is bare
+        # instead of being followed by a separate precondition assertion.
+        reminted = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        assert len(_objects_sharing_prefix(repo, reminted[:3])) == 1
+        assert reminted != sha
+        assert st.collect_commit_paths(repo, [reminted[:4]]).commits == (reminted,)
+
+    def test_the_REMINT_does_NOT_change_what_the_commit_CHANGED(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE ANTI-WEAKENING GUARD. A re-mint that moved the tree would leave
+        every caller's path assertion describing a different commit, and each
+        would still be green. The diff and the parent must be identical."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        before = st.collect_commit_paths(repo, [sha])
+        tree_before = _run_git(repo, "rev-parse", f"{sha}^{{tree}}").strip()
+        _write_object_colliding_with(repo, sha[:3])
+        reminted = _remint_until_short_sha_is_UNIQUE(repo, sha)
+        assert reminted != sha
+        assert _run_git(repo, "rev-parse", f"{reminted}^{{tree}}").strip() == tree_before
+        assert st.collect_commit_paths(repo, [reminted]).paths == before.paths
+        assert before.paths == ("src/collector/a.py", "src/collector/b.py")
+
+    def test_the_reminted_fixture_STILL_feeds_a_THREE_character_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The fix must not buy determinism by testing something else. The
+        prefix handed to the guard is still 3 characters, still BELOW
+        `COMMIT_SHA_MIN_CHARS`, and the production module still refuses it."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
+        assert len(sha[:3]) == 3 < st.COMMIT_SHA_MIN_CHARS
+        with pytest.raises(st.CommitRefMalformedError):
+            st.collect_commit_paths(repo, [sha[:3]])
+
+
 class TestCommitPositiveControl:
     """🔴 `claude/RULES.md` → "Positive control — can it ever observe the thing?"
 
@@ -7018,16 +7362,22 @@ class TestCommitNegativeControls:
         """🔴 The measurement behind the bound. `rev-parse --disambiguate` expands
         a 3-character prefix in a small repo — so without the bound a typo
         RESOLVES to a real commit and is reported as a deliberate argument. The
-        guard is not restating git's own refusal; git does not refuse."""
-        repo = _init_repo(tmp_path, SCOPE)
-        sha = _commit(repo, "src/collector/a.py")
+        guard is not restating git's own refusal; git does not refuse.
+
+        ⚠ The fixture comes from `_repo_with_unique_short_sha`, not from a bare
+        `_commit`: a 3-hex prefix has 4096 values against this repo's 8 objects,
+        so ~1 run in 585 drew one that named TWO of them and `expanded == [sha]`
+        was false for a reason with nothing to do with the bound. devrc#432."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
         expanded = _run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split()
         assert expanded == [sha], expanded
 
     def test_the_boundary_is_a_boundary_not_a_slope(self, tmp_path: Path) -> None:
-        """4 is accepted and 3 is not, at the same repo, on the same sha."""
-        repo = _init_repo(tmp_path, SCOPE)
-        sha = _commit(repo, "src/collector/a.py")
+        """4 is accepted and 3 is not, at the same repo, on the same sha.
+
+        ⚠ Same fixture precondition (devrc#432): an ambiguous 4-hex prefix would
+        raise `CommitAmbiguousError` here and read as the boundary having moved."""
+        repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
         assert st.collect_commit_paths(repo, [sha[:4]]).commits == (sha,)
         with pytest.raises(st.CommitRefMalformedError):
             st.collect_commit_paths(repo, [sha[:3]])
@@ -7549,9 +7899,21 @@ class TestCommitMutationKillMatrix:
     """
 
     def _repo_with(self, tmp_path: Path) -> tuple[Path, str]:
-        repo = _init_repo(tmp_path, SCOPE)
-        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
-        return repo, sha
+        """🔴 devrc#432 — goes through `_repo_with_unique_short_sha`, so HEAD's
+        THREE-hex prefix names exactly one object in this repo.
+
+        `test_kills_the_LENGTH_guard` feeds that 3-character prefix on purpose
+        (3 is below `COMMIT_SHA_MIN_CHARS`, which is the guard's whole point, so
+        "use more characters" would delete the coverage). 4096 prefixes against
+        8 objects made ~1 run in 585 AMBIGUOUS: git raised `CommitAmbiguousError`,
+        the mutant died of the WRONG guard, and the assertion under test never
+        ran. The precondition is applied to the WHOLE class rather than to that
+        one test — `claude/RULES.md` "one rule, one place" — because every
+        sibling reaching git through a prefix inherits the same hazard.
+        """
+        return _repo_with_unique_short_sha(
+            tmp_path, "src/collector/a.py", "src/collector/b.py"
+        )
 
     def test_the_commit_mutant_harness_WORKS(self, tmp_path: Path) -> None:
         """🔴 THE NO-OP CONTROL. An unmutated copy must reach the commit source
@@ -12515,12 +12877,33 @@ def pinned_host(monkeypatch):
     return FIXTURE_HOST
 
 
-class TestTheStoreIsPerHost:
-    """Every surface reporting on the store must name whose disk it read."""
+class TestTheStoreIsReadThroughAPerHostCache:
+    """Every surface reporting on the store must name whose disk it read.
 
+    🔴 THE CLASS WAS RENAMED FROM `TestTheStoreIsPerHost`, and the rename is the
+    change, not decoration. The old name asserted the claim these guards used to
+    pin — that the store itself is per-host and unreplicated, so an entry on the
+    other machine is permanently invisible. RETRACTED 2026-09-11: the Cairn
+    cutover made a hosted pod (`store.zacx.dev`) the datastore and the local
+    tree a SYNCED READ-THROUGH CACHE of it. Measured in one write-free session,
+    between two `fetched … just now` reads ~1h apart, the pod's snapshot moved
+    entry-files 232 -> 239 — content from the other machine demonstrably
+    arrives.
+
+    What is still true, and what every guard below now pins, is a FRESHNESS
+    bound: a read is served from a local cache, so it is only as complete as the
+    last `cairn sync` on THIS machine. Naming the host therefore still matters —
+    `store_root` is the same path on both machines and their caches are at
+    different syncs — but the reason is staleness, not isolation. Upstream
+    `ZacxDev/cairn` carries the matching wording as of `1e7aedf`.
+    """
+
+    #: 🔴 TYPED BY HAND from the pinned client's `entry_shape.STORE_IS_PER_HOST`,
+    #: never derived by calling the code under test.
     EXPECTED_HOST_LINE = _norm(
-        f"host: {FIXTURE_HOST} (the store is PER-HOST and unreplicated; this run "
-        f"read THIS machine's disk and consulted no other)"
+        f"host: {FIXTURE_HOST} (the store is read through a PER-HOST CACHE, only "
+        f"as fresh as its last sync; this run read THIS machine's disk and "
+        f"consulted no other)"
     )
 
     EXPECTED_SCOPE_ABSENT = _norm(
@@ -12531,11 +12914,12 @@ class TestTheStoreIsPerHost:
     )
 
     EXPECTED_NOT_THE_FLEET = _norm(
-        "NOT A FACT ABOUT THE FLEET — the store is PER-HOST and unreplicated; this "
-        "run read THIS machine's disk and consulted no other. The other host keeps "
-        "a DIFFERENT store, not a copy, and it may already hold `brand-new-repo/`. "
-        "Nothing is lost by writing a first entry here; just do not report this "
-        "scope as unrecorded everywhere."
+        "NOT A FACT ABOUT THE FLEET — the store is read through a PER-HOST CACHE, "
+        "only as fresh as its last sync; this run read THIS machine's disk and "
+        "consulted no other. The other host syncs the SAME hosted store through "
+        "its own cache, and may already hold `brand-new-repo/` where this one has "
+        "not synced it yet. Nothing is lost by writing a first entry here; just "
+        "do not report this scope as unrecorded everywhere."
     )
 
     def _absent_text(self, store: Path) -> str:
@@ -12545,29 +12929,46 @@ class TestTheStoreIsPerHost:
         assert rep.status == "scope-absent", "the fixture must reach the branch under test"
         return st.render_text(rep)
 
-    def test_scope_absent_says_ABSENT_HERE_not_absent_anywhere(
+    def test_scope_absent_says_ABSENT_AS_OF_THIS_HOSTS_LAST_SYNC_not_anywhere(
         self, store: Path, pinned_host: str
     ) -> None:
         """🔴 THE REGRESSION GUARD. The pre-change sentence — "the store has no
         `<scope>/` directory yet … the FIRST-ENTRY case, not a miss" — was FALSE
         as stated: measured 2026-08-27, a workbench probe said it of a scope that
         existed on the laptop with four entries in it. Both halves are pinned:
-        the verdict must be qualified to this host, AND the run must say that no
-        other host's store was consulted and one may hold the scope."""
+        the verdict must be qualified, AND the run must say what bounds it.
+
+        🔴 RENAMED FROM `test_scope_absent_says_ABSENT_HERE_not_absent_anywhere`,
+        because the WHY changed under it and a test name is read as a
+        specification. "ABSENT HERE" carried the retracted premise that the other
+        machine keeps a DIFFERENT store, so an absence here is permanent and
+        local. It is not: the two hosts cache the SAME hosted store and converge
+        through the pod (measured 2026-09-11 — entry-files 232 -> 239 between two
+        reads in one write-free session). The half that survives is
+        "not absent anywhere", and what it now rests on is the last `cairn sync`
+        on THIS machine, not isolation.
+
+        🔴 THE QUALIFICATION IS STILL LOAD-BEARING, and the retraction does not
+        weaken it — a stale cache and a separate store produce the SAME wrong
+        report ("nobody has recorded this"). Only the remedy differs: sync, then
+        look again."""
         lines = [_norm(ln) for ln in self._absent_text(store).splitlines()]
         assert self.EXPECTED_SCOPE_ABSENT in lines, (
             "the `scope-absent` verdict is not the pinned sentence.\n"
             f"  expected: {self.EXPECTED_SCOPE_ABSENT}\n"
-            "It must name THIS HOST and must not read as a claim about a single, "
-            "fleet-wide store — there is no such thing."
+            "It must name THIS HOST and must not read as a claim about what the "
+            "hosted store holds — this run read one cache of it."
         )
         assert self.EXPECTED_NOT_THE_FLEET in lines, (
-            "the `scope-absent` verdict no longer says that NO OTHER HOST WAS "
-            "CONSULTED and that the other machine may hold this scope.\n"
+            "the `scope-absent` verdict no longer says that this read was bounded "
+            "by THIS machine's last sync and that the other machine may already "
+            "hold this scope through its own cache of the same store.\n"
             f"  expected: {self.EXPECTED_NOT_THE_FLEET}\n"
             "Without this line the qualified first sentence still reads, to an "
             "agent, as 'nobody has recorded this anywhere' — which is the false "
-            "claim, not the wording."
+            "claim, not the wording. 🔴 And do NOT reinstate the older, stronger "
+            "isolation wording ('a DIFFERENT store, not a copy') — it was "
+            "measured false; the hosts share one store and differ only in sync."
         )
 
     def test_scope_absent_KEEPS_the_first_entry_guidance(
@@ -12762,22 +13163,33 @@ class TestTheStoreIsPerHost:
     EXPECTED_SKILL_BULLET = _norm(
         "- **`no-match` / `scope-absent`** — no existing entry was touched. "
         "`scope-absent` means this repo has no scope directory yet **in THIS HOST's "
-        "store**: the **first-entry case, not a failure**, and the reason this step "
-        "exists. 🔴 **The store is PER-HOST and unreplicated, so that is never a "
-        "claim about the fleet** — measured 2026-08-27 the workbench held 115 "
-        "entries / 14 scopes and the laptop 33 / 11, seven scopes existed only on "
-        "the laptop, and one probe reported a scope \"absent\" that had four entries "
-        "on the other machine. Write the first entry here anyway; just say \"on this "
-        "host\", and read the `host:` line the tool prints. Nothing to append either "
-        "way; go to the NO ENTRY clause below."
+        "cache of the store**: the **first-entry case, not a failure**, and the "
+        "reason this step exists. 🔴 **The store is read through a PER-HOST CACHE, "
+        "only as fresh as its last `cairn sync`, so that is never a claim about the "
+        "fleet** — measured 2026-08-27 a probe reported a scope \"absent\" that had "
+        "four entries on the other machine. ⚠ **The reason is FRESHNESS, not "
+        "isolation** — the Cairn cutover made a hosted pod the datastore and the "
+        "two hosts converge through it (measured 2026-09-11, the pod's snapshot "
+        "moved 232 -> 239 entry-files between two reads in one write-free session), "
+        "so an unsynced entry is invisible but not lost. Write the first entry here "
+        "anyway; just say \"as of this host's last sync\", and read the `host:` line "
+        "the tool prints. Nothing to append either way; go to the NO ENTRY clause "
+        "below."
     )
 
-    def test_the_skill_says_scope_absent_is_a_PER_HOST_finding(self) -> None:
+    def test_the_skill_says_scope_absent_is_a_PER_HOST_CACHE_finding(self) -> None:
         """The protocol an agent follows must carry the same qualification the
         tool prints. Before this, `subsystem-index/SKILL.md` said `scope-absent`
         "means this repo has no scope directory yet" full stop — so an agent that
         never read the tool's output still concluded, and reported, that the work
-        was unrecorded everywhere."""
+        was unrecorded everywhere.
+
+        🔴 RENAMED FROM `…_is_a_PER_HOST_finding` in the same change that
+        retracted the isolation claim. The bullet asserted the store itself is
+        per-host and unreplicated; post-cutover only the CACHE is, and the skill
+        contradicted its own §157, which already described the hosted pod. The
+        tool's message and the protocol are ONE claim — which is why this test
+        exists — so both moved together here."""
         lines = [_norm(ln) for ln in INDEX_DOC.read_text(encoding="utf-8").splitlines()]
         assert self.EXPECTED_SKILL_BULLET in lines, (
             "claude/skills/subsystem-index/SKILL.md no longer carries the pinned "

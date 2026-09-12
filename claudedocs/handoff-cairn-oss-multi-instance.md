@@ -75,9 +75,22 @@ is the PRIVATE proposal, not this doc.
 - **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. The pinned client
   went live 2026-09-09, **generation 713, rollback point 712** — the only record of which
-  generation to roll back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable**
-  (2026-09-11: 100% packet loss, `ssh: No route to host`), so cross-host agreement stays
-  `NOT COMPARED — 1 of 2 hosts`. Operator-blocked ranks merged 2026-09-10
+  generation to roll back to.
+  ✅ **CROSS-HOST AGREEMENT IS NOW COMPARED AND AGREES — 2 of 2 hosts, 2026-09-12.** `ship.sh`
+  converged both to devrc **`c337765e`** (rc 0, each reporting `VERIFIED … + switched` and 0 stale
+  managed artifacts), and the cairn pin was then read DIRECTLY on each rather than inferred from the
+  sha: both resolve `~/.local/bin/cairn` to the **identical** store path
+  `…-cairn-562a6ea/bin/cairn`.
+  ⚠ **Three facts in the sentence this replaces were stale, two of them asserting an absence that
+  had already been fixed.** (a) *"the laptop is still unreachable (100% packet loss, `ssh: No route
+  to host`)"* — it is unreachable **on the LAN only** (`192.168.50.155`); `ship.sh` hits that same
+  failure and **falls back to the nebula address** `10.42.0.100`, which answers. A ping to the LAN IP
+  is the wrong instrument for "is the laptop up", and it was the instrument used — twice.
+  (b) *"cross-host agreement stays `NOT COMPARED`"* — compared, above. (c) the deployed pin was
+  recorded as `cairn-c84c142`; it is **`cairn-562a6ea`** as of 2026-09-12.
+  🔴 **A `NOT COMPARED` verdict ages into a false claim the moment its blocker clears, and nothing
+  re-checks it. Re-measure before citing one — and measure the thing, not a proxy for it.**
+  Operator-blocked ranks merged 2026-09-10
   (`ZacxDev/homelab-infra` **#785** `37b5a71f8`, **#787** `936692ec7`, **#786** `4c890c7ac`;
   `innovation-upstream/devrc` **#1447** `719519fa9`). This doc's own prior updates merged as
   **`21f2c162`** (#1492), **`5c93440d`** (#1530), **`a66b6fb3`** (#1597).
@@ -905,11 +918,18 @@ belongs to that arc's own session. via: measurement
    "still → scripts/cairn" sentence in this doc is superseded.** It was made live by
    `ship.sh --no-remote` and then by generation 713; the deploy asymmetry held —
    `cairn-validate` and `cairn-who` both still resolve out-of-store into the checkout.
-   🔴 **THE LAPTOP IS STILL UNSWITCHED, and it is BLOCKED ON THE HOST, not on a
-   decision.** `ship.sh` (no flags) exited **255**: `ssh: connect to host 192.168.50.155
-   port 22: Connection timed out`, and it answers no ICMP either. Cross-host agreement is
-   therefore `NOT COMPARED — 1 of 2 hosts reported a landed sha`. Until it is powered on and
-   converged, every OSS-client fix is absent from the binary THAT machine runs.
+   ✅ **RESOLVED 2026-09-12 — THE LAPTOP IS SWITCHED AND CROSS-HOST AGREEMENT IS COMPARED.**
+   `ship.sh` (no flags) exits **0** and converges both hosts to devrc `c337765e`; the cairn pin
+   was read directly on each and both resolve to the identical `…-cairn-562a6ea/bin/cairn`.
+   ⚠ **The observation below was correct when taken and is kept for its diagnostic value, because
+   the SCOPE is what was wrong, not the reading.** `ship.sh` did exit **255** with
+   `ssh: connect to host 192.168.50.155 port 22: Connection timed out` and no ICMP — **but that is
+   the LAN address only.** `ship.sh` now falls back to the nebula address `10.42.0.100`, which
+   answers; today's run shows both legs on stderr. So *"blocked on the host"* was the wrong
+   conclusion from a right measurement: the host was up and the PATH was down.
+   🔴 **`NOT COMPARED — 1 of 2 hosts` therefore aged into a false claim, and this doc carried it in
+   two places.** A verdict of absence needs re-measuring before it is cited, and it needs measuring
+   against every route, not the first one that fails.
    ⚠ The worktree `~/workspace/devrc-flake-pin` was fully merged and has been **removed**;
    the `[ahead 8]` warning is discharged.
    🔴 **TWO WARNINGS ABOUT THAT WORKTREE WERE PUBLISHED HERE AND BOTH WERE WRONG. RETRACTED
