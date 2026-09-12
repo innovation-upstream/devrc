@@ -396,6 +396,13 @@ All three read `CLICKHOUSE_URL/USER/PASSWORD` from env (via `validation/chquery.
   binaries), bottlenecks (binaries by total wait time), signal-vs-noise (i3 switch rate,
   deep-work blocks, attention-by-app, browser-by-domain). Caveat: "signal vs noise" =
   switch-rate / attention-split only; value judgment needs a human/LLM layer.
+  🔴 **Exit 3 = PARTIAL, and it is NOT a failure to re-run blindly.** Any one of its seven
+  queries can be stopped by the server's OvercommitTracker under load (2.5 GiB
+  `max_server_memory_usage` in a 3 GiB pod), so a `CHQueryError` degrades that section
+  only: the report still prints, the dead section prints `!! SECTION UNAVAILABLE` with the
+  reason, and `--json` carries `failures{}`/`partial`. **A section marked UNAVAILABLE is
+  MISSING, never empty** — do not read it as "no data". Exit 0 means all seven computed;
+  a server that is unreachable still aborts outright (nothing can be said about anything).
 - `~/workspace/devrc/scripts/session-analysis/initiative-scan.py [--days N] [--json] [--repo PATH]`
   — cross-repo initiative + progress ledger (handoff docs + git + telemetry recency by
   `gitBranch` → momentum `active`/`slowing`/`stalled`, last-touched, next-step).
