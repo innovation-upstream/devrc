@@ -497,6 +497,290 @@ def test_no_reference_means_no_whoami_call(bridge):
 
 
 # --------------------------------------------------------------------------- #
+# The cross-host HANDOFF — the refusal has to hand over something runnable
+# --------------------------------------------------------------------------- #
+# 🔴 WHAT WAS WRONG BEFORE, precisely: the refusal above was CORRECT and it was a
+# dead end. `die` exits 1, which this CLI also returns for a malformed reference,
+# a dead bridge, a 404, an op-level error and every other failure — so a caller
+# could not tell "wrong host, retry over there" from "this will never work". And
+# the message ended "run it there" with no command to run, so the session holding
+# the reference had nothing to hand the operator.
+#
+# The refusal itself does NOT change and must not: `bodies == []` is asserted in
+# every case below as well as in the guard test above.
+HANDOFF_MARK = "browser:"
+
+
+def _handoff_lines(stderr):
+    """The refusal's stderr, split into (chatter, command-lines).
+
+    The CLI's contract is that the pasteable command is the ONLY line of the
+    refusal that does not begin with ``browser:``. Returning BOTH halves is what
+    lets a test assert there is exactly one such line — a helper that returned
+    only the command would hide a second one.
+    """
+    lines = stderr.splitlines()
+    return ([ln for ln in lines if ln.startswith(HANDOFF_MARK)],
+            [ln for ln in lines if not ln.startswith(HANDOFF_MARK)])
+
+
+def _relex(line):
+    """Re-read a handoff line the way a PASTE would — with the shell itself.
+
+    🔴 NOT ``shlex.split``. Python's lexer does not understand bash's ``$'…'``
+    ANSI-C form, which is what the CLI emits for an argument containing a
+    newline (a multi-line ``js`` script — the ordinary case, not an exotic one),
+    so a python-side check would score a correct line as broken and, worse,
+    could score a BROKEN one as correct for a different escape. The claim being
+    tested is "a shell re-reads this as the same argv", so a shell has to make
+    it.
+
+    ``eval set --`` also EXPANDS what it lexes, which is deliberate: an argument
+    like ``$(echo PWNED)`` that came back as ``PWNED`` would prove the quoting
+    is broken in the one way that matters. The payloads used here are inert by
+    construction (they echo a marker), so the check is observable without being
+    destructive.
+    """
+    r = subprocess.run(
+        ["bash", "-c", 'eval "set -- $1"; printf "%s\\0" "$@"', "_", line],
+        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+    assert r.returncode == 0, f"the handoff line is not even lexable: {r.stderr}"
+    return r.stdout.split("\0")[:-1] if r.stdout else []
+
+
+def test_the_wrong_host_refusal_exits_4_not_a_generic_1(bridge):
+    """🔴 THE DISTINCT CODE IS THE MACHINE-READABLE HALF of the handoff."""
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 4, (
+        f"rc={r.returncode}: the wrong-host refusal must be distinguishable "
+        f"from every other failure, all of which are 1\n{r.stderr}")
+    assert bridge.bodies == [], bridge.bodies
+
+
+@pytest.mark.parametrize("argv,why", [
+    (("bw://workbench/main", "text"), "malformed reference"),
+    (("bw://workbench/main/12345/9", "text"), "too many fields"),
+    (("bw://workbench/main/notanumber", "text"), "non-numeric tab"),
+    ((CANONICAL, "--instance", "x", "text"), "reference/flag conflict"),
+    ((CANONICAL, "bw://workbench/main/9", "text"), "two references"),
+    (("bw://workbench/main/12345", "nosuchsubcommand"), "unknown subcommand"),
+])
+def test_exit_4_means_ONLY_wrong_host_and_nothing_else(bridge, argv, why):
+    """NEGATIVE CONTROL for the code above — without it, rc 4 could be "any
+    reference problem", which is not a fact a caller can act on.
+
+    The bridge here is on the SAME host as the reference, so nothing in this
+    list can be a host disagreement: each must fail as a plain 1.
+    """
+    bridge.handler.host_label = "workbench"
+    r = bridge.run(*argv)
+    assert r.returncode == 1, (
+        f"{why} came back rc={r.returncode}; 4 is reserved for the wrong-host "
+        f"refusal\n{r.stderr}")
+
+
+def test_the_refusal_prints_a_command_addressed_at_the_NAMING_host(bridge):
+    """Criterion 1: not a bare "run it there" — something runnable."""
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "text")
+    chatter, cmd = _handoff_lines(r.stderr)
+    assert len(cmd) == 1, (
+        f"the refusal must carry EXACTLY one pasteable line; got {cmd!r}")
+    assert _relex(cmd[0]) == [str(CLI), CANONICAL, "text"]
+    # 🔴 The prose has to say WHERE to run it, and this asserts the DIRECTIVE
+    # line specifically, not merely that the host name appears somewhere — the
+    # opening line already names it, so a looser check would pass with the
+    # command left as an unexplained orphan.
+    assert any(re.search(r"Run this ON 'workbench'", ln) for ln in chatter), (
+        f"no line tells the reader which host to run it on:\n{r.stderr}")
+    assert bridge.bodies == [], bridge.bodies
+
+
+def test_the_handoff_names_the_CLI_BY_PATH_not_a_bare_word(bridge):
+    """`browser` is NOT on $PATH on either host (measured 2026-09-12: `command
+    -v browser` exits 1 on both) — the skill tells agents to run it by its full
+    path. A handoff line saying `browser …` would be a command that fails with
+    "command not found" over there, which is a dead end wearing a fix's clothes.
+
+    Absolutised, so the paste works from any cwd, and NOT symlink-resolved: the
+    path as invoked is the one that exists at the same place on the other host.
+    """
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "text")
+    _, cmd = _handoff_lines(r.stderr)
+    prog = _relex(cmd[0])[0]
+    assert prog.startswith("/"), f"not an absolute path: {prog!r}"
+    assert Path(prog).name == "browser", prog
+    assert Path(prog).is_file(), prog
+
+
+def test_a_RELATIVE_invocation_still_hands_over_an_ABSOLUTE_path(bridge,
+                                                                 tmp_path):
+    """🔴 THE FIXTURE ABOVE CANNOT SEE THIS, and that is why it is separate.
+
+    ``bridge.run`` always passes the CLI by an absolute path, so the
+    absolutisation step is a no-op in every other test here — deleting it would
+    leave them all green. Invoking through a relative path is the one input that
+    makes the step observable; a handoff carrying ``./browser`` or ``../browser``
+    is a command that resolves to something else, or to nothing, over there.
+    """
+    bridge.handler.host_label = "laptop"
+    rel = os.path.relpath(CLI, tmp_path)
+    assert not os.path.isabs(rel) and rel.startswith(".."), rel
+    e = bridge.env_for_stub()
+    r = subprocess.run(["bash", rel, CANONICAL, "text"], cwd=tmp_path, env=e,
+                       capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+    assert r.returncode == 4, r.stderr
+    _, cmd = _handoff_lines(r.stderr)
+    prog = _relex(cmd[0])[0]
+    assert prog == str(CLI), (
+        f"a relative invocation handed over {prog!r}; it must be absolutised, "
+        "or the paste depends on the other host's cwd")
+
+
+@pytest.mark.parametrize("argv", [
+    (CANONICAL, "text"),
+    (CANONICAL, "text", "--selector", "#a > b[c='d e']"),
+    (CANONICAL, "js", "const a = 1;\nreturn a + 'it\\'s';\n"),
+    (CANONICAL, "html", "--selector", "$(echo PWNED)"),
+    (CANONICAL, "html", "--selector", "`echo PWNED`"),
+    (CANONICAL, "html", "--selector", ""),
+    (CANONICAL, "html", "--selector", "a\tb"),
+    (CANONICAL, "html", "--selector", "[title='héllo — ✓']"),
+    ("--frame", "a b", CANONICAL, "text"),
+    ("text", CANONICAL, "--", "bw://workbench/main/9"),
+    (CANONICAL, "screenshot", "/tmp/a b.png"),
+])
+def test_the_handoff_re_lexes_to_the_ORIGINAL_argv(bridge, argv):
+    """🔴 THE WHOLE VALUE OF THE LINE IS THAT IT PASTES VERBATIM.
+
+    Every stage after the flag loop rewrites ``"$@"`` — the reference scanner
+    rebuilds the array with the ``bw://`` token REMOVED — so a line rebuilt from
+    parsed state would be missing the reference itself. And a line that is not
+    quoted is not a command: a selector with a space becomes two arguments, and
+    ``$(…)`` in a selector becomes an execution on the other host.
+
+    Fixtures are pairwise distinct and none of them equals a constant this test
+    names, so a mutant that hardcoded any single spelling would survive none of
+    them.
+    """
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(*argv)
+    assert r.returncode == 4, r.stderr
+    _, cmd = _handoff_lines(r.stderr)
+    assert len(cmd) == 1, f"the command must be ONE line; got {cmd!r}"
+    assert _relex(cmd[0]) == [str(CLI), *argv]
+    assert bridge.bodies == [], bridge.bodies
+
+
+def test_a_shell_metacharacter_is_QUOTED_not_expanded_by_the_paste(bridge):
+    """POSITIVE CONTROL for the round trip above.
+
+    ``_relex`` genuinely expands, so this asserts the marker survives as a
+    LITERAL. Were the escaping dropped, the same helper would hand back
+    ``PWNED`` and this reads red — which is the only thing that makes the
+    equality assertions above evidence rather than a tautology.
+    """
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "html", "--selector", "$(echo PWNED)")
+    _, cmd = _handoff_lines(r.stderr)
+    assert _relex(cmd[0])[-1] == "$(echo PWNED)"
+    assert "PWNED" not in "".join(_relex(cmd[0])[:-1])
+
+
+def test_the_handoff_goes_to_STDERR_and_stdout_stays_EMPTY(bridge):
+    """The file's standing rule: stdout is the JSON envelope and nothing else.
+
+    A shell command string on stdout would be worse than an empty stdout, not
+    better — `T=$(browser …)` would bind T to something that parses as no JSON
+    at all and reads like data.
+    """
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "text")
+    assert r.stdout == "", r.stdout
+    assert str(CLI) in r.stderr
+
+
+def test_BB_FRAME_is_replayed_but_the_reference_overridden_env_is_not(bridge):
+    """🔴 BB_FRAME SURVIVES A REFERENCE; BB_INSTANCE/BB_TAB DO NOT.
+
+    A handoff that dropped an inherited BB_FRAME would run against the top
+    document and answer about a different page — silently. Replaying
+    BB_INSTANCE/BB_TAB would be the opposite error: the reference overwrites
+    them here, so putting them on the line advertises a route the receiving CLI
+    ignores.
+    """
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "text", env={
+        "BB_FRAME": "ads.example/f", "BB_INSTANCE": "other", "BB_TAB": "999",
+    })
+    assert r.returncode == 4, r.stderr
+    _, cmd = _handoff_lines(r.stderr)
+    assert cmd[0].startswith("BB_FRAME=ads.example/f "), cmd[0]
+    assert "BB_INSTANCE" not in cmd[0], cmd[0]
+    assert "BB_TAB" not in cmd[0], cmd[0]
+    assert _relex(cmd[0].split(" ", 1)[1]) == [str(CLI), CANONICAL, "text"]
+
+
+def test_an_explicit_frame_FLAG_is_not_also_replayed_as_an_env_var(bridge):
+    """The mirror control: a --frame flag is already in the argv, so prefixing
+    BB_FRAME as well would set the route TWICE and read as a bug."""
+    bridge.handler.host_label = "laptop"
+    r = bridge.run("--frame", "ads.example/f", CANONICAL, "text")
+    _, cmd = _handoff_lines(r.stderr)
+    assert not cmd[0].startswith("BB_FRAME="), cmd[0]
+    assert _relex(cmd[0]) == [str(CLI), "--frame", "ads.example/f",
+                              CANONICAL, "text"]
+
+
+def test_a_SAME_LABELLED_profile_on_this_host_is_still_never_driven(bridge):
+    """🔴 CRITERION 3, and the only case where the guard does anything.
+
+    `work` is a real instance label on BOTH hosts (measured 2026-09-12:
+    `browser health` reports key/label `work`, connected, on laptop AND on
+    workbench). That is exactly the shape where a wrong-host reference could
+    resolve locally and drive the wrong machine's browser while returning an
+    ordinary envelope. Making the refusal a handoff must not soften it: the
+    observable is that NOTHING reached the wire, not that a code came back.
+    """
+    bridge.handler.host_label = "workbench"
+    same_label_ref = "bw://laptop/work/12345"
+    r = bridge.run(same_label_ref, "text")
+    assert r.returncode == 4, r.stderr
+    assert bridge.bodies == [], (
+        "a wrong-host reference reached the wire against a same-labelled local "
+        f"profile: {bridge.bodies}")
+    _, cmd = _handoff_lines(r.stderr)
+    assert _relex(cmd[0]) == [str(CLI), same_label_ref, "text"]
+
+
+def test_the_help_documents_exit_4_and_keeps_the_host_verification_sentence():
+    """🔴 CRITERION 4, pinned on the WHOLE NORMALISED SENTENCE, not on words.
+
+    The artifact under test is prose, so a guard on keywords is walkable by
+    rewording. The sentence below is the one the task requires to stay accurate
+    — it still is: the check is unchanged, and 'fails loudly' is now a rc-4
+    failure that also hands over a command. A cosmetic reword of it fails this
+    test, and that is the price of a machine-readable claim.
+    """
+    r = subprocess.run(["bash", str(CLI), "--help"], capture_output=True,
+                       text=True, timeout=CLI_TIMEOUT_S)
+    assert r.returncode == 0, r.stderr
+    help_text = re.sub(r"\s+", " ", r.stdout)
+    assert (
+        "The <host> field is VERIFIED against the bridge before the command "
+        "runs, so a reference pasted into a session on the other host fails "
+        "loudly instead of driving a same-labelled profile there."
+    ) in help_text, "the host-verification sentence was reworded or removed"
+    # The shipped behaviour, described: the code, the stream, the contract.
+    assert "exits 4" in help_text
+    assert "does NOT begin with \"browser:\"" in help_text
+    assert re.search(r"\b4\s+ONLY the wrong-host `bw://` refusal", help_text), (
+        "the EXIT CODES block does not list 4")
+
+
+# --------------------------------------------------------------------------- #
 # Refusals — a malformed reference must never be split into three fields
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("ref, expect", [
