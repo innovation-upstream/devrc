@@ -287,8 +287,8 @@ Not a bug — a measurement that would mislead if run as written.
   probe from the doc's earlier block and **record the new baseline date beside the count**.
 
 ### CLOSED 2026-09-03 — espanso `:acq` shadowed `:rna`; fixed in CODE, not in the config
-🔴 **THIS BLOCK WAS 65 LINES OF COMMIT-BY-COMMIT ATTRIBUTION AND IT WAS WRONG FOUR TIMES IN FOUR
-AUDIT ROUNDS — so it is CUT rather than corrected a fifth time.** Each round's replacement was
+🔴 **THIS BLOCK WAS 65 LINES OF COMMIT-BY-COMMIT ATTRIBUTION AND THREE SUCCESSIVE AUDIT ROUNDS EACH
+FOUND IT WRONG — so it is CUT rather than corrected a fourth time.** Each round's replacement was
 written with more care than the last and was still wrong: a test suite that cannot read the file
 (round 3), a `search_terms` read that is byte-identical on the red and green trees (round 4), then
 the wrong fix commit AND four guard tests that stay green when the mechanism is deleted (round 5).
@@ -297,11 +297,14 @@ insufficient diligence** — a handoff doc has no way to stay correct about a fi
 history as the code moves, and no test here can check it (the doc gates cannot see even a bogus path
 in this file).
 ✅ **What is true, and mechanically checkable:** the collision is gone — `recom` resolves to `:rna` on
-`origin/main`. It was fixed in the DETECTOR, not the config: **`#1247` (`b9b2493d`, 2026-09-02T17:16,
+`origin/main`. ⚠ **It is closed TWICE OVER, independently — say it that way, not "the code not the
+config".** The DETECTOR fix landed **23 h first**: **`#1247` (`b9b2493d`, 2026-09-02T22:16Z,
 *"declare :rna the owner of recom/recommend — unbreaks main, red since `a720d30d`"*, touching only
 `espanso_detect.py` + its tests), generalised by `#1252` (`de677683`, *"a snippet's declared
 `search_terms` outbid another's LABEL"*).** `a720d30d` caused it; `a451abc0` landed 23 h after it was
-already fixed and is what `#1265`'s body says reddened `main` next.
+already fixed and is what `#1265`'s body says reddened `main` next. **Measured both arms:** pre-fix
+detector + RED config → `None`; pre-fix detector + TODAY's config → `:rna`; today's detector + RED
+config → `:rna`. Either side alone closes it.
 🔴 **THE RECORD LIVES IN THE CODE, WHICH IS WHERE IT STAYS CORRECT** — `espanso_detect.py:344-372`
 (the precedence rule and why), `test_espanso_detect.py:727-757` (the operator's ruling and the owner
 table), and its FIX 7 block. **Read those, not a doc's copy of them.** The durable lesson is one
@@ -512,7 +515,9 @@ that cannot distinguish the two states is vacuous whether it is a test or a huma
    forcing: none — done; retained so the rank numbering stays stable.
 6. ✅ **CLOSED — the espanso `:acq`/`:rna` collision is gone: `recom` resolves to `:rna` on
    `origin/main`.** Fixed in the DETECTOR by `#1247` (`b9b2493d`) and generalised by `#1252`
-   (`de677683`) — **not** by a config edit, and not by this effort. Recorded only because this item
+   (`de677683`) 23 h before the config edit, which is independently sufficient on its own — so the
+   closure is over-determined and "the code, not the config" would be a claim about ORDER, not about
+   sufficiency. Not fixed by this effort. Recorded only because this item
    asserted a live red and carried `forcing: regression` after the red was gone.
    ⚠ **The causal archaeology that used to sit here is CUT** — it was wrong in four successive audit
    rounds, each time in a new way. See the superseded Open-investigations block above for why cutting
