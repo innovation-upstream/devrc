@@ -92,6 +92,15 @@ from typing import Iterable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 🔴 THE STORE-READER MODULES COME FROM THE PINNED `cairn` FLAKE INPUT, not
+# from `scripts/lib/` — devrc deleted its forked copies when it consolidated
+# onto the pin. `cairn_pin.ensure()` APPENDS the packaged `lib/` after the
+# line above and raises, naming both resolution routes and the remedy, when
+# the pin is not deployed. There is no local fallback.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 from subsystem_recall import (  # noqa: E402
     NUANCE_HEADING,
     POINTERS_HEADING,

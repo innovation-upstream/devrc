@@ -922,8 +922,13 @@ def real_runner(cmd, cwd=None):
 
 LedgerReport = namedtuple(
     "LedgerReport",
-    "files added deleted commits reason cumulative cumulative_reason",
+    "files added deleted commits churn_commits reason cumulative cumulative_reason",
 )
+# 🔴 `churn_commits` is the count the LINE COUNT came from — `<anchor>..<tip>`
+# with the same `--not <base>` the numstat uses. `commits` omits that exclusion.
+# The brief must name which it is printing: "over N commit(s)" beside a
+# `--not <base>` command read as the churn population and was not it. See
+# `RangeChurn`.
 # 🔴 `head_check` is the FOURTH read rule, beside rc 0 / silent stderr /
 # non-empty range. See `verify_head_is_the_pr`.
 HeadCheck = namedtuple("HeadCheck", "ok reason local_sha pr_sha")
@@ -1257,7 +1262,17 @@ def anchor_is_head(anchor, head_check):
 # The ledger — the skill's own command, with the skill's own read rules
 # --------------------------------------------------------------------------- #
 
-RangeChurn = namedtuple("RangeChurn", "files added deleted commits reason")
+RangeChurn = namedtuple(
+    "RangeChurn", "files added deleted commits churn_commits reason"
+)
+# 🔴 TWO COUNTS, AND THE DIFFERENCE IS THE POINT. `commits` is `<frm>..<to>`;
+# `churn_commits` is the same range `--not <base>` — the population the numstat
+# below actually measures. They diverge hugely in the shape this repo produces
+# constantly: MEASURED on devrc #1046's tail, `commits`=55 and `churn_commits`=2,
+# because 53 of those commits are an upstream bring-in the churn correctly
+# excludes. Quoting `commits` beside the line count pairs a number from one
+# population with a number from another, and reads as "55 commits produced 1,105
+# lines" when two did.
 
 
 def measure_range_churn(runner, repo_dir, frm, to, base):
@@ -1286,7 +1301,7 @@ def measure_range_churn(runner, repo_dir, frm, to, base):
     `reason` and NO number — a failed command is not a zero.
     """
     def fail(reason):
-        return RangeChurn(None, None, None, None, reason)
+        return RangeChurn(None, None, None, None, None, reason)
 
     rc, out, err = runner(
         ["git", "-C", repo_dir, "rev-list", "--count", f"{frm}..{to}"]
@@ -1304,7 +1319,25 @@ def measure_range_churn(runner, repo_dir, frm, to, base):
         # No commits ⇒ no churn, and no numstat call (which is also what this
         # function's extraction preserved: `measure_ledger` never reached the
         # numstat on an empty range either). The CALLER decides what it means.
-        return RangeChurn({}, 0, 0, 0, None)
+        return RangeChurn({}, 0, 0, 0, 0, None)
+
+    # The SECOND count — the population the numstat below measures. Same range,
+    # same `--not <base>`. See the `RangeChurn` note: a caller that prints
+    # `commits` beside the line count is quoting two different populations.
+    rc, out2, err2 = runner([
+        "git", "-C", repo_dir, "rev-list", "--count", f"{frm}..{to}",
+        "--not", base,
+    ])
+    if rc != 0:
+        return fail(f"`git rev-list {frm}..{to} --not {base}` exited {rc}: "
+                    f"{(err2 or out2).strip() or 'no output'}")
+    if err2.strip():
+        return fail(f"`git rev-list … --not {base}` wrote to stderr: {err2.strip()}")
+    try:
+        churn_commits = int(out2.strip())
+    except ValueError:
+        return fail(f"`git rev-list --count … --not {base}` printed "
+                    f"{out2.strip()!r}, not a number")
 
     rc, out, err = runner([
         "git", "-C", repo_dir, "log", "--numstat", "--format=",
@@ -1331,7 +1364,7 @@ def measure_range_churn(runner, repo_dir, frm, to, base):
         files[path] = (cur[0] + na, cur[1] + nd)
         added += na
         deleted += nd
-    return RangeChurn(files, added, deleted, commits, None)
+    return RangeChurn(files, added, deleted, commits, churn_commits, None)
 
 
 def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
@@ -1362,7 +1395,7 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
     not a zero, and neither is a measurement of the wrong tree.
     """
     def fail(reason):
-        return LedgerReport(None, None, None, None, reason, None, None)
+        return LedgerReport(None, None, None, None, None, reason, None, None)
 
     if head_check is not None and not head_check.ok:
         return fail(
@@ -1413,7 +1446,8 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
         )
 
     return LedgerReport(
-        churn.files, churn.added, churn.deleted, churn.commits, None, None, None
+        churn.files, churn.added, churn.deleted, churn.commits,
+        churn.churn_commits, None, None, None
     )
 
 
@@ -3329,7 +3363,10 @@ def render_ledger(facts):
     measured_tip = hc.local_sha if (hc is not None and hc.ok) else "HEAD"
     lines += [
         f"`git log --numstat --format= --remerge-diff {facts.prev_sha}.."
-        f"{measured_tip} --not {facts.base_ref}` over {led.commits} commit(s):",
+        f"{measured_tip} --not {facts.base_ref}` over "
+        f"{led.churn_commits} commit(s) "
+        f"({led.commits} in the range, {led.commits - led.churn_commits} of them "
+        f"excluded as already in {facts.base_ref}):",
         "",
         "```",
         f"{'added':>7} {'deleted':>8}  path",

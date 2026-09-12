@@ -805,6 +805,47 @@ Tekton legs sat on top of two deploy-blockers.
   `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
   measured **1536 passed, 0 failed** locally.
 
+### CLOSED 2026-09-12 — the kill-ledger treadmill, and why three of my PRs were the wrong altitude
+🔴 **THIS RETIRES THE `#1522` BLOCK ABOVE.** That block's diagnosis was right and its remedy was
+wrong: it treated each offending doc as a thing to classify. The class was closed structurally by
+someone else while I was still classifying instances.
+
+- **Resolved by:** `#1561` (`c0bbd6d9`) — *"stop the kill scanners reading `claudedocs/` — SIX docs
+  red-ed main in two hours and every fix was itself a doc"*. On `origin/main`:
+  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` at `:2624`, consumed by `_is_prose_only()` at `:2634`.
+  A prefix predicate, not row deletions. `#1557` was an intermediate step.
+- **`main` is GREEN**, measured at `b1abf6b1` with `__pycache__` cleared and
+  `PYTHONDONTWRITEBYTECODE=1`: **`1537 passed`**, 0 failed. via: measurement
+- 🔴 **My own merged handoff became an offender, and eliding my mention was NOT enough.**
+  `#1548`'s text quoted the wide-kill verb while documenting the breakage. `#1556` (`b62d1bf1`)
+  fixed it in two measured steps — elide my line: 2 failed → 1 failed; ledger the doc in both
+  allowlists: → **1536 passed**. The residual failure was at `:43` and `:2020`, **written by other
+  sessions** documenting the same breakage: with several authors writing at once, no one can elide
+  their way out. via: measurement
+- 🔴 **`#1556` was obsolete within the hour and is what made `#1549` conflict.** It added rows to
+  both allowlists shortly before `#1561` made every `claudedocs/` row unreachable. `git rebase
+  origin/main` on `#1549` conflicts in three hunks, and the HEAD side of the second IS `#1561`'s
+  landed implementation — resolving toward `#1549` would delete it. **Recommended closure as
+  superseded; not closed, it is not mine.** via: measurement
+- **Ruled out: that rebasing and merging `#1549` was the right move**, which is what I was asked to
+  do. Its fix is older and narrower than what landed: it scoped the *mention ledger*, `#1561`
+  scopes *both* scanners. Merging it regresses `main`. via: measurement
+- **Ruled out: that another ledger row would have worked.** After `#1556` merged, `main` went red
+  again on a **fourth** doc (`claudedocs/handoff-gate-speed-and-ci-signal.md`) inside the same
+  window, from a session unrelated to any of the three fixes. via: measurement
+- ⚠ **NOT established: whether scoping BOTH scanners is intended.** `#1561` exempts prose from the
+  ARGV scanner too, not just the mention census. A real call site inside a `claudedocs/` file would
+  now be unread. Flagged on `#1549`; nobody has answered it.
+- **The transferable rule:** *when a guard fires repeatedly and every fix is itself an instance of
+  what it guards, the guard's SCOPE is the defect — stop classifying and re-scope.* Three
+  locally-correct PRs of mine (`#1556` plus two earlier attempts) were each the wrong altitude.
+
+### Rank 3 slice 3 MERGED 2026-09-12 — `#1508`, correcting this doc's own carried-forward line
+`origin/main` `44bd8b0e`: *"consolidate onto the pinned client — delete the five forked reader
+modules"*. **`State now`'s carried-forward block still calls it BUILT, NOT MERGED** — that line was
+true when I wrote it and is now false. Recorded here rather than by replacing `State now`, which
+belongs to that arc's own session. via: measurement
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -1122,9 +1163,11 @@ Tekton legs sat on top of two deploy-blockers.
     firing exits 0.
     forcing: none
 
-22. ⚠ **REMEDIED AND MERGED — `#1458`, squash `ce9b55c3`, 2026-09-10. NOT YET VERIFIED BY THE
-    FLAKE RATE, which is the half that actually closes this. And the three remedies this item
-    recommended were all aimed at the wrong layer.**
+22. ✅ **CLOSED 2026-09-12 — REMEDIED AND MERGED (`#1458`, squash `ce9b55c3`, 2026-09-10) AND NOW
+    VERIFIED BY THE FLAKE RATE, which was the half that actually closes it: 0 of 99 verdicts on
+    heads CARRYING the sha against 12 of 298 that do not. The reading, its controls and its
+    lower-bound caveat are at the Closing-condition paragraph below. And the three remedies this
+    item originally recommended were all aimed at the wrong layer.**
     🔴 **VERIFIED BY CONTENT ON `origin/main`, NEVER BY ANCESTRY** — a squash merge makes
     `merge-base --is-ancestor` false forever, so that check reads "not merged" and is wrong.
     On `origin/main`: the `sited_root` fixture is present, `_DISK_ROOTED_ALLOWLIST` is present,
@@ -1223,9 +1266,26 @@ Tekton legs sat on top of two deploy-blockers.
     was false, and it was inflating the urgency of every gate item in this doc. ⚠ A protection
     setting is a point-in-time reading and can be changed without touching this repo: **re-read
     it, do not cite this line.** via: measurement
-    **Closing condition:** `#1458` merged, AND a flake-rate reading against a baseline whose PR
-    heads postdate the merge — **not a single green run**. The OSS half closes separately, with
-    rank 3 slice 3.
+    ✅ **CLOSING CONDITION MET 2026-09-12 — THE FLAKE-RATE READING EXISTS, BY ANCESTRY.** The
+    store-api test is named in **0 of 99** `tekton/devrc-pytests` verdicts on heads that CARRY
+    `ce9b55c3` against **12 of 298** that do not (4.03%), so P(0 | the pre-window rate) ≈
+    **0.017** — against 0.23 for the only prior reading (`#1512`, which split on the anchor's
+    TIMESTAMP). Population: 400 devrc PR heads `#1162`–`#1566`, every state, 397 with a verdict,
+    0 ancestry-unmeasurable; predicate `git merge-base --is-ancestor ce9b55c3 <head>`; collector
+    positive-controlled on the three known reds first. 🔴 **The zero still is not what
+    establishes the fix — the mechanism being gone is** (`origin/main`: `sited_root` on 106
+    lines, 1 surviving `tmp_path / "store"` and it is prose, the test itself still present at
+    `:14543`). ⚠ **This item's `:367` for that surviving line is STALE — it is now `:449`**;
+    re-derive a line number rather than quoting one. 🔴 **And every per-test count is a LOWER
+    BOUND**: 100 of 101 failure descriptions
+    are truncated at 138 characters, so the true post count is in **[0, 22]** — though the bias
+    runs the right way, post-window failing runs averaging 1.83 failures against 3.60 pre.
+    ⚠ **The date predicate this item warned about reclassified 5 of 397 verdicts and 0 of 101
+    failures, so `#1512`'s table was underpowered rather than corrupted** — do not discard it.
+    Full table, classification and residuals: `handoff-gate-flake-store-api.md` rank 1, which
+    also records what the reading found INSTEAD — the gate's post-fix red is dominated by
+    deterministic ledger censuses over tracked text (27 of 99 verdicts), not by any flake.
+    The OSS half still closes separately, with rank 3 slice 3.
     ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE REDDENED THIS PR, AND IT IS NOT THIS ONE.**
     Tests in `scripts/tests/test_run_tests_targets.py` spawn a nested `run-tests.sh` bounded at
     **120 s** and are SIGKILLed at it (`subprocess.TimeoutExpired`, rc `-9`) — **not** an
@@ -2028,6 +2088,15 @@ covers; pin it with `--config`, do not `cd`.
   `git update-ref -d` when the arc closes), the worktrees `/tmp/wt-cairn-slice3` (holds the
   rebased-but-unpushed `6205faec`) and `/tmp/wt-mainctl` (the `main` control checkout).
 
+- ✅ **RANK 22 IS NOW FULLY CLOSED — the verification below landed 2026-09-12**: the flake rate is
+  0/99 on heads carrying `ce9b55c3` against 12/298 that do not (P(0) ≈ 0.017), measured by
+  ancestry with a positive-controlled collector. 🔴 **What the reading found INSTEAD is the part
+  worth carrying forward: the gate's remaining red is not a flake.** Deterministic ledger
+  censuses over tracked text account for **27 of 99** post-fix verdicts (22 the kill-mention
+  ledger, all of them before `#1561` exempted `claudedocs/`; **5 the runner-bound ledger, 4 of
+  those AFTER it** — the same design class in a second ledger, and the live one). Table and
+  residuals in `handoff-gate-flake-store-api.md` rank 1.
+  The pre-verification wording, kept for the provenance it names:
 - 🔴 **RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.** `#1458` squash **`ce9b55c3`** merged and
   content-verified; recorded by `#1462` (`60033d1e`) and corrected by `#1525` (`018e483b`). The
   second flake it uncovered is filed as **`handoff-gate-flake-store-api.md` rank 7** (`#1477`,
@@ -2057,6 +2126,23 @@ covers; pin it with `--config`, do not `cd`.
 - 🔴 **The pre-create sweep only works as a SEPARATE step.** I piped `gh pr list` into the same
   command as `gh pr create` and shipped `#1529`, a duplicate of `#1522`; closed it. The sweep ran
   and I never read it.
+
+- 🔴 **A census over PROSE turns every write-up of the census into a new entry.** Six docs red-lined
+  `main` in roughly two hours from at least four sessions, including one quoting the scanner's own
+  `offenders=` output and one that was my own merged handoff. The fix is scope
+  (`_PROSE_ONLY_PREFIXES`), never classification. **If you are about to add the seventh row, stop.**
+- 🔴 **`main` moved under me four separate times this session** — twice invalidating a doc I was
+  editing (`#1540` conflicted after `#1546`; `#1549`'s base moved past its own fix), once merging my
+  `#1548` while I was elsewhere, once landing `#1561`. **Re-read the conflict instead of resolving
+  it mechanically**: that is what caught the `#1529` duplicate, the stale `#1540`, and the `#1549`
+  regression. A `-X theirs` on the last one would have deleted the landed fix.
+- ⚠ **I over-removed while trying to hand another session a verified recipe** — stripped every
+  `"claudedocs/…",` line programmatically, which also hit `quoting_is_the_point` and took the suite
+  to `2 failed`. I reported the census's own output instead and said plainly it was not a working
+  recipe. **Do not hand over a fix you have not watched pass.**
+- 🔴 **The pre-create sweep only works as a SEPARATE step** — see `#1529`, a duplicate of `#1522`
+  that I opened because I piped `gh pr list` into the same command as `gh pr create`. The sweep ran;
+  I never read it.
 
 ## How to verify
 
