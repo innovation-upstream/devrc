@@ -14,8 +14,9 @@ WHAT THAT MAKES TESTABLE, and why each guard is shaped the way it is:
    `{ isLaptop }`, and three of its fragments are host-conditional. A mode
    parked inside one of those would silently not exist on the other machine.
    So this file RENDERS the config for both values of `isLaptop` (a tiny nix
-   string evaluator, positive-controlled below) and asserts against the render,
-   not against the source text.
+   string evaluator — `testlib.i3_render`, shared with the picker-centering
+   guard and positive-controlled in `test_i3_render_seam.py`) and asserts
+   against the render, not against the source text.
 
 2. THE ESCAPE KEYS MUST STILL BE ESCAPES. Being stuck in game mode with no way
    out is the worst failure this feature has: every Alt binding is dead by
@@ -66,11 +67,12 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+from testlib.i3_render import HOSTS as _HOSTS, render as _render  # noqa: E402
+
 I3_CONFIG = REPO / "nix" / "i3" / "config.nix"
 GRAPHICAL_NIX = REPO / "nix" / "graphical.nix"
 BLOCK_SCRIPT_REL = "scripts/i3status-gamemode"
-
-_HOSTS = ("workbench", "laptop")
 
 
 def _load(relpath, modname):
@@ -83,102 +85,6 @@ def _load(relpath, modname):
 
 
 blk = _load(BLOCK_SCRIPT_REL, "i3status_gamemode")
-
-
-# --------------------------------------------------------------------------- #
-# A TINY NIX STRING EVALUATOR for nix/i3/config.nix.
-#
-# The file is `{ isLaptop ? false }: let <fragments> in ''<body>''`, where every
-# fragment is `if isLaptop then <string> else <string>`. Rendering it properly
-# would mean asking `nix`, which is ground truth and CANNOT RUN in the nix-build
-# check tier that gates merges (no nested nix, and that is the authoritative
-# tier). So: parse the three shapes this file actually uses, and REFUSE loudly
-# on anything else — `_render` raises rather than returning a body with an
-# unresolved `${…}` in it, because a silently unsubstituted interpolation would
-# make every assertion below pass over text no host ever gets.
-# --------------------------------------------------------------------------- #
-_INTERP = re.compile(r"\$\{(\w+)\}")
-
-
-def _nix_string_at(text, pos):
-    """Parse the nix string literal starting at/after `pos`.
-
-    Handles `''…''` and `"…"`. Returns (value, index just past the literal).
-    """
-    i = pos
-    while i < len(text) and text[i] in " \t\n":
-        i += 1
-    if text.startswith("''", i):
-        end = text.index("''", i + 2)
-        return text[i + 2:end], end + 2
-    if text[i] == '"':
-        end = text.index('"', i + 1)
-        return text[i + 1:end], end + 1
-    raise AssertionError(
-        "nix/i3/config.nix fragment at offset %d is not a string literal this "
-        "evaluator understands (%r…) — extend it rather than letting the "
-        "config render with an unresolved interpolation" % (i, text[i:i + 40]))
-
-
-def _fragments(header):
-    """{name: (laptop_value, workbench_value)} for each `if isLaptop` binding."""
-    out = {}
-    for m in re.finditer(r"^  (\w+) =", header, re.M):
-        name = m.group(1)
-        region_end = len(header)
-        nxt = re.search(r"^  \w+ =", header[m.end():], re.M)
-        if nxt:
-            region_end = m.end() + nxt.start()
-        region = header[m.start():region_end]
-        cond = region.find("if isLaptop then")
-        if cond < 0:
-            continue                      # not host-conditional; nothing to do
-        then_val, after = _nix_string_at(region, cond + len("if isLaptop then"))
-        els = region.index("else", after)
-        else_val, _ = _nix_string_at(region, els + len("else"))
-        out[name] = (then_val, else_val)
-    return out
-
-
-def _render(is_laptop: bool) -> str:
-    """The i3 config as it is written to ~/.config/i3/config on that host."""
-    text = I3_CONFIG.read_text()
-    marker = "\nin\n''\n"
-    head, body = text.split(marker, 1)
-    body = body[:body.rindex("''")]
-    frags = _fragments(head)
-
-    def sub(m):
-        name = m.group(1)
-        assert name in frags, (
-            "`${%s}` in the i3 config body is not an `if isLaptop` fragment "
-            "this evaluator can resolve — extend `_fragments`, or this test "
-            "renders text no host ever receives" % name)
-        return frags[name][0 if is_laptop else 1]
-
-    rendered = _INTERP.sub(sub, body)
-    assert "${" not in rendered, (
-        "unresolved interpolation left in the rendered config: "
-        + rendered[rendered.index("${"):rendered.index("${") + 60])
-    return rendered
-
-
-def test_the_renderer_really_renders_two_different_configs():
-    """🔴 POSITIVE CONTROL for the evaluator every guard below reads through.
-
-    A renderer that returned the raw body, or the same string twice, would make
-    "present on both hosts" true by construction. So: the two renders must
-    DIFFER, and each must carry the fragment that belongs only to it.
-    """
-    laptop, workbench = _render(True), _render(False)
-    assert laptop != workbench
-    assert "brightnessctl" in laptop and "brightnessctl" not in workbench
-    assert "xrandr --output DP-0" in workbench
-    assert "xrandr --output DP-0" not in laptop
-    # …and the shared body is in both, so the split did not eat it.
-    for cfg in (laptop, workbench):
-        assert "set $mod Mod1" in cfg
-        assert "default_border pixel 2" in cfg
 
 
 # --------------------------------------------------------------------------- #
