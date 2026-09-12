@@ -46,6 +46,27 @@ SID_C = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
 SERVER_PID = "424242"
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_runtime_dir(tmp_path, monkeypatch):
+    """🔴 AUTOUSE, AND IT CLOSES A HAZARD THIS FILE CREATED.
+
+    `claim_midsession_alert` writes a one-shot marker into `$XDG_RUNTIME_DIR`,
+    which on the dev host is the OPERATOR'S LIVE runtime dir. MEASURED while
+    writing these tests: four `alerted-<plan-mtime>` files appeared in
+    `/run/user/1000/tmux-session-restore/`, three of them keyed on the
+    operator's REAL plan mtimes — because the tests that reached the loud arm
+    without redirecting the variable also read the real plan. Deployed, that is
+    a test run PRE-CLAIMING the latch for a live incident and silencing its
+    alert.
+
+    Per-test `monkeypatch.setenv` fixed the tests that remembered. This is the
+    structural version: one rule, one place, applied to every test in the file
+    whether or not it knows the latch exists. A test that specifically wants the
+    variable ABSENT still deletes it itself.
+    """
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
+
+
 # --------------------------------------------------------------------------- #
 # codenames / naming / encoding
 # --------------------------------------------------------------------------- #
@@ -771,8 +792,18 @@ HOUR = 3600.0
 
 
 def _staleness_fixture(tmp_path, monkeypatch, *, plan_age_s, state_age_s=None,
-                       uptime_h=10_000.0):
-    """A plan and (optionally) a resurrect state file at chosen ages."""
+                       uptime_h=10_000.0, pane_age_s="unmeasurable"):
+    """A plan and (optionally) a resurrect state file at chosen ages.
+
+    🔴 `pane_age_s` DEFAULTS TO UNMEASURABLE, AND THAT DEFAULT IS THE POINT.
+    `plan_staleness_hours` now consults the agent ledger when the layout is newer
+    than the plan, and the ledger is a REAL directory that differs per tier —
+    populated and fresh on the dev host, absent in the nix build sandbox. Left
+    unpinned, every case below would take a different arm in each tier. The
+    default reproduces exactly the pre-ledger behaviour, so a test that says
+    nothing about panes is asserting the layout term alone; pass a number to
+    place the newest pane record that many seconds ago.
+    """
     import time
     now = time.time()
     plan = tmp_path / "restore-plan.json"
@@ -792,6 +823,10 @@ def _staleness_fixture(tmp_path, monkeypatch, *, plan_age_s, state_age_s=None,
     # 🔴 Uptime must be injected or every liveness case measures THIS host's
     # uptime (753h here), which makes the boot-time cases untestable.
     monkeypatch.setattr(tsr, "uptime_hours", lambda: uptime_h)
+    monkeypatch.setattr(
+        tsr, "newest_pane_ledger_activity",
+        (lambda *a, **k: None) if pane_age_s == "unmeasurable"
+        else (lambda *a, **k: now - pane_age_s))
     return plan
 
 
@@ -1287,6 +1322,33 @@ def _plan_of(tmp_path, n=2):
     return plan
 
 
+def _boot_shape(tmp_path, monkeypatch, *, plan_age_s, uptime_h):
+    """Pin the POINTER's mtime and this boot's uptime — `no_server_is_mid_session`'s
+    two inputs.
+
+    🔴 EVERY no-server test MUST call this, and the reason is the same two-tier
+    blindness the block above describes, one artefact further out. The refusal
+    branch now reads `tsr.PLAN`, which on the DEV HOST is the operator's real,
+    minutes-old plan on a host up for weeks (=> mid-session, rc 75) and in the
+    NIX SANDBOX does not exist at all (=> `no-plan`, rc 0). A test that leaves it
+    unpinned asserts a different arm in each tier — which is exactly how the two
+    tests below started passing in one tier and failing in the other the moment
+    this branch gained a second outcome.
+
+    `plan_age_s=None` means NO POINTER AT ALL (the genuine first-boot shape).
+    """
+    if plan_age_s is None:
+        monkeypatch.setattr(tsr, "PLAN", tmp_path / "no-pointer.json")
+    else:
+        import time
+        pointer = tmp_path / "pointer-plan.json"
+        pointer.write_text("[]")
+        stamp = time.time() - plan_age_s
+        os.utime(pointer, (stamp, stamp))
+        monkeypatch.setattr(tsr, "PLAN", pointer)
+    monkeypatch.setattr(tsr, "uptime_hours", lambda: uptime_h)
+
+
 def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
     """🔴 THE REGRESSION TEST FOR THE MEASURED LOSS. With no server, the old
     code ran `tmux new-session` itself, sent into the server it had just
@@ -1318,6 +1380,10 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
     # block gives for stubbing the probe at all.
     monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    # THE COLD BOOT, pinned rather than inherited from the tier — see
+    # `_boot_shape`. A plan written 8h ago on a host up for 45s predates this
+    # boot, which is the standing condition the rc 0 argument below is about.
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=8 * 3600, uptime_h=45 / 3600)
 
     ran: list[list[str]] = []
     monkeypatch.setattr(tsr, "run", lambda cmd: ran.append(cmd) or "")
@@ -1373,6 +1439,13 @@ def test_the_refusal_is_checked_BEFORE_the_send_loop_creates_anything(tmp_path, 
     # poll bails on its first probe, so `order` also pins that the poll does not
     # spin against a stubbed-absent server.
     monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
+    # 🔴 WITHOUT THIS, THIS TEST IS THE ONE CALL IN THE FILE THAT READS THE
+    # OPERATOR'S REAL `restore-plan.json` AND THE REAL `/proc/uptime` — which
+    # falsifies `_boot_shape`'s own "EVERY no-server test MUST call this" and
+    # takes opposite arms on the two tiers. It also kept the latch out of the
+    # real `$XDG_RUNTIME_DIR`. Found by the round-1 audit.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=8 * 3600, uptime_h=45 / 3600)
     order: list[str] = []
     monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into",
                         lambda: order.append("guard") or True)
@@ -1600,6 +1673,10 @@ def test_the_refusal_names_the_wait_and_which_fault_it_was(tmp_path, monkeypatch
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
     monkeypatch.setattr(tsr, "run", lambda cmd: (_ for _ in ()).throw(
         AssertionError("ran a tmux command while refusing")))
+    # Cold boot, pinned per-tier-identically — see `_boot_shape`. This test is
+    # about the WORDING of the wait, not about the exit code, so it takes the
+    # quiet arm deliberately.
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=8 * 3600, uptime_h=45 / 3600)
 
     rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
     err = capsys.readouterr().err
@@ -2885,6 +2962,704 @@ def test_a_claude_found_on_PATH_is_also_resolved_to_its_store_path(monkeypatch, 
     assert got == str(real), (
         f"returned the symlink found on PATH instead of its store target: {got!r} "
         "— a home-manager switch blanks that path for ~1s")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A MID-SESSION NO-SERVER REFUSAL IS AN INCIDENT AND MUST BE LOUD;
+#    A COLD-BOOT ONE IS EXPECTED AND MUST STAY QUIET.
+#
+# THE BUG. MEASURED 2026-09-11: the tmux server died at 02:36:44 taking ~52 live
+# conversations; this unit ran at 02:37:14, refused correctly, and exited 0. The
+# refusal was the only trace, in a journal nobody reads, and the workspace sat
+# dead for 8.5 HOURS with 53 recoverable bindings on disk. Nothing else on this
+# host starts a tmux server and `PathChanged=` fires once, so nothing retried.
+#
+# The refusal stays — it is the fix for 2026-09-06's 43 lost conversations and
+# creating a server inside the unit's cgroup is what destroyed them. What is
+# added is the DISCRIMINATOR and the channel: see `EXIT_SERVER_DIED_MIDSESSION`
+# for why the exit code is the channel, given `OnFailure=notify-failure@%n`
+# bypasses do-not-disturb and that bypass's own rule is about STANDING
+# conditions.
+#
+# 🔴 EVERY TEST HERE PINS BOTH INPUTS VIA `_boot_shape`, for the two-tier reason
+# stated there: the dev host's real pointer is fresh on a weeks-old boot, the
+# sandbox has none at all, and the two answer opposite arms.
+# --------------------------------------------------------------------------- #
+
+def _refusal(tmp_path, monkeypatch, **boot):
+    """Drive `cmd_restore` into the no-server refusal with a pinned boot shape.
+
+    🔴 The latch is redirected into `tmp_path` too. It lives in
+    `$XDG_RUNTIME_DIR`, which on the dev host is the operator's REAL runtime dir
+    — a test that let it write there would leak state between runs and, worse,
+    could silence a real incident alert on this machine.
+    """
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "run", lambda cmd: (_ for _ in ()).throw(
+        AssertionError("ran a tmux command while refusing")))
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("waited instead of refusing")))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    _boot_shape(tmp_path, monkeypatch, **boot)
+    return tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+
+
+def test_a_MID_SESSION_no_server_refusal_is_LOUD(tmp_path, monkeypatch, capsys):
+    """🔴 THE REGRESSION TEST FOR THE 8.5-HOUR SILENCE.
+
+    The incident's own numbers, from the preserved evidence: the plan was
+    written at 02:23 on a host that had been up since 2026-09-06 18:01 (~113h),
+    so it was written 8.6h ago INSIDE this boot. That is only reachable if a
+    tmux server with live claude panes existed during this boot — a cold boot
+    cannot produce it — so the refusal is an incident report, not a skip.
+    """
+    rc = _refusal(tmp_path, monkeypatch, plan_age_s=8.6 * 3600, uptime_h=113.0)
+    err = capsys.readouterr().err
+
+    assert rc == tsr.EXIT_SERVER_DIED_MIDSESSION, (
+        f"a mid-session server death exited {rc} — rc 0 is `Result=success`, no "
+        "`OnFailure=`, no toast and no retry, which is the 8.5 hours of silence "
+        "this test exists for")
+    assert "MID-SESSION" in err, err
+    assert "plan-written-this-boot" in err, (
+        "the log must name the signal it decided on, or the next reader cannot "
+        f"tell a correct alarm from a broken one: {err!r}")
+
+
+def test_a_COLD_BOOT_no_server_refusal_stays_QUIET(tmp_path, monkeypatch, capsys):
+    """🔴 THE POSITIVE CONTROL, and the half that protects the DND bypass.
+
+    Without it, a guard hardcoded to exit 75 passes the test above while firing a
+    do-not-disturb-defeating toast on EVERY cold boot — the "any unit that can
+    fail on a STANDING condition breaches it again" rule in `nix/home.nix`. A
+    plan written before this boot is exactly that standing condition.
+    """
+    rc = _refusal(tmp_path, monkeypatch, plan_age_s=8 * 3600, uptime_h=45 / 3600)
+    err = capsys.readouterr().err
+
+    assert rc == 0, (
+        f"a cold boot exited {rc}, which fires `OnFailure=notify-failure@%n` — a "
+        "toast that bypasses do-not-disturb — on a condition every cold boot "
+        "guarantees")
+    assert "MID-SESSION" not in err
+    assert "REFUSING" in err, "the refusal itself must not have gone away"
+
+
+def test_the_loud_refusal_is_STILL_A_REFUSAL(tmp_path, monkeypatch, capsys):
+    """Being loud must not make it act. Nothing may be sent, no session created,
+    and the `REFUSING to restore` line must survive verbatim —
+    `tmux-restore-observe.sh` counts that exact string for its RC_REFUSED arm.
+    """
+    ran: list[list[str]] = []
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "run", lambda cmd: ran.append(cmd) or "")
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=60.0, uptime_h=113.0)
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    err = capsys.readouterr().err
+
+    assert rc == tsr.EXIT_SERVER_DIED_MIDSESSION
+    assert ran == [], f"ran tmux commands while refusing loudly: {ran}"
+    assert "REFUSING to restore" in err, (
+        "the observe arm greps this exact string; a reworded refusal makes a "
+        "refused boot read CLEAN again")
+
+
+@pytest.mark.parametrize("plan_age_s,uptime_h,expect,token", [
+    # the incident: a plan from this boot, and no server now
+    (8.6 * 3600, 113.0, True, "plan-written-this-boot"),
+    # a cold boot: the plan is from before the machine came up
+    (8 * 3600, 45 / 3600, False, "plan-predates-this-boot"),
+    # a first boot / a host that has never saved
+    (None, 113.0, False, "no-plan"),
+    # a future mtime — a restored backup, `touch -d`, a backwards clock step.
+    # NOT evidence about this boot, and the token names the OBSERVATION.
+    (-3600.0, 113.0, False, "plan-mtime-in-the-future"),
+])
+def test_no_server_is_mid_session_names_which_signal_decided(
+        tmp_path, monkeypatch, plan_age_s, uptime_h, expect, token):
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=plan_age_s, uptime_h=uptime_h)
+    assert tsr.no_server_is_mid_session() == (expect, token)
+
+
+def test_an_UNMEASURABLE_uptime_does_not_fire_the_DND_bypassing_toast(tmp_path, monkeypatch):
+    """`uptime_hours()` returns +inf when `/proc/uptime` is unreadable, and
+    `age < inf` is true for every plan — so the naive arithmetic makes an
+    unreadable file assert an incident. This claim needs a measurement; withhold
+    it rather than toast through do-not-disturb off one that did not happen."""
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=60.0, uptime_h=float("inf"))
+    assert tsr.no_server_is_mid_session() == (False, "uptime-unmeasured")
+
+
+# --- 🔴 THE LATCH: the loud arm must be an EVENT, not a standing condition -- #
+#
+# ROUND 1 SHIPPED THIS WRONG. The argument was "`PathChanged=` is an event on
+# one watched name, so a socket nobody touches produces no second trigger".
+# MEASURED with a private socket: `kill-server` LEAVES THE SOCKET FILE, so
+# `ConditionPathExists=%t/tmux-%U/default` keeps passing, every later activation
+# reaches the refusal, and `plan-written-this-boot` is true for the rest of the
+# boot. 7 of 8 sockets in the operator's runtime dir were orphans. The audit
+# measured 14 activations of this unit on 2026-09-11, four inside 9 seconds,
+# driven by `X-Restart-Triggers` on home-manager switches — and
+# `notify-failure.sh` has no throttle. That is the DND bypass trained away.
+
+def test_a_REPEAT_activation_for_the_same_incident_does_NOT_toast_again(
+        tmp_path, monkeypatch, capsys):
+    """🔴 THE REGRESSION FOR 🔴-1. Two activations, one incident, one alert."""
+    first = _refusal(tmp_path, monkeypatch, plan_age_s=8.6 * 3600, uptime_h=113.0)
+    assert first == tsr.EXIT_SERVER_DIED_MIDSESSION, "the first alert must fire"
+    capsys.readouterr()
+
+    second = _refusal(tmp_path, monkeypatch, plan_age_s=8.6 * 3600, uptime_h=113.0)
+    err = capsys.readouterr().err
+
+    assert second == 0, (
+        f"a second activation for the SAME incident exited {second}, firing "
+        "`OnFailure=notify-failure@%n` again. The socket outlives the server, so "
+        "this branch is reached on every activation for the rest of the boot — "
+        "that is a STANDING condition on a DND-bypassing toast")
+    assert "MID-SESSION" in err, (
+        "the incident must still be reported in the journal on every "
+        "activation — only the ALARM is latched, not the diagnosis")
+    assert "already-alerted-this-incident" in err, err
+
+
+def test_a_SECOND_INCIDENT_in_the_same_boot_DOES_toast(tmp_path, monkeypatch, capsys):
+    """🔴 THE CONTROL THAT REJECTS A PER-BOOT LATCH, and it is not hypothetical:
+    2026-09-11 had TWO server deaths, 00:05 and 02:36. A boot-scoped latch would
+    have silenced the second one. The latch is keyed on the PLAN'S MTIME, which
+    moves when the save chain recovers and writes again."""
+    assert _refusal(tmp_path, monkeypatch, plan_age_s=8.6 * 3600,
+                    uptime_h=113.0) == tsr.EXIT_SERVER_DIED_MIDSESSION
+    capsys.readouterr()
+    # …recovery happened, saves resumed, then a second crash: a NEWER plan.
+    second = _refusal(tmp_path, monkeypatch, plan_age_s=600.0, uptime_h=113.0)
+    err = capsys.readouterr().err
+    assert second == tsr.EXIT_SERVER_DIED_MIDSESSION, (
+        f"a SECOND, DISTINCT incident exited {second} — the alert was latched "
+        "per boot rather than per incident, which would have silenced the "
+        "02:36 crash on 2026-09-11 because 00:05 had already fired")
+    assert "first-alert-for-this-incident" in err, err
+
+
+def test_with_NO_runtime_dir_the_alarm_is_WITHHELD_not_fired(tmp_path, monkeypatch, capsys):
+    """Without `$XDG_RUNTIME_DIR` there is nowhere guaranteed to be cleared, so
+    "once" cannot be promised. An unbounded toast through the DND bypass is worse
+    than a missed one, so the arm goes quiet and says why."""
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "run", lambda cmd: "")
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    _boot_shape(tmp_path, monkeypatch, plan_age_s=8.6 * 3600, uptime_h=113.0)
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    err = capsys.readouterr().err
+    assert rc == 0, f"toasted without being able to promise 'once': {rc}"
+    assert "no-runtime-dir" in err, err
+    assert "MID-SESSION" in err, "the diagnosis must still reach the journal"
+
+
+def test_the_latch_NEVER_writes_outside_the_runtime_dir_it_was_given(tmp_path, monkeypatch):
+    """🔴 THE GUARD FOR THE HAZARD THE AUTOUSE FIXTURE CLOSES. The latch is the
+    one thing in this file that writes OUTSIDE `tmp_path` by default, and a
+    marker landing in the operator's live `$XDG_RUNTIME_DIR` keyed on their real
+    plan mtime would silence a real incident's alert. Pin that the path is
+    derived from the variable and nowhere else."""
+    runtime = tmp_path / "elsewhere"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    claimed, _ = tsr.claim_midsession_alert(1_700_000_000.0)
+    assert claimed
+    written = sorted(p for p in runtime.rglob("*") if p.is_file())
+    assert [p.name for p in written] == ["alerted-1700000000"], written
+    assert written[0].parent == runtime / "tmux-session-restore", written[0]
+
+
+def test_the_latch_claim_is_atomic_between_racing_activations(tmp_path, monkeypatch):
+    """Four activations inside 9 seconds were MEASURED on 2026-09-11. The claim
+    is `O_CREAT|O_EXCL` — the same pattern `free_generation_stamp` uses — so
+    exactly one wins, rather than all four seeing "not yet alerted"."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    claims = [tsr.claim_midsession_alert(1_700_000_000.5) for _ in range(4)]
+    assert [c for c, _ in claims] == [True, False, False, False], claims
+    assert claims[0][1] == "first-alert-for-this-incident"
+
+
+def test_an_unwritable_latch_withholds_the_alarm_rather_than_repeating_it(tmp_path, monkeypatch):
+    """The same direction as a missing runtime dir, named separately so the log
+    says which happened. A latch we cannot write cannot bound the toast."""
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(blocked))
+    claimed, reason = tsr.claim_midsession_alert(1_700_000_000.0)
+    assert claimed is False
+    assert reason.startswith("latch-unwritable"), reason
+
+
+def test_the_midsession_code_is_not_shared_with_this_file_s_other_failures(tmp_path):
+    """INVARIANT GUARD — pins a property the bug never violated, so it is NOT
+    regression coverage. `tmux-restore-observe.sh` records `ExecMainStatus`, and
+    1 already means three unrelated things here (no plan / too stale / sends that
+    never reached claude). Collapsing this onto 1 would make that field unable to
+    name what happened."""
+    assert tsr.EXIT_SERVER_DIED_MIDSESSION not in (0, 1, 2)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE STALENESS GATE MUST NOT TREAT THE CRASH'S OWN DAMAGE AS EVIDENCE THAT
+#    THE PLAN IS STALE.
+#
+# MEASURED 2026-09-11, 11:00:02, verbatim from the journal:
+#     restore plan is out of step with the saved layout by 8.6h (limit 2.0h,
+#     basis=layout) — too stale, skipping. Run `save` first.
+# The 02:23 plan carried 53 bound conversations. The crash brought up a new,
+# EMPTY server; continuum autosaved THAT at 10:59; and the gate read the 8.6h
+# between them as the plan having gone stale. The guard against restoring a
+# stale plan blocked recovery at exactly the moment it was needed — the same
+# inverted-basis shape #1317 fixed once already for powered-off time.
+#
+# The fix cross-checks the "the plan stopped being refreshed" story against a
+# witness the crash CANNOT refresh: the agent ledger, written by the claude and
+# opencode processes themselves. MEASURED from the incident's preserved snapshot
+# (`~/.cache/tmux-crash2-20260911T110407/agent-ledger`, a `cp -a`): newest PANE
+# record `claude-p28.json` at 02:36:40, i.e. 13.4 minutes after the plan and 4
+# seconds before the crash.
+# --------------------------------------------------------------------------- #
+
+# 🔴 THESE ARE DERIVED FROM THE PRESERVED SNAPSHOT, AND THE PANE FIGURE WAS
+# WRONG IN ROUND 1. It was hand-picked as "the newest record before the
+# recovery" from a directory listing — a record the function would NOT have
+# returned, because the unfiltered query returns `claude-p2.json` at 11:03:34,
+# a RECOVERY pane. The fixture pinned a fiction and the test passed anyway.
+#
+# Re-derived by GROUPING the snapshot's pane records by `tmux_pid`, which is
+# what `newest_pane_ledger_activity` now does:
+#
+#   pid 4025325   60 records   newest 2026-09-06 17:25:30
+#   pid 4063373   56 records   newest 2026-09-11 02:36:40   <- the plan's
+#   pid 1111077   31 records   newest 2026-09-11 00:05:46   (crash 1)
+#   pid  627687    9 records   newest 2026-09-07 21:54:13
+#   pid 1820124    2 records   newest 2026-09-11 11:03:34   <- post-crash
+#
+# The server died at 02:36:44; its generation's newest record is 02:36:40. So
+# 02:36:40 IS what the function returns for the plan's generation — the number
+# round 1 asserted, now for a reason rather than by luck.
+INCIDENT_PLAN_AGE_S = 8.6 * HOUR          # plan 02:23, refusal 11:00
+INCIDENT_LAYOUT_AGE_S = 0.02 * HOUR       # continuum's post-crash autosave, 10:59
+INCIDENT_PANE_AGE_S = 8.6 * HOUR - 13.4 * 60   # gen 4063373 newest, 02:36:40
+
+
+def test_a_post_crash_layout_save_does_not_make_a_good_plan_stale(tmp_path, monkeypatch):
+    """🔴 THE REGRESSION. The incident's own three mtimes."""
+    _staleness_fixture(tmp_path, monkeypatch,
+                       plan_age_s=INCIDENT_PLAN_AGE_S,
+                       state_age_s=INCIDENT_LAYOUT_AGE_S,
+                       pane_age_s=INCIDENT_PANE_AGE_S,
+                       uptime_h=113.0)
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "ledger", (
+        f"basis={basis!r}: the 8.6h gap to a layout the CRASH wrote is still "
+        "being counted as evidence that the plan went stale")
+    assert hours < 2.0, (
+        f"measured {hours:.2f}h against the unit's 2.0h limit — the recovery is "
+        "refused again, which is the 8.5 hours this test exists for")
+
+
+def test_restore_RUNS_on_the_2026_09_11_numbers_instead_of_refusing(
+        tmp_path, monkeypatch, capsys):
+    """End to end through the unit's own `--staleness-check 2`."""
+    _staleness_fixture(tmp_path, monkeypatch,
+                       plan_age_s=INCIDENT_PLAN_AGE_S,
+                       state_age_s=INCIDENT_LAYOUT_AGE_S,
+                       pane_age_s=INCIDENT_PANE_AGE_S,
+                       uptime_h=113.0)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 0, f"the recovery was refused again: {err!r}"
+    assert "too stale" not in err
+
+
+def test_the_2026_08_05_outage_is_STILL_refused_when_the_panes_kept_running(
+        tmp_path, monkeypatch, capsys):
+    """🔴 THE OTHER HALF, and the one the narrowing could have destroyed.
+
+    The real outage: the post-save hook name was clobbered, so the plan froze at
+    Jul 5 while resurrect kept saving the LIVE workspace to Jul 29. The layout is
+    newer than the plan there too — the same shape as the incident — and the only
+    thing that separates them is whether work CONTINUED. Here it did: the panes
+    were writing to the ledger the whole time.
+    """
+    # 🔴 `pane_age_s=0.0`, NOT `1 * HOUR`. With the panes at the same age as the
+    # LAYOUT the case lands exactly ON the discount boundary (`worked == gap ==
+    # 599h`), so it passes on BOTH sides of a mutant that drops `worked < gap` —
+    # the M8 shape, which this file has now been bitten by twice. Panes writing
+    # RIGHT NOW overshoot it: `worked` 600h against `gap` 599h.
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR,
+                       state_age_s=1 * HOUR, pane_age_s=0.0)
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "layout", (
+        f"basis={basis!r}: a plan frozen 600h while claude kept running was "
+        "discounted by the ledger — the discount is for a workspace that DIED, "
+        "and this one never did")
+    assert hours > 2, (
+        f"measured {hours:.1f}h: a plan frozen for 600h while claude kept "
+        "running is being waved through — restoring it relaunches a month-old "
+        "workspace, which is the outage this gate was built for")
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    assert rc == 1, capsys.readouterr().err
+
+
+def test_a_layout_OLDER_than_the_plan_is_untouched_by_the_narrowing(tmp_path, monkeypatch):
+    """The mirror direction — continuum stopped saving while `save` kept running.
+
+    The ledger cross-check applies only where the layout is NEWER; a mutant that
+    drops that condition would discount this case too.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=1 * HOUR,
+                       state_age_s=600 * HOUR, pane_age_s=0.0)
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "layout", f"basis={basis!r}"
+    assert hours > 2, (
+        f"measured {hours:.1f}h — the layout being restored is not the one the "
+        "plan describes, and that is unrelated to when the panes last wrote")
+
+
+def test_an_UNMEASURABLE_ledger_leaves_the_layout_gap_exactly_as_it_was(tmp_path, monkeypatch):
+    """No ledger module, no directory, or a 7-day prune that emptied it. Falling
+    back to the previous behaviour can only refuse MORE, never less."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR,
+                       state_age_s=1 * HOUR)          # pane_age_s unmeasurable
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "layout"
+    assert hours > 500, hours
+
+
+def test_the_narrowing_can_only_DISCOUNT_the_layout_gap_never_INFLATE_it(tmp_path, monkeypatch):
+    """INVARIANT GUARD — the bug never violated this, so it is not regression
+    coverage; it pins that the cross-check is a `min` and not a replacement.
+
+    Plan 600h old, layout 1h old (they disagree by 599h), and a pane wrote a
+    minute ago (work outlived the plan by 600h). Reporting the larger number
+    would make the gate refuse on a basis that is not what the two artefacts
+    actually disagree by.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR,
+                       state_age_s=1 * HOUR, pane_age_s=60.0)
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "layout", basis
+    assert hours == pytest.approx(599.0, abs=0.1), hours
+
+
+def test_the_incident_shape_END_TO_END_through_the_REAL_witness(tmp_path, monkeypatch):
+    """🔴 THE SEAM. Every other case here stubs `newest_pane_ledger_activity`,
+    so each half can be green while the join is broken — which is exactly what
+    round 1 shipped: the arithmetic was right and the witness returned a
+    post-crash record.
+
+    This one builds all three artefacts for real — a plan file that RECORDS its
+    generation, a resurrect state file newer than it, and a ledger directory
+    holding the dead generation beside the post-crash one — and lets the
+    production code walk from the plan's `tmux_pid` to the witness itself.
+    """
+    import time
+    now = time.time()
+    plan = tmp_path / "restore-plan.json"
+    plan.write_text(json.dumps(
+        [dict(_gen_entry(1, SID_A), tmux_pid=GEN_PLAN)]))
+    os.utime(plan, (now - INCIDENT_PLAN_AGE_S, now - INCIDENT_PLAN_AGE_S))
+    monkeypatch.setattr(tsr, "PLAN", plan)
+
+    state = tmp_path / "tmux_resurrect_stub.txt"
+    state.write_text("stub")
+    os.utime(state, (now - INCIDENT_LAYOUT_AGE_S, now - INCIDENT_LAYOUT_AGE_S))
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: state)
+    monkeypatch.setattr(tsr, "uptime_hours", lambda: 113.0)
+
+    d, _ = _ledger(tmp_path, {
+        "claude-p28.json": (INCIDENT_PANE_AGE_S, GEN_PLAN),
+        "claude-p2.json": (60.0, GEN_POST),         # the recovery pane
+        "opencode-p1.json": (180.0, GEN_POST),
+    }, name="ledger-e2e")
+    monkeypatch.setattr(tsr, "LEDGER_DIR", d)
+
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "ledger", (
+        f"basis={basis!r} end to end — the generation did not reach the witness, "
+        "or the witness took the post-crash record")
+    assert hours < 2.0, f"{hours:.2f}h against the unit's 2.0h limit"
+    assert tsr.cmd_restore(dry_run=True, staleness_hours=2) == 0
+
+
+def test_the_ledger_basis_refusal_does_not_claim_a_layout_comparison(
+        tmp_path, monkeypatch, capsys):
+    """The `why` dict is the only consumer that knows the basis vocabulary, and
+    it is now FIVE arms. A missing one is a KeyError in the refusal path — the
+    crash the contract line in `plan_staleness_hours` exists to prevent — and a
+    message naming the layout would point the reader at the number this basis was
+    computed to reject."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR,
+                       state_age_s=1 * HOUR, pane_age_s=590 * HOUR)
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "ledger", basis
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert "basis=ledger" in err, err
+    assert "saved layout" not in err, (
+        f"the ledger basis is describing itself as a layout comparison: {err!r}")
+
+
+def test_a_skew_refusal_does_not_report_a_LEDGER_number_as_a_layout_gap(
+        tmp_path, monkeypatch, capsys):
+    """🔴 THE SAME CLAIM AS THE TEST ABOVE, ON THE PATH IT DID NOT COVER.
+
+    When an artefact's mtime is in the future, liveness is unmeasurable and the
+    function falls back to the contemporaneity number — but that number may
+    ALREADY have been discounted to the ledger term. Returning a bare `"skew"`
+    then printed the ledger number under the layout's wording: measured,
+    `out of step with the saved layout by 50.0h (basis=skew)` where 50.0h was
+    the ledger term. The basis is the pair, not the arithmetic.
+    """
+    _staleness_fixture(tmp_path, monkeypatch,
+                       plan_age_s=600 * HOUR,
+                       state_age_s=-1 * HOUR,      # in the FUTURE => skew
+                       pane_age_s=550 * HOUR)      # work stopped 50h after the plan
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "ledger-skew", (
+        f"basis={basis!r}: liveness is unmeasurable AND the number was "
+        "discounted; a bare 'skew' claims a layout comparison for a ledger "
+        "number")
+    assert 49 < hours < 51, hours
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert "basis=ledger-skew" in err, err
+    assert "saved layout" not in err, (
+        f"a ledger number is being reported as a layout gap: {err!r}")
+
+
+def test_a_skew_refusal_that_was_NOT_discounted_still_says_skew(tmp_path, monkeypatch, capsys):
+    """The discriminating control for the test above — without it a mutant that
+    always returns `ledger-skew` passes, and every plain skew refusal would then
+    claim a ledger comparison it never made."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR,
+                       state_age_s=-1 * HOUR)      # pane witness unmeasurable
+    hours, basis = tsr.plan_staleness_hours()
+    assert basis == "skew", basis
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1 and "basis=skew" in err, err
+    assert "saved layout" in err, err
+
+
+# --- the ledger witness itself --------------------------------------------- #
+
+GEN_PLAN = "4063373"        # the generation that died at 02:36:44
+GEN_POST = "1820124"        # the server that came up after the crash
+
+
+def _ledger(tmp_path, files, name="agent-ledger"):
+    """A ledger directory: {filename: (age_in_seconds, tmux_pid)}."""
+    import time
+    d = tmp_path / name
+    d.mkdir()
+    now = time.time()
+    for fname, (age, pid) in files.items():
+        p = d / fname
+        p.write_text(json.dumps({"schema": "agent-ledger/1", "runtime": "claude",
+                                 "session_id": SID_A, "tmux_pid": pid}) + "\n")
+        os.utime(p, (now - age, now - age))
+    return d, now
+
+
+def test_the_ledger_witness_takes_the_newest_PANE_record_OF_THAT_GENERATION(tmp_path):
+    d, now = _ledger(tmp_path, {"claude-p28.json": (3600.0, GEN_PLAN),
+                                "claude-p46.json": (7200.0, GEN_PLAN),
+                                "opencode-p1.json": (1800.0, GEN_PLAN)})
+    got = tsr.newest_pane_ledger_activity(GEN_PLAN, d)
+    assert got is not None and abs(got - (now - 1800.0)) < 2, got
+
+
+def test_a_POST_CRASH_agent_CANNOT_move_the_witness(tmp_path):
+    """🔴 THE ROUND-1 REFUTATION, AS A TEST.
+
+    The first version of this witness took the newest pane record outright, on
+    the stated invariant that "when the server dies they all stop writing at
+    once". That is FALSE: an agent working in a pane of the NEW post-crash server
+    writes `claude-p<N>.json` like any other, and pane ids restart at %0 so it
+    can even overwrite the dead generation's file for that pane.
+
+    MEASURED on the preserved snapshot
+    (`~/.cache/tmux-crash2-20260911T110407/agent-ledger`): the unfiltered query
+    returned `claude-p2.json` at 11:03:34 — a RECOVERY pane — which made
+    `worked` 8.672h against a `gap` of 8.6h, so the discount never applied and
+    the gate refused exactly as before. The fix did not fix the incident.
+
+    This fixture is that snapshot's shape: the dead generation frozen at the
+    crash, and a small, MUCH NEWER post-crash generation beside it.
+    """
+    d, now = _ledger(tmp_path, {
+        "claude-p28.json": (8.6 * HOUR - 13.4 * 60, GEN_PLAN),   # 02:36:40
+        "claude-p46.json": (8.6 * HOUR - 13.0 * 60, GEN_PLAN),
+        "claude-p2.json": (60.0, GEN_POST),                      # 11:03:34
+        "opencode-p1.json": (180.0, GEN_POST),                   # 11:01:48
+    })
+    got = tsr.newest_pane_ledger_activity(GEN_PLAN, d)
+    assert got is not None, "the plan's own generation went unmeasured"
+    assert abs(got - (now - (8.6 * HOUR - 13.4 * 60))) < 2, (
+        "a post-crash agent moved the witness — this is exactly the round-1 "
+        f"refutation: got {got!r}, the dead generation's newest is "
+        f"{now - (8.6 * HOUR - 13.4 * 60)!r}")
+
+
+def test_an_EMPTY_generation_measures_NOTHING_rather_than_matching_everything(tmp_path):
+    """A plan that does not record its generation must yield no witness at all.
+
+    🔴 THE FIXTURE HAS TO CONTAIN A RECORD WITH NO GENERATION, AND THE FIRST
+    VERSION DID NOT — a mutant deleting the `not generation` guard SURVIVED my
+    own sweep because every fixture record carried a pid, so the inner
+    `record_generation(rec) != generation` comparison rejected them anyway and
+    the outer guard never mattered. The pairwise-distinct rule, in its other
+    form: a fixture that cannot produce the guard's own boundary value cannot
+    see a mutant that removes the guard.
+
+    The hazard is real, not fixture-shaped: the ledger genuinely holds records
+    written before `tmux_pid` existed, so for a legacy plan ("" generation)
+    `"" == ""` would match that whole cohort and manufacture a liveness number
+    out of records that say nothing about this workspace.
+    """
+    d, _ = _ledger(tmp_path, {"claude-p2.json": (60.0, GEN_POST)})
+    ungen = d / "claude-p7.json"
+    ungen.write_text(json.dumps({"schema": "agent-ledger/1",
+                                 "runtime": "claude"}) + "\n")
+    assert tsr.record_generation(json.loads(ungen.read_text())) == "", (
+        "fixture control: this record must have an EMPTY generation, or the "
+        "outer guard is never the thing under test")
+    assert tsr.newest_pane_ledger_activity("", d) is None
+
+
+def test_the_ledger_witness_IGNORES_session_keyed_records(tmp_path):
+    """🔴 STILL LOAD-BEARING, JUST NOT SUFFICIENT. A `claude-s-<id>.json` is
+    written by an agent with no `$TMUX_PANE` — a claude run in a bare terminal,
+    which is exactly what an operator or an investigating agent does WHILE the
+    tmux workspace is dead. MEASURED in the preserved snapshot: 158 pane records
+    against 94 non-pane. (An earlier claim of "125 against 105" was the LIVE
+    ledger today — the wrong directory.)
+
+    The session-keyed records here carry the PLAN's generation, so only the
+    filename filter can exclude them — the generation filter cannot.
+    """
+    d, now = _ledger(tmp_path, {
+        "claude-p28.json": (7200.0, GEN_PLAN),
+        "claude-s-fb39f9cf-db4d-45eb-987c-580e54cc1b38.json": (5.0, GEN_PLAN),
+        "opencode-s-ses_f82684470ffepNDoNQ8SXYxAP0.json": (5.0, GEN_PLAN),
+    })
+    got = tsr.newest_pane_ledger_activity(GEN_PLAN, d)
+    assert got is not None and abs(got - (now - 7200.0)) < 2, (
+        f"took a session-keyed record as pane activity: {got!r} vs the pane "
+        f"record at {now - 7200.0!r}")
+
+
+def test_the_ledger_witness_reports_UNMEASURABLE_rather_than_a_number(tmp_path):
+    assert tsr.newest_pane_ledger_activity(GEN_PLAN, tmp_path / "absent") is None
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert tsr.newest_pane_ledger_activity(GEN_PLAN, empty) is None
+    # a record that is not readable JSON witnesses nothing, rather than raising
+    # out of the staleness gate
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "claude-p1.json").write_text("not json\n")
+    assert tsr.newest_pane_ledger_activity(GEN_PLAN, bad) is None
+
+
+def test_a_record_with_NO_generation_is_not_taken_as_a_match(tmp_path):
+    """`record_generation` returns "" for a record predating the `tmux_pid`
+    field. That must not compare equal to a real generation — a whole cohort of
+    ungeneration-ed records would otherwise become a live witness."""
+    d = tmp_path / "nogen"
+    d.mkdir()
+    p = d / "claude-p9.json"
+    p.write_text(json.dumps({"schema": "agent-ledger/1", "runtime": "claude"}) + "\n")
+    assert tsr.newest_pane_ledger_activity(GEN_PLAN, d) is None
+
+
+def test_the_witness_measures_NOTHING_if_the_writers_filename_shape_changes(tmp_path, monkeypatch):
+    """🔴 A SURVIVING MUTANT FROM THE ROUND-1 SWEEP: the shape guard worked and
+    nothing tested it.
+
+    The pane-name spelling is derived from `agent_ledger.pane_filename` rather
+    than restated. If that function's SHAPE changes so the sentinels no longer
+    bracket a separator and a suffix, this reader cannot know which files are
+    pane records — and must measure nothing rather than match everything or
+    nothing silently.
+    """
+    d, _ = _ledger(tmp_path, {"claude-p28.json": (60.0, GEN_PLAN)})
+    assert tsr.newest_pane_ledger_activity(GEN_PLAN, d) is not None, "control"
+
+    class _Shapeless:
+        LEDGER_DIR = str(d)
+
+        @staticmethod
+        def pane_filename(runtime, pane_id):
+            return "%s%s" % (runtime, pane_id)      # no separator, no suffix
+
+    monkeypatch.setattr(tsr, "_AL", _Shapeless)
+    assert tsr.newest_pane_ledger_activity(GEN_PLAN, d) is None
+
+
+def test_record_generation_is_ONE_reader_shared_with_the_binding_guard():
+    """One rule, one place. `ledger_binding`'s generation check and the witness
+    must never disagree about the field or about how a missing one is spelled."""
+    assert tsr.record_generation({"tmux_pid": " 4063373 "}) == "4063373"
+    assert tsr.record_generation({"tmux_pid": None}) == ""
+    assert tsr.record_generation({}) == ""
+    assert tsr.record_generation("not a dict") == ""
+
+
+def test_pane_activity_before_the_plan_counts_as_ZERO_not_as_negative(tmp_path, monkeypatch):
+    """The crash shape: the panes stopped BEFORE the plan's last save. A negative
+    number would compare as fresher than anything and print as nonsense."""
+    import time
+    monkeypatch.setattr(tsr, "newest_pane_ledger_activity",
+                        lambda *a, **k: time.time() - 7200.0)
+    assert tsr.pane_activity_after(time.time() - 60.0, GEN_PLAN) == 0.0
+
+
+# --- the plan carries the generation it was built under -------------------- #
+
+def test_a_saved_plan_records_the_tmux_generation_it_was_built_under(monkeypatch):
+    """Without this the witness has nothing to filter on and the whole
+    cross-check is unmeasurable — see `plan_generation`."""
+    monkeypatch.setattr(tsr, "codenames", lambda: {})
+    monkeypatch.setattr(tsr, "live_claude_panes", lambda: [
+        {"pane_id": "%1", "session": "s", "window": "1", "cwd": "/r", "title": "t"}])
+    monkeypatch.setattr(tsr, "tmux_server_pid", lambda: GEN_PLAN)
+    monkeypatch.setattr(tsr, "ledger_binding", lambda *a, **k: (SID_A, "ok"))
+    monkeypatch.setattr(tsr, "first_user_line", lambda *a: "")
+
+    plan = tsr.build_plan()
+    assert plan and plan[0]["tmux_pid"] == GEN_PLAN, plan
+    assert tsr.plan_generation(plan) == GEN_PLAN
+
+
+def test_a_plan_that_does_not_record_its_generation_measures_NOTHING():
+    """⚠ THE SCOPE OF THE FIX, PINNED. Every plan written before `build_plan`
+    started recording this — including the preserved 02:23 plan from the
+    incident itself — yields "". That makes the cross-check unmeasurable and the
+    gate behaves exactly as it did before; the remedy for such a plan is
+    `restore --plan <generation>`, which bypasses the gate. Anyone who "fixes"
+    this by defaulting to a live pid reintroduces the post-crash witness."""
+    assert tsr.plan_generation([{"session": "s", "session_id": SID_A}]) == ""
+    assert tsr.plan_generation([]) == ""
+    assert tsr.plan_generation(None) == ""
+    # the first entry may legitimately be blank (an unbound pane written before
+    # the pid was resolved); the generation is whatever the plan actually carries
+    assert tsr.plan_generation([{"tmux_pid": ""}, {"tmux_pid": GEN_PLAN}]) == GEN_PLAN
 
 
 # --------------------------------------------------------------------------- #

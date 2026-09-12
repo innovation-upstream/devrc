@@ -41,9 +41,15 @@ And, as before, what the verdict REFUSES to say:
      comparison must not be reported as agreement.
 
   7. 🔴 A RUN THAT REFUSED IS NOT A CLEAN BOOT. `tmux-session-restore.py` exits
-     0 when it finds no tmux server, deliberately, so it cannot fire the
-     DND-bypassing `OnFailure` toast — which makes `Result`, `ExecMainStatus`
-     and `InactiveExitTimestamp` byte-identical to a successful restore. A
+     0 when it finds no tmux server on a COLD BOOT, deliberately, so it cannot
+     fire the DND-bypassing `OnFailure` toast on a condition every cold boot
+     guarantees — which makes `Result`, `ExecMainStatus` and
+     `InactiveExitTimestamp` byte-identical to a successful restore. (A
+     MID-SESSION refusal — a plan written during this boot, so a workspace
+     existed and is gone — exits 75 the FIRST time per incident and 0 on every
+     later activation for the same incident, because the alert is latched. So
+     `ExecMainStatus=0` on a refusal still does not tell you which it was, and
+     this arm must key on the journal line either way.) A
      refused run also logs ZERO `claude --resume` lines, and the resume
      comparison is gated on `sends != 0`, so the whole block was SKIPPED and the
      verdict returned RC_CLEAN. Round 2 of the audit measured that: on a boot
@@ -467,11 +473,19 @@ def test_no_fixed_delay_advice_survives_ANYWHERE_in_the_report(tmp_path):
 # --------------------------------------------------------------------------- #
 # 🔴 A REFUSED RUN IS NOT A CLEAN BOOT
 #
-# The refusal exits 0 by design, so every systemd-side field reads like success,
-# and it logs zero sends, so the resume comparison (gated on `sends != 0`) never
-# runs. Before round 2 the verdict therefore returned RC_CLEAN on a boot where
-# NOTHING was resumed — while `tmux-session-restore.py` claimed in a comment
-# that this script surfaces exactly that path.
+# A COLD-BOOT refusal exits 0 by design, so every systemd-side field reads like
+# success, and it logs zero sends, so the resume comparison (gated on
+# `sends != 0`) never runs. Before round 2 the verdict therefore returned
+# RC_CLEAN on a boot where NOTHING was resumed — while
+# `tmux-session-restore.py` claimed in a comment that this script surfaces
+# exactly that path.
+#
+# 🔴 THE EXIT CODE IS NO LONGER A CONSTANT, AND THIS ARM MUST NOT START LEANING
+# ON ONE. A MID-SESSION refusal exits 75 once per incident and 0 for every later
+# activation of the same incident. Keying on the journal line is what keeps this
+# verdict correct across all three of those, which is why the fixture below
+# still uses `ExecMainStatus=0`: that is the case where an exit-code-based
+# instrument would be blind.
 # --------------------------------------------------------------------------- #
 
 def test_a_refused_run_is_NOT_a_clean_boot(tmp_path):
