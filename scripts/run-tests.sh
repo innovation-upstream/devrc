@@ -4635,8 +4635,16 @@ SHELL_TESTS=(
   # returns before the root check, and the suite drives the pure transforms
   # against fixtures — an lsof header in two different column layouts, a
   # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
-  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
-  # network and no git.
+  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher and no
+  # network. 🔴 IT DOES READ GIT, since section 14 — the sha-citation ledger —
+  # resolves refs and tests ancestry with `git -C "$ROOT"`. That sentence said "no
+  # git" for two commits after the reads landed: the change that added them
+  # touched only the two diagnose-disk files and never grepped for a note
+  # describing them. A property asserted in ONE file about code in ANOTHER goes
+  # stale silently, which is the whole reason this registry carries notes at all.
+  # The reads are all read-only (rev-parse/cat-file/merge-base), the target never
+  # fetches, and it degrades to COULD NOT MEASURE where there is no .git — which
+  # is why it still runs in the sandbox tier.
   # 🔴 THIS COMMENT HAS NOW CARRIED A WRONG LINE COUNT TWICE, in the commit
   # correcting the previous wrong one each time. It said "282 lines"; round 2
   # replaced that with "282 at the merge base (567 after round 1, 730 after
