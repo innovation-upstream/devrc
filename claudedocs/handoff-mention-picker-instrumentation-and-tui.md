@@ -18,19 +18,24 @@ picker window, (3) ship click telemetry to `activity.events`, (4) open PRs in a 
 instead of a browser.
 
 ## State now
-- Branch: `main`, clean, synced with `origin/main` (this is a SHARED checkout — another
-  session fast-forwarded it mid-session, from `b42ac7c3` to `db7bf3ff`).
-- **Nothing of this arc is merged yet.** Three agents dispatched, work in worktrees.
-- **Four claims HELD** (release them when their item lands):
-  `mention-pick-recording-autoopen` · `mention-picker-center` ·
-  `mention-click-telemetry` · `mention-pr-tui-research`
-- Branch pushed so far: `feat/mention-picker-center` (agent 2). Agent 1's branch not yet
-  on origin as of this writing. No PR numbers yet.
-- Deploy/verify status: **nothing deployed, nothing verified live.** No `home-manager
-  switch` and no `ship.sh` was run this session.
-- 🔴 `main` was RED on two `test_guard_core.py` kill-scanner tests for most of this
-  session and is **now GREEN** — measured `2 passed` at `db7bf3ff`. See the gotcha below;
-  the fix was NOT the one the previous handoff predicted.
+- Branch: `main`, SHARED checkout, moving constantly (observed `b42ac7c3` → `db7bf3ff` →
+  `b1abf6b1` → `5dac6ec2` within this session). Re-read `git status` before any write.
+- 🔴 `main` is **GREEN** again — the kill-scanner red is fixed (see the gotcha below).
+- **Four PRs open, none merged, nothing deployed:**
+  - **#1569** `feat/mention-pick-recording-and-click-telemetry` — the auto-open recording
+    fix + click telemetry. Agent still running at last observation.
+  - **#1562** `feat/mention-picker-center` — centers the picker float. Merged with current
+    `main` (`c9b45236`); its gate was re-launched unpiped and had **no `RESULT:` line yet**.
+  - **#1563** `docs/handoff-mention-picker-instrumentation` — this doc.
+  - octo.nvim review TUI — **dispatched, no branch yet**.
+- **Five claims HELD:** `mention-pick-recording-autoopen` · `mention-picker-center` ·
+  `mention-click-telemetry` · `mention-pr-tui-research` · `mention-pr-tui-octo-integration`
+- 🔴 **NO GATE VERDICT EXISTS FOR ANY OF THIS WORK.** Both running gates are
+  could-not-vouch, not green. `#1562`'s five i3/launcher files are green on its merged tree
+  (129 passed), which is a claim about those files only.
+- Deploy/verify status: **nothing deployed, nothing observed live.** No `home-manager
+  switch`, no `ship.sh`. Picker centering is verified against the RENDERED i3 config only —
+  nobody has seen the window land centered.
 
 ## Open investigations — live diagnosis state
 
@@ -67,22 +72,23 @@ instead of a browser.
   cannot be answered until rank+class are recorded at pick time.
 
 ## Next steps (ranked)
-1. **Land agent 1's instrumentation PR** — records BOTH paths tagged `auto`/`picker`,
-   plus rank / plausibility class / total-offered, plus the `activity.events` emit.
-   Files: `scripts/mention-open.py`, `scripts/collector/mention_scan.py`,
-   `scripts/collector/emit/`, `scripts/tests/test_mention_open.py`,
-   `scripts/tests/mutation_battery_mentions.py`. Repo: devrc.
-   forcing: user — operator asked for instrumentation + telemetry directly this session.
-2. **Land agent 2's PR on `feat/mention-picker-center`** — centers the picker float.
-   Files: `nix/i3/config.nix`, `scripts/tests/test_i3_picker_centering.py`.
-   IN FLIGHT: branch pushed, PR number not yet observed. Repo: devrc.
-   forcing: user — operator reported the window opens pinned left.
-3. **Act on the PR-TUI research** (agent 3, read-only) and decide whether to build.
-   Scope is operator-set at FULL review AND merge. Repo: devrc.
+1. **Land #1569** (auto-open recording + telemetry), then **#1562** (centering).
+   Repo: devrc. Both need a gate verdict first — neither has one.
+   forcing: user — operator asked for instrumentation and reported the left-pinned window.
+2. **Land the octo.nvim TUI PR** once the agent opens it. 🔴 It rewrites the same two
+   `open_url` call sites as #1569 (`mention-open.py:2439` and `:2507`), so whichever lands
+   second must TEST-MERGE and read the merged result of both sites — a clean `git merge` is
+   not a clean merge. Repo: devrc.
    forcing: user — operator asked for a TUI instead of the browser.
-4. **`ship.sh` once 1-3 land**, then re-verify the click path on the deployed wrapper.
+3. **`ship.sh`, then verify the click path on the deployed wrapper** — `picks.jsonl` must
+   GROW on the workbench after a click, including from an auto-open. That file staying
+   absent is the whole reason this arc exists.
+   forcing: user — the recording fix is unverifiable until it is deployed and clicked.
+4. **Operator-only live checks nothing hermetic can cover** — `:map <localleader>pm` must
+   report *No mapping found* (the merge-safety assertion), `nvim-octo <repo> <N>` on an
+   ISSUE number must open an issue buffer (the auto-detect control), and one real hint click.
    forcing: none
-5. **Release the four claims** as each item lands: `claim-work --release <slug>`.
+5. **Release the five claims** as each item lands: `claim-work --release <slug>`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -140,6 +146,88 @@ instead of a browser.
 - ⚠ **This is a SHARED checkout and it moved under this session** — `origin/main` advanced
   from `622fc2d8` to `db7bf3ff` mid-session, and the working tree's one dirty file
   disappeared, by another session's action. Re-read `git status` before any write.
+
+- 🔴 **THE PIPE TRAP FIRED AGAIN AND WAS CAUGHT ONLY BY LOOKING — measured, with the exact
+  bytes.** An agent's `gate.sh … | tail -40` produced, in full:
+  `gate: === pytest === (full log: …)` / `GATE_EXIT=0` / `[exited with code 0]`. That
+  `GATE_EXIT=0` is **`tail`'s** status over a gate that had just been **killed mid-pytest**,
+  and the background harness independently summarised it as *"completed (exit code 0)"*.
+  **No `RESULT:` line was ever printed.** Two independent numbers both said green for a run
+  that never finished. `gate.sh` prints a bounded summary itself and its exit status is
+  authoritative — there is no reason to pipe it, ever.
+- 🔴 **DISJOINT FILES ARE NOT SAFETY, and this arc produced the textbook case.** #1562's
+  merge with `main` had **zero** file overlap (14 upstream files, 6 of the branch's) — and
+  upstream had changed `scripts/tests/test_no_real_launchers.py`, a **repo-wide scanner over
+  test files**, while the branch added three test files it had never seen. Zero overlap,
+  direct interaction. Running that scanner against the MERGED tree (129 passed) is what
+  turned it from an assumption into evidence.
+- 🔴 **`main`'s kill-scanner red was fixed by a THIRD route, not the two PRs the previous
+  arc's handoff named.** It framed it as needing `#1534` and `#1539`, one offender each,
+  neither greening `main` alone. What landed was `c0bbd6d9 fix(guard-core): stop the kill
+  scanners reading claudedocs/`. **Every per-doc fix was itself a doc, so the fix rate could
+  never catch the break rate — the scanner's SCOPE was the defect, not any document.**
+  Measured green afterwards. Do not re-derive the two-PR dependency; it is obsolete.
+
+- 🔴 **PR-REVIEW TUI RESEARCH — the field was measured, so nobody re-surveys it.**
+  Recommendation: **octo.nvim**, the only candidate clearing FULL review+merge AND
+  deep-linking to one PR.
+  - **gh-dash cannot deep-link** — `cmd/root.go` declares `cobra.MaximumNArgs(1)` but the
+    `Run` body **never reads `args`**; it goes straight to cwd-derived repos. The config
+    `filters` workaround was measured at 7 points: a bare number ranks the target first but
+    never ISOLATES it (`#74` → 51 results), and gh-dash re-sorts anyway. **A click would land
+    on a list, not the PR.** It also has no request-changes action
+    (`prview/action.go` enumerates approve/close/reopen/merge only). Credit where due: its
+    merge CONFIRMATION (literal `Y`+Enter, `prssection.go:82-110`) is the best in the field.
+  - **No merge at all:** tuicr, prr, gh-review.nvim (its README says so explicitly).
+    **ghui:** no deep-link, no reopen.
+  - 🔴 **The reason octo is right is not features — it is that `Octo <N> <owner/repo>`
+    resolves the PR-vs-ISSUE ambiguity server-side.** `mention-open.py` builds `/pull/{id}`
+    for EVERY GitHub mention and GitHub redirects `/pull/<issue>` → `/issues/<issue>`, so
+    the URL cannot say which it is. `utils.open_buffer` (`utils.lua:315`) fires one GraphQL
+    `issueOrPullRequest` and dispatches on `__typename`. **Passing a URL would open a wrong
+    buffer for every issue mention; passing the NUMBER cannot.**
+  - Reviewing needs no checkout (`reviews/init.lua:214` gates that on `use_local_fs`,
+    default false). nixpkgs `octo-nvim` is a bare `buildVimPlugin` with **no declared
+    runtime deps** — plenary, a picker and the colorscheme must be on the packpath
+    explicitly. `pkgs.neovim.override { configure = …; }` was VERIFIED to instantiate; the
+    `writeShellApplication` wrapper was NOT.
+- 🔴 **octo has NO merge confirmation** — `commands.lua:2365` calls `gh.pr.merge(opts)` with
+  no prompt, bound by default to `<localleader>pm`, `psm`, `prm`, `pk` and `<C-r>` in the
+  picker. **Operator decision 2026-09-12:** `mappings_disable_default = true`, re-declare
+  only non-destructive keys, so merge requires typing `:Octo pr merge`.
+- 🔴 **Two octo defaults are WRONG FOR THIS REPO and would bite on first use.** Upstream
+  `default_merge_method = "merge"` produces a merge commit, but all 5 of this repo's most
+  recent merges are squashes — so the first TUI merge would silently produce the wrong
+  commit shape. And `default_delete_branch` must stay `false`: this repo has
+  `delete_branch_on_merge=true`, so deleting a STACKED PARENT's branch auto-closes the child
+  PR and **GitHub refuses to reopen it**.
+- 🔴 **A POST-SPAWN FALLBACK FOR THE TUI IS STRUCTURALLY IMPOSSIBLE — the pre-flight is the
+  only thing that can work.** alacritty 0.17.0 exits **0** whether its `-e` command runs or
+  exits 127, and `Popen` never waits, so a missing `nvim-octo` gives a window that flashes
+  and vanishes, invisible to the caller. `shutil.which` BEFORE the spawn is mandatory, not
+  defensive polish — which is exactly why `pick()` already pre-flights `fzf`.
+- 🔴 **The TUI/browser selector must be a MARKER FILE, never an env var.** The handler is
+  spawned by the alacritty hint with the **display manager's** environment, so a shell-set
+  variable never reaches it. `~/.server-mode` is the existing precedent in this repo.
+- **Three ledgers go red on the octo integration, and one is subtle:**
+  `nix/programs/alacritty/default.nix`'s `makeBinPath` is parsed by
+  `test_mention_open.py:1235` for `pkgs.X` names — ⚠ **a local `let`-bound package is not
+  spelled `pkgs.X` and will not parse**, so `nvim-octo` must come through an overlay to
+  genuinely BE `pkgs.nvim-octo`. Also `PROVIDER`/`SPAWNABLE_EXECUTABLES`/`EXPECTED_ARGV0` in
+  that file, and `nolaunch.py`'s two-way pin (it belongs in `ACKNOWLEDGED_UNSTUBBED` with a
+  written reason — it is only ever alacritty's `-e` payload, and alacritty is already
+  stubbed).
+- ⚠ **The research measured package versions against the REGISTRY nixpkgs, not this flake's
+  pin** (`flake.lock` is ~4 days older, same 26.11pre branch). Its `builtins.getFlake` of
+  the pinned input was interrupted and returned nothing. Re-verify availability against the
+  pin before relying on a version.
+- ⚠ **UNVERIFIED, do not build on it:** whether alacritty 0.17 disambiguates two hints with
+  identical regexes by `mouse.mods` (the proposed Shift-click-for-browser escape hatch).
+- 🔴 **The frozen mirror vs the pod, hit live.** `subsystem_touch.py` reads
+  `~/.claude/analyze-service-index` (the FROZEN mirror) and reported `NO ENTRY — scripts`,
+  while `cairn recall` (synced cache) showed a live `scripts` entry with 4 bullets.
+  **Following the probe's nomination would have created a duplicate entry.** Trust
+  `cairn recall` over the probe's entry-existence claim.
 
 ## How to verify
 ```bash
