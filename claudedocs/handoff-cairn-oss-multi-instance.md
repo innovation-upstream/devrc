@@ -1163,9 +1163,11 @@ belongs to that arc's own session. via: measurement
     firing exits 0.
     forcing: none
 
-22. ⚠ **REMEDIED AND MERGED — `#1458`, squash `ce9b55c3`, 2026-09-10. NOT YET VERIFIED BY THE
-    FLAKE RATE, which is the half that actually closes this. And the three remedies this item
-    recommended were all aimed at the wrong layer.**
+22. ✅ **CLOSED 2026-09-12 — REMEDIED AND MERGED (`#1458`, squash `ce9b55c3`, 2026-09-10) AND NOW
+    VERIFIED BY THE FLAKE RATE, which was the half that actually closes it: 0 of 99 verdicts on
+    heads CARRYING the sha against 12 of 298 that do not. The reading, its controls and its
+    lower-bound caveat are at the Closing-condition paragraph below. And the three remedies this
+    item originally recommended were all aimed at the wrong layer.**
     🔴 **VERIFIED BY CONTENT ON `origin/main`, NEVER BY ANCESTRY** — a squash merge makes
     `merge-base --is-ancestor` false forever, so that check reads "not merged" and is wrong.
     On `origin/main`: the `sited_root` fixture is present, `_DISK_ROOTED_ALLOWLIST` is present,
@@ -1264,9 +1266,26 @@ belongs to that arc's own session. via: measurement
     was false, and it was inflating the urgency of every gate item in this doc. ⚠ A protection
     setting is a point-in-time reading and can be changed without touching this repo: **re-read
     it, do not cite this line.** via: measurement
-    **Closing condition:** `#1458` merged, AND a flake-rate reading against a baseline whose PR
-    heads postdate the merge — **not a single green run**. The OSS half closes separately, with
-    rank 3 slice 3.
+    ✅ **CLOSING CONDITION MET 2026-09-12 — THE FLAKE-RATE READING EXISTS, BY ANCESTRY.** The
+    store-api test is named in **0 of 99** `tekton/devrc-pytests` verdicts on heads that CARRY
+    `ce9b55c3` against **12 of 298** that do not (4.03%), so P(0 | the pre-window rate) ≈
+    **0.017** — against 0.23 for the only prior reading (`#1512`, which split on the anchor's
+    TIMESTAMP). Population: 400 devrc PR heads `#1162`–`#1566`, every state, 397 with a verdict,
+    0 ancestry-unmeasurable; predicate `git merge-base --is-ancestor ce9b55c3 <head>`; collector
+    positive-controlled on the three known reds first. 🔴 **The zero still is not what
+    establishes the fix — the mechanism being gone is** (`origin/main`: `sited_root` on 106
+    lines, 1 surviving `tmp_path / "store"` and it is prose, the test itself still present at
+    `:14543`). ⚠ **This item's `:367` for that surviving line is STALE — it is now `:449`**;
+    re-derive a line number rather than quoting one. 🔴 **And every per-test count is a LOWER
+    BOUND**: 100 of 101 failure descriptions
+    are truncated at 138 characters, so the true post count is in **[0, 22]** — though the bias
+    runs the right way, post-window failing runs averaging 1.83 failures against 3.60 pre.
+    ⚠ **The date predicate this item warned about reclassified 5 of 397 verdicts and 0 of 101
+    failures, so `#1512`'s table was underpowered rather than corrupted** — do not discard it.
+    Full table, classification and residuals: `handoff-gate-flake-store-api.md` rank 1, which
+    also records what the reading found INSTEAD — the gate's post-fix red is dominated by
+    deterministic ledger censuses over tracked text (27 of 99 verdicts), not by any flake.
+    The OSS half still closes separately, with rank 3 slice 3.
     ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE REDDENED THIS PR, AND IT IS NOT THIS ONE.**
     Tests in `scripts/tests/test_run_tests_targets.py` spawn a nested `run-tests.sh` bounded at
     **120 s** and are SIGKILLed at it (`subprocess.TimeoutExpired`, rc `-9`) — **not** an
@@ -2069,6 +2088,15 @@ covers; pin it with `--config`, do not `cd`.
   `git update-ref -d` when the arc closes), the worktrees `/tmp/wt-cairn-slice3` (holds the
   rebased-but-unpushed `6205faec`) and `/tmp/wt-mainctl` (the `main` control checkout).
 
+- ✅ **RANK 22 IS NOW FULLY CLOSED — the verification below landed 2026-09-12**: the flake rate is
+  0/99 on heads carrying `ce9b55c3` against 12/298 that do not (P(0) ≈ 0.017), measured by
+  ancestry with a positive-controlled collector. 🔴 **What the reading found INSTEAD is the part
+  worth carrying forward: the gate's remaining red is not a flake.** Deterministic ledger
+  censuses over tracked text account for **27 of 99** post-fix verdicts (22 the kill-mention
+  ledger, all of them before `#1561` exempted `claudedocs/`; **5 the runner-bound ledger, 4 of
+  those AFTER it** — the same design class in a second ledger, and the live one). Table and
+  residuals in `handoff-gate-flake-store-api.md` rank 1.
+  The pre-verification wording, kept for the provenance it names:
 - 🔴 **RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.** `#1458` squash **`ce9b55c3`** merged and
   content-verified; recorded by `#1462` (`60033d1e`) and corrected by `#1525` (`018e483b`). The
   second flake it uncovered is filed as **`handoff-gate-flake-store-api.md` rank 7** (`#1477`,
