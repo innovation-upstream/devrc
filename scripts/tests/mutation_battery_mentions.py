@@ -680,7 +680,119 @@ MUTANTS: list[tuple] = [
      "non-permission bit"),
 ]
 
+# ---- F13: the AUTO-OPEN was invisible to Tier B, and the click reported ------
+#      nothing. Every row below is a guard added in 2026-09; each `expected`
+#      token is taken VERBATIM from the message of the assertion that fires
+#      FIRST, per the header's warning about K58/K60/K63.
+MUTANTS += [
+    ("K72", "deletion", "the single-candidate AUTO-OPEN stops recording — the "
+                        "exact defect this arm was added to fix, restored",
+     "        if auto_repo:\n"
+     "            record_pick(auto_repo, num, via=PICK_VIA_AUTO)\n",
+     "        if False:\n"
+     "            record_pick(auto_repo, num, via=PICK_VIA_AUTO)\n",
+     "the AUTO-OPEN path recorded"),
+    ("K73", "operand swap", "the auto path records itself as a PICKER pick, so "
+                            "the tag is present and LYING",
+     "            record_pick(auto_repo, num, via=PICK_VIA_AUTO)\n",
+     "            record_pick(auto_repo, num, via=PICK_VIA_PICKER)\n",
+     "an auto-open recorded itself as"),
+    ("K74", "widening", "the two tags collapse to one string, so the log can no "
+                        "longer tell the paths apart at all",
+     'PICK_VIA_AUTO = "auto"\n', 'PICK_VIA_AUTO = "picker"\n',
+     "did not land distinguishable tags in one log"),
+    ("K75", "deletion", "`pick_via` returns the raw field, so a row written "
+                        "before the tag existed reports `via=None`",
+     "    return via if via in PICK_VIA_VALUES else PICK_VIA_UNKNOWN\n",
+     "    return via\n",
+     # ⚠ NOT "row was DROPPED" — that token belongs to the assertion ABOVE the
+     # one this mutant trips, and a sweep scored the row KILLED-WRONG-REASON for
+     # exactly that. The rows still LOAD under this mutant; what moves is how
+     # they CLASSIFY.
+     "did not classify as `unknown`"),
+    ("K76", "widening", "`load_picks` DISCARDS every untagged row — the reading "
+                        "that silently deletes the operator's whole history the "
+                        "day a field is added",
+     '        out.append({"t": float(t), "repo": repo, "n": n, "via": pick_via(row)})\n',
+     "        if pick_via(row) == PICK_VIA_UNKNOWN:\n"
+     "            continue\n"
+     '        out.append({"t": float(t), "repo": repo, "n": n, "via": pick_via(row)})\n',
+     "row was DROPPED over its `via` field alone"),
+
+    # ---- F14: the click telemetry ------------------------------------------
+    ("K77", "widening", "the AUTO-OPEN reports `rank=0`, which reads as \"the "
+                        "operator took the top row\" for a click that offered "
+                        "no rows at all",
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False)\n',
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False,\n'
+     "                   rank=0, offered_total=1)\n",
+     "fabricated ranking"),
+    ("K78", "disclosure", "the OFFERED universe rides out in the telemetry's "
+                          "`repo` field — the leak the sink's guard exists for",
+     "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n",
+     "    emit_click(CLICK_PICKED, repo=\", \".join(repo_universe(discovered)),\n"
+     "               platform=picked_platform,\n",
+     "click telemetry"),
+    ("K79", "operand swap", "the rank is 1-based, so every measurement of "
+                            "\"did the ordering put it on top\" is off by one",
+     "    picked_rank = next((i for i, c in enumerate(candidates)\n"
+     '                        if c["url"] == url), None)\n',
+     "    picked_rank = next((i for i, c in enumerate(candidates, 1)\n"
+     '                        if c["url"] == url), None)\n',
+     "0-based position in the list AS PRESENTED"),
+    ("K80", "deletion", "a click with NO range table reports the class "
+                        "`unknown` instead of omitting it — \"could not ask\" "
+                        "collapses into \"asked, no answer\"",
+     "                    if picked_repo and order_ranges else None)\n",
+     "                    if picked_repo else None)\n",
+     "claims a measurement that did not happen"),
+    ("K81", "narrowing", "`emit_click` stops swallowing — a telemetry failure "
+                         "reaches `guarded_main` and turns a working click into "
+                         "`mention-open failed` with no browser",
+     "    except Exception:  # noqa: BLE001 — telemetry must never cost a click\n",
+     "    except ValueError:  # noqa: BLE001 — telemetry must never cost a click\n",
+     "a raising telemetry path cost the OPEN"),
+    ("K82", "operand swap", "the PICKER arm reports BEFORE the browser is "
+                            "launched, so its ~3.7 ms import lands in front of "
+                            "the thing the operator is waiting for",
+     "    rc = open_url(url)\n"
+     "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
+     "               picker_shown=True, offered_total=len(candidates),\n"
+     "               rank=picked_rank, plausibility=picked_class)\n"
+     "    return rc\n",
+     "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
+     "               picker_shown=True, offered_total=len(candidates),\n"
+     "               rank=picked_rank, plausibility=picked_class)\n"
+     "    return open_url(url)\n",
+     "PICKER click did not record"),
+    # 🔴 THE SAME MUTATION ON THE *OTHER* CALL SITE, AND IT IS NOT A DUPLICATE.
+    # An earlier version of the ordering test drove the AUTO arm only, so K82
+    # SURVIVED it — two record-then-open sites, one covered. Both rows stay, so
+    # narrowing that test back to one arm reddens here rather than silently
+    # halving what it proves.
+    ("K84", "operand swap", "the AUTO arm reports BEFORE the browser is "
+                            "launched — the same defect at the other call site",
+     "        rc = open_url(auto_url)\n"
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False)\n'
+     "        return rc\n",
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False)\n'
+     "        return open_url(auto_url)\n",
+     "AUTO click did not record"),
+    ("K83", "operand swap", "the plausibility class ships as its ORDINAL, so an "
+                            "ABSENT key and CLASS_PLAUSIBLE are both 0 to a "
+                            "consumer reading it as an integer",
+     '    CLASS_PLAUSIBLE: "plausible",\n', "    CLASS_PLAUSIBLE: 0,\n",
+     "would ship as a number"),
+]
+
 TARGETS: dict[str, pathlib.Path] = {
+    "K72": OPEN_, "K73": OPEN_, "K74": OPEN_, "K75": OPEN_, "K76": OPEN_,
+    "K77": OPEN_, "K78": OPEN_, "K79": OPEN_, "K80": OPEN_, "K81": OPEN_,
+    "K82": OPEN_, "K83": OPEN_, "K84": OPEN_,
     "P1": SCAN,
     "K1": TAILER, "K2": TAILER, "K3": TAILER, "K43": TAILER, "K44": TAILER,
     "K4": SCAN, "K5": SCAN, "K6": SCAN,

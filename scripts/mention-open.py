@@ -95,15 +95,27 @@ move. A silent empty picker would be the same silent zero one layer up.
 repos into this PUBLIC repository. It may go to the operator's own screen and
 NOWHERE ELSE: never to a log, never to activity.events, never to a test fixture,
 never to stderr. `notify()` prints, so the refusal paths below name only the
-clicked text — never a row from the universe.
+clicked text — never a row from the universe. ⚠ THE TELEMETRY SINK ADDED IN
+2026-09 DOES NOT WEAKEN THIS. It reports the one row the operator opened and
+three scalars about the list (rank, size, class); `click_dims` is never handed
+the candidate list at all, so there is no argument through which an offered row
+could reach it.
 
 🔴 THE SAME RULE COVERS TWO MORE FILES THIS HANDLER NOW TOUCHES, and both are
 0600 under the same directory, outside every checkout:
   * `known_ranges.json` — `{"owner/repo": <highest issue-or-PR number>}`, whose
     KEYS are the private names (the mirror of the two files above, where the
     values are). Written by `regen-known-repos.py`.
-  * `picks.jsonl`       — one `{"t","repo","n"}` line per repository the
-    OPERATOR chose from the picker. Written HERE, by `record_pick`.
+  * `picks.jsonl`       — one `{"t","repo","n","via"}` line per repository the
+    OPERATOR opened, from the picker AND from the single-candidate auto-open,
+    tagged with which. Written HERE, by `record_pick`.
+
+🔴 AND ONE SINK THAT IS *NOT* A FILE: the handler reports the OUTCOME of a click
+to the activity-telemetry spool (`source=tool`, `kind=invocation`,
+`text=mention-open`). The rule above is unchanged and the distinction is the
+whole of it — what leaves this process is what the operator TOUCHED (the repo
+whose page opened, the rank their row sat at, how many rows were offered), never
+what they were OFFERED. See the CLICK-PATH TELEMETRY block.
 
 ORDERING, AND WHY IT IS ONLY ORDERING
 The picker offers ~392 rows for a clicked `#N`, and they used to arrive in one
@@ -500,6 +512,45 @@ PICKS_HALF_LIFE_DAYS = 30.0
 # keeps is always at least what a reader would use.
 PICKS_COMPACT_AT = PICKS_MAX_ROWS * 2
 
+# 🔴 WHICH CODE PATH PRODUCED A PICK. Until 2026-09-11 the log recorded only the
+# rows the operator selected in the PICKER, and `main()`'s single-candidate
+# shortcut — the common, fast path — returned without recording anything. So
+# Tier B learned from the AMBIGUOUS clicks alone: every click the handler could
+# answer outright was invisible to it, and the scores described the minority of
+# clicks that were hard rather than what this operator means by a number.
+#
+# Both paths are recorded now, and the row says WHICH, because they are not the
+# same evidence. A picker pick is a CHOICE among rows the operator read; an
+# auto-open is the handler's own resolution, which the operator only implicitly
+# ratified by not complaining. A later scoring change may weight or exclude one
+# of them — the tag is what makes that possible without having thrown the data
+# away. Nothing reads it today: `pick_scores` is unchanged and counts every row
+# the same, which is the pre-change behaviour for picker rows and strictly more
+# data for auto rows.
+PICK_VIA_AUTO = "auto"
+PICK_VIA_PICKER = "picker"
+
+# 🔴 WHAT AN UNTAGGED ROW BECOMES, AND WHY IT IS NOT BACK-LABELLED `picker`.
+# Rows written before the tag existed carry no `via` at all (7 of them on the
+# laptop when this shipped; the workbench had no log). They were in FACT picker
+# picks — that was the only writer — but the ROW does not say so, and a reader
+# cannot tell a pre-change row from a future writer that forgot the field. So
+# they load as `unknown`: a third value a consumer must handle deliberately,
+# rather than a claim about provenance the data cannot support. An unrecognised
+# value (a corrupt row, or a tag written by a NEWER version of this handler)
+# lands here too — it is never a reason to DROP the row, because `repo`/`n`/`t`
+# are what the scoring reads and those are still good.
+PICK_VIA_UNKNOWN = "unknown"
+
+# What `record_pick` may WRITE. Deliberately narrower than what `load_picks` may
+# RETURN — a writer must name one of the two real paths, while a reader must be
+# total over whatever is on disk.
+PICK_VIA_RECORDED = (PICK_VIA_AUTO, PICK_VIA_PICKER)
+# What `load_picks` may return. Pinned two-way by
+# `test_the_pick_VIA_vocabulary_is_pinned_two_way`.
+PICK_VIA_VALUES = (PICK_VIA_AUTO, PICK_VIA_PICKER, PICK_VIA_UNKNOWN)
+
+
 # How far apart two reference numbers have to be before proximity stops helping.
 # `#1290` and `#1291` in one repo are the same week's work; `#3` and `#1291` are
 # not. A soft 1/(1+d/SCALE) curve rather than a window, so nothing falls off a
@@ -625,8 +676,27 @@ def ordering_state(ranges: dict[str, int], age: float | None) -> str:
     return ORDER_APPLIED
 
 
+def pick_via(row: dict) -> str:
+    """Which path produced a pick row — one of `PICK_VIA_VALUES`. Pure, total.
+
+    🔴 TOTAL ON PURPOSE, AND THAT IS THE BACKWARDS-COMPATIBILITY RULE IN ONE
+    PLACE. Every way a row can fail to name a path it wrote — the field absent
+    (a row written before the tag existed), the wrong type, a value this version
+    does not know (a NEWER writer) — is `unknown`. None of them is a reason to
+    discard the row: `load_picks` already decided the row is well-formed on the
+    three fields the scoring actually reads, and dropping it over a label would
+    silently delete history the operator earned.
+
+    🔴 ONE DEFINITION, because `load_picks` is not the only reader that will
+    want this. A predicate open-coded at two sites is wrong at one of them.
+    """
+    via = row.get("via") if isinstance(row, dict) else None
+    return via if via in PICK_VIA_VALUES else PICK_VIA_UNKNOWN
+
+
 def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]:
-    """The operator's recent picks as `[{"t": float, "repo": str, "n": int}]`.
+    """The operator's recent picks as
+    `[{"t": float, "repo": str, "n": int, "via": str}]`.
 
     Newest LAST, capped by `PICKS_MAX_ROWS` and filtered to
     `PICKS_MAX_AGE_DAYS`. 🔴 EVERY failure is [] — absent, unreadable, and
@@ -638,6 +708,11 @@ def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]
     per pick, so the rows that matter are the last ones; taking the first 500
     would freeze the preference at whatever the operator liked when the file was
     new and never move again.
+
+    🔴 `via` IS ALWAYS PRESENT ON THE WAY OUT AND NEVER REQUIRED ON THE WAY IN.
+    A row that does not name a path is `unknown`, not dropped — see `pick_via`,
+    which owns that rule. Every caller therefore gets a four-key row whatever the
+    file's vintage, so nothing downstream has to `.get` around a missing field.
     """
     path = path or PICKS_PATH
     now = time.time() if now is None else now
@@ -673,7 +748,7 @@ def load_picks(path: Path | None = None, now: float | None = None) -> list[dict]
             continue
         if (now - float(t)) / 86400.0 > PICKS_MAX_AGE_DAYS:
             continue
-        out.append({"t": float(t), "repo": repo, "n": n})
+        out.append({"t": float(t), "repo": repo, "n": n, "via": pick_via(row)})
     return out
 
 
@@ -812,8 +887,17 @@ def narrow_dir(directory: Path) -> None:
 
 
 def record_pick(repo: str, num: str, path: Path | None = None,
-                now: float | None = None) -> bool:
-    """Append one `{"t","repo","n"}` line to the pick log.
+                now: float | None = None, *, via: str) -> bool:
+    """Append one `{"t","repo","n","via"}` line to the pick log.
+
+    🔴 `via` IS A REQUIRED KEYWORD AND HAS NO DEFAULT, WHICH IS THE WHOLE POINT
+    OF THE FIELD. A default would make the tag a thing a call site can forget:
+    the auto-open path — the one this field exists to make visible — would then
+    record itself as whatever the default said, and the mislabelling would be
+    silent and permanent in a 0600 append-only log. Two call sites exist and
+    both must state which they are. A value outside `PICK_VIA_RECORDED` is a
+    quiet `False` and NO write, for the same reason a malformed repo is: a row
+    whose provenance is wrong is worse than no row.
 
     Returns True if the line was WRITTEN — which is not quite "survived". A
     compaction racing this call carries over anything appended past its read
@@ -859,6 +943,8 @@ def record_pick(repo: str, num: str, path: Path | None = None,
     reader would discard is not worth writing, and a log full of them would
     push real history past `PICKS_MAX_ROWS`.
     """
+    if via not in PICK_VIA_RECORDED:
+        return False
     if not (isinstance(repo, str) and _OWNER_REPO_RE.match(repo)):
         return False
     try:
@@ -869,7 +955,7 @@ def record_pick(repo: str, num: str, path: Path | None = None,
         return False
     path = path or PICKS_PATH
     row = {"t": round(time.time() if now is None else now, 3),
-           "repo": repo, "n": n}
+           "repo": repo, "n": n, "via": via}
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         narrow_dir(path.parent)
@@ -977,6 +1063,160 @@ def repo_of_github_url(url: str) -> str:
         return ""
     full = f"{m.group('owner')}/{m.group('repo')}"
     return full if _OWNER_REPO_RE.match(full) else ""
+
+
+# --------------------------------------------------------------------------- #
+# CLICK-PATH TELEMETRY
+#
+# 🔴 WHAT LEAVES THIS PROCESS, AND WHAT MAY NEVER. The handler now reports the
+# OUTCOME of a click to the personal activity pipeline. The line is exactly the
+# one `mention_scan`'s telemetry already sets: emit what the operator TOUCHED,
+# never what they were OFFERED. A `source=mentions` row has carried a plain
+# `owner/repo` since that leg shipped, and this carries the same — the repository
+# whose page was opened, which the operator is looking at.
+#
+# 🔴 THE OFFERED SET IS THE HAZARD AND IT IS EXCLUDED STRUCTURALLY, NOT BY
+# CONVENTION. `known_universe.json` names PRIVATE repositories and its committed
+# ancestor disclosed 232 of them into this PUBLIC repo. Nothing below is ever
+# handed the candidate list: `click_dims` takes SCALARS — a repo, a platform, a
+# rank, a class NAME, a count — so there is no argument through which a row the
+# operator did not choose could reach the spool. `test_no_universe_token_can_
+# reach_the_TELEMETRY_payload` is the guard, with a control that proves it fires.
+#
+# 🔴 IT CANNOT COST THE CLICK. Same posture as `record_pick`, one layer along:
+# `invocation.emit_invocation` swallows every failure and returns "", the import
+# is LAZY so a click that emits nothing pays nothing, the write is a single
+# `O_APPEND` line to a local spool — no network, no subprocess, no new verb on
+# the path `test_the_resolution_path_spawns_ONLY_these_local_commands` pins.
+# MEASURED on this host, 7 fresh-process runs: the FIRST emit of a click costs a
+# median 3.7 ms (range 3.3-6.8 under load, and the spread is box load, not this
+# code), essentially all of it the lazy import; a second emit in the same process
+# is 0.05 ms, which no click reaches because a click emits at most once. It is
+# paid AFTER `open_url` has already launched the browser.
+# --------------------------------------------------------------------------- #
+CLICK_TOOL = "mention-open"
+
+# The three outcomes a click can reach once the handler has something to show.
+# ⚠ DELIBERATELY NOT EVERY EXIT. The refusal paths (`refuse()`, `--print`, the
+# six-digit colour toast) emit nothing: they are several distinct arms with
+# their own toasts, and adding them is a separate change with its own argument.
+# What is here is the set the ORDERING question needs — a click that opened
+# something, and a picker the operator walked away from.
+CLICK_AUTO_OPEN = "auto-open"
+CLICK_PICKED = "picked"
+CLICK_DISMISSED = "dismissed"
+# Pinned two-way by `test_the_click_OUTCOME_vocabulary_is_pinned_two_way`.
+CLICK_OUTCOMES = (CLICK_AUTO_OPEN, CLICK_PICKED, CLICK_DISMISSED)
+
+# 🔴 THE CLASS GOES OUT AS A NAME, NEVER AS ITS ORDINAL. `CLASS_PLAUSIBLE` is
+# `0`, and a consumer reading the payload with ClickHouse's `JSONExtractInt`
+# gets `0` for a key that is ABSENT as well as for one that says "plausible" —
+# so shipping the ordinal would make "we never measured the class" and "the best
+# possible class" the same value, in the reassuring direction. A name makes the
+# absent case `''`, which is the one test the pipeline's own conventions say is
+# safe. Pinned two-way against `PLAUSIBILITY_CLASSES`.
+CLASS_NAMES = {
+    CLASS_PLAUSIBLE: "plausible",
+    CLASS_BELOW: "below",
+    CLASS_UNKNOWN: "unknown",
+    CLASS_IMPOSSIBLE: "impossible",
+}
+
+# Every dim `click_dims` can put in the payload, pinned two-way by
+# `test_the_click_telemetry_DIM_ledger_is_pinned_two_way`. A field added without
+# a ledger entry, or an entry naming no field, fails the suite — the shape of a
+# telemetry row is a contract with a consumer that is not in this repo.
+CLICK_DIM_FIELDS = ("repo", "platform", "picker_shown", "offered_total",
+                    "rank", "plausibility")
+
+
+def click_dims(repo: str = "", platform: str = "",
+               picker_shown: bool = False, offered_total: int | None = None,
+               rank: int | None = None,
+               plausibility: int | None = None) -> dict:
+    """The payload dims for one click outcome. Pure, no I/O, no clock.
+
+    🔴 AN UNMEASURABLE FIELD IS OMITTED, NEVER ZEROED — AND THIS IS THE WHOLE
+    REASON THE FUNCTION EXISTS RATHER THAN A DICT LITERAL AT EACH CALL SITE.
+    The single-candidate AUTO-OPEN shows no list at all, so it has no rank, no
+    class and no total. Emitting `rank=0` there would read as "the operator
+    chose the top row", which is the SUCCESS value for the ordering this
+    telemetry exists to evaluate: every average would be dragged toward a
+    conclusion by rows that never ranked anything. So `picker_shown` is the
+    field a consumer must filter on, and `rank`/`plausibility`/`offered_total`
+    are simply ABSENT when there was nothing to rank.
+
+    ⚠ TWO DIFFERENT ABSENCES, AND THEY ARE NOT THE SAME QUESTION. A MISSING
+    `plausibility` means the plausibility ordering did not run for this click —
+    no range table, a stale one, or a picker holding no universe rows. A
+    `plausibility` of `"unknown"` means it DID run and this repository had no
+    entry in the table. `plausibility_class` keeps `None` and `0` apart on the
+    read side for the same reason; this keeps "could not ask" and "asked, no
+    answer" apart one layer further out.
+
+    ⚠ `repo` AND `platform` ARE ALWAYS PRESENT, INCLUDING EMPTY. A clawgate or
+    ClickUp row has no `owner/repo` — `repo_of_github_url` returns "" for it —
+    and a dismissed picker opened nothing at all. `""` is the honest value and
+    it is one a consumer can test; omitting the key would make a clawgate pick
+    indistinguishable from a row this handler never filled in.
+    """
+    dims: dict = {"repo": repo, "platform": platform,
+                  "picker_shown": bool(picker_shown)}
+    if offered_total is not None:
+        dims["offered_total"] = int(offered_total)
+    if rank is not None:
+        dims["rank"] = int(rank)
+    if plausibility is not None and plausibility in CLASS_NAMES:
+        dims["plausibility"] = CLASS_NAMES[plausibility]
+    return dims
+
+
+def emit_click(outcome: str, **dims) -> str:
+    """Report one click outcome to the activity spool. Best-effort, returns the
+    line written or "" on ANY failure.
+
+    🔴 IT TAKES THE DIMS AS KEYWORDS AND BUILDS THEM *INSIDE* ITS OWN GUARD,
+    WHICH IS NOT A STYLE CHOICE — IT CLOSES A MEASURED HOLE. The first version
+    took an already-built dict, so `click_dims(...)` was evaluated at the CALL
+    SITE, outside this `try`. MEASURED with `click_dims` made to raise: the
+    browser still opened, and then `guarded_main` caught the exception, returned
+    **1** and fired a "mention-open failed" toast — a working click reported as
+    a broken one. A telemetry helper that can do that is worse than no
+    telemetry.
+
+    ⚠ WHAT IS STILL OUTSIDE, STATED RATHER THAN IMPLIED: the three pure lookups
+    the picker arm does to find the chosen row's rank, platform and plausibility
+    class. They are not moved in here because doing so would mean handing this
+    function the CANDIDATE LIST — the offered universe — which is the one thing
+    the disclosure rule says must never reach the sink. A narrower guarded
+    surface is the right trade against a wider disclosure surface.
+
+    🔴 IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE CLICK — the same contract
+    `record_pick` carries and for the same reason, except that this one is
+    strictly weaker evidence: a lost pick costs the learning, a lost telemetry
+    row costs a data point. The `except Exception` is deliberately wider than
+    `record_pick`'s `OSError` because the failure surface is wider: the
+    collector may not be deployed on this host at all, in which case
+    `scripts/collector/invocation.py` or `spool_emit` simply is not importable
+    and this must be a silent no-op rather than a dead click.
+
+    🔴 THE IMPORT IS LAZY, AND THAT IS MEASURED RATHER THAN STYLISTIC — the same
+    argument the module docstring makes for `concurrent.futures`. `spool_emit`
+    drags in `base64`, `datetime` and `socket`, none of which this handler
+    otherwise loads: a median 3.7 ms on this host. Every click that refuses,
+    prints or is barred by `--no-discovery` would pay it for nothing.
+    """
+    if outcome not in CLICK_OUTCOMES:
+        return ""
+    try:
+        # `scripts/collector` is already on `sys.path` — the module-level insert
+        # at the top of this file put it there for `mention_scan`. Re-inserting
+        # here would grow the path on every click for no gain.
+        import invocation  # noqa: PLC0415 — see the docstring
+        return invocation.emit_invocation(CLICK_TOOL, outcome,
+                                          dims=click_dims(**dims))
+    except Exception:  # noqa: BLE001 — telemetry must never cost a click
+        return ""
 
 
 def row_to_url(row: str, candidates: list[dict]) -> str:
@@ -2084,8 +2324,25 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
 
 def _ordered_universe(
         universe: list[str],
-        num: str) -> tuple[list[str], str, tuple[int, int], float | None]:
-    """`(rows, state, (plausible, impossible), age_days)` — the impure composer.
+        num: str) -> tuple[list[str], str, tuple[int, int], float | None,
+                           dict[str, int]]:
+    """`(rows, state, (plausible, impossible), age_days, ranges)` — the impure
+    composer.
+
+    🔴 THE `ranges` DICT COMES BACK FOR THE SAME "ONE MEASUREMENT, TWO READERS"
+    REASON THE AGE DOES, and it is the FIFTH element rather than a second
+    `load_known_ranges()` at the caller. The click telemetry reports which
+    plausibility class the row the operator CHOSE was in, and a class computed
+    from a second read can disagree with the order the operator was actually
+    looking at — the table is rewritten by a daily unit. A telemetry row that
+    describes a different ordering from the one on screen is worse than no row.
+
+    ⚠ IT IS `{}` IN EVERY DEGRADED STATE, AND THAT IS LOAD-BEARING RATHER THAN
+    TIDY. `ordering_state` returns `no-table` for an empty table and `stale`
+    past the threshold, and in both the rows come back UNORDERED — so an empty
+    `ranges` is exactly the predicate "no plausibility ordering happened here",
+    which is what the telemetry must report as an ABSENT class rather than as
+    `unknown`.
 
     🔴 THE AGE COMES BACK WITH THE STATE, AND THAT IS THE "ONE MEASUREMENT, TWO
     READERS" RULE `mapping_age_days` states. The state is DECIDED from the
@@ -2122,7 +2379,7 @@ def _ordered_universe(
     age = ranges_age_days()
     state = ordering_state(ranges, age)
     if state != ORDER_APPLIED:
-        return (universe, state, (0, 0), age)
+        return (universe, state, (0, 0), age, {})
     # 🔴 ONE CLOCK READING, TWO READERS — the same discipline `mapping_age_days`
     # states for the mtime. `load_picks` decides which rows are inside the age
     # cap and `pick_scores` decides how much each one decays; two independent
@@ -2138,7 +2395,7 @@ def _ordered_universe(
     classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
     return (rows, state,
             (classes.count(CLASS_PLAUSIBLE), classes.count(CLASS_IMPOSSIBLE)),
-            age)
+            age, ranges)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2274,6 +2531,11 @@ def main(argv: list[str] | None = None) -> int:
     order_state = ORDER_NO_TABLE
     order_counts = (0, 0)
     order_age: float | None = None
+    # The table the ordering ACTUALLY used, kept so the click telemetry can name
+    # the chosen row's plausibility class without a second, possibly disagreeing
+    # read — see `_ordered_universe`. It stays `{}` when no ordering ran, which
+    # is the predicate the telemetry reads.
+    order_ranges: dict[str, int] = {}
     _universe_rows: list[list[dict]] = []
 
     def universe_rows() -> list[dict]:
@@ -2293,10 +2555,10 @@ def main(argv: list[str] | None = None) -> int:
         ordering — should survive a fourth call site being added, and because
         the alternative is a reader re-deriving that three-way exclusivity from
         scratch. What it must NOT do is read as a live optimisation."""
-        nonlocal order_state, order_counts, order_age
+        nonlocal order_state, order_counts, order_age, order_ranges
         if not _universe_rows:
-            rows, order_state, order_counts, order_age = _ordered_universe(
-                universe_repos, num)
+            (rows, order_state, order_counts, order_age,
+             order_ranges) = _ordered_universe(universe_repos, num)
             _universe_rows.append(universe_candidates(num, rows))
         return _universe_rows[0]
 
@@ -2436,7 +2698,38 @@ def main(argv: list[str] | None = None) -> int:
     # and a host that happens to know exactly one repository must not have that
     # option opened for it.
     if len(candidates) == 1 and not offered_universe and not guessed:
-        return open_url(candidates[0]["url"])
+        # 🔴 THIS PATH USED TO RETURN WITHOUT RECORDING ANYTHING, AND THAT WAS
+        # THE DEFECT. It is the COMMON, fast shape — an `owner/repo#N`, a
+        # mapping hit, a measured checkout — so Tier B's pick log only ever saw
+        # the clicks the handler could NOT answer. The scores therefore
+        # described the operator's ambiguous minority and called it their
+        # preference. It is recorded now, tagged `auto` so a later scoring
+        # change can weight it differently from a row the operator read and
+        # selected; see `PICK_VIA_AUTO`.
+        #
+        # Same three properties as the picker arm below, which is the point of
+        # them being one function: only a github.com reference URL yields a
+        # repository, `record_pick` swallows every OSError so a read-only home
+        # costs the learning rather than the click, and neither can raise.
+        auto_url = candidates[0]["url"]
+        auto_repo = repo_of_github_url(auto_url)
+        if auto_repo:
+            record_pick(auto_repo, num, via=PICK_VIA_AUTO)
+        # 🔴 EMITTED *AFTER* THE OPEN, WHICH IS THE OPPOSITE OF `record_pick`'S
+        # ORDER AND IS DELIBERATE. The browser launch is what the operator is
+        # waiting for and `open_url` is a non-blocking `Popen`, so paying the
+        # telemetry import (a measured ~3.7 ms) behind it costs the click
+        # nothing. `record_pick` stays in front because it is the signal that
+        # must survive — it is what the NEXT click reads.
+        #
+        # 🔴 NO RANK, NO CLASS, NO TOTAL — AND THAT IS THE POINT OF OMITTING
+        # THEM RATHER THAN ZEROING THEM. Nothing was offered here, so there is
+        # no list to have been ranked in. `picker_shown=False` is what a
+        # consumer filters on; see `click_dims`.
+        rc = open_url(auto_url)
+        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,
+                   platform=candidates[0]["platform"], picker_shown=False)
+        return rc
 
     # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
     # UNEXPLAINED, and there are exactly two such pickers: one carrying a GUESS
@@ -2490,6 +2783,16 @@ def main(argv: list[str] | None = None) -> int:
 
     url = pick(candidates, mesg=mesg)
     if not url:
+        # 🔴 A DISMISSAL IS A MEASUREMENT, NOT A NON-EVENT — and it is the
+        # DENOMINATOR the ordering question needs. "Did the plausibility
+        # ordering help?" cannot be answered from the picks alone: a picker the
+        # operator walked away from is the shape where the rows on offer were
+        # wrong, and counting only the successes would make any ordering look
+        # good. `offered_total` rides along because the list size is the other
+        # half of that reading; there is no rank or class, because nothing was
+        # chosen.
+        emit_click(CLICK_DISMISSED, picker_shown=True,
+                   offered_total=len(candidates))
         return 0
     # 🔴 RECORDED *AFTER* THE CHOICE AND *BEFORE* THE OPEN, AND IT CANNOT BLOCK
     # EITHER. `record_pick` swallows every OSError (see it), so a read-only home
@@ -2504,8 +2807,35 @@ def main(argv: list[str] | None = None) -> int:
     # produces it most often.
     picked_repo = repo_of_github_url(url)
     if picked_repo:
-        record_pick(picked_repo, num)
-    return open_url(url)
+        record_pick(picked_repo, num, via=PICK_VIA_PICKER)
+    # 🔴 WHERE THE CHOSEN ROW SAT, WHICH IS THE MEASUREMENT THE ORDERING WAS
+    # SHIPPED WITHOUT. #1509 ranks the universe by whether a repository could
+    # plausibly hold `#N`, and nothing has ever recorded where in that list the
+    # operator's row actually was — so the feature could not be evaluated by
+    # anything except impression. `rank` is 0-based IN THE LIST AS PRESENTED
+    # (`candidates` is exactly what went to `pick`), so a working ordering shows
+    # as a rank distribution clustered near 0.
+    #
+    # ⚠ THE RANK IS LOOKED UP, NOT REMEMBERED. `row_to_url` maps a picker row
+    # back to a URL by SUFFIX rather than by index, precisely so a picker that
+    # decorates or reorders rows cannot open the wrong one — so an index carried
+    # from the row text would be the one thing that arrangement refuses to
+    # trust. `None` if the URL is somehow not in the list, which omits the field
+    # rather than inventing a position.
+    picked_rank = next((i for i, c in enumerate(candidates)
+                        if c["url"] == url), None)
+    # The class the ROW THE OPERATOR SAW was in, from the table that ordering
+    # actually used — `{}` when no ordering ran, which omits the field. See
+    # `_ordered_universe` and `click_dims` for why absent ≠ `unknown` here.
+    picked_class = (plausibility_class(num, order_ranges.get(picked_repo.lower()))
+                    if picked_repo and order_ranges else None)
+    picked_platform = next((c["platform"] for c in candidates
+                            if c["url"] == url), "")
+    rc = open_url(url)
+    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,
+               picker_shown=True, offered_total=len(candidates),
+               rank=picked_rank, plausibility=picked_class)
+    return rc
 
 
 def guarded_main(argv: list[str] | None = None) -> int:
