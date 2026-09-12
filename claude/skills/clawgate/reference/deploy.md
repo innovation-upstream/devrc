@@ -137,8 +137,19 @@ git -C ~/workspace/kubeclaw fetch origin && git -C ~/workspace/kubeclaw merge --
 
 `--ff-only` is the point: it cannot autostash, and a refusal is the signal that the clone diverged.
 
-## Verifying UI live is SIMPLE — the LAN UI is OPEN (no auth since 0.7.37)
-Drive a standalone Playwright (or curl) directly at the LAN pod `http://192.168.50.250:30302` — no
-cookie, no auth, no session injection. Use standalone Playwright, not the shared Playwright MCP
+## 🔴 Verifying UI live NEEDS A SESSION — this section said the LAN UI was open, and it is not
+**Measured 2026-09-12 (0.8.32): `GET http://192.168.50.250:30302/tasks/1` → `303` → `/login`.**
+`requireSession` enforces (`internal/api/auth.go:210-232` — `BrowserAuthRefusal` → `hasValidSession`
+→ `refuseUnauthenticated`); it is no longer the pass-through this file assumed. A Playwright run
+that "just drives the LAN pod" now lands on a login form and will report the UI broken.
+
+So: log in once with `CLAWGATE_UI_PASSWORD` and reuse the cookie (`storageState`).
+⚠ `CLAWGATE_SECURE_COOKIES` is **unset** and off by default (`auth.go:67-70`) precisely so a cookie
+minted over plain HTTP at the LAN door is not rejected — so a LAN login **does** stick. If a login
+seems to succeed and nothing is logged in, check that variable first: that symptom is what it exists
+to prevent.
+
+Drive a standalone Playwright (or curl) at the LAN pod `http://192.168.50.250:30302`. Use standalone
+Playwright, not the shared Playwright MCP
 browser, which is usually locked (`Browser is already in use … use --isolated`). To borrow Playwright
 deps in a fresh worktree, symlink `e2e/node_modules` to the main checkout's.

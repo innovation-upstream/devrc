@@ -91,6 +91,11 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
   NodePort `:30302`) is **OPEN, no auth** (trusted LAN). Only the machine hook token
   (`CLAWGATE_HOOK_TOKEN`) remains, gating `POST /api/send`, `POST /api/tasks`, and the
   `/api/response/{id}` poll.
+  🔴 **SUPERSEDED — this was true at 0.7.37 and is NOT true now.** A human session gate was
+  re-added at some point before 0.8.32: `requireSession` enforces (`internal/api/auth.go:210-232`)
+  and the LAN UI answers `303` → `/login` (measured 2026-09-12). This entry stays because a
+  changelog records what landed WHEN — but do not quote it as current state. ⚠ **Which release
+  re-added the gate is UNIDENTIFIED**; nobody has bisected it, so there is no entry for it below.
 - **0.7.39** — the durable Tasks adjudication queue: the task-spec drafter posts verified specs
   as durable Task cards via `POST /api/tasks`, replacing the evicting `/api/send` digest.
 - **0.7.40** one-tap Dispatch per card · **0.7.41** markdown-rendered bodies

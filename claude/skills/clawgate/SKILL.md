@@ -58,7 +58,7 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | Cluster | **workbench**, ns `clawgate`; dispatched agents in ns **`devpod-<agent-name>`** |
 | 🔴 kubeconfig is PER-HOST — never hardcode; `ls` both, take the one that EXISTS | workbench `.250` → `~/workspace/homelab-talos/workbench-kubeconfig`; laptop `.155` → `~/workspace/homelab-infra/workbench-kubeconfig`. The other is **absent** on each host. Telling the hosts apart: `troubleshooting.md`. |
 | Image / manifest | `harbor.homelab.lan/library/clawgate:<ver>`, pinned in `clusters/workbench/apps/clawgate/deployment.yaml` (Flux from `trunk`) |
-| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
+| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — 🔴 **the UI is NOT open; it needs a session** (measured 2026-09-12: `/tasks/1` → `303` → `/login`). Machine `/api/*` takes the hook token. See the retraction below — this row said "OPEN, no auth" and was wrong |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 `Stop` also carries other hooks — **preserve EVERY non-clawgate**; DERIVE, never count: `jq -r '.hooks.Stop[].hooks[].command'` |
 | 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. JSON on stdout only; rc 0–8. **Every other route is still curl.** Commands, config, the staleness closure and the skew note: `task-api.md` |
@@ -171,7 +171,11 @@ $CLAWGATE_HOOK_TOKEN` or `X-Clawgate-Token`. Statuses are exactly `open` / `in_p
 `ready_for_review` / `complete` — no `dismissed`; dismissing deletes.
 
 🔴 **ONE path deletes a task and TEARS DOWN its live dispatched agent pod**: `DELETE /api/tasks/{id}`
-(`dismissTask`; **no in-progress guard, deliberately**), unauthenticated on the LAN (above).
+(`dismissTask`; **no in-progress guard, deliberately**). ⚠ This said *"unauthenticated on the LAN"*;
+it is **`requireHookToken`** (`server.go:699`), not `requireSession` — so it is wrong in the
+OPPOSITE direction from the retraction above, and the correction does not make it safer: **every
+agent and hook on this box already holds that token** (`~/.claude/clawgate.env`), so it is one curl
+from anything that can read the file.
 ⚠ **Its automated twin is RETIRED — do not re-derive it.** Since **0.7.96** (`cf529d41`, live) the
 daily idle-task reaper **tags `stale` + posts a system comment** instead of calling `dismissTask`, so
 **nothing destroys a task or an agent pod on a timer**. `CLAWGATE_TASK_TTL` is still **unset in the
@@ -197,9 +201,12 @@ within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent i
 toolchain and the dispatch `curl`. Durable facts only:
 - **The loop DOES close unattended** (two real runs). "The 5-minute kickoff deadline is why it never
   worked" is DEAD — don't reopen it.
-- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb), behind the no-op
-  `requireSession` → **no auth on the LAN NodePort**. 🔴 A future webhook needs a **separate
-  hostname**, never a path bypass on `clawgate.zacx.dev` — that puts dispatch on the open internet.
+- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb). ⚠ This said *"behind
+  the no-op `requireSession` → no auth on the LAN NodePort"* — **measured false 2026-09-12: a
+  credential-less `POST /agents` on the LAN returns `401`.** `requireSession` enforces now (see the
+  retraction above), so LAN dispatch needs a session. 🔴 The webhook rule is UNCHANGED and still
+  right: a future webhook needs a **separate hostname**, never a path bypass on
+  `clawgate.zacx.dev` — a bypass would put agent dispatch on the open internet.
 - ⚠ **A dispatch that cannot START surfaces almost nothing** — the agent goes `error` but the task
   stays `in_progress`, `kicked_off` stays `false`, and nothing pushes. **Read the AGENT POD LOGS
   first — ns `devpod-<agent-name>`, not ns `clawgate`** (`agent-dispatch.md`).

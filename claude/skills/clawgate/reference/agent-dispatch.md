@@ -35,9 +35,12 @@ PIPELINE, not the toolchain. Node because the agent image is Debian 12 + Node 22
 
 ## `POST /agents` is FORM-ENCODED, not JSON
 ⚠ **There is no `clawgatectl` verb for dispatch and there cannot be a trivial one** — the route is
-form-encoded and answers with an HTML fragment, not JSON, so it stays curl. Registered behind
-`requireSession` — a literal pass-through (`internal/api/auth.go`) — so on the LAN NodePort it needs
-**no auth**:
+form-encoded and answers with an HTML fragment, not JSON, so it stays curl.
+
+🔴 **This said `requireSession` was "a literal pass-through", so dispatch needed no auth on the LAN.
+Measured false 2026-09-12 (0.8.32): a credential-less `POST /agents` on the LAN returns `401`.**
+`requireSession` enforces (`internal/api/auth.go:210-232`). The curl below therefore needs a
+session cookie; without one it 401s and the dispatch never happens:
 
 ```bash
 curl -sS -X POST http://192.168.50.250:30302/agents \
@@ -45,9 +48,11 @@ curl -sS -X POST http://192.168.50.250:30302/agents \
   --data-urlencode 'repo=ZacxDev/clawgate-loop-sandbox' --data-urlencode 'repo_branch=main'
 ```
 
-🔴 **Security consequence:** `clawgate.zacx.dev` is protected ONLY by the Authelia edge. Any future
-webhook must live on a **separate hostname**, never a path bypass there — a bypass would put
-**unauthenticated agent dispatch** on the internet.
+🔴 **Security consequence — UNCHANGED by the correction above, and still the rule.** `clawgate.zacx.dev`
+now has **two** gates (the Authelia edge, and clawgate's own session — clawgate does not trust
+Authelia's forwarded headers, so passing Authelia mints no clawgate session). Any future webhook
+must live on a **separate hostname**, never a path bypass there — a bypass would skip BOTH and put
+agent dispatch on the open internet.
 
 ## ⚠ A dispatch that cannot START fails SILENTLY
 `provisioningStuckTimeout` (**15m**, `internal/agents/reconcile.go`) marks the **agent** `error` —
