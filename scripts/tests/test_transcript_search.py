@@ -834,6 +834,18 @@ JSONL_GLOB_SITES = {
             "sanitised into the filename. The `.jsonl` in the same function is "
             "the FIXTURE TRANSCRIPT it writes, not a corpus walk — the hook "
             "reads the single path the payload names and never enumerates."),
+    ("scripts/tests/test_regen_known_repos.py", "OS-WALK"):
+        (1, "the DISCLOSURE sweep, and it is the OPPOSITE of a transcript walk: "
+            "it enumerates every file THIS REPO PUBLISHES, looking for one that "
+            "IS a repo mapping / picker universe / range table / pick log. Its "
+            "primary view is `git ls-files`; this walk is the fallback for the "
+            "nix sandbox tier, where the tree is a store copy with no `.git` and "
+            "git cannot answer. `.jsonl` joined its suffix filter when "
+            "`mention-open.py` started writing `picks.jsonl` — a 0600 host file "
+            "naming private repositories, which no whole-file `json.loads` can "
+            "read. It must NOT use `iter_transcripts`: the corpus enumerator "
+            "answers about `~/.claude/projects`, and this question is about the "
+            "checkout."),
 }
 
 _GLOB_ATTRS = {"glob", "rglob", "iglob"}
