@@ -942,6 +942,16 @@ HERMETIC_TARGETS=(
   # suppression predicate is gated here rather than left to the ungated hand-rolled
   # scripts beside it.
   scripts/claude-hooks/tests/test_next_step_nudge.py
+  # Same reason again — a FILE, because the directory's neighbours are hand-rolled.
+  # audit-pr-nudge is the PostToolUse nudge that fires when a PR is created, and what
+  # it is gated FOR is its MESSAGE: it is the only thing in the system firing at the
+  # moment a PR is born, which is the only moment a round-0 verdict ("should this
+  # change exist") can still change the outcome. Measured over the round-0 trial,
+  # dispatching later landed the report after the decision in 3 of 4 trials — so the
+  # ORDER the message prescribes is a correctness property, not wording. It shipped
+  # with no behavioural test at all: its only two were its FILENAME and its
+  # REGISTRATION, so the text was unpinned by construction.
+  scripts/claude-hooks/tests/test_audit_pr_nudge.py
   # Same reason again — a FILE, not the directory. This one gates the DELIVERY seam
   # rather than a hook's own logic: that register-nudge-hook.py is deployed, that a
   # switch actually RUNS it, and that the run leaves the right end state in a
@@ -2363,6 +2373,12 @@ TARGET_FLOORS=(
   # put through the gate's OWN function rather than arithmetic:
   #   _suggested_floor 130 = 130 - min(50, max(1, 130/20 = 6)) = 130 - 6 = 124.
   "scripts/claude-hooks/tests/test_next_step_nudge.py|124"
+  # 2026-09-12, audit-pr-nudge's MESSAGE arrives as a NEW target: 10 collected
+  # (2 regression guards watched RED at db7bf3ff + 8 invariant guards, labelled as
+  # such in the file so nobody counts them as evidence of a fixed defect).
+  # Gate's own count through the gate's own rule:
+  #   _suggested_floor 10 = 10 - min(50, max(1, 10/20 = 0 -> 1)) = 10 - 1 = 9.
+  "scripts/claude-hooks/tests/test_audit_pr_nudge.py|9"
   # 2026-08-13, the registrar's DELIVERY seam arrives as a NEW target: 17 collected.
   # Gate's own count through the gate's own rule:
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.

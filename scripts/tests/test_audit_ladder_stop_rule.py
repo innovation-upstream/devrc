@@ -870,18 +870,31 @@ SKILL_ASSEMBLER_ROUTER = (
     "`audit-claims` block ONLY, and carries the invariant clauses verbatim. "
     "**A delta round with no parseable block is REFUSED.**"
 )
+# 🔴 RE-POINTED 2026-09-12, AND THE OLD PIN IS WHY. This constant used to hold
+# the skill's "Brief the auditor on the environment" paragraph, and the test
+# below calls that an instruction "a reader ACTS on". It was not one: the
+# paragraph told the DISPATCHER to retype four environment warnings into the
+# Agent prompt, and a probe of two real briefs found all four absent from both
+# (0/0, against controls that moved). So a green suite certified the SENTENCE
+# EXISTED while no auditor had ever received it — the "a guard's DESCRIPTION
+# claims COVERAGE" shape, in the pin rather than in the code.
+#
+# The warnings now live in `audit-dispatch.py` as the `cold-checkout-is-not-the-
+# diff` and `own-what-you-spawn` invariant clauses, where `CLAUSE_LEDGER` in
+# test_audit_dispatch.py pins them two-way and every brief carries them in every
+# round. What is pinned HERE is only the half no brief can discharge: the
+# dispatcher must not retype them, and must still sweep for leaks and check its
+# own worktree afterwards, because the auditor's own claim is not evidence.
 SKILL_ENVIRONMENT_BRIEF = (
-    "**Brief the auditor on the environment, or it will report false findings** "
-    "— a fresh worktree is not a working checkout, and an auditor hitting this "
-    "cold blames the PR. Whichever apply: **submodules are unpopulated** in a "
-    "new worktree (one made 4 test files \"fail to collect\"); **monorepo "
-    "`node_modules`** may need linking per package, not just at the root; "
-    "**whether the base branch is already red** and *at which file*; and that "
-    "**zsh does not word-split unquoted parameters**, so `eslint $FILES` checks "
-    "**zero** files and prints a confident PASS. Have it mutate only in a `cp "
-    "-a` copy — **`rm -f <copy>/.git` first**, since a worktree's is a FILE "
-    "pointing at the real git dir, so a commit in the copy lands on your branch "
-    "— and verify your worktree clean yourself at the end."
+    "🔴 **Do NOT re-type the auditor's environment and cleanup warnings into the "
+    "prompt — `audit-dispatch.py` now carries them as invariant clauses "
+    "(`cold-checkout-is-not-the-diff`, `own-what-you-spawn`), so every brief has "
+    "them in every round.**"
+)
+SKILL_DISPATCHER_STILL_SWEEPS = (
+    "**Still yours, because no brief can do it:** sweep for leaked processes "
+    "yourself afterwards and verify your own worktree is clean at the end — an "
+    "auditor's \"cleaned up\" claim is not evidence."
 )
 SKILL_LEDGER = (
     "**Carry the ledger in every round's summary**: `round N · payload lines "
@@ -1615,7 +1628,16 @@ def test_the_operator_instructions_the_gate_depends_on_are_pinned():
         SKILL_MD, SKILL_REWORD_REGRESSION, "the reworded-rule regression shape"
     )
     _assert_pinned_once(
-        SKILL_MD, SKILL_ENVIRONMENT_BRIEF, "the environment brief"
+        SKILL_MD, SKILL_ENVIRONMENT_BRIEF, "the do-not-retype directive"
+    )
+    # 🔴 BOTH HALVES, because the re-point split one paragraph into two claims and
+    # a constant nobody asserts on is unpinned by construction — the shape this
+    # very module exists to catch. The half above says the dispatcher must NOT
+    # retype the clauses; this one says what is still theirs to do afterwards.
+    # Pinning only the first would let the sweep obligation be deleted silently
+    # while the suite stayed green, which is how the OLD pin failed.
+    _assert_pinned_once(
+        SKILL_MD, SKILL_DISPATCHER_STILL_SWEEPS, "the dispatcher's own sweep"
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_CROSS_REPO_WORKTREE, "the cross-repo worktree hazard"
