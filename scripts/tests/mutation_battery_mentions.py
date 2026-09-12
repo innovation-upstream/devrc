@@ -680,7 +680,220 @@ MUTANTS: list[tuple] = [
      "non-permission bit"),
 ]
 
+# ---- F13: the AUTO-OPEN was invisible to Tier B, and the click reported ------
+#      nothing. Every row below is a guard added in 2026-09; each `expected`
+#      token is taken VERBATIM from the message of the assertion that fires
+#      FIRST, per the header's warning about K58/K60/K63.
+MUTANTS += [
+    ("K72", "deletion", "the single-candidate AUTO-OPEN stops recording — the "
+                        "exact defect this arm was added to fix, restored",
+     "        if auto_repo:\n"
+     "            record_pick(auto_repo, num, via=PICK_VIA_AUTO)\n",
+     "        if False:\n"
+     "            record_pick(auto_repo, num, via=PICK_VIA_AUTO)\n",
+     "the AUTO-OPEN path recorded"),
+    ("K73", "operand swap", "the auto path records itself as a PICKER pick, so "
+                            "the tag is present and LYING",
+     "            record_pick(auto_repo, num, via=PICK_VIA_AUTO)\n",
+     "            record_pick(auto_repo, num, via=PICK_VIA_PICKER)\n",
+     "an auto-open recorded itself as"),
+    ("K74", "widening", "the two tags collapse to one string, so the log can no "
+                        "longer tell the paths apart at all",
+     'PICK_VIA_AUTO = "auto"\n', 'PICK_VIA_AUTO = "picker"\n',
+     "did not land distinguishable tags in one log"),
+    ("K75", "deletion", "`pick_via` returns the raw field, so a row written "
+                        "before the tag existed reports `via=None`",
+     "    return via if via in PICK_VIA_VALUES else PICK_VIA_UNKNOWN\n",
+     "    return via\n",
+     # ⚠ NOT "row was DROPPED" — that token belongs to the assertion ABOVE the
+     # one this mutant trips, and a sweep scored the row KILLED-WRONG-REASON for
+     # exactly that. The rows still LOAD under this mutant; what moves is how
+     # they CLASSIFY.
+     "did not classify as `unknown`"),
+    ("K76", "widening", "`load_picks` DISCARDS every untagged row — the reading "
+                        "that silently deletes the operator's whole history the "
+                        "day a field is added",
+     '        out.append({"t": float(t), "repo": repo, "n": n, "via": pick_via(row)})\n',
+     "        if pick_via(row) == PICK_VIA_UNKNOWN:\n"
+     "            continue\n"
+     '        out.append({"t": float(t), "repo": repo, "n": n, "via": pick_via(row)})\n',
+     "row was DROPPED over its `via` field alone"),
+
+    # ---- F14: the click telemetry ------------------------------------------
+    ("K77", "widening", "the AUTO-OPEN reports `rank=0`, which reads as \"the "
+                        "operator took the top row\" for a click that offered "
+                        "no rows at all",
+     # ⚠ RE-ANCHORED when the `surface` dim landed — caught at 0x by the
+     # anchors test, which is the third time that guard has stopped a row from
+     # scoring a silent SURVIVED in this PR.
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False,\n'
+     "                   surface=surface)\n",
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False,\n'
+     "                   surface=surface, rank=0, offered_total=1)\n",
+     "fabricated ranking"),
+    ("K78", "disclosure", "the OFFERED universe rides out in the telemetry's "
+                          "`repo` field — the leak the sink's guard exists for",
+     "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n",
+     "    emit_click(CLICK_PICKED, repo=\", \".join(repo_universe(discovered)),\n"
+     "               platform=picked_platform,\n",
+     "click telemetry"),
+    ("K79", "operand swap", "the rank is 1-based, so every measurement of "
+                            "\"did the ordering put it on top\" is off by one",
+     "    picked_rank = next((i for i, c in enumerate(candidates)\n"
+     '                        if c["url"] == url), None)\n',
+     "    picked_rank = next((i for i, c in enumerate(candidates, 1)\n"
+     '                        if c["url"] == url), None)\n',
+     "0-based position in the list AS PRESENTED"),
+    # ⚠ RE-ANCHORED when the `picked_ordered` gate was added to this line (the
+    # F3 fix). The anchors test caught it at 0x rather than letting the row
+    # score a silent SURVIVED.
+    ("K80", "deletion", "a click with NO range table reports the class "
+                        "`unknown` instead of omitting it — \"could not ask\" "
+                        "collapses into \"asked, no answer\"",
+     "                    if picked_repo and order_ranges and picked_ordered else None)\n",
+     "                    if picked_repo else None)\n",
+     "claims a measurement that did not happen"),
+    ("K81", "narrowing", "`emit_click` stops swallowing — a telemetry failure "
+                         "reaches `guarded_main` and turns a working click into "
+                         "`mention-open failed` with no browser",
+     "    except Exception:  # noqa: BLE001 — telemetry must never cost a click\n",
+     "    except ValueError:  # noqa: BLE001 — telemetry must never cost a click\n",
+     "a raising telemetry path cost the OPEN"),
+    ("K82", "operand swap", "the PICKER arm reports BEFORE the browser is "
+                            "launched, so its ~3.7 ms import lands in front of "
+                            "the thing the operator is waiting for",
+     # ⚠ RE-ANCHORED twice: once for the F2/F3 dims, once for `surface`. The
+     # whole block is the anchor, because a partial swap leaves `rc`/`surface`
+     # undefined and the row would die of a NameError — a kill for the wrong
+     # reason, which this battery counts as a problem.
+     "    rc, surface = open_reference(url)\n"
+     "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
+     "               picker_shown=picker_was_shown(reason),\n"
+     "               offered_total=len(candidates),\n"
+     "               rank=picked_rank, plausibility=picked_class,\n"
+     "               ordered=picked_ordered if picked_rank is not None else None,\n"
+     "               pinned_above=pinned_above, reason=reason, surface=surface)\n"
+     "    return rc\n",
+     "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
+     "               picker_shown=picker_was_shown(reason),\n"
+     "               offered_total=len(candidates),\n"
+     "               rank=picked_rank, plausibility=picked_class,\n"
+     "               ordered=picked_ordered if picked_rank is not None else None,\n"
+     "               pinned_above=pinned_above, reason=reason,\n"
+     "               surface=CLICK_SURFACE_BROWSER)\n"
+     "    return open_reference(url)[0]\n",
+     "PICKER click did not record"),
+
+    # ---- F15: the audit's three findings, each with its own mutant ----------
+    ("K85", "widening", "every empty `pick()` return is reported as a "
+                        "DISMISSAL again — including the three where NO PICKER "
+                        "WAS EVER SHOWN, which pads the ordering's own "
+                        "denominator with clicks that saw nothing",
+     "        emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED\n"
+     "                   else CLICK_NO_SELECTION,\n"
+     "                   picker_shown=picker_was_shown(reason),\n",
+     "        emit_click(CLICK_DISMISSED,\n"
+     "                   picker_shown=True,\n",
+     "was reported as"),
+    ("K86", "operand swap", "`picker_was_shown` claims a list was on screen for "
+                            "the endings where nothing was displayed",
+     "    if reason in PICK_REASONS_SHOWN:\n        return True\n",
+     "    if reason in PICK_REASONS_SHOWN:\n        return True\n"
+     "    if reason in PICK_REASONS_NOT_SHOWN:\n        return True\n",
+     "reported picker_shown="),
+    ("K87", "deletion", "`pick()` stops recording WHY it returned nothing, so "
+                        "every ending collapses back to `unattributed`",
+     "        set_pick_reason(PICK_REASON_DISMISSED)\n",
+     "        pass\n",
+     # ⚠ THE TOKEN MOVED WITH THE KILLER. This row SURVIVED its first sweep —
+     # every dismissal test stubbed `pick` and set the reason itself, so nothing
+     # exercised the real seam. The test written to close it
+     # (`test_the_REAL_pick_records_the_reason_at_every_one_of_its_exits`) is
+     # now the killer, and this is ITS message.
+     "for this ending, expected"),
+    ("K88", "widening", "a PINNED row claims the ordering ranked it — the F3 "
+                        "bias, restored: `rank` then mixes ordered rows with "
+                        "rows that were never placed",
+     "    picked_ordered = (pinned_above is not None and picked_rank is not None\n"
+     "                      and picked_rank >= pinned_above)\n",
+     "    picked_ordered = True\n",
+     "but the row claims it was"),
+    ("K89", "operand swap", "`pinned_above` is reported as 0 on the arms that "
+                            "APPEND the universe, so `rank - pinned_above` "
+                            "silently treats a pinned row as ranked",
+     "        pinned_above = len(candidates)\n"
+     "        candidates = candidates + universe_rows()\n",
+     "        pinned_above = 0\n"
+     "        candidates = candidates + universe_rows()\n",
+     # ⚠ SAME STORY AS K87: this row SURVIVED its first sweep because the F3
+     # test drove the GUESSED arm and this mutant is on DEAD END 2. The token
+     # belongs to the test written to cover that second arm.
+     "one clawgate row is pinned above"),
+
+    # ---- F16: the SURFACE dim — the seam with #1582 ------------------------
+    ("K90", "deletion", "the AUTO arm stops reporting WHERE the reference "
+                        "landed, so a browser open and the TUI open #1582 adds "
+                        "emit an identical row",
+     "        rc, surface = open_reference(auto_url)\n"
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False,\n'
+     "                   surface=surface)\n",
+     "        rc = open_url(auto_url)\n"
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False)\n',
+     # ⚠ THE TOKEN IS A SHORT PREFIX ON PURPOSE. The first attempt used a
+     # mid-sentence phrase and scored KILLED-WRONG-REASON — not because the
+     # wording moved, but because the assertions SUBSCRIPTED the missing dim and
+     # raised `KeyError`, which renders no message at all. Both now use `.get`
+     # and lead with this token.
+     "NO SURFACE DIM"),
+    ("K91", "operand swap", "`open_reference` reports a surface the LEDGER does "
+                            "not name — the value silently vanishes from every "
+                            "payload instead of failing",
+     "    return open_url(url), CLICK_SURFACE_BROWSER\n",
+     '    return open_url(url), "teletype"\n',
+     "which is not in CLICK_SURFACES"),
+    ("K92", "widening", "a DISMISSAL claims a surface for a reference that was "
+                        "never opened, putting a never-opened click into every "
+                        "per-surface count",
+     "                   pinned_above=pinned_above,\n"
+     "                   reason=reason)\n",
+     "                   pinned_above=pinned_above,\n"
+     "                   reason=reason, surface=CLICK_SURFACE_BROWSER)\n",
+     "reported a surface for a reference that was never"),
+    # 🔴 THE SAME MUTATION ON THE *OTHER* CALL SITE, AND IT IS NOT A DUPLICATE.
+    # An earlier version of the ordering test drove the AUTO arm only, so K82
+    # SURVIVED it — two record-then-open sites, one covered. Both rows stay, so
+    # narrowing that test back to one arm reddens here rather than silently
+    # halving what it proves.
+    ("K84", "operand swap", "the AUTO arm reports BEFORE the browser is "
+                            "launched — the same defect at the other call site",
+     # ⚠ RE-ANCHORED alongside K77/K82 when `surface` landed.
+     "        rc, surface = open_reference(auto_url)\n"
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False,\n'
+     "                   surface=surface)\n"
+     "        return rc\n",
+     "        emit_click(CLICK_AUTO_OPEN, repo=auto_repo,\n"
+     '                   platform=candidates[0]["platform"], picker_shown=False,\n'
+     "                   surface=CLICK_SURFACE_BROWSER)\n"
+     "        return open_reference(auto_url)[0]\n",
+     "AUTO click did not record"),
+    ("K83", "operand swap", "the plausibility class ships as its ORDINAL, so an "
+                            "ABSENT key and CLASS_PLAUSIBLE are both 0 to a "
+                            "consumer reading it as an integer",
+     '    CLASS_PLAUSIBLE: "plausible",\n', "    CLASS_PLAUSIBLE: 0,\n",
+     "would ship as a number"),
+]
+
 TARGETS: dict[str, pathlib.Path] = {
+    "K72": OPEN_, "K73": OPEN_, "K74": OPEN_, "K75": OPEN_, "K76": OPEN_,
+    "K77": OPEN_, "K78": OPEN_, "K79": OPEN_, "K80": OPEN_, "K81": OPEN_,
+    "K82": OPEN_, "K83": OPEN_, "K84": OPEN_,
+    "K85": OPEN_, "K86": OPEN_, "K87": OPEN_, "K88": OPEN_, "K89": OPEN_,
+    "K90": OPEN_, "K91": OPEN_, "K92": OPEN_,
     "P1": SCAN,
     "K1": TAILER, "K2": TAILER, "K3": TAILER, "K43": TAILER, "K44": TAILER,
     "K4": SCAN, "K5": SCAN, "K6": SCAN,
