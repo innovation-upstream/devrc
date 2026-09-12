@@ -21,22 +21,38 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- **THE ARC IS CLOSED. Ranks 1, 2, 3, 4, 7 shipped or PR'd; rank 9 closed by another session; rank 5
-  ANSWERED WITH NO PR; ranks 10 and 11 are PRs AWAITING THE OPERATOR'S MERGE CALL. Rank 8 is DATED.**
+- **RANK 7 IS MERGED. RANK 11's RED WAS REAL AND IS FIXED (CI re-running). RANK 10 IS HELD BEHIND A
+  MERGED-TREE RUN THAT IS STILL IN FLIGHT.** Ranks 1, 2, 3, 4, 9 remain closed tombstones; rank 5
+  ANSWERED with no PR; ranks 6 and 8 are DATED, not ready.
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
-  `#1524` 58bfb747. Closed unmerged on purpose: `#1558`, `#1559` (superseded by `#1561`).
-- 🔴 **THREE PRs ARE OPEN AND UNMERGED — this is what the next session inherits:**
-  - **`devrc#1600`** (rank 10) — the triage timer, `+450/-0`, 2 files. 2h interval, shipped
-    `--comment-mode dry-run`, 17/17 mutants killed.
-  - **`devrc#1603`** (rank 11) — the fast ledger check, `+1603/-2`, 5 files. Both historical reds
-    reproduced and caught; 166s vs the tier's ~20.1 min.
-  - **`ZacxDev/homelab-infra#799`** (rank 7) — `repo-full-name` pinned, `+190/-0`, **test-only**
-    (zero files under `clusters/`/`triggers/`/`apps/`, so it reconciles to nothing).
-- **`main` was RED twice this session, both fixed and verified green** — `#1567` (`_OWN_BOUND_LEDGER`)
-  and `#1561` (the kill-mention treadmill, by another session).
-- **All claims released.** Nothing is locked.
+  `#1524` 58bfb747 · **`homelab-infra#799` 0b14768a (NEW)**. Closed unmerged on purpose: `#1558`,
+  `#1559` (superseded by `#1561`).
+- **`ZacxDev/homelab-infra#799` — MERGED `0b14768a`, rank 7 CLOSED.** Verified by CONTENT on `trunk`
+  (a squash merge never makes the head an ancestor, so `--is-ancestor` is false forever and is not
+  the check). The test-only claim was **re-verified independently of the handoff** before merging:
+  2 files, both `scripts/tests/*`, `+190/-0`, **zero** files under `clusters/`/`triggers/`/`apps/`,
+  so it reconciles to nothing. `tekton/gitops-validate` green on all 9 legs. It was 4 behind
+  `trunk`; those 4 commits are comic-flex UI, two handoffs and a SOPS rotation-ledger test —
+  no overlap with supersede wiring in either direction.
+- **`devrc#1603` — the red was REAL, was the PR reintroducing the exact failure it exists to
+  prevent, and is FIXED at `8a88f255` (pushed; CI re-running as of this writing).** See the
+  Findings block below. Branch `feat/ledger-fast-check`, now `CLEAN`/`MERGEABLE`, 16 behind `main`.
+- **`devrc#1600` — NOT MERGED, deliberately.** All three checks green and `CLEAN`, but **24 commits
+  behind** `main` (tip `7e000e6b`). Its only shared surface is `nix/home.nix`, which **72 test files
+  read**, and it adds a **new systemd unit** — the two-way-unit-ledger class that has reddened `main`
+  twice on this arc. `scoped-tests.sh` exits 4 on that surface by design, so a merged-tree run over
+  those 72 files is the gate. **In flight at ~35% when this was written; its verdict is UNREAD.**
+  🔴 **Do not merge #1600 on the strength of its three green checks** — those are a claim about its
+  own branch at a base 24 commits stale.
+- **Claims held:** `gate-speed-and-ci-signal-10`, `gate-speed-and-ci-signal-11`. Rank 7 was merged
+  **without** claiming it first — `claim-work --list` and `gh pr list --state open` were both swept
+  and showed no claim and no duplicate on this arc, so nothing collided, but the claim should have
+  come first and did not.
+- **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
+  this session, with its positive control showing the board reachable. Per its own instruction that
+  is not a clean bill of health (a wrong id also answers 200/`[]`), so no field was written.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -101,21 +117,19 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–4 and 9 are CLOSED tombstones**; renumbering re-points every live claim.
+the END. **Ranks 1–4, 7 and 9 are CLOSED tombstones**; renumbering re-points every live claim.
 
 1. **CLOSED** — `homelab-infra#792` merged in dry-run (`dbe47814`). Arming is rank 8.
    forcing: none
 2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.
    forcing: none
-3. **CLOSED — the store-api flake was already fixed by `#1458`. ⚠ `#1512` is NO LONGER the
-   measurement of record**: it split on `ce9b55c3`'s TIMESTAMP and its zero was underpowered
-   (4/125 → 0/45, P(0) ≈ 0.23). Superseded 2026-09-12 by an ANCESTRY split over 400 PR heads —
-   **0 of 99** verdicts on heads carrying the sha against **12 of 298** that do not, P(0) ≈
-   **0.017** — recorded in `devrc#1568` (`8114a124`), full table at
-   `handoff-gate-flake-store-api.md` rank 1. ⚠ **`#1512`'s table is not WRONG**: re-splitting the
-   same 397 verdicts by date reclassified 5 and **0 of 101 failures**, so its predicate was the
-   wrong test and changed nothing at this sample. Cite the newer read; keep `#1512` for its
-   "it was never the worst flake" finding, which stands.
+3. **CLOSED — the store-api flake was already fixed by `#1458`.** ⚠ `#1512` is NO LONGER the
+   measurement of record; superseded 2026-09-12 by an ANCESTRY split over 400 PR heads — **0 of 99**
+   verdicts on heads carrying `ce9b55c3` against **12 of 298** that do not, P(0) ≈ **0.017** —
+   recorded in `devrc#1568` (`8114a124`), full table at `handoff-gate-flake-store-api.md` rank 1.
+   ⚠ `#1512`'s table is not WRONG: re-splitting the same 397 verdicts by date reclassified 5 and
+   **0 of 101 failures**. Cite the newer read; keep `#1512` for its "it was never the worst flake"
+   finding, which stands.
    forcing: none
 4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.
    forcing: none
@@ -141,34 +155,31 @@ the END. **Ranks 1–4 and 9 are CLOSED tombstones**; renumbering re-points ever
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**.
    🔴 Decide it TOGETHER with rank 4: `main-status-watch.py`'s flake screen already implements the same
    completeness-proving screen in **15 lines**, and `#1524` rebuilds that gate at ~885. Same question.
-   🔴 **NEW EVIDENCE FOR THAT DECISION, 2026-09-12 — and it cuts toward DELETE.** The screen exists
-   to skip re-runs on KNOWN FLAKES, and the store-api flake it was written around is now at **0 of
-   99** verdicts on heads carrying `ce9b55c3` (`handoff-gate-flake-store-api.md` rank 1). The same
-   read independently re-derived this file's own truncation finding from scratch — **100 of 101
-   failure descriptions truncated at 138 of the 140-character cap** — which is what makes the screen unsatisfiable
-   (the measurement sits beside `_FAILING_RE` in that file). So the screen now guards a flake that has
-   stopped occurring, using a completeness proof a 140-byte field cannot supply. ⚠ **Both figures are
-   a READ-TIME population that cannot be re-derived** (GitHub keeps one status per context and
-   supersedes overwrite it) — see `handoff-gate-flake-store-api.md` rank 1; a later disagreement is
-   not a refutation. ⚠ **Not a decision —
-   the 2026-10-11 date and "decide them together" both stand**; this is the datum to decide ON, and it
-   did not exist when the date was set.
+   🔴 **EVIDENCE CUTS TOWARD DELETE.** The screen exists to skip re-runs on KNOWN FLAKES, and the
+   store-api flake it was written around is now at **0 of 99** verdicts on heads carrying `ce9b55c3`
+   (`handoff-gate-flake-store-api.md` rank 1). The same read independently re-derived this file's own
+   truncation finding from scratch — **100 of 101 failure descriptions truncated at 138 of the
+   140-character cap** — which is what makes the screen unsatisfiable (the measurement sits beside
+   `_FAILING_RE` in that file). So the screen now guards a flake that has stopped occurring, using a
+   completeness proof a 140-byte field cannot supply. ⚠ **Both figures are a READ-TIME population that
+   cannot be re-derived** (GitHub keeps one status per context and supersedes overwrite it); a later
+   disagreement is not a refutation. ⚠ **Not a decision — the 2026-10-11 date and "decide them
+   together" both stand**; this is the datum to decide ON, and it did not exist when the date was set.
    forcing: none
-7. **PR OPEN — `ZacxDev/homelab-infra#799`, awaiting merge.** Pins `repo-full-name` across
-   `SUPERSEDE_TEMPLATES` at **three layers** (PipelineRun param, tt-param `default:`, shared binding)
-   because pinning only the param is walkable. 3 mutants **KILLED at HEAD / SURVIVED at BASE**, each
-   by its own guard with zero co-failing tests. Suite 2,414 tests / 0 failures. ⚠ Exit was
-   `SUITE_RC=2 = COULD NOT RUN` — three CEL tests need an in-cluster port-forward; environmental, not
-   a finding. **Test-only, so although merging DEPLOYS in that repo, this reconciles to nothing.**
+7. **CLOSED — `ZacxDev/homelab-infra#799` MERGED `0b14768a` on 2026-09-12.** Verified by content on
+   `trunk`; test-only, reconciled to nothing. See `State now`.
    forcing: none
 8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK UNTIL ~2026-09-18, THEN ARM.** Operator set this
-   date. Criteria (i)–(iii) were met non-vacuously on the first two post-deploy sweeps; (iv) needs the
+   date. Criteria (i)–(iii) met non-vacuously on the first two post-deploy sweeps; (iv) needs the
    window. Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and `|= "closed-pr pass:"` in
    Loki, hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` + the pinned literal at
    `test_supersede_logic.py:2251` (one commit, by construction).
-   🔴 Zero `DRY-RUN would cancel` lines after a week of normal merging is NOT a clean bill — it is the
-   instrument failing to see its bucket. ⚠ Dry-run short-circuits BEFORE the re-read guard, so the
-   soak cannot exercise the mid-tick race (devrc #1500 merged 14s after a sweep started).
+   🔴 Zero `DRY-RUN would cancel` lines after a week of normal merging is NOT a clean bill — it is
+   the instrument failing to see its bucket. ⚠ Dry-run short-circuits BEFORE the re-read guard, so
+   the soak cannot exercise the mid-tick race (devrc #1500 merged 14s after a sweep started).
+   ⚠ **`#799` has since merged into `trunk`**, so the tree you arm against is not the one the soak
+   started on. Zero overlap with the cronjob manifest, but re-read `test_supersede_logic.py:2251`
+   rather than trusting the line number.
    forcing: deadline — the operator set 2026-09-18.
 9. **CLOSED by `#1561`** — the kill scanners no longer read `claudedocs/`, which ends the treadmill
    rather than paying another round of it. **Rate evidence that the close is real and not merely
@@ -179,34 +190,50 @@ the END. **Ranks 1–4 and 9 are CLOSED tombstones**; renumbering re-points ever
    🔴 **Both instances of the CLASS are now fixed and the class itself is not.** The same design — a
    census over tracked text reddening `main` for everyone — fired next from
    `scripts/tests/test_runner_bound_ledger.py` (**5** reds, **4** after `c0bbd6d9`), closed by
-   `#1567` `6f1867b1` (**5 passed** at `origin/main` `337114e0`). **At least two instances in two days, both measured here, and nothing prevents
-   the next one.** Tracked as `handoff-gate-flake-store-api.md` rank 8, closed as an instance and
-   retained for the class.
+   `#1567` `6f1867b1` (**5 passed** at `origin/main` `337114e0`). **At least two instances in two
+   days, both measured here, and nothing prevents the next one.** Tracked as
+   `handoff-gate-flake-store-api.md` rank 8, closed as an instance and retained for the class.
    forcing: none — both instances shipped; the class is unaddressed and owned by nobody.
-10. **PR OPEN — `devrc#1600`, awaiting merge.** Timer for `stale-base-triage.py`, **2h** (derived: a
-   verdict only changes when a new `devrc-pytests` status lands ~19.6 min after a push, or `main`
-   moves a file the red names; measured cost 60 API reads / 43s / 59 PRs ⇒ 0.6% of the rate limit).
-   Ships `--comment-mode dry-run`, pinned by value. **No `OnFailure=notify-failure@`** (every red it
-   sees is somebody's PR, not an incident) and **rc 11 FAILS the unit** — the opposite of its siblings,
-   because it has no blind ladder.
-   🔴 **ITS SOAK EVIDENCE IS JOURNAL-ONLY, NOT LOKI** — a systemd-user unit's stdout carries
-   `_TRANSPORT=stdout` and alloy's journal source is a default-deny allowlist of
-   `kernel|journal|syslog`. Derived from config + measured transport; Loki was NOT queried to confirm
-   the absence. **This changes how rank 10's own arming decision gets made** — unlike `#792`, you
-   cannot read its dry-run evidence from Loki.
-   ⏳ **After merge: `ship.sh`, then `journalctl --user -u stale-base-triage -n 40 --no-pager`** —
-   whether the unit runs cleanly under systemd was NOT verified (no switch).
-   forcing: none
-11. **PR OPEN — `devrc#1603`, awaiting merge.** The ledger set is **genuinely DERIVED** (AST closure
-   at call time, no list); only a positive control is hardcoded, and a mutant proves it reachable.
-   🔴 Its two-pass design is load-bearing: `public_ip_scan.repo_files(root)` walks its own PARAMETER,
-   so a root-aware seed never fires on the shared lister most guards go through — **without pass 1,
-   neither incident is visible.** Surface is `scoped-tests.sh` on a file-SET change, which closes that
-   script's OWN blind spot (its mapper selects tests that NAME what you changed; a new file names
-   nothing — exactly how both reds happened). Both historical reds reproduced and caught, clean either
-   side. ⚠ **166s, i.e. ~3 minutes — NOT the "seconds" this rank originally claimed**; ~7× the tier.
-   A 2× narrower filter was REJECTED because its false negatives re-open the hole.
-   forcing: gate — it reddens `main`, and every branch cut from a red `main` inherits it.
+10. 🔴 **MERGE `devrc#1600` — BUT ONLY AFTER READING THE MERGED-TREE VERDICT, WHICH IS UNREAD.**
+    The run was ~35% done when the session ended; see the Open investigation above for the exact
+    repro. Its three green checks are a claim about a base **24 commits** stale and do not settle it.
+    Design reviewed against the diff this session and sound. Timer for `stale-base-triage.py`, **2h**
+    (derived: a verdict only changes when a new `devrc-pytests` status lands ~19.6 min after a push,
+    or `main` moves a file the red names; measured cost **60 API reads / 43s / 59 PRs ⇒ 0.6% of the
+    rate limit**). Ships `--comment-mode dry-run`, **pinned by value**; 17/17 mutants killed.
+    **No `OnFailure=notify-failure@`** (every red it sees is somebody's PR, not an incident) and
+    **rc 11 FAILS the unit** — the opposite of its siblings, because it has no blind ladder.
+    `SuccessExitStatus=10`, `TimeoutStartSec=600` (above the script's own 300s budget).
+    `serverMode`-gated to the workbench only — both hosts build the same flake, and once armed two
+    hosts would race to post the same comment.
+    ⏳ **After merge: `ship.sh`, THEN `journalctl --user -u stale-base-triage -n 40 --no-pager`** —
+    two separate claims. Whether the unit runs cleanly under systemd is STILL unverified; no switch
+    has been done.
+    🔴 **ITS SOAK EVIDENCE IS JOURNAL-ONLY, NOT LOKI** — a systemd-user unit's stdout carries
+    `_TRANSPORT=stdout` and alloy's journal source is a default-deny allowlist of
+    `kernel|journal|syslog`. Unlike `#792`, you cannot read its dry-run evidence from Loki.
+    forcing: none
+11. **`devrc#1603` — FIXED AND PUSHED (`8a88f255`); MERGE ONCE CI IS GREEN.** The sandbox-tier red
+    was real and was this PR reintroducing the permanently-red-gate failure it exists to prevent —
+    full diagnosis in the Gotchas block. Fix verified in **both** tiers, 29 passed each, with the
+    tier guard mutation-killed by its own error string.
+    The PR's own substance is unchanged and stands: the ledger set is **genuinely DERIVED** (AST
+    closure at call time, no list); only a positive control is hardcoded, and a mutant proves it
+    reachable. 🔴 Its two-pass design is load-bearing: `public_ip_scan.repo_files(root)` walks its
+    own PARAMETER, so a root-aware seed never fires on the shared lister most guards go through —
+    **without pass 1, neither incident is visible.** Surface is `scoped-tests.sh` on a file-SET
+    change, which closes that script's OWN blind spot (its mapper selects tests that NAME what you
+    changed; a new file names nothing — exactly how both reds happened). Both historical reds
+    reproduced and caught, clean either side. ⚠ **166s, i.e. ~3 minutes — NOT the "seconds" this
+    rank originally claimed**; ~7× the tier. A 2× narrower filter was REJECTED because its false
+    negatives re-open the hole.
+    ⚠ **CI was still `pending` on the new head when this was written — the verdict is UNREAD.**
+    Read `gh pr checks 1603` before merging, and remember the measured ~42–48% not-success rate:
+    read the failing test's name and ask whether the diff can reach it rather than acting on colour.
+    ⚠ 16 behind `main`; its files are `scripts/{ledger-check.sh,scoped-tests.sh,testlib/census_scan.py}`
+    plus two test files. `scoped-tests.sh` and `testlib/**` are BOTH declared shared surfaces, so the
+    same merged-tree caveat as rank 10 applies — do not lean on the branch's own green.
+    forcing: gate — it reddens `main`, and every branch cut from a red `main` inherits it.
 
 ## Decisions, so they are not re-litigated
 
@@ -228,19 +255,23 @@ the END. **Ranks 1–4 and 9 are CLOSED tombstones**; renumbering re-points ever
 ## How to verify
 
 ```bash
-# the three open PRs
-gh pr view 1600 --repo innovation-upstream/devrc --json state,mergeable
-gh pr view 1603 --repo innovation-upstream/devrc --json state,mergeable
-gh pr view 799  --repo ZacxDev/homelab-infra    --json state,mergeable
+# rank 7 — squash-merged, so verify by CONTENT, never by ancestry
+gh pr view 799 --repo ZacxDev/homelab-infra --json state,mergedAt,mergeCommit
+gh api /repos/ZacxDev/homelab-infra/contents/scripts/tests/test_supersede_wiring.py?ref=trunk --jq .size
 
-# rank 4's consumer — the unit runs from the WORKING TREE, so the checkout IS the deploy
-grep -c 'from ci_status import' ~/workspace/devrc/scripts/main-status-watch.py   # 1
-systemctl --user list-timers main-status-watch.timer --all
-
-# main is green on both ledgers this session reddened
+# rank 11 — the fix, in BOTH tiers. The sandbox tier is the one that was red.
+git -C ~/workspace/devrc fetch origin -q
 nix develop ~/workspace/devrc -c python3 -m pytest \
-  scripts/tests/test_runner_bound_ledger.py \
-  scripts/claude-hooks/tests/test_guard_core.py -q -p no:cacheprovider
+  ~/workspace/devrc-fix1603/scripts/tests/test_census_scan.py -q -p no:cacheprovider   # 29 passed
+
+S=$(mktemp -d); git -C ~/workspace/devrc-fix1603 archive HEAD | tar -x -C "$S"
+test -e "$S/.git" && echo "NOT the sandbox shape" || echo "no .git — sandbox reproduced"
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  "$S/scripts/tests/test_census_scan.py" -q -p no:cacheprovider --rootdir="$S"          # 29 passed
+
+# rank 10 — the gate that is UNREAD. Read PYTEST_RC, never the wrapper's exit code.
+bash /tmp/claude-1000/-home-zach-workspace-devrc/*/scratchpad/mt1600-run.sh
+grep -E '^(SELECTED|PYTEST_RC)=' <that run's log>
 
 # after merging #1600 only: ship, THEN read the consumer (separate claims)
 bash ~/workspace/devrc/scripts/ship.sh
@@ -529,6 +560,72 @@ journalctl --user -u stale-base-triage -n 40 --no-pager
   that two other sessions had just superseded my own `#1512` read with a better-powered one
   (`#1568`, ancestry split, P(0) ≈ 0.017 vs my 0.23). **Pruning would have deleted work that improves
   on mine.**
+
+### 2026-09-12 — rank 11's red: the PR reintroduced the failure it exists to prevent
+
+- 🔴 **A TEST THAT READS `git ls-files` IS A TEST THAT CANNOT PASS IN THE SANDBOX TIER.**
+  `tekton/devrc-pytests` was red on `#1603`'s own head `7d19f4c7` with
+  `test_the_runner_is_tracked_and_executable` reporting **`not tracked by git: []`** against
+  `scripts/ledger-check.sh` — a file tracked at mode **100755**. The message was FALSE. `nix build
+  .#checks…` builds from a `cp -r ${./.}` store copy with **no `.git`**, so `git ls-files` exits
+  **128** and prints nothing, and the assertion read that empty stdout as "untracked". Merged, it
+  would have been a **permanently-red gate on `main`** — which is the exact thing `#1603` was built
+  to stop. **A PR whose subject is "stop the guards that redden main" shipped a new one.**
+- 🔴 **REPRODUCED, NOT INFERRED — and the reproduction is what discriminated the two assertions.**
+  `git archive origin/pr-1603 | tar -x` into a scratch dir gives the sandbox shape exactly (no
+  `.git`, modes preserved). Probing it directly: the exec bit is **preserved** (`-rwxr-xr-x`), and
+  `git ls-files` returns **rc 128, empty stdout**. So of the test's two assertions only the git one
+  is tier-dependent — an empty result that would otherwise have been read as "either could be
+  failing". Running the test there reproduced the CI message verbatim.
+- **The fix mirrors a shape this repo had ALREADY SOLVED TWICE and nobody reused:**
+  `scripts/opencode/tests/test_dispatch.py::file_ship_problems` and
+  `scripts/tests/test_load_test_harness.py::deploy_carries`. Both carry long comments explaining
+  this precise failure — `test_dispatch.py`'s even records "five failures, all reporting a tracking
+  problem that did not exist". **The cost of the third instance was a red CI run and a session's
+  investigation; the search that would have prevented it was one grep for `not a git repo`.**
+- **The three checks, and which are tier-conditional — only ONE is:** existence proves the flake
+  carried the file inside the sandbox; the **exec bit is asserted unconditionally** (measured: both
+  `git archive` and the nix store copy preserve 100755, and a lost mode bit is a real regression the
+  sandbox CAN see); trackedness is made **conditional rather than skipped**, so it cannot go quietly
+  vacuous on the tier that does have a git dir.
+- 🔴 **The tier probe is a FUNCTION of the tree, not a module constant — and that is not style.**
+  A `GIT_DIR_PRESENT = ...` constant is a fixture that can only ever produce the value an assertion
+  about it names, so a mutant hardcoding it to `True` **survives on a dev host**, where the probe
+  returns `True` anyway. `test_dispatch.py` records that exact survivor. Also `.git` is a **FILE**
+  inside a worktree, so `.exists()` and never `.is_dir()` — this repo is developed in worktrees, and
+  `.is_dir()` would disable the tracking half everywhere it matters.
+- **Verification matrix, both tiers, identical counts:** dev-host tier (has `.git`) **29 passed**;
+  sandbox tier (no `.git`) **29 passed**; pre-fix sandbox tier **1 failed** (the reproduction).
+  🔴 **The equal counts are the evidence that nothing skipped itself** — a tier guard that silently
+  deselected its own tests would show as a lower count on one side, not as a failure.
+- **Mutation check, isolated to the narrowest expression:** deleting `if not git_present: return
+  problems` (asserted `count == 1` before writing, under `PYTHONDONTWRITEBYTECODE=1`) killed
+  `test_a_present_executable_runner_in_a_GIT_FREE_tree_reports_NOTHING` **with that guard's own
+  error string** (`is not git-tracked — \`git add\` it`), plus
+  `test_a_NON_EXECUTABLE_runner_is_reported_in_either_tier`. Killed for the right reason, and
+  reachable from an ordinary checkout.
+
+### 2026-09-12 — instrument failures in this session
+
+- 🔴 **A BACKGROUNDED WRAPPER REPORTED EXIT 0 OVER A RUN THAT NEVER RAN A TEST.** The merged-tree
+  script was launched as `bash run.sh > log 2>&1; echo "EXIT=$?"` — the shell's status is `echo`'s,
+  which is always 0. The harness dutifully reported "completed (exit code 0)" for a pytest that had
+  died on `unrecognized arguments: --timeout=900` (no `pytest-timeout` in this shell) with
+  `PYTEST_RC=4`. **Caught only by reading the log content.** This is the documented
+  count-not-exit-code trap arriving through the background-task notification, which reads far more
+  like an authority than a pipe does.
+- **`pytest` here has NO `--timeout` plugin.** `nix develop ~/workspace/devrc -c python3 -m pytest
+  --timeout=N` is a hard usage error, not a slow run. Bound a long run some other way.
+- **The merged-tree selector was given a floor for exactly this reason.** `mt1600-run.sh` refuses
+  (exit 3, `COULD NOT MEASURE`) below 5 selected files rather than reporting a fast green over a
+  collapsed selection — the silent-zero shape. It selected 72.
+- **Enumerated with `find … -print0 | xargs -0 grep`, not `grep -r`** — `grep` here is a function
+  wrapping ugrep and honours `.gitignore`, so a recursive zero is a claim about grep's view. The
+  session hit the hook warning about this on a live call.
+- ⚠ **`claim-work` was skipped for rank 7 and the merge happened anyway.** Both sweeps
+  (`claim-work --list`, `gh pr list --state open`) were run at session start and showed no claim and
+  no duplicate on this arc, so nothing collided — but the lock is supposed to come before the act,
+  and "I checked the soft signals" is the reasoning the rule exists to override.
 ## Open investigations — live diagnosis state
 
 ### RANK 2: #1469's audit ladder has not reached a clean round
@@ -580,3 +677,26 @@ journalctl --user -u stale-base-triage -n 40 --no-pager
 - **Next probe:** decide the design fix — scope the scanner off `claudedocs/`, or auto-classify a
   prose-only file that executes no tmux command. 🔴 Deliberately NOT taken unilaterally; classifying
   the doc unblocks `main` but does not close the loop.
+
+### RANK 10: #1600's merged-tree verdict is UNREAD — the run did not finish in session
+- **Symptom + exact repro:** `#1600` is green on its own branch at a base 24 commits behind `main`.
+  The question is whether the merge it creates is green. Repro:
+  `bash /tmp/.../scratchpad/mt1600-run.sh` — or rebuild it: worktree off `origin/main`, merge
+  `origin/pr-1600`, run every test file that reads `nix/home.nix` plus the PR's own new file.
+- **Observed (with values):** merge is textually clean — `Auto-merging nix/home.nix`, ort strategy,
+  `+450/-0` across 2 files, merge commit `01418433` on branch `mt/1600-merged` in worktree
+  `/home/zach/workspace/devrc-mt1600`. Selector found **72 test files**. Run reached **~35%** with
+  **zero failures so far** before the session ended. `origin/main` did not move during the run
+  (still `7e000e6b`), so the merged tree tested is the merged tree that would land.
+- **Ruled out:** "the three green checks settle it" — they are a claim about the PR branch at a
+  stale base; a clean textual merge is not a clean merge, and the at-risk surface here is a new
+  systemd unit against unit ledgers that live in OTHER files. via: code
+- **Ruled out:** "`scoped-tests.sh` can answer this" — it exits **4** on `nix/**`, a declared shared
+  surface, precisely because its mapper selects only files that NAME what changed and drops every
+  target reaching it through an import. via: doc
+- **Leading hypothesis:** it passes. The 35% already covered includes much of `scripts/tests/`, and
+  the unit is additive with its own master switch. Stated as a hypothesis because **the verdict was
+  never read** — this is exactly the "deployed ≠ verified" shape one level up.
+- **Next probe:** re-run the script and read `PYTEST_RC=` from
+  `scratchpad/mt1600.log`. 🔴 **Read the CONTENT, not the wrapper's exit code** — see the Gotchas
+  entry below; the first run of this very script reported wrapper exit 0 over `PYTEST_RC=4`.
