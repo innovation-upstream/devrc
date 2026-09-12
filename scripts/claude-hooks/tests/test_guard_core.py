@@ -2551,6 +2551,25 @@ _KILL_MENTION_LEDGER = {
     "claudedocs/handoff-mention-system-repos.md":
         "prose: a META-mention — it only quotes that the doc above 'landed "
         "carrying `tmux kill-server` text', i.e. it is about this ledger",
+    # 🔴 THE THIRD META-MENTION, AND THE RECURRENCE IS THE FINDING — NOT THIS ROW.
+    # Writing a handoff ABOUT this ledger TRIPS this ledger, because the trip
+    # condition is "a tracked file MENTIONS a wide tmux kill" and a write-up of
+    # the incident necessarily mentions one. Measured: #1520 classified one such
+    # doc, #1534 classified two more PLUS a real scanner bug (it matched
+    # `kill-session` inside `sk`+`ill-session`), and `main` went red again on a
+    # NEW doc within minutes of #1534 merging. Three of the four `claudedocs/`
+    # rows here exist for that reason alone.
+    # ⚠ So this row unblocks `main`; it does NOT close the loop, and the next
+    # handoff written about any of this will reopen it. The design options —
+    # scope the scanner off `claudedocs/`, or auto-classify a prose-only file
+    # that executes no tmux command — are deliberately NOT taken here; see the
+    # ranked list in `claudedocs/handoff-gate-speed-and-ci-signal.md`.
+    # 🔴 A gate that reddens on its own documentation trains readers to click
+    # through, which is the failure mode a red gate is supposed to prevent.
+    "claudedocs/handoff-cairn-oss-multi-instance.md":
+        "prose: a META-mention — a write-up ABOUT this ledger, quoting the "
+        "earlier docs' offending strings and the scanner bug that matched "
+        "`kill-session` inside `skill-session`; it executes no tmux command",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is
@@ -2701,6 +2720,11 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         # how `main` stayed red on TWO tests for one root cause.
         "claudedocs/handoff-tmux-webapp.md",
         "claudedocs/handoff-mention-system-repos.md",
+        # The third, for the same reason — and note the paragraph above was
+        # already written by the round that fixed the previous two, and did not
+        # prevent this. Both surfaces had to be edited AGAIN for one new file,
+        # so the two-place cost is not a one-off either.
+        "claudedocs/handoff-cairn-oss-multi-instance.md",
     }
     seen_in_allowlisted, offenders = 0, []
     for rel in _tracked_files():

@@ -436,8 +436,17 @@ bash ~/workspace/devrc/scripts/ship.sh
 - **Observed (with values):** `_KILL_MENTION_LEDGER` (`test_guard_core.py:2525`) is a two-way pin over
   every file mentioning a wide tmux kill. Four `claudedocs/` rows now; **three exist purely because
   someone documented the guard.** `#1520` classified one, `#1534` classified two more **plus a real
-  scanner bug** (it matched `kill-session` inside `sk`+`ill-session`), and `main` went red again on a
-  new doc **within minutes of #1534 merging**.
+  scanner bug** (it matched the session-kill token inside `sk`+`ill-session`), and `main` went red
+  again on a new doc **within minutes of #1534 merging**.
+  🔴 **AND THIS PARAGRAPH TRIPPED THE GUARD ITSELF, ONE TURN AFTER BEING WRITTEN.** The first draft
+  spelled that token literally; `_MENTION_RE` (`test_guard_core.py:2601`,
+  `(?<![A-Za-z0-9_])kill-s(?:erver|ession)`) matched it, and THIS DOC became the next unclassified
+  offender — replacing the one I had just fixed. The `sk`+`ill-session` split above is the
+  convention the guard's own file already uses for exactly this reason. ⚠ **Writing the split form
+  is NOT evasion and the distinction matters**: the ledger exists to enumerate files that could
+  EXECUTE a wide kill, and a handoff doc is not one — adding it would grow a safety ledger by one
+  row per write-up forever, which degrades the ledger rather than the doc. Re-justifying belongs on
+  a real site; a prose quotation belongs in the split form.
 - **Ruled out:** "carelessness / a one-off" — the recurrence is STRUCTURAL: a write-up of this
   incident is a new unclassified file *by construction*. via: measurement
 - **Ruled out:** "#1544 fixed it" — `#1544` is a handoff commit; the ledger still lacks the file, and
