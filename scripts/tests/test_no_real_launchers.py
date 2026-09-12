@@ -391,7 +391,7 @@ ACKNOWLEDGED_UNSTUBBED = {
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "i3status-scratchpads",
          "keylog-spin-capture.sh",
-         "mention-open.py",
+         "main-status-watch.py", "mention-open.py",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
          "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
@@ -454,6 +454,29 @@ ACKNOWLEDGED_UNSTUBBED = {
         "set. Both controls watched: clean tree passes, an injected "
         "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
         "test's own message. "
+        "main-status-watch.py (added 2026-09-11 with the shared-predicate "
+        "module scripts/lib/ci_status.py) is the same PROSE-MENTION shape and "
+        "is re-justified, not reworded. Its SINGLE occurrence is one clause of "
+        "a comment on the import block, explaining that the systemd unit runs "
+        "this file straight out of the CHECKOUT (ExecStart names "
+        "%h/workspace/devrc/scripts/main-status-watch.py), so a `git pull` "
+        "delivers BOTH files and no switch is involved — which is the whole "
+        "reason importing a sibling module is safe here rather than a new "
+        "deploy dependency. Deleting the word would delete the reason the "
+        "import is safe. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard: "
+        "test_main_status_watch.py::test_main_status_watch_SPAWNS_these_argv0_"
+        "AND_NOTHING_ELSE walks the AST and asserts the spawn argv[0] set is "
+        "exactly {git, <computed>, <not-a-list>}, grows-or-shrinks — and its "
+        "companion test_home_manager_is_MENTIONED_but_never_SPAWNED asserts "
+        "BOTH halves: the mention still EXISTS (or this row has outlived the "
+        "sentence it describes) and the name reaches NO executable line, "
+        "comments and docstrings stripped by AST. The two opaque argv[0] "
+        "entries are named rather than waved at: <computed> is [gh, 'api', "
+        "path] behind the MAIN_STATUS_WATCH_GH stub seam, and <not-a-list> is "
+        "trigger_deadman's `cmd`, whose production literal is pinned exactly — "
+        "and refused a --force — by "
+        "test_the_production_trigger_is_systemctl_start_main_green_check. "
         "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
         "and carries the STRONGEST form of the justification: the other three "
         "merely lack a call site, whereas this file has no executable "

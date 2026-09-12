@@ -1079,6 +1079,84 @@ def _code_only():
     return "\n".join(out)
 
 
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
+                "execv", "execvp", "execve", "spawnv", "spawnvp"}
+
+# 🔴 WHAT THIS SET MEANS, ENTRY BY ENTRY, because two of the three are opaque on
+# purpose and an opaque entry is exactly where a launcher hides:
+#   git            — `git -C <repo> remote get-url origin`, a literal list.
+#   <computed>     — `[gh, "api", path]`; `gh` is the MAIN_STATUS_WATCH_GH seam,
+#                    which is what lets every test point it at a stub.
+#   <not-a-list>   — `subprocess.run(cmd, …)` in `trigger_deadman`, where `cmd`
+#                    is either the MAIN_STATUS_WATCH_TRIGGER override or the
+#                    systemctl literal. That literal is pinned separately and
+#                    exactly by `test_the_production_trigger_is_systemctl_start_
+#                    main_green_check`, which also refuses `--force`.
+# So this pin is not the whole story by itself, and does not pretend to be — it
+# is the half that catches a NEW literal spawn appearing.
+EXPECTED_ARGV0 = {"git", "<computed>", "<not-a-list>"}
+
+
+def _spawn_argv0_literals(path):
+    """Every literal argv[0] in a spawn-shaped call, from the SYNTAX TREE.
+
+    `<computed>` / `<not-a-list>` rather than a skip: a command built from a
+    variable is precisely how a literal-keyed ledger gets walked past, so it
+    must land in the set and fail loudly instead of leaving it.
+    """
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            found.add(head.value if isinstance(head, ast.Constant) else "<computed>")
+        else:
+            found.add("<not-a-list>")
+    return found
+
+
+def test_main_status_watch_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """GROWS-OR-SHRINKS. A new binary is the hazard the `home-manager`
+    acknowledgement in `test_no_real_launchers.py` would otherwise hide; a
+    vanished one means that justification has stopped describing this file."""
+    assert _spawn_argv0_literals(SCRIPT) == EXPECTED_ARGV0
+
+
+def test_home_manager_is_MENTIONED_but_never_SPAWNED():
+    """🔴 THE PIN UNDER THIS FILE'S ROW IN `ACKNOWLEDGED_UNSTUBBED`.
+
+    `launcher_scan.hazard_hits` is a TEXT scan and says so, so a prose mention
+    is a hit. This file acquired one when the shared-module import landed: a
+    comment explaining that the unit runs out of the CHECKOUT, so a `git pull`
+    is the whole deploy and no home-manager switch is involved. That sentence is
+    the reason the import is safe, so it is re-justified rather than reworded to
+    dodge the scanner — which is this repo's stated convention.
+
+    Both halves of the acknowledgement's claim are asserted rather than left to
+    a reader of prose: the mention must still EXIST (or the table entry has
+    outlived the sentence it describes), and it must remain a MENTION.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert re.search(r"(?<![\w-])home-manager(?![\w-])", text), (
+        "the ACKNOWLEDGED_UNSTUBBED entry for this file exists BECAUSE it names "
+        "home-manager; if that is gone, remove the acknowledgement too")
+    assert "home-manager" not in _spawn_argv0_literals(SCRIPT), (
+        "main-status-watch.py now SPAWNS home-manager — the acknowledgement "
+        "covering it is an unreachability claim and is now FALSE")
+    # …and the name appears in NO executable line at all, comments and
+    # docstrings stripped. This is the assertion that would catch it reaching
+    # the binary through the trigger override's literal rather than through a
+    # spawn head.
+    assert "home-manager" not in _code_only(), (
+        "home-manager reached an executable line in main-status-watch.py")
+
+
 def test_code_only_really_strips_the_prose_it_claims_to():
     """The instrument behind four static guards, with both controls.
 
