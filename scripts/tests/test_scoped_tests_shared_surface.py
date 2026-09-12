@@ -28,12 +28,20 @@ direction, and without it this module would be green for a broken guard.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCOPED = REPO_ROOT / "scripts" / "scoped-tests.sh"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+# 🔴 write_exec owns the shebang. A hand-written `#!/usr/bin/env ...` here is
+# forbidden by `test_runtime_shebangs.py`, because `env` is absent from the nix
+# build sandbox -- so such a stub cannot run in the tier the merge is gated on.
+from testlib.mockbin import write_exec  # noqa: E402
 
 # Every glob the script declares, as a concrete path a diff could contain.
 # 🔴 Pinned as a LEDGER, two-way: `test_every_declared_trigger_is_exercised`
@@ -108,9 +116,14 @@ def repo(tmp_path: Path) -> Path:
     # runner that cannot answer makes the script refuse (exit 2) rather than map
     # everything to nothing. The two-space/`dir`/three-space shape is what the
     # script's `sed` extracts.
+    #
+    # 🔴 write_exec OWNS THE SHEBANG. Writing `#!/bin/sh` here is forbidden by
+    # `test_runtime_shebangs.py` and it caught this exact file on its first CI
+    # run -- `env` is absent from the nix build sandbox, so a hand-written
+    # shebang is unrunnable in the tier the merge is gated on.
     runner = r / "scripts" / "run-tests.sh"
-    runner.write_text(
-        "#!/bin/sh\n"
+    write_exec(
+        runner,
         'for a in "$@"; do\n'
         '  if [ "$a" = "--check-targets" ]; then\n'
         '    printf "  dir   scripts/tests\\n"\n'
@@ -120,7 +133,6 @@ def repo(tmp_path: Path) -> Path:
         "done\n"
         "echo 'stub runner -- never executed under --dry-run'\n"
     )
-    runner.chmod(0o755)
     subprocess.run(["git", "init", "-q"], cwd=r, check=True)
     subprocess.run(["git", "add", "-A"], cwd=r, check=True)
     subprocess.run(
