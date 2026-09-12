@@ -570,7 +570,7 @@ Both directions, and they do not cancel.
   | civitai-gpu-fleet | 10 | 0 · 0 · 0 | 5 · 0 · 5 | 5 |
   | vetr-app | 1 | 0 · 0 · 0 | 1 · 0 · 0 | 1 |
   | vetr-api | 2 | 0 · 0 · 0 | 0 · 0 · 2 | 0 |
-  | **TOTAL** | **186** | **4** · 0 · 7 | **36** · 42 · 101 | **38** |
+  | **TOTAL** | **186** | **4** · 0 · 3 | **36** · 42 · 101 | **38** |
 
   🔴 **FOUR, NOT FORTY — and an earlier revision of this section headlined the 40.** Forty
   commits name their round; only **4 are INTERIOR**, the class where the reading is unambiguous.
@@ -597,9 +597,27 @@ Both directions, and they do not cancel.
   successor block, so the gate-reset rule was not honoured and no round ever diffed that delta.
   ✅ **ZERO false positives for what it does claim, verified by reading all 11 devrc hits** —
   every one genuinely names a round, including a trailing parenthetical (`… (round-2 audit)`).
-  **Base-rate control:** the pattern matches **4 of 624** devrc `main` squash subjects (0.6%)
-  against 11 of 69 devrc gap commits (16%) — **~26× enriched** in the gap population, so it is not
-  firing on everything.
+  🔴 **BUT "NAMES A ROUND" IS NOT "IS THAT ROUND'S FIX", AND THE GAP BETWEEN THEM IS HALF THE
+  POPULATION ON ONE CORPUS.** A doc that *narrates* a round matches too — `docs(handoff): … a
+  round-2 audit caught a red main …` is a write-up of a round that ran elsewhere, not that
+  round's fix. Measured on devrc `main`: **2 of the 4 matched subjects are `docs(handoff)`
+  narration.** Found by round 1 of `#1576`; the census output now asserts only "names a round"
+  and prints the matched SPAN on every row so a reader can judge which kind it is.
+  ⚠ **Deliberately NOT patterned around.** Excluding `docs(` would be a guess over WORDS of
+  exactly the kind the five-bucket draft was deleted for, and wrong in both directions: a
+  `docs(` commit CAN be a round's own fix — for a prose-payload ladder every fix is one — and
+  narration is not confined to that prefix.
+  **Base-rate control, re-derived:** the pattern matches **4 of 1,377** devrc `main` squash
+  subjects (0.29%) against 11 of 69 devrc gap commits (16%) — **~55× enriched**, so it is not
+  firing on everything. ⚠ **An earlier revision said `4 of 624` (0.6%, ~26×) and gave no
+  command.** The NUMERATOR reproduces exactly — and all four are genuine (`round-2 audit` ×2,
+  `(round-7 audit)`, `(#1222 round-1 audit)`), which is stronger evidence than the claim made —
+  but the denominator did not, which in a doc whose premise is that an un-re-derivable
+  measurement is worthless is the wrong number to leave unsourced. Both figures point the same
+  way and nothing downstream moves. Re-derive with:
+  ```bash
+  git -C ~/workspace/devrc log --first-parent --format=%s origin/main | grep -cE '\(#[0-9]+\)$'
+  ```
   🔴 **READ THE SPLIT, NOT THE 40.** Measured on devrc: **10 of 11 ROUND-REF commits are TAIL
   and exactly ONE is interior**, so the combined headline is ~91% the ambiguous class — and the
   line counts three paragraphs up carry a 🔴 banner forbidding exactly this sum. The census now

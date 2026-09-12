@@ -195,6 +195,18 @@ def _is_ancestor(runner, repo_dir, a, b):
 # honoured and nothing re-audited that delta.** State that; do not state that
 # the code was never looked at.
 #
+# 🔴 AND THERE IS A SECOND CONTAMINATION CLASS — A DOC THAT *NARRATES* A ROUND.
+# `docs(handoff): … a round-2 audit caught a red main …` matches, and it is not
+# that round's fix; it is a write-up of a round that ran elsewhere. Measured on
+# devrc `main`: 2 of the 4 matched subjects are `docs(handoff)` narration, i.e.
+# HALF the matched population on that corpus. Found by round 1 of #1576.
+# 🔴 DELIBERATELY NOT PATTERNED AROUND. Excluding `docs(` would be a guess over
+# WORDS of exactly the kind the five-bucket draft was deleted for, and it would
+# be wrong in both directions: a `docs(...)` commit CAN be a round's own fix (a
+# prose-payload ladder's fixes are all `docs(`), and narration is not confined to
+# that prefix. The bucket therefore asserts only "names a round", the output says
+# so, and each row prints the matched SPAN so a reader can judge.
+#
 # 🔴 EVERYTHING ELSE IS REPORTED UNCLASSIFIED ON PURPOSE. An earlier draft of
 # this had five buckets keyed on conventional-commit types and correction verbs
 # (`fix(`, `correct`, `retract`, …). That is a guess dressed as a measurement:
@@ -212,7 +224,15 @@ _ROUND_REF_RE = re.compile(
     """
 )
 
-GapCommit = namedtuple("GapCommit", "sha parents subject round_ref is_merge")
+GapCommit = namedtuple(
+    "GapCommit", "sha parents subject round_ref is_merge round_span"
+)
+# `round_span` is the matched TEXT, not a boolean. 🔴 It exists because the
+# rendered subject is truncated and the census tells the reader to verify the
+# classification from it: measured over devrc `main`'s 4 real hits, the match
+# sits at columns 23, 64, 125 and 138, so THREE OF FOUR rendered as a ROUND-REF
+# line containing no round reference at all. A classification the operator
+# cannot check from the output is one they have to take on trust.
 
 
 def classify_gap_commits(runner, repo_dir, frm, to, base):
@@ -242,15 +262,30 @@ def classify_gap_commits(runner, repo_dir, frm, to, base):
         return [], f"`git log` wrote to stderr: {err.strip()}"
 
     commits = []
-    for line in out.splitlines():
+    # 🔴 `split("\n")`, NEVER `splitlines()`. `str.splitlines()` also breaks on
+    # U+2028, U+0085 (NEL), \x0b, \x0c and \x1c — none of which git treats as a
+    # line end inside `%s`. Measured: a subject containing any of them was split,
+    # the tail fragment hit the `len(parts) < 3` skip SILENTLY, and a commit whose
+    # subject said `audit round 7` was returned with `round_ref=False` and a
+    # truncated subject presented as complete.
+    for line in out.split("\n"):
         parts = line.split("\0")
         if len(parts) < 3:
+            if line.strip():
+                # Not silent: a fragment that is not just the trailing blank line
+                # means the parse lost something, and a floor that quietly drops
+                # rows is the reassuring-zero shape this file refuses elsewhere.
+                commits.append(GapCommit(
+                    sha="", parents=[], round_span="",
+                    subject=f"UNPARSED git log row: {line[:90]!r}",
+                    round_ref=False, is_merge=False))
             continue
         sha, parents, subject = parts[0], parts[1].split(), parts[2]
+        m = _ROUND_REF_RE.search(subject)
         commits.append(GapCommit(
             sha=sha, parents=parents, subject=subject,
-            round_ref=bool(_ROUND_REF_RE.search(subject)),
-            is_merge=len(parents) >= 2,
+            round_ref=bool(m), is_merge=len(parents) >= 2,
+            round_span=m.group(0) if m else "",
         ))
     return commits, None
 
@@ -379,7 +414,7 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
                 # Reported, never swallowed: an unclassifiable gap must not read
                 # as a gap with zero round references.
                 gap_commits = [GapCommit("", [], f"COULD NOT LIST: {why}",
-                                         False, False)]
+                                         False, False, "")]
         adjacencies.append(
             Adjacency(label, frm, to, r_from, r_to, added, deleted, commits,
                       reason, gap_commits)
@@ -569,8 +604,10 @@ def render(ladders, notes):
                     if not c.sha:
                         out.append(f"       ⚠ {c.subject}")
                     elif c.round_ref:
+                        # The span FIRST, because the subject is truncated and the
+                        # match is past the cut in most real cases.
                         out.append(f"       🔴 ROUND-REF  {c.sha[:8]} "
-                                   f"{c.subject[:74]}")
+                                   f"[{c.round_span}] {c.subject[:60]}")
                     elif c.is_merge:
                         out.append(f"       MERGE      {c.sha[:8]} "
                                    f"{c.subject[:74]}")
@@ -668,16 +705,25 @@ def render(ladders, notes):
                    "after the final block")
         out.append("     OR work that continued after the ladder ended, and "
                    "nothing here separates them.")
-        out.append(f"  🔴 ROUND-REF     {ref} — the commit's own subject names the "
-                   "audit round it belongs to.")
-        out.append("                      That is an UNLEDGERED ROUND: the round "
-                   "RAN (this is its own fix)")
-        out.append("                      and posted no two-sha `audited=` block, "
-                   "so its delta chains into")
-        out.append("                      nobody's range and nothing re-audited "
-                   "it. 🔴 NOT evidence the code")
-        out.append("                      was never looked at — the subject says "
-                   "the opposite.")
+        out.append(f"  🔴 ROUND-REF     {ref} — the subject NAMES an audit round. "
+                   "That is all this asserts.")
+        out.append("                      USUALLY it is that round's own fix, and "
+                   "then the gap means an")
+        out.append("                      UNLEDGERED ROUND: the round RAN and "
+                   "posted no two-sha `audited=`")
+        out.append("                      block, so its delta chains into nobody's "
+                   "range. 🔴 NOT evidence the")
+        out.append("                      code went unread — the subject says the "
+                   "opposite.")
+        out.append("                      🔴 BUT A DOC THAT *NARRATES* A ROUND "
+                   "MATCHES TOO, and it is not that")
+        out.append("                      round's fix at all. Measured on devrc "
+                   "`main`: 2 of the 4 matched")
+        out.append("                      subjects are `docs(handoff)` narration — "
+                   "HALF the population on")
+        out.append("                      that corpus. Read the span printed on "
+                   "each row before quoting a")
+        out.append("                      count as unledgered rounds.")
         out.append(f"  MERGE          {mrg} — structural (>=2 parents). Read its "
                    "remerge-diff: a SEMANTIC")
         out.append("                      conflict resolution hides here, and is "

@@ -81,17 +81,18 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED. The floor catches COLLAPSE, not growth; `run-tests.sh`'s own
-# formula is `m - min(50, max(1, m/20))`, which at m=25 is 24.
-# 🔴 IT HAS NOW FIRED FOUR TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
-# 17), 19→20, 20→21, 21→25. Not one was a refactor — each was tests added while
-# fixing something — and a hand-maintained floor would have silently tolerated
-# every one of them, widening from one test of slack to five.
+# formula is `m - min(50, max(1, m/20))`, which at m=27 is 26.
+# 🔴 IT HAS NOW FIRED FIVE TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
+# 17), 19→20, 20→21, 21→25, 25→27. Not one was a refactor — each was tests added
+# while fixing something, the last two while fixing audit findings — and a
+# hand-maintained floor would have tolerated every one, widening from one test of
+# slack to seven.
 # 🔴 DO NOT maintain this by memory — `test_ladder_range_coverage.py::
 # test_the_batterys_floor_is_re_derived_from_this_modules_size` reads the literal
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=24
+MIN_TESTS=26
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -259,6 +260,34 @@ run "the census calls its remainder development" \
     test_the_census_does_NOT_call_the_remainder_development "$LRC" \
     "unclassified   {rest} — 🔴 NOT 'ordinary development'. This " \
     "unclassified   {rest} — ordinary development. This "
+
+# 🔴 ROUND 1 of #1576 PROVED THE OVER-MATCH HALF VACUOUS: `re.compile(r"\d")`
+# SURVIVED the whole suite, because no negative fixture carried a digit or either
+# word. This row is that exact mutant, and it must now die.
+run "the pattern over-matches any digit" \
+    test_the_round_reference_pattern_is_pinned_BOTH_ways "$LRC" \
+    '_ROUND_REF_RE = re.compile(' \
+    '_ROUND_REF_RE = re.compile(r"\\d") or re.compile('
+
+run "the pattern over-matches the bare words" \
+    test_the_round_reference_pattern_is_pinned_BOTH_ways "$LRC" \
+    '_ROUND_REF_RE = re.compile(' \
+    '_ROUND_REF_RE = re.compile(r"round|audit", re.I) or re.compile('
+
+# 🔴 `splitlines()` breaks on U+2028/NEL/\x0b\x0c\x1c, which git does not treat
+# as line ends inside `%s` — it silently truncated a subject and lost its round
+# reference.
+run "the parse goes back to splitlines()" \
+    test_a_subject_with_an_exotic_line_break_is_not_silently_truncated "$LRC" \
+    '    for line in out.split("\n"):' \
+    '    for line in out.splitlines():'
+
+# 🔴 The matched span is printed because the subject is truncated BEFORE the
+# match in 3 of 4 real cases, and the census tells the reader to verify there.
+run "the ROUND-REF row stops printing the matched span" \
+    test_a_ROUND_REF_row_shows_the_MATCHED_SPAN "$LRC" \
+    'f"[{c.round_span}] {c.subject[:60]}")' \
+    'f"{c.subject[:74]}")'
 
 echo
 echo "== the labels that must NOT become a sized GAP =="

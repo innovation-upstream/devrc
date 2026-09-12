@@ -508,20 +508,43 @@ _ROUND_REF_NEGATIVES = [
     "docs(clawgate): two seam-guard comments claimed more than the code does",
     "chore(ci): re-trigger — devrc-pytests returned a false red under load",
     "test(gate): widen the conditional-pin guard to its docstring — all, not any",
+    # 🔴 THE SIX ABOVE CONTAIN NO DIGIT AND NEITHER WORD, SO THEY COULD NOT FAIL
+    # FOR THE WHOLE FAMILY OF OVER-MATCHING PATTERNS — round 1 of #1576
+    # demonstrated `_ROUND_REF_RE = re.compile(r"\d")` SURVIVING the full suite.
+    # `\d` classifies every subject carrying a digit as a self-declared round,
+    # and on this repo that is nearly every squash subject because they all end
+    # `(#1234)`. The seven below are the half that was missing: each carries a
+    # digit, or `round`/`audit` in a position that declares nothing.
+    "fix(dl-router): cap inline media at 3 accessors (#1234)",
+    "feat(gate): raise the collected-test floor to 920",
+    "chore(deps): bump vitest 1.6.0 -> 2.0.4",
+    "fix(session): the round-trip encoder dropped a field",
+    "docs(skills): audit-pr gains a ROUND 0 section",
+    "fix(clawgate): task 375 — ship clawgatectl into agent pods",
+    "test(store): round 2 of 3 fixtures still share a socket",
 ]
 
 
 def test_the_round_reference_pattern_is_pinned_BOTH_ways(lrc):
-    """🔴 The instrument validation, and both halves are mandatory.
+    r"""🔴 The instrument validation, and both halves are mandatory.
 
     A pattern that matches nothing makes the census report a reassuring ZERO
     round references — indistinguishable from a corpus with none. A pattern that
     matches too much turns every `fix(...)` into self-declared audit surface and
     inflates the one number this tool is willing to assert.
 
-    Measured: 8 of 8 positives, 0 of 6 false positives. These are the subjects
-    the hand classification read, so agreement here is agreement with a human
-    pass over the same commits.
+    Measured: 8 of 8 positives, 0 of 13 false positives. The positives are the
+    subjects the hand classification read, so agreement there is agreement with a
+    human pass over the same commits.
+
+    🔴 THE NEGATIVE HALF WAS VACUOUS UNTIL ROUND 1 OF #1576 PROVED IT. The first
+    six negatives contained no digit and neither the word `round` nor `audit`, so
+    the `false_pos` assertion could not fail for the entire family of plausible
+    over-matching patterns — `re.compile(r"\d")` SURVIVED the whole suite, while
+    classifying every subject with a digit as a self-declared round (on this repo,
+    nearly all of them: the squash subjects end `(#1234)`). Seven negatives
+    carrying a digit, or `round`/`audit` in a non-declaring position, close it.
+    **A two-way pin is only two-way against mutations its fixtures can express.**
     """
     missed = [s for s in _ROUND_REF_POSITIVES if not lrc._ROUND_REF_RE.search(s)]
     assert not missed, f"the pattern cannot see a real round reference: {missed}"
@@ -573,12 +596,67 @@ def test_a_gap_whose_commits_cannot_be_LISTED_says_so(lrc, ad, base_repo):
     # …and the reason must survive into the rendered report.
     fake = lrc.Adjacency(
         lrc.GAP, "a" * 40, "b" * 40, 1, None, 5, 0, 1, None,
-        [lrc.GapCommit("", [], "COULD NOT LIST: boom", False, False)])
+        [lrc.GapCommit("", [], "COULD NOT LIST: boom", False, False, "")])
     L = lrc.Ladder(1, "b" * 40, "main", 1, 1, 1, [fake], 10, 5, 0,
                    (0, 0), (5, 0), None, [], [])
     rendered = lrc.render([L], [])
     assert "COULD NOT LIST: boom" in rendered
     assert ad
+
+
+def test_a_subject_with_an_exotic_line_break_is_not_silently_truncated(lrc, ad,
+                                                                        base_repo):
+    """🔴 `str.splitlines()` breaks on U+2028, NEL, \x0b, \x0c, \x1c — none of
+    which git treats as a line end inside `%s`.
+
+    Round 1 of #1576 measured the consequence: the subject was split, the tail
+    fragment hit the `len(parts) < 3` skip SILENTLY, and a commit whose subject
+    said `audit round 7` came back `round_ref=False` with a truncated subject
+    presented as complete. The parse now uses `split("\n")`, and a fragment that
+    is not the trailing blank line is REPORTED rather than dropped.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 6, "round 1 fix")
+    head = _commit(repo, "b.py", 4,
+                   "fix(thing):\u2028 audit round 7 — after an exotic break")
+
+    commits, why = lrc.classify_gap_commits(
+        lrc.real_runner, str(repo), r1_to, head, "main")
+
+    assert why is None, why
+    real = [c for c in commits if c.sha]
+    assert len(real) == 1, [c.subject for c in real]
+    assert "audit round 7" in real[0].subject, (
+        "the subject was truncated at a break git does not consider one: "
+        f"{real[0].subject!r}")
+    assert real[0].round_ref, "and the round reference was therefore lost"
+    assert not [c for c in commits if not c.sha], \
+        "nothing should have been dropped or reported as unparsed"
+    assert base and ad
+
+
+def test_a_ROUND_REF_row_shows_the_MATCHED_SPAN(lrc, ad, base_repo):
+    """🔴 The rendered subject is truncated and the census says "read them".
+
+    Measured over devrc `main`'s 4 real hits, the match sits at columns 23, 64,
+    125 and 138 — so THREE OF FOUR rendered as a `ROUND-REF` line containing no
+    round reference at all, and the operator could not check the classification
+    from the output the census points them at. The span is now printed first.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 6, "round 1 fix")
+    # The reference sits past any sane truncation point.
+    subject = ("fix(store-siting): the entry census was a syntactic sweep and six "
+               "shapes walked past it (round-2 audit)")
+    head = _commit(repo, "b.py", 4, subject)
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 13, head, "main",
+                           [_block(1, base, r1_to)])
+    rendered = lrc.render([L], [])
+
+    assert "[round-2 audit]" in rendered, (
+        "the matched span must be printed, because the subject is truncated "
+        f"before it:\n{rendered}")
 
 
 def test_the_census_does_NOT_call_the_remainder_development(lrc, ad, base_repo):
@@ -608,7 +686,19 @@ def test_the_census_does_NOT_call_the_remainder_development(lrc, ad, base_repo):
     # the code was unaudited. Round 0 of #1576 found the original wording
     # asserted the opposite of what the commit subject says.
     assert "UNLEDGERED ROUND" in rendered
-    assert "NOT evidence the code" in rendered
+    # 🔴 Wrap-independent: the renderer line-breaks this phrase, and asserting
+    # the joined form made the guard fail on a cosmetic rewrap rather than on
+    # anything a reader would notice. Normalise whitespace instead.
+    flat = " ".join(rendered.split())
+    assert "NOT evidence the code went unread" in flat
+    # 🔴 and it must NOT assert that a match IS that round's own fix. Round 1 of
+    # #1576 measured a second contamination class: a `docs(handoff)` commit
+    # NARRATING a round matches too, and on devrc `main` that is 2 of 4 matched
+    # subjects. The bucket asserts "names a round" and says so.
+    assert "NAMES an audit round. That is all this asserts" in flat
+    assert "NARRATES" in rendered
+    assert "this is its own fix" not in flat, (
+        "the census is asserting the stronger reading the narration class refutes")
     # 🔴 and the census must SPLIT interior from tail — this file forbids summing
     # them for lines, and the first census summed them for commits anyway.
     assert "🔴 INTERIOR  round-ref" in rendered
