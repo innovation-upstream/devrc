@@ -104,7 +104,16 @@ from pathlib import Path
 # is involved. A run that lands in the instant between the two files arriving
 # fails to import and exits non-zero; this unit has no `OnFailure=` toast and the
 # next poll is 10 minutes away, so the cost of that window is one skipped poll.
-sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+#
+# 🔴 `append`, NEVER `insert(0, …)`. `scripts/lib/` is this repo's shared-module
+# dumping ground and grows freely; prepending it puts EVERY module in it ahead of
+# the standard library for every LATER import this process makes — including the
+# lazy `import traceback` on the unattended-crash path at the bottom of this
+# file, which is the one import that runs when something has already gone wrong.
+# Nothing there shadows a stdlib name today; `append` means nothing added
+# tomorrow can, and it costs nothing, because `ci_status` is not a name anything
+# else on the path defines.
+sys.path.append(str(Path(__file__).resolve().parent / "lib"))
 from ci_status import (classify, newest_per_context,  # noqa: E402
                        parse_failed_count, parse_failing_names)
 
@@ -211,7 +220,7 @@ def commit_verdict(rows):
 
 # ── the flake screen ──────────────────────────────────────────────────────────
 # 🔴 THIS SCREEN IS SOUND AND ALMOST NEVER SATISFIABLE, AND BOTH HALVES ARE THE
-# POINT. GitHub caps a status description at 140 characters and the pipeline's
+# POINT. GitHub caps a status description at 140 BYTES and the pipeline's
 # `FAILING: a | b | c | TOTAL …` line overruns it constantly. MEASURED on real
 # rows: one described `failed=7` while naming ONE test; one named NO test at all;
 # and the row that named the known flake was cut MID-WORD

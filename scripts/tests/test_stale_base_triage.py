@@ -233,6 +233,39 @@ def test_newest_per_context_is_order_independent():
     assert set(both) == {"tekton/devrc-pytests", "tekton/devrc-nodetests"}
 
 
+def test_newest_per_context_skips_a_malformed_row_rather_than_raising():
+    """🔴 THE CITED TEST THAT DID NOT EXIST, AND THE MUTANT THAT SURVIVED.
+
+    `scripts/lib/ci_status.py`'s module docstring names this test as the pin on
+    its row-validity policy, and it named nothing: deleting
+    `if not isinstance(row, dict): continue` SURVIVED the whole suite, because
+    no fixture anywhere fed the fold a non-dict row. A guard nothing reaches is
+    a guard that can be deleted by accident with a green suite.
+
+    It is REACHABLE here and the earlier checks do not pre-empt it: the skip is
+    the FIRST statement in the loop body, and each row below is a shape
+    `row.get` does not exist on — so removing the guard raises `AttributeError`
+    on the reporting path of a tool whose whole contract is to report rather
+    than crash.
+
+    WHICH POLICY THIS IS, because the two callers do not share one:
+    `stale-base-triage.py` has no row walk of its own and this skip is its
+    existing behaviour; `main-status-watch.py` validates every row in its own
+    walk first, so for that caller this arm is unreachable by construction. The
+    fold must therefore skip, not raise, and must not skip a VALID row.
+    """
+    good = {"context": "tekton/devrc-pytests", "state": "failure",
+            "created_at": "2026-09-11T17:00:00Z", "description": "FAILED"}
+    for junk in ([], "a string", 7, None, ("context", "x")):
+        got = M.newest_per_context([junk, good])
+        # POSITIVE CONTROL, in the same call: the valid row alongside the junk
+        # still folds, so "it did not raise" is not "it returned nothing".
+        assert set(got) == {"tekton/devrc-pytests"}, junk
+        assert got["tekton/devrc-pytests"]["state"] == "failure", junk
+    # …and a list of nothing BUT malformed rows is an empty fold, never a raise.
+    assert M.newest_per_context(["", 0, None]) == {}
+
+
 # ══ PURE: description parsing ═════════════════════════════════════════════════
 # REAL descriptions, copied from statuses THIS repo posted about its OWN tests.
 # No third-party text, no hostnames, no captured content — and they are here
@@ -265,7 +298,7 @@ def test_parse_failing_names_reads_the_names_and_stops_at_TOTAL():
 
 
 def test_a_trailing_TOTAL_fragment_is_not_a_test_name():
-    """🔴 A 140-CHAR CUT LANDING INSIDE ` | TOTAL` LEAVES A FRAGMENT WHERE A NAME
+    """🔴 A 140-BYTE CUT LANDING INSIDE ` | TOTAL` LEAVES A FRAGMENT WHERE A NAME
     WOULD BE. Left in, it resolves to no file and the PR is reported as a real
     red on the strength of a truncation artefact — the exact false negative this
     tool must not produce. Only the four proper prefixes of TOTAL are stripped,
@@ -466,6 +499,76 @@ def test_a_TRUNCATED_skipped_can_only_INFLATE_the_derived_bound():
     assert M.derived_failure_upper_bound(short) > M.derived_failure_upper_bound(full)
 
 
+def test_an_EARLIER_per_target_row_cannot_be_mistaken_for_the_TOTAL_banner():
+    """🔴 THE UNDER-COUNT DIRECTION, WHICH IS THE ONLY ONE THAT CERTIFIES.
+
+    `run-tests.sh` prints a row PER TARGET before the TOTAL banner, and those
+    rows carry the same field names:
+
+        FAIL  <dir>  (collected=… passed=… skipped=… failed=… errors=…)
+
+    Both parsers used `re.search` over an UNANCHORED pattern, so on a
+    description carrying such a row they read ONE TARGET'S numbers: the derived
+    bound came out 2 and `failed=` came out 2, where the run's own count is 27.
+    Two names would then be "provably complete" on a row with 27 failures — the
+    single error this tool must not make, and it is silent, because the verdict
+    it produces is a confident INHERITED rather than a refusal.
+
+    ⚠ NO REACHABLE EXPLOIT IS CLAIMED, AND THIS TEST DOES NOT DEMONSTRATE ONE.
+    What assembles the posted description is the pipeline in `homelab-talos`,
+    which cannot be pinned from this repo; every row measured here carries the
+    banner alone. This is the parser's half of the hazard, closed on its own.
+    """
+    # The per-target row's shape is READ OUT OF `run-tests.sh`, not imagined, so
+    # this fixture cannot quietly stop resembling what the gate emits.
+    runner = (ROOT / "scripts" / "run-tests.sh").read_text(encoding="utf-8")
+    assert re.search(r'collected=\$collected\s+passed=\$p\s+skipped=\$s', runner), (
+        "run-tests.sh no longer prints a per-target collected/passed/skipped "
+        "row — re-derive this fixture before trusting the assertions below")
+
+    per_target = "FAIL  scripts/tests  (collected=9 passed=6 skipped=1 failed=2 errors=0)"
+    banner = "TOTAL collected=900  passed=850  skipped=23  failed=27"
+    desc = f"FAILED: pytests — FAILING: test_x | {per_target} | {banner}"
+
+    # POSITIVE CONTROL on the fixture: the per-target triple really is readable
+    # and really does yield the wrong answer, so the assertions below are about
+    # which match is taken and not about a string nothing can parse.
+    assert re.search(r"\bcollected=(\d+)\s+passed=(\d+)\s+skipped=(\d+)",
+                     desc).groups() == ("9", "6", "1")
+    assert re.search(r"\bfailed=(\d+)\b", desc).group(1) == "2"
+
+    assert M.derived_failure_upper_bound(desc) == 27, desc     # NOT 9-6-1 = 2
+    assert M.parse_failed_count(desc) == 27, desc              # NOT the target's 2
+    # …and the verdict that rests on them REFUSES. Pinned as a whole string,
+    # because the failure mode being closed is a confident True: before the
+    # anchor this row returned `(True, "failed=2 and 2 named")` — certified
+    # complete, on a run with 27 failures. (The "2 named" is the per-target row
+    # itself being read as a second name by `FAILING:`; it is an artefact of
+    # this fixture and not part of what is pinned.)
+    ok, why = M.names_provably_complete(desc)
+    assert not ok, why
+    assert why == "the description says failed=27 but names 2", why
+    # The banner ALONE still answers, so the anchor did not simply disable both
+    # parsers on every row.
+    assert M.derived_failure_upper_bound(banner) == 27
+    assert M.parse_failed_count(banner) == 27
+
+    # 🔴 WHY `re.search` — FIRST match — NEEDS NO SEPARATE PIN ONCE ANCHORED,
+    # written down as a measurement rather than left as an unexplained
+    # surviving mutant. Rewriting `TOTALS_RE.search(…)` as a LAST-match fold
+    # still survives the suite, and it survives because the anchored pattern
+    # matches AT MOST ONCE on every banner this repo can post: `TOTAL` is
+    # printed once and last. Unanchored, first-vs-last was a live hazard —
+    # that is the whole finding above; anchored, the two are the same match.
+    # (Reachability was confirmed separately: breaking the same statement kills
+    # 39 tests, so the arm is executed and this is equivalence, not silence.)
+    for fixture in (desc, banner, REAL_ONE_NAMED_COMPLETE, REAL_NO_NAMES_AT_ALL,
+                    REAL_FIVE_FAILED_ONE_NAMED, REAL_CUT_BEFORE_THE_COUNT,
+                    *CUT_INSIDE_FAILED, synth_row("test_z", 10, 7, 1, 2)):
+        assert len(M._TOTALS_RE.findall(fixture)) <= 1, fixture
+    assert len(M._TOTALS_RE.findall(desc)) == 1, desc
+
+
 def test_the_derived_bound_refuses_a_row_it_cannot_read():
     """None, never a number and never a raise — an unreadable row must not
     become a bound of 0, which would certify every single-named row as
@@ -573,9 +676,14 @@ def test_the_run_tests_collected_arithmetic_this_derivation_rests_on_is_pinned()
     banners = [ln for ln in src.splitlines() if "TOTAL collected=$TOT_COLLECTED" in ln]
     assert len(banners) >= 2, f"expected both TOTAL banners, found {len(banners)}"
     for ln in banners:
+        # 🔴 `TOTAL` IS PART OF THE SHAPE, NOT DECORATION AROUND IT. Both
+        # parsers anchor on that word, because `run-tests.sh` also prints a
+        # per-target `(collected=… passed=… skipped=… failed=…)` row and an
+        # unanchored pattern reads THAT one. So the guard pins the word's
+        # adjacency to the triple, not just the triple's internal order.
         ordered = re.search(
-            r"collected=\$TOT_COLLECTED\s+passed=\$TOT_PASSED\s+skipped=\$TOT_SKIPPED\s+"
-            r"failed=\$TOT_FAILED", ln)
+            r"TOTAL\s+collected=\$TOT_COLLECTED\s+passed=\$TOT_PASSED\s+"
+            r"skipped=\$TOT_SKIPPED\s+failed=\$TOT_FAILED", ln)
         assert ordered, f"banner does not print the fields in order: {ln.strip()}"
         # …and the regex this file parses with actually matches that shape.
         assert M._TOTALS_RE.search(
@@ -635,7 +743,7 @@ def test_a_class_qualified_name_narrows_an_otherwise_ambiguous_method(repo):
     assert got["file"] == BRAVO
 
 
-def test_a_name_TRUNCATED_by_the_140_char_cap_still_resolves(repo):
+def test_a_name_TRUNCATED_by_the_140_BYTE_cap_still_resolves(repo):
     """🔴 REAL: a status row ended `…_CAN_see_the_dif`, mid-word. Phase 2 drops
     the opening paren so a prefix can match — and runs ONLY when phase 1 found
     nothing, which is why the next test exists."""
@@ -930,8 +1038,17 @@ class Harness:
         # Records EVERY argv, then answers on the first argument that looks like
         # an API path. `-X POST` therefore lands in the receipt exactly like a
         # read does — which is what makes "no write happened" observable.
+        #
+        # 🔴 ONE RECEIPT LINE PER INVOCATION, WHICH IT WAS NOT. A comment BODY
+        # contains newlines, so `printf "%s\n" "$*"` split ONE `gh` call across
+        # a dozen lines and `calls()` returned prose fragments as if they were
+        # invocations. That was invisible while the only question asked of a
+        # line was whether it contained the word POST; a classifier that reads
+        # each line AS an argv needs the lines to be argvs. Newlines inside an
+        # argument are flattened to spaces.
         write_exec(self.gh,
-                   f'printf "%s\\n" "$*" >> "{self.receipt}"\n'
+                   f'printf "%s" "$*" | tr "\\n" " " >> "{self.receipt}"\n'
+                   f'printf "\\n" >> "{self.receipt}"\n'
                    'p=""\n'
                    'for a in "$@"; do case "$a" in /*) p="$a"; break;; esac; done\n'
                    f'f=$(printf "%s" "$p" | tr "/?&=" "____")\n'
@@ -1099,7 +1216,10 @@ def test_the_DEFAULT_run_makes_no_write_api_call_at_all(harness, repo):
     proc = harness.run(repo, "--pr", "7")
     assert proc.returncode == RC_INHERITED, proc.stdout
     assert harness.calls(), "the stub was never reached — this test proves nothing"
-    assert not [c for c in harness.calls() if "POST" in c], harness.calls()
+    # 🔴 EVERY RECORDED CALL IS AN ENUMERATED READ — not "no line said POST".
+    # See `gh_write_calls`: the word-scan this replaces was satisfied by
+    # `-X PATCH`, `-X PUT`, `--method DELETE` and `gh pr comment` alike.
+    assert gh_write_calls(harness.calls()) == [], harness.calls()
     assert "mode=off" in proc.stdout
 
 
@@ -1107,17 +1227,60 @@ def test_POSITIVE_CONTROL_arming_it_DOES_reach_the_write_call(harness, repo):
     harness.serve_default(repo)
     proc = harness.run(repo, "--pr", "7", "--comment-mode", "on")
     assert proc.returncode == RC_INHERITED, proc.stdout + proc.stderr
-    posts = [c for c in harness.calls() if "POST" in c]
+    posts = gh_write_calls(harness.calls())
     assert len(posts) == 1, harness.calls()
     assert "/repos/o/r/issues/7/comments" in posts[0]
     assert "posted on #7" in proc.stdout
+
+
+def test_the_write_screen_SEES_the_shapes_the_word_POST_did_not(harness, repo):
+    """🔴 VALIDATE THE INSTRUMENT BEFORE READING ITS VERDICT. Four tests above
+    now conclude "no write happened" from `gh_write_calls(...) == []`, and that
+    conclusion is worth nothing until this classifier has been watched to go
+    both ways over realistic argv.
+
+    The rows are the disarm the word-scan actually had: `"POST" in <line>` is
+    False for every one of the six below, so each was a write that the previous
+    guard read as clean. `gh api -f` is the sharpest — it is a POST with no
+    method flag at all, so even a method-only screen calls it a read.
+    """
+    reads = ["api /repos/o/r/pulls/7",
+             "api /repos/o/r/commits/deadbeef/statuses?per_page=100",
+             "api -X GET /repos/o/r/x",
+             "api --method HEAD /repos/o/r/x"]
+    assert gh_write_calls(reads) == [], reads
+    writes = ["api -X PATCH /repos/o/r/issues/7",
+              "api -X PUT /repos/o/r/x",
+              "api --method DELETE /repos/o/r/x",
+              "api -XPOST /repos/o/r/x",
+              "api /repos/o/r/issues/7/comments -f body=hello",
+              "pr comment 7 --body hello"]
+    for w in writes:
+        assert "POST" not in w or w == "api -XPOST /repos/o/r/x", w
+        assert gh_write_calls([w]) == [w], w
+    # …and it is not simply "everything is a write": mixed in, only the write
+    # comes back, in order.
+    assert gh_write_calls(reads + writes) == writes
+
+    # POSITIVE CONTROL ON THE RECEIPT ITSELF, not on invented strings: a REAL
+    # armed run produces exactly one line this classifier calls a write, and the
+    # read-only run above produces none. Without this the table could be pinning
+    # a parser that never meets the format the harness actually writes.
+    harness.serve_default(repo)
+    harness.run(repo, "--pr", "7", "--comment-mode", "on")
+    recorded = harness.calls()
+    assert len(gh_write_calls(recorded)) == 1, recorded
+    # 🔴 ONE LINE PER INVOCATION: the comment body contains newlines, and the
+    # receipt must not split one call across several lines — every line has to
+    # be a real argv or the classifier is reading prose.
+    assert all(c.startswith("api ") for c in recorded), recorded
 
 
 def test_DRY_RUN_says_what_it_would_do_and_writes_nothing(harness, repo):
     harness.serve_default(repo)
     proc = harness.run(repo, "--pr", "7", "--comment-mode", "dry-run")
     assert "DRY-RUN would comment on #7" in proc.stdout
-    assert not [c for c in harness.calls() if "POST" in c], harness.calls()
+    assert gh_write_calls(harness.calls()) == [], harness.calls()
 
 
 def test_an_already_commented_PR_is_not_commented_on_twice(harness, repo):
@@ -1126,7 +1289,7 @@ def test_an_already_commented_PR_is_not_commented_on_twice(harness, repo):
                   [{"body": f"{M.COMMENT_MARKER}\nsaid this yesterday"}])
     proc = harness.run(repo, "--pr", "7", "--comment-mode", "on")
     assert "already carries the marker" in proc.stdout
-    assert not [c for c in harness.calls() if "POST" in c], harness.calls()
+    assert gh_write_calls(harness.calls()) == [], harness.calls()
 
 
 def test_a_NOT_INHERITED_PR_is_never_commented_on_even_when_armed(harness, repo):
@@ -1134,7 +1297,7 @@ def test_a_NOT_INHERITED_PR_is_never_commented_on_even_when_armed(harness, repo)
         "FAILED: pytests — FAILING: test_the_bravo_invariant_holds | TOTAL "
         "collected=9  passed=8  skipped=0  failed=1"))
     proc = harness.run(repo, "--pr", "7", "--comment-mode", "on")
-    assert not [c for c in harness.calls() if "POST" in c], harness.calls()
+    assert gh_write_calls(harness.calls()) == [], harness.calls()
     assert proc.returncode == RC_OK, proc.stdout
 
 
@@ -1223,29 +1386,195 @@ def test_the_rollup_endpoint_and_check_runs_are_never_requested():
     assert "/statuses" in " ".join(paths)
 
 
-def _git_subcommands():
+# 🔴 SENTINELS, NOT SKIPS. An argument list the AST cannot constant-fold is
+# precisely how a literal-keyed ledger gets walked past, so it must LAND IN THE
+# SET and fail loudly rather than leave it. This is the shape
+# `test_main_status_watch.py`'s `_spawn_argv0_literals` already uses, 200 lines
+# away in the same change; the version here dropped what it could not read, so
+# its stated rule ("an unknown git subcommand is a write by default") described
+# something it did not enforce — the opaque case was ABSENT, not DENIED.
+SUB_COMPUTED = "<computed>"        # `_git(repo, [sub, …])` with `sub` a variable
+SUB_NOT_A_LIST = "<not-a-list>"    # `_git(repo, cmd)` — argv built elsewhere
+SUB_EMPTY = "<empty-argv>"         # `_git(repo, [])`
+SUB_MISSING = "<no-argv>"          # `_git(repo)` — no argv argument at all
+
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
+                "execv", "execvp", "execve", "spawnv", "spawnvp"}
+
+# Every git subcommand this tool is permitted to reach. ALLOWLIST, NOT DENYLIST:
+# anything not named here — including all four sentinels above — is a write.
+GIT_READ_ONLY = frozenset({"rev-parse", "cat-file", "grep", "log", "merge-base",
+                           "rev-list"})
+
+
+def _git_subcommands(src=SRC):
     """Every git subcommand the source actually INVOKES, read from the AST.
 
     🔴 STRUCTURAL, NOT SPELLED. A string scan over the whole file would match
     the comment that EXPLAINS the hazard — which is exactly what a first draft
     of the guard below did, failing on its own documentation. The AST sees the
     argument list and nothing else, so prose cannot satisfy it or break it.
+
+    🔴 AND IT DROPS NOTHING. The argv is read from the SECOND POSITIONAL of
+    `_git(repo, args)` — not "whichever argument happens to be a list" — and
+    every element that is not a string constant becomes `<computed>`, so a
+    subcommand assembled at runtime reaches the allowlist as an unknown rather
+    than disappearing from it.
     """
-    tree = ast.parse(SRC)
+    tree = ast.parse(src)
     subs = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
+        fn = node.func if isinstance(node, ast.Call) else None
         if not (isinstance(fn, ast.Name) and fn.id == "_git"):
             continue
-        for arg in node.args:
-            if isinstance(arg, ast.List) and arg.elts:
-                head = arg.elts[0]
-                if isinstance(head, ast.Constant) and isinstance(head.value, str):
-                    subs.append([e.value for e in arg.elts
-                                 if isinstance(e, ast.Constant)])
+        if len(node.args) < 2:
+            subs.append([SUB_MISSING])
+            continue
+        argv = node.args[1]
+        if not isinstance(argv, (ast.List, ast.Tuple)):
+            subs.append([SUB_NOT_A_LIST])
+            continue
+        if not argv.elts:
+            subs.append([SUB_EMPTY])
+            continue
+        subs.append([e.value if isinstance(e, ast.Constant)
+                     and isinstance(e.value, str) else SUB_COMPUTED
+                     for e in argv.elts])
     return subs
+
+
+def _git_unenumerated(subs):
+    """The invocations the allowlist does NOT permit — the guard, as a function.
+
+    A predicate rather than a loop of asserts so that a test can drive it over
+    SYNTHETIC source and watch it reject; a guard only ever exercised on the
+    real file cannot be shown to reject anything.
+    """
+    bad = []
+    for a in subs:
+        if not a:
+            bad.append(a)
+        elif a[0] == "remote":
+            # `remote` has writing forms (`add`, `set-url`, `remove`); only the
+            # reading one is permitted, and it is checked by its ARGUMENT.
+            if a[:2] != ["remote", "get-url"]:
+                bad.append(a)
+        elif a[0] not in GIT_READ_ONLY:
+            bad.append(a)
+    return bad
+
+
+def _spawn_argv0(src=SRC):
+    """(lineno, argv0) for every spawn-shaped call, from the SYNTAX TREE.
+
+    Same sentinel discipline as `_git_subcommands`: a command built from a
+    variable lands in the set as `<computed>` rather than being skipped.
+    """
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            out.append((node.lineno,
+                        head.value if isinstance(head, ast.Constant) and
+                        isinstance(head.value, str) else SUB_COMPUTED))
+        else:
+            out.append((node.lineno, SUB_NOT_A_LIST))
+    return out
+
+
+def _gh_argv_shapes(src=SRC):
+    """The constant argv head of every spawn whose argv0 is the `gh` seam.
+
+    Stops at the first non-constant element or the first `/`-prefixed path, so
+    what comes back is the VERB — `("api",)`, `("api", "-X", "POST")` — and not
+    the endpoint. That is the thing an enumerated ledger can pin.
+    """
+    shapes = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if not (isinstance(first, (ast.List, ast.Tuple)) and first.elts):
+            continue
+        head = first.elts[0]
+        if not (isinstance(head, ast.Name) and head.id == "gh"):
+            continue
+        shape = []
+        for e in first.elts[1:]:
+            if not (isinstance(e, ast.Constant) and isinstance(e.value, str)):
+                break
+            if e.value.startswith("/"):
+                break
+            shape.append(e.value)
+        shapes.append(tuple(shape))
+    return shapes
+
+
+# 🔴 WHAT THIS SET MEANS, ENTRY BY ENTRY — a ledger whose entries are unexplained
+# is a ledger nobody can evaluate a new row against:
+#   ("api",)                 — `gh_json`: every READ this tool makes.
+#   ("api", "-X", "POST")    — `post_comment`: the ONE write, and it is reachable
+#                              only under `--comment-mode on`, whose default is
+#                              pinned to the literal "off" separately.
+# GROWS-OR-SHRINKS. `gh api -X PATCH`, `-X PUT`, `--method DELETE` and
+# `gh pr comment` each produce a shape that is not in here, which is exactly the
+# class the word-scan this replaces could not see.
+EXPECTED_GH_ARGV = {("api",), ("api", "-X", "POST")}
+
+# `gh api` is the only surface, and only these methods are reads.
+GH_READ_METHODS = frozenset({"GET", "HEAD"})
+_GH_FIELD_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+
+
+def gh_write_calls(calls):
+    """Every RECORDED `gh` invocation that is not an enumerated read.
+
+    🔴 ASSERTS THE STATE, NEVER THE ABSENCE OF A WORD. The guard this replaces
+    was `"POST" not in the receipt line`, and `gh api -X PATCH`, `-X PUT`,
+    `--method DELETE` and `gh pr comment` all walk straight past it. The disarm
+    is complete in today's tree; this is about what the guard catches next time.
+
+    🔴 A MISSING `-X` IS NOT A READ. `gh api` with any field flag (`-f`, `-F`,
+    `--field`, `--raw-field`, `--input`) defaults to POST, so a write needs no
+    method flag at all — the one shape a method-only screen would call clean.
+
+    Anything whose first token is not `api` is reported as a write too: it is a
+    `gh` surface nobody enumerated, and an allowlist must fail on those.
+    """
+    writes = []
+    for c in calls:
+        toks = c.split()
+        if not toks or toks[0] != "api":
+            writes.append(c)
+            continue
+        method, fields, i = None, False, 0
+        while i < len(toks):
+            t = toks[i]
+            if t in ("-X", "--method") and i + 1 < len(toks):
+                method, i = toks[i + 1].upper(), i + 2
+                continue
+            if t.startswith("-X") and len(t) > 2:
+                method = t[2:].upper()
+            elif t.startswith("--method="):
+                method = t.split("=", 1)[1].upper()
+            elif t in _GH_FIELD_FLAGS or t.startswith(("--field=", "--raw-field=")):
+                fields = True
+            i += 1
+        if method is None:
+            if fields:
+                writes.append(c)
+        elif method not in GH_READ_METHODS:
+            writes.append(c)
+    return writes
 
 
 def test_path_existence_is_proved_with_cat_file_not_diff_quiet():
@@ -1266,11 +1595,56 @@ def test_every_env_var_the_code_reads_is_documented_in_the_header():
     assert read == ledgered, f"read={sorted(read)} ledgered={sorted(ledgered)}"
 
 
+def _script_and_its_shared_libs(script=SCRIPT):
+    """{filename: source} for the script AND every `scripts/lib/*.py` it imports.
+
+    🔴 THE CONSOLIDATION MOVED CODE OUT FROM UNDER THE GUARD BELOW, AND THE FIRST
+    CITATION WRITTEN INTO THE NEW MODULE DANGLED. `classify`, the folds and the
+    banner parsers now live in `scripts/lib/ci_status.py`; its docstring cited
+    `test_newest_per_context_skips_a_malformed_row_rather_than_raising`, which
+    existed nowhere. Both copies of the citation guard — this one and
+    `test_main_status_watch.py`'s — were scoped to ONE script file, so neither
+    could see it. A citation that resolves to nothing reads as authority and is
+    not one; a guard that cannot see where the prose went is worse, because it
+    reads as coverage.
+
+    The imports are FOLLOWED rather than enumerated, so a second shared module
+    is covered the day it appears instead of the day somebody notices.
+    """
+    src = Path(script).read_text(encoding="utf-8")
+    lib = Path(script).resolve().parent / "lib"
+    out = {Path(script).name: src}
+    for node in ast.walk(ast.parse(src)):
+        names = []
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names.append(node.module)
+        elif isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        for mod in names:
+            p = lib / (mod.replace(".", "/") + ".py")
+            if p.is_file():
+                out[p.name] = p.read_text(encoding="utf-8")
+    return out
+
+
 def test_every_test_this_script_names_actually_exists():
     """A citation that resolves to nothing reads as authority and is not one.
-    Names wrapped across a comment line-break are re-joined before looking."""
-    joined = re.sub(r"\n#\s*", "", SRC)
-    cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", joined))
+    Names wrapped across a comment line-break are re-joined before looking.
+
+    🔴 THE SCRIPT **AND THE SHARED MODULES IT IMPORTS** — see
+    `_script_and_its_shared_libs` for why that widening exists.
+    """
+    sources = _script_and_its_shared_libs()
+    # POSITIVE CONTROL on the widening: the import-following really did reach a
+    # shared module. Without this a refactor that stops importing `ci_status`
+    # silently narrows this guard back to one file and nothing says so.
+    assert "ci_status.py" in sources, (
+        f"the import scan found no shared lib module — this widening is inert: "
+        f"{sorted(sources)}")
+    cited = set()
+    for name, text in sources.items():
+        joined = re.sub(r"\n#\s*", "", text)
+        cited |= set(re.findall(r"`(test_[A-Za-z0-9_]+)`", joined))
     assert cited, "the citation scan matched nothing — this guard is inert"
     # Repo-wide, because this script legitimately cites tests it does not own
     # (a real CI row names one, and the measurement in the header names
@@ -1300,21 +1674,105 @@ def test_no_git_subcommand_that_WRITES_is_ever_invoked():
     🔴 AN ALLOWLIST, NOT A DENYLIST — a git subcommand nobody enumerated is a
     write by default. A denylist of known writers passes silently the day
     someone reaches for one it does not name.
+
+    🔴 AND "UNENUMERATED" NOW INCLUDES "UNREADABLE". The scan used to DROP an
+    argument list it could not constant-fold, so `_git(repo, [sub, …])` with a
+    variable head was absent rather than denied and this docstring's rule was
+    wider than its implementation. The sentinels close that; the test below
+    drives the rejection over synthetic source rather than asserting it here.
     """
     subs = _git_subcommands()
     assert subs, "the AST scan found no git invocations — this guard is inert"
-    read_only = {"rev-parse", "cat-file", "grep", "log", "merge-base", "rev-list"}
-    for a in subs:
-        if a[0] == "remote":
-            # `remote` has writing forms (`add`, `set-url`, `remove`); only the
-            # reading one is permitted, and it is checked by its ARGUMENT.
-            assert a[:2] == ["remote", "get-url"], a
-            continue
-        assert a[0] in read_only, f"`git {a[0]}` is not an enumerated read: {a}"
+    assert _git_unenumerated(subs) == [], _git_unenumerated(subs)
     # POSITIVE CONTROL on the scan: it really does see the arguments, so the
     # allowlist above is not passing over an empty or opaque list.
     assert any(a[:2] == ["merge-base", "--is-ancestor"] for a in subs), subs
     assert any(a[0] == "remote" for a in subs), subs
+
+
+def test_a_COMPUTED_git_subcommand_is_DENIED_rather_than_VANISHING():
+    """🔴 THE GUARD ABOVE, DRIVEN OVER SOURCE THAT VIOLATES IT.
+
+    The allowlist's stated rule is "an unknown git subcommand is a write by
+    default", and before the sentinels that was false for every shape the AST
+    could not fold: a computed head, an argv built elsewhere, an empty list.
+    They were dropped by the scan, so the guard saw nothing and passed. Absent
+    is not denied — and the real file contains no such call, so no assertion
+    against the real file can tell those two apart.
+    """
+    synthetic = (
+        'def a(repo, sub):\n    _git(repo, [sub, "--hard"])\n'
+        'def b(repo, cmd):\n    _git(repo, cmd)\n'
+        'def c(repo):\n    _git(repo, [])\n'
+        'def d(repo):\n    _git(repo)\n'
+        'def e(repo):\n    _git(repo, ["rev-parse", "HEAD"])\n'
+    )
+    subs = _git_subcommands(synthetic)
+    assert sorted(a[0] for a in subs) == sorted(
+        [SUB_COMPUTED, SUB_NOT_A_LIST, SUB_EMPTY, SUB_MISSING, "rev-parse"]), subs
+    assert sorted(a[0] for a in _git_unenumerated(subs)) == sorted(
+        [SUB_COMPUTED, SUB_NOT_A_LIST, SUB_EMPTY, SUB_MISSING]), subs
+    # NEGATIVE CONTROL on the predicate: the enumerated read ALONE is accepted,
+    # so the four rejections above are about the opaque heads and not about a
+    # predicate that refuses whatever it is given.
+    assert _git_unenumerated(_git_subcommands(
+        'def e(repo):\n    _git(repo, ["rev-parse", "HEAD"])\n')) == []
+    # …and a real writer is rejected by NAME, which is the case the allowlist
+    # was written for in the first place.
+    assert _git_unenumerated(_git_subcommands(
+        'def f(repo):\n    _git(repo, ["push", "origin", "HEAD"])\n')) == [
+        ["push", "origin", "HEAD"]]
+
+
+def test_stale_base_triage_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """🔴 GROWS-OR-SHRINKS, and the half `_git_subcommands` structurally cannot
+    see: a bare `subprocess.run(["git", "push", …])` never goes near `_git`, so
+    the subcommand allowlist is blind to it by construction.
+
+      git          — `["git", "-C", str(repo), *args]`, inside `_git` only.
+      <computed>   — `[gh, "api", …]`; `gh` is the STALE_BASE_TRIAGE_GH seam,
+                     which is what lets every test point it at a stub. Its own
+                     argv is enumerated by the `gh` guard below, so `<computed>`
+                     here is not an unexamined hole.
+    """
+    assert {a0 for _, a0 in _spawn_argv0()} == {"git", SUB_COMPUTED}
+
+
+def test_every_git_SPAWN_goes_through_the_one_helper():
+    """The `_git` allowlist is only a claim about this tool if `_git` is the
+    only way a git process starts. A second `subprocess.run(["git", …])`
+    anywhere in the file would be a git invocation no allowlist ever sees."""
+    helpers = [n for n in ast.walk(ast.parse(SRC))
+               if isinstance(n, ast.FunctionDef) and n.name == "_git"]
+    assert len(helpers) == 1, [h.lineno for h in helpers]
+    lo, hi = helpers[0].lineno, helpers[0].end_lineno
+    spawns = [ln for ln, a0 in _spawn_argv0() if a0 == "git"]
+    assert spawns, "no git spawn found at all — this guard is inert"
+    assert all(lo <= ln <= hi for ln in spawns), (spawns, lo, hi)
+    # POSITIVE CONTROL: the detector CAN see a git spawn outside the helper —
+    # otherwise `all(...)` over a set it never populates is a vacuous green.
+    outside = [ln for ln, a0 in _spawn_argv0(
+        'import subprocess\nsubprocess.run(["git", "push"])\n') if a0 == "git"]
+    assert outside == [2], outside
+
+
+def test_the_gh_invocations_are_an_ENUMERATED_set_not_an_ABSENCE_of_POST():
+    """🔴 THE `gh` HALF HAD NO STRUCTURAL PIN AT ALL. The git half has an AST
+    allowlist; the write path was held by `"POST" not in <receipt line>`, which
+    `-X PATCH`, `-X PUT`, `--method DELETE` and `gh pr comment` all satisfy.
+    This asserts the STATE — the set of `gh` verbs the source can reach — rather
+    than the absence of a word another verb can avoid spelling."""
+    shapes = _gh_argv_shapes()
+    assert shapes, "the gh scan found no invocations — this guard is inert"
+    assert set(shapes) == EXPECTED_GH_ARGV, shapes
+    # …and exactly ONE of them is the write, so arming is a single site.
+    assert sum(1 for s in shapes if s == ("api", "-X", "POST")) == 1, shapes
+    # POSITIVE CONTROL on the scan: it CAN see a shape that is not in the
+    # ledger, so the equality above is not a comparison against nothing.
+    assert _gh_argv_shapes(
+        'import subprocess\ngh = "gh"\n'
+        'subprocess.run([gh, "api", "-X", "PATCH", "/repos/o/r/x"])\n'
+    ) == [("api", "-X", "PATCH")]
 
 
 def test_the_deleted_flags_are_GONE_from_the_parser_not_merely_undocumented():

@@ -165,7 +165,13 @@ from pathlib import Path
 # and both files import them; the disagreement between the copies was the
 # finding, and consolidating is what made it audible. What stays here is POLICY:
 # which context, what completeness means, and what to do about a red.
-sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+#
+# 🔴 `append`, NEVER `insert(0, …)` — see the same note in
+# `scripts/main-status-watch.py`. Prepending `scripts/lib/` puts every module in
+# it ahead of the standard library for every later import; appending removes the
+# shadowing class outright and costs nothing, since nothing else on the path
+# defines `ci_status`.
+sys.path.append(str(Path(__file__).resolve().parent / "lib"))
 from ci_status import (TOTALS_RE as _TOTALS_RE,  # noqa: E402
                        classify, derived_failure_upper_bound,
                        newest_per_context, parse_failed_count,

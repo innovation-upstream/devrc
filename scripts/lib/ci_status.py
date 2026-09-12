@@ -119,7 +119,25 @@ def newest_per_context(rows):
 #                                     failed=N  (floor: …)
 # GitHub caps a status description at 140 BYTES, so most real rows arrive cut.
 FAILING_RE = re.compile(r"FAILING:\s*(.+?)(?:\s*\|\s*TOTAL\b|$)")
-FAILED_COUNT_RE = re.compile(r"\bfailed=(\d+)\b")
+
+# 🔴 ANCHORED ON `TOTAL`, AND THE ANCHOR IS THE SOUNDNESS ARGUMENT, NOT TIDINESS.
+# `run-tests.sh` emits a PER-TARGET row for every target it ran —
+# `FAIL  <dir>  (collected=… passed=… skipped=… failed=… errors=…)` and
+# `PASS  <dir>  (collected=… passed=… skipped=… floor=…)` — and those rows come
+# BEFORE the TOTAL banner. `re.search` takes the FIRST match, so an unanchored
+# `\bfailed=(\d+)\b` reads ONE TARGET'S count and calls it the run's. Measured:
+# a description carrying an earlier `(collected=9 passed=6 skipped=1 failed=2
+# errors=0)` yields 2 where the banner's own `failed=` is 27 — an UNDER-count,
+# which is the single direction that certifies a completeness the row does not
+# have (see `derived_failure_upper_bound` below, and `names_provably_complete`
+# in `scripts/stale-base-triage.py`). Requiring the word `TOTAL` first makes the
+# first match the banner's, because `TOTAL` appears once and last.
+#
+# ⚠ NO REACHABLE EXPLOIT IS CLAIMED. What builds the description is the posting
+# pipeline, which lives in `homelab-talos` and cannot be pinned from this repo —
+# every row measured here carries the banner alone. This closes the parser's
+# side of a hazard whose other side is not ours to observe.
+FAILED_COUNT_RE = re.compile(r"\bTOTAL\b.*?\bfailed=(\d+)\b")
 
 # The only fragments a cut can leave behind where `TOTAL` was starting.
 # Enumerated rather than pattern-matched: a `startswith` test would also eat a
@@ -156,6 +174,11 @@ def parse_failed_count(description):
     It is the LAST field in the banner, so whether it survives is decided by the
     failing test's NAME LENGTH. `derived_failure_upper_bound` is the route that
     does not depend on that.
+
+    🔴 THE BANNER'S OWN — not the first `failed=` in the string. The anchor on
+    `FAILED_COUNT_RE` is what makes those the same thing; read the note there
+    before loosening it. Pinned by
+    `test_an_EARLIER_per_target_row_cannot_be_mistaken_for_the_TOTAL_banner`.
     """
     m = FAILED_COUNT_RE.search(description or "")
     return int(m.group(1)) if m else None
@@ -171,7 +194,15 @@ def parse_failed_count(description):
 # truncates a SUFFIX, so a field with more banner text after it was not cut.
 # Only `skipped=` — the last of the three — can itself be short, and a short
 # `skipped` SUBTRACTS LESS and so inflates the bound, i.e. errs toward refusing.
-TOTALS_RE = re.compile(r"\bcollected=(\d+)\s+passed=(\d+)\s+skipped=(\d+)")
+#
+# 🔴 AND THE GROUP IS ANCHORED ON `TOTAL`, FOR THE SECOND HALF OF THE SAME
+# ARGUMENT — see `FAILED_COUNT_RE` above. Adjacency proves the three numbers were
+# not cut SHORT; the anchor proves they are the RUN'S three and not some single
+# target's. Without it `re.search` takes the first triple in the string, and a
+# per-target `(collected=9 passed=6 skipped=1 …)` derives a bound of 2 for a run
+# whose own `failed=` is 27 — again the under-count direction, and here it lands
+# directly on the completeness proof.
+TOTALS_RE = re.compile(r"\bTOTAL\s+collected=(\d+)\s+passed=(\d+)\s+skipped=(\d+)")
 
 
 def derived_failure_upper_bound(description):

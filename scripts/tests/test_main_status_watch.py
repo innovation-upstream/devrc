@@ -68,7 +68,12 @@ RC_OK, RC_TRIGGERED, RC_UNMEASURED, RC_BLIND, RC_USAGE = 0, 10, 11, 12, 2
 # hazard the flake screen turns on is only demonstrable with real ones — every
 # synthetic description anybody would write by hand is conveniently complete.
 #
-# The known flake, cut MID-WORD by GitHub's 140-char description cap:
+# The known flake, cut MID-WORD by GitHub's 140-BYTE description cap. BYTES, not
+# characters: the `—` in `FAILED: pytests —` is three UTF-8 bytes, which is why
+# every real row measured on this repo reads `len(desc)=138`. Anyone building a
+# fixture from a CHARACTER cap lands two bytes late and quietly leaves `failed=`
+# readable — see `cut_like_github` in `scripts/tests/test_stale_base_triage.py`.
+REAL_DESC_BYTE_CAP = 140
 REAL_FLAKE_DESC = (
     "FAILED: pytests — FAILING: TestARefusedWriteIsIndistinguishableFromAnAbsentOne"
     ".test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_dif"
@@ -333,8 +338,33 @@ def test_a_foreign_context_is_ignored(h):
 # ══ THE FLAKE SCREEN ══════════════════════════════════════════════════════════
 # 🔴 THE COUNTERINTUITIVE HALF FIRST: the REAL known-flake row must TRIGGER.
 
+def test_CONTROL_the_real_truncated_rows_land_on_the_BYTE_cap_not_the_CHAR_cap():
+    """🔴 THE DISTINCTION THIS FILE'S PROSE HAD WRONG, MADE MACHINE-CHECKED.
+
+    The cap is 140 BYTES, and the two rows above that it actually cut are 138
+    CHARACTERS long, because the `—` in `FAILED: pytests —` is three UTF-8
+    bytes. A comment saying "140 characters" is an invitation to build a fixture
+    by slicing at `[:140]` — which lands two bytes late, quietly leaves `failed=`
+    readable, and turns a truncated row into a complete one. Every assertion
+    resting on that fixture then passes for the wrong reason.
+
+    ⚠ WHAT THIS DOES NOT RESOLVE, AND MUST NOT BE READ AS RESOLVING: whether the
+    cut is GitHub's or the posting pipeline's. Every sampled row carries exactly
+    one multi-byte character, so at 138 chars / 140 bytes the two are
+    indistinguishable. This pins the MEASUREMENT, not a mechanism.
+    """
+    for desc in (REAL_FLAKE_DESC, REAL_SEVEN_FAILED_ONE_NAMED):
+        assert len(desc.encode("utf-8")) == REAL_DESC_BYTE_CAP, desc
+        assert len(desc) == 138, (len(desc), desc)
+        assert len(desc) < REAL_DESC_BYTE_CAP, desc   # chars ≠ bytes, and that is the point
+    # POSITIVE CONTROL: a row that was NOT cut sits well inside the cap, so the
+    # equality above is a property of the truncated rows and not of every string
+    # in this file.
+    assert len(REAL_NO_NAME.encode("utf-8")) < REAL_DESC_BYTE_CAP, REAL_NO_NAME
+
+
 def test_the_REAL_known_flake_row_still_triggers_because_it_is_truncated(h):
-    """The row that named the known flake was cut MID-WORD at GitHub's 140-char
+    """The row that named the known flake was cut MID-WORD at GitHub's 140-BYTE
     cap, so it proves neither the full name nor that it was the only failure.
     Skipping on it would skip real reds hiding behind the truncation.
 
@@ -1756,6 +1786,14 @@ def test_every_test_this_script_names_actually_exists():
     a FUNCTION body stayed split and read as a name nobody defined. It failed on
     its own first run against a citation this very PR added, which is the
     cheapest possible way to learn that a pattern is narrower than its claim.
+
+    ⚠ SCOPED TO THIS SCRIPT FILE, AND THAT IS NOT THE WHOLE SURFACE. Citations
+    inside `scripts/lib/ci_status.py` — the module this file's script imports —
+    are checked by `test_stale_base_triage.py`, whose copy of this guard follows
+    its script's `scripts/lib` imports. That widening exists because the FIRST
+    citation written into `ci_status.py` dangled and neither copy, each scoped to
+    one script, could see it. One owner is enough for one file; what is NOT safe
+    is assuming this guard covers it.
     """
     src = SCRIPT.read_text(encoding="utf-8")
     joined = re.sub(r"_\n[ \t]*#[ \t]*", "_", src)
