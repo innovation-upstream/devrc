@@ -16,6 +16,16 @@ removing the tests' dependence on disk latency rather than by tuning bounds. Dis
 from `handoff-ci-speedup.md`, which is about gate SPEED and is owned elsewhere.
 
 ## State now
+✅ **2026-09-12 — RANK 1 HAS BEEN RUN. The verifier this doc was written for finally has a
+number, and the number relocates the problem.** The store-api fsync flake is named in **0 of 99**
+`tekton/devrc-pytests` verdicts on heads that CARRY `ce9b55c3` against **12 of 298** that do not
+(P(0) ≈ 0.017), measured by **ancestry**. 🔴 **And what the same read found instead: the gate's
+remaining red is dominated by DETERMINISTIC ledger censuses over tracked text — 27 of 99 post-fix
+verdicts, ~7× this flake at its worst — of which 22 were closed at the source by `#1561` and
+5 are the runner-bound ledger, on which `main` IS RED RIGHT NOW — already owned by `#1567`.**
+That is the new rank 8. Full
+table, controls and residuals in rank 1; claim `gate-flake-store-api-1` was held for the read.
+
 🔴 **THE AUDIT LADDER IS CLOSED — by decision, not by a clean round.** `#1219` and its
 successor `#1239` are both MERGED. The ladder ran **8 rounds on `#1219` + 2 on `#1239`**;
 every round but the last produced findings, and the last was ended deliberately because the
@@ -222,12 +232,91 @@ Not a bug — a measurement that would mislead if run as written.
 🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
 **Rank 5 is CLOSED** and is retained, unrenumbered, so live claims keep resolving.
 
-1. **Measure whether the flake rate actually dropped** — devrc, no files. 🔴 **NOW GENUINELY
-   UNBLOCKED for the first time**: `#1211` sited 1 of 3 files, `#1219` sited all three plus
-   `scoped_store`, and `#1239` replaced the whole census. The old baseline (5 store-api
-   failures among 14 open PRs, 2026-09-01) is **not comparable** — it was measured against a
-   partially-sited suite. Record a FRESH baseline with its date, and wait until a substantial
-   fraction of open PR heads postdate `65f7325b` before reading anything into the number.
+1. ✅ **MEASURED 2026-09-12 — THE READING EXISTS. The store-api flake is named in 0 of 99
+   verdicts on heads that CARRY `ce9b55c3`, against 12 of 298 that do not; and the gate's
+   remaining red is not this flake, nor any flake.** This rank asked for a number and the
+   number is below. What is left of it is a *different* item — see "What this does NOT close".
+
+   **Population and instrument.** Newest `tekton/devrc-pytests` verdict per PR head, over
+   **400** devrc PR heads (`#1162`–`#1566`, every state); **397** carried a verdict. Source is
+   the GitHub combined-status endpoint, which returns the latest status per context — the only
+   surviving record, because the pipelineruns are pruned hourly (`keep: 20`). Predicate is
+   **ancestry**: every `refs/pull/*/head` fetched into a throwaway repo (`--filter=tree:0`) and
+   `git merge-base --is-ancestor ce9b55c3 <head>` run locally, so the shared clone's ref
+   namespace was not written to. **0 heads were ancestry-unmeasurable.**
+   🔴 **Instrument validated before the verdict was read**: the three known reds
+   (`#1458`@`a6dd11eb`, `#1462`@`dc972398`, `#1454`@`c5e3123e`) all come back `failure` with
+   the failing test named, so a zero elsewhere is a reading and not a collector wired to
+   nothing. via: measurement
+
+   | window (ancestry) | verdicts | success | failure | error | pending | store-api test named |
+   |---|---|---|---|---|---|---|
+   | does **not** carry `ce9b55c3` | 298 | 192 | 64 | 41 | 1 | **12** (4.03%) |
+   | **carries** `ce9b55c3` | 99 | 29 | 37 | 29 | 4 | **0** |
+
+   At the pre-window rate the expected count in 99 verdicts is ~4.0, so
+   **P(observing 0) ≈ 0.017** — against **0.23** for the only prior reading (`#1512`, 4/125 →
+   0/45). 🔴 **The zero is still not what establishes the fix; the mechanism being gone is.**
+   Content-checked on `origin/main` so the zero cannot be a deleted test:
+   `TestARefusedWriteIsIndistinguishableFromAnAbsentOne` is present (`:14543`), the test is
+   present, `sited_root` appears on **106** lines, and the **1** surviving
+   `tmp_path / "store"` is at **`:449`** — prose narrating the fix, not a siting.
+   ⚠ **`:367` is what rank 22 and earlier revisions of this line both say, and it is STALE** —
+   the line moved. Re-derive a line number before quoting one; the file has taken commits since
+   `ce9b55c3`. via: measurement
+
+   🔴 **EVERY PER-TEST COUNT HERE IS A LOWER BOUND, AND THAT IS ALREADY MEASURED IN-REPO —
+   do not upgrade the 0 into "it did not fail".** A GitHub status description is capped at 140
+   characters; **100 of the 101 failure descriptions in this population are 138 characters, i.e.
+   truncated**, and `scripts/main-status-watch.py:236-239` records the measurement that matters: a
+   row described `failed=7` while naming ONE test, a row named none, and the row that named
+   *this* flake was cut mid-word at `…_CAN_see_the_dif`. A description can prove "at least one
+   test failed and here is its name"; it can never prove "these are all of them".
+   **The bias runs the right way, which is why the comparison survives it:** post-window failing
+   runs average **1.83** failures each against the pre-window's **3.60**, so a failure is *less*
+   likely to be hidden post-fix, not more. **Hard bound, stated rather than glossed:** 22 of the
+   99 post-window verdicts carry ≥1 unnamed failure (29 slots), so the true post count is in
+   **[0, 22]**; 42 of the 66 result-bearing post verdicts prove they held no store-api failure.
+   via: measurement
+
+   ⚠ **THE DATE PREDICATE WAS WRONG AND CHANGED NOTHING HERE — record that, because the
+   opposite assumption would discard `#1512`.** Splitting the same 397 verdicts by status
+   timestamp instead of ancestry reclassifies **5**, and **0 of the 101 failures**. So `#1512`'s
+   table is not corrupted by its predicate; it was merely underpowered. Ancestry is still the
+   predicate to use — this is one sample, not a proof the two agree in general. via: measurement
+
+   🔴 **WHAT THE MEASUREMENT FOUND INSTEAD, AND IT IS THE REASON TO READ THIS RANK: the gate's
+   red is now dominated by ledger censuses over tracked text, which are DETERMINISTIC, not
+   flakes.** Post-window reds by class: store-api fsync **0** (0.0% of verdicts) · rank 7's
+   `run-tests.sh` bound **3** (3.0%) · **tracked-text / ledger census 27 (27.3%)** · other 7
+   (7.1%). Pre-window: 12 (4.0%) · 7 (2.3%) · 12 (4.0%) · 33 (11.1%). **The census class is now
+   ~7× this rank's flake at its worst, and re-running cannot fix any of it.**
+   ⚠ **Split that 27 before acting on it, because half of it is already closed and half is
+   live.** **22** are `scripts/claude-hooks/tests/test_guard_core.py`'s kill-mention ledger, and
+   **every one predates `c0bbd6d9`** (`#1561`, 2026-09-12T03:16:36Z) exempting `claudedocs/` —
+   closed at the source, so that 22 does not forecast. **5** are
+   `scripts/tests/test_runner_bound_ledger.py`, and **4 of those POSTDATE `c0bbd6d9`**
+   (03:16:50Z–03:46:19Z): the same design class, in a second ledger `#1561` does not cover.
+   🔴 **That one is neither a flake nor a stale-base echo — `main` ITSELF IS RED ON IT**, run
+   directly at `origin/main` `4e970998` in a clean worktree: **1 failed, 1655 passed in 251s**,
+   the only diff being two `claudedocs/` files these scanners do not read. It is **rank 8**.
+   via: measurement
+
+   ⚠ **AND THE GATE'S OWN OBSERVABILITY IS WORSE THAN ITS RED RATE — noticed here, not
+   diagnosed.** `error` is **29 of 99** post-window verdicts (29%) against 41 of 298 (14%)
+   pre, and `main`'s last **8** commits carry **no completed `tekton/devrc-main-pytests`
+   verdict at all**: six `superseded by a newer run or a closed pull request`, two
+   `NO GATE POD: … the gate never started`, newest pending. A gate producing no verdict is not
+   a green one, and a rate computed over verdicts cannot see the runs that never reported.
+
+   **What this does NOT close:** nothing here was measured on the OSS copy
+   (`ZacxDev/cairn`'s identical 18-open-coded / 5-sited split), and the `[0, 22]` bound above is
+   the residual this instrument cannot narrow — the pipelineruns that could have are pruned.
+   Kept at rank 1 only until someone re-words it as the census item it has become.
+
+   — superseded text, kept because its caveat is still true of any FUTURE baseline: the old
+   baseline (5 store-api failures among 14 open PRs, 2026-09-01) is **not comparable**; it was
+   measured against a partially-sited suite.
    🔴 **THE ANCHOR MOVED AGAIN — `65f7325b` IS NO LONGER THE LAST INTERVENTION.** `#1458`
    (squash **`ce9b55c3`**, 2026-09-10) found that `#1211`/`#1219`/`#1239` sited **5** store
    roots in `test_subsystem_store_api.py` and left **18** open-coded on disk, including the one
@@ -236,12 +325,14 @@ Not a bug — a measurement that would mislead if run as written.
    docstring).** Use **`ce9b55c3`** as the anchor. 🔴 **The contaminated set is "carries
    `65f7325b`" with NO upper bound** — it mixes heads carrying one intervention with heads
    carrying two. Heads carrying the first and not the second are fine to count *as* the first.
-   🔴 **AND THE PREDICATE IS ANCESTRY, NOT DATE — every "postdates" in this doc, including rank
-   1's own sentence above, is the wrong test.** A branch cut before an intervention and never
-   rebased has commits dated after it and does **not** carry it, so a date filter gives a wrong
-   denominator on the one measurement this rank exists to produce. Use
-   `git merge-base --is-ancestor <sha> <head>`. Say which anchor any recorded number is against.
-   Full evidence: `handoff-cairn-oss-multi-instance.md` rank 22.
+   🔴 **AND THE PREDICATE IS ANCESTRY, NOT DATE — every remaining "postdates" in this doc is the
+   wrong test.** A branch cut before an intervention and never rebased has commits dated after it
+   and does **not** carry it, so a date filter gives a wrong denominator on the one measurement
+   this rank exists to produce. Use `git merge-base --is-ancestor <sha> <head>`. Say which anchor
+   any recorded number is against — the 2026-09-12 reading above is against `ce9b55c3`, by
+   ancestry, and it also reports what the date predicate would have given on the same 397
+   verdicts (5 reclassified, 0 of them failures). Full evidence:
+   `handoff-cairn-oss-multi-instance.md` rank 22.
    ⚠ **AND THE POPULATION IS NO LONGER ONE BOUND — see rank 7.** A store-api red and a
    `run-tests.sh` subprocess timeout are both "a check red on a diff that cannot reach it", so a
    rate that counts reds without classifying them will read rank 7's flake as this one failing
@@ -306,6 +397,12 @@ Not a bug — a measurement that would mislead if run as written.
      BE SERIAL"**, enforced at `:4043` and guarded by
      `test_a_nested_pytest_session_does_not_write_into_the_targets_ledger` — so concurrency is
      not available as a remedy. via: code
+   - **RATE, measured 2026-09-12 by rank 1's instrument and split on the same anchor:** this
+     file's tests are named in **7 of 298** verdicts on heads that do not carry `ce9b55c3`
+     (2.3%) and **3 of 99** on heads that do (3.0%) — `#1454`, `#1462` and `#1499`, all
+     `test_the_SUMMARY_BANNER_names_the_real_selection_source`. **Unchanged, not closed**, and
+     n=3 cannot distinguish 3.0% from 2.3%. Same lower-bound caveat as rank 1: a 138-character
+     status description names a subset. via: measurement
    - **Three occurrences, two tests, all merged red:** `#1458`@`a6dd11eb` (subset-note),
      `#1462`@`dc972398` and `#1454`@`c5e3123e` (SUMMARY_BANNER); the last two posted **4 s
      apart**. ⚠ The test FILE has not changed since 2026-08-30 (`ca088e70` `#289`, `809486fa`
@@ -330,6 +427,38 @@ Not a bug — a measurement that would mislead if run as written.
    hazard intact.
    forcing: gate — it reddened `#1454`, `#1458` and `#1462`, all merged with
    `tekton/devrc-pytests` RED because of it.
+
+8. 🔴 **`main` IS RED, DETERMINISTICALLY, ON THE RUNNER-BOUND LEDGER — and it is the class rank
+   1's measurement found has replaced the flake it was written to chase.** Measured 2026-09-12
+   by running the file directly at `origin/main` `4e970998` in a clean worktree:
+   `scripts/tests/test_runner_bound_ledger.py::test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger`
+   → **1 failed, 1655 passed in 251.49s**, on the `new` arm:
+   `{('scripts/tests/test_scoped_tests_shared_surface.py', 'ABSENT'): 1}`. That file spawns a
+   runner with **no bound of its own** and has no `_OWN_BOUND_LEDGER` row, so the two-way seam
+   ledger fires exactly as designed. **Not a flake, not a stale-base echo** — the control is that
+   the only diff in that worktree was two `claudedocs/` files, which these scanners do not read.
+   via: measurement
+   - **Rate, same instrument and anchor as rank 1:** named in **5 of 99** verdicts on heads
+     carrying `ce9b55c3`, **4 of them after `c0bbd6d9`** (`#1561`) closed the *sibling* census —
+     `#1524`@03:16:50Z, `#1556`/`#1559`/`#1522`@03:40–03:46Z — plus `#1494`@03:14:37Z.
+     via: measurement
+   - ✅ **ALREADY OWNED — `#1567` (`fix/scoped-surface-runner-bound`, opened 2026-09-12T03:58:34Z,
+     head `57030bfd`) has the same diagnosis and takes the right arm. Do not start a second
+     fix.** 🔴 **The pre-create sweep is what caught this** — the red was measured and filed here
+     at the same hour `#1567` was opened, and the lock could not have seen it, because nothing
+     was claimed. This is the class `design-claim-by-push.md` lists as NOT covered.
+   - **The fork in the fix, and `#1567` resolves it the right way.** The assertion offers two
+     arms: add a ledger row **with its reason**, or route the spawn through
+     `testlib.scoped_harness.run()` so it takes `RUNNER_TIMEOUT_S`. A row would have *recorded*
+     an unbounded suite that can hang forever; the harness *removes* it. `#1567` routes, and
+     positive-controls the fix by reverting to the unbounded spawn and watching the guard return
+     to `[ABSENT] x1`. Provenance it also names: the file arrived with `#1532` and reddened the
+     guard on landing.
+   **Closing condition:** `#1567` merged, AND
+   `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger` green on `origin/main` —
+   mechanically checkable by running that one file. Checked by whoever next reads this doc.
+   forcing: regression — `main` is red, and `claude/RULES.md`'s "a permanently-red gate is worse
+   than no gate" applies to the third census in this family in two days.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
@@ -508,6 +637,23 @@ nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   $DEVRC/scripts/collector/keylog/tests -q -p no:cacheprovider    # 1 failed, 100 passed
 gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/main)/status \
   --jq '.statuses[]|"\(.context) \(.state): \(.description[0:100])"'
+#   ⚠ This can show NO completed verdict at all: on 2026-09-12 main's last 8 commits carried
+#   six `superseded by a newer run…` and two `NO GATE POD`. A gate producing no verdict is
+#   not a green one — read the state, never just the absence of a `failure`.
+
+# rank 8 — main's CURRENT own red, and the reproduction is one file (expect 1 failed)
+nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  $DEVRC/scripts/tests/test_runner_bound_ledger.py -q -p no:cacheprovider
+
+# rank 1 — re-run the rate read. The predicate is ANCESTRY; a date split is the wrong test
+# (it reclassified 5 of 397 verdicts and 0 of 101 failures on 2026-09-12, which is luck, not
+# licence). Heads come from refs/pull/*/head; fetch them into a THROWAWAY repo so the shared
+# clone's ref namespace is not written to, then per head:
+#   git merge-base --is-ancestor ce9b55c3 <head>       # rc 0 = carries it
+#   gh api repos/innovation-upstream/devrc/commits/<head>/status   # newest verdict per context
+# 🔴 Positive-control the collector on `#1458`@`a6dd11eb`, `#1462`@`dc972398`,
+#   `#1454`@`c5e3123e` — all three must come back `failure` WITH a test named, or a zero
+#   elsewhere is a collector wired to nothing rather than a reading.
 ```
 🔴 Do NOT run these from a worktree whose path contains `fsync`, `flock`, `_EntryLock` or
 `_audit_lock` — the hung-server classifier substring-matches rendered tracebacks, which
