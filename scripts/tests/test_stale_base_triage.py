@@ -2090,3 +2090,288 @@ def test_the_deleted_flags_are_GONE_from_the_parser_not_merely_undocumented():
               if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     assert not [c for c in consts if "refs/stale-base-triage" in c], (
         "a ref-namespace literal survived the deletion of --fetch")
+
+
+# ══ ROUTING — the systemd unit that actually runs this thing ══════════════════
+#
+# 🔴 WHY THIS SECTION EXISTS. For its whole life before this, `stale-base-triage`
+# was ~885 payload lines and ~1,350 test lines that ran only when somebody
+# remembered the path: no timer, no hook, no CI step, no skill, no nix entry.
+# Every guard above was a claim about a tool nothing invoked. These are the
+# guards on the ROUTING, and they are deliberately about RELATIONSHIPS — the
+# writer is disarmed, the reporter cannot take the operator's attention, the
+# script's own budget expires before systemd's axe — rather than about words in
+# `nix/home.nix`, which a rewording could walk past.
+
+from testlib.nix_units import (  # noqa: E402
+    declares,
+    directive,
+    section,
+    unit_source,
+)
+
+HOME_NIX_PATH = ROOT / "nix" / "home.nix"
+HOME_NIX = HOME_NIX_PATH.read_text(encoding="utf-8")
+SERVICE_ATTR = "systemd.user.services.stale-base-triage"
+TIMER_ATTR = "systemd.user.timers.stale-base-triage"
+
+#: The banner this unit's prose block opens with. Used ONLY to bound the RAW
+#: (comment-bearing) window for the citation guard — every other guard here
+#: reads a comment-STRIPPED body through `nix_units`, which is what makes the
+#: difference between "this unit is declared" and "this unit is mentioned".
+_BANNER = "# ── IS THIS PR'S RED INHERITED?"
+
+
+def _service():
+    """The comment-stripped body of the service unit."""
+    return unit_source(SERVICE_ATTR, HOME_NIX)
+
+
+def _timer():
+    """The comment-stripped body of the timer unit."""
+    return unit_source(TIMER_ATTR, HOME_NIX)
+
+
+def _raw_prose_window():
+    """The RAW text of this unit's prose block + both unit declarations.
+
+    Comments INTACT, because that is where the test citations live. Bounded by
+    the next `# ── ` banner rather than by a byte count or by the name of the
+    unrelated unit that happens to follow today.
+    """
+    start = HOME_NIX.find(_BANNER)
+    assert start != -1, (
+        f"nix/home.nix no longer contains the banner {_BANNER!r}. This reader "
+        "bounds the citation window with it; re-anchor it rather than deleting "
+        "this guard."
+    )
+    nxt = re.search(r"^  # ── ", HOME_NIX[start + len(_BANNER):], re.M)
+    end = len(HOME_NIX) if nxt is None else start + len(_BANNER) + nxt.start()
+    return HOME_NIX[start:end]
+
+
+def test_the_unit_and_its_timer_are_LIVE_declarations_that_RUN_THIS_SCRIPT():
+    """🔴 THE WHOLE POINT: a tool nothing invokes is not shipped.
+
+    `declares()` rather than a substring, because a retired unit looks exactly
+    like a live one to `in` — that is the measured defect `nix_units` exists
+    for. And the ExecStart is read as a DIRECTIVE rather than a substring,
+    because `X-Restart-Triggers` on the very next line carries the same path:
+    deleting the ExecStart entirely leaves a naive scan green over a
+    `Type=oneshot` unit that cannot run at all.
+    """
+    assert declares(SERVICE_ATTR, HOME_NIX), (
+        "nix/home.nix declares no stale-base-triage SERVICE — the script is "
+        "unrouted again, which is the condition this section was written to end"
+    )
+    assert declares(TIMER_ATTR, HOME_NIX), (
+        "the service exists but nothing fires it on a schedule"
+    )
+    exec_start = directive("ExecStart", section("Service", _service()))
+    assert exec_start, "the service declares no ExecStart"
+    assert "scripts/stale-base-triage.py" in exec_start, exec_start
+    assert "--sweep" in exec_start, (
+        f"the unit runs the script in some other mode than the sweep: {exec_start}"
+    )
+    # POSITIVE CONTROL on the reader: `directive()` really can come back None,
+    # so the assertions above are not passing on a function that always answers.
+    assert directive("ExecStartPre", section("Service", _service())) is None
+
+
+def test_the_unit_ships_the_writer_DISARMED():
+    """🔴 THE SAFETY CLAIM OF THE PR THAT ADDED THIS UNIT: it reports, and it
+    posts nothing to anybody's PR.
+
+    The script's own `COMMENT_MODE_DEFAULT` is the literal `"off"` and is pinned
+    separately. This is the SECOND place the decision is spelled — the unit
+    passes `--comment-mode dry-run` explicitly, so a dry-run soak produces
+    `DRY-RUN would comment on #N` lines in the journal while writing nothing.
+    Arming is the one-token edit `dry-run` -> `on`, and it costs a visible line
+    HERE as well as in `nix/home.nix`. That is the point, not friction.
+
+    ⚠ IT ASSERTS THE VALUE, NOT MERE MEMBERSHIP IN THE LEGAL SET. `on` is a
+    legal value; a guard that accepted any of the three would let a bot that
+    comments on every open PR go live under a green suite.
+    """
+    exec_start = directive("ExecStart", section("Service", _service()))
+    # `[a-z-]+` rather than `\S+`: `directive()` hands back the nix STRING
+    # LITERAL, quotes included, so a greedy token captures the closing `"` and
+    # the comparison never matches whatever the value is.
+    modes = re.findall(r"--comment-mode[= ]([a-z-]+)", exec_start)
+    assert modes == ["dry-run"], (
+        f"the unit's --comment-mode is {modes!r}, not exactly ['dry-run']. If "
+        "this is the arming commit, say so in the diff and change this literal "
+        "deliberately — the criteria are written beside the ExecStart in "
+        "nix/home.nix."
+    )
+    # 🔴 ONE RULE, ONE PLACE. `comment_mode()` lets the CLI win over the env, so
+    # an env spelling here could not arm it today — but two spellings of one
+    # decision in one unit is how a later refactor flips one and not the other.
+    svc = _service()
+    assert "STALE_BASE_TRIAGE_COMMENT_MODE" not in svc, (
+        "the arming decision is spelled twice in one unit; keep it on the "
+        "ExecStart alone"
+    )
+
+
+def test_the_unit_is_NOT_wired_to_the_do_not_disturb_toast():
+    """🔴 A RELATIONSHIP, not a word. `notify-failure@` is the one toast class
+    deliberately wired to DEFEAT do-not-disturb. Every red this unit observes
+    belongs to somebody's PR — none of them is an incident on this host, and
+    none becomes more urgent for being shouted at the operator. A reporter that
+    can take the operator's attention is how `claude/RULES.md`'s
+    permanently-red gate gets built, one habituated dismissal at a time.
+
+    Read from the comment-STRIPPED body on purpose: the prose above the unit
+    discusses `notify-failure@` at length, so a raw scan would fail on the
+    paragraph explaining why it is absent — the trap the sibling guards on
+    `--fetch` and `--json` were each caught by.
+    """
+    for name, body in (("service", _service()), ("timer", _timer())):
+        assert "notify-failure" not in body, (
+            f"the {name} unit wires the DND-bypassing failure toast; this is a "
+            "reporter about other people's reds"
+        )
+    # POSITIVE CONTROL: the stripped body is not empty and the needle IS
+    # findable in this file's world — main-green-check wires one on purpose, so
+    # a reader that saw nothing anywhere would be inert rather than reassuring.
+    assert "ExecStart" in _service(), "the stripped service body is empty"
+    assert "notify-failure" in unit_source(
+        "systemd.user.services.main-green-check", HOME_NIX), (
+        "no unit in nix/home.nix wires notify-failure@ any more — this guard "
+        "can no longer distinguish 'absent' from 'unfindable'"
+    )
+
+
+def test_rc_INHERITED_is_a_systemd_SUCCESS_and_rc_UNMEASURED_IS_NOT():
+    """🔴 THE FAILURE POLICY, PINNED AGAINST THE SCRIPT'S OWN EXIT CODES.
+
+    rc 10 (INHERITED) is the tool's headline FINDING, not a fault: failing the
+    unit on it would leave `systemctl --user --failed` permanently dirty and
+    train everyone to ignore it.
+
+    rc 11 (COULD NOT MEASURE) deliberately DOES fail — the opposite of
+    `main-green-check` and `main-status-watch`, and the difference is that both
+    of those carry a blind LADDER and this script does not. rc 11 here is never
+    a per-PR miss (those are rows inside a run that still exits 0 or 10); it
+    means the run could not look AT ALL. With no ladder, calling that a success
+    is "blind in permanent silence" — the shape drift-check's rc 18 exists to
+    prevent. It is the right volume because there is no OnFailure: visible in
+    `--failed`, silent, and self-clearing on the next fire.
+    """
+    raw = directive("SuccessExitStatus", section("Service", _service()))
+    assert raw is not None, "the service declares no SuccessExitStatus"
+    codes = {int(tok) for tok in re.findall(r"\d+", raw)}
+    assert RC_INHERITED in codes, (
+        f"SuccessExitStatus is {raw!r} and does not include rc {RC_INHERITED} "
+        "(INHERITED) — the unit fails on its own headline finding"
+    )
+    assert RC_UNMEASURED not in codes, (
+        f"SuccessExitStatus is {raw!r} and swallows rc {RC_UNMEASURED} "
+        "(COULD NOT MEASURE). This script has no blind ladder, so that makes a "
+        "permanently broken sweep indistinguishable from a healthy one"
+    )
+    assert RC_USAGE not in codes, raw
+    # POSITIVE CONTROL on the parse: the codes really were read out of the
+    # value, not defaulted to an empty set that satisfies both `not in`s.
+    assert codes, f"SuccessExitStatus {raw!r} parsed to no codes at all"
+
+
+def test_the_scripts_own_budget_expires_BEFORE_the_units_timeout():
+    """🔴 A RELATIONSHIP BETWEEN TWO FILES, which is the seam nobody owns.
+
+    The script converts budget exhaustion into `COULD NOT MEASURE` rows and
+    still summarises. systemd's `TimeoutStartSec` converts it into SIGTERM and
+    no output at all. If the unit's axe falls first, every slow run reports
+    nothing and the ordered degradation the script implements is dead code.
+
+    Both numbers are READ, never restated: the budget out of the script's
+    constant, the timeout out of `nix/home.nix`. The nix comment's stated copy
+    of the budget is checked too — a prose number that drifts is how a reader
+    comes to believe the wrong relationship holds.
+    """
+    m = re.search(r"^TOTAL_BUDGET_S_DEFAULT = (\d+)", SRC_SCRIPT, re.M)
+    assert m, "TOTAL_BUDGET_S_DEFAULT is no longer a module-level int literal"
+    budget = int(m.group(1))
+    timeout = directive("TimeoutStartSec", section("Service", _service()))
+    assert timeout, "the service declares no TimeoutStartSec"
+    timeout = int(timeout)
+    assert budget < timeout, (
+        f"the script's API budget is {budget}s but systemd kills the run at "
+        f"{timeout}s — a slow sweep is SIGTERMed instead of reporting"
+    )
+    stated = re.search(r"TOTAL_BUDGET_S_DEFAULT = (\d+)", _raw_prose_window())
+    assert stated and int(stated.group(1)) == budget, (
+        f"nix/home.nix's comment states the budget as "
+        f"{stated.group(1) if stated else None}, the script says {budget}"
+    )
+
+
+def test_a_sweep_cannot_still_be_running_when_the_next_one_fires():
+    """Two overlapping sweeps double the API cost and interleave their output in
+    one journal, which is the state hardest to read the soak evidence out of.
+    `Type=oneshot` does not prevent it — the timer would simply not fire again
+    while the unit is activating — but the honest version is that the unit's own
+    worst case fits inside the interval, so the question never arises.
+    """
+    timeout = int(directive("TimeoutStartSec", section("Service", _service())))
+    interval = directive("OnUnitActiveSec", section("Timer", _timer()))
+    assert interval, "the timer declares no OnUnitActiveSec"
+    m = re.fullmatch(r'"(\d+)h"', interval.strip())
+    assert m, (
+        f"the interval {interval!r} is no longer stated in whole hours; this "
+        "guard's arithmetic assumed it was"
+    )
+    interval_s = int(m.group(1)) * 3600
+    assert timeout < interval_s, (
+        f"the unit may run for {timeout}s but fires every {interval_s}s"
+    )
+
+
+def test_the_timer_is_ENABLED_by_WantedBy_and_gated_by_its_master_switch():
+    """🔴 `WantedBy` SILENTLY CHANGED TO `After` IS A MEASURED SHAPE in this
+    repo: declared, never enabled, never fires, and every guard that only asked
+    "is the timer declared?" stayed green. So the directive is read by name.
+
+    The gate itself is asserted too, in both halves. `serverMode` is not
+    tidiness: both hosts build the same flake, so an ungated timer sweeps twice
+    and — once armed — races to post the same comment, which
+    `already_commented()` can only suppress after the first post has landed.
+    """
+    install = section("Install", _timer())
+    assert install, "the timer declares no [Install] section, so it is never enabled"
+    wanted = directive("WantedBy", install)
+    assert wanted and "timers.target" in wanted, (
+        f"the timer's WantedBy is {wanted!r} — it is declared but never enabled"
+    )
+    assert "serverMode" in wanted, (
+        f"the timer is not serverMode-gated ({wanted!r}); it would sweep from "
+        "both hosts and, armed, race to comment"
+    )
+    assert "enableStaleBaseTriage" in wanted, (
+        f"the timer has no master switch ({wanted!r}) — there is no one-line "
+        "way to stop the sweep without reverting the unit"
+    )
+    assert re.search(r"^  enableStaleBaseTriage = ", HOME_NIX, re.M), (
+        "the timer is gated on `enableStaleBaseTriage` but nothing defines it"
+    )
+
+
+def test_every_test_the_UNIT_names_actually_exists():
+    """The sibling guard for the script's own prose, applied to the nix block.
+
+    A citation that resolves to nothing reads as authority and is not one —
+    and a unit's comments are where the load-bearing "this is pinned, so a
+    later edit cannot quietly undo it" claims get made. Names wrapped across a
+    comment line-break are re-joined before looking; a `<file>.py::` prefix is
+    stepped over rather than being read as a dangling test name.
+    """
+    joined = re.sub(r"\n\s*#\s*", "", _raw_prose_window())
+    cited = set(re.findall(r"\btest_[A-Za-z0-9_]+\b(?!\.(?:py|sh))", joined))
+    assert cited, "the citation scan matched nothing — this guard is inert"
+    here = set()
+    for path in sorted((ROOT / "scripts").rglob("test_*.py")):
+        here |= set(re.findall(r"^ *def (test_[A-Za-z0-9_]+)",
+                               path.read_text(encoding="utf-8", errors="replace"),
+                               re.M))
+    assert cited <= here, f"dangling citations in the unit's prose: {sorted(cited - here)}"
