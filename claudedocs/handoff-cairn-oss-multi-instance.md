@@ -759,6 +759,43 @@ Tekton legs sat on top of two deploy-blockers.
 - **Next probe:** resolve the counterpart by subject and verify with `merge-base --is-ancestor`
   against the **PR head**, not against a worktree HEAD, every round.
 
+### The `FAILING:` line is a 140-char status description and CANNOT be read as a complete failure list
+- **Symptom + exact repro:** `gh pr checks <n>` prints one failing test while the same line's own
+  counts imply more. Observed on `#1525`:
+  `FAILING: test_every_kill_server_call_site_in_the_repo_is_classified | TOTAL collected=22167 passed=22163 skipped=2` — arithmetic gives **2 failed**, and the second name was truncated mid-token.
+- **Observed (with values):** three distinct bites in one session. (a) It hid
+  `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` from me; found only by running
+  the file locally after fixing the named one. (b) It is why `handoff-gate-flake-store-api.md`
+  rank 7's closing condition must **not** key on "no test appears in a `FAILING:` line" — a
+  rename, skip or deselect satisfies that with nothing fixed. (c) It appears to have produced a
+  regression in another session's PR: `#1522`'s `480b014f` removed two correct ledger rows on the
+  premise "a mention that does not exist" — a reasonable inference from a truncated line, and
+  false against the file.
+- **Ruled out: that the truncation is cosmetic.** It changes conclusions in both directions —
+  hiding a live failure, and satisfying an absence-based check. via: measurement
+- **Next probe:** none needed for diagnosis. **Read the file, not the status line** —
+  `grep -n '<pattern>' <file>` settled the `#1522` case in one command.
+
+### `#1522` (not mine) is red on BOTH kill guards, and its latest commit made it worse
+- **Symptom + exact repro:** at head `480b014f`, detached worktree, `__pycache__` cleared,
+  `PYTHONDONTWRITEBYTECODE=1`:
+  `nix develop <wt> --command python3 -m pytest <wt>/scripts/claude-hooks/tests/test_guard_core.py -q`
+  → **`2 failed, 1534 passed`**.
+- **Observed (with values):** census — `added: ['claudedocs/handoff-tmux-webapp.md'], removed: []`;
+  scanner — `offenders: [('claudedocs/handoff-tmux-webapp.md', 'tmux kill-session')]`. The mention
+  is real, at `handoff-tmux-webapp.md:3409`, and is on `origin/main` too.
+- **Ruled out: that the rows it deleted were wrong.** Its commit says they "recorded a mention
+  that does not exist"; `grep -n` finds it at `:3409` at that same head. via: measurement
+- **Ruled out: that `f346ba28` was already green.** It was **1 failed** — only its own new doc
+  missing from `quoting_is_the_point`. So `480b014f` went 1 → 2. via: measurement
+- **Leading hypothesis:** the shape is **two allowlists, one file** — `_KILL_MENTION_LEDGER` and
+  `quoting_is_the_point` must BOTH be edited, and three separate attempts today each populated
+  one. The durable fix is to have the scanner read the ledger directly: an entry classified
+  `prose:` IS the set `quoting_is_the_point` names.
+- **Next probe:** restore both `handoff-tmux-webapp.md` rows and add
+  `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
+  measured **1536 passed, 0 failed** locally.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -1981,6 +2018,36 @@ covers; pin it with `--config`, do not `cd`.
 - ⚠ **Left behind deliberately:** `refs/remotes/origin/pr/1508` in `~/workspace/devrc` (inert,
   `git update-ref -d` when the arc closes), the worktrees `/tmp/wt-cairn-slice3` (holds the
   rebased-but-unpushed `6205faec`) and `/tmp/wt-mainctl` (the `main` control checkout).
+
+- 🔴 **RANK 22 CLOSED-PENDING-VERIFICATION, 2026-09-11.** `#1458` squash **`ce9b55c3`** merged and
+  content-verified; recorded by `#1462` (`60033d1e`) and corrected by `#1525` (`018e483b`). The
+  second flake it uncovered is filed as **`handoff-gate-flake-store-api.md` rank 7** (`#1477`,
+  `50e8a71a`), which also corrects that doc's rank 1. **The verifier is the flake RATE against
+  heads that CARRY `ce9b55c3` — `git merge-base --is-ancestor`, never a date comparison.**
+- 🔴 **`cairn recall --repo <cairn>` is `scope-absent`; the scope is `devrc`.** The OSS repo has no
+  store scope. `cairn search --scope devrc '<term>'` is what surfaced `ci-repro/` and the
+  `#1211`/`#1219`/`#1239` history that made rank 22's whole diagnosis possible.
+- 🔴 **The OSS `cairn` repo carries the IDENTICAL 18-open-coded / 5-sited store split** and the
+  same one-fixture guard (`tests/test_subsystem_store_api.py:19716`). Deliberately not fixed: its
+  CI is GitHub-hosted with no single-node pin, and the fork consolidates ONTO that copy (rank 3
+  slice 3). **Decide it with slice 3, not by default.**
+- ⚠ **A PR merged with a red gate is not a PR that passed.** `#1458` and `#1462` both merged with
+  `tekton/devrc-pytests` RED on an attributed, unreachable flake. The gates are **advisory** —
+  measured twice: no required status checks, no rulesets, `enforce_admins: false`.
+  `claude/skills/tekton/SKILL.md` asserts the opposite and is STALE; `#1452` retracts it, and two
+  sites its sweep missed are commented there.
+- 🔴 **Four audit rounds across two PRs found essentially ONE defect class: a claim wider than
+  what was measured, written by the fix round correcting the previous one.** The provenance
+  sentence on gate-flake rank 7 was wrong **three consecutive times** — original, retraction, and
+  the retraction's correction — before being deleted rather than corrected a fourth time. **If a
+  sentence cannot be made true and precise, delete the claim.**
+- ⚠ **I took an auditor's timings on report and wrote them into a doc as measurements.** Round 2
+  caught it; re-measuring gave `:418` **43.48 s** against its 70.94 s, and the file **137.69 s**
+  against its 428.40 s. Nothing reproduced — and **that** became the finding: a 3.11x observed
+  spread means no point wall time from that file is quotable.
+- 🔴 **The pre-create sweep only works as a SEPARATE step.** I piped `gh pr list` into the same
+  command as `gh pr create` and shipped `#1529`, a duplicate of `#1522`; closed it. The sweep ran
+  and I never read it.
 
 ## How to verify
 
