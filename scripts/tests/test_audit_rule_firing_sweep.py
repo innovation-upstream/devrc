@@ -171,9 +171,23 @@ def _corpus(tmp_path, records, name="proj/s.jsonl"):
     return tmp_path
 
 
+# 🔴 EVERY VERDICT-ASSERTING TEST MUST PIN THE ORIGIN ITSELF — the suite runs in TWO TIERS
+# and they disagree about whether this is a git checkout. `nix build .#checks…` builds from a
+# `cp -r ${./.}` store copy with NO `.git`, so `origin_of`'s `git log -S` fails there, every
+# row reads `UNDATED`, and a test asserting `FIRED`/`UNFIRED` goes red in the sandbox while
+# staying green on the dev host. MEASURED: exactly 5 tests failed that way on
+# `tekton/devrc-pytests` (6 with the glob-ledger one), and the same 5 reproduced locally in a
+# `.git`-less copy of the tree. A test that lets origin come from git history is asserting on
+# its ENVIRONMENT, not on the sweep. So `_run` dates every rule at a fixed early instant
+# unless the test overrides it; `test_an_undatable_rule_reads_UNDATED_on_BOTH_tiers` pins the
+# undated path deterministically instead of leaving it to whether `.git` happens to exist.
+EARLY_ORIGIN = "2026-01-01T00:00:00+00:00"   # before every fixture timestamp below
+
+
 def _run(corpus, *args, env=None, expect=None):
     e = dict(os.environ)
     e["AUDIT_SWEEP_CORPUS"] = str(corpus)
+    e.setdefault("AUDIT_SWEEP_ORIGIN", EARLY_ORIGIN)
     e.update(env or {})
     r = subprocess.run([sys.executable, str(SCRIPT), *args],
                        capture_output=True, text=True, cwd=str(REPO), env=e,
@@ -417,6 +431,34 @@ def test_the_report_never_claims_the_rule_CAUGHT_something(tmp_path):
                expect=0).stdout
     assert "NOT 'caught'" in out
     assert "counts APPLICATIONS, not catches" in out
+
+
+def test_an_undatable_rule_reads_UNDATED_on_BOTH_tiers(tmp_path):
+    """🔴 The two-tier pin, and the reason `_run` forces an origin at all.
+
+    When the origin cannot be resolved — no `.git` (the `nix build` sandbox), a shallow
+    clone, or a skill copy with no history — the row must say UNDATED and the run must
+    still exit 0. Asserting that explicitly is what stops the OTHER tests quietly
+    measuring whether `.git` exists: before this, five of them passed on the dev host and
+    failed in the sandbox for exactly that reason, and neither tier's result was wrong —
+    they were answering different questions.
+    """
+    copy = tmp_path / "SKILL.md"
+    copy.write_text(SKILL.read_text())
+    recs = [_rec("assistant", [{"type": "text", "text": HEADING}]),
+            _rec("assistant", [{"type": "text", "text": SENTENCE}])]
+    out_path = tmp_path / "rows.json"
+    out = _run(_corpus(tmp_path, recs), "--rule", "round-ledger-line",
+               "--json", str(out_path), expect=0,
+               # empty string: not a forced origin, so dating falls through to the
+               # copied-skill branch, which has no history of its own
+               env={"AUDIT_SWEEP_ORIGIN": "", "AUDIT_SWEEP_SKILL": str(copy)}).stdout
+    row = next(l for l in out.splitlines() if l.startswith("round-ledger-line"))
+    assert "UNDATED" in row, row
+    r0 = _row(out_path, "round-ledger-line")
+    assert r0["origin"] is None, r0
+    # the application is still COUNTED — undatable is not unmeasurable
+    assert r0["fired"] == 1, r0
 
 
 def test_an_unfired_row_is_not_called_dead(tmp_path):
