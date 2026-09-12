@@ -319,13 +319,20 @@ from subsystem_resolver import (  # noqa: E402
 from git_mainline import FALLBACK_BASE_REFS  # noqa: E402
 from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 
-# 🔴 ONE RULE, ONE PLACE — "which MACHINE's store is this?". The store under
-# `~/.claude/analyze-service-index/` is PER-HOST and unreplicated; measured
-# 2026-08-27 the workbench held 115 entries / 14 scopes and the laptop 33 / 11,
-# with exactly ONE entry name in common across the four scopes both machines
-# have. Every verdict this module prints is therefore a fact about ONE disk, and
-# `host_identity` is what makes the output say so. Same owner as
+# 🔴 ONE RULE, ONE PLACE — "which MACHINE's cache is this?". The tree this
+# module reads is a PER-HOST READ-THROUGH CACHE of the hosted store, refreshed
+# by `cairn sync`; measured 2026-08-27, pre-cutover, the workbench held 115
+# entries / 14 scopes and the laptop 33 / 11, with exactly ONE entry name in
+# common across the four scopes both machines have. Every verdict this module
+# prints is therefore a fact about ONE disk AT ONE SYNC, and `host_identity` is
+# what makes the output say whose. Same owner as
 # `analyze-service-index/backup.py`, which keys its objects by it.
+#
+# ⚠ NOT AN ISOLATION CLAIM — that one was retracted 2026-09-11. This comment
+# used to say the store is "PER-HOST and unreplicated", which would mean an
+# entry written elsewhere never arrives. It does: the Cairn cutover made a
+# hosted pod the datastore, and in one write-free session the pod's snapshot
+# moved entry-files 232 -> 239 between two reads. The bound is freshness.
 #
 # 🔴 IMPORTED THROUGH `entry_shape.store_host`, NOT DIRECTLY — see the
 # `store_host` re-export below.
@@ -4576,12 +4583,23 @@ def render_text(report: TouchReport) -> str:
 
     if report.status == "scope-absent":
         out.append("")
-        # 🔴 "ABSENT HERE" IS NOT "ABSENT ANYWHERE", and the old wording said the
-        # second. MEASURED 2026-08-27: a workbench run probing `vetr-app` printed
+        # 🔴 "ABSENT AS OF THIS HOST'S LAST SYNC" IS NOT "ABSENT ANYWHERE", and
+        # the old wording said the second. MEASURED 2026-08-27: a workbench run probing `vetr-app` printed
         # `the store has no vetr-app/ directory yet … the FIRST-ENTRY case` while
         # a `vetr-app` scope with four entries existed ON THE LAPTOP. The status
-        # was right for this disk; the SENTENCE was a claim about a store that
-        # does not exist as one thing.
+        # was right for this disk; the SENTENCE was a claim about the fleet.
+        #
+        # 🔴 THE *REASON* PRINTED BESIDE IT WAS RETRACTED 2026-09-11, and the
+        # second line below was rewritten rather than rebaselined. It used to
+        # read "The other host keeps a DIFFERENT store, not a copy" — FALSE: the
+        # Cairn cutover made a hosted pod the datastore and the local tree a
+        # SYNCED READ-THROUGH CACHE of it, and the two hosts converge through the
+        # pod. Measured in one write-free session, between two `fetched … just
+        # now` reads ~1h apart, the pod's snapshot moved entry-files 232 -> 239.
+        # What bounds this verdict is FRESHNESS — the last `cairn sync` on THIS
+        # machine — not isolation. The qualification is unchanged in force: a
+        # stale cache and a separate store produce the same wrong report; only
+        # the remedy differs (sync, then look again).
         out.append(
             f"SCOPE ABSENT — THIS HOST's store ({store_host()}) has no "
             f"`{report.scope}/` directory yet. Every path below is unresolved "
@@ -4590,9 +4608,10 @@ def render_text(report: TouchReport) -> str:
         )
         out.append(
             f"  NOT A FACT ABOUT THE FLEET — {STORE_IS_PER_HOST}. The other host "
-            f"keeps a DIFFERENT store, not a copy, and it may already hold "
-            f"`{report.scope}/`. Nothing is lost by writing a first entry here; "
-            f"just do not report this scope as unrecorded everywhere."
+            f"syncs the SAME hosted store through its own cache, and may already "
+            f"hold `{report.scope}/` where this one has not synced it yet. "
+            f"Nothing is lost by writing a first entry here; just do not report "
+            f"this scope as unrecorded everywhere."
         )
 
     if report.known:
