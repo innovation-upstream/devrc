@@ -3059,6 +3059,12 @@ class TestSkillsAndCodeAgree:
             "clawgate_block": 2,
             # prints `handoff: $(basename …)`
             "git_pr_block": 1,
+            # rule (l)'s INVESTIGATIONS block, and it takes its CONTENT from
+            # $HANDOFF_TEXT exactly as this scan requires — these two are the
+            # same PATH uses `clawgate_block` makes, for the same clock ladder:
+            # `rel="$HANDOFF"` names the file for git's pickaxe, and `stat -c %Y`
+            # is the mtime fallback beneath it.
+            "investigations_block": 2,
             # resolves `rel` for the ref comparison
             "handoff_freshness": 1,
             # derives $REPO from the path when an explicit doc is passed (twice:

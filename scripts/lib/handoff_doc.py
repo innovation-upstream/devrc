@@ -241,6 +241,7 @@ EXIT CODES
 from __future__ import annotations
 
 import argparse
+import datetime
 import difflib
 import re
 import subprocess
@@ -1353,6 +1354,212 @@ def assumed_report(bullets: typing.Sequence[EliminationBullet]) -> str:
             f"`{ELIMINATION_KEY}: assumed` — REASONED, NOT MEASURED:",
             *[f"  {_clip(b.text, 96)}" for b in assumed[:EXISTING_SHOWN_MAX]],
             ASSUMED_NOTE,
+        ]
+    )
+
+
+# --- rule (l): a mid-diagnosis block declares WHEN it was written ------------
+#
+# 🔴 THE FAILURE THIS CLOSES, measured 2026-09-12. An `## Open investigations`
+# block is written in the PRESENT TENSE by a session mid-diagnosis, and rule (c)
+# APPENDS it forever — nothing ever retracts one. The doc's status header is
+# visibly dated; a diagnosis block is not, so it reads as current for the life
+# of the document. A session read one, adopted its framing, and the framing was
+# wrong: a claim that fused two documents' measurements over two windows with
+# two instruments. Refuting it cost a full re-measurement.
+# `claudedocs/handoff-handoff-resume-skill-trace.md` carries the worked example.
+#
+# 🔴 PROSE HAS ALREADY FAILED AT THIS. The `resume` skill body warns about the
+# class and cites two prior instances (2026-08-19, 2026-08-20). A warning that
+# must be remembered is a warning that gets skipped, so the STAMP IS WRITTEN BY
+# THE TOOL, not asked for in a checklist — the same reason rule (i) resolves the
+# topic slug here rather than telling the author to think about it.
+#
+# WHAT IS STAMPED, AND WHAT IS NOT:
+#   * only `### ` blocks inside the UPDATE's `## Open investigations` section —
+#     the text THIS session is writing. The base document is never touched, so
+#     this is not a retro-stamp of the corpus and cannot rewrite what a past
+#     session wrote. (Nor does it need to: `scripts/resume-state.sh` dates an
+#     unstamped block from the commit that introduced it, which answered for
+#     478 of 478 blocks across this repo's 81 docs. The stamp is the most
+#     PRECISE clock, never the only one.)
+#   * an EXPLICIT stamp always wins and is never rewritten. A session recording
+#     evidence gathered last week must be able to say so, and "the tool moved my
+#     date" is exactly how an author learns to distrust the field.
+#   * fence-aware, for `_unfenced`'s stated reason: a delta routinely pastes the
+#     skill's own template — a sample block is not a claim.
+#
+# The grammar is deliberately rule (j)/(k)'s: key, colon, value, `_MARKUP`
+# emphasis allowed. An author who has learned `forcing:` and `via:` should not
+# have to learn a third spelling. The VALUE is an ISO date rather than a closed
+# vocabulary, because the question is "when", not "which kind".
+INVESTIGATION_STAMP_KEY = "as-of"
+
+#: `## Open investigations` — matched on the PREFIX, exactly as `APPEND_PREFIXES`
+#: matches it, because the canonical spelling carries a trailing gloss ("— live
+#: diagnosis state") no updating session reproduces character-for-character.
+_INVESTIGATION_SECTION = re.compile(r"^##\s+open investigations", re.IGNORECASE)
+
+#: Any other `## ` heading closes the section. `### ` does not — that is a block.
+_ANY_H2 = re.compile(r"^##\s+")
+
+_INVESTIGATION_BLOCK = re.compile(r"^###\s+(.*\S)\s*$")
+
+#: 🔴 THE TRAILING `(?![-\d])` IS LOAD-BEARING: without it `as-of: 2026-09-12-rev2`
+#: parses as a valid date and the block is treated as stamped. It is not a
+#: hypothetical — a date followed by a hyphenated suffix is a real habit in this
+#: corpus's filenames. An unparseable value must read as ABSENT so the tool
+#: stamps it, rather than as a stamp nobody can date.
+_INVESTIGATION_STAMP = re.compile(
+    rf"(?<![A-Za-z0-9]){INVESTIGATION_STAMP_KEY}{_MARKUP}\s*:\s*{_MARKUP}\s*"
+    rf"(\d{{4}}-\d{{2}}-\d{{2}})(?![-\d])",
+    re.IGNORECASE,
+)
+
+
+def _unfenced_flags(lines: typing.Sequence[str]) -> list[bool]:
+    """`True` for each line that sits OUTSIDE a code fence (fences themselves
+    are `False`).
+
+    `_unfenced` yields only the surviving lines, which is what rule (f) needs;
+    stamping has to REWRITE the text, so it needs the mask instead. Same fence
+    grammar, taken from the same `_fence_token`, so the two cannot disagree
+    about where a fence starts.
+    """
+    flags: list[bool] = []
+    open_tok: str | None = None
+    for line in lines:
+        tok = _fence_token(line)
+        if open_tok is None:
+            if tok:
+                open_tok = tok
+                flags.append(False)
+                continue
+            flags.append(True)
+        else:
+            flags.append(False)
+            if (
+                tok
+                and tok[0] == open_tok[0]
+                and len(tok) >= len(open_tok)
+                and line.strip() == tok
+            ):
+                open_tok = None
+    return flags
+
+
+class InvestigationBlock(typing.NamedTuple):
+    """One `### ` block under `## Open investigations`, and its stamp."""
+
+    heading: str
+    """The heading text, without the `### ` marker."""
+    stamp: str | None
+    """The ISO date it declares, or None when it carries none."""
+    index: int
+    """0-based index of the heading line within the document's lines."""
+
+
+def investigation_blocks(text: str) -> list[InvestigationBlock]:
+    """Every mid-diagnosis block in `text`, with the date it declares.
+
+    🔴 SCOPED TO `## Open investigations`, WHICH IS THE OPPOSITE OF RULE (k)'s
+    CHOICE, and the difference is not an inconsistency. A `Ruled out:` bullet
+    makes the same claim wherever it is written, so rule (k) walks the whole
+    body. A *block* is a structural object that only exists under that heading —
+    a `### ` under `Gotchas` is not a live diagnosis and stamping it would put a
+    date on settled text, teaching the reader that the field means nothing.
+    """
+    lines = text.splitlines()
+    flags = _unfenced_flags(lines)
+    out: list[InvestigationBlock] = []
+    in_section = False
+    for i, line in enumerate(lines):
+        if not flags[i]:
+            continue
+        if _INVESTIGATION_SECTION.match(line):
+            in_section = True
+            continue
+        if _ANY_H2.match(line):
+            in_section = False
+            continue
+        if not in_section:
+            continue
+        m = _INVESTIGATION_BLOCK.match(line)
+        if m:
+            out.append(InvestigationBlock(m.group(1), None, i))
+            continue
+        if out and out[-1].stamp is None:
+            found = _INVESTIGATION_STAMP.search(line)
+            if found:
+                out[-1] = out[-1]._replace(stamp=found.group(1))
+    return out
+
+
+def stamp_investigations(text: str, today: str) -> tuple[str, list[str]]:
+    """`(text with every unstamped investigation block stamped, headings done)`.
+
+    The field is inserted as the block's FIRST bullet, immediately under its
+    heading: a fixed position is what makes it findable by eye and by
+    `resume-state.sh`, and the alternative — appending at the end of a block —
+    puts it after whatever fenced evidence the author pasted, where the fence
+    grammar decides its meaning.
+
+    Idempotent by construction: a block that already declares a date is skipped,
+    so re-running against an already-stamped scratch file changes nothing and
+    the `no-change` verdict stays reachable.
+    """
+    blocks = [b for b in investigation_blocks(text) if b.stamp is None]
+    if not blocks:
+        return text, []
+    lines = text.splitlines(keepends=True)
+    ends_clean = text.endswith("\n") or not text
+    for b in reversed(blocks):
+        lines.insert(b.index + 1, f"- {INVESTIGATION_STAMP_KEY}: {today}\n")
+    out = "".join(lines)
+    if not ends_clean:
+        out = out.rstrip("\n")
+    return out, [b.heading for b in blocks]
+
+
+def _today() -> str:
+    """Today, LOCAL, as `YYYY-MM-DD`.
+
+    Local rather than UTC on purpose: every other date a handoff carries is the
+    operator's calendar date, and a stamp reading tomorrow (or yesterday) beside
+    a `# Handoff: <topic> — <date>` line written the same minute would be read
+    as a bug in the field, not as a timezone.
+
+    🔴 NO ENVIRONMENT OVERRIDE, deliberately. A settable clock is a way for a
+    run to declare its own text fresh, and this field exists precisely because
+    nobody re-checks a date. Tests pass `today` to `stamp_investigations`
+    directly; nothing else needs to.
+    """
+    return datetime.date.today().isoformat()
+
+
+def stamped_report(headings: typing.Sequence[str], today: str) -> str:
+    """Rule (l)'s advisory, or "" when nothing needed a stamp.
+
+    An ADVISORY, never a refusal: the tool did the work, so there is nothing for
+    the author to fix and a refusal would be unclearable. It is still printed,
+    because a line this tool ADDED to the author's text must be visible above
+    the diff rather than discovered inside it.
+    """
+    if not headings:
+        return ""
+    return "\n".join(
+        [
+            f"🔴 {len(headings)} investigation block(s) carried no "
+            f"`{INVESTIGATION_STAMP_KEY}:` date, so this run stamped them "
+            f"`{INVESTIGATION_STAMP_KEY}: {today}`:",
+            *[f"  {_clip(h, 96)}" for h in headings[:EXISTING_SHOWN_MAX]],
+            "  A diagnosis block is written in the PRESENT TENSE and nothing "
+            "ever retracts it, so its age is the only thing that tells a later "
+            "reader whether to trust it. `scripts/resume-state.sh` reads this "
+            "field and reports a block that has aged out.",
+            "  🔴 The date is TODAY. If the evidence in a block is older than "
+            "that, say so: write the field yourself with the real date and this "
+            "run will leave it alone.",
         ]
     )
 
@@ -3052,6 +3259,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot read --update: {exc}", file=sys.stderr)
         return EXIT_FAIL
 
+    # ---- rule (l): every NEW investigation block declares its date ----------
+    # 🔴 FIRST, and against the UPDATE. First because every rule below reads
+    # `update_text` and they must all see the text that will be written — a
+    # stamp added after the merge would be a line in the committed doc that the
+    # diff on screen never showed. Against the UPDATE for rule (k)'s reason,
+    # sharpened: `open investigations` APPENDS, so stamping the merge would
+    # rewrite blocks past sessions wrote, dating them TODAY — the exact false
+    # freshness this rule exists to prevent, manufactured by the rule itself.
+    update_text, stamped = stamp_investigations(update_text, _today())
+    stamped_advisory = stamped_report(stamped, _today())
+
     # ---- rule (j): every ranked next-step names a forcing function ----------
     # Read from the UPDATE, so legacy items already in the base are never
     # retroactively refused — see `ranked_items`. An update that brings no
@@ -3180,6 +3398,14 @@ def main(argv: list[str] | None = None) -> int:
     assumed = assumed_report(bullets)
     if assumed:
         print(assumed)
+    # Rule (l)'s advisory. Same slot, and it is the one of the three that names
+    # a line the TOOL wrote rather than one the author did — which is exactly
+    # why it must be on screen above the diff rather than left to be noticed in
+    # it. Computed before the refusals so the text it describes is the text
+    # every rule below saw; printed here so a run that refuses does not claim to
+    # have stamped a document it never wrote.
+    if stamped_advisory:
+        print(stamped_advisory)
     print(diff, end="" if diff.endswith("\n") else "\n")
 
     if not args.confirm:

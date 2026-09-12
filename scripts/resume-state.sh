@@ -1782,6 +1782,214 @@ clawgate_block(){
 }
 
 # ---------------------------------------------------------------------------
+# INVESTIGATIONS — how OLD is each mid-diagnosis block, and does it still count?
+#
+# 🔴 THE FAILURE, measured 2026-09-12. An `## Open investigations` block is
+# written in the PRESENT TENSE by a session mid-diagnosis, and `/handoff`'s
+# merge APPENDS it forever — nothing ever retracts one. The doc's status header
+# is visibly dated; a diagnosis block is not, so it reads as CURRENT for the
+# life of the document. A session read one, adopted its framing, and the framing
+# was wrong: a claim fusing two documents' measurements over two windows with
+# two instruments. Refuting it cost a full re-measurement. The worked example is
+# `claudedocs/handoff-handoff-resume-skill-trace.md`, which now carries its own
+# refutation. The `resume` skill body had ALREADY warned about the class in
+# prose and cited two earlier instances (2026-08-19, 2026-08-20) — which is the
+# whole argument for putting the age on screen instead of in a paragraph.
+#
+# 🔴 WHAT AN UNSTAMPED BLOCK REPORTS — THE ONE DESIGN DECISION HERE, AND IT IS
+# NOT "NOT ADOPTED". `drift-check.sh` rc 22 prints NOT ADOPTED and sets no code
+# for a host with no `skillOverrides`, because that mechanism is applied to zero
+# hosts BY DESIGN and could not be evaluated at all. rc 18 is the opposite
+# lesson: a scope that can never be evaluated escalated NEVER, so the run read
+# clean while the check was structurally unable to fire.
+#
+# Neither applies, because AN UNSTAMPED BLOCK IS NOT UNDATEABLE. MEASURED at
+# 7e000e6b over this repo's whole corpus: 81 tracked handoff docs carry an
+# `## Open investigations` section, holding 478 `### ` blocks, and the commit
+# that INTRODUCED the block's heading dated **478 of 478** of them. So the stamp
+# is the most PRECISE clock, never the only one, and an unstamped block is aged
+# exactly like a stamped one — what differs is the clock NAME, printed beside
+# the age, exactly as `clawgate_block` names which of its four clocks answered.
+# `UNDATED` is reserved for a block NO clock could place, and it is a `!` gap
+# rather than a finding: nothing was measured, so nothing may be concluded.
+#
+# 🔴 WHY THE BLOCK'S OWN INTRODUCING COMMIT AND NOT THE DOC'S LAST COMMIT — the
+# hint that looks right and errs in the UNSAFE direction. A doc recommitted this
+# morning makes every block in it read 0 days old, including one written in
+# July: false FRESHNESS, which is the defect itself. The introducing commit is
+# per-BLOCK and content-derived, so it survives a `git worktree add` (which
+# stamps every file's mtime at checkout) for `clawgate_block`'s stated reason.
+# Where it cannot answer, the doc's last commit is used as an explicit FLOOR and
+# gapped as one — never quietly.
+#
+# THE WINDOW. Default 14 days, and it is a measurement rather than a taste call.
+# Over those same 478 blocks, aged at the moment their own doc was last written
+# — i.e. roughly the moment a session resumes it — p50 is 1.4d and p90 is 11.3d.
+# A 14-day window flags 15 of 478 (3%); 7 days would flag 86 (18%). A gate that
+# fires on a fifth of every doc is one everybody clicks through, which
+# `claude/RULES.md` names as worse than no gate; one that fires on nothing is
+# worth nothing. 3% is a signal.
+INVESTIGATION_MAX_AGE_DAYS="${RESUME_STATE_INVESTIGATION_MAX_AGE_DAYS:-14}"
+
+# Emits one `<stamp-or-dash><TAB><heading>` line per `### ` block under the
+# `## Open investigations` heading of the text on stdin.
+#
+# 🔴 `-` FOR "NO STAMP", NEVER AN EMPTY FIELD, AND THIS IS A FIX. TAB is IFS
+# WHITESPACE, so `IFS=$'\t' read -r stamp heading` COLLAPSES a leading empty
+# field: the row "\tAlpha" assigns stamp=Alpha and heading="", and the reader
+# then skipped every UNSTAMPED block — which is every block in the corpus. The
+# digest printed a confident `0 block(s)` for a doc holding one. Caught by
+# test_an_unstamped_block_in_an_OLD_doc_is_EXPIRED, not by reading the code.
+#
+# Pure and side-effect free so the test harness can assert it on fixture text,
+# exactly as `extract_prs` is asserted.
+#
+# FENCE-AWARE, for the reason `handoff_doc.py::_unfenced` states: a handoff
+# routinely pastes the skill's own template inside a code block, and a sample
+# block is not a live diagnosis. Matching the section on its PREFIX mirrors
+# `APPEND_PREFIXES` — the canonical spelling carries a trailing gloss ("— live
+# diagnosis state") that an updating session will not reproduce exactly.
+investigation_rows(){
+  awk '
+    function flush(){ if (h != "") print (stamp == "" ? "-" : stamp) "\t" h; h=""; stamp="" }
+    {
+      line = $0
+      if (match(line, /^[ \t]*(```+|~~~+)/)) {
+        tok = substr(line, RSTART, RLENGTH); sub(/^[ \t]*/, "", tok)
+        if (fence == "") { fence = substr(tok, 1, 1) }
+        else if (substr(tok, 1, 1) == fence) { fence = "" }
+        next
+      }
+      if (fence != "") next
+      low = tolower(line)
+      if (low ~ /^##[ \t]+open investigations/) { flush(); insec = 1; next }
+      if (line ~ /^##[ \t]/)                    { flush(); insec = 0; next }
+      if (!insec) next
+      if (line ~ /^###[ \t]/) {
+        flush()
+        h = line; sub(/^###[ \t]+/, "", h); sub(/[ \t]+$/, "", h)
+        next
+      }
+      # The stamp grammar is handoff_doc.py rule (l)`s: key, optional emphasis,
+      # colon, ISO date. The trailing guard rejects `2026-09-12-rev2` so an
+      # unparseable value reads ABSENT rather than as a date nobody can place.
+      #
+      # 🔴 THE NEXT CHARACTER IS READ FROM `low`, NOT FROM THE MATCH. Reading it
+      # from the extracted substring always yields "" — the date is the last
+      # thing in it — so the guard passed unconditionally and
+      # `as-of: 2026-01-02-rev2` was accepted as a stamp. Same shape as the
+      # `IFS` bug above: a guard that cannot fail.
+      if (h != "" && stamp == "" &&
+          match(low, /as-of[*_`~ \t]*:[*_`~ \t]*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
+        end = RSTART + RLENGTH
+        if (substr(low, end, 1) !~ /^[0-9-]/) stamp = substr(low, end - 10, 10)
+      }
+    }
+    END { flush() }
+  '
+}
+
+investigations_block(){
+  echo "INVESTIGATIONS"
+  if [ -z "$HANDOFF" ]; then
+    echo "  (no handoff — nothing to age)"
+    return
+  fi
+  local rows
+  # 🔴 `$HANDOFF_TEXT`, NOT `cat "$HANDOFF"` — the copy handoff_freshness CHOSE.
+  # `clawgate_block` shipped with that bug and the two copies differ exactly
+  # when it matters. Pinned structurally by
+  # test_only_handoff_freshness_READS_the_working_tree_copy.
+  rows=$(printf '%s\n' "$HANDOFF_TEXT" | investigation_rows)
+  if [ -z "$rows" ]; then
+    echo "  (no \"Open investigations\" blocks in this handoff — nothing to age;"
+    echo "   this says NOTHING about whether the rest of the doc is current)"
+    return
+  fi
+
+  # The clock ladder, most precise first. `clock=` spellings are SCRAPED out of
+  # this script by test_resume_state_clawgate.py and required to appear in
+  # claude/skills/resume/SKILL.md, so a new one cannot ship undocumented.
+  local now fresh expired undated line stamp heading epoch clock age gap
+  now=$(date +%s)
+  fresh=0 expired=0 undated=0
+  while IFS=$'\t' read -r stamp heading; do
+    [ -n "$heading" ] || continue
+    [ "$stamp" = "-" ] && stamp=""
+    epoch="" clock="" gap=""
+    if [ -n "$stamp" ]; then
+      epoch=$(date -d "$stamp" +%s 2>/dev/null)
+      if [ -n "$epoch" ]; then
+        clock="as-of stamp"
+      else
+        # A well-formed ISO date `date` still refuses (2026-02-31). Loud, not
+        # silently unstamped: the author wrote a date and it does not exist.
+        gap="the investigation \"$heading\" declares as-of: $stamp, which is not a real date — it was NOT aged"
+        clock="UNDATED"
+      fi
+    fi
+    if [ -z "$epoch" ] && [ -z "$gap" ] && [ -n "$REPO" ]; then
+      # git's pickaxe: the earliest commit whose count of this heading line
+      # CHANGED is the commit that introduced the block. Literal (no
+      # --pickaxe-regex), so a heading full of punctuation is safe.
+      local ref rel
+      ref="${HANDOFF_REF:-}" rel="$HANDOFF"
+      [ -n "$ref" ] && [ -n "$HANDOFF_REL" ] && rel="$HANDOFF_REL"
+      # shellcheck disable=SC2086
+      epoch=$(git -C "$REPO" log --format=%ct --reverse -S"### $heading" \
+                ${ref:+"$ref"} -- "$rel" 2>/dev/null | head -1)
+      if [ -n "$epoch" ]; then
+        clock="first commit carrying this block"
+        [ -n "$ref" ] && clock="first commit carrying this block on $ref"
+      fi
+    fi
+    if [ -z "$epoch" ] && [ -z "$gap" ] && [ -n "$REPO" ]; then
+      # Not in the doc's history at all. Either it was written since the last
+      # commit (age ~0) or the history is truncated (a shallow clone), and an
+      # EMPTY RESULT cannot distinguish the two — so take the doc's last commit,
+      # which over-reports age in the first case and under-reports in the
+      # second, and SAY it is a floor rather than a reading.
+      epoch=$(git -C "$REPO" log -1 --format=%ct \
+                ${HANDOFF_REF:+"$HANDOFF_REF"} -- "${HANDOFF_REL:-$HANDOFF}" 2>/dev/null)
+      if [ -n "$epoch" ]; then
+        clock="the doc's last commit"
+        gap="the investigation \"$heading\" is not in this doc's git history, so it was dated by ${clock} — that dates the DOCUMENT, not the block, and a doc recommitted today makes an ancient block read FRESH; treat this age as a floor"
+      fi
+    fi
+    if [ -z "$epoch" ] && [ -z "$gap" ]; then
+      epoch=$(stat -c %Y "$HANDOFF" 2>/dev/null)
+      if [ -n "$epoch" ]; then
+        clock="file mtime"
+        gap="the investigation \"$heading\" could only be dated by ${clock} — a checkout, copy or rsync resets that, so its age is not evidence in either direction"
+      fi
+    fi
+    if [ -z "$epoch" ]; then
+      [ -n "$clock" ] || clock="UNDATED"
+      [ -n "$gap" ] || gap="the investigation \"$heading\" could not be dated by any clock (${clock}) — whether its diagnosis is still current is UNKNOWN, which is NOT the same as fine"
+      undated=$((undated + 1))
+      printf '  ? %s  (%s)\n' "$heading" "$clock"
+      UNRECONCILED+=("$gap")
+      continue
+    fi
+    [ -n "$gap" ] && UNRECONCILED+=("$gap")
+    age=$(( (now - epoch) / 86400 ))
+    [ "$age" -lt 0 ] && age=0
+    if [ "$age" -gt "$INVESTIGATION_MAX_AGE_DAYS" ]; then
+      expired=$((expired + 1))
+      printf '  🔴 EXPIRED %sd  %s  (by %s)\n' "$age" "$heading" "$clock"
+      DRIFT+=("investigation \"$heading\" is EXPIRED — last written ${age}d ago (by ${clock}), past the ${INVESTIGATION_MAX_AGE_DAYS}d window. It is phrased in the PRESENT TENSE and nothing retracts it, so RE-MEASURE before adopting its framing, or retire the block")
+    else
+      fresh=$((fresh + 1))
+      printf '  %sd  %s  (by %s)\n' "$age" "$heading" "$clock"
+    fi
+  done <<<"$rows"
+
+  printf '  %s block(s): %s within the %sd window, %s EXPIRED, %s undated\n' \
+    "$((fresh + expired + undated))" "$fresh" "$INVESTIGATION_MAX_AGE_DAYS" \
+    "$expired" "$undated"
+}
+
+# ---------------------------------------------------------------------------
 
 # Gaps are the thing a reader skips. They used to print as bare `  ! …` lines
 # directly beneath a wall of `  - …` findings, and 2026-08-20 they were duly
@@ -1810,6 +2018,7 @@ main(){
   workload_block
   alerts_block
   clawgate_block
+  investigations_block
   echo "DRIFT"
   # 🔴 UNCONDITIONAL, AND FIRST. This notice used to live in the `elif` chain
   # below, which meant ANY finding suppressed it — and the SKILL block made that
