@@ -46,6 +46,34 @@ ls -d ~/workspace/clawgate-extension || echo "!! worktree GONE — base clone is
 git -C ~/workspace/homelab-talos diff --stat origin/trunk -- containers/clawgate/extension
 #   non-empty while the base clone is what Brave loads = the deployed extension is NOT trunk
 ```
+
+#### 🔴 …with ONE standing exception: workbench `Default` loads the BASE CLONE on purpose
+Decided by Zach 2026-09-12, after the worktree was restored and the trade priced: re-pointing it
+costs the storage migration in the next section (its live install holds the `hookToken`, the config
+and 4 saved drafts), and the base clone was byte-identical to `trunk` anyway. **Do not "fix" this.**
+An agent that re-points it to tidy up the invariant silently destroys that token and those drafts —
+which is the whole reason this exception is written down rather than left as a puzzle.
+
+**Two consequences that are easy to get wrong:**
+1. 🔴 **Deploying an extension change to workbench now means advancing the BASE CLONE**, not the
+   worktree. `git -C ~/workspace/homelab-talos fetch origin && git -C … merge --ff-only origin/trunk`
+   (the corollary in `homelab-talos/CLAUDE.md`). Running only the worktree `merge --ff-only` in the
+   "Deploying a merged extension change" section below updates a checkout **nothing loads** — the
+   exact green-verdict-about-the-wrong-target failure that killed `sync-clawgate-extension.sh`.
+   ⚠ **Expect that sync to REFUSE.** Measured 2026-09-12: `fatal: Not possible to fast-forward` —
+   the base clone had *diverged*, holding a local commit whose identical twin had already landed
+   upstream (same `git patch-id`, byte-identical trees; it is a duplicate, not lost work). That is
+   the normal state of this checkout, so the extension deploy path is blocked by default until
+   someone resolves it. **Two separate claims — make both:** the refusal does NOT by itself mean the
+   extension is stale. Check the subtree directly (`git diff --stat origin/trunk --
+   containers/clawgate/extension`); it was empty that day *while* the clone was diverged, i.e. the
+   loaded build was correct and the clone was not. Reading a refused sync as "the extension is
+   behind", or a clean subtree as "the clone is synced", are both wrong.
+2. The worktree still exists and is still the **laptop's** load path, so keep advancing it too. The
+   two hosts now deploy through different checkouts; say which one you advanced.
+
+The drift check above is the mitigation, and it is the ONLY thing standing between a behind base
+clone and a silently stale extension. Run it as part of any extension deploy.
 Recreating it: the branch usually still exists, so `worktree add -b` fails. Prove the branch holds
 no unique commits (`git log --oneline origin/trunk..clawgate-ext-local` → empty), then reset it:
 ```bash
