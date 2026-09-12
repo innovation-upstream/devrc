@@ -378,7 +378,18 @@ def _run_wrapper(tmp_path: Path, *args: str):
     `bash -euo pipefail` reproduces the preamble `writeShellApplication` adds —
     verified against the built derivation, whose first four lines are the
     shebang plus exactly those three `set -o` lines.
+
+    🔴 THE EXISTENCE CHECK IS NOT DEFENSIVE — IT CLOSES A MEASURED VACUOUS
+    GREEN. Run against a tree where `nvim-octo.sh` does not exist (the base
+    commit of the branch that added it), `bash` exits non-zero with an empty
+    argv log, which satisfied every "rejected, and nvim was never reached"
+    assertion below exactly as a correct wrapper does: 18 of them passed on a
+    tree with NO WRAPPER AT ALL. That is why the callers now assert the
+    wrapper's OWN exit code and OWN message rather than "non-zero".
     """
+    assert WRAPPER_SH.exists(), (
+        f"{WRAPPER_SH} is missing — was it `git add`ed? Without this check a "
+        f"missing wrapper makes every rejection test below pass vacuously")
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     log = tmp_path / "nvim-argv"
@@ -415,11 +426,26 @@ def test_a_good_invocation_composes_the_NUMBER_FIRST_ex_command(tmp_path):
 def test_a_number_is_passed_rather_than_a_url(tmp_path):
     """A URL would assert the reference KIND, which the handler cannot know —
     `mention-open.py` builds `/pull/{id}` for every mention and lets github.com
-    redirect. Pinned as an absence beside the positive above, because "it
-    happens to work today" is not the claim."""
-    _proc, argv = _run_wrapper(tmp_path, "rivalorg/spadeworks", "42")
+    redirect.
+
+    ⚠ THE POSITIVE ASSERTION COMES FIRST, AND IT HAS TO. An earlier version of
+    this test asserted only that `http` and `/pull/` were ABSENT from the argv,
+    which an EMPTY argv satisfies — and an empty argv is what a missing wrapper
+    produces. Pin what was passed, then observe what it is not."""
+    proc, argv = _run_wrapper(tmp_path, "rivalorg/spadeworks", "42")
+    assert proc.returncode == 0, proc.stderr
+    assert argv == ["-c", "Octo 42 rivalorg/spadeworks"], argv
     assert "http" not in " ".join(argv), argv
     assert "/pull/" not in " ".join(argv), argv
+
+
+# The wrapper's own exit codes. Asserted by VALUE rather than as "non-zero",
+# because non-zero is also what a missing file, a syntax error and an unbound
+# variable produce — see `_run_wrapper`'s note on the 18 tests that passed
+# against a tree with no wrapper at all.
+RC_USAGE = 64
+RC_BAD_REPO = 65
+RC_BAD_NUM = 66
 
 
 @pytest.mark.parametrize("repo", [
@@ -434,18 +460,27 @@ def test_a_number_is_passed_rather_than_a_url(tmp_path):
     "",
 ])
 def test_a_bad_repository_is_REJECTED_and_nvim_is_never_reached(tmp_path, repo):
-    """Non-zero exit AND no editor. Both halves: an exit code alone would be
-    satisfied by a wrapper that launched first and complained after."""
+    """Three halves, and the first is what makes the other two mean anything:
+    THIS guard's own exit code, THIS guard's own message, and no editor. An exit
+    code alone would be satisfied by a wrapper that launched first and
+    complained after — or by no wrapper at all."""
     proc, argv = _run_wrapper(tmp_path, repo, "1559")
-    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.returncode == RC_BAD_REPO, (proc.returncode, proc.stderr)
+    assert "not an owner/repo" in proc.stderr, proc.stderr
     assert argv == [], argv
 
 
 @pytest.mark.parametrize("num", ["", "abc", "12a", "-1", "1.5", "1 2",
                                  "$(id)", "42;ls"])
 def test_a_bad_number_is_REJECTED_and_nvim_is_never_reached(tmp_path, num):
+    """🔴 A DIFFERENT EXIT CODE FROM THE REPOSITORY GUARD, ON PURPOSE. A mutation
+    test that broke the repository check and watched "a test fail" would
+    otherwise be green for the wrong reason if the NUMBER guard was the one that
+    fired. Distinct codes plus distinct messages make each guard's kill
+    attributable to itself."""
     proc, argv = _run_wrapper(tmp_path, "gardenersguild/trowelcast", num)
-    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.returncode == RC_BAD_NUM, (proc.returncode, proc.stderr)
+    assert "not a reference number" in proc.stderr, proc.stderr
     assert argv == [], argv
 
 
@@ -458,7 +493,7 @@ def test_the_wrong_number_of_arguments_is_REJECTED(tmp_path, args):
     asserting only the exit code would pass while the operator got
     `nvim-octo.sh: line 23: $1: unbound variable`."""
     proc, argv = _run_wrapper(tmp_path, *args)
-    assert proc.returncode != 0
+    assert proc.returncode == RC_USAGE, (proc.returncode, proc.stderr)
     assert argv == []
     assert "usage:" in proc.stderr, proc.stderr
 
