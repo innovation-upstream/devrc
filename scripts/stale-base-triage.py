@@ -51,18 +51,52 @@
 # the change, and folding the two together is the roll-up mistake in a second
 # spelling.
 #
-# 🔴 COMPLETENESS IS THE HARD PART, AND IT IS WHY THIS TOOL SAYS "COULD NOT
-# MEASURE" MORE OFTEN THAN YOU WOULD LIKE. GitHub caps a status description at
-# 140 characters and the gate's `FAILING: a | b | TOTAL … failed=N …` line
-# overruns it constantly. MEASURED on this repo's own rows: one described
-# `failed=7` while naming ONE test; one named NO test at all; one was cut
-# MID-WORD inside a test name. So a description can prove "at least one test
-# failed and here is its name" — it can NEVER prove "these are all of them"
-# unless the `failed=N` count survived AND equals the number of names.
+# 🔴 COMPLETENESS IS THE HARD PART. GitHub caps a status description at 140
+# characters and the gate's `FAILING: a | b | TOTAL … failed=N …` line overruns
+# it constantly. MEASURED on this repo's own rows: one described `failed=7`
+# while naming ONE test; one named NO test at all; one was cut MID-WORD inside a
+# test name. So a description can prove "at least one test failed and here is
+# its name"; it can NEVER prove "these are all of them" on the names alone.
 # Dismissing a PR as INHERITED on an incomplete list would dismiss a real red,
 # which is the one error this tool must not make. So the PR-level verdict
-# requires provable completeness; the PER-TEST lines print either way, and a
+# requires PROVABLE completeness; the PER-TEST lines print either way, and a
 # `HINT:` line says when a rebase is worth trying anyway.
+#
+# 🔴 AND THE OBVIOUS WAY TO PROVE IT — READ `failed=N` — FIRES ON ALMOST NOTHING,
+# BECAUSE `failed=` IS THE FIELD THE CAP EATS. It is last in the banner, so
+# whether it survives is a function of the FAILING TEST'S NAME LENGTH and
+# nothing else. MEASURED 2026-09-11 on the three PRs this tool was justified by
+# (#1454, #1462, #1499): all three carry `len(desc)=138`, all three are cut
+# inside `failed=`, and all three therefore resolved to COULD NOT MEASURE with
+# the correct answer already in hand. The verdict was a function of a test name.
+#
+# 🔴 SO COMPLETENESS IS ALSO DERIVED, AND THE DERIVATION IS A PROOF RATHER THAN
+# A HEURISTIC. `scripts/run-tests.sh` GUARD 4 computes, per target,
+#     collected = passed + skipped + failed + errors + xfailed + xpassed
+#     TOT_FAILED += failed + errors        (i.e. the banner's `failed=` is f+e)
+# and sums each term into the TOTAL banner. Therefore
+#     collected − passed − skipped  ==  failed + xfailed + xpassed  ≥  failed
+# and names are a subset of the failures, so `len(names) ≤ failed ≤ derived`.
+# When `derived == len(names)` the inequality is squeezed shut and completeness
+# is PROVEN. `collected=`, `passed=` and `skipped=` all precede `failed=` in the
+# banner, so they are exactly the fields that survive the cut.
+# 🔴 THE BOUND IS AN OVER-COUNT, NEVER AN UNDER-COUNT, and that direction is the
+# whole safety argument: an under-count would let this file certify a
+# completeness it does not have and dismiss a real red. `xfailed`/`xpassed` can
+# only inflate it, and a `skipped=` truncated short by the cap can only inflate
+# it further — both push toward WITHHOLDING. See `derived_failure_upper_bound`.
+# The coupling to `run-tests.sh` is pinned by
+# `test_the_run_tests_collected_arithmetic_this_derivation_rests_on_is_pinned`.
+#
+# 🔴 PRIOR ART, AND WHAT THIS ADDS TO IT. `scripts/main-status-watch.py`'s
+# `screen_all_known_flakes` is the same completeness-proving screen in 15 lines,
+# and its comment records that it would have fired ZERO times on the 100 commits
+# measured. That zero is not a property of the idea — it is the `failed=N` route
+# above being eaten by the cap. This file's contribution is (a) the derived
+# route, which turns 0/3 into 3/3 on the justifying population, and (b) the
+# EVIDENCE half the screen has no equivalent of: blob OIDs and commit lists that
+# name WHICH commit on main already fixed the test. The completeness gate itself
+# is prior art and is cited as such; only the derivation and the evidence are new.
 #
 # EXIT CODES
 #   0   ran; no PR was classified INHERITED (the counts say what it DID find)
@@ -235,23 +269,102 @@ def parse_failed_count(description):
     return int(m.group(1)) if m else None
 
 
+# 🔴 THE THREE FIELDS ARE MATCHED AS ONE ADJACENT, ORDERED GROUP, NOT SEPARATELY,
+# AND THAT IS A SOUNDNESS REQUIREMENT RATHER THAN TIDINESS. The hazard is a
+# number the 140-char cap cut SHORT — `collected=22204` arriving as
+# `collected=2220` would read as a perfectly well-formed integer and make the
+# derived bound far too SMALL, which is the one direction that can certify a
+# completeness this row does not have. Requiring `passed=` and then `skipped=`
+# to follow proves that `collected=` and `passed=` are complete numbers: the cap
+# truncates a SUFFIX, so a field with more banner text after it was not cut.
+# Only `skipped=` — the last of the three — can itself be short, and a short
+# `skipped` SUBTRACTS LESS and so inflates the bound, i.e. errs toward
+# withholding. See `test_a_TRUNCATED_skipped_can_only_INFLATE_the_derived_bound`.
+_TOTALS_RE = re.compile(r"\bcollected=(\d+)\s+passed=(\d+)\s+skipped=(\d+)")
+
+
+def derived_failure_upper_bound(description):
+    """An UPPER bound on the banner's own `failed=`, or None if underivable.
+
+    `scripts/run-tests.sh` GUARD 4 computes, per target,
+
+        collected = passed + skipped + failed + errors + xfailed + xpassed
+        TOT_FAILED += failed + errors          (the banner's `failed=` is f+e)
+
+    and accumulates each term into the TOTAL banner this description quotes. So
+
+        collected − passed − skipped == failed + xfailed + xpassed >= failed
+
+    🔴 THE INEQUALITY ONLY EVER POINTS ONE WAY. `xfailed`/`xpassed` are
+    non-negative, so this can equal `failed=` but never fall below it. That is
+    what makes it usable as a completeness proof: a caller comparing it against
+    a count of NAMES is comparing against a ceiling, and a ceiling that happens
+    to equal the number of names squeezes `failed` to that same number. An
+    under-count would instead certify completeness on a row that had more
+    failures than it named — the single error this tool must not make.
+    """
+    m = _TOTALS_RE.search(description or "")
+    if not m:
+        return None
+    collected, passed, skipped = (int(g) for g in m.groups())
+    derived = collected - passed - skipped
+    # Negative is arithmetically impossible under the definition above, so it
+    # means the banner is not the banner this derivation was written against.
+    # Refusing to answer is the only safe reading of a row we cannot parse.
+    return derived if derived >= 0 else None
+
+
 def names_provably_complete(description):
     """True only when the description PROVES the named set is the whole set.
 
-    Returns (complete, reason). False on any doubt: no names, no surviving
-    count, or a count that disagrees with the names. This is the guard that
-    stops an INHERITED verdict being handed out on a truncated row that named
-    one of seven failures.
+    Returns (complete, reason). False on any doubt. TWO independent routes, and
+    the DIRECT one is tried first because it is the stronger claim:
+
+      1. `failed=N` survived the 140-char cap and equals the number of names.
+      2. `failed=N` did not survive, but `collected − passed − skipped` did —
+         an upper bound on `failed` (see `derived_failure_upper_bound`) — and it
+         equals the number of names, squeezing `failed` to that number too.
+
+    Route 2 exists because route 1 fires on almost nothing: `failed=` is the
+    LAST field in the banner, so whether it survives is decided by the failing
+    test's name length. On the three PRs this tool was justified by, route 1
+    returned "could not measure" with the answer already in the row.
+
+    This is the guard that stops an INHERITED verdict being handed out on a
+    truncated row that named one of seven failures, so every arm that cannot
+    PROVE the set complete returns False.
     """
     names = parse_failing_names(description)
     if not names:
         return False, "the description names no failing test"
+    derived = derived_failure_upper_bound(description)
     count = parse_failed_count(description)
-    if count is None:
-        return False, "the description was truncated before `failed=N`"
-    if count != len(names):
-        return False, f"the description says failed={count} but names {len(names)}"
-    return True, f"failed={count} and {len(names)} named"
+    if count is not None:
+        # 🔴 CONSISTENCY TRIPWIRE, AND IT IS HONESTLY LABELLED: while
+        # `run-tests.sh`'s arithmetic holds, `derived >= count` is guaranteed
+        # and this arm CANNOT FIRE on a real row. It is here so that an
+        # arithmetic change upstream shows up as a refusal to answer rather than
+        # as a silently wrong bound, and it is reachable from a test only. The
+        # test-time half of the same coupling is
+        # `test_the_run_tests_collected_arithmetic_this_derivation_rests_on_is_pinned`.
+        if derived is not None and derived < count:
+            return False, (f"the banner contradicts itself: failed={count} but "
+                           f"collected−passed−skipped={derived}, which cannot be "
+                           "smaller — the totals arithmetic this reads is not the "
+                           "one `run-tests.sh` documents")
+        if count != len(names):
+            return False, f"the description says failed={count} but names {len(names)}"
+        return True, f"failed={count} and {len(names)} named"
+    if derived is None:
+        return False, ("the description was truncated before `failed=N`, and "
+                       "collected/passed/skipped are not all readable either")
+    if derived != len(names):
+        return False, (f"the description was truncated before `failed=N`, and "
+                       f"collected−passed−skipped={derived} does not equal the "
+                       f"{len(names)} named")
+    return True, (f"`failed=N` was cut by the 140-char cap, but "
+                  f"collected−passed−skipped={derived} — an upper bound on the "
+                  f"failures — equals the {len(names)} named")
 
 
 # ── test name -> defining file ────────────────────────────────────────────────

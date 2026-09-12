@@ -296,6 +296,263 @@ def test_names_are_provably_complete_only_when_the_count_agrees():
         assert fragment in why, (desc, why)
 
 
+# ══ PURE: the DERIVED completeness proof ══════════════════════════════════════
+# 🔴 WHY SYNTHETIC, AND WHY THEY STILL LAND ON THE REAL BOUNDARY. This repo is
+# PUBLIC, so the rows below are BUILT, not pasted. What is copied from the
+# measurement is only the SHAPE: a banner cut by GitHub's cap at 140 BYTES —
+# which is 138 CHARACTERS once the `—` in `FAILED: pytests —` is counted as the
+# three UTF-8 bytes it is, and that is exactly why every real row measured on
+# this repo reads `len(desc)=138` rather than 140. Cutting on bytes is what puts
+# a synthetic fixture on the same boundary a real one lands on; cutting on
+# characters would land two bytes late and quietly leave `failed=` readable,
+# which is the whole hazard these tests are about.
+GITHUB_DESCRIPTION_BYTE_CAP = 140
+
+
+def cut_like_github(desc):
+    """Truncate to the 140-BYTE cap, never splitting a character."""
+    raw = desc.encode("utf-8")[:GITHUB_DESCRIPTION_BYTE_CAP]
+    while raw:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = raw[:-1]
+    return ""
+
+
+def synth_row(name, collected, passed, skipped, failed):
+    """A `devrc-pytests` banner in the shape `run-tests.sh` + the pipeline post."""
+    return (f"FAILED: pytests — FAILING: {name} | TOTAL collected={collected}"
+            f"  passed={passed}  skipped={skipped}  failed={failed}"
+            "  (floor: 18000 = sum of 30 per-target floors)")
+
+
+# The three rows the tool's own requirement was measured on, reproduced at their
+# real shape with invented test names of the real lengths. Field values are
+# pairwise distinct so a mutant hardcoding one of them cannot survive. Each is
+# kept as the (uncut, cut) PAIR so the control below can prove the cap really
+# landed inside `failed=` rather than merely that the row is short.
+UNCUT_AND_CUT = [
+    (lambda d: (d, cut_like_github(d)))(synth_row(name, c, p, s, 1))
+    for name, c, p, s in (
+        ("test_the_alpha_invariant_holds_when_the_ledger_is_empty", 22021, 22018, 2),
+        ("test_the_delta_ledger_is_rebuilt_from_the_spool_on_boot", 21964, 21960, 3),
+        ("test_the_gamma_pill_reports_its_own_sample_population", 22081, 22076, 4),
+    )
+]
+CUT_INSIDE_FAILED = [cut for _, cut in UNCUT_AND_CUT]
+
+
+def test_CONTROL_the_synthetic_rows_land_on_the_real_140_BYTE_boundary():
+    """🔴 THE FIXTURE IS THE INSTRUMENT HERE, so it is validated before anything
+    is concluded from it. If these rows were not actually cut inside `failed=`,
+    every assertion below would be about the DIRECT route and the derived one
+    would never run — a green proving nothing.
+
+    "Inside `failed=`" is asserted against the UNCUT row: the cut string is a
+    strict prefix of a banner that did print `failed=N`, and what survived stops
+    short of a readable count. The real rows end `…skipped=2  faile` / `…  fa`,
+    so the tail is a fragment of the word and cannot be matched for directly.
+    """
+    for full, desc in UNCUT_AND_CUT:
+        assert "  failed=1" in full, full
+        assert full.startswith(desc) and len(desc) < len(full), (desc, full)
+        assert len(desc) == 138, (len(desc), desc)
+        assert len(desc.encode("utf-8")) == GITHUB_DESCRIPTION_BYTE_CAP, desc
+        # The cut landed AFTER `skipped=` and BEFORE a readable `failed=N`.
+        assert M._TOTALS_RE.search(desc) is not None, desc
+        assert M.parse_failed_count(desc) is None, desc
+        assert M.parse_failed_count(full) == 1, full
+        assert len(M.parse_failing_names(desc)) == 1, desc
+
+
+def test_a_row_CUT_INSIDE_failed_is_PROVEN_complete_by_the_derived_count():
+    """🔴 F2. `failed=` is the LAST field in the banner, so whether it survives
+    the cap is decided by the failing test's NAME LENGTH — and on the three PRs
+    this tool was justified by it did not survive, so the verdict was
+    COULD NOT MEASURE with the answer already in the row.
+
+    `collected`, `passed` and `skipped` all PRECEDE it and do survive, and
+    `run-tests.sh` defines `collected = passed + skipped + failed + errors +
+    xfailed + xpassed`, so `collected − passed − skipped >= failed >= len(names)`.
+    Equality squeezes that shut and PROVES completeness.
+    """
+    for desc in CUT_INSIDE_FAILED:
+        assert M.derived_failure_upper_bound(desc) == 1, desc
+        ok, why = M.names_provably_complete(desc)
+        assert ok, (desc, why)
+        assert "collected−passed−skipped=1" in why, why
+
+
+def test_SOUNDNESS_the_derived_bound_never_UNDER_counts_the_visible_failed():
+    """🔴 THE HALF THAT CAN BE WRONG IN THE DANGEROUS DIRECTION.
+
+    An OVER-count only ever makes this tool withhold a verdict. An UNDER-count
+    makes it certify a completeness it does not have and dismiss a real red —
+    the one error it must not make. So wherever BOTH values are readable they
+    are compared, and the bound must never fall below the banner's own count.
+
+    The table is built from full (uncut) banners so `failed=N` is visible, and
+    the three multi-failure rows are the ones that matter: an under-counting
+    bound would drag them down toward the single name and certify them.
+    """
+    table = [
+        # name, collected, passed, skipped, failed, xfail+xpass slack
+        ("test_one", 21076, 21072, 3, 1, 0),
+        ("test_two", 21476, 21471, 2, 3, 0),
+        ("test_six", 21036, 21028, 3, 5, 0),
+        ("test_fortyish", 21500, 21450, 11, 39, 0),
+        # …and one with xfailed/xpassed inflating `collected` above p+s+failed,
+        # which is exactly the case where the bound is a strict OVER-count.
+        ("test_xf", 21000, 20950, 7, 40, 3),
+    ]
+    seen = set()
+    for name, collected, passed, skipped, failed, slack in table:
+        desc = synth_row(name, collected + slack, passed, skipped, failed)
+        derived = M.derived_failure_upper_bound(desc)
+        count = M.parse_failed_count(desc)
+        assert count == failed, desc
+        assert derived is not None, desc
+        assert derived >= count, (desc, derived, count)      # 🔴 NEVER BELOW
+        if slack == 0:
+            assert derived == count, (desc, derived, count)  # …and EXACT here
+        seen.add((derived, count))
+    # The table actually exercised both relations, so "never below" is not a
+    # claim about five copies of one row.
+    assert any(d == c for d, c in seen) and any(d > c for d, c in seen), seen
+
+
+def test_a_genuine_MULTI_failure_red_is_STILL_could_not_measure():
+    """🔴 THE CONTROL ON THE NEW ROUTE. A row that names ONE test while the
+    totals prove 39 failed must NOT be certified complete — with or without
+    `failed=N` surviving. Both spellings are driven, because the derived route
+    is the one that could newly get this wrong."""
+    full = synth_row("test_the_alpha_invariant_holds_when_the_ledger_is_empty",
+                      21500, 21450, 11, 39)
+    cut = cut_like_github(full)
+    assert M.parse_failed_count(full) == 39
+    assert M.parse_failed_count(cut) is None, cut     # the row the cap produces
+    for desc in (full, cut):
+        assert M.derived_failure_upper_bound(desc) == 39, desc
+        ok, why = M.names_provably_complete(desc)
+        assert not ok, (desc, why)
+        assert "39" in why, why
+
+
+def test_the_DIRECT_route_still_wins_when_failed_N_survived():
+    """Route 1 is not replaced, and it is the stronger claim. Pinned by driving
+    a row where the two routes would disagree if the order were flipped: the
+    slack from an xpassed makes the bound 2 while `failed=1` is right there."""
+    desc = synth_row("test_only_one_named", 100, 96, 2, 1)   # collected 100 = 96+2+1+1
+    assert M.derived_failure_upper_bound(desc) == 2
+    assert M.parse_failed_count(desc) == 1
+    ok, why = M.names_provably_complete(desc)
+    assert ok and why == "failed=1 and 1 named", why
+
+
+def test_a_TRUNCATED_skipped_can_only_INFLATE_the_derived_bound():
+    """🔴 THE ONE FIELD THE CAP CAN CUT SHORT WITHOUT BEING NOTICED, and the
+    reason `_TOTALS_RE` demands the three fields ADJACENT AND IN ORDER.
+
+    `collected=` and `passed=` are each followed by more banner text, so a match
+    proves they were not truncated. `skipped=` is last of the three and CAN be
+    left short — `skipped=23` arriving as `skipped=2`. Subtracting less inflates
+    the bound, which errs toward WITHHOLDING; the opposite would certify.
+    """
+    full = "FAILED: pytests — FAILING: test_x | TOTAL collected=900  passed=850  skipped=23  failed=27"
+    short = full.replace("skipped=23", "skipped=2")
+    assert M.derived_failure_upper_bound(full) == 27
+    assert M.derived_failure_upper_bound(short) == 48        # inflated, never below
+    assert M.derived_failure_upper_bound(short) > M.derived_failure_upper_bound(full)
+
+
+def test_the_derived_bound_refuses_a_row_it_cannot_read():
+    """None, never a number — an unreadable row must not become a bound of 0,
+    which would certify every single-named row as complete."""
+    for desc in ("", None, "FAILED: pytests — FAILING: test_x | TOTAL collected=9 ",
+                 "FAILED: pytests — FAILING: test_x | TOTAL collected=9  passed=8 ",
+                 # out of order: the adjacency requirement is what proves the
+                 # earlier fields were not cut short, so this must not match.
+                 "TOTAL passed=8  collected=9  skipped=0",
+                 # arithmetically impossible, so not the banner we parse.
+                 "TOTAL collected=9  passed=8  skipped=5"):
+        assert M.derived_failure_upper_bound(desc) is None, desc
+    # POSITIVE CONTROL: the same parser DOES answer on a well-formed row, so the
+    # Nones above are about these rows and not about a parser wired to nothing.
+    assert M.derived_failure_upper_bound(
+        "TOTAL collected=9  passed=8  skipped=0") == 1
+
+
+def test_a_banner_that_CONTRADICTS_itself_is_refused_rather_than_believed():
+    """🔴 THE TRIPWIRE ON THE COUPLING, HONESTLY LABELLED. While `run-tests.sh`'s
+    arithmetic holds, `derived >= failed=N` is guaranteed and this arm cannot
+    fire on a real row — it is reachable from a test only. It exists so that an
+    arithmetic change upstream surfaces as a refusal to answer rather than as a
+    silently wrong bound; the test-time half is the source pin below."""
+    desc = "FAILED: pytests — FAILING: test_x | TOTAL collected=9  passed=8  skipped=0  failed=4"
+    assert M.derived_failure_upper_bound(desc) == 1
+    assert M.parse_failed_count(desc) == 4
+    ok, why = M.names_provably_complete(desc)
+    assert not ok
+    assert "contradicts itself" in why, why
+
+
+def test_the_run_tests_collected_arithmetic_this_derivation_rests_on_is_pinned():
+    """🔴 THE DERIVATION IS A COUPLING TO ANOTHER FILE, SO IT IS PINNED THERE.
+
+    `derived_failure_upper_bound` is sound only because `scripts/run-tests.sh`
+    defines `collected` to INCLUDE `passed` and `skipped` and to include every
+    term the banner's `failed=` is built from. This reads those expressions out
+    of the shell source and checks the containment relation itself, rather than
+    asserting a literal string — so a rename of the shell locals is fine and a
+    change to WHAT IS SUMMED is not.
+
+    ⚠ WHAT IT CANNOT CHECK: that the remaining terms (`xfailed`, `xpassed`) are
+    non-negative counts. That is an arithmetic fact about pytest's summary line,
+    not a textual one, and it is stated rather than pinned.
+    """
+    src = (ROOT / "scripts" / "run-tests.sh").read_text(encoding="utf-8")
+
+    def terms(name):
+        m = re.search(rf"^\s*{name}=\$\(\(([^)]*)\)\)", src, re.M)
+        assert m, f"no `{name}=$((…))` assignment in run-tests.sh — guard is inert"
+        return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", m.group(1))) - {name}
+
+    collected = terms("collected")
+    failed = terms("TOT_FAILED")
+    assert collected, "the collected scan matched nothing — this guard is inert"
+    assert failed, "the TOT_FAILED scan matched nothing — this guard is inert"
+    # The two fields the derivation SUBTRACTS must be summands of `collected`.
+    passed_term, = terms("TOT_PASSED")
+    skipped_term, = terms("TOT_SKIPPED")
+    assert passed_term in collected, (passed_term, collected)
+    assert skipped_term in collected, (skipped_term, collected)
+    # …and everything the banner's `failed=` is built from must survive the
+    # subtraction, which is precisely why the remainder is an UPPER bound.
+    assert failed <= collected - {passed_term, skipped_term}, (failed, collected)
+    # The accumulators the banner prints are the per-target terms summed.
+    assert re.search(r"TOT_COLLECTED\s*\+\s*collected", src)
+    # And the banner really does print the three fields ADJACENT AND IN ORDER,
+    # which is the assumption `_TOTALS_RE` encodes.
+    banner = re.search(
+        r"collected=\$TOT_COLLECTED\s+passed=\$TOT_PASSED\s+skipped=\$TOT_SKIPPED\s+"
+        r"failed=\$TOT_FAILED", src)
+    assert banner, "the TOTAL banner no longer prints collected/passed/skipped/failed in order"
+    assert M._TOTALS_RE.search(
+        "TOTAL " + re.sub(r"\$TOT_(\w+)", "7", banner.group(0))) is not None
+
+
+def test_the_prior_art_this_gate_rebuilds_is_CITED_and_still_exists():
+    """🔴 A 15-LINE VERSION OF THIS SCREEN ALREADY SHIPPED. Citing it is not
+    courtesy: its comment records that it would have fired ZERO times on 100
+    commits, and this file's derived route is the explanation for that zero. A
+    citation that resolves to nothing reads as authority and is not one."""
+    assert "main-status-watch.py" in SRC_SCRIPT
+    assert "screen_all_known_flakes" in SRC_SCRIPT
+    prior = (ROOT / "scripts" / "main-status-watch.py").read_text(encoding="utf-8")
+    assert "def screen_all_known_flakes(" in prior
+
+
 def test_normalise_test_name_handles_all_three_real_shapes():
     assert M.normalise_test_name("test_plain") == (None, "test_plain")
     assert M.normalise_test_name("TestSuite.test_method") == (
@@ -520,6 +777,68 @@ def test_a_count_that_EXCEEDS_the_names_is_UNMEASURED(repo):
         "collected=9  passed=4  skipped=0  failed=5"))
     assert got["verdict"] == M.VERDICT_UNMEASURED
     assert "failed=5" in got["reason"]
+
+
+ROW_CUT_INSIDE_FAILED = (
+    "FAILED: pytests — FAILING: test_the_alpha_invariant_holds | TOTAL "
+    "collected=9  passed=7  skipped=1  faile")
+ROW_CUT_INSIDE_FAILED_MULTI = (
+    "FAILED: pytests — FAILING: test_the_alpha_invariant_holds | TOTAL "
+    "collected=9  passed=5  skipped=1  faile")
+
+
+def test_a_row_CUT_INSIDE_failed_now_reaches_INHERITED_at_PR_level(repo):
+    """🔴 F2 AT THE VERDICT. Before the derived route this row — the shape of
+    every one of the three PRs the tool was justified by — resolved to
+    COULD NOT MEASURE with the correct answer already in it. `failed=` is cut,
+    but `collected−passed−skipped = 9−7−1 = 1` equals the one name."""
+    got = M.triage_pr(repo.path, "main", pr_meta(repo),
+                      pr_row(ROW_CUT_INSIDE_FAILED))
+    assert M.parse_failed_count(ROW_CUT_INSIDE_FAILED) is None
+    assert got["verdict"] == M.VERDICT_INHERITED
+    assert got["complete"] is True
+    assert "collected−passed−skipped=1" in got["completeness_reason"]
+
+
+def test_a_row_CUT_INSIDE_failed_with_MORE_failures_than_names_is_withheld(repo):
+    """🔴 THE SAME ROW SHAPE, ONE FIELD DIFFERENT, AND THE ANSWER FLIPS. Without
+    this the test above is satisfied by a route that certifies every cut row.
+    Here `9−5−1 = 3` against ONE name: two failures are unaccounted for, the
+    named one IS inherited, and the PR must still not be dismissed."""
+    got = M.triage_pr(repo.path, "main", pr_meta(repo),
+                      pr_row(ROW_CUT_INSIDE_FAILED_MULTI))
+    assert got["verdict"] == M.VERDICT_UNMEASURED
+    assert got["complete"] is False
+    assert "collected−passed−skipped=3 does not equal the 1 named" in got["reason"]
+    assert got["any_explained"] is True          # …so the HINT still fires
+
+
+def test_end_to_end_a_row_cut_inside_failed_exits_10_and_names_the_fix(harness, repo):
+    """The whole F2 path through the real script: a description GitHub cut
+    inside `failed=` now produces the INHERITED exit code and the evidence."""
+    harness.serve_default(repo, desc=ROW_CUT_INSIDE_FAILED)
+    proc = harness.run(repo, "--pr", "7")
+    assert proc.returncode == RC_INHERITED, proc.stdout + proc.stderr
+    assert M.VERDICT_INHERITED in proc.stdout
+    assert repo.fix[:12] in proc.stdout
+    # …and the run SAYS which route proved it, so the claim is auditable.
+    assert "collected−passed−skipped=1" in proc.stdout
+
+
+def test_end_to_end_the_SAME_shape_with_extra_failures_does_NOT_exit_10(harness, repo):
+    """🔴 THE NEGATIVE CONTROL ON THE END-TO-END TEST ABOVE. Same script, same
+    fixture, same cut — one number different — and the exit code must move.
+
+    ⚠ HONESTLY LABELLED: this one is GREEN at the pre-change base too, because
+    the old code withheld every cut row. It is an INVARIANT guard on the new
+    route (it must not start dismissing multi-failure reds), NOT regression
+    coverage, and it is not counted as such in the red/green matrix.
+    """
+    harness.serve_default(repo, desc=ROW_CUT_INSIDE_FAILED_MULTI)
+    proc = harness.run(repo, "--pr", "7")
+    assert proc.returncode == RC_OK, proc.stdout + proc.stderr
+    assert M.VERDICT_UNMEASURED in proc.stdout
+    assert "HINT: at least one named failure IS inherited" in proc.stdout
 
 
 def test_a_GREEN_or_PENDING_head_is_not_a_verdict_at_all(repo):
