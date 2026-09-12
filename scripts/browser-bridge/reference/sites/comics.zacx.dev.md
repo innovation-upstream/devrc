@@ -53,6 +53,60 @@ click and we cannot click" blocker recorded in older handoffs is dead.
 
 ---
 
+## FLOW: uploading a file on /settings — and the ONE op-ordering rule that decides whether it works
+
+The "Add a page" fieldset on `/settings` is a plain `<form>` htmx posts as
+multipart. Driving it is three ops, and the third one's *position* is load-bearing:
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+T=<tabId>
+$BB --instance work --tab $T upload '#upload-form input[type=file]' /abs/path/img.png
+$BB --instance work --tab $T wake                      # 🔴 MUST be the op IMMEDIATELY before the click
+$BB --instance work --tab $T click '#upload-form button[type=submit]'
+$BB --instance work --tab $T text '#upload-result' --wake
+```
+
+🔴 **`wake` must be the op immediately before the `click`, or a multi-MiB upload
+STALLS FOREVER AND SILENTLY.** The tab is hidden (`open` creates tabs hidden) and
+`wake`'s un-throttle **ends at CDP detach** — i.e. at the end of that op — so
+slipping even one bridge op between `wake` and `click` leaves the XHR running in a
+re-throttled background tab. It does not error. The button un-disables, the
+`#upload-result` slot stays **empty**, and nothing reaches the server, which reads
+exactly like a broken upload path.
+
+**Measured 2026-09-12, the control that settles it** — same 26,699,177 B file,
+same freshly-loaded page, only the position of `wake` changed:
+
+| ordering | result |
+|---|---|
+| `upload` → **`wake`** → `click` | card rendered in **13 s** |
+| `wake` → `upload` → `click` | **nothing at 46 s**, empty slot, no server log |
+
+It cost most of a session and was written up twice as an app defect before the
+control was run. Small files (~100 KiB) complete either way, so a green small-file
+test proves nothing about this.
+
+**What the result slot says** (`#upload-result`, `aria-live="polite"`):
+
+| outcome | text |
+|---|---|
+| stored | `ADDED TO YOUR LIBRARY` + the key `u/<owner-uuid>/<name>` |
+| not an image (bytes, not extension) | `THAT IS NOT AN IMAGE THIS APP CAN SHOW` |
+| over the app's 25 MiB cap | `THAT FILE IS LARGER THAN THE LIMIT` |
+| **`413 Request Entity Too Large` / `nginx/…`** | 🔴 **a RELAY hop is capping, not the app** — see below |
+
+🔴 **A raw nginx page in that slot is always a `client_max_body_size` on a nebula
+gateway, and there are TWO hops.** `clusters/production/apps/nebula/gateway/nginx.conf`
+(upstream, wins) and `clusters/homelab/apps/nebula/gateway/nginx.conf`, both on
+`:8115`. Until 2026-09-12 neither set the directive, so nginx's default `1m`
+applied and every upload over ~1 MiB died there. **Fixing one leaves it inert.**
+The discriminator is the version string in the 413 body against the version each
+gateway's container actually runs (`kubectl exec … -c nginx -- nginx -v`) — that
+is what proved a *different* nginx was answering after the first fix.
+
+---
+
 ## TWO LANES. Pick one before the first op — they differ in what they can SEE.
 
 | lane | host | auth | service worker |
