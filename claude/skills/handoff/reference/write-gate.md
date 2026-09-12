@@ -451,3 +451,94 @@ self-documenting `evidence`: `evidence: the ACCESS_DENIED is positive evidence
 it is NOT` is a real shape here, and against it the kind group captures `the`,
 refusing a bullet whose author *did* cite a measurement. `via` needs a colon
 immediately after it, and prose writes `via the`, never `via:`.
+
+## §E — rule (l): a mid-diagnosis block declares WHEN it was written (2026-09-12)
+
+### The incident
+
+An `## Open investigations` block is written in the PRESENT TENSE by a session
+mid-diagnosis, and rule (c) APPENDS it forever: **nothing ever retracts one.**
+The doc's status header is visibly dated. A diagnosis block is not, so it reads
+as CURRENT for the life of the document.
+
+On 2026-09-12 a session read such a block, adopted its framing, and the framing
+was wrong — a claim that fused two documents' measurements, taken over two
+different windows with two different instruments, into an attribution neither
+source document makes. Refuting it cost a full re-measurement.
+`claudedocs/handoff-handoff-resume-skill-trace.md` is the worked example and now
+carries its own refutation.
+
+🔴 **Prose had already been tried and had already failed.** The `resume` skill
+body warned about exactly this class and cited two earlier instances
+(2026-08-19, 2026-08-20). A warning that must be remembered is a warning that
+gets skipped, which is why the field is WRITTEN BY THE TOOL rather than asked
+for in a checklist — the same reason rule (i) resolves the topic slug here
+instead of telling the author to think about it.
+
+### The field
+
+`as-of: YYYY-MM-DD`, the block's first bullet, immediately under its `### `
+heading. The grammar is rules (j) and (k)'s — key, optional `_MARKUP` emphasis,
+colon, value — because an author who has learned `forcing:` and `via:` should
+not have to learn a third spelling. The VALUE is an ISO date rather than a
+closed vocabulary: the question is *when*, not *which kind*.
+
+An unparseable value reads as **ABSENT**, not as a stamp. `as-of: 2026-09-12-rev2`
+would otherwise parse as a valid date and mark the block stamped — a date nobody
+can place, silently preferred over a clock that works.
+
+### What is stamped, and what is not
+
+* Only `### ` blocks inside the **update's** `## Open investigations` section —
+  the text THIS session is writing. The base document is never touched. Stamping
+  the merge would date blocks past sessions wrote as TODAY: the exact false
+  freshness the rule exists to prevent, manufactured by the rule itself.
+* **An explicit stamp always wins and is never rewritten.** A session recording
+  evidence gathered last week must be able to say so; "the tool moved my date"
+  is how an author learns to distrust a field.
+* Fence-aware. A delta routinely pastes the skill's own template, and a sample
+  block is not a claim.
+* It is an **advisory, never a refusal**. The tool did the work, so there is
+  nothing for the author to fix and a refusal would be unclearable. It still
+  prints above the diff: a line the TOOL added to the author's text must be on
+  screen before the confirm, not discovered in the committed doc afterwards.
+
+### Why it is not a permanently-red gate, and not inert either
+
+The reader is `scripts/resume-state.sh`'s `INVESTIGATIONS` block. Its one real
+design question is what an UNSTAMPED block reports, because almost every block
+in the corpus is unstamped. `drift-check.sh` rc 22 (a host with no overrides
+prints NOT ADOPTED and sets no rc) and rc 18 (UNMEASURED is not forever) point
+in opposite directions — and **neither applies, because an unstamped block is
+not undateable.**
+
+MEASURED at `7e000e6b` over this repo's whole corpus: 81 tracked handoff docs
+carry the section, holding **478** `### ` blocks, and git's pickaxe — the commit
+that first introduced the block's heading line — dated **478 of 478**. So the
+stamp is the most PRECISE clock, never the only one, and an unstamped block is
+aged exactly like a stamped one. Only the clock NAME differs, and it is printed.
+
+🔴 **The block's own introducing commit, NOT the doc's last commit.** The
+doc-level clock is the obvious reuse and it errs the UNSAFE way: a doc
+recommitted this morning makes a block written in July read 0 days old — false
+freshness, i.e. the defect. The pickaxe answer is per-BLOCK and content-derived,
+so it also survives a `git worktree add` (which stamps every file's mtime at
+checkout). Where it cannot answer, the doc's last commit is used as an explicit
+FLOOR and gapped as one; `file mtime` is gapped too; a block no clock can place
+is `UNDATED`, a `!` gap rather than a finding.
+
+The 14-day window is a measurement, not a taste call. Aged at the moment their
+own doc was last written — roughly the moment a session resumes it — those 478
+blocks are p50 **1.4d**, p90 **11.3d**. 14 days flags 15 of 478 (**3%**); 7 days
+would flag 86 (**18%**). A gate firing on a fifth of every doc is one everybody
+clicks through, which `claude/RULES.md` calls worse than no gate; one that fires
+on nothing is worth nothing.
+
+### Not done here
+
+The 478 existing blocks are **not** retro-stamped. They do not need to be — the
+pickaxe dates all of them — and a bulk rewrite of 81 documents would put a
+tool-chosen date on prose no session re-read. If a backfill is ever wanted, the
+closing condition is a `git grep -c 'as-of:' claudedocs/` reaching the block
+count that `investigation_rows` reports, verified by a session that also
+re-reads what it stamped.
