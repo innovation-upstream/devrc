@@ -6548,8 +6548,8 @@ def test_the_marker_file_can_pin_the_browser_on_a_host_that_HAS_the_tui(tui):
 
 
 def test_the_marker_file_can_pin_the_TUI_on_a_host_that_would_not_default_to_it(tui):
-    """The other direction, which is what makes rung 2 a rung rather than a
-    no-op: `tui_available()` is FALSE here, so rung 3 would have said browser."""
+    """The other direction, which is what makes rung 1 a rung rather than a
+    no-op: `tui_available()` is FALSE here, so rung 2 would have said browser."""
     tui.available = False
     assert MO.open_target(GH_PULL_URL) == MO.TARGET_BROWSER
     tui.marker.write_text("tui")
