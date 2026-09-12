@@ -2563,7 +2563,14 @@ _ARGV_WITHOUT_SOCKET_THAT_NEVER_RUNS = {
         "prose example from a call, so the classification has to be written down",
 }
 
-_MENTION_RE = re.compile(r"kill-s(?:erver|ession)")
+# 🔴 THE LEFT BOUNDARY IS LOAD-BEARING — without it this matches INSIDE another
+# word. `skill-session` contains `kill-session`, so a doc naming a claim slug
+# like `clawgate-skill-session-verbs` was scored as mentioning a wide tmux kill
+# and had to be classified in the ledger below — recording a mention that does
+# not exist. Measured across the tree: the boundary removes exactly ONE file and
+# loses NONE of the 13 genuine mentions.
+# A word char only, NOT `-`: `foo-kill-session` is still a real mention.
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])kill-s(?:erver|ession)")
 _TMUX_ARGV_RE = re.compile(
     r"""\[\s*(?:"tmux"|'tmux'|tmux_exe)[^\[\]]*kill-s(?:erver|ession)[^\[\]]*\]""", re.S)
 
@@ -2608,6 +2615,14 @@ def test_the_kill_site_scanner_can_see_anything_at_all():
     """
     assert _MENTION_RE.search("subprocess.run(['tmux', 'kill-server'])")
     assert not _MENTION_RE.search("tmux kill-pane -t %1")
+    # 🔴 THE SUBSTRING CASE, and it really happened. Without a left word boundary
+    # this pattern matches INSIDE `skill-session`, so an ordinary doc naming a
+    # claim slug scored as a wide-kill mention and demanded a ledger entry for a
+    # mention that does not exist. Two live spellings, both from real slugs.
+    assert not _MENTION_RE.search("clawgate-skill-session-verbs")
+    assert not _MENTION_RE.search("the skill-session boundary")
+    # ...and the boundary must not swallow a REAL mention that follows a hyphen.
+    assert _MENTION_RE.search("run tmux-kill-session by hand")
     assert _TMUX_ARGV_RE.search('subprocess.run(["tmux", "-L", s, "kill-server"])')
     assert not _TMUX_ARGV_RE.search('subprocess.run(["tmux", "-L", s, "kill-pane"])')
     mentions, argvs = _scan_kill_sites()
