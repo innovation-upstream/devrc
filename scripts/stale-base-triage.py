@@ -115,6 +115,25 @@
 # sentence wrapping onto a line that started with one would register as a ledger
 # entry for a knob that has none: a two-way pin satisfied by prose.
 #
+# 🔴 IT RUNS NO `git` SUBCOMMAND THAT WRITES — AT ALL, NOT MERELY "BY DEFAULT",
+# AND THAT IS NOW PINNED ABSOLUTELY. It used to carry `--fetch`, which wrote
+# `refs/stale-base-triage/*`, and the guard could then only say "the refs it
+# writes are namespaced" — a relative claim about a repo-GLOBAL surface (`refs/`
+# lives in the COMMON git dir, so a worktree gives zero isolation). `--fetch`
+# was DELETED after measuring that it bought nothing here: this repo's PRs are
+# same-repo branches and `origin`'s refspec is `+refs/heads/*`, so an ordinary
+# `git fetch origin` already brings every head — 58 of 58 open PR heads resolved
+# in the base clone with no `--fetch` anywhere. `test_no_git_subcommand_that_
+# WRITES_is_ever_invoked` now enumerates the read-only subcommands as an
+# ALLOWLIST, so an unknown one is a write by default.
+#
+# ⚠ `--json` WAS DELETED TOO, for having no consumer: `git grep` over the whole
+# repo found this script and its test file and nothing else. It cost a global
+# `_JSON_MODE`, a `say()` indirection on every human line, and a second exit
+# path. `--sweep` was KEPT and is now the primary mode — see the measurement in
+# the F2 note above: the sweep surfaces 7 eligible open reds where it surfaced
+# 4, including PRs 9 commits behind that are actively being worked.
+#
 # 🔴 IT WRITES NOTHING BY DEFAULT, AND ARMING IT COSTS A VISIBLE LINE.
 # `COMMENT_MODE_DEFAULT` is the literal `"off"`, pinned by
 # `test_the_comment_mode_default_is_the_LITERAL_off` — asserting mere membership
@@ -168,16 +187,8 @@ VERDICT_UNMEASURED = "COULD NOT MEASURE"
 HEADER_SENTINEL = '"""Triage a red PR'
 
 
-# 🔴 UNDER --json, STDOUT CARRIES THE PAYLOAD AND NOTHING ELSE. Prose printed
-# beside it makes the output un-parseable in a way that looks fine by eye: a
-# first draft printed the comment-mode line after the object, and `json.loads`
-# on the whole stream raised `Extra data` — the caller's parse, not this
-# script's, is where that lands. So every human line goes to stderr instead.
-_JSON_MODE = False
-
-
 def say(msg=""):
-    print(msg, file=sys.stderr if _JSON_MODE else sys.stdout, flush=True)
+    print(msg, flush=True)
 
 
 class Unmeasured(Exception):
@@ -540,7 +551,7 @@ def triage_pr(repo, main_ref, pr, row):
     if not ref_exists(repo, head_ref):
         out["verdict"] = VERDICT_UNMEASURED
         out["reason"] = (f"head {head_ref[:12]} is not in the local clone — "
-                         "re-run with --fetch, or fetch it by hand")
+                         "run `git fetch origin` and try again")
         return out
     merge_base = _git(repo, ["merge-base", main_ref, head_ref]).stdout.strip()
     out["merge_base"] = merge_base
@@ -680,22 +691,6 @@ def post_comment(repo_slug, number, body):
     return True
 
 
-# ── fetching ──────────────────────────────────────────────────────────────────
-# 🔴 EVERY REF THIS SCRIPT WRITES LIVES UNDER ITS OWN NAMESPACE. `refs/` is
-# repo-GLOBAL — it lives in the COMMON git dir, so a worktree gives zero
-# isolation and a concurrent session reads the same refs. Writing
-# `refs/remotes/origin/main` or a branch would reach into work this run knows
-# nothing about; `refs/stale-base-triage/*` cannot collide with a branch, a tag
-# or a remote-tracking ref.
-NS = "refs/stale-base-triage"
-
-
-def fetch_refs(repo, numbers):
-    specs = [f"+refs/heads/main:{NS}/main"]
-    specs += [f"+refs/pull/{n}/head:{NS}/pr-{n}" for n in numbers]
-    _git(repo, ["fetch", "--no-tags", "--quiet", "origin", *specs], timeout=300)
-
-
 # ── rendering ─────────────────────────────────────────────────────────────────
 def render(result):
     n = result["number"]
@@ -787,12 +782,8 @@ def build_parser():
                    help="triage this PR (repeatable)")
     p.add_argument("--sweep", action="store_true", help="triage every open PR")
     p.add_argument("--repo-path", default=str(Path(__file__).resolve().parents[1]))
-    p.add_argument("--main-ref", default=None,
-                   help="ref standing for main (default: origin/main, or the "
-                        "namespaced ref under --fetch)")
-    p.add_argument("--fetch", action="store_true",
-                   help=f"refresh {NS}/* from origin before measuring")
-    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--main-ref", default="origin/main",
+                   help="ref standing for main (default: origin/main)")
     p.add_argument("--comment-mode", choices=COMMENT_MODES, default=None,
                    help=f"post a PR comment (default {COMMENT_MODE_DEFAULT})")
     p.add_argument("-h", "--help", action="store_true")
@@ -800,9 +791,8 @@ def build_parser():
 
 
 def main(argv):
-    global _DEADLINE, _JSON_MODE
+    global _DEADLINE
     args = build_parser().parse_args(argv)
-    _JSON_MODE = bool(args.json)
     if args.help:
         return RC_OK if print_header() else RC_UNMEASURED
     if not args.pr and not args.sweep:
@@ -830,9 +820,7 @@ def main(argv):
                 prs.append({"number": r["number"], "title": r.get("title", ""),
                             "head_sha": r["head"]["sha"],
                             "url": r.get("html_url", "")})
-        if args.fetch:
-            fetch_refs(repo, [p["number"] for p in prs])
-        main_ref = args.main_ref or (f"{NS}/main" if args.fetch else "origin/main")
+        main_ref = args.main_ref
         if not ref_exists(repo, main_ref):
             raise Unmeasured(f"{main_ref} does not resolve in {repo}")
     except Unmeasured as exc:
@@ -856,17 +844,9 @@ def main(argv):
         if res.get("class") in ("superseded", "killed", "no-gate-pod", "error-other"):
             errors.append(res)
         results.append(res)
-        if not args.json:
-            render(res)
+        render(res)
 
-    if args.json:
-        print(json.dumps({"repo": slug, "main_ref": main_ref,
-                          "comment_mode": mode, "results": results}, indent=2),
-              flush=True)
-        n_inherited = len([r for r in results
-                           if r.get("verdict") == VERDICT_INHERITED])
-    else:
-        n_inherited = summarise(results, errors)
+    n_inherited = summarise(results, errors)
 
     if mode == "off":
         say(f"comment: mode=off (set --comment-mode on to arm it); "

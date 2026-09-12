@@ -907,7 +907,7 @@ def test_a_head_that_is_not_in_the_local_clone_is_UNMEASURED(repo):
     got = M.triage_pr(repo.path, "main", meta, pr_row(
         "FAILED: pytests — FAILING: test_the_alpha_invariant_holds | TOTAL failed=1"))
     assert got["verdict"] == M.VERDICT_UNMEASURED
-    assert "--fetch" in got["reason"]
+    assert "git fetch origin" in got["reason"]
 
 
 def test_a_head_with_NO_pytests_row_is_UNMEASURED_never_green(repo):
@@ -1048,21 +1048,6 @@ def test_the_HINT_is_printed_when_only_SOME_of_the_red_is_inherited(harness, rep
     assert M.VERDICT_UNMEASURED in proc.stdout
     assert "HINT: at least one named failure IS inherited" in proc.stdout
     assert "commits behind main" in proc.stdout
-
-
-def test_json_mode_emits_the_same_verdict_as_the_rendered_run(harness, repo):
-    harness.serve_default(repo)
-    proc = harness.run(repo, "--pr", "7", "--json")
-    assert proc.returncode == RC_INHERITED, proc.stdout
-    # 🔴 THE WHOLE OF STDOUT, parsed in one go — not a slice. A payload that is
-    # only parseable after a human picks the object out of surrounding prose is
-    # not machine-readable, and the failure lands in the CALLER's parser.
-    payload = json.loads(proc.stdout)
-    assert payload["results"][0]["verdict"] == M.VERDICT_INHERITED
-    assert payload["comment_mode"] == "off"
-    # …and the human lines still exist, on stderr.
-    assert "mode=off" in proc.stderr
-    assert payload["results"][0]["tests"][0]["candidates"][0]["sha"] == repo.fix
 
 
 def test_help_prints_the_env_ledger_rather_than_a_truncated_header(harness, repo):
@@ -1299,11 +1284,70 @@ def test_every_test_this_script_names_actually_exists():
     assert cited <= here, f"dangling citations: {sorted(cited - here)}"
 
 
-def test_only_refs_under_its_own_namespace_are_ever_written():
-    """🔴 `refs/` LIVES IN THE COMMON GIT DIR — a worktree gives zero isolation,
-    so a fetch refspec that landed on `refs/remotes/origin/main` or a branch
-    would reach into a concurrent session's work."""
-    dests = re.findall(r'\+refs/[^:"]+:([^"\s]+)', SRC)
-    assert dests, "the refspec scan matched nothing — this guard is inert"
-    for d in dests:
-        assert d.startswith("{NS}/") or d.startswith("refs/stale-base-triage/"), d
+def test_no_git_subcommand_that_WRITES_is_ever_invoked():
+    """🔴 "IT WRITES NOTHING" IS THIS TOOL'S SAFETY CLAIM, SO IT IS PINNED
+    ABSOLUTELY RATHER THAN RELATIVELY.
+
+    This guard replaces one that said "every ref it writes is namespaced under
+    `refs/stale-base-triage/*`" — true, and a weaker claim than the one the tool
+    makes, because `refs/` lives in the COMMON git dir: a worktree gives zero
+    isolation there, so ANY ref write reaches a concurrent session's repo. The
+    `--fetch` flag that made those writes was deleted for buying nothing here
+    (this repo's PRs are same-repo branches and `origin` fetches
+    `+refs/heads/*`, so an ordinary `git fetch origin` already has every head),
+    which lets the claim be pinned at zero.
+
+    🔴 AN ALLOWLIST, NOT A DENYLIST — a git subcommand nobody enumerated is a
+    write by default. A denylist of known writers passes silently the day
+    someone reaches for one it does not name.
+    """
+    subs = _git_subcommands()
+    assert subs, "the AST scan found no git invocations — this guard is inert"
+    read_only = {"rev-parse", "cat-file", "grep", "log", "merge-base", "rev-list"}
+    for a in subs:
+        if a[0] == "remote":
+            # `remote` has writing forms (`add`, `set-url`, `remove`); only the
+            # reading one is permitted, and it is checked by its ARGUMENT.
+            assert a[:2] == ["remote", "get-url"], a
+            continue
+        assert a[0] in read_only, f"`git {a[0]}` is not an enumerated read: {a}"
+    # POSITIVE CONTROL on the scan: it really does see the arguments, so the
+    # allowlist above is not passing over an empty or opaque list.
+    assert any(a[:2] == ["merge-base", "--is-ancestor"] for a in subs), subs
+    assert any(a[0] == "remote" for a in subs), subs
+
+
+def test_the_deleted_flags_are_GONE_from_the_parser_not_merely_undocumented():
+    """A flag left in the parser is a flag someone can still reach. Both
+    deletions are pinned at the source so a revert has to be deliberate.
+
+    `--fetch` was the only git WRITE in a tool whose stated safety property is
+    that it writes nothing; `--json` had no consumer anywhere in the repo.
+    `--sweep` is deliberately NOT in this list — it is the mode the derived
+    completeness route made useful.
+
+    🔴 STRUCTURAL, NOT SPELLED. A first version of this guard was a string scan
+    over the whole file and it failed on the HEADER PARAGRAPH THAT EXPLAINS THE
+    DELETION — the same trap `_git_subcommands` is AST-based to avoid. The AST
+    sees declarations and string constants; prose satisfies neither.
+    """
+    tree = ast.parse(SRC)
+    flags = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            flags |= {a.value for a in node.args
+                      if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+    assert flags, "the add_argument scan matched nothing — this guard is inert"
+    assert "--sweep" in flags, "--sweep was kept on purpose; see the header"
+    for gone in ("--fetch", "--json"):
+        assert gone not in flags, f"{gone} is still reachable in the parser"
+    # …and neither leaves a stub behind: no module-level `_JSON_MODE`, and no
+    # STRING CONSTANT naming the ref namespace `--fetch` used to write.
+    assigned = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+    assert "_JSON_MODE" not in assigned, assigned
+    consts = [n.value for n in ast.walk(tree)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    assert not [c for c in consts if "refs/stale-base-triage" in c], (
+        "a ref-namespace literal survived the deletion of --fetch")
