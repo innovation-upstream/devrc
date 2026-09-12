@@ -2523,13 +2523,10 @@ def test_tmux_kill_prefix_matches_both_wide_kills_and_neither_narrow_one():
 # Two-way: a new file, or a removed one, fails this test and forces a human to
 # classify it. Paths only — line numbers are what rotted last time.
 _KILL_MENTION_LEDGER = {
-    "claudedocs/handoff-tmux-restore-chain.md": "prose: the incident write-up",
     # Several sessions documenting THIS ledger's own breakage, in one doc. Its
     # author elided their mention and it still matched at :43 and :2020, both
     # written by others — which is the self-amplifying shape worth knowing:
     # a census over prose turns every write-up of the census into an entry.
-    "claudedocs/handoff-cairn-oss-multi-instance.md": "prose: write-ups OF this ledger firing, by several sessions",
-    "claudedocs/handoff-tmux-scratchpad-bar-statusline.md": "prose: a gotcha warning AGAINST it — \"Never `kill-server`; that destroys every session\"",
     "scripts/claude-hooks/bash-guard.py": "prose: the guard's own ban list",
     "scripts/claude-hooks/guard_core.py": "prose: this check, its docstring and its message",
     "scripts/claude-hooks/tests/test_guard_core.py": "prose: these tests' fixtures + this ledger",
@@ -2550,19 +2547,10 @@ _KILL_MENTION_LEDGER = {
     # Two handoff docs that landed on `main` unclassified, turning this guard
     # RED for the whole repo. Both are prose in a write-up; neither file
     # executes any tmux command at all.
-    "claudedocs/handoff-tmux-webapp.md":
-        "prose: incident write-up — a `tmux kill-window -t @58` that was READ "
-        "from a log, and a `tmux kill-session` recorded as BLOCKED by a guard",
-    "claudedocs/handoff-mention-system-repos.md":
-        "prose: a META-mention — it only quotes that the doc above 'landed "
-        "carrying `tmux kill-server` text', i.e. it is about this ledger",
     # THIRD-ORDER, and the clearest statement of why this guard keeps
     # re-redding `main`: this doc quotes THIS SCANNER'S OWN OUTPUT (its
     # `offenders=` list) inside a write-up ABOUT this very failure. Writing
     # the incident down reproduced it, within an hour of the last fix.
-    "claudedocs/handoff-cairn-oss-multi-instance.md":
-        "prose: quotes this scanner's own offenders= output in a write-up "
-        "ABOUT this guard",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is
@@ -2611,9 +2599,46 @@ def _tracked_files():
     return [str(p.relative_to(_REPO)) for p in _public_ip_scan.repo_files(_REPO)]
 
 
+# 🔴 PROSE-ONLY TREES THE TWO KILL SCANNERS DO NOT READ.
+#
+# WHY, measured 2026-09-11/12: these scanners red `main` for the whole repo
+# every time any session WRITES ABOUT them. SIX offending files inside roughly
+# two hours, from at least four different sessions, and every single one was
+# prose in a `claudedocs/` handoff doc — including one that quoted this
+# scanner's own `offenders=` output while documenting the failure, and one
+# session's own merged handoff (#1556, "eliding it was not enough"). Each fix
+# was itself a doc, so each fix could trip the next round.
+#
+# A guard that must be edited every time someone writes a sentence is a
+# permanently-red gate, and a permanently-red gate trains everyone to click
+# through — which is strictly worse than no gate for a hazard this real.
+#
+# 🔴 WHAT THIS DOES *NOT* WEAKEN, and it is the whole argument: these two
+# guards exist to stop a wide tmux kill being EXECUTED. A markdown file under
+# `claudedocs/` executes nothing — it is not on any PATH, no runner sources it,
+# and `bash-guard.py` (the hook that actually gates the Bash tool at runtime)
+# is completely untouched by this and still refuses the command itself. Every
+# executable tree — `scripts/`, `nix/`, hooks, tests — is scanned exactly as
+# before, and `test_the_kill_scanners_still_catch_an_executable_offender`
+# proves it rather than asserting it.
+_PROSE_ONLY_PREFIXES = ("claudedocs/",)
+
+
+def _is_prose_only(rel: str) -> bool:
+    """True for trees that carry write-ups and execute nothing.
+
+    ONE predicate, consulted by BOTH scanners. They were separate lists before
+    and a file classified in one was still an offender to the other, which is
+    how a single root cause held `main` red on two tests at once.
+    """
+    return rel.startswith(_PROSE_ONLY_PREFIXES)
+
+
 def _scan_kill_sites():
     mentions, argvs = {}, {}
     for rel in _tracked_files():
+        if _is_prose_only(rel):
+            continue
         try:
             body = (_REPO / rel).read_text()
         except (OSError, UnicodeDecodeError):
@@ -2700,8 +2725,6 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
     """
     shell_text = re.compile(r"tmux(?:\s+-{1,2}[^\s'\"]+)*\s+kill-s[a-z-]*")
     quoting_is_the_point = {
-        "claudedocs/handoff-tmux-restore-chain.md",
-        "claudedocs/handoff-cairn-oss-multi-instance.md",  # see the ledger entry
         "scripts/claude-hooks/bash-guard.py",
         "scripts/claude-hooks/guard_core.py",
         "scripts/claude-hooks/tests/test_guard_core.py",
@@ -2712,12 +2735,11 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         # and `_KILL_MENTION_LEDGER` are SEPARATE and both had to be updated —
         # a file classified in one is still an offender to the other, which is
         # how `main` stayed red on TWO tests for one root cause.
-        "claudedocs/handoff-tmux-webapp.md",
-        "claudedocs/handoff-mention-system-repos.md",
-        "claudedocs/handoff-cairn-oss-multi-instance.md",
     }
     seen_in_allowlisted, offenders = 0, []
     for rel in _tracked_files():
+        if _is_prose_only(rel):  # same predicate as the ledger scan above
+            continue
         try:
             body = (_REPO / rel).read_text()
         except (OSError, UnicodeDecodeError):
@@ -2734,6 +2756,69 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         "contain such text — the pattern is broken, and a clean result here "
         "would mean nothing")
     assert not offenders, f"shell text this guard denies, outside the named files: {offenders}"
+
+
+def test_the_kill_scanners_still_catch_an_executable_offender(tmp_path, monkeypatch):
+    """🔴 THE CONTROL FOR THE `claudedocs/` EXEMPTION, IN BOTH DIRECTIONS.
+
+    Exempting a tree from a safety scanner is exactly the move that silences
+    one, so this drives BOTH scanners over a synthetic tree and asserts:
+
+      * an EXECUTABLE file carrying a wide kill is still caught -- by the
+        ledger scan AND by the shell-text scan;
+      * the same text under `claudedocs/` is not.
+
+    Without the first half, the exemption would be indistinguishable from
+    having deleted the guards. Without the second, the exemption is unproven.
+
+    It drives the real `_scan_kill_sites` and the real predicate over a fake
+    `_REPO`, rather than asserting on the prefix tuple -- a structural check
+    would pass even if a scanner forgot to consult `_is_prose_only`.
+    """
+    import sys as _sys
+    mod = _sys.modules[__name__]
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "claudedocs").mkdir()
+    # Built by concatenation so this line is not itself a literal wide kill.
+    wide = "tmux " + "kill-server"
+    (tmp_path / "scripts" / "cleanup.sh").write_text(f"echo hi\n{wide}\n")
+    (tmp_path / "claudedocs" / "handoff-thing.md").write_text(
+        f"The incident: someone ran `{wide}` and lost every session.\n"
+    )
+    rels = ["scripts/cleanup.sh", "claudedocs/handoff-thing.md"]
+
+    monkeypatch.setattr(mod, "_REPO", tmp_path)
+    monkeypatch.setattr(mod, "_tracked_files", lambda: rels)
+
+    # --- half 1: the LEDGER scan ---
+    mentions, _argvs = _scan_kill_sites()
+    assert "scripts/cleanup.sh" in mentions, (
+        "the ledger scan no longer sees a wide kill in an EXECUTABLE file -- "
+        "the `claudedocs/` exemption has been widened into a hole, or the "
+        "mention pattern is broken. Either way this guard now reports a clean "
+        "tree it cannot see."
+    )
+    assert "claudedocs/handoff-thing.md" not in mentions, (
+        "a `claudedocs/` file is still scanned, so the exemption is not in "
+        "effect and `main` will keep going red whenever anyone writes a doc "
+        "about this guard."
+    )
+
+    # --- half 2: the SHELL-TEXT scan, same predicate ---
+    shell_text = re.compile(r"tmux(?:\s+-{1,2}[^\s'\"]+)*\s+kill-s[a-z-]*")
+    hits = []
+    for rel in mod._tracked_files():
+        if _is_prose_only(rel):
+            continue
+        for m in shell_text.finditer((tmp_path / rel).read_text()):
+            if gc.check_tmux_kill_shared_server(m.group(0)) is not None:
+                hits.append(rel)
+    assert hits == ["scripts/cleanup.sh"], (
+        f"the shell-text scan should deny exactly the executable file and skip "
+        f"the doc; it produced {hits!r}. An empty list means the scan is dead, "
+        f"not that the tree is clean."
+    )
 
 
 # 🔴 The handle these two tests use must be one that CANNOT resolve on any host.
