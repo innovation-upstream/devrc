@@ -301,7 +301,7 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
     transcript = str(rec.get("transcript_path") or "").strip()
     if not transcript or not Path(transcript).exists():
         return "", "transcript-missing"
-    rec_pid = str(rec.get("tmux_pid") or "").strip()
+    rec_pid = record_generation(rec)
     live_pid = str(server_pid or "").strip()
     if not rec_pid or not live_pid:
         return "", "generation-unmeasured"
@@ -310,6 +310,24 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
     if Path(transcript).parent.name != project_dir_for(cwd).name:
         return "", "project-mismatch"
     return sid, "ok"
+
+
+def record_generation(rec: dict) -> str:
+    """The tmux SERVER PID a ledger record was written under. "" if absent.
+
+    🔴 ONE RULE, ONE PLACE. Two readers need this — `ledger_binding`'s generation
+    check and `newest_pane_ledger_activity`'s generation filter — and they must
+    never disagree about which field carries it or how a missing one is spelled.
+    The field is the WRITER's (`scripts/lib/agent_ledger.py` puts `tmux_pid` on
+    every record it can resolve a tmux context for); it is read here once so a
+    rename breaks one site rather than diverging silently at two.
+
+    Empty string for absent/blank, never None: both callers compare it against a
+    live pid string, and `"" != <pid>` is the answer they both want.
+    """
+    if not isinstance(rec, dict):
+        return ""
+    return str(rec.get("tmux_pid") or "").strip()
 
 
 def jsonls_by_recency(cwd: str) -> list[Path]:
@@ -459,6 +477,15 @@ def build_plan() -> list[dict]:
             # `bind_source`: a pane can read `ok` here and still be `fuzzy`/unbound
             # if another pane claimed that session id first.
             "ledger_reason": reasons.get(i, ""),
+            # 🔴 THE TMUX GENERATION THIS PLAN WAS BUILT UNDER — the server pid,
+            # constant across a server's windows and different after a restart.
+            # `plan_staleness_hours` needs it to pick a liveness witness that a
+            # POST-CRASH agent cannot move; see `newest_pane_ledger_activity`.
+            # Written per entry rather than as a header because `read_plan`
+            # requires the plan to be a LIST, and every existing reader indexes
+            # it as one — a header object would change that contract for every
+            # consumer to carry one field.
+            "tmux_pid": server_pid,
             "title": (p["title"] or "").strip(),
             "hint": first_user_line(sid, p["cwd"]) if sid else "",
         })
@@ -1129,15 +1156,23 @@ def no_tmux_server_to_restore_into() -> bool:
 # refusal is guaranteed — and that is exactly why the cold-boot arm below still
 # exits 0, unchanged.
 #
-# A MID-SESSION death is the opposite of a standing condition on every axis that
-# the rule is about:
-#   * it is an EVENT, not a state — it requires a plan written during THIS boot,
-#     which a cold boot cannot produce (see `no_server_is_mid_session`);
-#   * it is SELF-CLEARING and fires at most once per death — `PathChanged=` is an
-#     event on one watched name, so a socket nobody touches produces no second
-#     trigger, and the next trigger comes only when a server is being started,
-#     which is the case that RESTORES rather than refusing;
-#   * it is precisely the class the bypass exists for. That block's own
+# 🔴 A MID-SESSION DEATH IS NOT AUTOMATICALLY AN EVENT, AND THE FIRST VERSION OF
+# THIS COMMENT CLAIMED IT WAS. It said the arm "fires at most once per death,
+# because `PathChanged=` is an event on one watched name, so a socket nobody
+# touches produces no second trigger". **That rests on the socket disappearing
+# when the server dies, and it does not** — measured, `kill-server` leaves the
+# socket file behind, so `ConditionPathExists=` keeps passing, every later
+# activation reaches this branch, and `plan-written-this-boot` stays true for the
+# rest of the boot. Read that way the loud arm was STANDING, which is precisely
+# what the rule forbids. See `claim_midsession_alert` for the measurement and for
+# the activation rate that makes it matter (14 in one day, four inside 9s).
+#
+# WHAT MAKES IT AN EVENT IS THE LATCH, NOT THE DIAGNOSIS. `claim_midsession_alert`
+# consumes a one-shot marker in `$XDG_RUNTIME_DIR` keyed on the plan's mtime, so:
+#   * the condition that leads to rc 75 is "this incident has not yet alerted",
+#     which is consumed by the first alert and cannot recur for that incident;
+#   * a cold boot still exits 0 on the standing condition, untouched;
+#   * and the class is still the one the bypass exists for. That block's own
 #     justification is that the toast is "the only signal that an important user
 #     unit died"; here what died is the operator's entire workspace, and the cost
 #     of the toast not arriving was measured at 8.5 hours and 53 conversations.
@@ -1221,6 +1256,81 @@ def no_server_is_mid_session(now: float | None = None) -> tuple[bool, str]:
     if age_h >= up:
         return False, "plan-predates-this-boot"
     return True, "plan-written-this-boot"
+
+
+def claim_midsession_alert(plan_mtime: float) -> tuple[bool, str]:
+    """Claim the ONE loud alert for this incident. `(claimed?, reason)`.
+
+    🔴 THIS IS WHAT MAKES THE LOUD ARM AN EVENT RATHER THAN A STANDING
+    CONDITION, AND WITHOUT IT THE EXIT-75 ARM IS EXACTLY WHAT `nix/home.nix`
+    FORBIDS. The reasoning it replaces was: "`PathChanged=` is an event on one
+    watched name, so a socket nobody touches produces no second trigger."
+    **That was false, and the mechanism is measured.**
+
+    A TMUX SOCKET OUTLIVES ITS SERVER. Measured on this host with a private
+    socket, which is the controlled version of the audit's fleet observation
+    (7 of 8 sockets in `/run/user/1000/tmux-1000/` were orphans):
+
+        tmux -L rgprobe1 new-session -d ...   -> socket present, has-session rc 0
+        tmux -L rgprobe1 kill-server
+        ls  /run/user/.../rgprobe1            -> STILL THERE
+        tmux -L rgprobe1 has-session          -> rc 1, "no server running on ..."
+
+    So after the operator's server dies, `ConditionPathExists=%t/tmux-%U/default`
+    goes on passing for the rest of the login session, `wait_for_tmux_server()`
+    takes its 30s `timeout` arm every time, and `no_server_is_mid_session()`
+    answers `plan-written-this-boot` every time — because that is *also* true for
+    the rest of the boot. The condition is STANDING, and every activation would
+    fire a DND-defeating `notify-failure@` toast. `X-Restart-Triggers` on the
+    script (`nix/home.nix`) restarts this unit on every home-manager switch that
+    changes it, this box took 44 nix profile generations in one day, the audit
+    measured 14 activations of this unit on 2026-09-11 with four inside 9
+    seconds, and `notify-failure.sh` has no throttle or dedup. The bypass would
+    be trained away — and `ship.sh` deploying this very change could fire it.
+
+    THE LATCH. `$XDG_RUNTIME_DIR` is a tmpfs the OS creates for the login session
+    and destroys with it, so a marker placed there is self-scoping: it cannot
+    survive a reboot, and it needs no cleanup code that could itself fail.
+    The claim is `O_CREAT|O_EXCL`, the same atomic pattern
+    `free_generation_stamp` uses, so two activations racing inside 9 seconds
+    resolve to exactly one winner.
+
+    🔴 KEYED ON THE PLAN'S MTIME, NOT ON THE BOOT. A per-boot latch would have
+    been wrong on the very day this is about: 2026-09-11 had TWO server deaths,
+    00:05 and 02:36, and a boot-scoped latch would have silenced the second.
+    The plan mtime is what distinguishes them — after a recovery the save chain
+    writes new generations, so the next incident carries a different mtime and
+    gets its own single alert. If no recovery happens the mtime does not move and
+    there is exactly one alert, which is the correct count for one incident.
+
+    ⚠ NO LATCH LOCATION => NO ALERT, deliberately. Without `$XDG_RUNTIME_DIR`
+    there is nowhere that is guaranteed to be cleared, so "once" cannot be
+    promised — and an unbounded toast through the DND bypass is worse than a
+    missed one. Returns `(False, "no-runtime-dir")` and the caller stays quiet.
+    Under the systemd user unit the variable is always set; this is the
+    hand-invocation path.
+
+    ⚠ `SuccessExitStatus=75` ON THE UNIT WAS CONSIDERED AND REJECTED. It would
+    make systemd treat the loud exit as success — which suppresses the toast
+    entirely, i.e. it re-creates the 8.5 hours of silence this arm exists to
+    end. It is a way to turn the alert off, not a way to bound it.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime:
+        return False, "no-runtime-dir"
+    d = Path(runtime) / "tmux-session-restore"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        fd = os.open(d / f"alerted-{int(plan_mtime)}",
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False, "already-alerted-this-incident"
+    except OSError as e:
+        # Cannot promise "once" => do not alarm. Same direction as the missing
+        # runtime dir, and named separately so the log says which happened.
+        return False, f"latch-unwritable ({type(e).__name__})"
+    os.close(fd)
+    return True, "first-alert-for-this-incident"
 
 
 # 🔴 HOW LONG TO WAIT FOR THE SESSION THE TRIGGER DOES NOT PROMISE.
@@ -1451,43 +1561,96 @@ def resurrect_state_mtime() -> float | None:
         return None
 
 
-def newest_pane_ledger_activity(directory: Path | None = None) -> float | None:
-    """When an agent PANE last wrote to the ledger, as an mtime. None if unknown.
+def plan_generation(plan: list[dict] | None) -> str:
+    """The tmux server pid a saved plan was built under. "" if it does not say.
 
-    🔴 THE WITNESS THE CRASH CANNOT REFRESH. `plan_staleness_hours` needs to know
-    whether work CONTINUED after the plan stopped being written, and every other
-    artefact in this chain is written by something a crash restarts: resurrect's
-    `last` is refreshed by the post-crash autosave (that is the 2026-09-11 bug),
-    and the plan is the thing under test. The agent ledger is written by the
-    claude/opencode PROCESSES themselves, so when the tmux server dies they all
-    stop writing at once and the newest record freezes at the moment of death.
-    MEASURED on the incident's preserved ledger snapshot
-    (`~/.cache/tmux-crash2-20260911T110407/agent-ledger`, a `cp -a`): the newest
-    pane record was `claude-p28.json` at 02:36:40, 4 seconds before the crash and
-    13.4 minutes after the plan — while resurrect's `last` had moved on to 10:59.
+    🔴 "" IS THE ANSWER FOR EVERY PLAN WRITTEN BEFORE `build_plan` STARTED
+    RECORDING THIS, and that is not a detail — it is the scope of the fix in
+    `plan_staleness_hours`. A plan with no generation gets NO liveness witness,
+    the contemporaneity term stands exactly as it did, and the gate behaves as it
+    did before. Recovering from such a plan is `restore --plan <generation>`,
+    which bypasses the staleness gate entirely.
+    """
+    for e in plan or []:
+        if isinstance(e, dict):
+            pid = str(e.get("tmux_pid") or "").strip()
+            if pid:
+                return pid
+    return ""
 
-    🔴 PANE RECORDS ONLY, AND THAT FILTER IS LOAD-BEARING. The same directory
-    holds SESSION-keyed records (`claude-s-<id>.json`) written by agents with no
-    `$TMUX_PANE` — a claude run in a bare terminal, which is exactly what an
-    operator or an investigating agent does WHILE the tmux workspace is dead.
-    Counting those would let the investigation of the outage look like evidence
-    that the outage was not happening. MEASURED in the same snapshot: 125 pane
-    records against 105 session-keyed ones.
+
+def newest_pane_ledger_activity(generation: str,
+                                directory: Path | None = None) -> float | None:
+    """When a pane of tmux server `generation` last wrote to the ledger. Or None.
+
+    🔴 A WITNESS THAT FREEZES BY CONSTRUCTION, AND THE FIRST ATTEMPT DID NOT.
+    `plan_staleness_hours` needs to know whether work CONTINUED after the plan
+    stopped being written. Every other artefact in this chain is refreshed by
+    something a crash restarts — resurrect's `last` is rewritten by the
+    post-crash autosave, which is the whole 2026-09-11 bug — so the witness has
+    to be something the dead server's successor cannot touch.
+
+    🔴 "THE PROCESSES ALL STOP WRITING WHEN THE SERVER DIES" IS FALSE, AND THIS
+    FUNCTION'S FIRST VERSION SHIPPED ON IT. An agent working in a pane of the NEW
+    post-crash server writes `claude-p<N>.json` like any other, and pane ids
+    RESTART at %0, so it even overwrites the dead server's record for that pane.
+    MEASURED on the incident's preserved snapshot
+    (`~/.cache/tmux-crash2-20260911T110407/agent-ledger`, a `cp -a` taken at
+    11:04): an unfiltered newest-pane-record query returns `claude-p2.json` at
+    **11:03:34**, giving `worked = 8.672h` against a `gap` of 8.6h — so
+    `worked < gap` was FALSE and the gate still refused. The fix did not fix the
+    incident it was written for.
+
+    🔴 THE GENERATION IS WHAT MAKES IT FREEZE. `tmux_pid` is the SERVER pid,
+    constant across a server's windows and different after a restart — the same
+    fact `ledger_binding`'s generation check rests on. Filtering to the plan's
+    OWN generation means a post-crash agent is in a different generation and
+    CANNOT move the witness however long the recovery takes. Measured on that
+    same snapshot, grouped by `tmux_pid`:
+
+        pid 4025325   60 records   newest 2026-09-06 17:25:30
+        pid 4063373   56 records   newest 2026-09-11 02:36:40   <- the plan's
+        pid 1111077   31 records   newest 2026-09-11 00:05:46   (crash 1)
+        pid  627687    9 records   newest 2026-09-07 21:54:13
+        pid 1820124    2 records   newest 2026-09-11 11:03:34   <- post-crash
+
+    The server died at 02:36:44. Its generation's newest record is 02:36:40, four
+    seconds earlier, and it cannot move again.
+
+    ⚠ THE DEGRADATION IS ONE-DIRECTIONAL AND SAFE. As the new server grows it
+    overwrites more of the dead generation's pane files, so the surviving newest
+    record can only move EARLIER — which makes `worked` smaller, i.e. more
+    permissive — and if every one is overwritten this returns None and the caller
+    falls back to refusing. It never invents lateness.
+
+    🔴 PANE RECORDS ONLY, AND THAT FILTER IS STILL LOAD-BEARING — it is just no
+    longer sufficient. The same directory holds SESSION-keyed records
+    (`claude-s-<id>.json`) written by agents with no `$TMUX_PANE`: a claude run
+    in a bare terminal, which is exactly what an operator or an investigating
+    agent does WHILE the tmux workspace is dead. MEASURED in that snapshot: 158
+    pane records against 94 non-pane. (An earlier version of this paragraph said
+    "125 against 105", which was the LIVE ledger today — the wrong directory.)
 
     🔴 THE PANE SPELLING IS DERIVED FROM THE WRITER, NOT RESTATED. `_BORROWED`
     already carries `pane_filename`; probing it with sentinels recovers the
     separator and suffix it actually uses, so a rename in `agent_ledger.py`
     cannot leave this reader silently matching nothing. A literal `"-p"` here
-    would be the duplicated predicate that whole module's docstring warns about.
+    would be the duplicated predicate that module's docstring warns about.
 
-    ⚠ Residual, stated: a session id that itself contains the separator would be
-    misclassified as a pane record, and a claude started INSIDE a pane of the new
-    post-crash server does refresh this legitimately. The first is unreachable
-    for the hex/base62 ids both writers produce; the second is a human actively
-    working, which is not a case this gate should override.
+    ⚠ Residuals, stated rather than hidden:
+      * an empty `generation` measures NOTHING and returns None — see
+        `plan_generation`. It is not "match every record".
+      * the mtime is the evidence, and it is not content: any `touch`, `rsync` or
+        `cp -a` over the ledger moves it and can re-stale the gate. The RECORD is
+        read (for its generation) but its own `last_activity_ts` is deliberately
+        not used as the clock — the two writers disagree on when they refresh it,
+        while the mtime is the file system's own answer to "when was this
+        written".
+      * a session id that itself contained the separator would be misclassified
+        as a pane record. Unreachable for the hex/base62 ids both writers produce.
     """
     d = Path(directory) if directory is not None else LEDGER_DIR
-    if _AL is None or d is None:
+    if _AL is None or d is None or not generation:
         return None
     # Sentinels that `_clean` leaves alone, so the parts around them are exactly
     # the writer's literal separator and suffix.
@@ -1508,8 +1671,15 @@ def newest_pane_ledger_activity(directory: Path | None = None) -> float | None:
         runtime, sep, pane = core.partition(mid)
         if not (sep and runtime and pane):
             continue
+        path = d / name
         try:
-            mtime = (d / name).stat().st_mtime
+            rec = json.loads(path.read_text().splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            continue            # a malformed record witnesses nothing
+        if record_generation(rec) != generation:
+            continue
+        try:
+            mtime = path.stat().st_mtime
         except OSError:
             continue
         if newest is None or mtime > newest:
@@ -1517,13 +1687,13 @@ def newest_pane_ledger_activity(directory: Path | None = None) -> float | None:
     return newest
 
 
-def pane_activity_after(when: float) -> float | None:
-    """Hours that agent PANES kept writing past `when`. None if unmeasurable.
+def pane_activity_after(when: float, generation: str) -> float | None:
+    """Hours that panes of `generation` kept writing past `when`. None if unknown.
 
-    Zero when the newest pane record PREDATES `when` — the panes stopped before
-    the plan did, which is the crash shape and the opposite of a stale plan.
+    Zero when that generation's newest record PREDATES `when` — the panes stopped
+    before the plan did, which is the crash shape and the opposite of a stale plan.
     """
-    newest = newest_pane_ledger_activity()
+    newest = newest_pane_ledger_activity(generation)
     if newest is None:
         return None
     return max(0.0, (newest - when) / 3600)
@@ -1624,10 +1794,13 @@ def plan_staleness_hours() -> tuple[float, str] | None:
     (`ls -t ~/.tmux/resurrect/*.txt | head`) before suspecting the plan.
 
     Returns `(hours, basis)` where basis is `"layout"`, `"ledger"`,
-    `"liveness"`, `"skew"` or `"wall"` — FIVE, and the `why` dict in
-    `cmd_restore` is the only consumer that knows it. A second consumer built
-    from a shorter contract KeyErrors in the refusal path, which is the crash
-    this line exists to prevent. The wall fallback (no readable state file) still carries the
+    `"liveness"`, `"skew"`, `"ledger-skew"` or `"wall"` — SIX, and the `why`
+    dict in `cmd_restore` is the only consumer that knows it. A second consumer
+    built from a shorter contract KeyErrors in the refusal path, which is the
+    crash this line exists to prevent. `ledger-skew` is not a sixth measurement:
+    it is `skew` reporting that the number it fell back to had already been
+    discounted, because the wording differs even though the arithmetic does not.
+    The wall fallback (no readable state file) still carries the
     powered-off flaw by construction, so the basis is part of the answer and
     the refusal message NAMES it — the same number means different things.
     """
@@ -1641,6 +1814,18 @@ def plan_staleness_hours() -> tuple[float, str] | None:
         # negative age both prints as nonsense and compares as fresh. There is
         # no second measure to fall back to on this basis, so clamp and let the
         # value stand at "not stale", which is what a negative already meant.
+        #
+        # 🔴 THE LEDGER CROSS-CHECK BELOW DELIBERATELY DOES NOT APPLY HERE, AND
+        # THAT IS A KNOWN, MEASURED LIMITATION RATHER THAN AN OVERSIGHT. An
+        # unreadable `<resurrect-dir>/last` is a plausible post-crash state, and
+        # in it the 2026-09-11 shape STILL REFUSES (measured). Discounting this
+        # number by pane activity was tried and is unsafe: the wall basis has no
+        # liveness term to pair with — `since` collapses to the plan's own age,
+        # so the `max(gap, live)` that protects the layout basis is circular
+        # here — and `min(wall, worked)` alone would wave through a plan whose
+        # workspace died an hour after it was written and has been dead for
+        # weeks. There is genuinely no signal on this path that says "recover
+        # me". The remedy is `restore --plan <generation>`, which skips this gate.
         return (max(0.0, (time.time() - mt) / 3600), "wall")
     gap = abs(state - mt) / 3600
     basis_gap = "layout"
@@ -1662,22 +1847,36 @@ def plan_staleness_hours() -> tuple[float, str] | None:
     # `newest_pane_ledger_activity`. Where the panes stopped WITH the plan, the
     # layout's extra hours were bought by a dead workspace and must not be counted.
     #
+    # 🔴 THE WITNESS IS SCOPED TO THE PLAN'S OWN TMUX GENERATION. Without that
+    # scope this cross-check DOES NOT WORK — measured on the incident's preserved
+    # ledger, an unscoped query returns a post-crash agent's record at 11:03:34,
+    # `worked` becomes 8.672h against a `gap` of 8.6h, and the gate refuses
+    # exactly as before. See `newest_pane_ledger_activity`.
+    #
+    # ⚠ SCOPE OF THE FIX, STATED PLAINLY: a plan that does not record its
+    # generation — every plan written before `build_plan` started doing so —
+    # yields `""`, measures nothing, and leaves `gap` exactly as it was. That
+    # includes the preserved 02:23 plan from the incident itself. This makes a
+    # REPLAY of 2026-09-11 recoverable, not that specific saved plan; for that,
+    # `restore --plan <generation>` bypasses this gate.
+    #
     # Worked through the four cases that matter — the middle two are the ones the
     # richness-comparison alternative gets wrong, which is why the witness is the
     # ledger and not the layout's window count:
-    #   2026-09-11 crash   plan 02:23, layout 10:59, panes froze 02:36:40
+    #   2026-09-11 crash   plan 02:23, layout 10:59, gen 4063373 froze 02:36:40
     #                      -> gap 8.6h, worked 0.22h -> 0.22h, PASSES (the fix)
-    #   2026-08-05 outage  plan Jul 5, layout Jul 29, panes running throughout
+    #   2026-08-05 outage  plan Jul 5, layout Jul 29, SAME generation still live
     #                      -> gap 576h, worked ~576h -> REFUSES (preserved)
     #   same, mid-session  identical, and uptime does not enter -> REFUSES
     #   layout older       `state < mt` -> untouched, still REFUSES
     #
-    # ⚠ Unmeasurable (no ledger module, no directory, no pane records — including
-    # the case where a 7-day prune has emptied it) leaves `gap` exactly as it was.
-    # Falling back to the previous behaviour is the safe direction: it can only
-    # refuse more, never less.
+    # ⚠ Unmeasurable (no generation on the plan, no ledger module, no directory,
+    # no surviving record of that generation — including the case where a 7-day
+    # prune or the new server's pane ids have overwritten them all) leaves `gap`
+    # exactly as it was. Falling back to the previous behaviour is the safe
+    # direction: it can only refuse more, never less.
     if state > mt:
-        worked = pane_activity_after(mt)
+        worked = pane_activity_after(mt, plan_generation(read_plan(PLAN)))
         if worked is not None and worked < gap:
             gap, basis_gap = worked, "ledger"
     # Liveness: time since the chain last produced ANYTHING, but never counting
@@ -1703,7 +1902,15 @@ def plan_staleness_hours() -> tuple[float, str] | None:
         # valid. Fall back to it and NAME the fact that liveness was not
         # evaluated, rather than inventing a liveness number in either
         # direction. Reporting "unmeasured" is the honest third option.
-        return (gap, "skew")
+        #
+        # 🔴 AND IT MUST CARRY WHICH NUMBER IT IS FALLING BACK TO. `gap` may
+        # already have been DISCOUNTED to the ledger number above, and returning
+        # a bare `"skew"` printed that ledger number under the layout's wording —
+        # measured, `out of step with the saved layout by 50.0h (basis=skew)`
+        # where 50.0h was the ledger term. That is precisely what
+        # `test_the_ledger_basis_refusal_does_not_claim_a_layout_comparison`
+        # exists to prevent, on a path it did not cover. The basis is the pair.
+        return (gap, "skew" if basis_gap == "layout" else "ledger-skew")
     live = min(since, uptime_hours())
     return (gap, basis_gap) if gap >= live else (live, "liveness")
 
@@ -1893,6 +2100,13 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
                     "skew": ("out of step with the saved layout by (liveness "
                              "NOT evaluated — an artefact's mtime is in the "
                              "future)"),
+                    # Same unmeasurable liveness, but the number being reported
+                    # is the LEDGER term, not the layout gap. Saying "the saved
+                    # layout" here would name the very number the discount
+                    # rejected.
+                    "ledger-skew": ("older than the last live agent pane by "
+                                    "(liveness NOT evaluated — an artefact's "
+                                    "mtime is in the future)"),
                 }[basis]
                 print(f"restore plan is {why} {gap:.1f}h "
                       f"(limit {staleness_hours}h, basis={basis}) — too stale, "
@@ -1912,54 +2126,57 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
     else:
         found, server_waited, why = True, 0.0, "not-checked"
     if not dry_run and plan and not found:
-        # 🔴 EXIT 0, NOT 1, AND THAT IS A DELIBERATE CHOICE — NOT AN OVERSIGHT.
-        # The unit is `OnFailure=notify-failure@%n`, and that toast bypasses
-        # DND (`nix/home.nix` — "any unit that can fail on a STANDING condition
-        # breaches it again").
+        # 🔴 EXIT 0 ON A COLD BOOT, 75 ONCE PER MID-SESSION INCIDENT. The unit
+        # is `OnFailure=notify-failure@%n`, and that toast bypasses DND
+        # (`nix/home.nix` — "any unit that can fail on a STANDING condition
+        # breaches it again"), so the whole question is whether the condition
+        # reaching a non-zero exit can STAND. See `EXIT_SERVER_DIED_MIDSESSION`,
+        # `no_server_is_mid_session` and `claim_midsession_alert`: the diagnosis
+        # separates the boot from the incident, and the LATCH is what stops the
+        # incident arm standing.
         #
-        # 🔴 THIS REASON HAS NOW BEEN WRONG TWICE. Round 1 said "no server is
+        # 🔴 THE REASON HERE HAS NOW BEEN WRONG THREE TIMES, AND EACH WRONG
+        # VERSION WAS A CONFIDENT CLAIM ABOUT FREQUENCY. Round 1: "no server is
         # the normal COLD-BOOT state, because the unit fires on OnActiveSec=45s"
-        # — that trigger is gone. Round 2 replaced it with "what is left is a
-        # rare race: a stale socket from a SIGKILLed server, or a server with
-        # zero sessions", and the FREQUENCY half of that was false: EVERY tmux
-        # server has zero sessions for its first ~100ms, and that is precisely
-        # the window `PathChanged=` fires in. So the two examples it gave as
-        # exotic were preceded by a state every tmux server passes through, in
-        # the exact window the trigger fires in. (Which of the reachable states
-        # was the MOST common was never measured either — do not add that claim
-        # back in a different spelling.)
+        # — that trigger is gone. Round 2: "what is left is a rare race", false,
+        # because EVERY tmux server has zero sessions for its first ~100ms and
+        # that is exactly the window `PathChanged=` fires in. Round 3 (this
+        # change's first draft): "it fires at most once per death, because
+        # `PathChanged=` is an event" — false, because **the socket outlives the
+        # server** (measured; see `claim_midsession_alert`), so every subsequent
+        # activation reaches this branch for the rest of the login session.
         #
         # WHAT IS TRUE, stated at the scope it was measured:
         #   * `PathChanged=` fires on the watched socket being DELETED as well
-        #     as created (MEASURED). Socket deletion is the operator's tmux
-        #     server exiting — routine. The unit's `ConditionPathExists=`
-        #     catches the ordinary shape of that before ExecStart.
+        #     as created (MEASURED). 🔴 But `ConditionPathExists=` does NOT
+        #     "catch the ordinary shape of that" — this comment used to say so
+        #     and it is FALSE: `kill-server` leaves the socket file, so the
+        #     condition keeps passing and ExecStart keeps running.
         #   * The socket-appears case used to reach here whenever ExecStart won
         #     the race against tmux's config queue — MEASURED at 2 of 2 sampled
         #     runs landing on OPPOSITE sides of it. `wait_for_tmux_server()`
         #     above is what now covers that window.
-        #   * 🔴 THE POST-FIX FREQUENCY IS UNMEASURED, and saying otherwise is
-        #     how this comment got it wrong twice. Establishing it needs reboots
-        #     this change has not had. What is left after the poll is: no socket
-        #     at all (`why=no-socket` — the server went away between systemd's
-        #     condition check and this process starting), or a socket with
-        #     nothing answering for the full bound (`why=timeout`). Neither
-        #     frequency is known.
+        #   * 🔴 THE FREQUENCY OF REACHING THIS BRANCH IS STILL UNMEASURED and
+        #     is now known to be UNBOUNDED per incident (14 activations of this
+        #     unit on 2026-09-11, four inside 9 seconds, driven by
+        #     `X-Restart-Triggers` on home-manager switches). Do not replace
+        #     this with a fourth plausible-sounding frequency claim; the design
+        #     no longer depends on one, which is the point of the latch.
         #
-        # 🔴 THE CONCLUSION DOES NOT DEPEND ON THE FREQUENCY, which is why it
-        # survives the correction. `OnFailure=` here bypasses DND. A branch that
-        # can be reached by a race must not raise an alarm indistinguishable
-        # from a real failure, however often the race happens — an alarm the
-        # operator cannot tell from a real one is an alarm they learn to
-        # dismiss, and this one bypasses DND to reach them. A skip the operator
-        # can read in the log is the honest report. Do NOT replace this with a
-        # third plausible-sounding reason; if you need the frequency, measure it.
+        # 🔴 THE CONCLUSION DOES NOT DEPEND ON THE FREQUENCY OF THE BRANCH, only
+        # on the frequency of the ALARM, and that is now bounded by construction
+        # at one per incident. A branch reachable by a race still must not raise
+        # an alarm indistinguishable from a real failure — which is why the
+        # cold-boot arm stays at exit 0 and says so in the log.
         #
         # It is READABLE, not merely logged: `tmux-restore-observe.sh` counts
         # `REFUSING to restore` in this unit's journal and reports a refused
         # boot as its own verdict (RC_REFUSED). That arm exists because the
         # resume comparison is gated on `sends != 0`, and a refused run logs
         # ZERO sends — so before it, a boot where nothing was resumed read CLEAN.
+        # 🔴 That string is load-bearing for that reader and for
+        # `test_the_loud_refusal_is_STILL_A_REFUSAL`: it is printed on BOTH
+        # arms, so a refusal stays observable there whatever the exit code is.
         why_line = {
             "no-socket": ("no socket at %s either — the server was gone before "
                           "this process started" % tmux_socket_path()),
@@ -1983,17 +2200,37 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         # `EXIT_SERVER_DIED_MIDSESSION` for why a non-zero code is the channel.
         mid_session, boot_reason = no_server_is_mid_session()
         print(f"  cold-boot check: {boot_reason}", file=sys.stderr)
-        if mid_session:
-            print("🔴 THE TMUX SERVER DIED MID-SESSION — this is an INCIDENT, not "
-                  "a cold boot.", file=sys.stderr)
-            print(f"  A restore plan was written during THIS boot ({PLAN}), so a "
-                  "workspace with live claude panes existed and does not now. "
-                  "Nothing on this host starts a tmux server on its own, so "
-                  "nothing will retry.", file=sys.stderr)
-            print("  Start tmux (that re-triggers this unit), or recover by hand: "
-                  "tmux-session-restore.py restore --best", file=sys.stderr)
-            return EXIT_SERVER_DIED_MIDSESSION
-        return 0
+        if not mid_session:
+            return 0
+        print("🔴 THE TMUX SERVER DIED MID-SESSION — this is an INCIDENT, not "
+              "a cold boot.", file=sys.stderr)
+        print(f"  A restore plan was written during THIS boot ({PLAN}), so a "
+              "workspace with live claude panes existed and does not now. "
+              "Nothing on this host starts a tmux server on its own, so "
+              "nothing will retry.", file=sys.stderr)
+        # 🔴 THE REMEDY MUST BE ONE THAT WORKS. An earlier draft offered
+        # `restore --best` here, and that is a DEAD END from this exact state:
+        # with no server it reaches this same refusal, after another 30s wait,
+        # and exits the same way. Only a tmux server gets the conversations
+        # back — and starting one re-triggers the path unit, so the restore
+        # follows on its own.
+        print("  START TMUX — that is the whole remedy, and it re-triggers this "
+              "unit so the restore follows. (`restore --best` from here only "
+              "reaches this same refusal: there is still no server.)",
+              file=sys.stderr)
+        try:
+            plan_mtime = PLAN.stat().st_mtime
+        except OSError:
+            plan_mtime = 0.0
+        claimed, latch = claim_midsession_alert(plan_mtime)
+        print(f"  alert latch: {latch}", file=sys.stderr)
+        if not claimed:
+            # Already reported, or nowhere to promise "once". Either way this
+            # activation must NOT fire `OnFailure=notify-failure@%n` again —
+            # see `claim_midsession_alert`. The incident lines above are still
+            # printed, so the journal carries every occurrence.
+            return 0
+        return EXIT_SERVER_DIED_MIDSESSION
     if not dry_run and plan and server_waited > 0:
         print(f"waited {server_waited:.1f}s for a tmux server to hold a session "
               f"({why}) — the path unit triggers on the SOCKET, which tmux "
