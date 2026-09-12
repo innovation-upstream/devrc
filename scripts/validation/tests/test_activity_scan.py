@@ -6,6 +6,7 @@ No test hits a real ClickHouse — the script is SQL-builders + formatting, so w
     correct source/filters) — guards against a copy-paste regression in the SQL
   - gather()/render() end-to-end against a fake CHClient (no network)
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -365,3 +366,277 @@ def test_render_handles_empty_i3_data():
     text = A.render(data)
     assert "no i3 data" in text
     assert "(none crossed n>=4)" in text
+
+
+# --------------------------------------------------------------------------- #
+# PER-SECTION DEGRADATION
+#
+# The report is seven independent queries and the trigger for a failure is SERVER LOAD,
+# not anything wrong with the query: activity's ClickHouse runs in a 3 GiB pod with
+# max_server_memory_usage 2.5 GiB and CH 25.x corrects that server-wide tracker against
+# container RSS, so the OvercommitTracker stops whichever query happens to be allocating.
+# Measured 2026-09-12 over 25 whole-report rounds, q_top_binaries and q_context_switches
+# were EACH killed independently while the other six sections were fine. Before this,
+# any one CHQueryError aborted gather() and the user got a traceback and no report.
+#
+# 🔴 The distinction these tests exist to protect: a section that returned ZERO ROWS and a
+# section whose query FAILED are different facts, and neither may be silently omitted.
+# --------------------------------------------------------------------------- #
+# One distinctive substring per query, used to make a fake client fail exactly one
+# section. Pinned two-way against A.SECTION_LABELS below, and each marker is checked to
+# match exactly ONE of the seven built statements — a marker that matched two would make
+# every "only this section failed" assertion vacuous.
+SECTION_MARKERS = {
+    "repeated_commands": "substring(text,1,60)",
+    "top_binaries": "GROUP BY bin ORDER BY n DESC",
+    "binaries_by_wait": "duration_ms<7200000",
+    "context_switches": "avg(sw)",
+    "attention_by_app": "WHERE kind='window-focus' AND app!='' GROUP BY app",
+    "browser_by_domain": "FROM seg WHERE brave_on>0",
+    "deep_work": "WHERE app='Alacritty' AND run_s<3600",
+}
+
+# What each section contributes to a rendered report when it SUCCEEDS, from
+# _sample_mapping(). Used to prove the other six survive one section's death.
+SECTION_EVIDENCE = {
+    "repeated_commands": "g pull",
+    "top_binaries": "civitai",
+    "binaries_by_wait": "429.1m",
+    "context_switches": "avg 100.4",
+    "attention_by_app": "Alacritty",
+    "browser_by_domain": "github.com",
+    "deep_work": ">=10min: 41",
+}
+
+MEMORY_LIMIT_ERROR = (
+    "ClickHouse HTTP 500: Code: 241. DB::Exception: Memory limit (total) exceeded: "
+    "would use 2.33 GiB, maximum: 2.33 GiB. OvercommitTracker decision: Query was "
+    "selected to stop by OvercommitTracker."
+)
+
+
+class FlakyClient(FakeClient):
+    """FakeClient that raises for any SQL containing one of `failing`'s markers."""
+
+    def __init__(self, mapping, failing=(), exc_factory=None):
+        super().__init__(mapping)
+        self.failing = tuple(failing)
+        self.exc_factory = exc_factory or (
+            lambda: A.Q.CHQueryError(MEMORY_LIMIT_ERROR, code=241, http_status=500))
+
+    def rows(self, sql):
+        for marker in self.failing:
+            if marker in sql:
+                raise self.exc_factory()
+        return super().rows(sql)
+
+
+def test_section_markers_are_pinned_to_the_ledger_and_are_unambiguous():
+    """Validate the instrument before reading any verdict off it.
+
+    Two ways these tests could pass while testing nothing: a marker naming a section
+    gather() no longer runs (the failure is never induced), or a marker that appears in
+    more than one statement (killing two sections while the test claims one).
+    """
+    assert set(SECTION_MARKERS) == set(A.SECTION_LABELS), (
+        "SECTION_MARKERS and activity-scan's SECTION_LABELS ledger disagree: "
+        f"markers-only={sorted(set(SECTION_MARKERS) - set(A.SECTION_LABELS))}, "
+        f"ledger-only={sorted(set(A.SECTION_LABELS) - set(SECTION_MARKERS))}. Every "
+        "section must be degradable and every degradable section must be exercised here."
+    )
+    assert set(SECTION_EVIDENCE) == set(A.SECTION_LABELS)
+    statements = [b() for b in ALL_BUILDERS]
+    for key, marker in SECTION_MARKERS.items():
+        hits = [s for s in statements if marker in s]
+        assert len(hits) == 1, (
+            f"marker for {key!r} ({marker!r}) matches {len(hits)} of the seven "
+            "statements, not exactly 1 — a per-section failure induced with it would not "
+            "be per-section"
+        )
+
+
+@pytest.mark.parametrize("failed", sorted(SECTION_MARKERS))
+def test_one_failed_section_still_yields_the_other_six(failed):
+    """A single CHQueryError degrades ONE section; the rest of the report survives."""
+    client = FlakyClient(_sample_mapping(), failing=[SECTION_MARKERS[failed]])
+    try:
+        data = A.gather(client, days=7, host="laptop")
+    except A.Q.CHQueryError as e:
+        pytest.fail(
+            f"gather() let a CHQueryError from section {failed!r} escape ({e}) — that "
+            "section is not wrapped, so one unlucky query still destroys the whole report"
+        )
+    assert set(data["failures"]) == {failed}, (
+        f"expected exactly the {failed!r} section to be recorded as failed, got "
+        f"{sorted(data['failures'])}"
+    )
+    text = A.render(data)
+    for other, evidence in SECTION_EVIDENCE.items():
+        if other == failed:
+            continue
+        assert evidence in text, (
+            f"{other!r} vanished from the report when {failed!r} failed — its evidence "
+            f"{evidence!r} is missing; a per-section failure must cost exactly one section"
+        )
+
+
+@pytest.mark.parametrize("failed", sorted(SECTION_MARKERS))
+def test_a_failed_section_is_explicitly_marked_and_names_a_reason(failed):
+    """Never silently omitted, and never mistakable for an empty section."""
+    client = FlakyClient(_sample_mapping(), failing=[SECTION_MARKERS[failed]])
+    data = A.gather(client, days=7, host="laptop")
+    text = A.render(data)
+
+    assert text.count(A.SECTION_UNAVAILABLE_MARK) == 1, (
+        f"expected exactly one {A.SECTION_UNAVAILABLE_MARK!r} line for the failed "
+        f"{failed!r} section, got {text.count(A.SECTION_UNAVAILABLE_MARK)} — a failed "
+        "section that prints nothing turns a holed report into one that reads as complete"
+    )
+    marked = [ln for ln in text.splitlines() if A.SECTION_UNAVAILABLE_MARK in ln][0]
+    assert A.SECTION_LABELS[failed] in marked, (
+        f"the unavailable line does not name which section died: {marked!r}"
+    )
+    # 🔴 it must NAME A REASON, not just say "unavailable"
+    assert "241" in marked and "Memory limit" in marked, (
+        f"the unavailable line does not carry the failure reason: {marked!r} — a reader "
+        "cannot tell an OvercommitTracker kill from a broken query without it"
+    )
+    # ...and the banner must count it with digit boundaries ("1 of 7" is a substring of
+    # "11 of 7", so a bare `in` check would survive a miscount mutant).
+    assert re.search(r"(?<!\d)1 of 7 sections could not be computed", text), (
+        f"expected a PARTIAL banner counting exactly 1 of 7 failed sections; got:\n"
+        f"{text.splitlines()[1] if len(text.splitlines()) > 1 else '(no banner line)'}"
+    )
+
+
+@pytest.mark.parametrize("section", sorted(SECTION_MARKERS))
+def test_failed_reads_differently_from_empty(section):
+    """🔴 The core distinction: zero rows and a dead query must not render the same.
+
+    Same section, same fake client shape, two runs: one where the query returns nothing
+    and one where it raises. The rendered lines for that section must differ, the empty
+    run must carry no unavailable marker at all, and the failed run must not be quietly
+    presented with the section's "(none…)" wording.
+    """
+    empty = A.render(A.gather(FakeClient({}), days=7, host="laptop"))
+    failed = A.render(A.gather(
+        FlakyClient({}, failing=[SECTION_MARKERS[section]]), days=7, host="laptop"))
+
+    assert A.SECTION_UNAVAILABLE_MARK not in empty, (
+        "a report where every section legitimately returned zero rows must contain NO "
+        f"{A.SECTION_UNAVAILABLE_MARK!r} marker — empty is not failed"
+    )
+    assert "PARTIAL REPORT" not in empty, (
+        "an all-empty report is a COMPLETE report and must not be banner-flagged partial"
+    )
+    assert A.SECTION_UNAVAILABLE_MARK in failed, (
+        f"the {section!r} section failed and the report does not say so — indistinguishable "
+        "from the empty run above"
+    )
+    assert empty != failed, (
+        f"a failed {section!r} renders byte-identically to an empty {section!r}: the "
+        "report is asserting 'no data' about a query that never answered"
+    )
+
+
+def test_json_payload_records_the_failure():
+    """--json is a machine-readable report; the failure must be IN the payload."""
+    client = FlakyClient(_sample_mapping(), failing=[SECTION_MARKERS["top_binaries"]])
+    data = A.gather(client, days=7, host="laptop")
+
+    assert data["partial"] is True, (
+        "data['partial'] must be True when a section failed — a consumer branching on it "
+        "would treat a holed report as whole"
+    )
+    rec = data["failures"]["top_binaries"]
+    assert rec["code"] == 241, f"the ClickHouse error code is not in the payload: {rec}"
+    assert rec["http_status"] == 500
+    assert "Memory limit" in rec["error"]
+    assert rec["section"] == A.SECTION_LABELS["top_binaries"]
+    # and it must survive serialisation the way main() emits it
+    round_tripped = json.loads(json.dumps(data, indent=2, default=str))
+    assert round_tripped["failures"]["top_binaries"]["code"] == 241
+
+    clean = A.gather(FakeClient(_sample_mapping()), days=7, host="laptop")
+    assert clean["partial"] is False and clean["failures"] == {}, (
+        "a fully successful report must still carry the keys, set to 'nothing failed' — "
+        f"got partial={clean['partial']!r} failures={clean['failures']!r}"
+    )
+
+
+def test_failure_reason_is_bounded_to_one_line():
+    """CH error bodies are multi-line and long; a report line must stay a line."""
+    huge = A.Q.CHQueryError("Code: 241.\nDB::Exception: " + "x" * 900, code=241)
+    client = FlakyClient(_sample_mapping(),
+                         failing=[SECTION_MARKERS["deep_work"]],
+                         exc_factory=lambda: huge)
+    data = A.gather(client, days=7, host="laptop")
+    reason = data["failures"]["deep_work"]["error"]
+    assert "\n" not in reason, f"the recorded reason spans lines: {reason!r}"
+    assert len(reason) <= 300, f"the recorded reason is {len(reason)} chars, unbounded"
+    assert A.render(data).count("\n" + "  " + A.SECTION_UNAVAILABLE_MARK) == 1
+
+
+def test_ch_unreachable_is_not_degraded():
+    """🔴 The guard must not over-catch.
+
+    CHUnreachable means the server could not be reached AT ALL — nothing can be said
+    about any query, so retrying a different one is pointless (chquery's taxonomy says
+    exactly this). Degrading it would print six empty sections over a dead pipeline and
+    call the result a report. Broadening the except clause to CHError must fail here.
+    """
+    client = FlakyClient(
+        _sample_mapping(), failing=[SECTION_MARKERS["context_switches"]],
+        exc_factory=lambda: A.Q.CHUnreachable("URLError: connection refused"))
+    try:
+        data = A.gather(client, days=7, host="laptop")
+    except A.Q.CHUnreachable:
+        return
+    pytest.fail(
+        "gather() swallowed a CHUnreachable and returned a report "
+        f"(failures={sorted(data['failures'])}) — an unreachable server is not a "
+        "degraded section, it is a run that cannot say anything about any section"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# main(): a partial report must be distinguishable from a whole one by EXIT STATUS
+# --------------------------------------------------------------------------- #
+def _run_main(monkeypatch, client, argv):
+    monkeypatch.setattr(A.Q.CHConn, "from_env", classmethod(
+        lambda cls, env=None: A.Q.CHConn(url="http://x", user="u", password="p")))
+    monkeypatch.setattr(A.Q, "CHClient", lambda conn: client)
+    return A.main(argv)
+
+
+def test_main_exit_status_separates_partial_from_whole(monkeypatch, capsys):
+    rc = _run_main(monkeypatch, FakeClient(_sample_mapping()), ["--days", "7"])
+    assert rc == 0, f"a report with every section computed must exit 0, got {rc}"
+    capsys.readouterr()
+
+    flaky = FlakyClient(_sample_mapping(), failing=[SECTION_MARKERS["top_binaries"]])
+    rc = _run_main(monkeypatch, flaky, ["--days", "7"])
+    assert rc == A.EXIT_PARTIAL, (
+        f"a report that lost a section must exit {A.EXIT_PARTIAL} (PARTIAL), got {rc} — "
+        "a caller redirecting stdout cannot otherwise tell a whole report from a holed one"
+    )
+    assert A.EXIT_PARTIAL != 0, (
+        "EXIT_PARTIAL is 0, so the assertion above compares a partial run against a clean "
+        "one and cannot tell them apart — PARTIAL must be its own non-zero status"
+    )
+    err = capsys.readouterr().err
+    assert "top_binaries" in err and "241" in err, (
+        f"the partial run said nothing on stderr about which section died: {err!r}"
+    )
+
+
+def test_main_json_mode_emits_the_failure_and_still_exits_partial(monkeypatch, capsys):
+    flaky = FlakyClient(_sample_mapping(), failing=[SECTION_MARKERS["browser_by_domain"]])
+    rc = _run_main(monkeypatch, flaky, ["--days", "7", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["partial"] is True
+    assert payload["failures"]["browser_by_domain"]["code"] == 241
+    assert rc == A.EXIT_PARTIAL, (
+        f"--json lost a section and exited {rc}; PARTIAL must be reported the same way "
+        "in both output modes"
+    )
