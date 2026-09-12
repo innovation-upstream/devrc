@@ -403,24 +403,28 @@ class TestBothCliSurfaces:
 
         So git is made UNCALLABLE and the refusal is required to arrive anyway.
 
-        🔴 BOTH `_git`s ARE PATCHED, AND UNTIL THIS COMMIT ONLY ONE WAS — which
-        made this guard VACUOUS. It patched `subsystem_touch._git` and claimed
-        git had been made uncallable; since devrc consolidated onto the pinned
-        client the READER resolves through `entry_shape.scope_for_repo` →
-        `entry_shape._git`, a DIFFERENT function object (measured:
-        `st._git is entry_shape._git` → False). With `st._git` raising,
-        `rc.scope_for_repo(<a real repo>)` still succeeded — so the premise the
-        assertion rests on was false while the assertion passed. A guard that
-        reads as coverage while providing none is worse than none.
+        🔴 EXACTLY ONE `_git` IS PATCHED — `entry_shape._git` — AND THAT IS THE
+        WHOLE SET. This paragraph replaces two earlier ones that contradicted
+        each other in the same docstring (one announced "BOTH `_git`s are
+        patched", the other "ONLY `entry_shape._git`"), because the fix was
+        written in two steps and only the second half got corrected.
 
-        ⚠ ONLY `entry_shape._git` IS PATCHED, AND THAT IS THE WHOLE SET. A first
-        attempt patched `subsystem_touch._git` as well "for strength"; its mutant
-        SURVIVED — measured — because after the consolidation the writer's
-        `scope_for_repo` DELEGATES to `entry_shape.scope_for_repo`, so
-        `subsystem_touch._git` is no longer on the scope path at all (it is still
-        used elsewhere in that module, by `collect_git_paths`). A patch whose
-        removal changes nothing is not extra safety; it is a line that makes the
-        set look bigger than the claim.
+        The history, as ONE account:
+
+          * The pre-consolidation guard patched `subsystem_touch._git` and
+            claimed git had been made uncallable. Since devrc consolidated onto
+            the pinned client the READER resolves through
+            `entry_shape.scope_for_repo` → `entry_shape._git`, a DIFFERENT
+            function object (measured: `st._git is entry_shape._git` → False).
+            With `st._git` raising, `rc.scope_for_repo(<a real repo>)` still
+            succeeded — the premise was false while the assertion passed. That is
+            the vacuity this fix is about.
+          * The first fix patched BOTH "for strength". Its mutant SURVIVED: the
+            writer's `scope_for_repo` DELEGATES to `entry_shape.scope_for_repo`,
+            so `subsystem_touch._git` is no longer on the scope path at all (it
+            is still used elsewhere in that module, by `collect_git_paths`). A
+            patch whose removal changes nothing is not extra safety, so it was
+            deleted rather than annotated.
         """
 
         def _no_git(*_a, **_k):  # pragma: no cover - the point is that it is not hit
@@ -431,16 +435,28 @@ class TestBothCliSurfaces:
         monkeypatch.setattr(entry_shape, "_git", _no_git)
 
         # 🔴 PROVE THE INSTRUMENT IS LIVE BEFORE READING ITS VERDICT. A
-        # not-a-directory input never reaches EITHER `_git`, so the two patches
-        # above are unobservable from the assertion below — MEASURED: deleting
-        # the `entry_shape` patch leaves this test green. That is not redundancy
-        # to shrug at, it is the reason the pre-consolidation version of this
-        # guard was VACUOUS and passed for a year while patching a `_git` the
-        # reader had stopped using. So: first drive an input that MUST call git
-        # and require the sentinel to arrive. If this stops raising, the patches
-        # are inert and the "git was never invoked" claim below means nothing.
-        # BOTH CLIs, because both must be shown to reach the patched function —
-        # the writer through its wrapper, the reader directly.
+        # not-a-directory input never reaches `_git` at all, so the patch above
+        # is unobservable from the final assertion — which is exactly how the
+        # pre-consolidation version of this guard stayed green while patching a
+        # `_git` the reader had stopped using. So: first drive an input that MUST
+        # call git and require the sentinel to arrive. If these stop raising, the
+        # patch is inert and the "git was never invoked" claim below means
+        # nothing.
+        #
+        # ⚠ AN EARLIER VERSION OF THIS COMMENT SAID "deleting the `entry_shape`
+        # patch leaves this test green". That was the PRE-FIX reading and it is
+        # FALSE at head — the two probes below are what made it false. Deleting
+        # the one `setattr` now goes RED, re-measured twice, and the failure
+        # differs by environment, which is worth knowing before reading a future
+        # mutation result: in a real git repo it dies on this guard's own
+        # `AssertionError: git was invoked`; in a `.git`-less `cp -a` copy the
+        # probe reaches real git first and it dies on `entry_shape.GitError`.
+        # Both are the instrument telling the truth; only the first names this
+        # guard.
+        # BOTH CLIs, because both must be shown to reach the ONE patched
+        # function — the writer through its wrapper, the reader directly. That
+        # the writer arrives there too is the fact the deleted second patch was
+        # obscuring.
         with pytest.raises(AssertionError, match="git was invoked"):
             rc.scope_for_repo(ROOT)
         with pytest.raises(AssertionError, match="git was invoked"):

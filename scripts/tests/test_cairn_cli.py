@@ -1330,10 +1330,30 @@ def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
     ⚠ AN EARLIER VERSION SAID "the two are not yet consolidated". That is now
     false — the five reader modules ARE consolidated onto the pin. What survives
     is narrower and is the whole reason this guard still applies: `scripts/lib/`
-    is still a real sibling directory holding devrc-ONLY modules (`cairn_pin`,
-    `timeouts`, `subsystem_touch`), and `scripts/cairn` still reaches them by
-    `__file__`-relative path — so the deploy mode below still cannot be a bare
+    is still a real sibling directory that `scripts/cairn` reaches by
+    `__file__`-relative path, so the deploy mode below still cannot be a bare
     store copy.
+
+    🔴 `timeouts` IS NOT devrc-ONLY, AND AN EARLIER VERSION OF THIS PARAGRAPH
+    SAID IT WAS. It exists in BOTH trees (sizes at the pin current when this was
+    written: devrc 3,526 B, pinned 1,671 B — the EXISTENCE is the claim, the
+    bytes will move on a pin bump and nothing checks them), so in
+    a change whose title is "delete the five forked reader modules", calling it
+    unique to devrc is precisely the sentence that would stop the next person
+    noticing a SIXTH surviving duplicate. It is deliberate and it is documented
+    (`cairn_pin`'s overlap ledger is the two-way pin on exactly that set), not an
+    oversight.
+
+    ⚠ No behavioural risk today, and the reason is measured rather than assumed:
+    NOTHING in the pinned lib imports `timeouts` (0 of its modules; positive
+    control on the same scan — 2 of them import `subsystem_resolver`), so the
+    pinned copy is never the one a devrc consumer ends up with by accident. ⚠ Both
+    counts are of the pin current when this was written; a bump can move them, and
+    the thing that would actually catch a change is `test_cairn_pin.py`'s overlap
+    ledger, not this sentence.
+
+    The genuinely devrc-only modules this guard rests on are `cairn_pin` and
+    `subsystem_touch`, and the assertion below names `cairn_pin` for that reason.
     """
     src = (REPO / "scripts" / "cairn").read_text()
     assert 'Path(__file__).resolve().parent / "lib"' in src, (

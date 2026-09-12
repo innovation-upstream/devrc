@@ -559,6 +559,30 @@ PIN_REQUIRING_UNITS = {
 
 CAIRN_LIB_ENTRY = "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
 
+#: 🔴 WHAT ACTUALLY HAPPENS WITHOUT THE ENTRY, PER UNIT — and it is NOT the same
+#: for all three. An earlier version of this guard said "this unit will not
+#: start" for every member of the ledger. True for two; FALSE for
+#: `present-regen`, because `measure.py::m_index_store` catches
+#: `CairnPinUnresolved` and degrades that row to `Unmeasurable`. The ledger was
+#: widened to three units in the same change that left the consequence at one —
+#: so the consequence is now per-unit too.
+#:
+#: ⚠ THE WEAKER CASE IS THE MORE DANGEROUS ONE. A unit that will not start gets
+#: noticed; a page that publishes daily with one row quietly unmeasured does not.
+PIN_ABSENCE_CONSEQUENCE = {
+    "analyze-service-index-backup":
+        "Without it the unit does NOT start at all: the import raises before "
+        "anything runs, so the backup simply stops happening.",
+    "handoff-index-sync":
+        "Without it the unit does NOT start at all: the import raises before "
+        "anything runs, so the index stops being synced.",
+    "present-regen":
+        "Without it the unit STILL RUNS and still publishes a page — "
+        "`measure.py::m_index_store` degrades the index-store row to "
+        "Unmeasurable. That is quieter than a dead timer, not milder: the page "
+        "keeps looking healthy while one of its rows has stopped measuring.",
+}
+
 
 def _unit_environment(home_nix: str, unit: str) -> list[str]:
     """The `Environment = [ … ]` entries of one `systemd.user.services.<unit>`.
@@ -586,10 +610,10 @@ def test_every_scheduled_consumer_of_the_pin_declares_CAIRN_LIB():
         entries = _unit_environment(home_nix, unit)
         assert CAIRN_LIB_ENTRY in entries, (
             f"`{unit}` does not set `{CAIRN_LIB_ENTRY}`, and it needs it: {why}. "
-            f"Its PATH is a closed list with no cairn in it, and "
-            f"`cairn_pin.ensure()` raises rather than degrading — so this unit "
-            f"will not start. It breaks on the next `git pull`, because the unit "
-            f"ExecStarts the working-tree copy."
+            f"Its PATH is a closed list with no cairn in it, so nothing else can "
+            f"answer. It breaks on the next `git pull`, because the unit runs the "
+            f"working-tree copy — not on a switch. "
+            f"{PIN_ABSENCE_CONSEQUENCE[unit]}"
         )
         # POSITIVE CONTROL on the parse: a reader that silently matched the wrong
         # block would also "find" the entry. Every one of these units sets PATH.

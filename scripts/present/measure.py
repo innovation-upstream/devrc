@@ -1050,11 +1050,20 @@ def m_index_store(env: Env) -> dict:
             "state, so a host without one is a state, not a defect"
         )
     sys.path.insert(0, str(lib))
+    # 🔴 IMPORTED OUTSIDE THE `try`, AND THAT IS NOT STYLE. The `except` clause
+    # below names `cairn_pin.CairnPinUnresolved`; a clause's expression is
+    # evaluated when the exception fires, so with the import INSIDE the `try` a
+    # failed import would leave the name unbound and the handler itself would
+    # raise `UnboundLocalError` — past the `except Exception` that follows,
+    # because that one is already being skipped over. Unreachable today (the
+    # module is beside this file and stdlib-only), which is exactly the kind of
+    # latent shape that surfaces on the day something else moves.
+    import cairn_pin  # noqa: PLC0415
+
     try:
         # 🔴 `subsystem_recall` IS THE PINNED MODULE, not a `scripts/lib/` copy —
         # devrc deleted its fork when it consolidated onto the `cairn` flake pin.
         # `cairn_pin.ensure()` appends the packaged `lib/` to `sys.path`.
-        import cairn_pin  # noqa: PLC0415
         cairn_pin.ensure()
         import subsystem_recall  # noqa: PLC0415
         _, idx = subsystem_recall.load_store(env.index_store, verb="present")
@@ -1540,9 +1549,19 @@ def m_store_api_clients(env: Env) -> dict:
     # rendered-artefact defect the note above is about. They are not re-pointed at
     # the pinned copies either: the question this row answers is "can a LOCAL
     # reader speak HTTP", and a module inside a /nix/store closure is not a local
-    # reader anyone here can change. `scripts/cairn` is added because it IS the
-    # devrc-side thing that speaks to the server, and leaving it out while
-    # deleting the two would have understated the count.
+    # reader anyone here can change.
+    #
+    # The two ADDED entries, each with its own reason — the first version of this
+    # comment justified only one of them, which is how a list grows an unexplained
+    # member:
+    #   * `scripts/cairn` — it IS the devrc-side thing that speaks to the server,
+    #     so leaving it out while deleting the two would have understated the
+    #     count. It is the entry that makes this row non-zero.
+    #   * `scripts/cairn-validate` — a local reader of the same store that does
+    #     NOT speak HTTP (measured: 0 `urllib`/`http` references). It is here as
+    #     the discriminating case: a list in which every member speaks HTTP
+    #     cannot show that the predicate is reading anything, and this row's
+    #     whole history is of a grep that matched the wrong thing.
     readers = ["scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py",
                "scripts/cairn", "scripts/cairn-validate"]
     rows = []
@@ -1560,13 +1579,17 @@ def m_store_api_clients(env: Env) -> dict:
     return dict(
         value=f"{clients} local reader(s) can speak to it",
         detail=(
-            "The server is built, tested and hosted. The consuming client was "
-            "designed and decided — 'hosted is an ENTRY-LEVEL ADVISORY, never the "
-            "primary read' — and then never written; the handoff says so in its "
-            "own words. The only things that have ever spoken to it are its own "
-            "seed and byte-identity scripts. 🔴 This is the shape worth "
-            "recognising: a subsystem can be complete, correct, well-tested and "
-            "have no reader, and every gate stays green throughout."
+            "The server is built, tested and hosted, and it now has a client: "
+            "`scripts/cairn` speaks to it over HTTP. 🔴 THE SHAPE WORTH "
+            "RECOGNISING IS THE PERIOD BEFORE THAT, NOT THE STATE NOW. This "
+            "subsystem was complete, correct, well-tested and READERLESS for "
+            "months — the client was designed and decided ('hosted is an "
+            "ENTRY-LEVEL ADVISORY, never the primary read') and then simply not "
+            "written, while every gate stayed green throughout. The only things "
+            "that had ever spoken to it were its own seed and byte-identity "
+            "scripts, until the client shipped in 2026-08. This row is what "
+            "turned that from an impression into a number, so it is kept "
+            "measuring rather than retired."
         ),
         source="wc -l over scripts/subsystem-store-api/ + an HTTP-client grep over the local store readers",
         columns=("reader / artefact", "finding"),

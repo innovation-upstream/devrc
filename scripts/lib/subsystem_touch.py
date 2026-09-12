@@ -333,9 +333,17 @@ from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 # ⚠ THIS BINDING NOW HAS NO CALL SITE IN THIS MODULE — measured CODE-ONLY
 # (`ast.unparse` with docstrings stripped): `this_host()` appears 0 times, every
 # use having moved behind `entry_shape.store_host`. Positive control, same pass:
-# `store_host()` appears 2 times. ⚠ A BARE `grep -c` DISAGREES and says 2 — both
-# hits are prose, one of them this very comment — so re-derive it code-only or
-# not at all.
+# `store_host()` appears 2 times.
+#
+# 🔴 A BARE `grep` DISAGREES, AND NO NUMBER FOR IT IS WORTH WRITING DOWN HERE.
+# An earlier version of this comment quoted one ("says 2 — both hits are prose")
+# and it was FALSE by the time it was committed: expanding this very comment is
+# what moved the count, and the same edit both asserted the number and
+# invalidated it. A later re-measure gave 8 lines / 9 occurrences, one of which
+# is the `import` line below — real code, not prose. That number will rot the
+# next time anyone edits this paragraph too, so the claim is DROPPED rather than
+# refreshed: there is no stable grep figure to quote, only the code-only
+# measurement above, and that is the one to re-derive.
 # An earlier version of this comment said "several call sites and tests name it",
 # and the call-site half was simply false. It is retained for ONE reason, and the
 # honest statement is that it is the only one: `test_subsystem_touch.py::

@@ -4266,6 +4266,15 @@ in
         # no cairn in it (measured on the live unit). This unit runs the
         # WORKING-TREE copy, so without this entry it breaks on the operator's
         # next `git pull`, not on a switch.
+        #
+        # ⚠ "BREAKS" IS WEAKER HERE THAN FOR THE OTHER TWO UNITS, AND THE
+        # DIFFERENCE IS DELIBERATE. `measure.py::m_index_store` catches
+        # `CairnPinUnresolved` and degrades that ROW to `Unmeasurable`, so
+        # without this entry `present-regen` still RUNS and still publishes a
+        # page — it just publishes one whose index-store row says the pinned
+        # client is not available. That is a silent-ish loss rather than a dead
+        # timer, which makes this entry MORE worth having, not less: a failing
+        # unit is noticed, a quietly unmeasured row is not.
         "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
         "PRESENT_REPO=%h/workspace/devrc"
         # 🔴 The SAME directory present-serve reads. Two literals that must

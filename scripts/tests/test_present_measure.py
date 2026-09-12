@@ -314,6 +314,69 @@ def test_the_rules_ceiling_is_read_from_the_test_that_owns_it():
     )
 
 
+def test_the_reader_rows_and_the_detail_prose_do_not_CONTRADICT_each_other():
+    """🔴 A MEASURED ROW THAT CONTRADICTS THE PARAGRAPH IT SITS UNDER — TWICE on
+    this one row, and both times it was caught by a human reading the rendered
+    page rather than by anything here.
+
+    (An earlier draft of this docstring said "the third time". Two is what the
+    record supports, and inflating it is the same defect as the one being
+    guarded — a sentence asserting a number nobody re-derived.)
+
+    History, because it is the argument for a test rather than a sharper comment:
+    the predicate once matched the bare token `requests` in prose and scored two
+    readers HTTP-capable off the phrase "pull requests"; and when the reader list
+    was updated for the cairn consolidation the count went 0 -> 1 while the
+    `detail` still read "a subsystem can be complete, correct, well-tested and
+    have no reader". `present-regen` republishes that page daily.
+
+    🔴 WHAT THIS CAN AND CANNOT SEE. It pins ONE relationship — the count in
+    `value` against the tense of the prose in `detail` — because that is the
+    contradiction that has actually shipped, twice. It is not a general
+    prose-checker and cannot tell whether the rest of the paragraph is true. A
+    reword that keeps both halves honest passes; a reword that re-asserts
+    readerlessness over a non-zero count fails.
+    """
+    env = measure.Env(repo=REPO_ROOT, home=Path.home(),
+                      claude_dir=Path.home() / ".claude",
+                      index_store=Path.home() / ".claude" / "nonexistent",
+                      allow_systemd=False, allow_network=False)
+    entry = next(e for e in measure.REGISTRY
+                 if "reader(s) can speak" in (measure.take(env, _registry(e))
+                                              .by_key(e[0]).value or ""))
+    row = measure.take(env, _registry(entry)).by_key(entry[0])
+    assert row.measured, row.reason
+
+    count = int(row.value.split()[0])
+    speaks = [r for r in row.rows if r[1] == "speaks HTTP"]
+    # POSITIVE CONTROL on the parse: the number in the sentence and the rows it
+    # is derived from must agree, or this guard is comparing prose to nothing.
+    assert count == len(speaks), (
+        f"the row's own value ({row.value!r}) disagrees with its rows "
+        f"({speaks!r}) — this guard cannot say anything about the prose until "
+        f"the number it compares against is the number the rows produce"
+    )
+
+    readerless = ("have no reader", "never written", "no reader")
+    if count > 0:
+        for phrase in readerless:
+            assert phrase not in row.detail, (
+                f"the row measures {count} local reader(s) that speak HTTP "
+                f"({[r[0] for r in speaks]}) while its own `detail` still says "
+                f"{phrase!r}. The page contradicts itself and present-regen "
+                f"republishes it daily. Fix the prose to match what the row now "
+                f"measures — and do not fix it by deleting the row: the "
+                f"readerless period is the finding this row exists to have "
+                f"recorded, it is just no longer the present tense."
+            )
+    else:
+        assert any(p in row.detail for p in readerless), (
+            "the row measures ZERO readers that speak HTTP and its `detail` no "
+            "longer says so — the paragraph has drifted the other way, which is "
+            "the same defect facing the other direction"
+        )
+
+
 def test_the_index_store_row_can_actually_be_MEASURED(tmp_path):
     """🔴 REGRESSION COVERAGE — the MEASURED branch was DEAD and 50 tests passed.
 
