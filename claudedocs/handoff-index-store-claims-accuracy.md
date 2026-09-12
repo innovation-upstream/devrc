@@ -424,8 +424,28 @@ nothing was recorded and no task was created.
   control proving the caveat is load-bearing. **Prose that tells an operator what to
   do is payload — audit it like code.**
 - ⚠ **`cairn create` EXISTS** (`34d00d90`/#1254, `PUT` + `If-None-Match: *`), so
-  retiring P3 strands nothing. Two comments in the tree still claimed the API had
-  "no create route"; that stale sentence was what made this look costly.
+  retiring P3 strands nothing. Two comments in the tree still said the API had
+  "no create route" — that sentence is wrong, and it was what made this look
+  costly. ⚠ UPDATED 2026-09-11. Measured by loading the repo's OWN scanner
+  (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`) against an
+  extracted `8b2b960b` tree, with a positive control returning 1 so the figures
+  are not a wired-to-nothing zero: **10 occurrences across 8 files; 9 live and
+  unmarked in 7 files; 8 live in 6 files besides the `cairn` SKILL.md.** One
+  straddles a newline AND is uppercase, so case-sensitive and line-based greps
+  both miss it.
+  🔴 **THIS BULLET'S COUNT HAS NOW BEEN WRONG TWICE, WHICH IS THE POINT OF IT.**
+  It first said "two comments", then "four live sites in four tracked files"
+  (round 1 caught it), then "6 live in 4 files" (round 2 caught that). Each wrong
+  figure was produced by a hand sweep and each read as precise. **Do not quote a
+  count here you have not re-derived with the scanner.**
+  🔴 **AND "ALL SITES ARE CORRECTED" WAS ITSELF FALSE WHEN WRITTEN — round 3 found
+  TWO more live, present-tense sites, one of them 115 lines below that claim in
+  this very file.** Four sweeps, four spellings: mechanism → one conclusion phrase
+  → two more. **A string needle cannot close this class**, because the claim has
+  no canonical wording; the needles in `_RETRACTED_BOUNDARY` catch the five
+  spellings seen so far and nothing guarantees a sixth. Sweep by MEANING before
+  claiming this class is clean, and do not write "all sites are corrected" again
+  without showing the sweep that establishes it.
 - ⚠ **A mutation batch that reports a green may have applied NO mutant.** My first
   attempt at the round-4 verification had a non-matching anchor and printed "97
   passed" — indistinguishable from a survival. Only the traceback caught it.
@@ -526,10 +546,13 @@ nothing was recorded and no task was created.
 - 🔴 **A line-based bullet scan under-counts against a multi-line corpus.** `^- YYYY-MM-DD:`
   found 24; block-aware parsing found 25, and the extra one was a stranded in-place EDIT of an
   existing pod bullet — a case that must be REPLACED, never inserted, or it duplicates.
-- **The `cairn` write verbs are `append` and `put` only.** `PUT` requires `If-Match` (428
-  without) and explicitly REFUSES `If-Match: *`; `replace_entry` opens `path.read_bytes()`. So
-  the pod structurally cannot accept a new entry, and `seed.sh` is the only path that ever
-  created one. That is why item 1 is a code change, not an operation.
+- ⚠ **RETRACTED — this bullet described the PRE-#1254 world and read as current.** It said the
+  write verbs were `append` and `put` only; it said the pod *"structurally cannot accept a new
+  entry"*; and it said `seed.sh` was *"the only path that ever created one"*. Each of those
+  is wrong today — **devrc#1254 / `34d00d90`** added `create`, which makes the scope directory
+  too. 🔴 This bullet survived a sweep that had just declared "All sites are corrected"
+  — **115 lines above it** — because that sweep matched strings and these sentences spell the
+  claim differently. Do not reach for `seed.sh` on the strength of a paragraph like this one.
 - **Front-matter/`## Pointers` divergence was checked and was ZERO** — all 10 shared entries
   were byte-identical above `## Nuance / work-history`, which is what made a bullet-level
   insert safe. Do not assume that holds next time; it was measured, not reasoned.

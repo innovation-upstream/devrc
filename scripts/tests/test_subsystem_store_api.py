@@ -4242,7 +4242,81 @@ _RETRACTED_BOUNDARY = (
     # copies of the number drifted together, which is exactly what a repo-wide
     # needle catches and three hand-checked sites do not.
     "51 entries of headroom",
+    # 🔴 ALSO NOT A BOUNDARY CLAIM — SAME FAILURE MODE, SAME SCANNER, and this
+    # one is the argument for the scanner rather than an application of it.
+    # "there is no CREATE route" was true until devrc#1254 (`34d00d90`) shipped
+    # `PUT … If-None-Match: *` and the `cairn create` verb. `claude/skills/cairn/
+    # SKILL.md` then asserted it for 8 more days, and a hand sweep run while
+    # fixing THAT file reported the repo clean — it was case-sensitive, and of
+    # the four live copies it missed, one straddled a newline inside a
+    # docstring. A line-based grep structurally cannot see that one; this
+    # scanner normalises wraps and case, which is the whole point.
+    # 🔴 THIS COMMENT ITSELF CARRIED A FALSE CLAIM AND TOLD READERS NOT TO FIX
+    # IT — the worst shape a note in a guard can take, and it is recorded rather
+    # than deleted. It read: "a new SCOPE's first entry still cannot be created
+    # through the API (the index is built by walking the store root) — do not
+    # 'correct' that sentence into a falsehood in the other direction."
+    # MEASURED FALSE: `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+    # `test_a_scopes_FIRST_entry_creates_the_directory` (this file) asserts 201
+    # for an allowlisted scope with NO directory. The only gate is the token's
+    # scope allowlist. The probe that produced the wrong claim used a scope that
+    # was absent AND non-allowlisted on a pod where those sets coincide, so it
+    # could not separate the two mechanisms.
+    # ⚠ FALSE-POSITIVE RANGE: this needle is a short, generic phrase, unlike the
+    # long sentences above it. A TRUE statement about some OTHER API ("the
+    # auditloop plugin push API has no create route") trips it. That is the
+    # known cost; reword, or carry a retraction marker within `_MARKER_WINDOW`.
+    "no create route",
+    # 🔴 THE SECOND RETRACTION NEEDS ITS OWN NEEDLE, and leaving it out is how
+    # the FIRST one drifted for eight days. The replacement claim — that a new
+    # scope's first entry still could not be created, so it "remains an operator
+    # step" — was ALSO false, and a round-2 audit found an 8th live site spelling
+    # it this way inside a file whose other copy had just been corrected. A
+    # phrase-scoped hand sweep could not see it: it searched the MECHANISM
+    # ("walking the store root"), and this site states only the CONCLUSION.
+    # Pinning the conclusion is what closes that gap.
+    # ⚠ Deliberately NOT needling "walking the store root": that phrase TRULY
+    # describes `snapshot_freshness`, which really does walk the root, so it
+    # would fire on correct writing.
+    #
+    # 🔴 AND THE FIRST DRAFT OF THESE TWO NEEDLES BROKE THAT VERY RULE. They read
+    # "remains an operator step" / "is still an operator step" — no subject at
+    # all, i.e. ordinary English about any operator step anywhere. MEASURED: the
+    # repo carries 9 TRUE occurrences of "operator step" across 7 unrelated files
+    # (signal provisioning, nix disk cleanup, tmux-webapp, browser-bridge,
+    # cairn-oss-multi-instance), each ONE WORD from turning this gate red, and a
+    # round-3 audit turned it red by changing "is" to "remains" in a doc about
+    # `sudo`. `claude/RULES.md`: a permanently-red gate is worse than no gate.
+    # 🔴 AND NARROWING THEM ONCE WAS STILL NOT ENOUGH — THIS IS THE THIRD PASS.
+    # Round 3 rewrote them to "first entry remains/is still an operator step" and
+    # added three more taken verbatim from real sites. A round-4 audit built its
+    # own false-positive probe and SIX of ten TRUE sentences fired; my own probe,
+    # written independently, got SEVEN of eight. Worst of them fired on the
+    # supposedly-narrowed needle: "The first entry remains an operator step for
+    # the OSS multi-instance store" is TRUE — that store really has no create
+    # verb yet — so the needle was still unbound to WHICH store it is about.
+    # Every needle below now carries a token tying it to THIS pod/claim, and the
+    # pair is re-verified on every change: a false-positive probe of true
+    # sentences, and a mutation battery of real reassertions.
+    "scope's first entry remains an operator step",
+    "scope's first entry is still an operator step",
+    "the pod structurally cannot accept a new entry",
+    "seed.sh is the only path that ever created one",
+    "first record can only reach the pod through an operator",
+    # ⚠ The 9th site spelled the claim TWICE in one paragraph; round 3 needled
+    # only the first half. This is the second, and it was left uncaught until a
+    # round-4 audit ran a copy-back of it and watched it SURVIVE.
+    "only create path available to a session",
 )
+
+# 🔴 A STRING NEEDLE CANNOT CLOSE THIS CLASS, AND FOUR ROUNDS OF TRYING IS THE
+# EVIDENCE. Round 1 swept by MECHANISM ("walking the store root") and missed a
+# site spelling the CONCLUSION; round 2 needled one conclusion phrase and missed
+# two more spellings; round 3 found those. Every pass swept by STRING, and the
+# claim has no canonical wording. Before declaring this class clean, sweep by
+# MEANING — e.g. `first (entry|record)` within ~120 chars of `seed|operator`,
+# plus "only create path" — and do not write "all sites are corrected" again
+# without showing the sweep that establishes it.
 
 # A retraction has to QUOTE the claim to retract it, so an occurrence with one
 # of these NEARBY is a correction, not an assertion. Kept deliberately short: a
