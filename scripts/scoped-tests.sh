@@ -119,7 +119,7 @@ while [ $# -gt 0 ]; do
     --set=*) SET="${1#*=}"; shift ;;
     --dry-run) DRY=1; shift ;;
     --no-ledgers) LEDGERS=0; shift ;;
-    -h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) ROOT="$1"; shift ;;
   esac
 done
@@ -303,7 +303,20 @@ while IFS= read -r _l; do [ -n "$_l" ] && SETCHANGE+=("$_l"); done <<EOF
 $SETCHANGE_RAW
 EOF
 
-if [ "$LEDGERS" -eq 0 ]; then
+LEDGER_CHECK="$ROOT/scripts/ledger-check.sh"
+if [ ! -f "$LEDGER_CHECK" ]; then
+  # 🔴 FAILS OPEN, LOUDLY, AND ONLY HERE. In this repo the checker is tracked
+  # and `test_census_scan.py::test_the_runner_is_tracked_and_executable` pins
+  # that, so an absence can only mean a foreign or throwaway tree — which is
+  # exactly what several existing mapper fixtures are. Exiting 127 there would
+  # fail unrelated tests for a reason that has nothing to do with them.
+  # It says so rather than staying quiet: a check that silently did not happen
+  # is indistinguishable from one that passed.
+  if [ "${#SETCHANGE[@]}" -gt 0 ]; then
+    echo "scoped-tests: ⚠ ${#SETCHANGE[@]} file(s) entered or left the tree, but"
+    echo "  $LEDGER_CHECK is MISSING — repo-census guards NOT run."
+  fi
+elif [ "$LEDGERS" -eq 0 ]; then
   echo "scoped-tests: ⚠ repo-census guards SKIPPED (--no-ledgers), and ${#SETCHANGE[@]}"
   echo "  file(s) entered or left the tree. That is the shape that reddens main."
 elif [ "${#SETCHANGE[@]}" -eq 0 ]; then
@@ -317,7 +330,7 @@ else
   echo "scoped-tests: ${#SETCHANGE[@]} file(s) entered or left the tree — running the"
   echo "  repo-census guards first (scripts/ledger-check.sh)."
   for _s in "${SETCHANGE[@]}"; do echo "    set-change: $_s"; done
-  bash "$ROOT/scripts/ledger-check.sh"
+  bash "$LEDGER_CHECK"
   _lrc=$?
   if [ "$_lrc" -ne 0 ]; then
     echo "" >&2

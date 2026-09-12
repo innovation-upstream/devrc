@@ -398,11 +398,14 @@ def test_the_runner_is_tracked_and_executable():
 def _run_checker(*args: str, env: dict | None = None, timeout: int = 300):
     """Drive `ledger-check.sh` itself.
 
-    🔴 Its own bound, and deliberately short of the 600 s that governs nested
-    full suites: every case below is expected to refuse in seconds, so a long
-    bound would turn a wedged run into a ten-minute stall for no coverage.
-    See `scripts/tests/test_runner_bound_ledger.py` — this site is recorded
-    there.
+    ⚠ `ledger-check.sh` is NOT one of `_RUNNER_TOKENS`, so this spawn is
+    invisible to `test_runner_bound_ledger.py` and needs no ledger row. Do not
+    "fix" that by adding one — a row for a site the discovery pass cannot see
+    would go red as a phantom the first time the ledger is compared.
+
+    The bound is its own and deliberately short of the 600 s that governs
+    nested full suites: every case below refuses in seconds, so a long bound
+    would turn a wedged run into a ten-minute stall for no coverage.
     """
     merged = dict(os.environ)
     merged.update(env or {})
