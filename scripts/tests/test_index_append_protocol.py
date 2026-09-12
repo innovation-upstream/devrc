@@ -1121,7 +1121,29 @@ class TestTheOwnersMechanismProseIsPinnedWHOLE:
     # `cairn create`), and these seven paragraphs describe ONE protocol for both
     # callers with NO per-caller exception — the create case is the SAME verb for
     # `/handoff` and `/analyze-service`, differing only in `--writer`.
-    EXPECTED_SHA = "738bef255e94a48b9459b80ee72325ce65fabb1842d57ec374d5d1702ac873d9"
+    #
+    # Updated 2026-09-11 for devrc#1170 🟡5. What moved: the freeze/address
+    # paragraph gained a clause naming WHICH probe each caller runs
+    # (`subsystem_touch.py` for `/handoff`, `service_recon.py` for
+    # `/analyze-service`) and stating that BOTH now print the `policy:` line from
+    # the SAME resolver, plus a note that `service_recon` has a fourth basis
+    # (`NOT RESOLVED — no scope was reached`) which is not a spelling of "neither
+    # README exists". Paragraph COUNT unchanged at 7; one paragraph grew.
+    #
+    # 🔴 Both doors re-read before this hash was pasted, which is what the
+    # failure message demands. `write-back.md` is UNCHANGED by this commit — step
+    # 4 still routes to the owner, it still states no mechanism of its own, and
+    # its own region hash is untouched; its caller facts are still just
+    # `--writer analyze-service` and the `cairn create` address.
+    #
+    # 🔴 AND THIS IS NOT A CARVE-OUT, which is the shape this guard exists to
+    # catch. The dangerous shape is "for caller X, do it differently"; this
+    # clause is the opposite — it exists because the ONE instruction
+    # ("read the policy file the probe named on its `policy:` line") was
+    # satisfiable for only one of the two callers, measured 0 occurrences of
+    # `policy:` in `service_recon.py` on 2026-09-10. Naming both binaries is what
+    # makes one protocol executable by both, not an exception added to it.
+    EXPECTED_SHA = "ddc10688edc72f6fce8ee2c6f654b5f6d5e06748ab8ee247016b2470abcae973"
 
     @staticmethod
     def _digest(owner: str) -> tuple[str, list[str]]:
