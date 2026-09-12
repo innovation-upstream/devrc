@@ -24,10 +24,23 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SCRIPTS))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
+# Resolved once, to an ABSOLUTE path, for the same reason the sibling suites do
+# it: `/usr/bin/env` does not exist in the nix build sandbox, and a bare "bash"
+# would be looked up in the child's PATH — which this harness deliberately
+# front-loads with a stub directory.
+_BASH = shutil.which("bash")
 
 ROOT = Path(__file__).resolve().parents[2]
 PKG = ROOT / "nix" / "pkgs" / "tools" / "nvim-octo"
@@ -393,15 +406,21 @@ def _run_wrapper(tmp_path: Path, *args: str):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     log = tmp_path / "nvim-argv"
-    stub = bindir / "nvim"
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
-        f'printf "%s\\n" "$@" > {log}\n'
-        "exit 0\n")
-    stub.chmod(0o755)
+    # 🔴 `write_exec`, NOT `write_text` + a hand-written shebang. It owns the
+    # shebang precisely so a call site cannot reintroduce `#!/usr/bin/env`,
+    # which does not exist in the nix build sandbox — the flake's
+    # `patchShebangs src/scripts` is there for the same reason.
+    #
+    # This is a TWO-TIER blind spot, caught by the repo-wide guard
+    # `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` running in CI and
+    # NOT by any dev-host run of this file: `/usr/bin/env` resolves on the
+    # workbench, so the stub executed and every test here was green while the
+    # sandbox tier could not have run them at all.
+    write_exec(bindir / "nvim", f'printf "%s\\n" "$@" > {log}\nexit 0\n')
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    assert _BASH, "bash is not on PATH — this harness cannot run the wrapper"
     proc = subprocess.run(
-        ["bash", "-euo", "pipefail", str(WRAPPER_SH), *args],
+        [_BASH, "-euo", "pipefail", str(WRAPPER_SH), *args],
         capture_output=True, text=True, env=env, timeout=60)
     argv = log.read_text().splitlines() if log.exists() else []
     return proc, argv
