@@ -27,6 +27,7 @@ adapter end-to-end through a subprocess and is the regression suite for every
 raw-text bypass the original six checks close. It must stay green unchanged.
 """
 import itertools
+import os
 import re
 import sys
 from pathlib import Path
@@ -4591,10 +4592,24 @@ def test_a_SOURCED_script_is_a_KNOWN_GAP_and_stays_allowed(script, template, tmp
     and then reopen silently.
 
     Sourcing runs in the CURRENT shell, so on danger alone it deserves reading
-    MORE than `bash <file>`. It is excluded because a different invariant
-    outranks it here: `test_the_hot_path_reads_no_files_and_execs_no_git` pins
-    that this hook must not open a file merely because a command names one, and
-    `. wt.env; ls` is the commonest shape on that path.
+    MORE than `bash <file>`.
+
+    ⚠ THE REASON THIS DOCSTRING USED TO GIVE WAS FALSE. It said
+    `test_the_hot_path_reads_no_files_and_execs_no_git` pins "that this hook must
+    not open a file merely because a command names one". That test asserts only
+    `not [o for o in opened if str(env) in o]` — that THE SOURCED ENV FILE was
+    not opened — and it passed unchanged while this very arm opened `ship.sh`
+    for `evaluate('…/scripts/ship.sh --no-laptop')`. No total open() count was
+    pinned anywhere, by it or by
+    `test_the_hot_path_gate_is_the_same_walk_it_guards`.
+
+    The reason that survives re-measurement is about the POPULATION, not about
+    an existing invariant: `. wt.env; ls` is the commonest shape on this hook's
+    hot path, an env file is not a program, and reading every sourced file would
+    put an open() on that shape on every Bash call.
+    `test_the_script_arm_opens_only_the_files_it_will_execute` is what now
+    constrains that claim — it asserts the exact SET of paths opened, so `. env`
+    opening anything goes red.
 
     If someone finds a cheap way to tell an env file from a program without
     reading it, this test is the one to delete — deliberately, with the reason.
@@ -4606,7 +4621,14 @@ def test_a_SOURCED_script_is_a_KNOWN_GAP_and_stays_allowed(script, template, tmp
 
 
 def test_a_script_reached_through_ANOTHER_script_is_DENIED(script, tmp_path):
-    """One hop of indirection must not launder it."""
+    """Indirection must not launder it.
+
+    ⚠ This docstring used to say "One hop", and "one hop" is what the arm was
+    described as doing. `_SCRIPT_RECURSION_LIMIT = 3` gives THREE — measured,
+    hops 1-3 deny and hop 4 allows. The boundary is pinned on both sides by
+    `test_the_recursion_limit_is_THREE_hops_not_one`; this one stays as the
+    readable single-hop case.
+    """
     inner = script(_CRASH1_BODY, "inner.sh")
     outer = script('#!/usr/bin/env bash\necho hi\nbash ' + inner + '\n', "outer.sh")
     assert gc.evaluate(f"bash {outer}", "claude-code", str(tmp_path))
@@ -4752,28 +4774,679 @@ def test_bash_dash_c_is_still_handled_by_the_nested_text_arm(tmp_path):
 # nothing: the population is asserted non-empty first, and a known-bad script is
 # injected into the same sweep as a positive control, so a sweep wired to a
 # wrong path fails instead of reporting a reassuring zero.
+#
+# ⚠ IT USED TO WALK THE WRONG POPULATION AND REPORT A CLEAN ZERO ANYWAY. The
+# first version called `d.iterdir()` — NON-recursive — over five directories,
+# which missed 671 files under `scripts/` alone. Re-run with `rglob`, the SAME
+# guard denied FIVE real files: `scripts/claude-hooks/guard_core.py` (mode 0755,
+# so `./scripts/claude-hooks/guard_core.py` is a real invocation),
+# `scripts/opencode/lib/oc_permissions.py`, `scripts/tests/test_opencode_engine
+# .py`, `scripts/tests/test_opencode_config.py` and a `__pycache__/*.pyc`. Every
+# one is PYTHON: the arm was reading whatever a command named as shell. The fix
+# is `_is_shell_program` — the INVOCATION decides the interpreter — and this
+# sweep is the measurement that has to stay honest about it.
+#
+# BOTH invocation shapes are swept, because they take different paths through
+# `_read_script`: `{p}` (direct execution) consults the shebang, `bash {p}` does
+# not and must not — a shebang that overrode an explicit `bash` would be a
+# bypass. The `bash` half is restricted to files that ARE shell programs, which
+# is the only population where that spelling is a thing anyone types.
 # --------------------------------------------------------------------------- #
-def test_no_real_script_in_this_repo_is_denied_by_the_script_arm(tmp_path):
+def _repo_sweep_files():
     root = Path(__file__).resolve().parents[3]
-    dirs = [root / "scripts", root / "githooks", root / "scripts/collector",
-            root / "scripts/dl-router", root / "scripts/opencode"]
-    files = [p for d in dirs if d.is_dir() for p in sorted(d.iterdir())
-             if p.is_file() and p.suffix not in (".md", ".json", ".lock")]
+    files = []
+    for d in (root / "scripts", root / "githooks"):
+        if not d.is_dir():
+            continue
+        files += [p for p in sorted(d.rglob("*"))
+                  if p.is_file() and "__pycache__" not in p.parts
+                  and p.suffix not in (".md", ".json", ".lock")]
+    return root, files
 
-    assert len(files) > 80, (
-        f"the sweep found only {len(files)} scripts — a zero-denial result from "
-        "a population this small is a fact about the walk, not about the guard")
+
+def test_no_real_script_in_this_repo_is_denied_by_the_script_arm(tmp_path):
+    root, files = _repo_sweep_files()
+
+    # 🔴 THE FLOOR IS THE RECURSIVE COUNT, NOT THE OLD NON-RECURSIVE ONE.
+    # Measured 2026-09-12: 819 files. A floor of 80 was satisfied by the walk
+    # that missed 671 of them, so it could not have caught the bug it exists to
+    # catch. Raised to 600 — comfortably below today's count, far above anything
+    # a non-recursive walk can reach.
+    assert len(files) > 600, (
+        f"the sweep found only {len(files)} files — a zero-denial result from a "
+        "population this small is a fact about the walk, not about the guard. "
+        "(Non-recursive walks of these dirs reach ~150.)")
 
     denied = [str(p) for p in files
-              if gc.check_executed_script_file(f"bash {p}", str(root))]
+              if gc.check_executed_script_file(str(p), str(root))]
+    shellish = [p for p in files
+                if gc._is_shell_program(str(p), p.read_text(errors="replace"))]
+    assert len(shellish) > 40, (
+        f"only {len(shellish)} shell programs found — the `bash {{p}}` half of "
+        "this sweep has gone vacuous")
+    denied += [str(p) for p in shellish
+               if gc.check_executed_script_file(f"bash {p}", str(root))]
+
     assert denied == [], (
         "the script arm denies real scripts in this repo: " + ", ".join(denied)
         + ". A guard that fires on routine work is worse than no guard.")
 
-    # POSITIVE CONTROL, in the same sweep and the same call shape: if this does
-    # not deny, the loop above proved nothing.
+    # POSITIVE CONTROL, in the same sweep and both call shapes: if these do not
+    # deny, the loops above proved nothing.
     bad = tmp_path / "control.sh"
     bad.write_text(_CRASH1_BODY)
+    bad.chmod(0o755)
     assert gc.check_executed_script_file(f"bash {bad}", str(root)), (
         "the positive control was ALLOWED — this sweep is wired to nothing and "
         "its zero above is meaningless")
+    assert gc.check_executed_script_file(str(bad), str(root)), (
+        "the direct-execution positive control was ALLOWED")
+
+
+def test_a_directly_executed_PYTHON_file_is_not_read_as_shell(tmp_path):
+    """The F7 fix, stated as behaviour rather than as a sweep count.
+
+    `guard_core.py` is mode 0755 and contains the literal `kill-server` in its
+    own deny message and `"kill-s"` in `_TMUX_KILL_MANY_PREFIX`, so reading it as
+    shell denies it — and `./scripts/claude-hooks/guard_core.py` is a real thing
+    to type. Its shebang says `python3`; those bytes are never shell commands.
+
+    🔴 The second half is the anti-bypass: an EXPLICIT `bash <file>` must still
+    parse the file whatever its shebang says, or writing `#!/usr/bin/env python3`
+    above a kill and running it with `bash` would walk straight past.
+    """
+    root, _ = _repo_sweep_files()
+    real = root / "scripts/claude-hooks/guard_core.py"
+    assert real.is_file() and os.access(real, os.X_OK), (
+        "the fixture file moved or lost its exec bit — pick another 0755 "
+        "python file in the repo, or this test proves nothing")
+    assert gc.check_executed_script_file(str(real), str(root)) is None
+
+    lying = tmp_path / "lying.sh"
+    lying.write_text("#!/usr/bin/env python3\n" + _CRASH1_BODY)
+    lying.chmod(0o755)
+    assert gc.evaluate(str(lying), "claude-code", str(tmp_path)) is None, (
+        "direct execution must honour the shebang")
+    assert gc.evaluate(f"bash {lying}", "claude-code", str(tmp_path)), (
+        "🔴 BYPASS: an explicit `bash <file>` stopped parsing because of a "
+        "shebang. The INVOCATION decides the interpreter, not the file.")
+
+
+def test_a_no_shebang_file_executed_directly_is_still_read_as_shell(tmp_path):
+    """`execve` on a file with no `#!` fails ENOEXEC and the calling shell
+    re-runs it as a SHELL script — so a no-shebang executable IS shell, and
+    skipping it would open the obvious hole (write the kill, chmod, run it).
+
+    The negative half: a file with no shebang AND no exec bit cannot be executed
+    directly at all, so it is read once and then dropped — never PARSED. That is
+    what stopped `claude/RULES.md`, `RULES-ARCHIVE.md` and `/etc/machine-id`
+    being run through the shell parser because a script's PROSE named them.
+    (The parse, not the read, is what cost ~200 ms apiece.)
+    """
+    ex = tmp_path / "noshebang"
+    ex.write_text("tmux kill-server\n")
+    ex.chmod(0o755)
+    assert gc.evaluate(str(ex), "claude-code", str(tmp_path))
+
+    plain = tmp_path / "notes"
+    plain.write_text("tmux kill-server\n")
+    plain.chmod(0o644)
+    assert gc.evaluate(str(plain), "claude-code", str(tmp_path)) is None, (
+        "a non-executable file with no shebang cannot be run by `./x` — reading "
+        "it is pure cost")
+    # …and the gap that creates, stated rather than papered over: `chmod +x`
+    # earlier in the SAME command line happens after this guard reads the mode.
+    assert gc.evaluate(f"chmod +x {plain} && {plain}", "claude-code",
+                       str(tmp_path)) is None, (
+        "KNOWN GAP: chmod-then-run of a file with no shebang. If this starts "
+        "denying, that is an improvement — delete the assertion on purpose.")
+
+
+def test_a_binary_is_never_parsed_as_shell(tmp_path):
+    """Before `_is_shell_program`, `_script_operand` returned argv[0] for ANY
+    path containing `/` — binaries included — and the whole `commands()` parser
+    then ran over up to 256 KiB of machine code on the hot path of every Bash
+    call. A NUL byte is the cheap, sound tell."""
+    b = tmp_path / "mybin"
+    # 🔴 THE FIXTURE IS THE TEST. A first draft used
+    # `b"\\x7fELF\\x00\\x00\\x00tmux kill-server\\x00"` and a mutation sweep
+    # scored "drop the NUL sniff" as SURVIVED — because with the NULs glued to
+    # the word, the tokeniser produced argv[0] == '\\x7fELF\\x00\\x00\\x00tmux',
+    # which is not `tmux`, so the guard would have allowed it either way. The
+    # assertion was UNREACHABLE and the test passed for the wrong reason. The
+    # kill must sit on its own line, reachable, so only the sniff can stop it.
+    b.write_bytes(b"\x7fELF\x02\x01\x00\x00\x00\x00\n\ntmux kill-server\n\x00")
+    b.chmod(0o755)
+    body = b.read_text(errors="replace")
+    assert gc.check_tmux_kill_shared_server(body), (
+        "CONTROL: these bytes, read as shell, DO deny — so the assertion below "
+        "is about the binary sniff and not about an unreachable fixture")
+    assert gc._is_shell_program(str(b), body) is False
+    assert gc.evaluate(str(b), "claude-code", str(tmp_path)) is None
+
+
+# --------------------------------------------------------------------------- #
+# 16b. 🔴 THE SENTINEL PRE-GATE — the fix for a 1-SECOND hook on the hot path.
+#
+# MEASURED in-process on the first shipped version of this arm:
+#   scripts/claim-work.sh --list   1195 ms   (0.21 ms without the arm)
+#   scripts/drift-check.sh          820 ms   (0.18 ms)
+#   bash scripts/gate.sh …           50 ms   (0.36 ms)
+# `claim-work.sh` is MANDATED by the resume skill and this hook runs on EVERY
+# Bash call in every session on both hosts.
+#
+# The fix is a substring pre-gate that is IMPLIED BY THE MATCHER, so it loses no
+# coverage — proved below rather than asserted. After it, plus the descent cap
+# and the interpreter rule: 1.02 ms / 1.59 ms / 0.71 ms.
+# --------------------------------------------------------------------------- #
+def test_every_script_text_check_carries_a_sentinel_its_matcher_implies():
+    """🔴 THE LEDGER THAT STOPS THE PRE-GATE GOING SILENTLY WRONG.
+
+    A pre-gate keyed to ONE check's sentinel becomes incorrect the moment a
+    SECOND check joins `_SCRIPT_TEXT_CHECKS`: the walk would still skip on the
+    tmux sentinel while the new check's own spellings walked past, and nothing
+    would go red. So the pairing is structural — every entry is
+    `(check, sentinel)` — and this asserts the shape AND the membership by name,
+    two-way, the way `_CLAUDE_CODE_CHECKS` is pinned.
+
+    Adding a check here means choosing a substring its own matcher REQUIRES, and
+    proving that implication the way `test_the_tmux_sentinel_is_IMPLIED_by_the_
+    matcher` does below. If you cannot name one, the check does not belong in
+    this tuple — put it behind its own gate.
+    """
+    assert all(isinstance(e, tuple) and len(e) == 2 for e in gc._SCRIPT_TEXT_CHECKS), (
+        "an entry is not a (check, sentinel) pair — a bare function here means "
+        "the pre-gate skips bodies that check could have denied")
+    assert all(callable(c) and isinstance(s, str) and s
+               for c, s in gc._SCRIPT_TEXT_CHECKS), (
+        "a check with an empty sentinel would gate on `'' in body`, i.e. on "
+        "nothing — that is the pre-gate silently removed")
+    assert {c.__name__: s for c, s in gc._SCRIPT_TEXT_CHECKS} == {
+        "check_tmux_kill_shared_server": gc._TMUX_KILL_MANY_PREFIX}, (
+        "the script-text check ledger changed. Each entry runs over the CONTENTS "
+        "of a file on every Bash call that names a script, and its sentinel is "
+        "what keeps that off the hot path — say so in the PR body, and bring the "
+        "false-positive sweep numbers.")
+
+
+def test_the_tmux_sentinel_is_IMPLIED_by_the_matcher():
+    """🔴 THE PROOF THAT THE PRE-GATE LOSES NO COVERAGE, not the assertion.
+
+    `check_tmux_kill_shared_server` can only deny via `_tmux_argv_is_a_wide_kill`,
+    which requires `any(_is_wide_kill_word(tok))`, which requires
+    `tok.startswith(_TMUX_KILL_MANY_PREFIX)`. So every token that can produce a
+    deny carries the sentinel, and a body with no token carrying it cannot be
+    denied. Asserted at the matcher, where the implication actually lives —
+    checking a handful of command strings would only sample it.
+    """
+    sentinel = gc._TMUX_KILL_MANY_PREFIX
+    for tok in ("kill-server", "kill-session", "kill-ser", "kill-ses", "kill-s",
+                "kill-pane", "kill-window", "kill", "kill-server-test", "",
+                "new-session", "KILL-SERVER", "ki", "kill-", "list-sessions"):
+        if gc._is_wide_kill_word(tok):
+            assert sentinel in tok, (
+                f"{tok!r} denies WITHOUT carrying the sentinel {sentinel!r} — "
+                "the pre-gate would skip a body this matcher would have denied")
+    # …and the control that keeps that loop from being vacuous: at least one of
+    # those tokens must actually be a wide-kill word.
+    assert any(gc._is_wide_kill_word(t) for t in ("kill-server", "kill-ses"))
+    # The implication restated as the property the pre-gate relies on.
+    assert not gc._is_wide_kill_word("kill-pane")
+    assert not gc._is_wide_kill_word(sentinel[:-1])
+
+
+def test_the_pre_gate_survives_a_QUOTE_SPLIT_spelling(script, tmp_path):
+    """The sentinel test runs over TEXT while the matcher runs over TOKENS, and
+    quoting is what separates the two: `tmux 'kill-'server` tokenises to
+    `kill-server` while the raw bytes contain no `kill-s`. A naive
+    `sentinel in body` would skip it — a guard walkable by SPELLING.
+
+    So the body is also tested with quote characters deleted. Both spellings
+    below deny; the escape from that is `test_a_line_continuation_splice…`,
+    which is declared rather than claimed closed.
+    """
+    for body in ("#!/usr/bin/env bash\ntmux 'kill-'server\n",
+                 '#!/usr/bin/env bash\ntmux "kill-"server\n',
+                 "#!/usr/bin/env bash\ntmux kill\\-server\n"):
+        path = script(body, "q.sh")
+        assert gc.evaluate(f"bash {path}", "claude-code", str(tmp_path)), (
+            f"the pre-gate skipped a quote-split spelling: {body!r}")
+
+
+def test_a_line_continuation_splice_is_a_DECLARED_gap_in_the_pre_gate(script, tmp_path):
+    """🔴 NOT a passing grade. Deleting the backslash leaves the NEWLINE between
+    the halves, so `kill-\\<newline>server` still hides the sentinel.
+
+    It is recorded here because the pre-gate's whole claim is "implied by the
+    matcher", and this is the one place that implication is weaker over text
+    than over tokens. Closing it means normalising line continuations before the
+    substring test — cheap, but it has not been measured on the hot path, so it
+    is declared instead of guessed at.
+    """
+    path = script("#!/usr/bin/env bash\ntmux kill-\\\nserver\n", "splice.sh")
+    assert gc.evaluate(f"bash {path}", "claude-code", str(tmp_path)) is None, (
+        "the splice now denies — good; delete this test on purpose and say so")
+
+
+def test_the_arm_does_not_PARSE_a_body_that_cannot_be_denied(tmp_path, monkeypatch):
+    """🔴 THE LATENCY REGRESSION PIN, as a structural claim rather than a timing
+    one — a wall-clock assertion on a 24-core box shared with dozens of test
+    runs would be a flake generator.
+
+    What made the arm cost a second was `commands()`, run over the whole file
+    body TWICE (once by the check, once to find nested invocations). This counts
+    the calls: a big benign script must cost exactly ONE parse — the caller's own
+    command line — and a small one that CAN be denied must cost more, or the
+    counter is wired to nothing.
+    """
+    benign = tmp_path / "big.sh"
+    benign.write_text("#!/usr/bin/env bash\n"
+                      + "echo hello world; ls -la /tmp\n" * 900)
+    assert len(benign.read_text()) > gc._SCRIPT_DESCEND_MAX_BYTES
+    killer = tmp_path / "small.sh"
+    killer.write_text(_CRASH1_BODY)
+
+    calls = []
+    real = gc.commands
+    monkeypatch.setattr(gc, "commands", lambda t, *a, **k: (calls.append(t), real(t, *a, **k))[1])
+
+    assert gc.check_executed_script_file(f"bash {benign}", str(tmp_path)) is None
+    assert len(calls) == 1, (
+        f"a benign body was parsed {len(calls) - 1} extra time(s). The sentinel "
+        "pre-gate or the descent cap has been removed; this is the 1-second hook.")
+
+    calls.clear()
+    assert gc.check_executed_script_file(f"bash {killer}", str(tmp_path))
+    assert len(calls) > 1, (
+        "POSITIVE CONTROL FAILED: a body that IS denied was never parsed, so "
+        "the count above is a fact about the spy, not about the guard")
+
+
+def test_a_body_over_the_DESCENT_cap_is_still_checked_but_not_followed(tmp_path):
+    """The descent cap is a real coverage trade, so both of its arms are pinned.
+
+    ARM 1 — the file itself is still checked at any size up to the READ cap.
+    ARM 2 — a nested invocation inside an over-cap body is NOT followed. That is
+    the declared loss; the alternative was 211 ms of parsing per Bash call.
+    """
+    pad = "echo hello world; ls -la /tmp\n" * 900
+    big_killer = tmp_path / "bigkill.sh"
+    big_killer.write_text("#!/usr/bin/env bash\n" + pad + "tmux kill-server\n")
+    assert len(big_killer.read_text()) > gc._SCRIPT_DESCEND_MAX_BYTES
+    assert len(big_killer.read_text().encode()) < gc._SCRIPT_READ_MAX_BYTES
+    assert gc.evaluate(f"bash {big_killer}", "claude-code", str(tmp_path)), (
+        "a kill in an over-cap body must still deny — the cap is on the DESCENT, "
+        "not on the check")
+
+    inner = tmp_path / "inner.sh"
+    inner.write_text(_CRASH1_BODY)
+    big_caller = tmp_path / "bigcall.sh"
+    big_caller.write_text("#!/usr/bin/env bash\n" + pad + f"bash {inner}\n")
+    assert gc.evaluate(f"bash {big_caller}", "claude-code", str(tmp_path)) is None, (
+        "KNOWN GAP: a nested invocation inside a body over the descent cap. If "
+        "this starts denying, the cap changed — re-measure the hot path before "
+        "deleting this test.")
+    # Control: the SAME caller under the cap does deny, so the assertion above
+    # is about the cap and not about the nesting being broken outright.
+    small_caller = tmp_path / "smallcall.sh"
+    small_caller.write_text(f"#!/usr/bin/env bash\nbash {inner}\n")
+    assert gc.evaluate(f"bash {small_caller}", "claude-code", str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# 16c. 🔴 THE OPEN() LEDGER — what this arm reads, pinned as a SET.
+# --------------------------------------------------------------------------- #
+def test_the_script_arm_opens_only_the_files_it_will_execute(tmp_path, monkeypatch):
+    """🔴 THE TEST THE PR SAID IT ALREADY HAD, AND DID NOT.
+
+    `test_the_hot_path_reads_no_files_and_execs_no_git` and
+    `test_the_hot_path_gate_is_the_same_walk_it_guards` assert only
+    `not [o for o in opened if str(env) in o]` — that THE SOURCED ENV FILE was
+    not opened. Neither pins a total. Both passed while this arm opened
+    `scripts/ship.sh` for `evaluate('…/ship.sh --no-laptop')`, and a comment in
+    guard_core.py cited them as the reason `source` is excluded while
+    `bash <file>` is not. That sentence was false.
+
+    This pins the SET: for a realistic mix, the only files opened are the ones
+    the commands would actually execute. `. env; ls` opens nothing — which is
+    what genuinely constrains the `source` exclusion — and a plain `ls` opens
+    nothing either.
+    """
+    (tmp_path / "wt.env").write_text("WT=/tmp/whatever\n")
+    (tmp_path / "repro.sh").write_text(_CRASH1_BODY)
+    (tmp_path / "notes.md").write_text("run `bash repro.sh` to reproduce\n")
+    benign = tmp_path / "benign.sh"
+    benign.write_text("#!/usr/bin/env bash\necho hi\n")
+    benign.chmod(0o755)
+
+    opened = []
+    real_open = open
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
+
+    def opens_for(cmd):
+        opened.clear()
+        gc.check_executed_script_file(cmd, str(tmp_path))
+        return sorted({os.path.basename(o) for o in opened})
+
+    assert opens_for("ls -la") == []
+    assert opens_for(". wt.env; ls") == [], (
+        "the `source` exclusion is what this asserts — an env file on the hot "
+        "path must not be opened by THIS arm")
+    assert opens_for("cat notes.md") == [], (
+        "naming a file is not executing it")
+    assert opens_for("git -C /tmp status") == []
+    assert opens_for(f"bash {benign}") == ["benign.sh"], (
+        "a `bash <file>` must open exactly that file and nothing else")
+    assert opens_for(str(tmp_path / "notes.md")) == ["notes.md"], (
+        "⚠ A DIRECT execution of a path IS opened, exactly once. The shebang is "
+        "authoritative about what interprets the file and cannot be read without "
+        "opening it; the mode is consulted only when there is no shebang. So the "
+        "claim pinned here is ONE read and NO parse, not zero reads — "
+        "test_the_arm_does_not_PARSE_a_body_that_cannot_be_denied owns the parse "
+        "count, and parsing is what cost a second per Bash call.")
+
+    # 🔴 POSITIVE CONTROL: the spy must be able to observe an open at all, or
+    # every empty list above is a fact about the monkeypatch.
+    assert opens_for(f"bash {tmp_path / 'repro.sh'}") == ["repro.sh"]
+
+
+# --------------------------------------------------------------------------- #
+# 16d. 🔴 INVOCATION SHAPES THAT WERE MEASURED ALLOW, AND ARE NOW DENIED.
+#
+# Each row below was verified ALLOW against the arm as first written, with a
+# file containing the crash-1 body. They are not hypotheticals.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("template,why", [
+    ("busybox sh {p}",
+     "`busybox` IS in _SHELLS, so the flag scan returned `sh` as the script "
+     "path — a file that never exists. Applet dispatch is the ONLY way busybox "
+     "is used as a shell, so the missed spelling was the whole feature."),
+    ("busybox ash {p}", "same, other applet"),
+    ("bash -O extglob {p}",
+     "`-O` was missing from the value-flag skip set, so `extglob` was returned "
+     "as the script path"),
+    ("bash +O extglob {p}",
+     "`+`-prefixed tokens were not recognised as flags at all, so `+O` itself "
+     "was returned as the path"),
+    ("bash +o histexpand {p}", "same, `+o`"),
+    ("bash 2>/dev/null {p}",
+     "a redirect BEFORE the operand was returned as the path; after it, the "
+     "arm already denied"),
+    ("bash >/tmp/guard-probe.log {p}", "same, stdout"),
+    ("bash 2> /tmp/guard-probe.log {p}", "same, detached target token"),
+    ("bash < {p}",
+     "the shell READS ITS PROGRAM from a `<` redirect, so the target IS the "
+     "script"),
+    ("bash -s < {p}", "same, the documented stdin spelling"),
+    ("bash -- {p}", "`--` used to `continue` without forcing an operand"),
+    ("bash -o errexit {p}", "regression guard on the pre-existing skip set"),
+    ("sh -eu {p}", "clustered short flags"),
+])
+def test_shapes_that_were_MEASURED_allow_now_deny(script, template, why, tmp_path):
+    path = script(_CRASH1_BODY)
+    assert gc.evaluate(template.format(p=path), "claude-code", str(tmp_path)), (
+        f"ALLOWED: {template} — {why}")
+
+
+def test_a_dash_dash_operand_that_looks_like_a_flag_is_the_script(tmp_path):
+    """`bash -- -weird.sh` runs a file called `-weird.sh`. The old scan saw
+    `--`, `continue`d, then skipped `-weird.sh` as a flag and returned None."""
+    p = tmp_path / "-weird.sh"
+    p.write_text(_CRASH1_BODY)
+    assert gc.evaluate(f"bash -- {p}", "claude-code", str(tmp_path))
+    # A `bash` OPERAND is resolved against the command's cwd — the `$PATH`
+    # guessing gap is about a bare argv[0], which this is not.
+    assert gc.evaluate("bash -- -weird.sh", "claude-code", str(tmp_path))
+    assert gc._script_operand(["bash", "--", "-weird.sh"]) == ("-weird.sh", False)
+
+
+@pytest.mark.parametrize("template,why", [
+    ("cat {p} | bash",
+     "the file reaches a shell through a PIPE; this parser models argv, not "
+     "data flow between two commands"),
+    ("tmux run-shell {p}", "tmux runs it; no shell token appears in the argv"),
+    ("tmux source-file {p}", "same, and the file is tmux commands, not shell"),
+    ("make -f {p}", "make's own recipe lines reach a shell"),
+    ("python3 {p}", "not a shell; the INVOCATION decides, and this one says python"),
+    ("watch bash {p}", "`watch` is not in _WRAPPERS and takes its own options"),
+    ("xargs bash {p}", "same family: an exec-ing wrapper with its own arity"),
+    ("nix develop /some/dir -c bash {p}",
+     "`nix develop … -c` is an exec wrapper this parser does not model; adding "
+     "it means an option-arity table, and getting one wrong is how a check "
+     "fails OPEN"),
+    ("find . -name x -exec bash {p} ;", "same"),
+    ("bash -c repro.sh",
+     "`-c` takes a COMMAND STRING; `repro.sh` there is a PATH lookup, not this "
+     "file — and treating it as a file is exactly the mutant "
+     "test_bash_dash_c_names_a_COMMAND_not_a_file kills"),
+])
+def test_the_DECLARED_gaps_stay_declared(script, template, why, tmp_path):
+    """🔴 NOT a passing grade — a ledger of holes, pinned so each one cannot
+    close by accident and then silently reopen.
+
+    The deny message used to end "Do not go looking for a spelling that slips
+    past this check", full stop, while `cat x.sh | bash` worked. An overclaiming
+    guard teaches the first agent who finds a gap that the guard lies. The
+    message now says gaps exist and are listed in the source; this is that list,
+    executable.
+
+    Closing any row is an improvement — delete its entry deliberately, with the
+    measurement, rather than letting the assertion rot into a claim that the gap
+    is desirable.
+    """
+    path = script(_CRASH1_BODY)
+    assert gc.evaluate(template.format(p=path), "claude-code",
+                       str(tmp_path)) is None, (
+        f"{template} now DENIES — that is an improvement. Delete this row on "
+        f"purpose and say so in the PR body. (gap reason: {why})")
+
+
+def test_the_deny_message_does_not_claim_there_are_no_gaps(script, tmp_path):
+    """F3's honesty half, asserted rather than left to review."""
+    path = script(_CRASH1_BODY)
+    reason = gc.evaluate(f"bash {path}", "claude-code", str(tmp_path))
+    assert "Do not go looking for a spelling that slips past this check." not in reason, (
+        "the deny message claims no bypass exists while `cat x.sh | bash` works")
+    assert "Gaps in this check exist" in reason
+
+
+def test_the_script_arm_deny_carries_its_OWN_remedy(script, tmp_path):
+    """🔴 THE INHERITED ESCAPE HATCH IS INVERTED FOR THIS ARM.
+
+    `_QUOTING_ESCAPE_HATCH` arrives inside the wrapped reason and tells the
+    caller to "write the text to a file" — correct when a heredoc BODY is being
+    parsed as a command, and backwards when what is denied is RUNNING a file.
+    Writing one is what the caller just did. So this arm appends its own tail,
+    and the tail must say the inherited advice does not apply here.
+    """
+    path = script(_CRASH1_BODY)
+    reason = gc.evaluate(f"bash {path}", "claude-code", str(tmp_path))
+    assert gc._QUOTING_ESCAPE_HATCH in reason, (
+        "the inherited hatch went missing — the prose-in-a-script false positive "
+        "still needs a documented way out")
+    assert gc._SCRIPT_ARM_REMEDY in reason
+    assert "IGNORE THE 'write the text to a file' NOTE ABOVE" in reason
+    assert "-L my-probe-$$" in reason
+    assert reason.index(gc._QUOTING_ESCAPE_HATCH) < reason.index(gc._SCRIPT_ARM_REMEDY), (
+        "the correction must come AFTER the advice it corrects, or it reads as "
+        "two contradictory instructions")
+
+
+# --------------------------------------------------------------------------- #
+# 16e. 🔴 THE `seen` SET WAS ORDER-DEPENDENT — a SOUNDNESS bug, not a nit.
+# --------------------------------------------------------------------------- #
+def _chain(tmp_path, names):
+    """Write `names[0] → names[1] → … → kill`, return the paths in that order."""
+    paths = []
+    prev = None
+    for n in reversed(names):
+        p = tmp_path / f"{n}.sh"
+        p.write_text("#!/usr/bin/env bash\n"
+                     + (f"bash {prev}\n" if prev else "tmux kill-server\n"))
+        p.chmod(0o755)
+        prev = p
+        paths.append(p)
+    return list(reversed(paths))
+
+
+@pytest.mark.parametrize("order", [("A", "X"), ("X", "A")])
+def test_the_visited_set_does_not_swallow_a_kill_by_ORDER(tmp_path, order):
+    """🔴 MEASURED, BOTH DIRECTIONS, on the arm as first written.
+
+    `seen` was global to the walk while `depth` is per-branch, so a file entered
+    `seen` at whatever depth it was FIRST reached. With `A→B→C→X→K` and the kill
+    in `K`:
+        bash A.sh; bash X.sh   ->  ALLOW   (X seen at depth 3, skipped at 0)
+        bash X.sh; bash A.sh   ->  DENY
+    Same two commands, same five files, the verdict decided by which came first.
+    Keying on `(realpath, depth)` fixes it; both orders are asserted so a
+    revert to path-only keying goes red in at least one of them.
+    """
+    a, b, c, x, k = _chain(tmp_path, ["A", "B", "C", "X", "K"])
+    named = {"A": a, "X": x}
+    cmd = f"bash {named[order[0]]}; bash {named[order[1]]}"
+    assert gc.evaluate(cmd, "claude-code", str(tmp_path)), (
+        f"ALLOWED in order {order} — the visited set swallowed the kill in {k}")
+
+
+@pytest.mark.parametrize("hops,denies", [(1, True), (2, True), (3, True), (4, False)])
+def test_the_recursion_limit_is_THREE_hops_not_one(tmp_path, hops, denies):
+    """The PR body said "recursing one hop". `_SCRIPT_RECURSION_LIMIT = 3` gives
+    three, and the boundary is asserted on BOTH sides so the constant cannot
+    drift without a red test. Hop 4 is the declared cut-off: a chain that long
+    is not a shape anyone types, and an unbounded walk on a hook that runs on
+    every Bash call is how a guard becomes a hang."""
+    chain = _chain(tmp_path, [f"h{i}" for i in range(hops)] + ["K"])
+    assert bool(gc.evaluate(f"bash {chain[0]}", "claude-code", str(tmp_path))) is denies
+
+
+# --------------------------------------------------------------------------- #
+# 16f. 🔴 THE MUTATION TARGETS — one test per guard a sweep found SURVIVING.
+#
+# The PR body claimed "8/8 KILLED". A 13-mutant re-run found SIX survivors, each
+# one a guard some docstring in this arm claims to cover. These are the tests
+# that kill them; each was watched RED with its mutant applied.
+# --------------------------------------------------------------------------- #
+def test_a_bare_word_is_not_treated_as_a_script_path(tmp_path):
+    """M1 — deleting `if "/" in argv[0]` in `_script_operand`.
+
+    Without the separator test, EVERY argv[0] becomes a candidate path resolved
+    against the command's cwd — so `repro.sh` (a `$PATH` lookup, the documented
+    gap) would be read out of the cwd, and so would a token from prose. That is
+    the fanout that read `claude/RULES.md` and `/etc/machine-id`.
+    """
+    (tmp_path / "repro.sh").write_text(_CRASH1_BODY)
+    assert gc._script_operand(["repro.sh"]) is None
+    assert gc.evaluate("repro.sh", "claude-code", str(tmp_path)) is None, (
+        "a bare word was resolved as a local file — PATH is not this process's "
+        "to guess")
+    # POSITIVE CONTROL: the SAME file, the SAME cwd, one `./` added. If this did
+    # not deny, the `is None` above would be a fact about a broken fixture
+    # rather than about the separator test.
+    assert gc._script_operand(["./repro.sh"]) == ("./repro.sh", True)
+    assert gc.evaluate("./repro.sh", "claude-code", str(tmp_path))
+
+
+def test_bash_dash_c_names_a_COMMAND_not_a_file(tmp_path):
+    """M2 — deleting the `-c` early return.
+
+    `bash -c repro.sh` runs the STRING `repro.sh` as a command line, i.e. a
+    `$PATH` lookup; it does not execute the file in the cwd. Without the early
+    return the token after `-c` becomes the script path and the local file is
+    read and denied — a false positive on a command that never touches it.
+
+    ⚠ The pre-existing `test_bash_dash_c_is_still_handled_by_the_nested_text_arm`
+    does NOT kill this mutant: `bash -c "tmux kill-server"` denies either way,
+    via the nested-text arm. This one distinguishes them.
+    """
+    (tmp_path / "repro.sh").write_text(_CRASH1_BODY)
+    assert gc._script_operand(["bash", "-c", "repro.sh"]) is None
+    assert gc.evaluate("bash -c repro.sh", "claude-code", str(tmp_path)) is None
+    # Control: without `-c`, the same tokens DO reach the file.
+    assert gc.evaluate("bash repro.sh", "claude-code", str(tmp_path))
+
+
+def test_a_value_flags_ARGUMENT_is_not_the_script(tmp_path):
+    """M3 — deleting the `("-o", "--rcfile", "--init-file")` skip (and the
+    `-O`/`+O`/`+o` entries added with it).
+
+    `bash --rcfile rc.sh victim.sh` runs `victim.sh`; `rc.sh` is an argument.
+    Without the skip the scan returns `rc.sh`, checks the WRONG file, and the
+    kill in the real script is allowed.
+    """
+    rc = tmp_path / "rc.sh"
+    rc.write_text("#!/usr/bin/env bash\necho benign\n")
+    victim = tmp_path / "victim.sh"
+    victim.write_text(_CRASH1_BODY)
+    for flag in ("--rcfile", "--init-file", "-o", "-O", "+O", "+o"):
+        arg = "errexit" if flag in ("-o", "+o") else (
+            "extglob" if flag in ("-O", "+O") else str(rc))
+        assert gc._script_operand(["bash", flag, arg, str(victim)]) == (str(victim), False)
+        assert gc.evaluate(f"bash {flag} {arg} {victim}", "claude-code",
+                           str(tmp_path)), f"{flag} swallowed the script operand"
+
+
+def test_a_path_carrying_an_unexpanded_expansion_is_NEVER_read(tmp_path):
+    """M4 — deleting the `"*?$`"` rejection in `_read_script`.
+
+    ⚠ The pre-existing `test_an_unexpanded_variable_path_is_ALLOWED` is VACUOUS
+    against this mutant: `bash "$SCRIPT"` resolves to no file either way, so it
+    passes with the rejection deleted. This version creates files whose names
+    ARE those literals, so the mutant reads one and denies.
+
+    The rule being pinned: this process sees pre-expansion text, so `$SCRIPT`
+    and `repro*.sh` name something it cannot resolve. Guessing means reading an
+    unrelated file and denying on ITS contents.
+    """
+    for name in ("$SCRIPT", "repro*.sh", "who?.sh", "`cmd`.sh"):
+        (tmp_path / name).write_text(_CRASH1_BODY)
+        assert gc._read_script(name, str(tmp_path)) is None, (
+            f"{name!r} was read as a literal path")
+        assert gc.evaluate(f"bash '{name}'", "claude-code", str(tmp_path)) is None, (
+            f"{name!r} denied — the guard resolved an expansion it cannot see "
+            "through")
+    # POSITIVE CONTROL: a plain name in the same directory IS read, so the
+    # `is None` results above are about the rejection and not a broken fixture.
+    (tmp_path / "plain.sh").write_text(_CRASH1_BODY)
+    assert gc._read_script("plain.sh", str(tmp_path)) is not None
+    assert gc.evaluate("bash plain.sh", "claude-code", str(tmp_path))
+
+
+def test_a_FIFO_is_never_OPENED(tmp_path, monkeypatch):
+    """M5 — deleting `if not os.path.isfile(p)` in `_read_script`.
+
+    🔴 THIS IS THE ANTI-HANG GUARD, and it was neither commented nor tested.
+    `open()` on a FIFO with no writer BLOCKS FOREVER, inside a hook that gates
+    every Bash call in every session on both hosts — so the failure is not "this
+    command is denied", it is "the operator's primary tool stops".
+
+    Asserted by FORBIDDING the open rather than by timing it: a test that hangs
+    to prove a hang is a test that hangs. The stub raises `AssertionError`, which
+    `_read_script`'s `except (OSError, ValueError)` deliberately does not catch,
+    so the mutant fails loudly instead of wedging the suite.
+    """
+    fifo = tmp_path / "pipe.sh"
+    os.mkfifo(fifo)
+    real_open = open
+
+    def no_fifo(f, *a, **k):
+        assert str(f) != str(fifo), (
+            "🔴 the guard OPENED a FIFO — with no writer this blocks forever and "
+            "wedges every Bash call in every session")
+        return real_open(f, *a, **k)
+
+    monkeypatch.setattr("builtins.open", no_fifo)
+    assert gc._read_script(str(fifo), str(tmp_path)) is None
+    assert gc.evaluate(f"bash {fifo}", "claude-code", str(tmp_path)) is None
+    # …the same guard also rejects a directory and a dangling symlink.
+    assert gc._read_script(str(tmp_path), str(tmp_path)) is None
+    dangling = tmp_path / "gone.sh"
+    dangling.symlink_to(tmp_path / "nothing-here")
+    assert gc._read_script(str(dangling), str(tmp_path)) is None
+    # POSITIVE CONTROL: the stub lets a real file through, so the Nones above
+    # are the guard's doing and not the monkeypatch refusing everything.
+    real = tmp_path / "real.sh"
+    real.write_text(_CRASH1_BODY)
+    assert gc._read_script(str(real), str(tmp_path)) is not None

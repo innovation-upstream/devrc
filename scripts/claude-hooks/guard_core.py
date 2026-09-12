@@ -2359,7 +2359,13 @@ _TMUX_KILL_DENY = (
     "own socket. "
     "🔴 AND IF A SHARED `kill-server` IS GENUINELY NEEDED, THE ESCAPE HATCH IS NOT YOURS: this "
     "hook gates the Bash TOOL, and the operator's own terminal is not hooked. Ask them to run "
-    "it. Do not go looking for a spelling that slips past this check."
+    # 🔴 THIS USED TO SAY "Do not go looking for a spelling that slips past this check", full
+    # stop — which read as a claim that none exists. It does: `cat x.sh | bash` reaches a shell
+    # through a pipe this parser does not model, and the blind-spot list in
+    # `check_tmux_kill_shared_server` names three more. An overclaiming deny message is worse
+    # than an honest one, because the first agent who finds a gap learns the guard lies.
+    "it. Gaps in this check exist and are listed in its source; using one is the same accident "
+    "as the incident above, not a workaround — the answer is still to ask the operator."
     + _QUOTING_ESCAPE_HATCH
 )
 
@@ -2508,42 +2514,130 @@ def check_tmux_kill_shared_server(cmd):
 # workflow, which `_IRREVERSIBLE_CHECKS` argues at length is worse than no gate
 # because it gets routed around AND reports safety.
 #
-# The narrow arm was measured on the same population: 135 real scripts across
-# `scripts/`, `githooks/`, `collector/`, `dl-router/` and `opencode/` — ZERO
-# denied — while the actual crash-1 body denies. That is the whole argument:
-# this arm is all upside on the tree as it stands. Widening it to another check
-# is an operator decision that must bring the same two numbers, not an
+# ⚠ THE "135 SCRIPTS, ZERO DENIED" FIGURE THAT USED TO SIT HERE WAS MEASURED ON
+# THE WRONG POPULATION AND WAS WRONG. The sweep walked five directories
+# NON-RECURSIVELY and missed 671 files under `scripts/` alone. Re-run
+# recursively, the arm as first written denied FIVE real files — `guard_core.py`
+# itself (mode 0755), `scripts/opencode/lib/oc_permissions.py`, two tests and a
+# `.pyc` — every one of them PYTHON, read as shell because the arm took any
+# path containing `/` as a script. Fixed by `_is_shell_program`: the INVOCATION
+# decides the interpreter.
+#
+# The honest figure, measured 2026-09-12 over a RECURSIVE walk of `scripts/` and
+# `githooks/`: 819 files, ZERO denied by direct execution, and ZERO denied by
+# `bash <file>` across the 86 of them that are shell programs — while the actual
+# crash-1 body denies. Widening this arm to another check is an operator
+# decision that must bring the same numbers from the same recursive walk, not an
 # assumption that more checks are more safety.
-_SCRIPT_TEXT_CHECKS = (check_tmux_kill_shared_server,)
+#
+# 🔴 EVERY ENTRY IS A (check, SENTINEL) PAIR, AND THE SENTINEL IS NOT OPTIONAL.
+# The sentinel is a substring that the check's OWN MATCHER makes NECESSARY for a
+# deny, and it is what keeps this arm off the hot path: a body that cannot
+# contain the sentinel cannot be denied, so it is never parsed. The pairing is
+# structural rather than a comment because a tuple of bare functions would make
+# the pre-gate silently WRONG the moment a second check joined — it would still
+# skip on the tmux sentinel while the new check's own spellings walked past.
+# `test_every_script_text_check_carries_a_sentinel_its_matcher_implies` fails if
+# an entry has no sentinel, and the implication itself is proved (not asserted)
+# by `test_the_tmux_sentinel_is_IMPLIED_by_the_matcher`.
+_SCRIPT_TEXT_CHECKS = (
+    # `_is_wide_kill_word` requires `tok.startswith(_TMUX_KILL_MANY_PREFIX)`, so
+    # EVERY spelling this check can deny carries that literal. Derived from the
+    # constant, never retyped, so the pre-gate cannot drift from the matcher.
+    (check_tmux_kill_shared_server, _TMUX_KILL_MANY_PREFIX),
+)
 
 # A script big enough to be a data file is not one an agent hand-wrote to run a
 # kill; the cap keeps a pathological read off the hot path of EVERY Bash call.
 _SCRIPT_READ_MAX_BYTES = 256 * 1024
 _SCRIPT_RECURSION_LIMIT = 3
 
+# 🔴 THE DESCENT CAP IS THE LATENCY FIX, AND IT IS A SEPARATE NUMBER FROM THE
+# READ CAP ON PURPOSE. MEASURED on the first shipped version of this arm, with
+# `evaluate()` timed in-process on the workbench:
+#
+#     scripts/claim-work.sh --list   960–1195 ms   (0.2 ms before this arm)
+#     scripts/drift-check.sh         552–820 ms
+#     bash scripts/gate.sh …          41–50 ms
+#
+# `claim-work.sh` is MANDATED by the resume skill, and this hook runs on every
+# Bash call in every session on both hosts. The cost is not the read (88 KiB is
+# ~0.5 ms); it is `commands()`, which took 187 ms on that body and was paid
+# TWICE — once by the check and once to find nested invocations — and then again
+# for every path-like token in its PROSE that happened to name a real file
+# (`claude/RULES.md`, `RULES-ARCHIVE.md`, `/etc/machine-id`, … all read).
+#
+# Two gates fix it, and they are different gates:
+#   * the SENTINEL pre-gate skips the check's parse when the body cannot be
+#     denied — no coverage loss, because the sentinel is implied by the matcher;
+#   * this cap skips the DESCENT parse for a body over 8 KiB. That one IS a
+#     coverage trade, stated plainly: a nested `bash <other>` inside a script
+#     larger than 8 KiB is not followed. The script itself is still read and
+#     still checked at any size up to the read cap. 8 KiB is where the parser
+#     costs ~5 ms; 16 KiB already costs ~34 ms and 88 KiB ~211 ms.
+# Agent-written scratch scripts — the population both 2026-09-11 incidents came
+# from — are a few hundred bytes, so multi-hop still works where it was needed.
+_SCRIPT_DESCEND_MAX_BYTES = 8 * 1024
+
 # 🔴 KNOWN GAP, AND A DELIBERATE ONE: `source x.sh` / `. x.sh` is NOT read.
 #
 # Sourcing runs in the CURRENT shell, so on danger alone it deserves reading
-# more than `bash <file>`, not less. It is excluded because of a DIFFERENT
-# invariant that outranks it here: `test_the_hot_path_reads_no_files_and_execs_
-# no_git` pins that this hook — which runs on EVERY Bash call on both hosts —
-# must not open files just because a command mentions one, and the dominant real
-# use of `.`/`source` is ENV FILES (`. wt.env; ls`), which the guard already
-# resolves through its own separately-gated path. Reading every sourced file
-# would put an open() on the hot path for the commonest shape there is.
+# more than `bash <file>`, not less.
 #
-# `bash <file>` is not that population: it is only the commands that actually
-# spawn a shell to RUN a script, which is both rare and exactly what the two
-# 2026-09-11 incidents did. So the arm covers the measured shape and declines
-# the one that would tax every call.
+# ⚠ THE REASON THIS BLOCK USED TO GIVE WAS FALSE, and the correction is the
+# point. It said `test_the_hot_path_reads_no_files_and_execs_no_git` "pins that
+# this hook must not open a file just because a command names one". That test
+# pins no such thing: it asserts only that THE SOURCED ENV FILE is not opened
+# for commands carrying no real `git … commit`, and it passed unchanged while
+# this very arm opened `ship.sh` for `evaluate('…/ship.sh --no-laptop')`. No
+# total open() count was pinned anywhere. Measured, not argued.
 #
-# What would close it without paying that cost: a cheap pre-gate that can tell
-# an env file from a program without reading it. There isn't one, so this is
-# recorded as open rather than papered over.
+# The reason that survives re-measurement is narrower, and it is about the
+# POPULATION rather than about an existing invariant: `. wt.env; ls` is the
+# commonest shape on this hook's hot path, an env file is not a program, and
+# reading every sourced file would put an open() on that shape on every Bash
+# call. `bash <file>` is not that population — it is only the commands that
+# spawn a shell to RUN a script, which is rare and is exactly what the two
+# 2026-09-11 incidents did.
+#
+# That claim is now PINNED by a test that actually constrains it:
+# `test_the_script_arm_opens_only_the_files_it_will_execute` asserts the exact
+# SET of paths opened for a realistic command mix — `. wt.env; ls` opens
+# nothing, `bash repro.sh` opens exactly `repro.sh` — with a positive control so
+# the assertion cannot pass by observing nothing.
 
 
-def _script_operand(argv):
-    """The path this argv would EXECUTE as a script file, or None.
+# Value-taking shell flags whose ARGUMENT is not the script. `-O`/`+O` and `+o`
+# were missing and each one was a live bypass: `bash -O extglob x.sh` returned
+# `extglob` as the script path (no such file → ALLOW), and `+`-prefixed tokens
+# were not recognised as flags at all, so `+O` itself was returned.
+_SHELL_VALUE_FLAGS = ("-o", "+o", "-O", "+O", "--rcfile", "--init-file")
+
+# A redirection token as this tokeniser hands it over: `>`, `2>`, `>>`, `&>`,
+# `<`, `<<EOF`, `2>&1`, `>/tmp/o.log`. Group 2 is the operator, group 3 whatever
+# was attached to it. Nothing that is not a redirection can match: an ordinary
+# operand would have to begin with digits followed by `<` or `>`.
+_REDIR_RE = re.compile(r"^(\d*)(<<-?|<&|>&|&>>?|<>|>>|>\||>|<)(.*)$")
+
+
+def _redirection(tok):
+    """`(kind, attached-target)` for a redirection token, else `(None, None)`.
+
+    `kind` is `"in"` only for a plain `<`, where the shell READS ITS PROGRAM
+    from the target — `bash < x.sh` and `bash -s < x.sh` execute `x.sh`, so the
+    redirect target IS the script. Every other operator redirects a stream the
+    shell does not interpret, so its target must be SKIPPED rather than read:
+    `bash 2>/dev/null x.sh` used to return `2>/dev/null` as the script path and
+    ALLOW the file that actually ran.
+    """
+    m = _REDIR_RE.match(tok)
+    if not m:
+        return (None, None)
+    return ("in" if m.group(2) == "<" else "other", m.group(3))
+
+
+def _script_operand(argv, _depth=0):
+    """`(path, executed_directly)` for the script this argv RUNS, or None.
 
     Two shapes, and deliberately no third:
       * `bash x.sh` / `sh -x x.sh`  — a shell with a FILE operand. `-c` is
@@ -2551,42 +2645,122 @@ def _script_operand(argv):
         this arm is for the case where the code is not in the command line.
       * `./x.sh` / `/abs/x.sh`      — executed directly.
 
-    Two gaps, both stated rather than papered over:
-      * `source`/`.` — see the block above; excluded to keep the hot-path
-        promise, not because it is safe.
+    🔴 THE SECOND ELEMENT IS LOAD-BEARING: THE INVOCATION DECIDES THE
+    INTERPRETER, NOT THE FILE. `bash x` means "read x as shell" whatever x
+    contains; `./x` means "run x the way its shebang says", which for a Python
+    file is not shell at all. Reading every directly-executed file as shell
+    denied FIVE real files in this repo — `scripts/claude-hooks/guard_core.py`
+    (mode 0755, so `./scripts/claude-hooks/guard_core.py` is a real invocation),
+    `scripts/opencode/lib/oc_permissions.py`, two tests and a `.pyc` — whose
+    bytes were never shell commands. See `_is_shell_program`.
+
+    KNOWN GAPS, stated rather than papered over, each pinned by a test in
+    section 16 of test_guard_core.py so it cannot close silently and then
+    reopen:
+      * `source`/`.` — see the block above.
       * a BARE `x.sh` resolved through `$PATH` — resolving it means guessing a
         PATH this process does not share with the command, and a wrong guess
         reads an unrelated file and denies on ITS contents.
+      * `cat x.sh | bash`, `tmux run-shell x.sh`, `tmux source-file x.sh`,
+        `make -f x.sh`, `python3 x.sh`, `watch bash x.sh`, `xargs … bash`,
+        `find -exec bash {} \\;`, `nix develop <dir> -c bash /abs/x.sh` — the
+        file reaches a shell through a program this parser does not model. Each
+        would need its own option-arity table, and getting one wrong is how a
+        check fails OPEN (see `_TMUX_VALUE_FLAGS`).
+      * `busybox busybox sh x.sh` — one applet hop is modelled, not two.
     """
     if not argv:
         return None
     base = os.path.basename(argv[0])
+    if base == "busybox":
+        # `busybox` is in `_SHELLS` because the binary can BE the shell, but the
+        # applet-dispatch spelling puts the real shell in argv[1] — and the flag
+        # scan below then returned `sh`, a path that never exists, so EVERY
+        # `busybox sh x.sh` was ALLOWED. That is the only way busybox is ever
+        # used as a shell here, so the missed spelling was the whole feature.
+        if _depth or len(argv) < 2:
+            return None
+        return _script_operand(argv[1:], _depth + 1)
     if base in _SHELLS:
-        skip_next = False
-        for tok in argv[1:]:
-            if skip_next:
-                skip_next = False
-                continue
+        i, force_operand = 1, False
+        while i < len(argv):
+            tok = argv[i]
+            if force_operand:
+                # After `--` the next token is the operand even when it looks
+                # like a flag: `bash -- -weird.sh` runs a file called
+                # `-weird.sh`. The old scan `continue`d past `--` and then
+                # skipped `-weird.sh` as a flag.
+                return (tok, False)
             if tok == "--":
+                force_operand = True
+                i += 1
                 continue
-            if tok.startswith("-"):
+            kind, attached = _redirection(tok)
+            if kind == "in":
+                if attached:
+                    return (attached, False)
+                return (argv[i + 1], False) if i + 1 < len(argv) else None
+            if kind == "other":
+                i += 1 if attached else 2
+                continue
+            if tok.startswith("-") or tok.startswith("+"):
                 # `-c` carries inline text, not a file; `_nested_shell_text` owns it.
-                if "c" in tok[1:] and not tok.startswith("--"):
+                if tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]:
                     return None
-                if tok in ("-o", "--rcfile", "--init-file"):
-                    skip_next = True
+                i += 2 if tok in _SHELL_VALUE_FLAGS else 1
                 continue
-            return tok
+            return (tok, False)
         return None
     # Direct execution. Require a path separator: a bare word here is either a
     # PATH lookup (see the docstring) or not a script at all.
     if "/" in argv[0]:
-        return argv[0]
+        return (argv[0], True)
     return None
 
 
-def _read_script(path, cwd):
-    """The file's text, or None when it is not a readable local regular file.
+def _is_shell_program(p, body):
+    """Would running `p` DIRECTLY execute `body` as shell commands?
+
+    Only asked of a directly-executed file (`./x`, `/abs/x`), never of a `bash
+    x` operand — there the invocation has already said "shell", and second-
+    guessing it from the file's own content would be a bypass: write a
+    `#!/usr/bin/env python3` line above a kill and run it with `bash`.
+
+    Three answers, in the order the kernel and the shell actually resolve them:
+      * a NUL byte near the start means a binary, not a text script;
+      * a `#!` line is authoritative — `execve` hands the file to THAT
+        interpreter, so a Python file is Python however it is named;
+      * no shebang at all means `execve` fails ENOEXEC and the calling shell
+        re-runs the file as a SHELL script — but only if it is executable in the
+        first place, because otherwise the invocation simply fails.
+    """
+    if "\x00" in body[:4096]:
+        return False
+    if body.startswith("#!"):
+        words = body.split("\n", 1)[0][2:].strip().split()
+        if not words:
+            return False
+        interp = os.path.basename(words[0])
+        if interp == "env":
+            # `#!/usr/bin/env -S VAR=1 bash` — the interpreter is the first word
+            # that is neither a flag nor an assignment.
+            interp = None
+            for w in words[1:]:
+                if w.startswith("-") or "=" in w:
+                    continue
+                interp = os.path.basename(w)
+                break
+            if interp is None:
+                return False
+        return interp in _SHELLS
+    try:
+        return bool(os.stat(p).st_mode & 0o111)
+    except OSError:
+        return False
+
+
+def _read_script(path, cwd, direct=False):
+    """The file's text, or None when it is not a shell program this can read.
 
     Never raises. A guard that throws on a weird path would fail the Bash call
     it was asked about, which is a worse outcome than the hole it is closing.
@@ -2596,14 +2770,83 @@ def _read_script(path, cwd):
             # Unexpanded glob/variable: this process cannot know what it names.
             return None
         p = path if os.path.isabs(path) else os.path.join(cwd or ".", path)
+        # 🔴 ANTI-HANG, NOT TIDINESS. `isfile` is False for a FIFO, and opening a
+        # FIFO that has no writer BLOCKS FOREVER — inside a hook that gates every
+        # Bash call in every session, i.e. it would wedge the operator's tool,
+        # not just this command. `bash /tmp/somefifo` is a real shape. It also
+        # rejects a directory and a dangling symlink.
         if not os.path.isfile(p):
             return None
         if os.path.getsize(p) > _SCRIPT_READ_MAX_BYTES:
             return None
         with open(p, encoding="utf-8", errors="replace") as fh:
-            return fh.read()
+            body = fh.read()
     except (OSError, ValueError):
         return None
+    if direct and not _is_shell_program(p, body):
+        return None
+    return body
+
+
+# Quoting characters deleted before the sentinel pre-gate runs. A shell token is
+# assembled from the text with these REMOVED, so `tmux 'kill-'server` and
+# `tmux kill\-server` both tokenise to `kill-server` while the raw bytes contain
+# no `kill-s`. Stripping them is what makes the pre-gate's implication hold over
+# TEXT and not merely over tokens.
+#
+# ⚠ Three `str.replace` passes, NOT `str.translate`. Measured on the 216 KiB
+# `scripts/drift-check.sh`: `translate` cost 20 ms — it is a per-character table
+# lookup in Python — against 0.6 ms for the replaces, and this runs on every
+# Bash call that names a script. The pre-gate must not become the cost it exists
+# to avoid.
+_UNQUOTE_CHARS = ("'", '"', "\\")
+
+
+def _unquote(body):
+    for ch in _UNQUOTE_CHARS:
+        body = body.replace(ch, "")
+    return body
+
+
+def _script_checks_for(body):
+    """The script-text checks whose sentinel appears in `body`.
+
+    🔴 THE PRE-GATE, and the reason it loses no coverage: each sentinel is a
+    substring the paired check's own matcher REQUIRES, so a body without it
+    cannot be denied by that check and parsing it would be pure cost. The body
+    is tested raw first (the common case, no copy) and then with quoting
+    stripped.
+
+    ⚠ RESIDUAL, declared: a line-continuation splice (`kill-\\` + newline +
+    `server`) still hides the sentinel, because deleting the backslash leaves
+    the newline between the halves. Pinned by
+    `test_a_line_continuation_splice_is_a_DECLARED_gap_in_the_pre_gate`.
+    """
+    stripped = None
+    for chk, sentinel in _SCRIPT_TEXT_CHECKS:
+        if sentinel in body:
+            yield chk
+            continue
+        if stripped is None:
+            stripped = _unquote(body)
+        if sentinel in stripped:
+            yield chk
+
+
+# 🔴 THIS ARM'S OWN REMEDY, because the inherited one is INVERTED here.
+# `_QUOTING_ESCAPE_HATCH` arrives inside `reason` and tells the caller to write
+# the text to a FILE — correct advice when a heredoc body is being parsed as a
+# command, and exactly backwards when what is denied is RUNNING a file. Writing
+# one is what the caller already did. So the tail says what actually clears it.
+_SCRIPT_ARM_REMEDY = (
+    " 🔴 AND IGNORE THE 'write the text to a file' NOTE ABOVE — it is inherited from the "
+    "checks that gate command TEXT and is backwards for this one: a file is what you just "
+    "ran. What clears this deny: (a) fix the SCRIPT — `tmux -L my-probe-$$ new-session -d …` "
+    "then `tmux -L my-probe-$$ kill-server`, or `kill-pane`/`kill-window` if you only meant "
+    "to remove what you named; (b) if the script only DOCUMENTS the command in a comment or a "
+    "heredoc, move that prose out of the executable file; (c) if a shared `kill-server` is "
+    "genuinely needed, ask the operator to run it in their own terminal."
+)
 
 
 @_wants_cwd
@@ -2614,9 +2857,18 @@ def check_executed_script_file(cmd, cwd=None):
     line does not contain the offending text and a bare "tmux kill-server is
     blocked" would read as a guard malfunction.
 
-    Bounded: recursion depth and a visited set, so a script that sources itself
-    (or a cycle between two) terminates instead of spinning a hook that runs on
-    every Bash call.
+    Bounded three ways, because this runs on every Bash call: a recursion depth,
+    a per-body descent cap (`_SCRIPT_DESCEND_MAX_BYTES`), and a visited set — so
+    a script that runs itself, or a cycle between two, terminates.
+
+    🔴 THE VISITED SET IS KEYED ON `(realpath, depth)`, NOT ON THE PATH. Keyed
+    on the path alone it was ORDER-DEPENDENT AND UNSOUND: `depth` is per-branch
+    but `seen` is global to the walk, so a file first reached at depth 3 (where
+    the next hop is over the limit) was then SKIPPED when the same file came up
+    again at depth 0, taking its whole subtree with it. Measured on a chain
+    `A→B→C→X→K` with the kill in `K`: `bash A.sh; bash X.sh` ALLOWED while
+    `bash X.sh; bash A.sh` DENIED — the same two commands, the same files, the
+    verdict decided by the order they appeared in.
     """
     seen = set()
 
@@ -2624,18 +2876,20 @@ def check_executed_script_file(cmd, cwd=None):
         if depth > _SCRIPT_RECURSION_LIMIT:
             return None
         for argv in commands(text):
-            path = _script_operand(argv)
-            if not path:
+            operand = _script_operand(argv)
+            if not operand:
                 continue
-            body = _read_script(path, cwd)
-            if body is None:
-                continue
-            key = os.path.realpath(
-                path if os.path.isabs(path) else os.path.join(cwd or ".", path))
+            path, direct = operand
+            key = (os.path.realpath(
+                path if os.path.isabs(path) else os.path.join(cwd or ".", path)),
+                depth)
             if key in seen:
                 continue
             seen.add(key)
-            for chk in _SCRIPT_TEXT_CHECKS:
+            body = _read_script(path, cwd, direct)
+            if body is None:
+                continue
+            for chk in _script_checks_for(body):
                 reason = chk(body)
                 if reason:
                     return (
@@ -2646,10 +2900,12 @@ def check_executed_script_file(cmd, cwd=None):
                         "Writing the command to a file and running the file is not "
                         "a way around this guard — it is the exact shape that "
                         "caused the incident. Fix the SCRIPT: give it its own "
-                        "server with `-L my-probe-$$` and kill that.")
-            nested = walk(body, depth + 1)
-            if nested:
-                return nested
+                        "server with `-L my-probe-$$` and kill that."
+                        + _SCRIPT_ARM_REMEDY)
+            if len(body) <= _SCRIPT_DESCEND_MAX_BYTES:
+                nested = walk(body, depth + 1)
+                if nested:
+                    return nested
         return None
 
     return walk(cmd, 0)
