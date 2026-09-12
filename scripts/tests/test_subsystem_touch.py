@@ -8723,8 +8723,9 @@ def _recovery_commands(message: str) -> list[list[str]]:
 # which the `nix build` tier's `$HOME` has — so that guard would be structurally
 # incapable of passing in one of the two tiers while staying green on a dev host.
 # This repo has already shipped exactly that defect once. The seam is pinned
-# instead by `test_the_LAUNCHER_still_prepends_what_this_command_omits`, which
-# reds if the launcher stops prepending either flag or stops appending argv.
+# instead by `scripts/tests/test_cairn_flake_pin.py`, which runs the REAL
+# launcher as a subprocess and reads both streams — measured to kill all three
+# prepend/append mutations on its own, with this file deselected.
 #
 # The store here is a SENTINEL the caller's own `--store` must override. Using
 # the test's real store would make a DROPPED `--store` invisible — measured: that
@@ -8950,11 +8951,11 @@ class TestMalformedRefusalNamesTheRecovery:
         # it with the same value the command emits makes a DROPPED `--store`
         # invisible: the parse yields the right root either way, so the mutant
         # survives a fully green assertion. Measured — it did, until this value
-        # was made one `store` can never equal.
-        launcher_default = "/nonexistent/LAUNCHER-DEFAULT-STORE"
-        assert str(store) != launcher_default
+        # was made one `store` can never equal. ONE definition, shared with
+        # `_writer_argv`, so the two models cannot drift apart.
+        assert str(store) != _LAUNCHER_DEFAULT_STORE
         args = st._build_parser().parse_args(
-            ["--store", launcher_default, "--validate"] + argv[1:]
+            ["--store", _LAUNCHER_DEFAULT_STORE, "--validate"] + argv[1:]
         )  # must not SystemExit
         assert args.validate is not None, "the parse is not a validate run at all"
         assert args.store == str(store), (
@@ -8980,25 +8981,28 @@ class TestMalformedRefusalNamesTheRecovery:
             f"home.sessionPath instead"
         )
 
-    def test_the_LAUNCHER_still_prepends_what_this_command_omits(self) -> None:
-        """🔴 SEAM LEDGER, not a component test. `validate_command` deliberately
-        does NOT spell `--validate`, because `scripts/cairn-validate` prepends it.
-        That is a relationship between two files, and nothing else asserts it: a
-        launcher that stopped prepending would make every emitted RECOVER command
-        parse fine and check NOTHING, which is a silent green."""
-        launcher = (ROOT / "scripts" / "cairn-validate").read_text(encoding="utf-8")
-        assert '"--validate"' in launcher, (
-            "scripts/cairn-validate no longer prepends --validate, so the command "
-            "validate_command() emits is no longer a validate run"
-        )
-        assert '"--store"' in launcher, (
-            "scripts/cairn-validate no longer prepends --store, so its default is "
-            "the writer's FROZEN mirror rather than the synced cache"
-        )
-        assert "sys.argv[1:]" in launcher, (
-            "the launcher no longer APPENDS the caller's argv after its own "
-            "defaults — last-occurrence-wins is what lets --store be overridden"
-        )
+    # 🔴 A SEAM LEDGER OVER `scripts/cairn-validate` USED TO LIVE HERE AND WAS
+    # DELETED, by round 0 of this PR's own audit. It grepped the launcher's
+    # SOURCE TEXT for `"--validate"`, `"--store"` and `"sys.argv[1:]"`, and its
+    # docstring claimed "nothing else asserts it … which is a silent green".
+    # That claim was FALSE, and the guard was SPELLED rather than structural:
+    # it passed if the literal appeared anywhere — a comment, the wrong argv
+    # position — and went falsely RED on a legal refactor (single quotes, or
+    # hoisting the flags into a constant), because the double quotes were baked
+    # into the pattern.
+    #
+    # MEASURED, which is why it went rather than got reworded: each of the three
+    # mutations it claimed to catch was run against `test_cairn_flake_pin.py`
+    # ALONE, with this file deselected — `--validate` prepend dropped → 3 failed;
+    # `--store` prepend dropped → 1 failed; caller argv dropped → 2 failed.
+    # Pristine control green at 15 passed first. Those tests run the REAL
+    # launcher as a subprocess and read BOTH streams, so they hold in the
+    # `nix build` tier too, and the `--store` one names the frozen mirror in its
+    # negative half precisely to kill the dropped-prepend mutant.
+    #
+    # So the seam is pinned BEHAVIOURALLY, one file over, and a second spelled
+    # copy of it read as coverage while providing none — which `claude/RULES.md`
+    # calls worse than no guard, because it stops anyone looking.
 
 
 class TestValidatorReusesTheReadersParser:

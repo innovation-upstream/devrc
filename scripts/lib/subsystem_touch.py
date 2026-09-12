@@ -5971,26 +5971,48 @@ def validate_command(store_root: str | Path, scope: str) -> str:
     quoting a command that no longer parses — the exact failure a "just run
     --validate" sentence has no defence against.
 
-    🔴 IT NAMES `cairn-validate`, NOT `python3 <this file>`. The absolute checkout
-    path this used to emit was baked into a protocol whose whole point is that
-    agents work in OTHER repos: `Path(__file__)` makes the command true for the
-    machine that PRINTED it and false for anyone who pastes it anywhere else, and
-    a reader has no way to tell those apart. `cairn-validate` is a bare command on
-    `home.sessionPath`, so it resolves from any cwd in either runtime, and it is
-    the spelling the launcher's own docstring declares as its interface. This is
-    rank 23(b) of `claudedocs/handoff-cairn-oss-multi-instance.md`.
+    🔴 IT NAMES `cairn-validate`, NOT `python3 <this file>` — AND THE REASON IS
+    THE RUNNING COPY, NOT THE MACHINE. ⚠ An earlier draft of this docstring (and
+    of the commit and PR that introduced it) said `Path(__file__)` "makes the
+    command true for the machine that PRINTED it and false for anyone who pastes
+    it anywhere else". **That was wrong twice over and is RETRACTED**, by round 0
+    of this PR's own audit: the old spelling emitted an ABSOLUTE path, so cwd was
+    never the failure; and `nix/home.nix` deploys the launcher as an
+    `mkOutOfStoreSymlink` into `${home}/workspace/devrc`, so any host on which
+    `cairn-validate` resolves AT ALL necessarily has this checkout at that same
+    absolute path — the old command would have worked there too. If anything the
+    new spelling's precondition is STRONGER: it needs a home-manager switch and a
+    deployed pin, where the old one needed only python.
 
-    🔴 `--store` IS EMITTED EXPLICITLY, AND THAT IS NOT REDUNDANT. The launcher
-    prepends the SYNCED CACHE as its default store; this function's contract is to
-    check the store the caller actually read, which is the one the refusal came
-    from. Passing it means argparse's last-occurrence-wins gives this value, so
-    the command cannot silently report a DIFFERENT store clean — the exact
-    failure mode `malformed_refusal` exists to prevent. Measured: with an explicit
-    `--store`, the run's own `store:` line names it, not the launcher's default.
+    The real defect, MEASURED: `Path(__file__).resolve()` names the RUNNING COPY.
+    Run out of a throwaway worktree — which is this repo's standing default for
+    any file-modifying agent — it emitted
+    `python3 /tmp/wt-<topic>/scripts/lib/subsystem_touch.py …`, a path that is
+    about to be `worktree remove`d. The recovery command went stale the moment the
+    session that printed it finished. `cairn-validate` is a bare command on
+    `home.sessionPath` and is the spelling the launcher's own docstring declares
+    as its interface. Rank 23(b) of
+    `claudedocs/handoff-cairn-oss-multi-instance.md`.
 
-    `--validate` is NOT spelled here: the launcher prepends it with no value, which
-    is the check-every-entry form. `test_the_command_is_BUILT_not_typed` pins that
-    seam so a launcher that stopped prepending it cannot go unnoticed.
+    🔴 `--store` IS EMITTED EXPLICITLY: it pins the command to the store THIS
+    refusal came from, so it cannot report a DIFFERENT store clean — the failure
+    `malformed_refusal` exists to prevent, and the one
+    `test_a_reject_in_ANOTHER_scope_gets_a_command_for_THAT_scope` guards.
+    ⚠ **But it is not the free choice an earlier draft implied, and the trade is
+    real.** `store` here is `build_report`'s argument, which in the ordinary path
+    is `args.store` — whose default is `DEFAULT_STORE_ROOT`, the FROZEN
+    pre-cutover mirror, NOT the synced cache the launcher would otherwise pick
+    (measured: mirror 161 entries, cache 244). The mandated invocations in
+    `claude/skills/subsystem-index/SKILL.md` pass no `--store`, so this emits a
+    command pointing at the frozen mirror. That is FAITHFUL — the malformed file
+    really is the one that was read — but it inherits a pre-existing question
+    this function does not answer and must not be read as settling: why does the
+    writer default to the frozen mirror at all? Do not "tidy" this by dropping
+    `--store`; that trades fidelity for freshness silently.
+
+    `--validate` is NOT spelled here: the launcher prepends it with no value,
+    which is the check-every-entry form. That seam is pinned BEHAVIOURALLY by
+    `scripts/tests/test_cairn_flake_pin.py`, which runs the real launcher.
     """
     return f"cairn-validate --store {store_root} --scope {normalize_ref(scope)}"
 

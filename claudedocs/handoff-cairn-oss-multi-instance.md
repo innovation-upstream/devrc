@@ -1385,6 +1385,48 @@ belongs to that arc's own session. via: measurement
       emits, so the parse yielded the right root either way. It dies only against a sentinel the
       caller's store can never equal. A fixture whose fields are not pairwise distinct cannot see
       the mutant that collapses them.
+    🔴 **ROUND 0 OF THIS PR'S OWN AUDIT REFUTED THIS ITEM'S STATED RATIONALE. The fix stands; the
+    REASON printed on it was wrong, and it is retracted in the code, the PR and here.** The claim
+    was that `Path(__file__)` makes the command *"true for the machine that printed it and false
+    for anyone who pastes it elsewhere"*. Both halves fail:
+    - the old spelling emitted an **absolute** path, so cwd was never the failure mode; and
+    - `nix/home.nix` deploys the launcher as an `mkOutOfStoreSymlink` into
+      `${homePath}/workspace/devrc`, so **any host where `cairn-validate` resolves at all
+      necessarily has this checkout at that same absolute path** — the old command would have
+      worked there too. The new spelling's precondition is if anything **stronger**: it needs a
+      home-manager switch and a deployed pin, where the old one needed only python.
+    **The real defect, measured:** `Path(__file__).resolve()` names the **running copy**. Run from
+    a throwaway worktree — this repo's standing default for any file-modifying agent — it emitted
+    `python3 /tmp/wt-cairn-rank23/scripts/lib/subsystem_touch.py …`, a path about to be
+    `worktree remove`d. The recovery command went stale the moment the session that printed it
+    ended. **That is the durable reason; do not re-derive the portability one from this doc.**
+    🔴 **AND A GUARD I WROTE WAS DELETED BY THAT ROUND, ON MEASUREMENT.**
+    `test_the_LAUNCHER_still_prepends_what_this_command_omits` grepped the launcher's SOURCE TEXT
+    and its docstring asserted *"nothing else asserts it … which is a silent green"* — **false**.
+    Control: each of its three mutations run against `test_cairn_flake_pin.py` ALONE, with
+    `test_subsystem_touch.py` deselected — `--validate` prepend dropped → **3 failed**; `--store`
+    prepend dropped → **1 failed**; caller argv dropped → **2 failed**; pristine control green at
+    **15 passed** first. Those tests run the REAL launcher as a subprocess and read BOTH streams,
+    so they hold in the `nix build` tier; mine was SPELLED (baked double quotes ⇒ falsely red on a
+    legal refactor, green on a literal in a comment). **A second, weaker copy of a guard that
+    already exists reads as coverage while providing none.**
+    ⚠ **`--store` SURVIVED the round but is no longer claimed to be free.** `store` here is
+    `args.store`, whose default is `DEFAULT_STORE_ROOT` — the **frozen pre-cutover mirror**, not
+    the synced cache the launcher would otherwise pick (measured: mirror **161** entries, cache
+    **244**), and the mandated invocations in `subsystem-index/SKILL.md` pass no `--store`. Keeping
+    it is FAITHFUL (the malformed file really is in the store that was read) but it inherits an
+    unanswered question — why does the writer default to the frozen mirror at all? — which this
+    change must not be read as settling.
+    🔴 **ROUND 0's OTHER FINDING, FILED NOT FIXED: this item's closing condition is SPELLED, and
+    the CLASS is still open.** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 is
+    genuinely met, but `command grep -rn '/home/zach/workspace/devrc' claude/skills/` returns **21
+    occurrences across 9 files**, including **four literal
+    `python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py …` invocations in
+    `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`** — the write-protocol skill itself,
+    the primary consumer. No scanner gates this class. **Closing condition:** a mechanical gate
+    over `claude/skills/**` rejecting any quoted or emitted command that embeds an absolute
+    checkout path, plus those 21 sites cleared — merged, and watched red-then-green on a planted
+    violation. **Owner: unassigned; this is a new ranked item, not part of rank 23.**
     ⚠ **A THIRD SITE OF THE SAME CLASS, FOUND WHILE FIXING (b) AND DELIBERATELY NOT FIXED:**
     `scripts/lib/subsystem_touch.py:3991` and `:4712` emit
     `python3 {SELF_PATH} --template <slug> --scope …` — the same absolute-checkout-path spelling,
