@@ -31,18 +31,38 @@
 # `server.py`'s entrypoint and asserts BOTH this file and the (allowlist-shaped)
 # `Dockerfile.dockerignore` cover it. Add an import, run that test.
 
+# 🔴 THE READER MODULES NOW COME FROM THE PINNED `cairn` PACKAGE, NOT FROM
+# `scripts/lib/`. devrc deleted its forked copies when it consolidated onto the
+# flake pin, so there is nothing at `scripts/lib/subsystem_recall.py` to COPY.
+# `build-push.sh` STAGES the pinned `lib/` into `.cairn-lib/` beside this file
+# (a gitignored build-context directory, written by name, never `cp -r` of a
+# working tree) and the COPY below takes it from there. The premise in this
+# file's header is unchanged and is the reason it is done this way: the pod must
+# run the SAME reader the CLI runs, and after the consolidation that reader is
+# the pinned one. A copy kept in `scripts/lib/` purely for the image would be
+# the second drifting tree this design exists to prevent.
+#
+# 🔴 `subsystem_touch.py` AND `git_mainline.py` ARE NO LONGER COPIED, and that
+# is a consequence rather than a trim: devrc's reader used to import its shared
+# vocabulary `from subsystem_touch`, while the pinned reader imports it from
+# `entry_shape`. The transitive closure from `server.py` is re-derived by
+# `test_subsystem_store_api.py::test_the_image_copies_every_module_it_needs`
+# across BOTH source trees — do not restore either by eye.
 FROM python:3.12-slim
 
-# Stdlib only: `subsystem_recall` imports argparse/difflib/json/re/sys/pathlib
-# and the local `subsystem_read_store`/`subsystem_resolver`/`subsystem_touch`,
-# and shells out to nothing. There is no requirements.txt to install and there
-# must not be one.
-COPY scripts/lib/subsystem_recall.py   /app/scripts/lib/
-COPY scripts/lib/subsystem_read_store.py /app/scripts/lib/
-COPY scripts/lib/subsystem_resolver.py /app/scripts/lib/
-COPY scripts/lib/subsystem_touch.py    /app/scripts/lib/
-COPY scripts/lib/git_mainline.py       /app/scripts/lib/
-COPY scripts/lib/host_identity.py      /app/scripts/lib/
+# Stdlib only: the reader imports argparse/difflib/json/re/sys/pathlib and its
+# own siblings, and shells out to nothing. There is no requirements.txt to
+# install and there must not be one.
+#
+# devrc's own module — the seam that puts the pinned lib on `sys.path`.
+COPY scripts/lib/cairn_pin.py /app/scripts/lib/
+# The pinned reader and its siblings, staged by build-push.sh. Named
+# individually for the same reason every other COPY here is: no `COPY . .`.
+COPY scripts/subsystem-store-api/.cairn-lib/subsystem_recall.py     /app/cairn-lib/
+COPY scripts/subsystem-store-api/.cairn-lib/subsystem_read_store.py /app/cairn-lib/
+COPY scripts/subsystem-store-api/.cairn-lib/subsystem_resolver.py   /app/cairn-lib/
+COPY scripts/subsystem-store-api/.cairn-lib/entry_shape.py          /app/cairn-lib/
+COPY scripts/subsystem-store-api/.cairn-lib/host_identity.py        /app/cairn-lib/
 COPY scripts/subsystem-store-api/server.py /app/scripts/subsystem-store-api/
 
 # `subsystem_touch` evaluates `DEFAULT_STORE_ROOT = Path.home() / ".claude" / …`
@@ -50,7 +70,14 @@ COPY scripts/subsystem-store-api/server.py /app/scripts/subsystem-store-api/
 # a passwd entry — which is the ordinary state of a numeric-UID container. The
 # value is never used here (every call passes `--store`), but the import would
 # fail before anything could say so.
-ENV HOME=/home/nonroot \
+# 🔴 `CAIRN_LIB` IS RESOLUTION ROUTE 1 AND THE ONLY ONE AVAILABLE HERE. The
+# container carries no `cairn` on PATH and no home-manager generation, so
+# `cairn_pin`'s PATH-derived route cannot answer; without this the server would
+# refuse at import with the pin's own "not found" message. That refusal is the
+# correct behaviour — it is why there is no silent fallback — and this is how the
+# pod satisfies it.
+ENV CAIRN_LIB=/app/cairn-lib \
+    HOME=/home/nonroot \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     SUBSYSTEM_STORE_ROOT=/data \

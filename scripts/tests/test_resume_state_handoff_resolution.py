@@ -43,8 +43,15 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from testlib.mockbin import write_exec  # noqa: E402
 
 SCRIPT = REPO_ROOT / "scripts/resume-state.sh"
@@ -1135,7 +1142,7 @@ def test_the_two_implementations_TIE_BREAK_differently_and_that_is_recorded():
     behaviour, so it is deliberately out of scope here — but it IS the same
     "step 3 vs step 4" seam, and it is real.
     """
-    src = (REPO_ROOT / "scripts/lib/subsystem_recall.py").read_text(encoding="utf-8")
+    src = (pinned("subsystem_recall")).read_text(encoding="utf-8")
     assert "focus_window" in src
     shell = (REPO_ROOT / "scripts/resume-state.sh").read_text(encoding="utf-8")
     assert "ls -t" in shell, (

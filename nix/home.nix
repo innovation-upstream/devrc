@@ -1502,15 +1502,22 @@ in
   # working in another repo, in either runtime, can resolve a bare command.
   # 🔴 SAME DEPLOY MODE AS `cairn-who`, FOR THE SAME REASON, AND NOT AS TIDINESS.
   # `scripts/cairn-validate` reaches `lib/subsystem_touch.py` and
-  # `lib/subsystem_read_store.py` through its own
-  # `Path(__file__).resolve().parent / "lib"`, and there IS NO PACKAGE shipping
-  # those beside it — `subsystem_touch.py` is the devrc-only WRITER and is
-  # deliberately absent from the OSS repo, which extracted the reader only. A
-  # `home.file` copy would resolve into /nix/store and die on import before
-  # printing anything. So the asymmetry above is now two-against-one: `cairn` is
-  # in-store because its package installs script and `lib/` together; these two
-  # are out-of-store because nothing installs theirs. Read all three lines
-  # together and do not "tidy" them into agreement in either direction.
+  # `lib/cairn_pin.py` through its own `Path(__file__).resolve().parent / "lib"`,
+  # and there IS NO PACKAGE shipping those beside it — `subsystem_touch.py` is the
+  # devrc-only WRITER and is deliberately absent from the OSS repo, which
+  # extracted the reader only, and `cairn_pin.py` is devrc's own seam onto the
+  # pinned package. A `home.file` copy would resolve into /nix/store and die on
+  # import before printing anything. So the asymmetry above is now
+  # two-against-one: `cairn` is in-store because its package installs script and
+  # `lib/` together; these two are out-of-store because nothing installs theirs.
+  # Read all three lines together and do not "tidy" them into agreement in either
+  # direction.
+  #
+  # ⚠ `subsystem_read_store` USED TO BE NAMED HERE and no longer is: devrc deleted
+  # its forked copy when it consolidated onto the pin, so that module arrives
+  # through `flake.lock`. The argument above is UNCHANGED by that — it was never
+  # about the reader modules, it is about `subsystem_touch.py`, which no package
+  # ships and which `cairn-validate` still reaches by checkout-relative path.
   home.file.".local/bin/cairn-validate".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-validate";
   # Claude Code hooks managed here (the script only — the settings.json
@@ -3059,6 +3066,14 @@ in
       TimeoutStartSec = 300;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.kubectl pkgs.bash pkgs.coreutils ]}"
+        # 🔴 THE PINNED cairn LIB — see the long note on
+        # `analyze-service-index-backup` for why PATH cannot substitute. devrc's
+        # store-reader modules resolve through `scripts/lib/cairn_pin.py`, which
+        # RAISES rather than degrading, and the PATH above is a CLOSED list with
+        # no cairn in it (measured on the live unit). This unit runs the
+        # WORKING-TREE copy, so without this entry it breaks on the operator's
+        # next `git pull`, not on a switch.
+        "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
         "HOME=%h"
@@ -4244,6 +4259,23 @@ in
       TimeoutStartSec = 300;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.git pkgs.gh pkgs.systemd pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        # 🔴 THE PINNED cairn LIB — see the long note on
+        # `analyze-service-index-backup` for why PATH cannot substitute. devrc's
+        # store-reader modules resolve through `scripts/lib/cairn_pin.py`, which
+        # RAISES rather than degrading, and the PATH above is a CLOSED list with
+        # no cairn in it (measured on the live unit). This unit runs the
+        # WORKING-TREE copy, so without this entry it breaks on the operator's
+        # next `git pull`, not on a switch.
+        #
+        # ⚠ "BREAKS" IS WEAKER HERE THAN FOR THE OTHER TWO UNITS, AND THE
+        # DIFFERENCE IS DELIBERATE. `measure.py::m_index_store` catches
+        # `CairnPinUnresolved` and degrades that ROW to `Unmeasurable`, so
+        # without this entry `present-regen` still RUNS and still publishes a
+        # page — it just publishes one whose index-store row says the pinned
+        # client is not available. That is a silent-ish loss rather than a dead
+        # timer, which makes this entry MORE worth having, not less: a failing
+        # unit is noticed, a quietly unmeasured row is not.
+        "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
         "PRESENT_REPO=%h/workspace/devrc"
         # 🔴 The SAME directory present-serve reads. Two literals that must
         # agree is the seam neither file owns, so the test suite pins them
@@ -4855,6 +4887,39 @@ in
         TimeoutStartSec = 900;
         Environment = [
           "PATH=${lib.makeBinPath [ pkgs.git pkgs.age pkgs.kubectl pkgs.coreutils ]}"
+          # 🔴 THE PINNED cairn LIB, AND IT IS LOAD-BEARING — WITHOUT IT THIS
+          # UNIT CANNOT IMPORT ITS OWN PROGRAM. devrc deleted its five forked
+          # store-reader modules and resolves them through
+          # `scripts/lib/cairn_pin.py`, which RAISES rather than degrading. That
+          # module has two routes: this variable, or `cairn` on PATH. The PATH
+          # above is a CLOSED list and there is no cairn in it — measured on the
+          # live unit — so route 2 cannot answer and only this entry can.
+          #
+          # 🔴 PATH IS NOT AN ALTERNATIVE FIX HERE, for two independent reasons.
+          # `%h/.local/bin/cairn` is a home-manager symlink into /nix/store, and
+          # this unit runs with `ProtectHome=tmpfs`, so inside its namespace that
+          # symlink does not exist at all. MEASURED here with `systemd-run
+          # --user`, both arms: with `-p ProtectHome=tmpfs` a `[ -e
+          # %h/.local/bin/cairn ]` probe prints ABSENT; the same probe without the
+          # directive prints PRESENT. And even where it does, a store path
+          # spelled through the deploy symlink is one `home-manager switch` away
+          # from a generation this unit was not built against; `${cairnPackage}`
+          # is the exact closure this configuration pins.
+          #
+          # 🔴 THE FAILURE IT PREVENTS BREAKS ON `git pull`, NOT ON A SWITCH.
+          # These units run the WORKING-TREE copy of the script, so the moment
+          # the consolidation lands on disk the timer runs code that
+          # hard-requires the pin — before any switch. Measured, same closed env
+          # both arms: base `IMPORT OK`, head `CairnPinUnresolved`.
+          #
+          # ⚠ DO NOT WRITE THE LITERAL WORD "Exec"+"Start" IN A COMMENT INSIDE A
+          # UNIT BLOCK. Guards in `scripts/tests/` read these blocks as TEXT:
+          # `test_handoff_index.py` counts lines containing it (a comment made
+          # the count 2) and slices the Environment block at its first
+          # occurrence (a comment truncated the block, hiding the handle lines
+          # from the check that they are derived rather than listed). Both went
+          # red in the authoritative tier and green on the dev host.
+          "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
           "HOME=%h"
           "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
           # The identity this encrypts to: the operator's EXISTING SOPS age key,

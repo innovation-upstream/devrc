@@ -2,7 +2,9 @@
 
 Loaded on demand, not every run. `SKILL.md` calls `scripts/lib/service_recon.py`,
 which performs the READ half of this document deterministically (through
-`scripts/lib/subsystem_recall.py`, the store's one reader). Read this when you
+`subsystem_recall`, the store's one reader — it ships in the pinned `cairn`
+package now, not in `scripts/lib/`; `python3 scripts/lib/cairn_pin.py` prints
+where). Read this when you
 need to **resolve a ref by hand**, **write an entry** (see `write-back.md`), or
 **understand what the recon brief's `index:` line is telling you**.
 
@@ -18,14 +20,14 @@ never live state, never re-derived config values.
 
 ## Resolution rules
 
-<!-- resolver-rules:begin — hashed by scripts/tests/test_subsystem_resolver.py. Editing ANYTHING between these markers, including ADDING a bullet, fails that test on purpose: the code implementing these rules is scripts/lib/subsystem_resolver.py and the two must move together. -->
+<!-- resolver-rules:begin — hashed by scripts/tests/test_subsystem_resolver.py. Editing ANYTHING between these markers, including ADDING a bullet, fails that test on purpose: the code implementing these rules is the PINNED `subsystem_resolver` (devrc deleted its copy when it consolidated onto the cairn flake pin; `python3 scripts/lib/cairn_pin.py` prints where it lives) and the two must move together. -->
 - **`<slug>`** is normalized: lowercase, `_` → `-`, any other char outside `[a-z0-9.-]` → `-`, collapsed, trimmed of leading/trailing `-` — applied identically on read and write **and to `aliases:` before comparing**, so `External DNS` / `externaldns` / `external-dns` land on one file, and so do `image_ingestion` / `image-ingestion`. The `_` fold matters: the index links `_`-spelled `MEMORY.md` slugs (`bastion_config_stale_until_reload_2026_07_08`). **Keep the pre-fold spelling in `aliases:`** — it stays a valid ref and records how the thing is really written.
 - **Kind qualification — only when disambiguation is needed.** One slug can name two KINDS of thing (`devrc/repo-cos` is both a code subsystem and the weekly ritual about it): qualify with `<slug>.<kind>.md` (`repo-cos.process.md`), kind ∈ `service` | `process` | `org` | `doc`. A trailing dot-segment is a kind **only if it is in that enum**, else it's part of the slug. 🔴 **Bare `<slug>.md` stays the default: no existing file is renamed, and a scope with no qualified filename behaves exactly as before.**
 - **Resolution — ambiguity is an ERROR, never a shadow.** Two tiers; an alias can never outrank a filename:
   1. **Filename tier** — normalized ref vs `<slug>.md` *and* every `<slug>.<kind>.md` in the scope. A ref naming its own kind (`repo-cos.process`) matches only that qualified file.
   2. **Alias tier** — normalized `aliases:` across the scope, consulted **only if tier 1 returned zero hits**.
   One hit → use it. **>1 in a tier → never pick: stop, call the ref ambiguous and list the candidates** (`repo-cos.md` vs `repo-cos.process.md`) for the user to choose. Zero in both → no index yet.
-- 🔴 **The EXECUTABLE authority for the two rules above is `scripts/lib/subsystem_resolver.py`** (`normalize_ref`, `split_kind`, `resolve_ref_tiered`). The prose here exists because *you* are the other implementation — but two implementations of one predicate drift, and here the drift is silent: a ref stops resolving and the miss reads as "no index yet". `scripts/tests/test_subsystem_resolver.py::TestCommandDocIsPinned` holds the sentences above as literal substrings alongside the behaviour each asserts, so **rewording either side without the other goes red naming the sentence that moved.** Change both in one commit.
+- 🔴 **The EXECUTABLE authority for the two rules above is `subsystem_resolver`** (`normalize_ref`, `split_kind`, `resolve_ref_tiered`) — the module in the pinned `cairn` package; devrc has no copy of it any more. The prose here exists because *you* are the other implementation — but two implementations of one predicate drift, and here the drift is silent: a ref stops resolving and the miss reads as "no index yet". `scripts/tests/test_subsystem_resolver.py::TestCommandDocIsPinned` holds the sentences above as literal substrings alongside the behaviour each asserts, so **rewording either side without the other goes red naming the sentence that moved.** Change both in one commit.
 - **Lazy** — a scope dir or service file may not exist yet; it appears only on a confirmed write-back (see "## Write-back (opt-in)").
 <!-- resolver-rules:end — deliberately AFTER the last bullet of this list, not before it: an editor appending a rule appends at the END, and a boundary that stops short of the append point leaves the likeliest drift outside the hash. -->
 
@@ -61,7 +63,7 @@ hash reason.
 - **Never `git reset --hard` (bare), `git clean`, or `git checkout --`** — each destroys **uncommitted** curated content, which is exactly the part no commit and no bundle holds. ⚠ "bare" qualifies `git reset --hard` ONLY, contrasted with the `<ref>` form below: `git checkout --` always takes a pathspec and `git clean` is almost always `-fd`, so reading "bare" across all three would license exactly the commands this bullet forbids.
 - 🔴 **`git reset --hard <ref>` is WORSE than the bare form, not milder — it orphans COMMITTED content.** `backup.py` bundles with `git bundle create --all`, which walks **reachable refs only**, so once the branch has moved back, the orphaned commits are in no FUTURE bundle. They are still inside the bundles ALREADY in the bucket, which hold whatever was reachable when each was made — `ASIB_KEEP` daily runs, default 14 (`backup.py`) — so run `restore-verify.py` before calling anything lost. Past that window the reflog is the only holder. Do not read "it is committed, so a bundle has it" as safety against a history rewrite.
 - **Never add a remote, never push**, and never copy a line into `devrc` (PUBLIC) or any public repo, issue, PR, gist or commit message. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
-- Each scope's own `README.md` states the policy governing it — **read it before writing there**.
+- 🔴 **Read the policy file the probe named on its `policy:` line before writing there, and do not go looking for one it did not name.** This sentence is the SAME one `~/.claude/skills/subsystem-index/SKILL.md` uses in the shared write half, deliberately word for word, and `scripts/tests/test_index_store_policy_line.py` fails if the two copies drift apart — one rule stated two ways is how one of them goes stale. ⚠ **It replaces "each scope's own `README.md` states the policy governing it — read it before writing there", which was unfollowable:** measured 2026-08-13, 1 of the store's 5 scopes had that file, and a new scope starts without one by construction. `service_recon.py` now prints the `policy:` line directly under `index:` on every status (see the table below), resolved by `subsystem_touch.governing_policy` — the same function `/handoff`'s probe uses, so the two probes cannot name different files for one scope.
 
 ## File schema
 
@@ -125,6 +127,19 @@ STALE**: a
 cache last synced three days ago serves a `HIT` that reads exactly like a fresh
 one, so the stamp lines are the only thing in the brief that says how old it is.
 No stamp lines means the store carried no stamp — never that it is fresh.
+
+🔴 **A `policy:` line follows, on EVERY status** — `policy: <path>  (<basis>)`,
+directly under the `index:`/`stamp:` block. It is the line the shared write half
+sends you to (Store safety, above), and the basis says which of four cases you
+are in: `scope README — authoritative for this scope`, `store-root README — this
+scope has none of its own`, `NONE — neither a scope README nor a store-root
+README exists`, or `NOT RESOLVED — no scope was reached, so no policy file was
+looked for`. 🔴 **The fourth is not a spelling of the third.** `NONE` is a
+measurement — two paths stat'd, neither there; `NOT RESOLVED` is `not-attempted`
+or `store-unstamped`, where nothing was asked at all, and reading them as one
+would let a run that never looked report what a run that looked and found
+nothing reports. The first three come from `subsystem_touch.governing_policy`,
+so they are the same answer `/handoff`'s probe prints for that scope.
 
 🔴 **`## What it is` is surfaced on the BODY paths only, never on an index row.**
 Until 2026-08-21 no BRIEFING path printed it — `subsystem_recall` left it out of

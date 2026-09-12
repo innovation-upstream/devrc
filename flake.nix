@@ -149,6 +149,28 @@
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
         pkgs.rsync pkgs.zsh pkgs.age pkgs.dash
+        # 🔴 cairn — THE PINNED CLIENT, AND IT IS NOT A TEST-ONLY CONVENIENCE.
+        # devrc deleted its five forked reader modules and resolves them from
+        # this package at runtime (`scripts/lib/cairn_pin.py`: `which cairn` ->
+        # realpath -> `libexec/cairn/lib`). So every suite that imports the
+        # writer or the reader needs it on PATH, `run-tests.sh` asserts it in
+        # REQUIRED_TOOLS, and putting it HERE — in the shared list — is what
+        # makes `nix develop` and both check tiers satisfy that precondition
+        # from one place.
+        #
+        # 🔴 IT IS THE SAME PACKAGE `homeConfigurations.zach` DEPLOYS, resolved
+        # from the same `flake.lock` entry, so the gate exercises the exact
+        # client the hosts run rather than a second build of it. That is also
+        # the cost, stated as plainly as the nodejs/nix/opencode entries below
+        # are: a `nix flake lock --update-input cairn` now invalidates this
+        # check's build cache AND can turn it red — which is the point, because
+        # every other cairn guard in this repo reads text and stays green while
+        # the pinned client is broken.
+        #
+        # ⚠ `cairn` is a PRIVATE flake input, absent from cache.nixos.org, so on
+        # a cold CI store this leg may pay a real build. Unmeasured here; the
+        # same caveat is recorded on `checks.cairn-client-runs` below.
+        cairn.packages.${system}.cairn
         # 🔴 tmux, because two of tmux-reply-agent's guards CANNOT be written
         # against a stub. A stub tmux always exits 0, so it models neither the
         # session PREFIX-MATCH (`-t scratch2:` opening a window in `scratch20`)

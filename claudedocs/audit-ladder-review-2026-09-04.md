@@ -512,9 +512,48 @@ Both directions, and they do not cancel.
   hazard `claude/RULES.md` names — *a clean git merge is not a clean merge; a semantic conflict
   survives it* — landing in a region no audit round's range covered. `--remerge-diff` is what
   makes it visible at all (shape B of the reference file's range table, working as designed).
-  ⚠ **SCOPE: this is the top of the distribution, not all of it** — 6 of 79 tail adjacencies,
-  ~34% of the 13,779 tail lines. The remaining 73 are unclassified, and a long tail of small
-  gaps may well be more development-heavy than these.
+  ⚠ **SCOPE of the six above: the top of the distribution, not all of it** — 6 of 79 tail
+  adjacencies, ~34% of the 13,779 tail lines, and they were picked BY SIZE, so they are
+  length-biased by construction.
+  ✅ **CONFIRMED ON A RANDOM SAMPLE, 2026-09-11 — and the unbiased draw is MORE audit-heavy,
+  not less.** Ten of the remaining 73 drawn uniformly (`random.seed(20260911)`, fixed and
+  printed so the sample is reproducible), spanning devrc, homelab-talos and
+  civit-datapacket-talos, 14 → 565 lines, **15 commits**:
+
+  | what the commit is | commits |
+  |---|---|
+  | fixes / audit responses | **11** |
+  | merges of the base branch | 2 |
+  | handoff/docs that are not a correction | 2 |
+  | **ordinary development** | **0** |
+
+  🔴 **ZERO features in 15 commits, and SEVEN of the eleven name an audit round in their own
+  subject line** — `audit r3`, `audit round 3`, `round-2 audit`, `round-3 audit`, `audit round
+  9`, `audit round 5`, and one more. The size-picked six had 1 feature in 17; the random ten
+  have 0 in 15. **Combined: 1 development commit out of 32, across 16 of 79 adjacencies.**
+  So the tail is not "mostly" missed audit surface — on this evidence it is almost entirely
+  that, and the earlier hedge was too generous to the null.
+  🔴 **AND THERE IS A MACHINE-CHECKABLE SIGNAL IN IT, which nobody is using:** seven of these
+  commit subjects state the round they belong to. A ladder that names its rounds in commit
+  subjects is one whose missed surface can be detected automatically — grep the tail's subjects
+  for a round reference and you have a classifier, no judgement required. Filed as a follow-on
+  rather than built here.
+  **The ten, recorded so the sample outlives the scratchpad it was drawn in** (the rank-10
+  lesson: a measurement whose inputs are gone is a measurement nobody can check) — repo and PR,
+  largest first: homelab-talos #748 (565 lines), civit-datapacket-talos #1418 (265),
+  **devrc #1083** (159), civit-datapacket-talos #1451 (146), homelab-talos #549 (115),
+  homelab-talos #673 (39), civit-datapacket-talos #1390 (34), homelab-talos #611 (25),
+  homelab-talos #488 (24), civit-datapacket-talos #1357 (14). Re-derive each with
+  `git -C <checkout> log --format='%p :: %s' <frm>..<to> --not <the PR's own base>`.
+  🔴 **`--not <base>` IS NOT OPTIONAL IN THAT COMMAND, and omitting it is how this
+  classification nearly went the other way.** Without it the listing shows the BASE branch's
+  own squash commits, so #1046's tail read as 55 unrelated PRs — which looks exactly like "the
+  PR kept developing" and would have CONFIRMED the hypothesis being tested. ⚠ And the base is
+  per-repo: two of these three repos use `trunk`, not `main`. An ad-hoc script that guessed
+  `origin/main` failed loudly on four of the ten; the measurement itself takes each PR's own
+  `baseRefName` from `gh` and was never wrong about it.
+  ⚠ Still 63 of 79 unclassified, and the two samples agree, which is weak evidence that a third
+  would too — they do not agree about a *rate* because neither was sized to estimate one.
   ⚠ **Two repos are UNMEASURABLE, each for its own reason, and neither is a pass.** naida-ai
   ran 214 PRs and posted **no ledger at all**, so there is nothing to measure coverage
   against — "no ladders ran here" and "ladders ran without blocks" are the same observation
