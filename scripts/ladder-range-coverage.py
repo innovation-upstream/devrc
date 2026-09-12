@@ -284,6 +284,66 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
 # Facts — `gh`, or a file so a test needs neither it nor a network
 # --------------------------------------------------------------------------- #
 
+def find_carriers(runner, repo, limit=300, state="all"):
+    """-> ([facts, …], note) for every PR in `repo` carrying an `audit-claims`
+    fence, newest first.
+
+    🔴 ONE ENUMERATOR, TWO CONSUMERS. Measuring the ladders in a repo and mining
+    their terminal-round prose are different tasks over the SAME population, and
+    that population has been built by hand twice — the 2026-09-04 review counted
+    "42 of 309 merged devrc PRs" in a scratchpad that no longer exists. A
+    hand-built list is also the one input nobody re-derives, so a repo added
+    later is silently out of scope.
+
+    🔴 IT IS ONE `gh` CALL, NOT ONE PER PR. `gh pr list --json comments` returns
+    the bodies, so the fence test is local. Asking per PR is ~300 calls against a
+    secondary rate limit and was the reason this stayed manual.
+
+    ⚠ THE BLIND SPOT IS INHERITED AND LOAD-BEARING: `gh` does not return REVIEW
+    comments here, so a block posted as a review is invisible — the same gap
+    `audit-dispatch.py` warns about when it cannot find a block a human can see.
+    A carrier count from this is therefore a FLOOR, never a census, and the note
+    it returns says so in the output rather than in this docstring alone.
+    """
+    cmd = ["gh", "pr", "list", "--repo", repo, "--state", state,
+           "--limit", str(limit), "--json",
+           "number,comments,headRefOid,baseRefName,title"]
+    rc, out, err = runner(cmd)
+    if rc != 0:
+        raise SystemExit(
+            f"`gh pr list --repo {repo}` exited {rc}: "
+            f"{(err or out).strip() or 'no output'}"
+        )
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"`gh pr list --repo {repo}` did not print JSON: {e}")
+
+    carriers = []
+    for pr in data:
+        bodies = [c.get("body", "") for c in pr.get("comments") or []]
+        if not any("audit-claims" in (b or "") for b in bodies):
+            continue
+        carriers.append({
+            "pr": pr.get("number"),
+            "head": pr.get("headRefOid") or "",
+            "base": pr.get("baseRefName") or "",
+            "comments": bodies,
+            "title": pr.get("title") or "",
+        })
+    note = (
+        f"{repo}: scanned {len(data)} PR(s) (state={state}, limit={limit}), "
+        f"{len(carriers)} carry an `audit-claims` fence. ⚠ A FLOOR, not a census "
+        "— `gh` does not return REVIEW comments, so a block posted as a review is "
+        "invisible here."
+    )
+    if len(data) >= limit:
+        note += (f" ⚠ The scan HIT ITS LIMIT ({limit}), so older PRs were not "
+                 "examined at all — raise --limit before reading this as the "
+                 "whole repo.")
+    return carriers, note
+
+
 def facts_from_gh(runner, repo, pr):
     cmd = ["gh", "pr", "view", str(pr), "--json",
            "comments,headRefOid,baseRefName,url"]
@@ -434,12 +494,24 @@ def render(ladders, notes):
                "payload IS the `.md`). So")
     out.append("  this total is the SIZE of the hole, not the payload the review "
                "under-counted by.")
-    out.append("⚠ A COMMIT COUNT IS NOT A CHURN COUNT. A GAP of many commits and "
-               "0 lines is `--not")
-    out.append("  <base>` working: those commits are an upstream bring-in already "
-               "in the base, which is")
-    out.append("  shape A of the reference file's range table. Three of the 20 "
-               "ladders look like that.")
+    # 🔴 DERIVED, NEVER A LITERAL. This line first shipped reading "Three of the
+    # 20 ladders look like that" — the figure from the devrc run it was written
+    # during — and then printed that sentence verbatim on a 5-ladder run of a
+    # different repo. A count in prose beside a measurement it is not computed
+    # from is the exact defect class this whole report exists to find, committed
+    # inside the report. Counted here instead.
+    zero_line_gaps = sum(
+        1 for L in ladders if L.reason is None
+        for a in L.adjacencies
+        if a.label == GAP and a.commits and not (a.added or 0) + (a.deleted or 0)
+    )
+    if zero_line_gaps:
+        out.append("⚠ A COMMIT COUNT IS NOT A CHURN COUNT. A GAP of many commits "
+                   "and 0 lines is `--not")
+        out.append("  <base>` working: those commits are an upstream bring-in "
+                   "already in the base, which is")
+        out.append(f"  shape A of the reference file's range table. "
+                   f"{zero_line_gaps} gap(s) in THIS run look like that.")
     return "\n".join(out)
 
 
@@ -460,11 +532,20 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
                                         "consults no `gh` and no network")
     ap.add_argument("--no-fetch", action="store_true",
                     help="skip `git fetch origin refs/pull/<n>/head`")
+    ap.add_argument("--find-carriers", action="store_true",
+                    help="enumerate every PR in --repo carrying an "
+                         "`audit-claims` fence and measure all of them")
+    ap.add_argument("--list-only", action="store_true",
+                    help="with --find-carriers: print the carriers and stop")
+    ap.add_argument("--limit", type=int, default=300,
+                    help="with --find-carriers: how many PRs to scan (default 300)")
     ap.add_argument("--audit-dispatch", help="path to audit-dispatch.py")
     args = ap.parse_args(argv)
 
-    if not args.prs and not args.facts_file:
-        ap.error("give at least one PR number, or --facts-file")
+    if not args.prs and not args.facts_file and not args.find_carriers:
+        ap.error("give at least one PR number, --facts-file, or --find-carriers")
+    if args.find_carriers and not args.repo:
+        ap.error("--find-carriers needs --repo owner/name")
 
     ad = load_audit_dispatch(args.audit_dispatch)
 
@@ -478,6 +559,30 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
         facts_list = raw if isinstance(raw, list) else [raw]
         notes.append("--facts-file mode: no `gh` was consulted, so nothing here "
                      "was checked against the live PR")
+    elif args.find_carriers:
+        facts_list, note = find_carriers(runner, args.repo, limit=args.limit)
+        notes.append(note)
+        if args.list_only:
+            print(note, file=out_stream)
+            for f in facts_list:
+                print(f"  #{f['pr']}  {f['title'][:88]}", file=out_stream)
+            return EXIT_OK if facts_list else EXIT_NOTHING_MEASURABLE
+        if not facts_list:
+            # 🔴 NOT a clean bill of health, and it is the answer rank 8 most
+            # often gets: "this repo ran no ladders with a ledger" and "nobody
+            # ever posted a block here" are the same observation, and neither is
+            # "the ladders here are fine".
+            print(note, file=out_stream)
+            print("\nUNMEASURABLE — this repo has NO PR carrying an "
+                  "`audit-claims` block in the scanned window, so there is no\n"
+                  "ledger to measure coverage against. That is a statement about "
+                  "the LEDGER, not about whether\nladders ran here: a ladder that "
+                  "ran without posting a block is invisible to every instrument\n"
+                  "in this family, including the review's.", file=out_stream)
+            return EXIT_NOTHING_MEASURABLE
+        if not args.no_fetch:
+            for f in facts_list:
+                notes.append(fetch_pr_ref(runner, args.repo_dir, f["pr"]))
     else:
         for pr in args.prs:
             if not args.no_fetch:
