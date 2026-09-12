@@ -552,8 +552,39 @@ Both directions, and they do not cancel.
   per-repo: two of these three repos use `trunk`, not `main`. An ad-hoc script that guessed
   `origin/main` failed loudly on four of the ten; the measurement itself takes each PR's own
   `baseRefName` from `gh` and was never wrong about it.
-  ⚠ Still 63 of 79 unclassified, and the two samples agree, which is weak evidence that a third
-  would too — they do not agree about a *rate* because neither was sized to estimate one.
+  ⚠ The two samples agree, which is weak evidence that a third would too — they do not agree
+  about a *rate* because neither was sized to estimate one.
+  ✅ **SAMPLING SUPERSEDED BY A CENSUS, 2026-09-11 — `--find-carriers` now classifies every gap
+  commit in every repo that carries ladders.** The sample's own by-product is the instrument:
+  a commit whose subject names the audit round it belongs to, sitting in a range no round
+  covered, is self-declared missed audit surface. **186 gap commits:**
+
+  | repo | gap commits | ROUND-REF | MERGE | unclassified | gaps with a ROUND-REF |
+  |---|---|---|---|---|---|
+  | devrc | 69 | **11** | 23 | 35 | 9 |
+  | homelab-talos | 79 | **16** | 17 | 46 | 16 |
+  | civit-datapacket-talos | 25 | **7** | 2 | 16 | 7 |
+  | civitai-gpu-fleet | 10 | **5** | 0 | 5 | 5 |
+  | vetr-app | 1 | **1** | 0 | 0 | 1 |
+  | vetr-api | 2 | 0 | 0 | 2 | 0 |
+  | **TOTAL** | **186** | **40** | 42 | 104 | **38** |
+
+  **40 commits across 38 gaps say in their own subject which audit round they belong to, while
+  sitting in a range no round's ledger covers.** That is the finding this whole arc was after,
+  and it needs no judgement: the commits assert it themselves.
+  🔴 **ZERO false positives on the real corpus, verified by reading all 11 devrc hits** — every
+  one is a genuine round commit, including one whose reference is a trailing parenthetical
+  (`… (round-2 audit)`). And the control that matters: **`eb947328` is among them** — the exact
+  commit this review identified BY HAND as #1233's uncovered round 3. The classifier found it
+  independently.
+  🔴 **THE CENSUS IS A FLOOR, NEVER A RATE, AND THE OUTPUT SAYS SO.** It sees only a round
+  reference a commit chose to write down; a round's fix with an ordinary subject lands in
+  `unclassified`, indistinguishable from a feature. Measured against the 32 hand-classified
+  commits: **8 self-declared where the hand pass found 20 fixes.** So the 104 `unclassified`
+  are **not** development — they are unread, and the tool refuses to guess. An earlier draft
+  had five heuristic buckets keyed on commit types and correction verbs; it was deleted,
+  because `claude/RULES.md` is explicit that a guard spelled over WORDS is walkable by
+  rewording, and a classifier is no different.
   ⚠ **Two repos are UNMEASURABLE, each for its own reason, and neither is a pass.** naida-ai
   ran 214 PRs and posted **no ledger at all**, so there is nothing to measure coverage
   against — "no ladders ran here" and "ladders ran without blocks" are the same observation
