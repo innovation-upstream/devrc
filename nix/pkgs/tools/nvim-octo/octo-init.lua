@@ -47,7 +47,34 @@
 -- merge action. So the picker choice below is a SAFETY setting, not a taste
 -- one, and the test asserts it for that reason.
 
-require("octo").setup({
+-- --------------------------------------------------------------------------
+-- EDITOR OPTIONS FIRST — and the ORDER IS LOAD-BEARING, not tidiness.
+-- --------------------------------------------------------------------------
+-- 🔴 `require("octo").setup()` CAN THROW, AND IT THROWS FOR A REASON THIS
+-- WRAPPER CAN PLAUSIBLY HIT. MEASURED against octo 2026-08-28 with `gh` absent
+-- from PATH: octo's own guard is `if not vim.fn.executable(cfg.gh_cmd) then`,
+-- and `vim.fn.executable()` returns the NUMBER 0 — which is TRUTHY in Lua. So
+-- `not 0` is false, the guard never fires, and execution falls through to
+-- `gh.setup()`, where plenary's `Job:new` raises "command must be executable".
+-- Upstream bug; not ours to fix from here, but ours to survive.
+--
+-- With the setup call last, that traceback aborted the rest of this file: no
+-- colorscheme, no options — a window that looks broken in a second, unrelated
+-- way on top of the real failure. Everything that does not depend on octo is
+-- therefore done BEFORE the call, and the call itself is wrapped.
+vim.o.termguicolors = true
+vim.o.background = "dark"
+vim.o.laststatus = 2
+vim.o.number = true
+vim.o.signcolumn = "yes"
+
+-- Gruvbox, to match every other terminal this operator looks at (the alacritty
+-- palette in `nix/programs/alacritty/default.nix` is the same theme).
+-- `pcall` because a colorscheme failure must not be able to cost the review.
+pcall(vim.cmd.colorscheme, "gruvbox")
+
+local ok, err = pcall(function()
+  require("octo").setup({
   -- See the picker note above: this is load-bearing, not preference.
   picker = "fzf-lua",
 
@@ -242,16 +269,26 @@ require("octo").setup({
       prev_comment = { lhs = "[c", desc = "go to previous comment" },
     },
   },
-})
+  })
+end)
 
--- Gruvbox, to match every other terminal this operator looks at (the alacritty
--- palette in `nix/programs/alacritty/default.nix` is the same theme).
-vim.o.termguicolors = true
-vim.o.background = "dark"
-pcall(vim.cmd.colorscheme, "gruvbox")
-
--- Quitting the LAST window closes the float terminal, which is the whole
--- lifecycle of a review window opened from a click.
-vim.o.laststatus = 2
-vim.o.number = true
-vim.o.signcolumn = "yes"
+-- 🔴 A FAILURE IS ANNOUNCED, NEVER SWALLOWED. The `pcall` exists to stop a
+-- setup error tearing the rest of this file in half, not to hide one — and the
+-- consequence of an error here is specific and otherwise baffling: `commands
+-- .setup()` never runs, so the `Octo` user command is never created, and the
+-- `-c "Octo <N> <owner/repo>"` the wrapper appends fails with `E492: Not an
+-- editor command: Octo` in a window that otherwise looks fine.
+--
+-- The message names the cause that can actually reach this arm. `gh` is pinned
+-- onto this wrapper's PATH by store path through `runtimeInputs`, so a missing
+-- `gh` means the deployed wrapper is not the one this repo builds.
+if not ok then
+  vim.notify(
+    "nvim-octo: octo.nvim failed to initialise, so `:Octo` does not exist.\n"
+      .. "The commonest cause is `gh` missing from this wrapper's PATH, which "
+      .. "nix pins — so a stale deploy rather than a config error. Run "
+      .. "`home-manager switch --flake ~/workspace/devrc --impure`.\n"
+      .. tostring(err),
+    vim.log.levels.ERROR
+  )
+end

@@ -58,6 +58,19 @@ with pkgs; [
   # discriminating check is in the assertion message of
   # test_engine_is_the_version_every_measurement_is_keyed_to.
   opencode
+
+  # nvim-octo — neovim + octo.nvim as a single-purpose GitHub review TUI, the
+  # surface a clicked `repo#N` mention opens in. Supplied by the overlay in
+  # `flake.nix` (see the comment there for why it must be spelled `pkgs.X`),
+  # built from `nix/pkgs/tools/nvim-octo/`.
+  #
+  # ⚠ THIS ENTRY IS FOR THE OPERATOR'S OWN PATH AND IS NOT WHAT THE CLICK USES.
+  # The hint handler is spawned by alacritty with the display manager's
+  # environment and resolves the binary through the wrapper's pinned
+  # `lib.makeBinPath` in `nix/programs/alacritty/default.nix` — which also
+  # survives the ~1s window where a `home-manager switch` blanks
+  # `~/.nix-profile`. Both entries are real; neither substitutes for the other.
+  nvim-octo
 ]
 ++ (import ./tmux-fuzzyclaw.nix { inherit pkgs workspace; })
 # clawgatectl — machine client for the clawgate JSON API. Built from the

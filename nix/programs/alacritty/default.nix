@@ -34,6 +34,21 @@ let
   # a hope, and it fails in BOTH directions, so a package nobody spawns is a
   # finding too.
   #
+  # ⚠ `pkgs.nvim-octo` IS THE SECOND ENTRY THE argv[0] READER CANNOT SEE, and
+  # it needs a THIRD reader rather than the `-c` one above. The review TUI is
+  # spawned as `alacritty … -e nvim-octo <repo> <num>`: argv[0] is the terminal
+  # and the `-e` payload is one level down, exactly like `fzf` — but `fzf`
+  # sits after a `-c` inside a shell script, and this sits after a `-e` as a
+  # bare command. `_exec_payload_commands` in `test_mention_open.py` reads the
+  # first word after a literal `-e` out of the handler's SYNTAX TREE (resolving
+  # a module constant, which is how `mention-open.py` spells it as
+  # `REVIEW_EXE`), so this entry is pinned to a call site and not to a comment.
+  # Without it the click opens a terminal that flashes and vanishes —
+  # alacritty exits 0 whether its `-e` command exits 0 or 127 — which is the
+  # silent dead end `open_tui`'s `shutil.which` pre-flight exists to convert
+  # into a browser fallback plus one toast. Both halves are real; the pre-flight
+  # is what makes a MISSING entry survivable, not what makes it acceptable.
+  #
   # ⚠ `pkgs.gh` USED TO BE HERE and is REMOVED. Its comment justified it as
   # "PASS 3's only tool" — PASS 3 was the GitHub-wide namesake search, which is
   # deleted (see `mention-open.py`'s docstring for the 4.3s it cost), and the
@@ -46,7 +61,7 @@ let
       # relying on the inherited PATH is not enough: a click landing in that
       # window would find none of these by bare name.
       pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify
-      pkgs.alacritty pkgs.fzf
+      pkgs.alacritty pkgs.fzf pkgs.nvim-octo
     ]}:$PATH
     exec ${pkgs.python312}/bin/python3 \
       ${config.home.homeDirectory}/workspace/devrc/scripts/mention-open.py "$@"
