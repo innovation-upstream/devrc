@@ -2937,6 +2937,73 @@ def test_a_claude_found_on_PATH_is_also_resolved_to_its_store_path(monkeypatch, 
 
 
 # --------------------------------------------------------------------------- #
+# RETENTION — the window, NOT what gets written.
+#
+# ⚠ THE PREMISE, RESTATED CORRECTLY BECAUSE IT KEEPS BEING STATED WRONG: "store
+# all saves instead of just the most recent" is ALREADY SHIPPED — that is #1383,
+# which introduced generations at all and is live on both hosts. What changes
+# here is only how many of them are kept.
+#
+# The claim is pinned as a DERIVED SPAN rather than as the literal 672, because
+# the literal is a consequence of two things (the ask, and continuum's cadence)
+# and only the span is the thing the operator asked for. A test asserting `== 672`
+# would go green for a cadence change that silently halved the window.
+# --------------------------------------------------------------------------- #
+
+CONTINUUM_SAVE_INTERVAL_MINUTES = 15   # nix/programs/tmux/default.nix
+
+
+def test_retention_spans_a_week_at_continuums_cadence():
+    """🔴 THE OPERATOR'S ASK, 2026-09-11: 48h -> 7 days.
+
+    48h was argued from a worst case of "a Friday-night crash noticed Sunday"
+    (~40h). 2026-09-11 refuted that worst case — the tmux server died TWICE in
+    24h, and the second recovery leaned on generations from before the first.
+    """
+    span_hours = tsr.KEEP_GENERATIONS * CONTINUUM_SAVE_INTERVAL_MINUTES / 60
+    assert span_hours >= 7 * 24, (
+        f"retention spans {span_hours:.0f}h at the 15-minute autosave, short of "
+        "the 7 days asked for; a window a single bad weekend can consume leaves "
+        "no margin for a second incident inside it")
+
+
+def test_pruning_still_behaves_at_the_FULL_retention_bound(state, monkeypatch):
+    """INVARIANT GUARD, NOT REGRESSION COVERAGE — and labelled so deliberately.
+    It derives its fixture size from `KEEP_GENERATIONS`, so it is green at 192
+    and at 672 alike; it CANNOT go red on the retention change and must not be
+    counted as evidence for it. What it is, is the mechanical confirmation that
+    raising the cap did not break the pruner: every other pruning test runs at a
+    fixture-sized 3, so before this nothing exercised the real bound at all.
+
+    Pins the three things a larger cap could break: the count kept, that the
+    survivors are the NEWEST ones (the name-sort, not an mtime sort), and that
+    the generation the pointer is on is still protected.
+    """
+    gens = state / tsr.GENERATIONS_DIRNAME
+    gens.mkdir(parents=True)
+    over = tsr.KEEP_GENERATIONS + 28        # 28 = 7h of saves past the cap
+    stamps = [tsr.generation_stamp(1_700_000_000 + i * 900) for i in range(over)]
+    for s in stamps:
+        gplan, gcheat = tsr.generation_paths(s)
+        gplan.write_text("[]")
+        gcheat.write_text("x")
+    # the pointer sits on the OLDEST — the case `protect` exists for
+    tsr.PLAN.symlink_to(tsr.generation_paths(stamps[0])[0])
+
+    removed = tsr.prune_generations(protect=(stamps[0],))
+
+    kept = tsr.list_generations()
+    assert len(kept) == tsr.KEEP_GENERATIONS + 1, (
+        f"{len(kept)} generations kept against a cap of {tsr.KEEP_GENERATIONS} "
+        "(+1 protected) — the retention cap is not being enforced at the larger "
+        "bound")
+    assert stamps[0] in kept, "pruned the generation the pointer is on"
+    assert kept[-1] == stamps[-1], "the newest generation did not survive"
+    assert stamps[0] not in removed
+    assert len(removed) == over - tsr.KEEP_GENERATIONS - 1
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 A MID-SESSION NO-SERVER REFUSAL IS AN INCIDENT AND MUST BE LOUD;
 #    A COLD-BOOT ONE IS EXPECTED AND MUST STAY QUIET.
 #
