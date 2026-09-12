@@ -146,13 +146,52 @@ ROOT = Path(__file__).resolve().parents[2]
 # Re-measure before deleting any of this, and do not upgrade the table into
 # "proven".
 #
-# ⚠ AND THIS TEST WAS NEVER THE WORST ONE, which matters because it was ranked and
-# worked as though it were. In the same pre-fix window
-# `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
-# (`test_analyze_service_index_escrow_verify.py`) failed 8 times to this test's 4 —
-# twice as often — and is also at 0 post-fix. A flake that is vivid because it has
-# a long diagnosis written about it is not thereby the most frequent one: COUNT
-# them before choosing which to chase.
+# 🔴 THE COMPARISON THAT USED TO SIT HERE WAS WRONG — RETRACTED 2026-09-11. It
+# read: `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
+# (`test_analyze_service_index_escrow_verify.py`) "failed 8 times to this test's
+# 4 — twice as often — and is also at 0 post-fix", concluding COUNT them before
+# choosing which to chase. The count was right; the conclusion was wrong. THAT
+# TEST IS NOT A FLAKE, AND `ce9b55c3` NEVER TOUCHED IT. Three measurements, same
+# instrument as the table above (200 PR heads, 2026-09-05..09-11, 197 terminal
+# verdicts):
+#
+#   * MECHANISM — it is not on this fix's path. That file imports no store
+#     server, no `store_siting`, no `build_server`; it drives `escrow-verify.py`
+#     against an in-memory `FakeDownloader`, so `_replace_bytes`'s in-request
+#     fsync is never reached. `ce9b55c3`'s diff names the file ZERO times, and
+#     the test runs in 1.71 s.
+#   * TIME — all 8 failures fall inside ONE 14-hour window on 2026-09-08
+#     (05:44Z..19:44Z) across 8 distinct heads, and EVERY run reports `failed=7`
+#     or `failed=8`: a whole-suite red hitting every open PR at once.
+#   * CAUSE — nixpkgs moved `age` to 1.3.2, and that test pins age's tamper
+#     verdicts by exact string equality. Re-keyed by #1392 (`94f82796`,
+#     09-08T18:26Z) and #1403 (`4f49f5dc`, 20:32Z) — TWO DAYS BEFORE `ce9b55c3`
+#     (09-10T20:56Z) existed. The two failures after 18:26Z are stale-base heads
+#     that had not yet picked up #1392.
+#
+# 🔴 SO COUNTING IS NOT THE RULE — COUNTING IS WHAT PRODUCED THE ERROR. A raw
+# verdict count ranked a one-day toolchain outage as this repo's worst flake.
+# Before a count means anything, split the population with two mechanical tests:
+#
+#   (a) SCATTER — a flake's failures spread across days; an environment red
+#       clusters in one window. THIS test: 5 failures on 5 distinct heads across
+#       4 separate days (09-06, 09-07, 09-08, 09-09 x2). The escrow one: 8 in 14
+#       hours. ⚠ That 5 is from the 200-head sample read 2026-09-11 and the
+#       table above says 4 from a differently-drawn one — which is the point:
+#       the SCATTER is the claim, not the count, because the count moves with
+#       the sample and the shape does not.
+#   (b) `failed=N` — a flake takes down ONE test (`failed=1`); an environment
+#       change takes down the same N>1 on every head at once.
+#
+# Only count what survives both.
+#
+# ⚠ AND EVERY COUNT HERE IS A LOWER BOUND — THE TABLE ABOVE INHERITS THIS.
+# GitHub truncates a status description at 138 characters, so only the FIRST
+# failing test is ever named; a run where a test failed behind an
+# alphabetically earlier one is invisible to this instrument. Bounded by
+# arithmetic on the same rows (`collected - passed - skipped`): of the 14
+# post-fix failures, 12 derive `failed=1`, one derives 2, and one is
+# unparseable — so at most two post-fix runs could be concealing anything.
 #
 #   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
 #     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …

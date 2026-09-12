@@ -1257,11 +1257,94 @@ def anchor_is_head(anchor, head_check):
 # The ledger — the skill's own command, with the skill's own read rules
 # --------------------------------------------------------------------------- #
 
+RangeChurn = namedtuple("RangeChurn", "files added deleted commits reason")
+
+
+def measure_range_churn(runner, repo_dir, frm, to, base):
+    """`git log --numstat --format= --remerge-diff <frm>..<to> --not <base>`.
+
+    The COMMAND half of the ledger's read rules, for an ARBITRARY range.
+    Extracted from `measure_ledger` so its second caller —
+    `scripts/ladder-range-coverage.py`, which measures the churn BETWEEN two
+    blocks' ranges — cannot drift away from it. Enforced here, not assumed:
+    **rc 0 and silent stderr**, on both git calls.
+
+    🔴 THE "NON-EMPTY RANGE" RULE IS DELIBERATELY *NOT* HERE, and that is why
+    this is a separate function rather than a parameterised `measure_ledger`.
+    The two callers want OPPOSITE things from an empty range. For a DELTA ROUND
+    it is a broken question — the range cannot contain anything, a finding-free
+    audit over it reads as a clean round, and `measure_ledger` spends three
+    branches diagnosing which cause it was. For the GAP between two blocks'
+    ranges an empty range is the HEALTHY answer: it is exactly what a ladder
+    whose blocks chain end-to-end looks like. A shared core that refused an
+    empty range would report every well-formed ladder as unmeasurable, so that
+    rule stays with the caller that needs it.
+
+    A missing ref or a git without `--remerge-diff` exits 128 with empty output;
+    an unwritable object store makes `--remerge-diff` UNDER-count, exit 0 and
+    print a plausible number, announcing itself only on stderr. Each returns a
+    `reason` and NO number — a failed command is not a zero.
+    """
+    def fail(reason):
+        return RangeChurn(None, None, None, None, reason)
+
+    rc, out, err = runner(
+        ["git", "-C", repo_dir, "rev-list", "--count", f"{frm}..{to}"]
+    )
+    if rc != 0:
+        return fail(f"`git rev-list {frm}..{to}` exited {rc}: "
+                    f"{(err or out).strip() or 'no output'}")
+    if err.strip():
+        return fail(f"`git rev-list` wrote to stderr: {err.strip()}")
+    try:
+        commits = int(out.strip())
+    except ValueError:
+        return fail(f"`git rev-list --count` printed {out.strip()!r}, not a number")
+    if commits == 0:
+        # No commits ⇒ no churn, and no numstat call (which is also what this
+        # function's extraction preserved: `measure_ledger` never reached the
+        # numstat on an empty range either). The CALLER decides what it means.
+        return RangeChurn({}, 0, 0, 0, None)
+
+    rc, out, err = runner([
+        "git", "-C", repo_dir, "log", "--numstat", "--format=",
+        "--remerge-diff", f"{frm}..{to}", "--not", base,
+    ])
+    if rc != 0:
+        return fail(f"the numstat command exited {rc}: "
+                    f"{(err or out).strip() or 'no output'}")
+    if err.strip():
+        return fail(
+            "the numstat command exited 0 but wrote to STDERR, so its number is "
+            f"not trustworthy: {err.strip()}"
+        )
+
+    files, added, deleted = {}, 0, 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        a, d, path = parts[0], parts[1], parts[-1]
+        na = 0 if a == "-" else int(a) if a.isdigit() else 0
+        nd = 0 if d == "-" else int(d) if d.isdigit() else 0
+        cur = files.get(path, (0, 0))
+        files[path] = (cur[0] + na, cur[1] + nd)
+        added += na
+        deleted += nd
+    return RangeChurn(files, added, deleted, commits, None)
+
+
 def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
     """`git log --numstat --format= --remerge-diff <prev>..HEAD --not <base>`.
 
-    🔴 FOUR read rules are enforced here, not assumed: **the checkout's HEAD is
-    the PR's head, rc 0, silent stderr, and a non-empty range**.
+    🔴 FOUR read rules govern this answer, none of them assumed: **the
+    checkout's HEAD is the PR's head, rc 0, silent stderr, and a non-empty
+    range**. TWO OF THE FOUR ARE NOW ENFORCED ONE LEVEL DOWN, in
+    `measure_range_churn` — rc 0 and silent stderr — and this function enforces
+    the other two, because they are the two that are specific to a delta round:
+    `head_check` is meaningless without a PR, and an empty range is a DEFECT
+    here while being the healthy answer for that function's other caller. The
+    count is four either way; do not read the delegation as a relaxation.
 
     The fourth one came last and is the one that lets the other three pass while
     the answer is entirely wrong: `HEAD` is resolved in the operator's own
@@ -1287,19 +1370,14 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
             f"mean what this ledger would claim it means: {head_check.reason}"
         )
 
-    rc, out, err = runner(
-        ["git", "-C", repo_dir, "rev-list", "--count", f"{prev_sha}..HEAD"]
-    )
-    if rc != 0:
-        return fail(f"`git rev-list {prev_sha}..HEAD` exited {rc}: "
-                    f"{(err or out).strip() or 'no output'}")
-    if err.strip():
-        return fail(f"`git rev-list` wrote to stderr: {err.strip()}")
-    try:
-        commits = int(out.strip())
-    except ValueError:
-        return fail(f"`git rev-list --count` printed {out.strip()!r}, not a number")
-    if commits == 0:
+    # The rc-0 / silent-stderr rules and the numstat parse live in
+    # `measure_range_churn`; the FOURTH rule (head_check, above) and the
+    # empty-range diagnosis below are this caller's, because only a delta round
+    # treats an empty range as a defect. See that function's docstring.
+    churn = measure_range_churn(runner, repo_dir, prev_sha, "HEAD", base)
+    if churn.reason is not None:
+        return fail(churn.reason)
+    if churn.commits == 0:
         # 🔴 THREE causes, and TWO OF THEM ARE REFUTED BY `head_check` — which is
         # a parameter of this very function, already required `ok` twelve lines
         # above. The old text named "the fixes are not committed yet, or this
@@ -1334,32 +1412,9 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
             "live.)"
         )
 
-    rc, out, err = runner([
-        "git", "-C", repo_dir, "log", "--numstat", "--format=",
-        "--remerge-diff", f"{prev_sha}..HEAD", "--not", base,
-    ])
-    if rc != 0:
-        return fail(f"the numstat command exited {rc}: "
-                    f"{(err or out).strip() or 'no output'}")
-    if err.strip():
-        return fail(
-            "the numstat command exited 0 but wrote to STDERR, so its number is "
-            f"not trustworthy: {err.strip()}"
-        )
-
-    files, added, deleted = {}, 0, 0
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        a, d, path = parts[0], parts[1], parts[-1]
-        na = 0 if a == "-" else int(a) if a.isdigit() else 0
-        nd = 0 if d == "-" else int(d) if d.isdigit() else 0
-        cur = files.get(path, (0, 0))
-        files[path] = (cur[0] + na, cur[1] + nd)
-        added += na
-        deleted += nd
-    return LedgerReport(files, added, deleted, commits, None, None, None)
+    return LedgerReport(
+        churn.files, churn.added, churn.deleted, churn.commits, None, None, None
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -241,6 +241,28 @@ Bold is wrong. Three lessons, and every one of them was shipped as a rule before
   diff, so on shape A it reports every upstream line as this round's work.
 - **D** is the positive control. A form that gets D wrong is not measuring churn at all.
 
+### 🔴 The range form above measures ONE round. It does not measure whether the rounds CHAIN.
+
+`scripts/ladder-range-coverage.py` is the other half, and it exists because that distinction
+was missed for as long as churn has been measured here. Every block range can be individually
+correct while the ladder still has churn **no range contains** — three routes, all real:
+
+- a round posts **no block** and a later round anchors past it (#1233's round 3, 524 lines);
+- churn lands **after the last block** (11 of 20 devrc ladders; 3,727 lines);
+- a block carries a **bare `audited=<sha>`**, which names no range at all (#958's round 1).
+
+🔴 **Run it before quoting any per-round churn table as complete**, and read the INTERIOR total
+rather than the sum: the tail conflates post-last-block fixes with development that continued
+after the ladder ended, and nothing in the ranges separates them. It refuses a zero it cannot
+tell from a broken run (a block's own range must measure non-zero first), and it shares
+`measure_range_churn` with `audit-dispatch.py` so the command cannot drift from the one the
+skill body tells an auditor to run. Mutants:
+`scripts/tests/mutants-ladder-range-coverage.sh`.
+
+⚠ **The earlier measurement's instrument is GONE** — `claudedocs/audit-ladder-review-2026-09-04.md`
+says its churn tool "was written for this review", in a scratchpad, so not one of its numbers
+can be re-derived from the tree. That is why this one is committed.
+
 ---
 
 ## Mutation variants that delete NOTHING
