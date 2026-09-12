@@ -1636,25 +1636,43 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
         "the ~120 s stall this change removes")
 
 
-# How long the fake holds the warm open, and how many times a starved attempt is
-# retried before the test gives up. 🔴 THE RETRY IS NOT FLAKE-PAPERING — a lost
-# window produces NO observation of the handler at all, so retrying is what keeps
-# a machine-load event from being reported as a code defect. The give-up path is
-# a LOUD failure that says which it was; nothing here can turn a real regression
-# green, because a wrapper that resumes after the signal is alive and inside the
-# warm at kill time, which is exactly when the attempt counts.
+# How long the fake holds the warm open, how much of that hold must still be
+# running for a missing lock to be a DEFECT rather than a lost window, and how
+# many starved attempts are retried before the test gives up.
+#
+# 🔴 WHY NOT JUST WIDEN THE HOLD — the obvious simplification, MEASURED and
+# REJECTED. A wider hold would put starvation out of reach and delete the retry
+# entirely, and it looks free because the fake writes its marker BEFORE sleeping,
+# so the happy path never waits for it. It is NOT free: GNU `timeout` puts the
+# warm's child in its OWN process group (`browser-agent` runs
+# `timeout "$OC_WARM_TIMEOUT" … debug agent build`), so the test's `killpg` to
+# the WRAPPER's group never reaches the fake — it sleeps out the whole hold while
+# bash defers the trap until that foreground command returns. Measured on this
+# pair: hold 3 s -> 6.78 s, hold 8 s -> 16.73 s, i.e. ~2x the hold, paid on the
+# KILL path every run. A 20 s hold would cost ~40 s per run to save a retry that
+# only executes when the box is already starving.
+#
+# 🔴 THE RETRY IS NOT FLAKE-PAPERING — a lost window produces NO observation of
+# the handler at all, so retrying is what keeps a lost window from being reported
+# as a code defect. It cannot green a real regression: a wrapper that resumes
+# after the signal is alive AND still holding the lock at kill time, which is
+# exactly when an attempt counts. ⚠ It is a CONVENIENCE requirement, not a
+# correctness one — the loud give-up failure alone would satisfy "never report a
+# lost window as a defect"; the retry only buys suite-greenness under load.
 _WARM_HOLD_S = 3
+_WARM_WINDOW_SLACK_S = 1.0
 _WARM_WINDOW_ATTEMPTS = 3
 
 
-def _warm_window_lost(proc, lock: Path):
-    """-> None if a signal sent NOW lands on a wrapper still inside the warm,
-    else the reason it would not.
+def _warm_window(proc, lock: Path, since_marker: float):
+    """-> ("ok", "") if a signal sent NOW lands on a wrapper still inside the
+    warm; ("lost", why) if it would not; ("defect", why) if the wrapper released
+    the warm lock while the hold was demonstrably still running.
 
-    🔴 MEASURED 2026-09-12, and it is the whole reason this function exists.
-    With the wrapper's `FAKE_OC_DEBUG_SLEEP` hold at 3 s, injecting a stall
-    between "the warm marker appeared" and the `killpg` splits into three bands,
-    and only the first is a verdict on the handler:
+    🔴 MEASURED 2026-09-12, and it is the whole reason this exists. With the
+    hold at 3 s, injecting a stall between "the warm marker appeared" and the
+    `killpg` splits into three bands, and only the first is a verdict on the
+    handler:
 
       stall < ~3 s   rc 143 / 130   the trap ran — the real observation
       ~3 s .. ~12 s  rc 2           the wrapper had LEFT the warm; the signal
@@ -1673,28 +1691,46 @@ def _warm_window_lost(proc, lock: Path):
     That third band is the reported `[INT]` split verdict: red under the suite's
     own `-n 4 --dist loadfile` on a loaded dev host, green alone, green in the
     nix sandbox — with no commit to the wrapper or this file in between.
+    ⚠ What is established is that rc 0 is reachable ONLY through the zombie path,
+    so the fix is correct whatever starved the run. WHICH upstream cause starved
+    those particular runs was never identified, and this code does not claim it.
 
-    ⚠ `proc.poll()` MUST NOT be used for this. It REAPS an exited child, which
-    removes the zombie and makes the very next `os.getpgid` raise
-    ProcessLookupError — a third failure shape, manufactured by the instrument.
-    Read `/proc/<pid>/stat` instead; it observes without reaping.
+    🔴 THE "defect" VERDICT IS WHY THIS IS NOT PURELY RETRYABLE. `assert
+    lock.is_dir()` used to be a hard precondition here, and folding a missing
+    lock into the retryable set would turn a real regression — the acquisition
+    moved after the warm, the release moved before it, the class
+    `browser-agent`'s own comments track — into three attempts and a message
+    telling the reader it is machine load. A missing lock while the wrapper is
+    ALIVE and the hold is demonstrably still running cannot be explained by a
+    slow box, so it stays a hard failure.
+
+    ⚠ `proc.poll()` MUST NOT be used for any of this. It REAPS an exited child,
+    which removes the zombie and makes the very next `os.getpgid` raise
+    ProcessLookupError — a fourth failure shape, manufactured by the instrument.
+    `_process_gone`/`_proc_state` read `/proc/<pid>/stat`, which observes without
+    reaping; they already carry the measured zombie incident, so this does NOT
+    open-code a second copy of that predicate.
     """
-    stat = Path(f"/proc/{proc.pid}/stat")
-    try:
-        # `comm` may contain spaces and parens, so the state field is the first
-        # token AFTER the final ')' — never `split()[2]`.
-        state = stat.read_text().rsplit(")", 1)[1].split()[0]
-    except (FileNotFoundError, ProcessLookupError, IndexError):
-        return "the wrapper was already gone before the signal"
-    if state == "Z":
-        return ("the wrapper was already a ZOMBIE before the signal — killpg "
-                "would succeed and the discarded signal would be read back as "
-                "the stored exit status")
+    state = _proc_state(proc.pid)
+    if _process_gone(proc.pid):
+        return "lost", (
+            f"the wrapper was already {'a ZOMBIE' if state == 'Z' else 'gone'} "
+            f"before the signal — killpg would succeed and the discarded signal "
+            f"would be read back as the stored exit status")
     if not lock.is_dir():
-        return (f"the warm lock '{lock.name}' was already released — the "
-                f"wrapper had left the warm (process state {state!r}), so the "
-                f"signal would hit a later stage, not the handler under test")
-    return None
+        if since_marker <= _WARM_WINDOW_SLACK_S:
+            return "defect", (
+                f"the warm lock '{lock.name}' is GONE only {since_marker:.2f}s "
+                f"after the wrapper announced it was inside the warm, while the "
+                f"wrapper is still alive (state {state!r}) and the {_WARM_HOLD_S}s "
+                f"hold must still be running. No amount of machine load explains "
+                f"that: the warm is supposed to run UNDER the lock.")
+        return "lost", (
+            f"the warm lock '{lock.name}' was already released {since_marker:.2f}s "
+            f"after the marker (hold is {_WARM_HOLD_S}s) — the wrapper had left "
+            f"the warm (state {state!r}), so the signal would hit a later stage, "
+            f"not the handler under test")
+    return "ok", ""
 
 
 @pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "TERM"), (signal.SIGINT, "INT")],
@@ -1730,7 +1766,12 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
         # RELEASE test, a TERM landing after the release finds the lock already gone,
         # so `not lock.exists()` passes for the WRONG REASON. Measured under the full
         # gate (8 m 45 s) the first version did exactly that.
-        in_warm = rig.scratch_root / f"in-warm-{os.getpid()}-{name}-{attempt}"
+        # 🔴 `-{attempt}` is LOAD-BEARING, not decoration: without it attempt 2's
+        # `_await` returns instantly on attempt 1's stale marker and the kill
+        # fires before the wrapper has re-entered the warm, so every retry is
+        # spent by construction. (`rig` is function-scoped on `tmp_path`, so the
+        # pid and the parametrisation cannot collide — only the attempt can.)
+        in_warm = rig.scratch_root / f"in-warm-{os.getpid()}-{attempt}"
         proc = rig.spawn(["read the page"],
                          extra_env={"FAKE_OC_DEBUG_SLEEP": str(_WARM_HOLD_S),
                                     "FAKE_OC_DEBUG_MARKER": str(in_warm),
@@ -1745,9 +1786,26 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
             # asserted.
             _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
                    slice_s=20.0, poll=0.02)
-            why = _warm_window_lost(proc, lock)
-            if why:
-                lost.append(f"attempt {attempt}: {why}")
+            # 🔴 The hold starts when the fake WRITES the marker, not when
+            # `_await` notices it — a stall inside `_await`'s own poll loop is
+            # exactly the starvation under test, and timing from here would
+            # measure 0.00s every time and call every lost window a defect.
+            # The file's mtime is the only honest zero for this clock.
+            verdict, why = _warm_window(
+                proc, lock, max(0.0, time.time() - in_warm.stat().st_mtime))
+            if verdict == "defect":
+                pytest.fail(
+                    f"precondition: the warm must run UNDER the lock.\n  {why}")
+            if verdict == "lost":
+                # Drain before abandoning: an undrained pipe leaks the fd AND
+                # throws away the wrapper's own account of why the window went.
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                try:
+                    lost_out, lost_err = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    lost_out = lost_err = "(could not drain)"
+                lost.append(f"attempt {attempt}: {why}\n      wrapper stderr tail: "
+                            f"{(lost_err or '')[-200:]!r}")
                 continue
             os.killpg(os.getpgid(proc.pid), sig)
             rc = proc.wait(timeout=45)
@@ -1758,20 +1816,33 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 proc.wait(timeout=10)
     else:
+        # Do not ASSERT machine load — measure it, the way every other
+        # wall-clock failure in this file does.
+        base = _spawn_baseline()
+        thresh = _SPAWN_IDLE_REF * _SPAWN_STALL_FACTOR
+        machine = ("so the MACHINE is stalled and that is the likely explanation"
+                   if base > thresh else
+                   "so the MACHINE looks idle — this is NOT explained by load, "
+                   "and the window is being lost for some other reason")
         pytest.fail(
             f"the {name} never landed inside the warm in "
             f"{_WARM_WINDOW_ATTEMPTS} attempts, so this run says NOTHING about "
-            f"the handler — it is a STARVED INSTRUMENT, not a verdict.\n  "
+            f"the handler — it is a STARVED INSTRUMENT, not a verdict on it.\n  "
             + "\n  ".join(lost) + "\n"
-            f"🔴 Read this as machine load, not as a code defect: the warm is "
-            f"held open for only {_WARM_HOLD_S}s and this process has to issue "
-            f"the signal inside it. MEASURED 2026-09-12 — a box that starves "
-            f"this test past the hold reports the wrapper as a zombie whose "
-            f"stored status is 0, and the `exited 0` assertion below then reads "
-            f"as a handler regression that did not happen.")
+            f"  Spawning {_SPAWN_PROBE_N} trivial processes just now took "
+            f"{base:.2f}s (idle reference {_SPAWN_IDLE_REF:.2f}s; stall threshold "
+            f"{thresh:.2f}s), {machine}.\n"
+            f"🔴 This is NOT the `exited 0` assertion below and must not be read "
+            f"as one: the warm is held open for only {_WARM_HOLD_S}s and this "
+            f"process has to issue the signal inside it. A run that loses that "
+            f"window sees the wrapper as a zombie whose stored status is 0, "
+            f"which reads as a handler regression that did not happen.")
 
-    diag = (f"\n  the {name} landed inside the warm (attempt {attempt}; "
-            f"hold {_WARM_HOLD_S}s), so this IS a verdict on the handler."
+    diag = (f"\n  the warm window was intact when last observed, microseconds "
+            f"before the {name} (attempt {attempt}; hold {_WARM_HOLD_S}s) — so "
+            f"this is a verdict on the handler, not a lost window. ⚠ That read "
+            f"and the killpg are not atomic, so a starvation landing in the gap "
+            f"between them can still reach this assertion."
             f"\n  wrapper stdout tail: {(out or '')[-400:]!r}"
             f"\n  wrapper stderr tail: {(err or '')[-400:]!r}")
     assert rc != 0, (
