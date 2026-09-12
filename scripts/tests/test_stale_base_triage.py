@@ -467,13 +467,20 @@ def test_a_TRUNCATED_skipped_can_only_INFLATE_the_derived_bound():
 
 
 def test_the_derived_bound_refuses_a_row_it_cannot_read():
-    """None, never a number — an unreadable row must not become a bound of 0,
-    which would certify every single-named row as complete."""
+    """None, never a number and never a raise — an unreadable row must not
+    become a bound of 0, which would certify every single-named row as
+    complete, and must not crash the reporting path either."""
     for desc in ("", None, "FAILED: pytests — FAILING: test_x | TOTAL collected=9 ",
                  "FAILED: pytests — FAILING: test_x | TOTAL collected=9  passed=8 ",
-                 # out of order: the adjacency requirement is what proves the
-                 # earlier fields were not cut short, so this must not match.
+                 # out of order: the three fields are read as ONE ordered group,
+                 # which is what proves the earlier ones were not cut short.
                  "TOTAL passed=8  collected=9  skipped=0",
+                 "TOTAL collected=9  skipped=0  passed=8",
+                 # 🔴 CUT EXACTLY ON THE `=`. `skipped=` with NO digits is the
+                 # shape a cap landing one character early produces; a `\\d*`
+                 # spelling of the group matches it and then `int("")` RAISES on
+                 # the reporting path. Refusal is the only safe reading.
+                 "TOTAL collected=9  passed=8  skipped=",
                  # arithmetically impossible, so not the banner we parse.
                  "TOTAL collected=9  passed=8  skipped=5"):
         assert M.derived_failure_upper_bound(desc) is None, desc
@@ -481,6 +488,28 @@ def test_the_derived_bound_refuses_a_row_it_cannot_read():
     # Nones above are about these rows and not about a parser wired to nothing.
     assert M.derived_failure_upper_bound(
         "TOTAL collected=9  passed=8  skipped=0") == 1
+
+
+def test_an_UNDERIVABLE_row_says_WHICH_route_failed_not_merely_that_one_did():
+    """🔴 THE REASON IS THE PRODUCT HERE, so it is pinned as a whole string.
+
+    Two different refusals reach the operator as COULD NOT MEASURE — "the count
+    was cut AND the totals are unreadable" and "the totals say there are more
+    failures than were named" — and they call for different next steps. A
+    mutant replacing the first with a bound of 0 produces the SAME verdict on
+    every input (names are non-empty by the time this runs, so 0 can never
+    equal them) and is invisible to a verdict-only assertion; only the text
+    distinguishes it.
+    """
+    ok, why = M.names_provably_complete("FAILED: pytests — FAILING: test_x | TOTAL collected=9 ")
+    assert not ok
+    assert why == ("the description was truncated before `failed=N`, and "
+                   "collected/passed/skipped are not all readable either"), why
+    ok, why = M.names_provably_complete(
+        "FAILED: pytests — FAILING: test_x | TOTAL collected=9  passed=5  skipped=1  fa")
+    assert not ok
+    assert why == ("the description was truncated before `failed=N`, and "
+                   "collected−passed−skipped=3 does not equal the 1 named"), why
 
 
 def test_a_banner_that_CONTRADICTS_itself_is_refused_rather_than_believed():
@@ -529,17 +558,28 @@ def test_the_run_tests_collected_arithmetic_this_derivation_rests_on_is_pinned()
     assert skipped_term in collected, (skipped_term, collected)
     # …and everything the banner's `failed=` is built from must survive the
     # subtraction, which is precisely why the remainder is an UPPER bound.
+    # ⚠ CONTAINMENT, NOT EQUALITY, AND DELIBERATELY SO: `run-tests.sh` SHRINKING
+    # what it sums into `failed=` keeps the bound an upper bound and is
+    # therefore safe — a mutation sweep confirmed that variant survives this
+    # guard, correctly. Only a term LEAVING `collected` breaks the derivation.
     assert failed <= collected - {passed_term, skipped_term}, (failed, collected)
     # The accumulators the banner prints are the per-target terms summed.
     assert re.search(r"TOT_COLLECTED\s*\+\s*collected", src)
-    # And the banner really does print the three fields ADJACENT AND IN ORDER,
-    # which is the assumption `_TOTALS_RE` encodes.
-    banner = re.search(
-        r"collected=\$TOT_COLLECTED\s+passed=\$TOT_PASSED\s+skipped=\$TOT_SKIPPED\s+"
-        r"failed=\$TOT_FAILED", src)
-    assert banner, "the TOTAL banner no longer prints collected/passed/skipped/failed in order"
-    assert M._TOTALS_RE.search(
-        "TOTAL " + re.sub(r"\$TOT_(\w+)", "7", banner.group(0))) is not None
+    # 🔴 EVERY banner line, not merely SOME line. `run-tests.sh` prints TWO —
+    # a full-run one and a SCOPED one — and a first version of this guard
+    # searched the whole file, so reordering the fields in one of them was
+    # satisfied by the other and SURVIVED the sweep. The order is the assumption
+    # `_TOTALS_RE` encodes, and it has to hold on every row that can be posted.
+    banners = [ln for ln in src.splitlines() if "TOTAL collected=$TOT_COLLECTED" in ln]
+    assert len(banners) >= 2, f"expected both TOTAL banners, found {len(banners)}"
+    for ln in banners:
+        ordered = re.search(
+            r"collected=\$TOT_COLLECTED\s+passed=\$TOT_PASSED\s+skipped=\$TOT_SKIPPED\s+"
+            r"failed=\$TOT_FAILED", ln)
+        assert ordered, f"banner does not print the fields in order: {ln.strip()}"
+        # …and the regex this file parses with actually matches that shape.
+        assert M._TOTALS_RE.search(
+            re.sub(r"\$TOT_(\w+)", "7", ordered.group(0))) is not None, ln
 
 
 def test_the_prior_art_this_gate_rebuilds_is_CITED_and_still_exists():
