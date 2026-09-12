@@ -16,19 +16,40 @@ the fault, and once end to end through the UI path after the fix. Rank 33 carrie
 the evidence and the defect it found. (Carried forward across a Status replace —
 it is the arc's central result, not status.)
 
-**Session total: 14 PRs merged, 2 open.** devrc #1392, #1389, #1388, #1408, #1468,
-#1483, #1534. homelab-infra #769, #771, #789, #791, #796, #797. Each verified by
-reading content off the mainline ref — a squash merge never makes the branch head
-an ancestor, so ancestry would have lied on every one.
+**Task 375 is CLOSED** (2026-09-12) and **clawgate is deployed at 0.8.32**. Both were
+stuck on the same invisible thing, described under "Gotchas": the `agent-pods` Flux
+Kustomization had been hand-suspended since 2026-06-07 while reporting `Ready=True`,
+and clawgate's image pin is a literal tag with no automation, so seven merged commits
+had never entered a running binary.
 
-**Open:**
-- **devrc #1549** — scope the wide-kill ledger to executable text (see the resolved
-  investigation below). CI starting.
-- **devrc #1515** `zach/clawgate-cross-session-reach` — clawgate skill cross-session
-  reach. Rebased to 0-behind locally; its remaining red is #1549's subject, not its own.
+**Task 519 (transcript streaming) — where it actually stands, measured 2026-09-12T04:54Z:**
 
-**Task 375 remains code-complete and BLOCKED** on the `agent-pods` Kustomization,
-Flux-suspended since 2026-06-07. Unchanged — see rank 43.
+| criterion | workbench | laptop |
+|---|---|---|
+| 1 — seconds-fresh, MEASURED | ✅ many sessions at a 0s/-1s gap | ❌ **not proven** — the host is idle, not disconnected |
+| 2 — rides the existing outbound connection | ✅ 52 accepted cursors | ✅ 4 accepted cursors, real byte offsets |
+| 3 — coverage past `MaxSessionsPerPush=8` | ✅ 52 sessions | n/a — only 7 sessions exist there |
+| 4 — bulk push still reconciles | ✅ | ✅ idle sessions carry rows ~23h newer than last host activity |
+
+🔴 **The laptop stream IS delivering.** An earlier reading in this arc said otherwise;
+it was wrong and the refutation is under "Open investigations". What is missing is a
+latency NUMBER, and only an active laptop session can produce one — rank 53.
+
+**Open PRs:**
+- **devrc #1515** `zach/clawgate-cross-session-reach` — **UNBLOCKED and pushed** (`ae8f79d7`),
+  `MERGEABLE / CLEAN`, 3 Tekton checks running. Rank 51.
+- **devrc #1549** — **do not land it.** Superseded by #1561 (merged 03:16:37Z). Rank 50;
+  closing it is rank 52.
+
+**Three cards are waiting on a signed-in human, not on code** — 519, 517 (`#754` merged),
+518 (`#753` merged). `/ui/tmux` is 401 without a session. Rank 54.
+
+⚠ **This doc was 551b4902-era until 2026-09-12 and was materially behind reality** — it
+predated the `agent-pods` resume, task 375's closing condition being met, the task 521
+re-spec, the 0.8.32 deploy and the container cleanup. Those landed as clawgate board
+comments on 375/519/521 and were only folded in here now. If a future session finds the
+board and this doc disagreeing, **the board is the newer record** — the write-back guard
+fires on the card, nothing fires on this file.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1115,16 +1136,21 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     host/port/user/database into the browser.
     forcing: none
 
-43. **Decide the `agent-pods` suspension** (homelab cluster, no repo files). Resume it, or declare
-   `suspend: true` in git so the state is visible and 375 is marked blocked-by-design. Prune risk
-   measured at **0 live objects**. This is the only thing standing between 375 and closed.
-   forcing: incident — a merged PR (#769) is silently inert in production, and has been for every
-   merge under that path since June.
-44. **Fix the kill-mention ledger on devrc `main`** — `scripts/claude-hooks/tests/test_guard_core.py:2525`,
-   add `claudedocs/handoff-tmux-scratchpad-bar-statusline.md`. One line, own PR.
-   forcing: gate — red on `main`, so it can surface in any devrc PR's pytests leg.
-45. **Land #1515** (devrc, `claude/skills/clawgate/`) — CI re-running after the size-ratchet fix.
-   IN FLIGHT: innovation-upstream/devrc#1515.
+43. ✅ **DONE 2026-09-12 — RESUMED.** `lastAppliedRevision` June `c8faceea` -> `5970433e`,
+   `Ready=True`, both live agents survived, pod rolled onto
+   `harbor.homelab.lan/library/openclaw-image:2026.6.11-py-cg0.8.31`. Prune risk was re-measured
+   AT THE MOMENT OF ACTION, not from the earlier note: 36 agent dirs deleted from git during the
+   suspension, ZERO with a live namespace; both surviving devpod namespaces confirmed still
+   declared in git first. This closed rank 43 and task 375 together.
+   forcing: incident — a merged PR (#769) was silently inert in production since June.
+44. ✅ **DONE 2026-09-12 by `devrc#1561`** (a DIFFERENT session), squash-merged 03:16:37Z. Not the
+   one-line ledger addition this item proposed — `_is_prose_only()` exempts `claudedocs/` from
+   BOTH scanners, removes 11 dead entries, and adds a positive control that executable offenders
+   are still caught. Verified green in a clean worktree at `origin/main`: the three target tests
+   pass, and the whole `test_guard_core.py` module is 1537 passed. See rank 50.
+   forcing: gate — red on `main`, so it surfaced in any devrc PR's pytests leg.
+45. **SUPERSEDED BY RANK 51 — same PR (#1515), do not claim both.** Left in place because ranks
+   are stable; work it at 51.
    forcing: none
 46. **Land #797** (homelab-infra, `containers/clawgate/internal/ui/`) — 4 checks pending.
    IN FLIGHT: ZacxDev/homelab-infra#797.
@@ -1144,14 +1170,41 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
    anthropic/openai dependency, so an "agent" there is a kubeclaw pod it provisions.
    forcing: none
 
-50. **Land #1549** (devrc, `scripts/claude-hooks/tests/test_guard_core.py`) — scopes the
-    wide-kill ledger to executable text so a handoff doc stops red-lining `main`.
-    IN FLIGHT: innovation-upstream/devrc#1549.
-    forcing: gate — the ledger red-lined `main` three times in one day, blocking every
-    devrc PR each time.
-51. **Land #1515** once #1549 is in — already rebased 0-behind; its only red was #1549's
-    subject. IN FLIGHT: innovation-upstream/devrc#1515.
+50. ✅ **CLOSED OUT 2026-09-12 — #1549 is SUPERSEDED BY #1561, do NOT land it.** #1561 merged
+    03:16:37Z and fixes the same defect more completely (one predicate consulted by BOTH scanners
+    vs #1549's one; 11 dead entries removed vs 2; plus a positive control). #1549 meanwhile went
+    `CONFLICTING/DIRTY` and its three gates are `KILLED` (gate pod died — not a code failure), so
+    its red says nothing about its content. The one real difference — #1549 kept the shell-text
+    scanner reading `claudedocs/` — does not matter: the runtime hook still denies the command
+    (measured, with a negative control). Comment posted on the PR recommending closure; see
+    rank 52 for the one remaining click.
+    forcing: gate — the ledger red-lined `main` three times in one day; #1561 closed that.
+51. **Land #1515 — UNBLOCKED 2026-09-12 and pushed; waiting on CI only.** Its only red was
+    #1549's subject, which #1561 fixed on `main`. Merged current `main` into the branch (no
+    force-push) and pushed as `ae8f79d7`; it is now `MERGEABLE / CLEAN` with 3 Tekton checks
+    running. Verified locally first on the merged tree: `-k kill` 96 passed, full
+    `test_guard_core.py` 1537 passed. 🔴 #1515 adds a file under `claude/skills/`, NOT
+    `claudedocs/`, so #1561's exemption does not cover it — checked explicitly for `kill-s` text
+    and there is none. IN FLIGHT: innovation-upstream/devrc#1515.
     forcing: none
+
+52. **Close `devrc#1549` unmerged.** Superseded by #1561 (rank 50 carries the measurement and the
+    PR comment is already posted). Nothing in it needs porting. One click; left for the operator
+    because closing was not what was asked for.
+    forcing: none
+53. **Measure criterion 1 of task 519 on the LAPTOP.** The stream is confirmed delivering from
+    that host (4 sessions with `reason: accepted` and real byte offsets on
+    `GET /api/transcripts/stream/cursors`), but there is no latency NUMBER because no laptop
+    session has been active since 03:37Z — an idle host cannot demonstrate stream latency. The
+    probe: one active Claude turn on the laptop, then re-run the tmux x transcript join and look
+    for a 0-5s gap the way the workbench sessions show. Repo: none — it is a measurement.
+    forcing: gate — task 519's own closing condition names both hosts and a measured number, and
+    that is the only criterion still unmet.
+54. **The operator-facing half of 519/517/518 — `/ui/tmux` needs a signed-in human.** Measured:
+    `/ui/tmux` returns 401 without a session, with `/health` 200 as the control, so no shell can
+    exercise it. Three cards are waiting on one visit: 519 (seconds-fresh session view), 517
+    (reply-delivery state renders, `#754` merged), 518 (JSONL chat view renders, `#753` merged).
+    forcing: user — all three cards name an operator observation in their closing condition.
 
 ## Open investigations — live diagnosis state
 
@@ -2087,6 +2140,42 @@ are corrected in place.
   `via: measurement`
 - **Next probe:** none — #1534 merged, #1549 open. If a fourth doc-mention red appears after
   #1549 lands, the scoping did not hold and the exclusion list is wrong.
+
+### Task 519 criterion 1 on the laptop — is the stream down, or is the host just idle?
+
+- **Symptom + exact repro:** the laptop's transcripts in clawgate look badly stale.
+  `clawgatectl tmux windows` (gives `host` + `claude_session_id`) joined against
+  `clawgatectl transcript ls` (gives `updatedAt`), 2026-09-12T04:54Z.
+- **Observed (with values):**
+  - `workbench` — 52 of 53 claude sessions carry a transcript; freshest **0s** behind the
+    newest row in the store; 12 under 60s.
+  - `laptop` — 7 of 7 carry one; freshest **4431s** behind, median **6064s**, **0** under 300s.
+  - Stream cursors, `GET /api/transcripts/stream/cursors`, 288 rows joined to host:
+    `workbench` 52 `accepted`; **`laptop` 4 `accepted` with real byte offsets**, 3
+    `unknown-offset`.
+  - Host-vs-server gap (`ledger.last_activity_ts` minus clawgate `updatedAt`), per session:
+    workbench n=52 max **+107s**, laptop n=7 max **-14s**; sessions on either host whose own
+    host knew of activity >5min ahead of clawgate: **0**.
+  - Newest laptop session activity of any kind: **03:37Z**, ~78 minutes before the read.
+- **Ruled out:** *the laptop stream is down / disconnected.* Every host-vs-server gap on the
+  laptop is negative — clawgate's row is at-or-newer than the laptop's own stamp on all 7
+  sessions, so nothing the laptop knew about failed to arrive; and 4 laptop sessions carry
+  `reason: accepted` cursors, which is the stream path's own verdict rather than the bulk
+  push's. via: measurement
+- **Ruled out:** *a 5-minute-bulk-push explanation for the freshest laptop sample.* It is NOT
+  ruled out — the -183s sample on session `11cb641d` is equally consistent with the bulk push
+  and with the stream, so it settles nothing and must not be quoted as a latency figure.
+  via: measurement
+- **Ruled out:** *reading staleness alone as evidence about the stream.* A stale transcript has
+  two causes — stream down, or host idle — and staleness separates neither. This is the empty-
+  result error and it produced a confident wrong reading in this very session before the
+  discriminator was run. via: measurement
+- **Leading hypothesis:** the laptop stream is healthy and the host has simply been idle for
+  ~78 minutes. Criterion 1 is unmeasurable there until someone types.
+- **Next probe:** take one active Claude Code turn on the laptop, then immediately re-run the
+  join and read the gap for that session's id:
+  `clawgatectl tmux windows` + `clawgatectl transcript ls`, match on `claude_session_id`,
+  compute `ledger.last_activity_ts - updatedAt`. Expect 0-5s, as the workbench sessions show.
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -3494,31 +3583,87 @@ are corrected in place.
   previous head's terminal checks linger; a poll reading them settles on another commit's
   verdict. Mine printed `SETTLED n=4` over a rollup that was actually empty.
 
+- 🔴 **A MERGED clawgate commit is NOT a deployed one, and nothing says so.** clawgate's image
+  pin is a literal tag with no image automation, so committing deploys the MANIFEST, not the
+  code. Seven merged commits — `#771` among them — sat inert for two days. The only thing that
+  noticed was the producer itself, logging `transcript streaming failed this poll … HTTP 404 to
+  a read` and carrying on, because stream failures are deliberately isolated from the write path
+  and the 5-minute bulk push kept feeding the read model. **Two days inert, no outage, no alarm.**
+  After merging anything here, re-read the pin and `clawgatectl health` — `merged` is not evidence.
+- 🔴 **A Flux Kustomization SUSPENDED BY HAND reports `Ready=True ReconciliationSucceeded`
+  forever.** `agent-pods` was suspended via the flux CLI on 2026-06-07T01:58Z, with `suspend`
+  absent from git and therefore unremovable by kustomize-controller under SSA. Everything merged
+  under `clusters/homelab/apps/agent-pods/` since June was silently inert, and nothing in git, no
+  task and no doc recorded it. **The only tell was that its `lastAppliedRevision` differed from
+  every sibling's** — compare that across Kustomizations, never the Ready condition.
+- 🔴 **`GET /api/transcripts/stream/cursors` wants `X-Clawgate-Token`, not `X-Hook-Token`.** The
+  wrong header returns `401 {"error":"invalid or missing hook token"}`, which reads exactly like
+  a credential problem rather than a header-name problem. `auth.go:583-588` accepts
+  `Authorization: Bearer` or `X-Clawgate-Token` and nothing else. Negative control for the route
+  itself: an absent route returns 404, so 401 does mean "exists, needs auth".
+- 🔴 **`gh pr checks` says `no checks reported on the branch` for a minute or so after a push,
+  and that is not an absence.** Seen again 2026-09-12 on #1515 seconds after pushing; three
+  Tekton checks registered shortly after. For devrc the expected minimum is **3**
+  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`) — assert a minimum count rather
+  than reading an empty rollup as "no CI".
+- 🔴 **A `KILLED` Tekton verdict is not a code failure and must not be read as one.** #1549's
+  three gates all reported `KILLED: … the gate pod died at or after step pytests
+  (preempted/evicted/OOM/timeout)`. That PR's red said nothing whatsoever about its content; the
+  content question had to be settled by running the tests in a clean worktree instead.
+- 🔴 **`claim-work` reports "THIS SESSION (you already hold it)" for claims made by EARLIER
+  sessions in the same clone.** Ownership is `/etc/machine-id` + `git rev-parse --git-dir`, so
+  every session running in the devrc primary clone shares one owner id — rc 12 means "this
+  host+worktree", not "this conversation". Two of this session's three relevant claims were
+  minted hours earlier by other sessions and read as mine. A genuinely concurrent peer shows a
+  DIFFERENT owner-id (measured: `8070ae169ba8` vs `3e776e148119`), which is the only reliable tell.
+- 🔴 **The ranked list in this doc is 979 lines and is a REPLACE section.** A delta that includes
+  `## Next steps (ranked)` without carrying the whole history forward DELETES every completed
+  rank — and the ranks are load-bearing, because a rank is half a `claim-work` slug. Build the
+  section by reading lines out of the existing doc and editing anchors in place, never by
+  retyping it. `handoff_doc.py`'s durable-drop warning is the backstop, not the plan.
+
 ## How to verify
 
 ```bash
-# 375's closing condition — homelab cluster, sh -c is load-bearing
-POD=$(kubectl --kubeconfig "$KC_HOMELAB" -n devpod-initiatives get pods -o jsonpath='{.items[0].metadata.name}')
-kubectl --kubeconfig "$KC_HOMELAB" -n devpod-initiatives exec "$POD" -c agent \
-  -- sh -c 'command -v clawgatectl && clawgatectl --version; command -v python3'
+# 1. Task 519 — per-host streaming, the join that produced the table above.
+clawgatectl tmux windows        # host + claude_session_id
+clawgatectl transcript ls       # sessionId + updatedAt
+# match on session id; compare `ledger.last_activity_ts` against `updatedAt`.
+# The workbench is the control: its stream is known-live, so its gap distribution is the floor.
 
-# the suspension that blocks it
-kubectl --kubeconfig "$KC_HOMELAB" get kustomization agent-pods -n flux-system \
-  -o jsonpath='{.spec.suspend} {.status.lastAppliedRevision}{"\n"}'
+# 2. The stream's own verdict, per host. Header name is load-bearing.
+set -a; . ~/.claude/clawgate.env; set +a
+curl -s -H "X-Clawgate-Token: $CLAWGATE_HOOK_TOKEN" \
+  "$CLAWGATE_API_URL/api/transcripts/stream/cursors" | jq '.sessions | length'
+curl -s -o /dev/null -w '%{http_code}\n' -H "X-Clawgate-Token: $CLAWGATE_HOOK_TOKEN" \
+  "$CLAWGATE_API_URL/api/nosuchroute"          # 404 — negative control for the route
 
-# the force-open fix is on trunk (expect 1 def, 0 live equality)
-git -C ~/workspace/homelab-talos show origin/trunk:containers/clawgate/internal/ui/tmux.go \
-  | grep -c 'func needsHuman'
+# 3. clawgate is actually running what was merged. Consumer, not manifest.
+KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate get deploy clawgate \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
+clawgatectl health
 
-# the kill-ledger red on devrc main
-git -C ~/workspace/devrc worktree add --detach /tmp/kc origin/main && \
-  (cd /tmp/kc && python3 -m pytest scripts/claude-hooks/tests/test_guard_core.py \
-     -k test_every_kill_server_call_site_in_the_repo_is_classified -q)
+# 4. The kill-guard question (ranks 44/50) — green on main, and the runtime gate intact.
+git -C "$DEVRC" worktree add --detach /tmp/wt-kg origin/main
+(cd /tmp/wt-kg && python3 -m pytest scripts/claude-hooks/tests/test_guard_core.py -q)
+git -C "$DEVRC" worktree remove --force /tmp/wt-kg
+# runtime hook, WITH a negative control so "deny" means something:
+#   'tmux kill-server' -> deny ; 'echo hello' -> no decision
 ```
+
+🔴 **Not verifiable from any shell:** `/ui/tmux` is 401 without a session (control: `/health`
+200). Cards 519, 517 and 518 each name an operator observation on the live page, and that is
+the only thing standing between all three and closed.
 ## Run this first — the index, one read-only command
 ```bash
-python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
+cairn recall --repo ~/workspace/devrc
 ```
+🔴 **The old spelling here (`python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py`) is a
+DEAD PATH as of `devrc#1508` (2026-09-11)** — devrc's five forked reader modules were deleted and
+the reader now ships in the pinned `cairn` package. Run bare, it exits 4 refusing an undateable
+store. `cairn recall` syncs first, then runs the same reader, so the answer carries its own
+freshness. This was the FIRST command in this doc and it had stopped working.
+
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
 reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
