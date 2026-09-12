@@ -371,6 +371,19 @@ def _mapping_is_never_the_operators(monkeypatch, tmp_path):
     monkeypatch.setattr(MO, "PICKS_PATH", picks)
     monkeypatch.setenv("MENTION_OPEN_PICKS", str(picks))
 
+    # 🔴 THE FIFTH, AND IT IS A DIFFERENT HAZARD FROM THE FOUR ABOVE. The marker
+    # names no repository, so nothing here is about disclosure. What an
+    # unredirected read would do is let the OPERATOR'S OWN pinned target decide
+    # a test's answer: `open_target` reads this file BEFORE it consults
+    # `tui_available()`, so a workbench with `tui` in it would flip every test
+    # that opens a GitHub URL onto the review-TUI path — a suite that behaves
+    # differently on the two hosts, for a reason no failure message would name.
+    # ⚠ NOT WRITTEN, for the same reason as the two above: absent means
+    # "unpinned", which is the default state and the correct one for a test that
+    # says nothing about the target.
+    target = tmp_path / "autouse-target"
+    monkeypatch.setattr(MO, "MENTION_TARGET_PATH", target)
+    monkeypatch.setenv("MENTION_OPEN_TARGET", str(target))
     # 🔴 THE FIFTH SINK, AND IT IS NOT UNDER `~/.config/mention-open` AT ALL —
     # which is exactly why `HOST_STATE_CONSTANTS` cannot see it and this line has
     # to exist. Since 2026-09 the handler reports click OUTCOMES to the activity
@@ -524,6 +537,15 @@ HOST_STATE_CONSTANTS = {
     "KNOWN_UNIVERSE_PATH": "MENTION_OPEN_KNOWN_UNIVERSE",
     "KNOWN_RANGES_PATH": "MENTION_OPEN_KNOWN_RANGES",
     "PICKS_PATH": "MENTION_OPEN_PICKS",
+    # The review-target marker. ⚠ IT IS THE ONE ENTRY HERE THAT NAMES NO
+    # REPOSITORY — it holds the literal word `tui` or `browser` — so the
+    # DISCLOSURE argument the other four rest on does not apply to it. It is
+    # ledgered anyway, and must be: it sits in the same directory, and an
+    # unredirected read would let the OPERATOR'S OWN marker decide a test's
+    # answer, silently moving the whole suite onto the TUI path on a host where
+    # they had pinned it. That is a different hazard from disclosure and it is
+    # the one this row closes.
+    "MENTION_TARGET_PATH": "MENTION_OPEN_TARGET",
 }
 
 
@@ -1302,6 +1324,89 @@ def _shell_child_commands(source: str) -> set[str]:
     return out
 
 
+def _exec_payload_commands(source: str) -> set[str]:
+    """The binaries a spawn hands a terminal to RUN — the first word of the
+    argument following a literal `"-e"` inside a spawn's argv list.
+
+    🔴 A THIRD READER, AND IT IS NOT A SPELLING VARIANT OF THE SECOND. argv[0]
+    covers the terminal; `_shell_child_commands` covers a command inside a
+    `sh -c` SCRIPT; this covers a command alacritty execs DIRECTLY. The review
+    TUI is `alacritty … -e nvim-octo <repo> <num>` — no shell, no `-c` — so the
+    `-c` reader sees nothing at all, and without this the wrapper's PATH would
+    carry `pkgs.nvim-octo` with nothing in the ledger requiring it (which the
+    `listed <= needed` direction of the test below would then call dead weight
+    and delete).
+
+    The failure it guards against is the same one `fzf` taught: alacritty exits
+    0 whether its `-e` command exits 0 or 127, so a missing binary is a window
+    that flashes and vanishes — invisible to the handler and green in every
+    suite.
+
+    Resolves ONE level of module-level `NAME = "…"`, because `mention-open.py`
+    spells it as the constant `REVIEW_EXE` rather than a literal — deliberately,
+    so the name `shutil.which` pre-flights and the name that is spawned cannot
+    drift apart. Absolute paths are skipped for the same reason as above:
+    `/bin/sh` is not resolved through PATH.
+    """
+    out: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("run", "Popen") or not node.args:
+            continue
+        argv = node.args[0]
+        if not isinstance(argv, (ast.List, ast.Tuple)):
+            continue
+        elts = list(argv.elts)
+        for i, elt in enumerate(elts[:-1]):
+            if not (isinstance(elt, ast.Constant) and elt.value == "-e"):
+                continue
+            payload = elts[i + 1]
+            text = None
+            if isinstance(payload, ast.Constant) and isinstance(payload.value, str):
+                text = payload.value
+            elif isinstance(payload, ast.Name):
+                text = _module_str_constant(source, payload.id)
+            if not text:
+                out.add("<computed>")
+                continue
+            word = text.split()[0] if text.split() else ""
+            if word and not word.startswith("/"):
+                out.add(word)
+    return out
+
+
+def test_the_exec_payload_reader_can_actually_fire():
+    """POSITIVE **AND** NEGATIVE CONTROL on the third reader, before its verdict
+    is believed — a reader that matched nothing would report a clean empty set
+    forever and `test_the_alacritty_wrapper_PATH_…` would silently stop covering
+    the one binary the review TUI cannot run without."""
+    # A bare command after `-e`, which is how the review terminal spells it.
+    assert _exec_payload_commands(
+        "import subprocess\n"
+        "subprocess.Popen(['alacritty', '-e', 'nvim-octo', 'o/r', '7'])\n"
+    ) == {"nvim-octo"}
+    # Through a module constant, which is how the handler actually spells it.
+    assert _exec_payload_commands(
+        "import subprocess\n"
+        "E = 'nvim-octo'\n"
+        "subprocess.Popen(['alacritty', '-e', E, 'o/r', '7'])\n"
+    ) == {"nvim-octo"}
+    # 🔴 THE PICKER'S OWN `-e` PAYLOAD IS `/bin/sh`, AN ABSOLUTE PATH, AND MUST
+    # NOT BE REPORTED — it is not resolved through PATH and needs no package.
+    # Without this arm the reader would demand a `pkgs./bin/sh`.
+    assert _exec_payload_commands(
+        "import subprocess\n"
+        "subprocess.Popen(['alacritty', '-e', '/bin/sh', '-c', 'fzf'])\n") == set()
+    # A spawn with no `-e` contributes nothing…
+    assert _exec_payload_commands(
+        "import subprocess\nsubprocess.run(['git', 'rev-parse'])\n") == set()
+    # …and a payload it cannot read is reported, never silently dropped.
+    assert _exec_payload_commands(
+        "import subprocess\n"
+        "subprocess.Popen(['alacritty', '-e', pick()])\n") == {"<computed>"}
+
+
 def _module_str_constant(source: str, name: str) -> str | None:
     """The value of a module-level `NAME = "…"` (implicit-concatenation
     included), or None. Deliberately NOT `getattr(MO, name)`: reading it off the
@@ -1387,7 +1492,14 @@ def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns()
     # executable -> the nix attribute that must provide it.
     PROVIDER = {"git": "pkgs.git", "tmux": "pkgs.tmux",
                 "xdg-open": "pkgs.xdg-utils", "notify-send": "pkgs.libnotify",
-                "alacritty": "pkgs.alacritty", "fzf": "pkgs.fzf"}
+                "alacritty": "pkgs.alacritty", "fzf": "pkgs.fzf",
+                # nvim-octo — the review TUI, supplied by the OVERLAY in
+                # flake.nix rather than by nixpkgs. It is spelled `pkgs.X` for
+                # exactly this reader: a `let`-bound derivation would not match
+                # the `pkgs\.[A-Za-z0-9_-]+` scan below, so the wrapper would
+                # look like it pins nothing and this seam would stop covering
+                # the binary the review click cannot run without.
+                "nvim-octo": "pkgs.nvim-octo"}
     # python312 is the interpreter the wrapper `exec`s by store path.
     INTERPRETER = {"pkgs.python312"}
 
@@ -1401,12 +1513,18 @@ def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns()
     assert listed, "positive control: the wrapper DOES pin a PATH"
 
     src = HANDLER.read_text()
-    spawned = _spawned_executables(src) | _shell_child_commands(src)
+    spawned = (_spawned_executables(src) | _shell_child_commands(src)
+               | _exec_payload_commands(src))
     assert spawned, "positive control: the module DOES spawn things"
     assert "fzf" in spawned, (
         "positive control on the SECOND reader: the picker's `sh -c` line must "
         "still be visible to _shell_child_commands, or this test silently stops "
         "covering the binary the picker cannot run without")
+    assert "nvim-octo" in spawned, (
+        "positive control on the THIRD reader: the review terminal's `-e` "
+        "payload must still be visible to _exec_payload_commands, or this test "
+        "silently stops covering the binary a review click cannot run without "
+        "— and `pkgs.nvim-octo` in the wrapper would then read as dead weight")
     needed = {PROVIDER[e] for e in spawned if e in PROVIDER}
     unknown = spawned - set(PROVIDER)
     assert not unknown, (
@@ -4581,13 +4699,20 @@ _SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
 #   tmux        — asking the pane for its repo
 #   notify-send — the refusal toast
 #   xdg-open    — opening the chosen URL
-#   alacritty   — the float terminal the fzf picker runs in (was `rofi` until
-#                 2026-09-09; see `PICKER_SH` for the ranking measurement that
-#                 forced the swap). ⚠ `fzf` itself is NOT here and must not be:
-#                 this set is argv[0] literals, and fzf is one level down, in
-#                 the `-c` script. `_shell_child_commands` is the reader that
-#                 sees it, and `test_the_alacritty_wrapper_PATH_covers_every_
-#                 executable_the_handler_spawns` is where it is pinned.
+#   alacritty   — the float terminal for BOTH of this handler's windows: the
+#                 fzf picker (was `rofi` until 2026-09-09; see `PICKER_SH` for
+#                 the ranking measurement that forced the swap) and, since the
+#                 review TUI landed, the `nvim-octo` review window. TWO call
+#                 sites, ONE argv[0] — which is why this set did not move when
+#                 the second arrived, and why it cannot be read as a count of
+#                 the things this module can launch.
+#                 ⚠ NEITHER `fzf` NOR `nvim-octo` IS HERE, AND NEITHER MAY BE:
+#                 this set is argv[0] literals, and both are one level down —
+#                 fzf inside the `-c` script, nvim-octo as the `-e` payload.
+#                 `_shell_child_commands` and `_exec_payload_commands` are the
+#                 readers that see them, and `test_the_alacritty_wrapper_PATH_
+#                 covers_every_executable_the_handler_spawns` is where both are
+#                 pinned.
 EXPECTED_ARGV0 = {"git", "tmux", "notify-send", "xdg-open", "alacritty"}
 
 
@@ -6377,6 +6502,428 @@ def _fzf_filter(rows: list[str], query: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE REVIEW TUI — `open_target` / `open_tui` / `open_browser`
+#
+# NOTHING BELOW RAISES A WINDOW OR STARTS AN EDITOR. The hermetic boundary is
+# the `Popen` call: its argv is assertable, and nothing after it is. Everything
+# past that boundary — that alacritty maps a window, that neovim starts, that
+# `setup()` ran, that `Octo <N> <repo>` resolved the right BUFFER KIND (a live
+# GraphQL call), that the merge mappings are gone from the LIVE buffer — is
+# stated as unverified in the PR rather than implied by a green test here.
+#
+# ⚠ `nvim-octo` IS DELIBERATELY NOT STUBBED ONTO PATH BY THE SUITE. It is in
+# `nolaunch.ACKNOWLEDGED_UNSTUBBED`, not `HOST_LAUNCHERS`, because it is only
+# ever reached as `alacritty`'s `-e` payload and alacritty IS stubbed. A
+# consequence worth naming: `tui_available()` is FALSE by default in every test
+# in this file, so every test that does not say otherwise exercises the browser
+# path. Each test below that wants the TUI says so explicitly.
+# --------------------------------------------------------------------------- #
+GH_PULL_URL = "https://github.com/gardenersguild/trowelcast/pull/1559"
+GH_ISSUE_URL = "https://github.com/gardenersguild/trowelcast/issues/1559"
+CLAWGATE_URL = "https://clawgate.zacx.dev/tasks/7"
+CLICKUP_URL = "https://app.clickup.com/t/868abc123"
+
+
+@pytest.fixture
+def tui(monkeypatch, tmp_path):
+    """Drive `open_url` with every impure edge recorded and nothing launched.
+
+    Returns a namespace whose `spawns` is the argv list of every `Popen`,
+    `notifies` every toast summary, and `available`/`marker` the two levers
+    `open_target` reads. The marker path is redirected into `tmp_path` so no
+    test can read — or be decided by — the operator's real
+    `~/.config/mention-open/target`.
+    """
+    spawns: list[list[str]] = []
+    notifies: list[str] = []
+
+    def record(argv, *a, **k):
+        spawns.append(list(argv))
+        return types.SimpleNamespace(poll=lambda: 0, terminate=lambda: None)
+
+    monkeypatch.setattr(MO.subprocess, "Popen", record)
+    monkeypatch.setattr(MO, "notify",
+                        lambda summary, body="": notifies.append(summary))
+    marker = tmp_path / "target"
+    monkeypatch.setattr(MO, "MENTION_TARGET_PATH", marker)
+    state = types.SimpleNamespace(spawns=spawns, notifies=notifies,
+                                  marker=marker, available=False)
+    monkeypatch.setattr(MO, "tui_available", lambda: state.available)
+    return state
+
+
+# --------------------------------------------------------------------------- #
+# 1. ARGV CONSTRUCTION
+# --------------------------------------------------------------------------- #
+def test_the_review_terminal_runs_the_TUI_with_the_repo_then_the_number(tui):
+    """🔴 THE ONE ASSERTABLE FACT ABOUT THE SPAWN, AND ALL THREE PARTS MATTER.
+
+    argv[0] must stay the constant `alacritty` (the AST ledger reads exactly
+    that); the `-e` payload must be the review wrapper (alacritty exits 0 for a
+    payload that does not exist, so nothing downstream can notice); and the last
+    two arguments must be the REPOSITORY and then the NUMBER, in that order,
+    because the wrapper assembles `Octo <num> <repo>` from their POSITIONS.
+    Swap them and octo is handed a repository where it expects a number, which
+    takes a completely different branch of `M.octo`.
+
+    The fixtures are pairwise distinct and distinct from every constant this
+    assertion names — `gardenersguild/trowelcast` and `1559`, never `owner/1`
+    and `1` — so a mutant that hardcodes a literal cannot survive by landing on
+    the expected value.
+    """
+    tui.available = True
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert len(tui.spawns) == 1, tui.spawns
+    argv = tui.spawns[0]
+    assert argv[0] == "alacritty", argv
+    assert argv[-3] == MO.REVIEW_EXE == "nvim-octo", argv
+    assert argv[-2:] == ["gardenersguild/trowelcast", "1559"], argv
+    # The `-e` really is what introduces the payload, not a coincidence of
+    # position: a future flag inserted after it would break the wrapper.
+    assert argv[argv.index("-e") + 1] == MO.REVIEW_EXE, argv
+
+
+def test_the_review_terminal_carries_its_own_window_class_and_geometry(tui):
+    """The instance half of the class names THIS window, so an i3 rule can size
+    a review without catching the fzf picker — which uses the SAME general
+    class. Asserted as a pair for that reason: `float` alone would be satisfied
+    by the picker's own class."""
+    tui.available = True
+    MO.open_url(GH_PULL_URL)
+    argv = tui.spawns[0]
+    assert argv[argv.index("--class") + 1] == MO.REVIEW_CLASS
+    assert MO.REVIEW_CLASS == "float,mention-review"
+    assert MO.REVIEW_CLASS != MO.PICKER_CLASS
+    assert f"window.dimensions.columns={MO.REVIEW_COLUMNS}" in argv
+    assert f"window.dimensions.lines={MO.REVIEW_LINES}" in argv
+
+
+# --------------------------------------------------------------------------- #
+# 2. DISPATCH CHOICE — and BOTH branches carry a positive control
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("url,expected", [
+    (GH_PULL_URL, MO.TARGET_TUI),
+    (GH_ISSUE_URL, MO.TARGET_TUI),
+    (CLAWGATE_URL, MO.TARGET_BROWSER),
+    (CLICKUP_URL, MO.TARGET_BROWSER),
+    # A github.com URL that is NOT an issue or a pull request. The TUI has
+    # nothing to open here, and `repo_of_github_url` — the looser reader used
+    # for the pick log — WOULD have said "gardenersguild/trowelcast".
+    ("https://github.com/gardenersguild/trowelcast/releases/tag/v2",
+     MO.TARGET_BROWSER),
+    ("https://github.com/gardenersguild/trowelcast/", MO.TARGET_BROWSER),
+])
+def test_the_target_is_decided_by_the_URL_SHAPE(tui, url, expected):
+    """🔴 THE TABLE IS ONLY EVIDENCE BECAUSE THE TUI ROWS ARE POSITIVE.
+
+    "zero TUI calls for a clawgate URL" is indistinguishable from a dispatcher
+    wired to nothing at all, so the same table asserts that the GitHub rows DO
+    reach the TUI under identical conditions. One parametrisation, both
+    directions, and the browser rows cannot pass vacuously.
+    """
+    tui.available = True
+    assert MO.open_target(url) == expected
+
+
+def test_a_clawgate_click_reaches_the_BROWSER_and_the_TUI_is_never_spawned(tui):
+    """The behavioural half of the table above: `open_target` returning a string
+    is a claim about a function; this is a claim about what was LAUNCHED."""
+    tui.available = True
+    assert MO.open_url(CLAWGATE_URL) == 0
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+    assert MO.REVIEW_EXE not in str(tui.spawns)
+    assert tui.notifies == [], (
+        "a clawgate click took the ordinary path and must say nothing")
+
+
+def test_a_github_click_reaches_the_TUI_under_the_SAME_fixture(tui):
+    """🔴 THE POSITIVE CONTROL FOR THE TEST ABOVE. Same fixture, same
+    availability, one field changed — so the clawgate zero is a fact about the
+    URL rather than about a handler that cannot reach the TUI at all."""
+    tui.available = True
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert [a[0] for a in tui.spawns] == ["alacritty"], tui.spawns
+    assert "xdg-open" not in str(tui.spawns)
+
+
+# --------------------------------------------------------------------------- #
+# 3. FALLBACK SELECTION
+# --------------------------------------------------------------------------- #
+def test_a_host_without_the_TUI_opens_the_browser_and_says_NOTHING(tui):
+    """🔴 SILENT ON PURPOSE, AND THIS IS THE ARM MOST LIKELY TO BE "FIXED" INTO
+    NOISE. A host with no `nvim-octo` has not lost anything it had — every click
+    behaves exactly as it did before this feature existed. Toasting on each one
+    to announce a capability the operator never asked for is the noise this
+    handler must not make. The announcement belongs where the TUI was ASKED for
+    and could not run, which is the test below."""
+    tui.available = False
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+    assert tui.notifies == [], tui.notifies
+
+
+def test_a_PINNED_tui_that_cannot_run_falls_back_and_says_so_EXACTLY_ONCE(tui):
+    """🔴 THE PRE-FLIGHT IS MANDATORY, NOT DEFENSIVE POLISH, AND A POST-SPAWN
+    FALLBACK STRUCTURALLY CANNOT REPLACE IT. alacritty 0.17.0 exits 0 whether
+    its `-e` command exits 0 or 127, and `Popen` never waits — so a missing
+    `nvim-octo` is a window that flashes and vanishes with nothing for this
+    process to observe. The operator asked for the TUI (the marker file), so the
+    refusal must be announced; a silent refusal is worse than the dead end it
+    replaces.
+
+    EXACTLY ONE toast, asserted as a count rather than as membership: a fallback
+    that also fired the browser's own failure toast would be two."""
+    tui.available = False
+    tui.marker.write_text(MO.TARGET_TUI)
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+    assert len(tui.notifies) == 1, tui.notifies
+
+
+def test_open_url_takes_NO_argument_but_the_url(tui):
+    """🔴 A DELETION, PINNED SO IT IS NOT QUIETLY UNDONE.
+
+    A `--browser` flag was built here and removed before it shipped: it was
+    UNREACHABLE from a click (the Alacritty hint hands the handler the matched
+    text and nothing else, and its regex cannot produce a token starting with
+    `-`), so its only caller was a human typing it in a shell — a second
+    spelling of the marker file with a strictly smaller reach.
+
+    The signature is what makes this feature purely additive to `main()`: both
+    call sites are byte-identical to the pre-TUI code, so a concurrent branch
+    rewriting either one cannot drop half of it. Re-adding a keyword here
+    re-opens that cross-PR hazard, which is why the shape is asserted rather
+    than left to a comment."""
+    import inspect
+    params = list(inspect.signature(MO.open_url).parameters)
+    assert params == ["url"], params
+    assert list(inspect.signature(MO.open_target).parameters) == ["url"]
+    assert "--browser" not in MO.build_parser().format_help()
+
+
+def test_the_marker_file_can_pin_the_browser_on_a_host_that_HAS_the_tui(tui):
+    """The durable escape hatch, and the direction that proves the marker is
+    read at all: this host WOULD have taken the TUI by default."""
+    tui.available = True
+    assert MO.open_target(GH_PULL_URL) == MO.TARGET_TUI, (
+        "positive control: without the marker this host takes the TUI, so the "
+        "assertion below is about the FILE and not about availability")
+    tui.marker.write_text("browser\n")
+    assert MO.open_target(GH_PULL_URL) == MO.TARGET_BROWSER
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+
+
+def test_the_marker_file_can_pin_the_TUI_on_a_host_that_would_not_default_to_it(tui):
+    """The other direction, which is what makes rung 1 a rung rather than a
+    no-op: `tui_available()` is FALSE here, so rung 2 would have said browser."""
+    tui.available = False
+    assert MO.open_target(GH_PULL_URL) == MO.TARGET_BROWSER
+    tui.marker.write_text("tui")
+    assert MO.open_target(GH_PULL_URL) == MO.TARGET_TUI
+
+
+@pytest.mark.parametrize("content", ["", "   \n", "TUI-ish", "browserr",
+                                     "tui browser", "0"])
+def test_an_UNREADABLE_marker_reads_as_unpinned_rather_than_wedging_a_click(
+        tui, content):
+    """A marker file that cannot be understood must not be able to break
+    clicking. Anything that is not exactly one of `TARGET_VALUES` falls through
+    to the default rung, which here means the browser."""
+    tui.available = False
+    tui.marker.write_text(content)
+    assert MO.read_target_marker() == ""
+    assert MO.open_target(GH_PULL_URL) == MO.TARGET_BROWSER
+
+
+def test_a_marker_that_is_a_DIRECTORY_is_not_an_exception(tui):
+    """`IsADirectoryError` is an `OSError`; the reader must treat it as unpinned
+    rather than let it reach `guarded_main`'s last-resort toast."""
+    tui.available = True
+    tui.marker.mkdir()
+    assert MO.read_target_marker() == ""
+
+
+def test_the_marker_is_read_at_CALL_time_not_bound_at_import(tui, tmp_path):
+    """A `path: Path = MENTION_TARGET_PATH` default is evaluated once, at
+    import, so `monkeypatch.setattr` on the module constant would be inert and
+    the whole fixture above would be testing the operator's real file."""
+    other = tmp_path / "elsewhere"
+    other.write_text("tui")
+    assert MO.read_target_marker(other) == MO.TARGET_TUI
+    assert MO.read_target_marker() == "", (
+        "the redirected default path was not honoured — this reader bound its "
+        "path at import and every marker test above is inert")
+
+
+def test_a_case_or_whitespace_variant_of_the_marker_still_counts(tui):
+    """The operator writes this file by hand; `echo TUI > target` must work."""
+    tui.available = False
+    tui.marker.write_text("  TUI \n")
+    assert MO.read_target_marker() == MO.TARGET_TUI
+
+
+def test_a_spawn_failure_falls_back_to_the_browser_rather_than_dying(
+        monkeypatch, tmp_path):
+    """🔴 THE FALLBACK IS THE WHOLE POINT OF THE FEATURE'S SHAPE. A terminal
+    that cannot be spawned at all (no DISPLAY, a GC'd store path) must still
+    open the link — the browser stays reachable from every arm."""
+    marker = tmp_path / "target"
+    monkeypatch.setattr(MO, "MENTION_TARGET_PATH", marker)
+    monkeypatch.setattr(MO, "tui_available", lambda: True)
+    notifies: list[str] = []
+    monkeypatch.setattr(MO, "notify",
+                        lambda summary, body="": notifies.append(summary))
+    seen: list[list[str]] = []
+
+    def flaky(argv, *a, **k):
+        if argv[0] == "alacritty":
+            raise OSError("no DISPLAY")
+        seen.append(list(argv))
+        return types.SimpleNamespace(poll=lambda: 0)
+
+    monkeypatch.setattr(MO.subprocess, "Popen", flaky)
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert [a[0] for a in seen] == ["xdg-open"], seen
+    assert len(notifies) == 1, notifies
+
+
+# --------------------------------------------------------------------------- #
+# 4. REPO / NUMBER EXTRACTION
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("url", [GH_PULL_URL, GH_ISSUE_URL])
+def test_both_pull_and_issues_yield_the_same_repo_and_number(url):
+    """🔴 THE REASON THE NUMBER IS PASSED RATHER THAN THE URL. `openable()`
+    builds `/pull/{id}` for EVERY GitHub mention because the handler cannot know
+    whether `#N` is an issue or a PR — github.com resolves that by redirecting.
+    So the kind segment carries no information, and both spellings must extract
+    identically. Handing octo a `/pull/` URL instead would assert the kind, and
+    would assert it WRONGLY for every issue mention.
+
+    The fixtures are pairwise distinct and distinct from the constants asserted
+    — a mutant returning a hardcoded `("owner/repo", "1")` cannot survive.
+    """
+    assert MO.github_ref(url) == ("gardenersguild/trowelcast", "1559")
+
+
+@pytest.mark.parametrize("url", [
+    CLAWGATE_URL,
+    CLICKUP_URL,
+    "https://github.com/gardenersguild/trowelcast",
+    "https://github.com/gardenersguild/trowelcast/",
+    "https://github.com/gardenersguild/trowelcast/pull/",
+    "https://github.com/gardenersguild/trowelcast/pull/abc",
+    "https://github.com/gardenersguild/trowelcast/releases/tag/v2",
+    "https://github.com/gardenersguild/trowelcast/pull/12/files",
+    "https://evil.example/github.com/gardenersguild/trowelcast/pull/12",
+    "",
+])
+def test_a_url_the_TUI_cannot_open_yields_no_repo_and_no_number(url):
+    """Both halves empty, never a half-answer: a caller that got a repo but no
+    number would build `Octo  <repo>`."""
+    assert MO.github_ref(url) == ("", "")
+
+
+def test_the_NUMBER_reaches_the_wrapper_INTACT(tui):
+    """A four-digit id distinct from every other number in this file, asserted
+    at the LAST argv position rather than by substring, so a mutant that
+    truncates it or reuses a neighbouring value cannot land on the expectation
+    by accident."""
+    tui.available = True
+    MO.open_url("https://github.com/rivalorg/spadeworks/issues/9042")
+    assert tui.spawns[0][-2:] == ["rivalorg/spadeworks", "9042"], tui.spawns
+
+
+def test_www_and_http_spellings_still_extract():
+    """The hint can hand over a URL the operator pasted, not only one this
+    module built."""
+    assert MO.github_ref("http://www.github.com/rivalorg/spadeworks/pull/22") == (
+        "rivalorg/spadeworks", "22")
+
+
+def test_open_tui_called_directly_with_an_unopenable_url_uses_the_browser(tui):
+    """Unreachable through `open_target` (rung 0 answers it first), and kept
+    because a DIRECT caller is not unreachable. Silent: the browser is the right
+    answer for this URL and nothing went wrong."""
+    tui.available = True
+    assert MO.open_tui(CLAWGATE_URL) == (0, MO.CLICK_SURFACE_BROWSER)
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+    assert tui.notifies == [], tui.notifies
+
+
+# --------------------------------------------------------------------------- #
+# 5. THE SEAM: main() actually reaches the dispatcher
+#
+# Every test above calls `open_url` directly, so none of them notices if
+# `main()` stops calling it — or calls it without the operator's flag.
+# --------------------------------------------------------------------------- #
+def _spawn_recorder(monkeypatch, tmp_path):
+    """Stub every impure edge `main()` touches and return the spawn log."""
+    monkeypatch.setattr(MO, "MENTION_TARGET_PATH", tmp_path / "target")
+    monkeypatch.setattr(MO, "tui_available", lambda: True)
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
+    spawns: list[list[str]] = []
+    monkeypatch.setattr(
+        MO.subprocess, "Popen",
+        lambda argv, *a, **k: spawns.append(list(argv))
+        or types.SimpleNamespace(poll=lambda: 0))
+    return spawns
+
+
+def test_main_routes_an_unambiguous_github_click_through_the_review_TUI(
+        monkeypatch, tmp_path):
+    """🔴 END TO END THROUGH THE DECISION, with only the impure edges stubbed.
+    This is the test that goes red if the auto-open call site stops routing
+    through `open_url` at all — which is exactly the line a concurrent branch is
+    also rewriting."""
+    spawns = _spawn_recorder(monkeypatch, tmp_path)
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    assert len(spawns) == 1, spawns
+    assert spawns[0][0] == "alacritty", spawns
+    assert spawns[0][-2:] == ["civitai/talos-infra", "1065"], spawns
+
+
+def test_main_routes_a_PICKED_github_row_through_the_review_TUI(
+        monkeypatch, tmp_path):
+    """🔴 THE SECOND CALL SITE, WHICH NO TEST ABOVE REACHES — and the one a
+    concurrent branch is also rewriting. A rewrite that opened the browser
+    directly instead of going through `open_url` would take this red; nothing
+    else in the file would notice.
+
+    🔴 THE PANE REPO IS WHAT MAKES THIS REACH THE PICKER AT ALL, AND THE FIRST
+    VERSION OF THIS TEST DID NOT HAVE IT. With `tmux_pane_repo` returning "", a
+    bare `#370` has exactly ONE candidate — the clawgate task — so `main()`
+    takes the single-candidate AUTO-OPEN branch and `pick` is never called. The
+    assertions still passed, because a clawgate URL opens in the browser either
+    way: a test of the picker call site that never reached it, green for the
+    wrong reason. MEASURED, not reasoned about. The `picks` assertion below is
+    what keeps that from recurring."""
+    spawns = _spawn_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "record_pick", lambda *a, **k: None)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "gardenersguild/trowelcast")
+    picks: list[int] = []
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": picks.append(len(c)) or GH_PULL_URL)
+    assert MO.main(["#370"]) == 0
+    assert picks, "the PICKER was never reached — this test proves nothing"
+    assert [a[0] for a in spawns] == ["alacritty"], spawns
+    assert spawns[0][-2:] == ["gardenersguild/trowelcast", "1559"], spawns
+
+
+def test_tui_available_asks_about_the_REVIEW_EXE_and_nothing_else(monkeypatch):
+    """🔴 ONE NAME, ONE PLACE. The pre-flight and the spawn must ask about the
+    same binary: a pre-flight that checks a name nothing spawns is a guard that
+    is always green and never reached."""
+    import shutil as _shutil
+    asked: list[str] = []
+    monkeypatch.setattr(_shutil, "which",
+                        lambda name: asked.append(name) or None)
+    assert MO.tui_available() is False
+    assert asked == [MO.REVIEW_EXE], asked
+    monkeypatch.setattr(_shutil, "which", lambda name: "/somewhere/" + name)
+    assert MO.tui_available() is True
 # THE AUTO-OPEN WAS INVISIBLE TO TIER B
 #
 # 🔴 WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the
@@ -7652,3 +8199,284 @@ def test_the_emitter_SPAWNS_NOTHING(monkeypatch, spool):
                          platform="github")
     assert line != "", "the emitter wrote nothing, so it spawned nothing either"
     assert len(_click_events(spool)) == 1, _click_events(spool)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SURFACE SEAM — which opener ran vs what the click ledger records
+#
+# This is an ISOLATION-SEAM guard, and it exists because both halves were
+# individually green while the merged behaviour was wrong. #1582 built the TUI
+# opener and tested it; #1569 built `open_reference` and tested it; neither
+# suite ever built the combined state, and the union merge of the two produced
+# `alacritty` spawning while the telemetry recorded `browser` — with 486 tests
+# passing. MEASURED, not imagined.
+#
+# So these pin a RELATIONSHIP: the surface the ledger records must be the
+# surface the opener that ACTUALLY RAN reported. A component test on either side
+# cannot see this.
+# --------------------------------------------------------------------------- #
+def test_a_tui_open_is_RECORDED_as_the_tui(tui):
+    """Row A of the seam. `alacritty` spawned ⇒ the recorded surface is `tui`.
+
+    🔴 THE DEFECT THIS PINS, IN ITS EXACT HISTORICAL FORM: `open_reference`
+    ending `return open_url(url), CLICK_SURFACE_BROWSER`. That is a measurement
+    wrapper whose measurement is a literal — the precise thing its own docstring
+    warns about, one level up — and it makes EVERY TUI click a `browser` row
+    while every suite stays green."""
+    tui.available = True
+    rc, surface = MO.open_reference(GH_PULL_URL)
+    assert rc == 0
+    assert [a[0] for a in tui.spawns] == ["alacritty"], tui.spawns
+    assert surface == MO.CLICK_SURFACE_TUI, surface
+
+
+def test_a_browser_open_is_RECORDED_as_the_browser(tui):
+    """Row A's control. Same fixture, a URL the TUI cannot open ⇒ `browser`.
+
+    Without this, `surface == "tui"` above could be a constant returned for
+    everything — the mirror of the bug, and just as green."""
+    tui.available = True
+    rc, surface = MO.open_reference(CLAWGATE_URL)
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+    assert surface == MO.CLICK_SURFACE_BROWSER, surface
+
+
+def test_a_TUI_THAT_FELL_BACK_is_recorded_as_the_BROWSER(tui):
+    """🔴 ROW B — THE CASE THAT MAKES THIS NOT A ONE-LINER, AND THE REASON THE
+    SURFACE MUST BE PROPAGATED RATHER THAN RE-DERIVED.
+
+    The marker PINS the TUI, so `open_target()` says `tui`. The `which`
+    pre-flight then fails and `open_browser` is what actually opens the link.
+    A fix that computed the surface from the ROUTING DECISION — the obvious
+    one-liner — would record `tui` for a click that a browser serviced. That is
+    a CLAIM; this asserts the MEASUREMENT.
+
+    Both halves are asserted together on purpose: the routing decision really is
+    `tui` (otherwise this test proves nothing about propagation) and the
+    recorded surface really is `browser`."""
+    tui.available = False
+    tui.marker.write_text(MO.TARGET_TUI)
+    assert MO.open_target(GH_PULL_URL) == MO.TARGET_TUI, (
+        "positive control: the ROUTING decision must be `tui` here, or this "
+        "test is not exercising the propagate-vs-re-derive distinction at all")
+    rc, surface = MO.open_reference(GH_PULL_URL)
+    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
+    assert surface == MO.CLICK_SURFACE_BROWSER, (
+        f"the ledger recorded {surface!r} for a click that `xdg-open` opened — "
+        f"the surface was re-derived from open_target() instead of taken from "
+        f"the opener that ran")
+
+
+def test_a_TUI_WHOSE_TERMINAL_WILL_NOT_SPAWN_is_recorded_as_the_BROWSER(
+        tui, monkeypatch):
+    """🔴 THE THIRD FALLBACK ARM, AND IT HAD NO SURFACE ASSERTION UNTIL A MUTANT
+    SURVIVED. `open_tui` falls back to the browser in three places; rows A and B
+    cover the unopenable-URL and failed-pre-flight arms, and this covers the one
+    where the pre-flight PASSED and `alacritty` itself would not spawn (no
+    DISPLAY, a GC'd store path).
+
+    MEASURED: mutating that arm to report `CLICK_SURFACE_TUI` left the whole
+    suite green — 453 passed — because every existing surface case either routed
+    to the browser before reaching `open_tui` or exercised a different arm. A
+    fallback that reports the surface it did NOT use is the same
+    claim-not-measurement defect as the original, in the arm nobody looked at.
+
+    ⚠ THE PRE-FLIGHT MUST PASS HERE, or this silently becomes row B again and
+    tests an arm that is already covered — so `tui.available` is True and the
+    assertion below pins that `alacritty` was genuinely attempted."""
+    tui.available = True
+    attempted: list[str] = []
+
+    def flaky(argv, *a, **k):
+        attempted.append(argv[0])
+        if argv[0] == "alacritty":
+            raise OSError("no DISPLAY")
+        return types.SimpleNamespace(poll=lambda: 0)
+
+    monkeypatch.setattr(MO.subprocess, "Popen", flaky)
+    rc, surface = MO.open_reference(GH_PULL_URL)
+    assert attempted[0] == "alacritty", (
+        "the terminal was never attempted — the pre-flight short-circuited and "
+        "this is row B, not the spawn-failure arm")
+    assert attempted[-1] == "xdg-open", attempted
+    assert surface == MO.CLICK_SURFACE_BROWSER, (
+        f"the spawn-failure arm reported {surface!r} for a click that "
+        f"`xdg-open` opened")
+
+
+def test_a_FAILED_open_still_reports_the_surface_it_TRIED(tui, monkeypatch):
+    """#1569's invariant, kept: the exit code is `open_url`'s and a failure
+    still names the surface it tried, because "the browser failed" and "no
+    browser was involved" are different rows."""
+    tui.available = True
+    monkeypatch.setattr(
+        MO.subprocess, "Popen",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("no DISPLAY")))
+    rc, surface = MO.open_reference(CLAWGATE_URL)
+    assert rc == 1, rc
+    assert surface == MO.CLICK_SURFACE_BROWSER, surface
+
+
+def test_open_url_still_returns_the_EXIT_CODE(tui):
+    """`open_url` keeps the `int` contract every pre-TUI caller had."""
+    tui.available = True
+    assert MO.open_url(GH_PULL_URL) == 0
+    assert [a[0] for a in tui.spawns] == ["alacritty"], tui.spawns
+
+
+@pytest.mark.parametrize("available,marker,url,want_argv0,want_surface", [
+    (True,  None,   GH_PULL_URL,  "alacritty", "tui"),
+    (False, None,   GH_PULL_URL,  "xdg-open",  "browser"),
+    (False, "tui",  GH_PULL_URL,  "xdg-open",  "browser"),   # case B
+    (True,  "browser", GH_PULL_URL, "xdg-open", "browser"),
+    (True,  None,   CLAWGATE_URL, "xdg-open",  "browser"),
+    (True,  None,   CLICKUP_URL,  "xdg-open",  "browser"),
+])
+def test_open_url_and_open_reference_ROUTE_THE_SAME_WAY(
+        tui, available, marker, url, want_argv0, want_surface):
+    """🔴 THE GUARD THAT PAYS FOR THE DUPLICATED ROUTING. `open_url` and
+    `open_reference` each call `open_target`, because `open_reference`'s own
+    seam guard requires its browser arm to delegate to `open_url` — so neither
+    can simply call the other. Two copies of a predicate is how the surface the
+    telemetry records drifts from the surface that actually opened the link, and
+    `claude/RULES.md` names consolidation as a BUG-FINDING instrument precisely
+    because an open-coded predicate is typically wrong at one site.
+
+    This drives BOTH over one table and asserts they agree — the spawn `open_url`
+    produces and the surface `open_reference` reports must describe the same
+    opener, for every routing input including case B."""
+    tui.available = available
+    if marker:
+        tui.marker.write_text(marker)
+    assert MO.open_url(url) == 0
+    via_open_url = [a[0] for a in tui.spawns]
+    assert via_open_url == [want_argv0], via_open_url
+
+    tui.spawns.clear()
+    rc, surface = MO.open_reference(url)
+    via_reference = [a[0] for a in tui.spawns]
+    assert rc == 0
+    assert via_reference == [want_argv0], via_reference
+    assert surface == want_surface, surface
+    # The relationship, stated directly: the surface names the opener that ran.
+    assert (surface == "tui") == (via_reference == ["alacritty"]), (
+        f"open_reference reported {surface!r} but {via_reference} opened it")
+
+
+# --- the STRUCTURAL half ---------------------------------------------------- #
+def _surface_returning_openers(source: str) -> dict[str, list]:
+    """`{function name: [surface expression per return]}` for every module-level
+    function annotated `-> tuple[int, str]`.
+
+    A `return` that is not a 2-tuple contributes `None`, which is what "this
+    opener reports no surface" looks like structurally.
+    """
+    out: dict[str, list] = {}
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        ann = ast.unparse(node.returns) if node.returns else ""
+        if ann.replace(" ", "") != "tuple[int,str]":
+            continue
+        found = []
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Return) or sub.value is None:
+                continue
+            v = sub.value
+            if isinstance(v, ast.Tuple) and len(v.elts) == 2:
+                found.append(("pair", v.elts[1]))
+            elif isinstance(v, ast.Call) and isinstance(v.func, ast.Name):
+                # 🔴 PROPAGATION IS A FIRST-CLASS ANSWER, NOT A DEFECT. `return
+                # open_tui(url)` hands back the surface the arm that RAN
+                # reported, which is the whole contract. Classifying it as
+                # "reports no surface" would push the next author toward
+                # re-deriving one at this level — the exact defect this file
+                # exists to stop.
+                found.append(("propagate", v.func.id))
+            else:
+                found.append(("bad", None))
+        out[node.name] = found
+    return out
+
+
+# Every function that opens a reference AND reports which surface did it.
+# 🔴 PINNED TWO-WAY against the module: a new opener that is not here fails, and
+# an entry naming no opener fails. That is what stops the next surface repeating
+# this defect — the failure mode was not "someone wrote the wrong constant", it
+# was "a second opener arrived and nobody taught the ledger about it".
+SURFACE_OPENERS = {"open_tui", "open_reference"}
+
+
+def test_every_surface_reporting_opener_is_LEDGERED_and_reports_a_REAL_surface():
+    """🔴 THE STRUCTURAL HALF OF THE SEAM, AND IT ASSERTS THE VALUE THAT COMES
+    BACK — NOT THAT A PARAMETER EXISTS. A type declaration is not a code path:
+    `-> tuple[int, str]` is satisfied by returning `(0, "")`, by returning a
+    hardcoded literal, and by returning the right thing, and only one of those
+    is correct.
+
+    Three claims, each of which failed at some point in this feature's history:
+      * the opener SET matches the ledger, both directions;
+      * EVERY return in an opener yields a 2-tuple — a bare `return 0` is an
+        opener that reports no surface at all;
+      * every surface position is a `CLICK_SURFACE_*` NAME, never a string
+        literal. The literal is the historical defect exactly.
+    """
+    src = HANDLER.read_text()
+    openers = _surface_returning_openers(src)
+    assert openers, "positive control: the module DOES declare surface openers"
+    assert set(openers) == SURFACE_OPENERS, (
+        f"the surface-reporting opener set MOVED: module says {sorted(openers)}, "
+        f"ledger says {sorted(SURFACE_OPENERS)}. A new opener must report a "
+        f"surface AND be ledgered here, or the click ledger silently records "
+        f"the wrong one for it.")
+    named: set[str] = set()
+    for fn, returns in openers.items():
+        assert returns, f"{fn} declares a surface but returns nothing"
+        for kind, expr in returns:
+            assert kind != "bad", (
+                f"{fn} has a `return` that neither yields a (code, surface) pair "
+                f"nor propagates one from another opener — that arm opens "
+                f"something and reports no surface at all")
+            if kind == "propagate":
+                assert expr in SURFACE_OPENERS, (
+                    f"{fn} propagates a surface from {expr!r}, which is not a "
+                    f"ledgered opener — the value it hands back is unaccounted")
+                continue
+            assert isinstance(expr, ast.Name), (
+                f"{fn} returns a surface that is not a CLICK_SURFACE_* name: "
+                f"{ast.unparse(expr)!r}. A LITERAL here is the exact defect this "
+                f"guard exists for — a measurement wrapper whose measurement is "
+                f"a constant.")
+            assert expr.id.startswith("CLICK_SURFACE_"), expr.id
+            named.add(expr.id)
+    # Both directions against the ledger of surfaces the module declares.
+    declared = {n for n in dir(MO) if n.startswith("CLICK_SURFACE_")}
+    assert named == declared, (
+        f"openers return {sorted(named)} but the module declares {sorted(declared)} "
+        f"— a surface nothing returns is dead, and one nothing declares is a typo")
+    assert {getattr(MO, n) for n in named} == set(MO.CLICK_SURFACES), (
+        "the surfaces openers can return are not exactly CLICK_SURFACES")
+
+
+def test_the_opener_reader_can_actually_fire():
+    """POSITIVE **AND** NEGATIVE CONTROL on the structural reader, before its
+    verdict is believed — a reader that matched nothing would pass the ledger
+    test for every possible module."""
+    good = ("def open_x(url: str) -> tuple[int, str]:\n"
+            "    return 0, CLICK_SURFACE_TUI\n")
+    got = _surface_returning_openers(good)
+    assert list(got) == ["open_x"]
+    kind, expr = got["open_x"][0]
+    assert kind == "pair" and isinstance(expr, ast.Name)
+    # A bare return is reported as "no surface", never skipped.
+    bare = ("def open_y(url: str) -> tuple[int, str]:\n    return 0\n")
+    assert _surface_returning_openers(bare)["open_y"] == [("bad", None)]
+    # A literal is visible as a literal — the historical defect's shape.
+    lit = ("def open_z(url: str) -> tuple[int, str]:\n    return 0, 'browser'\n")
+    lk, le = _surface_returning_openers(lit)["open_z"][0]
+    assert lk == "pair" and isinstance(le, ast.Constant)
+    # Propagation is classified as such, with the callee named.
+    prop = ("def open_w(url: str) -> tuple[int, str]:\n    return open_tui(url)\n")
+    assert _surface_returning_openers(prop)["open_w"] == [("propagate", "open_tui")]
+    # An unannotated function is not an opener.
+    assert _surface_returning_openers("def helper(u):\n    return 0, X\n") == {}

@@ -536,8 +536,15 @@ MUTANTS: list[tuple] = [
                         "`sh -c` line prints `fzf: not found` into a terminal "
                         "that immediately closes — a silent dead click, green "
                         "in every suite",
-     "      pkgs.alacritty pkgs.fzf\n",
-     "      pkgs.alacritty\n",
+     # ⚠ RE-ANCHORED when `pkgs.nvim-octo` joined this line (the review TUI).
+     # The anchor is the WHOLE line, so it went to 0x the moment the line grew
+     # a third package — and an anchor at 0x reports `NOT APPLIED` and scores as
+     # a SURVIVOR without testing anything, which is the silent green
+     # test_mutation_battery_anchors.py exists to catch. It did.
+     # The mutation itself is unchanged in KIND: drop `pkgs.fzf` and keep the
+     # rest, so the row still means "the picker's `sh -c` line cannot find fzf".
+     "      pkgs.alacritty pkgs.fzf pkgs.nvim-octo\n",
+     "      pkgs.alacritty pkgs.nvim-octo\n",
      "the wrapper's PATH is MISSING"),
     # ---- F15: the round-1 audit's findings, as mutants ----------------------
     ("K54", "deletion", "the picker loses `-i`, so fzf is SMART-CASE: a query "
