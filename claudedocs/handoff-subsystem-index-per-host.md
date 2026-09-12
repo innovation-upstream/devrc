@@ -156,8 +156,16 @@ autocommit — never run git in it):
    refs are content-identical to trunk and can be deleted.
 
 ## Gotchas / decisions / dead-ends
-- 🔴 **The store is PER-HOST and unreplicated, and the two copies are essentially
-  disjoint.** Measured: workbench **115 entries / 14 scopes**, laptop **33 / 11**. Four
+- 🔴 **SUPERSEDED 2026-09-12 — the store is NO LONGER per-host.** This bullet read *"The store is
+  PER-HOST and unreplicated, and the two copies are essentially disjoint."* The Cairn cutover made
+  a hosted pod the datastore; `~/.cache/subsystem-store` is a synced read-through cache of it, so
+  the two hosts converge on sync rather than diverging. Measured 2026-09-12: `cairn doctor` →
+  `cache-vs-pod OK` at 239/239, and the pod's snapshot moved `entry-files 232 → 239` inside one
+  write-free session. ⚠ **The disjointness numbers below are KEPT and are still a true record of
+  the pre-cutover state** — they are the measurement that motivated the cutover. What is retracted
+  is the present-tense framing, not the observation. 🔴 **This whole doc predates the cutover,
+  starting with its FILENAME (`-per-host`) — read it as history, not as current state.**
+  Measured: workbench **115 entries / 14 scopes**, laptop **33 / 11**. Four
   scope names exist on both; across those four, workbench holds 104 entries and laptop 10,
   with **exactly 1 entry name in common**. `civitai` 23 vs 1, `datapacket-talos` 47 vs 2,
   `homelab-talos` 15 vs 3 — **zero overlap in all three**.

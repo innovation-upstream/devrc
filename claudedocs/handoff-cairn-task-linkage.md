@@ -899,8 +899,17 @@ belong topically beside an earlier one.
 - 🔴 **CARRIED FORWARD — the Cairn store's measured state, 2026-08-31.** Workbench **146
   entries / 15 scopes**, laptop **47 / 12**; **22 distinct scopes of which 5 overlap and 7 are
   laptop-only**. The figures in the `subsystem-index` skill are from 2026-08-27 and are stale.
-  🔴 The store is **PER-HOST and unreplicated**, so a `scope-absent` on one machine is never a
-  claim about the fleet — phase 1 makes the pod canonical and has to reconcile the 5 overlaps.
+  🔴 **SUPERSEDED 2026-09-12 — PHASE 1 LANDED, AND THIS BULLET'S OWN NEXT CLAUSE IS WHY.** It
+  read: *"The store is PER-HOST and unreplicated, so a `scope-absent` on one machine is never a
+  claim about the fleet — phase 1 makes the pod canonical…"*. **Phase 1 shipped.** The numbers
+  above stay — they are a real measurement of a real pre-cutover state — but the **inference no
+  longer holds**: `~/.cache/subsystem-store` is a synced read-through cache of the hosted pod, so
+  a `scope-absent` is now bounded by **this host's last `cairn sync`**, not by store isolation.
+  Measured 2026-09-12: `cairn doctor` → `cache-vs-pod OK` at 239/239, and the pod's snapshot moved
+  `entry-files 232 → 239` inside one write-free session. ⚠ **Read the dated measurement, not the
+  tense** — the rest of this doc predates the cutover throughout.
+  The reader's banner asserted the same retracted claim and was the SOURCE that propagated it into
+  several docs; fixed in `ZacxDev/cairn#13`, re-pinned in `devrc#1592`, deployed to both hosts.
 - 🔴 **RANK 8 WAS ALREADY BUILT, BY ANOTHER SESSION, AND NOTHING IN THE LOCK COULD SEE IT.**
   devrc#1170 was open and unclaimed and was *exactly* phase 0. Only `gh pr list` surfaced it —
   `claim-work` locks an item, it does not notice the item being done elsewhere. Starting rank 8
