@@ -77,6 +77,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from collections import namedtuple
@@ -131,7 +132,8 @@ def real_runner(cmd, cwd=None):
 TIGHT, GAP, OVERLAP, UNRELATED = "TIGHT", "GAP", "OVERLAP", "UNRELATED"
 
 Adjacency = namedtuple(
-    "Adjacency", "label frm to from_round to_round added deleted commits reason"
+    "Adjacency",
+    "label frm to from_round to_round added deleted commits reason gap_commits"
 )
 Ladder = namedtuple(
     "Ladder",
@@ -160,6 +162,97 @@ def _is_ancestor(runner, repo_dir, a, b):
     # UNMEASURABLE; collapsing it to False there would label the adjacency a GAP
     # and hand it a size.
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Gap-commit classification — TWO certain buckets, and an honest "ask a human"
+# --------------------------------------------------------------------------- #
+# 🔴 THE SIGNAL IS SELF-DECLARED, WHICH IS WHY THIS IS NOT A HEURISTIC SOUP.
+# Measured over 32 hand-classified tail commits (2026-09-11, devrc +
+# homelab-talos + civit-datapacket-talos): EIGHT of them name the audit round
+# they belong to, in their own subject line — `audit round 5`, `audit r3`,
+# `round-2 audit`, `round-3 audit`, `audit round 9`.
+#
+# 🔴 WHAT IT MEASURES IS AN **UNLEDGERED ROUND**, NOT UNAUDITED CHURN — and the
+# first version of this file asserted the opposite, which is backwards. A commit
+# subject reading `audit round 5 — <what was fixed>` is EVIDENCE THAT ROUND 5
+# RAN; it is that round's own fix. What the gap proves is that the round posted
+# no two-sha `audited=<from>..<to>` block, so its churn chains into nobody's
+# range. That is a LEDGERING defect, and reading "an audit happened here" as
+# "no audit covered this" applies judgement in the direction the text
+# contradicts.
+#
+# 🔴 THE CASE THAT SETTLES IT IS THE ONE THIS FILE FIRST CALLED ITS CONTROL.
+# `eb947328` is devrc #1233's round 3 — and
+# `claudedocs/audit-ladder-review-2026-09-04.md` says in terms that #1233's
+# round-4 comment is TITLED "rounds 3 and 4". Round 3 was audited, inside round
+# 4's comment; what was missing was its block. The review's own mechanism
+# hypothesis says the same thing — "a devrc authoring habit: titling one comment
+# 'rounds N and N+1' and posting a single block for both".
+#
+# So the residual hazard is narrower, true, and still machine-checkable:
+# **round N's fix has no successor block, so the gate-reset rule was not
+# honoured and nothing re-audited that delta.** State that; do not state that
+# the code was never looked at.
+#
+# 🔴 EVERYTHING ELSE IS REPORTED UNCLASSIFIED ON PURPOSE. An earlier draft of
+# this had five buckets keyed on conventional-commit types and correction verbs
+# (`fix(`, `correct`, `retract`, …). That is a guess dressed as a measurement:
+# `claude/RULES.md` is explicit that a guard spelled over WORDS is walkable by
+# rewording, and the same applies to a classifier. So the census reports what it
+# KNOWS — self-declared round references, and merges, which are structural — and
+# hands the rest over by name. A smaller true answer beats a larger guessed one.
+_ROUND_REF_RE = re.compile(
+    r"""(?ix)
+    \b(?:
+        audit \s* (?: \s | - ) \s* r (?:ound)? \s* \.? \s* \d+   # audit round 3 · audit r3
+      | r (?:ound)? \s* - \s* \d+ \s+ audit                      # round-2 audit
+      | round \s+ \d+ \s+ (?:delta \s+ )? (?:re-)? audit         # round 4 delta re-audit
+    )\b
+    """
+)
+
+GapCommit = namedtuple("GapCommit", "sha parents subject round_ref is_merge")
+
+
+def classify_gap_commits(runner, repo_dir, frm, to, base):
+    """-> ([GapCommit], reason) for the commits that CONTRIBUTE the gap's churn.
+
+    🔴 `--not <base>` IS LOAD-BEARING HERE AND OMITTING IT INVERTS THE ANSWER.
+    Measured 2026-09-11: listing devrc #1046's tail without it showed 55 of
+    `main`'s OWN squash commits, which reads exactly like "the PR kept
+    developing" — i.e. it CONFIRMS the hypothesis that the tail is ordinary
+    development, using commits that are not in the churn at all. The confirming
+    evidence was an artifact of a dropped flag. This function exists partly so
+    that flag cannot be dropped by hand again.
+
+    ⚠ `base` must be the PR's OWN base. Two of the three repos measured use
+    `trunk`; a hand-written `origin/main` failed loudly on 4 of 10 samples, which
+    is the lucky failure — a WRONG-but-resolvable base would have changed the
+    numbers silently.
+    """
+    rc, out, err = runner([
+        "git", "-C", repo_dir, "log", "--format=%H%x00%p%x00%s",
+        f"{frm}..{to}", "--not", base,
+    ])
+    if rc != 0:
+        return [], (f"`git log {frm}..{to} --not {base}` exited {rc}: "
+                    f"{(err or out).strip() or 'no output'}")
+    if err.strip():
+        return [], f"`git log` wrote to stderr: {err.strip()}"
+
+    commits = []
+    for line in out.splitlines():
+        parts = line.split("\0")
+        if len(parts) < 3:
+            continue
+        sha, parents, subject = parts[0], parts[1].split(), parts[2]
+        commits.append(GapCommit(
+            sha=sha, parents=parents, subject=subject,
+            round_ref=bool(_ROUND_REF_RE.search(subject)),
+            is_merge=len(parents) >= 2,
+        ))
+    return commits, None
 
 
 def _classify(ad, runner, repo_dir, frm, to, base):
@@ -276,8 +369,20 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
             else:
                 interior_a += added or 0
                 interior_d += deleted or 0
+        # Only a GAP has commits worth classifying — a TIGHT adjacency has none,
+        # and OVERLAP/UNRELATED have no measurable population at all.
+        gap_commits = []
+        if label == GAP:
+            gap_commits, why = classify_gap_commits(
+                runner, repo_dir, frm, to, base)
+            if why:
+                # Reported, never swallowed: an unclassifiable gap must not read
+                # as a gap with zero round references.
+                gap_commits = [GapCommit("", [], f"COULD NOT LIST: {why}",
+                                         False, False)]
         adjacencies.append(
-            Adjacency(label, frm, to, r_from, r_to, added, deleted, commits, reason)
+            Adjacency(label, frm, to, r_from, r_to, added, deleted, commits,
+                      reason, gap_commits)
         )
 
     return Ladder(
@@ -460,6 +565,18 @@ def render(ladders, notes):
                            f"{a.commits} commit(s), "
                            f"{(a.added or 0) + (a.deleted or 0)} line(s) "
                            f"(+{a.added}/-{a.deleted}) in NO block's range")
+                for c in a.gap_commits:
+                    if not c.sha:
+                        out.append(f"       ⚠ {c.subject}")
+                    elif c.round_ref:
+                        out.append(f"       🔴 ROUND-REF  {c.sha[:8]} "
+                                   f"{c.subject[:74]}")
+                    elif c.is_merge:
+                        out.append(f"       MERGE      {c.sha[:8]} "
+                                   f"{c.subject[:74]}")
+                    else:
+                        out.append(f"       unclassified {c.sha[:8]} "
+                                   f"{c.subject[:72]}")
             else:
                 out.append(f"  {a.label}  {where}: {a.reason}")
         out.append(f"  UNCOVERED: {L.uncovered_added + L.uncovered_deleted} line(s)"
@@ -512,6 +629,73 @@ def render(ladders, notes):
         for a in L.adjacencies
         if a.label == GAP and a.commits and not (a.added or 0) + (a.deleted or 0)
     )
+    # 🔴 The census. Counts only what is SELF-DECLARED or STRUCTURAL; everything
+    # else is handed over by name rather than guessed at.
+    # 🔴 SPLIT BY INTERIOR/TAIL, because this file forbids summing them thirty
+    # lines up and the first census did it anyway. Measured on devrc: 10 of 11
+    # ROUND-REF commits are TAIL and exactly ONE is interior, so a single
+    # headline is ~91% the ambiguous class — the number that would get quoted.
+    def _bucket(tail_only):
+        return [c for L in ladders if L.reason is None
+                for a in L.adjacencies if a.label == GAP
+                and ((a.to_round is None) == tail_only)
+                for c in a.gap_commits if c.sha]
+
+    gc_int, gc_tail = _bucket(False), _bucket(True)
+    gc = gc_int + gc_tail
+    if gc:
+        def _counts(rows):
+            r = sum(1 for c in rows if c.round_ref)
+            m = sum(1 for c in rows if c.is_merge and not c.round_ref)
+            return r, m, len(rows) - r - m
+
+        ref, mrg, rest = _counts(gc)
+        i_ref, i_mrg, i_rest = _counts(gc_int)
+        t_ref, t_mrg, t_rest = _counts(gc_tail)
+        gaps_with_ref = sum(
+            1 for L in ladders if L.reason is None
+            for a in L.adjacencies
+            if a.label == GAP and any(c.round_ref for c in a.gap_commits))
+        out.append("")
+        out.append(f"GAP-COMMIT CENSUS over {len(gc)} commit(s) in the gaps above:")
+        out.append(f"  🔴 INTERIOR  round-ref {i_ref} · merge {i_mrg} · "
+                   f"unclassified {i_rest}   (of {len(gc_int)} commit(s))")
+        out.append(f"     TAIL      round-ref {t_ref} · merge {t_mrg} · "
+                   f"unclassified {t_rest}   (of {len(gc_tail)} commit(s))")
+        out.append("  🔴 READ THE SPLIT, NOT THE TOTAL — the same rule the line "
+                   "counts carry. An INTERIOR")
+        out.append("     round-ref is unambiguous; a TAIL one may be a fix posted "
+                   "after the final block")
+        out.append("     OR work that continued after the ladder ended, and "
+                   "nothing here separates them.")
+        out.append(f"  🔴 ROUND-REF     {ref} — the commit's own subject names the "
+                   "audit round it belongs to.")
+        out.append("                      That is an UNLEDGERED ROUND: the round "
+                   "RAN (this is its own fix)")
+        out.append("                      and posted no two-sha `audited=` block, "
+                   "so its delta chains into")
+        out.append("                      nobody's range and nothing re-audited "
+                   "it. 🔴 NOT evidence the code")
+        out.append("                      was never looked at — the subject says "
+                   "the opposite.")
+        out.append(f"  MERGE          {mrg} — structural (>=2 parents). Read its "
+                   "remerge-diff: a SEMANTIC")
+        out.append("                      conflict resolution hides here, and is "
+                   "real hand-written work.")
+        out.append(f"  unclassified   {rest} — 🔴 NOT 'ordinary development'. This "
+                   "tool declines to guess.")
+        out.append("                      Read them; the subjects are printed "
+                   "above.")
+        out.append(f"  → {gaps_with_ref} of the gaps carry at least one ROUND-REF "
+                   "commit.")
+        out.append("⚠ THE CENSUS IS A FLOOR ON UNLEDGERED ROUNDS, NEVER A RATE. "
+                   "It can only see a round")
+        out.append("  reference a commit chose to write down — a round's fix with "
+                   "an ordinary subject is")
+        out.append("  indistinguishable here from a feature, and lands in "
+                   "`unclassified`. Measured over 32")
+        out.append("  hand-classified commits: 8 self-declared, and the hand pass "
+                   "found 20 fixes in total.")
     if zero_line_gaps:
         out.append("⚠ A COMMIT COUNT IS NOT A CHURN COUNT. A GAP of many commits "
                    "and 0 lines is `--not")
