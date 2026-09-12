@@ -16,24 +16,19 @@ the fault, and once end to end through the UI path after the fix. Rank 33 carrie
 the evidence and the defect it found. (Carried forward across a Status replace —
 it is the arc's central result, not status.)
 
-**This session merged 12 PRs and left 3 open.** devrc: #1392, #1389, #1388, #1408, #1468, #1483.
-homelab-infra: #769, #771, #789, #791, #796. Every one verified by reading content off the
-mainline ref — a squash merge never makes the branch head an ancestor, so ancestry would have
-lied on all twelve.
+**Session total: 14 PRs merged, 2 open.** devrc #1392, #1389, #1388, #1408, #1468,
+#1483, #1534. homelab-infra #769, #771, #789, #791, #796, #797. Each verified by
+reading content off the mainline ref — a squash merge never makes the branch head
+an ancestor, so ancestry would have lied on every one.
 
-**Open, all green-or-running, none merged:**
-- **devrc #1515** `zach/clawgate-cross-session-reach` @ `b4d9da5a` — clawgate skill gains
-  cross-session reach (item 1). CI re-running after the ratchet fix below.
-- **homelab-infra #797** `feat/tmux-session-grouping` @ `30f404f4` — two-level host → tmux
-  session → window grouping (item 2). 4 checks PENDING.
+**Open:**
+- **devrc #1549** — scope the wide-kill ledger to executable text (see the resolved
+  investigation below). CI starting.
+- **devrc #1515** `zach/clawgate-cross-session-reach` — clawgate skill cross-session
+  reach. Rebased to 0-behind locally; its remaining red is #1549's subject, not its own.
 
-**Task 375 is code-complete and BLOCKED on infrastructure, not on work.** `#769` merged
-(`dfc4b048`), image `2026.6.11-py-cg0.8.31` published to `harbor.homelab.lan/library/`. Its
-closing condition — `command -v clawgatectl` inside a live agent pod — CANNOT pass; see the
-`agent-pods` block below.
-
-**Claims still held:** `clawgate-375-clawgatectl-in-agent-pods` (blocked externally),
-`clawgate-skill-session-verbs` (#1515), `clawgate-tmux-session-grouping` (#797).
+**Task 375 remains code-complete and BLOCKED** on the `agent-pods` Kustomization,
+Flux-suspended since 2026-06-07. Unchanged — see rank 43.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1149,6 +1144,15 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
    anthropic/openai dependency, so an "agent" there is a kubeclaw pod it provisions.
    forcing: none
 
+50. **Land #1549** (devrc, `scripts/claude-hooks/tests/test_guard_core.py`) — scopes the
+    wide-kill ledger to executable text so a handoff doc stops red-lining `main`.
+    IN FLIGHT: innovation-upstream/devrc#1549.
+    forcing: gate — the ledger red-lined `main` three times in one day, blocking every
+    devrc PR each time.
+51. **Land #1515** once #1549 is in — already rebased 0-behind; its only red was #1549's
+    subject. IN FLIGHT: innovation-upstream/devrc#1515.
+    forcing: none
+
 ## Open investigations — live diagnosis state
 
 🔴 **THE WORKBENCH STILL CANNOT PULL FROM `docker.io`. BUILD CLAWGATE IMAGES ON THE LAPTOP.**
@@ -2047,6 +2051,42 @@ are corrected in place.
   `via: measurement`
 - **Next probe:** add the file to `_KILL_MENTION_LEDGER` with a classification (it is prose — a
   handoff write-up), in its own PR.
+
+### ✅ RESOLVED — the wide-kill guards red-lined devrc `main` THREE times in one day, and only one was a real defect
+
+- **Symptom + exact repro:** `tekton/devrc-pytests` red on unrelated devrc PRs.
+  `git worktree add --detach /tmp/x origin/main && (cd /tmp/x && python3 -m pytest
+  scripts/claude-hooks/tests/test_guard_core.py -k kill -q)`
+- **Observed (with values):** three separate reds, three different causes.
+  1. `handoff-tmux-scratchpad-bar-statusline.md` — classified upstream by another session
+     while I was working. My own added entry was a **duplicate dict key silently shadowing
+     theirs**; the mutation sweep is what exposed it (dropping mine changed nothing).
+  2. `handoff-tmux-webapp.md` — a **FALSE positive**. `_MENTION_RE = r"kill-s(?:erver|ession)"`
+     had no left word boundary, so it matched inside **s·kill-session**, from the claim slug
+     `clawgate-skill-session-verbs`. Fixed in **#1534** (`7344e76f`) with
+     `(?<![A-Za-z0-9_])`. Measured across every tracked file: **14 → 13** files, removing
+     exactly the false positive, matching nothing new.
+  3. `handoff-mention-system-repos.md` — a **TRUE** positive, and the one that proved the
+     pattern: its offending line is *documenting this very guard*. Writing about the guard
+     tripped the guard.
+- **Ruled out — "these are unrelated flakes".** Each was reproduced on a clean `origin/main`
+  worktree with no PR involved. `via: measurement`
+- **Ruled out — "classify each one as it appears".** Composition at the time: **11 of 13**
+  ledger entries were real `scripts/` call sites; **all three** failures came from the
+  2-entry `claudedocs/` half. That is the permanently-red-gate shape — every PR in the repo
+  blocked on an unrelated doc. `via: measurement`
+- **The fix (operator's call, 2026-09-12):** scope the LEDGER to executable text; prose stays
+  guarded by `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`, which scans
+  claudedocs too but matches only real shell-command shape and runs each hit through
+  `check_tmux_kill_shared_server`. **PR #1549.**
+- 🔴 **My first coverage control was VACUOUS and is worth not repeating.** I planted a wide
+  kill in `claudedocs/handoff-comic-flex.md` and the guard passed — I could have written
+  that up as "narrowing loses nothing". That file **does not exist in this repo**; `git`
+  said so in the same output, the scanner skipped it, and the mutant never ran. Redone
+  against a file `git ls-files` returns: guard goes **RED**, tree restored byte-identical.
+  `via: measurement`
+- **Next probe:** none — #1534 merged, #1549 open. If a fourth doc-mention red appears after
+  #1549 lands, the scoping did not hold and the exclusion list is wrong.
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -3431,6 +3471,28 @@ are corrected in place.
 - **A poll timing out is not evidence about the PR** — check the PipelineRun's real
   start/completion times. devrc's pytests tier genuinely runs 20–55 min; a status timestamp is when
   the status was POSTED, not the run duration.
+
+- 🔴 **A guard can be tripped by PROSE THAT DOCUMENTS IT.** Three reds in one day on devrc
+  `main`, all from handoff docs, one of them a doc whose only content was writing up the
+  guard. When a check scans every tracked file for a *word*, every future write-up about it
+  is a future red. Scope such a check to the text that can actually execute, and let a
+  shape-aware check cover prose.
+- 🔴 **A regex without a left word boundary matches inside another word** — `kill-session`
+  lives inside `s·kill-session`. My own diagnostic grep reproduced the same bug while
+  hunting it, which is how it hid: the tool and the guard agreed, and both were wrong.
+- 🔴 **A duplicate dict key is silent in Python.** Adding a ledger entry another session had
+  already added shadowed theirs with no error. Only the mutation check (drop it → nothing
+  changes) revealed it was doing no work.
+- 🔴 **A mutation planted in an UNTRACKED file scores SURVIVED.** The scanner iterates
+  `git ls-files`; appending to a path git does not know produces a green that means nothing.
+  Verify the target is tracked-and-modified (`git status --porcelain <path>`) before reading
+  the verdict.
+- 🔴 **`git commit -F` with a heredoc is parsed by the bash guard as real commands.** A commit
+  message quoting a banned command is itself blocked. Write the message with the Write tool
+  and pass the file — which the repo's rules prefer anyway.
+- **A `gh pr checks` poll must bind to the head SHA in ONE json call.** After a force-push the
+  previous head's terminal checks linger; a poll reading them settles on another commit's
+  verdict. Mine printed `SETTLED n=4` over a rollup that was actually empty.
 
 ## How to verify
 
