@@ -445,14 +445,25 @@ class TestBothCliSurfaces:
         #
         # ⚠ AN EARLIER VERSION OF THIS COMMENT SAID "deleting the `entry_shape`
         # patch leaves this test green". That was the PRE-FIX reading and it is
-        # FALSE at head — the two probes below are what made it false. Deleting
-        # the one `setattr` now goes RED, re-measured twice, and the failure
-        # differs by environment, which is worth knowing before reading a future
-        # mutation result: in a real git repo it dies on this guard's own
-        # `AssertionError: git was invoked`; in a `.git`-less `cp -a` copy the
-        # probe reaches real git first and it dies on `entry_shape.GitError`.
-        # Both are the instrument telling the truth; only the first names this
-        # guard.
+        # FALSE at head — the probes below are what made it false. Deleting the
+        # one `setattr` goes RED. MEASURED on both arms, caches purged, under
+        # `PYTHONDONTWRITEBYTECODE=1`:
+        #
+        #   * a real `git init`ed tree -> `Failed: DID NOT RAISE AssertionError`
+        #   * a `.git`-less `cp -a` copy -> `entry_shape.GitError`
+        #
+        # 🔴 THE FIRST ARM IS THE INTERESTING ONE, AND AN EARLIER VERSION OF THIS
+        # COMMENT DESCRIBED IT WRONG — it said the mutant dies on this guard's own
+        # `AssertionError: git was invoked`. It cannot. With the patch deleted,
+        # `entry_shape.scope_for_repo(ROOT)` RETURNS NORMALLY (measured: `'r3-git'`
+        # in the probe tree), so the sentinel is structurally unable to arrive and
+        # its ABSENCE is the whole mechanism — which `pytest.raises` reports as
+        # DID NOT RAISE. That is the reachability probe doing exactly its job, and
+        # a future auditor who saw DID NOT RAISE while reading the old sentence
+        # would have concluded the guard or the environment had moved.
+        #
+        # The second arm is a different mechanism, not a different wording: with
+        # no `.git`, the probe reaches real git before any of this matters.
         # BOTH CLIs, because both must be shown to reach the ONE patched
         # function — the writer through its wrapper, the reader directly. That
         # the writer arrives there too is the fact the deleted second patch was

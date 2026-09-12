@@ -539,7 +539,14 @@ def test_the_pinned_readers_validate_remedy_is_a_NON_COMMAND_here():
 #: `Environment=PATH=${lib.makeBinPath [...]}`, a CLOSED list, and none of the
 #: three contains a cairn path — measured live with
 #: `systemctl --user show <unit> -p Environment`. `cairn_pin.ensure()` raises by
-#: design, so the units do not degrade, they fail to start.
+#: design, so nothing silently resolves a stale copy instead.
+#:
+#: 🔴 WHAT THE RAISE THEN COSTS IS PER-UNIT, NOT UNIFORM — see
+#: `PIN_ABSENCE_CONSEQUENCE` below, which is the authority. This paragraph used
+#: to end "so the units do not degrade, they fail to start", and that blanket
+#: claim survived the very commit that added the per-unit map seventeen lines
+#: down to retract it: two of the three do fail to start, `present-regen` does
+#: NOT. Do not re-state a single consequence here — the map is where it lives.
 #:
 #: 🔴 AND THE FAILURE ARRIVES ON `git pull`, NOT ON A SWITCH: each unit
 #: `ExecStart`s the WORKING-TREE copy of its program, so "no home-manager switch

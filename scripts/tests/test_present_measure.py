@@ -377,6 +377,81 @@ def test_the_reader_rows_and_the_detail_prose_do_not_CONTRADICT_each_other():
         )
 
 
+def test_a_failed_cairn_pin_IMPORT_degrades_cleanly_and_leaks_no_sys_path(tmp_path):
+    """🔴 TWO LATENT SHAPES IN ONE BLOCK, AND THE OBVIOUS FIX FOR EACH BREAKS THE
+    OTHER — so they are exercised rather than reasoned about.
+
+    `m_index_store` puts `scripts/lib` on `sys.path`, imports `cairn_pin` from
+    there, and has a handler naming `cairn_pin.CairnPinUnresolved`. If the import
+    fails:
+
+      (a) a handler that NAMES `cairn_pin` is evaluated with the module unbound,
+          so the handler itself raises `UnboundLocalError` — past the
+          `except Exception` beside it, which is already being skipped over;
+      (b) and if the import was hoisted out of the `try` to avoid (a), it also
+          left the `finally` that pops `sys.path[0]`, leaking `scripts/lib` into
+          every later measurer in the same process.
+
+    Both were walked into in turn while fixing this block. Neither is reachable
+    in the shipped tree — `cairn_pin.py` is present and stdlib-only — which is
+    exactly why nothing would notice a regression, and why the failure is PLANTED
+    here instead of waited for.
+
+    🔴 THE PLANT IS CONTROLLED. `__import__` is patched to raise only for
+    `cairn_pin`, and the control at the end proves the plant really fires — a
+    probe whose injected failure silently did not happen would report a clean
+    degrade and a clean `sys.path` for the best possible reason and the worst
+    possible one identically.
+    """
+    import builtins
+
+    env = measure.Env(repo=REPO_ROOT, home=tmp_path,
+                      claude_dir=tmp_path / ".claude",
+                      index_store=tmp_path / "store",
+                      allow_systemd=False, allow_network=False)
+    (tmp_path / "store").mkdir()
+    lib = str(REPO_ROOT / "scripts" / "lib")
+    before = list(sys.path)
+
+    real_import = builtins.__import__
+
+    def _boom(name, *a, **k):
+        if name == "cairn_pin":
+            raise ImportError("planted: cairn_pin cannot import")
+        return real_import(name, *a, **k)
+
+    builtins.__import__ = _boom
+    try:
+        with pytest.raises(measure.Unmeasurable) as exc:
+            measure.m_index_store(env)
+    finally:
+        builtins.__import__ = real_import
+
+    assert "did not import" in str(exc.value), (
+        f"the row degraded, but not on the import: {exc.value}. If this says "
+        f"UnboundLocalError the handler is naming `cairn_pin` while it is "
+        f"unbound — shape (a) above."
+    )
+    assert sys.path == before, (
+        f"`sys.path` was not restored after a failed import — shape (b) above. "
+        f"sys.path[0] is now {sys.path[0]!r}; it should be {before[0]!r}. Every "
+        f"measurer that runs after this one in the same process would see "
+        f"{lib!r} at the front."
+    )
+
+    # POSITIVE CONTROL on the plant itself.
+    #
+    # ⚠ IT CALLS `_boom` DIRECTLY, NOT `real_import`. The first version of this
+    # control called `real_import("cairn_pin")` — which bypasses the patch by
+    # construction and therefore measured nothing; it failed with DID NOT RAISE,
+    # which is the control working on itself. `importlib.import_module` would be
+    # wrong too: `cairn_pin` is already in `sys.modules` from the suite's own
+    # imports, so it would return the cached module without consulting
+    # `__import__` at all and the control would pass for the wrong reason.
+    with pytest.raises(ImportError, match="planted"):
+        _boom("cairn_pin")
+
+
 def test_the_index_store_row_can_actually_be_MEASURED(tmp_path):
     """🔴 REGRESSION COVERAGE — the MEASURED branch was DEAD and 50 tests passed.
 

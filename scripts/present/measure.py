@@ -1050,33 +1050,53 @@ def m_index_store(env: Env) -> dict:
             "state, so a host without one is a state, not a defect"
         )
     sys.path.insert(0, str(lib))
-    # 🔴 IMPORTED OUTSIDE THE `try`, AND THAT IS NOT STYLE. The `except` clause
-    # below names `cairn_pin.CairnPinUnresolved`; a clause's expression is
-    # evaluated when the exception fires, so with the import INSIDE the `try` a
-    # failed import would leave the name unbound and the handler itself would
-    # raise `UnboundLocalError` — past the `except Exception` that follows,
-    # because that one is already being skipped over. Unreachable today (the
-    # module is beside this file and stdlib-only), which is exactly the kind of
-    # latent shape that surfaces on the day something else moves.
-    import cairn_pin  # noqa: PLC0415
-
+    # 🔴 TWO LATENT SHAPES, AND THE OBVIOUS FIX FOR EACH BREAKS THE OTHER. Neither
+    # is reachable today; the shape below closes both and the nesting is the cost.
+    #
+    #   (a) `except cairn_pin.CairnPinUnresolved` EVALUATES `cairn_pin` at the
+    #       moment the exception fires. If the import that binds it has failed,
+    #       the HANDLER itself raises `UnboundLocalError` — past the
+    #       `except Exception` below it, which is already being skipped over.
+    #   (b) `sys.path.insert` above must come FIRST: `cairn_pin` lives in
+    #       `scripts/lib/` and THIS file is in `scripts/present/`, so it is NOT
+    #       "beside this file" (an earlier comment here said it was, and was
+    #       wrong). Moving the import out of the `try` to fix (a) therefore moved
+    #       it out of the `finally` that pops `lib`, leaking `scripts/lib` at
+    #       `sys.path[0]` for every later measurer in the process.
+    #
+    # 🔴 SO THE OUTER `try` CARRIES **ONLY** A `finally`, AND NO `except`. That is
+    # the load-bearing detail: an `except` clause on the outer block would be
+    # evaluated for the `Unmeasurable` the inner import handler raises, which is
+    # exactly the unbound-name case (a) is about — the first attempt at this fix
+    # nested the blocks but left the handlers outside, and reintroduced (a) while
+    # believing it had closed it. Handlers that name `cairn_pin` live in the
+    # `else`, where the import has provably succeeded.
     try:
-        # 🔴 `subsystem_recall` IS THE PINNED MODULE, not a `scripts/lib/` copy —
-        # devrc deleted its fork when it consolidated onto the `cairn` flake pin.
-        # `cairn_pin.ensure()` appends the packaged `lib/` to `sys.path`.
-        cairn_pin.ensure()
-        import subsystem_recall  # noqa: PLC0415
-        _, idx = subsystem_recall.load_store(env.index_store, verb="present")
-    except cairn_pin.CairnPinUnresolved as exc:
-        # 🔴 ITS OWN READING, NOT "the parser failed". A host where the pinned
-        # client is not deployed is a STATE — the same shape as the absent-store
-        # branch above — and folding it into the parser's message would report a
-        # broken store where there is only a missing client. The unit that runs
-        # this page passes `CAIRN_LIB` for exactly this reason, so on the
-        # scheduled path this branch means the unit's environment regressed.
-        raise Unmeasurable(f"the pinned cairn client is not available here: {exc}")
-    except Exception as exc:
-        raise Unmeasurable(f"the index store did not load through its own parser: {exc!r}")
+        try:
+            import cairn_pin  # noqa: PLC0415
+        except Exception as exc:
+            raise Unmeasurable(f"{lib / 'cairn_pin.py'} did not import: {exc!r}")
+        else:
+            try:
+                # 🔴 `subsystem_recall` IS THE PINNED MODULE, not a `scripts/lib/`
+                # copy — devrc deleted its fork when it consolidated onto the
+                # `cairn` flake pin. `ensure()` appends the packaged `lib/`.
+                cairn_pin.ensure()
+                import subsystem_recall  # noqa: PLC0415
+                _, idx = subsystem_recall.load_store(env.index_store, verb="present")
+            except cairn_pin.CairnPinUnresolved as exc:
+                # 🔴 ITS OWN READING, NOT "the parser failed". A host where the
+                # pinned client is not deployed is a STATE — the same shape as the
+                # absent-store branch above — and folding it into the parser's
+                # message would report a broken store where there is only a
+                # missing client. The unit that runs this page passes `CAIRN_LIB`
+                # for exactly this reason, so on the scheduled path this branch
+                # means the unit's environment regressed.
+                raise Unmeasurable(
+                    f"the pinned cairn client is not available here: {exc}")
+            except Exception as exc:
+                raise Unmeasurable(
+                    f"the index store did not load through its own parser: {exc!r}")
     finally:
         if sys.path and sys.path[0] == str(lib):
             sys.path.pop(0)
@@ -1098,7 +1118,17 @@ def m_index_store(env: Env) -> dict:
             "pulled on demand, which is why it can be large where RULES.md cannot. "
             "It is LOCAL state on each machine and is not in this repo."
         ),
-        source="~/.claude/analyze-service-index, read via scripts/lib/subsystem_recall.load_store()",
+        # 🔴 `render.py` PRINTS THIS VERBATIM as the row's `from:` line, so it is
+        # SHIPPED OUTPUT, not a comment. It used to name
+        # `scripts/lib/subsystem_recall.load_store()` — a path this repo deleted
+        # when it consolidated onto the pinned `cairn` client, so the published
+        # page was pointing a reader at a file that is gone on purpose. Same
+        # class as the `detail` prose fixed on the sibling row, and the reason
+        # every `source=` literal in this file was swept rather than this one
+        # patched: 25 literals, 13 live repo paths, one dead (this), one glob.
+        source=("~/.claude/analyze-service-index, read via the PINNED cairn "
+                "client's subsystem_recall.load_store() — `python3 "
+                "scripts/lib/cairn_pin.py` prints where that is"),
         columns=("scope", "entries"),
         rows=tuple(rows),
     )
