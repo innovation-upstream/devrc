@@ -169,26 +169,95 @@ def q_attention_by_app(win: int, host: str) -> str:
 def q_browser_by_domain(win: int, host: str) -> str:
     """i3 Brave-focused intervals ∩ nav-domain timeline (the project's i3-derived
     browser-attention metric). URL is in `text`; domain via domain()/netloc() fallback.
-    Logic lifted from dashboard panel "Browser attention by domain (i3-derived, s)"."""
+    Same measure as dashboard panel "Browser attention by domain (i3-derived, s)":
+    per domain, the wall-clock time during which Brave held i3 focus AND that domain
+    was the most recent navigation.
+
+    🔴 COMPUTED AS A SINGLE-PASS SWEEP OVER INTERVAL BOUNDARIES — NOT AS A JOIN. The
+    obvious spelling, and the one this used to ship, is `brave CROSS JOIN dom` with an
+    overlap predicate. That materialises |brave| x |dom| candidate pairs, which is
+    QUADRATIC in the window: measured 2026-09-12 against the live server, 727 x 831 =
+    604k pairs at --days 7 against 2,799 x 3,180 = 8.9M at --days 30 — 14.7x the work
+    for a 4.3x wider window. The pairs are streamed, not held, so the query's own
+    tracked peak stayed modest (16 MiB at 30d, still the largest of the report's seven
+    queries; the next is 10 MiB). What broke was the SERVER, not the query's own
+    budget: activity's ClickHouse runs in a 3 GiB pod with max_server_memory_usage
+    2.5 GiB, and CH 25.x corrects that server-wide tracker against container RSS. A
+    burst of 40 runs of the join raised the container's memory.current by ~110-155 MiB
+    of allocator churn; the same burst of a plain count() moved it -18 MiB and of this
+    sweep +14 MiB. Once the server-wide tracker sits at the ceiling the OvercommitTracker
+    stops whichever query is allocating, and that was this one — hence the user-visible
+    `Code: 241 … (total) memory limit exceeded … While executing JoiningTransform`.
+    Interleaved failure rates at --days 30, every arm in the same loop so all three saw
+    the same server conditions: join 9/225, this sweep 0/225, plain count() control
+    0/145. The gap widens with the window — at --days 90 the join failed 11 of 12 runs
+    and at --days 120 all 12, the sweep none of either.
+
+    ⚠ TWO HONEST CAVEATS. (1) The trigger is load, so the join did not fail every time
+    and this sweep is NOT immune by construction — it was stopped once in a further 25
+    whole-report rounds. What the rewrite removes is this report's own dominant
+    contribution to the pressure, not the ceiling. (2) The report has no per-section
+    degradation: in those same 25 rounds `q_top_binaries` and `q_context_switches` were
+    each killed too, and any one CHQueryError still aborts the whole gather().
+
+    The rewrite is exact, not an approximation. Each interval family is internally
+    non-overlapping — every interval runs from one `ts` to the next `ts` in the SAME
+    stream, capped at 30 min — so the join's pairwise-overlap sum is precisely the
+    measure of the set intersection, and a sweep computes the same measure: emit two
+    boundary rows per interval, carry Brave-focus depth and the active domain forward
+    across the merged stream, and charge each gap between consecutive boundaries to the
+    domain in force. 2 * (|brave| + |dom|) rows — 12k at --days 30, LINEAR in the window.
+
+    Measured equality against the join it replaces: byte-identical output at --days
+    7/14/21/30 (12 paired live runs each). At --days 90 fourteen of fifteen rows still
+    match exactly and one differs by 0.2 of 156 minutes — traced to three nav events
+    sharing one identical MILLISECOND, where `ORDER BY ts` has no tie-break, so which of
+    the tied rows gets the non-zero interval is undefined. That ambiguity is pre-existing
+    and belongs to the data, not to the rewrite; the sweep at least resolves it the same
+    way every run (25/25 identical), which the join does not promise.
+    """
     h = Q.sql_quote(host)
     return (
+        # --- the two interval families (unchanged from the join version) ---
         "WITH brave AS ("
-        "SELECT bs, be FROM ("
-        "SELECT toUnixTimestamp64Milli(ts) AS bs, app, least("
+        "SELECT host, bs, be FROM ("
+        "SELECT host, toUnixTimestamp64Milli(ts) AS bs, app, least("
         "(leadInFrame(toUnixTimestamp64Milli(ts),1,toUnixTimestamp64Milli(ts)) "
         "OVER (PARTITION BY host ORDER BY ts ASC ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)), "
         "toUnixTimestamp64Milli(ts)+1800000) AS be "
         f"FROM activity.events WHERE source='i3' AND kind='window-focus' AND host IN ({h}) AND ts>now()-{win}"
         ") WHERE app='Brave-browser'"
         "), dom AS ("
-        "SELECT d, ds, least(de, ds+1800000) AS de FROM ("
-        "SELECT if(domain(text)!='',domain(text),netloc(text)) AS d, toUnixTimestamp64Milli(ts) AS ds, "
+        "SELECT host, d, ds, least(de, ds+1800000) AS de FROM ("
+        "SELECT host, if(domain(text)!='',domain(text),netloc(text)) AS d, toUnixTimestamp64Milli(ts) AS ds, "
         "(leadInFrame(toUnixTimestamp64Milli(ts),1,toUnixTimestamp64Milli(ts)+1800000) "
         "OVER (PARTITION BY host ORDER BY ts ASC ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)) AS de "
         f"FROM activity.events WHERE source='browser' AND kind='nav' AND text!='' AND host IN ({h}) AND ts>now()-{win}"
-        ")) "
-        "SELECT d AS domain, round(sum(greatest(0, least(be,de)-greatest(bs,ds)))/60000,1) AS attention_min "
-        "FROM brave CROSS JOIN dom WHERE be>ds AND de>bs "
+        ")), "
+        # --- one boundary row per interval endpoint: 2*(|brave|+|dom|) rows total ---
+        # bd    : +1/-1 delta on the Brave-focus depth.
+        # dm    : the domain this boundary puts in force ('' = none).
+        # ord   : tie-break WITHIN one instant, so a domain that starts exactly when the
+        #         previous one ends wins over the end. Folded into dseq below.
+        # dseq  : t*4+ord for domain boundaries, 0 for Brave ones, so a running max()
+        #         carries the LATEST domain boundary forward without a join or a lookup.
+        "ev AS ("
+        "SELECT host, bs AS t, 0 AS ord, 1 AS bd, '' AS dm, 0 AS dseq FROM brave "
+        "UNION ALL SELECT host, be, 0, -1, '', 0 FROM brave "
+        "UNION ALL SELECT host, de, 1, 0, '', de*4+1 FROM dom "
+        "UNION ALL SELECT host, ds, 2, 0, d, ds*4+2 FROM dom"
+        "), "
+        # --- the sweep: gap to the next boundary + the state in force across it ---
+        "seg AS ("
+        "SELECT (leadInFrame(t,1,t) OVER (PARTITION BY host ORDER BY t ASC, ord ASC "
+        "ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING))-t AS ms, "
+        "(sum(bd) OVER (PARTITION BY host ORDER BY t ASC, ord ASC "
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS brave_on, "
+        "tupleElement((max((dseq, dm)) OVER (PARTITION BY host ORDER BY t ASC, ord ASC "
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)),2) AS d "
+        "FROM ev) "
+        "SELECT d AS domain, round(sum(ms)/60000,1) AS attention_min "
+        "FROM seg WHERE brave_on>0 AND ms>0 AND d!='' "
         "GROUP BY d HAVING attention_min>0 ORDER BY attention_min DESC LIMIT 15"
     )
 
