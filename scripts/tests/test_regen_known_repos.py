@@ -332,6 +332,19 @@ def looks_like_a_repo_range_table(text: str) -> int:
 # SHORT pick log rather than headroom against false positives. A 19-row log used
 # to pass; five rows is a much smaller hole.
 PICK_ROW_KEYS = frozenset({"n", "repo", "t"})
+
+# 🔴 KEYS A ROW MAY CARRY *IN ADDITION*, AND WHY THIS IS NOT A LOOSENING THAT
+# BLINDS THE DETECTOR. `record_pick` gained `via` (which code path produced the
+# pick) in 2026-09, and the obvious edit — adding it to `PICK_ROW_KEYS` — would
+# have made this sweep blind to every log written BEFORE that, which is every
+# log on disk today: the operator's own laptop holds 7 untagged rows, and a
+# leaked copy of exactly that file would then have scanned clean. An append-only
+# log keeps both vintages forever, so the detector has to know both. The
+# REQUIRED core stays the three keys; this is the optional half, and a key in
+# NEITHER set still reddens `test_the_pick_log_FINGERPRINT_matches_what_record_
+# pick_WRITES` — so the two-way pin is intact and the fingerprint is still a
+# shape, not a prefix.
+PICK_ROW_OPTIONAL_KEYS = frozenset({"via"})
 PICK_LOG_ROW_THRESHOLD = 5
 
 
@@ -396,7 +409,8 @@ def looks_like_a_pick_log(text: str) -> int:
             doc = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(doc, dict) or set(doc) != PICK_ROW_KEYS:
+        if (not isinstance(doc, dict)
+                or set(doc) - PICK_ROW_OPTIONAL_KEYS != PICK_ROW_KEYS):
             continue
         repo, num, when = doc.get("repo"), doc.get("n"), doc.get("t")
         if not (isinstance(repo, str) and _FULL_NAME_RE.match(repo)):
@@ -791,12 +805,22 @@ def test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES(tmp_path):
     with nothing holding the spelling."""
     mo = load_mention_open("mention_open_for_fingerprint")
     log = tmp_path / "picks.jsonl"
-    assert mo.record_pick("gardenersguild/trowelcast", "1291", log)
+    assert mo.record_pick("gardenersguild/trowelcast", "1291", log,
+                          via=mo.PICK_VIA_PICKER)
     written = json.loads(log.read_text().splitlines()[0])
-    assert set(written) == PICK_ROW_KEYS, (
+    # 🔴 TWO-WAY, AND BOTH DIRECTIONS MATTER. The REQUIRED core must still all be
+    # written (a rename of `repo`/`n`/`t` reddens here rather than silently
+    # blinding the sweep), and every key written must be one the detector knows
+    # about — so a SECOND optional field added to the writer reddens too, instead
+    # of pushing every row past an exact-match predicate.
+    assert PICK_ROW_KEYS <= set(written), (
         f"record_pick now writes {sorted(written)}, but the disclosure "
-        f"detector looks for {sorted(PICK_ROW_KEYS)} — the guard has gone "
+        f"detector requires {sorted(PICK_ROW_KEYS)} — the guard has gone "
         f"BLIND to the artefact it exists to catch. Update PICK_ROW_KEYS.")
+    assert set(written) <= PICK_ROW_KEYS | PICK_ROW_OPTIONAL_KEYS, (
+        f"record_pick writes {sorted(set(written) - PICK_ROW_KEYS - PICK_ROW_OPTIONAL_KEYS)}, "
+        f"which the detector's exact-shape predicate does not tolerate — every "
+        f"real pick row would now score 0. Add it to PICK_ROW_OPTIONAL_KEYS.")
     # …and the real artefact really does trip the detector at the threshold.
     many = "\n".join(log.read_text().strip()
                      for _ in range(PICK_LOG_ROW_THRESHOLD)) + "\n"
@@ -812,7 +836,7 @@ def test_the_pick_log_FINGERPRINT_matches_what_record_pick_WRITES(tmp_path):
     # through.
     wide = tmp_path / "wide.jsonl"
     for num in ("1", "99999", "100001", "999999999"):
-        assert mo.record_pick("gardenersguild/trowelcast", num, wide), num
+        assert mo.record_pick("gardenersguild/trowelcast", num, wide, via=mo.PICK_VIA_PICKER), num
     assert looks_like_a_pick_log(wide.read_text()) == 4, (
         f"the detector does not see every row the REAL writer accepts — "
         f"scored {looks_like_a_pick_log(wide.read_text())} of 4. A guard "
