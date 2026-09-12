@@ -100,7 +100,8 @@ Topic argument (optional): `$ARGUMENTS`.
    its own freshness instead of asserting completeness it cannot check.
 
    🔴 **The reader now REFUSES an undateable store rather than serving it.** `cairn`
-   drives `scripts/lib/subsystem_recall.py` — the same module, the same output — and run
+   drives `subsystem_recall` — the same module, the same output; it lives in the pinned
+   `cairn` package, not in `scripts/lib/` — and run
    bare that module defaults to the synced cache and **exits 4** with
    `REFUSING to read … Run \`cairn sync\` and re-run` when that cache carries no
    `.sync-stamp`. That is a working state, not a broken one: run `cairn sync`, or just
@@ -161,7 +162,7 @@ Topic argument (optional): `$ARGUMENTS`.
 
    **The READER exits non-zero only when NOTHING readable came back** (missing store, unreadable entry, or `scope-unreadable`/`search-unreadable` ⇒ **3**) — a scope that served some entries alongside a `MALFORMED` block exits **0**, because recall was available and was also honest about its gaps. ⚠ **That rule is the reader's, and `cairn` wraps it with codes of its own that do NOT follow it**: **2** (no scope could be derived — pass `--scope`) and **5** (the pod answered with something cairn refuses to install — which fires *even when a perfectly readable cache is sitting there*, because installing a corrupt snapshot over it is the worse outcome). So a non-zero from `cairn recall` does not by itself mean nothing was readable; read the banner. If it does exit non-zero, print the stderr line verbatim, note that recall was unavailable, and **continue the resume** — a broken index is not a reason to stop re-entering the work.
 
-   🔴 **Do NOT read a `4` from `cairn` as "run `cairn sync`".** Two different tools spell 4 differently and the wrong reading sends you to the command that just failed. **`cairn recall` never returns 4** — it reaches the reader as a *library*, where the refusal below does not exist. `cairn`'s own 4 is `sync`-only (`EXIT_REFRESH_FAILED`) and means *the store was NOT reached, but a usable cache survived*; re-running `cairn sync` is exactly the thing that just did not work. **The 4 that `cairn sync` fixes belongs to the raw reader** — `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py` run bare against a default store carrying no `.sync-stamp`, which refuses rather than serving a store that cannot date itself. Never fall back to recollection about what the index "probably says".
+   🔴 **Do NOT read a `4` from `cairn` as "run `cairn sync`".** Two different tools spell 4 differently and the wrong reading sends you to the command that just failed. **`cairn recall` never returns 4** — it reaches the reader as a *library*, where the refusal below does not exist. `cairn`'s own 4 is `sync`-only (`EXIT_REFRESH_FAILED`) and means *the store was NOT reached, but a usable cache survived*; re-running `cairn sync` is exactly the thing that just did not work. **The 4 that `cairn sync` fixes belongs to the raw reader** — `python3 "$(python3 ~/workspace/devrc/scripts/lib/cairn_pin.py)/subsystem_recall.py"` run bare against a default store carrying no `.sync-stamp`, which refuses rather than serving a store that cannot date itself. (That module ships in the pinned `cairn` package; `cairn_pin.py` is the one thing that knows where.) Never fall back to recollection about what the index "probably says".
 
 5. **Report**:
    - One-paragraph "where things stand" (reconciled with what you just verified).

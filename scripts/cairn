@@ -87,6 +87,25 @@ from typing import Sequence
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+# 🔴 THE READER MODULES BELOW COME FROM THE PINNED `cairn` FLAKE INPUT, NOT FROM
+# `scripts/lib/`. devrc deleted its forked copies when it consolidated onto the
+# pin; `cairn_pin.ensure()` APPENDS the packaged `lib/` to `sys.path` after the
+# line above and raises — with both resolution routes and the remedy named — when
+# the pin is not deployed. There is no local fallback to degrade to.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
+# 🔴 IMPORT `timeouts` BEFORE THE READER, AND THE ORDER IS LOAD-BEARING. The
+# pinned `subsystem_recall` PREPENDS its own directory to `sys.path` at import
+# time, so every import after it prefers the store copy — and `timeouts` is the
+# one module name that exists on both sides. Importing devrc's first binds the
+# copy `scripts/cairn` and `scripts/cairn-who` share. The two are compatible
+# today (the pinned one is a superset, and `test_cairn_pin.py` holds that), so
+# this is belt-and-braces rather than a live fix; it is written down because the
+# ordering is invisible and a later reshuffle would silently swap the module.
+from timeouts import unbounded_timeout_reason  # noqa: E402
+
 import subsystem_recall as rc  # noqa: E402
 import subsystem_touch  # noqa: E402
 from subsystem_touch import scope_for_repo  # noqa: E402
@@ -114,7 +133,8 @@ from subsystem_read_store import SYNC_STAMP  # noqa: E402
 # own binary (`scripts/cairn-who`), so the predicate lives in `lib/timeouts.py`
 # and BOTH programs import it from there; re-open-coding the check on this side
 # is precisely the two-copies state that shipped the bug. See `timeouts.py`.
-from timeouts import unbounded_timeout_reason  # noqa: E402
+# (The `from timeouts import …` line itself sits above the reader import — read
+# the note there for why the position matters.)
 
 DEFAULT_CONFIG = Path.home() / ".config" / "subsystem-store" / "env"
 # 🔴 THIS CLIENT'S OWN BOUND, tuned for an HTTP snapshot fetch. `cairn-who` has a
@@ -1214,6 +1234,13 @@ def _cairn_doctor():
     lib = str(Path(__file__).resolve().parent / "lib")
     if lib not in sys.path:
         sys.path.insert(0, lib)
+    # `cairn_doctor` is the PINNED module. There WAS a `cairn_pin.ensure()` call
+    # here, justified by a comment saying it "restored the ordering" after the
+    # `sys.path.insert` above. It could not: `ensure()` APPENDS, so it cannot
+    # change anything about a path entry inserted at the front, and the
+    # module-level call has already run by the time any subcommand builds its
+    # parser. It was inert, and its stated reason was a thing the function does
+    # not do — so it is deleted rather than re-justified.
     import cairn_doctor  # noqa: PLC0415
 
     return cairn_doctor

@@ -24,6 +24,29 @@ IMAGE="$REGISTRY/library/subsystem-store-api:$VERSION"
 # captured into ROOT alongside the real path. Measured here, not theorised.
 ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# 🔴 STAGE THE PINNED READER INTO THE BUILD CONTEXT. The image runs the SAME
+# reader the CLI runs, and since devrc consolidated onto the `cairn` flake pin
+# that reader lives in `/nix/store`, which a docker build context cannot reach.
+# So it is copied in BY NAME (never `cp -r` of a directory — the Dockerfile's own
+# "no COPY . ." rule, one level up) into a gitignored staging dir, and the image
+# points `CAIRN_LIB` at it.
+#
+# 🔴 THE STAGING DIR IS EMPTIED FIRST. A module dropped from the closure by a pin
+# bump would otherwise linger here and keep being COPYed, which is how an image
+# carries code no current source produces.
+CAIRN_LIB="$(python3 "$ROOT/scripts/lib/cairn_pin.py")"
+STAGE="$ROOT/scripts/subsystem-store-api/.cairn-lib"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+for m in subsystem_recall subsystem_read_store subsystem_resolver entry_shape host_identity; do
+  src="$CAIRN_LIB/$m.py"
+  [[ -f "$src" ]] || { echo "build-push: the pinned client has no $m.py at $src" >&2; exit 1; }
+  cp -- "$src" "$STAGE/$m.py"
+done
+staged=$(ls -1 "$STAGE" | wc -l)
+echo "==> staged $staged pinned module(s) from $CAIRN_LIB"
+[[ "$staged" == "5" ]] || { echo "build-push: expected 5 staged modules, got $staged" >&2; exit 1; }
+
 echo "==> building $IMAGE from $ROOT"
 docker build -f "$ROOT/scripts/subsystem-store-api/Dockerfile" -t "$IMAGE" "$ROOT"
 
@@ -40,8 +63,12 @@ echo "==> control: /data in the image holds $leaked files (must be 0) — OK"
 
 # And the positive half: the code IS there and imports. A zero above from an
 # image with no filesystem at all would look identical.
+# 🔴 THE IMPORT CONTROL GOES THROUGH `cairn_pin`, NOT A BARE `sys.path` POKE.
+# That is the mechanism the server itself uses, so this control now also proves
+# `CAIRN_LIB` is set correctly in the image — the single point where a staging
+# mistake would otherwise surface at pod start instead of at build time.
 docker run --rm "$IMAGE" python3 -c \
-  'import sys; sys.path.insert(0, "/app/scripts/lib"); import subsystem_recall as r; print("==> control: subsystem_recall imported,", len(r.RECALL_MODES), "modes")'
+  'import sys; sys.path.insert(0, "/app/scripts/lib"); import cairn_pin; print("==> control: pin resolves to", cairn_pin.ensure()); import subsystem_recall as r; print("==> control: subsystem_recall imported,", len(r.RECALL_MODES), "modes")'
 
 if [[ $PUSH -eq 0 ]]; then
   echo "==> --no-push: built only. NOTHING was pushed."

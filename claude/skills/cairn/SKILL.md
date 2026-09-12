@@ -125,12 +125,15 @@ there; it is not restated here.
 
 ## Where a host reads from
 
-`scripts/lib/subsystem_read_store.py` is the ONE answer for devrc's OWN readers
-(the `subsystem-index` writer and `cairn-who`), and `cairn doctor`'s
-`reader-resolution` check prints it. ⚠ The deployed `cairn` is the pinned flake
-package and carries its OWN copy of that module; the two agree today and are
-consolidated in a later slice — so if they ever disagree, `doctor`'s printed
-path is the authority for the CLIENT, and this file's for the writer.
+There is now exactly ONE `subsystem_read_store`, and it ships inside the pinned
+`cairn` flake package. devrc deleted its forked copy (with four others) when it
+consolidated onto the pin, so the writer, `cairn-who` and the deployed client all
+resolve the same module — `cairn doctor`'s `reader-resolution` check prints the
+path it used. ⚠ **The two-copies caveat that used to live here is GONE, not
+merely improved**: there is no longer a devrc-side copy for the client's to
+disagree with. `scripts/lib/cairn_pin.py` is the seam that finds it
+(`$CAIRN_LIB`, else `cairn` on PATH → `libexec/cairn/lib`); it REFUSES rather
+than falling back, because there is nothing local left to fall back to.
 
 Two directories exist and they are not interchangeable:
 `~/.cache/subsystem-store` is the synced

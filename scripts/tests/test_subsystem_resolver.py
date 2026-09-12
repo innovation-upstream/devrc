@@ -75,7 +75,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+MODULE_PATH = pinned("subsystem_resolver")
 # Formerly `claude/commands/analyze-service.md`. Upstream merged custom commands
 # INTO skills, so `claude/commands/` was retired and every command became
 # `claude/skills/<name>/SKILL.md`; this is the SAME doc at its new path, and
@@ -102,7 +110,6 @@ WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
-
 from testlib.skills_mapping import (  # noqa: E402
     assert_skills_mapping_declared,
 )
@@ -1619,8 +1626,16 @@ class TestCommandDocIsPinned:
             "ambiguity errors, never shadows",
         ),
         (
+            # ⚠ THE PATH WENT AWAY, THE POINTER DID NOT. devrc deleted its forked
+            # `subsystem_resolver` when it consolidated onto the pinned `cairn`
+            # package, so the doc names the MODULE rather than a repo path that
+            # no longer resolves — `test_doc_path_rot.py` would (correctly) call
+            # the old spelling a dead path. The predicate this pin protects is
+            # unchanged: `normalize_ref` / `split_kind` / `resolve_ref_tiered`
+            # were re-read against the block when this moved (code-only diff
+            # devrc-vs-pin for this module: 0 lines).
             "The EXECUTABLE authority for the two rules above is "
-            "`scripts/lib/subsystem_resolver.py`",
+            "`subsystem_resolver`",
             "the pointer naming this module as the authority",
         ),
         (
@@ -1643,7 +1658,15 @@ class TestCommandDocIsPinned:
     HASHED_REGIONS: list[tuple[str, str, str]] = [
         (
             "resolver-rules",
-            "52a56d94431ba4de3c6d696fa35b3ed4e443de612ec17a8f33a049174762e279",
+            # Moved 2026-09-11 for the consolidation onto the pinned `cairn`
+            # package: the authority bullet stopped naming a `scripts/lib/` path
+            # that no longer exists. The block was re-read against the code
+            # before this hash was pasted — `normalize_ref("External DNS")` →
+            # `external-dns`, `normalize_ref("image_ingestion")` →
+            # `image-ingestion`, `split_kind("repo-cos.process")` →
+            # `("repo-cos", "process")`, `split_kind("notes.md")` →
+            # `("notes.md", None)` — all exactly as the bullets describe.
+            "97e4c320e3649b8a58d0d9b342eadfbac492aa4621a2e007d238ad8060f49e0f",
             "normalize_ref / split_kind / resolve_ref_tiered",
         ),
         (
@@ -1725,8 +1748,10 @@ class TestCommandDocIsPinned:
             f"  expected sha256 {expected_sha}\n"
             f"  actual   sha256 {actual}\n\n"
             f"This is not a formatting nit. That block is the PROSE HALF of a\n"
-            f"predicate whose code half is {implemented_by} in\n"
-            f"scripts/lib/subsystem_resolver.py. A substring pin cannot see a\n"
+            f"predicate whose code half is {implemented_by} in the PINNED\n"
+            f"`subsystem_resolver` (devrc has no copy — `python3\n"
+            f"scripts/lib/cairn_pin.py` prints where it is). A substring pin\n"
+            f"cannot see a\n"
             f"sentence being ADDED, or an unpinned clause being deleted — this\n"
             f"hash is what does.\n\n"
             f"So: re-read the block against the code, make them agree, then paste\n"

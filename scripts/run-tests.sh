@@ -654,10 +654,23 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           skipped, which is the "green having measured the one shell the defect
 #           cannot occur in" failure the zsh note describes. They FAIL now.
 #
+# cairn:    the PINNED store client, and this entry is not about a subprocess —
+#           it is how the MODULES resolve. devrc deleted its five forked reader
+#           modules (`subsystem_recall`, `subsystem_resolver`,
+#           `subsystem_read_store`, `cairn_doctor`, `host_identity`) and takes
+#           them from the packaged client instead; `scripts/lib/cairn_pin.py`
+#           finds them by resolving `cairn` on PATH to its store path and
+#           appending `libexec/cairn/lib`. Without the binary, `test_cairn_pin.py`
+#           SKIPS (it has no relationship to measure) and every suite that
+#           imports the writer or the reader fails at import — so a missing
+#           `cairn` is neither a quiet skip nor a mysterious ImportError, it is
+#           this FATAL naming the binary. `flake.nix`'s `gateTools` carries the
+#           package so both tiers and `nix develop` satisfy it.
+#
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf cairn)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")

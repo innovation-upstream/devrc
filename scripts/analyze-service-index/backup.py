@@ -152,6 +152,16 @@ except ImportError as _exc:  # pragma: no cover - a deployment fault, not a code
 _LIB_DIR = _SCRIPTS_DIR / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
+# 🔴 `host_identity` IS THE PINNED MODULE. devrc deleted its fork when it
+# consolidated onto the `cairn` flake pin, so this name now resolves through
+# `cairn_pin.ensure()`, which APPENDS the packaged client's `lib/` to
+# `sys.path`. It raises rather than degrading — for the same reason the
+# ledger import above does: a host-identity fallback would let the two hosts
+# share a key prefix and evict each other's backups.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 import host_identity as _host_identity  # noqa: E402
 
 PROG = "analyze-service-index-backup"

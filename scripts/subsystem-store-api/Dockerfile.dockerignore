@@ -1,8 +1,8 @@
 **
-!scripts/lib/subsystem_recall.py
-!scripts/lib/subsystem_read_store.py
-!scripts/lib/subsystem_resolver.py
-!scripts/lib/subsystem_touch.py
-!scripts/lib/git_mainline.py
-!scripts/lib/host_identity.py
+!scripts/lib/cairn_pin.py
+!scripts/subsystem-store-api/.cairn-lib/subsystem_recall.py
+!scripts/subsystem-store-api/.cairn-lib/subsystem_read_store.py
+!scripts/subsystem-store-api/.cairn-lib/subsystem_resolver.py
+!scripts/subsystem-store-api/.cairn-lib/entry_shape.py
+!scripts/subsystem-store-api/.cairn-lib/host_identity.py
 !scripts/subsystem-store-api/server.py

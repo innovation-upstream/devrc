@@ -128,16 +128,19 @@ OUT_OF_SCOPE_PREFIXES: tuple[str, ...] = ("scripts/tests/", "scripts/testlib/")
 #: 🔴 THE THREE HISTORICAL DEFECTS ARE ALL IN HERE. Each one is a file that once
 #: hardcoded the frozen mirror; a row disappearing from this ledger is that
 #: regression happening again.
+#: 🔴 TWO ROWS LEFT THIS LEDGER WHEN devrc CONSOLIDATED ONTO THE PINNED CLIENT,
+#: AND THAT IS EXACTLY THE MOVE THE COMMENT ABOVE CALLS A REGRESSION — so it is
+#: recorded here rather than merely done. `scripts/lib/subsystem_read_store.py`
+#: (THE resolver) and `scripts/lib/subsystem_recall.py` (regression #1 of three)
+#: are no longer devrc files at all: they ship inside the pinned `cairn` package
+#: and cairn's own suite owns them. This ledger scans `git ls-files` under
+#: `scripts/`, so a row naming a file this repo does not track can only ever
+#: fail. The PROPERTY they carried is not dropped — `scripts/cairn`,
+#: `scripts/cairn-validate`, `service_recon.py` and `subsystem-audit.py` are
+#: still ledgered here, and they are the devrc surfaces that would reintroduce
+#: the frozen-mirror defect. What devrc can no longer grade from inside itself is
+#: the PINNED reader's own default, which is upstream's to hold.
 ROUTED: dict[str, str] = {
-    "scripts/lib/subsystem_read_store.py": (
-        "THE resolver. `read_store_root` reads the module global at call time, "
-        "which is what lets one `monkeypatch.setattr` repoint every consumer"
-    ),
-    "scripts/lib/subsystem_recall.py": (
-        "the READER `/resume` step 4 runs. Regression #1 of three: its CLI "
-        "defaulted `--store` to the frozen mirror and printed a completeness "
-        "claim about a store that had stopped moving"
-    ),
     "scripts/lib/service_recon.py": (
         "the recon `/analyze-service` runs. Regression #2 of three: same "
         "hardcoded mirror, found only after #1 was fixed"
@@ -165,11 +168,10 @@ ROUTED: dict[str, str] = {
 #: Files that compute a store-root path THEMSELVES, each with the reason it is
 #: allowed to. A row here is a deliberate exemption from `ROUTED`, and the reason
 #: is the artifact: an exemption nobody can justify in a sentence is the finding.
+#: ⚠ `scripts/lib/subsystem_read_store.py` LEFT THIS LEDGER TOO, for the reason
+#: given above ROUTED: it is a pinned-package module now, not a devrc file, and
+#: this ledger only ever scans files this repo tracks.
 SITED: dict[str, str] = {
-    "scripts/lib/subsystem_read_store.py": (
-        "THE OWNER. `DEFAULT_CACHE_ROOT` is the one definition of the synced "
-        "cache; every other reader imports the MODULE and calls the accessor"
-    ),
     "scripts/lib/subsystem_touch.py": (
         "THE WRITER's target. `DEFAULT_STORE_ROOT` is the pre-cutover local "
         "store — the constant `subsystem_read_store` was created to supersede "
@@ -265,8 +267,6 @@ SITED: dict[str, str] = {
 #: numbers stripped so ordinary edits do not churn it. A file growing a NEW kind
 #: fails here even though it is already ledgered.
 SELF_RESOLVED_KINDS: dict[str, frozenset[str]] = {
-    "scripts/lib/subsystem_read_store.py": frozenset(
-        {"name:DEFAULT_CACHE_ROOT", "path:subsystem-store"}),
     "scripts/lib/subsystem_touch.py": frozenset(
         {"name:DEFAULT_STORE_ROOT", "path:analyze-service-index"}),
     "scripts/cairn-cutover.py": frozenset(
@@ -747,20 +747,23 @@ class TestTheSitedLedgerIsTwoWay:
     def test_the_two_ledgers_overlap_only_where_stated(self) -> None:
         """A file in BOTH is doing two different things and must say so.
 
-        TWO are: `scripts/cairn` (routes for `--cache`; separately names the
-        credential file and the mirror `doctor` inspects) and
-        `subsystem_read_store.py` (it IS the resolver, and it declares the cache
-        root every router asks it for). Pinned as a literal so a third arriving
-        unexplained is a failure rather than a shrug.
+        ONE is: `scripts/cairn` (routes for `--cache`; separately names the
+        credential file and the mirror `doctor` inspects). Pinned as a literal so
+        a second arriving unexplained is a failure rather than a shrug.
 
-        ⚠ The docstring said "Today exactly one is" while the assertion pinned
-        two — a description narrower than its own body, which is the shape this
-        module is otherwise built to catch.
+        ⚠ It was TWO until devrc consolidated onto the pinned client. The other
+        was `subsystem_read_store.py` — it IS the resolver and declared the cache
+        root every router asks it for — and it is now a pinned-package module
+        this repo does not track. Both ledgers dropped it together; see the note
+        above `ROUTED`.
+
+        ⚠ Earlier still, the docstring said "Today exactly one is" while the
+        assertion pinned two — a description narrower than its own body, which is
+        the shape this module is otherwise built to catch. It is one again, for a
+        different reason, and both are written down so the number is never just a
+        number.
         """
-        assert set(ROUTED) & set(SITED) == {
-            "scripts/cairn",
-            "scripts/lib/subsystem_read_store.py",
-        }
+        assert set(ROUTED) & set(SITED) == {"scripts/cairn"}
 
 
 # =============================================================================
@@ -1020,7 +1023,10 @@ class TestTheEnumeratorItself:
         files = tracked_sources()
         assert len(files) > 100, f"only {len(files)} tracked files under scripts/"
         assert "scripts/cairn" in files
-        assert "scripts/lib/subsystem_read_store.py" in files
+        # ⚠ `scripts/lib/subsystem_touch.py`, not `subsystem_read_store.py` — the
+        # latter moved into the pinned `cairn` package and this repo no longer
+        # tracks it, so it would be a positive control that can never fire.
+        assert "scripts/lib/subsystem_touch.py" in files
 
     def test_the_out_of_scope_directories_really_are_excluded(self) -> None:
         """The exclusion is load-bearing and enumerated, so it is graded: a test
