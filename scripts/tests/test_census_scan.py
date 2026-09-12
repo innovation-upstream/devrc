@@ -169,6 +169,34 @@ def test_a_zero_argument_helper_still_counts_as_a_census(tmp_path):
     ]
 
 
+def test_a_DEFAULT_ARGUMENT_root_is_reached_by_a_bare_call(tmp_path):
+    """🔴 WHAT THE ZERO-ARGUMENT RULE IS ACTUALLY FOR.
+
+    `def scan(root=REPO_ROOT)` enumerates its own PARAMETER, so the root test
+    cannot fire inside it; the only place the repo is named is the default, and
+    the call site passes nothing. Screening zero-argument calls out — the
+    obvious tightening — makes this shape invisible.
+    """
+    root = _mini_repo(tmp_path, {
+        "scripts/tests/test_lambda.py": """
+            from pathlib import Path
+            REPO_ROOT = Path(__file__).resolve().parents[2]
+
+            def scan(where=REPO_ROOT):
+                return sorted(where.rglob("*.py"))
+
+            def test_the_ledger_matches():
+                assert scan() is not None
+
+            def test_the_scanner_handles_an_empty_tree(tmp_path):
+                assert scan(tmp_path) == []
+        """,
+    })
+    assert census_scan.census_nodeids(root) == [
+        "scripts/tests/test_lambda.py::test_the_ledger_matches"
+    ]
+
+
 def test_a_DOCSTRING_mentioning_ls_files_is_not_a_scan(tmp_path):
     """A docstring enumerates nothing.
 
@@ -448,3 +476,49 @@ def test_an_unknown_argument_is_refused_rather_than_ignored():
     proc = _run_checker("--tier", "both")
     assert proc.returncode == 2
     assert "unknown argument" in proc.stderr
+
+
+def test_a_run_that_printed_NO_VERDICT_is_refused_even_when_pytest_exits_0():
+    """🔴 READ THE CONTENT, NOT THE EXIT CODE — driven, not asserted.
+
+    `--collect-only` makes pytest print a collection line and exit **0** while
+    running nothing. An exit-code check would call that a pass. Measured: 386
+    tests collected, `pytest exit=0`, and the checker refuses at 3.
+
+    This is the only case here that pays a real collection (~15 s of the ~50 s),
+    and it is worth it: it is the exact shape — a green exit over a run that
+    produced no verdict — that this repo has been burned by repeatedly.
+    """
+    proc = _run_checker("-j", "0", "--", "--collect-only", timeout=900)
+    assert proc.returncode == 3, f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+    assert "printed no parseable summary" in proc.stderr
+    assert "(exit=0)" in proc.stderr, (
+        "the refusal must show that pytest itself exited 0 — that is the point")
+    assert "RESULT: COULD-NOT-MEASURE" in proc.stdout
+
+
+def test_the_dev_shell_reexec_forwards_the_ORIGINAL_arguments():
+    """STRUCTURAL PIN, and its limit is stated rather than papered over.
+
+    🔴 WHAT IT CANNOT DO: the re-exec only fires when `python3 -m pytest` is
+    NOT importable, and every test here runs inside the dev shell where it is.
+    So no test in this file can EXERCISE that branch, and the regression it
+    guards — the parser shifting `$@` empty before `exec` forwarded it, turning
+    `--list` into a 215-second full run — is reachable only from an operator's
+    direnv shell.
+
+    Reading the source is therefore the strongest check available, and it is
+    labelled as such: it pins that the exec forwards a variable captured BEFORE
+    the parse loop, not that the forwarding works.
+    """
+    src = LEDGER_CHECK.read_text(encoding="utf-8")
+    capture = src.index('ORIG_ARGS=("$@")')
+    parse = src.index("while [ $# -gt 0 ]; do")
+    exec_line = next(
+        l for l in src.splitlines() if l.strip().startswith("exec nix develop"))
+    assert capture < parse, (
+        "ORIG_ARGS is captured AFTER the parser has already shifted $@ away")
+    assert "ORIG_ARGS" in exec_line, (
+        f"the re-exec does not forward the captured arguments: {exec_line!r}")
+    assert '"$@"' not in exec_line, (
+        f're-exec forwards a `$@` the parser has emptied: {exec_line!r}')
