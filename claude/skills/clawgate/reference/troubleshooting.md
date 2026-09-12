@@ -81,6 +81,43 @@ must read `/root/.gh-token`. See `~/.claude/skills/clawgate/reference/architectu
 the core SKILL.md deploy section, and `~/.claude/skills/clawgate/reference/architecture.md` → e2e for the flake specifics and
 the `clawgate-e2e-pg-*` container leak.
 
+## A host's transcripts look stale — is the stream down, or is the host just idle?
+🔴 **Staleness alone cannot tell you, and guessing gets it wrong.** A stale transcript has two
+causes — the host's stream is broken, or nobody has typed there — and the observable is identical.
+Measured 2026-09-12: the laptop's freshest transcript was **4431 s** behind with 0 of 7 under
+300 s, which read as a dead stream and was not one.
+
+Two reads settle it, in this order:
+
+1. **Ask the stream itself.** `reason: accepted` with a byte offset is the STREAM path's own
+   verdict — the 5-minute bulk push does not produce one.
+   ```bash
+   set -a; . ~/.claude/clawgate.env; set +a
+   curl -s -H "X-Clawgate-Token: $CLAWGATE_HOOK_TOKEN" \
+     "$CLAWGATE_API_URL/api/transcripts/stream/cursors" | jq '.sessions | length'
+   curl -s -o /dev/null -w '%{http_code}\n' -H "X-Clawgate-Token: $CLAWGATE_HOOK_TOKEN" \
+     "$CLAWGATE_API_URL/api/nosuchroute"    # 404 — so a 401 means "exists, needs auth"
+   ```
+   The cursor rows carry no host, so join `sessionId` against `clawgatectl tmux windows`
+   (`host` + `claude_session_id`). Any `accepted` row for a host means that host's streamer is
+   delivering.
+2. **Ask whether anything went MISSING**, which is the question staleness cannot answer.
+   `ledger.last_activity_ts` in the tmux read model is written ON the host the session runs on,
+   so `host_activity - clawgate_updatedAt` is positive only when the host knew of writes clawgate
+   never got. Run it for the suspect host **and for a host whose stream is known-live as the
+   control** — measured, workbench max `+107 s` and laptop max `-14 s`, i.e. zero missing on
+   either, which is what proved the laptop idle rather than disconnected.
+
+🔴 **`X-Clawgate-Token`, not `X-Hook-Token`** — the wrong header returns
+`401 {"error":"invalid or missing hook token"}`, which reads as a credential problem rather than
+a header-name one (`internal/api/auth.go:583-588` accepts only `Authorization: Bearer` or
+`X-Clawgate-Token`).
+
+🔴 **An idle host cannot demonstrate stream LATENCY at all.** If every session there has been
+quiet for an hour, there is no recent append to time and no number to report — say that, rather
+than quoting the freshest gap. A sample within ~5 min is equally explained by the bulk push and
+settles nothing.
+
 ## Resolved — do not re-derive
 - ~~`.sops.yaml` on-disk is pre-truncated~~ **RESOLVED 2026-06-07**: the full ruleset was restored
   and a `clusters/workbench/apps/clawgate/.*.enc.yaml$` rule added, so the normal
