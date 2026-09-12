@@ -66,14 +66,49 @@ Typing it as a `cairn` subcommand is no longer valid: argparse exits 2 with an
 every writer; `prune-index` owns deletion, with its own confirmation gate. Load
 whichever applies rather than reconstructing their steps here.
 
-🔴 **There is no CREATE route, and the failure does not say so.** `PUT` demands
-an `If-Match` the caller derives from bytes that must already exist (`428` with
-none, and `If-Match: *` is refused because it is no precondition at all), and
-`POST …/bullets` appends to something. A ref the pod has never held answers
-`404 ref-unknown` — the same bytes as a ref outside your allowlist. So a scope's
-FIRST record cannot be made through the API at all; it is an operator step, and
-until somebody takes it the record does not exist anywhere the pod can serve.
-Measured 2026-09-03, on real entries stranded by exactly this.
+🔴 **A CREATE route EXISTS — `cairn create --scope S --ref R --file F` (`PUT`
+with `If-None-Match: *`, devrc#1254) — and it DOES create a scope's first entry,
+directory and all.** `create_entry` runs `path.parent.mkdir(exist_ok=True)`
+(`server.py`), commented *"how the store gained EVERY scope it has"*, and
+`test_a_scopes_FIRST_entry_creates_the_directory` asserts **201** plus the bytes
+on disk for a scope with no directory.
+
+🔴 **THE ONLY SCOPE-LEVEL GATE IS YOUR TOKEN'S SCOPE ALLOWLIST.** A scope outside
+it answers **404**; a scope INSIDE it with no directory yet is created. So the
+remedy for "I cannot create into scope X" is an allowlist edit, **not** seeding.
+
+🔴 **That 404 is byte-identical for FOUR different causes** — a scope outside your
+allowlist, a scope that never existed, a ref that resolves to nothing, and an
+entry the loader could not parse (`server.py`, and the same list in its README).
+Deliberately, so an error cannot enumerate the store. ⚠ That four-way ambiguity
+is about a **write 404 generally** (it reaches `append` and `If-Match` `PUT`
+through `_resolve_writable`). **On the CREATE path specifically only the
+allowlist arm can fire** — a ref resolving to nothing is the success case, a bad
+normalisation is 400, and the malformed-entry arm is not on that route — so for
+`cairn create`, "widen the allowlist" IS the right reading. ⚠ An earlier version
+of this block listed only two causes after being rewritten to widen the CREATE
+claim, and its replacement then told the reader to distrust the one reading that
+is correct here: wider on one axis, narrower on another, twice running.
+
+⚠ **THIS FILE HAS NOW BEEN WRONG TWICE ABOUT THE SAME SENTENCE, IN OPPOSITE
+DIRECTIONS.** It used to say there was no create route at all (false since
+#1254). The correction then said a first entry "is still an operator step —
+seeding", blaming an index walk — **also false**, and caught by a round-1 audit.
+The measurement behind it probed a scope that was absent *and* non-allowlisted,
+on a pod where those two sets are identical, so it could not tell the allowlist
+gate from the index walk and credited the wrong one. `claude/RULES.md`: *"An
+EMPTY RESULT cannot distinguish two mechanisms — go find the step that differs."*
+The discriminating control is: allowlist a scope, do NOT seed it, `cairn create`
+→ expect **201**.
+
+⚠ The failure a caller actually sees, measured 2026-09-11: `cairn create` into a
+non-allowlisted scope is **rc 6** `[not-found]`; into an allowlisted scope at a
+ref that exists is **rc 9** `[already-exists]`. Both wrote nothing. The codes
+differ, so rc 6 is a real reading — **but it is about the ALLOWLIST**, which is
+what the earlier version of this block got wrong.
+
+`~/.claude/skills/cairn/reference/operator-surface.md` carries the two ways an
+OPERATOR can tell a refused scope from an absent one; no client can.
 
 ## 🔴 The two different exit 4s
 
@@ -90,12 +125,15 @@ there; it is not restated here.
 
 ## Where a host reads from
 
-`scripts/lib/subsystem_read_store.py` is the ONE answer for devrc's OWN readers
-(the `subsystem-index` writer and `cairn-who`), and `cairn doctor`'s
-`reader-resolution` check prints it. ⚠ The deployed `cairn` is the pinned flake
-package and carries its OWN copy of that module; the two agree today and are
-consolidated in a later slice — so if they ever disagree, `doctor`'s printed
-path is the authority for the CLIENT, and this file's for the writer.
+There is now exactly ONE `subsystem_read_store`, and it ships inside the pinned
+`cairn` flake package. devrc deleted its forked copy (with four others) when it
+consolidated onto the pin, so the writer, `cairn-who` and the deployed client all
+resolve the same module — `cairn doctor`'s `reader-resolution` check prints the
+path it used. ⚠ **The two-copies caveat that used to live here is GONE, not
+merely improved**: there is no longer a devrc-side copy for the client's to
+disagree with. `scripts/lib/cairn_pin.py` is the seam that finds it
+(`$CAIRN_LIB`, else `cairn` on PATH → `libexec/cairn/lib`); it REFUSES rather
+than falling back, because there is nothing local left to fall back to.
 
 Two directories exist and they are not interchangeable:
 `~/.cache/subsystem-store` is the synced

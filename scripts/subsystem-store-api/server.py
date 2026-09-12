@@ -300,6 +300,15 @@ from urllib.parse import parse_qs, unquote, urlsplit
 _LIB = Path(__file__).resolve().parents[1] / "lib"
 sys.path.insert(0, str(_LIB))
 
+# 🔴 THE STORE-READER MODULES COME FROM THE PINNED `cairn` FLAKE INPUT, not
+# from `scripts/lib/` — devrc deleted its forked copies when it consolidated
+# onto the pin. `cairn_pin.ensure()` APPENDS the packaged `lib/` after the
+# line above and raises, naming both resolution routes and the remedy, when
+# the pin is not deployed. There is no local fallback.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 import subsystem_recall as rc  # noqa: E402
 
 # 🔴 THE PATH CLASSIFIER IS IMPORTED, NOT DEFINED HERE — it moved into

@@ -1,4 +1,5 @@
 ---
+clawgate-task: 375
 ---
 # Handoff: tmux-webapp — 2026-08-26
 
@@ -15,80 +16,19 @@ the fault, and once end to end through the UI path after the fix. Rank 33 carrie
 the evidence and the defect it found. (Carried forward across a Status replace —
 it is the arc's central result, not status.)
 
-🔴 **LIVE IS `0.8.31`. Rank 42 is MERGED, and a seven-item tmux-page feedback round
-shipped on top of it** — six PRs, one deploy, and a host-side fix in `devrc` that made
-the launcher work for the first time.
+**Session total: 14 PRs merged, 2 open.** devrc #1392, #1389, #1388, #1408, #1468,
+#1483, #1534. homelab-infra #769, #771, #789, #791, #796, #797. Each verified by
+reading content off the mainline ref — a squash merge never makes the branch head
+an ancestor, so ancestry would have lied on every one.
 
-| PR | what | squash |
-|---|---|---|
-| `ZacxDev/homelab-infra#749` | **rank 42** — the three UI residuals | `6ee01514c` |
-| `innovation-upstream/devrc#1364` | task 516 producer — `window_activity` on the wire | `112a52255` |
-| `ZacxDev/homelab-infra#751` | task 520 — clawgatectl reaches tmux/transcripts/panes/launch | `439fa7643` |
-| `ZacxDev/homelab-infra#752` | task 516 consumer — per-window age + `windows_measured` | `bf1a32945` |
-| `ZacxDev/homelab-infra#753` | task 518 — JSONL chat view replaces `chat.go` | `59230349b` |
-| `ZacxDev/homelab-infra#754` | task 517 — reply DELIVERY state from the queue | `1e548f431` |
-| `ZacxDev/homelab-infra#760` | task 523 — launch→session linkage | `0826aa200` |
-| `innovation-upstream/devrc#1379` | task 524 — the launcher's PATH defect | `18bc15004` |
-| `ZacxDev/homelab-infra` | deploy pin **0.8.31** | `c3eaee1d1` |
+**Open:**
+- **devrc #1549** — scope the wide-kill ledger to executable text (see the resolved
+  investigation below). CI starting.
+- **devrc #1515** `zach/clawgate-cross-session-reach` — clawgate skill cross-session
+  reach. Rebased to 0-behind locally; its remaining red is #1549's subject, not its own.
 
-**Verified live by CONTENT after the deploy** (the version is never the check):
-`window_activity`, `window_id` and `windowsMeasured=true` are all on the wire in
-`GET /api/tmux/snapshot`; `/ui/tmux` renders **35 distinct** relative ages on one
-page (the anti-vacuity check that they are per-WINDOW, not per-host); the session
-page carries `data-session-view-choice`×5 and `data-reply-state`, with
-`lg:grid-cols-2` and `RenderChatPage` both **0** as negative controls; and the two
-new transcript routes answer **200** while `/nosuch` answers **404**.
-
-🔴 **THE LAUNCHER RAN `claude` FOR THE FIRST TIME.** Task 523's measurement found it
-had never worked — every launched window died on `claude: command not found`. Task
-524 fixed it in `devrc`, and a live launch after the deploy opened a window running
-Claude Code. Pane PATH went **3 entries → 15**, with `claude` resolvable at
-`/home/zach/.nix-profile/bin`.
-
-### 🔴 STILL OPEN — three of the seven feedback items are DESIGNED, NOT BUILT
-
-Filed with acceptance criteria and closing conditions; no code exists for any of them.
-They live as clawgate tasks **519**, **521** and **522** — deliberately NOT as handoff
-ranks, because the ranked list below is this arc's own queue and the board is theirs.
-
-### ⚠ NOTHING IS `complete` — every card is `ready_for_review`
-
-516/517/518/520/523/524 all need live click-through by the operator. **524's is
-actively blocked**: window `@58` on `workbench`/`scratch` is parked on Claude Code's
-trust-folder prompt, so no `claude_session_id` is ever minted. Measured over 6
-snapshots; corroborated by a frozen `window_activity` and **0** new
-`~/.claude/projects/**.jsonl` files. Answering that prompt is an operator security
-decision. `tmux kill-window -t @58` once read.
-
-### The three unbuilt items — clawgate tasks 519 / 521 / 522
-
-**519 — transcript streaming.** Tail the JSONL over the host agent's
-existing outbound long-poll so the session view is seconds-fresh instead of the
-current 5-minute timer, and lift the `MaxSessionsPerPush = 8` coverage cap.
-🔴 **The operator's scoping decision, verbatim, so it is not re-litigated:** *"2
-distinct systems: clawgate and the session streaming is only for me. Cairn and the
-handoff session shipping is for the entire team and needs to be opt-in (as it
-currently is)."* So task **362**'s "a person must knowingly trigger the share"
-constraint governs the TEAM corpus and does NOT bind this. Do not merge the two
-systems and do not relax 362's opt-in on the strength of this.
-⚠ Decide whether task **180** (every clawgate deploy is a hard API outage —
-`Recreate` + `replicas: 1`) gates it: today a deploy drops a 5-minute push the next
-push repairs; after this it drops live streams on every deploy.
-**521 — chief agent.** A kubeclaw agent with full `clawgatectl`
-reach, a `chief` verb, and a clawgate-skill section so the operator's own Claude
-Code can drive it. 🔴 **BLOCKED on task 375** (`ready_for_review`, not complete):
-measured, `command -v clawgatectl` is **ABSENT** in a live agent pod and that
-image has no Dockerfile in git. Re-verify in a real pod rather than trusting 375's
-status field.
-🔴 Chief is a privilege concentration — send-keys into any pane on either host plus
-process launch, reachable through a chat box. Its writes must stay on the
-fail-closed tier and be attributable in the log by a FIELD, not by timing.
-**522 — chief slide-out + running recap.** Depends on 521
-for an inference path; clawgate has **no LLM client** (`go.mod` carries no
-anthropic/openai dep — an "agent" here is a kubeclaw pod it provisions).
-Operator decision: cover **every** window on `/ui/tmux`, not only those with a
-stored transcript — so the recap must say which input it used, since a
-`claude: false` pane can only be summarised from `pane_preview`.
+**Task 375 remains code-complete and BLOCKED** on the `agent-pods` Kustomization,
+Flux-suspended since 2026-06-07. Unchanged — see rank 43.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1175,6 +1115,44 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     host/port/user/database into the browser.
     forcing: none
 
+43. **Decide the `agent-pods` suspension** (homelab cluster, no repo files). Resume it, or declare
+   `suspend: true` in git so the state is visible and 375 is marked blocked-by-design. Prune risk
+   measured at **0 live objects**. This is the only thing standing between 375 and closed.
+   forcing: incident — a merged PR (#769) is silently inert in production, and has been for every
+   merge under that path since June.
+44. **Fix the kill-mention ledger on devrc `main`** — `scripts/claude-hooks/tests/test_guard_core.py:2525`,
+   add `claudedocs/handoff-tmux-scratchpad-bar-statusline.md`. One line, own PR.
+   forcing: gate — red on `main`, so it can surface in any devrc PR's pytests leg.
+45. **Land #1515** (devrc, `claude/skills/clawgate/`) — CI re-running after the size-ratchet fix.
+   IN FLIGHT: innovation-upstream/devrc#1515.
+   forcing: none
+46. **Land #797** (homelab-infra, `containers/clawgate/internal/ui/`) — 4 checks pending.
+   IN FLIGHT: ZacxDev/homelab-infra#797.
+   forcing: none
+47. **Confirm the tmux collapse defect was the operator's actual symptom.** #796 fixed a real
+   force-open bug, but the connected Brave profile has **zero** `cg.tmux.group.*` keys, so the
+   collapse is not active there. Read that localStorage on the device where sessions appear
+   missing (a phone is the untested case).
+   forcing: user — the operator reported missing sessions; the fix is unconfirmed against it.
+48. **Re-spec task 521 around a per-agent token.** `tier` discriminates the DOOR (`token` vs
+   `browser`), not the caller; one shared `CLAWGATE_TERMINAL_TOKEN` makes every machine caller
+   identical. `requireAgentToken` (`internal/api/agent.go:30-46`) already resolves a per-agent
+   token to a named row — that is the shape. Blocked until 375 closes.
+   forcing: security — 521 concentrates send-keys-into-any-pane plus process launch behind a chat
+   box, on an auth tier whose attribution is measured non-existent.
+49. **Task 522** needs 521 AND an LLM-client decision — clawgate's `go.mod` carries no
+   anthropic/openai dependency, so an "agent" there is a kubeclaw pod it provisions.
+   forcing: none
+
+50. **Land #1549** (devrc, `scripts/claude-hooks/tests/test_guard_core.py`) — scopes the
+    wide-kill ledger to executable text so a handoff doc stops red-lining `main`.
+    IN FLIGHT: innovation-upstream/devrc#1549.
+    forcing: gate — the ledger red-lined `main` three times in one day, blocking every
+    devrc PR each time.
+51. **Land #1515** once #1549 is in — already rebased 0-behind; its only red was #1549's
+    subject. IN FLIGHT: innovation-upstream/devrc#1515.
+    forcing: none
+
 ## Open investigations — live diagnosis state
 
 🔴 **THE WORKBENCH STILL CANNOT PULL FROM `docker.io`. BUILD CLAWGATE IMAGES ON THE LAPTOP.**
@@ -2015,6 +1993,100 @@ are corrected in place.
   gate), or re-launch into an already-trusted directory, then
   `curl -s -H "Authorization: Bearer $TOK" $B/api/tmux/snapshot` and read
   `claude_session_id` for that `window_id`. `tmux kill-window -t @58` once read.
+
+### 🔴 `agent-pods` Kustomization is Flux-SUSPENDED and has been since 2026-06-07 — task 375 cannot close
+
+- **Symptom + exact repro:** `#769` merged, Flux has the revision, the HelmRelease reports
+  `Ready=True` — and the pod still runs the OLD image. `KUBECONFIG=$KC_HOMELAB kubectl get
+  kustomization agent-pods -n flux-system -o json | python3 -c "import json,sys;
+  d=json.load(sys.stdin); print(d['spec'].get('suspend'), d['status']['lastAppliedRevision'])"`
+- **Observed (with values):** `suspend: true`; `lastAppliedRevision`
+  `trunk@sha1:c8faceea74f034b28fb0291900361a52df8b84ed`, a revision dated **2026-06-06 20:27
+  -0500**. Field owner is `manager=flux, op=Update, time=2026-06-07T01:58:20Z` — read with
+  `--show-managed-fields`, which is required; `kubectl get -o json` strips them by default and a
+  check that omits it reads an empty list and proves nothing. The suspension lands **31 minutes
+  after** the revision it pinned.
+- **Ruled out — prune danger.** 36 agent dirs were deleted from git during the suspension
+  (56,474 deletions over 120 files, the Clankup decommission) and **ZERO of their namespaces are
+  live**; only 2 `devpod-*` namespaces exist at all (`devpod-initiatives`, `devpod-task-drafter`).
+  So `prune: true` would delete nothing live. Instrument validated first: both known-live agents
+  match the `devpod-<dir>` pattern, and a looser substring test also returns 0. `via: measurement`
+- **Ruled out — "everything under that path is inert AND visibly broken".** It reports
+  `Ready=True ReconciliationSucceeded` forever, because a suspended Kustomization keeps reporting
+  its last successful apply. The only tell is that its `lastAppliedRevision` differs from every
+  sibling's. `via: measurement`
+- **Ruled out — the HelmRelease is unmanaged.** `initiatives-agent` (ns `flux-system`) carries NO
+  kustomize ownership labels and pulls its chart from a SEPARATE `kubeclaw` GitRepository, so
+  helm-controller keeps upgrading it (**v1725** revisions) against a moving chart while its spec
+  stays frozen at June. The object looks maximally alive while being deaf to git. `via: measurement`
+- **Leading hypothesis (INFERENCE, not measurement — labelled):** the suspension ends a two-hour
+  clawgate sprint (0.3.19→0.3.25) whose commits include *"apply granted-profile env + kubeconfig
+  to agents"*; commits stop dead at that point. Reads as agent provisioning moving from Flux to
+  clawgate. **Nothing in git, no task and no doc records it** — `suspend` is absent from
+  `clusters/homelab/flux-system/root-kustomizations/system/agent-pods.yaml`, which has exactly one
+  commit ever. Because the `flux` CLI owns the field under SSA, kustomize-controller can never
+  remove it. `via: assumed`
+- **Next probe:** decide whether to resume. `KUBECONFIG=$KC_HOMELAB kubectl patch kustomization
+  agent-pods -n flux-system --type=merge -p '{"spec":{"suspend":false}}'` then watch
+  `lastAppliedRevision` advance and the pod roll. Afterwards the one command that settles 375 —
+  note `sh -c` is load-bearing and the cluster is **homelab**, not workbench:
+  ```bash
+  POD=$(kubectl --kubeconfig "$KC_HOMELAB" -n devpod-initiatives get pods -o jsonpath='{.items[0].metadata.name}')
+  kubectl --kubeconfig "$KC_HOMELAB" -n devpod-initiatives exec "$POD" -c agent \
+    -- sh -c 'command -v clawgatectl && clawgatectl --version; command -v python3'
+  ```
+  Expect `/usr/local/bin/clawgatectl` + `0.8.31`, with `python3` as the positive control.
+  Rollback is `image.tag: "2026.6.11-py"`.
+
+### 🔴 `test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_classified` is RED on devrc `main`
+
+- **Symptom + exact repro:** any devrc PR's `devrc-pytests` can carry this failure. Reproduce on a
+  clean checkout: `git worktree add --detach /tmp/x origin/main && (cd /tmp/x && python3 -m pytest
+  scripts/claude-hooks/tests/test_guard_core.py -k test_every_kill_server_call_site_in_the_repo_is_classified)`
+- **Observed (with values):** `added: ['claudedocs/handoff-tmux-scratchpad-bar-statusline.md']` —
+  a file that mentions a wide tmux kill and is not entered in `_KILL_MENTION_LEDGER`
+  (`scripts/claude-hooks/tests/test_guard_core.py:2525`).
+- **Ruled out — caused by #1515.** Control run on clean `origin/main` at `687dd7a7` fails the
+  identical test with no PR involved; #1515 touches only `claude/skills/clawgate/**`.
+  `via: measurement`
+- **Next probe:** add the file to `_KILL_MENTION_LEDGER` with a classification (it is prose — a
+  handoff write-up), in its own PR.
+
+### ✅ RESOLVED — the wide-kill guards red-lined devrc `main` THREE times in one day, and only one was a real defect
+
+- **Symptom + exact repro:** `tekton/devrc-pytests` red on unrelated devrc PRs.
+  `git worktree add --detach /tmp/x origin/main && (cd /tmp/x && python3 -m pytest
+  scripts/claude-hooks/tests/test_guard_core.py -k kill -q)`
+- **Observed (with values):** three separate reds, three different causes.
+  1. `handoff-tmux-scratchpad-bar-statusline.md` — classified upstream by another session
+     while I was working. My own added entry was a **duplicate dict key silently shadowing
+     theirs**; the mutation sweep is what exposed it (dropping mine changed nothing).
+  2. `handoff-tmux-webapp.md` — a **FALSE positive**. `_MENTION_RE = r"kill-s(?:erver|ession)"`
+     had no left word boundary, so it matched inside **s·kill-session**, from the claim slug
+     `clawgate-skill-session-verbs`. Fixed in **#1534** (`7344e76f`) with
+     `(?<![A-Za-z0-9_])`. Measured across every tracked file: **14 → 13** files, removing
+     exactly the false positive, matching nothing new.
+  3. `handoff-mention-system-repos.md` — a **TRUE** positive, and the one that proved the
+     pattern: its offending line is *documenting this very guard*. Writing about the guard
+     tripped the guard.
+- **Ruled out — "these are unrelated flakes".** Each was reproduced on a clean `origin/main`
+  worktree with no PR involved. `via: measurement`
+- **Ruled out — "classify each one as it appears".** Composition at the time: **11 of 13**
+  ledger entries were real `scripts/` call sites; **all three** failures came from the
+  2-entry `claudedocs/` half. That is the permanently-red-gate shape — every PR in the repo
+  blocked on an unrelated doc. `via: measurement`
+- **The fix (operator's call, 2026-09-12):** scope the LEDGER to executable text; prose stays
+  guarded by `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`, which scans
+  claudedocs too but matches only real shell-command shape and runs each hit through
+  `check_tmux_kill_shared_server`. **PR #1549.**
+- 🔴 **My first coverage control was VACUOUS and is worth not repeating.** I planted a wide
+  kill in `claudedocs/handoff-comic-flex.md` and the guard passed — I could have written
+  that up as "narrowing loses nothing". That file **does not exist in this repo**; `git`
+  said so in the same output, the scanner skipped it, and the mutant never ran. Redone
+  against a file `git ls-files` returns: guard goes **RED**, tree restored byte-identical.
+  `via: measurement`
+- **Next probe:** none — #1534 merged, #1549 open. If a fourth doc-mention red appears after
+  #1549 lands, the scoping did not hold and the exclusion list is wrong.
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -3358,31 +3430,90 @@ are corrected in place.
   write surface cannot be armed from outside, so every spec that wants to click Send
   has to build its own server.
 
+- 🔴 **`tier` discriminates the DOOR, not the CALLER.** Measured on the live ledger: 6 `browser`
+  / 3 `token`, non-forgeable (a POST to the token route carrying `{"tier":"browser"}` stored
+  `tier:"token"`). But one shared terminal token means a chief write is indistinguishable from a
+  host-agent write. Do not claim per-session attribution.
+- 🔴 **Task 180's premise is STALE.** clawgate is `RollingUpdate`, not `Recreate` — verified on the
+  live deployment and in `clusters/workbench/apps/clawgate/deployment.yaml:60`, which carries a
+  rollback comment describing how to revert *to* `Recreate`. Two agents were briefed with the old
+  claim by me and it fed into their risk assessments.
+- 🔴 **clawgate runs on the WORKBENCH cluster, not homelab.** `ns clawgate` does not exist on
+  `$KC_HOMELAB`. The devpod agents are on homelab. Two different clusters; I briefed this wrong once.
+- 🔴 **`.envrc` is NOT tracked in devrc** (it IS in homelab-infra). Do not carry the assumption across.
+- 🔴 **Only `(host, pane_id)` uniquely identifies a window.** Measured over 87: `pane_id` 56
+  distinct, `window_id` 56, `codename` 19 of 69 **with 18 windows carrying none**. `codename` is
+  unusable as a selector. The wire key for the tmux session is camelCase **`tmuxSessionName`** —
+  querying `session` returns a confident "88/88 missing".
+- 🔴 **`term send` is subject to NONE of the calling session's PreToolUse hooks.** Found live: a
+  a wide tmux kill was blocked by a guard, and a send would have bypassed it. That is the
+  blocked action, not a workaround.
+- 🔴 **The clawgate skill is a home-manager `home.file` COPY** (`readlink -f` lands in
+  `/nix/store`), so merging #1515 does not make it live — that needs `home-manager switch`.
+- 🔴 **SKILL.md has a byte-exact ratchet at 15,665** (`test_the_skill_did_not_grow`), rule: any
+  addition needs an eviction in the SAME commit. It is a DIFFERENT instrument from
+  `scripts/skill-audit.py` (12,038 budget / 40,960 cap) — reading the wrong gate and finding
+  headroom is indistinguishable from having it, until CI.
+- 🔴 **A poll must bind to the head SHA.** After a force-push the PREVIOUS head's terminal checks
+  linger, so a poll reading them settles on another commit's verdict. Use ONE
+  `gh pr view --json headRefOid,statusCheckRollup` call and abort if HEAD moves. Also: `gh pr
+  checks` prints `pass`/`fail`, **not** `success`/`failure`, and prints prose ("no checks reported
+  on the branch") when the rollup is empty — a naive line-count reads that as checks. Minimum 4
+  for homelab-infra, 3 for devrc.
+- 🔴 **The devrc gate names only ONE failing test even when several targets fail.** Read the
+  per-target `FAIL  <path>  (…failed=N…)` lines; the summary line is not the set.
+- 🔴 **Verified-in-isolation is the vacuous green.** #1483's merge-blocker was a fixture shebang
+  tripping a cross-file guard; three audit rounds ran the changed file alone (50/50 green) and
+  none could see it. Three separate PRs this session were blocked by cross-file ledger guards.
+- **Scoping a sentence to make a claim true is what keeps failing.** #1483's ladder converged only
+  when the guarantee moved INTO the code (a union that is a superset by construction), after two
+  rounds of replacing one false absolute with another.
+- **A poll timing out is not evidence about the PR** — check the PipelineRun's real
+  start/completion times. devrc's pytests tier genuinely runs 20–55 min; a status timestamp is when
+  the status was POSTED, not the run duration.
+
+- 🔴 **A guard can be tripped by PROSE THAT DOCUMENTS IT.** Three reds in one day on devrc
+  `main`, all from handoff docs, one of them a doc whose only content was writing up the
+  guard. When a check scans every tracked file for a *word*, every future write-up about it
+  is a future red. Scope such a check to the text that can actually execute, and let a
+  shape-aware check cover prose.
+- 🔴 **A regex without a left word boundary matches inside another word** — `kill-session`
+  lives inside `s·kill-session`. My own diagnostic grep reproduced the same bug while
+  hunting it, which is how it hid: the tool and the guard agreed, and both were wrong.
+- 🔴 **A duplicate dict key is silent in Python.** Adding a ledger entry another session had
+  already added shadowed theirs with no error. Only the mutation check (drop it → nothing
+  changes) revealed it was doing no work.
+- 🔴 **A mutation planted in an UNTRACKED file scores SURVIVED.** The scanner iterates
+  `git ls-files`; appending to a path git does not know produces a green that means nothing.
+  Verify the target is tracked-and-modified (`git status --porcelain <path>`) before reading
+  the verdict.
+- 🔴 **`git commit -F` with a heredoc is parsed by the bash guard as real commands.** A commit
+  message quoting a banned command is itself blocked. Write the message with the Write tool
+  and pass the file — which the repo's rules prefer anyway.
+- **A `gh pr checks` poll must bind to the head SHA in ONE json call.** After a force-push the
+  previous head's terminal checks linger; a poll reading them settles on another commit's
+  verdict. Mine printed `SETTLED n=4` over a rollup that was actually empty.
+
 ## How to verify
 
 ```bash
-# 1. what is actually live (never read a version from this doc)
-clawgatectl health          # expect 0.8.28
+# 375's closing condition — homelab cluster, sh -c is load-bearing
+POD=$(kubectl --kubeconfig "$KC_HOMELAB" -n devpod-initiatives get pods -o jsonpath='{.items[0].metadata.name}')
+kubectl --kubeconfig "$KC_HOMELAB" -n devpod-initiatives exec "$POD" -c agent \
+  -- sh -c 'command -v clawgatectl && clawgatectl --version; command -v python3'
 
-# 2. 🔴 THE VERSION IS NOT THE CHECK — verify the FEATURES by content
-B=http://192.168.50.250:30302
-curl -s "$B/"        | grep -c 'min-\[2560px\]:max-w-\[150rem\]'   # 1  wider shell
-curl -s "$B/"        | grep -c '2xl:max-w-\[96rem\]'               # 0  the old cap is gone
-curl -s "$B/ui/tmux" | grep -c 'auto-fit,minmax(32rem,1fr)'        # >0 adaptive card grid
+# the suspension that blocks it
+kubectl --kubeconfig "$KC_HOMELAB" get kustomization agent-pods -n flux-system \
+  -o jsonpath='{.spec.suspend} {.status.lastAppliedRevision}{"\n"}'
 
-# 3. the two that need a session with the right content
-SID=$(curl -s "$B/ui/tmux" | grep -oE '/session/[0-9a-f-]{36}' | head -1 | cut -d/ -f3)
-curl -s "$B/session/$SID" | grep -c 'data-chat-freeform-reply'     # 1 when a pane resolves
-curl -s "$B/session/$SID" | grep -c 'data-tool-detail'             # >0 only if that tail HAS tool calls
-#    ⚠ a 0 on the last one is absence of TOOL RECORDS, not absence of the feature —
-#    scan several sessions before concluding anything.
+# the force-open fix is on trunk (expect 1 def, 0 live equality)
+git -C ~/workspace/homelab-talos show origin/trunk:containers/clawgate/internal/ui/tmux.go \
+  | grep -c 'func needsHuman'
 
-# 4. the host half (rank 32's closing condition), both hosts
-systemctl --user is-active tmux-reply-agent
-ssh zach@10.42.0.100 'systemctl --user is-active tmux-reply-agent'
-# 5. 🔴 `active` only says the process is alive. A repeating failure is logged ONCE,
-#    so ONLY the two startup lines means the poll is being ANSWERED:
-journalctl --user -u tmux-reply-agent -n 20 --no-pager -o cat
+# the kill-ledger red on devrc main
+git -C ~/workspace/devrc worktree add --detach /tmp/kc origin/main && \
+  (cd /tmp/kc && python3 -m pytest scripts/claude-hooks/tests/test_guard_core.py \
+     -k test_every_kill_server_call_site_in_the_repo_is_classified -q)
 ```
 ## Run this first — the index, one read-only command
 ```bash

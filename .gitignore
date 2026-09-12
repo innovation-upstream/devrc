@@ -63,3 +63,9 @@ __pycache__/
 # covers the generated files but not the directory itself, so without this line
 # the dir shows up untracked forever and is one `git add .` from being staged.
 /.opencode/
+
+# subsystem-store-api build staging. `build-push.sh` copies the PINNED cairn
+# reader modules here so a docker build context can reach them (/nix/store
+# cannot be COPYed from). Generated, never authored — and never committed, or the
+# repo would carry a second copy of exactly the modules it just deleted.
+/scripts/subsystem-store-api/.cairn-lib/

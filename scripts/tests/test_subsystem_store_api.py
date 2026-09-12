@@ -91,6 +91,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+
 # 🔴 ONE bound for every "this should already have happened" wait in this module
 # — the localhost HTTP round-trips, `wait_closed`, `await_audit`. These are
 # HANG-DETECTORS: they exist so a broken server fails the test instead of hanging
@@ -146,13 +154,52 @@ ROOT = Path(__file__).resolve().parents[2]
 # Re-measure before deleting any of this, and do not upgrade the table into
 # "proven".
 #
-# ⚠ AND THIS TEST WAS NEVER THE WORST ONE, which matters because it was ranked and
-# worked as though it were. In the same pre-fix window
-# `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
-# (`test_analyze_service_index_escrow_verify.py`) failed 8 times to this test's 4 —
-# twice as often — and is also at 0 post-fix. A flake that is vivid because it has
-# a long diagnosis written about it is not thereby the most frequent one: COUNT
-# them before choosing which to chase.
+# 🔴 THE COMPARISON THAT USED TO SIT HERE WAS WRONG — RETRACTED 2026-09-11. It
+# read: `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
+# (`test_analyze_service_index_escrow_verify.py`) "failed 8 times to this test's
+# 4 — twice as often — and is also at 0 post-fix", concluding COUNT them before
+# choosing which to chase. The count was right; the conclusion was wrong. THAT
+# TEST IS NOT A FLAKE, AND `ce9b55c3` NEVER TOUCHED IT. Three measurements, same
+# instrument as the table above (200 PR heads, 2026-09-05..09-11, 197 terminal
+# verdicts):
+#
+#   * MECHANISM — it is not on this fix's path. That file imports no store
+#     server, no `store_siting`, no `build_server`; it drives `escrow-verify.py`
+#     against an in-memory `FakeDownloader`, so `_replace_bytes`'s in-request
+#     fsync is never reached. `ce9b55c3`'s diff names the file ZERO times, and
+#     the test runs in 1.71 s.
+#   * TIME — all 8 failures fall inside ONE 14-hour window on 2026-09-08
+#     (05:44Z..19:44Z) across 8 distinct heads, and EVERY run reports `failed=7`
+#     or `failed=8`: a whole-suite red hitting every open PR at once.
+#   * CAUSE — nixpkgs moved `age` to 1.3.2, and that test pins age's tamper
+#     verdicts by exact string equality. Re-keyed by #1392 (`94f82796`,
+#     09-08T18:26Z) and #1403 (`4f49f5dc`, 20:32Z) — TWO DAYS BEFORE `ce9b55c3`
+#     (09-10T20:56Z) existed. The two failures after 18:26Z are stale-base heads
+#     that had not yet picked up #1392.
+#
+# 🔴 SO COUNTING IS NOT THE RULE — COUNTING IS WHAT PRODUCED THE ERROR. A raw
+# verdict count ranked a one-day toolchain outage as this repo's worst flake.
+# Before a count means anything, split the population with two mechanical tests:
+#
+#   (a) SCATTER — a flake's failures spread across days; an environment red
+#       clusters in one window. THIS test: 5 failures on 5 distinct heads across
+#       4 separate days (09-06, 09-07, 09-08, 09-09 x2). The escrow one: 8 in 14
+#       hours. ⚠ That 5 is from the 200-head sample read 2026-09-11 and the
+#       table above says 4 from a differently-drawn one — which is the point:
+#       the SCATTER is the claim, not the count, because the count moves with
+#       the sample and the shape does not.
+#   (b) `failed=N` — a flake takes down ONE test (`failed=1`); an environment
+#       change takes down the same N>1 on every head at once.
+#
+# Only count what survives both.
+#
+# ⚠ AND EVERY COUNT HERE IS A LOWER BOUND — THE TABLE ABOVE INHERITS THIS.
+# GitHub truncates a status description at 138 characters, so only the FIRST
+# failing test is ever named; a run where a test failed behind an
+# alphabetically earlier one is invisible to this instrument. Bounded by
+# arithmetic on the same rows (`collected - passed - skipped`): of the 14
+# post-fix failures, 12 derive `failed=1`, one derives 2, and one is
+# unparseable — so at most two post-fix runs could be concealing anything.
 #
 #   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
 #     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …
@@ -233,7 +280,7 @@ API_DIR = ROOT / "scripts" / "subsystem-store-api"
 SERVER_PATH = API_DIR / "server.py"
 SEED_PATH = API_DIR / "seed.sh"
 VERIFY_PATH = API_DIR / "verify-byte-identity.sh"
-RECALL_PATH = ROOT / "scripts" / "lib" / "subsystem_recall.py"
+RECALL_PATH = pinned("subsystem_recall")
 
 
 def _load_server():
@@ -260,16 +307,24 @@ assert resolver.classify_path is api.classify_path, (
 )
 
 # 🔴 THE SEAM THAT MAKES A POD-SHAPED `host:` LINE REACHABLE IN-PROCESS.
-# `subsystem_recall` does `from subsystem_touch import store_host_line`, and
-# `store_host_line` calls `store_host()` — a lookup in THIS module's globals, by
-# design (`subsystem_touch.store_host`'s docstring: "one injection point makes
-# the reader and the writer agree"). So patching it here moves what the
-# IN-PROCESS server renders while the local CLI, which `run_verify` starts as a
-# SUBPROCESS, keeps this machine's real identity. That asymmetry is precisely
-# the workbench-vs-pod shape, and nothing else in this harness produces it.
-touch = sys.modules["subsystem_touch"]
+# `subsystem_recall` does `from entry_shape import store_host_line`, and
+# `store_host_line` calls `store_host()` — a lookup in `entry_shape`'s globals,
+# by design (that module's docstring: "one injection point makes reader and
+# writer agree"). So patching it here moves what the IN-PROCESS server renders
+# while the local CLI, which `run_verify` starts as a SUBPROCESS, keeps this
+# machine's real identity. That asymmetry is precisely the workbench-vs-pod
+# shape, and nothing else in this harness produces it.
+#
+# ⚠ IT WAS `subsystem_touch` UNTIL devrc CONSOLIDATED ONTO THE PINNED CLIENT.
+# The writer no longer owns this vocabulary — both halves import it from the
+# shared `entry_shape` — and the pod image does not even carry `subsystem_touch`
+# any more, so naming it here would not merely patch the wrong module, it would
+# `KeyError` at import. The name is taken out of `sys.modules` deliberately:
+# `server.py` has already imported it by the line above, and re-importing by
+# path would give a SECOND module object whose globals the server never reads.
+touch = sys.modules["entry_shape"]
 assert hasattr(touch, "store_host"), (
-    "subsystem_touch no longer exposes `store_host` — the byte-identity "
+    "`entry_shape` no longer exposes `store_host` — the byte-identity "
     "verifier's `host:` canonicalisation is tested through this seam, and a "
     "rename here would silently turn those tests into same-host self-checks"
 )
@@ -4203,7 +4258,81 @@ _RETRACTED_BOUNDARY = (
     # copies of the number drifted together, which is exactly what a repo-wide
     # needle catches and three hand-checked sites do not.
     "51 entries of headroom",
+    # 🔴 ALSO NOT A BOUNDARY CLAIM — SAME FAILURE MODE, SAME SCANNER, and this
+    # one is the argument for the scanner rather than an application of it.
+    # "there is no CREATE route" was true until devrc#1254 (`34d00d90`) shipped
+    # `PUT … If-None-Match: *` and the `cairn create` verb. `claude/skills/cairn/
+    # SKILL.md` then asserted it for 8 more days, and a hand sweep run while
+    # fixing THAT file reported the repo clean — it was case-sensitive, and of
+    # the four live copies it missed, one straddled a newline inside a
+    # docstring. A line-based grep structurally cannot see that one; this
+    # scanner normalises wraps and case, which is the whole point.
+    # 🔴 THIS COMMENT ITSELF CARRIED A FALSE CLAIM AND TOLD READERS NOT TO FIX
+    # IT — the worst shape a note in a guard can take, and it is recorded rather
+    # than deleted. It read: "a new SCOPE's first entry still cannot be created
+    # through the API (the index is built by walking the store root) — do not
+    # 'correct' that sentence into a falsehood in the other direction."
+    # MEASURED FALSE: `create_entry` runs `path.parent.mkdir(exist_ok=True)` and
+    # `test_a_scopes_FIRST_entry_creates_the_directory` (this file) asserts 201
+    # for an allowlisted scope with NO directory. The only gate is the token's
+    # scope allowlist. The probe that produced the wrong claim used a scope that
+    # was absent AND non-allowlisted on a pod where those sets coincide, so it
+    # could not separate the two mechanisms.
+    # ⚠ FALSE-POSITIVE RANGE: this needle is a short, generic phrase, unlike the
+    # long sentences above it. A TRUE statement about some OTHER API ("the
+    # auditloop plugin push API has no create route") trips it. That is the
+    # known cost; reword, or carry a retraction marker within `_MARKER_WINDOW`.
+    "no create route",
+    # 🔴 THE SECOND RETRACTION NEEDS ITS OWN NEEDLE, and leaving it out is how
+    # the FIRST one drifted for eight days. The replacement claim — that a new
+    # scope's first entry still could not be created, so it "remains an operator
+    # step" — was ALSO false, and a round-2 audit found an 8th live site spelling
+    # it this way inside a file whose other copy had just been corrected. A
+    # phrase-scoped hand sweep could not see it: it searched the MECHANISM
+    # ("walking the store root"), and this site states only the CONCLUSION.
+    # Pinning the conclusion is what closes that gap.
+    # ⚠ Deliberately NOT needling "walking the store root": that phrase TRULY
+    # describes `snapshot_freshness`, which really does walk the root, so it
+    # would fire on correct writing.
+    #
+    # 🔴 AND THE FIRST DRAFT OF THESE TWO NEEDLES BROKE THAT VERY RULE. They read
+    # "remains an operator step" / "is still an operator step" — no subject at
+    # all, i.e. ordinary English about any operator step anywhere. MEASURED: the
+    # repo carries 9 TRUE occurrences of "operator step" across 7 unrelated files
+    # (signal provisioning, nix disk cleanup, tmux-webapp, browser-bridge,
+    # cairn-oss-multi-instance), each ONE WORD from turning this gate red, and a
+    # round-3 audit turned it red by changing "is" to "remains" in a doc about
+    # `sudo`. `claude/RULES.md`: a permanently-red gate is worse than no gate.
+    # 🔴 AND NARROWING THEM ONCE WAS STILL NOT ENOUGH — THIS IS THE THIRD PASS.
+    # Round 3 rewrote them to "first entry remains/is still an operator step" and
+    # added three more taken verbatim from real sites. A round-4 audit built its
+    # own false-positive probe and SIX of ten TRUE sentences fired; my own probe,
+    # written independently, got SEVEN of eight. Worst of them fired on the
+    # supposedly-narrowed needle: "The first entry remains an operator step for
+    # the OSS multi-instance store" is TRUE — that store really has no create
+    # verb yet — so the needle was still unbound to WHICH store it is about.
+    # Every needle below now carries a token tying it to THIS pod/claim, and the
+    # pair is re-verified on every change: a false-positive probe of true
+    # sentences, and a mutation battery of real reassertions.
+    "scope's first entry remains an operator step",
+    "scope's first entry is still an operator step",
+    "the pod structurally cannot accept a new entry",
+    "seed.sh is the only path that ever created one",
+    "first record can only reach the pod through an operator",
+    # ⚠ The 9th site spelled the claim TWICE in one paragraph; round 3 needled
+    # only the first half. This is the second, and it was left uncaught until a
+    # round-4 audit ran a copy-back of it and watched it SURVIVE.
+    "only create path available to a session",
 )
+
+# 🔴 A STRING NEEDLE CANNOT CLOSE THIS CLASS, AND FOUR ROUNDS OF TRYING IS THE
+# EVIDENCE. Round 1 swept by MECHANISM ("walking the store root") and missed a
+# site spelling the CONCLUSION; round 2 needled one conclusion phrase and missed
+# two more spellings; round 3 found those. Every pass swept by STRING, and the
+# claim has no canonical wording. Before declaring this class clean, sweep by
+# MEANING — e.g. `first (entry|record)` within ~120 chars of `seed|operator`,
+# plus "only create path" — and do not write "all sites are corrected" again
+# without showing the sweep that establishes it.
 
 # A retraction has to QUOTE the claim to retract it, so an occurrence with one
 # of these NEARBY is a correction, not an assertion. Kept deliberately short: a
@@ -6072,6 +6201,21 @@ class TestPhaseOneScope:
         lib = ROOT / "scripts" / "lib"
         dockerfile = (API_DIR / "Dockerfile").read_text()
 
+        # 🔴 THE CLOSURE SPANS TWO TREES NOW. devrc deleted its forked reader
+        # modules and takes them from the pinned `cairn` package, so a module
+        # `server.py` needs is either devrc-local (`scripts/lib/`) or pinned
+        # (`PINNED_LIB`) — and the two are COPIED FROM DIFFERENT PLACES in the
+        # Dockerfile. Resolving against `scripts/lib` alone would silently stop
+        # walking at the first pinned module and report a closure of one, which
+        # is the "reassuring zero" version of exactly the rot this test exists
+        # to catch.
+        def _where(mod: str) -> tuple[str, Path] | None:
+            if (lib / f"{mod}.py").exists():
+                return ("devrc", lib / f"{mod}.py")
+            if (PINNED_LIB / f"{mod}.py").exists():
+                return ("pinned", PINNED_LIB / f"{mod}.py")
+            return None
+
         def local_imports(path: Path) -> set[str]:
             found = set()
             for node in ast.walk(ast.parse(path.read_text())):
@@ -6080,16 +6224,31 @@ class TestPhaseOneScope:
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         found.add(alias.name.split(".")[0])
-            return {m for m in found if (lib / f"{m}.py").exists()}
+            return {m for m in found if _where(m)}
 
-        # Entrypoints: what the server imports directly.
-        needed, queue = set(), ["subsystem_recall"]
+        # 🔴 THE ENTRYPOINT IS `server.py` ITSELF, not a hardcoded module name.
+        # It used to be `["subsystem_recall"]`, which was true and is now
+        # incomplete: the server also imports `cairn_pin`, the devrc-side seam
+        # that puts the pinned lib on `sys.path`. A missing `cairn_pin` builds
+        # fine and fails at pod start with an ImportError naming a module the
+        # Dockerfile never mentioned — the original defect, one module along.
+        needed: dict[str, str] = {}
+        queue = sorted(local_imports(SERVER_PATH))
         while queue:
             mod = queue.pop()
             if mod in needed:
                 continue
-            needed.add(mod)
-            queue.extend(local_imports(lib / f"{mod}.py"))
+            origin, path = _where(mod)
+            needed[mod] = origin
+            queue.extend(local_imports(path))
+
+        devrc_needed = {m for m, o in needed.items() if o == "devrc"}
+        pinned_needed = {m for m, o in needed.items() if o == "pinned"}
+        assert devrc_needed and pinned_needed, (
+            f"the closure came out one-sided ({sorted(needed.items())}) — after "
+            f"the consolidation it must span both trees, so this is a broken "
+            f"walk rather than a clean result"
+        )
 
         # 🔴 TWO LISTS, AND CHECKING ONLY ONE IS A GUARD NARROWER THAN THE
         # HAZARD. The first version of this test checked only the COPY lines —
@@ -6102,15 +6261,53 @@ class TestPhaseOneScope:
         ignorefile = (API_DIR / "Dockerfile.dockerignore").read_text()
         copied = set(re.findall(r"COPY scripts/lib/(\w+)\.py", dockerfile))
         unignored = set(re.findall(r"!scripts/lib/(\w+)\.py", ignorefile))
+        # The pinned half is staged by `build-push.sh` into `.cairn-lib/` and
+        # copied from there — a different prefix, so it needs its own pattern.
+        # Matching `(\w+)\.py` after either prefix would fold the two sets
+        # together and let a module copied from the WRONG tree satisfy the check.
+        staged = set(re.findall(
+            r"COPY scripts/subsystem-store-api/\.cairn-lib/(\w+)\.py", dockerfile))
+        staged_unignored = set(re.findall(
+            r"!scripts/subsystem-store-api/\.cairn-lib/(\w+)\.py", ignorefile))
 
-        assert not (needed - copied), (
-            f"Dockerfile does not COPY {sorted(needed - copied)} — the image "
-            f"would build and then fail to import at runtime."
+        assert not (devrc_needed - copied), (
+            f"Dockerfile does not COPY {sorted(devrc_needed - copied)} from "
+            f"scripts/lib/ — the image would build and then fail to import at "
+            f"runtime."
         )
-        assert not (needed - unignored), (
+        assert not (devrc_needed - unignored), (
             f"Dockerfile.dockerignore does not un-ignore "
-            f"{sorted(needed - unignored)} — it is an allowlist, so the file "
-            f"never reaches the build context and COPY fails outright."
+            f"{sorted(devrc_needed - unignored)} — it is an allowlist, so the "
+            f"file never reaches the build context and COPY fails outright."
+        )
+        assert not (pinned_needed - staged), (
+            f"Dockerfile does not COPY {sorted(pinned_needed - staged)} from "
+            f"the .cairn-lib/ staging dir. Those modules live in the PINNED "
+            f"package, which a docker build context cannot reach — "
+            f"`build-push.sh` stages them, and its module list must cover this."
+        )
+        assert not (pinned_needed - staged_unignored), (
+            f"Dockerfile.dockerignore does not un-ignore "
+            f"{sorted(pinned_needed - staged_unignored)} under .cairn-lib/."
+        )
+
+        # 🔴 AND THE THIRD LIST: `build-push.sh` is what PUTS the files there, so
+        # a Dockerfile/ignore pair that agree with each other and disagree with
+        # the stager still fails the build. Two lists agreeing was the original
+        # bug's shape; three is the actual hazard now.
+        stager = (API_DIR / "build-push.sh").read_text()
+        for mod in sorted(pinned_needed):
+            assert mod in stager, (
+                f"`build-push.sh` does not stage `{mod}.py`, so the COPY for it "
+                f"names a file that will not exist in the build context."
+            )
+
+        # `CAIRN_LIB` is how the container satisfies `cairn_pin` route 1 — there
+        # is no `cairn` on PATH in the image, so without it the server refuses at
+        # import with the pin's own "not found" message.
+        assert "CAIRN_LIB=/app/cairn-lib" in dockerfile, (
+            "the image does not set CAIRN_LIB, so `cairn_pin` has no resolution "
+            "route inside the container and every reader import refuses."
         )
 
     def test_nothing_in_this_directory_writes_to_the_store(self):

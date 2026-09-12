@@ -17,67 +17,56 @@ assertion. Fix that, and land the ops scripts that were sitting untracked in the
 workbench working tree where a `git checkout` would have deleted them unreported.
 
 ## State now
-- **#1412, #1436, #1455 all MERGED** (squashes `f06b106f`, `4e26ec9a`, `c68750f6`), each
-  verified by CONTENT rather than ancestry. **#1490 is OPEN** — the round-2 prose fixes for
-  #1455 — `MERGEABLE`, 0 behind `origin/main`.
-- **Both hosts converged and switched**, `ship.sh` → `converged + verified — 2 hosts compared,
-  both at 0150d71f` (a genuine two-host agreement claim, not a one-host run). Each host:
-  `VERIFIED — on branch main at origin/main (clean tree) + switched`, 0 dangling and 0 stale
-  managed artifacts.
-- **Rank 1 (runaway-menu) is DONE, and its premise was WRONG** — see the retired block below.
-  The laptop's copy was a stale orphan, not unsaved work; it was deleted, not committed.
-- **Rank 2 (round-2 delta audit of #1455) is DONE and produced #1490.** Five 🟡, no 🔴, and
-  **four of the five were sentences the round-1 fix wrote about itself.** 🔴 **The ladder is
-  NOT finished**: a round returning findings that needed fixing is followed by another round,
-  so round 3 on #1490's delta is the stop condition.
-- **Drift: rc=17, one item, pre-existing and not this arc's.** Both hosts `untracked: 0` and
-  `clean — main == origin/main`. The remaining rc17 is `homelab-talos/containers/clawgate`
-  being 1 behind `origin/trunk` — the `clawgatectl` build source. ⚠ It MOVED from the
-  workbench to the laptop when the ship advanced the laptop while its homelab-talos checkout
-  stayed put; it is the clawgate initiative's, not this one's.
-- **No clawgate task.** `resolve` → rc 5, positive control green (9 links for another session).
-  An unknown session id also answers 200 with an EMPTY ARRAY, so not a clean bill of health.
-- **Claim held: `journald-26-11-migration-2`.** Release it when #1490 merges and the ladder
-  terminates, or when the remainder is filed.
+- 🔴 **THE ARC IS CLOSED. Ranks 1 and 2 are both DONE, and the audit ladder that grew out of
+  rank 2 is STOPPED on a stated criterion, not on convergence** — see the block below, which
+  is the one thing to read before re-opening any of it.
+- **Merged, all verified by CONTENT (a squash is never an ancestor of its base):** #1412
+  `f06b106f` · #1436 `4e26ec9a` · #1455 `c68750f6` · #1479 `0150d71f` · #1490 `c38c5484` ·
+  #1499 `81549ca0` · #1500 `3eb8332b` · #1506 `7e02f51e` · #1513 `a89afba7` · #1517 `8ff5d0e4`
+  · #1523 `269d596e`.
+- **`scripts/diagnose-nix-disk.sh` is DELETED.** That was rank 2's answer, and asking the
+  question is what found a real 48.00 GiB accounting defect in its successor.
+- **`test_diagnose_disk_accounting.sh`: 231 assertions, 0 failures on `main`.**
+- **Both hosts converged and switched** at the time of the last `ship.sh` run
+  (`2 hosts compared, both at 0150d71f`). ⚠ Eight PRs have merged since, so the hosts are
+  BEHIND `main` again — nothing in them is a `home.file` target, so no switch is owed, but
+  `scripts/ship.sh` is the command if you want parity.
+- **Drift: rc 17, pre-existing and not this arc's** — `homelab-talos/containers/clawgate` is
+  behind its own upstream. It is the clawgatectl build source and belongs to the clawgate
+  initiative. It MOVED from the workbench to the laptop when a ship advanced one host.
+- **No claims held.** `journald-26-11-migration-1` and `-2` both released.
+- **No clawgate task.** `resolve` → rc 5 with a green positive control; an unknown session id
+  also answers 200 with an EMPTY ARRAY, so that is not a clean bill of health.
 
 ## Next steps (ranked)
-1. **Merge #1490, then run ROUND 3 on its delta.** Merge **without `--delete-branch`** (see
-   the gotcha) and delete the branch after the checks post. Round 3 is the ladder's stop
-   condition — round 2 was not clean. If round 3 returns only prose findings with no 🔴, stop
-   on the stated criterion and **write the reason into the summary**.
-   forcing: gate — the ladder has not terminated and #1455's code is already on `main` with no
-   CI verdict of its own.
-2. **Migrate the laptop's journald config.** It carries
+1. **Migrate the laptop's journald config.** It carries
    `services.journald.extraConfig = "SyncIntervalSec=30s";` at `configuration.nix:370` (the
    ONE-LINE form) on `26.11pre1058091.ffb3c9b700e7`, so its next `nixos-rebuild` hits the same
    assertion the workbench hit. The rewriter handles that form and is unit-tested for it, but
    has NEVER been RUN on that host — different claims. ⚠ The `configuration.nix:370` reading
-   is from 2026-09-08 and has NOT been re-verified. The laptop IS reachable
-   (`zach@10.42.0.100`; the LAN address is same-network-only) and is now current with
-   `origin/main`.
+   is from 2026-09-08 and has not been re-verified. The laptop is reachable on nebula
+   (`zach@10.42.0.100`); the LAN address is same-network-only by design.
    forcing: none
-3. **Give the shell half of `apply-journald-settings-migration.sh` automated coverage.**
+2. **Give the shell half of `apply-journald-settings-migration.sh` automated coverage.**
    Five audit rounds of trap-message fixes rest entirely on reading; a throwaway harness built
    by an auditor caught a branch-ordering hazard in seconds and does not exist in the repo.
    forcing: none
-4. **Fix the three deprecated-option warnings** from the 26.11 eval of
+3. **Fix the three deprecated-option warnings** from the 26.11 eval of
    `/etc/nixos/configuration.nix`: `services.dnsmasq.servers` → `.settings.server`,
    `services.gnome.tracker.enable` → `.tinysparql.enable`,
    `services.gnome.tracker-miners.enable` → `.localsearch.enable`. They still work today.
    forcing: none
-5. **`diagnose-disk-accounting.sh`: the enumerator's `find` feeds no `DENIED_LOG`.** A
-   top-level entry root cannot stat is dropped from section 2 with no tally, and section 3's
-   residual absorbs it silently. 🔴 **RETRACTED 2026-09-11 — this item was FALSE and is
-   closed.** The enumerator never stats its entries (`-name` + `-print0` at `-maxdepth 1` need
-   only the readdir name), so there is nothing to drop: MEASURED over a fixture holding a
-   mode-000 directory, a dangling symlink, a regular file and a directory, all four were
-   emitted with ZERO bytes on stderr. The claim began as "a FIFTH same-shape site" and reached
-   four separate places before anyone checked the shape it was said to share.
+4. **`diagnose-disk-accounting.sh`: two known untallied-drop sites remain untallied.**
+   `split_by_device`'s foreign-entry loop and section 5's per-PVC inode loop each drop a
+   directory root cannot stat with no count, so the figure each feeds is a floor presented as a
+   total. Recorded and machine-pinned (test section 13), deliberately not fixed: bash's
+   `[ -d ]` cannot separate "not a directory" from "stat refused" from "unmatched glob", so a
+   count needs a different enumeration, not a `+ 1`.
    forcing: none
-6. **A top-level directory that is a MOUNTPOINT for another fs is counted as root-fs.**
-   Flagged by round 2 as out of range and unaudited: `/boot` is emitted by the enumerator,
-   then walked by `find "$d" -xdev`, whose `-xdev` anchors to *that* filesystem — so its
-   inodes land in section 2's totals. Predates this arc and is unchanged by it.
+5. **A top-level directory that is a MOUNTPOINT for another fs is counted as root-fs.**
+   `/boot` is emitted by the enumerator, then walked by `find "$d" -xdev`, whose `-xdev`
+   anchors to *that* filesystem — so its inodes land in section 2's totals. Predates this arc,
+   flagged by an auditor as out of range, never measured on this host.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -289,29 +278,88 @@ workbench working tree where a `git checkout` would have deleted them unreported
   gets replaced on the next update and this keeps being re-derived as an outage. **Every
   laptop fact in this doc came over nebula.**
 
+- 🔴 **`gh pr merge --delete-branch` while checks are PENDING guarantees they ERROR.** Measured
+  on #1455: merged `19:36:43Z`, Tekton started `19:40:14Z`, both legs `step clone failed
+  (rc 128)`. `ERROR` is not `FAILURE` — a broken gate, not a bad change — and it looks like a
+  red at a glance. That PR merged with NO automated signal at all. Merge without
+  `--delete-branch`, delete after the checks post. Every PR after it in this arc did that.
+- 🔴 **A "rescue this unsaved work" item can be exactly backwards — HASH IT FIRST.** A 145-line
+  laptop-only `scripts/runaway-menu` was byte-identical to a blob a later commit deliberately
+  DELETED in a refactor. Committing it would have reverted that refactor.
+  `drift-check`'s "in no commit and no backup" cannot tell the two apart — it is true of an
+  orphan too. `git hash-object <file>` against the file's own history is what can.
+- 🔴 **`find` and `grep` in an agent shell are SHELL FUNCTIONS wrapping bfs/ugrep.** I wrote a
+  claim about "the bash PATH" from a measurement taken in the agent shell; `bash -c 'type -a
+  find'` gives GNU findutils, the only find an operator's `#!/usr/bin/env bash` script sees.
+  CLAUDE.md records this for `grep`; it is equally true of `find`. **Measure with an absolute
+  path and name the binary.** ⚠ In the same session a `grep -c` of my own said there were ZERO
+  git reads in a file that had six — wrong quoting. Grep's answer is a claim about grep's view.
+- 🔴 **A `cp -a` copy of a worktree is not a git checkout.** A mutation test of the sha guard
+  in a copy reported SURVIVED against a guard that took its COULD NOT MEASURE branch and never
+  executed. Mutate inside a real checkout, and check WHICH branch a guard took.
+- 🔴 **Vary ONE thing.** Two successive comments blamed `-xdev` for a `find` exit code. MEASURED,
+  GNU 4.11.0, twice per cell: a mode-0400 base of 3 regular files gives rc 0 with AND without
+  the flag; the same base holding a SUBDIRECTORY gives rc 1 both ways. The second comment was
+  written by re-running with the flag added and reading the changed rc as the flag's doing —
+  when the FIXTURE had changed too.
+- 🔴 **A delta audit round is REFUSED without a claims block**, and posting one retroactively is
+  the fix. ⚠ A MISSING INTERMEDIATE block does not refuse — it silently widens the range across
+  two rounds' fixes and says so only on stderr, once.
+- 🔴 **Sweep every site, not the site you are standing in.** A bad `find` table was deleted from
+  one file and survived verbatim in its sibling, 300 lines away, so the two contradicted each
+  other at one sha. The same shape produced the ladder's worst finding: a comment saying a
+  symlink "must not" be listed, 25 lines above an assertion requiring that it is.
+- 🔴 **RETRACTED, and kept here so nobody re-derives it: `toplevel_accountable_entries()` does
+  NOT drop unstattable entries.** A ranked item once said it did, and called it "a FIFTH
+  same-shape site". False. The enumerator never stats — `-name` and `-print0` at `-maxdepth 1`
+  need only the readdir NAME, so nothing can fail per-entry. MEASURED over a fixture holding a
+  mode-000 directory, a dangling symlink, a regular file and a directory: all four emitted,
+  ZERO bytes on stderr. The claim reached four separate places before anyone checked the shape
+  it was said to share. Its stderr IS unredirected, which is why the `set -e` sweep counts it —
+  an unredirected stderr on a command that cannot fail per-entry is not a silent drop.
+- 🔴 **Write the claim AFTER the measurement.** Recorded because it was violated in the commit
+  enforcing it: I asserted two extraction fixes worked before testing either, and both were
+  wrong — a delimiter class that excluded the character it was meant to include, and a filter
+  running on output that never matched.
+
+- 🔴 **"No claims held" in a handoff is a CLAIM, and mine was false when it landed.** The
+  closing doc (merged `cac71625`) asserted it while `journald-26-11-migration-2` was still
+  held; `claim-work --list` immediately after the merge showed it, and it was released only
+  then. Nothing broke — the claim was mine and the work was done — but a `/resume` session
+  reading that line would have believed rank 2 was free while a live claim said otherwise,
+  which is the exact thing the lock exists to prevent. **Run `claim-work --list` while writing
+  the line, not from memory of having released something.** Worth one line because this is the
+  arc's own thesis — a claim nothing checks — reproduced in the document that closes it, after
+  nine rounds spent on precisely that failure. The doc is accurate now.
+- **Session cleanup, for the record:** the eleven worktrees this arc created
+  (`devrc-diagfix`, `devrc-handoff2`, `devrc-hand3`, `devrc-r2fix`, `devrc-r3fix`,
+  `devrc-r4fix`, `devrc-sweep`, `devrc-r6`, `devrc-r8`, `devrc-r9`, `devrc-close`) were removed
+  after their PRs merged, each checked for a live process and a dirty tree first. ⚠ Two
+  worktrees whose names START with `devrc-close` remain and are **other sessions'**
+  (`zach/handoff-closeout`, `docs/handoff-cairn-arc-closeout`) — a cleanup pattern matching
+  `close` hits `closeout` as a prefix. Match the full name.
+
 ## How to verify
 ```bash
-# the three merged PRs, by CONTENT (a squash is never an ancestor)
-for n in 1412 1436 1455; do gh pr view $n --repo innovation-upstream/devrc \
-  --json number,state,mergeCommit --jq '"#\(.number) \(.state) \(.mergeCommit.oid)"'; done
-git -C ~/workspace/devrc cat-file -e origin/main:scripts/diagnose-nix-disk.sh 2>/dev/null \
-  && echo "STILL PRESENT — #1455 did not land" || echo "absent, as expected"
-
-# the guards, on whatever main is now (expect 222 ok / 0 FAIL / rc 0)
+# the suite that carries both ledgers (expect 231 ok / 0 FAIL / rc 0)
 nix develop ~/workspace/devrc -c bash ~/workspace/devrc/scripts/tests/test_diagnose_disk_accounting.sh
 
-# #1455's CI is ERROR, not FAILURE — confirm before treating it as a red
+# the two machine-checked ledgers, by name
+nix develop ~/workspace/devrc -c bash ~/workspace/devrc/scripts/tests/test_diagnose_disk_accounting.sh \
+  | grep -E 'untallied-drop|cited sha'
+
+# the predecessor is gone
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/diagnose-nix-disk.sh 2>/dev/null \
+  && echo "STILL PRESENT" || echo "absent, as expected"
+
+# #1455 has no CI verdict and never will — ERROR, not FAILURE
 gh pr checks 1455 --repo innovation-upstream/devrc
 
-# the open round-2 PR
-gh pr view 1490 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
-
-# host + source drift (expect rc 17: the clawgate subtree only, now on the laptop)
+# host + source drift (expect rc 17: the clawgate subtree only)
 bash ~/workspace/devrc/scripts/drift-check.sh
 
-# the orphan is gone from the laptop, and is recoverable if that was wrong
-ssh zach@10.42.0.100 'ls ~/workspace/devrc/scripts/runaway-menu 2>&1'
-git -C ~/workspace/devrc show origin/zach/i3-runaways-bar-block:scripts/runaway-menu | head -5
+# host parity, if you want it — eight PRs merged since the last ship
+scripts/ship.sh
 
 # the migration is live on the workbench (three separate claims)
 grep -A2 'services\.journald' /etc/nixos/configuration.nix
@@ -476,3 +524,34 @@ independently. Kept for the load-vs-assertion reasoning; nothing here is open.
 - **Next probe:** none for #1455 (a merged PR's checks cannot be re-run without a fresh push).
   The forward fix is procedural and is in the Gotchas: do not pass `--delete-branch` while
   checks are pending.
+
+### 🛑 STOPPED BY DECISION — the audit ladder on the disk-accounting comments
+- **Read this before starting round 10.** Nine rounds ran. Every round found something real,
+  so the findings-keyed stop rule never fired. It was ended on the audit skill's
+  stated-criterion escape hatch, and the criterion is recorded here because a report that ends
+  that way is otherwise indistinguishable from one that converged.
+- **Why it would not stop on its own:** the two guards these rounds produced scan TEXT, and
+  their input space is unbounded — any spelling of a `-d` test, any spelling of a sha. An
+  adversarial reader can always construct one more. Rounds 7 and 8 each defeated the
+  then-current guard with spellings nobody writes (`commit_<sha>`, `v0.9-3-g<sha>`, a
+  four-line `if`). The stop is **realistic incidence, not adversarial reachability.**
+- **What was fixed instead, and why that is the right line:** the modes that fire on NORMAL
+  states. A shallow clone and a stale `origin/main` both made the sha guard fail correct files
+  and tell the operator to *"delete the figure"* — which would delete a CORRECT citation. That
+  is the permanently-red-gate shape and it was actively harmful; the exotic bypasses were not.
+- **What is deliberately left open, and is documented in the source rather than claimed
+  closed:** section 13 misses `test -d`, `[ -e ]`, `[ -f ]`, `|| break`, an `echo `-prefixed
+  line, a helper-delegated guard, and anything spread beyond its 3-line join window. Section 14
+  misses 4-6 char sha prefixes and every non-sha anchor (branch name, PR number, tag, date,
+  prose description of a commit).
+- 🔴 **One thing that must NOT be "fixed":** the sha floor stays at 7. Lowering it to git's
+  real minimum of 4 was MEASURED to report `added`, `feed`, `dead`, `512b` and `9999` as dead
+  citations — ordinary words and figures that are valid hex. A floor low enough to catch git's
+  minimum is unusable; one high enough to avoid English exempts short citations. No regex
+  closes both. `via: measurement`
+- **Ruled out:** that the code was ever wrong. The payload has been correct since round 1 —
+  every one of the ~31 findings was about whether a COMMENT describing it is true.
+  `via: measurement`
+- **Next probe (only if something forces it):** do not re-read the comments. Attack a guard
+  with a spelling a human would plausibly write, and if you cannot name one, the ladder is
+  still correctly stopped.

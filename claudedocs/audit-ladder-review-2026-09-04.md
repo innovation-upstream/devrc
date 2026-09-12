@@ -440,8 +440,140 @@ Both directions, and they do not cancel.
   of my table. #958 has the same shape (a 12-round ladder with 9 ranged blocks) but its ranges
   still chain end-to-end, so nothing is lost there. #1108 and #1219 both start at round 2, so
   their round-1 churn is likewise outside every range.
+  🔴 **NOW MEASURED, 2026-09-11, and the hole was WIDER AND NARROWER THAN THIS BULLET SAYS —
+  `scripts/ladder-range-coverage.py` over these same 20 ladders.** Three corrections, each
+  re-derivable by re-running it:
+  - **A SECOND interior gap existed and is named nowhere above: #998, round 1 → round 2,
+    `34265904..0aecdbf2`, 2 commits / 131 lines.** So the interior hole — the unambiguous kind,
+    where a round posted a block, a later round anchored past it, and nobody audited between —
+    is **655 raw lines across 2 of 20 ladders** (#1233 524 + #998 131), not one ladder.
+  - 🔴 **A WHOLE CLASS THIS BULLET DOES NOT MENTION IS SIX TIMES LARGER: the TAIL.** Churn
+    after the LAST block is in no range either, and **11 of 20 ladders carry some — 3,727 raw
+    lines**, led by #1046 (1,105), #1000 (987) and #1209 (672). ⚠ **It must NOT be quoted as
+    unaudited ladder work.** It conflates fixes posted after the final block (which the ladder
+    should have seen) with development that simply continued after the ladder ended (which it
+    should not), and nothing in the ranges distinguishes them. The script prints interior and
+    tail as separate totals for exactly this reason; read the split, never the 4,382 sum.
+  - ⚠ **"9 ranged blocks" for #958 is 8.** Its round-1 block is a BARE `audited=<sha>`, which
+    names no range at all — the same hole by a third route, and one with no reportable size.
+  - ✅ **This bullet's claim about #958 otherwise HOLDS**: all 8 of its adjacencies are TIGHT,
+    0 uncovered. #1219, #1286, #1120, #1181, #1207 and #989 are likewise 0 — a real negative
+    control, since a dead detector would also print 0 for them.
+  ⚠ **All of the above is RAW lines.** The payload/scaffolding split below was made by hand per
+  PR and no pathspec can make it, so **this does not say the `19,230 / 32,393` figures are
+  short by 655** — it says the ranges they were computed over missed that much churn.
+  ⚠ **And three of the tail gaps are many commits at ZERO lines** (#1064 125 commits, #1274 10,
+  #1110 7): `--not <base>` correctly excluding an upstream bring-in. A commit count is not a
+  churn count — shape A of the reference file's range table, working.
 - **The waste audit is devrc-only.** Ladders ran in homelab-talos, civit-datapacket-talos,
   vetr, auditloop, civitai-gpu-fleet and naida-ai; none were churn-measured.
+  ✅ **MEASURED 2026-09-11 — and the population outside devrc is LARGER than devrc's.**
+  `scripts/ladder-range-coverage.py --find-carriers` over each repo (limit 400, all states):
+
+  | repo | PRs scanned | carriers | measured | refused | INTERIOR | TAIL |
+  |---|---|---|---|---|---|---|
+  | homelab-talos | 400 ⚠ hit limit | 68 | 67 | 1 | **88** | 7,314 |
+  | civit-datapacket-talos | 400 ⚠ hit limit | 37 | 37 | 0 | **0** | 2,107 |
+  | vetr (api) | 152 | 13 | 11 | 2 | **0** | 115 |
+  | vetr (app) | 168 | 5 | 5 | 0 | **0** | 18 |
+  | civitai-gpu-fleet | 282 | 6 | 6 | 0 | **0** | 498 |
+  | naida-ai | 214 | **0** | — | — | UNMEASURABLE | — |
+  | auditloop | **0 PRs** | 0 | — | — | UNMEASURABLE | — |
+
+  **129 carriers outside devrc against 70 inside it** (devrc's newest 400 PRs, same command) —
+  so the repo this review measured holds about a third of the ladder work, and the other
+  two-thirds were unmeasured until now.
+  🔴 **THE HEADLINE FINDING INVERTS WHAT devrc SUGGESTS: the interior hole is essentially a
+  devrc phenomenon.** 655 uncovered interior lines across 20 devrc ladders, against **88
+  across 126 external ones** — and all 88 sit in a single repo (homelab-talos, 2 adjacencies).
+  Four of the five measured repos have **zero** interior gaps. The likely mechanism is a devrc
+  *authoring* habit rather than a property of the ladder: titling one comment "rounds N and
+  N+1" and posting a single block for both, which is exactly #1233's shape.
+  🔴 **TAIL churn IS MOSTLY MISSED AUDIT SURFACE — classified 2026-09-11, and the earlier
+  "probably ordinary development" reading was WRONG.** This bullet previously said the tail
+  conflates post-final-block fixes with development that continued after the ladder ended and
+  must not be quoted as unaudited work. The conflation is real; the *proportion* is not what
+  was guessed. Read every commit in the five largest devrc tails (#1046, #1000, #1209, #1121,
+  #998 — **3,349 of devrc's 3,727 tail lines, 17 commits**) plus the largest external one
+  (homelab-talos #707, 1,276 lines):
+
+  | what the commit is | commits |
+  |---|---|
+  | fixes / audit responses (one says *"audit round 5"* in its subject) | 9 |
+  | **merge-conflict RESOLUTIONS** | 4 |
+  | docs, handoff and a CI re-trigger | 3 |
+  | **ordinary development (a feature)** | **1** |
+
+  **One of seventeen is a feature.** homelab #707's single tail commit is *"withdraw the
+  doc-orphan guard, keep the seven orphan fixes"* — an audit response too.
+  🔴 **AND BY LINES THE BIGGEST SINGLE ITEM IS A SEMANTIC-CONFLICT RESOLUTION INSIDE A
+  `merge main`: 1,039 of #1046's 1,105 lines.** Its own commit message documents renumbering a
+  collided exit constant and rewriting 515/487 lines of one test file. That is exactly the
+  hazard `claude/RULES.md` names — *a clean git merge is not a clean merge; a semantic conflict
+  survives it* — landing in a region no audit round's range covered. `--remerge-diff` is what
+  makes it visible at all (shape B of the reference file's range table, working as designed).
+  ⚠ **SCOPE of the six above: the top of the distribution, not all of it** — 6 of 79 tail
+  adjacencies, ~34% of the 13,779 tail lines, and they were picked BY SIZE, so they are
+  length-biased by construction.
+  ✅ **CONFIRMED ON A RANDOM SAMPLE, 2026-09-11 — and the unbiased draw is MORE audit-heavy,
+  not less.** Ten of the remaining 73 drawn uniformly (`random.seed(20260911)`, fixed and
+  printed so the sample is reproducible), spanning devrc, homelab-talos and
+  civit-datapacket-talos, 14 → 565 lines, **15 commits**:
+
+  | what the commit is | commits |
+  |---|---|
+  | fixes / audit responses | **11** |
+  | merges of the base branch | 2 |
+  | handoff/docs that are not a correction | 2 |
+  | **ordinary development** | **0** |
+
+  🔴 **ZERO features in 15 commits, and SEVEN of the eleven name an audit round in their own
+  subject line** — `audit r3`, `audit round 3`, `round-2 audit`, `round-3 audit`, `audit round
+  9`, `audit round 5`, and one more. The size-picked six had 1 feature in 17; the random ten
+  have 0 in 15. **Combined: 1 development commit out of 32, across 16 of 79 adjacencies.**
+  So the tail is not "mostly" missed audit surface — on this evidence it is almost entirely
+  that, and the earlier hedge was too generous to the null.
+  🔴 **AND THERE IS A MACHINE-CHECKABLE SIGNAL IN IT, which nobody is using:** seven of these
+  commit subjects state the round they belong to. A ladder that names its rounds in commit
+  subjects is one whose missed surface can be detected automatically — grep the tail's subjects
+  for a round reference and you have a classifier, no judgement required. Filed as a follow-on
+  rather than built here.
+  **The ten, recorded so the sample outlives the scratchpad it was drawn in** (the rank-10
+  lesson: a measurement whose inputs are gone is a measurement nobody can check) — repo and PR,
+  largest first: homelab-talos #748 (565 lines), civit-datapacket-talos #1418 (265),
+  **devrc #1083** (159), civit-datapacket-talos #1451 (146), homelab-talos #549 (115),
+  homelab-talos #673 (39), civit-datapacket-talos #1390 (34), homelab-talos #611 (25),
+  homelab-talos #488 (24), civit-datapacket-talos #1357 (14). Re-derive each with
+  `git -C <checkout> log --format='%p :: %s' <frm>..<to> --not <the PR's own base>`.
+  🔴 **`--not <base>` IS NOT OPTIONAL IN THAT COMMAND, and omitting it is how this
+  classification nearly went the other way.** Without it the listing shows the BASE branch's
+  own squash commits, so #1046's tail read as 55 unrelated PRs — which looks exactly like "the
+  PR kept developing" and would have CONFIRMED the hypothesis being tested. ⚠ And the base is
+  per-repo: two of these three repos use `trunk`, not `main`. An ad-hoc script that guessed
+  `origin/main` failed loudly on four of the ten; the measurement itself takes each PR's own
+  `baseRefName` from `gh` and was never wrong about it.
+  ⚠ Still 63 of 79 unclassified, and the two samples agree, which is weak evidence that a third
+  would too — they do not agree about a *rate* because neither was sized to estimate one.
+  ⚠ **Two repos are UNMEASURABLE, each for its own reason, and neither is a pass.** naida-ai
+  ran 214 PRs and posted **no ledger at all**, so there is nothing to measure coverage
+  against — "no ladders ran here" and "ladders ran without blocks" are the same observation
+  from this instrument, and so is "they were fine". auditloop has no PR history in scope.
+  🔴 **A COMMIT COUNT IN THE 2026-09-11 TABLE ABOVE WAS WRONG IN THE FLATTERING DIRECTION, and
+  the same defect is in the SHIPPED BRIEF.** `measure_ledger` takes its commit count from
+  `rev-list --count <frm>..<to>` and its line count from the numstat **`--not <base>`** — two
+  different populations — and `audit-dispatch.py` printed the first as *"over N commit(s)"*
+  directly beside the second's command. MEASURED on #1046's tail: **55 commits reported, 2
+  contributing churn.** The other 53 were an upstream bring-in the churn correctly excludes.
+  Corrected figures: #1046 55→**2**, #1000 32→**7**, #1209 12→**3**, #1064 125→0-churn,
+  #1274 10→0-churn, #1110 7→0-churn. **Every LINE count in this review is unaffected** — the
+  churn command always had the exclusion. `RangeChurn` now carries both counts under separate
+  names and the brief prints both with the excluded number stated.
+  ⚠ **Three caveats on the counts.** (a) Every carrier count is a **FLOOR** — `gh` does not
+  return REVIEW comments, so a block posted as a review is invisible, the same blind spot
+  `audit-dispatch.py` warns about. (b) Two repos **hit the 400-PR scan limit**, so their
+  carrier counts are partial and the real totals are higher. (c) This measures **ALL**
+  carriers, not this review's 2026-08-28 → 09-05 window, so it is a superset and not
+  comparable to the table above row-for-row.
 
 **Over-counts:**
 
@@ -490,6 +622,17 @@ Both directions, and they do not cancel.
    hand. This is the only route to a *rate* for "ladders that stopped on a stated mechanism",
    and it is also how #1157's escape-hatch requirement gets checked. *Closes when* the
    terminal round's summary is classified for every carrier and the rate is published.
-5. **Fix the range-coverage hole.** Blocks that skip a round (#1233) leave churn in no
-   range. *Closes when* the measurement additionally reports, per ladder, the churn between
-   the first block's `from` and the head that no block's range covers.
+5. ~~Fix the range-coverage hole.~~ **CLOSED 2026-09-11** — `scripts/ladder-range-coverage.py`
+   reports it, per ladder, for the window `[first block's from, head]`, and was run over these
+   20: **interior 655 lines in 2 ladders, tail 3,727 in 11**, with the two kept as separate
+   totals because only the first is unambiguously unaudited ladder work. Findings are folded
+   into the CANNOT-SEE bullet above, including two this item did not anticipate — a second
+   interior gap (#998) and the tail class itself. The instrument is committed, with a mutation
+   battery (`scripts/tests/mutants-ladder-range-coverage.sh`), *because this review's own churn
+   instrument was a scratchpad variant that no longer exists* and none of its numbers can be
+   re-derived from the tree today.
+   ⚠ **Residual, which this item did NOT ask for and is NOT closed:** the window deliberately
+   excludes churn BEFORE the first block, so a ladder whose ledger starts at round 2 (#958,
+   #1108, #1219 here) still has its round-1 churn unmeasured. The script says so per ladder
+   rather than inventing a number, because what "round 1" means for a ledger that begins at 2
+   is a judgement about that PR, not arithmetic.

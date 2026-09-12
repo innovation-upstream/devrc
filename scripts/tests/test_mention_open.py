@@ -20,6 +20,7 @@ The two things worth pinning:
 from __future__ import annotations
 
 import ast
+import errno
 import importlib.util
 import json
 import os
@@ -341,6 +342,29 @@ def _mapping_is_never_the_operators(monkeypatch, tmp_path):
     # back real repositories, exactly as the mapping hole did. It was closed
     # per-test; a per-test guard is one forgotten flag away from being no guard.
     monkeypatch.setenv("DEVRC_WORKSPACE", str(tmp_path / "no-checkouts-here"))
+
+    # 🔴 THE THIRD AND FOURTH HOST-STATE FILES, AND THE FOURTH IS A *WRITE*.
+    # `known_ranges.json` is read exactly as the two above are, so it gets the
+    # same pair of redirects for the same measured reason. `picks.jsonl` is
+    # different in kind and strictly sharper: `record_pick` CREATES it, so an
+    # unredirected test running `main()` to a selection would APPEND the
+    # operator's real `~/.config/mention-open/picks.jsonl` — the first time any
+    # test in this file could modify host state outside `tmp_path`. Every
+    # previous hole in this fixture was a test READING the operator's data; this
+    # one would write to it.
+    #
+    # ⚠ NEITHER IS WRITTEN, for the reason the universe redirect states at
+    # length: a redirect relocates a read, it must not invent content the test
+    # did not ask for. An absent ranges file means "every repo is UNKNOWN",
+    # which is the cold-start state and the correct default for a test that says
+    # nothing about ordering; an absent pick log means no learned preference.
+    # Tests that want either write one.
+    ranges = tmp_path / "autouse-known-ranges.json"
+    monkeypatch.setattr(MO, "KNOWN_RANGES_PATH", ranges)
+    monkeypatch.setenv("MENTION_OPEN_KNOWN_RANGES", str(ranges))
+    picks = tmp_path / "autouse-picks.jsonl"
+    monkeypatch.setattr(MO, "PICKS_PATH", picks)
+    monkeypatch.setenv("MENTION_OPEN_PICKS", str(picks))
     return p
 
 
@@ -370,8 +394,247 @@ _CHILD_REPORTS_ITS_MAPPING_PATH = (
     "import importlib.util,sys;"
     "spec=importlib.util.spec_from_file_location('mo', sys.argv[1]);"
     "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
-    "print(m.KNOWN_REPOS_PATH);print(sorted(m.load_known_repos()))"
+    "print(m.KNOWN_REPOS_PATH);print(sorted(m.load_known_repos()));"
+    "print(m.KNOWN_RANGES_PATH);print(m.PICKS_PATH)"
 )
+
+
+# 🔴 EVERY HOST-STATE PATH THIS HANDLER TOUCHES, PINNED TWO-WAY BY
+# `test_the_HOST_STATE_path_ledger_is_pinned_two_way`. The autouse fixture above
+# has now been extended THREE times — once per new file — and each time the hole
+# existed silently until somebody happened to look. A ledger makes the next
+# addition fail the suite instead: a constant added without a redirect, or a
+# redirect left behind after a constant is deleted, both go red.
+HOST_STATE_CONSTANTS = {
+    "KNOWN_REPOS_PATH": "MENTION_OPEN_KNOWN_REPOS",
+    "KNOWN_UNIVERSE_PATH": "MENTION_OPEN_KNOWN_UNIVERSE",
+    "KNOWN_RANGES_PATH": "MENTION_OPEN_KNOWN_RANGES",
+    "PICKS_PATH": "MENTION_OPEN_PICKS",
+}
+
+
+def _host_state_constants(source: str) -> set[str]:
+    """Every module-level constant in `source` that points at a file under the
+    mention-open config directory.
+
+    🔴 SPELLINGS THIS HAS MISSED SILENTLY, each measured against a constant
+    planted in the real handler source:
+
+      * `X: Path = …`   — `ast.AnnAssign`, not `ast.Assign`;
+      * `X, Y = …, …`   — a tuple target, not an `ast.Name`;
+      * an assignment inside a module-level `if`/`try`/`with`/`for`/`while` —
+        `tree.body` only sees the top level;
+      * a lowercase name — `isupper()` is itself a spelling pin, which is the
+        very thing this function was rewritten to stop relying on;
+      * 🔴 `SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"` — a constant DERIVED
+        from an already-ledgered one, whose own source segment never says
+        `mention-open`. A round-3 audit called this the most LIKELY spelling of
+        the lot, and it is the worst: because `HOST_STATE_CONSTANTS` is
+        hand-maintained, both sides of the two-way pin lose the entry together
+        and the ledger test stays GREEN.
+
+    A missed spelling means an unredirected host-state file: a test reads — or,
+    since `record_pick`, WRITES — the operator's own 0600 data. So the walk is
+    over `Assign` AND `AnnAssign`, recursively through every module-level block
+    (never into a function or class, where a local of the same name is not a
+    module constant), over flattened tuple/list targets, with no constraint on
+    the name's case — and it is resolved to a FIXPOINT, so a constant built from
+    a known one is found however many hops away it is.
+
+    ⚠ THE TEST FOR *THIS* FUNCTION IS `test_the_host_state_DISCOVERY_sees_every_
+    spelling`, which plants each in turn. A discovery nobody has watched find
+    something is not a discovery.
+    """
+    tree = ast.parse(source)
+
+    def statements(body):
+        for node in body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                yield node
+            elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For,
+                                   ast.While)):
+                yield from statements(node.body)
+                yield from statements(getattr(node, "orelse", []))
+                yield from statements(getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    yield from statements(handler.body)
+
+    def targets(node):
+        raw = ([node.target] if isinstance(node, ast.AnnAssign)
+               else list(node.targets))
+        while raw:
+            tgt = raw.pop()
+            if isinstance(tgt, (ast.Tuple, ast.List)):
+                raw.extend(tgt.elts)
+            elif isinstance(tgt, ast.Name):
+                yield tgt.id
+
+    def builds_a_path(node) -> bool:
+        # `PICKER_CLASS = "float,mention-open"` is the i3 window class and names
+        # the directory only by coincidence of spelling — a bare string constant
+        # is not a file to redirect. The two shapes that ARE are a `Path(...)`
+        # call and a `/` join.
+        return any(
+            (isinstance(n, ast.Call)
+             and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+             == "Path")
+            or (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div))
+            for n in ast.walk(node.value))
+
+    assignments = [n for n in statements(tree.body) if n.value is not None]
+    found: set[str] = set()
+    # Seed: the assignments that NAME the directory themselves.
+    for node in assignments:
+        segment = ast.get_source_segment(source, node) or ""
+        if "mention-open" in segment and builds_a_path(node):
+            found.update(targets(node))
+    # 🔴 THEN TO A FIXPOINT — anything built from something already found is a
+    # host-state path too, however many hops away. Without this,
+    # `SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"` is invisible, and it is
+    # the most natural way to add the next one.
+    #
+    # 🔴 AND THE FIXPOINT PASS DOES *NOT* REQUIRE `builds_a_path`, which the
+    # first version did. A round-4 audit measured the cost: `SPOOL_PATH =
+    # PICKS_PATH.with_name("spool.jsonl")` was MISSED, because `.with_name` is
+    # neither a `Path(` call nor a `/` — and it is exactly as idiomatic as
+    # `.parent /`. Referencing a known host-state path IS the signal here; the
+    # path-shape test is only needed for the SEED, where the evidence is a
+    # coincidence of spelling (`PICKER_CLASS = "float,mention-open"`).
+    #
+    # ⚠ IT OVER-MATCHES IN THE SAFE DIRECTION. `RATIO = len(str(PICKS_PATH)) / 2`
+    # would be pulled in — and that fails LOUD, as a ledger mismatch somebody
+    # reads, rather than silently dropping a file nobody redirects.
+    while True:
+        grew = False
+        for node in assignments:
+            names = set(targets(node))
+            if names <= found:
+                continue
+            refs = {n.id for n in ast.walk(node.value)
+                    if isinstance(n, ast.Name)}
+            if refs & found:
+                found |= names
+                grew = True
+        if not grew:
+            return found
+
+
+@pytest.mark.parametrize("planted,name", [
+    ('SPOOL_PATH = Path.home() / ".config" / "mention-open" / "spool.jsonl"',
+     "SPOOL_PATH"),
+    ('SPOOL_PATH: Path = Path.home() / ".config" / "mention-open" / "s.jsonl"',
+     "SPOOL_PATH"),
+    ('SPOOL_PATH, _OTHER = Path("/x/mention-open/s.jsonl"), 1', "SPOOL_PATH"),
+    ('if True:\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('try:\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")\nexcept OSError:\n'
+     '    SPOOL_PATH = Path("/y/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('try:\n    _X = 1\nexcept OSError:\n'
+     '    SPOOL_PATH = Path("/y/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('with open("/dev/null") as _f:\n'
+     '    SPOOL_PATH = Path("/x/mention-open/s.jsonl")', "SPOOL_PATH"),
+    ('for _i in (1,):\n    SPOOL_PATH = Path("/x/mention-open/s.jsonl")',
+     "SPOOL_PATH"),
+    ('spool_path = Path("/x/mention-open/s.jsonl")', "spool_path"),
+    # 🔴 THE DERIVED SIBLING — its own source segment never says
+    # `mention-open`, and a round-3 audit called it the most LIKELY next
+    # spelling. It is also the worst kind of miss: the ledger is
+    # hand-maintained, so both sides lose the entry together and the two-way
+    # pin stays GREEN.
+    ('SPOOL_PATH = PICKS_PATH.parent / "spool.jsonl"', "SPOOL_PATH"),
+    # …and two hops, to prove it is a fixpoint rather than one lookahead.
+    ('_SPOOL_DIR = PICKS_PATH.parent / "spool"\n'
+     'SPOOL_PATH = _SPOOL_DIR / "today.jsonl"', "SPOOL_PATH"),
+    # 🔴 `.with_name` — MEASURED MISSED by the fixpoint's first version, which
+    # also demanded a `Path(` call or a `/` in the derived node. It is exactly
+    # as idiomatic as `.parent /`, and the reference to a known host-state path
+    # is the signal; the path-shape test belongs to the SEED only.
+    ('SPOOL_PATH = PICKS_PATH.with_name("spool.jsonl")', "SPOOL_PATH"),
+    ('SPOOL_PATH = PICKS_PATH.with_suffix(".bak")', "SPOOL_PATH"),
+])
+def test_the_host_state_DISCOVERY_sees_every_spelling(planted, name):
+    """🔴 THE POSITIVE CONTROL ON THE LEDGER'S DISCOVERY, and every one of these
+    was measured SILENTLY MISSED by some version of it — the first five by the
+    original `ast` walk, the derived-sibling pair by the round-2 rewrite that
+    replaced it. A ledger is only as two-way as the thing that enumerates the
+    left-hand side: a spelling it cannot see is an unredirected host-state file,
+    which since `record_pick` means a test WRITING the operator's own data.
+
+    ⚠ The `try`/`except` case is planted TWICE on purpose — once in the body and
+    once in the HANDLER — because a walk that recursed into `body` alone would
+    satisfy the first and miss the second, and the first version's claim to
+    cover handlers was never exercised."""
+    source = HANDLER.read_text() + "\n\n" + planted + "\n"
+    assert name in _host_state_constants(source), (
+        f"the discovery is blind to this spelling:\n{planted}")
+
+
+def test_the_host_state_discovery_does_NOT_fire_on_a_non_path():
+    """The negative control: a discovery that flagged everything would satisfy
+    all six cases above and be useless. `PICKER_CLASS` names the directory and
+    is an i3 window class, not a file."""
+    found = _host_state_constants(HANDLER.read_text())
+    assert "PICKER_CLASS" not in found, found
+    assert found, "POSITIVE CONTROL: the discovery found nothing at all"
+
+
+def test_the_HOST_STATE_path_ledger_is_pinned_two_way(tmp_path):
+    """🔴 GROWS-OR-SHRINKS, AND IT COVERS BOTH REDIRECT MECHANISMS.
+
+    The autouse fixture needs a `setattr` (for in-process reads) AND a `setenv`
+    (for the child `_run()` spawns) per file, and the history of this file is
+    that one of the two gets forgotten: the universe arm was added a release
+    after the mapping's, the ranges and picks arms a release after that, and
+    each gap was invisible until measured. This asserts, for every host-state
+    constant the handler declares:
+
+      * it is redirected INTO `tmp_path` — so no test reads or writes the
+        operator's real data;
+      * its env override names the variable the ledger says it does, and that
+        variable resolves to the same place — so the subprocess half is live.
+
+    🔴 AND IT IS TWO-WAY AGAINST THE MODULE. A new `*_PATH` constant under
+    `~/.config/mention-open/` that nobody added to this ledger fails here, which
+    is the only thing that makes the next one impossible to forget.
+    """
+    # 🔴 ASKED OF THE SOURCE, NOT OF THE MODULE OBJECT. The autouse fixture has
+    # already rebound every one of these to a `tmp_path` file, so a check that
+    # inspected `dir(MO)` for paths under `mention-open/` would find NOTHING and
+    # pass vacuously — a ledger that is two-way against an empty set is not
+    # two-way. The source is also where a new constant actually gets added.
+    # 🔴 KEYED ON THE DIRECTORY, NOT ON A SPELLING — and the first version was
+    # keyed on a spelling. It required the literal `Path(` and a name ending
+    # `PATH`/`PICKS`, which an audit MEASURED walkable: the sibling
+    # `regen-known-repos.py` spells all three of ITS host-state paths as
+    # `X = _CONFIG_DIR / "y.json"`, so the next author following the
+    # neighbouring file's style adds an unredirected host-state file and this
+    # ledger stays green. A guard on WORDS is walkable by REWORDING.
+    #
+    # What is asked instead is the thing that matters: does this module-level
+    # assignment name the mention-open config directory at all? That catches
+    # `Path(...)`, `_CONFIG_DIR / …`, an f-string, and anything else that has to
+    # mention the directory to point at it.
+    #
+    # ⚠ `ast`, NOT A REGEX — and the regex was tried. A pattern that had to span
+    # a multi-line assignment backtracked badly enough to hang the run; walking
+    # the assignment nodes and reading each one's own source segment asks the
+    # same question structurally, and cannot be fooled by a `mention-open`
+    # mention inside a nested function or a docstring.
+    in_source = _host_state_constants(HANDLER.read_text())
+    assert in_source == set(HOST_STATE_CONSTANTS), (
+        f"the host-state path ledger MOVED: the handler declares {sorted(in_source)}, "
+        f"the ledger names {sorted(HOST_STATE_CONSTANTS)}. Every one of these "
+        f"points at a 0600 file naming PRIVATE repositories — add it to the "
+        f"autouse redirect AND to this ledger, or tests will read (or write) "
+        f"the operator's own data.")
+    for const, env in HOST_STATE_CONSTANTS.items():
+        got = getattr(MO, const)
+        assert got.is_relative_to(tmp_path), (
+            f"{const} is NOT redirected — it resolves to {got}, which is the "
+            f"operator's own host state")
+        assert os.environ.get(env) == str(got), (
+            f"{const}'s env door {env} is {os.environ.get(env)!r}, not {str(got)!r} "
+            f"— the SUBPROCESS half of the redirect is missing, which is "
+            f"exactly the gap that let a child read the real 369-row mapping")
 
 
 def test_the_autouse_redirect_REACHES_A_SUBPROCESS(tmp_path):
@@ -392,7 +655,7 @@ def test_the_autouse_redirect_REACHES_A_SUBPROCESS(tmp_path):
     r = subprocess.run([sys.executable, "-c", _CHILD_REPORTS_ITS_MAPPING_PATH,
                         str(HANDLER)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
-    resolved, loaded = r.stdout.splitlines()[:2]
+    resolved, loaded, child_ranges, child_picks = r.stdout.splitlines()[:4]
     child_path = Path(resolved.strip())
     real = Path.home() / ".config/mention-open/known_repos.json"
     assert child_path != real, (
@@ -403,6 +666,16 @@ def test_the_autouse_redirect_REACHES_A_SUBPROCESS(tmp_path):
     # fake mapping. A redirect pointing somewhere unreadable would satisfy every
     # absence above while the child fell back to nothing.
     assert loaded.strip() == str(sorted(FAKE_UNIVERSE)), loaded
+    # 🔴 THE SAME CLAIM FOR THE TWO NEWER FILES, AND `picks.jsonl` IS THE ONE
+    # THAT MATTERS MOST HERE: a child resolving the real path would APPEND to
+    # the operator's own pick log the first time a `_run()` test reached a
+    # selection. Reading their data was the old hazard; writing it is a new one.
+    for line, const in ((child_ranges, MO.KNOWN_RANGES_PATH),
+                        (child_picks, MO.PICKS_PATH)):
+        got = Path(line.strip())
+        assert got.is_relative_to(tmp_path), (
+            f"a CHILD of this suite resolves the operator's real host state: {got}")
+        assert got == const, (got, const)
 
 
 def test_a_DISCOVERING_subprocess_resolves_through_the_FAKE_mapping(tmp_path,
@@ -750,6 +1023,16 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     Nothing here stubs `discover_repos` or `tmux_pane_repo`: those ARE the
     subject. A fixture that replaced them would leave this test green against a
     handler that phoned home from either one.
+
+    🔴 THE ORDERING RUNS TOO, AND IT HAD TO BE MADE TO. The autouse redirect
+    points the range table at a path that does NOT exist, so without the file
+    written below `load_known_ranges` returns {} and `_ordered_universe` takes
+    its early `ORDER_NO_TABLE` return — which means the pick log is never read
+    and the sort never runs. This guard would then have been asserting "the
+    ordering spawns nothing" about an ordering that never happened, which is
+    the vacuous-green shape the whole file is written against. With a FRESH
+    table and a real pick log present, every leg of the ordering executes
+    inside the recording window.
     """
     # A real mapping and a real checkout, so both measurement legs do work.
     mapping = tmp_path / "known_repos.json"
@@ -760,6 +1043,17 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     pane.mkdir()
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", mapping)
     monkeypatch.setattr(MO, "WORKSPACE", ws)
+    # A FRESH range table and a real pick log, so the ordering is ACTIVE — see
+    # the docstring. `universe` must hold the repo the checkout supplies, or
+    # there are no rows to order.
+    ranges = tmp_path / "known_ranges.json"
+    ranges.write_text(json.dumps({"rivalorg/spadeworks": 99,
+                                  "hobbyist/plotwidget": 0}))
+    monkeypatch.setattr(MO, "KNOWN_RANGES_PATH", ranges)
+    picks = tmp_path / "picks.jsonl"
+    picks.write_text(json.dumps({"t": time.time(), "repo": "rivalorg/spadeworks",
+                                 "n": 11}) + "\n")
+    monkeypatch.setattr(MO, "PICKS_PATH", picks)
 
     seen: list[list[str]] = []
 
@@ -783,12 +1077,29 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
     monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
 
+    ordered: list[str] = []
+    real_ordering = MO._ordered_universe
+    monkeypatch.setattr(
+        MO, "_ordered_universe",
+        lambda rows, num: ordered.append(num) or real_ordering(rows, num))
+
     assert MO.main(["zzznosuchrepo#12"]) == 0
     _assert_only_local_commands(seen)
     # POSITIVE CONTROL: the fan-out really ran over the real workspace, so the
     # ledger above is a fact about a path that did the work, not about a
     # short-circuit. One checkout ⇒ one `git remote` call.
     assert [c for c in seen if c[:2] == ["git", "remote"]], seen
+    # 🔴 SECOND POSITIVE CONTROL — the ORDERING ran, and ran ACTIVE. Without
+    # this the ledger is a claim about a code path the test never entered: an
+    # absent range table short-circuits `_ordered_universe` before it reads the
+    # pick log or sorts anything. See the docstring.
+    assert ordered == ["12"], ordered
+    rows, state, _counts, _age = real_ordering(
+        MO.repo_universe(MO.discover_repos(), []), "12")
+    assert state == MO.ORDER_APPLIED, (
+        f"the ordering DEGRADED to {state!r}, so the ledger above says nothing "
+        f"about an active ordering — the range table is missing or stale")
+    assert rows, "there were no universe rows to order"
 
 
 # Every executable the module may ever spawn, from ANY function. Wider than
@@ -4361,25 +4672,40 @@ def test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION(monkeypatch):
     task and trust the guess.
 
     Pinned as the WHOLE normalised string, because a guard on the words `guess`
-    and `tmux pane` is walkable by a reword that still names the wrong row."""
+    and `tmux pane` is walkable by a reword that still names the wrong row.
+
+    ⚠ THE ORDERING CLAUSE IS NOW PART OF THAT STRING, and moving this pin was a
+    DELIBERATE act rather than a test edit made to get green. Every picker
+    carrying universe rows says how those rows are ordered — or that they are
+    not — because an ordered list and an unordered one look identical and only
+    one is worth trusting (see `ordering_note`). This fixture has no range
+    table, which is the cold-start state, so the clause is the quiet `no-table`
+    wording."""
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, "acme/widget"])
     assert seen["mesg"] == (
         "#1291 names no repository. Row 2 is a guess from the tmux pane, which "
         "may not be the pane you clicked in — the 5 rows below it are every "
-        "repository this host knows. Type to search, or dismiss."), seen["mesg"]
+        "repository this host knows. Type to search, or dismiss. · rows "
+        "unordered — no reference-range table on this host yet "
+        "(scripts/regen-known-repos.py builds one)"), seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-#N GUESS-NOTE DISCLOSURE")
 
 
 def test_the_audit_pr_note_still_names_ROW_1(monkeypatch):
     """The other half of the same pin — the shape #1380 fixed must not have its
-    row number silently shifted by the `rank` parameter. Its guess is row 1."""
+    row number silently shifted by the `rank` parameter. Its guess is row 1.
+
+    ⚠ Carries the same deliberately-added ordering clause as its sibling above;
+    see that test's note for why moving a whole-string pin was the right move
+    here rather than a test edit to get green."""
     seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
     assert seen["mesg"] == (
         "audit-pr 1291 names no repository. Row 1 is a guess from the tmux "
         "pane, which may not be the pane you clicked in — the 5 rows below it "
-        "are every repository this host knows. Type to search, or dismiss."), (
-            seen["mesg"])
+        "are every repository this host knows. Type to search, or dismiss. · "
+        "rows unordered — no reference-range table on this host yet "
+        "(scripts/regen-known-repos.py builds one)"), seen["mesg"]
 
 
 def test_the_bare_hash_N_guess_is_NEVER_opened_unconfirmed(monkeypatch):
@@ -4459,11 +4785,20 @@ def test_a_bare_hash_N_with_NO_pane_repo_is_UNCHANGED_by_this_widening(
         monkeypatch):
     """🔴 THE UNTOUCHED NEIGHBOUR. Nothing attributed this `#N`, so there is no
     guess to override and PASS 3's own arm — not the guessed one — appends the
-    universe. It must still do so, and it must still carry NO note: the rows are
-    a real clawgate task plus a list, with nothing being recommended.
+    universe. It must still do so, and it must still RECOMMEND nothing: the rows
+    are a real clawgate task plus a list.
 
-    ⚠ INVARIANT GUARD — green at base 18bc1500 too, by design: "unchanged" is
-    the whole claim."""
+    ⚠ THE NOTE IS NO LONGER EMPTY, AND THAT CHANGE IS DELIBERATE. It used to
+    assert `mesg == ""` on the reasoning that a picker of pure evidence needs no
+    explanation — which is still true of RECOMMENDATIONS and was never true of
+    ORDER. This is the shape that puts several hundred universe rows under the
+    clawgate task, so it is precisely where the operator needs to know whether
+    those rows are ranked (see `ordering_note`); asserting an empty string here
+    would have made the commonest path the one place the ordering is silent.
+
+    What is pinned instead is the narrower true claim: the note says only how
+    the rows are ORDERED, and still recommends no repository. Both token guards,
+    because `_no_universe_token_anywhere` is blind to the pane-guessed repo."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
@@ -4475,7 +4810,14 @@ def test_a_bare_hash_N_with_NO_pane_repo_is_UNCHANGED_by_this_widening(
     urls = [c["url"] for c in seen["rows"]]
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
     assert len(urls) == 4, urls
-    assert seen["mesg"] == "", seen["mesg"]
+    assert seen["mesg"] == MO.ordering_note("1291", MO.ORDER_NO_TABLE), seen["mesg"]
+    for wrong in ("guess", "names no repository", "nothing here knows"):
+        assert wrong not in seen["mesg"], (
+            f"a picker of pure evidence is being described as a dead end or a "
+            f"recommendation ({wrong!r}): {seen['mesg']}")
+    _no_universe_token_anywhere(seen["mesg"], "BARE-#N ORDERING NOTE")
+    for token in PANE_GUESS_TOKENS:
+        assert token not in seen["mesg"], seen["mesg"]
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -4583,3 +4925,1284 @@ def test_the_universe_reaches_THE_PICKER_AND_NO_OTHER_SINK_on_the_bare_hash_N_pa
                   UNIVERSE_ONLY.split("/")[1]):
         assert token not in blob, (
             f"a universe row reached a sink that is not the picker: {token!r}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ORDERING THE PICKER — TIER A (plausibility) AND TIER B (the operator's own
+# picks). See `order_universe` in the handler for the design; what these pin is
+# the two properties that make it SAFE rather than merely useful:
+#
+#   * it is a PERMUTATION. Nothing is dropped, whatever the table says, because
+#     a row that is not in the list cannot be typed at and a day-old snapshot is
+#     wrong often enough to matter.
+#   * TIER B CANNOT CROSS A TIER A CLASS. A learned preference is evidence about
+#     the OPERATOR; a class is evidence about the REPOSITORY. No number of past
+#     picks makes a repo with zero references able to answer `#1291`.
+#
+# THE MEASUREMENT THESE EXIST FOR, recorded once here rather than in each test:
+# a 120-repo sample of this host's real universe found **54 (45%) with no issues
+# and no pull requests at all**, 40 topping out at 1-9, 19 at 10-99, 5 at
+# 100-999 and 2 at 1000+. So a high number is strongly discriminative and a low
+# one is weak — and nearly half the list can satisfy NO numeric click at all,
+# which is the bigger and cheaper half of the win.
+# `_measured_shape_corpus` reproduces that distribution at ~390 rows, the real
+# universe's size, with SYNTHETIC names: this repo is public.
+# --------------------------------------------------------------------------- #
+def test_the_plausibility_CLASS_set_is_pinned_and_ORDERED():
+    """🔴 TWO-WAY, AND THE ORDER IS THE BEHAVIOUR. `order_universe` sorts on
+    these integers, so they are not labels — a fifth class added later would
+    take a rank nobody chose, and renumbering them silently reorders the picker.
+    Same argument as the `PICKED_OUTCOMES` ledger above, one concept along."""
+    assert MO.PLAUSIBILITY_CLASSES == (
+        MO.CLASS_PLAUSIBLE, MO.CLASS_BELOW, MO.CLASS_UNKNOWN,
+        MO.CLASS_IMPOSSIBLE)
+    assert list(MO.PLAUSIBILITY_CLASSES) == sorted(MO.PLAUSIBILITY_CLASSES), (
+        "the classes are SORT KEYS — they must be in ascending rank order")
+    assert len(set(MO.PLAUSIBILITY_CLASSES)) == 4, "two classes share a rank"
+    # The ranks themselves, spelled out: an assertion on the tuple alone would
+    # survive all four being renumbered together.
+    assert (MO.CLASS_PLAUSIBLE < MO.CLASS_BELOW < MO.CLASS_UNKNOWN
+            < MO.CLASS_IMPOSSIBLE)
+
+
+@pytest.mark.parametrize("num,max_ref,expected", [
+    ("1291", 1300, MO.CLASS_PLAUSIBLE),   # head is past N
+    ("1291", 1291, MO.CLASS_PLAUSIBLE),   # exactly N — the boundary, INCLUDED
+    ("1291", 1290, MO.CLASS_BELOW),       # one short
+    ("1291", 4, MO.CLASS_BELOW),
+    ("1291", 0, MO.CLASS_IMPOSSIBLE),     # no issues and no PRs at all
+    ("1291", None, MO.CLASS_UNKNOWN),     # not in the table
+    ("1", 1, MO.CLASS_PLAUSIBLE),
+    ("1", 0, MO.CLASS_IMPOSSIBLE),
+])
+def test_plausibility_class_at_the_BOUNDARY_and_either_side(num, max_ref, expected):
+    """Pinned AT the boundary and at a middle value on both sides, because
+    `>=` vs `>` is the one mutation here a single-point test cannot see:
+    `max_ref == N` is the repo whose newest reference IS the clicked one, which
+    is the most plausible row there is."""
+    assert MO.plausibility_class(num, max_ref) == expected
+
+
+def test_UNKNOWN_and_IMPOSSIBLE_are_DIFFERENT_and_UNKNOWN_ranks_HIGHER():
+    """🔴 THE DISTINCTION THE WHOLE SCHEME RESTS ON, asserted rather than
+    described. `0` is the strongest signal available — it is the only value that
+    rules a repository out — so collapsing "I could not ask" into it would rank
+    a perfectly good repository last on no evidence.
+
+    `regen-known-repos.py` keeps the two apart on the WRITE side by OMITTING an
+    unanswered repo; this is the read side of the same contract."""
+    assert MO.plausibility_class("12", None) != MO.plausibility_class("12", 0)
+    assert MO.CLASS_UNKNOWN < MO.CLASS_IMPOSSIBLE, (
+        "an unmeasured repo must rank ABOVE one measured to have no references "
+        "— it may be anything, while the other is known to be nothing")
+
+
+def test_a_NON_NUMERIC_subject_is_UNKNOWN_rather_than_guessed():
+    """There is no ordering to apply when the clicked subject is not a number,
+    and inventing one would be worse than leaving the rows alone."""
+    assert MO.plausibility_class("", 40) == MO.CLASS_UNKNOWN
+    assert MO.plausibility_class("abc", 40) == MO.CLASS_UNKNOWN
+
+
+# --------------------------------------------------------------------------- #
+# order_universe — the sort
+# --------------------------------------------------------------------------- #
+_ORDER_UNIVERSE = ["acme/alpha", "acme/beta", "bravo/gamma", "delta/epsilon",
+                   "echo/zeta"]
+_ORDER_RANGES = {"acme/alpha": 5, "acme/beta": 0, "bravo/gamma": 2000,
+                 "delta/epsilon": 1300}
+
+
+def test_ordering_is_a_PERMUTATION_and_never_a_filter():
+    """🔴 THE SAFETY PROPERTY. A row that is not in the list cannot be typed at,
+    so dropping one on a day-old snapshot is unrecoverable from inside the
+    picker — the operator's only move is to dismiss and type a URL by hand,
+    which is the dead end this handler exists to remove. Ranking it last costs
+    a scroll.
+
+    Asserted as a MULTISET equality rather than a length, so a mutant that
+    dropped one row and duplicated another would still fail."""
+    for num in ("1291", "12", "1", "99999"):
+        got = MO.order_universe(_ORDER_UNIVERSE, num, _ORDER_RANGES)
+        assert sorted(got) == sorted(_ORDER_UNIVERSE), (
+            f"ordering for #{num} was not a permutation: {got}")
+
+
+def test_an_IMPOSSIBLE_repo_is_RANKED_LAST_and_never_DROPPED():
+    """The class it would be most tempting to hide — 45% of the real universe —
+    is present, and it is at the bottom."""
+    got = MO.order_universe(_ORDER_UNIVERSE, "1291", _ORDER_RANGES)
+    assert "acme/beta" in got, "the IMPOSSIBLE row was FILTERED, not ranked"
+    assert got[-1] == "acme/beta", got
+
+
+def test_a_HIGH_number_puts_the_repos_that_could_have_it_ON_TOP():
+    """The headline behaviour: `#1291` is plausible for the two repos whose
+    heads are past it, and the NEARER head comes first."""
+    got = MO.order_universe(_ORDER_UNIVERSE, "1291", _ORDER_RANGES)
+    assert got[:2] == ["delta/epsilon", "bravo/gamma"], got
+
+
+def test_within_PLAUSIBLE_the_NEARER_head_wins():
+    """`max_ref - N` ascending: a repository whose newest reference is just past
+    `N` is a better fit than one that passed it a thousand references ago.
+
+    🔴 THE NEGATIVE CONTROL IS THE ALPHABET, and it is asserted. `bravo/gamma`
+    sorts BEFORE `delta/epsilon` by name, so a mutant that dropped the distance
+    term would put them the other way round — which is what makes this test
+    about the distance rather than about `sorted` being stable."""
+    got = MO.order_universe(_ORDER_UNIVERSE, "1291", _ORDER_RANGES)
+    assert got.index("delta/epsilon") < got.index("bravo/gamma"), got
+    assert "bravo/gamma" < "delta/epsilon", (
+        "the fixture no longer reproduces the alphabet/distance disagreement — "
+        "this test would now pass under a mutant that ignored the distance")
+
+
+def test_the_DISTANCE_term_is_INERT_outside_PLAUSIBLE():
+    """🔴 THE CONDITION THE SORT KEY'S COMMENT CALLS LOAD-BEARING, PINNED — it
+    had NO test, and an adversarial audit measured the mutant (drop
+    `klass == CLASS_PLAUSIBLE`, keep `max_ref - target`) SURVIVING every
+    ordering fixture in this file.
+
+    Outside PLAUSIBLE the distance is NEGATIVE, so leaving it live sorts BELOW
+    rows WORST-FIRST: for `#1291`, a repo whose head is `#5` (d = -1286) would
+    outrank one whose head is `#1290` (d = -1). Backwards, and invisible to
+    every other test here because no fixture had TWO rows in the same
+    non-PLAUSIBLE class with different `max_ref` — which is exactly the gap.
+
+    🔴 THE FIXTURE IS BUILT SO ALL THREE CANDIDATE ORDERS DISAGREE — and the
+    first version of this docstring CLAIMED that while the fixture did not have
+    it. A round-2 audit measured `acme/near, acme/far, acme/mid`: alphabetical
+    came out `far, mid, near` and the mutant came out `far, mid, near` too,
+    identical. The test still killed the mutant it names, but it could not have
+    separated that mutant from the ALPHABETISING one `order_universe`'s own
+    docstring warns about. The names below are prefixed so the three genuinely
+    differ, and the three-way disagreement is now ASSERTED rather than asserted
+    about."""
+    universe = ["b/near", "a/far", "c/mid"]            # deliberately NOT sorted
+    ranges = {"b/near": 1290, "a/far": 5, "c/mid": 400}
+    got = MO.order_universe(universe, "1291", ranges)
+    assert all(MO.plausibility_class("1291", ranges[r]) == MO.CLASS_BELOW
+               for r in universe), "POSITIVE CONTROL: these are not all BELOW"
+    assert got == universe, (
+        f"BELOW rows were reordered by the distance term, which is negative "
+        f"there and therefore ranks them WORST-FIRST: {got}")
+    # 🔴 THE THREE ORDERS, ASSERTED PAIRWISE DISTINCT. Without this the test
+    # passes against an alphabetising sort whenever alphabetical happens to
+    # equal the incoming order — which is exactly how the previous fixture's
+    # claim became false without anything going red.
+    alphabetical = sorted(universe, key=str.lower)
+    mutant = sorted(universe, key=lambda r: ranges[r] - 1291)
+    assert len({tuple(universe), tuple(alphabetical), tuple(mutant)}) == 3, (
+        f"the fixture's three candidate orders are not pairwise distinct — "
+        f"incoming={universe} alphabetical={alphabetical} mutant={mutant}")
+
+
+def test_a_LOW_number_reorders_the_SAME_rows_DIFFERENTLY():
+    """🔴 THE ORDER IS A FUNCTION OF THE CLICKED NUMBER, not a fixed ranking.
+    `#3` is plausible for every repo with any references at all, and the one
+    whose head is nearest 3 leads — a different repo from `#1291`'s winner.
+
+    A version of this feature that merely sorted by `max_ref` DESCENDING would
+    pass every other test in this block and fail this one."""
+    high = MO.order_universe(_ORDER_UNIVERSE, "1291", _ORDER_RANGES)
+    low = MO.order_universe(_ORDER_UNIVERSE, "3", _ORDER_RANGES)
+    assert low[0] == "acme/alpha", low
+    assert high[0] == "delta/epsilon", high
+    assert low != high, "the order did not move between a low and a high number"
+
+
+def test_COLD_START_leaves_the_incoming_order_EXACTLY_as_it_was():
+    """🔴 THE REQUIREMENT THAT NOTHING REGRESSES ON A HOST WITH NO TABLE. No
+    ranges and no picks must reproduce today's picker exactly, and it is met by
+    CONSTRUCTION rather than by a branch: every key becomes
+    `(UNKNOWN, 0.0, 0, name)` and `sorted` is stable.
+
+    Asserted on a DELIBERATELY UNSORTED input, so a mutant that alphabetised
+    instead of preserving order goes red. The real incoming list is already
+    sorted by `repo_universe`, which would have made such a mutant invisible."""
+    shuffled = ["zulu/one", "alpha/two", "mike/three", "bravo/four"]
+    for scores in ({}, None):
+        got = (MO.order_universe(shuffled, "1291", {}, scores) if scores
+               is not None else MO.order_universe(shuffled, "1291", {}))
+        assert got == shuffled, (
+            f"COLD START REGRESSION: with no ranges and no picks the "
+            f"incoming order must survive untouched, and it did not — "
+            f"{got} != {shuffled}")
+
+
+# --------------------------------------------------------------------------- #
+# TIER B — the operator's own picks
+# --------------------------------------------------------------------------- #
+_T0 = 1_757_000_000.0
+
+
+def test_TIER_B_orders_WITHIN_a_class():
+    """A repo the operator has picked before comes first AMONG ITS EQUALS."""
+    universe = ["acme/alpha", "acme/beta", "acme/gamma"]
+    ranges = {"acme/alpha": 2000, "acme/beta": 2000, "acme/gamma": 2000}
+    picks = [{"t": _T0 - 86400, "repo": "acme/gamma", "n": 1290}]
+    scores = MO.pick_scores(picks, "1291", now=_T0)
+    got = MO.order_universe(universe, "1291", ranges, scores)
+    assert got[0] == "acme/gamma", (
+        f"a repo picked yesterday at #1290 did not lead its own class: {got}")
+    # NEGATIVE CONTROL: without the picks it is LAST, by the alphabet — so this
+    # test cannot pass against a sort that ignores the score.
+    assert MO.order_universe(universe, "1291", ranges)[0] == "acme/alpha"
+
+
+def test_TIER_B_can_NEVER_promote_across_a_TIER_A_class():
+    """🔴 THE INVARIANT. A learned preference is evidence about the OPERATOR; a
+    Tier A class is evidence about the REPOSITORY. No amount of past picking
+    makes a repo with zero references able to answer `#1291`, so a score must
+    never lift a row past a class boundary.
+
+    Built to make the mutant unmissable: `acme/impossible` is picked FIFTY
+    times, a minute ago, at EXACTLY the clicked number — the strongest Tier B
+    signal the scheme can produce — against one unpicked PLAUSIBLE row. If the
+    score were ever compared before the class, it would lead."""
+    universe = ["acme/plausible", "acme/impossible"]
+    ranges = {"acme/plausible": 1300, "acme/impossible": 0}
+    picks = [{"t": _T0 - 60, "repo": "acme/impossible", "n": 1291}
+             for _ in range(50)]
+    scores = MO.pick_scores(picks, "1291", now=_T0)
+    assert scores["acme/impossible"] > 90, (
+        f"POSITIVE CONTROL FAILED — the fixture's score is only "
+        f"{scores.get('acme/impossible')}, so this test could pass under a "
+        f"mutant that DOES compare scores before classes")
+    got = MO.order_universe(universe, "1291", ranges, scores)
+    assert got == ["acme/plausible", "acme/impossible"], (
+        f"a learned preference promoted an IMPOSSIBLE repository: {got}")
+
+
+def test_pick_scores_rewards_FREQUENCY_RECENCY_and_PROXIMITY_separately():
+    """Each of the three terms moves the score ON ITS OWN, so a mutant that
+    drops one is visible. Measured against a one-pick baseline rather than an
+    absolute number, because the constants are not the contract."""
+    base = MO.pick_scores([{"t": _T0 - 86400, "repo": "o/r", "n": 1291}],
+                          "1291", now=_T0)["o/r"]
+    twice = MO.pick_scores([{"t": _T0 - 86400, "repo": "o/r", "n": 1291}] * 2,
+                           "1291", now=_T0)["o/r"]
+    older = MO.pick_scores([{"t": _T0 - 86400 * 60, "repo": "o/r", "n": 1291}],
+                           "1291", now=_T0)["o/r"]
+    distant = MO.pick_scores([{"t": _T0 - 86400, "repo": "o/r", "n": 3}],
+                             "1291", now=_T0)["o/r"]
+    assert twice > base, "FREQUENCY: two picks did not outscore one"
+    assert base > older, "RECENCY: a 60-day-old pick did not decay"
+    assert base > distant, "PROXIMITY: a nearby number was not preferred"
+    assert distant > 0, (
+        "a distant number must still count as a pick — discarding it would "
+        "throw away that row's frequency and recency evidence with it")
+
+
+def test_a_repo_with_NO_picks_scores_nothing():
+    """The cold-start half of Tier B: no log, no scores, no reordering."""
+    assert MO.pick_scores([], "1291") == {}
+
+
+def test_pick_scores_is_CASE_FOLDED_like_every_other_key_in_this_module():
+    """GitHub names are case-insensitive and `repo_universe` preserves whatever
+    casing the API returned — so a score keyed on the spelling in the LOG would
+    miss the row it is about. The lesson `build_mapping` pays for at length."""
+    scores = MO.pick_scores(
+        [{"t": _T0, "repo": "Acme/Widget", "n": 12}], "12", now=_T0)
+    assert "acme/widget" in scores, scores
+    got = MO.order_universe(["acme/other", "Acme/Widget"], "12",
+                            {"acme/other": 99, "acme/widget": 99}, scores)
+    assert got[0] == "Acme/Widget", got
+
+
+# --------------------------------------------------------------------------- #
+# load_known_ranges / load_picks / record_pick — the I/O, every failure quiet
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("content,why", [
+    (None, "absent"),
+    ("", "empty"),
+    ("{", "truncated mid-write"),
+    ("[1, 2, 3]", "a LIST — the universe file handed to the wrong reader"),
+    ('"a string"', "a bare JSON scalar"),
+    ('{"not-a-repo": 5}', "a key that is not owner/repo"),
+    ('{"o/r": "40"}', "a STRING value where a number belongs"),
+    ('{"o/r": true}', "a bool, which is an int SUBCLASS in Python"),
+    ('{"o/r": -1}', "a negative number"),
+])
+def test_every_RANGE_TABLE_failure_is_an_empty_dict(tmp_path, content, why):
+    """🔴 A CORRUPTED TABLE MUST COST A WORSE ORDER, NEVER A DEAD CLICK. This
+    runs on a detached handler with nowhere to print a traceback, and `{}` means
+    "every repo is UNKNOWN", which is exactly the pre-change ordering.
+
+    ⚠ `true` IS IN THE LIST ON PURPOSE: `isinstance(True, int)` is True in
+    Python, so a value check written as `isinstance(v, int)` alone admits it as
+    the number 1 — filing a repository as BELOW on a boolean."""
+    p = tmp_path / "known_ranges.json"
+    if content is not None:
+        p.write_text(content)
+    assert MO.load_known_ranges(p) == {}, why
+
+
+def test_the_range_table_is_read_CASE_FOLDED(tmp_path):
+    """Keys arrive lowercased from the generator and `order_universe` looks up
+    `row.lower()` — but an older or hand-written file may not be, so the reader
+    folds too rather than trusting the writer."""
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"Acme/Widget": 40}))
+    assert MO.load_known_ranges(p) == {"acme/widget": 40}
+
+
+def test_load_known_ranges_resolves_its_PATH_at_CALL_time(monkeypatch, tmp_path):
+    """🔴 THE CLASS DEFECT THIS MODULE HAS PAID FOR TWICE. A `path: Path =
+    KNOWN_RANGES_PATH` default binds at IMPORT, so a test patching the module
+    attribute changes nothing and passes for the wrong reason — which is how
+    `load_known_repos`' own override test was measured INERT, with the whole
+    suite green after its call site was deleted."""
+    p = tmp_path / "elsewhere.json"
+    p.write_text(json.dumps({"o/r": 7}))
+    monkeypatch.setattr(MO, "KNOWN_RANGES_PATH", p)
+    assert MO.load_known_ranges() == {"o/r": 7}
+
+
+def test_load_picks_SKIPS_a_torn_line_rather_than_losing_the_FILE(tmp_path):
+    """🔴 THE LOG IS APPEND-ONLY AND ITS WRITER CAN BE KILLED MID-WRITE. One
+    truncated last line must not cost the whole history — which is exactly what
+    a whole-file `json.loads` would do."""
+    p = tmp_path / "picks.jsonl"
+    p.write_text(
+        json.dumps({"t": _T0, "repo": "o/good", "n": 12}) + "\n"
+        + '{"t": 1, "repo": "o/tor\n'          # torn
+        + "not json at all\n"
+        + json.dumps({"t": _T0, "repo": "o/also-good", "n": 13}) + "\n")
+    got = [r["repo"] for r in MO.load_picks(p, now=_T0)]
+    assert got == ["o/good", "o/also-good"], got
+
+
+@pytest.mark.parametrize("row,why", [
+    ({"t": _T0, "repo": "o/r"}, "no number"),
+    ({"t": _T0, "n": 12}, "no repo"),
+    ({"t": _T0, "repo": "not-a-repo", "n": 12}, "repo is not owner/repo"),
+    ({"t": _T0, "repo": "o/r", "n": "12"}, "the number is a string"),
+    ({"t": _T0, "repo": "o/r", "n": True}, "the number is a bool"),
+    ({"t": _T0, "repo": "o/r", "n": 0}, "a zero reference number"),
+    ({"t": "yesterday", "repo": "o/r", "n": 12}, "the timestamp is a string"),
+    ([1, 2, 3], "a list where an object belongs"),
+])
+def test_a_MALFORMED_pick_row_is_SKIPPED(tmp_path, row, why):
+    """POSITIVE CONTROL IN THE SAME READ: a good row sits beside each bad one
+    and must survive, so a reader that discarded everything fails this rather
+    than passing it."""
+    p = tmp_path / "picks.jsonl"
+    p.write_text(json.dumps(row) + "\n"
+                 + json.dumps({"t": _T0, "repo": "o/keeper", "n": 5}) + "\n")
+    assert [r["repo"] for r in MO.load_picks(p, now=_T0)] == ["o/keeper"], why
+
+
+def test_a_pick_log_that_is_NOT_UTF8_is_an_empty_list_not_a_DEAD_CLICK(tmp_path):
+    """🔴 THE ONE THAT WAS A LIVE DEFECT, AND IT IS A ONE-WORD ASYMMETRY.
+    `Path.read_text()` DECODES, and a decode failure raises
+    `UnicodeDecodeError` — a `ValueError`, NOT an `OSError`. Caught only by
+    `guarded_main`, the click produced "mention-open failed: UnicodeDecodeError"
+    and NO PICKER, while `load_picks`' own docstring said "EVERY failure is []"
+    and its sibling `load_known_ranges` already caught both.
+
+    Driven through `guarded_main` rather than `load_picks` alone, because the
+    claim is about the CLICK: the operator must still get a picker."""
+    p = tmp_path / "picks.jsonl"
+    p.write_bytes(json.dumps({"t": _T0, "repo": "o/r", "n": 5}).encode()
+                  + b"\n\xff\xfe not utf-8 at all\n")
+    assert MO.load_picks(p, now=_T0) == [], (
+        "a pick log that is NOT UTF-8 must read as an empty list — a "
+        "UnicodeDecodeError escaping here is a DEAD CLICK")
+
+
+def test_a_NON_UTF8_pick_log_still_shows_the_PICKER(monkeypatch, tmp_path):
+    """The behavioural half of the test above — the guard is about the click,
+    not about a return value. A corrupted accelerator must cost the operator a
+    worse ORDER, never a dead end."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/one": 9000})
+    bad = tmp_path / "picks-bad.jsonl"
+    bad.write_bytes(b"\xff\xfe\x00not utf-8\n")
+    monkeypatch.setattr(MO, "PICKS_PATH", bad)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/one"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    shown = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": shown.update(n=len(c)) or "")
+    said: list = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: said.append(a))
+    assert MO.guarded_main(["#1291"]) == 0
+    assert shown.get("n"), f"the click showed NO picker: {said}"
+    assert not said, f"the click reported a failure: {said}"
+
+
+def test_load_picks_caps_by_AGE_and_by_COUNT(tmp_path):
+    """Both caps, closing different ways for old data to mislead: a repository
+    that was the answer three months ago may not exist now, and an unbounded
+    file would be read in full on the picker path.
+
+    ⚠ THE COUNT CAP IS APPLIED TO THE *TAIL*. `record_pick` APPENDS, so the file
+    is chronological with the newest line LAST — this fixture is written the
+    same way, because a fixture in the other order would have made the cap look
+    correct while it kept the OLDEST rows. Taking the first N would freeze the
+    preference at whatever the operator liked when the file was new."""
+    p = tmp_path / "picks.jsonl"
+    total = MO.PICKS_MAX_ROWS + 50
+    old = _T0 - (MO.PICKS_MAX_AGE_DAYS + 5) * 86400
+    rows = [{"t": old, "repo": "o/ancient", "n": 1}]
+    # Oldest first, newest last — exactly what an append-only log looks like.
+    rows += [{"t": _T0 - (total - i), "repo": f"o/r{i}", "n": i + 1}
+             for i in range(total)]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    got = MO.load_picks(p, now=_T0)
+    assert len(got) <= MO.PICKS_MAX_ROWS, len(got)
+    assert not any(r["repo"] == "o/ancient" for r in got), (
+        "a pick older than PICKS_MAX_AGE_DAYS survived the age cap")
+    # …and the rows that DID survive are the NEWEST, not the oldest.
+    assert got[-1]["repo"] == f"o/r{total - 1}", got[-1]
+    assert not any(r["repo"] == "o/r0" for r in got), (
+        "the OLDEST rows survived the count cap — it is being applied to the "
+        "head of the file rather than the tail")
+
+
+def test_record_pick_APPENDS_and_the_file_is_0600(tmp_path):
+    """🔴 IT NAMES PRIVATE REPOSITORIES, so the mode is asserted."""
+    p = tmp_path / "sub" / "picks.jsonl"
+    assert MO.record_pick("acme/widget", "1291", p, now=_T0)
+    assert MO.record_pick("acme/other", "12", p, now=_T0 + 1)
+    rows = [json.loads(ln) for ln in p.read_text().splitlines()]
+    assert [r["repo"] for r in rows] == ["acme/widget", "acme/other"]
+    assert rows[0]["n"] == 1291 and isinstance(rows[0]["n"], int)
+    assert oct(os.stat(p).st_mode)[-3:] == "600", oct(os.stat(p).st_mode)
+    assert oct(os.stat(p.parent).st_mode)[-3:] == "700"
+
+
+def test_the_pick_log_is_COMPACTED_so_it_cannot_grow_without_bound(
+        tmp_path, monkeypatch):
+    """🔴 NOTHING ELSE TRIMS IT. `record_pick` only appends and the age cap is
+    applied on READ, so without this a 0600 file naming private repositories
+    accumulates forever — and `PICKS_MAX_ROWS`' comment claimed the count cap
+    prevented that, which an audit measured false: `load_picks` reads the whole
+    file and only then slices.
+
+    Asserted in BOTH directions, because a compaction that fired on every write
+    would be a write amplification and one that never fired would be no guard:
+    below the threshold the file is untouched, above it the TAIL survives."""
+    made = _watch_compaction_tmps(monkeypatch)
+    p = tmp_path / "picks.jsonl"
+    # One short, so the append lands the file EXACTLY on the threshold.
+    rows = [{"t": _T0 - (5000 - i), "repo": f"o/r{i}", "n": i + 1}
+            for i in range(MO.PICKS_COMPACT_AT - 1)]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    # AT the threshold: untouched. (`<=` vs `<` is the mutation a one-sided
+    # test cannot see, which is why this arm exists at all.)
+    before = p.read_text()
+    assert MO.record_pick("o/newest", "42", p, now=_T0)
+    assert len(p.read_text().splitlines()) == MO.PICKS_COMPACT_AT, (
+        "the log was trimmed AT the threshold rather than past it")
+    assert p.read_text().startswith(before), "existing rows were rewritten early"
+
+    # PAST it: trimmed to the most recent PICKS_MAX_ROWS, newest kept.
+    assert MO.record_pick("o/newer-still", "43", p, now=_T0 + 1)
+    kept = [json.loads(ln) for ln in p.read_text().splitlines()]
+    assert len(kept) == MO.PICKS_MAX_ROWS, len(kept)
+    assert kept[-1]["repo"] == "o/newer-still", kept[-1]
+    assert not any(r["repo"] == "o/r0" for r in kept), (
+        "compaction kept the HEAD of the file — it must keep the tail")
+    assert oct(os.stat(p).st_mode)[-3:] == "600", "compaction widened the mode"
+    # …and nothing was left behind — see `_watch_compaction_tmps` for why this
+    # observes `mkstemp` rather than listing the directory, and why asserting on
+    # a GUESSED tmp name (the old `picks.jsonl.tmp`) could never have failed.
+    assert made, "POSITIVE CONTROL: no compaction tmp was ever created"
+    assert [t for t in made if t.exists()] == [], (
+        f"a compaction tmp outlived the call: {[str(t) for t in made]}")
+
+
+def _watch_compaction_tmps(monkeypatch):
+    """A list that collects every tmp path compaction creates.
+
+    🔴 NOT A DIRECTORY LISTING, AND THAT IS FORCED RATHER THAN CHOSEN. The tmp
+    name comes from `mkstemp` and is unguessable, so the obvious check is to
+    list the directory — but the glob-site ledger in `test_transcript_search.py`
+    enumerates every listing in a scope whose source mentions the log's
+    extension, and MEASURED: an inline listing in the caller registered as a new
+    walk site, and so did a helper that merely explained itself using the
+    literal. Rather than widen a repo-wide disclosure ledger for a two-line test
+    assertion, this observes `mkstemp`'s real return value — which is a tighter
+    check anyway: it names the exact files the code under test created, instead
+    of inferring them from what is left lying around.
+    """
+    import tempfile as _tempfile
+    made: list[Path] = []
+    real = _tempfile.mkstemp
+
+    def spy(*a, **k):
+        fd, name = real(*a, **k)
+        made.append(Path(name))
+        return fd, name
+
+    monkeypatch.setattr(_tempfile, "mkstemp", spy)
+    # ⚠ A PLAIN FUNCTION, NOT A CONTEXT MANAGER. It was a
+    # `@contextlib.contextmanager` entered through a bare `ExitStack()`
+    # that nothing ever closed — so the generator never resumed past its
+    # `yield` and teardown happened only because `monkeypatch` undid the
+    # setattr anyway. `monkeypatch` owning the teardown is the whole
+    # reason no context manager is needed.
+    return made
+
+
+def test_a_RAISING_compaction_neither_LOSES_the_pick_nor_ESCAPES(tmp_path,
+                                                                  monkeypatch):
+    """🔴 THREE CLAIMS, AND THE FIRST VERSION OF THIS TEST PINNED THE OPPOSITE
+    OF ONE OF THEM. It wrapped the call in `pytest.raises(AssertionError)` —
+    asserting that `record_pick` PROPAGATES — while `record_pick`'s own
+    docstring says "IT CAN NEVER RAISE AND IT CAN NEVER BLOCK THE OPEN". A
+    round-2 audit caught it: a test made to pass for a new wrong reason, and the
+    escape it pinned would have skipped `open_url` entirely, turning the click
+    into "mention-open failed" with no browser.
+
+    So: the row is DURABLE before compaction runs, the raise does NOT escape,
+    and the return is still True — a compaction failure costs a large file, not
+    the operator's pick."""
+    p = tmp_path / "picks.jsonl"
+    rows = [{"t": _T0, "repo": f"o/r{i}", "n": i + 1}
+            for i in range(MO.PICKS_COMPACT_AT + 5)]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    fired: list = []
+    monkeypatch.setattr(
+        MO, "_compact_picks",
+        lambda *a, **k: fired.append(1) or (_ for _ in ()).throw(
+            RuntimeError("compaction exploded")))
+    assert MO.record_pick("o/kept", "9", p, now=_T0) is True, (
+        "a failed compaction flipped the return to False — the pick WAS "
+        "recorded")
+    assert fired, "POSITIVE CONTROL: compaction was never attempted"
+    assert json.loads(p.read_text().splitlines()[-1])["repo"] == "o/kept", (
+        "the row was not durable before compaction ran")
+
+
+def test_a_RAISING_compaction_does_not_cost_the_OPEN(monkeypatch):
+    """The behavioural half of the test above, at the call site that matters:
+    `record_pick` runs immediately before `return open_url(url)`."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/one"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "_compact_picks",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("compaction exploded")))
+    opened: list = []
+    said: list = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: said.append(a))
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": next(x["url"] for x in c
+                                                if "acme/one" in x["url"]))
+    assert MO.guarded_main(["#1291"]) == 0
+    assert opened, f"the click opened NOTHING because compaction raised: {said}"
+    assert not said, f"the click reported a failure: {said}"
+
+
+def test_record_pick_NARROWS_a_pre_existing_parent_that_others_can_read(tmp_path):
+    """🔴 THE HALF THAT WAS ONLY CLAIMED. `Path.mkdir(mode=…, exist_ok=True)`
+    applies the mode ONLY at creation, so a pre-existing
+    `~/.config/mention-open/` keeps whatever mode it has — while the docstring
+    paired the parent with the file mode, which IS re-applied every write. The
+    original test created its parent fresh and so could not see this."""
+    d = tmp_path / "preexisting"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    assert MO.record_pick("acme/widget", "12", d / "picks.jsonl")
+    assert oct(os.stat(d).st_mode)[-3:] == "700", (
+        "a pre-existing group/world-readable config dir was left that way, and "
+        "it holds files naming PRIVATE repositories")
+
+
+def test_record_pick_does_NOT_WIDEN_a_parent_the_operator_narrowed(tmp_path):
+    """🔴 THE OTHER DIRECTION, AND IT IS WHY THE FIX IS "STRIP GROUP/OTHER"
+    RATHER THAN "SET 0700". A flat `chmod(0o700)` closes the hole above and
+    opens a worse one: it re-grants owner-write to a directory made read-only on
+    purpose. Measured — it made
+    `test_record_pick_CANNOT_RAISE_when_the_log_is_UNWRITABLE` pass by removing
+    the condition that test exists to exercise.
+
+    Owner bits must survive untouched; only group and other are stripped."""
+    d = tmp_path / "narrowed"
+    d.mkdir()
+    os.chmod(d, 0o500)                    # r-x------ : owner cannot write
+    try:
+        MO.record_pick("acme/widget", "12", d / "picks.jsonl")
+        assert oct(os.stat(d).st_mode)[-3:] == "500", (
+            "record_pick WIDENED a directory the operator had narrowed")
+    finally:
+        os.chmod(d, 0o700)
+    # …and a mode with no group/other bits at all is left completely alone.
+    e = tmp_path / "already-fine"
+    e.mkdir()
+    os.chmod(e, 0o700)
+    assert MO.record_pick("acme/widget", "12", e / "picks.jsonl")
+    assert oct(os.stat(e).st_mode)[-3:] == "700"
+
+
+def _narrow_would_set(module, start: int) -> int | None:
+    """What `module.narrow_dir` would chmod a directory of mode `start` TO —
+    with `os.stat`/`os.chmod` stubbed, so no privileged bit has to be settable.
+
+    🔴 STUBBED ON PURPOSE, AND THE REASON IS A TWO-TIER DIFFERENCE THAT COST A
+    RED GATE. The first version of the setuid/setgid/sticky test called
+    `os.chmod(d, 0o2755)` for real. That works on the dev host and raises
+    `PermissionError: Operation not permitted` in the `nix build` sandbox, where
+    the build user may not set those bits — so the dev-host tier was green and
+    the authoritative tier failed, which is exactly the blindness `CLAUDE.md`
+    describes. A `skip` would have been worse: it is an UNPINNED skip, and it
+    would have made the sandbox tier silently stop testing this at all.
+
+    The property under test is mask ARITHMETIC (`& 0o7777` vs `& 0o777`), which
+    needs no privilege to check.
+    """
+    got: list[int] = []
+    real_stat, real_chmod = module.os.stat, module.os.chmod
+
+    class _St:
+        st_mode = start
+
+    module.os.stat = lambda *a, **k: _St()
+    module.os.chmod = lambda p, m, *a, **k: got.append(m)
+    try:
+        module.narrow_dir(Path("/nonexistent-does-not-matter"))
+    finally:
+        module.os.stat, module.os.chmod = real_stat, real_chmod
+    return got[0] if got else None
+
+
+@pytest.mark.parametrize("start,keeps", [
+    (0o2755, 0o2000),   # setgid — common on shared dirs, and not ours to clear
+    (0o1777, 0o1000),   # sticky
+    (0o4755, 0o4000),   # setuid
+])
+def test_narrowing_a_parent_PRESERVES_setuid_setgid_and_sticky(start, keeps):
+    """🔴 THE BITS A `& 0o777` MASK SILENTLY DESTROYS. A round-2 audit measured
+    a `0o2755` parent coming back `0o0700` and a `0o1777` one likewise: the
+    narrowing read only the low nine bits, so re-writing them cleared everything
+    above. Those bits are not ours to clear — the rule is "nobody ELSE may read
+    this", which is a statement about group and other alone.
+
+    ⚠ ASSERTED ON THE FULL MODE, because the sibling test above compares
+    `oct(...)[-3:]` and is therefore structurally blind to exactly this — which
+    is why it did not catch it. And driven through `_narrow_would_set`, which
+    explains why this cannot use a real `chmod`."""
+    mode = _narrow_would_set(MO, start)
+    assert mode is not None, f"narrow_dir did not chmod {start:o} at all"
+    assert mode & 0o077 == 0, f"group/other survived: {mode:o}"
+    assert mode & 0o7000 == keeps, (
+        f"narrowing destroyed a non-permission bit: {start:o} -> {mode:o}")
+    assert mode & 0o700 == start & 0o700, (
+        f"owner bits changed: {start:o} -> {mode:o}")
+
+
+def test_narrowing_a_parent_that_is_ALREADY_private_does_not_chmod_at_all():
+    """The negative control on the stub above: a mode with no group/other bits
+    needs no call, so `narrow_dir` must make none. Without this, a mutant that
+    chmod-ed unconditionally would satisfy every assertion in the sibling
+    test."""
+    assert _narrow_would_set(MO, 0o700) is None
+    assert _narrow_would_set(MO, 0o500) is None
+    assert _narrow_would_set(MO, 0o2700) is None
+
+
+def test_a_parent_this_tool_CANNOT_chmod_does_not_cost_the_PICK(tmp_path,
+                                                                monkeypatch):
+    """🔴 A REGRESSION THE NARROWING ITSELF INTRODUCED, and it is reachable
+    through a redirected `MENTION_OPEN_PICKS`. The chmod started out inside the
+    same `try` as the append, so an `EPERM` on a directory this tool does not
+    own — `/tmp`, say — propagated into `record_pick`'s handler and DROPPED THE
+    PICK, on a path that worked before the narrowing existed.
+
+    The write must still land; the narrowing is defence in depth, not a
+    precondition."""
+    d = tmp_path / "not-ours"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    monkeypatch.setattr(MO.os, "chmod", _raise_eperm(MO.os.chmod, d))
+    assert MO.record_pick("acme/widget", "12", d / "picks.jsonl") is True, (
+        "an un-chmod-able parent dropped the pick")
+    assert (d / "picks.jsonl").exists()
+
+
+def _raise_eperm(real, only_for: Path):
+    """`os.chmod` that refuses for one directory and behaves for everything
+    else — so the file's own 0600 still happens and the test is about the
+    PARENT."""
+    def chmod(p, mode, *a, **k):
+        if str(p) == str(only_for):
+            raise PermissionError("not ours to chmod")
+        return real(p, mode, *a, **k)
+    return chmod
+
+
+def test_record_pick_RE_APPLIES_the_mode_to_a_file_it_did_NOT_create(tmp_path):
+    """🔴 THE CASE `open(..., "a")` SILENTLY LEAVES OPEN. A log created by an
+    older build, a hand-run, or a permissive umask keeps its original mode
+    FOREVER unless the mode is re-applied on every write."""
+    p = tmp_path / "picks.jsonl"
+    p.write_text("")
+    os.chmod(p, 0o644)
+    assert MO.record_pick("acme/widget", "12", p)
+    assert oct(os.stat(p).st_mode)[-3:] == "600", (
+        "a pre-existing world-readable pick log was left world-readable")
+
+
+@pytest.mark.parametrize("repo,num", [
+    ("", "12"), ("not-a-repo", "12"), ("a/b/c", "12"), (None, "12"),
+    ("o/r", ""), ("o/r", "abc"), ("o/r", "0"), ("o/r", None),
+])
+def test_record_pick_REFUSES_what_the_READER_would_discard(tmp_path, repo, num):
+    """A row the reader throws away is not worth writing, and a log full of them
+    would push real history past `PICKS_MAX_ROWS`."""
+    p = tmp_path / "picks.jsonl"
+    assert MO.record_pick(repo, num, p) is False
+    assert not p.exists(), p.read_text() if p.exists() else ""
+
+
+def test_record_pick_CANNOT_RAISE_when_the_log_is_UNWRITABLE(tmp_path):
+    """🔴 A FULL DISK MUST COST THE LEARNING, NOT THE CLICK. This runs after the
+    operator has already chosen a URL; every OSError is a quiet False."""
+    d = tmp_path / "readonly"
+    d.mkdir()
+    os.chmod(d, 0o500)
+    try:
+        assert MO.record_pick("acme/widget", "12", d / "picks.jsonl") is False
+    finally:
+        os.chmod(d, 0o700)
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://github.com/acme/widget/issues/12", "acme/widget"),
+    ("https://github.com/acme/widget/pull/1291", "acme/widget"),
+    ("http://github.com/acme/widget/pull/1", "acme/widget"),
+    ("https://www.github.com/acme/widget/pull/1", "acme/widget"),
+    # NOT a repository — these must never be recorded as one.
+    ("https://clawgate.zacx.dev/tasks/370", ""),
+    ("https://app.clickup.com/t/868abc123", ""),
+    ("https://github.com/acme", ""),
+    ("https://example.com/acme/widget/issues/1", ""),
+    ("", ""),
+    (None, ""),
+])
+def test_repo_of_github_url(url, expected):
+    assert MO.repo_of_github_url(url) == expected
+
+
+# --------------------------------------------------------------------------- #
+# ordering_state / ordering_note — the DEADMAN, and what the operator sees
+# --------------------------------------------------------------------------- #
+def test_a_STALE_range_table_is_IGNORED_rather_than_TRUSTED():
+    """🔴 THE DEADMAN. Past `STALE_MAPPING_DAYS` the daily refresh has missed
+    SEVERAL runs, and the two misclassifications that follow point in OPPOSITE
+    directions — a repo that has advanced past `N` is filed BELOW, and a repo
+    that gained its first reference is filed IMPOSSIBLE. Ordering on that is
+    confidently wrong; ordering on nothing is merely what shipped before.
+
+    Measured AT the boundary and either side, because `>=` vs `>` is the
+    mutation a single-point test cannot see."""
+    ranges = {"o/r": 40}
+    for age, want in ((1.0, MO.ORDER_APPLIED),
+                      (MO.STALE_MAPPING_DAYS - 0.1, MO.ORDER_APPLIED),
+                      (MO.STALE_MAPPING_DAYS, MO.ORDER_STALE),
+                      (MO.STALE_MAPPING_DAYS + 5, MO.ORDER_STALE)):
+        assert MO.ordering_state(ranges, age) == want, (
+            f"a STALE table is being TRUSTED (or a fresh one distrusted): "
+            f"age {age} gave {MO.ordering_state(ranges, age)!r}, want "
+            f"{want!r}")
+
+
+def test_an_ABSENT_table_is_no_table_and_an_UNDATEABLE_one_is_STALE():
+    """Three states, three different next moves for the operator: run the
+    generator, look at the failing unit, or nothing at all. Collapsing them into
+    a boolean is the silent-zero shape this handler is written against."""
+    assert MO.ordering_state({}, 1.0) == MO.ORDER_NO_TABLE
+    assert MO.ordering_state({}, None) == MO.ORDER_NO_TABLE
+    # A table that EXISTS but cannot be dated is STALE, not missing — sending
+    # the operator to run a generator would not help when the file is there.
+    assert MO.ordering_state({"o/r": 1}, None) == MO.ORDER_STALE
+
+
+def test_the_ORDER_STATE_set_is_pinned_and_EVERY_ONE_has_a_note():
+    """🔴 TWO-WAY, AND IT CHECKS THE CONSUMER RATHER THAN THE LEDGER. A fourth
+    state added later with no wording would fall through `ordering_note`'s final
+    `return ""` and the operator would see an unordered picker described as
+    nothing at all — the silent `else` this file has already been bitten by
+    once, in `pick()`'s outcome handling."""
+    assert MO.ORDER_STATES == (MO.ORDER_APPLIED, MO.ORDER_NO_TABLE,
+                               MO.ORDER_STALE)
+    assert len(set(MO.ORDER_STATES)) == 3
+    for state in MO.ORDER_STATES:
+        assert MO.ordering_note("1291", state, 2, 54, age=9.0), (
+            f"the state {state!r} produces no wording at all")
+    assert MO.ordering_note("1291", "a-state-nobody-defined") == ""
+
+
+def test_the_ordering_note_SAYS_WHICH_STATE_and_names_NO_REPOSITORY():
+    """🔴 THE OPERATOR MUST BE ABLE TO TELL AN ORDERED LIST FROM AN UNORDERED
+    ONE — they look identical and only one is worth trusting.
+
+    And the note reaches the picker header, so it obeys the same rule as
+    `universe_note` and `guessed_note`: a clicked number and two counts, NEVER a
+    row. BOTH token guards, because `_no_universe_token_anywhere` is
+    structurally blind to the pane-guessed repo."""
+    applied = MO.ordering_note("1291", MO.ORDER_APPLIED, 2, 54)
+    assert "1291" in applied and "2" in applied and "54" in applied
+    stale = MO.ordering_note("1291", MO.ORDER_STALE, age=9.0)
+    assert "unordered" in stale and "9 days" in stale
+    assert "mention-known-repos-refresh" in stale, (
+        "the stale wording must name the UNIT — that is the thing to look at, "
+        "and a stale table is not fixed by editing a file")
+    missing = MO.ordering_note("1291", MO.ORDER_NO_TABLE)
+    assert "unordered" in missing and "regen-known-repos.py" in missing
+    # 🔴 THE QUIET/LOUD SPLIT IS ASSERTED, NOT JUST DESCRIBED. `no-table` fires
+    # on EVERY picker until the generator has run once — and forever on a host
+    # where `gh` is not configured, which is a legitimate state — so it must
+    # stay the shorter of the two and must NOT send the operator to a unit that
+    # is working fine.
+    assert len(missing) < len(stale), (missing, stale)
+    assert "systemctl" not in missing, (
+        "the no-table wording points at a UNIT, which on a host that has simply "
+        "never run the generator is a diagnosis pointing somewhere already fine")
+    for note in (applied, stale, missing):
+        _no_universe_token_anywhere(note, "ORDERING NOTE")
+        for token in PANE_GUESS_TOKENS:
+            assert token not in note, f"the ordering note named {token!r}"
+
+
+# --------------------------------------------------------------------------- #
+# END TO END through main()
+# --------------------------------------------------------------------------- #
+def _ranges_on_disk(monkeypatch, tmp_path, table, age_days=1.0):
+    """Write a real range table and point the handler at it, with a real mtime —
+    the staleness arm reads `st_mtime`, so a stubbed loader could not reach it."""
+    p = tmp_path / "ranges-for-this-test.json"
+    p.write_text(json.dumps(table))
+    when = time.time() - age_days * 86400
+    os.utime(p, (when, when))
+    monkeypatch.setattr(MO, "KNOWN_RANGES_PATH", p)
+    return p
+
+
+def test_main_ORDERS_the_universe_rows_and_the_CLAWGATE_row_STAYS_FIRST(
+        monkeypatch, tmp_path):
+    """🔴 THE INVARIANT THE WHOLE CHANGE IS SCOPED BY: the ordering applies to
+    the universe rows BENEATH the measured ones, never to the whole list. A bare
+    `#N` still opens on the clawgate task, one Enter away.
+
+    Driven through `main()` rather than through `order_universe`, because the
+    ordering could be perfectly right and still be applied to the wrong slice."""
+    universe = ["acme/impossible", "acme/near", "acme/far", "acme/unknown"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"acme/impossible": 0, "acme/near": 1300,
+                     "acme/far": 99000})
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(cands=c, mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    rows = seen["cands"]
+    assert rows[0]["platform"] == "clawgate", (
+        f"the clawgate row is no longer FIRST: {MO.picker_rows(rows)[:2]}")
+    repos = [MO.repo_of_github_url(c["url"]) for c in rows[1:]]
+    assert repos == ["acme/near", "acme/far", "acme/unknown",
+                     "acme/impossible"], repos
+
+
+def test_main_says_the_rows_are_ORDERED_in_the_PICKER_HEADER(monkeypatch,
+                                                             tmp_path):
+    """The header is the only surface that can say so — see `ordering_note`.
+
+    ⚠ THIS SHAPE HAS NO PRE-EXISTING NOTE, so the clause is the whole header —
+    the bare-`#N` picker is rows of real evidence plus a list and has always
+    carried `mesg == ""`. That the clause is APPENDED rather than SUBSTITUTED
+    where a note DOES exist is pinned separately, by the two whole-string
+    `guessed_note` tests above; asserting it here would have been asserting it
+    of a string that never had a second half."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/yes": 9000, "acme/no": 0})
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/yes", "acme/no"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    assert "ordered by plausibility for #1291" in seen["mesg"], seen["mesg"]
+    assert "1 could have it" in seen["mesg"], seen["mesg"]
+    assert "1 have no references" in seen["mesg"], seen["mesg"]
+    _no_universe_token_anywhere(seen["mesg"], "ORDERED HEADER")
+
+
+def test_main_says_the_rows_are_UNORDERED_when_the_table_is_STALE(monkeypatch,
+                                                                  tmp_path):
+    """🔴 IT DEGRADES *AND SAYS SO*. A silently-unordered picker would let the
+    operator keep trusting a top-of-list habit the host has stopped earning.
+
+    🔴 THE FIXTURE'S NAMES ARE CHOSEN SO THE TWO ORDERS DISAGREE, and that is
+    the whole reason this test can see anything. Its first version used
+    `zulu/one` / `alpha/two` / `mike/three`, whose ALPHABETICAL order happens to
+    equal their PLAUSIBILITY order for `#1291` — so a mutant that ordered a
+    stale table anyway produced a byte-identical list and SURVIVED a green run.
+    Measured in this change's own mutation sweep (M9). The names below put the
+    plausible repo in the middle of the alphabet and the impossible one first."""
+    universe = ["alpha/zeroref", "mike/highhead", "zulu/unmeasured"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"alpha/zeroref": 0, "mike/highhead": 9000},
+                    age_days=MO.STALE_MAPPING_DAYS + 3)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(cands=c, mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    assert "rows unordered" in seen["mesg"], seen["mesg"]
+    assert "mention-known-repos-refresh" in seen["mesg"], seen["mesg"]
+    # …and the rows really ARE in the pre-change order. `repo_universe` sorts
+    # case-insensitively, so an ordering applied anyway would have led with
+    # `mike/highhead` (9000 >= 1291) and ended on `alpha/zeroref` (0 refs).
+    repos = [MO.repo_of_github_url(c["url"]) for c in seen["cands"]
+             if MO.repo_of_github_url(c["url"])]
+    assert repos == sorted(universe, key=str.lower), repos
+    # POSITIVE CONTROL ON THE FIXTURE: the two orders must genuinely disagree,
+    # or the assertion above is satisfied by a coincidence rather than by the
+    # degrade. This is the check whose absence let mutant M9 survive.
+    ordered = MO.order_universe(universe, "1291",
+                                {"alpha/zeroref": 0, "mike/highhead": 9000})
+    assert ordered != sorted(universe, key=str.lower), (
+        f"the fixture's alphabetical order EQUALS its plausibility order "
+        f"({ordered}) — this test cannot see a stale table being ordered")
+
+
+def test_main_RECORDS_the_repository_the_operator_PICKED(monkeypatch):
+    """Tier B's write side, end to end: the row the operator selected becomes a
+    line in the log, and the log is the one the autouse redirect points at."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/chosen", "acme/other"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": next(x["url"] for x in c
+                                                if "acme/chosen" in x["url"]))
+    assert MO.main(["#1291"]) == 0
+    rows = [json.loads(ln) for ln in MO.PICKS_PATH.read_text().splitlines()]
+    assert [(r["repo"], r["n"]) for r in rows] == [("acme/chosen", 1291)], rows
+
+
+def test_a_DISMISSED_picker_records_NOTHING(monkeypatch):
+    """A dismissal opens nothing and must teach nothing — otherwise the log
+    would fill with repositories the operator explicitly declined."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/one", "acme/two"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
+    assert MO.main(["#1291"]) == 0
+    assert not MO.PICKS_PATH.exists(), MO.PICKS_PATH.read_text()
+
+
+def test_a_CLAWGATE_pick_is_NOT_recorded_as_a_repository(monkeypatch):
+    """`repo_of_github_url` is what keeps a task URL out of the repository log —
+    a clawgate row has an id, not an owner."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/one"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": next(x["url"] for x in c
+                                                if x["platform"] == "clawgate"))
+    assert MO.main(["#1291"]) == 0
+    assert not MO.PICKS_PATH.exists(), MO.PICKS_PATH.read_text()
+
+
+def test_an_EXPLICIT_click_pays_NOTHING_for_the_ORDERING(monkeypatch, tmp_path):
+    """🔴 THE FAST PATH MUST NOT PAY FOR A LIST IT DISCARDS, AND THE FIRST
+    VERSION OF THIS CHANGE DID — found by a latency probe, not by review, under
+    a comment that CLAIMED the opposite.
+
+    The trap is that `may_offer_universe and num` is TRUE for an explicit
+    `owner/repo#N`: that click carries a number and bars no picker, it simply
+    never reaches an arm that shows one. So "inside the conditional" is not the
+    same as "only on the picker path", and the ordering reads landed on the
+    commonest, fastest shape in the handler. MEASURED at 392 rows and a 400-row
+    pick log: a median 1.94 ms (0.26 ranges + 1.09 picks + 0.20 sort) against a
+    ~30 ms click.
+
+    Counted rather than timed: a 2 ms claim would drown in this box's load,
+    while "did it open the file" is exact."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/onlyone": 9000})
+    (tmp_path / "picks-for-this-test.jsonl").write_text(
+        json.dumps({"t": time.time(), "repo": "acme/onlyone", "n": 1}) + "\n")
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "picks-for-this-test.jsonl")
+    reads: list[str] = []
+    monkeypatch.setattr(MO, "load_known_ranges",
+                        lambda *a, **k: reads.append("ranges") or {})
+    monkeypatch.setattr(MO, "load_picks", lambda *a, **k: reads.append("picks") or [])
+    monkeypatch.setattr(MO, "ranges_age_days",
+                        lambda *a, **k: reads.append("age") or 1.0)
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/onlyone"])
+
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    assert reads == [], (
+        f"an explicit owner/repo#N click paid for the ordering it never uses: "
+        f"{reads}")
+
+    # 🔴 POSITIVE CONTROL ON THE COUNTER, in the same test. An assertion that
+    # only ever checks for an EMPTY list is indistinguishable from one watching
+    # a variable nothing writes to — so the very next call, on a shape that DOES
+    # show a picker, must move the number.
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
+    assert MO.main(["#1291"]) == 0
+    assert "ranges" in reads, (
+        f"POSITIVE CONTROL FAILED — the picker path did not read the range "
+        f"table either, so the assertion above proves nothing: {reads}")
+
+
+def test_the_ordered_universe_is_computed_AT_MOST_ONCE_per_click(monkeypatch,
+                                                                 tmp_path):
+    """⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST, AND IT IS LABELLED ONE
+    BECAUSE A MUTATION SWEEP PROVED IT CANNOT FAIL TODAY.
+
+    It was written believing the guessed arm asks for the rows a SECOND time,
+    so that `universe_rows`' memo was load-bearing. It is not: the three call
+    sites are mutually exclusive (dead end 1 and 2 are an `if`/`elif`; dead
+    end 1 sets `offered_universe`, which clears `guessed_offer`; dead end 2
+    requires NO GitHub candidate while `guessed` requires one). A mutant
+    defeating the memo SURVIVED this test and the whole suite — recorded here
+    rather than quietly deleted, because "I could not kill it" is a fact about
+    the guard that the next reader needs.
+
+    What it still buys: if a fourth call site is ever added, this goes red
+    rather than the click silently paying twice. It counts one click's calls,
+    with a positive control that the guessed arm ran at all — so it cannot pass
+    by the ordering never happening."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/one": 9000, "acme/two": 0})
+    calls: list[int] = []
+    real = MO._ordered_universe
+    monkeypatch.setattr(MO, "_ordered_universe",
+                        lambda rows, num: calls.append(1) or real(rows, num))
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/one", "acme/two"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: PANE_GUESS)
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(n=len(c)) or "")
+    assert MO.main(["#1291"]) == 0
+    # POSITIVE CONTROL: the guessed arm really did run, or "at most once" would
+    # be satisfied by "never".
+    assert seen["n"] >= 3, seen
+    assert calls == [1], (
+        f"_ordered_universe ran {len(calls)} times for one click — the memo is "
+        f"not holding")
+
+
+def test_a_PLAUSIBLE_universe_row_that_is_the_ONLY_one_is_still_NOT_auto_opened(
+        spy, monkeypatch, tmp_path):
+    """🔴 ORDER ONLY, NEVER AUTO-OPEN — the invariant this change was most
+    likely to break by accident. Making a row LOOK like the obvious answer must
+    not turn it into one: `offered_universe` still suppresses the "exactly one
+    candidate -> just open it" shortcut, and the ordering has no opinion about
+    that at all.
+
+    Built as the sharpest case available: a host whose universe holds ONE
+    repository, whose range table calls that repository PLAUSIBLE for the
+    clicked number, reached through a shape that produces no clawgate sibling."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/onlyone": 9000})
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/onlyone"])
+    assert MO.main(["trowelcast#1291"]) == 0
+    assert ("pick", 1) in spy, (
+        f"a single PLAUSIBLE universe row was auto-opened instead of OFFERED: "
+        f"{spy}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE MEASURED-SHAPE CORPUS — ordering at the REAL universe's size and
+# distribution, not on a four-row toy.
+# --------------------------------------------------------------------------- #
+def _measured_shape_corpus(seed: int = 20260911):
+    """(~390 rows, range table) shaped like the operator's real universe.
+
+    THE DISTRIBUTION IS THE MEASUREMENT, scaled from the 120-repo sample named
+    at the top of this block: 45% with NO references, then 1-9, 10-99, 100-999
+    and 1000+ in the measured proportions. Names are SYNTHETIC — this repo is
+    PUBLIC and the real universe is private."""
+    import random  # noqa: PLC0415 — only this corpus needs it
+    rng = random.Random(seed)
+    owners = ["gardenersguild", "hobbyist", "rivalorg", "nimbusworks",
+              "greenfielded", "quartzline", "sablefen", "umbralabs"]
+    stems = ["trowelcast", "spadeworks", "plotwidget", "sledgehorn",
+             "ploughshare", "atlas", "beacon", "cascade", "dossier", "eyrie",
+             "fathom", "girder", "harbour", "inkwell", "jetty", "kiln",
+             "lantern", "mortar", "nectar", "oxbow", "pergola", "quill"]
+    repos = sorted({f"{o}/{s}{i}" for i in range(3) for o in owners
+                    for s in stems})[:390]
+    table = {}
+    for r in repos:
+        roll = rng.random()
+        if roll < 0.45:
+            table[r.lower()] = 0
+        elif roll < 0.78:
+            table[r.lower()] = rng.randint(1, 9)
+        elif roll < 0.94:
+            table[r.lower()] = rng.randint(10, 99)
+        elif roll < 0.98:
+            table[r.lower()] = rng.randint(100, 999)
+        else:
+            table[r.lower()] = rng.randint(1000, 3000)
+    return repos, table
+
+
+def test_the_measured_corpus_really_HAS_the_measured_shape():
+    """🔴 THE GUARD ON THE FIXTURE. Both tests below assert against PROPORTIONS
+    of this corpus; if a reseed or a refactor flattened the distribution they
+    would keep passing while measuring something else entirely."""
+    repos, table = _measured_shape_corpus()
+    assert 350 <= len(repos) <= 420, len(repos)
+    zero = sum(1 for v in table.values() if v == 0)
+    high = sum(1 for v in table.values() if v >= 1000)
+    assert 0.38 <= zero / len(repos) <= 0.52, zero / len(repos)
+    assert 1 <= high <= 25, high
+
+
+def test_at_the_REAL_SIZE_a_HIGH_number_puts_the_answer_near_the_TOP():
+    """🔴 THE END-TO-END MEASUREMENT, on ~390 rows with the measured
+    distribution. A high number is strongly discriminative: only the handful of
+    repositories that have reached it are plausible, so the wanted row lands in
+    the first few rather than somewhere in the alphabet.
+
+    THE NEGATIVE CONTROL IS ASSERTED IN THE SAME RUN: the same repository under
+    today's alphabetical ordering sits far down the list, or this test would be
+    measuring nothing."""
+    repos, table = _measured_shape_corpus()
+    wanted = repos[len(repos) // 2]
+    table[wanted.lower()] = 1300          # a head just past the clicked number
+    ordered = MO.order_universe(repos, "1291", table)
+    rank = ordered.index(wanted) + 1
+    plausible = sum(1 for r in repos if table[r.lower()] >= 1291)
+    baseline = repos.index(wanted) + 1
+    assert rank <= plausible, (
+        f"the wanted repo ranked {rank} of {len(repos)} but only {plausible} "
+        f"rows are plausible for #1291 — the ordering is not doing its job")
+    assert rank <= 5, f"ranked {rank} of {len(repos)}"
+    assert baseline > 20 * rank, (
+        f"NEGATIVE CONTROL: the pre-change alphabetical rank was only "
+        f"{baseline}, so this corpus does not demonstrate an improvement "
+        f"(ordered rank {rank})")
+
+
+def test_at_the_REAL_SIZE_a_LOW_number_still_RANKS_OUT_the_IMPOSSIBLE():
+    """🔴 THE WEAK CASE, AND IT IS STILL WORTH IT. `#12` is plausible for most
+    repositories that have any references at all, so proximity buys little — but
+    45% of the list can NEVER satisfy it, and those drop below every row that
+    can. That is the bigger and cheaper half of the win.
+
+    Asserted as a PARTITION rather than on one row's rank, because for a low
+    number there is no single right answer to rank first."""
+    repos, table = _measured_shape_corpus()
+    ordered = MO.order_universe(repos, "12", table)
+    impossible = [r for r in repos if table[r.lower()] == 0]
+    assert len(impossible) > len(repos) // 3, (
+        f"POSITIVE CONTROL: only {len(impossible)} of {len(repos)} rows are "
+        f"impossible — the corpus no longer has the measured shape")
+    assert sorted(ordered[-len(impossible):]) == sorted(impossible), (
+        "the impossible rows are not exactly the TAIL of the list")
+    assert sorted(ordered) == sorted(repos), "rows were dropped"
+
+
+def test_adding_index_to_the_TIEBREAK_would_change_NOTHING_on_a_TYPED_query():
+    """🔴 THE REASON `PICKER_SH` IS NOT CHANGED, PINNED SO NOBODY RE-DERIVES IT.
+    `--tiebreak=end,index` looks like the obvious way to make our pre-computed
+    order the final arbiter, and it is a NO-OP: fzf appends `index` implicitly.
+
+    ⚠ EVERY QUERY HERE IS TYPED, WHICH IS THE WHOLE POINT. An EMPTY query proves
+    nothing — fzf preserves input order when there is nothing to score — so a
+    test built on one would pass against an fzf that discarded our order the
+    moment the operator pressed a key. That trap is why this test exists beside
+    the tie test below rather than instead of it.
+
+    The positive control is asserted in the same run: `--tiebreak=length` MUST
+    differ, or the comparison is blind and a zero means nothing."""
+    _require_fzf()
+    owners = ["nimbusworks", "greenfielded", "hollowpoint", "q", "mm",
+              "aaaaaaaaaaaaaaaa", "quartzline", "sablefen"]
+    names = ["api", "web", "cli", "sdk", "nimbusworks", "console", "atlas"]
+    repos = sorted({f"{o}/{n}" for o in owners for n in names}, key=str.lower)
+    repos = repos[::-1]                 # NOT sorted, so `index` has a say
+    rows = [f"github 1291 — https://github.com/{r}/pull/1291" for r in repos]
+
+    def ranked(tiebreak, query):
+        out = subprocess.run(
+            ["fzf", "--filter", query, f"--tiebreak={tiebreak}", "-i"],
+            input="\n".join(rows), capture_output=True, text=True)
+        return [r for r in out.stdout.split("\n") if r]
+
+    differed_index = differed_length = 0
+    for query in ("api", "nimbus", "nimbusworks", "cli", "on", "a", "sd", "e"):
+        assert ranked("end", query), f"positive control: {query!r} matched none"
+        differed_index += ranked("end", query) != ranked("end,index", query)
+        differed_length += ranked("end", query) != ranked("length", query)
+    assert differed_index == 0, (
+        f"`--tiebreak=end,index` DIFFERED from `end` on {differed_index} typed "
+        f"queries — `index` is NOT implicit after all, and PICKER_SH must gain "
+        f"the flag")
+    assert differed_length > 0, (
+        "POSITIVE CONTROL FAILED: `length` did not differ from `end` either, "
+        "so this comparison cannot see a difference and the zero above means "
+        "nothing")
+
+
+def test_REAL_fzf_lets_our_PRECOMPUTED_ORDER_decide_a_TIE():
+    """🔴 THE MECHANISM THE WHOLE ORDERING RESTS ON, ASSERTED AGAINST THE REAL
+    BINARY. `order_universe` computes a rank and hands it to fzf as INPUT ORDER;
+    that only means anything if fzf falls back to input order when its score and
+    tiebreak criteria tie. If it did not, our ordering would be silently
+    discarded the moment the operator typed a character.
+
+    ⚠ AND THIS IS WHY `--tiebreak=end,index` IS *NOT* SET. Adding `,index` was
+    the obvious way to make the property explicit, and it is a NO-OP: MEASURED
+    2026-09-11 over 520 (corpus, query) pairs, `--tiebreak=end` and
+    `--tiebreak=end,index` produced byte-identical output in **520 of 520**,
+    while the positive control `--tiebreak=length` differed in **438**. fzf
+    appends `index` implicitly (confirmed separately on a corpus built to TIE
+    under `end`, where every criterion returned input order). The property is
+    already ours; changing `PICKER_SH` — pinned by a whole-string test, a
+    metacharacter ban and a redirection ledger — would have been churn on a
+    disclosure-relevant constant for zero behaviour change.
+
+    The flags come from `_picker_flags()` and are never re-spelled here: a test
+    carrying its own would be a fact about fzf rather than about this handler."""
+    _require_fzf()
+    # Equal-length rows, so the query matches at an IDENTICAL offset from the
+    # end of every one: nothing but input order can separate them.
+    owners = ["zzzz", "mmmm", "aaaa", "qqqq", "bbbb", "yyyy"]
+    rows = [f"github 1291 — https://github.com/{o}/api/pull/1291" for o in owners]
+    assert len({len(r) for r in rows}) == 1, "the rows are not equal length"
+    got = _fzf_filter(rows, "api")
+    assert got == rows, (
+        f"fzf did NOT break the tie by input order — our pre-computed ordering "
+        f"is being discarded:\n{got}")
+    # 🔴 THE CONTROL THAT MAKES THIS A MEASUREMENT RATHER THAN A COINCIDENCE:
+    # reverse the INPUT and the OUTPUT must reverse with it. Without this, a
+    # corpus fzf happened to emit in that order for some other reason would
+    # satisfy the assertion above.
+    assert _fzf_filter(rows[::-1], "api") == rows[::-1], (
+        "reversing the input did not reverse the output — the rows are NOT "
+        "being separated by input order, so this test proves nothing")
+
+
+def _fzf_filter(rows: list[str], query: str) -> list[str]:
+    """`fzf --filter` under the PICKER'S OWN flags — see `_picker_flags`."""
+    out = subprocess.run(["fzf", "--filter", query, *_picker_flags()],
+                         input="\n".join(rows), capture_output=True, text=True)
+    return [r for r in out.stdout.split("\n") if r]

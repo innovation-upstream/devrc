@@ -392,6 +392,7 @@ which proves that assertion executes rather than restating the pins beside it.
 
 import importlib.util
 import re
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1175,14 +1176,64 @@ def test_the_batterys_floor_is_re_derived_from_this_modules_size():
         "re-point BATTERY_SH; if you deleted it, delete this guard in the same "
         "commit rather than leaving a pin on a file that no longer exists."
     )
-    battery = _read(BATTERY_SH)
-    literals = re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)
-    assert len(literals) == 1, (
-        f"expected exactly one `MIN_TESTS=` assignment in {BATTERY_SH}, "
-        f"found {len(literals)}: {literals}. This guard reads the literal, so "
-        "a second assignment makes which one the battery uses ambiguous."
+    # 🔴 ASK THE BATTERY, DO NOT READ ITS SOURCE (devrc #1431). This used to be
+    # `re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)`, which reads the source
+    # TEXT and is therefore blind to anything the SHELL applies. MEASURED — with
+    #     MIN_TESTS=15
+    #     if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi
+    # that regex reported `1 passed` while the battery floored at 3, and
+    # `MIN_TESTS=$LOW` is the same hole: a non-numeric right-hand side simply
+    # does not match, so the guard silently pins nothing. `--print-min-tests`
+    # is emitted after every assignment and immediately before the run, so it
+    # is the value `failing()` will actually compare against.
+    proc = subprocess.run(
+        ["bash", str(BATTERY_SH), "--print-min-tests"],
+        capture_output=True, text=True,
     )
-    floor = int(literals[0])
+    assert proc.returncode == 0, (
+        f"`{BATTERY_SH.name} --print-min-tests` exited {proc.returncode}; this "
+        f"guard cannot read the effective floor, and an unreadable floor must "
+        f"NOT be treated as a passing one.\nstdout={proc.stdout!r}\n"
+        f"stderr={proc.stderr!r}"
+    )
+    reported = proc.stdout.strip()
+    assert re.fullmatch(r"\d+", reported), (
+        f"`{BATTERY_SH.name} --print-min-tests` printed {reported!r}, which is "
+        "not a bare integer. The handler must print the effective MIN_TESTS and "
+        "nothing else -- a guard that parses prose here is the source-reading "
+        "defect in a new costume."
+    )
+    floor = int(reported)
+
+    # 🔴 AND THE EFFECTIVE VALUE ALONE IS NOT ENOUGH -- MEASURED, and it is why
+    # this second half exists. #1431 proposed "print the effective MIN_TESTS and
+    # assert on that" as the whole fix. It closes `MIN_TESTS=$LOW` (the battery
+    # reports 4 and this guard goes red), but it does NOT close the CONDITIONAL
+    # override the issue actually names:
+    #     MIN_TESTS=15
+    #     if [ -n "${QUICK:-}" ]; then MIN_TESTS=3; fi
+    # `--print-min-tests` runs with QUICK unset, so the effective floor honestly
+    # IS 15 for that invocation, and the guard passes -- while a `QUICK=1` run
+    # floors at 3. "Effective" is environment-dependent, and no probe can
+    # enumerate the environments.
+    #
+    # So the environment-independence is asserted STRUCTURALLY instead: exactly
+    # one assignment, anywhere in the file. 🔴 `^\s*` and not `^` -- the old
+    # guard anchored at column 0, which is precisely why an INDENTED override
+    # inside an `if` was invisible to it while a second top-level one was
+    # caught. The issue even recorded that a second numeric assignment "fires
+    # the len(literals) == 1 check"; it does, but only unindented.
+    assignments = re.findall(r"^\s*MIN_TESTS=", _read(BATTERY_SH), re.M)
+    assert len(assignments) == 1, (
+        f"expected exactly ONE `MIN_TESTS=` assignment in {BATTERY_SH}, found "
+        f"{len(assignments)}. A second one -- including an indented override "
+        f"inside an `if`, which is the shape that slipped past the previous "
+        f"column-0 regex -- makes the floor depend on the environment, so no "
+        f"single number this guard reads can be the one a given run uses.\n\n"
+        f"If the battery genuinely needs a conditional floor, this guard has to "
+        f"be re-thought rather than relaxed: pin every branch, or have the "
+        f"battery refuse to run when the override is active."
+    )
 
     src = _read(SELF_PY)
     assert not re.search(r"^\s*@[\w.]*parametrize", src, re.M), (
