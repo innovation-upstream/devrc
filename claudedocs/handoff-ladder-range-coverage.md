@@ -16,35 +16,28 @@ then outside it. Came in as ranks 10 and 8 of `handoff-audit-pr-ladder.md`; that
 since renumbered and dropped both, so this is the durable home.
 
 ## State now
-- **Branch:** `feat/ladder-carrier-enumerator` at `405c4b45`, pushed, **no PR yet**.
-  Worktree `/home/zach/workspace/devrc-ladder-find`, clean, branched off `058c90c2`.
-- ✅ **Rank 10 DONE and MERGED — `#1519` → squash `766c1295`**, verified by CONTENT on
-  `origin/main` (`scripts/ladder-range-coverage.py`, `scripts/tests/mutants-ladder-range-coverage.sh`,
-  and `measure_range_churn` all present), never by ancestry.
-  - `scripts/ladder-range-coverage.py` classifies every adjacency in a ladder's chain of
-    block ranges — TIGHT / GAP / OVERLAP / UNRELATED, plus the tail — and reports the
-    uncovered churn for the window `[first block's from, head]`.
-  - `measure_range_churn` was EXTRACTED from `audit-dispatch.py::measure_ledger` and is
-    shared, so the report cannot drift from the command the skill tells an auditor to run.
-  - Open item **5** of `claudedocs/audit-ladder-review-2026-09-04.md` is marked CLOSED in
-    that doc, with its residual stated.
-- ✅ **devrc measured (the review's own 20 ladders):** INTERIOR **655** lines in 2 ladders,
-  TAIL **3,727** in 11. Commands and per-ladder rows in the PR body of `#1519`.
-- ✅ **Rank 8 DONE — all six named repos churn-measured or UNMEASURABLE with a reason**, its
-  closing condition met. Results written into the `CANNOT-SEE` section of
-  `claudedocs/audit-ladder-review-2026-09-04.md` (uncommitted at time of writing; see ranked
-  item 1). **129 carriers outside devrc against 70 inside**; INTERIOR **88** total across 126
-  measured external ladders, TAIL 10,052. The per-repo table is in that doc, not repeated here.
-  ⚠ The raw per-repo reports were scratchpad files and are gone — re-run the commands in the
-  investigation block below rather than hunting for them.
-- **Deploy/verify status:** `766c1295` is merged and **NOT deployed** — no `ship.sh` run this
-  session. It adds a script and a test; nothing a consumer runs changed, and
-  `ladder-range-coverage.py` is invoked by path, not from `~/.claude`. `405c4b45` is pushed
-  only: not merged, not deployed.
-- ⚠ **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` exited **5**
-  (nothing resolved). An unknown session id answers 200 with an empty array, so that cannot
-  distinguish "this session touched no task" from "the id is wrong" — it is NOT a clean bill
-  of health, and no task was created to fill the blank.
+- **Branch / PR:** `#1552` OPEN (`fix/churn-commit-population`, worktree
+  `/home/zach/workspace/devrc-tailclass`) — the commit-population fix plus the tail
+  classification. Previous two both MERGED: `#1519` → `766c1295`, `#1528` → `b42ac7c3`.
+- ✅ **Ranked item 1 DONE** — `feat/ladder-carrier-enumerator` landed as `#1528`; the rank-8
+  table is committed, no longer working-tree-only.
+- **CARRIED FORWARD (the previous `State now` would have dropped it):** open items **5** (the
+  range-coverage hole) and the devrc-only half of the CANNOT-SEE bullet in
+  `claudedocs/audit-ladder-review-2026-09-04.md` are marked CLOSED in that doc, each with its
+  residual stated. That doc — not this one — is the durable home for the measurement results.
+- ✅ **Ranked item 2 DONE (pending #1552's merge)** — the tail is classified, and the answer
+  REVERSES this doc's own leading hypothesis. See the investigation below.
+- 🔴 **A defect found in the SHIPPED brief, fixed in `#1552`:** `measure_ledger` paired a
+  commit count from `<frm>..<to>` with a line count from the same range `--not <base>`, and
+  `audit-dispatch.py` printed the former as *"over N commit(s)"* beside the latter's command.
+  Measured: #1046's tail reported **55** commits when **2** contributed churn. Line counts are
+  unaffected; only the commit counts were wrong, and always in the flattering direction.
+- **Deploy/verify status:** nothing in `#1519`/`#1528`/`#1552` needs a `home-manager switch`
+  except `#1519`'s one managed path (`claude/skills/audit-pr/reference/round-ladder-evidence.md`),
+  which is **deployed and byte-verified on BOTH hosts** — `md5 cfaf3169` identical across
+  `origin/main`, workbench and laptop. `#1552` touches `scripts/` and `claudedocs/` only.
+- ⚠ Still no `clawgate-task:` field — `clawgate_handoff.sh resolve` exits **5** (nothing
+  resolved), which cannot distinguish "touched no task" from "wrong id". Not a clean bill.
 
 ## Open investigations — live diagnosis state
 
@@ -106,26 +99,46 @@ since renumbered and dropped both, so this is the durable home.
   cannot execute a kill — or whether the scan should be scoped to executable paths. That is
   the fix; adding each new doc to the ledger is the treadmill.
 
+### RESOLVED — the TAIL is missed audit surface, not development. This doc's own hypothesis was WRONG.
+- **Symptom + exact repro:** the tail was 13,779 lines across 79 adjacencies and
+  uninterpretable. Classified by reading every commit in the range, with the exclusion the
+  measurement applies:
+  ```bash
+  git -C <repo> log --format='  parents=%p :: %s' <frm>..<to> --not <base>
+  ```
+  🔴 **Omitting `--not <base>` there is the trap I nearly published from** — without it the
+  listing shows `main`'s own squash commits and #1046's tail reads as 55 unrelated PRs.
+- **Observed (with values):** five largest devrc tails (#1046, #1000, #1209, #1121, #998 —
+  3,349 of devrc's 3,727 tail lines, **17 commits**) plus homelab-talos #707 (1,276 lines, 1
+  commit): **9** fixes/audit responses (one names *"audit round 5"* in its subject), **4**
+  merge-conflict resolutions, **3** docs/handoff/CI-retrigger, **1** feature.
+- **Ruled out:** *"most of the tail is ordinary post-ladder development"* — this doc's leading
+  hypothesis, **falsified**. One of seventeen commits is a feature. via: measurement
+- **Ruled out:** *"`--remerge-diff` inflates a main-merge's churn"* — suspected when one merge
+  contributed 1,039 of #1046's 1,105 lines. It does not: that merge's own message documents a
+  renumbered exit constant and 515/487 rewritten lines in one test file. Real hand resolution,
+  shape B of the reference table working as designed. via: measurement
+- **Leading hypothesis (the part still open):** the unclassified 73 adjacencies — a long tail
+  of small gaps — may be more development-heavy than the top 6. The top of a distribution is
+  not the distribution.
+- **Next probe:** classify a RANDOM sample of 10 of the remaining 73, not the next-largest
+  ones, so the sample is not length-biased the way this one is by construction.
+
 ## Next steps (ranked)
-1. **Land `feat/ladder-carrier-enumerator`** — `405c4b45` plus the uncommitted rank-8 table in
-   `claudedocs/audit-ladder-review-2026-09-04.md`, in worktree
-   `/home/zach/workspace/devrc-ladder-find`. **An unmerged pushed branch is invisible to
-   `ship.sh` and to the next `/resume`, and the rank-8 numbers exist ONLY in that working
-   tree** — `claude/RULES.md` calls that unsaved work one routine `checkout` from deletion.
-   Claim `audit-pr-ladder-8` is HELD by this session; release it when this lands.
-   forcing: regression — the measurement is uncommitted and its scratch reports are already gone
-2. **Classify the three largest TAIL gaps by reading their commits** — post-final-block fixes
-   vs ordinary development. Until this is done, the 3,727-line devrc tail and the
-   7,314-line homelab-talos one must NOT be quoted as unaudited ladder work, and the
-   range-coverage defect's real size is unknown (it may be as small as 88 lines externally).
+1. **Merge `#1552`** and release claim `ladder-range-coverage-2`. It carries the commit-count
+   fix for the shipped brief, so every `audit-dispatch.py` ledger keeps mis-stating its commit
+   population until this lands.
+   forcing: regression — the brief prints a commit count from the wrong population on every round
+2. **Classify a RANDOM 10 of the 73 unclassified tail adjacencies.** The 6 already done were
+   picked by size, so they are length-biased by construction and cannot speak for the rest.
    forcing: none
-3. **Fix or rescope `_KILL_MENTION_LEDGER`** so a new handoff doc cannot red the gate. See the
-   investigation below for the two candidate fixes.
-   forcing: gate — `tekton/devrc-pytests` is red on `main` itself today, for every PR
-4. **Rank 9 — mine the stop-rationale prose across every carrier.** Now cheap: `--find-carriers
-   --list-only` produces the population that used to be hand-built (199 carriers across the
-   seven repos). Survives durably as open item **4** of
-   `claudedocs/audit-ladder-review-2026-09-04.md`.
+3. **Fix or rescope `_KILL_MENTION_LEDGER`** so a new handoff doc cannot red the gate.
+   `tekton/devrc-pytests` is red on `main` itself; reproduced on a clean `origin/main`
+   worktree at `50e8a71a`.
+   forcing: gate — red on `main` today, for every PR
+4. **Rank 9 — mine the stop-rationale prose across every carrier.** `--find-carriers
+   --list-only` now produces the population (199 across seven repos) that used to be
+   hand-built. Durable home: open item **4** of `claudedocs/audit-ladder-review-2026-09-04.md`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -178,6 +191,38 @@ since renumbered and dropped both, so this is the durable home.
 - ⚠ **`--find-carriers` fetches `refs/pull/<n>/head` into the target checkout**, which for the
   client repos means writing objects into shared clones. Additive only — it moves no ref and
   touches no working tree — but it is a write, and two of those repos are client-owned.
+
+- 🔴 **A COUNT AND A MEASUREMENT BESIDE IT CAN COME FROM DIFFERENT POPULATIONS, AND THE SHIPPED
+  LEDGER DID IT FOR ITS WHOLE LIFE.** `rev-list --count A..B` without `--not <base>`, printed
+  beside a numstat that has it. #1046: **55 reported, 2 real**. The tell is structural and
+  cheap to check — **two git invocations, one flag apart, whose outputs get printed in one
+  sentence.** Ask of any "N commits produced M lines": were N and M selected the same way?
+- 🔴 **THE WRONG NUMBER WAS THE ONE THAT MADE THE FINDING LOOK BORING.** 55-commits-1105-lines
+  reads as drift; 2-commits-one-of-them-a-conflict-resolution is a finding. A measurement
+  error that flatters the null is the one nobody chases.
+- 🔴 **I NEARLY CLASSIFIED FROM THE WRONG COMMIT SET.** My first `git log` of #1046's tail
+  omitted `--not origin/main` and showed 12+ of `main`'s own squash commits — which looked
+  exactly like "the PR kept developing", i.e. it CONFIRMED the hypothesis I held. The
+  confirming evidence was an artifact of dropping one flag. **List the population the
+  measurement measures, not the range it names.**
+- 🔴 **A TEST KEYED ON AN ABSOLUTE CALL ORDINAL BREAKS SILENTLY AND MISLEADINGLY.**
+  `test_a_failed_cumulative_measurement_does_not_print_a_false_cause` failed the SECOND
+  `rev-list` to target the cumulative measurement; adding one helper call re-pointed that at
+  the PER-ROUND one, so the test failed for a reason unrelated to its subject and the failure
+  message pointed at the wrong thing. Re-keyed to count only calls WITHOUT `--not` — one per
+  `measure_ledger`. **When two callers share a helper, key on an argument, not a count.**
+- **The assert-it-applied driver earned its place twice in one session.** Two mutants'
+  target strings were moved by my own edits; the battery printed `MUTATION DID NOT APPLY —
+  result meaningless` instead of a clean pass for mutants that never executed.
+- ⚠ **My own fixture expectation was wrong and the code was right.** The first version of the
+  new guard asserted the churn population was 1; it is 2, because a clean merge commit is not
+  reachable from the base either and so belongs to the population while contributing zero
+  lines. Corrected in the test, with the reason recorded there — that is the same shape as
+  #1046, where the merge contributed 1,039 lines rather than none.
+- ⚠ **CORRECTION to this doc's own earlier claim:** it said the rank-8 scratchpad reports
+  "are gone — re-run the driver rather than hunting for them". They were still there. That
+  was a prediction written as an observation; the reports survived and were what the
+  classification read.
 
 ## How to verify
 ```bash

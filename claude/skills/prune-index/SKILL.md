@@ -87,7 +87,9 @@ cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md
 ## 5. Fix a ref collision
 An ambiguous ref surfaces **nothing at all** — `--ref <it>` returns `ref-ambiguous` and no body, so the entry is unreachable by the name a human would type. Drop the alias from whichever entry it does not actually name (usually the one where it is an *initialism* rather than the word itself). 🔴 **The `aliases:` line is inside a frozen entry file, so this is a `cairn put` too** — same scratch-copy route as §4, same exit-8 rule; it is a one-line edit, not an exemption. Then prove the fix:
 ```bash
-cairn sync && python3 /home/zach/workspace/devrc/scripts/lib/subsystem_recall.py --store ~/.cache/subsystem-store --ref <ref> --scope <scope>
+DEVRC=/home/zach/workspace/devrc; REF=<the ambiguous ref>; SCOPE=<the scope>
+cairn sync && python3 "$(python3 "$DEVRC/scripts/lib/cairn_pin.py")/subsystem_recall.py" \
+  --store ~/.cache/subsystem-store --ref "$REF" --scope "$SCOPE"
 ```
 Must print `status=hit`, naming the entry you expect. 🔴 Clearing the collision by making the ref resolve to **nothing** is a regression, not a fix.
 

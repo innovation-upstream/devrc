@@ -66,6 +66,14 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 from subsystem_resolver import (  # noqa: E402
@@ -80,8 +88,7 @@ from subsystem_resolver import (  # noqa: E402
     parse_front_matter,
     parse_task_ref,
 )
-
-RECALL = REPO / "scripts" / "lib" / "subsystem_recall.py"
+RECALL = pinned("subsystem_recall")
 TOUCH = REPO / "scripts" / "lib" / "subsystem_touch.py"
 
 # A ref per shape that matters, kept in one place so a widening cannot quietly
@@ -284,8 +291,8 @@ class TestNoSystemIsEnumerated:
         enumerates it".
         """
         alien = "zzqhorizon"
-        for module in (REPO / "scripts/lib/subsystem_resolver.py",
-                       REPO / "scripts/lib/subsystem_recall.py"):
+        for module in (pinned("subsystem_resolver"),
+                       pinned("subsystem_recall")):
             assert alien not in module.read_text(encoding="utf-8"), (
                 f"{module.name} names {alien!r} — pick a system name that is "
                 f"genuinely absent, or this test is vacuous"

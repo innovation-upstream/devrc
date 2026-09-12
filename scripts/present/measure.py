@@ -1034,19 +1034,69 @@ def m_index_store(env: Env) -> dict:
     `--sanitize` build swaps them for synthetic stand-ins.
     """
     lib = env.repo / "scripts" / "lib"
-    if not (lib / "subsystem_recall.py").is_file():
-        raise Unmeasurable(f"{lib / 'subsystem_recall.py'} does not exist")
+    # 🔴 THE PRECONDITION USED TO BE `(lib / "subsystem_recall.py").is_file()`,
+    # AND IT WENT PERMANENTLY TRUE. devrc deleted that file when it consolidated
+    # onto the pinned `cairn` client, so the check could never pass again: this
+    # row was UNMEASURED on every host, the `cairn_pin.ensure()` below was
+    # unreachable, and the reason string pointed a reader at a file that had been
+    # deleted on purpose. It is replaced rather than removed — the question it
+    # asked ("is the reader here?") is still the right one; only the place the
+    # reader lives has changed, and `cairn_pin` is the one thing that knows it.
+    if not (lib / "cairn_pin.py").is_file():
+        raise Unmeasurable(f"{lib / 'cairn_pin.py'} does not exist")
     if not env.index_store.is_dir():
         raise Unmeasurable(
             f"no index store at {env.index_store} — it is per-machine local "
             "state, so a host without one is a state, not a defect"
         )
     sys.path.insert(0, str(lib))
+    # 🔴 TWO LATENT SHAPES, AND THE OBVIOUS FIX FOR EACH BREAKS THE OTHER. Neither
+    # is reachable today; the shape below closes both and the nesting is the cost.
+    #
+    #   (a) `except cairn_pin.CairnPinUnresolved` EVALUATES `cairn_pin` at the
+    #       moment the exception fires. If the import that binds it has failed,
+    #       the HANDLER itself raises `UnboundLocalError` — past the
+    #       `except Exception` below it, which is already being skipped over.
+    #   (b) `sys.path.insert` above must come FIRST: `cairn_pin` lives in
+    #       `scripts/lib/` and THIS file is in `scripts/present/`, so it is NOT
+    #       "beside this file" (an earlier comment here said it was, and was
+    #       wrong). Moving the import out of the `try` to fix (a) therefore moved
+    #       it out of the `finally` that pops `lib`, leaking `scripts/lib` at
+    #       `sys.path[0]` for every later measurer in the process.
+    #
+    # 🔴 SO THE OUTER `try` CARRIES **ONLY** A `finally`, AND NO `except`. That is
+    # the load-bearing detail: an `except` clause on the outer block would be
+    # evaluated for the `Unmeasurable` the inner import handler raises, which is
+    # exactly the unbound-name case (a) is about — the first attempt at this fix
+    # nested the blocks but left the handlers outside, and reintroduced (a) while
+    # believing it had closed it. Handlers that name `cairn_pin` live in the
+    # `else`, where the import has provably succeeded.
     try:
-        import subsystem_recall  # noqa: PLC0415
-        _, idx = subsystem_recall.load_store(env.index_store, verb="present")
-    except Exception as exc:
-        raise Unmeasurable(f"the index store did not load through its own parser: {exc!r}")
+        try:
+            import cairn_pin  # noqa: PLC0415
+        except Exception as exc:
+            raise Unmeasurable(f"{lib / 'cairn_pin.py'} did not import: {exc!r}")
+        else:
+            try:
+                # 🔴 `subsystem_recall` IS THE PINNED MODULE, not a `scripts/lib/`
+                # copy — devrc deleted its fork when it consolidated onto the
+                # `cairn` flake pin. `ensure()` appends the packaged `lib/`.
+                cairn_pin.ensure()
+                import subsystem_recall  # noqa: PLC0415
+                _, idx = subsystem_recall.load_store(env.index_store, verb="present")
+            except cairn_pin.CairnPinUnresolved as exc:
+                # 🔴 ITS OWN READING, NOT "the parser failed". A host where the
+                # pinned client is not deployed is a STATE — the same shape as the
+                # absent-store branch above — and folding it into the parser's
+                # message would report a broken store where there is only a
+                # missing client. The unit that runs this page passes `CAIRN_LIB`
+                # for exactly this reason, so on the scheduled path this branch
+                # means the unit's environment regressed.
+                raise Unmeasurable(
+                    f"the pinned cairn client is not available here: {exc}")
+            except Exception as exc:
+                raise Unmeasurable(
+                    f"the index store did not load through its own parser: {exc!r}")
     finally:
         if sys.path and sys.path[0] == str(lib):
             sys.path.pop(0)
@@ -1068,7 +1118,17 @@ def m_index_store(env: Env) -> dict:
             "pulled on demand, which is why it can be large where RULES.md cannot. "
             "It is LOCAL state on each machine and is not in this repo."
         ),
-        source="~/.claude/analyze-service-index, read via scripts/lib/subsystem_recall.load_store()",
+        # 🔴 `render.py` PRINTS THIS VERBATIM as the row's `from:` line, so it is
+        # SHIPPED OUTPUT, not a comment. It used to name
+        # `scripts/lib/subsystem_recall.load_store()` — a path this repo deleted
+        # when it consolidated onto the pinned `cairn` client, so the published
+        # page was pointing a reader at a file that is gone on purpose. Same
+        # class as the `detail` prose fixed on the sibling row, and the reason
+        # every `source=` literal in this file was swept rather than this one
+        # patched: 25 literals, 13 live repo paths, one dead (this), one glob.
+        source=("~/.claude/analyze-service-index, read via the PINNED cairn "
+                "client's subsystem_recall.load_store() — `python3 "
+                "scripts/lib/cairn_pin.py` prints where that is"),
         columns=("scope", "entries"),
         rows=tuple(rows),
     )
@@ -1511,8 +1571,29 @@ def m_store_api_clients(env: Env) -> dict:
     # that directly contradicted the section it sat under. Caught by reading the
     # rendered page, not by any test, which is the whole argument for looking at
     # the artefact.
-    readers = ["scripts/lib/subsystem_recall.py", "scripts/lib/subsystem_resolver.py",
-               "scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py"]
+    # 🔴 THE devrc-SIDE READERS ONLY, AND THE LIST SHRANK ON PURPOSE. It used to
+    # name `scripts/lib/subsystem_recall.py` and `scripts/lib/subsystem_resolver.py`
+    # too; devrc deleted both when it consolidated onto the pinned `cairn` client,
+    # so those two rows would render `ABSENT` — this page asserting that half of
+    # devrc's store readers are missing files, which is false and is exactly the
+    # rendered-artefact defect the note above is about. They are not re-pointed at
+    # the pinned copies either: the question this row answers is "can a LOCAL
+    # reader speak HTTP", and a module inside a /nix/store closure is not a local
+    # reader anyone here can change.
+    #
+    # The two ADDED entries, each with its own reason — the first version of this
+    # comment justified only one of them, which is how a list grows an unexplained
+    # member:
+    #   * `scripts/cairn` — it IS the devrc-side thing that speaks to the server,
+    #     so leaving it out while deleting the two would have understated the
+    #     count. It is the entry that makes this row non-zero.
+    #   * `scripts/cairn-validate` — a local reader of the same store that does
+    #     NOT speak HTTP (measured: 0 `urllib`/`http` references). It is here as
+    #     the discriminating case: a list in which every member speaks HTTP
+    #     cannot show that the predicate is reading anything, and this row's
+    #     whole history is of a grep that matched the wrong thing.
+    readers = ["scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py",
+               "scripts/cairn", "scripts/cairn-validate"]
     rows = []
     clients = 0
     for rel in readers:
@@ -1528,13 +1609,17 @@ def m_store_api_clients(env: Env) -> dict:
     return dict(
         value=f"{clients} local reader(s) can speak to it",
         detail=(
-            "The server is built, tested and hosted. The consuming client was "
-            "designed and decided — 'hosted is an ENTRY-LEVEL ADVISORY, never the "
-            "primary read' — and then never written; the handoff says so in its "
-            "own words. The only things that have ever spoken to it are its own "
-            "seed and byte-identity scripts. 🔴 This is the shape worth "
-            "recognising: a subsystem can be complete, correct, well-tested and "
-            "have no reader, and every gate stays green throughout."
+            "The server is built, tested and hosted, and it now has a client: "
+            "`scripts/cairn` speaks to it over HTTP. 🔴 THE SHAPE WORTH "
+            "RECOGNISING IS THE PERIOD BEFORE THAT, NOT THE STATE NOW. This "
+            "subsystem was complete, correct, well-tested and READERLESS for "
+            "months — the client was designed and decided ('hosted is an "
+            "ENTRY-LEVEL ADVISORY, never the primary read') and then simply not "
+            "written, while every gate stayed green throughout. The only things "
+            "that had ever spoken to it were its own seed and byte-identity "
+            "scripts, until the client shipped in 2026-08. This row is what "
+            "turned that from an impression into a number, so it is kept "
+            "measuring rather than retired."
         ),
         source="wc -l over scripts/subsystem-store-api/ + an HTTP-client grep over the local store readers",
         columns=("reader / artefact", "finding"),

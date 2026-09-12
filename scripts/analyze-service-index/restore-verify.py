@@ -195,6 +195,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+# 🔴 `host_identity` IS THE PINNED MODULE. devrc deleted its fork when it
+# consolidated onto the `cairn` flake pin, so this name now resolves through
+# `cairn_pin.ensure()`, which APPENDS the packaged client's `lib/` to
+# `sys.path`. It raises rather than degrading — for the same reason the
+# ledger import above does: a host-identity fallback would let the two hosts
+# share a key prefix and evict each other's backups.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 import backup as B  # noqa: E402  (sibling module; the producer this verifies)
 import host_identity as _host_identity  # noqa: E402  (the ONE "which machine am I")
 

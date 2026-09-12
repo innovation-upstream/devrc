@@ -7635,15 +7635,24 @@ def test_a_failed_cumulative_measurement_does_not_print_a_false_cause():
     Two mechanisms, one observable — the exact rule this module cites everywhere
     else to justify its own COULD-NOT-MEASURE design.
 
-    Driven by failing the SECOND `rev-list` only: the per-round measurement
+    Driven by failing the SECOND `measure_ledger` only: the per-round measurement
     succeeds (so a ledger is rendered) and the cumulative one, from the anchor,
-    does not.
+    does not. Both use the SAME range here (`aaaa1111..HEAD`), so they cannot be
+    told apart by their arguments — only by which call they are.
+
+    🔴 KEYED ON THE PLAIN `rev-list`, NOT AN ABSOLUTE ORDINAL. This said
+    `calls["n"] > 1` and broke the moment `measure_range_churn` grew a second
+    `rev-list` (the `--not <base>` churn-population count): call 2 became the
+    PER-ROUND measurement's, so the per-round failed, no ledger rendered, and the
+    test failed for a reason that had nothing to do with what it guards. Counting
+    only the calls WITHOUT `--not` means one per `measure_ledger`, so this
+    survives either measurement gaining or losing helper calls.
     """
     calls = {"n": 0}
     base = make_runner(comments=[CLAIMS_BLOCK_R2])
 
     def runner(cmd, cwd=None):
-        if cmd[:2] == ["git", "-C"] and cmd[3] == "rev-list":
+        if cmd[:2] == ["git", "-C"] and cmd[3] == "rev-list" and "--not" not in cmd:
             calls["n"] += 1
             if calls["n"] > 1:
                 return 128, "", "fatal: bad revision 'aaaa1111..HEAD'"
