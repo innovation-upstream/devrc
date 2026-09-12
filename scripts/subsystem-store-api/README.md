@@ -39,7 +39,7 @@ Replication happens over this API; those tests are untouched.
 | `Dockerfile` | image, built from the **repo root** as context (the modules live in `scripts/lib`) |
 | `build-push.sh` | build + push to Harbor. Refuses to push if `/data` in the image is non-empty |
 | `seed.sh` | `rsync` the local store into a stage, optionally `tar`-push it into the pod. Never writes to the source |
-| `verify-byte-identity.sh` | the phase-1 acceptance comparator, per scope: the `mode=list` render (index rows as a **sorted set**), the entry **set** by `comm`, then **each entry's** own single-ref render |
+| `verify-byte-identity.sh` | the phase-1 acceptance comparator, per scope: the `mode=list` render (index rows as a **sorted set**), the entry **set** by `comm`, then **each entry's** own single-ref render. ⚠ **EXPECTED to report a difference until the pod image is rebuilt** — see "A FIFTH difference" below |
 
 Manifests: `homelab-talos` → `clusters/homelab/apps/subsystem-store/`.
 
@@ -380,6 +380,32 @@ client identity. See "Rate limit, lockout and the client address" below.
 
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
+
+🔴 **RUNNING THE RECIPE ABOVE TODAY IS EXPECTED TO FAIL — read the next section
+before diagnosing anything.** devrc consolidated onto the pinned `cairn` client,
+so the LOCAL side of this comparison runs the PINNED reader while the deployed
+pod still serves an image built from devrc's old forked copy. The two sides are
+not the same program until someone rebuilds and redeploys (`build-push.sh`, which
+now stages the pinned modules).
+
+## A FIFTH difference, temporary, and it is the one you will hit first
+
+The four below are PERMANENT and structural. This one is not: it exists only
+while the pod runs a pre-consolidation image, and it goes away on the next
+rebuild.
+
+The pinned reader words the malformed-entry hint differently — `a writer
+--validate <path>` where devrc's copy said `subsystem_touch.py --validate
+<path>` — at **two** sites. That is the whole of it.
+
+🔴 **This is NOT a licence to ignore a FAIL.** The narrowness is the point: a
+difference on any other string is a real finding. Check *which* line moved.
+`cairn-cutover.py`'s P4 refusal says the same thing at the moment it refuses, so
+the operator is told there and not only here.
+
+⚠ devrc's own equivalent command is `cairn-validate <path>`, which is real and
+on PATH; the pinned reader cannot name it, which is why the wording regression is
+recorded rather than fixed.
 
 ## Why byte-identity is asserted "modulo FOUR named differences"
 

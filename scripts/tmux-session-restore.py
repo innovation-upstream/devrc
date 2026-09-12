@@ -36,6 +36,12 @@ Restore flags:
                           ~/.config/initiatives/restore-plans/ to resume from an
                           older generation after a bad save. `save` prints the
                           exact command whenever a save drops bound session ids.
+  --best                  takes no argument. Restore from a RECENT generation
+                          that is strictly richer than the current plan, when
+                          one exists — i.e. when a save repointed the plan at a
+                          workspace that had lost conversations. `restore`
+                          reports that situation and names the file either way;
+                          this just saves you retyping it.
   --staleness-check [H]   refuse to restore unless the plan is BOTH in step with
                           the saved layout AND produced within H hours of running
                           time (default: 2h). NOT wall-clock age — powered-off
@@ -53,6 +59,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -901,14 +908,157 @@ def cmd_show() -> int:
 
 
 def tmux_session_exists(name: str) -> bool:
-    return subprocess.run(["tmux", "has-session", "-t", name],
-                          capture_output=True).returncode == 0
+    """Does a session named EXACTLY `name` exist?
+
+    🔴 `tmux has-session -t <name>` IS NOT AN EXACT TEST. tmux resolves the
+    target by prefix and fnmatch, so it answers rc 0 for a session that merely
+    STARTS WITH the name. MEASURED on a private socket holding only `sctest`:
+
+        has-session -t sct    -> rc 0      (prefix)
+        has-session -t 'sc*'  -> rc 0      (fnmatch)
+        has-session -t zzznope -> rc 1
+
+    On this operator's own plan that is live, not theoretical: `scratch2` and
+    `scratch20` both exist. If `scratch20` is restored and `scratch2` is not,
+    this returned True for `scratch2`, `new-session` was skipped, and every
+    `scratch2` conversation was silently dropped while `new-window -t scratch2:5`
+    created a window inside `scratch20`.
+
+    `list-sessions -F '#{session_name}'` enumerates instead of resolving, so the
+    comparison can be exact.
+    """
+    out = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return False
+    return name in out.stdout.split("\n")
 
 
 def window_state(target: str) -> tuple[bool, str]:
-    """(window exists?, its pane_current_command) for a `session:window` target."""
-    out = run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"])
-    return (bool(out.strip()), out.strip())
+    """(window exists?, its pane_current_command) for a `session:window` target.
+
+    🔴 `tmux display-message -t <session>:<MISSING-INDEX>` DOES NOT FAIL. IT
+    ANSWERS ABOUT THE SESSION'S CURRENT WINDOW AND EXITS 0. That is what this
+    function used, and it made the predicate report `(True, 'zsh')` for a window
+    that does not exist.
+
+    MEASURED 2026-09-11 on the live server, with a control — `scratch3` had
+    exactly one window, index 1:
+
+        tmux display-message -p -t scratch3:1  -> '1:zsh'  rc=0
+        tmux display-message -p -t scratch3:87 -> '1:zsh'  rc=0   <- the lie
+        tmux display-message -p -t scratch3:99 -> '1:zsh'  rc=0   <- the lie
+
+    THE COST, measured the same night. A tmux server died with 52 bound
+    conversations. continuum restored the SESSIONS but only ONE WINDOW each, so
+    33 of the plan's windows were absent. `cmd_restore` asked this predicate,
+    was told every window existed, therefore never called `new-window`, and
+    `send-keys -t <session>:<missing>` ALSO resolves to the current window — so
+    50 resumes piled into the ~18 windows that did exist, each overwriting the
+    last. Result: `relaunched 50 windows` and **one** conversation running.
+    `_verify_sends` then re-read through this same lying predicate.
+
+    `list-windows` ENUMERATES a session's windows instead of resolving an index
+    against it, so the INDEX half of the question becomes exact.
+
+    🔴 BUT `-t <session>` IS STILL A TMUX TARGET, AND TMUX PREFIX- AND
+    FNMATCH-MATCHES SESSION NAMES. An earlier version of this docstring claimed
+    "there is nothing for tmux to be helpful about", and that was false for the
+    session component. MEASURED on a private socket where only `sctest` existed:
+
+        list-windows -t sct    -> sctest|1   rc=0     (prefix match)
+        list-windows -t 'sc*'  -> sctest|1   rc=0     (fnmatch)
+        has-session  -t sct    -> rc=0                (so new-session is skipped)
+
+    That is reachable on this operator's own plan, which holds BOTH `scratch2`
+    (windows 1-9) and `scratch20` (windows 1-3). In a partial continuum restore
+    where `scratch20` came back and `scratch2` did not, asking about
+    `scratch2:1` enumerates SCRATCH20's windows and answers `(True, ...)` — a
+    false PRESENT of exactly the class this function exists to remove, one level
+    up. `scratch2` is then never created and its conversations are silently
+    skipped, while `new-window -t scratch2:5` creates a window inside
+    `scratch20`.
+
+    So the session name is compared EXACTLY too, against `#{session_name}` from
+    the same output. tmux tells us which session it actually chose; we simply
+    stop believing it chose ours. Do not drop that field, and do not
+    "simplify" this back to `display-message` — a target-resolving command can
+    never answer an existence question.
+    """
+    sess, _, win = target.partition(":")
+    if not win:
+        return (False, "")
+    # `-F` keeps the triple on one line so a window whose command contains
+    # whitespace cannot shift the parse; the session name is carried so the
+    # caller's name can be verified rather than assumed.
+    out = run(["tmux", "list-windows", "-t", sess,
+               "-F", "#{session_name}\t#{window_index}\t#{pane_current_command}"])
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        got_sess, idx, cmd = parts[0], parts[1], parts[2]
+        if got_sess == sess and idx == win:
+            return (True, cmd.strip())
+    return (False, "")
+
+
+def claude_command() -> str:
+    """The `claude` binary to send, resolved to an ABSOLUTE path when possible.
+
+    🔴 A BARE `claude` IS RESOLVED BY THE TARGET PANE'S PATH, NOT BY OURS, AND
+    THAT PATH IS ROUTINELY BROKEN IN EXACTLY THE PANES THIS SCRIPT WRITES TO.
+    MEASURED 2026-09-11: after a server death, every pane tmux-continuum had
+    restored answered
+
+        claude: command not found
+        hostname: command not found
+
+    — a restored pane does not re-run the login shell's profile, so it can come
+    back with a PATH that predates the current home-manager generation (the
+    `~/.nix-profile` blanking this repo's MEMORY.md documents is the same
+    family). The sends were correct; the panes could not run them.
+
+    Resolving here fixes that for every send, because THIS process is started by
+    the systemd unit with a known-good PATH. `shutil.which` follows that PATH and
+    returns a `/nix/store/...` path that does not depend on the pane at all.
+
+    🔴 `shutil.which` ALONE IS NOT ENOUGH, AND RELYING ON IT SHIPPED THIS FIX
+    INERT IN THE ONE CONTEXT THAT MATTERS. The systemd unit pins its own PATH —
+    `nix/home.nix`: `makeBinPath [ python312 tmux coreutils ]` — and `claude` is
+    not on it. MEASURED under exactly that PATH:
+
+        env -i PATH=<the unit's three entries> python3 -c 'shutil.which("claude")'
+        -> None
+
+    So under the unit — which is how a restore runs after a crash or a boot —
+    `which` finds nothing and the bare name goes back on the wire, which is the
+    very failure this function exists to remove.
+
+    🔴 THE PROFILE SYMLINK IS RESOLVED TO ITS STORE PATH, NOT SENT AS-IS.
+    `~/.nix-profile/bin/claude` is correct but MUTABLE: this repo's MEMORY.md
+    records that a home-manager switch writes two generations and the
+    intermediate one drops every `home.packages` binary for ~1s, so a command
+    naming the profile path can miss. `realpath` pins the immutable
+    `/nix/store/...` target at the moment we build the line.
+
+    Order: PATH first (honours an override and a dev shell), then the profile,
+    then the bare name — because a bare `claude` is what shipped for months and
+    works wherever PATH is intact, so an unresolvable lookup must not turn a
+    working restore into no restore.
+    """
+    found = shutil.which("claude")
+    if found:
+        # 🔴 realpath HERE TOO. On this host `which` returns
+        # /home/zach/.nix-profile/bin/claude — the MUTABLE profile symlink this
+        # function's own docstring warns about. Protecting only the fallback
+        # branch left the branch that actually fires interactively unprotected.
+        return os.path.realpath(found)
+    profile = Path(os.path.expanduser("~/.nix-profile/bin/claude"))
+    if profile.exists():
+        # realpath: pin the store path, not the mutable profile symlink.
+        return os.path.realpath(profile)
+    return "claude"
 
 
 def no_tmux_server_to_restore_into() -> bool:
@@ -1344,12 +1494,145 @@ def uptime_hours() -> float:
         return float("inf")
 
 
+# 🔴 HOW MANY LOST BOUND IDS MAKE A SHRINK AN INCIDENT RATHER THAN CHURN.
+# Derived from this host's own 140-generation history, not chosen: the loss-size
+# histogram across 138 transitions is {1: 13, 2: 4, 3: 1, 4: 1, 15: 1}. Ordinary
+# churn — a conversation ending — loses one or two. The 2026-09-11 incident lost
+# FIFTEEN. There is a clean gap, and 5 sits in it: at this threshold the rule
+# fires on the incident and on nothing else in the whole retained chain.
+RECOVERY_ALERT_MIN_LOST = 5
+
+# 🔴 HOW FAR BACK TO LOOK, AND WHY IT IS BOUNDED AT ALL. Scanning the WHOLE
+# retained chain sounds safer and is not: an ancestor from a day ago legitimately
+# held conversations that have since ended, so an unbounded scan finds a
+# "richer" plan almost always — measured 134 of 140 pointer positions, i.e.
+# worse than the permanently-red predicate it replaced.
+#
+# MEASURED by replaying every pointer position against ONLY the generations that
+# existed AT THAT TIME. (Replaying against the full chain is the trap: it lets
+# the scan see the future, and that is how the 134/140 figure was produced.)
+#     window= 4 -> fires   4/140 (3%)    catches the incident
+#     window= 8 -> fires  11/140 (8%)    catches the incident
+#     window=16 -> fires  20/140 (14%)   catches the incident
+# Four is ~1h at the 15-minute autosave — long enough to span a recovery, short
+# enough that ordinary churn has not accumulated. It also fixes the visibility
+# problem the round-2 audit found in the consecutive-only predicate: the
+# incident fires at BOTH 052312 and 052314 (2s apart) and goes quiet at 053811,
+# the recovery save, instead of being visible for two seconds.
+RECOVERY_ALERT_WINDOW = 4
+
+
+def richer_generation(current: Path) -> tuple[Path, set[str]] | None:
+    """A generation that is STRICTLY RICHER than the current plan by a lot.
+
+    🔴 THE POINTER CAN MOVE TO A WORSE PLAN *WHILE YOU ARE RECOVERING*. MEASURED
+    2026-09-11: the pre-crash plan held 52 bound conversations; partway through
+    the recovery the 15-minute continuum autosave fired, saw the half-restored
+    workspace, and repointed `restore-plan.json` at a fresh 37-entry generation.
+    A restore after that moment recovers 37 of 52 and reports success. The 15 ids
+    existed only in the older generation. Generations make that recoverable
+    (#1383) — but only if somebody looks. This is the looking.
+
+    🔴 TWO EARLIER PREDICATES WERE BOTH WRONG, IN OPPOSITE DIRECTIONS, AND BOTH
+    WERE MEASURED WRONG ON THIS HOST'S REAL DATA RATHER THAN ARGUED:
+
+      (a) "ANY generation holds an id you lack" — TRUE FOREVER. Ordinary churn
+          leaves every older generation holding retired ids: **137 of 137**
+          generations satisfied it, so the warning fired on every single run.
+          A permanently-red gate trains everyone to click through.
+
+      (b) "the IMMEDIATELY PRECEDING generation was richer" — fires, but for
+          almost no time. Replaying the real chain, the incident was visible at
+          exactly ONE pointer position and the next save landed **2 seconds**
+          later, after which it was silent for the ~15 minutes that mattered.
+          The unit runs `restore` at BOOT, long after any such window, so in the
+          one automated caller it would essentially never fire.
+
+    The signature is neither "different" nor "adjacent". It is **a large drop in
+    bound ids that the current plan has not recovered**, wherever it sits in the
+    retained chain. So: scan every generation, keep those that are STRICTLY
+    RICHER than the current plan, and report the one that recovers the most —
+    provided it recovers at least `RECOVERY_ALERT_MIN_LOST`.
+
+    🔴 "STRICTLY RICHER" IS LOAD-BEARING AND ITS ABSENCE WAS A DEPLOY-BLOCKER.
+    Without it this returned any generation holding *some* id the current lacks,
+    including ones with FEWER conversations overall — so at the moment the
+    operator had just recovered to 52 windows, `--best` would have restored the
+    degraded **37**-entry plan and reported success. Measured on the real chain:
+    2 of 20 fire positions picked a poorer plan. Comparing totals is what makes
+    the remedy safe to follow.
+
+    Returns `(generation, ids_it_has_that_current_lacks)` or None.
+    """
+    cur_ids = bound_ids(read_plan(current) or [])
+    try:
+        cur_real = current.resolve()
+    except OSError:
+        cur_real = None
+    stamps = list_generations()
+    # Where does the pointer sit? Everything before it is an ancestor; only the
+    # RECENT ones are candidates (see RECOVERY_ALERT_WINDOW).
+    idx = len(stamps)
+    for i, st in enumerate(stamps):
+        try:
+            if cur_real is not None and generation_paths(st)[0].resolve() == cur_real:
+                idx = i
+                break
+        except OSError:
+            continue
+    best: tuple[Path, set[str]] | None = None
+    for stamp in stamps[max(0, idx - RECOVERY_ALERT_WINDOW):idx]:
+        gplan = generation_paths(stamp)[0]
+        try:
+            gids = bound_ids(read_plan(gplan) or [])
+        except (AttributeError, TypeError):
+            continue            # a malformed generation must not fail a restore
+        # STRICTLY richer overall — never offer a plan with fewer conversations.
+        if len(gids) <= len(cur_ids):
+            continue
+        missing = gids - cur_ids
+        if len(missing) < RECOVERY_ALERT_MIN_LOST:
+            continue            # churn, not an incident
+        if best is None or len(missing) > len(best[1]):
+            best = (gplan, missing)
+    return best
+
+
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
-                 staleness_hours: float | None = None) -> int:
+                 staleness_hours: float | None = None,
+                 prefer_best: bool = False) -> int:
     src = plan_path or PLAN
     if not src.exists():
         print(f"no restore plan at {src} — run `save` before rebooting", file=sys.stderr)
         return 1
+    # 🔴 WARN ALWAYS, SWITCH ONLY ON `--best`. A restore that silently used a
+    # different plan than the one the pointer names would be a worse surprise
+    # than the problem it solves — but a restore that says NOTHING while 15
+    # conversations sit in a generation one command away is how the 2026-09-11
+    # recovery nearly stopped at 37 of 52. Skipped when `--plan` was given: the
+    # caller has already chosen, explicitly.
+    if plan_path is None:
+        richer = richer_generation(src)
+        if richer is not None:
+            gplan, missing = richer
+            if prefer_best:
+                print(f"🔴 --best: using {gplan.name} — it carries {len(missing)} bound "
+                      f"session id(s) the current plan has LOST.", file=sys.stderr)
+                src = gplan
+                # 🔴 The staleness gate below measures PLAN, not `src`. Having
+                # explicitly chosen an OLDER generation, refusing it for being
+                # old is incoherent — and measuring the pointer would let a
+                # fresh pointer wave through an arbitrarily stale choice. Treat
+                # --best like --plan: the caller has chosen.
+                staleness_hours = None
+            else:
+                print(f"🔴 A NEWER-BUT-POORER PLAN IS IN EFFECT. {gplan.name} carries "
+                      f"{len(missing)} bound session id(s) this plan does not.",
+                      file=sys.stderr)
+                print("   A save can repoint mid-recovery; the ids are not lost, "
+                      "they are in that generation. To use it:", file=sys.stderr)
+                print(f"     tmux-session-restore.py restore --plan {gplan}", file=sys.stderr)
+                print("   …or re-run with --best to pick it automatically.", file=sys.stderr)
     if staleness_hours is not None and plan_path is None:
         measured = plan_staleness_hours()
         if measured is not None:
@@ -1473,6 +1756,8 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
             print(f"🔴 workspace did NOT settle within {waited:.0f}s — sending anyway, "
                   "but panes may still be respawning and sends can be DISCARDED. "
                   "This run is best-effort, not a clean restore.", file=sys.stderr)
+    # One PATH scan, not one per entry.
+    cb = claude_command()
     for e in plan:
         sess, win, cwd, sid = e["session"], e["window"], e["cwd"], e["session_id"]
         target = f"{sess}:{win}"
@@ -1480,14 +1765,17 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
             run(["tmux", "new-session", "-d", "-s", sess, "-c", cwd])
         exists, cmd = window_state(target)
         if not exists and not dry_run:
-            run(["tmux", "new-window", "-t", target, "-c", cwd])
+            # `-d`: creating 33 windows must not yank the active window in every
+            # session it touches. Dormant until now only because the old
+            # predicate meant new-window was essentially never called.
+            run(["tmux", "new-window", "-d", "-t", target, "-c", cwd])
             cmd = ""
         # Never clobber a window that already has claude running (idempotent re-runs).
         if cmd == "claude":
             print(f"  skip {e['codename']}:{win} — claude already running")
             skipped += 1
             continue
-        resume = f"claude --resume {sid}" if sid else "claude --resume"
+        resume = f"{cb} --resume {sid}" if sid else f"{cb} --resume"
         line = f"cd {cwd} && {resume}"
         if dry_run:
             print(f"{tag}send to {e['codename']}:{win}: {line}")
@@ -1575,10 +1863,11 @@ def main(argv: list[str]) -> int:
             if i + 1 < len(rest):
                 plan_path = Path(os.path.expanduser(rest[i + 1]))
         return cmd_restore(dry_run=dry, plan_path=plan_path,
-                           staleness_hours=staleness)
+                           staleness_hours=staleness,
+                           prefer_best="--best" in rest)
     print(__doc__.strip().split("\n\n")[0])
     print("\nusage: tmux-session-restore.py "
-          "{save | restore [--dry-run] [--plan PATH] | show}", file=sys.stderr)
+          "{save | restore [--dry-run] [--plan PATH] [--best] | show}", file=sys.stderr)
     return 2
 
 

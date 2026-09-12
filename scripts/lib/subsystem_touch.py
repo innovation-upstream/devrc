@@ -271,6 +271,16 @@ from typing import Iterable, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 🔴 THE READER MODULES BELOW ARE THE PINNED OSS CLIENT'S, NOT devrc's. devrc
+# carried its own forked copies until it consolidated onto the `cairn` flake pin;
+# `cairn_pin.ensure()` APPENDS the packaged `lib/` to `sys.path` after the line
+# above, so devrc-local modules still win and the store-reader vocabulary comes
+# from exactly one place. It raises rather than degrading — there is no local
+# copy to fall back to. See `cairn_pin`'s docstring.
+import cairn_pin  # noqa: E402
+
+cairn_pin.ensure()
+
 from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
     NUANCE_HEADING,
@@ -282,6 +292,7 @@ from subsystem_resolver import (  # noqa: E402
     JournalBullet,
     MalformedEntry,
     MalformedEntryError,
+    KINDS,
     ResolverError,
     SubsystemEntry,
     SubsystemIndex,
@@ -299,6 +310,7 @@ from subsystem_resolver import (  # noqa: E402
     path_refs,
     resolve_ref_tiered,
     scan_headings,
+    split_kind,
 )
 
 # 🔴 ONE RULE, ONE PLACE — "what is this repo's mainline?". Same `sys.path`
@@ -316,7 +328,55 @@ from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 # have. Every verdict this module prints is therefore a fact about ONE disk, and
 # `host_identity` is what makes the output say so. Same owner as
 # `analyze-service-index/backup.py`, which keys its objects by it.
+#
+# 🔴 IMPORTED THROUGH `entry_shape.store_host`, NOT DIRECTLY — see the
+# `store_host` re-export below.
+#
+# ⚠ THIS BINDING NOW HAS NO CALL SITE IN THIS MODULE — measured CODE-ONLY
+# (`ast.unparse` with docstrings stripped): `this_host()` appears 0 times, every
+# use having moved behind `entry_shape.store_host`. Positive control, same pass:
+# `store_host()` appears 2 times.
+#
+# 🔴 A BARE `grep` DISAGREES, AND NO NUMBER FOR IT IS WORTH WRITING DOWN HERE.
+# An earlier version of this comment quoted one ("says 2 — both hits are prose")
+# and it was FALSE by the time it was committed: expanding this very comment is
+# what moved the count, and the same edit both asserted the number and
+# invalidated it. A later re-measure gave 8 lines / 9 occurrences, one of which
+# is the `import` line below — real code, not prose. That number will rot the
+# next time anyone edits this paragraph too, so the claim is DROPPED rather than
+# refreshed: there is no stable grep figure to quote, only the code-only
+# measurement above, and that is the one to re-derive.
+# An earlier version of this comment said "several call sites and tests name it",
+# and the call-site half was simply false. It is retained for ONE reason, and the
+# honest statement is that it is the only one: `test_subsystem_touch.py::
+# test_the_writer_calls_host_identitys_this_host_NOT_host_label` asserts
+# `st.this_host is host_identity.this_host`, which is what stops someone
+# "simplifying" the identity back to `host_label`. Removing the binding is a
+# defensible follow-up; it is not a comment fix, so it is not done here.
 from host_identity import this_host  # noqa: E402
+
+# 🔴 THE SHARED VOCABULARY COMES FROM THE PIN. `entry_shape` is the module the
+# PINNED reader (`subsystem_recall`) imports its error classes, scope rule and
+# per-host caveat from. CLASS IDENTITY IS THE POINT: the reader catches
+# `entry_shape.StoreMissingError`, so a writer raising a same-named look-alike of
+# its own would sail straight past that `except`. devrc's ~25 writer-specific
+# errors re-base onto `CairnError`; `TouchError` is `entry_shape`'s own alias for
+# it, so every `except TouchError` in this repo keeps matching exactly what it
+# used to. `scripts/tests/test_cairn_pin.py` pins that the names below are
+# imported rather than redefined here.
+from entry_shape import (  # noqa: E402
+    SHAPE_HEADINGS,
+    STORE_IS_PER_HOST,
+    CairnError,
+    GitError,
+    RepoPathMissingError,
+    StoreMissingError,
+    TouchError,
+    derive_scope,
+    store_host,
+    store_host_line,
+)
+from entry_shape import scope_for_repo as _pinned_scope_for_repo  # noqa: E402
 
 __all__ = [
     "WRITER_ID",
@@ -328,6 +388,10 @@ __all__ = [
     "MAX_TRANSCRIPT_AGE_SECONDS",
     "JOURNAL_BULLETS_SHOWN",
     "JOURNAL_BULLET_MAX_LINES",
+    # 🔴 `CairnError` is the PINNED base and `TouchError` is its alias — both are
+    # exported so a consumer can name either, and so `__all__` records that this
+    # module no longer OWNS the taxonomy it re-exports.
+    "CairnError",
     "TouchError",
     "StoreMissingError",
     "EntryUnreadableError",
@@ -583,14 +647,16 @@ JOURNAL_BULLET_MAX_LINES = 6
 
 
 # --- Errors --------------------------------------------------------------------
-
-
-class TouchError(Exception):
-    """Base for every error this module raises."""
-
-
-class StoreMissingError(TouchError):
-    """The store root does not exist. Sentinel: 'store root not found'."""
+#
+# 🔴 `TouchError`, `StoreMissingError`, `GitError` and `RepoPathMissingError` are
+# NOT defined here — they are imported from the pinned `entry_shape` at the top of
+# this module, because the pinned READER raises and catches those exact classes.
+# A local redefinition would be a DIFFERENT class with the same name, and the
+# reader's `except entry_shape.StoreMissingError` would not match it: one of the
+# quietest ways two halves of one store stop agreeing. Everything below subclasses
+# `TouchError` as it always did — that name is `entry_shape`'s alias for
+# `CairnError`, so `except TouchError` keeps catching every writer error AND every
+# error the shared vocabulary raises.
 
 
 class EntryFileMissingError(TouchError):
@@ -602,52 +668,6 @@ class EntryFileMissingError(TouchError):
     second would make the validator's own output the thing that misleads. They do
     share an exit code, because the skill's handling of both is identical.
     """
-
-
-class RepoPathMissingError(TouchError):
-    """`--repo` names something that is not a directory.
-
-    Sentinels: 'repo path does not exist' when nothing is there, 'repo path is
-    not a directory' when something is. TWO, because they are two mistakes with
-    two next moves — see `repo_path_missing_message`.
-
-    🔴 ITS OWN SENTINEL, NOT `git command failed`, for `_object_type`'s reason:
-    "the repo path does not exist" is a first-class READING the caller can act
-    on, while `GitError`'s sentinel is a true statement about the subprocess and
-    a useless one about the argument. MEASURED 2026-08-28, from `/tmp`:
-
-        $ subsystem_recall.py --repo datapacket-talos
-        subsystem-recall: git command failed (git -C /tmp/datapacket-talos
-          rev-parse --path-format=absolute --git-common-dir): exit 128: fatal:
-          cannot change to '/tmp/datapacket-talos': No such file or directory
-
-    `--repo` takes a PATH and is resolved against the cwd, so a bare repo NAME
-    becomes `$PWD/<name>` — and the raw git error names neither that rule nor the
-    two ways out. It matters more here than the wording alone suggests: this
-    command is the subsystem store's ONLY read surface, and the store already
-    spent its early life with two writers and no reader. A prescribed first
-    command that answers with a git internals dump is how it goes back to unread.
-
-    The message is built by `repo_path_missing_message` — ONE spelling, used by
-    both CLIs through `scope_for_repo`, and pinned as one by
-    `test_repo_path_guard.py`.
-    """
-
-
-class GitError(TouchError):
-    """A git invocation failed. Sentinel: 'git command failed'.
-
-    🔴 `stderr` IS CARRIED AS AN ATTRIBUTE, NOT ONLY INSIDE THE MESSAGE, so that a
-    WRAPPING error can quote git's own words WITHOUT embedding this class's
-    sentinel in its own text. `_repo_slug` is that wrapper, and it is where this
-    was found: its `RepoRemoteError` interpolated the whole `GitError`, so its
-    message carried two sentinels at once and "which guard fired" stopped being
-    measurable — `TestPrNegativeControls._only` caught it on the first run.
-    """
-
-    def __init__(self, message: str, *, stderr: str = "") -> None:
-        super().__init__(message)
-        self.stderr = stderr
 
 
 # --- Session-source errors -----------------------------------------------------
@@ -1007,23 +1027,12 @@ class CommitIsMergeError(TouchError):
 # --- Scope ---------------------------------------------------------------------
 
 
-def derive_scope(repo_root: str | Path, git_common_dir: str | Path) -> str:
-    """The store scope for a repo, normalized. Worktree-stable.
-
-    `git_common_dir` is `git rev-parse --path-format=absolute --git-common-dir`:
-    for BOTH a base clone and any worktree of it, that is the base clone's
-    `.git`, so its parent is the repo everyone means. `--show-toplevel` is not
-    used for this because in a worktree it is the worktree's own directory.
-
-    Fallback: when the common dir is not literally named `.git` — a bare repo,
-    or a submodule whose common dir is `<super>/.git/modules/<name>` — the
-    parent basename would be meaningless (`modules`), so the repo root's
-    basename is used instead. Stated because the fallback is silent otherwise.
-    """
-    common = Path(git_common_dir)
-    if common.name == ".git":
-        return normalize_ref(common.parent.name)
-    return normalize_ref(Path(repo_root).name)
+# 🔴 `derive_scope` IS NOT DEFINED HERE — it is imported from the pinned
+# `entry_shape` at the top of this module. The scope RULE is the one thing a
+# reader and a writer absolutely must agree on: disagree and the writer accrues
+# entries under one name while the reader surfaces an empty scope under another,
+# which renders as "nothing recorded yet" and is indistinguishable from the
+# ordinary case. Two copies of it is exactly the shape that fails that way.
 
 
 #: Repo-root handles pre-exported into every agent shell, named in the remedy
@@ -1131,34 +1140,43 @@ def scope_for_repo(
 ) -> str:
     """Ask git where `repo` really lives, then `derive_scope` it. Runs git.
 
-    🔴 EXTRACTED SO THERE IS ONE SCOPE-DERIVATION CALL SITE, not two. `main()`
-    below inlined these three lines, which was fine while this module was the
-    store's only reader-of-scope. `scripts/lib/subsystem_recall.py` — the READ
-    half — needs exactly the same answer, and a reader and a writer that
-    disagree about which scope directory they mean is a silent, total failure:
-    the writer accrues entries under one name and the reader surfaces an empty
-    scope under another, which renders as "nothing recorded yet" and is
-    indistinguishable from the ordinary case. So the recall module imports THIS,
-    rather than re-spelling the two `rev-parse` invocations and the worktree
-    rule they exist to satisfy.
+    🔴 THE DERIVATION IS THE PIN'S — this is a thin wrapper around
+    `entry_shape.scope_for_repo`, not a second implementation. A reader and a
+    writer that disagree about which scope directory they mean is a silent, total
+    failure: the writer accrues entries under one name and the reader surfaces an
+    empty scope under another, which renders as "nothing recorded yet" and is
+    indistinguishable from the ordinary case. The pinned reader calls
+    `entry_shape.scope_for_repo`; so does this, so there is exactly one rule.
 
-    🔴 THE NON-DIRECTORY CASE IS CHECKED BEFORE GIT RUNS, and it belongs HERE for
-    the same reason the scope rule does — this is the one seam both halves cross,
-    so a guard placed in the reader alone would leave the writer answering the
-    identical mistake with an identical git dump. `store_root` and `given` exist
-    only for the message: `given` carries the raw pre-`resolve()` string so the
-    cwd-join is visible, and `store_root` is what lets the refusal name the scope
-    the caller probably wanted. Both default to None so every existing call site
-    (`service_recon._scope_of` among them) keeps working, at a slightly poorer
-    message rather than a TypeError.
+    🔴 WHAT THE WRAPPER ADDS, AND WHY IT IS NOT JUST DELEGATION. The pinned
+    `repo_path_missing_message` is the SANITISED one — the OSS extraction dropped
+    devrc's sentence naming the pre-exported repo handles (`$DEVRC`, `$HOMELAB`,
+    …), and its scope hint is a single "Did you mean --scope X?" that appears only
+    when the directory exists, against devrc's `_scope_hint`, which distinguishes
+    FOUR readings and says NOT CHECKED rather than going silent. Both of those are
+    devrc-specific facts the OSS client cannot state. So the non-directory case is
+    answered HERE, before the pinned function is called, with devrc's own message
+    — and it raises the PINNED `RepoPathMissingError` class, so a caller matching
+    on the class is unaffected. The pinned function re-checks `is_dir()` itself;
+    that check simply never fires through this path.
+
+    ⚠ THIS COVERS devrc's OWN CLIs ONLY. `cairn recall`, which is the pinned
+    client, prints the pinned wording — see this repo's PR for the consolidation
+    and its stated regression. The seam is the same one `store_host` sits on:
+    devrc can enrich what IT says, and cannot reach inside the packaged client.
+
+    `store_root` and `given` exist only for the message: `given` carries the raw
+    pre-`resolve()` string so the cwd-join is visible, and `store_root` is what
+    lets the refusal name the scope the caller probably wanted. Both default to
+    None so every existing call site (`service_recon._scope_of` among them) keeps
+    working, at a slightly poorer message rather than a TypeError.
     """
     repo = Path(repo)
     if not repo.is_dir():
         raise RepoPathMissingError(
             repo_path_missing_message(given, repo, store_root=store_root)
         )
-    common = _git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
-    return derive_scope(_toplevel(repo), common)
+    return _pinned_scope_for_repo(repo, store_root=store_root, given=given)
 
 
 # --- Path sources --------------------------------------------------------------
@@ -3600,6 +3618,144 @@ def new_entry_template(slug: str, scope: str, *, today: str, created_by: str) ->
     )
 
 
+# --- `--template` over an ENTRY THAT ALREADY EXISTS -----------------------------
+#
+# 🔴 THE FLAG PRINTS A FIRST-EVER-FILE BODY AND SAID NOTHING WHEN ONE EXISTED.
+# `--template <slug>` emitted the pristine template and exited **0** whether or
+# not `<scope>/<slug>.md` was already on disk carrying a curated history, and the
+# whole protocol downstream of it is "write this body to that address". So the
+# two-command demonstration is: create an entry with an `OPEN:` bullet, re-run
+# `--template` for the same slug, write what it prints — and the bullet is gone,
+# with every exit code in the sequence 0.
+#
+# ⚠ IT NEEDS NO RACE. The audit that found this framed it as two concurrent
+# writers; that framing is wrong and re-deriving it costs a harness nobody needs.
+# A single writer reproduces it in two commands.
+#
+# The check mirrors `resolve_ref_tiered`'s FILENAME tier by NAME rather than by
+# parsing, on purpose: a malformed entry file is exactly the one a writer is most
+# likely to "fix" by re-templating, and a parse-based check would drop it from the
+# index and report the slug free. The ALIAS tier is checked too, but only when the
+# index loads — an alias lives inside the file's front matter and there is no way
+# to read it without parsing.
+TEMPLATE_EXISTS_EXIT = 2
+"""Exit code for the refusal. **2, not a new code.** `--template`'s other refusal
+(a missing `--writer`) already exits 2 at the same call site, 3 is spoken for by
+"the store is broken", and `claude/skills/subsystem-index/SKILL.md` branches on
+`non-zero ⇒ print the line and write NOTHING` — which is the correct handling
+here. A fourth code would need every consumer to learn it before it changed any
+behaviour."""
+
+
+def _filename_tier_collisions(scope_dir: Path, nref: str) -> tuple[str, ...]:
+    """Filenames in `scope_dir` that `resolve_ref_tiered`'s tier 1 would match.
+
+    Same rule, one tier, no parsing: a bare ref matches `<slug>.md` **and** every
+    `<slug>.<kind>.md`; a kind-qualified ref matches only its own qualified file.
+    `README.md` is skipped — it is the scope's policy sheet, never an entry, the
+    same exclusion `load_index` makes.
+
+    🔴 `iterdir`, NEVER `glob`. `Path.glob` SWALLOWS an `OSError` from the
+    directory walk and yields nothing, so an unreadable scope directory would
+    report every slug free — an empty result standing in for "I could not look",
+    which is the one answer this function must never give. `iterdir` raises, and
+    the caller turns that into a named `unchecked` reason.
+    """
+    slug, kind = split_kind(nref)
+    hits: list[str] = []
+    for path in sorted(p for p in scope_dir.iterdir() if p.suffix == ".md"):
+        if path.name == "README.md":
+            continue
+        fslug, fkind = split_kind(normalize_ref(path.stem))
+        if kind is not None:
+            matched = fslug == slug and fkind == kind
+        else:
+            matched = fslug == nref
+        if matched:
+            hits.append(path.name)
+    return tuple(hits)
+
+
+def template_collision(
+    store_root: str | Path, scope: str, ref: str
+) -> tuple[str | None, str | None]:
+    """`(refusal, unchecked_reason)` — at most one is not None; both None is a pass.
+
+    A refusal names the file(s) that already exist and what writing the template
+    over one of them would destroy. `unchecked_reason` is the third state and is
+    NOT folded into the pass: a store that could not be read cannot say a slug is
+    free, and an empty result that cannot distinguish "no entry" from "no read"
+    is the failure `claude/RULES.md` names. READ-ONLY.
+
+    An absent store root and an absent scope directory are a genuine PASS, not an
+    unchecked: they are the first-entry case this flag exists for, and both are
+    ordinary (`scope-absent` is the normal first run in every repo that is not the
+    infra repo). The claim is about THIS HOST's mirror either way — the store is
+    per-host and unreplicated, and no local read can speak for the pod.
+    """
+    store = Path(store_root)
+    nref = normalize_ref(ref)
+    scope_dir = store / normalize_ref(scope)
+    if not scope_dir.is_dir():
+        return None, None
+
+    try:
+        by_filename = _filename_tier_collisions(scope_dir, nref)
+    except OSError as exc:
+        return None, (
+            f"{scope_dir} could not be listed ({type(exc).__name__}: {exc}), so whether "
+            f"`{nref}` already has an entry is UNKNOWN — not 'it has none'. ⚠ This is "
+            f"the branch `Path.glob` could not reach: glob SWALLOWS a permission error "
+            f"and yields nothing, which is indistinguishable from an empty directory"
+        )
+    if by_filename:
+        return _template_refusal(scope, nref, by_filename, "filename"), None
+
+    # The alias tier needs the front matter, so it is the half that can fail to
+    # run. `COLLECT` keeps one malformed entry from taking the whole scope down —
+    # and a malformed entry cannot carry a usable alias anyway, while its
+    # FILENAME was already checked above without parsing anything.
+    try:
+        index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)
+        entry, tier = resolve_ref_tiered(nref, index, scope)
+    except AmbiguousRefError as exc:
+        return (
+            f"`{nref}` is already AMBIGUOUS in scope `{scope}` ({exc}) — a third file "
+            f"cannot be the fix. Resolve the existing candidates first."
+        ), None
+    except (ResolverError, OSError) as exc:
+        # 🔴 `UnknownScopeError` lands here TOO, and reporting it as unchecked is
+        # deliberate. `load_index` REGISTERS an existing scope dir even when it
+        # holds no entries, and this function has already returned for a scope
+        # dir that does not exist — so the raise means the loader and the
+        # filesystem disagree about which scopes exist, which is precisely a
+        # state that must not be reported as "the slug is free".
+        return None, (
+            f"the alias tier was not checked: the store under {store} would not load "
+            f"({type(exc).__name__}: {exc}). The filename tier found no `{nref}` entry, "
+            f"which is a claim about FILENAMES only"
+        )
+    if entry is not None:
+        return _template_refusal(scope, nref, (entry.filename,), tier or "alias"), None
+    return None, None
+
+
+def _template_refusal(
+    scope: str, nref: str, filenames: tuple[str, ...], tier: str
+) -> str:
+    """One wording, one place — the CLI prints it and every test reads it here."""
+    named = ", ".join(f"`{scope}/{name}`" for name in filenames)
+    return (
+        f"--template refuses: {named} already exists ({tier} tier), so `{nref}` is not "
+        f"a new entry. --template prints the FIRST-EVER-file body — identity front "
+        f"matter plus placeholder sections — and writing it to that address DESTROYS "
+        f"every dated bullet the entry carries, `OPEN:` markers included, with nothing "
+        f"in the output saying so. To add to that entry append a bullet; to change it, "
+        f"read the body back and `cairn put` the whole of it. Re-run --template only "
+        f"with a slug that has no entry."
+    )
+
+
 # --- Rendering -----------------------------------------------------------------
 # 🔴 THE ROUTE OUT OF A DEAD END. A window that resolved nothing is a fact about
 # THE WINDOW READ, never about the session — and the four windows are blind in
@@ -4475,40 +4631,27 @@ def render_window_escalation(
     return out
 
 
-#: The ONE sentence naming whose disk was read. Shared by every surface in this
-#: module AND by `subsystem_recall`, which imports it — a header spelled at four
-#: sites is a header that will say four different things, and this one carries a
-#: claim about scope that must not vary between the reader and the writer.
-STORE_IS_PER_HOST = (
-    "the store is PER-HOST and unreplicated; this run read THIS machine's disk "
-    "and consulted no other"
-)
-
-
-def store_host() -> str:
-    """THIS machine's identity — the ONE call site of `host_identity.this_host`.
-
-    🔴 A SINGLE SEAM FOR BOTH MODULES. `subsystem_recall` imports THIS function
-    rather than `this_host` itself, so the name is looked up in this module's
-    globals wherever it is called from: one injection point makes the reader and
-    the writer agree, and a test that needs byte-stable output patches one thing
-    instead of two that can drift apart.
-    """
-    return this_host()
-
-
-def store_host_line(indent: str = "  ") -> str:
-    """`host: <id>  (<the per-host caveat>)` — printed under every `store:` line.
-
-    🔴 WITHOUT THIS THE OUTPUT STATES ONE DISK AS A FACT ABOUT THE FLEET. Measured
-    2026-08-27: the workbench store held 115 entries across 14 scopes, the laptop
-    33 across 11; of the four scope names present on both machines the workbench
-    held 104 entries and the laptop 10, with exactly ONE entry name in common,
-    and seven scopes existed ONLY on the laptop. Nothing syncs them. A verdict
-    printed without naming the host is therefore not a smaller claim than the
-    truth — it is a different, false one.
-    """
-    return f"{indent}host: {store_host()}  ({STORE_IS_PER_HOST})"
+# 🔴 `STORE_IS_PER_HOST`, `store_host` and `store_host_line` ARE NOT DEFINED
+# HERE — they are imported from the pinned `entry_shape` at the top of this
+# module. The per-host caveat is a claim both halves print under the same
+# `store:` line, and a header spelled at two sites is a header that will say two
+# different things.
+#
+# 🔴 THE TEST INJECTION POINT MOVED WITH THEM, AND THAT IS A BEHAVIOUR CHANGE.
+# `store_host_line()` calls `store_host()`, and `store_host()` calls
+# `this_host()` — both looked up in `entry_shape`'s globals now, not this
+# module's. So a test that needs byte-stable `host:` output must patch
+# `entry_shape.this_host` (or `entry_shape.store_host`); patching
+# `subsystem_touch.this_host` moves this module's OWN direct callers and
+# nothing else. It is still ONE injection point shared by the reader and the
+# writer — it is just in the module both of them import from.
+#
+# Why the line exists at all, measured 2026-08-27: the workbench store held 115
+# entries across 14 scopes and the laptop 33 across 11; of the four scope names
+# present on both machines the workbench held 104 entries and the laptop 10,
+# with exactly ONE entry name in common, and seven scopes existed ONLY on the
+# laptop. Nothing syncs them. A verdict printed without naming the host is not a
+# smaller claim than the truth — it is a different, false one.
 
 
 def render_text(report: TouchReport) -> str:
@@ -5182,20 +5325,18 @@ class OpenAction:
 # measured, and a writer cannot tell those apart in a list. The reader names its
 # absence under the entry's own body, where the person reading that entry is
 # already looking.
-SHAPE_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
-"""The schema headings whose absence makes a COUNT or a BADGE wrong on the read
-path.
-
-⚠ Pinned against `subsystem_recall.COUNTED_HEADINGS` — NOT its `SURFACED_HEADINGS`,
-which is wider — and deliberately not imported from either: `subsystem_recall`
-imports THIS module, so the direction is impossible. The tuples answer different
-questions: `SURFACED_HEADINGS` is a DISPLAY choice ("which sections does a printed
-body render"), `COUNTED_HEADINGS` and this one are a CHECK ("which sections must
-exist before any number this tool prints is a measurement"). Pinned by
-`test_subsystem_touch.py` rather than merged, so a display decision cannot
-silently become a validation rule — and, since the two now genuinely differ, so
-that widening the display set does not drag the validator along behind it.
-"""
+# 🔴 `SHAPE_HEADINGS` IS NOT DEFINED HERE — it is imported from the pinned
+# `entry_shape`, which re-exports it as `(POINTERS_HEADING, NUANCE_HEADING)` so a
+# writer does not take it from the renderer. It is the set of headings whose
+# absence makes a COUNT or a BADGE wrong on the read path, and the reader is the
+# half that computes those, so the reader's own package is where it belongs.
+#
+# ⚠ Still NOT `subsystem_recall.SURFACED_HEADINGS`, which is wider and answers a
+# different question: `SURFACED_HEADINGS` is a DISPLAY choice ("which sections
+# does a printed body render"), this one is a CHECK ("which sections must exist
+# before any number this tool prints is a measurement"). Pinned against
+# `subsystem_recall.COUNTED_HEADINGS` by `test_subsystem_touch.py` rather than
+# merged, so widening the display set cannot drag the validator along behind it.
 
 SHAPE_ABSENT = "absent"
 SHAPE_RENAMED = "renamed"
@@ -6508,6 +6649,28 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            # 🔴 REFUSE OVER AN EXISTING ENTRY. Reached only once `--writer` is
+            # satisfied, which is why it needs its own test: the refusal above
+            # short-circuits it, so a mutation that guts this branch survives any
+            # run that forgot the writer.
+            collision, unchecked = template_collision(
+                args.store, scope_of(), args.template
+            )
+            if collision is not None:
+                print(f"subsystem-touch: {collision}", file=sys.stderr)
+                return TEMPLATE_EXISTS_EXIT
+            if unchecked is not None:
+                # NOT a refusal: the first-entry case must still work on a host
+                # whose store is unreadable. But it is not silence either — a
+                # template printed without the check having run is a different
+                # artefact from one printed after a clean check, and only this
+                # line tells them apart.
+                print(
+                    f"subsystem-touch: ⚠ COULD NOT CHECK whether this slug already has "
+                    f"an entry — {unchecked}. The template below is printed anyway; "
+                    f"confirm the address is empty before writing it.",
+                    file=sys.stderr,
+                )
             print(
                 new_entry_template(
                     normalize_ref(args.template),

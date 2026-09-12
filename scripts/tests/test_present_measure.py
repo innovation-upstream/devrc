@@ -314,6 +314,242 @@ def test_the_rules_ceiling_is_read_from_the_test_that_owns_it():
     )
 
 
+def test_the_reader_rows_and_the_detail_prose_do_not_CONTRADICT_each_other():
+    """🔴 A MEASURED ROW THAT CONTRADICTS THE PARAGRAPH IT SITS UNDER — TWICE on
+    this one row, and both times it was caught by a human reading the rendered
+    page rather than by anything here.
+
+    (An earlier draft of this docstring said "the third time". Two is what the
+    record supports, and inflating it is the same defect as the one being
+    guarded — a sentence asserting a number nobody re-derived.)
+
+    History, because it is the argument for a test rather than a sharper comment:
+    the predicate once matched the bare token `requests` in prose and scored two
+    readers HTTP-capable off the phrase "pull requests"; and when the reader list
+    was updated for the cairn consolidation the count went 0 -> 1 while the
+    `detail` still read "a subsystem can be complete, correct, well-tested and
+    have no reader". `present-regen` republishes that page daily.
+
+    🔴 WHAT THIS CAN AND CANNOT SEE. It pins ONE relationship — the count in
+    `value` against the tense of the prose in `detail` — because that is the
+    contradiction that has actually shipped, twice. It is not a general
+    prose-checker and cannot tell whether the rest of the paragraph is true. A
+    reword that keeps both halves honest passes; a reword that re-asserts
+    readerlessness over a non-zero count fails.
+    """
+    env = measure.Env(repo=REPO_ROOT, home=Path.home(),
+                      claude_dir=Path.home() / ".claude",
+                      index_store=Path.home() / ".claude" / "nonexistent",
+                      allow_systemd=False, allow_network=False)
+    entry = next(e for e in measure.REGISTRY
+                 if "reader(s) can speak" in (measure.take(env, _registry(e))
+                                              .by_key(e[0]).value or ""))
+    row = measure.take(env, _registry(entry)).by_key(entry[0])
+    assert row.measured, row.reason
+
+    count = int(row.value.split()[0])
+    speaks = [r for r in row.rows if r[1] == "speaks HTTP"]
+    # POSITIVE CONTROL on the parse: the number in the sentence and the rows it
+    # is derived from must agree, or this guard is comparing prose to nothing.
+    assert count == len(speaks), (
+        f"the row's own value ({row.value!r}) disagrees with its rows "
+        f"({speaks!r}) — this guard cannot say anything about the prose until "
+        f"the number it compares against is the number the rows produce"
+    )
+
+    readerless = ("have no reader", "never written", "no reader")
+    if count > 0:
+        for phrase in readerless:
+            assert phrase not in row.detail, (
+                f"the row measures {count} local reader(s) that speak HTTP "
+                f"({[r[0] for r in speaks]}) while its own `detail` still says "
+                f"{phrase!r}. The page contradicts itself and present-regen "
+                f"republishes it daily. Fix the prose to match what the row now "
+                f"measures — and do not fix it by deleting the row: the "
+                f"readerless period is the finding this row exists to have "
+                f"recorded, it is just no longer the present tense."
+            )
+    else:
+        assert any(p in row.detail for p in readerless), (
+            "the row measures ZERO readers that speak HTTP and its `detail` no "
+            "longer says so — the paragraph has drifted the other way, which is "
+            "the same defect facing the other direction"
+        )
+
+
+def test_a_failed_cairn_pin_IMPORT_degrades_cleanly_and_leaks_no_sys_path(tmp_path):
+    """🔴 TWO LATENT SHAPES IN ONE BLOCK, AND THE OBVIOUS FIX FOR EACH BREAKS THE
+    OTHER — so they are exercised rather than reasoned about.
+
+    `m_index_store` puts `scripts/lib` on `sys.path`, imports `cairn_pin` from
+    there, and has a handler naming `cairn_pin.CairnPinUnresolved`. If the import
+    fails:
+
+      (a) a handler that NAMES `cairn_pin` is evaluated with the module unbound,
+          so the handler itself raises `UnboundLocalError` — past the
+          `except Exception` beside it, which is already being skipped over;
+      (b) and if the import was hoisted out of the `try` to avoid (a), it also
+          left the `finally` that pops `sys.path[0]`, leaking `scripts/lib` into
+          every later measurer in the same process.
+
+    Both were walked into in turn while fixing this block. Neither is reachable
+    in the shipped tree — `cairn_pin.py` is present and stdlib-only — which is
+    exactly why nothing would notice a regression, and why the failure is PLANTED
+    here instead of waited for.
+
+    🔴 THE PLANT IS CONTROLLED. `__import__` is patched to raise only for
+    `cairn_pin`, and the control at the end proves the plant really fires — a
+    probe whose injected failure silently did not happen would report a clean
+    degrade and a clean `sys.path` for the best possible reason and the worst
+    possible one identically.
+    """
+    import builtins
+
+    env = measure.Env(repo=REPO_ROOT, home=tmp_path,
+                      claude_dir=tmp_path / ".claude",
+                      index_store=tmp_path / "store",
+                      allow_systemd=False, allow_network=False)
+    (tmp_path / "store").mkdir()
+    lib = str(REPO_ROOT / "scripts" / "lib")
+    before = list(sys.path)
+
+    real_import = builtins.__import__
+
+    def _boom(name, *a, **k):
+        if name == "cairn_pin":
+            raise ImportError("planted: cairn_pin cannot import")
+        return real_import(name, *a, **k)
+
+    builtins.__import__ = _boom
+    try:
+        with pytest.raises(measure.Unmeasurable) as exc:
+            measure.m_index_store(env)
+    finally:
+        builtins.__import__ = real_import
+
+    assert "did not import" in str(exc.value), (
+        f"the row degraded, but not on the import: {exc.value}. If this says "
+        f"UnboundLocalError the handler is naming `cairn_pin` while it is "
+        f"unbound — shape (a) above."
+    )
+    assert sys.path == before, (
+        f"`sys.path` was not restored after a failed import — shape (b) above. "
+        f"sys.path[0] is now {sys.path[0]!r}; it should be {before[0]!r}. Every "
+        f"measurer that runs after this one in the same process would see "
+        f"{lib!r} at the front."
+    )
+
+    # POSITIVE CONTROL on the plant itself.
+    #
+    # ⚠ IT CALLS `_boom` DIRECTLY, NOT `real_import`. The first version of this
+    # control called `real_import("cairn_pin")` — which bypasses the patch by
+    # construction and therefore measured nothing; it failed with DID NOT RAISE,
+    # which is the control working on itself. `importlib.import_module` would be
+    # wrong too: `cairn_pin` is already in `sys.modules` from the suite's own
+    # imports, so it would return the cached module without consulting
+    # `__import__` at all and the control would pass for the wrong reason.
+    with pytest.raises(ImportError, match="planted"):
+        _boom("cairn_pin")
+
+
+def test_the_index_store_row_can_actually_be_MEASURED(tmp_path):
+    """🔴 REGRESSION COVERAGE — the MEASURED branch was DEAD and 50 tests passed.
+
+    `m_index_store` guarded itself with
+    `if not (lib / "subsystem_recall.py").is_file(): raise Unmeasurable(...)`.
+    devrc deleted that file when it consolidated onto the pinned `cairn` client,
+    so the guard went PERMANENTLY TRUE: the row was UNMEASURED on every host, the
+    `cairn_pin.ensure()` behind it could never execute, and the reason string
+    pointed a reader at a file that had been deleted on purpose.
+
+    🔴 NOTHING SAW IT, AND THE REASON IS THE LESSON. Every other `Env` in this
+    file points `index_store` at a directory that does not exist, so every one of
+    them takes the ABSENT branch and none has ever reached the parser. A suite
+    that only ever exercises the "cannot answer" path cannot tell a measurer that
+    is correctly silent from one that is structurally mute — which is this
+    module's own headline property, applied to itself.
+
+    So this builds a SYNTHETIC store and requires the row to come back MEASURED.
+    Red at the base of the consolidation branch? No — at that base the module was
+    not broken, so this is a guard on a hole the consolidation opened and the
+    consolidation closed. It is REGRESSION coverage against the shipped defect:
+    it fails on the tree as first pushed, and passes here.
+
+    🔴 PUBLIC-REPO NOTE, and it is why the store is built rather than borrowed:
+    the operator's real store holds client-confidential scope names. Nothing
+    below reads it. The fixture names are invented and share no substring with
+    any real scope.
+    """
+    store = tmp_path / "index-store"
+    (store / "widget-cfg").mkdir(parents=True)
+    (store / "widget-cfg" / "gizmo.md").write_text(
+        "---\n"
+        "service: gizmo\n"
+        "scope: widget-cfg\n"
+        "sensitivity: public\n"
+        "created_by: handoff\n"
+        "---\n"
+        "# gizmo\n\n"
+        "## What it is\n"
+        "A synthetic entry, invented for this test.\n\n"
+        "## Pointers\n"
+        "- `nowhere/real.py` — a pointer.\n\n"
+        "## Nuance / work-history\n"
+        "- 2026-01-01: a bullet.\n",
+        encoding="utf-8",
+    )
+
+    env = measure.Env(repo=REPO_ROOT, home=tmp_path,
+                      claude_dir=tmp_path / ".claude", index_store=store,
+                      allow_systemd=False, allow_network=False)
+    entry = next(e for e in measure.REGISTRY if e[0] == "index.store")
+    row = measure.take(env, _registry(entry)).by_key("index.store")
+
+    assert row.measured, (
+        f"the index.store row could not be measured against a store this test "
+        f"just built: {row.reason}. That is the shipped defect — a precondition "
+        f"naming a file the repo deliberately deleted — not a property of the "
+        f"store."
+    )
+    # A POSITIVE CONTROL on the number, not just on `measured`: a parser wired to
+    # nothing would also report a clean zero.
+    assert "1 entr" in row.value, (
+        f"the row is MEASURED but does not count the one entry built above "
+        f"({row.value!r}) — a measurer that answers without reading is the "
+        f"confident zero this module exists to catch"
+    )
+
+
+def test_the_index_store_row_is_UNMEASURED_when_the_pin_cannot_resolve(
+    tmp_path, monkeypatch
+):
+    """The other arm: the row degrades with its OWN reading, not the parser's.
+
+    🔴 A NEGATIVE CONTROL FOR THE TEST ABOVE. Without it, `measured=True` could be
+    a fact about this host rather than about the code, and the two branches of
+    `m_index_store` would be indistinguishable to the suite. It also pins the
+    SEPARATION: a host with no pinned client is a STATE, and reporting it as "the
+    index store did not load through its own parser" would claim a broken store
+    where there is only a missing client.
+    """
+    store = tmp_path / "index-store"
+    (store / "widget-cfg").mkdir(parents=True)
+
+    # Route 1 set-but-unusable REFUSES rather than falling through to PATH, which
+    # is what makes this reachable without touching PATH at all.
+    monkeypatch.setenv("CAIRN_LIB", str(tmp_path / "no-such-lib"))
+    env = measure.Env(repo=REPO_ROOT, home=tmp_path,
+                      claude_dir=tmp_path / ".claude", index_store=store,
+                      allow_systemd=False, allow_network=False)
+    entry = next(e for e in measure.REGISTRY if e[0] == "index.store")
+    row = measure.take(env, _registry(entry)).by_key("index.store")
+
+    assert not row.measured, "the row claimed a measurement with no pinned client"
+    assert "pinned cairn client is not available" in row.reason, (
+        f"the row degraded, but not with the pin's own reading: {row.reason!r}"
+    )
+
+
 def test_a_constant_is_read_by_PARSING_its_owner_not_by_importing_it(tmp_path):
     """🔴 REGRESSION COVERAGE — this was measurably broken and shipped an absence.
 

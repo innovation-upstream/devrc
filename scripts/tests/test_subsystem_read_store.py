@@ -41,8 +41,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 import service_recon as srec  # noqa: E402
 import subsystem_read_store as rs  # noqa: E402
 import subsystem_recall as rc  # noqa: E402
@@ -343,7 +350,7 @@ class TestTheWireConstants:
         would either be noise or need an exclusion list long enough to hide a
         real omission. Its two are pinned by name above.
         """
-        source = ROOT / "scripts" / "lib" / "subsystem_read_store.py"
+        source = pinned("subsystem_read_store")
         declared = _module_scope_assignments(source)
         # POSITIVE CONTROL. A walk that returned nothing — wrong path, a parse
         # that found no `Assign` — would report a clean sweep over zero names,
@@ -354,14 +361,18 @@ class TestTheWireConstants:
         for name in declared:
             assert hasattr(rs, name), f"{name} is assigned but not importable"
 
-        pinned = {n for m, n, _lit in WIRE_CONSTANTS if m is rs}
-        assert declared - pinned - NOT_WIRE_FACTS == set(), (
+        # `pinned_names`, not `pinned` — the module-level `pinned()` helper
+        # resolves the PINNED cairn lib and a local of that name shadows it,
+        # which is a `UnboundLocalError` on the `source = pinned(...)` line ABOVE
+        # rather than at the rebinding.
+        pinned_names = {n for m, n, _lit in WIRE_CONSTANTS if m is rs}
+        assert declared - pinned_names - NOT_WIRE_FACTS == set(), (
             f"`subsystem_read_store` grew module-scope constant(s) "
-            f"{sorted(declared - pinned - NOT_WIRE_FACTS)} with no pin. "
+            f"{sorted(declared - pinned_names - NOT_WIRE_FACTS)} with no pin. "
             f"Add them to WIRE_CONSTANTS, or to NOT_WIRE_FACTS with a reason."
         )
-        assert pinned <= declared, (
-            f"WIRE_CONSTANTS names {sorted(pinned - declared)}, which "
+        assert pinned_names <= declared, (
+            f"WIRE_CONSTANTS names {sorted(pinned_names - declared)}, which "
             f"`subsystem_read_store` no longer declares."
         )
 
@@ -645,7 +656,7 @@ class TestTheResolver:
         assert "EXIT_REFRESH_FAILED" in assigned, sorted(assigned)[:20]
         assert "cmd_sync" in assigned, sorted(assigned)[:20]
         swept = _module_scope_bindings(
-            ROOT / "scripts" / "lib" / "subsystem_read_store.py"
+            pinned("subsystem_read_store")
         )
         # POSITIVE CONTROL on the half `__all__` cannot supply: the sweep really
         # read names off the module, so a union that quietly collapsed back to
@@ -793,10 +804,10 @@ class TestAStampedDefaultStoreCarriesItsFreshness:
         than by grepping the output for a duration, because a duration string
         is a word another feature could spell.
         """
-        src = (ROOT / "scripts" / "lib" / "subsystem_recall.py").read_text(encoding="utf-8")
+        src = (pinned("subsystem_recall")).read_text(encoding="utf-8")
         assert "\nimport time" not in src and "\nfrom time import" not in src
         assert "\nimport datetime" not in src and "\nfrom datetime import" not in src
-        rd = (ROOT / "scripts" / "lib" / "subsystem_read_store.py").read_text(encoding="utf-8")
+        rd = (pinned("subsystem_read_store")).read_text(encoding="utf-8")
         assert "\nimport time" not in rd and "\nfrom time import" not in rd
         # And behaviourally: the stamp's own epoch is echoed, never converted.
         repointed(_store(tmp_path, stamped=True))
@@ -930,7 +941,7 @@ class TestThePodContractIsUnchanged:
         annotation (`_with_stamp`'s) counts too; comment lines are excluded so
         prose about the resolver stays free.
         """
-        src = (ROOT / "scripts" / "lib" / "subsystem_recall.py").read_text(encoding="utf-8")
+        src = (pinned("subsystem_recall")).read_text(encoding="utf-8")
         referencing = set()
         for node in ast.parse(src).body:
             segment = ast.get_source_segment(src, node) or ""
@@ -1831,7 +1842,7 @@ class TestTheAuditorHoldsNoSecondCopyOfTheReadStoreFacts:
         assigned = _module_scope_bindings(_AUDIT_SRC)
         # POSITIVE CONTROL, both collection paths: a constant and a `def`.
         assert {"TARGET", "audit_store"} <= assigned, sorted(assigned)[:20]
-        swept = _module_scope_bindings(ROOT / "scripts" / "lib" / "subsystem_read_store.py")
+        swept = _module_scope_bindings(pinned("subsystem_read_store"))
         assert {"SYNC_STAMP", "stamp_header"} <= swept, sorted(swept)
         clash = assigned & (set(rs.__all__) | swept)
         assert clash == set(), (

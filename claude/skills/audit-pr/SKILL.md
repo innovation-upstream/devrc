@@ -49,11 +49,12 @@ that is empty by construction and a finding-free pass over it reads as a clean r
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-⚠ **Consider `--round 0` FIRST — the requirements & deletion pass (its own section below).** It
-asks whether the change should EXIST, which no item on the checklist asks; it is the only round
-that can conclude *close this PR, do not audit it*. It is ON TRIAL, so it is a judgement call, not
-a step — but it has to be reachable from here or the trial closes by attrition rather than by
-evidence. Whichever you run, record `ran: R · changed the outcome: C` on the PR.
+🔴 **RUN `--round 0` FIRST — the requirements & deletion pass (its own section below).** It asks
+whether the change should EXIST, which no item on the checklist asks; it is the only round that can
+conclude *close this PR, do not audit it*. **No longer on trial: the trial CLOSED at `ran: 6 ·
+changed the outcome: 3`** (evidence in the section itself). 🔴 **Run it at PR-CREATE time, not when
+you get round to auditing** — that is the one finding the trial produced, and the
+`audit-pr-nudge.py` PostToolUse hook now routes it there for you.
 
 **Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
@@ -85,8 +86,8 @@ one scratchpad path and the branch namespace, so two audit rounds that both pick
 
 ## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE (runs BEFORE the checklist)
 
-⚠ **ON TRIAL, NOT A STANDING RULE — read the retirement condition at the end of this section
-before you run it.**
+✅ **A STANDING RULE — the trial is CLOSED. Read the TRIAL RECORD at the end of this section for
+what it cost and what it found; you do not have to re-litigate whether to run it.**
 
 Every axis below asks whether the change is CORRECT. None asks whether it should EXIST, and an
 audit scoped to a diff will never raise it on its own: that is how a 145 KB webhook listener
@@ -133,6 +134,15 @@ deleted is the waste this exists to catch. Work them in order; do not skip ahead
    "report, do not act" while pointing at a gate that already acts. What survives is the ORDERING
    claim, which is the half that does work. Recorded so the pair is not re-derived as ceremony.
 
+✅ **TRIAL RECORD — CLOSED 2026-09-12 at `ran: 6 · changed the outcome: 3`. The section STAYS; do
+not re-open the question.** 🔴 **The finding was the ROUTING, not the pass** — every zero was a
+dispatch that arrived after the merge decision was already taken, so the fix was a TRIGGER
+(`audit-pr-nudge.py` routes round 0 at `gh pr create`), not an edit to this section. ⚠ **Keep
+reporting the pair on each PR** — not to re-decide this section, but because it is now the only
+signal for whether that trigger works; `C` alone cannot distinguish "it ran and was useless" from
+"nobody invoked it". Decomposition, the per-PR timings, the fourth corroborating instance and the
+trigger's first pre-decision catch: `reference/round-ladder-evidence.md`.
+
 🔴 **ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER.** Its verdict is one of `proceed to the
 checklist` / `requirement questioned — <which>` / `deletion candidate — <what>` / `close, do not
 audit`. It is **not** a finding for the findings-keyed stop rule, it cannot end a ladder, and it
@@ -141,27 +151,7 @@ cannot license skipping a round. Every stop rule below is unchanged by it.
 **Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
 nothing at all is reportable — say what you examined to get there.
 
-⚠ **There is deliberately NO add-back percentage here.** An earlier draft asked for `deleted: X ·
-re-added: Y (Y/X = Z%)` "from the same `--numstat` command the attribution gate already runs", and
-that was **false**: `--numstat` reports added and deleted counts per file and cannot tell you that
-an added line is one previously deleted, so `Y` is undefined by the instrument named. The 10%
-add-back heuristic needs a measurement nothing here performs — and the sentence that followed it
-("an add-back of 0% means the deletion pass was too timid") asserted a direction measured nowhere,
-which is the shape this skill tells you to delete rather than reverse. Recorded so nobody derives
-it again.
-
-🔴 **RETIREMENT CONDITION — this section is on trial.** Run it on the next 3–5 PRs and record, on
-each PR, its verdict and whether that verdict CHANGED what happened. **If it ran and changed
-nothing, DELETE this section** — do not automate it further, and do not keep it because it reads
-well.
-
-🔴 **REPORT THE PAIR — `ran: R · changed the outcome: C` — never `C` alone.** A bare zero cannot
-distinguish "it ran five times and was useless" from "nobody ever typed `--round 0`", and those
-have opposite conclusions: the first retires the section, the second says the trial never started.
-`--round` still DEFAULTS to 1, so the second is the likelier reading of a silent zero. `R = 0` is
-not evidence about this section at all — it is evidence about its routing, and the fix is to run it,
-not to delete it. Closed by that pair reaching a decision, recorded on the PR that removes this
-section or on the one that promotes it out of trial.
+## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 <!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
      scripts/audit-dispatch.py captures the ROUND 0 section up to the next
@@ -170,8 +160,6 @@ section or on the one that promotes it out of trial.
      correctness axes it exists to withhold — measured: 3,367 chars -> 4,057.
      Pinned by test_the_round_zero_section_the_script_reads_is_the_one_the_
      skill_ships. Reword it freely; keep it a `## `. -->
-
-## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 **Audit for:**
 1. **Risks** — what breaks in production.

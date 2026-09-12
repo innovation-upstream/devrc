@@ -91,6 +91,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# 🔴 SOURCE-READING GUARDS POINT AT THE PINNED LIB, NOT `scripts/lib/`.
+# devrc deleted its forked reader modules when it consolidated onto the
+# `cairn` flake pin, so `pinned("<module>")` is where their source now is.
+# One seam for every such test — see `scripts/testlib/cairn_lib.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
+
+
 # 🔴 ONE bound for every "this should already have happened" wait in this module
 # — the localhost HTTP round-trips, `wait_closed`, `await_audit`. These are
 # HANG-DETECTORS: they exist so a broken server fails the test instead of hanging
@@ -272,7 +280,7 @@ API_DIR = ROOT / "scripts" / "subsystem-store-api"
 SERVER_PATH = API_DIR / "server.py"
 SEED_PATH = API_DIR / "seed.sh"
 VERIFY_PATH = API_DIR / "verify-byte-identity.sh"
-RECALL_PATH = ROOT / "scripts" / "lib" / "subsystem_recall.py"
+RECALL_PATH = pinned("subsystem_recall")
 
 
 def _load_server():
@@ -299,16 +307,24 @@ assert resolver.classify_path is api.classify_path, (
 )
 
 # 🔴 THE SEAM THAT MAKES A POD-SHAPED `host:` LINE REACHABLE IN-PROCESS.
-# `subsystem_recall` does `from subsystem_touch import store_host_line`, and
-# `store_host_line` calls `store_host()` — a lookup in THIS module's globals, by
-# design (`subsystem_touch.store_host`'s docstring: "one injection point makes
-# the reader and the writer agree"). So patching it here moves what the
-# IN-PROCESS server renders while the local CLI, which `run_verify` starts as a
-# SUBPROCESS, keeps this machine's real identity. That asymmetry is precisely
-# the workbench-vs-pod shape, and nothing else in this harness produces it.
-touch = sys.modules["subsystem_touch"]
+# `subsystem_recall` does `from entry_shape import store_host_line`, and
+# `store_host_line` calls `store_host()` — a lookup in `entry_shape`'s globals,
+# by design (that module's docstring: "one injection point makes reader and
+# writer agree"). So patching it here moves what the IN-PROCESS server renders
+# while the local CLI, which `run_verify` starts as a SUBPROCESS, keeps this
+# machine's real identity. That asymmetry is precisely the workbench-vs-pod
+# shape, and nothing else in this harness produces it.
+#
+# ⚠ IT WAS `subsystem_touch` UNTIL devrc CONSOLIDATED ONTO THE PINNED CLIENT.
+# The writer no longer owns this vocabulary — both halves import it from the
+# shared `entry_shape` — and the pod image does not even carry `subsystem_touch`
+# any more, so naming it here would not merely patch the wrong module, it would
+# `KeyError` at import. The name is taken out of `sys.modules` deliberately:
+# `server.py` has already imported it by the line above, and re-importing by
+# path would give a SECOND module object whose globals the server never reads.
+touch = sys.modules["entry_shape"]
 assert hasattr(touch, "store_host"), (
-    "subsystem_touch no longer exposes `store_host` — the byte-identity "
+    "`entry_shape` no longer exposes `store_host` — the byte-identity "
     "verifier's `host:` canonicalisation is tested through this seam, and a "
     "rename here would silently turn those tests into same-host self-checks"
 )
@@ -6185,6 +6201,21 @@ class TestPhaseOneScope:
         lib = ROOT / "scripts" / "lib"
         dockerfile = (API_DIR / "Dockerfile").read_text()
 
+        # 🔴 THE CLOSURE SPANS TWO TREES NOW. devrc deleted its forked reader
+        # modules and takes them from the pinned `cairn` package, so a module
+        # `server.py` needs is either devrc-local (`scripts/lib/`) or pinned
+        # (`PINNED_LIB`) — and the two are COPIED FROM DIFFERENT PLACES in the
+        # Dockerfile. Resolving against `scripts/lib` alone would silently stop
+        # walking at the first pinned module and report a closure of one, which
+        # is the "reassuring zero" version of exactly the rot this test exists
+        # to catch.
+        def _where(mod: str) -> tuple[str, Path] | None:
+            if (lib / f"{mod}.py").exists():
+                return ("devrc", lib / f"{mod}.py")
+            if (PINNED_LIB / f"{mod}.py").exists():
+                return ("pinned", PINNED_LIB / f"{mod}.py")
+            return None
+
         def local_imports(path: Path) -> set[str]:
             found = set()
             for node in ast.walk(ast.parse(path.read_text())):
@@ -6193,16 +6224,31 @@ class TestPhaseOneScope:
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         found.add(alias.name.split(".")[0])
-            return {m for m in found if (lib / f"{m}.py").exists()}
+            return {m for m in found if _where(m)}
 
-        # Entrypoints: what the server imports directly.
-        needed, queue = set(), ["subsystem_recall"]
+        # 🔴 THE ENTRYPOINT IS `server.py` ITSELF, not a hardcoded module name.
+        # It used to be `["subsystem_recall"]`, which was true and is now
+        # incomplete: the server also imports `cairn_pin`, the devrc-side seam
+        # that puts the pinned lib on `sys.path`. A missing `cairn_pin` builds
+        # fine and fails at pod start with an ImportError naming a module the
+        # Dockerfile never mentioned — the original defect, one module along.
+        needed: dict[str, str] = {}
+        queue = sorted(local_imports(SERVER_PATH))
         while queue:
             mod = queue.pop()
             if mod in needed:
                 continue
-            needed.add(mod)
-            queue.extend(local_imports(lib / f"{mod}.py"))
+            origin, path = _where(mod)
+            needed[mod] = origin
+            queue.extend(local_imports(path))
+
+        devrc_needed = {m for m, o in needed.items() if o == "devrc"}
+        pinned_needed = {m for m, o in needed.items() if o == "pinned"}
+        assert devrc_needed and pinned_needed, (
+            f"the closure came out one-sided ({sorted(needed.items())}) — after "
+            f"the consolidation it must span both trees, so this is a broken "
+            f"walk rather than a clean result"
+        )
 
         # 🔴 TWO LISTS, AND CHECKING ONLY ONE IS A GUARD NARROWER THAN THE
         # HAZARD. The first version of this test checked only the COPY lines —
@@ -6215,15 +6261,53 @@ class TestPhaseOneScope:
         ignorefile = (API_DIR / "Dockerfile.dockerignore").read_text()
         copied = set(re.findall(r"COPY scripts/lib/(\w+)\.py", dockerfile))
         unignored = set(re.findall(r"!scripts/lib/(\w+)\.py", ignorefile))
+        # The pinned half is staged by `build-push.sh` into `.cairn-lib/` and
+        # copied from there — a different prefix, so it needs its own pattern.
+        # Matching `(\w+)\.py` after either prefix would fold the two sets
+        # together and let a module copied from the WRONG tree satisfy the check.
+        staged = set(re.findall(
+            r"COPY scripts/subsystem-store-api/\.cairn-lib/(\w+)\.py", dockerfile))
+        staged_unignored = set(re.findall(
+            r"!scripts/subsystem-store-api/\.cairn-lib/(\w+)\.py", ignorefile))
 
-        assert not (needed - copied), (
-            f"Dockerfile does not COPY {sorted(needed - copied)} — the image "
-            f"would build and then fail to import at runtime."
+        assert not (devrc_needed - copied), (
+            f"Dockerfile does not COPY {sorted(devrc_needed - copied)} from "
+            f"scripts/lib/ — the image would build and then fail to import at "
+            f"runtime."
         )
-        assert not (needed - unignored), (
+        assert not (devrc_needed - unignored), (
             f"Dockerfile.dockerignore does not un-ignore "
-            f"{sorted(needed - unignored)} — it is an allowlist, so the file "
-            f"never reaches the build context and COPY fails outright."
+            f"{sorted(devrc_needed - unignored)} — it is an allowlist, so the "
+            f"file never reaches the build context and COPY fails outright."
+        )
+        assert not (pinned_needed - staged), (
+            f"Dockerfile does not COPY {sorted(pinned_needed - staged)} from "
+            f"the .cairn-lib/ staging dir. Those modules live in the PINNED "
+            f"package, which a docker build context cannot reach — "
+            f"`build-push.sh` stages them, and its module list must cover this."
+        )
+        assert not (pinned_needed - staged_unignored), (
+            f"Dockerfile.dockerignore does not un-ignore "
+            f"{sorted(pinned_needed - staged_unignored)} under .cairn-lib/."
+        )
+
+        # 🔴 AND THE THIRD LIST: `build-push.sh` is what PUTS the files there, so
+        # a Dockerfile/ignore pair that agree with each other and disagree with
+        # the stager still fails the build. Two lists agreeing was the original
+        # bug's shape; three is the actual hazard now.
+        stager = (API_DIR / "build-push.sh").read_text()
+        for mod in sorted(pinned_needed):
+            assert mod in stager, (
+                f"`build-push.sh` does not stage `{mod}.py`, so the COPY for it "
+                f"names a file that will not exist in the build context."
+            )
+
+        # `CAIRN_LIB` is how the container satisfies `cairn_pin` route 1 — there
+        # is no `cairn` on PATH in the image, so without it the server refuses at
+        # import with the pin's own "not found" message.
+        assert "CAIRN_LIB=/app/cairn-lib" in dockerfile, (
+            "the image does not set CAIRN_LIB, so `cairn_pin` has no resolution "
+            "route inside the container and every reader import refuses."
         )
 
     def test_nothing_in_this_directory_writes_to_the_store(self):
