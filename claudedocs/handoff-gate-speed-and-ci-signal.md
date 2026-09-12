@@ -21,38 +21,40 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- **RANK 7 IS MERGED. RANK 11's RED WAS REAL AND IS FIXED (CI re-running). RANK 10 IS HELD BEHIND A
-  MERGED-TREE RUN THAT IS STILL IN FLIGHT.** Ranks 1, 2, 3, 4, 9 remain closed tombstones; rank 5
-  ANSWERED with no PR; ranks 6 and 8 are DATED, not ready.
+- **RANKS 7 AND 10 ARE MERGED; RANK 11 IS FIXED AND AWAITING CI. 🔴 RANK 10 IS MERGED BUT THE UNIT
+  RUNS ON NO HOST** — `ship.sh` exited **rc 7** and the workbench was SKIPPED. Ranks 1, 2, 3, 4, 9
+  remain closed tombstones; rank 5 ANSWERED with no PR; ranks 6 and 8 are DATED, not ready.
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
-  `#1524` 58bfb747 · **`homelab-infra#799` 0b14768a (NEW)**. Closed unmerged on purpose: `#1558`,
-  `#1559` (superseded by `#1561`).
+  `#1524` 58bfb747 · **`homelab-infra#799` 0b14768a** · **`#1600` f99d3c1b**. Closed unmerged on
+  purpose: `#1558`, `#1559` (superseded by `#1561`).
 - **`ZacxDev/homelab-infra#799` — MERGED `0b14768a`, rank 7 CLOSED.** Verified by CONTENT on `trunk`
   (a squash merge never makes the head an ancestor, so `--is-ancestor` is false forever and is not
-  the check). The test-only claim was **re-verified independently of the handoff** before merging:
-  2 files, both `scripts/tests/*`, `+190/-0`, **zero** files under `clusters/`/`triggers/`/`apps/`,
-  so it reconciles to nothing. `tekton/gitops-validate` green on all 9 legs. It was 4 behind
-  `trunk`; those 4 commits are comic-flex UI, two handoffs and a SOPS rotation-ledger test —
-  no overlap with supersede wiring in either direction.
+  the check). Test-only claim re-verified independently before merging: 2 files, both
+  `scripts/tests/*`, **zero** under `clusters/`/`triggers/`/`apps/`.
+- **`devrc#1600` — MERGED `f99d3c1b`, gated on a real merged-tree run.** 8184 passed / 0 failed /
+  `PYTEST_RC=0` over **72 test files** (every test reading `nix/home.nix`, plus the PR's own), 33 min.
+  🔴 **The merged-tree claim was re-checked AT the moment of merging and held**: `origin/main` was
+  `7e000e6b` both when the tree was built and when the merge ran, and the tested tree's second parent
+  was the PR's live head `18701e53`. Verified landed by CONTENT (`enableStaleBaseTriage` ×2 in
+  `nix/home.nix` on `main`, test file present), never by ancestry.
+- 🔴 **BUT IT IS NOT RUNNING ANYWHERE, AND THAT IS THE OPEN ITEM.** See the investigation below.
+  `ship.sh` rc 7: laptop fast-forwarded `7e000e6b → f99d3c1b` and VERIFIED; **the workbench was
+  SKIPPED** — cannot fast-forward, blocked by a locally-changed `claude/skills/clawgate/SKILL.md`.
+  MEASURED after the run: workbench has `~/.server-mode` but the unit is **ABSENT** (no switch);
+  laptop has the unit but **no** `~/.server-mode`, so its timer is `UnitFileState=linked`, **0 timers
+  listed, `journalctl` `-- No entries --`**. The `serverMode` gate is working exactly as designed —
+  the sweep is supposed to run on the workbench only, and the workbench is the host that did not
+  converge. **Merged ≠ deployed ≠ running; this broke at DEPLOY.**
 - **`devrc#1603` — the red was REAL, was the PR reintroducing the exact failure it exists to
-  prevent, and is FIXED at `8a88f255` (pushed; CI re-running as of this writing).** See the
-  Findings block below. Branch `feat/ledger-fast-check`, now `CLEAN`/`MERGEABLE`, 16 behind `main`.
-- **`devrc#1600` — NOT MERGED, deliberately.** All three checks green and `CLEAN`, but **24 commits
-  behind** `main` (tip `7e000e6b`). Its only shared surface is `nix/home.nix`, which **72 test files
-  read**, and it adds a **new systemd unit** — the two-way-unit-ledger class that has reddened `main`
-  twice on this arc. `scoped-tests.sh` exits 4 on that surface by design, so a merged-tree run over
-  those 72 files is the gate. **In flight at ~35% when this was written; its verdict is UNREAD.**
-  🔴 **Do not merge #1600 on the strength of its three green checks** — those are a claim about its
-  own branch at a base 24 commits stale.
+  prevent, and is FIXED at `8a88f255`.** See the Gotchas block. CI re-running; verdict UNREAD.
+- **`devrc#1613` — the handoff PR** carrying the previous update (`2b5344e0`). Open; CI pending.
 - **Claims held:** `gate-speed-and-ci-signal-10`, `gate-speed-and-ci-signal-11`. Rank 7 was merged
-  **without** claiming it first — `claim-work --list` and `gh pr list --state open` were both swept
-  and showed no claim and no duplicate on this arc, so nothing collided, but the claim should have
-  come first and did not.
-- **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session, with its positive control showing the board reachable. Per its own instruction that
-  is not a clean bill of health (a wrong id also answers 200/`[]`), so no field was written.
+  **without** claiming it first — both sweeps were run and showed no claim and no duplicate, so
+  nothing collided, but the lock is supposed to precede the act.
+- **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` exited **5** (0 tasks); its
+  positive control shows the board reachable but that is explicitly NOT a clean bill of health.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -124,12 +126,14 @@ the END. **Ranks 1–4, 7 and 9 are CLOSED tombstones**; renumbering re-points e
 2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.
    forcing: none
 3. **CLOSED — the store-api flake was already fixed by `#1458`.** ⚠ `#1512` is NO LONGER the
-   measurement of record; superseded 2026-09-12 by an ANCESTRY split over 400 PR heads — **0 of 99**
-   verdicts on heads carrying `ce9b55c3` against **12 of 298** that do not, P(0) ≈ **0.017** —
-   recorded in `devrc#1568` (`8114a124`), full table at `handoff-gate-flake-store-api.md` rank 1.
-   ⚠ `#1512`'s table is not WRONG: re-splitting the same 397 verdicts by date reclassified 5 and
-   **0 of 101 failures**. Cite the newer read; keep `#1512` for its "it was never the worst flake"
-   finding, which stands.
+   measurement of record: it split on `ce9b55c3`'s TIMESTAMP and its zero was underpowered
+   (4/125 → 0/45, P(0) ≈ 0.23). Superseded 2026-09-12 by an ANCESTRY split over 400 PR heads —
+   **0 of 99** verdicts on heads carrying the sha against **12 of 298** that do not, P(0) ≈
+   **0.017** — recorded in `devrc#1568` (`8114a124`), full table at
+   `handoff-gate-flake-store-api.md` rank 1. ⚠ **`#1512`'s table is not WRONG**: re-splitting the
+   same 397 verdicts by date reclassified 5 and **0 of 101 failures**, so its predicate was the
+   wrong test and changed nothing at this sample. Cite the newer read; keep `#1512` for its
+   "it was never the worst flake" finding, which stands.
    forcing: none
 4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.
    forcing: none
@@ -167,7 +171,7 @@ the END. **Ranks 1–4, 7 and 9 are CLOSED tombstones**; renumbering re-points e
    together" both stand**; this is the datum to decide ON, and it did not exist when the date was set.
    forcing: none
 7. **CLOSED — `ZacxDev/homelab-infra#799` MERGED `0b14768a` on 2026-09-12.** Verified by content on
-   `trunk`; test-only, reconciled to nothing. See `State now`.
+   `trunk`; test-only, reconciled to nothing.
    forcing: none
 8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK UNTIL ~2026-09-18, THEN ARM.** Operator set this
    date. Criteria (i)–(iii) met non-vacuously on the first two post-deploy sweeps; (iv) needs the
@@ -194,25 +198,23 @@ the END. **Ranks 1–4, 7 and 9 are CLOSED tombstones**; renumbering re-points e
    days, both measured here, and nothing prevents the next one.** Tracked as
    `handoff-gate-flake-store-api.md` rank 8, closed as an instance and retained for the class.
    forcing: none — both instances shipped; the class is unaddressed and owned by nobody.
-10. 🔴 **MERGE `devrc#1600` — BUT ONLY AFTER READING THE MERGED-TREE VERDICT, WHICH IS UNREAD.**
-    The run was ~35% done when the session ended; see the Open investigation above for the exact
-    repro. Its three green checks are a claim about a base **24 commits** stale and do not settle it.
-    Design reviewed against the diff this session and sound. Timer for `stale-base-triage.py`, **2h**
-    (derived: a verdict only changes when a new `devrc-pytests` status lands ~19.6 min after a push,
-    or `main` moves a file the red names; measured cost **60 API reads / 43s / 59 PRs ⇒ 0.6% of the
-    rate limit**). Ships `--comment-mode dry-run`, **pinned by value**; 17/17 mutants killed.
-    **No `OnFailure=notify-failure@`** (every red it sees is somebody's PR, not an incident) and
-    **rc 11 FAILS the unit** — the opposite of its siblings, because it has no blind ladder.
-    `SuccessExitStatus=10`, `TimeoutStartSec=600` (above the script's own 300s budget).
-    `serverMode`-gated to the workbench only — both hosts build the same flake, and once armed two
-    hosts would race to post the same comment.
-    ⏳ **After merge: `ship.sh`, THEN `journalctl --user -u stale-base-triage -n 40 --no-pager`** —
-    two separate claims. Whether the unit runs cleanly under systemd is STILL unverified; no switch
-    has been done.
-    🔴 **ITS SOAK EVIDENCE IS JOURNAL-ONLY, NOT LOKI** — a systemd-user unit's stdout carries
+10. 🔴 **MERGED `f99d3c1b` — BUT RE-SHIP THE WORKBENCH; THE UNIT RUNS ON NO HOST.** This rank is NOT
+    closed, and the remaining work is a DEPLOY, not a code change. `ship.sh` rc 7 skipped the
+    workbench on a locally-changed `claude/skills/clawgate/SKILL.md` that another session was editing
+    **2 minutes** before it was read. See the open investigation for the exact next probe.
+    🔴 **Do NOT clear that file to unblock the ship** — it is live WIP (sha1 matches no recent commit),
+    and the remedy `ship.sh` prints would destroy it mid-edit.
+    The merge itself is verified: merged-tree run 8184 passed / 0 failed over 72 files, the
+    merged-tree claim re-checked at merge time, landing verified by content.
+    Design facts, carried forward: 2h interval (a verdict only changes when a new `devrc-pytests`
+    status lands ~19.6 min after a push, or `main` moves a file the red names; measured cost **60 API
+    reads / 43s / 59 PRs ⇒ 0.6% of the rate limit**), `--comment-mode dry-run` **pinned by value**,
+    17/17 mutants killed, **no `OnFailure=notify-failure@`**, `SuccessExitStatus=10`, **rc 11 FAILS
+    the unit** (opposite of its siblings — it has no blind ladder), `TimeoutStartSec=600`.
+    🔴 **ITS SOAK EVIDENCE WILL BE JOURNAL-ONLY, NOT LOKI** — a systemd-user unit's stdout carries
     `_TRANSPORT=stdout` and alloy's journal source is a default-deny allowlist of
     `kernel|journal|syslog`. Unlike `#792`, you cannot read its dry-run evidence from Loki.
-    forcing: none
+    forcing: gate — merged and inert; the deploy is what makes the merge mean anything.
 11. **`devrc#1603` — FIXED AND PUSHED (`8a88f255`); MERGE ONCE CI IS GREEN.** The sandbox-tier red
     was real and was this PR reintroducing the permanently-red-gate failure it exists to prevent —
     full diagnosis in the Gotchas block. Fix verified in **both** tiers, 29 passed each, with the
@@ -221,19 +223,14 @@ the END. **Ranks 1–4, 7 and 9 are CLOSED tombstones**; renumbering re-points e
     closure at call time, no list); only a positive control is hardcoded, and a mutant proves it
     reachable. 🔴 Its two-pass design is load-bearing: `public_ip_scan.repo_files(root)` walks its
     own PARAMETER, so a root-aware seed never fires on the shared lister most guards go through —
-    **without pass 1, neither incident is visible.** Surface is `scoped-tests.sh` on a file-SET
-    change, which closes that script's OWN blind spot (its mapper selects tests that NAME what you
-    changed; a new file names nothing — exactly how both reds happened). Both historical reds
-    reproduced and caught, clean either side. ⚠ **166s, i.e. ~3 minutes — NOT the "seconds" this
-    rank originally claimed**; ~7× the tier. A 2× narrower filter was REJECTED because its false
-    negatives re-open the hole.
-    ⚠ **CI was still `pending` on the new head when this was written — the verdict is UNREAD.**
-    Read `gh pr checks 1603` before merging, and remember the measured ~42–48% not-success rate:
-    read the failing test's name and ask whether the diff can reach it rather than acting on colour.
-    ⚠ 16 behind `main`; its files are `scripts/{ledger-check.sh,scoped-tests.sh,testlib/census_scan.py}`
-    plus two test files. `scoped-tests.sh` and `testlib/**` are BOTH declared shared surfaces, so the
-    same merged-tree caveat as rank 10 applies — do not lean on the branch's own green.
+    **without pass 1, neither incident is visible.** ⚠ **166s, i.e. ~3 minutes — NOT "seconds"**;
+    ~7× the tier. A 2× narrower filter was REJECTED because its false negatives re-open the hole.
+    ⚠ CI verdict UNREAD at time of writing. ⚠ It is behind `main`, and its files include
+    `scoped-tests.sh` and `testlib/**` — BOTH declared shared surfaces — so the merged-tree caveat
+    applies exactly as it did for rank 10. Do not lean on the branch's own green.
     forcing: gate — it reddens `main`, and every branch cut from a red `main` inherits it.
+12. **`devrc#1613` — the handoff PR.** Merge it once CI is green; it carries this doc.
+    forcing: none
 
 ## Decisions, so they are not re-litigated
 
@@ -255,27 +252,23 @@ the END. **Ranks 1–4, 7 and 9 are CLOSED tombstones**; renumbering re-points e
 ## How to verify
 
 ```bash
-# rank 7 — squash-merged, so verify by CONTENT, never by ancestry
+# rank 7 + rank 10 — squash merges, so verify by CONTENT, never by ancestry
 gh pr view 799 --repo ZacxDev/homelab-infra --json state,mergedAt,mergeCommit
-gh api /repos/ZacxDev/homelab-infra/contents/scripts/tests/test_supersede_wiring.py?ref=trunk --jq .size
+git -C ~/workspace/devrc show origin/main:nix/home.nix | grep -c enableStaleBaseTriage   # 2
+
+# 🔴 rank 10's REMAINING work — is the blocker gone? Only then re-ship.
+git -C ~/workspace/devrc status --short claude/skills/clawgate/SKILL.md   # empty == clear to ship
+bash ~/workspace/devrc/scripts/ship.sh        # READ EVERY PER-HOST LINE, not the final verdict
+systemctl --user list-timers stale-base-triage.timer --all   # workbench: expect a NEXT time
+journalctl --user -u stale-base-triage -n 40 --no-pager      # workbench ONLY — laptop is gated off
 
 # rank 11 — the fix, in BOTH tiers. The sandbox tier is the one that was red.
-git -C ~/workspace/devrc fetch origin -q
 nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc-fix1603/scripts/tests/test_census_scan.py -q -p no:cacheprovider   # 29 passed
-
 S=$(mktemp -d); git -C ~/workspace/devrc-fix1603 archive HEAD | tar -x -C "$S"
 test -e "$S/.git" && echo "NOT the sandbox shape" || echo "no .git — sandbox reproduced"
 nix develop ~/workspace/devrc -c python3 -m pytest \
   "$S/scripts/tests/test_census_scan.py" -q -p no:cacheprovider --rootdir="$S"          # 29 passed
-
-# rank 10 — the gate that is UNREAD. Read PYTEST_RC, never the wrapper's exit code.
-bash /tmp/claude-1000/-home-zach-workspace-devrc/*/scratchpad/mt1600-run.sh
-grep -E '^(SELECTED|PYTEST_RC)=' <that run's log>
-
-# after merging #1600 only: ship, THEN read the consumer (separate claims)
-bash ~/workspace/devrc/scripts/ship.sh
-journalctl --user -u stale-base-triage -n 40 --no-pager
 ```
 
 ## Gotchas / decisions / dead-ends
@@ -626,6 +619,38 @@ journalctl --user -u stale-base-triage -n 40 --no-pager
   (`claim-work --list`, `gh pr list --state open`) were run at session start and showed no claim and
   no duplicate on this arc, so nothing collided — but the lock is supposed to come before the act,
   and "I checked the soft signals" is the reasoning the rule exists to override.
+
+### 2026-09-12 — ship.sh rc 7: the verdict was wrong in BOTH directions
+
+- 🔴 **`ship.sh` EXITED 7 AND THE LAPTOP HAD DEPLOYED FINE; THE HOST THAT FAILED WAS THE ONLY ONE
+  THAT MATTERED.** Reading the final line alone gives "the ship failed" (false — the laptop
+  fast-forwarded `7e000e6b → f99d3c1b`, `552 checked, 0 dangling`, `✅ VERIFIED … + switched`).
+  Reading "one host converged" gives "it shipped" (also false — the sweep is `serverMode`-gated to
+  the **workbench**, which is exactly the host that was SKIPPED). **CLAUDE.md's "read every per-host
+  line, not the final verdict" is usually quoted against a skip hiding among greens; here the
+  greens and the skip pointed at opposite conclusions and only the per-host lines resolved it.**
+- 🔴 **A `serverMode`-gated unit deploys to the OTHER host and still runs nowhere — and it looks
+  healthy.** MEASURED: the laptop has the SERVICE (`LoadState=loaded`) because the service is always
+  emitted, but `UnitFileState=linked`, **0 timers listed**, `journalctl` `-- No entries --`, because
+  the `Install` block is gated and the laptop has no `~/.server-mode`. That is the gate working
+  correctly. **`systemctl cat <unit>` succeeding is not evidence the unit RUNS** — check
+  `list-timers` and `UnitFileState`, and check them on the host the gate actually targets.
+- 🔴 **THE BLOCKING FILE WAS LIVE WIP, AND THE REMEDY ship.sh PRINTS WOULD HAVE DESTROYED IT.**
+  `claude/skills/clawgate/SKILL.md` was locally changed; `ship.sh` offers
+  `git checkout origin/main -- <file>` as "take upstream". Two checks before believing it was stale:
+  its working-copy sha1 matched **none of the last 8 commits** of that path (so not the byte-identical
+  stale-orphan case CLAUDE.md warns about), and its **mtime was 2 minutes old** — another session was
+  writing it *then*. The diff was three security retractions to the clawgate skill. **Handed over
+  rather than cleared.** A dirty file that blocks your deploy is not thereby yours to resolve.
+- **`ship.sh` is right to refuse, and says so:** `ship never stashes: the stash is repo-GLOBAL and
+  would reach into other worktrees`. The skip left the workbench exactly as found, which is the
+  designed behaviour — and also the failure mode CLAUDE.md warns silently starves a host of every
+  future change. **A skipped host is not a neutral outcome; it has a clock on it.**
+- ⚠ **`gh pr merge --delete-branch` FAILED on a branch pinned by a DEAD AGENT'S WORKTREE**
+  (`.claude/worktrees/agent-ad021347d6b6db53d`) — the merge itself had succeeded. Checked the
+  worktree before dismissing it, per this doc's own standing warning: clean tree, one commit, and
+  that commit's content is what landed as `f99d3c1b`. Nothing stranded. **Its ancestry reads
+  "unmerged" forever because of the squash** — content is the arbiter, not `--is-ancestor`.
 ## Open investigations — live diagnosis state
 
 ### RANK 2: #1469's audit ladder has not reached a clean round
@@ -700,3 +725,34 @@ journalctl --user -u stale-base-triage -n 40 --no-pager
 - **Next probe:** re-run the script and read `PYTEST_RC=` from
   `scratchpad/mt1600.log`. 🔴 **Read the CONTENT, not the wrapper's exit code** — see the Gotchas
   entry below; the first run of this very script reported wrapper exit 0 over `PYTEST_RC=4`.
+
+### 🔴 RANK 10 SHIPPED TO NEITHER HOST — the workbench is blocked by ANOTHER SESSION'S LIVE WIP
+- **Symptom + exact repro:** `bash ~/workspace/devrc/scripts/ship.sh` → **rc 7**. Workbench line:
+  `SKIPPED — cannot fast-forward to origin/main: could not switch to the main branch`, blocking file
+  `claude/skills/clawgate/SKILL.md`. Re-check with
+  `systemctl --user list-timers stale-base-triage.timer --all` (workbench: 0 timers, unit absent).
+- **Observed (with values):** the blocking file is **genuinely live WIP, not a stale orphan** — its
+  working copy sha1 `978ad806` matches **none** of the last 8 commits of that path, and its mtime was
+  **2 minutes old at the moment it was read** (`17:23:38`, read `17:25:49`). The diff is three
+  security-relevant RETRACTIONS to the clawgate skill: the LAN UI is *not* open (`/tasks/1` → 303 →
+  `/login`), `DELETE /api/tasks/{id}` is `requireHookToken` not unauthenticated (`server.go:699`),
+  and a credential-less `POST /agents` on the LAN returns **401**. Someone is writing that file now.
+- **Ruled out:** "`ship.sh` failed, so nothing deployed" — the LAPTOP leg SUCCEEDED
+  (`fast-forwarded main 7e000e6b -> f99d3c1b`, `552 checked, 0 dangling`, `✅ VERIFIED … + switched`).
+  Reading only the final `rc=7` would have gotten this backwards in both directions. via: command
+- **Ruled out:** "the laptop got the switch, so the sweep is running there" — its timer is
+  `UnitFileState=linked` with **0 timers listed** and `journalctl` `-- No entries --`, because the
+  `Install` block is `serverMode`-gated and the laptop has no `~/.server-mode`. That is CORRECT
+  behaviour, not a second bug. via: command
+- **Ruled out:** "just `git checkout origin/main -- <file>` and re-run ship" — that is the remedy
+  `ship.sh` itself prints, and here it would **destroy another session's uncommitted work while it is
+  mid-edit**. `claude/RULES.md` names docs-in-a-working-tree as unsaved work and names writing into a
+  tree another process is writing as its own hazard. **Deliberately NOT taken.** via: code
+- **Leading hypothesis:** nothing is wrong with `#1600`. This is purely the documented
+  diverged/dirty-host failure mode, and it will clear on its own once the other session commits or
+  parks that file — at which point `ship.sh` fast-forwards the workbench normally.
+- **Next probe:** re-check whether the file is still dirty, and only then re-ship:
+  `git -C ~/workspace/devrc status --short claude/skills/clawgate/SKILL.md` → if clean,
+  `bash ~/workspace/devrc/scripts/ship.sh` and **read every per-host line, not the final verdict**,
+  then `journalctl --user -u stale-base-triage -n 40 --no-pager` **on the workbench**.
+  🔴 If it is STILL dirty, that is the other session's to resolve — hand it over, do not clear it.
