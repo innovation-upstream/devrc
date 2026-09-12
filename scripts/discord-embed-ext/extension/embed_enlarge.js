@@ -13,6 +13,67 @@
   var MAX_WALK_DEPTH = 8;
   var WIDTH_THRESHOLD = 500;
   var HEIGHT_THRESHOLD = 400;
+
+  // 🔴 THE FOUR BELOW ARE A VIEWPORT CAP, NOT THE TWO DETECTION THRESHOLDS
+  // ABOVE. WIDTH_THRESHOLD/HEIGHT_THRESHOLD are px numbers findContainer
+  // compares an ANCESTOR'S COMPUTED cap against, to RECOGNISE Discord's 400x300
+  // box so it can be removed. ENLARGED_* is the bound WE then impose on the
+  // media. Same shape, opposite direction: one reads, one writes. Do not reuse,
+  // extend or fold one into the other.
+  //
+  // 🔴 EXPRESSED IN CSS VIEWPORT UNITS, WITH NO resize LISTENER, DELIBERATELY.
+  // The engine re-evaluates vw/vh on every window resize itself, so there is no
+  // listener to leak, no cached px value to go stale and no rAF thrash. A
+  // JS-computed px cap would need one, and would need the fake DOM to grow a
+  // viewport it does not model. This is the whole design: keep it declarative.
+  //
+  // 🔴 UNDER 100 ON PURPOSE — NOT A ROUNDING CHOICE, AND NOT SIMPLIFIABLE.
+  // `100vw` is the width of the initial containing block, which INCLUDES the
+  // gutter a classic vertical scrollbar sits in, so a `100vw` element overflows
+  // horizontally and grows a HORIZONTAL scrollbar on any page that has a classic
+  // vertical one. MEASURED 2026-09-04 in the engine this actually ships against
+  // (Brave/Chromium 144, headless, 1000px window, `overflow-y: scroll` document):
+  // innerWidth 1000, documentElement.clientWidth 985 — a 15px gutter. A `100vw`
+  // box rendered 1000.00px against 985px of usable width and pushed
+  // scrollWidth past clientWidth; the 96vw box rendered 960.00px and did not.
+  // The remaining margin is also the only breathing room between the media and
+  // the window edge, because unclipAncestors() has just stripped every ancestor
+  // clip that would otherwise have supplied one.
+  var ENLARGED_MAX_VW = 96;
+  // 🔴 `vh`, NOT `dvh`, AS A DECISION RATHER THAN AN OMISSION. `dvh` tracks a
+  // retracting browser toolbar, so it RELAYOUTS media mid-scroll; `vh` is the
+  // LARGE viewport — stable, and numerically identical to `dvh` on desktop
+  // Brave, which is the only place this content script runs. Revisit only if
+  // this manifest ever matches a mobile browser.
+  // ⚠ `vh` IS THE WINDOW, NOT THE VISIBLE MESSAGE AREA. Discord insets the
+  // scroller by a channel header and a composer, so a 92vh image is still
+  // taller than what you can see and you will scroll to its bottom. That is a
+  // large improvement on `max-height: none` (2000px in a 640px viewport,
+  // measured) but it is NOT "now fits on screen", and the README must not say
+  // so. MEASURED on a synthetic Discord-shaped layout, 1200x800 with a 48px
+  // header and a 68px composer: scroller visible height 684px, a 1000x3000
+  // image capped to 736px. NOT measured against the live client. If fitting
+  // matters more than size, this constant is the single lever — ~85 rather
+  // than 92.
+  var ENLARGED_MAX_VH = 92;
+  // 🔴 BOTH HALVES, OR THE MEDIA ESCAPES SIDEWAYS. `100%` alone was the bug: it
+  // resolves against the container, whose own max-width applyOverride sets to
+  // `none` just above the write site, so the effective horizontal bound became an
+  // ancestor chain that need not be viewport-bounded. But `96vw` alone is a
+  // DIFFERENT bug — Discord's message column is much narrower than the window,
+  // so a viewport-only cap lets media spill out of the column and across the
+  // sidebar. min() takes whichever is smaller: the column when the column is
+  // narrow, the viewport when it is not. MEASURED in Brave/Chromium 144 at a
+  // 1000px window: computed max-width resolves to `min(100%, 960px)`, and the
+  // SAME declaration rendered 400.00px inside a 400px column and 960.00px inside
+  // a 2000px one — both halves demonstrably load-bearing, at two points.
+  //
+  // Built by concatenation so the number appears exactly ONCE, above. A second
+  // hardcoded `96vw`/`92vh` literal anywhere in this file is what lets the
+  // constant and its use drift apart, and the suite forbids it.
+  var ENLARGED_MAX_WIDTH = "min(100%, " + ENLARGED_MAX_VW + "vw)";
+  var ENLARGED_MAX_HEIGHT = ENLARGED_MAX_VH + "vh";
+
   var DEBOUNCE_MS = 100;
   var ATTR_ENLARGED = "data-dee-enlarged";
   // Holds the ancestor's PRIOR inline overflow so forget() can put it back —
@@ -233,6 +294,24 @@
     var unclipped = unclipAncestors(el);
     var removed = false;
     if (container) {
+      // 🔴 THE CONTAINER IS UNCAPPED AND STAYS UNCAPPED — the viewport cap goes
+      // on the ELEMENT only, and that is a decision, not an oversight. With
+      // width/height forced to `auto` the container is sized by its content, so
+      // once the media inside is bounded the container is bounded with it and
+      // no empty box is left behind; a second cap here would be redundant at
+      // best. At worst it is harmful: this container is Discord's own layout
+      // box, and re-imposing a max-height on a flex parent can squeeze the
+      // media the uncapping just freed. MEASURED, not reasoned: rendering this
+      // exact four-declaration set on a wrapper around a 92vh-capped 200x2000
+      // image in Brave/Chromium 144 gave wrapper height 588.80px against image
+      // height 588.80px — the container tracks the media exactly, no open box —
+      // and 588.80 <= the 640px viewport. There is nothing here for a container
+      // cap to fix.
+      //
+      // (An earlier version of this comment said 592.80 against 588.80 and
+      // called the 4px an inline baseline gap. That figure does not reproduce:
+      // re-measured at 0px in three line-height contexts. The decision it
+      // supports is unchanged and in fact stronger.)
       var ccs = container.style;
       ccs.setProperty("max-width", "none", "important");
       ccs.setProperty("max-height", "none", "important");
@@ -240,8 +319,27 @@
       ccs.setProperty("height", "auto", "important");
       removed = true;
     }
-    el.style.setProperty("max-width", "100%", "important");
-    el.style.setProperty("max-height", "none", "important");
+    // 🔴 THE VIEWPORT CAP. `max-height: none` here was the vertical overflow by
+    // construction: any tall image ran off the bottom of the window, resize or
+    // no resize. `max-width: 100%` was the horizontal half — see the
+    // ENLARGED_MAX_WIDTH header. MEASURED: a 200x2000 image under these
+    // declarations rendered 58.88 x 588.80 in Brave/Chromium 144 — the 1:10
+    // ratio intact — where the shipped `max-height: none` rendered it 2000px
+    // tall against a 640px viewport.
+    //
+    // 🔴 `object-fit: contain` IS NOT WHAT PRESERVES THAT RATIO — do not cite
+    // it as the reason, and do not delete it as useless either. In the ordinary
+    // BLOCK case the box ratio already equals the intrinsic ratio (58.88 x 10 =
+    // 588.80), so the replaced-element auto/max-constraint algorithm does the
+    // work: MEASURED identical at 58.88 x 588.80 with `contain`, with `fill`,
+    // and with the declaration deleted outright. It becomes load-bearing where
+    // the box ratio DIFFERS from the content's — same engine, same image,
+    // inside `display:flex; flex-direction:column` the box is 614.39 x 588.80,
+    // and there `fill` squashes while `contain` letterboxes. Kept for that
+    // case; no behavioural test in this suite can observe it, so only the
+    // structural declaration-set assertion holds the line.
+    el.style.setProperty("max-width", ENLARGED_MAX_WIDTH, "important");
+    el.style.setProperty("max-height", ENLARGED_MAX_HEIGHT, "important");
     el.style.setProperty("width", "auto", "important");
     el.style.setProperty("height", "auto", "important");
     el.style.setProperty("object-fit", "contain", "important");
@@ -365,6 +463,10 @@
   if (typeof globalThis !== "undefined") {
     globalThis.__DEE__ = {
       MEDIA_URL_RE: MEDIA_URL_RE,
+      ENLARGED_MAX_VW: ENLARGED_MAX_VW,
+      ENLARGED_MAX_VH: ENLARGED_MAX_VH,
+      ENLARGED_MAX_WIDTH: ENLARGED_MAX_WIDTH,
+      ENLARGED_MAX_HEIGHT: ENLARGED_MAX_HEIGHT,
       isMediaElement: isMediaElement,
       findContainer: findContainer,
       findMessageContainer: findMessageContainer,
