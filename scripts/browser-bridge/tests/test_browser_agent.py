@@ -180,6 +180,15 @@ _FAKE_OC_SRC = r'''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
 
+# 🔴 RECORD EVERY INVOCATION WHEN A HOLD IS ARMED. This is what lets the test say
+# "the warm invoked X, the fake keys on Y" instead of blaming machine load when
+# the wrapper's warm argv and this fake's keying diverge. It observes the ACTUAL
+# argv, so it cannot be walked by a change of SPELLING.
+_argv_log = os.environ.get("FAKE_OC_DEBUG_MARKER")
+if _argv_log and os.environ.get("FAKE_OC_DEBUG_SLEEP"):
+    with open(_argv_log + ".argv", "a") as _f:
+        _f.write(json.dumps(argv) + "\n")
+
 # `opencode debug agent browser-agent` — the wrapper's fail-closed tool-set gate.
 # Answer with a resolved `tools` map (model-free); NEVER touch FAKE_OC_LOG /
 # FAKE_OC_ENV (those count/inspect only the real `run`). FAKE_OC_GATE_MODE drives
@@ -199,11 +208,17 @@ if argv[:2] == ["debug", "agent"]:
     # clock reset to ~0 with the lock already released — and a purely starved
     # run is then reported as a lock-ORDERING REGRESSION that did not happen.
     # MEASURED: a 3.5s stall produced exactly that false verdict.
-    # ⚠ An earlier revision ALSO claimed the unscoped fake made the hold be paid
-    # TWICE per run. That is FALSE: both signal tests kill the wrapper INSIDE the
-    # warm, so the tool-set gate never executes and no test ever paid a second
-    # sleep. Per test at hold 3: unscoped 3.32/3.19/3.14, scoped 3.10/3.09/3.15
-    # — indistinguishable. Scoping bought correctness, not runtime.
+    # ⚠ An earlier revision claimed the unscoped fake made the hold be paid TWICE
+    # per run, as though scoping bought runtime. It does not — but the reason
+    # must be stated per PATH, because an unqualified "the gate never runs"
+    # contradicts the paragraph above and would justify reverting this scoping:
+    #   * GREEN run  — the kill lands inside the warm, the gate never executes,
+    #     the hold is paid ONCE. Measured per test at hold 3: unscoped
+    #     3.32/3.19/3.14 vs scoped 3.10/3.09/3.15, indistinguishable.
+    #   * LOST window — the gate DOES run and DOES re-sleep (measured unscoped:
+    #     marker rewritten, delta ~3.05s at stalls 4/6/8/12s). That is the BUG
+    #     this scoping fixes, not a cost it removes.
+    # So: scoping bought correctness on the path this file exists for.
     _dbg = float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0")) if argv[2:3] == ["@@WARM_SUBCOMMAND@@"] else 0.0
     if _dbg:
         _mk = os.environ.get("FAKE_OC_DEBUG_MARKER")
@@ -1684,10 +1699,11 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
 # from ~6 s today — to save a retry that only executes when the box is already
 # starving. ⚠ An earlier revision read "~2x the hold … per run" off the PAIR
 # total. Re-measure per test, never off the suite line. ⚠ A SECOND correction
-# attached to that one was ALSO wrong: scoping the fake's hold to the warm did
-# not remove a sleep any test was paying — both signal tests kill the wrapper
-# inside the warm, so the gate never runs. Measured per test at hold 3: unscoped
-# 3.32/3.19/3.14 vs scoped 3.10/3.09/3.15.
+# attached to that one was ALSO wrong: scoping did not remove a sleep any GREEN
+# run was paying — the kill lands inside the warm, so the gate never executes
+# there. Measured per test at hold 3: unscoped 3.32/3.19/3.14 vs scoped
+# 3.10/3.09/3.15. ⚠ On a LOST window the gate does run and does re-sleep, so
+# "the gate never runs" is true only of the green path; see `_fake_opencode`.
 #
 # 🔴 THE RETRY IS NOT FLAKE-PAPERING — a lost window produces NO observation of
 # the handler at all, so retrying is what keeps a lost window from being reported
@@ -1716,7 +1732,7 @@ def _warm_window(proc, lock: Path, since_marker: float):
                                     killed its tool-set gate instead, so the
                                     `rc != 0` assertion PASSES for the wrong
                                     reason and proves nothing
-      > ~12 s        rc 0           the wrapper had already exited. It is a
+      > ~8 s         rc 0           the wrapper had already exited. It is a
                                     ZOMBIE, so `os.getpgid` still resolves and
                                     `killpg` still succeeds — the signal is
                                     discarded — and `proc.wait()` hands back the
@@ -1728,6 +1744,12 @@ def _warm_window(proc, lock: Path, since_marker: float):
     That third band is the reported `[INT]` split verdict: red under the suite's
     own `-n 4 --dist loadfile` on a loaded dev host, green alone, green in the
     nix sandbox — with no commit to the wrapper or this file in between.
+
+    ⚠ The third row originally read `> ~12 s`; re-measured against the unscoped
+    fake it is `~8 s` (rc 2 at 4s and 6s, rc 0 at 8s and 12s), so the boundary
+    quoted here IS re-derived rather than as-first-written — an earlier revision
+    annotated this table with "~8s" while leaving "~12 s" in the row above it,
+    handing the reader two values for one boundary ten lines apart.
 
     🔴 THE TABLE ABOVE IS THE ORIGINAL DIAGNOSIS, MEASURED AGAINST THE UNSCOPED
     FAKE — DO NOT RE-RUN IT EXPECTING THOSE BOUNDARIES. Since the hold was scoped
@@ -1780,34 +1802,79 @@ def _warm_window(proc, lock: Path, since_marker: float):
     return "ok", ""
 
 
-def test_the_fakes_warm_hold_is_keyed_to_the_argv_the_wrapper_ACTUALLY_USES():
-    """🔴 PINS A COUPLING, and it fails in a direction nothing else would catch.
+def _coupling_diagnosis(in_warm: Path) -> str:
+    """-> a diagnosis when the fake was INVOKED but never took the warm hold.
 
-    `_fake_opencode` holds the warm open only for `debug agent <_WARM_SUBCOMMAND>`,
-    so that the tool-set gate — which re-enters the same branch AFTER the lock is
-    released — cannot refresh the warm marker. That is correct only while the
-    WRAPPER's warm really is spelled that way.
+    🔴 THIS REPLACED A SPELLED GUARD, AND THE REPLACEMENT IS THE POINT. The
+    previous version grepped the wrapper's source for `debug agent <sub>` and
+    claimed in its own docstring to assert "the RELATIONSHIP (both sides)". It
+    did not — it read the wrapper and never looked at the fake — and an audit
+    walked it four ways with the hazard live: `--print-logs` inserted BEFORE
+    `debug` (so `argv[:2]` no longer matches while the substring still does), the
+    warm reflowed onto a continuation line while a stale COMMENT kept matching
+    the line selector, the template placeholder renamed so `.replace()` silently
+    no-ops, and the keying moved to a different argv slot. All four left the
+    guard green while the signal tests reported STARVED INSTRUMENT — i.e. a
+    WRAPPER CHANGE misattributed to machine load, which is the exact failure this
+    file exists to stop, with a guard saying it was covered.
 
-    MEASURED: change the wrapper's warm to `debug agent --pure build` and the
-    marker is never written, so `test_the_release_handler_EXITS_rather_than_resuming`
-    reports `STARVED INSTRUMENT` — a WRAPPER CHANGE misattributed to machine load,
-    which is the exact class this file exists to stop, and the misattribution is
-    silent because "the box was busy" is always available as an explanation.
-
-    Asserts the RELATIONSHIP (both sides), not one side: the wrapper must invoke
-    the warm with the subcommand the fake keys its hold on.
+    Observing the ACTUAL argv cannot be walked by spelling. If the fake ran at
+    all and never took the hold, the coupling is broken, whatever it looks like.
     """
-    src = WRAPPER.read_text()
-    warm = [ln for ln in src.splitlines() if "debug agent" in ln and "timeout" in ln]
-    assert warm, ("no `timeout … debug agent …` line in the wrapper — the warm "
-                  "invocation moved or changed shape, and the fake's hold "
-                  "(_WARM_SUBCOMMAND) is keyed to an argv that no longer exists")
-    assert all(f"debug agent {_WARM_SUBCOMMAND}" in ln for ln in warm), (
-        f"the wrapper's warm no longer invokes `debug agent {_WARM_SUBCOMMAND}`: "
-        f"{warm!r}\n🔴 `_fake_opencode` keys its hold on argv[2:3] == "
-        f"[{_WARM_SUBCOMMAND!r}], so the warm marker would never be written and "
-        f"the signal tests would report STARVED INSTRUMENT — reading a wrapper "
-        f"change as machine load. Update BOTH sides together.")
+    log = Path(str(in_warm) + ".argv")
+    try:
+        seen = [json.loads(ln) for ln in log.read_text().splitlines() if ln.strip()]
+    except (OSError, ValueError):
+        return ""
+    if in_warm.exists() or not seen:
+        return ""
+    return (f"\n🔴 THIS IS NOT MACHINE LOAD — THE FAKE/WRAPPER COUPLING IS BROKEN. "
+            f"The fake was invoked {len(seen)} time(s) and never took the warm "
+            f"hold, which it keys on `argv[:2] == ['debug', 'agent']` AND "
+            f"`argv[2:3] == [{_WARM_SUBCOMMAND!r}]`.\n  actual argv: {seen!r}\n  "
+            f"The wrapper's warm invocation and the fake's keying have diverged; "
+            f"fix them TOGETHER. Do not read the starvation wording below.")
+
+
+def test_the_fake_takes_the_warm_hold_ONLY_for_the_warm_argv(rig, tmp_path):
+    """🔴 BEHAVIOURAL, not spelled: runs the fake and observes what it DOES.
+
+    Pins both halves of the keying by exercising it — a `build` invocation must
+    take the hold and write the marker, and the tool-set gate's
+    `debug agent browser-agent` must NOT (that invocation happens AFTER the lock
+    is released, and a hold there resets the warm clock and manufactures a false
+    lock-ordering verdict).
+
+    Catches what the old source-grep could not: a renamed template placeholder
+    (`.replace()` no-ops, so the fake keys on a literal that can never match) and
+    a keying moved to the wrong argv slot. Both are invisible to any check that
+    reads the WRAPPER.
+    """
+    marker = tmp_path / "mk"
+    env = dict(os.environ, FAKE_OC_DEBUG_SLEEP="1", FAKE_OC_DEBUG_MARKER=str(marker))
+
+    t0 = time.monotonic()
+    subprocess.run([str(rig.opencode_bin), "debug", "agent", _WARM_SUBCOMMAND],
+                   env=env, capture_output=True, timeout=30)
+    warm_took = time.monotonic() - t0
+    assert marker.exists(), (
+        f"`debug agent {_WARM_SUBCOMMAND}` did not write the warm marker — the "
+        f"fake's hold is keyed to something this invocation does not match, so "
+        f"every signal test would report STARVED INSTRUMENT instead of testing "
+        f"the handler. (A renamed `@@` placeholder does exactly this silently.)")
+    assert warm_took >= 0.9, f"the warm hold was not taken ({warm_took:.2f}s)"
+
+    marker.unlink()
+    t0 = time.monotonic()
+    subprocess.run([str(rig.opencode_bin), "debug", "agent", "browser-agent"],
+                   env=env, capture_output=True, timeout=30)
+    gate_took = time.monotonic() - t0
+    assert not marker.exists(), (
+        "the tool-set gate's `debug agent browser-agent` took the warm hold and "
+        "rewrote the marker. That invocation runs AFTER `_oc_lock_release`, so it "
+        "resets the warm clock with the lock already gone — which is exactly how "
+        "a purely starved run got reported as a lock-ordering regression.")
+    assert gate_took < 0.9, f"the gate slept ({gate_took:.2f}s); the hold is not scoped"
 
 
 @pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "TERM"), (signal.SIGINT, "INT")],
@@ -1943,7 +2010,12 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                    if base > thresh else
                    "so the MACHINE looks idle — this is NOT explained by load, "
                    "and the window is being lost for some other reason")
+        # 🔴 ASK THE ARGV LOG FIRST. A broken fake/wrapper coupling produces the
+        # SAME observable as starvation — three attempts that never reach the
+        # warm — so reporting starvation without checking is the misattribution
+        # this whole file is about, one level up.
         pytest.fail(
+            _coupling_diagnosis(in_warm) +
             f"the {name} never landed inside the warm in "
             f"{_WARM_WINDOW_ATTEMPTS} attempts, so this run says NOTHING about "
             f"the handler — it is a STARVED INSTRUMENT, not a verdict on it.\n  "
