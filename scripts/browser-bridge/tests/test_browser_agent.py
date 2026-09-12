@@ -154,13 +154,29 @@ sys.exit(0)
 ''')
 
 
+# The subcommand the WARM uses (`opencode debug agent build`, under the lock).
+# 🔴 ONE NAME, TWO SIDES. The fake keys its hold on this so the tool-set gate —
+# which re-enters the same branch AFTER the lock is released — cannot refresh the
+# warm marker. That makes it a COUPLING to the wrapper's exact warm argv, and an
+# unpinned coupling here fails in the worst possible direction: change the
+# wrapper's warm to `debug agent --pure build` and the marker is never written,
+# so the test reports STARVED INSTRUMENT and a WRAPPER CHANGE is misattributed to
+# machine load — the exact class this file exists to stop. Pinned by
+# `test_the_fakes_warm_hold_is_keyed_to_the_argv_the_wrapper_ACTUALLY_USES`.
+_WARM_SUBCOMMAND = "build"
+
+
 def _fake_opencode(path: Path) -> Path:
     """A stand-in for `opencode`. Behaviour is driven by env FAKE_OC_MODE; every
     invocation appends a line (with whether `--continue` was present) to
     $FAKE_OC_LOG, and dumps the BROWSER_AGENT_* env it received to $FAKE_OC_ENV so
     tests can prove the wrapper forced the tab/instance/domain policy. It emits a
     REAL-shaped `--format json` JSONL stream on stdout."""
-    return _write_exec(path, r'''#!/usr/bin/env python3
+    return _write_exec(path, _FAKE_OC_SRC.replace(
+        "@@WARM_SUBCOMMAND@@", _WARM_SUBCOMMAND))
+
+
+_FAKE_OC_SRC = r'''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
 
@@ -182,10 +198,13 @@ if argv[:2] == ["debug", "agent"]:
     # "how long has the warm been running?" from the marker's mtime sees the
     # clock reset to ~0 with the lock already released — and a purely starved
     # run is then reported as a lock-ORDERING REGRESSION that did not happen.
-    # MEASURED: a 3.5s stall produced exactly that false verdict. It also made
-    # the hold be paid TWICE per wrapper run, which is where a "~2x the hold"
-    # cost reading came from.
-    _dbg = float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0")) if argv[2:3] == ["build"] else 0.0
+    # MEASURED: a 3.5s stall produced exactly that false verdict.
+    # ⚠ An earlier revision ALSO claimed the unscoped fake made the hold be paid
+    # TWICE per run. That is FALSE: both signal tests kill the wrapper INSIDE the
+    # warm, so the tool-set gate never executes and no test ever paid a second
+    # sleep. Per test at hold 3: unscoped 3.32/3.19/3.14, scoped 3.10/3.09/3.15
+    # — indistinguishable. Scoping bought correctness, not runtime.
+    _dbg = float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0")) if argv[2:3] == ["@@WARM_SUBCOMMAND@@"] else 0.0
     if _dbg:
         _mk = os.environ.get("FAKE_OC_DEBUG_MARKER")
         if _mk:                       # announce that we are INSIDE the warm...
@@ -291,7 +310,7 @@ if mode == "partial":
     emit_text(schema(status="partial")); sys.exit(0)
 # default: ok
 emit_text(schema()); sys.exit(0)
-''')
+'''
 
 
 # --------------------------------------------------------------------------- #
@@ -1663,10 +1682,12 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
 # hold 8 s -> 8.08 / 8.13 s. So the cost is ~1x the hold PER TEST and ~2x for the
 # parametrised pair; a 20 s hold would cost ~20 s per test, ~40 s per pair, up
 # from ~6 s today — to save a retry that only executes when the box is already
-# starving. ⚠ An earlier revision of this comment read "~2x the hold … per run"
-# off the PAIR total and was wrong twice over: it also predated scoping the
-# fake's hold to the warm, which removed a SECOND sleep the tool-set gate used
-# to pay. Re-measure per test, never off the suite line.
+# starving. ⚠ An earlier revision read "~2x the hold … per run" off the PAIR
+# total. Re-measure per test, never off the suite line. ⚠ A SECOND correction
+# attached to that one was ALSO wrong: scoping the fake's hold to the warm did
+# not remove a sleep any test was paying — both signal tests kill the wrapper
+# inside the warm, so the gate never runs. Measured per test at hold 3: unscoped
+# 3.32/3.19/3.14 vs scoped 3.10/3.09/3.15.
 #
 # 🔴 THE RETRY IS NOT FLAKE-PAPERING — a lost window produces NO observation of
 # the handler at all, so retrying is what keeps a lost window from being reported
@@ -1707,6 +1728,16 @@ def _warm_window(proc, lock: Path, since_marker: float):
     That third band is the reported `[INT]` split verdict: red under the suite's
     own `-n 4 --dist loadfile` on a loaded dev host, green alone, green in the
     nix sandbox — with no commit to the wrapper or this file in between.
+
+    🔴 THE TABLE ABOVE IS THE ORIGINAL DIAGNOSIS, MEASURED AGAINST THE UNSCOPED
+    FAKE — DO NOT RE-RUN IT EXPECTING THOSE BOUNDARIES. Since the hold was scoped
+    to the warm the tool-set gate no longer sleeps, so the wrapper leaves the warm
+    and exits almost at once and the middle `rc 2` band NO LONGER EXISTS.
+    Re-measured on this tree with this classifier bypassed: stall 2s -> rc
+    143/130; stall 4 / 6 / 8 / 12s -> rc 0. The zombie band therefore starts at
+    ~4s rather than ~8s — a NARROWER margin, which raises the stake on this
+    function rather than lowering it. Re-measure before re-tuning
+    `_WARM_WINDOW_SLACK_S`; do not read the boundaries off this comment.
     ⚠ What is established is that rc 0 is reachable ONLY through the zombie path,
     so the fix is correct whatever starved the run. WHICH upstream cause starved
     those particular runs was never identified, and this code does not claim it.
@@ -1747,6 +1778,36 @@ def _warm_window(proc, lock: Path, since_marker: float):
             f"the warm (state {state!r}), so the signal would hit a later stage, "
             f"not the handler under test")
     return "ok", ""
+
+
+def test_the_fakes_warm_hold_is_keyed_to_the_argv_the_wrapper_ACTUALLY_USES():
+    """🔴 PINS A COUPLING, and it fails in a direction nothing else would catch.
+
+    `_fake_opencode` holds the warm open only for `debug agent <_WARM_SUBCOMMAND>`,
+    so that the tool-set gate — which re-enters the same branch AFTER the lock is
+    released — cannot refresh the warm marker. That is correct only while the
+    WRAPPER's warm really is spelled that way.
+
+    MEASURED: change the wrapper's warm to `debug agent --pure build` and the
+    marker is never written, so `test_the_release_handler_EXITS_rather_than_resuming`
+    reports `STARVED INSTRUMENT` — a WRAPPER CHANGE misattributed to machine load,
+    which is the exact class this file exists to stop, and the misattribution is
+    silent because "the box was busy" is always available as an explanation.
+
+    Asserts the RELATIONSHIP (both sides), not one side: the wrapper must invoke
+    the warm with the subcommand the fake keys its hold on.
+    """
+    src = WRAPPER.read_text()
+    warm = [ln for ln in src.splitlines() if "debug agent" in ln and "timeout" in ln]
+    assert warm, ("no `timeout … debug agent …` line in the wrapper — the warm "
+                  "invocation moved or changed shape, and the fake's hold "
+                  "(_WARM_SUBCOMMAND) is keyed to an argv that no longer exists")
+    assert all(f"debug agent {_WARM_SUBCOMMAND}" in ln for ln in warm), (
+        f"the wrapper's warm no longer invokes `debug agent {_WARM_SUBCOMMAND}`: "
+        f"{warm!r}\n🔴 `_fake_opencode` keys its hold on argv[2:3] == "
+        f"[{_WARM_SUBCOMMAND!r}], so the warm marker would never be written and "
+        f"the signal tests would report STARVED INSTRUMENT — reading a wrapper "
+        f"change as machine load. Update BOTH sides together.")
 
 
 @pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "TERM"), (signal.SIGINT, "INT")],
@@ -1815,8 +1876,15 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
             # and DOES run under the lock, so this makes the window real rather
             # than asserted.
             try:
+                # 🔴 `stall_cap` is NOT decoration. `_await`'s default extends a
+                # stalled wait to RUN_HARD_CAP (900s), and this call now sits
+                # inside a 3-attempt loop — which took the pathological case to
+                # ~46 min per parametrisation on exactly the starving box the
+                # retry exists for, against a dev-host tier already observed
+                # hitting its own cap and producing no verdict at all.
                 _await(lambda: in_warm.exists(),
-                       what="the wrapper to enter the warm", slice_s=20.0, poll=0.02)
+                       what="the wrapper to enter the warm", slice_s=20.0,
+                       stall_cap=60.0, poll=0.02)
             except pytest.fail.Exception as exc:
                 # 🔴 A FOURTH STARVATION SHAPE, and it used to bypass this loop
                 # entirely. `_await` fails in its OWN wording — which probes the
