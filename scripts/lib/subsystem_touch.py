@@ -6098,6 +6098,26 @@ def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryErr
     affected += sorted({m.scope for m in theirs})
     lines.append("  RECOVER — fix the file(s) named above, then re-run this probe. Check with:")
     lines += [f"    {validate_command(store, s)}" for s in affected]
+    # 🔴 NAME THE REMEDY FOR THE COMMAND ITSELF FAILING. The whole point of this
+    # message is that a refusal must not be a dead end, and moving to a bare
+    # PATH-resolved command introduced one it did not have before: on a checkout
+    # whose host has not `home-manager switch`ed since the launcher was added,
+    # the line above exits 127 `command not found` and says nothing further. The
+    # sibling failure — the pin undeployed — is already exemplary, because
+    # `cairn_pin.ensure()` names both resolution routes and the fix; this closes
+    # the one that reaches the operator as a bare shell error instead.
+    # 🔴 AND IT SPELLS NO FLAG AND NO CHECKOUT PATH. A first draft of this line
+    # offered "or run the writer directly with `python3 <devrc>/scripts/lib/
+    # subsystem_touch.py --store … --scope … --validate`" as a fallback. That was
+    # wrong twice: it re-introduced the absolute-checkout spelling this whole
+    # change removes, and it spelled `--validate` inside this function, which
+    # `test_the_command_is_BUILT_not_typed` forbids precisely so a flag rename
+    # cannot stale the text here. The deploy IS the remedy; a fallback that
+    # routes around it is how the old spelling comes back.
+    lines.append(
+        "  If that exits 127 (`cairn-validate: command not found`), this host has not "
+        "deployed the launcher yet — `home-manager switch` this checkout and re-run it."
+    )
     return "\n".join(lines)
 
 

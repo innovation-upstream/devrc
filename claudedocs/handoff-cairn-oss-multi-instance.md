@@ -203,9 +203,19 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   `validate` re-implemented on the resolver instead of shelling a writer's `--validate`.
   Per-module changed-line counts: `host_identity` **113**, `subsystem_resolver` **40**,
   `subsystem_recall` **38**, `cairn_doctor` **21**, `subsystem_read_store` **4**.
-  devrc additionally has `scripts/lib/subsystem_touch.py` at **6,654 lines** — the whole
-  writer half — against the OSS `lib/entry_shape.py` at **264**, which holds only the shared
+  devrc additionally has `scripts/lib/subsystem_touch.py` — the whole writer half, an order of
+  magnitude larger — against the OSS `lib/entry_shape.py`, which holds only the shared
   vocabulary. devrc has **15** cairn/subsystem test files; OSS has **7**. via: measurement
+  🔴 **THE TWO RAW LINE COUNTS THAT USED TO BE HERE (`6,654` and `264`) ARE GONE ON PURPOSE —
+  BOTH WENT STALE, AND ONE OF THEM WAS STALED BY THIS DOC'S OWN PR.** Measured 2026-09-12:
+  `subsystem_touch.py` read **6,693** at that PR's first commit and **6,855** two commits later
+  (its own docstring edits), against a doc asserting 6,654; `entry_shape.py` is **330**, not 264.
+  A raw line count of a file under active edit restales within the same PR, it is the cross-round
+  class this ladder already names — true when written, falsified by a later commit, inside no
+  round's diff range — and **nothing asserts on either number, so no test can ever catch it**.
+  The ORDER-OF-MAGNITUDE claim is what the argument actually rests on and it is robust; if you
+  need the figures, derive them: `wc -l scripts/lib/subsystem_touch.py` and
+  `git -C ~/workspace/cairn show HEAD:lib/entry_shape.py | wc -l`. **Do not re-insert them.**
 - **Ruled out: that the fork is behavioural and therefore expensive to reconcile.** I read
   every module diff: **~90% is sanitisation prose** — docstrings rewriting `subsystem_touch`
   to "the writer half"/`entry_shape` and removing named hosts and dates. The only real
