@@ -6621,17 +6621,13 @@ def _colliding_blob_pair(bound: int = 20000) -> tuple[bytes, bytes, str]:
 #     leaves a rare draw silently changing what the test proves.
 # -----------------------------------------------------------------------------
 
-#: How many times `_remint_until_short_sha_is_UNIQUE` may amend HEAD. Each
-#: attempt is an independent ~1-in-585 draw, so the loop's own failure
-#: probability is under 1e-60 — orders of magnitude below anything else that can
-#: fail this suite. It is a bound on a search, not a retry-until-green.
+#: How many AMENDS `_remint_until_short_sha_is_UNIQUE` may make. It checks
+#: `_SHORT_SHA_REMINTS + 1` draws — the initial one plus the result of every
+#: amend — and each is an independent ~1-in-585 draw, so the search's own
+#: failure probability is under 1e-60: orders of magnitude below anything else
+#: that can fail this suite. A bound on a search, not a retry-until-green, and
+#: exhausting it RAISES rather than returning something unchecked.
 _SHORT_SHA_REMINTS = 24
-
-#: The sentinel `_assert_short_sha_is_UNIQUE` refuses with. DISTINCT from every
-#: production sentinel on purpose: an ambiguous FIXTURE and an ambiguous
-#: ARGUMENT are different findings, and the whole defect was the second reading
-#: being applied to the first.
-AMBIGUOUS_FIXTURE_SENTINEL = "FIXTURE PRECONDITION: short sha is AMBIGUOUS"
 
 
 def _object_names(repo: Path) -> list[str]:
@@ -6687,36 +6683,52 @@ def _write_object_colliding_with(repo: Path, prefix: str) -> str:
     return _run_git(repo, "hash-object", "-w", "--", "collision-scratch.txt").strip()
 
 
-def _assert_short_sha_is_UNIQUE(repo: Path, sha: str, chars: int = 3) -> None:
-    """Refuse, BY NAME, a fixture whose `chars`-hex prefix names >1 object."""
-    sharing = _objects_sharing_prefix(repo, sha[:chars])
-    if len(sharing) != 1:
-        raise AssertionError(
-            f"{AMBIGUOUS_FIXTURE_SENTINEL}: {sha[:chars]!r} names {len(sharing)} "
-            f"object(s) in {repo} ({', '.join(sharing) or 'none'}). A test feeding "
-            f"that prefix would die of `CommitAmbiguousError` BEFORE reaching the "
-            f"guard it exists to exercise, so a green run would prove nothing and a "
-            f"red one would name the wrong guard. Re-mint the fixture — do NOT "
-            f"lengthen the prefix, which is 3 precisely because 3 is below "
-            f"`COMMIT_SHA_MIN_CHARS`."
-        )
-
-
 def _remint_until_short_sha_is_UNIQUE(
     repo: Path, sha: str, *, chars: int = 3, attempts: int = _SHORT_SHA_REMINTS
 ) -> str:
-    """Amend HEAD's message until its `chars`-hex prefix names exactly one object.
+    """Amend HEAD until its `chars`-hex prefix names exactly ONE object, or RAISE.
+
+    🔴 IT CANNOT RETURN AN AMBIGUOUS SHA — that is the entire contract, and it is
+    why there is no separate precondition helper beside it. A function whose one
+    job is to GUARANTEE a property must not own a path that returns without it,
+    and the earlier shape had exactly that: it fell through to a silent
+    `return sha` on exhaustion, with six call sites not asserting afterwards.
+    Collapsing the assert INTO the search is what makes the guarantee
+    unforgettable rather than merely available.
+
+    🔴 `attempts` bounds the AMENDS; `attempts + 1` DRAWS are checked — the
+    initial one, plus the result of every amend, THE LAST ONE INCLUDED. A loop
+    that amends and then returns without re-checking verifies at most `attempts`
+    draws and hands back the final one unexamined; that one unchecked draw is
+    precisely the hole the separate precondition call used to cover, so removing
+    the call without adding the post-loop check would have LOST a property while
+    looking like a simplification.
 
     Amending rewrites the COMMIT object only: the tree and the parent are
     carried over untouched, so the commit's DIFF — the thing every caller here
-    asserts on — cannot move. Returns the (possibly new) full sha.
+    asserts on — cannot move.
     """
     for i in range(attempts):
         if len(_objects_sharing_prefix(repo, sha[:chars])) == 1:
             return sha
         _run_git(repo, "commit", "--amend", "-m", f"w (re-mint {i})")
         sha = _run_git(repo, "rev-parse", "HEAD").strip()
-    return sha
+    # 🔴 THE LAST DRAW, CHECKED. See the second paragraph above: without this the
+    # final amend's result is returned unexamined and the contract is false for
+    # one draw in `attempts + 1`. Pinned by
+    # `test_the_LAST_draw_is_checked_and_the_amends_are_BOUNDED`.
+    sharing = _objects_sharing_prefix(repo, sha[:chars])
+    if len(sharing) == 1:
+        return sha
+    raise AssertionError(
+        f"FIXTURE PRECONDITION: short sha is AMBIGUOUS after {attempts} re-mint(s): "
+        f"{sha[:chars]!r} names {len(sharing)} object(s) in {repo} "
+        f"({', '.join(sharing) or 'none'}). A test feeding that prefix would die of "
+        f"`CommitAmbiguousError` BEFORE reaching the guard it exists to exercise, so "
+        f"a green run would prove nothing and a red one would name the wrong guard. "
+        f"Do NOT lengthen the prefix — it is 3 precisely because 3 is below "
+        f"`COMMIT_SHA_MIN_CHARS`."
+    )
 
 
 def _repo_with_unique_short_sha(
@@ -6727,12 +6739,14 @@ def _repo_with_unique_short_sha(
     The one construction every short-prefix test in this file goes through —
     `claude/RULES.md` "one rule, one place": the same latent ambiguity sat
     open-coded at three sites, and only one of them had ever been seen to fire.
+
+    There is no precondition call after the re-mint because there is nothing
+    left to check: `_remint_until_short_sha_is_UNIQUE` raises rather than
+    returning an ambiguous sha, so reaching this `return` IS the guarantee.
     """
     repo = _init_repo(tmp_path, SCOPE)
     sha = _commit(repo, *rel)
-    sha = _remint_until_short_sha_is_UNIQUE(repo, sha, chars=chars)
-    _assert_short_sha_is_UNIQUE(repo, sha, chars=chars)
-    return repo, sha
+    return repo, _remint_until_short_sha_is_UNIQUE(repo, sha, chars=chars)
 
 
 class TestShortShaFixturePrecondition:
@@ -6746,58 +6760,115 @@ class TestShortShaFixturePrecondition:
 
     def test_the_COLLISION_fixture_really_DOES_collide(self, tmp_path: Path) -> None:
         """🔴 POSITIVE CONTROL on the instrument. `_objects_sharing_prefix`
-        returning a reassuring 1 is indistinguishable from a reader wired to
-        nothing, so it is shown to MOVE: 1 before the colliding object exists, 2
-        after, on the same repo and the same prefix."""
+        returning a reassuring count is indistinguishable from a reader wired to
+        nothing, so it is shown to MOVE — by exactly one — when a colliding
+        object is added to the same repo under the same prefix.
+
+        🔴 DELIBERATELY NO `_remint_...` CALL, and asserted as a DELTA rather
+        than against absolute values. Both choices exist so a broken ORACLE dies
+        HERE, on this test's own assertion. Calling the re-mint first would make
+        a broken oracle raise before the control ever ran, and the mutant would
+        then be killed by the raise — a guard that kills everything distinguishes
+        nothing. The delta is also what removes this test's OWN residual 1-in-585
+        dependency: it holds whether or not the prefix already collided."""
         repo = _init_repo(tmp_path, SCOPE)
         sha = _commit(repo, "src/collector/a.py")
-        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
-        assert len(_objects_sharing_prefix(repo, sha[:3])) == 1
+        before = _objects_sharing_prefix(repo, sha[:3])
+        assert sha in before, "the commit must answer to its own prefix"
         other = _write_object_colliding_with(repo, sha[:3])
         assert other != sha
-        assert sorted(_objects_sharing_prefix(repo, sha[:3])) == sorted([other, sha])
+        after = _objects_sharing_prefix(repo, sha[:3])
+        assert len(after) == len(before) + 1, (before, after)
+        assert other in after and sha in after, (other, after)
 
     def test_the_two_object_oracles_AGREE(self, tmp_path: Path) -> None:
-        """🔴 THE SEAM. The precondition reads `cat-file --batch-all-objects`;
-        production counts candidates with `rev-parse --disambiguate`. A
-        precondition NARROWER than the call it protects would certify a fixture
-        that still flakes, and nothing else in this file would notice."""
+        """🔴 THE SEAM. This file's precondition reads
+        `cat-file --batch-all-objects`; production counts candidates with
+        `rev-parse --disambiguate`. An oracle NARROWER than the call it protects
+        would certify a fixture that still flakes, and nothing else here would
+        notice.
+
+        Same two choices as the control above, for the same reason: no re-mint
+        call, and no assertion on an absolute count — so a narrowed oracle dies
+        on the set comparison rather than on the re-mint's raise."""
         repo = _init_repo(tmp_path, SCOPE)
         sha = _commit(repo, "src/collector/a.py")
-        sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
-        _write_object_colliding_with(repo, sha[:3])
+        other = _write_object_colliding_with(repo, sha[:3])
         mine = sorted(_objects_sharing_prefix(repo, sha[:3]))
         gits = sorted(_run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split())
-        assert len(mine) == 2, mine
         assert mine == gits, (mine, gits)
+        # Non-vacuous by construction: the commit and the forced object both
+        # answer to this prefix, so the agreed set cannot be the empty one.
+        assert {sha, other} <= set(mine), (sha, other, mine)
 
-    def test_the_PRECONDITION_refuses_an_ambiguous_fixture_BY_NAME(
+    def test_the_REMINT_RAISES_rather_than_returning_an_AMBIGUOUS_sha(
         self, tmp_path: Path
     ) -> None:
-        """The guard itself, reached with NOTHING able to win ahead of it: the
-        repo is well-formed, the sha is a real 40-hex commit, and the ONLY thing
-        wrong is the ambiguity — so the refusal can be attributed to this guard
-        and to no neighbour."""
+        """🔴 THE CONTRACT. `attempts=0` makes the post-loop check the ONLY code
+        that can run, so the refusal is attributable to it and to no neighbour:
+        the repo is well-formed, the sha is a real 40-hex commit, and the single
+        thing wrong is the ambiguity.
+
+        This also proves the post-loop check is REACHABLE with zero amends —
+        nothing earlier can win, because there is nothing earlier."""
         repo = _init_repo(tmp_path, SCOPE)
         sha = _commit(repo, "src/collector/a.py")
         sha = _remint_until_short_sha_is_UNIQUE(repo, sha)
         _write_object_colliding_with(repo, sha[:3])
         with pytest.raises(AssertionError) as exc:
-            _assert_short_sha_is_UNIQUE(repo, sha)
-        # 🔴 THE LITERAL, not `AMBIGUOUS_FIXTURE_SENTINEL`. Asserting the
-        # constant against a message built from that same constant is an
-        # expectation derived from the implementation — `claude/RULES.md` — and
-        # a mutation sweep proved it: rewriting the constant left this test
-        # GREEN. The literal is what makes the wording a pinned contract.
+            _remint_until_short_sha_is_UNIQUE(repo, sha, attempts=0)
+        # 🔴 THE LITERAL, never a constant the message is also built from.
+        # Asserting a shared constant against itself is an expectation derived
+        # from the implementation (`claude/RULES.md`), and a mutation sweep
+        # proved it here: rewording the old constant left this test GREEN. Two
+        # independent spellings is what makes the wording a pinned contract.
         assert "FIXTURE PRECONDITION: short sha is AMBIGUOUS" in str(exc.value)
-        assert AMBIGUOUS_FIXTURE_SENTINEL == "FIXTURE PRECONDITION: short sha is AMBIGUOUS"
         assert "names 2 object(s)" in str(exc.value)
+        assert "after 0 re-mint(s)" in str(exc.value)
 
-    def test_the_PRECONDITION_is_SILENT_on_a_clean_fixture(self, tmp_path: Path) -> None:
-        """The other half of the pair: a guard that refused everything would pass
-        the test above while making every fixture unusable."""
+    def test_the_REMINT_returns_a_clean_fixture_UNCHANGED(self, tmp_path: Path) -> None:
+        """The other half of the pair: a search that refused everything, or that
+        amended a fixture needing no amendment, would satisfy the test above
+        while making every fixture unusable or its sha unstable."""
         repo, sha = _repo_with_unique_short_sha(tmp_path, "src/collector/a.py")
-        _assert_short_sha_is_UNIQUE(repo, sha)  # must not raise
+        assert _remint_until_short_sha_is_UNIQUE(repo, sha) == sha
+        assert _run_git(repo, "rev-parse", "HEAD").strip() == sha
+
+    def test_the_LAST_draw_is_checked_and_the_amends_are_BOUNDED(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 THE STRUCTURAL PIN, and the property the collapse would otherwise
+        have LOST. `attempts` bounds the AMENDS while `attempts + 1` DRAWS are
+        checked — so the result of the FINAL amend is examined rather than
+        returned unseen.
+
+        Counted rather than reasoned about: the oracle is replaced with one that
+        always reports ambiguity, so the search must exhaust. With `attempts=3`
+        it must consult the oracle FOUR times (three inside the loop, one after)
+        and amend exactly THREE times. A loop missing the post-loop check
+        consults it three times and returns the third amend's sha unchecked."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        calls: list[str] = []
+
+        def _always_ambiguous(r: Path, prefix: str) -> list[str]:
+            calls.append(prefix)
+            return ["deadbeef" * 5, "cafebabe" * 5]
+
+        monkeypatch.setattr(
+            sys.modules[__name__], "_objects_sharing_prefix", _always_ambiguous
+        )
+        objects_before = len(_object_names(repo))
+        with pytest.raises(AssertionError) as exc:
+            _remint_until_short_sha_is_UNIQUE(repo, sha, attempts=3)
+
+        assert len(calls) == 4, f"checked {len(calls)} draws, expected attempts+1=4"
+        # Each amend ORPHANS the commit it replaced, so the object database grows
+        # by exactly one per amend — an amend count that does not depend on the
+        # function reporting its own work.
+        assert len(_object_names(repo)) - objects_before == 3, "expected 3 amends"
+        assert "after 3 re-mint(s)" in str(exc.value)
+        assert "FIXTURE PRECONDITION: short sha is AMBIGUOUS" in str(exc.value)
 
     def test_the_REMINT_CONVERGES_from_a_forced_collision(self, tmp_path: Path) -> None:
         """🔴 THE REGRESSION TEST. Pre-fix there was no re-mint, so this repo —
@@ -6816,12 +6887,12 @@ class TestShortShaFixturePrecondition:
         # PRE-FIX STATE, asserted rather than assumed: git really does refuse.
         with pytest.raises(st.CommitAmbiguousError):
             st.collect_commit_paths(repo, [sha[:4]])
+        # 🔴 A re-mint that did nothing now RAISES here rather than returning an
+        # ambiguous sha for a later line to catch — which is what makes the guard
+        # REACHABLE-in-fact rather than merely present, and why this call is bare
+        # instead of being followed by a separate precondition assertion.
         reminted = _remint_until_short_sha_is_UNIQUE(repo, sha)
-        # 🔴 THE PRECONDITION FIRST, on purpose: a re-mint that did nothing must
-        # die of THIS guard's own sentinel, which is what makes the guard
-        # REACHABLE-in-fact rather than merely present. `reminted != sha` would
-        # fail first and attribute the breakage to a different claim.
-        _assert_short_sha_is_UNIQUE(repo, reminted)
+        assert len(_objects_sharing_prefix(repo, reminted[:3])) == 1
         assert reminted != sha
         assert st.collect_commit_paths(repo, [reminted[:4]]).commits == (reminted,)
 
