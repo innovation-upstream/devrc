@@ -33,13 +33,13 @@ its own weight, so the target is achievable and is not in dispute.
 This file did not, and said so: it sat 524 B over that bar, pinned by a ceiling of
 13,056. A further pass demoted the budget rationale and §3's classification
 sub-rules into two more sidecars (`budgets-and-scope.md`,
-`classification-rules.md`); it sits at 11,841 B (11.56 KiB) now, inside the shared
+`classification-rules.md`); it sits at 11,781 B (11.50 KiB) now, inside the shared
 12,038 B enforced budget for the first time. MAX_BYTES is therefore lowered to the
-TARGET itself (11,841 against 12,288; the margin is 447 B), which is the direction
+TARGET itself (11,781 against 12,288; the margin is 507 B), which is the direction
 of travel this docstring already named as intended.
 
-The binding limit is devrc's shared enforced budget, not this ceiling: 11,841
-against a 12,038 B effective floor, so there are 197 B of real room. This module
+The binding limit is devrc's shared enforced budget, not this ceiling: 11,781
+against a 12,038 B effective floor, so there are 257 B of real room. This module
 keeps no second floor of its own — devrc's budget is already ceiling minus a 250 B
 margin, so a further margin beneath it would warn before the warning, and every
 value tried for one was wrong in one direction or the other. That is the same
@@ -77,9 +77,9 @@ import pytest
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
 # NOT a derivation -- a measured position, now equal to the 12,288 B target
-# rather than above it. SKILL.md is 11,841 B (`stat -c %s` and `git cat-file -s`
-# agree), so 12,288 leaves 447 B of headroom -- but the CEILING is not what binds.
-# devrc's shared budget (12,038) is smaller, so the room that matters is 197 B of
+# rather than above it. SKILL.md is 11,781 B (`stat -c %s` and `git cat-file -s`
+# agree), so 12,288 leaves 507 B of headroom -- but the CEILING is not what binds.
+# devrc's shared budget (12,038) is smaller, so the room that matters is 257 B of
 # true working room. MIN_HEADROOM_BYTES (192) no longer defines a second floor
 # below that (see test_this_modules_floor_is_no_weaker_than_the_shared_one); it
 # survives only as the sizing rationale below.

@@ -1143,7 +1143,25 @@ class TestTheOwnersMechanismProseIsPinnedWHOLE:
     # satisfiable for only one of the two callers, measured 0 occurrences of
     # `policy:` in `service_recon.py` on 2026-09-10. Naming both binaries is what
     # makes one protocol executable by both, not an exception added to it.
-    EXPECTED_SHA = "ddc10688edc72f6fce8ee2c6f654b5f6d5e06748ab8ee247016b2470abcae973"
+    #
+    # Updated 2026-09-12 for the absolute-checkout-path gate
+    # (`scripts/tests/test_absolute_handle_paths.py`). What moved: NOTHING in the
+    # protocol. Four command lines inside the selected paragraphs swapped the
+    # spelled-out `/home/zach/workspace/devrc` for the `$DEVRC` handle that
+    # `nix/agent-handles.nix` already exports into every agent shell — the same
+    # binary, the same flags, the same order. Paragraph COUNT unchanged at 7; the
+    # diff is `git diff` -verified to be four one-token substitutions and nothing
+    # else.
+    #
+    # 🔴 Both doors re-read before this hash was pasted, which is what the failure
+    # message demands. `claude/skills/analyze-service/reference/write-back.md` is
+    # UNCHANGED by that commit (`git diff --stat` over
+    # `claude/skills/analyze-service/` is empty), so its own region hash is
+    # untouched, it still routes to the owner at step 4 and still states no
+    # mechanism of its own. And this is the OPPOSITE of a carve-out: a handle
+    # resolves identically for `/handoff` and `/analyze-service`, whereas the
+    # literal it replaced was correct for exactly one home directory.
+    EXPECTED_SHA = "547dea481bfeacd578464529de9f0c7252b4c790263da7499b47b791f773ec98"
 
     @staticmethod
     def _digest(owner: str) -> tuple[str, list[str]]:
