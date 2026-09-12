@@ -322,6 +322,23 @@ workbench working tree where a `git checkout` would have deleted them unreported
   wrong — a delimiter class that excluded the character it was meant to include, and a filter
   running on output that never matched.
 
+- 🔴 **"No claims held" in a handoff is a CLAIM, and mine was false when it landed.** The
+  closing doc (merged `cac71625`) asserted it while `journald-26-11-migration-2` was still
+  held; `claim-work --list` immediately after the merge showed it, and it was released only
+  then. Nothing broke — the claim was mine and the work was done — but a `/resume` session
+  reading that line would have believed rank 2 was free while a live claim said otherwise,
+  which is the exact thing the lock exists to prevent. **Run `claim-work --list` while writing
+  the line, not from memory of having released something.** Worth one line because this is the
+  arc's own thesis — a claim nothing checks — reproduced in the document that closes it, after
+  nine rounds spent on precisely that failure. The doc is accurate now.
+- **Session cleanup, for the record:** the eleven worktrees this arc created
+  (`devrc-diagfix`, `devrc-handoff2`, `devrc-hand3`, `devrc-r2fix`, `devrc-r3fix`,
+  `devrc-r4fix`, `devrc-sweep`, `devrc-r6`, `devrc-r8`, `devrc-r9`, `devrc-close`) were removed
+  after their PRs merged, each checked for a live process and a dirty tree first. ⚠ Two
+  worktrees whose names START with `devrc-close` remain and are **other sessions'**
+  (`zach/handoff-closeout`, `docs/handoff-cairn-arc-closeout`) — a cleanup pattern matching
+  `close` hits `closeout` as a prefix. Match the full name.
+
 ## How to verify
 ```bash
 # the suite that carries both ledgers (expect 231 ok / 0 FAIL / rc 0)
