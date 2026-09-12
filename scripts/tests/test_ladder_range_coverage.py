@@ -481,6 +481,131 @@ def test_the_commit_count_beside_the_lines_is_the_CHURN_population(lrc, ad,
     )
 
 
+# --------------------------------------------------------------------------- #
+# The gap-commit census — self-declared round references
+# --------------------------------------------------------------------------- #
+
+# 🔴 A TWO-WAY LEDGER OF REAL SUBJECTS, not invented ones. Every positive is a
+# commit subject that actually appeared in a measured tail gap (devrc,
+# homelab-talos, civit-datapacket-talos, 2026-09-11) plus `audit-dispatch.py`'s
+# own dispatch wording. Every negative is a real subject from the SAME gaps that
+# must NOT match — including two that a looser pattern would catch
+# (`re-trigger`, `widen the … guard`) and one that names a rule number.
+_ROUND_REF_POSITIVES = [
+    "fix(telemetry,find-session): audit round 5 — the retraction never reached the code",
+    "fix(audit r3): parse the packet length by index(), not regex — and END the ladder",
+    "fix(comic-flex): audit round 3 — retract a second wrong reason",
+    "ci(vetr): close the round-2 audit — F1's shape repeated ONE LAYER DOWN",
+    "docs(external-ip-source-drift): round-3 audit — three numbers this ladder staled",
+    "fix(autoremix): audit round 9 — pin the word 'unconditionally'",
+    "docs(alerts): audit round 5 drive-by — rule 1's selector needs ONE conjunct",
+    "Delta re-audit round 4 of PR 900",
+]
+_ROUND_REF_NEGATIVES = [
+    "fix(handoff_doc): rule (i) SHADOWED the stale-base refusal in every realistic repo",
+    "merge: main into fix/handoff-doc-absent-base-refusal",
+    "feat(find-session): search the OTHER hosts' Claude corpora",
+    "docs(clawgate): two seam-guard comments claimed more than the code does",
+    "chore(ci): re-trigger — devrc-pytests returned a false red under load",
+    "test(gate): widen the conditional-pin guard to its docstring — all, not any",
+]
+
+
+def test_the_round_reference_pattern_is_pinned_BOTH_ways(lrc):
+    """🔴 The instrument validation, and both halves are mandatory.
+
+    A pattern that matches nothing makes the census report a reassuring ZERO
+    round references — indistinguishable from a corpus with none. A pattern that
+    matches too much turns every `fix(...)` into self-declared audit surface and
+    inflates the one number this tool is willing to assert.
+
+    Measured: 8 of 8 positives, 0 of 6 false positives. These are the subjects
+    the hand classification read, so agreement here is agreement with a human
+    pass over the same commits.
+    """
+    missed = [s for s in _ROUND_REF_POSITIVES if not lrc._ROUND_REF_RE.search(s)]
+    assert not missed, f"the pattern cannot see a real round reference: {missed}"
+    false_pos = [s for s in _ROUND_REF_NEGATIVES if lrc._ROUND_REF_RE.search(s)]
+    assert not false_pos, f"the pattern over-matches: {false_pos}"
+
+
+def test_the_gap_commit_listing_EXCLUDES_the_base(lrc, ad, base_repo):
+    """🔴 Omitting `--not <base>` inverts the conclusion, so it is asserted.
+
+    MEASURED: listing devrc #1046's tail without it showed 55 of `main`'s own
+    squash commits, which reads exactly like "the PR kept developing" — the
+    hypothesis under test, confirmed by commits that contribute no churn at all.
+    Here the fixture puts THREE base commits in the range and one branch commit;
+    the listing must return the branch commit (plus the merge), never the three.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 6, "round 1 fix")
+    _git(repo, "checkout", "--quiet", "main")
+    for i in range(3):
+        _commit(repo, f"up{i}.py", 4, f"upstream {i} — MUST NOT be listed")
+    _git(repo, "checkout", "--quiet", "feat")
+    _git(repo, "merge", "--quiet", "--no-edit", "main")
+    head = _commit(repo, "mine.py", 3, "fix(thing): audit round 7 — the real one")
+
+    commits, why = lrc.classify_gap_commits(
+        lrc.real_runner, str(repo), r1_to, head, "main")
+
+    assert why is None, why
+    subjects = [c.subject for c in commits]
+    assert not [s for s in subjects if "MUST NOT be listed" in s], subjects
+    assert any(c.round_ref for c in commits), subjects
+    assert any(c.is_merge for c in commits), "the merge belongs to the population"
+    assert base and ad
+
+
+def test_a_gap_whose_commits_cannot_be_LISTED_says_so(lrc, ad, base_repo):
+    """🔴 A listing failure must not read as "a gap with zero round references".
+
+    Same rule as the churn refusal: an empty result and a broken command are the
+    same observable, so the broken one has to name itself.
+    """
+    repo, _base = base_repo
+    commits, why = lrc.classify_gap_commits(
+        lrc.real_runner, str(repo), "no-such-ref", "HEAD", "main")
+    assert commits == []
+    assert why and "exited" in why
+
+    # …and the reason must survive into the rendered report.
+    fake = lrc.Adjacency(
+        lrc.GAP, "a" * 40, "b" * 40, 1, None, 5, 0, 1, None,
+        [lrc.GapCommit("", [], "COULD NOT LIST: boom", False, False)])
+    L = lrc.Ladder(1, "b" * 40, "main", 1, 1, 1, [fake], 10, 5, 0,
+                   (0, 0), (5, 0), None, [], [])
+    rendered = lrc.render([L], [])
+    assert "COULD NOT LIST: boom" in rendered
+    assert ad
+
+
+def test_the_census_does_NOT_call_the_remainder_development(lrc, ad, base_repo):
+    """🔴 The honesty clause, asserted rather than trusted.
+
+    The whole point of reporting only self-declared and structural buckets is
+    that the leftover is UNKNOWN. A census that labelled it "development" would
+    be the guess-dressed-as-measurement this tool was written to replace — and it
+    would invert the finding, since the hand pass found 20 fixes among 32 while
+    only 8 declared a round.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 6, "round 1 fix")
+    head = _commit(repo, "b.py", 4, "fix(thing): something with no round named")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 12, head, "main",
+                           [_block(1, base, r1_to)])
+    rendered = lrc.render([L], [])
+
+    assert "GAP-COMMIT CENSUS" in rendered
+    assert "unclassified   1" in rendered
+    assert "NOT 'ordinary development'" in rendered
+    assert "FLOOR ON MISSED AUDIT SURFACE, NEVER A RATE" in rendered
+    # the un-declared commit must NOT be counted as a round reference
+    assert "ROUND-REF     0" in rendered
+
+
 def test_measure_range_churn_does_NOT_refuse_an_empty_range(ad, base_repo):
     """The inverted read rule, asserted directly.
 

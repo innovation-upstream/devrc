@@ -81,18 +81,17 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED. The floor catches COLLAPSE, not growth; `run-tests.sh`'s own
-# formula is `m - min(50, max(1, m/20))`, which at m=20 is 19.
-# 🔴 IT FIRED TWICE BEFORE THIS FILE WAS EVEN MERGED, which is the whole argument:
-# the module grew 18 → 19 (pin said 17, failed with `should be 18, not 17`), then
-# 19 → 20 one commit later (pin said 18, failed with `should be 19, not 18`).
-# Neither growth was a refactor — each was a single test added while fixing
-# something — and a hand-maintained floor would have silently tolerated both.
+# formula is `m - min(50, max(1, m/20))`, which at m=25 is 24.
+# 🔴 IT HAS NOW FIRED FOUR TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
+# 17), 19→20, 20→21, 21→25. Not one was a refactor — each was tests added while
+# fixing something — and a hand-maintained floor would have silently tolerated
+# every one of them, widening from one test of slack to five.
 # 🔴 DO NOT maintain this by memory — `test_ladder_range_coverage.py::
 # test_the_batterys_floor_is_re_derived_from_this_modules_size` reads the literal
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=20
+MIN_TESTS=24
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -227,6 +226,44 @@ run "the churn-population count is never computed" \
     test_the_commit_count_beside_the_lines_is_the_CHURN_population "$DISP" \
     '        churn_commits = int(out2.strip())' \
     '        churn_commits = int(out.strip())'
+
+# 🔴 The census asserts exactly ONE number (self-declared round references) and
+# declines the rest. Both halves are mutable into a lie: a dead pattern reports a
+# reassuring zero, and a greedy one turns every fix into self-declared surface.
+run "the round-reference pattern matches NOTHING" \
+    test_the_round_reference_pattern_is_pinned_BOTH_ways "$LRC" \
+    '_ROUND_REF_RE = re.compile(' \
+    '_ROUND_REF_RE = re.compile("(?!x)x") or re.compile('
+
+run "the gap listing stops excluding the base" \
+    test_the_gap_commit_listing_EXCLUDES_the_base "$LRC" \
+    '        f"{frm}..{to}", "--not", base,' \
+    '        f"{frm}..{to}",'
+
+# 🔴 THE MUTANT MUST REMOVE THE REASON, NOT REWORD IT. My first version swapped
+# the message for a different string that still contained "exited", so the guard
+# could not see it and the row SURVIVED — a mutant that proves nothing, caught
+# only because the row was expected to die. Mutate the narrowest thing that can
+# actually be wrong: the reason itself going None, which is the hazard.
+# 🔴 THE MUTANT MUST REMOVE THE REASON, NOT REWORD IT. My first version swapped
+# the message for a different string that still contained "exited", so the guard
+# could not see it and the row SURVIVED — a mutant proving nothing, caught only
+# because the row was expected to die. And the second version tried to replace a
+# two-line f-string, whose embedded quotes broke the DRIVER's own shell parsing.
+# Mutate the narrowest thing that can actually be wrong and needs no quoting:
+# the rc check itself, so a failed git call falls through to an empty listing
+# with NO reason — which is the hazard.
+run "a listing failure is swallowed as zero round-refs" \
+    test_a_gap_whose_commits_cannot_be_LISTED_says_so "$LRC" \
+    '    if rc != 0:
+        return [], (f"`git log' \
+    '    if False:
+        return [], (f"`git log'
+
+run "the census calls its remainder development" \
+    test_the_census_does_NOT_call_the_remainder_development "$LRC" \
+    "unclassified   {rest} — 🔴 NOT 'ordinary development'. This " \
+    "unclassified   {rest} — ordinary development. This "
 
 echo
 echo "== the labels that must NOT become a sized GAP =="
