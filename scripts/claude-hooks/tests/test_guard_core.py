@@ -144,6 +144,19 @@ CLAUDE_CODE_EXPECTED = [
     # "two real uses" count over a tree that held four. It is DERIVED by
     # test_every_kill_server_call_site_in_the_repo_is_classified below.
     "check_tmux_kill_shared_server",
+    # 🔴 The SIXTEENTH check, added 2026-09-11 — and added because the
+    # FIFTEENTH turned out to be a paper guard. The operator's tmux server died
+    # TWICE that night, 52 and 53 live conversations, AFTER the check above was
+    # deployed and working: both times an agent wrote `tmux kill-server` into a
+    # scratch .sh and ran `bash <file>`, and this hook gates the Bash-tool TEXT,
+    # which contained only the wrapper. Proven with a control pair — the inline
+    # spelling denies, the identical bytes in a file allowed at rc 0.
+    # It runs IMMEDIATELY after the check it backstops because it is the same
+    # finding reached through a file. Scope is deliberately ONE check over file
+    # contents, not the whole policy: running the policy over file bodies denies
+    # `ship.sh` and `drift-check.sh` (measured, 2 of 103), which would be a
+    # permanently-red gate on the deploy command itself.
+    "check_executed_script_file",
     "check_heredoc_to_file",
     "check_cd_then_git",
     "check_private_key",
@@ -2053,10 +2066,22 @@ def test_commit_to_main_is_inherited_by_the_opencode_policy(tmp_path):
 def test_evaluate_passes_cwd_only_to_checks_that_want_it(tmp_path):
     """The dispatch is the seam between `evaluate` and a world-reading check. If
     it silently stopped passing cwd, the guard would fall back to the hook
-    process's own directory and quietly report on the wrong repo."""
-    assert gc.check_git_commit_to_main.wants_cwd is True
-    others = [c for c in gc.POLICIES["opencode"] if c is not gc.check_git_commit_to_main]
-    assert not any(getattr(c, "wants_cwd", False) for c in others)
+    process's own directory and quietly report on the wrong repo.
+
+    🔴 TWO checks read the world now, not one. `check_executed_script_file`
+    (2026-09-11) resolves a RELATIVE script path against the command's cwd, so
+    the same failure mode applies to it exactly: fall back to the hook process's
+    own directory and it reads a different file than the one about to run — and
+    then either misses a kill or denies on an unrelated file's contents.
+
+    Pinned as an exact SET rather than a per-check assertion, so a third
+    world-reading check cannot join the policy without this ledger saying so.
+    """
+    want_cwd = {c.__name__ for c in gc.POLICIES["opencode"]
+                if getattr(c, "wants_cwd", False)}
+    assert want_cwd == {"check_git_commit_to_main", "check_executed_script_file"}, (
+        f"the set of cwd-taking checks is {sorted(want_cwd)}. Adding one is a "
+        "check that reads the world on every Bash call — say so in the PR body.")
 
 
 def test_evaluate_without_cwd_falls_back_and_does_not_raise():
@@ -4477,3 +4502,278 @@ def test_positive_a_sourced_env_file_supplies_the_worktree_path(tmp_path):
     assert gc.check_git_commit_to_main(
         f'. {env}\ngit -C "$WT" commit -q -F - <<\'MSG\'\ndocs: a message\nMSG',
         str(repo)) is None
+
+
+# =========================================================================== #
+# 16. 🔴 check_executed_script_file — the bypass that made check 15 a paper guard
+#
+# 2026-09-11: the operator's tmux server died TWICE in one night, 52 and 53 live
+# Claude conversations, with `check_tmux_kill_shared_server` deployed and
+# correct throughout. Both were the same shape — Write the kill into a scratch
+# .sh, then `bash <file>` — and the hook gates Bash-tool TEXT, which held only
+# the wrapper.
+#
+# Attribution is not "it happened around then": exec-to-first-scope-teardown was
+# 0.7s and 1.1s, and at each instant FOUR and THREE UNRELATED sessions were
+# interrupted at once, which a per-command denial cannot cause and a dying
+# shared server can.
+# =========================================================================== #
+_CRASH1_BODY = (
+    '#!/usr/bin/env bash\n'
+    'set -u\n'
+    'S="$(dirname "$(readlink -f "$0")")"\n'
+    'export TMUX_TMPDIR="$S/tmuxtmp"\n'
+    'cleanup() {\n'
+    '  tmux kill-server 2>/dev/null\n'
+    '}\n'
+    'trap cleanup EXIT\n'
+    'tmux kill-server 2>/dev/null; sleep 0.3\n'
+    'tmux new-session -d -s work\n'
+)
+
+# Verbatim in shape from crash 2: the kill is in a "teardown" at the END, so a
+# guard that only read the first lines of a file would miss it.
+_CRASH2_BODY = (
+    '#!/usr/bin/env bash\n'
+    'ROOT=/tmp/probe-root\n'
+    'echo "=== (a) declared root ==="\n'
+    'TMUX_TMPDIR="$ROOT" python3 "$BLK" 2>&1 | head -c 300\n'
+    'echo "=== teardown ==="\n'
+    'TMUX_TMPDIR="$ROOT" tmux kill-server 2>&1\n'
+)
+
+
+@pytest.fixture
+def script(tmp_path):
+    """Write a script file and return its path as a string."""
+    def _make(body, name="repro.sh"):
+        p = tmp_path / name
+        p.write_text(body)
+        p.chmod(0o755)
+        return str(p)
+    return _make
+
+
+@pytest.mark.parametrize("body,label", [
+    (_CRASH1_BODY, "crash-1"),
+    (_CRASH2_BODY, "crash-2"),
+])
+def test_the_two_real_incident_scripts_are_DENIED(script, body, label, tmp_path):
+    """The regression. Both bodies are the real shapes from 2026-09-11."""
+    path = script(body, f"{label}.sh")
+    reason = gc.evaluate(f"bash {path}", "claude-code", str(tmp_path))
+    assert reason, f"{label}: the incident script was ALLOWED — this is the bypass"
+    assert path in reason, (
+        "the deny must NAME the file: the caller's command line does not contain "
+        "the offending text, so a bare reason reads as a guard malfunction")
+
+
+@pytest.mark.parametrize("template", [
+    "bash {p}",
+    "sh {p}",
+    "bash -x {p}",
+    "timeout 60 {p} /some/arg",
+    "{p}",
+    "cd /tmp && bash {p}",
+    "bash {p} && echo done",
+])
+def test_every_invocation_shape_that_runs_the_file_is_DENIED(script, template, tmp_path):
+    """Multi-spelling matrix, in this file's established style. A guard that
+    catches one spelling of `run this file` is not a guard."""
+    path = script(_CRASH1_BODY)
+    assert gc.evaluate(template.format(p=path), "claude-code", str(tmp_path)), (
+        f"ALLOWED: {template}")
+
+
+@pytest.mark.parametrize("template", [". {p}", "source {p}"])
+def test_a_SOURCED_script_is_a_KNOWN_GAP_and_stays_allowed(script, template, tmp_path):
+    """🔴 NOT a passing grade — this pins a hole so it cannot close by accident
+    and then reopen silently.
+
+    Sourcing runs in the CURRENT shell, so on danger alone it deserves reading
+    MORE than `bash <file>`. It is excluded because a different invariant
+    outranks it here: `test_the_hot_path_reads_no_files_and_execs_no_git` pins
+    that this hook must not open a file merely because a command names one, and
+    `. wt.env; ls` is the commonest shape on that path.
+
+    If someone finds a cheap way to tell an env file from a program without
+    reading it, this test is the one to delete — deliberately, with the reason.
+    """
+    path = script(_CRASH1_BODY)
+    assert gc.evaluate(template.format(p=path), "claude-code", str(tmp_path)) is None, (
+        "the sourced arm now DENIES — if that is intended, confirm the hot-path "
+        "open() count is still pinned and delete this test on purpose")
+
+
+def test_a_script_reached_through_ANOTHER_script_is_DENIED(script, tmp_path):
+    """One hop of indirection must not launder it."""
+    inner = script(_CRASH1_BODY, "inner.sh")
+    outer = script('#!/usr/bin/env bash\necho hi\nbash ' + inner + '\n', "outer.sh")
+    assert gc.evaluate(f"bash {outer}", "claude-code", str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# Negative cases — the reason this arm is ONE check wide and not the policy.
+#
+# The last two are the MEASURED false positives: running the full policy over
+# file bodies denies `ship.sh` and `drift-check.sh` (2 of 103), because both
+# name a banned command in PROSE while explaining that they never run it.
+# Denying the repo's own deploy command would be a permanently-red gate.
+# --------------------------------------------------------------------------- #
+# 🔴 These carry the literals ON PURPOSE. A fixture that merely paraphrased the
+# banned command would not trip the full policy either, so it would prove
+# nothing about the scope decision — the test would pass for the wrong reason.
+# These are the shapes `ship.sh` and `drift-check.sh` actually contain.
+_PROSE_SHIP = (
+    '#!/usr/bin/env bash\n'
+    '# It never stashes: `git stash` is repo-GLOBAL and would reach into\n'
+    '# other worktrees, so this script does not use it.\n'
+    'echo ship\n'
+)
+
+_PROSE_DRIFT = (
+    '#!/usr/bin/env bash\n'
+    '# READ-ONLY: never `git reset --hard`, never fixes, only reports.\n'
+    'echo drift\n'
+)
+
+
+def test_the_prose_fixtures_WOULD_trip_the_full_policy(script, tmp_path):
+    """The control that makes the two prose cases above meaningful.
+
+    If these bodies did not trip the full policy, `test_benign_and_prose_only_
+    scripts_stay_ALLOWED` would pass whether or not the arm is narrow, and the
+    scope decision would rest on nothing. So: assert the full policy DOES deny
+    them as raw text, which is exactly what a whole-policy file scan would do.
+    """
+    for body, label in ((_PROSE_SHIP, "ship"), (_PROSE_DRIFT, "drift")):
+        assert gc.evaluate(body, "claude-code", str(tmp_path)), (
+            f"the {label} fixture no longer trips the full policy, so the "
+            "negative test it supports has become vacuous — restore a literal "
+            "that a whole-policy file scan would deny")
+
+
+@pytest.mark.parametrize("body,why", [
+    ('#!/usr/bin/env bash\ntmux kill-pane -t %3\n',
+     "kill-pane destroys exactly what it names and is routine here"),
+    ('#!/usr/bin/env bash\ntmux -L my-probe-$$ kill-server\n',
+     "a server the caller made is the prescribed remedy"),
+    ('#!/usr/bin/env bash\ngit stash list\n',
+     "a read"),
+    (_PROSE_SHIP, "ship.sh's own comment"),
+    (_PROSE_DRIFT, "drift-check.sh's own comment"),
+])
+def test_benign_and_prose_only_scripts_stay_ALLOWED(script, body, why, tmp_path):
+    path = script(body)
+    assert gc.evaluate(f"bash {path}", "claude-code", str(tmp_path)) is None, (
+        f"denied a script that must stay allowed ({why}) — a guard that fires on "
+        "correct work gets routed around AND reports safety")
+
+
+def test_a_RELATIVE_script_path_is_resolved_against_the_COMMANDS_cwd(tmp_path):
+    """🔴 Found by a mutation sweep, not by review: making `_read_script` ignore
+    `cwd` entirely (`p = path`) SURVIVED a green suite, because every other test
+    here writes an absolute path into the command. So the cwd hop that
+    `test_evaluate_passes_cwd_only_to_checks_that_want_it` justifies at length
+    was asserted by nothing — a docstring claiming coverage the tests did not
+    provide.
+
+    `bash repro.sh` is the shape an agent actually types after `cd`-ing into its
+    scratch dir, and resolving it against the HOOK process's cwd instead would
+    silently look at the wrong file — or no file — and allow the kill.
+    """
+    (tmp_path / "repro.sh").write_text(_CRASH1_BODY)
+    assert gc.evaluate("bash repro.sh", "claude-code", str(tmp_path)), (
+        "a relative script path was not resolved against the command's cwd")
+    # Negative half: the SAME relative name under a different cwd must not be
+    # invented out of nothing, or the check is reading files it was not pointed at.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert gc.evaluate("bash repro.sh", "claude-code", str(other)) is None
+
+
+def test_a_script_that_does_not_exist_yet_is_ALLOWED(tmp_path):
+    """Fail OPEN on an unreadable target. The hook must never turn 'I could not
+    look' into a denial of a command that may be perfectly fine."""
+    assert gc.evaluate(f"bash {tmp_path}/never-written.sh", "claude-code",
+                       str(tmp_path)) is None
+
+
+def test_an_unexpanded_variable_path_is_ALLOWED(tmp_path):
+    """`bash $SCRIPT` names something this process cannot resolve; guessing
+    would read an unrelated file and deny on ITS contents."""
+    assert gc.evaluate('bash "$SCRIPT"', "claude-code", str(tmp_path)) is None
+
+
+def test_a_self_EXECUTING_script_terminates(tmp_path):
+    """A cycle must not spin a hook that runs on every Bash call.
+
+    ⚠ This test was written against `. <self>` first, and that made it VACUOUS
+    the moment the sourced arm was dropped: `.` stopped being a script operand,
+    so nothing recursed and the cycle guard was never reached. It uses `bash
+    <self>` — which IS an operand — so the `seen` set is genuinely exercised.
+    """
+    p = tmp_path / "loop.sh"
+    p.write_text('#!/usr/bin/env bash\nbash ' + str(p) + '\n')
+    assert gc.evaluate(f"bash {p}", "claude-code", str(tmp_path)) is None
+
+
+def test_a_cycle_still_finds_a_kill_on_the_OTHER_side_of_it(tmp_path):
+    """The termination guard must not swallow the finding: a pair of scripts that
+    call each other, one of which kills, still denies. Without this, "it
+    terminated" and "it looked" are indistinguishable."""
+    a = tmp_path / "a.sh"
+    b = tmp_path / "b.sh"
+    a.write_text('#!/usr/bin/env bash\nbash ' + str(b) + '\n')
+    b.write_text('#!/usr/bin/env bash\nbash ' + str(a) + '\ntmux kill-server\n')
+    assert gc.evaluate(f"bash {a}", "claude-code", str(tmp_path))
+
+
+def test_an_oversized_file_is_not_read(script, tmp_path):
+    """The cap keeps a pathological read off the hot path. Stated as a KNOWN
+    GAP, not a safety property: a kill past the cap is not seen."""
+    big = _CRASH1_BODY + ("# padding\n" * 40000)
+    assert len(big.encode()) > gc._SCRIPT_READ_MAX_BYTES
+    path = script(big, "big.sh")
+    assert gc.evaluate(f"bash {path}", "claude-code", str(tmp_path)) is None
+
+
+def test_bash_dash_c_is_still_handled_by_the_nested_text_arm(tmp_path):
+    """`-c` carries TEXT, not a file — the pre-existing arm owns it, and this
+    test exists so a future edit to `_script_operand` cannot silently hand that
+    case to a file read that would find nothing."""
+    assert gc.evaluate('bash -c "tmux kill-server"', "claude-code", str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FALSE-POSITIVE LEDGER, derived and non-vacuous.
+#
+# This is the measurement that chose the arm's scope. It CANNOT pass by walking
+# nothing: the population is asserted non-empty first, and a known-bad script is
+# injected into the same sweep as a positive control, so a sweep wired to a
+# wrong path fails instead of reporting a reassuring zero.
+# --------------------------------------------------------------------------- #
+def test_no_real_script_in_this_repo_is_denied_by_the_script_arm(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    dirs = [root / "scripts", root / "githooks", root / "scripts/collector",
+            root / "scripts/dl-router", root / "scripts/opencode"]
+    files = [p for d in dirs if d.is_dir() for p in sorted(d.iterdir())
+             if p.is_file() and p.suffix not in (".md", ".json", ".lock")]
+
+    assert len(files) > 80, (
+        f"the sweep found only {len(files)} scripts — a zero-denial result from "
+        "a population this small is a fact about the walk, not about the guard")
+
+    denied = [str(p) for p in files
+              if gc.check_executed_script_file(f"bash {p}", str(root))]
+    assert denied == [], (
+        "the script arm denies real scripts in this repo: " + ", ".join(denied)
+        + ". A guard that fires on routine work is worse than no guard.")
+
+    # POSITIVE CONTROL, in the same sweep and the same call shape: if this does
+    # not deny, the loop above proved nothing.
+    bad = tmp_path / "control.sh"
+    bad.write_text(_CRASH1_BODY)
+    assert gc.check_executed_script_file(f"bash {bad}", str(root)), (
+        "the positive control was ALLOWED — this sweep is wired to nothing and "
+        "its zero above is meaningless")

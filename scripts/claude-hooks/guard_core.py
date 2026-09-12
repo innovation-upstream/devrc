@@ -2477,6 +2477,184 @@ def check_tmux_kill_shared_server(cmd):
     return None
 
 
+# --------------------------------------------------------------------------- #
+# THE SCRIPT-FILE ARM — the bypass that made the check above a paper guard.
+#
+# 🔴 MEASURED, TWICE, AFTER the check above was already deployed and correct.
+# 2026-09-11, the operator's tmux server died twice in one night, 52 and 53 live
+# Claude conversations each time. Both were this shape:
+#
+#     Write  -> /tmp/.../repro.sh   containing  TMUX_TMPDIR=… ; tmux kill-server
+#     Bash   -> bash /tmp/.../repro.sh
+#
+# `check_tmux_kill_shared_server` never saw the kill, because this hook gates the
+# Bash-tool TEXT and the text was `bash <path>`. Proven with a control pair: the
+# inline spelling DENIES, the identical bytes inside a file ALLOW at rc 0. The
+# guard's own docstring already said the thing that matters — "this hook gates
+# the Bash TOOL" — and the hole is that a file is not text the tool carries.
+#
+# Timing that pins it as cause rather than coincidence: 0.7s and 1.1s from exec
+# to the first `tmux-spawn-*.scope` teardown, and at each instant FOUR and THREE
+# UNRELATED sessions were interrupted simultaneously — a per-command denial
+# cannot do that; only the shared server dying can.
+#
+# 🔴 WHY ONLY THE TMUX CHECK RUNS OVER FILE CONTENTS, and why that is a floor
+# rather than timidity. The obvious design — run the whole policy over the file
+# — was MEASURED before being rejected: of 103 top-level `scripts/`, it denies
+# TWO, and they are `ship.sh` and `drift-check.sh`, i.e. the deploy command and
+# the drift deadman. Both are FALSE POSITIVES from prose (`ship.sh` explains
+# that it never stashes; the guard parses comment lines as commands). Denying
+# `bash scripts/ship.sh` would be a permanently-red gate on the repo's core
+# workflow, which `_IRREVERSIBLE_CHECKS` argues at length is worse than no gate
+# because it gets routed around AND reports safety.
+#
+# The narrow arm was measured on the same population: 135 real scripts across
+# `scripts/`, `githooks/`, `collector/`, `dl-router/` and `opencode/` — ZERO
+# denied — while the actual crash-1 body denies. That is the whole argument:
+# this arm is all upside on the tree as it stands. Widening it to another check
+# is an operator decision that must bring the same two numbers, not an
+# assumption that more checks are more safety.
+_SCRIPT_TEXT_CHECKS = (check_tmux_kill_shared_server,)
+
+# A script big enough to be a data file is not one an agent hand-wrote to run a
+# kill; the cap keeps a pathological read off the hot path of EVERY Bash call.
+_SCRIPT_READ_MAX_BYTES = 256 * 1024
+_SCRIPT_RECURSION_LIMIT = 3
+
+# 🔴 KNOWN GAP, AND A DELIBERATE ONE: `source x.sh` / `. x.sh` is NOT read.
+#
+# Sourcing runs in the CURRENT shell, so on danger alone it deserves reading
+# more than `bash <file>`, not less. It is excluded because of a DIFFERENT
+# invariant that outranks it here: `test_the_hot_path_reads_no_files_and_execs_
+# no_git` pins that this hook — which runs on EVERY Bash call on both hosts —
+# must not open files just because a command mentions one, and the dominant real
+# use of `.`/`source` is ENV FILES (`. wt.env; ls`), which the guard already
+# resolves through its own separately-gated path. Reading every sourced file
+# would put an open() on the hot path for the commonest shape there is.
+#
+# `bash <file>` is not that population: it is only the commands that actually
+# spawn a shell to RUN a script, which is both rare and exactly what the two
+# 2026-09-11 incidents did. So the arm covers the measured shape and declines
+# the one that would tax every call.
+#
+# What would close it without paying that cost: a cheap pre-gate that can tell
+# an env file from a program without reading it. There isn't one, so this is
+# recorded as open rather than papered over.
+
+
+def _script_operand(argv):
+    """The path this argv would EXECUTE as a script file, or None.
+
+    Two shapes, and deliberately no third:
+      * `bash x.sh` / `sh -x x.sh`  — a shell with a FILE operand. `-c` is
+        excluded because `_nested_shell_text` already recurses into that text;
+        this arm is for the case where the code is not in the command line.
+      * `./x.sh` / `/abs/x.sh`      — executed directly.
+
+    Two gaps, both stated rather than papered over:
+      * `source`/`.` — see the block above; excluded to keep the hot-path
+        promise, not because it is safe.
+      * a BARE `x.sh` resolved through `$PATH` — resolving it means guessing a
+        PATH this process does not share with the command, and a wrong guess
+        reads an unrelated file and denies on ITS contents.
+    """
+    if not argv:
+        return None
+    base = os.path.basename(argv[0])
+    if base in _SHELLS:
+        skip_next = False
+        for tok in argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok == "--":
+                continue
+            if tok.startswith("-"):
+                # `-c` carries inline text, not a file; `_nested_shell_text` owns it.
+                if "c" in tok[1:] and not tok.startswith("--"):
+                    return None
+                if tok in ("-o", "--rcfile", "--init-file"):
+                    skip_next = True
+                continue
+            return tok
+        return None
+    # Direct execution. Require a path separator: a bare word here is either a
+    # PATH lookup (see the docstring) or not a script at all.
+    if "/" in argv[0]:
+        return argv[0]
+    return None
+
+
+def _read_script(path, cwd):
+    """The file's text, or None when it is not a readable local regular file.
+
+    Never raises. A guard that throws on a weird path would fail the Bash call
+    it was asked about, which is a worse outcome than the hole it is closing.
+    """
+    try:
+        if not path or any(c in path for c in "*?$`"):
+            # Unexpanded glob/variable: this process cannot know what it names.
+            return None
+        p = path if os.path.isabs(path) else os.path.join(cwd or ".", path)
+        if not os.path.isfile(p):
+            return None
+        if os.path.getsize(p) > _SCRIPT_READ_MAX_BYTES:
+            return None
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except (OSError, ValueError):
+        return None
+
+
+@_wants_cwd
+def check_executed_script_file(cmd, cwd=None):
+    """Run the script-file checks over the CONTENTS of any script this executes.
+
+    The deny names the FILE as well as the reason, because the caller's command
+    line does not contain the offending text and a bare "tmux kill-server is
+    blocked" would read as a guard malfunction.
+
+    Bounded: recursion depth and a visited set, so a script that sources itself
+    (or a cycle between two) terminates instead of spinning a hook that runs on
+    every Bash call.
+    """
+    seen = set()
+
+    def walk(text, depth):
+        if depth > _SCRIPT_RECURSION_LIMIT:
+            return None
+        for argv in commands(text):
+            path = _script_operand(argv)
+            if not path:
+                continue
+            body = _read_script(path, cwd)
+            if body is None:
+                continue
+            key = os.path.realpath(
+                path if os.path.isabs(path) else os.path.join(cwd or ".", path))
+            if key in seen:
+                continue
+            seen.add(key)
+            for chk in _SCRIPT_TEXT_CHECKS:
+                reason = chk(body)
+                if reason:
+                    return (
+                        f"`{path}` is executed by this command and CONTAINS a "
+                        f"blocked command. {reason}\n\n"
+                        "🔴 THIS IS THE BYPASS THAT KILLED THE OPERATOR'S TMUX "
+                        "SERVER TWICE ON 2026-09-11 (52 and 53 live conversations). "
+                        "Writing the command to a file and running the file is not "
+                        "a way around this guard — it is the exact shape that "
+                        "caused the incident. Fix the SCRIPT: give it its own "
+                        "server with `-L my-probe-$$` and kill that.")
+            nested = walk(body, depth + 1)
+            if nested:
+                return nested
+        return None
+
+    return walk(cmd, 0)
+
+
 # =========================================================================== #
 # POLICIES
 # =========================================================================== #
@@ -2603,6 +2781,11 @@ _CLAUDE_CODE_CHECKS = [
     # caller believed — and BEFORE the advisory checks for the usual "report the
     # more serious problem" reason.
     check_tmux_kill_shared_server,
+    # Immediately after the check it backstops, because it is the SAME finding
+    # reached through a file rather than through the command line — see
+    # `check_executed_script_file`, which carries the two incidents and the
+    # false-positive measurement that decided its narrow scope.
+    check_executed_script_file,
     check_heredoc_to_file,
     check_cd_then_git,
     check_private_key,
