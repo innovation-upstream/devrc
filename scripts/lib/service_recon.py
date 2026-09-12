@@ -118,6 +118,11 @@ from subsystem_recall import (  # noqa: E402
 #: HERE (KeyError at import) instead of turning into a silent zero.
 RECALLED_STATUS = STATUS_PRECEDENCE[STATUS_PRECEDENCE.index("recalled")]
 from subsystem_resolver import normalize_ref  # noqa: E402
+# 🔴 ONE RULE, ONE PLACE — "which file governs a write into this scope?".
+# `governing_policy` is the writer's own resolver and is imported, never
+# re-derived: the shared write protocol tells every caller to read the file the
+# probe named, so the two probes that can name one must name the SAME one.
+from subsystem_touch import governing_policy  # noqa: E402
 from subsystem_touch import scope_for_repo  # noqa: E402
 
 # 🔴 THE SAME RESOLVER THE READER USES, NOT `subsystem_touch.DEFAULT_STORE_ROOT`.
@@ -477,6 +482,33 @@ class IndexResult:
     silent zero)."""
     detail: str = ""
     report: RecallReport | None = None
+    policy_path: str | None = None
+    """WHICH policy file governs a write into the scope that answered.
+
+    🔴 IT EXISTS BECAUSE THE SHARED WRITE PROTOCOL NAMES THIS LINE. Every caller
+    of the index store follows one append protocol
+    (`claude/skills/subsystem-index/SKILL.md`), and its write half says: *read the
+    policy file the probe named on its `policy:` line*. `/handoff`'s probe
+    (`subsystem_touch`) has printed one since 2026-08-13; this one, the probe
+    `/analyze-service` runs, printed **none** — measured 0 occurrences of
+    `policy:` in this file on 2026-09-10 — so a caller routed to the shared half
+    from here was handed an instruction its own tooling could not satisfy, and
+    `analyze-service/reference/index-store.md` sent it to the scope README
+    instead: two documents, one rule, two answers.
+
+    The answer comes from `subsystem_touch.governing_policy` — the same function,
+    not a second derivation — so the two probes cannot disagree about which file
+    governs a scope.
+    """
+    policy_basis: str = ""
+    """Which of the four cases `policy_path` is: one of `subsystem_touch`'s three
+    (`POLICY_SCOPE` / `POLICY_STORE_ROOT` / `POLICY_NONE`) when a scope was
+    reached, else `POLICY_NO_SCOPE`.
+
+    🔴 THE FOURTH IS NOT A SPELLING OF `POLICY_NONE`. `NONE` is a measurement —
+    neither README exists — and the fourth says no scope was reached, so nothing
+    was measured at all. Folding them would let a run that never asked report the
+    same thing as a run that asked and found nothing."""
 
 
 @dataclass(frozen=True)
@@ -921,7 +953,53 @@ def brief_store_root(resolved: str | Path, refusal: "IndexResult | None") -> str
     return f"{NOT_READ_PREFIX} ({refusal.status}) — {resolved}"
 
 
+POLICY_NO_SCOPE = "NOT RESOLVED — no scope was reached, so no policy file was looked for"
+"""The fourth basis, and the one `subsystem_touch` has no need of.
+
+🔴 A PROBE THAT NEVER REACHED A SCOPE HAS NOT MEASURED THE POLICY. `not-attempted`
+and `store-unstamped` both end with no scope in hand; printing
+`POLICY_NONE` ("neither README exists") there would be a measurement this run
+never made, and `claude/RULES.md` forbids exactly that — an empty result cannot
+distinguish two mechanisms, so the two are spelled apart.
+"""
+
+
+def with_policy(res: IndexResult, store_root: str | Path | None) -> IndexResult:
+    """Attach the governing-policy answer to one index result. READ-ONLY.
+
+    Resolved iff a SCOPE was reached: the policy file is per-scope, so without one
+    there is nothing to ask about. `store-missing` keeps its scope and gets a real
+    `POLICY_NONE` — that is a genuine measurement (`governing_policy` stats two
+    paths and neither exists), not a shrug.
+    """
+    if not res.scope:
+        return _dc_replace(res, policy_path=None, policy_basis=POLICY_NO_SCOPE)
+    root, _refusal, _stamp = _resolve_store(store_root)
+    path, basis = governing_policy(root, res.scope)
+    return _dc_replace(res, policy_path=path, policy_basis=basis)
+
+
 def read_index(
+    loc: LocateResult | str | None,
+    service: str,
+    *,
+    store_root: str | Path | None = None,
+) -> IndexResult:
+    """`_read_index_scopes` plus the governing-policy answer — the PUBLIC entry.
+
+    🔴 THE POLICY IS ATTACHED HERE, AT ONE SITE, rather than on each of the eight
+    returns below it. The shared write protocol
+    (`claude/skills/subsystem-index/SKILL.md`) tells a writer to read the file
+    this probe names, so an index result that reaches a renderer without one
+    re-opens the gap this closes — and a per-branch derivation is the duplicated
+    predicate `claude/RULES.md` names, at eight sites.
+    """
+    return with_policy(
+        _read_index_scopes(loc, service, store_root=store_root), store_root
+    )
+
+
+def _read_index_scopes(
     loc: LocateResult | str | None,
     service: str,
     *,
@@ -1408,7 +1486,12 @@ def recon(
     # second answer: the brief renders the stamp this call returns.)
     resolved_root, store_refusal, store_stamp = _resolve_store(store_root)
     idx = (
-        store_refusal
+        # 🔴 THE REFUSAL GOES THROUGH `with_policy` TOO. It bypasses `read_index`,
+        # which is where the policy is attached, so without this the one branch
+        # that prints no `policy:` line would be the one an agent hits on an
+        # unstamped store — and a missing line reads as "there is no policy",
+        # which is not what a refusal knows.
+        with_policy(store_refusal, None)
         if store_refusal is not None
         else read_index(loc, service, store_root=resolved_root)
     )
@@ -1582,6 +1665,21 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
                  + via
                  + (f" — {i.detail}" if i.detail else "")
                  + checked)
+    # 🔴 WHICH POLICY FILE GOVERNS A WRITE, ON EVERY STATUS — the line the shared
+    # write protocol sends the caller to. `claude/skills/subsystem-index/SKILL.md`
+    # says "read the policy file the probe named on its `policy:` line"; until
+    # 2026-09-11 this probe named none, so a caller routed there from
+    # `/analyze-service` was given an instruction its own tool could not satisfy.
+    # Same spelling as `subsystem_touch.render_text`, from the same resolver.
+    #
+    # ⚠ NO `or POLICY_NO_SCOPE` FALLBACK HERE, and its absence is load-bearing.
+    # The first version spelled the default in the renderer as well as in
+    # `with_policy`, which made a mutant that skipped `with_policy` on the
+    # refusal branch render byte-identically — it SURVIVED a sweep. One rule, one
+    # place: `with_policy` sets the basis, this prints what it set.
+    L[index_header_at + 1:index_header_at + 1] = [
+        f"policy: {i.policy_path or '(none)'}  ({i.policy_basis})"
+    ]
     # Unparsed, one field per line, and NO AGE COMPUTED — `subsystem_recall`
     # renders the same lines with the same prefix (`_read_store.stamp_header` is
     # the one spelling) and `cairn.cache_age` owns the arithmetic.
@@ -1680,6 +1778,11 @@ def brief_json(b: Brief) -> dict:
             "sensitivity": b.index.sensitivity, "basis": b.index.basis,
             "scopes_checked": list(b.index.scopes_checked),
             "candidates": list(b.index.candidates),
+            # Same two keys `subsystem_touch.report_json` emits, for the same
+            # reason: a JSON consumer must be able to reach the governing policy
+            # without re-deriving it from a rendered line.
+            "policy_file": b.index.policy_path,
+            "policy_basis": b.index.policy_basis,
             "pointers": b.index.pointers, "nuance": b.index.nuance, "detail": b.index.detail,
         },
         "config": {

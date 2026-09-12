@@ -48,6 +48,13 @@ or durable doc moved) is **3 firm of 17**, hand-verified:
 **So the falsifier's condition never fired**, and the honest reading is the opposite of the one this
 doc carried for a day: yield is low-but-real and the `--exclude-slug` fix did not reduce it.
 
+🔴 **AND THE COST QUESTION IS NOW CLOSED BY DELETION (2026-09-12).** The command is **180 bytes**;
+the prose defending it was **6,220** — a 34:1 ratio, and almost all of it this arc's own changelog
+sitting in an instruction file. It is deleted; `resume/SKILL.md` drops 47,762 → 44,834 B. **The
+step stays, the cost objection is gone, and no yield number was needed to get there.** Two
+attempts at that number cost a shipped-then-closed PR, two audits and a correction PR, to
+adjudicate one line — see rank 1 for why it must not be re-opened.
+
 🔴 **WHAT SURVIVES UNCHANGED — the descriptive half was sound.** `--exclude-slug` works exactly as
 designed: **0 self-hit slots** post-fix against 23 of 60 (38%) before, and the session's own doc was
 the #1 hit **0 times** against 13 of 20. Adoption is near-total: every resuming session runs it with
@@ -77,7 +84,7 @@ was crowded out.
   ⚠ **`ship.sh` reached the laptop only under a manual `REMOTE_SSH=zach@10.42.0.100`** — its
   default LAN address timed out. That split the run in two, so `ship.sh` printed
   **`cross-host agreement NOT COMPARED` both times**; the agreement above was checked BY HAND,
-  not by the tool. Filed as rank 3.
+  not by the tool. Filed as rank 2 (it was rank 3 until rank 1 closed).
 - **Live end-to-end on the deployed path:** `in_scope_docs=402` of 403, `excluded=handoff-search-index`,
   and all three hit slots holding documents from a different repo — i.e. the slots the session's
   own handoff used to occupy are now spent on documents it has not read.
@@ -335,24 +342,25 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   third choices are worth reading. That is the next probe above, and it is the real question.
 
 ## Next steps (ranked)
-1. **AGREE A YIELD CRITERION BEFORE MEASURING IT AGAIN — this metric has now been wrong TWICE, in
-   OPPOSITE directions, and both times the instrument was the cause.** `1 of 20` and `0 of 16` were
-   both produced by an open-only needle; a looser mention-based one gives 53%, which overcounts
-   because step 5 *mandates* reporting the hits. The number that matters sits between them and
-   **nobody has defined it**. 🔴 **Do not re-run either needle.** Write the criterion down FIRST —
-   the candidate is *"a hit delivered information the session did not already hold AND a decision,
-   probe or durable doc moved"* — then validate it on BOTH windows before quoting any figure, and
-   hand-verify a sample rather than trusting the parse. ⚠ **The falsifier is spent**: its condition
-   ("yield stays ~1/20 with foreign hits filling every slot") was evaluated against a broken
-   instrument, and re-running the same pre-commitment on a better one is not honouring it — it is
-   re-deciding on new evidence, which needs a new pre-commitment.
-   **Closing condition:** a written criterion in this doc, applied to both windows, with a
-   hand-verified sample and the pair reported — and whoever writes it says plainly whether the step
-   earns its ~4 KB.
-   forcing: none
-   ⚠ **The retirement question is OPEN, not settled either way.** `#1518` closed unmerged because
-   its evidence was wrong, NOT because keeping the step was shown to be right.
-2. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
+🔴 **RANK 1 IS CLOSED — AND IT WAS CLOSED BY DELETION, NOT BY MEASURING IT.** The question was
+*"is the corpus query worth what it costs?"* Measured 2026-09-12: **the command is 180 bytes and
+the prose defending it was 6,220 — a 34:1 ratio.** Almost the whole cost was this arc's own
+changelog living in an instruction file: the 5/6-vs-0/6 placement history, the
+denominators-that-reconcile paragraph, a byte-budget figure falsified twice. That prose is now
+deleted (−2,928 B from `resume/SKILL.md`, 47,762 → 44,834), the command stays, and the cost
+objection is gone without a yield number ever being needed.
+
+🔴 **DO NOT RE-OPEN THE YIELD MEASUREMENT.** It was attempted twice and was wrong both times, in
+opposite directions, for structurally different reasons — and each attempt cost far more than the
+line it was adjudicating: a shipped-then-closed PR (`#1518`), two adversarial audits, and a
+correction PR (`#1541`). **A measurement that costs orders of magnitude more than the thing it
+measures is the wrong instrument, however rigorous.** Three hand-verified cases where a hit
+changed what a session did are on record; that is enough to keep a 180-byte line.
+⚠ **If the question ever genuinely matters again, ASK THE OPERATOR** — he reads the
+`from handoff docs` line in every `/resume` report and is the single consumer. A thirty-second
+human answer beats transcript archaeology that has now failed twice.
+
+1. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
    `--exclude-slug "  "` normalises to `""`, prints `excluded=` with nothing after it, leaves
    `in_scope_docs == indexed_docs`, and returns the document the caller meant to drop — the exact
    class three audit rounds closed everywhere else. The library layer accepts `[""]` too. Round 4
@@ -364,7 +372,7 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
    **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
    with a test that watches it fail at the previous commit.
    forcing: none
-3. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
+2. **`ship.sh` cannot reach the laptop off-LAN, and the fallback address it already knows is
    unused.** `host-role.sh` defines `LAPTOP_IP_SECONDARY=10.42.0.100` (nebula) beside the primary
    `192.168.50.155`, but the SSH default derives from the primary only — so from off-network the
    remote leg dies `Connection timed out`, rc 255, and the run reports `incomplete`. Measured
@@ -377,12 +385,12 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
    when the primary is unreachable (or the rc-255 message names `REMOTE_SSH` and the nebula
    address), with a test that watches the fallback fire.
    forcing: none
-4. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
+3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
    does it, which is the intended signal.
    forcing: none
-5. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
+4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
    rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
    re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.

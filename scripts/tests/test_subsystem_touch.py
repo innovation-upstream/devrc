@@ -1439,6 +1439,203 @@ class TestCli:
         assert "created_by: analyze-service" in cap.out
         assert "created_by: handoff" not in cap.out
 
+    # ------------------------------------------------------------------
+    # devrc#1170 🟡6 — `--template` over an entry that ALREADY EXISTS.
+    # ------------------------------------------------------------------
+    #
+    # 🔴 THE DEFECT WAS A SILENT EXIT 0 OVER CURATED CONTENT. `--template <slug>`
+    # printed the first-ever-file body and exited 0 whether or not
+    # `<scope>/<slug>.md` already existed, and the whole protocol downstream of it
+    # is "write this body to that address" — so the pristine template lands on top
+    # of the entry's `## Nuance / work-history` and every `OPEN:` bullet in it is
+    # gone, with a 0 at every step.
+    #
+    # ⚠ IT NEEDS NO RACE, and this matters because the audit that found it framed
+    # it as one. Every test below is SINGLE-WRITER and two commands long. Do not
+    # rebuild it as a concurrency harness.
+
+    def test_template_over_an_EXISTING_entry_REFUSES(self, store: Path, capsys) -> None:
+        """🔴 RED AT BASE: before the guard this exited 0 and printed the body."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "collector",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == st.TEMPLATE_EXISTS_EXIT
+        assert cap.out.strip() == "", (
+            "the template body was printed anyway — a caller that reads stdout "
+            "gets the clobbering payload regardless of the exit code"
+        )
+        assert "collector.md" in cap.err, "the refusal must NAME the existing entry"
+        assert f"`{SCOPE}/collector.md`" in cap.err
+
+    def test_the_refusal_says_WHAT_WOULD_BE_LOST(self, store: Path, capsys) -> None:
+        """A refusal that only says 'exists' invites `--force`-hunting. The one
+        thing the caller cannot see for themselves is that the template has no
+        history in it, so writing it is a deletion."""
+        _rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "collector",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert "DESTROYS" in cap.err
+        assert "OPEN:" in cap.err
+
+    def test_an_ALIAS_hit_refuses_too(self, store: Path, capsys) -> None:
+        """`event_tap` is `collector.md`'s alias. Creating `event-tap.md` would
+        not overwrite that file — it would SHADOW the alias, which the resolver's
+        own rules call an error and never a shadow. Same refusal, named tier."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "event_tap",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == st.TEMPLATE_EXISTS_EXIT
+        assert "collector.md" in cap.err
+        assert "alias tier" in cap.err
+
+    def test_an_ALREADY_AMBIGUOUS_ref_refuses_rather_than_adding_a_third(
+        self, store: Path, capsys
+    ) -> None:
+        """`weekly-digest` names two files already. A third cannot be the fix."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "weekly-digest",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == st.TEMPLATE_EXISTS_EXIT
+        assert "weekly-digest.md" in cap.err
+        assert "weekly-digest.process.md" in cap.err
+
+    def test_a_KIND_QUALIFIED_slug_matches_only_its_OWN_file(
+        self, store: Path, capsys
+    ) -> None:
+        """The discriminating control on the tier-1 mirror: a qualified ref must
+        not be answered by the bare file, and vice versa. Without this, a
+        collision check that ignored `kind` entirely would look correct."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE,
+             "--template", "weekly-digest.process",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == st.TEMPLATE_EXISTS_EXIT
+        assert "weekly-digest.process.md" in cap.err
+        assert "`weekly-digest.md`" not in cap.err
+
+    def test_a_MALFORMED_existing_entry_STILL_refuses(
+        self, store: Path, capsys
+    ) -> None:
+        """🔴 THE REASON THE FILENAME TIER IS CHECKED BY NAME, NOT BY PARSING.
+
+        An entry that does not parse is exactly the one a writer is most likely
+        to "fix" by re-templating, and it is also the one a parse-based check
+        drops from the index — reporting the slug free while the file, and its
+        history, sit on disk. This is the case that kills a mutant of
+        `_filename_tier_collisions`; every other collision test is also answered
+        by the alias-tier call, so this one is not redundant with them.
+        """
+        (store / SCOPE / "collector.md").write_text(
+            "no front matter at all\n\n## Nuance / work-history\n"
+            "- 2026-01-01: OPEN: still unfinished.\n",
+            encoding="utf-8",
+        )
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "collector",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == st.TEMPLATE_EXISTS_EXIT
+        assert "collector.md" in cap.err
+        assert "filename tier" in cap.err
+
+    def test_a_slug_with_NO_entry_still_prints(self, store: Path, capsys) -> None:
+        """⚠ INVARIANT GUARD, not regression coverage — it passes at base too.
+
+        It is here because the guard's failure mode is refusing the FIRST-ENTRY
+        case, which is the case `--template` exists for."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "roster-sync",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == 0
+        assert "service: roster-sync" in cap.out
+        assert cap.err.strip() == ""
+
+    def test_a_scope_with_NO_DIRECTORY_still_prints(
+        self, store: Path, capsys
+    ) -> None:
+        """⚠ INVARIANT GUARD. `scope-absent` is the ordinary first run in every
+        repo that is not the infra repo; refusing there would make the intended
+        case the failing case."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", "a-scope-that-has-no-dir",
+             "--template", "collector", "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == 0
+        assert "service: collector" in cap.out
+
+    def test_the_SAME_slug_is_free_in_a_DIFFERENT_scope(
+        self, store: Path, capsys
+    ) -> None:
+        """⚠ INVARIANT GUARD — it passes at base, where everything exits 0.
+
+        The scope is part of the address. `collector` exists in SCOPE and not in
+        OTHER_SCOPE, so a check that ignored scope would refuse both — and a
+        check that ignored the store would refuse neither. It constrains the FIX,
+        not the bug."""
+        rc, _cap = self._run(
+            ["--store", str(store), "--scope", OTHER_SCOPE, "--template", "collector",
+             "--today", TODAY, "--writer", "handoff"],
+            capsys,
+        )
+        assert rc == 0
+
+    def test_the_WRITER_refusal_still_comes_first(self, store: Path, capsys) -> None:
+        """⚠ INVARIANT GUARD — it passes at base, where the writer refusal was
+        the only refusal there was.
+
+        Ordering, asserted rather than assumed: a missing `--writer` must not be
+        reported as a collision, and a collision must not be reported as a
+        missing writer. It also carries the REACHABILITY half of the collision
+        guard's mutation test — an earlier check that always won would make that
+        guard unexecutable while its mutant still died on someone else's
+        error."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "collector",
+             "--today", TODAY],
+            capsys,
+        )
+        assert rc == 2
+        assert "--template needs --writer" in cap.err
+        assert "DESTROYS" not in cap.err
+
+    def test_an_UNREADABLE_scope_dir_does_not_claim_the_slug_is_FREE(
+        self, store: Path, capsys
+    ) -> None:
+        """🔴 THE THIRD STATE. A store that could not be read has not said the
+        slug is free — `claude/RULES.md`: an empty result cannot distinguish two
+        mechanisms. The template still prints (the first-entry case must survive
+        an unreadable store), but the caller is told the check did not run."""
+        if os.geteuid() == 0:  # pragma: no cover — root ignores the mode bits
+            pytest.skip("root can list a 0o000 directory, so the condition cannot be built")
+        scope_dir = store / SCOPE
+        scope_dir.chmod(0o000)
+        try:
+            rc, cap = self._run(
+                ["--store", str(store), "--scope", SCOPE, "--template", "collector",
+                 "--today", TODAY, "--writer", "handoff"],
+                capsys,
+            )
+        finally:
+            scope_dir.chmod(0o755)
+        assert rc == 0, "an unreadable store must not block the first-entry case"
+        assert "service: collector" in cap.out
+        assert "COULD NOT CHECK" in cap.err
+        assert "UNKNOWN" in cap.err
+
     def test_end_to_end_against_a_REAL_repo(self, tmp_path: Path, capsys) -> None:
         """The whole path: real git → derived scope → real store → report. Every
         layer above is tested in isolation, and `claude/RULES.md` is explicit
@@ -3903,6 +4100,135 @@ def _load_mutant(tmp_path: Path, name: str, replacements: list[tuple[str, str]])
     return module
 
 
+class TestTemplateCollisionMutationKills:
+    """devrc#1170 🟡6 — four mutants, each isolating ONE decision.
+
+    🔴 EACH MUST DIE OF THIS GUARD'S OWN SYMPTOM. The kill assertion is "the
+    mutant exits 0 and prints the clobbering body, the real module exits
+    `TEMPLATE_EXISTS_EXIT` and prints the refusal" — not "some test went red",
+    which a neighbour's error would also produce.
+
+    🔴 REACHABILITY IS SEPARATELY PINNED by
+    `TestCli::test_the_WRITER_refusal_still_comes_first`: the `--writer` check
+    sits above this one and would make every mutant here die of the wrong error
+    if it ever started winning.
+    """
+
+    #: One argv, reused: the slug `collector` HAS an entry in `SCOPE`, so every
+    #: mutant below is asked the question the guard exists to answer.
+    def _argv(self, store: Path, slug: str = "collector") -> list[str]:
+        return ["--store", str(store), "--scope", SCOPE, "--template", slug,
+                "--today", TODAY, "--writer", "handoff"]
+
+    def test_kills_the_collision_branch(self, tmp_path: Path, capsys) -> None:
+        """The guard itself. Without it, exit 0 over curated content."""
+        mod = _load_mutant(
+            tmp_path, "m_tpl_branch",
+            [("            if collision is not None:", "            if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        capsys.readouterr()
+        assert mod.main(self._argv(store)) == 0
+        leaked = capsys.readouterr()
+        assert "service: collector" in leaked.out, (
+            "the mutant produced no template — the kill would be vacuous"
+        )
+        assert st.main(self._argv(store)) == st.TEMPLATE_EXISTS_EXIT
+        real = capsys.readouterr()
+        assert real.out.strip() == ""
+        assert "DESTROYS" in real.err
+
+    def test_kills_the_FILENAME_tier(self, tmp_path: Path, capsys) -> None:
+        """🔴 ISOLATED AGAINST A MALFORMED ENTRY, deliberately.
+
+        Against a well-formed entry this mutant SURVIVES — the alias-tier call
+        runs `resolve_ref_tiered`, which does its own filename tier and refuses
+        anyway. The filename check earns its place only where parsing fails, so
+        that is the fixture it is mutated against. Mutating it against a
+        well-formed entry would have reported a false SURVIVED and read as "this
+        check is redundant".
+        """
+        mod = _load_mutant(
+            tmp_path, "m_tpl_filename",
+            [("    if by_filename:", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / SCOPE / "collector.md").write_text(
+            "no front matter\n\n## Nuance / work-history\n- 2026-01-01: OPEN: x\n",
+            encoding="utf-8",
+        )
+        capsys.readouterr()
+        assert mod.main(self._argv(store)) == 0
+        assert "service: collector" in capsys.readouterr().out
+        assert st.main(self._argv(store)) == st.TEMPLATE_EXISTS_EXIT
+        assert "filename tier" in capsys.readouterr().err
+
+    def test_the_filename_mutant_SURVIVES_a_well_formed_entry(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The control for the reasoning above, asserted rather than asserted-about.
+
+        If this ever goes red the two tiers have stopped overlapping, and the
+        test above is no longer isolating what its docstring claims.
+        """
+        mod = _load_mutant(
+            tmp_path, "m_tpl_filename_ctl",
+            [("    if by_filename:", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        capsys.readouterr()
+        assert mod.main(self._argv(store)) == mod.TEMPLATE_EXISTS_EXIT, (
+            "the two tiers no longer overlap on a well-formed entry, so the "
+            "isolation argument in the test above has stopped holding"
+        )
+        assert "collector.md" in capsys.readouterr().err
+
+    def test_kills_the_ITERDIR_choice(self, tmp_path: Path, capsys) -> None:
+        """🔴 `glob` SWALLOWS the OSError and yields nothing, so an unreadable
+        scope reports every slug free. The mutant is the one-word change a
+        maintainer would plausibly make."""
+        if os.geteuid() == 0:  # pragma: no cover — root ignores the mode bits
+            pytest.skip("root can list a 0o000 directory")
+        mod = _load_mutant(
+            tmp_path, "m_tpl_iterdir",
+            [('for path in sorted(p for p in scope_dir.iterdir() if p.suffix == ".md"):',
+              'for path in sorted(scope_dir.glob("*.md")):')],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / SCOPE).chmod(0o000)
+        try:
+            capsys.readouterr()
+            assert mod.main(self._argv(store)) == 0
+            leaked = capsys.readouterr()
+            assert "COULD NOT CHECK" not in leaked.err, (
+                "the mutant reported the slug free with no caveat — that is the "
+                "silent answer this decision exists to prevent"
+            )
+            assert st.main(self._argv(store)) == 0
+            real = capsys.readouterr()
+            assert "COULD NOT CHECK" in real.err
+        finally:
+            (store / SCOPE).chmod(0o755)
+
+    def test_kills_the_UNCHECKED_report(self, tmp_path: Path, capsys) -> None:
+        """The third state must reach the caller. Without this branch a store
+        that could not be read is indistinguishable from a free slug."""
+        if os.geteuid() == 0:  # pragma: no cover
+            pytest.skip("root can list a 0o000 directory")
+        mod = _load_mutant(
+            tmp_path, "m_tpl_unchecked",
+            [("            if unchecked is not None:", "            if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / SCOPE).chmod(0o000)
+        try:
+            capsys.readouterr()
+            assert mod.main(self._argv(store)) == 0
+            assert capsys.readouterr().err.strip() == ""
+            assert st.main(self._argv(store)) == 0
+            assert "COULD NOT CHECK" in capsys.readouterr().err
+        finally:
+            (store / SCOPE).chmod(0o755)
 def _load_pinned_mutant(tmp_path: Path, name: str, module: str,
                         replacements: list[tuple[str, str]]):
     """`_load_mutant`, but for a module that lives in the PINNED cairn lib.
