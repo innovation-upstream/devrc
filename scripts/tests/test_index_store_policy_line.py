@@ -34,11 +34,14 @@ asserted against.
 """
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from testlib import hermetic_git
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
@@ -122,6 +125,25 @@ class TestBothProbesPrintTheLine:
     """The CODE half — the claim the sentence makes about the tooling."""
 
     @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        """A real git repo whose basename IS `SCOPE` — so `scope_for_repo`
+        derives the scope the store has a README for. Real git, no mock: the
+        scope derivation is part of the path under test."""
+        r = tmp_path / SCOPE
+        (r / "apps" / SERVICE).mkdir(parents=True)
+        (r / "apps" / SERVICE / "deployment.yaml").write_text(
+            f"kind: Deployment\nmetadata:\n  name: {SERVICE}\n", encoding="utf-8"
+        )
+        env = {**os.environ, **hermetic_git.MAINTENANCE_OFF,
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+        for args in (["init", "-q", "-b", "main"], ["add", "apps"],
+                     ["commit", "-qm", "seed"]):
+            subprocess.run(["git", "-C", str(r), *args], check=True,
+                           capture_output=True, text=True, env=env)
+        return r
+
+    @pytest.fixture
     def store(self, tmp_path: Path) -> Path:
         """A store whose SCOPE has its own README and whose OTHER_SCOPE does not."""
         s = tmp_path / "store"
@@ -138,20 +160,52 @@ class TestBothProbesPrintTheLine:
         )
         return s
 
-    def test_service_recon_prints_a_policy_line_AT_ALL(self, store: Path) -> None:
+    def test_service_recon_prints_a_policy_line_AT_ALL(
+        self, store: Path, repo: Path
+    ) -> None:
         """🔴 RED AT BASE. Measured 0 occurrences of `policy:` in
-        `scripts/lib/service_recon.py` on 2026-09-10 and 2026-09-11."""
-        brief = sr.recon(
-            SERVICE, repos=[], store_root=store, env={}, cwd=None,
-        )
-        idx = sr.with_policy(
-            sr._dc_replace(brief.index, scope=SCOPE), store
-        )
-        text = sr.render_brief(sr._dc_replace(brief, index=idx))
-        assert "\npolicy: " in text, (
+        `scripts/lib/service_recon.py` on 2026-09-10 and 2026-09-11.
+
+        🔴 END TO END THROUGH `recon`, never through `with_policy` by hand. A
+        mutation sweep caught exactly that: with the assertions built on a
+        directly-constructed `IndexResult`, a mutant that made `read_index`
+        return the raw unpolicied result SURVIVED — the guard was verified in
+        isolation while the only path a caller takes was untested.
+        """
+        brief = sr.recon(SERVICE, repos=[str(repo)], store_root=store)
+        text = sr.render_brief(brief)
+        assert f"\npolicy: {store / SCOPE / 'README.md'}  ({st.POLICY_SCOPE})" in text, (
             "the /analyze-service probe names no policy file, so the shared write "
-            "half's instruction is unsatisfiable for its callers"
+            f"half's instruction is unsatisfiable for its callers.\n{text}"
         )
+
+    def test_the_JSON_brief_carries_it_too(self, store: Path, repo: Path) -> None:
+        """A JSON consumer must not have to re-derive it from a rendered line.
+        Both keys, because a mutant that nulled the PATH while keeping the basis
+        survived a sweep that only asserted the basis."""
+        payload = sr.brief_json(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
+        assert payload["index"]["policy_file"] == str(store / SCOPE / "README.md")
+        assert payload["index"]["policy_basis"] == st.POLICY_SCOPE
+
+    def test_the_UNSTAMPED_REFUSAL_prints_the_line_too(
+        self, store: Path, monkeypatch
+    ) -> None:
+        """🔴 THE BRANCH THAT BYPASSES `read_index`.
+
+        An unstamped default store is refused before the index is asked, and that
+        refusal does not go through `read_index` — so it was the one status that
+        printed no `policy:` line, which reads as "there is no policy" rather
+        than "nothing was asked". A sweep caught this one too.
+        """
+        monkeypatch.setattr(
+            sr._read_store, "resolve_read_store",
+            lambda root=None: sr._read_store.ReadStore(
+                root=store, stamp=None, reason="no .sync-stamp (synthetic)"
+            ),
+        )
+        brief = sr.recon(SERVICE, repos=[], store_root=None, env={}, cwd=None)
+        assert brief.index.status == sr.INDEX_UNSTAMPED
+        assert f"\npolicy: (none)  ({sr.POLICY_NO_SCOPE})" in sr.render_brief(brief)
 
     @pytest.mark.parametrize("scope,expected_basis", [
         (SCOPE, st.POLICY_SCOPE),
