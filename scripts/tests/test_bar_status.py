@@ -1038,7 +1038,15 @@ def _home_file_gates(nix: str) -> dict:
         # the key line does not itself open a brace, the continuation is read
         # too. Every entry is one line today; this keeps that from being
         # load-bearing.
-        if not stripped.rstrip().endswith("{") and idx + 1 < len(lines):
+        # 🔴 ONLY when the line ENDS AT THE `=`. The first version of this read
+        # the next line whenever the current one did not end in `{` -- which
+        # swept up a NEIGHBOUR's gate for the `home.file."…".source = …;`
+        # one-liner idiom (26 occurrences in nix/home.nix, 0 here today).
+        # MEASURED: such an entry followed by another gated `mkIf isLaptop`
+        # returned `isLaptop`, and followed by a mere COMMENT mentioning it,
+        # likewise. That swapped a permissive mis-read for a borrowed one --
+        # narrower, but still formatting deciding the classification.
+        if stripped.rstrip().endswith("=") and idx + 1 < len(lines):
             stripped = stripped + " " + lines[idx + 1].strip()
         if "mkIf (!isLaptop)" in stripped or "mkIf !isLaptop" in stripped:
             gates[name] = "!isLaptop"
@@ -1134,10 +1142,16 @@ def test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it():
         p.name for p in SCRIPTS.glob("i3status-*")
         if "_load_freshness" in p.read_text())
     assert consumers, "no block script loads the sibling — this test is vacuous"
-    assert len(consumers) >= len(BLOCK_SOURCE_FILES), (
-        "derived %d sibling consumers but BLOCK_SOURCE_FILES names %d — the "
-        "derivation is missing blocks it used to cover"
-        % (len(consumers), len(BLOCK_SOURCE_FILES)))
+    # 🔴 SETS, NOT COUNTS. This compared `len(...) >= len(...)`, which a set
+    # that loses one member and gains another passes -- while the message
+    # claimed the derivation covered what it used to. Compare what it says.
+    known = {script for _name, script in BLOCK_SOURCE_FILES}
+    missing = known - set(consumers)
+    assert not missing, (
+        "the derivation no longer covers sibling consumer(s) the old list "
+        "named: %r. `SCRIPTS.glob('i3status-*')` cannot see a consumer that is "
+        "not named `i3status-*`, which is the same shape as the hole this "
+        "guard was widened to close." % sorted(missing))
 
     for script in consumers:
         consumer_gate = gates.get(script)

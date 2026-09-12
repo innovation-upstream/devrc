@@ -765,10 +765,14 @@ def test_a_relayed_cache_NAME_cannot_escape_the_directory(tmp_path, monkeypatch)
     assert sorted(p.name for p in dest.iterdir()) == ["ok.json"]
 
 
-def test_the_local_poller_probe_FAILS_SAFE(monkeypatch):
-    """If systemd cannot be asked, assume no local poller and proceed —
-    refusing on an unanswerable question would break the pull on any host
-    without systemd at all."""
+def test_the_local_poller_probe_FAILS_OPEN(monkeypatch):
+    """🔴 OPEN, NOT SAFE — and the name matters because it is what suite output
+    shows. If systemd cannot be asked we assume no local poller and PROCEED,
+    which with respect to the hazard (two writers on one cache) is the
+    permissive direction. That is the deliberate choice — refusing on an
+    unanswerable question would break the pull on any host without systemd, and
+    the nix gate is what actually prevents the collision — but calling it "safe"
+    named the opposite of what it does."""
     def _boom(*a, **k):
         raise FileNotFoundError("no systemctl")
     monkeypatch.setattr(subprocess, "run", _boom)
@@ -869,7 +873,21 @@ def test_the_relayed_cache_set_is_DERIVED_from_NATIVE_BLOCKS():
     host's tunnel as its own — fresh `ts`, no `wb` label, no `?`.
     """
     wanted = snap.native_cache_filenames()
-    assert wanted == {n.split("-", 1)[1] + ".json" for n in snap.NATIVE_BLOCKS}
+    # 🔴 PINNED AGAINST THE CONSUMERS, NOT AGAINST ITSELF. This used to assert
+    # `wanted == {n.split("-",1)[1] + ".json" for n in NATIVE_BLOCKS}` — a
+    # verbatim restatement of the function's own body, which cannot fail unless
+    # the function changes and says nothing about the files the blocks read.
+    # That is the same one-layer-down hole this very guard was added to close.
+    for block in sorted(snap.NATIVE_BLOCKS):
+        src_path = SCRIPTS / block
+        if not src_path.exists():
+            continue
+        m = re.search(r'^NAME\s*=\s*"([^"]+)"', src_path.read_text(), re.M)
+        assert m, "%s declares no NAME — cannot verify its cache file" % block
+        assert m.group(1) + ".json" in wanted, (
+            "%s reads %r.json but the relay does not carry it; on the observer "
+            "that pill would sit on `?` forever with the suite green"
+            % (block, m.group(1)))
     for relayed in snap.RELAY_BLOCKS:
         if "-" not in relayed:
             continue
@@ -901,3 +919,138 @@ def test_the_global_service_block_deploy_list_is_DERIVED_not_hardcoded():
         assert line in nix, (
             "%s is a NATIVE block but is not deployed on both hosts — on the "
             "observer it would be absent rather than showing a `?`" % name)
+
+
+# ---------------------------------------------------------------------------
+# F8 — the three behaviours round 1 shipped with no test at all
+# ---------------------------------------------------------------------------
+
+def _fake_pull(monkeypatch, tmp_path, remote_payload) -> dict:
+    """Drive `pull()` with a stubbed ssh so the schema path can be exercised."""
+    monkeypatch.setattr(snap, "CACHE_DIR", str(tmp_path / "remote"))
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(tmp_path / "bar-status"))
+    monkeypatch.setattr(snap, "local_poller_is_running", lambda: False)
+    os.makedirs(tmp_path / "remote", exist_ok=True)
+
+    class _P:
+        returncode = 0
+        stdout = json.dumps(remote_payload)
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _P())
+    rc = snap.pull("workbench", "z@h", "cmd")
+    dest = tmp_path / "remote" / "workbench.json"
+    return {
+        "rc": rc,
+        "snapshot": json.loads(dest.read_text()) if dest.exists() else None,
+        "cache": sorted(p.name for p in (tmp_path / "bar-status").iterdir())
+        if (tmp_path / "bar-status").is_dir() else [],
+    }
+
+
+def _remote(schema, blocks=None):
+    return {"schema": schema, "host": "workbench", "ts": int(time.time()),
+            "blocks": blocks if blocks is not None else [
+                {"name": "i3status-load", "text": "3.1", "state": "Idle"}],
+            "vitals": {},
+            "poller_cache": {"clawgate.json": '{"ts": 1789000000, "count": 1}'}}
+
+
+def test_a_NEWER_peer_schema_does_NOT_blank_the_observers_pills(tmp_path, monkeypatch):
+    """🔴 THE REGRESSION THE PREVIOUS ROUND INTRODUCED.
+
+    The schema check used to reject anything newer AND sat in front of the cache
+    install, so a workbench one generation ahead — the documented direction, the
+    laptop has sat 24 commits behind for days — made every pull write
+    `unreachable`, install nothing, and leave the laptop on `wb ?` plus six
+    Warning `?` pills. Before that guard existed the same skew simply worked.
+    """
+    got = _fake_pull(monkeypatch, tmp_path, _remote(snap.SCHEMA + 1))
+    assert got["rc"] == 0
+    # A successful snapshot carries NO `state` key -- only `_write_unreachable`
+    # adds one -- so absence is the pass, not a value comparison.
+    assert got["snapshot"].get("state") != "unreachable", \
+        "a newer peer schema blanked the snapshot"
+    assert got["cache"] == ["clawgate.json"], \
+        "the poller cache is poller-format and must install regardless of the " \
+        "SNAPSHOT schema — gating it turns a version skew into an outage"
+    assert "different generations" in got["snapshot"]["schema_note"]
+
+
+def test_a_version_skew_is_RECORDED_and_has_a_READER(tmp_path, monkeypatch):
+    """`schema_note` with no reader would be the DTO field the schema check was
+    criticised for being."""
+    got = _fake_pull(monkeypatch, tmp_path, _remote(snap.SCHEMA + 1))
+    assert got["snapshot"].get("schema_note")
+    assert "schema_note" in (SCRIPTS / "remote-host-detail").read_text(), \
+        "nothing renders schema_note — it is then a field, not a signal"
+
+
+def test_a_BOOL_schema_is_not_an_int(tmp_path, monkeypatch):
+    """`isinstance(True, int)` is True in Python, so an isinstance check waves a
+    bool through — the case test_clawgate_tasks.py flags 🔴."""
+    got = _fake_pull(monkeypatch, tmp_path, _remote(True))
+    assert "malformed" in got["snapshot"]["schema_note"], \
+        "a bool passed as a valid schema version"
+
+
+def test_a_snapshot_with_NO_BLOCK_LIST_is_unreadable_not_ok(tmp_path, monkeypatch):
+    """Shape, not version, is what makes a snapshot unrenderable."""
+    got = _fake_pull(monkeypatch, tmp_path, _remote(snap.SCHEMA, blocks="not-a-list"))
+    assert got["snapshot"]["state"] == "unreachable"
+    assert "blocks" in got["snapshot"]["detail"]
+
+
+def test_an_ALARMING_BLOCK_WITH_NO_TEXT_is_NAMED_not_counted(tmp_path):
+    """🔴 `wb +1` with nothing to be more THAN. Reachable in production:
+    `i3status-airvpn`'s stale pill is literally `{"text": "", "state":
+    "Warning"}`, so a stale airvpn source on the observed host painted the
+    observer a bare `+1`."""
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "text": "", "state": "Warning"}]), "--label", "wb")
+    assert "+1" not in out["text"], "the token was dropped and counted instead"
+    assert "airvpn" in out["text"]
+    assert out["state"] == "Warning"
+
+
+def test_the_relay_records_what_it_WITHHELD_and_the_detail_view_shows_it(tmp_path):
+    """`not_relayed` was written with no reader anywhere, so a block present in
+    the observed bar but absent from the relay vanished silently."""
+    assert "not_relayed" in (SCRIPTS / "remote-host-detail").read_text()
+    d = _pill_dir(tmp_path)
+    tgt = d / "remote-host-detail"
+    tgt.write_bytes((SCRIPTS / "remote-host-detail").read_bytes())
+    tgt.chmod(0o755)
+    cache = tmp_path / "cache" / "bar-remote"
+    cache.mkdir(parents=True, exist_ok=True)
+    payload = _live([{"name": "i3status-load", "text": "1.0", "state": "Idle"}])
+    payload["not_relayed"] = ["i3status-clawgate", "i3status-notifs"]
+    (cache / "workbench.json").write_text(json.dumps(payload))
+    proc = subprocess.run(
+        [sys.executable, str(tgt), "--host", "workbench", "--no-hold"],
+        capture_output=True, text=True, env=_hermetic_env(tmp_path), timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "not relayed" in proc.stdout
+    assert "clawgate" in proc.stdout and "notifs" in proc.stdout
+
+
+def test_the_systemctl_call_stays_on_a_READ_verb(tmp_path):
+    """🔴 THE PIN THE HAZARD-LEDGER ENTRY ARRIVED WITHOUT.
+
+    `bar-remote-snapshot` is acknowledged in `ACKNOWLEDGED_UNSTUBBED['systemctl']`
+    on the ground that nothing in scripts/tests reaches it — a runtime claim
+    nothing enforced. Every other genuine invoker in this repo (syshealth,
+    main-status-watch.py, tmux-restore-observe.sh) carries an argv pin. Without
+    one, changing `is-active` to `stop` leaves the file set unchanged and the
+    ledger green.
+    """
+    src = (SCRIPTS / "bar-remote-snapshot").read_text()
+    calls = re.findall(r'\["systemctl",\s*([^\]]*)\]', src)
+    assert len(calls) == 1, "expected exactly one systemctl argv, found %d" % len(calls)
+    argv = calls[0]
+    assert '"--user"' in argv
+    verbs = re.findall(r'"([a-z][a-z-]+)"', argv)
+    verb = next((v for v in verbs if v not in ("--user",)), None)
+    assert verb == "is-active", (
+        "the systemctl verb changed to %r. It must stay a READ: this script is "
+        "acknowledged as unstubbed, so a mutating verb would reach the real "
+        "host with nothing to stop it." % verb)

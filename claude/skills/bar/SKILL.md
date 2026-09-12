@@ -120,12 +120,22 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | remote host (LAPTOP) | `i3status-remote-host` | — | n/a | One pill relaying the WORKBENCH's HOST-LOCAL state from `~/.cache/bar-remote/workbench.json`, pulled every 60s by the `bar-remote-pull` timer (laptop only). 🔴 **NOT hide-at-zero** — it describes a machine nobody is looking at, so `quiet` and `not heard from in an hour` would both render as nothing; `wb ok` when current and quiet, trailing `?` when not, carrying the last known alarms. 🔴 **It relays VERDICTS, never recomputes them** — the gather runs the remote bar's own block commands read out of its deployed `config-top.toml`, so no threshold lives in this pill. 🔴 **Only HOST-LOCAL blocks travel** (`RELAY_BLOCKS` in `bar-remote-snapshot`): the six GLOBAL-SERVICE pills (clawgate/alerts/civitai/mail/telemetry/media) are deployed on the laptop instead, rendering from a poller cache the same pull syncs — relaying them labelled a shared fact as one host's and made this pill permanently red. `i3status-notifs` is withheld (unseen-dunst backlog, unactionable remotely) and so is this pill itself (recursive). The three classes are pinned two-way against `graphical.nix` by `test_every_custom_block_is_classified_exactly_once`. ⚠ `gpuBlock` is an i3status-rust BUILT-IN with no `command`, so the workbench's GPU is NOT relayed. **left/right-click → `remote-host-detail`, a float showing both hosts.** Debug: `systemctl --user status bar-remote-pull.timer`, then `bar-remote-snapshot --gather` on the workbench. |
 
 Bars differ by host (`isLaptop` in `graphical.nix`): laptop gets `batteryBlock` and **omits** GPU
-+ all count blocks + poller (nebula-only, no LAN path to homelab endpoints); workbench gets GPU
-(RTX 5080), the count blocks, the state-driven `mediaBlock` (qBit/AirVPN), `claudeRunsBlock` (▦ —
-live Claude-in-tmux count, **indicator only**: its click launched the retired `agent-ops` TUI and
-went with it), `rigcontrolBlock` (⚙) and `fansBlock` (pump/case RPM — the NCT6687D is the
-workbench board's Super I/O; the laptop has no such chip). `loadBlock` and `gamemodeBlock` are the
-CUSTOM blocks on **both** hosts (`/proc/loadavg` and one `i3-msg` need no poller).
+and the **POLLER** (nebula-only, no LAN path to homelab endpoints); workbench gets GPU
+(RTX 5080), `claudeRunsBlock` (▦ — live Claude-in-tmux count, **indicator only**: its click
+launched the retired `agent-ops` TUI and went with it), `rigcontrolBlock` (⚙) and `fansBlock`
+(pump/case RPM — the NCT6687D is the workbench board's Super I/O; the laptop has no such chip).
+
+🔴 **THE COUNT BLOCKS ARE NO LONGER WORKBENCH-ONLY, and this sentence used to say they were.**
+The six GLOBAL-SERVICE pills — `clawgate`, `mail`, `alerts`, `telemetry`, `civitai`, `media` —
+render on **BOTH** hosts. They are not one machine's facts (homelab/client-prod Alertmanager, the
+clawgate board, shared ClickHouse, a homelab qBittorrent pod), so both bars show them. On the
+laptop they read a poller cache **synced by `bar-remote-pull`**, not a local poller — the poller
+itself is still workbench-only — and their **clicks are withheld** (`lib.optionals (!isLaptop)`),
+because the targets are `grafana.homelab.lan`, `qbittorrent.workbench.lan` and a LAN IP that do
+not resolve from a nebula-only host. `airvpn` + `runaways` DO remain workbench-only and reach the
+laptop through the `wb` pill instead. ⚠ **Off nebula the laptop's six go `?`/Warning**, since
+nothing refreshes that cache. `loadBlock`, `gamemodeBlock`, `notifsBlock` and the scratchpad
+legend are CUSTOM blocks on both hosts that need no poller at all.
 
 ## Game mode (the 󰊗 pill + `mode "game"`)
 🔴 **`set $mod Mod1` — `$mod` is ALT, not Super.** i3 therefore holds a global X11 grab on ~60
@@ -164,18 +174,6 @@ untracked file so it is simply absent. A bare local pytest run sees it on disk a
 must be a real i3status-rust icon key, **not** an XDG desktop-icon name — an unknown one does not
 degrade to a missing glyph, it renders the whole pill as a red `Failed to render full text`
 (`test_every_block_ICON_is_a_REAL_i3status_rust_icon_key`).
-
-🔴 **THAT PARAGRAPH IS NOW PARTLY STALE AND THIS IS THE CORRECTION.** Since the
-remote-host relay landed, the six GLOBAL-SERVICE count blocks — `clawgate`, `mail`,
-`alerts`, `telemetry`, `civitai`, `media` — render on **BOTH** hosts, not the workbench
-only. They are not one machine's facts (they are homelab/client-prod Alertmanager, the
-clawgate board, shared ClickHouse, a homelab qBittorrent pod), so both bars show them.
-On the laptop they read a poller cache **synced by `bar-remote-pull`** rather than a local
-poller — the poller itself is still workbench-only — and their **clicks are withheld**
-(`lib.optionals (!isLaptop)`), because the targets are `grafana.homelab.lan`,
-`qbittorrent.workbench.lan` and a LAN IP that do not resolve from a nebula-only host.
-`airvpn` + `runaways` remain workbench-only and reach the laptop through the `wb` pill.
-⚠ **Off nebula the laptop's six go `?`/Warning**, since nothing refreshes that cache.
 
 ## Deploy / apply
 - **Single host (validate an edit end-to-end):** `home-manager switch --flake ~/workspace/devrc --impure`.

@@ -583,21 +583,49 @@ def pull(host_label: str, ssh_dest: str, remote_cmd: str) -> int:
     if not isinstance(payload, dict) or "ts" not in payload:
         return _write_unreachable(dest, host_label, "remote payload has no ts")
 
-    # 🔴 BRANCH ON THE SCHEMA -- a version field nothing reads is a DTO field,
-    # not a guard, and this one was exactly that: a payload claiming schema 999
-    # rendered `wb ok` / Idle. During a rollout the two hosts genuinely differ
-    # (the observer switches before the observed, or vice versa), so a
-    # newer-or-unknown snapshot must be reported as unreadable rather than
-    # rendered as calm. Older is accepted: fields are additive, and refusing a
-    # peer that is merely behind would blank the pill for the whole rollout.
+    # 🔴 THE POLLER CACHE IS INSTALLED FIRST, AND UNCONDITIONALLY ON THE SCHEMA.
+    # It is verbatim poller JSON, governed by the POLLER's format and read by the
+    # poller's own block scripts -- this module's `SCHEMA` says nothing about it.
+    # An earlier version gated it behind the schema check below and so turned a
+    # routine version skew into a SEVEN-PILL OUTAGE: with the workbench one
+    # generation ahead (the documented direction -- the laptop has sat 24 commits
+    # behind for days, which is why drift-check exists), every pull wrote
+    # `unreachable`, no cache was installed, and the laptop rendered `wb ?` plus
+    # six Warning `?` pills. Before that guard existed, the same skew kept working.
+    install_poller_cache(payload.pop("poller_cache", None) or {})
+
+    # 🔴 SCHEMA IS READ, BUT IT DOES NOT BLANK THE PILL -- and the direction it
+    # used to enforce was wrong by its own argument.
+    #
+    # It rejected anything NEWER than this host understands. But the reason given
+    # for accepting older was "fields are additive", and that is an argument that
+    # a newer snapshot is READABLE, not that it is not. The repo's own sibling
+    # precedent runs the other way (`lib/clawgate_tasks.py` accepts newer), and
+    # this PR bumped SCHEMA 1->2 for an additive change, so an additive bump is
+    # the expected case rather than the exotic one.
+    #
+    # What actually makes a snapshot unreadable is its SHAPE, so that is what is
+    # checked. A version difference is recorded and surfaced, never rendered as
+    # an outage.
     remote_schema = payload.get("schema")
-    if not isinstance(remote_schema, int) or remote_schema > SCHEMA:
+    # `isinstance(True, int)` is True in Python, so a bool would sail through an
+    # isinstance check -- the exact case `test_clawgate_tasks.py` flags 🔴.
+    schema_ok = type(remote_schema) is int  # noqa: E721 - bool must NOT pass
+    if not schema_ok:
+        payload["schema_note"] = f"malformed schema {remote_schema!r}"
+    elif remote_schema != SCHEMA:
+        payload["schema_note"] = (
+            f"peer schema {remote_schema} vs {SCHEMA} here -- hosts are on "
+            f"different generations")
+
+    if not isinstance(payload.get("blocks"), list):
+        # THIS is unreadable: no block list means nothing to render, and calling
+        # it `ok` would be the silent zero.
         return _write_unreachable(
             dest, host_label,
-            f"snapshot schema {remote_schema!r} is newer than this host "
-            f"understands ({SCHEMA}) -- the peer is on a newer generation")
+            "snapshot has no readable `blocks` list"
+            + (f" ({payload['schema_note']})" if payload.get("schema_note") else ""))
 
-    install_poller_cache(payload.pop("poller_cache", None) or {})
     _atomic_write(dest, payload)
     return 0
 

@@ -195,6 +195,11 @@ def build(remote_host: str, local_label: str) -> list:
                                 body.get("label_source")))
         if body.get("error"):
             out.append(f"  {STATE_ANSI['Warning']}gather error:{RESET} {body['error']}")
+        # A version skew no longer blanks the pill, so this is the only place it
+        # is visible. Without a reader `schema_note` would be the same DTO field
+        # the schema check was criticised for being.
+        if payload.get("schema_note"):
+            out.append(f"  {STATE_ANSI['Info']}note:{RESET} {payload['schema_note']}")
         out.append("")
         render_blocks(body.get("blocks") or [], out)
         out.append("")
