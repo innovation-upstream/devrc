@@ -90,6 +90,21 @@ let
   # through a shell.
   syshealthCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${pkgs.bash}/bin/bash -c '${home}/workspace/devrc/scripts/syshealth; echo; read -n 1 -r -s -p \"[any key to close]\"'";
 
+  # The remote-host pill's click: the full relayed bar, both hosts, in a float.
+  # 🔴 A FLOAT TERMINAL, for the reason spelled out on `syshealthCmd` above and
+  # measured on the scratchpad picker: i3status-rust runs a click through
+  # `sh -c` with NO CONTROLLING TERMINAL, so a bare TUI exits `inappropriate
+  # ioctl for device` and the click is a SILENT NO-OP. `remote-host-detail`
+  # holds the terminal itself (it `input()`s when stdin is a tty), so unlike
+  # syshealthCmd there is no `read -n 1` bolted on here — but the float is
+  # still mandatory, because without a tty the hold is skipped and the window
+  # vanishes instantly, which is indistinguishable from the click doing nothing.
+  # 🔴 `--local-label laptop` is EXPLICIT and must stay so: both hosts are named
+  # `nixos`, so a label derived from the hostname names neither (the script
+  # refuses to guess and says `this-host` instead, which is honest but less
+  # useful than the truth nix already knows from `isLaptop`).
+  remoteHostDetailCmd = "alacritty --class float,float -o window.dimensions.columns=100 -o window.dimensions.lines=46 -e ${pkgs.bash}/bin/bash -c '${scriptsDir}/remote-host-detail --host workbench --local-label laptop'";
+
   # The scratchpad legend pill's left-click: the same fzf picker tmux binds to
   # Alt+Shift+T (`~/.config/tmux/scratch-picker.sh`, deployed by nix/home.nix).
   # 🔴 THE FLOAT TERMINAL IS NOT OPTIONAL, for exactly the reason spelled out on
@@ -616,8 +631,43 @@ let
     ];
   };
 
+  # remote-host: ONE pill relaying the OTHER machine's whole bar, from a
+  # snapshot pulled over nebula by `bar-remote-pull` (below). LAPTOP ONLY, and
+  # that gate is the feature, not an accident: the operator sits at the laptop
+  # and SSHes to the workbench, so the laptop's bar is the one showing the wrong
+  # machine's state.
+  #
+  # 🔴 IT DOES NOT HIDE AT ZERO, and it is the only pill here that does not.
+  # Every count pill is invisible when quiet, which is right for a pill on the
+  # bar of the machine it describes — if that machine's poller dies, EVERY pill
+  # goes `?` at once and the operator sees it. This one describes a machine
+  # nobody is looking at, so "quiet" and "I have not heard from it in an hour"
+  # would both render as nothing, and the second is exactly when you need it.
+  # `wb ok` when current and quiet; `wb ok?` when it is not current.
+  #
+  # 🔴 NO `--red-above` HERE, DELIBERATELY. The pill relays each remote block's
+  # OWN state, produced by the remote bar's own command with the remote host's
+  # own thresholds. A threshold in this argv would be a third copy of a number
+  # that already lives in two places, and the copy furthest from anyone's eyes.
+  #
+  # interval 30 against a ~60s pull: the pill re-reads a local file, so a short
+  # interval costs nothing and shortens the gap between a snapshot landing and
+  # the bar showing it. No `signal` — nothing signals the bar on the pull, and
+  # a stale-by-30s relay is already behind a `?` when it matters.
+  remoteHostBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-remote-host --host workbench --label wb";
+    json = true;
+    interval = 30;
+    click = [
+      { button = "left"; cmd = remoteHostDetailCmd; }
+      { button = "right"; cmd = remoteHostDetailCmd; }
+    ];
+  };
+
   blocks =
     [ memoryBlock diskBlock scratchpadsBlock netBlock cpuBlock loadBlock temperatureBlock ]
+    ++ lib.optional isLaptop remoteHostBlock
     ++ lib.optional (!isLaptop) fansBlock
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
@@ -851,8 +901,35 @@ lib.mkIf isNixOS {
   # `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`, which
   # runs each block with no sibling present — so if that ever regresses, the
   # failure here is a dead pill, not a question mark.
-  home.file.".config/i3status-rust/scripts/bar_freshness.py" = lib.mkIf (!isLaptop) {
+  # 🔴 WIDENED FROM `mkIf (!isLaptop)` TO BOTH HOSTS, and the direction is the
+  # whole point. `i3status-remote-host` is a LAPTOP-only block that loads this
+  # sibling, so leaving the module workbench-only would put the block on the one
+  # machine without the module — the exact inversion the long note above warns
+  # about, just mirrored. Deploying it everywhere keeps the module WIDER than
+  # every consumer, which is the invariant those tests actually assert.
+  home.file.".config/i3status-rust/scripts/bar_freshness.py" = {
     source = ../scripts/bar_freshness.py;
+  };
+
+  # bar-remote-snapshot: BOTH hosts, and this is not symmetry for its own sake.
+  # The laptop runs `--pull` (and `--gather` for its own half of the detail
+  # view); the workbench must answer that pull with `--gather`, invoked over SSH
+  # at THIS path. Gate it to the laptop and the pull reaches a workbench that
+  # cannot answer — a pill stuck on `?` with a perfectly successful deploy on
+  # both machines.
+  home.file.".config/i3status-rust/scripts/bar-remote-snapshot" = {
+    source = ../scripts/bar-remote-snapshot;
+    executable = true;
+  };
+
+  # The pill and its drill-down: laptop only, matching remoteHostBlock's gate.
+  home.file.".config/i3status-rust/scripts/i3status-remote-host" = lib.mkIf isLaptop {
+    source = ../scripts/i3status-remote-host;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/remote-host-detail" = lib.mkIf isLaptop {
+    source = ../scripts/remote-host-detail;
+    executable = true;
   };
   home.file.".config/i3status-rust/scripts/i3status-clawgate" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-clawgate;
@@ -1018,6 +1095,68 @@ lib.mkIf isNixOS {
     Timer = {
       OnStartupSec = "20s";
       OnUnitActiveSec = "45s";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # bar-remote pull — LAPTOP ONLY. Every ~60s it SSHes to the workbench over
+  # nebula, runs `bar-remote-snapshot --gather` there, and lands the result at
+  # ~/.cache/bar-remote/workbench.json for `i3status-remote-host` to render.
+  #
+  # 🔴 PULL, NOT PUSH, and that choice is load-bearing. A push from the
+  # workbench would fire at a laptop that is asleep, on another network, or
+  # simply off — every ~60s, failing, toasting, and filling the workbench's
+  # journal with the operator's own lid being shut. Pulling puts the schedule on
+  # the machine that knows whether it is awake and connected, and makes an
+  # unreachable peer a LOCAL, expected state that renders as `?` on the pill.
+  #
+  # 🔴 NO `OnFailure = notify-failure@` HERE, unlike the poller. An unreachable
+  # workbench is the ordinary case for a roaming laptop, the script exits 0 for
+  # it on purpose, and the signal already reaches the operator through the pill
+  # (`?`, with the last known alarms carried behind it). A failure toast on this
+  # unit would fire the DND-defeating class every time the lid closed.
+  #
+  # The env is minimal under systemd, so PATH is explicit: python3 runs the
+  # script, openssh provides `ssh`, coreutils the usual. BAR_HOST_LABEL names
+  # THIS host for the script's own `--gather` half — both machines are called
+  # `nixos`, so nothing can derive it.
+  systemd.user.services.bar-remote-pull = lib.mkIf isLaptop {
+    Unit = {
+      Description = "Pull the workbench's bar snapshot → ~/.cache/bar-remote for the i3 bar";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Ceiling above the script's own ssh ConnectTimeout(8) + gather timeout,
+      # so systemd reaps a wedged ssh rather than letting the timer stall.
+      TimeoutStartSec = 60;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.openssh pkgs.coreutils ]}"
+        "HOME=%h"
+        "BAR_HOST_LABEL=laptop"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 ${scriptsDir}/bar-remote-snapshot"
+        + " --pull workbench --ssh zach@10.42.0.30"
+        + " --remote-cmd 'python3 ~/.config/i3status-rust/scripts/bar-remote-snapshot --gather --label workbench'";
+      X-Restart-Triggers = [ "${../scripts/bar-remote-snapshot}" ];
+    };
+  };
+
+  systemd.user.timers.bar-remote-pull = lib.mkIf isLaptop {
+    Unit = {
+      Description = "Periodic timer for the workbench bar-snapshot pull";
+    };
+    Timer = {
+      OnStartupSec = "25s";
+      # 60s, deliberately slower than the poller's 45s: this crosses a ~138ms
+      # nebula link to run ~15 block scripts on the far side, and the relayed
+      # data is at most one poller-interval fresh anyway. Staleness beyond
+      # MAX_CACHE_AGE_SECS (600s) is what the `?` exists for, so a missed pull
+      # or two is absorbed rather than alarming.
+      OnUnitActiveSec = "60s";
     };
     Install = {
       WantedBy = [ "timers.target" ];

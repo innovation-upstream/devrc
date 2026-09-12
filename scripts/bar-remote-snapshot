@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""Publish (or fetch) ONE host's whole bar state as a single JSON snapshot.
+
+Two verbs, one script, deployed to BOTH hosts:
+
+  bar-remote-snapshot --gather
+      Print THIS host's snapshot on stdout. Runs on the machine being observed.
+
+  bar-remote-snapshot --pull <host> --ssh <dest>
+      SSH to <dest>, run `--gather` there, and land the result at
+      ~/.cache/bar-remote/<host>.json atomically. Runs on the observing machine.
+
+WHY IT RUNS THE BAR'S OWN BLOCK COMMANDS INSTEAD OF RE-DERIVING COUNTS
+---------------------------------------------------------------------
+Every count pill's red line lives in `nix/graphical.nix` as a `--red-above N`
+argument on that block's `command`, and is mirrored into the poller's toast env.
+That is already two places, and the bar skill records what happens when they
+drift. Re-deriving the verdicts here would make a THIRD, and this one would be
+the copy nobody looks at -- it renders on a different machine.
+
+So the gather does not know what a threshold is. It reads the DEPLOYED
+`config-top.toml`, takes each custom block's `command` VERBATIM, runs it, and
+records the `{"text", "state"}` that block emitted. The verdict travels; the
+predicate does not. A new block, a retuned threshold, or a reworded pill is
+picked up with no change here.
+
+🔴 Corollary, and it is the point: the remote pill cannot disagree with the
+remote bar, because it is not a second opinion -- it is the same opinion,
+relayed.
+
+WHAT THIS CANNOT CAPTURE, SAID OUT LOUD
+---------------------------------------
+i3status-rust's BUILT-IN blocks (cpu, memory, disk_space, net, time, battery)
+are internal to the bar binary -- they have no `command` to run. They are
+gathered separately, from /proc and statvfs, under "vitals". That split is
+structural, not an oversight, and it is why `vitals` and `blocks` are different
+keys rather than one merged list: a reader must be able to tell a relayed
+verdict from a locally-computed number.
+
+FRESHNESS
+---------
+`ts` is an INT (`bar_freshness.int_or_none` refuses to coerce a float, which
+would short-circuit every staleness case to `?` and look exactly like a code
+bug). Readers apply `bar_freshness.unmeasured` to the snapshot exactly as they
+would to a poller cache file -- an unreachable peer is then indistinguishable,
+by design, from a dead poller: both mean "this is not a current measurement".
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+SCHEMA = 1
+
+# Where a pulled snapshot lands on the OBSERVING host. Deliberately NOT
+# ~/.cache/bar-status: that directory is the poller's, every file in it is a
+# local measurement, and mixing a relayed one in would break that invariant.
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
+    "bar-remote",
+)
+
+BAR_CONFIG = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"),
+    "i3status-rust",
+    "config-top.toml",
+)
+
+# A block script that hangs must not hang the pull. Each is a local file read.
+BLOCK_TIMEOUT_SECS = 8
+GATHER_TIMEOUT_SECS = 45
+
+
+# --------------------------------------------------------------------------
+# gather
+# --------------------------------------------------------------------------
+
+def parse_block_commands(toml_text: str) -> list[dict]:
+    """Every custom block's `command`, in bar order, WITH its declared format.
+
+    Returns `[{"command": str, "json": bool}, ...]`.
+
+    Hand-rolled rather than a TOML library because this must run under a bare
+    python3 on either host with no third-party imports -- the same constraint
+    every block script here is written to.
+
+    🔴 `json` IS NOT ASSUMED, AND THAT IS NOT DEFENSIVENESS -- IT IS MEASURED.
+    i3status-rust's `custom` block defaults to `json = false`, i.e. it treats
+    the command's stdout as PLAIN TEXT. On this bar, 15 blocks are `custom` and
+    only 14 declare `json = true`: `i3blocks-rigcontrol` is an i3blocks-era
+    script that prints a bare glyph. A gather that assumed JSON scored that
+    healthy block as `unparseable`/Warning -- inventing an alarm on the
+    observing host for a block that was working perfectly.
+
+    🔴 `[[block.click]]`'s `cmd` is deliberately NOT collected. Those are user
+    actions -- they open menus, float terminals, toggle game mode. Running one
+    during a gather would fire a side effect on the observed host every pull.
+    """
+    blocks: list[dict] = []
+    cur: dict | None = None
+
+    def flush() -> None:
+        if cur is not None and cur.get("command"):
+            blocks.append({"command": cur["command"], "json": cur.get("json", False)})
+
+    for raw in toml_text.splitlines():
+        line = raw.strip()
+        if line.startswith("[[block]]"):
+            flush()
+            cur = {}
+            continue
+        if line.startswith("["):
+            # Any other table header ([[block.click]], [settings], [icons], ...)
+            # ends the stanza's own key space. Without this a click's `cmd`
+            # could be mistaken for a block key.
+            flush()
+            cur = None
+            continue
+        if cur is None:
+            continue
+        m = re.match(r'^block\s*=\s*"([^"]+)"', line)
+        if m:
+            if m.group(1) != "custom":
+                cur = None
+            continue
+        m = re.match(r'^command\s*=\s*"(.+)"\s*$', line)
+        if m:
+            cur["command"] = m.group(1)
+            continue
+        m = re.match(r"^json\s*=\s*(true|false)\s*$", line)
+        if m:
+            cur["json"] = m.group(1) == "true"
+    flush()
+    return blocks
+
+
+def block_name(command: str) -> str:
+    """A short, stable label for a block, from its command's basename."""
+    first = command.split()[0] if command.split() else command
+    return os.path.basename(first)
+
+
+def run_block(command: str, env: dict, is_json: bool = True) -> dict:
+    """Run one block command and record what it rendered.
+
+    `is_json` mirrors the block's own `json =` in the bar config: a plain-text
+    block's stdout IS its pill text, with no state of its own (i3status-rust
+    renders it Idle), so parsing it as JSON would manufacture an alarm.
+
+    A block that fails is recorded as a block that failed -- never dropped.
+    A dropped block is an alarm that silently stops being relayed.
+    """
+    out = {"name": block_name(command), "command": command, "json": is_json}
+    try:
+        proc = subprocess.run(
+            ["sh", "-c", command],
+            capture_output=True, text=True,
+            timeout=BLOCK_TIMEOUT_SECS, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        out.update(text="?", state="Warning", error="timeout")
+        return out
+    except Exception as exc:  # noqa: BLE001 - a gather must not abort on one block
+        out.update(text="?", state="Warning", error=f"spawn: {exc.__class__.__name__}")
+        return out
+
+    body = (proc.stdout or "").strip()
+    if not body:
+        # An EMPTY pill is a real, correct state here: every count block is
+        # hide-at-zero, so "measured and quiet" renders as nothing at all.
+        out.update(text="", state="Idle", rc=proc.returncode)
+        return out
+    if not is_json:
+        # Plain-text block: stdout IS the pill, first line only (i3blocks'
+        # 2nd/3rd lines are short-text and colour, which i3status-rust ignores).
+        out.update(text=body.splitlines()[0], state="Idle", rc=proc.returncode)
+        return out
+    try:
+        payload = json.loads(body)
+    except Exception:
+        out.update(text="?", state="Warning", error="unparseable", rc=proc.returncode)
+        return out
+    if not isinstance(payload, dict):
+        out.update(text="?", state="Warning", error="not-an-object", rc=proc.returncode)
+        return out
+    out.update(
+        text=payload.get("text", ""),
+        state=payload.get("state", "Idle"),
+        rc=proc.returncode,
+    )
+    if "short_text" in payload:
+        out["short_text"] = payload["short_text"]
+    return out
+
+
+def _read(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def gather_vitals() -> dict:
+    """The numbers i3status-rust renders INTERNALLY, which have no command.
+
+    Everything here is /proc or statvfs -- no subprocess, no network, so a
+    vitals gather cannot hang or depend on anything being installed.
+    """
+    v: dict = {}
+
+    loadavg = _read("/proc/loadavg")
+    if loadavg:
+        parts = loadavg.split()
+        if len(parts) >= 3:
+            try:
+                v["load1"], v["load5"], v["load15"] = (float(p) for p in parts[:3])
+            except ValueError:
+                pass
+
+    meminfo = _read("/proc/meminfo")
+    if meminfo:
+        kb = {}
+        for line in meminfo.splitlines():
+            bits = line.split()
+            if len(bits) >= 2 and bits[0].endswith(":"):
+                try:
+                    kb[bits[0][:-1]] = int(bits[1])
+                except ValueError:
+                    pass
+        total, avail = kb.get("MemTotal"), kb.get("MemAvailable")
+        if total:
+            v["mem_total_gb"] = round(total / 1048576, 1)
+            if avail is not None:
+                v["mem_used_gb"] = round((total - avail) / 1048576, 1)
+                v["mem_used_pct"] = round((total - avail) * 100.0 / total, 1)
+        swap_total, swap_free = kb.get("SwapTotal"), kb.get("SwapFree")
+        if swap_total:
+            v["swap_total_gb"] = round(swap_total / 1048576, 1)
+            v["swap_used_gb"] = round((swap_total - (swap_free or 0)) / 1048576, 1)
+
+    uptime = _read("/proc/uptime")
+    if uptime:
+        try:
+            v["uptime_secs"] = int(float(uptime.split()[0]))
+        except (ValueError, IndexError):
+            pass
+
+    # CPU: a POINT sample would need two reads separated by a sleep, which would
+    # stall the gather. Load average already answers "is the box saturated", so
+    # cpu% is deliberately not reported rather than reported badly.
+    cpus = 0
+    stat = _read("/proc/stat")
+    if stat:
+        cpus = sum(1 for line in stat.splitlines() if re.match(r"^cpu\d+\s", line))
+    if cpus:
+        v["cpus"] = cpus
+        if "load1" in v:
+            v["load1_per_cpu"] = round(v["load1"] / cpus, 2)
+
+    # 🔴 Dedup by DEVICE, not by the numbers. On this workbench `/` and `/home`
+    # are one filesystem (st_dev 66314 for both), so a value-based dedup keeps
+    # both and the detail view prints the same 712 GB twice as if they were two
+    # disks. Comparing the rendered dicts cannot catch that -- their `mount`
+    # keys differ, which is precisely the field that makes them look distinct.
+    mounts = []
+    seen_devs = set()
+    for mount in ("/", "/home", "/nix"):
+        try:
+            dev = os.stat(mount).st_dev
+            st = os.statvfs(mount)
+        except OSError:
+            continue
+        if dev in seen_devs:
+            continue
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        if total <= 0:
+            continue
+        seen_devs.add(dev)
+        mounts.append({
+            "mount": mount,
+            "total_gb": round(total / 1073741824, 1),
+            "free_gb": round(free / 1073741824, 1),
+            "used_pct": round((total - free) * 100.0 / total, 1),
+        })
+    if mounts:
+        v["disk"] = mounts
+
+    return v
+
+
+def resolve_label(explicit: str | None) -> tuple[str, str]:
+    """Return `(label, source)` -- and NEVER silently guess an identity.
+
+    🔴 BOTH OF THIS OPERATOR'S HOSTS ARE NAMED `nixos`. Measured on each:
+    `hostname` is `nixos` on the workbench AND the laptop, and `ACTIVITY_HOST`
+    is unset in a non-interactive shell on both. So `socket.gethostname()` is
+    not an identity here -- it is a constant, and a snapshot labelled by it
+    would say `nixos` for whichever machine produced it. This is the same trap
+    RULES records from the claim-lock's `uname -n`, where each host read the
+    other's claims as its own.
+
+    So the label is DECLARED (nix passes `--label`, which knows `isLaptop`), or
+    taken from `$BAR_HOST_LABEL`, and only then falls back to the hostname --
+    with `source` recording which, so a reader can say "guessed" out loud
+    instead of presenting a coin-flip as a fact.
+    """
+    if explicit:
+        return explicit, "declared"
+    env_label = os.environ.get("BAR_HOST_LABEL")
+    if env_label:
+        return env_label, "env"
+    return socket.gethostname(), "hostname"
+
+
+def gather(host_label: str | None = None) -> dict:
+    env = dict(os.environ)
+    # Over SSH there is no DISPLAY, and the blocks that ask X a question
+    # (game mode) would report "cannot answer" on a perfectly healthy host.
+    env.setdefault("DISPLAY", ":0")
+    env.setdefault("XAUTHORITY", os.path.join(os.path.expanduser("~"), ".Xauthority"))
+
+    label, label_source = resolve_label(host_label)
+    snapshot: dict = {
+        "schema": SCHEMA,
+        "host": label,
+        "label_source": label_source,
+        # INT on purpose -- see the module docstring.
+        "ts": int(time.time()),
+        "vitals": gather_vitals(),
+    }
+
+    toml_text = _read(BAR_CONFIG)
+    if toml_text is None:
+        snapshot["blocks"] = []
+        snapshot["error"] = f"no bar config at {BAR_CONFIG}"
+        return snapshot
+
+    specs = parse_block_commands(toml_text)
+    snapshot["blocks"] = [
+        run_block(s["command"], env, is_json=s["json"]) for s in specs
+    ]
+    if not specs:
+        # Not the same as "every block was quiet". A config that parsed to zero
+        # custom blocks means the reader is about to render a confident "ok"
+        # from a gather that asked nothing.
+        snapshot["error"] = "bar config parsed to ZERO custom blocks"
+    return snapshot
+
+
+# --------------------------------------------------------------------------
+# pull
+# --------------------------------------------------------------------------
+
+def pull(host_label: str, ssh_dest: str, remote_cmd: str) -> int:
+    os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+    dest = os.path.join(CACHE_DIR, f"{host_label}.json")
+
+    argv = [
+        "ssh", "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "StrictHostKeyChecking=accept-new",
+        ssh_dest, remote_cmd,
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=GATHER_TIMEOUT_SECS
+        )
+    except subprocess.TimeoutExpired:
+        return _write_unreachable(dest, host_label, "ssh timeout")
+    except Exception as exc:  # noqa: BLE001
+        return _write_unreachable(dest, host_label, f"ssh spawn: {exc.__class__.__name__}")
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        return _write_unreachable(
+            dest, host_label,
+            f"ssh rc={proc.returncode}: {detail[-1] if detail else 'no stderr'}",
+        )
+
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception:
+        return _write_unreachable(dest, host_label, "remote output was not JSON")
+
+    if not isinstance(payload, dict) or "ts" not in payload:
+        return _write_unreachable(dest, host_label, "remote payload has no ts")
+
+    _atomic_write(dest, payload)
+    return 0
+
+
+def _write_unreachable(dest: str, host_label: str, detail: str) -> int:
+    """Record that the peer could not be reached -- WITHOUT destroying the
+    previous reading.
+
+    🔴 This is the same rule the poller follows: an outage may make a reading
+    less trusted, it may never make a recorded alarm quieter. So the last good
+    snapshot is preserved under `last_good` and the reader carries its alarms
+    forward behind a `?`. Overwriting it with an empty error object would turn a
+    workbench with two stuck dispatches into a silent bar.
+    """
+    previous = None
+    try:
+        with open(dest, "r", encoding="utf-8") as fh:
+            prior = json.load(fh)
+        previous = prior.get("last_good", prior) if isinstance(prior, dict) else None
+    except (OSError, ValueError):
+        previous = None
+
+    payload = {
+        "schema": SCHEMA,
+        "host": host_label,
+        "ts": int(time.time()),
+        "state": "unreachable",
+        "detail": detail,
+    }
+    if previous:
+        payload["last_good"] = previous
+    _atomic_write(dest, payload)
+
+    # 🔴 SAY WHY, EVERY TIME. The exit code below is deliberately 0, so this
+    # stderr line is the ONLY place a permanently-broken pull (wrong host, no
+    # key, sshd down) is distinguishable from the transient one it is designed
+    # to absorb. Without it, "the peer is briefly away" and "this was never
+    # going to work" are the same silent success in the journal.
+    print(f"bar-remote-snapshot: {host_label} UNREACHABLE -- {detail}", file=sys.stderr)
+
+    # Exit 0: an unreachable peer is an ordinary, expected state (a closed
+    # laptop, a dropped tunnel). Failing the unit would fire the DND-defeating
+    # failure toast every time the operator shut the lid -- and the pill already
+    # carries the signal, as a `?` with the last known alarms held behind it.
+    return 0
+
+
+def _atomic_write(dest: str, payload: dict) -> None:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".snap-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--gather", action="store_true",
+                    help="print THIS host's snapshot on stdout")
+    ap.add_argument("--pull", metavar="HOST_LABEL",
+                    help="fetch a peer's snapshot into the cache under this label")
+    ap.add_argument("--ssh", metavar="DEST",
+                    help="ssh destination for --pull (user@host)")
+    ap.add_argument("--remote-cmd", default="bar-remote-snapshot --gather",
+                    help="command to run on the peer (default: %(default)s)")
+    ap.add_argument("--label", help="override the host label recorded by --gather")
+    args = ap.parse_args(argv)
+
+    if args.gather:
+        json.dump(gather(args.label), sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+
+    if args.pull:
+        if not args.ssh:
+            ap.error("--pull requires --ssh")
+        if not shutil.which("ssh"):
+            print("bar-remote-snapshot: no ssh on PATH", file=sys.stderr)
+            return 2
+        return pull(args.pull, args.ssh, args.remote_cmd)
+
+    ap.error("one of --gather or --pull is required")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

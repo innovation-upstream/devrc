@@ -1006,6 +1006,66 @@ BLOCK_SOURCE_FILES = [
 assert [n for n, _ in BLOCK_SOURCE_FILES] == [n for n, _ in ALL_BLOCKS]
 
 
+#: Host gates a `home.file` entry can carry, as SETS of hosts. Containment is
+#: then ordinary set containment rather than string matching, which is what lets
+#: the guard below state its invariant instead of spelling one instance of it.
+_GATE_HOSTS = {
+    "both": frozenset({"workbench", "laptop"}),
+    "!isLaptop": frozenset({"workbench"}),
+    "isLaptop": frozenset({"laptop"}),
+}
+
+
+def _home_file_gates(nix: str) -> dict:
+    """Map `<basename> -> gate token` for every i3status-rust script home.file.
+
+    Reads the `home.file.".config/i3status-rust/scripts/<name>" = ...` lines and
+    classifies the gate on that same line: `lib.mkIf (!isLaptop)`,
+    `lib.mkIf isLaptop`, or no mkIf at all (= both hosts).
+    """
+    gates = {}
+    prefix = 'home.file.".config/i3status-rust/scripts/'
+    for line in nix.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        name = stripped[len(prefix):].split('"', 1)[0]
+        if "mkIf (!isLaptop)" in stripped or "mkIf !isLaptop" in stripped:
+            gates[name] = "!isLaptop"
+        elif "mkIf isLaptop" in stripped:
+            gates[name] = "isLaptop"
+        elif "mkIf" in stripped:
+            # An unrecognised condition must NOT silently read as "both" — that
+            # is the permissive default that turns this guard into decoration.
+            gates[name] = "unknown:" + stripped
+        else:
+            gates[name] = "both"
+    return gates
+
+
+def _gate_contains(outer: str, inner: str) -> bool:
+    """Does gate `outer` deploy on every host gate `inner` deploys on?"""
+    if outer not in _GATE_HOSTS or inner not in _GATE_HOSTS:
+        return False
+    return _GATE_HOSTS[inner] <= _GATE_HOSTS[outer]
+
+
+def test_the_gate_helper_REJECTS_an_unrecognised_condition():
+    """Positive control for the helper above: it must not answer `both` for a
+    gate it does not understand, and `_gate_contains` must refuse an unknown
+    token outright rather than treating it as universal."""
+    nix = 'home.file.".config/i3status-rust/scripts/x" = lib.mkIf someOtherCond {'
+    assert _home_file_gates(nix)["x"].startswith("unknown:")
+    assert not _gate_contains("unknown:whatever", "isLaptop")
+    assert not _gate_contains("both", "unknown:whatever")
+    # and the ordinary readings it MUST get right
+    assert _gate_contains("both", "isLaptop")
+    assert _gate_contains("both", "!isLaptop")
+    assert _gate_contains("!isLaptop", "!isLaptop")
+    assert not _gate_contains("!isLaptop", "isLaptop")
+    assert not _gate_contains("isLaptop", "!isLaptop")
+
+
 def test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it():
     """🔴 THE SEAM A UNIT TEST CANNOT SEE. Each block loads `bar_freshness.py`
     out of its OWN directory — which at runtime is
@@ -1028,15 +1088,31 @@ def test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it():
         assert "_load_freshness" in src, name
         entry = '.config/i3status-rust/scripts/%s"' % script
         assert entry in nix, "%s loads the sibling but is not deployed" % name
-    # the sibling must not be deployed on a NARROWER gate than its consumers:
-    # both are !isLaptop, so a laptop has neither rather than blocks with no
-    # module to load.
-    for line in nix.splitlines():
-        if "scripts/bar_freshness.py\"" in line and "home.file" in line:
-            assert "!isLaptop" in line, line
-            break
-    else:
-        raise AssertionError("no home.file line for bar_freshness.py")
+    # 🔴 THE SIBLING'S GATE MUST CONTAIN EVERY CONSUMER'S — asserted as a
+    # RELATIONSHIP, not as a spelling.
+    #
+    # This used to assert the literal string `!isLaptop` on the sibling's
+    # home.file line. That is a guard on a WORD, and it went red the moment a
+    # LAPTOP-only consumer (`i3status-remote-host`) arrived and the sibling was
+    # correctly WIDENED to both hosts — the change satisfied the invariant this
+    # docstring states and failed the word it happened to be spelled with.
+    # Worse, the spelling was walkable in the dangerous direction too: had the
+    # sibling been narrowed to `mkIf isLaptop` while consumers stayed
+    # `!isLaptop`, the substring `isLaptop` is still present and a laxer check
+    # would have passed while every workbench pill rendered `?`.
+    #
+    # So: extract each home.file entry's gate and assert containment.
+    gates = _home_file_gates(nix)
+    sibling_gate = gates.get("bar_freshness.py")
+    assert sibling_gate is not None, "no home.file entry for bar_freshness.py"
+    for name, script in BLOCK_SOURCE_FILES:
+        consumer_gate = gates.get(script)
+        assert consumer_gate is not None, "%s has no home.file entry" % name
+        assert _gate_contains(sibling_gate, consumer_gate), (
+            "bar_freshness.py is deployed on gate %r, which does NOT cover "
+            "consumer %s on gate %r — that host would carry the block with no "
+            "module to load, and every pill it renders would be `?`"
+            % (sibling_gate, script, consumer_gate))
 
 
 def test_the_two_TOO_OLD_constants_measure_DIFFERENT_THINGS():
@@ -3248,14 +3324,72 @@ def test_the_PROSE_COUNT_of_freshness_consumers_matches_the_SOURCES_ledger():
     assert consumers, (
         "no block script calls `fresh.unmeasured(` — this test measured "
         "nothing, so its count would be a vacuous 0")
-    # 🔴 The two ledgers must be the SAME SET, not merely the same size: a source
-    # polled with no block, or a block for no source, is a real defect and would
-    # otherwise cancel out in a bare count comparison.
-    assert consumers == sorted(n for n, _fn in poll.SOURCES), (
-        "the freshness consumers and the polled sources disagree:\n"
-        "  blocks  %r\n  SOURCES %r" % (consumers, sorted(n for n, _fn in poll.SOURCES)))
+    # 🔴 THERE ARE NOW TWO WRITERS, AND THE LEDGER HAS TO SAY SO.
+    #
+    # The invariant is "every freshness consumer has a writer that refreshes
+    # its cache, and every writer has a consumer" — NOT "every consumer is a
+    # poller source". Those were the same sentence while `bar-status-poll` was
+    # the only writer. `i3status-remote-host` is refreshed by `bar-remote-pull`
+    # (a laptop timer that SSHes to the peer), so it is a legitimate consumer
+    # with NO entry in `poll.SOURCES`, and the old equality read that as a
+    # defect.
+    #
+    # The second set is ENUMERATED, not pattern-matched, for the same reason the
+    # first one is read back against SOURCES: a consumer that drifts out of both
+    # ledgers is a pill nothing refreshes, and the whole point here is that it
+    # cannot appear silently. Adding a block to this list is a deliberate claim
+    # that some OTHER writer keeps its cache current — name that writer.
+    NON_POLLER_CONSUMERS = {
+        # consumer -> the unit that writes its cache
+        "remote-host": "bar-remote-pull.timer (systemd --user, laptop)",
+    }
+    polled = sorted(n for n, _fn in poll.SOURCES)
+    expected = sorted(polled + list(NON_POLLER_CONSUMERS))
+    assert consumers == expected, (
+        "the freshness consumers and their writers disagree:\n"
+        "  blocks     %r\n  SOURCES    %r\n  non-poller %r\n"
+        "A block here with no writer is a pill that can never refresh; a writer "
+        "with no block is a cache nothing renders."
+        % (consumers, polled, sorted(NON_POLLER_CONSUMERS)))
+    # Two-way on the second ledger too: an entry naming a block that no longer
+    # calls `fresh.unmeasured(` is a stale claim about a writer nobody needs.
+    assert set(NON_POLLER_CONSUMERS) <= set(consumers), (
+        "NON_POLLER_CONSUMERS names %r, which no block script consumes"
+        % sorted(set(NON_POLLER_CONSUMERS) - set(consumers)))
+    # And the named writer must actually exist in the nix that defines it.
+    nix_text = (Path(__file__).resolve().parents[1].parent
+                / "nix" / "graphical.nix").read_text()
+    for consumer, writer in NON_POLLER_CONSUMERS.items():
+        unit = writer.split(".timer")[0].split()[0]
+        assert "systemd.user.timers.%s" % unit in nix_text, (
+            "%s is declared to be refreshed by %r, but no such timer is defined "
+            "in nix/graphical.nix — the cache would never be written"
+            % (consumer, unit))
 
-    n = len(consumers)
+    # 🔴 THE PROSE COUNT IS THE *POLLED* POPULATION, NOT THE CONSUMER COUNT —
+    # and the difference was measured by reading all six pinned sentences, not
+    # assumed.
+    #
+    # When `bar-status-poll` was the only writer these were one number, so the
+    # loop below used `len(consumers)`. Adding a non-poller consumer
+    # (`i3status-remote-host`, fed by `bar-remote-pull`) split them, and driving
+    # the prose from the larger number would have forced SIX sentences to say
+    # "nine" — of which every single one is about the poller's own blocks:
+    #
+    #   "the one predicate all {N} use"          -> "one per entry in SOURCES below"
+    #   "the single predicate all {N} ask"       -> enumerates the poller's pills
+    #   "within MAX_CACHE_AGE_SECS all {N} say"  -> what happens when the POLLER dies
+    #   "{n} hand-copied freshness gates"        -> a HISTORICAL count, one per SOURCES
+    #   "so the {n} blocks cannot disagree"      -> carry_forward's consumers
+    #   "the source most likely of the {n}"      -> of the poller's SOURCES
+    #
+    # `remote-host` is in none of those populations: the poller dying does not
+    # touch its cache, it was never a hand-copied gate, and it does not call
+    # `carry_forward` (it carries a whole preserved payload at WRITE time
+    # instead). So renumbering them to nine would have made three of them
+    # outright false and the rest misleading — the N-1 defect this guard exists
+    # to prevent, committed in the act of satisfying the guard.
+    n = len(polled)
     word = _NUMBER_WORDS.get(n)
     assert word, "no number word for %d — extend _NUMBER_WORDS" % n
 
