@@ -2551,6 +2551,13 @@ _KILL_MENTION_LEDGER = {
     "claudedocs/handoff-mention-system-repos.md":
         "prose: a META-mention — it only quotes that the doc above 'landed "
         "carrying `tmux kill-server` text', i.e. it is about this ledger",
+    # THIRD-ORDER, and the clearest statement of why this guard keeps
+    # re-redding `main`: this doc quotes THIS SCANNER'S OWN OUTPUT (its
+    # `offenders=` list) inside a write-up ABOUT this very failure. Writing
+    # the incident down reproduced it, within an hour of the last fix.
+    "claudedocs/handoff-cairn-oss-multi-instance.md":
+        "prose: quotes this scanner's own offenders= output in a write-up "
+        "ABOUT this guard",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is
@@ -2701,6 +2708,7 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         # how `main` stayed red on TWO tests for one root cause.
         "claudedocs/handoff-tmux-webapp.md",
         "claudedocs/handoff-mention-system-repos.md",
+        "claudedocs/handoff-cairn-oss-multi-instance.md",
     }
     seen_in_allowlisted, offenders = 0, []
     for rel in _tracked_files():
