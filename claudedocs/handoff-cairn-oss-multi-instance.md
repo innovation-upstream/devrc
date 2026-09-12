@@ -18,73 +18,48 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+**CARRIED FORWARD from the previous update — not this session's work, preserved because a
+`State now` replace would delete it.** Re-verify before acting; these are dated readings.
 - 🔨 **2026-09-11 — RANK 3 SLICE 3 IS BUILT, AUDITED ONCE, FIXED AND PUSHED. NOT MERGED.**
   `innovation-upstream/devrc` **#1508**, branch `chore/cairn-consolidate-onto-pin`, head
-  **`0a331066`** (was `acc9ee6a` before the fix round). 47 files. The five forked reader
-  modules are DELETED and resolved from the pinned flake through a new
-  `scripts/lib/cairn_pin.py`; the writer takes its vocabulary from the pinned `entry_shape`.
-  Claim `cairn-oss-multi-instance-3` is **still HELD** — correct, the work has not landed.
+  **`0a331066`** (was `acc9ee6a` before the fix round). 47 files; the five forked reader modules
+  are DELETED and resolved from the pinned flake. Its open decision: wait for someone to classify
+  a second doc, land a small separate PR that does it, or merge with a `pytests` red attributable
+  to `main` — **recommendation was the middle one**, un-decided.
+- **The fork decision stands — CONSOLIDATE ONTO THE PIN** (operator, 2026-09-08, not to be
+  re-asked). The pinned client went live via `home-manager switch` on 2026-09-09, **generation
+  713, rollback point 712** — the only record of which generation to roll back to. Deployed pin
+  is `cairn-c84c142`. The **laptop was still unreachable** 2026-09-11 (100% packet loss,
+  `ssh: No route to host`), so cross-host agreement stays `NOT COMPARED — 1 of 2 hosts`.
+- **The three operator-blocked ranks merged 2026-09-10**, each verified on its mainline BY
+  CONTENT: `ZacxDev/homelab-infra` **#785** `37b5a71f8` (rank 11), **#787** `936692ec7` (rank 13
+  + rank 7), **#786** `4c890c7ac` (rank 20, the third CI leg), `innovation-upstream/devrc`
+  **#1447** `719519fa9`.
+- **`innovation-upstream/devrc` #1472** re-checked 2026-09-11: **still OPEN**, `mergedAt: null`.
 
-- 🔴 **THE MERGE IS BLOCKED BY `main`'s OWN RED, NOT BY THIS PR — and that is an operator
-  decision, not something to click through.** `tekton/devrc-pytests` fails
-  `test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_classified` and
-  `::test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny`. Both name
-  `claudedocs/handoff-tmux-webapp.md`. **Measured at the merge base with this branch absent:
-  `2 failed, 1534 passed`** — and #1508's 47-file diff touches **no** `claudedocs/` and no
-  `claude-hooks/` file. Corroborated from two independent artifacts on `main`: **#1520**
-  fixed the SIBLING doc, and **#1525**'s own subject says *"I fixed one doc and left the other
-  on main"*. With `enforce_admins: true` a red required check blocks everyone, so the three
-  options are: wait for someone to classify that second doc, land a small separate PR that
-  does it, or merge #1508 with a `pytests` red attributable to `main`. **Recommendation: the
-  middle one.** Un-decided as of this write.
-
-- **The audit ladder, round 1 — BLIND, and it earned its keep: TWO 🔴 DEPLOY-BLOCKERS that a
-  green suite could not see.** Both were re-verified independently before any fix was made.
-  - **🔴1 — three live systemd timers would have broken on the operator's next `git pull`,
-    before any `home-manager switch`.** `analyze-service-index-backup`, `handoff-index-sync`
-    and `present-regen` each set a **closed** `Environment=PATH=…`; measured live with
-    `systemctl --user show <u> -p Environment`, **none contained any `cairn` path**, while the
-    PR had added an unguarded module-level `cairn_pin.ensure()` (which raises by design) to
-    `backup.py` and `handoff_doc.py`. Matrix: base `IMPORT OK` → head `CairnPinUnresolved`.
-    The units `ExecStart` the WORKING-TREE copy, which is why "no switch was performed" did
-    not scope the risk away.
-  - **🔴2 — the PR's own new code was unreachable on every host.** `present/measure.py:1037`
-    still gated on the deleted `scripts/lib/subsystem_recall.py`, so the `cairn_pin.ensure()`
-    16 lines below could never run. #2 was MASKING a third instance of #1.
-  - Fixed at `0a331066`; round-1 claims block posted to the PR as an **issue** comment
-    (`#issuecomment-5641736094` — a REVIEW comment would be invisible to `audit-dispatch.py`).
-  - **Round 2 (delta, blind, `acc9ee6a..0a331066`) was IN FLIGHT at this write.** Its result
-    is not in this doc. Per the ladder, the first round that returns no finding needing a fix
-    is the last.
-
-- **Still true and carried forward:** the fork decision stands — **CONSOLIDATE ONTO THE PIN,
-  operator, 2026-09-08, not to be re-asked.** The pinned client went live via
-  `home-manager switch` on 2026-09-09, **generation 713, rollback point 712** — the only record
-  of which generation to roll back to. Deployed pin is `cairn-c84c142`. The **laptop is still
-  unreachable** (2026-09-11: 100% packet loss, `ssh: No route to host` on 192.168.50.155), so
-  cross-host agreement stays `NOT COMPARED — 1 of 2 hosts`.
-
-- **Carried forward so the REPLACE does not drop them:**
-  - The **mechanism**, which the PR implements and which is not re-litigated: `cairn_pin.py`
-    resolves the pinned lib from `CAIRN_LIB`, else `shutil.which("cairn")` → `realpath` →
-    `libexec/cairn/lib`, validated on a two-file marker set, and **refuses loudly** — no silent
-    fallback, because the devrc copies no longer exist to fall back to. It **APPENDS** after
-    devrc's own `scripts/lib` so devrc's `timeouts.py` cannot be shadowed, with a seam guard
-    asserting the overlap set is exactly `{timeouts}` and failing if it GROWS or SHRINKS. An env
-    var alone was rejected on evidence: `nix/sessionVariables.nix` lands in profile.d, which a
-    non-interactive `zsh -c` does not source. 🔴 Round 1 proved the corollary the hard way — a
-    **systemd unit** does not source it either, which is 🔴1 above.
-  - **The three operator-blocked ranks merged 2026-09-10**, each verified on its mainline BY
-    CONTENT (a squash is never an ancestor): `ZacxDev/homelab-infra` **#785** `37b5a71f8`
-    (rank 11, the `cairn` scope), **#787** `936692ec7` (rank 13 deploy + rank 7), **#786**
-    `4c890c7ac` (rank 20, the third CI leg), `innovation-upstream/devrc` **#1447** `719519fa9`.
-  - **`innovation-upstream/devrc` #1472** (three rank headings contradicting their own closure
-    notes) re-checked 2026-09-11: **still OPEN**, `mergedAt: null`.
-  - This doc's own previous update merged as **`21f2c162`** (#1492).
-
-- 🔴 **STILL OPEN AND UNTOUCHED:** rank 4 (`civitai/talos-infra#1414`), rank 8, rank 18,
-  rank 21, rank 23. **Rank 22 is claimed by ANOTHER SESSION** — do not take it. Rank 20
-  remains HALF (the leg must be watched to go RED when the pinned client is stubbed).
+**This session:**
+- 🔴 **RANK 22 IS REMEDIED AND MERGED, AND STILL NOT VERIFIED.** `#1458` squash **`ce9b55c3`**
+  (2026-09-10), content-verified on `origin/main`. The verifier is the flake RATE against a
+  baseline whose heads **carry** `ce9b55c3` — weeks out. Do not call this closed before then.
+- **Four PRs merged this session:** `#1458` (the remedy), `#1462` (`60033d1e`, rank 22's record),
+  `#1477` (`50e8a71a`, gate-flake rank 7 + rank 1 corrections), `#1525` (`018e483b`, sweeping four
+  retracted claims out of this doc's rank 22).
+- **`#1529` opened and CLOSED by me as a duplicate of `#1522`.** Process failure worth naming: I
+  ran the pre-create sweep piped into the same command as `gh pr create`, so I never read it
+  before acting. **The sweep only works as a separate step.**
+- **Open, not mine, both blocking someone:** `#1452` (two `enforce_admins` sites its sweep
+  missed — commented, not fixed) and `#1522` (the kill-guard classification; **its head
+  `480b014f` still fails BOTH guards** — see below).
+- **Audit ladders run:** `#1458` round 0 + rounds 1-3 (closed on the stated criterion, zero 🔴);
+  `#1477` round 0 + rounds 1-2 (10 findings, all addressed). Round-0 trial record across this
+  session: **`ran: 2 · changed the outcome: 2`**.
+- ⚠ **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
+  session, with its positive control confirming the board was reachable. A wrong id also answers
+  200 with an empty array, so that 0 is a real reading of the board and **not** a clean bill of
+  health about the id.
+- 🔴 **`$DEVRC` IS ON ANOTHER SESSION'S BRANCH AGAIN** (`docs/close-tmux-scratchpad-bar-statusline`,
+  with a modified file). This doc was written from a `main` worktree for that reason. Unchanged
+  advice: run `handoff_doc.py --repo <a worktree on main>`, never `$DEVRC`.
 
 ## Open investigations — live diagnosis state
 
@@ -726,6 +701,43 @@ Tekton legs sat on top of two deploy-blockers.
   invisible to the script while looking perfectly present to a human. via: command
 - **Next probe:** none. Run `--round N --emit-claims --audited <the tip that round READ>` as part
   of closing every round, not as a separate remembered step.
+
+### The `FAILING:` line is a 140-char status description and CANNOT be read as a complete failure list
+- **Symptom + exact repro:** `gh pr checks <n>` prints one failing test while the same line's own
+  counts imply more. Observed on `#1525`: `FAILING: test_every_kill_server_call_site_in_the_repo_is_classified | TOTAL collected=22167 passed=22163 skipped=2` — arithmetic gives **2 failed**, and the
+  second name was truncated mid-token.
+- **Observed (with values):** three distinct bites in one session. (a) It hid
+  `test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` from me; I found it only by
+  running the file locally after fixing the named one. (b) It is why
+  `handoff-gate-flake-store-api.md` rank 7's closing condition must **not** key on "no test
+  appears in a `FAILING:` line" — a rename, skip or deselect satisfies that with nothing fixed.
+  (c) It appears to have produced a regression in someone else's PR: `#1522`'s `480b014f` removed
+  two correct ledger rows on the premise "a mention that does not exist", which is a reasonable
+  inference from a truncated line and is false against the file.
+- **Ruled out: that the truncation is cosmetic.** It changes conclusions in both directions —
+  hiding a live failure, and satisfying an absence-based check. via: measurement
+- **Next probe:** none needed for diagnosis. **Read the file, not the status line** —
+  `grep -n '<pattern>' <file>` settled the `#1522` case in one command.
+
+### `#1522` (not mine) is red on BOTH kill guards, and its latest commit made it worse
+- **Symptom + exact repro:** at head `480b014f`, in a detached worktree with `__pycache__`
+  cleared and `PYTHONDONTWRITEBYTECODE=1`:
+  `nix develop <wt> --command python3 -m pytest <wt>/scripts/claude-hooks/tests/test_guard_core.py -q`
+  → **`2 failed, 1534 passed`**.
+- **Observed (with values):** census — `added: ['claudedocs/handoff-tmux-webapp.md'], removed: []`;
+  scanner — `offenders: [('claudedocs/handoff-tmux-webapp.md', 'tmux kill-session')]`. The mention
+  is real, at `handoff-tmux-webapp.md:3409`, and is on `origin/main` too.
+- **Ruled out: that the rows it deleted were wrong.** Its commit message says they "recorded a
+  mention that does not exist"; `grep -n` finds it at `:3409` at that same head. via: measurement
+- **Ruled out: that `f346ba28` was already green.** It was **1 failed** — only its own new doc
+  missing from `quoting_is_the_point`. So `480b014f` went 1 → 2. via: measurement
+- **Leading hypothesis:** the shape is **two allowlists, one file** — `_KILL_MENTION_LEDGER` and
+  `quoting_is_the_point` must both be edited, and three separate attempts today each populated
+  one. The durable fix is to have the scanner read the ledger directly: an entry classified
+  `prose:` IS the set `quoting_is_the_point` names.
+- **Next probe:** restore both `handoff-tmux-webapp.md` rows and add
+  `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
+  measured **1536 passed, 0 failed** locally.
 
 ## Next steps (ranked)
 
@@ -1936,6 +1948,27 @@ covers; pin it with `--config`, do not `cd`.
 - ⚠ **Left behind deliberately:** `refs/remotes/origin/pr/1508` in `~/workspace/devrc` (created
   by the audit worktrees; inert, `git update-ref -d` when the arc closes), and the worktree
   `/tmp/wt-cairn-slice3`, kept in case CI comes back red.
+
+- 🔴 **`cairn recall --repo <cairn>` is `scope-absent`; the scope is `devrc`.** The OSS repo has no
+  store scope. Use `cairn search --scope devrc '<term>'` — it is what surfaced `ci-repro/` and the
+  `#1211`/`#1219`/`#1239` history that made rank 22's whole diagnosis possible.
+- 🔴 **The OSS `cairn` repo carries the IDENTICAL 18-open-coded / 5-sited store split** and the
+  same one-fixture guard (`tests/test_subsystem_store_api.py:19716`). Not fixed: its CI is
+  GitHub-hosted with no single-node pin, and the fork consolidates ONTO that copy (rank 3 slice 3).
+  **Decide it with slice 3, not by default.**
+- ⚠ **A PR merged with a red gate is not a PR that passed.** `#1458` and `#1462` both merged with
+  `tekton/devrc-pytests` RED on an attributed, unreachable flake. The gates are **advisory** —
+  measured twice: no required status checks, no rulesets, `enforce_admins: false`. `claude/skills/tekton/SKILL.md`
+  asserts the opposite and is STALE; `#1452` is the PR that retracts it.
+- 🔴 **Four audit rounds across two PRs found essentially ONE defect class: a claim wider than
+  what was measured, written by the fix round that was correcting the previous one.** The
+  provenance sentence on gate-flake rank 7 was wrong **three consecutive times** — original,
+  retraction, and the retraction's correction — before being deleted rather than corrected a
+  fourth time. If a sentence cannot be made true and precise, **delete the claim.**
+- ⚠ **I took an auditor's timings on report and wrote them into a doc as measurements.** Round 2
+  caught it; re-measuring gave `:418` **43.48 s** against its 70.94 s and the file **137.69 s**
+  against its 428.40 s. Nothing reproduced, and **that** became the finding: a 3.11x observed
+  spread means no point wall time from that file is quotable.
 
 ## How to verify
 
