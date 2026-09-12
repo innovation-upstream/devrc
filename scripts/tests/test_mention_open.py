@@ -745,7 +745,7 @@ def spy(monkeypatch):
                         {"talos-infra": "civitai/talos-infra"})
     monkeypatch.setattr(MO, "tmux_pane_repo",
                         lambda: calls.append("tmux") or "civitai/talos-infra")
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: calls.append(("open", url)) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: calls.append(("open", url)) or 0)
     # `mesg=""` mirrors the real signature: `main()` hands the picker a note to
     # show above the list when the universe is the answer. A stub that took only
     # `candidates` would raise TypeError on that path — which is a kill, but for
@@ -1460,7 +1460,7 @@ def test_a_mapping_ONLY_name_resolves_end_to_end_through_main(tmp_path, monkeypa
     monkeypatch.setattr(MO, "WORKSPACE", tmp_path / "no-such-workspace")
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
     opened = []
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main(["plotwidget#42"]) == 0
     assert opened == ["https://github.com/gardenersguild/plotwidget/pull/42"]
 
@@ -3386,8 +3386,7 @@ def test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape(monkeypatch, tex
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
     monkeypatch.setattr(MO, "open_url",
-                        lambda url, **kw: pytest.fail(
-                            f"AUTO-OPENED a guessed repo: {url}"))
+                        lambda url: pytest.fail(f"AUTO-OPENED a guessed repo: {url}"))
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(
@@ -3492,7 +3491,7 @@ def test_a_repo_the_TEXT_named_still_opens_with_no_picker(monkeypatch, text,
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": pytest.fail(f"asked about {text}"))
     opened = []
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main([text]) == 0
     assert opened == [expected], opened
 
@@ -3521,7 +3520,7 @@ def test_an_audit_pr_reference_with_NO_pane_repo_offers_the_PICKER(
     reference becomes a CHOICE over the local universe — never a guess, and never
     the dead-end toast."""
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: pytest.fail(f"opened {url}"))
+    monkeypatch.setattr(MO, "open_url", lambda url: pytest.fail(f"opened {url}"))
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(rows=len(c), mesg=mesg) or "")
@@ -3620,7 +3619,7 @@ def test_an_UNREADABLE_mapping_degrades_the_same_way(tmp_path, monkeypatch):
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
     picks, opens, notices = [], [], []
     monkeypatch.setattr(MO, "pick", lambda c, mesg="": picks.append(len(c)) or "")
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opens.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opens.append(url) or 0)
     monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
     assert MO.main(["zzznosuchrepo#12"]) == 1
     assert notices[-1][0] == "cannot resolve zzznosuchrepo#12"
@@ -3874,7 +3873,7 @@ def test_the_universe_picker_EXPLAINS_ITSELF_above_the_list(universe, monkeypatc
     plus how many rows are offered, when the mapping was generated, and the
     remedy. Never a row from the universe."""
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 3.0))
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
     seen = {}
 
     def note_pick(cands, mesg=""):
@@ -4455,7 +4454,7 @@ def test_the_universe_file_is_NOT_read_on_a_click_that_resolves(monkeypatch):
     reads = []
     monkeypatch.setattr(MO, "load_known_universe",
                         lambda *a, **k: reads.append(1) or [])
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: reads.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: reads.append(url) or 0)
     assert MO.main(["--no-discovery", "civitai/talos-infra#1065"]) == 0
     assert reads == ["https://github.com/civitai/talos-infra/pull/1065"], (
         f"expected exactly one open and no universe read, got {reads}")
@@ -4710,7 +4709,7 @@ def test_the_guessed_repo_is_still_NEVER_opened_unconfirmed(monkeypatch):
     opening it unconfirmed is the confident-wrong-page failure the whole handler
     is anchored against. `open_url` must not be reached without a selection."""
     opened = []
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY])
     assert opened == [], f"a guessed repo was opened without a selection: {opened}"
 
@@ -4725,7 +4724,7 @@ def test_an_EXPLICIT_owner_still_opens_directly_and_gets_NO_picker(monkeypatch):
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
     picked, opened = [], []
     monkeypatch.setattr(MO, "pick", lambda c, mesg="": picked.append(c) or "")
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main(["civitai/talos-infra#1065"]) == 0
     assert picked == [], "an explicit owner must not raise a picker"
     assert opened == ["https://github.com/civitai/talos-infra/pull/1065"], opened
@@ -4845,7 +4844,7 @@ def test_the_bare_hash_N_guess_is_NEVER_opened_unconfirmed(monkeypatch):
     catch the widening WEAKENING it, which is a different failure from the one
     being fixed."""
     opened = []
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     _guessed_picker(monkeypatch, text="#1291", universe=[UNIVERSE_ONLY])
     assert opened == [], f"a guessed repo was opened without a selection: {opened}"
 
@@ -4976,7 +4975,7 @@ def test_the_TEXTS_OWN_evidence_still_opens_with_ZERO_keystrokes(monkeypatch,
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": pytest.fail(f"asked about {text}"))
     opened = []
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main([text]) == 0
     assert opened == [expected], opened
 
@@ -5617,7 +5616,7 @@ def test_a_RAISING_compaction_does_not_cost_the_OPEN(monkeypatch):
                             RuntimeError("compaction exploded")))
     opened: list = []
     said: list = []
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: opened.append(url) or 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     monkeypatch.setattr(MO, "notify", lambda *a, **k: said.append(a))
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": next(x["url"] for x in c
@@ -6012,7 +6011,7 @@ def test_main_RECORDS_the_repository_the_operator_PICKED(monkeypatch):
     monkeypatch.setattr(MO, "load_known_universe",
                         lambda *a, **k: ["acme/chosen", "acme/other"])
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": next(x["url"] for x in c
                                                 if "acme/chosen" in x["url"]))
@@ -6039,7 +6038,7 @@ def test_a_CLAWGATE_pick_is_NOT_recorded_as_a_repository(monkeypatch):
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/one"])
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": next(x["url"] for x in c
                                                 if x["platform"] == "clawgate"))
@@ -6072,7 +6071,7 @@ def test_an_EXPLICIT_click_pays_NOTHING_for_the_ORDERING(monkeypatch, tmp_path):
     monkeypatch.setattr(MO, "load_picks", lambda *a, **k: reads.append("picks") or [])
     monkeypatch.setattr(MO, "ranges_age_days",
                         lambda *a, **k: reads.append("age") or 1.0)
-    monkeypatch.setattr(MO, "open_url", lambda url, **kw: 0)
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
     monkeypatch.setattr(MO, "load_known_universe",
                         lambda *a, **k: ["acme/onlyone"])
@@ -6514,14 +6513,25 @@ def test_a_PINNED_tui_that_cannot_run_falls_back_and_says_so_EXACTLY_ONCE(tui):
     assert len(tui.notifies) == 1, tui.notifies
 
 
-def test_the_browser_flag_wins_even_for_a_github_reference(tui):
-    """The per-click escape hatch. It beats the marker file too: a flag typed
-    NOW is newer evidence than a file written once."""
-    tui.available = True
-    tui.marker.write_text(MO.TARGET_TUI)
-    assert MO.open_url(GH_PULL_URL, browser=True) == 0
-    assert [a[0] for a in tui.spawns] == ["xdg-open"], tui.spawns
-    assert tui.notifies == [], "an explicit --browser is not a failure"
+def test_open_url_takes_NO_argument_but_the_url(tui):
+    """🔴 A DELETION, PINNED SO IT IS NOT QUIETLY UNDONE.
+
+    A `--browser` flag was built here and removed before it shipped: it was
+    UNREACHABLE from a click (the Alacritty hint hands the handler the matched
+    text and nothing else, and its regex cannot produce a token starting with
+    `-`), so its only caller was a human typing it in a shell — a second
+    spelling of the marker file with a strictly smaller reach.
+
+    The signature is what makes this feature purely additive to `main()`: both
+    call sites are byte-identical to the pre-TUI code, so a concurrent branch
+    rewriting either one cannot drop half of it. Re-adding a keyword here
+    re-opens that cross-PR hazard, which is why the shape is asserted rather
+    than left to a comment."""
+    import inspect
+    params = list(inspect.signature(MO.open_url).parameters)
+    assert params == ["url"], params
+    assert list(inspect.signature(MO.open_target).parameters) == ["url"]
+    assert "--browser" not in MO.build_parser().format_help()
 
 
 def test_the_marker_file_can_pin_the_browser_on_a_host_that_HAS_the_tui(tui):
@@ -6706,48 +6716,33 @@ def test_main_routes_an_unambiguous_github_click_through_the_review_TUI(
     assert spawns[0][-2:] == ["civitai/talos-infra", "1065"], spawns
 
 
-def test_main_honours_the_browser_flag_on_the_auto_open_path(
+def test_main_routes_a_PICKED_github_row_through_the_review_TUI(
         monkeypatch, tmp_path):
-    """🔴 THE FLAG MUST SURVIVE THE CALL SITE. `open_url` growing a keyword that
-    `main()` never passes is a feature that is 100% dead with a green suite —
-    the fix-direction trap RULES.md names: adding it to the parser changes
-    NOTHING while no call site forwards it."""
-    spawns = _spawn_recorder(monkeypatch, tmp_path)
-    assert MO.main(["--browser", "civitai/talos-infra#1065"]) == 0
-    assert [a[0] for a in spawns] == ["xdg-open"], spawns
+    """🔴 THE SECOND CALL SITE, WHICH NO TEST ABOVE REACHES — and the one a
+    concurrent branch is also rewriting. A rewrite that opened the browser
+    directly instead of going through `open_url` would take this red; nothing
+    else in the file would notice.
 
-
-def test_main_honours_the_browser_flag_on_the_PICKER_path(
-        monkeypatch, tmp_path):
-    """The SECOND call site, which no test above reaches. Both sites forward the
-    flag or neither does — and a predicate that is right at one site and wrong
-    at the other is the shape this repo keeps paying for."""
+    🔴 THE PANE REPO IS WHAT MAKES THIS REACH THE PICKER AT ALL, AND THE FIRST
+    VERSION OF THIS TEST DID NOT HAVE IT. With `tmux_pane_repo` returning "", a
+    bare `#370` has exactly ONE candidate — the clawgate task — so `main()`
+    takes the single-candidate AUTO-OPEN branch and `pick` is never called. The
+    assertions still passed, because a clawgate URL opens in the browser either
+    way: a test of the picker call site that never reached it, green for the
+    wrong reason. MEASURED, not reasoned about. The `picks` assertion below is
+    what keeps that from recurring."""
     spawns = _spawn_recorder(monkeypatch, tmp_path)
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
     monkeypatch.setattr(MO, "record_pick", lambda *a, **k: None)
-    # 🔴 THE PANE REPO IS WHAT MAKES THIS REACH THE PICKER AT ALL, AND THE FIRST
-    # VERSION OF THIS TEST DID NOT HAVE IT. With `tmux_pane_repo` returning "",
-    # a bare `#370` has exactly ONE candidate — the clawgate task — so `main()`
-    # takes the single-candidate AUTO-OPEN branch and `pick` is never called.
-    # Both assertions still passed, because a clawgate URL opens in the browser
-    # with or without the flag: a test of the picker call site that never
-    # reached it, green either way. MEASURED, not reasoned about — it failed on
-    # the positive control below, which is the only reason it was caught.
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "gardenersguild/trowelcast")
     picks: list[int] = []
     monkeypatch.setattr(
         MO, "pick",
         lambda c, mesg="": picks.append(len(c)) or GH_PULL_URL)
-    assert MO.main(["--browser", "#370"]) == 0
-    assert picks, "the PICKER was never reached — this test proves nothing"
-    assert [a[0] for a in spawns] == ["xdg-open"], spawns
-    # POSITIVE CONTROL on the same path: WITHOUT the flag it takes the TUI, so
-    # the browser above is the flag's doing and not the picker path's.
-    spawns.clear()
-    picks.clear()
     assert MO.main(["#370"]) == 0
-    assert picks, "the PICKER was never reached on the control run either"
+    assert picks, "the PICKER was never reached — this test proves nothing"
     assert [a[0] for a in spawns] == ["alacritty"], spawns
+    assert spawns[0][-2:] == ["gardenersguild/trowelcast", "1559"], spawns
 
 
 def test_tui_available_asks_about_the_REVIEW_EXE_and_nothing_else(monkeypatch):

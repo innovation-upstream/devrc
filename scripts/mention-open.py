@@ -38,9 +38,18 @@ browser tab. Everything else (a clawgate task, a ClickUp id, any GitHub URL
 that is not `/issues/N` or `/pull/N`) is always `xdg-open`.
 
 The TUI is taken only when this host HAS it, and the browser stays reachable
-from three directions: `--browser` on the command line, `browser` in the marker
-file at `~/.config/mention-open/target`, and `open_tui`'s own pre-flight, which
-falls back and says so. Read `open_target`'s docstring for the rung order.
+from two directions: `browser` in the marker file at
+`~/.config/mention-open/target`, and `open_tui`'s own pre-flight, which falls
+back and says so. Read `open_target`'s docstring for the rung order.
+
+⚠ A `--browser` FLAG WAS BUILT HERE AND DELETED BEFORE IT SHIPPED, AND THE
+REASON IS WORTH KEEPING SO IT IS NOT RE-ADDED. It called itself "the operator's
+per-click escape hatch", and it was UNREACHABLE FROM A CLICK: the only
+production caller is the Alacritty hint, whose `command` gets the matched text
+and nothing else, and whose regex cannot produce a token starting with `-`. So
+its sole caller was a human typing it in a shell — a second spelling of what the
+marker file already does, reachable from strictly fewer places. The marker file
+is the one rung, and it is the reachable one.
 
 🔴 THE CLICK PATH MAKES NO NETWORK CALL. This is a hard property, not a target,
 and it is pinned by `test_the_resolution_path_spawns_ONLY_these_local_commands`.
@@ -1393,7 +1402,7 @@ def read_target_marker(path: Path | None = None) -> str:
     return value if value in TARGET_VALUES else ""
 
 
-def open_target(url: str, *, browser: bool = False) -> str:
+def open_target(url: str) -> str:
     """Which surface this URL opens on. One of `TARGET_VALUES`, always.
 
     The rungs, in order, and why each sits where it does:
@@ -1404,12 +1413,12 @@ def open_target(url: str, *, browser: bool = False) -> str:
          because "whatever the marker says" is not a meaningful instruction for
          a URL the TUI has no way to open: honouring it would produce a window
          that fails, where the browser would simply have worked.
-      1. `--browser`. The operator's per-click escape hatch, and it wins over
-         their own marker: a flag typed NOW is newer evidence than a file
-         written once.
-      2. THE MARKER FILE. See `MENTION_TARGET_PATH` for why it is a file and
-         can never be an environment variable.
-      3. THE DEFAULT: the TUI when this host actually has it, the browser when
+      1. THE MARKER FILE. See `MENTION_TARGET_PATH` for why it is a file and
+         can never be an environment variable — and see the module docstring
+         for why the `--browser` FLAG that used to sit above this rung was
+         deleted rather than shipped: it could not be reached from a click, so
+         it was a second spelling of this rung with a strictly smaller reach.
+      2. THE DEFAULT: the TUI when this host actually has it, the browser when
          it does not. SILENT in the second case, deliberately — a host with no
          `nvim-octo` has not lost anything it had, and toasting on every click
          to say so is the noise this handler must not make. The announcement
@@ -1417,8 +1426,6 @@ def open_target(url: str, *, browser: bool = False) -> str:
          is `open_tui`'s pre-flight.
     """
     if not github_ref(url)[0]:
-        return TARGET_BROWSER
-    if browser:
         return TARGET_BROWSER
     marked = read_target_marker()
     if marked:
@@ -1484,14 +1491,20 @@ def open_tui(url: str) -> int:
     return 0
 
 
-def open_url(url: str, *, browser: bool = False) -> int:
+def open_url(url: str) -> int:
     """Open a resolved mention on whichever surface `open_target` names.
 
-    🔴 THE DISPATCH LIVES HERE AND NOWHERE ELSE. `main()` has two call sites —
-    the single-candidate auto-open and the post-picker open — and a predicate
-    open-coded at both is wrong at one of them. Both still call `open_url`.
+    🔴 THE DISPATCH LIVES HERE AND NOWHERE ELSE, AND THE SIGNATURE IS UNCHANGED
+    FROM BEFORE THE TUI EXISTED — deliberately. `main()` has two call sites (the
+    single-candidate auto-open and the post-picker open) and neither had to
+    change, so this whole feature is PURELY ADDITIVE to the decision path: a
+    concurrent branch rewriting either call site cannot silently drop half of
+    it, because there is no half to drop. An earlier revision threaded a
+    `browser=` keyword through both sites and produced exactly that hazard
+    against PR #1569 — measured: 418 tests green, two seam guards red. The flag
+    is gone (see the module docstring) and with it the hazard.
     """
-    if open_target(url, browser=browser) == TARGET_TUI:
+    if open_target(url) == TARGET_TUI:
         return open_tui(url)
     return open_browser(url)
 
@@ -1960,11 +1973,6 @@ def build_parser() -> argparse.ArgumentParser:
                         "the repository picker: it is non-interactive, so an "
                         "unresolvable reference exits 1 with a named reason "
                         "rather than listing every repo on the host")
-    p.add_argument("--browser", action="store_true",
-                   help="open in the browser even when this host would have "
-                        "used the review TUI. The per-click escape hatch; the "
-                        "durable one is the marker file at "
-                        "~/.config/mention-open/target")
     p.add_argument("--no-discovery", action="store_true",
                    help="do not read git remotes or ask tmux — resolve only "
                         "what the text itself carries")
@@ -2701,7 +2709,7 @@ def main(argv: list[str] | None = None) -> int:
     # and a host that happens to know exactly one repository must not have that
     # option opened for it.
     if len(candidates) == 1 and not offered_universe and not guessed:
-        return open_url(candidates[0]["url"], browser=args.browser)
+        return open_url(candidates[0]["url"])
 
     # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
     # UNEXPLAINED, and there are exactly two such pickers: one carrying a GUESS
@@ -2770,7 +2778,7 @@ def main(argv: list[str] | None = None) -> int:
     picked_repo = repo_of_github_url(url)
     if picked_repo:
         record_pick(picked_repo, num)
-    return open_url(url, browser=args.browser)
+    return open_url(url)
 
 
 def guarded_main(argv: list[str] | None = None) -> int:

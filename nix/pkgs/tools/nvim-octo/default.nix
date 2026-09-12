@@ -30,6 +30,18 @@
 #   gruvbox-nvim       — the colorscheme `octo-init.lua` sets, matching the
 #                        alacritty palette in nix/programs/alacritty.
 #
+# ⚠ IT IS NOT IN `home.packages`, AND THAT IS DELIBERATE. `nix/pkgs/tools/
+# default.nix` carried an entry for a while; it bought only a hand-typed
+# invocation nobody asked for, while adding a `home.packages` entry (a known
+# collision surface with an imperative `nix profile install` on this host) and a
+# second wrapped-neovim closure on the operator's PATH. The CLICK does not use
+# it: the hint handler resolves `nvim-octo` through the wrapper's pinned
+# `lib.makeBinPath` in `nix/programs/alacritty/default.nix`, which is the entry
+# the AST ledger pins and the one that survives the ~1s window where a
+# `home-manager switch` blanks `~/.nix-profile`. The overlay in `flake.nix`
+# already forces this derivation to build, so nothing is un-gated by its
+# absence.
+#
 # 🔴 `gh` IS A HARD REQUIREMENT, NOT A NICETY. octo's `setup()` checks
 # `vim.fn.executable(config.values.gh_cmd)` and REFUSES to initialise without
 # it — the `Octo` user command is created by `commands.setup()`, which runs
@@ -68,11 +80,14 @@ in
 pkgs.writeShellApplication {
   name = "nvim-octo";
 
-  # `git` is here because octo reads the remote host/name for buffers opened
-  # WITHOUT an explicit repo. `mention-open.py` always passes one, so this is
-  # belt-and-braces for a hand-typed invocation rather than a path the click
-  # depends on — stated plainly rather than justified as essential.
-  runtimeInputs = [ nvimWithOcto pkgs.gh pkgs.git ];
+  # ⚠ `pkgs.git` IS DELIBERATELY ABSENT, AND IT WAS HERE. octo reads a remote's
+  # host/name only for a buffer opened WITHOUT an explicit repo — and this
+  # wrapper REFUSES such an invocation: `nvim-octo.sh` requires both arguments
+  # and exits 64 without them. So git could only ever have served a call shape
+  # that cannot happen, which is dead weight in the closure plus a comment
+  # justifying a code path that does not exist. If a future `nvim-octo` grows a
+  # one-argument or zero-argument form, add it back WITH that form.
+  runtimeInputs = [ nvimWithOcto pkgs.gh ];
 
   text = builtins.readFile ./nvim-octo.sh;
 
