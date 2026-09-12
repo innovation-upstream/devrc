@@ -161,8 +161,13 @@ sys.exit(0)
 # unpinned coupling here fails in the worst possible direction: change the
 # wrapper's warm to `debug agent --pure build` and the marker is never written,
 # so the test reports STARVED INSTRUMENT and a WRAPPER CHANGE is misattributed to
-# machine load — the exact class this file exists to stop. Pinned by
-# `test_the_fakes_warm_hold_is_keyed_to_the_argv_the_wrapper_ACTUALLY_USES`.
+# machine load — the exact class this file exists to stop. Pinned BEHAVIOURALLY by
+# `test_the_fake_takes_the_warm_hold_ONLY_for_the_warm_argv` (runs the fake and
+# observes what it does) and `test_a_BROKEN_COUPLING_is_reported_as_one_and_NOT_
+# as_starvation` (drives the real failure path with the coupling broken).
+# ⚠ An earlier source-grep guard was DELETED, not weakened: it passed while the
+# hazard existed in 4 of 6 mutant shapes, and its docstring claimed to assert
+# "the RELATIONSHIP (both sides)" while only ever reading the wrapper.
 _WARM_SUBCOMMAND = "build"
 
 
@@ -172,11 +177,18 @@ def _fake_opencode(path: Path) -> Path:
     $FAKE_OC_LOG, and dumps the BROWSER_AGENT_* env it received to $FAKE_OC_ENV so
     tests can prove the wrapper forced the tab/instance/domain policy. It emits a
     REAL-shaped `--format json` JSONL stream on stdout."""
-    return _write_exec(path, _FAKE_OC_SRC.replace(
-        "@@WARM_SUBCOMMAND@@", _WARM_SUBCOMMAND))
-
-
-_FAKE_OC_SRC = r'''#!/usr/bin/env python3
+    # 🔴 THE SUBSTITUTION STAYS ON THE LITERAL, INLINE. An earlier revision hoisted
+    # this body to a module constant so `.replace()` could be applied to it, and
+    # that silently broke `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`:
+    # its allowlist pins the needle `_write_exec(path,` on the line carrying the
+    # shebang, and a hoisted module-constant assignment carries neither needle.
+    # (This comment deliberately does not SPELL that prefix — doing so makes the
+    # scanner match the comment itself, which is the trap the guard's own
+    # allowlist comments record, and which cost a cycle here.)
+    # The PR was RED on `tekton/devrc-pytests` for three commits because of it.
+    # Keep the shebang adjacent to `_write_exec(path,` rather than buying an
+    # allowlist exemption for a refactor that bought nothing.
+    return _write_exec(path, r'''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
 
@@ -325,7 +337,7 @@ if mode == "partial":
     emit_text(schema(status="partial")); sys.exit(0)
 # default: ok
 emit_text(schema()); sys.exit(0)
-'''
+'''.replace("@@WARM_SUBCOMMAND@@", _WARM_SUBCOMMAND))
 
 
 # --------------------------------------------------------------------------- #
@@ -1715,6 +1727,7 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
 _WARM_HOLD_S = 3
 _WARM_WINDOW_SLACK_S = 1.0
 _WARM_WINDOW_ATTEMPTS = 3
+_WARM_AWAIT_SLICE_S = 20.0
 
 
 def _warm_window(proc, lock: Path, since_marker: float):
@@ -1822,15 +1835,31 @@ def _coupling_diagnosis(in_warm: Path) -> str:
     all and never took the hold, the coupling is broken, whatever it looks like.
     """
     log = Path(str(in_warm) + ".argv")
+    if in_warm.exists():
+        return ""                      # the warm ran; not a coupling question
+    if not log.exists():
+        return ("\n⚠ COULD NOT MEASURE the coupling: the fake wrote no argv log "
+                f"at {log.name}. Either it was never invoked, or the log and this "
+                f"reader have diverged — do not read the wording below as proof "
+                f"the coupling is intact.")
     try:
-        seen = [json.loads(ln) for ln in log.read_text().splitlines() if ln.strip()]
-    except (OSError, ValueError):
-        return ""
-    if in_warm.exists() or not seen:
-        return ""
+        raw = [ln for ln in log.read_text().splitlines() if ln.strip()]
+        seen = [json.loads(ln) for ln in raw]
+    except (OSError, ValueError) as exc:
+        return (f"\n⚠ COULD NOT MEASURE the coupling: argv log unreadable ({exc}).")
+    if not seen:
+        return ("\n⚠ COULD NOT MEASURE the coupling: the argv log exists but is "
+                "EMPTY.")
+    # 🔴 COMPARE AGAINST THE KEYING THIS MESSAGE NAMES. Without this term the
+    # function asserts a break while printing evidence of an intact coupling —
+    # "actual argv: [['debug','agent','build']]" under a headline saying the
+    # coupling is broken, telling the reader to go and change correct code.
+    if any(a[:2] == ["debug", "agent"] and a[2:3] == [_WARM_SUBCOMMAND]
+           for a in seen):
+        return ""                      # the keying DID match: genuine starvation
     return (f"\n🔴 THIS IS NOT MACHINE LOAD — THE FAKE/WRAPPER COUPLING IS BROKEN. "
-            f"The fake was invoked {len(seen)} time(s) and never took the warm "
-            f"hold, which it keys on `argv[:2] == ['debug', 'agent']` AND "
+            f"The fake logged {len(seen)} invocation(s) and none matched the warm "
+            f"hold's keying, `argv[:2] == ['debug', 'agent']` AND "
             f"`argv[2:3] == [{_WARM_SUBCOMMAND!r}]`.\n  actual argv: {seen!r}\n  "
             f"The wrapper's warm invocation and the fake's keying have diverged; "
             f"fix them TOGETHER. Do not read the starvation wording below.")
@@ -1874,7 +1903,59 @@ def test_the_fake_takes_the_warm_hold_ONLY_for_the_warm_argv(rig, tmp_path):
         "rewrote the marker. That invocation runs AFTER `_oc_lock_release`, so it "
         "resets the warm clock with the lock already gone — which is exactly how "
         "a purely starved run got reported as a lock-ordering regression.")
-    assert gate_took < 0.9, f"the gate slept ({gate_took:.2f}s); the hold is not scoped"
+    # 🔴 NO `gate_took < 0.9` ASSERTION HERE, DELIBERATELY. An earlier revision had
+    # one, and it was a LOAD-SENSITIVE assertion whose failure message
+    # ("the gate slept; the hold is not scoped") is a flat lie about the code —
+    # in the file whose entire purpose is stopping that misattribution. Measured:
+    # at a spawn baseline of 2.75s it fired at 1.06s with the code correct. The
+    # `not marker.exists()` assertion above is the DETERMINISTIC form of the same
+    # claim and kills the same mutants, so the timing one bought nothing but a
+    # flake. `warm_took >= 0.9` stays: it is a lower bound on a sleep(1), which
+    # load can only help.
+    # 🔴 The argv log is the coupling's other half, and it has to be OBSERVED
+    # here or `_coupling_diagnosis` reads a file nothing guarantees is written.
+    assert (marker.parent / (marker.name + ".argv")).exists(), (
+        f"the fake wrote no argv log beside {marker.name} — `_coupling_diagnosis` "
+        f"reads `<marker>.argv`, so deleting or renaming that write silently turns "
+        f"every coupling break back into a starvation verdict.")
+
+
+def test_a_BROKEN_COUPLING_is_reported_as_one_and_NOT_as_starvation(rig, monkeypatch):
+    """🔴 THE POSITIVE CONTROL FOR THE DIAGNOSIS, and without it the whole thing
+    is a reassuring zero.
+
+    MEASURED before this test existed: four separate mutations — deleting the
+    fake's argv-log write, writing it to a different filename, making
+    `_coupling_diagnosis` return "", and REMOVING ITS CALL from the starved
+    failure path — each SURVIVED the full 67-test file. The last one is the exact
+    defect that was caught by hand while writing this feature; it could regress
+    with no signal at all, and the file would silently go back to reporting a
+    wrapper change as machine load.
+
+    So this drives the real failure path with a deliberately broken coupling and
+    asserts the message names the COUPLING. It runs in seconds because the await
+    slice and the attempt count are overridable.
+    """
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "_WARM_SUBCOMMAND", "nosuchsubcommand")
+    monkeypatch.setattr(mod, "_WARM_WINDOW_ATTEMPTS", 1)
+    monkeypatch.setattr(mod, "_WARM_AWAIT_SLICE_S", 1.0)
+    # rebuild the fake so its hold is keyed on a subcommand the wrapper never
+    # sends — a coupling break, without touching the wrapper.
+    _fake_opencode(rig.opencode_bin)
+
+    with pytest.raises(pytest.fail.Exception) as exc:
+        test_the_release_handler_EXITS_rather_than_resuming(rig, signal.SIGINT, "INT")
+
+    msg = str(exc.value)
+    assert "COUPLING IS BROKEN" in msg, (
+        "a broken fake/wrapper coupling was reported WITHOUT naming the coupling. "
+        "That is the starvation misattribution this feature exists to remove, and "
+        "it means `_coupling_diagnosis` is either inert or no longer called from "
+        f"the starved failure path.\n  got: {msg[:600]}")
+    assert "nosuchsubcommand" in msg, (
+        "the diagnosis fired but did not name the keying it compared against, so "
+        "a reader cannot tell which side diverged.")
 
 
 @pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "TERM"), (signal.SIGINT, "INT")],
@@ -1961,8 +2042,8 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
                 # waited for — and the retry does add load to an already-loaded
                 # box, which is the half of the trade worth remembering.
                 _await(lambda: in_warm.exists(),
-                       what="the wrapper to enter the warm", slice_s=20.0,
-                       stall_cap=60.0, poll=0.02)
+                       what="the wrapper to enter the warm",
+                       slice_s=_WARM_AWAIT_SLICE_S, stall_cap=60.0, poll=0.02)
             except pytest.fail.Exception as exc:
                 # 🔴 A FOURTH STARVATION SHAPE, and it used to bypass this loop
                 # entirely. `_await` fails in its OWN wording — which probes the
