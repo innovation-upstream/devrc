@@ -425,28 +425,53 @@ read the root cause first; the design is what failed, not the code.
    forcing: none
 
 
-11. **THE STRUCTURAL FIX — exclude `claudedocs/` from the wide-kill MENTION scan.**
-   `scripts/claude-hooks/tests/test_guard_core.py`: `_scan_kill_sites()` feeds
-   `_MENTION_RE` over `_tracked_files()`, and `_KILL_MENTION_LEDGER` then demands
-   a human classification per file. The guard exists to catch CALL SITES; prose in
-   `claudedocs/` is never one, and the sibling guard already concedes exactly this
-   with its in-body `quoting_is_the_point` set. Measured above: the change drops 5
-   noise entries and keeps all 10 real ones.
-   Shape to consider: skip `claudedocs/` in the mention scan only, keep the ledger
-   for `scripts/`, and keep BOTH positive controls
-   (`test_the_kill_site_scanner_can_see_anything_at_all`) so the narrowed scan
-   still proves it can see something. 🔴 Verify the exclusion cannot hide a real
-   call site: a `.md` file CAN carry an executable fence, so prefer "prose unless
-   it parses as a command" over a blanket path skip if that is cheap.
-   Closing condition: a new handoff doc naming a wide kill lands on `main` and
-   `pytest -k kill` stays green with no ledger edit.
-   forcing: gate — 9 of 10 open PRs were simultaneously red on this, none of them
-   the cause; that is `claude/RULES.md`'s permanently-red gate, observed.
-12. **Land devrc#1543, then devrc#1522.** #1543 classifies
-   `handoff-mention-system-repos.md` in both ledgers; #1522 classifies only its own
-   document and is rebased to defer everything else. `IN FLIGHT:
-   innovation-upstream/devrc#1543, innovation-upstream/devrc#1522`.
-   forcing: gate — `main` is red until both land.
+11. ✅ **CLOSED 2026-09-12 by devrc#1561 (`c0bbd6d9`) — NOT by this thread, and what
+   landed is WIDER than this rank asked for.** The ask was: exclude `claudedocs/`
+   from the wide-kill MENTION scan in `scripts/claude-hooks/tests/test_guard_core.py`,
+   because the guard exists to catch CALL SITES and prose is never one.
+   - **What shipped:** ONE predicate — `_is_prose_only()` over
+     `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` — consulted by **BOTH** scanners.
+     This rank asked for the mention half only; #1561 also exempted the shell-text
+     guard. That is the better shape and it is the consolidation this thread kept
+     asking for: the two guards' SEPARATE allowlists were the reason one fix left
+     `main` red on the other test, so a single predicate is what actually ends the
+     loop. No `quoting_is_the_point` row was needed either.
+   - **Re-measured live on `origin/main` 2026-09-12, not read off the PR:** 189
+     tracked `claudedocs/` files, **6** of which the mention pattern matches TODAY
+     — so without the exemption `main` would be red on six docs right now, not the
+     five this rank estimated. Still scanned: **11** executable-tree files by the
+     mention half, **7** by the argv half, **0** `claudedocs/` in either.
+     `pytest -k kill` → **98 passed**.
+   - 🔴 **The closing condition this rank wrote is MET by a NAMED COMMIT, not by
+     argument.** `457a5dc7` (#1560) landed a handoff doc carrying the trigger
+     spelling in prose **74 seconds after** `c0bbd6d9` (22:17:50 vs 22:16:36
+     -0500), and **no commit has touched `test_guard_core.py` since**. A doc naming
+     the hazard landed on `main` with zero ledger edits and the gate stayed green —
+     which is exactly the test this rank demanded, run by the repo rather than by me.
+   - 🔴 **The hazard this rank flagged is REAL, knowingly accepted, and covered
+     somewhere else — verified rather than assumed.** Because BOTH static scanners
+     now skip `claudedocs/`, a doc that literally spells the command is caught by
+     NEITHER. The cover is the runtime hook, and it was exercised directly:
+     `guard_core.check_tmux_kill_shared_server` **refused both** wide spellings and
+     returned `None` for the `-L <literal-socket>` form. `bash-guard.py` gates the
+     Bash tool and #1561 did not touch it, so a fence in a doc is inert unless a
+     human runs it in their own unhooked terminal.
+   - **Residual, stated because it is silent:** the static guards no longer cover
+     documentation at all, so nothing fails if a doc grows a copy-pasteable
+     dangerous fence. Fix direction if it ever matters — scan `claudedocs/` for
+     FENCED CODE BLOCKS only, never prose. 🔴 Do not re-add a whole-file scan; that
+     is the treadmill this closed.
+   forcing: none — was "gate" (9 of 10 open PRs red at once); the gate is clear.
+12. **devrc#1522 is the only one of the three still open.** #1543 merged as
+   `0b5ee924`, and the ledger it edited was then made unreachable by #1561, so
+   nothing there needs re-landing. `IN FLIGHT: innovation-upstream/devrc#1522`.
+   🔴 **devrc#1549 (`fix/kill-ledger-scope`) is SUPERSEDED — close it, do not merge
+   it.** It scoped the mention half only and added a `quoting_is_the_point` row,
+   both older and narrower than what landed; it is now `CONFLICTING` against `main`
+   and one of its three conflict hunks is #1561's own text. Its claim
+   `devrc-kill-ledger-scope-executables` was still LIVE under another session at
+   the time of writing, so closing it is that session's call or the operator's.
+   forcing: none — `main` is green; this is cleanup, not an unblock.
 13. **devrc#1516** — the cairn-skill note on the two scopes stranded local-only
    (`civitai-developer-docs`, `civitai-app-requests`). Its only failure was
    `test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor`, which
