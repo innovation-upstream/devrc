@@ -1092,7 +1092,13 @@ def test_code_only_really_strips_the_prose_it_claims_to():
     only_in_a_docstring = "Raised for every reason the world could not be read"
     assert only_in_a_docstring in raw, "fixture phrase moved; this guard is blind"
     assert only_in_a_docstring not in code, "docstring prose still reaches the guards"
-    assert "def classify(state, description):" in code, (
+    # ⚠ The positive-control phrase must be a line this file still EXECUTES.
+    # It used to be `def classify(state, description):`, which moved to
+    # `scripts/lib/ci_status.py` when the duplicated predicates were
+    # consolidated — at which point this control started asserting the absence
+    # of a function that is simply elsewhere, i.e. it would have failed for a
+    # reason that has nothing to do with `_code_only`.
+    assert "def commit_verdict(rows):" in code, (
         "_code_only stripped executable lines too — every guard reading it is vacuous"
     )
 
@@ -1297,8 +1303,17 @@ def test_a_MOVED_docstring_sentinel_REFUSES_rather_than_dumping_the_file(tmp_pat
     assert moved != src, "the docstring sentinel is not where this test thinks"
     copy = tmp_path / "moved-sentinel.py"
     copy.write_text(moved, encoding="utf-8")
+    # 🔴 THE COPY HAS NO SIBLING `lib/`, so the shared `ci_status` import must be
+    # satisfied explicitly. The script resolves it relative to its OWN file,
+    # which is right for production — the unit runs it out of the checkout — and
+    # is exactly why a copy-and-run test has to say where the module is. Without
+    # this the copy dies on ImportError and the assertions below would be
+    # measuring a missing module, not a moved sentinel.
+    env = dict(os.environ,
+               PYTHONPATH=os.pathsep.join(
+                   [str(ROOT / "scripts" / "lib"), os.environ.get("PYTHONPATH", "")]))
     proc = subprocess.run([sys.executable, str(copy), "--help"],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == RC_USAGE, proc.stdout + proc.stderr
     assert "cannot locate the end of the header" in proc.stdout
     # and it must NOT fall back to dumping the source: a header knob name would
@@ -1362,6 +1377,97 @@ def test_an_unknown_argument_is_a_USAGE_error(h):
 )
 def test_classify_maps_a_row_to_its_documented_class(state, description, expected):
     assert _load().classify(state, description) == expected
+
+
+def test_newest_per_context_is_ORDER_INDEPENDENT_which_first_wins_was_not():
+    """🔴 THE BEHAVIOUR CHANGE THAT CAME WITH THE CONSOLIDATION, DRIVEN BOTH WAYS.
+
+    This file used to fold to the FIRST row per context. That is right only
+    because GitHub returns the array newest-first — an assumption about someone
+    else's response ordering, load-bearing, unstated, and untested. The shared
+    `newest_per_context` folds on `max(created_at)` instead.
+
+    The OLD rule is reimplemented below and shown to return the WRONG row on the
+    order it does not expect, beside the new one returning the right row on
+    BOTH. Without the old rule present in the test, "the new one is right" is a
+    claim about one implementation and says nothing about what changed.
+    """
+    mod = _load()
+    old = {"context": CTX_PY, "state": "pending", "description": "running",
+           "created_at": "2026-09-11T10:00:00Z"}
+    new = {"context": CTX_PY, "state": "failure", "description": REAL_NO_NAME,
+           "created_at": "2026-09-11T17:00:00Z"}
+
+    def first_wins(rows):                 # the rule this file used to carry
+        seen = {}
+        for row in rows:
+            if row["context"] not in seen:
+                seen[row["context"]] = row
+        return seen
+
+    newest_first, oldest_first = [new, old], [old, new]
+    # On GitHub's CURRENT ordering the two rules agree — which is exactly why
+    # the old one survived unnoticed.
+    assert first_wins(newest_first)[CTX_PY]["state"] == "failure"
+    # On the OTHER ordering the old rule reports the superseded `pending` row,
+    # i.e. a head whose gate has already failed reads as still running.
+    assert first_wins(oldest_first)[CTX_PY]["state"] == "pending"
+    # The shared fold is right on both, because the array's order is not an
+    # input to it at all.
+    for order in (newest_first, oldest_first):
+        assert mod.newest_per_context(order)[CTX_PY]["state"] == "failure", order
+    # …and a second context is kept independently rather than overwritten.
+    both = mod.newest_per_context(
+        [new, old, {"context": CTX_NODE, "state": "success",
+                    "description": REAL_SUCCESS,
+                    "created_at": "2026-09-11T17:00:00Z"}])
+    assert set(both) == {CTX_PY, CTX_NODE}
+
+
+def test_newest_per_context_returns_FOREIGN_contexts_and_the_POLICY_filters_them():
+    """🔴 THE FILTER MOVED OUT OF THE FOLD AND INTO `commit_verdict`, so pin
+    where it now lives. The shared fold is about GitHub's data and returns every
+    context; "only `tekton/devrc-main-*` may speak about main" is THIS file's
+    rule. If the filter were lost in the move, a foreign pipeline's green would
+    close an open red episode — `test_a_commit_with_ONLY_FOREIGN_contexts_is_no_
+    verdict_not_green` is the end-to-end half of the same guard."""
+    mod = _load()
+    rows = [_status("tekton/devrc-cairn-client-runs", "success", "all good elsewhere"),
+            _status(CTX_PY, "failure", REAL_NO_NAME)]
+    assert set(mod.newest_per_context(rows)) == {
+        "tekton/devrc-cairn-client-runs", CTX_PY}
+    verdict, reds = mod.commit_verdict(rows)
+    assert verdict == "red" and set(reds) == {CTX_PY}
+    # The foreign row ALONE is no verdict — never green.
+    assert mod.commit_verdict(rows[:1]) == ("none", {})
+
+
+def test_the_shared_predicates_are_NOT_re_declared_in_either_consumer():
+    """🔴 ONE RULE, ONE PLACE — ENFORCED, NOT ASSERTED IN PROSE. These four
+    predicates were open-coded in this file AND in `stale-base-triage.py`, and
+    the copies had already diverged before anybody noticed: only one stripped
+    the `TOTAL` truncation fragment, only one folded by timestamp. A comment
+    saying "shared" does not stop the next copy; a test that fails on a local
+    `def` does.
+    """
+    shared = ("classify", "newest_per_context", "parse_failing_names",
+              "parse_failed_count", "derived_failure_upper_bound")
+    consumers = [ROOT / "scripts" / "main-status-watch.py",
+                 ROOT / "scripts" / "stale-base-triage.py"]
+    lib = ROOT / "scripts" / "lib" / "ci_status.py"
+    lib_src = lib.read_text(encoding="utf-8")
+    for name in shared:
+        assert f"def {name}(" in lib_src, f"{name} is not defined in {lib}"
+    for path in consumers:
+        src = path.read_text(encoding="utf-8")
+        for name in shared:
+            assert f"\ndef {name}(" not in src, (
+                f"{path.name} re-declares `{name}` — it belongs to "
+                f"scripts/lib/ci_status.py")
+    # POSITIVE CONTROL on the scan itself: the pattern DOES match a real local
+    # definition, so the assertions above are not vacuous on a pattern that
+    # never matches anything.
+    assert "\ndef screen_all_known_flakes(" in consumers[0].read_text(encoding="utf-8")
 
 
 def test_an_UNRECOGNISED_state_is_never_green_end_to_end(h):

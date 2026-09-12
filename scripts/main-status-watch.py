@@ -92,6 +92,22 @@ import sys
 import time
 from pathlib import Path
 
+# 🔴 ONE RULE, ONE PLACE. `classify`, `newest_per_context`, `parse_failing_names`
+# and `parse_failed_count` used to be open-coded HERE and again in
+# `scripts/stale-base-triage.py`, and the copies had already DIVERGED. They now
+# live in `scripts/lib/ci_status.py`; this file keeps only the POLICY — which
+# context prefix may speak, which names are known flakes, what to do about a red.
+#
+# ⚠ IMPORTED BY PATH, not as a package, and this unit runs the file straight out
+# of the CHECKOUT (`ExecStart=… %h/workspace/devrc/scripts/main-status-watch.py`),
+# so a `git pull` is the whole deploy for both files and no home-manager switch
+# is involved. A run that lands in the instant between the two files arriving
+# fails to import and exits non-zero; this unit has no `OnFailure=` toast and the
+# next poll is 10 minutes away, so the cost of that window is one skipped poll.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from ci_status import (classify, newest_per_context,  # noqa: E402
+                       parse_failed_count, parse_failing_names)
+
 RC_OK, RC_TRIGGERED, RC_UNMEASURED, RC_BLIND, RC_USAGE = 0, 10, 11, 12, 2
 
 # The context prefix the main-push pipeline posts under. Derived nowhere: this
@@ -137,77 +153,40 @@ def print_header():
 
 
 # ── classification ────────────────────────────────────────────────────────────
-# 🔴 ONLY `state == "failure"` IS A RED. Every non-code outcome the pipeline
-# reports — superseded, KILLED, NO GATE POD — arrives as `state == "error"`, and
-# each says "Not a code failure." in its own description. Treating `error` as red
-# is the roll-up mistake in a second spelling; treating it as GREEN would be
-# worse still, so it is classified as NOT-A-VERDICT and the walk continues past
-# it. That is the narrowest rule that can be wrong in only one direction.
+# 🔴 `classify` AND `newest_per_context` NOW LIVE IN `scripts/lib/ci_status.py`,
+# imported above. What they do and why is documented there; what stays HERE is
+# the policy they are applied under.
 #
 # ⚠ `commit_verdict` BRANCHES ON `green` AND `red` ONLY, WHICH IS WHY THE FINER
-# CLASSES NEEDED A TEST OF THEIR OWN. Downstream, `superseded`/`killed`/
+# CLASSES NEED A TEST OF THEIR OWN. Downstream, `superseded`/`killed`/
 # `no-gate-pod`/`error-other` are indistinguishable, so an end-to-end test can
-# only ever see "not a verdict" — measured, 35 of this function's 60 enumerated
+# only ever see "not a verdict" — measured, 35 of `classify`'s 60 enumerated
 # mutants survived a fully green 61-test suite, and the 25 that died were
 # exactly the ones that moved an answer INTO green-or-red. Worse, the two
-# fall-through `return "error-other"`s are reached by no fixture at all: turning
-# either into `return "green"` survived. That is a state GitHub adds tomorrow
-# folded into "main is green", closing a red episode. They are now pinned by
-# `test_classify_maps_a_row_to_its_documented_class`, which drives this function
-# directly — the only way to see a distinction the caller cannot make.
+# fall-through `return "error-other"`s were reached by no fixture at all:
+# turning either into `return "green"` survived. That is a state GitHub adds
+# tomorrow folded into "main is green", closing a red episode. They are pinned
+# by `test_classify_maps_a_row_to_its_documented_class`, which drives the shared
+# function directly — the only way to see a distinction the caller cannot make.
 # A tuple named NOT_A_VERDICT used to sit here enumerating the same classes;
 # nothing read it, so it was deleted rather than left reading as a contract it
 # could not enforce.
-
-
-def classify(state, description):
-    """One status row -> a verdict class. Pure, and the tests drive it directly.
-
-    🔴 UNRECOGNISED MEANS `error-other`, WHICH MEANS NOT-A-VERDICT — never green.
-    Both fall-through returns below are the arm an unknown `state` lands on, and
-    "absence reads as green" is the single failure this whole file is built
-    against.
-    """
-    desc = (description or "").strip()
-    if state == "success":
-        return "green"
-    if state == "failure":
-        return "red"
-    if state == "pending":
-        return "pending"
-    if state == "error":
-        if desc.startswith("superseded"):
-            return "superseded"
-        if desc.startswith("KILLED"):
-            return "killed"
-        if desc.startswith("NO GATE POD"):
-            return "no-gate-pod"
-        return "error-other"
-    return "error-other"
-
-
-def newest_per_context(rows):
-    """GitHub returns statuses newest-first; keep the first row per context.
-
-    A commit accumulates a `pending` row and then its verdict under the SAME
-    context, so folding by context is what turns the history into a current
-    answer. Without it a stale `pending` from 20 minutes ago outvotes the
-    verdict that replaced it.
-    """
-    # 🔴 NO isinstance GUARD HERE, DELIBERATELY — ONE RULE, ONE PLACE. A first
-    # draft had one, and a mutation sweep proved it UNREACHABLE: the walk already
-    # rejects a non-object row loudly, naming the commit, so this one could never
-    # execute. Worse, it `continue`d — silently DROPPING a row, and a dropped row
-    # could be the red. A guard that cannot run, and would hide evidence if it
-    # did, is worse than none: it reads as coverage and stops anyone looking.
-    seen = {}
-    for row in rows:
-        ctx = row.get("context", "")
-        if not ctx.startswith(CONTEXT_PREFIX):
-            continue
-        if ctx not in seen:
-            seen[ctx] = row
-    return seen
+#
+# 🔴 THE FOLD CHANGED WHEN IT MOVED, AND THE CHANGE IS DELIBERATE. This file
+# used to keep the FIRST row per context, which is right only because GitHub
+# returns the array newest-first — an assumption about someone else's response
+# ordering, load-bearing and unstated. The shared `newest_per_context` folds on
+# `max(created_at)` instead: it agrees with first-wins on the order GitHub uses
+# today and stays right if that order ever changes. Pinned by
+# `test_newest_per_context_is_ORDER_INDEPENDENT_which_first_wins_was_not`.
+#
+# 🔴 AND THE CONTEXT FILTER MOVED HERE, WHICH IS WHERE THE POLICY BELONGS. The
+# shared fold returns every context it saw; deciding that only
+# `tekton/devrc-main-*` may speak about main is this file's rule, not GitHub's.
+# It must be applied BEFORE the emptiness check below — a commit carrying only a
+# foreign pipeline's rows has NO verdict here, and reading one as green would
+# close an open red episode off another pipeline's answer. Pinned by
+# `test_a_commit_with_ONLY_FOREIGN_contexts_is_no_verdict_not_green`.
 
 
 def commit_verdict(rows):
@@ -217,7 +196,8 @@ def commit_verdict(rows):
     verdict unless at least one leg produced green-or-red — a commit whose legs
     were all superseded tells us nothing at all, and must not read as green.
     """
-    per_ctx = newest_per_context(rows)
+    per_ctx = {ctx: row for ctx, row in newest_per_context(rows).items()
+               if ctx.startswith(CONTEXT_PREFIX)}
     if not per_ctx:
         return "none", {}
     classes = {ctx: classify(r.get("state"), r.get("description")) for ctx, r in per_ctx.items()}
@@ -245,23 +225,28 @@ def commit_verdict(rows):
 # row, which triggers a confirmation run because its truncation makes
 # completeness unprovable. That is the correct answer, not a defect.
 #
-# It is kept because it costs 15 lines and encodes WHY name-matching cannot carry
-# the flake decision here, next to a ledger someone will otherwise be tempted to
-# grow. The flake decision is made by the deadman, by re-running.
-_FAILING_RE = re.compile(r"FAILING:\s*(.+?)(?:\s*\|\s*TOTAL\b|$)")
-_FAILED_COUNT_RE = re.compile(r"\bfailed=(\d+)\b")
-
-
-def parse_failing_names(description):
-    m = _FAILING_RE.search(description or "")
-    if not m:
-        return []
-    return [n.strip() for n in m.group(1).split("|") if n.strip()]
-
-
-def parse_failed_count(description):
-    m = _FAILED_COUNT_RE.search(description or "")
-    return int(m.group(1)) if m else None
+# It is kept because it costs a handful of lines and encodes WHY name-matching
+# cannot carry the flake decision here, next to a ledger someone will otherwise
+# be tempted to grow. The flake decision is made by the deadman, by re-running.
+#
+# 🔴 THE ZERO ABOVE IS NOT A PROPERTY OF THE IDEA — IT IS THIS SCREEN READING
+# ONLY `failed=N`, WHICH IS THE FIELD THE 140-BYTE CAP EATS. `failed=` is LAST
+# in the banner, so whether it survives is decided by the failing test's NAME
+# LENGTH. `scripts/stale-base-triage.py` derives the same completeness proof a
+# second way — `collected − passed − skipped` is an upper bound on `failed`, and
+# those three fields PRECEDE it, so they survive — and on the rows measured that
+# route turns 5/28 provably-complete into 18/28.
+#
+# ⚠ DELIBERATELY NOT ADOPTED HERE, AND THE REASON IS THE DIRECTION OF THE ERROR.
+# There, proving completeness makes the tool SPEAK; here it makes this file stay
+# SILENT about a red. A wider screen is a wider silence over the only automated
+# detector `main` has, and the screen's own argument is that the flake decision
+# belongs to the deadman's re-run rather than to a name match. Widening it is a
+# change to make on purpose, with its own measurement — not a free win inherited
+# from a sibling. (Handoff rank 6's open question, "is this screen inert?", now
+# has half an answer: it is inert for a REASON, and the reason is fixable.)
+# `parse_failing_names` / `parse_failed_count` are shared with that file via
+# `scripts/lib/ci_status.py`; only the decision below is local.
 
 
 def screen_all_known_flakes(descriptions):

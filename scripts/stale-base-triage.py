@@ -131,6 +131,19 @@ import sys
 import time
 from pathlib import Path
 
+# 🔴 ONE RULE, ONE PLACE. `classify` here was BYTE-IDENTICAL to
+# `main-status-watch.py`'s, and the parsers were duplicated AND already
+# divergent — only this copy stripped the `TOTAL` truncation fragment, only this
+# copy folded statuses by timestamp. They now live in `scripts/lib/ci_status.py`
+# and both files import them; the disagreement between the copies was the
+# finding, and consolidating is what made it audible. What stays here is POLICY:
+# which context, what completeness means, and what to do about a red.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from ci_status import (TOTALS_RE as _TOTALS_RE,  # noqa: E402
+                       classify, derived_failure_upper_bound,
+                       newest_per_context, parse_failed_count,
+                       parse_failing_names)
+
 RC_OK, RC_INHERITED, RC_UNMEASURED, RC_USAGE = 0, 10, 11, 2
 
 # The context this triage is about. A literal contract with the devrc-ci
@@ -188,130 +201,12 @@ def print_header():
     return True
 
 
-# ── status classification ─────────────────────────────────────────────────────
-def classify(state, description):
-    """One status row -> a verdict class. Pure; the tests drive it directly.
-
-    🔴 UNRECOGNISED MEANS `error-other`, WHICH MEANS NOT-A-VERDICT — never
-    `red`, and never `green`. Only `failure` is a code failure; every broken-gate
-    outcome this pipeline produces arrives as `error` and is reported under its
-    own name so a human can see it was the gate, not the change.
-    """
-    desc = (description or "").strip()
-    if state == "success":
-        return "green"
-    if state == "failure":
-        return "red"
-    if state == "pending":
-        return "pending"
-    if state == "error":
-        if desc.startswith("superseded"):
-            return "superseded"
-        if desc.startswith("KILLED"):
-            return "killed"
-        if desc.startswith("NO GATE POD"):
-            return "no-gate-pod"
-        return "error-other"
-    return "error-other"
-
-
-def newest_per_context(rows):
-    """Fold status rows to the NEWEST row per context, by `created_at`.
-
-    🔴 NOT first-wins and NOT last-wins. GitHub returns this array newest-first
-    today, so a last-wins dict yields the OLDEST post per context — an agent
-    shipped exactly that and reported a known-green head as `pending`. Folding
-    on `max(created_at)` is correct under either ordering, so the hazard is
-    removed rather than merely avoided; `test_newest_per_context_is_order_
-    independent` feeds both orders and pins that they agree.
-    """
-    best = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        ctx = row.get("context") or ""
-        if not ctx:
-            continue
-        stamp = row.get("created_at") or ""
-        if ctx not in best or stamp > best[ctx][0]:
-            best[ctx] = (stamp, row)
-    return {ctx: row for ctx, (_, row) in best.items()}
-
-
-# ── description parsing ───────────────────────────────────────────────────────
-_FAILING_RE = re.compile(r"FAILING:\s*(.+?)(?:\s*\|\s*TOTAL\b|$)")
-_FAILED_COUNT_RE = re.compile(r"\bfailed=(\d+)\b")
-# The only fragments a 140-char cut can leave behind where `TOTAL` was starting.
-# Enumerated rather than pattern-matched: a `startswith` test would also eat a
-# real name, and every test in this repo begins `test_` or `Test`, none of which
-# is a prefix of `TOTAL`. See `test_a_trailing_TOTAL_fragment_is_not_a_test_name`.
-_TOTAL_FRAGMENTS = ("T", "TO", "TOT", "TOTA")
-
-
-def parse_failing_names(description):
-    """The test names the description NAMES. May be incomplete — see the header.
-
-    A description cut inside ` | TOTAL` leaves a trailing fragment of the word
-    TOTAL sitting where a name would be. Left in, it resolves to no file and the
-    PR is reported as a real red on the strength of a truncation artefact.
-    """
-    m = _FAILING_RE.search(description or "")
-    if not m:
-        return []
-    names = [n.strip() for n in m.group(1).split("|") if n.strip()]
-    if names and names[-1] in _TOTAL_FRAGMENTS:
-        names.pop()
-    return names
-
-
-def parse_failed_count(description):
-    m = _FAILED_COUNT_RE.search(description or "")
-    return int(m.group(1)) if m else None
-
-
-# 🔴 THE THREE FIELDS ARE MATCHED AS ONE ADJACENT, ORDERED GROUP, NOT SEPARATELY,
-# AND THAT IS A SOUNDNESS REQUIREMENT RATHER THAN TIDINESS. The hazard is a
-# number the 140-char cap cut SHORT — `collected=22204` arriving as
-# `collected=2220` would read as a perfectly well-formed integer and make the
-# derived bound far too SMALL, which is the one direction that can certify a
-# completeness this row does not have. Requiring `passed=` and then `skipped=`
-# to follow proves that `collected=` and `passed=` are complete numbers: the cap
-# truncates a SUFFIX, so a field with more banner text after it was not cut.
-# Only `skipped=` — the last of the three — can itself be short, and a short
-# `skipped` SUBTRACTS LESS and so inflates the bound, i.e. errs toward
-# withholding. See `test_a_TRUNCATED_skipped_can_only_INFLATE_the_derived_bound`.
-_TOTALS_RE = re.compile(r"\bcollected=(\d+)\s+passed=(\d+)\s+skipped=(\d+)")
-
-
-def derived_failure_upper_bound(description):
-    """An UPPER bound on the banner's own `failed=`, or None if underivable.
-
-    `scripts/run-tests.sh` GUARD 4 computes, per target,
-
-        collected = passed + skipped + failed + errors + xfailed + xpassed
-        TOT_FAILED += failed + errors          (the banner's `failed=` is f+e)
-
-    and accumulates each term into the TOTAL banner this description quotes. So
-
-        collected − passed − skipped == failed + xfailed + xpassed >= failed
-
-    🔴 THE INEQUALITY ONLY EVER POINTS ONE WAY. `xfailed`/`xpassed` are
-    non-negative, so this can equal `failed=` but never fall below it. That is
-    what makes it usable as a completeness proof: a caller comparing it against
-    a count of NAMES is comparing against a ceiling, and a ceiling that happens
-    to equal the number of names squeezes `failed` to that same number. An
-    under-count would instead certify completeness on a row that had more
-    failures than it named — the single error this tool must not make.
-    """
-    m = _TOTALS_RE.search(description or "")
-    if not m:
-        return None
-    collected, passed, skipped = (int(g) for g in m.groups())
-    derived = collected - passed - skipped
-    # Negative is arithmetically impossible under the definition above, so it
-    # means the banner is not the banner this derivation was written against.
-    # Refusing to answer is the only safe reading of a row we cannot parse.
-    return derived if derived >= 0 else None
+# ── status classification and description parsing ─────────────────────────────
+# 🔴 `classify`, `newest_per_context`, `parse_failing_names`, `parse_failed_count`
+# and `derived_failure_upper_bound` are IMPORTED from `scripts/lib/ci_status.py`
+# (see the import block). What each one does, and the trap it exists for, is
+# documented there. Re-declaring any of them here is refused by
+# `test_the_shared_predicates_are_NOT_re_declared_in_either_consumer`.
 
 
 def names_provably_complete(description):
