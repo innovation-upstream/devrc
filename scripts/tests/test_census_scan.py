@@ -430,13 +430,150 @@ def test_the_runners_floor_is_below_what_the_derivation_actually_returns(live):
     )
 
 
+# 🔴 THE TWO TIERS RUN THIS FILE IN DIFFERENT TREES, AND ONLY ONE HAS A `.git`.
+# `nix build .#checks.x86_64-linux.pytests` builds from a store copy with no git
+# dir, so `git ls-files` exits **128** and an assertion reading that as "not
+# tracked" turns the gate red on a message that is FALSE. This test did exactly
+# that on `tekton/devrc-pytests` for this PR's own head (7d19f4c7): `not tracked
+# by git: []` against a file that is tracked at mode 100755. Same shape already
+# solved in `scripts/opencode/tests/test_dispatch.py` and
+# `scripts/tests/test_load_test_harness.py`; this mirrors them.
+def git_dir_present(root: Path) -> bool:
+    """Which tier are we in? A FUNCTION of the tree, not a module constant.
+
+    🔴 Deliberately not cached into a `GIT_DIR_PRESENT` global. A constant is a
+    fixture that can only ever produce the value an assertion about it names, so
+    a mutant hardcoding it to `True` survives on a dev host — where the probe
+    returns `True` anyway — and the tier switch goes unpinned exactly where it
+    matters. Every caller computes the tier from the tree it is looking at.
+
+    🔴 `.git` is a FILE inside a worktree (it holds `gitdir: …`), and this repo
+    is developed in worktrees, so `.exists()` and never `.is_dir()`.
+    """
+    return (root / ".git").exists()
+
+
+def runner_ship_problems(root: Path, rel: str, git_present: bool) -> list[str]:
+    """Reasons `rel` would not reach a consumer as a runnable script. [] == fine.
+
+    Three checks, and only ONE of them is tier-conditional:
+
+      * EXISTENCE is the meaningful proof INSIDE the sandbox. The store copy is
+        built from tracked files, so an untracked file is simply not there.
+      * The EXECUTABLE bit is meaningful in BOTH tiers — measured: `git archive`
+        and the nix store copy each preserve mode 100755 — so it is asserted
+        unconditionally rather than thrown away with the git half.
+      * TRACKEDNESS is meaningful only on a DEV HOST, where the file exists on
+        disk whether or not git has heard of it. That is the real hazard: the
+        switch succeeds and the flake silently omits the file.
+
+    `git_present` is a PARAMETER, not a module-level read, so both branches are
+    exercisable from either tier — see the controls below.
+    """
+    path = root / rel
+    if not path.is_file():
+        return [f"{rel} is missing from this tree"]
+    problems = []
+    if not os.access(path, os.X_OK):
+        problems.append(f"{rel} is not executable — `chmod +x` it")
+    if not git_present:
+        return problems          # nix sandbox tier: no .git, nothing more to ask
+    p = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", rel],
+        capture_output=True, text=True, timeout=60)
+    if p.returncode != 0:
+        problems.append(f"{rel} is not git-tracked — `git add` it")
+    return problems
+
+
 def test_the_runner_is_tracked_and_executable():
-    """A new file that is not `git add`ed is silently omitted by the flake."""
-    out = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "--", "scripts/ledger-check.sh"],
-        capture_output=True, text=True, timeout=60).stdout.split()
-    assert out == ["scripts/ledger-check.sh"], f"not tracked by git: {out!r}"
-    assert os.access(LEDGER_CHECK, os.X_OK), "ledger-check.sh is not executable"
+    """A new file that is not `git add`ed is silently omitted by the flake.
+
+    The switch SUCCEEDS and the file is simply not there — which for this file
+    means `scoped-tests.sh` shells out to a missing checker.
+    """
+    assert runner_ship_problems(
+        REPO_ROOT, "scripts/ledger-check.sh", git_dir_present(REPO_ROOT)) == []
+
+
+def test_the_tier_probe_answers_BOTH_ways_from_either_tier(tmp_path: Path):
+    """🔴 The pin on the tier switch, built so it cannot agree with itself.
+
+    Both fixtures are constructed here, so this runs identically in the sandbox
+    and on a dev host, and a mutant hardcoding the probe to either constant dies
+    in one of the two arms.
+    """
+    (tmp_path / "with").mkdir()
+    (tmp_path / "with" / ".git").write_text("gitdir: /elsewhere\n")   # worktree
+    (tmp_path / "without").mkdir()
+    assert git_dir_present(tmp_path / "with") is True
+    assert git_dir_present(tmp_path / "without") is False
+
+
+# --- controls on the tier guard -------------------------------------------- #
+# 🔴 These build their own fixtures, so they run identically in BOTH tiers. A
+# guard exercisable only on a dev host is a guard nobody re-checks after the
+# sandbox breaks it — which is the failure this whole block is fixing.
+
+def test_a_missing_runner_is_reported_in_either_tier(tmp_path: Path):
+    """POSITIVE CONTROL. Without it, the `== []` above is indistinguishable from
+    a helper wired to nothing."""
+    assert runner_ship_problems(tmp_path, "nope.sh", False) == \
+        ["nope.sh is missing from this tree"]
+    assert runner_ship_problems(tmp_path, "nope.sh", True) == \
+        ["nope.sh is missing from this tree"]
+
+
+def test_a_DIRECTORY_at_the_runner_path_is_not_a_shipped_file(tmp_path: Path):
+    """The claim is "this FILE ships". A directory standing where the script
+    should be satisfies `exists()` — hence `is_file()`."""
+    (tmp_path / "ledger-check.sh").mkdir()
+    assert runner_ship_problems(tmp_path, "ledger-check.sh", False) == \
+        ["ledger-check.sh is missing from this tree"]
+
+
+def test_a_NON_EXECUTABLE_runner_is_reported_in_either_tier(tmp_path: Path):
+    """🔴 The half that must NOT have been thrown away with the git half.
+
+    `scoped-tests.sh` invokes the checker as `bash <path>`, but the deployed
+    contract is an executable script; a lost mode bit is a real regression the
+    sandbox CAN observe, so it is asserted there too.
+    """
+    script = tmp_path / "ledger-check.sh"
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    script.chmod(0o644)
+    assert runner_ship_problems(tmp_path, "ledger-check.sh", False) == \
+        ["ledger-check.sh is not executable — `chmod +x` it"]
+
+
+def test_an_untracked_runner_is_reported_when_git_is_present(tmp_path: Path):
+    """The check the sandbox CANNOT make, made here against a real git repo —
+    proving the dev-host tier still catches the hazard the `.git` guard skips."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True,
+                   capture_output=True)
+    for name in ("tracked.sh", "untracked.sh"):
+        p = tmp_path / name
+        p.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        p.chmod(0o755)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.sh"], check=True,
+                   capture_output=True)
+    assert runner_ship_problems(tmp_path, "tracked.sh", True) == []
+    assert runner_ship_problems(tmp_path, "untracked.sh", True) == \
+        ["untracked.sh is not git-tracked — `git add` it"]
+
+
+def test_a_present_executable_runner_in_a_GIT_FREE_tree_reports_NOTHING(
+        tmp_path: Path):
+    """🔴 THE REGRESSION CASE — this is the sandbox, reproduced.
+
+    It fails in an ORDINARY checkout the moment the `.git` guard is deleted,
+    which is what stops the CI-red from silently coming back.
+    """
+    script = tmp_path / "ledger-check.sh"
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    script.chmod(0o755)
+    assert not (tmp_path / ".git").exists()
+    assert runner_ship_problems(tmp_path, "ledger-check.sh", False) == []
 
 
 # --------------------------------------------------------------- runner guards
