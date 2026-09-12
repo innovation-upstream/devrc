@@ -61,7 +61,7 @@ hash reason.
 - **Never `git reset --hard` (bare), `git clean`, or `git checkout --`** — each destroys **uncommitted** curated content, which is exactly the part no commit and no bundle holds. ⚠ "bare" qualifies `git reset --hard` ONLY, contrasted with the `<ref>` form below: `git checkout --` always takes a pathspec and `git clean` is almost always `-fd`, so reading "bare" across all three would license exactly the commands this bullet forbids.
 - 🔴 **`git reset --hard <ref>` is WORSE than the bare form, not milder — it orphans COMMITTED content.** `backup.py` bundles with `git bundle create --all`, which walks **reachable refs only**, so once the branch has moved back, the orphaned commits are in no FUTURE bundle. They are still inside the bundles ALREADY in the bucket, which hold whatever was reachable when each was made — `ASIB_KEEP` daily runs, default 14 (`backup.py`) — so run `restore-verify.py` before calling anything lost. Past that window the reflog is the only holder. Do not read "it is committed, so a bundle has it" as safety against a history rewrite.
 - **Never add a remote, never push**, and never copy a line into `devrc` (PUBLIC) or any public repo, issue, PR, gist or commit message. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
-- Each scope's own `README.md` states the policy governing it — **read it before writing there**.
+- 🔴 **Read the policy file the probe named on its `policy:` line before writing there, and do not go looking for one it did not name.** This sentence is the SAME one `~/.claude/skills/subsystem-index/SKILL.md` uses in the shared write half, deliberately word for word, and `scripts/tests/test_index_store_policy_line.py` fails if the two copies drift apart — one rule stated two ways is how one of them goes stale. ⚠ **It replaces "each scope's own `README.md` states the policy governing it — read it before writing there", which was unfollowable:** measured 2026-08-13, 1 of the store's 5 scopes had that file, and a new scope starts without one by construction. `service_recon.py` now prints the `policy:` line directly under `index:` on every status (see the table below), resolved by `subsystem_touch.governing_policy` — the same function `/handoff`'s probe uses, so the two probes cannot name different files for one scope.
 
 ## File schema
 
@@ -125,6 +125,19 @@ STALE**: a
 cache last synced three days ago serves a `HIT` that reads exactly like a fresh
 one, so the stamp lines are the only thing in the brief that says how old it is.
 No stamp lines means the store carried no stamp — never that it is fresh.
+
+🔴 **A `policy:` line follows, on EVERY status** — `policy: <path>  (<basis>)`,
+directly under the `index:`/`stamp:` block. It is the line the shared write half
+sends you to (Store safety, above), and the basis says which of four cases you
+are in: `scope README — authoritative for this scope`, `store-root README — this
+scope has none of its own`, `NONE — neither a scope README nor a store-root
+README exists`, or `NOT RESOLVED — no scope was reached, so no policy file was
+looked for`. 🔴 **The fourth is not a spelling of the third.** `NONE` is a
+measurement — two paths stat'd, neither there; `NOT RESOLVED` is `not-attempted`
+or `store-unstamped`, where nothing was asked at all, and reading them as one
+would let a run that never looked report what a run that looked and found
+nothing reports. The first three come from `subsystem_touch.governing_policy`,
+so they are the same answer `/handoff`'s probe prints for that scope.
 
 🔴 **`## What it is` is surfaced on the BODY paths only, never on an index row.**
 Until 2026-08-21 no BRIEFING path printed it — `subsystem_recall` left it out of
