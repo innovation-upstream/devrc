@@ -117,7 +117,7 @@ dispatch that arrived after the merge decision was already taken, so the fix was
 reporting the pair on each PR** — not to re-decide this section, but because it is now the only
 signal for whether that trigger works; `C` alone cannot distinguish "it ran and was useless" from
 "nobody invoked it". Decomposition, the per-PR timings, the fourth corroborating instance and the
-trigger's first pre-decision catch: `reference/round-ladder-evidence.md`.
+trigger's first pre-decision catch: `~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`.
 
 🔴 **ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER.** Its verdict is one of `proceed to the
 checklist` / `requirement questioned — <which>` / `deletion candidate — <what>` / `close, do not
