@@ -49,11 +49,12 @@ that is empty by construction and a finding-free pass over it reads as a clean r
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-⚠ **Consider `--round 0` FIRST — the requirements & deletion pass (its own section below).** It
-asks whether the change should EXIST, which no item on the checklist asks; it is the only round
-that can conclude *close this PR, do not audit it*. It is ON TRIAL, so it is a judgement call, not
-a step — but it has to be reachable from here or the trial closes by attrition rather than by
-evidence. Whichever you run, record `ran: R · changed the outcome: C` on the PR.
+🔴 **RUN `--round 0` FIRST — the requirements & deletion pass (its own section below).** It asks
+whether the change should EXIST, which no item on the checklist asks; it is the only round that can
+conclude *close this PR, do not audit it*. **No longer on trial: the trial CLOSED at `ran: 6 ·
+changed the outcome: 3`** (evidence in the section itself). 🔴 **Run it at PR-CREATE time, not when
+you get round to auditing** — that is the one finding the trial produced, and the
+`audit-pr-nudge.py` PostToolUse hook now routes it there for you.
 
 **Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
@@ -85,8 +86,8 @@ one scratchpad path and the branch namespace, so two audit rounds that both pick
 
 ## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE (runs BEFORE the checklist)
 
-⚠ **ON TRIAL, NOT A STANDING RULE — read the retirement condition at the end of this section
-before you run it.**
+✅ **A STANDING RULE — the trial is CLOSED. Read the TRIAL RECORD at the end of this section for
+what it cost and what it found; you do not have to re-litigate whether to run it.**
 
 Every axis below asks whether the change is CORRECT. None asks whether it should EXIST, and an
 audit scoped to a diff will never raise it on its own: that is how a 145 KB webhook listener
@@ -150,18 +151,30 @@ add-back heuristic needs a measurement nothing here performs — and the sentenc
 which is the shape this skill tells you to delete rather than reverse. Recorded so nobody derives
 it again.
 
-🔴 **RETIREMENT CONDITION — this section is on trial.** Run it on the next 3–5 PRs and record, on
-each PR, its verdict and whether that verdict CHANGED what happened. **If it ran and changed
-nothing, DELETE this section** — do not automate it further, and do not keep it because it reads
-well.
+✅ **TRIAL RECORD — CLOSED 2026-09-12 at `ran: 6 · changed the outcome: 3`. The section STAYS. Do
+not re-open the question; read what it found instead.** The retirement condition that stood here
+said *"if it ran and changed nothing, DELETE this section"*. It ran and it changed things, so the
+condition is spent and is recorded rather than left standing — a trial nobody can close is how a
+judgement call becomes permanent by attrition.
 
-🔴 **REPORT THE PAIR — `ran: R · changed the outcome: C` — never `C` alone.** A bare zero cannot
-distinguish "it ran five times and was useless" from "nobody ever typed `--round 0`", and those
-have opposite conclusions: the first retires the section, the second says the trial never started.
-`--round` still DEFAULTS to 1, so the second is the likelier reading of a silent zero. `R = 0` is
-not evidence about this section at all — it is evidence about its routing, and the fix is to run it,
-not to delete it. Closed by that pair reaching a decision, recorded on the PR that removes this
-section or on the one that promotes it out of trial.
+Decomposition, because the PAIR is the record and `C` alone is meaningless: trials 1–2 → 2/2 ·
+trials 3–5 → **3/0** · a peer session's round 0 on `#1518` → 1/1 (it closed that PR unmerged).
+
+🔴 **THE FINDING WAS THE ROUTING, NOT THE SECTION — and every zero above says so.** All three of
+trials 3–5 produced a verdict and none could act, because each was dispatched after the decision
+was already taken: `#1523` merged **27 min BEFORE** its audit was dispatched, `#1510` merged **+6
+min after**, `#1518` was closed **5 min before** the report returned. Audit runtimes were
+459/920/776 s, so no speedup reaches any of them. **Round 0's question is only actionable while the
+merge decision is open**, so the fix was a trigger, not an edit to this section:
+`scripts/claude-hooks/audit-pr-nudge.py` now routes round 0 as step 1 of the nudge it fires on
+`gh pr create` (pinned by `scripts/claude-hooks/tests/test_audit_pr_nudge.py`). Full evidence:
+`claudedocs/handoff-audit-pr-ladder.md`.
+
+⚠ **Keep reporting `ran: R · changed the outcome: C` on each PR** — not to decide this section's
+fate, which is settled, but because it is the only record of whether the TRIGGER is working. A bare
+`C` cannot distinguish "it ran and was useless" from "nobody invoked it", and those have opposite
+conclusions; `--round` still defaults to 1, so a silent zero is more likely a routing failure than a
+verdict about the pass.
 
 <!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
      scripts/audit-dispatch.py captures the ROUND 0 section up to the next
