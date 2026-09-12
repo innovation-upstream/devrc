@@ -58,7 +58,83 @@ import sys
 import tempfile
 import time
 
-SCHEMA = 1
+SCHEMA = 2
+
+# ---------------------------------------------------------------------------
+# 🔴 WHICH BLOCKS ARE A REMOTE HOST'S FACTS -- the classification this whole
+# feature turns on, and the one it originally got WRONG.
+#
+# The first version relayed all 15 custom blocks under a `wb` label. That is a
+# CATEGORY ERROR for most of them: `clawgate`, `alerts`, `civitai`, `mail`,
+# `telemetry` and `media` are not the workbench's state at all -- they are
+# homelab/client-prod Alertmanager, the clawgate board, shared ClickHouse and a
+# homelab qBittorrent pod. Their numbers are identical whichever machine you
+# read them from; the workbench is merely the host that happens to poll them.
+#
+# Labelling `233!10` as `wb` says something false. And because those global
+# backlogs are large and standing (MEASURED 2026-09-12: telemetry Critical,
+# clawgate 233 with 10 stuck, and the clawgate stuck-toast latch unchanged for
+# 24 days), relaying them made the pill permanently red -- which RULES calls out
+# directly: "a permanently-red gate is worse than no gate".
+#
+# So the sets below split by WHOSE FACT IT IS, not by what is convenient:
+#
+#   RELAY       genuinely this host's own state -> travels in the snapshot
+#   NATIVE      a global service -> the OBSERVER runs the same block itself,
+#               against a synced copy of the poller cache. Not relayed, because
+#               relaying it would relabel a shared fact as one host's.
+#   LOCAL_ONLY  the observer already has its own, with the same meaning
+#
+# Pinned two-way against `nix/graphical.nix` by
+# `test_every_custom_block_is_classified_exactly_once`: a new block that lands
+# in none of these sets fails the suite rather than silently defaulting into the
+# relay, which is how the first version acquired its whole problem.
+# ---------------------------------------------------------------------------
+
+RELAY_BLOCKS = frozenset({
+    "i3status-load",         # the workbench's own load average
+    "i3status-fans",         # its pump/case RPM (NCT6687D -- workbench only)
+    "i3status-airvpn",       # the HOST tunnel, per-machine
+    "i3status-runaways",     # its runaway processes
+    "i3status-claude-runs",  # Claude sessions in ITS tmux
+    "i3blocks-rigcontrol",   # its RGB/monitor mode
+    "i3status-scratchpads",  # its tmux scratch sessions -- the ones an SSH'd
+                             # operator is actually working in
+})
+
+NATIVE_BLOCKS = frozenset({
+    "i3status-telemetry",    # shared ClickHouse deadman
+    "i3status-alerts",       # homelab Alertmanager
+    "i3status-civitai",      # CLIENT prod Alertmanager
+    "i3status-mail",         # homelab Postgres mail_actions
+    "i3status-clawgate",     # the clawgate board
+    "i3status-media",        # homelab qBittorrent pod
+})
+
+LOCAL_ONLY_BLOCKS = frozenset({
+    "i3status-gamemode",     # per-host i3 binding state; the observer has its own
+    # 🔴 notifs is deliberately NOT relayed. It is the workbench's UNSEEN dunst
+    # backlog -- 185 at measurement, Critical, monotonically growing while the
+    # operator is away, and unactionable from the other machine: the relayed
+    # pill has no `seen` path, so it could never be cleared from there. It was
+    # the single loudest contributor to the permanently-red pill.
+    "i3status-notifs",
+    # 🔴 THE RELAY PILL ITSELF. Caught by
+    # `test_every_custom_block_is_classified_exactly_once` on its first run --
+    # exactly the silent default into RELAY_BLOCKS that guard exists to stop.
+    # Relaying it would be recursive: host A would carry its rendering of host
+    # B's view of host A, aged by a different clock and collapsed through two
+    # rollups, so a single alarm could arrive twice wearing two labels and two
+    # ages. It is the OBSERVER's own pill and never travels.
+    "i3status-remote-host",
+})
+
+# ⚠ KNOWN GAP, stated rather than hidden: `gpuBlock` is an i3status-rust
+# BUILT-IN (`block = "nvidia_gpu"`), not a custom block, so it has no `command`
+# to run and cannot be relayed by this mechanism at all. The workbench's GPU
+# utilisation is therefore NOT visible on the observer. Closing it would mean
+# shelling out to `nvidia-smi` in the vitals gather, which `gather_vitals` is
+# pinned not to do (it must stay /proc + statvfs so it cannot hang).
 
 # Where a pulled snapshot lands on the OBSERVING host. Deliberately NOT
 # ~/.cache/bar-status: that directory is the poller's, every file in it is a
@@ -191,13 +267,13 @@ def run_block(command: str, env: dict, is_json: bool = True) -> dict:
     if not isinstance(payload, dict):
         out.update(text="?", state="Warning", error="not-an-object", rc=proc.returncode)
         return out
+    # `short_text` is deliberately NOT carried: nothing on either side reads it,
+    # and it was present on 8 of 15 blocks -- dead weight on every pull.
     out.update(
         text=payload.get("text", ""),
         state=payload.get("state", "Idle"),
         rc=proc.returncode,
     )
-    if "short_text" in payload:
-        out["short_text"] = payload["short_text"]
     return out
 
 
@@ -217,14 +293,17 @@ def gather_vitals() -> dict:
     """
     v: dict = {}
 
-    loadavg = _read("/proc/loadavg")
-    if loadavg:
-        parts = loadavg.split()
-        if len(parts) >= 3:
-            try:
-                v["load1"], v["load5"], v["load15"] = (float(p) for p in parts[:3])
-            except ValueError:
-                pass
+    # 🔴 LOAD IS NOT GATHERED HERE, ON PURPOSE. `i3status-load` is a RELAYED
+    # block, so the snapshot already carries the remote host's load average
+    # *with its own Warning/Critical verdict*, computed against that host's own
+    # threshold. Reading /proc/loadavg here as well produced two renderings of
+    # one number -- one relayed, one locally recomputed -- which is precisely
+    # the "second opinion" this module's docstring says must not exist. The
+    # relayed one wins because it carries the verdict; this one is deleted.
+    #
+    # `cpus` below is kept and is NOT a duplicate: it is a static property of
+    # the machine that no relayed block reports, and it is what makes the
+    # relayed load number readable as a saturation ratio.
 
     meminfo = _read("/proc/meminfo")
     if meminfo:
@@ -255,16 +334,14 @@ def gather_vitals() -> dict:
             pass
 
     # CPU: a POINT sample would need two reads separated by a sleep, which would
-    # stall the gather. Load average already answers "is the box saturated", so
-    # cpu% is deliberately not reported rather than reported badly.
+    # stall the gather. The relayed `i3status-load` block already answers "is the
+    # box saturated", so cpu% is deliberately not reported rather than badly.
     cpus = 0
     stat = _read("/proc/stat")
     if stat:
         cpus = sum(1 for line in stat.splitlines() if re.match(r"^cpu\d+\s", line))
     if cpus:
         v["cpus"] = cpus
-        if "load1" in v:
-            v["load1_per_cpu"] = round(v["load1"] / cpus, 2)
 
     # 🔴 Dedup by DEVICE, not by the numbers. On this workbench `/` and `/home`
     # are one filesystem (st_dev 66314 for both), so a value-based dedup keeps
@@ -322,6 +399,60 @@ def resolve_label(explicit: str | None) -> tuple[str, str]:
     return socket.gethostname(), "hostname"
 
 
+# 🔴 DERIVED THE WAY THE BLOCK SCRIPTS DERIVE IT, NOT THE WAY THIS FILE WOULD
+# PREFER TO. Every `i3status-*` block hardcodes
+# `os.path.expanduser("~") / ".cache" / "bar-status"` and does NOT consult
+# `XDG_CACHE_HOME`. An earlier version of this line honoured XDG, which is
+# tidier and WRONG: on any host with `XDG_CACHE_HOME` set to a non-default
+# path, the pull would write the relayed cache somewhere the blocks never look,
+# and every global-service pill would sit on `?` while the sync reported
+# success. MEASURED exactly that, with a test harness that set the variable.
+#
+# This is a SHARED CONTRACT with code this feature does not own, so it is
+# spelled the consumer's way. Tests override the module attribute directly
+# rather than via the environment.
+POLLER_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "bar-status")
+
+
+def gather_poller_cache() -> dict:
+    """The poller's per-source JSON, carried VERBATIM for the observer's own blocks.
+
+    🔴 THE POINT IS THAT NOTHING IS INTERPRETED HERE. The six NATIVE_BLOCKS are
+    global-service pills; the observer runs those SAME block scripts against
+    these SAME bytes, so it reaches the same verdict by the same code with the
+    same thresholds. Parsing, filtering or re-deriving anything on the way would
+    turn a shared fact into a second opinion -- which is the failure that made
+    relaying them a category error in the first place.
+
+    Only `*.json` is carried. The sibling `*.toast-state` files are the poller's
+    rising-edge latches: they belong to the machine that FIRES the toasts, and
+    copying them would let the observer's copy clear a live latch and make the
+    workbench re-toast a steady-state condition.
+
+    `ts` inside each payload is untouched, so the observer's existing
+    `bar_freshness.unmeasured` ages them exactly as it would a local poll -- a
+    dead pull and a dead poller become indistinguishable, which is correct:
+    both mean "not a current measurement".
+    """
+    out: dict = {}
+    try:
+        names = sorted(os.listdir(POLLER_CACHE_DIR))
+    except OSError:
+        return out
+    for fname in names:
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(POLLER_CACHE_DIR, fname), "r",
+                      encoding="utf-8") as fh:
+                out[fname] = fh.read()
+        except OSError:
+            # A source that cannot be read is simply not carried; the observer's
+            # block then sees a missing file and renders its own `?`.
+            continue
+    return out
+
+
 def gather(host_label: str | None = None) -> dict:
     env = dict(os.environ)
     # Over SSH there is no DISPLAY, and the blocks that ask X a question
@@ -346,9 +477,20 @@ def gather(host_label: str | None = None) -> dict:
         return snapshot
 
     specs = parse_block_commands(toml_text)
+    relayed, skipped = [], []
+    for s in specs:
+        name = block_name(s["command"])
+        if name in RELAY_BLOCKS:
+            relayed.append(s)
+        else:
+            skipped.append(name)
     snapshot["blocks"] = [
-        run_block(s["command"], env, is_json=s["json"]) for s in specs
+        run_block(s["command"], env, is_json=s["json"]) for s in relayed
     ]
+    # Recorded so a reader can tell "this host does not run that block" from
+    # "the relay declined to carry it", which look identical in the output.
+    snapshot["not_relayed"] = sorted(skipped)
+    snapshot["poller_cache"] = gather_poller_cache()
     if not specs:
         # Not the same as "every block was quiet". A config that parsed to zero
         # custom blocks means the reader is about to render a confident "ok"
@@ -395,8 +537,64 @@ def pull(host_label: str, ssh_dest: str, remote_cmd: str) -> int:
     if not isinstance(payload, dict) or "ts" not in payload:
         return _write_unreachable(dest, host_label, "remote payload has no ts")
 
+    install_poller_cache(payload.pop("poller_cache", None) or {})
     _atomic_write(dest, payload)
     return 0
+
+
+def local_poller_is_running() -> bool:
+    """Is a LOCAL `bar-status-poll` writing the cache we are about to overwrite?
+
+    🔴 THE ONE COLLISION THIS FEATURE CAN CAUSE. `install_poller_cache` writes
+    into `~/.cache/bar-status/`, which is the LOCAL poller's directory -- that is
+    deliberate, because it is what lets the observer's global-service blocks run
+    completely unchanged. On a host that also polls, the two writers would fight
+    and the pills would flip between local and relayed readings with no way to
+    tell which you were looking at.
+
+    Today nix makes that impossible (the poller is `!isLaptop`, the pull is
+    `isLaptop`) and a test pins those gates mutually exclusive. This is the
+    runtime half: cheap, and it fails SAFE -- if systemd cannot be asked, we
+    assume no local poller and proceed, because refusing on an unanswerable
+    question would break the pull on every host that has no systemd at all.
+    """
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "is-active", "bar-status-poll.timer"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return proc.stdout.strip() == "active"
+
+
+def install_poller_cache(cache: dict) -> None:
+    """Write the relayed poller payloads where the observer's own blocks read them."""
+    if not cache:
+        return
+    if local_poller_is_running():
+        print("bar-remote-snapshot: a LOCAL bar-status-poll is active -- NOT "
+              "installing the relayed cache (it would fight the local writer)",
+              file=sys.stderr)
+        return
+    try:
+        os.makedirs(POLLER_CACHE_DIR, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        print(f"bar-remote-snapshot: cannot create {POLLER_CACHE_DIR}: {exc}",
+              file=sys.stderr)
+        return
+    for fname, body in cache.items():
+        # Never let a relayed name escape the directory.
+        if os.path.basename(fname) != fname or not fname.endswith(".json"):
+            continue
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            continue
+        try:
+            _atomic_write(os.path.join(POLLER_CACHE_DIR, fname), payload)
+        except OSError:
+            continue
 
 
 def _write_unreachable(dest: str, host_label: str, detail: str) -> int:

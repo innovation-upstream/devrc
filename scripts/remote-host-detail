@@ -148,14 +148,14 @@ def render_vitals(v: dict, out: list) -> None:
     if not v:
         out.append(f"  {DIM}no vitals{RESET}")
         return
-    load1 = v.get("load1")
-    cpus = v.get("cpus")
-    if load1 is not None:
-        per = v.get("load1_per_cpu")
-        warn = STATE_ANSI["Critical"] if (per or 0) >= 2 else (
-            STATE_ANSI["Warning"] if (per or 0) >= 1 else STATE_ANSI["Idle"])
-        out.append(f"  {warn}load{RESET}      {load1} / {v.get('load5')} / "
-                   f"{v.get('load15')}   {DIM}{cpus} cpus, {per}x per-cpu{RESET}")
+    # 🔴 NO LOAD LINE HERE. The relayed `load` block above already carries the
+    # remote host's load average WITH its own Warning/Critical verdict; printing
+    # a second, locally-recomputed one made the same number appear twice with
+    # two different opinions attached. `cpus` is kept because no relayed block
+    # reports it, and it is what makes the relayed load readable as a ratio.
+    if v.get("cpus"):
+        out.append(f"  cpus      {v['cpus']}   {DIM}(divide the `load` pill "
+                   f"above by this for saturation){RESET}")
     if v.get("mem_total_gb"):
         out.append(f"  mem       {v.get('mem_used_gb')} / {v['mem_total_gb']} GB"
                    f"   {DIM}{v.get('mem_used_pct')}%{RESET}")

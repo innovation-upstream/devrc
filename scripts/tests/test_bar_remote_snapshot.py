@@ -18,6 +18,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -473,10 +474,20 @@ def test_remote_PANGO_markup_cannot_leak_into_the_pill(tmp_path):
     assert out["text"].count("</span>") == 1
 
 
-def test_the_host_label_is_wb_not_a_two_character_slice(tmp_path):
-    """`host[:2]` spells `workbench` as `wo` -- wrong, and unreadable next to a
-    `wb` the operator already says out loud."""
-    out = _run_pill(tmp_path, _live([{"name": "x", "text": "", "state": "Idle"}]))
+def test_the_deployed_pill_is_labelled_wb_BY_NIX(tmp_path):
+    """The label is a deployment fact, not a script default.
+
+    An earlier version of this test asserted the SCRIPT's default was `wb`,
+    which pinned a `_HOST_LABELS` map that production never executed -- nix
+    passes `--label` at every call site. Round 0 flagged the map as dead code
+    defended in the PR body; it is gone, and what is pinned now is the thing
+    that actually decides what the operator sees.
+    """
+    nix = (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+    assert "i3status-remote-host --host workbench --label wb" in nix, \
+        "the deployed pill command no longer passes an explicit --label"
+    out = _run_pill(tmp_path, _live([{"name": "x", "text": "", "state": "Idle"}]),
+                    "--label", "wb")
     assert ">wb<" in out["text"], out["text"]
 
 
@@ -572,3 +583,240 @@ def test_the_detail_view_does_not_invent_a_hostname_for_THIS_host(tmp_path):
         if "this host" in proc.stdout else proc.stdout
     assert real_hostname.upper() not in local_section.upper() or real_hostname == "this-host", \
         "the view printed the machine's hostname as an identity: %r" % real_hostname
+
+
+# ---------------------------------------------------------------------------
+# block classification — the pin that would have caught the category error
+# ---------------------------------------------------------------------------
+
+def _custom_block_scripts_in_nix() -> set:
+    """Every custom block's script basename, read out of nix/graphical.nix."""
+    nix = (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+    found = set()
+    for m in re.finditer(r'command = "\$\{scriptsDir\}/([A-Za-z0-9_.-]+)', nix):
+        found.add(m.group(1))
+    return found
+
+
+def test_every_custom_block_is_classified_exactly_once():
+    """🔴 THE GUARD THE FIRST VERSION OF THIS FEATURE NEEDED AND DID NOT HAVE.
+
+    The relay originally carried ALL 15 custom blocks under a `wb` label. Six of
+    them are GLOBAL-SERVICE facts -- the clawgate board, homelab and client-prod
+    Alertmanager, shared ClickHouse, a homelab qBittorrent pod -- whose numbers
+    are identical whichever host reads them. Relaying those as "the workbench's
+    state" is a category error, and because those backlogs are large and
+    standing it made the pill permanently Critical: MEASURED 2026-09-12, three
+    standing Criticals of which NOT ONE was a workbench fact.
+
+    A new block must not be able to default into the relay silently. So the
+    three sets are pinned two-way against the nix that defines the blocks: a
+    block in no set fails here, and a set naming a block that no longer exists
+    fails here too.
+    """
+    classified = snap.RELAY_BLOCKS | snap.NATIVE_BLOCKS | snap.LOCAL_ONLY_BLOCKS
+    in_nix = _custom_block_scripts_in_nix()
+    assert in_nix, "read no custom block commands out of graphical.nix — vacuous"
+
+    unclassified = in_nix - classified
+    assert not unclassified, (
+        "custom block(s) in nix/graphical.nix with no classification: %r\n"
+        "Add each to RELAY_BLOCKS (this host's own fact), NATIVE_BLOCKS (a "
+        "global service the observer should run itself) or LOCAL_ONLY_BLOCKS "
+        "(the observer has its own). Defaulting into the relay is the category "
+        "error this guard exists to prevent." % sorted(unclassified))
+
+    phantom = classified - in_nix
+    assert not phantom, (
+        "classified block(s) that are not custom blocks in graphical.nix: %r"
+        % sorted(phantom))
+
+
+def test_the_three_classes_are_DISJOINT():
+    """A block in two sets would be both relayed and expected native — the pill
+    and the local bar would then show the same fact twice, under two labels."""
+    assert not (snap.RELAY_BLOCKS & snap.NATIVE_BLOCKS)
+    assert not (snap.RELAY_BLOCKS & snap.LOCAL_ONLY_BLOCKS)
+    assert not (snap.NATIVE_BLOCKS & snap.LOCAL_ONLY_BLOCKS)
+
+
+def test_no_GLOBAL_SERVICE_block_is_relayed_under_a_host_label():
+    """The specific regression: these six must never travel in the snapshot."""
+    for name in ("i3status-clawgate", "i3status-alerts", "i3status-civitai",
+                 "i3status-mail", "i3status-telemetry", "i3status-media"):
+        assert name in snap.NATIVE_BLOCKS, name
+        assert name not in snap.RELAY_BLOCKS, \
+            "%s is a global-service fact; relaying it labels it as one host's" % name
+
+
+def test_the_unseen_notification_backlog_is_not_relayed():
+    """🔴 D7. `i3status-notifs` is the observed host's UNSEEN dunst backlog —
+    185 at measurement, Critical, growing while the operator is away, and
+    unactionable from the other machine because the relayed pill has no `seen`
+    path. It was the loudest single contributor to the permanently-red pill."""
+    assert "i3status-notifs" in snap.LOCAL_ONLY_BLOCKS
+    assert "i3status-notifs" not in snap.RELAY_BLOCKS
+
+
+def test_the_gather_relays_ONLY_the_classified_relay_set(tmp_path, monkeypatch):
+    toml = "\n".join(
+        '[[block]]\nblock = "custom"\njson = true\ncommand = "/x/%s"\n' % n
+        for n in ("i3status-clawgate", "i3status-load", "i3status-notifs"))
+    cfg = tmp_path / "config-top.toml"
+    cfg.write_text(toml)
+    monkeypatch.setattr(snap, "BAR_CONFIG", str(cfg))
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(tmp_path / "nocache"))
+    monkeypatch.setattr(snap, "run_block",
+                        lambda cmd, env, is_json=True: {"name": snap.block_name(cmd),
+                                                        "text": "", "state": "Idle"})
+    out = snap.gather("workbench")
+    assert [b["name"] for b in out["blocks"]] == ["i3status-load"]
+    assert out["not_relayed"] == ["i3status-clawgate", "i3status-notifs"], \
+        "what was withheld must be RECORDED — 'this host does not run it' and " \
+        "'the relay declined it' look identical otherwise"
+
+
+# ---------------------------------------------------------------------------
+# the poller-cache relay — what makes the six native blocks work on the observer
+# ---------------------------------------------------------------------------
+
+def test_the_poller_cache_travels_VERBATIM(tmp_path, monkeypatch):
+    """🔴 Nothing is interpreted. The observer runs the SAME block scripts
+    against the SAME bytes, so it reaches the same verdict by the same code with
+    the same thresholds. Re-deriving anything here would turn a shared fact into
+    a second opinion — the failure that made relaying them wrong to begin with."""
+    src = tmp_path / "bar-status"
+    src.mkdir()
+    body = '{"ts": 1789000000, "count": 233, "stuck_count": 10}'
+    (src / "clawgate.json").write_text(body)
+    (src / "clawgate.toast-state").write_text("fired")
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(src))
+    cache = snap.gather_poller_cache()
+    assert cache["clawgate.json"] == body, "payload was altered in transit"
+    assert "clawgate.toast-state" not in cache, \
+        "the rising-edge LATCH belongs to the host that fires toasts; copying " \
+        "it lets the observer clear a live latch and cause a re-toast"
+
+
+def test_installing_the_cache_lands_it_where_the_observers_blocks_read_it(tmp_path, monkeypatch):
+    dest = tmp_path / "bar-status"
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(dest))
+    monkeypatch.setattr(snap, "local_poller_is_running", lambda: False)
+    snap.install_poller_cache({"mail.json": '{"ts": 1789000000, "count": 5}'})
+    got = json.loads((dest / "mail.json").read_text())
+    assert got["count"] == 5
+    assert oct((dest / "mail.json").stat().st_mode)[-3:] == "600"
+
+
+def test_the_install_REFUSES_when_a_LOCAL_poller_is_running(tmp_path, monkeypatch, capsys):
+    """🔴 The one collision this feature can cause. Two writers on one cache
+    dir make the pills flip between local and relayed readings with no way to
+    tell which you are looking at."""
+    dest = tmp_path / "bar-status"
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(dest))
+    monkeypatch.setattr(snap, "local_poller_is_running", lambda: True)
+    snap.install_poller_cache({"mail.json": '{"ts": 1, "count": 5}'})
+    assert not dest.exists(), "overwrote a live local poller's cache"
+    assert "NOT installing" in capsys.readouterr().err
+
+
+def test_a_relayed_cache_NAME_cannot_escape_the_directory(tmp_path, monkeypatch):
+    dest = tmp_path / "bar-status"
+    monkeypatch.setattr(snap, "POLLER_CACHE_DIR", str(dest))
+    monkeypatch.setattr(snap, "local_poller_is_running", lambda: False)
+    snap.install_poller_cache({
+        "../../evil.json": '{"ts": 1}',
+        "/etc/evil.json": '{"ts": 1}',
+        "notjson.txt": "x",
+        "ok.json": '{"ts": 1}',
+    })
+    assert sorted(p.name for p in dest.iterdir()) == ["ok.json"]
+
+
+def test_the_local_poller_probe_FAILS_SAFE(monkeypatch):
+    """If systemd cannot be asked, assume no local poller and proceed —
+    refusing on an unanswerable question would break the pull on any host
+    without systemd at all."""
+    def _boom(*a, **k):
+        raise FileNotFoundError("no systemctl")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert snap.local_poller_is_running() is False
+
+
+# ---------------------------------------------------------------------------
+# the nix wiring for the split
+# ---------------------------------------------------------------------------
+
+def _nix() -> str:
+    return (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+
+
+def test_the_global_service_blocks_render_on_BOTH_hosts():
+    """They are not one host's facts, so both bars show them."""
+    nix = _nix()
+    assert "++ [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock ]" in nix
+    for script in ("i3status-clawgate", "i3status-mail", "i3status-alerts",
+                   "i3status-telemetry", "i3status-civitai", "i3status-media"):
+        line = 'home.file.".config/i3status-rust/scripts/%s" = {' % script
+        assert line in nix, "%s is not deployed on both hosts — dead pill" % script
+
+
+def test_the_LAN_BOUND_clicks_are_withheld_from_the_laptop():
+    """🔴 MEASURED: these clicks target `grafana.homelab.lan`,
+    `qbittorrent.workbench.lan` and `http://192.168.50.250:30302` — a LAN
+    hostname, a LAN hostname and a LAN IP, none of which resolve from a
+    nebula-only laptop; civitai and media additionally need per-host 0600
+    credential files that do not exist there. Shipping them would put several
+    silently dead buttons on the laptop bar."""
+    nix = _nix()
+    for blk in ("telemetryBlock", "alertsBlock", "civitaiBlock", "mailBlock",
+                "clawgateBlock", "mediaBlock"):
+        m = re.search(r"^  %s = \{\n(.*?)^  \};$" % blk, nix, re.M | re.S)
+        assert m, blk
+        body = m.group(1)
+        assert "click = lib.optionals (!isLaptop) [" in body, \
+            "%s's click list is not withheld from the laptop" % blk
+
+
+def test_the_pull_and_the_poller_can_NEVER_run_on_the_same_host():
+    """The structural half of the collision guard: nix must gate the relayed-cache
+    writer and the local poller mutually exclusively."""
+    nix = _nix()
+    assert "systemd.user.timers.bar-remote-pull = lib.mkIf isLaptop" in nix
+    assert "systemd.user.timers.bar-status-poll = lib.mkIf (!isLaptop)" in nix
+
+
+def test_the_relayed_cache_dir_MATCHES_what_the_block_scripts_actually_read():
+    """🔴 A SHARED CONTRACT WITH CODE THIS FEATURE DOES NOT OWN.
+
+    The global-service pills only work on the observer because the pull writes
+    their cache where THEY look. Every `i3status-*` block derives that path as
+    `expanduser("~") / ".cache" / "bar-status"` and does NOT consult
+    `XDG_CACHE_HOME`.
+
+    An earlier version of `POLLER_CACHE_DIR` honoured XDG — tidier, and wrong:
+    MEASURED on a host with the variable set, the pull reported success, the
+    files landed, and all four global pills sat on `?` because the blocks were
+    reading a different directory. A sync that succeeds while the pills stay
+    blank is the worst shape available.
+
+    Asserted against the BLOCKS' own source, not against a literal, so a future
+    change on either side has to move both.
+    """
+    ours = snap.POLLER_CACHE_DIR
+    checked = 0
+    for name in sorted(snap.NATIVE_BLOCKS):
+        block = SCRIPTS / name
+        if not block.exists():
+            continue
+        src = block.read_text()
+        assert "XDG_CACHE_HOME" not in src, (
+            "%s now reads XDG_CACHE_HOME; POLLER_CACHE_DIR must follow it or "
+            "the relayed cache lands where the block does not look" % name)
+        assert '".cache", "bar-status"' in src.replace("'", '"'), (
+            "%s no longer derives the documented cache path — re-check the "
+            "contract rather than assuming it still holds" % name)
+        checked += 1
+    assert checked, "no NATIVE block scripts found — this test measured nothing"
+    assert ours == os.path.join(os.path.expanduser("~"), ".cache", "bar-status"), \
+        "POLLER_CACHE_DIR (%r) is not the path the blocks read" % ours

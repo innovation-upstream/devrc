@@ -60,14 +60,10 @@ _HOST_COLOURS = {
 }
 _HOST_COLOUR_FALLBACK = "#928374"
 
-# 🔴 An explicit map, NOT `host[:2]`. That slice spells "workbench" as `wo`,
-# which is both wrong and unreadable next to a `wb` everyone already says out
-# loud. The fallback stays a slice so an unknown host still gets a short label
-# rather than no pill.
-_HOST_LABELS = {
-    "workbench": "wb",
-    "laptop": "lt",
-}
+#: Most relayed readings to show before collapsing the rest to `+N`. A constant,
+#: not a flag: it was a `--max-tokens` argument that nothing -- not nix, not any
+#: test -- ever passed.
+MAX_TOKENS = 3
 
 
 def _load_freshness():
@@ -151,7 +147,8 @@ def rollup(blocks: list) -> str:
     return worst
 
 
-def render(payload, now: int, label: str, host: str, max_tokens: int) -> dict:
+def render(payload, now: int, label: str, host: str,
+           max_tokens: int = 3) -> dict:
     colour = _HOST_COLOURS.get(host, _HOST_COLOUR_FALLBACK)
     tag = f'<span foreground="{colour}" weight="bold">{html.escape(label)}</span>'
 
@@ -213,15 +210,13 @@ def main(argv=None) -> int:
     ap.add_argument("--host", default="workbench",
                     help="snapshot label to read (default: %(default)s)")
     ap.add_argument("--label", default=None,
-                    help="short text shown on the pill (default: wb/lt, else 2 chars)")
-    ap.add_argument("--max-tokens", type=int, default=3,
-                    help="most relayed pills to show before collapsing to +N")
+                    help="short text shown on the pill (default: the host name)")
     args = ap.parse_args(argv)
 
-    label = args.label or _HOST_LABELS.get(args.host, args.host[:2])
+    label = args.label or args.host
     try:
         payload = load(args.host)
-        out = render(payload, int(time.time()), label, args.host, args.max_tokens)
+        out = render(payload, int(time.time()), label, args.host, MAX_TOKENS)
     except Exception:
         # 🔴 Built from literals so it cannot depend on whatever just failed --
         # including the sibling module, `payload`, or `html`.

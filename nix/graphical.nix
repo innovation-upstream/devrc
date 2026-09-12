@@ -370,7 +370,7 @@ let
     json = true;
     interval = 30;
     signal = 13;
-    click = [
+    click = lib.optionals (!isLaptop) [
       { button = "left"; cmd = "xdg-open http://grafana.homelab.lan"; }
     ];
   };
@@ -388,7 +388,7 @@ let
     json = true;
     interval = 30;
     signal = 14;
-    click = [
+    click = lib.optionals (!isLaptop) [
       { button = "left"; cmd = "${scriptsDir}/bar-url --open civitai_grafana"; }
     ];
   };
@@ -406,7 +406,7 @@ let
     json = true;
     interval = 30;
     signal = 17;
-    click = [
+    click = lib.optionals (!isLaptop) [
       # Float the full per-host/per-source table (measured budget vs measured
       # silence, per pair). `read` holds the window open — deadman.py prints and
       # exits, and i3status-rust runs a click cmd through `sh -c`.
@@ -419,7 +419,7 @@ let
     json = true;
     interval = 30;
     signal = 12;
-    click = [
+    click = lib.optionals (!isLaptop) [
       { button = "left"; cmd = "alacritty --class float,float -e ${home}/workspace/devrc/scripts/mail-triage"; }
     ];
   };
@@ -429,7 +429,7 @@ let
     json = true;
     interval = 30;
     signal = 11;
-    click = [
+    click = lib.optionals (!isLaptop) [
       { button = "left"; cmd = "xdg-open http://192.168.50.250:30302"; }
     ];
   };
@@ -450,7 +450,7 @@ let
     json = true;
     interval = 30;
     signal = 16;
-    click = [
+    click = lib.optionals (!isLaptop) [
       { button = "left"; cmd = "${scriptsDir}/media-menu"; }
       { button = "right"; cmd = "xdg-open http://qbittorrent.workbench.lan"; }
     ];
@@ -631,11 +631,33 @@ let
     ];
   };
 
-  # remote-host: ONE pill relaying the OTHER machine's whole bar, from a
+  # remote-host: ONE pill relaying the OTHER machine's HOST-LOCAL state, from a
   # snapshot pulled over nebula by `bar-remote-pull` (below). LAPTOP ONLY, and
   # that gate is the feature, not an accident: the operator sits at the laptop
   # and SSHes to the workbench, so the laptop's bar is the one showing the wrong
   # machine's state.
+  #
+  # 🔴 THE ASK WAS "BOTH BARS ON BOTH HOSTS PLUS A SELECTOR". THIS IS NOT THAT,
+  # AND THE REASON IS RECORDED HERE BECAUSE IT IS INVISIBLE IN THE RESULT.
+  # The operator asked for "both bars available on both hosts, and a bar item to
+  # open a tui to select which is shown … so it's easy to tell which is
+  # selected". Two deliberate substitutions, both chosen from a menu the
+  # operator was shown:
+  #
+  #   1. NO SELECTOR. A selector means one host's pills are off-screen at any
+  #      moment, and these are ALARMS that hide at zero. Muting the unselected
+  #      host is strictly worse than the outage case the `?` grammar exists for:
+  #      an outage leaves a visible `?` carrying the last known alarm, while a
+  #      selector leaves nothing at all. So both hosts' facts are always shown.
+  #   2. SPLIT BY SCOPE INSTEAD. "Both bars on both hosts" is delivered for the
+  #      six GLOBAL-SERVICE pills by deploying those blocks on the laptop
+  #      against a synced cache (see the blocks list) -- which is literally the
+  #      ask -- while this pill carries only what is genuinely one machine's.
+  #
+  # Without this note the next reader sees a one-directional pill with no
+  # selector, concludes the symmetric case was overlooked, and rebuilds the
+  # selector -- reinstating the alarm-muting. That is a whole PR's worth of
+  # work to arrive back here.
   #
   # 🔴 IT DOES NOT HIDE AT ZERO, and it is the only pill here that does not.
   # Every count pill is invisible when quiet, which is right for a pill on the
@@ -672,7 +694,23 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock runawaysBlock ]
+    # 🔴 SPLIT BY WHOSE FACT IT IS, not by which host polls it. These six are
+    # GLOBAL-SERVICE pills -- homelab/client-prod Alertmanager, the clawgate
+    # board, shared ClickHouse, a homelab qBittorrent pod. Their numbers are
+    # identical whichever machine reads them, so they belong on BOTH bars and
+    # must NOT be relayed under a `wb` label: calling the clawgate queue "the
+    # workbench's state" is a category error, and it is what made the relay pill
+    # permanently red (three standing Criticals, none of them a workbench fact).
+    #
+    # On the laptop they render from a poller cache SYNCED by `bar-remote-pull`
+    # -- the same bytes, read by the same block scripts, reaching the same
+    # verdict by the same code. No second poller, no new port-forward into
+    # client prod, and `bar_freshness` ages the synced payload exactly as it
+    # would a local poll.
+    ++ [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock ]
+    # airvpn + runaways stay workbench-only: those ARE host-local facts, and the
+    # laptop sees them through the relayed `wb` pill instead.
+    ++ lib.optionals (!isLaptop) [ airvpnBlock runawaysBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ gamemodeBlock notifsBlock ];
@@ -931,23 +969,23 @@ lib.mkIf isNixOS {
     source = ../scripts/remote-host-detail;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-clawgate" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-clawgate" = {
     source = ../scripts/i3status-clawgate;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-mail" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-mail" = {
     source = ../scripts/i3status-mail;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-alerts" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-alerts" = {
     source = ../scripts/i3status-alerts;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-telemetry" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-telemetry" = {
     source = ../scripts/i3status-telemetry;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-civitai" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-civitai" = {
     source = ../scripts/i3status-civitai;
     executable = true;
   };
@@ -976,7 +1014,7 @@ lib.mkIf isNixOS {
   # media block: the credential-free render script (reads ~/.cache/bar-status/
   # media.json) + its right-click detail popup. Both workbench-only. Creds/keys
   # for the popup live in ~/.config/bar/media.env (0600), NOT here / in the store.
-  home.file.".config/i3status-rust/scripts/i3status-media" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-media" = {
     source = ../scripts/i3status-media;
     executable = true;
   };
