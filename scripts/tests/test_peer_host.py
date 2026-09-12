@@ -61,6 +61,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -527,42 +528,76 @@ def test_the_remote_program_actually_runs_and_emits_the_protocol(tmp_path):
     assert leg["unreadable"] == 0
 
 
-def test_host_label_stays_SHIPPABLE_over_the_wire():
-    """🔴 THE CONSTRAINT IS STATED ABOUT THE WRONG MODULE WITHOUT THIS.
+#: 🔴 AN ASSERTED LEDGER, NOT A CATEGORY TEST. The exact module set each spliced
+#: source may import, checked for EQUALITY so it fails when the set GROWS *or*
+#: SHRINKS. The previous guard asked "is every import stdlib?" against the LOCAL
+#: interpreter's `sys.stdlib_module_names`, and a mutation sweep showed
+#: `import tomllib` SURVIVED it: tomllib is stdlib on 3.11+ and absent on 3.9 —
+#: the very version `_READER_SOURCE`'s comment names as the constraint. A
+#: category the local interpreter defines cannot police a remote one. An exact
+#: set can, because any change at all stops the test and a human decides.
+SHIPPABLE_IMPORTS = {
+    "host_label.py": {"__future__", "os"},
+    "_READER_SOURCE": {"json", "os", "sys"},
+}
 
-    `_READER_SOURCE`'s comment says "stdlib-only and Python-3.9-compatible", but
-    the source actually spliced into the remote program is `host_label.py`, which
-    carried no such pin. A future third-party import there breaks the remote leg
-    as `unreachable` — a purely local bug that reads as a DEAD LAPTOP, which is
-    exactly the failure class `test_the_remote_program_puts_from_future_first`
-    exists for. The end-to-end test cannot catch it either: the package would be
-    installed on the dev host, so the splice would run fine there.
 
-    Imports only; a stdlib-only module is what "shippable" means here.
-
-    ⚠ THERE IS NO RELATIVE-IMPORT BRANCH, AND THAT IS DELIBERATE. One was written
-    and then DELETED after a mutation sweep showed it could never execute: a
-    `from . import x` in `host_label.py` breaks the flat `import host_label` that
-    this very file does at module scope, so the mutant kills COLLECTION and the
-    assertion is never reached. The hazard is real but it is caught earlier and
-    far louder than any guard here could manage — by every importer at once — so
-    a branch for it would be dead code claiming coverage it cannot provide.
-    """
-    src = (_SCRIPTS / "lib" / "host_label.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
+def _imported_roots(source: str) -> set:
+    """Top-level module names imported anywhere in `source`, incl. inside defs."""
     roots = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             roots.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            roots.add(node.module.split(".")[0])
-    stdlib = set(getattr(sys, "stdlib_module_names", ())) | {"__future__"}
-    assert stdlib, "no stdlib_module_names on this interpreter — cannot judge"
-    non_stdlib = sorted(r for r in roots if r not in stdlib)
-    assert not non_stdlib, (
-        "host_label.py imports %s, which will not exist on the remote host — "
-        "the peer-host SSH leg would report the laptop as UNREACHABLE"
-        % non_stdlib)
+        elif isinstance(node, ast.ImportFrom):
+            assert not node.level, "a relative import cannot resolve remotely"
+            if node.module:
+                roots.add(node.module.split(".")[0])
+    return roots
+
+
+@pytest.mark.parametrize("which", sorted(SHIPPABLE_IMPORTS))
+def test_both_spliced_sources_stay_SHIPPABLE_over_the_wire(which):
+    """🔴 BOTH HALVES OF THE REMOTE PROGRAM ARE PINNED, AND BOTH ARE SHIPPED.
+
+    An earlier docstring here said the constraint was "stated about the WRONG
+    module" — that `_READER_SOURCE` carried the "stdlib-only and 3.9-compatible"
+    comment while `host_label.py` was the source actually spliced. **That was
+    false.** `remote_program()` splices BOTH: `host_label.py`'s body AND
+    `_READER_SOURCE`. The constraint was INCOMPLETE, not misplaced — and a
+    reader who believed the old wording could have relaxed `_READER_SOURCE`'s
+    comment on the grounds that it is not shipped, with nothing to catch it,
+    because the guard read only `host_label.py`.
+
+    A third-party or too-new import in EITHER half kills the SSH leg, and it
+    surfaces as `unreachable` — a purely local bug that reads as a DEAD LAPTOP.
+    The end-to-end test cannot catch it: the package would be present on the dev
+    host, so the splice would run there and fail only on the remote.
+    """
+    if which == "host_label.py":
+        source = (_SCRIPTS / "lib" / "host_label.py").read_text(encoding="utf-8")
+    else:
+        source = ph._READER_SOURCE
+    assert _imported_roots(source) == SHIPPABLE_IMPORTS[which], (
+        "%s's imports changed. Every module here is spliced into the program "
+        "piped to the remote `python3 -`, so each one must exist on the REMOTE "
+        "host and on Python 3.9. Confirm that, then update SHIPPABLE_IMPORTS."
+        % which)
+
+
+def test_that_shippable_ledger_can_actually_fire():
+    """🔴 NEGATIVE CONTROL, and it uses the mutant that DEFEATED the old guard.
+
+    `tomllib` is stdlib on this interpreter, so the previous
+    `in sys.stdlib_module_names` check passed it while it would break a 3.9
+    remote. An exact-set ledger must reject it — and must equally reject a
+    module being REMOVED, which a subset check would not see.
+    """
+    base = SHIPPABLE_IMPORTS["host_label.py"]
+    assert _imported_roots("from __future__ import annotations\nimport os\n") == base
+    for mutant in ("import tomllib\n", "import requests\n"):
+        src = "from __future__ import annotations\nimport os\n" + mutant
+        assert _imported_roots(src) != base, mutant
+    assert _imported_roots("import os\n") != base, "a REMOVED import must fail too"
 
 
 def test_the_shipped_reader_is_the_one_the_local_leg_runs():
@@ -972,14 +1007,18 @@ def test_no_module_redeclares_a_peer_address_literal():
     (and of `host_label.py`'s ledger comment) claimed "every place these
     addresses are spelled" and was FALSE when written:
       * a target COMPOSED at runtime — `scripts/lib/host-role.sh` builds
-        `zach@10.42.0.100` from two shell variables and never spells it whole;
-      * a BARE IP — `scripts/browser-bridge/server.py:653-654`;
-      * anything outside `scripts/` — a literal in `nix/` is invisible.
-    Both known cases are named in `host_label.PEER_SSH`'s comment. The values
-    agree today; this is a duplication hazard, not a live defect.
+        `zach@<ip>` from shell variables and never spells it whole;
+      * a BARE IP — `scripts/browser-bridge/server.py`;
+      * anything outside `scripts/` — `nix/` carries several (espanso snippets,
+        a systemd ExecStart, shell under `nix/system/`).
+    🔴 That is a description of the SCOPE, not a census. `host_label.PEER_SSH`'s
+    comment says the same and deliberately enumerates nothing outside it: two
+    earlier drafts tried to list every spelling, and both were incomplete when
+    written. GREP; do not trust a list. The values agree today; this is a
+    duplication hazard, not a live defect.
 
     On its FIRST run it found a copy nobody had listed:
-    `scripts/session-analysis/espanso-usage.py:90`, a hardcoded
+    `scripts/session-analysis/espanso-usage.py`, a hardcoded
     `DEFAULT_REMOTE`. It is derived now.
     """
     scanned, offenders = _scan_for_address_literals(_SCRIPTS)
@@ -1122,6 +1161,32 @@ def test_peer_host_is_on_PATH_as_a_bare_command():
     assert "scripts/peer-host" in entry, entry
 
 
+def test_the_cairn_home_nix_entries_stay_ADJACENT():
+    """🔴 PINS THE THING THIS PR BROKE, because nothing else does.
+
+    `nix/home.nix`'s `cairn-validate` comment says "the THIRD member of the pair
+    above" and "read all three lines together". Those are POSITIONAL references:
+    the first draft of this PR wedged `.local/bin/peer-host` between `cairn-who`
+    and `cairn-validate`, and both phrases silently began resolving to the wrong
+    entries. It was moved below the trio — but that fix is positional and, until
+    this test, unguarded, so the next `home.file` entry could re-wedge it exactly
+    the same way.
+
+    `test_cairn_split.py` pins the comment's TEXT; nothing pinned the ADJACENCY
+    the text depends on. Two pins, two different claims — this is the second.
+    """
+    home_nix = (_SCRIPTS.parent / "nix" / "home.nix").read_text(encoding="utf-8")
+    order = re.findall(r'home\.file\."\.local/bin/([A-Za-z0-9_-]+)"', home_nix)
+    trio = ["cairn", "cairn-who", "cairn-validate"]
+    assert all(name in order for name in trio), order
+    idx = [order.index(name) for name in trio]
+    assert idx == sorted(idx), "the cairn entries are out of order: %s" % order
+    assert idx[-1] - idx[0] == len(trio) - 1, (
+        "something was inserted between the cairn entries, so that block's "
+        "'the pair above' / 'read all three lines together' now resolve to the "
+        "wrong lines: %s" % order[idx[0]:idx[-1] + 1])
+
+
 def test_the_module_resolves_its_lib_relative_to_the_RESOLVED_file():
     """The property the line above depends on, asserted against the source: the
     sibling lookup must use `resolve()`, or a PATH symlink would look for `lib/`
@@ -1229,8 +1294,10 @@ MUTATION_MATRIX = {
         "test_a_non_ascii_digit_is_not_a_pid",
     "an empty/bogus host scope answers UNMATCHED instead of raising":
         "test_an_EMPTY_host_scope_RAISES_rather_than_answering_unmatched",
-    "host_label.py grows a third-party import (remote leg dies as unreachable)":
-        "test_host_label_stays_SHIPPABLE_over_the_wire",
+    "either spliced source grows an import (remote leg dies as unreachable)":
+        "test_both_spliced_sources_stay_SHIPPABLE_over_the_wire",
+    "the shippable ledger becomes a subset check / stops rejecting tomllib":
+        "test_that_shippable_ledger_can_actually_fire",
     "an unreadable host_label.py escapes read_host as a traceback (exit 1)":
         "test_a_missing_host_label_source_is_a_leg_ERROR_not_a_traceback",
     # CLI
@@ -1244,6 +1311,8 @@ MUTATION_MATRIX = {
         "test_peer_host_is_on_PATH_as_a_bare_command",
     "the PATH entry becomes a home.file store copy":
         "test_peer_host_is_on_PATH_as_a_bare_command",
+    "a home.file entry is wedged between the cairn trio again":
+        "test_the_cairn_home_nix_entries_stay_ADJACENT",
     "resolve() dropped from the lib lookup (breaks the PATH symlink)":
         "test_the_module_resolves_its_lib_relative_to_the_RESOLVED_file",
     "the host is printed even on a refusal":

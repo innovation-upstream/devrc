@@ -43,31 +43,46 @@ DEFAULT_LOCAL_HOST = "workbench"
 #: gateway's state as the laptop's. That is why the address belongs next to the
 #: label vocabulary it is meant to agree with, rather than being retyped per tool.
 #:
-#: 🔴 THE LEDGER — AND ITS EXACT SCOPE, WHICH IS NARROWER THAN "EVERY SPELLING".
-#: This comment used to say "every place these addresses are spelled". That was
-#: FALSE when written, and an over-claiming ledger is worse than none: it is the
-#: thing the next reader trusts INSTEAD of looking.
+#: 🔴 THE GUARD'S SCOPE, STATED ONCE. NOT A LIST OF EVERY SPELLING.
 #:
-#: DERIVE from this table (were literals, now are not):
-#:   * `scripts/peer-host`                         -> `ssh_target(host)`
-#:   * `scripts/lib/opencode_search.py:PEERS`      -> this tuple, by identity
-#:   * `scripts/session-manager:LAPTOP_SSH_TARGET` -> `ssh_target("laptop")`
-#:   * `scripts/session-analysis/espanso-usage.py` -> `ssh_target("laptop")`
+#: Two earlier drafts of this comment tried to ENUMERATE where these addresses
+#: appear. Both were incomplete when written — the first listed 3 of 5, the
+#: second 5 of 11+ — and each was caught by the next audit round. An enumeration
+#: of places a guard CANNOT see is unbounded and rots silently, and an
+#: over-claiming ledger is worse than none: it is what the next reader trusts
+#: INSTEAD of looking. So this states the SCOPE, which is checkable and stable,
+#: and stops pretending to a census.
 #:
-#: 🔴 STILL SPELL THESE ADDRESSES INDEPENDENTLY, and are NOT covered by the guard:
-#:   * `scripts/lib/host-role.sh:32-35,47-48` — bare IPs in shell, composed into
-#:     `zach@…` at RUNTIME. It is live (sourced by `ship.sh` and `drift-check.sh`)
-#:     and `scripts/README.md` calls it "the ONE host-identity predicate" — so two
-#:     modules currently each claim to be the single home of these addresses. It
-#:     is shell and it answers a different question (which role am I, from a list
-#:     of interface addresses), so folding it in is a design change, not a rename.
-#:   * `scripts/browser-bridge/server.py:653-654` — bare IPs in `_HOST_IP_ORDER`.
+#: ENFORCED — `test_peer_host.py::test_no_module_redeclares_a_peer_address_literal`:
+#:     no `user@addr` STRING CONSTANT for a peer, in any non-test file under
+#:     `scripts/`, outside this module.
 #:
-#: The values all AGREE today; this is a duplication hazard, not a live defect.
-#: `test_peer_host.py::test_no_module_redeclares_a_peer_address_literal` enforces
-#: exactly one thing — no `user@addr` STRING CONSTANT outside this file, under
-#: `scripts/`. It cannot see a runtime-composed target or a bare IP, and the two
-#: entries above are why that limit is written here rather than left implicit.
+#: OUT OF SCOPE, and therefore NOT enumerated anywhere: a target COMPOSED at
+#: runtime from parts (shell does this); a BARE IP; and anything outside
+#: `scripts/` — `nix/` in particular carries several, in espanso snippets, a
+#: systemd `ExecStart` and shell under `nix/system/`. To find them, GREP; do not
+#: trust a list here.
+#:
+#: The two in-scope-but-unreachable cases worth knowing by name, because each is
+#: itself a claimed single source of truth:
+#:   * `scripts/lib/host-role.sh` — composes `zach@<ip>` at runtime from bare IP
+#:     constants. Live (sourced by `ship.sh` and `drift-check.sh`), and
+#:     `scripts/README.md` calls it "the ONE host-identity predicate", so two
+#:     modules each claim to be the single home. It answers a different question
+#:     (which role am I, from a list of interface addresses) and it is shell, so
+#:     folding it in is a design change, not a rename.
+#:   * `scripts/browser-bridge/server.py` — bare IPs in `_HOST_IP_ORDER`.
+#:
+#: 🔴 NO LINE NUMBERS, deliberately — `nix/home.nix` states the rule this repo
+#: already learned: "a line number is a claim that rots silently". An earlier
+#: draft of this comment carried four, and one had already gone stale within the
+#: same PR.
+#:
+#: These modules DERIVE from this table (all were literals):
+#:   `scripts/peer-host`, `scripts/lib/opencode_search.py`,
+#:   `scripts/session-manager`, `scripts/session-analysis/espanso-usage.py`.
+#:
+#: Every value agrees today; this is a duplication hazard, not a live defect.
 PEER_SSH = (
     ("workbench", "10.42.0.30", "zach"),
     ("laptop", "10.42.0.100", "zach"),
