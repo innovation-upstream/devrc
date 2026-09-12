@@ -1662,8 +1662,14 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     # 2026-09-11 this probe named none, so a caller routed there from
     # `/analyze-service` was given an instruction its own tool could not satisfy.
     # Same spelling as `subsystem_touch.render_text`, from the same resolver.
+    #
+    # ⚠ NO `or POLICY_NO_SCOPE` FALLBACK HERE, and its absence is load-bearing.
+    # The first version spelled the default in the renderer as well as in
+    # `with_policy`, which made a mutant that skipped `with_policy` on the
+    # refusal branch render byte-identically — it SURVIVED a sweep. One rule, one
+    # place: `with_policy` sets the basis, this prints what it set.
     L[index_header_at + 1:index_header_at + 1] = [
-        f"policy: {i.policy_path or '(none)'}  ({i.policy_basis or POLICY_NO_SCOPE})"
+        f"policy: {i.policy_path or '(none)'}  ({i.policy_basis})"
     ]
     # Unparsed, one field per line, and NO AGE COMPUTED — `subsystem_recall`
     # renders the same lines with the same prefix (`_read_store.stamp_header` is
@@ -1767,7 +1773,7 @@ def brief_json(b: Brief) -> dict:
             # reason: a JSON consumer must be able to reach the governing policy
             # without re-deriving it from a rendered line.
             "policy_file": b.index.policy_path,
-            "policy_basis": b.index.policy_basis or POLICY_NO_SCOPE,
+            "policy_basis": b.index.policy_basis,
             "pointers": b.index.pointers, "nuance": b.index.nuance, "detail": b.index.detail,
         },
         "config": {
