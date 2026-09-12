@@ -2524,6 +2524,11 @@ def test_tmux_kill_prefix_matches_both_wide_kills_and_neither_narrow_one():
 # classify it. Paths only — line numbers are what rotted last time.
 _KILL_MENTION_LEDGER = {
     "claudedocs/handoff-tmux-restore-chain.md": "prose: the incident write-up",
+    # Several sessions documenting THIS ledger's own breakage, in one doc. Its
+    # author elided their mention and it still matched at :43 and :2020, both
+    # written by others — which is the self-amplifying shape worth knowing:
+    # a census over prose turns every write-up of the census into an entry.
+    "claudedocs/handoff-cairn-oss-multi-instance.md": "prose: write-ups OF this ledger firing, by several sessions",
     "claudedocs/handoff-tmux-scratchpad-bar-statusline.md": "prose: a gotcha warning AGAINST it — \"Never `kill-server`; that destroys every session\"",
     "scripts/claude-hooks/bash-guard.py": "prose: the guard's own ban list",
     "scripts/claude-hooks/guard_core.py": "prose: this check, its docstring and its message",
@@ -2689,6 +2694,7 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
     shell_text = re.compile(r"tmux(?:\s+-{1,2}[^\s'\"]+)*\s+kill-s[a-z-]*")
     quoting_is_the_point = {
         "claudedocs/handoff-tmux-restore-chain.md",
+        "claudedocs/handoff-cairn-oss-multi-instance.md",  # see the ledger entry
         "scripts/claude-hooks/bash-guard.py",
         "scripts/claude-hooks/guard_core.py",
         "scripts/claude-hooks/tests/test_guard_core.py",

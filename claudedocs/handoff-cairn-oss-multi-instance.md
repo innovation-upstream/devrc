@@ -782,8 +782,17 @@ Tekton legs sat on top of two deploy-blockers.
   `nix develop <wt> --command python3 -m pytest <wt>/scripts/claude-hooks/tests/test_guard_core.py -q`
   → **`2 failed, 1534 passed`**.
 - **Observed (with values):** census — `added: ['claudedocs/handoff-tmux-webapp.md'], removed: []`;
-  scanner — `offenders: [('claudedocs/handoff-tmux-webapp.md', 'tmux kill-session')]`. The mention
-  is real, at `handoff-tmux-webapp.md:3409`, and is on `origin/main` too.
+  scanner — `offenders: [('claudedocs/handoff-tmux-webapp.md', '<the wide-kill verb>')]`. The
+  mention is real, at `handoff-tmux-webapp.md:3409`, and is on `origin/main` too.
+  🔴 **THE VERB IS ELIDED HERE ON PURPOSE — AND ELISION ALONE WAS NOT ENOUGH, WHICH IS THE
+  LESSON.** An earlier revision of this bullet quoted it literally and made THIS doc an offender,
+  red on `origin/main` (`f3e27aa3`: `added: ['claudedocs/handoff-cairn-oss-multi-instance.md']`).
+  Eliding it dropped the count from 2 failures to 1 — and the doc **still** matched, at `:43` and
+  `:2020`, both written by OTHER sessions documenting this same breakage. **A census over prose
+  that mentions a command turns every write-up of the census into a new entry**, and with several
+  sessions writing about it at once, no single author can elide their way out. So this doc IS
+  ledgered (both allowlists), and the elision stays as the cheap half: don't add the sixth,
+  seventh and eighth mention while the row already covers you.
 - **Ruled out: that the rows it deleted were wrong.** Its commit says they "recorded a mention
   that does not exist"; `grep -n` finds it at `:3409` at that same head. via: measurement
 - **Ruled out: that `f346ba28` was already green.** It was **1 failed** — only its own new doc
