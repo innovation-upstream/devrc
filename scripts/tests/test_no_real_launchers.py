@@ -243,6 +243,36 @@ def test_the_stubbed_launcher_set_is_pinned():
 # were wrong too: this entry used to say "ship.sh/drift-check.sh only" while
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
+    "nvim-octo": (
+        {"mention-open.py"},
+        "UNREACHABLE BY CONSTRUCTION, not by measurement-of-absence: it is "
+        "NEVER argv[0] of anything this repo spawns. `mention-open.py` reaches "
+        "it only as the `-e` PAYLOAD of an `alacritty` spawn — `alacritty "
+        "--class float,mention-review … -e nvim-octo <owner/repo> <number>` — "
+        "and `alacritty` IS in HOST_LAUNCHERS, so the suite's stub intercepts "
+        "the parent and the payload is never exec'd at all. Stubbing it "
+        "instead would be actively WRONG, and not merely redundant: the stub "
+        "dir is on PATH, so a `nvim-octo` stub would make `shutil.which` "
+        "succeed and flip `tui_available()` to TRUE for every test in "
+        "test_mention_open.py that does not override it — silently moving the "
+        "whole file off the browser path it has always exercised. "
+        "🔴 THE PIN, arriving WITH the entry rather than after an audit, "
+        "because this acknowledgement would otherwise blind the guard exactly "
+        "as the tmux-reply-agent paragraph below records: "
+        "test_mention_open.py::test_mention_open_SPAWNS_these_argv0_AND_"
+        "NOTHING_ELSE walks the handler's AST and asserts its spawn argv[0] "
+        "set is EXACTLY {git, tmux, notify-send, xdg-open, alacritty}, "
+        "grows-or-shrinks, with a `<computed>` sentinel — so a direct "
+        "`subprocess.Popen(['nvim-octo', …])` added here fails THAT test "
+        "rather than hiding behind this row. A SECOND pin covers the payload "
+        "position itself: test_the_alacritty_wrapper_PATH_covers_every_"
+        "executable_the_handler_spawns reads the first word after a literal "
+        "`-e` out of the syntax tree (_exec_payload_commands) and requires "
+        "`pkgs.nvim-octo` on the hint wrapper's PATH, in BOTH directions — so "
+        "the payload cannot silently move, and the package cannot be listed "
+        "without a call site. Both controls WATCHED: clean tree passes, and "
+        "_exec_payload_commands' own positive/negative controls are asserted "
+        "in test_the_exec_payload_reader_can_actually_fire."),
     "systemctl": (
         {"airvpn-menu", "keylog-spin-capture.sh", "main-status-watch.py",
          "mention-open.py",
