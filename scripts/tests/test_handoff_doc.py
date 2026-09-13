@@ -6498,11 +6498,31 @@ class TestTheArcDeclaresWhatEndsIt:
         the doc in `repo` leaves it absent on BOTH sides, which is the
         genuinely-new case rule (m) is right to refuse — so the test measured
         rule (m) working and called it rule (h) losing. The stale shape is
-        specifically: present at `origin/main`, absent here."""
+        specifically: present at `origin/main`, absent here.
+
+        🔴 AND THE PROPOSAL RUN IS THE HALF THAT PINS THE PREDICATE — the second
+        draft asserted only the `--confirm` path and MUTATION-TESTED AS A
+        WRONG-KILLER: rule (h)'s refusal sits ABOVE rule (m), so under
+        `--confirm` it returns 9 whether `is_new_doc` is right or wrong, and the
+        test could not see the mutant it is named for. Rule (h) refuses ONLY
+        under `--confirm`, so the proposal run is where a wrong `is_new_doc`
+        actually surfaces: it refuses `undefined-done` on a document whose
+        finish line is sitting on the mainline. Both halves, both asserted."""
         work = repo_lacking_the_doc(tmp_path)
         upd = write_delta(
             tmp_path, "stale.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
         )
+        # (a) the PROPOSAL run — nothing above rule (m) refuses here, so this is
+        #     a statement about `is_new_doc` and nothing else.
+        prop = run_tool(work, update=upd)
+        assert prop.returncode == hd.EXIT_OK, (
+            f"a STALE BASE was read as a NEW arc: rule (m) refused a proposal "
+            f"run for a document whose finish line is on the mainline "
+            f"(rc={prop.returncode})\n" + prop.stdout + prop.stderr
+        )
+        assert "status=undefined-done" not in prop.stderr
+        # (b) the CONFIRM run — precedence: rule (h) is the one that must speak,
+        #     because its refusal is about destroying a committed document.
         res = run_tool(work, "--confirm", update=upd)
         assert res.returncode == hd.EXIT_STALE_BASE, (
             f"expected rule (h) to win, got {res.returncode}\n"
@@ -6523,13 +6543,24 @@ class TestTheArcDeclaresWhatEndsIt:
                 "- closing-condition: check — --dry-run exits 0",
                 "--dry-run exits 0",
             ),
+            (
+                # 🔴 NO SEPARATOR AT ALL, and this case is what makes the
+                # lookahead observable. MUTATION-MEASURED: with the em dash
+                # present, dropping `(?=\s|$)` changes NOTHING — the separator
+                # is followed by a space either way — so the mutant SURVIVED a
+                # green parametrization. The anchor only binds when the
+                # character after the separator is not whitespace.
+                "- closing-condition: check --dry-run exits 0",
+                "--dry-run exits 0",
+            ),
             ("- closing-condition: check: PR #123 merges", "PR #123 merges"),
             (
                 "- **closing-condition:** judgement — Zach reads r3's transcript",
                 "Zach reads r3's transcript",
             ),
         ],
-        ids=["backtick", "double-dash", "colon-separator", "bold-template"],
+        ids=["backtick", "double-dash", "no-separator-double-dash",
+             "colon-separator", "bold-template"],
     )
     def test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER(
         self, line: str, detail: str

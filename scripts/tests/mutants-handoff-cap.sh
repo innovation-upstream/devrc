@@ -828,11 +828,21 @@ run 'closing-vocabulary-opened' \
 run 'closing-pattern-narrowed-to-one-markup-run' \
   test_the_step_2_TEMPLATE_SPELLING_is_the_one_that_parses \
   's@{CLOSING_KEY}{_MARKUP}\\s\*:\[\\s\*_`~\]\*@{CLOSING_KEY}{_MARKUP}\\s*:{_MARKUP}\\s*@'
-# The detail lead-strip, both measured mangles. A greedy class eats a leading
-# backtick; an unanchored separator eats one dash of `--dry-run`.
+# The detail lead-strip, and BOTH measured mangles get their own row — the
+# leading class and the separator anchor are independent bounds, and one row
+# mutating the whole compile() at once could not tell you which one binds.
+#
+# ⚠ AN EARLIER SINGLE ROW HERE REPORTED `MUTATION DID NOT APPLY`, which the
+# harness scores as a FAILURE for exactly this reason: a `sed` that silently
+# misses reports the UNMUTATED file's behaviour, i.e. the most flattering
+# possible wrong answer. Both expressions below were checked to change EXACTLY
+# ONE LINE before they were written down.
 run 'detail-strip-eats-leading-markup' \
   test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER \
-  's@_CLOSING_DETAIL_LEAD = re.compile(r"\^\[\\s\*_`~\]\*(?:\[:\\-–—\](?=\\s|$))?\\s\*")@_CLOSING_DETAIL_LEAD = re.compile(r"^[\\s*_`~:\\-–—]+")@'
+  's@r"\^\[\\s\*_`~\]\*@r"^[\\s*_`~:\\-–—]+@'
+run 'detail-separator-loses-its-anchor' \
+  test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER \
+  's@(?=\\s|\$)@@'
 # The DELETION arm: a document that HAD a finish line and loses it.
 run 'deleting-the-field-is-not-noticed' \
   test_an_update_that_DELETES_the_field_is_REFUSED \
