@@ -94,11 +94,24 @@ NEW_FINDING_C = (
     "- **Supersedes:** the earlier at-max interpretation recorded above was wrong.\n"
 )
 
+#: `BASE_DOC`'s `## Goal`, as its OWN constant and reused by every test that
+#: needs to reproduce it.
+#:
+#: 🔴 DERIVED RATHER THAN RE-TYPED, and the reason is a measured failure in this
+#: very PR. Two "no-op update" fixtures carried a hand-copied Goal section; when
+#: rule (m)'s `closing-condition:` line was added to `BASE_DOC` the copies did
+#: not move, so a delta meant to change NOTHING silently became one that REPLACES
+#: `## Goal` and DELETES the field — `status=no-change` turned into
+#: `status=undefined-done`, and the tests read as a rule-(m) defect rather than
+#: as fixture drift. A derived section cannot drift.
+BASE_GOAL_SECTION = """## Goal
+Make the sample subsystem stop dropping work under load.
+- closing-condition: check — `python3 tools/queue_probe.py --for 240` reports 30/s
+"""
+
 BASE_DOC = f"""# Handoff: sample-topic — 2026-08-01
 
-## Goal
-Make the sample subsystem stop dropping work under load.
-
+{BASE_GOAL_SECTION}
 ## State now
 - Branch / PR: `feat/sample` / none
 - What's DONE this session: the queue instrumentation landed
@@ -270,6 +283,33 @@ def repo(tmp_path: Path) -> Path:
 def update_file(tmp_path: Path) -> Path:
     p = tmp_path / "update.md"
     p.write_text(UPDATE_DOC, encoding="utf-8")
+    return p
+
+
+#: `UPDATE_DOC` plus a `## Goal` carrying rule (m)'s field.
+#:
+#: 🔴 A SECOND CONSTANT RATHER THAN A LINE ADDED TO `UPDATE_DOC`, and the split
+#: is the point. `UPDATE_DOC` is a DELTA against a base that already has a Goal,
+#: so it deliberately omits one — that omission is what several tests are about
+#: (`Goal` is a REPLACE heading; a delta that omits it must leave the base's
+#: alone). Rule (m), by contrast, refuses a NEW doc with no finish line, and the
+#: new-doc tests get there by deleting the base — at which point the very same
+#: delta becomes the whole document and legitimately has nowhere to state one.
+#: Folding the Goal into `UPDATE_DOC` would have made every update test rewrite
+#: a section it is not testing.
+NEW_DOC_UPDATE = (
+    "## Goal\n"
+    "Make the sample subsystem stop dropping work under load.\n"
+    "- closing-condition: check — `python3 tools/queue_probe.py --for 240` "
+    "reports 30/s\n\n"
+) + UPDATE_DOC
+
+
+@pytest.fixture
+def new_doc_update_file(tmp_path: Path) -> Path:
+    """A delta fit to BECOME a document — see `NEW_DOC_UPDATE`."""
+    p = tmp_path / "new-doc-update.md"
+    p.write_text(NEW_DOC_UPDATE, encoding="utf-8")
     return p
 
 
@@ -1450,7 +1490,11 @@ class TestRuleFDidNotMoveTheExitCodes:
         # bump is deliberate rather than reflexive — the injectivity loop
         # ran FIRST and passed, so this is a genuinely new code and not the
         # #962/#1046 collision shape wearing a count failure.
-        assert len(codes) == 10, f"the EXIT_* constant set changed: {codes}"
+        # 10 -> 12, 2026-09-13: rules (m) and (n) add `EXIT_UNDEFINED_DONE = 11`
+        # and `EXIT_RANK_GROWTH = 12`. Same reading as the entry above — the
+        # injectivity loop ran FIRST and passed, so these are two genuinely new
+        # codes rather than a collision wearing a count failure.
+        assert len(codes) == 12, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1465,6 +1509,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # reason: an unpinned new value survives the whole suite while the
         # prose that quotes it goes stale.
         assert hd.EXIT_UNEVIDENCED == 10
+        # Rules (m) and (n), pinned for the identical reason. Both numbers are
+        # quoted in `claude/skills/handoff/SKILL.md`'s step-5 legend, which is
+        # the prose that goes stale when an unpinned value moves.
+        assert (hd.EXIT_UNDEFINED_DONE, hd.EXIT_RANK_GROWTH) == (11, 12)
 
     def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
         """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
@@ -2339,8 +2387,8 @@ class TestTheOtherExITSDidNotMove:
 
     def _noop_update(self, tmp_path: Path) -> Path:
         p = tmp_path / "noop.md"
-        p.write_text("## Goal\nMake the sample subsystem stop dropping work "
-                     "under load.\n", encoding="utf-8")
+        # 🔴 `BASE_GOAL_SECTION`, never a re-typed copy — see the constant.
+        p.write_text(BASE_GOAL_SECTION, encoding="utf-8")
         return p
 
     def test_no_advance_is_byte_identical(
@@ -2847,7 +2895,7 @@ class TestTheNewDocPathReachesTheGate:
         assert "**Draft the handoff doc into a SCRATCH FILE" in doc
 
     def test_the_module_creates_a_doc_that_does_not_exist(
-        self, repo: Path, update_file: Path
+        self, repo: Path, new_doc_update_file: Path
     ) -> None:
         """The BEHAVIOUR the prose now promises: with no base the run offers the
         ordinary gate -- a diff, `status=proposed`, nothing written.
@@ -2859,14 +2907,14 @@ class TestTheNewDocPathReachesTheGate:
         behaviour, and nothing else asserts it."""
         doc = repo / "claudedocs" / "handoff-sample-topic.md"
         doc.unlink()
-        res = run_tool(repo, update=update_file)
+        res = run_tool(repo, update=new_doc_update_file)
         assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
         assert "status=proposed" in res.stdout + res.stderr
         assert "+++ b/claudedocs/handoff-sample-topic.md" in res.stdout
         assert not doc.exists(), "the proposal wrote the doc — the gate is bypassed"
 
     def test_the_no_base_run_confirms_into_exactly_one_commit(
-        self, repo: Path, update_file: Path
+        self, repo: Path, new_doc_update_file: Path
     ) -> None:
         """…and `--confirm` lands it, so the new-doc case ends the session
         COMMITTED rather than untracked -- the property whose absence is the
@@ -2877,7 +2925,7 @@ class TestTheNewDocPathReachesTheGate:
         doc = repo / "claudedocs" / "handoff-sample-topic.md"
         doc.unlink()
         before = commit_shas(repo)
-        res = run_tool(repo, "--confirm", update=update_file)
+        res = run_tool(repo, "--confirm", update=new_doc_update_file)
         assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
         assert doc.exists(), "the doc was not created"
         after = commit_shas(repo)
@@ -3039,7 +3087,7 @@ class TestBlockedCommitLeavesNoTrace:
         )
 
     def test_first_ever_handoff_leaves_no_untracked_file_behind(
-        self, repo: Path, update_file: Path
+        self, repo: Path, new_doc_update_file: Path
     ) -> None:
         """The `original is None` -> `unlink` branch, which had no fixture.
 
@@ -3059,7 +3107,7 @@ class TestBlockedCommitLeavesNoTrace:
         # flag the run would never reach the commit it needs to see refused.
         res = subprocess.run(
             [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
-             "brand-new-topic", "--update", str(update_file), "--advanced",
+             "brand-new-topic", "--update", str(new_doc_update_file), "--advanced",
              "a first-ever handoff for this topic", "--new-effort", "--confirm"],
             capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
         )
@@ -3911,9 +3959,9 @@ class TestASecondDocForAnExistingEffortIsRefused:
         )
         assert tree_hash(repo) == before
 
-    def test_new_effort_lands_it(self, repo: Path, update_file: Path) -> None:
+    def test_new_effort_lands_it(self, repo: Path, new_doc_update_file: Path) -> None:
         """The assertion works — otherwise the rule bans new efforts outright."""
-        res = run_tool(repo, "--new-effort", update=update_file, topic="genuinely-new")
+        res = run_tool(repo, "--new-effort", update=new_doc_update_file, topic="genuinely-new")
         assert res.returncode == 0, res.stdout + res.stderr
         assert "status=proposed" in res.stdout
 
@@ -3928,7 +3976,7 @@ class TestASecondDocForAnExistingEffortIsRefused:
         assert "status=new-doc" not in res.stdout + res.stderr
 
     def test_the_FIRST_doc_in_a_repo_needs_no_flag(
-        self, tmp_path: Path, update_file: Path
+        self, tmp_path: Path, new_doc_update_file: Path
     ) -> None:
         """🔴 THE BOOTSTRAP CASE, and the one an over-eager rule would break.
         A repo with no handoff docs at all has no effort to duplicate, so
@@ -3948,7 +3996,7 @@ class TestASecondDocForAnExistingEffortIsRefused:
         _sh("git", "add", "--", "README.md", cwd=work)
         _sh("git", "commit", "-q", "-m", "seed", cwd=work)
 
-        res = run_tool(work, update=update_file, topic="first-effort")
+        res = run_tool(work, update=new_doc_update_file, topic="first-effort")
         assert res.returncode == 0, res.stdout + res.stderr
         assert "status=proposed" in res.stdout
 
@@ -5152,10 +5200,8 @@ class TestRulesIAndJDidNotMoveTheOtherExits:
         assert res.returncode == hd.EXIT_NO_ADVANCE, res.stdout + res.stderr
 
     def test_no_change_is_still_5(self, repo: Path, tmp_path: Path) -> None:
-        noop = write_delta(
-            tmp_path, "noop2.md",
-            "## Goal\nMake the sample subsystem stop dropping work under load.\n",
-        )
+        # 🔴 `BASE_GOAL_SECTION`, never a re-typed copy — see the constant.
+        noop = write_delta(tmp_path, "noop2.md", BASE_GOAL_SECTION)
         res = run_tool(repo, update=noop)
         assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
 
@@ -5266,7 +5312,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
 
     def test_a_GENUINELY_NEW_doc_is_untouched_by_this(
-        self, tmp_path: Path, update_file: Path
+        self, tmp_path: Path, new_doc_update_file: Path
     ) -> None:
         """🔴 THE CASE THIS MUST NOT BREAK. Absent on BOTH sides is the new-doc
         path the skill says step 5 owns. Refusing it would make first writes
@@ -5275,7 +5321,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         work = repo_lacking_the_doc(tmp_path)
         # Same clone, a topic that exists nowhere — mainline included.
         argv = [sys.executable, str(TOOL), "--repo", str(work),
-                "--topic", "brand-new-topic", "--update", str(update_file),
+                "--topic", "brand-new-topic", "--update", str(new_doc_update_file),
                 "--advanced", "first write", "--confirm"]
         res = subprocess.run(argv, capture_output=True, text=True,
                              env=dict(os.environ, **GIT_ENV))
@@ -5449,7 +5495,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             "the remedy must say the refusal is deferred, not absent")
 
     def test_a_doc_DELETED_on_the_mainline_gets_NEITHER_the_loud_line_nor_a_refusal(
-        self, tmp_path: Path, update_file: Path
+        self, tmp_path: Path, new_doc_update_file: Path
     ) -> None:
         """🔴 THE OTHER ARM OF THE SEAM — the one two rounds of fixes missed.
 
@@ -5480,7 +5526,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         _sh("git", "push", "-q", "origin", "main", cwd=other)
         _sh("git", "fetch", "-q", "origin", cwd=work)
 
-        proposal = run_tool(work, update=update_file)
+        proposal = run_tool(work, update=new_doc_update_file)
         assert proposal.returncode == 0, proposal.stderr
         # 🔴 ASSERT THE PRECONDITION, not only the two negatives. Every other
         # assertion here is satisfied by "the currency check never ran" —
@@ -5493,7 +5539,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert "will be replaced by this delta" not in proposal.stdout, (
             "claimed a replacement of a document the mainline does not have")
 
-        confirmed = run_tool(work, "--confirm", update=update_file)
+        confirmed = run_tool(work, "--confirm", update=new_doc_update_file)
         assert confirmed.returncode == 0, (
             "a legitimate first write was refused", confirmed.stdout, confirmed.stderr)
         assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
@@ -5541,7 +5587,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert hd.wrong_base_tells(blank, UPDATE_DOC, {}) == ()
 
     def test_an_EMPTY_mainline_doc_is_NOT_something_to_lose(
-        self, tmp_path: Path, update_file: Path
+        self, tmp_path: Path, new_doc_update_file: Path
     ) -> None:
         """🔴 THE MIRROR BUG: refusing where NOTHING is destroyed.
 
@@ -5567,7 +5613,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         _sh("git", "push", "-q", "origin", "main", cwd=other)
         _sh("git", "fetch", "-q", "origin", cwd=work)
 
-        res = run_tool(work, "--confirm", update=update_file)
+        res = run_tool(work, "--confirm", update=new_doc_update_file)
         assert res.returncode == 0, (
             "refused a first write where the mainline copy is EMPTY — nothing "
             "would have been destroyed", res.stdout, res.stderr)
@@ -5594,7 +5640,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
 
     @pytest.mark.parametrize("blank", ["\n", "   \n\n"])
     def test_a_WHITESPACE_mainline_doc_is_ALSO_not_something_to_lose(
-        self, tmp_path: Path, update_file: Path, blank: str
+        self, tmp_path: Path, new_doc_update_file: Path, blank: str
     ) -> None:
         """🔴 The MIRROR bug, one notch along — round 4 fixed only `""`.
 
@@ -5616,7 +5662,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         # HEADER is not enough either: it prints whenever `doc_behind` is
         # non-zero. Only the mainline SHAPE line proves the copy was read and
         # measured, which is the claim this test's name makes.
-        prop = run_tool(work, update=update_file)
+        prop = run_tool(work, update=new_doc_update_file)
         # 🔴 ORDER MATTERS. Assert the loud-line ABSENCE first: if
         # `replaces_mainline_doc` regresses to `bool(mainline.lines)`, the loud
         # branch is taken and the shape line never prints — so the shape
@@ -5637,7 +5683,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             "the mainline copy was never read or was measured from the wrong "
             "text, so the negatives below prove nothing", prop.stdout[-400:])
 
-        res = run_tool(work, "--confirm", update=update_file)
+        res = run_tool(work, "--confirm", update=new_doc_update_file)
         assert res.returncode == 0, (
             "refused a first write against a WHITESPACE mainline copy — nothing "
             "would have been destroyed", res.stdout, res.stderr)
@@ -6192,3 +6238,457 @@ class TestRuleKIsWiredToRealContent:
             f"the pattern has stopped matching the house style, and a gate that "
             f"matches nothing reads exactly like a gate that passes."
         )
+
+
+# ===========================================================================
+# Rule (m) — the arc declares what ENDS it, and rule (n) — the rank queue
+# does not GROW its unforced half.
+#
+# 🔴 THE REGRESSION MATRIX, run by hand because these tests cannot run
+# themselves against a tree that has no rule: at `origin/main` (`ced40bdb`)
+# every test below that asserts a refusal goes RED, because neither refusal
+# exists there; the ones that stay green are the NEGATIVE controls (a compliant
+# document must still land), which is exactly the split that makes them
+# controls rather than coverage. At HEAD both classes are green. Re-derive it
+# in a second worktree off `origin/main`, never by reasoning about it.
+# ===========================================================================
+
+#: A `## Goal` that satisfies rule (m). Kept as one constant so a test asserting
+#: the COMPLIANT path cannot silently drift away from the one asserting the
+#: refusal — they must be the same field or neither proves anything about it.
+GOAL_WITH_CONDITION = (
+    "## Goal\n"
+    "Stop the widget queue dropping work.\n"
+    "- closing-condition: check — `tools/queue_probe.py --for 240` reports 30/s\n"
+)
+GOAL_WITHOUT_CONDITION = "## Goal\nStop the widget queue dropping work.\n"
+
+#: A minimal ranked section that satisfies rule (j), so a rule-(m) test is never
+#: accidentally measuring rule (j)'s refusal instead.
+EXTERNAL_STEP = (
+    "## Next steps (ranked)\n1. Ship it. forcing: gate — the soak blocks release\n"
+)
+
+
+def _legacy_repo(repo: Path) -> Path:
+    """`repo` with rule (m)'s field REMOVED from the committed doc.
+
+    The shared `BASE_DOC` carries the field (every other class wants the
+    compliant shape), so the grandfathered arm needs a base that predates the
+    rule. Committed, not just written, because `is_new_doc` and rule (h) both
+    read git.
+    """
+    doc = repo / "claudedocs" / "handoff-sample-topic.md"
+    text = doc.read_text(encoding="utf-8")
+    stripped = "\n".join(
+        ln for ln in text.splitlines() if "closing-condition" not in ln
+    ) + "\n"
+    assert stripped != text, "the fixture already lacked the field — vacuous"
+    doc.write_text(stripped, encoding="utf-8")
+    _sh("git", "add", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-qm", "legacy doc, pre rule (m)", cwd=repo)
+    return repo
+
+
+class TestTheArcDeclaresWhatEndsIt:
+    """Rule (m). 📖 `claude/skills/handoff/reference/write-gate.md` §F."""
+
+    # ---- the NEW-DOC arm: refused --------------------------------------
+
+    def test_a_new_doc_with_no_closing_condition_is_REFUSED(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        upd = write_delta(
+            tmp_path, "nodod.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNDEFINED_DONE, res.stdout + res.stderr
+        assert "status=undefined-done" in res.stderr
+        assert f"[no {hd.CLOSING_KEY}: field]" in res.stderr
+        assert "NEW handoff doc" in res.stderr
+
+    def test_the_refusal_writes_NOTHING(self, repo: Path, tmp_path: Path) -> None:
+        """🔴 The property every refusal in this module shares, asserted rather
+        than assumed: a `--confirm --push` that refuses must leave no doc, no
+        commit and no ref — otherwise the gate is a speed bump."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.unlink()
+        before = commit_shas(repo)
+        upd = write_delta(
+            tmp_path, "nodod2.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, "--confirm", "--push", update=upd)
+        assert res.returncode == hd.EXIT_UNDEFINED_DONE, res.stdout + res.stderr
+        assert not doc.exists(), "the refusal created the doc"
+        assert commit_shas(repo) == before, "the refusal committed"
+
+    def test_a_new_doc_WITH_the_field_lands(self, repo: Path, tmp_path: Path) -> None:
+        """🔴 THE NEGATIVE CONTROL for every refusal above. A gate that cannot
+        pass is not a gate, and this one is cheap to get wrong: the field's
+        grammar is strict, so an over-tight pattern refuses the very shape the
+        step-2 template teaches."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        upd = write_delta(
+            tmp_path, "dod.md", GOAL_WITH_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_the_step_2_TEMPLATE_SPELLING_is_the_one_that_parses(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE SEAM between the skill and the module, and the one that would
+        make this rule red-by-construction. The template writes the field
+        BOLDED and BULLETED (`- **closing-condition:** check — …`); a pattern
+        that only accepted the bare spelling would refuse every author who did
+        exactly what they were shown."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        template_spelling = (
+            "## Goal\nStop the drops.\n"
+            "- **closing-condition:** `check` — `tools/probe.py` exits 0 on main\n"
+        )
+        upd = write_delta(tmp_path, "tmpl.md", template_spelling + "\n" + EXTERNAL_STEP)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+    # ---- the diagnosis arms: each cause names its OWN fix ---------------
+
+    @pytest.mark.parametrize(
+        "goal,marker",
+        [
+            (
+                "## Goal\nx\n- closing-condition: soon — whenever it feels done\n",
+                "[unknown kind]",
+            ),
+            ("## Goal\nx\n- closing-condition: check\n", "[empty]"),
+            (
+                "## Goal\nx\n- closing condition: check — the probe passes\n",
+                "[unparsed]",
+            ),
+            (
+                "## Goal\nx\n```\nclosing-condition: check — the probe passes\n```\n",
+                "[fenced]",
+            ),
+            (
+                GOAL_WITHOUT_CONDITION
+                + "\n## Gotchas\n- closing-condition: check — the probe passes\n",
+                "[wrong section]",
+            ),
+        ],
+        ids=["unknown-kind", "empty", "unparsed", "fenced", "wrong-section"],
+    )
+    def test_each_cause_is_named_with_its_own_marker(
+        self, repo: Path, tmp_path: Path, goal: str, marker: str
+    ) -> None:
+        """🔴 THE MEASURED FAILURE THIS PREVENTS is rule (j)'s, recorded on
+        `_FORCING_ATTEMPT`: an author whose field IS there was told
+        `[no forcing: field]` and handed a remedy they had already carried out,
+        so no re-run could clear it. Five ways to write this field wrong, five
+        different things to do about it — and each run must name ONLY its own,
+        or the legend is noise."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        name = "cause-" + marker.strip("[]").replace(" ", "-") + ".md"
+        upd = write_delta(tmp_path, name, goal + "\n" + EXTERNAL_STEP)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNDEFINED_DONE, res.stdout + res.stderr
+        assert marker in res.stderr, res.stderr
+        others = {
+            "[unknown kind]", "[empty]", "[unparsed]", "[fenced]",
+            "[wrong section]", f"[no {hd.CLOSING_KEY}: field]",
+        } - {marker}
+        for other in others:
+            assert other not in res.stderr, (
+                f"the {marker} refusal ALSO printed {other}: two remedies for "
+                f"one cause is how the unclearable-refusal failure returns\n"
+                + res.stderr
+            )
+
+    def test_a_field_outside_the_Goal_section_does_NOT_satisfy_the_rule(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 `claude/RULES.md`'s SPELLED-GUARD SHAPE, and this rule shipped its
+        first draft with it: the guard passed while the hazard sat in a place
+        the consumer cannot read. `resume-state.sh`'s DOD block parses the
+        `## Goal` section, so a field under any other heading is invisible to
+        every later round — which is the only thing the field is FOR."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        upd = write_delta(
+            tmp_path,
+            "elsewhere.md",
+            GOAL_WITHOUT_CONDITION
+            + "\n## State now\n- closing-condition: check — the probe passes\n"
+            + "\n" + EXTERNAL_STEP,
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNDEFINED_DONE, res.stdout + res.stderr
+        assert "[wrong section]" in res.stderr
+        assert "MOVE it" in res.stderr and "State now" in res.stderr
+
+    # ---- the DELETION arm ------------------------------------------------
+
+    def test_an_update_that_DELETES_the_field_is_REFUSED(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """`Goal` is a REPLACE heading, so a delta that rewrites it drops
+        whatever it does not carry — silently, and forever. This is the one way
+        a compliant document stops complying, and nothing else would catch it."""
+        upd = write_delta(
+            tmp_path, "drop.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNDEFINED_DONE, res.stdout + res.stderr
+        assert "HAD a" in res.stderr
+
+    def test_a_delta_that_OMITS_the_Goal_section_keeps_the_base_field(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE ORDINARY PATH, and the one that would make this a
+        permanently-red gate if it broke. The overwhelmingly common delta says
+        nothing about `## Goal`; the merge must leave the base's field alone and
+        the rule must read the MERGE, not the update. `update_file` is exactly
+        that shape."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=undefined-done" not in res.stderr
+
+    # ---- the GRANDFATHERED arm ------------------------------------------
+
+    def test_a_legacy_doc_is_ADVISED_not_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PERMANENTLY-RED-GATE GUARD, the same one rule (j) carries.
+        MEASURED with the parser itself on the day the rule landed: 0 of 119 devrc
+        handoff docs and 0 of 64 homelab-talos ones carry a field it accepts. Refusing them
+        would be red on run one, which `claude/RULES.md` calls worse than no
+        gate."""
+        legacy = _legacy_repo(repo)
+        upd = write_delta(tmp_path, "legacy.md", "## State now\n- moved on\n")
+        res = run_tool(legacy, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "declares no `closing-condition:`" in res.stdout
+        assert "GRANDFATHERED" in res.stdout
+
+    def test_the_advisory_is_SILENT_on_a_compliant_doc(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`dropped_durable_report`'s stated reason: a reassuring line printed
+        on every run is skimmed, and then read as a guarantee."""
+        res = run_tool(repo, update=update_file)
+        assert "GRANDFATHERED" not in res.stdout
+
+    # ---- precedence ------------------------------------------------------
+
+    def test_a_STALE_BASE_is_not_reported_as_a_NEW_arc(
+        self, tmp_path: Path
+    ) -> None:
+        # 🔴 NO `repo` FIXTURE: it builds `tmp_path/work` too, and
+        # `repo_lacking_the_doc` then dies on FileExistsError — a red test that
+        # says nothing about either rule.
+        """🔴 THE MEASURED FALSE POSITIVE THAT DEFINED `is_new_doc`, and it took
+        19 of this module's tests red in one run. A stale base presents as an
+        empty local doc — rule (h)'s whole subject — so `not base_text` alone
+        made rule (m) demand a finish line from an arc whose document already
+        carries one upstream. Rule (h) must win: its refusal is about
+        destroying a committed document.
+
+        🔴 `repo_lacking_the_doc`, NOT a locally-deleted doc, and the first
+        draft of this test used the latter and PASSED THE WRONG WAY. Deleting
+        the doc in `repo` leaves it absent on BOTH sides, which is the
+        genuinely-new case rule (m) is right to refuse — so the test measured
+        rule (m) working and called it rule (h) losing. The stale shape is
+        specifically: present at `origin/main`, absent here."""
+        work = repo_lacking_the_doc(tmp_path)
+        upd = write_delta(
+            tmp_path, "stale.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(work, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            f"expected rule (h) to win, got {res.returncode}\n"
+            + res.stdout + res.stderr
+        )
+        assert "status=undefined-done" not in res.stderr
+
+    # ---- the parser's own edges -----------------------------------------
+
+    @pytest.mark.parametrize(
+        "line,detail",
+        [
+            (
+                "- closing-condition: check — `gate.sh` exits 0 on main",
+                "`gate.sh` exits 0 on main",
+            ),
+            (
+                "- closing-condition: check — --dry-run exits 0",
+                "--dry-run exits 0",
+            ),
+            ("- closing-condition: check: PR #123 merges", "PR #123 merges"),
+            (
+                "- **closing-condition:** judgement — Zach reads r3's transcript",
+                "Zach reads r3's transcript",
+            ),
+        ],
+        ids=["backtick", "double-dash", "colon-separator", "bold-template"],
+    )
+    def test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER(
+        self, line: str, detail: str
+    ) -> None:
+        """🔴 THE DETAIL IS NOT ONLY AN EMPTINESS TEST — `resume-state.sh` PRINTS
+        it on every round, so a character the lead-strip eats is a character
+        wrong on screen forever. Both of the first two were MEASURED wrong in
+        the first draft: a greedy separator class ate the opening backtick of
+        ``check — `gate.sh` exits 0``, and an unanchored separator ate one dash
+        of `check — --dry-run exits 0`."""
+        got = hd.closing_condition(f"## Goal\nx\n{line}\n")
+        assert got.is_declared, got
+        assert got.detail == detail, got
+
+    def test_the_two_kinds_are_a_CLOSED_set(self) -> None:
+        """The vocabulary is the part a rewording cannot walk, and it is not
+        invented here: `claude/RULES.md`'s object-leak paragraph draws exactly
+        this line — a mechanical check OR a named human judgement — and refuses
+        a third. A new member is a decision, not a typo."""
+        assert hd.CLOSING_KINDS == frozenset({"check", "judgement"})
+
+
+class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
+    """Rule (n). 📖 `claude/skills/handoff/reference/write-gate.md` §G."""
+
+    def _steps(self, *items: str) -> str:
+        return "## Next steps (ranked)\n" + "".join(
+            f"{n}. {t}\n" for n, t in enumerate(items, 1)
+        )
+
+    def test_adding_a_self_generated_rank_beyond_the_base_count_is_REFUSED(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """`BASE_DOC` carries TWO untagged ranked items, so the document's
+        self-generated half is 2. Three is growth."""
+        upd = write_delta(
+            tmp_path,
+            "grow.md",
+            self._steps(
+                "Refactor the parser. forcing: none",
+                "Tidy the fixtures. forcing: none",
+                "Rename the helper. forcing: none",
+            ),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_RANK_GROWTH, res.stdout + res.stderr
+        assert "status=rank-growth" in res.stderr
+        assert "2 item(s) in the document" in res.stderr
+        assert "3 in this update" in res.stderr
+        assert "## Defects (batched)" in res.stderr
+
+    def test_the_refusal_does_not_claim_to_know_WHICH_item_is_new(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 A GUARD ON WHAT THE TOOL DOES NOT CLAIM. Rank text is rewritten
+        and rank numbers are re-pointed between rounds, so any cross-round match
+        would be a guess — and a guess names the WRONG item, which is worse than
+        naming none. The refusal has to say so in its own words, or a reader
+        assumes the last-listed item is the addition."""
+        upd = write_delta(
+            tmp_path,
+            "nowhich.md",
+            self._steps(*[f"Item {i}. forcing: none" for i in range(1, 5)]),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_RANK_GROWTH
+        assert "is NOT identified" in res.stderr
+        assert "The COUNT is the finding" in res.stderr
+
+    def test_a_FLAT_count_lands(self, repo: Path, tmp_path: Path) -> None:
+        """🔴 THE NEGATIVE CONTROL, and the boundary: this is a RATCHET on
+        growth, not a queue-length limit. Two in, two out."""
+        upd = write_delta(
+            tmp_path,
+            "flat.md",
+            self._steps(
+                "Refactor the parser. forcing: none",
+                "Tidy the fixtures. forcing: none",
+            ),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "NO external forcing" in res.stdout
+
+    def test_an_EXTERNAL_kind_is_not_counted_at_all(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE DESIGN, not an exemption. Work that answers to an incident,
+        the operator or a red gate must never be blocked by a queue rule — the
+        finding is about the SELF-GENERATED half, which compounded 2–6 items a
+        round while under a third of the queue carried any forcing function."""
+        upd = write_delta(
+            tmp_path,
+            "external.md",
+            self._steps(
+                *[f"Fix {i}. forcing: incident — pager {i}" for i in range(1, 9)]
+            ),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+    def test_an_UNTAGGED_legacy_base_item_counts_as_SELF_GENERATED(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PREDICATE THAT KEEPS THIS RULE OFF THE PERMANENTLY-RED LIST,
+        and it was WRONG in the first draft: counting only the literal
+        `forcing: none` read every legacy base as ZERO, so the first honest
+        re-tagging of a legacy queue — the exact behaviour rule (j) exists to
+        produce — looked like pure growth. MEASURED: it took
+        `test_forcing_none_is_ACCEPTED_and_reported` red.
+
+        `BASE_DOC`'s two items carry no field at all. Re-tagging BOTH as `none`
+        must land."""
+        assert hd.self_generated_rank_count(BASE_DOC) == 2, (
+            "the fixture's legacy items stopped counting — this test is vacuous"
+        )
+        upd = write_delta(
+            tmp_path,
+            "retag.md",
+            self._steps(
+                "Instrument the drain loop. forcing: none",
+                "Re-read the retry wrapper. forcing: none",
+            ),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+    def test_the_operator_opt_in_overrides(self, repo: Path, tmp_path: Path) -> None:
+        """The report's own words: "ranks may only be added by operator
+        opt-in". The flag IS that opt-in, and it is deliberately long."""
+        upd = write_delta(
+            tmp_path,
+            "optin.md",
+            self._steps(*[f"Item {i}. forcing: none" for i in range(1, 6)]),
+        )
+        assert run_tool(repo, update=upd).returncode == hd.EXIT_RANK_GROWTH
+        res = run_tool(repo, hd.UNFORCED_GROWTH_FLAG, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+    def test_a_delta_with_no_Next_steps_section_is_not_asked(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (j)'s reason, inherited: an update that touches no ranks cannot
+        grow the queue, and must not be refused for the base's history."""
+        upd = write_delta(tmp_path, "nosteps.md", "## State now\n- moved on\n")
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+    def test_a_NEW_doc_is_silent(self, repo: Path, tmp_path: Path) -> None:
+        """Round 1 legitimately opens with self-generated work; the finding is
+        about what happens AFTER it. `self_generated_report` still counts them."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        upd = write_delta(
+            tmp_path,
+            "new.md",
+            GOAL_WITH_CONDITION
+            + "\n"
+            + self._steps(*[f"Item {i}. forcing: none" for i in range(1, 7)]),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "NO external forcing" in res.stdout

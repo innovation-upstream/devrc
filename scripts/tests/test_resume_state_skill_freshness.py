@@ -1156,9 +1156,14 @@ def test_the_SKILL_block_LEADS_the_digest(tmp_path, stub_bin):
     # `INVESTIGATIONS` sits between CLAWGATE and DRIFT: like CLAWGATE it reads
     # the handoff and contributes findings and gaps, so it has to run before the
     # block that prints them.
+    # `DOD` sits LAST of the blocks for a reason of its own (2026-09-13): it is
+    # the question every other block's findings feed into — "given all that, is
+    # this arc finished?" — and it is the line that must still be in view when
+    # the reader reaches DRIFT. It also contributes a gap, so like the two above
+    # it has to run before the block that prints them.
     assert headers == [
         "SKILL", "GIT/PR", "WORKLOAD", "ALERTS", "CLAWGATE", "INVESTIGATIONS",
-        "DRIFT",
+        "DOD", "DRIFT",
     ], (
         f"the SKILL block must LEAD the digest; got {headers}"
     )

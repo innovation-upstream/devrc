@@ -40,6 +40,7 @@
 # "mutation-verified" can be RE-DERIVED instead of believed.
 #
 #   bash scripts/tests/mutants-handoff-cap.sh        # exit 0 only if ALL ok
+#   MUTANT_FILTER='rule-[mn]' bash …                 # one block; see _row_selected
 #
 # Follows the convention `mutants-claim-work.sh` / `mutants-dead-guard.sh`
 # established, and for the reasons documented there:
@@ -167,8 +168,31 @@ failing() {
 # skill body; everything else — the DID-NOT-APPLY diff, the harness floor, the
 # WRONG-KILLER check, the restore — is shared, because a second copy of this
 # logic is the shape `claude/RULES.md` says regenerates the same bug at N sites.
+# 🔴 A ROW FILTER, AND IT CANNOT SWITCH OFF THE CONTROLS. `MUTANT_FILTER` is an
+# ERE matched against a row's NAME; unset runs everything. It exists because one
+# row costs a full suite run (~3 min here) and the battery is past 80 of them,
+# so "re-derive the block I just changed" was in practice "do not re-derive".
+#
+# 🔴 THE TWO CONTROLS ARE FORCED THROUGH ANY FILTER, which is the whole reason
+# this is safe to add. A filter that excluded `already-caught-positive-control`
+# would let a harness wired to nothing print a screen of `ok` — the exact shape
+# this file's header calls a clean sweep worth nothing — and one that excluded
+# the behaviour-free `SURVIVES` control would stop proving the rows key on
+# behaviour. Filtering them out is therefore not a user choice.
+#
+# 🔴 A FILTERED RUN SAYS SO IN ITS SUMMARY. A partial sweep reported as a full
+# one is `claude/RULES.md`'s "no silent caps": what was dropped is printed.
+FILTER_FORCED='already-caught-positive-control|comment-reword-control'
+SKIPPED=0
+_row_selected() { # _row_selected <name>
+  [ -z "${MUTANT_FILTER:-}" ] && return 0
+  grep -Eq "$FILTER_FORCED" <<<"$1" && return 0
+  grep -Eq "$MUTANT_FILTER" <<<"$1"
+}
+
 _run() { # _run <file> <pristine-copy> <name> <want> <sed-expr>
   local file="$1" orig="$2" name="$3" want="$4" expr="$5"
+  if ! _row_selected "$name"; then SKIPPED=$((SKIPPED+1)); return; fi
   ROWS=$((ROWS+1))
   sed "$expr" "$file" > "$T/m" 2>/dev/null
   if cmp -s "$file" "$T/m"; then
@@ -774,6 +798,95 @@ run 'fenced-filter-ignores-indent' test_an_unrelated_column_0_fence_does_not_for
 run 'rule-k-comment-reword-control' SURVIVES \
   's|# --- rule (k): an elimination names HOW it was eliminated|# --- rule k: elimination evidence (reworded comment)|'
 
+printf '\n== rule (m): the arc declares what ENDS it (must be KILLED) ==\n'
+# The refusal itself. Narrowest expression: the `if` that returns it.
+run 'rule-m-refusal-never-fires' test_a_new_doc_with_no_closing_condition_is_REFUSED \
+  's|^    if undefined_done:|    if False:|'
+# 🔴 THE `in_goal` HALF, ON ITS OWN ROW. This was a REAL defect in the rule's
+# first draft — a well-formed field under `## State now` satisfied the gate
+# while `resume-state.sh`, which parses the Goal section, could not see it.
+# `claude/RULES.md`'s spelled-guard shape: the guard passes while the hazard
+# sits somewhere the consumer cannot read.
+run 'closing-condition-accepted-anywhere' \
+  test_a_field_outside_the_Goal_section_does_NOT_satisfy_the_rule \
+  's|and bool(self.detail) and self.in_goal|and bool(self.detail)|'
+# The emptiness half, isolated from `in_goal` above for the enclosing-condition
+# reason this harness's header gives.
+run 'a-kind-with-no-condition-is-accepted' \
+  test_each_cause_is_named_with_its_own_marker \
+  's|and bool(self.detail) and self.in_goal|and self.in_goal|'
+# The vocabulary. An open set is what `soon`/`tbd`/`done` would walk straight
+# through, and it is the half a rewording cannot defeat.
+run 'closing-vocabulary-opened' \
+  test_each_cause_is_named_with_its_own_marker \
+  's|return self.kind in CLOSING_KINDS and|return self.kind is not None and|'
+# 🔴 THE TEMPLATE-SPELLING ROW, and it is the one this rule actually shipped
+# wrong. `_MARKUP\s*` cannot see markup-space-markup, which is exactly how the
+# step-2 template writes the field (`- **closing-condition:** `check` — …`), so
+# the writer refused the one spelling the skill teaches while the shell parser
+# accepted it. Reverting the class must go red.
+run 'closing-pattern-narrowed-to-one-markup-run' \
+  test_the_step_2_TEMPLATE_SPELLING_is_the_one_that_parses \
+  's@{CLOSING_KEY}{_MARKUP}\\s\*:\[\\s\*_`~\]\*@{CLOSING_KEY}{_MARKUP}\\s*:{_MARKUP}\\s*@'
+# The detail lead-strip, both measured mangles. A greedy class eats a leading
+# backtick; an unanchored separator eats one dash of `--dry-run`.
+run 'detail-strip-eats-leading-markup' \
+  test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER \
+  's@_CLOSING_DETAIL_LEAD = re.compile(r"\^\[\\s\*_`~\]\*(?:\[:\\-–—\](?=\\s|$))?\\s\*")@_CLOSING_DETAIL_LEAD = re.compile(r"^[\\s*_`~:\\-–—]+")@'
+# The DELETION arm: a document that HAD a finish line and loses it.
+run 'deleting-the-field-is-not-noticed' \
+  test_an_update_that_DELETES_the_field_is_REFUSED \
+  's|        base_had_one=closing_condition(base_text).is_declared,|        base_had_one=False,|'
+# 🔴 THE GRANDFATHERING, IN BOTH DIRECTIONS. Removing it makes the gate
+# permanently red on a corpus where 0 of 183 docs comply; removing the advisory
+# makes a legacy doc silent forever, which is how it never gets fixed.
+run 'legacy-docs-are-refused-too' \
+  test_a_legacy_doc_is_ADVISED_not_refused \
+  's|    if not (is_new_doc or base_had_one):|    if False:|'
+run 'legacy-advisory-suppressed' \
+  test_a_legacy_doc_is_ADVISED_not_refused \
+  's|    legacy_dod = legacy_dod_report(closing, is_new_doc)|    legacy_dod = ""|'
+# 🔴 PRECEDENCE. `not base_text` alone reads a STALE BASE as a new arc — the
+# false positive that took 19 tests red in one run.
+run 'stale-base-read-as-a-new-arc' \
+  test_a_STALE_BASE_is_not_reported_as_a_NEW_arc \
+  's|    is_new_doc = not base_text.strip() and not currency.replaces_mainline_doc(base_text)|    is_new_doc = not base_text.strip()|'
+# BEHAVIOUR-FREE CONTROL for this block: the rows above must key on behaviour,
+# not on rule (m)'s own comment text.
+run 'rule-m-comment-reword-control' SURVIVES \
+  's|# --- rule (m): the arc declares what ENDS it|# --- rule m: closing condition (reworded comment)|'
+
+printf '\n== rule (n): the rank queue does not GROW its unforced half (must be KILLED) ==\n'
+run 'rule-n-refusal-never-fires' \
+  test_adding_a_self_generated_rank_beyond_the_base_count_is_REFUSED \
+  's|^    if growth:|    if False:|'
+# 🔴 THE PREDICATE, AND IT WAS WRONG IN THE FIRST DRAFT. Counting only the
+# literal `none` reads every legacy base as ZERO, so the first honest re-tagging
+# of a legacy queue looks like pure growth and is refused — red on run one.
+run 'untagged-legacy-items-stop-counting' \
+  test_an_UNTAGGED_legacy_base_item_counts_as_SELF_GENERATED \
+  's|    return item.kind not in EXTERNAL_FORCING_KINDS|    return item.kind == "none"|'
+# The boundary: `<=` is what makes this a ratchet on GROWTH rather than a cap.
+run 'flat-count-refused-as-growth' \
+  test_a_FLAT_count_lands \
+  's|    if len(none_items) <= base_count:|    if len(none_items) < base_count:|'
+# The operator opt-in. A flag the code ignores is a refusal nobody can clear.
+run 'operator-opt-in-ignored' \
+  test_the_operator_opt_in_overrides \
+  's|        if args.rank_growth_approved|        if False|'
+# 🔴 THE HONESTY CLAUSE. The refusal must NOT claim to know which item is new —
+# rank text and rank numbers both move between rounds, so a match would be a
+# guess, and a guess names the wrong item.
+run 'refusal-claims-to-know-which-item' \
+  test_the_refusal_does_not_claim_to_know_WHICH_item_is_new \
+  's|"  ⚠ WHICH of these is the addition is NOT identified|"  ⚠ The last item listed is the addition|'
+# The new-doc grandfathering: round 1 legitimately opens with self-generated work.
+run 'new-docs-are-ratcheted-too' \
+  test_a_NEW_doc_is_silent \
+  's|^    if is_new_doc:|    if False:|'
+run 'rule-n-comment-reword-control' SURVIVES \
+  's|# --- rule (n): the rank queue does not GROW its unforced half|# --- rule n: rank ratchet (reworded comment)|'
+
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
 # is already known to catch. If this row ever reports SURVIVED, the harness is
@@ -786,4 +899,9 @@ run 'comment-reword-control' SURVIVES \
   's|# --- rule (j): a ranked item names an external forcing function|# --- rule j: ranked item forcing function (reworded comment)|'
 
 printf '\n%d row(s), %d failure(s)\n' "$ROWS" "$FAILURES"
+if [ -n "${MUTANT_FILTER:-}" ]; then
+  printf '🔴 PARTIAL SWEEP: MUTANT_FILTER=%s skipped %d row(s). This is NOT a\n' \
+    "$MUTANT_FILTER" "$SKIPPED"
+  printf '   clean bill for the rows it did not run — re-run with it unset.\n'
+fi
 [ "$FAILURES" -eq 0 ] || exit 1

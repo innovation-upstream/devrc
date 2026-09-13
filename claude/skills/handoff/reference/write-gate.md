@@ -542,3 +542,220 @@ tool-chosen date on prose no session re-read. If a backfill is ever wanted, the
 closing condition is a `git grep -c 'as-of:' claudedocs/` reaching the block
 count that `investigation_rows` reports, verified by a session that also
 re-reads what it stamped.
+
+## §F — rule (m): the arc declares what ENDS it (2026-09-13)
+
+The field is `closing-condition: <kind> — <the thing itself>` in the doc's
+`## Goal` section, `<kind>` one of `check` / `judgement`. Written by the step-2
+template, refused by `handoff_doc.py` on a new doc that lacks one, and printed
+by `resume-state.sh`'s `DOD` block on every later round.
+
+### The measurement
+
+`claudedocs/audit-arc-rabbit-holes-2026-09-13.md` in `homelab-talos` (committed
+at `841cf63b3`) read 75 days of session telemetry out of ClickHouse
+`activity.events`. Handoff ARCS are directly observable there because both ends
+are standardized: a kickoff is `/resume — continue the <topic> work. Canonical
+handoff (read first): …/handoff-<topic>.md`, and an operator close-check is
+`anything left outstanding from this arc?…`. That window holds **745 doc-linked
+kickoff sessions across 299 arcs**. The five longest were deep-read
+transcript-by-transcript.
+
+**The headline, and it is not the one the question expected.** Later rounds do
+not stop shipping — commits/session stays flat at ~7 and output tokens/commit
+flat at ~80–86k all the way to round 7+. What changes is *what* is shipped: from
+round 7 on it is increasingly audit-fixes, guards, validators and
+re-verification of the arc's own prior work. In **all five** deep-read arcs the
+round-1 objective was satisfied within **1–7 rounds**. The arcs ran **13–23**.
+
+Refuted by the same data, and recorded so nobody re-derives them: effort
+inflation (tokens/commit is flat), commit collapse (commits/session is flat),
+and idle late rounds (audit-heavy sessions commit MORE — 8.3 vs 5.3 per session
+at r7+).
+
+**The close-check does not close.** Of 188 sessions carrying an operator
+close-check, **11%** ended the arc; the median close-check → next-kickoff gap is
+**1.0 h**. The check was being answered with an inventory of what remained,
+which by construction re-opens the arc, rather than with a verdict against
+anything.
+
+### Why a FIELD and not an instruction
+
+Every one of those five documents was well written. None of them was missing a
+Goal; what they were missing was a statement of what would make the Goal DONE,
+so "is this finished?" had no object and every round answered it from the
+ranked list — which grows (§G). Prose telling a session to write a finish line
+is the shape `claude/RULES.md` calls walkable: the sentence gets written, in
+different words each time, and nothing can read it back. A NAMED FIELD with a
+CLOSED KIND can be read back — by the refusal, and by `resume-state.sh` on every
+later round, which is the half that actually confronts a session mid-arc.
+
+The two kinds are not invented here. `claude/RULES.md`'s object-leak paragraph
+already draws exactly this line for a filed work item — "a mechanical check (a
+merged PR, a cleared alert, a command exiting 0) **or** a named human judgement
+over NAMED EVIDENCE ('X reads the transcript' — never 'someone will decide')" —
+and refuses a third option. `check` and `judgement` are those two, and the
+absence of a third is the point of the vocabulary.
+
+### The grandfathering, and why it is not weakness
+
+Measured with the parser itself on the day the rule landed: **0 of 119** devrc
+handoff docs and **0 of 64** homelab-talos ones carry a field it accepts.
+Refusing on every one of them would be red-by-construction from run one, which
+`claude/RULES.md` names as worse than no gate — and this module has already
+been bitten by that exact shape (see `ranked_items` on why rule (j) reads the
+update rather than the merge).
+
+So the refusal is scoped to the two cases where it cannot be vacuous:
+
+- **a NEW doc.** Round 1 is the only round at which a finish line can honestly
+  be set — by round 7 the arc has already drifted past whatever it would have
+  said — and a new document has no history to grandfather.
+- **an update that DELETES a field the document had.** That is the one way a
+  compliant document stops complying, and nothing else would catch it: `Goal`
+  is a REPLACE-bucket heading, so a delta that rewrites it silently drops
+  whatever it does not carry.
+
+Everything else gets `legacy_dod_report`, an advisory above the diff on every
+update until someone spends a line.
+
+### What "new doc" means, and the false positive that defined it
+
+`not base_text` is NOT the predicate, and using it took **19 of this module's
+own tests red in one run**. A STALE BASE presents identically — an empty local
+doc — which is the whole shape rule (h) exists for. Under that reading rule (m)
+demanded a finish line from an arc whose document already carries one on the
+mainline. The predicate is `not base_text.strip() and not
+currency.replaces_mainline_doc(base_text)`, reusing the reading rule (i)
+already took so the two decisions cannot disagree.
+
+For the same reason both arc rules run BELOW rule (h)'s refusal rather than
+beside (j)/(k): a wrong base makes "this arc has no finish line" a statement
+about a document nobody is editing.
+
+### `in_goal` is part of `is_declared`, and leaving it out was a real defect
+
+The rule's first draft accepted a well-formed field wherever it appeared. A
+field under `## State now` satisfied the gate while `/resume` — which reads the
+Goal section — could not see it: `claude/RULES.md`'s spelled-guard shape
+exactly, the guard passing while the hazard exists in a different place. The
+field is still FOUND outside `## Goal`, and reported with its heading, because
+"move it" and "write one" are different fixes and only one of them is solved by
+writing the field again.
+
+### The detail text is not only an emptiness test
+
+`resume-state.sh` prints it every round, so a character eaten by the parser is a
+character wrong on screen forever. Two mangles were measured and fixed in the
+lead-strip: a greedy separator class ate the opening backtick of
+``check — `gate.sh` exits 0`` (leaving ``gate.sh` exits 0``), and an unanchored
+separator ate one dash of `check — --dry-run exits 0`. The separator must now be
+followed by whitespace or end-of-line, and only whitespace is stripped after it.
+
+## §G — rule (n): the rank queue does not GROW its unforced half (2026-09-13)
+
+### The mechanism
+
+The same study's **strongest** finding, ranked first of five root causes: a
+**self-extending rank queue**. Each round's audits and close-checks minted **2–6
+new ranked items**, faster than rounds closed them, so the queue could not drain
+however much the arc shipped. Measured rank counts, first round → last:
+
+    comic-flex        0 → 76
+    qa-coverage       9 → 84
+    tmux              1 → 55
+    tekton           11 → 54
+
+ANSWERED/closed markers were effectively absent (0.00–0.01 per kickoff). One of
+those documents recorded its own state as *"54 items… Of the 29 live items, only
+nine carry a forcing function"*, and another self-reported *"rank 53 was false
+within ninety minutes of my writing it — the sixth instance of this doc's
+ranked-list drift"*.
+
+The second-ranked cause feeds it: **audit-ladder compounding**. audit-pr use per
+session rose 17.7% → 30.5% → 42.9% → **53.6%** by round bucket, and audit-skill
+loads per commit 0.71 → 2.33. Every sampled delta round found real defects in
+the previous round's own fixes. The ladder is not the problem — it is working as
+`claude/RULES.md`'s audit-fix-resets-gate rule describes — but each finding was
+becoming a RANK, and ranks are what the next session draws work from.
+
+### Why the ratchet is on the `forcing: none` half only
+
+An item with an EXTERNAL forcing kind answers to something outside the loop: an
+incident, the operator, a red gate. Blocking that on a queue-length rule would
+be wrong, and would make the gate one people route around. What compounds is the
+other half. Rule (j) already makes a self-generated item DECLARE itself
+(`forcing: none` — "accepted and counted, and not eligible to be worked"); rule
+(n) is what makes the count it was being counted for actually bind.
+
+It is an ANTI-REGROWTH RATCHET, the same idiom as this repo's byte gates: the
+number may fall freely and may not rise. Closing self-generated items is what
+buys room for new ones — which is exactly the behaviour the finding asks for.
+
+### What it deliberately does NOT do
+
+It does not match items across rounds. Rank TEXT is rewritten between rounds and
+rank NUMBERS are re-pointed by re-ranking (which the skill already warns
+silently re-points every live `claim-work` claim), so any identity test would be
+a guess — and a guess here names the WRONG item as the addition, which is worse
+than reporting only that the count moved. The refusal says so in its own words
+and prints the whole `forcing: none` population instead.
+
+It is also silent on a NEW doc. Round 1 legitimately opens with self-generated
+work; the finding is about what happens after it. `self_generated_report` still
+counts them on every run, new doc included.
+
+### The audit-ladder cap that was proposed and NOT taken
+
+The report's third proposed fix was *"max 3 delta rounds per PR, then
+ship-with-known-findings + explicit decision record"*. That was put to the
+operator against the standing rule it contradicts — `claude/RULES.md`'s
+audit-fix-resets-gate: *"A CLEAN round ENDS the ladder… **Not a cap** — the
+count is set by FINDINGS, never by a number."* Both cite the same evidence, that
+delta rounds keep finding real defects.
+
+**Operator decision 2026-09-13: disclosure, not a cap.** RULES.md is unchanged.
+What lands instead is the non-conflicting half — the ladder's rounds are
+RECORDED in `## State now` (`Audit ladder: <N> delta round(s); last round found
+<what — or CLEAN, which ENDS it>`), so a long ladder is visible and costed and
+the ship-with-known-findings call is the operator's to make, and audit findings
+may no longer mint ranks, which is this rule. Nothing forbids round 4 when round
+3 found a real defect.
+
+### The close-check verdict
+
+The report's fourth fix — *"close-check must end in a verdict, not an
+inventory"* — is not a separate mechanism. It is what §F's field gives the
+close-check something to be a verdict ABOUT: `ADDRESSED ⇒ the arc is CLOSED`,
+`NOT ⇒ name the one item`, and anything else outstanding starts a NEW arc. It is
+stated in the step-2 template beside the field, and `/resume` step 5 is required
+to render it. Without the field it was unenforceable prose, which is why the two
+ship together.
+
+### `## Defects (batched)` is deliberately NOT a canonical heading
+
+`CANONICAL_HEADING_PREFIXES` is what rule (h) uses to decide that a canonical
+section arriving NEW in an ESTABLISHED base is a tell for a wrong base. Adding
+`defects` to it would make the very first update that introduces the new section
+— which is every existing document, once — look like a stale-base tell. The
+heading is therefore an ordinary REPLACE section: a delta that omits it leaves
+it alone, and a delta that carries it replaces it, which is the behaviour a
+drainable list wants.
+
+### The DOD block does NOT raise a `!` gap — a measured correction
+
+`resume-state.sh`'s first version of the block raised a gap when a handoff
+declared no field. It fired on **every** run: 0 of 183 handoff docs across the
+two corpora carry one. A gap on every document turns the `!! GAPS` banner —
+whose only job is to tell a reader that what they just read is INCOMPLETE
+because a source did not answer — into furniture, which is
+`claude/RULES.md`'s permanently-red-gate objection wearing a different hat. It
+took **49 tests red in one run**, every one of them asserting the ordinary
+no-gap path.
+
+It was also the wrong CHANNEL by the script's own established rule. The
+`CLAWGATE` block already decides that a doc carrying no `clawgate-task:` field
+is not a gap — nothing was asked, so nothing went unanswered — and a document
+that declares no finish line is that same case. What replaced it is a 🔴 line in
+the DOD block's own section saying the question is UNANSWERABLE, which is
+explicitly not the same as unfinished.

@@ -639,8 +639,13 @@ class TestTheWriterStamps:
         env = _git_env(repo)
         subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, env=env)
         scratch = tmp_path / "delta.md"
+        # 🔴 THE `## Goal` IS NOT DECORATION — rule (m) refuses a NEW doc that
+        # names no closing condition, and this fixture creates one. Without the
+        # field the run exits 11 and never reaches the stamp this test is about.
         scratch.write_text(
-            doc_with("### A brand new claim\n- detail\n")
+            "## Goal\nProve the stamp lands in the diff.\n"
+            "- closing-condition: check — this test passes\n\n"
+            + doc_with("### A brand new claim\n- detail\n")
             + "\n## Next steps\n1. do the thing forcing: none\n",
             encoding="utf-8",
         )
