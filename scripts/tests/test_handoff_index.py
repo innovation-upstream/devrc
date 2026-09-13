@@ -6003,8 +6003,20 @@ class TestTheExclusionValueNormalisesOrSaysSo:
         assert "── relayrepo/widget-relay" in out, "an unknown slug must not filter"
 
 
-class TestABlankExclusionIsRefusedAtTheINPUT:
-    """🔴 THE LAST REACHABLE SPELLING OF THE SILENT NO-OP, MEASURED 2026-09-13.
+class TestAValueThatDerivesNoSlugIsRefusedAtTheINPUT:
+    """🔴 THE LAST SPELLING THAT DERIVES THE EMPTY SLUG, MEASURED 2026-09-13.
+
+    ⚠ NOT "the last silent no-op" — that wider sentence is false, and was
+    carried here for one round. A value that derives a NON-EMPTY slug matching
+    no row is still a no-op: it prints a confident `excluded=` and filters
+    nothing. That is deliberate — the class above pins it as
+    `test_an_unmatched_slug_still_says_what_it_excluded` (a doc may be
+    uncommitted or in another repo) — and it is reachable: `resume-state.sh`
+    prints `handoff: (none found — git-only)` and `claude/skills/resume/SKILL.md`
+    tells the caller to pass that printed value, which derives the non-empty slug
+    `'(none found — git-only)'` and sails through this guard. Benign — no doc was
+    loaded, so there is nothing to exclude — but it is a no-op this guard does
+    not close, so the claim is scoped to the EMPTY slug.
 
     `handoff_search.py --offline --query '…' --exclude-slug '  '` printed
     `indexed_docs=418 … in_scope_docs=418`, a scope line reading `excluded=` with
@@ -6027,8 +6039,9 @@ class TestABlankExclusionIsRefusedAtTheINPUT:
     scope — loudly this time, which is worse."""
 
     #: Every value argparse can hand `--exclude-slug` that derives no slug.
-    #: 🔴 The last two are NOT whitespace: they pin that the rule is the empty
-    #: SLUG, so a mutant narrowing the guard to `value.strip()` is killed.
+    #: 🔴 The last THREE are NOT whitespace (`claudedocs`, `claudedocs/`, `/`):
+    #: they pin that the rule is the empty SLUG, so a mutant narrowing the guard
+    #: to `value.strip()` is killed.
     UNUSABLE = ("", "  ", "\t", "\n", " \t\n ", "claudedocs", "claudedocs/", "/")
 
     def _repo(self, tmp_path):
@@ -6082,7 +6095,13 @@ class TestABlankExclusionIsRefusedAtTheINPUT:
         delete the feature while passing as its fix."""
         repo = self._repo(tmp_path)
         assert hs.main(self._base(repo)) == 0
-        assert "relayrepo/widget-relay" not in capsys.readouterr().out  # sanity: label is blankrepo
+        # 🔴 THE BASELINE, and it is what makes the `not in` below mean anything.
+        # This line used to assert `"relayrepo/widget-relay" not in …` — copied
+        # from the sibling class, whose fixture repo IS `relayrepo`. Ours is
+        # `blankrepo`, so that string could never appear and the assertion could
+        # not fail. Assert the doc IS returned before exclusion instead.
+        before = capsys.readouterr().out
+        assert "── blankrepo/widget-relay" in before, before
 
         rc = hs.main(self._base(repo) + ["--exclude-slug",
                                          "claudedocs/handoff-widget-relay.md"])

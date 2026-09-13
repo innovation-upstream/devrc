@@ -977,8 +977,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "you have not seen. Excludes that slug in EVERY repo — a "
                          "bare slug cannot say which. The exclusion is printed on "
                          "the scope line and counted in `in_scope_*`. A value that "
-                         "names no slug (blank, or nothing beyond `claudedocs/`) "
-                         "is a usage error, never a silent no-op")
+                         "names no slug — blank, or a bare prefix/affix with no "
+                         "topic left (`claudedocs`, `/`, `handoff-.md`) — is a "
+                         "usage error, never a silent no-op")
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                     help=f"maximum hits to return (>= {MIN_LIMIT})")
     ap.add_argument("--json", action="store_true")
@@ -996,9 +997,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     exclude = tuple(dict.fromkeys(exclusion_slug(v) for v in args.exclude_slug))
 
     # 🔴 A VALUE THAT NAMES NO SLUG IS REFUSED HERE, AT THE INPUT — it is the last
-    # reachable spelling of the silent no-op the path / bare-basename /
-    # trailing-space shapes each had, and the one normalisation cannot repair
-    # because there is nothing to derive. MEASURED: `--exclude-slug "  "` printed
+    # spelling that derives the EMPTY slug, the shape the path / bare-basename /
+    # trailing-space rounds each had, and the one normalisation cannot repair
+    # because there is nothing to derive. ⚠ NOT "the last silent no-op": a value
+    # that derives a NON-empty slug matching no row is still a no-op, and is
+    # deliberately allowed (`test_an_unmatched_slug_still_says_what_it_excluded`
+    # pins that an unknown slug must not filter) — `resume-state.sh`'s
+    # `(none found — git-only)` is exactly that, and passes this guard.
+    # MEASURED: `--exclude-slug "  "` printed
     # `excluded=` with nothing after it, left `in_scope_docs` equal to
     # `indexed_docs`, exited 0, and returned the very document the caller was
     # dropping. `claudedocs`, `/` and `handoff-.md` reach the same empty slug by a
@@ -1015,8 +1021,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if unusable:
         print(
             "handoff-search: --exclude-slug takes a slug or a doc path, and got a "
-            "value that names NO slug — blank, or nothing beyond a `claudedocs/` "
-            "prefix ("
+            "value that names NO slug — blank, or a bare prefix/affix with no topic "
+            "left (`claudedocs`, `/`, `handoff-.md`) ("
             + ", ".join(repr(v) for v in unusable)
             + "); it normalises to the EMPTY slug, which excludes NOTHING while "
               "printing a confident `excluded=` line and handing back the very "
