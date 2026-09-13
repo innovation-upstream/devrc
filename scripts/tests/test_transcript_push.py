@@ -1337,55 +1337,123 @@ def test_the_SNAPSHOT_pusher_triggers_on_the_host_identity_files_ITS_COLLECTOR_R
         "scripts/lib but does not declare them as restart triggers")
 
 
-def test_the_host_label_PROBE_ships_every_file_the_module_OPENS_BESIDE_ITSELF():
-    """🔴 THE FOURTH CONSUMER OF THE HOST-IDENTITY CHAIN, AND THE ONE WITH NO
-    LEDGER. The three tests above grade systemd units. `nix/home.nix` also
-    assembles a `hostLabelProbe` derivation — a flat store directory that
-    `home.activation.activityCollectorEnv` runs `host_label.py` out of — and
-    nothing pinned what it contains. That is the same "graded two and left the
-    third" shape, one layer over.
+def _activity_collector_unit_block() -> str:
+    """The activity-collector SERVICE block from nix/home.nix."""
+    text = HOME_NIX.read_text()
+    idx = text.index("systemd.user.services.activity-collector")
+    end = text.index("systemd.user.services", idx + 10)
+    return text[idx:end]
 
-    WHAT A MISSING SIBLING COSTS HERE IS SILENT AND DIRECTIONAL. `host_label.py`
-    locates `host-role.sh` NEXT TO ITSELF via `__file__`; with the sibling
-    dropped, `host_addrs()` takes an `OSError`, degrades to the nebula-only
-    `PEER_SSH` subset, and the activation still exits 0 — deriving the right
-    label whenever nebula is up, and quietly deriving NOTHING when it is not.
-    The probe's own comment in `nix/home.nix` says exactly this; a comment is a
-    claim, so here is the check.
 
-    DERIVED, NOT TYPED, by the same scanner the three ledgers above use: a second
-    address-table file added to `host_label.py` tomorrow fails here without
-    anyone editing this test.
+def test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS():
+    """🔴 THE FOURTH UNIT ON THE HOST-IDENTITY CHAIN, AND THE ONE THIS SAME FILE
+    WOULD HAVE LEFT UNLEDGERED AGAIN. The three tests above grade
+    transcript-push, tmux-reply-agent and tmux-snapshot-push. `collector.py` was
+    the ONE consumer that read `ACTIVITY_HOST` from the environment instead of
+    deriving it; now it loads `host_label.py` — which `open()`s `host-role.sh`
+    beside itself — so it acquired exactly the dependency the other three have,
+    and "graded N units and left the (N+1)th" is the pattern that produced every
+    finding in this family.
 
-    ⚠ SCOPE: the probe's CONTENTS, not the activation's behaviour. That the built
-    store directory really holds both files, byte-identical to the repo's, is
-    `test_host_label_identity.py::
-    test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files`.
+    WHAT A STALE ANSWER COSTS HERE IS THE WORST OF THE FOUR. This unit is
+    `Restart=always` and long-lived: a oneshot on a timer picks up new code at
+    its next tick, but a correction to the fleet's ADDRESS TABLE lands on disk
+    and this daemon keeps stamping EVERY shipped telemetry row from the old one
+    until something else restarts it. Both files are deployed as
+    symlinked-by-path store files, so the unit definition does not change on its
+    own — which is the same reason `collector.py` itself already needed a
+    trigger.
+
+    DERIVED, NOT TYPED, for the chain it covers: the daemon's own imports and
+    path-built filenames are read from ITS source, and the host-identity module's
+    path-opened files from ITS source, so a second address-table file added
+    tomorrow fails here without anyone editing this test.
+
+    ⚠ SCOPE, STATED AT THE WIDTH IT HOLDS — the HOST-IDENTITY chain, not every
+    dependency of this unit. `collector.py` is otherwise stdlib-only (measured
+    while writing this), so today the two sets coincide; that is a fact about
+    today's collector, not a property this test enforces.
+
+    INVARIANT GUARD on a declaration this branch adds — there is no `origin/main`
+    state in which it could have gone red, because the dependency did not exist
+    there. Its sensitivity is the mutation row `MUT-C4` in
+    `scripts/tests/mutants-host-label.sh`.
+    """
+    libdir = REPO_ROOT / "scripts" / "lib"
+    collector = REPO_ROOT / "scripts" / "collector" / "collector.py"
+
+    needed = {n for n in _lib_modules_a_python_file_imports(collector, libdir)
+              if n == "host_label.py"}
+    for name in sorted(needed):
+        needed |= _lib_files_a_python_file_BUILDS_A_PATH_TO(libdir / name, libdir)
+
+    # 🔴 TWO CONTROLS, one per direction of the scan. A reassuring `missing ==
+    # set()` is indistinguishable from a scanner that read nothing.
+    assert "host_label.py" in needed, (
+        "the scan of collector.py does not see the module that decides which "
+        "machine this is, so this ledger is measuring nothing")
+    assert "host-role.sh" in needed, (
+        f"the path-opened hop found nothing in {sorted(needed)} — host_label.py opens "
+        "scripts/lib/host-role.sh for the fleet's address table, and a scanner blind "
+        "to that is exactly how this dependency went undeclared on three units")
+
+    block = _activity_collector_unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the activity-collector unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./scripts/(?:lib|collector)/([^}]+)\}",
+                              m.group(1)))
+    assert "collector.py" in declared, (
+        f"the extracted block is not the collector unit's trigger list: {declared}")
+    missing = needed - declared
+    assert not missing, (
+        f"the activity-collector unit hard-depends on {sorted(missing)} from "
+        "scripts/lib but does not declare them as restart triggers — a Restart=always "
+        "daemon then keeps stamping every row from a stale address table")
+
+
+def test_the_host_identity_pair_is_DEPLOYED_beside_the_collector():
+    """🔴 A RESTART TRIGGER IS NOT A DEPLOYMENT, AND THE COLLECTOR NEEDS BOTH.
+    What runs on a host is `~/.config/activity-collector/collector.py` — a lone
+    flattened symlink into /nix/store with no `scripts/lib` anywhere near it. A
+    file that is not declared in `nix/home.nix` simply is not there: the switch
+    SUCCEEDS and the daemon silently degrades (it catches the ImportError by
+    design, because a collector that will not start is worse than a mislabelled
+    column). So the failure is invisible from the unit's status — exactly the
+    shape `test_collector_deploy_declares.py` exists for, one directory over.
+
+    BOTH FILES, and the second is the one with no `import` to find:
+    `host_label.py` locates `host-role.sh` next to itself by path. Ship the `.py`
+    alone and the module degrades to the nebula-only `PEER_SSH` subset — right on
+    the mesh, quietly non-deriving off it, exit 0 either way.
+
+    DERIVED from the module's own source, so a second address-table file added
+    tomorrow fails here.
+
+    INVARIANT GUARD on a declaration this branch adds; its sensitivity is
+    `MUT-C5` in `scripts/tests/mutants-host-label.sh`.
     """
     libdir = REPO_ROOT / "scripts" / "lib"
     needed = {"host_label.py"} | _lib_files_a_python_file_BUILDS_A_PATH_TO(
         libdir / "host_label.py", libdir)
-
-    # POSITIVE CONTROL: a reassuring `missing == set()` is indistinguishable from
-    # a scanner that read nothing.
     assert "host-role.sh" in needed, (
         f"the path-opened scan of host_label.py found {sorted(needed)} — it does "
         "not see the address table the module opens by path, so this ledger is "
         "measuring nothing")
 
     text = HOME_NIX.read_text()
-    start = text.index("hostLabelProbe = pkgs.runCommandLocal")
-    block = text[start:text.index("'';", start)]
-    copied = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", block))
-    assert copied, (
-        f"no scripts/lib file is copied into the host-label probe at all: {block!r}")
-
-    missing = needed - copied
+    declared = set(re.findall(
+        r'home\.file\."\.config/activity-collector/lib/([^"]+)"', text))
+    assert declared, (
+        "nix/home.nix deploys no scripts/lib file beside the collector at all")
+    missing = needed - declared
     assert not missing, (
-        f"nix/home.nix's hostLabelProbe copies {sorted(copied)} but host_label.py "
-        f"hard-depends on {sorted(missing)} beside itself. Without the sibling the "
-        "module degrades to the nebula-only PEER_SSH subset — correct on the mesh, "
-        "silently non-deriving off it, exit 0 either way")
+        f"nix/home.nix deploys {sorted(declared)} into "
+        f"~/.config/activity-collector/lib but collector.py's host-identity chain "
+        f"needs {sorted(missing)}. The switch will SUCCEED and the daemon will "
+        "quietly stop deriving its host label.")
+    for name in sorted(needed):
+        assert f"../scripts/lib/{name}" in text, (
+            f"the lib/{name} entry does not point at ../scripts/lib/{name}")
 
 
 def _lib_modules_a_python_file_imports(path, libdir):

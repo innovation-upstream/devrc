@@ -285,26 +285,6 @@ let
     mkdir -p "$out"
     python3 ${../scripts/opencode/generate-commands.py} ${../claude/skills} "$out"
   '';
-  # 🔴 THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", SIDE BY SIDE IN THE
-  # STORE. `home.activation.activityCollectorEnv` runs `host_label.py` to derive
-  # this host's ACTIVITY_HOST, and that module locates `host-role.sh` — the
-  # owner of the fleet's address table — NEXT TO ITSELF via `__file__`. A lone
-  # flattened store path for the `.py` would find no sibling and silently
-  # degrade to the nebula-only `PEER_SSH` subset, which is wrong exactly when
-  # nebula is down.
-  #
-  # TWO NAMED FILES RATHER THAN `${../scripts/lib}`, DELIBERATELY. Importing the
-  # directory works, and it also makes EVERY file under `scripts/lib` a nix-read
-  # STORE path — `scripts/lib/nix_read_paths.sh` resolves a directory token to
-  # the directory itself (measured), so `drift-check.sh` and `ship.sh` would
-  # start reporting untracked files there as dirty-in-artifact on both hosts.
-  # This spelling changes neither instrument: both files are already nix-read
-  # individually, as restart triggers.
-  hostLabelProbe = pkgs.runCommandLocal "devrc-host-label-probe" { } ''
-    mkdir -p "$out"
-    cp ${../scripts/lib/host_label.py} "$out/host_label.py"
-    cp ${../scripts/lib/host-role.sh} "$out/host-role.sh"
-  '';
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
@@ -769,46 +749,16 @@ in
   # laptop's real file had at some point been hand-edited to `laptop`; a
   # reinstall, a new machine, or `rm`ing that file arms it.
   #
-  # So the label is DERIVED here rather than templated — by the SAME module every
-  # consumer reads, which is why this is one source of truth rather than a third
-  # copy of the rule. It runs out of `hostLabelProbe` (see the `let` block) so
-  # that `host-role.sh` sits beside it in the store — read that binding's comment
-  # before changing how the module is located here.
-  #
-  # IDEMPOTENT AND NON-CLOBBERING, both halves deliberately:
-  #   * the template copy still only happens when the file is ABSENT;
-  #   * the label is only ever APPENDED, and only when the file states no valid
-  #     one — a hand-edited value is never touched, never rewritten, never
-  #     re-derived over.
-  # A machine that cannot identify itself right now (off-network at switch time)
-  # gets NOTHING rather than a guess, with a printed reason; the next switch
-  # tries again, because the missing-label condition is still true.
-  #
-  # 🔴 "NON-CLOBBERING" WAS A CLAIM ABOUT THE LINE, NOT ABOUT THE FILE, AND THE
-  # FILE IS WHAT MATTERS. An `>>` onto a file whose last line has NO trailing
-  # newline does not add a line — it EXTENDS the last one. Measured:
-  #     before  CLICKHOUSE_PASSWORD=s3cret          (no trailing newline)
-  #     after   CLICKHOUSE_PASSWORD=s3cretACTIVITY_HOST=workbench
-  # This file is a systemd `EnvironmentFile=` (see the activity-collector unit
-  # below), so that mangles the credential the collector authenticates with — it
-  # 401s and telemetry stops silently — and had the last line been
-  # `ACTIVITY_HTTP_TIMEOUT`, `float()` would raise and the collector would not
-  # start at all. It also appends AGAIN on every later switch, because the
-  # mangled line no longer states a label. Reachable by the path this repo's own
-  # `SECRETS.md` prescribes: provision off-mesh (no label appended), hand-edit
-  # `CLICKHOUSE_PASSWORD` in, switch again on-mesh. Hence the newline guard
-  # below — do not remove it because "the file always ends in a newline"; the
-  # operator's editor is what decides that, not us.
-  #
-  # 🔴 AND THE "STATES NO VALID LABEL" QUESTION IS THE MODULE'S TO ANSWER. This
-  # block used to answer it with its own `grep -qE '^[ ]*ACTIVITY_HOST=[^ ]'` —
-  # a THIRD copy of the rule `scripts/lib/host_label.py` exists because it was
-  # open-coded twice and drifted. The two disagreed on four real inputs (a
-  # TAB-indented line, `ACTIVITY_HOST= laptop`, an invalid value, an `export`
-  # prefix), each producing either a duplicate contradicting line or a permanent
-  # false "could not derive" message on a healthy host. So it ASKS, via
-  # `--file-states-label` on the same entry point the derive step already runs.
-  # Do NOT re-introduce a grep here, however careful — that is the defect.
+  # 🔴 AND NOTHING WRITES A LABEL IN HERE, DELIBERATELY. An earlier revision of
+  # #1601 derived the label at activation time and APPENDED it to this file. That
+  # is a write into a systemd `EnvironmentFile=` holding a credential, and it
+  # produced its own data-loss defect (an `>>` onto a file whose last line had no
+  # trailing newline EXTENDED that line, mangling `CLICKHOUSE_PASSWORD`). It was
+  # only ever needed because `scripts/collector/collector.py` was the ONE consumer
+  # that read the label from the environment instead of deriving it. The collector
+  # derives now — see its `_derive_host_label`, and the `lib/` files deployed
+  # beside it below — so this block is back to the one thing it should do: create
+  # the file if it is absent. Do NOT re-introduce a write here.
   home.activation.activityCollectorEnv = lib.hm.dag.entryAfter ["writeBoundary"] ''
     envFile="$HOME/.config/activity-collector/env"
     if [ ! -e "$envFile" ]; then
@@ -816,46 +766,6 @@ in
       cp ${../scripts/collector/.env.example} "$envFile"
       chmod 600 "$envFile"
       echo "activity-collector: seeded $envFile from .env.example (edit to add CLICKHOUSE_PASSWORD)"
-    fi
-    # Exit 0 = the file already states a valid label (the operator's, or ours
-    # from an earlier switch) and is left alone. Exit 1 = it states none.
-    # stdout is the label and is not wanted here; stderr is NOT swallowed, so a
-    # broken module is visible rather than read as "states none".
-    if ! ${pkgs.python3}/bin/python3 ${hostLabelProbe}/host_label.py --file-states-label "$envFile" >/dev/null; then
-      if [ ! -w "$envFile" ]; then
-        # 🔴 SAY SO. A root-owned or chmod-400 env file used to be skipped in
-        # TOTAL silence — rc 0, no output — leaving ACTIVITY_HOST unset with no
-        # signal that anything had been declined.
-        echo "activity-collector: $envFile states no ACTIVITY_HOST and is not writable — left untouched; set ACTIVITY_HOST there by hand"
-      else
-        # host_label.py exits non-zero with a reason on stderr and prints NOTHING
-        # on stdout when it cannot name this machine — so an empty `derived` is
-        # the refusal, and a non-empty one is a label the machine's own address
-        # backs. 🔴 THE REASON IS FORWARDED, NOT DISCARDED: `2>/dev/null` plus a
-        # generic "re-run the switch on-network" asserted a cause this block has
-        # not distinguished, and printed it forever on an on-network host whose
-        # real problem was a `HostLabelConflict` that re-running cannot fix.
-        labelErr="$(${pkgs.coreutils}/bin/mktemp)"
-        if derived="$(${pkgs.python3}/bin/python3 ${hostLabelProbe}/host_label.py 2>"$labelErr")" \
-           && [ -n "$derived" ]; then
-          # THE NEWLINE GUARD — see the block comment above. `$(…)` strips
-          # trailing newlines, so a last byte of "\n" reads as empty here and a
-          # last byte of anything else reads as non-empty.
-          if [ -s "$envFile" ] && [ -n "$(${pkgs.coreutils}/bin/tail -c 1 "$envFile")" ]; then
-            printf '\n' >> "$envFile"
-          fi
-          printf 'ACTIVITY_HOST=%s\n' "$derived" >> "$envFile"
-          echo "activity-collector: derived ACTIVITY_HOST=$derived into $envFile"
-        else
-          reason="$(${pkgs.coreutils}/bin/tr '\n' ' ' < "$labelErr")"
-          if [ -z "$reason" ]; then
-            reason="host_label.py failed without a message"
-          fi
-          echo "activity-collector: $envFile states no ACTIVITY_HOST and this machine's label could not be derived: $reason"
-          echo "activity-collector: set ACTIVITY_HOST in $envFile by hand, or resolve the reason above and re-run the switch"
-        fi
-        ${pkgs.coreutils}/bin/rm -f "$labelErr"
-      fi
     fi
   '';
 
@@ -1318,6 +1228,33 @@ in
     source = ../scripts/collector/collector.py;
     executable = true;
   };
+  # 🔴 THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", DEPLOYED BESIDE THE
+  # DAEMON THAT ASKS. Since #1601 the collector DERIVES `ACTIVITY_HOST` when the
+  # environment states none, instead of falling back to emit's `$(hostname)` —
+  # which is `nixos` on BOTH machines, i.e. a collision, not a label. It loads
+  # `scripts/lib/host_label.py` from a `lib/` dir next to itself, because what
+  # runs on a host is `~/.config/activity-collector/collector.py`, a lone
+  # flattened symlink with no `scripts/lib` anywhere near it. Same reason
+  # `changed_paths.py` and `mention_scan.py` need their own entries above.
+  #
+  # BOTH FILES, NOT JUST THE `.py`. `host_label.py` locates `host-role.sh` — the
+  # owner of the fleet's address table — NEXT TO ITSELF via `__file__`, with no
+  # `import` to find. Ship the module alone and it degrades SILENTLY to the
+  # nebula-only `PEER_SSH` subset: right on the mesh, quietly non-deriving off
+  # it, exit 0 either way. Pinned by
+  # `scripts/collector/tests/test_collector.py::test_the_DEPLOYED_symlink_layout_
+  # can_derive_the_host_label` and by the restart-trigger ledger in
+  # `scripts/tests/test_transcript_push.py`.
+  #
+  # TWO NAMED FILES RATHER THAN `${../scripts/lib}`, DELIBERATELY. Importing the
+  # directory works, and it also makes EVERY file under `scripts/lib` a nix-read
+  # STORE path — `scripts/lib/nix_read_paths.sh` resolves a directory token to
+  # the directory itself (measured), so `drift-check.sh` and `ship.sh` would
+  # start reporting untracked files there as dirty-in-artifact on both hosts.
+  home.file.".config/activity-collector/lib/host_label.py".source =
+    ../scripts/lib/host_label.py;
+  home.file.".config/activity-collector/lib/host-role.sh".source =
+    ../scripts/lib/host-role.sh;
   # Shared by BOTH session summarisers (claude/session-tailer.py and
   # opencode/session_tailer.py) — the one definition of the `changed_paths*`
   # payload block. It must land at the collector ROOT, beside collector.py,
@@ -2548,7 +2485,22 @@ in
       # code edit alone leaves the daemon running STALE code until a manual
       # `systemctl --user restart`. Pinning the script's store path here makes the
       # unit definition change whenever the code changes → switch restarts it.
-      X-Restart-Triggers = [ "${../scripts/collector/collector.py}" ];
+      #
+      # 🔴 AND THE HOST-IDENTITY PAIR, FOR THE SAME REASON AND WITH A WORSE
+      # CONSEQUENCE. Since #1601 the collector loads `host_label.py` (which
+      # `open()`s `host-role.sh` beside itself) to derive `ACTIVITY_HOST` when the
+      # environment states none. Both are deployed as symlinked-by-path store
+      # files, so without these lines a correction to the fleet's ADDRESS TABLE
+      # lands on disk while this `Restart=always` daemon keeps stamping every
+      # shipped row from the OLD one — and `host-role.sh` is the half no import
+      # scanner can see. Pinned, DERIVED not typed, by
+      # `scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_
+      # triggers_on_the_host_identity_files_IT_LOADS`.
+      X-Restart-Triggers = [
+        "${../scripts/collector/collector.py}"
+        "${../scripts/lib/host_label.py}"
+        "${../scripts/lib/host-role.sh}"
+      ];
     };
     Install = {
       WantedBy = [ "default.target" ];

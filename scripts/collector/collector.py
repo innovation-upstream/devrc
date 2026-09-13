@@ -57,6 +57,85 @@ from pathlib import Path
 
 LOG = logging.getLogger("activity-collector")
 
+# --------------------------------------------------------------------------- #
+# WHICH MACHINE IS THIS (#1601)
+# --------------------------------------------------------------------------- #
+#: 🔴 THE COLLECTOR WAS THE ONE CONSUMER THAT DID NOT DERIVE. Every other reader
+#: of the fleet's host label — `transcript-push.sh`, `tmux-reply-agent`,
+#: `session-manager`, `peer-host`, `espanso-usage.py` — goes through
+#: `scripts/lib/host_label.py`, which since #1601 identifies this machine from an
+#: address it actually HOLDS rather than defaulting to the literal `"workbench"`.
+#: This file read `ACTIVITY_HOST` out of the environment and, absent, fell back
+#: to `""` — under which `parse_line` leaves emit's `host=$(hostname)` standing,
+#: and `hostname` is **`nixos` on BOTH machines**. So a host with no stated label
+#: shipped every telemetry row under a name that collides with the other box.
+#:
+#: That gap is why the first cut of #1601 had to WRITE a label into
+#: `~/.config/activity-collector/env` from a home-manager activation — a write
+#: into a systemd `EnvironmentFile=` holding a credential, which promptly ate the
+#: previous line of one. Deriving here deletes the reason for the write.
+#:
+#: WHERE THE MODULE LIVES, IN THE TWO LAYOUTS THIS FILE RUNS IN:
+#:   repo      `scripts/collector/collector.py`      -> `scripts/lib/`
+#:   deployed  `~/.config/activity-collector/collector.py` -> `…/activity-collector/lib/`
+#: The deployed pair is placed there by `nix/home.nix` (`home.file` entries next
+#: to the one for this script); read that comment before changing either spelling.
+#:
+#: 🔴 `abspath`, NEVER `realpath`/`.resolve()`. The deployed copy is a SYMLINK
+#: into /nix/store; resolving it walks out of `~/.config/activity-collector` and
+#: loses the sibling entirely. The session tailers are pinned to the same rule by
+#: `scripts/tests/test_collector_deploy_declares.py::
+#: test_the_tailers_do_not_resolve_symlinks_when_locating_the_root`.
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+HOST_LABEL_LIB_DIRS = (
+    os.path.join(os.path.dirname(_SELF_DIR), "lib"),   # repo:     scripts/lib
+    os.path.join(_SELF_DIR, "lib"),                    # deployed: …/lib
+)
+
+
+def _load_host_label():
+    """Import `scripts/lib/host_label.py` from whichever layout we are in."""
+    for libdir in HOST_LABEL_LIB_DIRS:
+        if os.path.isfile(os.path.join(libdir, "host_label.py")):
+            if libdir not in sys.path:
+                sys.path.insert(0, libdir)
+            break
+    import host_label  # noqa: PLC0415 — deliberately lazy; see _derive_host_label
+    return host_label
+
+
+def _derive_host_label(env) -> str:
+    """This machine's label, or `""` when it cannot be determined.
+
+    🔴 IT MUST DEGRADE, NEVER CRASH, AND THAT IS NOT A STYLE PREFERENCE. This is
+    a `Restart=always` systemd daemon and it is the ONLY thing that drains the
+    spool: a collector that refuses to start does not mislabel telemetry, it
+    STOPS it, on every host, until someone notices. `host_label.local_host_label`
+    raises by design — correct for `peer-host`, which routes work and must not
+    guess — but here the honest fallback already exists and is strictly better
+    than dying: an empty `host_override` leaves emit's own `host=` in place.
+    That is the behaviour every release before #1601 had.
+    So: BROAD `except Exception`. Not just `HostLabelError` — a missing or broken
+    `lib/` beside the deployed copy raises `ImportError`, and a future signal
+    added to the module could raise anything at all. `BaseException` is
+    deliberately NOT caught: `KeyboardInterrupt` and `SystemExit` must still stop
+    the process.
+
+    The reason is logged ONCE (this runs once, from `Config.from_env`), at
+    WARNING, naming the exception type — an operator reading the journal needs to
+    tell "this box is off the mesh" from "the deploy is missing a file".
+    """
+    try:
+        return _load_host_label().local_host_label(env=env)
+    except Exception as exc:  # noqa: BLE001 — see the docstring; never crash here
+        LOG.warning(
+            "could not derive this host's ACTIVITY_HOST label (%s: %s) — shipping "
+            "with emit's own host value, which is `nixos` on both machines. Set "
+            "ACTIVITY_HOST in ~/.config/activity-collector/env to fix the column.",
+            type(exc).__name__, exc,
+        )
+        return ""
+
 # Columns that map straight to ClickHouse `activity.events` table columns.
 # Everything NOT in here (and not `ts`/`host`) is bundled into `payload` JSON.
 STRING_COLS = {
@@ -93,7 +172,9 @@ class Config:
     max_buffer_age_seconds: float = 7 * 24 * 3600
     http_timeout: float = 10.0
     # Per-host label. Both machines are hostname `nixos`, so emit's host=$(hostname)
-    # collides — set ACTIVITY_HOST=workbench/laptop per host to disambiguate.
+    # collides — ACTIVITY_HOST disambiguates. Stated in the environment it wins;
+    # absent, `from_env` DERIVES it (see `_derive_host_label`) rather than leaving
+    # this empty, which is what let `nixos` through before #1601.
     host_override: str = ""
 
     @classmethod
@@ -114,7 +195,12 @@ class Config:
                 e.get("ACTIVITY_MAX_BUFFER_AGE_SECONDS", cls.max_buffer_age_seconds)
             ),
             http_timeout=float(e.get("ACTIVITY_HTTP_TIMEOUT", cls.http_timeout)),
-            host_override=e.get("ACTIVITY_HOST", cls.host_override),
+            # 🔴 STATED WINS, ABSENT DERIVES. `or` rather than a `.get` default:
+            # the env file is systemd-sourced, so a present-but-EMPTY
+            # `ACTIVITY_HOST=` is the same "says nothing" as an absent one, and
+            # the old `e.get(..., "")` treated it as a stated value.
+            host_override=(e.get("ACTIVITY_HOST", "").strip()
+                           or _derive_host_label(e)),
         )
 
     @property

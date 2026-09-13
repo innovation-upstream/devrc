@@ -490,42 +490,17 @@ if __name__ == "__main__":
     # captured as the host NAME by `HOST_NAME="$(python3 …)"`, so the message
     # goes to stderr and nothing else is printed.
     #
-    # 🔴 `--file-states-label [FILE]` — THE SAME RULE, ASKED AS A QUESTION, AND IT
-    # EXISTS SO THAT NOBODY RE-SPELLS IT. `nix/home.nix`'s
-    # `home.activation.activityCollectorEnv` has to decide "does this env file
-    # already state a valid ACTIVITY_HOST?" before it appends one. It used to
-    # answer that with its OWN grep (`^[ ]*ACTIVITY_HOST=[^ ]`) — a THIRD copy of
-    # a rule this module exists because it was open-coded twice and drifted. The
-    # two disagreed on four real inputs, each with its own consequence: an
-    # invalid `ACTIVITY_HOST=nixos` (grep: stated, module: ignored → never
-    # repaired), a TAB-indented line and `ACTIVITY_HOST= laptop` (grep: none,
-    # module: valid → a duplicate append and a permanent, false "could not
-    # derive" message), and `export ACTIVITY_HOST=…` (grep: none, module:
-    # ignored → a second, contradicting line). Making the grep cleverer would
-    # have minted a fourth spelling in a third language; asking here collapses
-    # the table by construction.
-    #
-    # Exit 0 and print the label when the file states a VALID one; exit 1,
-    # printing nothing, when it does not. Deliberately the FILE only — the
-    # caller is deciding what to write INTO that file, so `ACTIVITY_HOST` in the
-    # switch's own environment is not the question being asked.
-    _argv = sys.argv[1:]
-    if _argv:
-        if _argv[0] != "--file-states-label" or len(_argv) > 2:
-            sys.stderr.write(
-                "host_label: usage: host_label.py [--file-states-label [FILE]]\n")
-            raise SystemExit(2)
-        _path = _argv[1] if len(_argv) == 2 else ACTIVITY_ENV
-        try:
-            with open(_path, "r", encoding="utf-8", errors="replace") as _fh:
-                _body = _fh.read()
-        except OSError:
-            _body = ""
-        _stated = _file_stated_label(_body)
-        if not _stated:
-            raise SystemExit(1)
-        print(_stated)
-        raise SystemExit(0)
+    # 🔴 NO SUBCOMMANDS, AND THAT IS A DELETION RATHER THAN AN OMISSION. An
+    # earlier revision of #1601 added `--file-states-label`, so that
+    # `nix/home.nix`'s `home.activation.activityCollectorEnv` could ask "does
+    # this env file already state a valid label?" before APPENDING one. That
+    # activation is gone — the collector derives its own label now instead of
+    # having one written into a systemd `EnvironmentFile=` for it — and with it
+    # the only caller. Public surface on a module six things import is not free:
+    # it is read as supported, so it is removed rather than left standing.
+    if sys.argv[1:]:
+        sys.stderr.write("host_label: usage: host_label.py (no arguments)\n")
+        raise SystemExit(2)
     try:
         print(local_host_label())
     except HostLabelError as exc:
