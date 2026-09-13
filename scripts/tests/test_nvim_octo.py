@@ -416,14 +416,31 @@ def _run_wrapper(tmp_path: Path, *args: str):
     # NOT by any dev-host run of this file: `/usr/bin/env` resolves on the
     # workbench, so the stub executed and every test here was green while the
     # sandbox tier could not have run them at all.
-    write_exec(bindir / "nvim", f'printf "%s\\n" "$@" > {log}\nexit 0\n')
+    # 🔴 THE STUB RECORDS THE ENVIRONMENT AS WELL AS argv, because the wrapper's
+    # hermeticity is carried by an EXPORTED VARIABLE and not by an argument. A
+    # stub that only logs `"$@"` is structurally blind to it: `NVIM_APPNAME`
+    # could be deleted from the wrapper and every assertion here would stay
+    # green. `_appname` below is what makes that observable.
+    envlog = tmp_path / "nvim-env"
+    write_exec(bindir / "nvim",
+               f'printf "%s\\n" "$@" > {log}\n'
+               f'printf "%s" "${{NVIM_APPNAME-<UNSET>}}" > {envlog}\n'
+               f'exit 0\n')
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    # 🔴 A DELIBERATELY WRONG INHERITED VALUE, NOT AN ABSENT ONE. If the harness
+    # left `NVIM_APPNAME` unset, a wrapper that merely failed to unset something
+    # would be indistinguishable from one that exports the right name. Seeding a
+    # value the wrapper MUST override means the assertion can only pass if the
+    # wrapper actually wrote it — and this string cannot be confused with the
+    # expected one or with `<UNSET>`.
+    env["NVIM_APPNAME"] = "inherited-from-the-display-manager"
     assert _BASH, "bash is not on PATH — this harness cannot run the wrapper"
     proc = subprocess.run(
         [_BASH, "-euo", "pipefail", str(WRAPPER_SH), *args],
         capture_output=True, text=True, env=env, timeout=60)
     argv = log.read_text().splitlines() if log.exists() else []
-    return proc, argv
+    appname = envlog.read_text() if envlog.exists() else None
+    return proc, argv, appname
 
 
 def test_a_good_invocation_composes_the_NUMBER_FIRST_ex_command(tmp_path):
@@ -437,7 +454,7 @@ def test_a_good_invocation_composes_the_NUMBER_FIRST_ex_command(tmp_path):
     The fixtures are pairwise distinct and distinct from every constant the
     assertion names, so a mutant hardcoding a literal cannot survive.
     """
-    proc, argv = _run_wrapper(tmp_path, "gardenersguild/trowelcast", "1559")
+    proc, argv, _appname = _run_wrapper(tmp_path, "gardenersguild/trowelcast", "1559")
     assert proc.returncode == 0, proc.stderr
     assert argv == ["-c", "Octo 1559 gardenersguild/trowelcast"], argv
 
@@ -451,7 +468,7 @@ def test_a_number_is_passed_rather_than_a_url(tmp_path):
     this test asserted only that `http` and `/pull/` were ABSENT from the argv,
     which an EMPTY argv satisfies — and an empty argv is what a missing wrapper
     produces. Pin what was passed, then observe what it is not."""
-    proc, argv = _run_wrapper(tmp_path, "rivalorg/spadeworks", "42")
+    proc, argv, _appname = _run_wrapper(tmp_path, "rivalorg/spadeworks", "42")
     assert proc.returncode == 0, proc.stderr
     assert argv == ["-c", "Octo 42 rivalorg/spadeworks"], argv
     assert "http" not in " ".join(argv), argv
@@ -483,7 +500,7 @@ def test_a_bad_repository_is_REJECTED_and_nvim_is_never_reached(tmp_path, repo):
     THIS guard's own exit code, THIS guard's own message, and no editor. An exit
     code alone would be satisfied by a wrapper that launched first and
     complained after — or by no wrapper at all."""
-    proc, argv = _run_wrapper(tmp_path, repo, "1559")
+    proc, argv, _appname = _run_wrapper(tmp_path, repo, "1559")
     assert proc.returncode == RC_BAD_REPO, (proc.returncode, proc.stderr)
     assert "not an owner/repo" in proc.stderr, proc.stderr
     assert argv == [], argv
@@ -497,7 +514,7 @@ def test_a_bad_number_is_REJECTED_and_nvim_is_never_reached(tmp_path, num):
     otherwise be green for the wrong reason if the NUMBER guard was the one that
     fired. Distinct codes plus distinct messages make each guard's kill
     attributable to itself."""
-    proc, argv = _run_wrapper(tmp_path, "gardenersguild/trowelcast", num)
+    proc, argv, _appname = _run_wrapper(tmp_path, "gardenersguild/trowelcast", num)
     assert proc.returncode == RC_BAD_NUM, (proc.returncode, proc.stderr)
     assert "not a reference number" in proc.stderr, proc.stderr
     assert argv == [], argv
@@ -511,7 +528,7 @@ def test_the_wrong_number_of_arguments_is_REJECTED(tmp_path, args):
     says nothing about usage — and with `set -e` it is still non-zero, so a test
     asserting only the exit code would pass while the operator got
     `nvim-octo.sh: line 23: $1: unbound variable`."""
-    proc, argv = _run_wrapper(tmp_path, *args)
+    proc, argv, _appname = _run_wrapper(tmp_path, *args)
     assert proc.returncode == RC_USAGE, (proc.returncode, proc.stderr)
     assert argv == []
     assert "usage:" in proc.stderr, proc.stderr
@@ -530,7 +547,7 @@ def test_real_shaped_repository_names_are_ACCEPTED(tmp_path, repo):
     which is the instrument-validation trap RULES.md names. Dots, dashes,
     underscores and mixed case all occur in these owners' real repository
     names."""
-    proc, argv = _run_wrapper(tmp_path, repo, "7")
+    proc, argv, _appname = _run_wrapper(tmp_path, repo, "7")
     assert proc.returncode == 0, proc.stderr
     assert argv == ["-c", f"Octo 7 {repo}"], argv
 
@@ -543,3 +560,47 @@ def test_the_wrapper_text_carries_no_shebang_and_no_set_line():
     text = WRAPPER_SH.read_text(encoding="utf-8")
     assert not text.startswith("#!"), text.splitlines()[:1]
     assert not re.search(r"^\s*set\s+-", text, re.M), text
+
+
+def test_the_wrapper_ISOLATES_neovims_app_namespace(tmp_path):
+    """🔴 REGRESSION COVERAGE for a MEASURED breakage, not a hypothetical.
+
+    Selecting a row in the mention picker opened a review buffer that errored with
+    `module 'lyaml' not found`. The trace named
+    `~/.local/share/nvim/site/pack/packer/start/qdr.nvim/lua/qdr-nvim/qdr.lua:2` —
+    a PACKER-INSTALLED PLUGIN OF THE OPERATOR'S, loaded into this wrapper because
+    neovim's default `packpath` includes that site directory whatever `-u` says.
+    Their daily editor supplies the rock, this derivation does not.
+
+    🔴 THE FIX IS NOT THE MISSING ROCK, AND THAT IS WHY THIS GUARD PINS THE
+    NAMESPACE RATHER THAN A DEPENDENCY. Adding `lyaml` would make that one plugin
+    load successfully inside a review TUI with no business running it, and leave
+    every other plugin in that directory able to break the review surface on the
+    next unrelated editor change. `default.nix` claims the plugin set "cannot be
+    changed by an edit to an editor config, and it cannot be broken by one
+    either"; `NVIM_APPNAME` is what makes that claim true.
+
+    ⚠ WHAT THIS DOES AND DOES NOT ESTABLISH. It proves the wrapper EXPORTS the
+    variable — observable because the stub records its own environment. It does
+    NOT prove neovim honours it; that was measured by hand against the built
+    derivation (headless load silent, `require("octo")` true, `exists(":Octo")`
+    == 2) and is recorded in the PR, not asserted here, because asserting it
+    needs a nix build and a real editor.
+
+    The harness seeds a WRONG inherited value, so this can only pass if the
+    wrapper actually wrote its own — an absent variable would be satisfied by a
+    wrapper that merely failed to unset something.
+    """
+    proc, argv, appname = _run_wrapper(tmp_path, "gardenersguild/trowelcast", "1559")
+    assert proc.returncode == 0, proc.stderr
+    assert argv, "nvim was never reached, so the environment proves nothing"
+    assert appname == "nvim-octo", (
+        "the wrapper handed neovim NVIM_APPNAME=%r. It must export "
+        "'nvim-octo' so neovim reads ~/.local/share/nvim-octo/site instead of "
+        "the operator's ~/.local/share/nvim/site — otherwise their packer "
+        "plugins load into the review TUI and break it (measured: qdr.nvim "
+        "requiring 'lyaml', which this derivation does not ship). %s"
+        % (appname,
+           "The harness seeded a deliberately wrong value, so this is what the "
+           "wrapper wrote." if appname != "<UNSET>" else
+           "'<UNSET>' means the wrapper unset it rather than setting it."))
