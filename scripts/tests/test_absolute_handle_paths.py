@@ -25,8 +25,12 @@ later half armed.
 ⚠ This sentence read "21 occurrences across 9 files" until it was re-derived;
 that pair reproduces under no framing tried -- not the parent commit with this
 module, not the parent with the module as first committed (30/14), not the set
-`98aa68b7` actually fixed (28/13). The figures above are stated against a NAMED
-ref precisely so the next reader can re-run rather than inherit.
+`98aa68b7` actually fixed (28/13). ⚠ Those two are NOT a third and fourth
+quantity that coincidentally match the split above: the module AS FIRST
+COMMITTED had only the absolute half, so running it over that tree measures
+exactly the absolute subset. One set, reachable three ways. The figures above
+are stated against a NAMED ref precisely so the next reader can re-run rather
+than inherit.
 
 🔴 THIS IS A SPELLING GATE, NOT A RESOLUTION GATE -- and that is deliberate
 ------------------------------------------------------------------------------
