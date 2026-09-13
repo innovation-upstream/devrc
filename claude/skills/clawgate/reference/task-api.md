@@ -264,18 +264,23 @@ and **no login QR to manage**.
 - **Phone / public** → `https://clawgate.zacx.dev`, pass the **Authelia passkey** at
   `https://login.zacx.dev` (user `zach`, already enrolled). Authelia owns auth/SSO now — manage it
   there, not in clawgate. Memory `authelia-passkey-sso`.
-- **LAN** → `http://192.168.50.250:30302` or `clawgate.workbench.lan` — open, no auth.
+- **LAN** → `http://192.168.50.250:30302` or `clawgate.workbench.lan` — 🔴 **NOT open: the human UI
+  needs a session** (measured 2026-09-12, `/tasks/1` → `303` → `/login`). The machine `/api/*` door
+  still takes the hook token. This bullet said "open, no auth" and was wrong.
 - **Which endpoints take the hook token is now enumerated exhaustively** — see "The complete
   machine surface" at the bottom of this file, derived from the checked-in route golden. Never
   hand-list it from memory: this bullet used to name seven routes out of fifteen, and that partial
   list is how `GET /api/agents` stayed invisible for months.
 - 🔴 **The `/api/` prefix does NOT mean "needs the token."** `/api/requests`,
-  `/api/openrouter/models`, `/api/push/*` and `/api/auto-approve*` sit behind the no-op
-  `requireSession` and are **wide open on the LAN NodePort** — and `POST /api/auto-approve` is
-  state-changing on the open side.
-- 🔴🔴 **`POST /api/auto-approve-all` is the most consequential switch in the app, and it is
-  unauthenticated on the LAN** (`internal/api/server.go:325`, wrapped in the no-op `requireSession`;
-  handler at `:1105`). It accepts **either** a form body or JSON — `enabled` (`true`/`1`/`on`) plus
+  `/api/openrouter/models`, `/api/push/*` and `/api/auto-approve*` sit behind **`requireSession`** —
+  a DIFFERENT credential from the hook token, not a weaker one. ⚠ This said they were "wide open on
+  the LAN NodePort" because `requireSession` was a no-op; **that is retracted — it enforces now**
+  (`internal/api/auth.go:210-232`), measured 2026-09-12. The point the bullet was making SURVIVES:
+  a hook token gets you nowhere on these, so "my token works" proves nothing about them.
+- 🔴🔴 **`POST /api/auto-approve-all` is the most consequential switch in the app** (`server.go:599`,
+  wrapped in `requireSession`; handler at `:1105`). ⚠ It was described here as "unauthenticated on
+  the LAN" — **no longer true**, it now needs a session. It is still the most dangerous switch in
+  the app and 🔴 **must never be fired to test a theory.** It accepts **either** a form body or JSON — `enabled` (`true`/`1`/`on`) plus
   `duration` (the UI offers 1h / 8h / 24h). Enabling it does **two** things, and the second is the
   one people miss:
   1. arms a **single global window** that auto-approves every *future* request **in every project**
@@ -298,13 +303,26 @@ and **no login QR to manage**.
 - 🔴 **`/operator/*` is a THIRD credential** — `requireOperatorToken` demands the reserved Operator
   *agent's* hooks token, not the hook token, which gets `401 {"error":"not the operator"}`. It
   covers **11 of the 13** `/operator*` routes; `GET /operator` and `POST /operator/provision` are
-  `requireSession`, i.e. open on the LAN.
-- Everything else (the UI, `/ui/*`) is OPEN — behind Authelia publicly, directly reachable on the
-  LAN. The hook never has a cookie; the UI never calls `/api/response/{id}`.
-- 🔴 **"session auth" is not auth**: `requireSession` is a literal pass-through no-op since 0.7.37
-  (`internal/api/auth.go`), so **everything on the LAN NodePort is unauthenticated — including
-  `DELETE /tasks/{id}`**. And `requireHookToken` is **enforce-when-set**: with `CLAWGATE_HOOK_TOKEN`
-  empty the machine endpoints are wide open too.
+  `requireSession` — which now means **gated**, not open (see below).
+- Everything else (the UI, `/ui/*`) is behind `requireSession`: Authelia **plus** that session
+  publicly, and that session alone on the LAN. The hook never has a cookie; the UI never calls
+  `/api/response/{id}`.
+- 🔴 **RETRACTED 2026-09-12 — `requireSession` ENFORCES; do not re-derive the old claim.** This read
+  *""session auth" is not auth: `requireSession` is a literal pass-through no-op since 0.7.37, so
+  everything on the LAN NodePort is unauthenticated — including `DELETE /tasks/{id}`."* Both halves
+  are wrong, in opposite directions:
+  - `requireSession` is not a pass-through (`internal/api/auth.go:210-232`: `BrowserAuthRefusal` →
+    `hasValidSession` → `refuseUnauthenticated`). Measured: `/tasks/1` → `303` → `/login`,
+    credential-less `POST /agents` → `401`.
+  - `DELETE /api/tasks/{id}` was never behind `requireSession` at all — it is **`requireHookToken`**
+    (`server.go:699`). So the destructive route the sentence named is gated by the ONE credential
+    every agent on this box already holds, which is worse than the sentence implied, not better.
+  🔴 **The durable lesson, which is why this is written out rather than deleted: the two doors take
+  DIFFERENT credentials, so a working hook token is not evidence the UI is reachable, and a reachable
+  UI is not evidence the machine door is open.** Proving one open proves nothing about the other —
+  that mistake shipped the browser extension's task links inert (PR #802).
+  And `requireHookToken` is still **enforce-when-set**: with `CLAWGATE_HOOK_TOKEN` empty the machine
+  endpoints are wide open.
 
 ---
 

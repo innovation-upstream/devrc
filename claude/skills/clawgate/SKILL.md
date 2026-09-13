@@ -58,17 +58,44 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | Cluster | **workbench**, ns `clawgate`; dispatched agents in ns **`devpod-<agent-name>`** |
 | 🔴 kubeconfig is PER-HOST — never hardcode; `ls` both, take the one that EXISTS | workbench `.250` → `~/workspace/homelab-talos/workbench-kubeconfig`; laptop `.155` → `~/workspace/homelab-infra/workbench-kubeconfig`. The other is **absent** on each host. Telling the hosts apart: `troubleshooting.md`. |
 | Image / manifest | `harbor.homelab.lan/library/clawgate:<ver>`, pinned in `clusters/workbench/apps/clawgate/deployment.yaml` (Flux from `trunk`) |
-| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
+| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — 🔴 **the UI is NOT open; it needs a session** (measured 2026-09-12: `/tasks/1` → `303` → `/login`). Machine `/api/*` takes the hook token. See the retraction below — this row said "OPEN, no auth" and was wrong |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 `Stop` also carries other hooks — **preserve EVERY non-clawgate**; DERIVE, never count: `jq -r '.hooks.Stop[].hooks[].command'` |
 | 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. JSON on stdout only; rc 0–8. **Every other route is still curl.** Commands, config, the staleness closure and the skew note: `task-api.md` |
 
-🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
-so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
-/api/auto-approve-all`** (arms a global auto-approve window over **every** future request in
-**every** project + sweeps the pending queue; checkpoints excepted). `requireHookToken` is
-**enforce-when-set**: an empty token opens the machine endpoints too. All four wrappers across all
-120 routes: `task-api.md`.
+🔴 **RETRACTED 2026-09-12 — clawgate's HUMAN tier IS gated again; do not re-derive the old claim.**
+This block read *"clawgate has NO human auth of its own (since 0.7.37): `requireSession` is a
+pass-through no-op, so the LAN NodePort is fully unauthenticated"*. **Measured false** against the
+live pod (0.8.32): `GET http://192.168.50.250:30302/tasks/1` → **`303` → `/login?next=%2Ftasks%2F1`**,
+and `/tasks` likewise; `/login` answers 200, so `CLAWGATE_UI_PASSWORD` is set and the gate is real.
+Re-measure before quoting either way — this flipped once and the deployment env is what decides it.
+
+**The two doors take DIFFERENT credentials, and this is the trap:**
+
+| door | wrapper | credential | measured |
+|---|---|---|---|
+| `/api/*` (machine) | `requireHookToken` | `Authorization: Bearer $CLAWGATE_HOOK_TOKEN` | `GET /api/tasks?limit=1` → **200** |
+| `/tasks/{id}`, `/tasks`, the UI | `requireSession` | a **session cookie** | **303 → `/login`** — the hook token buys NOTHING here |
+
+🔴 **So a working hook token is not evidence the UI is reachable**, and an agent that proves the API
+door open has proven nothing about the human one. This is what made the extension's "open in
+clawgate" links inert (PR #802): the token read the task list fine and every link hit a login form.
+
+**Public host = TWO gates, not one.** `https://clawgate.zacx.dev/tasks/1` → **302** to
+`login.zacx.dev` (Authelia), and clawgate's own `/login` still sits behind it — **clawgate does not
+trust Authelia's forwarded headers** (`git grep -E 'Remote-User|forwardAuth' internal/api/` → no
+hits). Passing Authelia does not mint a clawgate session.
+
+⚠ `CLAWGATE_SECURE_COOKIES` is **unset** in the live deployment, and `internal/api/auth.go:67-70`
+says it is off by default precisely so a cookie minted at the plain-HTTP LAN door is not silently
+rejected. So a one-time LAN login **does** stick. Cookies still expire — both `clawgate_session`
+and `authelia_session` were EXPIRED in workbench Brave `Default` on 2026-09-12.
+
+`requireHookToken` is **enforce-when-set**: an empty token opens the machine endpoints. 🔴 **`POST
+/api/auto-approve-all`** arms a global auto-approve window over **every** future request in **every**
+project + sweeps the pending queue (checkpoints excepted) — **never fire it to test a theory.** Which
+wrapper each of the 120 routes carries: `task-api.md` — and that inventory now inherits this
+retraction, so re-measure a route's door rather than trusting a remembered "open".
 
 ---
 
@@ -144,7 +171,11 @@ $CLAWGATE_HOOK_TOKEN` or `X-Clawgate-Token`. Statuses are exactly `open` / `in_p
 `ready_for_review` / `complete` — no `dismissed`; dismissing deletes.
 
 🔴 **ONE path deletes a task and TEARS DOWN its live dispatched agent pod**: `DELETE /api/tasks/{id}`
-(`dismissTask`; **no in-progress guard, deliberately**), unauthenticated on the LAN (above).
+(`dismissTask`; **no in-progress guard, deliberately**). ⚠ This said *"unauthenticated on the LAN"*;
+it is **`requireHookToken`** (`server.go:699`), not `requireSession` — so it is wrong in the
+OPPOSITE direction from the retraction above, and the correction does not make it safer: **every
+agent and hook on this box already holds that token** (`~/.claude/clawgate.env`), so it is one curl
+from anything that can read the file.
 ⚠ **Its automated twin is RETIRED — do not re-derive it.** Since **0.7.96** (`cf529d41`, live) the
 daily idle-task reaper **tags `stale` + posts a system comment** instead of calling `dismissTask`, so
 **nothing destroys a task or an agent pod on a timer**. `CLAWGATE_TASK_TTL` is still **unset in the
@@ -170,9 +201,12 @@ within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent i
 toolchain and the dispatch `curl`. Durable facts only:
 - **The loop DOES close unattended** (two real runs). "The 5-minute kickoff deadline is why it never
   worked" is DEAD — don't reopen it.
-- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb), behind the no-op
-  `requireSession` → **no auth on the LAN NodePort**. 🔴 A future webhook needs a **separate
-  hostname**, never a path bypass on `clawgate.zacx.dev` — that puts dispatch on the open internet.
+- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb). ⚠ This said *"behind
+  the no-op `requireSession` → no auth on the LAN NodePort"* — **measured false 2026-09-12: a
+  credential-less `POST /agents` on the LAN returns `401`.** `requireSession` enforces now (see the
+  retraction above), so LAN dispatch needs a session. 🔴 The webhook rule is UNCHANGED and still
+  right: a future webhook needs a **separate hostname**, never a path bypass on
+  `clawgate.zacx.dev` — a bypass would put agent dispatch on the open internet.
 - ⚠ **A dispatch that cannot START surfaces almost nothing** — the agent goes `error` but the task
   stays `in_progress`, `kicked_off` stays `false`, and nothing pushes. **Read the AGENT POD LOGS
   first — ns `devpod-<agent-name>`, not ns `clawgate`** (`agent-dispatch.md`).
