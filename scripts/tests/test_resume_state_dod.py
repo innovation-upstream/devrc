@@ -9,11 +9,11 @@ stop it is the finish line being in front of the session that is choosing the
 round's work — which is this block, in the digest every `/resume` reads before
 it reads the doc.
 
-MEASURED (`claudedocs/audit-arc-rabbit-holes-2026-09-13.md` in `homelab-talos`,
+MEASURED (`<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md`,
 committed at `841cf63b3`): over 75 days, 745 doc-linked kickoff sessions across
 299 arcs. In all five deep-read arcs the round-1 objective was met by round 1-7
-and the arc then ran 13-23 rounds. Of 188 operator close-checks, 11% closed an
-arc; the median close-check to re-kickoff gap was 1.0 h. Both numbers describe
+and the arc then ran 13-23 rounds. Of the 185 close-checks that landed on an arc
+session, 21 (11%) closed one; the median close-check to re-kickoff gap was 1.0 h. Both numbers describe
 rounds that had no object to answer "is it done?" against.
 
 🔴 THE SEAM IS THE POINT OF `TestTheTwoParsersAgree`, and it is the same seam

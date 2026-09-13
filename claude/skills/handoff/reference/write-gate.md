@@ -552,7 +552,7 @@ by `resume-state.sh`'s `DOD` block on every later round.
 
 ### The measurement
 
-`claudedocs/audit-arc-rabbit-holes-2026-09-13.md` in `homelab-talos` (committed
+`<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md` (committed
 at `841cf63b3`) read 75 days of session telemetry out of ClickHouse
 `activity.events`. Handoff ARCS are directly observable there because both ends
 are standardized: a kickoff is `/resume — continue the <topic> work. Canonical
@@ -573,8 +573,9 @@ inflation (tokens/commit is flat), commit collapse (commits/session is flat),
 and idle late rounds (audit-heavy sessions commit MORE — 8.3 vs 5.3 per session
 at r7+).
 
-**The close-check does not close.** Of 188 sessions carrying an operator
-close-check, **11%** ended the arc; the median close-check → next-kickoff gap is
+**The close-check does not close.** The window holds **224** close-check prompts
+across **188** sessions; of the **185** that landed on an arc session, **21
+(11%)** ended the arc; the median close-check → next-kickoff gap is
 **1.0 h**. The check was being answered with an inventory of what remained,
 which by construction re-opens the arc, rather than with a verdict against
 anything.
@@ -679,6 +680,32 @@ the previous round's own fixes. The ladder is not the problem — it is working 
 `claude/RULES.md`'s audit-fix-resets-gate rule describes — but each finding was
 becoming a RANK, and ranks are what the next session draws work from.
 
+### 🔴 THE RULE IS NARROWER THAN THE REPORT ASKED FOR — say so, do not paper over it
+
+The report's fix 2 reads *"After round 1, ranks may only be **added** by operator
+opt-in"* — **all** ranks — and its cited evidence explicitly names *"`forcing:
+user` items unclosable by the agent"*. This rule exempts all six EXTERNAL kinds,
+`user` included, from the count entirely. The word "external" appears nowhere in
+the report; the self-vs-external split is an implementer's choice, and it is a
+NARROWING. Round 0 of this PR's own audit raised it; the operator's call
+(2026-09-13) was to keep the exemption.
+
+Why keeping it is defensible, and what it costs:
+
+- Blocking work the OPERATOR asked for is the wrong failure mode, and it would
+  make the override flag routine rather than exceptional — which is how a gate
+  becomes one people route around.
+- The tag is unverifiable either way. This module gates a field's EXISTENCE, not
+  its truth (rules (j) and (k) take the same posture deliberately), so an author
+  who wants a 55th rank can type `forcing: gate` and the ratchet is silent. 🔴
+  **The ratchet's real binding force is on an HONEST author** — state that,
+  rather than claiming a strength it does not have.
+- 🔴 **AND IT DOES NOT ADDRESS THE `forcing: user` FINDING AT ALL.** That
+  complaint is about items that never DRAIN — "structurally unclosable by the
+  agent" — and an ADDITIONS ratchet cannot touch a drain problem. Nothing here
+  closes it; it is open, and recorded as open so the next reader does not mistake
+  this rule for a fix to it.
+
 ### Why the ratchet is on the `forcing: none` half only
 
 An item with an EXTERNAL forcing kind answers to something outside the loop: an
@@ -715,12 +742,25 @@ count is set by FINDINGS, never by a number."* Both cite the same evidence, that
 delta rounds keep finding real defects.
 
 **Operator decision 2026-09-13: disclosure, not a cap.** RULES.md is unchanged.
-What lands instead is the non-conflicting half — the ladder's rounds are
-RECORDED in `## State now` (`Audit ladder: <N> delta round(s); last round found
-<what — or CLEAN, which ENDS it>`), so a long ladder is visible and costed and
-the ship-with-known-findings call is the operator's to make, and audit findings
-may no longer mint ranks, which is this rule. Nothing forbids round 4 when round
-3 found a real defect.
+What lands instead is the non-conflicting half: audit findings may no longer
+mint ranks, which is this rule. Nothing forbids round 4 when round 3 found a
+real defect.
+
+🔴 **AND THE DISCLOSURE HALF IS NOT NEW WORK — IT ALREADY EXISTS, WHICH IS WHY
+THIS PR SHIPS NONE.** A first draft added an `Audit ladder: <N> delta round(s)`
+line to the `## State now` template. Round 0 of this PR's own audit cut it, and
+was right: the ladder's round count already lives machine-readably in the PR's
+fenced `audit-claims` block, which `scripts/audit-dispatch.py` PARSES and whose
+staleness it announces on stderr. Nothing would have parsed the template line —
+no reader, no test, no assertion — so it was a second, hand-copied copy of a
+number that already has an owner, and `claude/RULES.md` is explicit that a field
+nothing BRANCHES on is not a guard. Three devrc handoffs already record ladder
+state in `## State now` in their own prose without being told to.
+
+⚠ What the `audit-claims` block does NOT give you, stated so nobody reads the
+paragraph above as complete: it is per-PR, and an ARC spans many PRs. There is
+no arc-scoped view of total ladder cost today. That is a gap, not a thing this
+PR closed.
 
 ### The close-check verdict
 

@@ -1588,7 +1588,7 @@ def stamped_report(headings: typing.Sequence[str], today: str) -> str:
 # --- rule (m): the arc declares what ENDS it ----------------------------------
 #
 # 🔴 THE MEASUREMENT THIS RULE EXISTS FOR, and it is about handoff ARCS rather
-# than about any one document. `claudedocs/audit-arc-rabbit-holes-2026-09-13.md`
+# than about any one document. `<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md`
 # in homelab-talos read 75 days of telemetry — 745 doc-linked kickoff sessions
 # across 299 arcs — and deep-read the five longest. In ALL FIVE the round-1
 # objective was satisfied within 1–7 rounds; the arcs ran 13–23. Nothing in

@@ -2098,10 +2098,10 @@ investigations_block(){
 # screen at the moment the round chooses its work — which is here, in the digest
 # every `/resume` reads before it reads the doc.
 #
-# MEASURED (claudedocs/audit-arc-rabbit-holes-2026-09-13.md in homelab-talos, 75
+# MEASURED (<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md in homelab-talos, 75
 # days / 299 arcs): the round-1 objective was met by round 1–7 in all five
-# deep-read arcs, which then ran 13–23 rounds; and of 188 operator close-checks
-# only 11% closed an arc, median re-kickoff 1.0h. Both numbers describe rounds
+# deep-read arcs, which then ran 13–23 rounds; and of the 185 close-checks that
+# landed on an arc session only 21 (11%) closed one, median re-kickoff 1.0h. Both numbers describe rounds
 # that had no object to answer "is it done?" against.
 #
 # The grammar is `handoff_doc.py`'s — key, colon, a member of a closed

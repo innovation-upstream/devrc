@@ -85,7 +85,6 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - Branch / PR: ...
    - What's DONE this session (with commit hashes / file paths)
    - What's IN FLIGHT (started, not finished)
-   - Audit ladder: <N> delta round(s); last round found <what — or CLEAN, which ENDS it>
    - Deploy/verify status: deployed? verified against the real path? (be honest)
 
    ## Open investigations — live diagnosis state

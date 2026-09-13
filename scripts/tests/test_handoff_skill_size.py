@@ -256,7 +256,7 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # 2026-08-28 entry for the THIRD time — rules (m) and (n), which are two halves
 # of one finding rather than two unrelated asks.
 #
-# THE FINDING. `claudedocs/audit-arc-rabbit-holes-2026-09-13.md` (homelab-talos)
+# THE FINDING. `<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md` (homelab-talos)
 # read 75 days of session telemetry — 745 doc-linked kickoff sessions across 299
 # handoff ARCS — and deep-read the five longest. In ALL FIVE the round-1
 # objective was met within 1–7 rounds and the arc then ran 13–23. The arcs did
@@ -299,7 +299,16 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # — about two thirds of one rule — above the floor. Deliberately tight, for the
 # reason every entry above gives: the pressure is the point, and the answer to
 # the next round is lever 1 or 2, not another raise.
-MAX_BYTES = 28_800
+#
+# 🔴 2026-09-13, same PR: 28,800 -> 28,700 (-100). RATCHETED DOWN, which is this
+# module's stated direction of travel, and the occasion is the one that usually
+# gets banked as slack instead: ROUND 0 OF THIS PR'S OWN AUDIT DELETED SOMETHING.
+# The `Audit ladder: <N> delta round(s)` line came out of the `## State now`
+# template (91 B) because nothing parsed it and the PR's `audit-claims` block
+# already carries the round count. Leaving the ceiling where it was would have
+# converted a deletion into headroom silently — which is how a ratchet stops
+# ratcheting. The need is therefore +1,367, not +1,458.
+MAX_BYTES = 28_700
 
 # Required working margin below the ceiling.
 #

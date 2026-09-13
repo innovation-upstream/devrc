@@ -40,7 +40,15 @@
 # "mutation-verified" can be RE-DERIVED instead of believed.
 #
 #   bash scripts/tests/mutants-handoff-cap.sh        # exit 0 only if ALL ok
-#   MUTANT_FILTER='rule-[mn]' bash …                 # one block; see _row_selected
+#   MUTANT_FILTER='<ERE over ROW NAMES>' bash …      # a subset; see _row_selected
+#
+# 🔴 THE FILTER MATCHES ROW NAMES, AND ROW NAMES ARE NOT BLOCK-PREFIXED — so a
+# pattern that reads like a block selects a handful of rows and silently skips
+# the rest. MEASURED: `rule-[mn]` selects 4 of the 19 rows in the rule-(m)/(n)
+# blocks, skipping every row that pins a real defect. There is no block
+# selector; spell the rows you mean, and READ THE `PARTIAL SWEEP` LINE, which
+# prints how many were skipped. To re-derive rules (m) and (n) in full:
+#   MUTANT_FILTER='rule-m|rule-n|closing-|detail-strip|detail-separator|deleting-the-field|legacy-|stale-base-read|untagged-legacy|flat-count|operator-opt-in|refusal-claims|new-docs-are-ratcheted|a-kind-with-no-condition'
 #
 # Follows the convention `mutants-claim-work.sh` / `mutants-dead-guard.sh`
 # established, and for the reasons documented there:
