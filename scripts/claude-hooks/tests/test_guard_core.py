@@ -2536,6 +2536,12 @@ _KILL_MENTION_LEDGER = {
     "scripts/tests/test_session_resolve.py": "ARGV: `;`-injection fixtures, asserted REJECTED",
     "scripts/tests/test_session_write.py": "ARGV: `;`-injection fixtures, asserted REJECTED",
     "scripts/tests/test_tmux_reply_agent.py": "ARGV: subprocess lists, all carry -L",
+    # The wrapped-URL hyperlink test. Three kill-server argv lists — module
+    # fixture teardown (twice: the success path after yield and the
+    # new-session-failure path before it). All carry `-L <uuid-socket>` against
+    # a throwaway server the test itself created, so a misfire can only kill
+    # the fixture's own server; never executed against a shared server.
+    "scripts/tests/test_tmux_hyperlink_open.py": "ARGV: subprocess lists, all carry -L",
     # Added by the socket-activation PR. The mention is one line of a class
     # docstring explaining WHY the service needs `ConditionPathExists=`:
     # `PathChanged=` fires on socket DELETION too, and a deletion is the
