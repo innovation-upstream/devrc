@@ -18,7 +18,7 @@ Why this recurs: appending one line to `MEMORY.md` is lower-friction than puttin
 
 ## 1. Audit (deterministic — no edits)
 ```bash
-python3 /home/zach/workspace/devrc/scripts/memory-audit.py
+python3 $DEVRC/scripts/memory-audit.py
 ```
 (pass a memory dir or `MEMORY.md` path to audit a different project; with no arg it derives the current project's memory dir from `$PWD`). It prints: size vs budget, per-section byte-weights + bullet counts vs caps, **archive candidates** (Active-work bullets marked shipped/verified/merged/done), **fat bullets** (>250 B — trim targets), link integrity, and a one-line verdict.
 
@@ -48,7 +48,7 @@ Skill files live in the project repo → they need the repo's git workflow. For 
 
 ## 6. Verify (don't trust — measure)
 ```bash
-python3 /home/zach/workspace/devrc/scripts/memory-audit.py   # size under target, caps ✓, links resolve
+python3 $DEVRC/scripts/memory-audit.py   # size under target, caps ✓, links resolve
 ```
 Confirm: under the 12 KB target, both sections under cap, all links resolve, and (if you migrated) the skill lines are actually present on trunk. Report the before/after size, what moved where, and the backup path.
 

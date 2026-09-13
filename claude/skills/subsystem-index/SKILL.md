@@ -70,7 +70,7 @@ says to, and hand its outcome back — do not re-litigate whether to write.
 ✅ **Run the probe FIRST, unconditionally — do not research anything before running it.** It **never writes**; it resolves the changed paths against the store and reports. Its first two output lines state the `scope=` it derived and the `store:` path it read, **so the two facts you would otherwise go looking up are printed by the command you are deciding whether to run.** Nothing below needs to be settled beforehand. The write half is at the END of this step, and it asks nothing — see the write rule there.
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --session <session-uuid> --exclude claudedocs/handoff-<topic>.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --repo <repo> --session <session-uuid> --exclude claudedocs/handoff-<topic>.md
 ```
 
 🔴 **`<session-uuid>` is the basename of your scratchpad directory.** Your system prompt names a scratchpad path of the form `/tmp/claude-<n>/<project>/<session-uuid>/scratchpad` — pass that `<session-uuid>` segment, nothing else. There is no environment variable for it, so it can only come from you.
@@ -90,7 +90,7 @@ python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> 
 🔴 **If you landed any PRs this session, run it a SECOND time over them** — you know exactly which ones, and nothing else in the toolchain does:
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --pr <n>[,<n>...] --exclude claudedocs/handoff-<topic>.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --repo <repo> --pr <n>[,<n>...] --exclude claudedocs/handoff-<topic>.md
 ```
 
 This is the **only** source that sees a **subagent's** work — a PR's file list does not care which agent, session or tool wrote the bytes, and delegating implementation to a subagent is the standing default here.
@@ -110,7 +110,7 @@ Closed-unmerged PRs are refused by name — their files exist in no tree. `OPEN`
 🔴 **If the work became a commit but NO PR — a direct push, or a branch not opened yet — run it over the SHAS YOU CREATED:**
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --commit <sha>[,<sha>...] --exclude claudedocs/handoff-<topic>.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --repo <repo> --commit <sha>[,<sha>...] --exclude claudedocs/handoff-<topic>.md
 ```
 
 A commit is the primitive the other two reduce to — a PR is a set of commits, worktree-authored work becomes a mainline commit, a direct push *is* a commit — so this reaches repos where neither of the others can. **You know the shas you just made; nothing else in the toolchain does.**
@@ -215,7 +215,7 @@ cairn put --scope <scope> --ref <entry> --file <scratchpad>/entry.md
 🔴 **A BRAND-NEW entry is `cairn create`, not a local file — the store has had a create verb since 2026-09-03:**
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --template <slug> --writer <caller> > <scratchpad>/new.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --template <slug> --writer <caller> > <scratchpad>/new.md
 #   fill in <scratchpad>/new.md — a scratch path, never under ~/.claude/analyze-service-index/
 cairn create --scope <scope> --ref <slug> --file <scratchpad>/new.md
 ```

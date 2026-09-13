@@ -33,7 +33,7 @@ hosts report hostname `nixos`, so disambiguate by IP (`ip -4 addr`) or `browser 
 shell, so a doc that says "just use `$KC_WORKBENCH`" breaks there. Select the file instead
 (verified verbatim in bash and zsh on both hosts):
 ```bash
-KC=$(ls /home/zach/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
+KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
 ```
 
 ## A UI feature "looks broken" for a user but works in incognito/fresh

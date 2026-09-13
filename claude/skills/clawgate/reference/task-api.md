@@ -209,7 +209,7 @@ CLOSED set — `runbook:` (hard-validated), `initiative:` (soft), `gate:` (**blo
 
 🔴 That **400 is a load-bearing WIRE CONTRACT** — producers key their fail-open retry on it. Full
 grammar, rationale, and the `title`-vs-`directory` rules:
-`/home/zach/workspace/devrc/claude/skills/clawgate/reference/internals.md`.
+`~/.claude/skills/clawgate/reference/internals.md`.
 
 ## ⚠ A task body may contain element references from the browser extension
 Lines like
@@ -217,7 +217,7 @@ Lines like
 🔑 **Do NOT search the selector first** (it is the least durable signal): work domain/path →
 adjacent text → selector → accessible name. Full procedure, worked example, and the
 `buildEnrichment` developer note:
-`/home/zach/workspace/devrc/claude/skills/clawgate/reference/element-references.md`.
+`~/.claude/skills/clawgate/reference/element-references.md`.
 
 ## Card producers — all share `CLAWGATE_HOOK_TOKEN`
 ⚠ **Rotation coupling: rotating the token means updating all three of 1–3 below, or they fail

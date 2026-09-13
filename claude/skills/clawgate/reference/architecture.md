@@ -4,7 +4,7 @@ Read when: you're changing agents/repos/runbooks/privilege behaviour, wiring a n
 adding a native tool, or working on the e2e suite. Routine ops don't need this file.
 
 Full point-in-time state, loose ends and gotchas live in
-`/home/zach/workspace/homelab-talos/containers/clawgate/HANDOFF.md` (**authoritative — read it
+`~/workspace/homelab-talos/containers/clawgate/HANDOFF.md` (**authoritative — read it
 first**) + session memories `clawgate-phase2` / `clawgate-phase3` / `clawgate-runbooks` /
 `clawgate-loop-validation` / `authelia-passkey-sso` / `openclaw-exec-sandbox-strips-env` /
 `clawgate-version-before-build`.

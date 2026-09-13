@@ -37,7 +37,7 @@ touching the image, DNS, the gateway ConfigMap, or forwarding.
 | Receiver | ns `mailbox`, Deployment `mail-receiver`, ClusterIP `mail-receiver.mailbox.svc:2525`, NodePort **30026**. Env: `PG_DSN` (secretKeyRef), `MAILPIT_HOST` (empty = onward relay OFF) |
 | Postgres | ns `mailbox`, `mailbox-postgres-0` (StatefulSet), ClusterIP `mailbox-postgres:5432`, db/user `mailbox`, PVC `openebs-nvme-1tb`. Password in secret `mailbox-postgres-auth` (key `pg-dsn`). **Also hosts the `initiatives` schema**, whose one live table is `initiatives.handoff_section` (the handoff search index, written by `scripts/lib/handoff_index.py` and read by `resume`) — same instance, `_db.py` and port-forward |
 | `mail` schema | `id, message_id (UNIQUE), received_at, date_header, from_addr, to_addrs[], cc_addrs[], subject, headers jsonb, text_body, html_body, raw bytea, size_bytes, labels text[], processed_at, search tsvector (GIN)` |
-| Cluster access | mailbox app + receiver: `KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig`. Gateway :25 + CF DNS + postfix test-send: `~/workspace/homelab-talos/production-kubeconfig`. **From the laptop** (nebula-only): `KUBECONFIG=~/.kube/homelab-nebula.yaml` (proxy-url SOCKS via the `homelab-kube-tunnel` service → workbench `10.42.0.30`); the rebuild step still needs the workbench (Harbor is LAN) |
+| Cluster access | mailbox app + receiver: `KUBECONFIG=$KC_HOMELAB`. Gateway :25 + CF DNS + postfix test-send: `$KC_PROD`. **From the laptop** (nebula-only): `KUBECONFIG=$KC_NEBULA` (proxy-url SOCKS via the `homelab-kube-tunnel` service → workbench `10.42.0.30`); the rebuild step still needs the workbench (Harbor is LAN) |
 | Gateway configs | homelab: `clusters/homelab/apps/nebula/gateway/gateway-nginx-config.yaml` (ConfigMap `nebula-gateway-nginx-config`, the `:2525 → mail-receiver.mailbox.svc` line). Hetzner: `clusters/production/apps/nebula/gateway/gateway-nginx-config.yaml` (`listen 0.0.0.0:25`). Both are the `nebula-gateway` DaemonSet (ns `nebula`, container `nginx-proxy`) |
 | Cloudflare | zone `zacx.dev` id `72f00688be30dfc863a2c84fa6ab771c`. Token: secret `cloudflare-api-token`/`cloudflare_api_token` in **production** ns `external-dns` (DNS-edit scope ONLY — NOT Email Routing admin). Mail records managed **directly via CF API**, NOT external-dns (avoids the flap) |
 
@@ -130,7 +130,7 @@ Proven live by the retired `repo-cos` weekly digest, and still used by the task-
 # minimal send-as-Zach (workbench; needs the SOPS age key on PATH via nix-shell)
 export SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key
 nix-shell -p 'python3.withPackages(p:[p.requests])' sops --run 'python3 - <<PY
-import sys; sys.path.insert(0, "/home/zach/workspace/devrc/scripts/task-spec-drafter")
+import os, sys; sys.path.insert(0, os.environ["DEVRC"] + "/scripts/task-spec-drafter")  # $VAR does NOT expand in python
 import email_send
 user, pw = email_send.load_credentials()          # SOPS-decrypts IMAP_USER/IMAP_APP_PASSWORD
 msg = email_send.build_message(subject="hi", body="test", from_addr=user, to_addr="someone@example.com")
@@ -145,7 +145,7 @@ PY'
 
 ## status / query
 ```bash
-export KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig
+export KUBECONFIG=$KC_HOMELAB
 kubectl -n mailbox get pods,svc            # mail-receiver + mailbox-postgres-0 should be Running/1-1
 kubectl -n mailbox logs deploy/mail-receiver --tail=20   # "stored id=…" / "dedupe" lines
 PSQL='kubectl -n mailbox exec mailbox-postgres-0 -- psql -U mailbox -d mailbox -c'

@@ -63,7 +63,7 @@ out of the remote host, #118), then dropped k3s apiserver→pod replies and Cras
 A LAN-only test CANNOT reach the nebula direct-punch lockout mode, so it is NOT sufficient:
 1. Run it from a **LAN session** (192.168.50.x — always allowed = your recovery path) held open.
 2. Workbench k3s healthy:
-   `KUBECONFIG=/home/zach/workspace/homelab-talos/workbench-kubeconfig kubectl get pods -A | grep -vE 'Running|Completed'`
+   `KUBECONFIG=$KC_WORKBENCH kubectl get pods -A | grep -vE 'Running|Completed'`
    (expect nothing bad).
 3. Nebula overlay intact: `KUBECONFIG=$KC_HOMELAB kubectl get nodes` → **4 nodes**.
 4. Exit IP is the tunnel: `curl -s https://ipinfo.io/json` → **CA** and an AirVPN `org`,

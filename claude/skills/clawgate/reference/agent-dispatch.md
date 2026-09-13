@@ -3,7 +3,7 @@
 Read when: you are **dispatching, debugging or reasoning about the agent loop** (a task that should
 have produced a PR, a dispatch that never started, the test fixture, `POST /agents`).
 
-🔴 **Current STATUS of the loop lives in `/home/zach/workspace/homelab-talos/containers/clawgate/HANDOFF.md`,
+🔴 **Current STATUS of the loop lives in `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md`,
 not here.** Two point-in-time claims were written into the skill on 2026-07-31 and were BOTH
 superseded within two days — the checkpoint/kickoff-deadline breakage (**fixed in 0.7.80**, pinned by
 `provision_kickoff_ctx_test.go` + `checkpoint_test.go`) and the private-clone diagnosis (written

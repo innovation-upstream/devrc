@@ -140,7 +140,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    **Answer first, in one line: what changed since the doc was written?** If the honest answer is *nothing*, **say so and write nothing** — a handoff that still describes reality is not stale. On a NEW doc the question has no "since": answer with what this session produced, because a doc that does not exist cannot still be describing reality. Otherwise merge it; this **writes nothing** and prints the diff you are about to ask about:
 
    ```
-   python3 /home/zach/workspace/devrc/scripts/lib/handoff_doc.py --repo <repo> --topic <topic> --update <scratch-file> --advanced '<what changed since the doc was written>'
+   python3 $DEVRC/scripts/lib/handoff_doc.py --repo <repo> --topic <topic> --update <scratch-file> --advanced '<what changed since the doc was written>'
    ```
 
    **The doc's YAML front matter survives this merge** — `split_front_matter` carries the base's block through, so a delta that starts with prose rather than a `## ` heading can no longer silently drop the `clawgate-task:` field. Put a front-matter block in your delta ONLY when you mean to change the recorded task; an explicit one wins. 🔴 **The NEW-doc case inverts that:** there is no base block to carry, so the delta's own front matter is the doc's only chance at one — if step 1 resolved a task, it must be at line 1 of the scratch file.

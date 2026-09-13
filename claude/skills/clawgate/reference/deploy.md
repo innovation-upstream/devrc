@@ -35,16 +35,26 @@ VER=0.7.83   # 🔴 FETCH trunk + check the LIVE deployment pin FIRST — Zach s
              # shipped: 0.7.82, built + deployed 2026-08-02 — assume stale, verify with the status
              # snippet in SKILL.md.)
 
-# 0. fresh worktree off the latest trunk (clean tree — only YOUR changes live here)
-cd /home/zach/workspace/homelab-talos && git fetch origin trunk
-git worktree add /home/zach/workspace/homelab-trunk -B clawgate-$VER origin/trunk
-cd /home/zach/workspace/homelab-trunk/containers/clawgate
+# 0. resolve the PER-HOST homelab checkout ONCE. 🔴 The directory name differs by host
+#    (workbench `homelab-talos`, laptop `homelab-infra` — SKILL.md Key facts), so the `ls`
+#    probe is the sanctioned form and `$HOMELAB` is NOT: that handle is existence-guarded on
+#    `homelab-talos` alone, so it is simply ABSENT on the host where the other name is right.
+HL=$(ls -d ~/workspace/homelab-{talos,infra} 2>/dev/null | head -1); echo "HL=$HL"
+#    🔴 READ THAT ECHO. An EMPTY $HL is not an error you will see later — `cd ""` is a silent
+#    no-op that returns 0 on bash ≤5.2 and in zsh, so every step below would run against
+#    whatever directory you happened to be standing in. Empty ⇒ stop here.
+WT=$(dirname "$HL")/homelab-trunk   # the throwaway worktree this recipe CREATES (no handle exists)
+
+# 0b. fresh worktree off the latest trunk (clean tree — only YOUR changes live here)
+cd "$HL" && git fetch origin trunk
+git worktree add "$WT" -B clawgate-$VER origin/trunk
+cd "$WT"/containers/clawgate
 #  ... make your code changes here, in the worktree ...
 
 # 1. test (Go + hook bats + e2e) — must be green. A worktree-local `go test` needs app.css built
 #    FIRST (it's gitignored; a missing one 404s BOTH TestStaticAssetsServed and TestOpenRoutesNoAuth).
 #    🔴 BUILD IT FROM INSIDE containers/clawgate/ — see the CSS-cwd trap below. Correct form:
-nix-shell -p tailwindcss --run "cd /home/zach/workspace/homelab-trunk/containers/clawgate && tailwindcss -i ./web/css/input.css -o ./web/static/app.css --minify"
+nix-shell -p tailwindcss --run "cd $WT/containers/clawgate && tailwindcss -i ./web/css/input.css -o ./web/static/app.css --minify"
 wc -c web/static/app.css   # sanity: ~36 KB. ~5 KB = the cwd trap fired. Or: grep -c '\.h-14' web/static/app.css
 nix-shell -p go --run 'go build ./... && go vet ./... && go test -race -cover ./...'
 nix-shell -p bats jq --run 'bats hook/tests/clawgate-hook.bats'
@@ -60,7 +70,7 @@ clawgatectl --api-url http://localhost:8219 health; docker rm -f cg-smoke   # rc
 docker push harbor.homelab.lan/library/clawgate:$VER && docker push harbor.homelab.lan/library/clawgate:latest
 
 # 3. bump the pin, stage explicit paths, commit, rebase (clean tree → no autostash), push
-cd /home/zach/workspace/homelab-trunk
+cd "$WT"
 # 🔴 BUMP BOTH. The version lives in TWO files and `version_pin_test.go` asserts
 # they are equal, so moving the pin alone turns `go test ./...` RED — which is
 # `tekton/clawgate-ci FAILED: go` on EVERY PR that touches containers/clawgate,
@@ -84,17 +94,17 @@ git commit -m "..." -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@an
 git fetch origin trunk && git rebase origin/trunk && git push origin HEAD:trunk
 
 # 4. reconcile + verify
-KC=/home/zach/workspace/homelab-infra/workbench-kubeconfig   # PER-HOST — see SKILL.md Key facts
+KC=$HL/workbench-kubeconfig   # PER-HOST — resolved once at step 0
 flux --kubeconfig $KC reconcile kustomization clawgate --with-source
 until kubectl --kubeconfig $KC -n clawgate get pod -l app=clawgate -o jsonpath='{.items[0].spec.containers[0].image}' | grep -q "$VER"; do sleep 4; done
 clawgatectl health   # confirm the live version (+ a stderr skew note if it differs)
 
 # 5. clean up the worktree (force: removes gitignored build artifacts too)
-cd /home/zach/workspace/homelab-talos
-git worktree remove /home/zach/workspace/homelab-trunk --force && git branch -D clawgate-$VER
+cd "$HL"
+git worktree remove "$WT" --force && git branch -D clawgate-$VER
 
 # 6. re-sync the base clone — it is write-only and silently falls behind
-git -C /home/zach/workspace/homelab-talos fetch origin && git -C /home/zach/workspace/homelab-talos merge --ff-only origin/trunk
+git -C "$HL" fetch origin && git -C "$HL" merge --ff-only origin/trunk
 ```
 
 ## 🔴 THE CSS-cwd TRAP (cost hours on 2026-07-30 — read before debugging any e2e failure)

@@ -274,7 +274,7 @@ The workbench firewall `allowedTCPPorts` is a short allowlist
 the workbench and open **`http://localhost:<port>`**, never open a firewall port for a throwaway.
 
 Verifying the picker's privacy guard by hand has a trap that makes the obvious test vacuous →
-`/home/zach/workspace/devrc/claude/skills/clawgate/reference/element-references.md`.
+`~/.claude/skills/clawgate/reference/element-references.md`.
 
 ## CI scope
 `clawgate-ci` (Tekton — see the `tekton` skill) runs `go build`/`vet`/`test -race` + extension
