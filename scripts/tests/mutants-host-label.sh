@@ -55,58 +55,40 @@ if [ -e "$ROOT/.git" ] || [ -e "$ROOT/scripts/.git" ] || [ -e "$ROOT/nix/.git" ]
 fi
 find "$ROOT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 
-MOD="$ROOT/scripts/lib/host_label.py"
-SUITE="$ROOT/scripts/tests/test_host_label_identity.py"
-cp "$MOD" "$T/mod.orig"
-ORIG_SHA="$(sha256sum "$T/mod.orig" | cut -d' ' -f1)"
-restore() {
-  cp "$T/mod.orig" "$MOD"
-  # 🔴 VERIFIED, not assumed. A battery that leaves a mutant in place scores
-  # every LATER mutant against a doubly-broken module.
-  local now; now="$(sha256sum "$MOD" | cut -d' ' -f1)"
-  if [ "$now" != "$ORIG_SHA" ]; then
-    echo "🔴 restore FAILED — the copy is still mutated; aborting"; exit 2
-  fi
-}
-
-# 🔴 TWO MORE MUTATION TARGETS, BECAUSE THE MODULE IS NOT WHERE THE REMAINING
-# HOST-IDENTITY DEFECTS LIVE.
+# 🔴 THREE MUTATION TARGETS, ONE MECHANISM. Each is (file, pristine copy, the
+# suite whose verdict scores it). An earlier revision spelled `run`, `restore`
+# and `failing` out THREE times, once per target; the copies had already begun to
+# drift (one scored against the wrong suite). One table, one runner.
 #
-#   * `scripts/collector/collector.py` — the ONE consumer that did not derive.
-#     Its guards are scored against `scripts/collector/tests/test_collector.py`
-#     (`failing_collector`), because that is the suite that owns them.
-#   * `nix/home.nix` — the collector's DEPLOYMENT: the two `lib/` files placed
-#     beside the daemon and the unit's restart triggers. Neither is observable
-#     from the collector suite, so those rows are scored against the two derived
-#     ledgers in `scripts/tests/test_transcript_push.py` (`failing_ledger`).
+#   host_label  the module itself            -> test_host_label_identity.py
+#   collector   the ONE consumer that did    -> scripts/collector/tests/test_collector.py
+#               not derive
+#   nix         the collector's DEPLOYMENT   -> the two DERIVED ledgers in
+#               (lib/ files + triggers)         test_transcript_push.py
 #
 # ⚠ AN EARLIER REVISION MUTATED `nix/home.nix` AND SCORED IT AGAINST A SUITE THAT
 # NIX-BUILT THE ACTIVATION BLOCK FOR REAL. That harness could not run in
 # `checks.pytests` — nested `nix-build` with `<nixpkgs>`, no store realisation in
 # the sandbox — so every guard it carried was invisible to the merge gate. The
 # activation it guarded is gone; nothing here builds anything.
-#
-# Same contract as `run` throughout: exact-name killer, applied-diff check,
-# verified restore.
-NIXF="$ROOT/nix/home.nix"
-cp "$NIXF" "$T/nix.orig"
-NIX_ORIG_SHA="$(sha256sum "$T/nix.orig" | cut -d' ' -f1)"
-restore_nix() {
-  cp "$T/nix.orig" "$NIXF"
-  local now; now="$(sha256sum "$NIXF" | cut -d' ' -f1)"
-  if [ "$now" != "$NIX_ORIG_SHA" ]; then
-    echo "🔴 nix restore FAILED — the copy is still mutated; aborting"; exit 2
-  fi
-}
+declare -A TARGET_FILE=(
+  [host_label]="$ROOT/scripts/lib/host_label.py"
+  [collector]="$ROOT/scripts/collector/collector.py"
+  [nix]="$ROOT/nix/home.nix"
+)
+declare -A TARGET_SHA=()
+for k in "${!TARGET_FILE[@]}"; do
+  cp "${TARGET_FILE[$k]}" "$T/$k.orig"
+  TARGET_SHA[$k]="$(sha256sum "$T/$k.orig" | cut -d' ' -f1)"
+done
 
-COLL="$ROOT/scripts/collector/collector.py"
-cp "$COLL" "$T/coll.orig"
-COLL_ORIG_SHA="$(sha256sum "$T/coll.orig" | cut -d' ' -f1)"
-restore_coll() {
-  cp "$T/coll.orig" "$COLL"
-  local now; now="$(sha256sum "$COLL" | cut -d' ' -f1)"
-  if [ "$now" != "$COLL_ORIG_SHA" ]; then
-    echo "🔴 collector restore FAILED — the copy is still mutated; aborting"; exit 2
+restore() { # restore <target>
+  cp "$T/$1.orig" "${TARGET_FILE[$1]}"
+  # 🔴 VERIFIED, not assumed. A battery that leaves a mutant in place scores
+  # every LATER mutant against a doubly-broken file.
+  local now; now="$(sha256sum "${TARGET_FILE[$1]}" | cut -d' ' -f1)"
+  if [ "$now" != "${TARGET_SHA[$1]}" ]; then
+    echo "🔴 restore of $1 FAILED — the copy is still mutated; aborting"; exit 2
   fi
 }
 
@@ -116,73 +98,51 @@ FAILURES=0
 # only FAILED lines cannot tell "no test failed" from "pytest died at
 # collection", and the SURVIVES control would then report ok over a harness
 # wired to nothing. So COUNT the collected tests and refuse below a floor. The
-# floor catches COLLAPSE, not growth, so it sits under the real count.
-MIN_TESTS=20
-failing() {
-  local out n f total
-  out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
-    -q --no-header --tb=no -p no:cacheprovider -p no:randomly 2>/dev/null)"
-  n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
-  f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
-  total=$(( ${n:-0} + ${f:-0} ))
-  if [ "$total" -lt "$MIN_TESTS" ]; then
-    echo "__HARNESS_BROKE__ only $total test(s) ran (floor $MIN_TESTS)"
-    return
-  fi
-  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
-}
-
-# The collector suite. Its own floor, for the same reason as the one above: a
-# collection error yields zero FAILED lines, i.e. "clean".
-COLL_SUITE="$ROOT/scripts/collector/tests/test_collector.py"
-MIN_COLL_TESTS=30
-failing_collector() {
-  local out n f total
-  out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$COLL_SUITE" \
-    -q --no-header --tb=no -p no:cacheprovider -p no:randomly 2>/dev/null)"
-  n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
-  f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
-  total=$(( ${n:-0} + ${f:-0} ))
-  if [ "$total" -lt "$MIN_COLL_TESTS" ]; then
-    echo "__HARNESS_BROKE__ only $total collector test(s) ran (floor $MIN_COLL_TESTS)"
-    return
-  fi
-  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
-}
-
-# 🔴 THE DEPLOYMENT LEDGERS, SELECTED BY EXACT NODE ID. `test_transcript_push.py`
-# is a heavy suite (it stands up servers and drives the real push script) and
-# these two tests are pure file reads, so the whole file is not run per mutant.
-# A `-k` filter would be a second spelling that can silently select nothing; two
-# explicit node ids plus a floor of exactly 2 cannot.
-LEDGERS=(
-  "$ROOT/scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS"
-  "$ROOT/scripts/tests/test_transcript_push.py::test_the_host_identity_pair_is_DEPLOYED_beside_the_collector"
+# floor catches COLLAPSE, not growth, so it sits under the real count — except
+# for the ledger pair, which is TWO named node ids and is therefore exact.
+#
+# 🔴 THE LEDGERS ARE SELECTED BY EXACT NODE ID, NOT BY `-k`.
+# `test_transcript_push.py` is a heavy suite (it stands up servers and drives the
+# real push script) and these two tests are pure file reads, so the whole file is
+# not run per mutant. A `-k` filter is a second spelling that can silently select
+# nothing; two node ids plus a floor of exactly 2 cannot.
+declare -A SUITE_ARGS=(
+  [host_label]="$ROOT/scripts/tests/test_host_label_identity.py"
+  [collector]="$ROOT/scripts/collector/tests/test_collector.py"
+  [nix]="$ROOT/scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS $ROOT/scripts/tests/test_transcript_push.py::test_the_host_identity_pair_is_DEPLOYED_beside_the_collector"
 )
-failing_ledger() {
-  local out n f total
-  out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "${LEDGERS[@]}" \
+declare -A SUITE_FLOOR=( [host_label]=20 [collector]=30 [nix]=2 )
+
+FAILURES=0
+
+failing() { # failing <target>
+  local out n f total args
+  # 🔴 `${=…}` — this file is bash, but the split is spelled explicitly anyway so
+  # the intent survives a copy into a zsh harness, where a bare $var does NOT
+  # word-split and the whole string would become one nonexistent path.
+  read -r -a args <<<"${SUITE_ARGS[$1]}"
+  out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "${args[@]}" \
     -q --no-header --tb=no -p no:cacheprovider -p no:randomly 2>/dev/null)"
   n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
   f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
   total=$(( ${n:-0} + ${f:-0} ))
-  if [ "$total" -ne 2 ]; then
-    echo "__HARNESS_BROKE__ $total ledger test(s) ran, want exactly 2"
+  if [ "$total" -lt "${SUITE_FLOOR[$1]}" ]; then
+    echo "__HARNESS_BROKE__ only $total $1 test(s) ran (floor ${SUITE_FLOOR[$1]})"
     return
   fi
   sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
 }
 
-run() { # run <name> <expect: a test node name | SURVIVES> <sed-expr>
-  local name="$1" want="$2" expr="$3"
-  sed "$expr" "$MOD" > "$T/m" 2>/dev/null
-  if cmp -s "$MOD" "$T/m"; then
+run_on() { # run_on <target> <name> <expect: a test node name | SURVIVES> <sed-expr>
+  local tgt="$1" name="$2" want="$3" expr="$4" file="${TARGET_FILE[$1]}"
+  sed "$expr" "$file" > "$T/m" 2>/dev/null
+  if cmp -s "$file" "$T/m"; then
     printf '  🔴 %-52s MUTATION DID NOT APPLY — result meaningless\n' "$name"
     FAILURES=$((FAILURES+1)); return
   fi
-  cp "$T/m" "$MOD"
-  local killers; killers="$(failing)"
-  restore
+  cp "$T/m" "$file"
+  local killers; killers="$(failing "$tgt")"
+  restore "$tgt"
   if grep -q __HARNESS_BROKE__ <<<"$killers"; then
     printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
     FAILURES=$((FAILURES+1)); return
@@ -205,77 +165,16 @@ run() { # run <name> <expect: a test node name | SURVIVES> <sed-expr>
     "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
 }
 
-run_nix() { # run_nix <name> <expect: a test node name | SURVIVES> <sed-expr>
-  local name="$1" want="$2" expr="$3"
-  sed "$expr" "$NIXF" > "$T/mn" 2>/dev/null
-  if cmp -s "$NIXF" "$T/mn"; then
-    printf '  🔴 %-52s MUTATION DID NOT APPLY — result meaningless\n' "$name"
-    FAILURES=$((FAILURES+1)); return
-  fi
-  cp "$T/mn" "$NIXF"
-  local killers; killers="$(failing_ledger)"
-  restore_nix
-  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
-    printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
-    FAILURES=$((FAILURES+1)); return
-  fi
-  if [ "$want" = SURVIVES ]; then
-    if [ -z "$killers" ]; then
-      printf '  ok %-52s SURVIVED as required (control)\n' "$name"; return
-    fi
-    printf '  🔴 %-52s CONTROL KILLED by %s — not measuring behaviour\n' \
-      "$name" "$(tr '\n' ',' <<<"$killers")"; FAILURES=$((FAILURES+1)); return
-  fi
-  if [ -z "$killers" ]; then
-    printf '  🔴 %-52s SURVIVED — no test failed\n' "$name"
-    FAILURES=$((FAILURES+1)); return
-  fi
-  if grep -qx "$want" <<<"$killers"; then
-    printf '  ok %-52s killed by %s\n' "$name" "$want"; return
-  fi
-  printf '  🔴 %-52s WRONG-KILLER — died to: %s (wanted %s)\n' \
-    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
-}
-
-run_coll() { # run_coll <name> <expect: a test node name | SURVIVES> <sed-expr>
-  local name="$1" want="$2" expr="$3"
-  sed "$expr" "$COLL" > "$T/mc" 2>/dev/null
-  if cmp -s "$COLL" "$T/mc"; then
-    printf '  🔴 %-52s MUTATION DID NOT APPLY — result meaningless\n' "$name"
-    FAILURES=$((FAILURES+1)); return
-  fi
-  cp "$T/mc" "$COLL"
-  local killers; killers="$(failing_collector)"
-  restore_coll
-  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
-    printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
-    FAILURES=$((FAILURES+1)); return
-  fi
-  if [ "$want" = SURVIVES ]; then
-    if [ -z "$killers" ]; then
-      printf '  ok %-52s SURVIVED as required (control)\n' "$name"; return
-    fi
-    printf '  🔴 %-52s CONTROL KILLED by %s — not measuring behaviour\n' \
-      "$name" "$(tr '\n' ',' <<<"$killers")"; FAILURES=$((FAILURES+1)); return
-  fi
-  if [ -z "$killers" ]; then
-    printf '  🔴 %-52s SURVIVED — no test failed\n' "$name"
-    FAILURES=$((FAILURES+1)); return
-  fi
-  if grep -qx "$want" <<<"$killers"; then
-    printf '  ok %-52s killed by %s\n' "$name" "$want"; return
-  fi
-  printf '  🔴 %-52s WRONG-KILLER — died to: %s (wanted %s)\n' \
-    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
-}
+run()      { run_on host_label "$@"; }
+run_coll() { run_on collector  "$@"; }
+run_nix()  { run_on nix        "$@"; }
 
 printf 'mutating a COPY at %s (your worktree is untouched)\n' "$ROOT"
-printf 'baseline host_label suite (must be empty): '
-b="$(failing)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
-printf 'baseline collector suite (must be empty): '
-b="$(failing_collector)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
-printf 'baseline deployment ledgers (must be empty): '
-b="$(failing_ledger)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
+for tgt in host_label collector nix; do
+  printf 'baseline %-10s (must be empty): ' "$tgt"
+  b="$(failing "$tgt")"
+  [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
+done
 
 printf '\n== the defect itself: the workbench default ==\n'
 # MUT-1. THE POSITIVE CONTROL FOR THE WHOLE BATTERY: a mutant everyone knows
