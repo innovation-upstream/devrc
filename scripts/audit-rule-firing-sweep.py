@@ -300,7 +300,7 @@ def skill_versions() -> list[tuple[str, str, str]]:
     Scanning every version is both cheaper and more exact than one `-S` call per rule: ~24
     `git show`s total against 49 subprocesses, and it yields the earliest version that
     CONTAINS the text rather than the commit that changed its count. `--follow` is required
-    — this file lived at `claude/commands/audit-pr.md` until the commands/skills merge, and
+    — this file lived under the retired commands tree until the commands/skills merge, and
     a path-pinned log silently stops at the rename.
 
     🔴 `--reverse` IS NOT USED, AND MUST NOT BE: `git log --follow --reverse` returns

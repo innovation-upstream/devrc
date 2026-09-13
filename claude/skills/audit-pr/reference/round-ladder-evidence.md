@@ -740,3 +740,111 @@ edit instead: the containing section's first commit, or an explicitly recorded o
 this corpus and uncounted. UNFIRED is never "dead". And a rule can be FOLLOWED without anyone
 writing a sentence the sweep can match, so a low count is weak evidence about the RULE and
 strong evidence only about the WORDS.
+
+## 2026-09-13 · the origin of a prose rule is an INTERVAL — the re-measurement, and two wrong daters
+
+Supersedes the dating half of the 2026-09-12 section above. The firing numbers there were
+real but two-thirds unusable, and the cause was mine: `git log -S` on each rule's CURRENT
+wording dates the REWORD, not the rule.
+
+    basis            FIRED  UNRELIABLE  UNFIRED   regressed the wrong way
+    wording (first)     14          32        3           —
+    section only        25          21        3           2
+    interval (now)      27          19        3           0
+
+🔴 **BOTH SINGLE-BOUND DATERS WERE MEASURED WRONG, IN OPPOSITE DIRECTIONS — do not
+re-derive either.** `wording` put 44 of 49 origins in 2026-08/09 (this skill reworded
+nearly everything inside six weeks), so ordinary earlier use fell before the window and
+tripped the specificity control. `section` — the earliest version carrying the rule's
+section heading — recovered 13 of those and sent **two the other way**
+(`dispatch-blind` 0 → 437 pre-origin hits, `nine-axes` 0 → 29), because **headings get
+reworded too**: a section is NOT reliably older than the sentence inside it.
+
+**So the origin is an interval and the middle is disclosed, not decided.** Before `early`
+(the section did not exist yet) ⇒ the pattern is not specific to the rule, withhold.
+Inside `[early, late)` ⇒ counted as `ambig`, genuinely unattributable. At/after `late`
+⇒ an unambiguous application. `dispatch-blind` is now FIRED on 561 later matches with its
+437 in-interval ones *shown* rather than withholding the row.
+
+**Run 2026-09-13 · 23 skill versions scanned (2026-06-30 .. 2026-09-12) · controls
+POSITIVE 582 / NEGATIVE 0.**
+
+```
+rule                                   origin interval         sess  fired in-fnd  ambig nondevrc  verdict
+delta-vs-audited-tip                   2026-07-29              1366   2848    884      0     2077  FIRED
+attribution-gate                       2026-08-27                 —      —      —      —        —  UNRELIABLE (12x before the section existed — pattern not specific to this rule)
+round-ledger-line                      2026-07-29..2026-08-27   774    829    474      3      586  FIRED
+verdict-is-not-the-stop                2026-08-25                 —      —      —      —        —  UNRELIABLE (2x before the section existed — pattern not specific to this rule)
+dispatch-blind                         2026-08-03..2026-08-25   221    563     79    436      337  FIRED
+round0-first                           2026-06-30..2026-09-12   117    440     68    263      324  FIRED
+per-prior-finding-status               2026-07-29               340    357    291      0      242  FIRED
+remerge-diff-flags                     2026-08-27                 —      —      —      —        —  UNRELIABLE (10x before the section existed — pattern not specific to this rule)
+clean-round-ends-ladder                2026-08-25                 —      —      —      —        —  UNRELIABLE (106x before the section existed — pattern not specific to this rule)
+brief-assembler                        2026-06-30..2026-08-28   123    202     58     19       92  FIRED
+prose-escape-hatch                     2026-08-25..2026-08-30     —      —      —      —        —  UNRELIABLE (13x before the section existed — pattern not specific to this rule)
+mutation-deletion-easy-half            2026-08-03               139    167     61      0      133  FIRED
+pr-description-corrected-publicly      2026-07-29..2026-08-03   115    149     42      0      120  FIRED
+behaviour-or-guard-label               2026-07-29..2026-08-27   129    135    120     10      110  FIRED
+guard-lost-its-reason                  2026-09-05                 —      —      —      —        —  UNRELIABLE (232x before the section existed — pattern not specific to this rule)
+round0-delete-pass                     2026-09-09                 —      —      —      —        —  UNRELIABLE (8x before the section existed — pattern not specific to this rule)
+pin-whole-normalised-statement         2026-08-03..2026-08-27    84     94     51     55       63  FIRED
+round0-ledger                          2026-09-09                 —      —      —      —        —  UNRELIABLE (3x before the section existed — pattern not specific to this rule)
+missing-intermediate-block             2026-06-30..2026-09-02    48     61     10     32       44  FIRED
+round0-author-of-record                2026-09-09                 —      —      —      —        —  UNRELIABLE (3x before the section existed — pattern not specific to this rule)
+delta-no-block-refused                 2026-06-30..2026-08-28    46     57      5      3       33  FIRED
+emit-claims-audited                    2026-06-30..2026-08-28    34     55     17     31       19  FIRED
+fix-prose-is-next-finding              2026-08-25..2026-09-05    44     52     26      0       38  FIRED
+round0-prior-round-scrutiny            2026-09-09                 —      —      —      —        —  UNRELIABLE (3x before the section existed — pattern not specific to this rule)
+round0-simplify-is-operators           2026-09-09                 —      —      —      —        —  UNRELIABLE (4x before the section existed — pattern not specific to this rule)
+stale-claim-out-of-range               2026-08-30                 —      —      —      —        —  UNRELIABLE (3x before the section existed — pattern not specific to this rule)
+price-from-consuming-code              2026-08-03                35     40     15      0       30  FIRED
+review-comments-invisible              2026-06-30..2026-09-02    27     31      0      0       23  FIRED
+decide-once-revert-test                2026-09-08..2026-09-09     —      —      —      —        —  UNRELIABLE (5x before the section existed — pattern not specific to this rule)
+round0-reports-only                    2026-09-09                 —      —      —      —        —  UNRELIABLE (2x before the section existed — pattern not specific to this rule)
+not-a-round-cap                        2026-08-25                 —      —      —      —        —  UNRELIABLE (7x before the section existed — pattern not specific to this rule)
+payload-not-extension                  2026-08-27                 —      —      —      —        —  UNRELIABLE (5x before the section existed — pattern not specific to this rule)
+nits-are-a-stopping-round              2026-08-25..2026-09-09    10     12      7     33       10  FIRED
+sweep-every-claim                      2026-09-05                 7      9      6      0        5  FIRED
+round0-at-pr-create                    2026-06-30..2026-09-12     6      8      1      8        2  FIRED
+count-in-prose-is-a-claim              2026-09-05                 8      8      3      0        5  FIRED
+nine-axes                              2026-06-30..2026-09-09     6      6      2     29        5  FIRED
+fix-the-form-not-the-number            2026-08-25                 5      6      3      0        2  FIRED
+one-number-one-name                    2026-08-27..2026-09-08     5      6      2      1        3  FIRED
+high-yield-classes                     2026-06-30..2026-07-23     5      5      0      0        0  FIRED — devrc only (meta-session confounder unresolved)
+sweep-human-surface-first              2026-09-05                 —      —      —      —        —  UNRELIABLE (3x before the section existed — pattern not specific to this rule)
+frame-includes-should-exist            2026-08-25..2026-09-10     3      4      0      3        4  FIRED
+say-stop-rule-to-reauditor             2026-08-25                 —      —      —      —        —  UNRELIABLE (2x before the section existed — pattern not specific to this rule)
+round0-no-accelerate                   2026-09-09                 2      2      0      0        1  FIRED
+names-own-missing-variable             2026-09-05                 —      —      —      —        —  UNRELIABLE (1x before the section existed — pattern not specific to this rule)
+severity-cannot-end-ladder             2026-08-25..2026-09-09     1      1      1      1        1  FIRED
+invariant-clauses                      2026-06-30..2026-09-12     0      0      0      0        0  UNFIRED (not 'dead' — see blind spot 4)
+round0-not-revert-test                 2026-09-09                 0      0      0      0        0  UNFIRED (not 'dead' — see blind spot 4)
+base-is-current-tip                    2026-08-27                 0      0      0      0        0  UNFIRED (not 'dead' — see blind spot 4)
+SUMMARY  rules=49  FIRED=27  UNFIRED=3  UNRELIABLE=19
+```
+
+🔴 **A TRUNCATED HISTORY SCAN DOES NOT LOOK TRUNCATED, and this one was.** The first
+interval build read **1 of 23** versions because `git log --follow --reverse` returns ONE
+commit, silently — measured here: `--follow` alone 23, `--follow --reverse` 1 (with or
+without `--name-only`), `--reverse` alone 19 (it misses the pre-rename history from before the commands/skills merge). The 1-version scan dated every rule whose section existed
+back then and called the rest UNDATED, which is indistinguishable from a working dater with
+gaps; it was caught only because one rule went BACKWARDS from datable to UNDATED.
+`scan_reaches_current()` now refuses rather than degrading: the newest version scanned must
+BE the current skill, so it must carry every ledger probe. ⚠ Its limit is asserted in the
+test, not implied — dropping the newest real commit is NOT caught, because that commit
+changed no probe. It guards against a scan wired to nothing or grossly truncated; it is not
+a completeness proof.
+
+**What the dating fix does NOT fix — 19 rules, and they need different work.** Their
+`apply` patterns match ordinary English, so they match before even the section existed:
+`guard-lost-its-reason` (`has none`) 232 pre-origin hits, `clean-round-ends-ladder`
+(`clean round`) 106, then a tail at 13 and below. Tightening a pattern is not re-dating a
+rule; these stay withheld until someone does that, and withheld is not zero.
+
+**Unchanged and still the standout row:** `base-is-current-tip` — **370 injected loads,
+ZERO applications.** ⚠ Still not a deletion case on its own: silence can also mean nobody
+has violated the rule.
+
+⚠ **The `AMBIGUOUS` verdict is pinned by tests but has NEVER fired on the real corpus.** It
+needs `fired == 0` while `ambig > 0`, and every real rule with in-interval matches also has
+later ones. Recorded as an untested-in-production branch rather than as working coverage.

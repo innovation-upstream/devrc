@@ -439,7 +439,7 @@ def test_the_history_scan_either_reaches_the_CURRENT_skill_or_REFUSES(mod):
 
     `git log --follow --reverse` returns ONE commit, silently. MEASURED on this skill:
     `--follow` alone 23 versions, `--follow --reverse` 1, `--reverse` alone 19 (it misses
-    the pre-rename history at `claude/commands/audit-pr.md`). A 1-version scan does NOT
+    the pre-rename history from before the commands/skills merge). A 1-version scan does NOT
     look broken — rules whose section existed in that one old version get dated and every
     other rule reads UNDATED, indistinguishable from a working dater with gaps.
 
