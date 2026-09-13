@@ -44,6 +44,7 @@ retraction, so re-measure a route's door rather than trusting a remembered "open
 
 ## `DELETE /api/tasks/{id}` — corrected in the OTHER direction
 
+🔴 **`DELETE /api/tasks/{id}` deletes a task AND tears down its live dispatched agent pod**
 (`dismissTask`; **no in-progress guard, deliberately**). ⚠ This said *"unauthenticated on the LAN"*;
 it is **`requireHookToken`** (`server.go:699`), not `requireSession` — so it is wrong in the
 OPPOSITE direction from the retraction above, and the correction does not make it safer: **every
@@ -52,12 +53,12 @@ from anything that can read the file.
 
 ## `POST /agents` — corrected too
 
-- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb). ⚠ This said *"behind
-  the no-op `requireSession` → no auth on the LAN NodePort"* — **measured false 2026-09-12: a
-  credential-less `POST /agents` on the LAN returns `401`.** `requireSession` enforces now (see the
-  retraction above), so LAN dispatch needs a session. 🔴 The webhook rule is UNCHANGED and still
-  right: a future webhook needs a **separate hostname**, never a path bypass on
-  `clawgate.zacx.dev` — a bypass would put agent dispatch on the open internet.
+**`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb). ⚠ This said *"behind
+the no-op `requireSession` → no auth on the LAN NodePort"* — **measured false 2026-09-12: a
+credential-less `POST /agents` on the LAN returns `401`.** `requireSession` enforces now (see the
+retraction above), so LAN dispatch needs a session. 🔴 The webhook rule is UNCHANGED and still
+right: a future webhook needs a **separate hostname**, never a path bypass on
+`clawgate.zacx.dev` — a bypass would put agent dispatch on the open internet.
 
 ## The idle-task reaper, retired (evicted from the core 2026-09-13)
 
@@ -65,12 +66,6 @@ Since **0.7.96** (`cf529d41`, live) the daily idle-task reaper **tags `stale` + 
 comment** instead of calling `dismissTask`, so **nothing destroys a task or an agent pod on a
 timer**. `CLAWGATE_TASK_TTL` is still **unset in the deployment**, so the 7d default is LIVE — it
 now costs a tag, not the task (`off`/`0` disables).
-
-## `requireHookToken` is enforce-when-set (evicted from the core 2026-09-13)
-
-An **empty** token opens the machine endpoints. So "the API answered" is not evidence a credential
-was checked — confirm `CLAWGATE_HOOK_TOKEN` is actually set in the deployment before reading a 200
-as proof of anything.
 
 ## Per-host kubeconfig paths (evicted from the core 2026-09-13)
 
