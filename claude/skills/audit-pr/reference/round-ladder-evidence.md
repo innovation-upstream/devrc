@@ -632,3 +632,111 @@ skill performs — and the sentence that followed it ("an add-back of 0% means t
 too timid") asserted a direction measured nowhere, which is the shape the skill tells you to delete
 rather than reverse. Recorded here so nobody derives it again; it was cut from the body because it
 addresses a future EDITOR of the skill, not an auditor.
+
+## 2026-09-12 · has each rule FIRED since it was written — the first run, and why two-thirds of it is unanswered
+
+Handoff rank 14 asked, per rule in `SKILL.md`: has it caught anything SINCE its origin
+incident? `scripts/audit-rule-firing-sweep.py` answers it for 49 enumerated rules, and
+`scripts/tests/test_audit_rule_firing_sweep.py` pins the ledger both ways — every probe must
+still be in the skill, and every 🔴 paragraph must be a ledger rule or enumerated as not one.
+
+🔴 **THE NAIVE SWEEP IS A FALSE INSTRUMENT, AND THE NUMBER IS BIG ENOUGH TO LOOK LIKE A
+FINDING.** Grepping the corpus for a rule's own wording measures where the SKILL WAS LOADED:
+`payload lines changed THIS round` matched **1,022 of 5,993 transcript files**, because the
+skill body and every assembled brief are injected into the transcript of each session that
+uses them. Provenance-classified over the first 120 of those files, the matching blocks were
+**182 user-role text · 83 assistant · 55 `Read` results · 20 `Bash` results** — only the 83
+are the rule being applied. The separation is read off the transcript (`tool_use_id` → tool
+name), never inferred from the text, because a similarity heuristic here is the thing
+`scripts/lib/handoff_doc.py:179` refuses in terms.
+
+**Run 2026-09-12T20:33Z · corpus 5,993 files (both tiers — `subagents/` INCLUDED on purpose,
+because an auditor IS a subagent) · 5,855 after prefilter · controls POSITIVE 584 /
+NEGATIVE 0.**
+
+```
+rule                                   origin       sess  fired in-fnd nondevrc   noise last seen   verdict
+delta-vs-audited-tip                   2026-07-29   1376   2899    902     2107    6180 2026-09-12  FIRED
+attribution-gate                       2026-08-27      —      —      —        —    1633 —           UNRELIABLE (pattern matched 12x pre-origin)
+dispatch-blind                         2026-08-03    376   1011    136      697    1922 2026-09-12  FIRED
+round-ledger-line                      2026-08-27      —      —      —        —    2016 —           UNRELIABLE (pattern matched 3x pre-origin)
+verdict-is-not-the-stop                2026-08-25      —      —      —        —    1378 —           UNRELIABLE (pattern matched 2x pre-origin)
+per-prior-finding-status               2026-07-29    338    354    287      238    2999 2026-09-12  FIRED
+remerge-diff-flags                     2026-08-27      —      —      —        —    2251 —           UNRELIABLE (pattern matched 10x pre-origin)
+round0-first                           2026-09-12      —      —      —        —     892 —           UNRELIABLE (pattern matched 263x pre-origin)
+clean-round-ends-ladder                2026-08-25      —      —      —        —    3489 —           UNRELIABLE (pattern matched 108x pre-origin)
+brief-assembler                        2026-08-28      —      —      —        —    3639 —           UNRELIABLE (pattern matched 19x pre-origin)
+mutation-deletion-easy-half            2026-08-03    144    181     65      146    1208 2026-09-12  FIRED
+prose-escape-hatch                     2026-08-30      —      —      —        —     567 —           UNRELIABLE (pattern matched 26x pre-origin)
+pr-description-corrected-publicly      2026-07-29    116    151     41      120     777 2026-09-12  FIRED
+behaviour-or-guard-label               2026-08-27      —      —      —        —     703 —           UNRELIABLE (pattern matched 11x pre-origin)
+guard-lost-its-reason                  2026-09-05      —      —      —        —    3499 —           UNRELIABLE (pattern matched 236x pre-origin)
+pin-whole-normalised-statement         2026-08-27      —      —      —        —    1316 —           UNRELIABLE (pattern matched 56x pre-origin)
+round0-delete-pass                     2026-09-09      —      —      —        —     284 —           UNRELIABLE (pattern matched 8x pre-origin)
+missing-intermediate-block             2026-09-02      —      —      —        —     676 —           UNRELIABLE (pattern matched 32x pre-origin)
+emit-claims-audited                    2026-08-28      —      —      —        —    1074 —           UNRELIABLE (pattern matched 31x pre-origin)
+delta-no-block-refused                 2026-08-28      —      —      —        —     365 —           UNRELIABLE (pattern matched 3x pre-origin)
+round0-ledger                          2026-09-09      —      —      —        —     208 —           UNRELIABLE (pattern matched 3x pre-origin)
+round0-author-of-record                2026-09-09      —      —      —        —     186 —           UNRELIABLE (pattern matched 3x pre-origin)
+fix-prose-is-next-finding              2026-09-05     40     45     22       34     313 2026-09-12  FIRED
+price-from-consuming-code              2026-08-03     39     45     16       35     769 2026-09-08  FIRED
+round0-prior-round-scrutiny            2026-09-09      —      —      —        —     179 —           UNRELIABLE (pattern matched 3x pre-origin)
+stale-claim-out-of-range               2026-08-30      —      —      —        —     463 —           UNRELIABLE (pattern matched 3x pre-origin)
+round0-simplify-is-operators           2026-09-09      —      —      —        —     166 —           UNRELIABLE (pattern matched 4x pre-origin)
+decide-once-revert-test                2026-09-08      —      —      —        —     239 —           UNRELIABLE (pattern matched 5x pre-origin)
+nine-axes                              2026-06-30     33     35     15       30    2309 2026-09-12  FIRED
+review-comments-invisible              2026-09-02     27     31      0       23     217 2026-09-12  FIRED
+round0-reports-only                    2026-09-09      —      —      —        —     141 —           UNRELIABLE (pattern matched 2x pre-origin)
+not-a-round-cap                        2026-08-25      —      —      —        —     511 —           UNRELIABLE (pattern matched 7x pre-origin)
+payload-not-extension                  2026-08-27      —      —      —        —     465 —           UNRELIABLE (pattern matched 5x pre-origin)
+nits-are-a-stopping-round              2026-09-09      —      —      —        —     244 —           UNRELIABLE (pattern matched 33x pre-origin)
+sweep-every-claim                      2026-09-05      6      8      6        4     169 2026-09-11  FIRED
+count-in-prose-is-a-claim              2026-09-05      8      8      3        5     215 2026-09-12  FIRED
+round0-at-pr-create                    2026-09-12      —      —      —        —     440 —           UNRELIABLE (pattern matched 8x pre-origin)
+fix-the-form-not-the-number            2026-08-25      5      6      3        2     359 2026-09-12  FIRED
+one-number-one-name                    2026-09-08      —      —      —        —      87 —           UNRELIABLE (pattern matched 1x pre-origin)
+high-yield-classes                     2026-07-23      5      5      0        0     591 2026-09-12  FIRED — devrc only (meta-session confounder unresolved)
+sweep-human-surface-first              2026-09-05      —      —      —        —     143 —           UNRELIABLE (pattern matched 3x pre-origin)
+frame-includes-should-exist            2026-09-10      —      —      —        —      90 —           UNRELIABLE (pattern matched 3x pre-origin)
+say-stop-rule-to-reauditor             2026-08-25      —      —      —        —    1159 —           UNRELIABLE (pattern matched 2x pre-origin)
+round0-no-accelerate                   2026-09-09      2      2      0        1     106 2026-09-12  FIRED
+names-own-missing-variable             2026-09-05      —      —      —        —     183 —           UNRELIABLE (pattern matched 1x pre-origin)
+severity-cannot-end-ladder             2026-09-09      —      —      —        —      79 —           UNRELIABLE (pattern matched 1x pre-origin)
+invariant-clauses                      2026-09-12      0      0      0        0      10             UNFIRED (not 'dead' — see blind spot 4)
+round0-not-revert-test                 2026-09-09      0      0      0        0     104             UNFIRED (not 'dead' — see blind spot 4)
+base-is-current-tip                    2026-08-27      0      0      0        0     363             UNFIRED (not 'dead' — see blind spot 4)
+SUMMARY  rules=49  FIRED=14  UNFIRED=3  UNRELIABLE=32
+```
+
+🔴 **`fired` counts APPLICATIONS, not catches.** The item asked "caught anything"; whether an
+application caught a defect needs the finding read, so `in-fnd` — a match within 600 chars of
+a severity marker — is the narrower column. Prefer `sess`: one verbose auditor restating a
+rule eight times is eight blocks and one use.
+
+🔴 **32 OF 49 ROWS ARE WITHHELD, AND THAT IS A FAULT IN THE DATING, NOT A FINDING ABOUT THE
+RULES.** Origin is dated by `git log -S<probe>` on the rule's CURRENT wording, so a rule
+reworded after its practice began dates at the reword — and **44 of 49 origins fall in
+2026-08/2026-09**, because this skill reworded nearly everything inside six weeks. Ordinary
+earlier use then lands before the window and trips the specificity control. The pre-origin
+count separates the two causes at a glance: **>=10 is a genuinely over-broad pattern**
+(`round 0` 263, `has none` 236, `clean round` 108 — all ordinary English), **1-8 is a rule
+whose practice predates its sentence** (20 rules, whose numbers were probably usable and were
+withheld anyway). 🔴 **Do not raise a threshold to clear them** — that number was measured
+nowhere, and withholding is the honest behaviour. Date the rule on something that survives an
+edit instead: the containing section's first commit, or an explicitly recorded origin.
+
+**What the run does support today:**
+- `base-is-current-tip` — **363 injected loads over 16 days, ZERO applications.** The
+  strongest loaded-but-never-applied signal in the table, and the kind of row rank 14 existed
+  to surface. ⚠ Not a deletion case on its own: silence can also mean nobody has violated it.
+- `review-comments-invisible` — 27 sessions, 31 applications, **`in-fnd` 0**: applied as
+  operating guidance, never beside a severity marker.
+- `high-yield-classes` — fired in devrc project dirs ONLY, so the meta-session confounder (a
+  session EDITING this skill discusses its rules in assistant text) is unresolved for it.
+- The long tail is real: `delta-vs-audited-tip` 1,376 sessions, `dispatch-blind` 376,
+  `per-prior-finding-status` 338, `mutation-deletion-easy-half` 144.
+
+⚠ **Blind spots, stated rather than implied.** Claude Code only — opencode audits are outside
+this corpus and uncounted. UNFIRED is never "dead". And a rule can be FOLLOWED without anyone
+writing a sentence the sweep can match, so a low count is weak evidence about the RULE and
+strong evidence only about the WORDS.
