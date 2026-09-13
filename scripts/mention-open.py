@@ -2048,24 +2048,48 @@ def open_reference(url: str) -> tuple[int, str]:
 # writing down. MEASURED 2026-09-12 (`TIOCGWINSZ` on each host's own alacritty
 # pty): the workbench's cell is 11.0x22.0 px in a 3440x1413 workspace, the
 # laptop's 19.0x37.0 px in 2256x1480. So the review window's 200x50 was
-# 3800x1850 px on the laptop — 168% x 125% of that workspace, grossly unusable —
-# while this picker's 120x22 is 1320x484 px on the workbench (38% x 34%, fine) and
-# 2280x814 on the laptop: ~101% of its WIDTH, over by about 24 px of grid before
-# any window decoration is counted.
+# 3800x1850 px on the laptop — 168% x 125% of that workspace, grossly unusable.
 #
-# ⚠ SO THE PICKER IS MARGINALLY TOO WIDE ON THE LAPTOP TOO. That is a
-# PRE-EXISTING condition, not something the review window's fix introduced, and it
-# is deliberately left alone here: 24 px of overflow on a centred float is a
-# cosmetic clip, not the unusable window that prompted the review-window change,
-# and narrowing `PICKER_COLUMNS` changes a layout the operator reads constantly
-# (`format_row` wraps to `PICKER_COLUMNS - 2`). Fixing it is a separate decision
-# with its own before/after, not a side effect of this one.
+# 🔴 AND THE PICKER OVERFLOWED THE LAPTOP TOO — 120 COLUMNS IS WHY IT IS NOW 110.
+# This block used to say the picker's overflow was "deliberately left alone",
+# "cosmetic", and "a separate decision with its own before/after". That decision
+# has since been made, by the operator, from the screen: with the review window
+# fixed, the picker was the window still hanging off the edge, and it was reported
+# as such. What follows is the before/after that comment asked for.
 #
-# Giving the picker an i3 resize would restate its geometry in a second file that
-# cannot see these constants — so if the 24 px is ever worth closing, the lever is
-# `PICKER_COLUMNS` here, not a `resize set` there.
+# 🔴 MEASURED LIVE on the laptop from `i3-msg -t get_tree` — not computed, which
+# matters because the earlier figure in this block was computed and understated it.
+# At 120 columns: client 2280x814, **container rect 2284x818** against a 2256 px
+# screen, positioned at **x = -14**. Because i3 centres it, the overflow is split
+# across BOTH edges — ~14 px clipped left and right, about 1.5 columns. The old
+# "over by about 24 px" counted the CLIENT against the screen and omitted the
+# 2 px border on each side; the rect is what has to fit, and it was 28 px over.
+#
+# At 110 columns: 110*19 = 2090 client, 2094 rect — 162 px of margin on the
+# laptop, and 1214 rect on the workbench (110*11 + 4). 118 columns would also
+# technically fit (2246 rect, 10 px spare) and is rejected for that reason: a
+# margin thinner than one cell does not survive a font change, and the whole
+# defect class here is a geometry that was only ever right on one display.
+#
+# ⚠ THE COST IS REAL AND WAS THE REASON FOR DEFERRING: `picker_header` wraps to
+# `PICKER_COLUMNS - 2`, so the note above the list is now wrapped at 108 rather
+# than 118 — ten characters narrower on a surface the operator reads constantly.
+# That is the trade, accepted deliberately, not an unnoticed side effect.
+#
+# 🔴 THE WRAPPER IS `picker_header`, NOT `format_row`. The comment this block
+# replaced named `format_row`, and NO SUCH FUNCTION HAS EVER EXISTED in this file
+# — a cross-reference nothing could check, propagated once while rewriting this
+# very paragraph before a guard caught it. `test_the_PICKERS_WRAP_WIDTH_tracks_
+# its_COLUMN_COUNT` now CALLS `picker_header` by name, so the next wrong name
+# fails loudly instead of reading as documentation.
+#
+# Giving the picker an i3 `resize set` instead would restate its geometry in a
+# second file that cannot see these constants — and `picker_header`'s wrap width is
+# derived from this number, so an i3-side size would silently disagree with the
+# width the text was wrapped for. The lever is `PICKER_COLUMNS` here, which is
+# what `test_i3_picker_centering.py` pins by asserting i3 only CENTRES the picker.
 PICKER_CLASS = "float,mention-open"
-PICKER_COLUMNS = 120
+PICKER_COLUMNS = 110
 PICKER_LINES = 22
 
 # 🔴 THE ROWS NEVER TOUCH argv, AND THAT IS THE WHOLE REASON FOR THE FIFOs.
