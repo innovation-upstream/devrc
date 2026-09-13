@@ -18,48 +18,45 @@ picker window, (3) ship click telemetry to `activity.events`, (4) open PRs in a 
 instead of a browser.
 
 ## State now
-🔴 **RANK 1 IS EXERCISED** — `picks.jsonl` EXISTS and GREW from a real operator click on the
-**laptop** (37 → 38 → 40 rows; newest at the time of measurement
-`{"n": 581, "repo": "civitai/cli", "via": "picker"}`). The workbench's file is **still absent**,
-and that is the wrong-host answer, not a broken fix: the auto-open arm was driven end-to-end on
-the workbench's live source under full isolation (`MENTION_OPEN_PICKS` + `ACTIVITY_SPOOL_DIR`
-redirected, launchers stubbed) and wrote `{"n": 1291, …, "via": "auto"}` plus the click row
-`outcome=auto-open … picker_shown=false surface=tui`, with the real file verified ABSENT before
-and after. ⚠ `via: "auto"` has still never been written by a HUMAN; every recorded row is
-`via: "picker"`.
+✅ **ALL FOUR ORIGINAL OBJECTIVES ARE CLOSED, EACH WITH LIVE EVIDENCE. THE ARC IS DONE.**
 
-**NEW DEFECT FOUND AND FIXED IN FLIGHT — operator, verbatim: *"the new tui opens far too big and
-overflows the screen, its unusable"*.** `IN FLIGHT: devrc#1619`, branch
-`fix/mention-review-window-ppt`, head **`70e2ba07`**.
+| # | objective | evidence |
+|---|---|---|
+| 1 | record picks that were dropped | **2 `via=auto` rows** from real clicks (laptop, 09-12) |
+| 2 | centre the picker window | **`2094x818 at +81`** — `(2256-2094)/2 = 81`, exactly centred, 162 px margin |
+| 3 | click telemetry → `activity.events` | **9 rows** with the full dim set |
+| 4 | open PRs in a TUI, not a browser | **review buffer loads CLEAN** — operator confirmed 2026-09-13 |
 
-- **What it does now:** `nix/i3/config.nix` gains
-  `for_window [class="float" instance="mention-review"] floating enable, resize set ${reviewSizePpt}, move position center`
-  with `reviewSizePpt = if isLaptop then "90 ppt 90 ppt" else "64 ppt 77 ppt"` (the existing
-  `{ isLaptop }` mechanism). `REVIEW_COLUMNS`/`REVIEW_LINES` and both
-  `-o window.dimensions.*` flags are **deleted** — i3 is the sole authority on this window's
-  geometry. The picker's constants are untouched.
-- **Operator decisions, both this session:** per-host percentages (not one value), and delete the
-  cell hint entirely.
-- **Tests:** 603 collected / 603 passed. Four guards red at `d1f80d4a`, two more red at
-  `451ead89`. 20-mutant sweep, all killed, with M02 and M18 each killed by ONE guard alone
-  (proving the two new guards REACHABLE, not merely breakable) and a comment-only mutant
-  SURVIVING as the readability control.
-- 🔴 **AUDIT LADDER DELIBERATELY ENDED after round 2** (`gh pr view 1619` → the
-  `Audit ladder — DELIBERATELY ENDED` comment carries the full record). Round 0 questioned the
-  requirement, round 1 (blind, nine axes) and round 2 (delta) each found real defects which were
-  fixed. **Ended on the prose-payload criterion, NOT converged** — see the Gotchas entry for why
-  it could not terminate on its own. Zero 🔴 in any round.
-- 🔴 **NOT DEPLOYED, and merging will not deploy it.** `nix/i3/config.nix` is a `home.file`
-  target. Required ordered sequence: **merge → `scripts/ship.sh` → `i3-msg reload` on each host.**
-  Between the switch and the reload the TUI opens at alacritty's default **~80×24** on BOTH hosts
-  (new script passes no dimensions; old i3 config has no sizing rule) — small and usable, not
-  overflowing, but a real intermediate state. The reload is a DEPLOY step, not a verification step.
-- **`devrc#1620`** carries this doc. Its three Tekton checks are GREEN (pytest 22,831 passed,
-  node 1,449, cairn client). #1619's were pending at the new head.
-- **This session resolved no clawgate task** — `clawgate_handoff.sh resolve` exited 5 (0 tasks).
-  An unknown session id answers 200 with an empty array, so that is NOT evidence it touched none.
-- ⚠ The shared checkout moved repeatedly under this session (`7e000e6b` → `b55720e8` →
-  `22ddd8dc` → `14daa42a` → `c794c9a7`), by other sessions. Re-read `git status` before any write.
+Objective 3's evidence (ClickHouse `activity.events`, `text='mention-open'`), one row verbatim:
+`{"tool":"mention-open","outcome":"picked","repo":"civitai/civitai","platform":"github",`
+`"picker_shown":true,"offered_total":393,"rank":3,"plausibility":"below","reason":"selected",`
+`"ordered":true,"pinned_above":2,"surface":"tui"}`
+
+**Both windows measured live on the laptop from `i3-msg -t get_tree`, captured by an
+`i3-msg -t subscribe` monitor rather than by opening anything** — so the operator's screen was
+never taken. Review `2030x1353 at +113+88`, client `2026x1349` = **106x36 character cells**,
+the FIRST observation of that window's grid; picker `2094x818 at +81+355`. Both exactly centred.
+
+**Merged, deployed to BOTH hosts, verified by content on `origin/main` (never by ancestry):**
+
+| PR | squash | what |
+|---|---|---|
+| **#1619** | `243b3a06` | review window sized per-host in percent of OUTPUT; cell hint deleted |
+| **#1632** | `c3ff700c` | picker 120→110 cols — it overflowed the laptop by 28 px at `x=-14` |
+| **#1633** | `86560804` | `NVIM_APPNAME` isolation — the TUI was loading the operator's packer plugins |
+| **#1620** | `f5942a24` | an earlier revision of this doc |
+
+`ship.sh` rc=0 three times; the last converged both hosts at `86560804` and **COMPARED** them
+(594/553 managed artifacts, 0 dangling, 0 stale each). `i3-msg reload` on both.
+
+🔴 **AUDIT LADDER ON #1619 DELIBERATELY ENDED after round 2 — ENDED, not CONVERGED.** Rounds 0,
+1 (blind, nine axes) and 2 (delta) each found real defects, all fixed; zero 🔴 in any round.
+Reason and residuals recorded on the PR (`Audit ladder — DELIBERATELY ENDED`).
+
+- **This session resolved no clawgate task** — `resolve` exited 5 with a POSITIVE CONTROL (the
+  same endpoint answered 3 links for another session). That narrows it to "a correct id WOULD
+  have resolved"; it is NOT evidence this session touched no task. No `clawgate-task:` written.
+- All `mention-*` claims RELEASED; this session's worktrees removed.
 
 ## Open investigations — live diagnosis state
 
@@ -187,53 +184,98 @@ framing and the arithmetic that moved.
   the live read is evidence for the border STYLE and the CELL SIZE only.
   `floating_resize`'s increment snapping remains unmodelled.
 
+### ✅ RETIRED — "The rendered grid has never been observed, and one term remains unmeasurable"
+- as-of: 2026-09-13
+🔴 **HALF of that block is now CLOSED by measurement; do not re-derive either half.** The
+decoration term it called unmeasurable — "a floating `deco_rect` was never obtainable, no
+floating containers in any live tree" — was measured the moment the PICKER was captured:
+client `2280x814` inside rect `2284x818`, i.e. **exactly 2 px per side**, confirming the
+BS_PIXEL/`logical_px(2)` model that all three audit rounds could only derive from i3's C.
+⚠ Still open from it: the REVIEW window's character grid has never been observed on either host,
+and `floating_resize`'s increment snapping remains unmodelled.
+
+### 🔴 Objective 4: the review TUI has never run end to end
+- as-of: 2026-09-13
+- **Symptom + exact repro:** selecting a row in the mention picker opened a neovim window that
+  errored `module 'lyaml' not found`. Repro before the fix: click a `repo#N` on the laptop,
+  select a row from the picker.
+- **Observed (with values):** `E5108: Lua:
+  .../nvim/site/pack/packer/start/qdr.nvim/lua/qdr-nvim/qdr.lua:2: module 'lyaml' not found`,
+  then `loop or previous error loading module 'qdr-nvim'`. Reproduced headlessly off the
+  wrapper's own neovim (`/nix/store/3x220pvz…-neovim-0.12.5/bin/nvim --headless +qa`).
+- **Ruled out:** that octo or the wrapper's own plugin set was at fault — the trace names a
+  PACKER-installed plugin of the operator's under `~/.local/share/nvim/site`, loaded because
+  neovim's default `packpath` includes that directory whatever `-u` says. via: measurement
+- **Ruled out:** that the fix is the missing rock. `default.nix` claims the plugin set "cannot be
+  broken by" an editor-config edit; adding `lyaml` would make that ONE plugin load inside a
+  review TUI with no business running it and leave every other plugin able to break it next
+  time. via: code
+- **Ruled out:** that `NVIM_APPNAME` isolation breaks octo — with it set, a headless load emits
+  NOTHING, `require("octo")` is `true` and `vim.fn.exists(":Octo")` is `2`, so `setup()` ran and
+  still found `gh`. Re-verified on the DEPLOYED laptop artifact
+  (`/nix/store/l0x996h4…-nvim-octo`) with `qdr.nvim` still installed. via: measurement
+- **Leading hypothesis:** none — fixed and deployed (`86560804`). What is UNVERIFIED is only
+  whether a human gets a working review buffer, because the store path is baked into alacritty's
+  config and a running terminal resolved the old one.
+- **Next probe:** rank 1. A NEW alacritty window, click, select, and `:map <localleader>pm`.
+
+### ✅ CLOSED 2026-09-13 — the picker's geometry, verified LIVE on the laptop
+`as-of: 2026-09-13`
+🔴 **Measured from i3's own tree the moment the window appeared, so this one is DONE — do not
+re-verify it.** `PICKER mention-open rect=2094x818 at +81+355 client=2090x814` against the
+laptop's `2256x1480` workspace: **162 px of margin and a POSITIVE x**. Before `c3ff700c` it was
+`2284x818 at x=-14` — 28 px over, hanging off BOTH edges because i3 centres it.
+⚠ And it is **exactly centred**, not merely fitting: `(2256 - 2094) / 2 = 81`, which is the x
+i3 produced. That retires the caveat the previous revision carried on objective 2 ("its WIDTH
+changed, new geometry unverified live"). Captured by an `i3-msg -t subscribe -m '["window"]'`
+monitor rather than by opening a window, so the operator's screen was never taken.
+
+### ✅ CLOSED 2026-09-13 — objective 4: the review TUI runs end to end
+`as-of: 2026-09-13`
+🔴 **The operator confirmed the review buffer loads CLEAN after `86560804`. Do not re-open this.**
+The `lyaml` crash is gone, and the window's geometry was measured the same session:
+`rect=2030x1353 at +113+88`, client `2026x1349` → **106x36 cells**, 226 px margin, exactly
+centred (`(2256-2030)/2 = 113`).
+⚠ **What the measurement alone could NOT establish, recorded because it nearly closed this
+prematurely:** a window showing an `E5108` trace has the SAME rectangle as a working one, and by
+the time the geometry was captured the window was closed (no live `nvim` carrying
+`NVIM_APPNAME`, no mapped `mention-review`), so process state could not answer either. The
+closure rests on the OPERATOR READING THE SCREEN — which is the only instrument that could.
+⚠ Still not done, and it is rank 1: `:map <localleader>pm` in a live buffer.
+
 ## Next steps (ranked)
-1. 🔴 **MERGE #1619, THEN DEPLOY IT — the operator cannot use the review TUI until this lands.**
-   Ordered: merge → `scripts/ship.sh` → `i3-msg reload` on each host. Read EVERY per-host line of
-   `ship.sh`, not its final verdict. Then click a `repo#N` mention on the **laptop** and read the
-   `mention-review` window's rect out of `i3-msg -t get_tree` against the workspace rect
-   (`2256x1480`); expect ~`2030x1332`. **IN FLIGHT: devrc#1619.** Repo: devrc.
-   forcing: user — the operator reported the TUI unusable, verbatim, this session.
-2. 🔴 **That click is also the ONLY way to close the one thing three audit rounds could not:**
-   whether i3 honours `resize set <n> ppt <n> ppt` in a `for_window` on a FLOATING container at
-   map time. The MECHANISM is established from i3 4.25.1 source (`cmd_resize_set`) and i3's own
-   implementing testcase (i3/i3#3023) — but it has never been observed live, and it is the single
-   assumption the whole fix rests on. Repo: devrc.
-   forcing: user — same report; the fix is unverified against the symptom that motivated it.
-3. **Merge #1620** (this doc). All three checks green. Repo: devrc.
+1. **Check the merge-safety assertion in a live review buffer — the ONE sub-item never done.**
+   In a review buffer, `:map <localleader>pm` **must report `No mapping found`**. `octo-init.lua`
+   sets `mappings_disable_default = true` and re-declares only non-destructive keys, and
+   `scripts/tests/test_nvim_octo.py` asserts that STRUCTURALLY over the config — but a config
+   saying a mapping is gone is a claim about the FILE; only a live buffer proves the buffer.
+   Repo: devrc.
+   forcing: none
+2. **Add the `adoption-scan` registry row for the click telemetry.** CONFIRMED ABSENT (no
+   `mention-open` hit under `scripts/adoption*`). The dims are landing in ClickHouse NOW, so the
+   tool built to answer "is this used?" still cannot see the feature built to make usage visible.
+   Repo: devrc.
+   forcing: none
+3. **Decide whether Tier A ranking helps — ANSWERABLE and unanswered.** `rank` and
+   `plausibility` are in the data. 9 rows is far too few; revisit after weeks of clicks. Chosen
+   `rank` should cluster near 0 and `plausibility` skew PLAUSIBLE. Repo: devrc.
    forcing: none
 4. **Rename `test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders`** — the name
-   over-states what it pins (the workbench comes out one COLUMN narrower: 199x50, not 200x50).
-   Its docstring now tells the reader to read the name narrowly and enumerates what it does not
-   establish. Deferred from round 2 because renaming ripples into the red-at-base matrix and the
-   mutant ledger. Repo: devrc.
+   overstates what it pins (the workbench renders 199x50, one column NARROWER than 200x50).
+   Deferred from audit round 2; its docstring says to read the name narrowly. Repo: devrc.
    forcing: none
-5. **Drive `via: "auto"` once from a real click.** Every recorded row is `via: "picker"`. The auto
-   arm is measured working as CODE but never through the alacritty hint wrapper, which carries the
-   display manager's environment rather than a shell's. Repo: devrc.
+5. **Close or merge `#1539`** — the SUPERSEDED mention-arc handoff naming the obsolete two-PR
+   dependency for main's kill-scanner red. Repo: devrc.
    forcing: none
-6. **Add the `adoption-scan` registry row for the click telemetry** (`surface`, `rank`,
-   `plausibility`, `offered_total`, `via`). Flagged by #1569's author as not done. Repo: devrc.
+6. **Prune this arc's agent worktrees** under `.claude/worktrees/agent-*`. ⚠ Skip
+   `agent-a8d600896310294ae` (LOCKED) and anything not yours; ~238 belong to other sessions.
+   Repo: devrc.
    forcing: none
-7. **Confirm a real click row reaches `activity.events`.** The SHAPE is verified — an isolated
-   probe produced a well-formed spool line with `surface=tui` — but no real row has been observed
-   in ClickHouse. Deliberately not faked. Repo: devrc.
+7. ⚠ **NOT THIS ARC'S: the handoff doc-size gate is RED on `main`** —
+   `handoff-cairn-oss-multi-instance.md` (200,600 B over 196,608 B) and
+   `handoff-gate-speed-and-ci-signal.md` (86,111 B over 81,920 B) are over their grandfathered
+   allowances. A permanently-red gate trains people to click through it. Repo: devrc.
    forcing: none
-8. **The PICKER is also too wide on the laptop** — `120x22` cells = `2280x814` px against a
-   `2256` px width, **101.1%, over by 24 px**. Pre-existing and cosmetic; `format_row` wraps to
-   `PICKER_COLUMNS - 2`, so narrowing it changes a layout the operator reads constantly. Repo: devrc.
-   forcing: none
-9. **Decide whether Tier A ranking actually helps** — answerable after weeks of real clicks now
-   that rank/class/total-offered are recorded. Repo: devrc.
-   forcing: none
-10. **Close or merge #1539** (`docs/handoff-arc-final-close`) — the SUPERSEDED mention-arc handoff
-    naming the obsolete two-PR dependency for main's kill-scanner red. Repo: devrc.
-    forcing: none
-11. **Prune this arc's agent worktrees** under `.claude/worktrees/agent-*`. ⚠ One
-    (`agent-a8d600896310294ae`) was LOCKED by the harness and must not be force-removed; several
-    others were removed cleanly this session. The repo holds ~150 belonging to other sessions.
-    Repo: devrc.
-    forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A `record_pick` that exists is not a `record_pick` that runs.** The function, its
@@ -621,21 +663,95 @@ framing and the arithmetic that moved.
   fired. They were carried forward under `Gotchas` by reading the diff. A silent run is not
   evidence nothing durable was dropped.
 
+- 🔴 **VERIFYING THE CONTAINER IS NOT VERIFYING THE CONTENTS, AND THIS ARC PAID FOR IT TWICE.**
+  Three audit rounds refined the review window's GEOMETRY and each recorded "the live path is
+  unverified"; the first real click found a **crash inside** the window, not a sizing problem —
+  and the telemetry still said `surface: "tui"`, because alacritty exits 0 whether its `-e`
+  payload runs or dies at 127. A measured, centred, correctly-sized window containing a stack
+  trace satisfies every assertion this repo can make about it.
+- 🔴 **`for_window … floating enable` DOES NOT TAKE `default_floating_border`.** That default is
+  applied only on the `automatic` path inside `floating_enable()`; a `for_window` COMMAND reaches
+  `floating_enable(con, false)`, so the container keeps `default_border` — here `pixel 2`.
+  Getting this backwards inverted a whole round's arithmetic: with a titlebar the 51st row is
+  visible, with a 2 px border it is absorbed, so `77 ppt` and `78 ppt` render IDENTICALLY.
+  `77` is retained only because it is committed; its original rationale is void and was
+  deliberately NOT replaced.
+- 🔴 **i3's `resize set … ppt` RESOLVES AGAINST THE OUTPUT RECT; `move position center` IN THE
+  SAME CHAIN USES THE WORKSPACE.** The bar's height (27/24 px) is the difference, so width is
+  unaffected and height is understated by one bar. i3's own test suite cannot catch this — its
+  fake outputs carry no bar. Do not carry one rect over to the other.
+- 🔴 **TWO WINDOWS HAD THE SAME DEFECT AND ONLY ONE WAS FOUND BY REASONING.** Both the review
+  window and the PICKER were sized in CELLS (`11.0x22.0` px on the workbench, `19.0x37.0` on the
+  laptop), so one constant could not fit both displays. The picker was found only because the
+  operator said the symptom persisted and the next step was to MEASURE rather than to tune the
+  number they had asked for — narrowing the review window would have shrunk a correct window and
+  left the actual complaint untouched. Three audit rounds had seen the picker and filed it
+  "pre-existing, cosmetic"; it was the window on screen.
+- 🔴 **AN AUDIT LADDER WHOSE PAYLOAD IS PROSE CANNOT TERMINATE ON ITS OWN.** #1619 shipped ~5
+  lines of code and ~150 of comment, so the attribution gate is inert (comment lines in payload
+  files ARE payload lines) and "fixed a defect" and "reworded a warning" are the same edit:
+  round 1's fix introduced a false claim *while documenting the term it had just found it was
+  ignoring*, and round 2's fix was entirely prose correcting it. Stop on the stated criterion and
+  WRITE THE REASON DOWN, or an ended ladder is indistinguishable from a converged one.
+- 🔴 **FOUR SWEEP-HARNESS BUGS ON ONE PR, ACROSS FOUR AGENTS EACH BRIEFED ON THE EARLIER ONES:**
+  a `^` without `re.MULTILINE` (0 names over a log with 14 failures); a verdict regex matching
+  pytest's `short test summary info` banner; a `-k review` filter silently deselecting the
+  killing guard; and `-q` printing neither `collected N items` nor a decorated tail. **Not one
+  was caught by reading more carefully** — every catch came from a control or from
+  cross-checking the failure COUNT against a second, independently-derived read.
+- 🔴 **WORKTREE ISOLATION DOES NOT SURVIVE A SESSION RESTART.** An audit agent's worktree was
+  removed during an API-limit restart; its cwd silently fell back to the SHARED checkout and it
+  ran `git checkout --detach` there, noticing six tool calls later. Independently verified
+  afterwards (reflog shows a clean round trip, `main` never moved, stash stack untouched) —
+  because an agent's own "cleaned up" claim is not evidence. **Re-check `pwd` after any resume.**
+- 🔴 **`xargs -0 command grep` SILENTLY FINDS NOTHING** — `command` is a shell builtin, so xargs
+  has nothing to exec, and `2>/dev/null` eats the error. It returned "no consumers of
+  PICKER_COLUMNS", which was false. **The only reason it was caught is that the POSITIVE CONTROL
+  came back empty too.** Use an absolute `/run/current-system/sw/bin/grep`.
+- 🔴 **A CROSS-REFERENCE IS A CLAIM: `format_row` NEVER EXISTED in `mention-open.py`** — the
+  wrapper is `picker_header`. The false name sat in a comment, was propagated once while
+  REWRITING that comment, and the first draft of the new guard used `hasattr(MO, "format_row")`
+  and would have **SKIPPED ITSELF SILENTLY**. Other modules do have a real `format_row`, which is
+  exactly why grepping for it looks reassuring. The guard now calls `picker_header` by name.
+- ⚠ **A STALE MEASUREMENT REPORTED AS CURRENT STATE.** Objectives 1 and 3 were reported as open
+  after the operator's clicks had already closed them — the summary described the last reading
+  rather than re-reading. Re-measure before asserting status, including status you measured
+  yourself an hour earlier.
+- ⚠ **THIS DOC IS NOW CAPPED.** `scripts/tests/test_handoff_doc_size.py` caps every
+  `claudedocs/**/handoff-*.md` at `MAX_BYTES` and this doc is **NOT** grandfathered, so it must
+  stay under the ceiling — read the number in the test, never restate it. It was 50,476 B before
+  this update. `Open investigations` and `Gotchas` APPEND, so the doc only grows: future updates
+  should prune a superseded block rather than only adding, and a breach needs a grandfather entry
+  (which the test calls a ratchet whose removal is the goal).
+
 ## How to verify
 ```bash
-# THE one check that closes this arc — after a real click on a `repo#N` mention
-wc -l < ~/.config/mention-open/picks.jsonl        # must EXIST and GROW (was absent)
+# 🔴 RANK 1 — and a NEW alacritty window is mandatory: the nvim-octo store path is baked into
+# alacritty's config, which a running terminal already resolved.
+#   click a `repo#N` -> select a row -> a review buffer must LOAD (no `lyaml` trace)
+#   then, in that buffer:  :map <localleader>pm      -> must print `No mapping found`
 
-# Centering, live, without launching the picker (raises ONE window; restore after)
-i3-msg -t get_config | grep 'class="float"'       # line 47 no position; the instance rule centres
-# NB: i3-msg needs DISPLAY=:0, XAUTHORITY and I3SOCK from /proc/$(pgrep -x i3)/environ
+# The deployed wrapper, without opening a window (run on the host you are testing)
+NO=$(grep -oE '/nix/store/[a-z0-9]*-nvim-octo' "$(readlink -f ~/.config/alacritty/alacritty.toml \
+  | xargs grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' | head -1)" | head -1)
+grep -n 'NVIM_APPNAME=nvim-octo' "$NO/bin/nvim-octo"      # must be present
 
-# The click path reaches the TUI binary (NOT the interactive PATH — that is by design)
-W=$(readlink -f ~/.config/alacritty/alacritty.toml)
-H=$(grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' "$W" | head -1)
-grep -o '/nix/store/[a-z0-9]*-nvim-octo' "$H"     # ⚠ do NOT require a version suffix
+# Geometry, live, WITHOUT launching anything — read it while a window happens to be open
+i3-msg -t get_tree | python3 -c "import json,sys
+def w(n):
+  p=n.get('window_properties') or {}
+  if p.get('instance') in ('mention-review','mention-open'): print(p['instance'], n['rect'])
+  for c in n.get('nodes',[])+n.get('floating_nodes',[]): w(c)
+w(json.load(sys.stdin))"
+# laptop expectations: review 2030x1353 at +113+88 · picker 2094x818 (was 2284x818 at x=-14)
+# 🔴 i3-msg needs DISPLAY, XAUTHORITY and I3SOCK from /proc/$(pgrep -x i3)/environ
 
-# What actually shipped, per host
+# Objectives 1 and 3, both already CLOSED — these re-confirm rather than discover
+grep -c '"via": "auto"' ~/.config/mention-open/picks.jsonl    # >0 on the laptop
+KUBECONFIG=$KC_HOMELAB kubectl exec -n activity deploy/clickhouse -- \
+  clickhouse-client --query "SELECT count() FROM activity.events WHERE text='mention-open'"
+
+# What shipped, per host
 git -C ~/workspace/devrc rev-parse --short HEAD
 ssh zach@10.42.0.100 'git -C ~/workspace/devrc rev-parse --short HEAD'
 ```
