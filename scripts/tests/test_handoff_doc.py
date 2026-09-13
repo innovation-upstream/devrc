@@ -6723,3 +6723,117 @@ class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
         res = run_tool(repo, update=upd)
         assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
         assert "NO external forcing" in res.stdout
+# ══ rule (j): the size-budget warning ═════════════════════════════════════════
+# 🔴 WHY IT EXISTS. `test_handoff_doc_size.py` caps every handoff doc and has no
+# feedback loop — `/handoff` appends by design and the author finds out when an
+# UNRELATED PR goes red. MEASURED 2026-09-13, the evening that gate landed: three
+# different documents went over in one session, discovered exactly that way.
+#
+# 🔴 EVERY TEST HERE ASSERTS IT WARNS AND NEVER REFUSES. A blocking check
+# deadlocks against the write-back guard, which blocks Stop until a handoff is
+# written — a session on a doc already grandfathered OVER the ceiling could then
+# neither record its work nor end its turn.
+
+DOC = "claudedocs/handoff-example-topic.md"
+
+
+def _budget(relpath, after_bytes, before_bytes=1000):
+    """Drive `budget_warning` with texts of an exact size, not a real document."""
+    return hd.budget_warning(relpath, "x" * after_bytes, "x" * before_bytes)
+
+
+def test_an_update_that_goes_OVER_the_ceiling_warns_loudly():
+    out = _budget(DOC, hd.handoff_budget.MAX_BYTES + 1)
+    assert "OVER ITS SIZE BUDGET" in out, out
+    assert "over by 1 B" in out, out
+    # the remedy ladder, in the order the owning test prescribes
+    assert "evict what has CLOSED" in out
+    assert "claudedocs/refs/" in out
+    assert "raising a number is LAST" in out
+
+
+def test_the_over_budget_warning_REFUSES_NOTHING():
+    """🔴 THE LOAD-BEARING ASSERTION. If this ever becomes a refusal it deadlocks
+    the write-back guard, and the session loses its work rather than its bytes."""
+    out = _budget(DOC, hd.handoff_budget.MAX_BYTES * 4)
+    assert "WARNING, not a refusal" in out, out
+    assert "deadlock" in out.lower(), out
+    # it returns TEXT; nothing about it can stop a caller
+    assert isinstance(out, str)
+
+
+def test_it_does_not_tell_you_to_delete_an_open_investigation():
+    """The owning playbook's 🔴 rule, carried into the warning — otherwise the
+    cheapest way to satisfy it is to delete the very sections it exists for."""
+    out = _budget(DOC, hd.handoff_budget.MAX_BYTES + 5000)
+    assert "Do NOT satisfy it by deleting an open investigation" in out, out
+
+
+def test_a_GRANDFATHERED_doc_is_measured_against_ITS_allowance_not_the_ceiling():
+    """A doc in the ledger is legitimately over the base ceiling; warning on that
+    would fire forever on 12 documents and train everyone to ignore the line."""
+    path, allowance = next(iter(hd.handoff_budget.GRANDFATHERED.items()))
+    assert allowance > hd.handoff_budget.MAX_BYTES, "fixture assumes a raised entry"
+    assert _budget(path, hd.handoff_budget.MAX_BYTES + 10) == "", "warned inside its allowance"
+    over = _budget(path, allowance + 1)
+    assert "OVER ITS SIZE BUDGET" in over and "grandfathered allowance" in over, over
+
+
+def test_a_doc_BACK_UNDER_the_ceiling_says_to_DELETE_its_ledger_entry():
+    """The ledger is a ratchet. An entry left behind licenses the regrowth it was
+    installed to catch — the owning test fails on it, so say so here first."""
+    path = next(iter(hd.handoff_budget.GRANDFATHERED))
+    out = _budget(path, hd.handoff_budget.MAX_BYTES - 1)
+    assert "DELETE its `GRANDFATHERED` entry" in out, out
+
+
+def test_it_warns_EARLY_while_there_is_still_headroom():
+    """The whole point is arriving before the red, not with it."""
+    near = hd.handoff_budget.MAX_BYTES - (hd.BUDGET_NEAR_BYTES - 1)
+    out = _budget(DOC, near)
+    assert out.startswith("⚠ Size:"), out
+    assert "left" in out
+
+
+def test_SILENT_when_the_doc_has_room():
+    """🔴 THE CONTROL THAT MAKES THE WARNING WORTH READING. A line printed on
+    every run is a line nobody reads by the third one — so silence here is the
+    assertion, not an absence of coverage."""
+    assert _budget(DOC, hd.handoff_budget.MAX_BYTES // 2) == ""
+
+
+def test_it_says_NOTHING_about_a_file_that_is_not_a_handoff_doc():
+    """Negative control on the path filter. Without it, every `--repo` write of
+    any markdown file would be measured against a handoff ceiling."""
+    assert _budget("claudedocs/proposal-something.md", 10**6) == ""
+    assert _budget("README.md", 10**6) == ""
+    assert _budget("claudedocs/refs/gate-speed-and-ci-signal.md", 10**6) == ""
+
+
+def test_the_delta_is_reported_with_its_SIGN():
+    """An update that SHRINKS a doc past the line should not read as though it
+    caused the overage — the sign is what tells an author which way they moved."""
+    grew = _budget(DOC, hd.handoff_budget.MAX_BYTES + 100, before_bytes=10)
+    shrank = _budget(DOC, hd.handoff_budget.MAX_BYTES + 100,
+                     before_bytes=hd.handoff_budget.MAX_BYTES * 2)
+    assert "+" in grew, grew
+    assert "-" in shrank, shrank
+
+
+def test_the_warning_is_printed_BEFORE_the_diff_in_the_real_proposal_flow():
+    """🔴 STRUCTURAL, not a unit call. A warning computed and never printed is the
+    shape this repo keeps meeting; and one printed AFTER several hundred diff
+    lines is one nobody sees. Pins the call site and its ORDER over the source."""
+    src = TOOL.read_text(encoding="utf-8")
+    call = src.index("budget_note = budget_warning(")
+    printed = src.index("print(budget_note)", call)
+    # ⚠ the emit is `print(diff, end=...)`, NOT `print(diff)` — my first anchor
+    # was a spelling that does not occur, and the test failed on the ANCHOR
+    # rather than on the ordering it exists to check.
+    diff = src.index("print(diff,", call)
+    assert call < printed < diff, "the budget note must print before the diff"
+    # POSITIVE CONTROL: every anchor is real and unique, so the ordering above is
+    # a claim about the source and not about three substrings that all return -1.
+    assert src.count("budget_note = budget_warning(") == 1
+    assert src.count("print(budget_note)") == 1
+    assert src.count("print(diff,") == 1

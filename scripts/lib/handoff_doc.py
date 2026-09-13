@@ -283,6 +283,7 @@ from subsystem_resolver import parse_journal_bullets  # noqa: E402
 # measured in devrc itself — and rule (h) would then measure currency against a
 # branch the rest of the toolchain does not consider mainline.
 import git_mainline  # noqa: E402
+import handoff_budget  # noqa: E402
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -2692,6 +2693,80 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
     return "\n".join(blocks)
 
 
+
+# --- rule (j): would this update put the document OVER its size budget? -------
+#
+# 🔴 WHY THIS EXISTS. `scripts/tests/test_handoff_doc_size.py` caps every
+# `claudedocs/**/handoff-*.md`, and it has no feedback loop: `/handoff` appends by
+# design, nothing in that loop says you are approaching a ceiling, and the author
+# finds out when an UNRELATED PR goes red. MEASURED 2026-09-13, the evening the
+# gate landed: THREE different documents went over in one session and every one
+# was discovered that way.
+#
+# 🔴 IT WARNS AND NEVER REFUSES, and that is forced rather than preferred. A
+# blocking check DEADLOCKS against `~/.claude/hooks/handoff-write-guard.py`,
+# which blocks Stop until a handoff is written: a session working on one of the
+# documents already grandfathered OVER the base ceiling could then neither record
+# its work nor end its turn. The write guard's own measurement — 22 of 253
+# sessions never recorded, ZERO of them because a gate correctly declined — says
+# the unrecorded session is the more expensive failure.
+#
+# ⚠ IT IS NOT THE AUTHORITY. The gate reads the file on disk; this reads the text
+# about to be written. They agree today and the test is what fails.
+BUDGET_NEAR_BYTES = 4_096
+
+
+def budget_warning(relpath: str, merged_text: str, base_text: str) -> str:
+    """A one-block warning, or "" when there is nothing worth saying.
+
+    Silent by default: a doc with room says nothing, because a line that prints
+    on every run is a line nobody reads by the third one.
+    """
+    if not relpath.startswith("claudedocs/") or "/handoff-" not in "/" + relpath:
+        return ""
+    after = len(merged_text.encode("utf-8"))
+    before = len(base_text.encode("utf-8"))
+    allowance = handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES)
+    grandfathered = relpath in handoff_budget.GRANDFATHERED
+    delta = after - before
+    sign = "+" if delta >= 0 else ""
+
+    if after > allowance:
+        which = ("its grandfathered allowance" if grandfathered
+                 else "the handoff-document ceiling")
+        return "\n".join([
+            f"🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET: {after:,} B "
+            f"against {which} of {allowance:,} B, over by {after - allowance:,} B "
+            f"({sign}{delta:,} B this update).",
+            "  `test_no_handoff_doc_exceeds_its_budget` will go RED on `main`, and it "
+            "fails for EVERYONE — the next unrelated PR inherits it.",
+            "  Fix in the order that test's own playbook prescribes, and raising a "
+            "number is LAST: evict what has CLOSED (usually the whole answer), then "
+            "demote dated evidence to `claudedocs/refs/<topic>.md` leaving a pointer, "
+            "then split by initiative.",
+            "  🔴 Do NOT satisfy it by deleting an open investigation, a gotcha or a "
+            "ruled-out theory — those are the sections whose whole value is that a "
+            "future session does not repeat the work.",
+            "  This is a WARNING, not a refusal: a blocking check here would deadlock "
+            "against the write-back guard, and an unrecorded session costs more.",
+        ])
+
+    if grandfathered and after <= handoff_budget.MAX_BYTES:
+        return (f"✅ This doc is now {after:,} B, back under the "
+                f"{handoff_budget.MAX_BYTES:,} B ceiling — DELETE its "
+                f"`GRANDFATHERED` entry in scripts/lib/handoff_budget.py in this "
+                f"same commit. The ledger is a ratchet; an entry left behind "
+                f"licenses the regrowth it was installed to catch.")
+
+    headroom = allowance - after
+    if headroom < BUDGET_NEAR_BYTES:
+        return (f"⚠ Size: {after:,} B of {allowance:,} B "
+                f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
+                f"update or two will go over; evicting what has CLOSED now is "
+                f"cheaper than doing it under a red `main`.")
+    return ""
+
+
 def _clip(text: str, limit: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -3802,6 +3877,11 @@ def main(argv: list[str] | None = None) -> int:
     # the skill's contract pins one per run.
     if base_text:
         print(buckets_line(report.buckets))
+    # 🔴 Rule (j), with the bucket line and above the diff: it is a fact about the
+    # text the human is about to approve, so it has to arrive before the text.
+    budget_note = budget_warning(relpath, merged_text, base_text)
+    if budget_note:
+        print(budget_note)
     # 🔴 RULE (h) FIRST, above rule (f) and above the diff. It is the only one of
     # the three that can invalidate the OTHER two: a wrong base makes the bucket
     # line describe a merge nobody wanted and makes "nothing durable dropped"
