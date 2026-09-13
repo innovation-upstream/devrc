@@ -96,6 +96,40 @@ inline in SKILL.md — it is a correctness rail, not a debugging step.)
 - `Cannot access a chrome:// URL` (with a `null` result) → `eval`/`js` can't run on
   `chrome://` / `brave://` pages. Not a bridge fault.
 
+## CLI exit codes — and the one that is NOT a failure to debug
+
+The CLI's own codes, distinct from the wire errors above. Only three are ever
+returned; **branch on them rather than on message text**.
+
+| rc | meaning |
+|---|---|
+| `0` | success — the JSON envelope is on stdout |
+| `1` | the command failed; nothing was applied, or the op itself failed |
+| `3` | ONLY `nav --wake` / `open --wake`: the nav/open SUCCEEDED, the wake did not. The tab HAS navigated and its JSON is still on stdout with `result.data.wake.ok:false` — read `result.data.wake.error` for the real cause |
+| `4` | ONLY a wrong-host `bw://` reference — see below. Nothing was sent |
+
+**`rc 4` — `bw://<host>/…` minted on the OTHER host.** Not a bug and not
+something to retry here: this CLI only ever talks to `127.0.0.1`, so it cannot
+reach a tab on the other machine, and a same-labelled profile here (`work`
+exists on **both** hosts) is a different browser. The check is a real `/whoami`
+read and it fails **closed**.
+
+It is a **handoff**, not a dead end. stdout is empty; stderr carries the command
+to run on the naming host — **the only line of the refusal that does not begin
+with `browser:`**, your own command line re-quoted, argv[0] absolutised:
+
+```
+browser: bw://laptop/work/533 was minted on 'laptop'; this bridge is 'workbench'.
+browser:   Nothing was sent. …
+browser:   Run this ON 'laptop' — the next line, verbatim:
+/home/zach/workspace/devrc/scripts/browser-bridge/browser text bw://laptop/work/533
+browser:   Exit code 4 means exactly this and nothing else …
+```
+
+Lift it out with `2>&1 >/dev/null | grep -v '^browser:'`. It is deliberately
+**not** proxied across hosts: that would mean a non-loopback listener and a
+second per-host token, which is the property the loopback binding exists to keep.
+
 ## ⚠ The extension can DROP mid-session — and ↻ is PER-PROFILE
 
 Distinct from a stale build: this is a bridge that was **working in this very

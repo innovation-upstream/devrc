@@ -26,10 +26,20 @@
 #
 #   Either position works. The <host> field is VERIFIED against the bridge before
 #   the command runs, so a reference pasted into a session on the other host
-#   fails loudly instead of driving a same-labelled profile there. Combining a
-#   reference with --instance/--tab is an error, not a precedence question. For
-#   `type`, `js`/`eval` and `agent` — whose argument is arbitrary text — only the
-#   leading position is a reference; a trailing bw://… is the value you meant.
+#   fails loudly instead of driving a same-labelled profile there.
+#
+#   That refusal is a HANDOFF, not a dead end. It exits 4 — a code this CLI uses
+#   for nothing else, so a caller can branch on "wrong host" instead of guessing
+#   at a generic 1 — and prints on STDERR the command to run on the naming host:
+#   your own command line, re-quoted, on the single line of the refusal that does
+#   NOT begin with "browser:". Nothing is sent and stdout stays empty. This CLI
+#   deliberately does not proxy the command across hosts (that would mean a
+#   non-loopback listener and a second token); the paste is the handoff.
+#
+#   Combining a reference with --instance/--tab is an error, not a precedence
+#   question. For `type`, `js`/`eval` and `agent` — whose argument is arbitrary
+#   text — only the leading position is a reference; a trailing bw://… is the
+#   value you meant.
 #
 # Per-session tab isolation (fixes concurrent-session clobbering):
 #   Two Claude sessions driving one browser used to interleave on ONE shared
@@ -299,7 +309,21 @@
 #      `error` to tell a transient cause (`rate_limited`) from a permanent one
 #      (`wake_with_frame_unsupported`). On success `result.data.wake.ok` is true,
 #      so `ok` is always present in both shapes.
+#   4  ONLY the wrong-host `bw://` refusal: the reference was minted on the OTHER
+#      host, so NOTHING was sent — see "Tab references" above. stdout is empty;
+#      stderr carries the command to run on the naming host.
 set -uo pipefail
+
+# 🔴 THE ORIGINAL ARGV, CAPTURED BEFORE ANYTHING CONSUMES IT. Three later stages
+# rewrite "$@" — the leading-flag loop shifts, the reference scanner rebuilds the
+# array with the bw:// token REMOVED, and each subcommand's own parser shifts
+# again — so by the time the wrong-host check runs there is no longer a copy of
+# what the operator typed. The cross-host handoff quotes THAT back at them; a
+# line rebuilt from the parsed state instead would silently drop every flag this
+# reconstruction does not happen to model, and would be wrong in exactly the way
+# a pasted command must not be.
+BB_ARGV0="$0"
+BB_ORIG_ARGV=("$@")
 
 HOST="${BROWSER_BRIDGE_HOST:-127.0.0.1}"
 PORT="${BROWSER_BRIDGE_PORT:-8788}"
@@ -1695,6 +1719,59 @@ sub="${1:-}"; shift || true
 # line, so a command that never touches the wire never emits it.
 _note_env_routing
 
+# --- the cross-host HANDOFF line ---------------------------------------------- #
+# _shq ARG — ARG quoted so a shell re-reads it as the SAME single word. Same rule
+# as python's shlex.quote: bare when every byte is in the POSIX-safe set,
+# otherwise single-quoted with each embedded quote spelled '\''. Bare-when-safe
+# is not cosmetics: the handoff line is meant to be read and pasted by a human,
+# and a fully-quoted `browser 'text' 'bw://…'` reads as a machine artefact next
+# to the line they actually typed.
+#
+# 🔴 A CONTROL CHARACTER GETS THE $'…' FORM INSTEAD, and this arm is not exotic:
+# a multi-line `js`/`eval` script is the ordinary way to use those subcommands,
+# and single quotes preserve its newlines LITERALLY — which pastes correctly but
+# spreads the command over several lines and breaks the one-line contract the
+# refusal advertises to callers. bash's own %q emits `$'a\nb'`, which bash and
+# zsh (the only shells this pair of hosts runs) both re-read to identical bytes.
+_shq() {
+  case "$1" in
+    "")                       printf "''" ;;
+    *[[:cntrl:]]*)            printf '%q' "$1" ;;
+    *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
+    *)                        printf '%s' "$1" ;;
+  esac
+}
+
+# _handoff_command — the operator's own command line, re-quoted, addressed at the
+# CLI on the naming host.
+#
+# argv[0] is ABSOLUTISED but deliberately NOT `readlink -f`'d. Both hosts keep
+# the checkout at the same path under the same $HOME, so the path as invoked is
+# the path that exists over there; resolving the symlink instead would print this
+# host's deploy/store path, which is the one thing guaranteed not to be right.
+# A bare name (found on $PATH) is left alone — the same name resolves there too.
+#
+# 🔴 BB_FRAME IS REPLAYED AND THE OTHER TWO ARE NOT, and the asymmetry is the
+# point. An exported BB_INSTANCE/BB_TAB is OVERWRITTEN by the reference (that is
+# what a reference is), so replaying them would put a route on the line that the
+# receiving CLI ignores. BB_FRAME survives the reference untouched, so a handoff
+# that dropped it would run against the top frame and answer about a different
+# document. Env-supplied only: a --frame FLAG is already in the argv below.
+_handoff_command() {
+  local a0="$BB_ARGV0" d _a
+  case "$a0" in
+    */*) d="$(cd -- "$(dirname -- "$a0")" 2>/dev/null && pwd)" \
+           && a0="${d}/$(basename -- "$a0")" ;;
+  esac
+  if [ -n "$FRAME" ] && [ "$FRAME_SRC" = "\$BB_FRAME" ]; then
+    printf 'BB_FRAME=%s ' "$(_shq "$FRAME")"
+  fi
+  _shq "$a0"
+  for _a in ${BB_ORIG_ARGV[@]+"${BB_ORIG_ARGV[@]}"}; do
+    printf ' '; _shq "$_a"
+  done
+}
+
 # --- the reference's HOST field, checked against the bridge we are talking to - #
 # 🔴 THIS IS THE POINT OF THE HOST FIELD, and it has to be a real request. This
 # CLI only ever talks to 127.0.0.1, so a reference minted on the workbench and
@@ -1753,7 +1830,29 @@ out("ok", label)
     echo "browser: this bridge ${_whost_why}, so $REF's host field" \
          "('${REF_HOST}') was NOT verified — proceeding." >&2
   elif [ "$_whost" != "$REF_HOST" ]; then
-    die "$REF was minted on '${REF_HOST}'; this bridge is '${_whost}'. The tab it names is on the other host — run it there."
+    # 🔴 THE REFUSAL DOES NOT MOVE. Everything below is what happens AFTER it:
+    # nothing is sent, and the exit is non-zero. What changed is that "run it
+    # there" used to be the whole answer, leaving the session with no command to
+    # hand anyone and a caller with a generic rc 1 it could not tell from a
+    # malformed reference, a dead bridge or a 404.
+    #
+    # STDERR, not stdout, and that is the existing convention rather than a new
+    # decision: stdout is the JSON envelope and nothing else, so a caller doing
+    # `T=$(browser …)` on a refused command must get an EMPTY T. A shell command
+    # string on stdout would be strictly worse than empty — it parses as nothing
+    # and reads as data. rc 4 is the machine-readable half; the paste is the
+    # human half; both are on the stream that already carries diagnostics.
+    _hcmd="$(_handoff_command)"
+    echo "browser: $REF was minted on '${REF_HOST}'; this bridge is '${_whost}'." >&2
+    echo "browser:   Nothing was sent. This CLI only ever talks to 127.0.0.1, and a" >&2
+    echo "browser:   same-labelled profile here is a DIFFERENT browser — driving it is the" >&2
+    echo "browser:   failure this check exists to prevent, so it will not be attempted." >&2
+    echo "browser:   Run this ON '${REF_HOST}' — the next line, verbatim:" >&2
+    echo "$_hcmd" >&2
+    echo "browser:   Exit code 4 means exactly this and nothing else (rc 1 is every other" >&2
+    echo "browser:   failure), and that command is the ONLY line of this refusal which does" >&2
+    echo "browser:   not begin with 'browser:' — so a caller can branch on 4 and lift it out." >&2
+    exit 4
   fi
 fi
 
