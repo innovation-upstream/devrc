@@ -173,6 +173,8 @@ def make_repo(
     commit_epoch: int | None = None,
     mtime: int | None = None,
     extra_commits: list[tuple[str, int]] | None = None,
+    extra_docs: list[tuple[str, str, int]] | None = None,
+    renames: list[tuple[str, int]] | None = None,
 ) -> Path:
     """A throwaway repo holding one handoff.
 
@@ -180,6 +182,16 @@ def make_repo(
     doc with new text at later times, which is what makes the block's own
     introducing commit differ from the doc's last commit — the distinction the
     whole clock ladder turns on.
+
+    `extra_docs` — `(repo-relative path, text, epoch)` — are committed BEFORE
+    the handoff, so a second document carrying the same heading is genuinely
+    OLDER than the one under test. That ordering is the whole point: it is what
+    lets a heading-collision fixture distinguish a path-scoped answer from a
+    repo-wide one.
+
+    `renames` — `(new repo-relative path, epoch)` — `git mv`s the doc, in order.
+    A PURE rename: content is untouched, so the moving commit changes no line of
+    the document and a heading-scoped pickaxe must not date anything to it.
     """
     repo = tmp_path / "fixture-repo"
     (repo / "claudedocs").mkdir(parents=True)
@@ -190,13 +202,28 @@ def make_repo(
     subprocess.run([*git, "add", "README.md"], check=True, env=env)
     subprocess.run([*git, "commit", "-qm", "seed"], check=True, env=env)
 
-    p = repo / "claudedocs" / "handoff-sample.md"
+    for rel, text, when in extra_docs or []:
+        other = repo / rel
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_text(text, encoding="utf-8")
+        _commit(git, env, rel, when, f"other doc {rel}")
+
+    rel = "claudedocs/handoff-sample.md"
+    p = repo / rel
     p.write_text(doc_text, encoding="utf-8")
     if commit_epoch is not None:
-        _commit(git, env, "claudedocs/handoff-sample.md", commit_epoch, "handoff")
+        _commit(git, env, rel, commit_epoch, "handoff")
     for text, when in extra_commits or []:
         p.write_text(text, encoding="utf-8")
-        _commit(git, env, "claudedocs/handoff-sample.md", when, "update")
+        _commit(git, env, rel, when, "update")
+    for dest, when in renames or []:
+        (repo / dest).parent.mkdir(parents=True, exist_ok=True)
+        when_s = f"{when} +0000"
+        cenv = dict(env, GIT_AUTHOR_DATE=when_s, GIT_COMMITTER_DATE=when_s)
+        subprocess.run([*git, "mv", rel, dest], check=True, env=cenv)
+        subprocess.run([*git, "commit", "-qm", f"archive {rel} -> {dest}"],
+                       check=True, env=cenv)
+        rel, p = dest, repo / dest
     if mtime is not None:
         os.utime(p, (mtime, mtime))
     return repo
@@ -209,14 +236,21 @@ def _commit(git, env, rel: str, epoch: int, msg: str) -> None:
     subprocess.run([*git, "commit", "-qm", msg], check=True, env=cenv)
 
 
-def run_digest(repo: Path, stubs, **extra_env) -> str:
+def run_digest(repo: Path, stubs, *, arg: str | None = None, **extra_env) -> str:
+    """The digest, optionally NAMED a handoff instead of auto-discovering one.
+
+    `arg` is required for any doc outside `claudedocs/`'s own top level — the
+    auto-discovery glob is `claudedocs/handoff-*.md` and does not descend, so an
+    archived doc is only ever reached by being named. That is exactly how the
+    live reproduction was run.
+    """
     d, log = stubs
     env = _git_env(repo)
     env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
     env["STUB_LOG"] = str(log)
     env.update({k: str(v) for k, v in extra_env.items()})
     out = subprocess.run(
-        ["bash", str(RESUME)],
+        ["bash", str(RESUME)] + ([arg] if arg else []),
         cwd=str(repo),
         capture_output=True,
         text=True,
@@ -578,6 +612,223 @@ class TestReachability:
         out = run_digest(repo, stubs)
         assert "none detected — live state matches" not in out, out
         assert "NOT a clean bill of health" in out, out
+
+
+# --------------------------------------------------------------------------- #
+# a rename must not reset the clock
+# --------------------------------------------------------------------------- #
+ARCHIVED = "claudedocs/archive/handoff-sample.md"
+
+
+class TestARenameDoesNotResetTheClock:
+    """🔴 THE REGRESSION #1618 + #1627 CREATED TOGETHER, each green alone.
+
+    #1618 dates a block with a PATH-SCOPED pickaxe. #1627 archived 35 handoff
+    docs by RENAMING them under `claudedocs/archive/`. A path-scoped pickaxe
+    only visits commits that touch that path, so after a rename the earliest
+    such commit is the rename — and every block in the doc reports `0d`, the
+    freshest possible reading, on the oldest documents in the corpus. Exactly
+    the inversion the feature exists to prevent.
+
+    MEASURED on `origin/main` at 86560804: all 19 investigation blocks in the 8
+    archived docs that carry one read `0d`; before the move the same blocks read
+    31d–43d. The worked example is a doc whose blocks went `EXPIRED 43d` -> `0d`.
+
+    ⚠ NO REAL DOCUMENT IS QUOTED HERE. This repo is public and handoff docs
+    carry client detail; every fixture below is synthetic.
+
+    ⚠ THE DEAD END, so nobody re-derives it: `--follow` combined with `-S`
+    returns NOTHING for a renamed path — WORSE than a wrong date, because an
+    empty result routes the block to UNDATED rather than EXPIRED.
+    `test_the_FOLLOW_pickaxe_dead_end_is_still_a_dead_end` pins that, with the
+    non-renamed control that proves it is git's behaviour and not a typo.
+    """
+
+    def _aged_block_doc(self) -> str:
+        return doc_with("### The claim that predates the move\n- detail\n")
+
+    def test_a_RENAMED_docs_block_keeps_the_age_of_the_commit_that_WROTE_it(
+        self, tmp_path, stubs
+    ):
+        """🔴 THE REGRESSION TEST. Red on pre-change code, green after.
+
+        Written 40 days ago at `claudedocs/`, moved into `claudedocs/archive/`
+        an hour ago by a PURE rename that changes no line of the document. The
+        block is 40 days old and must say so.
+        """
+        now = int(time.time())
+        repo = make_repo(
+            tmp_path,
+            self._aged_block_doc(),
+            commit_epoch=now - 40 * DAY,
+            renames=[(ARCHIVED, now - 3600)],
+        )
+        out = run_digest(repo, stubs, arg=ARCHIVED)
+        hits = [f for f in findings(out) if "EXPIRED" in f]
+        assert len(hits) == 1, (
+            "a renamed doc's block must still age from the commit that WROTE "
+            f"it, not from the move:\n{findings(out)}\n{out}"
+        )
+        assert "The claim that predates the move" in hits[0], hits[0]
+        # The DAY COUNT, not merely the word EXPIRED: a wrong-but-old date would
+        # satisfy the flag while still misreporting the block.
+        assert "40d ago" in hits[0], (
+            f"expected the block's own 40-day age, got: {hits[0]}"
+        )
+        assert "first commit carrying this block" in hits[0], hits[0]
+
+    def test_CONTROL_the_same_fixture_WITHOUT_the_rename_is_EXPIRED_too(
+        self, tmp_path, stubs
+    ):
+        """The common path, through the same explicit-path entry point.
+
+        🔴 THIS IS AN INVARIANT GUARD, NOT A REGRESSION TEST — it is green on
+        pre-change code, and it is here so the fix cannot buy the renamed case
+        by breaking the un-renamed one. The ONLY difference from the test above
+        is the rename.
+        """
+        now = int(time.time())
+        repo = make_repo(
+            tmp_path, self._aged_block_doc(), commit_epoch=now - 40 * DAY
+        )
+        out = run_digest(repo, stubs, arg="claudedocs/handoff-sample.md")
+        hits = [f for f in findings(out) if "EXPIRED" in f]
+        assert len(hits) == 1, f"{findings(out)}\n{out}"
+        assert "40d ago" in hits[0], hits[0]
+        assert "first commit carrying this block" in hits[0], hits[0]
+
+    def test_a_CHAIN_of_renames_is_walked_all_the_way_back(self, tmp_path, stubs):
+        """One hop is not the mechanism — the doc's WHOLE name history is.
+
+        A fix that resolves only the immediately-previous path passes the test
+        above and fails here, so this is what makes that test's claim general.
+        """
+        now = int(time.time())
+        repo = make_repo(
+            tmp_path,
+            self._aged_block_doc(),
+            commit_epoch=now - 40 * DAY,
+            renames=[
+                ("claudedocs/handoff-sample-renamed.md", now - 20 * DAY),
+                (ARCHIVED, now - 3600),
+            ],
+        )
+        out = run_digest(repo, stubs, arg=ARCHIVED)
+        hits = [f for f in findings(out) if "EXPIRED" in f]
+        assert len(hits) == 1, f"{findings(out)}\n{out}"
+        assert "40d ago" in hits[0], (
+            f"the chain must reach the ORIGINAL name, not the middle one: {hits[0]}"
+        )
+
+    def test_a_FRESH_block_in_a_RENAMED_doc_is_STILL_SILENT(self, tmp_path, stubs):
+        """The other half: the fix must not simply age everything past the window.
+
+        TWO CLAIMS, AND THEY ARE NOT THE SAME KIND. "Still silent" IS an
+        invariant guard — the broken code reported this block as fresh too, for
+        the wrong reason — and it is here because `claude/RULES.md` calls a
+        permanently-red gate worse than no gate, so a "fix" that expires every
+        archived doc would be one. But the AGE it prints is a regression claim:
+        MEASURED red at 86560804, where the same fixture reports `0d` because
+        the rename is the only commit the pickaxe can see.
+        """
+        now = int(time.time())
+        repo = make_repo(
+            tmp_path,
+            doc_with("### A diagnosis written this week\n- detail\n"),
+            commit_epoch=now - 2 * DAY,
+            renames=[(ARCHIVED, now - 3600)],
+        )
+        out = run_digest(repo, stubs, arg=ARCHIVED)
+        assert not [f for f in findings(out) if "EXPIRED" in f], out
+        body = "\n".join(section(out, "INVESTIGATIONS"))
+        assert "2d" in body, body
+        assert "0 EXPIRED" in body, body
+
+    def test_the_pickaxe_stays_SCOPED_and_never_dates_a_block_from_ANOTHER_doc(
+        self, tmp_path, stubs
+    ):
+        """🔴 WHY THE FIX IS NOT "DROP THE PATHSPEC".
+
+        Repo-wide is the obvious candidate and it is correct on today's corpus —
+        MEASURED at 86560804: 487 distinct investigation headings, and ZERO
+        whose `### <heading>` substring occurs in a second tracked file. But it
+        makes every future collision a WRONG ANSWER rather than a non-event, and
+        it costs ~8x per block on a hot path. This pins the narrower choice.
+
+        Here an OLDER, unrelated document already carries the identical heading.
+        The doc under test was written 2 days ago; a repo-wide pickaxe would
+        date its block to the other document's 40-day-old commit and file it
+        EXPIRED. Scoped to this doc's own path history, it stays silent.
+
+        🔴 AN INVARIANT GUARD — green before the change too. Its job is to fail
+        if anyone later widens the query, which is the one way this fix can be
+        made wrong.
+        """
+        now = int(time.time())
+        shared = "### A heading two documents happen to share"
+        repo = make_repo(
+            tmp_path,
+            doc_with(f"{shared}\n- detail\n"),
+            commit_epoch=now - 2 * DAY,
+            extra_docs=[
+                (
+                    "claudedocs/handoff-unrelated.md",
+                    doc_with(f"{shared}\n- unrelated detail\n"),
+                    now - 40 * DAY,
+                )
+            ],
+            renames=[(ARCHIVED, now - 3600)],
+        )
+        out = run_digest(repo, stubs, arg=ARCHIVED)
+        assert not [f for f in findings(out) if "EXPIRED" in f], (
+            "the block must be dated from ITS OWN document, not from an older "
+            f"document sharing the heading:\n{findings(out)}\n{out}"
+        )
+
+    def test_the_FOLLOW_pickaxe_dead_end_is_still_a_dead_end(self, tmp_path):
+        """A pin on git, not on us — the reason the fix cannot be `--follow -S`.
+
+        `--follow` + `-S` returns NOTHING for a renamed path. The NON-renamed
+        control in the same fixture returns the true first date, which is what
+        proves this is git's documented single-path/rename-detection behaviour
+        and not a malformed invocation. If a future git makes the combination
+        work, this test goes red and the simpler fix becomes available.
+        """
+        now = int(time.time())
+        moved_heading = "### The claim that predates the move"
+        stayed_heading = "### The claim in a document nobody moved"
+        stayed_rel = "claudedocs/handoff-unmoved.md"
+        repo = make_repo(
+            tmp_path,
+            doc_with(f"{moved_heading}\n- detail\n"),
+            commit_epoch=now - 40 * DAY,
+            extra_docs=[
+                (stayed_rel, doc_with(f"{stayed_heading}\n- detail\n"), now - 40 * DAY)
+            ],
+            renames=[(ARCHIVED, now - 3600)],
+        )
+        env = _git_env(repo)
+
+        def pickaxe(heading: str, *args: str) -> str:
+            r = subprocess.run(
+                ["git", "-C", str(repo), "log", "--format=%ct", "--reverse",
+                 f"-S{heading}", *args],
+                capture_output=True, text=True, timeout=60, env=env, check=True,
+            )
+            return r.stdout.strip()
+
+        assert pickaxe(moved_heading, "--follow", "--", ARCHIVED) == "", (
+            "if this is no longer empty, `--follow -S` works and the fix in "
+            "resume-state.sh can be simplified"
+        )
+        # POSITIVE CONTROL — the identical invocation against a doc that was
+        # NEVER renamed does answer. Without it, the empty result above is
+        # indistinguishable from a malformed command.
+        assert pickaxe(stayed_heading, "--follow", "--", stayed_rel) != ""
+        # …and the plain path-scoped form the script actually uses answers for
+        # BOTH, which is what makes the whole-history pathspec the right fix.
+        assert pickaxe(stayed_heading, "--", stayed_rel) != ""
+        assert pickaxe(moved_heading, "--", "claudedocs/handoff-sample.md") != ""
 
 
 # --------------------------------------------------------------------------- #
