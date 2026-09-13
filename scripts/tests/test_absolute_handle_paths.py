@@ -15,9 +15,14 @@ therefore duplicates a value the runtime already holds, at a site nothing checks
 The duplicate is wrong the moment the user, the home directory or the checkout
 location differs -- and it is wrong SILENTLY: the command does not warn, it just
 names a file that is not there, or (worse, for a kubeconfig) a cluster that is
-not the one meant. Measured at the commit that introduced this module: 21
-occurrences across 9 files, all of them inside runnable commands or file
-pointers.
+not the one meant. Measured by running THIS module against `22ddd8dc`, the
+commit before it existed: 39 occurrences across 17 files (37 across 16 net of
+the ignore list), all of them inside runnable commands or file pointers.
+⚠ This sentence read "21 occurrences across 9 files" until it was re-derived;
+that pair reproduces under no framing tried -- not the parent commit with this
+module, not the parent with the module as first committed (30/14), not the set
+`98aa68b7` actually fixed (28/13). The figures above are stated against a NAMED
+ref precisely so the next reader can re-run rather than inherit.
 
 🔴 THIS IS A SPELLING GATE, NOT A RESOLUTION GATE -- and that is deliberate
 ------------------------------------------------------------------------------
@@ -43,7 +48,12 @@ THE HANDLE TABLE IS PARSED FROM `nix/agent-handles.nix`, NEVER RESTATED
 (`workspace/devrc`). This module parses those suffixes out of the nix file and
 turns each into `<any absolute prefix>/<suffix>`. Two consequences worth stating:
 
-  * adding a handle there arms this gate for it with no edit here;
+  * adding a handle there arms this gate for it with no edit here -- but ONLY
+    for a suffix of TWO OR MORE segments. A one-segment suffix turns the pattern
+    into a wildcard over every parent directory, so it is refused by
+    `test_the_handle_table_is_parsed_from_the_nix_source`; see the
+    MINIMUM SPECIFICITY note on `_ABS_PREFIX`. Auto-arming is a convenience
+    inside that bound, not an unbounded promise;
   * the remedy printed on failure is the handle's OWN name, so the failure line
     is the fix (`-> use `$DEVRC/scripts/memory-audit.py``).
 
@@ -92,11 +102,28 @@ matcher can still see.
 Read the title of this module as narrower than it sounds. `~/workspace/devrc/x`
 names the same checkout as `$DEVRC/x` and this gate does **not** flag it: the
 `~` character is in `_LEFT_BOUND`'s exclusion set, so a tilde-spelled path is
-invisible to every absolute pattern. Measured on the commit this gate was armed
-against: **183** `~/workspace/…` tokens across the corpus, of which **13** name a
-file a `$KC_*` handle also names and **9** of those sit in a `KUBECONFIG=`
-assignment. The 9 are fixed and gated below; the other **176** `~/workspace/…`
-tokens stay green.
+invisible to every absolute pattern.
+
+THE CENSUS, measured on `f4241883` -- the commit the `~` half was armed against:
+
+  * **183** `~/workspace/…` tokens across the corpus;
+  * **10** of those 183 name a file a `$KC_*` handle also names;
+  * a further **3** name a `$KC_*` file in the `~/.kube/…` spelling. 🔴 Those
+    are NOT `~/workspace/…` tokens and are NOT among the 183 -- the **13**
+    tilde-spelled `$KC_*` files are the two groups ADDED, never a subset of the
+    183. (This line read "13 of which" until it was re-derived; conflating the
+    two spellings is what made one quantity carry two figures.)
+  * **9** of the 13 sit in a `KUBECONFIG=` assignment -- 6 spelled
+    `~/workspace/…`, 3 spelled `~/.kube/…`. Those 9 are fixed and gated below,
+    along with one bare `~/workspace/…` pointer fixed beside them.
+
+🔴 ONE NAME PER QUANTITY, AND IT IS STATED ONCE -- HERE, AGAINST A NAMED REF.
+Everywhere else in this module these tokens are referred to in WORDS. A total
+kept beside the thing it counts drifts the moment anyone edits a doc (this
+census is already stale against HEAD, by construction -- the commit it describes
+is what moved it), and two figures for one quantity is how a reader learns to
+trust neither. If you need the current number, derive it; do not add a second
+copy here.
 
 That is deliberate, for two reasons and one deferral:
 
@@ -112,8 +139,9 @@ That is deliberate, for two reasons and one deferral:
     reader to `ls` both and take the one that exists. A handle cannot express
     that -- `$KC_WORKBENCH` names only the `homelab-talos` spelling, so it is
     EMPTY on exactly the host where `homelab-infra` is right;
-  * and the 176-token repo-handle sweep is DEFERRED work, not a claim that those
-    sites are fine. Until it happens, THIS GATE'S TITLE OVERSTATES ITS SCOPE:
+  * and the remaining `~/workspace/…` repo-handle sweep is DEFERRED work, not a
+    claim that those sites are fine. Until it happens, THIS GATE'S TITLE
+    OVERSTATES ITS SCOPE:
     it rejects the `/home/<user>/…` spelling everywhere, and the `~/…` spelling
     for one shape only.
 
@@ -142,21 +170,38 @@ gate DRY against the SOURCE); the DISCRIMINATOR agreeing is the point.
 ⚠ MEASURED, AND IT CORRECTS THE FOLK JUSTIFICATION FOR THIS RULE
 ------------------------------------------------------------------
 The reason usually given -- "an absent `~` path yields an empty `KUBECONFIG=`,
-which falls back to `~/.kube/config`" -- is BACKWARDS, and measuring it takes
-one command. `~` is expanded by the shell whether or not the file exists, so:
+which falls back to `~/.kube/config`" -- is BACKWARDS. `~` is expanded by the
+shell whether or not the file exists, so an ABSENT path is never an EMPTY
+variable, and the two arms fail differently:
 
     KUBECONFIG=<an absent file>  kubectl config current-context
-        -> `error: current-context is not set`     (LOUD; no fallback)
+        -> `error: current-context is not set`, rc 1   (LOUD; no fallback)
     KUBECONFIG=                  kubectl config current-context
-        -> the context from `~/.kube/config`       (SILENT; wrong cluster)
+        -> the context from `~/.kube/config`, rc 0     (SILENT; wrong cluster)
+
+🔴 THE SECOND LINE CARRIES A PRECONDITION, AND IT DOES NOT HOLD ON THIS HOST.
+The silent arm requires the DEFAULT kubeconfig to carry a NON-EMPTY
+`current-context`; it is reached only after someone has run `kubectl config
+use-context`. Re-measured 2026-09-12, kubectl v1.36.3: `~/.kube/config` exists
+here (8,750 B, 3 contexts, mtime 2026-07-24 -- so this was already true when the
+block above was first written) but carries `current-context: ""`. BOTH arms
+therefore return `error: current-context is not set`, rc 1 -- loud, and
+character-for-character identical. As written the transcript did not reproduce.
+
+The MECHANISM is real; only its reachability is host state. Isolated with a
+control that varies nothing else -- same kubectl, same command, a `HOME` whose
+`.kube/config` sets `current-context: sentinel-ctx`: the empty arm returns
+`sentinel-ctx` rc 0 while the absent-file arm still fails rc 1. That is the
+difference the two lines above claim, observed, with the precondition supplied.
 
 The silent arm is the EXISTENCE-GUARDED HANDLE's failure mode, not the tilde's:
 a `$KC_*` that declines to export leaves `KUBECONFIG=` empty. So substituting
 the handle trades a loud failure for a quiet one on a host where the checkout is
-absent. It is still the right trade here -- this is a SPELLING gate, and the
-duplicated literal is wrong on any host whose checkout differs (the
-`homelab-talos` / `homelab-infra` split above is that host, live) -- but do not
-repeat the fallback sentence as the mechanism. It is not what happens.
+absent AND a default context is set. It is still the right trade here -- this is
+a SPELLING gate, and the duplicated literal is wrong on any host whose checkout
+differs (the `homelab-talos` / `homelab-infra` split above is that host, live)
+-- but do not repeat the fallback sentence as the mechanism, and do not quote
+the transcript without its precondition. Neither is what happens unconditionally.
 
 THE ESCAPE HATCH
 ----------------
@@ -213,6 +258,15 @@ _NIX_SECTION = re.compile(r"^\s*kubeconfigs\s*=\s*\{(.*?)^\s*\};", re.M | re.S)
 # The `${home}` half, as a pattern: ANY absolute prefix of one or more segments.
 # This is what makes the gate host-independent -- `/home/zach`, `/home/alice` and
 # `/root` are all matched, so the verdict never depends on who runs it.
+#
+# 🔴 MINIMUM SPECIFICITY: THIS WILDCARD IS ONLY SAFE AGAINST A SUFFIX OF TWO OR
+# MORE SEGMENTS. The prefix deliberately matches anything, so ALL the specificity
+# lives in the suffix it is glued to. `workspace/devrc` names one checkout under
+# any home. A ONE-segment suffix names that segment under ANY parent -- and the
+# gate would then print a remedy for it, naming a DIFFERENT FILE. That bound is
+# asserted in `test_the_handle_table_is_parsed_from_the_nix_source`, not here,
+# because it is a property of the TABLE parsed out of the nix source (which is
+# free to change without this file changing) rather than of this pattern.
 _ABS_PREFIX = r"/(?:[A-Za-z0-9._+-]+/)*"
 # A match may not START mid-path and may not END mid-segment (see BOUNDARY, NOT
 # SUBSTRING above).
@@ -420,7 +474,7 @@ def _new_violations() -> list[tuple[str, int, str, str]]:
 # headline workflow is PRUNING documentation, so a floor sitting just under the
 # measurement reds on ordinary work and sends the reader hunting a bug that is
 # not there.
-CORPUS_DOC_FLOOR = 40  # measured 88
+CORPUS_DOC_FLOOR = 40  # measured 99 (re-derived via `_corpus()`; read "88" before)
 
 
 def test_corpus_is_not_empty():
@@ -432,7 +486,7 @@ def test_corpus_is_not_empty():
     """
     docs = _corpus()
     assert len(docs) >= CORPUS_DOC_FLOOR, (
-        f"only {len(docs)} corpus doc(s) found under {CORPUS_DIRS} -- 88 were "
+        f"only {len(docs)} corpus doc(s) found under {CORPUS_DIRS} -- 99 were "
         "measured. The corpus builder has broken, and every PASS from this "
         "module is a claim about the builder rather than about the docs."
     )
@@ -499,9 +553,35 @@ def test_the_handle_table_is_parsed_from_the_nix_source():
     )
     # The suffixes are what the patterns are built from; an empty one would match
     # every absolute path in the corpus.
+    #
+    # 🔴 AND SO WOULD A ONE-SEGMENT ONE, WHICH IS THE HAZARD THE DOCSTRING'S
+    # "adding a handle there arms this gate with no edit here" WOULD OTHERWISE
+    # LEAVE UNBOUNDED. `_ABS_PREFIX` matches ANY absolute prefix by design, so a
+    # short suffix is a wildcard and the remedy the gate prints for it names a
+    # DIFFERENT FILE than the one flagged. Reproduced: adding
+    # `NIXCFG = "${home}/nixos";` to `nix/agent-handles.nix`, with no edit to
+    # this module, makes the gate report 22 corpus sites spelling `/etc/nixos/…`
+    # and emit `-> use `$NIXCFG/configuration.nix`` -- i.e.
+    # `~/nixos/configuration.nix`, which is not `/etc/nixos/configuration.nix`.
+    # A remedy that reads as correct and silently redirects the reader is worse
+    # than no finding at all.
+    #
+    # One assertion covers BOTH halves of the gate: `_handle_table()` parses the
+    # WHOLE nix file, so a `kubeconfigs` entry with a one-segment suffix is
+    # caught here too and needs no second copy in the kubeconfig ledger.
     for name, rel in table:
         assert rel and not rel.startswith("/") and "${" not in rel, (
             f"{name} parsed to a suffix this gate cannot use: {rel!r}"
+        )
+        assert "/" in rel, (
+            f'{name} = "${{home}}/{rel}" is a ONE-SEGMENT handle suffix, which '
+            f"this gate cannot arm safely. Its absolute pattern is <any absolute "
+            f"prefix>/{rel}, so {rel!r} matches under ANY parent -- /etc/{rel}, "
+            f"/usr/local/{rel}, /var/lib/{rel} -- not only under a home. Each of "
+            f"those is a DIFFERENT FILE from the one ${name} names, and the gate "
+            f"would print `-> use `${name}/<tail>`` for it: a wrong-file remedy "
+            f"that reads as a correct instruction. Give the handle a suffix of "
+            f"two or more segments, or exclude it here and say why."
         )
 
 
@@ -517,10 +597,13 @@ def test_the_kubeconfig_table_is_its_own_nix_section():
     🔴 BOTH DIRECTIONS MATTER AND THEY FAIL DIFFERENTLY. An EMPTY or shrunken
     table disarms the `~` check while every other assertion in this module stays
     green -- the reassuring zero. A table that GREW to include the repo handles
-    would arm `~` for all 184 `~/workspace/…` sites, which is the deferred sweep
-    and would make the gate unsatisfiable on Read-tool pointers. So the
-    kubeconfig names are floored as a set AND the repo names are asserted
-    ABSENT.
+    would arm `~` for EVERY `~/workspace/…` site in the corpus, which is the
+    deferred sweep and would make the gate unsatisfiable on Read-tool pointers.
+    (This sentence carried a count of its own, disagreeing with the module
+    docstring's census of the same quantity. The census is stated ONCE, there,
+    against a named ref; here the argument does not need a figure, so it has
+    none.) So the kubeconfig names are floored as a set AND the repo names are
+    asserted ABSENT.
     """
     names = {n for n, _ in _kubeconfig_table()}
     assert not (KNOWN_KUBECONFIG_HANDLES - names), (
