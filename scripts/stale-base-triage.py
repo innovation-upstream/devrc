@@ -177,6 +177,42 @@ from ci_status import (TOTALS_RE as _TOTALS_RE,  # noqa: E402
                        newest_per_context, parse_failed_count,
                        parse_failing_names)
 
+# 🔴 THE CENSUS-GUARD SCREEN. Same `append`, same reason as above.
+#
+# WHY THIS IMPORT EXISTS, MEASURED: this tool's INHERITED test is "the failing
+# test's own FILE is byte-identical at the head and the merge-base, and main has
+# moved it". That is sound for a test which exercises code it NAMES, and
+# systematically WRONG for a repo-wide census/scanner guard, which inspects
+# OTHER files — there an unchanged guard file is the NORMAL state of a genuine,
+# self-inflicted breakage, so the premise carries no information and the
+# heuristic fires exactly backwards.
+#
+# Measured 2026-09-12 on this tool's first live sweep, by rebuilding each PR's
+# merged tree and running only the named failing test:
+#     #1450  passed  -> INHERITED was RIGHT
+#     #1286  passed  -> INHERITED was RIGHT
+#     #1603  FAILED  -> INHERITED was FALSE   <- test_runtime_shebangs.py
+#     #1194  FAILED  -> INHERITED was FALSE   <- test_runtime_shebangs.py
+#     #1038  merge conflict -> untestable, excluded from the rate
+# 2 of 4 testable verdicts were FALSE, both on the same census guard, and in
+# BOTH the offender was a NEW FILE the PR itself adds (#1194's was its own
+# `scripts/tests/test_break_glass_merge.py`, absent from main — so a rebase
+# would carry the offending file along with the red). `#1600`'s own unit block
+# calls ONE false INHERITED disqualifying for arming; this is the fix for it.
+#
+# 🔴 THE MEMBERSHIP SET IS DERIVED, NOT LISTED, and deliberately reuses the
+# derivation `ledger-check.sh` already runs (`14daa42a`) rather than growing a
+# second one: `census_scan.analyze()` computes, from the AST, every test whose
+# verdict depends on the repo's FILE SET. A hand-kept list of "the census
+# guards" would be a ledger, and would rot exactly the way the ledgers it
+# describes did — which is the failure this whole tool reports on.
+#
+# ⚠ `census_scan` is pure AST + filesystem walk: it shells out to NOTHING, so
+# importing it cannot weaken this tool's "runs no git subcommand that writes"
+# claim. Verified by `test_the_census_screen_cannot_shell_out`.
+sys.path.append(str(Path(__file__).resolve().parent))
+from testlib import census_scan  # noqa: E402
+
 RC_OK, RC_INHERITED, RC_UNMEASURED, RC_USAGE = 0, 10, 11, 2
 
 # The context this triage is about. A literal contract with the devrc-ci
@@ -197,6 +233,102 @@ TOTAL_BUDGET_S_DEFAULT = 300
 VERDICT_INHERITED = "INHERITED — likely cured by rebase"
 VERDICT_NOT_STALE = "NOT EXPLAINED BY STALENESS"
 VERDICT_UNMEASURED = "COULD NOT MEASURE"
+
+
+class CensusIndex:
+    """Membership oracle: "is this failing test a repo-census guard?"
+
+    🔴 LAZY ON PURPOSE, AND THE LAZINESS IS LOAD-BEARING. The derivation costs
+    ~28s (MEASURED: `ledger-check.sh` reports `derive 27803ms`) against a sweep
+    whose whole run was 35s, so building it unconditionally would nearly double
+    every run — including the many that never reach an INHERITED verdict at all.
+    It is built on FIRST ASK and reused, so a sweep with no candidate pays
+    nothing.
+
+    🔴 AND A FAILURE TO BUILD IS NOT A PASS. If the derivation cannot be built,
+    `ok` is False and `is_census_guard` RAISES rather than answering — the caller
+    turns that into COULD NOT MEASURE. Answering "not a census guard" on failure
+    would restore the exact bug this class exists to fix, silently, on the day
+    the derivation breaks. The one error this tool must never make is dismissing
+    a real red, so an unanswerable screen must never resolve toward INHERITED.
+    """
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.built = False
+        self.ok = False
+        self.error = None
+        self.parsed = 0             # modules the derivation actually read
+        self.pairs = set()          # (repo-relative path, bare function name)
+        self.whole_modules = set()  # repo-relative paths selected entire
+        self.build_ms = None
+
+    def _build(self):
+        self.built = True
+        t0 = time.monotonic()
+        try:
+            res = census_scan.analyze(self.root)
+        except Exception as exc:                      # noqa: BLE001 - reported
+            self.error = f"{type(exc).__name__}: {exc}"
+            return
+        for nodeid in res.nodeids:
+            path, _, rest = nodeid.partition("::")
+            if not rest:
+                self.whole_modules.add(path)
+                continue
+            # Strip a pytest parametrisation suffix: the description names the
+            # bare function, never `test_x[param]`.
+            self.pairs.add((path, rest.split("[", 1)[0]))
+        for mod in getattr(res, "whole_modules", ()):
+            self.whole_modules.add(str(mod))
+        # 🔴 A SCAN THAT PARSED NOTHING IS A BROKEN INSTRUMENT, NOT AN ANSWER —
+        # and this guard exists because the obvious version of this class FAILED
+        # OPEN. MEASURED while writing it: `census_scan.analyze()` on a path with
+        # no scripts tree RETURNS AN EMPTY RESULT rather than raising. Read as
+        # "nothing in this repo is a census guard", every verdict would sail past
+        # the screen to INHERITED — the bug back, silently, the day the
+        # derivation is pointed at the wrong root.
+        #
+        # ⚠ THE TRIP IS `parsed == 0`, NOT A FLOOR ON THE GUARD COUNT, and the
+        # difference was measured rather than reasoned. A count floor (tried
+        # first, mirroring `ledger-check.sh`'s `MIN_NODEIDS`) turned every
+        # end-to-end fixture repo into COULD NOT MEASURE: a small repo with
+        # genuinely no census guards is a TRUE answer, not a broken scan, and a
+        # guard that cannot tell those apart fails the wrong way. The
+        # production-strength claim — that THIS repo derives a large guard set —
+        # is a POSITIVE CONTROL in the suite, which is where it belongs.
+        self.parsed = getattr(res, "parsed", 0)
+        if not self.parsed:
+            self.error = (f"the census derivation parsed 0 modules under "
+                          f"{self.root} — a broken or mis-rooted scan, not a "
+                          "repo without census guards")
+            return
+        self.ok = True
+        self.build_ms = int((time.monotonic() - t0) * 1000)
+
+    def is_census_guard(self, path, name, truncated=False):
+        """True/False, or RAISE if the derivation could not be built.
+
+        `truncated` matters because the status description is capped at 140
+        bytes and cuts a long test name mid-word (MEASURED: 100 of 101 failure
+        descriptions truncate). A truncated name is matched by PREFIX, which can
+        only ever select MORE tests as census guards — i.e. it errs toward
+        demotion, the safe direction.
+        """
+        if not self.built:
+            self._build()
+        if not self.ok:
+            raise RuntimeError(
+                f"the census derivation could not be built ({self.error}) — so "
+                "whether this test is a repo-census guard is UNKNOWN, and an "
+                "INHERITED verdict cannot be justified")
+        if path in self.whole_modules:
+            return True
+        if (path, name) in self.pairs:
+            return True
+        if truncated:
+            return any(p == path and fn.startswith(name) for p, fn in self.pairs)
+        return False
 
 HEADER_SENTINEL = '"""Triage a red PR'
 
@@ -479,7 +611,7 @@ def prove_candidates(repo, candidates, main_ref, head_ref):
     return proven
 
 
-def triage_one_test(repo, main_ref, head_ref, merge_base, raw_name):
+def triage_one_test(repo, main_ref, head_ref, merge_base, raw_name, census=None):
     """One failing test -> its own verdict plus the evidence for it."""
     res = resolve_test_file(repo, head_ref, raw_name)
     if res["status"] != "ok":
@@ -533,6 +665,34 @@ def triage_one_test(repo, main_ref, head_ref, merge_base, raw_name):
                          "this run")
         out["candidates"] = candidates
         return out
+    # 🔴 THE CENSUS-GUARD SCREEN — the LAST thing before INHERITED, and it can
+    # only ever DEMOTE. Everything above has established the stale-base pattern;
+    # this asks whether that pattern MEANS anything for this particular test. For
+    # a scanner over other files it does not: see the measured 2-of-4 false rate
+    # in the import block. Placed here rather than earlier so the evidence above
+    # is still computed and printed — a reader gets to see the candidates that
+    # WOULD have justified INHERITED, which is what made the original false
+    # verdicts falsifiable in one command.
+    if census is not None:
+        try:
+            if census.is_census_guard(path, raw_name, res["truncated_name"]):
+                out["verdict"] = VERDICT_NOT_STALE
+                out["census_guard"] = True
+                out["candidates"] = proven
+                out["reason"] = (
+                    f"`{raw_name}` is a REPO-CENSUS guard — its verdict depends "
+                    f"on the repo's FILE SET, not only on `{path}`. That `{path}` "
+                    "is byte-identical at the head and the merge-base is the "
+                    "NORMAL state of a genuine breakage here (the PR never "
+                    "touches the guard; it adds a file the guard scans), so "
+                    "staleness does not explain this red. Treat it as real.")
+                return out
+        except RuntimeError as exc:
+            out["verdict"] = VERDICT_UNMEASURED
+            out["candidates"] = proven
+            out["reason"] = str(exc)
+            return out
+
     out["verdict"] = VERDICT_INHERITED
     out["explained"] = True
     out["candidates"] = proven
@@ -543,7 +703,7 @@ def triage_one_test(repo, main_ref, head_ref, merge_base, raw_name):
 
 
 # ── per-PR triage ─────────────────────────────────────────────────────────────
-def triage_pr(repo, main_ref, pr, row):
+def triage_pr(repo, main_ref, pr, row, census=None):
     """Fold one PR's newest pytests row into a verdict plus its evidence."""
     out = {"number": pr["number"], "title": pr.get("title", ""),
            "head": pr["head_sha"], "url": pr.get("url", "")}
@@ -577,7 +737,8 @@ def triage_pr(repo, main_ref, pr, row):
     out["names"] = names
     out["complete"] = complete
     out["completeness_reason"] = completeness_reason
-    out["tests"] = [triage_one_test(repo, main_ref, head_ref, merge_base, n)
+    out["tests"] = [triage_one_test(repo, main_ref, head_ref, merge_base, n,
+                                    census)
                     for n in names]
 
     explained = [t for t in out["tests"] if t["explained"]]
@@ -759,7 +920,7 @@ def render(result):
     say()
 
 
-def summarise(results, errors):
+def summarise(results, errors, census=None):
     inherited = [r for r in results if r.get("verdict") == VERDICT_INHERITED]
     not_stale = [r for r in results if r.get("verdict") == VERDICT_NOT_STALE]
     unmeasured = [r for r in results if r.get("verdict") == VERDICT_UNMEASURED]
@@ -773,6 +934,26 @@ def summarise(results, errors):
         + ("  " + ", ".join(f"#{r['number']}" for r in not_stale) if not_stale else ""))
     say(f"   COULD NOT MEASURE:      {len(unmeasured)}"
         + ("  " + ", ".join(f"#{r['number']}" for r in unmeasured) if unmeasured else ""))
+    # 🔴 REPORT THE SCREEN'S OWN WORK, INCLUDING ITS ZERO. A demotion changes a
+    # verdict a reader would otherwise have acted on, so it is named rather than
+    # folded silently into NOT EXPLAINED. And the line prints whether or not the
+    # index was ever built: "0 demoted" from a screen that never ran is a
+    # different claim from "0 demoted" by a screen that looked, which is exactly
+    # the silent-zero shape this repo keeps getting caught by.
+    demoted = [r for r in results
+               if any(t.get("census_guard") for t in r.get("tests", []))]
+    if census is None:
+        pass                       # no index in play (unit callers)
+    elif not census.built:
+        say("   census screen:          NOT CONSULTED — no PR reached the "
+            "INHERITED branch, so the derivation was never built")
+    elif not census.ok:
+        say(f"   census screen:          COULD NOT BUILD ({census.error}) — "
+            "every affected verdict was withheld, never resolved to INHERITED")
+    else:
+        say(f"   census screen:          {len(demoted)} demoted"
+            + ("  " + ", ".join(f"#{r['number']}" for r in demoted) if demoted else "")
+            + f"   [{len(census.pairs)} guard nodeids derived in {census.build_ms}ms]")
     # 🔴 A BROKEN GATE IS NEVER A CODE FAILURE, so it is counted on its own line
     # and never inside the red total. Folding it in is the roll-up mistake.
     if errors:
@@ -845,12 +1026,20 @@ def main(argv):
         f"({_git(repo, ['rev-parse', main_ref]).stdout.strip()[:12]})   "
         f"comment-mode {mode}")
     say()
+    # 🔴 Built from the LOCAL WORKING TREE, not the PR head, and that is a
+    # deliberate approximation with a named direction. Analysing each head would
+    # need a checkout per PR; the working tree is ~main. A test that BECAME a
+    # census guard on main after the merge-base is therefore treated as one,
+    # which can only DEMOTE a verdict — never manufacture an INHERITED. Erring
+    # toward demotion is the safe direction, because the one error this tool must
+    # never make is dismissing a real red.
+    census = CensusIndex(repo)
     results, errors = [], []
     for pr in prs:
         try:
             rows = gh_json(f"/repos/{slug}/commits/{pr['head_sha']}/statuses?per_page=100")
             row = newest_per_context(rows if isinstance(rows, list) else []).get(CONTEXT)
-            res = triage_pr(repo, main_ref, pr, row)
+            res = triage_pr(repo, main_ref, pr, row, census)
         except Unmeasured as exc:
             res = {"number": pr["number"], "title": pr.get("title", ""),
                    "head": pr["head_sha"], "url": pr.get("url", ""),
@@ -860,7 +1049,7 @@ def main(argv):
         results.append(res)
         render(res)
 
-    n_inherited = summarise(results, errors)
+    n_inherited = summarise(results, errors, census)
 
     if mode == "off":
         say(f"comment: mode=off (set --comment-mode on to arm it); "
