@@ -448,20 +448,18 @@ def test_emit_concurrent_appends_dont_interleave(tmp_path):
 # --------------------------------------------------------------------------- #
 # 🔴 THE COLLECTOR WAS THE ONE CONSUMER THAT DID NOT DERIVE. `ACTIVITY_HOST`
 # absent, it fell back to `""`, under which `parse_line` leaves emit's
-# `host=$(hostname)` standing — and `hostname` is `nixos` on BOTH machines. Every
-# other consumer of the label goes through `scripts/lib/host_label.py`, which
-# names the machine from an address it actually HOLDS. That single gap is why the
-# first cut of #1601 had to WRITE a label into `~/.config/activity-collector/env`
-# from a home-manager activation, and that write mangled a `CLICKHOUSE_PASSWORD`
-# line in a systemd `EnvironmentFile=`. Deriving here deletes the write.
+# `host=$(hostname)` standing — `nixos` on BOTH machines. That single gap is why
+# the first cut of #1601 had to WRITE a label into the collector's env file from
+# a home-manager activation, and that write mangled a `CLICKHOUSE_PASSWORD` line
+# in a systemd `EnvironmentFile=`. Deriving here deletes the write.
 #
 # 🔴 HERMETIC BY CONSTRUCTION, AND IT HAS TO BE: this suite runs on ONE OF THE TWO
-# REAL MACHINES the module is about, so the address probe would happily answer
-# truthfully mid-test and make an assertion pass for a reason unrelated to the
-# code. `_hermetic_host_label` below states "this machine holds none of the known
-# addresses" and points the env file at a path that does not exist; every test
-# that WANTS a signal injects one. `test_the_hermeticity_fixture_is_installed` is
-# the positive control on it — a guard nobody has watched work is not a guard.
+# REAL MACHINES the module is about, so the address probe would answer truthfully
+# mid-test and make an assertion pass for a reason unrelated to the code.
+# `_hermetic_host_label` says "this machine holds none of the known addresses"
+# and points the env file at a path that does not exist; every test that WANTS a
+# signal injects one. `test_the_hermeticity_fixture_is_installed` is its positive
+# control — a guard nobody has watched work is not a guard.
 #: 🔴 WHICH OF THE TESTS BELOW IS REGRESSION COVERAGE, AND AGAINST WHICH BASE.
 #: These fail at `4697add2` — the round-1 head of this branch, where
 #: `host_label.py` already derived and only `collector.py` did not — BECAUSE OF
@@ -649,16 +647,12 @@ def test_an_UNIDENTIFIABLE_machine_DEGRADES_rather_than_crashing_the_daemon(
 ], ids=["import-error", "arbitrary-exception"])
 def test_a_BROKEN_host_label_module_DEGRADES_rather_than_crashing_the_daemon(
         monkeypatch, tmp_path, caplog, body, want):
-    """🔴 THE `except Exception` IS BROAD ON PURPOSE, AND THIS IS WHY. The
-    deployed collector loads `host_label.py` out of a `lib/` dir next to itself
-    that `nix/home.nix` places there. A switch that loses that entry SUCCEEDS —
-    the file simply is not deployed — and the import then raises something that
-    is NOT a `HostLabelError`. Narrowing the catch to the module's own exception
-    class would take the daemon down for a deployment mistake, which is the
-    failure this whole guard exists to prevent.
-
-    Two shapes: a missing dependency (`ImportError`) and any other exception at
-    import time. Neither may reach the process.
+    """🔴 THE `except Exception` IS BROAD ON PURPOSE, AND THIS IS WHY. A switch
+    that loses the `lib/` entry SUCCEEDS — the file simply is not deployed — and
+    the import then raises something that is NOT a `HostLabelError`. Narrowing
+    the catch to the module's own class would take the daemon down for a
+    deployment mistake. Two shapes, neither of which may reach the process: a
+    missing dependency (`ImportError`), and any other exception at import time.
 
     INVARIANT GUARD; sensitivity is `MUT-C2b` in
     `scripts/tests/mutants-host-label.sh`.
@@ -683,14 +677,12 @@ def test_a_BROKEN_host_label_module_DEGRADES_rather_than_crashing_the_daemon(
 def test_the_DAEMON_ITSELF_STARTS_when_the_machine_cannot_be_identified(tmp_path):
     """🔴 THE SAME CLAIM AT THE PROCESS LEVEL, WHICH IS WHERE IT IS MADE. Every
     assertion above calls `Config.from_env` in-process; systemd runs
-    `python3 collector.py`. `--flush-once` is that real entry point (`main()` →
-    `Config.from_env()` → work → exit), so this exercises the path the unit
-    takes rather than a Python restatement of it.
+    `python3 collector.py`. `--flush-once` is that real entry point, so this
+    exercises the path the unit takes rather than a restatement of it.
 
-    Hermetic: an EMPTY spool, so `flush_once` finds no segment and no HTTP call
-    is ever made. `CLICKHOUSE_URL` is set to a loopback port nothing listens on
-    so that a regression which DID reach the network fails loudly rather than
-    touching the real store.
+    Hermetic: an EMPTY spool, so no HTTP call is made at all; `CLICKHOUSE_URL`
+    points at a loopback port nothing listens on, so a regression that DID reach
+    the network fails loudly instead of touching the real store.
 
     INVARIANT GUARD; sensitivity is `MUT-C2` (which makes this rc 1 with a
     traceback).
@@ -762,9 +754,9 @@ def test_the_DEPLOYED_symlink_layout_can_derive_the_host_label(
     Every assertion above imports the collector from the REPO layout, where
     `scripts/lib/` is two directories up. What runs on a host is
     `~/.config/activity-collector/collector.py` — a lone flattened SYMLINK into
-    /nix/store with no `scripts/` anywhere near it. A derivation that works in
-    the repo and not there is a feature that is inert on both machines while
-    every test is green: exactly the "verified in isolation" shape.
+    /nix/store with no `scripts/` near it. A derivation that works in the repo
+    and not there is inert on both machines while every test is green: exactly
+    the "verified in isolation" shape.
 
     THREE ARMS, because the pass alone would not be evidence:
       * both files deployed          -> the label is derived

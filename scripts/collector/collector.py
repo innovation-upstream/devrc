@@ -61,31 +61,25 @@ LOG = logging.getLogger("activity-collector")
 # WHICH MACHINE IS THIS (#1601)
 # --------------------------------------------------------------------------- #
 #: 🔴 THE COLLECTOR WAS THE ONE CONSUMER THAT DID NOT DERIVE. Every other reader
-#: of the fleet's host label — `transcript-push.sh`, `tmux-reply-agent`,
-#: `session-manager`, `peer-host`, `espanso-usage.py` — goes through
-#: `scripts/lib/host_label.py`, which since #1601 identifies this machine from an
-#: address it actually HOLDS rather than defaulting to the literal `"workbench"`.
-#: This file read `ACTIVITY_HOST` out of the environment and, absent, fell back
-#: to `""` — under which `parse_line` leaves emit's `host=$(hostname)` standing,
-#: and `hostname` is **`nixos` on BOTH machines**. So a host with no stated label
-#: shipped every telemetry row under a name that collides with the other box.
+#: of the label goes through `scripts/lib/host_label.py`, which since #1601 names
+#: this machine from an address it actually HOLDS. This file read `ACTIVITY_HOST`
+#: from the environment and, absent, fell back to `""` — under which `parse_line`
+#: leaves emit's `host=$(hostname)` standing, and `hostname` is `nixos` on BOTH
+#: machines. That single gap is why the first cut of #1601 had to WRITE a label
+#: into `~/.config/activity-collector/env` from a home-manager activation, a
+#: write into a systemd `EnvironmentFile=` that promptly ate a credential line.
+#: Deriving here deletes the reason for the write.
 #:
-#: That gap is why the first cut of #1601 had to WRITE a label into
-#: `~/.config/activity-collector/env` from a home-manager activation — a write
-#: into a systemd `EnvironmentFile=` holding a credential, which promptly ate the
-#: previous line of one. Deriving here deletes the reason for the write.
-#:
-#: WHERE THE MODULE LIVES, IN THE TWO LAYOUTS THIS FILE RUNS IN:
-#:   repo      `scripts/collector/collector.py`      -> `scripts/lib/`
-#:   deployed  `~/.config/activity-collector/collector.py` -> `…/activity-collector/lib/`
-#: The deployed pair is placed there by `nix/home.nix` (`home.file` entries next
-#: to the one for this script); read that comment before changing either spelling.
+#: THE TWO LAYOUTS THIS FILE RUNS IN:
+#:   repo      `scripts/collector/collector.py`            -> `scripts/lib/`
+#:   deployed  `~/.config/activity-collector/collector.py` -> `…/lib/`
+#: `nix/home.nix` places the deployed pair; read that comment before changing
+#: either spelling.
 #:
 #: 🔴 `abspath`, NEVER `realpath`/`.resolve()`. The deployed copy is a SYMLINK
 #: into /nix/store; resolving it walks out of `~/.config/activity-collector` and
-#: loses the sibling entirely. The session tailers are pinned to the same rule by
-#: `scripts/tests/test_collector_deploy_declares.py::
-#: test_the_tailers_do_not_resolve_symlinks_when_locating_the_root`.
+#: loses the sibling. Same rule the session tailers are pinned to by
+#: `scripts/tests/test_collector_deploy_declares.py`.
 _SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 HOST_LABEL_LIB_DIRS = (
     os.path.join(os.path.dirname(_SELF_DIR), "lib"),   # repo:     scripts/lib
@@ -108,22 +102,17 @@ def _derive_host_label(env) -> str:
     """This machine's label, or `""` when it cannot be determined.
 
     🔴 IT MUST DEGRADE, NEVER CRASH, AND THAT IS NOT A STYLE PREFERENCE. This is
-    a `Restart=always` systemd daemon and it is the ONLY thing that drains the
-    spool: a collector that refuses to start does not mislabel telemetry, it
-    STOPS it, on every host, until someone notices. `host_label.local_host_label`
-    raises by design — correct for `peer-host`, which routes work and must not
-    guess — but here the honest fallback already exists and is strictly better
-    than dying: an empty `host_override` leaves emit's own `host=` in place.
-    That is the behaviour every release before #1601 had.
-    So: BROAD `except Exception`. Not just `HostLabelError` — a missing or broken
-    `lib/` beside the deployed copy raises `ImportError`, and a future signal
-    added to the module could raise anything at all. `BaseException` is
-    deliberately NOT caught: `KeyboardInterrupt` and `SystemExit` must still stop
-    the process.
+    a `Restart=always` daemon and the ONLY drain on the spool: a collector that
+    refuses to start does not mislabel telemetry, it STOPS it, on every host,
+    until someone notices. `local_host_label` raises by design — correct for
+    `peer-host`, which routes work — but here the honest fallback is the
+    pre-#1601 behaviour: an empty `host_override` leaves emit's own `host=`.
 
-    The reason is logged ONCE (this runs once, from `Config.from_env`), at
-    WARNING, naming the exception type — an operator reading the journal needs to
-    tell "this box is off the mesh" from "the deploy is missing a file".
+    So: BROAD `except Exception`. Not just `HostLabelError` — an undeployed
+    `lib/` raises `ImportError`. `BaseException` is deliberately NOT caught, so
+    `KeyboardInterrupt`/`SystemExit` still stop the process. The reason is logged
+    once, at WARNING, naming the exception TYPE: an operator needs to tell "off
+    the mesh" from "the deploy is missing a file".
     """
     try:
         return _load_host_label().local_host_label(env=env)

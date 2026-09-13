@@ -1356,23 +1356,20 @@ def test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS():
     finding in this family.
 
     WHAT A STALE ANSWER COSTS HERE IS THE WORST OF THE FOUR. This unit is
-    `Restart=always` and long-lived: a oneshot on a timer picks up new code at
-    its next tick, but a correction to the fleet's ADDRESS TABLE lands on disk
-    and this daemon keeps stamping EVERY shipped telemetry row from the old one
-    until something else restarts it. Both files are deployed as
-    symlinked-by-path store files, so the unit definition does not change on its
-    own — which is the same reason `collector.py` itself already needed a
-    trigger.
+    `Restart=always` and long-lived: a oneshot on a timer picks up new code next
+    tick, but a correction to the fleet's ADDRESS TABLE lands on disk and this
+    daemon keeps stamping EVERY shipped row from the old one until something else
+    restarts it. Both files are symlinked-by-path store files, so the unit
+    definition does not change on its own — the same reason `collector.py` itself
+    already needed a trigger.
 
-    DERIVED, NOT TYPED, for the chain it covers: the daemon's own imports and
-    path-built filenames are read from ITS source, and the host-identity module's
-    path-opened files from ITS source, so a second address-table file added
-    tomorrow fails here without anyone editing this test.
+    DERIVED, NOT TYPED: the daemon's imports and path-built filenames are read
+    from ITS source, the module's path-opened files from ITS source, so a second
+    address-table file added tomorrow fails here.
 
-    ⚠ SCOPE, STATED AT THE WIDTH IT HOLDS — the HOST-IDENTITY chain, not every
-    dependency of this unit. `collector.py` is otherwise stdlib-only (measured
-    while writing this), so today the two sets coincide; that is a fact about
-    today's collector, not a property this test enforces.
+    ⚠ SCOPE — the HOST-IDENTITY chain, not every dependency of this unit.
+    `collector.py` is otherwise stdlib-only (measured), so today the two sets
+    coincide; that is a fact about today's collector, not a property pinned here.
 
     INVARIANT GUARD on a declaration this branch adds — there is no `origin/main`
     state in which it could have gone red, because the dependency did not exist
@@ -1413,15 +1410,13 @@ def test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS():
 
 def test_the_host_identity_pair_is_DEPLOYED_beside_the_collector():
     """🔴 A RESTART TRIGGER IS NOT A DEPLOYMENT, AND THE COLLECTOR NEEDS BOTH.
-    What runs on a host is `~/.config/activity-collector/collector.py` — a lone
-    flattened symlink into /nix/store with no `scripts/lib` anywhere near it. A
-    file that is not declared in `nix/home.nix` simply is not there: the switch
+    A file not declared in `nix/home.nix` simply is not there: the switch
     SUCCEEDS and the daemon silently degrades (it catches the ImportError by
-    design, because a collector that will not start is worse than a mislabelled
-    column). So the failure is invisible from the unit's status — exactly the
-    shape `test_collector_deploy_declares.py` exists for, one directory over.
+    design — a collector that will not start is worse than a mislabelled column),
+    so the failure is invisible from the unit's status. Exactly the shape
+    `test_collector_deploy_declares.py` exists for, one directory over.
 
-    BOTH FILES, and the second is the one with no `import` to find:
+    BOTH FILES, the second being the one with no `import` to find:
     `host_label.py` locates `host-role.sh` next to itself by path. Ship the `.py`
     alone and the module degrades to the nebula-only `PEER_SSH` subset — right on
     the mesh, quietly non-deriving off it, exit 0 either way.

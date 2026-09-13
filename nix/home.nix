@@ -1231,26 +1231,25 @@ in
   # 🔴 THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", DEPLOYED BESIDE THE
   # DAEMON THAT ASKS. Since #1601 the collector DERIVES `ACTIVITY_HOST` when the
   # environment states none, instead of falling back to emit's `$(hostname)` —
-  # which is `nixos` on BOTH machines, i.e. a collision, not a label. It loads
-  # `scripts/lib/host_label.py` from a `lib/` dir next to itself, because what
-  # runs on a host is `~/.config/activity-collector/collector.py`, a lone
-  # flattened symlink with no `scripts/lib` anywhere near it. Same reason
-  # `changed_paths.py` and `mention_scan.py` need their own entries above.
+  # `nixos` on BOTH machines, i.e. a collision, not a label. It loads the module
+  # from a `lib/` dir next to itself, because what runs on a host is
+  # `~/.config/activity-collector/collector.py`, a lone flattened symlink with no
+  # `scripts/lib` near it. Same reason `changed_paths.py` and `mention_scan.py`
+  # need their own entries above.
   #
   # BOTH FILES, NOT JUST THE `.py`. `host_label.py` locates `host-role.sh` — the
   # owner of the fleet's address table — NEXT TO ITSELF via `__file__`, with no
   # `import` to find. Ship the module alone and it degrades SILENTLY to the
   # nebula-only `PEER_SSH` subset: right on the mesh, quietly non-deriving off
-  # it, exit 0 either way. Pinned by
-  # `scripts/collector/tests/test_collector.py::test_the_DEPLOYED_symlink_layout_
-  # can_derive_the_host_label` and by the restart-trigger ledger in
-  # `scripts/tests/test_transcript_push.py`.
+  # it, exit 0 either way. Pinned behaviourally by
+  # `scripts/collector/tests/test_collector.py` and structurally by the ledgers
+  # in `scripts/tests/test_transcript_push.py`.
   #
-  # TWO NAMED FILES RATHER THAN `${../scripts/lib}`, DELIBERATELY. Importing the
-  # directory works, and it also makes EVERY file under `scripts/lib` a nix-read
-  # STORE path — `scripts/lib/nix_read_paths.sh` resolves a directory token to
-  # the directory itself (measured), so `drift-check.sh` and `ship.sh` would
-  # start reporting untracked files there as dirty-in-artifact on both hosts.
+  # TWO NAMED FILES RATHER THAN `${../scripts/lib}`, DELIBERATELY: importing the
+  # directory makes EVERY file under `scripts/lib` a nix-read STORE path
+  # (`nix_read_paths.sh` resolves a directory token to the directory itself,
+  # measured), so `drift-check.sh` and `ship.sh` would start reporting untracked
+  # files there as dirty-in-artifact on both hosts.
   home.file.".config/activity-collector/lib/host_label.py".source =
     ../scripts/lib/host_label.py;
   home.file.".config/activity-collector/lib/host-role.sh".source =
@@ -2487,15 +2486,13 @@ in
       # unit definition change whenever the code changes → switch restarts it.
       #
       # 🔴 AND THE HOST-IDENTITY PAIR, FOR THE SAME REASON AND WITH A WORSE
-      # CONSEQUENCE. Since #1601 the collector loads `host_label.py` (which
-      # `open()`s `host-role.sh` beside itself) to derive `ACTIVITY_HOST` when the
-      # environment states none. Both are deployed as symlinked-by-path store
-      # files, so without these lines a correction to the fleet's ADDRESS TABLE
-      # lands on disk while this `Restart=always` daemon keeps stamping every
-      # shipped row from the OLD one — and `host-role.sh` is the half no import
-      # scanner can see. Pinned, DERIVED not typed, by
-      # `scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_
-      # triggers_on_the_host_identity_files_IT_LOADS`.
+      # CONSEQUENCE. The collector loads `host_label.py` (which `open()`s
+      # `host-role.sh` beside itself) to derive `ACTIVITY_HOST`. Both are
+      # symlinked-by-path store files, so without these lines a correction to the
+      # fleet's ADDRESS TABLE lands on disk while this `Restart=always` daemon
+      # keeps stamping every shipped row from the OLD one — and `host-role.sh` is
+      # the half no import scanner can see. Pinned, DERIVED not typed, in
+      # `scripts/tests/test_transcript_push.py`.
       X-Restart-Triggers = [
         "${../scripts/collector/collector.py}"
         "${../scripts/lib/host_label.py}"
