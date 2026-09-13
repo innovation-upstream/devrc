@@ -76,7 +76,11 @@ GRANDFATHERED: dict[str, int] = {
     # new document is the caller. Caught by merging `main` in and re-running,
     # which is the check that rule asks for.
     "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,   #  71,027 B
-    "claudedocs/handoff-handoff-search-index.md": 81_920,       #  67,076 B
+    # `claudedocs/handoff-handoff-search-index.md` was the twelfth entry and is
+    # GONE: it was pruned back to 59,805 B and now fits under MAX_BYTES on its
+    # own, so check (c) demands the entry be deleted rather than left standing.
+    # That is the ratchet working — an entry is not a permanent exemption, and
+    # leaving it here would have let the doc regrow 22 KB unobserved.
 }
 
 

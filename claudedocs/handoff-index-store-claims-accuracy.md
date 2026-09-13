@@ -55,35 +55,24 @@ for this session. An unknown session id answers `200 {"tasks":[]}`, not 404, so 
 cannot distinguish "touched no task" from "the id is wrong". Per the flow, nothing
 was written and no task was created. This is **not** a clean reading.
 
+⚠ **This doc was cut on 2026-09-13** because it passed its size ceiling and turned `main`
+RED. Nothing was deleted: every closed investigation block, the closed ranked item and ten
+duplicated Gotchas bullets were moved VERBATIM to
+`claudedocs/refs/index-store-claims-accuracy.md` and are pointed at from where they stood. 🔴 That file is **not** indexed by `handoff_search` — which is why only
+CLOSED material went there, and why every open investigation, gotcha and ruled-out theory
+below stayed.
+
 ## Open investigations — live diagnosis state
 
-### Why devrc-ci went red on PRs whose diff could not reach the failing suite
-- **Symptom + exact repro:** `tekton/devrc-pytests` FAILURE on `228b8cea` and `8f1d4531`
-  while the same shas were green locally on both tiers.
-- **Observed (with values):** run 1 `devrc-ci-5hsmf` — `pytests` exit 0, `nodetests` exit 0,
-  `verdict` exit 1, `failed=1` of 19958, in `scripts/tests/test_subsystem_store_api.py`.
-  Run 2 `devrc-ci-tfrr6` — `failed=3` in `scripts/browser-bridge/tests/test_browser_agent.py`,
-  message: *"the wrapper did not exit within 60s. Spawning 10 trivial processes on this machine
-  just now took 0.16s (idle reference 0.10s; stall threshold 0.80s), so the MACHINE is not the
-  explanation."* Four other runs on four non-mine shas failed on different tests in the
-  store-api file. Locally: 641 passed × 3 standalone, sandbox tier `failed=0`.
-- **Ruled out:** CPU/node load — the failing test's OWN control measured process-spawn latency
-  at failure time and found the node healthy. via: measurement
-- **Ruled out:** a defect in devrc#1132 — the failing test and the server it exercises are
-  byte-identical between `3f9c8144` (CI green) and `228b8cea` (CI red). via: command
-- **Ruled out (RETRACTED, mine):** "concurrent unsandboxed nix builds share /tmp and the network
-  namespace". The unsandboxed observation is REAL (`/build` absent in a live gate pod while
-  `nix config show` reports `sandbox = true`) but it was NOT the mechanism for either failure.
-  via: doc
-- **Leading hypothesis — now RESOLVED by others, and both causes were specific, not systemic:**
-  the store-api failures were `_replace_bytes` fsyncing inside the request, exceeding
-  `HANG_TIMEOUT` under disk contention — **devrc#1211 (`1a4350f3`)** moved the test store off the
-  contended disk. The browser-bridge failures were three flat `elapsed < 1.0` bounds against a
-  **5.0s** timeout, i.e. load detectors rather than timeout detectors — **devrc#1179** derives
-  each as `TIMEOUT / 2`. With both on `main`, `7d3b6d2a` went green first try.
-- **Next probe:** none needed for this thread. If it recurs, read the `verdict` step first —
-  `pytests exit 0` + `verdict exit 1` means a test FAILED; a step that emitted no `RESULT:` line
-  was KILLED, which is a different problem.
+### ✅ CLOSED — why devrc-ci went red on PRs whose diff could not reach the failing suite
+Both causes were specific, not systemic: the store-api reds were `_replace_bytes` fsyncing inside
+the request and exceeding `HANG_TIMEOUT` under disk contention (**devrc#1211** → `1a4350f3`); the
+browser-bridge reds were three flat `elapsed < 1.0` bounds against a **5.0s** timeout, i.e. load
+detectors rather than timeout detectors (**devrc#1179**, which derives each as `TIMEOUT / 2`).
+🔴 **If it recurs, read the `verdict` step FIRST** — `pytests exit 0` + `verdict exit 1` means a
+test FAILED, and a step that emitted no `RESULT:` line was KILLED, which is a different problem.
+Run ids, the per-run failure counts and the RETRACTED unsandboxed-nix theory →
+`claudedocs/refs/index-store-claims-accuracy.md`.
 
 ### RESOLVED — "entries are still being WRITTEN to the local mirror while the pod is canonical"
 - **Symptom + exact repro:** entries kept changing under `~/.claude/analyze-service-index/`
@@ -129,28 +118,12 @@ was written and no task was created. This is **not** a clean reading.
 - **Next probe:** none for the diagnosis. Before ANY future local→pod bulk operation, run the
   per-bullet direction check rather than a file-level containment set.
 
-### `cairn-cutover.py` P3 is blocked by the new guard and cannot complete
-- **Symptom + exact repro:** `cairn-cutover.py` P3 invokes `bash seed.sh --store <delta_dir> …`
-  with **no `--allow-overwrite`** (`cairn-cutover.py:1379-1382`). Its `plan.shippable` is
-  `ADD + SUPERSEDES + MERGED` (`cairn-cutover.py:516`, `:494`).
-- **Observed (with values):** `SUPERSEDES` and `MERGED` are BY DEFINITION entries whose pod bytes
-  differ, which is exactly what the pre-flight refuses — so P3 exits 8 and pushes nothing the
-  moment anything supersedes. Measured on the real store while auditing: **52 of 157** shared
-  entries differ today, so this is the normal state, not an edge.
-- **Ruled out:** "the cutover tests would have caught it" — `test_cairn_cutover.py` only
-  re-extracts the `find` expression from `seed.sh`'s source (`:473-475`); **nothing exercises P3
-  against the real script**, so its 85 green tests say nothing about this. via: code
-- **Ruled out:** "the refusal predates this PR so the guidance is fine" — the exit-8 refusal does
-  predate round 2, but round 2 rewrote the message, and it now tells that caller the local tree
-  is "a FROZEN pre-cutover mirror" and to "send it entry-by-entry". Both are FALSE for a curated
-  delta that `_materialise` built and whose rollback set `_save_prepush` already wrote. via: code
-- **Leading hypothesis:** P3 either needs to pass `--allow-overwrite` (it IS a reviewed delta
-  with a rollback set already on disk) or is simply dead post-cutover and should say so. This is
-  a decision about the cutover's lifecycle, not a bug fix, which is why it was not taken
-  unilaterally.
-- **Next probe:** `python3 scripts/cairn-cutover.py --help` and read P3's own description, then
-  decide. If P3 is retained, the one-line change is `--allow-overwrite` at
-  `cairn-cutover.py:1379-1382` plus a test that exercises P3 against the real `seed.sh`.
+### ✅ CLOSED — `cairn-cutover.py` P3 is blocked by the new guard and cannot complete
+Settled the OPPOSITE way round from this block's own leading hypothesis: P3 is **RETIRED**
+(**devrc#1428** → squash `13c0791a`), because `--allow-overwrite` is the DATA-LOSS path and the
+exit-8 refusal was the last guard, not the bug. See the retained Gotchas bullet. Full diagnosis,
+the `52 of 157` shared-entries measurement and the two ruled-out readings →
+`claudedocs/refs/index-store-claims-accuracy.md`.
 
 ### 🔴 The pre-flight's join key can DIVERGE between host and pod — and the pod's `echo` is the reachable route
 - **Symptom + exact repro:** a staged entry whose pod copy DIFFERS is silently treated as a pure
@@ -210,22 +183,12 @@ was written and no task was created. This is **not** a clean reading.
   skips blank lines in `--help`) and the structural one (pair by position). Either way a ROUND 4
   delta audit is owed.
 
-### `--help` still drifts, and has ZERO test coverage
-- **Symptom + exact repro:** insert one blank line into `seed.sh`'s leading comment header and
-  run `bash seed.sh --help`.
-- **Observed (with values):** unmodified → **61 lines**, ends on a complete paragraph, contains
-  `allow-overwrite`. One blank line inserted at line 33 → **31 lines**, `allow-overwrite`
-  occurrences **0**. The `awk`'s `{exit}` fires on the first non-`#` line, and a blank line is
-  one. That is verbatim the defect `d7c4c266` exists to fix, silently reintroducible.
-- **Ruled out:** "the line-range rot was the whole bug and the `awk` closes it" — the `awk`
-  closes the GROWTH shape and leaves the BLANK-LINE shape wide open. via: measurement
-- **Ruled out:** "a test guards the fix" — `grep` over `test_subsystem_store_api.py` finds no
-  `seed.sh --help` assertion at all; the only `--help` test belongs to
-  `verify-byte-identity.sh`. The commit's headline claim is unguarded. via: measurement
-- **Leading hypothesis:** `/^#/{...} /^$/{next} {exit}` (or match `^#|^$` and stop only on a
-  real non-comment line), plus the missing test asserting `--help` contains `allow-overwrite`
-  and ends on a terminator.
-- **Next probe:** fold into the same fix commit as the block above, then round 4.
+### ✅ CLOSED — `--help` still drifts, and has ZERO test coverage
+Both halves closed. `test_subsystem_store_api.py` now asserts `seed.sh --help` contains
+`--allow-overwrite`, and pins the blank-line injection that used to truncate it. ⚠ The standing
+lesson is retained in Gotchas below — **`--help` claimed "cannot drift" TWICE and was wrong both
+times**, which is why the test exists. The 61 → 31 line measurement and the two ruled-out readings
+→ `claudedocs/refs/index-store-claims-accuracy.md`.
 
 ### Two of the delta's NEW guards have no test — both mutants SURVIVED
 - **Symptom + exact repro:** break the guard on purpose and the suite stays green.
@@ -272,60 +235,19 @@ was written and no task was created. This is **not** a clean reading.
 - **Next probe:** add the `FROM` pin; decide separately whether a docker-backed test is worth
   its cost.
 
-### `test_git_repo_isolation.py::test_live_cotenants_sees_another_process_in_the_repo` is LOAD-FLAKY on the sandbox tier
-- **Symptom + exact repro:** the sandbox `pytests` derivation goes red with `failed=1` while
-  the dev-host tier on the same tree is green. Re-running the identical derivation passes.
-  `nix build <repo>#checks.x86_64-linux.pytests --no-link --print-build-logs`
-- **Observed (with values):** `scripts/tests/test_git_repo_isolation.py:1496` —
-  `assert live_cotenants([git_dir]) == []` returned `['126220:git']` on a **brand-new tmp
-  repo**, i.e. a live `git` process whose cwd is inside a repo created microseconds earlier.
-  Run 1: `SANDBOX_PYTESTS_NIX_RC=1`, `RESULT: FAIL (exit=1)`, 21867 collected / 21863 passed
-  / **1 failed**. Run 2, byte-identical derivation: `RC=0`, `RESULT: PASS`, 21867 / 21864 /
-  **0 failed**.
-- **Ruled out:** "devrc#1304 caused it" — the file is **byte-identical to `origin/main`**
-  (`git diff --stat origin/main HEAD -- <file>` empty) and the PR touches four files, none
-  of them this one. via: command
-- **Ruled out:** "it is deterministic" — same derivation, 1 red / 1 green. via: measurement
-- **Ruled out:** "it reproduces on the dev host" — 10 consecutive runs of that single test,
-  unloaded, all passed in 0.63–1.34s. Absence at low load is NOT evidence of absence.
-  via: measurement
-- **Leading hypothesis, NOT confirmed:** `_mkrepo` (`:250-258`) runs `git init` / `add` /
-  `commit` via `subprocess.run`, which waits only for the PARENT. `git commit` can fork a
-  detached `git gc --auto` whose cwd is the new repo; the co-tenant scan then sees it. Load
-  widens the window, which would explain dev-host-green / sandbox-red. A theory that
-  explains the failure is not evidence for it — this was never reproduced.
-- **Next probe:** the discriminating one is to make `_mkrepo` deterministic rather than to
-  re-run: `git -c gc.auto=0 …` on all three commands (or `git init` with
-  `core.logAllRefUpdates=false` + an explicit `gc.auto=0` in `_env()`), then re-run the
-  sandbox tier under deliberate load. If the flake survives that, the gc theory is wrong and
-  the next suspect is the fsmonitor/credential helper. **Do not "fix" it by re-running** —
-  a flaky gate trains everyone to click through.
-
-### 🔴 REFUTED — the `gc --auto` theory for the co-tenant flake (supersedes the block above)
-- **Symptom + exact repro:** unchanged — the sandbox `pytests` derivation reds with
-  `live_cotenants(...)` returning a `git` process on a brand-new tmp repo, and a re-run of
-  the byte-identical derivation passes.
-- **Observed (with values):** `gc.auto` is unset, i.e. the default **6700** loose objects;
-  `_mkrepo` leaves **3** (`git count-objects -v` → `count: 3 size: 12 in-pack: 0`). The
-  threshold is unreachable by construction, so the commit CANNOT fork a `gc --auto`.
-  Two-arm loop, 80 iterations each at load 31.6 — as-shipped and with `gc.auto=0` forced:
-  **0 hits in both arms**.
-- **Ruled out:** the `gc --auto` mechanism this doc previously named as the leading
-  hypothesis. Refuted twice over: arithmetically (3 objects vs a 6700 threshold) and
-  empirically (0/80 in the arm that should show it). via: measurement
-- **Ruled out:** "the 0/80 might be a probe wired to nothing" — a positive control ran
-  FIRST: spawning a process with cwd in the repo made `live_cotenants` return
-  `['<pid>:python3.12']`, and the same harness returned `[]` before the spawn. The probe
-  demonstrably sees a co-tenant, so the zero is a real reading. via: measurement
-- **Leading hypothesis:** NONE — and that is the honest state. The failure was observed
-  once, in the sandbox tier, under `pytest -n 4 --dist loadfile`. `live_cotenants` matches
-  on a process whose **cwd** is inside the work tree, and nothing yet explains how a `git`
-  process acquired a cwd inside a just-created per-test tmp repo.
-- **Next probe:** do NOT re-derive `gc --auto`. Wait for the next red and read the message
-  #1340 added — it prints the intruder's `cwd=` and `cmdline=`, which is what separates an
-  xdist sibling from a stray host process from one of our own children. `/proc` for a
-  transient process is gone by the time anyone reads the log, which is why the capture had
-  to move into the assertion.
+### ✅ CLOSED — `test_git_repo_isolation.py::test_live_cotenants_sees_another_process_in_the_repo`
+Diagnosed and fixed in **devrc#1453** → `eeea9025`: the intruder is
+`git maintenance run --auto --quiet --detach`, which `subprocess.run` does not wait for, so the
+child outlives the parent with its cwd inside the just-created repo. Fixed with
+`maintenance.auto=false` in `_GIT_ENV`.
+🔴 **Do NOT re-derive the `gc --auto` theory.** It was refuted twice — arithmetically (3 loose
+objects against a 6700 threshold) and empirically (0/80 with `gc.auto=0` forced, behind a positive
+control) — and **both refutations were CORRECT**; `maintenance run --auto` is a different code path
+that `gc.auto` does not reach. `gc.auto` is deliberately NOT set in the fix. Both blocks — the
+load-flaky observation and the REFUTED-theory block with its positive control — are preserved
+verbatim in `claudedocs/refs/index-store-claims-accuracy.md`; the standing lessons ("ship the
+diagnostic, not a guess"; "a 0/N only means something after a positive control") are retained in
+Gotchas below.
 
 ## Next steps (ranked)
 
@@ -365,16 +287,7 @@ automatically, and the next writer is the only moment anyone looks.
    standing reminder and is an accurate report, not an alarm.
    forcing: none
 
-2. ✅ **CLOSED — `devrc#1170`'s 🟡5 and 🟡6, merged as `#1554` (squash `663bc86a`).**
-   🟡5: the probe now EMITS `policy: <path>  (<basis>)`, sourced from
-   `subsystem_touch.governing_policy` rather than re-derived, and `index-store.md`
-   carries the `subsystem-index/SKILL.md` sentence verbatim with a test comparing
-   the two docs to each other. The instruction was made satisfiable rather than
-   softened. 🟡6: `--template` over an existing entry now REFUSES (exit 2) naming
-   what would be destroyed. ⚠ #1170's audit framed 🟡6 as a race; that framing was
-   wrong and the single-writer repro is two commands.
-
-3. **Two small guard gaps left open on purpose, named so they read as OPEN rather
+2. **Two small guard gaps left open on purpose, named so they read as OPEN rather
    than absent.**
    - `scripts/tests/test_cairn_skill_verb_ledger.py` — nothing verifies that a
      `DELEGATED` ledger reason is TRUE. Measured churn of the guarded surface:
@@ -389,15 +302,12 @@ automatically, and the next writer is the only moment anyone looks.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
-- ✅ **THE DASH PREMISE IS TRUE ON THE DEPLOYED POD, AND NO LONGER LOAD-BEARING.**
-  Measured 2026-09-10 against the RUNNING image (`subsystem-store-api:0.8.0`, not
-  the `Dockerfile`): `/bin/sh -> dash` (`/usr/bin/dash`), and its `echo "a\tb"`
-  emits a real TAB. Control: bash emits the literal `a\tb`, so the asymmetry is
-  real and the reading is not a no-op. **But every pod-side emit in `seed.sh` is
-  now `printf`, not `echo`** — `grep -nE "sh -c .*echo"` returns nothing — so the
-  dash-specific behaviour cannot reach the join key any more. The premise held
-  AND the code stopped depending on it; verifying it changed no decision, which
-  is the honest outcome for a `forcing: none` item.
+- ✅ **THE DASH PREMISE IS TRUE ON THE DEPLOYED POD, AND NO LONGER LOAD-BEARING** —
+  every pod-side emit in `seed.sh` is now `printf`, not `echo` (`grep -nE "sh -c .*echo"`
+  returns nothing), so dash's escape-interpreting `echo` cannot reach the join key any
+  more. 🔴 Read that beside the join-key block above, which still carries the LITERAL-TAB
+  route: the premise held AND the code stopped depending on it. Measurement, bash control
+  and the honest `forcing: none` outcome → `claudedocs/refs/index-store-claims-accuracy.md`.
 
 - ✅ **THE CO-TENANT FLAKE IS DIAGNOSED AND FIXED — `devrc#1453` → `eeea9025`. It
   was `git maintenance run --auto --quiet --detach`, never `gc --auto`.**
@@ -437,25 +347,17 @@ automatically, and the next writer is the only moment anyone looks.
   showing the extraction found something.
 
 - ✅ **THE OPENCODE BLINDNESS IS FIXED — `devrc#1365` → squash `14126d94`.**
-  `clawgate_resolve` reads `OPENCODE_SESSION_ID` before `CLAUDE_CODE_SESSION_ID`
-  (verified on `origin/main` by content: 9 occurrences where the item said 0), and
-  refuses outright when `$OPENCODE` is set with no opencode id, because the claude
-  id in scope there may be an ancestor's and nothing can tell. 🔴 **This item was
-  still telling the next session to do work that had already merged** — the ranked
-  list is not self-closing, and the only moment anyone checks is the next writer's.
-  ⚠ It buys CORRECTNESS, not capability: `clawgatectl` has no opencode tier
-  (measured 2026-09-07, `grep -rl OPENCODE containers/` = 0 against 5 for the claude
-  var), so opencode sessions resolve exit 5 rather than their own tasks until that
-  lands — a Go change in `homelab-talos`.
+  `clawgate_resolve` reads `OPENCODE_SESSION_ID` before `CLAUDE_CODE_SESSION_ID`, and
+  refuses outright when `$OPENCODE` is set with no opencode id. ⚠ **STILL OPEN, and it is
+  a CAPABILITY gap rather than a correctness one:** `clawgatectl` has no opencode tier, so
+  opencode sessions resolve exit 5 rather than their own tasks until that lands — a Go
+  change in `homelab-talos`. Verification detail → `claudedocs/refs/index-store-claims-accuracy.md`.
 
-- ✅ **P3 IS RETIRED — `devrc#1428` → squash `13c0791a`, and the framing in the old
-  ranked item was the wrong half of the choice.** It read "either pass the flag or
-  declare P3 dead", calling `--allow-overwrite` the one-line fix. That flag is the
-  DATA-LOSS path: `seed.sh`'s tar adds and overwrites but never deletes, so a push
-  from a frozen mirror silently reverts every pod-newer entry and reports success.
-  The exit-8 refusal was the last guard, not the bug. P3 now refuses with
-  `RC_CUTOVER_COMPLETE (19)`, conditioned on state (`refused > 0`) so a genuine
-  first cutover still passes through.
+- ✅ **P3 IS RETIRED — `devrc#1428` → squash `13c0791a`.** `--allow-overwrite` is the
+  DATA-LOSS path, not the one-line fix the old ranked item called it: `seed.sh`'s tar
+  adds and overwrites but never deletes. P3 now refuses with `RC_CUTOVER_COMPLETE (19)`,
+  conditioned on state so a genuine first cutover still passes. Why the old framing was
+  the wrong half of the choice → `claudedocs/refs/index-store-claims-accuracy.md`.
 - 🔴 **FOUR AUDIT ROUNDS, AND THE LAST THREE FOUND MY OWN PROSE, NOT MY CODE.** The
   guard was right after round 1; rounds 2–4 each found that the *fix round* had
   written something false or harmful. Round 2: the predicate `writable == 0` failed
@@ -472,18 +374,14 @@ automatically, and the next writer is the only moment anyone looks.
 - ⚠ **`cairn create` EXISTS** (`34d00d90`/#1254, `PUT` + `If-None-Match: *`), so
   retiring P3 strands nothing. Two comments in the tree still said the API had
   "no create route" — that sentence is wrong, and it was what made this look
-  costly. ⚠ UPDATED 2026-09-11. Measured by loading the repo's OWN scanner
-  (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`) against an
-  extracted `8b2b960b` tree, with a positive control returning 1 so the figures
-  are not a wired-to-nothing zero: **10 occurrences across 8 files; 9 live and
-  unmarked in 7 files; 8 live in 6 files besides the `cairn` SKILL.md.** One
-  straddles a newline AND is uppercase, so case-sensitive and line-based greps
-  both miss it.
-  🔴 **THIS BULLET'S COUNT HAS NOW BEEN WRONG TWICE, WHICH IS THE POINT OF IT.**
-  It first said "two comments", then "four live sites in four tracked files"
-  (round 1 caught it), then "6 live in 4 files" (round 2 caught that). Each wrong
-  figure was produced by a hand sweep and each read as precise. **Do not quote a
-  count here you have not re-derived with the scanner.**
+  costly. One occurrence straddles a newline AND is uppercase, so case-sensitive
+  and line-based greps both miss it.
+  🔴 **THIS BULLET'S COUNT HAS NOW BEEN WRONG TWICE, WHICH IS THE POINT OF IT** —
+  every wrong figure was produced by a hand sweep and every one read as precise.
+  **Do not quote a count here you have not re-derived with the repo's OWN scanner**
+  (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`), behind a
+  positive control that returns non-zero. The 2026-09-11 figures and the history of
+  the wrong ones → `claudedocs/refs/index-store-claims-accuracy.md`.
   🔴 **AND "ALL SITES ARE CORRECTED" WAS ITSELF FALSE WHEN WRITTEN — round 3 found
   TWO more live, present-tense sites, one of them 115 lines below that claim in
   this very file.** Four sweeps, four spellings: mechanism → one conclusion phrase
@@ -576,10 +474,6 @@ automatically, and the next writer is the only moment anyone looks.
 - **`_MARKER_ANYWHERE` requires the colon on purpose.** `_NEAR_MISS_MARKER`'s shouted branch
   may skip the terminator because it is ANCHORED at a bullet head; unanchored over a whole
   line that same rule fires on `OPEN SOURCE`.
-- **Carried forward from the previous `State now` (it would otherwise be dropped by this
-  update):** `devrc#1223 → 540e748d`, the `dropped lines:` advisory in `--validate`, was
-  verified by content AND behaviour — run against the real 2026-08-19 blob it reports **13
-  dropped lines** and flags nuance line 11 as a lost declaration.
 - 🔴 **`ctime` cannot distinguish "the writer set the mode" from "something chmod'd right
   after" — it only rules out a LATER re-freeze.** Both shapes leave ctime a few ms past mtime.
   What actually answered it was reproducing the `Edit` in a replica. An earlier reading of mine
@@ -606,13 +500,6 @@ automatically, and the next writer is the only moment anyone looks.
   "the THIRD frozen read surface — the one whose output drives deletions (rank 20)" — so more
   than one session is repointing read surfaces off this mirror. Check for overlap before
   editing `subsystem_audit`/`subsystem_recall`.
-- 🔴 **A COMMIT MESSAGE WRITTEN FROM MEMORY SHIPPED A FALSE CLAIM, AND THE DEFECT IT SAID WAS
-  FIXED WENT WITH IT.** `3c8e37da` asserted a 🔴 fix; the pushed blob contained **none** of it
-  (`grep -c OC_LOCK_PID_FILE` = 6 where it should have been 0). Cause: the red-at-base check
-  restores with `git checkout HEAD -- <file>`, and it was run BEFORE committing, so `HEAD` was
-  the pre-fix commit and the "restore" reverted the uncommitted work. `git add` then staged a
-  file that no longer held the change. **Read the claim off the committed blob, never off what
-  you remember editing** — and commit before any checkout-based experiment.
 - 🔴 **A CONTROL THAT SHARES THE CONTAMINANT IS NOT A CONTROL.** A browser-bridge failure
   reproduced on `origin/main`, which read as "inherited / main is broken" and was reported that
   way. It was neither: a machine-global orphaned lock was failing both runs. The rule names this
@@ -639,14 +526,6 @@ automatically, and the next writer is the only moment anyone looks.
   code. `browser-agent`'s machine-global lock was one mechanism; raw CPU contention was
   another. Any red measured above ~load 20 needs a control before it means anything.
 
-- **Carried forward from an earlier `State now` (a REPLACE section, so it would otherwise be
-  dropped):** the ORIGINAL rank 1 is CLOSED — the writer was Claude Code sessions themselves
-  using `Edit`/`Write` on `~/.claude/analyze-service-index/` (the `0444` freeze is inert against
-  them: those tools rewrite-and-rename and need only the containing directory's `0755` bit), 21
-  stranded bullets + 2 revisions were reconciled onto the pod and verified at the consumer, and
-  the write path was closed by the CREATE verb (`devrc#1254` → `34d00d90`, live as image
-  `subsystem-store-api:0.7.0`, verified with `cairn create` returning exit 9 / already-exists
-  where it returned 405 read-only before).
 - **Also carried forward:** `seed.sh`'s blast radius is MEASURED HIGHER than when this doc was
   first written — beyond the cairn-attributed bullets it would revert the **5 pod-newer bullets**
   found on 2026-09-02/03, two of them `OPEN:` → `RESOLVED` closures with ~20 lines of later
@@ -668,13 +547,6 @@ automatically, and the next writer is the only moment anyone looks.
   line from awk FIELDS (`{print $2" "$1}`) truncates any path at its first blank, which turned a
   loud crash into a confident FALSE REFUSAL naming a nonexistent path. Both shipped as a claim
   with no test; both were caught only by an audit re-running them.
-- 🔴 **A CONTROL THAT SHARES THE CONTAMINANT IS NOT A CONTROL.** A browser-bridge failure
-  reproduced on `origin/main` and was reported as "inherited / main is broken". It was neither —
-  a machine-global orphaned lock was failing both runs. What worked was removing the suspected
-  cause and watching the test pass, not a second sample.
-- 🔴 **THE PIPE TRAP FIRED FOUR TIMES** — `… | tail; echo "rc=$?"` printed `GATE_RC=0` over
-  `GATE: RESULT=FAIL exit=1`, and `NIXBUILD_RC=0` over a failed derivation. The runners' own
-  `RESULT:` line caught it every time.
 - 🔴 **A TEST CAN BE VACUOUS IN A WAY ONLY MUTATION SHOWS.** The first `LC_ALL=C join` guard
   planted its sort-inversion on the POD — but the probe answers only STAGED paths, so a pod-only
   file never reaches the join. It passed, and the mutant survived. Both sides of the inversion
@@ -682,9 +554,6 @@ automatically, and the next writer is the only moment anyone looks.
 - **A `-k` FILTER CAN EXCLUDE THE KILLING TEST SILENTLY.** `-k "SILENTLY_SKIPPED"` matched
   nothing against class `…SILENTLYSKIPPED` and reported `1 passed` — a green that proved nothing
   about the two tests it had quietly dropped.
-- **Concurrent agents corrupt each other's results on this box.** Load hit 62 on 24 cores; three
-  failures investigated in this effort were other sessions' suites rather than code. Queue behind
-  them rather than killing them, and treat any red above ~load 20 as needing a control.
 - 🔴 **THE TEST HARNESS RUNS THE POD'S COMMAND UNDER BASH, AND THE POD IS DASH.** Every test in
   `test_subsystem_store_api.py` drives a fake `kubectl` whose `exec` runs the command locally.
   `echo "ABSENT  $1"` therefore behaves one way in all 723 green tests and a different way on
@@ -696,18 +565,10 @@ automatically, and the next writer is the only moment anyone looks.
   moved the boundary from `0x20` to `0x09` — the same bug, one byte lower, and the round-2
   commit's own comment describes the defect it still has. Ask instead whether the key needs to
   be parsed out of text AT ALL.
-- 🔴 **`{exit}` on "the first non-comment line" treats a BLANK line as code.** The `--help`
-  rewrite traded a rotting line-range for a rule that a single blank line in the header
-  silently truncates — measured 61 → 31 lines with `allow-overwrite` gone. A rule that "cannot
-  drift" should be tested; there is no `seed.sh --help` test at all.
 - **Two of three round-3 findings I re-measured MYSELF rather than taking the auditor's word,
   and both held exactly.** The rules require re-verifying a subagent's numbers; here they were
   right. That is worth recording precisely because the previous two rounds each carried a wrong
   datum from a subagent.
-- 🔴 **TWO INDEPENDENT LENSES FOUND THE SAME TAB DEFECT BY DIFFERENT ROUTES** — lens 1 by
-  fuzzing the real script, lens 2 by hand at unmutated HEAD. Neither was told what the other was
-  looking for. That agreement is the strongest evidence in this round, and it is also the
-  argument for splitting a round into lenses rather than running one auditor twice.
 - 🔴 **THE FIRST ROUND WHOSE PREDECESSOR'S CLAIMS ALL SURVIVED — and it still found defects.**
   Rounds 1 and 2 each caught the previous round LYING about what it had fixed. Round 3 verified
   every round-2 claim as TRUE (and one as *understated*), then found four NEW gaps anyway. So a
@@ -722,15 +583,13 @@ automatically, and the next writer is the only moment anyone looks.
 - **The handoff doc was 1 commit behind at session start** and `handoff_doc.py` resolves its
   base from the working tree, so the fast-forward had to happen BEFORE any draft. A stale base
   would have merged into an out-of-date document and reported success.
-- **Two corrections to this doc, measured 2026-09-05, recorded HERE so a future `State now`
-  replace cannot drop them.** (1) The old rank 8 — *"`main` is RED on
-  `test_clawgate_task_interview_guard.py`"* — is **CLOSED**: it passes on `origin/main`
-  (`1 passed in 0.29s`), fixed by `8c27c5cf` (#1303), "a stale file at the `--body-file`
-  path shadowed the heredoc about to overwrite it — the verdict was a property of the HOST".
-  The dev-host tier has no known inherited red any more, so a red there now means something.
-  (2) Tekton posts on a PR head but `required_status_checks` is **null** and
-  `enforce_admins` **false** — re-measured at merge time. Nothing gates; the two-tier local
-  run IS the gate.
+- **Two corrections to this doc, measured 2026-09-05 — both now ✅ CLOSED.** The live
+  residue is the one sentence worth carrying: **the dev-host tier has no known inherited
+  red any more, so a red there now means something** (read that beside the "INHERITED RED"
+  bullet below, which is what it qualifies). The old rank 8, the `8c27c5cf` fix and the
+  branch-protection reading taken at merge time →
+  `claudedocs/refs/index-store-claims-accuracy.md`. ⚠ Do not quote that
+  protection reading — `CLAUDE.md` owns the current state and it has moved since.
 
 - 🔴 **A SPLICE-BASED EDIT TO A TEST FILE IS A COVERAGE-DELETING OPERATION.** Replacing one
   test by cutting between two string anchors silently removed a 4-param test that sat
@@ -786,10 +645,6 @@ automatically, and the next writer is the only moment anyone looks.
   0/80 in BOTH arms — which, without proving the probe could see anything at all, is
   indistinguishable from a harness wired to nothing. The control (spawn a process in the
   repo, watch `live_cotenants` return a pid) is what made the zero a reading.
-- 🔴 **WHEN THE MECHANISM IS UNKNOWN, SHIP THE DIAGNOSTIC, NOT A GUESS.** `gc.auto=0` was
-  one line and would have looked like a resolution while the real cause stayed open —
-  strictly worse than nothing, because it would have stopped anyone looking. Making the
-  failure self-describing is the honest move when you cannot name the cause.
 - 🔴 **A DIAGNOSTIC NOBODY TESTED IS WORTH NOTHING AT THE MOMENT IT FIRES** — it only ever
   runs inside an already-failing assertion. Two tests plus a mutation matrix (drop
   cwd+cmdline → KILLED 2; let a dead pid raise instead of degrading → KILLED 1), because a
@@ -803,19 +658,13 @@ automatically, and the next writer is the only moment anyone looks.
   (homelab-infra):` fails the grammar, so a genuine closure showed no badge and read as
   unfinished. `--validate` reports these as *attempted marker did not parse* — an advisory
   that exits 0, so it is only seen by someone who reads past the verdict.
-- **`gh pr merge` rc is not the merge's verdict.** It returned **1** for a failure that was
-  only about deleting a LOCAL branch still held by a worktree — the remote merge had
-  already succeeded. Remove the worktree first, and verify by content either way.
-- 🔴 **`clawgate_handoff.sh resolve` EXIT 5 CANNOT DISTINGUISH "THIS SESSION TOUCHED NO TASK" FROM "THE SESSION ID IS WRONG", and it answered that way on SIX separate
-  handoffs in this effort.** An unknown session returns `200 {"tasks":[]}`, not 404, so the
-  empty array is the same observation for both. Every time the positive control confirmed the
-  board was reachable (2, 11 and other link counts for OTHER sessions), which is what makes
-  the zero a reading about THIS id rather than about the board — and equally why it is not a
-  clean result. Per the flow no `clawgate-task:` field was written and none created, six
-  times. ⚠ One run exited **6** instead (one linked task, role=`read`, none worked) — a
-  different code for a different state, also correctly declining to write. **The six
-  near-identical bullets this replaces are MERGED, not lost: they differed only in the
-  control's link count.**
+- 🔴 **`clawgate_handoff.sh resolve` EXIT 5 CANNOT DISTINGUISH "THIS SESSION TOUCHED NO
+  TASK" FROM "THE SESSION ID IS WRONG"** — an unknown session returns `200 {"tasks":[]}`,
+  not 404, so the empty array is the same observation for both. It answered that way on
+  SIX handoffs in this effort, each behind a positive control proving the board was
+  reachable, and each time nothing was written and no task created. Stated in `## Goal`
+  and `## State now` above; the six merged bullets and the one `exit 6` variant →
+  `claudedocs/refs/index-store-claims-accuracy.md`.
 
 - ⚠ **CARRIED FORWARD from the old `State now` so this REPLACE cannot drop them** (the two
   the merge flagged as durable-and-orphaned): the original rank 1 closed as **devrc#1304**,
@@ -899,13 +748,6 @@ automatically, and the next writer is the only moment anyone looks.
   discussing itself. The cost was a SOPS edit plus a pod restart whose failure mode is
   *the store stays down*. **"It is broken" was slid into "it needs fixing" without ever
   asking whether anything depended on it.**
-- ⚠ **A RANKED LIST WENT STALE A FOURTH TIME — by the session that closed it.** It
-  claimed the work with *"retire the stale ranked text"* in its own claim subject,
-  shipped the fixes, and never returned to the list; rank 2 read "Never started" after
-  `#1554` had merged. Closed in `#1636`. Nothing closes a ranked item automatically.
-- ⚠ **FOUR AUDIT ROUNDS, AND EVERY FIX ROUND INTRODUCED THE NEXT FINDING** — 4 for 4,
-  and the finding was usually the fix round's own PROSE, not its code. Round 0 (the
-  requirements pass) earned its keep: `ran: 1 · changed the outcome: 1`.
 - ⚠ **A SUBAGENT CAUGHT A PERMANENTLY-RED GATE IN ITS OWN GUARD before shipping it** —
   its first cut classified every refusal row as the create path's 404, so a *correct*
   third row (`rc 9 already-exists`, which `_entry_exists` answers at 412) would have
