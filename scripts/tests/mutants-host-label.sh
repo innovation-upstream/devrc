@@ -69,6 +69,26 @@ restore() {
   fi
 }
 
+# 🔴 A SECOND MUTATION TARGET, BECAUSE HALF THE HOST-IDENTITY DEFECTS WERE NOT IN
+# THE MODULE. `nix/home.nix`'s `home.activation.activityCollectorEnv` is what
+# actually writes `ACTIVITY_HOST` onto a machine, and its round-1 findings — an
+# append that mangled the previous line of a systemd EnvironmentFile, a silently
+# skipped non-writable file, a discarded diagnosis, and a re-spelled copy of the
+# module's own "does this file state a label" rule — all lived there. Suite
+# section 8 runs that block for real (nix-evaluates it, executes it under a
+# throwaway HOME), so mutating this file is observable by the same harness.
+# Same contract as `run`: exact-name killer, applied-diff check, verified restore.
+NIXF="$ROOT/nix/home.nix"
+cp "$NIXF" "$T/nix.orig"
+NIX_ORIG_SHA="$(sha256sum "$T/nix.orig" | cut -d' ' -f1)"
+restore_nix() {
+  cp "$T/nix.orig" "$NIXF"
+  local now; now="$(sha256sum "$NIXF" | cut -d' ' -f1)"
+  if [ "$now" != "$NIX_ORIG_SHA" ]; then
+    echo "🔴 nix restore FAILED — the copy is still mutated; aborting"; exit 2
+  fi
+}
+
 FAILURES=0
 
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean". Reading
@@ -101,6 +121,38 @@ run() { # run <name> <expect: a test node name | SURVIVES> <sed-expr>
   cp "$T/m" "$MOD"
   local killers; killers="$(failing)"
   restore
+  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
+    printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if [ "$want" = SURVIVES ]; then
+    if [ -z "$killers" ]; then
+      printf '  ok %-52s SURVIVED as required (control)\n' "$name"; return
+    fi
+    printf '  🔴 %-52s CONTROL KILLED by %s — not measuring behaviour\n' \
+      "$name" "$(tr '\n' ',' <<<"$killers")"; FAILURES=$((FAILURES+1)); return
+  fi
+  if [ -z "$killers" ]; then
+    printf '  🔴 %-52s SURVIVED — no test failed\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if grep -qx "$want" <<<"$killers"; then
+    printf '  ok %-52s killed by %s\n' "$name" "$want"; return
+  fi
+  printf '  🔴 %-52s WRONG-KILLER — died to: %s (wanted %s)\n' \
+    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
+}
+
+run_nix() { # run_nix <name> <expect: a test node name | SURVIVES> <sed-expr>
+  local name="$1" want="$2" expr="$3"
+  sed "$expr" "$NIXF" > "$T/mn" 2>/dev/null
+  if cmp -s "$NIXF" "$T/mn"; then
+    printf '  🔴 %-52s MUTATION DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  cp "$T/mn" "$NIXF"
+  local killers; killers="$(failing)"
+  restore_nix
   if grep -q __HARNESS_BROKE__ <<<"$killers"; then
     printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
     FAILURES=$((FAILURES+1)); return
@@ -229,6 +281,58 @@ run 'MUT-9 refusal-on-stdout-and-exit-0' \
   test_the_shell_entry_point_prints_nothing_and_exits_nonzero_on_a_refusal \
   's|^        raise SystemExit(3)$|        print(exc)\n        raise SystemExit(0)|'
 
+printf '\n== the module rule the ACTIVATION asks (--file-states-label) ==\n'
+# 🔴 MUT-F1-5. The activation used to answer "does this file already state a
+# label?" with its own grep, a THIRD copy of a rule this module exists because it
+# was open-coded twice. This mutant puts a grep-shaped rule back — inside the
+# module, where the activation now asks — and the table row that dies is the one
+# the two copies really disagreed on: `ACTIVITY_HOST=nixos` is a stated label to
+# a substring test and an INVALID one to the module, so a machine carrying a
+# typo'd label would never be repaired.
+run 'MUT-F1-5 --file-states-label uses a substring rule' \
+  test_the_activation_and_the_MODULE_agree_on_what_states_a_label \
+  's|^        _stated = _file_stated_label(_body)$|        _stated = "workbench" if "ACTIVITY_HOST=" in _body else ""|'
+# MUT-F1-5b: the flag's exit-code direction. Inverted, a file that states none
+# reports "states one" and the activation never derives at all.
+run 'MUT-F1-5b --file-states-label exit code inverted' \
+  test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line \
+  's|^        if not _stated:$|        if _stated:|'
+
+printf '\n== the activation that writes ACTIVITY_HOST (nix/home.nix) ==\n'
+# 🔴 MUT-F1-2 IS THE AUDITOR'S OWN MUTANT, RE-RUN IN THE FIX'S HOME. Before this
+# round the block asked `grep -qE '^[ ]*ACTIVITY_HOST=[^ ]'` and the guard on
+# that behaviour asserted `">>" in block and "grep" in block` — under which
+# neutering the pattern to `ZZZ_NEVER_MATCHES` left the suite GREEN while every
+# `home-manager switch` appended another line to a systemd EnvironmentFile,
+# unbounded. This row restores exactly that mutant (the neutered grep, in place
+# of asking the module) and it must now die to a BEHAVIOURAL test.
+run_nix 'MUT-F1-2 idempotence check neutered (the old grep)' \
+  test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line \
+  's|^    if ! .*--file-states-label.*then$|    if ! grep -qE "^[ ]*ZZZ_NEVER_MATCHES=" "$envFile"; then|'
+# MUT-F1-1: the newline guard. Without it, `>>` onto a file whose last line has
+# no trailing newline EXTENDS that line — mangling CLICKHOUSE_PASSWORD.
+run_nix 'MUT-F1-1 trailing-newline guard removed' \
+  test_the_activation_appends_to_a_file_whose_last_line_has_NO_NEWLINE \
+  's|^          if \[ -s "$envFile" \] && \[ -n .*then$|          if false; then|'
+# MUT-F1-4: the diagnosis discarded again, which is how a generic, false cause
+# came to be printed forever on a healthy host.
+run_nix 'MUT-F1-4 the module stderr discarded again' \
+  test_the_activation_forwards_the_MODULES_OWN_reason_for_refusing \
+  's|2>"$labelErr")"|2>/dev/null)"|'
+# MUT-F1-6: back to declining the write in total silence.
+run_nix 'MUT-F1-6 non-writable file skipped silently' \
+  test_a_NON_WRITABLE_env_file_is_reported_rather_than_skipped_in_silence \
+  's|^        echo "activity-collector: $envFile states no ACTIVITY_HOST and is not writable.*|        :|'
+# 🔴 MUT-F1-3: the probe drops the sibling `host-role.sh`. `host_label.py`
+# locates it via `__file__`, so the loss is SILENT — right on the mesh, quietly
+# non-deriving off it. (The DERIVED ledger for the same property lives in
+# test_transcript_push.py::test_the_host_label_PROBE_ships_every_file_the_module
+# _OPENS_BESIDE_ITSELF; this battery only runs test_host_label_identity.py, so
+# that one is mutation-checked by hand — see the PR body.)
+run_nix 'MUT-F1-3 probe ships host_label.py without host-role.sh' \
+  test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files \
+  's|^    cp ${\.\./scripts/lib/host-role\.sh} "$out/host-role\.sh"$|    true|'
+
 printf '\n== controls ==\n'
 # 🔴 THE NEGATIVE CONTROL ON THE HARNESS: a behaviour-free edit MUST survive. If
 # it kills something, the battery is keying on the file's TEXT rather than its
@@ -237,6 +341,12 @@ printf '\n== controls ==\n'
 # `cmp` sees and Python does not.
 run 'CONTROL comment-only-edit-must-survive' SURVIVES \
   's|^#: Test/ops seam for the address probe|#: (control edit) Test/ops seam for the address probe|'
+# The same negative control for the SECOND target. Section 8 nix-evaluates and
+# RUNS `nix/home.nix`'s activation block, so a comment edit there changes the
+# built script's bytes (and its store path) without changing its behaviour — if
+# that kills a test, section 8 is keying on text, not on what the block does.
+run_nix 'CONTROL nix comment-only edit must survive' SURVIVES \
+  's|^    # Exit 0 = the file already states a valid label|    # (control edit) Exit 0 = the file already states a valid label|'
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then

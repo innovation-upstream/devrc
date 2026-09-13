@@ -53,6 +53,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -110,6 +111,42 @@ RED_AT_BASE = {
 GAP_CLOSERS_PROVEN_BY_MUTATION = {
     "test_a_stated_WORKBENCH_on_a_machine_whose_ADDRESS_says_laptop_RAISES":
         "MUT-2b conflict-check-fires-in-ONE-direction-only",
+    # 🔴 SECTION 8's TWO. Both PASS at `1fae3fdf` — the round-1 base — so neither
+    # is regression coverage, and both close a hole a mutant walks straight
+    # through. `TWICE…` is the behavioural replacement for the SPELLED
+    # idempotence guard section 7 used to carry: with the old grep's pattern
+    # neutered to `ZZZ_NEVER_MATCHES` (MUT-F1-2, the auditor's own mutant, now a
+    # row in the battery) every switch appended another line to a systemd
+    # EnvironmentFile and the structural check stayed green. `…probe_ships_BOTH
+    # _files` pins a store LAYOUT no test touched: drop `host-role.sh` and the
+    # module silently degrades to the nebula-only PEER_SSH subset.
+    "test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line":
+        "MUT-F1-2 idempotence check neutered (the old grep)",
+    "test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files":
+        "MUT-F1-3 probe ships host_label.py without host-role.sh",
+}
+
+#: 🔴 ROUND-1 REGRESSION COVERAGE, AND AGAINST A DIFFERENT BASE FROM `RED_AT_BASE`.
+#: These fail at `1fae3fdf` — the round-0 fix commit, i.e. the tree these defects
+#: were found in — not at `origin/main`, where the activation block is a different
+#: shape entirely. Measured by copying THIS file into a detached worktree at that
+#: commit: 6 failed, 34 passed (85 passed with test_transcript_push.py included).
+#: The two bases are kept apart deliberately; collapsing them would let a test
+#: that only ever saw the newer defect read as coverage for the original one.
+RED_AT_ROUND1_BASE = {
+    # F1-1, DATA LOSS: `>>` onto a file with no trailing newline extended
+    # `CLICKHOUSE_PASSWORD=s3cret` into `…s3cretACTIVITY_HOST=workbench`.
+    "test_the_activation_appends_to_a_file_whose_last_line_has_NO_NEWLINE",
+    # F1-5 (three of the four rows): the activation's own grep and the module
+    # disagreed about what "states a label" means. The `an-export-prefix` row is
+    # deliberately NOT here — both spellings agree on it, so it is the table's
+    # own control that the parametrisation is not simply always red.
+    "test_the_activation_and_the_MODULE_agree_on_what_states_a_label",
+    # F1-6: a non-writable env file was skipped with rc 0 and EMPTY output.
+    "test_a_NON_WRITABLE_env_file_is_reported_rather_than_skipped_in_silence",
+    # F1-4: the module's diagnosis went to /dev/null and a fixed, undistinguished
+    # cause was printed in its place.
+    "test_the_activation_forwards_the_MODULES_OWN_reason_for_refusing",
 }
 
 #: 🔴 DELIBERATELY *NOT* IN `RED_AT_BASE`, AND THE OMISSION IS THE POINT.
@@ -843,13 +880,360 @@ def test_the_activation_DERIVES_the_label_instead_of_templating_one():
         "ACTIVITY_HOST exists to prevent")
     assert "ACTIVITY_HOST=" in block, (
         "the activation runs host_label.py but never writes ACTIVITY_HOST")
-    # 🔴 NON-CLOBBERING. It must only ever ADD the line, and only when the file
-    # states none — a hand-edited value is the operator's, and re-deriving over it
-    # would make a `home-manager switch` silently rewrite their config.
-    assert ">>" in block and "grep" in block, (
-        "the activation must APPEND the derived label, and only when the file "
-        "states none — see the block's own comment. A rewrite would clobber a "
-        "hand-edited value on every switch")
+    # 🔴 APPEND, NEVER REWRITE — and that is ALL this assertion claims.
+    #
+    # It used to read `">>" in block and "grep" in block` under a message that
+    # claimed the whole idempotence property ("…and only when the file states
+    # none … A rewrite would clobber a hand-edited value on every switch"). That
+    # was a SPELLED guard, not a structural one: measured, replacing the grep's
+    # pattern with `^[ ]*ZZZ_NEVER_MATCHES=` — under which EVERY switch appends
+    # another line to a systemd EnvironmentFile, forever — left this test GREEN
+    # (1 passed, 28 deselected). A guard that reads as coverage while providing
+    # none is worse than no guard, because it stops the next person looking.
+    #
+    # The idempotence claim is now BEHAVIOURAL and lives in section 8 below:
+    # `test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line`
+    # and `test_a_file_that_already_states_a_label_is_left_BYTE_IDENTICAL` run
+    # the real nix-evaluated snippet in a throwaway `HOME`.
+    assert ">>" in block, (
+        "the activation must APPEND the derived label rather than rewrite the "
+        "file; see section 8 for the behavioural idempotence guards")
+
+
+# =========================================================================== #
+# 8. THE ACTIVATION, RUN FOR REAL
+# =========================================================================== #
+# 🔴 WHY THIS SECTION EXISTS: A SOURCE-TEXT GREP CANNOT SEE WHAT THIS BLOCK DOES.
+# Section 7 asserts that the activation MENTIONS things. Two defects lived
+# happily underneath that: an `>>` onto a file with no trailing newline
+# CONCATENATES onto the last line (mangling `CLICKHOUSE_PASSWORD` in a systemd
+# `EnvironmentFile=`, then appending again on every later switch because the
+# mangled line no longer states a label), and a neutered idempotence pattern
+# left the structural guard fully green while every switch grew the file.
+#
+# So these run the REAL nix-evaluated snippet: the `''…''` literal is read out of
+# `nix/home.nix` verbatim, evaluated by nix with the file's OWN `hostLabelProbe`
+# binding (also read verbatim), built, and executed under a throwaway `HOME`.
+# Nothing here touches the operator's real `~/.config/activity-collector/env`.
+#
+# ⚠ WHAT IT IS STILL NOT: a `home-manager switch`. The DAG placement
+# (`entryAfter ["writeBoundary"]`) and home-manager's own `set -eu`/PATH are not
+# under test; the tests run the script under `bash -eu` to approximate the
+# latter. Section 7's structural check is what pins the block into the module
+# system at all.
+_ACTIVATION_ANCHOR = "home.activation.activityCollectorEnv = "
+_PROBE_ANCHOR = "hostLabelProbe = pkgs.runCommandLocal"
+
+
+def _nix_indented_string(text, anchor):
+    """The `''…''` literal that follows `anchor` in a Nix file, verbatim."""
+    start = text.index(anchor)
+    opened = text.index("''", start)
+    closed = text.index("'';", opened + 2)
+    return text[opened:closed + 2]
+
+
+@pytest.fixture(scope="module")
+def activation_script(tmp_path_factory):
+    """The activation block, EVALUATED BY NIX, as an executable file.
+
+    🔴 BOTH halves come out of `nix/home.nix` rather than being retyped here.
+    Retyping `hostLabelProbe` would have hidden exactly the defect its own
+    comment warns about — a probe that ships `host_label.py` WITHOUT
+    `host-role.sh` beside it — behind a fixture that always ships both.
+
+    ⚠ ONE THING HERE IS NOT THE DEPLOYED ARTICLE: `pkgs` is `<nixpkgs>` (the
+    channel), not the flake's pinned input, because `nix eval`ing the whole
+    `homeConfigurations."zach"` to reach this one attribute costs minutes. The
+    block's own text and its `hostLabelProbe` ARE the deployed ones; only
+    `python3`/`coreutils` could differ. Measured 2026-09-13, they do not — both
+    routes resolve `python3-3.14.7` to the same store path — but that is a fact
+    about today's pins, not a guarantee, so if a mutant ever dies here for a
+    reason that smells like a toolchain difference, this is why.
+    """
+    if shutil.which("nix-build") is None:
+        pytest.fail(
+            "nix-build not on PATH. These are the only tests that observe what "
+            "the activation DOES rather than what it says; a skip here is how "
+            "an env-file-corrupting append ships. Run under `nix develop` / "
+            "scripts/gate.sh.")
+    text = _HOME_NIX.read_text(encoding="utf-8")
+    expr = (
+        "let\n"
+        "  pkgs = import <nixpkgs> { };\n"
+        '  hostLabelProbe = pkgs.runCommandLocal "devrc-host-label-probe" { } %s;\n'
+        'in pkgs.writeText "activity-collector-env-activation" (%s)\n'
+        % (_nix_indented_string(text, _PROBE_ANCHOR),
+           _nix_indented_string(text, _ACTIVATION_ANCHOR))
+    )
+    # cwd is `nix/` so the block's own relative paths (`../scripts/…`) resolve
+    # the way they do in home.nix.
+    p = subprocess.run(["nix-build", "--no-out-link", "-E", expr],
+                       capture_output=True, text=True,
+                       cwd=str(_SCRIPTS.parent / "nix"), timeout=1800)
+    assert p.returncode == 0, (
+        "evaluating the activation block failed:\n" + p.stdout + p.stderr)
+    return Path(p.stdout.strip().splitlines()[-1])
+
+
+def _addrs_of(label):
+    """The addresses `host-role.sh` gives `label`, as HOST_LABEL_ADDRS wants them.
+
+    Read from the module's own table, never typed here: a literal would pin this
+    suite to the fleet's current IPs, and `test_peer_host.py` polices exactly
+    that kind of second copy.
+    """
+    return " ".join(a for lbl, a in hl.host_addrs() if lbl == label)
+
+
+def _run_activation(script, home, addrs, extra_env=None):
+    """Run the built snippet under a throwaway `HOME`. Returns CompletedProcess."""
+    env = {
+        "HOME": str(home),
+        "PATH": os.environ.get("PATH", ""),
+        # The module's address seam: "this machine holds exactly these".
+        hl.HOST_LABEL_ADDRS_ENV: addrs,
+    }
+    env.update(extra_env or {})
+    return subprocess.run(["bash", "-eu", str(script)],
+                          capture_output=True, text=True, env=env, timeout=300)
+
+
+def _env_file(home):
+    return home / ".config" / "activity-collector" / "env"
+
+
+def _seeded_home(tmp_path, body, mode=0o600):
+    home = tmp_path / "home"
+    (home / ".config" / "activity-collector").mkdir(parents=True)
+    f = _env_file(home)
+    f.write_text(body, encoding="utf-8")
+    f.chmod(mode)
+    return home
+
+
+def _valid_label_lines(body):
+    """Every line the MODULE would read as a valid `ACTIVITY_HOST=` statement."""
+    return [ln for ln in body.splitlines() if hl._file_stated_label(ln)]
+
+
+def test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files(
+        activation_script):
+    """POSITIVE CONTROL on the harness, plus the store-layout half of F1-3.
+
+    Two ways this fixture could measure nothing: it could have built some other
+    text, or it could have built a probe directory that does not contain the
+    module the block runs. Both are checked against the repo's own bytes.
+
+    🔴 AND THE SIBLING. `host_label.py` locates `host-role.sh` via `__file__`, so
+    a probe holding only the `.py` degrades — silently, exit 0 — to the
+    nebula-only `PEER_SSH` subset, which is wrong exactly when nebula is down.
+    Every other test in this section would still pass in that state, because
+    they inject `HOST_LABEL_ADDRS` and never reach the table.
+    """
+    body = activation_script.read_text(encoding="utf-8")
+    assert 'envFile="$HOME/.config/activity-collector/env"' in body, (
+        f"the built script is not the activation: {body[:200]!r}")
+
+    probes = sorted({Path(tok).parent for tok in re.findall(
+        r"/nix/store/[^\s\"']*devrc-host-label-probe[^\s\"']*", body)})
+    assert len(probes) == 1, (
+        f"expected exactly one host-label probe store path, found {probes}")
+    probe = probes[0]
+    for name in ("host_label.py", "host-role.sh"):
+        shipped = probe / name
+        assert shipped.is_file(), (
+            f"{name} is missing from {probe}. host_label.py opens host-role.sh "
+            "beside itself for the fleet's address table; without the sibling it "
+            "falls back to the nebula-only PEER_SSH subset — right on the mesh, "
+            "silently non-deriving off it")
+        assert shipped.read_bytes() == (_SCRIPTS / "lib" / name).read_bytes(), (
+            f"{shipped} is not the repo's scripts/lib/{name}")
+
+
+def test_the_activation_appends_to_a_file_whose_last_line_has_NO_NEWLINE(
+        activation_script, tmp_path):
+    """🔴 DATA LOSS. `printf … >> "$envFile"` on a file that does not end in a
+    newline EXTENDS the last line rather than adding one. Measured before the
+    fix:
+
+        before  CLICKHOUSE_PASSWORD=s3cret          (no trailing newline)
+        after   CLICKHOUSE_PASSWORD=s3cretACTIVITY_HOST=workbench
+                ACTIVITY_HOST=workbench
+
+    This file is a systemd `EnvironmentFile=`, so the mangled line is the
+    credential the collector authenticates with — it 401s and telemetry stops,
+    silently — and the block prints its SUCCESS message while doing it. Note the
+    second line: because the mangled line no longer states a label, the next
+    switch appends again, unbounded.
+
+    Reachable by the path `SECRETS.md` step 3 prescribes: provision off-mesh (no
+    label appended), hand-edit `CLICKHOUSE_PASSWORD` in, switch again on-mesh.
+    """
+    secret = "CLICKHOUSE_PASSWORD=s3cret"
+    home = _seeded_home(tmp_path, "CLICKHOUSE_URL=http://example/\n" + secret)
+    out = _run_activation(activation_script, home, _addrs_of("workbench"))
+    assert out.returncode == 0, out.stderr
+
+    body = _env_file(home).read_text(encoding="utf-8")
+    assert secret in body.splitlines(), (
+        f"the append mangled the last line: {body!r}")
+    assert _valid_label_lines(body) == ["ACTIVITY_HOST=workbench"], body
+
+
+def test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line(
+        activation_script, tmp_path):
+    """🔴 THE IDEMPOTENCE CLAIM, MEASURED RATHER THAN SPELLED. Section 7 used to
+    assert `">>" in block and "grep" in block` under a message claiming this
+    property; with the grep's pattern neutered to `ZZZ_NEVER_MATCHES` that check
+    stayed green while every switch appended another line to a systemd
+    EnvironmentFile.
+
+    Run 1 seeds from the template (which states no host) and derives. Run 2 must
+    change NOTHING — asserted byte-for-byte, not by counting lines, so a rewrite
+    that happens to produce the same number of lines is caught too.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    first = _run_activation(activation_script, home, _addrs_of("workbench"))
+    assert first.returncode == 0, first.stderr
+    assert "derived ACTIVITY_HOST=workbench" in first.stdout, first.stdout
+    after_one = _env_file(home).read_bytes()
+    assert _valid_label_lines(after_one.decode()) == ["ACTIVITY_HOST=workbench"]
+
+    second = _run_activation(activation_script, home, _addrs_of("workbench"))
+    assert second.returncode == 0, second.stderr
+    assert _env_file(home).read_bytes() == after_one, (
+        "the second run changed the env file. Every `home-manager switch` would "
+        "grow it: %r" % _env_file(home).read_text())
+    assert "derived" not in second.stdout, (
+        "the second run re-derived; it must not even look: " + second.stdout)
+
+
+#: The four inputs on which the activation's old open-coded grep and the module
+#: disagreed, with what each disagreement cost. `states` is the MODULE's answer,
+#: which is the one every consumer acts on.
+_DISAGREEMENT_TABLE = [
+    # (id, file body, module sees a label?)
+    ("an-invalid-value", "ACTIVITY_HOST=nixos\n", False),
+    ("a-TAB-indented-line", "\tACTIVITY_HOST=laptop\n", True),
+    ("a-space-after-the-equals", "ACTIVITY_HOST= laptop\n", True),
+    ("an-export-prefix", "export ACTIVITY_HOST=laptop\n", False),
+]
+
+
+@pytest.mark.parametrize("case,body,states", _DISAGREEMENT_TABLE,
+                         ids=[c for c, _, _ in _DISAGREEMENT_TABLE])
+def test_the_activation_and_the_MODULE_agree_on_what_states_a_label(
+        activation_script, tmp_path, case, body, states):
+    """🔴 ONE RULE, ONE PLACE — AND THIS IS THE TABLE THAT PROVED THERE WERE TWO.
+
+    The block used to ask `grep -qE '^[ ]*ACTIVITY_HOST=[^ ]'`; the module asks
+    `line.strip().startswith("ACTIVITY_HOST=")` and then validates the value.
+    They disagreed on all four rows below, and each disagreement had a cost:
+
+      `ACTIVITY_HOST=nixos`        grep: stated  module: invalid → never repaired
+      `\\tACTIVITY_HOST=laptop`     grep: none    module: laptop  → duplicate append,
+                                                                   or a PERMANENT
+                                                                   false "could not
+                                                                   derive" message
+      `ACTIVITY_HOST= laptop`      grep: none    module: laptop  → same
+      `export ACTIVITY_HOST=…`     grep: none    module: ignored → a second,
+                                                                   contradicting line
+
+    The fix is not a cleverer grep — that mints a third spelling. The block ASKS
+    the module (`--file-states-label`), so the table collapses by construction.
+
+    🔴 IT ALSO CLOSES THE FIRST/LAST SPLIT. Python takes the FIRST valid
+    `ACTIVITY_HOST=`; systemd's `EnvironmentFile=` takes the LAST assignment. That
+    only bites when a file ends up holding two contradicting lines — which rows 2
+    and 3 above could create. So every row asserts BOTH: at most one line the
+    module reads as valid, and that line is the LAST `ACTIVITY_HOST` line in the
+    file, i.e. the one systemd will use.
+    """
+    home = _seeded_home(tmp_path, body)
+    before = _env_file(home).read_bytes()
+    out = _run_activation(activation_script, home, _addrs_of("workbench"))
+    assert out.returncode == 0, out.stderr
+    after = _env_file(home).read_text(encoding="utf-8")
+
+    if states:
+        assert after.encode() == before, (
+            "the file already states a label the module accepts, so the "
+            f"activation must leave it byte-identical; got {after!r}")
+        # 🔴 THE WHOLE OUTPUT, NOT A KEYWORD. A file that already states a label
+        # is not the activation's business, so it must say NOTHING — and this is
+        # the assertion that catches F1-4's permanent false message: at base,
+        # rows 2 and 3 slipped past the grep, reached the derive step, hit
+        # `HostLabelConflict` against their own stated label, and printed "could
+        # not derive … re-run the switch on-network" on EVERY switch, forever, on
+        # a healthy on-network host. A `"could not be derived" not in out.stdout`
+        # check was green against that exact text — a spelled guard, walkable by
+        # rewording.
+        assert out.stdout.strip() == "", (
+            "the file already states a label the module accepts, so the "
+            "activation must print nothing at all; got: " + out.stdout)
+    else:
+        assert after != before.decode(), (
+            "the file states no label the module accepts, so one must be "
+            f"appended; got {after!r}")
+
+    valid = _valid_label_lines(after)
+    assert len(valid) == 1, (
+        f"expected exactly one line the module reads as a valid label, got {valid}")
+    last = [ln for ln in after.splitlines() if "ACTIVITY_HOST=" in ln][-1]
+    assert last == valid[0], (
+        "python reads the FIRST valid ACTIVITY_HOST and systemd the LAST "
+        f"assignment; they disagree here — last={last!r} valid={valid[0]!r}")
+
+
+def test_a_NON_WRITABLE_env_file_is_reported_rather_than_skipped_in_silence(
+        activation_script, tmp_path):
+    """🔴 A root-owned or `chmod 400` env file used to fall out of the whole
+    block on `[ -w "$envFile" ]` with rc 0 and EMPTY output. The operator got no
+    signal at all that `ACTIVITY_HOST` had not been set — and an unset
+    ACTIVITY_HOST is the `hostname`-collision (`nixos` on both machines) this
+    whole change exists to prevent."""
+    home = _seeded_home(tmp_path, "CLICKHOUSE_URL=http://example/\n", mode=0o400)
+    before = _env_file(home).read_bytes()
+    out = _run_activation(activation_script, home, _addrs_of("workbench"))
+    assert out.returncode == 0, out.stderr
+    assert _env_file(home).read_bytes() == before
+    assert "not writable" in out.stdout, (
+        "a declined write must be announced; got stdout=%r stderr=%r"
+        % (out.stdout, out.stderr))
+    assert str(_env_file(home)) in out.stdout, (
+        "the message must name the file the operator has to edit: " + out.stdout)
+
+
+def test_the_activation_forwards_the_MODULES_OWN_reason_for_refusing(
+        activation_script, tmp_path):
+    """🔴 IT USED TO DISCARD THE DIAGNOSIS AND THEN STATE A CAUSE IT HAD NOT
+    DISTINGUISHED. `2>/dev/null` plus a fixed "re-run the switch on-network"
+    printed the same sentence for every refusal — including, measured on the
+    workbench ON-network, a `HostLabelConflict` that re-running cannot fix.
+
+    Two DIFFERENT refusals are exercised and the printed text must differ and
+    must each carry the module's own words; a message that merely mentions the
+    file would satisfy a single-case assertion while still being generic.
+    """
+    home = _seeded_home(tmp_path, "CLICKHOUSE_URL=http://example/\n")
+
+    unresolved = _run_activation(activation_script, home, "")
+    assert unresolved.returncode == 0, unresolved.stderr
+    assert "cannot identify this machine" in unresolved.stdout, unresolved.stdout
+
+    conflict = _run_activation(activation_script, home, _addrs_of("workbench"),
+                               extra_env={"ACTIVITY_HOST": "laptop"})
+    assert conflict.returncode == 0, conflict.stderr
+    assert "refusing to name it" in conflict.stdout, conflict.stdout
+    assert "the address it holds says" in conflict.stdout, conflict.stdout
+
+    assert unresolved.stdout != conflict.stdout, (
+        "both refusals print the same sentence, so the reason is not being "
+        "forwarded: " + unresolved.stdout)
+    # NEGATIVE CONTROL on the pair: neither refusal may have written anything.
+    assert _valid_label_lines(_env_file(home).read_text()) == []
 
 
 # =========================================================================== #
@@ -909,4 +1293,36 @@ MUTATION_MATRIX = {
         "test_the_shell_entry_point_prints_nothing_and_exits_nonzero_on_a_refusal",
     "MUT-10 an invalid ACTIVITY_HOST is passed through instead of ignored":
         "test_an_invalid_label_is_still_ignored_rather_than_passed_through",
+}
+
+#: 🔴 THE SECOND MUTATION TARGET: `nix/home.nix`'s activation block, which is
+#: where the round-1 findings actually lived. Same battery, same contract (the
+#: named test must fail on its OWN assertion); `mutants-host-label.sh` gained a
+#: `run_nix` for it and a comment-only negative control on that file too, since
+#: section 8 nix-evaluates and RUNS the block rather than reading its text.
+ACTIVATION_MUTATION_MATRIX = {
+    "MUT-F1-5 --file-states-label answers with a substring rule (the old grep, "
+    "moved into the module)":
+        "test_the_activation_and_the_MODULE_agree_on_what_states_a_label",
+    "MUT-F1-5b the --file-states-label exit code is inverted":
+        "test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line",
+    "MUT-F1-2 the idempotence check is the old grep with a never-matching pattern":
+        "test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line",
+    "MUT-F1-1 the trailing-newline guard before the append is removed":
+        "test_the_activation_appends_to_a_file_whose_last_line_has_NO_NEWLINE",
+    "MUT-F1-4 the module's stderr is sent to /dev/null again":
+        "test_the_activation_forwards_the_MODULES_OWN_reason_for_refusing",
+    "MUT-F1-6 a non-writable env file is declined in silence again":
+        "test_a_NON_WRITABLE_env_file_is_reported_rather_than_skipped_in_silence",
+    "MUT-F1-3 hostLabelProbe ships host_label.py without host-role.sh":
+        "test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files",
+    # 🔴 THE SAME MUTANT, SCORED AGAINST THE OTHER SUITE, BY HAND. The battery
+    # only runs test_host_label_identity.py, so the DERIVED ledger in
+    # test_transcript_push.py is not in its blast radius. Applied to a /tmp copy
+    # of `scripts/` + `nix/`: baseline 1 passed, mutant 1 FAILED on its own
+    # assertion ("hostLabelProbe copies ['host_label.py'] but host_label.py
+    # hard-depends on ['host-role.sh'] beside itself").
+    "MUT-F1-3 (ledger arm, run by hand — not in the battery)":
+        "test_transcript_push.py::"
+        "test_the_host_label_PROBE_ships_every_file_the_module_OPENS_BESIDE_ITSELF",
 }

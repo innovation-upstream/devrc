@@ -1337,6 +1337,57 @@ def test_the_SNAPSHOT_pusher_triggers_on_the_host_identity_files_ITS_COLLECTOR_R
         "scripts/lib but does not declare them as restart triggers")
 
 
+def test_the_host_label_PROBE_ships_every_file_the_module_OPENS_BESIDE_ITSELF():
+    """🔴 THE FOURTH CONSUMER OF THE HOST-IDENTITY CHAIN, AND THE ONE WITH NO
+    LEDGER. The three tests above grade systemd units. `nix/home.nix` also
+    assembles a `hostLabelProbe` derivation — a flat store directory that
+    `home.activation.activityCollectorEnv` runs `host_label.py` out of — and
+    nothing pinned what it contains. That is the same "graded two and left the
+    third" shape, one layer over.
+
+    WHAT A MISSING SIBLING COSTS HERE IS SILENT AND DIRECTIONAL. `host_label.py`
+    locates `host-role.sh` NEXT TO ITSELF via `__file__`; with the sibling
+    dropped, `host_addrs()` takes an `OSError`, degrades to the nebula-only
+    `PEER_SSH` subset, and the activation still exits 0 — deriving the right
+    label whenever nebula is up, and quietly deriving NOTHING when it is not.
+    The probe's own comment in `nix/home.nix` says exactly this; a comment is a
+    claim, so here is the check.
+
+    DERIVED, NOT TYPED, by the same scanner the three ledgers above use: a second
+    address-table file added to `host_label.py` tomorrow fails here without
+    anyone editing this test.
+
+    ⚠ SCOPE: the probe's CONTENTS, not the activation's behaviour. That the built
+    store directory really holds both files, byte-identical to the repo's, is
+    `test_host_label_identity.py::
+    test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files`.
+    """
+    libdir = REPO_ROOT / "scripts" / "lib"
+    needed = {"host_label.py"} | _lib_files_a_python_file_BUILDS_A_PATH_TO(
+        libdir / "host_label.py", libdir)
+
+    # POSITIVE CONTROL: a reassuring `missing == set()` is indistinguishable from
+    # a scanner that read nothing.
+    assert "host-role.sh" in needed, (
+        f"the path-opened scan of host_label.py found {sorted(needed)} — it does "
+        "not see the address table the module opens by path, so this ledger is "
+        "measuring nothing")
+
+    text = HOME_NIX.read_text()
+    start = text.index("hostLabelProbe = pkgs.runCommandLocal")
+    block = text[start:text.index("'';", start)]
+    copied = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", block))
+    assert copied, (
+        f"no scripts/lib file is copied into the host-label probe at all: {block!r}")
+
+    missing = needed - copied
+    assert not missing, (
+        f"nix/home.nix's hostLabelProbe copies {sorted(copied)} but host_label.py "
+        f"hard-depends on {sorted(missing)} beside itself. Without the sibling the "
+        "module degrades to the nebula-only PEER_SSH subset — correct on the mesh, "
+        "silently non-deriving off it, exit 0 either way")
+
+
 def _lib_modules_a_python_file_imports(path, libdir):
     r"""Every `scripts/lib` module `path` pulls in, by AST — not by regex.
 

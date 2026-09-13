@@ -783,6 +783,32 @@ in
   # A machine that cannot identify itself right now (off-network at switch time)
   # gets NOTHING rather than a guess, with a printed reason; the next switch
   # tries again, because the missing-label condition is still true.
+  #
+  # 🔴 "NON-CLOBBERING" WAS A CLAIM ABOUT THE LINE, NOT ABOUT THE FILE, AND THE
+  # FILE IS WHAT MATTERS. An `>>` onto a file whose last line has NO trailing
+  # newline does not add a line — it EXTENDS the last one. Measured:
+  #     before  CLICKHOUSE_PASSWORD=s3cret          (no trailing newline)
+  #     after   CLICKHOUSE_PASSWORD=s3cretACTIVITY_HOST=workbench
+  # This file is a systemd `EnvironmentFile=` (see the activity-collector unit
+  # below), so that mangles the credential the collector authenticates with — it
+  # 401s and telemetry stops silently — and had the last line been
+  # `ACTIVITY_HTTP_TIMEOUT`, `float()` would raise and the collector would not
+  # start at all. It also appends AGAIN on every later switch, because the
+  # mangled line no longer states a label. Reachable by the path this repo's own
+  # `SECRETS.md` prescribes: provision off-mesh (no label appended), hand-edit
+  # `CLICKHOUSE_PASSWORD` in, switch again on-mesh. Hence the newline guard
+  # below — do not remove it because "the file always ends in a newline"; the
+  # operator's editor is what decides that, not us.
+  #
+  # 🔴 AND THE "STATES NO VALID LABEL" QUESTION IS THE MODULE'S TO ANSWER. This
+  # block used to answer it with its own `grep -qE '^[ ]*ACTIVITY_HOST=[^ ]'` —
+  # a THIRD copy of the rule `scripts/lib/host_label.py` exists because it was
+  # open-coded twice and drifted. The two disagreed on four real inputs (a
+  # TAB-indented line, `ACTIVITY_HOST= laptop`, an invalid value, an `export`
+  # prefix), each producing either a duplicate contradicting line or a permanent
+  # false "could not derive" message on a healthy host. So it ASKS, via
+  # `--file-states-label` on the same entry point the derive step already runs.
+  # Do NOT re-introduce a grep here, however careful — that is the defect.
   home.activation.activityCollectorEnv = lib.hm.dag.entryAfter ["writeBoundary"] ''
     envFile="$HOME/.config/activity-collector/env"
     if [ ! -e "$envFile" ]; then
@@ -791,17 +817,44 @@ in
       chmod 600 "$envFile"
       echo "activity-collector: seeded $envFile from .env.example (edit to add CLICKHOUSE_PASSWORD)"
     fi
-    if [ -w "$envFile" ] && \
-       ! ${pkgs.gnugrep}/bin/grep -qE '^[ ]*ACTIVITY_HOST=[^ ]' "$envFile"; then
-      # host_label.py exits 3 with a reason on stderr and prints NOTHING on
-      # stdout when it cannot name this machine — so an empty `derived` is the
-      # refusal, and a non-empty one is a label the machine's own address backs.
-      if derived="$(${pkgs.python3}/bin/python3 ${hostLabelProbe}/host_label.py 2>/dev/null)" \
-         && [ -n "$derived" ]; then
-        printf 'ACTIVITY_HOST=%s\n' "$derived" >> "$envFile"
-        echo "activity-collector: derived ACTIVITY_HOST=$derived into $envFile"
+    # Exit 0 = the file already states a valid label (the operator's, or ours
+    # from an earlier switch) and is left alone. Exit 1 = it states none.
+    # stdout is the label and is not wanted here; stderr is NOT swallowed, so a
+    # broken module is visible rather than read as "states none".
+    if ! ${pkgs.python3}/bin/python3 ${hostLabelProbe}/host_label.py --file-states-label "$envFile" >/dev/null; then
+      if [ ! -w "$envFile" ]; then
+        # 🔴 SAY SO. A root-owned or chmod-400 env file used to be skipped in
+        # TOTAL silence — rc 0, no output — leaving ACTIVITY_HOST unset with no
+        # signal that anything had been declined.
+        echo "activity-collector: $envFile states no ACTIVITY_HOST and is not writable — left untouched; set ACTIVITY_HOST there by hand"
       else
-        echo "activity-collector: could not derive this host's label, so $envFile states none — set ACTIVITY_HOST by hand, or re-run the switch on-network"
+        # host_label.py exits non-zero with a reason on stderr and prints NOTHING
+        # on stdout when it cannot name this machine — so an empty `derived` is
+        # the refusal, and a non-empty one is a label the machine's own address
+        # backs. 🔴 THE REASON IS FORWARDED, NOT DISCARDED: `2>/dev/null` plus a
+        # generic "re-run the switch on-network" asserted a cause this block has
+        # not distinguished, and printed it forever on an on-network host whose
+        # real problem was a `HostLabelConflict` that re-running cannot fix.
+        labelErr="$(${pkgs.coreutils}/bin/mktemp)"
+        if derived="$(${pkgs.python3}/bin/python3 ${hostLabelProbe}/host_label.py 2>"$labelErr")" \
+           && [ -n "$derived" ]; then
+          # THE NEWLINE GUARD — see the block comment above. `$(…)` strips
+          # trailing newlines, so a last byte of "\n" reads as empty here and a
+          # last byte of anything else reads as non-empty.
+          if [ -s "$envFile" ] && [ -n "$(${pkgs.coreutils}/bin/tail -c 1 "$envFile")" ]; then
+            printf '\n' >> "$envFile"
+          fi
+          printf 'ACTIVITY_HOST=%s\n' "$derived" >> "$envFile"
+          echo "activity-collector: derived ACTIVITY_HOST=$derived into $envFile"
+        else
+          reason="$(${pkgs.coreutils}/bin/tr '\n' ' ' < "$labelErr")"
+          if [ -z "$reason" ]; then
+            reason="host_label.py failed without a message"
+          fi
+          echo "activity-collector: $envFile states no ACTIVITY_HOST and this machine's label could not be derived: $reason"
+          echo "activity-collector: set ACTIVITY_HOST in $envFile by hand, or resolve the reason above and re-run the switch"
+        fi
+        ${pkgs.coreutils}/bin/rm -f "$labelErr"
       fi
     fi
   '';
