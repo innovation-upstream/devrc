@@ -18,49 +18,45 @@ picker window, (3) ship click telemetry to `activity.events`, (4) open PRs in a 
 instead of a browser.
 
 ## State now
-🔴 **THREE OF THE FOUR ORIGINAL OBJECTIVES ARE NOW CLOSED WITH LIVE EVIDENCE. THE FOURTH — THE
-PR REVIEW TUI — IS NOT, AND IT IS THE ONLY REAL BLOCKER.**
+✅ **ALL FOUR ORIGINAL OBJECTIVES ARE CLOSED, EACH WITH LIVE EVIDENCE. THE ARC IS DONE.**
 
-| # | objective | state |
+| # | objective | evidence |
 |---|---|---|
-| 1 | record picks that were dropped | ✅ **2 `via=auto` rows** from real clicks (laptop, 19:38 + 21:55 on 09-12) |
-| 2 | centre the picker window | ✅ closed in the earlier arc — ⚠ its WIDTH changed 09-13, new geometry unverified live |
-| 3 | click telemetry → `activity.events` | ✅ **9 rows** with the full dim set |
-| 4 | open PRs in a TUI, not a browser | 🔴 **NOT closed** — see the investigation block |
+| 1 | record picks that were dropped | **2 `via=auto` rows** from real clicks (laptop, 09-12) |
+| 2 | centre the picker window | **`2094x818 at +81`** — `(2256-2094)/2 = 81`, exactly centred, 162 px margin |
+| 3 | click telemetry → `activity.events` | **9 rows** with the full dim set |
+| 4 | open PRs in a TUI, not a browser | **review buffer loads CLEAN** — operator confirmed 2026-09-13 |
 
-Objective 3's evidence (ClickHouse `activity.events`, `text='mention-open'`, 9 rows,
-19:08 09-12 → 04:58 09-13 UTC), one row verbatim:
+Objective 3's evidence (ClickHouse `activity.events`, `text='mention-open'`), one row verbatim:
 `{"tool":"mention-open","outcome":"picked","repo":"civitai/civitai","platform":"github",`
 `"picker_shown":true,"offered_total":393,"rank":3,"plausibility":"below","reason":"selected",`
 `"ordered":true,"pinned_above":2,"surface":"tui"}`
 
-**Merged, deployed to BOTH hosts and verified by content on `origin/main` (never by ancestry):**
+**Both windows measured live on the laptop from `i3-msg -t get_tree`, captured by an
+`i3-msg -t subscribe` monitor rather than by opening anything** — so the operator's screen was
+never taken. Review `2030x1353 at +113+88`, client `2026x1349` = **106x36 character cells**,
+the FIRST observation of that window's grid; picker `2094x818 at +81+355`. Both exactly centred.
+
+**Merged, deployed to BOTH hosts, verified by content on `origin/main` (never by ancestry):**
 
 | PR | squash | what |
 |---|---|---|
 | **#1619** | `243b3a06` | review window sized per-host in percent of OUTPUT; cell hint deleted |
-| **#1632** | `c3ff700c` | picker 120→110 cols — it overflowed the laptop by 28 px |
+| **#1632** | `c3ff700c` | picker 120→110 cols — it overflowed the laptop by 28 px at `x=-14` |
 | **#1633** | `86560804` | `NVIM_APPNAME` isolation — the TUI was loading the operator's packer plugins |
-| **#1620** | `f5942a24` | the previous revision of this doc |
+| **#1620** | `f5942a24` | an earlier revision of this doc |
 
-`ship.sh` rc=0 three times; the last run converged both hosts at `86560804` and **COMPARED**
-them (594/553 managed artifacts, 0 dangling, 0 stale each). `i3-msg reload` run on both; the
-review rule is in i3's RUNNING config (`64 ppt 77 ppt` workbench / `90 ppt 90 ppt` laptop), and
-screen state was re-read after each reload and was unchanged.
+`ship.sh` rc=0 three times; the last converged both hosts at `86560804` and **COMPARED** them
+(594/553 managed artifacts, 0 dangling, 0 stale each). `i3-msg reload` on both.
 
-🔴 **AUDIT LADDER ON #1619 DELIBERATELY ENDED after round 2 — read it as ENDED, not CONVERGED.**
-Rounds 0, 1 (blind, nine axes) and 2 (delta) each found real defects, all fixed; zero 🔴 in any
-round. Ended on the prose-payload criterion with the reason recorded on the PR
-(`Audit ladder — DELIBERATELY ENDED` comment), plus the residuals that are OPEN not absent.
+🔴 **AUDIT LADDER ON #1619 DELIBERATELY ENDED after round 2 — ENDED, not CONVERGED.** Rounds 0,
+1 (blind, nine axes) and 2 (delta) each found real defects, all fixed; zero 🔴 in any round.
+Reason and residuals recorded on the PR (`Audit ladder — DELIBERATELY ENDED`).
 
-- **This session resolved no clawgate task** — `clawgate_handoff.sh resolve` exited 5 with a
-  POSITIVE CONTROL (the same endpoint answered 3 links for another session, so the board is
-  reachable and the token accepted). That narrows it to "a correct id WOULD have resolved"; it
-  is NOT evidence this session touched no task. No `clawgate-task:` field written.
-- All `mention-*` claims RELEASED; my two worktrees removed. ⚠ `devrc-picker-rank`
-  (`fix/picker-fzf-ranking`) belongs to ANOTHER session — do not touch it; and
-  `.claude/worktrees/agent-a8d600896310294ae` is LOCKED by the harness.
-- ⚠ The shared checkout moved ~8 times under this session. Re-read `git status` before any write.
+- **This session resolved no clawgate task** — `resolve` exited 5 with a POSITIVE CONTROL (the
+  same endpoint answered 3 links for another session). That narrows it to "a correct id WOULD
+  have resolved"; it is NOT evidence this session touched no task. No `clawgate-task:` written.
+- All `mention-*` claims RELEASED; this session's worktrees removed.
 
 ## Open investigations — live diagnosis state
 
@@ -234,41 +230,51 @@ i3 produced. That retires the caveat the previous revision carried on objective 
 changed, new geometry unverified live"). Captured by an `i3-msg -t subscribe -m '["window"]'`
 monitor rather than by opening a window, so the operator's screen was never taken.
 
+### ✅ CLOSED 2026-09-13 — objective 4: the review TUI runs end to end
+`as-of: 2026-09-13`
+🔴 **The operator confirmed the review buffer loads CLEAN after `86560804`. Do not re-open this.**
+The `lyaml` crash is gone, and the window's geometry was measured the same session:
+`rect=2030x1353 at +113+88`, client `2026x1349` → **106x36 cells**, 226 px margin, exactly
+centred (`(2256-2030)/2 = 113`).
+⚠ **What the measurement alone could NOT establish, recorded because it nearly closed this
+prematurely:** a window showing an `E5108` trace has the SAME rectangle as a working one, and by
+the time the geometry was captured the window was closed (no live `nvim` carrying
+`NVIM_APPNAME`, no mapped `mention-review`), so process state could not answer either. The
+closure rests on the OPERATOR READING THE SCREEN — which is the only instrument that could.
+⚠ Still not done, and it is rank 1: `:map <localleader>pm` in a live buffer.
+
 ## Next steps (ranked)
-1. 🔴 **Confirm the review TUI actually works — OPEN A NEW ALACRITTY WINDOW FIRST.** The
-   `nvim-octo` store path is baked into alacritty's config, which a running terminal already
-   resolved, so an existing window still execs the OLD wrapper and will reproduce the `lyaml`
-   crash. In the new window click a `repo#N`, select a row, and confirm a review buffer loads.
-   Then `:map <localleader>pm` **must report `No mapping found`** — the merge-safety assertion,
-   never yet checked in a live buffer. **This is the ONLY objective still unverified.** Repo: devrc.
-   forcing: user — the operator hit the crash; objective 4 has never worked end-to-end.
-2. **Add the `adoption-scan` registry row for the click telemetry.** CONFIRMED ABSENT
-   (no `mention-open` hit under `scripts/adoption*`). The dims (`surface`, `rank`,
-   `plausibility`, `offered_total`, `via`, `pinned_above`) are landing in ClickHouse NOW, so the
+1. **Check the merge-safety assertion in a live review buffer — the ONE sub-item never done.**
+   In a review buffer, `:map <localleader>pm` **must report `No mapping found`**. `octo-init.lua`
+   sets `mappings_disable_default = true` and re-declares only non-destructive keys, and
+   `scripts/tests/test_nvim_octo.py` asserts that STRUCTURALLY over the config — but a config
+   saying a mapping is gone is a claim about the FILE; only a live buffer proves the buffer.
+   Repo: devrc.
+   forcing: none
+2. **Add the `adoption-scan` registry row for the click telemetry.** CONFIRMED ABSENT (no
+   `mention-open` hit under `scripts/adoption*`). The dims are landing in ClickHouse NOW, so the
    tool built to answer "is this used?" still cannot see the feature built to make usage visible.
    Repo: devrc.
    forcing: none
-3. **Decide whether Tier A ranking helps — now ANSWERABLE and unanswered.** `rank` and
-   `plausibility` are in the data (`rank:3 plausibility:below`, `rank:2 plausibility:plausible`).
-   9 rows is far too few; revisit after weeks of clicks. Chosen `rank` should cluster near 0 and
-   `plausibility` skew PLAUSIBLE. Repo: devrc.
+3. **Decide whether Tier A ranking helps — ANSWERABLE and unanswered.** `rank` and
+   `plausibility` are in the data. 9 rows is far too few; revisit after weeks of clicks. Chosen
+   `rank` should cluster near 0 and `plausibility` skew PLAUSIBLE. Repo: devrc.
    forcing: none
 4. **Rename `test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders`** — the name
-   overstates what it pins (the workbench renders 199x50, one column NARROWER than the 200x50 it
-   used to). Deferred from audit round 2 because renaming ripples into the red-at-base matrix and
-   the 20-mutant ledger; its docstring now tells the reader to read the name narrowly. Repo: devrc.
+   overstates what it pins (the workbench renders 199x50, one column NARROWER than 200x50).
+   Deferred from audit round 2; its docstring says to read the name narrowly. Repo: devrc.
    forcing: none
-5. **Close or merge `#1539`** (`docs/handoff-arc-final-close`) — the SUPERSEDED mention-arc
-   handoff naming the obsolete two-PR dependency for main's kill-scanner red. Repo: devrc.
+5. **Close or merge `#1539`** — the SUPERSEDED mention-arc handoff naming the obsolete two-PR
+   dependency for main's kill-scanner red. Repo: devrc.
    forcing: none
 6. **Prune this arc's agent worktrees** under `.claude/worktrees/agent-*`. ⚠ Skip
-   `agent-a8d600896310294ae` (LOCKED — never force it) and anything not yours; the repo holds
-   ~238 worktrees belonging to other sessions. Repo: devrc.
+   `agent-a8d600896310294ae` (LOCKED) and anything not yours; ~238 belong to other sessions.
+   Repo: devrc.
    forcing: none
-7. ⚠ **NOT THIS ARC'S, but measured here: the handoff doc-size gate is RED on `main`** —
+7. ⚠ **NOT THIS ARC'S: the handoff doc-size gate is RED on `main`** —
    `handoff-cairn-oss-multi-instance.md` (200,600 B over 196,608 B) and
-   `handoff-gate-speed-and-ci-signal.md` (86,111 B over 81,920 B) are both over their
-   grandfathered allowances. A permanently-red gate trains people to click through it. Repo: devrc.
+   `handoff-gate-speed-and-ci-signal.md` (86,111 B over 81,920 B) are over their grandfathered
+   allowances. A permanently-red gate trains people to click through it. Repo: devrc.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
