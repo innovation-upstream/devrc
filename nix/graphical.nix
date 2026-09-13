@@ -11,8 +11,29 @@
 #
 # The i3 config is written verbatim via xdg.configFile."i3/config".text (raw string
 # from ./i3/config.nix) rather than the HM i3 DSL — Zach hand-maintains it.
-# NOTE: writing ~/.config/i3/config is INERT until the system stops forcing
-# `i3 -c /etc/i3.conf` — run `sudo bash nix/system/apply-i3-to-hm.sh` to cutover.
+#
+# 🔴 THIS FILE IS LIVE. The note here used to say writing ~/.config/i3/config is
+# "INERT until the system stops forcing `i3 -c /etc/i3.conf` — run
+# `sudo bash nix/system/apply-i3-to-hm.sh` to cutover". THE CUTOVER ALREADY
+# HAPPENED and that note was false. MEASURED 2026-09-12, read-only, BOTH hosts:
+# `/etc/i3.conf` does not exist; the running i3's `/proc/<pid>/cmdline` carries no
+# `-c` (it is `i3 -a --restart …`); and `i3-msg -t get_version` reports
+# `loaded_config_file_name: /home/zach/.config/i3/config`. The workbench's
+# /etc/nixos/configuration.nix has no `windowManager.i3.configFile` and no
+# `environment.etc."i3.conf"`.
+#
+# Left as-is it actively misleads: it tells a reader that editing ./i3/config.nix
+# cannot take effect, so they skip the `home-manager switch` + `i3-msg reload` that
+# ./i3/config.nix itself documents as a REQUIRED deploy step.
+#
+# 🔴 WHAT STILL APPLIES: ~/.config/i3/config is a nix-store COPY (`readlink -f`
+# resolves into /nix/store/…-hm_i3config), so an edit here needs a
+# `home-manager switch`; and i3 does not re-read its config on change, so the
+# switch needs an explicit `i3-msg reload` after it. Editing this repo and
+# expecting a running i3 to pick it up is the real trap, not /etc/i3.conf.
+#
+# nix/system/apply-i3-to-hm.sh is retained as the historical record of that
+# cutover; it is not a pending step.
 { config, pkgs, lib, isNixOS ? false, isLaptop ? false, ... }:
 
 let

@@ -53,12 +53,13 @@ import sys
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent.parent
-for _rel in ("validation", "collector/keylog", "collector/claude"):
+for _rel in ("validation", "collector/keylog", "collector/claude", "lib"):
     _dir = str(_SCRIPTS / _rel)
     if _dir not in sys.path:
         sys.path.insert(0, _dir)
 
 import chquery as Q                                    # noqa: E402
+import host_label as _host_label                       # noqa: E402
 import espanso_triggers as ET                          # noqa: E402
 # `_WORD_RE` is the detector's OWN label tokenizer. Re-spelling it here (with a
 # regex that kept hyphens) invented "self-miss" findings for every hyphenated
@@ -87,7 +88,12 @@ ESPANSO_BASE_REL = ".config/espanso/match/base.yml"
 KEYLOG_UNIT = "keylog.service"
 ESPANSO_UNIT = "espanso"
 # The laptop, over nebula (same target the ship.sh/`:sshln` snippet uses).
-DEFAULT_REMOTE = "zach@10.42.0.100"
+# 🔴 DERIVED, NOT DECLARED. This was the literal `"zach@10.42.0.100"`, a fourth
+# copy of an address whose wrong value does not fail loudly — `10.42.0.10` is the
+# homelab GATEWAY and answers happily. Found by
+# `test_peer_host.py::test_no_module_redeclares_a_peer_address_literal` on that
+# guard's FIRST run. `scripts/lib/host_label.py` owns the table.
+DEFAULT_REMOTE = _host_label.ssh_target("laptop")
 
 # Boilerplate matched case-INSENSITIVELY: the shared tuple is spelled the way
 # the collector sees it, but transcripts carry both casings (measured 2026-08-05:

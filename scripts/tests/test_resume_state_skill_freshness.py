@@ -1150,7 +1150,16 @@ def test_the_SKILL_block_LEADS_the_digest(tmp_path, stub_bin):
     out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout)
     headers = [ln for ln in out.splitlines()
                if ln and not ln.startswith((" ", "#"))]
-    assert headers == ["SKILL", "GIT/PR", "WORKLOAD", "ALERTS", "CLAWGATE", "DRIFT"], (
+    # 🔴 THE WHOLE SEQUENCE, not just the first entry — a test that only
+    # asserted `headers[0] == "SKILL"` would let a block be added anywhere else
+    # unnoticed, and DRIFT must stay LAST for the same reason SKILL stays first.
+    # `INVESTIGATIONS` sits between CLAWGATE and DRIFT: like CLAWGATE it reads
+    # the handoff and contributes findings and gaps, so it has to run before the
+    # block that prints them.
+    assert headers == [
+        "SKILL", "GIT/PR", "WORKLOAD", "ALERTS", "CLAWGATE", "INVESTIGATIONS",
+        "DRIFT",
+    ], (
         f"the SKILL block must LEAD the digest; got {headers}"
     )
 

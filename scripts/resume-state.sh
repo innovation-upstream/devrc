@@ -388,7 +388,7 @@ worktrees_holding(){
 #                       basename, so nothing was chosen. See `worktrees_holding`.
 embedded_md_path(){
   local tok hit="" miss="" base dir noglob="" root=""
-  local amb="" ambig="" wt="" wrc=0 mine="" ydir=""
+  local amb="" ambig="" wt="" wrc=0 mine="" ydir="" archsub=""
   # The repo of $PWD, resolved ONCE. Used only to re-anchor a RELATIVE token
   # that named a real doc from one directory up — see the clause below.
   root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || root=""
@@ -411,8 +411,51 @@ embedded_md_path(){
     # DELETED — mutating it away survived all 115 tests, i.e. it guarded
     # nothing, and a guard that reads as load-bearing while doing nothing is
     # worse than its absence.
+    # 🔴 AN ARCHIVED DOC IS STILL A HANDOFF, AND THE FALLBACKS MUST STILL NOT
+    # SEE IT. `claudedocs/archive/` holds the docs untouched for >30 days. They
+    # remain INDEXED (`handoff_index.py` walks recursively on both sides of its
+    # durability difference), so `handoff_search` keeps returning them and a
+    # reader keeps being sent to a path this scan must be able to accept.
+    #
+    # 🔴 THIS IS A DIRECTORY WIDENING ONLY — IT DOES NOT TOUCH THE FALLBACK
+    # CHAIN, AND THAT ASYMMETRY IS THE WHOLE DESIGN. `resolve()`'s three
+    # fallbacks (`handoff-"$arg"*.md`, `handoff-*.md`, `*HANDOFF*.md`) are
+    # non-recursive shell globs against `"$REPO"/claudedocs/`, so an archived
+    # doc can never be chosen as "the newest of N" — which is correct: a doc
+    # nobody has touched in a month is the LAST thing a no-argument /resume
+    # should reconcile against. Named explicitly it resolves; guessed at it
+    # does not. Do not "fix" that by making the globs recursive.
+    #
+    # 🔴 WITHOUT THIS THE MOVE ITSELF OPENS #684. The gate below tests the
+    # IMMEDIATE parent, so `…/claudedocs/archive/handoff-x.md` in prose failed
+    # it, returned rc 1 ("no handoff-shaped token at all") rather than rc 2, and
+    # the run fell through to the newest-of-N fallback and reconciled an
+    # UNRELATED initiative with no gap printed. The bare-token form was never
+    # affected — `resolve()` takes `[ -f "$arg" ]` first — so this is the prose
+    # route only, which is the route `/resume` and /handoff's kickoff template
+    # actually use.
+    #
+    # Normalising here rather than widening each of the four downstream sites is
+    # `claude/RULES.md`'s "one rule, one place": `$dir` is put back on the
+    # `…/claudedocs` anchor and `$base` carries the `archive/` prefix, so the
+    # parent-directory gate, the worktree search, the `$mine` discriminator and
+    # the `$root` re-anchor all keep working UNMODIFIED — including the mutation
+    # anchors that pin two of them verbatim. `$tok` is untouched, so `[ -f ]`
+    # and the `miss` bookkeeping still speak about what the caller wrote.
+    #
+    # The accepted directory set is ENUMERATED, not a pattern, for the reason
+    # `drift-check.sh`'s allowlist gives: an unrecognised subdirectory of
+    # `claudedocs/` is NOT a handoff location by default. Pinned two-way by
+    # `test_the_accepted_handoff_DIRECTORIES_are_an_enumerated_ledger`.
+    archsub=""
+    case "$dir" in
+      */claudedocs/archive|claudedocs/archive) archsub="archive/"; dir=${dir%/archive} ;;
+    esac
     case "$dir" in */claudedocs|claudedocs) ;; *) continue ;; esac
     case "$base" in handoff-*.md|*HANDOFF*.md) ;; *) continue ;; esac
+    # After the family test, never before: the test is about the BASENAME, and
+    # `archive/handoff-x.md` matches neither glob.
+    base="$archsub$base"
     [ -f "$tok" ] && { hit="$tok"; break; }
     # 🔴 THE NAMED TREE'S OWN CLONE, INCLUDING ITS LINKED WORKTREES. `<X>` is the
     # token with `/claudedocs/<base>` stripped, i.e. the checkout the caller
@@ -1782,6 +1825,271 @@ clawgate_block(){
 }
 
 # ---------------------------------------------------------------------------
+# INVESTIGATIONS — how OLD is each mid-diagnosis block, and does it still count?
+#
+# 🔴 THE FAILURE, measured 2026-09-12. An `## Open investigations` block is
+# written in the PRESENT TENSE by a session mid-diagnosis, and `/handoff`'s
+# merge APPENDS it forever — nothing ever retracts one. The doc's status header
+# is visibly dated; a diagnosis block is not, so it reads as CURRENT for the
+# life of the document. A session read one, adopted its framing, and the framing
+# was wrong: a claim fusing two documents' measurements over two windows with
+# two instruments. Refuting it cost a full re-measurement. The worked example is
+# `claudedocs/handoff-handoff-resume-skill-trace.md`, which now carries its own
+# refutation. The `resume` skill body had ALREADY warned about the class in
+# prose and cited two earlier instances (2026-08-19, 2026-08-20) — which is the
+# whole argument for putting the age on screen instead of in a paragraph.
+#
+# 🔴 WHAT AN UNSTAMPED BLOCK REPORTS — THE ONE DESIGN DECISION HERE, AND IT IS
+# NOT "NOT ADOPTED". `drift-check.sh` rc 22 prints NOT ADOPTED and sets no code
+# for a host with no `skillOverrides`, because that mechanism is applied to zero
+# hosts BY DESIGN and could not be evaluated at all. rc 18 is the opposite
+# lesson: a scope that can never be evaluated escalated NEVER, so the run read
+# clean while the check was structurally unable to fire.
+#
+# Neither applies, because AN UNSTAMPED BLOCK IS NOT UNDATEABLE. MEASURED at
+# 7e000e6b over this repo's whole corpus: 81 tracked handoff docs carry an
+# `## Open investigations` section, holding 478 `### ` blocks, and the commit
+# that INTRODUCED the block's heading dated **478 of 478** of them. So the stamp
+# is the most PRECISE clock, never the only one, and an unstamped block is aged
+# exactly like a stamped one — what differs is the clock NAME, printed beside
+# the age, exactly as `clawgate_block` names which of its four clocks answered.
+# `UNDATED` is reserved for a block NO clock could place, and it is a `!` gap
+# rather than a finding: nothing was measured, so nothing may be concluded.
+#
+# 🔴 WHY THE BLOCK'S OWN INTRODUCING COMMIT AND NOT THE DOC'S LAST COMMIT — the
+# hint that looks right and errs in the UNSAFE direction. A doc recommitted this
+# morning makes every block in it read 0 days old, including one written in
+# July: false FRESHNESS, which is the defect itself. The introducing commit is
+# per-BLOCK and content-derived, so it survives a `git worktree add` (which
+# stamps every file's mtime at checkout) for `clawgate_block`'s stated reason.
+# Where it cannot answer, the doc's last commit is used as an explicit FLOOR and
+# gapped as one — never quietly.
+#
+# THE WINDOW. Default 14 days, and it is a measurement rather than a taste call.
+# Over those same 478 blocks, aged at the moment their own doc was last written
+# — i.e. roughly the moment a session resumes it — p50 is 1.4d and p90 is 11.3d.
+# A 14-day window flags 15 of 478 (3%); 7 days would flag 86 (18%). A gate that
+# fires on a fifth of every doc is one everybody clicks through, which
+# `claude/RULES.md` names as worse than no gate; one that fires on nothing is
+# worth nothing. 3% is a signal.
+INVESTIGATION_MAX_AGE_DAYS="${RESUME_STATE_INVESTIGATION_MAX_AGE_DAYS:-14}"
+
+# Emits one `<stamp-or-dash><TAB><heading>` line per `### ` block under the
+# `## Open investigations` heading of the text on stdin.
+#
+# 🔴 `-` FOR "NO STAMP", NEVER AN EMPTY FIELD, AND THIS IS A FIX. TAB is IFS
+# WHITESPACE, so `IFS=$'\t' read -r stamp heading` COLLAPSES a leading empty
+# field: the row "\tAlpha" assigns stamp=Alpha and heading="", and the reader
+# then skipped every UNSTAMPED block — which is every block in the corpus. The
+# digest printed a confident `0 block(s)` for a doc holding one. Caught by
+# test_an_unstamped_block_in_an_OLD_doc_is_EXPIRED, not by reading the code.
+#
+# Pure and side-effect free so the test harness can assert it on fixture text,
+# exactly as `extract_prs` is asserted.
+#
+# FENCE-AWARE, for the reason `handoff_doc.py::_unfenced` states: a handoff
+# routinely pastes the skill's own template inside a code block, and a sample
+# block is not a live diagnosis. Matching the section on its PREFIX mirrors
+# `APPEND_PREFIXES` — the canonical spelling carries a trailing gloss ("— live
+# diagnosis state") that an updating session will not reproduce exactly.
+investigation_rows(){
+  awk '
+    function flush(){ if (h != "") print (stamp == "" ? "-" : stamp) "\t" h; h=""; stamp="" }
+    {
+      line = $0
+      if (match(line, /^[ \t]*(```+|~~~+)/)) {
+        tok = substr(line, RSTART, RLENGTH); sub(/^[ \t]*/, "", tok)
+        if (fence == "") { fence = substr(tok, 1, 1) }
+        else if (substr(tok, 1, 1) == fence) { fence = "" }
+        next
+      }
+      if (fence != "") next
+      low = tolower(line)
+      if (low ~ /^##[ \t]+open investigations/) { flush(); insec = 1; next }
+      if (line ~ /^##[ \t]/)                    { flush(); insec = 0; next }
+      if (!insec) next
+      if (line ~ /^###[ \t]/) {
+        flush()
+        h = line; sub(/^###[ \t]+/, "", h); sub(/[ \t]+$/, "", h)
+        next
+      }
+      # The stamp grammar is handoff_doc.py rule (l)`s: key, optional emphasis,
+      # colon, ISO date. The trailing guard rejects `2026-09-12-rev2` so an
+      # unparseable value reads ABSENT rather than as a date nobody can place.
+      #
+      # 🔴 THE NEXT CHARACTER IS READ FROM `low`, NOT FROM THE MATCH. Reading it
+      # from the extracted substring always yields "" — the date is the last
+      # thing in it — so the guard passed unconditionally and
+      # `as-of: 2026-01-02-rev2` was accepted as a stamp. Same shape as the
+      # `IFS` bug above: a guard that cannot fail.
+      if (h != "" && stamp == "" &&
+          match(low, /as-of[*_`~ \t]*:[*_`~ \t]*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
+        end = RSTART + RLENGTH
+        if (substr(low, end, 1) !~ /^[0-9-]/) stamp = substr(low, end - 10, 10)
+      }
+    }
+    END { flush() }
+  '
+}
+
+# Every PRIOR name this document has had — newest rename first, current name
+# NOT included. The caller seeds the array with the current path, so this can
+# return nothing without ever producing an empty pathspec.
+#
+# 🔴 A PATH-SCOPED PICKAXE IS RESET BY A RENAME, AND IT ERRS THE UNSAFE WAY.
+# `git log -S… -- <path>` only visits commits that TOUCH that path, so once a
+# doc is moved the earliest such commit is the move itself and every block in it
+# dates to the day of the move — 0d, the freshest possible answer, handed to the
+# documents most likely to be stale. That is this feature inverted, not merely
+# degraded. MEASURED 2026-09-13 on this repo: #1627 archived 35 handoff docs by
+# renaming them under claudedocs/archive/, and the 19 investigation blocks in
+# the 8 that carry one went from 2026-07-31 … 2026-08-12 to 0d overnight.
+#
+# 🔴 `--follow` CANNOT BE THE FIX — IT IS WORSE THAN THE BUG. Combined with `-S`
+# it returns NOTHING AT ALL for a renamed path (measured; the control is a
+# NON-renamed doc, where the same invocation returns the true first date), and
+# an empty result routes the block to UNDATED rather than to EXPIRED. So
+# `--follow` is used HERE and only here, for NAME RESOLUTION, and the pickaxe
+# below stays an ordinary path-scoped query — over the whole resolved set.
+#
+# Deliberately NOT "drop the pathspec". Repo-wide is correct on this corpus
+# (measured: 487 distinct investigation headings, ZERO whose `### <heading>`
+# substring occurs in a second tracked file) but it is ~8× slower per block
+# (0.63s vs 0.08s here) on a hot path that runs once per block, and it makes
+# every future heading collision anywhere in the repo a wrong ANSWER instead of
+# a non-event. The path history costs one 0.06s call per DOCUMENT and cannot
+# collide at all.
+doc_prior_paths(){
+  local ref="$1" rel="$2"
+  [ -n "$REPO" ] || return 0
+  # `--name-status` renders a rename as `R<score><TAB>old<TAB>new`, so field 2
+  # is the name the doc was moved AWAY from — field 3 is the one we already have.
+  # shellcheck disable=SC2086
+  git -C "$REPO" log ${ref:+"$ref"} --format= --name-status --find-renames \
+      --follow -- "$rel" 2>/dev/null |
+    awk -F'\t' '$1 ~ /^R[0-9]*$/ && $2 != "" { print $2 }'
+}
+
+investigations_block(){
+  echo "INVESTIGATIONS"
+  if [ -z "$HANDOFF" ]; then
+    echo "  (no handoff — nothing to age)"
+    return
+  fi
+  local rows
+  # 🔴 `$HANDOFF_TEXT`, NOT `cat "$HANDOFF"` — the copy handoff_freshness CHOSE.
+  # `clawgate_block` shipped with that bug and the two copies differ exactly
+  # when it matters. Pinned structurally by
+  # test_only_handoff_freshness_READS_the_working_tree_copy.
+  rows=$(printf '%s\n' "$HANDOFF_TEXT" | investigation_rows)
+  if [ -z "$rows" ]; then
+    echo "  (no \"Open investigations\" blocks in this handoff — nothing to age;"
+    echo "   this says NOTHING about whether the rest of the doc is current)"
+    return
+  fi
+
+  # The clock ladder, most precise first. `clock=` spellings are SCRAPED out of
+  # this script by test_resume_state_clawgate.py and required to appear in
+  # claude/skills/resume/SKILL.md, so a new one cannot ship undocumented.
+  local now fresh expired undated line stamp heading epoch clock age gap
+  now=$(date +%s)
+  fresh=0 expired=0 undated=0
+
+  # Resolved ONCE per document, not once per block: the pickaxe below runs per
+  # block, and the answer is a property of the doc.
+  local ref rel
+  ref="${HANDOFF_REF:-}" rel="$HANDOFF"
+  [ -n "$ref" ] && [ -n "$HANDOFF_REL" ] && rel="$HANDOFF_REL"
+  # 🔴 SEEDED WITH THE CURRENT PATH AND ONLY EVER APPENDED TO. An empty array
+  # would expand to NO pathspec at all, i.e. silently to the repo-wide query
+  # this whole mechanism exists to avoid — so the array is built in the one
+  # shape that cannot become empty, rather than guarded against becoming empty
+  # by a branch nothing can reach.
+  local -a paths=("$rel")
+  local prior
+  while IFS= read -r prior; do
+    [ -n "$prior" ] && paths+=("$prior")
+  done < <(doc_prior_paths "$ref" "$rel")
+
+  while IFS=$'\t' read -r stamp heading; do
+    [ -n "$heading" ] || continue
+    [ "$stamp" = "-" ] && stamp=""
+    epoch="" clock="" gap=""
+    if [ -n "$stamp" ]; then
+      epoch=$(date -d "$stamp" +%s 2>/dev/null)
+      if [ -n "$epoch" ]; then
+        clock="as-of stamp"
+      else
+        # A well-formed ISO date `date` still refuses (2026-02-31). Loud, not
+        # silently unstamped: the author wrote a date and it does not exist.
+        gap="the investigation \"$heading\" declares as-of: $stamp, which is not a real date — it was NOT aged"
+        clock="UNDATED"
+      fi
+    fi
+    if [ -z "$epoch" ] && [ -z "$gap" ] && [ -n "$REPO" ]; then
+      # git's pickaxe: the earliest commit whose count of this heading line
+      # CHANGED is the commit that introduced the block. Literal (no
+      # --pickaxe-regex), so a heading full of punctuation is safe.
+      #
+      # Scoped to EVERY name the doc has had (see doc_path_history), so a rename
+      # cannot reset the block's clock. For an un-renamed doc `paths` holds one
+      # entry and this is byte-for-byte the query it always was — measured over
+      # this repo's 119 handoff docs, 84 resolve to exactly one path.
+      # shellcheck disable=SC2086
+      epoch=$(git -C "$REPO" log --format=%ct --reverse -S"### $heading" \
+                ${ref:+"$ref"} -- "${paths[@]}" 2>/dev/null | head -1)
+      if [ -n "$epoch" ]; then
+        clock="first commit carrying this block"
+        [ -n "$ref" ] && clock="first commit carrying this block on $ref"
+      fi
+    fi
+    if [ -z "$epoch" ] && [ -z "$gap" ] && [ -n "$REPO" ]; then
+      # Not in the doc's history at all. Either it was written since the last
+      # commit (age ~0) or the history is truncated (a shallow clone), and an
+      # EMPTY RESULT cannot distinguish the two — so take the doc's last commit,
+      # which over-reports age in the first case and under-reports in the
+      # second, and SAY it is a floor rather than a reading.
+      epoch=$(git -C "$REPO" log -1 --format=%ct \
+                ${HANDOFF_REF:+"$HANDOFF_REF"} -- "${HANDOFF_REL:-$HANDOFF}" 2>/dev/null)
+      if [ -n "$epoch" ]; then
+        clock="the doc's last commit"
+        gap="the investigation \"$heading\" is not in this doc's git history, so it was dated by ${clock} — that dates the DOCUMENT, not the block, and a doc recommitted today makes an ancient block read FRESH; treat this age as a floor"
+      fi
+    fi
+    if [ -z "$epoch" ] && [ -z "$gap" ]; then
+      epoch=$(stat -c %Y "$HANDOFF" 2>/dev/null)
+      if [ -n "$epoch" ]; then
+        clock="file mtime"
+        gap="the investigation \"$heading\" could only be dated by ${clock} — a checkout, copy or rsync resets that, so its age is not evidence in either direction"
+      fi
+    fi
+    if [ -z "$epoch" ]; then
+      [ -n "$clock" ] || clock="UNDATED"
+      [ -n "$gap" ] || gap="the investigation \"$heading\" could not be dated by any clock (${clock}) — whether its diagnosis is still current is UNKNOWN, which is NOT the same as fine"
+      undated=$((undated + 1))
+      printf '  ? %s  (%s)\n' "$heading" "$clock"
+      UNRECONCILED+=("$gap")
+      continue
+    fi
+    [ -n "$gap" ] && UNRECONCILED+=("$gap")
+    age=$(( (now - epoch) / 86400 ))
+    [ "$age" -lt 0 ] && age=0
+    if [ "$age" -gt "$INVESTIGATION_MAX_AGE_DAYS" ]; then
+      expired=$((expired + 1))
+      printf '  🔴 EXPIRED %sd  %s  (by %s)\n' "$age" "$heading" "$clock"
+      DRIFT+=("investigation \"$heading\" is EXPIRED — last written ${age}d ago (by ${clock}), past the ${INVESTIGATION_MAX_AGE_DAYS}d window. It is phrased in the PRESENT TENSE and nothing retracts it, so RE-MEASURE before adopting its framing, or retire the block")
+    else
+      fresh=$((fresh + 1))
+      printf '  %sd  %s  (by %s)\n' "$age" "$heading" "$clock"
+    fi
+  done <<<"$rows"
+
+  printf '  %s block(s): %s within the %sd window, %s EXPIRED, %s undated\n' \
+    "$((fresh + expired + undated))" "$fresh" "$INVESTIGATION_MAX_AGE_DAYS" \
+    "$expired" "$undated"
+}
+
+# ---------------------------------------------------------------------------
 
 # Gaps are the thing a reader skips. They used to print as bare `  ! …` lines
 # directly beneath a wall of `  - …` findings, and 2026-08-20 they were duly
@@ -1810,6 +2118,7 @@ main(){
   workload_block
   alerts_block
   clawgate_block
+  investigations_block
   echo "DRIFT"
   # 🔴 UNCONDITIONAL, AND FIRST. This notice used to live in the `elif` chain
   # below, which meant ANY finding suppressed it — and the SKILL block made that

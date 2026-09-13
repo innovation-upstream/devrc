@@ -47,7 +47,8 @@ Env defaults `$BB_INSTANCE`/`$BB_TAB`/`$BB_FRAME` (flag wins; zsh does NOT
 split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say so
 once, on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
-`--instance`+`--tab`, either side of the op; host verified. `<ref> context`
+`--instance`+`--tab`, either side of the op; host verified (wrong host = rc 4 +
+the command to run there). `<ref> context`
 resolves one. 🔴 For
 `type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
 the text/goal you send. `agent` refuses a LEADING one, `--tab` and `--frame`.

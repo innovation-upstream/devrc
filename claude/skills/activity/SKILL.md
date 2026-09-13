@@ -39,7 +39,7 @@ stamps `host` from `ACTIVITY_HOST`.
 | Collector config | `~/.config/activity-collector/env` per host (chmod 600, NOT in git/nix store): `CLICKHOUSE_URL/USER/PASSWORD`, `ACTIVITY_HOST` (=`workbench`/`laptop`), batch/flush/buffer caps |
 | Services (home-manager systemd **user**) | `activity-collector` (always), `keylog` + `i3-source` (graphical-session.target — **BOTH hosts run these; the workbench has a real X/i3 session**), `browser-activity-receiver` (:8787 loopback), `claude-activity-source` (oneshot + 5-min timer) |
 | Dashboard | Grafana "Activity & Productivity" (uid `activity-productivity`), datasource `activity-clickhouse` → `https://grafana.homelab.lan` |
-| Cluster access | `KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig` (context `admin@zach-homelab`); manifests in `clusters/homelab/apps/activity/` + dashboard in `clusters/homelab/flux-system/charts/prom-stack/`. **From the laptop** (nebula-only, can't reach the LAN API `192.168.50.94:6443`): `KUBECONFIG=~/.kube/homelab-nebula.yaml` — routes through the `homelab-kube-tunnel` systemd user service (ssh -D SOCKS via the workbench `10.42.0.30`) |
+| Cluster access | `KUBECONFIG=$KC_HOMELAB` (context `admin@zach-homelab`); manifests in `clusters/homelab/apps/activity/` + dashboard in `clusters/homelab/flux-system/charts/prom-stack/`. **From the laptop** (nebula-only, can't reach the LAN API `192.168.50.94:6443`): `KUBECONFIG=$KC_NEBULA` — routes through the `homelab-kube-tunnel` systemd user service (ssh -D SOCKS via the workbench `10.42.0.30`) |
 | Schema columns | `ts DateTime64(3) (UTC), host, source, kind, project, cwd, session, app, text, duration_ms, exit_code, payload(JSON), ingested_at` |
 
 ### The sources — MEASURED, not declared
@@ -346,7 +346,7 @@ Read-only; **workbench-only** timer `ch-regrowth-check`, **monthly on the 11th**
 ```bash
 scripts/collector/run-regrowth-check.sh            # or: systemctl --user start ch-regrowth-check
 # from the laptop (nebula), by hand:
-KUBECONFIG=~/.kube/homelab-nebula.yaml CH_REGROWTH_URL=http://10.42.0.10:30123 \
+KUBECONFIG=$KC_NEBULA CH_REGROWTH_URL=http://10.42.0.10:30123 \
   scripts/collector/run-regrowth-check.sh
 ```
 - Asserts: `du(store)` >2 GiB ALARM / >1 GiB WARN · any `*_0` table (a TTL applied to an
@@ -396,6 +396,13 @@ All three read `CLICKHOUSE_URL/USER/PASSWORD` from env (via `validation/chquery.
   binaries), bottlenecks (binaries by total wait time), signal-vs-noise (i3 switch rate,
   deep-work blocks, attention-by-app, browser-by-domain). Caveat: "signal vs noise" =
   switch-rate / attention-split only; value judgment needs a human/LLM layer.
+  🔴 **Exit 3 = PARTIAL, and it is NOT a failure to re-run blindly.** Any one of its seven
+  queries can be stopped by the server's OvercommitTracker under load (2.5 GiB
+  `max_server_memory_usage` in a 3 GiB pod), so a `CHQueryError` degrades that section
+  only: the report still prints, the dead section prints `!! SECTION UNAVAILABLE` with the
+  reason, and `--json` carries `failures{}`/`partial`. **A section marked UNAVAILABLE is
+  MISSING, never empty** — do not read it as "no data". Exit 0 means all seven computed;
+  a server that is unreachable still aborts outright (nothing can be said about anything).
 - `~/workspace/devrc/scripts/session-analysis/initiative-scan.py [--days N] [--json] [--repo PATH]`
   — cross-repo initiative + progress ledger (handoff docs + git + telemetry recency by
   `gitBranch` → momentum `active`/`slowing`/`stalled`, last-touched, next-step).

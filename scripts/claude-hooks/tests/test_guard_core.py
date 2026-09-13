@@ -2562,6 +2562,12 @@ _KILL_MENTION_LEDGER = {
     "scripts/tests/test_session_resolve.py": "ARGV: `;`-injection fixtures, asserted REJECTED",
     "scripts/tests/test_session_write.py": "ARGV: `;`-injection fixtures, asserted REJECTED",
     "scripts/tests/test_tmux_reply_agent.py": "ARGV: subprocess lists, all carry -L",
+    # The wrapped-URL hyperlink test. Three kill-server argv lists — module
+    # fixture teardown (twice: the success path after yield and the
+    # new-session-failure path before it). All carry `-L <uuid-socket>` against
+    # a throwaway server the test itself created, so a misfire can only kill
+    # the fixture's own server; never executed against a shared server.
+    "scripts/tests/test_tmux_hyperlink_open.py": "ARGV: subprocess lists, all carry -L",
     # Added by the socket-activation PR. The mention is one line of a class
     # docstring explaining WHY the service needs `ConditionPathExists=`:
     # `PathChanged=` fires on socket DELETION too, and a deletion is the
@@ -2577,6 +2583,23 @@ _KILL_MENTION_LEDGER = {
     # re-redding `main`: this doc quotes THIS SCANNER'S OWN OUTPUT (its
     # `offenders=` list) inside a write-up ABOUT this very failure. Writing
     # the incident down reproduced it, within an hour of the last fix.
+    #
+    # Added by the mid-session-refusal PR. BOTH are prose, and the prose is the
+    # FINDING rather than decoration: a tmux socket file OUTLIVES its server, so
+    # `ConditionPathExists=` keeps passing after the operator's server dies. That
+    # is the whole reason the loud arm needed a once-per-incident latch instead of
+    # relying on the trigger to fire once — MEASURED on a private socket, and on
+    # the live host where 7 of 8 runtime sockets were orphans. Deleting either
+    # sentence to get this guard green would delete the reason the latch exists.
+    # Verified NOT call sites: the script's complete spawn argv[0] set is
+    # {tmux, grep} (AST walk) and no `kill-s…` subcommand appears in any argv;
+    # the sibling scanner `test_no_tracked_shell_text_writes_a_kill_this_guard_
+    # would_deny` passes on both files, i.e. neither carries shell text this
+    # guard would deny.
+    "scripts/tmux-session-restore.py":
+        "prose: why the socket outliving its server forces a latch",
+    "scripts/session-analysis/tests/test_tmux_session_restore.py":
+        "prose: the same measurement, in the test that pins the latch",
 }
 
 # A tmux argv list that carries NO `-L` and is nevertheless fine, because it is

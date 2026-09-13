@@ -115,6 +115,24 @@ ALLOWLIST = [
     ("scripts/tests/test_cairn_split.py", "assert first.startswith(",
      "ASSERTS the cairn-who launcher's shebang shape to justify its executable "
      "bit; writes no stub and execs nothing"),
+    # Shape (b), and the INVERSE of the three entries above: they assert a
+    # shebang is PRESENT, this asserts one is ABSENT. `nvim-octo.sh` is the body
+    # of a `writeShellApplication`, which prepends the shebang and the `set -o`
+    # lines itself; a second copy in the source would be harmless in production
+    # but would make the test harness's `bash -euo pipefail` a claim about a
+    # file that sets its own options — i.e. the harness would silently stop
+    # reproducing the deployed preamble. The test READS the repo file off disk
+    # and checks its first two characters; it writes no stub and execs nothing
+    # through this line, so `testlib.mockbin.write_exec` has nothing to own
+    # here. (The same file's stub-writing site DOES use `write_exec`, and its
+    # subprocess execs a `shutil.which("bash")` absolute path — this pin covers
+    # the assertion only.)
+    # 🔴 The needle deliberately does not spell the two-character prefix, or
+    # `test_this_guards_source_does_not_match_itself` would flag this entry —
+    # the same trap the three entries above record.
+    ("scripts/tests/test_nvim_octo.py", "assert not text.startswith(",
+     "ASSERTS the wrapper body carries NO shebang (writeShellApplication owns "
+     "it); writes no stub and execs nothing"),
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",
@@ -171,6 +189,14 @@ ALLOWLIST = [
     ("scripts/tests/test_nebula_relay_apply.py", "original.startswith",
      "shape (b) — ASSERTS the copied verifier still has a shebang before the line "
      "above replaces it; writes nothing"),
+    # Shape (b) again: `scripts/peer-host` is a real committed script, and this
+    # line ASSERTS its interpreter line has the `#!` prefix. It writes no file
+    # and execs nothing, so no unresolvable interpreter can be introduced. The
+    # pin names the assertion, not a shebang, so this file's own
+    # test_this_guards_source_does_not_match_itself stays green.
+    ("scripts/tests/test_peer_host.py", "first.startswith",
+     "shape (b) — ASSERTS the committed peer-host script's interpreter line has "
+     "a shebang prefix; writes nothing and execs nothing"),
 ]
 
 

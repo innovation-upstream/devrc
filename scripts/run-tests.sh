@@ -3775,6 +3775,30 @@ EXPECTED_SKIPS=(
   # lands on one core, the fix is to make the CONTROL independent of the
   # runner's mode, not to delete this entry.
   "scripts/tests|only meaningful inside a real xdist worker|unset:DEVRC_XDIST_ACTIVE"
+  # `test_mutation_battery_anchors.py::test_the_PAIR_check_goes_RED_on_a_real_
+  # battery_COPY` is a NEGATIVE CONTROL that truncates a battery's first
+  # MULTI-SITE (`old`/`new` as tuples) row. A battery with no such row has
+  # nothing to truncate, so the control skips itself LOUDLY rather than passing
+  # — which is right, and is exactly the case this ledger exists to account for.
+  #
+  # 🔴 PINNED RATHER THAN RE-POINTED, and the standing preference above is for
+  # re-pointing whenever a test can be made to RUN. It cannot here: the control's
+  # subject is a tuple row, and inventing one so the control has something to
+  # chew on would put a contrived mutant in an instrument whose whole purpose is
+  # quotable evidence. The two batteries below are legitimately single-site.
+  #
+  # 🔴 MEASURED PRE-EXISTING: at ced40bdb — before the battery this change adds —
+  # the archive/cap entry was ALREADY unpinned, and running that one target
+  # reported `1 UNPINNED skip group` and `RESULT: FAIL`. So the first entry
+  # unbreaks a gate that was red on main; the second keeps it that way.
+  #
+  # ONE ENTRY PER BATTERY, not one widened regex: the accounting compares the
+  # skip TOTAL against the number of applicable ENTRIES (one test per entry), so
+  # a single entry absorbing both leaves 2 skips against 1 pin and stays red.
+  # Adding or removing a single-site battery means adding or removing a line
+  # here — that accounting cost is the mechanism, not an oversight.
+  "scripts/tests|mutation_battery_handoff_archive_and_cap[.]py has no multi-site row"
+  "scripts/tests|mutation_battery_investigation_rename[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a

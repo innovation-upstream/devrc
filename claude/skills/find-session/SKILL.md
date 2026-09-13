@@ -25,7 +25,7 @@ past for a question about now.
 fleet does not, so live-first only ever gets more right.
 
 ```bash
-python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tail 80]
+python3 $DEVRC/scripts/find-session.py <terms> --live [--tail 80]
 ```
 
 - **Live first, archive only as a fallback.** If any live window matched, the archive walk is
@@ -125,7 +125,7 @@ predicate lives THERE, not in `find-session.py`, so the two tools cannot disagre
 
 1. Run the search helper:
    ```bash
-   python3 /home/zach/workspace/devrc/scripts/find-session.py $ARGUMENTS
+   python3 $DEVRC/scripts/find-session.py $ARGUMENTS
    ```
    - Terms are **ANDed** by default (a session must match all). Add `--any` to OR them.
    - Quote a multi-word term to match it as a phrase: `"pr 235"`.

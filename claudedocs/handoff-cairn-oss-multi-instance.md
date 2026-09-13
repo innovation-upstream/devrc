@@ -43,11 +43,11 @@ is the PRIVATE proposal, not this doc.
   original change, were where every finding lived.**
 
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
-  **23(c)** (upstream PR in `ZacxDev/cairn`); **the CLASS rank 23 did not close** — 21 absolute
-  checkout paths across 9 skill files, incl. four live `python3 /home/zach/workspace/devrc/…`
-  invocations in `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`, no scanner gating
-  them (rank 23's own condition was a **grep**, which is why it could be met while the class
-  stands); **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
+  **23(c)** (upstream PR in `ZacxDev/cairn`); ✅ **the CLASS rank 23 did not close is now
+  CLOSED — see rank 24** (devrc **#1621**, squash **`df09a6c2`**): a mechanical gate over the
+  `claude/**` + `CLAUDE.md` corpus rejects any absolute checkout path a handle already names,
+  and the sites are cleared. It is NOT in this list's open set any more; what rank 24 filed in
+  its place is ranks **25–27**; **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
   rank 18 predicted it would); **20 half two** (that CI leg has only ever been watched **pass**,
   so its red path is unproven); **4, 8, 21**; and the `m_index_store` `sys.path` item.
   **Rank 22 belongs to another session — do not take it.**
@@ -75,9 +75,22 @@ is the PRIVATE proposal, not this doc.
 - **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. The pinned client
   went live 2026-09-09, **generation 713, rollback point 712** — the only record of which
-  generation to roll back to; deployed pin `cairn-c84c142`. The **laptop is still unreachable**
-  (2026-09-11: 100% packet loss, `ssh: No route to host`), so cross-host agreement stays
-  `NOT COMPARED — 1 of 2 hosts`. Operator-blocked ranks merged 2026-09-10
+  generation to roll back to.
+  ✅ **CROSS-HOST AGREEMENT IS NOW COMPARED AND AGREES — 2 of 2 hosts, 2026-09-12.** `ship.sh`
+  converged both to devrc **`c337765e`** (rc 0, each reporting `VERIFIED … + switched` and 0 stale
+  managed artifacts), and the cairn pin was then read DIRECTLY on each rather than inferred from the
+  sha: both resolve `~/.local/bin/cairn` to the **identical** store path
+  `…-cairn-562a6ea/bin/cairn`.
+  ⚠ **Three facts in the sentence this replaces were stale, two of them asserting an absence that
+  had already been fixed.** (a) *"the laptop is still unreachable (100% packet loss, `ssh: No route
+  to host`)"* — it is unreachable **on the LAN only** (`192.168.50.155`); `ship.sh` hits that same
+  failure and **falls back to the nebula address** `10.42.0.100`, which answers. A ping to the LAN IP
+  is the wrong instrument for "is the laptop up", and it was the instrument used — twice.
+  (b) *"cross-host agreement stays `NOT COMPARED`"* — compared, above. (c) the deployed pin was
+  recorded as `cairn-c84c142`; it is **`cairn-562a6ea`** as of 2026-09-12.
+  🔴 **A `NOT COMPARED` verdict ages into a false claim the moment its blocker clears, and nothing
+  re-checks it. Re-measure before citing one — and measure the thing, not a proxy for it.**
+  Operator-blocked ranks merged 2026-09-10
   (`ZacxDev/homelab-infra` **#785** `37b5a71f8`, **#787** `936692ec7`, **#786** `4c890c7ac`;
   `innovation-upstream/devrc` **#1447** `719519fa9`). This doc's own prior updates merged as
   **`21f2c162`** (#1492), **`5c93440d`** (#1530), **`a66b6fb3`** (#1597).
@@ -905,11 +918,18 @@ belongs to that arc's own session. via: measurement
    "still → scripts/cairn" sentence in this doc is superseded.** It was made live by
    `ship.sh --no-remote` and then by generation 713; the deploy asymmetry held —
    `cairn-validate` and `cairn-who` both still resolve out-of-store into the checkout.
-   🔴 **THE LAPTOP IS STILL UNSWITCHED, and it is BLOCKED ON THE HOST, not on a
-   decision.** `ship.sh` (no flags) exited **255**: `ssh: connect to host 192.168.50.155
-   port 22: Connection timed out`, and it answers no ICMP either. Cross-host agreement is
-   therefore `NOT COMPARED — 1 of 2 hosts reported a landed sha`. Until it is powered on and
-   converged, every OSS-client fix is absent from the binary THAT machine runs.
+   ✅ **RESOLVED 2026-09-12 — THE LAPTOP IS SWITCHED AND CROSS-HOST AGREEMENT IS COMPARED.**
+   `ship.sh` (no flags) exits **0** and converges both hosts to devrc `c337765e`; the cairn pin
+   was read directly on each and both resolve to the identical `…-cairn-562a6ea/bin/cairn`.
+   ⚠ **The observation below was correct when taken and is kept for its diagnostic value, because
+   the SCOPE is what was wrong, not the reading.** `ship.sh` did exit **255** with
+   `ssh: connect to host 192.168.50.155 port 22: Connection timed out` and no ICMP — **but that is
+   the LAN address only.** `ship.sh` now falls back to the nebula address `10.42.0.100`, which
+   answers; today's run shows both legs on stderr. So *"blocked on the host"* was the wrong
+   conclusion from a right measurement: the host was up and the PATH was down.
+   🔴 **`NOT COMPARED — 1 of 2 hosts` therefore aged into a false claim, and this doc carried it in
+   two places.** A verdict of absence needs re-measuring before it is cited, and it needs measuring
+   against every route, not the first one that fails.
    ⚠ The worktree `~/workspace/devrc-flake-pin` was fully merged and has been **removed**;
    the `[ahead 8]` warning is discharged.
    🔴 **TWO WARNINGS ABOUT THAT WORKTREE WERE PUBLISHED HERE AND BOTH WERE WRONG. RETRACTED
@@ -1479,6 +1499,114 @@ belongs to that arc's own session. via: measurement
     either a launcher exists and both sites name it, or a decision is recorded here that the
     writer's `--template` path is meant to stay checkout-absolute. Named so it reads as
     known-and-open rather than missed.
+    forcing: none
+
+24. ✅ **DONE 2026-09-13 — THE CLASS RANK 23 COULD NOT CLOSE IS CLOSED.** devrc **#1621**,
+    squash **`df09a6c2`**. `scripts/tests/test_absolute_handle_paths.py` rejects any absolute
+    checkout path in the `claude/**` + `CLAUDE.md` corpus that a handle from
+    `nix/agent-handles.nix` already names; the 21 repo-handle sites and 9 `KUBECONFIG=~`
+    occurrences are cleared.
+    🔴 **THE HANDLE TABLE IS PARSED FROM `nix/agent-handles.nix`, NOT RESTATED.** That file is
+    already the generator for both consumers — zsh's `envExtra` and opencode's `plugin/env.js` —
+    and its own header says adding a handle by hand is *"exactly the drift this replaced"*. So
+    the gate cannot drift from the handles, and emitting the right remedy is a CONSEQUENCE of
+    parsing the source rather than a second thing to maintain.
+    🔴 **IT REJECTS THE SPELLING AND NEVER RESOLVES THE PATH.** The sibling `test_doc_path_rot.py`
+    deliberately skips absolute paths — *"Absolute paths are never claims this repo can settle"* —
+    and that exemption is precisely where these sites had been sitting. Matching TEXT is
+    host-independent; `stat`ing would not be, and would have made the gate a claim about the
+    machine running it.
+    ✅ **CLOSING CONDITION MET, VERIFIED BY CONTENT AT `origin/main`** (a squash makes
+    `merge-base --is-ancestor` false forever, so ancestry cannot answer this): both
+    `scripts/tests/test_absolute_handle_paths.py` and
+    `scripts/tests/absolute-handle-path-ignore.list` are present; the gate runs **48 passed** in
+    a clean worktree off `origin/main`; and a planted
+    `python3 /home/zach/workspace/devrc/scripts/memory-audit.py` turns it **red** with
+    ``-> use `$DEVRC/scripts/memory-audit.py` `` — red-then-green watched, not inferred.
+    **The documented exceptions are 3 + 1.** Three remain in the corpus, all in
+    `claude/skills/clawgate/reference/cross-session-reach.md` — two recorded `clawgatectl` JSON
+    payloads at `:127`/`:174` and a table cell at `:98` whose value is an ellipsis — ignore-listed
+    with a written reason. The fourth is
+    `KUBECONFIG=~/workspace/homelab-infra/workbench-kubeconfig` at
+    `claude/skills/auditloop/reference/ui-and-meta-run.md:48`, deliberately untouched: **no handle
+    names that file**, and `$KC_WORKBENCH` is the `homelab-talos` spelling, i.e. empty on exactly
+    the host where `homelab-infra` is the correct path.
+    🔴 **WHAT THE FOUR AUDIT ROUNDS COST IS THE DURABLE OUTPUT, NOT THE GATE. 🔴0 in every
+    round; every headline finding was a FALSE CLAIM ABOUT THE CODE, never a logic defect.**
+    - **Round 0** found the gate one spelling narrower than the class it claimed —
+      `~/workspace/<handle>` walked straight through it, **184 sites**. That is structurally the
+      same charge rank 24 levelled at rank 23, one level up: a condition met by its own spelling
+      while the class stands.
+    - **Round 1** found that a ONE-SEGMENT handle suffix-wildcards into any absolute parent, so
+      the gate prints a **wrong-FILE remedy**. The failure line is DESIGNED to be the fix, which
+      is exactly why a wrong remedy is the actionable defect rather than cosmetic.
+    - **Round 2** found a guard whose stated consequence was measurably false — **on its second
+      draft**. The third draft is the true one.
+    - **The final sweep** found **six more** false consequence claims, and only a sweep of every
+      site would have caught them: each was locally plausible where it stood.
+    ⚠ **THE LADDER WAS STOPPED ON THE PROSE CRITERION, NOT ON A CLEAN ROUND.** The payload here
+    is prose inside a test module, so the attribution gate is structurally inert — *"fixed a
+    defect"* and *"reworded a warning"* are the same edit, and no round can distinguish them. The
+    conditions for stopping held: no 🔴 in any round, blast radius bounded to *"the document
+    contains a false sentence"*, and the shape swept at every site rather than at the ones a round
+    happened to name. 🔴 **The accepted cost, recorded so it reads as OPEN rather than absent: the
+    sentences the last fix round wrote have NOT been read by an adversarial round, and that
+    round's own first replacement for a boundary claim was itself wrong. The residual error rate
+    on that prose is non-zero — not assumed zero.**
+    forcing: none — done
+
+25. **The repo-handle `~/workspace/<handle>/…` sites the kubeconfig arm deliberately deferred.**
+    #1621 armed the `~` spelling for **kubeconfig** handles only — an operator decision, on the
+    asymmetry that `$KC_*` names a FILE while a repo handle names a DIRECTORY and the `~` family
+    carries no path tail. That leaves the repo-handle half of the `~` class untouched.
+    🔴 **MEASURED AT `origin/main` AFTER #1621, AND THE POPULATION IS NOT WHAT A GREP SUGGESTS —
+    read this before scoping the sweep.** The corpus holds **177** `~/workspace/…` tokens, but only
+    **129** of them name a repo that HAS a handle: `~/workspace/devrc` **100** and
+    `~/workspace/homelab-talos` **29**. The other **48 HAVE NO HANDLE AND THEREFORE NO REMEDY** —
+    `clawgate-extension` 18, `homelab-infra` 6, `tmux-fuzzyclaw` 5, `kubeclaw` 5, `scratch` 3, and
+    a tail. Arming the gate against all 177 would block those 48 with nothing to offer them, which
+    is the permanently-red gate `claude/RULES.md` forbids; it is the same shape as
+    `claude/skills/auditloop/reference/ui-and-meta-run.md:48`, the one site #1621 left alone for
+    exactly this reason. **Scope the sweep to the 129, or add handles first.**
+    🔴 **The second subtlety, because it makes this NOT a blanket rewrite either:** `~` is the
+    **CORRECT** spelling for a Read-tool target — `$VAR` does not expand there — so each of the 129
+    has to be classified, not rewritten. A sweep that treats every `~/workspace/<handle>` as a
+    violation will break the Read-tool sites it "fixes".
+    **Closing condition:** EITHER the gate arms `~` for repo handles with an explicit, tested
+    carve-out for Read-tool targets and the sites are cleared — merged, and watched red-then-green
+    on a planted violation — OR a decision is recorded in this doc that `~/<suffix>` is an
+    accepted spelling, in which case the gate's docstring must stop implying otherwise.
+    forcing: none
+
+26. **The handle table has TWO hand-maintained copies, and both are drifted from
+    `nix/agent-handles.nix` TODAY.** `scripts/claude-hooks/shell-env-nudge.py` carries 9 of 10 —
+    **missing `KC_PROD`**, whose kubeconfig exists — so the runtime nudge is blind to the very
+    handle two of #1621's fixed sites use. `scripts/lib/handoff_index.py`'s `REPO_ENV_HANDLES` is
+    `("DEVRC","HOMELAB","DATAPACKET","CIVITAI")` — **missing `CIVITAI_CLI`**, whose checkout
+    exists.
+    ⚠ **Blast radius, stated honestly rather than at the altitude an audit reached for.** The
+    `KC_PROD` gap is LIVE but minor: a missed nudge, not a wrong cluster. The `CIVITAI_CLI` one is
+    **LATENT** — that checkout holds **0** handoff docs today, so it has no victim. An audit
+    described it as docs being *"silently outside the index"*; that was measured, and it is not
+    true today.
+    #1621 added no THIRD copy — it parses the source — but it reduced the count by none.
+    **Closing condition:** a test asserting that both hand-maintained handle sets equal the set
+    parsed from `nix/agent-handles.nix`, shown **RED** against today's tree and **GREEN** after
+    both are corrected — merged.
+    forcing: none
+
+27. **`scripts/tests/test_doc_path_rot.py` carries the same stale-census defect twice, over the
+    corpus its sibling gate asserts is IDENTICAL.** `CORPUS_DOC_FLOOR = 40  # measured 80` against
+    a real **99**, and `REFERENCE_FLOOR = 155  # measured 310` against a real **593** — and each
+    figure is restated in a failure message, so it is **4 sites**, not 2. Neither breaks anything
+    — floors are minimums, so a real count above them passes — but they are the numbers a
+    maintainer reads while debugging a corpus collapse, and the 310→593 gap is wide enough to
+    make a genuine collapse look survivable.
+    ⚠ **That module is arguably the more honest of the two:** its figures are explicitly
+    ref-scoped where the sibling's are bare. The defect is staleness, not the convention.
+    **Closing condition:** each figure re-derived from the module's own corpus/reference builders,
+    with the comment AND the failure message updated together — or the counts deleted where they
+    add nothing — merged.
     forcing: none
 
 ## Gotchas / decisions / dead-ends

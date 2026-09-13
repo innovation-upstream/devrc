@@ -1782,7 +1782,16 @@ def test_the_shared_lib_is_APPENDED_to_sys_path_and_never_PREPENDED():
     """
     got = _sys_path_mutations(SRC)
     assert got, "the sys.path scan matched nothing — this guard is inert"
-    assert [m for _, m in got] == ["append"], got
+    # 🔴 THE INVARIANT IS THE SPELLING, NOT THE COUNT. This asserted
+    # `== ["append"]` — exactly one — until the census-guard screen added a
+    # second append (`scripts/`, for `testlib.census_scan`). A count is the
+    # wrong pin: it goes red on an addition that OBEYS the rule while saying
+    # nothing about one that breaks it. Every mutation must be an append; the
+    # count is pinned separately and loosely, so a third legitimate import does
+    # not read as a violation.
+    assert {m for _, m in got} == {"append"}, got
+    assert len(got) == 2, (
+        f"expected the two documented appends (scripts/lib, scripts/), got {got}")
     # POSITIVE CONTROL: the scan CAN see the spelling this forbids, so the
     # equality above is not a comparison against a scan wired to nothing.
     assert _sys_path_mutations(
@@ -2090,3 +2099,561 @@ def test_the_deleted_flags_are_GONE_from_the_parser_not_merely_undocumented():
               if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     assert not [c for c in consts if "refs/stale-base-triage" in c], (
         "a ref-namespace literal survived the deletion of --fetch")
+
+
+# ══ ROUTING — the systemd unit that actually runs this thing ══════════════════
+#
+# 🔴 WHY THIS SECTION EXISTS. For its whole life before this, `stale-base-triage`
+# was ~885 payload lines and ~1,350 test lines that ran only when somebody
+# remembered the path: no timer, no hook, no CI step, no skill, no nix entry.
+# Every guard above was a claim about a tool nothing invoked. These are the
+# guards on the ROUTING, and they are deliberately about RELATIONSHIPS — the
+# writer is disarmed, the reporter cannot take the operator's attention, the
+# script's own budget expires before systemd's axe — rather than about words in
+# `nix/home.nix`, which a rewording could walk past.
+
+from testlib.nix_units import (  # noqa: E402
+    declares,
+    directive,
+    section,
+    unit_source,
+)
+
+HOME_NIX_PATH = ROOT / "nix" / "home.nix"
+HOME_NIX = HOME_NIX_PATH.read_text(encoding="utf-8")
+SERVICE_ATTR = "systemd.user.services.stale-base-triage"
+TIMER_ATTR = "systemd.user.timers.stale-base-triage"
+
+#: The banner this unit's prose block opens with. Used ONLY to bound the RAW
+#: (comment-bearing) window for the citation guard — every other guard here
+#: reads a comment-STRIPPED body through `nix_units`, which is what makes the
+#: difference between "this unit is declared" and "this unit is mentioned".
+_BANNER = "# ── IS THIS PR'S RED INHERITED?"
+
+
+def _service():
+    """The comment-stripped body of the service unit."""
+    return unit_source(SERVICE_ATTR, HOME_NIX)
+
+
+def _timer():
+    """The comment-stripped body of the timer unit."""
+    return unit_source(TIMER_ATTR, HOME_NIX)
+
+
+def _raw_prose_window():
+    """The RAW text of this unit's prose block + both unit declarations.
+
+    Comments INTACT, because that is where the test citations live. Bounded by
+    the next `# ── ` banner rather than by a byte count or by the name of the
+    unrelated unit that happens to follow today.
+    """
+    start = HOME_NIX.find(_BANNER)
+    assert start != -1, (
+        f"nix/home.nix no longer contains the banner {_BANNER!r}. This reader "
+        "bounds the citation window with it; re-anchor it rather than deleting "
+        "this guard."
+    )
+    nxt = re.search(r"^  # ── ", HOME_NIX[start + len(_BANNER):], re.M)
+    end = len(HOME_NIX) if nxt is None else start + len(_BANNER) + nxt.start()
+    return HOME_NIX[start:end]
+
+
+def test_the_unit_and_its_timer_are_LIVE_declarations_that_RUN_THIS_SCRIPT():
+    """🔴 THE WHOLE POINT: a tool nothing invokes is not shipped.
+
+    `declares()` rather than a substring, because a retired unit looks exactly
+    like a live one to `in` — that is the measured defect `nix_units` exists
+    for. And the ExecStart is read as a DIRECTIVE rather than a substring,
+    because `X-Restart-Triggers` on the very next line carries the same path:
+    deleting the ExecStart entirely leaves a naive scan green over a
+    `Type=oneshot` unit that cannot run at all.
+    """
+    assert declares(SERVICE_ATTR, HOME_NIX), (
+        "nix/home.nix declares no stale-base-triage SERVICE — the script is "
+        "unrouted again, which is the condition this section was written to end"
+    )
+    assert declares(TIMER_ATTR, HOME_NIX), (
+        "the service exists but nothing fires it on a schedule"
+    )
+    exec_start = directive("ExecStart", section("Service", _service()))
+    assert exec_start, "the service declares no ExecStart"
+    assert "scripts/stale-base-triage.py" in exec_start, exec_start
+    assert "--sweep" in exec_start, (
+        f"the unit runs the script in some other mode than the sweep: {exec_start}"
+    )
+    # POSITIVE CONTROL on the reader: `directive()` really can come back None,
+    # so the assertions above are not passing on a function that always answers.
+    assert directive("ExecStartPre", section("Service", _service())) is None
+
+
+def test_the_unit_ships_the_writer_DISARMED():
+    """🔴 THE SAFETY CLAIM OF THE PR THAT ADDED THIS UNIT: it reports, and it
+    posts nothing to anybody's PR.
+
+    The script's own `COMMENT_MODE_DEFAULT` is the literal `"off"` and is pinned
+    separately. This is the SECOND place the decision is spelled — the unit
+    passes `--comment-mode dry-run` explicitly, so a dry-run soak produces
+    `DRY-RUN would comment on #N` lines in the journal while writing nothing.
+    Arming is the one-token edit `dry-run` -> `on`, and it costs a visible line
+    HERE as well as in `nix/home.nix`. That is the point, not friction.
+
+    ⚠ IT ASSERTS THE VALUE, NOT MERE MEMBERSHIP IN THE LEGAL SET. `on` is a
+    legal value; a guard that accepted any of the three would let a bot that
+    comments on every open PR go live under a green suite.
+    """
+    exec_start = directive("ExecStart", section("Service", _service()))
+    # `[a-z-]+` rather than `\S+`: `directive()` hands back the nix STRING
+    # LITERAL, quotes included, so a greedy token captures the closing `"` and
+    # the comparison never matches whatever the value is.
+    modes = re.findall(r"--comment-mode[= ]([a-z-]+)", exec_start)
+    assert modes == ["dry-run"], (
+        f"the unit's --comment-mode is {modes!r}, not exactly ['dry-run']. If "
+        "this is the arming commit, say so in the diff and change this literal "
+        "deliberately — the criteria are written beside the ExecStart in "
+        "nix/home.nix."
+    )
+    # 🔴 ONE RULE, ONE PLACE. `comment_mode()` lets the CLI win over the env, so
+    # an env spelling here could not arm it today — but two spellings of one
+    # decision in one unit is how a later refactor flips one and not the other.
+    svc = _service()
+    assert "STALE_BASE_TRIAGE_COMMENT_MODE" not in svc, (
+        "the arming decision is spelled twice in one unit; keep it on the "
+        "ExecStart alone"
+    )
+
+
+def test_the_unit_is_NOT_wired_to_the_do_not_disturb_toast():
+    """🔴 A RELATIONSHIP, not a word. `notify-failure@` is the one toast class
+    deliberately wired to DEFEAT do-not-disturb. Every red this unit observes
+    belongs to somebody's PR — none of them is an incident on this host, and
+    none becomes more urgent for being shouted at the operator. A reporter that
+    can take the operator's attention is how `claude/RULES.md`'s
+    permanently-red gate gets built, one habituated dismissal at a time.
+
+    Read from the comment-STRIPPED body on purpose: the prose above the unit
+    discusses `notify-failure@` at length, so a raw scan would fail on the
+    paragraph explaining why it is absent — the trap the sibling guards on
+    `--fetch` and `--json` were each caught by.
+    """
+    for name, body in (("service", _service()), ("timer", _timer())):
+        assert "notify-failure" not in body, (
+            f"the {name} unit wires the DND-bypassing failure toast; this is a "
+            "reporter about other people's reds"
+        )
+    # POSITIVE CONTROL: the stripped body is not empty and the needle IS
+    # findable in this file's world — main-green-check wires one on purpose, so
+    # a reader that saw nothing anywhere would be inert rather than reassuring.
+    assert "ExecStart" in _service(), "the stripped service body is empty"
+    assert "notify-failure" in unit_source(
+        "systemd.user.services.main-green-check", HOME_NIX), (
+        "no unit in nix/home.nix wires notify-failure@ any more — this guard "
+        "can no longer distinguish 'absent' from 'unfindable'"
+    )
+
+
+def test_rc_INHERITED_is_a_systemd_SUCCESS_and_rc_UNMEASURED_IS_NOT():
+    """🔴 THE FAILURE POLICY, PINNED AGAINST THE SCRIPT'S OWN EXIT CODES.
+
+    rc 10 (INHERITED) is the tool's headline FINDING, not a fault: failing the
+    unit on it would leave `systemctl --user --failed` permanently dirty and
+    train everyone to ignore it.
+
+    rc 11 (COULD NOT MEASURE) deliberately DOES fail — the opposite of
+    `main-green-check` and `main-status-watch`, and the difference is that both
+    of those carry a blind LADDER and this script does not. rc 11 here is never
+    a per-PR miss (those are rows inside a run that still exits 0 or 10); it
+    means the run could not look AT ALL. With no ladder, calling that a success
+    is "blind in permanent silence" — the shape drift-check's rc 18 exists to
+    prevent. It is the right volume because there is no OnFailure: visible in
+    `--failed`, silent, and self-clearing on the next fire.
+    """
+    raw = directive("SuccessExitStatus", section("Service", _service()))
+    assert raw is not None, "the service declares no SuccessExitStatus"
+    codes = {int(tok) for tok in re.findall(r"\d+", raw)}
+    assert RC_INHERITED in codes, (
+        f"SuccessExitStatus is {raw!r} and does not include rc {RC_INHERITED} "
+        "(INHERITED) — the unit fails on its own headline finding"
+    )
+    assert RC_UNMEASURED not in codes, (
+        f"SuccessExitStatus is {raw!r} and swallows rc {RC_UNMEASURED} "
+        "(COULD NOT MEASURE). This script has no blind ladder, so that makes a "
+        "permanently broken sweep indistinguishable from a healthy one"
+    )
+    assert RC_USAGE not in codes, raw
+    # POSITIVE CONTROL on the parse: the codes really were read out of the
+    # value, not defaulted to an empty set that satisfies both `not in`s.
+    assert codes, f"SuccessExitStatus {raw!r} parsed to no codes at all"
+
+
+def test_the_scripts_own_budget_expires_BEFORE_the_units_timeout():
+    """🔴 A RELATIONSHIP BETWEEN TWO FILES, which is the seam nobody owns.
+
+    The script converts budget exhaustion into `COULD NOT MEASURE` rows and
+    still summarises. systemd's `TimeoutStartSec` converts it into SIGTERM and
+    no output at all. If the unit's axe falls first, every slow run reports
+    nothing and the ordered degradation the script implements is dead code.
+
+    Both numbers are READ, never restated: the budget out of the script's
+    constant, the timeout out of `nix/home.nix`. The nix comment's stated copy
+    of the budget is checked too — a prose number that drifts is how a reader
+    comes to believe the wrong relationship holds.
+    """
+    m = re.search(r"^TOTAL_BUDGET_S_DEFAULT = (\d+)", SRC_SCRIPT, re.M)
+    assert m, "TOTAL_BUDGET_S_DEFAULT is no longer a module-level int literal"
+    budget = int(m.group(1))
+    timeout = directive("TimeoutStartSec", section("Service", _service()))
+    assert timeout, "the service declares no TimeoutStartSec"
+    timeout = int(timeout)
+    assert budget < timeout, (
+        f"the script's API budget is {budget}s but systemd kills the run at "
+        f"{timeout}s — a slow sweep is SIGTERMed instead of reporting"
+    )
+    stated = re.search(r"TOTAL_BUDGET_S_DEFAULT = (\d+)", _raw_prose_window())
+    assert stated and int(stated.group(1)) == budget, (
+        f"nix/home.nix's comment states the budget as "
+        f"{stated.group(1) if stated else None}, the script says {budget}"
+    )
+
+
+def test_a_sweep_cannot_still_be_running_when_the_next_one_fires():
+    """Two overlapping sweeps double the API cost and interleave their output in
+    one journal, which is the state hardest to read the soak evidence out of.
+    `Type=oneshot` does not prevent it — the timer would simply not fire again
+    while the unit is activating — but the honest version is that the unit's own
+    worst case fits inside the interval, so the question never arises.
+    """
+    timeout = int(directive("TimeoutStartSec", section("Service", _service())))
+    interval = directive("OnUnitActiveSec", section("Timer", _timer()))
+    assert interval, "the timer declares no OnUnitActiveSec"
+    m = re.fullmatch(r'"(\d+)h"', interval.strip())
+    assert m, (
+        f"the interval {interval!r} is no longer stated in whole hours; this "
+        "guard's arithmetic assumed it was"
+    )
+    interval_s = int(m.group(1)) * 3600
+    assert timeout < interval_s, (
+        f"the unit may run for {timeout}s but fires every {interval_s}s"
+    )
+
+
+def test_the_timer_is_ENABLED_by_WantedBy_and_gated_by_its_master_switch():
+    """🔴 `WantedBy` SILENTLY CHANGED TO `After` IS A MEASURED SHAPE in this
+    repo: declared, never enabled, never fires, and every guard that only asked
+    "is the timer declared?" stayed green. So the directive is read by name.
+
+    The gate itself is asserted too, in both halves. `serverMode` is not
+    tidiness: both hosts build the same flake, so an ungated timer sweeps twice
+    and — once armed — races to post the same comment, which
+    `already_commented()` can only suppress after the first post has landed.
+    """
+    install = section("Install", _timer())
+    assert install, "the timer declares no [Install] section, so it is never enabled"
+    wanted = directive("WantedBy", install)
+    assert wanted and "timers.target" in wanted, (
+        f"the timer's WantedBy is {wanted!r} — it is declared but never enabled"
+    )
+    assert "serverMode" in wanted, (
+        f"the timer is not serverMode-gated ({wanted!r}); it would sweep from "
+        "both hosts and, armed, race to comment"
+    )
+    assert "enableStaleBaseTriage" in wanted, (
+        f"the timer has no master switch ({wanted!r}) — there is no one-line "
+        "way to stop the sweep without reverting the unit"
+    )
+    assert re.search(r"^  enableStaleBaseTriage = ", HOME_NIX, re.M), (
+        "the timer is gated on `enableStaleBaseTriage` but nothing defines it"
+    )
+
+
+def test_every_test_the_UNIT_names_actually_exists():
+    """The sibling guard for the script's own prose, applied to the nix block.
+
+    A citation that resolves to nothing reads as authority and is not one —
+    and a unit's comments are where the load-bearing "this is pinned, so a
+    later edit cannot quietly undo it" claims get made. Names wrapped across a
+    comment line-break are re-joined before looking; a `<file>.py::` prefix is
+    stepped over rather than being read as a dangling test name.
+    """
+    joined = re.sub(r"\n\s*#\s*", "", _raw_prose_window())
+    cited = set(re.findall(r"\btest_[A-Za-z0-9_]+\b(?!\.(?:py|sh))", joined))
+    assert cited, "the citation scan matched nothing — this guard is inert"
+    here = set()
+    for path in sorted((ROOT / "scripts").rglob("test_*.py")):
+        here |= set(re.findall(r"^ *def (test_[A-Za-z0-9_]+)",
+                               path.read_text(encoding="utf-8", errors="replace"),
+                               re.M))
+    assert cited <= here, f"dangling citations in the unit's prose: {sorted(cited - here)}"
+
+
+# ══ the census-guard screen ═══════════════════════════════════════════════════
+# 🔴 WHY THIS BLOCK EXISTS, AND WHAT ITS BASELINE IS. The tool's first live sweep
+# ruled five PRs INHERITED. Rebuilding each merged tree and running ONLY the
+# named failing test gave: #1450 passed, #1286 passed, #1603 FAILED, #1194
+# FAILED, #1038 merge-conflict (untestable). So 2 of 4 testable verdicts were
+# FALSE — both on the SAME repo-wide census guard, and in both the offender was
+# a NEW FILE the PR itself adds (#1194's was its own
+# `scripts/tests/test_break_glass_merge.py`, absent from main, so a rebase would
+# have carried the offending file along with the red).
+#
+# 🔴 These reuse the `repo` fixture deliberately: ALPHA is already the INHERITED
+# shape and BRAVO the NOT-EXPLAINED one, with pairwise-distinct names and commit
+# subjects. Only the ORACLE'S ANSWER differs between the two headline cases, so
+# the screen is isolated and nothing else moves.
+
+class _FakeCensus:
+    """A CensusIndex stand-in whose answer is fixed by the test, not derived.
+
+    🔴 The real derivation costs ~28s and is covered by `test_census_scan.py`.
+    What needs pinning HERE is the WIRING — that True demotes, that a raise
+    withholds, and that it is not asked at all before the stale pattern holds.
+    """
+
+    def __init__(self, answer=False, raises=False):
+        self._answer, self._raises = answer, raises
+        self.built, self.ok, self.error = True, not raises, None
+        self.pairs, self.whole_modules, self.build_ms = set(), set(), 1
+        self.asked = []
+
+    def is_census_guard(self, path, name, truncated=False):
+        self.asked.append((path, name, truncated))
+        if self._raises:
+            raise RuntimeError(
+                "the census derivation could not be built (stub) — so whether "
+                "this test is a repo-census guard is UNKNOWN")
+        return self._answer
+
+
+def _triage_c(r, name, census, main_ref="main", head_ref="pr"):
+    return M.triage_one_test(r.path, main_ref, head_ref, r.merge_base, name, census)
+
+
+def test_a_census_guard_is_DEMOTED_rather_than_ruled_inherited(repo):
+    """🔴 THE HEADLINE CASE — the shape that made the tool wrong twice.
+
+    ALPHA is the fixture's INHERITED shape: the PR never touched it and main has
+    moved it. Without the screen this is INHERITED (pinned by the sibling test
+    below, which differs ONLY in the oracle's answer). With it, the verdict must
+    be NOT EXPLAINED.
+    """
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(answer=True))
+    assert got["verdict"] == M.VERDICT_NOT_STALE, got
+    assert got["census_guard"] is True, got
+    assert got["explained"] is False, "a demoted test must NOT count as explained"
+    assert "REPO-CENSUS guard" in got["reason"], got["reason"]
+
+
+def test_a_NON_census_test_in_the_same_shape_is_still_INHERITED(repo):
+    """🔴 THE HALF THAT COULD HAVE FALSIFIED THE PREDICATE, and did not.
+
+    #1450 and #1286 were CORRECT INHERITED verdicts. A screen that demoted
+    everything would "fix" the false positives by destroying the tool — and
+    would pass the test above. Identical fixture, identical call, only the
+    oracle's answer differs.
+    """
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(answer=False))
+    assert got["verdict"] == M.VERDICT_INHERITED, got
+    assert got.get("census_guard") is None, got
+    assert got["explained"] is True, got
+
+
+def test_an_UNBUILDABLE_census_index_WITHHOLDS_and_never_resolves_to_inherited(repo):
+    """🔴 FAIL-SAFE DIRECTION, PINNED. If the derivation cannot be built the
+    answer is UNKNOWN — and unknown must not resolve toward INHERITED, or this
+    bug returns silently the day `census_scan` breaks."""
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(raises=True))
+    assert got["verdict"] == M.VERDICT_UNMEASURED, got
+    assert got["explained"] is False, got
+    assert "UNKNOWN" in got["reason"], got["reason"]
+
+
+def test_the_screen_runs_LAST_so_the_evidence_SURVIVES_the_demotion(repo):
+    """The demoted verdict still carries `candidates` — the commits that WOULD
+    have justified INHERITED. That evidence is what let the original false
+    verdicts be falsified in one command, so it must not be thrown away."""
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(answer=True))
+    assert got["verdict"] == M.VERDICT_NOT_STALE
+    assert got["candidates"], "the evidence must survive the demotion"
+    assert got["blob_head"] == got["blob_merge_base"], got
+
+
+def test_the_screen_is_NOT_consulted_before_the_stale_pattern_is_established(repo):
+    """🔴 ORDERING, PINNED — and it is a COST claim, not a style one.
+
+    The real derivation is ~28s against a sweep that ran in 35s. BRAVO is the
+    fixture's PR-owns-the-file shape, rejected by the blob comparison long
+    before the screen; the stub records what it was asked, and here it must be
+    asked NOTHING.
+    """
+    census = _FakeCensus(answer=True)
+    got = _triage_c(repo, "test_the_bravo_invariant_holds", census)
+    assert got["verdict"] == M.VERDICT_NOT_STALE
+    assert census.asked == [], f"the screen was consulted needlessly: {census.asked}"
+
+
+def test_a_TRUNCATED_name_is_matched_by_prefix_and_errs_toward_demotion():
+    """The 140-byte cap cuts names mid-word (100 of 101 rows measured). A prefix
+    match can only ever select MORE tests as guards — the safe direction."""
+    idx = M.CensusIndex(ROOT)
+    idx.built, idx.ok = True, True
+    idx.pairs = {("scripts/tests/test_x.py", "test_a_long_name_the_cap_cut_in_half")}
+    assert idx.is_census_guard("scripts/tests/test_x.py",
+                               "test_a_long_name_the_cap", truncated=True)
+    assert not idx.is_census_guard("scripts/tests/test_x.py",
+                                   "test_a_long_name_the_cap", truncated=False)
+
+
+def test_a_whole_module_selection_counts_as_a_census_guard():
+    """`census_scan` can select a module ENTIRE; a test inside one is a guard
+    even though no (path, name) pair names it."""
+    idx = M.CensusIndex(ROOT)
+    idx.built, idx.ok = True, True
+    idx.whole_modules = {"scripts/tests/test_all_of_me.py"}
+    assert idx.is_census_guard("scripts/tests/test_all_of_me.py", "test_anything")
+    assert not idx.is_census_guard("scripts/tests/test_other.py", "test_anything")
+
+
+def test_a_MIS_ROOTED_index_RAISES_rather_than_answering_no(tmp_path):
+    """🔴 THE REAL CLASS, not the stub, and THE BUG THIS TEST ACTUALLY FOUND.
+
+    `census_scan.analyze()` on a path with no scripts tree RETURNS AN EMPTY
+    RESULT — it does not raise. The first version of `CensusIndex` trusted that
+    and would have answered "not a census guard" for every test in the repo, i.e.
+    failed OPEN into exactly the bug the screen exists to fix. The trip is
+    `parsed == 0`; this drives it at a real empty directory rather than asserting
+    it about a stub.
+    """
+    idx = M.CensusIndex(tmp_path / "nothing-here")
+    with pytest.raises(RuntimeError) as exc:
+        idx.is_census_guard("scripts/tests/test_x.py", "test_y")
+    assert "UNKNOWN" in str(exc.value)
+    assert idx.built and not idx.ok, "a failed build must be recorded, not retried blindly"
+    assert idx.parsed == 0, idx.parsed
+
+
+def test_the_screen_is_NOT_vacuous_on_the_real_repo():
+    """🔴 THE POSITIVE CONTROL, and it is where the production-strength claim
+    lives. Every other test here drives a stub or a fixture; none of them would
+    notice if the derivation returned nothing useful against THIS repo, which is
+    the only tree the unit ever actually runs on. A count floor at RUNTIME was
+    tried first and was wrong — it turned every small fixture repo into COULD NOT
+    MEASURE — so the strong claim is asserted here instead.
+
+    ⚠ Bounded loosely on purpose: this pins "the screen can see a large
+    population", not an exact number that would go red on every new guard.
+    """
+    idx = M.CensusIndex(ROOT)
+    assert idx.is_census_guard(
+        "scripts/tests/test_runtime_shebangs.py",
+        "test_no_test_writes_a_usr_bin_env_shebang_at_runtime"), (
+        "the guard that produced BOTH measured false INHERITED verdicts is not "
+        "in the derived set — the screen would not have fixed either of them")
+    assert idx.ok and idx.parsed > 100, (idx.ok, idx.parsed, idx.error)
+    assert len(idx.pairs) + len(idx.whole_modules) > 60, len(idx.pairs)
+
+
+def test_the_census_screen_cannot_shell_out():
+    """🔴 THE SAFETY CLAIM THIS IMPORT MUST NOT WEAKEN. The tool's headline
+    guarantee is that it runs no git subcommand that writes. `census_scan` is
+    pure AST + filesystem, so importing it cannot add one — asserted over the
+    dependency's SOURCE rather than trusted."""
+    src = (ROOT / "scripts" / "testlib" / "census_scan.py").read_text(encoding="utf-8")
+    imported = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "subprocess" not in imported, imported
+    assert "os.system" not in src
+
+
+def test_the_FIVE_VERDICT_regression_baseline_is_reproduced_by_the_screen():
+    """🔴 THE MEASURED BASELINE, AS A TABLE. These five verdicts are the tool's
+    own first live sweep, each checked by rebuilding the merged tree and running
+    only the named failing test. The two FALSE rows are what this change exists
+    to fix; the two RIGHT rows are what it must not break."""
+    GUARD_FILE = "scripts/tests/test_runtime_shebangs.py"
+    UNIT_FILE = "scripts/tests/test_run_tests_targets.py"
+    # (pr, failing test, file, is-a-census-guard, measured truth)
+    BASELINE = [
+        (1450, "test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS",
+         UNIT_FILE, False, "INHERITED"),
+        (1286, "test_agent_without_any_tab_is_untouched",
+         "scripts/browser-bridge/tests/test_browser_tab_ref.py", False, "INHERITED"),
+        (1603, "test_no_test_writes_a_usr_bin_env_shebang_at_runtime",
+         GUARD_FILE, True, "REAL"),
+        (1194, "test_no_test_writes_a_usr_bin_env_shebang_at_runtime",
+         GUARD_FILE, True, "REAL"),
+    ]
+    assert len({f for _, _, f, _, _ in BASELINE}) == 3, "fixture files must not all collide"
+    for pr, name, path, is_guard, truth in BASELINE:
+        idx = M.CensusIndex(ROOT)
+        idx.built, idx.ok = True, True
+        idx.pairs = {(path, name)} if is_guard else set()
+        got = idx.is_census_guard(path, name)
+        assert got is (truth == "REAL"), (
+            f"#{pr}: screen says census-guard={got}, measured truth was {truth}")
+
+
+def test_the_summary_line_distinguishes_a_zero_from_a_screen_that_never_ran(capsys):
+    """🔴 SILENT-ZERO GUARD. "0 demoted" by a screen that looked and "0 demoted"
+    by a screen that never built are different claims, and this repo keeps
+    getting caught conflating them."""
+    results = [{"number": 1, "verdict": M.VERDICT_INHERITED, "tests": []}]
+    M.summarise(results, [], M.CensusIndex(ROOT))          # never built
+    assert "NOT CONSULTED" in capsys.readouterr().out
+
+    built = M.CensusIndex(ROOT)
+    built.built, built.ok, built.build_ms = True, True, 7
+    M.summarise(results, [], built)
+    out = capsys.readouterr().out
+    assert "0 demoted" in out and "NOT CONSULTED" not in out, out
+
+
+def test_the_PRODUCTION_call_site_actually_PASSES_the_census_index():
+    """🔴 THE SCREEN DEFAULTS TO OFF, SO ITS WIRING IS THE THING THAT CAN ROT.
+
+    `census=None` skips the screen entirely — deliberate, so the ~100 existing
+    unit tests drive the evidence path without paying a 28s derivation. The cost
+    is that DROPPING the argument at the one production call site would make the
+    screen silently inert while every test above still passes: the exact
+    "reads as coverage while providing none" shape this repo keeps hitting.
+
+    So the call site is pinned STRUCTURALLY, over the AST, rather than by a
+    comment asking nicely.
+    """
+    tree = ast.parse(SRC)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "triage_pr"]
+    assert calls, "no call to triage_pr found — this guard is inert"
+    for call in calls:
+        passed = len(call.args) + len(call.keywords)
+        assert passed == 5, (
+            f"triage_pr is called with {passed} arguments at line {call.lineno}; "
+            "the census index is the 5th and without it the screen is inert")
+
+    # POSITIVE CONTROL: the scan CAN see the four-argument spelling it forbids,
+    # so the equality above is not a comparison against a scan wired to nothing.
+    bad = ast.parse("triage_pr(repo, main_ref, pr, row)\n")
+    bad_calls = [n for n in ast.walk(bad)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "triage_pr"]
+    assert len(bad_calls) == 1 and len(bad_calls[0].args) == 4
+
+
+def test_triage_one_test_is_never_called_without_the_index_in_production():
+    """The same pin one level down: `triage_pr` fans out to `triage_one_test`,
+    and dropping the argument THERE would disable the screen just as completely
+    while `triage_pr`'s own signature still looked right."""
+    tree = ast.parse(SRC)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "triage_one_test"]
+    assert calls, "no call to triage_one_test found — this guard is inert"
+    for call in calls:
+        passed = len(call.args) + len(call.keywords)
+        assert passed == 6, (
+            f"triage_one_test is called with {passed} arguments at line "
+            f"{call.lineno}; the census index is the 6th")

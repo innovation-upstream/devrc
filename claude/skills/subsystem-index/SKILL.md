@@ -70,7 +70,7 @@ says to, and hand its outcome back — do not re-litigate whether to write.
 ✅ **Run the probe FIRST, unconditionally — do not research anything before running it.** It **never writes**; it resolves the changed paths against the store and reports. Its first two output lines state the `scope=` it derived and the `store:` path it read, **so the two facts you would otherwise go looking up are printed by the command you are deciding whether to run.** Nothing below needs to be settled beforehand. The write half is at the END of this step, and it asks nothing — see the write rule there.
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --session <session-uuid> --exclude claudedocs/handoff-<topic>.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --repo <repo> --session <session-uuid> --exclude claudedocs/handoff-<topic>.md
 ```
 
 🔴 **`<session-uuid>` is the basename of your scratchpad directory.** Your system prompt names a scratchpad path of the form `/tmp/claude-<n>/<project>/<session-uuid>/scratchpad` — pass that `<session-uuid>` segment, nothing else. There is no environment variable for it, so it can only come from you.
@@ -90,7 +90,7 @@ python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> 
 🔴 **If you landed any PRs this session, run it a SECOND time over them** — you know exactly which ones, and nothing else in the toolchain does:
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --pr <n>[,<n>...] --exclude claudedocs/handoff-<topic>.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --repo <repo> --pr <n>[,<n>...] --exclude claudedocs/handoff-<topic>.md
 ```
 
 This is the **only** source that sees a **subagent's** work — a PR's file list does not care which agent, session or tool wrote the bytes, and delegating implementation to a subagent is the standing default here.
@@ -110,7 +110,7 @@ Closed-unmerged PRs are refused by name — their files exist in no tree. `OPEN`
 🔴 **If the work became a commit but NO PR — a direct push, or a branch not opened yet — run it over the SHAS YOU CREATED:**
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --commit <sha>[,<sha>...] --exclude claudedocs/handoff-<topic>.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --repo <repo> --commit <sha>[,<sha>...] --exclude claudedocs/handoff-<topic>.md
 ```
 
 A commit is the primitive the other two reduce to — a PR is a set of commits, worktree-authored work becomes a mainline commit, a direct push *is* a commit — so this reaches repos where neither of the others can. **You know the shas you just made; nothing else in the toolchain does.**
@@ -139,7 +139,7 @@ Otherwise read `status=` and act on that case:
 
 🔴 **"It belongs in a skill" is a ROUTE, not a disposal — finish it in THIS turn or it is lost.** The sentence above authorises declining the index; on its own it also discharges the obligation, and the lesson then lives only in a transcript, which is the medium this store exists to outlive. 📖 §7.7. So: **take the owning skill from the tool's `SKILL HOMES` block, never from memory** — it ranks by term specificity, and a hit is a lead, not an answer. If nothing matched, run the `grep -ril` it prints with *your* domain term, because the tool derives terms from paths and **cannot see what the session was about**. Then append there under the same rule as the index write — show one compact diff, then edit; no question. 🔴 Edit the **repo source** (`~/workspace/devrc/claude/skills/…`), never `~/.claude/…` (a read-only store symlink), and a **new** file must be `git add`ed or the flake silently omits it from the deploy. If genuinely nothing owns it, say **UNFILED** and name the term you searched — an unfiled item that names its search is recoverable; "belongs in a skill" is not.
 - **`ambiguous` listed** — report the candidates and **write nothing** for that ref. The resolver refuses to pick; so do you.
-- **`no-match` / `scope-absent`** — no existing entry was touched. `scope-absent` means this repo has no scope directory yet **in THIS HOST's store**: the **first-entry case, not a failure**, and the reason this step exists. 🔴 **The store is PER-HOST and unreplicated, so that is never a claim about the fleet** — measured 2026-08-27 the workbench held 115 entries / 14 scopes and the laptop 33 / 11, seven scopes existed only on the laptop, and one probe reported a scope "absent" that had four entries on the other machine. Write the first entry here anyway; just say "on this host", and read the `host:` line the tool prints. Nothing to append either way; go to the NO ENTRY clause below.
+- **`no-match` / `scope-absent`** — no existing entry was touched. `scope-absent` means this repo has no scope directory yet **in THIS HOST's cache of the store**: the **first-entry case, not a failure**, and the reason this step exists. 🔴 **The store is read through a PER-HOST CACHE, only as fresh as its last `cairn sync`, so that is never a claim about the fleet** — measured 2026-08-27 a probe reported a scope "absent" that had four entries on the other machine. ⚠ **The reason is FRESHNESS, not isolation** — the Cairn cutover made a hosted pod the datastore and the two hosts converge through it (measured 2026-09-11, the pod's snapshot moved 232 -> 239 entry-files between two reads in one write-free session), so an unsynced entry is invisible but not lost. Write the first entry here anyway; just say "as of this host's last sync", and read the `host:` line the tool prints. Nothing to append either way; go to the NO ENTRY clause below.
 - **`looked-at-nothing`** — say so plainly and write nothing. This is *not* "nothing touched an entry": no path was examined at all. Never report the two as the same result.
 
 🔴 **On either dead end the tool now prints a `ROUTE OUT` block naming the windows it did NOT read** — read it before concluding "a real zero". A zero is a fact about the window, and the four windows are blind in different directions; the block excludes the source that just failed, so every line in it is a move you have not made. It appears on `looked-at-nothing` and `no-match` only, never on a resolved run.
@@ -215,7 +215,7 @@ cairn put --scope <scope> --ref <entry> --file <scratchpad>/entry.md
 🔴 **A BRAND-NEW entry is `cairn create`, not a local file — the store has had a create verb since 2026-09-03:**
 
 ```
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --template <slug> --writer <caller> > <scratchpad>/new.md
+python3 $DEVRC/scripts/lib/subsystem_touch.py --template <slug> --writer <caller> > <scratchpad>/new.md
 #   fill in <scratchpad>/new.md — a scratch path, never under ~/.claude/analyze-service-index/
 cairn create --scope <scope> --ref <slug> --file <scratchpad>/new.md
 ```

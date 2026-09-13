@@ -74,8 +74,22 @@ PRIOR_FINDING_B = (
     "- **Observed (with values):** `x-retry-remaining: 0` on the FIRST response.\n"
     "- **Leading hypothesis:** the budget is decremented in the wrapper, not the client.\n"
 )
+# 🔴 THIS ONE CARRIES AN EXPLICIT `as-of:` AND THE OTHER TWO DO NOT, ON PURPOSE.
+# It is the block the UPDATE brings, and rule (l) STAMPS every unstamped
+# investigation block an update adds — so without a field of its own the tool
+# would insert one, which (a) breaks the byte-identity assertions in
+# `TestAppendVsReplace` for a reason that has nothing to do with append-vs-
+# replace, and (b) prints rule (l)'s advisory between `buckets:` and the diff,
+# which `between_buckets_and_diff` reads as rule (h) having gone noisy.
+# Pre-stamping SCOPES those guards to what they are about. Rule (l)'s own
+# behaviour — that it stamps, that it never rewrites an explicit stamp, and that
+# the added line reaches the diff — is proven end to end in
+# `scripts/tests/test_resume_state_investigations.py`, not here.
+# PRIOR_FINDING_A/B stay unstamped because they live in the BASE, which rule (l)
+# must never touch.
 NEW_FINDING_C = (
     "### the at-max reading was misread — the adapter serves a different window\n"
+    "- as-of: 2026-09-01\n"
     "- **Observed (with values):** adapter 110m against the raw source's 32m.\n"
     "- **Supersedes:** the earlier at-max interpretation recorded above was wrong.\n"
 )

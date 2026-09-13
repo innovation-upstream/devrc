@@ -83,7 +83,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - Deploy/verify status: deployed? verified against the real path? (be honest)
 
    ## Open investigations — live diagnosis state
-   <!-- One block PER unresolved bug/investigation. Omit the whole section only if nothing is mid-diagnosis. -->
+   <!-- One block PER unresolved bug/investigation. Omit the section only if nothing is mid-diagnosis. Step 5 STAMPS each new block `as-of: <today>` and never rewrites one you wrote, so date it YOURSELF when the evidence is older. 📖 write-gate §E. -->
    ### <bug/symptom in one line>
    - **Symptom + exact repro:** what breaks, and the precise click-path / request / command that triggers it.
    - **Observed (with values):** the actual evidence gathered — error strings, response headers, log lines, query outputs, span timings. Real values, copy-pasted, not paraphrased.
@@ -119,7 +119,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    <one-line of the single most important next action>
    ```
 
-   🔴 **Keep the literal `/resume` prefix, and do NOT rely on it.** Measured twice: both a prose kickoff and the `/resume`-prefixed replacement got the doc read and the index skipped entirely — a subagent gets the kickoff as prompt TEXT, with no CLI slash-command parsing, so the prefix reads as a topic label. **The deterministic hook is the DOC, not this block**: both sessions read it first, immediately, which is why the index command lives at the TOP of it. The prefix costs nothing and does work in an interactive session; it is not a mechanism. 📖 Both measurements: `~/.claude/skills/handoff/reference/kickoff-prefix.md`.
+   🔴 **Keep the literal `/resume` prefix, and do NOT rely on it.** Measured twice: it changed nothing — the doc was read and the index skipped either way (why: 📖 below). **The deterministic hook is the DOC, not this block**: both sessions read it first, immediately, which is why the index command lives at the TOP of it. The prefix costs nothing and does work in an interactive session; it is not a mechanism. 📖 Both measurements: `~/.claude/skills/handoff/reference/kickoff-prefix.md`.
 
    🔴 **Emit this BEFORE steps 4 and 5, unconditionally.** The kickoff block is the deliverable and everything after it can refuse — step 4 can dead-end, step 5 can exit without writing — so a run that never reaches the end must still have handed it over. ⚠ It names a path step 5 may not land: **if step 5 is declined or refuses, say in the same breath that the doc does not carry this session's findings** — an unqualified kickoff pointing at a stale or absent doc is worse than none.
 
@@ -140,7 +140,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    **Answer first, in one line: what changed since the doc was written?** If the honest answer is *nothing*, **say so and write nothing** — a handoff that still describes reality is not stale. On a NEW doc the question has no "since": answer with what this session produced, because a doc that does not exist cannot still be describing reality. Otherwise merge it; this **writes nothing** and prints the diff you are about to ask about:
 
    ```
-   python3 /home/zach/workspace/devrc/scripts/lib/handoff_doc.py --repo <repo> --topic <topic> --update <scratch-file> --advanced '<what changed since the doc was written>'
+   python3 $DEVRC/scripts/lib/handoff_doc.py --repo <repo> --topic <topic> --update <scratch-file> --advanced '<what changed since the doc was written>'
    ```
 
    **The doc's YAML front matter survives this merge** — `split_front_matter` carries the base's block through, so a delta that starts with prose rather than a `## ` heading can no longer silently drop the `clawgate-task:` field. Put a front-matter block in your delta ONLY when you mean to change the recorded task; an explicit one wins. 🔴 **The NEW-doc case inverts that:** there is no base block to carry, so the delta's own front matter is the doc's only chance at one — if step 1 resolved a task, it must be at line 1 of the scratch file.

@@ -42,9 +42,9 @@ Full rules incl. cross-repo targets and the stale-clone trap: `~/.claude/skills/
 🔴 **Sync first and audit the CACHE, not `~/.claude/analyze-service-index/`.** Since the Cairn cutover the pod is the authority and the local store is a frozen (`0444`) mirror that **no write updates** — every bullet appended through `cairn append` since the freeze is missing from it. Auditing the stale copy silently under-counts `OPEN:` bullets, which is the one number §6 compares before and after.
 ```bash
 cairn sync && S=~/.cache/subsystem-store
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store $S                 # whole store
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store $S --scope devrc   # one scope
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store $S --all           # list every entry
+python3 $DEVRC/scripts/subsystem-audit.py --store $S                 # whole store
+python3 $DEVRC/scripts/subsystem-audit.py --store $S --scope devrc   # one scope
+python3 $DEVRC/scripts/subsystem-audit.py --store $S --all           # list every entry
 ```
 Prints, each **with its denominator**: per-entry bytes vs budget; bullet shape vs the schema (advisory); the lifecycle split (OPEN kept / EVICTABLE / **NO HOME** / NOT CHECKED); pointer integrity; front-matter completeness; **ref collisions**; scopes with no README; and a verdict.
 
@@ -87,7 +87,7 @@ cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md
 ## 5. Fix a ref collision
 An ambiguous ref surfaces **nothing at all** — `--ref <it>` returns `ref-ambiguous` and no body, so the entry is unreachable by the name a human would type. Drop the alias from whichever entry it does not actually name (usually the one where it is an *initialism* rather than the word itself). 🔴 **The `aliases:` line is inside a frozen entry file, so this is a `cairn put` too** — same scratch-copy route as §4, same exit-8 rule; it is a one-line edit, not an exemption. Then prove the fix:
 ```bash
-DEVRC=/home/zach/workspace/devrc; REF=<the ambiguous ref>; SCOPE=<the scope>
+REF=<the ambiguous ref>; SCOPE=<the scope>
 cairn sync && python3 "$(python3 "$DEVRC/scripts/lib/cairn_pin.py")/subsystem_recall.py" \
   --store ~/.cache/subsystem-store --ref "$REF" --scope "$SCOPE"
 ```
@@ -95,7 +95,7 @@ Must print `status=hit`, naming the entry you expect. 🔴 Clearing the collisio
 
 ## 6. Verify (don't trust — measure)
 ```bash
-cairn sync && python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store ~/.cache/subsystem-store --scope <scope>
+cairn sync && python3 $DEVRC/scripts/subsystem-audit.py --store ~/.cache/subsystem-store --scope <scope>
 ```
 🔴 **`cairn sync` again, or you re-measure the bytes you measured in §1** — the put landed on the pod, and a cache read without a refresh is a claim about your own pre-put copy, which is byte-identical whether or not the write succeeded.
 

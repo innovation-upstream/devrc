@@ -1069,11 +1069,27 @@ def prune(uploader, prefix: str, keep: int, just_uploaded: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 🔴 `host_label` LIVES IN `scripts/lib/host_identity.py` AND IS RE-EXPORTED HERE.
 # It is no longer only the backup's concern: the /analyze-service reader and
-# writer print the same identity in their headers, because their store is the
-# same per-host, unreplicated directory this file bundles. A second copy of "which
-# machine am I" would drift from this one and be wrong in one of the two places
-# — claude/RULES.md → "One rule, one place". `B.host_label()` keeps working for
-# `restore-verify.py` and `escrow-verify.py`; only the implementation moved.
+# writer print the same identity in their headers, and both answers must come
+# from one place. A second copy of "which machine am I" would drift from this one
+# and be wrong in one of the two places — claude/RULES.md → "One rule, one
+# place". `B.host_label()` keeps working for `restore-verify.py` and
+# `escrow-verify.py`; only the implementation moved.
+#
+# ⚠ CORRECTED 2026-09-11 — this used to justify the shared identity by saying the
+# reader's store IS "the same per-host, unreplicated directory this file
+# bundles". Both halves are now false. (a) THE DIRECTORIES DIFFER: `DEFAULT_STORE`
+# above is `~/.claude/analyze-service-index`, the FROZEN pre-cutover mirror, while
+# the reader resolves `~/.cache/subsystem-store`, the synced read-through cache
+# (`subsystem_read_store.resolve_read_store`). (b) "UNREPLICATED" WAS RETRACTED
+# for the live store: the Cairn cutover made a hosted pod the datastore and the
+# hosts converge through it — measured, the pod's snapshot moved entry-files
+# 232 -> 239 between two reads in one write-free session. The shared `host_label`
+# is still right; the REASON given for it was not.
+#
+# 🔴 OPEN — NOT DECIDED HERE: whether this unit should still bundle the frozen
+# mirror, or the synced cache, or neither now that the pod holds the content and
+# has its own backup CronJob. Flagged rather than answered, because changing a
+# disaster-recovery target is not a docs fix.
 host_label = _host_identity.host_label
 
 

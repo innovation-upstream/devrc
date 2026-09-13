@@ -42,6 +42,15 @@ HAZARD_VOCABULARY = (
     "systemd-run", "systemctl", "loginctl",
     "notify-send", "dunstify", "dunstctl",
     "rofi", "yad", "zenity", "wmctrl", "xdotool", "i3-msg", "alacritty",
+    # nvim-octo — neovim + octo.nvim as a GitHub review TUI. It is in THIS
+    # vocabulary rather than only in the ledger because a bare invocation takes
+    # over whatever terminal it is run in and, once a PR buffer is open, is one
+    # typed `:Octo pr merge` from a WRITE against a real repository. A launcher
+    # whose blast radius is a merge belongs on the list of names that must be
+    # accounted for, even though the handler only ever reaches it as
+    # `alacritty`'s `-e` payload (which is why it is ACKNOWLEDGED rather than
+    # stubbed — see test_no_real_launchers.py).
+    "nvim-octo",
     "xdg-open", "openrgb", "ddcutil", "brightnessctl", "xset",
     "pactl", "playerctl", "espanso",
     "home-manager", "nixos-rebuild",

@@ -41,6 +41,33 @@ is the exact mistake this routing line exists to prevent: measured 2026-08-29, `
 workbench-only keyword search answered "never used", the reverse of the truth. Mention ≠ use, and
 one host ≠ the fleet.
 
+🔴 **WIDER THAN A NAME — grepping for a prompt's, skill's or brief's OWN TEXT measures where that
+text was DISTRIBUTED, never that anyone used it, and it over-counts by more than an order of
+magnitude.** The name case above is one instance; the general one is that **the artifact is
+injected into the transcript of every session that loads it** — a skill body, an assembled brief, a
+file read. MEASURED 2026-09-12 over 5,986 transcripts: a distinctive sentence from
+`claude/skills/audit-pr/SKILL.md` matched **1,022 files**, and provenance-classified on the first
+120 of those, the matching blocks were **182 user-role text · 83 assistant · 55 `Read` results · 20
+`Bash` results** — only the 83 were the rule being APPLIED. 🔴 **The fix is not a better regex; it
+is PROVENANCE, read off the transcript rather than inferred from the text.** A `tool_result` block
+carries a `tool_use_id`, so resolving it to its tool name per file separates the classes
+mechanically — no similarity heuristic, which `scripts/lib/handoff_doc.py:179` refuses in terms:
+
+    assistant text block            -> the model APPLYING it            = SIGNAL
+    Agent/Task tool_result          -> a dispatched subagent's report   = SIGNAL
+    Read/Skill/Bash tool_result     -> the artifact, or a brief         = noise
+    user-role text                  -> a prompt quoting it             = noise
+
+⚠ Two caveats that survive the fix, because neither is a matching problem. **A session EDITING the
+artifact discusses it in assistant text** and is not a use, so split the count by project dir and
+report the confounder. And **COUNT SESSIONS, NOT BLOCKS** — one verbose agent restating something
+eight times is eight blocks and one use. Worked instrument:
+`scripts/audit-rule-firing-sweep.py` (+ `scripts/tests/test_audit_rule_firing_sweep.py`), which
+also carries the two traps that make such a sweep read a confident zero: an `rg` pre-pass reads RAW
+JSON while the matcher reads DECODED text, so an `ensure_ascii` transcript hides every non-ASCII
+pattern; and `git log %aI`'s numeric offset against a transcript's `...Z` cannot be compared as
+strings.
+
 ⚠ `skills_used` is **forward-only** (first rows 2026-08-29): a skill genuinely used before that
 date reads as unused. Say "no recorded use since <date>", never "never used".
 

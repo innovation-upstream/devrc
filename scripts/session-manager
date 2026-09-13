@@ -208,13 +208,35 @@ waiting_signals, waiting_status, unsent_prompt, unsent_prompt_status,
 pane_preview, pane_preview_status, claude_session_id, runtime, ledger,
 fuzzyclaw, panes. The row ledger is pinned by a test.
 
-`window_activity` is the ONE OPTIONAL row key and is therefore listed apart
-from the ledger above: epoch seconds from tmux's `#{window_activity}`, PRESENT
-only when it was measured and ABSENT — never null, never 0 — otherwise. It is
-when this WINDOW last produced output, which is a different question from
-`age_secs` (when an AGENT last wrote a ledger record) and from a consumer's own
-receive time (one value for the whole HOST). Its absence is pinned by a test in
-both directions.
+`window_activity` and `color` are the TWO OPTIONAL row keys and are therefore
+listed apart from the ledger above. Each is PRESENT only when it was measured
+and ABSENT — never null, never `""`, never 0 — otherwise, and each absence is
+pinned by a test in BOTH directions.
+
+`window_activity` is epoch seconds from tmux's `#{window_activity}`: when this
+WINDOW last produced output, which is a different question from `age_secs`
+(when an AGENT last wrote a ledger record) and from a consumer's own receive
+time (one value for the whole HOST).
+
+🔴 `color` IS THE SLOT'S COLOUR AND IT IS ABSENT — NOT `""` — FOR A SESSION
+WITH NO SLOT. Lower-case `#rrggbb`, off `scripts/tmux-scratch-slots.sh`
+(`scratch16:I:#ebdbb2:Ivory` -> `#ebdbb2`), so a consumer can colour-match its
+own tmux page to the popup border the operator already looks at instead of
+keeping a second copy of that table. A second copy is the specific drift that
+file's own grammar comment records: the bar legend and the tmux bindings each
+carried a private regex and disagreed in BOTH directions. This rides with
+`codename` and `hotkey` off the SAME parse (`load_scratch_slots`), never a
+second pass over the text.
+
+It is ABSENT rather than empty because `""` is not a readable "no colour" to
+the consumer that renders it: a CSS/pango reader takes an empty value as
+inherit-or-transparent, i.e. a colour it can paint, so the row would assert a
+colour for a session that has none. The absent branch is the ordinary case, not
+a theoretical one — measured 2026-09-12 on this host's tmux server, 2 of 19
+live sessions (`homelab-talos`, `datapacket-talos-2`) have no slot entry at all.
+Two slots deliberately SHARE a colour (`scratch11:w:#ebdbb2:wheat` and
+`scratch16:I:#ebdbb2:Ivory`), so `color` identifies a slot's appearance and
+never the slot itself — `session` plus `window_index` is still the address.
 
 🔴 `repo` IS THE PROJECT KEY, AND IT IS RESOLVED ON THE HOST THAT OWNS THE
 DIRECTORY
@@ -395,6 +417,14 @@ AL = _load_agent_ledger()
 # worktree and absent in the nix build sandbox.
 # --------------------------------------------------------------------------- #
 sys.path.insert(0, os.path.join(_HERE, "validation"))
+# `scripts/lib` joins it for the same reason: `host_label` is a LIBRARY, and the
+# path is resolved relative to THIS file so it survives a worktree and the nix
+# build sandbox. Unlike chquery this import is NOT optional — the laptop SSH
+# target is derived from it, and a degraded fallback would be a second copy of
+# exactly the constant it exists to deduplicate.
+sys.path.insert(0, os.path.join(_HERE, "lib"))
+import host_label as _host_label  # noqa: E402
+
 try:
     import chquery as _chq  # noqa: E402
     CH_IMPORT_ERROR = None
@@ -411,12 +441,19 @@ ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
 # `10.42.0.10` is the homelab GATEWAY. Getting this wrong does not fail loudly —
 # SSH succeeds against a real host and reports the gateway's tmux state as the
 # laptop's. It matched `claude/skills/standup/standup.sh:26`, the repo's only
-# other precedent, until that skill was retired (2026-09-07); this constant is
-# now the precedent. The LAN address is same-network-only, so a LAN-first probe
-# buys a timeout on every scan of a laptop that usually is not on this network.
-# Pinned by a test.
+# other precedent, until that skill was retired (2026-09-07). The LAN address is
+# same-network-only, so a LAN-first probe buys a timeout on every scan of a
+# laptop that usually is not on this network. Pinned by a test.
+#
+# 🔴 DERIVED, NOT DECLARED, since 2026-09-12. This was the literal string, and
+# `scripts/peer-host` needed the same address — which is the moment a duplicated
+# constant becomes one that can DISAGREE, and this is the one constant in the
+# repo whose disagreement is silent by construction (see above: the wrong host
+# answers). It now comes from `scripts/lib/host_label.py`, the module that
+# already owns the host vocabulary these addresses pair with. The value is
+# unchanged and its own literal test still pins it.
 # --------------------------------------------------------------------------- #
-LAPTOP_SSH_TARGET = "zach@10.42.0.100"
+LAPTOP_SSH_TARGET = _host_label.ssh_target("laptop")
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
             "-o", "StrictHostKeyChecking=accept-new")
 SSH_TIMEOUT = 12.0
@@ -774,8 +811,33 @@ FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
 SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
 SCRATCH_SLOTS_REPO = os.path.join(_HERE, "tmux-scratch-slots.sh")
 # A SCRATCH_SLOTS entry is "scratch4:V:#83a598:Vapor" (session:key:color:name).
-# Same regex as claude_sessions / initiative-scan — one table, one parser.
-_SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
+#
+# 🔴 APPLIED WHOLE-LINE, which is what makes a COMMENTED-OUT entry a non-entry.
+# `scripts/tmux-scratch-slots.sh` states that on its `SLOT_ENTRY_RE:` marker
+# line — "Applied WHOLE-LINE by both … That anchoring is what makes a
+# commented-out entry a non-entry for everyone" — and this copy was NOT anchored
+# until 2026-09-12. MEASURED before the fix, a table whose second entry was
+# commented out (`# "scratch9:z:#aabbcc:Zed"`): this parser returned BOTH
+# sessions. The damage is the same one that file records for the bar legend —
+# a session advertised with a codename, a hotkey bound to nothing, and now a
+# `color` a consumer paints — so the anchoring is part of publishing `color`,
+# not a drive-by.
+#
+# ⚠ TWO GAPS AGAINST THAT MARKER LINE SURVIVE HERE, both pre-existing and both
+# deliberately NOT closed by that change:
+#   * the siblings `scripts/tmux-session-restore.py` and
+#     `scripts/session-analysis/initiative-scan.py` still carry the UNANCHORED
+#     form, so the three no longer agree. The real fix is all four reading the
+#     marker line; that is a separate change, and this comment is the record
+#     that they diverge today. (The old comment here claimed "one table, one
+#     parser", which was never true of the colour width below.)
+#   * the marker line accepts #RGB / #RRRGGGBBB / #RRRRGGGGBBBB as well, and
+#     this regex accepts only 6 digits — so such an entry gets a tmux binding
+#     and NO codename, hotkey or colour here. Left as is on purpose: the `color`
+#     row field's published contract is lower-case `#rrggbb`, and a 3-digit
+#     value would break the consumer that string-matches it.
+_SLOT_RE = re.compile(
+    r'^[ \t]*"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"[ \t]*$', re.M)
 
 DEFAULT_STALE_THRESHOLD = 3600      # 1h
 DEFAULT_TAIL_LINES = 100
@@ -1757,6 +1819,16 @@ def load_scratch_slots(paths=None, reader=None) -> dict:
     answer that, `Vapor (V)` does. The key was parsed and thrown away into a
     `_key` for as long as this file has existed.
 
+    🔴 THE COLOUR IS CANONICALISED TO LOWER CASE HERE, AND THIS IS THE ONLY
+    PLACE THAT MAY DO IT. `_SLOT_RE` accepts `[0-9a-fA-F]`, so `#EBDBB2` is a
+    legal table entry, while the `color` row field is published to consumers as
+    lower-case `#rrggbb` — and a consumer that colour-matches by string
+    equality (the whole reason the field exists) would read `#EBDBB2` and
+    `#ebdbb2` as two different slots. Normalising at the PARSE means `codename`,
+    `hotkey` and `color` all leave one function agreeing, rather than each
+    caller re-deciding; a second `.lower()` at a row builder would be the
+    duplicated predicate that regenerates the same bug per call site.
+
     Tries each path in order (deployed first, then in-repo) and returns the
     first non-empty mapping. {} on any failure — the slot table is a display
     nicety, never a hard dependency.
@@ -1767,7 +1839,8 @@ def load_scratch_slots(paths=None, reader=None) -> dict:
         text = reader(p)
         if text is None:
             continue
-        mapping = {session: {"codename": name, "key": key, "color": color}
+        mapping = {session: {"codename": name, "key": key,
+                             "color": color.lower()}
                    for session, key, color, name in _SLOT_RE.findall(text)}
         if mapping:
             return mapping
@@ -2945,8 +3018,9 @@ def fold_windows(panes, host, slots=None, task_index=None,
 
     🔴 `window_activity` IS `{window_id: epoch_seconds}` FROM THE SAME
     `list-windows` CALL `slot_window_ids` CAME FROM, and the row carries the KEY
-    ONLY WHEN IT HAS A VALUE. This is the one field on the row that is ABSENT
-    rather than null when unmeasured, and that is deliberate: `age_secs` already
+    ONLY WHEN IT HAS A VALUE. It is one of the two fields on the row that are
+    ABSENT rather than null when absent (`color` off `slots` is the other), and
+    that is deliberate: `age_secs` already
     owns the null-plus-`age_source` shape for AGENT activity, and a second
     nullable age beside it would read as the same measurement failing. An
     absent key cannot be mistaken for a measured zero, and a measured zero here
@@ -2956,6 +3030,12 @@ def fold_windows(panes, host, slots=None, task_index=None,
     `age_secs` is how long since an AGENT wrote a ledger record, and
     `window_activity` is when tmux last saw output in the window. A bare shell
     has the second and never the first.
+
+    🔴 `color` COMES OUT OF `slots` AND IS ABSENT FOR A SESSION WITH NO ENTRY —
+    never `""`. `codename` is null in that same case because it sits in the
+    always-present ledger; this one is omitted, because its consumer PAINTS with
+    it and an empty string is a value CSS and pango will happily paint. See the
+    module docstring for the full contract.
     """
     now = time.time() if now is None else now
     slots = slots or {}
@@ -3041,6 +3121,11 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # `not_claude` while the text was never requested would let a
             # consumer conclude the fleet holds no Claude panes.
             p_status, p_text = "disabled", None
+        # The slot entry for this session, resolved ONCE: `codename` reads it
+        # below and `color` reads it after the dict is built. Two
+        # `slots.get(session)` calls would be two chances to look the wrong
+        # session up.
+        slot = slots.get(session) or {}
         row = {
             # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
             # function folds PANES, so by construction every row it builds has
@@ -3056,7 +3141,7 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "window_index": widx,
             "window_id": wid,
             "window_name": lead.get("window_name", ""),
-            "codename": (slots.get(session) or {}).get("codename"),
+            "codename": slot.get("codename"),
             # 🔴 ADDITIVE to `session`/`window_index`, never a replacement:
             # two sessions in one repo resolve to the SAME label. See the
             # module docstring.
@@ -3144,13 +3229,26 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "panes": len(members),
         }
         # 🔴 SET ONLY WHEN MEASURED — the key is ABSENT otherwise, never null and
-        # never 0. See the docstring: this is the sole row field with that shape,
-        # and the alternative (`"window_activity": None` on every row) would put a
-        # second nullable age beside `age_secs` measuring a DIFFERENT thing, which
-        # is how two unrelated signals get read as one failing one.
+        # never 0. See the docstring: `window_activity` and `color` are the two
+        # row fields with that shape, and the alternative here
+        # (`"window_activity": None` on every row) would put a second nullable
+        # age beside `age_secs` measuring a DIFFERENT thing, which is how two
+        # unrelated signals get read as one failing one.
         act = window_activity.get(wid) if wid else None
         if act is not None:
             row["window_activity"] = act
+        # 🔴 THE SLOT COLOUR, ABSENT FOR A SESSION WITH NO SLOT — not `""`, and
+        # not `null` either. The consumer paints with it, and an empty string is
+        # a paintable value to CSS/pango, so emitting one would assert a colour
+        # this session does not have. Unlike `hotkey`, which is published as
+        # `null` for tiers 2/3 because it sits in a ledger of always-present
+        # keys, this one is absent: the docstring lists it apart and the row
+        # ledger test pins both states. The falsy test is deliberate — a slot
+        # line whose colour field somehow arrived empty is "no colour", exactly
+        # like no slot at all, and `test_tier2_an_EMPTY_codename_does_not_win`
+        # applies the same rule one field over.
+        if slot.get("color"):
+            row["color"] = slot["color"]
         rows.append(row)
     return rows
 

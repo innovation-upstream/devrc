@@ -69,6 +69,10 @@ BATTERIES = (
     "mutation_battery_resume_state.py",
     "mutation_battery_resume_state_skill.py",
     "mutation_battery_mentions.py",
+    "mutation_battery_investigation_rename.py",
+    # Spans THREE files (resume-state.sh, the ceiling test module, and the
+    # shared handoff-name predicate it borrows), so it declares `TARGETS`.
+    "mutation_battery_handoff_archive_and_cap.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.

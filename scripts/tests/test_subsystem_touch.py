@@ -12877,12 +12877,33 @@ def pinned_host(monkeypatch):
     return FIXTURE_HOST
 
 
-class TestTheStoreIsPerHost:
-    """Every surface reporting on the store must name whose disk it read."""
+class TestTheStoreIsReadThroughAPerHostCache:
+    """Every surface reporting on the store must name whose disk it read.
 
+    🔴 THE CLASS WAS RENAMED FROM `TestTheStoreIsPerHost`, and the rename is the
+    change, not decoration. The old name asserted the claim these guards used to
+    pin — that the store itself is per-host and unreplicated, so an entry on the
+    other machine is permanently invisible. RETRACTED 2026-09-11: the Cairn
+    cutover made a hosted pod (`store.zacx.dev`) the datastore and the local
+    tree a SYNCED READ-THROUGH CACHE of it. Measured in one write-free session,
+    between two `fetched … just now` reads ~1h apart, the pod's snapshot moved
+    entry-files 232 -> 239 — content from the other machine demonstrably
+    arrives.
+
+    What is still true, and what every guard below now pins, is a FRESHNESS
+    bound: a read is served from a local cache, so it is only as complete as the
+    last `cairn sync` on THIS machine. Naming the host therefore still matters —
+    `store_root` is the same path on both machines and their caches are at
+    different syncs — but the reason is staleness, not isolation. Upstream
+    `ZacxDev/cairn` carries the matching wording as of `1e7aedf`.
+    """
+
+    #: 🔴 TYPED BY HAND from the pinned client's `entry_shape.STORE_IS_PER_HOST`,
+    #: never derived by calling the code under test.
     EXPECTED_HOST_LINE = _norm(
-        f"host: {FIXTURE_HOST} (the store is PER-HOST and unreplicated; this run "
-        f"read THIS machine's disk and consulted no other)"
+        f"host: {FIXTURE_HOST} (the store is read through a PER-HOST CACHE, only "
+        f"as fresh as its last sync; this run read THIS machine's disk and "
+        f"consulted no other)"
     )
 
     EXPECTED_SCOPE_ABSENT = _norm(
@@ -12893,11 +12914,12 @@ class TestTheStoreIsPerHost:
     )
 
     EXPECTED_NOT_THE_FLEET = _norm(
-        "NOT A FACT ABOUT THE FLEET — the store is PER-HOST and unreplicated; this "
-        "run read THIS machine's disk and consulted no other. The other host keeps "
-        "a DIFFERENT store, not a copy, and it may already hold `brand-new-repo/`. "
-        "Nothing is lost by writing a first entry here; just do not report this "
-        "scope as unrecorded everywhere."
+        "NOT A FACT ABOUT THE FLEET — the store is read through a PER-HOST CACHE, "
+        "only as fresh as its last sync; this run read THIS machine's disk and "
+        "consulted no other. The other host syncs the SAME hosted store through "
+        "its own cache, and may already hold `brand-new-repo/` where this one has "
+        "not synced it yet. Nothing is lost by writing a first entry here; just "
+        "do not report this scope as unrecorded everywhere."
     )
 
     def _absent_text(self, store: Path) -> str:
@@ -12907,29 +12929,46 @@ class TestTheStoreIsPerHost:
         assert rep.status == "scope-absent", "the fixture must reach the branch under test"
         return st.render_text(rep)
 
-    def test_scope_absent_says_ABSENT_HERE_not_absent_anywhere(
+    def test_scope_absent_says_ABSENT_AS_OF_THIS_HOSTS_LAST_SYNC_not_anywhere(
         self, store: Path, pinned_host: str
     ) -> None:
         """🔴 THE REGRESSION GUARD. The pre-change sentence — "the store has no
         `<scope>/` directory yet … the FIRST-ENTRY case, not a miss" — was FALSE
         as stated: measured 2026-08-27, a workbench probe said it of a scope that
         existed on the laptop with four entries in it. Both halves are pinned:
-        the verdict must be qualified to this host, AND the run must say that no
-        other host's store was consulted and one may hold the scope."""
+        the verdict must be qualified, AND the run must say what bounds it.
+
+        🔴 RENAMED FROM `test_scope_absent_says_ABSENT_HERE_not_absent_anywhere`,
+        because the WHY changed under it and a test name is read as a
+        specification. "ABSENT HERE" carried the retracted premise that the other
+        machine keeps a DIFFERENT store, so an absence here is permanent and
+        local. It is not: the two hosts cache the SAME hosted store and converge
+        through the pod (measured 2026-09-11 — entry-files 232 -> 239 between two
+        reads in one write-free session). The half that survives is
+        "not absent anywhere", and what it now rests on is the last `cairn sync`
+        on THIS machine, not isolation.
+
+        🔴 THE QUALIFICATION IS STILL LOAD-BEARING, and the retraction does not
+        weaken it — a stale cache and a separate store produce the SAME wrong
+        report ("nobody has recorded this"). Only the remedy differs: sync, then
+        look again."""
         lines = [_norm(ln) for ln in self._absent_text(store).splitlines()]
         assert self.EXPECTED_SCOPE_ABSENT in lines, (
             "the `scope-absent` verdict is not the pinned sentence.\n"
             f"  expected: {self.EXPECTED_SCOPE_ABSENT}\n"
-            "It must name THIS HOST and must not read as a claim about a single, "
-            "fleet-wide store — there is no such thing."
+            "It must name THIS HOST and must not read as a claim about what the "
+            "hosted store holds — this run read one cache of it."
         )
         assert self.EXPECTED_NOT_THE_FLEET in lines, (
-            "the `scope-absent` verdict no longer says that NO OTHER HOST WAS "
-            "CONSULTED and that the other machine may hold this scope.\n"
+            "the `scope-absent` verdict no longer says that this read was bounded "
+            "by THIS machine's last sync and that the other machine may already "
+            "hold this scope through its own cache of the same store.\n"
             f"  expected: {self.EXPECTED_NOT_THE_FLEET}\n"
             "Without this line the qualified first sentence still reads, to an "
             "agent, as 'nobody has recorded this anywhere' — which is the false "
-            "claim, not the wording."
+            "claim, not the wording. 🔴 And do NOT reinstate the older, stronger "
+            "isolation wording ('a DIFFERENT store, not a copy') — it was "
+            "measured false; the hosts share one store and differ only in sync."
         )
 
     def test_scope_absent_KEEPS_the_first_entry_guidance(
@@ -13124,22 +13163,33 @@ class TestTheStoreIsPerHost:
     EXPECTED_SKILL_BULLET = _norm(
         "- **`no-match` / `scope-absent`** — no existing entry was touched. "
         "`scope-absent` means this repo has no scope directory yet **in THIS HOST's "
-        "store**: the **first-entry case, not a failure**, and the reason this step "
-        "exists. 🔴 **The store is PER-HOST and unreplicated, so that is never a "
-        "claim about the fleet** — measured 2026-08-27 the workbench held 115 "
-        "entries / 14 scopes and the laptop 33 / 11, seven scopes existed only on "
-        "the laptop, and one probe reported a scope \"absent\" that had four entries "
-        "on the other machine. Write the first entry here anyway; just say \"on this "
-        "host\", and read the `host:` line the tool prints. Nothing to append either "
-        "way; go to the NO ENTRY clause below."
+        "cache of the store**: the **first-entry case, not a failure**, and the "
+        "reason this step exists. 🔴 **The store is read through a PER-HOST CACHE, "
+        "only as fresh as its last `cairn sync`, so that is never a claim about the "
+        "fleet** — measured 2026-08-27 a probe reported a scope \"absent\" that had "
+        "four entries on the other machine. ⚠ **The reason is FRESHNESS, not "
+        "isolation** — the Cairn cutover made a hosted pod the datastore and the "
+        "two hosts converge through it (measured 2026-09-11, the pod's snapshot "
+        "moved 232 -> 239 entry-files between two reads in one write-free session), "
+        "so an unsynced entry is invisible but not lost. Write the first entry here "
+        "anyway; just say \"as of this host's last sync\", and read the `host:` line "
+        "the tool prints. Nothing to append either way; go to the NO ENTRY clause "
+        "below."
     )
 
-    def test_the_skill_says_scope_absent_is_a_PER_HOST_finding(self) -> None:
+    def test_the_skill_says_scope_absent_is_a_PER_HOST_CACHE_finding(self) -> None:
         """The protocol an agent follows must carry the same qualification the
         tool prints. Before this, `subsystem-index/SKILL.md` said `scope-absent`
         "means this repo has no scope directory yet" full stop — so an agent that
         never read the tool's output still concluded, and reported, that the work
-        was unrecorded everywhere."""
+        was unrecorded everywhere.
+
+        🔴 RENAMED FROM `…_is_a_PER_HOST_finding` in the same change that
+        retracted the isolation claim. The bullet asserted the store itself is
+        per-host and unreplicated; post-cutover only the CACHE is, and the skill
+        contradicted its own §157, which already described the hosted pod. The
+        tool's message and the protocol are ONE claim — which is why this test
+        exists — so both moved together here."""
         lines = [_norm(ln) for ln in INDEX_DOC.read_text(encoding="utf-8").splitlines()]
         assert self.EXPECTED_SKILL_BULLET in lines, (
             "claude/skills/subsystem-index/SKILL.md no longer carries the pinned "

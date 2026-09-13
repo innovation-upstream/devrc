@@ -5,8 +5,8 @@ description: "Operate clawgate — the self-hosted Claude Code permission router
 
 # clawgate operations
 
-Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone (it ROUTES;
-does NOT gate — `telemetry.md`), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
+Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone (it ROUTES; does
+NOT gate — `telemetry.md`), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
 agent self-service + privilege profiles + an Operator, runbooks with approval gates, and a machine
 Task API producers post work into for one-tap Dispatch.
 
@@ -14,11 +14,11 @@ Task API producers post work into for one-tap Dispatch.
 GREP it for the section you need, never read it whole (~190 KB, lower half superseded).**
 
 ⚠ **This skill drifts from the code in BOTH directions** — weeks EARLY once, six releases BEHIND
-once. Never treat a doc claim as evidence: `clawgatectl health` for the live pin, `git grep` for
-the feature.
+once. Never treat a doc claim as evidence: `clawgatectl health` for the live pin, `git grep` for the
+feature.
 
 ## Reference files
-`devrc/claude/skills/clawgate/reference/` (→ `~/.claude/skills/clawgate/` after a switch).
+`devrc/claude/skills/clawgate/reference/` → `~/.claude/skills/clawgate/` after a switch.
 
 | file | read it when |
 |---|---|
@@ -36,6 +36,7 @@ the feature.
 | `cross-session-reach.md` | reach another session; 🔴 `term send` RUNS what you type |
 | `element-references.md` | task body carries extension-picked element refs |
 | `prior-work-recall.md` | the `prior work` step: hit counts, flags, why the guard is an `if` |
+| `auth-doors.md` | 🔴 which door takes which credential; the retraction, measured BOTH ways |
 
 ## Flow files
 `flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
@@ -44,7 +45,7 @@ auto-fire — something must name it.
 | file | run it when |
 |---|---|
 | `task-authoring.md` | **CREATING a task** — pre-verify → interview → recommend → tags → confirm → create. 🔴 A PreToolUse hook DENIES a create with no `## Acceptance criteria`, or an unreadable body. Override `CLAWGATE_NO_INTERVIEW=1`. |
-| `task-pickup.md` | **PICKING UP a task** — "read and evaluate clawgate task N", then "local dispatch": read → evaluate → pre-start note → `in_progress` → work → ONE completion comment → status. Carries the criteria detector, ordering trap and comment rules. 🔴 A Stop hook BLOCKS on a missing write-back. |
+| `task-pickup.md` | **PICKING UP a task** — the full ritual, criteria detector, ordering trap and comment rules. See the `task pickup` section below, which owns the status gate. |
 
 Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 `clawgate-loop-validation` · `authelia-passkey-sso`.
@@ -56,19 +57,22 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | Source | `~/workspace/homelab-talos/containers/clawgate/` (module `github.com/zacxdev/clawgate`) |
 | Hook scripts | `hook/clawgate-hook.sh` (PermissionRequest → `/api/send`) + `hook/clawgate-stop-hook.sh` (Stop → `/api/suggest`); both read `~/.claude/clawgate.env` |
 | Cluster | **workbench**, ns `clawgate`; dispatched agents in ns **`devpod-<agent-name>`** |
-| 🔴 kubeconfig is PER-HOST — never hardcode; `ls` both, take the one that EXISTS | workbench `.250` → `~/workspace/homelab-talos/workbench-kubeconfig`; laptop `.155` → `~/workspace/homelab-infra/workbench-kubeconfig`. The other is **absent** on each host. Telling the hosts apart: `troubleshooting.md`. |
+| 🔴 kubeconfig is PER-HOST | never hardcode — `ls` both, take the one that EXISTS; the other is **absent** on each host. Paths + telling the hosts apart: `troubleshooting.md` |
 | Image / manifest | `harbor.homelab.lan/library/clawgate:<ver>`, pinned in `clusters/workbench/apps/clawgate/deployment.yaml` (Flux from `trunk`) |
-| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
+| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — 🔴 the UI needs a SESSION, `/api/*` takes the hook token; see the two-door block below |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
-| Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 `Stop` also carries other hooks — **preserve EVERY non-clawgate**; DERIVE, never count: `jq -r '.hooks.Stop[].hooks[].command'` |
-| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. JSON on stdout only; rc 0–8. **Every other route is still curl.** Commands, config, the staleness closure and the skew note: `task-api.md` |
+| Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 `Stop` carries OTHER hooks — **preserve every non-clawgate one**; DERIVE, never count: `jq -r '.hooks.Stop[].hooks[].command'` |
+| 🔴 Machine client | **`clawgatectl`** (`nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL tree, so it can be present but STALE — a behind checkout ships a binary MISSING verbs that prints help and exits 0 under a plausible version.** JSON on stdout; rc 0–8; else curl. Commands + staleness closure: `task-api.md` |
 
-🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
-so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
-/api/auto-approve-all`** (arms a global auto-approve window over **every** future request in
-**every** project + sweeps the pending queue; checkpoints excepted). `requireHookToken` is
-**enforce-when-set**: an empty token opens the machine endpoints too. All four wrappers across all
-120 routes: `task-api.md`.
+🔴 **TWO DOORS, DIFFERENT CREDENTIALS — a working hook token proves NOTHING about the UI.** `/api/*`
+takes `Bearer $CLAWGATE_HOOK_TOKEN`; `/tasks*` and the UI take a **session cookie** and answer
+`303 → /login` without one (public host: Authelia on top, whose headers clawgate does not trust).
+Proving the API door open proves nothing about the human one — that is why the extension's "open in
+clawgate" links were inert (PR #802).
+🔴 **`POST /api/auto-approve-all` arms a global auto-approve window over EVERY future request in
+EVERY project — never fire it to test a theory.**
+⚠ **Measured WRONG IN BOTH DIRECTIONS — re-measure, never quote from memory.** Evidence, the
+per-door table and the two corrected routes: `~/.claude/skills/clawgate/reference/auth-doors.md`.
 
 ---
 
@@ -83,7 +87,7 @@ cairn is absent reads as this step FAILING; a bare `if` skips SILENTLY). `prior-
 
 ## status
 ```bash
-KC=$(ls /home/zach/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
+KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
 kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate -o wide
 clawgatectl health   # live version + uptime; rc 6 = unreachable, rc 8 = you hit the public host
 ```
@@ -118,10 +122,9 @@ test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, c
 asked for. Run it unprompted. The bash block, the criteria detector, the frozen-verdict rule, the
 completion-comment shape, the ordering trap and the two-comments rule are all there.
 
-🔴 **A hook ENFORCES this** (`~/.claude/hooks/clawgate-writeback-guard.py`): armed by the
-step-1 **read**, it **blocks Stop** when work followed (edit/commit/push/PR) and a **live** re-read
-shows no `claude-code` comment since. Read-and-evaluate-only never fires; commenting silences it.
-Its block message names `~/.claude/skills/clawgate/flows/task-pickup.md` by path.
+🔴 **A hook ENFORCES this** (`clawgate-writeback-guard.py`): armed by the step-1 read, it **blocks
+Stop** when work followed and a live re-read shows no `claude-code` comment since. Commenting
+silences it; read-and-evaluate-only never fires. Detail: `flows/task-pickup.md`.
 
 🔴 **Status gate — the only place `complete` is ever yours to set.** Criteria are
 **AUTHOR-SPECIFIED** only when the task body carries a `## Acceptance criteria` heading; anything
@@ -136,19 +139,19 @@ else means you **DERIVED** them, and that verdict is frozen at your first read.
 ## machine (hook-token) Task API
 🔴 **Authoring one? `flows/task-authoring.md` FIRST** — a hook denies a criteria-less create.
 Read/create with `clawgatectl task ls --summary [--status open --tag t --limit n]` · `task get <id>`
-· `task create --body …`; **`--summary`/`--status`/`--limit` filter SERVER-side** — NOT true at
-0.7.85, re-measured live 0.7.87 on 2026-08-13. Write status + comments with `clawgatectl task
-status` / `task comment` (above). Every remaining verb (`PATCH` content/tags, `DELETE`, comment
-DELETE, `/api/tags`, `/api/projects`, `/api/notify`) is still curl with `Authorization: Bearer
-$CLAWGATE_HOOK_TOKEN` or `X-Clawgate-Token`. Statuses are exactly `open` / `in_progress` /
-`ready_for_review` / `complete` — no `dismissed`; dismissing deletes.
+· `task create --body …`; **`--summary`/`--status`/`--limit` filter SERVER-side** (re-measured 0.7.87
+— was false at 0.7.85). Write status + comments with `clawgatectl task status` / `task comment`
+(above). Every remaining verb (`PATCH`, `DELETE`, comment DELETE, `/api/tags`, `/api/projects`,
+`/api/notify`) is still curl with `Authorization: Bearer $CLAWGATE_HOOK_TOKEN` (`task-api.md`).
+Statuses are exactly `open` / `in_progress` / `ready_for_review` / `complete` — no `dismissed`;
+dismissing deletes.
 
 🔴 **ONE path deletes a task and TEARS DOWN its live dispatched agent pod**: `DELETE /api/tasks/{id}`
-(`dismissTask`; **no in-progress guard, deliberately**), unauthenticated on the LAN (above).
-⚠ **Its automated twin is RETIRED — do not re-derive it.** Since **0.7.96** (`cf529d41`, live) the
-daily idle-task reaper **tags `stale` + posts a system comment** instead of calling `dismissTask`, so
-**nothing destroys a task or an agent pod on a timer**. `CLAWGATE_TASK_TTL` is still **unset in the
-deployment**, so the 7d default is LIVE — it now costs a tag, not the task (`off`/`0` disables).
+(`dismissTask`; **no in-progress guard, deliberately**). It is `requireHookToken`, not
+`requireSession` — which does NOT make it safer: every agent and hook here already holds that token
+(`~/.claude/clawgate.env`). Why that correction runs opposite to the other one: `auth-doors.md`.
+⚠ **Its automated twin is RETIRED — do not re-derive it: NOTHING destroys a task or an agent pod on
+a timer.** The reaper tags `stale` instead; the 7d default is live but costs a tag (`task-api.md`).
 
 ⚠ **Tags are hard-validated: one invalid tag or unknown `runbook:` is a hard 400 that fails the whole
 create** — a load-bearing wire contract producers key their retry on.
@@ -170,9 +173,9 @@ within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent i
 toolchain and the dispatch `curl`. Durable facts only:
 - **The loop DOES close unattended** (two real runs). "The 5-minute kickoff deadline is why it never
   worked" is DEAD — don't reopen it.
-- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb), behind the no-op
-  `requireSession` → **no auth on the LAN NodePort**. 🔴 A future webhook needs a **separate
-  hostname**, never a path bypass on `clawgate.zacx.dev` — that puts dispatch on the open internet.
+- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb) and needs a SESSION —
+  a credential-less LAN call returns `401` (`auth-doors.md`). 🔴 A future webhook needs a **separate
+  hostname**, never a path bypass on `clawgate.zacx.dev` — that would put dispatch on the open net.
 - ⚠ **A dispatch that cannot START surfaces almost nothing** — the agent goes `error` but the task
   stays `in_progress`, `kicked_off` stays `false`, and nothing pushes. **Read the AGENT POD LOGS
   first — ns `devpod-<agent-name>`, not ns `clawgate`** (`agent-dispatch.md`).

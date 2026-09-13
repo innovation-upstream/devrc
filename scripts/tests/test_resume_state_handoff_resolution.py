@@ -3354,3 +3354,255 @@ def test_the_EPHEMERAL_classification_needs_the_WHOLE_agent_worktree_PATH(
         tok=tok, base=IN_WORKTREE, n=6,
         paths=", ".join(h_paths + a_paths[:2]) + ", and 2 more",
     ) + GAP_REST_NONE, gaps[0]
+
+
+# --------------------------------------------------------------------------- #
+# `claudedocs/archive/` — NAMEABLE, NEVER GUESSED AT
+#
+# Docs untouched for >30 days live in `claudedocs/archive/`. They stay INDEXED
+# (`handoff_index.py` walks recursively on both sides of its durability
+# difference), so `handoff_search` keeps returning them and a reader keeps being
+# handed an `…/archive/…` path to paste. Two claims, and they pull in OPPOSITE
+# directions — which is why neither may be inferred from the other:
+#
+#   NAMED explicitly, in prose  -> resolves         (the directory widening)
+#   GUESSED at by a fallback    -> never chosen     (the globs stay flat)
+#
+# 🔴 EVERY FIXTURE HERE MAKES THE ARCHIVED DOC THE NEWEST FILE ON DISK. Every
+# fallback in resolve() is an `ls -t … | head -1`, so an archived doc that is
+# merely PRESENT cannot tell "the glob does not reach the subdirectory" from
+# "the glob reached it and something newer won". Newest is the only fixture
+# where those two answers differ.
+# --------------------------------------------------------------------------- #
+ARCHIVED = "handoff-archived-topic-2026-01-01.md"
+
+#: Newer than anything `make_repo` stamps (it starts at 1_700_000_000 and steps
+#: by 1000), so `ls -t` would put an archived doc FIRST if a glob reached it.
+ARCHIVE_MTIME = 1_800_000_000
+
+
+def archive_doc(repo, name=ARCHIVED, *, subdir="archive"):
+    """Write `name` into `<repo>/claudedocs/<subdir>/` as the NEWEST doc on disk.
+
+    `subdir` is a parameter so the enumeration claim can be driven NEGATIVELY:
+    the accepted directory set is a ledger, not a pattern, so an unrecognised
+    sibling of `archive/` must not resolve — and the only way to watch that is
+    to build one.
+    """
+    d = repo / "claudedocs" / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(f"## {name}\narchived handoff prose\n")
+    os.utime(p, (ARCHIVE_MTIME, ARCHIVE_MTIME))
+    return p
+
+
+def test_an_archived_doc_named_in_PROSE_resolves(tmp_path, stub_bin):
+    """🔴 THE REGRESSION THE ARCHIVE MOVE WOULD OTHERWISE HAVE CREATED — #684's
+    silent-wrong-document, one directory level down.
+
+    The prose scan tests the token's IMMEDIATE parent, so before the widening
+    `…/claudedocs/archive/handoff-x.md` failed that gate, `embedded_md_path`
+    returned rc 1 ("no handoff-shaped token at all") rather than rc 2, and
+    `named_missing` stayed empty — so the fallback chain ran and the digest
+    reconciled an unrelated initiative with NO gap printed.
+
+    THE FIXTURE IS DISCRIMINATING: two live docs exist, so a run that ignores
+    the named token has somewhere else to go and lands on `handoff-live-b.md`.
+    Asserting the archived name therefore separates "resolved what was named"
+    from "fell through and guessed", which `!= (none found)` would not.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-live-a.md", "handoff-live-b.md"))
+    doc = archive_doc(repo)
+    out = run_resume(repo, stub_bin, f"pick the old thread back up; handoff: {doc}")
+    assert handoff_line(out) == f"handoff: {ARCHIVED}", out
+
+
+def test_an_archived_doc_named_as_the_BARE_argument_resolves(tmp_path, stub_bin):
+    """The other route, pinned because it is the one that never needed fixing.
+
+    `resolve()` takes `[ -f "$arg" ]` before the prose scan, so a single-token
+    path has always resolved whatever it names. Recorded so a future reader does
+    not attribute THIS route's behaviour to the widening above and "simplify"
+    the widening away.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-live-a.md", "handoff-live-b.md"))
+    doc = archive_doc(repo)
+    assert handoff_line(run_resume(repo, stub_bin, str(doc))) == f"handoff: {ARCHIVED}"
+
+
+def test_the_newest_of_N_fallback_NEVER_reaches_the_archive(tmp_path, stub_bin):
+    """🔴 THE HALF THE WIDENING MUST NOT BREAK, and the reason it is a DIRECTORY
+    widening rather than a recursive glob.
+
+    A doc nobody has touched in a month is the LAST thing a no-argument /resume
+    should reconcile against. The archived doc here is the NEWEST file on disk,
+    so `ls -t | head -1` selects it the moment any glob reaches the
+    subdirectory.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-live-a.md",))
+    archive_doc(repo)
+    assert handoff_line(run_resume(repo, stub_bin)) == "handoff: handoff-live-a.md"
+
+
+def test_a_repo_whose_ONLY_handoffs_are_archived_reconciles_NOTHING(tmp_path, stub_bin):
+    """The stronger form of the test above: with no live doc to prefer, the
+    fallback must still DECLINE rather than reach into the archive.
+
+    The previous test passes if the globs merely RANK a live doc first; this one
+    fails unless they cannot SEE the subdirectory at all.
+    """
+    repo = make_repo(tmp_path, docs=())
+    archive_doc(repo)
+    out = run_resume(repo, stub_bin)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+
+
+def test_the_topic_SLUG_glob_does_not_reach_the_archive(tmp_path, stub_bin):
+    """A slug is a guess at a NAME, not a claim about a FILE, so it stays on the
+    live side with the other two fallbacks.
+
+    `handoff-archived-topic*` matches the archived doc's basename exactly; the
+    only thing keeping it out is that the glob is flat.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-live-a.md",))
+    archive_doc(repo)
+    out = run_resume(repo, stub_bin, "archived-topic")
+    assert handoff_line(out) == "handoff: handoff-live-a.md", out
+
+
+def test_an_UNRECOGNISED_claudedocs_subdirectory_is_not_a_handoff_location(
+    tmp_path, stub_bin
+):
+    """🔴 THE ENUMERATION, WATCHED RATHER THAN ASSERTED — `drift-check.sh`'s
+    allowlist argument: an unknown entry is not covered by default.
+
+    `claudedocs/drafts/handoff-x.md` is the same SHAPE as an archived doc and
+    differs only in the one component the ledger enumerates, so it must miss. A
+    pattern-based gate (`*/claudedocs/*`) passes every other case in this
+    section and fails HERE; that is the whole point of the fixture.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-live-a.md",))
+    doc = archive_doc(repo, subdir="drafts")
+    out = run_resume(repo, stub_bin, f"resume that; handoff: {doc}")
+    assert handoff_line(out) == "handoff: handoff-live-a.md", out
+
+
+def test_an_archived_doc_in_a_LINKED_WORKTREE_resolves_out_of_the_RIGHT_one(
+    tmp_path, stub_bin
+):
+    """🔴 THE ROUTE THAT ACTUALLY READS `$base`, AND THE WRONG-DOCUMENT HARM.
+
+    A MEASURED GAP, not a hypothetical: the first version of this section tested
+    only tokens whose named path exists on disk, and `resolve()` takes
+    `[ -f "$tok" ]` before ever touching `$base`. Two mutants — dropping the
+    `archive/` prefix from `$base`, and deleting the line that applies it —
+    SURVIVED the whole 198-test suite, because nothing here had ever reached a
+    route that reads it. `claude/RULES.md`: prove a guard REACHABLE, not merely
+    breakable.
+
+    The shape, which is #1164's with an archive directory added: the base clone
+    has never held the doc, so the search widens to the clone's linked
+    worktrees, and `worktrees_holding` builds `<w>/claudedocs/<base>`. Without
+    the prefix that is `<w>/claudedocs/<ARCHIVED>` — and worktree B holds
+    exactly that, a DIFFERENT document that merely shares the basename. So the
+    mutant does not miss; it resolves the wrong initiative, silently, out of the
+    wrong checkout.
+
+    THE DISCRIMINATOR IS `# repo:`, NOT `handoff:`. The `handoff:` line is a
+    basename and is byte-identical for both documents — the same reason
+    `test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this_repo_STILL_re_anchors`
+    gives for asserting the same line.
+    """
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    right = add_worktree(repo, "devrc-archived", "feat/archived")
+    wrong = add_worktree(repo, "devrc-live", "feat/live")
+    archive_doc(right)                                   # …/claudedocs/archive/ARCHIVED
+    (wrong / "claudedocs" / ARCHIVED).write_text(        # same NAME, other document
+        "## a DIFFERENT initiative that happens to share the basename\n"
+    )
+
+    named = repo / "claudedocs" / "archive" / ARCHIVED
+    assert not named.exists(), "the fixture must NOT put the doc in the base clone"
+
+    out = run_resume(repo, stub_bin, f"resume that; handoff: {named}", cwd=repo)
+    assert handoff_line(out) == f"handoff: {ARCHIVED}", out
+    assert gap_lines(out) == [], out
+    assert _repo_as_the_script_resolved_it(out) == str(right.resolve()), out
+
+
+def test_an_archived_doc_reached_by_the_RELATIVE_re_anchor_resolves(
+    tmp_path, stub_bin
+):
+    """The second route that reads `$base`: `$root/claudedocs/$base`.
+
+    `/handoff`'s kickoff template emits `<repo>/claudedocs/handoff-<topic>.md`,
+    which resolves from the repo's PARENT and not from the repo where the
+    kickoff is pasted — so `[ -f "$tok" ]` misses and the run re-anchors on
+    `$root`. With `archive/` in the path that clause reads
+    `$root/claudedocs/archive/<name>` only if the prefix reached `$base`.
+
+    Discriminating without a decoy: the mutant looks for
+    `$root/claudedocs/<name>`, which does not exist, so it records
+    `named_missing` and the fallback chain is SUPPRESSED — `(none found)`
+    rather than the doc. `handoff-live-a.md` is present precisely so that a
+    would-be fallback has somewhere to go and the assertion is not satisfied by
+    an empty repo.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-live-a.md",), name="devrc")
+    archive_doc(repo)
+    tok = f"devrc/claudedocs/archive/{ARCHIVED}"
+    assert not (repo / tok).exists(), "the token must MISS from inside the repo"
+
+    out = run_resume(repo, stub_bin, f"continue; handoff: {tok}", cwd=repo)
+    assert handoff_line(out) == f"handoff: {ARCHIVED}", out
+
+
+def test_the_accepted_handoff_DIRECTORIES_are_an_enumerated_ledger():
+    """🔴 A LEDGER OVER A RELATIONSHIP, failing when the set GROWS *or* SHRINKS.
+
+    The behavioural tests above cover the two directories that exist today. What
+    they cannot see is a THIRD one added later, or the pair respelled as a
+    pattern — both widen what /resume treats as a handoff, silently.
+
+    Pinned as whole patterns, not keywords: `claude/RULES.md`'s "a guard can be
+    SPELLED rather than STRUCTURAL — assert the STATE".
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+
+    anchor = re.search(r'case "\$dir" in ([^)]+)\) ;; \*\) continue ;; esac', src)
+    normalise = re.search(r'case "\$dir" in\n\s+([^)]+)\) archsub=', src)
+    assert anchor, "the parent-directory gate was not found in resume-state.sh"
+    assert normalise, "the archive normalisation was not found in resume-state.sh"
+
+    assert set(anchor.group(1).split("|")) == {"*/claudedocs", "claudedocs"}, (
+        anchor.group(1)
+    )
+    assert set(normalise.group(1).split("|")) == {
+        "*/claudedocs/archive",
+        "claudedocs/archive",
+    }, normalise.group(1)
+
+
+def test_control_the_directory_ledger_scanner_can_actually_find_the_patterns():
+    """POSITIVE CONTROL for the ledger above.
+
+    Two regexes over shell source is the shape that silently matches nothing.
+    A `None` match is caught by the asserts up there; a regex matching a
+    DIFFERENT, empty-ish construct would not be. So pin that each side yields a
+    non-empty set of non-empty patterns, and that the two sides are DISJOINT —
+    one regex accidentally matching the OTHER's line is the failure that
+    separates.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    anchor = set(
+        re.search(r'case "\$dir" in ([^)]+)\) ;; \*\) continue ;; esac', src)
+        .group(1)
+        .split("|")
+    )
+    normalise = set(
+        re.search(r'case "\$dir" in\n\s+([^)]+)\) archsub=', src).group(1).split("|")
+    )
+    assert anchor and all(p.strip() for p in anchor), anchor
+    assert normalise and all(p.strip() for p in normalise), normalise
+    assert not (anchor & normalise), (anchor, normalise)
