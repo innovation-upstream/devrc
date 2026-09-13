@@ -129,8 +129,24 @@ since renumbered and dropped both, so this is the durable home.
 - **Next probe:** classify a RANDOM sample of 10 of the remaining 73, not the next-largest
   ones, so the sample is not length-biased the way this one is by construction.
 
+### RESOLVED — the bring-in caveat explained a CLEAN MERGE, and rank 9 is measured
+- as-of: 2026-09-13 · **in flight as a PR off `origin/main`, NOT merged**
+- **Ranks 1 and 2 of the list below are both done in that PR.** Rank 1: the caveat is now
+  DERIVED from whether every commit contributing the zero-line gap is a MERGE, and prints **no
+  explanation at all** for one containing a non-merge commit. The bring-in reading was not
+  re-worded but RETIRED from that gate: it selects on `churn_commits`, and a bring-in commit is
+  reachable from the base, so `--not <base>` excludes it from that count as well as from the
+  lines — the class could not reach the caveat at all. Rank 2: `scripts/ladder-stop-rationale.py`
+  + 30 guards classify the terminal round of **201 carriers in 7 repos**; **121 of 191
+  terminated ladders (63.4%) state no reason**, and **28 of the 33 that declared a criterion
+  (84.8%) wrote the rationale in the same summary** (#1157's check). Numbers, frozen taxonomy
+  and residuals are in `claudedocs/audit-ladder-review-2026-09-04.md` open item **4, CLOSED** —
+  read them there, not here.
+- ⚠ **The population is NOT this review's "42 carriers"** — that was its own merged-devrc
+  window. 201 across all states, newest 400 PRs per repo, and three repos hit that limit.
+
 ### The bring-in caveat is SHIPPED ON MAIN and gives the wrong reason
-- as-of: 2026-09-12
+- as-of: 2026-09-12 · **superseded by the entry above**
 - **Symptom + exact repro:** `scripts/ladder-range-coverage.py:667` gates the "many commits, 0
   lines" caveat on `a.commits`, which `b1abf6b1` changed to mean `churn_commits`. Reproduce:
   ```bash
