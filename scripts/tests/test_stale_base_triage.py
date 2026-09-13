@@ -1782,7 +1782,16 @@ def test_the_shared_lib_is_APPENDED_to_sys_path_and_never_PREPENDED():
     """
     got = _sys_path_mutations(SRC)
     assert got, "the sys.path scan matched nothing — this guard is inert"
-    assert [m for _, m in got] == ["append"], got
+    # 🔴 THE INVARIANT IS THE SPELLING, NOT THE COUNT. This asserted
+    # `== ["append"]` — exactly one — until the census-guard screen added a
+    # second append (`scripts/`, for `testlib.census_scan`). A count is the
+    # wrong pin: it goes red on an addition that OBEYS the rule while saying
+    # nothing about one that breaks it. Every mutation must be an append; the
+    # count is pinned separately and loosely, so a third legitimate import does
+    # not read as a violation.
+    assert {m for _, m in got} == {"append"}, got
+    assert len(got) == 2, (
+        f"expected the two documented appends (scripts/lib, scripts/), got {got}")
     # POSITIVE CONTROL: the scan CAN see the spelling this forbids, so the
     # equality above is not a comparison against a scan wired to nothing.
     assert _sys_path_mutations(
@@ -2375,3 +2384,276 @@ def test_every_test_the_UNIT_names_actually_exists():
                                path.read_text(encoding="utf-8", errors="replace"),
                                re.M))
     assert cited <= here, f"dangling citations in the unit's prose: {sorted(cited - here)}"
+
+
+# ══ the census-guard screen ═══════════════════════════════════════════════════
+# 🔴 WHY THIS BLOCK EXISTS, AND WHAT ITS BASELINE IS. The tool's first live sweep
+# ruled five PRs INHERITED. Rebuilding each merged tree and running ONLY the
+# named failing test gave: #1450 passed, #1286 passed, #1603 FAILED, #1194
+# FAILED, #1038 merge-conflict (untestable). So 2 of 4 testable verdicts were
+# FALSE — both on the SAME repo-wide census guard, and in both the offender was
+# a NEW FILE the PR itself adds (#1194's was its own
+# `scripts/tests/test_break_glass_merge.py`, absent from main, so a rebase would
+# have carried the offending file along with the red).
+#
+# 🔴 These reuse the `repo` fixture deliberately: ALPHA is already the INHERITED
+# shape and BRAVO the NOT-EXPLAINED one, with pairwise-distinct names and commit
+# subjects. Only the ORACLE'S ANSWER differs between the two headline cases, so
+# the screen is isolated and nothing else moves.
+
+class _FakeCensus:
+    """A CensusIndex stand-in whose answer is fixed by the test, not derived.
+
+    🔴 The real derivation costs ~28s and is covered by `test_census_scan.py`.
+    What needs pinning HERE is the WIRING — that True demotes, that a raise
+    withholds, and that it is not asked at all before the stale pattern holds.
+    """
+
+    def __init__(self, answer=False, raises=False):
+        self._answer, self._raises = answer, raises
+        self.built, self.ok, self.error = True, not raises, None
+        self.pairs, self.whole_modules, self.build_ms = set(), set(), 1
+        self.asked = []
+
+    def is_census_guard(self, path, name, truncated=False):
+        self.asked.append((path, name, truncated))
+        if self._raises:
+            raise RuntimeError(
+                "the census derivation could not be built (stub) — so whether "
+                "this test is a repo-census guard is UNKNOWN")
+        return self._answer
+
+
+def _triage_c(r, name, census, main_ref="main", head_ref="pr"):
+    return M.triage_one_test(r.path, main_ref, head_ref, r.merge_base, name, census)
+
+
+def test_a_census_guard_is_DEMOTED_rather_than_ruled_inherited(repo):
+    """🔴 THE HEADLINE CASE — the shape that made the tool wrong twice.
+
+    ALPHA is the fixture's INHERITED shape: the PR never touched it and main has
+    moved it. Without the screen this is INHERITED (pinned by the sibling test
+    below, which differs ONLY in the oracle's answer). With it, the verdict must
+    be NOT EXPLAINED.
+    """
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(answer=True))
+    assert got["verdict"] == M.VERDICT_NOT_STALE, got
+    assert got["census_guard"] is True, got
+    assert got["explained"] is False, "a demoted test must NOT count as explained"
+    assert "REPO-CENSUS guard" in got["reason"], got["reason"]
+
+
+def test_a_NON_census_test_in_the_same_shape_is_still_INHERITED(repo):
+    """🔴 THE HALF THAT COULD HAVE FALSIFIED THE PREDICATE, and did not.
+
+    #1450 and #1286 were CORRECT INHERITED verdicts. A screen that demoted
+    everything would "fix" the false positives by destroying the tool — and
+    would pass the test above. Identical fixture, identical call, only the
+    oracle's answer differs.
+    """
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(answer=False))
+    assert got["verdict"] == M.VERDICT_INHERITED, got
+    assert got.get("census_guard") is None, got
+    assert got["explained"] is True, got
+
+
+def test_an_UNBUILDABLE_census_index_WITHHOLDS_and_never_resolves_to_inherited(repo):
+    """🔴 FAIL-SAFE DIRECTION, PINNED. If the derivation cannot be built the
+    answer is UNKNOWN — and unknown must not resolve toward INHERITED, or this
+    bug returns silently the day `census_scan` breaks."""
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(raises=True))
+    assert got["verdict"] == M.VERDICT_UNMEASURED, got
+    assert got["explained"] is False, got
+    assert "UNKNOWN" in got["reason"], got["reason"]
+
+
+def test_the_screen_runs_LAST_so_the_evidence_SURVIVES_the_demotion(repo):
+    """The demoted verdict still carries `candidates` — the commits that WOULD
+    have justified INHERITED. That evidence is what let the original false
+    verdicts be falsified in one command, so it must not be thrown away."""
+    got = _triage_c(repo, "test_the_alpha_invariant_holds", _FakeCensus(answer=True))
+    assert got["verdict"] == M.VERDICT_NOT_STALE
+    assert got["candidates"], "the evidence must survive the demotion"
+    assert got["blob_head"] == got["blob_merge_base"], got
+
+
+def test_the_screen_is_NOT_consulted_before_the_stale_pattern_is_established(repo):
+    """🔴 ORDERING, PINNED — and it is a COST claim, not a style one.
+
+    The real derivation is ~28s against a sweep that ran in 35s. BRAVO is the
+    fixture's PR-owns-the-file shape, rejected by the blob comparison long
+    before the screen; the stub records what it was asked, and here it must be
+    asked NOTHING.
+    """
+    census = _FakeCensus(answer=True)
+    got = _triage_c(repo, "test_the_bravo_invariant_holds", census)
+    assert got["verdict"] == M.VERDICT_NOT_STALE
+    assert census.asked == [], f"the screen was consulted needlessly: {census.asked}"
+
+
+def test_a_TRUNCATED_name_is_matched_by_prefix_and_errs_toward_demotion():
+    """The 140-byte cap cuts names mid-word (100 of 101 rows measured). A prefix
+    match can only ever select MORE tests as guards — the safe direction."""
+    idx = M.CensusIndex(ROOT)
+    idx.built, idx.ok = True, True
+    idx.pairs = {("scripts/tests/test_x.py", "test_a_long_name_the_cap_cut_in_half")}
+    assert idx.is_census_guard("scripts/tests/test_x.py",
+                               "test_a_long_name_the_cap", truncated=True)
+    assert not idx.is_census_guard("scripts/tests/test_x.py",
+                                   "test_a_long_name_the_cap", truncated=False)
+
+
+def test_a_whole_module_selection_counts_as_a_census_guard():
+    """`census_scan` can select a module ENTIRE; a test inside one is a guard
+    even though no (path, name) pair names it."""
+    idx = M.CensusIndex(ROOT)
+    idx.built, idx.ok = True, True
+    idx.whole_modules = {"scripts/tests/test_all_of_me.py"}
+    assert idx.is_census_guard("scripts/tests/test_all_of_me.py", "test_anything")
+    assert not idx.is_census_guard("scripts/tests/test_other.py", "test_anything")
+
+
+def test_a_MIS_ROOTED_index_RAISES_rather_than_answering_no(tmp_path):
+    """🔴 THE REAL CLASS, not the stub, and THE BUG THIS TEST ACTUALLY FOUND.
+
+    `census_scan.analyze()` on a path with no scripts tree RETURNS AN EMPTY
+    RESULT — it does not raise. The first version of `CensusIndex` trusted that
+    and would have answered "not a census guard" for every test in the repo, i.e.
+    failed OPEN into exactly the bug the screen exists to fix. The trip is
+    `parsed == 0`; this drives it at a real empty directory rather than asserting
+    it about a stub.
+    """
+    idx = M.CensusIndex(tmp_path / "nothing-here")
+    with pytest.raises(RuntimeError) as exc:
+        idx.is_census_guard("scripts/tests/test_x.py", "test_y")
+    assert "UNKNOWN" in str(exc.value)
+    assert idx.built and not idx.ok, "a failed build must be recorded, not retried blindly"
+    assert idx.parsed == 0, idx.parsed
+
+
+def test_the_screen_is_NOT_vacuous_on_the_real_repo():
+    """🔴 THE POSITIVE CONTROL, and it is where the production-strength claim
+    lives. Every other test here drives a stub or a fixture; none of them would
+    notice if the derivation returned nothing useful against THIS repo, which is
+    the only tree the unit ever actually runs on. A count floor at RUNTIME was
+    tried first and was wrong — it turned every small fixture repo into COULD NOT
+    MEASURE — so the strong claim is asserted here instead.
+
+    ⚠ Bounded loosely on purpose: this pins "the screen can see a large
+    population", not an exact number that would go red on every new guard.
+    """
+    idx = M.CensusIndex(ROOT)
+    assert idx.is_census_guard(
+        "scripts/tests/test_runtime_shebangs.py",
+        "test_no_test_writes_a_usr_bin_env_shebang_at_runtime"), (
+        "the guard that produced BOTH measured false INHERITED verdicts is not "
+        "in the derived set — the screen would not have fixed either of them")
+    assert idx.ok and idx.parsed > 100, (idx.ok, idx.parsed, idx.error)
+    assert len(idx.pairs) + len(idx.whole_modules) > 60, len(idx.pairs)
+
+
+def test_the_census_screen_cannot_shell_out():
+    """🔴 THE SAFETY CLAIM THIS IMPORT MUST NOT WEAKEN. The tool's headline
+    guarantee is that it runs no git subcommand that writes. `census_scan` is
+    pure AST + filesystem, so importing it cannot add one — asserted over the
+    dependency's SOURCE rather than trusted."""
+    src = (ROOT / "scripts" / "testlib" / "census_scan.py").read_text(encoding="utf-8")
+    imported = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "subprocess" not in imported, imported
+    assert "os.system" not in src
+
+
+def test_the_FIVE_VERDICT_regression_baseline_is_reproduced_by_the_screen():
+    """🔴 THE MEASURED BASELINE, AS A TABLE. These five verdicts are the tool's
+    own first live sweep, each checked by rebuilding the merged tree and running
+    only the named failing test. The two FALSE rows are what this change exists
+    to fix; the two RIGHT rows are what it must not break."""
+    GUARD_FILE = "scripts/tests/test_runtime_shebangs.py"
+    UNIT_FILE = "scripts/tests/test_run_tests_targets.py"
+    # (pr, failing test, file, is-a-census-guard, measured truth)
+    BASELINE = [
+        (1450, "test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS",
+         UNIT_FILE, False, "INHERITED"),
+        (1286, "test_agent_without_any_tab_is_untouched",
+         "scripts/browser-bridge/tests/test_browser_tab_ref.py", False, "INHERITED"),
+        (1603, "test_no_test_writes_a_usr_bin_env_shebang_at_runtime",
+         GUARD_FILE, True, "REAL"),
+        (1194, "test_no_test_writes_a_usr_bin_env_shebang_at_runtime",
+         GUARD_FILE, True, "REAL"),
+    ]
+    assert len({f for _, _, f, _, _ in BASELINE}) == 3, "fixture files must not all collide"
+    for pr, name, path, is_guard, truth in BASELINE:
+        idx = M.CensusIndex(ROOT)
+        idx.built, idx.ok = True, True
+        idx.pairs = {(path, name)} if is_guard else set()
+        got = idx.is_census_guard(path, name)
+        assert got is (truth == "REAL"), (
+            f"#{pr}: screen says census-guard={got}, measured truth was {truth}")
+
+
+def test_the_summary_line_distinguishes_a_zero_from_a_screen_that_never_ran(capsys):
+    """🔴 SILENT-ZERO GUARD. "0 demoted" by a screen that looked and "0 demoted"
+    by a screen that never built are different claims, and this repo keeps
+    getting caught conflating them."""
+    results = [{"number": 1, "verdict": M.VERDICT_INHERITED, "tests": []}]
+    M.summarise(results, [], M.CensusIndex(ROOT))          # never built
+    assert "NOT CONSULTED" in capsys.readouterr().out
+
+    built = M.CensusIndex(ROOT)
+    built.built, built.ok, built.build_ms = True, True, 7
+    M.summarise(results, [], built)
+    out = capsys.readouterr().out
+    assert "0 demoted" in out and "NOT CONSULTED" not in out, out
+
+
+def test_the_PRODUCTION_call_site_actually_PASSES_the_census_index():
+    """🔴 THE SCREEN DEFAULTS TO OFF, SO ITS WIRING IS THE THING THAT CAN ROT.
+
+    `census=None` skips the screen entirely — deliberate, so the ~100 existing
+    unit tests drive the evidence path without paying a 28s derivation. The cost
+    is that DROPPING the argument at the one production call site would make the
+    screen silently inert while every test above still passes: the exact
+    "reads as coverage while providing none" shape this repo keeps hitting.
+
+    So the call site is pinned STRUCTURALLY, over the AST, rather than by a
+    comment asking nicely.
+    """
+    tree = ast.parse(SRC)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "triage_pr"]
+    assert calls, "no call to triage_pr found — this guard is inert"
+    for call in calls:
+        passed = len(call.args) + len(call.keywords)
+        assert passed == 5, (
+            f"triage_pr is called with {passed} arguments at line {call.lineno}; "
+            "the census index is the 5th and without it the screen is inert")
+
+    # POSITIVE CONTROL: the scan CAN see the four-argument spelling it forbids,
+    # so the equality above is not a comparison against a scan wired to nothing.
+    bad = ast.parse("triage_pr(repo, main_ref, pr, row)\n")
+    bad_calls = [n for n in ast.walk(bad)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "triage_pr"]
+    assert len(bad_calls) == 1 and len(bad_calls[0].args) == 4
+
+
+def test_triage_one_test_is_never_called_without_the_index_in_production():
+    """The same pin one level down: `triage_pr` fans out to `triage_one_test`,
+    and dropping the argument THERE would disable the screen just as completely
+    while `triage_pr`'s own signature still looked right."""
+    tree = ast.parse(SRC)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "triage_one_test"]
+    assert calls, "no call to triage_one_test found — this guard is inert"
+    for call in calls:
+        passed = len(call.args) + len(call.keywords)
+        assert passed == 6, (
+            f"triage_one_test is called with {passed} arguments at line "
+            f"{call.lineno}; the census index is the 6th")
