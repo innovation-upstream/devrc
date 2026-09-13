@@ -978,6 +978,78 @@ def test_a_DIFFERENT_float_instance_is_NOT_resized(is_laptop):
 
 
 @pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
+def test_the_PICKERS_CELL_COUNT_FITS_both_hosts_screens(is_laptop):
+    """REGRESSION COVERAGE — red at 120 columns, green at 110.
+
+    🔴 THIS IS THE GUARD THE REVIEW WINDOW'S DEFECT NEVER HAD, and its absence is
+    why the picker shipped too wide for a year. `PICKER_COLUMNS` is a CELL count
+    and a cell's pixel size is per-host, so one constant has to fit BOTH displays
+    — the identical defect class the review window's `ppt` rule exists to end,
+    one window over. Nothing checked it, so nothing objected.
+
+    🔴 MEASURED LIVE, not computed: at 120 columns the laptop's picker came up as
+    `rect=2284x818 at +-14+355` (client 2280x814) on a 2256 px screen. i3 centres
+    it, so the 28 px of overflow was split across BOTH edges — x was NEGATIVE, and
+    ~14 px was clipped left and right. An earlier comment in `mention-open.py` put
+    this at "about 24 px" by measuring the CLIENT against the screen and omitting
+    the 2 px border per side; the RECT is what has to fit.
+
+    ⚠ THE BORDER TERM IS DERIVED, NOT MEASURED — see the decoration paragraph
+    above. `default_border pixel 2` with no `default_floating_border` means
+    BS_PIXEL/2 px for a `for_window … floating enable` container, so the rect is
+    the client plus 2 px per side. That is read off i3's source; a floating
+    `deco_rect` was never obtainable (no floating containers in any live tree).
+    If it is ever wrong, it is wrong by a few px in the SAFE direction here.
+    """
+    host = HOSTS[1] if is_laptop else HOSTS[0]
+    cell_w, cell_h = _MEASURED[host]["cell"]
+    ws_w, ws_h = _MEASURED[host]["workspace"]
+    border = 2 * 2  # BS_PIXEL, logical_px(2), both sides
+    rect_w = MO.PICKER_COLUMNS * cell_w + border
+    rect_h = MO.PICKER_LINES * cell_h + border
+    assert rect_w <= ws_w and rect_h <= ws_h, (
+        "on %s the picker's %dx%d CELLS are %.0fx%.0f px of container rect "
+        "(cell %.1fx%.1f + %d px border), which does not fit the %dx%d WORKSPACE "
+        "— %.1f%% x %.1f%% of it. i3 CENTRES this window, so an overflowing width "
+        "hangs off BOTH edges (measured at 120 columns: x=-14, ~14 px clipped each "
+        "side). Lower PICKER_COLUMNS/PICKER_LINES in scripts/mention-open.py — do "
+        "NOT add an i3 `resize set`, which would restate this geometry in a file "
+        "that cannot see these constants while `picker_header` kept wrapping to the "
+        "OLD width. The binding constraint is the host with the LARGER cell."
+        % (host, MO.PICKER_COLUMNS, MO.PICKER_LINES, rect_w, rect_h,
+           cell_w, cell_h, border, ws_w, ws_h,
+           100.0 * rect_w / ws_w, 100.0 * rect_h / ws_h))
+
+
+@pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
+def test_the_PICKERS_WRAP_WIDTH_tracks_its_COLUMN_COUNT(is_laptop):
+    """REGRESSION COVERAGE for the seam the fit guard alone cannot see.
+
+    🔴 A WIDTH THAT FITS THE SCREEN IS NOT A WIDTH THE TEXT WAS WRAPPED FOR.
+    `picker_header` wraps to `PICKER_COLUMNS - 2`, so the wrap width and the
+    window width are two consumers of ONE constant — and the tempting fix for an
+    overflowing picker (size it in i3 instead) changes the window while leaving
+    the text wrapped for the old width, which no screen-fit assertion can detect.
+    This pins the RELATIONSHIP, not either side.
+
+    ⚠ THE FUNCTION IS `picker_header`, NOT `format_row`. `mention-open.py` named
+    `format_row` as the wrapper and **no such function has ever existed in that
+    file** — a cross-reference nothing could check. (Other modules do have a real
+    `format_row`, which is exactly why a grep for it looks reassuring.) It is why
+    the first draft of this guard reached for `hasattr` and would have SKIPPED
+    itself silently. No `hasattr`, no skip: a wrong name now fails loudly.
+    """
+    del is_laptop  # host-independent: this is a seam between two code paths
+    wrapped = MO.picker_header("x" * (MO.PICKER_COLUMNS * 3))
+    widest = max(len(line) for line in wrapped)
+    assert widest <= MO.PICKER_COLUMNS - 2, (
+        "picker_header wrapped a long message to %d columns while PICKER_COLUMNS "
+        "is %d. The wrap width must stay derived from the column count, or the "
+        "picker renders text wider than the window it is drawn in."
+        % (widest, MO.PICKER_COLUMNS))
+
+
+@pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
 def test_the_PICKER_is_still_not_resized_by_anything(is_laptop):
     """INVARIANT GUARD (green before the fix as well as after).
 
