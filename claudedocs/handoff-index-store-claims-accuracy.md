@@ -22,35 +22,38 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-**Every ranked item this doc carried is now CLOSED except two `forcing: none` ones.**
-Both hosts converged and VERIFIED at `05985792` (workbench + laptop agree on one sha;
-0 dangling, 0 stale artefacts each). Merged this session, each verified on `origin/main`
-BY CONTENT rather than by ancestry:
+**BOTH RANKED ITEMS THIS DOC CARRIED ARE CLOSED, and the arc is finished.** Five PRs
+merged, each verified on `origin/main` BY CONTENT rather than by ancestry:
 
-- **rc 17 cleared on BOTH hosts** — `homelab-talos` pulled + `home-manager switch`.
-  The doc named only the laptop; the workbench was 2 commits stale too, and rc 17 is
-  per-host, so fixing the named host alone would have left the arm firing.
-- **`devrc#1365` → `14126d94`** — `clawgate_resolve` reads `OPENCODE_SESSION_ID` before
-  `CLAUDE_CODE_SESSION_ID`, and REFUSES when `$OPENCODE` is set with no opencode id.
-  ⚠ Buys CORRECTNESS, not capability: `clawgatectl` has no opencode tier (measured,
-  `grep -rl OPENCODE containers/` = 0 vs 5 for the claude var), so opencode sessions
-  resolve exit 5 rather than their own tasks until a Go change lands in `homelab-talos`.
-- **`devrc#1428` → `13c0791a`** — P3 retired, refusing with `RC_CUTOVER_COMPLETE (19)`
-  keyed on `refused > 0`. Four audit rounds.
-- **`devrc#1453` → `eeea9025`** — the co-tenant flake, DIAGNOSED: `git maintenance run
-  --auto --quiet --detach`. Fixed with `maintenance.auto=false` in `_GIT_ENV`.
-- **#1449, #1465, #1470, #1475** → `6f9eb6a2`, `c6700447`, `2a4fe326`, `05985792` —
-  handoff closures, the dash-premise verification, and the prune.
+- **`#1504` → `3161851b`** — retracted *"there is no CREATE route"* from the `cairn`
+  skill (false since `#1254`), swept **five** tracked files, added a two-way verb
+  ledger and a repo-wide needle. Four audit rounds; see Gotchas.
+- **`#1553` → `b4d472f7`** — guards `operator-surface.md`'s REFUSED/ABSENT probe
+  against the code it routes off: the doc's remedy table is parsed as a routing
+  object and every code it quotes is checked against `server.py`'s emissions and
+  `scripts/cairn::_classify`. A SEAM guard — both sides were well tested alone.
+- **`#1554` → `663bc86a`** — `#1170`'s 🟡5 (the probe now EMITS `policy:`) and 🟡6
+  (`--template` refuses instead of clobbering).
+- **`#1636` → `7cee3602`** — the ranked-list closeout.
+- `#1508` (not ours) merged mid-arc and conflicted with `#1554`; resolved union.
 
-**Deploy/verify status, honestly:** all four tiers green on the final merged trees; where
-the dev-host `pytest` tier hit its 3600s wall clock under ambient load (80–90 on 24 cores
-from other sessions), the control was the killed target run STANDALONE on the same tree,
-and that is a different claim from a completed run. It is stated as such on each PR.
+**Deploy status, stated separately from the merge:** `#1504` is DEPLOYED and verified
+at the consumer on BOTH hosts — same `/nix/store` path, `cmp`-identical to
+`origin/main`. `#1553`/`#1554`/`#1636` are merged but **NOT deployed** (no switch since).
 
-**No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **6**: one linked task
-(`#503 role=read`, "Replace /dev/sda in talos-uvh-gtj"), NONE worked. I recognise it — I
-read it to test a CI theory — and it is definitively not this effort, so per the flow
-nothing was recorded and no task was created.
+**Two live-state repairs, neither of them a ranked item:**
+- `cli/safeterm.md` was WRITABLE in the frozen mirror. Re-frozen `0444` — but only
+  after proving the POD copy was newer (9,840 vs 3,763 bytes; pod held all 4 of the
+  mirror's bullets plus 5 more). Pushing the mirror would have reverted a day.
+- The two stranded entries were **single-copy**: the laptop had neither, the mirror
+  is not a git repo, and the backup CronJob covers the pod's `/data`, not the mirror.
+  Rescue copies now on BOTH hosts at `~/rescue/subsystem-stranded-2026-09-12/`,
+  md5-verified. That is what made rank 1 safe to park.
+
+**No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks
+for this session. An unknown session id answers `200 {"tasks":[]}`, not 404, so this
+cannot distinguish "touched no task" from "the id is wrong". Per the flow, nothing
+was written and no task was created. This is **not** a clean reading.
 
 ## Open investigations — live diagnosis state
 
@@ -846,22 +849,90 @@ automatically, and the next writer is the only moment anyone looks.
   inherited. `605b29ac`/#1439 landed it — ⚠ and that PR merged with **10 of its own
   tests red** on the tier a merge gates on, fixed upstream later the same day.
 
+- 🔴 **A PROBE WHOSE TWO CANDIDATE MECHANISMS COINCIDE IN THE SAMPLE CANNOT SEPARATE
+  THEM — and it will confidently name the wrong one.** `cairn create` was run against a
+  scope that was absent AND non-allowlisted, on a pod whose allowlist enumerated
+  exactly the scopes on disk. The `rc 6` came from the allowlist check, which returns
+  BEFORE the index is loaded; it was credited to an index walk, and that false
+  mechanism then shipped into two skills, three `claudedocs/` and four test
+  docstrings. The discriminating control was available and never run: **allowlist a
+  scope, do NOT seed it, create → 201.** RULES: *an EMPTY RESULT cannot distinguish
+  two mechanisms — go find the step that differs.*
+- 🔴 **A CASE-SENSITIVE GREP QUOTED AS A CLEAN SWEEP.** `grep -ln 'There is no CREATE
+  route\|no CREATE route'` → **0 files**, reported as "only the skill had it".
+  Case-insensitively: **6**. Through the repo's own normalising scanner: **10
+  occurrences in 8 files**, one straddling a newline inside a docstring where no
+  line-based grep can ever see it. Four successive sweeps each found a spelling the
+  previous one's phrasing missed — mechanism → one conclusion phrase → two more.
+  **A string needle cannot close a claim that has no canonical wording.**
+- 🔴 **AN UNSUBJECTED NEEDLE FIRES ON TRUE WRITING, AND IT HAPPENED TWICE IN ONE PR.**
+  `"remains an operator step"` carries no subject; the repo holds **9 true occurrences
+  of "operator step" across 7 unrelated files**, each one word from turning a repo-wide
+  gate red. My own probe fired **7 of 8** true sentences — including on a needle I had
+  already "narrowed", because *"The first entry remains an operator step for the OSS
+  multi-instance store"* is TRUE. **Bind every needle to its subject, and verify as a
+  PAIR: a false-positive probe over TRUE sentences AND a mutation battery.** A gate
+  that cannot go green is the mirror of one that cannot go red.
+- 🔴 **`rerere` REPLAYED A RESOLUTION FROM A DIFFERENT MERGE — verify by COUNTING, not
+  by reading.** It auto-applied the union resolution recorded on an integration branch
+  onto the real PR merge. It was correct, established by counting test defs across all
+  three trees: base 688, PR +16, `#1508` +0, merged 704. The rr-cache lives in the
+  **common** git dir, so a resolution recorded in any worktree is repo-global.
+- 🔴 **"INHERITED RED" IS NOT A REUSABLE VERDICT — run the control every time.** One red
+  was inherited (`main` failed it too, naming a different file). The next red looked
+  identical and was NOT: `main` PASSED it. The real cause was staleness — the branch sat
+  **10 commits behind**, and a commit in that window added the ledger row the test
+  demanded. Merging current `main` fixed it. **Read the failing test's name, ask whether
+  the diff can reach it, then check how far behind the base is.**
+- 🔴 **zsh ATE A GIT PATHSPEC AND PRODUCED A PLAUSIBLE NUMBER.** `$MB:scripts/...` —
+  `:s` is a history modifier, so `git show` received only the sha and printed a COMMIT
+  MESSAGE. The count read `base defs: 0`, and the arithmetic built on it
+  ("PR added 704") looked like data rather than an error. **Brace it: `${MB}:`.**
+- ⚠ **MY OWN CI WATCHER COULD NOT GO GREEN.** It required no `pending` in the status
+  list, but every context posts BOTH a pending and a final row, so the condition never
+  cleared and it reported "unresolved" over a resolved verdict. Validate the instrument
+  before reading its verdict — including one you just wrote.
+- 🔴 **"DO WE NEED IT" RETIRED THE REMAINING WORK, and the operator had to ask.** Rank 1
+  was presented as a next step with a three-step runbook. Measured on the question:
+  nothing has read either scope, neither repo is checked out on this host, the entries
+  have not moved since 2026-09-02/03, and most references to them are this effort
+  discussing itself. The cost was a SOPS edit plus a pod restart whose failure mode is
+  *the store stays down*. **"It is broken" was slid into "it needs fixing" without ever
+  asking whether anything depended on it.**
+- ⚠ **A RANKED LIST WENT STALE A FOURTH TIME — by the session that closed it.** It
+  claimed the work with *"retire the stale ranked text"* in its own claim subject,
+  shipped the fixes, and never returned to the list; rank 2 read "Never started" after
+  `#1554` had merged. Closed in `#1636`. Nothing closes a ranked item automatically.
+- ⚠ **FOUR AUDIT ROUNDS, AND EVERY FIX ROUND INTRODUCED THE NEXT FINDING** — 4 for 4,
+  and the finding was usually the fix round's own PROSE, not its code. Round 0 (the
+  requirements pass) earned its keep: `ran: 1 · changed the outcome: 1`.
+- ⚠ **A SUBAGENT CAUGHT A PERMANENTLY-RED GATE IN ITS OWN GUARD before shipping it** —
+  its first cut classified every refusal row as the create path's 404, so a *correct*
+  third row (`rc 9 already-exists`, which `_entry_exists` answers at 412) would have
+  failed the guard against a doc that had just improved.
+
 ## How to verify
 
 ```bash
 # every closure landed, BY CONTENT (a squash is never an ancestor)
-git -C ~/workspace/devrc show origin/main:scripts/lib/clawgate_handoff.sh | grep -c OPENCODE_SESSION_ID   # 9
-git -C ~/workspace/devrc show origin/main:scripts/cairn-cutover.py | grep -c 'RC_CUTOVER_COMPLETE = 19'   # 1
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py | grep -c maintenance.auto  # 1
+git -C ~/workspace/devrc show origin/main:claude/skills/cairn/SKILL.md | grep -c 'cairn create'              # 4
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/tests/test_cairn_operator_surface_probe.py && echo ok
+git -C ~/workspace/devrc show origin/main:scripts/lib/service_recon.py | grep -c governing_policy            # 5
 
-# the co-tenant fix, by the SPAWN rather than the race (deterministic; positive control included)
+# the mechanism itself — the control the first probe never ran
 nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_git_repo_isolation.py -q -p no:cacheprovider \
-  -k maintenance                                                   # passes, and its control asserts the spawn IS visible without the fix
+  ~/workspace/devrc/scripts/tests/test_subsystem_store_api.py -q -p no:cacheprovider \
+  -k 'FIRST_entry_creates_the_directory or OUTSIDE_the_allowlist_is_the_SAME_404'     # 2 passed
 
-# both hosts agree on ONE sha — the claim that matters
-bash ~/workspace/devrc/scripts/ship.sh 2>&1 | tail -3              # converged + verified, 2 hosts compared
+# the needles are bound to a subject: TRUE sentences must NOT fire
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_subsystem_store_api.py -q -p no:cacheprovider \
+  -k TestByteIdentityVerifier                                                          # 35 passed
 
-# the doc's own structure survived the prune
-git -C ~/workspace/devrc show origin/main:claudedocs/handoff-index-store-claims-accuracy.md | grep -c '^## '  # 7
+# the two stranded entries still have an off-machine copy (they were single-copy)
+md5sum ~/rescue/subsystem-stranded-2026-09-12/*.md
+ssh zach@10.42.0.100 'md5sum ~/rescue/subsystem-stranded-2026-09-12/*.md'              # must match
+
+# the standing reminder for rank 1 — an accurate report, not an alarm
+cairn doctor 2>&1 | grep -E 'token-scopes|frozen-mirror'
 ```
