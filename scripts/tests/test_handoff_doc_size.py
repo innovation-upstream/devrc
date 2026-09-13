@@ -162,6 +162,17 @@ GRANDFATHERED: dict[str, int] = {
     "claudedocs/handoff-tmux-restore-chain.md": 98_304,         #  84,569 B
     "claudedocs/handoff-skill-chain-usage-audit.md": 81_920,    #  79,511 B
     "claudedocs/handoff-cairn-task-linkage.md": 81_920,         #  76,743 B
+    # 🔴 THE TWELFTH ENTRY IS A MERGED-TREE FINDING, NOT A DAY-ONE MEASUREMENT,
+    # and it is worth a line because it is the shape this ledger will keep
+    # meeting. This doc did not exist when the ceiling was measured; it landed on
+    # `main` while this branch was open. The two changes share NO FILE — the
+    # branch never touched it and `main` never touched this module — so both
+    # sides were green and only the MERGED tree was red. `claude/RULES.md`:
+    # "DISJOINT FILES ARE NOT SAFETY … one side widens a function's required
+    # inputs, the other adds a CALLER". Here the gate is the widened input and a
+    # new document is the caller. Caught by merging `main` in and re-running,
+    # which is the check that rule asks for.
+    "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,   #  71,027 B
     "claudedocs/handoff-handoff-search-index.md": 81_920,       #  67,076 B
 }
 
@@ -219,6 +230,46 @@ def handoff_docs(root: Path) -> tuple[dict[str, int], handoff_index.DiskScan]:
     """
     scan = handoff_index.handoff_paths_on_disk(root)
     return {p: (root / p).stat().st_size for p in scan.paths}, scan
+
+
+def this_repos_corpus() -> dict[str, int]:
+    """`{relpath: size}` for THIS repo, from BOTH enumerations, UNIONED.
+
+    🔴 THE UNION IS THE SAFE DIRECTION, and it is the population the ceiling is
+    enforced over. `handoff_docs` borrows `handoff_index`'s `os.walk` + regex;
+    this adds an independent `rglob` + shell glob. Taking the union means a
+    NARROWING in either mechanism cannot let a document escape the cap — it can
+    only ever add work, never excuse a file.
+    `test_the_borrowed_walk_agrees_with_an_INDEPENDENT_enumeration` is what
+    keeps the two honest; this function is what makes a disagreement fail SAFE
+    in the meantime.
+
+    🔴 IT ALSO PUTS THE CEILING TEST INTO `ledger-check.sh`'s POPULATION, AND
+    THAT IS NOT A SIDE EFFECT — IT IS MEASURED. `scripts/testlib/census_scan.py`
+    derives the tests whose verdict depends on the repo's FILE SET, and
+    `ledger-check.sh` runs exactly those as the fast pre-merge screen for "a new
+    file landed without its ledger row". That IS this gate's failure mode: a
+    handoff doc over the ceiling landing on `main` from a branch that never
+    touched this file. MEASURED while writing this — the first version of this
+    module was absent from that derived set entirely, because the scanner reads
+    a `Path(__file__)`-derived root and the borrowed walk reaches its own
+    through a PARAMETER, a blind spot its header states. The literal
+    `REPO_ROOT`-rooted `rglob` below is what the scanner can see, so the ceiling
+    test is now screened rather than only caught by the full tier.
+
+    ⚠ Verify with `python3 scripts/testlib/census_scan.py | grep
+    handoff_doc_size`, never by reading this paragraph.
+    """
+    walked, _ = handoff_docs(REPO_ROOT)
+    globbed = {
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in (REPO_ROOT / handoff_index.HANDOFF_DIR).rglob("handoff-*.md")
+        if p.is_file()
+    }
+    sizes = dict(walked)
+    for rel in globbed:
+        sizes.setdefault(rel, (REPO_ROOT / rel).stat().st_size)
+    return sizes
 
 
 def oversize_findings(
@@ -368,6 +419,61 @@ NAME_PREDICATE_TABLE = (
 )
 
 
+def test_the_borrowed_walk_agrees_with_an_INDEPENDENT_enumeration():
+    """A cross-check against a second enumeration that fails DIFFERENTLY, and
+    the thing that puts this module in `ledger-check.sh`'s population.
+
+    🔴 TWO JOBS, AND THE SECOND ONE IS WHY IT IS SPELLED THIS WAY.
+
+    (1) The guard. `handoff_docs` borrows `handoff_index`'s walk rather than
+    reimplementing it — right for "one rule, one place", and it means this gate
+    inherits that walk's blind spots silently. A walk that quietly stopped
+    descending, or narrowed its predicate, would shrink the governed population
+    and every assertion here would still pass. `claude/RULES.md` asks for a
+    cross-check against a second tool that fails differently: `Path.rglob` with
+    a shell glob is a different mechanism from `os.walk` plus a regex, and the
+    two disagreeing is a finding whichever side moved.
+
+    (2) 🔴 THE DISCOVERY GAP, MEASURED. `scripts/testlib/census_scan.py` derives
+    the tests whose verdict depends on the repo's FILE SET, and
+    `ledger-check.sh` runs exactly those as the fast pre-merge screen for "a
+    file landed without its ledger row" — which is this module's failure mode
+    precisely. This module was NOT in that derived set: the scanner reads a
+    `Path(__file__)`-derived root, and ours reaches its walk through a
+    PARAMETER, which its own header lists as a known blind spot. So the screen
+    built for this class could not see the newest member of it. A literal
+    `REPO_ROOT.rglob` here is what makes it visible — pinned by
+    `test_census_scan.py`'s anchors staying green, not by this comment.
+
+    ⚠ NOT a substitute for the seam pin below. This compares two ENUMERATIONS of
+    the same tree; that one pins what the shared predicate MEANS. A widening
+    applied to both sides at once passes here and fails there.
+    """
+    borrowed, scan = handoff_docs(REPO_ROOT)
+    assert scan.complete, scan
+    direct = {
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in (REPO_ROOT / handoff_index.HANDOFF_DIR).rglob("handoff-*.md")
+        if p.is_file()
+    }
+    assert direct, (
+        "the independent rglob found no handoff docs — it is the control half "
+        "of this comparison and two empty sets compare equal, so a zero here "
+        "would make the assertion below vacuous."
+    )
+    only_borrowed = sorted(set(borrowed) - direct)
+    only_direct = sorted(direct - set(borrowed))
+    assert not (only_borrowed or only_direct), (
+        "the borrowed walk and an independent rglob disagree about which files "
+        "are handoff docs — one of them narrowed.\n"
+        f"  only in handoff_index's walk: {only_borrowed}\n"
+        f"  only in the direct rglob:     {only_direct}\n"
+        "⚠ `handoff-.md` is the one name the two mechanisms legitimately "
+        "disagree on (`*` matches empty, `.+` does not). If that is what this "
+        "is, rename the file — it is not a topic."
+    )
+
+
 def test_the_size_predicate_is_the_INDEX_MODULES_and_not_a_second_spelling():
     """🔴 A SEAM LEDGER. `handoff_index` is the single declared answer to "is
     this a handoff doc", and this module is a second consumer of that answer.
@@ -481,14 +587,14 @@ def test_tightest_allowance_quantises_up_and_never_returns_zero():
 # --------------------------------------------------------------------------- #
 # the gate
 # --------------------------------------------------------------------------- #
-@pytest.fixture(scope="module")
-def corpus():
-    sizes, scan = handoff_docs(REPO_ROOT)
-    return sizes, scan
-
-
-def test_no_handoff_doc_exceeds_its_budget(corpus):
-    sizes, _ = corpus
+def test_no_handoff_doc_exceeds_its_budget():
+    # 🔴 `this_repos_corpus()`, NOT `handoff_docs(REPO_ROOT)` — deliberately, and
+    # a module-scoped fixture wrapping it would undo BOTH reasons. It enforces
+    # over the UNION of the two enumerations (a narrowing in either cannot
+    # excuse a file), and the literal REPO_ROOT walk inside it is what
+    # `census_scan.py` can see, which is what puts THIS test in
+    # `ledger-check.sh`'s pre-merge screen. See that function's docstring.
+    sizes = this_repos_corpus()
     findings = oversize_findings(sizes, GRANDFATHERED)
     assert not any(findings.values()), (
         f"\n\nA handoff document is over budget, or the grandfather ledger has "
