@@ -28,7 +28,7 @@ docker build -t harbor.homelab.lan/library/mail-receiver:<NEWTAG> /tmp/mail-rece
 ```bash
 # From a PRODUCTION pod via the postfix relay → MX-routes through the real chain.
 # Relay allows From @mail.zacx.dev (ALLOWED_SENDER_DOMAINS); MYNETWORKS covers pods.
-KUBECONFIG=~/workspace/homelab-talos/production-kubeconfig kubectl -n nebula run mailtest-$RANDOM \
+KUBECONFIG=$KC_PROD kubectl -n nebula run mailtest-$RANDOM \
   --rm -i --restart=Never --image=python:3.12-slim --command -- python3 -c '
 import smtplib; from email.message import EmailMessage
 m=EmailMessage(); m["Message-ID"]="<t@mail.zacx.dev>"; m["From"]="probe@mail.zacx.dev"
@@ -49,7 +49,7 @@ Zone `zacx.dev` id `72f00688be30dfc863a2c84fa6ab771c`. Token: secret
 (DNS-edit scope ONLY — NOT Email Routing admin).
 
 ```bash
-KUBECONFIG=~/workspace/homelab-talos/production-kubeconfig
+KUBECONFIG=$KC_PROD
 CFT=$(kubectl -n external-dns get secret cloudflare-api-token -o jsonpath='{.data.cloudflare_api_token}' | base64 -d)
 ZID=72f00688be30dfc863a2c84fa6ab771c
 curl -s -H "Authorization: Bearer $CFT" "https://api.cloudflare.com/client/v4/zones/$ZID/dns_records?type=MX&per_page=100"

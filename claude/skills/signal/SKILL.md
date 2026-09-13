@@ -274,7 +274,7 @@ group's messages, reactions and attachment bytes — it only stops READS returni
 
 Direct SQL (the store is authoritative):
 ```bash
-export KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig
+export KUBECONFIG=$KC_HOMELAB
 PSQL='kubectl -n mailbox exec mailbox-postgres-0 -- psql -U mailbox -d mailbox -c'
 MUTED='not exists (select 1 from signal.excluded_groups x
         join signal.groups gx on gx.group_id=x.group_id where gx.id=m.group_id)'

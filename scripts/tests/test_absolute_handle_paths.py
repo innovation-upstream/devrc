@@ -87,6 +87,77 @@ against a planted violation on every run (`test_planted_absolute_path_is_caught`
 Both halves are needed: a floor proves the corpus is there, the plant proves the
 matcher can still see.
 
+🔴 `~/<suffix>` IS AN ACCEPTED SPELLING FOR THE **REPO** HANDLES, TODAY
+------------------------------------------------------------------------
+Read the title of this module as narrower than it sounds. `~/workspace/devrc/x`
+names the same checkout as `$DEVRC/x` and this gate does **not** flag it: the
+`~` character is in `_LEFT_BOUND`'s exclusion set, so a tilde-spelled path is
+invisible to every absolute pattern. Measured on the commit this gate was armed
+against: **183** `~/workspace/…` tokens across the corpus, of which **13** name a
+file a `$KC_*` handle also names and **9** of those sit in a `KUBECONFIG=`
+assignment. The 9 are fixed and gated below; the other **176** `~/workspace/…`
+tokens stay green.
+
+That is deliberate, for two reasons and one deferral:
+
+  * `~` IS THE CORRECT SPELLING FOR A READ-TOOL TARGET. A doc pointing an agent
+    at `~/.claude/skills/<name>/reference/<topic>.md` is naming a file to be
+    opened with the Read tool, where `$VAR` does not expand. Arming `~`
+    wholesale would make the gate unsatisfiable on those sites, and
+    `claude/RULES.md` calls a permanently-red gate worse than no gate;
+  * `~` IS ALSO THE CORRECT SPELLING WHERE THE PER-HOST SPLIT IS THE POINT.
+    `claude/skills/clawgate/SKILL.md` and its `reference/troubleshooting.md`
+    tabulate BOTH `~/workspace/homelab-talos/workbench-kubeconfig` and
+    `~/workspace/homelab-infra/workbench-kubeconfig` precisely to teach the
+    reader to `ls` both and take the one that exists. A handle cannot express
+    that -- `$KC_WORKBENCH` names only the `homelab-talos` spelling, so it is
+    EMPTY on exactly the host where `homelab-infra` is right;
+  * and the 176-token repo-handle sweep is DEFERRED work, not a claim that those
+    sites are fine. Until it happens, THIS GATE'S TITLE OVERSTATES ITS SCOPE:
+    it rejects the `/home/<user>/…` spelling everywhere, and the `~/…` spelling
+    for one shape only.
+
+WHAT IS ARMED FOR `~`: A KUBECONFIG ASSIGNMENT, AND NOTHING ELSE
+-----------------------------------------------------------------
+One narrow shape is rejected in the `~` spelling: `KUBECONFIG=~/<suffix>` (with
+or without a leading `export`) where `<suffix>` is a path the `kubeconfigs`
+block of `agent-handles.nix` already names. That block is parsed out of the nix
+file separately from `repos` -- see `_kubeconfig_table` -- so the two halves
+cannot be armed by accident together.
+
+The `KUBECONFIG=` prefix IS the shell-command discriminator, and it is the whole
+restriction: a bare `~/workspace/homelab-talos/homelab-kubeconfig` cited as a
+pointer stays green. Pinned in both directions by
+`test_a_tilde_kubeconfig_outside_a_shell_assignment_stays_green` and
+`test_planted_tilde_kubeconfig_assignment_is_caught`.
+
+That shape is not invented here. `scripts/claude-hooks/shell-env-nudge.py` --
+the RUNTIME nudge, the second copy of the handle table this module deliberately
+does not consult -- already keys on `KUBECONFIG=<path>`, already expands `~`
+before matching, and already declines to nudge a repo path used as a file
+reference. So the gate rejects in a doc exactly what the hook nudges in a live
+command. The TABLES stay separate (reading the nix source is what makes this
+gate DRY against the SOURCE); the DISCRIMINATOR agreeing is the point.
+
+⚠ MEASURED, AND IT CORRECTS THE FOLK JUSTIFICATION FOR THIS RULE
+------------------------------------------------------------------
+The reason usually given -- "an absent `~` path yields an empty `KUBECONFIG=`,
+which falls back to `~/.kube/config`" -- is BACKWARDS, and measuring it takes
+one command. `~` is expanded by the shell whether or not the file exists, so:
+
+    KUBECONFIG=<an absent file>  kubectl config current-context
+        -> `error: current-context is not set`     (LOUD; no fallback)
+    KUBECONFIG=                  kubectl config current-context
+        -> the context from `~/.kube/config`       (SILENT; wrong cluster)
+
+The silent arm is the EXISTENCE-GUARDED HANDLE's failure mode, not the tilde's:
+a `$KC_*` that declines to export leaves `KUBECONFIG=` empty. So substituting
+the handle trades a loud failure for a quiet one on a host where the checkout is
+absent. It is still the right trade here -- this is a SPELLING gate, and the
+duplicated literal is wrong on any host whose checkout differs (the
+`homelab-talos` / `homelab-infra` split above is that host, live) -- but do not
+repeat the fallback sentence as the mechanism. It is not what happens.
+
 THE ESCAPE HATCH
 ----------------
 `IGNORE_FILE`, keyed on `(doc, literal)` -- NOT on the literal alone, so an
@@ -112,6 +183,12 @@ from test_doc_path_rot import (  # noqa: E402
     _corpus_from_index,
     _has_index,
 )
+# 🔴 The SEAM is this module's corpus against the one the OTHER GATE ACTUALLY
+# ITERATES -- `test_doc_path_rot._corpus`, the zero-argument function its own
+# gate calls. Comparing against `_corpus_docs` instead cannot fail, because the
+# local `_corpus` is defined as a call to it; see
+# `test_the_corpus_is_the_doc_rot_gates_corpus`.
+from test_doc_path_rot import _corpus as _doc_rot_corpus  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 HANDLES_NIX = REPO_ROOT / "nix/agent-handles.nix"
@@ -125,6 +202,13 @@ IGNORE_FILE = HERE / "absolute-handle-path-ignore.list"
 # would go unparsed, which `test_the_handle_table_is_parsed_from_the_nix_source`
 # catches via the floor and the named-handle assertions.
 _NIX_ENTRY = re.compile(r'^\s*([A-Z][A-Z0-9_]*)\s*=\s*"\$\{home\}/([^"]+)"\s*;', re.M)
+
+# The `kubeconfigs = { ... };` attrset, isolated from `repos = { ... };`. Only
+# the kubeconfig half is armed for the `~` spelling (see the docstring), so the
+# two must be parsed SEPARATELY rather than filtered by a `KC_` name prefix --
+# a naming convention is a spelling, and a handle added to `kubeconfigs` under
+# some other name would silently go unarmed.
+_NIX_SECTION = re.compile(r"^\s*kubeconfigs\s*=\s*\{(.*?)^\s*\};", re.M | re.S)
 
 # The `${home}` half, as a pattern: ANY absolute prefix of one or more segments.
 # This is what makes the gate host-independent -- `/home/zach`, `/home/alice` and
@@ -149,6 +233,20 @@ _RIGHT_BOUND = r"(?![A-Za-z0-9._+-])"
 # carry them; a trailing `/` is allowed, punctuation that ends a sentence is not.
 _TAIL = r"(?:/[A-Za-z0-9._+@%-]+)*/?"
 
+# THE `~` HALF -- kubeconfigs only, and only inside a shell assignment.
+#
+# `KUBECONFIG=` is the shell-command discriminator. It is what separates a
+# RUNNABLE command (where `$KC_*` expands and is the correct spelling) from a
+# doc POINTER or a Read-tool target (where `$VAR` does NOT expand, so `~` is
+# correct and must stay legal). Widening this to bare `~/<suffix>` flags those
+# pointers; `test_a_tilde_kubeconfig_outside_a_shell_assignment_stays_green`
+# is the assertion that catches the widening.
+#
+# The left lookbehind keeps `MY_KUBECONFIG=`-style suffixed names out, so the
+# match is an assignment to the real variable rather than to anything ending in
+# those letters. There is no `_TAIL`: a kubeconfig handle names a FILE.
+_KUBECONFIG_ASSIGN = r"(?<![A-Za-z0-9_])KUBECONFIG="
+
 
 def _handle_table() -> list[tuple[str, str]]:
     """`[(HANDLE_NAME, home-relative-suffix), ...]`, LONGEST SUFFIX FIRST.
@@ -162,11 +260,45 @@ def _handle_table() -> list[tuple[str, str]]:
     return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
 
 
+def _kubeconfig_table() -> list[tuple[str, str]]:
+    """The `kubeconfigs` half of `agent-handles.nix`, LONGEST SUFFIX FIRST.
+
+    Parsed out of its own attrset, not filtered by name. An empty return here
+    disarms the whole `~` half while every other assertion stays green, so it is
+    floored as a ledger by `test_the_kubeconfig_table_is_its_own_nix_section`.
+    """
+    text = HANDLES_NIX.read_text(encoding="utf-8")
+    m = _NIX_SECTION.search(text)
+    if not m:
+        raise AssertionError(
+            f"no `kubeconfigs = {{ ... }};` block found in {HANDLES_NIX}. The "
+            "`~` half of this gate is built from that block; without it every "
+            "tilde-spelled kubeconfig assignment in the corpus goes UNCHECKED "
+            "while this module still reports PASS."
+        )
+    entries = [(name, rel.rstrip("/")) for name, rel in _NIX_ENTRY.findall(m.group(1))]
+    return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
+
+
 def _patterns() -> list[tuple[str, re.Pattern[str]]]:
-    return [
-        (name, re.compile(_LEFT_BOUND + _ABS_PREFIX + re.escape(rel) + _TAIL + _RIGHT_BOUND))
+    """`[(HANDLE_NAME, compiled), ...]`. Group 1 of every pattern is the LITERAL.
+
+    Two families, and they cannot collide: an absolute match starts at `/`, a
+    tilde match at `~`, so no offset is ever claimed by both. Group 1 is what
+    makes them uniform -- the `~` patterns must not report their `KUBECONFIG=`
+    prefix as part of the path.
+    """
+    abs_pats = [
+        (name, re.compile(
+            _LEFT_BOUND + "(" + _ABS_PREFIX + re.escape(rel) + _TAIL + ")" + _RIGHT_BOUND
+        ))
         for name, rel in _handle_table()
     ]
+    tilde_pats = [
+        (name, re.compile(_KUBECONFIG_ASSIGN + "(~/" + re.escape(rel) + ")" + _RIGHT_BOUND))
+        for name, rel in _kubeconfig_table()
+    ]
+    return abs_pats + tilde_pats
 
 
 def _violations(docs: dict[str, str]) -> list[tuple[str, int, str, str]]:
@@ -185,8 +317,10 @@ def _violations(docs: dict[str, str]) -> list[tuple[str, int, str, str]]:
             for name, pat in pats:
                 for m in pat.finditer(line):
                     # First writer wins: `pats` is longest-suffix-first, so the
-                    # most specific handle claims the offset.
-                    claimed.setdefault(m.start(), (m.group(0), name))
+                    # most specific handle claims the offset. Group 1 is the
+                    # literal -- for a `~` match the `KUBECONFIG=` prefix that
+                    # anchored it is NOT part of the path being reported.
+                    claimed.setdefault(m.start(1), (m.group(1), name))
             for start in sorted(claimed):
                 literal, name = claimed[start]
                 out.append((doc, lineno, literal, name))
@@ -307,10 +441,18 @@ def test_corpus_is_not_empty():
 def test_the_corpus_is_the_doc_rot_gates_corpus():
     """SEAM GUARD. Two gates over 'the same corpus' is a claim, and a claim that
     nobody owns drifts: if one of them narrows, the other's green stops covering
-    what its docstring says it covers. Asserted in BOTH tiers -- the temp-repo
-    arms live in `test_doc_path_rot`; here it is enough that both modules compute
-    the corpus from the SAME functions and that the no-index fallback agrees."""
-    assert _corpus() == _corpus_docs(REPO_ROOT), (
+    what its docstring says it covers.
+
+    🔴 GRADED AGAINST THE OTHER GATE'S OWN ENTRY POINT, `test_doc_path_rot
+    ._corpus` -- the zero-argument function that module's gate actually iterates
+    -- NOT against the shared builder `_corpus_docs`. That distinction is the
+    whole guard: the local `_corpus` is *defined* as `_corpus_docs(REPO_ROOT)`,
+    so `assert _corpus() == _corpus_docs(REPO_ROOT)` restates its own definition
+    and cannot fail for the reason the docstring gives. It stayed green through
+    a narrowing of `test_doc_path_rot._corpus`, which is the exact seam it
+    claims to watch. Reading as coverage while providing none is worse than
+    providing none, because it stops anyone looking."""
+    assert _corpus() == _doc_rot_corpus(), (
         "this gate's corpus is no longer the doc-rot gate's corpus. A narrowed "
         "corpus is the silent failure: every doc it dropped is UNCHECKED and "
         "UNCOUNTED, and the gate still reports PASS."
@@ -358,6 +500,43 @@ def test_the_handle_table_is_parsed_from_the_nix_source():
     # The suffixes are what the patterns are built from; an empty one would match
     # every absolute path in the corpus.
     for name, rel in table:
+        assert rel and not rel.startswith("/") and "${" not in rel, (
+            f"{name} parsed to a suffix this gate cannot use: {rel!r}"
+        )
+
+
+KNOWN_KUBECONFIG_HANDLES = frozenset(
+    {"KC_HOMELAB", "KC_WORKBENCH", "KC_PROD", "KC_DPPROD", "KC_NEBULA"}
+)
+KNOWN_REPO_HANDLES = KNOWN_HANDLES - KNOWN_KUBECONFIG_HANDLES
+
+
+def test_the_kubeconfig_table_is_its_own_nix_section():
+    """LEDGER + NEGATIVE LEDGER on the `~` half's table.
+
+    🔴 BOTH DIRECTIONS MATTER AND THEY FAIL DIFFERENTLY. An EMPTY or shrunken
+    table disarms the `~` check while every other assertion in this module stays
+    green -- the reassuring zero. A table that GREW to include the repo handles
+    would arm `~` for all 184 `~/workspace/…` sites, which is the deferred sweep
+    and would make the gate unsatisfiable on Read-tool pointers. So the
+    kubeconfig names are floored as a set AND the repo names are asserted
+    ABSENT.
+    """
+    names = {n for n, _ in _kubeconfig_table()}
+    assert not (KNOWN_KUBECONFIG_HANDLES - names), (
+        "kubeconfig handles no longer parsed out of the `kubeconfigs` block of "
+        f"nix/agent-handles.nix: {sorted(KNOWN_KUBECONFIG_HANDLES - names)}. "
+        "The `~` half of this gate is built from that block, so every tilde-"
+        "spelled assignment naming them is now UNCHECKED."
+    )
+    leaked = names & KNOWN_REPO_HANDLES
+    assert not leaked, (
+        f"repo handles leaked into the kubeconfig table: {sorted(leaked)}. That "
+        "arms the `~` spelling for repo checkouts, which this module's docstring "
+        "records as an ACCEPTED spelling (Read-tool targets need it) and as "
+        "deferred work. Widening it here is a silent scope change."
+    )
+    for name, rel in _kubeconfig_table():
         assert rel and not rel.startswith("/") and "${" not in rel, (
             f"{name} parsed to a suffix this gate cannot use: {rel!r}"
         )
@@ -528,6 +707,73 @@ def test_planted_absolute_path_is_caught(text, literal, handle):
     handle. A gate that stays green on a planted violation is testing nothing."""
     assert _found(text) == [(literal, handle)], (
         f"planting {text!r} did not produce exactly [({literal!r}, {handle!r})]."
+    )
+
+
+@pytest.mark.parametrize(
+    "text,literal,handle",
+    [
+        # The shape measured in the corpus: a one-shot env prefix on a command.
+        ("`KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig kubectl get pods`",
+         "~/workspace/homelab-talos/homelab-kubeconfig", "KC_HOMELAB"),
+        # `export`, inside a fenced block.
+        ("export KUBECONFIG=~/workspace/homelab-talos/production-kubeconfig",
+         "~/workspace/homelab-talos/production-kubeconfig", "KC_PROD"),
+        # The dot-directory kubeconfig, which lives nowhere near a checkout.
+        ("`KUBECONFIG=~/.kube/homelab-nebula.yaml kubectl -n activity get pods`",
+         "~/.kube/homelab-nebula.yaml", "KC_NEBULA"),
+        # A DIFFERENT repo's kubeconfig, to prove the table is not one row.
+        ("KUBECONFIG=~/workspace/civit/datapacket-talos/prod-kubeconfig kubectl top nodes",
+         "~/workspace/civit/datapacket-talos/prod-kubeconfig", "KC_DPPROD"),
+    ],
+    ids=["homelab-inline", "prod-export", "nebula-dotdir", "dpprod"],
+)
+def test_planted_tilde_kubeconfig_assignment_is_caught(text, literal, handle):
+    """NEGATIVE CONTROL on the `~` half.
+
+    The reported literal must be the PATH, not the `KUBECONFIG=` prefix that
+    anchored it -- otherwise the printed remedy is unusable and the ignore-list
+    key names a string no reader would search for."""
+    assert _found(text) == [(literal, handle)], (
+        f"planting {text!r} did not produce exactly [({literal!r}, {handle!r})]."
+    )
+    assert _remedy(literal, handle) == f"${handle}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 🔴 THE SHELL-CONTEXT RESTRICTION, GRADED. Each of these names a file a
+        # `$KC_*` handle also names, in the `~` spelling, and each must stay
+        # GREEN because it is not a shell assignment. Widening the restriction
+        # -- dropping the `KUBECONFIG=` anchor -- turns every one of them red.
+        #
+        # A Read-tool target: `$VAR` does not expand there, so `~` is CORRECT.
+        "Open `~/workspace/homelab-talos/homelab-kubeconfig` to read the context list.",
+        # A table cell naming the file as a fact, not running anything.
+        "| Kubeconfig | `~/workspace/homelab-talos/workbench-kubeconfig` | absent |",
+        # 🔴 THE PER-HOST SPLIT, where the handle is not equivalent: the laptop
+        # checkout is `homelab-infra`, which NO handle names, so the doc must be
+        # free to write both spellings side by side.
+        "workbench -> `~/workspace/homelab-talos/workbench-kubeconfig`; "
+        "laptop -> `~/workspace/homelab-infra/workbench-kubeconfig`",
+        # An assignment to a DIFFERENT variable that merely ends in the letters.
+        "`MY_KUBECONFIG=~/.kube/homelab-nebula.yaml`",
+        # The remedy itself, which must stay satisfiable.
+        "`KUBECONFIG=$KC_HOMELAB kubectl get pods -A`",
+        # A `~` path under a REPO handle: the accepted spelling, deferred sweep.
+        "`KUBECONFIG=~/workspace/homelab-talos/some-other-file`",
+        # A kubeconfig-shaped sibling that no handle names.
+        "`KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig-old`",
+    ],
+    ids=["read-tool-target", "table-cell", "per-host-split", "other-var",
+         "the-remedy", "repo-handle-tilde", "sibling-file"],
+)
+def test_a_tilde_kubeconfig_outside_a_shell_assignment_stays_green(text):
+    assert _found(text) == [], (
+        f"planting {text!r} turned the gate red. The `~` half is armed ONLY for "
+        "a `KUBECONFIG=` assignment; anything wider makes Read-tool pointers and "
+        "the per-host `homelab-infra` table unsatisfiable."
     )
 
 
