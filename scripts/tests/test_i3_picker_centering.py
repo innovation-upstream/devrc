@@ -24,14 +24,24 @@ THE FIX HAS TWO HALVES AND BOTH ARE HAZARDS, which is why there are two guards:
 
 AND THE REVIEW TUI — the other window `mention-open.py` launches — MUST FIT THE
 SCREEN, which is guards 3 and 4. It opened at 200x50 CHARACTER CELLS and overflowed
-the display, unusably: a cell's pixel size is a function of font size and DPI, so
-one cell count cannot satisfy a 3440x1413 workspace at ~96 DPI and a 2256x1480 one
-at ~201 DPI. i3 sizes it in `ppt` — percent of the workspace — which is correct on
-both hosts by construction, and the cell counts survive only as a pre-map hint. The
-hazards mirror the picker's: a resize expressed in PIXELS reads almost identically
-in the config, a `resize set` on a still-TILED window is a silent no-op, and hanging
-the resize off the shared `class="float"` rule would resize a dozen windows plus the
-picker while passing every positive guard.
+the laptop's display, unusably. A cell's pixel size is a function of font size and
+DPI, so one cell count cannot satisfy both hosts; i3 sizes it in `ppt` — percent of
+the workspace — and `mention-open.py` now passes NO `window.dimensions` at all, so
+i3 is the sole authority and there is no second number to disagree with it.
+
+🔴 BUT `ppt` IS THE RIGHT UNIT, NOT A HOST-INDEPENDENT SIZE, AND THAT IS WHY THE
+PERCENTAGES ARE PER HOST. One shared `90 ppt 90 ppt` fits the laptop and makes the
+workbench's window 41% WIDER than the size the operator called unusable — on the
+host that never had the defect. So guard 3 pins the percentages PER HOST, and a
+separate guard pins that the two hosts DISAGREE: collapsing them back to one number
+is the regression this whole arrangement exists to prevent, and it would otherwise
+pass every mechanism check here.
+
+THE HAZARDS MIRROR THE PICKER'S: a resize expressed in PIXELS reads almost
+identically in the config (i3 defaults the unit to px when omitted), a `resize set`
+on a still-TILED window is a silent no-op, and hanging the resize off the shared
+`class="float"` rule would resize a dozen windows plus the picker while passing
+every positive guard.
 
 WHY NEITHER GUARD IS SPELLED. The picker's identity is DERIVED by importing
 `scripts/mention-open.py` and splitting `PICKER_CLASS`, so renaming the instance
@@ -347,25 +357,67 @@ def test_no_OTHER_float_this_repo_launches_is_moved_or_resized(is_laptop):
 
 
 # --------------------------------------------------------------------------- #
-# GUARD 3 — the REVIEW TUI is sized in PERCENT OF THE WORKSPACE.
+# GUARD 3 — the REVIEW TUI is sized in PERCENT OF THE WORKSPACE, PER HOST.
 #
-# THE DEFECT: the review window opened at `REVIEW_COLUMNS`x`REVIEW_LINES` =
-# 200x50 CHARACTER CELLS and overflowed the screen, unusably. A cell is not a
-# length — its pixel size is a function of the font size and the display's DPI —
-# so no single cell count can fit two displays. MEASURED: the workbench's usable
-# workspace is 3440x1413 at ~96 DPI; the laptop's is 2256x1480 on a 285mm eDP-1
-# panel, ~201 DPI. Both hosts resolve the SAME alacritty.toml out of the nix store
-# and it sets no `[font]` size, so the laptop's cell is roughly twice the
-# workbench's in each axis and the same constant asks for roughly four times the
-# area. `ppt` is a percentage of the workspace i3 is placing the window on, so it
-# is right on both hosts by construction — and on any display added later.
+# THE DEFECT: the review window opened at 200x50 CHARACTER CELLS and overflowed
+# the LAPTOP's screen, unusably. A cell is not a length — its pixel size is a
+# function of the font size and the display's DPI — so no single cell count can
+# fit two displays, and `mention-open.py` now passes no cell count at all.
 #
-# The guards below pin the MECHANISM, not the number: that the window receives a
-# resize whose UNITS are percent-of-workspace, that the rule issuing it also
-# floats the window (a `resize set` on a TILED window is a silent no-op — the same
-# hazard guard 1's companion pins for the picker), and that it is centred. The
-# percentage itself is a taste call and may be tuned without going red.
+# MEASURED 2026-09-12 by `TIOCGWINSZ` on each host's own running alacritty pty,
+# which reports the grid in rows/cols AND its size in pixels — so the cell size is
+# a DIVISION, not a DPI estimate. (The pty has to be a DIRECT child of alacritty:
+# a tmux pane's winsize is synthesized by tmux and says nothing about a font.)
+# Workspace rects from i3's own `get_workspaces`, i3 4.25.1 on both hosts:
+#
+#   host       usable workspace   cell (px)     largest grid observed
+#   workbench  3440x1413          11.0 x 22.0   312 x 63
+#   laptop     2256x1480          19.0 x 37.0   118 x 39
+#
+# The laptop's cell is 1.73x wider and 1.68x taller — 2.90x the AREA. An earlier
+# revision of this file said "roughly twice in each axis … roughly four times the
+# area"; that was unmeasured and it OVER-stated the gap, which is exactly how one
+# percentage came to look like it could serve both hosts.
+#
+# 🔴 SO `ppt` IS THE RIGHT UNIT AND NOT A HOST-INDEPENDENT SIZE. `resize set 90 ppt
+# 90 ppt` is 2030x1332 px on the laptop (fits) and 3096x1272 on the workbench —
+# +41% on the width of the 2200x1100 window the operator called unusable, on the
+# host where the review TUI had never even opened (its `picks.jsonl` does not
+# exist; the laptop's does). Hence `_REVIEW_PPT` below, and hence the guard that
+# the two hosts DISAGREE.
+#
+# The guards below pin FOUR things: that the window receives a resize whose UNITS
+# are percent-of-workspace (i3 defaults the unit to px, so `resize set 90 90` is a
+# legal 90-PIXEL window); that the percentages are THIS HOST'S; that the two hosts
+# differ; and that the rule issuing the resize also floats the window (a `resize
+# set` on a TILED window is a silent no-op — the same hazard guard 1's companion
+# pins for the picker) and centres it.
 # --------------------------------------------------------------------------- #
+#: The `resize set <w> ppt <h> ppt` operands each host must receive, and the
+#: MEASURED facts they were derived from. Literal expectations on purpose — a
+#: value recomputed from the config would be the implementation restating itself.
+#:
+#: 🔴 TUNING EITHER PAIR MEANS RE-DERIVING IT FROM A FRESH MEASUREMENT, not
+#: nudging the number: the workbench's 64x78 is not a taste call but the pair that
+#: reproduces the size that host ALREADY renders (see the guard below), and the
+#: laptop's 90x90 is the largest round pair that fits 2256x1480.
+_REVIEW_PPT = {"workbench": (64, 78), "laptop": (90, 90)}
+
+#: {host: (workspace_px, cell_px)} — see the MEASURED table above. Used only to
+#: re-derive what `_REVIEW_PPT` comes out to in cells, so the ledger carries its
+#: own justification instead of two bare numbers nobody can check.
+_MEASURED = {"workbench": ((3440, 1413), (11.0, 22.0)),
+             "laptop": ((2256, 1480), (19.0, 37.0))}
+
+#: What `REVIEW_COLUMNS`x`REVIEW_LINES` held on `main` — i.e. the size the
+#: workbench renders TODAY, and the one it must keep rendering.
+_DEPLOYED_REVIEW_CELLS = (200, 50)
+
+
+def _review_ppt(is_laptop):
+    """The (w, h) percent pairs the review window receives on this host."""
+    return _percent_resizes(_actions(render(is_laptop), _review_window()))
+
 @pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
 def test_the_review_window_is_sized_in_PERCENT_OF_WORKSPACE_on_both_hosts(
         is_laptop):
@@ -383,11 +435,10 @@ def test_the_review_window_is_sized_in_PERCENT_OF_WORKSPACE_on_both_hosts(
     assert pcts, (
         "on the %s render of nix/i3/config.nix, a window with the review TUI's "
         "own properties (%s — from REVIEW_CLASS=%r) receives %s. Nothing sizes "
-        "it as a PERCENT OF THE WORKSPACE (`resize set <w> ppt <h> ppt`), so its "
-        "size is whatever `REVIEW_COLUMNS`x`REVIEW_LINES` CHARACTER CELLS happen "
-        "to come to on this display — the defect: a cell's pixel size is "
-        "DPI-dependent, the workbench is 3440x1413 at ~96 DPI and the laptop "
-        "2256x1480 at ~201 DPI, and one cell count cannot fit both."
+        "it as a PERCENT OF THE WORKSPACE (`resize set <w> ppt <h> ppt`). i3 is "
+        "the ONLY thing that sizes this window — scripts/mention-open.py passes "
+        "no `window.dimensions` for it — so with this rule gone the window is "
+        "whatever alacritty defaults to, and nothing fits it to the display."
         % (host, window, MO.REVIEW_CLASS,
            sorted(got) or "NO for_window rule at all"))
     bad = [p for p in pcts if not all(0 < v <= 100 for v in p)]
@@ -395,6 +446,96 @@ def test_the_review_window_is_sized_in_PERCENT_OF_WORKSPACE_on_both_hosts(
         "on the %s render the review window's percent-of-workspace resize is "
         "%s — a `ppt` value outside 1..100 is not a percentage of anything i3 "
         "can place it on." % (host, bad))
+
+
+@pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
+def test_the_review_windows_percentages_are_THIS_HOSTS(is_laptop):
+    """🔴 THE PER-HOST PIN. The guard above accepts ANY percentage in 1..100, so
+    it passed in full over a single shared `90 ppt 90 ppt` — which fits the laptop
+    and is +41% on the width of the window the operator reported as unusable, on
+    the workbench, where the review TUI had never opened at all.
+
+    A percentage of a workspace is a different SIZE on every workspace. `ppt` buys
+    the right unit; it does not buy one number serving two displays.
+    """
+    host = HOSTS[1] if is_laptop else HOSTS[0]
+    want = _REVIEW_PPT[host]
+    got = _review_ppt(is_laptop)
+    assert got == [want], (
+        "on the %s render the review window receives percent-of-workspace "
+        "resize(s) %s; this host must get exactly %s. Workspace %dx%d, cell "
+        "%.1fx%.1f px (measured). If you are retuning this deliberately, re-derive "
+        "the pair from a fresh measurement and update `_REVIEW_PPT` — and check "
+        "the OTHER host separately, because the two are not interchangeable."
+        % (host, got or "NONE", [want], _MEASURED[host][0][0],
+           _MEASURED[host][0][1], _MEASURED[host][1][0], _MEASURED[host][1][1]))
+
+
+def test_the_two_HOSTS_review_percentages_DIFFER():
+    """🔴 THE GUARD ON THE DECISION ITSELF, and the one no per-host pin can give
+    you. `_REVIEW_PPT` is a ledger in this file: a future change that collapses
+    the two hosts back to one `resize set` AND edits the ledger to match passes
+    every other guard here, green, having reintroduced the exact defect.
+
+    So this reads the two RENDERS and asserts they disagree, without consulting
+    the ledger at all. The percentages may both be retuned; they may not become
+    one number. A display that genuinely made the same pair correct on both hosts
+    would be a reason to delete this test deliberately, with the measurement that
+    shows it — not a reason for it to quietly pass.
+    """
+    wb, lt = _review_ppt(False), _review_ppt(True)
+    assert wb and lt, (
+        "one of the renders carries no percent-of-workspace resize for the review "
+        "window at all (workbench=%s, laptop=%s) — see the sizing guard above; "
+        "this guard would otherwise pass vacuously on two empty lists being "
+        "unequal to each other." % (wb or "NONE", lt or "NONE"))
+    assert wb != lt, (
+        "both hosts size the review window at %s. The percentages are PER HOST on "
+        "purpose: `ppt` is a percentage of the workspace, and the two workspaces "
+        "are %dx%d (workbench) and %dx%d (laptop), so one pair cannot express one "
+        "intent on both. A shared 90x90 renders 3096x1272 on the workbench — 41%% "
+        "wider than the 2200x1100 window the operator called unusable, on the host "
+        "that never had the defect. Put the per-host fragment back in "
+        "nix/i3/config.nix (`reviewSizePpt`)."
+        % (wb, _MEASURED["workbench"][0][0], _MEASURED["workbench"][0][1],
+           _MEASURED["laptop"][0][0], _MEASURED["laptop"][0][1]))
+
+
+def test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders():
+    """🔴 WHY 64x78 AND NOT A ROUNDER NUMBER — the one claim in this change that is
+    about NOT changing anything.
+
+    The reported defect was the laptop's. The workbench's 200x50-cell window is
+    2200x1100 px, which fits its 3440x1413 workspace at 64% x 78%, and the
+    operator's decision was that this host must come out of the change rendering
+    exactly what it renders now. `64 ppt 78 ppt` is that size re-expressed, not a
+    new choice — so pin it as the derivation rather than as a literal, or the next
+    person reads two arbitrary numbers and rounds them.
+
+    Asserted in CELLS, which is the unit the grid actually quantises to: the pixel
+    sizes differ by +1.6 x +2.1 px, under one cell in both axes.
+    """
+    (ws_w, ws_h), (cell_w, cell_h) = _MEASURED["workbench"]
+    want_cols, want_lines = _DEPLOYED_REVIEW_CELLS
+    got = _review_ppt(False)
+    assert len(got) == 1, (
+        "the workbench render carries %s percent-of-workspace resizes for the "
+        "review window, expected exactly one: %s" % (len(got), got or "NONE"))
+    w_pct, h_pct = got[0]
+    cols = int(ws_w * w_pct / 100.0 // cell_w)
+    lines = int(ws_h * h_pct / 100.0 // cell_h)
+    assert (cols, lines) == (want_cols, want_lines), (
+        "the workbench's `resize set %d ppt %d ppt` maps to %dx%d CHARACTER CELLS "
+        "(%.0fx%.0f px of a %dx%d workspace at a measured %.1fx%.1f px cell). It "
+        "has to come to %dx%d — the size that host renders TODAY, from the "
+        "REVIEW_COLUMNS/REVIEW_LINES deployed on main. The laptop is the host with "
+        "the defect; changing the workbench's size is not part of this fix. If the "
+        "workbench's font or display really has changed, RE-MEASURE "
+        "(`TIOCGWINSZ` on a direct alacritty child pty, i3 `get_workspaces` for "
+        "the rect), update `_MEASURED`, and re-derive the percentages."
+        % (w_pct, h_pct, cols, lines, ws_w * w_pct / 100.0,
+           ws_h * h_pct / 100.0, ws_w, ws_h, cell_w, cell_h,
+           want_cols, want_lines))
 
 
 @pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
@@ -449,6 +590,17 @@ def test_the_sizing_rule_names_the_review_instance_EXACTLY(is_laptop):
     anchoring (`^…$`) is accepted, an alternation or a prefix is not — the
     conservative direction, and a rule wanting to cover two windows can say so by
     failing here first.
+
+    ⚠ WHAT THAT COSTS, stated rather than left for the next person to discover:
+    this guard FORBIDS the legitimate spelling
+    `instance="mention-(open|review)"`. That alternation is a correct, arguably
+    tidier way to write one rule covering both of this handler's windows, and it
+    reddens here. The refusal is deliberate — an alternation is also how a rule
+    silently grows to cover a window nobody sized for, and this file cannot tell
+    the two apart — but it is a real constraint, not an oversight. A change that
+    genuinely wants one rule for both windows has to widen this guard explicitly
+    (match the criterion against the SET of instances it is allowed to name),
+    which is the conversation worth having rather than skipping.
     """
     host = HOSTS[1] if is_laptop else HOSTS[0]
     cfg = render(is_laptop)
@@ -475,9 +627,10 @@ def test_the_sizing_rule_names_the_review_instance_EXACTLY(is_laptop):
 
 @pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
 def test_the_review_window_is_CENTRED_on_both_hosts(is_laptop):
-    """A 90%-of-workspace window placed at i3's default float position hangs off
-    the edge it is pushed against — so the resize is only half the fix. Same
-    assertion shape as guard 1's, against the review window's own identity."""
+    """A window sized to most of the workspace and placed at i3's default float
+    position hangs off the edge it is pushed against — so the resize is only half
+    the fix. Same assertion shape as guard 1's, against the review window's own
+    identity."""
     host = HOSTS[1] if is_laptop else HOSTS[0]
     got = _actions(render(is_laptop), _review_window())
     assert "move position center" in got, (

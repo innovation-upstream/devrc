@@ -1683,33 +1683,39 @@ def open_browser(url: str) -> int:
     return 0
 
 
-# The float terminal the review TUI runs in, and its PRE-RESIZE size HINT.
+# The float terminal the review TUI runs in. ITS SIZE IS NOT SET HERE.
 #
 # `--class float,mention-review` puts it under `for_window [class="float"]
 # floating enable` in `nix/i3/config.nix` — the same rule the fzf picker's
 # terminal uses — while the instance half names THIS window specifically, and a
 # second, narrower rule keys on exactly that: `for_window [class="float"
-# instance="mention-review"] floating enable, resize set 90 ppt 90 ppt, move
-# position center`.
+# instance="mention-review"] floating enable, resize set <w> ppt <h> ppt, move
+# position center`, with the percentages PER HOST (`reviewSizePpt` there).
 #
-# 🔴 THAT i3 RULE IS AUTHORITATIVE FOR THE SIZE. THESE TWO NUMBERS ARE A HINT.
-# They are a count of CHARACTER CELLS, and a cell is not a length — its pixel size
-# depends on the font size and the display's DPI, so no single pair can fit two
-# displays. At 200x50 this window opened bigger than the laptop's screen and was
-# unusable: the workbench's usable workspace is 3440x1413 at ~96 DPI, the laptop's
-# 2256x1480 on a 285mm panel at ~201 DPI, so the laptop's cell is roughly twice the
-# workbench's in each axis. i3 resizes to a percentage of the ACTUAL workspace the
-# moment the window maps, which is host-independent by construction; these values
-# only decide what alacritty maps FIRST, and are the standalone fallback for the
-# case where that rule is absent or i3 is not the window manager. So they are
-# deliberately conservative rather than large — an over-large hint is a visible
-# flash before the resize with i3, and an unusable window without it.
+# 🔴 THERE IS DELIBERATELY NO `REVIEW_COLUMNS`/`REVIEW_LINES`, AND NO
+# `-o window.dimensions.*` ON THE COMMAND LINE BELOW. i3 is the sole authority on
+# this window's geometry; a cell hint here would be a second number for one
+# decision, in a file that cannot see the workspace it has to fit.
 #
-# Still bigger than `PICKER_*`: the picker is a list, a review is a diff beside a
-# file panel.
+# A cell is not a length — its pixel size is a function of the font size and the
+# display's DPI — so no single cell count fits both hosts. MEASURED 2026-09-12 by
+# `TIOCGWINSZ` on each host's own running alacritty pty (it reports the grid in
+# rows/cols AND in pixels, so the cell size is a division, not an estimate):
+# the workbench's cell is 11.0x22.0 px in a 3440x1413 workspace, the laptop's
+# 19.0x37.0 px in 2256x1480 — 1.73x wider, 1.68x taller, 2.90x the area. The
+# largest grids that fit are about 312x63 and 118x39 respectively. So 200x50, the
+# value that drew the complaint, is 2200x1100 px on the workbench (fine) and
+# 3800x1850 on the laptop (168% x 125% of the screen — the defect); and 140x40,
+# the lowered hint this constant briefly held, is still 2660x1480 on the laptop,
+# 118% of its width. A hint that can only ever be right on one host is not a
+# fallback, it is a second bug.
+#
+# With no `window.dimensions` alacritty maps at its own default (~80x24), which is
+# 880x528 px on the workbench and 1520x888 on the laptop — inside both workspaces.
+# So the pre-resize flash is small-then-right rather than oversized-then-right,
+# and if the i3 rule is ever absent the window is merely SMALL, which is usable.
+# That is a strictly better failure mode than a window bigger than the screen.
 REVIEW_CLASS = "float,mention-review"
-REVIEW_COLUMNS = 140
-REVIEW_LINES = 40
 
 # The wrapper that runs neovim with octo.nvim configured. Packaged as
 # `nix/pkgs/tools/nvim-octo/` and pinned onto the hint wrapper's PATH by
@@ -1847,10 +1853,13 @@ def open_tui(url: str) -> tuple[int, str]:
         # `nvim-octo` takes `<owner/repo> <number>` as two ordinary argv
         # entries and assembles the ex-command itself, so no quoting hazard
         # reaches this file and argv[0] stays the constant the ledger needs.
+        #
+        # 🔴 NO `-o window.dimensions.*` HERE, ON PURPOSE — see REVIEW_CLASS.
+        # i3 sizes this window in percent of the workspace, per host; a cell
+        # count added back here would be a second geometry for one window and
+        # could only ever fit one of the two displays.
         subprocess.Popen(
             ["alacritty", "--class", REVIEW_CLASS,
-             "-o", f"window.dimensions.columns={REVIEW_COLUMNS}",
-             "-o", f"window.dimensions.lines={REVIEW_LINES}",
              "-e", REVIEW_EXE, repo, num],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1971,15 +1980,34 @@ def open_reference(url: str) -> tuple[int, str]:
 # `scripts/tests/test_i3_picker_centering.py` derives the instance FROM this
 # constant rather than spelling it, and goes red on the disagreement.
 #
-# The SIZE stays here and only here. i3 centres the window alacritty sized; the
-# picker's rule carries no `resize set`, so `PICKER_COLUMNS`/`PICKER_LINES` below
-# are the single source of the picker's geometry. 🔴 THE CONFIG DOES CARRY ONE
-# NOW, for the review window — `resize set 90 ppt 90 ppt` on
-# `instance="mention-review"` — so this is a claim about the PICKER's rule, not
-# about the file. The two windows differ on purpose: the picker is small enough
-# that no display makes its cell count overflow, the review window was not.
+# The SIZE stays here and only here — FOR THE PICKER. i3 centres the window
+# alacritty sized; the picker's rule carries no `resize set`, so
+# `PICKER_COLUMNS`/`PICKER_LINES` below are the single source of the picker's
+# geometry. 🔴 THE CONFIG DOES CARRY A `resize set` NOW — for the REVIEW window,
+# on `instance="mention-review"`, with PER-HOST percentages (`reviewSizePpt` in
+# nix/i3/config.nix) — so this is a claim about the PICKER's rule, not about the
+# file, and the review window's geometry is the exact OPPOSITE arrangement: it
+# passes no `window.dimensions` at all and i3 owns its size outright.
+#
+# The two windows differ in DEGREE, and the honest version of that is worth
+# writing down. MEASURED 2026-09-12 (`TIOCGWINSZ` on each host's own alacritty
+# pty): the workbench's cell is 11.0x22.0 px in a 3440x1413 workspace, the
+# laptop's 19.0x37.0 px in 2256x1480. So the review window's 200x50 was
+# 3800x1850 px on the laptop — 168% x 125% of the screen, grossly unusable — while
+# this picker's 120x22 is 1320x484 px on the workbench (38% x 34%, fine) and
+# 2280x814 on the laptop: 101.1% of its WIDTH, over by 24 px.
+#
+# ⚠ SO THE PICKER IS MARGINALLY TOO WIDE ON THE LAPTOP TOO. That is a
+# PRE-EXISTING condition, not something the review window's fix introduced, and it
+# is deliberately left alone here: 24 px of overflow on a centred float is a
+# cosmetic clip, not the unusable window that prompted the review-window change,
+# and narrowing `PICKER_COLUMNS` changes a layout the operator reads constantly
+# (`format_row` wraps to `PICKER_COLUMNS - 2`). Fixing it is a separate decision
+# with its own before/after, not a side effect of this one.
+#
 # Giving the picker an i3 resize would restate its geometry in a second file that
-# cannot see these constants.
+# cannot see these constants — so if the 24 px is ever worth closing, the lever is
+# `PICKER_COLUMNS` here, not a `resize set` there.
 PICKER_CLASS = "float,mention-open"
 PICKER_COLUMNS = 120
 PICKER_LINES = 22

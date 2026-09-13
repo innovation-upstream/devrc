@@ -61,6 +61,46 @@ let
       workspace 1 output DP-0
       workspace 2 output DP-0
       workspace 3 output HDMI-0 DP-0'';
+
+  # 🔴 PER-HOST, AND THE TWO VALUES MUST NOT BE COLLAPSED BACK INTO ONE.
+  #
+  # The `<w> ppt <h> ppt` operands of the review TUI's `resize set` (the rule is
+  # near the bottom of this file; only the numbers live up here, so the rule's
+  # STRUCTURE cannot diverge between hosts by accident).
+  #
+  # `ppt` is a percentage of the WORKSPACE, so it is the right UNIT on any
+  # display — but a percentage is not a host-independent SIZE, and treating it as
+  # one is the mistake this fragment exists to undo. One shared `90 ppt 90 ppt`
+  # is correct on the laptop and 41% WIDER on the workbench than the size the
+  # operator called unusable, on the host that never had the defect.
+  #
+  # MEASURED 2026-09-12, `TIOCGWINSZ` on each host's own running alacritty pty —
+  # which reports the grid in rows/cols AND its size in pixels, so the cell size
+  # is a DIVISION and not a DPI estimate. The pty must be a DIRECT child of
+  # alacritty: a tmux pane's winsize is synthesized by tmux and is not evidence
+  # about any font.
+  #
+  #   host       usable workspace   cell (px)     largest grid observed
+  #   workbench  3440x1413          11.0 x 22.0   312 x 63
+  #   laptop     2256x1480          19.0 x 37.0   118 x 39
+  #
+  # So the laptop's cell is 1.73x wider and 1.68x taller than the workbench's —
+  # 2.90x the AREA. (An earlier revision of this comment said "roughly twice in
+  # each axis … roughly four times the area". That was never measured and it is
+  # wrong in the direction that matters: it over-states the gap, which is how one
+  # percentage came to look like it could serve both hosts.)
+  #
+  # laptop, 90 ppt x 90 ppt -> 2030x1332 px, 106x36 cells. Fits 2256x1480.
+  # workbench, 64 ppt x 78 ppt -> 2202x1102 px, which maps to 200x50 cells at an
+  # 11.0x22.0 cell — the SAME grid the deployed `REVIEW_COLUMNS`x`REVIEW_LINES`
+  # of 200x50 gives it today (2200x1100 px; the two differ by +1.6 x +2.1 px,
+  # sub-cell in both axes). That is deliberate and it is the whole point: the
+  # complaint was about the LAPTOP — the workbench's `picks.jsonl` does not exist,
+  # so the review TUI has never opened there — and the workbench must come out of
+  # this change rendering exactly what it renders now.
+  reviewSizePpt =
+    if isLaptop then "90 ppt 90 ppt"
+    else "64 ppt 78 ppt";
 in
 ''
 set $mod Mod1
@@ -109,27 +149,34 @@ for_window [class="float"] floating enable
 # constants — so changing the picker's size would silently leave i3 forcing the
 # old one. One geometry decision, one place: alacritty sizes, i3 only centres.
 for_window [class="float" instance="mention-open"] floating enable, move position center
-# 🔴 THE REVIEW TUI IS THE ONE FLOAT i3 DOES SIZE — IN PERCENT OF THE WORKSPACE,
-# and that is not a contradiction of the paragraph above but its consequence.
+# 🔴 THE REVIEW TUI IS THE ONE FLOAT i3 DOES SIZE, AND i3 IS ITS ONLY AUTHORITY —
+# which is not a contradiction of the paragraph above but its consequence.
 # `window.dimensions` is a count of CHARACTER CELLS, and a cell is not a length:
 # its pixel size is a function of the font size and the display's DPI. The picker
 # is small enough that no display makes its cell count overflow, so leaving its
 # geometry in one place costs nothing. The review window is not: at 200x50 cells it
-# opened bigger than the screen and was unusable. MEASURED — the workbench's usable
-# workspace is 3440x1413 at ~96 DPI; the laptop's is 2256x1480 on a 285mm eDP-1
-# panel, ~201 DPI. Both hosts resolve the SAME alacritty.toml out of the nix store
-# and it carries no `[font]` section, so the font size is alacritty's default on
-# both and the laptop's cell is roughly twice the workbench's in each axis — one
-# constant asking for roughly four times the area. No cell count satisfies both.
+# opened bigger than the laptop's screen (3800x1850 px against a 2256x1480
+# workspace — 168% x 125%) and was unusable.
 #
-# `ppt` is a percentage of the workspace i3 is placing the window on, so it is
-# correct on both hosts by construction, and on any display added later. That makes
-# THIS line authoritative for the review window's size whenever i3 is running;
-# `REVIEW_COLUMNS`/`REVIEW_LINES` in scripts/mention-open.py survive only as the
-# pre-resize hint for what alacritty maps first, and as the standalone fallback if
-# this rule is absent. The percentage is a taste call and may be tuned; the UNIT is
-# not — `resize set 90 90` is legal i3 meaning 90 PIXELS, because the unit defaults
-# to px when omitted.
+# scripts/mention-open.py therefore passes NO `window.dimensions` for this window
+# at all: the cell hint is DELETED, not lowered. A hint and an authority are two
+# numbers for one decision, and the hint could only ever be wrong on one host —
+# 140x40, the lowered value, is 2660x1480 px on the laptop, still 118% of its
+# width. Without a hint alacritty maps at its own default (~80x24: 880x528 px on
+# the workbench, 1520x888 on the laptop, comfortably inside both workspaces) and
+# i3 resizes UP, so the pre-resize flash is small-then-right instead of
+# oversized-then-right. If this rule is ever absent the window is SMALL, which is
+# usable; the hint's failure mode was a window larger than the screen, which is
+# not. One geometry decision, one place — here.
+#
+# THE PERCENTAGES ARE PER-HOST (`reviewSizePpt` in the `let` block above, with the
+# measured cell sizes and the arithmetic). `ppt` is the right UNIT on any display,
+# but a percentage is still not a host-independent SIZE: 90 ppt is 2030x1332 on the
+# laptop and 3096x1272 on the workbench, +41% wider than the size that drew the
+# complaint. The UNIT is not a taste call — `resize set 90 90` is legal i3 meaning
+# 90 PIXELS, because the unit defaults to px when omitted — and neither is the
+# FACT that the two hosts differ; scripts/tests/test_i3_picker_centering.py
+# asserts both, so collapsing these back to one number reddens.
 #
 # `floating enable` is REPEATED, exactly as in the picker's rule and for a sharper
 # reason: `resize set` on a still-TILED window is a silent no-op, so this rule must
@@ -141,7 +188,15 @@ for_window [class="float" instance="mention-open"] floating enable, move positio
 # above. The instance half is `REVIEW_CLASS` in scripts/mention-open.py, and
 # scripts/tests/test_i3_picker_centering.py derives it from that constant rather
 # than spelling it, so a rename there reddens instead of leaving this rule inert.
-for_window [class="float" instance="mention-review"] floating enable, resize set 90 ppt 90 ppt, move position center
+#
+# ⚠ NOT VERIFIED ANYWHERE, AND THE WHOLE FIX RESTS ON IT: that i3 honours
+# `resize set <n> ppt <n> ppt` inside a `for_window` on a FLOATING container.
+# Two separate measured facts, not one: this is the only `resize set` DIRECTIVE in
+# this file outside the `mode "resize"` bindings, AND this file is the only i3
+# config in the repo (every other `resize set` under nix/ and scripts/ is prose or
+# a test fixture) — so there is no prior art here to argue from. Confirming it
+# needs a live `i3-msg reload` on the operator's desk, which is theirs to run.
+for_window [class="float" instance="mention-review"] floating enable, resize set ${reviewSizePpt}, move position center
 # 🔴 `(?i)` IS LOAD-BEARING, not decoration. i3 criteria are PCRE and
 # CASE-SENSITIVE by default (the userguide's "case-insensitive" examples are
 # showing you how to opt IN with `(?i)`), and `class` matches the SECOND field
