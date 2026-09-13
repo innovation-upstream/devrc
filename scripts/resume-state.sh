@@ -388,7 +388,7 @@ worktrees_holding(){
 #                       basename, so nothing was chosen. See `worktrees_holding`.
 embedded_md_path(){
   local tok hit="" miss="" base dir noglob="" root=""
-  local amb="" ambig="" wt="" wrc=0 mine="" ydir=""
+  local amb="" ambig="" wt="" wrc=0 mine="" ydir="" archsub=""
   # The repo of $PWD, resolved ONCE. Used only to re-anchor a RELATIVE token
   # that named a real doc from one directory up — see the clause below.
   root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || root=""
@@ -411,8 +411,51 @@ embedded_md_path(){
     # DELETED — mutating it away survived all 115 tests, i.e. it guarded
     # nothing, and a guard that reads as load-bearing while doing nothing is
     # worse than its absence.
+    # 🔴 AN ARCHIVED DOC IS STILL A HANDOFF, AND THE FALLBACKS MUST STILL NOT
+    # SEE IT. `claudedocs/archive/` holds the docs untouched for >30 days. They
+    # remain INDEXED (`handoff_index.py` walks recursively on both sides of its
+    # durability difference), so `handoff_search` keeps returning them and a
+    # reader keeps being sent to a path this scan must be able to accept.
+    #
+    # 🔴 THIS IS A DIRECTORY WIDENING ONLY — IT DOES NOT TOUCH THE FALLBACK
+    # CHAIN, AND THAT ASYMMETRY IS THE WHOLE DESIGN. `resolve()`'s three
+    # fallbacks (`handoff-"$arg"*.md`, `handoff-*.md`, `*HANDOFF*.md`) are
+    # non-recursive shell globs against `"$REPO"/claudedocs/`, so an archived
+    # doc can never be chosen as "the newest of N" — which is correct: a doc
+    # nobody has touched in a month is the LAST thing a no-argument /resume
+    # should reconcile against. Named explicitly it resolves; guessed at it
+    # does not. Do not "fix" that by making the globs recursive.
+    #
+    # 🔴 WITHOUT THIS THE MOVE ITSELF OPENS #684. The gate below tests the
+    # IMMEDIATE parent, so `…/claudedocs/archive/handoff-x.md` in prose failed
+    # it, returned rc 1 ("no handoff-shaped token at all") rather than rc 2, and
+    # the run fell through to the newest-of-N fallback and reconciled an
+    # UNRELATED initiative with no gap printed. The bare-token form was never
+    # affected — `resolve()` takes `[ -f "$arg" ]` first — so this is the prose
+    # route only, which is the route `/resume` and /handoff's kickoff template
+    # actually use.
+    #
+    # Normalising here rather than widening each of the four downstream sites is
+    # `claude/RULES.md`'s "one rule, one place": `$dir` is put back on the
+    # `…/claudedocs` anchor and `$base` carries the `archive/` prefix, so the
+    # parent-directory gate, the worktree search, the `$mine` discriminator and
+    # the `$root` re-anchor all keep working UNMODIFIED — including the mutation
+    # anchors that pin two of them verbatim. `$tok` is untouched, so `[ -f ]`
+    # and the `miss` bookkeeping still speak about what the caller wrote.
+    #
+    # The accepted directory set is ENUMERATED, not a pattern, for the reason
+    # `drift-check.sh`'s allowlist gives: an unrecognised subdirectory of
+    # `claudedocs/` is NOT a handoff location by default. Pinned two-way by
+    # `test_the_accepted_handoff_DIRECTORIES_are_an_enumerated_ledger`.
+    archsub=""
+    case "$dir" in
+      */claudedocs/archive|claudedocs/archive) archsub="archive/"; dir=${dir%/archive} ;;
+    esac
     case "$dir" in */claudedocs|claudedocs) ;; *) continue ;; esac
     case "$base" in handoff-*.md|*HANDOFF*.md) ;; *) continue ;; esac
+    # After the family test, never before: the test is about the BASENAME, and
+    # `archive/handoff-x.md` matches neither glob.
+    base="$archsub$base"
     [ -f "$tok" ] && { hit="$tok"; break; }
     # 🔴 THE NAMED TREE'S OWN CLONE, INCLUDING ITS LINKED WORKTREES. `<X>` is the
     # token with `/claudedocs/<base>` stripped, i.e. the checkout the caller

@@ -8,7 +8,7 @@ description: "Fix or extend the i3status-rust status bar and its status-count po
 The workbench + laptop status bar. Migrated **i3blocks (/etc/nixos) → i3status-rust under
 home-manager** (PR #74). All bar config, block scripts, and the poller live in the **devrc** repo
 and deploy via home-manager. Point-in-time history: memory `i3-bar-i3status-rust-migration` +
-`devrc/claudedocs/handoff-agent-facing-workbench-2026-07-11.md`.
+`devrc/claudedocs/archive/handoff-agent-facing-workbench-2026-07-11.md`.
 
 **AirVPN host tunnel + its pill → `~/.claude/skills/bar/reference/airvpn.md`** (source `~/workspace/devrc/claude/skills/bar/reference/airvpn.md`): the killswitch design, the
 🔴 mandatory re-test protocol, apply/re-arm/bail procedures. Read it before touching anything AirVPN.
