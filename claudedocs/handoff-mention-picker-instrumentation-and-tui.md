@@ -223,40 +223,52 @@ and `floating_resize`'s increment snapping remains unmodelled.
   config and a running terminal resolved the old one.
 - **Next probe:** rank 1. A NEW alacritty window, click, select, and `:map <localleader>pm`.
 
+### ✅ CLOSED 2026-09-13 — the picker's geometry, verified LIVE on the laptop
+`as-of: 2026-09-13`
+🔴 **Measured from i3's own tree the moment the window appeared, so this one is DONE — do not
+re-verify it.** `PICKER mention-open rect=2094x818 at +81+355 client=2090x814` against the
+laptop's `2256x1480` workspace: **162 px of margin and a POSITIVE x**. Before `c3ff700c` it was
+`2284x818 at x=-14` — 28 px over, hanging off BOTH edges because i3 centres it.
+⚠ And it is **exactly centred**, not merely fitting: `(2256 - 2094) / 2 = 81`, which is the x
+i3 produced. That retires the caveat the previous revision carried on objective 2 ("its WIDTH
+changed, new geometry unverified live"). Captured by an `i3-msg -t subscribe -m '["window"]'`
+monitor rather than by opening a window, so the operator's screen was never taken.
+
 ## Next steps (ranked)
 1. 🔴 **Confirm the review TUI actually works — OPEN A NEW ALACRITTY WINDOW FIRST.** The
    `nvim-octo` store path is baked into alacritty's config, which a running terminal already
    resolved, so an existing window still execs the OLD wrapper and will reproduce the `lyaml`
    crash. In the new window click a `repo#N`, select a row, and confirm a review buffer loads.
    Then `:map <localleader>pm` **must report `No mapping found`** — the merge-safety assertion,
-   never yet checked in a live buffer. Repo: devrc.
+   never yet checked in a live buffer. **This is the ONLY objective still unverified.** Repo: devrc.
    forcing: user — the operator hit the crash; objective 4 has never worked end-to-end.
-2. **Verify the picker's new 110-col geometry live.** Predicted `2094x818` rect with 162 px
-   margin and a POSITIVE x (it was `2284x818 at x=-14`). Read it from `i3-msg -t get_tree`.
-   Repo: devrc.
-   forcing: user — the operator reported the overflow; the fix is unverified on a screen.
-3. **Add the `adoption-scan` registry row for the click telemetry.** CONFIRMED ABSENT
+2. **Add the `adoption-scan` registry row for the click telemetry.** CONFIRMED ABSENT
    (no `mention-open` hit under `scripts/adoption*`). The dims (`surface`, `rank`,
    `plausibility`, `offered_total`, `via`, `pinned_above`) are landing in ClickHouse NOW, so the
    tool built to answer "is this used?" still cannot see the feature built to make usage visible.
    Repo: devrc.
    forcing: none
-4. **Decide whether Tier A ranking helps — now ANSWERABLE and unanswered.** `rank` and
+3. **Decide whether Tier A ranking helps — now ANSWERABLE and unanswered.** `rank` and
    `plausibility` are in the data (`rank:3 plausibility:below`, `rank:2 plausibility:plausible`).
    9 rows is far too few; revisit after weeks of clicks. Chosen `rank` should cluster near 0 and
    `plausibility` skew PLAUSIBLE. Repo: devrc.
    forcing: none
-5. **Rename `test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders`** — the name
+4. **Rename `test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders`** — the name
    overstates what it pins (the workbench renders 199x50, one column NARROWER than the 200x50 it
    used to). Deferred from audit round 2 because renaming ripples into the red-at-base matrix and
    the 20-mutant ledger; its docstring now tells the reader to read the name narrowly. Repo: devrc.
    forcing: none
-6. **Close or merge `#1539`** (`docs/handoff-arc-final-close`) — the SUPERSEDED mention-arc
+5. **Close or merge `#1539`** (`docs/handoff-arc-final-close`) — the SUPERSEDED mention-arc
    handoff naming the obsolete two-PR dependency for main's kill-scanner red. Repo: devrc.
    forcing: none
-7. **Prune this arc's agent worktrees** under `.claude/worktrees/agent-*`. ⚠ Skip
+6. **Prune this arc's agent worktrees** under `.claude/worktrees/agent-*`. ⚠ Skip
    `agent-a8d600896310294ae` (LOCKED — never force it) and anything not yours; the repo holds
    ~238 worktrees belonging to other sessions. Repo: devrc.
+   forcing: none
+7. ⚠ **NOT THIS ARC'S, but measured here: the handoff doc-size gate is RED on `main`** —
+   `handoff-cairn-oss-multi-instance.md` (200,600 B over 196,608 B) and
+   `handoff-gate-speed-and-ci-signal.md` (86,111 B over 81,920 B) are both over their
+   grandfathered allowances. A permanently-red gate trains people to click through it. Repo: devrc.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
