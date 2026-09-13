@@ -68,39 +68,75 @@ let
   # near the bottom of this file; only the numbers live up here, so the rule's
   # STRUCTURE cannot diverge between hosts by accident).
   #
-  # `ppt` is a percentage of the WORKSPACE, so it is the right UNIT on any
-  # display — but a percentage is not a host-independent SIZE, and treating it as
-  # one is the mistake this fragment exists to undo. One shared `90 ppt 90 ppt`
-  # is correct on the laptop and 41% WIDER on the workbench than the size the
-  # operator called unusable, on the host that never had the defect.
+  # 🔴 `ppt` IS A PERCENTAGE OF THE **OUTPUT** RECT, NOT OF THE WORKSPACE. Every
+  # number here used to be derived against the workspace, and that was wrong by
+  # the height of the status bar. ESTABLISHED FROM i3 4.25.1 SOURCE (the version
+  # running on both hosts), two independent artifacts:
   #
-  # MEASURED 2026-09-12, `TIOCGWINSZ` on each host's own running alacritty pty —
-  # which reports the grid in rows/cols AND its size in pixels, so the cell size
-  # is a DIVISION and not a DPI estimate. The pty must be a DIRECT child of
-  # alacritty: a tmux pane's winsize is synthesized by tmux and is not evidence
-  # about any font.
+  #   src/commands.c, cmd_resize_set():
+  #     const Con *output = con_get_output(floating_con);
+  #     … cwidth  = output->rect.width  * ((double)cwidth  / 100.0);
+  #     … cheight = output->rect.height * ((double)cheight / 100.0);
+  #   testcases/t/252-floating-size.t: `fake-outputs 1333x999`, then
+  #     cmd 'resize set 33 ppt 20 ppt'; do_test(int(0.33*1333), int(0.2*999));
   #
-  #   host       usable workspace   cell (px)     largest grid observed
-  #   workbench  3440x1413          11.0 x 22.0   312 x 63
-  #   laptop     2256x1480          19.0 x 37.0   118 x 39
+  # i3's own test outputs carry no bar, so workspace == output there — which is
+  # exactly why this never surfaces in i3's suite and had to be read off the C.
   #
-  # So the laptop's cell is 1.73x wider and 1.68x taller than the workbench's —
-  # 2.90x the AREA. (An earlier revision of this comment said "roughly twice in
-  # each axis … roughly four times the area". That was never measured and it is
-  # wrong in the direction that matters: it over-states the gap, which is how one
-  # percentage came to look like it could serve both hosts.)
+  # ⚠ AND `move position center` USES A DIFFERENT RECT AGAIN — the WORKSPACE's.
+  # src/commands.c, cmd_move_window_to_center(): for `position` it calls
+  # `floating_center(floating_con, con_get_workspace(floating_con)->rect)` (only
+  # `move absolute position center` uses the root rect). So this one chain sizes
+  # against the output and places against the workspace. That asymmetry is
+  # harmless at these percentages and would not be at 100 ppt of the height.
   #
-  # laptop, 90 ppt x 90 ppt -> 2030x1332 px, 106x36 cells. Fits 2256x1480.
-  # workbench, 64 ppt x 78 ppt -> 2202x1102 px, which maps to 200x50 cells at an
-  # 11.0x22.0 cell — the SAME grid the deployed `REVIEW_COLUMNS`x`REVIEW_LINES`
-  # of 200x50 gives it today (2200x1100 px; the two differ by +1.6 x +2.1 px,
-  # sub-cell in both axes). That is deliberate and it is the whole point: the
-  # complaint was about the LAPTOP — the workbench's `picks.jsonl` does not exist,
-  # so the review TUI has never opened there — and the workbench must come out of
-  # this change rendering exactly what it renders now.
+  # MEASURED 2026-09-12, read-only, both hosts, i3 4.25.1. Rects from
+  # `i3-msg -t get_outputs` / `-t get_workspaces`; cell size from `TIOCGWINSZ` on
+  # each host's own running alacritty pty, which reports the grid in rows/cols AND
+  # its size in pixels, so the cell is a DIVISION and not a DPI estimate. The pty
+  # must be a DIRECT child of alacritty — a tmux pane's winsize is synthesized by
+  # tmux and is not evidence about any font.
+  #
+  #   host       OUTPUT rect  workspace rect  bar   cell (px)     largest grid seen
+  #   workbench  3440x1440    3440x1413       27px  11.0 x 22.0   312 x 63
+  #   laptop     2256x1504    2256x1480       24px  19.0 x 37.0   118 x 39
+  #
+  # The WIDTH is unaffected (the bar is a full-width strip, so output width ==
+  # workspace width); the HEIGHT is what the old derivation understated, by 27px
+  # and 24px respectively. The laptop's cell is 1.73x wider and 1.68x taller than
+  # the workbench's — 2.90x the AREA. (An earlier revision said "roughly twice in
+  # each axis … roughly four times the area". That was never measured and it
+  # over-states the gap, which is how one percentage came to look like it could
+  # serve both hosts.)
+  #
+  # laptop, 90 ppt x 90 ppt -> ~2030 x ~1354 px of the 2256x1504 OUTPUT. Inside
+  # the 2256x1480 workspace in both axes, which is the reported defect fixed.
+  # workbench, 64 ppt x 77 ppt -> ~2202 x ~1109 px of the 3440x1440 OUTPUT, which
+  # is 200x50 cells at an 11.0x22.0 cell — the SAME grid the deployed
+  # `REVIEW_COLUMNS`x`REVIEW_LINES` of 200x50 gives it today (2200x1100 px; both
+  # axes differ by under one cell). That is deliberate and it is the whole point:
+  # the complaint was about the LAPTOP — the workbench's `picks.jsonl` does not
+  # exist, so the review TUI has never opened there — and the workbench must come
+  # out of this change rendering what it renders now.
+  #
+  # 🔴 77, NOT 78. `78 ppt` of the OUTPUT's 1440 is ~1123 px = 51 rows: one cell
+  # MORE than today, i.e. a visible change on the host this fix promises not to
+  # touch. It read as sub-cell only while the arithmetic used 1413.
+  #
+  # ⚠ THE CELL ARITHMETIC MODELS THE i3 RECT ONLY, SO THE GRID IS APPROXIMATE —
+  # do not read "200x50" as exact, and do not quote these pixel figures to a
+  # tenth. Two terms are deliberately NOT modelled. (a) DECORATION: this file
+  # sets `default_border pixel 2` but never `default_floating_border`, so floats
+  # take i3's default — `config.default_floating_border = BS_NORMAL` with
+  # `logical_px(2)` (src/config.c), i.e. a titlebar plus borders — and a floating
+  # con's `rect` INCLUDES that, so the client area is SMALLER than the rect and
+  # the real grid is a little under what these numbers say. (b) SIZE-INCREMENT
+  # SNAPPING: `floating_resize` (src/floating.c) upscales the decorated rect to a
+  # multiple of the window's width/height increments. Quantifying either needs a
+  # window opened or resized on the operator's live desk, which is theirs to do.
   reviewSizePpt =
     if isLaptop then "90 ppt 90 ppt"
-    else "64 ppt 78 ppt";
+    else "64 ppt 77 ppt";
 in
 ''
 set $mod Mod1
@@ -169,14 +205,25 @@ for_window [class="float" instance="mention-open"] floating enable, move positio
 # usable; the hint's failure mode was a window larger than the screen, which is
 # not. One geometry decision, one place — here.
 #
-# THE PERCENTAGES ARE PER-HOST (`reviewSizePpt` in the `let` block above, with the
-# measured cell sizes and the arithmetic). `ppt` is the right UNIT on any display,
-# but a percentage is still not a host-independent SIZE: 90 ppt is 2030x1332 on the
-# laptop and 3096x1272 on the workbench, +41% wider than the size that drew the
+# THE PERCENTAGES ARE PER-HOST (`reviewSizePpt` in the `let` block above, which
+# carries the measured rects, the cell sizes, the arithmetic and the i3 source
+# citations). 🔴 `ppt` IS A PERCENTAGE OF THE **OUTPUT** RECT, NOT THE WORKSPACE —
+# i3 4.25.1 `src/commands.c`, `cmd_resize_set()`, multiplies by
+# `con_get_output(floating_con)->rect`, so the bar's 27px (workbench) / 24px
+# (laptop) is NOT subtracted. `ppt` is the right UNIT on any display, but a
+# percentage is still not a host-independent SIZE: 90 ppt is ~2030x1354 on the
+# laptop and 3096x1296 on the workbench, +41% wider than the size that drew the
 # complaint. The UNIT is not a taste call — `resize set 90 90` is legal i3 meaning
 # 90 PIXELS, because the unit defaults to px when omitted — and neither is the
 # FACT that the two hosts differ; scripts/tests/test_i3_picker_centering.py
 # asserts both, so collapsing these back to one number reddens.
+#
+# ⚠ `move position center` IN THIS SAME CHAIN CENTRES AGAINST THE **WORKSPACE**
+# rect, not the output's (`cmd_move_window_to_center()` -> `floating_center(…,
+# con_get_workspace(…)->rect)`; only `move absolute position center` uses the root
+# rect). One chain, two different rects. Harmless at these percentages; it would
+# not be near 100 ppt of the height, where the window would be taller than the
+# workspace it is being centred in.
 #
 # `floating enable` is REPEATED, exactly as in the picker's rule and for a sharper
 # reason: `resize set` on a still-TILED window is a silent no-op, so this rule must
@@ -189,13 +236,43 @@ for_window [class="float" instance="mention-open"] floating enable, move positio
 # scripts/tests/test_i3_picker_centering.py derives it from that constant rather
 # than spelling it, so a rename there reddens instead of leaving this rule inert.
 #
-# ⚠ NOT VERIFIED ANYWHERE, AND THE WHOLE FIX RESTS ON IT: that i3 honours
-# `resize set <n> ppt <n> ppt` inside a `for_window` on a FLOATING container.
-# Two separate measured facts, not one: this is the only `resize set` DIRECTIVE in
-# this file outside the `mode "resize"` bindings, AND this file is the only i3
-# config in the repo (every other `resize set` under nix/ and scripts/ is prose or
-# a test fixture) — so there is no prior art here to argue from. Confirming it
-# needs a live `i3-msg reload` on the operator's desk, which is theirs to run.
+# 🔴 DEPLOYING THIS NEEDS THREE STEPS, AND THE THIRD IS NOT OPTIONAL:
+#
+#     merge  ->  scripts/ship.sh  ->  i3-msg reload   (on EACH host)
+#
+# The `i3-msg reload` is a REQUIRED DEPLOY STEP, not a verification nicety. The
+# two halves of this feature land on different schedules: scripts/mention-open.py
+# is exec'd straight out of the working tree (nix/programs/alacritty/default.nix
+# runs ~/workspace/devrc/scripts/mention-open.py), so a plain `git pull`
+# makes the hint-DELETION live with no switch at all — while THIS file is
+# `xdg.configFile."i3/config".text` (nix/graphical.nix), which needs a
+# `home-manager switch` AND then an explicit reload, because i3 does not re-read
+# its config when the file changes and nothing in nix/graphical.nix or any
+# activation script reloads it.
+#
+# So between `ship.sh` and the reload there is a window in which NEITHER half
+# sizes the TUI: the script passes no dimensions, the running i3 has no rule, and
+# the review window opens at alacritty's own default ~80x24 on BOTH hosts. That is
+# small but usable (the old failure mode was a window larger than the screen), and
+# on the workbench it IS a change from today's 200x50 — the one this PR otherwise
+# promises not to make — persisting until somebody reloads.
+#
+# An automatic reload is deliberately NOT wired into the activation script: that
+# would reload i3 on every future `home-manager switch`, which is a change to
+# shared graphical infrastructure far beyond this window, and it is the operator's
+# call.
+#
+# ⚠ WHAT IS AND IS NOT ESTABLISHED about i3 honouring this chain. The MECHANISM is
+# read off i3 4.25.1's own source and test suite: `cmd_resize_set()` takes the
+# `con_inside_floating()` branch and multiplies `ppt` by the OUTPUT rect, and
+# `testcases/t/252-floating-size.t` exercises `resize set <n> ppt <n> ppt` on a
+# floating window against a fake output. What is still NOT verified live is the
+# end-to-end: that this `for_window` fires at map time on these hosts and the
+# window comes up at that size. Confirming that needs an `i3-msg reload` plus an
+# opened window on the operator's desk, which is theirs to run. Note also that
+# this is the only `resize set` DIRECTIVE in this file outside the `mode "resize"`
+# bindings, and this file is the only i3 config in the repo — so there is no prior
+# art here to argue from.
 for_window [class="float" instance="mention-review"] floating enable, resize set ${reviewSizePpt}, move position center
 # 🔴 `(?i)` IS LOAD-BEARING, not decoration. i3 criteria are PCRE and
 # CASE-SENSITIVE by default (the userguide's "case-insensitive" examples are

@@ -25,11 +25,23 @@ THE FIX HAS TWO HALVES AND BOTH ARE HAZARDS, which is why there are two guards:
 AND THE REVIEW TUI — the other window `mention-open.py` launches — MUST FIT THE
 SCREEN, which is guards 3 and 4. It opened at 200x50 CHARACTER CELLS and overflowed
 the laptop's display, unusably. A cell's pixel size is a function of font size and
-DPI, so one cell count cannot satisfy both hosts; i3 sizes it in `ppt` — percent of
-the workspace — and `mention-open.py` now passes NO `window.dimensions` at all, so
-i3 is the sole authority and there is no second number to disagree with it.
+DPI, so one cell count cannot satisfy both hosts; i3 sizes it in `ppt` and
+`mention-open.py` now passes NO `window.dimensions` at all, so i3 is the sole
+authority and there is no second number to disagree with it.
 
-🔴 BUT `ppt` IS THE RIGHT UNIT, NOT A HOST-INDEPENDENT SIZE, AND THAT IS WHY THE
+🔴 `ppt` IS A PERCENTAGE OF THE **OUTPUT** RECT, NOT OF THE WORKSPACE. This file
+said "workspace" everywhere and every height in it was wrong by the status bar.
+Established from i3 4.25.1 source (the version on both hosts), two independent
+artifacts: `src/commands.c`'s `cmd_resize_set()` multiplies by
+`con_get_output(floating_con)->rect`, and `testcases/t/252-floating-size.t` checks
+`resize set 33 ppt 20 ppt` against `int(0.33*1333)` x `int(0.2*999)` of a
+`fake-outputs 1333x999`. i3's test outputs carry no bar, so workspace == output
+there — which is why this cannot be caught by reading i3's suite alone. The
+WORKSPACE rect is still the right basis for a FIT question, and it is what `move
+position center` centres against (`con_get_workspace(…)->rect`), so one chain here
+sizes against one rect and places against another.
+
+🔴 AND `ppt` IS THE RIGHT UNIT, NOT A HOST-INDEPENDENT SIZE, WHICH IS WHY THE
 PERCENTAGES ARE PER HOST. One shared `90 ppt 90 ppt` fits the laptop and makes the
 workbench's window 41% WIDER than the size the operator called unusable — on the
 host that never had the defect. So guard 3 pins the percentages PER HOST, and a
@@ -205,10 +217,12 @@ _RESIZE_SET = re.compile(
 
 
 def _percent_resizes(actions) -> list:
-    """[(width_pct, height_pct)] for every resize sized in PERCENT-OF-WORKSPACE.
+    """[(width_pct, height_pct)] for every resize sized in PERCENT-OF-OUTPUT.
 
-    A resize whose units are px — or omitted, which MEANS px — is deliberately
-    NOT returned: it is the defect, not a weaker form of the fix.
+    `ppt` is a percentage of the OUTPUT rect, not the workspace's — i3 4.25.1
+    `src/commands.c`, `cmd_resize_set()`. A resize whose units are px — or
+    omitted, which MEANS px — is deliberately NOT returned: it is the defect, not
+    a weaker form of the fix.
     """
     out = []
     for action in actions:
@@ -357,57 +371,111 @@ def test_no_OTHER_float_this_repo_launches_is_moved_or_resized(is_laptop):
 
 
 # --------------------------------------------------------------------------- #
-# GUARD 3 — the REVIEW TUI is sized in PERCENT OF THE WORKSPACE, PER HOST.
+# GUARD 3 — the REVIEW TUI is sized in PERCENT OF THE OUTPUT RECT, PER HOST.
 #
 # THE DEFECT: the review window opened at 200x50 CHARACTER CELLS and overflowed
 # the LAPTOP's screen, unusably. A cell is not a length — its pixel size is a
 # function of the font size and the display's DPI — so no single cell count can
 # fit two displays, and `mention-open.py` now passes no cell count at all.
 #
-# MEASURED 2026-09-12 by `TIOCGWINSZ` on each host's own running alacritty pty,
-# which reports the grid in rows/cols AND its size in pixels — so the cell size is
-# a DIVISION, not a DPI estimate. (The pty has to be a DIRECT child of alacritty:
-# a tmux pane's winsize is synthesized by tmux and says nothing about a font.)
-# Workspace rects from i3's own `get_workspaces`, i3 4.25.1 on both hosts:
+# 🔴 `ppt` RESOLVES AGAINST THE **OUTPUT** RECT, NOT THE WORKSPACE'S. i3 4.25.1,
+# `src/commands.c`, `cmd_resize_set()`:
 #
-#   host       usable workspace   cell (px)     largest grid observed
-#   workbench  3440x1413          11.0 x 22.0   312 x 63
-#   laptop     2256x1480          19.0 x 37.0   118 x 39
+#     const Con *output = con_get_output(floating_con);
+#     … cwidth  = output->rect.width  * ((double)cwidth  / 100.0);
+#     … cheight = output->rect.height * ((double)cheight / 100.0);
 #
-# The laptop's cell is 1.73x wider and 1.68x taller — 2.90x the AREA. An earlier
-# revision of this file said "roughly twice in each axis … roughly four times the
-# area"; that was unmeasured and it OVER-stated the gap, which is exactly how one
-# percentage came to look like it could serve both hosts.
+# corroborated by i3's own `testcases/t/252-floating-size.t`, which sets
+# `fake-outputs 1333x999` and asserts `resize set 33 ppt 20 ppt` lands on
+# `int(0.33*1333)` x `int(0.2*999)` — the OUTPUT. i3's test outputs carry no bar,
+# so workspace == output there, which is why this cannot surface in i3's suite.
+# Every height in this block was previously derived against the workspace and was
+# short by the bar: `78 ppt` read as sub-cell on the workbench when it is a whole
+# ROW larger than what that host renders today.
+#
+# ⚠ `move position center` USES THE **WORKSPACE** RECT (`cmd_move_window_to_center`
+# -> `floating_center(…, con_get_workspace(…)->rect)`; `move absolute position
+# center` uses the root rect). One chain, two rects — so the sizing basis and the
+# placement basis are genuinely different, and the FIT question is still about the
+# workspace.
+#
+# MEASURED 2026-09-12, read-only, i3 4.25.1 on both hosts. Rects from
+# `i3-msg -t get_outputs` and `-t get_workspaces`; cell size from `TIOCGWINSZ` on
+# each host's own running alacritty pty, which reports the grid in rows/cols AND
+# its size in pixels — so the cell size is a DIVISION, not a DPI estimate. (The pty
+# has to be a DIRECT child of alacritty: a tmux pane's winsize is synthesized by
+# tmux and says nothing about a font.)
+#
+#   host       OUTPUT rect  workspace rect  bar   cell (px)     largest grid seen
+#   workbench  3440x1440    3440x1413       27px  11.0 x 22.0   312 x 63
+#   laptop     2256x1504    2256x1480       24px  19.0 x 37.0   118 x 39
+#
+# Width is identical in both columns — the bar is a full-width strip — so only the
+# HEIGHT was ever wrong. The laptop's cell is 1.73x wider and 1.68x taller than the
+# workbench's, 2.90x the AREA. An earlier revision of this file said "roughly twice
+# in each axis … roughly four times the area"; that was unmeasured and it
+# OVER-stated the gap, which is exactly how one percentage came to look like it
+# could serve both hosts.
 #
 # 🔴 SO `ppt` IS THE RIGHT UNIT AND NOT A HOST-INDEPENDENT SIZE. `resize set 90 ppt
-# 90 ppt` is 2030x1332 px on the laptop (fits) and 3096x1272 on the workbench —
-# +41% on the width of the 2200x1100 window the operator called unusable, on the
-# host where the review TUI had never even opened (its `picks.jsonl` does not
-# exist; the laptop's does). Hence `_REVIEW_PPT` below, and hence the guard that
-# the two hosts DISAGREE.
+# 90 ppt` is ~2030x1354 px on the laptop (inside its 2256x1480 workspace) and
+# 3096x1296 on the workbench — +41% on the width of the 2200x1100 window the
+# operator called unusable, on the host where the review TUI had never even opened
+# (its `picks.jsonl` does not exist; the laptop's does). Hence `_REVIEW_PPT` below,
+# and hence the guard that the two hosts DISAGREE.
 #
-# The guards below pin FOUR things: that the window receives a resize whose UNITS
-# are percent-of-workspace (i3 defaults the unit to px, so `resize set 90 90` is a
+# ⚠ THE CELL ARITHMETIC BELOW MODELS THE i3 **RECT** ONLY, SO EVERY GRID IT
+# PRODUCES IS APPROXIMATE — read "200x50" as "about 200x50", and do not restate any
+# of these pixel figures to a tenth. Two terms are deliberately not modelled, and
+# neither can be measured without opening or resizing a window on the operator's
+# live desk. (a) DECORATION: `nix/i3/config.nix` sets `default_border pixel 2` but
+# never `default_floating_border`, so floats take i3's default `normal 2`
+# (`src/config.c`: `config.default_floating_border = BS_NORMAL`,
+# `default_floating_border_width = logical_px(2)`) — a titlebar plus borders — and
+# a floating con's `rect` INCLUDES that, so the client area is smaller than the
+# rect and the true grid is a little under these numbers. (b) SIZE-INCREMENT
+# SNAPPING: `floating_resize` (`src/floating.c`) upscales the decorated rect to a
+# multiple of the window's width/height increments.
+#
+# The guards below pin FIVE things: that the window receives a resize whose UNITS
+# are percent-of-output (i3 defaults the unit to px, so `resize set 90 90` is a
 # legal 90-PIXEL window); that the percentages are THIS HOST'S; that the two hosts
-# differ; and that the rule issuing the resize also floats the window (a `resize
-# set` on a TILED window is a silent no-op — the same hazard guard 1's companion
-# pins for the picker) and centres it.
+# differ; that the ledger of measured rects is internally coherent (the check that
+# would have caught the workspace-for-output substitution); and that the rule
+# issuing the resize also floats the window (a `resize set` on a TILED window is a
+# silent no-op — the same hazard guard 1's companion pins for the picker) and
+# centres it.
 # --------------------------------------------------------------------------- #
 #: The `resize set <w> ppt <h> ppt` operands each host must receive, and the
 #: MEASURED facts they were derived from. Literal expectations on purpose — a
 #: value recomputed from the config would be the implementation restating itself.
 #:
 #: 🔴 TUNING EITHER PAIR MEANS RE-DERIVING IT FROM A FRESH MEASUREMENT, not
-#: nudging the number: the workbench's 64x78 is not a taste call but the pair that
+#: nudging the number: the workbench's 64x77 is not a taste call but the pair that
 #: reproduces the size that host ALREADY renders (see the guard below), and the
-#: laptop's 90x90 is the largest round pair that fits 2256x1480.
-_REVIEW_PPT = {"workbench": (64, 78), "laptop": (90, 90)}
+#: laptop's 90x90 is the largest round pair whose OUTPUT-relative size still fits
+#: inside the laptop's workspace rect.
+_REVIEW_PPT = {"workbench": (64, 77), "laptop": (90, 90)}
 
-#: {host: (workspace_px, cell_px)} — see the MEASURED table above. Used only to
-#: re-derive what `_REVIEW_PPT` comes out to in cells, so the ledger carries its
-#: own justification instead of two bare numbers nobody can check.
-_MEASURED = {"workbench": ((3440, 1413), (11.0, 22.0)),
-             "laptop": ((2256, 1480), (19.0, 37.0))}
+#: The measured rects and cell size per host — see the MEASURED table above.
+#:
+#: 🔴 THIS LEDGER IS AN INPUT, NOT A DERIVED FACT. Nothing in this file can check
+#: it against the machines; it is a transcription of a read-only measurement, and
+#: the guards that read it are only as right as it is. Round 1 of this PR's audit
+#: found it holding the WORKSPACE height in what the arithmetic used as the OUTPUT
+#: height — which is why `output` and `workspace` are now separate keys and why
+#: `test_the_MEASURED_ledger_is_INTERNALLY_COHERENT` exists. Re-measure
+#: (`i3-msg -t get_outputs`, `-t get_workspaces`, `TIOCGWINSZ` on a direct
+#: alacritty child pty) rather than adjusting a number to make a guard pass.
+#:
+#: `output` is what `resize set … ppt` multiplies; `workspace` is what `move
+#: position center` centres against and what a FIT question is asked of.
+_MEASURED = {
+    "workbench": {"output": (3440, 1440), "workspace": (3440, 1413),
+                  "cell": (11.0, 22.0)},
+    "laptop": {"output": (2256, 1504), "workspace": (2256, 1480),
+               "cell": (19.0, 37.0)},
+}
 
 #: What `REVIEW_COLUMNS`x`REVIEW_LINES` held on `main` — i.e. the size the
 #: workbench renders TODAY, and the one it must keep rendering.
@@ -419,7 +487,7 @@ def _review_ppt(is_laptop):
     return _percent_resizes(_actions(render(is_laptop), _review_window()))
 
 @pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
-def test_the_review_window_is_sized_in_PERCENT_OF_WORKSPACE_on_both_hosts(
+def test_the_review_window_is_sized_in_PERCENT_OF_OUTPUT_on_both_hosts(
         is_laptop):
     """🔴 THE REGRESSION GUARD for the reported defect.
 
@@ -435,7 +503,7 @@ def test_the_review_window_is_sized_in_PERCENT_OF_WORKSPACE_on_both_hosts(
     assert pcts, (
         "on the %s render of nix/i3/config.nix, a window with the review TUI's "
         "own properties (%s — from REVIEW_CLASS=%r) receives %s. Nothing sizes "
-        "it as a PERCENT OF THE WORKSPACE (`resize set <w> ppt <h> ppt`). i3 is "
+        "it as a PERCENT OF THE OUTPUT RECT (`resize set <w> ppt <h> ppt`). i3 is "
         "the ONLY thing that sizes this window — scripts/mention-open.py passes "
         "no `window.dimensions` for it — so with this rule gone the window is "
         "whatever alacritty defaults to, and nothing fits it to the display."
@@ -443,7 +511,7 @@ def test_the_review_window_is_sized_in_PERCENT_OF_WORKSPACE_on_both_hosts(
            sorted(got) or "NO for_window rule at all"))
     bad = [p for p in pcts if not all(0 < v <= 100 for v in p)]
     assert not bad, (
-        "on the %s render the review window's percent-of-workspace resize is "
+        "on the %s render the review window's percent-of-output resize is "
         "%s — a `ppt` value outside 1..100 is not a percentage of anything i3 "
         "can place it on." % (host, bad))
 
@@ -455,20 +523,22 @@ def test_the_review_windows_percentages_are_THIS_HOSTS(is_laptop):
     and is +41% on the width of the window the operator reported as unusable, on
     the workbench, where the review TUI had never opened at all.
 
-    A percentage of a workspace is a different SIZE on every workspace. `ppt` buys
-    the right unit; it does not buy one number serving two displays.
+    A percentage of an output is a different SIZE on every output. `ppt` buys the
+    right unit; it does not buy one number serving two displays.
     """
     host = HOSTS[1] if is_laptop else HOSTS[0]
     want = _REVIEW_PPT[host]
     got = _review_ppt(is_laptop)
+    m = _MEASURED[host]
     assert got == [want], (
-        "on the %s render the review window receives percent-of-workspace "
-        "resize(s) %s; this host must get exactly %s. Workspace %dx%d, cell "
-        "%.1fx%.1f px (measured). If you are retuning this deliberately, re-derive "
-        "the pair from a fresh measurement and update `_REVIEW_PPT` — and check "
-        "the OTHER host separately, because the two are not interchangeable."
-        % (host, got or "NONE", [want], _MEASURED[host][0][0],
-           _MEASURED[host][0][1], _MEASURED[host][1][0], _MEASURED[host][1][1]))
+        "on the %s render the review window receives percent-of-output "
+        "resize(s) %s; this host must get exactly %s. OUTPUT %dx%d (what `ppt` "
+        "multiplies), workspace %dx%d, cell %.1fx%.1f px (measured). If you are "
+        "retuning this deliberately, re-derive the pair from a fresh measurement "
+        "and update `_REVIEW_PPT` — and check the OTHER host separately, because "
+        "the two are not interchangeable."
+        % (host, got or "NONE", [want], m["output"][0], m["output"][1],
+           m["workspace"][0], m["workspace"][1], m["cell"][0], m["cell"][1]))
 
 
 def test_the_two_HOSTS_review_percentages_DIFFER():
@@ -485,57 +555,160 @@ def test_the_two_HOSTS_review_percentages_DIFFER():
     """
     wb, lt = _review_ppt(False), _review_ppt(True)
     assert wb and lt, (
-        "one of the renders carries no percent-of-workspace resize for the review "
+        "one of the renders carries no percent-of-output resize for the review "
         "window at all (workbench=%s, laptop=%s) — see the sizing guard above; "
         "this guard would otherwise pass vacuously on two empty lists being "
         "unequal to each other." % (wb or "NONE", lt or "NONE"))
     assert wb != lt, (
         "both hosts size the review window at %s. The percentages are PER HOST on "
-        "purpose: `ppt` is a percentage of the workspace, and the two workspaces "
+        "purpose: `ppt` is a percentage of the OUTPUT rect, and the two outputs "
         "are %dx%d (workbench) and %dx%d (laptop), so one pair cannot express one "
-        "intent on both. A shared 90x90 renders 3096x1272 on the workbench — 41%% "
+        "intent on both. A shared 90x90 renders 3096x1296 on the workbench — 41%% "
         "wider than the 2200x1100 window the operator called unusable, on the host "
         "that never had the defect. Put the per-host fragment back in "
         "nix/i3/config.nix (`reviewSizePpt`)."
-        % (wb, _MEASURED["workbench"][0][0], _MEASURED["workbench"][0][1],
-           _MEASURED["laptop"][0][0], _MEASURED["laptop"][0][1]))
+        % (wb, _MEASURED["workbench"]["output"][0],
+           _MEASURED["workbench"]["output"][1],
+           _MEASURED["laptop"]["output"][0], _MEASURED["laptop"]["output"][1]))
+
+
+def test_the_MEASURED_ledger_is_INTERNALLY_COHERENT():
+    """🔴 THE CHECK THAT WOULD HAVE CAUGHT ROUND 1'S DEFECT, and the reason
+    `_MEASURED` carries two rects instead of one.
+
+    Every other guard here reads `_MEASURED` as ground truth, so a wrong ledger is
+    invisible to all of them: this PR shipped with the WORKSPACE height sitting in
+    the slot the arithmetic used as the OUTPUT height, and the suite was green.
+    Nothing in a unit test can measure a display — but it CAN assert that the two
+    rects stand in the relationship a bar-on-an-output must produce, and that is
+    precisely the relationship the substitution destroys.
+
+    WIDTH must be EQUAL: an i3 bar is a full-width strip, so an output and its
+    workspace differ in height only. HEIGHT must differ by a plausible bar: > 0
+    (a zero means somebody put the same rect in both slots, which is the bug) and
+    small relative to the screen (a large gap means one of the two is not this
+    output's rect at all).
+
+    ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE. The pre-fix tree had no `output`
+    key for this to be red against; what it pins is that the ledger cannot be
+    edited back into the shape the audit found. Its killing power is demonstrated
+    by mutation (substitute the workspace height for the output height, per host)
+    rather than by a red on an earlier commit.
+    """
+    for host, m in sorted(_MEASURED.items()):
+        out_w, out_h = m["output"]
+        ws_w, ws_h = m["workspace"]
+        assert out_w == ws_w, (
+            "%s: the ledger's OUTPUT width (%d) and workspace width (%d) differ. "
+            "An i3 bar is a full-width strip, so these two rects can only differ "
+            "in HEIGHT — one of them is not this output's rect. RE-MEASURE with "
+            "`i3-msg -t get_outputs` and `-t get_workspaces`."
+            % (host, out_w, ws_w))
+        bar = out_h - ws_h
+        assert bar > 0, (
+            "%s: the ledger says the OUTPUT is %d px tall and the workspace %d px "
+            "— a bar of %d px. The output rect is strictly taller than the "
+            "workspace it hosts a bar on, so %s means the same rect has been "
+            "written into both slots. That is exactly round 1's defect: `resize "
+            "set … ppt` multiplies the OUTPUT rect (i3 4.25.1 `cmd_resize_set`), "
+            "so a workspace height here silently understates every `ppt` height "
+            "by the bar. RE-MEASURE both rects; do not reconcile them by editing "
+            "one." % (host, out_h, ws_h, bar,
+                      "zero" if bar == 0 else "a negative value"))
+        assert bar < out_h // 8, (
+            "%s: the ledger implies a %d px status bar on a %d px output, which is "
+            "not a status bar. One of `output`/`workspace` is not this output's "
+            "rect — RE-MEASURE." % (host, bar, out_h))
 
 
 def test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders():
-    """🔴 WHY 64x78 AND NOT A ROUNDER NUMBER — the one claim in this change that is
+    """🔴 WHY 64x77 AND NOT A ROUNDER NUMBER — the one claim in this change that is
     about NOT changing anything.
 
     The reported defect was the laptop's. The workbench's 200x50-cell window is
-    2200x1100 px, which fits its 3440x1413 workspace at 64% x 78%, and the
-    operator's decision was that this host must come out of the change rendering
-    exactly what it renders now. `64 ppt 78 ppt` is that size re-expressed, not a
-    new choice — so pin it as the derivation rather than as a literal, or the next
-    person reads two arbitrary numbers and rounds them.
+    2200x1100 px, and the operator's decision was that this host must come out of
+    the change rendering what it renders now. `64 ppt 77 ppt` is that size
+    re-expressed against the rect `ppt` actually multiplies — the 3440x1440 OUTPUT,
+    not the 3440x1413 workspace — so pin it as the derivation rather than as a
+    literal, or the next person reads two arbitrary numbers and rounds them.
 
-    Asserted in CELLS, which is the unit the grid actually quantises to: the pixel
-    sizes differ by +1.6 x +2.1 px, under one cell in both axes.
+    🔴 77, NOT 78, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS GUARD. Against the
+    workspace's 1413 both read as the same grid; against the OUTPUT's 1440, `78
+    ppt` is ~1123 px = 51 rows — one row MORE than today, on the host this change
+    promises not to touch. The original ledger held 1413 in the slot used as the
+    output height, so the guard certified a size change as a no-op.
+
+    Asserted in CELLS, which is the unit the grid quantises to: at 64x77 the pixel
+    figures differ from today's 2200x1100 by under one cell in both axes.
+
+    ⚠ The cell count models the i3 RECT only — window decoration and
+    size-increment snapping are not modelled (see the block above), so read the
+    grid as approximate. `_MEASURED` is a transcribed measurement, not a derived
+    fact; `test_the_MEASURED_ledger_is_INTERNALLY_COHERENT` is what keeps it
+    honest about which rect is which.
     """
-    (ws_w, ws_h), (cell_w, cell_h) = _MEASURED["workbench"]
+    m = _MEASURED["workbench"]
+    out_w, out_h = m["output"]
+    cell_w, cell_h = m["cell"]
     want_cols, want_lines = _DEPLOYED_REVIEW_CELLS
     got = _review_ppt(False)
     assert len(got) == 1, (
-        "the workbench render carries %s percent-of-workspace resizes for the "
+        "the workbench render carries %s percent-of-output resizes for the "
         "review window, expected exactly one: %s" % (len(got), got or "NONE"))
     w_pct, h_pct = got[0]
-    cols = int(ws_w * w_pct / 100.0 // cell_w)
-    lines = int(ws_h * h_pct / 100.0 // cell_h)
+    cols = int(out_w * w_pct / 100.0 // cell_w)
+    lines = int(out_h * h_pct / 100.0 // cell_h)
     assert (cols, lines) == (want_cols, want_lines), (
         "the workbench's `resize set %d ppt %d ppt` maps to %dx%d CHARACTER CELLS "
-        "(%.0fx%.0f px of a %dx%d workspace at a measured %.1fx%.1f px cell). It "
-        "has to come to %dx%d — the size that host renders TODAY, from the "
+        "(%.0fx%.0f px of a %dx%d OUTPUT at a measured %.1fx%.1f px cell — `ppt` "
+        "multiplies the OUTPUT rect, not the %dx%d workspace). It has to come to "
+        "%dx%d — the size that host renders TODAY, from the "
         "REVIEW_COLUMNS/REVIEW_LINES deployed on main. The laptop is the host with "
         "the defect; changing the workbench's size is not part of this fix. If the "
         "workbench's font or display really has changed, RE-MEASURE "
-        "(`TIOCGWINSZ` on a direct alacritty child pty, i3 `get_workspaces` for "
-        "the rect), update `_MEASURED`, and re-derive the percentages."
-        % (w_pct, h_pct, cols, lines, ws_w * w_pct / 100.0,
-           ws_h * h_pct / 100.0, ws_w, ws_h, cell_w, cell_h,
-           want_cols, want_lines))
+        "(`TIOCGWINSZ` on a direct alacritty child pty, `i3-msg -t get_outputs` "
+        "for the rect), update `_MEASURED`, and re-derive the percentages."
+        % (w_pct, h_pct, cols, lines, out_w * w_pct / 100.0,
+           out_h * h_pct / 100.0, out_w, out_h, cell_w, cell_h,
+           m["workspace"][0], m["workspace"][1], want_cols, want_lines))
+
+
+@pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
+def test_the_review_window_FITS_the_workspace_it_is_CENTRED_in(is_laptop):
+    """The reported defect, expressed in the two rects that actually decide it.
+
+    `resize set … ppt` multiplies the OUTPUT rect; `move position center` centres
+    against the WORKSPACE rect. So the size is a percentage of one rect and has to
+    fit inside a SMALLER one, and nothing about `ppt` guarantees that: `100 ppt`
+    of the height is taller than any workspace carrying a bar.
+
+    ⚠ INVARIANT GUARD on today's percentages (both hosts already fit), labelled as
+    such — the original defect was a CELL count, which this file cannot express.
+    What it buys is that a future retune cannot reintroduce an overflowing window
+    by arithmetic nobody re-did, and it is the only assertion here that checks the
+    laptop's 90x90 against something other than the `_REVIEW_PPT` ledger.
+    """
+    host = HOSTS[1] if is_laptop else HOSTS[0]
+    m = _MEASURED[host]
+    out_w, out_h = m["output"]
+    ws_w, ws_h = m["workspace"]
+    got = _review_ppt(is_laptop)
+    assert len(got) == 1, (
+        "the %s render carries %s percent-of-output resizes for the review "
+        "window, expected exactly one: %s" % (host, len(got), got or "NONE"))
+    w_pct, h_pct = got[0]
+    px_w, px_h = out_w * w_pct / 100.0, out_h * h_pct / 100.0
+    assert px_w <= ws_w and px_h <= ws_h, (
+        "on the %s render the review window's `resize set %d ppt %d ppt` is "
+        "%.0fx%.0f px (%d%% x %d%% of the %dx%d OUTPUT), which does not fit the "
+        "%dx%d WORKSPACE it is centred in — %.0f%% x %.0f%% of it. That is the "
+        "reported defect: a window hanging off the edge of the screen. Note the "
+        "two rects are different on purpose (`cmd_resize_set` uses the output, "
+        "`cmd_move_window_to_center` the workspace), so a height percentage above "
+        "~%d ppt cannot fit here however legal it looks."
+        % (host, w_pct, h_pct, px_w, px_h, w_pct, h_pct, out_w, out_h,
+           ws_w, ws_h, 100.0 * px_w / ws_w, 100.0 * px_h / ws_h,
+           int(100 * ws_h / out_h)))
 
 
 @pytest.mark.parametrize("is_laptop", [False, True], ids=HOSTS)
@@ -558,7 +731,7 @@ def test_the_rule_that_RESIZES_the_review_window_also_FLOATS_it(is_laptop):
               if _percent_resizes(_chain(cmd))]
     assert sizing, (
         "on the %s render no rule matching the review window (%s) carries a "
-        "percent-of-workspace resize at all — see the sizing guard above."
+        "percent-of-output resize at all — see the sizing guard above."
         % (host, window))
     unfloated = [cmd for _crits, cmd in sizing
                  if "floating enable" not in _chain(cmd)]
@@ -609,7 +782,7 @@ def test_the_sizing_rule_names_the_review_instance_EXACTLY(is_laptop):
               if _percent_resizes(_chain(cmd))]
     assert sizing, (
         "on the %s render no rule matching the review window (%s) carries a "
-        "percent-of-workspace resize at all — see the sizing guard above."
+        "percent-of-output resize at all — see the sizing guard above."
         % (host, window))
     loose = [c for c in sizing
              if c.get("instance", "").lstrip("^").rstrip("$")

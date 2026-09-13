@@ -6600,10 +6600,16 @@ def test_the_review_terminal_names_itself_and_sets_NO_geometry(tui):
     on each host's own alacritty pty: the workbench's cell is 11.0x22.0 px in a
     3440x1413 workspace, the laptop's 19.0x37.0 px in 2256x1480. So 200x50 cells
     — the value that drew the complaint — is 2200x1100 px on the workbench and
-    3800x1850 on the laptop, 168% x 125% of that screen. 140x40, the lowered
+    3800x1850 on the laptop, 168% x 125% of that workspace. 140x40, the lowered
     value, is still 2660x1480 there, 118% of its width. No cell count fits both,
     so i3 is the sole authority (`reviewSizePpt` in nix/i3/config.nix, per host)
     and there is nothing here to disagree with it.
+
+    ⚠ Those workspace rects are the FIT basis. i3's own `ppt` arithmetic uses the
+    OUTPUT rect instead (3440x1440 / 2256x1504 — `cmd_resize_set()` in i3 4.25.1
+    multiplies `con_get_output(…)->rect`), which is a different number by the
+    status bar; see the derivation in nix/i3/config.nix. Do not carry one rect
+    over to the other.
 
     The PICKER keeps its cell count, deliberately — it is small enough that no
     display overflows it, and its i3 rule carries no `resize`. Asserted here too,
@@ -6621,7 +6627,7 @@ def test_the_review_terminal_names_itself_and_sets_NO_geometry(tui):
     dims = [a for a in argv if "window.dimensions" in a]
     assert not dims, (
         "the review terminal's argv carries %s. i3 is the ONLY authority on this "
-        "window's size — it resizes in percent of the workspace, per host, "
+        "window's size — it resizes in percent of the OUTPUT rect, per host, "
         "because a CHARACTER-CELL count cannot fit a 3440x1413 workspace at an "
         "11.0x22.0 px cell and a 2256x1480 one at 19.0x37.0 px. A hint here is a "
         "second number for one decision and can only ever be right on one host: "
@@ -6630,7 +6636,7 @@ def test_the_review_terminal_names_itself_and_sets_NO_geometry(tui):
         % (dims, argv))
     assert not hasattr(MO, "REVIEW_COLUMNS"), (
         "scripts/mention-open.py defines REVIEW_COLUMNS again. The review "
-        "window's geometry is i3's, in percent of the workspace; a cell constant "
+        "window's geometry is i3's, in percent of the OUTPUT rect; a cell constant "
         "here is the defect returning, whether or not it reaches the argv yet.")
     assert not hasattr(MO, "REVIEW_LINES"), (
         "scripts/mention-open.py defines REVIEW_LINES again — see REVIEW_COLUMNS "

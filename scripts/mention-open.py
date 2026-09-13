@@ -1700,21 +1700,48 @@ def open_browser(url: str) -> int:
 # A cell is not a length — its pixel size is a function of the font size and the
 # display's DPI — so no single cell count fits both hosts. MEASURED 2026-09-12 by
 # `TIOCGWINSZ` on each host's own running alacritty pty (it reports the grid in
-# rows/cols AND in pixels, so the cell size is a division, not an estimate):
-# the workbench's cell is 11.0x22.0 px in a 3440x1413 workspace, the laptop's
-# 19.0x37.0 px in 2256x1480 — 1.73x wider, 1.68x taller, 2.90x the area. The
-# largest grids that fit are about 312x63 and 118x39 respectively. So 200x50, the
-# value that drew the complaint, is 2200x1100 px on the workbench (fine) and
-# 3800x1850 on the laptop (168% x 125% of the screen — the defect); and 140x40,
-# the lowered hint this constant briefly held, is still 2660x1480 on the laptop,
-# 118% of its width. A hint that can only ever be right on one host is not a
-# fallback, it is a second bug.
+# rows/cols AND in pixels, so the cell size is a division, not an estimate), with
+# the rects from `i3-msg -t get_outputs` / `-t get_workspaces`, i3 4.25.1:
+#
+#   host       OUTPUT rect  workspace rect  bar   cell (px)     largest grid seen
+#   workbench  3440x1440    3440x1413       27px  11.0 x 22.0   312 x 63
+#   laptop     2256x1504    2256x1480       24px  19.0 x 37.0   118 x 39
+#
+# 🔴 THE TWO RECTS ARE BOTH LOAD-BEARING AND THEY ARE NOT INTERCHANGEABLE. i3
+# resolves `resize set … ppt` against the **OUTPUT** rect (i3 4.25.1
+# `src/commands.c`, `cmd_resize_set()`: `con_get_output(floating_con)->rect`), so
+# the bar height is NOT subtracted from what a percentage buys; whether the result
+# FITS is a question about the WORKSPACE rect, which is the output minus the bar
+# and also what `move position center` centres against
+# (`con_get_workspace(…)->rect`). Deriving the percentages against the workspace
+# understated the height by 27px / 24px, which is how `78 ppt` came to look
+# sub-cell on the workbench when it is a whole row bigger.
+#
+# The laptop's cell is 1.73x wider and 1.68x taller than the workbench's, 2.90x
+# the area. So 200x50, the value that drew the complaint, is 2200x1100 px on the
+# workbench (fine) and 3800x1850 on the laptop — 168% x 125% of its 2256x1480
+# workspace, the defect; and 140x40, the lowered hint this constant briefly held,
+# is still 2660x1480 on the laptop, 118% of its width. A hint that can only ever
+# be right on one host is not a fallback, it is a second bug.
 #
 # With no `window.dimensions` alacritty maps at its own default (~80x24), which is
 # 880x528 px on the workbench and 1520x888 on the laptop — inside both workspaces.
 # So the pre-resize flash is small-then-right rather than oversized-then-right,
 # and if the i3 rule is ever absent the window is merely SMALL, which is usable.
 # That is a strictly better failure mode than a window bigger than the screen.
+#
+# 🔴 THAT "ever absent" IS A REAL DEPLOY STATE, NOT A HYPOTHETICAL. This file is
+# exec'd straight out of the working tree, so a `git pull` makes the hint deletion
+# live with no switch; nix/i3/config.nix is an `xdg.configFile`, so it needs a
+# `home-manager switch` AND an explicit `i3-msg reload` (i3 does not re-read its
+# config on change, and nothing in nix/ reloads it). Deploy order is therefore
+# merge -> `scripts/ship.sh` -> `i3-msg reload` on each host, and in between the
+# review window opens at ~80x24 on both.
+#
+# ⚠ Every cell figure above models the i3 RECT only. Decoration (floats take i3's
+# default `normal 2` — `default_floating_border` is unset — and a floating con's
+# rect INCLUDES the titlebar and borders) and `floating_resize`'s size-increment
+# snapping are NOT modelled, so treat the grids as approximate.
 REVIEW_CLASS = "float,mention-review"
 
 # The wrapper that runs neovim with octo.nvim configured. Packaged as
@@ -1855,9 +1882,10 @@ def open_tui(url: str) -> tuple[int, str]:
         # reaches this file and argv[0] stays the constant the ledger needs.
         #
         # 🔴 NO `-o window.dimensions.*` HERE, ON PURPOSE — see REVIEW_CLASS.
-        # i3 sizes this window in percent of the workspace, per host; a cell
-        # count added back here would be a second geometry for one window and
-        # could only ever fit one of the two displays.
+        # i3 sizes this window in `ppt`, which is a percent of the OUTPUT rect
+        # (not the workspace — `cmd_resize_set()` in i3 4.25.1), per host; a
+        # cell count added back here would be a second geometry for one window
+        # and could only ever fit one of the two displays.
         subprocess.Popen(
             ["alacritty", "--class", REVIEW_CLASS,
              "-e", REVIEW_EXE, repo, num],
@@ -1989,13 +2017,20 @@ def open_reference(url: str) -> tuple[int, str]:
 # file, and the review window's geometry is the exact OPPOSITE arrangement: it
 # passes no `window.dimensions` at all and i3 owns its size outright.
 #
+# (⚠ `reviewSizePpt`'s percentages are of the OUTPUT rect, not the workspace —
+# 3440x1440 and 2256x1504. The workspace rects below are the output minus the
+# status bar, and they are the right basis for a FIT question, which is what the
+# rest of this block asks. Do not carry one rect over to the other: the review
+# window's `ppt` pair is derived against the output, see `reviewSizePpt`.)
+#
 # The two windows differ in DEGREE, and the honest version of that is worth
 # writing down. MEASURED 2026-09-12 (`TIOCGWINSZ` on each host's own alacritty
 # pty): the workbench's cell is 11.0x22.0 px in a 3440x1413 workspace, the
 # laptop's 19.0x37.0 px in 2256x1480. So the review window's 200x50 was
-# 3800x1850 px on the laptop — 168% x 125% of the screen, grossly unusable — while
-# this picker's 120x22 is 1320x484 px on the workbench (38% x 34%, fine) and
-# 2280x814 on the laptop: 101.1% of its WIDTH, over by 24 px.
+# 3800x1850 px on the laptop — 168% x 125% of that workspace, grossly unusable —
+# while this picker's 120x22 is 1320x484 px on the workbench (38% x 34%, fine) and
+# 2280x814 on the laptop: ~101% of its WIDTH, over by about 24 px of grid before
+# any window decoration is counted.
 #
 # ⚠ SO THE PICKER IS MARGINALLY TOO WIDE ON THE LAPTOP TOO. That is a
 # PRE-EXISTING condition, not something the review window's fix introduced, and it
