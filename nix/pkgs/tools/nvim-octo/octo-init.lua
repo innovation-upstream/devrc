@@ -380,10 +380,20 @@ function M.resolve_lhs(lhs)
   return out
 end
 
--- The merge METHOD is read out of the live config rather than restated, so
--- `default_merge_method` above stays the single place it is decided. An
--- unreadable config yields a prompt that says so rather than one that names a
--- method nobody chose.
+-- 🔴 A SENTINEL, NOT A DEFAULT, AND THE DIFFERENCE IS THE WHOLE POINT. The
+-- merge METHOD is read out of the live config rather than restated, so
+-- `default_merge_method` above stays the single place it is decided. When it
+-- cannot be read, this must NOT quietly substitute a plausible value: a merge
+-- dispatched with a method nobody chose is the wrong commit shape on a repo
+-- whose last five merges were all squashes, and the prompt would have named
+-- the guess as though it were the setting. `confirm_and_merge` REFUSES on this
+-- value rather than asking.
+--
+-- ⚠ FOUND BY A MUTATION SWEEP, not by review: replacing this return with
+-- `"squash"` survived a fully green suite, because nothing reached the arm.
+-- The repair was to make it reachable AND consequential.
+M.MERGE_METHOD_UNKNOWN = "UNKNOWN-METHOD"
+
 function M.merge_method()
   local got, conf = pcall(function()
     return require("octo.config").values
@@ -391,7 +401,7 @@ function M.merge_method()
   if got and type(conf) == "table" and type(conf.default_merge_method) == "string" then
     return conf.default_merge_method
   end
-  return "UNKNOWN-METHOD"
+  return M.MERGE_METHOD_UNKNOWN
 end
 
 function M.merge_desc()
@@ -689,6 +699,15 @@ function M.confirm_and_merge()
     return false
   end
   local method = M.merge_method()
+  if method == M.MERGE_METHOD_UNKNOWN then
+    vim.notify(
+      "nvim-octo: `default_merge_method` could not be read from octo's live "
+        .. "config, so the merge method is unknown. REFUSING rather than "
+        .. "guessing — a merge dispatched with a method nobody chose produces "
+        .. "the wrong commit shape. Merge from the web UI, or fix the wrapper.",
+      vim.log.levels.ERROR)
+    return false
+  end
   local prompt = string.format(
     "MERGE pull request #%s in %s, method %s? Type yes to confirm (anything else aborts): ",
     tostring(pr.number), tostring(pr.repo), method)

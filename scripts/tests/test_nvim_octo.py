@@ -991,6 +991,46 @@ def test_the_merge_method_is_READ_from_the_config_not_restated(tmp_path):
     assert FIXTURE_OTHER_METHOD in kv["legend_desc"][0], kv["legend_desc"]
 
 
+@pytest.mark.parametrize("break_it,ident", [
+    ("CONF.values.default_merge_method = nil", "field-absent"),
+    ('MODULES["octo.config"] = nil', "module-unreadable"),
+], ids=["field-absent", "module-unreadable"])
+def test_an_UNREADABLE_merge_method_REFUSES_rather_than_guessing(
+        tmp_path, break_it, ident):
+    """🔴 THIS GUARD EXISTS BECAUSE A MUTATION SWEEP FOUND THE ARM UNREACHABLE.
+
+    `M.merge_method` returns a sentinel when the live config cannot be read.
+    Replacing that sentinel with the literal `"squash"` SURVIVED a fully green
+    suite — nothing ever reached the arm, so the fallback was decoration and
+    the "reads the config, never restates it" claim held only on the happy
+    path. A merge dispatched with a method nobody chose is the wrong commit
+    shape, which is exactly what `default_merge_method = "squash"` exists to
+    prevent.
+
+    So the arm now REFUSES, and this reaches it two ways: the field missing,
+    and the whole config module unreadable. Both must abort BEFORE asking —
+    a prompt naming a guessed method is worse than no prompt.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        break_it,
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {"yes"}',
+        'KV("returned", tostring(NvimOcto.confirm_and_merge()))',
+        'KV("merges", #RECORD.merges)',
+        'KV("prompts", #RECORD.prompts)',
+        'for _, n in ipairs(RECORD.notify) do KV("notify", n.msg) end',
+    ]))
+    assert kv["merges"] == ["0"], (
+        f"[{ident}] a merge was dispatched with a method that could not be "
+        f"read from the config")
+    assert kv["returned"] == ["false"], kv
+    assert kv["prompts"] == ["0"], (
+        f"[{ident}] the operator was asked to confirm a merge whose method is "
+        f"unknown — the prompt would have named a guess")
+    assert any("REFUSING" in n for n in kv["notify"]), kv.get("notify")
+
+
 def test_a_non_pull_request_buffer_cannot_be_merged(tmp_path):
     """The key is bound on PR buffers, but `get_current_buffer` answers about
     whatever is focused. A merge attempt with no PR must abort BEFORE asking —
