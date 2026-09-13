@@ -104,7 +104,8 @@ that could not be measured are none of them readings.
 🔴 THE EXIT-CODE CONTRACT, AND THE ONE DECISION IN IT THAT IS ARGUABLE
 ----------------------------------------------------------------------
     0   hit, no-match                     ANSWERS about a scope that was searched
-    2   usage (bad --limit, no repos)     argv is wrong; nothing ran
+    2   usage (bad --limit, no repos,     argv is wrong; nothing ran
+        an --exclude-slug naming no slug)
     3   broken-index                      the table is empty
     4   empty-scope                       the FILTER selected nothing
     6   unmeasured-corpus                 NO repo resolved (--offline)
@@ -975,7 +976,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "the handoff you have ALREADY READ, so the hits are docs "
                          "you have not seen. Excludes that slug in EVERY repo — a "
                          "bare slug cannot say which. The exclusion is printed on "
-                         "the scope line and counted in `in_scope_*`")
+                         "the scope line and counted in `in_scope_*`. A value that "
+                         "names no slug (blank, or nothing beyond `claudedocs/`) "
+                         "is a usage error, never a silent no-op")
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                     help=f"maximum hits to return (>= {MIN_LIMIT})")
     ap.add_argument("--json", action="store_true")
@@ -991,6 +994,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 🔴 De-duplicated but ORDER-PRESERVING: the scope line names them, and a
     # repeated `--exclude-slug` must not make that line report a filter twice.
     exclude = tuple(dict.fromkeys(exclusion_slug(v) for v in args.exclude_slug))
+
+    # 🔴 A VALUE THAT NAMES NO SLUG IS REFUSED HERE, AT THE INPUT — it is the last
+    # reachable spelling of the silent no-op the path / bare-basename /
+    # trailing-space shapes each had, and the one normalisation cannot repair
+    # because there is nothing to derive. MEASURED: `--exclude-slug "  "` printed
+    # `excluded=` with nothing after it, left `in_scope_docs` equal to
+    # `indexed_docs`, exited 0, and returned the very document the caller was
+    # dropping. `claudedocs`, `/` and `handoff-.md` reach the same empty slug by a
+    # different road, which is why the predicate is "derives no slug" rather than
+    # "looks blank". 🔴 AND IT BELONGS AT THE INPUT, NEVER IN A RENDERER: a
+    # `label or "(unnamed)"` would put a falsy string back on the decision path
+    # this module spent three audit rounds clearing, and would make the run LOOK
+    # filtered while filtering nothing — the exact failure being closed.
+    # ⚠ The library layer still ACCEPTS `exclude=[""]`; see `_exclusion_list` in
+    # `handoff_index.py`. Deliberately out of scope here — this closes the only
+    # door argparse can open, and the programmatic hole is named rather than
+    # silently widened into.
+    unusable = tuple(v for v in args.exclude_slug if not exclusion_slug(v))
+    if unusable:
+        print(
+            "handoff-search: --exclude-slug takes a slug or a doc path, and got a "
+            "value that names NO slug — blank, or nothing beyond a `claudedocs/` "
+            "prefix ("
+            + ", ".join(repr(v) for v in unusable)
+            + "); it normalises to the EMPTY slug, which excludes NOTHING while "
+              "printing a confident `excluded=` line and handing back the very "
+              "document you meant to drop.",
+            file=sys.stderr,
+        )
+        return 2
 
     # 🔴 BOUNDED BEFORE THE QUERY RUNS, not clamped silently. `--limit 0` produced
     # zero hits from a healthy index and rendered the corpus-is-silent prose; a

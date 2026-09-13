@@ -6003,6 +6003,99 @@ class TestTheExclusionValueNormalisesOrSaysSo:
         assert "── relayrepo/widget-relay" in out, "an unknown slug must not filter"
 
 
+class TestABlankExclusionIsRefusedAtTheINPUT:
+    """🔴 THE LAST REACHABLE SPELLING OF THE SILENT NO-OP, MEASURED 2026-09-13.
+
+    `handoff_search.py --offline --query '…' --exclude-slug '  '` printed
+    `indexed_docs=418 … in_scope_docs=418`, a scope line reading `excluded=` with
+    NOTHING after it, exited **0**, and returned the very document the caller was
+    dropping. The three shapes the class above closed (an absolute path, a
+    `handoff-x` basename with no suffix, a trailing space) all had a slug to
+    derive and were fixed by normalising harder. This one has none: the value
+    normalises to `""`, `""` matches no row, and a filter that silently declines
+    to filter is indistinguishable from one that worked.
+
+    🔴 THE PREDICATE IS "DERIVES NO SLUG", NOT "LOOKS BLANK" — a guard keyed on
+    the spelling would be walkable by a different spelling of the same state
+    (`claude/RULES.md`, "a guard can be SPELLED rather than STRUCTURAL").
+    `claudedocs`, `/` and `handoff-.md` are not blank and reach the identical
+    empty slug by a different road, so they are refused by the same rule.
+
+    🔴 AND IT IS AN INPUT REJECTION, NEVER A RENDERER DEFAULT. Papering over the
+    empty label with `label or "(unnamed)"` would put a falsy string back on the
+    decision path three audit rounds cleared, and would still search the wrong
+    scope — loudly this time, which is worse."""
+
+    #: Every value argparse can hand `--exclude-slug` that derives no slug.
+    #: 🔴 The last two are NOT whitespace: they pin that the rule is the empty
+    #: SLUG, so a mutant narrowing the guard to `value.strip()` is killed.
+    UNUSABLE = ("", "  ", "\t", "\n", " \t\n ", "claudedocs", "claudedocs/", "/")
+
+    def _repo(self, tmp_path):
+        repo = tmp_path / "blankrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL,
+                           "handoff-cable-audit.md": DOC_SPARSE})
+        return repo
+
+    def _base(self, repo):
+        return ["--query", "quixotry", "--offline", "--offline-repo", str(repo),
+                "--limit", "3"]
+
+    def test_a_value_that_derives_no_slug_is_a_usage_error(self, tmp_path, capsys):
+        repo = self._repo(tmp_path)
+        for raw in self.UNUSABLE:
+            rc = hs.main(self._base(repo) + ["--exclude-slug", raw])
+            cap = capsys.readouterr()
+            assert rc == 2, f"{raw!r} exited {rc}, so a scripted caller reads it as an answer"
+            assert "--exclude-slug" in cap.err, f"{raw!r}: {cap.err!r}"
+            assert repr(raw) in cap.err, (
+                f"the refusal does not name the value it refused; got {cap.err!r}"
+            )
+            # 🔴 THE SEARCH MUST NOT HAVE RUN. Rejecting AND answering would leave
+            # the wrong scope on screen for anyone reading stdout.
+            assert cap.out == "", f"{raw!r} printed a result anyway: {cap.out!r}"
+
+    def test_the_refusal_says_WHY_rather_than_dumping_usage(self, tmp_path, capsys):
+        """It names the state (`EMPTY slug`) and the consequence (`excludes
+        NOTHING`), because the whole defect is that the run LOOKS filtered."""
+        repo = self._repo(tmp_path)
+        assert hs.main(self._base(repo) + ["--exclude-slug", "  "]) == 2
+        err = capsys.readouterr().err
+        assert "EMPTY slug" in err, err
+        assert "excludes NOTHING" in err, err
+        assert "usage:" not in err, f"a generic argparse dump, not a diagnosis: {err!r}"
+
+    def test_a_blank_among_GOOD_values_is_still_refused(self, tmp_path, capsys):
+        """🔴 NOT "reject only when every value is blank". One unusable value in a
+        list makes the printed `excluded=` line disagree with what was asked for,
+        and the caller cannot see which half took effect."""
+        repo = self._repo(tmp_path)
+        rc = hs.main(self._base(repo) + ["--exclude-slug", "widget-relay",
+                                         "--exclude-slug", "  "])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert repr("  ") in err and repr("widget-relay") not in err, err
+
+    def test_a_REAL_slug_is_unaffected_END_TO_END(self, tmp_path, capsys):
+        """🔴 THE NEGATIVE CONTROL. Without it, a guard that refused EVERY
+        `--exclude-slug` value would satisfy every assertion above — and would
+        delete the feature while passing as its fix."""
+        repo = self._repo(tmp_path)
+        assert hs.main(self._base(repo)) == 0
+        assert "relayrepo/widget-relay" not in capsys.readouterr().out  # sanity: label is blankrepo
+
+        rc = hs.main(self._base(repo) + ["--exclude-slug",
+                                         "claudedocs/handoff-widget-relay.md"])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "excluded=widget-relay" in out, out
+        assert "── blankrepo/widget-relay" not in out, out
+        # …and the exclusion actually NARROWED the scope, which is the half a
+        # printed `excluded=` line cannot prove on its own.
+        stats = re.search(r"indexed_docs=(\d+).*?in_scope_docs=(\d+)", out)
+        assert stats and int(stats.group(2)) < int(stats.group(1)), out
+
+
 class TestAnExcludeArgumentThatWouldLIEIsRefused:
     """🔴 BOTH SHAPES RETURN A WRONG SCOPE, NOT AN ERROR, AND ONE OF THEM MAKES
     THE TWO BACKENDS DISAGREE — which no test in this repo can observe, because
