@@ -1235,7 +1235,7 @@ in
   # from a `lib/` dir next to itself, because what runs on a host is
   # `~/.config/activity-collector/collector.py`, a lone flattened symlink with no
   # `scripts/lib` near it. Same reason `changed_paths.py` and `mention_scan.py`
-  # need their own entries above.
+  # need their own entries below.
   #
   # BOTH FILES, NOT JUST THE `.py`. `host_label.py` locates `host-role.sh` — the
   # owner of the fleet's address table — NEXT TO ITSELF via `__file__`, with no
@@ -2472,8 +2472,35 @@ in
       Type = "simple";
       # PATH must be explicit: a user service does not inherit the login PATH.
       # python3 (with stdlib only) + base64/coreutils for the helper path.
+      #
+      # 🔴 PYTHONDONTWRITEBYTECODE IS A CORRECTNESS SETTING HERE, NOT TIDINESS.
+      # `~/.config/activity-collector/` is a REAL, WRITABLE directory (only the
+      # leaves are store symlinks), and this daemon's interpreter writes into it:
+      # on the workbench today that dir holds a `changed_paths.cpython-312.pyc`
+      # dated 2026-08-13, still there across every generation since (and the
+      # keylog/ and browser-ext/ subdirs hold their own). CPython validates a cached
+      # module on (source mtime-in-whole-SECONDS, source size) — and EVERY nix
+      # store path has `mtime = 1`, so across deploys the mtime half is a
+      # constant and the key degenerates to SIZE ALONE. A size-preserving
+      # correction to `lib/host_label.py` (an IP octet, a comparison operator, a
+      # typo) therefore reads as UNCHANGED: `ship.sh` succeeds, the triggers
+      # below fire, the unit restarts, and this `Restart=always` daemon re-loads
+      # the OLD bytecode and stamps every telemetry row from the old logic —
+      # across restarts and reboots, silently. Reproduced with both controls: a
+      # same-size octet edit is ignored, a different-size edit is not, and
+      # deleting `__pycache__` fixes it.
+      #
+      # ⚠ IT PREVENTS THE WRITE, IT DOES NOT INVALIDATE A CACHE THAT ALREADY
+      # EXISTS. Sound for this pair only because there is none yet: the `lib/`
+      # entries are added by the same change as this line, and
+      # `~/.config/activity-collector/lib/` is absent on the workbench at
+      # generation `af943906` (measured), so no `host_label` pyc has ever been
+      # written. Ship this line WITH the lib/ entries, never after them — and if
+      # they ever do land apart, purge `~/.config/activity-collector/**/__pycache__`
+      # once by hand, because this setting cannot.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
+        "PYTHONDONTWRITEBYTECODE=1"
       ];
       EnvironmentFile = "-%h/.config/activity-collector/env";
       ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/collector.py";
@@ -2493,6 +2520,13 @@ in
       # keeps stamping every shipped row from the OLD one — and `host-role.sh` is
       # the half no import scanner can see. Pinned, DERIVED not typed, in
       # `scripts/tests/test_transcript_push.py`.
+      #
+      # ⚠ SCOPE: THESE TRIGGERS CLOSE THE *RESTART* HALF ONLY, NOT
+      # CODE-FRESHNESS. They guarantee the daemon is restarted when the code
+      # changes; they say nothing about which BYTES it then loads. The `.pyc`
+      # cache is the other half, and it is keyed on size alone here — see
+      # `PYTHONDONTWRITEBYTECODE` above, without which a restarted daemon can
+      # re-load the pre-edit module. Both are needed; neither implies the other.
       X-Restart-Triggers = [
         "${../scripts/collector/collector.py}"
         "${../scripts/lib/host_label.py}"

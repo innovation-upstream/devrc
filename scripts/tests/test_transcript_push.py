@@ -1408,6 +1408,60 @@ def test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS():
         "daemon then keeps stamping every row from a stale address table")
 
 
+def test_the_ACTIVITY_COLLECTOR_unit_REFUSES_TO_CACHE_BYTECODE():
+    """🔴 A RESTART IS NOT FRESH CODE — THE `.pyc` CACHE IS THE OTHER HALF.
+    The trigger ledger above guarantees the daemon is RESTARTED when
+    `host_label.py` changes. It says nothing about which bytes the restarted
+    daemon then loads, and here those can be the pre-edit ones:
+
+      * `~/.config/activity-collector/` is a real, WRITABLE directory (only the
+        leaves are store symlinks) and this daemon's interpreter writes into it —
+        an August `__pycache__/changed_paths.cpython-312.pyc` is still there,
+        having outlived every generation since.
+      * CPython validates a cached module on (source mtime-in-whole-SECONDS,
+        source size), and EVERY nix store path has `mtime = 1`. Across deploys
+        the mtime half is a constant, so the key degenerates to SIZE ALONE.
+
+    A size-preserving correction — an IP octet, a comparison operator, a typo —
+    is therefore invisible: `ship.sh` succeeds, the triggers fire, the unit
+    restarts, and this `Restart=always` daemon re-loads the OLD module and
+    stamps every shipped row from the old logic, across restarts and reboots.
+    The mechanism is reproduced end-to-end, with both controls, by
+    `test_a_SAME_SIZE_redeploy_is_INVISIBLE_when_the_daemon_may_cache_bytecode`
+    in `scripts/collector/tests/test_collector.py`.
+
+    🔴 WHY THIS GUARD READS THE UNIT AND NOT A RUNNING PROCESS. Both deployed-
+    layout harnesses in that file set `PYTHONDONTWRITEBYTECODE=1` in the child's
+    env — which is exactly why the suite was structurally blind to this: no test
+    it contains could ever have written a `.pyc` to go stale. The only artefact
+    that decides it in production is the unit's DECLARED environment, so that is
+    what is asserted here.
+
+    ⚠ IT PREVENTS THE WRITE, NOT THE READ OF AN EXISTING CACHE. Sound for this
+    pair only because the `lib/` entries land in the same change: no
+    `~/.config/activity-collector/lib/` exists on the workbench at generation
+    `af943906` (measured), so no `host_label` pyc has ever been written. See the
+    `nix/home.nix` comment for the purge if they ever land apart.
+
+    INVARIANT GUARD on a declaration this branch adds; its sensitivity is
+    `MUT-C10` in `scripts/tests/mutants-host-label.sh`.
+    """
+    block = _activity_collector_unit_block()
+    m = re.search(r"Environment = \[(.*?)\];", block, re.S)
+    assert m, "the activity-collector unit declares no Environment list at all"
+    env = re.findall(r'"([^"]*)"', m.group(1))
+    # Positive control on the extraction: a wrong or empty block would otherwise
+    # fail below for a reason that has nothing to do with bytecode caching.
+    assert any(e.startswith("PATH=") for e in env), (
+        f"the extracted list is not the collector unit's Environment: {env}")
+    assert "PYTHONDONTWRITEBYTECODE=1" in env, (
+        f"the activity-collector unit's Environment is {env} — it does not set "
+        "PYTHONDONTWRITEBYTECODE=1, so the daemon writes a __pycache__ into its "
+        "own deployed directory and a SIZE-PRESERVING correction to "
+        "lib/host_label.py is silently ignored on the next restart (every nix "
+        "store path has mtime=1, so size is the whole cache key).")
+
+
 def test_the_host_identity_pair_is_DEPLOYED_beside_the_collector():
     """🔴 A RESTART TRIGGER IS NOT A DEPLOYMENT, AND THE COLLECTOR NEEDS BOTH.
     A file not declared in `nix/home.nix` simply is not there: the switch
@@ -1424,8 +1478,21 @@ def test_the_host_identity_pair_is_DEPLOYED_beside_the_collector():
     DERIVED from the module's own source, so a second address-table file added
     tomorrow fails here.
 
+    🔴 THE ATTRIBUTE PATH IS HALF A DECLARATION; THIS PINS THE `.source` TOO.
+    The first cut checked the source with `f"../scripts/lib/{name}" in text` — a
+    FILE-WIDE substring, already satisfied hundreds of lines away by the
+    `X-Restart-Triggers` list, so it could not see an entry wired to the WRONG
+    file. Two mutants stayed green on both ledgers: `lib/host_label.py` sourced
+    from `timeouts.py`, and — the realistic copy-paste slip — `lib/host-role.sh`
+    sourced from `host_label.py`. The second is the dangerous one: `host_label.py`
+    would then `open()` a "host-role.sh" that is Python, `parse_host_addrs`
+    returns `()`, and the module falls back to the nebula-only `PEER_SSH`
+    subset — the exact silent, mesh-dependent degradation this ledger exists to
+    prevent. So each name's own `.source` is extracted and compared, not
+    searched for.
+
     INVARIANT GUARD on a declaration this branch adds; its sensitivity is
-    `MUT-C5` in `scripts/tests/mutants-host-label.sh`.
+    `MUT-C5`, `MUT-C8` and `MUT-C9` in `scripts/tests/mutants-host-label.sh`.
     """
     libdir = REPO_ROOT / "scripts" / "lib"
     needed = {"host_label.py"} | _lib_files_a_python_file_BUILDS_A_PATH_TO(
@@ -1446,9 +1513,26 @@ def test_the_host_identity_pair_is_DEPLOYED_beside_the_collector():
         f"~/.config/activity-collector/lib but collector.py's host-identity chain "
         f"needs {sorted(missing)}. The switch will SUCCEED and the daemon will "
         "quietly stop deriving its host label.")
+
+    # name -> the path THAT entry takes its bytes from. Scoped to each entry, so
+    # a `.source` naming a different file cannot be satisfied from elsewhere in
+    # the file (see the docstring).
+    sources = {
+        name: " ".join(src.split())
+        for name, src in re.findall(
+            r'home\.file\."\.config/activity-collector/lib/([^"]+)"'
+            r'\.source\s*=\s*([^;]+);', text)
+    }
     for name in sorted(needed):
-        assert f"../scripts/lib/{name}" in text, (
-            f"the lib/{name} entry does not point at ../scripts/lib/{name}")
+        src = sources.get(name)
+        assert src is not None, (
+            f"the lib/{name} entry declares no `.source = …;` this ledger can "
+            "read (an attrset-form entry?) — it is deployed, but WHERE FROM is "
+            "unverified, so update this extraction rather than trusting it")
+        assert src == f"../scripts/lib/{name}", (
+            f"~/.config/activity-collector/lib/{name} is deployed FROM {src}, "
+            f"not from ../scripts/lib/{name}. The switch succeeds and the daemon "
+            "loads the wrong bytes under the right filename.")
 
 
 def _lib_modules_a_python_file_imports(path, libdir):

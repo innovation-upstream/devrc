@@ -109,9 +109,9 @@ FAILURES=0
 declare -A SUITE_ARGS=(
   [host_label]="$ROOT/scripts/tests/test_host_label_identity.py"
   [collector]="$ROOT/scripts/collector/tests/test_collector.py"
-  [nix]="$ROOT/scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS $ROOT/scripts/tests/test_transcript_push.py::test_the_host_identity_pair_is_DEPLOYED_beside_the_collector"
+  [nix]="$ROOT/scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS $ROOT/scripts/tests/test_transcript_push.py::test_the_host_identity_pair_is_DEPLOYED_beside_the_collector $ROOT/scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_unit_REFUSES_TO_CACHE_BYTECODE"
 )
-declare -A SUITE_FLOOR=( [host_label]=20 [collector]=30 [nix]=2 )
+declare -A SUITE_FLOOR=( [host_label]=20 [collector]=30 [nix]=3 )
 
 FAILURES=0
 
@@ -341,6 +341,29 @@ run_nix 'MUT-C4 the collector unit drops the identity triggers' \
 run_nix 'MUT-C5 host-role.sh is not deployed beside the collector' \
   test_the_host_identity_pair_is_DEPLOYED_beside_the_collector \
   's|^  home\.file\.".config/activity-collector/lib/host-role.sh".source =$|  home.file.".config/activity-collector/lib/UNUSED-host-role.sh".source =|'
+# 🔴 MUT-C8/C9: THE ENTRY IS PRESENT AND WIRED TO THE WRONG FILE. C5 above
+# removes a declaration; these keep both attribute paths intact and swap what
+# each takes its bytes FROM — the copy-paste slip, not the omission. Both were
+# GREEN on both ledgers until the source-pinning landed (measured: `2 passed`
+# each), because the source was checked with a FILE-WIDE substring that the
+# X-Restart-Triggers list hundreds of lines away already satisfied.
+# C9 is the one that matters: `host_label.py` would `open()` a "host-role.sh"
+# that is Python, `parse_host_addrs` returns `()`, and the module silently falls
+# back to the nebula-only PEER_SSH subset.
+run_nix 'MUT-C8 lib/host_label.py sourced from the wrong file' \
+  test_the_host_identity_pair_is_DEPLOYED_beside_the_collector \
+  '/^  home\.file\."\.config\/activity-collector\/lib\/host_label\.py"\.source =$/{n;s|^    \.\./scripts/lib/host_label\.py;$|    ../scripts/lib/timeouts.py;|}'
+run_nix 'MUT-C9 lib/host-role.sh sourced from host_label.py' \
+  test_the_host_identity_pair_is_DEPLOYED_beside_the_collector \
+  '/^  home\.file\."\.config\/activity-collector\/lib\/host-role\.sh"\.source =$/{n;s|^    \.\./scripts/lib/host-role\.sh;$|    ../scripts/lib/host_label.py;|}'
+# 🔴 MUT-C10: the daemon is allowed to cache bytecode again. A restart trigger
+# firing is not fresh code — with a `__pycache__` in the deployed dir and every
+# store path at mtime=1, the cache key is SIZE alone and a size-preserving
+# correction to lib/host_label.py is silently ignored. RANGE-ADDRESSED to the
+# collector unit for the same reason MUT-C4 is.
+run_nix 'MUT-C10 the collector unit may cache bytecode again' \
+  test_the_ACTIVITY_COLLECTOR_unit_REFUSES_TO_CACHE_BYTECODE \
+  '/^  systemd\.user\.services\.activity-collector = {$/,/^  };$/{/^        "PYTHONDONTWRITEBYTECODE=1"$/d}'
 
 printf '\n== controls ==\n'
 # 🔴 THE NEGATIVE CONTROL ON THE HARNESS: a behaviour-free edit MUST survive. If

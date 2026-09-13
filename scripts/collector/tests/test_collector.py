@@ -464,11 +464,25 @@ def test_emit_concurrent_appends_dont_interleave(tmp_path):
 #: These fail at `4697add2` — the round-1 head of this branch, where
 #: `host_label.py` already derived and only `collector.py` did not — BECAUSE OF
 #: THE DEFECT, i.e. because `from_env` answered `""` where it should have derived.
-#: Measured by copying THIS file into an archive of that commit under /tmp:
-#: 8 failed, 34 passed; the other four failures are missing SYMBOLS
-#: (`_load_host_label`, `HOST_LABEL_LIB_DIRS`) or a log line that does not exist
-#: there, which is NOT "red because of the defect" and is deliberately not
-#: claimed here. `origin/main` is not a usable base for these at all — the module
+#:
+#: THE RECIPE, IN FULL, BECAUSE THE OBVIOUS ONE DOES NOT REPRODUCE. Copying THIS
+#: file verbatim into `git archive 4697add2` under /tmp gives **ERRORS ONLY — one
+#: per collected test, 0 failed, 0 passed** — not a red/green matrix at all: the
+#: autouse `_hermetic_host_label` fixture calls `C._load_host_label()`, a symbol
+#: that does not exist there, so every test dies at SETUP and nothing runs. The
+#: fixture call has to be neutralised first, by loading `scripts/lib/host_label.py`
+#: inline with `importlib.util.spec_from_file_location` instead (the MODULE
+#: derives at `4697add2`; only its consumer did not, which is the whole point).
+#: With exactly that one substitution: **8 failed**, the rest passed
+#: (45 errors → 8 failed / 37 passed as measured at this file's current size; the
+#: PASS count tracks however many tests this file holds, the 8 does not).
+#: Of the 8, four are these two ledger entries — three parametrisations of
+#: `..._is_DERIVED_from_an_address_this_machine_holds` plus the deployed-layout
+#: test — each `assert '' == '<label>'`, i.e. red BECAUSE OF THE DEFECT. The
+#: other four are not: two are `AttributeError: no attribute 'HOST_LABEL_LIB_DIRS'`
+#: (a missing SYMBOL) and two assert a WARNING log line that does not exist
+#: there. That distinction is deliberately not claimed as coverage.
+#: `origin/main` is not a usable base for these at all — the module
 #: has no address signal there, so the fixture cannot even be built.
 #: Everything else in this section is an INVARIANT GUARD: it pins behaviour that
 #: was already correct, or a code path this branch introduces. The distinction is
@@ -791,6 +805,98 @@ def test_the_DEPLOYED_symlink_layout_can_derive_the_host_label(
         "host-role.sh was not deployed beside host_label.py, yet the LAN address "
         "still resolved — the fallback table is supposed to be the nebula-only "
         "PEER_SSH subset, so this arm is measuring nothing")
+
+
+def _redeploy_probe(tmp_path, dont_write_bytecode, second_marker):
+    """Deploy `host_label.py` carrying `MARKER = "AAA"`, import it through the
+    deployed symlink, REDEPLOY it carrying `second_marker`, import again — and
+    return what the SECOND import saw.
+
+    The nix store is imitated where it matters: the store file's mtime is forced
+    to 1 on both deploys (every real store path has `mtime = 1`), and only the
+    leaf is a symlink, so `<dep>/lib/` is a real writable directory Python can
+    drop a `__pycache__` into. Returns `(second_seen, pyc_existed_after_first)`.
+    """
+    dep = _deploy(tmp_path)
+    store_py = (tmp_path / "store" / "host_label.py")
+    base = _LIB.joinpath("host_label.py").read_bytes()
+
+    def deploy(marker):
+        store_py.write_bytes(base + b'\nMARKER = "' + marker.encode() + b'"\n')
+        os.utime(store_py, (1, 1))
+
+    prog = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import host_label\n"
+        "print('MARKER=' + host_label.MARKER)\n"
+    )
+
+    def run():
+        env = dict(os.environ)
+        env.update({"HOST_LABEL_ADDRS": "",
+                    "HOST_LABEL_ENV_FILE": str(tmp_path / "absent-env")})
+        env.pop("ACTIVITY_HOST", None)
+        if dont_write_bytecode:
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+        else:
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+        p = subprocess.run([sys.executable, "-c", prog, str(dep / "lib")],
+                           capture_output=True, text=True, env=env, timeout=120)
+        assert p.returncode == 0, p.stdout + p.stderr
+        line = [l for l in p.stdout.splitlines() if l.startswith("MARKER=")]
+        assert line, p.stdout + p.stderr
+        return line[0][len("MARKER="):]
+
+    deploy("AAA")
+    assert run() == "AAA"
+    cached = list((dep / "lib" / "__pycache__").glob("host_label.*.pyc"))
+    deploy(second_marker)
+    return run(), bool(cached)
+
+
+def test_a_SAME_SIZE_redeploy_is_INVISIBLE_when_the_daemon_may_cache_bytecode(
+        tmp_path):
+    """🔴 THE MECHANISM BEHIND THE UNIT'S `PYTHONDONTWRITEBYTECODE`, EXERCISED
+    RATHER THAN ASSERTED. Its ledger —
+    `test_the_ACTIVITY_COLLECTOR_unit_REFUSES_TO_CACHE_BYTECODE` in
+    `scripts/tests/test_transcript_push.py` — reads the unit's declared
+    environment, which is the only artefact that decides this in production. That
+    guard is worth nothing if the hazard it names is imaginary, so this one
+    reproduces the hazard end to end, in the layout that actually runs on a host.
+
+    🔴 AND IT IS THE ONE HARNESS HERE THAT LETS BYTECODE BE WRITTEN. Every other
+    deployed-layout probe in this file pins `PYTHONDONTWRITEBYTECODE=1` in the
+    child env, which is precisely why this whole suite was structurally blind to
+    it: no test it contained could produce a `.pyc` that could go stale.
+
+    Three arms, and the second two are the controls that make the first mean
+    something:
+      1. bytecode allowed + a SAME-SIZE redeploy -> the old module. The bug.
+      2. bytecode allowed + a DIFFERENT-SIZE redeploy -> the new module. So the
+         cache key really is size (mtime is pinned at 1 both times, as the store
+         pins it), not "caching is simply broken here".
+      3. bytecode refused + the SAME same-size redeploy -> the new module. So the
+         unit's setting is what closes arm 1, and closes it for the right reason.
+    """
+    stale, cached = _redeploy_probe(tmp_path / "same", False, "BBB")
+    assert cached, (
+        "no host_label .pyc was written into the deployed lib/ at all — this "
+        "harness cannot observe the staleness it exists to demonstrate")
+    assert stale == "AAA", (
+        f"a same-size redeploy was picked up ({stale}) — either this CPython no "
+        "longer keys its cache on (mtime, size) or the store-mtime imitation "
+        "broke; the unit's PYTHONDONTWRITEBYTECODE would then be guarding nothing")
+
+    bigger, _ = _redeploy_probe(tmp_path / "diff", False, "CCCCCCCC")
+    assert bigger == "CCCCCCCC", (
+        "a DIFFERENT-size redeploy was also ignored, so arm 1 is not evidence "
+        "about the size key — bytecode caching is broken here in some other way")
+
+    fixed, _ = _redeploy_probe(tmp_path / "fixed", True, "BBB")
+    assert fixed == "BBB", (
+        "even with PYTHONDONTWRITEBYTECODE=1 the same-size redeploy was ignored "
+        "— the setting the activity-collector unit carries does not close this")
 
 
 def test_the_RED_AT_4697ADD2_ledger_names_only_tests_that_EXIST():
