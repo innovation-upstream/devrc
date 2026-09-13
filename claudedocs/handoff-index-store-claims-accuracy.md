@@ -326,20 +326,63 @@ nothing was recorded and no task was created.
 
 ## Next steps (ranked)
 
-1. **Decide the token allowlist for the 2 remaining local-only entries** (`devrc`,
-   the k8s secret in ns `subsystem-store`). RE-VERIFIED 2026-09-10: both
-   `civitai-app-requests` and `civitai-developer-docs` read local=yes pod=NO, with
-   `civitai` as a yes/yes positive control, so the comparison can see a difference.
-   Widening the allowlist edits the secret and needs a pod delete (the token file is
-   read ONCE at startup). ⚠ The doc's sub-claim "`cairn create` answers `not-found`"
-   is UNVERIFIED — my probe was malformed (it requires `--file`); re-derive before
-   quoting it.
+🔴 **BOTH RANKS THIS DOC CARRIED ARE CLOSED. It went stale a FOURTH time before
+this edit** — it was still telling a reader that rank 2 had been "Never started"
+**after `#1554` had merged**, and still flagging a sub-claim as UNVERIFIED after it
+had been verified. The session that closed them claimed the item with *"retire the
+stale ranked text"* in its own subject line and then did not do it. That is the
+failure this doc has documented three times over; nothing closes a ranked item
+automatically, and the next writer is the only moment anyone looks.
+
+1. ⏸ **PARKED, deliberately — the two stranded scopes** (`civitai-app-requests`,
+   `civitai-developer-docs`). ⚠ The old text asked the WRONG QUESTION ("decide the
+   token allowlist") and carried a sub-claim it marked UNVERIFIED. Both settled
+   2026-09-12:
+   - **`cairn create` DOES create a scope's first entry, directory included**
+     (`create_entry` → `path.parent.mkdir(exist_ok=True)`; pinned by
+     `test_a_scopes_FIRST_entry_creates_the_directory`). **Seeding is NOT
+     required** — `seed.sh` is for bulk pushes and carries the overwrite hazard.
+   - **The only scope-level gate is the token's scope allowlist.** The
+     `not-found` sub-claim is VERIFIED: rc 6 for a non-allowlisted scope against a
+     control of rc 9 `already-exists`; both wrote nothing. ⚠ The original probe
+     could not have distinguished the mechanisms — it used a scope that was absent
+     AND non-allowlisted on a pod where those sets coincide.
+   **Why parked, not done:** the remaining step edits a SOPS secret in
+   `ZacxDev/homelab-infra` and needs a pod delete, whose failure mode is
+   `EXIT_CONFIG (78)` with no second pod under `Recreate` — *the store stays down*.
+   Measured against that: nothing has read either scope, neither repo is checked
+   out on this host, and the entries have not moved since 2026-09-02/03.
+   🔴 **The loss risk that would have justified it is CLOSED**: they were
+   single-copy (laptop had neither, the mirror is not a git repo, and the backup
+   CronJob covers the pod's `/data`, not the mirror). Rescue copies now exist on
+   BOTH hosts at `~/rescue/subsystem-stranded-2026-09-12/`, md5-verified.
+   **Closing condition:** the next time that secret is edited for ANY reason, add
+   both scope names in the same commit — the pod restart is already being paid —
+   then `cairn create` twice. `cairn doctor`'s `token-scopes` PROBLEM is the
+   standing reminder and is an accurate report, not an alarm.
    forcing: none
 
-2. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Never started. 🟡5 RE-VERIFIED 2026-09-10:
-   still **0** occurrences of `policy:` in `scripts/lib/service_recon.py` on
-   `origin/main`. 🟡6: `--template` over an EXISTING entry prints the first-ever-file
-   template and exits 0 silently, destroying an `OPEN:` bullet.
+2. ✅ **CLOSED — `devrc#1170`'s 🟡5 and 🟡6, merged as `#1554` (squash `663bc86a`).**
+   🟡5: the probe now EMITS `policy: <path>  (<basis>)`, sourced from
+   `subsystem_touch.governing_policy` rather than re-derived, and `index-store.md`
+   carries the `subsystem-index/SKILL.md` sentence verbatim with a test comparing
+   the two docs to each other. The instruction was made satisfiable rather than
+   softened. 🟡6: `--template` over an existing entry now REFUSES (exit 2) naming
+   what would be destroyed. ⚠ #1170's audit framed 🟡6 as a race; that framing was
+   wrong and the single-writer repro is two commands.
+
+3. **Two small guard gaps left open on purpose, named so they read as OPEN rather
+   than absent.**
+   - `scripts/tests/test_cairn_skill_verb_ledger.py` — nothing verifies that a
+     `DELEGATED` ledger reason is TRUE. Measured churn of the guarded surface:
+     6 verb-set-changing commits in 16 days, so the cheapest way past the ledger is
+     to type `DELEGATED` and a sentence. (Round 0 of `/audit-pr` on `#1504`.)
+   - `_RETRACTED_BOUNDARY` has no needle for the retracted *"widening the allowlist
+     changes nothing"*. MEASURED structural, not live: the only two occurrences sit
+     inside explicit retraction markers. 🔴 Any needle change there owes the round-4
+     discipline — a false-positive probe over TRUE sentences **plus** a mutation
+     battery, verified as a pair. A needle without a subject fires on correct
+     writing; that has happened twice in this file's history.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
