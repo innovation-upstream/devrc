@@ -23,6 +23,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# `scripts/lib` is not a package (no `__init__.py`) — siblings are imported flat,
+# off a sys.path entry this module adds itself. Same idiom as `cairn_who.py`, and
+# it is what lets a caller that loaded THIS file by explicit path still resolve
+# `host_label` rather than dying on an import it never asked for.
+_LIB = str(Path(__file__).resolve().parent)
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+import host_label as _host_label  # noqa: E402
+
 SNIPPET_PAD = 50
 GENESIS_CHARS = 200
 
@@ -31,10 +40,14 @@ LOCAL_DB = Path.home() / DB_RELPATH
 
 # Every host that holds an opencode DB, by Nebula address. Whichever of these IS
 # the machine we are running on is read from disk; the others go over SSH.
-PEERS = (
-    ("workbench", "10.42.0.30", "zach"),
-    ("laptop", "10.42.0.100", "zach"),
-)
+#
+# 🔴 NOT A SECOND COPY. This used to be a literal `(label, addr, user)` tuple
+# identical to `host_label.PEER_SSH`, and a second tool (`scripts/peer-host`)
+# needed the same table — which is the moment a duplicated constant becomes a
+# constant that can disagree. It is imported now, so the addresses have ONE
+# spelling. `configured_peers()` below still owns the opencode-specific env
+# override; only the default moved.
+PEERS = _host_label.PEER_SSH
 REMOTE_DB = Path("/home/zach") / DB_RELPATH
 
 

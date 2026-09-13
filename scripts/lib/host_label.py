@@ -35,6 +35,85 @@ import os
 HOST_NAMES = ("workbench", "laptop")
 DEFAULT_LOCAL_HOST = "workbench"
 
+#: 🔴 EVERY host in HOST_NAMES with the Nebula address and user an SSH leg to it
+#: needs — `(label, addr, user)`, in HOST_NAMES order.
+#:
+#: `10.42.0.100` is the LAPTOP; `10.42.0.10` is the homelab GATEWAY. Getting that
+#: wrong DOES NOT FAIL LOUDLY: SSH succeeds against a real host and reports the
+#: gateway's state as the laptop's. That is why the address belongs next to the
+#: label vocabulary it is meant to agree with, rather than being retyped per tool.
+#:
+#: 🔴 THE GUARD'S SCOPE, STATED ONCE. NOT A LIST OF EVERY SPELLING.
+#:
+#: Two earlier drafts of this comment tried to ENUMERATE where these addresses
+#: appear. Both were incomplete when written — the first listed 3 of 5, the
+#: second 5 of 11+ — and each was caught by the next audit round. An enumeration
+#: of places a guard CANNOT see is unbounded and rots silently, and an
+#: over-claiming ledger is worse than none: it is what the next reader trusts
+#: INSTEAD of looking. So this states the SCOPE, which is checkable and stable,
+#: and stops pretending to a census.
+#:
+#: ENFORCED — `test_peer_host.py::test_no_module_redeclares_a_peer_address_literal`:
+#:     no string constant EQUAL to a peer's `user@addr`, in a file under
+#:     `scripts/` that is not inside a `tests/` directory and does not end in
+#:     `.md`, outside this module.
+#:
+#: 🔴 EVERY CLAUSE OF THAT WAS MEASURED AGAINST THE SCANNER, not inferred from
+#: its name. It does NOT catch a constant that merely CONTAINS the address
+#: (`"ssh zach@… uptime"`), an f-string, a bare unquoted address in a `.sh`
+#: file, or anything in a `.md` — `scripts/browser-bridge/README.md` spells one
+#: today. This is the THIRD attempt at this paragraph; the first two described
+#: the guard more widely than it works, which is the same defect in a new place.
+#:
+#: OUT OF SCOPE, and therefore NOT enumerated anywhere: a target COMPOSED at
+#: runtime from parts (shell does this); a BARE IP; and anything outside
+#: `scripts/` — `nix/` in particular carries several, in espanso snippets, a
+#: systemd `ExecStart` and shell under `nix/system/`. To find them, GREP; do not
+#: trust a list here.
+#:
+#: The two in-scope-but-unreachable cases worth knowing by name, because each is
+#: itself a claimed single source of truth:
+#:   * `scripts/lib/host-role.sh` — composes `zach@<ip>` at runtime from bare IP
+#:     constants. Live (sourced by `ship.sh` and `drift-check.sh`), and
+#:     `scripts/README.md` calls it "the ONE host-identity predicate", so two
+#:     modules each claim to be the single home. It answers a different question
+#:     (which role am I, from a list of interface addresses) and it is shell, so
+#:     folding it in is a design change, not a rename.
+#:   * `scripts/browser-bridge/server.py` — bare IPs in `_HOST_IP_ORDER`.
+#:
+#: 🔴 NO LINE NUMBERS, deliberately — `nix/home.nix` states the rule this repo
+#: already learned: "a line number is a claim that rots silently". An earlier
+#: draft of this comment carried four, and one had already gone stale within the
+#: same PR.
+#:
+#: These modules DERIVE from this table (three of the four were literals;
+#: `scripts/peer-host` is new and never carried one):
+#:   `scripts/peer-host`, `scripts/lib/opencode_search.py`,
+#:   `scripts/session-manager`, `scripts/session-analysis/espanso-usage.py`.
+#:
+#: Every value agrees today; this is a duplication hazard, not a live defect.
+PEER_SSH = (
+    ("workbench", "10.42.0.30", "zach"),
+    ("laptop", "10.42.0.100", "zach"),
+)
+
+
+def ssh_target(label: str) -> str:
+    """`user@addr` for a host label. Raises on an unknown label.
+
+    Raising is deliberate. A miss that returned None or "" would be spliced into
+    an `ssh` argv and produce a connection to the LOCAL machine or to whatever
+    the caller's default host is — i.e. the wrong machine's answer, reported as
+    that label's. There is no safe fallback here, so there is none.
+    """
+    for lbl, addr, user in PEER_SSH:
+        if lbl == label:
+            return f"{user}@{addr}"
+    raise KeyError(
+        "no SSH target for host label %r — known labels: %s"
+        % (label, ", ".join(l for l, _, _ in PEER_SSH)))
+
+
 #: Where the collector records this machine's label.
 #:
 #: `HOST_LABEL_ENV_FILE` redirects it. That override exists so a test can point
