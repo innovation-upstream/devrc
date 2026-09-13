@@ -2592,13 +2592,31 @@ _SCRIPT_DESCEND_MAX_BYTES = 8 * 1024
 # 🔴 THE FAN-OUT BOUND — total bytes this ONE `evaluate()` will hand to the
 # parser, across every body at every depth. The per-body cap above bounds one
 # file; nothing bounded how MANY, and the difference was measured in seconds:
-# 1 wrapper → 100 helpers of 8 KiB = 2,858 ms; a two-level 30×30 = 18,453 ms.
+# 1 wrapper → 100 helpers of 8 KiB = 1,610 ms; a two-level 30×30 with DISTINCT
+# leaves = 16,381 ms. ⚠ ONE RUN, ONE FIXTURE SET — an earlier draft quoted
+# 2,858/18,453/5,307 ms here and 1,610/16,381/1,559 ms two hundred lines away,
+# two different runs on a box under different load, presented as one fact. The
+# numbers in this file are now all from the run recorded in the round-3 PR
+# comment; re-measure rather than average them.
 #
 # 64 KiB is eight bodies at the per-body cap, or ~128 of the few-hundred-byte
 # scratch scripts this arm exists for, so it cannot bite a real script running
 # a handful of helpers. What it bounds is a SEARCH, never a check: see
 # `check_executed_script_file` — every file reached is still read and still
 # sentinel-tested however many preceded it.
+#
+# ⚠ "TOTAL BYTES HANDED TO THE PARSER" WAS MEASURABLY FALSE FOR ONE COMMIT. The
+# charge sat outside the depth check, so a body found AT the recursion limit was
+# debited in full and then handed to a walk that returned immediately — proven
+# with a `commands()` spy on a 4-deep chain: an 8,189 B body never parsed and
+# still charged. Eight such chains spent the whole budget on nothing and flipped
+# a later file from DENY to ALLOW. The level loop now breaks before charging at
+# the last level, so the sentence is true again.
+#
+# ⚠ THE CHARGE IS ALL-OR-NOTHING, and that asymmetry is worth knowing: a body
+# that does not fit consumes nothing. Bodies are spent smallest-first, so the
+# first that does not fit ends the level — the residue is simply left unspent
+# rather than dribbled away on whichever body happened to come next.
 _SCRIPT_DESCEND_BUDGET_BYTES = 64 * 1024
 
 # 🔴 KNOWN GAP, AND A DELIBERATE ONE: `source x.sh` / `. x.sh` is NOT read.
@@ -2643,16 +2661,38 @@ _SCRIPT_DESCEND_BUDGET_BYTES = 64 * 1024
 # The sweep that "covered" `-o`/`-O`/`+o`/`+O` iterated each flag ALONE, which is
 # the one shape that cannot expose a clustering bug.
 #
-# The rule is bash's: in a cluster the value-taking letter consumes the NEXT
-# word only when it is LAST (`-eo pipefail`). A value letter mid-cluster takes
-# its value from the rest of the cluster, so the next word is still the operand.
+# 🔴 ONE SKIPPED WORD PER VALUE LETTER, WHATEVER ITS POSITION IN THE CLUSTER.
+# This comment previously asserted a "last letter only" rule — that a value
+# letter mid-cluster takes its value from the rest of the cluster — and that was
+# FACTUALLY WRONG. Measured against GNU bash 5.3.15, every one of these RUNS
+# `x.sh` while the last-letter rule returned `pipefail`/`extglob` as the script:
+#     bash -oe  pipefail x.sh          bash -uoe pipefail x.sh
+#     bash -ox  pipefail x.sh          bash -Oe  extglob  x.sh
+#     sh   -oe  pipefail x.sh          bash -eoO pipefail extglob x.sh
+# The last one is the shape that settles the rule: TWO value letters, TWO words
+# consumed, and `x.sh` still the script. So the count — not the position — is
+# what advances the scan. Last-letter missed 5 of 16 shapes; counting misses 0.
+#
+# ⚠ AND IT FAILED IN THE FALSE-DENY DIRECTION TOO, which is the worse one: with
+# a file named `pipefail` in the cwd, `bash -oe pipefail x.sh` denied on THAT
+# file's contents — a candidate path invented from a flag's argument, which is
+# exactly what the direct-execution branch refuses to do.
+#
+# ⚠ MEASURING THIS IS ITSELF A TRAP. A first sweep ran `$sh $f x.sh` with the
+# flags in a zsh variable; zsh does NOT word-split, so bash received `-oe
+# pipefail` as ONE argument, errored with "invalid option name", and every row
+# read as "bash refuses this shape" — the opposite conclusion, stated with
+# measurements. `${=f}`, a literal list, or a real array; see RULES.md.
 _SHELL_VALUE_SHORT = "oO"
 _SHELL_VALUE_LONG = ("--rcfile", "--init-file")
 
-# A redirection token as this tokeniser hands it over: `>`, `2>`, `>>`, `&>`,
-# `<`, `<<EOF`, `2>&1`, `>/tmp/o.log`. Group 2 is the operator, group 3 whatever
-# was attached to it. Nothing that is not a redirection can match: an ordinary
-# operand would have to begin with digits followed by `<` or `>`.
+# A redirection token as this tokeniser hands it over: `>`, `2>`, `>>`, `<`,
+# `<<EOF`, `>/tmp/o.log` — and the `&` forms (`2>&1`, `&>`, `>&2`) ONLY in their
+# QUOTED or ESCAPED spellings, because `split_commands` cuts an unquoted `&`
+# before this function ever sees the token. Both halves are measured; see
+# `_redirection`. Group 2 is the operator, group 3 whatever was attached to it.
+# Nothing that is not a redirection can match: an ordinary operand would have to
+# begin with digits followed by `<` or `>`.
 _REDIR_RE = re.compile(r"^(\d*)(<<-?|<&|>&|&>>?|<>|>>|>\||>|<)(.*)$")
 
 
@@ -2666,14 +2706,24 @@ def _redirection(tok):
     `bash 2>/dev/null x.sh` used to return `2>/dev/null` as the script path and
     ALLOW the file that actually ran.
 
-    ⚠ THE `&` FORMS NEVER REACH THIS FUNCTION, AND THIS DOCSTRING USED TO IMPLY
-    THEY DID by listing `2>&1` among the tokens handled. MEASURED: the segment
-    splitter cuts on `&` first, so `bash 2>&1 x.sh` arrives as TWO argvs —
-    `['bash', '2>']` and `['1', 'x.sh']` — and neither yields an operand. Same
-    for `3>&1` and `&>/tmp/o`. That is a property of `split_commands`, one layer
-    below this parser, so it is DECLARED as a gap here rather than papered over
-    with a pattern that cannot fire. Pinned by
-    `test_the_ampersand_redirect_forms_are_a_DECLARED_gap`.
+    ⚠ THE `&` FORMS SPLIT IN TWO, AND ONLY THE UNQUOTED SPELLING IS LOST. This
+    paragraph has now been wrong in BOTH directions and the correction is the
+    point. It first implied `2>&1` was handled here; the round-2 "retraction"
+    then said the `&` forms "NEVER reach this function" and called
+    `<&|>&|&>>?` "a pattern that cannot fire" — which invited deleting those
+    alternatives. Both claims are false. MEASURED:
+
+        bash 2>&1 x.sh      -> split_commands cuts on the bare `&`, giving TWO
+                               argvs (`['bash','2>']`, `['1','x.sh']`); no
+                               operand, so the file is ALLOWED. A real gap.
+        bash '2>&1' x.sh    -> one argv, `_redirection('2>&1')` = ('other','1'),
+        bash "2>&1" x.sh       the token is skipped as a redirect and `x.sh` is
+        bash 2\\>\\&1 x.sh     returned. DENIES. The alternatives DO fire.
+
+    So: the unquoted spelling is a gap in `split_commands`, one layer below this
+    parser and shared by every check; the quoted and escaped spellings are
+    handled HERE and are pinned in the DENY direction. Both are asserted by
+    `test_the_ampersand_redirect_forms_split_only_when_UNQUOTED`.
     """
     m = _REDIR_RE.match(tok)
     if not m:
@@ -2756,8 +2806,9 @@ def _script_operand(argv, _depth=0):
                 # `-c` carries inline text, not a file; `_nested_shell_text` owns it.
                 if tok.startswith("-") and "c" in letters:
                     return None
-                # Last letter only — see `_SHELL_VALUE_SHORT`.
-                i += 2 if letters and letters[-1] in _SHELL_VALUE_SHORT else 1
+                # One skipped word per value letter, wherever it sits in the
+                # cluster — see `_SHELL_VALUE_SHORT` for the bash measurement.
+                i += 1 + sum(1 for c in letters if c in _SHELL_VALUE_SHORT)
                 continue
             return (tok, False)
         return None
@@ -2938,8 +2989,10 @@ def check_executed_script_file(cmd, cwd=None):
     said "bounded three ways" and that was a claim about ONE BODY, not about the
     walk. Nothing bounded the NUMBER of bodies, and it showed: MEASURED on a
     single `evaluate()`, one wrapper naming 100 helpers of 8 KiB each cost
-    **2,858 ms**, a two-level 30×30 fan-out **18,453 ms**, and 300 scripts on one
-    command line **5,307 ms**. An 18-second hook call on the operator's primary
+    **1,610 ms**, a two-level 30×30 fan-out over DISTINCT leaves **16,381 ms**,
+    and 300 scripts on one command line **1,559 ms** — one run, one fixture set;
+    see `_SCRIPT_DESCEND_BUDGET_BYTES` on why that qualifier is here. A
+    16-second hook call on the operator's primary
     tool is the same defect this arm's latency fix was for, one axis over.
 
     So the bounds are now:
@@ -2950,12 +3003,61 @@ def check_executed_script_file(cmd, cwd=None):
         bytes this one `evaluate()` will hand to the parser. This is the bound
         on FAN-OUT.
       * A VISITED SET, keyed `(realpath, depth, direct)`.
-    🔴 THE BUDGET DELIBERATELY NEVER GATES THE CHECK. Every file this walk
-    reaches is read and sentinel-tested however many came before it, so a kill
-    in a file the command NAMES is found regardless of fan-out; only the descent
-    into that file's own children is budgeted. That is why the budget's
-    order-dependence is a bound on a SEARCH and not a repeat of the soundness
-    bug below.
+
+    🔴 THE WALK IS BREADTH-FIRST AND ITS BUDGET IS SPENT IN A CANONICAL ORDER,
+    AND THAT IS A CORRECTION, NOT A FLOURISH. This paragraph used to be headed
+    "THE BUDGET DELIBERATELY NEVER GATES THE CHECK", and as written that was
+    FALSE: the budget gated the DESCENT, and a kill one hop below a file was
+    reached only by descending, so bulk ahead of it hid the kill. MEASURED on
+    the previous commit, one directory, `k.sh` (17 B, the kill) reached through
+    `last.sh` (3 KB), behind eight 8,190 B bodies:
+
+        bash last.sh                                    DENY
+        bash b0.sh; …; bash b7.sh; bash last.sh         ALLOW  🔴
+        bash last.sh; bash b0.sh; …; bash b7.sh         DENY
+        the same eight as one `&&` chain, bulk first    ALLOW  🔴
+
+    Same commands, same files, verdict decided by the order they were written
+    in — the third round running in which the fix for the last round's
+    order-dependence re-opened it in a new coordinate.
+
+    What is true now, and it is two claims, not one:
+      1. NO FILE THE WALK REACHES IS EVER CHECK-GATED. Every level reads and
+         sentinel-tests every file it names, in textual order, before any budget
+         is spent. A kill in a file the command NAMES cannot be hidden by
+         anything else on the line, at any fan-out.
+      2. WHICH FILES ARE REACHED BELOW LEVEL 1 IS A FUNCTION OF THE FILE SET,
+         NOT OF THE COMMAND'S ORDER. Each level sorts its bodies by (size,
+         resolved path) and spends the budget smallest-first, so reordering the
+         command cannot change the verdict. Smallest-first also maximises how
+         many bodies a fixed budget searches, which is what makes the measured
+         case above deny in BOTH orders.
+    🔴 THE RESIDUAL, STATED: a kill below a level whose budget ran out is still
+    missed — deterministically now, and in the same family as the 8 KiB per-body
+    cap and the 256 KiB read cap. It is a bounded SEARCH, and the bound is
+    declared rather than described as an absence.
+
+    ⚠ A DIRECTION THAT WAS EVALUATED AND REJECTED ON MEASUREMENT: charge the
+    budget only for bodies bearing the sentinel. It is not a bound at all —
+    almost nothing bears the sentinel, so almost nothing is ever charged. Built
+    and measured: the two-level 30x30 fan-out went from 187 ms back to
+    17,855 ms, i.e. worse than the 16,381 ms with no budget whatsoever.
+
+    ⚠ FOUR GUARDS IN THIS FUNCTION ARE NOW SUBSUMED BY THE LEVEL ORDERING, AND
+    EACH HAS A SURVIVING MUTANT. They are kept because they cost nothing and
+    each becomes load-bearing again the moment the ordering is lost, but none of
+    them is claimed as covered:
+      * `depth` in the visited key — a level-ordered walk always reaches a file
+        at its SHALLOWEST level first, so the round-1 defect cannot occur.
+      * `direct` in the visited key — see the honest negative above.
+      * the `break` before the last level — there is no level after the last, so
+        a charge there can never be spent. It keeps
+        `_SCRIPT_DESCEND_BUDGET_BYTES`'s comment literally true; it changes no
+        verdict.
+      * `break` (not `continue`) on the first body that does not fit — bodies
+        are spent in ASCENDING size, so nothing after it fits either.
+    `test_the_walk_is_BREADTH_first_which_is_what_makes_three_guards_redundant`
+    pins the ordering itself, and is what goes red first if it is lost.
 
     🔴 THE VISITED SET IS KEYED ON `(realpath, depth, direct)` AND IS ONLY
     WRITTEN AFTER A SUCCESSFUL READ. Both halves are load-bearing and both were
@@ -2995,61 +3097,82 @@ def check_executed_script_file(cmd, cwd=None):
     """
     seen = set()
     read_memo = {}
-    budget = [_SCRIPT_DESCEND_BUDGET_BYTES]
+    budget = _SCRIPT_DESCEND_BUDGET_BYTES
+    frontier = [cmd]
 
-    def walk(text, depth):
-        if depth > _SCRIPT_RECURSION_LIMIT:
-            return None
-        for argv in commands(text):
-            operand = _script_operand(argv)
-            if not operand:
-                continue
-            path, direct = operand
-            # Memoised on the RAW path string: no syscall, cannot raise, and it
-            # is what stops a body that names one helper 100 times re-reading it
-            # 100 times now that `seen` is written after the read.
-            if (path, direct) in read_memo:
-                body = read_memo[(path, direct)]
-            else:
-                body = read_memo[(path, direct)] = _read_script(path, cwd, direct)
-            if body is None:
-                continue
-            # 🔴 AFTER the read, never before — and `realpath` runs only on a
-            # path `_read_script` has already OPENED. It used to run on the raw
-            # operand, where a NUL byte raised an UNCAUGHT `ValueError: lstat:
-            # embedded null character in path` straight out of `evaluate()`.
-            # Measured reachable from 12 tracked `icon-*.png` files: a binary
-            # body is walked, and a NUL-bearing token becomes a candidate path.
-            # It failed CLOSED (bash-guard.py catches BaseException and denies
-            # "bash-guard crashed"), so it was a confusing false deny rather
-            # than a bypass — but it was a crash that did not exist before.
-            key = (os.path.realpath(
-                path if os.path.isabs(path) else os.path.join(cwd or ".", path)),
-                depth, direct)
-            if key in seen:
-                continue
-            seen.add(key)
-            for chk in _script_checks_for(body):
-                reason = chk(body)
-                if reason:
-                    return (
-                        f"`{path}` is executed by this command and CONTAINS a "
-                        f"blocked command. {reason}\n\n"
-                        "🔴 THIS IS THE BYPASS THAT KILLED THE OPERATOR'S TMUX "
-                        "SERVER TWICE ON 2026-09-11 (52 and 53 live conversations). "
-                        "Writing the command to a file and running the file is not "
-                        "a way around this guard — it is the exact shape that "
-                        "caused the incident. Fix the SCRIPT: give it its own "
-                        "server with `-L my-probe-$$` and kill that."
-                        + _SCRIPT_ARM_REMEDY)
-            if len(body) <= _SCRIPT_DESCEND_MAX_BYTES and budget[0] >= len(body):
-                budget[0] -= len(body)
-                nested = walk(body, depth + 1)
-                if nested:
-                    return nested
-        return None
+    for depth in range(_SCRIPT_RECURSION_LIMIT + 1):
+        # --- 1. READ AND CHECK EVERY FILE THIS LEVEL NAMES. Unbudgeted, in
+        #        textual order, so a kill in a file the command NAMES is found
+        #        whatever else is on the line and however much came before it.
+        reached = []
+        for text in frontier:
+            for argv in commands(text):
+                operand = _script_operand(argv)
+                if not operand:
+                    continue
+                path, direct = operand
+                # Memoised on the RAW path string: no syscall, cannot raise, and
+                # it is what stops a body that names one helper 100 times
+                # re-reading it 100 times now that `seen` is written after the
+                # read.
+                if (path, direct) in read_memo:
+                    body = read_memo[(path, direct)]
+                else:
+                    body = read_memo[(path, direct)] = _read_script(path, cwd, direct)
+                if body is None:
+                    continue
+                # 🔴 AFTER the read, never before — and `realpath` runs only on a
+                # path `_read_script` has already OPENED. It used to run on the
+                # raw operand, where a NUL byte raised an UNCAUGHT `ValueError:
+                # lstat: embedded null character in path` straight out of
+                # `evaluate()`. Measured reachable from 19 tracked `icon-*.png`
+                # files: a binary body is walked, and a NUL-bearing token becomes
+                # a candidate path. It failed CLOSED (bash-guard.py catches
+                # BaseException and denies "bash-guard crashed"), so it was a
+                # confusing false deny rather than a bypass — but it was a crash
+                # that did not exist before.
+                key = (os.path.realpath(
+                    path if os.path.isabs(path) else os.path.join(cwd or ".", path)),
+                    depth, direct)
+                if key in seen:
+                    continue
+                seen.add(key)
+                for chk in _script_checks_for(body):
+                    reason = chk(body)
+                    if reason:
+                        return (
+                            f"`{path}` is executed by this command and CONTAINS a "
+                            f"blocked command. {reason}\n\n"
+                            "🔴 THIS IS THE BYPASS THAT KILLED THE OPERATOR'S TMUX "
+                            "SERVER TWICE ON 2026-09-11 (52 and 53 live conversations). "
+                            "Writing the command to a file and running the file is not "
+                            "a way around this guard — it is the exact shape that "
+                            "caused the incident. Fix the SCRIPT: give it its own "
+                            "server with `-L my-probe-$$` and kill that."
+                            + _SCRIPT_ARM_REMEDY)
+                reached.append((len(body), key[0], body))
 
-    return walk(cmd, 0)
+        # --- 2. CHOOSE WHAT TO PARSE NEXT, IN A CANONICAL ORDER.
+        if depth == _SCRIPT_RECURSION_LIMIT:
+            break            # nothing below this level will ever be read, so
+                             # charging the budget for it would be a lie — see
+                             # `_SCRIPT_DESCEND_BUDGET_BYTES`.
+        frontier = []
+        # SMALLEST FIRST, then by resolved path. Sorting is what makes the
+        # verdict a function of the file SET rather than of the order the
+        # command happens to name them in; smallest-first maximises how many
+        # bodies a fixed budget can search, and it is what makes the measured
+        # bulk-then-killer case deny.
+        for size, resolved, body in sorted(reached, key=lambda r: (r[0], r[1])):
+            if size > _SCRIPT_DESCEND_MAX_BYTES or size > budget:
+                # Ascending order, so nothing after this fits either.
+                break
+            budget -= size
+            frontier.append(body)
+        if not frontier:
+            break
+
+    return None
 
 
 # =========================================================================== #

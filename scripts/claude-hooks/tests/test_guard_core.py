@@ -5674,19 +5674,30 @@ def test_a_SKIPPED_read_does_not_poison_the_visited_set(unreadable_kill, templat
     `bash x` half — which would have been parsed, and denies on its own — was
     skipped. The verdict was decided by which spelling came first.
 
-    The two independent halves of the fix are asserted here behaviourally and in
-    `test_the_visited_key_includes_the_INVOCATION_not_just_the_path` structurally.
+    ⚠ THE FIX HAS ONE OBSERVABLE HALF, NOT TWO. This docstring used to say the
+    halves were asserted "behaviourally here and structurally in
+    `test_the_visited_key_includes_the_INVOCATION_not_just_the_path`", and a
+    mutation sweep showed that was a coverage claim the suite does not have: the
+    mutant that drops `direct` from the key SURVIVES a full run. Both tests are
+    satisfied by the after-read insert alone.
+    `test_the_direct_element_of_the_visited_key_is_DEFENCE_not_a_fix` is the one
+    that says so, and it is right.
     """
     assert gc.evaluate(template, "claude-code", str(tmp_path)), (
         f"ALLOWED: {template!r} — a read that never happened poisoned `seen`")
 
 
 def test_the_visited_key_includes_the_INVOCATION_not_just_the_path(tmp_path):
-    """The structural half. `direct` decides whether a file is read as shell at
-    all, so two entries differing only in `direct` are two different questions
-    and must not share a key. Asserted through behaviour one level down, where
-    the command line itself contains only ONE spelling — so this cannot be
-    satisfied by anything that merely special-cases a top-level `||`."""
+    """The same defect ONE LEVEL DOWN, where the command line itself contains
+    only one spelling — so this cannot be satisfied by anything that merely
+    special-cases a top-level `||`.
+
+    ⚠ It does NOT assert anything about `direct` being in the visited key, and
+    it used to claim it did ("two entries differing only in `direct` … must not
+    share a key"). The mutant that drops `direct` SURVIVES this test and the
+    whole suite; see
+    `test_the_direct_element_of_the_visited_key_is_DEFENCE_not_a_fix`. What this
+    pins is the after-read insert, reached through a wrapper."""
     py = tmp_path / "py.sh"
     py.write_text("#!/usr/bin/env python3\ntmux kill-server\n")
     py.chmod(0o755)
@@ -5830,17 +5841,20 @@ def test_the_walk_bounds_TOTAL_parsed_bytes_not_just_one_body(tmp_path, monkeypa
     assert descended > 0, "nothing was descended into at all — the probe is dead"
 
 
-def test_the_fan_out_budget_NEVER_gates_the_CHECK(tmp_path):
-    """🔴 THE SOUNDNESS HALF, and the reason the budget is defensible at all.
+def test_no_file_the_walk_REACHES_is_ever_check_gated(tmp_path):
+    """🔴 RENAMED, BECAUSE THE OLD NAME WAS A CLAIM THE CODE DID NOT MEET.
 
-    A budget consumed by earlier siblings is order-dependent by construction —
-    the very shape round 1 fixed. It is acceptable here ONLY because it bounds
-    the SEARCH for nested scripts and never the check itself: every file the
-    walk reaches is read and sentinel-tested however many came before it.
+    This was `test_the_fan_out_budget_NEVER_gates_the_CHECK`, and both that name
+    and the headline it mirrored in guard_core.py were FALSE as written: the
+    budget gated the DESCENT, and a kill one hop below a file is reached only by
+    descending, so bulk ahead of that file hid it —
+    `test_bulk_ahead_of_a_killer_parent_does_not_hide_it` is that case, and it
+    ALLOWED before this round.
 
-    So: 120 benign 8 KiB helpers, then the kill, in one command. The budget is
-    long exhausted by the time the last helper is reached, and it must still
-    deny.
+    What is true, and all this test claims: no file the walk REACHES is ever
+    check-gated. Every level reads and sentinel-tests every file it names before
+    any budget is spent, so a kill in a file the command NAMES survives any
+    amount of bulk in front of it. The deeper claim is the sibling test's.
     """
     # 🔴 THE KILLER MUST BE BIG, and that is the whole isolation of this test.
     # A first draft used a 40-byte `kill.sh`; the mutant "gate the check on
@@ -5855,11 +5869,13 @@ def test_the_fan_out_budget_NEVER_gates_the_CHECK(tmp_path):
     assert len(killer.read_text()) > gc._SCRIPT_DESCEND_MAX_BYTES // 2, (
         "the killer is small enough to fit the leftover budget, so this test "
         "cannot see a check that is wrongly budget-gated")
-    # ⚠ FEW LINES, BIG HELPERS. A first draft used 120 helpers and the WRAPPER
-    # itself came to ~9 KiB of `bash <long tmp path>` lines — over
-    # `_SCRIPT_DESCEND_MAX_BYTES`, so the walk never descended into it and the
-    # test failed for a reason that had nothing to do with the budget. 12
-    # helpers of 8 KiB exhaust a 64 KiB budget with a wrapper under 1 KiB.
+    # ⚠ FEW LINES, BIG HELPERS — and the COUNT IS DERIVED, never written twice.
+    # A first draft used 120 helpers and the WRAPPER itself came to ~9 KiB of
+    # `bash <long tmp path>` lines — over `_SCRIPT_DESCEND_MAX_BYTES`, so the
+    # walk never descended into it and the test failed for a reason that had
+    # nothing to do with the budget. Three later readers then found "120" in the
+    # docstring, "12" in this comment and "10" from the expression, none of them
+    # the number the code used; the count is now named once, here.
     n = 2 + gc._SCRIPT_DESCEND_BUDGET_BYTES // gc._SCRIPT_DESCEND_MAX_BYTES
     wrap = _fanout_tree(tmp_path, n, 8000, tail=f"bash {killer}\n")
     assert len(wrap.read_text()) <= gc._SCRIPT_DESCEND_MAX_BYTES, (
@@ -5869,7 +5885,7 @@ def test_the_fan_out_budget_NEVER_gates_the_CHECK(tmp_path):
     assert total > gc._SCRIPT_DESCEND_BUDGET_BYTES, (
         "the fixture no longer exhausts the budget, so this proves nothing")
     assert gc.evaluate(f"bash {wrap}", "claude-code", str(tmp_path)), (
-        "the kill was missed because 120 benign files came first — the budget "
+        f"the kill was missed because {n} benign files came first — the budget "
         "is gating the CHECK, not just the descent")
 
 
@@ -5881,23 +5897,44 @@ def test_the_fan_out_budget_NEVER_gates_the_CHECK(tmp_path):
     "bash 3>&1 {p}",
     "bash &>/tmp/guard-probe.log {p}",
 ])
-def test_the_ampersand_redirect_forms_are_a_DECLARED_gap(script, template, tmp_path):
-    """🔴 NOT a passing grade, and the reason is one layer below this parser.
+def test_the_ampersand_redirect_forms_split_only_when_UNQUOTED(script, template, tmp_path):
+    """🔴 ONLY THE UNQUOTED SPELLING IS A GAP, and the previous version of this
+    test asserted the opposite of half the truth.
 
-    `split_commands` cuts on `&` before `_redirection` ever sees the token, so
-    `bash 2>&1 x.sh` arrives as TWO argvs — `['bash', '2>']` and `['1', 'x.sh']`
-    — and neither yields an operand. `_redirection`'s docstring used to list
-    `2>&1` among the tokens it handles, which was a claim about a pattern that
-    cannot fire.
+    It was called `..._are_a_DECLARED_gap` and its docstring said the `&` forms
+    never reach `_redirection` and that `<&|>&|&>>?` was "a pattern that cannot
+    fire" — which invites deleting those alternatives. MEASURED, they fire:
+    `_redirection('2>&1')` is `('other', '1')`, and `bash '2>&1' x.sh`,
+    `bash "2>&1" x.sh` and `bash 2\\>\\&1 x.sh` all DENY, because quoting or
+    escaping the `&` stops `split_commands` cutting there.
 
-    Closing this means changing the shared segment splitter, which every check
-    in this file depends on. Declared rather than attempted.
+    So this row is the UNQUOTED spelling only: a gap in the shared segment
+    splitter, one layer below this parser. The quoted arm below is the control
+    that keeps the gap honest — if BOTH allowed, the cause would be something
+    else entirely.
     """
     path = script(_CRASH1_BODY)
     assert gc.evaluate(template.format(p=path), "claude-code", str(tmp_path)) is None, (
         f"{template} now DENIES — an improvement; delete this row on purpose")
     # The mechanism, asserted, so a reader does not have to take it on trust.
     assert len(gc.commands(template.format(p=path))) > 1
+
+
+@pytest.mark.parametrize("template", [
+    "bash '2>&1' {p}",
+    'bash "2>&1" {p}',
+    "bash 2\\>\\&1 {p}",
+])
+def test_a_QUOTED_ampersand_redirect_is_skipped_and_the_script_still_denies(
+        script, template, tmp_path):
+    """The other half, and the reason `_REDIR_RE`'s `&` alternatives are NOT
+    dead code. Quoting the `&` keeps the token whole, `_redirection` classifies
+    it as a stream redirect, and the operand after it is found."""
+    assert gc._redirection("2>&1") == ("other", "1"), (
+        "the `&` alternatives stopped matching — they are live, not decorative")
+    path = script(_CRASH1_BODY)
+    assert gc.evaluate(template.format(p=path), "claude-code", str(tmp_path)), (
+        f"ALLOWED: {template} — a quoted redirect swallowed the script operand")
 
 
 def test_a_redirection_token_is_not_a_directly_executed_script(tmp_path):
@@ -5929,3 +5966,272 @@ def test_a_COMMENT_only_script_is_allowed_and_the_deny_says_so(script, tmp_path)
     assert "A plain `#` comment does NOT trigger this deny" in reason, (
         "the remedy must say which cause CANNOT fire, or the reader edits the "
         "wrong thing")
+
+
+# =========================================================================== #
+# 16j. 🔴 ROUND-3 — the fan-out budget was itself a NEW order-dependent ALLOW.
+#
+# Third round running in which the fix for the previous round's
+# order-dependence re-opened it in a new coordinate. The budget gated the
+# DESCENT, and a kill one hop below a file is reached only by descending — so
+# bulk ahead of that file hid the kill, while the same commands in the reverse
+# order denied.
+#
+# The walk is now BREADTH-FIRST with the budget spent in a canonical order
+# (smallest body first, then resolved path), so the verdict is a function of the
+# file SET rather than of the order the command names them in.
+# =========================================================================== #
+def _bulk_and_killer_parent(tmp_path):
+    """The round-3 reproduction, verbatim in shape: a small killer TWO hops
+    down, behind enough 8 KiB bodies to exhaust the budget at one level."""
+    k = tmp_path / "k.sh"
+    k.write_text("tmux kill-server\n")
+    k.chmod(0o755)
+    last = tmp_path / "last.sh"
+    last.write_text("#!/usr/bin/env bash\n"
+                    + "echo hello world; ls -la /tmp\n" * 100 + f"bash {k}\n")
+    last.chmod(0o755)
+    pad = "cat <<EOF\nhello world\nEOF\n"
+    n = 1 + gc._SCRIPT_DESCEND_BUDGET_BYTES // gc._SCRIPT_DESCEND_MAX_BYTES
+    bulk = []
+    for i in range(n):
+        b = tmp_path / f"b{i}.sh"
+        b.write_text("#!/usr/bin/env bash\n" + pad * (8160 // len(pad)))
+        b.chmod(0o755)
+        bulk.append(b)
+    assert sum(len(b.read_text()) for b in bulk) > gc._SCRIPT_DESCEND_BUDGET_BYTES, (
+        "the bulk no longer exhausts the budget, so this proves nothing")
+    assert len(last.read_text()) <= gc._SCRIPT_DESCEND_MAX_BYTES, (
+        "the killer's parent is over the per-body cap — then this test is about "
+        "that cap, not about the budget")
+    return last, bulk
+
+
+@pytest.mark.parametrize("shape", ["bulk-then-killer", "killer-then-bulk",
+                                   "and-chain-bulk-first", "killer-alone"])
+def test_bulk_ahead_of_a_killer_parent_does_not_hide_it(tmp_path, shape):
+    """🔴 THE ROUND-3 REGRESSION, and the exact reproduction that was measured.
+
+    MEASURED at 133a79cd, one directory, `k.sh` (17 B) reached through
+    `last.sh` (3 KB), behind eight 8,190 B bodies:
+
+        bash last.sh                                  DENY
+        bash b0.sh; …; bash b7.sh; bash last.sh       ALLOW  🔴
+        bash last.sh; bash b0.sh; …; bash b7.sh       DENY
+        the same eight as one `&&` chain, bulk first  ALLOW  🔴
+
+    Same commands, same files, verdict decided by the order they were written
+    in. A sweep of benign-size x parent-size found 28 of 54 cells ALLOW, every
+    one of which denied with the bulk removed, and it reproduced with real
+    tracked repo scripts as the bulk — not a knife edge.
+
+    🔴 THIS IS THE MULTI-FILE TOP-LEVEL SHAPE ON PURPOSE. The depth-1 case
+    (`test_no_file_the_walk_REACHES_is_ever_check_gated`) cannot see this
+    defect: there the kill is in a file the command NAMES, so it is checked
+    before any budget is spent. Only a kill BELOW a named file needs the
+    descent, and only the descent was budgeted.
+    """
+    last, bulk = _bulk_and_killer_parent(tmp_path)
+    pre = "; ".join(f"bash {b}" for b in bulk)
+    cmd = {
+        "killer-alone": f"bash {last}",
+        "bulk-then-killer": f"{pre}; bash {last}",
+        "killer-then-bulk": f"bash {last}; {pre}",
+        "and-chain-bulk-first": " && ".join(f"bash {b}" for b in bulk) + f" && bash {last}",
+    }[shape]
+    assert gc.evaluate(cmd, "claude-code", str(tmp_path)), (
+        f"ALLOWED ({shape}) — bulk ahead of the killer's parent hid the kill")
+
+
+def test_the_verdict_does_not_depend_on_COMMAND_ORDER(tmp_path):
+    """The general claim, swept rather than sampled: for the fixture above,
+    EVERY ordering of the same clauses must give the same verdict.
+
+    This is what "the verdict is a function of the file SET" means, and it is
+    the property three consecutive rounds of this PR failed to hold. A budget
+    spent in traversal order cannot have it; one spent in a canonical order can.
+    """
+    last, bulk = _bulk_and_killer_parent(tmp_path)
+    clauses = [f"bash {b}" for b in bulk] + [f"bash {last}"]
+    verdicts = set()
+    for rot in range(len(clauses)):
+        rotated = clauses[rot:] + clauses[:rot]
+        verdicts.add(bool(gc.evaluate("; ".join(rotated), "claude-code", str(tmp_path))))
+    # …and the reversed order, which is the shape the audit measured.
+    verdicts.add(bool(gc.evaluate("; ".join(reversed(clauses)), "claude-code",
+                                  str(tmp_path))))
+    assert verdicts == {True}, (
+        f"orderings of the SAME clauses disagreed: {verdicts}. A verdict that "
+        "depends on which clause was typed first is the defect of rounds 1, 2 "
+        "and 3 — in a new coordinate each time.")
+
+
+def test_a_body_at_the_recursion_limit_is_not_CHARGED_for_a_parse_that_cannot_happen(
+        tmp_path):
+    """🔴 MEASURED at 133a79cd with a `commands()` spy: a body found AT the
+    recursion limit was debited in full and then handed to a walk that returned
+    immediately — 8,189 B charged, 0 B parsed. That made
+    `_SCRIPT_DESCEND_BUDGET_BYTES`'s own comment ("total bytes this ONE
+    evaluate() will hand to the parser") measurably false.
+
+    ⚠ ASSERTED THROUGH THE BUDGET'S CONSEQUENCE, NOT THROUGH THE PARSE COUNT. A
+    first version compared parsed sizes and was GREEN at 133a79cd — of course it
+    was: the defect is that a body is charged WITHOUT being parsed, so a
+    parse-only probe cannot see it. The budget is a local, so the only thing
+    that can: spend it on phantom charges and watch a later file stop being
+    searched.
+
+    🔴 AND AN HONEST ATTRIBUTION, because the obvious one is wrong. What makes
+    this GREEN now is the BREADTH-FIRST walk, NOT the `break` before the last
+    level. Mutation-tested: removing that `break` (so the last level charges
+    again) SURVIVES — in a level-ordered walk there IS no level after the last,
+    so a charge there can never be spent. The `break` is an optimisation, and it
+    is what keeps `_SCRIPT_DESCEND_BUDGET_BYTES`'s own comment literally true;
+    it is not the thing this test pins. See
+    `test_the_walk_is_BREADTH_first_which_is_what_makes_three_guards_redundant`.
+    """
+    pad = "cat <<EOF\nx\nEOF\n"
+    # 🔴 MANY SMALL PHANTOM CHARGES, NOT A FEW BIG ONES — and that detail is the
+    # whole fixture. A first version used 9 chains of ~8 KiB and was GREEN at
+    # 133a79cd: the charge is all-or-nothing, so once the budget dropped below
+    # 8 KiB the big debits were REFUSED and enough residue survived to search
+    # the parent anyway. Charges that keep fitting are what actually drain it.
+    deep_bytes = 1024
+    n = 6 + gc._SCRIPT_DESCEND_BUDGET_BYTES // deep_bytes
+    tops = []
+    for c in range(n):
+        deep = tmp_path / f"c{c}_0.sh"
+        deep.write_text("#!/usr/bin/env bash\n" + pad * (deep_bytes // len(pad)))
+        deep.chmod(0o755)
+        prev = deep
+        for i in range(1, gc._SCRIPT_RECURSION_LIMIT + 1):
+            nxt = tmp_path / f"c{c}_{i}.sh"
+            nxt.write_text(f"#!/usr/bin/env bash\nbash {prev}\n")
+            nxt.chmod(0o755)
+            prev = nxt
+        tops.append(prev)
+
+    killer = tmp_path / "k.sh"
+    killer.write_text("tmux kill-server\n")
+    killer.chmod(0o755)
+    parent = tmp_path / "parent.sh"
+    parent.write_text("#!/usr/bin/env bash\n"
+                      + "echo hello world; ls -la /tmp\n" * 100 + f"bash {killer}\n")
+    parent.chmod(0o755)
+
+    # CONTROL: the parent denies on its own, so the assertion below is about the
+    # budget and not about a broken fixture.
+    assert gc.evaluate(f"bash {parent}", "claude-code", str(tmp_path))
+    cmd = "; ".join([f"bash {t}" for t in tops] + [f"bash {parent}"])
+    assert gc.evaluate(cmd, "claude-code", str(tmp_path)), (
+        f"ALLOWED — {n} chains whose deepest body can never be parsed still "
+        "spent the budget, and the kill below `parent.sh` was never searched for")
+    # POSITIVE CONTROL on the fixture itself: the chains must really be capable
+    # of draining a budget, or the assertion above passes for want of a probe.
+    assert n * deep_bytes > gc._SCRIPT_DESCEND_BUDGET_BYTES
+
+
+def test_every_bash_value_flag_CLUSTER_shape_is_measured_against_real_bash(tmp_path):
+    """🔴 THE RULE WAS FACTUALLY WRONG, AND THE COMMENT CERTIFIED IT.
+
+    The shipped rule was "a value letter consumes the next word only when it is
+    LAST in the cluster", with a comment asserting a mid-cluster value letter
+    takes its value from the rest of the cluster. Measured against GNU bash
+    5.3.15 — every one of these RUNS `x.sh`, and the last-letter rule returned
+    `pipefail`/`extglob` as the script for five of them:
+
+        bash -oe pipefail x.sh      bash -uoe pipefail x.sh
+        bash -ox pipefail x.sh      bash -Oe  extglob  x.sh
+        sh   -oe pipefail x.sh      bash -eoO pipefail extglob x.sh
+
+    The last is what settles it: TWO value letters, TWO words consumed, `x.sh`
+    still the script. So the count advances the scan, not the position.
+
+    ⚠ And it failed in the FALSE-DENY direction too, which is worse: with a file
+    named `pipefail` in the cwd, `bash -oe pipefail x.sh` denied on THAT file.
+    Both directions are asserted below.
+    """
+    victim = tmp_path / "victim.sh"
+    victim.write_text(_CRASH1_BODY)
+    decoy = tmp_path / "pipefail"
+    decoy.write_text(_CRASH1_BODY)          # a kill, so a wrong-file read DENIES
+    (tmp_path / "extglob").write_text(_CRASH1_BODY)
+
+    for prefix in ("bash -oe pipefail", "bash -uoe pipefail", "bash -ox pipefail",
+                   "bash -Oe extglob", "bash -eoO pipefail extglob",
+                   "sh -oe pipefail", "bash -eo pipefail", "bash -euo pipefail",
+                   "bash -xo pipefail", "bash -eO extglob", "bash -o pipefail"):
+        argv = prefix.split() + [str(victim)]
+        assert gc._script_operand(argv) == (str(victim), False), (
+            f"{prefix!r} resolved to {gc._script_operand(argv)}, not the script")
+
+    # FALSE-DENY DIRECTION: the decoy is a real file with a real kill in it, so
+    # a rule that reads the flag's ARGUMENT as the script denies on the wrong
+    # file — and the assertion above would not see it, because both deny.
+    benign = tmp_path / "benign.sh"
+    benign.write_text("#!/usr/bin/env bash\necho hi\n")
+    assert gc.evaluate(f"bash -oe pipefail {benign}", "claude-code",
+                       str(tmp_path)) is None, (
+        "denied on `pipefail` — the flag's argument was read as the script, "
+        "which is a candidate path invented out of a flag")
+    # CONTROL: the decoy really would deny if it were read, so the assertion
+    # above is not passing because the decoy is harmless.
+    assert gc.evaluate(f"bash {decoy}", "claude-code", str(tmp_path))
+
+    # …and the boundary: clusters with NO value letter must not eat the operand.
+    assert gc._script_operand(["bash", "-eu", str(victim)]) == (str(victim), False)
+    assert gc._script_operand(["bash", "-x", str(victim)]) == (str(victim), False)
+
+
+def test_the_walk_is_BREADTH_first_which_is_what_makes_three_guards_redundant(
+        tmp_path, monkeypatch):
+    """🔴 THE LOAD-BEARING PROPERTY OF THE ROUND-3 RESTRUCTURE, pinned — and the
+    reason four guards in this arm now have SURVIVING mutants.
+
+    The walk processes one whole LEVEL before any of the next: every file named
+    at depth N is read and checked before any file at depth N+1 is looked at.
+    Three consequences, each of which makes an existing guard unobservable, and
+    all four are reported as SURVIVED rather than dressed up as covered:
+
+      * `depth` in the visited key (the round-1 fix). A level-ordered walk
+        always reaches a file at its SHALLOWEST level first, so the round-1
+        defect — first recorded deep, then skipped when reached shallow — cannot
+        happen. Mutant "key on the path alone" SURVIVES.
+      * `direct` in the visited key (the round-2 defence). Already redundant for
+        its own reason; see
+        `test_the_direct_element_of_the_visited_key_is_DEFENCE_not_a_fix`.
+      * the `break` before the last level (the round-3 NEW-5 fix). There is no
+        level after the last, so a charge there cannot be spent. Mutant
+        SURVIVES; the `break` keeps the budget constant's comment true.
+      * `break` vs `continue` on the first body that does not fit. Bodies are
+        spent in ASCENDING size, so nothing after the first misfit fits either.
+        Provably inert; mutant SURVIVES.
+
+    All four are kept — they cost nothing and each becomes load-bearing again if
+    this ordering is ever lost. THIS test is what would go red first.
+    """
+    # A two-level tree: one file named directly, one reachable only through it.
+    deep = tmp_path / "deep.sh"
+    deep.write_text("#!/usr/bin/env bash\necho deep\n")
+    deep.chmod(0o755)
+    mid = tmp_path / "mid.sh"
+    mid.write_text(f"#!/usr/bin/env bash\nbash {deep}\n")
+    mid.chmod(0o755)
+    sibling = tmp_path / "zz_sibling.sh"          # sorts AFTER mid.sh
+    sibling.write_text("#!/usr/bin/env bash\necho sibling\n")
+    sibling.chmod(0o755)
+
+    opened = []
+    real_open = open
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda f, *a, **k: (opened.append(os.path.basename(str(f))), real_open(f, *a, **k))[1])
+    assert gc.check_executed_script_file(
+        f"bash {mid}; bash {sibling}", str(tmp_path)) is None
+
+    for name in ("mid.sh", "zz_sibling.sh", "deep.sh"):
+        assert name in opened, f"{name} was never read — the probe is wired wrong"
+    assert opened.index("zz_sibling.sh") < opened.index("deep.sh"), (
+        f"read order was {opened}. A depth-2 file was read before a depth-1 "
+        "sibling: the walk is depth-first again, and with it come back the "
+        "order-dependent verdicts of rounds 1, 2 and 3.")
