@@ -1932,6 +1932,44 @@ investigation_rows(){
   '
 }
 
+# Every PRIOR name this document has had — newest rename first, current name
+# NOT included. The caller seeds the array with the current path, so this can
+# return nothing without ever producing an empty pathspec.
+#
+# 🔴 A PATH-SCOPED PICKAXE IS RESET BY A RENAME, AND IT ERRS THE UNSAFE WAY.
+# `git log -S… -- <path>` only visits commits that TOUCH that path, so once a
+# doc is moved the earliest such commit is the move itself and every block in it
+# dates to the day of the move — 0d, the freshest possible answer, handed to the
+# documents most likely to be stale. That is this feature inverted, not merely
+# degraded. MEASURED 2026-09-13 on this repo: #1627 archived 35 handoff docs by
+# renaming them under claudedocs/archive/, and the 19 investigation blocks in
+# the 8 that carry one went from 2026-07-31 … 2026-08-12 to 0d overnight.
+#
+# 🔴 `--follow` CANNOT BE THE FIX — IT IS WORSE THAN THE BUG. Combined with `-S`
+# it returns NOTHING AT ALL for a renamed path (measured; the control is a
+# NON-renamed doc, where the same invocation returns the true first date), and
+# an empty result routes the block to UNDATED rather than to EXPIRED. So
+# `--follow` is used HERE and only here, for NAME RESOLUTION, and the pickaxe
+# below stays an ordinary path-scoped query — over the whole resolved set.
+#
+# Deliberately NOT "drop the pathspec". Repo-wide is correct on this corpus
+# (measured: 487 distinct investigation headings, ZERO whose `### <heading>`
+# substring occurs in a second tracked file) but it is ~8× slower per block
+# (0.63s vs 0.08s here) on a hot path that runs once per block, and it makes
+# every future heading collision anywhere in the repo a wrong ANSWER instead of
+# a non-event. The path history costs one 0.06s call per DOCUMENT and cannot
+# collide at all.
+doc_prior_paths(){
+  local ref="$1" rel="$2"
+  [ -n "$REPO" ] || return 0
+  # `--name-status` renders a rename as `R<score><TAB>old<TAB>new`, so field 2
+  # is the name the doc was moved AWAY from — field 3 is the one we already have.
+  # shellcheck disable=SC2086
+  git -C "$REPO" log ${ref:+"$ref"} --format= --name-status --find-renames \
+      --follow -- "$rel" 2>/dev/null |
+    awk -F'\t' '$1 ~ /^R[0-9]*$/ && $2 != "" { print $2 }'
+}
+
 investigations_block(){
   echo "INVESTIGATIONS"
   if [ -z "$HANDOFF" ]; then
@@ -1956,6 +1994,23 @@ investigations_block(){
   local now fresh expired undated line stamp heading epoch clock age gap
   now=$(date +%s)
   fresh=0 expired=0 undated=0
+
+  # Resolved ONCE per document, not once per block: the pickaxe below runs per
+  # block, and the answer is a property of the doc.
+  local ref rel
+  ref="${HANDOFF_REF:-}" rel="$HANDOFF"
+  [ -n "$ref" ] && [ -n "$HANDOFF_REL" ] && rel="$HANDOFF_REL"
+  # 🔴 SEEDED WITH THE CURRENT PATH AND ONLY EVER APPENDED TO. An empty array
+  # would expand to NO pathspec at all, i.e. silently to the repo-wide query
+  # this whole mechanism exists to avoid — so the array is built in the one
+  # shape that cannot become empty, rather than guarded against becoming empty
+  # by a branch nothing can reach.
+  local -a paths=("$rel")
+  local prior
+  while IFS= read -r prior; do
+    [ -n "$prior" ] && paths+=("$prior")
+  done < <(doc_prior_paths "$ref" "$rel")
+
   while IFS=$'\t' read -r stamp heading; do
     [ -n "$heading" ] || continue
     [ "$stamp" = "-" ] && stamp=""
@@ -1975,12 +2030,14 @@ investigations_block(){
       # git's pickaxe: the earliest commit whose count of this heading line
       # CHANGED is the commit that introduced the block. Literal (no
       # --pickaxe-regex), so a heading full of punctuation is safe.
-      local ref rel
-      ref="${HANDOFF_REF:-}" rel="$HANDOFF"
-      [ -n "$ref" ] && [ -n "$HANDOFF_REL" ] && rel="$HANDOFF_REL"
+      #
+      # Scoped to EVERY name the doc has had (see doc_path_history), so a rename
+      # cannot reset the block's clock. For an un-renamed doc `paths` holds one
+      # entry and this is byte-for-byte the query it always was — measured over
+      # this repo's 119 handoff docs, 84 resolve to exactly one path.
       # shellcheck disable=SC2086
       epoch=$(git -C "$REPO" log --format=%ct --reverse -S"### $heading" \
-                ${ref:+"$ref"} -- "$rel" 2>/dev/null | head -1)
+                ${ref:+"$ref"} -- "${paths[@]}" 2>/dev/null | head -1)
       if [ -n "$epoch" ]; then
         clock="first commit carrying this block"
         [ -n "$ref" ] && clock="first commit carrying this block on $ref"
