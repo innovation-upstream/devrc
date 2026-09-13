@@ -3,25 +3,38 @@
 🔴 WHAT THIS FILE CAN AND CANNOT SEE, STATED FIRST SO A GREEN RUN IS NOT READ
 AS MORE THAN IT IS.
 
-It asserts two things, both from files in this repo:
+It asserts three things, all from files in this repo:
 
   * the octo.nvim configuration the wrapper ships — parsed STRUCTURALLY, so the
     claim is about the table that will be handed to `setup()`, not about words
     in a comment;
+  * the legend, the `?` binding and the merge confirmation — by EXECUTING
+    `octo-init.lua` under `luajit` with `vim` and `require` stubbed, so a `no`
+    answer is watched failing to merge rather than reasoned about;
   * the wrapper's argument validation — by RUNNING the shell text with `nvim`
     stubbed, so a rejection is watched rather than reasoned about.
 
+🔴 THE FIRST TIER IS STRUCTURALLY BLIND TO THE SECOND, AND THAT IS WHY THE
+SECOND EXISTS. A keymap installed with `vim.keymap.set` is not a table entry,
+so every structural reader here is blind to it — a merge keystroke can appear,
+and an UNCONFIRMED one can appear, with the config section fully green. That
+happened: `test_no_merge_keystroke_is_declared_for_a_pull_request_buffer` read
+as "no merge keystroke exists" and kept passing when one was added.
+
 It cannot see, and does not claim: that alacritty maps a window; that neovim
 starts; that `setup()` ran; that `Octo <N> <owner/repo>` resolved the right
-buffer KIND (a live GraphQL call); or that the merge mappings are absent from a
-LIVE PR buffer. A config file saying a mapping is gone is a claim about the
-file — only a running editor proves the buffer. Those were measured by hand on
-the built derivation and recorded in the PR; they are deliberately NOT asserted
-here, because the measurement needs a nix build and a headless editor, and a
-test that skips itself when it cannot get one is worse than no test.
+buffer KIND (a live GraphQL call); that real neovim accepts the option tables
+the lua tier passes to `vim.keymap.set` / `nvim_open_win`; that `?` is
+reachable in a LIVE review; or that the float looks right on screen. A config
+file saying a mapping is gone is a claim about the file, and a stubbed `vim` is
+a claim about our logic — only a running editor proves the buffer. Those were
+measured by hand on the built derivation and recorded in the PR, because the
+measurement needs a nix build and a real editor, and a test that skips itself
+when it cannot get one is worse than no test.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -281,21 +294,33 @@ def test_the_pull_request_table_is_NOT_empty(pr_keys: set[str]):
 
 
 @pytest.mark.parametrize("key", MERGE_MAPPINGS + MERGE_MENUS)
-def test_no_merge_keystroke_is_declared_for_a_pull_request_buffer(
+def test_octos_OWN_UNCONFIRMED_merge_actions_are_NOT_declared_in_the_table(
         pr_keys: set[str], key: str):
-    """🔴 THE OPERATOR REQUIREMENT, ASSERTED AS STATE: merging must require
-    TYPING `:Octo pr merge`, never a keystroke.
+    """🔴 THIS GUARD NO LONGER MEANS "NO MERGE KEYSTROKE EXISTS", AND SAYING SO
+    IS THE POINT OF THIS DOCSTRING.
 
-    Upstream binds four immediate-merge keymaps and three merge-queue ones, and
-    puts "Merge PR" / "Squash and Merge PR" / "Delete Branch" behind `<CR>` via
-    `pr_options`. `mappings_disable_default = true` clears the whole default
-    table, so what this file declares is the complete set — and none of it may
-    be one of these.
+    It used to. The decision then was that merging must require typing `:Octo
+    pr merge`; the operator has since asked for a keymap, and one now exists
+    (`<localleader>pm`). This guard kept passing across that change without a
+    single edit — a merge keystroke appeared and the test that read as "no
+    merge keystroke exists" stayed green — which is precisely the "reads as
+    coverage, provides none" shape. It is retained with a NARROWER and now
+    TRUE claim, and the behavioural half lives in
+    `test_every_path_to_a_merge_passes_through_the_confirmation` and
+    `test_the_merge_KEYMAP_itself_is_on_the_confirmed_path` below.
+
+    THE NARROWER CLAIM: none of OCTO's own merge actions may be declared here.
+    Those are the unconfirmed ones — `octo.commands.merge_pr` calls
+    `gh.pr.merge(opts)` with no prompt of any kind, and `pr_options` puts
+    "Merge PR" / "Squash and Merge PR" / "Delete Branch" behind a single `<CR>`.
+    Declaring one would bind THAT, which is the unconfirmed merge this config
+    exists to prevent — and it would do so while the wrapper's own confirmed
+    keymap sat beside it looking like the safety.
     """
     assert key not in pr_keys, (
-        f"`{key}` is declared in mappings.pull_request, which puts a merge "
-        f"back one keystroke away. Merging must require typing "
-        f"`:Octo pr merge`.")
+        f"`{key}` is declared in mappings.pull_request, which binds OCTO's own "
+        f"merge action. That action prompts for NOTHING. The wrapper's merge "
+        f"keymap must stay the only one, because it is the only one that asks.")
 
 
 def test_the_default_mappings_are_cleared_before_ours_are_merged(lua: str):
@@ -377,6 +402,706 @@ def test_the_config_is_referenced_by_the_derivation(lua: str):
         "octo.nvim declares NO runtime dependencies (a bare buildVimPlugin), "
         "so each plugin must be listed explicitly or the config errors at "
         "startup")
+
+
+# --------------------------------------------------------------------------- #
+# THE LEGEND AND THE CONFIRMED MERGE — EXECUTED, not read
+#
+# 🔴 THE CONFIG SECTION ABOVE CANNOT SEE ANY OF THIS, AND THAT IS WHY THIS
+# SECTION EXISTS. A merge keymap installed by `vim.keymap.set` is not a table
+# entry, so every structural reader above is blind to it: a merge keystroke can
+# appear, and an unconfirmed one can appear, with the whole section green. The
+# only honest guard is to RUN the file and watch what a `no` answer does.
+#
+# HOW: `octo-init.lua` is executed under `luajit` — the same Lua dialect neovim
+# embeds — with `vim` and `require` stubbed. The stub records every
+# `vim.keymap.set`, every `vim.notify`, every prompt, and every call that would
+# have reached `octo.commands.merge_pr`. Nothing touches a network, a terminal
+# or GitHub.
+#
+# ⚠ WHAT THIS TIER CANNOT SEE, stated so a green run is not read as more than
+# it is. The stub is not neovim. It proves OUR logic — which callback a key is
+# bound to, that a `no` answer never reaches the merge, that the rows are
+# resolved — and it CANNOT prove that real neovim accepts the option tables we
+# pass to `vim.keymap.set` / `nvim_open_win`, that `?` is reachable in a live
+# review, or that the float looks right. Those were driven by hand against a
+# real headless neovim and recorded in the PR.
+# --------------------------------------------------------------------------- #
+
+# Resolved to an ABSOLUTE path for the same reason `_BASH` is. Asserted rather
+# than skipped: `luajit` is in flake.nix's `gateTools` and in run-tests.sh's
+# REQUIRED_TOOLS, so its absence is an environment fault the runner reports by
+# name — and a suite that quietly skipped instead would report merge safety it
+# never measured, which is the failure this whole file is written against.
+_LUAJIT = shutil.which("luajit")
+
+# 🔴 FIXTURE VALUES, CHOSEN TO BE PAIRWISE DISTINCT AND DISTINCT FROM EVERY
+# CONSTANT THE ASSERTIONS NAME. `default_merge_method` in the config is
+# "squash", so the mutation-probe method below must NOT be "squash" or a mutant
+# hardcoding that literal would survive. Likewise the PR number and repo are
+# nothing that appears anywhere in `octo-init.lua`.
+FIXTURE_PR_NUMBER = "4207"
+FIXTURE_PR_REPO = "gardenersguild/trowelcast"
+FIXTURE_OTHER_METHOD = "rebase"
+
+# Every buffer kind `mappings_disable_default` clears, i.e. every kind that can
+# reach `apply_mappings`. 🔴 THREE OF THESE NEVER GET `filetype = "octo"` —
+# review_diff, file_panel and submit_win — which is the measured reason the
+# legend rides `apply_mappings` instead of a FileType autocmd.
+ALL_KINDS = ("pull_request", "issue", "review_thread", "submit_win",
+             "review_diff", "file_panel", "repo", "release", "discussion")
+
+_LUA_PRELUDE = r"""
+-- Stubs for everything octo-init.lua reaches outside itself. Records rather
+-- than performs, so the scenario below can read what the file DID.
+RECORD = {keymaps = {}, notify = {}, merges = {}, prompts = {}, wins = {},
+          applied = {}, buflines = nil}
+ANSWERS = {}
+CURRENT_BUFFER = nil
+OCTO_MAPPINGS_MISSING = nil
+
+function KV(k, v) io.write("KV\t", tostring(k), "\t", tostring(v), "\n") end
+function FAIL(msg) error("SCENARIO-FAILED: " .. tostring(msg), 0) end
+
+local function autotable()
+  return setmetatable({}, {__index = function(t, k)
+    local v = {}; rawset(t, k, v); return v
+  end})
+end
+
+vim = {
+  g = {},
+  o = {columns = 120, lines = 40},
+  bo = autotable(),
+  wo = autotable(),
+  log = {levels = {ERROR = 4, WARN = 3, INFO = 2}},
+  cmd = {colorscheme = function() end},
+  fn = {
+    strdisplaywidth = function(s) return #s end,
+    input = function(prompt)
+      RECORD.prompts[#RECORD.prompts + 1] = prompt
+      local a = table.remove(ANSWERS, 1)
+      -- `<C-c>` at a real `input()` RAISES; this models that, because the
+      -- abort arm must cover it and an unguarded call would propagate out.
+      if a == "<INTERRUPT>" then error("Keyboard interrupt") end
+      return a
+    end,
+  },
+  notify = function(msg, lvl)
+    RECORD.notify[#RECORD.notify + 1] = {msg = msg, lvl = lvl}
+  end,
+  keymap = {
+    set = function(mode, lhs, rhs, opts)
+      RECORD.keymaps[#RECORD.keymaps + 1] =
+        {mode = mode, lhs = lhs, rhs = rhs, opts = opts or {}}
+    end,
+  },
+  api = {
+    nvim_create_buf = function() return 99 end,
+    nvim_buf_set_lines = function(_, _, _, _, lines) RECORD.buflines = lines end,
+    nvim_open_win = function(_, _, cfg)
+      RECORD.wins[#RECORD.wins + 1] = cfg; return 77
+    end,
+    nvim_win_is_valid = function() return true end,
+    nvim_win_close = function() RECORD.closed = true end,
+  },
+}
+
+-- Every octo action name resolves, mirroring a real octo where each key in the
+-- config tables names a function in `octo.mappings`. A scenario can knock one
+-- out via OCTO_MAPPINGS_MISSING to prove the legend filters on it.
+local OCTO_ACTIONS = setmetatable({}, {__index = function(_, k)
+  if k == OCTO_MAPPINGS_MISSING then return nil end
+  return function() end
+end})
+
+CONF = {values = {}}
+
+MODULES = {
+  ["octo"] = {
+    setup = function(opts)
+      for k, v in pairs(opts) do CONF.values[k] = v end
+    end,
+  },
+  ["octo.config"] = CONF,
+  ["octo.mappings"] = OCTO_ACTIONS,
+  ["octo.commands"] = {
+    merge_pr = function(method) RECORD.merges[#RECORD.merges + 1] = method end,
+  },
+}
+
+-- A scenario models "upstream renamed the seam" by clearing this field in its
+-- `setup`, which runs after the prelude and before the file is loaded.
+MODULES["octo.utils"] = {
+  get_current_buffer = function() return CURRENT_BUFFER end,
+  apply_mappings = function(kind, bufnr)
+    RECORD.applied[#RECORD.applied + 1] = {kind = kind, bufnr = bufnr}
+  end,
+}
+
+local real_require = require
+require = function(name)
+  if MODULES[name] ~= nil then return MODULES[name] end
+  return real_require(name)
+end
+
+function PR_BUFFER(number, repo)
+  return {number = number, repo = repo,
+          isPullRequest = function() return true end}
+end
+
+-- Every keymap recorded for one lhs, most recent last.
+function KEYMAPS_FOR(lhs)
+  local out = {}
+  for _, m in ipairs(RECORD.keymaps) do
+    if m.lhs == lhs then out[#out + 1] = m end
+  end
+  return out
+end
+
+function LOAD_INIT() dofile(INIT_PATH) end
+"""
+
+
+def _run_lua(tmp_path: Path, body: str, *, setup: str = ""):
+    """Execute `octo-init.lua` under luajit with the stubs, then run `body`.
+
+    `setup` runs BEFORE the file is loaded (it is how a scenario removes
+    `apply_mappings` from the stub, or seeds a different config). `body` runs
+    after. Everything the scenario wants observed is printed with `KV`.
+
+    Returns `(proc, kv)` where `kv` maps a key to the LIST of values printed
+    for it — a list, not a scalar, because several assertions below are about
+    "one row per kind".
+    """
+    assert INIT_LUA.exists(), f"{INIT_LUA} is missing — was it `git add`ed?"
+    assert _LUAJIT, (
+        "luajit is not on PATH, so the legend and the merge confirmation are "
+        "UNMEASURED. It is declared in flake.nix `gateTools` and in "
+        "run-tests.sh REQUIRED_TOOLS; enter the dev shell (`nix develop "
+        f"{ROOT}`) rather than letting this suite skip.")
+    script = tmp_path / "scenario.lua"
+    script.write_text(
+        f'INIT_PATH = {json.dumps(str(INIT_LUA))}\n'
+        + _LUA_PRELUDE + "\n" + setup + "\nLOAD_INIT()\n" + body + "\n",
+        encoding="utf-8")
+    proc = subprocess.run([_LUAJIT, str(script)],
+                          capture_output=True, text=True, timeout=60)
+    kv: dict[str, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0] == "KV":
+            kv.setdefault(parts[1], []).append(parts[2])
+    return proc, kv
+
+
+def _ok_lua(tmp_path: Path, body: str, *, setup: str = ""):
+    """`_run_lua`, asserting the scenario ran to completion."""
+    proc, kv = _run_lua(tmp_path, body, setup=setup)
+    assert proc.returncode == 0, (
+        f"the lua scenario failed (exit={proc.returncode}):\n{proc.stderr}")
+    return kv
+
+
+def test_the_lua_harness_can_actually_fire(tmp_path):
+    """🔴 INSTRUMENT VALIDATION, BOTH DIRECTIONS, BEFORE ANY VERDICT BELOW IS
+    BELIEVED.
+
+    NEGATIVE CONTROL — the harness can go RED. A scenario that calls `FAIL`
+    must exit non-zero and say so; a harness whose failures were swallowed
+    would report every assertion below as passing.
+
+    POSITIVE CONTROL — the counts it reports can MOVE off zero, and they come
+    from the real file. A reassuring `0 merges` is indistinguishable from a
+    harness wired to nothing until a non-zero has been watched.
+    """
+    red, _ = _run_lua(tmp_path, 'FAIL("deliberate")')
+    assert red.returncode != 0, (
+        "a scenario that raised still exited 0 — this harness cannot report a "
+        f"failure, so nothing it prints is evidence.\n{red.stdout}")
+    assert "SCENARIO-FAILED: deliberate" in red.stderr, red.stderr
+
+    kv = _ok_lua(tmp_path, "\n".join([
+        'if type(NvimOcto) ~= "table" then FAIL("the file defined no NvimOcto") end',
+        'KV("rows", #NvimOcto.legend_rows("pull_request"))',
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {"yes"}',
+        'NvimOcto.confirm_and_merge()',
+        'KV("merges", #RECORD.merges)',
+    ]))
+    assert int(kv["rows"][0]) > 30, kv
+    # The positive control on the merge counter: it CAN reach 1. Every abort
+    # assertion below reads this same counter, and a counter that could only
+    # ever be 0 would make all of them vacuous.
+    assert kv["merges"] == ["1"], kv
+
+
+def test_the_legend_seam_FAILS_LOUDLY_when_apply_mappings_disappears(tmp_path):
+    """🔴 REGRESSION COVERAGE FOR THE FRAGILITY THIS DESIGN CHOSE.
+
+    The `?` binding rides `octo.utils.apply_mappings`, which is a PLUGIN's
+    module function. If a future octo renames or moves it, a wrap that merely
+    stopped applying would make `?` silently cease to exist — and a legend
+    nobody can open looks exactly like a legend nobody pressed. So the file
+    asserts the seam and RAISES.
+
+    Driven, not read: the scenario deletes `apply_mappings` from the stub
+    before loading the file, and the file must abort. The message must name
+    the seam, or the operator gets an unexplained startup error.
+    """
+    proc, _ = _run_lua(
+        tmp_path, 'KV("loaded", "yes")',
+        setup='MODULES["octo.utils"].apply_mappings = nil')
+    assert proc.returncode != 0, (
+        "octo-init.lua loaded cleanly with `apply_mappings` absent. The wrap "
+        "silently applied nothing, so `?` does not exist and nothing said so."
+        f"\n{proc.stdout}")
+    assert "apply_mappings" in proc.stderr, proc.stderr
+    # NEGATIVE CONTROL on this test: with the seam present the same scenario
+    # must load. Without this, "it raised" could be any error at all.
+    ok_kv = _ok_lua(tmp_path, 'KV("loaded", "yes")')
+    assert ok_kv["loaded"] == ["yes"], ok_kv
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_every_buffer_kind_gets_the_legend_key(tmp_path, kind: str):
+    """🔴 THE MEASURED REASON THE SEAM IS `apply_mappings` AND NOT `FileType
+    octo`, asserted per kind rather than argued.
+
+    `filetype = "octo"` is set on the PR / issue / discussion buffers only.
+    `review_diff` is applied to a buffer holding the DIFFED FILE, so its
+    filetype is that file's language; `file_panel` and `submit_win` are plain
+    scratch buffers. A FileType hook would bind `?` on three kinds and miss
+    six — including all three review surfaces, which is where a reviewer
+    spends the time. Parametrised so a kind that stops getting it names
+    ITSELF.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'RECORD.keymaps = {}',
+        'require("octo.utils").apply_mappings(%s, 12)' % json.dumps(kind),
+        'KV("legend_maps", #KEYMAPS_FOR("?"))',
+        'KV("delegated", #RECORD.applied)',
+        'KV("delegated_kind", RECORD.applied[1] and RECORD.applied[1].kind)',
+    ]))
+    assert kv["legend_maps"] == ["1"], (
+        f"a `{kind}` buffer got {kv['legend_maps']} `?` bindings, not one")
+    # The wrap must DELEGATE, not replace: octo's own 131 bindings still have
+    # to be applied. A wrap that forgot the original call would leave the
+    # buffer with a legend and nothing to list.
+    assert kv["delegated"] == ["1"] and kv["delegated_kind"] == [kind], kv
+
+
+def test_the_legend_keys_are_RESOLVED_not_localleader_placeholders(tmp_path):
+    """🔴 `<localleader>` IS A BACKSLASH, AND A LEGEND THAT SAID
+    `<localleader>pd` WOULD BE CLOSE TO USELESS.
+
+    Neither `mapleader` nor `maplocalleader` is set by this wrapper, so both
+    are neovim's default `\\`. Asserted in three parts, because the first two
+    alone are satisfiable by an empty row set: rows EXIST, none of them spells
+    a leader placeholder, and at least one actually starts with the resolved
+    character.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'local rows = NvimOcto.legend_rows("pull_request")',
+        'KV("n", #rows)',
+        'for _, r in ipairs(rows) do KV("lhs", r.lhs) end',
+    ]))
+    assert int(kv["n"][0]) > 30, kv
+    placeholders = [k for k in kv["lhs"] if "leader" in k.lower()]
+    assert not placeholders, (
+        f"the legend prints unresolved leader placeholders: {placeholders}")
+    assert any(k.startswith("\\") for k in kv["lhs"]), (
+        "no row resolved to a backslash sequence, so the resolver may not be "
+        f"running at all: {kv['lhs']}")
+    # Non-leader key names stay in vim's own notation, which is how they are
+    # typed and how every other vim document writes them.
+    assert "<C-b>" in kv["lhs"], kv["lhs"]
+    # The MOVING control on the resolver is its own test below — a resolver
+    # that hardcoded a backslash would survive everything asserted here.
+
+
+def test_the_resolver_FOLLOWS_the_configured_leaders_SEPARATELY(tmp_path):
+    """🔴 THE MOVING CONTROL ON THE RESOLVER, and it moves the two leaders to
+    DIFFERENT characters on purpose.
+
+    The default makes `mapleader` and `maplocalleader` both `\\`, so a resolver
+    that confused the two — or that returned a hardcoded backslash, or read the
+    values once at load time — is indistinguishable from a correct one under
+    the config as shipped. Moving them apart separates all three: the config's
+    forty-odd `<localleader>` keys must follow one character, `approve_pr`'s
+    lone `<leader>qa` must follow the other, and neither may keep the
+    backslash. The two probe characters appear nowhere in `octo-init.lua`.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'vim.g.maplocalleader = ","',
+        'vim.g.mapleader = ";"',
+        'for _, r in ipairs(NvimOcto.legend_rows("pull_request")) do',
+        '  KV(r.action, r.lhs)',
+        'end',
+    ]))
+    assert kv["show_pr_diff"] == [",pd"], kv["show_pr_diff"]
+    assert kv["approve_pr"] == [";qa"], kv["approve_pr"]
+    assert kv["merge"] == [",pm"], kv["merge"]
+    everything = [v for values in kv.values() for v in values]
+    assert not any(k.startswith("\\") for k in everything), (
+        f"rows still resolve to a backslash after both leaders moved: "
+        f"{[k for k in everything if k.startswith(chr(92))]}")
+    # NEGATIVE CONTROL on the probe itself: the untouched keys must NOT have
+    # moved, or this is measuring a resolver that rewrites everything.
+    assert kv["open_in_browser"] == ["<C-b>"], kv["open_in_browser"]
+    assert kv["next_comment"] == ["]c"], kv["next_comment"]
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_the_legend_row_count_is_DERIVED_from_the_live_config(tmp_path, kind):
+    """🔴 GENERATED, NOT CURATED — asserted as an equality against the config
+    the editor was actually handed, per kind.
+
+    The count in the title is what a reader trusts, so it is pinned to
+    `config.values.mappings[kind]` plus the wrapper's own bindings for that
+    kind. A hand-written legend would drift from this the first time a mapping
+    changed, silently.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'local declared = 0',
+        'for _ in pairs(CONF.values.mappings[%s]) do declared = declared + 1 end'
+        % json.dumps(kind),
+        'KV("declared", declared)',
+        'KV("extra", #NvimOcto.extra_for(%s))' % json.dumps(kind),
+        'KV("rows", #NvimOcto.legend_rows(%s))' % json.dumps(kind),
+        'KV("title", NvimOcto.legend_lines(%s)[1])' % json.dumps(kind),
+    ]))
+    declared, extra, rows = (int(kv[k][0]) for k in ("declared", "extra", "rows"))
+    assert rows == declared + extra, (
+        f"{kind}: the legend shows {rows} rows for a config declaring "
+        f"{declared} mappings plus {extra} wrapper bindings")
+    assert f"{rows} bindings" in kv["title"][0], kv["title"]
+    assert kind in kv["title"][0], kv["title"]
+
+
+def test_the_legend_lists_only_what_is_actually_BOUND(tmp_path):
+    """`octo.utils.apply_mappings` binds an entry only when the action exists
+    in `octo.mappings`. A legend built from the raw config table would
+    advertise a keystroke that is not bound — a row that reads as coverage and
+    provides none, on screen. Driven by removing one action from the stub."""
+    body = "\n".join([
+        'local rows = NvimOcto.legend_rows("pull_request")',
+        'KV("rows", #rows)',
+        'for _, r in ipairs(rows) do KV("action", r.action) end',
+    ])
+    full = _ok_lua(tmp_path, body)
+    holed = _ok_lua(tmp_path, body,
+                    setup='OCTO_MAPPINGS_MISSING = "approve_pr"')
+    assert "approve_pr" in full["action"], full["action"]
+    assert "approve_pr" not in holed["action"], holed["action"]
+    assert int(holed["rows"][0]) == int(full["rows"][0]) - 1, (full, holed)
+
+
+def test_open_in_browser_was_ALREADY_bound_and_is_now_DISCOVERABLE(tmp_path):
+    """🔴 THE SECOND OPERATOR ASK WAS NOT A MISSING BINDING, IT WAS A MISSING
+    LEGEND. `open_in_browser = { lhs = "<C-b>" }` is declared on five of the
+    nine tables and always has been; the operator could not find it. This pins
+    that the legend now names it on every kind that declares it — and that no
+    SECOND browser binding was added, which would have been the wrong fix.
+    """
+    kinds = [k for k in ALL_KINDS]
+    body = ["local declaring = 0"]
+    for kind in kinds:
+        body += [
+            'if CONF.values.mappings[%s].open_in_browser then' % json.dumps(kind),
+            '  declaring = declaring + 1',
+            '  local seen = 0',
+            '  for _, r in ipairs(NvimOcto.legend_rows(%s)) do' % json.dumps(kind),
+            '    if r.action == "open_in_browser" then',
+            '      seen = seen + 1',
+            '      KV("browser_row", %s .. "=" .. r.lhs)' % json.dumps(kind),
+            '    end',
+            '  end',
+            '  if seen ~= 1 then FAIL(%s .. " has " .. seen .. " browser rows") end'
+            % json.dumps(kind),
+            'end',
+        ]
+    body.append('KV("declaring", declaring)')
+    kv = _ok_lua(tmp_path, "\n".join(body))
+    assert int(kv["declaring"][0]) == 5, (
+        f"expected five tables to declare open_in_browser, got "
+        f"{kv['declaring']}: {kv.get('browser_row')}")
+    assert all(row.endswith("=<C-b>") for row in kv["browser_row"]), (
+        f"the legend renders a browser key that is not `<C-b>`, which means a "
+        f"second binding was added instead of making the first one "
+        f"discoverable: {kv['browser_row']}")
+
+
+# --------------------------------------------------------------------------- #
+# THE MERGE CONFIRMATION — the one guard the structural section cannot make
+# --------------------------------------------------------------------------- #
+
+# 🔴 EVERY ANSWER THAT MUST ABORT. `y` is on this list deliberately: the prompt
+# demands the word, and a wrapper that accepted a single keystroke would have
+# reintroduced most of the hazard it exists to close. `<INTERRUPT>` models the
+# `<C-c>` a real `input()` raises.
+ABORTING_ANSWERS = ("no", "n", "y", "Y", "", "  ", "yes please", "nope",
+                    "yesterday", "<INTERRUPT>")
+CONFIRMING_ANSWERS = ("yes", "YES", "Yes", "  yes  ")
+
+
+@pytest.mark.parametrize("answer", ABORTING_ANSWERS)
+def test_every_path_to_a_merge_passes_through_the_confirmation(tmp_path, answer):
+    """🔴 THE OPERATOR REQUIREMENT, ASSERTED BEHAVIOURALLY: an answer that is
+    not an explicit `yes` must reach NO merge.
+
+    Watched, not grepped. A test that looked for the word "confirm" in the
+    source would pass against a comment; this one holds the buffer and the
+    merge still and moves only the human's answer, so a confirmation that had
+    been reduced to decoration fails here.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {%s}' % json.dumps(answer),
+        'KV("returned", tostring(NvimOcto.confirm_and_merge()))',
+        'KV("merges", #RECORD.merges)',
+        'KV("prompts", #RECORD.prompts)',
+        'for _, n in ipairs(RECORD.notify) do KV("notify", n.msg) end',
+    ]))
+    assert kv["merges"] == ["0"], (
+        f"answering {answer!r} MERGED the pull request")
+    assert kv["returned"] == ["false"], kv
+    # It must have ASKED — an implementation that refused to merge by never
+    # reaching the prompt would satisfy the counter above while being broken.
+    assert kv["prompts"] == ["1"], kv
+    # And it must SAY it aborted. A silent no-op on a key the legend advertises
+    # reads as a broken keymap.
+    assert any("ABORTED" in n for n in kv["notify"]), kv.get("notify")
+
+
+@pytest.mark.parametrize("answer", CONFIRMING_ANSWERS)
+def test_an_explicit_yes_DOES_merge(tmp_path, answer):
+    """🔴 THE OTHER HALF, AND IT IS NOT OPTIONAL. Without it, a confirmation
+    that aborted on EVERYTHING would pass every assertion above — a merge key
+    that never merges is a broken feature that reads as a safe one."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {%s}' % json.dumps(answer),
+        'KV("returned", tostring(NvimOcto.confirm_and_merge()))',
+        'KV("merges", #RECORD.merges)',
+        'for _, m in ipairs(RECORD.merges) do KV("method", m) end',
+    ]))
+    assert kv["merges"] == ["1"] and kv["returned"] == ["true"], kv
+    assert kv["method"] == ["squash"], (
+        "the merge was dispatched with a method other than the configured "
+        f"one: {kv['method']}")
+
+
+def test_the_merge_KEYMAP_itself_is_on_the_confirmed_path(tmp_path):
+    """🔴 THE SEAM GUARD, AND THE ONE THAT MATTERS MOST.
+
+    The tests above prove `confirm_and_merge` asks. They say NOTHING about what
+    the keystroke is wired to — and a keymap wired straight to
+    `octo.commands.merge_pr` would merge with no prompt while every one of them
+    stayed green. That is this repo's "verified in isolation" shape exactly: two
+    surfaces each tested, the defect living in the seam nobody owns.
+
+    So this takes the callback THE WRAP REGISTERED for the merge key, out of
+    the recorder, and invokes it — once with `no`, once with `yes`.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'RECORD.keymaps = {}',
+        'require("octo.utils").apply_mappings("pull_request", 12)',
+        # Find the wrapper's merge binding by its CALLBACK's effect, not by a
+        # name: whatever lhs it was registered under, exactly one registered
+        # callback must ask before merging.
+        'local candidates = {}',
+        'for _, m in ipairs(RECORD.keymaps) do',
+        '  if m.lhs ~= "?" then candidates[#candidates + 1] = m end',
+        'end',
+        'KV("candidates", #candidates)',
+        'if #candidates ~= 1 then FAIL("expected one non-legend binding") end',
+        'local merge_map = candidates[1]',
+        'KV("lhs", merge_map.lhs)',
+        'KV("desc", merge_map.opts.desc)',
+        'KV("buffer", tostring(merge_map.opts.buffer))',
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {"no"}',
+        'merge_map.rhs()',
+        'KV("merges_after_no", #RECORD.merges)',
+        'KV("prompts_after_no", #RECORD.prompts)',
+        'ANSWERS = {"yes"}',
+        'merge_map.rhs()',
+        'KV("merges_after_yes", #RECORD.merges)',
+    ]))
+    assert kv["merges_after_no"] == ["0"], (
+        "pressing the merge key and answering `no` MERGED the pull request — "
+        "the keymap is not routed through the confirmation")
+    assert kv["prompts_after_no"] == ["1"], (
+        "pressing the merge key asked nothing, so there is no confirmation on "
+        "this path at all")
+    assert kv["merges_after_yes"] == ["1"], kv
+    # The binding is BUFFER-LOCAL, like every octo mapping — a global merge key
+    # would be live in any buffer the operator opened.
+    assert kv["buffer"] == ["12"], kv
+    # And it is upstream's own merge lhs, so upstream documentation still
+    # describes this buffer.
+    assert kv["lhs"] == ["<localleader>pm"], kv
+
+
+def test_the_merge_prompt_NAMES_the_pull_request_the_repo_and_the_method(tmp_path):
+    """A confirmation that says "are you sure?" confirms nothing — the
+    operator has several review buffers open. The prompt must identify what is
+    about to be merged and how. Fixtures are pairwise distinct and appear
+    nowhere in `octo-init.lua`, so a prompt hardcoding a literal cannot pass."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {"no"}',
+        'NvimOcto.confirm_and_merge()',
+        'KV("prompt", RECORD.prompts[1])',
+    ]))
+    prompt = kv["prompt"][0]
+    for needed in (FIXTURE_PR_NUMBER, FIXTURE_PR_REPO, "squash", "yes"):
+        assert needed in prompt, (
+            f"the confirmation prompt does not name {needed!r}: {prompt!r}")
+
+
+def test_the_merge_method_is_READ_from_the_config_not_restated(tmp_path):
+    """🔴 A MOVING CONTROL, because `"squash"` is also the literal in the
+    config — an assertion that only ever saw that value could not tell a live
+    read from a hardcoded string. The scenario moves the live config to a
+    method that appears NOWHERE in `octo-init.lua`, and both the prompt and the
+    dispatched merge must follow it."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'CONF.values.default_merge_method = %s' % json.dumps(FIXTURE_OTHER_METHOD),
+        'CURRENT_BUFFER = PR_BUFFER(%s, %s)' % (
+            FIXTURE_PR_NUMBER, json.dumps(FIXTURE_PR_REPO)),
+        'ANSWERS = {"yes"}',
+        'NvimOcto.confirm_and_merge()',
+        'KV("prompt", RECORD.prompts[1])',
+        'KV("method", RECORD.merges[1])',
+        'for _, r in ipairs(NvimOcto.legend_rows("pull_request")) do',
+        '  if r.action == "merge" then KV("legend_desc", r.desc) end',
+        'end',
+    ]))
+    assert kv["method"] == [FIXTURE_OTHER_METHOD], kv
+    assert FIXTURE_OTHER_METHOD in kv["prompt"][0], kv["prompt"]
+    assert "squash" not in kv["prompt"][0], kv["prompt"]
+    # The legend describes the same live value, so the two cannot disagree.
+    assert FIXTURE_OTHER_METHOD in kv["legend_desc"][0], kv["legend_desc"]
+
+
+def test_a_non_pull_request_buffer_cannot_be_merged(tmp_path):
+    """The key is bound on PR buffers, but `get_current_buffer` answers about
+    whatever is focused. A merge attempt with no PR must abort BEFORE asking —
+    a prompt naming nothing is worse than no prompt."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'CURRENT_BUFFER = nil',
+        'ANSWERS = {"yes"}',
+        'KV("returned", tostring(NvimOcto.confirm_and_merge()))',
+        'KV("merges", #RECORD.merges)',
+        'KV("prompts", #RECORD.prompts)',
+    ]))
+    assert kv["merges"] == ["0"] and kv["returned"] == ["false"], kv
+    assert kv["prompts"] == ["0"], kv
+
+
+def test_the_legend_footer_names_the_SAME_key_the_merge_was_bound_to(tmp_path):
+    """🔴 A RELATIONSHIP, NOT A WORD. Asserting that the footer contains
+    "confirm" would be walkable by a comment; this pins that the key the
+    footer PRINTS is the resolved form of the key the wrap actually
+    REGISTERED, so a legend cannot advertise a keystroke that was never
+    installed or name the wrong one."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'RECORD.keymaps = {}',
+        'require("octo.utils").apply_mappings("pull_request", 12)',
+        'for _, m in ipairs(RECORD.keymaps) do',
+        '  if m.lhs ~= "?" then KV("bound", NvimOcto.resolve_lhs(m.lhs)) end',
+        'end',
+        'for _, line in ipairs(NvimOcto.legend_lines("pull_request")) do',
+        '  if line:sub(1, 6) == "MERGE:" then KV("footer", line) end',
+        'end',
+    ]))
+    assert len(kv["bound"]) == 1, kv
+    assert len(kv["footer"]) == 1, (
+        f"expected exactly one MERGE: footer line, got {kv.get('footer')}")
+    assert kv["bound"][0] in kv["footer"][0], (
+        f"the footer advertises a key the wrap did not bind: "
+        f"bound={kv['bound'][0]!r} footer={kv['footer'][0]!r}")
+
+
+@pytest.mark.parametrize("kind", ["issue", "review_diff", "file_panel",
+                                  "submit_win", "discussion", "repo",
+                                  "release", "review_thread"])
+def test_NO_merge_key_is_bound_outside_a_pull_request_buffer(tmp_path, kind):
+    """The merge binding is scoped to `pull_request` because octo's merge
+    resolves the CURRENT buffer — a merge key on the file panel could not act
+    on anything, and a key that does nothing is a key the operator learns to
+    distrust. Asserted per kind so a widening names the kind it widened to."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'RECORD.keymaps = {}',
+        'require("octo.utils").apply_mappings(%s, 12)' % json.dumps(kind),
+        'for _, m in ipairs(RECORD.keymaps) do KV("lhs", m.lhs) end',
+    ]))
+    assert kv["lhs"] == ["?"], (
+        f"a `{kind}` buffer got bindings beyond the legend: {kv['lhs']}")
+
+
+def test_the_legend_window_is_CAPPED_to_the_editor(tmp_path):
+    """🔴 MEASURED AT TWO POINTS, because a size claim that holds at one is a
+    claim about that one. A `pull_request` legend is ~48 lines; on a tall
+    terminal it must show in full, and on a short one it must be clamped
+    rather than opened taller than the screen.
+
+    The float scrolls when clamped — the rows are not lost, the window just
+    cannot overflow."""
+    body = "\n".join([
+        'vim.o.lines = LINES',
+        'vim.o.columns = COLUMNS',
+        'NvimOcto.show_legend("pull_request")',
+        'local cfg = RECORD.wins[1]',
+        'KV("h", cfg.height)',
+        'KV("w", cfg.width)',
+        'KV("row", cfg.row)',
+        'KV("col", cfg.col)',
+        'KV("content", #NvimOcto.legend_lines("pull_request"))',
+    ])
+    short = _ok_lua(tmp_path, body.replace("LINES", "24").replace("COLUMNS", "60"))
+    tall = _ok_lua(tmp_path, body.replace("LINES", "120").replace("COLUMNS", "200"))
+
+    content = int(tall["content"][0])
+    assert content > 40, (
+        f"the pull_request legend is only {content} lines — this test is no "
+        f"longer measuring a legend that could overflow")
+
+    assert int(short["h"][0]) <= 24 - 6, short
+    assert int(short["w"][0]) <= 60 - 4, short
+    assert int(short["row"][0]) >= 0 and int(short["col"][0]) >= 0, short
+    # On a tall terminal nothing is clipped…
+    assert int(tall["h"][0]) == content, tall
+    # …and the two measurements actually DIFFER, so the cap is doing work
+    # rather than the content happening to fit at both points.
+    assert int(short["h"][0]) < int(tall["h"][0]), (short, tall)
+
+
+def test_the_legend_closes_on_q_and_Esc(tmp_path):
+    """The float takes focus, so it must be dismissable without knowing which
+    buffer it is. Asserted as the set of close keys bound INSIDE the legend
+    buffer, plus that invoking one actually closes the window."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'RECORD.keymaps = {}',
+        'local win, buf = NvimOcto.show_legend("pull_request")',
+        'KV("buf", tostring(buf))',
+        'for _, m in ipairs(RECORD.keymaps) do',
+        '  if m.opts.buffer == buf then KV("close_key", m.lhs) end',
+        'end',
+        'for _, m in ipairs(RECORD.keymaps) do',
+        '  if m.lhs == "q" and m.opts.buffer == buf then m.rhs() end',
+        'end',
+        'KV("closed", tostring(RECORD.closed))',
+    ]))
+    assert sorted(kv["close_key"]) == sorted(["q", "<Esc>", "?"]), kv
+    assert kv["closed"] == ["true"], kv
 
 
 # --------------------------------------------------------------------------- #

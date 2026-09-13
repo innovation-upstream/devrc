@@ -11,9 +11,11 @@
 #     keymaps cannot be changed by an edit to an editor config, and it cannot
 #     be broken by one either;
 #   * the merge-safety config in ./octo-init.lua strips upstream's four merge
-#     KEYMAPS and its `<CR>` merge MENU. Doing that inside the daily editor
-#     would impose this repo's risk posture on every other use of neovim, which
-#     is not what was asked for and is not reversible per-buffer.
+#     KEYMAPS and its `<CR>` merge MENU, replacing them with ONE keystroke that
+#     asks first, and it binds `?` to a generated legend in every octo buffer.
+#     Doing either inside the daily editor would impose this repo's risk posture
+#     — and its shadowing of `?`, vim's reverse-search — on every other use of
+#     neovim, which is not what was asked for and is not reversible per-buffer.
 #
 # 🔴 vimPlugins.octo-nvim DECLARES NO RUNTIME DEPENDENCIES. It is a bare
 # `buildVimPlugin`, so nothing pulls in the modules its Lua actually
