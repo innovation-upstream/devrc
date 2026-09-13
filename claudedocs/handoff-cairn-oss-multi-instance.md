@@ -1558,12 +1558,20 @@ belongs to that arc's own session. via: measurement
 25. **The repo-handle `~/workspace/<handle>/…` sites the kubeconfig arm deliberately deferred.**
     #1621 armed the `~` spelling for **kubeconfig** handles only — an operator decision, on the
     asymmetry that `$KC_*` names a FILE while a repo handle names a DIRECTORY and the `~` family
-    carries no path tail. That leaves the repo-handle half of the `~` class (the large population
-    round 0 surfaced) untouched.
-    🔴 **The subtlety a later session will need, because it makes this NOT a blanket sweep:**
-    `~` is the **CORRECT** spelling for a Read-tool target — `$VAR` does not expand there — so
-    each site has to be classified, not rewritten. A sweep that treats every `~/workspace/<handle>`
-    as a violation will break the Read-tool sites it "fixes".
+    carries no path tail. That leaves the repo-handle half of the `~` class untouched.
+    🔴 **MEASURED AT `origin/main` AFTER #1621, AND THE POPULATION IS NOT WHAT A GREP SUGGESTS —
+    read this before scoping the sweep.** The corpus holds **177** `~/workspace/…` tokens, but only
+    **129** of them name a repo that HAS a handle: `~/workspace/devrc` **100** and
+    `~/workspace/homelab-talos` **29**. The other **48 HAVE NO HANDLE AND THEREFORE NO REMEDY** —
+    `clawgate-extension` 18, `homelab-infra` 6, `tmux-fuzzyclaw` 5, `kubeclaw` 5, `scratch` 3, and
+    a tail. Arming the gate against all 177 would block those 48 with nothing to offer them, which
+    is the permanently-red gate `claude/RULES.md` forbids; it is the same shape as
+    `claude/skills/auditloop/reference/ui-and-meta-run.md:48`, the one site #1621 left alone for
+    exactly this reason. **Scope the sweep to the 129, or add handles first.**
+    🔴 **The second subtlety, because it makes this NOT a blanket rewrite either:** `~` is the
+    **CORRECT** spelling for a Read-tool target — `$VAR` does not expand there — so each of the 129
+    has to be classified, not rewritten. A sweep that treats every `~/workspace/<handle>` as a
+    violation will break the Read-tool sites it "fixes".
     **Closing condition:** EITHER the gate arms `~` for repo handles with an explicit, tested
     carve-out for Read-tool targets and the sites are cleared — merged, and watched red-then-green
     on a planted violation — OR a decision is recorded in this doc that `~/<suffix>` is an
