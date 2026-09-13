@@ -5181,7 +5181,7 @@ in
   # kubeconfig points at the LAN API (192.168.50.94:6443) and the `kubectl exec
   # ... du` reading needs it. The laptop is nebula-only AND has an open,
   # unresolved nebula fault that makes these ClickHouse queries intermittently
-  # stall to timeout (claudedocs/handoff-agent-setup-audit.md, investigation 1)
+  # stall to timeout (claudedocs/archive/handoff-agent-setup-audit.md, inv. 1)
   # — a check that flakes is a check that gets ignored, which is the exact
   # failure mode this is built to avoid. A laptop run is still possible BY HAND:
   # KUBECONFIG=~/.kube/homelab-nebula.yaml CH_REGROWTH_URL=http://10.42.0.10:30123

@@ -1,5 +1,5 @@
 Continue the browser-bridge work. Canonical handoff (read first):
-  ~/workspace/devrc/claudedocs/handoff-browser-bridge-2026-07-31.md
+  ~/workspace/devrc/claudedocs/archive/handoff-browser-bridge-2026-07-31.md
 
 First action: measure deepseek-flash on ~10 real goals (~$0.06, ~20 min) — it gates the
 `browser agent`-first default flip, which is designed and approved but deliberately

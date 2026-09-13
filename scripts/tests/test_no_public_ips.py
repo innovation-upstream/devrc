@@ -115,7 +115,7 @@ ALLOWLIST = {
     ("scripts/tests/test_airvpn_menu.py", "9.9.9.9"): "public resolver as a 'some public IP' fixture",
     # The conventional dummies. Not routable to anything of ours; the point of
     # them is that they are obviously fake.
-    ("claudedocs/handoff-agent-setup-audit.md", "1.2.3.4"): "the conventional dummy, quoted from a guard test",
+    ("claudedocs/archive/handoff-agent-setup-audit.md", "1.2.3.4"): "the conventional dummy, quoted from a guard test",
     ("scripts/claude-hooks/guard_core.py", "1.2.3.4"): "the conventional dummy in the module's own docstring/examples",
     ("scripts/claude-hooks/tests/test_guard_core.py", "1.2.3.4"): "the conventional dummy in the talosctl/publish-sink tests",
     ("scripts/tests/test_airvpn_menu.py", "1.2.3.4"): "the conventional dummy",
