@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -371,7 +372,7 @@ def test_a_pre_origin_match_withholds_the_number_instead_of_reporting_it(tmp_pat
                env={"AUDIT_SWEEP_ORIGIN": "2026-06-01T00:00:00+00:00"}).stdout
     row = next(l for l in out.splitlines() if l.startswith("round-ledger-line"))
     assert "UNRELIABLE" in row, row
-    assert "pre-origin" in row
+    assert "before the section existed" in row, row
     assert "Withheld is not zero" in out
 
 
@@ -431,6 +432,133 @@ def test_the_report_never_claims_the_rule_CAUGHT_something(tmp_path):
                expect=0).stdout
     assert "NOT 'caught'" in out
     assert "counts APPLICATIONS, not catches" in out
+
+
+def test_the_history_scan_either_reaches_the_CURRENT_skill_or_REFUSES(mod):
+    """🔴 WATCHED RED, and it is the control the first version of this dater lacked.
+
+    `git log --follow --reverse` returns ONE commit, silently. MEASURED on this skill:
+    `--follow` alone 23 versions, `--follow --reverse` 1, `--reverse` alone 19 (it misses
+    the pre-rename history at `claude/commands/audit-pr.md`). A 1-version scan does NOT
+    look broken — rules whose section existed in that one old version get dated and every
+    other rule reads UNDATED, indistinguishable from a working dater with gaps.
+
+    🔴 PHRASED FOR BOTH TIERS RATHER THAN SKIPPED. The `nix build` tier builds from a
+    store copy with NO `.git`, so there is no history to reach there; an earlier draft of
+    this test asserted the history directly and went red in exactly that tier. Either the
+    scan reaches the current skill, or there is no history and the sweep must REFUSE —
+    both are real assertions, and neither tier sits this one out.
+    """
+    versions = mod.skill_versions()
+    if not versions:                       # no-git tier: the refusal is the behaviour
+        assert "no versions" in (mod.scan_reaches_current([]) or "")
+        return
+    assert len(versions) >= 10, (
+        f"only {len(versions)} version(s) scanned — the history walk is truncated. "
+        "Do NOT add --reverse; reverse in Python.")
+    assert mod.scan_reaches_current(versions) is None
+    stamps = [mod.parse_ts(iso) for _sha, iso, _c in versions]
+    assert stamps == sorted(stamps), "versions must be OLDEST FIRST"
+    # and the interval must be non-degenerate for real rules, or the ambiguity this
+    # instrument exists to report would be invisible
+    body = (mod.REPO / mod.SKILL_REL).read_text()
+    ordered = 0
+    for r in mod.RULES:
+        e, l = (mod.parse_ts(x or "") for x in mod.origin_bounds(r["probe"], versions, body))
+        assert e is not None and l is not None and e <= l, f"{r['id']}: inverted interval"
+        ordered += e < l
+    assert ordered >= 5, f"only {ordered} rule(s) have a non-empty interval"
+
+
+def test_a_heading_NEWER_than_its_rule_does_not_invert_the_interval(mod):
+    """The specific shape that broke the section-only dater, pinned by construction."""
+    body = ("## old section\n\nrule sentence here\n")
+    assert mod.section_heading_for("rule sentence here", body) == "## old section"
+    # a probe with no heading above it resolves to None rather than guessing
+    assert mod.section_heading_for("x", "no headings at all, x\n") is None
+    # and a rule under a LATER heading still yields bounds ordered early<=late,
+    # because origin_bounds SORTS the two candidates instead of assuming which is older
+    versions = [("aaaaaaaa", "2026-01-01T00:00:00+00:00", "rule sentence here\n"),
+                ("bbbbbbbb", "2026-02-01T00:00:00+00:00", "## new heading\nrule sentence here\n")]
+    early, late = mod.origin_bounds("rule sentence here", versions,
+                                    "## new heading\nrule sentence here\n")
+    pe, pl = mod.parse_ts(early), mod.parse_ts(late)
+    assert pe is not None and pl is not None and pe <= pl
+    assert early.startswith("2026-01-01"), (early, late)   # the SENTENCE is older here
+    assert late.startswith("2026-02-01")
+
+
+EARLY_BOUND = "2026-03-01T00:00:00+00:00"
+LATE_BOUND = "2026-05-01T00:00:00+00:00"
+INTERVAL_ENV = {"AUDIT_SWEEP_ORIGIN": EARLY_BOUND,
+                "AUDIT_SWEEP_ORIGIN_LATE": LATE_BOUND}
+
+
+def test_a_match_inside_the_interval_is_AMBIGUOUS_not_fired_and_not_withheld(tmp_path):
+    """Three buckets, and the middle one is the new honesty.
+
+    Before the section existed ⇒ the pattern is not specific to the rule (withhold).
+    After the rule's own wording ⇒ a firing. In between ⇒ unattributable: it cannot be
+    told apart from language predating the rule, so it is counted on its own and the row
+    is neither FIRED nor withheld on its account.
+
+    🔴 The bounds come from the env hook, NOT from the skill's git history. Two earlier
+    drafts were wrong about this: one hardcoded a date and SKIPPED when the interval moved
+    (a test that skips itself is worse than none), the next derived the date from
+    `skill_versions()` and went RED in the no-git sandbox tier — the same defect this
+    file already pins for the verdict tests, reintroduced by the fix for it.
+    """
+    ts = "2026-04-01T00:00:00.000Z"                   # strictly inside [early, late)
+    recs = [_rec("assistant", [{"type": "text", "text": HEADING}], ts=ts),
+            _rec("assistant", [{"type": "text", "text": SENTENCE}], ts=ts)]
+    out_path = tmp_path / "rows.json"
+    out = _run(_corpus(tmp_path, recs), "--rule", "round-ledger-line",
+               "--json", str(out_path), expect=0, env=INTERVAL_ENV).stdout
+    row = _row(out_path, "round-ledger-line")
+    assert row["ambiguous"] == 1, row
+    assert row["fired"] == 0, row
+    assert row["pre_origin"] == 0, row
+    assert "AMBIGUOUS" in row["verdict"], row["verdict"]
+    assert "AMBIGUOUS" in out
+
+
+def test_a_match_AFTER_the_late_bound_is_an_unambiguous_firing(tmp_path):
+    """The other side of the same boundary, so AMBIGUOUS is not the only reachable
+    outcome — a bucket that always wins would make the middle one unfalsifiable."""
+    ts = "2026-06-01T00:00:00.000Z"                   # strictly after `late`
+    recs = [_rec("assistant", [{"type": "text", "text": HEADING}], ts=ts),
+            _rec("assistant", [{"type": "text", "text": SENTENCE}], ts=ts)]
+    out_path = tmp_path / "rows.json"
+    _run(_corpus(tmp_path, recs), "--rule", "round-ledger-line",
+         "--json", str(out_path), expect=0, env=INTERVAL_ENV)
+    row = _row(out_path, "round-ledger-line")
+    assert row["fired"] == 1 and row["ambiguous"] == 0, row
+    assert row["verdict"].startswith("FIRED"), row["verdict"]
+
+
+def test_a_match_BEFORE_the_early_bound_is_withheld_as_non_specific(tmp_path):
+    """And the third side, so all three buckets are pinned against one fixed interval."""
+    ts = "2026-01-15T00:00:00.000Z"                   # strictly before `early`
+    recs = [_rec("assistant", [{"type": "text", "text": HEADING}], ts=ts),
+            _rec("assistant", [{"type": "text", "text": SENTENCE}], ts=ts)]
+    out_path = tmp_path / "rows.json"
+    _run(_corpus(tmp_path, recs), "--rule", "round-ledger-line",
+         "--json", str(out_path), expect=0, env=INTERVAL_ENV)
+    row = _row(out_path, "round-ledger-line")
+    assert row["withheld"] is True and row["pre_origin"] == 1, row
+    assert "before the section existed" in row["verdict"], row["verdict"]
+
+
+def _mod_parse(raw):
+    from datetime import datetime, timezone
+    if not raw:
+        return None
+    s = raw.strip().replace("Z", "+00:00")
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
 def test_an_undatable_rule_reads_UNDATED_on_BOTH_tiers(tmp_path):

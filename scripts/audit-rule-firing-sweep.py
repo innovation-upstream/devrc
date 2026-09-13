@@ -39,9 +39,20 @@ the transcript rather than guessed from the text.
 
 BLIND SPOTS, so no count is read wider than it is
 -------------------------------------------------
-1. **The window opens at the CURRENT WORDING, not the rule's true birth.** Origin is
-   dated by `git log -S<probe>` on today's phrasing, so a rule reworded after it
-   landed is dated at the REWORD. That narrows the window and can only UNDER-count.
+1. **Origin is an INTERVAL, not a date, and matches inside it are reported as
+   UNATTRIBUTABLE rather than as firings.** `early` = the earliest version carrying the
+   rule's SECTION HEADING; `late` = the earliest carrying its own SENTENCE. Both
+   single-bound versions were MEASURED WRONG, in opposite directions: `wording` alone
+   dated 44 of 49 rules into 2026-08/09 (the reword, not the rule) and withheld 32 of 49
+   rows; `section` alone recovered 13 of those but sent TWO the other way, because
+   HEADINGS GET REWORDED TOO so a section is not reliably older than its own contents.
+   The interval fixed 13 with 0 regressions — but it is a disclosure, not a resolution:
+   `ambig` can be large (263 for `round0-first`), and those matches are genuinely
+   unattributable. ⚠ Neither bound is the rule's cited origin INCIDENT, which only the
+   rule's own prose names and nothing here parses.
+   ⚠ **The `AMBIGUOUS` verdict is pinned by tests but has never fired on the real
+   corpus** — it needs `fired == 0` while `ambig > 0`, and every real rule with
+   in-interval matches also has later ones. Treat it as an untested-in-production branch.
 2. **A meta-session confounder is reported, not removed.** Sessions editing this
    skill discuss its rules in assistant text; those are not firings. The report
    splits every count by project dir and prints `devrc` separately, because a firing
@@ -277,31 +288,183 @@ def parse_ts(raw: str):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def origin_of(probe: str) -> tuple[str, str] | tuple[None, None]:
-    """Oldest commit whose diff changed the count of `probe` in the skill file.
+def skill_versions() -> list[tuple[str, str, str]]:
+    """(sha, iso, content) for every commit that touched the skill, OLDEST FIRST.
 
-    That is the rule's origin AS CURRENTLY WORDED — see blind spot 1.
+    🔴 THIS REPLACES `git log -S<probe>`, WHICH DATED THE REWORD RATHER THAN THE RULE.
+    MEASURED on the sweep's first real run: 44 of 49 origins landed in 2026-08/09 because
+    the skill reworded nearly every rule inside six weeks, so ordinary earlier use fell
+    before the window and tripped the specificity control — **32 of 49 rows withheld**, and
+    the sweep could not answer its own question for two-thirds of its ledger.
+
+    Scanning every version is both cheaper and more exact than one `-S` call per rule: ~24
+    `git show`s total against 49 subprocesses, and it yields the earliest version that
+    CONTAINS the text rather than the commit that changed its count. `--follow` is required
+    — this file lived at `claude/commands/audit-pr.md` until the commands/skills merge, and
+    a path-pinned log silently stops at the rename.
+
+    🔴 `--reverse` IS NOT USED, AND MUST NOT BE: `git log --follow --reverse` returns
+    **ONE** commit, silently. MEASURED on this file — `--follow` alone 23, `--follow
+    --reverse` 1 (with or without `--name-only`), `--reverse` alone 19 (it misses the
+    pre-rename history). The 1-commit scan did not look broken: it dated every rule whose
+    section existed in that single old version and called the rest UNDATED, which reads
+    exactly like a working dater with some gaps. So the order is reversed in PYTHON, and
+    `_assert_scan_reaches_current` refuses rather than degrading quietly.
+    """
+    cmd = ["git", "-C", str(REPO), "log", "--follow",
+           "--format=%x01%H\t%aI", "--name-only", "--", SKILL_REL]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except Exception:
+        return []
+    versions: list[tuple[str, str, str]] = []
+    for chunk in out.stdout.split("\x01"):
+        lines = [l for l in chunk.splitlines() if l.strip()]
+        if not lines:
+            continue
+        try:
+            sha, iso = lines[0].split("\t", 1)
+        except ValueError:
+            continue
+        paths = [l for l in lines[1:] if l.endswith(".md")]
+        for p in paths:
+            try:
+                show = subprocess.run(["git", "-C", str(REPO), "show", f"{sha}:{p}"],
+                                      capture_output=True, text=True, timeout=60)
+            except Exception:
+                continue
+            if show.returncode == 0 and show.stdout:
+                versions.append((sha[:8], iso.strip(), show.stdout))
+                break
+    versions.reverse()          # git gave newest-first; callers want OLDEST first
+    return versions
+
+
+def scan_reaches_current(versions) -> str | None:
+    """Why this scan cannot be trusted, or None if it can.
+
+    🔴 THE CONTROL THAT CATCHES A TRUNCATED HISTORY. A scan that reached only some
+    versions produces a report that looks ordinary: rules whose section existed in the
+    versions it DID reach get dated, and every other rule reads `UNDATED`. Nothing in the
+    output says the scan was short. This caught exactly that — a `--reverse` that silently
+    returned 1 of 23 versions — and it is a cheap, total check: the NEWEST version scanned
+    must be the skill as it is now, so it must contain every ledger probe.
+    """
+    if not versions:
+        return "no versions scanned at all"
+    newest = versions[-1][2]
+    if len(versions) < 2:
+        return (f"only {len(versions)} version scanned — a one-version history cannot "
+                "date anything relative to anything")
+    missing = [r["id"] for r in RULES if r["probe"] not in newest]
+    if missing:
+        return ("the NEWEST version scanned is not the current skill — it is missing "
+                f"{len(missing)} ledger probe(s) ({', '.join(missing[:4])}"
+                f"{'…' if len(missing) > 4 else ''}). The history scan is TRUNCATED, so "
+                "every UNDATED row would be an artefact of the scan, not a fact about "
+                "the rule.")
+    return None
+
+
+def section_heading_for(probe: str, body: str) -> str | None:
+    """The `## ` heading of the section the probe sits in, in the CURRENT skill.
+
+    A rule's sentence gets reworded; the section it lives under is far more stable, so
+    this is what makes the origin survive an edit.
+    """
+    idx = body.find(probe)
+    if idx < 0:
+        return None
+    head = None
+    for m in re.finditer(r"^##+ .*$", body[:idx], re.M):
+        head = m.group(0).strip()
+    return head
+
+
+def origin_of(probe: str, versions=None, body: str = "") -> tuple:
+    """(sha, iso, basis) for a rule's origin — the earliest version that carries it.
+
+    Two bases, and the report prints which was used, because they answer subtly
+    different questions and one of them can over-count:
+      `section`  the earliest version containing the rule's SECTION HEADING. Preferred:
+                 it survives a reword of the rule's own sentence. ⚠ It can be EARLIER
+                 than the rule itself when a rule was added to an existing section, so it
+                 widens the window — the opposite error to the one it fixes, and disclosed
+                 rather than hidden.
+      `wording`  the earliest version containing the probe itself. Used when no section
+                 heading can be resolved.
     """
     forced = os.environ.get("AUDIT_SWEEP_ORIGIN")
     if forced:
         # Test/what-if hook: date every rule at one instant, so the pre-origin
         # withholding path can be watched work. Printed in the header when set.
-        return ("forced", forced)
+        return ("forced", forced, "forced")
     if os.environ.get("AUDIT_SWEEP_SKILL"):
         # A copied skill has no history of its own; dating it against the real
         # file would attribute a fixture's rules to real commits. Say UNDATED.
+        return (None, None, "undatable")
+    versions = versions if versions is not None else skill_versions()
+    if not versions:
+        return (None, None, "undatable")
+    heading = section_heading_for(probe, body) if body else None
+    for needle, basis in ((heading, "section"), (probe, "wording")):
+        if not needle:
+            continue
+        for sha, iso, content in versions:          # oldest first
+            if needle in content:
+                return (sha, iso, basis)
+    return (None, None, "undatable")
+
+
+def origin_bounds(probe: str, versions, body: str) -> tuple:
+    """(early_iso, late_iso) — the rule's origin is somewhere BETWEEN these.
+
+    🔴 NEITHER BOUND IS THE ORIGIN, AND PICKING ONE IS HOW THIS WENT WRONG TWICE.
+      `late`  = earliest version containing the rule's own SENTENCE. Too LATE whenever the
+                rule was reworded: MEASURED, that dated 44 of 49 rules into 2026-08/09 and
+                withheld 32 of 49 rows.
+      `early` = earliest version containing the rule's SECTION HEADING. Usually earlier —
+                but NOT reliably, because HEADINGS GET REWORDED TOO. MEASURED on the
+                section basis alone: 13 rules recovered, and **2 went the other way**
+                (`dispatch-blind` 0 -> 437 pre-origin hits, `nine-axes` 0 -> 29) because
+                their current heading is NEWER than their sentence. It is also too EARLY
+                for a rule added to an already-old section.
+
+    So the window is reported as an INTERVAL and the ambiguity is surfaced rather than
+    resolved by fiat: applications after `late` are unambiguous; applications between the
+    two cannot be attributed to the rule rather than to language that predates it; and
+    only applications before `early` — before even the section existed — are evidence the
+    pattern is not specific to the rule.
+    """
+    forced = os.environ.get("AUDIT_SWEEP_ORIGIN")
+    if forced:
+        # `AUDIT_SWEEP_ORIGIN_LATE` makes the INTERVAL itself settable, so the
+        # three-bucket logic is testable without a git history — the sandbox tier has
+        # none, and tests that reached for the real history were red there. Defaults to
+        # a degenerate interval so the single-value hook keeps its old meaning.
+        return (forced, os.environ.get("AUDIT_SWEEP_ORIGIN_LATE") or forced)
+    if os.environ.get("AUDIT_SWEEP_SKILL") or not versions:
         return (None, None)
-    cmd = ["git", "-C", str(REPO), "log", "--follow", "--format=%h\t%aI",
-           f"-S{probe}", "--", SKILL_REL]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except Exception:
+    heading = section_heading_for(probe, body) if body else None
+
+    def first_with(needle):
+        if not needle:
+            return None
+        for _sha, iso, content in versions:         # oldest first
+            if needle in content:
+                return iso
+        return None
+
+    sec, word = first_with(heading), first_with(probe)
+    cands = [c for c in (sec, word) if c]
+    if not cands:
         return (None, None)
-    lines = [l for l in out.stdout.splitlines() if l.strip()]
-    if not lines:
+    dated = [(parse_ts(c), c) for c in cands]
+    dated = [(d, c) for d, c in dated if d is not None]
+    if not dated:
         return (None, None)
-    sha, iso = lines[-1].split("\t", 1)
-    return (sha, iso.strip())
+    dated.sort(key=lambda pair: pair[0])
+    return (dated[0][1], dated[-1][1])
 
 
 def iter_corpus() -> list[Path]:
@@ -417,7 +580,7 @@ def main() -> int:
     ap.add_argument("--json", dest="json_out", help="also write the rows as JSON")
     args = ap.parse_args()
 
-    check_ledger_against_skill()
+    body = check_ledger_against_skill()
     rules = [r for r in RULES if not args.rule or r["id"] in args.rule]
     if not rules:
         fail(5, "no rule matched --rule")
@@ -429,9 +592,21 @@ def main() -> int:
               f"{os.environ['AUDIT_SWEEP_ORIGIN']}, NOT at its own commit. "
               "This is a what-if run; do not quote it as a measurement.")
 
+    # ONE scan of the skill's history, shared by every rule (see skill_versions).
+    versions = ([] if os.environ.get("AUDIT_SWEEP_ORIGIN")
+                or os.environ.get("AUDIT_SWEEP_SKILL") else skill_versions())
+    if versions:
+        print(f"skill history scanned: {len(versions)} version(s), "
+              f"{versions[0][1][:10]} .. {versions[-1][1][:10]}")
+        why = scan_reaches_current(versions)
+        if why:
+            fail(3, "the skill-history scan cannot be trusted: " + why)
     for r in rules:
-        sha, iso = origin_of(r["probe"])
-        r["origin_sha"], r["origin_iso"] = sha, iso
+        sha, iso, basis = origin_of(r["probe"], versions, body)
+        early, late = origin_bounds(r["probe"], versions, body)
+        r["origin_sha"], r["origin_iso"], r["origin_basis"] = sha, iso, basis
+        r["origin_early"], r["origin_late"] = early, late
+        r["early_dt"], r["late_dt"] = parse_ts(early or ""), parse_ts(late or "")
         r["origin_dt"] = parse_ts(iso or "")
         r["rx"] = re.compile(r["apply"], re.I)
     undated = [r["id"] for r in rules if not r["origin_iso"]]
@@ -449,7 +624,9 @@ def main() -> int:
     # counters
     fired = collections.Counter()          # rule -> assistant/agent matches at-or-after origin
     in_find = collections.Counter()
-    pre = collections.Counter()            # rule -> matches BEFORE origin (specificity control)
+    pre = collections.Counter()            # matches before the SECTION existed
+    ambig = collections.Counter()          # matches INSIDE the origin interval
+    ambig_sessions = collections.defaultdict(set)
     noise = collections.Counter()          # rule -> injected matches
     projects = collections.defaultdict(collections.Counter)
     # 🔴 BLOCKS are not SESSIONS. One verbose auditor restating a rule eight times in
@@ -479,14 +656,23 @@ def main() -> int:
                 if not signal:
                     noise[r["id"]] += 1
                     continue
-                if not r["origin_dt"]:
-                    after = True          # undated: counted, flagged separately
-                elif tdt is None:
-                    after = True          # unstamped block: counted, cannot be binned
+                # THREE buckets against the origin INTERVAL, not two against a point.
+                # `early` = the section existed; `late` = this wording existed.
+                early, late = r["early_dt"], r["late_dt"]
+                if tdt is None or early is None or late is None:
+                    bucket = "fired"      # undated / unstamped: counted, flagged
+                elif tdt < early:
+                    bucket = "pre"        # before even the SECTION -> pattern too broad
+                elif tdt < late:
+                    bucket = "ambig"      # inside the interval -> unattributable
                 else:
-                    after = tdt >= r["origin_dt"]
-                if not after:
+                    bucket = "fired"
+                if bucket == "pre":
                     pre[r["id"]] += 1
+                    continue
+                if bucket == "ambig":
+                    ambig[r["id"]] += 1
+                    ambig_sessions[r["id"]].add(str(f))
                     continue
                 fired[r["id"]] += 1
                 projects[r["id"]][proj] += 1
@@ -515,35 +701,42 @@ def main() -> int:
     rows = []
     print("\nPER-RULE — `fired` = assistant-authored applications at/after origin. "
           "NOT 'caught'.")
-    print(f"{'rule':38} {'origin':11} {'sess':>5} {'fired':>6} {'in-fnd':>6} "
-          f"{'nondevrc':>8} {'noise':>7} {'last seen':10}  verdict")
+    print(f"{'rule':38} {'origin interval':22} {'sess':>5} {'fired':>6} "
+          f"{'in-fnd':>6} {'ambig':>6} {'nondevrc':>8}  verdict")
     for r in sorted(rules, key=lambda x: -fired[x["id"]]):
         rid = r["id"]
         nondevrc = sum(v for k, v in projects[rid].items() if "devrc" not in k)
         if pre[rid]:
-            verdict = f"UNRELIABLE (pattern matched {pre[rid]}x pre-origin)"
+            verdict = (f"UNRELIABLE ({pre[rid]}x before the section existed — "
+                       "pattern not specific to this rule)")
         elif not r["origin_iso"]:
             verdict = "UNDATED — origin not in git history"
+        elif fired[rid] == 0 and ambig[rid]:
+            verdict = (f"AMBIGUOUS ({ambig[rid]}x inside the origin interval, 0 after it "
+                       "— cannot attribute to the rule vs earlier language)")
         elif fired[rid] == 0:
             verdict = "UNFIRED (not 'dead' — see blind spot 4)"
         elif nondevrc == 0:
             verdict = "FIRED — devrc only (meta-session confounder unresolved)"
         else:
             verdict = "FIRED"
-        last = (first_last.get(rid, ("", ""))[1] or "")[:10]
         if pre[rid]:
             # 🔴 ACTUALLY withhold it. The verdict says the number is withheld, so
             # printing it anyway would make the label wider than the implementation
             # — the exact shape this skill's own rules tell an auditor to hunt.
-            cols = f"{'—':>5} {'—':>6} {'—':>6} {'—':>8} {noise[rid]:7d}"
-            last = "—"
+            cols = f"{'—':>5} {'—':>6} {'—':>6} {'—':>6} {'—':>8}"
         else:
             cols = (f"{len(sessions[rid]):5d} {fired[rid]:6d} {in_find[rid]:6d} "
-                    f"{nondevrc:8d} {noise[rid]:7d}")
-        print(f"{rid:38} {(r['origin_iso'] or '')[:10]:11} {cols} {last:10}  {verdict}")
+                    f"{ambig[rid]:6d} {nondevrc:8d}")
+        e, l = (r['origin_early'] or '')[:10], (r['origin_late'] or '')[:10]
+        interval = f"{e}..{l}" if e and l and e != l else (e or l or "?")
+        print(f"{rid:38} {interval:22} {cols}  {verdict}")
         withheld = bool(pre[rid])
         rows.append(dict(id=rid, name=r["name"], origin_sha=r["origin_sha"],
-                         origin=r["origin_iso"], withheld=withheld,
+                         origin=r["origin_iso"], origin_basis=r["origin_basis"],
+                         origin_early=r["origin_early"], origin_late=r["origin_late"],
+                         ambiguous=None if withheld else ambig[rid],
+                         withheld=withheld,
                          sessions=None if withheld else len(sessions[rid]),
                          fired=None if withheld else fired[rid],
                          in_finding=None if withheld else in_find[rid],
