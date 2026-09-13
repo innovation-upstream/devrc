@@ -129,6 +129,33 @@ was crowded out.
   directly against ClickHouse `activity.events` (a different instrument, a different
   window) and found a nonzero laptop rate — see that doc rather than re-deriving it here.
 
+🔴 **`#1571` IS MERGED, SHIPPED AND VERIFIED LIVE ON BOTH HOSTS (2026-09-12).** Merged as
+`e52371c4`, verified by CONTENT on `origin/main` with a negative control (the three cut paragraphs
+return 0) because a squash makes ancestry read "not merged" forever. Both hosts converged at
+`6f1867b1` and — the check that actually matters — both `readlink -f ~/.claude/skills/resume/SKILL.md`
+resolve to the SAME store path `3zhmivln…-devrc-claude-skills/resume/SKILL.md` at **44,834 B**, with
+the command present and the cut changelog absent. Merged, deployed and live are three claims; all
+three were checked.
+⚠ **`ship.sh` took TWO passes, twice, and neither was a defect in the change.** Pass 1 returned
+**rc 19 (hosts disagree)** — `origin/main` moved between the two hosts' fetches, so each host landed
+internally-consistent on a DIFFERENT commit; a later run returned **rc 11 (verify-failed)** for the
+same reason. `main` moved three times during one run. Every per-host line was green in both; only
+the cross-host comparison caught it. **Read the per-host lines AND the final verdict — and note the
+background-wrapper reported `exit code 0` while the run's own `SHIP_RC` was 19.**
+
+🔴 **THE CAIRN ENTRY CARRIED THE RETRACTED NUMBER FOR A DAY AFTER THE DOC WAS FIXED (corrected
+2026-09-12).** `devrc/handoff-index` served `RESOLVED 4a67ea73: YIELD ANSWERED — 1 of 20` as a
+settled resolution, and its `## Pointers` line still read *"`SKILL.md` step 3 — the only consumer;
+queries per open item"* — stale since `#1332` on 2026-09-06. **That is the worst place for it:**
+`cairn recall` is the surviving retrieval surface and `/resume` step 4 reads it FIRST, so a future
+session would have been handed `1 of 20` as a pointer while this doc said it was retracted. Fixed by
+one `cairn put` (both lines) plus one `cairn append` (how the arc resolved); pod validated
+**32 of 32 entries parse, 0 malformed, 0 dropped lines, 0 out-of-reach markers**. 🔴 **This is the
+doc's OWN recorded gotcha recurring** — "a `RESOLVED:` bullet does not retire an `OPEN:` one …
+writing the resolution and retiring the marker are two edits, and only the first feels like
+progress" — committed here by the session that wrote that very sentence. **When you retract a figure
+in this doc, grep the STORE for it in the same turn.**
+
 ## Open investigations — live diagnosis state
 
 ### SUPERSEDED — a repo whose every doc is unreadable has its rows deleted, rc 0, no PARTIAL notice
@@ -401,6 +428,11 @@ human answer beats transcript archaeology that has now failed twice.
    ergonomics gap, not a correctness one — **but it splits the run in two, and `ship.sh` then
    prints `cross-host agreement NOT COMPARED`, which is the check that exists to catch the two
    hosts landing on different commits.**
+   🔴 **EVIDENCE STRENGTHENED 2026-09-12 — hit on FOUR consecutive `ship.sh` runs in one session**,
+   every one requiring `REMOTE_SSH=zach@10.42.0.100` by hand. `drift-check.sh` ALREADY has the
+   fallback and printed `zach@192.168.50.155 did not answer — using zach@10.42.0.100 for laptop`
+   in the same session, so the two sibling scripts disagree and only one of them recovers.
+   **That makes this a copy-the-working-implementation change, not a design task.**
    **Closing condition:** a merged PR where the remote leg falls back to the secondary address
    when the primary is unreachable (or the rc-255 message names `REMOTE_SSH` and the nebula
    address), with a test that watches the fallback fire.
@@ -655,6 +687,34 @@ human answer beats transcript archaeology that has now failed twice.
   DIFF.** Both rounds found the same counterexample independently, in a PR whose code was correct
   and whose tests passed. **The finding was not in the diff at all** — it was in the sentence the
   diff existed to act on. When a change's whole justification is one number, audit the NUMBER.
+
+- 🔴 **A RETRACTION IS NOT DONE WHEN THE DOC IS FIXED — THE STORE IS A SECOND COPY, AND IT IS THE
+  ONE `/resume` READS FIRST.** `#1541` retracted `1 of 20` here on 2026-09-11; the cairn
+  `devrc/handoff-index` entry went on serving it as a `RESOLVED:` bullet until 2026-09-12, alongside
+  a `## Pointers` line about step 3 that `#1332` had falsified six days earlier. **Same shape this
+  doc already records** ("a `RESOLVED:` bullet does not retire an `OPEN:` one"), committed by the
+  session that wrote it down. **Grep the store for any figure you retract, in the same turn.**
+- 🔴 **A SHARED CLONE ON SOMEONE ELSE'S BRANCH IS THE NORMAL STATE, NOT AN ANOMALY — CHECK BEFORE
+  `/handoff`.** Measured 2026-09-12: `$DEVRC` sat on `fix/tmux-osc8-hyperlinks` (another session's),
+  and `handoff_doc.py --confirm --push` commits to **whatever branch the checkout is on**. This
+  handoff was landed from `git worktree add <path> main` instead. The skill says this; the thing
+  that makes it bite is that the branch is not yours and nothing announces the switch.
+- ⚠ **`ship.sh` rc 19 / rc 11 on a BUSY repo are races, not defects.** `main` moved three times
+  inside one run; each host landed internally-consistent on a different commit and every per-host
+  line was green. The documented fix (re-run) worked both times. 🔴 **And a backgrounded `ship.sh`
+  reported `exit code 0` while its own `SHIP_RC` was 19** — read the run's own status line, never
+  the wrapper's.
+- 🔴 **WHEN A LEDGER KEEPS NEEDING NEW ENTRIES, DELETE THE COUPLING — an external worked example
+  landed mid-session.** `test_every_kill_server_call_site_in_the_repo_is_classified` reddened `main`
+  four times in two hours (`0b5ee924` → `6395ce1f` → `b62d1bf1`), each fix adding another
+  `claudedocs/` file to a ledger, one of them *"a doc quoting this scanner's own output"* and
+  another *"my own merged handoff became the sixth offender"*. `c0bbd6d9` (#1561) stopped the
+  scanner reading `claudedocs/` at all and it has not recurred. **Same move that closed rank 1
+  here** — stop the mechanism reading prose rather than keep annotating the prose.
+- ⚠ **A stale observation reported three times.** This session reported that kill-ledger red as an
+  open loose end in three consecutive replies; it had been fixed by `#1561` before the first. It was
+  measured once, in a worktree pinned to an older `main`, and never re-checked. **Re-verify at the
+  moment you ACT, not when you formed the plan** — and a "loose end" you are handing over is an act.
 
 ## How to verify
 ```bash
