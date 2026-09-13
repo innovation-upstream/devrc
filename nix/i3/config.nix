@@ -109,31 +109,84 @@ let
   # over-states the gap, which is how one percentage came to look like it could
   # serve both hosts.)
   #
-  # laptop, 90 ppt x 90 ppt -> ~2030 x ~1354 px of the 2256x1504 OUTPUT. Inside
-  # the 2256x1480 workspace in both axes, which is the reported defect fixed.
-  # workbench, 64 ppt x 77 ppt -> ~2202 x ~1109 px of the 3440x1440 OUTPUT, which
-  # is 200x50 cells at an 11.0x22.0 cell — the SAME grid the deployed
-  # `REVIEW_COLUMNS`x`REVIEW_LINES` of 200x50 gives it today (2200x1100 px; both
-  # axes differ by under one cell). That is deliberate and it is the whole point:
-  # the complaint was about the LAPTOP — the workbench's `picks.jsonl` does not
-  # exist, so the review TUI has never opened there — and the workbench must come
-  # out of this change rendering what it renders now.
+  # laptop, 90 ppt x 90 ppt -> ~2030 x ~1353 px of the 2256x1504 OUTPUT. Inside
+  # the 2256x1480 workspace in both axes, which is the reported defect fixed —
+  # and it stays comfortably inside under every decoration model below, so the
+  # host that actually HAS the defect is fixed either way.
+  # workbench, 64 ppt x 77 ppt -> 2201 x 1108 px of the 3440x1440 OUTPUT, which
+  # is 200x50 cells of the BARE RECT at an 11.0x22.0 cell.
   #
-  # 🔴 77, NOT 78. `78 ppt` of the OUTPUT's 1440 is ~1123 px = 51 rows: one cell
-  # MORE than today, i.e. a visible change on the host this fix promises not to
-  # touch. It read as sub-cell only while the arithmetic used 1413.
+  # 🔴 AND THE BARE RECT IS NOT WHAT RENDERS. The window's DECORATION (next
+  # paragraph) takes 4 px off each axis, so the CLIENT area is 2197x1104 =
+  # **199x50** cells — not the 200x50 the deployed `REVIEW_COLUMNS`x`REVIEW_LINES`
+  # produces (200x50 CLIENT cells = 2200x1100 px). So:
   #
-  # ⚠ THE CELL ARITHMETIC MODELS THE i3 RECT ONLY, SO THE GRID IS APPROXIMATE —
-  # do not read "200x50" as exact, and do not quote these pixel figures to a
-  # tenth. Two terms are deliberately NOT modelled. (a) DECORATION: this file
-  # sets `default_border pixel 2` but never `default_floating_border`, so floats
-  # take i3's default — `config.default_floating_border = BS_NORMAL` with
-  # `logical_px(2)` (src/config.c), i.e. a titlebar plus borders — and a floating
-  # con's `rect` INCLUDES that, so the client area is SMALLER than the rect and
-  # the real grid is a little under what these numbers say. (b) SIZE-INCREMENT
-  # SNAPPING: `floating_resize` (src/floating.c) upscales the decorated rect to a
-  # multiple of the window's width/height increments. Quantifying either needs a
-  # window opened or resized on the operator's live desk, which is theirs to do.
+  #   🔴 THIS CHANGE DOES NOT KEEP THE WORKBENCH'S GRID IDENTICAL. It is one
+  #   COLUMN narrower (199 vs 200) under the corrected model, and that is true of
+  #   `78 ppt` as well — the height is the axis that matches, the width is not.
+  #   An earlier revision of this comment promised "the workbench must come out
+  #   of this change rendering what it renders now"; that promise is RETIRED
+  #   rather than re-justified, because the arithmetic does not keep it.
+  #
+  #   What the stakes actually are: the workbench's
+  #   `~/.config/mention-open/picks.jsonl` DOES NOT EXIST (measured 2026-09-12;
+  #   the laptop's does), so the review TUI has never opened on this host and
+  #   nobody has ever seen either grid. The complaint was the LAPTOP's.
+  #
+  # 🔴 77 OR 78 ARE INDISTINGUISHABLE, AND 77 IS KEPT ONLY BECAUSE IT IS WHAT IS
+  # ALREADY COMMITTED. Under the corrected decoration model both render 199x50:
+  #
+  #   ppt            rect         client (BS_PIXEL bw2)   cells
+  #   64 ppt 77 ppt  2201 x 1108  2197 x 1104             199 x 50
+  #   64 ppt 78 ppt  2201 x 1123  2197 x 1119             199 x 50
+  #
+  # ⚠ An earlier revision of this comment said `78 ppt` is "51 rows: one cell
+  # MORE than today, i.e. a visible change". **51 is a row count of the BARE
+  # RECT** (1123 // 22 = 51); the decoration this same comment documents absorbs
+  # it, and floor(1119 / 22) is 50. So that rationale for preferring 77 was
+  # VOID. 🔴 IT HAS NOT BEEN REPLACED WITH A BETTER ONE — no purpose for 77 over
+  # 78 could be found, and "I could not find a purpose" is the finding. 77 stays
+  # because it is the value already committed and deployed in this branch, not
+  # because it renders differently.
+  #
+  # ⚠ THE CELL ARITHMETIC MODELS THE i3 RECT PLUS A BORDER, SO THE GRID IS STILL
+  # APPROXIMATE — do not quote these pixel figures to a tenth. One term is
+  # modelled now and one is not.
+  #
+  # (a) DECORATION — MODELLED, and the earlier claim here was WRONG. This comment
+  # said floats take i3's default `default_floating_border = BS_NORMAL` ("a
+  # titlebar plus borders"). THEY DO NOT. `config.default_floating_border` is
+  # applied ONLY inside `floating_enable()` under `if (automatic)`
+  # (src/floating.c:353-354). `for_window … floating enable` is a COMMAND:
+  # `cmd_floating()` calls `floating_enable(con, false)` (src/commands.c:1157),
+  # and `run_assignments()` runs at src/manage.c:588 (map time; :746 on the
+  # remanage path) — AFTER the `want_floating` decision at src/manage.c:462-546.
+  # `want_floating` is set only by window-type atoms / `_NET_WM_STATE_MODAL` /
+  # sticky / transient-for / a fixed min==max size hint, and an alacritty
+  # toplevel matches none of those. So the container keeps what
+  # `con_new_skeleton()` gave it (src/con.c:44, `config.default_border`), which
+  # `default_border pixel 2` sets to **BS_PIXEL with `logical_px(2)`**, and
+  # `current_border_width` is `config.default_border_width` (src/manage.c:546,
+  # the non-floating arm). `con_border_style_rect_without_title()`'s
+  # non-BS_NORMAL branch is `{bw, bw, -2bw, -2bw}` (src/con.c:1846-1849) — 2 px
+  # on all four sides, so
+  # the client area is rect MINUS 4 px in BOTH axes. No titlebar.
+  #
+  # LIVE, read-only (`i3-msg -t get_tree`, `-t get_config`, i3 4.25.1): the
+  # running alacritty windows report `border=pixel, current_border_width=2`, and
+  # the config carries no `default_floating_border`, no `new_float` and no
+  # `for_window … border`. ⚠ Those live windows sit in a TABBED parent, where
+  # `con_border_style()` (src/con.c:1942) overrides a non-BS_NORMAL style to
+  # BS_NORMAL for a >1-child tabbed container — which is why their client height
+  # is rect-2 rather than rect-4. A FLOAT's parent is a CT_FLOATING_CON with
+  # `layout = L_SPLITH` (src/floating.c:291), so no override applies and the
+  # -4/-4 above is the float's case. The live read is evidence for the BORDER
+  # STYLE and the CELL SIZE; the float's own inset comes off the C.
+  #
+  # (b) SIZE-INCREMENT SNAPPING — STILL NOT MODELLED. `floating_resize`
+  # (src/floating.c) upscales the decorated rect to a multiple of the window's
+  # width/height increments. Quantifying it needs a window opened or resized on
+  # the operator's live desk, which is theirs to do.
   reviewSizePpt =
     if isLaptop then "90 ppt 90 ppt"
     else "64 ppt 77 ppt";
@@ -254,8 +307,12 @@ for_window [class="float" instance="mention-open"] floating enable, move positio
 # sizes the TUI: the script passes no dimensions, the running i3 has no rule, and
 # the review window opens at alacritty's own default ~80x24 on BOTH hosts. That is
 # small but usable (the old failure mode was a window larger than the screen), and
-# on the workbench it IS a change from today's 200x50 — the one this PR otherwise
-# promises not to make — persisting until somebody reloads.
+# on the workbench it IS a large change from today's 200x50, persisting until
+# somebody reloads. ⚠ That window is not the only change to the workbench: the
+# RESIZED size is ~199x50 client cells, one column narrower than today (see
+# `reviewSizePpt`'s derivation above). This change does not keep the workbench's
+# grid identical, and the comment here used to claim the PR "promises not to"
+# change it.
 #
 # An automatic reload is deliberately NOT wired into the activation script: that
 # would reload i3 on every future `home-manager switch`, which is a change to

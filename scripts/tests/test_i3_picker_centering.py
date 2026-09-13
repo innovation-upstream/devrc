@@ -30,7 +30,19 @@ DPI, so one cell count cannot satisfy both hosts; i3 sizes it in `ppt` and
 authority and there is no second number to disagree with it.
 
 🔴 `ppt` IS A PERCENTAGE OF THE **OUTPUT** RECT, NOT OF THE WORKSPACE. This file
-said "workspace" everywhere and every height in it was wrong by the status bar.
+said "workspace" everywhere, and every height DERIVED FROM A `ppt` PERCENTAGE was
+short by the status bar. Measured at `451ead89`, this PR's previous head: `90 ppt`
+read as 1332 px on the laptop (0.90 x 1480) and 1272 px on the workbench
+(0.90 x 1413), and the 200x50 window's fit read as "64% x 78%" (1100 / 1413).
+
+⚠ NOT "every height" — an earlier wording of this paragraph said that and it
+OVER-states the defect. The transcribed rects (1413, 1480), the cell heights
+(22.0, 37.0), the largest observed row counts (63, 39) and the 1100 px of a
+50-row grid were all correct then and are correct now. Read the narrow version:
+converting a FIT basis into the output rect is the SAME error in the other
+direction, and this file forbids it explicitly elsewhere ("Do not carry one rect
+over to the other").
+
 Established from i3 4.25.1 source (the version on both hosts), two independent
 artifacts: `src/commands.c`'s `cmd_resize_set()` multiplies by
 `con_get_output(floating_con)->rect`, and `testcases/t/252-floating-size.t` checks
@@ -389,9 +401,12 @@ def test_no_OTHER_float_this_repo_launches_is_moved_or_resized(is_laptop):
 # `fake-outputs 1333x999` and asserts `resize set 33 ppt 20 ppt` lands on
 # `int(0.33*1333)` x `int(0.2*999)` — the OUTPUT. i3's test outputs carry no bar,
 # so workspace == output there, which is why this cannot surface in i3's suite.
-# Every height in this block was previously derived against the workspace and was
-# short by the bar: `78 ppt` read as sub-cell on the workbench when it is a whole
-# ROW larger than what that host renders today.
+# Every height in this block that was DERIVED FROM A `ppt` PERCENTAGE was
+# previously computed against the workspace and was short by the bar — not every
+# height in it (the transcribed rects and cell sizes were fine). `78 ppt` read as
+# sub-cell on the workbench when it is a whole ROW larger in the BARE RECT.
+# ⚠ It is NOT a row larger once decoration is counted; see the decoration
+# paragraph below and `test_the_WORKBENCH_keeps_rendering_…`'s docstring.
 #
 # ⚠ `move position center` USES THE **WORKSPACE** RECT (`cmd_move_window_to_center`
 # -> `floating_center(…, con_get_workspace(…)->rect)`; `move absolute position
@@ -425,36 +440,89 @@ def test_no_OTHER_float_this_repo_launches_is_moved_or_resized(is_laptop):
 # and hence the guard that the two hosts DISAGREE.
 #
 # ⚠ THE CELL ARITHMETIC BELOW MODELS THE i3 **RECT** ONLY, SO EVERY GRID IT
-# PRODUCES IS APPROXIMATE — read "200x50" as "about 200x50", and do not restate any
-# of these pixel figures to a tenth. Two terms are deliberately not modelled, and
-# neither can be measured without opening or resizing a window on the operator's
-# live desk. (a) DECORATION: `nix/i3/config.nix` sets `default_border pixel 2` but
-# never `default_floating_border`, so floats take i3's default `normal 2`
-# (`src/config.c`: `config.default_floating_border = BS_NORMAL`,
-# `default_floating_border_width = logical_px(2)`) — a titlebar plus borders — and
-# a floating con's `rect` INCLUDES that, so the client area is smaller than the
-# rect and the true grid is a little under these numbers. (b) SIZE-INCREMENT
-# SNAPPING: `floating_resize` (`src/floating.c`) upscales the decorated rect to a
-# multiple of the window's width/height increments.
+# PRODUCES IS A BARE-RECT GRID, NOT A RENDERED ONE — and `_DEPLOYED_REVIEW_CELLS`
+# is a CLIENT-area cell count, so the two are not the same unit. Do not restate any
+# of these pixel figures to a tenth.
 #
-# The guards below pin FIVE things: that the window receives a resize whose UNITS
-# are percent-of-output (i3 defaults the unit to px, so `resize set 90 90` is a
-# legal 90-PIXEL window); that the percentages are THIS HOST'S; that the two hosts
-# differ; that the ledger of measured rects is internally coherent (the check that
-# would have caught the workspace-for-output substitution); and that the rule
-# issuing the resize also floats the window (a `resize set` on a TILED window is a
-# silent no-op — the same hazard guard 1's companion pins for the picker) and
-# centres it.
+# (a) DECORATION — QUANTIFIED, AND THE CLAIM THAT USED TO BE HERE WAS WRONG. This
+# block said `nix/i3/config.nix` "sets `default_border pixel 2` but never
+# `default_floating_border`, so floats take i3's default `normal 2` … a titlebar
+# plus borders". THAT DOES NOT HOLD FOR THIS WINDOW. `config.default_floating_border`
+# is applied ONLY inside `floating_enable()` under `if (automatic)` (i3 4.25.1
+# `src/floating.c:353-354`). `for_window … floating enable` is a COMMAND, not the
+# automatic path: `cmd_floating()` calls `floating_enable(con, false)`
+# (`src/commands.c:1157`), and `run_assignments()` runs at `src/manage.c:588`
+# (map time; `:746` on the remanage path) — AFTER the `want_floating` decision at
+# `src/manage.c:462-546`. `want_floating` is set only by window-type atoms /
+# `_NET_WM_STATE_MODAL` / sticky / transient-for / a fixed min==max size hint, and
+# an alacritty toplevel matches none of them. So the container keeps what
+# `con_new_skeleton()` gave it (`src/con.c:44`, `config.default_border`), which
+# `default_border pixel 2` sets to **BS_PIXEL with `logical_px(2)`**, and
+# `current_border_width` comes from the non-floating arm of `src/manage.c:546`.
+# `con_border_style_rect_without_title()`'s non-BS_NORMAL branch is
+# `{bw, bw, -2bw, -2bw}` (`src/con.c:1846-1849`): 2 px on all four sides, so the
+# CLIENT area is the rect MINUS 4 px in BOTH axes. There is no titlebar.
+#
+# LIVE, read-only (`i3-msg -t get_tree` / `-t get_config`, i3 4.25.1): the running
+# alacritty windows report `border=pixel, current_border_width=2`, and the config
+# carries no `default_floating_border`, no `new_float` and no `for_window … border`.
+# ⚠ Those live windows sit in a TABBED parent, and `con_border_style()`
+# (`src/con.c:1942`) overrides a non-BS_NORMAL style to BS_NORMAL for a >1-child
+# tabbed container — which is why their client HEIGHT is rect-2, not rect-4. A
+# float's parent is a CT_FLOATING_CON with `layout = L_SPLITH`
+# (`src/floating.c:291`), so no override applies and -4/-4 is the float's case.
+# The live read is evidence for the BORDER STYLE and the CELL SIZE; the float's own
+# inset comes off the C.
+#
+# (b) SIZE-INCREMENT SNAPPING — STILL NOT MODELLED. `floating_resize`
+# (`src/floating.c`) upscales the decorated rect to a multiple of the window's
+# width/height increments. Measuring it needs a window opened or resized on the
+# operator's live desk.
+#
+# 🔴 AND THE RENDERED GRID HAS NEVER BEEN OBSERVED. The workbench's
+# `~/.config/mention-open/picks.jsonl` does not exist (measured 2026-09-12), so the
+# review window has never opened on that host; and no floating container existed in
+# the live tree in any round of this PR's audit, so no real floating `deco_rect` was
+# ever read. Everything about the float's inset is derived from i3's C.
+#
+# The guards below pin these things — COUNT THE LIST, and do not put a total beside
+# it (a total kept next to its own list drifts: this block said "FIVE" while the
+# block held nine test functions, and round 1 added two while incrementing the
+# total by one):
+#
+#   1. the window receives a resize whose UNITS are percent-of-output (i3 defaults
+#      the unit to px, so `resize set 90 90` is a legal 90-PIXEL window);
+#   2. the percentages are THIS HOST'S;
+#   3. the two hosts' percentages DIFFER;
+#   4. the ledger of measured rects is internally coherent (the check that would
+#      have caught the workspace-for-output substitution);
+#   5. the workbench's pair still maps to `_DEPLOYED_REVIEW_CELLS` in the BARE
+#      RECT (read its docstring for what that does and does not claim);
+#   6. the size still FITS the workspace it is centred in, on both hosts;
+#   7. the rule issuing the resize also FLOATS the window (a `resize set` on a
+#      TILED window is a silent no-op — the same hazard guard 1's companion pins
+#      for the picker);
+#   8. the rule names the review instance EXACTLY (i3's PCRE is unanchored);
+#   9. the window is CENTRED on both hosts.
 # --------------------------------------------------------------------------- #
 #: The `resize set <w> ppt <h> ppt` operands each host must receive, and the
 #: MEASURED facts they were derived from. Literal expectations on purpose — a
 #: value recomputed from the config would be the implementation restating itself.
 #:
 #: 🔴 TUNING EITHER PAIR MEANS RE-DERIVING IT FROM A FRESH MEASUREMENT, not
-#: nudging the number: the workbench's 64x77 is not a taste call but the pair that
-#: reproduces the size that host ALREADY renders (see the guard below), and the
-#: laptop's 90x90 is the largest round pair whose OUTPUT-relative size still fits
-#: inside the laptop's workspace rect.
+#: nudging the number. The laptop's 90x90 is the largest round pair whose
+#: OUTPUT-relative size still fits inside the laptop's workspace rect.
+#:
+#: ⚠ THE WORKBENCH'S 77 HAS NO BETTER JUSTIFICATION THAN "IT IS WHAT IS ALREADY
+#: COMMITTED", and saying so is the honest version. An earlier revision of this
+#: docstring called 64x77 "the pair that reproduces the size that host ALREADY
+#: renders"; it does not. `64 ppt 77 ppt` is a 2201x1108 BARE RECT, which is
+#: 200x50 cells — but the CLIENT area is 4 px smaller in each axis (BS_PIXEL bw 2;
+#: see the decoration paragraph above), i.e. 2197x1104 = **199x50** cells, one
+#: column short of the 200x50 the deployed cell constants produced. `78 ppt` gives
+#: the SAME 199x50, so the two are indistinguishable on screen and the "78 is one
+#: row more" rationale was void. No purpose for 77 over 78 was found; that absence
+#: is the finding, and a purpose invented to fill it would be a hypothesis.
 _REVIEW_PPT = {"workbench": (64, 77), "laptop": (90, 90)}
 
 #: The measured rects and cell size per host — see the MEASURED table above.
@@ -477,8 +545,14 @@ _MEASURED = {
                "cell": (19.0, 37.0)},
 }
 
-#: What `REVIEW_COLUMNS`x`REVIEW_LINES` held on `main` — i.e. the size the
-#: workbench renders TODAY, and the one it must keep rendering.
+#: What `REVIEW_COLUMNS`x`REVIEW_LINES` held on `main`. Those were passed to
+#: alacritty as `window.dimensions`, so this is a CLIENT-AREA cell count.
+#:
+#: ⚠ IT IS NOT "THE SIZE THE WORKBENCH MUST KEEP RENDERING" — an earlier revision
+#: of this docstring said that and the change does not keep it. The guard below
+#: compares this against a BARE-RECT grid, which is one column wider than the
+#: client grid the new rule produces (199x50). The two numbers are in different
+#: units and they do not agree; see `_REVIEW_PPT`.
 _DEPLOYED_REVIEW_CELLS = (200, 50)
 
 
@@ -584,10 +658,20 @@ def test_the_MEASURED_ledger_is_INTERNALLY_COHERENT():
     precisely the relationship the substitution destroys.
 
     WIDTH must be EQUAL: an i3 bar is a full-width strip, so an output and its
-    workspace differ in height only. HEIGHT must differ by a plausible bar: > 0
-    (a zero means somebody put the same rect in both slots, which is the bug) and
-    small relative to the screen (a large gap means one of the two is not this
-    output's rect at all).
+    workspace differ in height only. HEIGHT must differ by a plausible bar, and
+    the three failing shapes are DIFFERENT faults, so the message names each
+    separately rather than attributing all of them to one cause:
+
+      * gap EXACTLY ZERO  — the same rect was written into both slots (the bug
+        round 1 shipped);
+      * gap NEGATIVE      — the two rects are SWAPPED, or one of them is not this
+        output's at all. NOT the identical-rect case;
+      * gap LARGE relative to the screen — one of the two is not this output's
+        rect.
+
+    ⚠ The zero and negative branches used to share one sentence reading "a
+    negative value means the same rect has been written into both slots", which
+    is false of the negative case.
 
     ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE. The pre-fix tree had no `output`
     key for this to be red against; what it pins is that the ledger cannot be
@@ -608,13 +692,17 @@ def test_the_MEASURED_ledger_is_INTERNALLY_COHERENT():
         assert bar > 0, (
             "%s: the ledger says the OUTPUT is %d px tall and the workspace %d px "
             "— a bar of %d px. The output rect is strictly taller than the "
-            "workspace it hosts a bar on, so %s means the same rect has been "
-            "written into both slots. That is exactly round 1's defect: `resize "
-            "set … ppt` multiplies the OUTPUT rect (i3 4.25.1 `cmd_resize_set`), "
-            "so a workspace height here silently understates every `ppt` height "
-            "by the bar. RE-MEASURE both rects; do not reconcile them by editing "
-            "one." % (host, out_h, ws_h, bar,
-                      "zero" if bar == 0 else "a negative value"))
+            "workspace it hosts a bar on. %s That matters because `resize set … "
+            "ppt` multiplies the OUTPUT rect (i3 4.25.1 `cmd_resize_set`), so a "
+            "workspace height in the output slot silently understates every `ppt` "
+            "height by the bar — round 1's defect. RE-MEASURE both rects; do not "
+            "reconcile them by editing one."
+            % (host, out_h, ws_h, bar,
+               ("A gap of EXACTLY ZERO means the same rect has been written into "
+                "both slots." if bar == 0 else
+                "A NEGATIVE gap means the two rects are SWAPPED, or one of them "
+                "is not this output's rect at all — it does NOT mean they are "
+                "identical; that is the zero case.")))
         assert bar < out_h // 8, (
             "%s: the ledger implies a %d px status bar on a %d px output, which is "
             "not a status bar. One of `output`/`workspace` is not this output's "
@@ -622,30 +710,52 @@ def test_the_MEASURED_ledger_is_INTERNALLY_COHERENT():
 
 
 def test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders():
-    """🔴 WHY 64x77 AND NOT A ROUNDER NUMBER — the one claim in this change that is
-    about NOT changing anything.
+    """🔴 WHAT THIS PINS IS THE BARE-RECT DERIVATION OF `64 ppt 77 ppt`. READ THE
+    NAME NARROWLY — it OVER-states what is established, and the following is the
+    correction rather than a defence of it.
 
-    The reported defect was the laptop's. The workbench's 200x50-cell window is
-    2200x1100 px, and the operator's decision was that this host must come out of
-    the change rendering what it renders now. `64 ppt 77 ppt` is that size
-    re-expressed against the rect `ppt` actually multiplies — the 3440x1440 OUTPUT,
-    not the 3440x1413 workspace — so pin it as the derivation rather than as a
-    literal, or the next person reads two arbitrary numbers and rounds them.
+    WHAT IT ASSERTS: that `64 ppt 77 ppt` of the 3440x1440 OUTPUT (2201x1108 px)
+    quantises to `_DEPLOYED_REVIEW_CELLS` — 200x50 — at the measured 11.0x22.0 px
+    cell. That keeps the pair from being "nudged": a retune that is not re-derived
+    from a fresh measurement fails here.
 
-    🔴 77, NOT 78, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS GUARD. Against the
-    workspace's 1413 both read as the same grid; against the OUTPUT's 1440, `78
-    ppt` is ~1123 px = 51 rows — one row MORE than today, on the host this change
-    promises not to touch. The original ledger held 1413 in the slot used as the
-    output height, so the guard certified a size change as a no-op.
+    🔴 WHAT IT DOES **NOT** ESTABLISH — three things, all of them claims an earlier
+    revision of this docstring made:
 
-    Asserted in CELLS, which is the unit the grid quantises to: at 64x77 the pixel
-    figures differ from today's 2200x1100 by under one cell in both axes.
+    1. **NOT that the workbench renders what it renders today.** The 2201x1108 px
+       above is the BARE i3 RECT. The decoration is `pixel 2`, so the CLIENT area
+       is 4 px smaller in EACH axis (2197x1104) = **199x50** cells, while
+       `_DEPLOYED_REVIEW_CELLS` is a CLIENT-area count. The width axis is one
+       column short. The promise "the workbench must come out of this change
+       rendering what it renders now" IS NOT MET, for `77` or `78`, and it is
+       RETIRED here rather than re-justified. (Why that is survivable: the
+       workbench's `~/.config/mention-open/picks.jsonl` does not exist, so this
+       window has never opened on that host; the laptop — the actual defect — is
+       fixed comfortably either way.)
 
-    ⚠ The cell count models the i3 RECT only — window decoration and
-    size-increment snapping are not modelled (see the block above), so read the
-    grid as approximate. `_MEASURED` is a transcribed measurement, not a derived
-    fact; `test_the_MEASURED_ledger_is_INTERNALLY_COHERENT` is what keeps it
-    honest about which rect is which.
+    2. **NOT that `78 ppt` would have been a visible change.** The previous
+       wording said `78 ppt` is "~1123 px = 51 rows — one row MORE than today".
+       51 is a row count of the BARE RECT (1123 // 22); the client height is 1119,
+       and 1119 // 22 is 50. So BOTH pairs render 199x50 and are indistinguishable
+       on screen. `77` is retained because it is the value already committed and
+       deployed in this branch — there is no better justification, and not finding
+       one is the finding.
+
+    3. **NOT a rendered grid at all.** The rendered grid has NEVER been observed:
+       the window has never opened on the workbench, and no floating container
+       existed in the live i3 tree in any round of this PR's audit, so no real
+       floating `deco_rect` was ever read. The -4/-4 inset is derived from i3
+       4.25.1's C (see the decoration paragraph above), not measured.
+
+    ⚠ The "both read as the same grid" sentence this docstring used to carry had no
+    antecedent and was false on its nearest reading: against the workspace's 1413,
+    `77 ppt` is 1088 px = 49 rows and `78 ppt` is 1102 px = 50 — not the same. The
+    comparison that IS true is the one `nix/i3/config.nix` states: `78 ppt` of the
+    workspace and today's 200x50 read as the same grid.
+
+    `_MEASURED` is a transcribed measurement, not a derived fact;
+    `test_the_MEASURED_ledger_is_INTERNALLY_COHERENT` is what keeps it honest about
+    which rect is which. Size-increment snapping remains unmodelled.
     """
     m = _MEASURED["workbench"]
     out_w, out_h = m["output"]
@@ -660,14 +770,17 @@ def test_the_WORKBENCH_keeps_rendering_the_size_it_ALREADY_renders():
     lines = int(out_h * h_pct / 100.0 // cell_h)
     assert (cols, lines) == (want_cols, want_lines), (
         "the workbench's `resize set %d ppt %d ppt` maps to %dx%d CHARACTER CELLS "
-        "(%.0fx%.0f px of a %dx%d OUTPUT at a measured %.1fx%.1f px cell — `ppt` "
-        "multiplies the OUTPUT rect, not the %dx%d workspace). It has to come to "
-        "%dx%d — the size that host renders TODAY, from the "
-        "REVIEW_COLUMNS/REVIEW_LINES deployed on main. The laptop is the host with "
-        "the defect; changing the workbench's size is not part of this fix. If the "
-        "workbench's font or display really has changed, RE-MEASURE "
-        "(`TIOCGWINSZ` on a direct alacritty child pty, `i3-msg -t get_outputs` "
-        "for the rect), update `_MEASURED`, and re-derive the percentages."
+        "OF THE BARE RECT (%.0fx%.0f px of a %dx%d OUTPUT at a measured %.1fx%.1f "
+        "px cell — `ppt` multiplies the OUTPUT rect, not the %dx%d workspace). It "
+        "has to come to %dx%d, which is what REVIEW_COLUMNS/REVIEW_LINES held on "
+        "main. ⚠ THAT IS A BARE-RECT COMPARISON AGAINST A CLIENT-AREA COUNT, not a "
+        "claim that the two render alike: the rendered grid is one column narrower "
+        "(199x50) because a floating con's rect includes a 2 px border on all four "
+        "sides. See this test's docstring before reading a green here as 'the "
+        "workbench is unchanged'. If the workbench's font or display really has "
+        "changed, RE-MEASURE (`TIOCGWINSZ` on a direct alacritty child pty, "
+        "`i3-msg -t get_outputs` for the rect), update `_MEASURED`, and re-derive "
+        "the percentages."
         % (w_pct, h_pct, cols, lines, out_w * w_pct / 100.0,
            out_h * h_pct / 100.0, out_w, out_h, cell_w, cell_h,
            m["workspace"][0], m["workspace"][1], want_cols, want_lines))
@@ -686,7 +799,15 @@ def test_the_review_window_FITS_the_workspace_it_is_CENTRED_in(is_laptop):
     such — the original defect was a CELL count, which this file cannot express.
     What it buys is that a future retune cannot reintroduce an overflowing window
     by arithmetic nobody re-did, and it is the only assertion here that checks the
-    laptop's 90x90 against something other than the `_REVIEW_PPT` ledger.
+    laptop's 90x90 against a MEASURED RECT.
+
+    ⚠ That is narrower than it used to read. An earlier wording said "the only
+    assertion here that checks the laptop's 90x90 against something other than the
+    `_REVIEW_PPT` ledger", and that is overstated:
+    `test_the_two_HOSTS_review_percentages_DIFFER` reads the two renders and never
+    consults the ledger, and the sizing guard's `0 < v <= 100` bound does not read
+    it either. Neither compares against a rect, which is the distinction that makes
+    this guard the only one of its kind.
     """
     host = HOSTS[1] if is_laptop else HOSTS[0]
     m = _MEASURED[host]

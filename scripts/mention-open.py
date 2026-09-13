@@ -1738,10 +1738,31 @@ def open_browser(url: str) -> int:
 # merge -> `scripts/ship.sh` -> `i3-msg reload` on each host, and in between the
 # review window opens at ~80x24 on both.
 #
-# ⚠ Every cell figure above models the i3 RECT only. Decoration (floats take i3's
-# default `normal 2` — `default_floating_border` is unset — and a floating con's
-# rect INCLUDES the titlebar and borders) and `floating_resize`'s size-increment
-# snapping are NOT modelled, so treat the grids as approximate.
+# ⚠ Every cell figure above models the i3 RECT only, and a floating con's rect
+# INCLUDES its decoration, so the CLIENT grid is smaller. The decoration term is
+# quantified in nix/i3/config.nix beside `reviewSizePpt`; `floating_resize`'s
+# size-increment snapping is still unmodelled. Treat these grids as approximate.
+#
+# 🔴 AND THE DECORATION IS `pixel 2`, NOT `normal 2` — THIS COMMENT SAID
+# OTHERWISE AND IT WAS WRONG. There is no titlebar. `config.default_floating_border`
+# (BS_NORMAL by default) is applied only inside `floating_enable()` under
+# `if (automatic)` (i3 4.25.1 src/floating.c:353-354), and `for_window … floating
+# enable` is a COMMAND: `cmd_floating()` calls `floating_enable(con, false)`
+# (src/commands.c:1157), and `run_assignments()` runs at src/manage.c:588 — after
+# the `want_floating` decision at src/manage.c:462-546, which an alacritty
+# toplevel does not trip. So the con keeps `config.default_border`
+# (src/con.c:44), i.e. **BS_PIXEL / logical_px(2)** from `default_border pixel 2`,
+# and the client area is the rect minus 4 px in BOTH axes (src/con.c:1846-1849).
+# LIVE, read-only: the running alacritty windows report `border=pixel,
+# current_border_width=2`, and the config sets no `default_floating_border`, no
+# `new_float` and no `for_window … border`.
+#
+# Consequence for the workbench: `64 ppt 77 ppt` is a 2201x1108 rect, a 2197x1104
+# client, **199x50** cells — ONE COLUMN narrower than the 200x50 the deleted
+# `REVIEW_COLUMNS`/`REVIEW_LINES` produced. `78 ppt` gives the same 199x50. ⚠ The
+# rendered grid has never been OBSERVED on the workbench: that host's
+# `~/.config/mention-open/picks.jsonl` does not exist, so this window has never
+# opened there.
 REVIEW_CLASS = "float,mention-review"
 
 # The wrapper that runs neovim with octo.nvim configured. Packaged as
