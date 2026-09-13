@@ -81,8 +81,8 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED. The floor catches COLLAPSE, not growth; `run-tests.sh`'s own
-# formula is `m - min(50, max(1, m/20))`, which at m=27 is 26.
-# 🔴 IT HAS NOW FIRED FIVE TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
+# formula is `m - min(50, max(1, m/20))`, which at m=29 is 28.
+# 🔴 IT HAS NOW FIRED SIX TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
 # 17), 19→20, 20→21, 21→25, 25→27. Not one was a refactor — each was tests added
 # while fixing something, the last two while fixing audit findings — and a
 # hand-maintained floor would have tolerated every one, widening from one test of
@@ -92,7 +92,7 @@ ROWS=0
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=26
+MIN_TESTS=28
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -209,11 +209,29 @@ run "the interior bucket never accumulates" \
 
 # 🔴 The regression row. This caveat shipped as a LITERAL ("Three of the 20
 # ladders") and printed that devrc figure under a 5-ladder run of another repo.
-# The mutant restores the literal; the guard must notice.
+# The mutant restores a literal count; the guard must notice.
 run "the zero-line-gap caveat goes back to a literal" \
     test_the_zero_line_gap_caveat_is_DERIVED_from_this_run "$LRC" \
-    '                   f"{zero_line_gaps} gap(s) in THIS run look like that.")' \
-    '                   "Three of the 20 ladders look like that.")'
+    '                   f"{len(zero_line_merge)} in THIS run are CLEAN MERGES: every")' \
+    '                   "Three of the 20 ladders are CLEAN MERGES: every")'
+
+# 🔴 The SECOND regression in the same caveat, and the one shipped on `main` until
+# 2026-09-13: its EXPLANATION was wrong, not its count. It read "those commits are
+# an upstream bring-in already in the base" while the gate selects on
+# `churn_commits`, a population a bring-in is excluded from by construction — so
+# what it actually fired on was a clean merge contributing no diff. The mutant
+# stops deriving the mechanism from the commits and always tells the merge story.
+run "the zero-line-gap mechanism stops being derived" \
+    test_a_zero_line_gap_with_a_NON_merge_commit_is_NOT_explained "$LRC" \
+    '    zero_line_merge = [a for a in zero_line if _all_merges(a)]' \
+    '    zero_line_merge = list(zero_line)'
+
+# …and the other direction: always tell the residue story, which would print "no
+# explanation" over a gap whose commits are all merges and explain nothing it can.
+run "a clean-merge gap is reported as unexplained" \
+    test_the_zero_line_gap_caveat_is_DERIVED_from_this_run "$LRC" \
+    '    zero_line_other = [a for a in zero_line if not _all_merges(a)]' \
+    '    zero_line_other = list(zero_line)'
 
 # 🔴 The regression that made a real finding read as routine drift: pairing a raw
 # range count with a `--not <base>` line count. devrc #1046's tail printed
@@ -288,6 +306,14 @@ run "the ROUND-REF row stops printing the matched span" \
     test_a_ROUND_REF_row_shows_the_MATCHED_SPAN "$LRC" \
     'f"[{c.round_span}] {c.subject[:60]}")' \
     'f"{c.subject[:74]}")'
+
+# 🔴 The carrier scan tested for the SUBSTRING `audit-claims`, which enumerated a
+# PR that merely DISCUSSES the ledger (devrc #1440). An OVER-count, in a
+# population whose every other caveat is a floor.
+run "the carrier scan goes back to a substring test" \
+    test_a_PR_that_merely_DISCUSSES_the_ledger_is_not_a_carrier "$LRC" \
+    '        if not _has_claims_fence(ad, bodies):' \
+    '        if not any("audit-claims" in (b or "") for b in bodies):'
 
 echo
 echo "== the labels that must NOT become a sized GAP =="

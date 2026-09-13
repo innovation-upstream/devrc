@@ -465,6 +465,18 @@ Both directions, and they do not cancel.
   ⚠ **And three of the tail gaps are many commits at ZERO lines** (#1064 125 commits, #1274 10,
   #1110 7): `--not <base>` correctly excluding an upstream bring-in. A commit count is not a
   churn count — shape A of the reference file's range table, working.
+  🔴 **CORRECTED 2026-09-13 — those counts are RAW, and a re-run prints a DIFFERENT number for
+  a DIFFERENT mechanism.** `b1abf6b1` made the report print `churn_commits`, so #1064 and #1274
+  now read **`1 commit(s), 0 line(s)`**, not 125 and 10. Both numbers are right about their own
+  population and the sentence above is right about the raw one — but the single commit the new
+  count keeps is a **clean MERGE of the base contributing no diff**, which is not a bring-in at
+  all: a bring-in commit is reachable from the base, so `--not <base>` removes it from
+  `churn_commits` as well as from the lines. Two mechanisms produce "commits at zero lines" and
+  only the raw-count one is the bring-in. The shipped caveat in
+  `scripts/ladder-range-coverage.py` carried this same conflation for its whole life and has
+  been re-derived: it now classifies the zero-line gap from whether every contributing commit
+  is a merge, and prints **no explanation at all** for a zero-line gap containing a non-merge
+  commit (empty / mode-only / rename-only / binary-only are indistinguishable to the numstat).
 - **The waste audit is devrc-only.** Ladders ran in homelab-talos, civit-datapacket-talos,
   vetr, auditloop, civitai-gpu-fleet and naida-ai; none were churn-measured.
   ✅ **MEASURED 2026-09-11 — and the population outside devrc is LARGER than devrc's.**
@@ -653,6 +665,15 @@ Both directions, and they do not cancel.
   #1274 10→0-churn, #1110 7→0-churn. **Every LINE count in this review is unaffected** — the
   churn command always had the exclusion. `RangeChurn` now carries both counts under separate
   names and the brief prints both with the excluded number stated.
+  🔴 **AND ONE CAVEAT RAN THE OTHER WAY, UNSTATED — the carrier counts above are ALSO an
+  OVER-count.** `find_carriers` tested for the SUBSTRING `audit-claims`, so a PR that merely
+  DISCUSSES the ledger was enumerated as a ladder. MEASURED on devrc #1440: its single match
+  sits inside a numbered claim line about `--emit-claims`, there is no fence, and it is not a
+  ladder. **That matters because every other caveat here is a FLOOR**, so a reader correcting
+  for the documented direction corrected the wrong way. Fixed 2026-09-13: the scan now matches
+  `audit-dispatch.py`'s own `_FENCE_OPEN`. ⚠ **Scope: the carrier COUNT moves, no rate does** —
+  a non-ladder carries no usable block, so it was already reported UNMEASURABLE and already
+  excluded from every downstream total.
   ⚠ **Three caveats on the counts.** (a) Every carrier count is a **FLOOR** — `gh` does not
   return REVIEW comments, so a block posted as a review is invisible, the same blind spot
   `audit-dispatch.py` warns about. (b) Two repos **hit the 400-PR scan limit**, so their
@@ -679,12 +700,23 @@ Both directions, and they do not cancel.
   real limit is that this is **prose in a comment, extracted by hand for two PRs** — it was
   not mined across all 42 carriers, so no rate is claimed. Note also that a self-report is a
   claim by the session about itself: #1132's is internally inconsistent (above).
+  ✅ **MEASURED 2026-09-13 and the rate IS now claimed — see open item 4, CLOSED.**
+  `scripts/ladder-stop-rationale.py` classifies the terminal round of every carrier in seven
+  repos: **121 of 191 terminated ladders (63.4%) state NO reason at all.** This bullet's
+  "sometimes stated outright" was right and was the smaller half.
 - **Whether a round was CLEAN — only where a block says so.** The churn measurement alone
   cannot distinguish a clean round from an uncommitted one; #1274 r5 is legible only because
   its block states *"No fixes were made this round: the audit returned no findings."*
   Cleanliness was not extracted at scale.
-- **Whether the escape hatch's stated rationale was actually written** (#1157's requirement).
-  Not measured; it needs prose extraction from every terminal round's summary.
+- ~~**Whether the escape hatch's stated rationale was actually written** (#1157's
+  requirement). Not measured; it needs prose extraction from every terminal round's summary.~~
+  ✅ **MEASURED 2026-09-13 — open item 4, CLOSED. 28 of the 33 carriers that DECLARED a stop
+  on a criterion (84.8%) wrote a rationale in the same summary; 5 did not.** Two of the five
+  are the instructive shapes: one points at *"the criterion stated before it ran"* and another
+  says the rationale is in an earlier comment — both are exactly the state #1157 forbids,
+  because a reader of that round cannot tell a deliberate stop from a convergence.
+  ⚠ It is a FLOOR on compliance: a rationale phrased in words the extractor does not carry
+  reads as absent.
 - **Elapsed time and token cost per ladder.** The #498 case history's most damning figures
   (5h32m, 77% of session output) have no counterpart here — this review measured churn and
   depth only.
@@ -703,10 +735,116 @@ Both directions, and they do not cancel.
 3. ~~Establish whether the ≥1286 block drought is real.~~ **CLOSED 2026-09-05** — it was not.
    #1313 carries a block, and the real driver is change type (`docs` 2.3% vs `feat` 34.8%),
    not PR number.
-4. **Mine the stop-rationale prose across all 42 carriers**, rather than the two read by
-   hand. This is the only route to a *rate* for "ladders that stopped on a stated mechanism",
-   and it is also how #1157's escape-hatch requirement gets checked. *Closes when* the
-   terminal round's summary is classified for every carrier and the rate is published.
+4. ~~Mine the stop-rationale prose across all 42 carriers, rather than the two read by hand.~~
+   **CLOSED 2026-09-13** — `scripts/ladder-stop-rationale.py` classifies the TERMINAL round of
+   every carrier it can enumerate, in seven repos, and the rate is published below.
+   🔴 **THE POPULATION IS NOT THE 42 THIS ITEM NAMED, and substituting one for the other
+   silently is the error this whole document exists to catch.** The 42 was *this review's* own
+   window — 42 of 309 **merged devrc** PRs, 2026-08-28 → 09-05, counted in a scratchpad that no
+   longer exists. What was measured is **201 carriers across 7 repos, ALL states, the newest
+   400 PRs per repo**: devrc 64 · homelab-infra 70 · talos-infra 40 · vetr-api 15 · vetr-app 6
+   · gpu-fleet-infra 6 · naida-ai 0 (ran 214 PRs and posted no ledger at all). A superset, a
+   different unit, and **not comparable to this review's window row-for-row.**
+
+   **THE FROZEN TAXONOMY** — five classes, in the PRECEDENCE the tool applies, pinned in code
+   by `test_ladder_stop_rationale.py::test_the_taxonomy_is_FROZEN_and_pinned_two_way`:
+   `attribution-gate` (the stop is ATTRIBUTED to the gate) · `clean-round` (the round asserts
+   it found nothing) · `operator-decision` (a human overrode the ladder and the comment says
+   so) · `stated-criterion` (a stop declared on any other basis — the prose escape hatch) ·
+   `unstated`. Not classified and **excluded from the denominator rather than folded into it**:
+   `not-terminated` (the PR is OPEN, so the ladder has not stopped) and `no-terminal-round`.
+   🔴 **`merged-anyway` was in the starting proposal and is deliberately NOT a class.** Every
+   merged carrier's ladder is followed by a merge, so the merge discriminates nothing about the
+   stop; minting it would partition `unstated` by OUTCOME while claiming to describe CAUSE.
+   Each row prints the PR's state instead, so that split is available without the tool
+   asserting a mechanism.
+   🔴 **`operator-decision` was ADDED to the proposal's four**, because the first run over the
+   real corpus scored devrc #1455 `unstated` while its terminal comment says round 2 *"was
+   skipped by operator instruction, not by a clean round"*. Kept separate from
+   `stated-criterion` because only the latter carries #1157's write-it-down obligation.
+
+   **THE RATE. Denominator = 191 terminated carriers with an identifiable terminal round**
+   (201 carriers − 9 OPEN − 1 that is not a ladder at all):
+
+   | why the ladder stopped | carriers | of 191 |
+   |---|---|---|
+   | `unstated` — nothing says why | **121** | **63.4%** |
+   | `stated-criterion` | 33 | 17.3% |
+   | `attribution-gate` | 21 | 11.0% |
+   | `clean-round` | 13 | 6.8% |
+   | `operator-decision` | 3 | 1.6% |
+   | **stopped for a reason the record STATES** | **70** | **36.6%** |
+
+   🔴 **Nearly two ladders in three end with no recorded reason.** That is the headline, and it
+   is the direct measurement of what this review's CANNOT-SEE bullet could only call "not at
+   scale". ⚠ **It is a CEILING on compliance, not a floor** — the classifier reads the WHOLE
+   terminal comment rather than a `summary` section (these reports have no machine-identifiable
+   one), so a stop phrase anywhere in it counts and `unstated` is if anything UNDER-counted.
+
+   **THE #1157 SUB-RATE. Denominator = the 33 `stated-criterion` carriers**: **28 (84.8%)
+   wrote a rationale in the same summary; 5 (15.2%) did not.** #1157's requirement is that the
+   reason be named IN THE ROUND'S SUMMARY and not left implicit, because without it a report
+   that ended on the escape hatch is indistinguishable from one that converged. Two of the five
+   are the instructive shapes: one stops *"on the criterion stated before it ran"* (a pointer,
+   not a reason) and one says the rationale is in an earlier comment. ⚠ This half IS a floor —
+   a rationale phrased in words the extractor does not carry reads as absent.
+
+   **THE INSTRUMENT, and what validating it cost.** `scripts/ladder-stop-rationale.py` + 30
+   guards in `scripts/tests/test_ladder_stop_rationale.py`. It reuses
+   `audit_dispatch.parse_claims_blocks` and `ladder_range_coverage.find_carriers` — one block
+   grammar, one carrier population, both asserted structurally. Five extractors, each pinned
+   two-way, and **almost every fixture is a row the first run got WRONG and a human then read**.
+   **6 false positives** — 5 measured on the corpus (a NEGATED gate; an operator decision about
+   a DESIGN fork; a stop contrasted away as *"rather than stopping here"*; a grep sweep's "found
+   none"; a finding-free claim about an EARLIER round) and 1 exposed by the test's own negative
+   (a stop and the gate in one sentence with the negation AFTER the gate's name). **6 false
+   negatives** — operator instruction; a *"Why the ladder stops here"* heading; `produced none`;
+   `were scaffolding/prose`; `0` where the pattern wanted `zero`; a `LADDER STOPPED` with no
+   article. ⚠ One narrowing was tried and **REVERTED**: requiring *"stops ON the gate"* deleted
+   three real gate stops written *"stops here — the attribution gate, not a clean round"*.
+   🔴 **The deepest class was not a pattern being too wide — it was a TRUE sentence about the
+   WRONG ROUND.** A terminal comment reports its neighbours, so a finding-free claim about
+   round N−1 reads as a clean round N. Every match is now discarded when its sentence names
+   only EARLIER rounds; a LATER round number is kept, because "round N+1 was not run" is the
+   canonical way to say a ladder stopped.
+
+   **RESIDUALS — stated, and NOT closed by this item:**
+   - ⚠ **A FLOOR on the population.** `gh pr list --json comments` does not return REVIEW
+     comments, so a round report posted as a review is invisible — the blind spot
+     `audit-dispatch.py` already warns about. `--json reviews` exists and was deliberately not
+     used: it would change the population mid-arc and the enumerator is shared with
+     `ladder-range-coverage.py`.
+   - ⚠ **devrc, homelab-infra and talos-infra all HIT the 400-PR scan limit**, so their carrier
+     counts are partial and the real totals are higher.
+   - 🔴 **The carrier population is OVER-counted in one direction too, and nothing said so
+     before now: `find_carriers` tests for the SUBSTRING `audit-claims`**, so a PR that merely
+     DISCUSSES the ledger in prose is enumerated as a carrier. Measured: devrc #1440 is one,
+     and it is not a ladder. Every other caveat on these counts is a floor; this one is not.
+   - 🔴 **`parse_claims_blocks` discards a block whose `round=<n>` header is well formed when
+     its claims are not NUMBERED** — devrc #1586 writes them `🔴-1 FIXED — …`. Correct for the
+     dispatcher, wrong for round identification, so this tool recovers the round from the
+     header (reusing `audit_dispatch`'s own header objects) and reports how often: **2 of 201.**
+   - ⚠ **ONE comment per ladder is read.** A rationale written in an earlier comment for the
+     same round, or in the PR body, is not seen — measured on one talos-infra carrier whose
+     terminal comment says in terms that its rationale is in the comment above.
+   - ⚠ **16 of 201 terminal rounds were identified from a PROSE HEADING and no block.**
+   - ⚠ **The population MOVES, and it moved DURING this measurement.** It is the newest 400 PRs
+     per repo, so the devrc count fell 65 → 64 between two runs an hour apart as a new PR
+     entered the window, and a confirming run minutes after the commit read **202 carriers with
+     2 `no-terminal-round`** rather than 201 with 1. 🔴 **Both runs gave the SAME denominator
+     (191) and the SAME five percentages**, which is the useful fact: the rate is stable while
+     the carrier integers are not. Re-running will not reproduce every integer; re-running is
+     still the only way to check any of them.
+   - 🔴 **NOT MEASURED: whether a stated reason is TRUE.** This classifies what the record
+     SAYS. #1132's own self-report is internally inconsistent (above), and a self-report is a
+     claim by a session about itself. The 36.6% is a documentation rate, not a compliance rate.
+   - 🔴 **NOT MEASURED: the 121 `unstated` ladders' actual mechanism.** Hand-reading a dozen
+     devrc ones found the common shape is a terminal round that REPORTED FINDINGS and then
+     merged — devrc #1326 ran nine rounds and its last returned 3 🟡 and 1 🟢 — but no rate is
+     claimed for that, and no sample was sized to estimate one.
+   - ⚠ **No mutation battery.** The mutation evidence is in-test: each direction builds the
+     broken pattern and asserts a fixture moves under it, which is what keeps the negatives from
+     being vacuous. A shell battery like `mutants-ladder-range-coverage.sh` was not written.
 5. ~~Fix the range-coverage hole.~~ **CLOSED 2026-09-11** — `scripts/ladder-range-coverage.py`
    reports it, per ladder, for the window `[first block's from, head]`, and was run over these
    20: **interior 655 lines in 2 ladders, tail 3,727 in 11**, with the two kept as separate
