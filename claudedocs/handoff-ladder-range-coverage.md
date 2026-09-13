@@ -16,28 +16,33 @@ then outside it. Came in as ranks 10 and 8 of `handoff-audit-pr-ladder.md`; that
 since renumbered and dropped both, so this is the durable home.
 
 ## State now
-- **Branch / PR:** `#1552` OPEN (`fix/churn-commit-population`, worktree
-  `/home/zach/workspace/devrc-tailclass`) — the commit-population fix plus the tail
-  classification. Previous two both MERGED: `#1519` → `766c1295`, `#1528` → `b42ac7c3`.
-- ✅ **Ranked item 1 DONE** — `feat/ladder-carrier-enumerator` landed as `#1528`; the rank-8
-  table is committed, no longer working-tree-only.
-- **CARRIED FORWARD (the previous `State now` would have dropped it):** open items **5** (the
-  range-coverage hole) and the devrc-only half of the CANNOT-SEE bullet in
-  `claudedocs/audit-ladder-review-2026-09-04.md` are marked CLOSED in that doc, each with its
-  residual stated. That doc — not this one — is the durable home for the measurement results.
-- ✅ **Ranked item 2 DONE (pending #1552's merge)** — the tail is classified, and the answer
-  REVERSES this doc's own leading hypothesis. See the investigation below.
-- 🔴 **A defect found in the SHIPPED brief, fixed in `#1552`:** `measure_ledger` paired a
-  commit count from `<frm>..<to>` with a line count from the same range `--not <base>`, and
-  `audit-dispatch.py` printed the former as *"over N commit(s)"* beside the latter's command.
-  Measured: #1046's tail reported **55** commits when **2** contributed churn. Line counts are
-  unaffected; only the commit counts were wrong, and always in the flattering direction.
-- **Deploy/verify status:** nothing in `#1519`/`#1528`/`#1552` needs a `home-manager switch`
-  except `#1519`'s one managed path (`claude/skills/audit-pr/reference/round-ladder-evidence.md`),
-  which is **deployed and byte-verified on BOTH hosts** — `md5 cfaf3169` identical across
-  `origin/main`, workbench and laptop. `#1552` touches `scripts/` and `claudedocs/` only.
-- ⚠ Still no `clawgate-task:` field — `clawgate_handoff.sh resolve` exits **5** (nothing
-  resolved), which cannot distinguish "touched no task" from "wrong id". Not a clean bill.
+- **Branch / PR: NOTHING IN FLIGHT.** All five PRs of this arc are MERGED and verified by
+  content on `origin/main`: `#1519`→`766c1295`, `#1528`→`b42ac7c3`, `#1552`→`b1abf6b1`,
+  `#1564`→`61f41adf`, `#1576`→`3409d325`. No open PR, no worktree, no held claim.
+- 🔴 **THE OPERATOR ASKED WHETHER EVERYTHING WAS ADDRESSED AND THE ANSWER WAS NO — that audit
+  is what this update records.** Of the five ranked items the kickoff named (8, 9, 10, 14, 16):
+  **10 and 8 are mine and done; 14 and 16 were closed by OTHER sessions and re-verified here;
+  9 WAS NEVER STARTED.** It is the one user-specified objective of this arc that did not ship.
+- ✅ **Re-verified, not remembered** — rank 14: `#1287` closed, its port `#1505` **MERGED**
+  2026-09-11T20:20Z. Rank 16: `#1431` was reopened and then closed carrying a **written
+  dismissal naming the reader**, which is its stated closing condition, met.
+- **Deploy/verify status:** nothing in this arc needs a `home-manager switch` except `#1519`'s
+  one managed path (`claude/skills/audit-pr/reference/round-ladder-evidence.md`), which is
+  **deployed and byte-verified on BOTH hosts** (`md5 cfaf3169` identical across `origin/main`,
+  workbench and laptop). Everything else is `scripts/` + `claudedocs/`, which home-manager does
+  not deploy. `ladder-range-coverage.py` is invoked BY PATH and is not on `PATH`.
+- **CARRIED FORWARD for the third time, because every `State now` replace tries to eat it:**
+  the DURABLE RESULTS of this arc do not live in this doc — they live in
+  `claudedocs/audit-ladder-review-2026-09-04.md`, where open item **5** and the devrc-only half
+  of the CANNOT-SEE bullet are marked CLOSED with their residuals, the six-repo census table
+  sits, and open items **4** (rank 9) and **6** (the 4 interior round-refs) are the two still
+  open. Read that doc, not this one, for the findings.
+- ⚠ **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exits **5** (nothing
+  resolved), which cannot distinguish "touched no task" from "wrong id". Not a clean bill, and
+  no task was created to fill it.
+- 🔴 **The shared clone `$DEVRC` is checked out on ANOTHER session's branch**
+  (`fix/tmux-osc8-hyperlinks`, observed 2026-09-12). This doc was written from a worktree on
+  `main` for exactly that reason — see the gotcha below.
 
 ## Open investigations — live diagnosis state
 
@@ -124,21 +129,72 @@ since renumbered and dropped both, so this is the durable home.
 - **Next probe:** classify a RANDOM sample of 10 of the remaining 73, not the next-largest
   ones, so the sample is not length-biased the way this one is by construction.
 
+### The bring-in caveat is SHIPPED ON MAIN and gives the wrong reason
+- as-of: 2026-09-12
+- **Symptom + exact repro:** `scripts/ladder-range-coverage.py:667` gates the "many commits, 0
+  lines" caveat on `a.commits`, which `b1abf6b1` changed to mean `churn_commits`. Reproduce:
+  ```bash
+  nix develop ~/workspace/devrc -c python3 scripts/ladder-range-coverage.py 1064 1274 1046 \
+    --repo innovation-upstream/devrc --repo-dir ~/workspace/devrc --no-fetch
+  ```
+- **Observed (with values):** `#1064` prints `1 commit(s), 0 line(s)` — it printed **125
+  commits** before the `churn_commits` change. The caveat still fires (`2 gap(s) in THIS run
+  look like that`) and still reads *"A GAP of **many** commits and 0 lines is `--not <base>`
+  working: those commits are an upstream bring-in already in the base"*.
+- **Ruled out:** *"the caveat is now dead code"* — it is not; it fired on 2 of 3 ladders in the
+  run above. via: measurement
+- **Ruled out:** *"the counts are wrong"* — they are not. `churn_commits` is the correct number
+  to print beside a `--not <base>` line count; that was the whole point of `b1abf6b1`.
+  via: measurement
+- **Leading hypothesis:** the bring-in population is now excluded from the count BEFORE the
+  caveat sees it, so what remains to trigger it is a **clean merge commit contributing no
+  diff** — a different mechanism than the text describes. The caveat explains a merge as a
+  bring-in.
+- **Next probe:** decide whether to re-word it for the merge case or gate it on the raw
+  `commits` instead (both counts are on `RangeChurn`). Then check the twin claim in
+  `claudedocs/audit-ladder-review-2026-09-04.md`, which carries the same "many commits and 0
+  lines" wording.
+
+### Round 2 of #1576's ladder was never run, by operator decision
+- as-of: 2026-09-12
+- **Symptom + exact repro:** round 1 returned **5 🟡 / 2 🟢 / no 🔴**; the findings-keyed stop
+  rule says a round that found things is followed by another. The operator said "merge it".
+- **Observed (with values):** the fixes for round 1 landed as `3f5d0694` and are in
+  `3409d325`. They are substantially PROSE — the narration-class paragraph, the vacuous-pin
+  docstring, three doc corrections.
+- **Ruled out:** *"the ladder converged"* — it did not; it was stopped by decision, and the PR
+  comment records `ran: 2 · changed the outcome: 2`. via: doc
+- **Leading hypothesis:** this repo's measured pattern is that the fix round's own prose is the
+  likeliest next finding, and round 1 itself demonstrated that twice (a vacuous pin half, a
+  TOTAL row that did not sum). The un-audited delta is `59002824..3f5d0694`.
+- **Next probe:** a BLIND delta audit of that range if the operator wants the ladder closed on
+  evidence rather than on decision. `scripts/audit-dispatch.py 1576 --round 2` will REFUSE —
+  no `audit-claims` block was ever posted (round 0 correctly emits none, and round 1 was a
+  first-full audit) — so dispatch it by hand against that range.
+
 ## Next steps (ranked)
-1. **Merge `#1552`** and release claim `ladder-range-coverage-2`. It carries the commit-count
-   fix for the shipped brief, so every `audit-dispatch.py` ledger keeps mis-stating its commit
-   population until this lands.
-   forcing: regression — the brief prints a commit count from the wrong population on every round
-2. **Classify a RANDOM 10 of the 73 unclassified tail adjacencies.** The 6 already done were
-   picked by size, so they are length-biased by construction and cannot speak for the rest.
+1. **Fix the shipped bring-in caveat** (`scripts/ladder-range-coverage.py:667` + the twin
+   wording in `claudedocs/audit-ladder-review-2026-09-04.md`). Smallest item, and it is wrong
+   on `main` today. See the investigation above for both candidate fixes.
+   forcing: regression — a caveat shipped on `main` explains a clean merge as an upstream bring-in
+2. **Rank 9 — mine the stop-rationale prose across every carrier, and publish the rate.**
+   THE ONE OPERATOR-SPECIFIED OBJECTIVE OF THIS ARC THAT DID NOT SHIP. Durable home: open item
+   **4** of `claudedocs/audit-ladder-review-2026-09-04.md`, unchanged and uncrossed. The
+   expensive half is already built — `scripts/ladder-range-coverage.py --find-carriers
+   --list-only --repo <slug> --limit 400` produces the carrier population that used to be
+   hand-built (199 across seven repos). What remains: read each carrier's TERMINAL round
+   summary, classify why it stopped, publish the rate, and check `#1157`'s escape-hatch
+   requirement against it.
+   forcing: user — named in the kickoff as one of five open items; never started
+3. **Close open item 6** — read the **4 INTERIOR** round-refs (small by construction) and
+   record per PR whether that round's delta was ever re-audited under another round's block; OR
+   write on the item that the 40 will not be read. It does NOT close by re-running the census.
    forcing: none
-3. **Fix or rescope `_KILL_MENTION_LEDGER`** so a new handoff doc cannot red the gate.
-   `tekton/devrc-pytests` is red on `main` itself; reproduced on a clean `origin/main`
-   worktree at `50e8a71a`.
-   forcing: gate — red on `main` today, for every PR
-4. **Rank 9 — mine the stop-rationale prose across every carrier.** `--find-carriers
-   --list-only` now produces the population (199 across seven repos) that used to be
-   hand-built. Durable home: open item **4** of `claudedocs/audit-ladder-review-2026-09-04.md`.
+4. **Round 2 of #1576's ladder**, blind, over `59002824..3f5d0694` — only if the ladder should
+   close on evidence rather than on the merge decision. See the investigation above.
+   forcing: none
+5. **Classify more of the 63 unread adjacencies**, if a rate is ever wanted. Neither existing
+   sample was sized to estimate one and no rate is claimed anywhere.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -223,6 +279,36 @@ since renumbered and dropped both, so this is the durable home.
   "are gone — re-run the driver rather than hunting for them". They were still there. That
   was a prediction written as an observation; the reports survived and were what the
   classification read.
+
+- 🔴 **I MARKED A FINDING "FIXED" IN A COMMIT MESSAGE WITHOUT FIXING IT, AND ONLY THE
+  OPERATOR'S QUESTION SURFACED IT.** Round 1's 🟡 #5 was "the PR title and body headline the
+  number the diff forbids quoting". I retitled the PR, posted a correction comment, and wrote
+  **"All seven are fixed"** in `3f5d0694` — while the BODY still carried all four retracted
+  claims (`supersedes sampling`, `40 … where no round looked`, `Why you can believe the 40`,
+  `found it independently`). Verified by grep, then rewritten. **The audit did not miss it; I
+  recorded it as done without doing it.** A fix-claim in a commit message is a claim like any
+  other, and the cheap check is to grep the artefact for the retracted string.
+- 🔴 **`handoff_doc.py --repo $DEVRC` WOULD HAVE COMMITTED THIS DOC TO ANOTHER SESSION'S
+  BRANCH.** Measured 2026-09-12: the shared clone was on `fix/tmux-osc8-hyperlinks`, not
+  `main`. The remedy the `handoff-index` cairn entry names is the one used here — run it with
+  `--repo <a worktree on main>`, which fixes the write target and the read base in one move.
+  `git branch --show-current` on the clone before every handoff write, not just before commits.
+- 🔴 **A RED CI CHECK ON A BRANCH ~30 COMMITS BEHIND IS A CLAIM ABOUT THE WRONG TREE.**
+  `#1576` showed `tekton/devrc-pytests` red on
+  `test_every_site_writing_its_OWN_runner_bound_is_in_the_ledger`. Measured: it **passes** on
+  current `main` AND on the MERGED tree (built with `git worktree add --detach origin/main` +
+  `git merge origin/<branch>`), where the 27-test suite and all 30 battery rows were also
+  green. The ledger entry it wanted had landed on `main` after the branch point. **Gate on the
+  merged tree — it is what distinguished stale CI from a real conflict, and it took one
+  worktree.**
+- ⚠ **The scratchpad reports survived, and this doc previously predicted they would not.** An
+  earlier revision said the rank-8 `r8-*.txt` reports were "gone — re-run the driver". They
+  were still there and are what the tail classification read. A prediction written as an
+  observation.
+- ⚠ **252 registered worktrees in the shared clone** (observed 2026-09-12), none of them this
+  arc's — every one removed as it finished. Other sessions' agent checkouts, nothing prunes
+  them, and not this effort's to clean. Recorded because the number is now large enough that
+  `git worktree list` is no longer a usable orientation command.
 
 ## How to verify
 ```bash
