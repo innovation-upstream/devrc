@@ -2254,6 +2254,24 @@ covers; pin it with `--config`, do not `cd`.
   is stale **by construction** until someone comes back for it. **Do not treat a merged handoff
   edit as self-updating** (#1597 is the follow-up that closed it).
 
+### 🔴 2026-09-13 — `gh pr merge --auto` MERGED IMMEDIATELY through a pending gate, because devrc's checks are ADVISORY
+- **What happened:** #1635's three Tekton checks were `pending`. `gh pr merge 1635 --squash --delete-branch --auto` was run *specifically* to defer the merge until they went green. It exited **rc 0 with no output**, and the PR was **already `MERGED`** — at `05:46:46Z`, while all three statuses still read `pending` as of `05:45:14Z`.
+- **Mechanism:** `--auto` arms GitHub's auto-merge, which waits on **REQUIRED** checks. devrc's `tekton/devrc-*` are **commit statuses that are not required**, so there was nothing to wait on and the request degenerated to an immediate merge. `autoMergeRequest` reads `null` afterwards — it never armed.
+- **Why it is expensive:** it fails by **merging**, not by erroring, and `rc 0` + empty output looks exactly like success. The tell is only visible after the fact: `gh pr view <n> --json autoMergeRequest,state` → `autoMergeRequest=null` **and** `state=MERGED` in the same read.
+- **Do instead:** on a repo with no required checks, `--auto` is a no-op — poll the checks to terminal yourself and merge only then (a `Monitor` until-loop over `gh pr checks --json name,bucket`, asserting a **minimum check count** so an unregistered rollup cannot settle it instantly). Do not reach for `--auto` as a safety.
+- **Recovery when it does fire:** the gate is not lost, only re-ordered. Verify the MERGED tree directly instead of waiting on a status attached to an already-merged commit — `git worktree add --detach /tmp/x origin/main` then run the gates there. Done here: **124 passed** (`test_absolute_handle_paths.py` + `test_doc_path_rot.py`) on `origin/main` after the merge, plus a planted violation watched red. The tree is verified; the ORDER was wrong.
+
+### 🔴 2026-09-13 — NO local pre-push hook runs in this clone, so the delta gates are CI-only here
+- **Measured:** `/home/zach/workspace/devrc/.git/hooks/pre-push` **does not exist** and `core.hooksPath` is **unset** (global and local). Two independent sessions' agents reported the same thing while pushing to `fix/skills-absolute-checkout-paths` and `docs/handoff-rank24-closed`.
+- **Consequence:** every push in this arc was **locally ungated** — the doc-rot / skill-path / handle-path gates did not evaluate any change before it left the machine. Whatever Tekton posts is the only check, and per the gotcha above a Tekton status can be *bypassed at merge time* and can also register *after* a merge.
+- **Not diagnosed:** whether the hook was never installed in this clone, or was installed and later lost. `scripts/install-hooks.sh` exists and is the documented one-time install; nobody ran it here. **Closing condition if picked up:** `git -C <repo> config core.hooksPath` resolves, or `.git/hooks/pre-push` exists, AND a deliberately-bad push is watched to be REFUSED locally — a hook that exists but never fires is the same as none.
+
+### 2026-09-13 — the rank-24 arc's own process notes
+- **`claim-work --slug-for <doc> <rank>` was used on a rank that did not yet exist as a numbered item.** Rank 24 lived only as prose inside rank 23's body, so the slug had to be inferred. It worked, but the numbering is half a claim's identity — **file the ranked item first, then claim it**, or two sessions can derive different slugs for the same work. Ranks 24–27 are now numbered in `## Next steps (ranked)`.
+- **`audit-dispatch.py` resolves the PR against the CWD's repo.** Run from a different clone it fails with `Could not resolve to a PullRequest with the number of <n>` — which reads as a bad PR number, not a wrong cwd. Run it as `(cd <the PR's worktree> && python3 $DEVRC/scripts/audit-dispatch.py <n> …)`.
+- **`--emit-claims` PRINTS a skeleton; it does not post.** The block must be pasted into an **issue** comment — `gh pr view --json comments` does not return REVIEW comments, so a block posted as a review is invisible to the next round's brief.
+- **The audit briefs' `WHERE TO WORK` said `isolation: "worktree"` and that was wrong for every dispatch in this arc** — the flag worktrees the *dispatching session's* cwd repo, which was `datapacket-talos`, not devrc. Every audit agent was given an explicit override to build its own detached worktree off `refs/pull/<n>/head`. This is the documented cross-repo trap; the brief generator cannot know the caller's cwd.
+
 ## How to verify
 
 🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
