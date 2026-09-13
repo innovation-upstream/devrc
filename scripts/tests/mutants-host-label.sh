@@ -69,15 +69,25 @@ restore() {
   fi
 }
 
-# 🔴 A SECOND MUTATION TARGET, BECAUSE HALF THE HOST-IDENTITY DEFECTS WERE NOT IN
-# THE MODULE. `nix/home.nix`'s `home.activation.activityCollectorEnv` is what
-# actually writes `ACTIVITY_HOST` onto a machine, and its round-1 findings — an
-# append that mangled the previous line of a systemd EnvironmentFile, a silently
-# skipped non-writable file, a discarded diagnosis, and a re-spelled copy of the
-# module's own "does this file state a label" rule — all lived there. Suite
-# section 8 runs that block for real (nix-evaluates it, executes it under a
-# throwaway HOME), so mutating this file is observable by the same harness.
-# Same contract as `run`: exact-name killer, applied-diff check, verified restore.
+# 🔴 TWO MORE MUTATION TARGETS, BECAUSE THE MODULE IS NOT WHERE THE REMAINING
+# HOST-IDENTITY DEFECTS LIVE.
+#
+#   * `scripts/collector/collector.py` — the ONE consumer that did not derive.
+#     Its guards are scored against `scripts/collector/tests/test_collector.py`
+#     (`failing_collector`), because that is the suite that owns them.
+#   * `nix/home.nix` — the collector's DEPLOYMENT: the two `lib/` files placed
+#     beside the daemon and the unit's restart triggers. Neither is observable
+#     from the collector suite, so those rows are scored against the two derived
+#     ledgers in `scripts/tests/test_transcript_push.py` (`failing_ledger`).
+#
+# ⚠ AN EARLIER REVISION MUTATED `nix/home.nix` AND SCORED IT AGAINST A SUITE THAT
+# NIX-BUILT THE ACTIVATION BLOCK FOR REAL. That harness could not run in
+# `checks.pytests` — nested `nix-build` with `<nixpkgs>`, no store realisation in
+# the sandbox — so every guard it carried was invisible to the merge gate. The
+# activation it guarded is gone; nothing here builds anything.
+#
+# Same contract as `run` throughout: exact-name killer, applied-diff check,
+# verified restore.
 NIXF="$ROOT/nix/home.nix"
 cp "$NIXF" "$T/nix.orig"
 NIX_ORIG_SHA="$(sha256sum "$T/nix.orig" | cut -d' ' -f1)"
@@ -86,6 +96,17 @@ restore_nix() {
   local now; now="$(sha256sum "$NIXF" | cut -d' ' -f1)"
   if [ "$now" != "$NIX_ORIG_SHA" ]; then
     echo "🔴 nix restore FAILED — the copy is still mutated; aborting"; exit 2
+  fi
+}
+
+COLL="$ROOT/scripts/collector/collector.py"
+cp "$COLL" "$T/coll.orig"
+COLL_ORIG_SHA="$(sha256sum "$T/coll.orig" | cut -d' ' -f1)"
+restore_coll() {
+  cp "$T/coll.orig" "$COLL"
+  local now; now="$(sha256sum "$COLL" | cut -d' ' -f1)"
+  if [ "$now" != "$COLL_ORIG_SHA" ]; then
+    echo "🔴 collector restore FAILED — the copy is still mutated; aborting"; exit 2
   fi
 }
 
@@ -106,6 +127,47 @@ failing() {
   total=$(( ${n:-0} + ${f:-0} ))
   if [ "$total" -lt "$MIN_TESTS" ]; then
     echo "__HARNESS_BROKE__ only $total test(s) ran (floor $MIN_TESTS)"
+    return
+  fi
+  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
+}
+
+# The collector suite. Its own floor, for the same reason as the one above: a
+# collection error yields zero FAILED lines, i.e. "clean".
+COLL_SUITE="$ROOT/scripts/collector/tests/test_collector.py"
+MIN_COLL_TESTS=30
+failing_collector() {
+  local out n f total
+  out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$COLL_SUITE" \
+    -q --no-header --tb=no -p no:cacheprovider -p no:randomly 2>/dev/null)"
+  n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
+  f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
+  total=$(( ${n:-0} + ${f:-0} ))
+  if [ "$total" -lt "$MIN_COLL_TESTS" ]; then
+    echo "__HARNESS_BROKE__ only $total collector test(s) ran (floor $MIN_COLL_TESTS)"
+    return
+  fi
+  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
+}
+
+# 🔴 THE DEPLOYMENT LEDGERS, SELECTED BY EXACT NODE ID. `test_transcript_push.py`
+# is a heavy suite (it stands up servers and drives the real push script) and
+# these two tests are pure file reads, so the whole file is not run per mutant.
+# A `-k` filter would be a second spelling that can silently select nothing; two
+# explicit node ids plus a floor of exactly 2 cannot.
+LEDGERS=(
+  "$ROOT/scripts/tests/test_transcript_push.py::test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS"
+  "$ROOT/scripts/tests/test_transcript_push.py::test_the_host_identity_pair_is_DEPLOYED_beside_the_collector"
+)
+failing_ledger() {
+  local out n f total
+  out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "${LEDGERS[@]}" \
+    -q --no-header --tb=no -p no:cacheprovider -p no:randomly 2>/dev/null)"
+  n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
+  f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
+  total=$(( ${n:-0} + ${f:-0} ))
+  if [ "$total" -ne 2 ]; then
+    echo "__HARNESS_BROKE__ $total ledger test(s) ran, want exactly 2"
     return
   fi
   sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
@@ -151,7 +213,7 @@ run_nix() { # run_nix <name> <expect: a test node name | SURVIVES> <sed-expr>
     FAILURES=$((FAILURES+1)); return
   fi
   cp "$T/mn" "$NIXF"
-  local killers; killers="$(failing)"
+  local killers; killers="$(failing_ledger)"
   restore_nix
   if grep -q __HARNESS_BROKE__ <<<"$killers"; then
     printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
@@ -175,9 +237,45 @@ run_nix() { # run_nix <name> <expect: a test node name | SURVIVES> <sed-expr>
     "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
 }
 
+run_coll() { # run_coll <name> <expect: a test node name | SURVIVES> <sed-expr>
+  local name="$1" want="$2" expr="$3"
+  sed "$expr" "$COLL" > "$T/mc" 2>/dev/null
+  if cmp -s "$COLL" "$T/mc"; then
+    printf '  🔴 %-52s MUTATION DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  cp "$T/mc" "$COLL"
+  local killers; killers="$(failing_collector)"
+  restore_coll
+  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
+    printf '  🔴 %-52s HARNESS BROKE — %s\n' "$name" "$killers"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if [ "$want" = SURVIVES ]; then
+    if [ -z "$killers" ]; then
+      printf '  ok %-52s SURVIVED as required (control)\n' "$name"; return
+    fi
+    printf '  🔴 %-52s CONTROL KILLED by %s — not measuring behaviour\n' \
+      "$name" "$(tr '\n' ',' <<<"$killers")"; FAILURES=$((FAILURES+1)); return
+  fi
+  if [ -z "$killers" ]; then
+    printf '  🔴 %-52s SURVIVED — no test failed\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if grep -qx "$want" <<<"$killers"; then
+    printf '  ok %-52s killed by %s\n' "$name" "$want"; return
+  fi
+  printf '  🔴 %-52s WRONG-KILLER — died to: %s (wanted %s)\n' \
+    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
+}
+
 printf 'mutating a COPY at %s (your worktree is untouched)\n' "$ROOT"
-printf 'baseline (must be empty): '
+printf 'baseline host_label suite (must be empty): '
 b="$(failing)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
+printf 'baseline collector suite (must be empty): '
+b="$(failing_collector)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
+printf 'baseline deployment ledgers (must be empty): '
+b="$(failing_ledger)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
 
 printf '\n== the defect itself: the workbench default ==\n'
 # MUT-1. THE POSITIVE CONTROL FOR THE WHOLE BATTERY: a mutant everyone knows
@@ -281,57 +379,69 @@ run 'MUT-9 refusal-on-stdout-and-exit-0' \
   test_the_shell_entry_point_prints_nothing_and_exits_nonzero_on_a_refusal \
   's|^        raise SystemExit(3)$|        print(exc)\n        raise SystemExit(0)|'
 
-printf '\n== the module rule the ACTIVATION asks (--file-states-label) ==\n'
-# 🔴 MUT-F1-5. The activation used to answer "does this file already state a
-# label?" with its own grep, a THIRD copy of a rule this module exists because it
-# was open-coded twice. This mutant puts a grep-shaped rule back — inside the
-# module, where the activation now asks — and the table row that dies is the one
-# the two copies really disagreed on: `ACTIVITY_HOST=nixos` is a stated label to
-# a substring test and an INVALID one to the module, so a machine carrying a
-# typo'd label would never be repaired.
-run 'MUT-F1-5 --file-states-label uses a substring rule' \
-  test_the_activation_and_the_MODULE_agree_on_what_states_a_label \
-  's|^        _stated = _file_stated_label(_body)$|        _stated = "workbench" if "ACTIVITY_HOST=" in _body else ""|'
-# MUT-F1-5b: the flag's exit-code direction. Inverted, a file that states none
-# reports "states one" and the activation never derives at all.
-run 'MUT-F1-5b --file-states-label exit code inverted' \
-  test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line \
-  's|^        if not _stated:$|        if _stated:|'
+printf '\n== the collector: derive, and DEGRADE rather than crash ==\n'
+# 🔴 MUT-C1 IS #1601 IN THE ONE CONSUMER THAT STILL HAD IT. Absent
+# `ACTIVITY_HOST`, `from_env` used to answer `""`, under which `parse_line`
+# leaves emit's `host=$(hostname)` — `nixos` on BOTH machines — on every row.
+run_coll 'MUT-C1 the derive is dropped (back to "")' \
+  test_an_ABSENT_ACTIVITY_HOST_is_DERIVED_from_an_address_this_machine_holds \
+  's|^                           or _derive_host_label(e)),$|                           or ""),|'
+# 🔴 MUT-C2 IS THE ONE THIS WHOLE REWORK'S LIVE RISK RESTS ON. `local_host_label`
+# RAISES on a machine it cannot name; narrow the catch so that escapes and the
+# `Restart=always` daemon does not start at all — a far worse outcome than the
+# mislabelled column the PR set out to fix. `KeyError` is not in
+# `HostLabelError`'s bases, so an unresolvable machine propagates.
+run_coll 'MUT-C2 the degrade path is dead (daemon crashes)' \
+  test_an_UNIDENTIFIABLE_machine_DEGRADES_rather_than_crashing_the_daemon \
+  's|^    except Exception as exc:  # noqa: BLE001|    except KeyError as exc:  # noqa: BLE001|'
+# MUT-C2b: the catch narrowed to the module's OWN exception class. An
+# unidentifiable machine is then still handled, but a `lib/` that failed to
+# deploy raises ImportError and takes the daemon down — the deployment mistake
+# the broad catch exists for. `HostLabelError` subclasses RuntimeError.
+run_coll 'MUT-C2b the catch narrowed to HostLabelError only' \
+  test_a_BROKEN_host_label_module_DEGRADES_rather_than_crashing_the_daemon \
+  's|^    except Exception as exc:  # noqa: BLE001|    except RuntimeError as exc:  # noqa: BLE001|'
+# 🔴 MUT-C3: precedence — AND ITS KILLER IS NOT THE TEST WHOSE NAME SAYS SO.
+# Scored first against `test_an_explicit_ACTIVITY_HOST_still_WINS_over_the_
+# derivation`, this mutant SURVIVED, and correctly: `_derive_host_label` passes
+# `env` through to `local_host_label`, which raises `HostLabelConflict` on a
+# stated label its address contradicts, and the broad catch turns that into `""`
+# — so the expression falls through to the environment whichever order it is in.
+# The two orders differ on exactly ONE input, an INVALID stated label, which the
+# module ignores and this daemon passes through. That is the row below.
+run_coll 'MUT-C3 the derivation preempts an explicit ACTIVITY_HOST' \
+  test_an_INVALID_ACTIVITY_HOST_is_still_passed_through_UNCHANGED \
+  's|^            host_override=(e.get("ACTIVITY_HOST", "").strip()$|            host_override=(_derive_host_label(e) or e.get("ACTIVITY_HOST", "").strip()|'
+# 🔴 MUT-C6 AND MUT-C7 ARE THE DEPLOYED LAYOUT, WHICH NO REPO-LAYOUT TEST TOUCHES.
+# C6 drops the `lib/` candidate that only exists on a host; C7 resolves the
+# symlink, which walks out of ~/.config/activity-collector into /nix/store and
+# loses the sibling. Both are green in the repo and inert on both machines.
+run_coll 'MUT-C6 the deployed lib/ candidate is dropped' \
+  test_the_DEPLOYED_symlink_layout_can_derive_the_host_label \
+  's|^    os.path.join(_SELF_DIR, "lib"),                    # deployed: …/lib$|    # (mutant) the deployed candidate is gone|'
+run_coll 'MUT-C7 realpath instead of abspath (resolves into the store)' \
+  test_the_DEPLOYED_symlink_layout_can_derive_the_host_label \
+  's|^_SELF_DIR = os.path.dirname(os.path.abspath(__file__))$|_SELF_DIR = os.path.dirname(os.path.realpath(__file__))|'
+# The negative control for THIS target: a comment-only edit must survive.
+run_coll 'CONTROL collector comment-only edit must survive' SURVIVES \
+  's|^# WHICH MACHINE IS THIS (#1601)$|# (control edit) WHICH MACHINE IS THIS (#1601)|'
 
-printf '\n== the activation that writes ACTIVITY_HOST (nix/home.nix) ==\n'
-# 🔴 MUT-F1-2 IS THE AUDITOR'S OWN MUTANT, RE-RUN IN THE FIX'S HOME. Before this
-# round the block asked `grep -qE '^[ ]*ACTIVITY_HOST=[^ ]'` and the guard on
-# that behaviour asserted `">>" in block and "grep" in block` — under which
-# neutering the pattern to `ZZZ_NEVER_MATCHES` left the suite GREEN while every
-# `home-manager switch` appended another line to a systemd EnvironmentFile,
-# unbounded. This row restores exactly that mutant (the neutered grep, in place
-# of asking the module) and it must now die to a BEHAVIOURAL test.
-run_nix 'MUT-F1-2 idempotence check neutered (the old grep)' \
-  test_running_the_activation_TWICE_leaves_exactly_one_ACTIVITY_HOST_line \
-  's|^    if ! .*--file-states-label.*then$|    if ! grep -qE "^[ ]*ZZZ_NEVER_MATCHES=" "$envFile"; then|'
-# MUT-F1-1: the newline guard. Without it, `>>` onto a file whose last line has
-# no trailing newline EXTENDS that line — mangling CLICKHOUSE_PASSWORD.
-run_nix 'MUT-F1-1 trailing-newline guard removed' \
-  test_the_activation_appends_to_a_file_whose_last_line_has_NO_NEWLINE \
-  's|^          if \[ -s "$envFile" \] && \[ -n .*then$|          if false; then|'
-# MUT-F1-4: the diagnosis discarded again, which is how a generic, false cause
-# came to be printed forever on a healthy host.
-run_nix 'MUT-F1-4 the module stderr discarded again' \
-  test_the_activation_forwards_the_MODULES_OWN_reason_for_refusing \
-  's|2>"$labelErr")"|2>/dev/null)"|'
-# MUT-F1-6: back to declining the write in total silence.
-run_nix 'MUT-F1-6 non-writable file skipped silently' \
-  test_a_NON_WRITABLE_env_file_is_reported_rather_than_skipped_in_silence \
-  's|^        echo "activity-collector: $envFile states no ACTIVITY_HOST and is not writable.*|        :|'
-# 🔴 MUT-F1-3: the probe drops the sibling `host-role.sh`. `host_label.py`
-# locates it via `__file__`, so the loss is SILENT — right on the mesh, quietly
-# non-deriving off it. (The DERIVED ledger for the same property lives in
-# test_transcript_push.py::test_the_host_label_PROBE_ships_every_file_the_module
-# _OPENS_BESIDE_ITSELF; this battery only runs test_host_label_identity.py, so
-# that one is mutation-checked by hand — see the PR body.)
-run_nix 'MUT-F1-3 probe ships host_label.py without host-role.sh' \
-  test_the_built_activation_is_the_DEPLOYED_one_and_its_probe_ships_BOTH_files \
-  's|^    cp ${\.\./scripts/lib/host-role\.sh} "$out/host-role\.sh"$|    true|'
+printf '\n== the collector DEPLOYMENT (nix/home.nix) ==\n'
+# MUT-C4: the restart triggers lose the host-identity pair. The daemon is
+# long-lived, so it would keep stamping every row from a stale address table.
+# 🔴 RANGE-ADDRESSED TO THE COLLECTOR UNIT. That trigger line is spelled
+# identically in FOUR units; a bare `s|…|…|` would mutate all of them at once,
+# which is a different (and much wider) mutant than the one this row claims to
+# score.
+run_nix 'MUT-C4 the collector unit drops the identity triggers' \
+  test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS \
+  '/^  systemd\.user\.services\.activity-collector = {$/,/^  };$/s|^        "${\.\./scripts/lib/host_label\.py}"$|        "${../scripts/collector/emit}"|'
+# 🔴 MUT-C5: the `lib/` files are not DEPLOYED beside the daemon. The switch
+# succeeds and the collector silently stops deriving — it catches the
+# ImportError by design, so nothing about the unit's status says so.
+run_nix 'MUT-C5 host-role.sh is not deployed beside the collector' \
+  test_the_host_identity_pair_is_DEPLOYED_beside_the_collector \
+  's|^  home\.file\.".config/activity-collector/lib/host-role.sh".source =$|  home.file.".config/activity-collector/lib/UNUSED-host-role.sh".source =|'
 
 printf '\n== controls ==\n'
 # 🔴 THE NEGATIVE CONTROL ON THE HARNESS: a behaviour-free edit MUST survive. If
@@ -341,12 +451,11 @@ printf '\n== controls ==\n'
 # `cmp` sees and Python does not.
 run 'CONTROL comment-only-edit-must-survive' SURVIVES \
   's|^#: Test/ops seam for the address probe|#: (control edit) Test/ops seam for the address probe|'
-# The same negative control for the SECOND target. Section 8 nix-evaluates and
-# RUNS `nix/home.nix`'s activation block, so a comment edit there changes the
-# built script's bytes (and its store path) without changing its behaviour — if
-# that kills a test, section 8 is keying on text, not on what the block does.
+# The same negative control for the nix target: the two ledgers read `home.nix`
+# as TEXT, so a comment edit is exactly the change that would expose a guard
+# keying on prose rather than on the declarations it claims to check.
 run_nix 'CONTROL nix comment-only edit must survive' SURVIVES \
-  's|^    # Exit 0 = the file already states a valid label|    # (control edit) Exit 0 = the file already states a valid label|'
+  's|^  # 🔴 THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", DEPLOYED BESIDE THE$|  # (control edit) THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", BESIDE THE|'
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
