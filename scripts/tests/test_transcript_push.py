@@ -1793,8 +1793,14 @@ def _agent_module():
 @pytest.mark.parametrize("env_body,want", [
     ('ACTIVITY_HOST=laptop\n', "laptop"),
     ('ACTIVITY_HOST="workbench"\n', "workbench"),
-    ('ACTIVITY_HOST=not-a-real-host\n', "workbench"),   # invalid -> default
-    ('', "workbench"),                                    # absent -> default
+    # 🔴 THESE TWO USED TO EXPECT `"workbench"`, AND THAT WAS #1601 WRITTEN DOWN
+    # AS A REQUIREMENT. An invalid or absent ACTIVITY_HOST made BOTH feeders emit
+    # the literal `workbench` — agreeing, which is all this test ever asked, and
+    # both wrong on the laptop. Now both REFUSE, which is still agreement and is
+    # also an answer nobody can act on by mistake. `None` means "neither feeder
+    # may produce a label".
+    ('ACTIVITY_HOST=not-a-real-host\n', None),   # invalid -> refusal
+    ('', None),                                   # absent  -> refusal
 ])
 def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, env_body, want):
     """🔴 THE ASSERTION IS THAT THE TWO AGREE, NOT THAT EITHER IS RIGHT. Pinning
@@ -1804,12 +1810,32 @@ def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, en
     The push is driven end to end (so the SHELL's resolution is what is measured,
     not a Python restatement of it) and compared with what the agent computes from
     the same file.
+
+    🔴 `HOST_LABEL_ADDRS=""` PINS THE THIRD FEEDER, WHICH BOTH HALVES NOW SHARE
+    (#1601). The fixture states a host; the machine running the suite would
+    otherwise cross-check that statement against its OWN address and raise on the
+    row that names the other machine — so the verdict would depend on which host
+    ran the suite. Set-but-empty says "holds none of the known addresses". The
+    third feeder is measured on its own in `test_host_label_identity.py`.
     """
     env_file = tmp_path / "activity-env"
     env_file.write_text(env_body)
 
     agent = _agent_module()
-    agent_label = agent.local_host_label(env={}, env_file=str(env_file))
+    prior = os.environ.get("HOST_LABEL_ADDRS")
+    os.environ["HOST_LABEL_ADDRS"] = ""
+    try:
+        if want is None:
+            with pytest.raises(agent.HostLabelError):
+                agent.local_host_label(env={}, env_file=str(env_file))
+            agent_label = None
+        else:
+            agent_label = agent.local_host_label(env={}, env_file=str(env_file))
+    finally:
+        if prior is None:
+            os.environ.pop("HOST_LABEL_ADDRS", None)
+        else:
+            os.environ["HOST_LABEL_ADDRS"] = prior
 
     # The shell half, through the real script. TRANSCRIPT_PUSH_HOST is deliberately
     # NOT set — that override is what the other tests use, and using it here would
@@ -1828,9 +1854,23 @@ def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, en
         "CLAWGATE_HOOK_TOKEN": "t",
         # Point the shared module at the fixture's env file.
         "HOST_LABEL_ENV_FILE": str(env_file),
+        "HOST_LABEL_ADDRS": "",
     })
     proc = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True,
                           env=env, timeout=180)
+
+    if want is None:
+        # The shell half's refusal is its OWN documented one: rc 3 and the
+        # "refusing to push under a guessed name" line, which it already emits
+        # when `python3 host_label.py` fails. The module now makes that path
+        # reachable from an unresolvable label rather than only a missing file.
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "refusing to push under a guessed name" in proc.stdout
+        assert not pushes(server), (
+            "the bulk feeder pushed under a host name nothing could justify, "
+            "while the stream agent refused — the two disagree about the SAME row")
+        return
+
     assert proc.returncode == 0, proc.stdout + proc.stderr
     pushed = json.loads(pushes(server)[0]["body"])["host"]
 
@@ -1893,7 +1933,15 @@ def test_the_agent_reads_the_env_file_the_SHARED_MODULE_names(tmp_path):
         # no env_file= argument: the DEFAULT is what is under test
         "print(m.local_host_label(env={}))\n"
     )
-    env = dict(os.environ, HOST_LABEL_ENV_FILE=str(env_file))
+    # 🔴 `HOST_LABEL_ADDRS=""` PINS THE THIRD FEEDER (#1601). The fixture states
+    # `laptop`; the machine running this suite is usually the WORKBENCH, whose
+    # own address now cross-checks that statement and raises `HostLabelConflict`.
+    # Set-but-empty means "this machine holds none of the known addresses", so
+    # what is measured stays what the test is named for: WHICH FILE the agent's
+    # default `env_file` points at. Without it the verdict would depend on which
+    # of the two machines ran the suite.
+    env = dict(os.environ, HOST_LABEL_ENV_FILE=str(env_file),
+               HOST_LABEL_ADDRS="")
     env.pop("ACTIVITY_HOST", None)
     out = subprocess.run(
         [sys.executable, "-c", snippet, str(REPO_ROOT / "scripts" / "tmux-reply-agent")],

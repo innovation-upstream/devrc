@@ -29,6 +29,18 @@
 # --- Canonical per-host identity ----------------------------------------------
 # Primary signal: the stable LAN address (192.168.50.x) — reliable across boots.
 # Secondary signal: the 10.42.x address (less stable) — fallback only.
+#
+# 🔴 THESE FOUR ASSIGNMENTS ARE PARSED BY PYTHON, NOT ONLY SOURCED BY SHELL.
+# `scripts/lib/host_label.py` READS this file to get the fleet's address table
+# instead of typing it a second time (#1601) — it cannot source shell, and it
+# must not fork `ip`, because the systemd units that call it deliberately carry
+# no `iproute2`. Its regex wants each line to stay literally
+#     <HOST>_IP_{PRIMARY,SECONDARY}="<dotted quad>"
+# one per line, uppercase host name matching a label in `HOST_NAMES`. Renaming,
+# templating or splitting one of these makes the parse FAIL CLOSED (no address
+# signal at all, so that module refuses to name the host rather than guessing) —
+# it cannot mislabel a machine, but it does disarm the fallback. Pinned by
+# `scripts/tests/test_host_label_identity.py`.
 WORKBENCH_IP_PRIMARY="192.168.50.250"
 WORKBENCH_IP_SECONDARY="10.42.0.30"
 LAPTOP_IP_PRIMARY="192.168.50.155"

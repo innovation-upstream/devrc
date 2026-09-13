@@ -3975,6 +3975,16 @@ in
         # ACTIVITY_HOST). Verified by a full production-shape run with neither on
         # PATH. Trimming a copied list is right; trimming it without running the
         # child is how gawk got removed.
+        # ⚠ HALF OF THAT SENTENCE STOPPED BEING TRUE IN #1601, AND THE
+        # CONCLUSION STILL HOLDS. `scripts/lib/host_label.py` DOES read
+        # interface addresses now — it derives the host from an address the
+        # machine holds rather than defaulting to "workbench" — but it does so
+        # by BINDING a UDP socket in pure Python, never by running `ip`, chosen
+        # precisely so this PATH (and transcript-push's, which is smaller still)
+        # does not have to grow. This unit's child is `session-manager`, which
+        # held its own ACTIVITY_HOST-only copy of the rule until the same PR
+        # deleted it and made it delegate — so this unit now DOES reach the
+        # address derivation, and still needs no iproute2.
         # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
         "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnused pkgs.openssh pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"

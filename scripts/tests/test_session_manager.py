@@ -3877,11 +3877,23 @@ HISTORY_ROW = {"ts": "2026-08-11 11:59:00", "kind": "prompt",
 
 
 def test_sql_session_history_IS_reachable_from_main():
-    """The dead-code check, structurally: name the caller, don't assume one."""
+    """The dead-code check, structurally: name the caller, don't assume one.
+
+    ⚠ IT READS THE WHOLE ENTRY PATH, NOT ONE FUNCTION, AND THAT IS A FIX. This
+    used to read `inspect.getsource(sm.main)` alone. #1601 split the CLI into a
+    thin `main` (which catches the host-label refusal in one place) and `_run`
+    (the dispatcher), and the guard went red — not because the call had gone
+    away, but because it had moved one frame down. A reachability guard that
+    names a single function asserts the SHAPE of the entry point, not
+    reachability; searching every function on the path is the claim it was
+    always making.
+    """
     import inspect
     src = inspect.getsource(sm.detail_history)
     assert "sql_session_history(" in src
-    assert "detail_history(" in inspect.getsource(sm.main)
+    entry = "".join(inspect.getsource(fn)
+                    for fn in (sm.main, sm._run) if fn is not None)
+    assert "detail_history(" in entry
 
 
 def test_detail_history_queries_the_session_id_of_the_narrowed_window():
@@ -4067,6 +4079,40 @@ def test_main_tail_without_a_target_is_a_usage_error(capsys):
     assert "requires" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("argv,want_err", [
+    (["tail"], "requires"),
+    (["tail", "rm -rf /"], "<session>:<window>"),
+])
+def test_a_usage_error_does_not_depend_on_KNOWING_WHICH_HOST_THIS_IS(
+        monkeypatch, tmp_path, capsys, argv, want_err):
+    """🔴 A REGRESSION TEST, AND THE LOCAL TIER IS STRUCTURALLY BLIND TO IT.
+
+    #1601 made `local_host_label()` RAISE when nothing identifies the machine,
+    and the first cut of that change resolved the label at the top of `main()` —
+    before the per-subcommand usage checks. On a machine that is neither host
+    (CI, a container, anyone else's box) a plain `session-manager tail` with no
+    target then returned EXIT_UNAVAILABLE instead of EXIT_USAGE: the caller is
+    told "no host could be measured" when what actually happened is that they
+    mistyped the command. Caught by CI, NOT by this suite, and it could not have
+    been: this suite runs on the workbench or the laptop, which always resolve,
+    so the whole failure mode is invisible here unless the third feeder is
+    muted deliberately — which is what the two lines below do.
+
+    A usage error is a statement about the ARGV. It must not acquire a
+    dependency on host identity, so the label is now resolved lazily, at first
+    use, which is after every usage check.
+    """
+    monkeypatch.setenv("HOST_LABEL_ADDRS", "")            # holds no known address
+    monkeypatch.setenv("HOST_LABEL_ENV_FILE", str(tmp_path / "absent"))
+    monkeypatch.delenv("ACTIVITY_HOST", raising=False)
+    monkeypatch.setattr(sm, "ACTIVITY_ENV", str(tmp_path / "absent"))
+    # The premise: this process genuinely cannot name its own host.
+    with pytest.raises(sm.HostLabelError):
+        sm.local_host_label(env={}, env_file=str(tmp_path / "absent"))
+    assert sm.main(argv) == sm.EXIT_USAGE
+    assert want_err in capsys.readouterr().err
+
+
 def test_main_tail_with_a_malformed_target_is_a_usage_error(capsys):
     assert sm.main(["tail", "rm -rf /"]) == sm.EXIT_USAGE
     assert "<session>:<window>" in capsys.readouterr().err
@@ -4117,26 +4163,83 @@ def test_main_host_flag_narrows_the_host_tuple(monkeypatch):
     assert seen["hosts"] == ("laptop",)
 
 
-def test_local_host_label_prefers_the_env_var():
-    assert sm.local_host_label(env={"ACTIVITY_HOST": "laptop"}) == "laptop"
-    assert sm.local_host_label(env={"ACTIVITY_HOST": "WORKBENCH"}) == "workbench"
+@pytest.fixture
+def _no_real_addresses(monkeypatch):
+    """🔴 PIN THE THIRD FEEDER, OR THESE TESTS ANSWER DIFFERENTLY PER MACHINE.
+
+    Since #1601 `local_host_label` is `scripts/lib/host_label.py`'s — this file
+    no longer carries a private copy — and that rule cross-checks the stated
+    label against an address the running machine HOLDS. A case that states
+    `laptop` therefore raises `HostLabelConflict` on the workbench and passes on
+    the laptop. `HOST_LABEL_ADDRS` set-but-EMPTY means "holds none of the known
+    addresses", which is the only setting that makes these say the same thing in
+    both places. The address feeder has its own suite,
+    `test_host_label_identity.py`.
+    """
+    monkeypatch.setenv("HOST_LABEL_ADDRS", "")
 
 
-def test_local_host_label_rejects_a_bogus_value_and_falls_back(tmp_path):
+def test_local_host_label_prefers_the_env_var(_no_real_addresses, tmp_path):
+    absent = str(tmp_path / "missing")
+    assert sm.local_host_label(env={"ACTIVITY_HOST": "laptop"},
+                               env_file=absent) == "laptop"
+    assert sm.local_host_label(env={"ACTIVITY_HOST": "WORKBENCH"},
+                               env_file=absent) == "workbench"
+
+
+def test_local_host_label_rejects_a_bogus_value_and_REFUSES(_no_real_addresses, tmp_path):
+    """🔴 THIS USED TO ASSERT `== "workbench"` AND PASSED FOR THE WRONG REASON.
+
+    A typo'd ACTIVITY_HOST with nothing else to go on made this tool stamp every
+    window row `workbench`. On the laptop that is a wrong host name on real data,
+    and the read model's latest-per-host upsert then REPLACES the workbench's own
+    snapshot with it. The typo is still IGNORED (it must never mint a third
+    host); what changed is that ignoring every signal now refuses.
+    """
     envf = tmp_path / "env"
     envf.write_text("ACTIVITY_HOST=mars\n")
-    assert sm.local_host_label(env={}, env_file=str(envf)) == "workbench"
+    with pytest.raises(sm.HostLabelError):
+        sm.local_host_label(env={}, env_file=str(envf))
 
 
-def test_local_host_label_reads_the_collector_env_file(tmp_path):
+def test_local_host_label_reads_the_collector_env_file(_no_real_addresses, tmp_path):
     envf = tmp_path / "env"
     envf.write_text("# comment\nCLICKHOUSE_URL=x\nACTIVITY_HOST='laptop'\n")
     assert sm.local_host_label(env={}, env_file=str(envf)) == "laptop"
 
 
-def test_local_host_label_defaults_to_workbench_with_no_sources(tmp_path):
-    assert sm.local_host_label(env={},
-                               env_file=str(tmp_path / "missing")) == "workbench"
+def test_local_host_label_REFUSES_with_no_sources(_no_real_addresses, tmp_path):
+    """The renamed sibling of the old `..._defaults_to_workbench_...`."""
+    with pytest.raises(sm.HostLabelError):
+        sm.local_host_label(env={}, env_file=str(tmp_path / "missing"))
+
+
+def test_local_host_label_is_the_SHARED_rule_not_a_private_copy():
+    """🔴 SEAM GUARD. `test_tmux_reply_agent.py` reads THIS FILE as the authority
+    the reply agent's label must match, so a private copy here can drift the two
+    feeders that write the SAME read-model row — which is what #1601 found when
+    the shared module stopped defaulting and this file did not.
+
+    Structural: the function must DELEGATE, not re-derive. Asserted by calling it
+    with a value only the shared module's own vocabulary/behaviour produces AND
+    by checking the source contains no second parse.
+    """
+    src = pathlib.Path(_SCRIPT).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    assigned = {t.id for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                for t in node.targets if isinstance(t, ast.Name)}
+    assert "DEFAULT_LOCAL_HOST" not in assigned, (
+        "the workbench default is back in session-manager — #1601 removed it "
+        "from the shared module, and a copy here re-creates the defect")
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "local_host_label")
+    body = ast.dump(fn)
+    assert "host_label" in body and "local_host_label" in body, (
+        "session-manager's local_host_label no longer delegates to the shared "
+        "module")
+    assert "ACTIVITY_HOST=" not in ast.get_source_segment(src, fn), (
+        "session-manager is parsing the collector env file itself again — that "
+        "is the private copy coming back")
 
 
 # =========================================================================== #
