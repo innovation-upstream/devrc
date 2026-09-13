@@ -1083,9 +1083,176 @@ def test_load_scratch_codenames_is_a_PROJECTION_of_one_parse():
     assert names == {s: v["codename"] for s, v in slots.items()}
 
 
-def test_the_colour_rides_along_too_but_is_not_rendered():
+# --------------------------------------------------------------------------- #
+# THE SLOT COLOUR — parsed here, published as the row's `color`
+#
+# 🔴 WHY IT IS PUBLISHED AT ALL. The colour was parsed and thrown away for as
+# long as this file existed, so clawgate's tmux page either had no colour or
+# kept its own copy of the slot table. A second copy is the exact drift
+# `scripts/tmux-scratch-slots.sh` records in its own grammar comment: the bar
+# legend and the tmux bindings each carried a private regex and disagreed in
+# BOTH directions. One table, one parse, the answer on the row.
+# --------------------------------------------------------------------------- #
+def test_the_colour_is_parsed_for_every_slot_AND_rides_on_the_fixture():
     slots = sm.load_scratch_slots(paths=["/x"], reader=lambda p: SLOT_TABLE)
     assert slots["scratch2"]["color"] == "#83a598"
+    assert slots["scratch7"]["color"] == "#b8bb26"
+
+
+def test_the_colour_is_CANONICALISED_to_lower_case_at_the_parse():
+    """🔴 `_SLOT_RE` accepts `[0-9a-fA-F]`, so `#B8BB26` is a legal entry while
+    the published contract is lower-case `#rrggbb`. A consumer colour-matches by
+    string equality — that is the whole point of the field — so the two spellings
+    of one colour must not reach it as two colours.
+
+    The control is the PAIR: the upper-case table must yield the SAME value the
+    lower-case one does, and the input must really differ from the output.
+    """
+    upper = SLOT_TABLE.replace("#b8bb26", "#B8BB26").replace("#83a598", "#83A598")
+    assert upper != SLOT_TABLE, "positive control: the fixture was not re-cased"
+    got = sm.load_scratch_slots(paths=["/x"], reader=lambda p: upper)
+    assert got == SLOTS_FIXTURE, (
+        "an upper-case table entry must arrive canonicalised — otherwise "
+        "`#B8BB26` and `#b8bb26` are two slots to a string-matching consumer")
+    assert got["scratch7"]["color"] == "#b8bb26"
+
+
+def test_a_COMMENTED_OUT_slot_line_is_not_a_slot():
+    """🔴 `scripts/tmux-scratch-slots.sh` says the grammar is applied WHOLE-LINE
+    and that "that anchoring is what makes a commented-out entry a non-entry for
+    everyone". This parser was UNANCHORED until 2026-09-12 — MEASURED, the table
+    below returned BOTH sessions — which is the same defect that file records for
+    the bar legend, except it now also hands a consumer a `color` to paint for a
+    session whose hotkey is bound to nothing.
+
+    Reported as a PAIR so the zero is not a parser wired to nothing: the live
+    entry must still come through.
+    """
+    table = "\n".join([
+        "SCRATCH_SLOTS=(",
+        '  "scratch7:S:#b8bb26:Grove"',
+        '  # "scratch9:z:#aabbcc:Zed"',
+        ")",
+    ])
+    got = sm.load_scratch_slots(paths=["/x"], reader=lambda p: table)
+    assert "scratch7" in got, "positive control: the LIVE entry was dropped too"
+    assert "scratch9" not in got, (
+        "a commented-out entry became a slot — it would advertise a codename, a "
+        "hotkey bound to nothing, and a colour for a session that has none")
+    assert got == {"scratch7": {"codename": "Grove", "key": "S",
+                                "color": "#b8bb26"}}
+
+
+@pytest.mark.parametrize("bad,why", [
+    ('SCRATCH_SLOTS=(\n  "scratch7:S:b8bb26:Grove"\n)', "colour missing '#'"),
+    ('SCRATCH_SLOTS=(\n  "scratch7:S:#b8bb2:Grove"\n)', "5 hex digits"),
+    ('SCRATCH_SLOTS=(\n  scratch7:S:#b8bb26:Grove\n)', "unquoted"),
+    ('SCRATCH_SLOTS=(\n  "scratch7:S:#b8bb26"\n)', "no codename field"),
+    ('SCRATCH_SLOTS=(\n  "scratch7:S:#b8bb26:Grove" # note\n)',
+     "trailing comment — not a slot to the marker grammar either"),
+])
+def test_a_malformed_slot_line_yields_no_colour_and_never_raises(bad, why):
+    assert sm.load_scratch_slots(paths=["/x"], reader=lambda p: bad) == {}, why
+
+
+def test_the_colour_is_the_SLOT_S_OWN_for_all_20_REAL_slots():
+    """🔴 A SEAM guard over the REAL table, asserting the (codename, colour) PAIR.
+
+    The pair is load-bearing: `scratch11:w:#ebdbb2:wheat` and
+    `scratch16:I:#ebdbb2:Ivory` SHARE `#ebdbb2`, so a test that only checked
+    "some colour came back", or that checked colours alone, cannot see a mapping
+    bug that swaps those two sessions. Expectations are read OUT OF the table
+    text by an independent regex rather than restated here, so a rekeyed or
+    re-coloured slot moves the expectation with it — and a hardcoded map in the
+    implementation fails.
+    """
+    table = os.path.normpath(os.path.join(_HERE, "..", "tmux-scratch-slots.sh"))
+    text = pathlib.Path(table).read_text()
+    # Independent of `sm._SLOT_RE` on purpose — deriving the expectation from
+    # the parser under test would let a broken parser define its own answer.
+    want = {m[0]: (m[3], m[2].lower()) for m in re.findall(
+        r'^\s*"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"\s*$',
+        text, re.M)}
+    assert len(want) == 20, f"the real table no longer holds 20 slots: {len(want)}"
+    slots = sm.load_scratch_slots(paths=[table])
+    assert slots, "positive control: the real slot table parsed as EMPTY"
+    assert {s: (v["codename"], v["color"]) for s, v in slots.items()} == want
+
+    # ...and the shared-colour pair is really there, so the paragraph above is a
+    # fact about today's table and not a stale justification.
+    shared = [s for s, (_, c) in want.items() if c == "#ebdbb2"]
+    assert len(shared) == 2, (
+        "no two slots share a colour any more, so colour alone would now be a "
+        "sufficient key — re-justify this test's pair assertion or delete the "
+        "claim; do not leave it asserting a dead fact")
+    assert {want[s][0] for s in shared} == {"wheat", "Ivory"}
+
+    # Every published colour satisfies the contract the consumer was handed.
+    for session, entry in slots.items():
+        assert re.fullmatch(r"#[0-9a-f]{6}", entry["color"]), session
+
+
+def test_the_row_CARRIES_the_colour_and_OMITS_it_with_no_slot():
+    """🔴 The END-TO-END half, through the real fold, not the parser alone.
+
+    Two rows from one call: a slot session and a non-slot one. The presence/
+    absence pair is asserted together, because "it emitted a colour" and "it
+    omitted one where it should" are two different claims and a mutant can
+    satisfy either alone.
+    """
+    panes = "\n".join([
+        "%11|9001|scratch7|3|w-a|/w/synth-alpha|claude|title-a",
+        "%12|9002|no-slot-here|4|w-b|/w/synth-bravo|zsh|title-b",
+    ])
+    rows = sm.fold_windows(sm.parse_panes(panes), "workbench",
+                           slots=SLOTS_FIXTURE, now=NOW)
+    by_session = {r["session"]: r for r in rows}
+    assert by_session["scratch7"]["color"] == "#b8bb26"
+    assert "color" not in by_session["no-slot-here"], (
+        "a non-slot session must carry NO `color` key at all")
+    # 🔴 ...and the value tracks the TABLE, not a constant. Re-colour the slot
+    # and the row must move — which a mutant emitting one hardcoded colour for
+    # every session cannot do.
+    recoloured = {"scratch7": dict(SLOTS_FIXTURE["scratch7"],
+                                   color="#010203")}
+    moved = sm.fold_windows(sm.parse_panes(panes), "workbench",
+                            slots=recoloured, now=NOW)
+    assert {r["session"]: r.get("color") for r in moved} == {
+        "scratch7": "#010203", "no-slot-here": None}
+
+
+def test_an_EMPTY_colour_on_a_slot_entry_is_OMITTED_not_published():
+    """A slot whose colour field somehow arrived empty has no colour, exactly
+    like no slot at all — the same rule `test_tier2_an_EMPTY_codename_does_not_win`
+    applies one field over. `""` must never reach the row: it is a value the
+    consumer will paint."""
+    rows = sm.fold_windows(
+        sm.parse_panes("%11|9001|scratch7|3|w-a|/w/x|claude|t"),
+        "workbench", slots={"scratch7": {"codename": "Grove", "key": "S",
+                                         "color": ""}}, now=NOW)
+    assert "color" not in rows[0]
+    assert rows[0]["codename"] == "Grove"
+
+
+def test_the_colour_is_NOT_in_the_LEAN_view_and_that_is_DELIBERATE():
+    """🔴 A reviewed omission, not an oversight — pinned so it stays reviewed.
+
+    The lean view's sole consumer is an agent triaging panes, and a hex colour is
+    not something it can act on: this view's rule is that duplication and
+    human-facing identity go while a measurement's PROVENANCE never does, and a
+    colour is the first of those. The snapshot pusher — the consumer this field
+    exists for — runs `--json`, the FULL view (pinned by
+    `test_the_collector_is_NOT_asked_for_the_lean_view` in
+    `scripts/tests/test_tmux_snapshot_push.py`), so nothing it needs is lost.
+    """
+    assert "color" not in sm.LEAN_ROW_FIELDS
+    lean = sm.lean_report(base_gather())
+    row = lean["hosts"]["workbench"]["windows"][0]
+    assert row["session"] == "scratch7", "fixture moved; this needs a slot row"
+    assert "color" not in row
+    # ...and the FULL report of the same gather does carry it, so the assertion
+    # above is about the VIEW and not about a collector that stopped emitting.
+    assert base_gather()["hosts"]["workbench"]["windows"][0]["color"] == "#b8bb26"
 
 
 @pytest.mark.parametrize("row,expect", [
@@ -2411,6 +2578,14 @@ def test_json_golden_schema_and_values():
         # tmux did not measure it; both states are pinned by
         # `test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks`.
         "window_activity": 1788313131,
+        # 🔴 THE SLOT COLOUR, and the literal is `scratch7`'s from SLOT_TABLE —
+        # pairwise distinct from the OTHER fixture slot's `#83a598`, so a mutant
+        # that emits one constant colour for every session cannot satisfy this
+        # golden and `test_the_colour_is_the_SLOT_S_OWN` together. This key is
+        # ABSENT, never "" and never null, for a session with no slot entry;
+        # both states are pinned by
+        # `test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks`.
+        "color": "#b8bb26",
     }
 
     second = wb["windows"][1]
@@ -2418,6 +2593,11 @@ def test_json_golden_schema_and_values():
     assert second["window_id"] == "@52"
     assert second["claude"] is False
     assert second["codename"] is None
+    # 🔴 ...and `misc` is in NO slot, so the colour key is ABSENT — not "", not
+    # null. Asserted as key absence because that is the whole contract: a
+    # consumer that paints `row.color` must get nothing to paint, and `""` is a
+    # value CSS/pango will paint.
+    assert "color" not in second
     # ...and this is the row the whole feature exists for: no codename, and a
     # cwd (`/home/zach/tmp`) that names it anyway.
     assert (second["label"], second["label_source"]) == ("tmp", "path")
@@ -7205,20 +7385,37 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "claude_session_id", "runtime", "ledger", "fuzzyclaw",
         "panes",
     }
-    # 🔴 THE ONE OPTIONAL KEY, AND IT IS PINNED IN BOTH DIRECTIONS RATHER THAN
-    # EXCUSED. `window_activity` is present when tmux measured it and absent
-    # when it did not — so a set equality against a single fixture would either
-    # forbid the field or require it, and both readings are wrong. The two arms
-    # below assert each state against a fixture that produces it, which is what
-    # keeps this a ledger and not a hole in one.
-    optional = {"window_activity"}
+    # 🔴 THE TWO OPTIONAL KEYS, AND EACH IS PINNED IN BOTH DIRECTIONS RATHER
+    # THAN EXCUSED. `window_activity` is present when tmux measured it and
+    # absent when it did not; `color` is present for a session the slot table
+    # names and absent for one it does not — so a set equality against a single
+    # fixture would either forbid a field or require it, and both readings are
+    # wrong. The three arms below assert each state against a fixture that
+    # produces it, which is what keeps this a ledger and not a hole in one.
+    #
+    # 🔴 THE ARMS ARE INDEPENDENT ON PURPOSE. Row 0 is `scratch7` (a slot) with
+    # activity measured; arm 2 keeps the slot and kills the activity; arm 3
+    # keeps the activity and drops the slot. A single fixture varying both at
+    # once could not tell "omitted `color`" from "omitted `window_activity`".
+    optional = {"window_activity", "color"}
     assert set(row) == expected | optional, (
-        "the default fixture measures activity, so the row must carry the key")
+        "the default fixture measures activity AND sits in a slot, so the row "
+        "must carry both optional keys")
     unmeasured = base_gather(runner=make_runner(
         local_windows_rc=1, local_windows_err="windows blew up",
     ))["hosts"]["workbench"]["windows"][0]
-    assert set(unmeasured) == expected, (
-        "a window whose activity was not measured must carry NO key for it")
+    assert set(unmeasured) == expected | {"color"}, (
+        "a window whose activity was not measured must carry NO key for it — "
+        "and must still carry `color`, which comes off the slot table and not "
+        "off `list-windows`")
+    # ...and the mirror image: activity measured, NO slot entry. `misc` is row 1
+    # of the same default fixture and is in no slot.
+    no_slot = base_gather()["hosts"]["workbench"]["windows"][1]
+    assert no_slot["session"] == "misc", "fixture moved; this arm needs a non-slot row"
+    assert set(no_slot) == expected | {"window_activity"}, (
+        "a session with no slot entry must carry NO `color` key — not `\"\"`, "
+        "not null. Its consumer PAINTS with the value, and an empty string is "
+        "a colour CSS and pango will paint.")
     # 🔴 THE ROW-ENUMERATION BLOCK, NOT THE WHOLE `__doc__` (#1031 item 2).
     # This used to be `assert field in sm.__doc__` — a substring test across a
     # 275-line docstring. MEASURED: 24 of the 32 row names also occur elsewhere

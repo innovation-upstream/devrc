@@ -186,11 +186,12 @@ measured as null. `caveats`, `summary.waiting`'s tri-state, `clawgate_queue` and
 measurement status are kept in full, because a cheap payload that can lie is worse than an
 expensive one.
 
-Dropped from **rows** (8): `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`,
+Dropped from **rows** (9): `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`,
 and the `ledger`/`fuzzyclaw` sub-objects — duplication, their useful contents are already flat on
-the row. `label_source` is deliberately KEPT: like `age_source` it is provenance, and it is the
-only thing separating a row labelled from a real directory from one labelled because the cwd
-yielded nothing.
+the row — plus **`color`**, which is presentation this view's agent consumer cannot act on (see
+its section below). `label_source` is deliberately KEPT: like `age_source` it is provenance, and
+it is the only thing separating a row labelled from a real directory from one labelled because
+the cwd yielded nothing.
 
 Dropped from **hosts** (2): `ssh_target` (fixed config the caller already knows) and
 `live_window_ids` (a ~346 B array no consumer reads).
@@ -227,6 +228,28 @@ a chord; run it through the rule above (or read `--json`) before quoting it to a
 repo resolve to the SAME label, so quote both. New non-scratch sessions get a real tmux name
 at creation from `scripts/tmux-autoname-session.sh`; `label` is what covers the ones that
 predate it.
+
+### `color` — the slot's colour, and it is ABSENT rather than empty
+
+🔴 **A slot row carries `color`: lower-case `#rrggbb`, straight off the same
+`scripts/tmux-scratch-slots.sh` parse `codename` and `hotkey` come from** (`scratch16:I:#ebdbb2:Ivory`
+→ `#ebdbb2`). It exists so a consumer can colour-match its own tmux page to the popup border the
+operator already looks at **without keeping a second copy of that table** — a second copy is the
+exact drift that file's grammar comment records, where the bar legend and the tmux bindings each
+carried a private regex and disagreed in both directions.
+
+🔴 **A session with NO slot carries NO `color` key at all** — not `""`, not `null`. Test key
+PRESENCE, never truthiness: the value is painted, and an empty string is a colour CSS and pango
+will happily paint. Measured 2026-09-12 on the workbench's tmux server, 2 of 19 live sessions
+(`homelab-talos`, `datapacket-talos-2`) have no slot entry, so this is the ordinary branch.
+It is one of exactly TWO optional row keys (`window_activity` is the other).
+
+⚠ **`color` is NOT in `LEAN_ROW_FIELDS`** — a hex colour is not something the lean view's agent
+consumer can act on. The snapshot pusher asks for `--json`, the full view, so it gets the field.
+
+⚠ **Two slots deliberately SHARE a colour** (`scratch11:w:#ebdbb2:wheat` and
+`scratch16:I:#ebdbb2:Ivory`), so `color` keys an APPEARANCE and never a slot. Do not group,
+dedupe or identify a session by it.
 
 ## 🔴 `repo` — the PROJECT key, and it is not `label`
 
