@@ -16,8 +16,6 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-
-
 - Branch / PR: **every PR from this arc is MERGED — NINE of them.** `#1505` (`bc67b177`), `#1507` (`3a0c77dd`), `#1543` (`0b5ee924`), `#1532` (`6fa09466`), `#1533` (`f3e27aa3`), `#1544` (`9e5c348c`), `#1557` (`6395ce1f`), `#1561` (`c0bbd6d9`).
 - **Deploy/verify status: BOTH HOSTS CONVERGED AND VERIFIED AT `db7bf3ff`.** ⚠ Point-in-time: `main` merges every few minutes here and has moved on since; re-run `ship.sh` before relying on host state.
 - 🔴 **`#1532`, `#1533` and `#1543` were MERGED WITHOUT CI at the operator's explicit instruction** (2026-09-11, worth the risk because the queue was blocking other work). The post-merge behavioural evidence in ranked item 7 is therefore the ONLY evidence those three work. All three checks have now been run against the MERGED tree, including the one that had only ever run on a branch.
@@ -41,6 +39,9 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - 🔴 **RANK 4'S HEADLINE: 75% of `audit-pr/SKILL.md` reaches no brief in any round, and that is NOT the finding.** A reach table over two REAL briefs (controls 1/0 and 0/1, both moved) showed a `--round 0` brief inlines 8,216 chars and a `--round ≥1` brief just **706 (2.0%)**. The actionable parts were two: **(a)** 40% of the round-0 inlined payload was editor-facing history — a retraction, a closed trial's decomposition, an HTML comment about a capture regex — billed to an auditor of someone else's PR on every dispatch, and **the largest single piece was mine, written 90 minutes earlier**. Cut in `#1587`: inlined section **8,216 → 5,252 chars (−36%)**, brief 19,074 → 16,664 B, evidence demoted to `~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`. **(b)** three paragraphs told the DISPATCHER to retype the auditor's environment/cleanup warnings, and they probed **0/0 in both briefs** — migrated into the assembler as the `cold-checkout-is-not-the-diff` and `own-what-you-spawn` invariant clauses in `#1589`, now **1/1**. `SKILL.md` **35,845 → 32,110 B** across the two.
 - 🔴 **I MERGED `#1589` THROUGH A RED CHECK AND `main` WAS RED FOR ~40 MINUTES. Mine, and the cause was a batching mistake, not a judgement call.** `test_doc_path_rot.py::test_no_new_dead_paths` failed 1 of 22,546 on `#1589`'s head — but the dead path arrived in `#1587`: my compressed TRIAL RECORD ended with a bare `` `reference/round-ladder-evidence.md` ``, which is unopenable from a deployed `~/.claude/skills/…`. Line 11 of the same file already used the deployed form; I used a different one 109 lines later. Fixed in `#1593` (`7aa06ad1`), re-verified against a DETACHED checkout of `main` itself: **76 passed** on the gate that was red, and 151 passed on the two modules pinning that paragraph.
 - **Deploy/verify status:** `ship.sh` rc 0, `2 hosts compared`, both at `7aa06ad1`. The LAN address timed out on all three runs today, so the nebula fallback was genuinely exercised each time. Deployed skill blob `ad83d6b8` identical on both hosts; `assembler carries both clauses: 2` on the laptop too.
+- 🔶 **THIS SESSION (2026-09-12) DREW RANK 14. The instrument is committed and the measurement RAN; rank 14 is still OPEN and the PR is not merged.** Branch `feat/audit-rule-firing-sweep`, **in a worktree at `/home/zach/workspace/devrc-rule-firing`** — not in the base clone — off `origin/main` `7e000e6b`. 22 tests pass; `scoped-tests.sh` reported `RESULT: PASS` / `SCOPE: SCOPED (1 of 29 hermetic targets)`, which is **not** a gate verdict and is not quoted as one. Neither `nix build` tier was run. **The measurement answers the item for 17 of 49 rules and is structurally unable to answer for 32** — see rank 14 for the cause and the one narrow next step.
+- 🔴 **A SECOND SESSION CHECKED OUT `main` IN THE SHARED BASE CLONE MID-TASK, AND I HAD ALREADY STAGED ONTO IT.** Measured in the reflog, not inferred: `HEAD@{2}` `main`→`feat/audit-rule-firing-sweep` (mine), `HEAD@{1}` `feat/audit-rule-firing-sweep`→`main` (**not mine**), `HEAD@{0}` `merge origin/main: Fast-forward`. `git branch --show-current` immediately before the commit is the only thing that caught it — a commit would have landed on `main` with no conflict and no error, and `git log` afterwards would have looked exactly right. Recovery: `restore --staged` both paths, `cp` both files to `…/scratchpad/r14/preserve/` and checksum them, `branch -D` the branch, re-create it as a **worktree** off the fetched `origin/main`, copy the files in, checksums re-verified identical (`aa0a5d2f…`, `2916fb38…`), and the untracked copies removed from the shared clone so no other session trips on them. **The shared clone was left exactly as found.**
+- ⚠ **No `clawgate-task:` recorded: `clawgate_handoff.sh resolve` exited 5.** Its positive control answered 10 links for another session, so the board is reachable — but a wrong id also answers 200 with an empty array, so that is not a clean bill of health. The doc had no field either (`field` → rc 1), so nothing was dropped.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -116,7 +117,6 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-
 🔴 **Numbering PRESERVED where it was stable — live `claim-work` refs are keyed to it. Identify an item by its SUBJECT, never its rank.** ⚠ **Rank 12 was DUPLICATED on `main`** (a peer's `#1561` item and mine both took 12, two minutes apart); the recurrence-convention item moved to **13** and nothing was claimed on 12/13/14 when that was checked, so no live claim was re-pointed. Rank 14 is new.
 
 1. ✅ **FULLY DONE — nothing here to work. The trial closed at `ran: 6 · changed the outcome: 3` (the section STAYS) AND the trigger it called for is shipped, deployed and validated: `#1565` routes round 0 at PR-create time, `#1574` retired the retirement condition.** 🔴 **An earlier revision of this item told the next session to "delete the RETIREMENT CONDITION … recording the pair" — that is DONE, and an instruction to do already-finished work is the "stale in the direction of ALREADY DONE" hazard this very doc catalogues.** If you want the record, read `claude/skills/audit-pr/SKILL.md`; do not re-derive it. forcing: none
@@ -153,7 +153,7 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 11. **The vetr DMARC monitor is laptop-only and rebuild-fragile.** Found by round-0 trial 5, re-verified independently: `nix/home.nix`'s `dmarc-watch` block makes the UNIT declarative while `ExecStart` points at `${workspace}/scratch/vetr/scripts/dmarc-alert.py` and a `~/.config/vetr/cloudflare-dns.env` credential that **nothing manages**. That path exists on the laptop (timer live) and **not on the workbench**, where the service is emitted as a store symlink and the timer is gated off. Either give the vetr scripts a managed home or state in the block's comment that this monitor is laptop-local. Also fix that comment's claim that a hand `systemctl --user start` "still works" — on the workbench it is `203/EXEC` plus a `notify-failure@` toast. 🔴 **Belongs to `claudedocs/handoff-dmarc-enforcement-and-spoofing.md`, not this ladder** — move it there rather than working it here. forcing: regression — a spoofing monitor with a verified true positive that will silently not exist on a rebuilt host
 12. ✅ **DONE (2026-09-12) — `#1561` MERGED (`c0bbd6d9`) and shipped: the kill scanners no longer read `claudedocs/`.** They red-ed `main` for the whole repo **six times in about two hours**, from at least four sessions, and *every* offender was prose in a handoff doc — one quoting the scanner's own `offenders=` output while documenting the failure, and one session's own merged handoff (`#1556`, "eliding it was not enough"). Each fix was itself a doc, so each fix could trip the next round. 🔴 **What it does NOT weaken:** the diff is ONE file (the test module); `bash-guard.py`, the hook that actually gates the Bash tool, is untouched and was verified on the shipped tree **by content, not exit code** — still `permissionDecision: "deny"` for a wide kill, silent on a harmless command. A markdown file executes nothing; every executable tree is scanned exactly as before. One predicate `_is_prose_only()` now serves BOTH scanners (they had separate lists, which is why one root cause held `main` red on two tests). Mutants: dropping the predicate from the ledger scan → red; widening the exemption to swallow `scripts/` → red. forcing: none
 13. **Decide the `Gotchas` recurrence convention — MEASURED at 183 bullets / ~101 KB inside a 164 KB doc, with five redundant families.** Found by round 0 on `#1581` (which also cut three bullets from that PR for it). The doc's established convention is a NEW full bullet per recurrence — `git grep -n 'TRAP AGAIN'` finds three separate bullets on the piped-`$?` trap alone — so each recurrence is monotonic growth with nothing to stop it. Measured families on `main`: `MUTATION DID NOT APPLY` ×3, timestamped-reading ×6, spelled/walkable guard ×2, `xargs -0 command grep` ×1, piped `$?` ×3. 🔴 **Two things deliberately NOT proposed, each for a reason:** this doc has **no byte ceiling** (the `MIN_HEADROOM|st_size <=` union returns 10 files, none under `claudedocs/`), so do not argue from a limit that does not exist; and **no new detector** — `scripts/lib/handoff_doc.py:179` refuses the class in terms (*"NO FUZZY MATCH IS ATTEMPTED — a similarity heuristic here would be exactly the clever-inference guard the operator's standing rule forbids"*), and no named instrument takes a `claudedocs/` doc (`/prune-skill` is `SKILL.md`, `/prune-memory` is `MEMORY.md`, `/prune-index` is the cairn store). So this is a per-family human judgement, not a tool. **Closing condition:** the operator reads the five-family table above and records, per family, either "collapse to one bullet" or "the convention stands" — in this doc, in writing. Until then it is a known, measured, accepted cost rather than an open defect. forcing: none
-14. **Answer the one question round 0 on the skill could NOT answer: for each rule in `audit-pr/SKILL.md`, has it caught anything SINCE its origin incident?** Most rules cite the PR that bought them, and origin is not evidence of continued value. Only two were verified as having fired again (the prose escape hatch, and the attribution gate); every other rule's "has it fired since" is **UNMEASURED** — the audit said so rather than implying coverage. 🔴 **This needs a transcript sweep, and `/adoption-scan` does NOT take a prose file as a target**, so it is a new instrument or it is nothing. ⚠ Do not read silence as deadness either: a rule that has not fired again may simply be one nobody has violated since. **Closing condition:** either a per-rule measurement exists, or this item is closed in writing as not-worth-the-instrument — recorded in this doc. forcing: none
+14. 🔶 **STILL OPEN — THE INSTRUMENT IS BUILT AND THE MEASUREMENT RAN, AND IT ANSWERS THE QUESTION FOR 17 OF 49 RULES. The other 32 are STRUCTURALLY UNANSWERED, and that is the finding.** `feat/audit-rule-firing-sweep` (`126e697e` + the measurement commit), unmerged. **Run 2026-09-12T20:33Z over 5,993 transcripts / 7.2 GB, controls PASSED (positive 584, negative 0): `FIRED=14 · UNFIRED=3 · UNRELIABLE=32`.** 🔴 **Do NOT read the 14 as the answer and do not close this item on them.** The 32 are withheld by the sweep's own specificity control — the pattern matched text PREDATING the rule — and the cause is **blind spot 1 biting far harder than it was written to warn about**: origin is dated at the rule's CURRENT WORDING via `git log -S`, and **44 of 49 origins fall in 2026-08 or 2026-09** because this skill reworded nearly every rule in the last six weeks. So for most rules the dated window opens long AFTER the practice began, and ordinary earlier use reads as "the pattern is not specific". 🔴 **The withhold CONFLATES two different things and the pre-origin counts separate them cleanly — 12 rules at ≥10 pre-origin hits are genuinely over-broad patterns (`round0-first` 263, `guard-lost-its-reason` 236, `clean-round-ends-ladder` 108: they match ordinary English), while 20 rules sit at 1–8, where the number was probably usable and got withheld anyway.** ✅ **What IS usable today:** the 14 FIRED rows with session counts (`delta-vs-audited-tip` 1,376 sessions · `dispatch-blind` 376 · `per-prior-finding-status` 338 · `mutation-deletion-easy-half` 144 · `pr-description-corrected-publicly` 116, down to `round0-no-accelerate` at 2), and the three UNFIRED — of which **`base-is-current-tip` is the one worth acting on: 363 injected loads over 16 days and ZERO applications**, the strongest loaded-but-never-applied signal in the table and exactly what this item existed to surface. ⚠ Also real: `review-comments-invisible` fired in 27 sessions with **`in-fnd` 0** — applied as operating guidance, never beside a severity marker; and `high-yield-classes` fired in devrc projects ONLY, so its meta-session confounder is unresolved. **NEXT STEP, named and narrow:** give the ledger a per-rule `origin_hint` (or date a rule at the earliest commit touching its containing SECTION rather than its current sentence) so a reworded rule stops dating itself at the reword — then re-run. 🔴 **Do not "fix" this by loosening the control**: withholding is the honest behaviour, and a threshold on the pre-origin count would be a number nobody measured. ⚠ **And the weakness round 0 found in rank 14 ITSELF is still unresolved: the DECISION RULE is undefined.** `base-is-current-tip` reading 0 licenses nothing on its own, because this item also says not to read silence as deadness — decide what an unfired rule earns before anyone acts on a row. Nothing runs this on a schedule, same as `ladder-depth-sweep.py` and `ladder-range-coverage.py`. forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -1085,8 +1085,78 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - 🔴 **DO NOT BATCH `gh pr checks` AND `gh pr merge` INTO ONE COMMAND. I did, and `main` was red for ~40 minutes.** The red (`test_doc_path_rot.py::test_no_new_dead_paths`, 1 of 22,546) printed in the same output as the merge confirmation, so I read it *after* the merge had already happened. CI caught the defect correctly and on time; batching removed my own opportunity to act on it. ⚠ **And the red was not the PR it appeared on**: the dead path arrived one PR earlier (`#1587`) and was first reported on `#1589`'s head — the ordinary shape of inheriting a red from a base that moved, which is a reason to read the failing test's NAME rather than assume the current diff caused it. The defect itself: a bare `` `reference/round-ladder-evidence.md` `` is unopenable from a deployed `~/.claude/skills/…`, and line 11 of that same file already used the deployed form — I used a different one 109 lines later.
 - ⚠ **RANK 12 WAS DUPLICATED ON `main` BY TWO SESSIONS TWO MINUTES APART, which is the "a rank is half a claim's identity" hazard arriving concretely.** A peer's `#1561` item and mine both took 12; `claim-work --slug-for <doc> 12` would have derived ONE slug for TWO items. Resolved by moving the open item to 13 **after checking that 12/13/14 were all unclaimed**, so no live claim was re-pointed — had one existed, the renumber would silently have pointed it at someone else's work. 🔴 **Before appending a ranked item, read the LAST number in the live doc rather than the last one you remember writing**, and before renumbering anything, `claim-work --check` every number you touch.
 
-## How to verify
+- 🔴 **DATING A PROSE RULE BY ITS CURRENT WORDING DATES THE REWORD, NOT THE RULE — and in a
+  frequently-edited document that does not merely narrow a window, it DISABLES the
+  measurement for most of it.** `audit-rule-firing-sweep.py` dates each rule with
+  `git log -S<probe>` on a phrase taken from today's `SKILL.md`. Its docstring warned this
+  "can only UNDER-count"; MEASURED 2026-09-12 the effect was far larger than that wording
+  suggests — **44 of 49 origins landed in 2026-08/2026-09** because the skill reworded
+  nearly every rule inside six weeks, so the dated window opens long AFTER the practice
+  began and ordinary earlier use reads as *"the pattern is not specific to the rule"*.
+  **32 of 49 rules were withheld as UNRELIABLE, so the sweep's first real run could not
+  answer its own question for two-thirds of its ledger.** 🔴 **The withhold also CONFLATES
+  two unrelated causes, and the pre-origin count separates them at a glance**: ≥10 hits is
+  a genuinely over-broad pattern (`\bround 0\b` → 263, `has none` → 236, `clean round` →
+  108 — all ordinary English), 1–8 is a rule whose practice simply predates its current
+  sentence. 🔴 **Widest reading, and the part worth carrying: any "has X been used since it
+  landed" question needs an origin for X that SURVIVES X being edited.** A content-derived
+  origin (`-S` on the current text, a checksum, a line number) silently re-dates itself on
+  every reword, and the failure is invisible because each individual origin looks
+  plausible. Date it on something stable — the containing section's first commit, or an
+  explicit recorded origin — and treat a high withheld-count as a fault in the DATING, not
+  as a finding about the rules.
+- 🔴 **A TEXT SEARCH FOR A RULE'S OWN WORDING COUNTS SKILL LOADS, NOT FIRINGS — and the
+  number is large enough to look like a finding.** Measured 2026-09-12 over
+  `~/.claude/projects` (5,986 transcripts, 7.2 GB): `payload lines changed THIS round`
+  matched **1,022 files**. Provenance-classified on the first 120 of them, the matching
+  blocks were **182 user-role text · 83 assistant · 55 `Read` results · 20 `Bash`
+  results** — i.e. the dominant signal is the skill body and the dispatched brief being
+  injected, and only the 83 are the rule being applied. 🔴 **Generalises past this
+  instrument: any corpus search for the text of a prompt, skill or brief measures
+  DISTRIBUTION of that text, never USE of it.** The fix is not a better regex — it is
+  reading provenance off the transcript (`tool_use_id` → tool name) so the injected
+  copies are separated mechanically rather than by a similarity heuristic.
+- 🔴 **A PREFILTER AND ITS MATCHER CAN DISAGREE ABOUT WHAT THE BYTES SAY.** The sweep's
+  `rg` prefilter reads RAW JSON while the matcher runs on DECODED text, so a writer using
+  `ensure_ascii` stores `—` as the six characters `\u2014` and **any prefilter pattern
+  carrying a literal em-dash selects ZERO files** — including the sweep's own POSITIVE
+  control, which is how it was caught (four tests red at once). Every rule then read
+  UNFIRED off a corpus never parsed. Widest reading: **whenever a cheap pre-pass and the
+  real check read different encodings of the same data, the pre-pass can silently
+  under-select and the result reads as a clean zero.** Fixed by widening every non-ASCII
+  char to `.{1,6}`; the prefilter only ever has to OVER-select.
+- 🔴 **`git log %aI` and a transcript timestamp cannot be compared as STRINGS.** A
+  transcript stamps `...Z`, git stamps a numeric offset, so
+  `"2026-09-11T04:11:19.123Z" >= "2026-09-11T04:11:19-05:00"` is lexicographic nonsense
+  — it says "after" for an instant five hours EARLIER. Every rule's origin window was
+  wrong until both sides were parsed to aware datetimes. The test asserts the naive
+  compare gets it backwards BEFORE asserting the parsed one gets it right, so the pin
+  cannot pass vacuously.
+- 🔴 **A VERDICT THAT SAYS "WITHHELD" MUST WITHHOLD.** The sweep's UNRELIABLE row — a
+  rule whose pattern matched text predating it, so the pattern is not specific to the
+  rule — printed the real post-origin counts beside that label, so a reader could quote
+  a figure the instrument had just declared unreliable. The label was wider than the
+  implementation, which is the shape `audit-pr/SKILL.md` tells an auditor to hunt, found
+  in my own code while writing the instrument that measures that skill. Now dashes in the
+  table and `null` in the JSON, pinned by
+  `test_a_withheld_row_prints_no_number_at_all_not_a_zero`.
+- 🟡 **A LEDGER OVER PROSE CAN BE PINNED TWO-WAY WITHOUT A SIMILARITY HEURISTIC — key on
+  🔴 PARAGRAPHS and ENUMERATE the exceptions.** "Every rule in the skill has a ledger
+  entry" is not mechanically checkable, because a rule is not a machine-visible unit in
+  prose — but a blank-line-separated paragraph carrying a 🔴 is. So
+  `test_audit_rule_firing_sweep.py` requires each such paragraph to contain a ledger
+  probe OR appear in an enumerated `NOT_A_RULE` list with its reason, and a second test
+  fails on an exemption anchor that matches nothing. Measured when it landed: 70
+  paragraphs, 30 with 🔴, 22 probe-covered, 8 enumerated. 🔴 **A no-exemptions version
+  would have been RED the day it landed**, which `claude/RULES.md` forbids outright — the
+  enumeration is what makes the gate honest rather than ignorable.
+- ⚠ **The corpus walk deliberately INCLUDES the `subagents/` tier, opposite to
+  `scripts/lib/transcript_search.py`.** That module excludes it because a subagent is not
+  a resumable session — correct for `/find-session`, wrong here: an AUDITOR *is* a
+  subagent, so its own transcript is where a rule gets applied. Reusing that library
+  would have been the natural move and would have dropped the primary surface.
 
+## How to verify
 ```bash
 # 1. main is no longer red (the reason #1543 exists)
 git -C ~/workspace/devrc worktree add /tmp/mainctl --detach origin/main
@@ -1143,6 +1213,32 @@ git -C $R show origin/main:scripts/tests/test_diagnose_disk_accounting.sh | grep
 #      Read the surrounding lines: the survivor must sit under "An earlier version of this
 #      paragraph read". 🔴 The count cannot answer this question; only the context can.
 ```
+Rank 14's instrument — **the controls are the point, so run the pair, not the sweep alone**:
+
+```bash
+W=/home/zach/workspace/devrc-rule-firing     # the worktree; `main` does not carry this yet
+nix develop $W -c python3 -m pytest $W/scripts/tests/test_audit_rule_firing_sweep.py -q
+#   expect: 22 passed
+
+# the sweep refuses rather than printing zeros it cannot vouch for — watch BOTH arms:
+S=$(mktemp -d); mkdir -p $S/proj
+printf '%s\n' '{"type":"assistant","timestamp":"2026-09-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"unrelated"}]}}' > $S/proj/s.jsonl
+AUDIT_SWEEP_CORPUS=$S python3 $W/scripts/audit-rule-firing-sweep.py --rule attribution-gate; echo "expect 3, got $?"
+#   -> POSITIVE control FAILED: the corpus never saw the skill, so no row is quotable.
+printf '%s\n' '{"type":"assistant","timestamp":"2026-09-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"/audit-pr — adversarial PR audit"}]}}' >> $S/proj/s.jsonl
+AUDIT_SWEEP_CORPUS=$S python3 $W/scripts/audit-rule-firing-sweep.py --rule attribution-gate; echo "expect 0, got $?"
+#   -> controls ok; the row reads UNFIRED, which is the honest answer for that corpus.
+
+# the ledger gate, watched RED (a reworded rule must not date itself to the wrong commit):
+cp $W/claude/skills/audit-pr/SKILL.md $S/SKILL.md
+sed -i 's/ONE NUMBER, ONE NAME/ONE COUNT, ONE LABEL/' $S/SKILL.md
+AUDIT_SWEEP_CORPUS=$S AUDIT_SWEEP_SKILL=$S/SKILL.md python3 $W/scripts/audit-rule-firing-sweep.py; echo "expect 5, got $?"
+#   -> names `one-number-one-name` on stderr. Without the sed it exits 0 — that is the
+#      positive half, and it is required: a gate that is always red proves nothing.
+```
+
+🔴 **Do NOT quote a `fired` count as "the rule caught something"** — see rank 14. And do not
+read an UNFIRED row as dead: the sweep says so itself on every such row.
 ## Open investigations — live diagnosis state
 
 ### 🔴 A stale claim I introduced in `#1023`, still on `main` — fix open as `#1035`
@@ -1607,3 +1703,27 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
   gh pr list --repo innovation-upstream/devrc --state open --json number,createdAt \
     --jq '[.[]|select((now - (.createdAt|fromdateiso8601)) < 900)|.number]'
   ```
+
+### RESOLVED — rank 14's sweep ran; the open question moved to how a rule is DATED
+- **Resolved:** the full-corpus run completed at 2026-09-12T20:33Z, `EXIT=0`, over **5,993
+  transcript files** (both tiers), 5,855 surviving the prefilter. **Controls PASSED and were
+  read before any row: positive 584, negative 0.** Verdicts: `FIRED=14 · UNFIRED=3 ·
+  UNRELIABLE=32`. Raw output `…/scratchpad/r14/full.{txt,json}`; re-run with
+  `python3 scripts/audit-rule-firing-sweep.py --samples 1`.
+- **Ruled out — the run died when I deleted the script from the base clone mid-run.** It did
+  not: the process had already loaded and compiled the source, and `rchar` was still climbing
+  past 4.4 GB after the delete. via: measurement
+- **Ruled out — "sweep not running", which my own detector reported once.** A broken detector,
+  not a dead process: the loop matched the `zsh -c` wrappers `pgrep -f` returns for my own
+  shell (the documented trap) so `ls -d /proc/...` took several PIDs and failed.
+  `pgrep -af … | grep -v 'zsh -c'` showed the python process throughout. via: command
+- **Ruled out — UNRELIABLE means my regexes are bad.** For 20 of the 32 the pre-origin count
+  is 1–8, which is a rule whose practice predates its current sentence rather than a loose
+  pattern; only ~12 (≥10 hits) are genuinely over-broad. The dominant cause is the DATING.
+  via: measurement
+- **What is still open, and it is a different question from the one rank 14 asked:** how to
+  date a rule so the window survives the rule being reworded. **Next probe:** add a per-rule
+  `origin_hint` to the ledger (or date at the earliest commit touching the containing `## `
+  section) for the 20 low-pre-origin rules, re-run, and check the withheld count drops
+  without loosening the control. 🔴 Do not raise a pre-origin threshold to make them pass —
+  that number was measured nowhere.
