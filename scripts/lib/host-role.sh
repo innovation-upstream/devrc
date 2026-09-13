@@ -36,11 +36,26 @@
 # must not fork `ip`, because the systemd units that call it deliberately carry
 # no `iproute2`. Its regex wants each line to stay literally
 #     <HOST>_IP_{PRIMARY,SECONDARY}="<dotted quad>"
-# one per line, uppercase host name matching a label in `HOST_NAMES`. Renaming,
-# templating or splitting one of these makes the parse FAIL CLOSED (no address
-# signal at all, so that module refuses to name the host rather than guessing) —
-# it cannot mislabel a machine, but it does disarm the fallback. Pinned by
-# `scripts/tests/test_host_label_identity.py`.
+# one per line, uppercase host name matching a label in `HOST_NAMES`. Anything
+# else on the line — a trailing comment, an `export`/`declare -r` prefix, single
+# quotes, a templated `${WB_IP:-…}` value, a rename, a split — drops THAT line
+# from the parse.
+#
+# 🔴 WHAT THAT COSTS, AT THE WIDTH IT ACTUALLY HOLDS. This comment used to say a
+# reformat makes the parse "FAIL CLOSED (no address signal at all)". Both halves
+# were wrong, measured:
+#   * dropping ONE of a host's two lines yields a 3-entry PARTIAL table, which is
+#     ACCEPTED — the module's guard is per-HOST, not per-constant. Still safe:
+#     every surviving entry is a correct (host, addr) pair, so the worst outcome
+#     is that a machine whose only remaining evidence was the dropped line goes
+#     UNNAMED and the module refuses. It cannot mislabel a machine.
+#   * dropping BOTH of one host's lines does return `()` — but that is not "no
+#     address signal at all" either: `host_addrs()` then falls back to the
+#     module's own `PEER_SSH`, i.e. the two 10.42.0.x nebula addresses. What is
+#     lost is the LAN signal, which matters exactly when nebula is down.
+# Pinned by `scripts/tests/test_host_label_identity.py`
+# (`test_a_table_missing_a_WHOLE_HOST_fails_CLOSED`, and
+# `test_a_reformatted_SINGLE_constant_degrades_to_a_PARTIAL_table_that_cannot_MISLABEL`).
 WORKBENCH_IP_PRIMARY="192.168.50.250"
 WORKBENCH_IP_SECONDARY="10.42.0.30"
 LAPTOP_IP_PRIMARY="192.168.50.155"

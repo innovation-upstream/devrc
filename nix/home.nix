@@ -285,6 +285,26 @@ let
     mkdir -p "$out"
     python3 ${../scripts/opencode/generate-commands.py} ${../claude/skills} "$out"
   '';
+  # 🔴 THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", SIDE BY SIDE IN THE
+  # STORE. `home.activation.activityCollectorEnv` runs `host_label.py` to derive
+  # this host's ACTIVITY_HOST, and that module locates `host-role.sh` — the
+  # owner of the fleet's address table — NEXT TO ITSELF via `__file__`. A lone
+  # flattened store path for the `.py` would find no sibling and silently
+  # degrade to the nebula-only `PEER_SSH` subset, which is wrong exactly when
+  # nebula is down.
+  #
+  # TWO NAMED FILES RATHER THAN `${../scripts/lib}`, DELIBERATELY. Importing the
+  # directory works, and it also makes EVERY file under `scripts/lib` a nix-read
+  # STORE path — `scripts/lib/nix_read_paths.sh` resolves a directory token to
+  # the directory itself (measured), so `drift-check.sh` and `ship.sh` would
+  # start reporting untracked files there as dirty-in-artifact on both hosts.
+  # This spelling changes neither instrument: both files are already nix-read
+  # individually, as restart triggers.
+  hostLabelProbe = pkgs.runCommandLocal "devrc-host-label-probe" { } ''
+    mkdir -p "$out"
+    cp ${../scripts/lib/host_label.py} "$out/host_label.py"
+    cp ${../scripts/lib/host-role.sh} "$out/host-role.sh"
+  '';
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
@@ -737,6 +757,32 @@ in
   # exist yet. The real file holds the (future) ClickHouse credentials, so it is
   # NEVER in the nix store and NEVER committed — created here once, chmod 600,
   # then edited in place. We copy the in-repo .env.example as the template.
+  #
+  # 🔴 THE TEMPLATE MUST NOT NAME A HOST, AND IT USED TO. `.env.example` carried
+  # `ACTIVITY_HOST=workbench`, and this block copies it VERBATIM onto ANY host
+  # that lacks the real file — so a fresh LAPTOP got `workbench` baked in. Since
+  # #1601 that is not merely a wrong column: `scripts/lib/host_label.py`
+  # cross-checks the stated label against an address this machine holds and
+  # raises `HostLabelConflict`, so transcript-push (every 5 min), tmux-reply-agent
+  # (FAILED after 5 restarts), tmux-snapshot-push (every 2 min) and `peer-host`
+  # all fail on an otherwise-healthy machine. It was LATENT only because the
+  # laptop's real file had at some point been hand-edited to `laptop`; a
+  # reinstall, a new machine, or `rm`ing that file arms it.
+  #
+  # So the label is DERIVED here rather than templated — by the SAME module every
+  # consumer reads, which is why this is one source of truth rather than a third
+  # copy of the rule. It runs out of `hostLabelProbe` (see the `let` block) so
+  # that `host-role.sh` sits beside it in the store — read that binding's comment
+  # before changing how the module is located here.
+  #
+  # IDEMPOTENT AND NON-CLOBBERING, both halves deliberately:
+  #   * the template copy still only happens when the file is ABSENT;
+  #   * the label is only ever APPENDED, and only when the file states no valid
+  #     one — a hand-edited value is never touched, never rewritten, never
+  #     re-derived over.
+  # A machine that cannot identify itself right now (off-network at switch time)
+  # gets NOTHING rather than a guess, with a printed reason; the next switch
+  # tries again, because the missing-label condition is still true.
   home.activation.activityCollectorEnv = lib.hm.dag.entryAfter ["writeBoundary"] ''
     envFile="$HOME/.config/activity-collector/env"
     if [ ! -e "$envFile" ]; then
@@ -744,6 +790,19 @@ in
       cp ${../scripts/collector/.env.example} "$envFile"
       chmod 600 "$envFile"
       echo "activity-collector: seeded $envFile from .env.example (edit to add CLICKHOUSE_PASSWORD)"
+    fi
+    if [ -w "$envFile" ] && \
+       ! ${pkgs.gnugrep}/bin/grep -qE '^[ ]*ACTIVITY_HOST=[^ ]' "$envFile"; then
+      # host_label.py exits 3 with a reason on stderr and prints NOTHING on
+      # stdout when it cannot name this machine — so an empty `derived` is the
+      # refusal, and a non-empty one is a label the machine's own address backs.
+      if derived="$(${pkgs.python3}/bin/python3 ${hostLabelProbe}/host_label.py 2>/dev/null)" \
+         && [ -n "$derived" ]; then
+        printf 'ACTIVITY_HOST=%s\n' "$derived" >> "$envFile"
+        echo "activity-collector: derived ACTIVITY_HOST=$derived into $envFile"
+      else
+        echo "activity-collector: could not derive this host's label, so $envFile states none — set ACTIVITY_HOST by hand, or re-run the switch on-network"
+      fi
     fi
   '';
 
@@ -4065,6 +4124,16 @@ in
         # The collector is the payload's author: a change to what it emits is a
         # change to what this unit delivers, with no edit to the pusher at all.
         "${../scripts/session-manager}"
+        # 🔴 AND THE COLLECTOR'S OWN TWO. `session-manager` imports host_label.py,
+        # which `open()`s host-role.sh by path; together they decide WHICH HOST
+        # every row this unit ships is stamped with, and the read model upserts
+        # latest-per-host — so a stale answer here does not lose a snapshot, it
+        # REPLACES the other machine's with this one's. Neither was declared
+        # (#1601 added the dependency and listed it on two of the three units
+        # that acquired it), and host-role.sh is the half no import scanner can
+        # see.
+        "${../scripts/lib/host_label.py}"
+        "${../scripts/lib/host-role.sh}"
       ];
     };
   };
@@ -4200,6 +4269,15 @@ in
         # runs old code indefinitely. That consequence is the resident agent's,
         # and this arc has now made the same overstatement twice.
         "${../scripts/lib/transcript_search.py}"
+        # 🔴 A DEPENDENCY NO IMPORT SCANNER COULD SEE. host_label.py `open()`s
+        # this file BY PATH to get the fleet's address table — there is no
+        # `import` to find, which is exactly why the source-derived ledger beside
+        # it (`test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger`,
+        # arm (c)) read `from_host_label == set()` and passed. The ledger now
+        # scans path-built filenames too, so the next one cannot hide the same
+        # way. A reformat of one of its `*_IP_*` constants changes which
+        # addresses this unit can identify itself from.
+        "${../scripts/lib/host-role.sh}"
       ];
     };
   };
@@ -4267,9 +4345,22 @@ in
       # that has to keep its meaning.
       #
       # What surfaces a genuinely broken agent instead: the two exit codes it can
-      # actually take (2 = no credentials, 3 = tmux unusable) are both permanent
-      # configuration faults, and StartLimit below turns a repeat of either into a
-      # FAILED unit, which `/syshealth --systemd` reads. Everything transient is backed off
+      # actually take are both permanent configuration faults, and StartLimit
+      # below turns a repeat of either into a FAILED unit, which
+      # `/syshealth --systemd` reads.
+      #
+      #   2  no CLAWGATE_TERMINAL_TOKEN — the write surface is not armed here.
+      #   3  EITHER `tmux -V` fails (tmux unusable) OR `local_host_label()` raises
+      #      (this machine cannot be identified). 🔴 TWO CAUSES, ONE CODE, and
+      #      the second is the one an operator will meet: #1601 made the host
+      #      label RAISE instead of guessing `"workbench"`, so a stated label
+      #      that contradicts the machine's own address — the state a
+      #      template-provisioned `~/.config/activity-collector/env` used to
+      #      create — lands here. This comment named only tmux for one release,
+      #      and it is what someone reads when they find this unit FAILED. The
+      #      agent's own log line says which; read it before reaching for tmux.
+      #
+      # Everything transient is backed off
       # from inside the loop rather than exited on, precisely so a restart storm
       # is not the failure mode.
       StartLimitIntervalSec = 600;
@@ -4337,6 +4428,15 @@ in
         "${../scripts/lib/host_label.py}"
         "${../scripts/lib/transcript_stream.py}"
         "${../scripts/lib/transcript_search.py}"
+        # 🔴 THE ONE WITH NO `import` TO FIND, AND THIS IS THE UNIT WHERE THAT
+        # COSTS MOST. host_label.py `open()`s host-role.sh by PATH for the
+        # address table, so both trigger ledgers — the typed one and the
+        # source-derived one — were blind to it: an AST import scan returns the
+        # empty set for a file that opens its dependency. This unit is RESIDENT,
+        # so without this line a correction to the fleet's addresses lands on
+        # disk and the running agent keeps identifying this host from the OLD
+        # table until something else restarts it.
+        "${../scripts/lib/host-role.sh}"
       ];
     };
     Install = {

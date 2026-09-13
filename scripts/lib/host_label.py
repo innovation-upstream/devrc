@@ -207,12 +207,33 @@ _ADDR_RANKS = ("PRIMARY", "SECONDARY")
 def parse_host_addrs(source: str, host_names=HOST_NAMES) -> tuple:
     """`((label, addr), …)` parsed out of host-role.sh, in ITS precedence order.
 
-    🔴 FAILS CLOSED, and that is the whole safety argument for reading a foreign
-    file at runtime. If the parse does not yield at least one address for EVERY
-    host in `host_names` — the file moved, was reformatted, lost a constant — it
-    returns `()`, i.e. "no address signal", and `local_host_label()` then refuses
-    rather than answering from a half-read table. A partial table is the one
-    outcome that could mislabel a machine, so it is the one outcome forbidden.
+    🔴 THE GUARD IS PER-HOST, NOT PER-CONSTANT — STATED AT THE WIDTH IT ACTUALLY
+    HOLDS. Three earlier revisions of this paragraph said "a partial table is the
+    one outcome forbidden"; that was measurably false, and an over-claiming
+    safety note is what the next reader trusts INSTEAD of looking. What the loop
+    below checks is that EVERY host in `host_names` contributed AT LEAST ONE
+    address. Lose all of a host's constants and it returns `()`. Lose ONE of a
+    host's two — a trailing comment on the line, an `export`/`declare -r` prefix,
+    single quotes, a templated `${WB_IP:-…}` value — and the parse yields a
+    3-entry PARTIAL table, which this function does NOT refuse.
+
+    🔴 WHY THAT IS STILL SAFE, WHICH IS THE CLAIM THAT MATTERS AND IS THE ONE
+    WORTH TRUSTING: every entry that survives is a correct `(host, addr)` PAIR.
+    Dropping one narrows the evidence, it never re-points it, so the worst a
+    partial table can do is fail to recognise a machine — `address_host_label()`
+    then returns None and `local_host_label()` REFUSES. Degradation here is
+    refusal, never mislabel. Measured in both directions by the
+    `..._degrades_to_a_PARTIAL_table_that_cannot_MISLABEL` test in
+    `scripts/tests/test_host_label_identity.py`, and pinned against a widening of
+    this guard by `MUT-11` in `scripts/tests/mutants-host-label.sh`.
+
+    The whole-host `()` is nonetheless the case worth keeping: a table holding
+    only the workbench's addresses would answer `workbench` for what the
+    workbench holds and nothing for the laptop, i.e. it would recreate #1601 for
+    one host while looking like a working signal.
+
+    ⚠ `()` IS NOT THE END OF THE STORY — see `host_addrs()`, which falls back to
+    the `PEER_SSH` nebula subset rather than to "no address signal at all".
     """
     found = {}
     for name, rank, addr in _IP_ASSIGN_RE.findall(source or ""):

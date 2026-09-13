@@ -44,7 +44,13 @@ trap 'rm -rf "$T"' EXIT
 ROOT="$T/tree"
 mkdir -p "$ROOT"
 cp -a "$SRC/scripts" "$ROOT/scripts"
-if [ -e "$ROOT/.git" ] || [ -e "$ROOT/scripts/.git" ]; then
+# 🔴 `nix/` TOO, AND IT IS NOT OPTIONAL. The suite asserts things about the
+# systemd units and the collector-env activation that read `nix/home.nix`
+# relative to the tree root; without it those tests fail on the COPY and the
+# battery aborts at its own "ALREADY RED" baseline — a harness fault that reads
+# as a repo fault. Nothing here ever mutates it.
+cp -a "$SRC/nix" "$ROOT/nix"
+if [ -e "$ROOT/.git" ] || [ -e "$ROOT/scripts/.git" ] || [ -e "$ROOT/nix/.git" ]; then
   echo "🔴 the copy carries a .git — refusing to run"; exit 2
 fi
 find "$ROOT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
@@ -132,6 +138,18 @@ printf '\n== the cross-check and the precedence ==\n'
 run 'MUT-2 conflict-check-dropped' \
   test_a_stated_label_the_address_contradicts_RAISES \
   's|^    if stated and derived and stated != derived:$|    if False:|'
+# 🔴 MUT-2b IS THE HALF MUT-2 CANNOT SEE. MUT-2 removes the guard entirely; a
+# guard can also be NARROWED, and until this row's killer existed the suite could
+# not tell the difference. Measured twice, both times with this row's killer
+# absent: narrowing the check to `... and stated == "laptop"` left the suite
+# fully GREEN (25 passed as the round-0 audit measured it; 28 passed re-measured
+# with the other new tests present and only the killer removed) — the #1601
+# direction (stated `workbench` on a machine whose address says `laptop`, which
+# is what the repo's own `.env.example` used to provision) was untested, while
+# only its mirror was covered.
+run 'MUT-2b conflict-check-fires-in-ONE-direction-only' \
+  test_a_stated_WORKBENCH_on_a_machine_whose_ADDRESS_says_laptop_RAISES \
+  's|^    if stated and derived and stated != derived:$|    if stated and derived and stated != derived and stated == "laptop":|'
 # 🔴 MUT-3 IS AN *EQUIVALENT* MUTANT, AND IT IS KEPT RATHER THAN DELETED.
 # It was written expecting a kill, SURVIVED, and the survival is CORRECT — not a
 # coverage gap. Swapping the two returns in `local_host_label` is unobservable
@@ -144,8 +162,20 @@ run 'MUT-2 conflict-check-dropped' \
 # So the env-over-file-over-address precedence is enforced by
 # `stated_host_label` and by the conflict guard, NOT by the order of these two
 # returns. Recording that is the point: the next reader who writes this mutant
-# gets the answer instead of re-deriving it, and a future change that WEAKENS
-# the conflict guard turns this line red, which is exactly when it should.
+# gets the answer instead of re-deriving it.
+#
+# ⚠ IT IS NOT A TRIPWIRE ON THE CONFLICT GUARD, AND THIS COMMENT SAID IT WAS.
+# The deleted sentence read "a future change that WEAKENS the conflict guard
+# turns this line red, which is exactly when it should". False in both available
+# shapes, and measured:
+#   * guard REMOVED in-source  -> the battery never reaches this line. The
+#     baseline check above goes red (MUT-2's killer fails on the unmutated file)
+#     and the script exits 1 at "🔴 ALREADY RED".
+#   * guard NARROWED in-source -> this mutant STILL SURVIVES and the battery
+#     still prints ok, because the swap remains unobservable for every input the
+#     narrowed guard lets through.
+# The guard's tripwires are MUT-2 and MUT-2b above, each killed by a named test.
+# Do not restore the tripwire claim.
 run 'MUT-3 derived-preferred-over-stated (EQUIVALENT)' SURVIVES \
   's|^    if stated:$|    if derived:\n        return derived\n    if stated:|'
 # MUT-3b is the precedence that IS observable: env over file, inside
@@ -172,12 +202,27 @@ run 'MUT-8 bind-probe-always-true' \
   's|^def _bind_holds_address(addr: str) -> bool:$|&\n    return True|'
 
 printf '\n== the shared table (host-role.sh is the owner) ==\n'
-run 'MUT-6 partial-table-returned-instead-of-()' \
-  test_a_table_missing_a_HOST_fails_CLOSED \
+# 🔴 THE GUARD IS PER-HOST, AND THE OLD NAME SAID PER-CONSTANT. It is the
+# whole-host `return ()` that is mutated here; a table missing ONE of a host's
+# two addresses is ACCEPTED by design (safe — every surviving entry is still a
+# correct (host, addr) pair, so the worst case is a refusal, never a mislabel).
+run 'MUT-6 whole-host-missing-table-accepted' \
+  test_a_table_missing_a_WHOLE_HOST_fails_CLOSED \
   's|^            return ()$|            pass|'
 run 'MUT-7 host-role.sh-ignored-PEER_SSH-always' \
   test_the_table_FOLLOWS_the_shell_file_rather_than_being_a_copy \
   's|^    if key:$|    if False:|'
+# 🔴 MUT-11 PINS THE GUARD'S WIDTH, WHICH THREE COMMENTS USED TO OVERSTATE. They
+# said a reformat of ONE `*_IP_*` constant makes the parse refuse; it does not —
+# the guard is per-HOST (`any`), so one dropped line yields a 3-entry PARTIAL
+# table, which is accepted and is safe (every surviving entry is still a correct
+# (host, addr) pair). Widening it to `all` is the change those comments described,
+# and this row is what makes the corrected wording machine-checked rather than
+# merely reworded: change the width and the test that documents the real
+# behaviour goes red.
+run 'MUT-11 per-HOST-guard-widened-to-per-RANK' \
+  test_a_reformatted_SINGLE_constant_degrades_to_a_PARTIAL_table_that_cannot_MISLABEL \
+  's|^        if not any((host, rank) in found for rank in _ADDR_RANKS):$|        if not all((host, rank) in found for rank in _ADDR_RANKS):|'
 
 printf '\n== the shell entry point transcript-push.sh reads ==\n'
 run 'MUT-9 refusal-on-stdout-and-exit-0' \

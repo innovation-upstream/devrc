@@ -35,11 +35,14 @@ used the real four could not tell "read the table" from "printed the literal".
 
 🔴 WHICH TESTS ARE REGRESSION COVERAGE, AND AGAINST WHICH BASE. `RED_AT_BASE`
 names the tests that fail at `origin/main` (af943906/e1b6a9e3) BECAUSE OF THE
-DEFECT — not merely because a new symbol does not exist there. Everything else
-in this file is an INVARIANT GUARD: it pins behaviour that was already correct,
-or behaviour of code this branch introduced, and is NOT counted as evidence that
-a bug was fixed. The distinction is written down because a guard that never
-could have gone red reads as coverage and provides none.
+DEFECT — not merely because a new symbol does not exist there.
+`GAP_CLOSERS_PROVEN_BY_MUTATION` names the tests that close a hole this branch
+LEFT, whose sensitivity is demonstrated by a named mutant rather than by a base
+revision. Everything else in this file is an INVARIANT GUARD: it pins behaviour
+that was already correct, or behaviour of code this branch introduced, and is
+NOT counted as evidence that a bug was fixed. The distinction is written down
+because a guard that never could have gone red reads as coverage and provides
+none.
 
 The MUTATION MATRIX this suite was checked against is `MUTATION_MATRIX` at the
 bottom of this file: each mutant, and the test that kills it WITH ITS OWN
@@ -76,6 +79,37 @@ RED_AT_BASE = {
     "test_the_address_identifies_the_laptop_when_env_and_file_are_silent",
     "test_a_stated_label_the_address_contradicts_RAISES",
     "test_the_shell_entry_point_prints_nothing_and_exits_nonzero_on_a_refusal",
+}
+
+#: 🔴 A THIRD CATEGORY, AND IT EXISTS BECAUSE NEITHER OF THE TWO ABOVE WOULD BE
+#: HONEST FOR IT. `test_a_stated_WORKBENCH_on_a_machine_whose_ADDRESS_says_laptop
+#: _RAISES` covers the #1601 DIRECTION — a machine told it is the workbench while
+#: its address says laptop — which is what this repo's own `.env.example` used to
+#: provision onto a fresh host, and which nothing tested. Measured:
+#:
+#:   at HEAD                  GREEN — the guard already covered both directions,
+#:                            so it is not regression coverage for this branch
+#:   at `origin/main`         the scenario is UNREPRESENTABLE: that module has no
+#:                            address signal at all (`hasattr(m,
+#:                            "address_host_label")` is False), and the seeded
+#:                            `ACTIVITY_HOST=workbench` simply returns
+#:                            'workbench' on any machine. The test file errors at
+#:                            fixture setup there on a missing symbol, which is
+#:                            NOT the "red because of the defect" RED_AT_BASE
+#:                            claims, so it is deliberately not listed above.
+#:   under MUT-2b             RED, on this test's own assertion. Narrowing the
+#:                            conflict guard to one direction left the suite
+#:                            fully green before this test existed — 25 passed
+#:                            when the round-0 audit measured it, re-measured at
+#:                            28 passed with only this test removed.
+#:
+#: That mutation IS the sensitivity evidence. Listing the test as regression
+#: coverage it cannot provide would be the inflation `RED_AT_BASE` exists to
+#: prevent; leaving it unlabelled would read as an invariant guard, which
+#: undersells it.
+GAP_CLOSERS_PROVEN_BY_MUTATION = {
+    "test_a_stated_WORKBENCH_on_a_machine_whose_ADDRESS_says_laptop_RAISES":
+        "MUT-2b conflict-check-fires-in-ONE-direction-only",
 }
 
 #: 🔴 DELIBERATELY *NOT* IN `RED_AT_BASE`, AND THE OMISSION IS THE POINT.
@@ -346,6 +380,68 @@ def test_a_stated_label_the_address_contradicts_RAISES():
             "alone does not tell you which is wrong")
 
 
+def test_a_stated_WORKBENCH_on_a_machine_whose_ADDRESS_says_laptop_RAISES():
+    """🔴 THE #1601 DIRECTION, AND IT WAS THE ONE DIRECTION NOTHING COVERED.
+
+    The test above asserts the MIRROR — stated `laptop`, address says
+    `workbench`. This asserts the direction the defect actually produces: a
+    machine told it is the WORKBENCH while its own address says LAPTOP. That is
+    what `scripts/collector/.env.example` used to bake into every freshly
+    provisioned host (it read `ACTIVITY_HOST=workbench`, copied verbatim onto any
+    machine lacking the file), and it is the exact shape of the silent
+    wrong-answer #1601 closed: the laptop believing it is the workbench.
+
+    🔴 PROOF THE GAP WAS REAL, NOT A SYMMETRY ARGUMENT. Narrowing the guard in
+    `local_host_label` to
+
+        if stated and derived and stated != derived and stated == "laptop":
+
+    left the WHOLE suite green — 25 passed as the round-0 audit measured it, and
+    re-measured here at 28 passed with this file's other new tests present and
+    only THIS one removed — and `MUT-3` still SURVIVED under it. With this test
+    present that narrowing fails HERE, on this test's own assertion; see `MUT-2b`
+    in `scripts/tests/mutants-host-label.sh`.
+
+    ⚠ NOT REGRESSION COVERAGE FOR THIS BRANCH, AND CLASSIFIED AS SUCH: it is
+    GREEN at HEAD, and at `origin/main` the scenario cannot even be expressed.
+    See `GAP_CLOSERS_PROVEN_BY_MUTATION` at the top of this file for the three
+    measurements and why neither existing category fits.
+
+    Both feeders get their own arm, because they are separate code paths and the
+    higher-precedence one (the env var) is the one a guard applied only to the
+    file would pass straight through.
+    """
+    table = hl.host_addrs()
+    laptop = [a for lbl, a in table if lbl == "laptop"]
+    assert laptop, "the shared table knows no laptop address"
+
+    # (a) the ENVIRONMENT states `workbench`; the machine holds the LAPTOP's
+    #     addresses.
+    absent = Path(hl.ACTIVITY_ENV + "-absent")
+    with pytest.raises(hl.HostLabelConflict) as env_exc:
+        hl.local_host_label(env={"ACTIVITY_HOST": "workbench"}, env_file=str(absent),
+                            addrs=table, holds=holds_only(*laptop))
+    assert "ACTIVITY_HOST" in str(env_exc.value), (
+        "the conflict must name the ENV VAR that made the wrong claim")
+    for both in ("'workbench'", "'laptop'"):
+        assert both in str(env_exc.value), (
+            "the message must carry BOTH the claim and the measurement")
+
+    # (b) the FILE states `workbench` — this is the provisioned-template case
+    #     verbatim, and the reason F1's fix is a provisioning fix.
+    f = Path(hl.ACTIVITY_ENV + "-seeded")
+    f.write_text("ACTIVITY_HOST=workbench\n", encoding="utf-8")
+    with pytest.raises(hl.HostLabelConflict) as file_exc:
+        hl.local_host_label(env={}, env_file=str(f), addrs=table,
+                            holds=holds_only(*laptop))
+    assert str(f) in str(file_exc.value), (
+        "the conflict must name the FILE that made the wrong claim — on a freshly "
+        "provisioned host that file is the whole bug, and the operator has to be "
+        "told which path to edit")
+    for both in ("'workbench'", "'laptop'"):
+        assert both in str(file_exc.value)
+
+
 def test_a_stated_label_the_address_AGREES_with_is_returned():
     """INVARIANT GUARD — the cross-check must not refuse the normal case."""
     table = hl.host_addrs()
@@ -414,13 +510,21 @@ def test_the_table_FOLLOWS_the_shell_file_rather_than_being_a_copy():
         hl._reset_host_addrs_cache()
 
 
-def test_a_table_missing_a_HOST_fails_CLOSED():
-    """🔴 A PARTIAL TABLE IS THE ONE OUTCOME THAT COULD MISLABEL A MACHINE.
+def test_a_table_missing_a_WHOLE_HOST_fails_CLOSED():
+    """🔴 LOSING EVERY ADDRESS OF ONE HOST IS THE OUTCOME THAT COULD MISLABEL.
 
     If host-role.sh loses the laptop's constants, a table holding only the
     workbench's would answer `workbench` for anything the workbench holds and
     nothing for the laptop — i.e. it would recreate the defect for one host. The
     parse must return `()` instead. INVARIANT GUARD.
+
+    ⚠ SCOPE, AND THE DOCSTRING USED TO OVERSTATE IT. This name and this body are
+    about a WHOLE HOST going missing, which is all the guard in
+    `parse_host_addrs` checks. Losing ONE of a host's two constants yields a
+    3-entry PARTIAL table that is NOT refused — measured, and pinned as its own
+    behaviour by the test below. The old name (`..._a_HOST_fails_CLOSED`) and the
+    old docstring ("a partial table is the one outcome forbidden") read as
+    coverage of both and covered only this one.
     """
     assert hl.parse_host_addrs('WORKBENCH_IP_PRIMARY="192.0.2.101"\n') == ()
     assert hl.parse_host_addrs("") == ()
@@ -428,6 +532,67 @@ def test_a_table_missing_a_HOST_fails_CLOSED():
     # Not-an-address is not an address.
     assert hl.parse_host_addrs(
         'WORKBENCH_IP_PRIMARY="${SOME_VAR}"\nLAPTOP_IP_PRIMARY="10.0.0.1"\n') == ()
+
+
+def test_a_reformatted_SINGLE_constant_degrades_to_a_PARTIAL_table_that_cannot_MISLABEL():
+    """🔴 THE BEHAVIOUR THE 'FAILS CLOSED' COMMENTS DENIED, PINNED AS WHAT IT IS.
+
+    Three comments (`parse_host_addrs`, the test above, `host-role.sh`) claimed a
+    reformat of one of the four `*_IP_*` constants makes the parse refuse. It does
+    not: the guard is per-HOST, so a trailing comment / an `export` prefix /
+    single quotes / a templated value on ONE line drops that line and leaves a
+    3-entry table. This test measures the drop AND the property that makes the
+    drop harmless, so the corrected comments are machine-checked rather than
+    merely reworded.
+
+    THE SAFETY PROPERTY, IN BOTH DIRECTIONS:
+      * every surviving entry is still a CORRECT (host, addr) pair, so a machine
+        holding any of them is still named CORRECTLY — never as the other host;
+      * a machine whose only remaining evidence was the dropped line is not
+        named at all, and `local_host_label()` REFUSES.
+    Degradation is refusal, never mislabel. INVARIANT GUARD.
+    """
+    # Four real reformats, each dropping the workbench's PRIMARY and nothing else.
+    for label, body in (
+        ("trailing comment",
+         'WORKBENCH_IP_PRIMARY="192.0.2.101"  # the LAN one\n'),
+        ("export prefix", 'export WORKBENCH_IP_PRIMARY="192.0.2.101"\n'),
+        ("single quotes", "WORKBENCH_IP_PRIMARY='192.0.2.101'\n"),
+        ("templated", 'WORKBENCH_IP_PRIMARY="${WB_IP:-192.0.2.101}"\n'),
+    ):
+        src = (body
+               + 'WORKBENCH_IP_SECONDARY="192.0.2.102"\n'
+                 'LAPTOP_IP_PRIMARY="203.0.113.201"\n'
+                 'LAPTOP_IP_SECONDARY="203.0.113.202"\n')
+        table = hl.parse_host_addrs(src)
+        assert table == (("laptop", "203.0.113.201"),
+                         ("workbench", "192.0.2.102"),
+                         ("laptop", "203.0.113.202")), (
+            f"{label}: expected a 3-entry PARTIAL table (the guard is per-HOST, "
+            f"not per-constant), got {table}")
+
+        # The workbench is still named CORRECTLY from what survived…
+        assert hl.address_host_label(
+            addrs=table, holds=holds_only("192.0.2.102")) == "workbench", label
+        # …the laptop is unaffected…
+        assert hl.address_host_label(
+            addrs=table, holds=holds_only("203.0.113.201")) == "laptop", label
+        # …and a machine holding ONLY the dropped address is not named at all,
+        # which upstream is a refusal rather than a wrong answer.
+        assert hl.address_host_label(
+            addrs=table, holds=holds_only("192.0.2.101")) is None, label
+        with pytest.raises(hl.HostLabelUnresolved):
+            hl.local_host_label(env={}, env_file=str(Path(hl.ACTIVITY_ENV)),
+                                addrs=table, holds=holds_only("192.0.2.101"))
+
+    # POSITIVE CONTROL: the same four lines UNreformatted parse to all four, so
+    # the 3-entry results above are the reformat's doing and not a parser that
+    # cannot read this fixture at all.
+    whole = ('WORKBENCH_IP_PRIMARY="192.0.2.101"\n'
+             'WORKBENCH_IP_SECONDARY="192.0.2.102"\n'
+             'LAPTOP_IP_PRIMARY="203.0.113.201"\n'
+             'LAPTOP_IP_SECONDARY="203.0.113.202"\n')
+    assert len(hl.parse_host_addrs(whole)) == 4
 
 
 def test_an_unreadable_shell_file_degrades_to_the_PEER_SSH_subset_not_to_a_guess():
@@ -599,6 +764,95 @@ def test_the_shell_entry_point_prints_nothing_and_exits_nonzero_on_a_refusal():
 
 
 # =========================================================================== #
+# 7. THE REPO'S OWN PROVISIONING MUST NOT STATE A HOST
+# =========================================================================== #
+_ENV_TEMPLATE = _SCRIPTS / "collector" / ".env.example"
+_HOME_NIX = _SCRIPTS.parent / "nix" / "home.nix"
+
+
+def test_the_provisioning_template_STATES_NO_HOST():
+    """🔴 A TEMPLATE CANNOT KNOW WHICH MACHINE IT LANDS ON, AND THIS ONE CLAIMED
+    TO. `scripts/collector/.env.example` carried `ACTIVITY_HOST=workbench`, and
+    `nix/home.nix`'s `home.activation.activityCollectorEnv` copies that file
+    VERBATIM onto ANY host that lacks `~/.config/activity-collector/env`. So a
+    fresh LAPTOP was provisioned with a stated label its own address contradicts.
+
+    Before #1601 that was a wrong column. After #1601 it is an OUTAGE: the stated
+    label is cross-checked against an address the machine holds, so every
+    consumer raises `HostLabelConflict` — transcript-push every 5 minutes,
+    tmux-reply-agent FAILED after 5 restarts, tmux-snapshot-push every 2 minutes,
+    `peer-host` rc 4 — on an otherwise-healthy machine. Latent only because this
+    laptop's file had been hand-edited years earlier; a reinstall, a new machine
+    or `rm`ing that file arms it. NOTHING in `scripts/tests` or
+    `scripts/collector` read this template's value before this test.
+
+    🔴 CHECKED WITH THE MODULE'S OWN PARSER, not a regex written here. What makes
+    the template dangerous is precisely what `_file_stated_label` would read out
+    of it at runtime, so that is the question asked — one rule, not a second
+    spelling of it that can drift from the first.
+    """
+    body = _ENV_TEMPLATE.read_text(encoding="utf-8")
+
+    assert hl._file_stated_label(body) == "", (
+        "the provisioning template states a host label. It is copied verbatim onto "
+        "any machine that lacks the real file, so whichever label it names is WRONG "
+        "on the other host — and since #1601 a wrong stated label is a refusal in "
+        "every consumer, not a cosmetic error. Leave it unset and let the activation "
+        "derive it; see nix/home.nix::activityCollectorEnv")
+
+    # 🔴 POSITIVE CONTROL: the parser CAN read a label out of this exact body, so
+    # the "" above is the template's doing and not a parser wired to nothing.
+    assert hl._file_stated_label(body + "\nACTIVITY_HOST=laptop\n") == "laptop"
+    # 🔴 AND A CONTROL ON THE FILE: it is still a real template with real
+    # settings, so the "" is not the answer for an empty or vanished file.
+    assert "CLICKHOUSE_URL=" in body and "ACTIVITY_BATCH_SIZE=" in body
+
+
+def test_the_activation_DERIVES_the_label_instead_of_templating_one():
+    """🔴 THE OTHER HALF OF F1: removing the value from the template is only safe
+    if something supplies it. The collector stamps `host` from `ACTIVITY_HOST`
+    and falls back to `hostname` — `nixos` on BOTH machines — so a template that
+    states nothing and an activation that derives nothing would trade a
+    conflicting label for a colliding one.
+
+    The activation must therefore RUN `host_label.py`, which is also what keeps
+    this to ONE source of truth: the same module every consumer reads, rather
+    than a third place the fleet's identity is decided.
+
+    Structural (the block's text), because the alternative is running
+    `home-manager switch` — which is a deploy, not a test.
+    """
+    text = _HOME_NIX.read_text(encoding="utf-8")
+    # 🔴 THE ASSIGNMENT, NOT THE NAME. `home.activation.activityCollectorEnv`
+    # also appears inside a COMMENT in the `let` block (the `hostLabelProbe`
+    # binding explains why it exists), and matching the bare name landed on that
+    # comment — a block that contains neither the script nor its writes, so this
+    # test failed for a reason that had nothing to do with the activation.
+    start = text.index("home.activation.activityCollectorEnv = ")
+    block = text[start:text.index("'';", start)]
+    # POSITIVE CONTROL on the extraction: this must be the activation BODY, not
+    # prose about it. Without this the assertions below could be measuring any
+    # region of the file that happens to mention the name.
+    assert 'envFile="$HOME/.config/activity-collector/env"' in block, (
+        f"the extracted block is not the activation script: {block[:200]!r}")
+
+    assert "host_label.py" in block, (
+        "the activation no longer derives the host label. With the template "
+        "stating none, nothing would set ACTIVITY_HOST and the collector would "
+        "stamp `hostname` — `nixos` on both machines, which is the collision "
+        "ACTIVITY_HOST exists to prevent")
+    assert "ACTIVITY_HOST=" in block, (
+        "the activation runs host_label.py but never writes ACTIVITY_HOST")
+    # 🔴 NON-CLOBBERING. It must only ever ADD the line, and only when the file
+    # states none — a hand-edited value is the operator's, and re-deriving over it
+    # would make a `home-manager switch` silently rewrite their config.
+    assert ">>" in block and "grep" in block, (
+        "the activation must APPEND the derived label, and only when the file "
+        "states none — see the block's own comment. A rewrite would clobber a "
+        "hand-edited value on every switch")
+
+
+# =========================================================================== #
 # MUTATION MATRIX
 # =========================================================================== #
 #: Each row: the mutation applied to `scripts/lib/host_label.py`, and the ONE
@@ -612,24 +866,43 @@ MUTATION_MATRIX = {
         "test_nothing_determines_it_REFUSES_instead_of_saying_workbench",
     "MUT-2 the stated/derived conflict check is dropped":
         "test_a_stated_label_the_address_contradicts_RAISES",
+    # 🔴 THE GUARD'S OTHER HALF, AND THE ONE THE SUITE COULD NOT SEE. Narrowing
+    # the conflict check to `… and stated == "laptop"` left the whole 25-test
+    # suite GREEN before its killer existed — the #1601 direction (stated
+    # workbench, address says laptop) was simply untested, and it is the
+    # direction the repo's own provisioning produced.
+    "MUT-2b the conflict check fires for only ONE of the two directions":
+        "test_a_stated_WORKBENCH_on_a_machine_whose_ADDRESS_says_laptop_RAISES",
     # 🔴 EQUIVALENT MUTANT, KEPT ON PURPOSE. Swapping the two returns in
     # `local_host_label` is unobservable: the conflict guard above has already
     # refused the only input that distinguishes them (both set and DIFFERENT),
-    # and in every other case one of the two is falsy. It survives, correctly.
-    # The battery asserts SURVIVES for it, so a future change that weakens the
-    # conflict guard turns it red — which is when it should.
+    # and in every other case one of the two is falsy. It survives, correctly,
+    # and the row exists so the next reader who writes this mutant gets the
+    # answer instead of re-deriving it.
+    #
+    # ⚠ IT IS NOT A TRIPWIRE ON THE CONFLICT GUARD, AND THIS ROW SAID IT WAS.
+    # The claim ("a future change that weakens the conflict guard turns it red")
+    # is false in BOTH available shapes, measured: with the guard REMOVED
+    # in-source the battery aborts at its own red baseline before this line ever
+    # runs, and with the guard NARROWED this mutant still SURVIVES and the
+    # battery still prints ok. The guard's real tripwires are MUT-2 and MUT-2b,
+    # each with a named killer above.
     "MUT-3 `derived` preferred over `stated` — EQUIVALENT, must SURVIVE":
-        "(no killer: see mutants-host-label.sh)",
+        "(no killer, and NOT a tripwire: see mutants-host-label.sh)",
     "MUT-3b the FILE is preferred over the environment":
         "test_the_environment_still_wins",
     "MUT-4 the per-label dedupe in address_host_label is removed":
         "test_holding_BOTH_of_one_hosts_addresses_is_ordinary_not_a_conflict",
     "MUT-5 the multi-host refusal becomes `hits[0]`":
         "test_holding_TWO_hosts_addresses_REFUSES_rather_than_picking_one",
-    "MUT-6 parse_host_addrs returns a PARTIAL table instead of ()":
-        "test_a_table_missing_a_HOST_fails_CLOSED",
+    "MUT-6 parse_host_addrs accepts a table missing a WHOLE HOST":
+        "test_a_table_missing_a_WHOLE_HOST_fails_CLOSED",
     "MUT-7 host_addrs ignores host-role.sh and uses PEER_SSH always":
         "test_the_table_FOLLOWS_the_shell_file_rather_than_being_a_copy",
+    # The guard's WIDTH: per-HOST (`any`), not per-rank (`all`). Three comments
+    # claimed the latter; this row is what keeps the corrected wording honest.
+    "MUT-11 the per-HOST address guard is widened to per-RANK":
+        "test_a_reformatted_SINGLE_constant_degrades_to_a_PARTIAL_table_that_cannot_MISLABEL",
     "MUT-8 the bind probe returns True unconditionally":
         "test_the_bind_probe_answers_truthfully_about_THIS_machine",
     "MUT-9 __main__ prints the refusal to stdout and exits 0":
