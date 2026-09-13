@@ -6583,19 +6583,87 @@ def test_the_review_terminal_runs_the_TUI_with_the_repo_then_the_number(tui):
     assert argv[argv.index("-e") + 1] == MO.REVIEW_EXE, argv
 
 
-def test_the_review_terminal_carries_its_own_window_class_and_geometry(tui):
+def test_the_review_terminal_names_itself_and_sets_NO_geometry(tui):
     """The instance half of the class names THIS window, so an i3 rule can size
     a review without catching the fzf picker — which uses the SAME general
     class. Asserted as a pair for that reason: `float` alone would be satisfied
-    by the picker's own class."""
+    by the picker's own class.
+
+    🔴 AND THE ARGV MUST CARRY NO `window.dimensions` AT ALL. This used to assert
+    the opposite — that the argv carried `REVIEW_COLUMNS`/`REVIEW_LINES` — which
+    read its expectation straight out of the implementation and so could not fail
+    for any value those constants held, including the ones that overflowed the
+    screen. They are gone, and the NEGATIVE is the claim worth pinning.
+
+    WHY: `window.dimensions` is a count of CHARACTER CELLS, and a cell's pixel
+    size is a function of font size and DPI. MEASURED 2026-09-12 by `TIOCGWINSZ`
+    on each host's own alacritty pty: the workbench's cell is 11.0x22.0 px in a
+    3440x1413 workspace, the laptop's 19.0x37.0 px in 2256x1480. So 200x50 cells
+    — the value that drew the complaint — is 2200x1100 px on the workbench and
+    3800x1850 on the laptop, 168% x 125% of that workspace. 140x40, the lowered
+    value, is still 2660x1480 there, 118% of its width. No cell count fits both,
+    so i3 is the sole authority (`reviewSizePpt` in nix/i3/config.nix, per host)
+    and there is nothing here to disagree with it.
+
+    ⚠ Those workspace rects are the FIT basis. i3's own `ppt` arithmetic uses the
+    OUTPUT rect instead (3440x1440 / 2256x1504 — `cmd_resize_set()` in i3 4.25.1
+    multiplies `con_get_output(…)->rect`), which is a different number by the
+    status bar; see the derivation in nix/i3/config.nix. Do not carry one rect
+    over to the other.
+
+    The PICKER keeps its cell count, deliberately — it is small enough that no
+    display overflows it, and its i3 rule carries no `resize`. Asserted here too,
+    so "delete the hint" cannot quietly spread to the window that wants one.
+    """
     tui.available = True
     MO.open_url(GH_PULL_URL)
     argv = tui.spawns[0]
     assert argv[argv.index("--class") + 1] == MO.REVIEW_CLASS
     assert MO.REVIEW_CLASS == "float,mention-review"
     assert MO.REVIEW_CLASS != MO.PICKER_CLASS
-    assert f"window.dimensions.columns={MO.REVIEW_COLUMNS}" in argv
-    assert f"window.dimensions.lines={MO.REVIEW_LINES}" in argv
+    # Substring-matched across the WHOLE argv, not `-o` pairs: the hazard is a
+    # cell count reaching alacritty by any spelling, including one this test did
+    # not imagine (`--option`, an `=`-joined form, a different sub-key).
+    dims = [a for a in argv if "window.dimensions" in a]
+    assert not dims, (
+        "the review terminal's argv carries %s. i3 is the ONLY authority on this "
+        "window's size — it resizes in percent of the OUTPUT rect, per host, "
+        "because a CHARACTER-CELL count cannot fit a 3440x1413 workspace at an "
+        "11.0x22.0 px cell and a 2256x1480 one at 19.0x37.0 px. A hint here is a "
+        "second number for one decision and can only ever be right on one host: "
+        "200x50 cells is 3800x1850 px on the laptop (168%% of its width) and even "
+        "140x40 is 2660x1480 (118%%). Size it in nix/i3/config.nix.\nargv: %s"
+        % (dims, argv))
+    assert not hasattr(MO, "REVIEW_COLUMNS"), (
+        "scripts/mention-open.py defines REVIEW_COLUMNS again. The review "
+        "window's geometry is i3's, in percent of the OUTPUT rect; a cell constant "
+        "here is the defect returning, whether or not it reaches the argv yet.")
+    assert not hasattr(MO, "REVIEW_LINES"), (
+        "scripts/mention-open.py defines REVIEW_LINES again — see REVIEW_COLUMNS "
+        "above.")
+    # 🔴 POSITIVE CONTROL for the scan above — without it, `dims == []` is
+    # indistinguishable from a pattern wired to nothing. Two halves, because they
+    # are two different claims.
+    #
+    # (a) the PREDICATE can match: fed an argv of exactly the shape this module
+    #     builds for the picker, it returns non-empty.
+    probe = ["alacritty", "--class", MO.PICKER_CLASS,
+             "-o", f"window.dimensions.columns={MO.PICKER_COLUMNS}",
+             "-o", f"window.dimensions.lines={MO.PICKER_LINES}"]
+    assert [a for a in probe if "window.dimensions" in a], (
+        "the `window.dimensions` scan does not match even an argv built to carry "
+        "it — the negative assertion above is measuring nothing. %s" % (probe,))
+    # (b) the DELETION WAS SURGICAL: the handler still sets cell dimensions
+    #     somewhere (the picker's spawn, which keeps them on purpose). A module
+    #     with none left would mean this change had spread to the picker, and (a)
+    #     alone cannot see that.
+    assert "window.dimensions" in HANDLER.read_text(encoding="utf-8"), (
+        "scripts/mention-open.py no longer sets `window.dimensions` ANYWHERE. "
+        "Only the REVIEW window's hint was meant to go; the picker sizes itself "
+        "in cells deliberately and its i3 rule carries no `resize`.")
+    assert MO.PICKER_COLUMNS and MO.PICKER_LINES, (
+        "PICKER_COLUMNS/PICKER_LINES are the picker's geometry and must survive "
+        "the review window's hint being deleted.")
 
 
 # --------------------------------------------------------------------------- #

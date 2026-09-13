@@ -1683,18 +1683,87 @@ def open_browser(url: str) -> int:
     return 0
 
 
-# The float terminal the review TUI runs in, and its geometry.
+# The float terminal the review TUI runs in. ITS SIZE IS NOT SET HERE.
 #
 # `--class float,mention-review` puts it under `for_window [class="float"]
 # floating enable` in `nix/i3/config.nix` — the same rule the fzf picker's
-# terminal uses — while the instance half names THIS window specifically, so an
-# i3 rule can size or place a review without catching the picker.
+# terminal uses — while the instance half names THIS window specifically, and a
+# second, narrower rule keys on exactly that: `for_window [class="float"
+# instance="mention-review"] floating enable, resize set <w> ppt <h> ppt, move
+# position center`, with the percentages PER HOST (`reviewSizePpt` there).
 #
-# Bigger than `PICKER_*` because the two windows hold different things: the
-# picker is a list, a review is a diff beside a file panel.
+# 🔴 THERE IS DELIBERATELY NO `REVIEW_COLUMNS`/`REVIEW_LINES`, AND NO
+# `-o window.dimensions.*` ON THE COMMAND LINE BELOW. i3 is the sole authority on
+# this window's geometry; a cell hint here would be a second number for one
+# decision, in a file that cannot see the workspace it has to fit.
+#
+# A cell is not a length — its pixel size is a function of the font size and the
+# display's DPI — so no single cell count fits both hosts. MEASURED 2026-09-12 by
+# `TIOCGWINSZ` on each host's own running alacritty pty (it reports the grid in
+# rows/cols AND in pixels, so the cell size is a division, not an estimate), with
+# the rects from `i3-msg -t get_outputs` / `-t get_workspaces`, i3 4.25.1:
+#
+#   host       OUTPUT rect  workspace rect  bar   cell (px)     largest grid seen
+#   workbench  3440x1440    3440x1413       27px  11.0 x 22.0   312 x 63
+#   laptop     2256x1504    2256x1480       24px  19.0 x 37.0   118 x 39
+#
+# 🔴 THE TWO RECTS ARE BOTH LOAD-BEARING AND THEY ARE NOT INTERCHANGEABLE. i3
+# resolves `resize set … ppt` against the **OUTPUT** rect (i3 4.25.1
+# `src/commands.c`, `cmd_resize_set()`: `con_get_output(floating_con)->rect`), so
+# the bar height is NOT subtracted from what a percentage buys; whether the result
+# FITS is a question about the WORKSPACE rect, which is the output minus the bar
+# and also what `move position center` centres against
+# (`con_get_workspace(…)->rect`). Deriving the percentages against the workspace
+# understated the height by 27px / 24px, which is how `78 ppt` came to look
+# sub-cell on the workbench when it is a whole row bigger.
+#
+# The laptop's cell is 1.73x wider and 1.68x taller than the workbench's, 2.90x
+# the area. So 200x50, the value that drew the complaint, is 2200x1100 px on the
+# workbench (fine) and 3800x1850 on the laptop — 168% x 125% of its 2256x1480
+# workspace, the defect; and 140x40, the lowered hint this constant briefly held,
+# is still 2660x1480 on the laptop, 118% of its width. A hint that can only ever
+# be right on one host is not a fallback, it is a second bug.
+#
+# With no `window.dimensions` alacritty maps at its own default (~80x24), which is
+# 880x528 px on the workbench and 1520x888 on the laptop — inside both workspaces.
+# So the pre-resize flash is small-then-right rather than oversized-then-right,
+# and if the i3 rule is ever absent the window is merely SMALL, which is usable.
+# That is a strictly better failure mode than a window bigger than the screen.
+#
+# 🔴 THAT "ever absent" IS A REAL DEPLOY STATE, NOT A HYPOTHETICAL. This file is
+# exec'd straight out of the working tree, so a `git pull` makes the hint deletion
+# live with no switch; nix/i3/config.nix is an `xdg.configFile`, so it needs a
+# `home-manager switch` AND an explicit `i3-msg reload` (i3 does not re-read its
+# config on change, and nothing in nix/ reloads it). Deploy order is therefore
+# merge -> `scripts/ship.sh` -> `i3-msg reload` on each host, and in between the
+# review window opens at ~80x24 on both.
+#
+# ⚠ Every cell figure above models the i3 RECT only, and a floating con's rect
+# INCLUDES its decoration, so the CLIENT grid is smaller. The decoration term is
+# quantified in nix/i3/config.nix beside `reviewSizePpt`; `floating_resize`'s
+# size-increment snapping is still unmodelled. Treat these grids as approximate.
+#
+# 🔴 AND THE DECORATION IS `pixel 2`, NOT `normal 2` — THIS COMMENT SAID
+# OTHERWISE AND IT WAS WRONG. There is no titlebar. `config.default_floating_border`
+# (BS_NORMAL by default) is applied only inside `floating_enable()` under
+# `if (automatic)` (i3 4.25.1 src/floating.c:353-354), and `for_window … floating
+# enable` is a COMMAND: `cmd_floating()` calls `floating_enable(con, false)`
+# (src/commands.c:1157), and `run_assignments()` runs at src/manage.c:588 — after
+# the `want_floating` decision at src/manage.c:462-546, which an alacritty
+# toplevel does not trip. So the con keeps `config.default_border`
+# (src/con.c:44), i.e. **BS_PIXEL / logical_px(2)** from `default_border pixel 2`,
+# and the client area is the rect minus 4 px in BOTH axes (src/con.c:1846-1849).
+# LIVE, read-only: the running alacritty windows report `border=pixel,
+# current_border_width=2`, and the config sets no `default_floating_border`, no
+# `new_float` and no `for_window … border`.
+#
+# Consequence for the workbench: `64 ppt 77 ppt` is a 2201x1108 rect, a 2197x1104
+# client, **199x50** cells — ONE COLUMN narrower than the 200x50 the deleted
+# `REVIEW_COLUMNS`/`REVIEW_LINES` produced. `78 ppt` gives the same 199x50. ⚠ The
+# rendered grid has never been OBSERVED on the workbench: that host's
+# `~/.config/mention-open/picks.jsonl` does not exist, so this window has never
+# opened there.
 REVIEW_CLASS = "float,mention-review"
-REVIEW_COLUMNS = 200
-REVIEW_LINES = 50
 
 # The wrapper that runs neovim with octo.nvim configured. Packaged as
 # `nix/pkgs/tools/nvim-octo/` and pinned onto the hint wrapper's PATH by
@@ -1832,10 +1901,14 @@ def open_tui(url: str) -> tuple[int, str]:
         # `nvim-octo` takes `<owner/repo> <number>` as two ordinary argv
         # entries and assembles the ex-command itself, so no quoting hazard
         # reaches this file and argv[0] stays the constant the ledger needs.
+        #
+        # 🔴 NO `-o window.dimensions.*` HERE, ON PURPOSE — see REVIEW_CLASS.
+        # i3 sizes this window in `ppt`, which is a percent of the OUTPUT rect
+        # (not the workspace — `cmd_resize_set()` in i3 4.25.1), per host; a
+        # cell count added back here would be a second geometry for one window
+        # and could only ever fit one of the two displays.
         subprocess.Popen(
             ["alacritty", "--class", REVIEW_CLASS,
-             "-o", f"window.dimensions.columns={REVIEW_COLUMNS}",
-             "-o", f"window.dimensions.lines={REVIEW_LINES}",
              "-e", REVIEW_EXE, repo, num],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1956,9 +2029,41 @@ def open_reference(url: str) -> tuple[int, str]:
 # `scripts/tests/test_i3_picker_centering.py` derives the instance FROM this
 # constant rather than spelling it, and goes red on the disagreement.
 #
-# The SIZE stays here and only here. i3 centres the window alacritty sized; the
-# config carries no `resize set`, so `PICKER_COLUMNS`/`PICKER_LINES` below are
-# the single source of the picker's geometry.
+# The SIZE stays here and only here — FOR THE PICKER. i3 centres the window
+# alacritty sized; the picker's rule carries no `resize set`, so
+# `PICKER_COLUMNS`/`PICKER_LINES` below are the single source of the picker's
+# geometry. 🔴 THE CONFIG DOES CARRY A `resize set` NOW — for the REVIEW window,
+# on `instance="mention-review"`, with PER-HOST percentages (`reviewSizePpt` in
+# nix/i3/config.nix) — so this is a claim about the PICKER's rule, not about the
+# file, and the review window's geometry is the exact OPPOSITE arrangement: it
+# passes no `window.dimensions` at all and i3 owns its size outright.
+#
+# (⚠ `reviewSizePpt`'s percentages are of the OUTPUT rect, not the workspace —
+# 3440x1440 and 2256x1504. The workspace rects below are the output minus the
+# status bar, and they are the right basis for a FIT question, which is what the
+# rest of this block asks. Do not carry one rect over to the other: the review
+# window's `ppt` pair is derived against the output, see `reviewSizePpt`.)
+#
+# The two windows differ in DEGREE, and the honest version of that is worth
+# writing down. MEASURED 2026-09-12 (`TIOCGWINSZ` on each host's own alacritty
+# pty): the workbench's cell is 11.0x22.0 px in a 3440x1413 workspace, the
+# laptop's 19.0x37.0 px in 2256x1480. So the review window's 200x50 was
+# 3800x1850 px on the laptop — 168% x 125% of that workspace, grossly unusable —
+# while this picker's 120x22 is 1320x484 px on the workbench (38% x 34%, fine) and
+# 2280x814 on the laptop: ~101% of its WIDTH, over by about 24 px of grid before
+# any window decoration is counted.
+#
+# ⚠ SO THE PICKER IS MARGINALLY TOO WIDE ON THE LAPTOP TOO. That is a
+# PRE-EXISTING condition, not something the review window's fix introduced, and it
+# is deliberately left alone here: 24 px of overflow on a centred float is a
+# cosmetic clip, not the unusable window that prompted the review-window change,
+# and narrowing `PICKER_COLUMNS` changes a layout the operator reads constantly
+# (`format_row` wraps to `PICKER_COLUMNS - 2`). Fixing it is a separate decision
+# with its own before/after, not a side effect of this one.
+#
+# Giving the picker an i3 resize would restate its geometry in a second file that
+# cannot see these constants — so if the 24 px is ever worth closing, the lever is
+# `PICKER_COLUMNS` here, not a `resize set` there.
 PICKER_CLASS = "float,mention-open"
 PICKER_COLUMNS = 120
 PICKER_LINES = 22
