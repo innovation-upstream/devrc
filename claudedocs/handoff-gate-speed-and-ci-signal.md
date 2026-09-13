@@ -807,6 +807,24 @@ bash ~/workspace/devrc/scripts/ship.sh
   landed on `b9f40f82` and the laptop on `f5942a24`; each host really was at `origin/main` as IT saw
   it. The second pass converged both. **The verdict is a claim about the FLEET agreeing on one sha,
   and it is not reducible to the per-host lines.**
+
+### 2026-09-13 — rate evidence for rank 9's close, moved somewhere it cannot be dropped
+
+- **`#1561`'s close is backed by a RATE, not just a merge, and the figure kept getting dropped.**
+  The `_KILL_MENTION_LEDGER` census guard accounts for **22** `tekton/devrc-pytests` reds across PR
+  heads, and **every one of them predates `c0bbd6d9`** — the commit after which the kill scanners no
+  longer read `claudedocs/`. The second instance of the same class,
+  `scripts/tests/test_runner_bound_ledger.py`, accounts for **5** reds (**4** after `c0bbd6d9`) and
+  was closed by `#1567` `6f1867b1`, verified **5 passed** at `origin/main` `337114e0`.
+  ⚠ Both populations are READ-TIME ONLY and cannot be re-derived — GitHub keeps one status per
+  context and supersedes overwrite it (see `handoff-gate-flake-store-api.md` rank 1). A later
+  disagreement is not a refutation.
+- 🔴 **WHY THIS IS HERE RATHER THAN IN RANK 9:** it lived under `Next steps`, which is REPLACED on
+  every update, and `handoff_doc.py`'s durable-drop warning caught it being deleted — after the
+  write, because that update was run with `--confirm --push` in one pass instead of proposing
+  first. `Gotchas` is APPEND-only, so the sha survives here permanently. **A measured figure that
+  matters belongs under an APPEND heading; a REPLACE section is for status, and status is exactly
+  what gets overwritten.**
 ## Open investigations — live diagnosis state
 
 ### RANK 2: #1469's audit ladder has not reached a clean round
