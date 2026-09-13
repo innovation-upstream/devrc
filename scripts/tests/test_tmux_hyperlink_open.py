@@ -47,8 +47,12 @@ URI = "https://example.com/" + "a" * 60
 LINK_TEXT = "L" * 60
 OSC8 = f"\\033]8;;{URI}\\033\\\\{LINK_TEXT}\\033]8;;\\033\\\\"
 SOCK = f"hint-open-{uuid.uuid4().hex[:8]}"
+# Resolved here but NOT asserted at module scope: an `assert` during import
+# makes the whole module uncollectable on a tmux-less host (0 tests, no
+# diagnostic), including the two tests below that only read .tmux.conf. The
+# deferred assert in the `server` fixture is the pattern
+# test_tmux_reply_agent.py chose for the same runtime.
 TMUX = shutil.which("tmux")
-assert TMUX, "tmux is not on PATH"
 
 
 def tmux(*args):
@@ -59,6 +63,7 @@ def tmux(*args):
 
 @pytest.fixture(scope="module")
 def server():
+    assert TMUX, "tmux is not on PATH — the live-tmux tests cannot run"
     # Fake HOME so .tmux.conf's session-created/after-select-window hooks
     # (pipe-activity.sh, activity-emit.sh, autoname-session.sh) resolve to
     # nothing — this test must not write a row into the REAL activity spool.
@@ -71,7 +76,14 @@ def server():
          f"printf '{OSC8}'; sleep 300"],
         capture_output=True, text=True, timeout=30, env=env,
     )
-    assert proc.returncode == 0, proc.stderr
+    if proc.returncode != 0:
+        # Tear down whatever came up before failing: an assert before yield
+        # skips the fixture teardown entirely and leaks the server on SOCK,
+        # which the next run's identically-named socket would then contend
+        # with.
+        subprocess.run(["tmux", "-L", SOCK, "kill-server"],
+                       capture_output=True, timeout=30)
+        pytest.fail(f"tmux new-session failed: {proc.stderr}")
     yield
     subprocess.run(["tmux", "-L", SOCK, "kill-server"], capture_output=True,
                    timeout=30)
