@@ -17,7 +17,11 @@ location differs -- and it is wrong SILENTLY: the command does not warn, it just
 names a file that is not there, or (worse, for a kubeconfig) a cluster that is
 not the one meant. Measured by running THIS module against `22ddd8dc`, the
 commit before it existed: 39 occurrences across 17 files (37 across 16 net of
-the ignore list), all of them inside runnable commands or file pointers.
+the ignore list), all of them inside runnable commands or file pointers. The
+gate's two halves do not contribute equally, and the split matters below: 30 of
+those 39, across 14 files, are the ABSOLUTE spelling (28 across 13 net); the
+remaining 9, across 4 files, are the `~`-spelled kubeconfig assignments the
+later half armed.
 ⚠ This sentence read "21 occurrences across 9 files" until it was re-derived;
 that pair reproduces under no framing tried -- not the parent commit with this
 module, not the parent with the module as first committed (30/14), not the set
@@ -33,10 +37,16 @@ declines to look at absolute paths:
     make whether a token is even COUNTED depend on which user runs the gate [...]
     Absolute paths are never claims this repo can settle
 
-That reasoning is correct and is exactly why these 21 sites survived a gate
-running over the very same files. So this module never resolves, stats or
-expands anything: it matches a TEXTUAL PATTERN, which is identical on every host,
-in every clone, for every user. `/home/zach/workspace/devrc/x`,
+That reasoning is correct, and it is exactly why the ABSOLUTE-spelled sites in
+the census above -- the only spelling it speaks to -- survived a gate running
+over the very same files. They did survive it: `test_doc_path_rot`'s own suite
+is green over that tree. The `~`-spelled sites in the same census are NOT
+covered by this argument; they survive that gate for reasons of its own, which
+is why the census counts the two spellings separately rather than as one number.
+
+So this module never resolves, stats or expands anything: it matches a TEXTUAL
+PATTERN, which is identical on every host, in every clone, for every user.
+`/home/zach/workspace/devrc/x`,
 `/home/alice/workspace/devrc/x` and `/root/workspace/devrc/x` are all flagged, and
 the verdict cannot depend on the machine because nothing about the machine is
 read.
@@ -73,10 +83,19 @@ LONGEST MATCH WINS
 
 BOUNDARY, NOT SUBSTRING
 -----------------------
-A match must end at a path boundary, or `workspace/civit/civitai` would claim
-`workspace/civit/civitai-cli` (a DIFFERENT repo with its OWN handle) and
-`workspace/devrc` would claim a sibling `workspace/devrc-scratch`. Pinned by
-`test_a_sibling_directory_is_not_a_match`.
+A match must end at a path boundary, or `workspace/devrc` would claim a sibling
+`workspace/devrc-scratch` -- a DIFFERENT directory, reported under `$DEVRC` with
+a remedy naming the wrong tree. Measured, by deleting `_RIGHT_BOUND`:
+`/home/zach/workspace/devrc-scratch/notes.md` becomes a `$DEVRC` finding.
+
+⚠ `workspace/civit/civitai` vs `workspace/civit/civitai-cli` READS like the same
+mechanism and is NOT one; this note asserted it was until it was planted. Both
+patterns start at the SAME offset, and the table is longest-suffix-first, so
+`$CIVITAI_CLI` claims it with or without `_RIGHT_BOUND` -- deleting the boundary
+changes that verdict not at all. That pair is protected by LONGEST MATCH WINS
+above. The boundary's job is the sibling NO handle names. Both cases are
+asserted by `test_a_sibling_directory_is_not_a_match`; only the `devrc-scratch`
+arm grades the boundary.
 
 TWO TIERS -- THIS MODULE MUST RUN WHERE IT ACTUALLY GATES
 ----------------------------------------------------------
@@ -129,9 +148,16 @@ That is deliberate, for two reasons and one deferral:
 
   * `~` IS THE CORRECT SPELLING FOR A READ-TOOL TARGET. A doc pointing an agent
     at `~/.claude/skills/<name>/reference/<topic>.md` is naming a file to be
-    opened with the Read tool, where `$VAR` does not expand. Arming `~`
-    wholesale would make the gate unsatisfiable on those sites, and
-    `claude/RULES.md` calls a permanently-red gate worse than no gate;
+    opened with the Read tool, where `$VAR` does not expand -- it is the
+    spelling this gate's own failure message recommends. Arming `~` wholesale
+    would make the gate unsatisfiable on such pointers, and `claude/RULES.md`
+    calls a permanently-red gate worse than no gate. ⚠ That example is the
+    SHAPE, not a site a wholesale arming would flag: NO handle names `.claude`,
+    so arming `~` for every handle reports ZERO `~/.claude/…` findings --
+    measured. The pointers it actually breaks are the `~/workspace/…` ones: the
+    same experiment flags most of the corpus's `~/workspace/…` tokens, among
+    them `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md`, which
+    `test_a_correct_spelling_stays_green` requires to stay green;
   * `~` IS ALSO THE CORRECT SPELLING WHERE THE PER-HOST SPLIT IS THE POINT.
     `claude/skills/clawgate/SKILL.md` and its `reference/troubleshooting.md`
     tabulate BOTH `~/workspace/homelab-talos/workbench-kubeconfig` and
@@ -283,8 +309,15 @@ _RIGHT_BOUND = r"(?![A-Za-z0-9._+-])"
 # The TAIL: the rest of the path after the handle's own suffix. Captured so the
 # failure line can print the WHOLE literal and the remedy can keep it verbatim --
 # `$DEVRC/scripts/memory-audit.py`, not a bare `$DEVRC` the reader must re-derive
-# the rest of. `@` and `%` are in the class because real paths in this corpus
-# carry them; a trailing `/` is allowed, punctuation that ends a sentence is not.
+# the rest of. A trailing `/` is allowed, punctuation that ends a sentence is
+# not.
+#
+# ⚠ `@` and `%` are in the class DEFENSIVELY -- for the shapes that carry them
+# (an npm scope, a URL-escaped segment) -- NOT because this corpus has any.
+# This comment asserted the corpus as the reason and that was not a fact:
+# measured at `22ddd8dc`, at `f4241883` and at HEAD, no literal this gate
+# matches carries either character, and dropping both from the class changes no
+# verdict. Keeping them is free; the justification had to be corrected.
 _TAIL = r"(?:/[A-Za-z0-9._+@%-]+)*/?"
 
 # THE `~` HALF -- kubeconfigs only, and only inside a shell assignment.
@@ -469,11 +502,17 @@ def _new_violations() -> list[tuple[str, int, str, str]]:
 
 # --- positive controls -------------------------------------------------------
 
-# HALF the measured corpus, by the same rule `test_doc_path_rot.py` states for
-# its own floors: these are COLLAPSE detectors, not a census. This repo's
-# headline workflow is PRUNING documentation, so a floor sitting just under the
-# measurement reds on ordinary work and sends the reader hunting a bug that is
-# not there.
+# WELL UNDER HALF the measured corpus, by the same rule `test_doc_path_rot.py`
+# states for its own floors: these are COLLAPSE detectors, not a census. This
+# repo's headline workflow is PRUNING documentation, so a floor sitting just
+# under the measurement reds on ordinary work and sends the reader hunting a bug
+# that is not there.
+#
+# ⚠ This read "HALF" until the arithmetic was checked: 40 against a corpus of 99
+# is nearer two-fifths. The value is the sibling gate's own floor, which ITS
+# comment records as half of the 80 it measured; this corpus has grown since and
+# the floor has not, which only makes it slacker -- the safe direction for a
+# collapse detector, but not "half".
 CORPUS_DOC_FLOOR = 40  # measured 99 (re-derived via `_corpus()`; read "88" before)
 
 
@@ -581,7 +620,13 @@ def test_the_handle_table_is_parsed_from_the_nix_source():
             f"those is a DIFFERENT FILE from the one ${name} names, and the gate "
             f"would print `-> use `${name}/<tail>`` for it: a wrong-file remedy "
             f"that reads as a correct instruction. Give the handle a suffix of "
-            f"two or more segments, or exclude it here and say why."
+            f"two or more segments. If it genuinely names a one-segment "
+            f"directory, there is NO exclusion hatch to reach for: "
+            f"{IGNORE_FILE.name} is keyed on (doc, literal) and filters "
+            f"VIOLATIONS, so it cannot exempt a table entry -- and silencing "
+            f"this assert by hand leaves `_patterns` arming the wildcard "
+            f"anyway. Excluding a handle means teaching `_handle_table` to skip "
+            f"it, which is a code change and needs its own test."
         )
 
 
@@ -596,14 +641,38 @@ def test_the_kubeconfig_table_is_its_own_nix_section():
 
     🔴 BOTH DIRECTIONS MATTER AND THEY FAIL DIFFERENTLY. An EMPTY or shrunken
     table disarms the `~` check while every other assertion in this module stays
-    green -- the reassuring zero. A table that GREW to include the repo handles
-    would arm `~` for EVERY `~/workspace/…` site in the corpus, which is the
-    deferred sweep and would make the gate unsatisfiable on Read-tool pointers.
-    (This sentence carried a count of its own, disagreeing with the module
-    docstring's census of the same quantity. The census is stated ONCE, there,
-    against a named ref; here the argument does not need a figure, so it has
-    none.) So the kubeconfig names are floored as a set AND the repo names are
-    asserted ABSENT.
+    green -- the reassuring zero. The `leaked` half is a SCOPE LEDGER: what `~`
+    covers is a deliberate decision, and this is where it is written down.
+
+    🔴 THE HAZARD IS THE ANCHOR, NOT THE TABLE -- so do not re-derive a
+    catastrophe for this assert. This docstring claimed a grown table "would arm
+    `~` for EVERY `~/workspace/…` site in the corpus" and "make the gate
+    unsatisfiable on Read-tool pointers". MEASURED, by planting all five repo
+    handles into the `kubeconfigs` block of a throwaway de-gitted copy and
+    re-running: NOT ONE corpus site turns red, and every Read-tool-pointer
+    fixture in `test_a_tilde_kubeconfig_outside_a_shell_assignment_stays_green`
+    stays green. The `~` family is anchored on `KUBECONFIG=`, so a leaked handle
+    can only fire inside an assignment naming that checkout -- and the corpus
+    has none. What actually arms `~` broadly is DROPPING THE ANCHOR: that is
+    stated and guarded where the anchor is defined (`_KUBECONFIG_ASSIGN`), and
+    graded by that same probe. With the anchor gone AND the table grown it does
+    reach most of the corpus's `~/workspace/…` sites -- the deferred sweep --
+    but neither change gets there alone.
+
+    ⚠ A GROWN TABLE IS NOT HARMLESS EITHER; IT FAILS IN A DIFFERENT WAY. The
+    same experiment turns the `repo-handle-tilde` and `sibling-file` fixtures
+    red, on `KUBECONFIG=~/workspace/homelab-talos/<file>`, and the gate prints
+    `KUBECONFIG=$HOMELAB` -- silently dropping the filename. The `~` family
+    carries no `_TAIL` because a kubeconfig handle names a FILE; a repo handle
+    names a DIRECTORY, so the reported literal stops at the checkout root and
+    the remedy names the wrong file. Same class as the one-segment-suffix hazard
+    above: a remedy that reads as a correct instruction and is not.
+
+    (An earlier draft of this docstring carried a count of its own, disagreeing
+    with the module docstring's census of the same quantity. The census is
+    stated ONCE, there, against a named ref; the argument here does not need a
+    figure, so it still has none.) So the kubeconfig names are floored as a set
+    AND the repo names are asserted ABSENT.
     """
     names = {n for n, _ in _kubeconfig_table()}
     assert not (KNOWN_KUBECONFIG_HANDLES - names), (
@@ -826,10 +895,19 @@ def test_planted_tilde_kubeconfig_assignment_is_caught(text, literal, handle):
 @pytest.mark.parametrize(
     "text",
     [
-        # 🔴 THE SHELL-CONTEXT RESTRICTION, GRADED. Each of these names a file a
-        # `$KC_*` handle also names, in the `~` spelling, and each must stay
-        # GREEN because it is not a shell assignment. Widening the restriction
-        # -- dropping the `KUBECONFIG=` anchor -- turns every one of them red.
+        # 🔴 THE SHELL-CONTEXT RESTRICTION, GRADED -- but these fixtures do not
+        # all grade the same guard, so read the ids before quoting this block.
+        # MEASURED by dropping the `KUBECONFIG=` anchor and re-running: FOUR go
+        # red -- `read-tool-target`, `table-cell`, `per-host-split`, `other-var`.
+        # Those are the ones naming a file a `$KC_*` handle also names, in the
+        # `~` spelling, and they are what the anchor is FOR.
+        #
+        # The other three stay GREEN under that mutation and grade other things:
+        # `the-remedy` carries no `~` at all, and `repo-handle-tilde` /
+        # `sibling-file` name files NO handle covers -- those two are the ones
+        # that go red if a REPO handle leaks into the kubeconfig table, which is
+        # `test_the_kubeconfig_table_is_its_own_nix_section`'s ledger. "Turns
+        # every one of them red" was asserted here and is false: 4 of 7.
         #
         # A Read-tool target: `$VAR` does not expand there, so `~` is CORRECT.
         "Open `~/workspace/homelab-talos/homelab-kubeconfig` to read the context list.",
@@ -875,10 +953,28 @@ def test_the_longest_handle_wins():
 
 
 def test_a_sibling_directory_is_not_a_match():
-    """BOUNDARY, NOT SUBSTRING. `workspace/civit/civitai` is a character prefix of
-    `workspace/civit/civitai-cli`, which is a DIFFERENT repo with its OWN handle;
-    without the right-hand boundary the gate would report `$CIVITAI` for it and
-    print a remedy that silently names the wrong checkout."""
+    """BOUNDARY, NOT SUBSTRING -- and the arms below grade DIFFERENT mechanisms.
+
+    🔴 THE `civitai-cli` ARM DOES NOT GRADE THE BOUNDARY, and this docstring said
+    it did. `workspace/civit/civitai` is a character prefix of
+    `workspace/civit/civitai-cli`, but both patterns start at the same offset and
+    the table is longest-suffix-first, so `$CIVITAI_CLI` claims it with or
+    without `_RIGHT_BOUND` -- measured by deleting the boundary and re-running
+    this input. It is kept because asserting that the MORE SPECIFIC handle is the
+    one reported is worth an assertion; the mechanism it grades is LONGEST MATCH
+    WINS, not this one.
+
+    🔴 NOR DOES THE `homelab-trunk` ARM -- checked, because the obvious pairing
+    is wrong twice over. No handle suffix is a character PREFIX of
+    `workspace/homelab-trunk` (`homelab-talos` diverges at the fourth letter),
+    so it is green with `_RIGHT_BOUND` and green without it. It grades a weaker
+    and still worthwhile claim: a path under home that no handle covers is not
+    flagged.
+
+    `devrc-scratch` is the ONLY arm here that grades `_RIGHT_BOUND`, and it does
+    so squarely: `workspace/devrc` IS a character prefix of it, so with the
+    boundary deleted `$DEVRC` claims it and the gate prints a remedy naming the
+    wrong tree -- measured."""
     assert _found("`/home/zach/workspace/civit/civitai-cli/main.go`") == [
         ("/home/zach/workspace/civit/civitai-cli/main.go", "CIVITAI_CLI")
     ]
