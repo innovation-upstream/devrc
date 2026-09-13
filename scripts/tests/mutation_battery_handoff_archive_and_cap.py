@@ -63,6 +63,37 @@ IDX = ROOT / "scripts/lib/handoff_index.py"
 RESOLUTION_SUITE = "scripts/tests/test_resume_state_handoff_resolution.py"
 CAP_SUITE = "scripts/tests/test_handoff_doc_size.py"
 
+#: 🔴 THE TABLE IS NAMED `MUTANTS` AND `old` IS ITS 4TH FIELD BECAUSE
+#: `test_mutation_battery_anchors.py` READS IT — that is a contract, not a
+#: style. That module is COLLECTED (it mutates nothing), so on every push it
+#: re-checks that each `old` below still occurs EXACTLY ONCE in its target. An
+#: anchor reformatted to 0x makes its row print `NOT-APPLIED` and score as a
+#: SURVIVOR while testing nothing, and only someone re-running this battery by
+#: hand would ever see it. That has happened twice in this repo, once on
+#: `resume-state.sh` itself (`60c893b7`, row X1).
+#:
+#: ⚠ THE FIRST VERSION OF THIS FILE CALLED IT `ROWS` WITH `old` FIFTH, AND WAS
+#: THEREFORE UNPINNED — caught by that module's own two-way ledger, which is a
+#: THIRD enumeration this change had to register with. Reshaped rather than
+#: exempted: `NOT_TABLE_DRIVEN` would have passed on the technicality that a
+#: table named `ROWS` has no `^MUTANTS` line, which is exactly the
+#: technically-true-but-misleading reason `test_the_EXEMPTION_list_is_not_a_
+#: hiding_place` exists to refuse.
+#:
+#: A BATTERY SPANNING SEVERAL FILES declares `TARGETS`; `SCRIPT` is the default
+#: for any row without an entry. Both are declared below, and the anchors module
+#: requires every row to appear in `TARGETS` once `TARGETS` is non-empty.
+SCRIPT = SH
+
+#: Which suite's verdict each target's mutants are scored against. Derived from
+#: the target rather than carried per row, so a row cannot name a file and a
+#: suite that disagree.
+SUITE_OF_TARGET = {
+    SH: RESOLUTION_SUITE,
+    CAP: CAP_SUITE,
+    IDX: CAP_SUITE,
+}
+
 # --- section 1: claudedocs/archive/ resolution --------------------------------
 NORMALISE = (
     '    case "$dir" in\n'
@@ -81,97 +112,128 @@ FALLBACK = (
     '        HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md 2>/dev/null | head -1)\n'
 )
 
-# (id, suite, file, description, old, new, the test that must go red)
-ROWS = [
-    ("A1", RESOLUTION_SUITE, SH, "delete the archive normalisation entirely",
+# (id, shape, description, old, new, the test whose OWN assertion must go red)
+#
+# 🔴 `old` IS THE 4TH FIELD. See the contract note above `SCRIPT`.
+MUTANTS = [
+    ("A1", "deletion", "delete the archive normalisation entirely",
      NORMALISE, "",
      "test_an_archived_doc_named_in_PROSE_resolves"),
-    ("A2", RESOLUTION_SUITE, SH, "normalisation runs but drops archive/ from $base",
+    ("A2", "replacement", "normalisation runs but drops archive/ from $base",
      'archsub="archive/"; dir=${dir%/archive}',
      'archsub=""; dir=${dir%/archive}',
      "test_an_archived_doc_in_a_LINKED_WORKTREE_resolves_out_of_the_RIGHT_one"),
-    ("A3", RESOLUTION_SUITE, SH, "never apply the prefix to $base",
+    ("A3", "deletion", "never apply the prefix to $base",
      PREFIX, "",
      "test_an_archived_doc_in_a_LINKED_WORKTREE_resolves_out_of_the_RIGHT_one"),
-    ("A4", RESOLUTION_SUITE, SH, "apply the prefix BEFORE the basename family test",
+    ("A4", "reorder", "apply the prefix BEFORE the basename family test",
      FAMILY + PREFIX, PREFIX + FAMILY,
      "test_an_archived_doc_named_in_PROSE_resolves"),
-    ("A5", RESOLUTION_SUITE, SH, "respell the enumerated directory gate as a PATTERN",
+    ("A5", "widening", "respell the enumerated directory gate as a PATTERN",
      ANCHOR,
      '    case "$dir" in */claudedocs|claudedocs|*/claudedocs/*) ;; *) continue ;; esac\n',
      "test_an_UNRECOGNISED_claudedocs_subdirectory_is_not_a_handoff_location"),
-    ("A6", RESOLUTION_SUITE, SH, "make the newest-of-N fallback reach the archive",
+    ("A6", "widening", "make the newest-of-N fallback reach the archive",
      FALLBACK,
      '        HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md '
      '"$REPO"/claudedocs/archive/handoff-*.md 2>/dev/null | head -1)\n',
      "test_the_newest_of_N_fallback_NEVER_reaches_the_archive"),
-    ("A7", RESOLUTION_SUITE, SH, "add a THIRD directory without updating the ledger",
+    ("A7", "widening", "add a THIRD directory without updating the ledger",
      NORMALISE,
      '    case "$dir" in\n'
      '      */claudedocs/archive|claudedocs/archive|*/claudedocs/drafts) '
      'archsub="archive/"; dir=${dir%/archive} ;;\n'
      "    esac\n",
      "test_the_accepted_handoff_DIRECTORIES_are_an_enumerated_ledger"),
-    ("A8", RESOLUTION_SUITE, SH, "$base prefix dropped — the RE-ANCHOR route",
+    ("A8", "replacement", "$base prefix dropped — the RE-ANCHOR route",
      'archsub="archive/"; dir=${dir%/archive}',
      'archsub=""; dir=${dir%/archive}',
      "test_an_archived_doc_reached_by_the_RELATIVE_re_anchor_resolves"),
 
     # --- section 2: the byte ceiling ------------------------------------------
-    ("C1", CAP_SUITE, CAP, "raise the ceiling until nothing hits it (decoration)",
+    ("C1", "replacement", "raise the ceiling until nothing hits it (decoration)",
      "MAX_BYTES = 65_536", "MAX_BYTES = 1_000_000",
      "test_every_grandfathered_entry_is_a_correctly_stepped_allowance"),
-    ("C2", CAP_SUITE, CAP, "the ceiling check never reports",
+    ("C2", "short-circuit", "the ceiling check never reports",
      "            if size > MAX_BYTES:\n", "            if False:\n",
      "test_control_the_checker_reports_every_kind_of_breach"),
-    ("C3", CAP_SUITE, CAP, "the walk stops being recursive (archive ungated)",
+    ("C3", "narrowing", "the walk stops being recursive (archive ungated)",
      "    return {p: (root / p).stat().st_size for p in scan.paths}, scan",
      "    return {p: (root / p).stat().st_size for p in scan.paths "
      "if p.count('/') == 1}, scan",
      "test_the_scan_reaches_the_ARCHIVE_subdirectory"),
-    ("C4", CAP_SUITE, CAP, "silently drop a document from the ledger",
+    ("C4", "deletion", "silently drop a document from the ledger",
      '    "claudedocs/handoff-tmux-webapp.md": 327_680,               # 314,233 B\n',
      "",
      "test_no_handoff_doc_exceeds_its_budget"),
-    ("C5", CAP_SUITE, CAP, "loosen one allowance by two steps (slack entry)",
+    ("C5", "replacement", "loosen one allowance by two steps (slack entry)",
      '"claudedocs/handoff-handoff-search-index.md": 81_920,',
      '"claudedocs/handoff-handoff-search-index.md": 114_688,',
      "test_no_handoff_doc_exceeds_its_budget"),
-    ("C6", CAP_SUITE, CAP, "leave a stale entry naming a nonexistent document",
+    ("C6", "insertion", "leave a stale entry naming a nonexistent document",
      "GRANDFATHERED: dict[str, int] = {\n",
      "GRANDFATHERED: dict[str, int] = {\n"
      '    "claudedocs/handoff-was-renamed-away.md": 98_304,\n',
      "test_no_handoff_doc_exceeds_its_budget"),
-    ("C7", CAP_SUITE, CAP, "never ask a shrunken document to drop its entry",
+    ("C7", "short-circuit", "never ask a shrunken document to drop its entry",
      "        if size <= MAX_BYTES:\n            now_fits.append(",
      "        if False:\n            now_fits.append(",
      "test_control_the_checker_reports_every_kind_of_breach"),
-    ("C8", CAP_SUITE, CAP, "tightest_allowance stops quantising",
+    ("C8", "replacement", "tightest_allowance stops quantising",
      "    return max(step, math.ceil(size / step) * step)",
      "    return max(step, size)",
      "test_tightest_allowance_quantises_up_and_never_returns_zero"),
-    ("C9", CAP_SUITE, CAP, "🔴 THE VACUOUS GREEN: the walk returns nothing",
+    ("C9", "insertion", "🔴 THE VACUOUS GREEN: the walk returns nothing",
      "    scan = handoff_index.handoff_paths_on_disk(root)",
      "    scan = handoff_index.handoff_paths_on_disk(root)\n"
      "    scan = handoff_index.DiskScan(paths=(), scanned=True, absent=False, errors=())",
      "test_the_scan_sees_a_real_corpus"),
-    ("C10", CAP_SUITE, IDX, "case-fold the shared name predicate (the SEAM)",
+    ("C10", "widening", "case-fold the shared name predicate (the SEAM)",
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.md\Z")',
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.md\Z", re.IGNORECASE)',
      "test_the_size_predicate_is_the_INDEX_MODULES_and_not_a_second_spelling"),
-    ("C11", CAP_SUITE, CAP, "POSITIVE CONTROL — a malformed ledger MUST die",
+    ("C11", "replacement", "POSITIVE CONTROL — a malformed ledger MUST die",
      '"claudedocs/handoff-cairn-phase3.md": 163_840,',
      '"claudedocs/handoff-cairn-phase3.md": 163_841,',
      "test_every_grandfathered_entry_is_a_correctly_stepped_allowance"),
-    ("C12", CAP_SUITE, IDX, "drop the start anchor from the shared predicate (SEAM)",
+    ("C12", "widening", "drop the start anchor from the shared predicate (SEAM)",
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.md\Z")',
      r'_HANDOFF_NAME = re.compile(r"handoff-.+\.md\Z")',
      "test_the_size_predicate_is_the_INDEX_MODULES_and_not_a_second_spelling"),
-    ("C13", CAP_SUITE, IDX, "widen the shared predicate to .markdown (SEAM)",
+    ("C13", "widening", "widen the shared predicate to .markdown (SEAM)",
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.md\Z")',
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.mark?down?\Z|\Ahandoff-.+\.md\Z")',
      "test_the_size_predicate_is_the_INDEX_MODULES_and_not_a_second_spelling"),
 ]
+
+#: 🔴 EVERY ROW, BECAUSE THIS BATTERY SPANS THREE FILES. The anchors module
+#: requires a COMPLETE map once `TARGETS` is non-empty: a row with no entry
+#: silently falls back to `SCRIPT` and has its anchor counted against the WRONG
+#: file, where it occurs 0x — which reads as a battery bug rather than as the
+#: mapping bug it is. An entry naming no row fails there too.
+TARGETS = {
+    "A1": SH,
+    "A2": SH,
+    "A3": SH,
+    "A4": SH,
+    "A5": SH,
+    "A6": SH,
+    "A7": SH,
+    "A8": SH,
+    "C1": CAP,
+    "C2": CAP,
+    "C3": CAP,
+    "C4": CAP,
+    "C5": CAP,
+    "C6": CAP,
+    "C7": CAP,
+    "C8": CAP,
+    "C9": CAP,
+    "C10": IDX,
+    "C11": CAP,
+    "C12": IDX,
+    "C13": IDX,
+}
 
 
 def run_suite(suite: str) -> tuple[bool, str]:
@@ -185,10 +247,26 @@ def run_suite(suite: str) -> tuple[bool, str]:
     return p.returncode == 0, p.stdout + p.stderr
 
 
+def target_of(mid: str) -> pathlib.Path:
+    """The file a row mutates. Same fallback rule the anchors module applies, so
+    the battery and the checker cannot disagree about where a row's anchor is."""
+    return TARGETS.get(mid, SCRIPT)
+
+
+def suite_of(mid: str) -> str:
+    """The suite a row is scored against, DERIVED from its target rather than
+    carried as a field — a row cannot then name a file and a suite that
+    disagree, and there is one less thing for a reshape to desynchronise."""
+    return SUITE_OF_TARGET[target_of(mid)]
+
+
 def main() -> int:
     only = {a for a in sys.argv[1:] if not a.startswith("-")}
-    rows = [r for r in ROWS if not only or r[0] in only]
-    suites = sorted({r[1] for r in rows})
+    unknown = sorted(only - {r[0] for r in MUTANTS})
+    if unknown:
+        raise SystemExit(f"no such mutant id(s): {unknown}")
+    rows = [r for r in MUTANTS if not only or r[0] in only]
+    suites = sorted({suite_of(r[0]) for r in rows})
     saved = {p: p.read_text(encoding="utf-8") for p in {SH, CAP, IDX}}
 
     for suite in suites:
@@ -203,7 +281,8 @@ def main() -> int:
 
     results = []
     try:
-        for mid, suite, path, desc, old, new, want in rows:
+        for mid, _shape, desc, old, new, want in rows:
+            path, suite = target_of(mid), suite_of(mid)
             src = path.read_text(encoding="utf-8")
             n = src.count(old)
             if n != 1:
