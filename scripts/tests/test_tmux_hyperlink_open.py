@@ -66,12 +66,16 @@ TMUX = shutil.which("tmux")
 RENDER_TIMEOUT_S = 10.0
 # 🔴 A SECOND, SEPARATE CONSTANT — NOT a reuse of the one above, because the two
 # wait on DIFFERENT OBJECTS (see `enter_copy_mode_on_the_link`): the pane grid
-# vs the copy-mode screen's hyperlink table. One constant with one comment
-# describing only the first consumer is how a reader concludes "raising it costs
-# nothing" and is wrong — in the BROKEN case each consumer spends its deadline
-# in turn, so a genuine dropped-format regression takes 2x this to report,
-# against the ~0.1s an immediate assert used to take. Raise either only knowing
-# that.
+# vs the copy-mode screen's hyperlink table.
+# ⚠ RETRACTED, and corrected here rather than quietly dropped: this comment used
+# to say a dropped-format regression "takes 2x this to report" because "each
+# consumer spends its deadline in turn". MEASURED with the format renamed to an
+# unknown one: a single path reports in 10.96s, not 21s. `rendered` reads the
+# GRID, which a format drop does not touch, so it returns fast — and had it
+# timed out, its `pytest.fail` aborts before this consumer ever runs. The whole
+# FILE takes ~21s only because two tests each pay THIS constant once.
+# So: raising RENDER_TIMEOUT_S contributes ZERO to a dropped-format report;
+# raising this one is what costs, once per grid-reading test.
 COPY_MODE_TIMEOUT_S = 10.0
 
 
@@ -227,9 +231,13 @@ def enter_copy_mode_on_the_link(sock=None, deadline_s=COPY_MODE_TIMEOUT_S):
     would be an rc-0 no-op re-reading the same stale snapshot: the loop would
     still LOOK like a retry, would spin to the deadline, and would then blame a
     tmux regression for a harness fault — the exact defect the `rendered` rc
-    check above exists to prevent, one screen further down. `#{pane_in_mode}`
-    is asserted too, because an rc-0 `cancel` that left the pane in a mode
-    produces the same inert loop.
+    check above exists to prevent, one screen further down.
+
+    ⚠ `#{pane_in_mode}` is deliberately NOT asserted, and the comment beside
+    `cancel` says why. An earlier version of this docstring claimed it WAS —
+    while that comment forbade adding it, 26 lines apart, both written in the
+    same commit. The inert-loop case an rc-0-but-ineffective `cancel` would
+    produce is therefore UNCOVERED, stated rather than implied.
     """
     sock = SOCK if sock is None else sock
     deadline = time.monotonic() + deadline_s
@@ -255,21 +263,28 @@ def enter_copy_mode_on_the_link(sock=None, deadline_s=COPY_MODE_TIMEOUT_S):
         c = tmux_on(sock, "send-keys", "-t", "t", "-X", "cancel")
         assert c.returncode == 0, ("cancel FAILED — the retry below would be "
                                    "an rc-0 no-op on a stale snapshot", c.stderr)
-        # 🔴 DO NOT ADD A `#{pane_in_mode} == 0` CHECK HERE. It is the obvious
-        # guard, an audit recommended it, and it is WRONG on tmux 3.7c — two
-        # ways, both measured after writing it and watching this loop hang:
-        #   - it does not report a BOOLEAN. In copy mode it reads `2`, so a
-        #     `== "1"` test is false while the pane is very much in a mode.
-        #   - it does not return to `0` across a cancel in THIS loop: each
-        #     iteration pushes a mode and pops one, so polling for `0` spins
-        #     until the deadline and turns a healthy retry into a failure.
-        # Measured directly: after an rc-0 `cancel`, `#{pane_in_mode}` still
-        # read `2` for the full 2 s it was polled — and the very next
-        # `copy-mode` re-read the format CORRECTLY. So re-entry works and the
-        # mode counter is simply not the signal for it. `cancel`'s rc, checked
-        # above, is the guard that is both cheap and true.
-        time.sleep(0.01)
-        tmux("send-keys", "-t", "t", "-X", "cancel")
+        # 🔴 DO NOT POLL `#{pane_in_mode}` FOR `0` HERE — but not for the reason
+        # this comment gave for two commits, which was wrong twice over.
+        #
+        # RETRACTED: "it reads `2` in copy mode, so it is not a boolean" and
+        # "each iteration pushes a mode and pops one". MEASURED on tmux 3.7c:
+        # it is a COUNT OF STACKED MODES, it reads `1` in copy mode on an
+        # otherwise-clean pane, and `copy-mode` at a pane already in copy mode
+        # does NOT push — the count holds.
+        #
+        # THE REAL MECHANISM, and it is a property of THIS FIXTURE, not of
+        # tmux: the pane is already in `view-mode` before any test touches it,
+        # because the shipped .tmux.conf's `session-created` run-shell hooks
+        # cannot resolve under the fixture's fake
+        # `HOME=/nonexistent-tmux-hyperlink-test`, and tmux shows their output
+        # in a view-mode pane. So the stack is [view]; `copy-mode` pushes to
+        # [copy, view] = 2; ONE `cancel` pops to [view] = 1, never 0. Control:
+        # shipped conf -> view-mode 8/8; `-f /dev/null` -> no mode 8/8.
+        #
+        # So a `== "0"` poll hangs because ONE cancel cannot reach 0 here, not
+        # because the counter is unreadable. It is reachable if you pop twice
+        # or clear the view mode first — deliberately not done, because
+        # `cancel`'s rc above is cheaper and the extra state is not worth it.
         time.sleep(0.01)
 
 
@@ -342,8 +357,10 @@ def test_the_grid_hyperlink_spans_the_wrap(rendered):
     # "entered ONCE" and explained the discipline with "`send-keys -X` outside
     # copy mode exits 0 and silently does nothing". Both halves are wrong on the
     # tmux this file pins: MEASURED on 3.7c, every `send-keys -X` verb outside
-    # copy mode returns rc **1** (`not in a mode`), so `:341` below does catch
-    # that case. The discipline still matters, for a different reason the old
+    # copy mode returns rc **1** (`not in a mode`), so the `assert s.returncode
+    # == 0` in the probe loop below does catch that case. (A line NUMBER used to
+    # stand here and had already rotted into pointing at a comment — a
+    # cross-reference is a claim, and one keyed on a line number ages badly.) The discipline still matters, for a different reason the old
     # sentence did not describe — a pane left in a STALE mode, which is rc 0 and
     # invisible; see the delegate's own note on `cancel`.
     enter_copy_mode_on_the_link()
@@ -393,6 +410,27 @@ def test_the_copy_mode_retry_RECOVERS_a_snapshot_taken_before_the_link_landed():
         # snapshot is necessarily empty. This is the state the retry exists
         # for, and the state no other test in this file can produce.
         assert tmux_on(sock, "copy-mode", "-t", "t").returncode == 0
+        # 🔴 MOVE THE CURSOR ONTO THE LINK BEFORE READING, OR THIS CHECK IS A
+        # TAUTOLOGY. `#{copy_cursor_hyperlink}` is the hyperlink AT THE COPY
+        # CURSOR, and on entering copy mode the cursor sits at the pane cursor
+        # — one cell past the end of a 60-char link that ends at row 1 col 19.
+        # It therefore reads '' whether or not the link has landed, so the
+        # assert below could never fail. MEASURED with the link definitively
+        # in the grid: unmoved cursor -> '' (guard silent); after `top-line`
+        # + `start-of-line` -> the URI (guard fires).
+        #
+        # That is not pedantry: it is the only thing standing between this
+        # test and a VACUOUS PASS. If ~0.75s elapses before this point — a
+        # deschedule, a slower host, a CI sandbox, or anyone shortening the
+        # sleep this message invites them to tune — the snapshot already holds
+        # the link, the delegate returns on iteration 1 without ever calling
+        # `cancel`, and the test passes having exercised nothing. CONTROL:
+        # with `cancel` broken AND a 1.0s deschedule injected here, the old
+        # tautological guard let the suite pass 6/6; with this fixed guard the
+        # same mutant FAILS on exactly this test.
+        for step in ("top-line", "start-of-line"):
+            assert tmux_on(sock, "send-keys", "-t", "t",
+                           "-X", step).returncode == 0
         empty = tmux_on(sock, "display", "-p", "-t", "t",
                         "#{copy_cursor_hyperlink}").stdout.strip()
         assert empty != URI, (
