@@ -53,11 +53,14 @@ it can be true in.**
 Run: nix develop ~/workspace/devrc -c python3 -m pytest \\
        scripts/browser-bridge/tests/test_browser_tab_ref.py -q
 """
+import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -68,6 +71,14 @@ from testlib import mockbin  # noqa: E402
 
 BB = Path(__file__).resolve().parent.parent          # scripts/browser-bridge
 CLI = BB / "browser"
+
+# 🔴 THE ADDRESS TABLE IS IMPORTED, NEVER RETYPED — the same rule the CLI itself
+# now follows. A test that spelled `zach@10.42.0.30` would pass while the CLI
+# dialled the homelab gateway, because both strings look equally plausible.
+_LIB = BB.parent / "lib"                             # scripts/lib
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+import host_label as _hl  # noqa: E402
 
 # The canonical reference. Same literal as tests/tab_ref.test.mjs.
 CANONICAL = "bw://workbench/main/12345"
@@ -159,9 +170,64 @@ def bridge(tmp_path):
     for k in ("BB_INSTANCE", "BB_TAB", "BB_FRAME"):
         env.pop(k, None)
 
+    # 🔴 THE `ssh` STUB IS NOT OPTIONAL AND IT IS INSTALLED FOR EVERY TEST IN
+    # THIS FILE, INCLUDING THE ONES THAT PREDATE IT.
+    #
+    # A wrong-host reference now RUNS the command on the naming host. On the
+    # developer's own machine the naming host in `bw://workbench/…` is a real,
+    # reachable box — so without this stub, the pre-existing refusal tests would
+    # ssh to a live workstation and drive somebody's actual Brave session. That
+    # is not a flake risk, it is the test suite performing the exact action the
+    # feature is dangerous for. The stub makes the transport a fixture: the
+    # ADDRESS is still resolved for real (through host_label, so a test can
+    # assert the target), only the hop is faked.
+    #
+    # DEFAULT = UNREACHABLE, which is the safe default twice over: it is the
+    # rc-4 fallback path, so every #1598 handoff assertion keeps its meaning
+    # unchanged, and a test that forgets to install a proxying stub fails
+    # visibly rather than reaching the network.
+    binhome = tmp_path / "stub-bin"
+    binhome.mkdir()
+    sshlog = tmp_path / "ssh-invocations"
+    env["PATH"] = f"{binhome}{os.pathsep}" + env.get("PATH", "")
+    env["BROWSER_BRIDGE_SSH_LOG"] = str(sshlog)
+
+    def _install_ssh(body):
+        """Replace the stub `ssh`. `body` is POSIX sh; argv is the real ssh argv.
+
+        Every stub logs its full argv (NUL-separated records) to
+        BROWSER_BRIDGE_SSH_LOG first, so "was ssh called, and with what" is
+        answerable in tests that are about something else.
+        """
+        mockbin.write_exec(
+            binhome / "ssh",
+            'for a in "$@"; do printf \'%s\\0\' "$a" >> "$BROWSER_BRIDGE_SSH_LOG"; done\n'
+            'printf \'\\36\\0\' >> "$BROWSER_BRIDGE_SSH_LOG"\n' + body)
+
+    _install_ssh(
+        'echo "ssh: connect to host stubbed port 22: Network is unreachable" >&2\n'
+        'exit 255\n')
+
     class _Bridge:
         handler = _Handler
         bodies = _Handler.bodies
+        install_ssh = staticmethod(_install_ssh)
+        ssh_log = sshlog
+
+        @staticmethod
+        def ssh_calls():
+            """Every stub-ssh invocation as a list of argv lists."""
+            if not sshlog.exists():
+                return []
+            raw = sshlog.read_text()
+            calls, cur = [], []
+            for tok in raw.split("\0")[:-1]:
+                if tok == "\36":
+                    calls.append(cur)
+                    cur = []
+                else:
+                    cur.append(tok)
+            return calls
 
         @staticmethod
         def env_for_stub():
@@ -756,13 +822,13 @@ def test_a_SAME_LABELLED_profile_on_this_host_is_still_never_driven(bridge):
 
 
 def test_the_help_documents_exit_4_and_keeps_the_host_verification_sentence():
-    """🔴 CRITERION 4, pinned on the WHOLE NORMALISED SENTENCE, not on words.
+    """🔴 Pinned on the WHOLE NORMALISED SENTENCE, not on words.
 
     The artifact under test is prose, so a guard on keywords is walkable by
-    rewording. The sentence below is the one the task requires to stay accurate
-    — it still is: the check is unchanged, and 'fails loudly' is now a rc-4
-    failure that also hands over a command. A cosmetic reword of it fails this
-    test, and that is the price of a machine-readable claim.
+    rewording. Both sentences below describe behaviour a caller depends on and
+    both were REWRITTEN by #574: the check still runs, but its consequence is no
+    longer "fails loudly" — it is "runs it over there". A cosmetic reword of
+    either fails this test, and that is the price of a machine-readable claim.
     """
     r = subprocess.run(["bash", str(CLI), "--help"], capture_output=True,
                        text=True, timeout=CLI_TIMEOUT_S)
@@ -770,14 +836,23 @@ def test_the_help_documents_exit_4_and_keeps_the_host_verification_sentence():
     help_text = re.sub(r"\s+", " ", r.stdout)
     assert (
         "The <host> field is VERIFIED against the bridge before the command "
-        "runs, so a reference pasted into a session on the other host fails "
-        "loudly instead of driving a same-labelled profile there."
+        "runs, so a reference pasted into a session on the other host is run ON "
+        "that host over SSH instead of driving a same-labelled profile here."
     ) in help_text, "the host-verification sentence was reworded or removed"
+    # 🔴 The non-goal, stated where an operator reads it: SSH is the transport
+    # and no listener is opened. A future change that exposes the bridge on the
+    # mesh would make this sentence false, and this is where that is caught.
+    assert (
+        "NO LISTENER IS OPENED ANYWHERE: the bridge on both hosts still binds "
+        "127.0.0.1 only and still enforces its Host-header allowlist"
+    ) in help_text, "the loopback-only contract was reworded or removed"
     # The shipped behaviour, described: the code, the stream, the contract.
     assert "exits 4" in help_text
     assert "does NOT begin with \"browser:\"" in help_text
-    assert re.search(r"\b4\s+ONLY the wrong-host `bw://` refusal", help_text), (
-        "the EXIT CODES block does not list 4")
+    assert re.search(r"\b4\s+ONLY the wrong-host `bw://` refusal: the reference "
+                     r"was minted on the OTHER host AND that host could not be "
+                     r"reached over SSH", help_text), (
+        "the EXIT CODES block does not describe 4 as the UNREACHABLE fallback")
 
 
 # --------------------------------------------------------------------------- #
@@ -1344,3 +1419,885 @@ def test_an_explicitly_cleared_instance_forwards_NOTHING_and_leaks_NOTHING(bridg
         f"BB_INSTANCE survived into browser-agent's environment, so its child "
         f"`browser` calls would drive profile 'work' — the wrong Brave profile, "
         f"with nothing on stderr saying so. stdout: {r.stdout!r}")
+
+
+# =========================================================================== #
+# #574 — a foreign reference is EXECUTED on the naming host over SSH
+# =========================================================================== #
+# WHAT CHANGED, AND WHAT DID NOT.
+#
+#   #1598 (above) made a wrong-host reference exit 4 and print a command for a
+#   human to paste. This makes the CLI run that command itself, on the machine
+#   the reference names, over SSH — the transport `ship.sh`, `peer-host` and
+#   `session-manager` already use. The rc-4 handoff is now the FALLBACK for a
+#   naming host that cannot be reached, so every assertion in the #1598 section
+#   above still holds: the fixture's default stub `ssh` is unreachable.
+#
+#   The security contract does NOT change and this section pins that: no
+#   listener is opened, `server.py` is untouched, and the LOCAL bridge is never
+#   driven for a foreign reference whatever the transport does.
+#
+# 🔴 WHAT A WRONG ANSWER LOOKS LIKE HERE, which is what shapes the assertions:
+#
+#   (a) THE HOP GOES TO THE WRONG MACHINE. `10.42.0.10` is the homelab gateway
+#       and answers ssh perfectly happily when `10.42.0.100` (the laptop) was
+#       meant, so a wrong address does not fail — it returns another machine's
+#       answer. Two guards: the target must be `host_label.ssh_target()`'s, and
+#       what crosses must be the REFERENCE (so the far end re-checks for itself)
+#       rather than `--instance`/`--tab` (which would ask it to trust us).
+#   (b) THE REMOTE LEG NEVER RAN and the empty result reads as success. ssh
+#       exits 255 for both "no route" and "the remote command exited 255", and a
+#       shell that dies before the command still produces plausible stdout. So
+#       the protocol carries its own positive control: a versioned sentinel
+#       naming the remote rc. No sentinel ⇒ unreachable, never a silent 0.
+#   (c) THE SCREENSHOT LANDS ON THE WRONG DISK. A `.png` written over there is
+#       useless here, so the far host is asked for the data URL and the LOCAL
+#       writer makes the file.
+#
+# RED-AT-BASE MATRIX — see the module docstring's convention. Measured at
+# `00afff8c` (origin/main) with ONLY this test file copied in: this whole file
+# went 25 FAILED / 110 passed there, and 135 passed at HEAD. The six cases here
+# that were GREEN at base each say so in their own docstring — they are
+# invariant guards, positive controls or non-goal pins, and none of them is
+# evidence that the proxy works.
+
+#: The remote leg's own rc, behind a versioned token — see `_ssh_proxy` in the
+#: CLI. Pinned against the CLI's literal by
+#: `test_the_proxy_sentinel_is_the_CLIs_OWN_literal`, because a stub that agrees
+#: with a sentinel nothing emits would make every proxy test green for nothing.
+PROXY_SENTINEL = "BBPROXY1:"
+
+#: A 70-byte 1x1 PNG. Real bytes, not a placeholder: the CLI's screenshot writer
+#: validates strict base64 AND the 8-byte PNG signature before writing, so a
+#: fixture that is not a PNG would exercise the refusal path instead of the
+#: success path and this whole group would pass for the wrong reason.
+PNG_1X1_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+               "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _proxy_ssh(stdout="", stderr="", rc=0):
+    """A stub `ssh` body that behaves as a REACHED host: it emits `stdout`,
+    `stderr`, and then the sentinel line carrying `rc`.
+
+    🔴 THE SENTINEL GOES ON **STDERR**, matching what the CLI asks the remote
+    shell to do. It used to be the last line of stdout, which forced the CLI to
+    read the whole response into a shell variable just to strip that line — the
+    root of the E2BIG defect (see `test_a_LARGE_proxied_screenshot_leaves_no_temp_
+    file_and_no_E2BIG`). Keeping stdout pure is what lets the CLI `cat` it.
+    `test_the_remote_payload_sends_the_sentinel_to_STDERR` pins the two together.
+
+    It stands in for the whole hop — the payload the CLI hands ssh is logged and
+    asserted on separately, so nothing here has to interpret it.
+    """
+    return (f"printf '%s' {shlex.quote(stdout)}\n"
+            f"printf '%s' {shlex.quote(stderr)} >&2\n"
+            f"printf '{PROXY_SENTINEL}%s\\n' {int(rc)} >&2\n"
+            f"exit {int(rc)}\n")
+
+
+def _png_b64(width=220, height=220):
+    """A REAL, valid PNG of a chosen size, base64'd — big enough to trip E2BIG.
+
+    🔴 THE SIZE IS THE POINT AND IT IS NOT ARBITRARY. The defect needs ONE
+    argv/envp string over `MAX_ARG_STRLEN` (32 pages = 131 072 bytes); at
+    220x220 of incompressible noise the base64 is ~194 KB, comfortably over,
+    while the 1x1 fixture used elsewhere is ~100 bytes and CANNOT reproduce it.
+    A fixture that can only ever be small is invisible to this whole class.
+
+    It must also be a real PNG: the writer validates strict base64 AND the
+    8-byte signature, so a blob of X's would exercise the refusal path instead.
+    `zlib` level 0 (stored) keeps the noise from compressing away.
+    """
+    import struct
+    import zlib
+    raw = bytearray()
+    seed = 12345
+    for _ in range(height):
+        raw.append(0)                        # filter byte: None
+        for _ in range(width):
+            seed = (seed * 1103515245 + 12345) & 0xFFFFFFFF
+            raw += bytes(((seed >> 16) & 0xFF, (seed >> 8) & 0xFF, seed & 0xFF))
+
+    def chunk(tag, data):
+        body = tag + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 0))
+           + chunk(b"IEND", b""))
+    return base64.b64encode(png).decode(), len(png)
+
+
+def _screenshot_envelope(url="https://example.invalid/page"):
+    """The raw `--data-url` envelope the far host would print."""
+    return json.dumps({
+        "ok": True,
+        "result": {"id": "c", "ok": True,
+                   "data": {"dataUrl": "data:image/png;base64," + PNG_1X1_B64,
+                            "url": url}}})
+
+
+def _ssh_payload(bridge, n=0):
+    """The COMMAND argument of the n-th stub-ssh invocation (ssh's last argv)."""
+    calls = bridge.ssh_calls()
+    assert calls, "ssh was never invoked, so this assertion proves nothing"
+    return calls[n][-1]
+
+
+# --------------------------------------------------------------------------- #
+# It runs over there, and the result comes back here
+# --------------------------------------------------------------------------- #
+def test_a_foreign_reference_is_EXECUTED_on_the_naming_host_over_ssh(bridge):
+    """🔴 CRITERION 1: exit 0, the far host's result on OUR stdout, no paste."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout='{"ok":true,"remote":"yes"}\n'))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"ok": True, "remote": "yes"}
+    # The point of the whole guard: the LOCAL bridge saw nothing.
+    assert bridge.bodies == [], bridge.bodies
+    assert len(bridge.ssh_calls()) == 1, bridge.ssh_calls()
+
+
+def test_the_remote_stdout_crosses_BYTE_FOR_BYTE_with_the_sentinel_removed(bridge):
+    """The sentinel is protocol, not payload — it must not reach the caller.
+
+    A `screenshot <path>` prints a bare path on line 1 and consumers parse it,
+    so an extra trailing line here is not cosmetic.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="line one\nline two\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "line one\nline two\n", repr(r.stdout)
+    assert PROXY_SENTINEL not in r.stdout
+
+
+def test_the_remote_stderr_is_replayed_on_OUR_stderr(bridge):
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n", stderr="browser: a warning\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert "browser: a warning" in r.stderr
+    assert "a warning" not in r.stdout
+
+
+@pytest.mark.parametrize("rc", [0, 1, 3, 4])
+def test_the_remote_EXIT_CODE_is_returned_verbatim(bridge, rc):
+    """Including 4: a far host that itself refuses must not be reported as
+    "unreachable". The two are told apart by stdout, which only a leg that RAN
+    can produce."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=f'{{"rc":{rc}}}\n', rc=rc))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == rc, r.stderr
+    assert json.loads(r.stdout) == {"rc": rc}
+
+
+# --------------------------------------------------------------------------- #
+# WHERE the hop goes, and what it carries
+# --------------------------------------------------------------------------- #
+def test_the_ssh_target_is_the_one_host_label_names(bridge):
+    """🔴 A restated address does not fail loudly — it answers as the wrong box.
+
+    Asserted POSITIVELY (the naming host's target is present) and NEGATIVELY
+    (the OTHER host's is not): a target that is merely "some `zach@…` string"
+    would satisfy the positive half while routing every reference to one box.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n"))
+    r = bridge.run(CANONICAL, "text")          # names 'workbench'
+    assert r.returncode == 0, r.stderr
+    argv = bridge.ssh_calls()[0]
+    assert _hl.ssh_target("workbench") in argv, argv
+    assert _hl.ssh_target("laptop") not in argv, argv
+
+
+def test_what_crosses_is_the_REFERENCE_not_instance_and_tab(bridge):
+    """🔴 So the far end re-runs the host check against its OWN bridge.
+
+    `--instance work --tab 12345` would arrive with no host field at all, and
+    the far end would drive whatever `work` means over there — which is the
+    exact failure this feature's guard exists to prevent, moved one hop away.
+    Sending the reference makes the address verified twice, independently.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    payload = _ssh_payload(bridge)
+    assert CANONICAL in payload, payload
+    assert "--instance" not in payload, payload
+    assert "--tab" not in payload, payload
+
+
+def test_the_command_run_remotely_RE_LEXES_to_the_operators_own_argv(bridge):
+    """It is #1598's handoff line, executed rather than printed — same string."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n"))
+    r = bridge.run(CANONICAL, "nav", "https://example.invalid/a b")
+    assert r.returncode == 0, r.stderr
+    first = _ssh_payload(bridge).splitlines()[0]
+    assert _relex(first) == [str(CLI), CANONICAL, "nav",
+                             "https://example.invalid/a b"]
+
+
+def test_a_MUTATING_op_proxies_with_no_flag_and_no_confirmation(bridge):
+    """🔴 DECIDED, NOT AN OVERSIGHT (task 574 Assumptions). A read-only-first
+    design with mutating ops behind a flag was offered and declined. `nav`
+    crossing unprompted is the shipped behaviour; a future "safety" gate here
+    fails this test, which is the intended way to notice it."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout='{"ok":true}\n'))
+    r = bridge.run(CANONICAL, "nav", "https://example.invalid/x")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"ok": True}
+    assert "nav" in _ssh_payload(bridge)
+
+
+# --------------------------------------------------------------------------- #
+# The naming host could not be reached — #1598's handoff, as the fallback
+# --------------------------------------------------------------------------- #
+def test_an_UNREACHABLE_naming_host_falls_back_to_the_rc4_handoff(bridge):
+    """🔴 CRITERION 4: nothing regresses when nebula is down."""
+    bridge.handler.host_label = "laptop"       # fixture's default stub: rc 255
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 4, r.stderr
+    assert r.stdout == "", repr(r.stdout)
+    assert bridge.bodies == [], bridge.bodies
+    chatter, cmd = _handoff_lines(r.stderr)
+    assert len(cmd) == 1, cmd
+    assert _relex(cmd[0]) == [str(CLI), CANONICAL, "text"]
+    assert any("did not answer" in ln for ln in chatter), r.stderr
+
+
+def test_the_ssh_TRANSPORT_ERROR_is_reprefixed_so_the_paste_line_stays_unique(bridge):
+    """🔴 The contract is "exactly one stderr line without 'browser:'".
+
+    ssh's own errors do not carry that prefix, so emitting them raw would give a
+    caller doing `tail -1`/`grep -v '^browser:'` two candidate command lines and
+    no way to choose. They are re-prefixed — and still shown, because "could not
+    connect" is the one thing the operator needs.
+    """
+    bridge.handler.host_label = "laptop"
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 4, r.stderr
+    chatter, cmd = _handoff_lines(r.stderr)
+    assert len(cmd) == 1, cmd
+    assert any("Network is unreachable" in ln for ln in chatter), r.stderr
+
+
+def test_a_remote_leg_with_NO_SENTINEL_is_UNREACHABLE_not_a_silent_success(bridge):
+    """🔴 THE POSITIVE CONTROL OF THE PROXY PROTOCOL.
+
+    ssh exits 0 and prints a perfectly plausible envelope, but our command never
+    ran (a banner, a login shell that died, a ProxyCommand that answered). Read
+    by exit code alone this is a success with a result. The sentinel is what
+    makes it a fallback instead — and this test is what proves the sentinel is
+    load-bearing rather than decorative.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh("printf '%s' '{\"ok\":true,\"result\":{}}'\nexit 0\n")
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 4, (
+        f"a sentinel-less remote leg was accepted as a result: rc={r.returncode} "
+        f"stdout={r.stdout!r}")
+    assert r.stdout == "", repr(r.stdout)
+    assert bridge.bodies == [], bridge.bodies
+
+
+def test_an_UNKNOWN_host_label_never_reaches_ssh_at_all(bridge):
+    """`ssh_target()` raises rather than guessing, and this is where that lands.
+
+    A label with no address must NOT be spliced into an ssh argv — that connects
+    to the local machine or to the caller's default host, i.e. the wrong box
+    reported as that label's.
+    """
+    bridge.handler.host_label = "workbench"
+    r = bridge.run("bw://nosuchhost/main/12345", "text")
+    assert r.returncode == 4, r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+    assert bridge.bodies == [], bridge.bodies
+    assert "No SSH target is known" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The safety property: host B's reference must never drive host A's browser
+# --------------------------------------------------------------------------- #
+def test_a_SAME_LABELLED_profile_here_is_never_driven_when_the_hop_SUCCEEDS(bridge):
+    """🔴 CRITERION 5, the reachable half.
+
+    `work` is a real instance label on BOTH hosts, which is the only shape where
+    a wrong-host reference could resolve locally and drive the wrong machine
+    while returning an ordinary envelope. The observable is that the local
+    bridge received NOTHING — not that a particular code came back.
+    """
+    bridge.handler.host_label = "workbench"
+    bridge.install_ssh(_proxy_ssh(stdout='{"ok":true,"from":"laptop"}\n'))
+    r = bridge.run("bw://laptop/work/12345", "nav", "https://example.invalid/x")
+    assert r.returncode == 0, r.stderr
+    assert bridge.bodies == [], (
+        f"a reference naming the laptop reached THIS host's bridge: {bridge.bodies}")
+    assert _hl.ssh_target("laptop") in bridge.ssh_calls()[0]
+
+
+def test_a_SAME_LABELLED_profile_here_is_never_driven_when_the_hop_FAILS(bridge):
+    """🔴 CRITERION 5, the unreachable half — the one a fallback could get wrong.
+
+    "The far host is down, so do it locally" is the plausible, wrong repair. It
+    must stay a refusal.
+
+    INVARIANT GUARD, not regression coverage: green at `00afff8c` too, where
+    there was no proxy and the refusal was the only behaviour. It is what fails
+    if a future fallback ever reaches for the local bridge.
+    """
+    bridge.handler.host_label = "workbench"
+    r = bridge.run("bw://laptop/work/12345", "nav", "https://example.invalid/x")
+    assert r.returncode == 4, r.stderr
+    assert bridge.bodies == [], (
+        f"a wrong-host reference reached the wire when ssh failed: {bridge.bodies}")
+
+
+def test_POSITIVE_CONTROL_the_same_local_profile_IS_drivable(bridge):
+    """🔴 Without this, the two tests above are indistinguishable from "nothing
+    on this host was ever drivable" — a bridge that refuses everything would
+    make them green while the guard did nothing."""
+    bridge.handler.host_label = "workbench"
+    r = bridge.run("--instance", "work", "--tab", "12345", "nav",
+                   "https://example.invalid/x")
+    assert r.returncode == 0, r.stderr
+    assert bridge.bodies, "the local bridge accepted nothing, so the guard tests prove nothing"
+    assert bridge.bodies[-1]["target"] == "work"
+    assert bridge.bodies[-1]["tab"] == 12345
+
+
+def test_the_LOCAL_WIRE_IS_CLOSED_once_a_proxy_target_is_set(bridge, tmp_path):
+    """🔴 LATENT INVARIANT GUARD — read the label before counting this as coverage.
+
+    `cmd_op`'s refusal is NOT reachable on any of today's code paths: every op
+    except `screenshot` exits inside the host check, and `screenshot` calls
+    `_ssh_proxy`, never `cmd_op`. So this is not regression coverage for a live
+    defect; it is the seam guard for the change that makes it reachable.
+
+    `screenshot` is the reason the guard exists at all. It is the first op that
+    deliberately runs PAST the host check (its bytes must be written on the
+    calling host), so "the branch exits before the wire" stopped being true for
+    every op. The next op that needs the same treatment is one edit away from
+    driving the wrong machine's browser, and that edit is what this simulates:
+    the copy below routes the deferred screenshot through `cmd_op`. The refusal
+    must fire with its OWN message, and nothing may reach the bridge.
+    """
+    root = tmp_path / "clone" / "scripts"
+    (root / "browser-bridge").mkdir(parents=True)
+    (root / "lib").symlink_to(_LIB)             # so `_ssh_target_for` still resolves
+    src = CLI.read_text(encoding="utf-8")
+    needle = '_ssh_proxy "$BB_PROXY_TARGET" "$_rcmd"; _prc=$?'
+    assert src.count(needle) == 1, (
+        "the screenshot proxy call was renamed; this mutation no longer targets it")
+    mutated = src.replace(
+        needle,
+        'resp="$(cmd_op screenshot "$full")"; _prc=$?; _BB_PROXY_RAN=1; _BB_PROXY_OUT=""')
+    copy = root / "browser-bridge" / "browser"
+    copy.write_text(mutated, encoding="utf-8")
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=_screenshot_envelope() + "\n"))
+    r = subprocess.run(["bash", str(copy), CANONICAL, "screenshot"],
+                       env=bridge.env_for_stub(), capture_output=True,
+                       text=True, timeout=CLI_TIMEOUT_S)
+    assert "tried to reach the LOCAL bridge" in r.stderr, (
+        f"cmd_op did not refuse; rc={r.returncode} stderr={r.stderr!r}")
+    assert r.returncode != 0, r.stderr
+    assert bridge.bodies == [], (
+        f"the deferred op reached the local bridge: {bridge.bodies}")
+
+
+# --------------------------------------------------------------------------- #
+# screenshot — captured over there, written HERE
+# --------------------------------------------------------------------------- #
+def test_a_foreign_screenshot_writes_the_PNG_LOCALLY_and_prints_a_LOCAL_path(bridge, tmp_path):
+    """🔴 CRITERION 3. A path that exists only on the far host is a failure."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=_screenshot_envelope() + "\n"))
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0] == str(out), repr(r.stdout)
+    assert out.exists(), "the printed path does not exist on the CALLING host"
+    assert out.read_bytes().startswith(PNG_MAGIC)
+    assert bridge.bodies == [], bridge.bodies
+
+
+def test_a_foreign_screenshot_with_no_path_writes_a_LOCAL_temp_file(bridge, tmp_path):
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=_screenshot_envelope() + "\n"))
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r = bridge.run(CANONICAL, "screenshot", env={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    p = Path(payload["path"])
+    assert p.parent == tmpdir, payload
+    assert p.read_bytes().startswith(PNG_MAGIC)
+    assert payload["bytes"] == 70
+
+
+def test_the_far_host_is_asked_for_the_DATA_URL_and_never_for_a_local_path(bridge, tmp_path):
+    """🔴 The local path must NOT cross. Sent over there it would write the file
+    on the wrong disk and this command would print a path that does not exist
+    here — criterion 3's explicit failure mode."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=_screenshot_envelope() + "\n"))
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out))
+    assert r.returncode == 0, r.stderr
+    first = _ssh_payload(bridge).splitlines()[0]
+    assert _relex(first) == [str(CLI), CANONICAL, "screenshot", "--data-url"]
+    assert str(out) not in _ssh_payload(bridge)
+
+
+def test_fullpage_survives_the_hop(bridge, tmp_path):
+    """A capture option belongs to the REMOTE leg; an output option belongs
+    here. This is the one that has to cross."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=_screenshot_envelope() + "\n"))
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out), "--fullpage")
+    assert r.returncode == 0, r.stderr
+    first = _ssh_payload(bridge).splitlines()[0]
+    assert _relex(first) == [str(CLI), CANONICAL, "screenshot", "--data-url",
+                             "--fullpage"]
+
+
+def test_a_foreign_screenshot_JSON_envelope_is_the_LOCAL_one(bridge, tmp_path):
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=_screenshot_envelope() + "\n"))
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["path"] == str(out)
+    assert payload["bytes"] == 70
+    assert payload["url"] == "https://example.invalid/page"
+
+
+def test_a_screenshot_USAGE_error_is_still_a_LOCAL_rc1_before_any_ssh(bridge, tmp_path):
+    """Validated here, so the operator gets this CLI's own message rather than a
+    confusing one relayed from a machine they did not think they were using."""
+    bridge.handler.host_label = "laptop"
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out), "--data-url")
+    assert r.returncode == 1, r.stderr
+    assert "mutually exclusive" in r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+    assert not out.exists()
+
+
+def test_an_unreachable_host_for_a_SCREENSHOT_falls_back_to_the_handoff(bridge, tmp_path):
+    bridge.handler.host_label = "laptop"       # default stub: unreachable
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out))
+    assert r.returncode == 4, r.stderr
+    assert not out.exists()
+    assert bridge.bodies == [], bridge.bodies
+    _, cmd = _handoff_lines(r.stderr)
+    assert len(cmd) == 1, cmd
+    assert _relex(cmd[0]) == [str(CLI), CANONICAL, "screenshot", str(out)]
+
+
+def test_a_REMOTE_screenshot_failure_is_not_reported_as_unreachable(bridge, tmp_path):
+    """The far host answered — it just could not capture. rc must be ITS rc, and
+    no handoff line may be printed (there is nothing to retry over there)."""
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="", stderr="browser: op failed\n", rc=1))
+    out = tmp_path / "shot.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out))
+    assert r.returncode == 1, r.stderr
+    assert "Run this ON" not in r.stderr, r.stderr
+    assert not out.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Scope: nothing that is not a foreign reference grows an SSH hop
+# --------------------------------------------------------------------------- #
+def test_INVARIANT_GUARD_a_MATCHING_host_never_invokes_ssh(bridge):
+    """Green before this change too (there was no ssh at all). It pins the
+    feature's SCOPE — an ordinary same-host reference must not acquire a network
+    round trip — and is NOT evidence the proxy works."""
+    bridge.handler.host_label = "workbench"
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+    assert bridge.bodies and bridge.bodies[-1]["target"] == CANONICAL_INSTANCE
+
+
+def test_INVARIANT_GUARD_no_reference_at_all_never_invokes_ssh(bridge):
+    """As above: scope, not evidence."""
+    r = bridge.run("--instance", "main", "text")
+    assert r.returncode == 0, r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+
+
+def test_a_bridge_that_cannot_name_its_host_still_proceeds_LOCALLY(bridge):
+    """FAIL OPEN on ignorance is unchanged: an unidentifiable bridge warns and
+    runs the command HERE. It must not start ssh-ing on a guess — that would
+    turn "we do not know" into "drive the other machine"."""
+    bridge.handler.host_label = "unknown"
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert "NOT verified" in r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+    assert bridge.bodies and bridge.bodies[-1]["target"] == CANONICAL_INSTANCE
+
+
+# --------------------------------------------------------------------------- #
+# Seam guards — the stub agrees with the implementation it stands in for
+# --------------------------------------------------------------------------- #
+def test_the_proxy_sentinel_is_the_CLIs_OWN_literal():
+    """🔴 Every proxying test above is built on `PROXY_SENTINEL`. If the CLI's
+    literal changed, the stubs would emit a token nothing recognises and every
+    one of those tests would take the UNREACHABLE path — i.e. go red for a
+    harness reason. This makes the two one claim."""
+    src = CLI.read_text(encoding="utf-8")
+    m = re.search(r'^BB_PROXY_SENTINEL="([^"]+)"$', src, re.MULTILINE)
+    assert m, "BB_PROXY_SENTINEL is no longer a plain literal assignment"
+    assert m.group(1) == PROXY_SENTINEL
+
+
+def test_the_CLI_declares_no_peer_ADDRESS_of_its_own():
+    """🔴 The non-goal, pinned where this feature could break it.
+
+    `scripts/tests/test_peer_host.py` enforces this repo-wide, but it is worth a
+    local guard on the one file that just grew a reason to want an address: a
+    literal here would not fail loudly — `10.42.0.10` is the homelab gateway and
+    answers ssh happily when the laptop was meant.
+    """
+    src = CLI.read_text(encoding="utf-8")
+    for label, addr, user in _hl.PEER_SSH:
+        assert addr not in src, (
+            f"the browser CLI spells {label}'s address ({addr}) — call "
+            f"host_label.ssh_target() instead")
+        assert f"{user}@{addr}" not in src
+
+
+def test_server_py_is_UNTOUCHED_by_this_feature():
+    """🔴 CRITERION 6, the half a test can hold: the bridge stays loopback-only.
+
+    The runtime half ("no new listening port") is an `ss -lptn` diff and lives
+    in the PR body. This pins the source-level contract that makes it true — the
+    bind address and the Host-header allowlist — so a later change that reaches
+    for "just expose it on the mesh" turns this red.
+    """
+    src = (BB / "server.py").read_text(encoding="utf-8")
+    assert ('_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", '
+            '"[::1]"})') in src, (
+        "server.py's Host-header allowlist was widened or reworded")
+    assert 'os.environ.get("BROWSER_BRIDGE_HOST", "127.0.0.1")' in src, (
+        "server.py no longer defaults to a loopback bind")
+
+
+# =========================================================================== #
+# The E2BIG / temp-file-leak defect — found by independent verification of #1662
+# =========================================================================== #
+# 🔴 WHAT HAPPENED, because the shape of these tests only makes sense with it.
+#
+#   `_ssh_proxy` used to capture the remote leg's stdout into a shell variable:
+#   `out="$(ssh …)"`. On a screenshot that is several hundred KB of base64. The
+#   very next `rm -f "$errf"` then died with **"Argument list too long"** and the
+#   temp file leaked — reproducibly, on every proxied screenshot of a real page.
+#
+#   The cause is not the argument (a 29-byte path) and not ARG_MAX (2 MB here
+#   against a 28 KB environment). Measured by instrumenting the live CLI:
+#
+#     * the invoking shell EXPORTED a variable called `out` — a generic name;
+#     * `local out` does NOT clear an inherited export attribute (bash prints
+#       `declare -x out=…` for the local; control: `local +x out` is clean, same
+#       value, same shell);
+#     * so the payload became ONE environment string, and the Linux per-string
+#       cap `MAX_ARG_STRLEN` is 32 pages = 131 072 bytes — far below ARG_MAX. Past
+#       it, EVERY `execve` in the process fails: `rm`, `cat`, `env`, `wc`, `true`
+#       all did. Threshold measured between 120 KB (fine) and 330 KB (fails).
+#
+#   Two independent conditions, so a test needs BOTH: an exported variable whose
+#   NAME the CLI reuses, and a payload over 128 KB. A fixture missing either one
+#   is green against the broken code.
+#
+# 🔴 AND THE FIRST FIX WAS ITSELF WRONG IN A WAY ONLY THE LEAK TEST CAUGHT: the
+#   temp files were registered by a helper called as `f="$(_bb_tmpfile …)"`, so
+#   the registration happened in a command-substitution SUBSHELL and the EXIT
+#   trap swept an empty list. The cleanup code was present, looked right, and
+#   removed nothing. That is why the assertion here is on FILES ON DISK and not
+#   on the presence of a trap.
+
+#: The kernel's per-string argv/envp cap — 32 pages. Named rather than spelled at
+#: the use site so the "is this fixture actually big enough" question is one read.
+MAX_ARG_STRLEN = 131_072
+
+
+def _proxy_tmp_files(tmpdir):
+    return sorted(p.name for p in Path(tmpdir).glob("browser-proxy-*"))
+
+
+def _big_screenshot_envelope():
+    b64, png_len = _png_b64()
+    assert len(b64) > MAX_ARG_STRLEN, (
+        f"the fixture base64 is {len(b64)} B, under MAX_ARG_STRLEN "
+        f"({MAX_ARG_STRLEN}) — it CANNOT reproduce the defect")
+    return json.dumps({
+        "ok": True,
+        "result": {"id": "c", "ok": True,
+                   "data": {"dataUrl": "data:image/png;base64," + b64,
+                            "url": "https://example.invalid/big"}}}), png_len
+
+
+def test_a_LARGE_proxied_screenshot_leaves_no_temp_file_and_no_E2BIG(bridge, tmp_path):
+    """🔴 THE REGRESSION TEST FOR THE DEFECT. Red at `bad7544e`.
+
+    Both reproduction conditions are supplied explicitly: `out` is EXPORTED into
+    the CLI's environment (the invoking shell happened to export it, which is
+    what made this environment-dependent and easy to miss), and the payload is
+    over MAX_ARG_STRLEN. Neither alone reproduces anything.
+
+    The observable is a file on disk, not a code shape: the broken version had
+    `rm -f "$errf"` right there in the source and it ran and failed.
+    """
+    envelope, png_len = _big_screenshot_envelope()
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=envelope + "\n"))
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    out = tmp_path / "big.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out),
+                   env={"TMPDIR": str(tmpdir), "out": "/an/exported/generic/name"})
+    assert r.returncode == 0, r.stderr
+    assert "Argument list too long" not in r.stderr, (
+        f"an exec failed with E2BIG — the payload is back in an exported shell "
+        f"variable:\n{r.stderr}")
+    assert _proxy_tmp_files(tmpdir) == [], (
+        f"proxy temp files leaked: {_proxy_tmp_files(tmpdir)}")
+    # …and the feature still works at this size.
+    assert out.read_bytes()[:8] == PNG_MAGIC
+    assert len(out.read_bytes()) == png_len
+
+
+def test_the_leak_check_can_SEE_a_temp_file_positive_control(bridge, tmp_path):
+    """🔴 POSITIVE CONTROL for the assertion above.
+
+    `_proxy_tmp_files(...) == []` is a ZERO, and a zero is indistinguishable from
+    a glob wired to the wrong directory. This proves the glob CAN return
+    non-empty for the exact name shape the CLI creates, in the exact directory
+    the test points at.
+    """
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    assert _proxy_tmp_files(tmpdir) == []
+    (tmpdir / "browser-proxy-err.ABCDEF").write_text("x")
+    (tmpdir / "browser-proxy-out.ABCDEF").write_text("x")
+    assert _proxy_tmp_files(tmpdir) == ["browser-proxy-err.ABCDEF",
+                                        "browser-proxy-out.ABCDEF"]
+
+
+# 🔴 EXPLICIT `ids`. Without them pytest derives the id from the ssh body, so the
+# node id contains the whole stub script — unquotable on a command line, which
+# silently turned a mutation run into "no tests ran" and scored the mutant
+# SURVIVED. The verdict was about the id, not the code.
+@pytest.mark.parametrize("case,ssh_body,expect_rc", [
+    ("remote ran and succeeded", _proxy_ssh(stdout='{"ok":true}\n'), 0),
+    ("remote ran and failed",    _proxy_ssh(stdout="", stderr="boom\n", rc=1), 1),
+    ("host unreachable",         "echo 'ssh: no route' >&2\nexit 255\n", 4),
+    ("reached but no sentinel",  "printf '%s' '{}'\nexit 0\n", 4),
+], ids=["ran-ok", "ran-failed", "unreachable", "no-sentinel"])
+def test_the_temp_files_are_removed_on_EVERY_exit_path(bridge, tmp_path, case,
+                                                       ssh_body, expect_rc):
+    """🔴 "Removed at the end of the function" is not "removed on every path".
+
+    `_ssh_proxy` returns early when the sentinel is missing, and its callers
+    `exit` from three different places — including `_print_handoff`, which never
+    returns. Each row here leaves the process by a different door.
+
+    INVARIANT GUARD — all four rows are GREEN at `bad7544e`. The old inline `rm`
+    did cover these paths *at small payload sizes*; what it could not survive was
+    the exec failing (the row above). This pins that replacing it with a trap did
+    not lose the coverage it had, and is NOT evidence the defect is fixed.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(ssh_body)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    r = bridge.run(CANONICAL, "text", env={"TMPDIR": str(tmpdir)})
+    assert r.returncode == expect_rc, f"{case}: rc={r.returncode}\n{r.stderr}"
+    assert _proxy_tmp_files(tmpdir) == [], (
+        f"{case}: proxy temp files leaked: {_proxy_tmp_files(tmpdir)}")
+
+
+def test_a_CLEANUP_THAT_CANNOT_RUN_says_so(bridge, tmp_path):
+    """🔴 A leak nobody is told about is how four stray files accumulated.
+
+    The directory is made read-only after the CLI has created its temp files, so
+    the unlink is refused. The requirement is not that cleanup always succeeds —
+    it is that a failure is never silent.
+    """
+    bridge.handler.host_label = "laptop"
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    # A stub ssh that seals the directory *after* the CLI has created its files.
+    bridge.install_ssh(
+        f"printf '%s' '{{\"ok\":true}}'\n"
+        f"printf '{PROXY_SENTINEL}0\\n' >&2\n"
+        f"chmod 500 {shlex.quote(str(tmpdir))}\n"
+        "exit 0\n")
+    r = bridge.run(CANONICAL, "text", env={"TMPDIR": str(tmpdir)})
+    tmpdir.chmod(0o700)                       # so tmp_path teardown can clean up
+    leftovers = _proxy_tmp_files(tmpdir)
+    if not leftovers:
+        pytest.skip("the unlink was not actually refused (running as root?), so "
+                    "this case cannot observe what it is about")
+    assert "remove it by hand" in r.stderr, (
+        f"temp files survived ({leftovers}) and NOTHING said so:\n{r.stderr}")
+    # Still a `browser:`-prefixed line, so the paste-line contract is untouched.
+    for line in r.stderr.splitlines():
+        if "remove it by hand" in line:
+            assert line.startswith("browser:"), line
+
+
+def test_a_cleanup_whose_rm_LIES_is_still_reported(bridge, tmp_path):
+    """🔴 THE SECOND DETECTOR, given its own reachable case.
+
+    `_bb_tmp_cleanup` has two independent checks: `rm` returning non-zero, and
+    the file still existing afterwards. A mutation sweep found that killing the
+    SECOND one alone left every test green — the first still fired — i.e. the
+    existence check was covered by nothing. That is a guard reading as coverage
+    while providing none.
+
+    This reaches it with a case the first check cannot: a stub `rm` that exits 0
+    and removes nothing. Only "the file survived" can notice that.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout='{"ok":true}\n'))
+    binhome = Path(bridge.ssh_log).parent / "stub-bin"
+    mockbin.write_exec(binhome / "rm", 'exit 0\n')      # lies: succeeds, removes nothing
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    try:
+        r = bridge.run(CANONICAL, "text", env={"TMPDIR": str(tmpdir)})
+        assert r.returncode == 0, r.stderr
+        assert _proxy_tmp_files(tmpdir), (
+            "the stub `rm` did not actually leave the files behind, so this case "
+            "cannot observe what it is about")
+        assert "survived cleanup" in r.stderr, (
+            f"a cleanup that silently removed nothing said nothing:\n{r.stderr}")
+    finally:
+        (binhome / "rm").unlink()
+
+
+def test_a_LARGE_proxied_read_keeps_stdout_byte_exact(bridge, tmp_path):
+    """The payload now reaches stdout by `cat`, not by interpolating a variable.
+
+    Pinned at a size past MAX_ARG_STRLEN so the assertion is about the path that
+    was broken, and byte-for-byte so a `printf`-based reimplementation that eats
+    trailing newlines fails here.
+    """
+    body = ("x" * (MAX_ARG_STRLEN + 5000)) + "\n\n"
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=body))
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    r = bridge.run(CANONICAL, "text",
+                   env={"TMPDIR": str(tmpdir), "out": "/an/exported/generic/name"})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == body, (
+        f"stdout is {len(r.stdout)} B, expected {len(body)} B "
+        f"(trailing newlines are part of the claim)")
+    assert "Argument list too long" not in r.stderr
+
+
+def test_the_remote_payload_sends_the_sentinel_to_STDERR(bridge):
+    """🔴 SEAM GUARD. Keeping stdout pure is what makes the `cat` possible.
+
+    Move the sentinel back onto stdout and the CLI must once again read the whole
+    response into a variable to strip it — reintroducing the defect. The stub in
+    this file emits it on stderr; this is what keeps the two one claim.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    payload = _ssh_payload(bridge)
+    sentinel_lines = [ln for ln in payload.splitlines() if PROXY_SENTINEL in ln]
+    assert len(sentinel_lines) == 1, payload
+    assert sentinel_lines[0].rstrip().endswith(">&2"), (
+        f"the remote is not asked to put the sentinel on stderr: "
+        f"{sentinel_lines[0]!r}")
+
+
+def test_the_SENTINEL_never_leaks_onto_the_callers_stderr(bridge):
+    """It is protocol, not output. A caller reading stderr must not see it.
+
+    INVARIANT GUARD (green at `bad7544e`, where the sentinel was on stdout and so
+    could not reach stderr anyway). It becomes load-bearing now that the sentinel
+    IS written to the remote's stderr: without it, moving the token would leak it
+    to every caller and nothing would say so.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n", stderr="browser: a warning\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert "browser: a warning" in r.stderr
+    assert PROXY_SENTINEL not in r.stderr, r.stderr
+    assert PROXY_SENTINEL not in r.stdout, r.stdout
+
+
+def test_a_CLI_that_cannot_REACH_host_label_refuses_and_drives_nothing(bridge, tmp_path):
+    """🔴 FAIL-CLOSED UNDER A FAILURE NOBODY DESIGNED FOR — observed for real.
+
+    An independent verifier copied `browser` to /tmp to instrument it, which
+    silently broke its relative path to `scripts/lib/host_label.py`. That is the
+    exact shape where a resolver returning "" gets spliced into an ssh argv, or
+    worse, where the code shrugs and uses the LOCAL bridge. It must refuse.
+
+    The copy below is placed with NO `lib/` sibling, so `_ssh_target_for` finds
+    nothing — and `work` is a label that exists on both hosts, so a fall-through
+    would drive a real local profile.
+
+    INVARIANT GUARD — green at `bad7544e`; the behaviour was already correct and
+    was observed by accident during independent verification. It is written down
+    because "the resolver returned empty" is the shape that silently becomes an
+    `ssh ""` or a local drive, and nothing pinned it before.
+    """
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    copy = stray / "browser"
+    copy.write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
+    bridge.handler.host_label = "workbench"
+    r = subprocess.run(["bash", str(copy), "bw://laptop/work/12345", "nav",
+                        "https://guard-must-not-reach.invalid/"],
+                       env=bridge.env_for_stub(), capture_output=True,
+                       text=True, timeout=CLI_TIMEOUT_S)
+    assert r.returncode == 4, r.stderr
+    assert "No SSH target is known" in r.stderr, r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+    assert bridge.bodies == [], (
+        f"a foreign reference drove the LOCAL bridge when host_label could not "
+        f"be reached: {bridge.bodies}")
+
+
+def test_the_proxy_locals_are_all_declared_PLUS_X(bridge):
+    """🔴 STRUCTURAL GUARD on the half of the fix a behavioural test cannot see.
+
+    The payload no longer goes into a variable, so the export trap has nothing
+    big to attach to *today*. `+x` is what stops the next variable added to this
+    function from re-opening it — and its absence is silent until someone's shell
+    happens to export a matching name. Assert the declaration, since there is no
+    observable to assert.
+    """
+    src = CLI.read_text(encoding="utf-8")
+    body = src.split("_ssh_proxy() {", 1)[1].split("\n}", 1)[0]
+    locals_ = [ln.strip() for ln in body.splitlines()
+               if ln.strip().startswith("local ")]
+    assert locals_, "no `local` declarations found — did _ssh_proxy get renamed?"
+    for decl in locals_:
+        assert decl.startswith("local +x "), (
+            f"a local in _ssh_proxy is not `+x`, so an inherited export "
+            f"attribute can attach to it: {decl!r}")

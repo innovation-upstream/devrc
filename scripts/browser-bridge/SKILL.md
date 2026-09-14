@@ -45,10 +45,10 @@ Global flags, usable before any op: `--instance <key>` (which profile),
 `--tab <id>` (explicit tab), `--frame <numericId|urlSubstring>` (inside an iframe).
 Env defaults `$BB_INSTANCE`/`$BB_TAB`/`$BB_FRAME` (flag wins; zsh does NOT
 split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say so
-once, on stderr.
+on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
-`--instance`+`--tab`, either side of the op; host verified (wrong host = rc 4 +
-the command to run there). `<ref> context`
+`--instance`+`--tab`, either side of the op; host verified; a foreign ref RUNS
+there over ssh (unreachable → rc 4 + paste). `<ref> context`
 resolves one. 🔴 For
 `type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
 the text/goal you send. `agent` refuses a LEADING one, `--tab` and `--frame`.
