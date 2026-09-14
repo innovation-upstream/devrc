@@ -33,6 +33,7 @@ fix exists (alacritty#1705 wontfix); the copy-mode `o` binding also answers
 import re
 import shutil
 import subprocess
+import time
 import uuid
 
 import pytest
@@ -53,6 +54,10 @@ SOCK = f"hint-open-{uuid.uuid4().hex[:8]}"
 # deferred assert in the `server` fixture is the pattern
 # test_tmux_reply_agent.py chose for the same runtime.
 TMUX = shutil.which("tmux")
+# Generous on purpose: the measured render is 15-25 ms, so this is ~400x the
+# observed need. It is a DEADLINE, not a delay — a healthy run returns as soon
+# as the grid holds the URI and never spends it.
+RENDER_TIMEOUT_S = 10.0
 
 
 def tmux(*args):
@@ -89,6 +94,51 @@ def server():
                    timeout=30)
 
 
+@pytest.fixture(scope="module")
+def rendered(server):
+    """Block until the pane's OSC 8 link is actually IN the grid.
+
+    🔴 `new-session -d` returns when the SERVER is up, which says nothing about
+    whether the pane command's `printf` has been read and parsed into the grid.
+    MEASURED 2026-09-14: 30 of 30 immediate captures came back EMPTY, with the
+    URI arriving 15-25 ms later. Every grid-reading test was therefore passing
+    only when some unrelated earlier test happened to burn that much wall time
+    first — which made `test_the_grid_hyperlink_spans_the_wrap` fail 7 of 8 runs
+    in isolation while `test_tmux_stores_the_hyperlink_and_can_report_it` failed
+    1 of 3 in file order. ONE defect, two symptoms, ranked by run order.
+
+    That ordering is why this is a fixture and not a retry on the one test that
+    was observed flaking: deleting that test — the standing recommendation
+    before this was measured — would have left the WORSE flake behind it, newly
+    first in line. One rule, one place.
+
+    🔴 IT CANNOT MASK A REAL BREAKAGE. On timeout it FAILS, loudly, quoting the
+    grid it did see, so an OSC 8 that never renders — the actual thing these
+    tests pin — is still RED and is distinguishable from a slow one. A bare
+    `sleep` would have been the masking version of this fix. Mutation-checked:
+    with the OSC 8 wrapper removed from the pane payload the fixture fails with
+    the message below and `Last capture: '\\n'`, never a pass.
+
+    Only the two grid-READING tests take this fixture. The tests that read a
+    server option or the key table keep plain `server`, so a genuine OSC 8
+    regression still leaves their independent signal green and legible.
+    """
+    deadline = time.monotonic() + RENDER_TIMEOUT_S
+    last = ""
+    while time.monotonic() < deadline:
+        cap = tmux("capture-pane", "-p", "-H", "-t", "t")
+        last = cap.stdout
+        if URI in last:
+            return
+        time.sleep(0.01)
+    pytest.fail(
+        f"the OSC 8 hyperlink never reached the tmux grid within "
+        f"{RENDER_TIMEOUT_S}s — this is the failure these tests exist to "
+        f"catch, NOT the render race this fixture absorbs. "
+        f"Last capture: {last!r}"
+    )
+
+
 def test_conf_appends_the_hyperlinks_terminal_feature():
     conf = open(CONF).read()
     assert re.search(r"^set -as terminal-features ',\*:hyperlinks'", conf, re.M)
@@ -117,7 +167,7 @@ def test_running_tmux_accepts_the_hyperlinks_feature(server):
     assert "hyperlinks" in out.stdout, out.stdout
 
 
-def test_tmux_stores_the_hyperlink_and_can_report_it(server):
+def test_tmux_stores_the_hyperlink_and_can_report_it(rendered):
     # ⚠ INVARIANT GUARD, not regression coverage: tmux PARSES OSC 8 from
     # applications unconditionally (input.c), so the grid holds the URI
     # whether or not terminal-features is set — this passed BEFORE the fix
@@ -130,7 +180,7 @@ def test_tmux_stores_the_hyperlink_and_can_report_it(server):
     assert URI in out.stdout, out.stdout
 
 
-def test_the_grid_hyperlink_spans_the_wrap(server):
+def test_the_grid_hyperlink_spans_the_wrap(rendered):
     # ⚠ INVARIANT GUARD, same caveat as above — measured: the copy-mode
     # format reads the full URI at the link's first cell AND on the wrapped
     # continuation row, which is what makes the whole wrapped link one
