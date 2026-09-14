@@ -441,3 +441,470 @@ def test_emit_concurrent_appends_dont_interleave(tmp_path):
     assert len(lines) == 20
     texts = sorted(C.parse_line(l)["text"] for l in lines)
     assert texts == sorted(f"cmd{i}" for i in range(20))
+
+
+# --------------------------------------------------------------------------- #
+# WHICH MACHINE IS THIS (#1601)
+# --------------------------------------------------------------------------- #
+# 🔴 THE COLLECTOR WAS THE ONE CONSUMER THAT DID NOT DERIVE. `ACTIVITY_HOST`
+# absent, it fell back to `""`, under which `parse_line` leaves emit's
+# `host=$(hostname)` standing — `nixos` on BOTH machines. That single gap is why
+# the first cut of #1601 had to WRITE a label into the collector's env file from
+# a home-manager activation, and that write mangled a `CLICKHOUSE_PASSWORD` line
+# in a systemd `EnvironmentFile=`. Deriving here deletes the write.
+#
+# 🔴 HERMETIC BY CONSTRUCTION, AND IT HAS TO BE: this suite runs on ONE OF THE TWO
+# REAL MACHINES the module is about, so the address probe would answer truthfully
+# mid-test and make an assertion pass for a reason unrelated to the code.
+# `_hermetic_host_label` says "this machine holds none of the known addresses"
+# and points the env file at a path that does not exist; every test that WANTS a
+# signal injects one. `test_the_hermeticity_fixture_is_installed` is its positive
+# control — a guard nobody has watched work is not a guard.
+#: 🔴 WHICH OF THE TESTS BELOW IS REGRESSION COVERAGE, AND AGAINST WHICH BASE.
+#: These fail at `4697add2` — the round-1 head of this branch, where
+#: `host_label.py` already derived and only `collector.py` did not — BECAUSE OF
+#: THE DEFECT, i.e. because `from_env` answered `""` where it should have derived.
+#:
+#: THE RECIPE, IN FULL, BECAUSE THE OBVIOUS ONE DOES NOT REPRODUCE. Copying THIS
+#: file verbatim into `git archive 4697add2` under /tmp gives **ERRORS ONLY — one
+#: per collected test, 0 failed, 0 passed** — not a red/green matrix at all: the
+#: autouse `_hermetic_host_label` fixture calls `C._load_host_label()`, a symbol
+#: that does not exist there, so every test dies at SETUP and nothing runs. The
+#: fixture call has to be neutralised first, by loading `scripts/lib/host_label.py`
+#: inline with `importlib.util.spec_from_file_location` instead (the MODULE
+#: derives at `4697add2`; only its consumer did not, which is the whole point).
+#: With exactly that one substitution: **8 failed**, the rest passed
+#: (45 errors → 8 failed / 37 passed as measured at this file's current size; the
+#: PASS count tracks however many tests this file holds, the 8 does not).
+#: Of the 8, four are these two ledger entries — three parametrisations of
+#: `..._is_DERIVED_from_an_address_this_machine_holds` plus the deployed-layout
+#: test — each `assert '' == '<label>'`, i.e. red BECAUSE OF THE DEFECT. The
+#: other four are not: two are `AttributeError: no attribute 'HOST_LABEL_LIB_DIRS'`
+#: (a missing SYMBOL) and two assert a WARNING log line that does not exist
+#: there. That distinction is deliberately not claimed as coverage.
+#: `origin/main` is not a usable base for these at all — the module
+#: has no address signal there, so the fixture cannot even be built.
+#: Everything else in this section is an INVARIANT GUARD: it pins behaviour that
+#: was already correct, or a code path this branch introduces. The distinction is
+#: written down because a guard that never could have gone red reads as coverage
+#: and provides none.
+RED_AT_4697ADD2 = {
+    "test_an_ABSENT_ACTIVITY_HOST_is_DERIVED_from_an_address_this_machine_holds",
+    "test_the_DEPLOYED_symlink_layout_can_derive_the_host_label",
+}
+
+_LIB = Path(__file__).resolve().parent.parent.parent / "lib"
+_COLLECTOR_PY = Path(__file__).resolve().parent.parent / "collector.py"
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_host_label(monkeypatch, tmp_path_factory):
+    """Mute the real machine's identity for every test in this file."""
+    monkeypatch.setenv("HOST_LABEL_ADDRS", "")
+    monkeypatch.delenv("ACTIVITY_HOST", raising=False)
+    # `_load_host_label` mutates sys.path; hand monkeypatch a COPY so the
+    # original list object is restored and one test cannot leak a libdir into
+    # the next (the broken-module cases below depend on that).
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    hl = C._load_host_label()
+    monkeypatch.setattr(
+        hl, "ACTIVITY_ENV",
+        str(tmp_path_factory.mktemp("no-env") / "absent-env"))
+    return hl
+
+
+def _addrs_of(hl, label):
+    """The addresses `host-role.sh` gives `label`. Read from the module's own
+    table, never typed here — a literal would pin this suite to the fleet's
+    current IPs, which `test_peer_host.py` polices."""
+    return " ".join(a for lbl, a in hl.host_addrs() if lbl == label)
+
+
+def test_the_hermeticity_fixture_is_installed(_hermetic_host_label):
+    """POSITIVE CONTROL on the fixture, asserted by OBSERVING the module rather
+    than by re-reading the fixture.
+
+    INVARIANT GUARD (it is about the harness, not the defect).
+    """
+    hl = _hermetic_host_label
+    assert not os.path.exists(hl.ACTIVITY_ENV)
+    assert os.environ.get("ACTIVITY_HOST") is None
+    assert hl.address_host_label() is None
+    # …and it is the ENV that did that, not a probe wired to nothing: with the
+    # variable unset the probe would reach the real machine. Feeding it a value
+    # that MUST match moves the answer, so the PAIR is reported, not the zero.
+    os.environ["HOST_LABEL_ADDRS"] = _addrs_of(hl, "workbench")
+    hl._reset_host_addrs_cache()
+    assert hl.address_host_label() == "workbench"
+    os.environ["HOST_LABEL_ADDRS"] = ""
+    assert hl.address_host_label() is None
+
+
+def test_an_explicit_ACTIVITY_HOST_still_WINS_over_the_derivation(
+        _hermetic_host_label):
+    """Precedence that must NOT change: a stated label is what the daemon stamps.
+
+    The machine "holds" the WORKBENCH's addresses while the environment says
+    `laptop` — so a mutant that derives FIRST answers `workbench` here.
+
+    INVARIANT GUARD: green at `origin/main` too, where `from_env` read the
+    environment and nothing else.
+
+    🔴 THIS TEST IS *NOT* THE KILLER FOR "THE DERIVE PREEMPTS THE ENVIRONMENT",
+    AND AN EARLIER DRAFT OF THIS DOCSTRING CLAIMED IT WAS. Measured: the mutant
+    that puts `_derive_host_label(e) or …` in front SURVIVED the whole collector
+    suite. It has to — `_derive_host_label` passes `env` STRAIGHT THROUGH to
+    `local_host_label`, which cross-checks the stated label against the address
+    and RAISES `HostLabelConflict` on exactly the input this test builds; the
+    broad catch turns that into `""` and the expression falls through to the
+    environment anyway. So for a VALID stated label the two orders are
+    indistinguishable. The observable difference is an INVALID one, and its
+    killer is `test_an_INVALID_ACTIVITY_HOST_is_still_passed_through_UNCHANGED`
+    below (`MUT-C3`). This test pins the contract; that one is what makes it
+    machine-checked.
+
+    ⚠ AND IT IS AN OVERRIDE HERE, UNLIKE EVERYWHERE ELSE. `local_host_label()`
+    CROSS-CHECKS a stated label against the machine's address and raises on a
+    contradiction; this daemon never gets that far, by design — see
+    `_derive_host_label`'s docstring for why a collector that refuses to start is
+    worse than a wrong column.
+    """
+    hl = _hermetic_host_label
+    os.environ["HOST_LABEL_ADDRS"] = _addrs_of(hl, "workbench")
+    assert C.Config.from_env({"ACTIVITY_HOST": "laptop"}).host_override == "laptop"
+
+
+@pytest.mark.parametrize("env", [{}, {"ACTIVITY_HOST": ""},
+                                 {"ACTIVITY_HOST": "  "}],
+                         ids=["absent", "empty", "blank"])
+def test_an_ABSENT_ACTIVITY_HOST_is_DERIVED_from_an_address_this_machine_holds(
+        _hermetic_host_label, env):
+    """🔴 RED AT BASE, AND THIS IS THE WHOLE POINT OF THE CHANGE. At
+    `origin/main` (and at this branch's own `4697add2`) `from_env` answered `""`
+    for all three of these, and `parse_line` then left emit's `host=$(hostname)`
+    — `nixos` on BOTH machines — on every shipped row.
+
+    The `blank` row is the one the old `e.get("ACTIVITY_HOST", "")` got wrong in
+    a second way: a whitespace-only value is truthy, so it was stamped verbatim.
+
+    The injected address is the LAPTOP's, deliberately: `workbench` is the
+    literal the old default used, so a mutant that hardcodes it cannot survive
+    by accidentally equalling the expectation.
+    """
+    hl = _hermetic_host_label
+    os.environ["HOST_LABEL_ADDRS"] = _addrs_of(hl, "laptop")
+    assert C.Config.from_env(env).host_override == "laptop"
+
+
+def test_an_INVALID_ACTIVITY_HOST_is_still_passed_through_UNCHANGED(
+        _hermetic_host_label):
+    """🔴 THE COLLECTOR DOES NOT VALIDATE WHAT THE OPERATOR STATED, AND THAT IS
+    THE PRE-#1601 CONTRACT KEPT DELIBERATELY. `host_label.py` ignores a value
+    outside `HOST_NAMES` (a typo would otherwise mint a third host the fleet does
+    not know); this daemon does not, because its job is to stamp a column and a
+    stated value is the operator's to get right. Changing that would be a
+    behaviour change for every host, smuggled in under a fix.
+
+    It is also the ONLY input on which "environment first" and "derive first" are
+    distinguishable — see the note on
+    `test_an_explicit_ACTIVITY_HOST_still_WINS_over_the_derivation`. So this is
+    the killer for `MUT-C3`.
+
+    INVARIANT GUARD — green at `4697add2` and at `origin/main`, where `from_env`
+    read the environment and nothing else.
+    """
+    hl = _hermetic_host_label
+    os.environ["HOST_LABEL_ADDRS"] = _addrs_of(hl, "workbench")
+    # A value the module would REJECT, and pairwise distinct from both real host
+    # names, so a mutant that answers with the derived label cannot equal it.
+    assert hl._file_stated_label("ACTIVITY_HOST=nixos-typo\n") == "", (
+        "the fixture value is one the module ACCEPTS — this test would then be "
+        "measuring agreement, not pass-through")
+    assert C.Config.from_env(
+        {"ACTIVITY_HOST": "nixos-typo"}).host_override == "nixos-typo"
+
+
+def test_an_UNIDENTIFIABLE_machine_DEGRADES_rather_than_crashing_the_daemon(
+        _hermetic_host_label, caplog):
+    """🔴 DEGRADE, NEVER CRASH. `local_host_label()` RAISES when nothing names
+    the machine — correct for `peer-host`, which routes work — but this is a
+    `Restart=always` daemon and the ONLY drain on the spool. A collector that
+    refuses to start does not mislabel telemetry, it STOPS it, on every host,
+    until somebody notices. The honest fallback is the pre-#1601 behaviour:
+    empty `host_override`, emit's own `host=` stands.
+
+    The reason must be LOGGED, not swallowed — an operator reading the journal
+    needs to tell "this box is off the mesh" from "the deploy lost a file".
+
+    INVARIANT GUARD against `origin/main` (which could not raise), and the
+    guard this rework's live-daemon risk rests on. Its sensitivity is `MUT-C2`
+    in `scripts/tests/mutants-host-label.sh`.
+    """
+    with caplog.at_level("WARNING"):
+        try:
+            cfg = C.Config.from_env({})
+        except Exception as exc:  # noqa: BLE001 — the failure under test
+            pytest.fail(
+                "the collector CRASHED while deriving its host label "
+                f"({type(exc).__name__}: {exc}). This runs at daemon startup, so "
+                "the unit would not start at all and the spool would never drain")
+    assert cfg.host_override == ""
+    assert "could not derive this host's ACTIVITY_HOST label" in caplog.text
+    assert "HostLabelUnresolved" in caplog.text, (
+        "the log line must name WHY — a generic message cannot distinguish an "
+        f"off-mesh box from a broken deploy. Got: {caplog.text!r}")
+
+
+@pytest.mark.parametrize("body,want", [
+    ("import a_module_that_does_not_exist_xyz\n", "ModuleNotFoundError"),
+    ("raise RuntimeError('the deploy is missing a file')\n", "RuntimeError"),
+], ids=["import-error", "arbitrary-exception"])
+def test_a_BROKEN_host_label_module_DEGRADES_rather_than_crashing_the_daemon(
+        monkeypatch, tmp_path, caplog, body, want):
+    """🔴 THE `except Exception` IS BROAD ON PURPOSE, AND THIS IS WHY. A switch
+    that loses the `lib/` entry SUCCEEDS — the file simply is not deployed — and
+    the import then raises something that is NOT a `HostLabelError`. Narrowing
+    the catch to the module's own class would take the daemon down for a
+    deployment mistake. Two shapes, neither of which may reach the process: a
+    missing dependency (`ImportError`), and any other exception at import time.
+
+    INVARIANT GUARD; sensitivity is `MUT-C2b` in
+    `scripts/tests/mutants-host-label.sh`.
+    """
+    broken = tmp_path / "brokenlib"
+    broken.mkdir()
+    (broken / "host_label.py").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(C, "HOST_LABEL_LIB_DIRS", (str(broken),))
+    monkeypatch.delitem(sys.modules, "host_label", raising=False)
+
+    with caplog.at_level("WARNING"):
+        try:
+            cfg = C.Config.from_env({})
+        except Exception as exc:  # noqa: BLE001 — the failure under test
+            pytest.fail(
+                "a broken/undeployed host_label.py CRASHED the collector "
+                f"({type(exc).__name__}: {exc}) — the daemon would not start")
+    assert cfg.host_override == ""
+    assert want in caplog.text, caplog.text
+
+
+def test_the_DAEMON_ITSELF_STARTS_when_the_machine_cannot_be_identified(tmp_path):
+    """🔴 THE SAME CLAIM AT THE PROCESS LEVEL, WHICH IS WHERE IT IS MADE. Every
+    assertion above calls `Config.from_env` in-process; systemd runs
+    `python3 collector.py`. `--flush-once` is that real entry point, so this
+    exercises the path the unit takes rather than a restatement of it.
+
+    Hermetic: an EMPTY spool, so no HTTP call is made at all; `CLICKHOUSE_URL`
+    points at a loopback port nothing listens on, so a regression that DID reach
+    the network fails loudly instead of touching the real store.
+
+    INVARIANT GUARD; sensitivity is `MUT-C2` (which makes this rc 1 with a
+    traceback).
+    """
+    env = dict(os.environ)
+    env.update({
+        "ACTIVITY_SPOOL_DIR": str(tmp_path / "spool"),
+        "HOST_LABEL_ADDRS": "",
+        "HOST_LABEL_ENV_FILE": str(tmp_path / "absent-env"),
+        "CLICKHOUSE_URL": "http://127.0.0.1:1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    env.pop("ACTIVITY_HOST", None)
+    p = subprocess.run([sys.executable, str(_COLLECTOR_PY), "--flush-once"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 0, (
+        "the collector daemon exited non-zero on a machine it cannot identify. "
+        f"systemd would restart-loop it and the spool would never drain.\n"
+        f"stdout: {p.stdout}\nstderr: {p.stderr}")
+    assert "could not derive this host's ACTIVITY_HOST label" in p.stderr
+    assert "Traceback" not in p.stderr, p.stderr
+
+
+def _deploy(tmp_path, ship_lib=("host_label.py", "host-role.sh")):
+    """A fake `~/.config/activity-collector/`: real dir, per-file SYMLINKS into a
+    FLAT fake store — the shape home-manager actually produces (each `home.file`
+    source is its own `/nix/store/<hash>-<name>` path, not a tree)."""
+    store = tmp_path / "store"
+    store.mkdir(parents=True)
+    dep = tmp_path / "deployed"
+    (dep / "lib").mkdir(parents=True)
+
+    (store / "collector.py").write_bytes(_COLLECTOR_PY.read_bytes())
+    (dep / "collector.py").symlink_to(store / "collector.py")
+    for name in ship_lib:
+        (store / name).write_bytes((_LIB / name).read_bytes())
+        (dep / "lib" / name).symlink_to(store / name)
+    return dep
+
+
+def _deployed_label(dep, addrs, tmp_path):
+    """`Config.from_env({}).host_override` as computed by the DEPLOYED copy."""
+    prog = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('c', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        # Registered BEFORE exec: @dataclass resolves its own module out of
+        # sys.modules, and an unregistered one dies on `Config`.
+        "sys.modules['c'] = m\n"
+        "spec.loader.exec_module(m)\n"
+        "print('LABEL=' + repr(m.Config.from_env({}).host_override))\n"
+    )
+    env = dict(os.environ)
+    env.update({"HOST_LABEL_ADDRS": addrs,
+                "HOST_LABEL_ENV_FILE": str(tmp_path / "absent-env"),
+                "PYTHONDONTWRITEBYTECODE": "1"})
+    env.pop("ACTIVITY_HOST", None)
+    p = subprocess.run([sys.executable, "-c", prog, str(dep / "collector.py")],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 0, p.stdout + p.stderr
+    line = [l for l in p.stdout.splitlines() if l.startswith("LABEL=")]
+    assert line, p.stdout + p.stderr
+    return eval(line[0][len("LABEL="):])  # noqa: S307 — a repr() we just produced
+
+
+def test_the_DEPLOYED_symlink_layout_can_derive_the_host_label(
+        _hermetic_host_label, tmp_path):
+    """🔴 THE SEAM, AND IT IS THE ONE SURFACE NO OTHER TEST IN THIS REPO LOADS.
+    Every assertion above imports the collector from the REPO layout, where
+    `scripts/lib/` is two directories up. What runs on a host is
+    `~/.config/activity-collector/collector.py` — a lone flattened SYMLINK into
+    /nix/store with no `scripts/` near it. A derivation that works in the repo
+    and not there is inert on both machines while every test is green: exactly
+    the "verified in isolation" shape.
+
+    THREE ARMS, because the pass alone would not be evidence:
+      * both files deployed          -> the label is derived
+      * NOTHING deployed beside it   -> `""`, and the process does not crash
+      * `host-role.sh` MISSING       -> `""` for a LAN-only address, because the
+        module falls back to the nebula-only `PEER_SSH` subset. That is the
+        SILENT degradation `nix/home.nix` ships both files to prevent: right on
+        the mesh, quietly non-deriving off it, exit 0 either way.
+
+    The address injected is the workbench's LAN one specifically — it exists only
+    in `host-role.sh`, never in `PEER_SSH`, which is what makes arm 3 measure the
+    sibling rather than the module.
+
+    INVARIANT GUARD (the deployed layout did not exist for this dependency at
+    base); sensitivity is `MUT-C6` and `MUT-C7` in
+    `scripts/tests/mutants-host-label.sh`.
+    """
+    hl = _hermetic_host_label
+    lan = next(a for lbl, a in hl.host_addrs()
+               if lbl == "workbench" and a not in {x for _, x, _ in hl.PEER_SSH})
+
+    both = _deploy(tmp_path / "a")
+    assert _deployed_label(both, lan, tmp_path) == "workbench"
+
+    none = _deploy(tmp_path / "b", ship_lib=())
+    assert _deployed_label(none, lan, tmp_path) == "", (
+        "with no lib/ deployed the collector must degrade to the empty override, "
+        "not crash and not guess")
+
+    lonely = _deploy(tmp_path / "c", ship_lib=("host_label.py",))
+    assert _deployed_label(lonely, lan, tmp_path) == "", (
+        "host-role.sh was not deployed beside host_label.py, yet the LAN address "
+        "still resolved — the fallback table is supposed to be the nebula-only "
+        "PEER_SSH subset, so this arm is measuring nothing")
+
+
+def _redeploy_probe(tmp_path, dont_write_bytecode, second_marker):
+    """Deploy `host_label.py` carrying `MARKER = "AAA"`, import it through the
+    deployed symlink, REDEPLOY it carrying `second_marker`, import again — and
+    return what the SECOND import saw.
+
+    The nix store is imitated where it matters: the store file's mtime is forced
+    to 1 on both deploys (every real store path has `mtime = 1`), and only the
+    leaf is a symlink, so `<dep>/lib/` is a real writable directory Python can
+    drop a `__pycache__` into. Returns `(second_seen, pyc_existed_after_first)`.
+    """
+    dep = _deploy(tmp_path)
+    store_py = (tmp_path / "store" / "host_label.py")
+    base = _LIB.joinpath("host_label.py").read_bytes()
+
+    def deploy(marker):
+        store_py.write_bytes(base + b'\nMARKER = "' + marker.encode() + b'"\n')
+        os.utime(store_py, (1, 1))
+
+    prog = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import host_label\n"
+        "print('MARKER=' + host_label.MARKER)\n"
+    )
+
+    def run():
+        env = dict(os.environ)
+        env.update({"HOST_LABEL_ADDRS": "",
+                    "HOST_LABEL_ENV_FILE": str(tmp_path / "absent-env")})
+        env.pop("ACTIVITY_HOST", None)
+        if dont_write_bytecode:
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+        else:
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+        p = subprocess.run([sys.executable, "-c", prog, str(dep / "lib")],
+                           capture_output=True, text=True, env=env, timeout=120)
+        assert p.returncode == 0, p.stdout + p.stderr
+        line = [l for l in p.stdout.splitlines() if l.startswith("MARKER=")]
+        assert line, p.stdout + p.stderr
+        return line[0][len("MARKER="):]
+
+    deploy("AAA")
+    assert run() == "AAA"
+    cached = list((dep / "lib" / "__pycache__").glob("host_label.*.pyc"))
+    deploy(second_marker)
+    return run(), bool(cached)
+
+
+def test_a_SAME_SIZE_redeploy_is_INVISIBLE_when_the_daemon_may_cache_bytecode(
+        tmp_path):
+    """🔴 THE MECHANISM BEHIND THE UNIT'S `PYTHONDONTWRITEBYTECODE`, EXERCISED
+    RATHER THAN ASSERTED. Its ledger —
+    `test_the_ACTIVITY_COLLECTOR_unit_REFUSES_TO_CACHE_BYTECODE` in
+    `scripts/tests/test_transcript_push.py` — reads the unit's declared
+    environment, which is the only artefact that decides this in production. That
+    guard is worth nothing if the hazard it names is imaginary, so this one
+    reproduces the hazard end to end, in the layout that actually runs on a host.
+
+    🔴 AND IT IS THE ONE HARNESS HERE THAT LETS BYTECODE BE WRITTEN. Every other
+    deployed-layout probe in this file pins `PYTHONDONTWRITEBYTECODE=1` in the
+    child env, which is precisely why this whole suite was structurally blind to
+    it: no test it contained could produce a `.pyc` that could go stale.
+
+    Three arms, and the second two are the controls that make the first mean
+    something:
+      1. bytecode allowed + a SAME-SIZE redeploy -> the old module. The bug.
+      2. bytecode allowed + a DIFFERENT-SIZE redeploy -> the new module. So the
+         cache key really is size (mtime is pinned at 1 both times, as the store
+         pins it), not "caching is simply broken here".
+      3. bytecode refused + the SAME same-size redeploy -> the new module. So the
+         unit's setting is what closes arm 1, and closes it for the right reason.
+    """
+    stale, cached = _redeploy_probe(tmp_path / "same", False, "BBB")
+    assert cached, (
+        "no host_label .pyc was written into the deployed lib/ at all — this "
+        "harness cannot observe the staleness it exists to demonstrate")
+    assert stale == "AAA", (
+        f"a same-size redeploy was picked up ({stale}) — either this CPython no "
+        "longer keys its cache on (mtime, size) or the store-mtime imitation "
+        "broke; the unit's PYTHONDONTWRITEBYTECODE would then be guarding nothing")
+
+    bigger, _ = _redeploy_probe(tmp_path / "diff", False, "CCCCCCCC")
+    assert bigger == "CCCCCCCC", (
+        "a DIFFERENT-size redeploy was also ignored, so arm 1 is not evidence "
+        "about the size key — bytecode caching is broken here in some other way")
+
+    fixed, _ = _redeploy_probe(tmp_path / "fixed", True, "BBB")
+    assert fixed == "BBB", (
+        "even with PYTHONDONTWRITEBYTECODE=1 the same-size redeploy was ignored "
+        "— the setting the activity-collector unit carries does not close this")
+
+
+def test_the_RED_AT_4697ADD2_ledger_names_only_tests_that_EXIST():
+    """A ledger of test names is a CLAIM; this makes it a checkable one. The
+    same pin `test_peer_host.py` and `test_transcript_search.py` carry — without
+    it a rename leaves the claim pointing at nothing while still reading as
+    evidence. INVARIANT GUARD."""
+    defined = {k for k in globals() if k.startswith("test_")}
+    assert len(defined) > 20, "the globals() scan is wired to nothing"
+    missing = sorted(RED_AT_4697ADD2 - defined)
+    assert not missing, f"RED_AT_4697ADD2 names tests that do not exist: {missing}"

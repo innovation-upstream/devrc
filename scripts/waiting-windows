@@ -1344,7 +1344,27 @@ def main(argv=None, environ=None, now=None, state_file=None):
     if args.json_file:
         report = read_report_file(args.json_file)
     else:
-        report = fetch_report(os.path.join(here, "session-manager"))
+        # 🔴 A COLLECTOR FAILURE IS A DIAGNOSIS, NOT A STACK TRACE. `fetch_report`
+        # has always raised on a non-zero rc, but nothing could reach that path
+        # in practice until #1601 made `session-manager` exit 4 when the machine
+        # cannot name itself — so this on-demand CLI started dying with
+        # `RuntimeError: session-manager exited 4: …` and rc 1. The message it
+        # carries is the actionable one (it names the stated label, the derived
+        # one and the file to edit); a traceback buries it under frames from a
+        # tool the operator did not run and implies a bug in THIS script.
+        #
+        # rc 4, matching the collector's own EXIT_UNAVAILABLE, because that is
+        # what happened: nothing was measured. It is distinct from rc 2 (a usage
+        # error, below) and from rc 0 with an empty report, which means "measured,
+        # and nothing is waiting" — the one answer this must never be confused
+        # with.
+        try:
+            report = fetch_report(os.path.join(here, "session-manager"))
+        except RuntimeError as exc:
+            print("waiting-windows: could not collect the window census, so "
+                  "'nothing is waiting' would be unmeasured rather than true — "
+                  "%s" % exc, file=sys.stderr)
+            return 4
 
     if args.no_state:
         loaded = {"stamps": {}, "status": "disabled"}

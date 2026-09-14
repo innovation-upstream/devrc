@@ -432,6 +432,7 @@ in
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
+          { trigger = ":par"; replace = "proceed as recommended"; label = "Proceed as recommended"; search_terms = ["proceed" "recommended" ]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
           # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
           # mid-sentence FRAGMENT snippet has been pruned (:ds, :rns, :pst, :rnx).
@@ -737,6 +738,28 @@ in
   # exist yet. The real file holds the (future) ClickHouse credentials, so it is
   # NEVER in the nix store and NEVER committed — created here once, chmod 600,
   # then edited in place. We copy the in-repo .env.example as the template.
+  #
+  # 🔴 THE TEMPLATE MUST NOT NAME A HOST, AND IT USED TO. `.env.example` carried
+  # `ACTIVITY_HOST=workbench`, and this block copies it VERBATIM onto ANY host
+  # that lacks the real file — so a fresh LAPTOP got `workbench` baked in. Since
+  # #1601 that is not merely a wrong column: `scripts/lib/host_label.py`
+  # cross-checks the stated label against an address this machine holds and
+  # raises `HostLabelConflict`, so transcript-push (every 5 min), tmux-reply-agent
+  # (FAILED after 5 restarts), tmux-snapshot-push (every 2 min) and `peer-host`
+  # all fail on an otherwise-healthy machine. It was LATENT only because the
+  # laptop's real file had at some point been hand-edited to `laptop`; a
+  # reinstall, a new machine, or `rm`ing that file arms it.
+  #
+  # 🔴 AND NOTHING WRITES A LABEL IN HERE, DELIBERATELY. An earlier revision of
+  # #1601 derived the label at activation time and APPENDED it to this file. That
+  # is a write into a systemd `EnvironmentFile=` holding a credential, and it
+  # produced its own data-loss defect (an `>>` onto a file whose last line had no
+  # trailing newline EXTENDED that line, mangling `CLICKHOUSE_PASSWORD`). It was
+  # only ever needed because `scripts/collector/collector.py` was the ONE consumer
+  # that read the label from the environment instead of deriving it. The collector
+  # derives now — see its `_derive_host_label`, and the `lib/` files deployed
+  # beside it below — so this block is back to the one thing it should do: create
+  # the file if it is absent. Do NOT re-introduce a write here.
   home.activation.activityCollectorEnv = lib.hm.dag.entryAfter ["writeBoundary"] ''
     envFile="$HOME/.config/activity-collector/env"
     if [ ! -e "$envFile" ]; then
@@ -1206,6 +1229,32 @@ in
     source = ../scripts/collector/collector.py;
     executable = true;
   };
+  # 🔴 THE TWO FILES THAT ANSWER "WHICH MACHINE IS THIS", DEPLOYED BESIDE THE
+  # DAEMON THAT ASKS. Since #1601 the collector DERIVES `ACTIVITY_HOST` when the
+  # environment states none, instead of falling back to emit's `$(hostname)` —
+  # `nixos` on BOTH machines, i.e. a collision, not a label. It loads the module
+  # from a `lib/` dir next to itself, because what runs on a host is
+  # `~/.config/activity-collector/collector.py`, a lone flattened symlink with no
+  # `scripts/lib` near it. Same reason `changed_paths.py` and `mention_scan.py`
+  # need their own entries below.
+  #
+  # BOTH FILES, NOT JUST THE `.py`. `host_label.py` locates `host-role.sh` — the
+  # owner of the fleet's address table — NEXT TO ITSELF via `__file__`, with no
+  # `import` to find. Ship the module alone and it degrades SILENTLY to the
+  # nebula-only `PEER_SSH` subset: right on the mesh, quietly non-deriving off
+  # it, exit 0 either way. Pinned behaviourally by
+  # `scripts/collector/tests/test_collector.py` and structurally by the ledgers
+  # in `scripts/tests/test_transcript_push.py`.
+  #
+  # TWO NAMED FILES RATHER THAN `${../scripts/lib}`, DELIBERATELY: importing the
+  # directory makes EVERY file under `scripts/lib` a nix-read STORE path
+  # (`nix_read_paths.sh` resolves a directory token to the directory itself,
+  # measured), so `drift-check.sh` and `ship.sh` would start reporting untracked
+  # files there as dirty-in-artifact on both hosts.
+  home.file.".config/activity-collector/lib/host_label.py".source =
+    ../scripts/lib/host_label.py;
+  home.file.".config/activity-collector/lib/host-role.sh".source =
+    ../scripts/lib/host-role.sh;
   # Shared by BOTH session summarisers (claude/session-tailer.py and
   # opencode/session_tailer.py) — the one definition of the `changed_paths*`
   # payload block. It must land at the collector ROOT, beside collector.py,
@@ -2424,8 +2473,35 @@ in
       Type = "simple";
       # PATH must be explicit: a user service does not inherit the login PATH.
       # python3 (with stdlib only) + base64/coreutils for the helper path.
+      #
+      # 🔴 PYTHONDONTWRITEBYTECODE IS A CORRECTNESS SETTING HERE, NOT TIDINESS.
+      # `~/.config/activity-collector/` is a REAL, WRITABLE directory (only the
+      # leaves are store symlinks), and this daemon's interpreter writes into it:
+      # on the workbench today that dir holds a `changed_paths.cpython-312.pyc`
+      # dated 2026-08-13, still there across every generation since (and the
+      # keylog/ and browser-ext/ subdirs hold their own). CPython validates a cached
+      # module on (source mtime-in-whole-SECONDS, source size) — and EVERY nix
+      # store path has `mtime = 1`, so across deploys the mtime half is a
+      # constant and the key degenerates to SIZE ALONE. A size-preserving
+      # correction to `lib/host_label.py` (an IP octet, a comparison operator, a
+      # typo) therefore reads as UNCHANGED: `ship.sh` succeeds, the triggers
+      # below fire, the unit restarts, and this `Restart=always` daemon re-loads
+      # the OLD bytecode and stamps every telemetry row from the old logic —
+      # across restarts and reboots, silently. Reproduced with both controls: a
+      # same-size octet edit is ignored, a different-size edit is not, and
+      # deleting `__pycache__` fixes it.
+      #
+      # ⚠ IT PREVENTS THE WRITE, IT DOES NOT INVALIDATE A CACHE THAT ALREADY
+      # EXISTS. Sound for this pair only because there is none yet: the `lib/`
+      # entries are added by the same change as this line, and
+      # `~/.config/activity-collector/lib/` is absent on the workbench at
+      # generation `af943906` (measured), so no `host_label` pyc has ever been
+      # written. Ship this line WITH the lib/ entries, never after them — and if
+      # they ever do land apart, purge `~/.config/activity-collector/**/__pycache__`
+      # once by hand, because this setting cannot.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
+        "PYTHONDONTWRITEBYTECODE=1"
       ];
       EnvironmentFile = "-%h/.config/activity-collector/env";
       ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/collector.py";
@@ -2436,7 +2512,27 @@ in
       # code edit alone leaves the daemon running STALE code until a manual
       # `systemctl --user restart`. Pinning the script's store path here makes the
       # unit definition change whenever the code changes → switch restarts it.
-      X-Restart-Triggers = [ "${../scripts/collector/collector.py}" ];
+      #
+      # 🔴 AND THE HOST-IDENTITY PAIR, FOR THE SAME REASON AND WITH A WORSE
+      # CONSEQUENCE. The collector loads `host_label.py` (which `open()`s
+      # `host-role.sh` beside itself) to derive `ACTIVITY_HOST`. Both are
+      # symlinked-by-path store files, so without these lines a correction to the
+      # fleet's ADDRESS TABLE lands on disk while this `Restart=always` daemon
+      # keeps stamping every shipped row from the OLD one — and `host-role.sh` is
+      # the half no import scanner can see. Pinned, DERIVED not typed, in
+      # `scripts/tests/test_transcript_push.py`.
+      #
+      # ⚠ SCOPE: THESE TRIGGERS CLOSE THE *RESTART* HALF ONLY, NOT
+      # CODE-FRESHNESS. They guarantee the daemon is restarted when the code
+      # changes; they say nothing about which BYTES it then loads. The `.pyc`
+      # cache is the other half, and it is keyed on size alone here — see
+      # `PYTHONDONTWRITEBYTECODE` above, without which a restarted daemon can
+      # re-load the pre-edit module. Both are needed; neither implies the other.
+      X-Restart-Triggers = [
+        "${../scripts/collector/collector.py}"
+        "${../scripts/lib/host_label.py}"
+        "${../scripts/lib/host-role.sh}"
+      ];
     };
     Install = {
       WantedBy = [ "default.target" ];
@@ -3975,6 +4071,16 @@ in
         # ACTIVITY_HOST). Verified by a full production-shape run with neither on
         # PATH. Trimming a copied list is right; trimming it without running the
         # child is how gawk got removed.
+        # ⚠ HALF OF THAT SENTENCE STOPPED BEING TRUE IN #1601, AND THE
+        # CONCLUSION STILL HOLDS. `scripts/lib/host_label.py` DOES read
+        # interface addresses now — it derives the host from an address the
+        # machine holds rather than defaulting to "workbench" — but it does so
+        # by BINDING a UDP socket in pure Python, never by running `ip`, chosen
+        # precisely so this PATH (and transcript-push's, which is smaller still)
+        # does not have to grow. This unit's child is `session-manager`, which
+        # held its own ACTIVITY_HOST-only copy of the rule until the same PR
+        # deleted it and made it delegate — so this unit now DOES reach the
+        # address derivation, and still needs no iproute2.
         # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
         "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnused pkgs.openssh pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
@@ -4055,6 +4161,16 @@ in
         # The collector is the payload's author: a change to what it emits is a
         # change to what this unit delivers, with no edit to the pusher at all.
         "${../scripts/session-manager}"
+        # 🔴 AND THE COLLECTOR'S OWN TWO. `session-manager` imports host_label.py,
+        # which `open()`s host-role.sh by path; together they decide WHICH HOST
+        # every row this unit ships is stamped with, and the read model upserts
+        # latest-per-host — so a stale answer here does not lose a snapshot, it
+        # REPLACES the other machine's with this one's. Neither was declared
+        # (#1601 added the dependency and listed it on two of the three units
+        # that acquired it), and host-role.sh is the half no import scanner can
+        # see.
+        "${../scripts/lib/host_label.py}"
+        "${../scripts/lib/host-role.sh}"
       ];
     };
   };
@@ -4190,6 +4306,15 @@ in
         # runs old code indefinitely. That consequence is the resident agent's,
         # and this arc has now made the same overstatement twice.
         "${../scripts/lib/transcript_search.py}"
+        # 🔴 A DEPENDENCY NO IMPORT SCANNER COULD SEE. host_label.py `open()`s
+        # this file BY PATH to get the fleet's address table — there is no
+        # `import` to find, which is exactly why the source-derived ledger beside
+        # it (`test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger`,
+        # arm (c)) read `from_host_label == set()` and passed. The ledger now
+        # scans path-built filenames too, so the next one cannot hide the same
+        # way. A reformat of one of its `*_IP_*` constants changes which
+        # addresses this unit can identify itself from.
+        "${../scripts/lib/host-role.sh}"
       ];
     };
   };
@@ -4257,9 +4382,22 @@ in
       # that has to keep its meaning.
       #
       # What surfaces a genuinely broken agent instead: the two exit codes it can
-      # actually take (2 = no credentials, 3 = tmux unusable) are both permanent
-      # configuration faults, and StartLimit below turns a repeat of either into a
-      # FAILED unit, which `/syshealth --systemd` reads. Everything transient is backed off
+      # actually take are both permanent configuration faults, and StartLimit
+      # below turns a repeat of either into a FAILED unit, which
+      # `/syshealth --systemd` reads.
+      #
+      #   2  no CLAWGATE_TERMINAL_TOKEN — the write surface is not armed here.
+      #   3  EITHER `tmux -V` fails (tmux unusable) OR `local_host_label()` raises
+      #      (this machine cannot be identified). 🔴 TWO CAUSES, ONE CODE, and
+      #      the second is the one an operator will meet: #1601 made the host
+      #      label RAISE instead of guessing `"workbench"`, so a stated label
+      #      that contradicts the machine's own address — the state a
+      #      template-provisioned `~/.config/activity-collector/env` used to
+      #      create — lands here. This comment named only tmux for one release,
+      #      and it is what someone reads when they find this unit FAILED. The
+      #      agent's own log line says which; read it before reaching for tmux.
+      #
+      # Everything transient is backed off
       # from inside the loop rather than exited on, precisely so a restart storm
       # is not the failure mode.
       StartLimitIntervalSec = 600;
@@ -4327,6 +4465,15 @@ in
         "${../scripts/lib/host_label.py}"
         "${../scripts/lib/transcript_stream.py}"
         "${../scripts/lib/transcript_search.py}"
+        # 🔴 THE ONE WITH NO `import` TO FIND, AND THIS IS THE UNIT WHERE THAT
+        # COSTS MOST. host_label.py `open()`s host-role.sh by PATH for the
+        # address table, so both trigger ledgers — the typed one and the
+        # source-derived one — were blind to it: an AST import scan returns the
+        # empty set for a file that opens its dependency. This unit is RESIDENT,
+        # so without this line a correction to the fleet's addresses lands on
+        # disk and the running agent keeps identifying this host from the OLD
+        # table until something else restarts it.
+        "${../scripts/lib/host-role.sh}"
       ];
     };
     Install = {
