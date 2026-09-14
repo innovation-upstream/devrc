@@ -68,6 +68,12 @@ NOT_A_RULE = {
     "WHY IT WAS WRONG — the substitute collapsed":
         "the evidence for that retraction (the 75% prose-class measurement and the "
         "#1111 counter-instance). Evidence for a withdrawn rule, not a rule",
+    "THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS":
+        "the EVIDENCE for the two-thirds number — the corpus measurement, the gap it "
+        "sits in, and the measured price at round 2. Its one imperative "
+        "('re-derive before moving the number') constrains a future PROPOSAL, not "
+        "any audit round, so no round can be measured against it — the same reason "
+        "THE DEEPER REASON below it is exempt",
     "THE DEEPER REASON, AND THE ONE TO KEEP":
         "the durable lesson the retraction leaves behind — that only an OBSERVABLE, "
         "never a class property, separates a non-terminating prose ladder from a "

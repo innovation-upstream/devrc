@@ -640,48 +640,105 @@ SKILL_HATCH_NOT_A_LICENCE = (
 # of the last 119 first-parent commits on `main` touch only `.md`), which left the
 # 🔴 count as the only discriminating term and so re-implemented the
 # `deploy-blocking only` rule the same section rejects. A converging prose ladder
-# and a non-terminating one have the SAME diff; only the ROUND's findings
-# separate them.
+# and a non-terminating one have the SAME diff; only what the ROUND observes
+# separates them.
+#
+# 🔴 THE OPERAND IS **LINES**, AND THAT IS THE 2026-09-14 CORRECTION. The first
+# version of this paragraph counted FINDINGS, blaming each fix-requiring
+# finding's cited `file:line`. A round-0 audit plus a corpus replay found it
+# broken in the opposite direction to `#1678`: the operand was never stated, and
+# it decides everything -- scored against an auditor's RAW findings it permits
+# most rounds, scored against what a round RECORDS about its own fixes it
+# permits almost none, because a recorded fix item hardly ever carries a
+# `file:line`. Worse, on the record the rule must read from, it scored `#1111`
+# -- the PR this whole section rests on -- at 0 of 7 and FORBADE it. By LINES
+# `#1111` is 19/26 = 0.731 and PASSES. See `test_the_founding_case_and_its_
+# neighbours_are_a_REGRESSION_fixture` for the ledger that pins that.
 SKILL_PROSE_DETERMINATION = (
-    "🔴 **\"WILL NOT STOP ON THEIR OWN\" IS AN OBSERVATION ABOUT AUTHORSHIP, "
-    "COUNTED RATHER THAN DELIBERATED — and never available before ROUND 2.** "
-    "For each finding this round that required a fix, `git blame` the "
-    "`file:line` it names at the sha you audited and ask ONE thing of the "
-    "commit that wrote that line: is it inside the LADDER's own range — after "
-    "the tip ROUND 1 audited — or is it the PR's own prose from before the "
-    "ladder started? (`git merge-base --is-ancestor <blame-sha> <the tip round "
-    "1 audited>`; rc 0 ⇒ the PR's own prose. That tip is the `<from>` of THE "
-    "RANGE at round 2, and the anchor THE LEDGER's cumulative figure uses after "
-    "that.) Ladder-authored means the round is auditing text the ladder wrote; "
-    "PR-authored means it is still converging on what the PR ships — and **no "
-    "property of the DIFF separates those two**, which is why the retracted "
-    "draft below could not. **The reason is nameable when at least two-thirds "
-    "of those findings are ladder-authored — ⌈2n/3⌉ of n: two of two, two of "
-    "three, three of four, four of six.** Round 1 has no previous round to "
-    "attribute to, so it can never satisfy this: **two rounds is the floor, and "
-    "no rule may move it.**"
+    "🔴 **\"WILL NOT STOP ON THEIR OWN\" IS AN OBSERVATION ABOUT THE LINES THIS "
+    "ROUND'S FIX TOUCHED, COUNTED RATHER THAN DELIBERATED — and never available "
+    "before ROUND 2. The ⚠ caveat directly above demands a distinction; this "
+    "paragraph is the only thing that makes it.** The unit is LINES, never "
+    "findings: a findings count needs a `file:line` per item and what a round "
+    "RECORDS about its own fixes almost never carries one, so the denominator "
+    "is chosen by whoever counts — and the one the PR record actually supports "
+    "FORBIDS this section's founding case, `#1111`. Take the range THIS round's "
+    "own `audit-claims` block records, `<from>..<to>` — the tip your audit "
+    "READ, to the head your fixes produced — and count its **PRE-IMAGE** lines, "
+    "the ones the fix MODIFIED or DELETED. A purely ADDED line has no pre-image "
+    "and is in neither column. Blame each at `<from>` and ask ONE thing of the "
+    "commit that wrote it: is it an ancestor of the tip ROUND 1 audited — the "
+    "PR's own prose, still converging on what it ships — or is it the ladder's "
+    "own text, which means the round is auditing what the ladder wrote? **The "
+    "reason is nameable when at least TWO-THIRDS of the attributable pre-image "
+    "lines are ladder-authored**, and the count goes in the summary as "
+    "`<ladder>/<attributable>` so a reader sees the denominator and not just "
+    "the ratio. The three commands are under the caveat below. Round 1 has no "
+    "previous round to attribute to, so it can never satisfy this: **two rounds "
+    "is the floor, and no rule may move it.**"
 )
 
 # 🔴 The fail-safe half, pinned WHOLE for the reason the caveat above is: every
 # operative sentence here is invertible into a rule that reads just as
-# reasonable and stops a CONVERGING ladder. "counts as NOT ladder-authored"
-# -> "counts as ladder-authored" silently moves every unattributable finding to
-# the stopping side; "Below the threshold, run the next round" -> "...stop" is
-# the `If in doubt, STOP` mutant one paragraph up, which SURVIVED a green suite
-# until it was pinned.
+# reasonable and stops a CONVERGING ladder. "there is no cap and no sample"
+# -> "cap it at N" silently truncates the operand in whichever direction the
+# first N lines happen to point (MEASURED: a 400-line cap moved the share on 8
+# of 159 corpus rounds and in BOTH directions); "the share is then 0 BY
+# CONSTRUCTION" -> deleting that clause turns a structural zero back into a
+# measured zero, which is the `empty-result` trap in `claude/RULES.md`; and
+# dropping `-w`/`-M` is not cosmetic -- it moved the share on 34 of 159 rounds
+# and flipped 3 stop verdicts.
 SKILL_DETERMINATION_FAILSAFE = (
-    "⚠ **EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND, and this replaces "
-    "the JUDGEMENT, not the other preconditions.** A finding with no "
-    "`file:line`, one about a sentence that is MISSING, one whose blame you "
-    "cannot resolve, and a round whose round-1 anchor is not recoverable (THE "
-    "LEDGER reports it NOT MEASURED) all count as NOT ladder-authored — the "
-    "same fail-safe direction as *Ambiguous is not zero*. Below the threshold, "
-    "run the next round. **It is a rule about EVIDENCE, not a prediction:** it "
-    "does not prove the ladder cannot converge, it makes two auditors reach the "
-    "same answer from the same findings and lets a reader check which one they "
-    "reached. The severity, blast-radius and swept-at-every-site preconditions "
-    "above are unchanged and all still have to hold, and the count goes in the "
-    "summary beside the reason."
+    "⚠ **EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND, this replaces the "
+    "JUDGEMENT and not the other preconditions, and three states are NOT "
+    "MEASURED rather than a number.** (a) A pre-image line you cannot blame, or "
+    "a round you cannot blame in FULL — **there is no cap and no sample**; "
+    "capping the corpus measurement at 400 lines moved the share on 8 of 159 "
+    "rounds and in BOTH directions, so a partial count is a silent truncation "
+    "and not a conservative one. (b) A round whose ladder anchor IS its own "
+    "`<from>` — what a missing or bare `round=1` block leaves behind, 3 of 159 "
+    "corpus rounds, every one of them a round 2: the share is then **0 BY "
+    "CONSTRUCTION**, and a structural zero is not a measured zero. (c) An "
+    "anchor THE LEDGER reports NOT MEASURED. Each of those means run the next "
+    "round. **`-w` and `-M` are part of the rule, not a refinement** — without "
+    "them a whitespace-only reindent counts as the round having edited that "
+    "text; MEASURED, they moved the share on 34 of 159 rounds, on one from 0.25 "
+    "to 0.89, and flipped the stop verdict on 3. 🔴 **They do NOT fix a "
+    "REFLOW**: rewrapping a paragraph re-blames every line of it to the "
+    "rewrapper, which inflates ladder-authored and biases towards STOPPING, and "
+    "no blame flag can see it — which is why the count is written down where a "
+    "reader can challenge it. The severity, blast-radius and "
+    "swept-at-every-site preconditions above are unchanged and all still have "
+    "to hold."
+)
+
+# 🔴 THE DERIVATION, pinned because a threshold with no derivation is a number
+# somebody picked. `#1691`'s first draft used ⌈2n/3⌉ over FINDINGS, and the
+# defect a round-0 audit found was not the fraction -- it was that 2/3 sat on
+# the corpus MEAN (66% against a 66.7% threshold), i.e. maximum instability.
+# Over LINES the same fraction sits at the 28th percentile of all ladders and,
+# on the population this rule governs, in an empty band 0.156 wide. That is the
+# claim this constant keeps honest: change the number and you must re-derive,
+# and the paragraph says so in its own last sentence.
+SKILL_THRESHOLD_DERIVATION = (
+    "🔴 **THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS, AND ONLY "
+    "THERE IS IT A SEPARATOR.** Measured over every `audit-claims` carrier in "
+    "this repo — 600 PRs scanned, 90 carriers, 159 delta rounds measured, 157 "
+    "with an attributable pre-image line: across ALL ladders two-thirds is an "
+    "ordinary point on a flat distribution — nearest share below it 0.657, "
+    "nearest above it two-thirds exactly, 12 rounds within ±0.05. Across the "
+    "rounds this rule actually governs — the PRs whose whole diff is prose, 29 "
+    "rounds over 7 PRs — it is a **gap**: nearest below **0.571**, nearest "
+    "above **0.727**, and **zero** rounds within ±0.05, identical with and "
+    "without `-w`/`-M`. 20 of those 29 are at or above it; of the 9 below, one "
+    "(`#1108` round 2) is the structural zero the caveat above reports NOT "
+    "MEASURED rather than as a count. `#1111` sits at **19/26 = 0.731**, on the "
+    "far side of the gap. ⚠ **The honest cost, and it is not small:** at round "
+    "2 only 3 of the 7 prose ladders reach it (their round-2 median share is "
+    "0.267), so for most prose PRs this rule does NOT fire at round 2 either — "
+    "it reaches 4 of 5 by round 4 and 5 of 5 by round 5. **Two rounds is the "
+    "floor; the measured typical price is three.** And n=7 PRs is a small "
+    "population: re-derive before moving the number, do not tune it."
 )
 
 # `claude/RULES-ARCHIVE.md`, anchor `audit-fix-resets-gate` -- the evidence the
@@ -1507,6 +1564,10 @@ def test_the_determination_and_its_fail_safe_are_pinned_WHOLE():
         SKILL_MD, SKILL_DETERMINATION_FAILSAFE,
         "the determination's fail-safe direction",
     )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_THRESHOLD_DERIVATION,
+        "the threshold's derivation from the population it governs",
+    )
 
 
 def test_the_determination_follows_the_caveat_it_qualifies():
@@ -1525,16 +1586,37 @@ def test_the_determination_follows_the_caveat_it_qualifies():
     nothing may sit at all -- `test_the_escape_hatch_pointer_resolves_to_the_
     NOT_A_LICENCE_caveat` owns that, and this test would still pass with the
     determination inserted there, so the two are not substitutes.
+
+    🔴 KEPT, AND NO LONGER SELF-IMPOSED -- that was round-0 finding F7 against
+    the first draft of this PR, and it was right about the first draft. Nothing
+    in the prose then REQUIRED this adjacency: the "read the next paragraph"
+    pointer lands on the caveat, the caveat said nothing about what follows it,
+    and this test asserted a layout only the test believed in. A guard nothing
+    else claims is a guard nobody can check. So the DETERMINATION now opens by
+    naming its own position -- "The ⚠ caveat directly above demands a
+    distinction; this paragraph is the only thing that makes it" -- and this
+    test is what stops that sentence becoming false. Same for the fail-safe:
+    the determination's own last-but-one sentence says "the three commands are
+    under the caveat below", so the caveat must be the block after it. The test
+    now enforces a claim the document makes, which is the only kind worth
+    enforcing.
+
+    ⚠ The DERIVATION paragraph is deliberately NOT adjacency-pinned. It is
+    evidence for the number, not method for applying it, and a fenced command
+    block sits between it and the fail-safe on purpose -- so it is asserted to
+    come after, and nothing more.
     """
     paras = [p for p in _read(SKILL_MD).split("\n\n") if p.strip()]
     normed = [_norm(p) for p in paras]
     want_caveat = _norm(SKILL_HATCH_NOT_A_LICENCE)
     want_det = _norm(SKILL_PROSE_DETERMINATION)
     want_fail = _norm(SKILL_DETERMINATION_FAILSAFE)
+    want_deriv = _norm(SKILL_THRESHOLD_DERIVATION)
     for want, what in (
         (want_caveat, "the not-a-licence caveat"),
         (want_det, "the authorship determination"),
         (want_fail, "the determination's fail-safe"),
+        (want_deriv, "the threshold's derivation"),
     ):
         assert want in normed, (
             f"\n\nclaude/skills/audit-pr/SKILL.md: {what} is not a standalone "
@@ -1568,9 +1650,18 @@ def test_the_determination_follows_the_caveat_it_qualifies():
         "one rule. Read alone, the threshold is a licence to stop on a count "
         "an auditor got to pick the denominator for."
     )
+    g = normed.index(want_deriv)
+    assert g > f, (
+        "\n\nclaude/skills/audit-pr/SKILL.md: the threshold's DERIVATION "
+        f"(block {g}) no longer comes after the fail-safe (block {f}).\n"
+        "  Deliberately not an ADJACENCY: the fenced command block sits "
+        "between them. What must hold is that a reader meets the rule before "
+        "the evidence for its number, because the evidence is long and the "
+        "rule is what they came for."
+    )
 
 
-def test_the_determinations_SCOPE_matches_the_one_every_brief_ships():
+def test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships():
     """🔴 A SCOPE guard, and the reason it is a SEAM rather than a third pin.
 
     MEASURED on the withdrawn `#1678`: widening that rule's scope from `ENTIRELY
@@ -1582,9 +1673,17 @@ def test_the_determinations_SCOPE_matches_the_one_every_brief_ships():
 
     A second constant in THIS file does not close that: the same edit refreshes
     it. What closes it is a copy of the scope in a file that edit does not
-    touch. `scripts/audit-dispatch.py` carries these two sentences because every
-    round-2-and-later brief SHIPS them to the auditor, so the scope now has two
-    owners and moving it needs both -- which is the moment somebody notices.
+    touch. `scripts/audit-dispatch.py` carries these FOUR sentences because
+    every round-2-and-later `--emit-claims` run SHIPS them to the ladder
+    runner, so the scope has two owners and moving it needs both -- which is
+    the moment somebody notices.
+
+    🔴 FOUR, NOT TWO, AND THE TWO ADDITIONS ARE THE RESTRAINTS. Round-0 finding
+    F2 against this PR's first draft: the shipped copy carried the THRESHOLD
+    and the FLOOR -- the permissive half -- while `no 🔴 · no blast radius ·
+    swept at every site · record what you are NOT fixing` stayed in a skill the
+    reader of that artefact does not have. A guard over the permissive half
+    alone certifies the half that does not need certifying.
 
     ⚠ WHAT THIS DOES NOT DO. It does not stop a scope change; it makes one
     visible in the diff and impossible to land in one file. And it is keyed to
@@ -1599,20 +1698,23 @@ def test_the_determinations_SCOPE_matches_the_one_every_brief_ships():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     skill = _norm(_read(SKILL_MD))
-    for name in ("PROSE_DETERMINATION_THRESHOLD", "PROSE_DETERMINATION_FLOOR"):
+    for name in ("PROSE_DETERMINATION_THRESHOLD",
+                 "PROSE_DETERMINATION_FLOOR",
+                 "PROSE_DETERMINATION_PRECONDITIONS",
+                 "PROSE_DETERMINATION_STRUCTURAL_ZERO"):
         assert hasattr(mod, name), (
             f"\n\n`scripts/audit-dispatch.py` no longer defines `{name}`.\n"
             "  That constant is the OTHER owner of this rule's scope, and the "
-            "brief is where an auditor actually reads it. If you deleted the "
-            "brief section, delete this guard in the same commit and say in "
-            "the message that the scope is back to a single pin that a "
-            "constant-refresh walks past."
+            "`--emit-claims` output is where a ladder runner actually reads "
+            "it. If you deleted that section, delete this guard in the same "
+            "commit and say in the message that the scope is back to a single "
+            "pin that a constant-refresh walks past."
         )
         claim = _norm(getattr(mod, name))
         assert claim in skill, (
             f"\n\n`audit-dispatch.py`'s `{name}` is no longer verbatim in "
             "claude/skills/audit-pr/SKILL.md.\n"
-            f"  The brief ships:\n    {claim}\n\n"
+            f"  The emitter ships:\n    {claim}\n\n"
             "  🔴 IF YOU ARE WIDENING THE RULE, STOP AND READ THE `RETRACTED "
             "DRAFT` PARAGRAPHS IN THAT SKILL FIRST. A scope this test would "
             "let through once already shipped and was withdrawn the same day: "
