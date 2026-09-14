@@ -20,9 +20,23 @@ The performance design that matters is **one GraphQL round trip instead of three
 between a local `git fetch` and the REST diff, and an on-disk cache** — not the language.
 A Go rewrite that keeps octo's sequential fetch pattern would feel *identical*.
 
+**Three research findings that changed the design, all in the "this is simpler than you think
+/ harder than you think" direction:**
+
+- 🔴 **`gh-dash` — a 12.5k-star, four-year-old Bubble Tea PR dashboard — has never solved
+  in-pane diff rendering.** It shells out to a pager, and its top open issues are exactly that
+  gap. That is simultaneously the best evidence the need is real and the best evidence it is
+  harder than it looks (§2.3(b)).
+- ✅ **No syntax highlighting.** lazygit — the named target — doesn't do it either; it renders
+  `git diff --color`. This removes a dependency and two documented ways to hang a core (§6.3).
+- 🔴 **One Bubble Tea v2 issue lands squarely on this workload**: its renderer is reported
+  *slower than v1* on scroll frames. v2 is still the right choice, but measuring this is a
+  Phase 0 kill criterion, not a Phase 3 surprise (§6.2, §13.3).
+
 Phasing: a genuinely useful **read-only slice in ~3–5 days**; write actions +2–3; the speed
-work +2–3; retirement +1. **~9–13 focused days total.** Phase 1 is independently shippable
-and Phase 4 is the only irreversible step.
+work +2–3; retirement +1. **~9–13 focused days total**, plus a day of Phase 0 spike and an
+easily-underestimated third gate tier for Go. Phase 1 is independently shippable and Phase 4
+is the only irreversible step.
 
 ---
 
@@ -64,9 +78,18 @@ neovim start.
 | M11 | `git rev-parse HEAD` (proxy for a static binary's process floor) | **0.004s** |
 | M12 | clickable universe with a local clone, by leaf name | 26 / 371 = **7%** |
 | M13 | clickable universe with a local clone, by each checkout's **own `origin` remote** | 31 / 341 = **9%** |
+| M14 | PR size, **this repo**, 300 most recent PRs | p50 **165** changed lines / **1** file · p90 1,337 / 6 · p99 3,893 · max 10,388 · **≥5,000 lines: 1 PR (0.3%)** |
+| M15 | PR size, **a second repository of the operator's** (deliberately unnamed — private), 300 PRs | p50 **394** / **4** files · p90 3,135 / 19 · p99 7,162 · max 7,633 · **≥5,000 lines: 16 (5%)** |
 
 M12 and M13 are two different methods reaching the same answer, which is the point of running
 both — M12 is blind to a clone whose directory name differs from the repo name, M13 is not.
+
+M14 and M15 are two *different* repositories on purpose: a single repo's distribution is a
+claim about that repo, and this one is unusually agent-driven. They disagree by roughly 2.4×
+at the median and by 16× in the ≥5,000-line tail, which is exactly why one sample would have
+been misleading. **What they agree on is the shape:** the median PR is small — one to four
+files, a few hundred lines — and the huge diff is a 0.3–5% tail. §6.2 is rewritten around
+that.
 
 Everything in 1b is **counts and ratios only**. `known_repos.json` names private
 repositories and no repository name from it appears in this document or in any probe output
@@ -116,9 +139,9 @@ that was retained.
 
 ### 2.1 The recommendation
 
-Build **`mention-review`** — a single-purpose Go/Bubble Tea TUI for reading, commenting on,
-approving and merging one GitHub pull request, spawned by the existing Alacritty hint path.
-Retire `nvim-octo` at the end, in its own revertable commit.
+Build **`mention-review`** — a single-purpose Go TUI on **Bubble Tea v2** (§13) for reading,
+commenting on, approving and merging one GitHub pull request, spawned by the existing
+Alacritty hint path. Retire `nvim-octo` at the end, in its own revertable commit.
 
 ### 2.2 Confidence, split by claim
 
@@ -127,7 +150,10 @@ Retire `nvim-octo` at the end, in its own revertable commit.
 | The performance analysis in §1 and §3 is correct | **HIGH** | measured here, twice, with controls |
 | One GraphQL round trip supplies all four panels | **HIGH** | M5, executed against this repo |
 | A lazygit-style diff surface is not reachable by patching octo | **MEDIUM-HIGH** | §7; based on octo's architecture, not on a fork attempt |
-| The rewrite is the right call | **MEDIUM-HIGH** | the primary ask is UX and only a rewrite reaches it; the risk is §2.4 |
+| Bubble Tea **v2** over v1 (§13) | **HIGH** | v1 frozen 12–18 months; v2 stable since 2026-02; nixpkgs-verified |
+| No syntax highlighting (§6.3) | **HIGH** | lazygit, the named target, does none |
+| The v2 renderer can scroll a p99 diff acceptably | 🔴 **LOW — UNMEASURED** | [#1724](https://github.com/charmbracelet/bubbletea/issues/1724) argues against; Phase 0 kill criterion |
+| The rewrite is the right call | **MEDIUM-HIGH** | the primary ask is UX and only a rewrite reaches it; the risks are §2.4 and the row above |
 | The effort estimate (~9–13 days) | **MEDIUM** | estimates of this shape run long; Phase 1 is the confident part |
 
 ### 2.3 Alternatives considered and rejected
@@ -138,10 +164,42 @@ latency win. Rejected as *the* answer because it cannot deliver the thing that w
 asked for. It remains the correct fallback if the build stalls.
 
 **(b) Use `gh-dash` (an existing Bubble Tea GitHub TUI).**
-Rejected: it is a *dashboard* over many PRs — the opposite of this shape, which is spawned
-with one `owner/repo` + `N` and must open straight into that PR. Adopting it would mean
-fighting its navigation model to reach a single-PR deep link, and its diff surface is not the
-lazygit-style commits/files/hunks layout. Worth reading for prior art; not worth adopting.
+Rejected — and 🔴 **its prior art is the most important single input to this proposal, because
+it is a negative result.**
+
+gh-dash is a 12.5k-star, four-year-old Bubble Tea GitHub PR dashboard, already on Bubble Tea
+v2. **It has never solved in-pane diff rendering.** Its entire diff feature is roughly
+twenty-five lines: shell out to `gh pr diff` under `tea.ExecProcess` and hand the terminal to
+the user's pager. Its most-upvoted open issues are exactly that gap —
+[#852](https://github.com/dlvhdr/gh-dash/issues/852) ("drops the code context"),
+[#490](https://github.com/dlvhdr/gh-dash/issues/490) — and
+[#312](https://github.com/dlvhdr/gh-dash/issues/312) was terminal corruption caused by the
+`ExecProcess` handoff itself.
+
+**Two things follow, and they point in opposite directions.** The optimistic one: the thing
+being proposed here genuinely does not exist, which is why the operator cannot simply install
+it. The sobering one: **a well-resourced project with 12.5k stars and four years did not build
+it**, which is evidence that in-pane diff rendering in Bubble Tea is harder than a
+one-paragraph design makes it look. §6.2's five hazards are what that difficulty is made of.
+
+It is also the wrong *shape* regardless: a dashboard over many PRs, where this is spawned with
+one `owner/repo` + `N` and must open straight into that PR.
+
+**(f) Vendor `crush`'s diff view.**
+Charm's own coding agent contains `internal/ui/diffview` — the only real in-pane diff
+renderer in the Go/Bubble Tea ecosystem, with unified *and* split modes and a clever
+background-preserving formatter that applies syntax colour to the *foreground* while holding
+the diff's add/delete *background* constant, plus a hash-keyed highlight cache.
+
+Rejected on three independent grounds, any one of which is sufficient: it lives under
+`internal/`, which Go forbids importing; crush is licensed **FSL-1.1-MIT** (a
+functional-source licence with a non-compete window), so copying it is a licence decision, not
+a technical one; and it diffs *before/after file content*, so **it cannot consume a unified
+diff** — which is the only thing the API path can supply.
+
+⚠ Worth reading anyway, and worth noting that the local-clone path *can* supply before/after
+blobs. If syntax highlighting is ever wanted (§6.3 recommends against it), that technique is
+the state of the art and the local path is where it would be reachable.
 
 **(c) Shell out to `lazygit` itself.**
 Rejected, and it is worth saying why because the operator named lazygit: lazygit is a
@@ -151,7 +209,7 @@ of clickable repos (M13) have no local clone for it to operate on at all. It is 
 
 **(d) Delegate diff rendering to `delta` / `difftastic` in a pager.**
 Rejected as the primary surface (a pager is not a navigable panel), but **explicitly kept as
-the escape hatch for a file too large to viewport** — see §6.4.
+the escape hatch for a file too large to viewport** — see §6.2.
 
 **(e) Extend the TUI to issues, notifications, repo browsing.**
 Rejected by the operator, and the measurements support him: scope is what makes the one-shot
@@ -217,6 +275,12 @@ indistinguishable glyph in his font) and §5.3 makes it a test, not an intention
 
 Four panels. Nothing else. No issue list, no notifications, no repo tree, no settings screen.
 
+⚠ **Focus the Diff panel by default, not Files.** M14 says the median PR in this repo touches
+**one file**, and M15 says four in the other — so for a large fraction of openings the Files
+panel has nothing to choose and landing there wastes a keystroke on every single review. The
+panels still exist for the p90 (6 and 19 files respectively); they just should not be where
+the cursor starts.
+
 ### 3.2 Models
 
 Root model `App` owns everything that more than one panel reads:
@@ -280,6 +344,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     next, intents := a.Step(msg)
     return next, tea.Batch(mapRun(intents, a.client)...)
 }
+
+// 🔴 v2: View returns a tea.View STRUCT, not a string — and that is also where
+// AltScreen/Cursor/MouseMode now live, since tea.WithAltScreen() is gone (§13.2).
+func (a App) View() tea.View { ... }
 ```
 
 🔴 **This must be in the design from day one.** Retrofitting it means rewriting every
@@ -361,6 +429,7 @@ var Keys = KeyMap{
     NextHunk:  key.NewBinding(key.WithKeys("]h"),       key.WithHelp("]h",  "next hunk")),
     Merge:     key.NewBinding(key.WithKeys("m"),        key.WithHelp("m",   "merge (asks first)")),
 }
+// v2 note: match tea.KeyPressMsg, not tea.KeyMsg — the latter is an interface now (§13.2).
 
 func (k KeyMap) ShortHelp() []key.Binding  { /* the footer row */ }
 func (k KeyMap) FullHelp() [][]key.Binding { /* `?` — grouped by panel */ }
@@ -463,13 +532,37 @@ is *no*, so there are none.
 
 ### 5.0 🔴 What is rejected, and why
 
-**Golden frames are rejected as the primary mechanism.** `teatest.RequireEqualOutput` with
-`-update` asserts "the bytes did not change". It goes red on every cosmetic edit — a padding
-tweak, a reworded label — and the person who is annoyed regenerates it with `-update`. Over a
-few months it converges on asserting nothing while *reading* as thorough coverage, which is
-worse than no test because it stops anyone looking. At most **one** golden frame may exist,
-as a smoke check that the renderer produces *something*, and it may never be the evidence for
-a behavioural claim.
+**Golden frames are rejected as the primary mechanism**, and the research supplies four
+independent reasons beyond the obvious one.
+
+The obvious one: `teatest.RequireEqualOutput` with `-update` asserts "the bytes did not
+change". It goes red on every cosmetic edit — a padding tweak, a reworded label — and the
+person who is annoyed regenerates it with `-update`. Over a few months it converges on
+asserting nothing while *reading* as thorough coverage, which is worse than no test because it
+stops anyone looking.
+
+The four specific ones, from the documented failure modes:
+
+1. 🔴 **`Output()` is a byte STREAM, not a screen.** It is a buffer of every frame the renderer
+   emitted, concatenated, ANSI and all. A golden file is a transcript of *redraws*, not of what
+   a user would see — so the assertion is coupled to render scheduling, which is not behaviour.
+2. 🔴 **Colour-profile drift.** Charm's own teatest post names this as the canonical bug: the
+   golden was generated under whatever profile the developer's terminal reported, and CI
+   reports something else. (⚠ That post is from 2023 and its recommended fix,
+   `lipgloss.SetColorProfile(termenv.Ascii)`, is an **API deleted in Lip Gloss v2** — see
+   §5.3(d).)
+3. 🔴 **Bubble Tea v2 makes it worse.** v2 queries terminal capabilities at startup (DECRQM,
+   modes 2026/2027), so the captured stream now carries environment-dependent handshake bytes
+   that were not there in v1.
+4. **Frame boundaries are not stable when commands do async work** — and this design is
+   *built* on async commands (§3.4). A documented flake in the wild was exactly this: the
+   renderer flushed a variant of a transient frame with different leading control bytes.
+
+Golden files also need `*.golden -text` in `.gitattributes` or git mangles them, and multiple
+goldens in one test overwrite each other.
+
+**So: at most one golden frame may exist**, as a smoke check that the renderer produces
+*something*, and it may never be the evidence for a behavioural claim.
 
 ### 5.1 Layer 1 — pure domain tests (the bulk of the suite)
 
@@ -534,17 +627,26 @@ guard on *words* is walkable by rewording. Assert the **entire normalised prompt
 fixture:
 
 ```
-merge owner/repo#42 "Fix the widget" using SQUASH — this cannot be undone. [y/N]
+merge owner/repo#42 "Fix the widget" using SQUASH as <login> — this cannot be undone. [y/N]
 ```
 
 A cosmetic reword then fails the test. That cost is paid deliberately, for a machine-readable
-claim about what the operator is shown before an irreversible action.
+claim about what the operator is shown before an irreversible action. 🔴 **The `as <login>`
+clause is part of the pinned string**, so the §10.2 multi-account mitigation cannot be reworded
+away.
 
-**(d) 🔴 Meaning is never colour-only.** Render every meaning-bearing state with the lipgloss
-colour profile forced to **`Ascii`** (no colour at all) and assert the state WORD is present:
-`APPROVED`, `CHANGES`, `DRAFT`, `CLEAN`, `BLOCKED`, `CONFLICT`, `N FAILING`, `STALE`,
-`OFFLINE`. Goes red the day someone encodes approval as a green dot. This is the operator's
-font constraint turned into a gate.
+**(d) 🔴 Meaning is never colour-only.** Render every meaning-bearing state with **all colour
+removed** and assert the state WORD is present: `APPROVED`, `CHANGES`, `DRAFT`, `CLEAN`,
+`BLOCKED`, `CONFLICT`, `N FAILING`, `STALE`, `OFFLINE`. Goes red the day someone encodes
+approval as a green dot. This is the operator's font constraint turned into a gate.
+
+⚠ **Mechanism note, because the obvious spelling is a deleted API.** Every guide still says
+`lipgloss.SetColorProfile(termenv.Ascii)` — **Lip Gloss v2 removed the whole `Renderer`
+concept**, including `SetColorProfile`, `NewRenderer` and `ColorProfile`. In v2 the profile is
+a program-level concern: `tea.WithColorProfile(...)` (which survives v2, unlike most
+`tea.With*` options — see §13), or downsampling at the output layer via `colorprofile`. Get
+this wrong and the test renders *with* colour, finds the word anyway because the word was
+there all along, and passes while measuring nothing.
 
 **(e) 🔴 argv contract.** Exit **64** on wrong argument count, **65** on a malformed
 `owner/repo`, **66** on a non-numeric or empty number — driven as a table against the *binary*,
@@ -553,14 +655,41 @@ slash, `..` traversal, and forbidden characters. These are ported directly from
 `test_nvim_octo.py`, which already pins them, so the contract survives the implementation
 swap rather than being re-derived.
 
-### 5.4 Layer 4 — exactly one `teatest` end-to-end
+### 5.4 Layer 4 — exactly one end-to-end test
 
 One test, doing only what the layers above structurally cannot: proving the wiring. Fake HTTP
-server → real `tea.Program` under `teatest.NewTestModel` → scripted keys → `WaitFor` a
-substring → `FinalModel()` and assert on the **model's state**, not the frame.
+server → real `tea.Program` → scripted keys → assert on the **model's final state**, not on a
+frame. Its value is catching "the panels never got wired to the fetched data", which every
+isolated test passes. Its cost is being the flakiest test in the suite, so it stays at one.
 
-Its value is catching "the panels never got wired to the fetched data", which every isolated
-test passes. Its cost is being the flakiest test in the suite, so it stays at one.
+**Two candidate mechanisms, and the recommendation is the boring one:**
+
+- **`tea.WithoutRenderer()` + `WithInput`/`WithOutput`/`WithContext`/`WithWindowSize`** — a
+  headless program with no renderer at all. ✅ **Recommended.** It exercises the real event
+  loop and the real command plumbing, produces no ANSI to be confused by, and uses only
+  first-party, semver-tagged API. This is also what Charm's own testing guide leads with — its
+  docs say *"your Update function is pure — test it directly"* and *"commands are just
+  functions — test them directly"*, and notably **do not mention `teatest` at all**.
+
+- **`x/exp/teatest/v2`** — usable, maintained (its tree moved as recently as 2026-09-13), but
+  three things argue against leaning on it: 🔴 it has **no semver tag** (pseudo-versions only)
+  and lives under `exp/` with *"no backwards compatibility guarantees"*, which is a poor fit
+  for a `vendorHash`-pinned nix build; its `Output()` returns the **raw byte stream of every
+  frame the renderer emitted**, not a screen, so you assert against a transcript of redraws;
+  and Bubble Tea v2's capability handshake (DECRQM, modes 2026/2027) now injects
+  environment-dependent bytes into that stream. It is the tool for golden frames, and §5.0
+  already rejected those.
+
+⚠ **Worth watching, deliberately not adopted: `charmbracelet/x/vttest`,** published
+**2026-09-13 — one day before this proposal**. It is a real terminal emulator for tests with a
+`Snapshot()` returning cursor position, cell contents, colours and modes, serializable to
+JSON/YAML — i.e. exactly the fix for the stream-versus-screen problem, and the right long-term
+home for guard 5.3(d). It is untagged, one day old, and its docs do not yet mention Bubble Tea.
+**Do not bet a suite on it.** Re-evaluate at Phase 3.
+
+⚠ **Rejected: `knz/catwalk`.** Conceptually the nicest design in this space — datadriven
+`Update`-level tests with `run`/`type`/`key`/`resize` directives — but its last release is
+**v0.1.4 (2023-02-05) and it is Bubble Tea v1 only.** Dead.
 
 ### 5.5 🔴 Mutation controls — named in advance
 
@@ -573,7 +702,8 @@ mutation that **must** kill it and the error it must produce:
 | 5.3(a) | delete a binding from the dispatch table, keep its help entry | *"help entry `X` is dispatched on nowhere"* |
 | 5.3(b) | add a new write intent, ledger it in neither set | *"write intent `X` is in neither CONFIRMED nor NOT_CONFIRMED"* |
 | 5.3(c) | change `SQUASH` to `MERGE` in the prompt | whole-string mismatch, both strings printed |
-| 5.3(d) | replace the word `APPROVED` with a green glyph | *"state Approved renders no word under Ascii"* |
+| 5.3(d) | replace the word `APPROVED` with a green glyph | *"state Approved renders no word with colour removed"* |
+| 5.3(c) | drop the `as <login>` clause from the prompt | whole-string mismatch (the §10.2 mitigation is pinned) |
 | 5.2 | make `m` fire the merge directly with no confirmation | `intents` non-empty where empty was asserted |
 
 🔴 **Each must fail with THIS guard's own error.** A mutation killed by a *different* test's
@@ -617,6 +747,8 @@ and is named only because verifying the default for §5.6 is what surfaced it.
 
 ## 6. Degraded behaviour — the honest failure story
 
+### 6.1 What every failure mode does
+
 🔴 **A window that flashes and vanishes is the worst outcome and must never happen.** Alacritty
 exits 0 whether its `-e` command exits 0 or 127, so an exit code teaches the operator nothing;
 every failure below renders a readable card and waits for `q`.
@@ -634,26 +766,89 @@ every failure below renders a readable card and waits for `q`.
 | **`git fetch` fails** | silent — the API result was racing it anyway and wins by default. Reported only in a `d` debug pane, never as an error card. |
 | **malformed argv** | exits 64/65/66 *before* drawing anything, exactly as today |
 
-### 6.4 Large diffs — what actually breaks
+### 6.2 Large diffs — what actually breaks, and how common it actually is
 
-M9 says local `git diff` produces 94,779 diff lines in 0.165s, so *producing* a huge diff is
-not the problem. The problems are downstream: styling and re-wrapping every line through
-lipgloss is per-cell work, and syntax highlighting a 5,000-line file is not free.
+🔴 **First, the scoping fact: the huge diff is the tail, not the case.** M14/M15 say the
+median PR is **165–394 changed lines across 1–4 files**, and PRs past 5,000 lines are
+**0.3%** in this repo and **5%** in the second one. Engineering a sophisticated virtualized
+renderer for the p99 while the p50 is one small file is the YAGNI trap. **Optimize the p50;
+give the p99 an honest escape hatch.**
 
-The mitigations, in order:
+M9 says local `git diff` *produces* 94,779 diff lines in 0.165s, so generating the diff is
+never the problem. Everything expensive is downstream, and the research turned up four
+specific, documented hazards — each with a concrete mitigation:
 
-1. **Parse once, style lazily.** Keep the diff as a `[]Line` structure and style only the
-   window the viewport is about to show. Never build a styled 5,000-line string and hand it
-   to a viewport to slice.
-2. **Highlight lazily and per-file**, with a hard cap: above N lines, drop to plain
-   add/remove/context styling and say so in words (`NO HIGHLIGHTING — file too large`).
-3. **Re-wrap only on resize**, cached by width.
-4. **The `$PAGER` escape hatch** for anything past the cap — this is where `delta` earns its
-   place (§2.3(d)).
+1. 🔴 **`viewport.SoftWrap = true` is O(n) over the WHOLE buffer, several times per frame.**
+   Read from `bubbles/viewport`'s source: with soft wrap on, `calculateLine` loops every line
+   calling `ansi.StringWidth`; with it **off** the same function is O(1). And `View()`,
+   `TotalLineCount()` and `maxYOffset()` each trigger their own full pass. On a 5,000-line
+   diff that is tens of thousands of width computations per frame.
+   → **`SoftWrap = false`.** Pre-wrap in our own code if wrapping is wanted, cached by width.
 
-🔴 **This must be measured on a real 5,000-line diff during Phase 1, not assumed.** If the
-render budget cannot be met, the viewport strategy is the thing to change, and finding that
-out in Phase 3 is too late.
+2. 🔴 **Never pre-style the whole buffer.** The viewport slices for *rendering*
+   (`visibleLines()` → `m.lines[ridx:bottom]`), but any styling done before `SetContent` is
+   100% yours and ~100% wasted. A documented Bubble Tea log-viewer case study measured
+   **52 → 651 lines/s (12.5×)** from exactly three changes: render only visible entries, stop
+   reallocating the backing slice, and add a **width-aware render cache**.
+   → Keep the diff as `[]Line`; style only the visible window; cache by (line, width).
+
+3. **Use `SetContentLines`, not `JoinVertical` + `SetContent`.** The same case study measured
+   the join-then-resplit round trip at **8% of total CPU**, and switching that one path took
+   it from **2.19s → ~270ms**. `SetContentLines` is a Bubble Tea v2-era addition — a small,
+   concrete reason the version choice in §13 matters.
+
+4. 🔴 **Bubble Tea v2's renderer may be SLOWER than v1 on exactly this workload.**
+   [bubbletea#1724](https://github.com/charmbracelet/bubbletea/issues/1724) (open, filed
+   2026-06-25) reports the "cursed renderer" at **~300–800µs per scroll frame against v1's
+   ~50–100µs**, and names log viewers and code browsers as the affected shape. The fix PR is
+   blocked on an upstream dependency.
+   ⚠ **Single-source and recent** — I have not reproduced it, and it contradicts the project's
+   own marketing. **Re-read it before relying on it in either direction.** It is called out
+   here because a scrolling diff viewer is precisely the workload it describes, and because
+   §13 still recommends v2 *despite* it.
+
+5. **`$PAGER` escape hatch above the cap.** `TRUNCATED — 12,401 lines · <key> opens it in
+   $PAGER`. This is where `delta` earns its place (§2.3(d)), and it is what gh-dash does for
+   *every* diff (§2.3(b)).
+
+🔴 **Measure this in Phase 1, on a real diff at the p99 (~4,000 lines) and at the observed max
+(~10,000), not at the median.** If the frame budget cannot be met, the viewport strategy is
+the thing to change — and finding that out in Phase 3 is too late. Hazard 4 in particular is
+a Phase 0 question, because it could argue for a different renderer or a lower `tea.WithFPS`.
+
+### 6.3 🔴 Syntax highlighting: recommend NOT doing it
+
+The research turned up a finding that simplifies this proposal considerably.
+
+**lazygit — the thing the operator explicitly said he likes — does no syntax highlighting at
+all.** Its `go.mod` carries no chroma and no diff library. It builds `git diff --color=<arg>`
+and renders the ANSI git itself produced: green additions, red deletions, plain context. The
+diff-reading experience he is asking for **is** that.
+
+Against that, the cost of highlighting is real and mostly operational:
+
+- 🔴 chroma's regex engine **`panic`s** on a rule timeout rather than returning an error, so
+  any code lexing arbitrary PR content needs a `recover()`;
+- 🔴 [chroma#1377](https://github.com/alecthomas/chroma/issues/1377) (open, filed 2026-09-11)
+  reports zero-width-match rule cycles spinning a core **forever**, and notes the per-regex
+  timeout does not help because each individual match completes quickly. `recover()` alone is
+  therefore insufficient — it needs a goroutine with a budget;
+- `formatters.Get(name)` **silently returns a no-op formatter** on a typo — a silent zero;
+- chroma's own `diff` lexer is line-level: it colours `+`/`-`/`@@` and does **not** highlight
+  the code inside the hunks, so "use the diff lexer" does not get you what the name suggests;
+- making syntax colours coexist with diff backgrounds needs a custom formatter that applies
+  the *foreground* while preserving the add/delete *background*. Exactly one Go project has
+  built this (§2.3(f)), and it lives under `internal/` behind a non-MIT licence.
+
+**Recommendation: ship with git-style add/remove/context colouring and no lexer.** For the
+local-clone path this is literally `git diff --color=always` (lazygit's approach, zero
+dependencies). For the API path it is a small colouriser over the parsed hunks — the same
+three colours, produced by us.
+
+If highlighting is wanted later it is an additive Phase 3+ change behind a config flag, and
+it arrives with the `recover()` + goroutine budget the two hazards above demand. **It is not
+in the recommended scope**, and this replaces what an earlier draft filed as an open
+question.
 
 ---
 
@@ -826,10 +1021,18 @@ so the reader would go blind to it and the wrapper would *look* like it pins not
 ### 9.3 Vendoring
 
 `vendorHash` derived the documented way — build with a deliberately wrong hash and take the
-`got:` value. 🔴 Never hand-edited. The dependency set stays small on purpose: bubbletea,
-bubbles, lipgloss, a GitHub client, a diff parser, and a highlighter. Every addition is a
-vendor-hash re-derivation and a supply-chain entry, in a binary that holds a token with merge
-scope.
+`got:` value. 🔴 Never hand-edited.
+
+The dependency set stays small on purpose — **five direct modules** (§13): bubbletea v2,
+bubbles v2, lipgloss v2, `cli/go-gh` and `bluekeyes/go-gitdiff`. No lexer (§6.3), no
+`go-github` (§13.4). Every addition is a vendor-hash re-derivation and a supply-chain entry,
+**in a binary that holds a token with merge scope** — which is also the reason the version
+floor in §10.3 is not negotiable.
+
+⚠ Note that `go-gh` alone pulls in a large transitive tree (it drags `glamour`, `chroma`,
+`termenv` and a jq implementation). That is a build-time and binary-size cost rather than a
+runtime one, and it is the price of not hand-rolling `gh`'s auth precedence (§10.1). Worth
+re-examining if the binary gets embarrassing.
 
 ### 9.4 `doCheck = false` — see §5.6
 
@@ -840,9 +1043,61 @@ Non-negotiable on the deploy derivation: a red Go test must not be able to fail 
 
 ## 10. Authentication
 
-**Reuse `gh`'s token**, resolved in-process via `cli/go-gh`'s auth helper
-(`auth.TokenForHost("github.com")` → `GH_TOKEN`/`GITHUB_TOKEN`, then `gh`'s `hosts.yml`, then
-its keyring). Measured cost of that resolution: **0.07s (M1)**, paid once at startup.
+**Reuse `gh`'s token**, resolved via `cli/go-gh`'s `auth.TokenForHost("github.com")`.
+Measured cost of an equivalent resolution: **0.07s (M1)**, paid once at startup.
+
+### 10.1 🔴 What `TokenForHost` actually does — it is not all in-process
+
+Read from `cli/go-gh`'s `pkg/auth/auth.go`, the precedence is:
+
+1. `GH_TOKEN`, then `GITHUB_TOKEN` (environment)
+2. `~/.config/gh/hosts.yml` → `hosts.<host>.oauth_token`
+3. 🔴 **shells out**: `gh auth token --secure-storage --hostname <host>`
+4. `("", "default")` — i.e. **empty string, no error**
+
+**go-gh does not read the OS keyring in-process.** The keyring code lives in `cli/cli`'s own
+`internal/` tree and is unimportable, so rung 3 is a subprocess. Two consequences:
+
+- 🔴 **If we ever depend on rung 3, `gh` must be in the derivation's `runtimeInputs`** — pinned
+  by store path, exactly as `nvim-octo`'s `default.nix` already pins it and for the identical
+  reason (the whole call chain starts in an Alacritty hint spawned with the display manager's
+  environment). Without it, `TokenForHost` returns `("", "default")` **silently**.
+- ⚠ **On this host, rung 2 fires and rung 3 never runs today** — `~/.config/gh/hosts.yml`
+  holds plaintext `oauth_token` entries and the session bus exposes no
+  `org.freedesktop.secrets`. That is a fact about today's state, not a guarantee: one
+  `gh auth login --secure-storage` changes it. Pin `gh` anyway.
+
+### 10.2 🔴 The multi-account hazard, and the cheap fix
+
+[cli/cli#14370](https://github.com/cli/cli/issues/14370) (open, filed 2026-09-06): the OS
+keyring is **not partitioned by account**, so `gh auth token --secure-storage` can return a
+token for a *different* account than the config's active one. **This host's `hosts.yml` carries
+two github.com users**, which puts it squarely in scope.
+
+For a read-only tool this is a curiosity. **For a tool that can approve and merge, it is the
+difference between approving as yourself and approving as somebody else** — and it is
+completely invisible at the point of action.
+
+**The fix is cheap, deterministic, and free:** add `viewer { login }` to the GraphQL query the
+TUI already fires (§3.4 — same round trip, no extra cost) and render it as a **word** in the
+Overview panel and in every confirmation prompt:
+
+```
+merge owner/repo#42 "Fix the widget" using SQUASH as <login> — this cannot be undone. [y/N]
+```
+
+🔴 **The authenticated login belongs in §5.3(c)'s whole-string prompt assertion**, so it cannot
+be dropped by a later reword. This turns an invisible hazard into something the operator reads
+before every irreversible action, which is the only mitigation that does not depend on
+remembering.
+
+### 10.3 Version floor
+
+🔴 **Pin `cli/go-gh` at ≥ v2.12.1.** Two advisories land in this exact code path:
+CVE-2024-53859 (`auth.TokenForHost` leaking tokens across host boundaries, fixed v2.11.1) and
+CVE-2025-48938 (fixed v2.12.1). Current release is v2.16.0.
+
+### 10.4 The tradeoff
 
 **The tradeoff, stated rather than glossed:**
 
@@ -873,11 +1128,23 @@ card.** The `NO TOKEN` / `TOKEN REJECTED` cards say which condition holds and no
 
 Honest framing: **this is a large build.** The estimates assume focused days.
 
-### Phase 0 — spike · **0.5–1 day**
-Prove in Go what M5 proved through `gh`: one `issueOrPullRequest` query returns everything the
-four panels need, and `go-gh` resolves auth on this host.
-🔴 **Kill criterion:** if the common case needs more than one round trip, the performance
-argument weakens materially and the whole proposal should be re-read before continuing.
+### Phase 0 — spike · **1 day**
+Three questions, each with a kill criterion. None of them is UI work.
+
+1. **The query.** Prove in Go what M5 proved through `gh`: one `issueOrPullRequest` query
+   returns everything the four panels need, including `viewer { login }` (§10.2).
+   🔴 **Kill:** if the common case needs more than one round trip, the performance argument
+   weakens materially and the whole proposal should be re-read.
+2. **Auth.** `go-gh` ≥ v2.12.1 resolves a token on this host, and the `NO TOKEN` /
+   `TOKEN REJECTED` paths are distinguishable (§6, §10).
+3. 🔴 **The renderer.** Scroll a ~4,000-line buffer (the measured p99, M14/M15) under Bubble
+   Tea v2 with `SoftWrap = false` and `SetContentLines`, and measure the per-frame cost
+   against [#1724](https://github.com/charmbracelet/bubbletea/issues/1724)'s reported
+   300–800µs.
+   🔴 **Kill:** if scrolling a p99 diff is visibly janky and neither `tea.WithFPS` nor the
+   §6.2 mitigations fix it, **stop and reconsider the framework** — that is the one defect
+   that would make the finished product worse at its primary job than what it replaces, and it
+   is far cheaper to find on day one than in Phase 3.
 
 ### Phase 1 — first shippable slice · **3–5 days**
 Read-only, and genuinely usable.
@@ -886,7 +1153,9 @@ generated help footer (§3.6) · unified diff from the API only · the issue car
 gruvbox matching the Alacritty palette · `o` browser, `q` quit · nix packaging (§9) ·
 test layers 1–3 (§5).
 Explicitly **not** in Phase 1: local git, caching, write actions, syntax highlighting.
-🔴 **Measure a 5,000-line diff here (§6.4).** It is a Phase 1 finding, not a Phase 3 one.
+🔴 **Re-measure scrolling at the p99 (~4,000 lines) and the observed max (~10,000) here
+(§6.2)**, on the real panel rather than Phase 0's bare buffer. It is a Phase 1 finding, not a
+Phase 3 one.
 
 ### Phase 2 — write actions · **2–3 days**
 Comment · approve · request changes · submit review · merge. All behind the confirmation
@@ -926,8 +1195,107 @@ prints**, never by arithmetic on the two sides.
    octo prefetch is 10–15% of the cost. Is the diff *layout* genuinely the irritation?
 2. **Side-by-side or unified diff?** Unified is proposed (lazygit's default, and it survives a
    narrow panel). Side-by-side is a Phase 3+ addition if wanted.
-3. **Syntax highlighting — worth it?** It costs a dependency and a per-file budget. Plain
-   add/remove/context styling may be enough, and it is what lazygit shows by default.
-4. **§8.3 — has the review TUI actually been used?** Worth knowing before a ~10-day build.
-5. **Comment posting: inline on a diff line, or PR-level only?** Inline is materially more
+3. **§8.3 — has the review TUI actually been used?** Worth knowing before a ~10-day build.
+4. **Comment posting: inline on a diff line, or PR-level only?** Inline is materially more
    work (review-thread positioning against the diff) and may not be wanted at all.
+
+⚠ A previous draft asked "syntax highlighting — worth it?" as an open question. **§6.3 answers
+it: no**, and the strongest argument is that lazygit — the tool named as the target — does not
+do it either.
+
+---
+
+## 13. The stack
+
+🔴 **Every version below was resolved from `proxy.golang.org` or the GitHub API on
+2026-09-14.** This ecosystem moved hard in the last seven months and most prose about it is
+stale; re-resolve rather than trusting this table's age.
+
+| module | version | date | note |
+|---|---|---|---|
+| `charm.land/bubbletea/v2` | **v2.0.9** | 2026-08-19 | v1's last release was v1.3.10, **2025-09-17** |
+| `charm.land/bubbles/v2` | **v2.2.1** | 2026-08-24 | `SetContentLines`, viewport gutter/highlight |
+| `charm.land/lipgloss/v2` | **v2.0.6** | 2026-08-11 | v1's last was v1.1.0, **2025-03-12** |
+| `cli/go-gh/v2` | v2.16.0 | 2026-09-03 | 🔴 floor **v2.12.1**, see §10.3 |
+| `bluekeyes/go-gitdiff` | v0.9.0 | 2026-07-18 | unified-diff parser — typed `IsRename`/`IsBinary`/`OldMode` |
+
+### 13.1 🔴 Take v2 — and the import path is NOT the GitHub one
+
+v2.0.0 shipped **2026-02-24** for all three libraries, the project's first breaking change in
+six years.
+
+🔴 **The module path moved to a vanity domain, and the GitHub path is dead at stable.** The
+`go.mod` under the GitHub v2 tags declares `module charm.land/bubbletea/v2`, so
+`go get github.com/charmbracelet/bubbletea/v2@v2.0.9` fails with *"module declares its path
+as…"*. `github.com/charmbracelet/bubbletea/v2` stopped publishing at **v2.0.0-beta.6
+(2025-10-30)**. The source still lives on GitHub; only the module path changed. This is the
+single easiest thing to get wrong and it fails at `go mod tidy`, loudly, which is the good
+kind of wrong.
+
+**Why v2 rather than v1**, on evidence rather than novelty:
+
+- **v1 is frozen in practice.** bubbletea v1's last release is twelve months old and predates
+  v2 stable by five months; lipgloss v1's is eighteen months old. The maintainers' commitment
+  was explicitly time-boxed to *"until v2 is merged"*, and the release record shows that
+  condition satisfied.
+- **The README directs new users to v2**, and Charm dogfoods it across their own shipping
+  tools.
+- **Nix packaging is verified working**, not assumed: nixpkgs ships a prebuilt `gh-dash` whose
+  `go.mod` requires `charm.land/bubbletea/v2` + `bubbles/v2` + `lipgloss/v2`, so the vanity
+  paths resolve under a standard `buildGoModule`. nixpkgs `go` is **1.26.7**, above v2's
+  `go 1.25.0` floor.
+- ⚠ **One stale-advice trap**: a January 2026 automated module review recommended *"staying on
+  v1 for now"*. It was written at RC2, before v2 stable, and has expired by its own terms.
+
+### 13.2 The v2 API changes that actually touch this design
+
+- **`View() string` → `View() tea.View`** (a struct). Terminal state became declarative.
+- 🔴 **`tea.WithAltScreen()` and the terminal-feature options are GONE** → `view.AltScreen =
+  true`, `view.MouseMode`, `view.ReportFocus`, `view.Cursor`. Every v1 tutorial you will find
+  opens with `tea.WithAltScreen()`.
+- **Keys**: `tea.KeyMsg` is now an interface — match **`tea.KeyPressMsg`**. `msg.Type` →
+  `msg.Code`, `msg.Runes` → `msg.Text`, and `case " "` becomes `case "space"`.
+- ✅ **`Init() tea.Cmd` is UNCHANGED.** It churned during beta and reverted. Several secondary
+  sources say otherwise; they are wrong.
+- **Surviving program options** (the ones §5.4 and §5.3(d) depend on): `WithContext`,
+  `WithInput`, `WithOutput`, `WithFPS`, `WithColorProfile`, `WithWindowSize`,
+  **`WithoutRenderer`**, `WithoutCatchPanics`, `WithoutSignalHandler`.
+- **Lip Gloss v2 removed the `Renderer` concept entirely** — no `NewRenderer`,
+  `SetDefaultRenderer` or `SetColorProfile`; `lipgloss.Color` went from a string type to a
+  function returning a stdlib `color.Color`; `AdaptiveColor` moved to a `compat` package in
+  favour of `LightDark()`. 🔴 This is what invalidates the standard golden-file recipe (§5.0,
+  §5.3(d)) and it will invalidate any gruvbox palette code copied from a v1 example.
+- **Bubbles v2**: exported `Width`/`Height` became `SetWidth()`/`Width()`;
+  `HighPerformanceRendering` is **removed** (and deprecated upstream — do not reach for it).
+
+### 13.3 The risk in taking v2, stated
+
+v2 is seven months old with ~112 open issues, and **one of them is squarely on this
+application's workload** — [#1724](https://github.com/charmbracelet/bubbletea/issues/1724),
+the renderer being slower than v1 on scroll frames (§6.2 hazard 4). There is also no published
+benchmark behind the "orders of magnitude faster" headline; it is qualitative at source.
+
+**The recommendation is still v2**, because v1 receives nothing and an app pinned to a dead
+major ages badly — but §6.2's Phase-0/1 measurement is not optional, and if scroll performance
+cannot be made acceptable, that measurement is what makes the decision reversible.
+
+### 13.4 Deliberately NOT taken
+
+- **`alecthomas/chroma`** — see §6.3. No lexer at all.
+- **`google/go-github`** — excellent library (v92.0.0, only two dependencies), but it cut
+  **twelve major versions in 8.3 months**, and the major is in the import path, so each bump is
+  a repo-wide rewrite. This application needs one GraphQL query, one paginated REST read and
+  four writes; that is small enough to hand-roll over go-gh's authenticated `*http.Client`
+  rather than board a 21-day major-version treadmill. ⚠ If pagination or rate-limit handling
+  ever gets hard, revisit — pin one major and bump quarterly, not per release.
+- **`shurcooL/githubv4`** — 🔴 **zero tags, ever**; a request for one has been open since 2020,
+  and its `go.mod` omits the `require` for its own graphql dependency. Not something to pin a
+  `vendorHash` to.
+- **`sourcegraph/go-diff`** — fine and no longer dormant (v0.9.0, 2026-09-10), but
+  `go-gitdiff` types renames, modes and binary files where this one leaves extended headers as
+  raw strings.
+- **`charmbracelet/ultraviolet`** — the cell/input layer under v2. 🔴 **No tagged release at
+  all**; bubbletea depends on it by pseudo-version. Fine as a transitive dependency, not
+  something to import directly.
+- **`charmbracelet/fang`** — real and good, but it is a `cobra` wrapper for styled CLI help.
+  This binary takes two positional arguments and has no subcommands.
