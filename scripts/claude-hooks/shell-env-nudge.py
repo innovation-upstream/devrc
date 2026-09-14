@@ -18,7 +18,15 @@ import sys, json, os, re
 
 HOME = os.path.expanduser("~")
 
-# Absolute repo root -> canonical env var (must match nix/programs/zsh/default.nix).
+# 🔴 BOTH TABLES BELOW RESTATE `nix/agent-handles.nix`, WHICH IS THE SOURCE OF TRUTH.
+# They are pinned to it by `scripts/tests/test_shell_env_nudge_handles.py`, both
+# directions — add a handle there and this file goes red until it is added here too.
+# (This comment used to name `nix/programs/zsh/default.nix`; that file IMPORTS
+# agent-handles.nix, so it is a generated consumer like this one, not the source.
+# Matching a copy against a copy is how KC_PROD went missing here from its
+# declaration on 2026-08-02 until 2026-09-14 — ~6 weeks, silently.)
+#
+# Absolute repo root -> canonical env var.
 REPO_VARS = {
     f"{HOME}/workspace/devrc": "DEVRC",
     f"{HOME}/workspace/homelab-talos": "HOMELAB",
@@ -30,6 +38,7 @@ REPO_VARS = {
 KC_VARS = {
     f"{HOME}/workspace/homelab-talos/homelab-kubeconfig": "KC_HOMELAB",
     f"{HOME}/workspace/homelab-talos/workbench-kubeconfig": "KC_WORKBENCH",
+    f"{HOME}/workspace/homelab-talos/production-kubeconfig": "KC_PROD",
     f"{HOME}/workspace/civit/datapacket-talos/prod-kubeconfig": "KC_DPPROD",
     f"{HOME}/.kube/homelab-nebula.yaml": "KC_NEBULA",
 }

@@ -73,9 +73,19 @@ turns each into `<any absolute prefix>/<suffix>`. Two consequences worth stating
 
 ⚠ A SECOND COPY OF THIS TABLE EXISTS and is deliberately NOT consulted:
 `scripts/claude-hooks/shell-env-nudge.py` keeps its own `REPO_VARS`/`KC_VARS`
-dicts, whose header says they must match. Reading the nix file is what makes this
-gate DRY against the SOURCE rather than against another copy; unifying the hook
-with it is separate work.
+dicts. Reading the nix file is what makes this gate DRY against the SOURCE rather
+than against another copy — that stays true, and the hook is still not consulted
+here.
+
+What changed: that copy is no longer UNPINNED. This paragraph used to end "unifying
+the hook with it is separate work", and while it said so the hook's `KC_VARS` was
+missing `KC_PROD` — from 2026-08-02, when that handle was declared, to 2026-09-14
+(~6 weeks), with nothing able to report it.
+`scripts/tests/test_shell_env_nudge_handles.py` now pins both of the hook's dicts
+to `agent-handles.nix` in BOTH directions, importing `_handle_table()` /
+`_kubeconfig_table()` from THIS module rather than writing a third regex over the
+same file. So a handle added to the nix source arms this gate automatically and
+reds that ledger until the hook is updated too.
 
 LONGEST MATCH WINS
 ------------------
