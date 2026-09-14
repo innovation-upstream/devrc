@@ -140,6 +140,22 @@ is the PRIVATE proposal, not this doc.
   **That is the attribution gate's shape: the ladder was auditing itself.** Stopped by decision
   after round 1, not on a clean round.
 
+- 🔴 **THE PHASE LADDER, RE-MEASURED 2026-09-14 — AND `B` IS NEXT AND HAS NOT STARTED.**
+  The merged proposal (`claudedocs/proposal-cairn-civitai-instance.md` on talos-infra `trunk`)
+  §9 phases A1→A2→A3→B→C→D→E→F→G. Measured against code, not read off the table:
+  **A1 ✅** (repo public, leakscan with both controls) · **A2 ✅** (`reload_tokens` on cairn
+  `origin/main`) · **A3 ✅** (devrc consumes the pinned flake, #1406 `9300f234`) ·
+  **B ⛔ NOT STARTED** · C–G not started.
+  🔴 **B is "client multi-instance, still ONE instance configured", and its closing condition is
+  the point: *existing behaviour unchanged — provable BEFORE any data moves*.** It needs the
+  scope→instance registry decisions 3 and 8 describe (explicit, **fails loud** on an unregistered
+  scope; lives in devrc, **aliases only, never a hostname**). **Measured: no such registry exists**
+  — nothing in devrc or the pinned client matches, and the client has no multi-instance notion at
+  all. So B is a build, not a wiring change.
+  ⚠ **Ranks 25/27/28 and the audit residue do NOT advance the goal.** The only ranked item that
+  ever did was 4, and it is now closed. **The next goal-advancing work is phase B itself, which
+  has no rank** — file one when someone takes it, with B's own closing condition.
+
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
   **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
   those sites have no handle and therefore no remedy);
@@ -147,7 +163,8 @@ is the PRIVATE proposal, not this doc.
   #1657's round-2 audit; pre-existing in kind, NOT a #1657 regression, and its frequency is
   explicitly UNMEASURED); **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
   rank 18 predicted it would); **20 half two** (that CI leg has only ever been watched **pass**,
-  so its red path is unproven); **4, 8, 21**; and the `m_index_store` `sys.path` item.
+  so its red path is unproven); **8, 21**; and the `m_index_store` `sys.path` item.
+  ✅ **4 is CLOSED** — the instance proposal MERGED (`civitai/talos-infra#1414` `c9b1c4e03`).
   ✅ The CLASS rank 23 did not close is CLOSED — rank 24, devrc **#1621**, squash **`df09a6c2`**.
   ✅ **26 is CLOSED** — #1657 `0808a820`, live on both hosts, verified by content.
   **Rank 22 belongs to another session — do not take it.** ⚠ **Rank 20 is CLAIMED (~4 d old);
@@ -527,54 +544,13 @@ it routes the mandated check back at a client that does not run it, re-opening t
   was running at the same instant BEFORE re-running anything; that is the only observation
   that separates the two mechanisms, and it is unrecoverable afterwards.
 
-### The cost of consolidating onto the pin is MEASURED — it is 2 real deltas, not 5 modules' worth
-🔴 This supersedes the fork block's per-module **raw-line** figures as the basis for planning
-slice 3. Those counts (`host_identity` 122, `cairn_doctor` 43, `subsystem_recall` 38 …) are
-RAW diffs and are dominated by the extraction's docstring rewrites; they say almost nothing
-about what devrc would gain or lose. Do not re-derive this — verify it still holds.
-- **Symptom + exact repro:** not a bug — the unmeasured half of a decided piece of work.
-  Repro: render both copies docstring- and comment-free and diff those.
-  `python3 -c 'import ast,sys; …'` — strip every `Module/FunctionDef/ClassDef` docstring, then
-  `ast.unparse`. **Both controls were watched**: the same file against itself → **0** diff
-  lines; one renamed identifier (`def this_host` → `this_hostX`) → **4**. An instrument that
-  cannot go red, and cannot see a rename, would have produced the same reassuring numbers.
-- **Observed (with values), 2026-09-11** — devrc `scripts/lib/` vs cairn `lib/`,
-  code-only diff lines (raw `diff -u` lines in parentheses):
-  `subsystem_resolver` **0** (164) · `subsystem_read_store` **0** (20) ·
-  `host_identity` **19** (175) · `cairn_doctor` **42** (73) · `subsystem_recall` **98** (318) ·
-  `timeouts` **8** (60). Two of the five modules are **behaviourally identical**; `subsystem_resolver`
-  is 2,814 lines in devrc and every one of the 164 differing lines is prose. via: measurement
-- **Observed: where the three non-zero modules differ, the PINNED side is the superset.**
-  `host_identity` adds `HOST_LABEL_ENV = ("CAIRN_HOST","ASIB_HOST","ACTIVITY_HOST")` and reads
-  it in `host_label()`; `cairn_doctor` takes `mirror_root: Path | None` and reports
-  `NOT_OBSERVABLE` instead of crashing when no mirror is configured; `subsystem_recall`
-  factors `main` into `recall_selection()` / `reject_recall_flags()` and takes its shared
-  vocabulary `from entry_shape import …` where devrc's takes the same names
-  `from subsystem_touch import …`. `timeouts` differs only by an unused `DEFAULT_TIMEOUT = 60`.
-  via: measurement
-- 🔴 **Observed: the WRITER's vocabulary is almost free, and the two exceptions are the whole
-  job.** Comparing `scripts/lib/subsystem_touch.py` against cairn's `lib/entry_shape.py`
-  per-name, normalised the same way: `STORE_IS_PER_HOST`, `SHAPE_HEADINGS`, `store_host`,
-  `store_host_line`, `derive_scope`, `scope_for_repo`, `_git`, `_toplevel` are **byte-identical**.
-  Only two move: (a) the exception base — cairn's is `CairnError` with `TouchError = CairnError`
-  as a compatibility alias, while devrc's `TouchError(Exception)` is the base that ~25 writer
-  errors subclass; (b) `repo_path_missing_message`. via: measurement
-- 🔴 **The one KNOWING REGRESSION, named rather than discovered later:** entry_shape's
-  `repo_path_missing_message` drops devrc's sentence naming the pre-exported handles
-  (`REPO_PATH_HANDLES = ("$DEVRC","$HOMELAB","$DATAPACKET","$CIVITAI")`) and hints
-  `Did you mean --scope X?` only when that scope dir exists. Because `scope_for_repo` — which
-  is byte-identical and IS imported from the pin — calls it, taking the pin takes the weaker
-  message with it. The brief's preferred remedy is devrc-side: catch `RepoPathMissingError` at
-  devrc's own CLI boundary and re-append the handles sentence, so nothing is lost and
-  `scope_for_repo` still comes from the pin. via: code
-- **Ruled out: that class identity can be left alone.** The pinned `subsystem_recall` catches
-  `entry_shape.StoreMissingError`; a writer that raises its own look-alike of the same name
-  would not be caught. Importing the vocabulary is not tidiness here — it is the thing that
-  makes the two halves interoperate. via: code
-- **Next probe:** none for the measurement. The open question is the agent's: whether devrc's
-  test files that assert the *unsanitised* strings (``subsystem_touch.py --validate`` where the
-  pin says ``a writer --validate``) should be updated or deleted as cairn-owned. The brief says
-  update the expectation to the PINNED string and never weaken an assertion to a substring.
+### DEMOTED 2026-09-14 — the cost of consolidating onto the pin (rank 3, DELIVERED)
+Moved verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` per the size playbook's
+step 2. Rank 3 slice 3 shipped (#1508 `44bd8b0e`), so the decision it informed is closed.
+🔴 **The METHOD is what outlives it** — render both copies docstring-free before diffing,
+and watch BOTH controls (a file against itself → 0 lines; one renamed identifier → 4). An
+instrument that cannot go red, and cannot see a rename, returns the same reassuring number.
+**Next probe: none.**
 
 ### The root cause behind BOTH round-1 blockers — an environment claim measured from the wrong shell
 🔴 One sentence, and it generalises past this PR: **every environment claim in #1508's body was
@@ -797,8 +773,20 @@ belongs to that arc's own session. via: measurement
    ❌ on both hosts. **Re-measure before declaring this done.**
    forcing: none
 
-4. **Merge or close `civitai/talos-infra` #1414** (the instance proposal). Four open questions
-   in §11; none blocks A3. **RE-VERIFIED LIVE 2026-09-09: still OPEN** (`state: OPEN`,
+4. ✅ **CLOSED 2026-09-14 — MERGED. `civitai/talos-infra#1414`, squash `c9b1c4e03`.**
+   All four §11 questions answered by the operator: **Zach-only at launch but PER-IDENTITY
+   from day one**; **`cairn.civitai.com`, CF-proxied**; **Zach the sole token admin for now**;
+   **OSS contributions OPEN from day one** (the one answer that went against the
+   recommendation, recorded as such). 🔴 Its §8 blocker table was STALE FOR NINE DAYS —
+   blocker 2 (token reload) LANDED while the PR sat open (`server/server.py:5049
+   reload_tokens`, 47 test refs) — so the table was re-measured whole, not row by row.
+   **That is §8's own lesson landing on itself:** a blocker table is a claim with a shelf
+   life; re-measure ALL of it at merge time.
+   **The one follow-on it creates:** `ZacxDev/cairn` gains `CONTRIBUTING.md` + issues
+   enabled. **Closes when** both exist on `origin/main` and the file names the leak gate
+   (`tests/leakscan.py`) and the test command — land it BEFORE advertising the repo, so a
+   first contributor meets a documented gate rather than a surprising one.
+   (Historical: four open questions in §11; none blocked A3.) **RE-VERIFIED LIVE 2026-09-09: still OPEN** (`state: OPEN`,
    `mergedAt: null`).
    🔴 **AND A RECONCILER FALSE POSITIVE TO NOT FALL FOR AGAIN.** `resume-state.sh` reported
    `PR #1414 MERGED but handoff frames it as open/in-flight`. That is a **devrc** PR — a

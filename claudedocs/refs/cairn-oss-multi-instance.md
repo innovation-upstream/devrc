@@ -118,3 +118,62 @@ wall time was observed at **137.69 s / 164.27 s / 205 s / 428.40 s — a 3.11x s
 tree**. A fixed 120 s bound sits inside that spread. 🔴 **The cause is NOT established**;
 `#1429` was checked and **refuted** for this tier (`limits.cpu: "4"` makes the old and new
 worker formulas both yield 4). via: measurement
+
+---
+
+## DEMOTED 2026-09-14 — the cost of consolidating onto the pin (rank 3, DELIVERED)
+
+Kept verbatim because its *method* outlives its numbers: it is the worked example of
+rendering two copies docstring-free before diffing them, with BOTH controls watched
+(a file against itself -> 0; one renamed identifier -> 4). Rank 3 slice 3 shipped
+(#1508 `44bd8b0e`), so the decision it informed is closed.
+
+### The cost of consolidating onto the pin is MEASURED — it is 2 real deltas, not 5 modules' worth
+🔴 This supersedes the fork block's per-module **raw-line** figures as the basis for planning
+slice 3. Those counts (`host_identity` 122, `cairn_doctor` 43, `subsystem_recall` 38 …) are
+RAW diffs and are dominated by the extraction's docstring rewrites; they say almost nothing
+about what devrc would gain or lose. Do not re-derive this — verify it still holds.
+- **Symptom + exact repro:** not a bug — the unmeasured half of a decided piece of work.
+  Repro: render both copies docstring- and comment-free and diff those.
+  `python3 -c 'import ast,sys; …'` — strip every `Module/FunctionDef/ClassDef` docstring, then
+  `ast.unparse`. **Both controls were watched**: the same file against itself → **0** diff
+  lines; one renamed identifier (`def this_host` → `this_hostX`) → **4**. An instrument that
+  cannot go red, and cannot see a rename, would have produced the same reassuring numbers.
+- **Observed (with values), 2026-09-11** — devrc `scripts/lib/` vs cairn `lib/`,
+  code-only diff lines (raw `diff -u` lines in parentheses):
+  `subsystem_resolver` **0** (164) · `subsystem_read_store` **0** (20) ·
+  `host_identity` **19** (175) · `cairn_doctor` **42** (73) · `subsystem_recall` **98** (318) ·
+  `timeouts` **8** (60). Two of the five modules are **behaviourally identical**; `subsystem_resolver`
+  is 2,814 lines in devrc and every one of the 164 differing lines is prose. via: measurement
+- **Observed: where the three non-zero modules differ, the PINNED side is the superset.**
+  `host_identity` adds `HOST_LABEL_ENV = ("CAIRN_HOST","ASIB_HOST","ACTIVITY_HOST")` and reads
+  it in `host_label()`; `cairn_doctor` takes `mirror_root: Path | None` and reports
+  `NOT_OBSERVABLE` instead of crashing when no mirror is configured; `subsystem_recall`
+  factors `main` into `recall_selection()` / `reject_recall_flags()` and takes its shared
+  vocabulary `from entry_shape import …` where devrc's takes the same names
+  `from subsystem_touch import …`. `timeouts` differs only by an unused `DEFAULT_TIMEOUT = 60`.
+  via: measurement
+- 🔴 **Observed: the WRITER's vocabulary is almost free, and the two exceptions are the whole
+  job.** Comparing `scripts/lib/subsystem_touch.py` against cairn's `lib/entry_shape.py`
+  per-name, normalised the same way: `STORE_IS_PER_HOST`, `SHAPE_HEADINGS`, `store_host`,
+  `store_host_line`, `derive_scope`, `scope_for_repo`, `_git`, `_toplevel` are **byte-identical**.
+  Only two move: (a) the exception base — cairn's is `CairnError` with `TouchError = CairnError`
+  as a compatibility alias, while devrc's `TouchError(Exception)` is the base that ~25 writer
+  errors subclass; (b) `repo_path_missing_message`. via: measurement
+- 🔴 **The one KNOWING REGRESSION, named rather than discovered later:** entry_shape's
+  `repo_path_missing_message` drops devrc's sentence naming the pre-exported handles
+  (`REPO_PATH_HANDLES = ("$DEVRC","$HOMELAB","$DATAPACKET","$CIVITAI")`) and hints
+  `Did you mean --scope X?` only when that scope dir exists. Because `scope_for_repo` — which
+  is byte-identical and IS imported from the pin — calls it, taking the pin takes the weaker
+  message with it. The brief's preferred remedy is devrc-side: catch `RepoPathMissingError` at
+  devrc's own CLI boundary and re-append the handles sentence, so nothing is lost and
+  `scope_for_repo` still comes from the pin. via: code
+- **Ruled out: that class identity can be left alone.** The pinned `subsystem_recall` catches
+  `entry_shape.StoreMissingError`; a writer that raises its own look-alike of the same name
+  would not be caught. Importing the vocabulary is not tidiness here — it is the thing that
+  makes the two halves interoperate. via: code
+- **Next probe:** none for the measurement. The open question is the agent's: whether devrc's
+  test files that assert the *unsanitised* strings (``subsystem_touch.py --validate`` where the
+  pin says ``a writer --validate``) should be updated or deleted as cairn-owned. The brief says
+  update the expectation to the PINNED string and never weaken an assertion to a substring.
+
