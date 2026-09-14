@@ -29,17 +29,18 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- ✅ **THE ARC IS CLOSED, AND `main` IS GREEN — rank 16, the last thing holding it red, SHIPPED.**
-  Rank 14's four-round ladder finished this session (`#1681`), and both unowned reds are fixed
-  and merged (`#1692`, `#1690`).
+- ✅ **THE ARC IS CLOSED, `main` IS GREEN, AND IT IS DEPLOYED TO BOTH HOSTS.** Rank 14's
+  four-round ladder finished this session (`#1681`), both unowned reds are fixed and merged
+  (`#1692`, `#1690`), and `ship.sh` converged workbench + laptop. Ranks 1–16 are all tombstones;
+  **rank 8's 2026-09-18 date is the only thing left with a clock on it.**
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
   `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
   `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · `#1654` cfe4eb54 · `#1658` 00afff8c ·
-  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` **053aa1f4** · `#1683` **8881029e** ·
-  `#1692` **ff5585ef** · `#1690` **f88e5235**.
+  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` 053aa1f4 · `#1683` 8881029e ·
+  `#1692` **ff5585ef** · `#1690` **f88e5235** · `#1693` **6a629a45**.
 - ✅ **`main` IS GREEN, MEASURED ON THE REAL TIP — not on a constructed tree.** A `git archive` of
   `origin/main` **`f88e5235`**, zero PR content: **644 passed, 0 failed** across
   `test_runtime_shebangs.py`, `test_clawgate_writeback_guard.py` and
@@ -55,12 +56,24 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
   (a 69 B restore, every claim a measurement) and not run for `#1692`. `#1692` carries a stated,
   UNCLOSED gap: *"nothing execs these fixtures" is measured, not enforced by a test* — the count
   ledger bounds it by failing on a new site, which is a forcing function, not a proof.
+- ✅ **DEPLOYED AND VERIFIED, stated separately from "merged" because they are different claims.**
+  `ship.sh` rc **0**: both hosts at **`f88e5235`**, cross-host agreement CONFIRMED
+  (`local=workbench remote=laptop`), 598 / 557 managed artifacts resolve, **0 dangling, 0 stale**
+  on each. That matters here because `#1690` changes `claude/skills/clawgate/SKILL.md`, a
+  nix-managed path a `git pull` cannot move.
+  ⚠ **The hosts sit one commit behind `origin/main` (`6a629a45`) and that is FINE** — the only
+  commit since is this handoff doc, under `claudedocs/`, which nix does not deploy. Do not
+  re-ship for it.
+- 🔴 **ONE HOST CARRIES CONTENT THAT IS ON NO BRANCH — the workbench, and it is NOT this arc's
+  work.** See the dated gotcha below. Nothing to fix here; it is another session's live WIP.
 - **CI IMPACT, MEASURED — the arc's two halves have OPPOSITE answers.** Local delivering
   (`gate.sh` 1.92→0.76 runs per merged PR, `nix build .#checks` 2.83→0.73, `scoped-tests.sh`
   0→0.67); **CI wall time never moved and could NOT have** — see rank 5. Unchanged this session.
-- **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) with its positive control
-  showing the board reachable — which proves a correct id WOULD have resolved, **not** that this
-  session touched no task. Not a clean bill of health.
+- **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) twice this session, each
+  time with its positive control showing the board reachable — which proves a correct id WOULD
+  have resolved, **not** that this session touched no task. Not a clean bill of health.
+- **Claim `main-red-shebang-and-writeback-guards` is RELEASED.** Base clone fast-forwarded to
+  `6a629a45`; every worktree this session made is removed with nothing stranded.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -829,6 +842,36 @@ EOF
   accepting a finding.**
 - **A repro pinned to a test NAME dies silently when the test is deleted** — rank 14's documented
   repro would have become `5 deselected`, exit 5, ~0.1s: indistinguishable from a pass.
+
+### 2026-09-14 — `ship.sh` bakes another session's UNCOMMITTED work into the deployed generation
+
+- 🔴 **MEASURED, on this run: the workbench's deployed generation is `origin/main` PLUS two
+  staged-but-uncommitted paths**, and `ship.sh` said so itself — `🔴 DIRTY AND IN THE ARTIFACT —
+  nix reads 2 path(s) at eval/build time`, naming `claude/skills/the-algorithm/SKILL.md` and
+  `claude/skill-tiers.json`. The laptop line on the same run reads `(clean tree)`. **The run
+  still exits 0 and still says `✅ VERIFIED`** — this is a warning among greens, on one host's
+  lines, which is exactly the shape CLAUDE.md says to read per-host rather than by verdict.
+- **The proof it is real, not a formality:** `git cat-file -e origin/main:claude/skills/the-algorithm/SKILL.md`
+  → `exists on disk, but not in 'origin/main'`, while `readlink -f
+  ~/.claude/skills/the-algorithm/SKILL.md` terminates in `/nix/store/…-devrc-claude-skills/`.
+  **A skill that is on no branch is live on the workbench** — it appears in this session's own
+  skill listing. `readlink -f` is the arbiter, per RULES.md, and it says DEPLOYED.
+- **Whose:** another session, actively — the files were **74 seconds old** and **staged** when
+  ship ran, and the dirty set had grown from 2 paths to **13** twenty minutes later (a
+  skill-description/tier pass: 9 `SKILL.md` files, `claude/skill-tiers.json`,
+  `scripts/tests/test_skill_descriptions.py`). **Left untouched** — a dirty file that lands in
+  your deploy is not thereby yours to resolve, the same call this doc records for the
+  `ship.sh` rc 7 incident.
+- 🔴 **The generalisation, which is the durable half:** `ship.sh` deploys the **working tree**,
+  not the **committed tree**, wherever nix reads a path at eval/build time. So *"I shipped
+  `origin/main`"* is false on any host with a dirty nix-read path, and the divergence is
+  invisible to `git log`, to `drift-check`'s git-parity arm (both hosts ARE at the same sha) and
+  to the managed-artifact scan (0 dangling, 0 stale — the links resolve; they just resolve to
+  bytes no branch has). **The warning line is the only detector.**
+- ⚠ **It self-heals only if that session commits.** If the work is abandoned, the workbench keeps
+  running a skill nobody can find in git until the next switch rebuilds without it — and nothing
+  announces that either. Worth a `git status --short` on both hosts before quoting any host as
+  "at `origin/main`".
 ## Open investigations — live diagnosis state
 
 ### CLOSED investigation blocks — evicted 2026-09-13
