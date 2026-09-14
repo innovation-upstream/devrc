@@ -2,12 +2,21 @@
 -- mention opens in. Sourced by the generated init.vim (`luafile`), so it runs
 -- BEFORE the `-c "Octo <N> <owner/repo>"` the wrapper appends.
 --
--- 🔴 THIS FILE IS PARSED BY A TEST. `scripts/tests/test_nvim_octo.py` reads the
--- `mappings.pull_request` table structurally and asserts that NO merge key is
+-- 🔴 THIS FILE IS PARSED **AND EXECUTED** BY A TEST.
+-- `scripts/tests/test_nvim_octo.py` reads the `mappings.pull_request` table
+-- structurally (asserting that none of octo's own unconfirmed merge actions is
 -- declared in it, plus `default_merge_method`, `default_delete_branch` and
--- `picker`. Reword the comments freely; do not move those settings into a
--- computed expression, because a value the reader cannot see is a value nobody
--- is checking.
+-- `picker`), and then RUNS this whole file under `luajit` with a stubbed `vim`
+-- and a stubbed `require`, driving `NvimOcto` below. Reword the comments
+-- freely; do not move those settings into a computed expression, because a
+-- value the reader cannot see is a value nobody is checking.
+--
+-- ⚠ `--` LINE COMMENTS ONLY. The test's comment stripper does not understand
+-- Lua long-bracket comments (`--[[ … ]]`) and would hand every structural
+-- reader the body of one as if it were configuration.
+--
+-- ⚠ LuaJIT 5.1 SYNTAX ONLY, for the same reason: the hermetic tier runs this
+-- file through `luajit`, not through neovim.
 
 -- --------------------------------------------------------------------------
 -- MERGE SAFETY — why this config re-declares ~45 mappings by hand
@@ -20,9 +29,47 @@
 -- request. That is the hazard this file exists to close.
 --
 -- `mappings_disable_default = true` clears every default mapping table before
--- the user tables below are merged in (octo `config.lua`'s `M.setup`), so what
--- is declared here is the COMPLETE set of octo keymaps. Merging is then
--- reachable only by TYPING `:Octo pr merge`, which is a deliberate act.
+-- the user tables below are merged in (octo `config.lua`'s M.setup), so what
+-- is declared here is the COMPLETE set of OCTO keymaps, and none of them
+-- merges.
+--
+-- 🔴 THERE IS NOW A MERGE KEYSTROKE AGAIN, AND IT IS NOT ONE OF OCTO'S. This
+-- reverses the original decision that merging must require typing
+-- `:Octo pr merge`. The operator asked for a keymap; the stated mitigation in
+-- the original decision was "a confirmation step on destructive verbs, not a
+-- narrower scope", and what actually shipped was the narrower scope. So the
+-- keystroke is back WITH the confirmation that was supposed to accompany it.
+--
+-- 🔴 THE CITATION FOR THAT QUOTE, BECAUSE AN EARLIER ROUND OF THIS CHANGE
+-- ATTRIBUTED IT TO THIS FILE AND THAT WAS WRONG. It is operator-authored, and
+-- it lives in
+-- `claudedocs/handoff-mention-picker-instrumentation-and-tui.md:305`, under
+-- "Operator decision 2026-09-12, settled: the PR TUI scope is FULL review AND
+-- merge. The blast radius of one-keystroke merge in a repo with no blocking
+-- gate was raised before the decision and accepted; the mitigation is a
+-- confirmation step on destructive verbs, not a narrower scope." A
+-- cross-reference is a claim like any other.
+--
+-- 🔴 "VERBS", PLURAL — SO MERGE IS NOT THE ONLY CONFIRMED ONE. `CONFIRMED_
+-- VERBS` further down carries `approve_review` (`<C-a>` — one chord, no
+-- leader, in the review VERDICT window), `approve_pr` (`<leader>qa`),
+-- `submit_review` (`<localleader>vs`, on the two REVIEW surfaces only) and
+-- `delete_comment` (`<localleader>cd`, unrecoverable). Each of those is
+-- REMOVED from the `mappings` tables below for exactly the reason `merge_pr`
+-- is: a declared entry binds OCTO's own action, which asks nothing.
+--
+-- ⚠ DELIBERATELY NOT CONFIRMED, and that is a decision rather than an
+-- oversight: `close_issue` (`\ic`), `reopen_issue` (`\io`), `remove_reviewer`
+-- (`\vd`), `remove_assignee` (`\ad`) and `remove_label` (`\ld`). Every one of
+-- them is undone by pressing the opposite key, so a prompt would be friction
+-- with nothing behind it.
+--
+-- ⚠ THE DISTINCTION IS LOAD-BEARING, NOT BOOKKEEPING. Re-declaring `merge_pr`
+-- in the table below would bind OCTO's action, which calls `gh.pr.merge(opts)`
+-- with no prompt of any kind. The keymap installed at the bottom of this file
+-- is OURS: it resolves the PR, ASKS, and only then calls the same
+-- `octo.commands.merge_pr` octo would have called. `mappings.pull_request`
+-- therefore still declares no merge action, and the test still asserts that.
 --
 -- 🔴 `pr_options` IS DELIBERATELY NOT RE-DECLARED, AND THAT IS NOT AN
 -- OVERSIGHT. Upstream binds it to `<CR>` — a single keystroke — and its menu
@@ -102,7 +149,9 @@ local ok, err = pcall(function()
     -- Copied from octo 2026-08-28's own defaults, MINUS the seven merge
     -- entries (merge_pr, squash_and_merge_pr, rebase_and_merge_pr,
     -- merge_pr_stack, merge_pr_queue, squash_and_merge_queue,
-    -- rebase_and_merge_queue) and minus pr_options. Same left-hand sides, so
+    -- rebase_and_merge_queue), minus pr_options, and minus the entries
+    -- `CONFIRMED_VERBS` re-installs with a prompt in front of them
+    -- (`approve_pr`, `delete_comment`). Same left-hand sides throughout, so
     -- upstream documentation still describes this buffer.
     pull_request = {
       checkout_pr = { lhs = "<localleader>po", desc = "checkout PR" },
@@ -115,7 +164,6 @@ local ok, err = pcall(function()
       reopen_issue = { lhs = "<localleader>io", desc = "reopen PR" },
       list_issues = { lhs = "<localleader>il", desc = "list open issues on same repo" },
       reload = { lhs = "<C-r>", desc = "reload PR" },
-      approve_pr = { lhs = "<leader>qa", desc = "approve PR" },
       open_in_browser = { lhs = "<C-b>", desc = "open PR in browser" },
       copy_url = { lhs = "<C-y>", desc = "copy url to system clipboard" },
       copy_sha = { lhs = "<C-e>", desc = "copy commit SHA to system clipboard" },
@@ -132,7 +180,6 @@ local ok, err = pcall(function()
       goto_issue = { lhs = "<localleader>gi", desc = "navigate to a local repo issue" },
       add_comment = { lhs = "<localleader>ca", desc = "add comment" },
       add_reply = { lhs = "<localleader>cr", desc = "add reply" },
-      delete_comment = { lhs = "<localleader>cd", desc = "delete comment" },
       comment_edits = { lhs = "<localleader>ce", desc = "show comment edit history" },
       reference_in_new_issue = { lhs = "<localleader>ri", desc = "reference comment in new issue" },
       next_comment = { lhs = "]c", desc = "go to next comment" },
@@ -167,7 +214,6 @@ local ok, err = pcall(function()
       goto_issue = { lhs = "<localleader>gi", desc = "navigate to a local repo issue" },
       add_comment = { lhs = "<localleader>ca", desc = "add comment" },
       add_reply = { lhs = "<localleader>cr", desc = "add reply" },
-      delete_comment = { lhs = "<localleader>cd", desc = "delete comment" },
       comment_edits = { lhs = "<localleader>ce", desc = "show comment edit history" },
       reference_in_new_issue = { lhs = "<localleader>ri", desc = "reference comment in new issue" },
       next_comment = { lhs = "]c", desc = "go to next comment" },
@@ -179,7 +225,6 @@ local ok, err = pcall(function()
       add_comment = { lhs = "<localleader>ca", desc = "add comment" },
       add_reply = { lhs = "<localleader>cr", desc = "add reply" },
       add_suggestion = { lhs = "<localleader>sa", desc = "add suggestion" },
-      delete_comment = { lhs = "<localleader>cd", desc = "delete comment" },
       comment_edits = { lhs = "<localleader>ce", desc = "show comment edit history" },
       next_comment = { lhs = "]c", desc = "go to next comment" },
       prev_comment = { lhs = "[c", desc = "go to previous comment" },
@@ -197,15 +242,28 @@ local ok, err = pcall(function()
     -- The review VERDICT window. `<C-r>` is "request changes" here, in a
     -- buffer that exists only while a review is being submitted — it is not
     -- the PR buffer's `<C-r>`, which reloads.
+    --
+    -- 🔴 `approve_review` IS ABSENT ON PURPOSE AND IS RE-INSTALLED, CONFIRMED,
+    -- BY `CONFIRMED_VERBS`. Upstream binds it to `<C-a>` — ONE CHORD, no
+    -- leader prefix at all — in a window whose whole purpose is to post a
+    -- verdict. That is the sharpest edge in this config, sharper than the
+    -- merge key, because a merge needs `\pm` and this needs one keystroke.
     submit_win = {
-      approve_review = { lhs = "<C-a>", desc = "approve review", mode = { "n" } },
       comment_review = { lhs = "<C-m>", desc = "comment review", mode = { "n" } },
       request_changes = { lhs = "<C-r>", desc = "request changes review", mode = { "n" } },
       close_review_tab = { lhs = "<C-c>", desc = "close review tab", mode = { "n" } },
     },
 
+    -- 🔴 `submit_review` IS ABSENT FROM THIS TABLE AND FROM `file_panel`, AND
+    -- IS RE-INSTALLED CONFIRMED — BUT `review_start` ON `pull_request` ABOVE
+    -- IS NOT, THOUGH BOTH ARE SPELLED `<localleader>vs`. They are different
+    -- actions on different buffer kinds: starting a review is harmless and
+    -- local, submitting one posts it to GitHub. The confirmation is keyed on
+    -- the ACTION and the KIND, never on the key, and `CONFIRMED_VERBS` lists
+    -- only `review_diff` and `file_panel` for this verb. A prompt on
+    -- `review_start` would be friction on a harmless action and would read as
+    -- a mechanism that keys on keystrokes.
     review_diff = {
-      submit_review = { lhs = "<localleader>vs", desc = "submit review" },
       discard_review = { lhs = "<localleader>vd", desc = "discard review" },
       add_review_comment = { lhs = "<localleader>ca", desc = "add a new review comment", mode = { "n", "x" } },
       add_review_suggestion = { lhs = "<localleader>sa", desc = "add a new review suggestion", mode = { "n", "x" } },
@@ -227,7 +285,6 @@ local ok, err = pcall(function()
     },
 
     file_panel = {
-      submit_review = { lhs = "<localleader>vs", desc = "submit review" },
       discard_review = { lhs = "<localleader>vd", desc = "discard review" },
       next_entry = { lhs = "j", desc = "move to next changed file" },
       prev_entry = { lhs = "k", desc = "move to previous changed file" },
@@ -263,7 +320,6 @@ local ok, err = pcall(function()
       copy_url = { lhs = "<C-y>", desc = "copy url to system clipboard" },
       add_comment = { lhs = "<localleader>ca", desc = "add comment" },
       add_reply = { lhs = "<localleader>cr", desc = "add reply" },
-      delete_comment = { lhs = "<localleader>cd", desc = "delete comment" },
       comment_edits = { lhs = "<localleader>ce", desc = "show comment edit history" },
       next_comment = { lhs = "]c", desc = "go to next comment" },
       prev_comment = { lhs = "[c", desc = "go to previous comment" },
@@ -291,4 +347,929 @@ if not ok then
       .. tostring(err),
     vim.log.levels.ERROR
   )
+end
+
+-- ==========================================================================
+-- THE LEGEND (`?`, or `g?` IN A DIFF), AND THE CONFIRMED VERBS
+-- ==========================================================================
+-- WHY THIS EXISTS: the operator opened a review buffer and asked "how do I
+-- merge?" — 131 keymaps across nine buffer kinds and nothing on screen names
+-- one of them. Two of the three asks turn out to be the SAME ask:
+-- "open in browser" was ALREADY bound (`<C-b>`, on five of the nine tables);
+-- it was simply undiscoverable. So this adds no second browser binding.
+--
+-- 🔴 THE LEGEND IS GENERATED FROM `config.values.mappings[kind]` AT KEYPRESS
+-- TIME, NEVER HAND-WRITTEN. A curated list is stale the first time a binding
+-- changes, and it goes stale silently — it is a comment that looks like a
+-- feature. Every key, every description and the count all come from the live
+-- config; the only key names spelled as literals in this file are the ones the
+-- wrapper itself INSTALLS, and each is spelled exactly once — the legend key
+-- in `LEGEND_LHS`, the merge key in `EXTRA_BINDINGS`, and one line per
+-- confirmed verb in `CONFIRMED_VERBS`. All three feed the same `extra_for`,
+-- which is what the keymaps are set from AND what the legend is rendered from.
+--
+-- 🔴 `?` IS SHADOWED EVERYWHERE EXCEPT THE DIFF, WHERE IT IS `g?`, AND ON
+-- THREE KINDS THAT SHADOWING COSTS SOMETHING REAL. `?` is vim's reverse
+-- search. This comment used to say that on the octo surfaces "there is nothing
+-- to reverse-search through, so taking `?` costs nothing", and that is FALSE
+-- for `pull_request`, `issue` and `discussion`: those buffers hold the body
+-- plus every rendered comment (octo's `ui/writers.lua` `write_body` and
+-- `write_comment`, called from `model/octo-buffer.lua`'s render path) — which
+-- is exactly the text one reverse-searches.
+--
+-- 🔴 SO STATE THE COST, DO NOT REACH FOR A BETTER-SOUNDING REASON. This
+-- shadows `?` on the three text-heavy kinds. What is left there is `/` plus
+-- `N`, which searches backwards and is what the operator accepted; the map is
+-- buffer-local, so nothing outside a review surface is touched. The DECISION
+-- stands on the operator asking for a discoverable legend and choosing this
+-- key — not on the surfaces being empty, which they are not. The first
+-- justification was invented to fit a decision already made, and inventing a
+-- second one is how this regenerates.
+--
+-- ⚠ `file_panel` and `submit_win` genuinely hold nothing to search — a file
+-- list and a short verdict form — so for those two the original sentence was
+-- right. `repo` and `release` carry one binding each.
+--
+-- `review_diff` is the exception and it is not a close call: that buffer holds
+-- REAL SOURCE, opened for the express purpose of reading it, and searching
+-- backwards through a hunk is ordinary during a review. So the diff keeps `?`
+-- and opens its legend with `g?` (upstream `g?` is the ROT13 operator, which
+-- nobody is reaching for in a review).
+--
+-- ⚠ THE INCONSISTENCY IS SELF-DOCUMENTING BY CONSTRUCTION. `legend_lines`
+-- prints the key that was bound FOR THAT KIND in the header and again on the
+-- close line, and it reads that key out of `extra_for(kind)` rather than
+-- restating it — so a diff legend says `g?` and a PR legend says `?` with no
+-- second place to keep in step.
+--
+-- 🔴 `<localleader>` IS A BACKSLASH HERE. Neither `mapleader` nor
+-- `maplocalleader` is set by this wrapper, so both are neovim's default `\`,
+-- and every `<localleader>xy` in the tables above is really `\xy`. A legend
+-- that printed `<localleader>pd` would be close to useless, so the rows are
+-- RESOLVED against `vim.g.maplocalleader` / `vim.g.mapleader`. Key names that
+-- are not leaders (`<C-b>`, `<CR>`, `]c`) stay in vim's own notation, because
+-- that is how they are typed and how every other vim document writes them.
+--
+-- ⚠ `_G.NvimOcto` IS THE OBSERVATION SURFACE, and that is why it is a global
+-- in a file that otherwise needs none. It is what the hermetic test drives:
+-- stub the ask with "no" and watch the merge NOT happen, stub it with "yes"
+-- and watch it happen. A confirmation nothing can drive is a confirmation
+-- nobody has watched work.
+--
+-- 🔴 IT IS A WRITABLE GLOBAL, AND THAT IS A STATED ASSUMPTION RATHER THAN AN
+-- OVERSIGHT. Anything else loaded into this editor could reassign `M.ask` and
+-- disarm every confirmation in this file — an auditor did exactly that to
+-- neutralise a probe. It is acceptable HERE because this is a dedicated
+-- single-purpose wrapper whose plugin set is pinned by `default.nix` (octo
+-- plus its four declared dependencies) and loads no third-party Lua, and
+-- because the operator's own neovim config never reaches it. It would NOT be
+-- acceptable in the daily editor — which is one more reason this is a separate
+-- wrapper. If a plugin is ever added here, that assumption is what changes.
+local M = {}
+_G.NvimOcto = M
+
+-- The leader characters, resolved the way neovim resolves them: unset (or
+-- empty) means the default backslash. Read at CALL time rather than captured,
+-- so the legend cannot drift from what vim would bind.
+function M.leader_chars()
+  local function resolved(value)
+    if value == nil or value == "" then
+      return "\\"
+    end
+    return tostring(value)
+  end
+  return resolved(vim.g.mapleader), resolved(vim.g.maplocalleader)
+end
+
+-- `<localleader>po` -> `\po`. `%b<>` matches one balanced `<…>` token at a
+-- time, so `<localleader><space>` yields `\<space>` and `<C-b>` is returned
+-- untouched — a gsub over the raw string would have mangled both.
+function M.resolve_lhs(lhs)
+  local leader, localleader = M.leader_chars()
+  local out = tostring(lhs):gsub("%b<>", function(token)
+    local name = token:sub(2, -2):lower()
+    if name == "localleader" then
+      return localleader
+    end
+    if name == "leader" then
+      return leader
+    end
+    return token
+  end)
+  return out
+end
+
+-- 🔴 A SENTINEL, NOT A DEFAULT, AND THE DIFFERENCE IS THE WHOLE POINT. The
+-- merge METHOD is read out of the live config rather than restated, so
+-- `default_merge_method` above stays the single place it is decided. When it
+-- cannot be read, this must NOT quietly substitute a plausible value: a merge
+-- dispatched with a method nobody chose is the wrong commit shape on a repo
+-- whose last five merges were all squashes, and the prompt would have named
+-- the guess as though it were the setting. `confirm_and_merge` REFUSES on this
+-- value rather than asking.
+--
+-- ⚠ FOUND BY A MUTATION SWEEP, not by review: replacing this return with
+-- `"squash"` survived a fully green suite, because nothing reached the arm.
+--
+-- 🔴 BE HONEST ABOUT HOW REACHABLE THE REPAIR ACTUALLY MADE IT — AN EARLIER
+-- COMMENT HERE CLAIMED "the repair was to make it reachable AND
+-- consequential", AND THAT IS TRUE OF THE HERMETIC TIER ONLY. That tier stubs
+-- `require`, so it can hand `merge_method` an unreadable config at will. On
+-- the CLICK PATH it is close to unreachable, and the reason is structural:
+-- the whole legend-and-merge block below runs only `if ok`, where `ok` is the
+-- `pcall` around `require("octo").setup({ … default_merge_method = "squash"
+-- … })`. If setup SUCCEEDED, `octo.config.values.default_merge_method` is the
+-- string this very file just set; if it FAILED, no keymap is installed at all
+-- and `confirm_and_merge` cannot be reached from a key. What is left is a
+-- narrow middle — octo mutating or dropping the field after a successful
+-- setup, or `require("octo.config")` throwing later — which nothing observed
+-- has ever produced.
+--
+-- It is KEPT anyway, and the reason is the direction of the failure rather
+-- than its likelihood: twelve lines that refuse cost nothing, and the
+-- alternative branch dispatches a real merge with a method nobody chose.
+M.MERGE_METHOD_UNKNOWN = "UNKNOWN-METHOD"
+
+function M.merge_method()
+  local got, conf = pcall(function()
+    return require("octo.config").values
+  end)
+  if got and type(conf) == "table" and type(conf.default_merge_method) == "string" then
+    return conf.default_merge_method
+  end
+  return M.MERGE_METHOD_UNKNOWN
+end
+
+function M.merge_desc()
+  return string.format(
+    "merge this PR (%s) — ASKS FOR CONFIRMATION FIRST", M.merge_method())
+end
+
+-- 🔴 THE LEGEND KEY, SPELLED ONCE. `review_diff` is the only kind that keeps
+-- `?` for vim's reverse search (see the block above), so it is the only entry
+-- here. Everything that displays or binds a legend key reads this through
+-- `extra_for`, never a second literal.
+local LEGEND_DEFAULT_LHS = "?"
+local LEGEND_LHS = {
+  review_diff = "g?",
+}
+
+function M.legend_lhs(kind)
+  return LEGEND_LHS[kind] or LEGEND_DEFAULT_LHS
+end
+
+-- 🔴 THE CONFIRMED VERBS — THE LEDGER THAT MAKES THE OPERATOR'S DECISION
+-- MACHINE-READABLE. Each row names an OCTO action that is deliberately absent
+-- from the `mappings` tables above and re-installed here behind a prompt. A
+-- row added here binds the key, prompts, and appears in that kind's legend,
+-- all from this one edit; a row removed here un-binds the key entirely rather
+-- than quietly restoring an unconfirmed one, because the `mappings` tables do
+-- not declare it either.
+--
+-- 🔴 `kinds` IS PART OF THE IDENTITY, NOT A SCOPE HINT. `<localleader>vs` is
+-- `submit_review` on the two review surfaces and `review_start` on
+-- `pull_request`; only the first is destructive. Listing the kinds is how the
+-- mechanism stays keyed on the ACTION rather than on the keystroke.
+--
+-- `label` is the sentence the prompt asks; `short` is what the legend row
+-- says. Both are spelled once.
+local CONFIRMED_VERBS = {
+  {
+    action = "approve_review",
+    lhs = "<C-a>",
+    mode = { "n" },
+    kinds = { "submit_win" },
+    short = "approve this review",
+    label = "APPROVE this review and post the verdict to GitHub",
+  },
+  {
+    action = "approve_pr",
+    lhs = "<leader>qa",
+    kinds = { "pull_request" },
+    short = "approve this pull request",
+    label = "APPROVE this pull request",
+  },
+  {
+    action = "submit_review",
+    lhs = "<localleader>vs",
+    kinds = { "review_diff", "file_panel" },
+    short = "submit this review",
+    label = "SUBMIT this review to GitHub",
+  },
+  {
+    action = "delete_comment",
+    lhs = "<localleader>cd",
+    kinds = { "pull_request", "issue", "review_thread", "discussion" },
+    short = "delete this comment",
+    label = "DELETE this comment — GitHub cannot undo it",
+  },
+}
+
+-- 🔴 ONE TABLE, TWO CONSUMERS: the keymaps are SET from this and the legend is
+-- RENDERED from this. That is what makes "the legend shows what is bound" a
+-- structural property rather than a promise — a binding added here appears in
+-- the legend with no second edit, and a legend row cannot describe a keystroke
+-- that was never installed.
+--
+-- `["*"]` applies to every buffer kind; a kind key adds to it.
+-- `make(kind)` returns the callback, closing over the kind so the legend a
+-- buffer shows is ITS OWN table and not whichever buffer happened to be open
+-- when the config loaded.
+local EXTRA_BINDINGS = {
+  ["*"] = {
+    {
+      id = "legend",
+      lhs = function(kind)
+        return M.legend_lhs(kind)
+      end,
+      desc = "show this legend",
+      make = function(kind)
+        return function()
+          M.show_legend(kind)
+        end
+      end,
+    },
+  },
+  -- Only on `pull_request`: octo's merge resolves the CURRENT buffer, so a
+  -- merge key on the diff or file-panel surface could not act on anything.
+  -- The same condition therefore decides both the keymap and the legend's
+  -- merge footer, because both read this table.
+  --
+  -- ⚠ `<localleader>pm` IS UPSTREAM'S OWN MERGE KEY, AND THAT BUYS THE KEY
+  -- ONLY — NOT THE METHOD. Narrower than it used to read: upstream declares
+  -- this lhs as `merge_pr`, described in octo's `config.lua:407` as "merge
+  -- commit PR", while what it dispatches here is a SQUASH, because
+  -- `default_merge_method` above is "squash". So upstream's documentation
+  -- still tells a reader WHERE to press and is wrong about what happens next.
+  -- What closes that gap is this wrapper saying so at the moment it matters,
+  -- both read from the live config: the prompt names the method ("… method
+  -- squash?") and the legend row reads "merge this PR (squash)".
+  pull_request = {
+    {
+      id = "merge",
+      lhs = "<localleader>pm",
+      desc = function()
+        return M.merge_desc()
+      end,
+      make = function()
+        return function()
+          M.confirm_and_merge()
+        end
+      end,
+    },
+  },
+}
+
+-- Expand the verb ledger into the same table the legend and the keymaps read.
+-- A loop rather than forty hand-written entries: the alternative is one
+-- literal per (verb, kind) pair, which is how the key, the prompt and the
+-- legend row get to disagree.
+for _, verb in ipairs(CONFIRMED_VERBS) do
+  for _, kind in ipairs(verb.kinds) do
+    local group = EXTRA_BINDINGS[kind]
+    if group == nil then
+      group = {}
+      EXTRA_BINDINGS[kind] = group
+    end
+    group[#group + 1] = {
+      id = verb.action,
+      lhs = verb.lhs,
+      mode = verb.mode,
+      desc = verb.short .. " — ASKS FOR CONFIRMATION FIRST",
+      make = function()
+        return function()
+          M.confirm_and_run(verb.action, verb.label)
+        end
+      end,
+    }
+  end
+end
+
+-- The wrapper's own bindings for one kind, with every `desc` and every `lhs`
+-- resolved to a string. `lhs` may be a function of the kind because the legend
+-- key differs on `review_diff`; resolving it HERE is what keeps the keymap and
+-- the legend row reading one value.
+function M.extra_for(kind)
+  local out = {}
+  local groups = { EXTRA_BINDINGS["*"], EXTRA_BINDINGS[kind] }
+  for _, group in ipairs(groups) do
+    if type(group) == "table" then
+      for _, binding in ipairs(group) do
+        local desc = binding.desc
+        if type(desc) == "function" then
+          desc = desc()
+        end
+        local lhs = binding.lhs
+        if type(lhs) == "function" then
+          lhs = lhs(kind)
+        end
+        out[#out + 1] = {
+          id = binding.id,
+          lhs = tostring(lhs),
+          mode = binding.mode or "n",
+          desc = tostring(desc),
+          make = binding.make,
+        }
+      end
+    end
+  end
+  return out
+end
+
+-- Plain keys and `<C-…>` first, leader groups after; alphabetical within each,
+-- with the action name as a deterministic tie-break. Sorting by the RESOLVED
+-- key is what puts all the `\…` sequences together, which is the grouping a
+-- reader is actually looking for.
+local function leader_group(lhs)
+  local leader, localleader = M.leader_chars()
+  if lhs:sub(1, #localleader) == localleader then
+    return 1
+  end
+  if lhs:sub(1, #leader) == leader then
+    return 1
+  end
+  return 0
+end
+
+function M.row_order(a, b)
+  local ga, gb = leader_group(a.lhs), leader_group(b.lhs)
+  if ga ~= gb then
+    return ga < gb
+  end
+  if a.lhs ~= b.lhs then
+    return a.lhs < b.lhs
+  end
+  return a.action < b.action
+end
+
+-- 🔴 THE ROWS MIRROR `octo.utils.apply_mappings`'s OWN FILTER, deliberately.
+-- That function binds an entry only when the action exists in `octo.mappings`
+-- and carries a non-empty `lhs`, so a legend that listed the raw config table
+-- would advertise keystrokes that are not bound. The count in the title is
+-- therefore a count of BINDINGS, which is the number a reader can act on.
+function M.legend_rows(kind)
+  local rows = {}
+  local got_conf, conf = pcall(function()
+    return require("octo.config").values
+  end)
+  local got_actions, actions = pcall(require, "octo.mappings")
+  if not got_actions then
+    actions = nil
+  end
+  if got_conf and type(conf) == "table" and type(conf.mappings) == "table" then
+    local declared = conf.mappings[kind]
+    if type(declared) == "table" then
+      for action, value in pairs(declared) do
+        local bound = (actions == nil) or (actions[action] ~= nil)
+        if bound and type(value) == "table"
+            and type(value.lhs) == "string" and value.lhs ~= "" then
+          local desc = value.desc
+          if type(desc) ~= "string" or desc == "" then
+            desc = (action:gsub("_", " "))
+          end
+          rows[#rows + 1] = {
+            action = action,
+            lhs = M.resolve_lhs(value.lhs),
+            desc = desc,
+            source = "octo",
+          }
+        end
+      end
+    end
+  end
+  for _, binding in ipairs(M.extra_for(kind)) do
+    rows[#rows + 1] = {
+      action = binding.id,
+      lhs = M.resolve_lhs(binding.lhs),
+      desc = binding.desc,
+      source = "nvim-octo",
+    }
+  end
+  table.sort(rows, M.row_order)
+  return rows
+end
+
+-- `#text` counts BYTES, and these lines carry em dashes; `strdisplaywidth` is
+-- the only thing that knows how wide they render. Guarded because this file is
+-- also executed outside neovim by the hermetic test, where falling back to the
+-- byte count merely over-estimates the window width by a few columns.
+local function display_width(text)
+  local got, width = pcall(function()
+    return vim.fn.strdisplaywidth(text)
+  end)
+  if got and type(width) == "number" then
+    return width
+  end
+  return #text
+end
+
+-- The rendered legend, as an array of lines. Split out from `show_legend` so
+-- the text is readable without a window — which is how the tests read it, and
+-- how a headless check reads it.
+function M.legend_lines(kind)
+  local rows = M.legend_rows(kind)
+  -- 🔴 THE HEADER NAMES ITS OWN KEY, READ BACK OUT OF THE BINDING TABLE. On
+  -- `review_diff` that is `g?` and everywhere else `?`; a legend that printed
+  -- a key it was not opened with would be worse than printing none, and
+  -- hardcoding it in a second place is exactly how the two would drift.
+  local legend_key = nil
+  for _, binding in ipairs(M.extra_for(kind)) do
+    if binding.id == "legend" then
+      legend_key = M.resolve_lhs(binding.lhs)
+    end
+  end
+  local keywidth = 1
+  for _, row in ipairs(rows) do
+    if #row.lhs > keywidth then
+      keywidth = #row.lhs
+    end
+  end
+  local body = {}
+  for _, row in ipairs(rows) do
+    body[#body + 1] = string.format("  %-" .. keywidth .. "s   %s", row.lhs, row.desc)
+  end
+  local lines = {
+    string.format("octo legend — %s buffer — %d bindings — opened with %s",
+      kind, #rows, tostring(legend_key)),
+    "",
+  }
+  for _, line in ipairs(body) do
+    lines[#lines + 1] = line
+  end
+  -- The merge footer is emitted from the SAME table the merge keymap is
+  -- installed from, so it appears exactly where a merge is actually bound and
+  -- names exactly the key that was bound.
+  for _, binding in ipairs(M.extra_for(kind)) do
+    if binding.id == "merge" then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = string.format(
+        "MERGE: %s  — %s. Any answer other than `yes` aborts and sends nothing.",
+        M.resolve_lhs(binding.lhs), binding.desc)
+    end
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = string.format("q / <Esc> / %s   close this legend",
+    tostring(legend_key))
+  return lines
+end
+
+-- A floating window, sized to its content and CAPPED to the editor: the
+-- largest legend is `pull_request`, and it must not run off a 30-line
+-- terminal. Over the cap the window scrolls rather than overflowing.
+--
+-- ⚠ SIZE, MEASURED RATHER THAN REMEMBERED — this said "45 rows", which was
+-- wrong in the direction that matters. Driven in a REAL editor at b36453eb
+-- (headless neovim, real octo.nvim, the legend key pressed through the
+-- callback the wrap registered): 46 ROWS rendering 52 LINES. Both move
+-- whenever a mapping is added or removed, so they are here to say "taller than
+-- a short terminal", never as a constant anything reads —
+-- `#M.legend_lines("pull_request")` is the live answer.
+function M.show_legend(kind)
+  local lines = M.legend_lines(kind)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].bufhidden = "wipe"
+
+  local width = 1
+  for _, line in ipairs(lines) do
+    local w = display_width(line)
+    if w > width then
+      width = w
+    end
+  end
+  local columns = tonumber(vim.o.columns) or 80
+  local editor_lines = tonumber(vim.o.lines) or 24
+  width = math.min(width + 2, math.max(20, columns - 4))
+  local height = math.min(#lines, math.max(3, editor_lines - 6))
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = math.max(0, math.floor((editor_lines - height) / 2) - 1),
+    col = math.max(0, math.floor((columns - width) / 2)),
+    style = "minimal",
+    border = "rounded",
+  })
+
+  local function close()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+  -- The third close key is the SAME key that opened it, per kind — `g?` in a
+  -- diff — so "press it again to dismiss" is true of whatever the header just
+  -- told the reader to press.
+  for _, key in ipairs({ "q", "<Esc>", M.legend_lhs(kind) }) do
+    vim.keymap.set("n", key, close,
+      { buffer = buf, silent = true, noremap = true, nowait = true,
+        desc = "close the octo legend" })
+  end
+  return win, buf
+end
+
+-- --------------------------------------------------------------------------
+-- THE CONFIRMATION
+-- --------------------------------------------------------------------------
+-- 🔴 THE THREE SEAMS ARE SEPARATE FUNCTIONS ON PURPOSE. `current_pr`, `ask`
+-- and `perform_merge` are the buffer, the human and GitHub; splitting them is
+-- what lets a test hold two of them still and move the third, so "a `no`
+-- answer does not reach the merge" is WATCHED rather than reasoned about. A
+-- confirmation written as one inline block can only be read, and a read
+-- confirmation is exactly the kind of guard this repo keeps finding inert.
+function M.current_pr()
+  local got, utils = pcall(require, "octo.utils")
+  if not got or type(utils) ~= "table" or type(utils.get_current_buffer) ~= "function" then
+    return nil
+  end
+  local buffer = utils.get_current_buffer()
+  if type(buffer) ~= "table" or type(buffer.isPullRequest) ~= "function" then
+    return nil
+  end
+  if not buffer:isPullRequest() then
+    return nil
+  end
+  return { number = buffer.number, repo = buffer.repo }
+end
+
+function M.ask(prompt)
+  return vim.fn.input(prompt)
+end
+
+-- The SAME call octo's own `merge_pr` action makes. Driving a private path
+-- would be a second implementation of merging, which is how the two would
+-- drift; this way `default_merge_method` and `default_delete_branch` are read
+-- by the code that has always read them.
+function M.perform_merge(method)
+  require("octo.commands").merge_pr(method)
+end
+
+local function trimmed(text)
+  local out = tostring(text):gsub("^%s+", "")
+  out = out:gsub("%s+$", "")
+  return out
+end
+
+-- One place decides what counts as consent, for every confirmed verb. An
+-- explicit `yes` and nothing else: a single `y` would have reintroduced most
+-- of the hazard, and `<C-c>` at an `input()` prompt RAISES rather than
+-- returning "" — which lands here as `answered == false`, the abort arm, the
+-- only safe direction for that error.
+function M.said_yes(answered, answer)
+  if not answered or type(answer) ~= "string" then
+    return false
+  end
+  return trimmed(answer):lower() == "yes"
+end
+
+-- The identity of whatever the buffer is about, when it can be resolved. Empty
+-- rather than refusing: `submit_review` fires on a diff buffer, where
+-- `get_current_buffer` may answer about no PR at all, and a review is still
+-- worth confirming there. Merge is the one verb that REFUSES without an
+-- identity, because it names the PR it is about to change.
+function M.context_suffix()
+  local pr = M.current_pr()
+  if pr == nil then
+    return ""
+  end
+  return string.format(" on #%s in %s", tostring(pr.number), tostring(pr.repo))
+end
+
+-- 🔴 THE SAME FUNCTION OCTO WOULD HAVE BOUND, LOOKED UP THE SAME WAY
+-- `utils.apply_mappings` LOOKS IT UP. Re-implementing `approve_pr` or
+-- `delete_comment` here would be a second implementation of each, which is how
+-- the two drift; this way the confirmation is the ONLY thing this wrapper adds.
+function M.perform_action(action)
+  local got, mappings = pcall(require, "octo.mappings")
+  local fn = got and type(mappings) == "table" and mappings[action] or nil
+  if type(fn) ~= "function" then
+    vim.notify(
+      string.format(
+        "nvim-octo: `octo.mappings.%s` is not a function, so this key can do "
+          .. "nothing. octo.nvim has renamed or removed it and this wrapper's "
+          .. "octo-init.lua must be updated.", tostring(action)),
+      vim.log.levels.ERROR)
+    return false
+  end
+  fn()
+  return true
+end
+
+-- Returns true only when the action was actually dispatched, so a test can
+-- tell "aborted" from "done" without inspecting the world — the same contract
+-- `confirm_and_merge` has.
+function M.confirm_and_run(action, label)
+  local prompt = string.format(
+    "%s%s? Type yes to confirm (anything else aborts): ",
+    tostring(label), M.context_suffix())
+  local answered, answer = pcall(M.ask, prompt)
+  if not M.said_yes(answered, answer) then
+    vim.notify(
+      string.format(
+        "nvim-octo: `%s` ABORTED — nothing was sent to GitHub.",
+        tostring(action)),
+      vim.log.levels.WARN)
+    return false
+  end
+  return M.perform_action(action)
+end
+
+-- Returns true only when a merge was actually dispatched, so the caller — and
+-- a test — can tell "aborted" from "merged" without inspecting the world.
+function M.confirm_and_merge()
+  local pr = M.current_pr()
+  if pr == nil then
+    vim.notify(
+      "nvim-octo: this is not a pull request buffer, so there is nothing to merge.",
+      vim.log.levels.WARN)
+    return false
+  end
+  local method = M.merge_method()
+  if method == M.MERGE_METHOD_UNKNOWN then
+    vim.notify(
+      "nvim-octo: `default_merge_method` could not be read from octo's live "
+        .. "config, so the merge method is unknown. REFUSING rather than "
+        .. "guessing — a merge dispatched with a method nobody chose produces "
+        .. "the wrong commit shape. Merge from the web UI, or fix the wrapper.",
+      vim.log.levels.ERROR)
+    return false
+  end
+  local prompt = string.format(
+    "MERGE pull request #%s in %s, method %s? Type yes to confirm (anything else aborts): ",
+    tostring(pr.number), tostring(pr.repo), method)
+  -- 🔴 `pcall`, because `<C-c>` at an `input()` prompt RAISES rather than
+  -- returning an empty string. An unguarded call would propagate the
+  -- interrupt out of the keymap; guarded, the interrupt lands in the abort
+  -- arm, which is the only safe direction for this particular error.
+  local answered, answer = pcall(M.ask, prompt)
+  if not M.said_yes(answered, answer) then
+    vim.notify(
+      string.format(
+        "nvim-octo: merge of #%s in %s ABORTED — nothing was sent to GitHub.",
+        tostring(pr.number), tostring(pr.repo)),
+      vim.log.levels.WARN)
+    return false
+  end
+  M.perform_merge(method)
+  return true
+end
+
+-- 🔴 THE TEARDOWN. Called when a seam this wrapper depends on is gone, and it
+-- has to make the REFUSAL real rather than announce one: see the long note
+-- below for the measurement that killed the previous mechanism. Split out as a
+-- named function so a test can drive it and read what it DID, and so the two
+-- halves are visibly two halves.
+
+-- Greedy word wrap, so the refusal reads as prose in a window of unknown
+-- width rather than as one line running off the right edge. `display_width`
+-- rather than `#` because these strings carry em dashes and backticks.
+local function wrap_text(text, width)
+  local out, line = {}, ""
+  for word in tostring(text):gmatch("%S+") do
+    local candidate = (line == "") and word or (line .. " " .. word)
+    if line ~= "" and display_width(candidate) > width then
+      out[#out + 1] = line
+      line = word
+    else
+      line = candidate
+    end
+  end
+  if line ~= "" then
+    out[#out + 1] = line
+  end
+  return out
+end
+
+-- 🔴 THE DIAGNOSIS SURFACE IS A BUFFER AS WELL AS THE MESSAGE AREA, AND THE
+-- REASON IS MEASURED — a real neovim 0.12.5 TUI captured in a pty and replayed
+-- through a terminal emulator, not reasoned about.
+--
+-- ⚠ AND THE OBVIOUS REASON IS WRONG, SO DO NOT RE-DERIVE IT. The expectation
+-- was that `E492: Not an editor command: Octo` — which the wrapper's appended
+-- `-c` produces once the command is deleted, after this file has finished —
+-- would land on the message line LAST and OVERWRITE the notification. It does
+-- not. Startup messages accumulate, so the FIRST screen carries the whole
+-- notification with the `E492` underneath it.
+--
+-- 🔴 WHAT ACTUALLY GOES WRONG IS THE SECOND SCREEN. The `E492` forces a
+-- `Press ENTER or type command to continue` prompt, and that keypress clears
+-- the message area. With the notification alone, what the operator is left
+-- looking at is the NEOVIM SPLASH SCREEN — "Nvim is open source and freely
+-- distributable", "type :q<Enter> to exit" — in an empty `[No Name]` buffer.
+-- That is indistinguishable from a broken install, and it is one keystroke
+-- away. So the explanation also goes somewhere a keypress cannot erase: the
+-- buffer the window is displaying.
+M.REFUSAL_TITLE = "nvim-octo: REFUSING to open a review buffer"
+
+-- Split from `show_refusal` so the text is readable without a window, which is
+-- how the hermetic test reads it.
+function M.refusal_lines(message, width)
+  width = math.max(28, math.min(tonumber(width) or 78, 100))
+  local lines = {}
+  -- The title goes through the same wrap as the body: it is 43 columns, and a
+  -- window narrower than that is exactly where an unwrapped line would run off
+  -- the edge and take the first word of the diagnosis with it.
+  for _, line in ipairs(wrap_text(M.REFUSAL_TITLE, width)) do
+    lines[#lines + 1] = line
+  end
+  lines[#lines + 1] = ""
+  for _, line in ipairs(wrap_text(message, width)) do
+    lines[#lines + 1] = line
+  end
+  lines[#lines + 1] = ""
+  -- The `E492` is this refusal working, not a second fault. Saying so here is
+  -- the difference between a diagnosis and two unexplained errors.
+  for _, line in ipairs(wrap_text(
+    "The `Octo` command has been DELETED, so no review buffer can open. The "
+      .. "`E492: Not an editor command: Octo` neovim reported on startup is "
+      .. "that deletion working — it is not a separate fault, and this "
+      .. "wrapper is not mis-installed.", width)) do
+    lines[#lines + 1] = line
+  end
+  lines[#lines + 1] = ""
+  for _, line in ipairs(wrap_text(
+    "Nothing was sent to GitHub and no review surface was opened. Quit with "
+      .. "`:qa`. Fixing this means updating octo-init.lua in devrc to the "
+      .. "seam octo.nvim now exposes.", width)) do
+    lines[#lines + 1] = line
+  end
+  return lines
+end
+
+-- Two columns of margin, so the text never touches the right edge.
+function M.refusal_width()
+  return (tonumber(vim.o.columns) or 80) - 2
+end
+
+-- The same text as one string, for the surfaces that take one: the startup
+-- notification and stderr. Written from `refusal_lines` rather than beside it
+-- so the two cannot drift.
+function M.refusal_text(message, width)
+  return table.concat(M.refusal_lines(message, width), "\n")
+end
+
+-- Replace the window's buffer with the diagnosis. Not a floating window: a
+-- float is dismissible and can be closed by the very keypress the operator
+-- uses to find out what happened, and this text must still be there when they
+-- look.
+function M.show_refusal(message)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false,
+    M.refusal_lines(message, M.refusal_width()))
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].modifiable = false
+  -- 🔴 THE GUTTER THIS FILE TURNS ON GLOBALLY (`number`, `signcolumn`) COSTS
+  -- SIX COLUMNS, and a refusal is prose, not code. Left on, every wrapped line
+  -- broke mid-word in the capture. Window-local, so nothing else is affected.
+  pcall(function()
+    vim.wo[0].number = false
+    vim.wo[0].signcolumn = "no"
+  end)
+  vim.api.nvim_win_set_buf(0, buf)
+  return buf
+end
+
+function M.refuse_to_start(message)
+  -- stderr as well, and unconditionally. It is the copy that survives for
+  -- anyone running `nvim-octo` from a shell, and the only copy left if every
+  -- window step below fails.
+  pcall(function()
+    io.stderr:write(message .. "\n")
+  end)
+  -- 🔴 WARN, NOT ERROR, AND THE LEVEL IS THE MEASUREMENT. An ERROR-level
+  -- `vim.notify` inside a `luafile` is promoted to a vim error by the sourcing
+  -- command — a LEVEL promotion `pcall` cannot catch, because it is vim's own
+  -- error state and not a lua error. Captured from a real neovim 0.12.5 TUI in
+  -- a pty: at ERROR the operator's first screen was `Error in VIMINIT:`,
+  -- `E5108: Lua: …` and a stack traceback, and the rest of the generated rc was
+  -- ABANDONED. At WARN the same screen carries the diagnosis and nothing else.
+  -- The `pcall` stays because a notify can still fail outright.
+  --
+  -- It carries the WHOLE refusal, not just the seam sentence, so the first
+  -- screen — which is the message area, before any keypress — already explains
+  -- the `E492` that is about to appear under it.
+  pcall(vim.notify, M.refusal_text(message, M.refusal_width()),
+    vim.log.levels.WARN)
+  -- 1. The structural half — with no `Octo` command the `-c "Octo <N> <repo>"`
+  --    the wrapper appends cannot produce a review buffer at all. `pcall`
+  --    because the command does not exist when octo's own setup failed, and
+  --    deleting an absent command raises.
+  pcall(function()
+    vim.api.nvim_del_user_command("Octo")
+  end)
+  -- 2. The legible half — the editor STAYS UP with the explanation in the
+  --    window, which is the whole reason this wrapper no longer quits. It is
+  --    what the operator is left looking at once the startup messages are
+  --    acknowledged.
+  pcall(function()
+    M.show_refusal(message)
+  end)
+  return false
+end
+
+-- --------------------------------------------------------------------------
+-- THE SEAM — why this rides `utils.apply_mappings` and not `FileType octo`
+-- --------------------------------------------------------------------------
+-- 🔴 A `FileType octo` AUTOCMD IS THE OBVIOUS HOOK AND IT IS INCOMPLETE.
+-- MEASURED against octo 2026-08-28: `filetype = "octo"` is set only on the
+-- PR / issue / discussion buffers. The three REVIEW surfaces never get it —
+-- `review_diff` is applied to a buffer holding the diffed FILE (so its
+-- filetype is that file's language), and `file_panel` and `submit_win` are
+-- plain scratch buffers. A FileType hook would therefore miss EVERY binding on
+-- those three surfaces, which is where a review happens.
+--
+-- 🔴 NO TOTAL IS CARRIED HERE ANY MORE, BECAUSE THREE DIFFERENT POPULATIONS
+-- WERE BEING SPELLED WITH ONE NUMBER. This block read "would have missed 40 of
+-- the 131 bindings" in the PRESENT tense; 131/40 was measured at `a302fd9e`,
+-- the commit that added this legend, and went stale one commit later when
+-- `CONFIRMED_VERBS` moved eight entries out of the `mappings` tables above.
+-- MEASURED at b36453eb, all nine kinds, the three review surfaces in brackets:
+--   * DECLARED in the tables above ........................ 123  (37)
+--   * BOUND — what the legend lists: octo's entries that
+--     survive `apply_mappings`' own filter, plus this
+--     wrapper's per-kind bindings .......................... 141  (43)
+--   * DECLARED at `a302fd9e`, where "131" came from ....... 131  (40)
+-- The number a reader can act on is the BOUND one, and the legend header
+-- PRINTS it per kind — read it there rather than trusting this comment, which
+-- is a snapshot and will be wrong again.
+--
+-- `octo.utils.apply_mappings(kind, bufnr)` is the one seam every kind passes
+-- through, and — the part that matters — it CARRIES THE KIND, which is what a
+-- per-buffer legend needs.
+--
+-- 🔴 WRAPPING A PLUGIN'S MODULE FUNCTION IS FRAGILE ACROSS UPSTREAM UPDATES,
+-- SO THE WRAPPER TEARS THE EDITOR DOWN RATHER THAN DEGRADING. If a future octo
+-- renames or moves `apply_mappings`, the wrap silently stops applying: `?`
+-- ceases to exist AND every confirmed verb above reverts to being simply
+-- UNBOUND, because none of them is declared in the `mappings` tables any more.
+-- A legend that is gone looks exactly like a legend nobody pressed.
+--
+-- 🔴 `error()` WAS THE PREVIOUS MECHANISM AND IT DID NOT DO THIS — MEASURED ON
+-- neovim 0.12.5, NOT REASONED ABOUT. The wrapper's structure is `customRC` →
+-- `luafile <this file>`, then `nvim -c "Octo <N> <owner/repo>"`. An erroring
+-- `luafile` prints `E5113`, ABANDONS THE REST OF THIS FILE, RUNS THE REMAINING
+-- rc LINES, EXECUTES THE `-c` ANYWAY, AND EXITS 0. So the outcome of raising
+-- was: the review window opens, the operator dismisses an error flash, and
+-- reviews with `?` and every confirmed verb silently missing — precisely what
+-- refusing was chosen to prevent. The comment that used to sit here claimed
+-- the opposite, which is why it is spelled out at this length.
+--
+-- 🔴 SO THE REFUSAL IS MADE OF TWO MECHANISMS, AND BOTH ARE DELIBERATE:
+--   1. DELETE THE `Octo` USER COMMAND. This is the structural half — it is
+--      what makes "no half-wired review buffer" true regardless of what else
+--      runs, because the `-c "Octo …"` the wrapper appends is the only thing
+--      that opens one. MEASURED with the quit neutralised, so the deletion was
+--      isolated: the `-c` runs, `exists(':Octo')` is 0, no review buffer.
+--   2. PUT THE DIAGNOSIS IN THE WINDOW. The editor STAYS UP and the buffer it
+--      is displaying holds the explanation, so the operator can read it and
+--      close it themselves.
+--
+-- 🔴 IT USED TO `cquit 69` AND THAT WAS REMOVED ON PURPOSE — DO NOT PUT IT
+-- BACK WITHOUT REVISITING THIS. The quit added nothing structural (the
+-- deletion above is what stops a review buffer) and cost the only thing the
+-- operator could act on: the window VANISHED, taking the diagnosis with it.
+-- `nvim-octo` is launched from an alacritty hint on a clicked mention, so the
+-- terminal dies with the process. A window that flashes and disappears is very
+-- close to the silent degradation this whole refusal exists to end — the
+-- operator is left with a click that did nothing. So the wrapper now exits 0
+-- and the failure is legible on screen instead of in a status nobody reads.
+--
+-- ⚠ WHAT IS ON SCREEN IS MEASURED, NOT ASSUMED — captured from a real neovim
+-- TUI in a pty and replayed through a terminal emulator. The two things it
+-- found are both counter-intuitive, and both are written up in the teardown
+-- block above: an ERROR-level notification is promoted to a thrown vim error and
+-- replaces the diagnosis with a stack traceback, and a notification ALONE
+-- survives the first screen but is wiped by the `Press ENTER` the appended
+-- `-c`'s `E492` forces — leaving the operator on the neovim SPLASH SCREEN.
+-- Hence WARN, and hence the buffer.
+if ok then
+  local got_utils, octo_utils = pcall(require, "octo.utils")
+  if not got_utils or type(octo_utils) ~= "table"
+      or type(octo_utils.apply_mappings) ~= "function" then
+    M.refuse_to_start(
+      "nvim-octo: octo.utils.apply_mappings is not a function, so the `?` "
+        .. "legend, the confirmed-merge keymap and every other confirmed verb "
+        .. "cannot be installed. octo.nvim has moved or renamed that seam; this "
+        .. "wrapper's octo-init.lua must be updated to the new one. REFUSING to "
+        .. "open a review buffer — the alternative is a review surface whose "
+        .. "safety keymaps have silently disappeared.")
+  else
+    local original_apply_mappings = octo_utils.apply_mappings
+    octo_utils.apply_mappings = function(kind, bufnr)
+      original_apply_mappings(kind, bufnr)
+      for _, binding in ipairs(M.extra_for(kind)) do
+        -- The RAW lhs goes to vim, exactly as octo passes `value.lhs`, so vim
+        -- expands `<localleader>` itself; only the LEGEND resolves it, and it
+        -- resolves it from the same `vim.g` vim expanded from.
+        vim.keymap.set(binding.mode or "n", binding.lhs, binding.make(kind), {
+          buffer = bufnr,
+          silent = true,
+          noremap = true,
+          nowait = true,
+          desc = binding.desc,
+        })
+      end
+    end
+  end
 end

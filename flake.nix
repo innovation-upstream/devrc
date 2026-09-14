@@ -219,6 +219,17 @@
         # wrapper's PATH — so the gate environment carrying it is not a
         # test-only convenience.
         pkgs.fzf
+        # 🔴 luajit, for the SAME reason as tmux and fzf above: a guard that
+        # cannot be written against a stub. `nix/pkgs/tools/nvim-octo/
+        # octo-init.lua` installs a merge keystroke that must pass through a
+        # confirmation, and a keymap set by `vim.keymap.set` is INVISIBLE to
+        # the structural Lua-table reader in test_nvim_octo.py — the config
+        # section stays green whether the confirmation is on the path or not.
+        # The only honest guard EXECUTES that file (luajit is the dialect
+        # neovim embeds) with `vim` and `require` stubbed, and watches a `no`
+        # answer fail to reach the merge. Without this entry that suite has no
+        # interpreter and reports merge safety it never measured.
+        pkgs.luajit
       ];
     in
     {
