@@ -59,6 +59,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SH = ROOT / "scripts/resume-state.sh"
 CAP = ROOT / "scripts/tests/test_handoff_doc_size.py"
 IDX = ROOT / "scripts/lib/handoff_index.py"
+#: 🔴 THE CEILING'S CONSTANTS LIVE IN THE LIBRARY, NOT THE SUITE. `#1648`
+#: (`a2c84a1c`) moved `MAX_BYTES`, `GRANDFATHERED` and `tightest_allowance` out
+#: of `CAP` and into this module so a WRITER could be warned before a write.
+#: Six rows below still anchored on `CAP`, where they then occurred 0x — every
+#: one of them scoring as a SURVIVOR while testing nothing, which is precisely
+#: the failure the note above `SCRIPT` describes. The battery's targets are a
+#: THIRD thing an extraction has to carry with it; moving a constant is not a
+#: refactor of one file.
+BUD = ROOT / "scripts/lib/handoff_budget.py"
 
 RESOLUTION_SUITE = "scripts/tests/test_resume_state_handoff_resolution.py"
 CAP_SUITE = "scripts/tests/test_handoff_doc_size.py"
@@ -92,6 +101,7 @@ SUITE_OF_TARGET = {
     SH: RESOLUTION_SUITE,
     CAP: CAP_SUITE,
     IDX: CAP_SUITE,
+    BUD: CAP_SUITE,
 }
 
 # --- section 1: claudedocs/archive/ resolution --------------------------------
@@ -162,13 +172,33 @@ MUTANTS = [
      "    return {p: (root / p).stat().st_size for p in scan.paths "
      "if p.count('/') == 1}, scan",
      "test_the_scan_reaches_the_ARCHIVE_subdirectory"),
+    # ⚠ RE-ANCHORED, and the REASON generalises to C5 and C11 below: a row that
+    # anchors on a ledger line binds to its TRAILING MEASURED COMMENT too — the
+    # mutation is deleting the whole line, so the comment cannot be trimmed out
+    # of the anchor. That comment is re-measured whenever the allowance is
+    # bumped, which happens when the doc runs out of headroom. So the RIGHT
+    # entry to anchor on is the one with the MOST headroom, and this row had the
+    # LEAST: `handoff-tmux-webapp.md` measured 326,750 B against its 327,680 B
+    # allowance — 930 B — after growing 314,233 -> 323,642 -> 326,750 in two
+    # commits. The next `/handoff` append bumps the allowance, re-measures the
+    # comment, and takes this anchor to 0x, i.e. SURVIVED-while-testing-nothing:
+    # the exact defect this file's own re-anchor was fixing. Moved to
+    # `handoff-nix-disk-cleanup.md` (99,215 B of 114,688 — 15,473 B of headroom).
+    # 🔴 Re-check the headroom of whatever entry these three rows name whenever
+    # the ledger is edited; `handoff_budget.GRANDFATHERED` is the source.
     ("C4", "deletion", "silently drop a document from the ledger",
-     '    "claudedocs/handoff-tmux-webapp.md": 327_680,               # 314,233 B\n',
+     '    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,          #  99,215 B\n',
      "",
      "test_no_handoff_doc_exceeds_its_budget"),
+    # ⚠ RE-ANCHORED: this row used to loosen `handoff-handoff-search-index.md`,
+    # whose entry `#1650` DELETED once the doc was pruned back under MAX_BYTES.
+    # A row anchored on a ledger entry is only as durable as that entry, and the
+    # ledger is designed to shrink — so the anchor moved to a live entry rather
+    # than the row being dropped. Same shape: 76,743 B quantises to 81,920, so
+    # 114,688 is exactly two steps of slack.
     ("C5", "replacement", "loosen one allowance by two steps (slack entry)",
-     '"claudedocs/handoff-handoff-search-index.md": 81_920,',
-     '"claudedocs/handoff-handoff-search-index.md": 114_688,',
+     '"claudedocs/handoff-cairn-task-linkage.md": 81_920,',
+     '"claudedocs/handoff-cairn-task-linkage.md": 114_688,',
      "test_no_handoff_doc_exceeds_its_budget"),
     ("C6", "insertion", "leave a stale entry naming a nonexistent document",
      "GRANDFATHERED: dict[str, int] = {\n",
@@ -220,17 +250,20 @@ TARGETS = {
     "A6": SH,
     "A7": SH,
     "A8": SH,
-    "C1": CAP,
+    # The ceiling's DATA and its arithmetic live in `BUD`; the checker that
+    # reads them, and the scan wiring, stay in `CAP`. Split per row, not per
+    # section, because the section spans both files.
+    "C1": BUD,
     "C2": CAP,
     "C3": CAP,
-    "C4": CAP,
-    "C5": CAP,
-    "C6": CAP,
+    "C4": BUD,
+    "C5": BUD,
+    "C6": BUD,
     "C7": CAP,
-    "C8": CAP,
+    "C8": BUD,
     "C9": CAP,
     "C10": IDX,
-    "C11": CAP,
+    "C11": BUD,
     "C12": IDX,
     "C13": IDX,
 }
@@ -267,7 +300,14 @@ def main() -> int:
         raise SystemExit(f"no such mutant id(s): {unknown}")
     rows = [r for r in MUTANTS if not only or r[0] in only]
     suites = sorted({suite_of(r[0]) for r in rows})
-    saved = {p: p.read_text(encoding="utf-8") for p in {SH, CAP, IDX}}
+    # 🔴 `BUD` BELONGS HERE — this is the OUTER net, and it is the one that
+    # matters. The per-row `finally` restores after each mutant, but a run killed
+    # between rows (a timeout, a ^C) skips it, and then only this snapshot can
+    # put the tree back. MEASURED while writing this change: a foreground run hit
+    # a 10-minute cap and the SIGTERM left `scripts/resume-state.sh` carrying row
+    # A6's mutant — tracked source, silently modified. Adding a target without
+    # adding it here leaves that target the one file the net cannot restore.
+    saved = {p: p.read_text(encoding="utf-8") for p in {SH, CAP, IDX, BUD}}
 
     for suite in suites:
         ok, out = run_suite(suite)
