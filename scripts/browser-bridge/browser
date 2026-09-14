@@ -1882,15 +1882,23 @@ _bb_tmpfile() {
 
 # 🔴 NOT SILENT ON FAILURE. A cleanup that cannot run is a leak, and a leak
 # nobody is told about is how four stray `/tmp/browser-proxy-err.*` files
-# accumulated before anyone looked. Both the `rm` failing AND the file surviving
-# are reported — they are different failures (a refused unlink vs. an `rm` that
-# never executed at all), and the second is the one that actually happened.
+# accumulated before anyone looked.
+#
+# 🔴 ONE DETECTOR, AND IT IS THE FILE'S EXISTENCE — NOT `rm`'s EXIT STATUS. This
+# had two checks (`rm` non-zero, and the file still there) until a mutation sweep
+# showed the first could be silenced with every test still green: whenever `rm`
+# fails the file also survives, so the second always fired too. A second guard
+# that no case can reach alone is not redundancy, it is a guard reading as
+# coverage while providing none. The existence check is also STRICTLY STRONGER —
+# it catches an `rm` that reports success and removes nothing, which the exit
+# status by definition cannot. Both of its cases are reachable and tested
+# (`test_a_CLEANUP_THAT_CANNOT_RUN_says_so`, a refused unlink; and
+# `test_a_cleanup_whose_rm_LIES_is_still_reported`, a stub `rm` that exits 0).
 _bb_tmp_cleanup() {
   local +x _bb_f
   for _bb_f in ${_BB_TMPFILES[@]+"${_BB_TMPFILES[@]}"}; do
     [ -n "$_bb_f" ] || continue
-    rm -f -- "$_bb_f" 2>/dev/null \
-      || echo "browser: could not remove temp file ${_bb_f} — remove it by hand" >&2
+    rm -f -- "$_bb_f" 2>/dev/null
     [ ! -e "$_bb_f" ] \
       || echo "browser: temp file ${_bb_f} survived cleanup — remove it by hand" >&2
   done
@@ -2009,7 +2017,7 @@ except Exception:
 # re-prefixed rather than emitted raw. When the remote leg DID run, its stderr is
 # replayed line by line — minus the sentinel, which is protocol and not output.
 _ssh_proxy() {
-  local +x _bb_target="$1" _bb_cmd="$2" _bb_payload _bb_line _bb_acc _bb_errf
+  local _bb_target="$1" _bb_cmd="$2" _bb_payload _bb_line _bb_acc _bb_errf
   _BB_PROXY_RAN=0; _BB_PROXY_ERR=""; _BB_PROXY_RC=""; _BB_PROXY_OUT=""
   # NOT `$( )` — see _bb_tmpfile: the registration must happen in THIS shell.
   _bb_tmpfile proxy-err || return 0

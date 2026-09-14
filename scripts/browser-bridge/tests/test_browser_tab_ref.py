@@ -2099,12 +2099,16 @@ def test_the_leak_check_can_SEE_a_temp_file_positive_control(bridge, tmp_path):
                                         "browser-proxy-out.ABCDEF"]
 
 
+# 🔴 EXPLICIT `ids`. Without them pytest derives the id from the ssh body, so the
+# node id contains the whole stub script — unquotable on a command line, which
+# silently turned a mutation run into "no tests ran" and scored the mutant
+# SURVIVED. The verdict was about the id, not the code.
 @pytest.mark.parametrize("case,ssh_body,expect_rc", [
     ("remote ran and succeeded", _proxy_ssh(stdout='{"ok":true}\n'), 0),
     ("remote ran and failed",    _proxy_ssh(stdout="", stderr="boom\n", rc=1), 1),
     ("host unreachable",         "echo 'ssh: no route' >&2\nexit 255\n", 4),
     ("reached but no sentinel",  "printf '%s' '{}'\nexit 0\n", 4),
-])
+], ids=["ran-ok", "ran-failed", "unreachable", "no-sentinel"])
 def test_the_temp_files_are_removed_on_EVERY_exit_path(bridge, tmp_path, case,
                                                        ssh_body, expect_rc):
     """🔴 "Removed at the end of the function" is not "removed on every path".
@@ -2156,6 +2160,36 @@ def test_a_CLEANUP_THAT_CANNOT_RUN_says_so(bridge, tmp_path):
     for line in r.stderr.splitlines():
         if "remove it by hand" in line:
             assert line.startswith("browser:"), line
+
+
+def test_a_cleanup_whose_rm_LIES_is_still_reported(bridge, tmp_path):
+    """🔴 THE SECOND DETECTOR, given its own reachable case.
+
+    `_bb_tmp_cleanup` has two independent checks: `rm` returning non-zero, and
+    the file still existing afterwards. A mutation sweep found that killing the
+    SECOND one alone left every test green — the first still fired — i.e. the
+    existence check was covered by nothing. That is a guard reading as coverage
+    while providing none.
+
+    This reaches it with a case the first check cannot: a stub `rm` that exits 0
+    and removes nothing. Only "the file survived" can notice that.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout='{"ok":true}\n'))
+    binhome = Path(bridge.ssh_log).parent / "stub-bin"
+    mockbin.write_exec(binhome / "rm", 'exit 0\n')      # lies: succeeds, removes nothing
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    try:
+        r = bridge.run(CANONICAL, "text", env={"TMPDIR": str(tmpdir)})
+        assert r.returncode == 0, r.stderr
+        assert _proxy_tmp_files(tmpdir), (
+            "the stub `rm` did not actually leave the files behind, so this case "
+            "cannot observe what it is about")
+        assert "survived cleanup" in r.stderr, (
+            f"a cleanup that silently removed nothing said nothing:\n{r.stderr}")
+    finally:
+        (binhome / "rm").unlink()
 
 
 def test_a_LARGE_proxied_read_keeps_stdout_byte_exact(bridge, tmp_path):
