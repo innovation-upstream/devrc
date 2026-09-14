@@ -297,3 +297,36 @@ printed alongside.) Taking one over is a
 deliberate, separate verb (`--steal`) — never automatic, because "the holder went
 quiet for a week" and "the holder is on a long piece of work" are the same
 observable. Release your own claims when the work lands.
+
+## An abandoned claim is invisible to its holder and blocking to everyone else
+
+🔴 **That asymmetry is why stale claims survive, and it is not obvious from the exit
+codes read one at a time.** The ownership token is `/etc/machine-id` +
+`git rev-parse --git-dir`, so the SAME unreleased ref answers:
+
+- **rc 12 — `THIS SESSION (you already hold it)` — carry on**, to the clone that
+  claimed it; and
+- **rc 10 — ALREADY CLAIMED, STOP**, to the other host, or any other clone.
+
+So a claim nobody is working reads as *fine* from exactly the machine that could
+clear it, and as *taken* from the machines it obstructs. Neither side sees the
+contradiction: the holder is told to carry on, the blocked session is told someone
+is on it, and nothing expires the ref in a way a human notices.
+
+MEASURED 2026-09-14: `cairn-oss-multi-instance-20` sat claimed for **5 days** on
+work that was still open and that nobody was doing. It surfaced only because
+someone asked "is anything outstanding?" and ran `claim-work --list` — not from any
+check the workflow performs.
+
+**Two cheap habits, and neither needs `--force`:**
+1. At session end, `claim-work --list` and `--release` anything of yours whose work
+   did not land. Releasing your own ref is unconditional.
+2. When you INHERIT an arc, read the list for claims older than a couple of days
+   before assuming the queue is free — and check `where:` against your own before
+   reading rc 10 as "a peer is on it".
+
+⚠ This does NOT license auto-stealing. The paragraph above still holds: "the holder
+went quiet for a week" and "the holder is on a long piece of work" are the same
+observable, which is why `--steal` is a separate deliberate verb. What changes is
+that the HOLDER now has a reason to look, because they are the one party the stale
+ref never warns.
