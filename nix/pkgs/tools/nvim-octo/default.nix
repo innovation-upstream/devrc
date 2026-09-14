@@ -10,12 +10,25 @@
 #   * the review surface stays hermetic — its plugin set, its colours and its
 #     keymaps cannot be changed by an edit to an editor config, and it cannot
 #     be broken by one either;
-#   * the merge-safety config in ./octo-init.lua strips upstream's four merge
-#     KEYMAPS and its `<CR>` merge MENU, replacing them with ONE keystroke that
-#     asks first, and it binds `?` to a generated legend in every octo buffer.
-#     Doing either inside the daily editor would impose this repo's risk posture
-#     — and its shadowing of `?`, vim's reverse-search — on every other use of
-#     neovim, which is not what was asked for and is not reversible per-buffer.
+#   * the merge-safety config in ./octo-init.lua strips EVERY merge KEYMAP
+#     upstream declares on a PR buffer, and its `<CR>` merge MENU, replacing
+#     them with ONE keystroke that asks first; and it binds a generated legend
+#     in every octo buffer — `?` on eight kinds, `g?` on `review_diff`, which
+#     keeps `?` for vim's reverse search. Doing either inside the daily editor
+#     would impose this repo's risk posture — and its shadowing of `?` — on
+#     every other use of neovim, which is not what was asked for and is not
+#     reversible per-buffer.
+#
+#     ⚠ NO COUNT IS WRITTEN HERE, ON PURPOSE, AND THE `?` IS NOT UNIVERSAL.
+#     This sentence said "four merge KEYMAPS" and "`?` … in every octo buffer";
+#     MEASURED against octo 2026-08-28, upstream declares SEVEN (`config.lua`
+#     :407-421) and the diff's legend key is `g?` — see the `?` IS SHADOWED
+#     block in octo-init.lua for why, and for what that shadowing costs on the
+#     three text-heavy kinds. The four was the number the brief named, and it
+#     survived an edit to this very sentence. The ledger is `MERGE_MAPPINGS` in
+#     `scripts/tests/test_nvim_octo.py` — count it there, where a test pins the
+#     set against the config, rather than carrying a total beside a list that
+#     lives in another file.
 #
 # 🔴 vimPlugins.octo-nvim DECLARES NO RUNTIME DEPENDENCIES. It is a bare
 # `buildVimPlugin`, so nothing pulls in the modules its Lua actually

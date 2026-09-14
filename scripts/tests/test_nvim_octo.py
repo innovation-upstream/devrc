@@ -1100,9 +1100,12 @@ def test_every_buffer_kind_gets_the_legend_key(tmp_path, kind: str):
     assert kv["legend_maps"] == ["1"], (
         f"a `{kind}` buffer got {kv['legend_maps']} `{legend_lhs(kind)}` "
         f"bindings, not one")
-    # The wrap must DELEGATE, not replace: octo's own 131 bindings still have
-    # to be applied. A wrap that forgot the original call would leave the
-    # buffer with a legend and nothing to list.
+    # The wrap must DELEGATE, not replace: octo's own bindings for this kind
+    # still have to be applied. A wrap that forgot the original call would
+    # leave the buffer with a legend and nothing to list.
+    # ⚠ This said "octo's own 131 bindings", a figure measured at `a302fd9e`
+    # and stale one commit later — see the population note in `octo-init.lua`'s
+    # SEAM block, which names all three counts and the tree each belongs to.
     assert kv["delegated"] == ["1"] and kv["delegated_kind"] == [kind], kv
 
 
@@ -1185,6 +1188,94 @@ def test_the_legend_HEADER_names_the_key_that_opens_THAT_kind(tmp_path, kind):
         # The NEGATIVE half: a diff header must not advertise the default.
         assert "opened with ?" not in header, header
         assert "/ ?   close" not in closer, closer
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_the_LEGEND_CALLBACK_the_wrap_REGISTERED_shows_THAT_kinds_table(
+        tmp_path, kind):
+    """🔴 THE PER-KIND CLOSURE, DRIVEN THROUGH THE CALLBACK — the same seam
+    `test_the_merge_KEYMAP_itself_is_on_the_confirmed_path` closes for merge.
+
+    Every other legend test either calls `legend_lines(kind)` BY HAND or only
+    counts how many times the key was bound. Neither can see the closure in
+    `EXTRA_BINDINGS["*"].make` handing `show_legend` the wrong kind: press `g?`
+    in a `review_diff` buffer, get a legend headed `pull_request … 46 bindings`
+    advertising `\\pm` (merge) and `\\qa` (approve), neither of which is bound
+    there. MEASURED: mutating `M.show_legend(kind)` to
+    `M.show_legend("pull_request")` left all 167 tests green.
+
+    So this presses the key the WRAP ACTUALLY REGISTERED for this kind and
+    reads the lines that press wrote into a buffer. Asserted as STATE rather
+    than as a word — the header must name THIS kind and must name no OTHER
+    kind, and the count it prints must equal this kind's own row count — so a
+    legend cannot pass by spelling something plausible.
+
+    ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE. The shipped Lua is correct and
+    was correct at `b36453eb`; this is green on both. It is red at both under
+    the mutant above, which is the only evidence that it runs at all.
+
+    ⚠ The `pull_request` parametrisation cannot see that mutant — the mutant is
+    the identity there. It is kept because the guard's claim is about every
+    kind, and dropping the one row a particular mutant cannot kill would make
+    the ledger describe something narrower than it says.
+    """
+    want = legend_lhs(kind)
+    kv = _ok_lua(tmp_path, "\n".join([
+        'RECORD.keymaps = {}',
+        'require("octo.utils").apply_mappings(%s, 12)' % json.dumps(kind),
+        'local legend = {}',
+        'for _, m in ipairs(RECORD.keymaps) do',
+        '  if m.opts.desc == "show this legend" then legend[#legend + 1] = m end',
+        'end',
+        'if #legend ~= 1 then',
+        '  FAIL("expected exactly one legend binding, got " .. #legend)',
+        'end',
+        'KV("lhs", legend[1].lhs)',
+        # Reset first, so everything read below was written by THIS keypress
+        # and not by anything the file did at load time.
+        'RECORD.setlines = {}',
+        'RECORD.wins = {}',
+        'legend[1].rhs()',
+        'KV("buffers_written", #RECORD.setlines)',
+        'KV("windows_opened", #RECORD.wins)',
+        'local lines = RECORD.setlines[1] and RECORD.setlines[1].lines or {}',
+        'KV("lines", #lines)',
+        'KV("header", tostring(lines[1]))',
+        'KV("rows", #NvimOcto.legend_rows(%s))' % json.dumps(kind),
+    ]))
+    # POSITIVE CONTROL: the keypress actually produced a legend. Every
+    # assertion below reads that one buffer, and a `0` here would make all of
+    # them vacuous.
+    assert kv["buffers_written"] == ["1"], (
+        f"pressing {want!r} on a `{kind}` buffer wrote "
+        f"{kv['buffers_written']} buffers, not one: {kv}")
+    assert kv["windows_opened"] == ["1"], (
+        f"pressing {want!r} on a `{kind}` buffer opened "
+        f"{kv['windows_opened']} windows, not one: {kv}")
+    assert int(kv["lines"][0]) > 3, kv
+    assert kv["lhs"] == [want], kv
+
+    header = kv["header"][0]
+    assert f"— {kind} buffer —" in header, (
+        f"pressing {want!r} on a `{kind}` buffer opened a legend headed "
+        f"{header!r}. The callback the wrap registered does not close over "
+        f"THIS kind, so the buffer is advertising another kind's keys — "
+        f"keystrokes that are not bound here.")
+    for other in ALL_KINDS:
+        if other == kind:
+            continue
+        assert f"— {other} buffer —" not in header, (
+            f"the `{kind}` legend names `{other}` in its header: {header!r}")
+    # The count is this kind's own, not whichever kind the closure captured.
+    # Two kinds can share a row count, so this is a second reading rather than
+    # the load-bearing one — the name above is that.
+    assert f"{kv['rows'][0]} bindings" in header, (
+        f"the `{kind}` legend header prints a count that is not this kind's "
+        f"{kv['rows'][0]} rows: {header!r}")
+    # …and it opened with this kind's key, read back off the same press.
+    assert header.endswith(f"opened with {want}"), (
+        f"the `{kind}` legend header does not name the key it was opened "
+        f"with: {header!r}")
 
 
 def test_the_legend_keys_are_RESOLVED_not_localleader_placeholders(tmp_path):
@@ -1461,8 +1552,12 @@ def test_the_merge_KEYMAP_itself_is_on_the_confirmed_path(tmp_path):
     # The binding is BUFFER-LOCAL, like every octo mapping — a global merge key
     # would be live in any buffer the operator opened.
     assert kv["buffer"] == ["12"], kv
-    # And it is upstream's own merge lhs, so upstream documentation still
-    # describes this buffer.
+    # And it is upstream's own merge lhs. ⚠ NARROWED: that buys the KEY, not
+    # the METHOD. Upstream declares this lhs as `merge_pr`, "merge commit PR"
+    # (octo `config.lua:407`), while this dispatches a squash — so upstream's
+    # docs still say where to press and are wrong about what happens next. What
+    # names the method is the prompt and the legend row, both asserted
+    # elsewhere in this file.
     assert kv["lhs"] == ["<localleader>pm"], kv
 
 
@@ -1816,9 +1911,12 @@ def test_NO_merge_key_is_bound_outside_a_pull_request_buffer(tmp_path, kind):
 
 def test_the_legend_window_is_CAPPED_to_the_editor(tmp_path):
     """🔴 MEASURED AT TWO POINTS, because a size claim that holds at one is a
-    claim about that one. A `pull_request` legend is ~48 lines; on a tall
-    terminal it must show in full, and on a short one it must be clamped
-    rather than opened taller than the screen.
+    claim about that one. A `pull_request` legend is 52 lines at `b36453eb`
+    (46 rows, plus the header, the blanks and the merge footer) — this
+    docstring said "~48", which was never measured; the assertion below is
+    `> 40` and passed either way. On a tall terminal it must show in full, and
+    on a short one it must be clamped rather than opened taller than the
+    screen.
 
     The float scrolls when clamped — the rows are not lost, the window just
     cannot overflow."""

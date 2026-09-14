@@ -368,14 +368,33 @@ end
 -- confirmed verb in `CONFIRMED_VERBS`. All three feed the same `extra_for`,
 -- which is what the keymaps are set from AND what the legend is rendered from.
 --
--- 🔴 `?` IS SHADOWED EVERYWHERE EXCEPT THE DIFF, WHERE IT IS `g?`. `?` is
--- vim's reverse search. On the octo surfaces — a PR buffer, an issue, the file
--- panel, the verdict window — there is nothing to reverse-search through, so
--- taking `?` costs nothing. `review_diff` is the exception and it is not a
--- close call: that buffer holds REAL SOURCE, opened for the express purpose of
--- reading it, and searching backwards through a hunk is ordinary during a
--- review. So the diff keeps `?` and opens its legend with `g?` (upstream `g?`
--- is the ROT13 operator, which nobody is reaching for in a review).
+-- 🔴 `?` IS SHADOWED EVERYWHERE EXCEPT THE DIFF, WHERE IT IS `g?`, AND ON
+-- THREE KINDS THAT SHADOWING COSTS SOMETHING REAL. `?` is vim's reverse
+-- search. This comment used to say that on the octo surfaces "there is nothing
+-- to reverse-search through, so taking `?` costs nothing", and that is FALSE
+-- for `pull_request`, `issue` and `discussion`: those buffers hold the body
+-- plus every rendered comment (octo's `ui/writers.lua` `write_body` and
+-- `write_comment`, called from `model/octo-buffer.lua`'s render path) — which
+-- is exactly the text one reverse-searches.
+--
+-- 🔴 SO STATE THE COST, DO NOT REACH FOR A BETTER-SOUNDING REASON. This
+-- shadows `?` on the three text-heavy kinds. What is left there is `/` plus
+-- `N`, which searches backwards and is what the operator accepted; the map is
+-- buffer-local, so nothing outside a review surface is touched. The DECISION
+-- stands on the operator asking for a discoverable legend and choosing this
+-- key — not on the surfaces being empty, which they are not. The first
+-- justification was invented to fit a decision already made, and inventing a
+-- second one is how this regenerates.
+--
+-- ⚠ `file_panel` and `submit_win` genuinely hold nothing to search — a file
+-- list and a short verdict form — so for those two the original sentence was
+-- right. `repo` and `release` carry one binding each.
+--
+-- `review_diff` is the exception and it is not a close call: that buffer holds
+-- REAL SOURCE, opened for the express purpose of reading it, and searching
+-- backwards through a hunk is ordinary during a review. So the diff keeps `?`
+-- and opens its legend with `g?` (upstream `g?` is the ROT13 operator, which
+-- nobody is reaching for in a review).
 --
 -- ⚠ THE INCONSISTENCY IS SELF-DOCUMENTING BY CONSTRUCTION. `legend_lines`
 -- prints the key that was bound FOR THAT KIND in the header and again on the
@@ -396,6 +415,16 @@ end
 -- stub the ask with "no" and watch the merge NOT happen, stub it with "yes"
 -- and watch it happen. A confirmation nothing can drive is a confirmation
 -- nobody has watched work.
+--
+-- 🔴 IT IS A WRITABLE GLOBAL, AND THAT IS A STATED ASSUMPTION RATHER THAN AN
+-- OVERSIGHT. Anything else loaded into this editor could reassign `M.ask` and
+-- disarm every confirmation in this file — an auditor did exactly that to
+-- neutralise a probe. It is acceptable HERE because this is a dedicated
+-- single-purpose wrapper whose plugin set is pinned by `default.nix` (octo
+-- plus its four declared dependencies) and loads no third-party Lua, and
+-- because the operator's own neovim config never reaches it. It would NOT be
+-- acceptable in the daily editor — which is one more reason this is a separate
+-- wrapper. If a plugin is ever added here, that assumption is what changes.
 local M = {}
 _G.NvimOcto = M
 
@@ -565,6 +594,16 @@ local EXTRA_BINDINGS = {
   -- merge key on the diff or file-panel surface could not act on anything.
   -- The same condition therefore decides both the keymap and the legend's
   -- merge footer, because both read this table.
+  --
+  -- ⚠ `<localleader>pm` IS UPSTREAM'S OWN MERGE KEY, AND THAT BUYS THE KEY
+  -- ONLY — NOT THE METHOD. Narrower than it used to read: upstream declares
+  -- this lhs as `merge_pr`, described in octo's `config.lua:407` as "merge
+  -- commit PR", while what it dispatches here is a SQUASH, because
+  -- `default_merge_method` above is "squash". So upstream's documentation
+  -- still tells a reader WHERE to press and is wrong about what happens next.
+  -- What closes that gap is this wrapper saying so at the moment it matters,
+  -- both read from the live config: the prompt names the method ("… method
+  -- squash?") and the legend row reads "merge this PR (squash)".
   pull_request = {
     {
       id = "merge",
@@ -774,9 +813,17 @@ function M.legend_lines(kind)
   return lines
 end
 
--- A floating window, sized to its content and CAPPED to the editor: a
--- `pull_request` legend is 45 rows and must not run off a 30-line terminal.
--- Over the cap the window scrolls rather than overflowing.
+-- A floating window, sized to its content and CAPPED to the editor: the
+-- largest legend is `pull_request`, and it must not run off a 30-line
+-- terminal. Over the cap the window scrolls rather than overflowing.
+--
+-- ⚠ SIZE, MEASURED RATHER THAN REMEMBERED — this said "45 rows", which was
+-- wrong in the direction that matters. Driven in a REAL editor at b36453eb
+-- (headless neovim, real octo.nvim, the legend key pressed through the
+-- callback the wrap registered): 46 ROWS rendering 52 LINES. Both move
+-- whenever a mapping is added or removed, so they are here to say "taller than
+-- a short terminal", never as a constant anything reads —
+-- `#M.legend_lines("pull_request")` is the live answer.
 function M.show_legend(kind)
   local lines = M.legend_lines(kind)
   local buf = vim.api.nvim_create_buf(false, true)
@@ -1129,8 +1176,23 @@ end
 -- PR / issue / discussion buffers. The three REVIEW surfaces never get it —
 -- `review_diff` is applied to a buffer holding the diffed FILE (so its
 -- filetype is that file's language), and `file_panel` and `submit_win` are
--- plain scratch buffers. A FileType hook would therefore have missed 40 of
--- the 131 bindings, in exactly the buffers a review happens in.
+-- plain scratch buffers. A FileType hook would therefore miss EVERY binding on
+-- those three surfaces, which is where a review happens.
+--
+-- 🔴 NO TOTAL IS CARRIED HERE ANY MORE, BECAUSE THREE DIFFERENT POPULATIONS
+-- WERE BEING SPELLED WITH ONE NUMBER. This block read "would have missed 40 of
+-- the 131 bindings" in the PRESENT tense; 131/40 was measured at `a302fd9e`,
+-- the commit that added this legend, and went stale one commit later when
+-- `CONFIRMED_VERBS` moved eight entries out of the `mappings` tables above.
+-- MEASURED at b36453eb, all nine kinds, the three review surfaces in brackets:
+--   * DECLARED in the tables above ........................ 123  (37)
+--   * BOUND — what the legend lists: octo's entries that
+--     survive `apply_mappings`' own filter, plus this
+--     wrapper's per-kind bindings .......................... 141  (43)
+--   * DECLARED at `a302fd9e`, where "131" came from ....... 131  (40)
+-- The number a reader can act on is the BOUND one, and the legend header
+-- PRINTS it per kind — read it there rather than trusting this comment, which
+-- is a snapshot and will be wrong again.
 --
 -- `octo.utils.apply_mappings(kind, bufnr)` is the one seam every kind passes
 -- through, and — the part that matters — it CARRIES THE KIND, which is what a
