@@ -13,7 +13,16 @@ they were demoted rather than dropped. The pre-eviction doc is also at
 🔴 **Numbers here are RETIRED, never reused.** A rank is half a `claim-work` claim's identity, so
 re-minting one of these would point a new claim at closed work.
 
-Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 44, 46, 50, 51, 52, 55, 58, 61, 62
+Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 50, 51, 52, 55, 58, 61, 62
+
+🔴 **42 and 45 joined on 2026-09-14, and BOTH had been closed for days before the sweep that
+missed them.** Rank 42's three residuals were fixed by `ZacxDev/homelab-infra#749`, squash
+`6ee01514c`; rank 45 was a bare pointer at rank 51, which merged as `innovation-upstream/devrc#1515`
+(`cf77128d`) and was evicted in the first sweep — leaving 45 pointing into this file. The first
+sweep evicted what was *marked* closed; neither of these was, so **being marked open is not
+evidence an item is open.** The next session took 42 off the queue, re-derived that all three
+residuals were already gone, and paid a full recon round for it. When a sweep runs, re-measure the
+survivors against the code rather than reading their own status lines.
 
 ---
 
@@ -1035,3 +1044,40 @@ Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22,
     forcing: gate — with 17 this makes three of the four clawgate checks capable of reds that are
     not about the change, and this one is the worst of the three to dismiss: unlike 17 it can fail
     on a package a Go diff genuinely touches, so "it is just the flake" will eventually be wrong.
+
+42. ✅ **DONE — closed by `ZacxDev/homelab-infra#749`, squash `6ee01514c`**, "fix(clawgate): close
+    rank 42's three residuals — two guards walkable by a spelling, one banner carrying the DSN".
+    Verified 2026-09-14 against `origin/trunk` (the ref, not a working tree) and by RUNNING the
+    guards, not by reading them: 20 tests executed under one `-run` filter, all PASS, counted from
+    `--- PASS` lines rather than trusted from `ok` — a filter that matches nothing also prints `ok`.
+    Each residual has a named successor in the source:
+    - `aaOffScreen` px-only → `aaOffScreenScale` + `aaPxPerUnit` + `aaViewportUnits` convert every
+      absolute, font-relative and viewport unit, and an UNRECOGNISED unit falls back 1:1 rather than
+      being skipped — the fail-closed direction. Its own docstring now names the old hole
+      ("This arm used to require a `px` suffix"). Control: `TestAaHidingStylesSeesInlineStyles`.
+    - `aaEvictsIn`'s literal `maps` match → `aaIsMapsPkg(name, imports)` resolves the package
+      through the FILE's own import block, so an alias and a dot-import are both hits. Its control
+      `TestAaEvictsInSeesEveryWayAWindowCanDie` carries alias rows that differ from their un-aliased
+      twins in nothing else, so a predicate ignoring imports must fail one of each pair.
+    - `autoApprovePersistNotice` embedding `err.Error()` → `autoApprovePersistDetail` returns a
+      CLASSIFICATION, gated by an ALLOWLIST of sentinels (`context.DeadlineExceeded`/`Canceled`)
+      rather than a scrub — deliberately, because a scrub of host/port/user patterns would be a
+      guard on WORDS, correct for one driver wording and walked by the next release. The detail is
+      MOVED, not lost: `(*Server).persistNotice` logs the error in full, and
+      `TestEveryPersistNoticeIsLogged` fails if a fourth toggle calls the builder directly.
+    ORIGINAL: **Three residuals the UI round left disclosed rather than fixed.** `aaOffScreen`
+    understands only `px` offsets; `aaEvictsIn`'s `maps` arm matches the literal
+    package name so an aliased import evades it; `autoApprovePersistNotice` embeds
+    `err.Error()` verbatim, which for a pgx dial failure can carry
+    host/port/user/database into the browser.
+    forcing: none
+
+45. ✅ **CLOSED — it was never work of its own, and its target closed first.** Rank 51 merged as
+    `innovation-upstream/devrc#1515`, squash `cf77128d`, and was evicted to this file in the
+    2026-09-14 sweep — so from that moment 45 was a live queue entry whose only content was a
+    pointer into the closed-ranks ref. 🔴 **A "see rank N" entry outlives its target silently**:
+    nothing links the two, so evicting N leaves the pointer reading as open work. An entry whose
+    whole body is a redirect should be evicted WITH the rank it redirects to.
+    ORIGINAL: **SUPERSEDED BY RANK 51 — same PR (#1515), do not claim both.** Left in place because
+    ranks are stable; work it at 51.
+    forcing: none

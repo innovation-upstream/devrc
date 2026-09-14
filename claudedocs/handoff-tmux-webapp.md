@@ -207,7 +207,11 @@ From the analyze-service index (**recall — verify before relying on**):
 ## Next steps (ranked)
 
 
-🔴 **Ranks 1–8, 10–16, 18, 19–24, 27–41, 43–44, 46, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED 2026-09-14 — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They carry 68 `🔴` markers between them, so they are lessons rather than status. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — it had survived the first sweep because it was still open then, and an item completed AFTER a sweep must be evicted in the same change that closes it or the queue offers finished work to the next session. This doc stood at 327,624 B of a 327,680 B budget (56 B), and the next routine handoff write would have turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone; `claudedocs/refs/` is exempt from that test, `claudedocs/handoff-*.md` is not.
+🔴 **Ranks 1–8, 10–16, 18, 19–24, 27–41, 42, 43–46, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They carry 68 `🔴` markers between them, so they are lessons rather than status. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — it had survived the first sweep because it was still open then, and an item completed AFTER a sweep must be evicted in the same change that closes it or the queue offers finished work to the next session. This doc stood at 327,624 B of a 327,680 B budget (56 B), and the next routine handoff write would have turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone; `claudedocs/refs/` is exempt from that test, `claudedocs/handoff-*.md` is not.
+
+🔴 **RANKS 42 AND 45 JOINED THEM 2026-09-14, AND BOTH HAD BEEN CLOSED FOR DAYS WHILE STILL READING AS OPEN.** 42's three residuals were fixed by `ZacxDev/homelab-infra#749` (squash `6ee01514c`); 45 was a bare "work it at 51" pointer, and 51 merged as `#1515` and was evicted in the first sweep, so 45 had been pointing into the closed-ranks ref ever since. 🔴 **The rule above is not enough, because it only catches items you KNOW you closed.** The first sweep evicted what was *marked* closed; these two were not marked, so they survived — **an item's own status line is not evidence of its status.** A session took 42 off the queue, re-derived from the source that all three residuals were already gone, and paid a full recon round for it. **When you sweep, re-measure the survivors against the code.**
+
+⚠ **FOUR MORE SURVIVORS ARE NOT ACTIONABLE — read this before claiming one.** They are left inline for their `🔴` content, not because there is work in them: **9** was never a work item at all; **17** is `CLOSED AS NOT-OURS` (another session owns `ZacxDev/homelab-infra#685`, and the item as written was too narrow to have worked anyway); **25** and **26** are both ✅ DONE in `#695` (squash `8f6aa6d3a`) with their claims released. Counting these plus 42 and 45, **six of the fifteen entries this queue advertised were finished or fictional.** The genuinely-open head of the queue is **47**.
 
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
@@ -297,16 +301,6 @@ From the analyze-service index (**recall — verify before relying on**):
     `/session/{id}` and from the tmux page, sourced from the transcript, verified on the live pod
     after deploy — not inferred from a green test.
     forcing: none
-42. **Three residuals the UI round left disclosed rather than fixed.** `aaOffScreen`
-    understands only `px` offsets; `aaEvictsIn`'s `maps` arm matches the literal
-    package name so an aliased import evades it; `autoApprovePersistNotice` embeds
-    `err.Error()` verbatim, which for a pgx dial failure can carry
-    host/port/user/database into the browser.
-    forcing: none
-
-45. **SUPERSEDED BY RANK 51 — same PR (#1515), do not claim both.** Left in place because ranks
-   are stable; work it at 51.
-   forcing: none
 47. **Confirm the tmux collapse defect was the operator's actual symptom.** #796 fixed a real
    force-open bug, but the connected Brave profile has **zero** `cg.tmux.group.*` keys, so the
    collapse is not active there. Read that localStorage on the device where sessions appear
