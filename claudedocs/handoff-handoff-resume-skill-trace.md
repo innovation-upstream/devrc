@@ -17,34 +17,25 @@ Trace the handoff and resume skills end-to-end: their flows, cross-references,
 shared infrastructure, and usage patterns. No code changes — pure analysis.
 
 ## State now
-- Base clone on `main`; all work landed via PRs from worktrees. `origin/main` is moving fast
-  (4 commits landed during this session alone) — re-fetch before trusting any measurement.
-- 🔴 **The two reds this doc's ranks 1 and 2 named are BOTH CLOSED. A THIRD red, which this
-  doc never named, is what `main` is red on now** — and it is the only one left.
-  - Rank 2 (clawgate SKILL.md) was **already green before this session opened**: `#1640`
-    (`f45bb86e`) paid #1615's eviction. This doc still called it red because it was written
-    from a measurement taken before #1640 merged. The kickoff repeated it.
-  - Rank 1 (`handoff-index-store-claims-accuracy.md`) was **already an open PR** — `#1650`,
-    claimed 3 h earlier by another session — and had grown from the 1,677 B this doc records
-    to **7,062 B** over. Closed by merging, not by new work.
-- **Three PRs merged this session (all verified by CONTENT, not ancestry):**
-  - `#1655` `18a95e23` — **mine.** The unnamed third red: a needle FALSE POSITIVE.
-  - `#1650` `d4c7d5b7` — the index-store eviction + the stale grandfather-entry deletion.
-    I pushed one commit onto it (the `refs/` marker, below) and merged `main` in.
-  - `#1651` `22ae0817` — search-index close-out. I merged `main` into it so its CI stopped
-    showing a false red; **no change to its diff**.
-- **Measured at `22ae0817` in a detached worktree — `main`'s current gate state:**
-  - `test_no_handoff_doc_exceeds_its_budget` — **GREEN** (9 passed)
-  - `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` — **GREEN**
-  - `test_every_mutation_anchor_occurs_exactly_once_in_its_target` — 🔴 **RED**, 6 anchors 0x
-- **IN FLIGHT:** `fix/reanchor-budget-battery` (worktree `…/scratchpad/anc`, uncommitted,
-  1 file, +27/-8). Anchors test green on it (29 passed, 2 skipped). **The mutation battery
-  re-run that would prove the six rows still KILL is still running** — see the investigation
-  block. Nothing committed, nothing pushed, no PR.
-- 🔴 NO `clawgate-task:` field. `clawgate_handoff.sh resolve` exited **5** — 0 tasks, with its
-  positive control confirming the board is reachable. Per its own message that is a REAL
-  reading but does NOT prove the session id is right, so it is not a statement that the board
-  is fine.
+- Base clone on `main`; all work landed via PRs from worktrees. `origin/main` is moving very
+  fast (it advanced ~10 times during one session) — **re-fetch and re-measure before trusting
+  any number in this doc**, including the ones written minutes ago.
+- ✅ **All three of the reds this arc was opened against are CLOSED and verified on `main`.**
+  Measured at `f9ef66e4` in a detached worktree, by content and not by ancestry:
+  - `test_no_handoff_doc_exceeds_its_budget` — **GREEN** (`#1650` `d4c7d5b7`)
+  - `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` — **GREEN** (`#1655`
+    `18a95e23`)
+  - `test_every_mutation_anchor_occurs_exactly_once_in_its_target` — **GREEN** (`#1665`
+    `c1600c93`)
+- **Five PRs merged this arc:** `#1655` `18a95e23` · `#1650` `d4c7d5b7` (I added the `refs/`
+  marker commit) · `#1651` `22ae0817` (rebase only, no diff change) · `#1665` `c1600c93` ·
+  `#1663` `f9ef66e4` (this doc).
+- 🔴 **`main` IS STILL RED, on a fourth test that is NOT this arc's work and has no owner
+  here** — see rank 1. It was found the same way the other two unnamed reds were: by running
+  the control on `main` instead of trusting a PR's colour.
+- 🔴 NO `clawgate-task:` field. `clawgate_handoff.sh resolve` exited **5** — 0 tasks, its
+  positive control confirming the board is reachable. A REAL reading, but it does NOT prove
+  the session id is right, so it is not a statement that the board is fine.
 
 ## Open investigations — live diagnosis state
 
@@ -240,14 +231,64 @@ that produced the wrong number. Kept below as originally written, not silently r
   `SURVIVED` on C5 means the re-anchor is wrong. ⚠ It takes **>10 min** — run it detached,
   never under a 10-minute foreground cap (see Gotchas).
 
+### Do the six re-anchored battery rows still KILL, or only APPLY? — CLOSED 2026-09-14
+- as-of: 2026-09-14
+- ✅ **ANSWERED: they kill.** Full battery re-run against the re-anchored table —
+  `CONTROL test_handoff_doc_size.py: 9 passed`, `CONTROL
+  test_resume_state_handoff_resolution.py: 200 passed`, **`21/21 killed for the named
+  reason`**. C4 (re-anchored twice), C5 (re-anchored onto a live entry) and C11 (the positive
+  control) are each `KILLED(attributed)` — by the test their own row names, not a neighbouring
+  guard.
+- 🔴 **The FIRST `21/21` did not cover the final table and would have been quoted as if it
+  did.** A round-0 audit moved C4's anchor after that run; both runs print the identical
+  string `21/21 killed for the named reason`, so nothing about the number would have revealed
+  it was measured against a superseded table. **A mutation result is a claim about the table
+  that was in the file when it ran.** via: measurement (two full battery runs)
+- **Ruled out:** that the anchors test could stand in for the battery — it reports an anchor
+  is APPLIED (1x), never that its mutant KILLS. It was green on a table whose C4 anchor was
+  about to go 0x. via: code + measurement
+- **Next probe:** none — closed.
+
+### `main` red on `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` — NOT this arc's work
+- as-of: 2026-09-14
+- **Symptom + exact repro:**
+  ```bash
+  git -C ~/workspace/devrc worktree add -f /tmp/sb --detach origin/main
+  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/sb/scripts/tests/test_runtime_shebangs.py -q -k usr_bin_env
+  ```
+- **Observed (with values):** `AssertionError: a test writes its own shebang — use
+  testlib.mockbin.write_exec` — **12 sites, all in one file**,
+  `scripts/claude-hooks/tests/test_guard_core.py` at lines 4676, 4691, 4786, 4803, 4810, 4832,
+  4834, 4836, 4892, 4902, 4903 and 5019. Eleven are `#!/usr/bin/env bash`, one
+  (`:5019`) is `#!/usr/bin/env python3`.
+- **Ruled out:** that it is this arc's doing — reproduced on plain `origin/main` at
+  `e6f05e04` BEFORE `#1665`/`#1663` merged, and again at `f9ef66e4` after. Neither PR touches
+  `scripts/claude-hooks/` or `scripts/tests/test_runtime_shebangs.py`. via: measurement
+  (control run at two mainline shas)
+- **Leading hypothesis:** the guard and the offending sites were written by different changes
+  and never met on one tree — the same DISJOINT-FILE merge shape this doc already records
+  twice. `test_runtime_shebangs.py`'s last three touching commits are `af943906`, `cfdb3899`,
+  `b79ccfbe`; the writer sites live in a file none of them names. UNCONFIRMED — nobody has
+  bisected it.
+- **Next probe:** confirm the direction before fixing anything — `git log -S'#!/usr/bin/env
+  bash' --oneline -- scripts/claude-hooks/tests/test_guard_core.py` against the first commit
+  adding the guard, to establish which side arrived second. Then convert the 12 sites to
+  `testlib.mockbin.write_exec`, which is what the assertion names.
+
 ## Next steps (ranked)
-<!-- Renumbered 2026-09-14: previous ranks 1 and 2 are both CLOSED (rank 2 was already
-     closed before the session opened). Old 3-6 keep their content, shifted up. -->
-1. **Finish the battery re-anchor and open its PR.** Branch `fix/reanchor-budget-battery`
-   already exists with the change; it needs the battery verdict read, then a commit + PR.
-   Touches only `scripts/tests/mutation_battery_handoff_archive_and_cap.py`.
-   forcing: gate — `main` is red on `test_every_mutation_anchor_occurs_exactly_once_in_its_target`
-   right now, and the 4-hourly main-green deadman reproduces and toasts on it
+<!-- Renumbered 2026-09-14 (second time this day): the previous rank 1 (the battery
+     re-anchor) MERGED as #1665 c1600c93, so every rank below it shifted up by one. The
+     previous list went stale within hours of being written, which is this doc's own
+     recurring failure — see the Gotchas entry about re-measuring a rank before acting. -->
+1. **Unbreak `main`: the runtime-shebang guard.** 12 sites in
+   `scripts/claude-hooks/tests/test_guard_core.py` write their own `#!/usr/bin/env …` instead
+   of using `testlib.mockbin.write_exec`. Not this arc's work and it has no owner — see the
+   investigation block above for the exact lines and the probe that establishes which side
+   arrived second. 🔴 Establish the direction BEFORE converting: if the guard is the newer
+   side, converting 12 call sites is right; if the sites are, the guard may have shipped
+   already-red, which is the "permanently-red gate" case `claude/RULES.md` forbids.
+   forcing: gate — `main` is red on it right now, and the 4-hourly main-green deadman
+   reproduces and toasts on it
 2. **Demote `resume/SKILL.md` step 4 to `reference/`, and give the body a ceiling.**
    MEASURED 2026-09-12: step 4 (the two recall surfaces) is **19,536 of 47,684 bytes — 41%**
    of the largest skill body in the repo, which has **no `reference/` dir** (19 other skills
@@ -270,11 +311,11 @@ that produced the wrong number. Kept below as originally written, not silently r
    query in `claude/skills/activity/reference/queries.md`.
    forcing: none
 5. **Retract the expired Tekton-capacity claim in `CLAUDE.md`.** It records capacity as "not
-   the constraint" (measured 2026-09-10). MEASURED 2026-09-12: the scheduler refused to place
-   `devrc-ci-gxsd6-gate-pod` for 16 minutes — `0/5 nodes are available: 1 Insufficient cpu, …`,
-   `tekton-ci-1` at 98% CPU, 8 concurrent `devrc-ci` runs. It drained unaided, so this is
-   congestion not breakage — but that sentence is cited as the reason a branch-protection
-   question is settled, so a session will reason from it.
+   the constraint" (measured 2026-09-10, node at 14% CPU requests). MEASURED 2026-09-12: the
+   scheduler refused to place `devrc-ci-gxsd6-gate-pod` for 16 minutes — `0/5 nodes are
+   available: 1 Insufficient cpu, …`, `tekton-ci-1` at 98% CPU, 8 concurrent `devrc-ci` runs.
+   It drained unaided, so this is congestion not breakage — but that sentence is cited as the
+   reason a branch-protection question is settled, so a session will reason from it.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -456,28 +497,111 @@ that produced the wrong number. Kept below as originally written, not silently r
   (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`) behind a positive
   control**; a raw grep understates the count and reads as precise.
 
+- 🔴 **A DOC ABOUT A GUARD TRIPS THE GUARD — this doc reddened `main` on the very test it was
+  documenting.** The Gotchas bullet below QUOTES the retracted needle in order to explain it,
+  and the How-to-verify bullet spells out the positive-control fixture, which is a BARE
+  ASSERTION by construction — that is exactly what makes it a usable control and exactly what
+  makes it a finding once it is in a tracked file. **Caught by CI, not by me**, on the PR that
+  was landing this very doc. 🔴 **My own scanner probe missed both because it scanned the two
+  index-store docs and not the doc I was writing: a scanner is a claim about the corpus you
+  POINTED IT AT.** When you write prose about a content gate, run that gate over your own
+  prose before pushing.
+- 🔴 **THE RANKED LIST WENT STALE TWICE IN ONE DAY, AND THAT IS THE DOC'S OWN RECURRING
+  DEFECT.** The kickoff that opened this arc asserted two ranks: one had been closed by
+  `#1640` BEFORE the session started, the other was already an open PR (`#1650`) and had grown
+  from the recorded 1,677 B to 7,062 B. Then the replacement rank 1 was merged within hours
+  and the list was stale again. Three consecutive sessions now. The mechanism is structural: a
+  rank is written from a measurement taken *before* the doc is committed and **nothing
+  re-reads it**. 🔴 **Re-measure every rank before acting on it** — `git show
+  origin/main:<path> | wc -c`, or run the named test, costs one command and would have caught
+  every one of these.
+- 🔴 **`gh pr list --state open` IS WHAT PREVENTED DUPLICATE WORK, AND `claim-work` ALONE
+  WOULD NOT HAVE.** `claim-work` derives its slug from `<doc>-<rank>`; the other session had
+  claimed the same work under a slug from its own topic
+  (`handoff-doc-oversize-claims-accuracy`), so the two never collided and my claim was
+  granted. **Sweep open PRs even when your claim succeeds.**
+- 🔴 **A RED CHECK ON A PR IS NOT EVIDENCE ABOUT THAT PR — RUN THE CONTROL ON `main` FIRST.**
+  Measured four times this arc. `#1650` and `#1651` were both red on a test neither diff could
+  reach; `#1665`'s red was a guard red on `main`; and the one red that WAS mine (the needle,
+  on `#1663`) was distinguished from the others by exactly the same control. Verify staleness
+  STRUCTURALLY, not by timestamp: `git merge-base --is-ancestor <fix-sha> <pr-head>` answers
+  "was the fix even in this tree".
+- 🔴 **A SCOPED GATE RUN CANNOT SUPPORT AN UNSCOPED CLAIM.** I said "`main` is green except
+  doc-size" having run only the two gates I was targeting; the anchors red had been sitting
+  there since `#1648`, and the shebang red still is. **Name the tests you ran, or run the
+  tier** — and a green subset is never a statement about `main`.
+- 🔴 **A CONSTANT EXTRACTION HAS A THIRD LEDGER: THE MUTATION BATTERY'S `TARGETS`.** `#1648`
+  moved `MAX_BYTES`/`GRANDFATHERED`/`tightest_allowance` into `scripts/lib/handoff_budget.py`
+  and left six rows pointing at the file they came from. They did not fail loudly — they went
+  **0x**, which the battery scores as SURVIVED. The tell is the separate
+  `test_mutation_battery_anchors.py`, never the battery. Ledger-class list so far:
+  `test_no_public_ips.py`'s ALLOWLIST · `census_scan.py`/`ledger-check.sh` ·
+  `test_mutation_battery_anchors.py`'s `BATTERIES` · **and its `TARGETS` map.**
+- 🔴 **A BATTERY ROW ANCHORED ON LEDGER DATA BINDS TO THE TRAILING MEASURED COMMENT TOO, SO
+  ANCHOR ON THE ENTRY WITH THE MOST HEADROOM.** The mutation deletes the whole line, so the
+  comment cannot be trimmed out; that comment is re-measured whenever the allowance is bumped,
+  and an allowance is bumped when a doc runs out of headroom. C4 was anchored on the entry
+  with the LEAST headroom of the eleven — `handoff-tmux-webapp.md`, **930 B**, after growing
+  314,233 → 323,642 → 326,750 in two commits. Days from going 0x. Found by a round-0 audit,
+  re-verified, moved to `handoff-nix-disk-cleanup.md` (15,473 B).
+  ⚠ **Open DEFECT, declined on purpose and recorded rather than dropped** (not a rank — an
+  audit finding is a defect, and a rank queue that grows every round does not drain):
+  deriving C4/C5/C11's anchors from `handoff_budget.GRANDFATHERED` at import time would end
+  this class, but makes the anchors test's 0x direction **near-vacuous** for those rows —
+  it would compare a string against the file it was generated from. The defensible middle the
+  audit named is to derive those three and keep **C6**'s structural anchor
+  (`GRANDFATHERED: dict[str, int] = {`) as the literal tripwire. Operator-level call.
+- 🔴 **TWO MUTATION RUNS PRINTED THE IDENTICAL `21/21 killed for the named reason` AGAINST
+  DIFFERENT TABLES.** The first predated the C4 re-anchor. Nothing in the number says which
+  table it measured, so quoting the earlier one after the change would have been a false
+  claim that looked like evidence. **Re-run the battery after ANY edit to its table, and say
+  which table the number belongs to.**
+- 🔴 **THE MUTATION BATTERY TAKES >10 MIN AND A TIMEOUT KILL SKIPS ITS `finally` RESTORE.**
+  A foreground run hit a 10-minute cap and the SIGTERM left `scripts/resume-state.sh` carrying
+  row A6's mutant — tracked source, silently modified. **Run it detached**, and `git status`
+  the worktree afterwards regardless. Related: the outer `saved` snapshot is the only net for
+  a run killed BETWEEN rows, and it did not list the new target until `#1665` added it.
+- ⚠ **I committed from a worktree while that battery was actively mutating tracked files in
+  it.** `git status` showed `scripts/resume-state.sh` modified mid-run. Staging EXPLICIT paths
+  is the only reason a mutant did not land in the commit — `git add -A` would have committed
+  one as though it were source. This is the concrete case the never-blind-stage rule exists
+  for.
+- **The needle false positive, for the next person who trips it:** the retracted
+  `no create route` claim is matched by a deliberately short needle whose own comment predicts
+  false positives and prescribes the fix ("reword, or carry a retraction marker within
+  `_MARKER_WINDOW`"). Sites that merely QUOTE it — a gotcha reproducing the grep pattern, a
+  heading naming the sweep — are not assertions, and two of them straddled a line wrap, so
+  `grep -n` showed ONE hit where the normalising scanner saw TWO. **Use the repo's own scanner
+  behind a positive control**; a raw grep understates the count and reads as precise.
+
 ## How to verify
-- `main`'s three gates, at whatever `origin/main` is now (re-fetch first — it moved 4x in one
-  session):
+- The three gates this arc closed, at whatever `origin/main` is now (re-fetch first — it moves
+  constantly):
   ```bash
   git -C ~/workspace/devrc fetch origin -q
   git -C ~/workspace/devrc worktree add -f /tmp/mchk --detach origin/main
-  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_handoff_doc_size.py -q            # expect 9 passed
-  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_mutation_battery_anchors.py -q    # RED until rank 1 lands
-  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_subsystem_store_api.py -q -k RETRACTED_two_entry_boundary
+  nix develop ~/workspace/devrc -c python3 -m pytest \
+    /tmp/mchk/scripts/tests/test_handoff_doc_size.py \
+    /tmp/mchk/scripts/tests/test_mutation_battery_anchors.py -q     # expect 38 passed, 2 skipped
+  nix develop ~/workspace/devrc -c python3 -m pytest \
+    /tmp/mchk/scripts/tests/test_subsystem_store_api.py -q -k RETRACTED_two_entry_boundary
+  nix develop ~/workspace/devrc -c python3 -m pytest \
+    /tmp/mchk/scripts/tests/test_runtime_shebangs.py -q             # 🔴 STILL RED — rank 1
   git -C ~/workspace/devrc worktree remove /tmp/mchk --force
   ```
-- The three merged PRs, by CONTENT not ancestry (a squash merge never makes the branch head
-  an ancestor):
+- The five PRs, by CONTENT not ancestry (a squash merge never makes the branch head an
+  ancestor):
   ```bash
-  git -C ~/workspace/devrc show origin/main:claudedocs/handoff-index-store-claims-accuracy.md | grep -c "both spellings retracted"   # 1  (#1655)
-  git -C ~/workspace/devrc cat-file -e origin/main:claudedocs/refs/index-store-claims-accuracy.md                                    # exit 0 (#1650)
-  git -C ~/workspace/devrc show origin/main:scripts/lib/handoff_budget.py | grep -c "was the twelfth entry and is"                   # 1  (#1650)
+  git -C ~/workspace/devrc show origin/main:claudedocs/handoff-index-store-claims-accuracy.md | grep -c "both spellings retracted"           # 1  (#1655)
+  git -C ~/workspace/devrc cat-file -e origin/main:claudedocs/refs/index-store-claims-accuracy.md                                            # 0  (#1650)
+  git -C ~/workspace/devrc show origin/main:scripts/tests/mutation_battery_handoff_archive_and_cap.py | grep -c "SH, CAP, IDX, BUD"          # 1  (#1665)
+  git -C ~/workspace/devrc show origin/main:scripts/tests/mutation_battery_handoff_archive_and_cap.py | grep -c 'nix-disk-cleanup.md": 114_688'  # 1  (#1665)
   ```
-- The needle scan, with the control that makes its zero meaningful — load the repo's own
-  `_normalise_for_scan`/`_RETRACTION_MARKERS`/`_MARKER_WINDOW` from
-  `scripts/tests/test_subsystem_store_api.py`, assert that a bare retracted sentence — e.g.
-  `"the pod has no create route at all"`, retracted — still reports as a FINDING, then scan
-  the tracked corpus. A zero without that control is indistinguishable from a scanner wired
-  to nothing. ⚠ The control fixture is a BARE ASSERTION by construction, so writing it into a
-  tracked file needs its own marker or it becomes a real finding.
+- The battery's kill claim — and it must be RE-RUN, never quoted from this doc, because the
+  number is identical across tables:
+  ```bash
+  cd <a worktree>; nix develop ~/workspace/devrc -c python3 \
+    scripts/tests/mutation_battery_handoff_archive_and_cap.py      # >10 min; run it DETACHED
+  # expect: both CONTROL lines green, then `21/21 killed for the named reason`
+  git status --porcelain                                           # MUST be empty afterwards
+  ```
