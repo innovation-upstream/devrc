@@ -9,14 +9,17 @@ refreshes it) and introduced a synced cache at `~/.cache/subsystem-store` that
 `cairn sync` maintains. `scripts/lib/subsystem_read_store.py` is the ONE place
 that answers "where does this host read the store from".
 
-Three shipped readers went on resolving the FROZEN mirror anyway:
+FOUR shipped tools went on resolving the FROZEN mirror anyway:
 
     subsystem_recall.py's CLI     the reader `/resume` step 4 runs
     service_recon.py              the recon `/analyze-service` runs
     subsystem-audit.py            the auditor `/prune-index` runs
+    subsystem_touch.py's CLI      the index reporter `/handoff` step 4 runs
 
 Each was found by a human noticing, one at a time, after the previous one was
-fixed. Nothing in the tree could see the fourth. `subsystem_read_store`'s
+fixed — including the fourth, which this file predicted and then could not see,
+because `subsystem_touch` was already ledgered under `SITED` with an exemption
+whose premise was false. A row's REASON is load-bearing; see that row. `subsystem_read_store`'s
 docstring records the measurement: the frozen mirror served **26** `devrc/`
 entries and the cache **29**, and the frozen one printed
 "ALL 26 entries in `devrc/`, none omitted" — a completeness claim about a store
@@ -157,11 +160,25 @@ ROUTED: dict[str, str] = {
     ),
     "scripts/cairn-validate": (
         "the write-protocol parse check, and it routes here for the SAME reason "
-        "the three regressions above existed. `subsystem_touch`'s own `--store` "
-        "default is the FROZEN pre-cutover mirror, so a launcher that inherited "
-        "it would parse the PRE-write bytes and report a clean entry that is not "
-        "the one just written. Resolving through the resolver is what points the "
-        "mandated post-write check at the store that actually moved"
+        "the three regressions above existed. It resolves the store itself and "
+        "passes it to `subsystem_touch` EXPLICITLY, which is what points the "
+        "mandated post-write check at the store that actually moved. ⚠ Its "
+        "original reason said it routed because `subsystem_touch`'s own default "
+        "was the frozen mirror — that half is now obsolete (see the row below), "
+        "but the routing is not: an explicit `--store` is also what keeps the "
+        "launcher on the PERMISSIVE side of the stamp guard"
+    ),
+    "scripts/lib/subsystem_touch.py": (
+        "REGRESSION #4 OF FOUR, and the last holdout — found by the same "
+        "mechanism as the other three, one at a time, after they were fixed. Its "
+        "`--store` default WAS `DEFAULT_STORE_ROOT`, the frozen mirror, and none "
+        "of the mandated invocations in `claude/skills/subsystem-index/SKILL.md` "
+        "pass `--store`, so every census, `--validate` and touch report read a "
+        "store that had stopped moving (measured: mirror 161 entries, cache "
+        "244). It now defaults to `read_store_root()` and refuses an undateable "
+        "DEFAULT with `EXIT_UNSTAMPED_READ_STORE`, on the same contract as "
+        "`subsystem_recall` and `subsystem-audit.py`. It is ALSO in `SITED` "
+        "below: the mirror's path still has one legitimate reader"
     ),
 }
 
@@ -173,12 +190,20 @@ ROUTED: dict[str, str] = {
 #: this ledger only ever scans files this repo tracks.
 SITED: dict[str, str] = {
     "scripts/lib/subsystem_touch.py": (
-        "THE WRITER's target. `DEFAULT_STORE_ROOT` is the pre-cutover local "
-        "store — the constant `subsystem_read_store` was created to supersede "
-        "for READS. It is not a read surface: `--validate` and `--store` here "
-        "parse and write entries, and `cairn validate` passes the cache "
-        "explicitly. Exempt because pointing it at the synced cache would make "
-        "the writer's default target a directory `cairn sync` replaces wholesale"
+        "EXEMPT for the CONSTANT ONLY — its `--store` DEFAULT is no longer this "
+        "path, which is why the file is now in `ROUTED` above as well. 🔴 The "
+        "old reason here was 'exempt because pointing it at the synced cache "
+        "would make the writer's default target a directory `cairn sync` "
+        "replaces wholesale', and its premise was FALSE: this module never "
+        "writes to the store (its own `--help` says READ-ONLY, and "
+        "`TestNeverWrites` hashes the tree either side of every mode), so there "
+        "was no write for a resync to clobber — the exemption was guarding a "
+        "hazard that did not exist while the real one, a default reading a "
+        "frozen mirror, ran unchecked. `DEFAULT_STORE_ROOT` stays because the "
+        "mirror still has one legitimate reader: `cairn doctor` takes it as "
+        "`mirror_root` to check the mirror is still frozen, and "
+        "`subsystem_read_store` deliberately does not name the mirror, so this "
+        "IS the one definition"
     ),
     "scripts/cairn-cutover.py": (
         "EXEMPT — the mirror is its SUBJECT, not a store it reads for an answer. "
@@ -759,11 +784,19 @@ class TestTheSitedLedgerIsTwoWay:
 
         ⚠ Earlier still, the docstring said "Today exactly one is" while the
         assertion pinned two — a description narrower than its own body, which is
-        the shape this module is otherwise built to catch. It is one again, for a
-        different reason, and both are written down so the number is never just a
-        number.
+        the shape this module is otherwise built to catch. It is TWO again, for
+        yet another reason, and each is written down so the number is never just
+        a number.
+
+        The second is `scripts/lib/subsystem_touch.py`: its `--store` DEFAULT now
+        routes through the resolver, while `DEFAULT_STORE_ROOT` stays as the one
+        definition of the frozen mirror for `cairn doctor`'s freeze check. Both
+        rows say so.
         """
-        assert set(ROUTED) & set(SITED) == {"scripts/cairn"}
+        assert set(ROUTED) & set(SITED) == {
+            "scripts/cairn",
+            "scripts/lib/subsystem_touch.py",
+        }
 
 
 # =============================================================================
