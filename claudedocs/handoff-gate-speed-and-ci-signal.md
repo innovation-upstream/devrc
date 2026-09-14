@@ -29,21 +29,35 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- ✅ **THE ARC IS CLOSED. Rank 14 shipped this session after a FOUR-ROUND audit ladder** (round 0 +
-  three delta rounds), every round finding something the previous round's fix had introduced.
+- ✅ **THE ARC IS CLOSED, AND `main` IS GREEN — rank 16, the last thing holding it red, SHIPPED.**
+  Rank 14's four-round ladder finished this session (`#1681`), and both unowned reds are fixed
+  and merged (`#1692`, `#1690`).
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
   `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
   `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · `#1654` cfe4eb54 · `#1658` 00afff8c ·
-  `#1671` **2b27bdae** · `#1672` **42efad37**.
-- ⏳ **`#1681` OPEN** — round 3's fixes to `#1671`, carrying a 🔴 that is currently ON `main`.
-- 🔴 **`main` IS RED on two UNOWNED guards** (rank 16). Both reproduce on clean `origin/main`
-  `6c8c94d2` with ZERO PR content. `#1671`/`#1672` were merged THROUGH them, knowingly.
+  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` **053aa1f4** · `#1683` **8881029e** ·
+  `#1692` **ff5585ef** · `#1690` **f88e5235**.
+- ✅ **`main` IS GREEN, MEASURED ON THE REAL TIP — not on a constructed tree.** A `git archive` of
+  `origin/main` **`f88e5235`**, zero PR content: **644 passed, 0 failed** across
+  `test_runtime_shebangs.py`, `test_clawgate_writeback_guard.py` and
+  `test_clawgate_task_interview_guard.py` (which owns the SKILL.md ceiling). The same trio was
+  **2 failed** on every tip from `6c8c94d2` through `8881029e`.
+  ⚠ **The pre-merge gate was NOT re-run after its base moved, by operator decision.** The
+  combined merged-tree run (`053aa1f4` + both branches, merge `555baa62`) was 644 passed, then
+  `#1683` moved `main` to `8881029e` and that claim expired unrefreshed. What redeems it is the
+  post-merge reading above, which is a STRONGER claim than the one skipped — but it arrived
+  AFTER the merge, so for the duration of the merge itself the gate was stale. Recorded because
+  the honest version of "it was fine" is "it was fine, and we found out afterwards".
+- ⚠ **NEITHER FIX WAS AUDITED.** The pre-merge audit was offered and declined for `#1690`
+  (a 69 B restore, every claim a measurement) and not run for `#1692`. `#1692` carries a stated,
+  UNCLOSED gap: *"nothing execs these fixtures" is measured, not enforced by a test* — the count
+  ledger bounds it by failing on a new site, which is a forcing function, not a proof.
 - **CI IMPACT, MEASURED — the arc's two halves have OPPOSITE answers.** Local delivering
   (`gate.sh` 1.92→0.76 runs per merged PR, `nix build .#checks` 2.83→0.73, `scoped-tests.sh`
-  0→0.67); **CI wall time never moved and could NOT have** — see rank 5.
+  0→0.67); **CI wall time never moved and could NOT have** — see rank 5. Unchanged this session.
 - **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) with its positive control
   showing the board reachable — which proves a correct id WOULD have resolved, **not** that this
   session touched no task. Not a clean bill of health.
@@ -111,8 +125,9 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (main is RED, unowned), **8**
-(DUE 2026-09-18) and **6** (DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — measured).
+the END. **Ranks 1–16 are CLOSED tombstones.** Live: **8** (DUE 2026-09-18) and **6**
+(DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — measured). 🔴 **With rank 16 closed, `main` is
+green and NOTHING here is blocking** — rank 8's date is the only thing with a clock on it.
 
 1. **CLOSED** — `homelab-infra#792` merged dry-run (`dbe47814`). Arming is rank 8.  forcing: none
 2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.  forcing: none
@@ -186,11 +201,15 @@ the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (main is RED, unow
     GRID while the test asserted on the COPY-MODE snapshot, a different object. Fixed in the
     fixture; the redundant sibling guard DELETED (it survived every mutation of the shipped
     `.tmux.conf`, and the silent `copy_cursor_hyperlink`-removal class is caught only by
-    `spans_the_wrap`). ⏳ **`#1681` OPEN — round 3's fixes**, incl. a 🔴: the reachability
-    guard was a TAUTOLOGY (`#{copy_cursor_hyperlink}` reads at the CURSOR, which on entry sits
-    past the link, so it read `''` regardless). Control: cancel broken + 1.0s deschedule →
-    merged guard 6 passed (mutant SURVIVES), fixed guard 1 failed.
-    forcing: gate — `#1681` is unmerged, so the tautological guard is what is on `main`.
+    `spans_the_wrap`). ✅ **ROUND 3 LANDED TOO — `#1681` `053aa1f4`**, verified by CONTENT
+    (`origin/main`'s copy of the file is byte-identical to the PR head's, md5 `5c1c8753`), which
+    retires the tautological reachability guard (`#{copy_cursor_hyperlink}` reads at the CURSOR,
+    which on entry sits past the link, so it read `''` regardless). Gated on the MERGED tree
+    before merging, not on the PR branch: touched file **6 passed × 3 runs**, and the
+    inherited-red control unchanged at **exactly 2** — which is what made the red inherited
+    rather than introduced. **The ladder is four rounds and is OVER: round 3 was the last, and
+    it produced no round 4** — `claude/RULES.md` says a clean round ENDS the ladder.
+    forcing: none
 15. **CLOSED — `#1648` `a2c84a1c`, shipped and consumer-verified on the deployed tool.**
     `handoff_doc.py` now warns an author, in the proposal run above the diff, when an update would
     put the doc over its budget. 🔴 **It WARNS and never REFUSES, and that is forced**: a blocking
@@ -200,11 +219,67 @@ the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (main is RED, unow
     to `scripts/lib/handoff_budget.py`; `test_handoff_doc_size.py` still owns the policy.
     ⚠ Closes the FEEDBACK gap, not the budget problem.
     forcing: none
-16. 🔴 **`main` IS RED ON TWO UNOWNED GUARDS, AND BOTH ARE GUARD-vs-GUARD CONFLICTS, not bugs.**
-    Diagnosed, NOT fixed — the fix is a judgement call in other sessions' files and was put to
-    the operator. Claim `main-red-shebang-and-writeback-guards` HELD. Detail + the measured
-    eliminations are in the Open investigations block below.
-    forcing: gate — every PR inherits both reds, and a permanently-red gate trains click-through.
+16. **CLOSED — `#1692` `ff5585ef` (shebang scan) + `#1690` `f88e5235` (writeback seam), and
+    `main` VERIFIED GREEN on the real tip `f88e5235`: 644 passed, 0 failed, zero PR content.**
+    The operator answered: RED 2 → restore the literal; RED 1 → *"do we need this? can we
+    simplify?"*, answered by measurement rather than by picking an option. 🔴 **The framing this
+    item inherited — "guard-vs-guard conflicts" needing a gate to yield — is REFUTED for BOTH.**
+    RED 2 was not a three-way pull (the #1621 guard does not cover `~/.claude/…`, and the ceiling
+    had 125 B of headroom); RED 1's literals turned out to be TEST DATA for a production parser,
+    so no guard had to yield there either. Detail + every measurement is in the Open
+    investigations block below. Claim `main-red-shebang-and-writeback-guards` still HELD —
+    release it when both merge.
+    forcing: gate — until both land, every PR still inherits both reds, and a permanently-red
+    gate trains click-through.
+
+\n\n## Open investigations — live diagnosis state
+
+### RESOLVED — rank 16's two reds: BOTH "guard-vs-guard conflict" readings were wrong
+- as-of: 2026-09-14
+- 🔴 **SUPERSEDES the block above it** (`main` is RED on two UNOWNED guards …). That block's
+  framing — two gates in genuine conflict, needing an operator to decide which one yields — is
+  **refuted for both reds**, and its "Next probe: none needed, this is an operator decision" is
+  no longer the instruction to follow. Its *observations* (42 hits, all in `test_guard_core.py`,
+  all from `9b8969a8`; `FLOW_DEPLOYED` absent from SKILL.md) all reproduced exactly.
+- **RED 2 — measured, not argued.** The claimed three-way pull had only one live leg. #1621's
+  handle guard does **not** cover this path: `test_absolute_handle_paths.py` says so in its own
+  source (*"NO handle names `.claude`, so arming `~` for every handle reports ZERO
+  `~/.claude/…` findings"*) and uses that very shape as an example in its guidance text. And the
+  ceiling had room — SKILL.md was **15540 B against 15665**, so restoring the sentence #1640
+  evicted cost **69 B** and landed at **15609** (56 B headroom). `#1690`, 742 passed.
+- **RED 1 — the literals are TEST DATA for a production parser, which inverts the question.**
+  `guard_core._runs_as_shell` carries a branch existing solely to resolve an env-based
+  interpreter line (`<env> bash`, and the `-S VAR=1 bash` form), because a DIRECTLY-executed
+  file is handed to whatever that line names. Mutating `interp == "env"` → False (narrowest
+  expression, `count == 1`, `PYTHONDONTWRITEBYTECODE=1`) **KILLS**
+  `test_every_invocation_shape_that_runs_the_file_is_DENIED[{p}]` and
+  `[timeout 60 {p} /some/arg]` — and kills them for the branch's own reason: the kill is ALLOWED
+  because the file stopped being read as shell. Only the two DIRECT-execution shapes die, which
+  is the only arm that consults an interpreter line at all.
+- 🔴 **Ruled out — "just respell them `/bin/sh`" (the fix that looks obvious and is wrong).**
+  With `_CRASH1_BODY` respelled AND the same mutant applied, all **7** invocation shapes PASS:
+  the mutant **SURVIVES**. The respell buys green by making the branch UNTESTED, not by making
+  it unnecessary. via: measurement
+- **Ruled out — `testlib.mockbin.write_exec`.** It owns a `/bin/sh` line and RAISES on a
+  supplied one, so it is the respell above wearing a helper's clothes — unavailable here for
+  exactly the reason the control shows. via: code
+- **Ruled out — the sandbox hazard is present at these sites.** It needs the file EXECUTED. The
+  file has **18** subprocess/exec sites and **0** of them lie in the fixture span (4676–6244);
+  the bodies go to `gc.evaluate()` as TEXT. Positive control on that search: the same query
+  finds all 18 elsewhere, so the zero is a reading, not a wiring fault. via: measurement
+- **Ruled out — a plain allowlist entry is enough.** An entry keyed on `(path, substring)`
+  covering 40 lines pre-approves the 41st for free, in a 6,000-line file whose SUBJECT is
+  interpreter lines. So `#1692` gives the two entries a **COUNT** (`PINNED_COUNTS`), making it a
+  ledger over 42 known lines. Negative controls, each applied to a `cp -a` copy and reverted to
+  byte-identical (`cmp`): extra site → RED · site removed → count RED *and* scan RED (a
+  `/bin/sh` line is still an offender under shape 1) · orphan key → both new tests RED.
+  via: measurement
+- ⚠ **STATED, NOT ENFORCED:** "nothing execs these fixtures" is measured, not pinned by a test —
+  a static "does this span exec anything" check would go quietly vacuous. What bounds it is the
+  count ledger: a new site fails the suite and forces someone to re-verify the premise.
+- **Next probe:** none for the diagnosis. What remains is a decision: audit `#1690`/`#1692`
+  (offered, unanswered) and merge, then `claim-work --release
+  main-red-shebang-and-writeback-guards`.
 
 ## Decisions, so they are not re-litigated
 
@@ -226,20 +301,26 @@ the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (main is RED, unow
 ## How to verify
 
 ```bash
-# rank 14 landed — by CONTENT, never ancestry (squash merge)
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_tmux_hyperlink_open.py \
-  | grep -c "def test_the_copy_mode_retry_RECOVERS"        # expect 1
+# rank 14 / #1681 landed — by CONTENT, never ancestry (squash merge)
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_tmux_hyperlink_open.py | md5sum
+#   5c1c87536fd65523a8c4a12ffe2c227a  — byte-identical to the PR head's copy
 
-# rank 16 — BOTH reds, on a clean tree with ZERO PR content
+# rank 16 — main GREEN, on the real tip, with zero PR content. Re-measure; do not trust this age.
 S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
 (cd "$S" && nix develop ~/workspace/devrc -c python3 -m pytest \
   "$S/scripts/tests/test_runtime_shebangs.py" \
   "$S/scripts/claude-hooks/tests/test_clawgate_writeback_guard.py" \
-  -q -p no:cacheprovider --rootdir="$S")        # expect 2 failed
+  "$S/scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py" \
+  -q -p no:cacheprovider --rootdir="$S")        # 644 passed at f88e5235
 
-# the CI-impact measurement is re-runnable; both scripts are self-contained
-#   scratchpad/ci_durations.py   (GitHub per-status timestamps -> CI wall time)
-#   scratchpad/tool_adoption2.py (transcripts -> local gate/scoped-tests usage)
+# the counted pin can go RED in BOTH directions — the control that makes it a ledger
+python3 - <<'EOF'
+import sys; sys.path.insert(0, '/home/zach/workspace/devrc/scripts')
+from pathlib import Path
+from testlib import shebang_scan as S
+hits = S.scan_file(Path('/home/zach/workspace/devrc/scripts/claude-hooks/tests/test_guard_core.py'))
+print(sum('env bash' in l for _, l in hits), sum('env python3' in l for _, l in hits))  # 40 2
+EOF
 ```
 
 ## Gotchas / decisions / dead-ends
