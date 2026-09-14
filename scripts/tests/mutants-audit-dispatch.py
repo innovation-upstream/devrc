@@ -344,6 +344,28 @@ def det_restraints_dropped(t):
     return _swap(t, _DET_RESTRAINTS, '        + "",')
 
 
+def det_not_measured_states_a_and_c_dropped(t):
+    """Ship (b) alone — the state that owns a seam constant — and drop the two
+
+    that do not. This is what the FIRST render of this section actually did, and
+    it is the half-delivery shape of round-0 finding F2 reappearing one
+    paragraph down: a guard bound to the constant sees nothing, because the
+    constant is still there.
+    """
+    return _swap(
+        t,
+        '        "⚠ **Three states are NOT MEASURED rather than a number, and each "\n'
+        '        "means run the next round.** (a) A pre-image line you cannot blame, or "\n'
+        '        "a round you cannot blame in FULL — there is no cap and no sample; "\n'
+        '        "capping the corpus measurement at 400 lines moved the share on 8 of "\n'
+        '        "159 rounds and in BOTH directions. "\n'
+        "        + PROSE_DETERMINATION_STRUCTURAL_ZERO\n"
+        '        + " (c) An anchor THE LEDGER reports NOT MEASURED.",',
+        '        "⚠ One state is NOT MEASURED rather than a number. "\n'
+        "        + PROSE_DETERMINATION_STRUCTURAL_ZERO,",
+    )
+
+
 def det_conjunct_label_dropped(t):
     """The restraints ship as TEXT but nothing says they are CONJUNCTS.
 
@@ -3431,6 +3453,12 @@ ROWS = [
     ("Q10 threshold narrowed to three quarters — FORBIDS #1111",
      {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
      det_threshold_narrowed_to_three_quarters),
+    # Q12 is the half-delivery shape a second time, one paragraph down from the
+    # one F2 named — and the guard that catches it is deliberately NOT bound to
+    # the seam constant, because the constant survives this edit intact.
+    ("Q12 the (a) and (c) NOT-MEASURED states dropped",
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     det_not_measured_states_a_and_c_dropped),
     ("Q11 a structural zero returned as a measured miss",
      {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture",
       "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not"},

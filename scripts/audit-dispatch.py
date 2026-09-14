@@ -3485,8 +3485,19 @@ def render_prose_determination(round_no, emit_from, head_sha, anchor):
         "over 159 corpus rounds they move the share on 34 of them, on one from "
         "0.25 to 0.89, and flip the stop verdict on 3. They do NOT fix a "
         "REFLOW, which re-blames a whole paragraph to the rewrapper and biases "
-        "towards STOPPING; that is why the count is written down. "
-        + PROSE_DETERMINATION_STRUCTURAL_ZERO,
+        "towards STOPPING; that is why the count is written down.",
+        "",
+        # 🔴 ALL THREE NOT-MEASURED STATES, not just the one with a constant.
+        # The first render of this section shipped (b) alone, prefix and all,
+        # which read as a fragment AND quietly dropped the other two — the same
+        # half-delivery shape as F2, one paragraph down.
+        "⚠ **Three states are NOT MEASURED rather than a number, and each "
+        "means run the next round.** (a) A pre-image line you cannot blame, or "
+        "a round you cannot blame in FULL — there is no cap and no sample; "
+        "capping the corpus measurement at 400 lines moved the share on 8 of "
+        "159 rounds and in BOTH directions. "
+        + PROSE_DETERMINATION_STRUCTURAL_ZERO
+        + " (c) An anchor THE LEDGER reports NOT MEASURED.",
         "",
         "⚠ **NAMEABLE IS NOT SUFFICIENT.** Every one of these still has to hold, "
         "and they are reproduced here rather than named because a rule that "

@@ -7879,6 +7879,26 @@ def test_the_prose_determination_names_the_boundary_it_can_resolve():
         "the normal case says the anchor IS this round's own `<from>`, so a "
         "runner cannot tell a measurable round from an unmeasurable one"
     )
+    # 🔴 ALL THREE STATES SHIP, not only the one that owns a seam constant.
+    # MEASURED on the first render of this section: it shipped (b) alone —
+    # prefix and all — which read as a fragment AND silently dropped the other
+    # two, the same half-delivery shape as round-0 finding F2 one paragraph
+    # down. A brief cannot assume the reader has the skill.
+    assert "Three states are NOT MEASURED rather than a number" in section, (
+        "the section does not say how many NOT MEASURED states there are, so a "
+        "runner meeting one of them has no way to know the list is complete"
+    )
+    for frag, what in (
+        ("(a) A pre-image line you cannot blame", "the unblameable line"),
+        ("there is no cap and no sample", "the no-cap rule"),
+        (ad.PROSE_DETERMINATION_STRUCTURAL_ZERO, "the structural zero"),
+        ("(c) An anchor THE LEDGER reports NOT MEASURED", "the missing anchor"),
+    ):
+        assert frag in section, (
+            f"the section ships without {what}. Every one of these means 'run "
+            "the next round' for a DIFFERENT reason, and a runner who only has "
+            "some of them will read the missing ones as a measured miss."
+        )
 
     # The collision: a bare round-1 block makes the anchor and `<from>` one sha.
     rc, out, err = run_main(
