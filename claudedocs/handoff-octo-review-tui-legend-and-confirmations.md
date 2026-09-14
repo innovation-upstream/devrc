@@ -15,45 +15,43 @@ Make the `nvim-octo` review TUI usable: nothing told the operator how to act in 
 operator asks — a legend, an open-in-browser hotkey, and `?` to show the legend.
 
 ## State now
-✅ **SHIPPED — `#1653`, squash `d4179fbd`, merged and deployed to both hosts.**
-🔴 **NOT YET EXERCISED BY A HUMAN.** Needs a NEW alacritty window (see rank 1).
+✅ **SHIPPED AND THE DEPLOY IS NOW VERIFIED — `#1653`, squash `d4179fbd`.**
+🔴 **STILL NOT EXERCISED BY A HUMAN.** Needs a NEW alacritty window (rank 1).
 
-**What it does now:**
-- `?` opens a generated legend showing **this buffer's own bindings**, on 8 of 9 kinds;
-  `review_diff` uses **`g?`** instead so reverse-search survives in the one buffer holding
-  real source. The legend header names the key that opened it, derived, so the two cannot drift.
-- **Merge is bound again** — `\pm` — but behind a confirmation naming the PR, repo and method.
-  This deliberately REVERSES the earlier "merge must be typed as `:Octo pr merge`" decision;
-  the operator authored the reversal, twice. Also confirmed: `approve_review` (`<C-a>`),
-  `approve_pr` (`\qa`), `submit_review` (`\vs`), `delete_comment` (`\cd`).
-- **Deliberately NOT confirmed** (trivially reversible): `close_issue` `\ic`, `reopen_issue`
-  `\io`, `remove_reviewer` `\vd`, `remove_assignee` `\ad`, `remove_label` `\ld`.
-- A broken `apply_mappings` seam now **tears the editor down**: deletes the `:Octo` command and
-  writes the diagnosis into a scratch buffer that becomes the visible buffer. Exit stays 0.
+**Deploy, measured after the fact** (the previous revision of this doc asserted "deployed to both
+hosts" while `ship.sh` was still running — see the Gotchas entry):
+- `ship.sh` rc=0; **2 hosts compared, both at `d4179fbd`**; workbench 598 managed artifacts /
+  laptop 557, **0 dangling, 0 stale** on each; both `VERIFIED — on branch main at origin/main
+  (clean tree) + switched`. LAN unreachable, fell back to nebula for the laptop, as always.
+- **The DEPLOYED artifact on the laptop was probed headlessly** (`/nix/store/31l5l2zn…-nvim-octo`,
+  no window raised): `legend rows: pull_request=46 review_diff=20`, and
+  `legend key: pull_request=?  review_diff=g?`. So the per-kind key resolution is live on the
+  machine that will be used, not merely in the repo.
 
-**Recon facts that shaped it, measured:**
-- `open_in_browser = <C-b>` **ALREADY EXISTED** on 5 kinds. That ask was discoverability, not a
-  missing feature — nothing was added for it.
-- `maplocalleader`/`mapleader` are both `nil` → a literal `\`. The legend prints RESOLVED keys.
-- 131 bindings declared at the base across 9 kinds; **141 actually bound** at HEAD (123 declared,
-  8 moved into `CONFIRMED_VERBS`). Those three numbers differ by WHICH SET is counted.
-- `?` and `g?` were both free in all 9 tables.
+**What it does:** `?` opens a generated legend of **this buffer's own bindings** on 8 of 9 kinds;
+`review_diff` uses **`g?`** so reverse-search survives where real source is read. Merge is bound
+again as `\pm` behind a confirmation naming PR, repo and method — a deliberate reversal of the
+earlier "merge must be typed" decision, authored by the operator twice. Also confirmed:
+`approve_review` (`<C-a>`), `approve_pr` (`\qa`), `submit_review` (`\vs`), `delete_comment`
+(`\cd`). Deliberately NOT confirmed (trivially reversible): `close_issue`, `reopen_issue`,
+`remove_reviewer`, `remove_assignee`, `remove_label`. A broken `apply_mappings` seam deletes the
+`:Octo` command and writes the diagnosis into the visible buffer; exit stays 0.
 
-**Audit ladder: round 0, round 1 (blind), two fix rounds. ZERO 🔴 in any round.**
-- Round 0 measured that the original `error()`-on-broken-seam design was false: nvim prints the
-  error, runs the rest of the rc, opens the review buffer and exits 0.
-- Round 1 (blind) found the legend's per-kind closure had no guard — a mutant pinning it to one
-  kind left all 167 tests green. Shipped code was correct; the guard was missing.
-- Final sweep: **44 mutants, 43 killed**, comment-only control SURVIVED, every earlier mutant
-  retained and still dying. Suite 176 green.
+**Recon that shaped it:** `open_in_browser = <C-b>` ALREADY existed on 5 kinds — that ask was
+discoverability, and nothing was added for it. `maplocalleader`/`mapleader` are both `nil` → a
+literal `\`, so the legend prints RESOLVED keys. `?` and `g?` were both free in all 9 tables.
 
-**CI was RED on the branch and it was NOT this PR** — `test_NO_TRACKED_FILE_ASSERTS_the_
-RETRACTED_two_entry_boundary`, tripping on `claudedocs/handoff-index-store-claims-accuracy.md`,
-a different effort's doc. `18a95e23` (#1655) had fixed it upstream; the branch predated that fix.
-**Verified on the MERGED tree: 964 passed**, including that guard.
+**Audit ladder: round 0, round 1 (blind), two fix rounds, ZERO 🔴.** Final sweep 44 mutants /
+43 killed, comment-only control SURVIVED, every earlier mutant retained. Suite 176 green.
+**The branch's CI red was another effort's doc** (`test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_
+two_entry_boundary` on `claudedocs/handoff-index-store-claims-accuracy.md`), fixed upstream by
+`18a95e23`, which the branch predated — **the MERGED tree ran 964 passed**, that guard included.
 
-- **This session resolved no clawgate task** — `resolve` exited 5. An unknown session id answers
-  200 with an empty array, so that is NOT evidence it touched none. No `clawgate-task:` written.
+- **IN FLIGHT: `devrc#1666`** — this document. OPEN, head `1cb19ea8`, `MERGEABLE/UNSTABLE`.
+- **This session resolved no clawgate task** — `resolve` exited 5 with a POSITIVE CONTROL (the
+  same endpoint answered 3 links for another session, so the board is reachable and the token
+  accepted). That narrows it to "a correct id WOULD have resolved"; it is NOT evidence this
+  session touched none. No `clawgate-task:` field written.
 
 ## Open investigations — live diagnosis state
 
@@ -145,6 +143,14 @@ a different effort's doc. `18a95e23` (#1655) had fixed it upstream; the branch p
 - ⚠ **Use `nix develop <the branch's worktree>`, not the base clone**, for anything on this
   subsystem: `luajit` joined `gateTools` in this PR, so a base clone predating it has no
   interpreter and the suite fails its own precondition.
+
+- 🔴 **THIS DOC ASSERTED "DEPLOYED TO BOTH HOSTS" WHILE `ship.sh` WAS STILL RUNNING.** It was
+  written from the merge, not from the deploy — the same shape as every other error this arc
+  produced, and in the one document whose job is to be trusted next session. It happened to be
+  true, which is worse than being caught: nothing in the doc distinguished a verified deploy from
+  an expected one. **A handoff written mid-operation must say which claims are pending**, or the
+  next reader inherits a prediction wearing the clothes of a measurement. The values above were
+  added only after `ship.sh` returned rc=0 and the laptop's deployed artifact was probed.
 
 ## How to verify
 ```bash
