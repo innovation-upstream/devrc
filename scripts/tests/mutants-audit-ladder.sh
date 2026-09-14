@@ -521,52 +521,98 @@ echo "== the DETERMINATION: what turns the hatch's judgement into a count =="
 # exists so the next attempt cannot land it quietly.
 run "determination: round floor moved to ROUND 1" \
     test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
-    'never available before ROUND 2.**' \
-    'nameable from ROUND 1 when the payload is entirely prose.**'
-# The fail-safe DIRECTION, inverted. Every unattributable finding moves to the
-# stopping side and the count silently becomes easier to reach — a reading a
-# reviewer would accept, and the same shape as the `If in doubt, STOP` mutant
-# three rows up, which survived a green suite until its paragraph was pinned.
-run "determination: unattributable -> ladder-authored" \
+    'and never available before ROUND 2. The ⚠ caveat directly' \
+    'and nameable from ROUND 1 when the payload is prose. The ⚠ caveat directly'
+# 🔴 THE OPERAND, SWAPPED BACK TO FINDINGS. This is not a hypothetical either:
+# it is the rule this PR's own first draft shipped, and the reason it was
+# re-keyed is that a recorded fix item almost never carries a `file:line`, so
+# the denominator becomes whatever the counter picks — and on the record the
+# rule must read, it scored `#1111` at 0 of 7 and FORBADE the case the section
+# rests on.
+run "determination: operand swapped back to FINDINGS" \
     test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
-    'all count as NOT ladder-authored' \
-    'all count as ladder-authored'
+    'The unit is
+LINES, never findings' \
+    'The unit is
+FINDINGS, never lines'
+# The fail-safe DIRECTION, inverted: a cap turns a full count into whatever the
+# first N lines happen to say. MEASURED — a 400-line cap moved the share on 8
+# of 159 corpus rounds and in BOTH directions, so this is not a conservative
+# simplification, it is a different measurement wearing the same number.
+run "determination: a CAP reintroduced on the operand" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    '**there is no cap and
+no sample**' \
+    '**cap it at the first 400
+pre-image lines**'
+# The structural zero, re-read as a measurement. Same ACTION, different CLAIM —
+# `claude/RULES.md`'s `empty-result` rule, and 3 of 159 corpus rounds are in
+# exactly this state.
+run "determination: a structural zero becomes a measured zero" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'and a structural zero is not a measured zero' \
+    'and a structural zero counts as a measured zero'
+# 🔴 THE DERIVATION. A threshold with no derivation is a number somebody picked,
+# and the defect a round-0 audit found in this PR's first draft was not the
+# fraction but that it sat on the population MEAN. Deleting the sentence that
+# says re-derive-do-not-tune is the edit that makes the next move invisible.
+run "derivation: 're-derive, do not tune' deleted" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'population: re-derive before moving the number, do not tune it.' \
+    'population.'
+# 🔴 THE HONEST-COST SENTENCE. It is the half a reader would most like to lose:
+# without it the rule reads as a shortcut that fires at round 2, when measured
+# it fires there for 3 of 7 prose ladders.
+run "derivation: the measured round-2 price deleted" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    '**Two rounds is the floor; the measured typical price is
+three.**' \
+    '**Two rounds is the
+floor.**'
 # 🔴 THE SCOPE ROW, AND THE REASON `run_pair` EXISTS. Widening the THRESHOLD and
 # refreshing the pinned constant in the same edit is what a dutiful author does
 # when a whole-string pin goes red — its own message tells them to. MEASURED on
 # `#1678`: that pair scored 17 passed AND `✅ 20 row(s), all as expected`. Here
 # both of this file's own pins stay GREEN by construction (the constant now
 # matches the widened document) and only the SEAM guard, which reads the copy of
-# the scope that ships in every brief, can see it.
+# the scope that ships in every `--emit-claims` run, can see it.
 run_pair "determination: THRESHOLD widened, constant refreshed" \
-    test_the_determinations_SCOPE_matches_the_one_every_brief_ships \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships \
     "$SKILL" \
-    'when at
-least two-thirds of those findings' \
-    'when at
-least one of those findings' \
+    'nameable when at least TWO-THIRDS of the attributable pre-image lines' \
+    'nameable when at least ONE of the attributable pre-image lines' \
     "$SUITE" \
-    'when at least two-thirds "
-    "of those findings' \
-    'when at least one "
-    "of those findings'
+    'reason is nameable when at least TWO-THIRDS of the attributable pre-image "
+    "lines' \
+    'reason is nameable when at least ONE of the attributable pre-image "
+    "lines'
 
-# 🔴 THE OTHER END OF THE SEAM. The two rows above mutate the SKILL; these mutate
-# the copy `audit-dispatch.py` SHIPS to every round-2-and-later auditor, leaving
-# the skill untouched. Both directions matter: the guard exists so the scope
-# cannot move in ONE file, and a guard watched in only one direction is half a
-# guard. Neither of these is scoreable in `mutants-audit-dispatch.py` — that
-# harness runs `test_audit_dispatch.py` alone and cannot see this killer.
-run "seam: the BRIEF's threshold widened" \
-    test_the_determinations_SCOPE_matches_the_one_every_brief_ships "$DISPATCH" \
-    '    "**The reason is nameable when at least two-thirds of those findings are "' \
-    '    "**The reason is nameable when any of those findings are "'
-run "seam: the BRIEF's round floor inverted" \
-    test_the_determinations_SCOPE_matches_the_one_every_brief_ships "$DISPATCH" \
+# 🔴 THE OTHER END OF THE SEAM. The rows above mutate the SKILL; these mutate
+# the copy `audit-dispatch.py` SHIPS to every round-2-and-later ladder runner,
+# leaving the skill untouched. Both directions matter: the guard exists so the
+# scope cannot move in ONE file, and a guard watched in only one direction is
+# half a guard. None of these is scoreable in `mutants-audit-dispatch.py` —
+# that harness runs `test_audit_dispatch.py` alone and cannot see this killer.
+run "seam: the EMITTED threshold widened" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "**The reason is nameable when at least TWO-THIRDS of the attributable "' \
+    '    "**The reason is nameable when any of the attributable "'
+run "seam: the EMITTED round floor inverted" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
     '    "Round 1 has no previous round to attribute to, so it can never satisfy "' \
     '    "Round 1 may satisfy this when the payload is entirely prose, so "'
+# 🔴 THE TWO NEW SEAM OWNERS — round-0 finding F2. Before this PR the emitted
+# copy carried the THRESHOLD and the FLOOR and neither restraint, so a guard
+# over the seam certified the permissive half alone.
+run "seam: the EMITTED restraints reworded" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "· and the recurring SHAPE swept at every site rather than at the one that "' \
+    '    "· and the recurring SHAPE swept at the site that "'
+run "seam: the EMITTED structural-zero rule reworded" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "(b) A round whose ladder anchor IS its own `<from>` — what a missing or "' \
+    '    "(b) A round whose ladder anchor is unusual — what a missing or "'
 
-echo
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
 # 🔴 These two are the rows the module's docstring marks as the reachability
 # controls, and they were the gap this harness shipped with: without them the
@@ -585,7 +631,7 @@ run_move "stop clause moved to its OWN bullet in RULES.md" \
 # then get the caveat's demand with no method anywhere near it.
 run_move "determination moved BELOW the retraction record" \
     test_the_determination_follows_the_caveat_it_qualifies "$SKILL" \
-    '(lambda a, b, c: t[:a] + t[b:c] + t[a:b] + t[c:])(t.rindex("\n\n", 0, t.index("IS AN OBSERVATION ABOUT AUTHORSHIP")) + 2, t.index("🔴 **WRITING IT DOWN"), t.index("## Mutation testing:"))'
+    '(lambda a, b, c: t[:a] + t[b:c] + t[a:b] + t[c:])(t.rindex("\n\n", 0, t.index("IS AN OBSERVATION ABOUT THE LINES")) + 2, t.index("🔴 **WRITING IT DOWN"), t.index("## Mutation testing:"))'
 run_move "ATTRIBUTION section moved ABOVE the stop rule" \
     test_the_attribution_gate_comes_after_the_rule_it_bounds "$SKILL" \
     't[:t.index("### 🔴 A clean round ENDS the ladder.")] + t[t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD"):t.index("## Mutation testing:")] + t[t.index("### 🔴 A clean round ENDS the ladder."):t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD")] + t[t.index("## Mutation testing:"):]'

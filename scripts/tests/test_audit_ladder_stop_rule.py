@@ -673,9 +673,9 @@ SKILL_PROSE_DETERMINATION = (
     "reason is nameable when at least TWO-THIRDS of the attributable pre-image "
     "lines are ladder-authored**, and the count goes in the summary as "
     "`<ladder>/<attributable>` so a reader sees the denominator and not just "
-    "the ratio. The three commands are under the caveat below. Round 1 has no "
-    "previous round to attribute to, so it can never satisfy this: **two rounds "
-    "is the floor, and no rule may move it.**"
+    "the ratio. The three commands sit below the ⚠ paragraph that follows this "
+    "one. Round 1 has no previous round to attribute to, so it can never "
+    "satisfy this: **two rounds is the floor, and no rule may move it.**"
 )
 
 # 🔴 The fail-safe half, pinned WHOLE for the reason the caveat above is: every

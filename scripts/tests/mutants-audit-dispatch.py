@@ -140,7 +140,14 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # 16 — the exact shape `mutants-audit-ladder.sh` recorded twice before its own
 # floor was pinned to a test. This one still is not; it is maintained by this
 # comment and by whoever reads it.
-MIN_TESTS = 131
+#
+# 🔴 ROUND 19 RAISED IT AGAIN, 131 -> 147, at m = 154 — COUNTED from this
+# harness's own `POS  unmutated copy .......... 154 passed` line, put through
+# the same formula, `154 - min(50, max(1, 154 // 20))` = 154 - 7 = 147. NOT
+# derived by adding this round's new tests to 131, and the jump is larger than
+# the test count because one of them is parametrized over a twelve-row fixture
+# ledger.
+MIN_TESTS = 147
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -2623,10 +2630,19 @@ ROWS = [
     # fixes are the SAME mechanism: the round-1 assumption warning asks
     # `range_anchor` what the next round will anchor on, so dropping the bare
     # fallback makes that anchor None and the warning silent again.
+    # 🔴 N2 GAINED A FOURTH KILLER IN ROUND 19, and it is the same mechanism a
+    # third time: the prose determination's COLLISION case — the anchor and the
+    # round's own `<from>` being one sha — is reached from a BARE `round=1`
+    # block, which is exactly what this fallback makes readable. Drop the
+    # fallback and that block anchors nothing, so the collision never arises and
+    # the guard over it goes red. Recorded rather than re-scoped: it is a true
+    # report about a real coupling, and the alternative is a fixture that stops
+    # exercising the state 3 of 159 corpus rounds are actually in.
     ("N2  the bare round-1 fallback is dropped",
      {"test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
       "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
-      "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement"},
+      "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement",
+      "test_the_prose_determination_names_the_boundary_it_can_resolve"},
      range_anchor_loses_the_bare_fallback),
     # 🔴 THE MIRROR IMAGE, and the reason the two readers are separate
     # functions: "one anchor everywhere" is wrong on the WRITER's side, and it
@@ -3358,8 +3374,16 @@ ROWS = [
     # whose suite IS that module and which already copies this script into its
     # tree. A row must be scored by a harness that can see its killer.
     # --------------------------------------------------------------------- #
+    # Q1 kills two, and the second is worth knowing rather than hiding: with the
+    # floor at round 1 the determination — which carries its own fenced command
+    # block — prints beside the round-1 `audit-claims` skeleton, and the
+    # round-trip guard that reads the emitted block back through this script's
+    # own parser then has two fences to choose from. So the withdrawn `#1678`
+    # rule does not merely permit a wrong stop, it corrupts the artefact the
+    # NEXT round anchors on. Recorded, not re-scoped.
     ("Q1  the determination's round floor moved to ROUND 1",
-     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before"},
+     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+      "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
      det_floor_to_round_one),
     # Q2 kills five: with the section gone every guard over it fails, four of
     # them on the explicit "carries no determination section at all" assertion
