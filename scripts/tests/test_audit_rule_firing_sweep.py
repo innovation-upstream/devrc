@@ -61,6 +61,18 @@ NOT_A_RULE = {
         "paragraph is pinned by nothing and may be edited freely",
     "Findings by severity (🔴 deploy-blocking":
         "the OUTPUT FORMAT. The 🔴 here is a severity glyph being defined, not a rule",
+    "RETRACTED DRAFT":
+        "the record of a rule that was SHIPPED AND WITHDRAWN (#1678 / e8fa6fca). A "
+        "retraction is the opposite of a rule that can fire — it exists so the draft "
+        "is not re-derived — so there is nothing for the sweep to date",
+    "WHY IT WAS WRONG — the substitute collapsed":
+        "the evidence for that retraction (the 75% prose-class measurement and the "
+        "#1111 counter-instance). Evidence for a withdrawn rule, not a rule",
+    "THE DEEPER REASON, AND THE ONE TO KEEP":
+        "the durable lesson the retraction leaves behind — that only an OBSERVABLE, "
+        "never a class property, separates a non-terminating prose ladder from a "
+        "converging one. It constrains the next PROPOSAL rather than any audit "
+        "round, so no round can be measured against it",
 }
 
 

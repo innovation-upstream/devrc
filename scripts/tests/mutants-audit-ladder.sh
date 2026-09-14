@@ -149,7 +149,7 @@ ROWS=0
 # `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
 # this_modules_size`, which reads the number below, counts the module, and
 # fails with the replacement value. Growth cannot silently outrun it again.
-MIN_TESTS=16
+MIN_TESTS=15
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on
@@ -445,10 +445,10 @@ doubt, STOP:'
 # structure rather than to text.
 run "hatch: blank line before the caveat deleted" \
     test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat "$SKILL" \
-    'summary that you are paying it.
+    'open rather than absent.
 
 ⚠ **THIS DOES NOT OVERRIDE' \
-    'summary that you are paying it.
+    'open rather than absent.
 ⚠ **THIS DOES NOT OVERRIDE'
 
 echo

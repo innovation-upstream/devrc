@@ -372,14 +372,7 @@ about text round 1 had written, and the gate could not see it.
 the rounds will not stop on their own; read the next paragraph before acting on it.** No 🔴 · no
 blast radius beyond "the document contains a false sentence" · and the recurring SHAPE swept at
 every site rather than at the one that was reported. Record what you are NOT fixing, on the PR,
-so the next reader knows it is open rather than absent. 🔴 **THE REASON MAY BE STRUCTURAL, AND A
-STRUCTURAL REASON IS NAMEABLE AT ROUND 1 — you do not owe a round to prove it.** When this PR's
-payload is ENTIRELY prose, "fixed a defect" and "reworded a warning" are the same edit at EVERY
-round, so the attribution gate cannot fire at any round — that is a property of the DIFF, readable
-before round 2, not a pattern you must watch repeat. Name that, with the payload classification
-round 1 already owes, and the precondition is met on the first round that returns no 🔴. 🔴 **The
-price is explicit and you must state it: round 1's own fixes then ship UNAUDITED** — so sweep the
-SHAPE at every site before stopping, and write in the summary that you are paying it.
+so the next reader knows it is open rather than absent.
 
 ⚠ **THIS DOES NOT OVERRIDE THE FINDINGS-KEYED STOP RULE, AND IT IS NOT A LICENCE TO STOP ON A
 ROUND THAT FOUND THINGS.** That rule still governs: a round returning findings that needed fixing
@@ -406,24 +399,42 @@ re-pointed it at itself — found by the next round. Both of those paragraphs ar
 because both pins pass while a paragraph sits between them. This paragraph is pinned by nothing —
 edit it freely.
 
-🔴 **WHY THE ROUND-1 SHORTCUT WAS ADDED, AND WHAT IT COSTS.** Operator report, 2026-09-14: prose
-ladders were still grinding — *"Round 1: 3🟡/3🟢. Round 2: 3🟡/3🟢. Every finding in both rounds is
-the same shape … each round's findings are overwhelmingly in prose the previous round's fix
-wrote."* That session reached the hatch **correctly**, and its preconditions held — but only at
-round 2, because *"you can already name why the rounds will not stop"* reads as something you must
-watch repeat. It is not: on a 100%-prose payload the gate's inertness is a property of the diff,
-true at round 1 and every round after. The old wording charged a round to re-discover it, and that
-round's findings were themselves prose the previous fix wrote — the loop the hatch exists to end,
-running one extra turn by construction. ⚠ **The cost is real and is stated in the criteria
-paragraph rather than hidden here: stopping at round 1 ships round 1's fixes unaudited**, and this
-skill's own evidence (#505, #1111, `homelab-infra` #702) is that a fix round's prose is the
-likeliest next finding. That is why the sweep-every-site precondition and the write-it-down
-obligation are NOT relaxed — they are the only things standing where a round used to.
-🔴 **SEVERITY-KEYED STOPPING WAS CONSIDERED AGAIN HERE AND REJECTED AGAIN.** The operator's first
-framing was *"stop after 0 high sev"*; that is the `deploy-blocking only` rule this skill already
-rejected, and #702 is the counter-evidence — six rounds, zero 🔴, each catching a false claim the
-previous fix had written. This change keeps the findings-keyed rule and the 🔴 precondition
-untouched; it only removes the round tax on naming a reason that was already true.
+🔴 **RETRACTED DRAFT — "a STRUCTURAL reason is nameable at ROUND 1". Shipped as `#1678`
+(`e8fa6fca`), retracted within hours. DO NOT RE-DERIVE IT; the next four paragraphs are why.**
+The operator reported prose ladders still grinding (round 1: 3🟡/3🟢, round 2: the same, every
+finding in prose the previous round's fix had written) and asked for a stop keyed on zero
+high-severity findings. That ask was declined as the `deploy-blocking only` rule rejected at the
+top of this section — and then the replacement **re-implemented it by accident**, which is the
+part worth remembering.
+
+🔴 **WHY IT WAS WRONG — the substitute collapsed INTO the rule it was avoiding.** The draft's
+precondition had two parts: *the payload is entirely prose* and *no 🔴*. The first is true **by
+construction for the whole prose class**, so the only discriminating test left was the 🔴 count.
+MEASURED: **90 of the last 119 first-parent commits on `main` (75%) touch only `.md`**, so that
+was the dominant class, not a carve-out. 🔴 **And it would have killed its own founding
+evidence** — this section rests on devrc **#1111**, which touches exactly one file,
+`claudedocs/handoff-audit-pr-ladder.md`. Under the draft #1111 qualifies for the round-1
+shortcut and stops before producing the round-2 finding the hatch exists on.
+
+🔴 **THE DEEPER REASON, AND THE ONE TO KEEP: "watch it repeat" IS THE ONLY OBSERVABLE THAT
+SEPARATES A NON-TERMINATING PROSE LADDER FROM A CONVERGING ONE.** Both have a 100%-prose
+payload; the class property cannot tell them apart. The draft replaced the observable with the
+property, so the distinction the ⚠ caveat above still demands became unmakeable. Anything
+proposing to shorten this ladder must say what it observes, not what the diff IS.
+
+⚠ **Two supporting claims the draft made were also false, checked by audit and reproduced.**
+(a) *"the attribution gate cannot fire at any round"* — it can: on a prose-payload PR a round
+whose fix touches only the test module changes **zero payload lines**, and two consecutive such
+rounds fire the gate; that is the `#498` shape this section already cites. (b) *"with the payload
+classification round 1 already owes"* — no artefact carries it: `render_ledger` tells round 1
+*"Start the ledger at your round 2"* and `emit_claims_skeleton` emits no classification field, so
+the permission depended on something the pipeline never produces.
+
+⚠ **The measured guard gap, recorded so the next attempt budgets for it:** with the draft in
+place, widening its scope from `ENTIRELY prose` to `MOSTLY prose or otherwise hard to gate` and
+refreshing the pinned constant scored **17 passed AND `✅ 20 row(s), all as expected`**. The
+whole-paragraph pin and the battery are both blind to that word. A future version of this
+shortcut needs a battery row on its SCOPE, not only on its presence.
 
 ## Mutation testing: deletion-mutants are the EASY half
 

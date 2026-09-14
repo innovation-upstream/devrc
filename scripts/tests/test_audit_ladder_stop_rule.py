@@ -564,16 +564,7 @@ SKILL_PROSE_ESCAPE_STOP = (
     "document contains a false sentence\" · and the recurring SHAPE swept at "
     "every site rather than at the one that was reported. Record what you are "
     "NOT fixing, on the PR, so the next reader knows it is open rather than "
-    "absent. 🔴 **THE REASON MAY BE STRUCTURAL, AND A "
-    "STRUCTURAL REASON IS NAMEABLE AT ROUND 1 — you do not owe a round to prove "
-    "it.** When this PR's payload is ENTIRELY prose, \"fixed a defect\" and "
-    "\"reworded a warning\" are the same edit at EVERY round, so the attribution "
-    "gate cannot fire at any round — that is a property of the DIFF, readable "
-    "before round 2, not a pattern you must watch repeat. Name that, with the "
-    "payload classification round 1 already owes, and the precondition is met on "
-    "the first round that returns no 🔴. 🔴 **The price is explicit and you must "
-    "state it: round 1's own fixes then ship UNAUDITED** — so sweep the SHAPE at "
-    "every site before stopping, and write in the summary that you are paying it."
+    "absent."
 )
 
 # 🔴 The ⚠ caveat is what stops the hatch ending a CONVERGING ladder, and it is
@@ -1360,65 +1351,6 @@ def test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY():
         SKILL_MD,
         SKILL_HATCH_NOT_A_LICENCE,
         "the escape hatch's not-a-licence caveat",
-    )
-
-
-def test_the_round_1_permission_and_its_PRICE_live_in_the_SAME_paragraph():
-    """🔴 The round-1 shortcut and the cost it incurs are ONE clause, not two.
-
-    Added 2026-09-14 on an operator report that prose ladders still ground for
-    two rounds before the hatch became nameable. The fix says a STRUCTURAL
-    reason (a 100%-prose payload makes the attribution gate inert at every
-    round) is nameable at round 1, so no round is spent re-discovering it.
-
-    🔴 WHY THIS IS NOT REDUNDANT WITH THE WHOLE-PARAGRAPH PIN ABOVE. That pin
-    fails on ANY edit, and its own failure message tells the editor to update
-    the constant in the same commit -- which is the correct instruction and is
-    exactly how the price half could be dropped while the permission stays:
-    reword, update the constant, green. This test names the PAIR, so removing
-    the price is no longer a constant refresh but a deliberate deletion of a
-    test whose name says what it protects.
-
-    The pairing is the whole safety argument. "Stop at round 1" alone ships
-    round 1's own fixes unaudited, and this skill's evidence (#505, #1111,
-    `homelab-infra` #702) is that a fix round's prose is the likeliest next
-    finding. The permission is only defensible while the report SAYS it is
-    paying that, so the two must sit in the same block a reader cannot get one
-    half of.
-
-    Asserted on the PARAGRAPH, not the file: both present anywhere would pass
-    while they sit in different sections, and a reader acting on the criteria
-    paragraph would never reach the price.
-    """
-    paras = [p for p in _read(SKILL_MD).split("\n\n") if p.strip()]
-    hits = [p for p in paras if "NAMEABLE AT ROUND 1" in _norm(p)]
-
-    assert len(hits) == 1, (
-        "\n\nclaude/skills/audit-pr/SKILL.md: expected exactly ONE paragraph "
-        f"granting the round-1 shortcut, found {len(hits)}.\n"
-        "  0 => the permission was deleted; if that is deliberate, delete this "
-        "test in the same commit and say why in the message.\n"
-        "  2+ => it is stated in two places, so one can be edited while the "
-        "other reassures the next reader. State it once."
-    )
-    para = _norm(hits[0])
-
-    assert "ship UNAUDITED" in para, (
-        "\n\nclaude/skills/audit-pr/SKILL.md: the round-1 shortcut no longer "
-        "states its PRICE in the same paragraph.\n"
-        "  The permission to stop at round 1 is only defensible while the "
-        "report says out loud that round 1's own fixes ship unaudited — this "
-        "skill's own evidence (#505, #1111, homelab-infra #702) is that a fix "
-        "round's prose is the likeliest next finding.\n"
-        "  Restore the clause, or — if the shortcut itself is being retracted — "
-        "remove the permission too and delete this test in the SAME commit."
-    )
-    assert "sweep the SHAPE at every site" in para, (
-        "\n\nclaude/skills/audit-pr/SKILL.md: the round-1 shortcut no longer "
-        "carries the sweep-every-site precondition.\n"
-        "  That precondition and the write-it-down obligation are the only "
-        "things standing where a round used to. Dropping the sweep turns the "
-        "shortcut into the severity-keyed stop this skill twice rejected."
     )
 
 
