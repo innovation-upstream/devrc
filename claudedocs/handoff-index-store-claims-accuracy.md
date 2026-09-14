@@ -708,7 +708,8 @@ automatically, and the next writer is the only moment anyone looks.
   scope, do NOT seed it, create → 201.** RULES: *an EMPTY RESULT cannot distinguish
   two mechanisms — go find the step that differs.*
 - 🔴 **A CASE-SENSITIVE GREP QUOTED AS A CLEAN SWEEP.** `grep -ln 'There is no CREATE
-  route\|no CREATE route'` → **0 files**, reported as "only the skill had it".
+  route\|no CREATE route'` (both spellings retracted) → **0 files**, reported as
+  "only the skill had it".
   Case-insensitively: **6**. Through the repo's own normalising scanner: **10
   occurrences in 8 files**, one straddling a newline inside a docstring where no
   line-based grep can ever see it. Four successive sweeps each found a spelling the

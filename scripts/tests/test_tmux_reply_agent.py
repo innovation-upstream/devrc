@@ -763,7 +763,7 @@ def test_the_token_is_never_in_argv(server, tmux_stub, tmp_path):
 # --------------------------------------------------------------------------- #
 # 6. The seams: the host label and the tmux server-id spelling.
 # --------------------------------------------------------------------------- #
-def test_the_host_label_follows_the_same_rule_as_the_collector(tmp_path):
+def test_the_host_label_follows_the_same_rule_as_the_collector(tmp_path, monkeypatch):
     """🔴 ONE RULE, AND A DISAGREEMENT HERE IS SILENT.
 
     The server's queue is keyed on the host label the READ MODEL stores, which
@@ -771,21 +771,49 @@ def test_the_host_label_follows_the_same_rule_as_the_collector(tmp_path):
     machines, so it cannot be the source of truth). An agent that computed a
     different label would poll for a host nobody enqueues to and deliver nothing
     at all, with no error anywhere.
+
+    🔴 `HOST_LABEL_ADDRS=""` IS SET FOR EVERY CASE BELOW, AND IT IS NOT
+    BOILERPLATE. Since #1601 the shared rule has a THIRD feeder — an address this
+    machine holds — which is a cross-check on the two named here. Without pinning
+    it, `env={"ACTIVITY_HOST": "WORKBENCH"}` would raise `HostLabelConflict` when
+    this suite runs on the LAPTOP and pass on the workbench: a test whose verdict
+    depends on which machine ran it. Set-but-empty says "holds none of them", so
+    what is measured here is exactly the env-vs-file rule this test is named for.
+    The third feeder gets its own suite, `test_host_label_identity.py`.
     """
     env_file = tmp_path / "collector-env"
     env_file.write_text('ACTIVITY_HOST="laptop"\n')
+    monkeypatch.setenv(AGENT.HOST_LABEL.HOST_LABEL_ADDRS_ENV, "")
     assert AGENT.local_host_label(env={}, env_file=str(env_file)) == "laptop"
     assert AGENT.local_host_label(env={"ACTIVITY_HOST": "WORKBENCH"}, env_file=str(env_file)) == "workbench"
-    # An unrecognised label falls back rather than inventing a host.
-    assert AGENT.local_host_label(env={"ACTIVITY_HOST": "nixos"}, env_file=str(tmp_path / "absent")) == "workbench"
+    # 🔴 AN UNRECOGNISED LABEL NO LONGER "FALLS BACK" — THERE IS NOWHERE TO FALL.
+    # This assertion used to read `== "workbench"`, which is the #1601 defect
+    # written down as an expectation: on the laptop, a typo'd ACTIVITY_HOST and
+    # an absent env file made this agent claim the WORKBENCH's termwrite queue,
+    # poll a host nobody enqueues to and deliver nothing, silently. The typo is
+    # still ignored rather than passed through (it must never mint a third host);
+    # what changed is that ignoring every signal now ends in a refusal.
+    with pytest.raises(AGENT.HostLabelError):
+        AGENT.local_host_label(env={"ACTIVITY_HOST": "nixos"},
+                               env_file=str(tmp_path / "absent"))
     # And the vocabulary is the collector's own, read from its source rather than
     # restated here.
     collector_src = COLLECTOR.read_text()
     assert 'HOST_NAMES = ("workbench", "laptop")' in collector_src, (
         "the collector's host vocabulary changed; this agent's HOST_NAMES must follow it")
     assert AGENT.HOST_NAMES == ("workbench", "laptop")
-    assert 'DEFAULT_LOCAL_HOST = "workbench"' in collector_src
-    assert AGENT.DEFAULT_LOCAL_HOST == "workbench"
+    # 🔴 STRUCTURAL, NOT SPELLED. A substring check for `DEFAULT_LOCAL_HOST`
+    # would fire on the COMMENT that explains why the constant was deleted —
+    # the guard would then be un-satisfiable by anything except silence about
+    # its own history. What must not come back is an ASSIGNMENT.
+    import ast as _ast
+    assigned = {t.id for node in _ast.walk(_ast.parse(collector_src))
+                if isinstance(node, _ast.Assign)
+                for t in node.targets if isinstance(t, _ast.Name)}
+    assert "DEFAULT_LOCAL_HOST" not in assigned, (
+        "#1601 deleted the workbench default from the collector; a constant by "
+        "that name coming back is the defect coming back")
+    assert not hasattr(AGENT, "DEFAULT_LOCAL_HOST")
 
 
 def test_the_server_id_format_matches_the_collectors():

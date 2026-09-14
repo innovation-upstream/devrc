@@ -15,66 +15,61 @@ Make the post-reboot restore of the tmux/claude workspace actually work. It had 
 worked: every link in the save→plan→restore chain was broken, silently, for ~30 days.
 
 ## State now
-### Merged in this arc (durable — carried forward across updates)
-| PR | merge sha | what was broken |
-|---|---|---|
-| #1297 | `56c68cc7` | `@resurrect-hook-post-save` is not a valid resurrect hook kind — the save side had **never** run |
-| #1309 | `cc409f82` | continuum's `status-right` autosave interpolation clobbered by a later `set -g status-right` |
-| #1314 | `dcaeb408` | zero `workspace … output` directives against a declared dual-head layout |
-| #1311 | `d9f0836c` | window→conversation binding by 145-file grep instead of the per-pane ledger |
-| #1317 | `946d9038` | the staleness gate counted POWERED-OFF time against the plan |
-| #1344 | `1ecc03c1` | no instrument existed to read a reboot; adds `tmux-restore-observe.sh` |
-| #1351 | `9353d958` | the unit MANUFACTURED a tmux server systemd then killed; adds the no-server REFUSAL |
-| #1375 | head `10570f92` | 81-row gate inventory + `scripts/check-gate-inventory.py` |
-| #1415 | `176f412b` | the wide-tmux-kill guard — LIVE on both hosts |
-| #1376 | `e55533ea` | socket-activation trigger — LIVE on both hosts |
-| #1383 | `a4d9d083` | **timestamped plan generations** + four round-1 audit fixes |
-| #1464 | `82219263` | retires the staged OOM script (operator decision, round-0 audit) |
-| #1460 | `f3412fc1` | a `nix/home.nix` comment measured false in BOTH halves |
-| #1443 / #1486 | `cdfd14ab` / open | handoff updates |
-| #1467 | `cd556159` | transcript-push caps tuned to an UNDEPLOYED server; push was 413-dead fleet-wide |
+**The arc's original ranks 1–4 are all SHIPPED and VERIFIED on both hosts.** Four PRs
+merged this session; both 2026-09-11 crashes are ATTRIBUTED and the bypass that caused
+them is closed on the live hook.
 
-- 🔴 **THE REBOOT — 2026-09-06 18:01:46, from 32 days of uptime — is STILL the only time the BOOT
-  path has ever been exercised, and it ran the OLD timer design.** #1376 replaced the trigger with
-  a socket `.path` unit, so the mechanism now deployed has **never fired at boot on either host**.
-  The 2026-09-11 crashes exercised the mid-session path, not the boot path.
-- 🔴 **OPERATOR DECISION: THE REBOOT IS ON HOLD.** Do not run one, do not re-propose it unasked.
-- **#1459 was opened and then CLOSED** by the operator's decision to delete the staged OOM script
-  (#1464). It fixed a MEASURED data-loss path — a re-run whose `nixos-rebuild` failed restored a
-  STALE backup over `/etc/nixos/configuration.nix`, taking unrelated operator edits with it — but
-  it was correct work on something that should not exist. Reasoning, including the
-  counter-argument, is on #1459 and in #1464's body. Do not re-derive it.
+| PR | squash | what it closes |
+|---|---|---|
+| #1494 | `fad97801` | the `window_state` false positive — `main`'s restore collapsed 52 windows onto 1 |
+| #1586 | `17a664fc` | mid-session refusal now LOUD (once per incident); staleness gate stops counting the crash's own damage |
+| #1588 | `dd45dbdd` | generation retention 48h → 7d (`KEEP_GENERATIONS` 672) |
+| #1551 | `9b8969a8` | the script-file bypass: the wide-kill guard read only the command line |
+
+Deployed **and** verified, stated separately: `ship.sh` converged both hosts, cross-host
+agreement COMPARED (not a one-host skip). Verified against the real failing paths, not
+inferred —
+- `window_state("probeA:87")` → `(False, '')` on a private `-L` socket, after reproducing
+  the raw predicate's lie (`display-message -t probeA:87` → `1:devrc`, rc 0);
+- the DEPLOYED hook: inline kill → DENY, `bash <script containing it>` → **DENY** (the
+  bypass, now closed), benign script → ALLOW (no permanently-red gate);
+- 8/8 bash cluster shapes now DENY (5 were ALLOWing); per-call hook latency ~1 ms.
+
+### Carried forward — durable, NOT superseded by the above
+- 🔴 **OPERATOR DIRECTIVE: THE REBOOT IS ON HOLD.** Do not run one, do not re-propose it unasked.
+- 🔴 **THE BOOT PATH HAS STILL NEVER BEEN EXERCISED BY THE DEPLOYED MECHANISM.** The only
+  reboot (2026-09-06 18:01:46, from 32 days of uptime) ran the OLD timer design; #1376
+  replaced it with a socket `.path` unit, which has **never fired at boot on either host**.
+  The 2026-09-11 crashes exercised the mid-session path only — and so does everything
+  #1586 added.
 - 🔴 **OPERATOR DIRECTIVE: PROCEED REGARDLESS OF LOAD.**
-- 🔴 **THE LOCAL FULL-SUITE RITUAL IS RETIRED** (CLAUDE.md, 2026-09-09). CI is ADVISORY, ~42% of
-  reds are noise — act on the failing TEST. Use a change-scoped subset:
+- **#1459 was opened then CLOSED** by the operator's decision to delete the staged OOM
+  script (#1464). It fixed a MEASURED data-loss path (a re-run whose `nixos-rebuild` failed
+  restored a STALE backup over `/etc/nixos/configuration.nix`, taking unrelated operator
+  edits with it) but was correct work on something that should not exist. Reasoning and the
+  counter-argument are on #1459 and in #1464's body — **do not re-derive it.**
+- 🔴 **THE LOCAL FULL-SUITE RITUAL IS RETIRED** (CLAUDE.md, 2026-09-09). CI is ADVISORY and
+  ~42% of reds are noise — act on the failing TEST. Use a change-scoped subset:
   `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q`.
+- The earlier arc's fifteen merged PRs (#1297 … #1467) are no longer tabled here; the size
+  gate's eviction order applies and they are closed. `git log --oneline --grep='tmux-restore'`
+  and this doc's own history carry them.
+- ⚠ **The previous crash TIMES in this doc were WRONG** (00:08 / 02:23). Measured from
+  scope-teardown bucketing: **00:05:47** and **02:36:44**. See Gotchas — that single error is
+  why the true cause read as ruled out.
 
-### 🔴 TWO TMUX CRASHES IN 24 HOURS — both recovered BY HAND, neither attributed
-| | crash 1 | crash 2 |
-|---|---|---|
-| when (local) | 2026-09-11 **00:08** | 2026-09-11 **02:23** |
-| detected | immediately (operator) | **NOT** — 8.5h silent, found at 11:00 |
-| autorecovery | fired, then failed (window_state bug) | **refused twice, recovered nothing** |
-| recovered | 52/52 by hand | 52/53 by hand |
+**#1551 ran a 4-round audit ladder.** Round 4 returned no merge-blocker and recommended
+stopping. Each earlier round found a real defect *introduced by the previous round's fix* —
+rounds 1→2 an order-dependent ALLOW on `./x || bash x` plus an uncaught `ValueError`
+reachable from 12 tracked PNGs; rounds 2→3 the fan-out budget hiding a kill behind benign
+bulk. Round 4: **0 order-dependent topologies of 220**, and **zero always-DENY→always-ALLOW
+transitions** — no reliable catch was lost by the breadth-first restructure.
 
-- **Current state: 52 claude panes, 19 sessions, 55 windows, healthy.** The 53rd
-  (`scratch8:1`) runs **opencode** — a live process where the plan wanted claude; deliberately
-  NOT clobbered.
-- 🔴 **#1494 IS STILL OPEN AND IS WHAT PERFORMED BOTH RECOVERIES.** `main`'s restore still has
-  the `window_state` false-positive and the bare-`claude` send. **Merging it is rank 1.**
-- ⚠ Leftovers a human should clear (the guard blocks the agent from `kill-session`/`kill-server`):
-  an empty session `0` from the crash, and a stale audit probe server **pid 3670875** (started
-  02:37, private `nix-shell` `TMUX_TMPDIR`, not the operator's).
-
-### Retention today, measured — the operator's ask restated
-🔴 **"store all saves instead of just the most recent" IS ALREADY DONE** — #1383 shipped
-generations and they are live on both hosts. The real ask is **48h → 7d**:
-```
-146 generations on disk   4 MiB total   ~34 KiB each (plan + cheat-sheet)
-KEEP_GENERATIONS = 192  = 48h at the 15-minute autosave   (retention span today: 38.8h)
-7 days = 672 generations ≈ 22 MiB
-```
-Cost is trivial; the change is one constant plus its tests. See rank 3.
+**Residuals shipped knowingly, all declared in-source and pinned:** the 8 KiB per-body cap,
+the 64 KiB descent budget (a kill below an exhausted level is missed, deterministically),
+`source`/`.` not read (hot-path `open()` promise), `cat x.sh | bash` and nine other
+declared invocation gaps, and the line-continuation splice (a tokeniser gap, not a pre-gate
+one).
 
 ## Open investigations — live diagnosis state
 
@@ -719,44 +714,53 @@ First full audit, 2026-09-09. Verdict **merge after fixing 🔴 1**. Line number
   via: measurement
 
 ## Next steps (ranked)
-🔴 **Prefer a TOPICAL claim slug over a rank-derived one** — ranks have been renumbered twice in
-this arc, and `claim-work --slug-for <doc> <rank>` derives the slug FROM the rank.
-
-1. **Merge and ship #1494.** It is what recovered the operator twice by hand, and `main` still
-   carries the `window_state` false positive (a missing window reports PRESENT, so every resume
-   collapses onto one window) and the bare-`claude` send. Two audit rounds are done: round 1
-   found 3 🔴, round 2 found 2 🔴 + 4 surviving mutants, all fixed; 7/7 mutants now killed,
-   135 passed. Round 2 produced findings, so **a round 3 is owed by the ladder** — decide
-   knowingly whether to run it or merge first, given `main` is the broken one.
-   IN FLIGHT: innovation-upstream/devrc#1494
-   forcing: incident — two crashes in 24h; the deployed restore recovered 1 of 52 on the first
-   and 0 of 53 on the second, and the fix that worked is still unmerged.
-2. **Fix the two refusal gaps** (`scripts/tmux-session-restore.py`): make a MID-SESSION no-server
-   refusal loud while a cold-boot one stays quiet, and stop the staleness gate treating a
-   post-crash resurrect save as evidence the plan is stale.
-   forcing: incident — 2026-09-11 02:23, both refusals fired correctly and the workspace sat dead
-   for 8.5 hours with 53 recoverable conversations on disk.
-3. **Extend generation retention 48h → 7d** — the operator's ask. `KEEP_GENERATIONS = 192` →
-   `672` in `scripts/tmux-session-restore.py:101`, plus the tests that pin it. Measured cost:
-   ~34 KiB per generation, so 7d ≈ **22 MiB** (4 MiB today). ⚠ Restate the premise when doing it:
-   "all saves instead of just the most recent" is ALREADY shipped (#1383); this is purely the
-   window. ⚠ Check `richer_generation`'s scan cost at 672 (measured 0.26s cold at 138).
-   forcing: user — operator asked for 7d retention on 2026-09-11.
-4. **Root-cause the crashes.** Two in 24h, unattributed. Start with ClickHouse `activity.events`
-   for the two windows; if that is empty, install a watcher BEFORE the next one.
-   forcing: incident — twice in 24 hours, ~53 live conversations at risk each time.
-5. **Merge #1480 / #1481 / #1486** — all open, all verified, all small.
+1. **Unbreak `main` — it is RED and UNOWNED.** Measured at `a2c84a1c` on a pristine
+   checkout: `test_no_handoff_doc_exceeds_its_budget` (offender
+   `claudedocs/handoff-index-store-claims-accuracy.md`, 72,598 B, over by 7,062 B; plus
+   `handoff-handoff-search-index.md` is back under and its GRANDFATHERED entry must be
+   deleted — the ledger is a ratchet) and
+   `test_clawgate_writeback_guard.py::test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`.
+   No open PR owns either. The 4-hourly `main-green-check` deadman reproduces and toasts
+   until they land.
+   forcing: gate — `main` is red on two tests and the deadman is alarming on a DND-bypassing class.
+2. **Merge #1480 / #1481 / #1486** — all still OPEN, all small, all previously verified.
    IN FLIGHT: innovation-upstream/devrc#1480, #1481, #1486
    forcing: gate — #1480 closes a round-1 audit finding still open on `main`.
-6. **Implement opencode restore** (design decided: full auto-parity; an UNBOUND opencode pane
-   sends NOTHING and is listed; the save-side tally must distinguish "no opencode panes existed"
-   from "existed and I bound zero"). ⚠ Newly relevant: `scratch8:1` ran opencode through both
-   crashes and is the one window the plan could not restore.
+3. **Evict this doc's CLOSED blocks.** 84,569 B against a 98,304 B grandfathered allowance
+   (~13.7 KB headroom) — and the ledger is a ratchet, so the allowance only ever falls.
+   Ranks 1–4 and every ✅-marked investigation block are now dead weight. The size gate's
+   own order applies: evict closed → demote dated evidence to `claudedocs/refs/` → split.
+   forcing: gate — `scripts/tests/test_handoff_doc_size.py` fails the whole repo when a doc exceeds its allowance.
+4. **Delete `depth` and `direct` from `check_executed_script_file`'s visited key.** Round 4
+   measured them BOTH redundant under the breadth-first ordering (their mutants survive a
+   full 1,639-test run) AND costing budget — they re-charge the same bytes, shrinking the
+   very budget whose exhaustion is the declared residual. I reproduced the `direct` half:
+   11 dual-readable benign scripts (0755 + shell shebang) in the `./x || bash x` form ahead
+   of a carrier → ALLOW; single-spelling → DENY. ⚠ Reach is narrower than round 4's writeup
+   implies — at 0644/no-shebang the files are never charged twice, which is why it could
+   not be built from real tracked scripts. One-token fix.
+   forcing: regression — a measured weakening introduced by the round-3 restructure.
+5. **Implement opencode restore.** Blocker confirmed still present:
+   `scripts/tmux-session-restore.py:320` hardcodes `_AL.pane_filename("claude", pane_id)`,
+   while **28 `opencode-p*.json` ledger records** are on disk being written and never read.
+   Design already decided: full auto-parity; an UNBOUND opencode pane sends NOTHING and is
+   listed; the save-side tally must distinguish "no opencode panes existed" from "existed
+   and I bound zero". `opencode --session <id>` IGNORES the launch cwd, so
+   `session.directory == pane cwd` is mandatory.
    forcing: user — operator asked for opencode restore parity on 2026-09-07 and chose the design.
-7. **Work clawgate task 526** (drift-check chain-liveness arm) — fix its `ZacxDev/devrc` repo
-   field first; this repo's origin is `innovation-upstream/devrc`.
+6. **clawgate task 526 — fix its `repo` field FIRST.** Confirmed `status: open` with
+   `repo: ZacxDev/devrc`; this repo is `innovation-upstream/devrc`, and the wrong slug is
+   baked into its acceptance criteria too.
    forcing: incident — 2026-09-07 the laptop's chain was found dead only because a human looked.
-8. **Reboot to confirm the boot path.** 🔴 ON HOLD BY THE OPERATOR.
+7. **Clear the stale test-fixture tmux server.** pid **3670875** =
+   `tmux -L rank29-test_a_MISSING_session_is_refu0 new-session -d -s scratch20`, cwd
+   `/home/zach/workspace/devrc-gate-base`, started Sep 11 02:37:48, private `TMUX_TMPDIR`.
+   A pytest leftover on a private socket — NOT the operator's server (that is pid 1820124),
+   so it is safe to kill by RESOLVED pid. 29 orphan sockets now sit in
+   `/run/user/1000/tmux-1000/`.
+   forcing: none
+8. **Reboot to confirm the boot path.** 🔴 STILL ON HOLD BY THE OPERATOR. The socket-`.path`
+   trigger has never fired at boot on either host.
    forcing: none
 9. **`--assume-empty` for `restore --dry-run`.**
    forcing: none
@@ -1107,30 +1111,77 @@ ELSE.** They map to ranks 1–3 below. A resuming session on the SAME host+workt
 - ⚠ **A mutant that "SURVIVED" may never have run** — one scored SURVIVED because the mutating
   `python3` was not on PATH. Verify the mutant DIFFERS before scoring it.
 
+- 🔴 **A tmux socket FILE OUTLIVES ITS SERVER.** `kill-server`, SIGKILL and the last
+  session exiting all leave it. Measured: 7 of 8 runtime sockets were orphans, two of them
+  mine minutes after I killed those servers. So `ConditionPathExists=` keeps passing after
+  the operator's server dies — which is why #1586's loud arm needed a once-per-incident
+  latch rather than trusting the path unit to fire once. **Never read socket existence as a
+  live server.**
+- 🔴 **The latch is keyed on the PLAN'S MTIME, not the boot.** 2026-09-11 had TWO deaths;
+  a boot-keyed latch would have silenced the second. Pinned by a test, not a note.
+- 🔴 **A guard that gates COMMAND TEXT is blind to a command inside a FILE.** #1415 was
+  deployed and correct and did not stop the same accident twice more, because the agents
+  wrote `tmux kill-server` into a scratch `.sh` and ran `bash <file>`. Proven with a control
+  pair before any code was written: inline DENIES, identical bytes in a file ALLOWED at rc 0.
+- 🔴 **An empty result cannot distinguish two mechanisms — and the crash TIMES were wrong.**
+  The previous handoff searched 00:08 and 02:23; scope-teardown bucketing puts the deaths at
+  **00:05:47** and **02:36:44**, the second 13 minutes off. That single error is why
+  "nothing logged" kept coming back and why the true cause read as ruled out.
+- 🔴 **The discriminator for "was it killed or did it die" was CONCURRENT INTERRUPTIONS.**
+  At each instant FOUR and THREE *unrelated* sessions were interrupted simultaneously, doing
+  unrelated work in other repos. A per-command denial cannot do that; a dying shared server
+  can. Timing alone would not have settled it.
+- 🔴 **The agent-ledger freezes at the crash ONLY when scoped to the plan's tmux
+  generation.** Unscoped, the witness is moved by any post-crash agent working in a pane of
+  the NEW server. Verified across three incidents: gen `627687` → 21:54:13 (died 21:54:15),
+  `1111077` → 00:05:46 (died 00:05:47), `4063373` → 02:36:40 (died 02:36:44). ⚠ A plan with
+  no recorded generation — every legacy plan, including the preserved 02:23 one — measures
+  nothing; its remedy stays `restore --plan <generation>`.
+- 🔴 **The previous "positive control of 54" for the OOM refutation DOES NOT REPRODUCE**:
+  `oom-kill:` is 0 across every boot. A real control was built (a contained 50 MB cgroup
+  OOM does log here), so "not an OOM" now rests on a working instrument rather than an
+  unreproducible one. Same for segfaults: the pattern fires 6× elsewhere, zero kernel
+  entries in either crash window.
+- 🔴 **Re-gate when the base MOVES, not when files overlap.** #1494 was gated green, `main`
+  moved 20+ commits, and the re-gate found a REAL conflict in a two-way ledger while GitHub
+  still said `mergeable: UNKNOWN`. Both sides had appended to the same
+  `ACKNOWLEDGED_UNSTUBBED` entry; the resolution is the UNION and the ledger's own test
+  verifies it.
+- ⚠ **`audit-dispatch.py`'s delta RANGE spans an intervening `origin/main` merge.** Round 3
+  derived a range of 111 files / 20,908 insertions for a round whose real payload was ONE
+  commit, 2 files. Scope the auditor to the fix commit yourself, or the round re-audits
+  main's work and its cost becomes indistinguishable from a first full audit.
+- ⚠ **Two agents overruled a prescription of mine, with evidence, and were right both
+  times:** keying the visited set on `direct` (its mutant survives *structurally*), and
+  charging the descent budget only for sentinel-passing bodies (measured 17,855 ms on
+  30×30 — *worse than no budget*, because never charging benign bodies never bounds
+  anything). Prefer "evaluate this direction" over "do this" when briefing.
+- ⚠ **Harness traps hit live, each of which inverted a conclusion until caught:** an
+  unquoted zsh variable made real bash receive `-oe pipefail` as ONE argument (every row
+  read "bash refuses this shape" — the opposite finding); `shutil.copy`/`copy2` preserve
+  mode, so a 0644 copy of `guard_core.py` trips an exec-bit fixture and fakes a RED (bit two
+  consecutive rounds — use `copyfile`); and `if <generator>:` is always truthy, which masked
+  a refutation until a byte counter caught it.
+
 ## How to verify
 ```bash
-# 1. is the restore fix merged yet? (until then, main is the BROKEN one)
-gh pr view 1494 --repo innovation-upstream/devrc --json state,mergeable --jq '"\(.state) \(.mergeable)"'
+# 1. all four PRs landed, by CONTENT (a squash makes --is-ancestor false forever)
+git -C ~/workspace/devrc show origin/main:scripts/tmux-session-restore.py \
+  | grep -cE 'claim_midsession_alert|tmux_pid'          # latch + generation witness
+git -C ~/workspace/devrc show origin/main:scripts/tmux-session-restore.py \
+  | grep -m1 '^KEEP_GENERATIONS'                        # expect 672
 
-# 2. current workspace health
-tmux list-panes -a -F '#{pane_current_command}' | grep -c claude     # expect ~52
-tmux list-sessions | wc -l
+# 2. THE BYPASS IS CLOSED ON THE DEPLOYED HOOK (not the repo copy)
+printf '#!/usr/bin/env bash\ntmux kill-server\n' > /tmp/bp.sh
+printf '{"tool_name":"Bash","tool_input":{"command":"bash /tmp/bp.sh"}}' \
+  | python3 ~/.claude/hooks/bash-guard.py     # expect a DENY naming /tmp/bp.sh
+rm -f /tmp/bp.sh
 
-# 3. is the SAVE chain alive? (a stale newest generation is the tell)
-ls -1 ~/.config/initiatives/restore-plans/restore-plan_*.json | tail -1
-tmux show-options -gqv @resurrect-hook-post-save-all
-tmux show-options -gv status-right | grep -c continuum_save          # expect 1
+# 3. is main still red? (rank 1) — run on a PRISTINE checkout, not this tree
+nix develop ~/workspace/devrc -c python3 -m pytest -q \
+  scripts/tests/test_handoff_doc_size.py \
+  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py
 
-# 4. retention span + cost (rank 3 sizing)
-ls -1 ~/.config/initiatives/restore-plans/restore-plan_*.json | wc -l
-du -sh ~/.config/initiatives/restore-plans
-
-# 5. did the unit refuse, and why? (both refusal modes are in the journal)
-journalctl --user -u tmux-session-restore.service --since '-24h' --no-pager \
-  | grep -E 'REFUSING|out of step|relaunched'
-
-# 6. THE RECOVERY, if it happens again — preserve, then restore from a GENERATION
-cp -aL ~/.config/initiatives/restore-plan.json ~/.cache/crash-$(date +%s).json
-python3 <#1494-worktree>/scripts/tmux-session-restore.py restore --plan \
-  ~/.config/initiatives/restore-plans/<richest-recent>.json
+# 4. this doc's own budget headroom (rank 3)
+wc -c ~/workspace/devrc/claudedocs/handoff-tmux-restore-chain.md   # allowance 98,304
 ```

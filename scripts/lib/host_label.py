@@ -24,16 +24,54 @@ poll then reseeded up to 48 KiB per session because "the host changed". Caught b
 an adversarial audit BEFORE deploy, with both values measured side by side.
 
 So the rule lives here now, in one module, and both feeders read it.
+
+🔴 AND IT NO LONGER GUESSES. `local_host_label()` used to end
+`return DEFAULT_LOCAL_HOST` — the literal `"workbench"` — whenever neither
+`ACTIVITY_HOST` nor the collector's env file supplied a valid label. On the
+LAPTOP in that state every consumer stamped `workbench` on the laptop's data,
+silently, exit 0, no error. For `scripts/peer-host` — a ROUTING tool — that is
+not a degraded answer, it is a WRONG one: the local leg reads the laptop's
+registry and files it under `workbench`, while the `laptop` leg becomes an SSH
+connection to itself. Work then gets sent to the wrong machine, which is the
+exact failure that tool was built to prevent.
+
+The default is gone. In its place, in order:
+
+  1. `ACTIVITY_HOST` in the environment (unchanged, still wins),
+  2. `ACTIVITY_HOST=` in the collector env file (unchanged, still second),
+  3. 🔴 NEW — DERIVE it from an address this machine actually HOLDS. Both hosts
+     report hostname `nixos`, but each holds addresses only it holds, and
+     `scripts/lib/host-role.sh` already owns that table (see HOST_ROLE_SH).
+  4. 🔴 NEW — nothing determined it -> `HostLabelUnresolved`. Not `"workbench"`.
+
+and (3) is also a CROSS-CHECK on (1)/(2): when the stated label and the
+address-derived one disagree, that is `HostLabelConflict`, for the same reason
+`ssh_target()` raises on an unknown label — there is no safe answer, so there is
+none. See `local_host_label` for why an exception rather than a sentinel.
 """
 from __future__ import annotations
 
 import os
+import re
+import socket
+import sys
 
 #: The host vocabulary the read model, the termwrite queue and the activity
 #: collector all use. `hostname` is "nixos" on BOTH machines, which is precisely
 #: why it cannot be the source of truth.
 HOST_NAMES = ("workbench", "laptop")
-DEFAULT_LOCAL_HOST = "workbench"
+
+
+class HostLabelError(RuntimeError):
+    """Base class: this module refuses to name the local machine."""
+
+
+class HostLabelUnresolved(HostLabelError):
+    """Nothing positively identified this machine."""
+
+
+class HostLabelConflict(HostLabelError):
+    """Two signals named DIFFERENT machines, so neither can be trusted."""
 
 #: 🔴 EVERY host in HOST_NAMES with the Nebula address and user an SSH leg to it
 #: needs — `(label, addr, user)`, in HOST_NAMES order.
@@ -75,11 +113,20 @@ DEFAULT_LOCAL_HOST = "workbench"
 #: itself a claimed single source of truth:
 #:   * `scripts/lib/host-role.sh` — composes `zach@<ip>` at runtime from bare IP
 #:     constants. Live (sourced by `ship.sh` and `drift-check.sh`), and
-#:     `scripts/README.md` calls it "the ONE host-identity predicate", so two
-#:     modules each claim to be the single home. It answers a different question
-#:     (which role am I, from a list of interface addresses) and it is shell, so
-#:     folding it in is a design change, not a rename.
-#:   * `scripts/browser-bridge/server.py` — bare IPs in `_HOST_IP_ORDER`.
+#:     `scripts/README.md` calls it "the ONE host-identity predicate". 🔴 IT IS
+#:     NO LONGER A SECOND, UNRELATED CLAIM: this module now READS its IP table
+#:     (see `HOST_ROLE_SH` / `host_addrs()`) instead of restating one, so the
+#:     shell file OWNS the addresses and this module owns the label vocabulary
+#:     and the Python answer. The two are pinned together by
+#:     `test_host_label_identity.py::test_the_address_table_is_host_role_shs_own`.
+#:     Folding the shell into Python is still a design change, not a rename, and
+#:     is still not done.
+#:   * `scripts/browser-bridge/server.py` — bare IPs in `_HOST_IP_ORDER`. It
+#:     CANNOT import this module: home-manager deploys it as a lone flattened
+#:     symlink at `~/.config/browser-bridge/server.py`, with no `lib/` sibling.
+#:     So it keeps its copy and
+#:     `test_host_label_identity.py::test_browser_bridges_ip_table_agrees` fails
+#:     if the two ever disagree.
 #:
 #: 🔴 NO LINE NUMBERS, deliberately — `nix/home.nix` states the rule this repo
 #: already learned: "a line number is a claim that rots silently". An earlier
@@ -124,25 +171,222 @@ ACTIVITY_ENV = os.environ.get("HOST_LABEL_ENV_FILE") or os.path.expanduser(
     "~/.config/activity-collector/env")
 
 
-def local_host_label(env=None, env_file: str = ACTIVITY_ENV) -> str:
-    """This machine's ACTIVITY_HOST label.
+# =========================================================================== #
+# THE THIRD SIGNAL: an address this machine actually holds
+# =========================================================================== #
+#: 🔴 THE ADDRESS TABLE IS NOT DECLARED HERE. It is READ from
+#: `scripts/lib/host-role.sh`, which already owns it and is already live
+#: (`ship.sh`, `drift-check.sh` source it). This module exists BECAUSE a
+#: duplicated rule drifted; answering that by typing the same four addresses a
+#: second time would have been the same mistake in a new file.
+#:
+#: Read, not executed: a `bash` + `ip` fork per call would be both slow on a
+#: hot-ish path and IMPOSSIBLE in the units that call this — `nix/home.nix`
+#: deliberately drops `iproute2` from the transcript-push and tmux-reply-agent
+#: PATHs, and that omission is itself pinned by a test. Nothing here shells out.
+HOST_ROLE_SH = (
+    os.path.join(os.path.dirname(os.path.abspath(globals()["__file__"])),
+                 "host-role.sh")
+    if globals().get("__file__") else None)
 
-    The ENVIRONMENT wins over the file, then the file, then the default. A value
-    that is not one of HOST_NAMES is ignored rather than passed through: a typo
-    would otherwise mint a third host that nothing else in the fleet knows about,
-    and — since the termwrite queue is keyed on this label — an agent computing
-    one would poll for a host nobody enqueues to and deliver nothing, silently.
+#: `WORKBENCH_IP_PRIMARY="192.168.50.250"` and its three siblings. The host part
+#: is captured NON-GREEDILY so `WORKBENCH_IP_PRIMARY` yields `WORKBENCH`, and the
+#: address is matched as four real octets so a commented-out or templated line
+#: cannot be read as a host address.
+_IP_ASSIGN_RE = re.compile(
+    r'^[ \t]*([A-Z][A-Z0-9_]*?)_IP_(PRIMARY|SECONDARY)[ \t]*=[ \t]*'
+    r'"?((?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    r'(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3})"?[ \t]*$',
+    re.MULTILINE)
+
+#: host-role.sh's own precedence: every PRIMARY (the stable 192.168.50.x LAN
+#: address) before any SECONDARY (the 10.42.0.x nebula one).
+_ADDR_RANKS = ("PRIMARY", "SECONDARY")
+
+
+def parse_host_addrs(source: str, host_names=HOST_NAMES) -> tuple:
+    """`((label, addr), …)` parsed out of host-role.sh, in ITS precedence order.
+
+    🔴 THE GUARD IS PER-HOST, NOT PER-CONSTANT — STATED AT THE WIDTH IT ACTUALLY
+    HOLDS. Three earlier revisions of this paragraph said "a partial table is the
+    one outcome forbidden"; that was measurably false, and an over-claiming
+    safety note is what the next reader trusts INSTEAD of looking. What the loop
+    below checks is that EVERY host in `host_names` contributed AT LEAST ONE
+    address. Lose all of a host's constants and it returns `()`. Lose ONE of a
+    host's two — a trailing comment on the line, an `export`/`declare -r` prefix,
+    single quotes, a templated `${WB_IP:-…}` value — and the parse yields a
+    3-entry PARTIAL table, which this function does NOT refuse.
+
+    🔴 WHY THAT IS STILL SAFE, WHICH IS THE CLAIM THAT MATTERS AND IS THE ONE
+    WORTH TRUSTING: every entry that survives is a correct `(host, addr)` PAIR.
+    Dropping one narrows the evidence, it never re-points it, so the worst a
+    partial table can do is fail to recognise a machine — `address_host_label()`
+    then returns None and `local_host_label()` REFUSES. Degradation here is
+    refusal, never mislabel. Measured in both directions by the
+    `..._degrades_to_a_PARTIAL_table_that_cannot_MISLABEL` test in
+    `scripts/tests/test_host_label_identity.py`, and pinned against a widening of
+    this guard by `MUT-11` in `scripts/tests/mutants-host-label.sh`.
+
+    The whole-host `()` is nonetheless the case worth keeping: a table holding
+    only the workbench's addresses would answer `workbench` for what the
+    workbench holds and nothing for the laptop, i.e. it would recreate #1601 for
+    one host while looking like a working signal.
+
+    ⚠ `()` IS NOT THE END OF THE STORY — see `host_addrs()`, which falls back to
+    the `PEER_SSH` nebula subset rather than to "no address signal at all".
     """
-    e = os.environ if env is None else env
-    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
-    if v in HOST_NAMES:
-        return v
+    found = {}
+    for name, rank, addr in _IP_ASSIGN_RE.findall(source or ""):
+        label = name.lower()
+        if label in host_names:
+            found.setdefault((label, rank), addr)
+    for host in host_names:
+        if not any((host, rank) in found for rank in _ADDR_RANKS):
+            return ()
+    out = []
+    for rank in _ADDR_RANKS:
+        for host in host_names:
+            addr = found.get((host, rank))
+            if addr:
+                out.append((host, addr))
+    return tuple(out)
+
+
+def _peer_ssh_addrs() -> tuple:
+    """The nebula half of the table, from this module's OWN `PEER_SSH`.
+
+    🔴 A FALLBACK, NOT A SECOND TABLE, AND IT IS A STRICT SUBSET BY TEST.
+    `test_host_label_identity.py::test_peer_ssh_addresses_are_in_the_shared_table`
+    fails if any `PEER_SSH` address is absent from host-role.sh's, so this can
+    never DISAGREE with the file — it can only know less (no LAN addresses).
+
+    It exists because `scripts/peer-host` SPLICES this module's source into a
+    program it pipes to `python3 -` on the far host. There `__file__` is
+    `'<stdin>'`, so host-role.sh cannot be located — and that leg is exactly the
+    one whose independent self-identification catches a wrong SSH address. It
+    reaches the far host over nebula, so the nebula addresses are the ones that
+    can possibly match there anyway.
+    """
+    return tuple((label, addr) for label, addr, _user in PEER_SSH)
+
+
+_HOST_ADDRS_MEMO = {}
+
+
+def host_addrs(path=None) -> tuple:
+    """The `(label, addr)` table, memoised per path. Never raises."""
+    key = HOST_ROLE_SH if path is None else path
+    if key in _HOST_ADDRS_MEMO:
+        return _HOST_ADDRS_MEMO[key]
+    table = ()
+    if key:
+        try:
+            with open(key, "r", encoding="utf-8", errors="replace") as fh:
+                table = parse_host_addrs(fh.read())
+        except OSError:
+            table = ()
+    if not table:
+        table = _peer_ssh_addrs()
+    _HOST_ADDRS_MEMO[key] = table
+    return table
+
+
+def _reset_host_addrs_cache():
+    """Test seam: drop the memo so a fixture path can be re-read."""
+    _HOST_ADDRS_MEMO.clear()
+
+
+#: Test/ops seam for the address probe, read from the PROCESS environment the
+#: same way `HOST_LABEL_ENV_FILE` is: a space- or comma-separated list of the
+#: addresses this machine is to be treated as holding. Set-but-EMPTY means "holds
+#: none of them", which is how a test makes the third signal deterministic
+#: without depending on which of the two real machines it is running on.
+HOST_LABEL_ADDRS_ENV = "HOST_LABEL_ADDRS"
+
+
+def _bind_holds_address(addr: str) -> bool:
+    """True when THIS machine holds `addr` on some interface.
+
+    🔴 A BIND, NOT AN ENUMERATION AND NOT A CONNECT — three properties matter.
+    (a) It cannot block: binding a UDP socket to a local address sends no packet
+    and contacts nothing, so there is no timeout to get wrong on a hot path
+    (measured 2026-09-12: ~100 µs for five candidates on workbench, ~75 µs on the
+    laptop). (b) It needs no external binary, which the calling systemd units
+    require — see HOST_ROLE_SH. (c) It sees addresses a default-route probe
+    cannot: measured the same day, the laptop was on `192.168.1.4`, NOT on the
+    192.168.50.0/24 LAN at all, so only its nebula address identified it. A
+    `connect()`-to-a-public-resolver source-address trick — what
+    `browser-bridge/server.py` does — would have reported neither. (The address
+    is described rather than spelled: `test_no_public_ips.py` refuses a routable
+    public IP literal anywhere in this repo, and rightly.)
+
+    An address this machine does not hold gives `EADDRNOTAVAIL`. The one way a
+    bind can succeed for a foreign address is `net.ipv4.ip_nonlocal_bind=1`
+    (measured `0` on both hosts) — and that case cannot mislabel anything, since
+    it would make BOTH hosts' addresses match and `address_host_label()` refuses
+    on a multi-host match rather than picking one.
+    """
     try:
-        with open(env_file, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     except OSError:
-        text = ""
-    for line in text.splitlines():
+        return False
+    try:
+        sock.bind((addr, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _holds_from_env(raw: str):
+    held = frozenset(part for part in raw.replace(",", " ").split() if part)
+    return lambda addr: addr in held
+
+
+def _default_holds():
+    raw = os.environ.get(HOST_LABEL_ADDRS_ENV)
+    return _bind_holds_address if raw is None else _holds_from_env(raw)
+
+
+def address_host_label(holds=None, addrs=None):
+    """The host label this machine's OWN addresses imply, or None.
+
+    Raises `HostLabelConflict` when addresses of MORE THAN ONE host are present.
+    🔴 THIS IS A DELIBERATE DIVERGENCE FROM `host-role.sh::detect_role`, which
+    documents that a list carrying both hosts' primaries resolves to `workbench`.
+    Its caller is a CONVERGER, where picking one and proceeding beats stopping;
+    this module's callers include a ROUTING tool, where a wrong answer sends work
+    to the wrong machine. Same table, different tie-break, both written down.
+    """
+    table = host_addrs() if addrs is None else tuple(addrs)
+    probe = _default_holds() if holds is None else holds
+    hits = []
+    for label, addr in table:
+        # 🔴 NOT AN OPTIMISATION — CORRECTNESS. Every host has TWO addresses in
+        # this table and normally holds BOTH (workbench: 192.168.50.250 and
+        # 10.42.0.30). Without this skip the same label lands in `hits` twice and
+        # the multi-host refusal below fires on a perfectly ordinary machine.
+        if label in hits:
+            continue
+        try:
+            if probe(addr):
+                hits.append(label)
+        except OSError:
+            continue
+    if len(hits) > 1:
+        raise HostLabelConflict(
+            "this machine holds addresses belonging to more than one host (%s)"
+            " — refusing to name it" % ", ".join(hits))
+    return hits[0] if hits else None
+
+
+# =========================================================================== #
+# THE ANSWER
+# =========================================================================== #
+def _file_stated_label(text) -> str:
+    """The valid `ACTIVITY_HOST=` label in an env-file body, or ""."""
+    for line in (text or "").splitlines():
         line = line.strip()
         if line.startswith("ACTIVITY_HOST="):
             val = line[len("ACTIVITY_HOST="):].strip()
@@ -151,11 +395,114 @@ def local_host_label(env=None, env_file: str = ACTIVITY_ENV) -> str:
             val = val.strip().lower()
             if val in HOST_NAMES:
                 return val
-    return DEFAULT_LOCAL_HOST
+    return ""
+
+
+def stated_host_label(env=None, env_file=None) -> tuple:
+    """`(source, label)` from the two DECLARED feeders, or `("", "")`.
+
+    🔴 `env_file=None` MEANS `ACTIVITY_ENV`, RESOLVED AT CALL TIME — it is NOT
+    the same as spelling the constant as the default. A default argument is
+    bound once, when the `def` executes, so `monkeypatch.setattr(host_label,
+    "ACTIVITY_ENV", …)` left the old path baked in and the patch was INERT:
+    `test_peer_host.py`'s hermeticity fixture did exactly that and this function
+    kept reading the operator's REAL collector config. It went unnoticed because
+    the real answer and the fixture's happened to agree. Measured 2026-09-12.
+
+    The environment wins over the file. A value that is not one of HOST_NAMES is
+    ignored rather than passed through: a typo would otherwise mint a third host
+    that nothing else in the fleet knows about, and — since the termwrite queue is
+    keyed on this label — an agent computing one would poll for a host nobody
+    enqueues to and deliver nothing, silently.
+    """
+    env_file = ACTIVITY_ENV if env_file is None else env_file
+    e = os.environ if env is None else env
+    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
+    if v in HOST_NAMES:
+        return ("ACTIVITY_HOST", v)
+    try:
+        with open(env_file, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    label = _file_stated_label(text)
+    return ((env_file, label) if label else ("", ""))
+
+
+def local_host_label(env=None, env_file=None, holds=None, addrs=None) -> str:
+    """This machine's ACTIVITY_HOST label. RAISES rather than guessing.
+
+    `env_file=None` means `ACTIVITY_ENV`, resolved at CALL time — see
+    `stated_host_label`, where spelling the constant as the default silently
+    disarmed a test fixture.
+
+    Precedence is unchanged where it was already right — `ACTIVITY_HOST` in the
+    environment, then the collector's env file — and the machine's OWN ADDRESSES
+    are the fallback AND the cross-check, never the primary.
+
+    🔴 AN EXCEPTION, NOT A SENTINEL, AND THE REASON IS THIS MODULE'S OWN HISTORY.
+    A returned `None`/`""` is only a guard if every consumer BRANCHES on it, and
+    there are seven-plus of them; the first one that does not would splice the
+    sentinel into a queue key, a ClickHouse row or an `ssh` argv and produce a
+    new silent wrong answer in place of the old one. `ssh_target()` above already
+    made this call for the same reason ("there is no safe fallback here, so there
+    is none"), and the shell entry point below turns the exception back into the
+    empty-stdout-plus-nonzero pair `transcript-push.sh` already treats as fatal.
+    So: ONE failure mode, loud, and no consumer has to remember anything.
+
+    ⚠ WHAT THIS COSTS: an operator who sets `ACTIVITY_HOST=laptop` on the
+    workbench now gets `HostLabelConflict` instead of `laptop`. That is the
+    mandate — the class of defect being closed is "a machine that believes it is
+    the other machine" — but it does mean `ACTIVITY_HOST` is NOT an override.
+    The declared seams are `HOST_LABEL_ADDRS` (below), the `holds`/`addrs`
+    parameters, and, for the transcript feeder specifically, its own
+    `TRANSCRIPT_PUSH_HOST`, which bypasses this module entirely.
+    """
+    env_file = ACTIVITY_ENV if env_file is None else env_file
+    source, stated = stated_host_label(env=env, env_file=env_file)
+    derived = address_host_label(holds=holds, addrs=addrs)
+    if stated and derived and stated != derived:
+        raise HostLabelConflict(
+            "%s says this machine is %r, but the address it holds says %r — "
+            "refusing to name it" % (source, stated, derived))
+    if stated:
+        return stated
+    if derived:
+        return derived
+    raise HostLabelUnresolved(
+        "cannot identify this machine: ACTIVITY_HOST is unset or invalid, %r "
+        "supplies no valid ACTIVITY_HOST, and none of the known host addresses "
+        "(%s) is held here. `hostname` is 'nixos' on both hosts, so there is "
+        "nothing left to derive from — refusing to guess."
+        % (env_file, ", ".join("%s=%s" % (l, a)
+                               for l, a in (host_addrs() if addrs is None
+                                            else tuple(addrs))) or "none"))
 
 
 if __name__ == "__main__":
     # 🔴 THE SHELL ENTRY POINT. transcript-push.sh calls `python3 host_label.py`
     # rather than re-deriving the rule in shell — which is what it used to do, and
     # what got the two feeders out of step. Prints nothing but the label.
-    print(local_host_label())
+    #
+    # 🔴 ON A REFUSAL, STDOUT STAYS EMPTY AND THE EXIT IS NON-ZERO — the two
+    # signals `transcript-push.sh` already checks together ("A FAILURE HERE IS
+    # FATAL, NOT A FALLBACK TO `uname -n`"). A traceback on stdout would be
+    # captured as the host NAME by `HOST_NAME="$(python3 …)"`, so the message
+    # goes to stderr and nothing else is printed.
+    #
+    # 🔴 NO SUBCOMMANDS, AND THAT IS A DELETION RATHER THAN AN OMISSION. An
+    # earlier revision of #1601 added `--file-states-label`, so that
+    # `nix/home.nix`'s `home.activation.activityCollectorEnv` could ask "does
+    # this env file already state a valid label?" before APPENDING one. That
+    # activation is gone — the collector derives its own label now instead of
+    # having one written into a systemd `EnvironmentFile=` for it — and with it
+    # the only caller. Public surface on a module six things import is not free:
+    # it is read as supported, so it is removed rather than left standing.
+    if sys.argv[1:]:
+        sys.stderr.write("host_label: usage: host_label.py (no arguments)\n")
+        raise SystemExit(2)
+    try:
+        print(local_host_label())
+    except HostLabelError as exc:
+        sys.stderr.write("host_label: %s\n" % exc)
+        raise SystemExit(3)

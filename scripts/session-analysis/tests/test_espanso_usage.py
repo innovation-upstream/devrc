@@ -731,12 +731,31 @@ def test_main_verify_deploy_exit_code_signals_a_problem(monkeypatch, capsys):
 # --------------------------------------------------------------------------- #
 # misc
 # --------------------------------------------------------------------------- #
-def test_local_host_label_prefers_env_then_collector_file(tmp_path):
-    assert M.local_host_label(env={"ACTIVITY_HOST": "LapTop"}) == "laptop"
+def test_local_host_label_prefers_env_then_collector_file(tmp_path, monkeypatch):
+    """🔴 `HOST_LABEL_ADDRS=""` PINS THE THIRD FEEDER (#1601).
+
+    This function is no longer a private copy of the rule — it delegates to
+    `scripts/lib/host_label.py`, which cross-checks a stated label against an
+    address the running machine HOLDS. Without pinning that, the `LapTop` case
+    below would raise (and be swallowed to `""`) on the workbench and pass on the
+    laptop: a test whose verdict depends on which machine ran it. Set-but-empty
+    means "holds none of the known addresses". The address feeder is measured on
+    its own in `scripts/tests/test_host_label_identity.py`.
+    """
+    monkeypatch.setenv("HOST_LABEL_ADDRS", "")
+    absent = str(tmp_path / "absent")
+    assert M.local_host_label(env={"ACTIVITY_HOST": "LapTop"},
+                              env_file=absent) == "laptop"
     f = tmp_path / "env"
     f.write_text('FOO=1\nACTIVITY_HOST="workbench"\n')
     assert M.local_host_label(env={}, env_file=str(f)) == "workbench"
-    assert M.local_host_label(env={}, env_file=str(tmp_path / "absent")) == ""
+    # 🔴 UNRESOLVED IS STILL `""` HERE, NOT AN EXCEPTION, AND THAT IS DELIBERATE.
+    # The shared module RAISES; this wrapper swallows it because its single
+    # caller already branches on falsiness and the product is a REPORT that
+    # prints "host: UNRESOLVED". Degrading a report is right where killing a
+    # feeder is not. The old behaviour was "" here too — what changed is that
+    # the machine's own address is consulted before giving up.
+    assert M.local_host_label(env={}, env_file=absent) == ""
 
 
 def test_parse_args_keeps_every_legacy_flag():

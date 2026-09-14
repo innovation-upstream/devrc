@@ -115,3 +115,97 @@ how a question was settled, so a future session does not re-run the probe.
   is what the arming decision actually needs. ⚠ **Do not assume the other four are also false** —
   `#1450` is 174 commits behind and may well be genuine; only `#1603` has been checked.
 
+
+## CLOSED dated sections, evicted 2026-09-13 (second pass)
+
+🔴 Evicted when the budget warning shipped in `#1648` fired on its own author's write — 873 B of
+headroom left — and said evicting now is cheaper than doing it under a red `main`. Both sections
+below belong to ranks that are CLOSED (2 and 3). ⚠ The `#792` review section was deliberately NOT
+evicted: rank 8 is LIVE and dated 2026-09-18, and that section is its arming evidence.
+
+### 2026-09-11 — verifying rank 2, and four instrument failures in one session
+
+- 🔴 **`git rev-parse $ref:path` in zsh returns a CONFIDENT WRONG 40-char sha.** `$r` followed by
+  `:s` is eaten as a **history substitute modifier**, so the command never asks what you think.
+  It printed a plausible blob id that made a file look CHANGED across three refs when
+  `git ls-tree` showed one identical blob (`c342720d`). **Brace it (`${r}:path`) or use
+  `git ls-tree`.** This is the documented unbraced-var trap, hit while actively reading the rule.
+- 🔴 **A mutation that edits a COMMENT reports SURVIVED having never run.** `classify`'s
+  fall-through was mutated with `.replace('return "error-other"', …, 1)` — and the FIRST
+  occurrence in the file is inside a comment *quoting that literal as prose*. The sweep was green
+  and meaningless. **Mutate by LINE NUMBER with an assert on the line's exact content.** Redone
+  properly, both fall-throughs are KILLED by named tests
+  (`test_an_UNRECOGNISED_state_is_never_green_end_to_end`).
+- 🔴 **zsh does not word-split, so `pytest $SEL` passed 50 paths as ONE argument** — pytest errored
+  `file or directory not found`, ran **`no tests ran in 0.00s`**, and the pipeline still **exited
+  0**. A merged-tree gate that observed nothing and reported success. Use an array, or `${=SEL}`,
+  and **assert the collected count moved** before believing a green.
+- 🔴 **I destroyed my own control by removing its worktree while it was still running**
+  (`FileNotFoundError: …/wt-control`, and it exited **0** anyway). The decision did not change
+  because the discriminating run had already finished — but that is luck, not justification.
+  **Do not tear down a tree a background job depends on.**
+- **A 1-of-4049 merged-tree failure was LOAD, and the mechanism was identified rather than
+  re-run-until-green.** `test_no_real_launchers.py::test_autouse_is_what_protects_a_test_that_
+  never_asks` died on a 300s `TimeoutExpired` on a *nested* pytest inside a run that took 3090s;
+  the same file alone on the same merged tree passes **80/80 in 254s**. ⚠ It was NOT dismissed on
+  shape: that file references `main-status-watch` four times, #1469 added its `NOLAUNCH_ACK` row,
+  and `ffe4e5d0` is precedent for this exact file breaking on a merge with main. The launcher
+  ledger's one real citation into the rewritten test file
+  (`test_the_trigger_verb_is_MUTATING_so_the_stub_fails_it_closed`) was checked and RESOLVES.
+- 🔴 **A PR green on its own branch is not a merged-tree claim, and #1502 was 12 commits behind.**
+  Zero file overlap and a clean textual merge — which is NOT safety — so the at-risk surfaces
+  (every test reading `CLAUDE.md`, the disk-accounting ledger, `scoped-tests`) were run on the
+  actual merged tree before merging.
+- **`#1502`'s own ladder repeated the arc's headline lesson twice more.** Round 4 caught round 3
+  **claiming a fix it had not made** — the PR body had been written from the finding list rather
+  than the diff. Round 5 then found three of round 3's own measured numbers stated **wider than
+  measured** ("21 mutants" → 16; "every mutant of classify's arms" → 35 of 60; "ZERO coverage" →
+  10 of 11). A fix round's own prose remains the likeliest next finding.
+- **A 100% kill rate is a broken harness, and was reported as such.** One verification sweep
+  returned 439/439 KILLED **with a RED negative control**; the whole 457-run sweep was voided
+  rather than reported. A span self-check also caught 1 mutant of 440 whose edit landed inside an
+  f-string and never made the change it claimed — reported VOID, not SURVIVED.
+- 🔴 **CLAUDE.md said `main-status-watch` was "NOT LIVE UNTIL A SWITCH" for a full day after
+  `ship.sh` had converged both hosts to `86b1ddec`.** The sentence was written before the deploy
+  and nothing re-read it. Corrected in `#1502` to a MEASURED liveness claim that names its own
+  re-measurement command. **A ⏳ "not live yet" note is a claim with an expiry that nothing prints.**
+- ⚠ **#792's dry-run soak cannot validate the guard its own best evidence needs.** devrc **#1500**
+  merged **14 seconds after** the sweep pod started — i.e. mid-tick, exactly the race the re-read
+  guard exists for. Dry-run short-circuits `cancel_all` BEFORE the re-read, so the soak shows the
+  SELECTOR is right while structurally never exercising the WRITE-path guard. Weigh that when
+  deciding rank 8.
+
+### 2026-09-11 — rank 3: a ranked item whose premise was wrong in both directions
+
+- 🔴 **"Needs a diagnosis" was FALSE — the diagnosis was already in the file, and excellent.** The
+  suite's own classifier had printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`
+  on run `devrc-ci-86zxj`: `server.py:_replace_bytes` fsyncs the file and then the parent dir
+  **inside the request, before the response is written**, and fsync blocks in uninterruptible sleep
+  — which is exactly the captured `TimeoutError` inside `socket.recv_into` (connection ESTABLISHED,
+  never answered). **Read the target file before believing a handoff's characterisation of it.**
+- 🔴 **AND IT WAS ALREADY FIXED, by a PR nobody connected to it.** `#1458` (`ce9b55c3`) sited the 18
+  remaining store roots — this class's among them — on **tmpfs** via `sited_root`. That removes the
+  mechanism rather than widening a bound: an fsync to RAM cannot stall on a contended disk. Nothing
+  recorded that the fix had LANDED, so the item stayed on the queue reading as live.
+  **A fix that is not written down where the symptom is described has not finished landing.**
+- **Measured, `tekton/devrc-pytests`, newest verdict per PR head, split on `ce9b55c3`:** pre-fix 125
+  verdicts / 29 genuine failures / **4** this test; post-fix 45 / 6 / **0**. `failure` and `error`
+  counted separately throughout — `error` is a broken gate, not a bad change.
+- 🔴 **THE ZERO WAS NEVER THE PROOF, and the comment now says so in the file.** At the pre-fix
+  per-verdict rate (3.2%) the expected count in 45 verdicts is ~1.4, so **P(observing 0) ≈ 0.23** —
+  a one-in-four coincidence. The mechanism's removal is what carries the claim. **A before/after
+  table is the easiest thing in this repo to over-read; state the power beside it or it will be
+  upgraded to "proven" by the next reader.**
+- 🔴 **IT WAS NEVER THE WORST FLAKE — it was the best-DOCUMENTED one.** Same pre-fix window:
+  `test_every_decrypt_family_VERDICT_is_pinned_WHOLE` failed **8** times to this test's **4**, and
+  is also at 0 post-fix. It had no long diagnosis attached and was never ranked. **Vividness is not
+  frequency: COUNT the failures before choosing which flake to chase.** This is the same error as
+  ranking by a memorable incident rather than by a census.
+- **`main` is a useless population for this question and that is structural.** Of 43 post-fix
+  pytests verdicts on `main`, **40 were artefacts** (~31 `superseded`, 4 `KILLED: the gate pod
+  died`, 4 `NO GATE POD`, 1 pending) leaving **3** authoritative successes. Use PR heads.
+- ⚠ **UNMEASURED, recorded rather than guessed:** the 760-test verification run emitted **3
+  warnings**, and this suite warns on `the spawn lost the port race and retried`. Only the tail was
+  captured, so whether those were port-race retries is **unknown**. If they were, the race is live
+  on this host — but nothing here claims that.
+
