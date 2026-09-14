@@ -153,10 +153,18 @@ is the PRIVATE proposal, not this doc.
   — nothing in devrc or the pinned client matches, and the client has no multi-instance notion at
   all. So B is a build, not a wiring change.
   ⚠ **Ranks 25/27/28 and the audit residue do NOT advance the goal.** The only ranked item that
-  ever did was 4, and it is now closed. **The next goal-advancing work is phase B itself, which
-  has no rank** — file one when someone takes it, with B's own closing condition.
+  ever did was 4, and it is now closed.
+  ✅ **B NOW HAS A RANK — 29, filed 2026-09-14, UNCLAIMED.** Its three "nothing exists" measurements
+  were re-taken at filing time rather than carried from this bullet, and the enumeration was a
+  `find … | xargs grep` because this host's `grep -r` is .gitignore-blind and returns the same zero
+  for a different reason. **Read rank 29 before scoping: it is TWO PRs in two repos** (mechanism in
+  `ZacxDev/cairn`, routing table in devrc), and its closing condition turns §9's "existing behaviour
+  unchanged" into a captured before/after diff **with a positive control**, because an
+  unchanged-output claim with no control is indistinguishable from a harness wired to nothing.
 
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
+  🔴 **29 is the only one of these that advances the `## Goal`** — it is phase B, and C/D/E cannot
+  start until it lands. The rest are hygiene.
   **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
   those sites have no handle and therefore no remedy);
   **27**; **28** (the cwd-blind relative nudge — FILED 2026-09-14 by operator decision during
@@ -262,35 +270,19 @@ is the PRIVATE proposal, not this doc.
 - **Next probe:** export one real session and read it. That is a human judgement over named
   evidence, not a command.
 
-### CLOSED 2026-09-07 — the cairn full-suite intermittent, and the nine-round ladder on its fix
-🔴 **This SUPERSEDED and RETIRED an earlier block titled "The full-suite intermittent in cairn
-— RATE MEASURED, DID NOT REPRODUCE; one live mechanism closed", EVICTED 2026-09-13.** Its
-"Next probe: none scheduled" is carried below; everything else in it was history. Do not
-resurrect it from git history and re-derive its probes.
-
-- **Outcome:** `ZacxDev/cairn` #3 merged as `8e4ef84`. The intermittent is recorded as
-  NOT REPRODUCING; it is **not** claimed fixed, and the PR says so.
-- **Observed (with values):** 18 CI runs / 0 failures (9 pre-existing + 9 reruns, `failed=0`,
-  **0 skipped in all 18**, collected 1593..1651), plus 5 local full runs across the fix
-  rounds. Combined ≈43 runs, 1 failure. via: measurement
-- 🔴 **Ruled out as recoverable — the one failure has no traceback and never will.** The run
-  was read through `pytest -q | tail -1`; the transcript (`a0759a10-…`) holds only the short
-  summary. Which of three branches fired is unknowable. **That, not the rate, is why 43 runs
-  closed nothing.** via: measurement
-- **Ruled out:** that reordering `poll()`/`terminate()` closes the signal window — it MOVES
-  it and inverts the error direction to over-credit. Delivery is now RECORDED
-  (`delivered_sigterm = was_running and proc.returncode is None`), exact in all three states.
-  via: measurement
-- **Left OPEN by decision, recorded in the code so it reads as open rather than absent:**
-  (a) the residual over-credit INSIDE `send_signal`, between its poll and its `os.kill` —
-  irreducible from outside CPython; (b) `was_running` is provably redundant and its mutant
-  survives — the simplification is available and the note says so; (c) the suite-level "no
-  stray race warnings" property, which no test inside the suite can assert about itself
-  (`filterwarnings = error` was weighed and REJECTED — it would redden every *successfully*
-  retried race); (d) several historical figures in comments (~100 µs, 0 flips in 500, 784
-  tests) that no future round can re-check, scoped as past measurements.
-- **Next probe:** none. If it recurs, the message is self-diagnosing — READ IT rather than
-  re-running. Re-running to a green is what trains everyone to click through.
+### EVICTED 2026-09-14 — the cairn full-suite intermittent and the nine-round ladder (CLOSED)
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #3 `8e4ef84`**; the intermittent is recorded as NOT
+REPRODUCING and is **not** claimed fixed. Block evicted for size to pay for rank 29, per the
+2026-09-07 convention; it had already superseded an earlier 2026-09-13 eviction — do not
+resurrect either from git history and re-derive its probes.
+🔴 **The lesson that survives, and it is about EVIDENCE not rate:** ≈43 runs with 1 failure
+closed **nothing**, because that one failure has no traceback and never will — it was read
+through `pytest -q | tail -1`, so the transcript holds only the short summary and which of
+three branches fired is unknowable. **A run count cannot substitute for a captured failure.**
+Four residuals were left open **in the code** (an irreducible over-credit inside `send_signal`;
+a redundant `was_running` whose mutant survives; a suite-level property no test in the suite
+can assert about itself, `filterwarnings = error` weighed and REJECTED; and historical comment
+figures no round can re-check) — read them at `8e4ef84`, not here. **Next probe: none.**
 
 ### EVICTED 2026-09-14 — the devrc/OSS client fork (DECIDED and DELIVERED)
 🔴 **The question this block held open is CLOSED twice over:** the operator decided
@@ -389,31 +381,17 @@ not-found path, printing to STDERR; the implementing round wrote *"I believe the
 sandbox-safe, but that is reasoning, not a measurement"*, and it was wrong; (c) a scan hit is
 fixed by pinning a RELATIONSHIP, not by allowlisting a string. **Next probe: none.**
 
-### Round 1 and round 3's guards — the mutation evidence, kept so nobody re-derives it
-- **Round 1's 🟡 was a guard NARROWER THAN ITS OWN DOCSTRING, not an inert one.** The decoy
-  `cairnPackage = pkgs.hello;` **plus** `cairnUnused = cairn.packages.${system}.cairn;`
-  **SURVIVED at `f98be263` (8 passed)** while `home.file.".local/bin/cairn".source` became
-  `${pkgs.hello}/bin/cairn` — home-manager's `insertFileEntry` does an unconditional `ln -s`,
-  so that BUILDS and deploys a **dangling symlink**. `pkgs.hello` **alone** was already
-  killed: the failure needed a decoy carrying the string the second assertion looked for.
-  via: measurement
-- 🔴 **Round 1 fixed a false RED and opened a path to a false GREEN.** Its bracket walk fell
-  off the end when depth never returned to 0, leaving `header` at the **whole file**;
-  `cairnPackage` occurs twice in the module body, so the assertion passed vacuously. MEASURED
-  at `b79cf63a`: a legal multi-line header that drops `cairnPackage` and carries one
-  unbalanced `(` in a prose comment → **8 passed**. via: measurement
-- 🔴 **A mutant SURVIVED round 3's first battery and is recorded rather than hidden.**
-  Reinstating the whole-file fallback survived: once comments stop carrying depth the
-  vacuous-case fixture closes correctly, so it never reached the fall-off-the-end branch — an
-  **unreachable guard**, green for the wrong reason. A third test with a header having no
-  closing `}` at all — a case no earlier assertion rejects — killed it. via: measurement
-- **A control in the other direction:** a cosmetic **rewrap** of the pinned command across
-  three lines stays green, so the whitespace normalisation is doing work rather than the pin
-  being brittle. via: measurement
-- **Ruled out: that the ledger pin was ever binding.** Before round 3 it named FLAGS only —
-  routing the same flags at the packaged client left the suite **green at 79 passed**, fully
-  re-opening round 1's 🔴. via: measurement
-- **Next probe:** none. All matrices are on PR #1406's round-2 and round-3 comments.
+### EVICTED 2026-09-14 — round 1 and round 3's guards, the mutation evidence (CLOSED)
+🔴 **Every matrix is on PR #1406's round-2 and round-3 comments** — read them there. Evicted for
+size to pay for rank 29. **The three transferable shapes, kept because each cost a round:**
+(a) a decoy must carry the STRING the assertion looks for — `pkgs.hello` alone was killed, but
+`pkgs.hello` **plus** a second binding naming the real package SURVIVED while the deployed
+symlink was dangling (home-manager's `insertFileEntry` `ln -s`s unconditionally, so a broken
+pin BUILDS); (b) a bracket walk that never returns to depth 0 silently widens `header` to the
+WHOLE FILE, and a symbol occurring twice in the body then passes the assertion vacuously — a
+false RED fixed into a path to a false GREEN; (c) the round-3 mutant that SURVIVED was
+**unreachable**, not wrong: an earlier fixture closed correctly so the branch never ran, and
+only a case no earlier assertion rejects killed it. **Next probe: none.**
 
 ### STILL OPEN by decision — five round-2 🟡s the operator chose not to block the merge on
 - 🟡2 `count == 1` false-reds two legal nix spellings, and a one-line
@@ -1383,6 +1361,56 @@ belongs to that arc's own session. via: measurement
     hook's own suite updated, OR a decision is recorded here that a cwd-blind relative nudge is
     accepted, in which case the guard comments in `shell-env-nudge.py` must stop implying otherwise.
     forcing: none
+
+29. 🔴 **PHASE B — the client goes multi-instance, still ONE instance configured. THE ONLY
+    REMAINING GOAL-ADVANCING ITEM, and it is a BUILD, not a wiring change.** Filed 2026-09-14
+    because B had no rank: A1/A2/A3 are ✅, ranks 25/27/28 and the audit residue do not advance
+    the `## Goal`, and the only ranked item that ever did (4) is closed.
+    **Measured 2026-09-14, enumerated not sampled:** the deployed client
+    (`…-cairn-1e7aedf/libexec/cairn/cairn:246`) resolves exactly ONE store — `SUBSYSTEM_STORE_URL`
+    from the env or `~/.config/subsystem-store/env` — and carries **no instance notion at all**;
+    the live config dir holds `env` alone; and `find … -print0 | xargs -0 grep` over devrc's
+    `*.py`/`*.nix`/`*.sh` for a scope→instance map returns **zero files** (enumerating, because
+    this host's `grep -r` is .gitignore-blind and would have returned the same zero for a
+    different reason). ⚠ The only multi-instance text anywhere is `lib/entry_shape.py:166-169`,
+    a comment instructing whoever adds routing to rewrite the per-host caveat — a TODO, not a
+    partial implementation. **So there is nothing to extend; B is net-new code.**
+    **The design is SETTLED — do not re-litigate it.** Proposal §5 + decisions 3/8, merged at
+    talos-infra `trunk:claudedocs/proposal-cairn-civitai-instance.md` (§11: "nothing in this
+    document is open"): an explicit checked-in `scope → ALIAS` map in devrc, **aliases only,
+    never a hostname**, pinned TWO-WAY in the manner of `claude/skill-tiers.json`, and an
+    unregistered scope **REFUSES** rather than defaulting — a default recreates the
+    writes-landing-in-a-store-nobody-reads shape that cost six entries in rank 23. New instances
+    are additive `~/.config/subsystem-store/instances/<alias>.env` files; `env` stays the
+    `personal` alias so the env-var override precedence the tests rely on is untouched. Cache
+    becomes `~/.cache/subsystem-store/<alias>/` with a per-alias `.sync-stamp`. ⚠ `DEFAULT_CACHE_ROOT`
+    carries a "THE one definition" comment AND a mutation battery — expect to EXTEND the sweep,
+    not move a constant. 🔴 **The mechanism ships in `ZacxDev/cairn`, the routing table stays in
+    devrc** (the OSS client knows how to route and nothing about who routes where), so this is
+    TWO PRs in two repos, and the devrc half cannot merge before the pin moves.
+    🔴 **An existing sentence becomes a LIE in the same change** (§5.4): every recall prints
+    "the store is PER-HOST and unreplicated … an absence below is an absence HERE", which under
+    routing is actively misleading — an absence may mean the scope lives elsewhere. Likewise
+    `doctor` reports PER-INSTANCE and must keep distinguishing configured-but-unreachable from
+    reachable-with-no-scopes, and `--all-scopes` fans out, labels each hit, and **fails loud** on
+    any unreachable instance — a silent partial makes "found nothing" a lie.
+    🔴 **Closing condition — §9's "existing behaviour unchanged, provable BEFORE any data moves",
+    made mechanical.** Closes when ALL of: (a) both PRs merged and verified BY CONTENT at each
+    `origin/main` — a squash makes ancestry false forever; (b) the two-way registry pin is watched
+    RED on a scope with no entry AND RED on an entry naming no scope, not asserted; (c) an
+    unregistered scope EXITS NON-ZERO naming the scope, proven by a test red against today's
+    single-store resolution; (d) exactly ONE instance stays configured and `cairn doctor` reports
+    one instance on BOTH hosts after `ship.sh` — read the resolved store path, never ship's rc;
+    (e) the unchanged-behaviour proof is a CAPTURED DIFF, not a claim — `recall --repo`,
+    `recall --scope`, explicit `--store`, and a `SUBSYSTEM_STORE_URL=` override each byte-identical
+    before and after against the same store, **with a positive control showing that diff CAN move**,
+    or the proof is indistinguishable from a harness wired to nothing; (f) the per-host caveat
+    string is rewritten. **Who checks:** (a)–(d) and (f) mechanically at the two `origin/main`s;
+    (e) by whoever takes this rank, recorded HERE with both arms of its control.
+    ⚠ **OUT OF SCOPE, and must not creep in:** deploying the civitai instance (C), moving any entry
+    (D/E), or adding a second instance to any config. B ships plumbing with one instance PRECISELY
+    so the routing change is proven before data moves.
+    forcing: none — but C/D/E cannot start until it lands, so it gates the rest of the arc
 
 ## Gotchas / decisions / dead-ends
 
