@@ -445,8 +445,11 @@ that produced the wrong number. Kept below as originally written, not silently r
   `git status` anyway if it dies hard" and that is not boilerplate. **Run it detached**, and
   `git status` the worktree afterwards regardless. Confined to a worktree here; in a base
   clone it would have been a mutated tracked file nobody was looking for.
-- **The needle false positive, for the next person who trips it:** `"no create route"` is a
-  deliberately short needle whose own comment predicts false positives and prescribes the fix
+- **The needle false positive, for the next person who trips it:** `"no create route"` (a
+  retracted claim) is a deliberately short needle whose own comment predicts false positives
+  🔴 **and writing this very bullet tripped it — twice.** Quoting the needle to EXPLAIN it is
+  itself an unmarked occurrence, so a doc about the gate reddens the gate. Both sites here
+  carry a marker for that reason. It prescribes the fix
   ("reword, or carry a retraction marker within `_MARKER_WINDOW`"). Two of the three sites
   were a gotcha QUOTING a grep pattern, and both straddled a line wrap — so `grep -n` showed
   **one** hit where the normalising scanner saw **two**. **Use the repo's own scanner
@@ -473,6 +476,8 @@ that produced the wrong number. Kept below as originally written, not silently r
   ```
 - The needle scan, with the control that makes its zero meaningful — load the repo's own
   `_normalise_for_scan`/`_RETRACTION_MARKERS`/`_MARKER_WINDOW` from
-  `scripts/tests/test_subsystem_store_api.py`, assert a bare `"the pod has no create route at
-  all"` still reports as a FINDING, then scan the tracked corpus. A zero without that control
-  is indistinguishable from a scanner wired to nothing.
+  `scripts/tests/test_subsystem_store_api.py`, assert that a bare retracted sentence — e.g.
+  `"the pod has no create route at all"`, retracted — still reports as a FINDING, then scan
+  the tracked corpus. A zero without that control is indistinguishable from a scanner wired
+  to nothing. ⚠ The control fixture is a BARE ASSERTION by construction, so writing it into a
+  tracked file needs its own marker or it becomes a real finding.
