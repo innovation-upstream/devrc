@@ -431,7 +431,36 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
 # Facts — `gh`, or a file so a test needs neither it nor a network
 # --------------------------------------------------------------------------- #
 
-def find_carriers(runner, repo, limit=300, state="all"):
+def _has_claims_fence(ad, bodies):
+    """Does ANY comment carry a real `audit-claims` FENCE?
+
+    🔴 THIS REPLACED A SUBSTRING TEST, AND THE SUBSTRING TEST OVER-COUNTED. It
+    was `"audit-claims" in body`, so a PR that merely DISCUSSES the ledger in
+    prose was enumerated as a carrier. MEASURED on devrc #1440: its only match
+    sits inside a numbered claim line talking about `--emit-claims`, there is no
+    fence, and it is not a ladder — fittingly, it is the PR that added round 0 to
+    the skill.
+
+    🔴 IT MATTERS BECAUSE IT RAN THE WRONG WAY. Every other caveat on a carrier
+    count here is a FLOOR (`gh` does not return review comments, so the scan
+    under-counts). This one was an OVER-count and was stated nowhere, so a reader
+    correcting for the documented direction would correct the wrong way.
+
+    ⚠ Scope, stated so nobody reads it as a number fix: a non-ladder carries no
+    usable block, so it was already reported UNMEASURABLE and already excluded
+    from every downstream total. What moves is the carrier COUNT, not a rate.
+
+    The fence grammar is `audit-dispatch.py`'s own `_FENCE_OPEN` — one rule, one
+    place, and the same object `parse_claims_blocks` matches with.
+    """
+    for body in bodies:
+        for line in (body or "").split("\n"):
+            if ad._FENCE_OPEN.match(line):
+                return True
+    return False
+
+
+def find_carriers(ad, runner, repo, limit=300, state="all"):
     """-> ([facts, …], note) for every PR in `repo` carrying an `audit-claims`
     fence, newest first.
 
@@ -469,7 +498,7 @@ def find_carriers(runner, repo, limit=300, state="all"):
     carriers = []
     for pr in data:
         bodies = [c.get("body", "") for c in pr.get("comments") or []]
-        if not any("audit-claims" in (b or "") for b in bodies):
+        if not _has_claims_fence(ad, bodies):
             continue
         carriers.append({
             "pr": pr.get("number"),
@@ -661,11 +690,38 @@ def render(ladders, notes):
     # different repo. A count in prose beside a measurement it is not computed
     # from is the exact defect class this whole report exists to find, committed
     # inside the report. Counted here instead.
-    zero_line_gaps = sum(
-        1 for L in ladders if L.reason is None
+    #
+    # 🔴 AND THE *EXPLANATION* WAS WRONG ON `main` FOR THE SAME REASON THE COUNT
+    # ONCE WAS — prose beside a number it is not computed from. It read "A GAP of
+    # MANY commits and 0 lines is `--not <base>` working: those commits are an
+    # upstream bring-in already in the base", while the gate selects on
+    # `a.commits`, which `b1abf6b1` redefined to mean `churn_commits`. A bring-in
+    # commit IS reachable from the base, so `--not <base>` removes it from THAT
+    # count as well as from the lines — **the bring-in class can no longer reach
+    # this caveat at all.** MEASURED 2026-09-13 on devrc #1064 and #1274: both
+    # print `1 commit(s), 0 line(s)` where the pre-`b1abf6b1` report said 125 and
+    # 10, and in both the single surviving commit is a MERGE. So the shipped text
+    # explained a clean merge as an upstream bring-in: a different mechanism.
+    # The fix is to DERIVE the mechanism from what the gap's commits are, and to
+    # refuse to explain the residue rather than reach for the nearest story.
+    zero_line = [
+        a for L in ladders if L.reason is None
         for a in L.adjacencies
         if a.label == GAP and a.commits and not (a.added or 0) + (a.deleted or 0)
-    )
+    ]
+
+    def _all_merges(a):
+        """Every commit contributing this gap is structurally a merge.
+
+        `c.sha` excludes the COULD-NOT-LIST placeholder, so a gap whose commits
+        could not be listed is never explained as a clean merge — an unlistable
+        gap is exactly the case with no evidence for any explanation.
+        """
+        return bool(a.gap_commits) and all(
+            c.sha and c.is_merge for c in a.gap_commits)
+
+    zero_line_merge = [a for a in zero_line if _all_merges(a)]
+    zero_line_other = [a for a in zero_line if not _all_merges(a)]
     # 🔴 The census. Counts only what is SELF-DECLARED or STRUCTURAL; everything
     # else is handed over by name rather than guessed at.
     # 🔴 SPLIT BY INTERIOR/TAIL, because this file forbids summing them thirty
@@ -742,13 +798,42 @@ def render(ladders, notes):
                    "`unclassified`. Measured over 32")
         out.append("  hand-classified commits: 8 self-declared, and the hand pass "
                    "found 20 fixes in total.")
-    if zero_line_gaps:
-        out.append("⚠ A COMMIT COUNT IS NOT A CHURN COUNT. A GAP of many commits "
-                   "and 0 lines is `--not")
-        out.append("  <base>` working: those commits are an upstream bring-in "
-                   "already in the base, which is")
-        out.append(f"  shape A of the reference file's range table. "
-                   f"{zero_line_gaps} gap(s) in THIS run look like that.")
+    if zero_line_merge:
+        out.append(f"⚠ A ZERO-LINE GAP IS NOT AN EMPTY ONE, AND "
+                   f"{len(zero_line_merge)} in THIS run are CLEAN MERGES: every")
+        out.append("  commit contributing the gap has >=2 parents and the churn "
+                   "is 0. A merge of the base")
+        out.append("  into the branch is not reachable FROM the base, so it "
+                   "belongs to the `--not <base>`")
+        # ⚠ `remerge-diff` is written WITHOUT its leading dashes on purpose:
+        # `test_it_imports_the_churn_command_rather_than_carrying_a_copy` forbids
+        # the flag's exact spelling outside a comment, so that this file can
+        # never grow a second copy of the churn command.
+        out.append("  population and is counted — while the remerge-diff of that "
+                   "merge finds no hand-written")
+        out.append("  resolution")
+        out.append("  in it, so 0 lines is the honest answer and nothing was "
+                   "audited-and-missed there.")
+        out.append("  🔴 NOT an upstream bring-in. This caveat SAID that until "
+                   "2026-09-13 and it was wrong")
+        out.append("  for the population it can select: a bring-in commit is "
+                   "reachable from the base, so")
+        out.append("  `--not <base>` drops it from the commit count printed above "
+                   "(that count has been")
+        out.append("  `churn_commits` since b1abf6b1) as well as from the lines. "
+                   "The bring-in reading")
+        out.append("  belongs to a RAW `rev-list` count, which this report does "
+                   "not print.")
+    if zero_line_other:
+        out.append(f"⚠ {len(zero_line_other)} gap(s) contribute 0 line(s) with at "
+                   "least one NON-merge commit in them.")
+        out.append("  🔴 THIS REPORT HAS NO EXPLANATION FOR THOSE and declines to "
+                   "invent one — read the")
+        out.append("  subjects printed above. Mechanisms it cannot tell apart: an "
+                   "empty commit, a")
+        out.append("  mode-only or pure-rename change, and a binary-only change "
+                   "(numstat prints `-` for")
+        out.append("  binary and the churn counts that as 0).")
     return "\n".join(out)
 
 
@@ -797,7 +882,7 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
         notes.append("--facts-file mode: no `gh` was consulted, so nothing here "
                      "was checked against the live PR")
     elif args.find_carriers:
-        facts_list, note = find_carriers(runner, args.repo, limit=args.limit)
+        facts_list, note = find_carriers(ad, runner, args.repo, limit=args.limit)
         notes.append(note)
         if args.list_only:
             print(note, file=out_stream)

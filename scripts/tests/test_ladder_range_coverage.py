@@ -226,19 +226,31 @@ def test_interior_and_tail_gaps_are_reported_as_SEPARATE_totals(lrc, ad,
 
 
 def test_the_zero_line_gap_caveat_is_DERIVED_from_this_run(lrc, ad, base_repo):
-    """🔴 Regression. That caveat shipped as the literal "Three of the 20 ladders
-    look like that" — the figure from the devrc run it was written during — and
-    then printed verbatim under a 5-ladder run of a different repo. A count in
-    prose beside a measurement it is not computed from is the defect class this
-    whole report exists to find.
+    """🔴 Regression, TWICE OVER — the count and then the explanation.
 
-    The fixture makes a gap of real COMMITS with ZERO churn, which is what an
-    upstream bring-in looks like: commits that `--not <base>` excludes entirely.
+    (1) That caveat shipped as the literal "Three of the 20 ladders look like
+    that" — the figure from the devrc run it was written during — and then
+    printed verbatim under a 5-ladder run of a different repo.
+
+    (2) 🔴 ITS EXPLANATION WAS WRONG ON `main` UNTIL 2026-09-13, and for the same
+    reason: prose beside a number it was not computed from. It read "A GAP of
+    MANY commits and 0 lines is `--not <base>` working: those commits are an
+    upstream bring-in already in the base" while the gate selects on
+    `churn_commits` (since `b1abf6b1`) — a population a bring-in commit is
+    excluded from BY CONSTRUCTION, because it is reachable from the base. So the
+    bring-in class could not reach the caveat at all, and what the caveat
+    actually fired on was a CLEAN MERGE contributing no diff. MEASURED on devrc
+    #1064 and #1274: `1 commit(s), 0 line(s)` apiece, the one commit a merge.
+
+    THIS FIXTURE IS THAT CASE, and its docstring used to mis-name it: the
+    `upstream.py` commit is NOT in the churn population at all (it is reachable
+    from `main`), so the gap's single commit is the MERGE. Asserted as such.
     """
     repo, base = base_repo
     r1_to = _commit(repo, "a.py", 10, "round 1 fix")
-    # Commits already in `main`, so `--not main` excludes every line of them:
-    # reachable from the branch, contributing no churn.
+    # A commit already in `main`: reachable from the base, so `--not main`
+    # excludes it from BOTH the lines and `churn_commits`. What is left in the
+    # gap is the merge commit itself.
     _git(repo, "checkout", "--quiet", "main")
     upstream = _commit(repo, "upstream.py", 12, "an upstream commit")
     _git(repo, "checkout", "--quiet", "feat")
@@ -252,13 +264,61 @@ def test_the_zero_line_gap_caveat_is_DERIVED_from_this_run(lrc, ad, base_repo):
     assert tail.label == lrc.GAP, (tail.label, tail.reason)
     assert tail.commits and tail.commits > 0, "the gap has real commits"
     assert (tail.added, tail.deleted) == (0, 0), \
-        "`--not main` must exclude the bring-in's lines"
+        "a clean merge of the base contributes no churn"
+    # The mechanism, pinned: the surviving commit is the merge, never `upstream`.
+    assert [c.is_merge for c in tail.gap_commits] == [True], \
+        [(c.sha[:8], c.subject, c.is_merge) for c in tail.gap_commits]
 
     rendered = lrc.render([L], [])
-    assert "1 gap(s) in THIS run look like that" in rendered
+    assert "1 in THIS run are CLEAN MERGES" in rendered
     assert "the 20 ladders" not in rendered, \
         "a hardcoded corpus figure is being printed for an unrelated run"
+    # 🔴 The retracted explanation must not be reachable from this gate.
+    assert "upstream bring-in already in the base" not in rendered, \
+        "the caveat is explaining a clean merge as an upstream bring-in again"
+    assert "NON-merge commit" not in rendered, \
+        "the unexplained-residue branch fired on an all-merge gap"
     assert upstream
+
+
+def test_a_zero_line_gap_with_a_NON_merge_commit_is_NOT_explained(lrc, ad,
+                                                                 base_repo):
+    """🔴 The other side of the same pin: the report must not reach for the merge
+    story when the evidence for it is absent.
+
+    An EMPTY commit is reachable from nowhere in the base, so it counts toward
+    `churn_commits` and contributes 0 lines — a zero-line gap with no merge in
+    it. The honest output is "no explanation, read the subjects", and the
+    mechanisms named (empty / mode-only / rename-only / binary-only) are exactly
+    the ones `measure_range_churn` cannot tell apart, since its numstat parse
+    maps a binary `-` to 0.
+
+    🔴 THE AXIS THIS VARIES IS `is_merge`, WHICH IS THE AXIS THE FIX BRANCHES ON.
+    A mutant that ignores the commits and always prints the merge story passes
+    the sibling test above and dies here; one that always prints the residue
+    story dies above and passes here. Neither fixture alone can see both.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    _git(repo, "commit", "--quiet", "--allow-empty", "-m",
+         "an empty commit after the last block")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 11, head, "main",
+                           [_block(1, base, r1_to)])
+
+    tail = L.adjacencies[-1]
+    assert tail.label == lrc.GAP, (tail.label, tail.reason)
+    assert tail.commits == 1, tail.commits
+    assert (tail.added, tail.deleted) == (0, 0)
+    assert [c.is_merge for c in tail.gap_commits] == [False]
+
+    rendered = lrc.render([L], [])
+    assert "1 gap(s) contribute 0 line(s) with at least one NON-merge" in rendered
+    assert "HAS NO EXPLANATION" in rendered
+    assert "CLEAN MERGES" not in rendered, \
+        "a non-merge zero-line gap was explained as a clean merge"
+    assert ad
 
 
 def test_an_overlap_is_labelled_OVERLAP_and_given_no_size(lrc, ad, base_repo):
@@ -774,6 +834,45 @@ def test_the_script_runs_and_its_usage_does_not_require_a_network():
                        capture_output=True, text=True, check=False)
     assert p.returncode == 0, p.stderr
     assert "--facts-file" in p.stdout
+
+
+def test_a_PR_that_merely_DISCUSSES_the_ledger_is_not_a_carrier(lrc, ad):
+    """🔴 `find_carriers` tested for the SUBSTRING `audit-claims`, so a PR that
+    only TALKS about the ledger was enumerated as a ladder.
+
+    MEASURED on devrc #1440: its single match sits inside a numbered claim line
+    discussing `--emit-claims`; there is no fence and it is not a ladder. The
+    direction is what makes it worth a guard — every other caveat on a carrier
+    count is a FLOOR (`gh` returns no review comments), so this one ran the
+    opposite way and was documented nowhere.
+
+    Hermetic: the `gh` call is faked, so this needs no network and no PR.
+    """
+    prose = ("Round 2 fixes. I used `--emit-claims` here; see the audit-claims "
+             "block convention in the skill.")
+    real = ("```audit-claims round=2 audited=aaaa1111..bbbb2222\n"
+            "1. a claim\n```")
+
+    def runner(cmd, cwd=None):
+        assert cmd[0] == "gh", cmd
+        return 0, json.dumps([
+            {"number": 1440, "title": "discusses the ledger only",
+             "headRefOid": "a" * 40, "baseRefName": "main",
+             "comments": [{"body": prose}]},
+            {"number": 1233, "title": "a real ladder",
+             "headRefOid": "b" * 40, "baseRefName": "main",
+             "comments": [{"body": real}]},
+        ]), ""
+
+    carriers, note = lrc.find_carriers(ad, runner, "owner/repo", limit=400)
+
+    numbers = [c["pr"] for c in carriers]
+    assert numbers == [1233], (
+        f"the prose-only PR was enumerated as a carrier: {numbers}")
+    # …and the positive control: the real ladder must still be found, or this
+    # guard would pass against a predicate that matches nothing.
+    assert 1233 in numbers
+    assert "1 carry" in note or "1 carry an" in note, note
 
 
 def test_the_batterys_floor_is_re_derived_from_this_modules_size():
