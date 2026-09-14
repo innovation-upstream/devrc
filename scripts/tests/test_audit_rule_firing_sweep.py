@@ -61,6 +61,10 @@ NOT_A_RULE = {
         "paragraph is pinned by nothing and may be edited freely",
     "Findings by severity (🔴 deploy-blocking":
         "the OUTPUT FORMAT. The 🔴 here is a severity glyph being defined, not a rule",
+    "WHEN A PR WITH A LIVE LADDER MUST TAKE UPSTREAM":
+        "branch-maintenance guidance to the ladder's OPERATOR — how to sync the PR "
+        "between rounds. It decides the SHAPE of the range a later round reads, so "
+        "no auditor reading a diff can ever produce it as a finding",
 }
 
 
