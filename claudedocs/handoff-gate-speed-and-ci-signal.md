@@ -33,8 +33,9 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
   `#1650` merged 2026-09-14T02:53Z; the gate run on `origin/main` `dbefe6fa` is **9 passed**. ⚠ This
   is the SECOND time in two days this doc asserted a red that somebody else had already fixed —
   `#1658` existed to correct the first. **A close-out's own red claim is the one nobody re-checks.**
-- ⏳ **`#1671` OPEN — rank 14, and it OVERTURNS that rank's recommendation** (delete → fix in the
-  fixture; deleting would have left a worse flake behind). Claim `gate-speed-and-ci-signal-14` held.
+- ⏳ **`#1671` OPEN — rank 14, doing BOTH halves of its own Next probe** (poll with a bounded
+  deadline; delete the redundant guard). Claim `gate-speed-and-ci-signal-14` held. 🔴 **Its first
+  draft claimed to OVERTURN a "delete" recommendation — RETRACTED, the doc never made one.**
 - **The local half of the arc IS delivering, measured two independent ways** — see the 2026-09-14
   gotcha. Local full-tier runs per merged PR: `gate.sh` **1.92 → 0.76**, `nix build .#checks`
   **2.83 → 0.73**; `scoped-tests.sh` **0 → 0.67** (144 calls, 38–52 sessions). ⚠ Its per-PR rate is
@@ -180,12 +181,15 @@ the END. **Ranks 1–13 and 15 are CLOSED tombstones.** Live: **14** (IN FLIGHT 
     MEASURED 2026-09-14, 30 trials: `new-session -d` returns when the tmux SERVER is up, not when
     the pane's `printf` has rendered — **30 of 30** immediate captures were EMPTY, the URI arriving
     **15–25 ms** later. So the flake is ORDER-DEPENDENT, and the named test is not its worst
-    symptom: `test_the_grid_hyperlink_spans_the_wrap` fails **7 of 8 in isolation** against the
-    named test's **1 of 3 in file order**. 🔴 **Deleting the named test would have left the WORSE
-    flake behind it, newly first in line** — the recommendation was an argument about the test's
-    VALUE that was never checked against the MECHANISM. Fixed in the shared fixture instead (one
-    rule, one place); controls watched both ways — 6/6 green where it was 1/8, and the OSC 8
-    wrapper removed still fails with the fixture's own message, killing exactly the 2 grid-readers.
+    **15–25 ms** later. ⚠ **The RATE is load-dependent and no figure should be quoted as a
+    property of the test**: `spans_the_wrap` measured 7 of 8 failing on one host-load and 3 of 8 on
+    another, and **0 of 8 in file order**. An earlier version of this item quoted one run of each as
+    a fixed asymmetry, and labelled an ISOLATED run as file order — both RETRACTED.
+    🔴 **What reproduces, twice independently: deleting the named test ALONE still left
+    `spans_the_wrap` failing 3 of 10.** So the fix is the fixture (one rule, one place) AND the
+    deletion — of the test that turned out to detect nothing the other one does not: it survives
+    both a `.tmux.conf` regression and a silent `copy_cursor_hyperlink` removal (an unknown
+    `#{...}` expands EMPTY at rc 0), which only `spans_the_wrap` catches.
     forcing: gate — until `#1671` lands, `main` keeps reddening.
 15. **CLOSED — `#1648` `a2c84a1c`, shipped and consumer-verified on the deployed tool.**
     `handoff_doc.py` now warns an author, in the proposal run above the diff, when an update would
@@ -879,7 +883,16 @@ indexed by `handoff_search`, so go to it by path.
   prose-only file that executes no tmux command. 🔴 Deliberately NOT taken unilaterally; classifying
   the doc unblocks `main` but does not close the loop.
 
-### 🔴 RANK 14: a flaky tmux test on `main` is reddening unrelated PRs
+### ✅ RESOLVED 2026-09-14 — RANK 14's flaky tmux test: a render race, fixed in `#1671`
+- **Resolution:** the Next probe's FIRST option (poll with a bounded deadline) shipped as a
+  `rendered` fixture, and its second (delete the guard) shipped too — for the test that was
+  measured to detect nothing the sibling does not. 🔴 **The block below is the ORIGINAL diagnosis,
+  kept verbatim; its leading hypothesis was RIGHT.** Two corrections to what was built on it: the
+  ranked item's "strongest argument for deleting it" was read as a recommendation and is not one
+  (this block's own Next probe names polling first and says the fix is the author's call), and the
+  1-passed/2-failed figure is one sample of a LOAD-DEPENDENT rate, not a property of the test.
+
+### 🔴 RANK 14 (ORIGINAL, superseded by the block above): a flaky tmux test on `main` is reddening unrelated PRs
 - as-of: 2026-09-13
 - **Symptom + exact repro:** on a clean checkout of `origin/main`,
   `nix develop ~/workspace/devrc -c python3 -m pytest
