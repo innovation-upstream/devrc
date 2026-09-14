@@ -79,10 +79,18 @@ def analyze(cmd):
         var = KC_VARS.get(norm)
         # 🔴 The basename fallback is for RELATIVE references only. Applied to an
         # absolute path it matches a DIFFERENT FILE that happens to share a name
-        # and nudges a handle for the wrong cluster — and because $KC_* is
-        # existence-guarded, on a host where that handle is unset the suggestion
-        # expands to EMPTY and `KUBECONFIG= kubectl` silently falls back to the
-        # default context. Measured before this guard: an absolute
+        # and nudges a handle for the wrong cluster. Where that handle IS set the
+        # command runs against the wrong cluster; where $KC_* declines to export
+        # the suggestion expands to EMPTY.
+        # ⚠ DO NOT write that the empty case "silently falls back to the default
+        # context" — `scripts/tests/test_absolute_handle_paths.py` RETRACTED that
+        # sentence and forbids repeating it without its precondition. The silent
+        # arm needs the default kubeconfig to carry a NON-EMPTY `current-context`;
+        # on this host `~/.kube/config` has `current-context: ""`, so both arms
+        # return `error: current-context is not set`, rc 1 — loud, and
+        # character-identical. Re-measured here. The mechanism is real; its
+        # reachability is host state.
+        # Measured before this guard: an absolute
         # `.../homelab-infra/production-kubeconfig` (the laptop's documented
         # layout) was nudged as `$KC_PROD`, which is guarded on the
         # `homelab-talos` spelling. `_norm` expands `~`, so `~/...` is absolute

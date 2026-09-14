@@ -71,7 +71,9 @@ MEASURED on this host, and it is not hypothetical: `~/.kube/homelab-nebula.yaml`
 does not exist, `$KC_NEBULA` is UNSET — and the hook nudges `KUBECONFIG=$KC_NEBULA`
 anyway, which is precisely the failure
 `test_the_kubeconfig_table_is_exactly_the_nix_kubeconfigs_block` describes in its
-own `extra`-arm message ("expands to EMPTY … falls back to the DEFAULT context").
+own `extra`-arm message ("expands to EMPTY"). ⚠ That message used to continue
+"… falls back to the DEFAULT context"; it does not, unconditionally — see the
+retraction in `test_absolute_handle_paths.py` and the corrected wording there.
 That is PRE-EXISTING — `KC_NEBULA` has been in `KC_VARS` since the hook landed —
 but this ledger now makes its presence MANDATORY in both directions, so it is
 recorded here rather than left to be rediscovered.
@@ -106,7 +108,6 @@ not depend on which user or host runs it.
 """
 import importlib.util
 import os
-import re
 
 # The nix parser, imported rather than re-implemented — see the module docstring.
 # `_handle_table()` returns EVERY `NAME = "${home}/…";` entry in the file (both
@@ -115,28 +116,10 @@ import re
 # module from adding a third regex over the same file.
 from test_absolute_handle_paths import (  # noqa: E402
     HANDLES_NIX,
-    _NIX_ENTRY,
     _handle_table,
     _kubeconfig_table,
+    nix_block,
 )
-
-# The `repos = { ... };` attrset, isolated — the mirror of that module's
-# `_NIX_SECTION`, which is hardcoded to the `kubeconfigs` block. Only the ENTRY
-# pattern is shared (imported above); this adds the block boundary, which is the
-# one thing the imported module does not expose for this half.
-#
-# 🔴 THIS REPLACED A SUBTRACTION, AND THE SUBTRACTION WAS UNSOUND. `_repos()`
-# used to be "the whole-file parse minus the kubeconfig names", justified as
-# exact because the two blocks are disjoint. Disjointness gives
-# `repos ∩ kubeconfigs = ∅`; exactness ALSO needs
-# `_handle_table() ⊆ repos ∪ kubeconfigs`, which nothing asserted. Measured: add
-# a third block to `agent-handles.nix` —
-# `caches = { CACHE_X = "${home}/.cache/agent-x"; };` — and the old derivation
-# swept `CACHE_X` into the repo half, so
-# `test_the_repo_table_is_exactly_the_nix_repos_block` failed telling the reader
-# to ADD a never-exported, non-repo handle to `REPO_VARS`. It failed LOUD, which
-# capped the damage, but with an actively wrong remedy.
-_REPOS_BLOCK = re.compile(r"^\s*repos\s*=\s*\{(.*?)^\s*\};", re.M | re.S)
 
 HOOK = HANDLES_NIX.parent.parent / "scripts/claude-hooks/shell-env-nudge.py"
 
@@ -164,20 +147,30 @@ def _expected(entries, home):
 def _repos():
     """The `repos` block of `agent-handles.nix`, LONGEST SUFFIX FIRST.
 
-    Parsed out of its OWN attrset, symmetric with `_kubeconfig_table()`, rather
-    than derived by subtracting the kubeconfig names from a whole-file parse —
-    see the `_REPOS_BLOCK` note above for why the subtraction was unsound.
+    🔴 PARSED VIA THE IMPORTED `nix_block`, NOT A LOCAL REGEX — and it took two
+    tries to get that right. This began as "the whole-file parse MINUS the
+    kubeconfig names", justified as exact because the two blocks are disjoint.
+    Disjointness gives `repos ∩ kubeconfigs = ∅`; exactness ALSO needs
+    `_handle_table() ⊆ repos ∪ kubeconfigs`, which nothing asserted. Measured:
+    a third block — `caches = { CACHE_X = "${home}/.cache/agent-x"; };` — was
+    swept into the repo half, so
+    `test_the_repo_table_is_exactly_the_nix_repos_block` failed telling the
+    reader to ADD a never-exported, non-repo handle to `REPO_VARS`. Loud, but an
+    actively wrong remedy.
+
+    The first fix replaced the subtraction with a LOCAL block regex, which made
+    this module's own docstring false ("the parser is IMPORTED, not re-written")
+    and put a THIRD copy of the predicate over one file — copies that disagreed:
+    on an inline `repos = { A = "..."; };` the local one over-captured into the
+    next block while `test_repo_path_guard`'s `split("repos = {")` copy silently
+    dropped an entry. `nix_block` is that predicate, parameterised where it
+    already lived.
     """
-    text = HANDLES_NIX.read_text(encoding="utf-8")
-    m = _REPOS_BLOCK.search(text)
-    if not m:
-        raise AssertionError(
-            f"no `repos = {{ ... }};` block found in {HANDLES_NIX}. Every repo "
-            f"assertion in this module compares against that block; without it "
-            f"they compare against an empty set and pass vacuously."
-        )
-    entries = [(name, rel.rstrip("/")) for name, rel in _NIX_ENTRY.findall(m.group(1))]
-    return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
+    return nix_block(
+        "repos",
+        "Every repo assertion in this module compares against that block; "
+        "without it they compare against an empty set and pass vacuously.",
+    )
 
 
 def test_the_nix_source_parses_to_a_usable_table():
@@ -326,9 +319,10 @@ def test_the_kubeconfig_table_is_exactly_the_nix_kubeconfigs_block():
     assert not extra, (
         f"KC_VARS carries kubeconfig handle(s) nix/agent-handles.nix does not "
         f"declare: {sorted(extra.values())}. 🔴 A kubeconfig handle that the "
-        f"shell does not export expands to EMPTY, and `KUBECONFIG= kubectl …` "
-        f"falls back to the DEFAULT context — i.e. the nudge would route a "
-        f"command at whatever cluster is default rather than the named one. "
+        f"shell does not export expands to EMPTY. (`KUBECONFIG= kubectl` reaches "
+        f"the default context only where the default kubeconfig carries a "
+        f"non-empty `current-context`; that precondition is RETRACTED as "
+        f"unconditional in test_absolute_handle_paths.py — do not restate it.) "
         f"Remove them, or declare them in nix/agent-handles.nix."
     )
     assert got == want
@@ -382,8 +376,16 @@ def test_an_absolute_path_is_not_matched_by_BASENAME_alone():
     An absolute path that merely ENDS in a known kubeconfig name is a DIFFERENT
     FILE, so the nudge named the wrong cluster. Because `$KC_*` is
     existence-guarded in nix, on a host where that handle is unset the suggestion
-    expands to EMPTY and `KUBECONFIG= kubectl` falls back to the DEFAULT context
-    — silently.
+    expands to EMPTY.
+
+    ⚠ DO NOT say the empty case "silently falls back to the default context".
+    `test_absolute_handle_paths.py` RETRACTED that sentence and forbids repeating
+    it without its precondition: the silent arm needs the default kubeconfig to
+    carry a NON-EMPTY `current-context`, and on this host `~/.kube/config` has
+    `current-context: ""`, so BOTH arms return `error: current-context is not
+    set`, rc 1 — loud and character-identical (re-measured). The worse case is
+    the one that does not need a precondition: where the wrongly-named handle IS
+    exported, the command runs against the WRONG CLUSTER with no error at all.
 
     🔴 MEASURED BEFORE THE FIX, and the realistic case is the damaging one:
     `claude/skills/auditloop/SKILL.md` documents the laptop's kubeconfigs at
@@ -418,9 +420,12 @@ def test_an_absolute_path_is_not_matched_by_BASENAME_alone():
         got = [v for v, _ in mod.analyze(f"KUBECONFIG={bad} kubectl get pods")]
         assert got == [], (
             f"{bad!r} shares a basename with a known kubeconfig but is a "
-            f"DIFFERENT FILE, and was nudged as {got}. That names the wrong "
-            f"cluster, and where the handle is unset it expands to empty and "
-            f"silently selects the default context."
+            f"DIFFERENT FILE, and was nudged as {got}. Where that handle IS "
+            f"exported the command runs against the WRONG CLUSTER; where it "
+            f"declines to export the suggestion expands to empty. (Do not write "
+            f"that the empty case silently takes the default context — "
+            f"test_absolute_handle_paths.py retracted that without its "
+            f"precondition; here both arms are loud.)"
         )
 
 
