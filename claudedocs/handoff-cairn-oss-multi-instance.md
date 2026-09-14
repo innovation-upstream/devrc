@@ -2342,6 +2342,32 @@ covers; pin it with `--config`, do not `cd`.
   not on a clean round.** Recorded because a report that stops on the prose criterion is
   otherwise indistinguishable from one that converged. via: measurement
 
+- 🔴 **2026-09-14 — AN ABANDONED `claim-work` LOCK IS INVISIBLE TO THE HOST THAT HOLDS IT AND
+  BLOCKING TO EVERY OTHER ONE. That asymmetry is why it survives.** Found while auditing what was
+  left outstanding: `cairn-oss-multi-instance-20` had been claimed **5 days earlier** and never
+  released, on work that is still open (rank 20 half two — that CI leg has only ever been watched
+  PASS, so its red path is unproven). Nobody was doing it.
+  🔴 **The mechanism, which is the part worth carrying:** the ownership token is
+  `/etc/machine-id` + `git rev-parse --git-dir`, so `claim-work --check` answered
+  **`— THIS SESSION (you already hold it)`** here, i.e. **rc 12, carry on** — while the SAME ref
+  would have returned **rc 10, STOP** to the laptop or to any other clone. A stale claim therefore
+  reads as *fine* from exactly the machine that could clear it, and as *taken* from the machines
+  it obstructs. Neither host sees the contradiction, and nothing expires it in a way a human
+  notices.
+  **The cheap habit:** when a session ends, `claim-work --list` and release anything of yours whose
+  work did not land — and when you inherit an arc, check the list for claims older than a couple of
+  days before assuming the queue is free. `--release` of your own ref needs no `--force`.
+  Released; the arc now holds **zero** claims. via: measurement
+
+- ⚠ **2026-09-14 — "IS ANYTHING OUTSTANDING?" IS ANSWERED BY THE `closing-condition`, NOT BY THE
+  RANKED LIST, AND THE TWO GAVE OPPOSITE ANSWERS.** Ranks 4, 23 and 26 all closed across two
+  sessions and the queue read as productive. The `## Goal` closing-condition added this session
+  says the arc has **not** met its ask: the second instance does not exist, phase B has not
+  started, and — measured — ranks 25/27/28 and the audit residue cannot advance it. **A ranked
+  list measures ACTIVITY; only a frozen closing-condition measures ARRIVAL.** Any future
+  close-check on this arc must answer the `closing-condition` line with a verdict, never by
+  inventorying what shipped. via: measurement
+
 ## How to verify
 
 🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
