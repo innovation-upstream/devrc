@@ -15,14 +15,29 @@ Measure the churn that an audit ladder's `audit-claims` blocks do NOT cover, in 
 then outside it. Came in as ranks 10 and 8 of `handoff-audit-pr-ladder.md`; that doc has
 since renumbered and dropped both, so this is the durable home.
 
+closing-condition: every open item of `claudedocs/audit-ladder-review-2026-09-04.md` that
+this arc owns — **4** (stop-rationale, CLOSED), **5** (the range-coverage hole, CLOSED) and
+**6** (the unledgered rounds) — carries either a CLOSED marker with its residuals or a
+written operator decision not to read it. *Checked by:* a reader opening that doc's
+`## Open items` section and finding no uncrossed item whose text names range-coverage,
+stop-rationale or the gap census. The instruments themselves are shipped and guarded; this
+arc ends at the ITEMS, not at more measurement.
+
 ## State now
-- **Branch / PR: NOTHING IN FLIGHT.** All five PRs of this arc are MERGED and verified by
-  content on `origin/main`: `#1519`→`766c1295`, `#1528`→`b42ac7c3`, `#1552`→`b1abf6b1`,
-  `#1564`→`61f41adf`, `#1576`→`3409d325`. No open PR, no worktree, no held claim.
-- 🔴 **THE OPERATOR ASKED WHETHER EVERYTHING WAS ADDRESSED AND THE ANSWER WAS NO — that audit
-  is what this update records.** Of the five ranked items the kickoff named (8, 9, 10, 14, 16):
-  **10 and 8 are mine and done; 14 and 16 were closed by OTHER sessions and re-verified here;
-  9 WAS NEVER STARTED.** It is the one user-specified objective of this arc that did not ship.
+- **Branch / PR: all SEVEN PRs of this arc are MERGED** and verified by content on
+  `origin/main`: `#1519`→`766c1295`, `#1528`→`b42ac7c3`, `#1552`→`b1abf6b1`,
+  `#1564`→`61f41adf`, `#1576`→`3409d325`, **`#1649`→`46ebb689`** (rank 1) and
+  **`#1643`→`e6f05e04`** (rank 2 / the arc's rank 9), both merged **2026-09-14T04:15Z and
+  04:21Z**.
+- 🔴 **RANK 9 SHIPPED — and this doc said "NEVER STARTED" for ten hours after it did.**
+  The bullet here used to read *"9 WAS NEVER STARTED … the one user-specified objective of
+  this arc that did not ship"*, and a `/resume` kickoff was written from it **after**
+  `#1643` merged, instructing the next session to start work that was already on `main`.
+  The doc's own investigation entry below had said rank 9 was measured since 2026-09-13.
+  **The doc contradicted itself and the kickoff drew the stale half** — see the gotcha.
+  Of the five ranked items the original kickoff named (8, 9, 10, 14, 16): **8, 9 and 10 are
+  mine and done; 14 and 16 were closed by OTHER sessions and re-verified here. All five are
+  now closed.**
 - ✅ **Re-verified, not remembered** — rank 14: `#1287` closed, its port `#1505` **MERGED**
   2026-09-11T20:20Z. Rank 16: `#1431` was reopened and then closed carrying a **written
   dismissal naming the reader**, which is its stated closing condition, met.
@@ -33,16 +48,21 @@ since renumbered and dropped both, so this is the durable home.
   not deploy. `ladder-range-coverage.py` is invoked BY PATH and is not on `PATH`.
 - **CARRIED FORWARD for the third time, because every `State now` replace tries to eat it:**
   the DURABLE RESULTS of this arc do not live in this doc — they live in
-  `claudedocs/audit-ladder-review-2026-09-04.md`, where open item **5** and the devrc-only half
-  of the CANNOT-SEE bullet are marked CLOSED with their residuals, the six-repo census table
-  sits, and open items **4** (rank 9) and **6** (the 4 interior round-refs) are the two still
-  open. Read that doc, not this one, for the findings.
+  `claudedocs/audit-ladder-review-2026-09-04.md`, where open items **4** (stop-rationale) and
+  **5** (the range-coverage hole) and the devrc-only half of the CANNOT-SEE bullet are marked
+  CLOSED with their residuals, and the six-repo census table sits. Of the items this arc owns
+  only **6** (the unledgered rounds) is still open. Read that doc, not this one, for the
+  findings. ⚠ Items **1**, **2**, **7** and **8** there are open but are NOT in this arc's
+  closing condition. **7** (the `parse_claims_blocks` numbering gap, 2 of 201) and **8** (the
+  400-PR scan limit, hit by three repos) were filed BY rank 2's run as its own residuals —
+  read them as the stop-rationale measurement's known limits, not as unstarted work.
 - ⚠ **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exits **5** (nothing
   resolved), which cannot distinguish "touched no task" from "wrong id". Not a clean bill, and
   no task was created to fill it.
-- 🔴 **The shared clone `$DEVRC` is checked out on ANOTHER session's branch**
-  (`fix/tmux-osc8-hyperlinks`, observed 2026-09-12). This doc was written from a worktree on
-  `main` for exactly that reason — see the gotcha below.
+- ⚠ **The shared clone `$DEVRC`'s branch is VOLATILE — re-read it, never carry it.** It was on
+  `fix/tmux-osc8-hyperlinks` on 2026-09-12 and on `main` on 2026-09-14. `git -C $DEVRC branch
+  --show-current` immediately before any write. This doc is written from a worktree on `main`
+  either way — see the gotcha below.
 
 ## Open investigations — live diagnosis state
 
@@ -72,7 +92,13 @@ since renumbered and dropped both, so this is the durable home.
   refuses to say so. It conflates fixes posted after the final block with development that
   simply continued after the ladder ended. via: code (the `r_to is None` split in
   `measure_ladder`, and the caveat `render` prints)
-- **Leading hypothesis:** most of the tail is ordinary post-ladder development, not missed
+- 🔴 **THIS HYPOTHESIS IS FALSIFIED — see the RESOLVED entry two sections down, and do not
+  read it from here without that.** Left in place because the *external* tail is still
+  unclassified; but *"most of the tail is ordinary post-ladder development"* was tested on 17
+  commits and **1 was a feature**. The heading above it is also stale: it says *"nobody knows
+  what it IS"*, which is true only of the external tail now.
+- **Leading hypothesis (FALSIFIED for devrc; UNTESTED externally):** most of the tail is
+  ordinary post-ladder development, not missed
   audit surface — which would mean the range-coverage hole is a real but SMALL defect (88
   lines outside devrc) and the 10,052 is mostly noise. devrc's interior gaps are probably a
   local *authoring* habit: titling one comment "rounds N and N+1" and posting one block for
@@ -130,7 +156,9 @@ since renumbered and dropped both, so this is the durable home.
   ones, so the sample is not length-biased the way this one is by construction.
 
 ### RESOLVED — the bring-in caveat explained a CLEAN MERGE, and rank 9 is measured
-- as-of: 2026-09-13 · **in flight as a PR off `origin/main`, NOT merged**
+- as-of: 2026-09-14 · ✅ **BOTH MERGED** — `#1649`→`46ebb689` (04:15Z) and `#1643`→`e6f05e04`
+  (04:21Z). ⚠ This line read *"in flight … NOT merged"* for ten hours after they landed, and
+  that staleness is what produced a false kickoff — see the first gotcha.
 - **Ranks 1 and 2 of the list below are both done in that PR.** Rank 1: the caveat is now
   DERIVED from whether every commit contributing the zero-line gap is a MERGE, and prints **no
   explanation at all** for one containing a non-merge commit. The bring-in reading was not
@@ -189,22 +217,36 @@ since renumbered and dropped both, so this is the durable home.
   first-full audit) — so dispatch it by hand against that range.
 
 ## Next steps (ranked)
-1. **Fix the shipped bring-in caveat** (`scripts/ladder-range-coverage.py:667` + the twin
-   wording in `claudedocs/audit-ladder-review-2026-09-04.md`). Smallest item, and it is wrong
-   on `main` today. See the investigation above for both candidate fixes.
+🔴 **NUMBERING IS STABLE AND CLOSED ITEMS STAY IN PLACE, STRUCK.** The rank is half a
+`claim-work` slug's identity, so renumbering silently re-points every live claim — this arc's
+worst gotcha, recorded below, was another doc doing exactly that. Do not compact this list.
+
+1. ~~**Fix the shipped bring-in caveat.**~~ **CLOSED 2026-09-14** — `#1649`→`46ebb689`. The
+   caveat is now DERIVED from whether every commit contributing the gap is a merge, and it
+   explicitly retracts the bring-in reading in its own output. Re-verified behaviourally this
+   session, not just by diff: the `1064 1274 1046` run prints *"2 in THIS run are CLEAN
+   MERGES"* and *"🔴 NOT an upstream bring-in."*
    forcing: regression — a caveat shipped on `main` explains a clean merge as an upstream bring-in
-2. **Rank 9 — mine the stop-rationale prose across every carrier, and publish the rate.**
-   THE ONE OPERATOR-SPECIFIED OBJECTIVE OF THIS ARC THAT DID NOT SHIP. Durable home: open item
-   **4** of `claudedocs/audit-ladder-review-2026-09-04.md`, unchanged and uncrossed. The
-   expensive half is already built — `scripts/ladder-range-coverage.py --find-carriers
-   --list-only --repo <slug> --limit 400` produces the carrier population that used to be
-   hand-built (199 across seven repos). What remains: read each carrier's TERMINAL round
-   summary, classify why it stopped, publish the rate, and check `#1157`'s escape-hatch
-   requirement against it.
-   forcing: user — named in the kickoff as one of five open items; never started
-3. **Close open item 6** — read the **4 INTERIOR** round-refs (small by construction) and
-   record per PR whether that round's delta was ever re-audited under another round's block; OR
-   write on the item that the 40 will not be read. It does NOT close by re-running the census.
+2. ~~**Rank 9 — mine the stop-rationale prose across every carrier, and publish the rate.**~~
+   **CLOSED 2026-09-14** — `#1643`→`e6f05e04`. `scripts/ladder-stop-rationale.py` + 30 guards
+   classify the terminal round of **201 carriers in 7 repos**: **121 of 191 terminated ladders
+   (63.4%) state no reason at all**, and **28 of the 33 that declared a criterion (84.8%)**
+   wrote the rationale in the same summary (`#1157`'s check). Numbers, frozen taxonomy and
+   residuals live in `claudedocs/audit-ladder-review-2026-09-04.md` open item **4, CLOSED**.
+   forcing: user — named in the kickoff as one of five open items
+3. **Close open item 6 — the INTERIOR half is MEASURED and the answer is ONE commit.** Re-ran
+   the census over the full devrc carrier population this session (**62 carriers found, 60
+   measured**, `--limit 400`): **INTERIOR round-ref 0 · merge 0 · unclassified 1, of 1 interior
+   commit total**; TAIL round-ref 7 · merge 18 · unclassified 33, of 58. Totals interior **191**
+   / tail **6,727**. The one interior gap is **`#1326`, round 7 `to` → round 8 `from`,
+   `404ec208..b9848f9d`, 191 lines** — `docs(proposal): eight of nine open questions answered`,
+   the operator's design decisions 9–16 recorded into the proposal. Round 8's block anchored
+   PAST it and rounds 8–9 are TIGHT, so **that delta is inside no round's range and was never
+   re-audited.** ⚠ **This is a DIFFERENT, LARGER population than the review's** (60 ladders vs
+   20, where the census read 1 interior round-ref of 40) — it is a fresh measurement, NOT the
+   review's item resolving. What REMAINS to close item 6: write that finding onto the item in
+   `claudedocs/audit-ladder-review-2026-09-04.md`. 🔴 Re-running the census again does NOT
+   close it — producing the list is not reading it.
    forcing: none
 4. **Round 2 of #1576's ladder**, blind, over `59002824..3f5d0694` — only if the ladder should
    close on evidence rather than on the merge decision. See the investigation above.
@@ -214,6 +256,23 @@ since renumbered and dropped both, so this is the durable home.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **THIS DOC CONTRADICTED ITSELF FOR TEN HOURS AND THE NEXT KICKOFF DREW THE STALE HALF —
+  A `/resume` WAS SENT TO REDO WORK ALREADY ON `main`.** `#1649` merged 04:15Z and `#1643`
+  04:21Z on 2026-09-14. The doc's **investigation section** had said since 2026-09-13 that
+  both were done ("*Ranks 1 and 2 of the list below are both done in that PR*"), but its
+  **`State now`** still read *"9 WAS NEVER STARTED"* and its **ranked list** still carried
+  both as open items 1 and 2. The kickoff was written from the two stale sections and
+  instructed the session to *"fix the stale bring-in caveat first — it is shipped on main and
+  gives the wrong reason"*, which had been false for ten hours. **Nothing caught it; the
+  session caught it by re-verifying against `origin/main` before starting.** 🔴 **The lesson
+  is not "update the doc" — it is that a handoff doc has THREE places that assert status
+  (`State now`, the investigation entries, the ranked list) and a reader entering at any one
+  of them gets a different answer. An investigation entry marked RESOLVED is not a status
+  update until the other two move with it.** The cheap check before writing any kickoff:
+  `gh pr view <n> --json mergedAt` on every PR the doc calls in-flight.
+- ⚠ **`--find-carriers` on devrc now reports 62 carriers and STILL HITS the 400-PR limit** —
+  its own output says so. Every devrc total derived from it is a FLOOR, low by an unknown
+  amount, and that is review open item **8**.
 - 🔴 **THE RANKED LIST OF `handoff-audit-pr-ladder.md` WAS RENUMBERED AND THREE ITEMS
   VANISHED — one of them while I held its claim.** That doc's preamble said *"Numbering is
   STABLE — the rank is half a `claim-work` slug's identity"*; the rewrite (merged as
