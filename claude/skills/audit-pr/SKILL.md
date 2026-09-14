@@ -372,7 +372,14 @@ about text round 1 had written, and the gate could not see it.
 the rounds will not stop on their own; read the next paragraph before acting on it.** No 🔴 · no
 blast radius beyond "the document contains a false sentence" · and the recurring SHAPE swept at
 every site rather than at the one that was reported. Record what you are NOT fixing, on the PR,
-so the next reader knows it is open rather than absent.
+so the next reader knows it is open rather than absent. 🔴 **THE REASON MAY BE STRUCTURAL, AND A
+STRUCTURAL REASON IS NAMEABLE AT ROUND 1 — you do not owe a round to prove it.** When this PR's
+payload is ENTIRELY prose, "fixed a defect" and "reworded a warning" are the same edit at EVERY
+round, so the attribution gate cannot fire at any round — that is a property of the DIFF, readable
+before round 2, not a pattern you must watch repeat. Name that, with the payload classification
+round 1 already owes, and the precondition is met on the first round that returns no 🔴. 🔴 **The
+price is explicit and you must state it: round 1's own fixes then ship UNAUDITED** — so sweep the
+SHAPE at every site before stopping, and write in the summary that you are paying it.
 
 ⚠ **THIS DOES NOT OVERRIDE THE FINDINGS-KEYED STOP RULE, AND IT IS NOT A LICENCE TO STOP ON A
 ROUND THAT FOUND THINGS.** That rule still governs: a round returning findings that needed fixing
@@ -398,6 +405,25 @@ re-pointed it at itself — found by the next round. Both of those paragraphs ar
 `scripts/tests/test_audit_ladder_stop_rule.py`, and their ADJACENCY is asserted separately,
 because both pins pass while a paragraph sits between them. This paragraph is pinned by nothing —
 edit it freely.
+
+🔴 **WHY THE ROUND-1 SHORTCUT WAS ADDED, AND WHAT IT COSTS.** Operator report, 2026-09-14: prose
+ladders were still grinding — *"Round 1: 3🟡/3🟢. Round 2: 3🟡/3🟢. Every finding in both rounds is
+the same shape … each round's findings are overwhelmingly in prose the previous round's fix
+wrote."* That session reached the hatch **correctly**, and its preconditions held — but only at
+round 2, because *"you can already name why the rounds will not stop"* reads as something you must
+watch repeat. It is not: on a 100%-prose payload the gate's inertness is a property of the diff,
+true at round 1 and every round after. The old wording charged a round to re-discover it, and that
+round's findings were themselves prose the previous fix wrote — the loop the hatch exists to end,
+running one extra turn by construction. ⚠ **The cost is real and is stated in the criteria
+paragraph rather than hidden here: stopping at round 1 ships round 1's fixes unaudited**, and this
+skill's own evidence (#505, #1111, `homelab-infra` #702) is that a fix round's prose is the
+likeliest next finding. That is why the sweep-every-site precondition and the write-it-down
+obligation are NOT relaxed — they are the only things standing where a round used to.
+🔴 **SEVERITY-KEYED STOPPING WAS CONSIDERED AGAIN HERE AND REJECTED AGAIN.** The operator's first
+framing was *"stop after 0 high sev"*; that is the `deploy-blocking only` rule this skill already
+rejected, and #702 is the counter-evidence — six rounds, zero 🔴, each catching a false claim the
+previous fix had written. This change keeps the findings-keyed rule and the 🔴 precondition
+untouched; it only removes the round tax on naming a reason that was already true.
 
 ## Mutation testing: deletion-mutants are the EASY half
 
