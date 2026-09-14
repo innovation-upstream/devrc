@@ -2017,7 +2017,7 @@ except Exception:
 # re-prefixed rather than emitted raw. When the remote leg DID run, its stderr is
 # replayed line by line — minus the sentinel, which is protocol and not output.
 _ssh_proxy() {
-  local _bb_target="$1" _bb_cmd="$2" _bb_payload _bb_line _bb_acc _bb_errf
+  local +x _bb_target="$1" _bb_cmd="$2" _bb_payload _bb_line _bb_acc _bb_errf
   _BB_PROXY_RAN=0; _BB_PROXY_ERR=""; _BB_PROXY_RC=""; _BB_PROXY_OUT=""
   # NOT `$( )` — see _bb_tmpfile: the registration must happen in THIS shell.
   _bb_tmpfile proxy-err || return 0
