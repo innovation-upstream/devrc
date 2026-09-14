@@ -2453,6 +2453,19 @@ are corrected in place.
   `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci -o json | python3 -c 'import json,sys;[print(i["metadata"]["name"],(i.get("status",{}).get("conditions") or [{}])[0].get("reason")) for i in json.load(sys.stdin)["items"] if "clawgate-e2e" in i["metadata"]["name"]]'`
   If it times out on a quiet box, the 40m budget or the spec is the defect, not the load.
 
+### ✅ RESOLVED 2026-09-14 — rank 61 `clawgate-e2e` `TaskRunTimeout` is NODE I/O, not a stranded lock
+
+- as-of: 2026-09-14
+- Supersedes the `clawgate-e2e` is TIMING OUT block above — its next probe is spent.
+- **Evidence:** `claudedocs/refs/clawgate-e2e-tasktimeout-node-io.md`
+- **Ruled out:** a stranded `pg_advisory_lock` — `57014` hits the migration DDL, not a lock wait, and
+  the checkpointer's own fsync ran 130.6s/37.8s/35.2s/32.1s. via: measurement
+- **Ruled out:** a code defect — rev `24be212` on an idle node: 224 passed, 7.5m vs a 40m timeout.
+  via: measurement
+- **IN FLIGHT `ZacxDev/homelab-infra#819`**; claim `tmux-webapp-61` HELD. `Next steps` deliberately
+  NOT rewritten — a REPLACE section, so editing rank 61 would re-point every live claim.
+- **Next probe:** merge #819, release the claim, then rank 18 — same mechanism, `clawgate-ci`.
+
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
   is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
