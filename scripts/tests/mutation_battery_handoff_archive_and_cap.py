@@ -59,6 +59,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SH = ROOT / "scripts/resume-state.sh"
 CAP = ROOT / "scripts/tests/test_handoff_doc_size.py"
 IDX = ROOT / "scripts/lib/handoff_index.py"
+#: 🔴 THE CEILING'S CONSTANTS LIVE IN THE LIBRARY, NOT THE SUITE. `#1648`
+#: (`a2c84a1c`) moved `MAX_BYTES`, `GRANDFATHERED` and `tightest_allowance` out
+#: of `CAP` and into this module so a WRITER could be warned before a write.
+#: Six rows below still anchored on `CAP`, where they then occurred 0x — every
+#: one of them scoring as a SURVIVOR while testing nothing, which is precisely
+#: the failure the note above `SCRIPT` describes. The battery's targets are a
+#: THIRD thing an extraction has to carry with it; moving a constant is not a
+#: refactor of one file.
+BUD = ROOT / "scripts/lib/handoff_budget.py"
 
 RESOLUTION_SUITE = "scripts/tests/test_resume_state_handoff_resolution.py"
 CAP_SUITE = "scripts/tests/test_handoff_doc_size.py"
@@ -92,6 +101,7 @@ SUITE_OF_TARGET = {
     SH: RESOLUTION_SUITE,
     CAP: CAP_SUITE,
     IDX: CAP_SUITE,
+    BUD: CAP_SUITE,
 }
 
 # --- section 1: claudedocs/archive/ resolution --------------------------------
@@ -166,9 +176,15 @@ MUTANTS = [
      '    "claudedocs/handoff-tmux-webapp.md": 327_680,               # 314,233 B\n',
      "",
      "test_no_handoff_doc_exceeds_its_budget"),
+    # ⚠ RE-ANCHORED: this row used to loosen `handoff-handoff-search-index.md`,
+    # whose entry `#1650` DELETED once the doc was pruned back under MAX_BYTES.
+    # A row anchored on a ledger entry is only as durable as that entry, and the
+    # ledger is designed to shrink — so the anchor moved to a live entry rather
+    # than the row being dropped. Same shape: 76,743 B quantises to 81,920, so
+    # 114,688 is exactly two steps of slack.
     ("C5", "replacement", "loosen one allowance by two steps (slack entry)",
-     '"claudedocs/handoff-handoff-search-index.md": 81_920,',
-     '"claudedocs/handoff-handoff-search-index.md": 114_688,',
+     '"claudedocs/handoff-cairn-task-linkage.md": 81_920,',
+     '"claudedocs/handoff-cairn-task-linkage.md": 114_688,',
      "test_no_handoff_doc_exceeds_its_budget"),
     ("C6", "insertion", "leave a stale entry naming a nonexistent document",
      "GRANDFATHERED: dict[str, int] = {\n",
@@ -220,17 +236,20 @@ TARGETS = {
     "A6": SH,
     "A7": SH,
     "A8": SH,
-    "C1": CAP,
+    # The ceiling's DATA and its arithmetic live in `BUD`; the checker that
+    # reads them, and the scan wiring, stay in `CAP`. Split per row, not per
+    # section, because the section spans both files.
+    "C1": BUD,
     "C2": CAP,
     "C3": CAP,
-    "C4": CAP,
-    "C5": CAP,
-    "C6": CAP,
+    "C4": BUD,
+    "C5": BUD,
+    "C6": BUD,
     "C7": CAP,
-    "C8": CAP,
+    "C8": BUD,
     "C9": CAP,
     "C10": IDX,
-    "C11": CAP,
+    "C11": BUD,
     "C12": IDX,
     "C13": IDX,
 }
