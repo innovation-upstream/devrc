@@ -502,27 +502,28 @@ def render_fires(data):
 def local_host_label(env=None, env_file=None) -> str:
     """This machine's ACTIVITY_HOST label, or "" when it cannot be resolved.
 
+    🔴 DELEGATED SINCE #1601 — THIS WAS THE THIRD PRIVATE COPY OF THE RULE.
     `hostname` is "nixos" on BOTH hosts, so it is useless here; the collector's
-    env file is the source of truth the telemetry itself is stamped with.
+    env file is the source of truth the telemetry itself is stamped with, and
+    when that is silent the shared module derives the host from an address this
+    machine actually holds. The copy could not do that, so on a laptop with no
+    ACTIVITY_HOST it reported UNRESOLVED where the answer was knowable.
+
+    ⚠ THE `""` IS KEPT ON PURPOSE AND IS NOT A SECOND POLICY. The shared module
+    RAISES, because most of its consumers would splice a sentinel into a queue
+    key or an ssh argv. Here the single caller already branches on falsiness
+    (`if a.host and wants_transcripts and local and …`) and the product is a
+    REPORT that prints "host: UNRESOLVED" — degrading a report is right where
+    killing a feeder is not. The branch is the guard that makes it safe; do not
+    copy this shape to a caller that has no such branch.
     """
-    e = os.environ if env is None else env
-    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
-    if v in ("workbench", "laptop"):
-        return v
-    path = env_file or os.path.expanduser("~/.config/activity-collector/env")
+    kwargs = {"env": env}
+    if env_file is not None:
+        kwargs["env_file"] = env_file
     try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError:
+        return _host_label.local_host_label(**kwargs)
+    except _host_label.HostLabelError:
         return ""
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("ACTIVITY_HOST="):
-            val = line[len("ACTIVITY_HOST="):].strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-                val = val[1:-1]
-            val = val.strip().lower()
-            return val if val in ("workbench", "laptop") else ""
-    return ""
 
 
 def norm(s):

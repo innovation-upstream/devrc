@@ -168,7 +168,13 @@ ACTIVITY_ENV = HOST_LABEL.ACTIVITY_ENV
 # rule there is the same drift this consolidation exists to end; the tests below
 # read these names, so they must BE the module's values, not equal to them.
 HOST_NAMES = HOST_LABEL.HOST_NAMES
-DEFAULT_LOCAL_HOST = HOST_LABEL.DEFAULT_LOCAL_HOST
+# 🔴 THERE IS NO `DEFAULT_LOCAL_HOST` ANY MORE, AND ITS ABSENCE IS THE FIX.
+# It was the literal `"workbench"`, returned whenever neither ACTIVITY_HOST nor
+# the collector env file supplied a label — so on the LAPTOP this agent would
+# have claimed the workbench's queue, polled a host nobody enqueues to, and
+# delivered nothing, silently. `local_host_label()` now derives the label from an
+# address this machine holds and RAISES when nothing does. See host_label.py.
+HostLabelError = HOST_LABEL.HostLabelError
 
 # The poll cadence. The server's write TTL is 90s, so this is ~18 polls inside a
 # write's whole deliverable life: a reply typed on a phone lands within seconds,
@@ -1109,7 +1115,18 @@ def main(argv: list[str]) -> int:
         log("tmux is not usable on this host; a claimed write could not be delivered")
         return 3
 
-    host = local_host_label()
+    # 🔴 A REFUSAL TO NAME THIS HOST IS FATAL, NOT A DEFAULT. `local_host_label`
+    # used to answer `"workbench"` when nothing identified the machine; on the
+    # laptop that made this agent claim the WORKBENCH's queue — polling a host
+    # nobody enqueues to, delivering nothing, with no error anywhere. Dying with
+    # a named reason is the only honest outcome, and it is caught rather than
+    # left to escape so the log says WHY instead of showing a traceback.
+    try:
+        host = local_host_label()
+    except HostLabelError as exc:
+        log(f"cannot identify this host, so a claim would name the wrong "
+            f"machine's queue: {exc}")
+        return 3
     # The agent identity the server records against a claim. It includes the pid
     # so two agents on one host (a hand-started one beside the unit) are
     # distinguishable in the audit log rather than indistinguishable.

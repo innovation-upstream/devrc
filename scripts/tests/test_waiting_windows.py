@@ -2270,6 +2270,51 @@ def _main(argv, tmp_path, capsys, rep=None):
     return rc, captured
 
 
+def test_main_FAILS_LEGIBLY_when_the_collector_cannot_be_run(tmp_path, capsys,
+                                                             monkeypatch):
+    """🔴 A COLLECTOR FAILURE MUST BE A DIAGNOSIS, NOT A TRACEBACK.
+
+    `fetch_report` has always raised `RuntimeError` on a non-zero rc, and nothing
+    caught it — but the path was effectively unreachable until #1601 made
+    `session-manager` exit 4 on a machine it cannot name. Then this on-demand CLI
+    started dying with
+
+        RuntimeError: session-manager exited 4: … cannot tell which machine …
+
+    and rc 1, burying the one actionable sentence under frames from a tool the
+    operator did not run. Measured on this branch before the fix.
+
+    THREE ASSERTIONS, because "it printed something" is not the property:
+      * a non-zero, NON-CRASH exit — and specifically 4, distinct from the rc 2
+        this tool already uses for a usage error, and from rc 0;
+      * the collector's own message survives to stderr, so the operator still
+        gets the label, the file and the reason;
+      * NOTHING on stdout — an empty report there is indistinguishable from
+        "measured, and nothing is waiting", which is the answer this must never
+        be confused with.
+    """
+    class P:
+        returncode = 4
+        stdout = ""
+        stderr = ("session-manager: cannot tell which machine this is, so every row "
+                  "would be stamped with a host name nothing justifies")
+
+    # The autouse backstop makes `subprocess.run` raise; this replaces it with a
+    # collector that FAILS, which is the case under test.
+    monkeypatch.setattr(ww.subprocess, "run", lambda *a, **k: P())
+
+    rc = ww.main(["--no-state", "--no-registry"], now=NOW, environ={})
+    cap = capsys.readouterr()
+
+    assert rc == 4, f"rc={rc}; a traceback would have escaped as rc 1"
+    assert "cannot tell which machine this is" in cap.err, (
+        f"the collector's own diagnosis did not survive: {cap.err!r}")
+    assert "waiting-windows:" in cap.err
+    assert cap.out == "", (
+        f"stdout must stay empty on an unmeasured run, got {cap.out!r} — a report "
+        "here reads as 'nothing is waiting'")
+
+
 def test_main_runs_end_to_end_and_emits_the_json_report(tmp_path, capsys):
     rc, cap = _main([], tmp_path, capsys)
     assert rc == 0

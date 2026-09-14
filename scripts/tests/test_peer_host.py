@@ -114,18 +114,40 @@ def _no_real_registry(monkeypatch, tmp_path):
 def _no_real_host_label_file(monkeypatch, tmp_path):
     monkeypatch.setattr(hl, "ACTIVITY_ENV", str(tmp_path / "absent-env"))
     monkeypatch.delenv("ACTIVITY_HOST", raising=False)
+    # 🔴 THE THIRD FEEDER HAS TO BE NEUTRALISED TOO, OR THIS SUITE ANSWERS
+    # DIFFERENTLY ON THE TWO MACHINES. Since #1601 `local_host_label()` also
+    # derives the label from an address this machine HOLDS, so a test running on
+    # the laptop would resolve `laptop` where the same test on the workbench
+    # resolves `workbench` — and one that states a label the running machine
+    # contradicts gets `HostLabelConflict`. Set-but-empty means "this machine
+    # holds none of the known addresses", which is the only value that makes the
+    # suite say the same thing in both places. Tests that WANT the address signal
+    # inject `holds=`/`addrs=` explicitly (see test_host_label_identity.py).
+    #
+    # It is an ENV var, not a monkeypatched attribute, deliberately: several
+    # tests here run the module in a SUBPROCESS (`python3 -`, the real
+    # transcript feeder), and only the environment crosses that boundary.
+    monkeypatch.setenv(hl.HOST_LABEL_ADDRS_ENV, "")
 
 
 def test_the_hermeticity_fixtures_are_actually_installed(tmp_path):
-    """POSITIVE CONTROL on all three autouse fixtures."""
+    """POSITIVE CONTROL on all four autouse fixtures."""
     with pytest.raises(_Forbidden):
         ph._default_runner(["ssh", "somewhere"])
     assert not os.path.exists(ph.DEFAULT_REGISTRY_DIR)
     assert "absent-registry" in ph.DEFAULT_REGISTRY_DIR
     assert not os.path.exists(hl.ACTIVITY_ENV)
-    # …and with no env file and no env var, the label falls back to the default
-    # rather than reading this machine's real collector config.
-    assert hl.local_host_label() == hl.DEFAULT_LOCAL_HOST
+    # …and with no env file, no env var and no address, the label is REFUSED
+    # rather than defaulted (#1601) and rather than read off this machine's real
+    # collector config. Both halves matter: a leak of the real config would make
+    # this pass on the workbench for an environmental reason, and the old
+    # `== DEFAULT_LOCAL_HOST` assertion passed on BOTH machines while the module
+    # was silently calling the laptop "workbench".
+    with pytest.raises(hl.HostLabelUnresolved):
+        hl.local_host_label()
+    assert not hasattr(hl, "DEFAULT_LOCAL_HOST"), (
+        "the workbench default is the defect #1601 removed; a reinstated "
+        "constant by that name would silently restore it")
 
 
 # =========================================================================== #
@@ -537,7 +559,11 @@ def test_the_remote_program_actually_runs_and_emits_the_protocol(tmp_path):
 #: category the local interpreter defines cannot police a remote one. An exact
 #: set can, because any change at all stops the test and a human decides.
 SHIPPABLE_IMPORTS = {
-    "host_label.py": {"__future__", "os"},
+    # `re`, `socket` and `sys` arrived with #1601 (the address-derived host
+    # label). All three are stdlib and all three predate Python 3.9 by a decade,
+    # so the ledger's own constraint — must exist on the REMOTE host, on 3.9 —
+    # is satisfied; checked, not assumed.
+    "host_label.py": {"__future__", "os", "re", "socket", "sys"},
     "_READER_SOURCE": {"json", "os", "sys"},
     # 🔴 THE THIRD CONTRIBUTOR, AND THE ONLY ONE THAT COVERS THE REAL ARTEFACT.
     # `remote_program()` does not just concatenate the two sources above — it
@@ -550,7 +576,7 @@ SHIPPABLE_IMPORTS = {
     #
     # This entry is the union over the ASSEMBLED program, so it cannot be
     # outflanked by a fourth contributor either.
-    "remote_program()": {"__future__", "json", "os", "sys"},
+    "remote_program()": {"__future__", "json", "os", "re", "socket", "sys"},
 }
 
 

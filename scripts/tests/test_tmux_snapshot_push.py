@@ -799,6 +799,13 @@ def test_the_unit_PATH_carries_every_binary_the_collector_needs():
     was the audit finding that got iproute2 removed, and removing gawk in the
     same sweep is what broke the ledger, because nothing here listed it.
 
+    ⚠ AND #1601 MADE HALF OF THAT STALE WITHOUT CHANGING THE ANSWER. The SHARED
+    `scripts/lib/host_label.py` now does derive the host from an address the
+    machine holds — but by BINDING a UDP socket in pure Python, never by running
+    `ip`. This unit's child (`session-manager`) held its own ACTIVITY_HOST-only
+    copy until the same PR deleted it and made it delegate, so this unit now
+    DOES reach that derivation. `iproute2` still stays off the list.
+
     ⚠ AND THE NAME OVERSTATES THE BODY. "carries every binary the collector
     needs" sounds like a RELATIONSHIP (unit PATH ⊇ what the child calls); the
     body checks a HAND-TYPED list of names. It pins what someone remembered, not

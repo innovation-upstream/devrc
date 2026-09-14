@@ -290,7 +290,20 @@ def _peerhost_main(directory):
     import json as _json
     import os as _os
     import sys as _sys
-    label = local_host_label()
+    # 🔴 A FAR END THAT CANNOT NAME ITSELF MUST STILL PRINT THE SENTINEL.
+    # `local_host_label()` raises rather than defaulting to "workbench". Letting
+    # that escape here would kill the remote program before line 1, and the leg
+    # would come back `no_sentinel`/`unreachable` — i.e. "the laptop is DOWN",
+    # which is a wrong diagnosis for a machine that answered fine and simply
+    # could not identify itself. Reporting the token instead makes it a
+    # `label_mismatch`, whose message names both the label we dialled and what
+    # the far end said, and the reason travels in the payload's `error`.
+    _unresolved = None
+    try:
+        label = local_host_label()
+    except Exception as exc:                                        # noqa: BLE001
+        label = "unresolved"
+        _unresolved = "%s: %s" % (type(exc).__name__, exc)
     directory = _os.path.expanduser(directory)
     try:
         payload = _peerhost_read_registry(directory)
@@ -299,6 +312,8 @@ def _peerhost_main(directory):
         payload = {"records": [], "stale_dropped": 0, "unreadable": 0,
                    "error": "%s: %s" % (type(exc).__name__, exc)}
     payload["dir"] = directory
+    if _unresolved and not payload.get("error"):
+        payload["error"] = _unresolved
     # The sentinel FIRST, on its own line, carrying the label this machine
     # computed for itself. The caller refuses the leg if either is missing.
     _sys.stdout.write("%s %s\n" % (_PEERHOST_SENTINEL, label))
@@ -487,11 +502,17 @@ def _read_local(host: str, *, registry_dir: str, proc_dir: str = "/proc") -> dic
 
     ⚠ THE CONSEQUENCE, STATED RATHER THAN GUARDED: if `local_host_label()` is
     wrong about this machine, this leg mislabels every record on it and nothing
-    here can tell. That is reachable only when neither `ACTIVITY_HOST` nor the
-    collector env file supplies a value, so `host_label` falls back to its
-    `workbench` default — measured 2026-09-12 as NOT the case on either host
-    (both set it explicitly). The fix belongs in `host_label`, which every
-    fleet consumer shares, not as a fourth private copy here.
+    here can tell.
+
+    ✅ THE ROUTE TO THAT IS CLOSED AT THE SOURCE (#1601), WHERE THIS COMMENT
+    ALWAYS SAID IT BELONGED. `host_label` no longer falls back to a `workbench`
+    default when neither `ACTIVITY_HOST` nor the collector env file supplies a
+    value: it derives the label from an address this machine actually holds, and
+    RAISES when nothing identifies it. So `local_host_label()` can now be wrong
+    only if a host is stated wrongly AND holds no known address — and the
+    statement is cross-checked against the address whenever one is held. The
+    asymmetry above is unchanged and still real; what changed is that its
+    reachable input is gone.
     """
     ns = _reader_namespace()
     directory = os.path.expanduser(registry_dir)
@@ -733,9 +754,21 @@ def main(argv=None) -> int:
     # AND the only hand-hold for creating the mislabelling `_read_local`'s
     # docstring describes. Which machine this is comes from `host_label`, the
     # one place the fleet already agrees on.
-    result = lookup(args.selector, hosts=hosts,
-                    registry_dir=args.registry_dir,
-                    ssh_timeout=args.ssh_timeout)
+    # 🔴 IF THIS MACHINE CANNOT NAME ITSELF, THERE IS NO ANSWER TO GIVE. Every
+    # leg is split on `local_host` — one host is read locally, the other over
+    # ssh — so a wrong value routes the local read under the other machine's
+    # name AND turns the remote leg into a connection to ourselves. That is a
+    # WRONG answer from a routing tool, so the refusal is reported as
+    # EXIT_INCOMPLETE (nothing could be searched), never as EXIT_UNMATCHED,
+    # which a caller is entitled to read as "that peer does not exist".
+    try:
+        result = lookup(args.selector, hosts=hosts,
+                        registry_dir=args.registry_dir,
+                        ssh_timeout=args.ssh_timeout)
+    except _hl.HostLabelError as exc:
+        print("peer-host: cannot tell which machine this is, so no host could "
+              "be searched — this is NOT 'not found': %s" % exc, file=sys.stderr)
+        return EXIT_INCOMPLETE
 
     diag = render_diagnostics(result)
     if diag:

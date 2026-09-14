@@ -434,7 +434,21 @@ except Exception as _e:  # noqa: BLE001 — degrade, never crash the whole scan
 
 # ClickHouse creds: the collector's own env file on this host. NEVER a hardcoded
 # endpoint and never a hardcoded password.
-ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
+#
+# 🔴 THE PATH COMES FROM THE SHARED MODULE, NOT RESTATED HERE — AND THIS IS THE
+# THIRD LITERAL, THE ONE A CONSOLIDATION SKIPS. `tmux-reply-agent` already made
+# exactly this change and recorded why: re-exporting the host VOCABULARY while
+# leaving the env-file PATH restated left `host_label.ACTIVITY_ENV` — and
+# `HOST_LABEL_ENV_FILE` with it — DEAD for that consumer, so pointing the shared
+# module at a fixture changed nothing and 203/203 still passed. Measured here
+# the same way (#1601): with `HOST_LABEL_ENV_FILE` aimed at a nonexistent path
+# and no ACTIVITY_HOST, this tool still resolved a label off the operator's real
+# collector config, because that variable never reached this line.
+#
+# It is ONE file carrying both `ACTIVITY_HOST` and the `CLICKHOUSE_*` creds, so
+# redirecting it redirects both together — which is the point: a test can aim
+# every feeder at one fixture instead of aiming some of them.
+ACTIVITY_ENV = _host_label.ACTIVITY_ENV
 
 # --------------------------------------------------------------------------- #
 # 🔴 The laptop's SSH target. `10.42.0.100` is the LAPTOP on nebula;
@@ -460,7 +474,17 @@ SSH_TIMEOUT = 12.0
 LOCAL_TIMEOUT = 5.0
 
 HOST_NAMES = ("workbench", "laptop")
-DEFAULT_LOCAL_HOST = "workbench"
+# 🔴 THERE IS NO `DEFAULT_LOCAL_HOST` ANY MORE (#1601), AND THIS FILE IS WHY THE
+# CONSOLIDATION HAD TO REACH THIS FAR. `local_host_label` below used to be a
+# PRIVATE COPY of the shared rule ending `return DEFAULT_LOCAL_HOST`, i.e. the
+# literal "workbench". `test_tmux_reply_agent.py` reads THIS FILE as the
+# authority the reply agent's label must match — so the moment the shared module
+# stopped defaulting, this copy would have been the one still doing it, and the
+# two feeders that write the same row would have disagreed again in exactly the
+# way the shared module exists to prevent. The blast radius here is worse than
+# the agent's: a snapshot pushed under the wrong host name REPLACES that host's
+# real snapshot through the latest-per-host upsert.
+HostLabelError = _host_label.HostLabelError
 
 # The 8-field pipe format, a SUBSET of the detector's in
 # scripts/lib/claude_sessions.py (`list_tmux_panes_raw`).
@@ -3747,23 +3771,23 @@ def run_tmux(argv, host, local_host, runner=None, timeout=None,
 
 
 def local_host_label(env=None, env_file=None) -> str:
-    """This machine's ACTIVITY_HOST label. `hostname` is "nixos" on BOTH hosts,
-    so the collector's env file is the source of truth. Defaults to workbench."""
-    e = os.environ if env is None else env
-    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
-    if v in HOST_NAMES:
-        return v
-    text = _read_text(env_file or ACTIVITY_ENV)
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if line.startswith("ACTIVITY_HOST="):
-            val = line[len("ACTIVITY_HOST="):].strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-                val = val[1:-1]
-            val = val.strip().lower()
-            if val in HOST_NAMES:
-                return val
-    return DEFAULT_LOCAL_HOST
+    """This machine's ACTIVITY_HOST label — DELEGATED, not re-derived.
+
+    🔴 THIS WAS A PRIVATE COPY OF THE SHARED RULE UNTIL #1601, and the copy is
+    what made the seam breakable. `hostname` is "nixos" on BOTH hosts, so the
+    collector's env file — and now, when that is silent, an address this machine
+    actually holds — is the source of truth. The old copy ended
+    `return DEFAULT_LOCAL_HOST`, the literal "workbench": run on the laptop with
+    no ACTIVITY_HOST anywhere, every window this tool reported was filed under
+    the workbench's name, and the read model's latest-per-host upsert then
+    REPLACED the workbench's real snapshot with the laptop's.
+
+    RAISES `HostLabelError` rather than guessing; both call sites catch it and
+    say so. `env_file=None` keeps this file's own default path, which is the same
+    file the shared module names.
+    """
+    return _host_label.local_host_label(
+        env=env, env_file=env_file or ACTIVITY_ENV)
 
 
 def make_ch_client(env_file=ACTIVITY_ENV, opener=None):
@@ -5854,10 +5878,61 @@ def build_parser():
 
 
 def main(argv=None):
+    """CLI entry point.
+
+    🔴 THE HOST-LABEL REFUSAL IS CAUGHT HERE, IN ONE PLACE, AND THE LABEL ITSELF
+    IS RESOLVED LAZILY BY `_run` — both halves are a fix for a measured
+    regression, not structure for its own sake.
+
+    #1601 made `local_host_label()` raise rather than guess `"workbench"`. The
+    first cut of that resolved it at the TOP of the run, before the
+    per-subcommand usage checks, and on a machine that is neither host — CI, a
+    container, anyone else's box — `session-manager tail` with no target then
+    returned EXIT_UNAVAILABLE instead of EXIT_USAGE. That tells the caller "no
+    host could be measured" when what actually happened is that they mistyped
+    the command. Caught by CI and NOT by the local suite, which could not see it:
+    the suite runs on the workbench or the laptop, both of which always resolve.
+
+    A usage error is a statement about the ARGV and must not acquire a
+    dependency on host identity. So `_run` resolves the label at FIRST USE — for
+    every path that genuinely needs it, and no earlier — and the one refusal
+    message lives here rather than being repeated at each use site.
+    """
+    try:
+        return _run(argv)
+    except HostLabelError as exc:
+        # 🔴 EVERY LEG IS SPLIT ON THE LOCAL LABEL: one host is read locally and
+        # the other over SSH, and every row this tool emits is STAMPED with a
+        # host name. A wrong value therefore does two things at once — it files
+        # this machine's windows under the other machine's name, and it SSHes to
+        # itself for the host it thinks is remote. The read model upserts
+        # latest-per-host, so the mislabelled snapshot then REPLACES the real
+        # one. EXIT_UNAVAILABLE is the honest code: no requested host was
+        # measured, so a zero here is unmeasured rather than a real answer.
+        print("session-manager: cannot tell which machine this is, so every "
+              "row would be stamped with a host name nothing justifies — "
+              "refusing to scan: %s" % exc, file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+
+def _run(argv=None):
     args = build_parser().parse_args(
         sys.argv[1:] if argv is None else list(argv))
     hosts = HOST_NAMES if args.host == "all" else (args.host,)
-    local = local_host_label()
+
+    # 🔴 LAZY, AND MEMOISED, AND THE LAZINESS IS LOAD-BEARING — see `main`.
+    # Resolving here would put a host-identity dependency in front of every
+    # usage check below. `local_host()` raises `HostLabelError` on a machine
+    # that cannot name itself; `main` turns that into EXIT_UNAVAILABLE. The
+    # memo matters because the probe is called on more than one path and the
+    # answer must not be able to differ within one run.
+    _local_memo = {}
+
+    def local_host():
+        if "v" not in _local_memo:
+            _local_memo["v"] = local_host_label()
+        return _local_memo["v"]
+
     # Explicit-off WINS, and the collision is reported rather than resolved in
     # silence — the caller asked for two incompatible things and gets told
     # which one ran.
@@ -5896,8 +5971,11 @@ def main(argv=None):
         # silent: the JSON carries `host_defaulted` and the not-found message
         # names the host actually searched plus how to search the other one.
         host_defaulted = args.host not in HOST_NAMES
-        host = local if host_defaulted else args.host
-        res = tail_window(args.target, host, local, lines=args.lines,
+        # FIRST USE of the local label on this path — deliberately after both
+        # usage checks above, so a mistyped command is a usage error even on a
+        # machine that cannot name itself (#1601).
+        host = local_host() if host_defaulted else args.host
+        res = tail_window(args.target, host, local_host(), lines=args.lines,
                           plain=args.plain)
         res["host_defaulted"] = host_defaulted
         # The consumer has to know whether `text` carries escapes; a JSON
@@ -5961,7 +6039,7 @@ def main(argv=None):
 
     if args.plain:
         print("(--plain applies to `tail` only)", file=sys.stderr)
-    report = gather(hosts=hosts, local_host=local,
+    report = gather(hosts=hosts, local_host=local_host(),
                     use_ch=(not args.no_ch and args.subcommand != "list"),
                     use_fuzzyclaw=use_fuzzyclaw,
                     use_ledger=not args.no_ledger,
