@@ -2061,7 +2061,7 @@ out("ok", label)
     # ssh channel) and the LOCAL writer — the one that validates the PNG magic,
     # mkstemps at 0600 and prunes — turns it into a local file. Deferring is safe
     # because `cmd_op` is closed from this point on; the screenshot branch calls
-    # `_proxy_screenshot` instead, and there is no third way to reach the wire.
+    # `_ssh_proxy` instead, and there is no third way to reach the wire.
     if [ "$sub" = "screenshot" ]; then
       : # handled in the screenshot branch below
     else
