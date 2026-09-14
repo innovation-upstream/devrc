@@ -55,7 +55,7 @@ GRANDFATHER_STEP = 16_384
 # informational — the enforced number is the allowance, and the measurement the
 # gate reads is the file.
 GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 262_144,               # 248,414 B
+    "claudedocs/handoff-tmux-webapp.md": 245_760,               # 242,155 B
     "claudedocs/handoff-audit-pr-ladder.md": 196_608,           # 195,625 B
     "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
     "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B

@@ -1,28 +1,56 @@
 # `handoff-tmux-webapp` — CLOSED ranked items, evicted 2026-09-14
 
-Verbatim copy of the 47 CLOSED items evicted from `claudedocs/handoff-tmux-webapp.md`'s
-`## Next steps (ranked)` on 2026-09-14. **Nothing was deleted** — the live doc stood at
-327,624 B of a 327,680 B budget (56 B of headroom), so the next routine handoff write would have
-turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone. `claudedocs/refs/`
-is exempt from that test; `claudedocs/handoff-*.md` is not.
+Verbatim copy of the CLOSED items evicted from `claudedocs/handoff-tmux-webapp.md`'s
+`## Next steps (ranked)`, across two sweeps on 2026-09-14. **Nothing was deleted** — the live doc
+stood at 327,624 B of a 327,680 B budget (56 B of headroom), so the next routine handoff write
+would have turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone.
+`claudedocs/refs/` is exempt from that test; `claudedocs/handoff-*.md` is not.
 
-These items carry **68 `🔴` markers** between them — real lessons, not just status — which is why
-they were demoted rather than dropped. The pre-eviction doc is also at
-`git -C <devrc> show 08e052f0:claudedocs/handoff-tmux-webapp.md`.
+These items are real lessons, not just status, which is why they were demoted rather than dropped.
+The pre-eviction doc is also at `git -C <devrc> show 08e052f0:claudedocs/handoff-tmux-webapp.md`.
+
+⚠ **The item COUNT and the `🔴` COUNT that used to stand here are gone on purpose.** Both were
+prose totals kept beside the thing they counted, nothing asserted on either, and both had already
+drifted: the header said 47 items when the roster held 49, and "68 `🔴` markers" was wrong at the
+base of the very PR that quoted it (the true figure was 73). **Count the `Evicted:` roster below if
+you need a number** — it is the one list a reader can check against the entries.
 
 🔴 **Numbers here are RETIRED, never reused.** A rank is half a `claim-work` claim's identity, so
 re-minting one of these would point a new claim at closed work.
 
-Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 50, 51, 52, 55, 58, 61, 62
+Evicted: 1–46, 50, 51, 52, 55, 58, 61, 62
 
-🔴 **42 and 45 joined on 2026-09-14, and BOTH had been closed for days before the sweep that
-missed them.** Rank 42's three residuals were fixed by `ZacxDev/homelab-infra#749`, squash
-`6ee01514c`; rank 45 was a bare pointer at rank 51, which merged as `innovation-upstream/devrc#1515`
-(`cf77128d`) and was evicted in the first sweep — leaving 45 pointing into this file. The first
-sweep evicted what was *marked* closed; neither of these was, so **being marked open is not
-evidence an item is open.** The next session took 42 off the queue, re-derived that all three
-residuals were already gone, and paid a full recon round for it. When a sweep runs, re-measure the
-survivors against the code rather than reading their own status lines.
+The live queue therefore holds exactly: 47, 48, 49, 53, 54, 56, 57, 59, 60.
+
+🔴 **THE SECOND SWEEP EVICTED SIX — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED FOR DAYS
+WHILE STILL READING AS OPEN.** Six of the fifteen entries the queue then advertised were finished
+or fictional. **The mechanism is MEASURED, not guessed: the first sweep keyed on each rank's
+HEADING LINE, and every closure recorded only in a rank's BODY survived it.** The heading-line
+marker predicts eviction for **58 of 62** ranks, and all four exceptions are explained — 46, 61 and
+62 carried no marker but were closed by the sweep session itself; 53's heading says
+`WORKBENCH IS NOW DONE` while its laptop half is genuinely open, so it is a false positive of the
+predicate rather than a counter-example to the mechanism.
+
+The six split into two classes, and they need different remedies:
+
+- **17, 25, 26 — closure WAS recorded, in the body.** `CLOSED AS NOT-OURS` and two `✅ DONE …
+  Claim released`. A scan that reads the whole body catches all three, in both sweeps.
+- **42, 45 — no marker anywhere.** Nobody had noticed `#749` closed 42; 45 was orphaned the moment
+  rank 51 was evicted out from under it. Only re-measuring against the code catches these.
+
+🔴 **RETRACTED — "the first sweep evicted what was *marked* closed; these were not marked".** That
+was this file's own first explanation of the miss and it is FALSE: 17, 25 and 26 were all marked,
+in the body, at `6c8c94d2^` — the exact tree the first sweep ran against. Caught by a round-0 audit
+and confirmed by measurement. It matters because the wrong diagnosis prescribes the expensive
+remedy (re-measure everything) for a class the cheap one (read the whole body) already covers.
+**Do not re-derive it.**
+
+🔴 **The deterministic version does not exist yet, and it is the thing that would end this.** A
+test failing when a live-queue rank body carries `✅ DONE`/`CLOSED` is mechanically checkable off
+`handoff_index._next_step_units`, which already parses exactly that structure — and nothing
+cross-checks this file against the live doc today (`git grep -n "closed-ranks" scripts/ claude/`
+returns zero). It needs care rather than enthusiasm: **rank 53 is its first false positive**, and a
+predicate that red-lines an open item trains everyone to click through.
 
 ---
 
@@ -1048,8 +1076,20 @@ survivors against the code rather than reading their own status lines.
 42. ✅ **DONE — closed by `ZacxDev/homelab-infra#749`, squash `6ee01514c`**, "fix(clawgate): close
     rank 42's three residuals — two guards walkable by a spelling, one banner carrying the DSN".
     Verified 2026-09-14 against `origin/trunk` (the ref, not a working tree) and by RUNNING the
-    guards, not by reading them: 20 tests executed under one `-run` filter, all PASS, counted from
-    `--- PASS` lines rather than trusted from `ok` — a filter that matches nothing also prints `ok`.
+    guards, not by reading them. 🔴 **The FILTER is the load-bearing datum, not the count** — a
+    filter that matches nothing also prints `ok`, so a bare total is unreproducible and an earlier
+    draft of this entry quoted one ("20") that no filter reproduces. From
+    `containers/clawgate`, `go1.25.14`:
+    ```
+    go test ./internal/ui/ ./internal/api/ -count=1 -v -run \
+      'TestAaHidingStylesSeesInlineStyles|TestAaEvictsInSeesEveryWayAWindowCanDie|TestPersistNoticeRedactsTheDSNAndLogsItInFull|TestPersistNoticeRendersTheSENTINELsTextNotTheWRAPPERs|TestEveryPersistNoticeIsLogged'
+    ```
+    → **5 `--- PASS`, 0 FAIL, 0 SKIP** — one per named guard, counted from `--- PASS` lines rather
+    than trusted from `ok`. An independent audit round additionally **mutation-killed** all three:
+    forcing `aaOffScreenScale`'s unknown-unit fallback to `return false` reds the `left:-7331nsu`
+    row; reducing `aaIsMapsPkg` to `name == "maps"` fails three alias rows AND the reverse row
+    `import maps "encoding/json"`; returning `err.Error()` from `autoApprovePersistDetail` reds
+    `TestPersistNoticeRedactsTheDSNAndLogsItInFull`.
     Each residual has a named successor in the source:
     - `aaOffScreen` px-only → `aaOffScreenScale` + `aaPxPerUnit` + `aaViewportUnits` convert every
       absolute, font-relative and viewport unit, and an UNRECOGNISED unit falls back 1:1 rather than
@@ -1081,3 +1121,127 @@ survivors against the code rather than reading their own status lines.
     ORIGINAL: **SUPERSEDED BY RANK 51 — same PR (#1515), do not claim both.** Left in place because
     ranks are stable; work it at 51.
     forcing: none
+
+
+<!-- Second sweep, 2026-09-14. The four below were evicted together with 42 and 45; each carried
+     its closure IN ITS BODY (or, for 9, was never a work item), which is exactly why the first
+     sweep's heading-line scan walked past them. The ORIGINAL text follows each closure note
+     verbatim, INDENTED so it cannot open a second numbered entry for the same rank. -->
+
+9. ✅ **NOT A WORK ITEM, and it never was** — it held a rank only so the numbering stayed sparse.
+   Evicted 2026-09-14: a placeholder in a queue is indistinguishable from work until you read it,
+   which is the cost this file exists to stop paying.
+   ORIGINAL, verbatim:
+    9. **There is no rank 9** — a previous revision listed one and it was never a work item (the
+       operator confirmed 2026-08-27 that MEMORY.md is not used here).
+       forcing: none
+
+17. ✅ **CLOSED — its closing condition SHIPPED, and the entry never said so.**
+    `ZacxDev/homelab-infra#685` — *"make the health wait evidence-driven — fast-fail on a dead
+    server, patient with a slow one"* — **MERGED 2026-09-05T00:36:56Z, squash `51eb4e0ea8005`**,
+    the day after the entry was written. The body below still reads *"is this item's closing
+    condition, in flight"*, present tense, nine days stale.
+    🔴 **THIS IS THE ENTRY THAT BROKE THE RULE IN THE SAME COMMIT THAT WROTE IT.** The first
+    version of this sweep KEPT 17 in the queue under a paragraph restating *"another session owns
+    #685"* — copied from the body, never re-measured — two lines below its own new sentence *"an
+    item's own status line is not evidence of its status."* An audit round caught it. **A sweep
+    that re-measures what it EVICTS and quotes what it KEEPS has not done the thing it claims.**
+    ⚠ It was ALREADY marked `CLOSED AS NOT-OURS 2026-09-04` in its body and still survived the
+    first sweep — one of the three items that dated the heading-line diagnosis.
+    ORIGINAL, verbatim:
+    17. **The e2e/ux-audit harnesses' 15s health-check budget produces MISATTRIBUTED CI reds.** Repo:
+        `homelab-talos`, `containers/clawgate/e2e/tests/helpers/server.ts:372` (the throw) and whatever
+        sets the 15000ms budget it reports. Both `clawgate-e2e` and `clawgate-ux-audit` stand up an
+        ephemeral clawgate + Postgres and fail with `clawgate health check did not pass on port <N>
+        within 15000ms` when the box is loaded. **Measured 2026-09-02 on #637:** the same check
+        alternated Fail/Success across three commits that changed only string literals in one Go test
+        file, the failing TEST moved between runs, and `clawgate-e2e` also failed on `b2fecf49` — a
+        commit already merged to trunk and not from that PR. A passing run cleared the budget by
+        **854ms against 15000ms**, so this is a startup race, not a margin being approached.
+        Closing condition: a red on either check can be attributed to a diff without a re-run — e.g.
+        the budget scales with load, or the harness retries, or the failure names the contended
+        resource. Until then, re-run the PipelineRun from its own spec (recipe in "How to verify").
+        🔴 **CLOSED AS NOT-OURS 2026-09-04 — ANOTHER SESSION IS ALREADY BUILDING THIS. DO NOT START IT.**
+        `ZacxDev/homelab-infra#685` — *"make the health wait evidence-driven — fast-fail on a dead
+        server, patient with a slow one"* — is this item's closing condition, in flight. Siblings on the
+        same platform problem: **#684** (log lock waits on the clawgate-ci Postgres sidecar — rank 18's
+        instrumentation) and **#687** (stop blaming the commit for platform timeouts).
+        🔴 **NOTHING CLAIMED IT, so `claim-work` could not have seen it — only the unconditional
+        `gh pr list` sweep did.** That is the class the sweep exists for and the lock structurally
+        cannot cover.
+        ⚠ **AND THE ITEM AS WRITTEN WAS TOO NARROW TO HAVE WORKED.** It prescribes a budget fix in
+        clawgate's two e2e harnesses, but the degradation is platform-wide — measured 2026-09-04 from
+        PipelineRun history: `clawgate-ci` 3/18, `gitops-validate` 6/22, `clawgate-ux-audit` 5/18,
+        `devrc-ci` 9/20, `naida-ux-audit` 9/20, `clawgate-e2e` 11/18, and only `remix-ux-audit` (15/16)
+        healthy. A timeout constant in `containers/clawgate/e2e/tests/helpers/server.ts` cannot reach
+        `gitops-validate` or `naida-ux-audit`; they do not run that code. The real remedies are rank
+        18's node diagnosis and the dedicated CI hardware another session shipped the same day
+        (Hetzner ccx33 `tekton-ci-1`, 8c/32G) — **already observed taking work**: `clawgate-ci-g4gcm`
+        scheduled across `talos-xr6-r7p` and `tekton-ci-1`.
+        ⚠ **Its own signature is still live and still worth recognising** — measured on `#690`'s head
+        the same day: `tasks-mobile.spec.ts:531` failed all three attempts with
+        `clawgate health check did not pass on port 39531/40037/41167 within 15000ms`, i.e. in FIXTURE
+        SETUP, before the test body ran, on a diff that only swapped two CSS width classes.
+        forcing: gate — two of the four checks on every clawgate PR produce reds that are not about the
+        change, which is the permanently-red-gate shape: it trains readers to click through.
+
+25. ✅ **DONE — and it said so in its own body since 2026-09-05, through two sweeps.**
+    `ZacxDev/homelab-infra#695`, squash `8f6aa6d3a`, content-verified on trunk; the host-side half
+    `innovation-upstream/devrc#1310` merged; claim released, re-confirmed 2026-09-14 against
+    `claim-work --list`. 🔴 Its note that this doc's **"Attention queue" section is STALE** — the
+    hook DOES raise `AskUserQuestion` to the queue — is a live gotcha and travels with it.
+    ORIGINAL, verbatim:
+    25. **The transcript feeder — get Claude Code transcript content from both hosts into clawgate,
+        read-only.** Repo: `ZacxDev/homelab-infra` (ingest) + `innovation-upstream/devrc` (the host-side
+        push). ✅ **DONE 2026-09-05 — `ZacxDev/homelab-infra#695`, squash `8f6aa6d3a`**, content-verified
+        on trunk. The devrc host-side half is `innovation-upstream/devrc#1310`. Claim released.
+        🔴 **THIS DOC'S ATTENTION MODEL WAS STALE AND THE RECON REFUTED IT.** The "Attention queue"
+        section above says `AskUserQuestion` is *"🔴 Silent today — `hook/clawgate-hook.sh:79`
+        explicitly defers to the terminal without contacting the server"* and calls the hook change
+        the primary use case. **That is false as of 2026-09-04.** `raise_attention_question` exists at
+        `hook/clawgate-hook.sh:102` and fires on `AskUserQuestion` at `:201`; questions ARE reaching
+        the queue, with their options. Measured live: **36 open entries — 2 `question`, 34 `idle`.**
+        Do not re-derive the old model from that section; fix the section when you next touch it.
+        **Why a transcript feeder at all:** the operator asked for a "pretty chat view" of session
+        content. The right source is the **Claude Code JSONL transcript**, not `capture-pane`.
+        Measured: transcripts sit at `~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl`, are
+        newline-delimited JSON with `type` in {`assistant`,`user`,`attachment`,`system`,`mode`,
+        `permission-mode`,`bridge-session`,`last-prompt`,`ai-title`} (one file: 133 records = 39
+        assistant, 38 attachment, 17 user), and **the join key already exists** — every attention entry
+        carries the Claude Code session id. `capture-pane` is an ANSI screen dump: lossy,
+        scrollback-bounded, turn boundaries guessable only from formatting. **Operator chose transcript
+        for BOTH surfaces**, with no capture-pane fallback.
+        🔴 **A write route under a ledgered prefix reds the build** — see rank 29.
+        🔴 **TRANSCRIPTS ARE CAPTURED TEXT AND THIS REPO IS PUBLIC.** No real message body, prompt,
+        model output, media path or third-party hostname in a fixture, golden, debug dump or PR body.
+        Fixtures must be SYNTHETIC and regenerated to the shape.
+        Closing condition: transcript content for a named session on EACH host is retrievable from the
+        pod, and the path is read-only — no host-side execution of any kind is reachable through it.
+        forcing: none — no deadline; it is the foundation rank 26 needs.
+
+26. ✅ **DONE — same PR as 25, same two-sweep survival.** Shipped in `#695`, squash `8f6aa6d3a`;
+    claim released, re-confirmed 2026-09-14. 🔴 Its durable half is that `/session/{id}` is a
+    CROSS-AGENT CONTRACT rather than an implementation detail, and that disjoint file ownership
+    between two concurrent agents is NOT merge safety.
+    ORIGINAL, verbatim:
+    26. **The chat view — one transcript-driven component, mounted twice.** Repo:
+        `ZacxDev/homelab-infra`, `containers/clawgate/internal/ui/`. ✅ **DONE 2026-09-05 — shipped in
+        `#695`, squash `8f6aa6d3a`.** 🔴 The `/session/{claudeSessionId}` contract was verified against
+        the REAL binary, not asserted: the href read out of the card's own `AttentionSessionPath`
+        constant returned **200** with the session id in the body, and a bogus path returned **404** as
+        the negative control — so "not 404" is a measurement. Claim released. Originally dispatched
+        2026-09-04, claim `tmux-webapp-26`. Renders a transcript as an app-native chat (user vs
+        assistant turns), NOT a terminal dump. Two mounts: the tmux page, and a new standalone
+        **`/session/{claudeSessionId}`** (shell) + **`/ui/session/{claudeSessionId}`** (partial).
+        🔴 **`/session/{id}` IS A CROSS-AGENT CONTRACT, NOT AN IMPLEMENTATION DETAIL.** Rank 27's agent
+        adds the attention card's "view session" link pointing at exactly that path, in a different
+        worktree, concurrently. Renaming the route silently breaks a link nobody will test together —
+        the isolation-seam shape. **Merge 26 before 27, or the link 404s.**
+        ⚠ **File ownership was split to keep the two agents off each other:** 26 owns
+        `internal/ui/tmux.go`, `internal/api/tmux.go` and the new chat/session files; 27+28 own
+        `internal/ui/attention.go`, `internal/api/attention.go`, `internal/attention/` and `hook/`.
+        🔴 **Disjoint files are NOT safety** — test-merge the two branches before merging the second.
+        Closing condition: a Claude Code session renders as a readable chat at
+        `/session/{id}` and from the tmux page, sourced from the transcript, verified on the live pod
+        after deploy — not inferred from a green test.
+        forcing: none
