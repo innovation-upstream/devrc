@@ -3037,6 +3037,29 @@ are corrected in place.
   **45,762 bytes**. Also: use the repo-pinned Tailwind **v3** from `node_modules`, not
   `nix-shell -p tailwindcss`, which now ships v4.
 
+- 🔴 **`devrc` `main`'s red `pytests` gate is a MOVING SET, not one stuck test — so naming "the"
+  pre-existing failure implies a stability that does not hold.** The close-out block above names
+  `test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`, measured failing at `origin/main`
+  on 2026-09-14. Hours later, on `devrc#1685`, the named verdict was a **different** test:
+  `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` (`failed=2`, collected 23,703). Both are
+  real and both pre-exist. **A session that checks "is it still that test?" will get a different
+  answer and may conclude its own change broke the gate.** The discriminator is always the same and
+  costs one command — run the SPECIFIC failing file in a detached worktree of pristine `origin/main`:
+  `git -C $DEVRC worktree add --detach /tmp/ctl origin/main` then
+  `(cd /tmp/ctl && nix-shell -p "(python3.withPackages(ps:[ps.pyyaml ps.pytest]))" --run 'python3 -m pytest -q scripts/tests/<file>.py')`.
+- ⚠ **Two ways that control itself returns a non-answer, both hit while doing it:** (a) a broad
+  `-k <name> scripts/` collects modules needing `psycopg2` and dies `INTERNALERROR ... 3 errors` —
+  that is the instrument, not a verdict; (b) grepping for the test NAME finds a file that merely
+  *mentions* it (`scripts/stale-base-triage.py`), and pytest then prints **`no tests ran`** — a zero
+  that proves nothing. Grep for `def <test_name>` to get the defining file, and treat `no tests ran`
+  as "wrong target", never as "passes".
+- 🔴 **An item completed AFTER an eviction sweep must be evicted in the change that closes it.**
+  Rank 18 survived the 2026-09-14 sweep legitimately (it was open then), was closed by
+  `ZacxDev/homelab-infra#820`, and then sat in the ranked queue as available work until `devrc#1685`.
+  A `/resume` session would have `claim-work`'d and redone it. The eviction note in
+  `## Next steps (ranked)` now carries this rule; the failure mode is that closing and evicting are
+  two different actions and only the first feels like finishing.
+
 ## How to verify
 
 ```bash
