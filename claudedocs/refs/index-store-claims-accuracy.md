@@ -351,7 +351,7 @@ is the THIRD copy of a finding the core doc still states in `## Goal` and `## St
   near-identical bullets this replaces are MERGED, not lost: they differed only in the
   control's link count.**
 
-### The `no CREATE route` sweep — the 2026-09-11 figures and the history of wrong ones
+### The `no CREATE route` sweep (claim retracted) — the 2026-09-11 figures and the history of wrong ones
 
 🔴 The IMPERATIVE stays in the core doc ("do not quote a count here you have not re-derived with
 the repo's OWN scanner"), and so does the whole *"all sites are corrected" was itself false* /
