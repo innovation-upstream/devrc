@@ -16,6 +16,25 @@ debugging, changing or copying a specific pipeline.
 
 ## 🔴 CRITICAL GOTCHAS — read first
 
+0. 🔴 **A PR RED YOUR DIFF CANNOT REACH IS INHERITED — CHECK BEFORE YOU DEBUG IT.**
+   Measured **three times in one session (2026-08-31), on three different legs**, all on
+   `ZacxDev/homelab-infra` PRs: (a) `FAILED: gitleaks` on a **docs-only** diff — *trunk
+   itself* had been red for ~5 h since `e097d136`, on another session's handoff quoting
+   `password: "changeme-clickhouse-password"` (fixed by `#598`, a rule-scoped
+   `[[rules.allowlists]]` exempting `^claudedocs/` from `unrotated-template-default` only);
+   (b) `FAILED: sops-rules` reporting `rule count DROPPED: 33 → 32` and naming a rule the
+   branch never touched — trunk had **ADDED** it after the branch point; (c)
+   `FAILED: scripts-tests` on a docs-only diff — trunk was broken and `c902cdd5`
+   (*"unbreak trunk CI"*) fixed it after branching.
+   **The tell is constant: a failing leg your diff cannot touch.** The control is
+   **base-vs-branch** — run the same leg against `origin/trunk` and compare; identical
+   output proves the red is not yours. **Then REBASE; do not debug the leg.**
+   🔴 **And trunk can be red for hours while EVERY open PR still looks green**, because
+   they branched before the offending commit. **A green PR is evidence about its branch
+   point, never about trunk.** Nothing currently watches trunk's own gate state.
+   ⚠ `gh pr checks` reports *"no checks reported"* for a PR that has a **passing** commit
+   status — Tekton posts a legacy status, not a check-run. Use
+   `gh api repos/<o>/<r>/commits/<sha>/status`.
 1. **hostNetwork gateway host-port collisions.** The nebula public gateway (BOTH prod +
    homelab) is `hostNetwork: true`, so any new nginx `listen` port must be verified free at
    the **HOST** level, NOT just in the nginx config. Decode `/proc/net/tcp` on the **LIVE**
