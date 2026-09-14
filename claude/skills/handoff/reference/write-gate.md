@@ -654,11 +654,33 @@ queue this module cannot COUNT.** `ranked_items` recognises only the heading
 reads only the update. Rule (n) reads BOTH sides, so the same gap turns a
 reworded base heading into a false GROWTH: migrating such a queue onto the
 canonical heading **while shrinking it** was refused, permanently, clearable
-only by `--rank-growth-approved`. Measured over the real corpus — 183
-`handoff-*.md` across devrc and homelab-talos — **22** docs carry a ranked queue
-under an unrecognised heading that this counts as 0; 19 hit `status=dated-topic`
-first, leaving **3** live. The rule now SKIPS when the base carries no canonical
-`## Next steps`, because a count that was never taken must not be printed as 0.
+only by `--rank-growth-approved`. The rule now SKIPS when the base carries no
+canonical `## Next steps`, because a count that was never taken must not be
+printed as 0.
+
+⚠ **THE POPULATION FIGURE IS PREDICATE-DEPENDENT — quote the one that
+reproduces.** A first draft said "22 docs"; round 2 could not reproduce it and
+got **38** on a wide predicate (any fence-aware numbered list in a doc with no
+canonical `## Next steps`) and **28** on a narrow one. What DOES reproduce
+exactly is the number that matters: **3 live docs** —
+`handoff-analyze-service-index-backup.md`, `handoff-syshealth-skill.md`,
+`handoff-minio-credential-hardening.md`. The rest hit `status=dated-topic`
+first and are unreachable. Corpus: 183 `handoff-*.md` across devrc and
+homelab-talos.
+
+🔴 **TWO RESIDUALS THIS SKIP DOES NOT CLOSE, both measured in round 2 and both
+left open deliberately rather than met with more machinery.**
+- A base carrying **BOTH** a canonical `## Next steps` and a reworded queue is
+  still counted from the canonical one alone, so a PARTIAL migration — the
+  natural intermediate state of the very fix this section prescribes — can still
+  be refused for shrinking. The skip keys on the heading's PRESENCE, not on
+  whether the count is complete.
+- An UPDATE whose queue sits under an unrecognised heading is invisible to
+  `ranked_items`, so rule (n) sees zero items, does not refuse, and does not
+  disclose either (the disclosure is gated on the update carrying
+  self-generated ranks). That is rule (j)'s deliberate synonym gap inherited,
+  not something this rule introduced — but it means the relocation hazard below
+  is **not** one heading wide.
 
 🔴 **AND "the working copy is empty" IS NOT "there is no document".**
 Emptying a TRACKED doc in place left it with a full history and a blank working
@@ -816,6 +838,15 @@ names `## Defects (batched)` as the relief valve — and that section is invisib
 to rule (j), to rule (n), to `/resume`'s digest and to the DRIFT block. So an
 arc can satisfy the ratchet by moving its growth one heading down, and **nothing
 would measure that it had.**
+
+🔴 **AND THE HOLE IS NOT ONE HEADING WIDE — round 2 corrected this paragraph.**
+`## Defects (batched)` is merely the destination this skill NAMES. The actual
+set is *every* heading `is_next_steps_heading` does not recognise, which §F
+measures at 28–38 real documents depending on the predicate. Measured end to
+end: five `forcing: none` ranks under `## Ranked next steps` in an update exit
+**0** with no refusal and no disclosure, while the same five under
+`## Next steps` exit **12**. A reader who took this section as "one heading" —
+which an earlier draft invited — would have the hazard's size wrong.
 
 That is accepted for now: a bounded, drainable defect list is the behaviour the
 report asked for, and gating it too would be building the second mechanism

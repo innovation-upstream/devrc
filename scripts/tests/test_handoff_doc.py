@@ -7056,10 +7056,79 @@ class TestTheArcRulesOnlyCompareAgainstAUsableBase:
         """🔴 `None` IS NOT `False`, and collapsing them inverts the fail
         direction. git failing to answer is not evidence a doc is new; treated
         as `False` it would refuse a grandfathered document on a repo this tool
-        merely could not read."""
+        merely could not read.
+
+        ⚠ A UNIT GUARD ON AN INPUT `main()` CANNOT REACH, and labelled as one
+        after round 2 measured it: `main()` returns `EXIT_FAIL` on a directory
+        with no `.git` a screen earlier, so this input never arrives there. It
+        stays because it pins the helper's contract directly — but it is NOT
+        what covers the distinction in the running tool. The two tests below
+        are, and they reach it through `main()`.
+        """
         empty = tmp_path / "not-a-repo"
         empty.mkdir()
         assert hd.doc_tracked_at_head(empty, "claudedocs/x.md") is None
+
+    def _unborn_head_repo(self, tmp_path: Path) -> Path:
+        """A real git repo with NO commits — `git init` and nothing else.
+
+        🔴 THE ONLY PRODUCER OF `None` THAT `main()` CAN ACTUALLY REACH, and
+        round 2 found it by asking which inputs get there. `rev-parse --verify
+        HEAD` fails on an unborn HEAD, so `doc_tracked_at_head` cannot answer,
+        and every predicate downstream has to say so rather than borrow another
+        case's words. `git checkout --orphan` produces the same state.
+        """
+        repo = tmp_path / "unborn"
+        (repo / "claudedocs").mkdir(parents=True)
+        _sh("git", "init", "-q", cwd=repo)
+        for k, v in (("user.name", "T"), ("user.email", "t@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=repo)
+        assert hd.doc_tracked_at_head(repo, "claudedocs/handoff-sample-topic.md") is None
+        return repo
+
+    def test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 A CLAIM ABOUT HISTORY MAY ONLY BE MADE WHEN THE HISTORY WAS READ.
+        The advisory used to assert the doc "was written before rule (m) and is
+        GRANDFATHERED" in a repo with no commits at all — there is no history
+        there, so the sentence is false about every document it can describe.
+
+        The fail DIRECTION is unchanged and deliberate: an unreadable repo
+        grandfathers rather than refuses. What changes is that the run says
+        which case it is in.
+        """
+        repo = self._unborn_head_repo(tmp_path)
+        upd = write_delta(
+            tmp_path, "unborn.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, "--new-effort", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        blob = res.stdout + res.stderr
+        assert "git could not say whether the doc has any history" in blob, blob
+        assert "it was written before rule (m)" not in blob, blob
+
+    def test_an_UNBORN_HEAD_gets_its_OWN_ratchet_skip_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 AND THE SKIP MAY NOT BORROW THE OTHER REASON'S WORDS EITHER. The
+        stale-base wording tells the author that "the count you would have been
+        held to is the one in the document you cannot currently read" — advice
+        that names a document which, here, may not exist anywhere."""
+        repo = self._unborn_head_repo(tmp_path)
+        upd = write_delta(
+            tmp_path,
+            "unborn-ranks.md",
+            GOAL_WITH_CONDITION
+            + "\n## Next steps (ranked)\n"
+            + "".join(f"{i}. Item {i}. forcing: none\n" for i in range(1, 4)),
+        )
+        res = run_tool(repo, "--new-effort", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "RULE (n) DID NOT RUN" in res.stdout, res.stdout
+        assert "git could not say whether this doc exists in HEAD" in res.stdout, res.stdout
+        assert "does not hold a readable copy" not in res.stdout, res.stdout
 
 
     def test_the_skip_disclosure_is_SILENT_when_the_update_adds_no_self_generated_rank(

@@ -1895,7 +1895,9 @@ def undefined_done_report(
     )
 
 
-def legacy_dod_report(found: ClosingCondition, is_new_doc: bool) -> str:
+def legacy_dod_report(
+    found: ClosingCondition, is_new_doc: bool, history_unknown: bool = False
+) -> str:
     """Rule (m)'s advisory for a pre-rule document, or "".
 
     Silent when the field is there, and silent on a NEW doc — that case is a
@@ -1906,10 +1908,20 @@ def legacy_dod_report(found: ClosingCondition, is_new_doc: bool) -> str:
     """
     if found.is_declared or is_new_doc:
         return ""
+    # 🔴 "written before rule (m)" IS A CLAIM ABOUT HISTORY, so it may only be
+    # made when the history was READ. Round 2 caught it asserted in a repo with
+    # an unborn HEAD, where there is no history at all.
+    lead = (
+        f"⚠ This handoff declares no `{CLOSING_KEY}:`, and git could not say "
+        f"whether the doc has any history here, so whether it PREDATES rule (m) "
+        f"is unknown. Grandfathered either way — this run proceeds."
+        if history_unknown else
+        f"⚠ This handoff declares no `{CLOSING_KEY}:` — it was written "
+        f"before rule (m) and is GRANDFATHERED, so this run proceeds."
+    )
     return "\n".join(
         [
-            f"⚠ This handoff declares no `{CLOSING_KEY}:` — it was written "
-            f"before rule (m) and is GRANDFATHERED, so this run proceeds.",
+            lead,
             "  Adding one is a `## Goal` delta — a line if the doc has that "
             "section, the section plus a line if it does not (measured: 42 of "
             "183 handoff docs have no heading that resolves to `goal`). Until "
@@ -3954,12 +3966,31 @@ def main(argv: list[str] | None = None) -> int:
     # So the mainline reading alone is not enough — it is populated only when the
     # mainline is AHEAD on this doc — and HEAD has to be asked too.
     tracked_at_head = doc_tracked_at_head(repo, relpath)
+    # 🔴 `None` IS ITS OWN CASE, NOT A QUIET MEMBER OF "a doc may exist".
+    # Round 2 measured the cost of folding it in: in a repo with an UNBORN HEAD
+    # (a fresh `git init`, or `git checkout --orphan`) `doc_tracked_at_head`
+    # answers `None`, so a genuinely new arc was GRANDFATHERED — rule (m)'s
+    # refuse arm silently off — and the run printed two statements that were
+    # false about the document: that it "was written before rule (m)", and that
+    # the ratchet was skipped because "this checkout does not hold a readable
+    # copy of the doc … the count you would have been held to is the one in the
+    # document you cannot currently read". There is no document, anywhere.
+    #
+    # Folding is still the right FAIL DIRECTION — an unreadable repo must
+    # grandfather rather than refuse — so what changes is that the run SAYS
+    # which case it is in instead of borrowing the other one's words.
+    git_could_not_answer = tracked_at_head is None
     doc_exists_elsewhere = (
-        currency.replaces_mainline_doc(base_text) or tracked_at_head is not False
-    )
-    base_readable = bool(base_text.strip()) and not currency.replaces_mainline_doc(
-        base_text
-    )
+        currency.replaces_mainline_doc(base_text) or tracked_at_head is True
+    ) or git_could_not_answer
+    # 🔴 `bool(base_text.strip())` ALONE — the `replaces_mainline_doc` conjunct
+    # was PROVABLY DEAD and round 2 killed it by mutation. `nothing_to_merge_into`
+    # IS `not text.strip()`, and `replaces_mainline_doc` requires it, so the
+    # second operand can never change the result. It survived the full suite
+    # because no input can distinguish the two readings — the shape this module
+    # refuses elsewhere. Keeping it would also keep the false narrative that
+    # rule (m)'s fix lives here; the real fix is `is_new_doc` below.
+    base_readable = bool(base_text.strip())
     # ⚠ `tracked_at_head is not False` — `None` (git could not answer) counts as
     # "a document may exist", which is the FAIL-CLOSED direction for rule (m):
     # an unreadable repo grandfathers a doc rather than refusing one.
@@ -4070,6 +4101,14 @@ def main(argv: list[str] | None = None) -> int:
     ratchet_skip = ""
     if is_new_doc or args.rank_growth_approved:
         pass  # round 1, or the operator opted in — both are DECISIONS, not gaps
+    elif git_could_not_answer and not base_text.strip():
+        # The THIRD reason (round 2, finding 1). Distinct from the one below:
+        # there may be no document at all, so telling the author to go and read
+        # a count "in the document you cannot currently read" would be false.
+        ratchet_skip = (
+            "git could not say whether this doc exists in HEAD, so whether there "
+            "is a document to ratchet against is UNKNOWN"
+        )
     elif not base_readable:
         ratchet_skip = "this checkout does not hold a readable copy of the doc"
     elif not base_carries_a_ranked_queue:
@@ -4099,7 +4138,10 @@ def main(argv: list[str] | None = None) -> int:
     closing = closing_condition(merged_text)
     undefined_done = undefined_done_report(
         closing,
-        base_had_one=base_readable and closing_condition(base_text).is_declared,
+        # `closing_condition("").is_declared` is already False for every
+        # blank base, so a `base_readable and …` conjunct here was dead too
+        # (round 2, mutation-proven). One predicate, stated once.
+        base_had_one=closing_condition(base_text).is_declared,
         is_new_doc=is_new_doc,
     )
     if undefined_done:
@@ -4142,7 +4184,7 @@ def main(argv: list[str] | None = None) -> int:
     # this rule is not refused (that would be red-by-construction on every legacy
     # handoff), so the ONLY thing that ever surfaces its missing finish line is
     # this line, above the diff, on every update until someone adds one.
-    legacy_dod = legacy_dod_report(closing, is_new_doc)
+    legacy_dod = legacy_dod_report(closing, is_new_doc, git_could_not_answer)
     if legacy_dod:
         print(legacy_dod)
     # Rule (l)'s advisory. Same slot, and it is the one of the three that names

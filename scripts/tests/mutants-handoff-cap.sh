@@ -666,6 +666,10 @@ run 'mainline-measured-from-the-wrong-text' \
   's|            mainline = doc_shape(shown.out)|            mainline = doc_shape("")|'
 
 printf '\n== the round-4 regression must fail with the RIGHT message (#1093.1) ==\n'
+# ⚠ THE GUARD NAMES BOTH ROWS. Keying on the first alone meant
+# `MUTANT_FILTER='round-4-negative-control'` ran 5 rows and not that one, with
+# the accounting still balanced — an operator re-running a row by the name the
+# harness itself printed got a green (round 2, finding 9).
 # 🔴 THESE TWO ROWS DO NOT GO THROUGH `_run`, SO THEY DO NOT GO THROUGH
 # `_row_selected` EITHER — they increment ROWS by hand. Under MUTANT_FILTER
 # that made the accounting lie in two ways at once (audit F6): they ran
@@ -673,7 +677,7 @@ printf '\n== the round-4 regression must fail with the RIGHT message (#1093.1) =
 # so `9 row(s) … skipped 83` did not add up to the 90 `_run` sites. Gate the
 # pair explicitly. They are DIAGNOSTIC-QUALITY rows (which test message, not
 # which test), which is why they cannot simply become `run` calls.
-if _row_selected round-4-regression-message; then
+if _row_selected round-4-regression-message || _row_selected round-4-negative-control; then
 # 🔴 A DIAGNOSTIC-QUALITY ROW, so `_run` cannot score it: every other row asks
 # WHICH TEST died, this one asks WHICH MESSAGE it died with. Reverting
 # `replaces_mainline_doc` to the round-4 bug takes the LOUD branch, so the shape
@@ -895,6 +899,25 @@ run 'stale-base-read-as-a-new-arc' \
   's|    is_new_doc = not base_text.strip() and not doc_exists_elsewhere|    is_new_doc = not base_text.strip()|'
 # BEHAVIOUR-FREE CONTROL for this block: the rows above must key on behaviour,
 # not on rule (m)'s own comment text.
+# 🔴 THE `None` DISTINCTION, WHICH WAS MUTATION-PROVEN DEAD. Round 2 collapsed
+# `tracked_at_head is not False` to `bool(tracked_at_head)` — exactly the
+# None/False distinction the fix claims — and it SURVIVED a full green 472-test
+# run, because the only guard on it fed a NON-GIT DIRECTORY, an input `main()`
+# refuses a screen earlier with EXIT_FAIL. These rows exist so that cannot
+# recur: they mutate the reachable predicate, and the killers reach it through
+# `main()` via an UNBORN HEAD.
+run 'None-collapsed-into-may-exist' \
+  test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
+  's|    git_could_not_answer = tracked_at_head is None|    git_could_not_answer = False|'
+run 'unborn-head-borrows-the-stale-base-wording' \
+  test_an_UNBORN_HEAD_gets_its_OWN_ratchet_skip_reason \
+  's|    elif git_could_not_answer and not base_text.strip():|    elif False:|'
+# 🔴 AND THE FAIL DIRECTION ITSELF. Folding `None` toward "a doc may exist" is a
+# DECISION (grandfather rather than refuse on a repo we could not read); flip it
+# and a genuinely-unreadable repo starts refusing documents.
+run 'None-flipped-to-fail-closed' \
+  test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
+  's|    ) or git_could_not_answer|    ) and not git_could_not_answer|'
 run 'rule-m-comment-reword-control' SURVIVES \
   's|# --- rule (m): the arc declares what ENDS it|# --- rule m: closing condition (reworded comment)|'
 

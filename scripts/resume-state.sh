@@ -2130,6 +2130,19 @@ dod_row(){
     # `\302\240` is U+00A0 NBSP: pythons `\s` is unicode-aware and awks
     # `[ \t]` is not, so without it a NBSP after the colon made the writer
     # declare a field the reader could not see (audit F5).
+    #
+    # \U0001f534 TWO RESIDUALS, MEASURED IN ROUND 2 AND NOT CLOSED — the comment
+    # above names a CLASS and this fixes one member of it.
+    #   (a) NBSP is admitted HERE only. `closing-condition<NBSP>:` and
+    #       `check <NBSP>the probe` still diverge, and so does U+2009.
+    #       Pre-existing, not introduced; the full class is every space
+    #       character pythons `\s` knows and this bracket does not.
+    #   (b) LOCALE-DEPENDENT. Under a UTF-8 locale gawk reads `\302\240`
+    #       as the NBSP CHARACTER (verified: `c2 a0 58` -> `58`, while
+    #       `c3 82 58`, `c2 a9 58` and `58 e2 80 a0` are untouched). Under
+    #       LC_ALL=C the same bracket matches BYTES, so a trailing `a0` of
+    #       an unrelated codepoint is eaten and the output is invalid
+    #       UTF-8. `dod_row` sets no locale. Do not `LC_ALL=C` this block.
     function trim(s){ sub(/^[ \t\302\240*_`~]+/,"",s); sub(/[ \t\302\240]+$/,"",s); return s }
     /^[ \t]*(```|~~~)/ { fence = !fence; next }
     fence { next }
@@ -2157,7 +2170,16 @@ dod_row(){
         # outside the matrix TestTheTwoParsersAgree covered. NOTE: no apostrophe
         # anywhere in this awk block — it lives inside a single-quoted shell
         # string, so one would terminate the program mid-comment.
-        if (detail ~ /^[0-9]/) exit
+        # NOTE: `next`, NOT `exit` — python does not MATCH this line at all
+        # (`_CLOSING` requires the kind boundary), so `_closing_in` moves to
+        # the next line and can still declare a well-formed field below it.
+        # `exit` ended the whole scan, so a malformed field above a good one
+        # made the READER show the loud NO-closing-condition banner for a doc
+        # the WRITER accepts. Round 2 of this PRs audit measured it: 5 seam
+        # divergences, 2 of them this. The `exit`s below are correct because
+        # python RETURNS on those — an unknown kind and an empty condition
+        # both parse, and the first field wins.
+        if (detail ~ /^[0-9]/) next
         # ONE separator, and only when it is followed by space or end of line —
         # or `check — --dry-run exits 0` loses a dash. The python side anchors
         # the same way with a lookahead; awk has none, so the shape is tested
