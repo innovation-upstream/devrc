@@ -21,29 +21,28 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- 🔴 **THE ARC'S OWN WORK IS DONE. What remains on `main` is TWO REDS OWNED BY OTHER SESSIONS**
-  (rank 14's tmux flake, and one over-budget handoff doc) plus a CLASS nobody owns — see rank 15.
-  Ranks 1–4, 7, 9–13 are closed tombstones; rank 5 ANSWERED with no PR; ranks 6 and 8 are DATED.
+- ✅ **THE ARC IS CLOSED. Every objective it was resumed with is merged, shipped and
+  consumer-verified, and the two items it SPAWNED (ranks 13, 15) are closed too.** What remains on
+  `main` is owned by other sessions — see the tail of the ranked list.
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
-  `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · **`#1640` f45bb86e** ·
-  **`#1645` 3a3bede7**.
-- **`#1640` (`f45bb86e`) — the clawgate skill ceiling, FIXED.** `main` had been DETERMINISTICALLY RED
-  since `05f42bd1` (#1615): `claude/skills/clawgate/SKILL.md` at **18412 B** against the **15665**
-  ceiling. #1615 added ~2765 B of security retractions without the eviction CLAUDE.md requires, and
-  nothing blocks a merge, so it landed red. Paid the eviction rather than raising the ceiling:
-  verbatim demotion to a new `reference/auth-doors.md`, body now **15540 B** on `main`.
-- **`#1645` (`3a3bede7`) — the handoff-doc budget, MY OWN BREAKAGE, FIXED.** Three of my updates
-  (#1613/#1625/#1631) grew this doc to **86,111 B** against an **81,920** allowance. Four CLOSED
-  investigation blocks moved verbatim to `claudedocs/refs/gate-speed-and-ci-signal.md`; doc now
-  **77,234 B** on `main`, 4,686 B headroom, grandfather entry unchanged and still the tightest step.
-- 🔴 **`main` IS STILL RED, on things that are not mine.** `handoff-index-store-claims-accuracy.md`
-  is over the 65,536 ceiling — and it is **ACTIVELY GROWING**: 67,213 B → **72,598 B** across ~40
-  minutes, last commit 54 seconds before I looked. `handoff-cairn-oss-multi-instance.md` was over
-  too and has since dropped out. Rank 14's tmux flake is unfixed. **No claim, no open PR on either.**
-- **All claims RELEASED.**
+  `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
+  `#1645` 3a3bede7 · `#1647` 3ff2bef9 · **`#1648` a2c84a1c**.
+- **Both hosts converged and VERIFIED at `a2c84a1c`.** All claims RELEASED. No PR of mine is open.
+- **The three inherited PRs are all merged and consumer-verified**, which was the whole
+  inheritance: `#1600` (timer live, 2h, dry-run pinned, one clean run `Result=success`
+  `ExecMainStatus=10`), `#1603` (244 nodeids, 392 passed, **229s** — not the 166s once claimed),
+  `homelab-infra#799` (test-only, reconciled to nothing).
+- **`#1648` (`a2c84a1c`) — rank 15, CLOSED and consumer-verified on the deployed tool.** Both arms
+  fire: `⚠ Size: 79,449 B of 81,920 B (+140 B this update) — 2,471 B left` and
+  `🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET … over by 5,836 B`. Silent when there is room.
+- 🔴 **`main` IS STILL RED, on TWO failures that trace to ONE foreign document** —
+  `handoff-index-store-claims-accuracy.md` is both over its ceiling AND spells a retracted needle
+  (`test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary`). ⚠ **Another session is already
+  on it — `#1650` is open and titled for exactly that overage.** Plus rank 14's tmux flake. None of
+  it mine; do not duplicate `#1650`.
 - **No `clawgate-task:` field** — `resolve` exited 5 (0 tasks).
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
@@ -109,22 +108,19 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–4, 7, 9, 10, 11, 12 and 13 are CLOSED tombstones.** Live: 15, 14, 8, 6, 5.
+the END. **Ranks 1–13 and 15 are CLOSED tombstones.** The ONLY live items are **14** (another
+session's test), **8** and **6** (DATED), and **5** (ANSWERED, no PR).
 
-1. **CLOSED** — `homelab-infra#792` merged in dry-run (`dbe47814`). Arming is rank 8.
-   forcing: none
-2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.
-   forcing: none
+1. **CLOSED** — `homelab-infra#792` merged dry-run (`dbe47814`). Arming is rank 8.  forcing: none
+2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.  forcing: none
 3. **CLOSED — the store-api flake was fixed by `#1458`.** ⚠ `#1512` is no longer the measurement of
    record: superseded by an ANCESTRY split over 400 PR heads — **0 of 99** verdicts on heads carrying
-   `ce9b55c3` against **12 of 298** that do not, P(0) ≈ **0.017** (`devrc#1568` `8114a124`; table at
-   `handoff-gate-flake-store-api.md` rank 1). `#1512`'s own table is not wrong, just the wrong
-   predicate; keep it for "it was never the worst flake".
+   `ce9b55c3` vs **12 of 298** that do not, P(0) ≈ **0.017** (`devrc#1568` `8114a124`; table at
+   `handoff-gate-flake-store-api.md` rank 1). Keep `#1512` for "it was never the worst flake".
    forcing: none
-4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.
-   forcing: none
-5. **ANSWERED — NO PR, BOTH CANDIDATE FIXES REFUTED.** `step-pytests` is **1177s = 94.4%** of a 1247s
-   gate pod (23 pods, 11h); `scripts/tests` is **582–778s** at 14,327 of 22,518 tests. **Test
+4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.  forcing: none
+5. **ANSWERED — NO PR, BOTH CANDIDATE FIXES REFUTED.** `step-pytests` is **1177s = 94.4%** of a
+   1247s gate pod (23 pods, 11h); `scripts/tests` is **582–778s** at 14,327 of 22,518 tests. **Test
    execution is the cost, not dependency realisation.** (a) **No cache left to hit** — the warm
    node-pinned `/nix` PVC was removed in `homelab-talos 3c53d618a`; per-run `emptyDir`, no
    substituters, min `step-pytests` **956s**. (b) **Excluding `claudedocs/` would blind real gates**
@@ -141,12 +137,11 @@ the END. **Ranks 1–4, 7, 9, 10, 11, 12 and 13 are CLOSED tombstones.** Live: 1
    138 of the 140-char cap, making the screen unsatisfiable. ⚠ Both are READ-TIME populations that
    cannot be re-derived. ⚠ Not a decision — the date stands.
    forcing: none
-7. **CLOSED — `homelab-infra#799` `0b14768a`.** Test-only; reconciled to nothing.
-   forcing: none
+7. **CLOSED — `homelab-infra#799` `0b14768a`.** Test-only; reconciled to nothing.  forcing: none
 8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK TO ~2026-09-18, THEN ARM.** Operator set the date.
    Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` / `|= "closed-pr pass:"` in Loki,
    hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` + the pinned literal at
-   `test_supersede_logic.py:2251` (re-read the line number; `#799` has since landed).
+   `test_supersede_logic.py:2251` (re-read the line number; `#799` has landed since).
    🔴 Zero `DRY-RUN would cancel` after a week is NOT a clean bill. ⚠ Dry-run short-circuits before
    the re-read guard. 🔴 **Rank 13 is the WORKED EXAMPLE for this call** — a dry-run soak exposed a
    **2-of-4 false rate** in a sibling tool that every mutation sweep and merged-tree gate had passed,
@@ -155,17 +150,19 @@ the END. **Ranks 1–4, 7, 9, 10, 11, 12 and 13 are CLOSED tombstones.** Live: 1
    forcing: deadline — 2026-09-18.
 9. **CLOSED by `#1561` + `#1567`.** 🔴 The CLASS is mitigated, not closed: `#1603`'s
    `ledger-check.sh` DETECTS it in 229s and `#1629` stops the triage bot being fooled by it, but
-   nothing PREVENTS a new instance. Third instance this arc was `test_runtime_shebangs.py`.
+   nothing PREVENTS a new instance. 🔴 **THREE instances landed in ONE DAY** —
+   `_KILL_MENTION_LEDGER`, `test_runtime_shebangs.py`, and
+   `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary`, the last still red on `main`.
+   Each was a guard tripped by the DOCUMENTATION of that guard.
    forcing: none — owned by nobody.
-10. **CLOSED — `#1600` `f99d3c1b`**, shipped, consumer VERIFIED RUNNING (2h timer, dry-run pinned).
-    forcing: none
-11. **CLOSED — `#1603` `14daa42a`**, shipped, consumer VERIFIED (244 nodeids, 392 passed, **229s**).
+10. **CLOSED — `#1600` `f99d3c1b`**, shipped, consumer VERIFIED RUNNING.  forcing: none
+11. **CLOSED — `#1603` `14daa42a`**, shipped, consumer VERIFIED (244 nodeids, 392 passed, 229s).
     forcing: none
 12. **CLOSED — `#1613` `264de70d`**, merged through a red proven unreachable from its diff.
     forcing: none
 13. **CLOSED — `#1629` `f839e720`**, shipped, CONSUMER-VERIFIED on the real verdicts: `#1450`/`#1286`
-    stay INHERITED, `#1194` demotes, 244 guards derived in 18.7s. ⚠ Fixes the bot's REASONING; does
-    NOT arm it.
+    stay INHERITED, `#1194` demotes, 244 guards in 18.7s. ⚠ Fixes the bot's REASONING; does NOT arm
+    it — arming is still a separate, evidence-gated call.
     forcing: none
 14. 🔴 **A FLAKY TMUX TEST ON `main` REDDENS UNRELATED PRs — fix or delete it.**
     `test_tmux_hyperlink_open.py::test_tmux_stores_the_hyperlink_and_can_report_it`, MEASURED **1
@@ -174,20 +171,18 @@ the END. **Ranks 1–4, 7, 9, 10, 11, 12 and 13 are CLOSED tombstones.** Live: 1
     argument for deleting it. 🔴 Another session's test — raise or claim it, do not rewrite it
     unilaterally. ⚠ `claude/RULES.md`: a flaky test is FIXABLE, not re-runnable.
     forcing: gate — it reddens `main` and every branch inherits the noise.
-15. 🔴 **THE HANDOFF-DOC BUDGET IS BECOMING A PERMANENTLY-RED GATE — close the CLASS, not the
-    instance.** `test_no_handoff_doc_exceeds_its_budget` was tripped by **three different documents
-    in one evening**, one of them mine (`#1645`). The live violator,
-    `handoff-index-store-claims-accuracy.md`, grew **67,213 → 72,598 B in ~40 minutes** while I
-    worked, last commit 54 seconds before I read it — i.e. the gate goes red faster than anyone
-    fixes it, which is exactly `claude/RULES.md`'s "a permanently-red gate trains everyone to click
-    through".
-    🔴 **The instance is NOT the work.** Each session's `/handoff` appends by design, and nothing in
-    that loop warns you that you are approaching the ceiling — the author finds out when an
-    UNRELATED PR goes red, which is how I found mine. **The fix is a pre-write budget check inside
-    the handoff flow** (warn in the proposal run, where the durable-drop warning already prints, so
-    the cost lands on the session that caused it). ⚠ Do NOT start by editing other sessions' docs:
-    one is being written right now, and writing into a file another process holds is its own hazard.
-    forcing: gate — `main` is red on this today, and the rate suggests it stays red.
+15. **CLOSED — `#1648` `a2c84a1c`, shipped and consumer-verified on the deployed tool.**
+    `handoff_doc.py` now warns an author, in the proposal run above the diff, when an update would
+    put the doc over its budget — the gate had no feedback loop, and three documents went over in
+    the single evening it landed. 🔴 **It WARNS and never REFUSES, and that is forced**: a blocking
+    check deadlocks against `handoff-write-guard.py`, which blocks Stop until a handoff is written,
+    so a session on a doc already grandfathered OVER the ceiling could neither record its work nor
+    end its turn. Pinned by `test_the_over_budget_warning_REFUSES_NOTHING`. The ceiling/step/ledger
+    moved to `scripts/lib/handoff_budget.py` because production code importing a TEST module is a
+    direction this repo has nowhere else; `test_handoff_doc_size.py` still owns the policy.
+    ⚠ This closes the FEEDBACK gap, not the budget problem — docs still grow, authors just find out
+    at write time instead of from someone else's red PR.
+    forcing: none
 
 ## Decisions, so they are not re-litigated
 
@@ -311,92 +306,6 @@ bash ~/workspace/devrc/scripts/ship.sh
   written, and by review time the branch was **6 behind**. Zero file overlap and
   `mergeStateStatus: CLEAN`, so the risk was low, but the gated tree was no longer the merged
   tree. **A merged-tree claim carries an expiry that nothing prints.**
-
-### 2026-09-11 — verifying rank 2, and four instrument failures in one session
-
-- 🔴 **`git rev-parse $ref:path` in zsh returns a CONFIDENT WRONG 40-char sha.** `$r` followed by
-  `:s` is eaten as a **history substitute modifier**, so the command never asks what you think.
-  It printed a plausible blob id that made a file look CHANGED across three refs when
-  `git ls-tree` showed one identical blob (`c342720d`). **Brace it (`${r}:path`) or use
-  `git ls-tree`.** This is the documented unbraced-var trap, hit while actively reading the rule.
-- 🔴 **A mutation that edits a COMMENT reports SURVIVED having never run.** `classify`'s
-  fall-through was mutated with `.replace('return "error-other"', …, 1)` — and the FIRST
-  occurrence in the file is inside a comment *quoting that literal as prose*. The sweep was green
-  and meaningless. **Mutate by LINE NUMBER with an assert on the line's exact content.** Redone
-  properly, both fall-throughs are KILLED by named tests
-  (`test_an_UNRECOGNISED_state_is_never_green_end_to_end`).
-- 🔴 **zsh does not word-split, so `pytest $SEL` passed 50 paths as ONE argument** — pytest errored
-  `file or directory not found`, ran **`no tests ran in 0.00s`**, and the pipeline still **exited
-  0**. A merged-tree gate that observed nothing and reported success. Use an array, or `${=SEL}`,
-  and **assert the collected count moved** before believing a green.
-- 🔴 **I destroyed my own control by removing its worktree while it was still running**
-  (`FileNotFoundError: …/wt-control`, and it exited **0** anyway). The decision did not change
-  because the discriminating run had already finished — but that is luck, not justification.
-  **Do not tear down a tree a background job depends on.**
-- **A 1-of-4049 merged-tree failure was LOAD, and the mechanism was identified rather than
-  re-run-until-green.** `test_no_real_launchers.py::test_autouse_is_what_protects_a_test_that_
-  never_asks` died on a 300s `TimeoutExpired` on a *nested* pytest inside a run that took 3090s;
-  the same file alone on the same merged tree passes **80/80 in 254s**. ⚠ It was NOT dismissed on
-  shape: that file references `main-status-watch` four times, #1469 added its `NOLAUNCH_ACK` row,
-  and `ffe4e5d0` is precedent for this exact file breaking on a merge with main. The launcher
-  ledger's one real citation into the rewritten test file
-  (`test_the_trigger_verb_is_MUTATING_so_the_stub_fails_it_closed`) was checked and RESOLVES.
-- 🔴 **A PR green on its own branch is not a merged-tree claim, and #1502 was 12 commits behind.**
-  Zero file overlap and a clean textual merge — which is NOT safety — so the at-risk surfaces
-  (every test reading `CLAUDE.md`, the disk-accounting ledger, `scoped-tests`) were run on the
-  actual merged tree before merging.
-- **`#1502`'s own ladder repeated the arc's headline lesson twice more.** Round 4 caught round 3
-  **claiming a fix it had not made** — the PR body had been written from the finding list rather
-  than the diff. Round 5 then found three of round 3's own measured numbers stated **wider than
-  measured** ("21 mutants" → 16; "every mutant of classify's arms" → 35 of 60; "ZERO coverage" →
-  10 of 11). A fix round's own prose remains the likeliest next finding.
-- **A 100% kill rate is a broken harness, and was reported as such.** One verification sweep
-  returned 439/439 KILLED **with a RED negative control**; the whole 457-run sweep was voided
-  rather than reported. A span self-check also caught 1 mutant of 440 whose edit landed inside an
-  f-string and never made the change it claimed — reported VOID, not SURVIVED.
-- 🔴 **CLAUDE.md said `main-status-watch` was "NOT LIVE UNTIL A SWITCH" for a full day after
-  `ship.sh` had converged both hosts to `86b1ddec`.** The sentence was written before the deploy
-  and nothing re-read it. Corrected in `#1502` to a MEASURED liveness claim that names its own
-  re-measurement command. **A ⏳ "not live yet" note is a claim with an expiry that nothing prints.**
-- ⚠ **#792's dry-run soak cannot validate the guard its own best evidence needs.** devrc **#1500**
-  merged **14 seconds after** the sweep pod started — i.e. mid-tick, exactly the race the re-read
-  guard exists for. Dry-run short-circuits `cancel_all` BEFORE the re-read, so the soak shows the
-  SELECTOR is right while structurally never exercising the WRITE-path guard. Weigh that when
-  deciding rank 8.
-
-### 2026-09-11 — rank 3: a ranked item whose premise was wrong in both directions
-
-- 🔴 **"Needs a diagnosis" was FALSE — the diagnosis was already in the file, and excellent.** The
-  suite's own classifier had printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`
-  on run `devrc-ci-86zxj`: `server.py:_replace_bytes` fsyncs the file and then the parent dir
-  **inside the request, before the response is written**, and fsync blocks in uninterruptible sleep
-  — which is exactly the captured `TimeoutError` inside `socket.recv_into` (connection ESTABLISHED,
-  never answered). **Read the target file before believing a handoff's characterisation of it.**
-- 🔴 **AND IT WAS ALREADY FIXED, by a PR nobody connected to it.** `#1458` (`ce9b55c3`) sited the 18
-  remaining store roots — this class's among them — on **tmpfs** via `sited_root`. That removes the
-  mechanism rather than widening a bound: an fsync to RAM cannot stall on a contended disk. Nothing
-  recorded that the fix had LANDED, so the item stayed on the queue reading as live.
-  **A fix that is not written down where the symptom is described has not finished landing.**
-- **Measured, `tekton/devrc-pytests`, newest verdict per PR head, split on `ce9b55c3`:** pre-fix 125
-  verdicts / 29 genuine failures / **4** this test; post-fix 45 / 6 / **0**. `failure` and `error`
-  counted separately throughout — `error` is a broken gate, not a bad change.
-- 🔴 **THE ZERO WAS NEVER THE PROOF, and the comment now says so in the file.** At the pre-fix
-  per-verdict rate (3.2%) the expected count in 45 verdicts is ~1.4, so **P(observing 0) ≈ 0.23** —
-  a one-in-four coincidence. The mechanism's removal is what carries the claim. **A before/after
-  table is the easiest thing in this repo to over-read; state the power beside it or it will be
-  upgraded to "proven" by the next reader.**
-- 🔴 **IT WAS NEVER THE WORST FLAKE — it was the best-DOCUMENTED one.** Same pre-fix window:
-  `test_every_decrypt_family_VERDICT_is_pinned_WHOLE` failed **8** times to this test's **4**, and
-  is also at 0 post-fix. It had no long diagnosis attached and was never ranked. **Vividness is not
-  frequency: COUNT the failures before choosing which flake to chase.** This is the same error as
-  ranking by a memorable incident rather than by a census.
-- **`main` is a useless population for this question and that is structural.** Of 43 post-fix
-  pytests verdicts on `main`, **40 were artefacts** (~31 `superseded`, 4 `KILLED: the gate pod
-  died`, 4 `NO GATE POD`, 1 pending) leaving **3** authoritative successes. Use PR heads.
-- ⚠ **UNMEASURED, recorded rather than guessed:** the 760-test verification run emitted **3
-  warnings**, and this suite warns on `the spawn lost the port race and retried`. Only the tail was
-  captured, so whether those were port-race retries is **unknown**. If they were, the race is live
-  on this host — but nothing here claims that.
 
 ### 2026-09-12 — rank 4's ladder, and a red `main` nobody had fixed
 
@@ -844,6 +753,29 @@ bash ~/workspace/devrc/scripts/ship.sh
   absence of a `pending` row is not a verdict. Fixed to require all three checks PRESENT and
   settled. Four stale waiters also fired with empty output and **exit 0** — the shape that reads as
   success.
+
+### 2026-09-13 — closing out: what a "closed" arc still had outstanding
+
+- 🔴 **THE RANKED LIST SAID RANK 15 WAS OPEN AFTER I HAD ALREADY SHIPPED IT.** `#1647` filed rank 15
+  as 🔴 actionable; `#1648` closed it twenty minutes later; nothing updated the doc in between, so
+  `main` carried an open item pointing at work that was merged, shipped and verified. A next session
+  would have `claim-work`ed it and rebuilt it — the exact duplicate-work failure that cost this arc
+  two PRs (`#1558`/`#1559`) earlier. **Found only by being asked "is anything outstanding?" and
+  CHECKING the doc on `main` rather than reciting what I remembered doing.**
+  Generalise: **when one PR files a ranked item and a later PR closes it, the doc is stale between
+  them, and the window is invisible** — the ranked list is the queue every `/resume` draws from, so
+  a stale OPEN is worse than a stale CLOSED.
+- **Worktree hygiene is part of finishing.** Eleven worktrees and thirteen branches were left behind
+  by this arc's merged-tree gates and fix branches. All were clean, and every one's work was
+  verified ON `main` BY CONTENT before removal — **their `commits-not-on-main` counts were 1–8 and
+  that is the SQUASH TRAP, not evidence of stranded work**; ancestry says unmerged forever after a
+  squash. ⚠ Eight similarly-named worktrees in that directory belong to OTHER sessions and were left
+  untouched; a name pattern is not ownership.
+- ⚠ **The rank-9 class produced a THIRD instance today, and it is still red on `main`.**
+  `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` fires on a handoff doc whose prose
+  DOCUMENTS a grep that was wrongly quoted as a clean sweep — spelling the needle to explain the
+  trap is what trips the guard. Same shape as `_KILL_MENTION_LEDGER` and `test_runtime_shebangs.py`.
+  **Three in one day is a rate, not a coincidence.**
 ## Open investigations — live diagnosis state
 
 ### CLOSED investigation blocks — evicted 2026-09-13
