@@ -18,7 +18,15 @@ import sys, json, os, re
 
 HOME = os.path.expanduser("~")
 
-# Absolute repo root -> canonical env var (must match nix/programs/zsh/default.nix).
+# 🔴 BOTH TABLES BELOW RESTATE `nix/agent-handles.nix`, WHICH IS THE SOURCE OF TRUTH.
+# They are pinned to it by `scripts/tests/test_shell_env_nudge_handles.py`, both
+# directions — add a handle there and this file goes red until it is added here too.
+# (This comment used to name `nix/programs/zsh/default.nix`; that file IMPORTS
+# agent-handles.nix, so it is a generated consumer like this one, not the source.
+# Matching a copy against a copy is how KC_PROD went missing here from its
+# declaration on 2026-08-02 until 2026-09-14 — ~6 weeks, silently.)
+#
+# Absolute repo root -> canonical env var.
 REPO_VARS = {
     f"{HOME}/workspace/devrc": "DEVRC",
     f"{HOME}/workspace/homelab-talos": "HOMELAB",
@@ -30,10 +38,14 @@ REPO_VARS = {
 KC_VARS = {
     f"{HOME}/workspace/homelab-talos/homelab-kubeconfig": "KC_HOMELAB",
     f"{HOME}/workspace/homelab-talos/workbench-kubeconfig": "KC_WORKBENCH",
+    f"{HOME}/workspace/homelab-talos/production-kubeconfig": "KC_PROD",
     f"{HOME}/workspace/civit/datapacket-talos/prod-kubeconfig": "KC_DPPROD",
     f"{HOME}/.kube/homelab-nebula.yaml": "KC_NEBULA",
 }
 # Relative kubeconfig references (e.g. datapacket's `KUBECONFIG=./prod-kubeconfig`) by basename.
+# 🔴 RELATIVE ONLY — see the `norm.startswith("/")` guard at the lookup site. An
+# ABSOLUTE path that merely ENDS in one of these names is a DIFFERENT FILE, and
+# nudging its handle names the wrong cluster.
 KC_BASENAMES = {os.path.basename(p): v for p, v in KC_VARS.items()}
 
 CACHE_DIR = f"{HOME}/.cache/claude-shell-env-nudge"
@@ -64,7 +76,27 @@ def analyze(cmd):
         if raw.startswith("$"):  # already a variable
             continue
         norm = _norm(raw)
-        var = KC_VARS.get(norm) or KC_BASENAMES.get(os.path.basename(norm))
+        var = KC_VARS.get(norm)
+        # 🔴 The basename fallback is for RELATIVE references only. Applied to an
+        # absolute path it matches a DIFFERENT FILE that happens to share a name
+        # and nudges a handle for the wrong cluster. Where that handle IS set the
+        # command runs against the wrong cluster; where $KC_* declines to export
+        # the suggestion expands to EMPTY.
+        # ⚠ DO NOT write that the empty case "silently falls back to the default
+        # context" — `scripts/tests/test_absolute_handle_paths.py` RETRACTED that
+        # sentence and forbids repeating it without its precondition. The silent
+        # arm needs the default kubeconfig to carry a NON-EMPTY `current-context`;
+        # on this host `~/.kube/config` has `current-context: ""`, so both arms
+        # return `error: current-context is not set`, rc 1 — loud, and
+        # character-identical. Re-measured here. The mechanism is real; its
+        # reachability is host state.
+        # Measured before this guard: an absolute
+        # `.../homelab-infra/production-kubeconfig` (the laptop's documented
+        # layout) was nudged as `$KC_PROD`, which is guarded on the
+        # `homelab-talos` spelling. `_norm` expands `~`, so `~/...` is absolute
+        # here and is covered.
+        if not var and not norm.startswith("/"):
+            var = KC_BASENAMES.get(os.path.basename(norm))
         if var:
             suggestions.setdefault(var, f"KUBECONFIG=${var} kubectl …")
 
