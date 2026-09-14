@@ -18,6 +18,37 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+- 🔨 **2026-09-14 — RANK 26 IS IN FLIGHT AS `innovation-upstream/devrc` #1657, NOT MERGED.**
+  Branch `fix/handle-table-drift`, commit `57f93df0`, `MERGEABLE`, three Tekton gates
+  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`) **pending** at hand-off.
+  Claim `cairn-oss-multi-instance-26` is **HELD**, not released — release it when #1657 merges.
+  🔴 **Rank 26 remains listed as OPEN in `Next steps` ON PURPOSE**: it is not merged, and this
+  doc's own rank-23 lesson is that a doc edited in the same commit as the work cannot record
+  that work's merge. Mark it done in a later pass, by content.
+  - **Shipped:** `KC_PROD` added to `shell-env-nudge.py`'s `KC_VARS`; new
+    `scripts/tests/test_shell_env_nudge_handles.py` pins BOTH of the hook's dicts to
+    `nix/agent-handles.nix` in BOTH directions, as whole `path -> handle` mappings rather than
+    name sets; a basename-shadow guard on `KC_BASENAMES`; the stale "unifying the hook with it
+    is separate work" paragraph in `test_absolute_handle_paths.py` retired.
+  - **Matrix:** RED at `06287019` naming `['KC_PROD']` with its remedy, GREEN at HEAD (5 passed).
+    Mutation battery **7/7**, each killed by its INTENDED test on that test's OWN message,
+    harness control green on the pristine tree first, `PYTHONDONTWRITEBYTECODE=1`, both mutated
+    files diffed byte-identical after. 378 passed across the four directly-affected suites.
+  - ⚠ **The full `scripts/tests` suite was STARTED AND DID NOT FINISH** — ~2% after ~35 min on a
+    heavily loaded box. **It is not a pass and must not be reported as one**; the three Tekton
+    legs on #1657 are the authoritative read. Log: this session's scratchpad `full-suite.log`.
+
+- 🔴 **RANK 26'S PREMISE WAS HALF FALSE, AND THE REFUTATION IS THE DURABLE OUTPUT.** The item
+  says "The handle table has TWO hand-maintained copies, and both are drifted." One is.
+  `handoff_index.REPO_ENV_HANDLES` omitting `CIVITAI_CLI` is **NOT drift** — it is a deliberate
+  exclusion, already pinned in BOTH directions with its reason recorded in source, by
+  `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`,
+  which **passes today** (measured). Implementing rank 26 as written would have deleted a
+  documented decision, added a zero-doc repo to the corpus, and narrowed the hosts `--prune`
+  can run from. **Rank 26's own closing condition is therefore wrong as stated** — "both are
+  corrected" cannot be met, because one of the two is already correct. Amend it to the hook
+  alone when marking the item done.
+
 - ✅ **2026-09-12 — THE RANK-23 ARC IS CLOSED. Two PRs merged, both verified BY CONTENT.**
   `innovation-upstream/devrc` **#1583** squash **`c1ecc830`** (rank 23(a)+(b)) and **#1597** squash
   **`a66b6fb3`** (the status line #1583 left stale, plus the open-items ledger). Claim
@@ -28,66 +59,55 @@ is the PRIVATE proposal, not this doc.
   🔴 **Ancestry cannot answer any of this — a squash makes `merge-base --is-ancestor` false
   forever. Every check above is a CONTENT check.**
 
-- 🔴 **THE DURABLE OUTPUT OF THIS SESSION IS NOT THE CODE — IT IS WHAT THREE AUDIT ROUNDS FOUND.
-  Zero 🔴 in any round; every finding was a FALSE CLAIM ABOUT THE CODE, and two were in my own
-  prose.** Round 0 refuted the PR's *stated rationale* (the old spelling's defect was
-  `Path(__file__)` naming the **running copy** — stale after `worktree remove` — not
-  cross-machine portability, which was measurably backwards: `nix/home.nix` deploys into
-  `${home}/workspace/devrc`, so any host resolving `cairn-validate` has the checkout at that same
-  path). Round 0 also **deleted a guard I wrote**, on measurement: the pre-existing
+- 🔴 **THE DURABLE OUTPUT OF THE 2026-09-12 SESSION WAS NOT THE CODE — IT IS WHAT THREE AUDIT
+  ROUNDS FOUND. Zero 🔴 in any round; every finding was a FALSE CLAIM ABOUT THE CODE, and two
+  were in that session's own prose.** Round 0 refuted the PR's *stated rationale* (the old
+  spelling's defect was `Path(__file__)` naming the **running copy** — stale after
+  `worktree remove` — not cross-machine portability, which was measurably backwards). Round 0
+  also **deleted a guard that session wrote**, on measurement: the pre-existing
   `test_cairn_flake_pin.py` already killed all three of its mutants behaviourally, in both tiers.
-  Round 2 found the remedy I added was **unrunnable** (bare `home-manager switch` cannot evaluate
-  `nix/home.nix`, which takes a required `cairnPackage`) and that I had **cited a guard that does
-  not guard** — `test_the_command_is_BUILT_not_typed` asserts the flag as a quoted ARGUMENT TOKEN,
-  not inside a message string, so the withdrawn fallback passed it. **The fix rounds, not the
-  original change, were where every finding lived.**
+  Round 2 found the added remedy **unrunnable** and that it had **cited a guard that does not
+  guard**. **The fix rounds, not the original change, were where every finding lived.**
 
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
-  **23(c)** (upstream PR in `ZacxDev/cairn`); ✅ **the CLASS rank 23 did not close is now
-  CLOSED — see rank 24** (devrc **#1621**, squash **`df09a6c2`**): a mechanical gate over the
-  `claude/**` + `CLAUDE.md` corpus rejects any absolute checkout path a handle already names,
-  and the sites are cleared. It is NOT in this list's open set any more; what rank 24 filed in
-  its place is ranks **25–27**; **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
+  **23(c)** (upstream PR in `ZacxDev/cairn` — the arc's last unclosed piece);
+  **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
+  those sites have no handle and therefore no remedy); **26 IN FLIGHT as #1657** (above);
+  **27**; **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
   rank 18 predicted it would); **20 half two** (that CI leg has only ever been watched **pass**,
   so its red path is unproven); **4, 8, 21**; and the `m_index_store` `sys.path` item.
+  ✅ The CLASS rank 23 did not close is CLOSED — rank 24, devrc **#1621**, squash **`df09a6c2`**.
   **Rank 22 belongs to another session — do not take it.**
 
-- ⚠ **ONE INSTRUCTED STEP WAS NEVER RUN, recorded so it is not mistaken for done.** The kickoff
-  said to re-run the two `test_guard_core.py` tests at `main` before trusting it and then push the
-  held rebase. **Those tests were never run.** Their purpose evaporated — #1508 was already merged
-  by another session as `44bd8b0e` before this session started, so there was nothing left to gate
-  — but the premise disappeared, the check did not pass. If an independent read of `main` was
-  wanted, it is still outstanding.
+- ⚠ **ONE INSTRUCTED STEP WAS NEVER RUN, recorded so it is not mistaken for done.** An earlier
+  kickoff said to re-run the two `test_guard_core.py` tests at `main` before trusting it and then
+  push the held rebase. **Those tests were never run.** Their purpose evaporated — #1508 was
+  already merged by another session as `44bd8b0e` — but the premise disappeared, the check did
+  not pass. If an independent read of `main` was wanted, it is still outstanding.
 
-- ✅ **RANK 3 SLICE 3 MERGED — #1508, squash `44bd8b0e`** (by another session, 03:42:52Z; claim
-  `cairn-oss-multi-instance-3` released). Verified by content: all five forked reader modules
-  `ABSENT` on `origin/main`; `scripts/lib/timeouts.py` REMAINS by design (never one of the five).
-  ⚠ `scripts/lib/subsystem_touch.py` still exists and **must** — it is the devrc-only WRITER,
-  deliberately absent from the OSS repo. Slice 3 consolidated the READER half only.
+- ✅ **RANK 3 SLICE 3 MERGED — #1508, squash `44bd8b0e`.** RE-VERIFIED BY CONTENT 2026-09-14 at
+  `origin/main`: all five forked reader modules (`host_identity`, `subsystem_resolver`,
+  `subsystem_recall`, `cairn_doctor`, `subsystem_read_store`) **ABSENT**;
+  `scripts/lib/timeouts.py` and `scripts/lib/subsystem_touch.py` **PRESENT by design** — the
+  latter is the devrc-only WRITER, deliberately absent from the OSS repo. Slice 3 consolidated
+  the READER half only.
 
 - ✅ **The kill-mention-ledger treadmill is CLOSED STRUCTURALLY by #1561 (`c0bbd6d9`)** —
-  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose, instead of
-  classifying each offending doc. ⚠ **This RETIRES the "THE MERGE IS BLOCKED BY A TREADMILL"
-  block that used to stand here**, and its instruction to go classify mentions. The lesson that
-  survives: three PRs of per-instance classification were the wrong altitude, and the design fix
-  landed while they were still being written.
+  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose. The lesson
+  that survives: three PRs of per-instance classification were the wrong altitude, and the design
+  fix landed while they were still being written.
 
 - **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. The pinned client
   went live 2026-09-09, **generation 713, rollback point 712** — the only record of which
   generation to roll back to.
-  ✅ **CROSS-HOST AGREEMENT IS NOW COMPARED AND AGREES — 2 of 2 hosts, 2026-09-12.** `ship.sh`
-  converged both to devrc **`c337765e`** (rc 0, each reporting `VERIFIED … + switched` and 0 stale
-  managed artifacts), and the cairn pin was then read DIRECTLY on each rather than inferred from the
-  sha: both resolve `~/.local/bin/cairn` to the **identical** store path
-  `…-cairn-562a6ea/bin/cairn`.
-  ⚠ **Three facts in the sentence this replaces were stale, two of them asserting an absence that
-  had already been fixed.** (a) *"the laptop is still unreachable (100% packet loss, `ssh: No route
-  to host`)"* — it is unreachable **on the LAN only** (`192.168.50.155`); `ship.sh` hits that same
-  failure and **falls back to the nebula address** `10.42.0.100`, which answers. A ping to the LAN IP
-  is the wrong instrument for "is the laptop up", and it was the instrument used — twice.
-  (b) *"cross-host agreement stays `NOT COMPARED`"* — compared, above. (c) the deployed pin was
-  recorded as `cairn-c84c142`; it is **`cairn-562a6ea`** as of 2026-09-12.
+  ✅ **CROSS-HOST AGREEMENT IS COMPARED AND AGREES — 2 of 2 hosts, 2026-09-12.** `ship.sh`
+  converged both to devrc **`c337765e`** (rc 0, each reporting `VERIFIED … + switched`, 0 stale
+  managed artifacts); the cairn pin was read DIRECTLY on each rather than inferred from the sha:
+  both resolve `~/.local/bin/cairn` to the identical store path `…-cairn-562a6ea/bin/cairn`.
+  ⚠ The laptop is unreachable **on the LAN only** (`192.168.50.155`); `ship.sh` falls back to the
+  nebula address `10.42.0.100`, which answers. A ping to the LAN IP is the wrong instrument for
+  "is the laptop up".
   🔴 **A `NOT COMPARED` verdict ages into a false claim the moment its blocker clears, and nothing
   re-checks it. Re-measure before citing one — and measure the thing, not a proxy for it.**
   Operator-blocked ranks merged 2026-09-10
@@ -103,6 +123,11 @@ is the PRIVATE proposal, not this doc.
   `if sys.path[0] == str(lib)` guard is false when it runs and both entries survive. Blast radius
   today is nil — `timeouts` is the only overlapping name and nothing in `scripts/present/`
   imports it.)
+
+- ⚠ **No clawgate task is recorded for this session and none was invented.**
+  `clawgate_handoff.sh resolve` exited **5** (`NOTHING RESOLVED — 0 tasks`), which cannot
+  distinguish "this session touched no task" from "the id is wrong". It is not a clean bill of
+  health, and no `clawgate-task:` field was written.
 
 ## Open investigations — live diagnosis state
 
@@ -2272,16 +2297,72 @@ covers; pin it with `--config`, do not `cd`.
 - **`--emit-claims` PRINTS a skeleton; it does not post.** The block must be pasted into an **issue** comment — `gh pr view --json comments` does not return REVIEW comments, so a block posted as a review is invisible to the next round's brief.
 - **The audit briefs' `WHERE TO WORK` said `isolation: "worktree"` and that was wrong for every dispatch in this arc** — the flag worktrees the *dispatching session's* cwd repo, which was `datapacket-talos`, not devrc. Every audit agent was given an explicit override to build its own detached worktree off `refs/pull/<n>/head`. This is the documented cross-repo trap; the brief generator cannot know the caller's cwd.
 
+- 🔴 **2026-09-14 — A RANKED ITEM CAN NAME A SECOND DEFECT THAT IS ACTUALLY A GATED DECISION, AND
+  THE ITEM'S OWN "MEASURED" CAVEAT IS NOT ENOUGH TO CATCH IT.** Rank 26 asserted two drifted
+  handle tables. It even measured the second one's blast radius honestly — *"the `CIVITAI_CLI` one
+  is LATENT — that checkout holds 0 handoff docs today, so it has no victim"* — and that
+  measurement was correct (re-measured 2026-09-14: still 0). **What it never asked was whether the
+  omission was INTENDED.** It was: `test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`
+  pins `declared - REPO_ENV_HANDLES == {"CIVITAI_CLI"}` with the reason in source, and passes.
+  - **Ruled out: that the item was merely stale and the guard is newer.** The guard's own comment
+    records that the one-way version of it shipped while nix declared five handles and the module
+    read four — i.e. the guard was written BECAUSE of this exact class and predates the item.
+    via: code
+  - **Ruled out: that adding the handle would be harmless anyway.** It would add a zero-doc repo to
+    the corpus and, because `prune_config_refusal` requires EVERY `REPO_ENV_HANDLES` entry to be
+    SET, narrow the hosts an operator can `--prune` from. via: code
+  - **The transferable rule:** before "fixing" a table that omits an entry, `grep` for a test that
+    ASSERTS the omission. A deliberate exclusion and an oversight look identical in the table
+    itself; they differ only in whether something else pins them. One grep separates them.
+
+- 🔴 **2026-09-14 — `grep -cF` WITH A MULTI-LINE PATTERN SPLITS IT ONE-PATTERN-PER-LINE, SO A
+  TRAILING NEWLINE MATCHES EVERY LINE.** A mutation battery guarded each mutation with
+  `n=$(grep -cF -- "$old" "$f"); [ "$n" = 1 ] || INVALID`. Three of seven mutants — all valid —
+  were scored `INVALID: pattern matched 150 times` / `38 times`, because the patterns ended in a
+  newline and the empty final pattern matched every line of the file. **The harness failed, not
+  the mutations**, and it failed in the reassuring direction: it looked like the mutations were
+  ill-formed. Count multi-line patterns in Python (`s.count(old)`), never with `grep -c`.
+  This is the instrument-validation rule landing on the *battery's own* guard rather than on the
+  code under test. via: measurement
+
+- 🔴 **2026-09-14 — AN EMPTY `gh pr checks` ON A PR SECONDS OLD IS EVIDENCE OF NOTHING, AND THIS
+  SESSION WATCHED IT FLIP.** `gh pr checks 1657` returned `no checks reported on the branch`
+  immediately after `gh pr create`; minutes later the same command listed **three** Tekton gates
+  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`), all `pending`. Recorded as a
+  worked example because the failure mode is to write the empty read into a PR body or a handoff
+  as "no CI here". via: measurement
+
+- ⚠ **2026-09-14 — `How to verify` had gone stale against `State now` IN THE SAME DOC, and in the
+  direction that understates progress.** Its rank-3 block said *"slice 3 — NOT started; all five
+  duplicated modules still present"* while `State now` recorded slice 3 merged as #1508. Measured
+  at `origin/main`: all five ABSENT. `State now` was right. **A REPLACE section and an APPEND
+  section drift apart precisely because only one of them is rewritten each pass** — re-read the
+  REPLACE sections against each other before confirming an update. via: measurement
+
 ## How to verify
 
 🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
 
 ```bash
-# the four merges (all MERGED; content checks, not ancestry)
+# the four operator-blocked merges (all MERGED; content checks, not ancestry)
 gh pr view 785 -R ZacxDev/homelab-infra --json state,mergeCommit   # 37b5a71f8
 gh pr view 786 -R ZacxDev/homelab-infra --json state,mergeCommit   # 4c890c7ac
 gh pr view 787 -R ZacxDev/homelab-infra --json state,mergeCommit   # 936692ec7
 gh pr view 1447 -R innovation-upstream/devrc --json state,mergeCommit  # 719519fa9
+
+# rank 26 — IN FLIGHT. Not merged; do not report it as done.
+gh pr view 1657 -R innovation-upstream/devrc --json state,mergeCommit,mergeStateStatus
+gh pr checks 1657 -R innovation-upstream/devrc
+#   🔴 an EMPTY rollup on a young PR means NOT YET REGISTERED, never "no CI" — watched flip
+#   from `no checks reported` to three pending Tekton legs in one session.
+# once merged, verify BY CONTENT, then release the claim:
+git -C $DEVRC show origin/main:scripts/claude-hooks/shell-env-nudge.py | grep -c KC_PROD  # 1
+git -C $DEVRC cat-file -e origin/main:scripts/tests/test_shell_env_nudge_handles.py       # rc 0
+claim-work --release cairn-oss-multi-instance-26
+
+# rank 26's REFUTED half — this must PASS, and it is why CIVITAI_CLI is absent by design
+python3 -m pytest $DEVRC/scripts/tests/test_handoff_index.py \
+  -k test_every_handle_the_indexer_reads_is_exported_by_the_unit -q      # expect 1 passed
 
 # rank 13/7 — read the RUNNING container, never the manifest, and keep the control
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get deploy subsystem-store-api \
@@ -2298,16 +2379,22 @@ cairn recall --ref ci-leg --scope cairn        # 1 of 1 entry in `cairn/`
 KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get task devrc-ci-gate \
   -o jsonpath='{range .spec.steps[*]}{.name}{" "}{end}{"\n"}'
 #   expect: clone capture-etc seed-nix pytests nodetests cairn-client-runs verdict
-gh pr checks <any open devrc PR>               # expect tekton/devrc-cairn-client-runs listed
 #   🔴 HALF TWO IS UNMET: nothing here shows the leg goes RED when the client is stubbed.
 
 # rank 21 — still failing, re-verified 2026-09-10
 systemctl --user show analyze-service-index-commit.service -p Result -p ExecMainStatus
 #   expect Result=exit-code ExecMainStatus=1
 
-# rank 3 slice 3 — NOT started; all five duplicated modules still present
-ls ~/workspace/devrc/scripts/lib/{host_identity,subsystem_resolver,subsystem_recall,cairn_doctor,subsystem_read_store}.py
+# rank 3 slice 3 — MERGED (#1508 `44bd8b0e`). CORRECTED 2026-09-14: the line that used to sit
+# here said "NOT started; all five modules still present", which contradicted `State now` and
+# was wrong. The five READER modules are gone; the WRITER and `timeouts.py` stay by design.
+for m in host_identity subsystem_resolver subsystem_recall cairn_doctor subsystem_read_store; do
+  git -C $DEVRC cat-file -e "origin/main:scripts/lib/$m.py" 2>/dev/null && echo "$m PRESENT" \
+    || echo "$m ABSENT"
+done                                            # expect all five ABSENT
+git -C $DEVRC cat-file -e origin/main:scripts/lib/subsystem_touch.py   # rc 0 — PRESENT by design
 ```
-Expected: four MERGED shas; store on `0.8.0` with SIGHUP `1` and control `1`; the cairn
-scope holding one entry; a seven-step gate Task; rank 21 still `ExecMainStatus=1`; five
-module files still present.
+Expected: four MERGED shas; #1657 OPEN with three Tekton legs; the `REPO_ENV_HANDLES` ledger
+passing; store on `0.8.0` with SIGHUP `1` and control `1`; the cairn scope holding one entry;
+a seven-step gate Task; rank 21 still `ExecMainStatus=1`; five reader modules ABSENT and the
+writer PRESENT.
