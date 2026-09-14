@@ -18,29 +18,30 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- 🔨 **2026-09-14 — RANK 26 IS IN FLIGHT AS `innovation-upstream/devrc` #1657, NOT MERGED.**
-  Branch `fix/handle-table-drift`, commit `57f93df0`, `MERGEABLE`, three Tekton gates
-  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`) **pending** at hand-off.
-  Claim `cairn-oss-multi-instance-26` is **HELD**, not released — release it when #1657 merges.
-  🔴 **Rank 26 remains listed as OPEN in `Next steps` ON PURPOSE**: it is not merged, and this
-  doc's own rank-23 lesson is that a doc edited in the same commit as the work cannot record
-  that work's merge. Mark it done in a later pass, by content.
-  - **Shipped:** `KC_PROD` added to `shell-env-nudge.py`'s `KC_VARS`; new
-    `scripts/tests/test_shell_env_nudge_handles.py` pins BOTH of the hook's dicts to
-    `nix/agent-handles.nix` in BOTH directions, as whole `path -> handle` mappings rather than
-    name sets; a basename-shadow guard on `KC_BASENAMES`; the stale "unifying the hook with it
-    is separate work" paragraph in `test_absolute_handle_paths.py` retired.
-  - **Matrix:** RED at `06287019` naming `['KC_PROD']` with its remedy, GREEN at HEAD (5 passed).
-    Mutation battery **7/7**, each killed by its INTENDED test on that test's OWN message,
-    harness control green on the pristine tree first, `PYTHONDONTWRITEBYTECODE=1`, both mutated
-    files diffed byte-identical after. 378 passed across the four directly-affected suites.
-  - ⚠ **The full `scripts/tests` suite was STARTED AND DID NOT FINISH** — ~2% after ~35 min on a
-    heavily loaded box. **It is not a pass and must not be reported as one**; the three Tekton
-    legs on #1657 are the authoritative read. Log: this session's scratchpad `full-suite.log`.
+- ✅ **2026-09-14 — RANK 26 MERGED: `innovation-upstream/devrc` #1657, squash `0808a820`.** Three
+  audit rounds (0, 1, 2). Claim `cairn-oss-multi-instance-26` RELEASED. Verified BY CONTENT at
+  `origin/main` — see rank 26 for the six checks. **Rank 28 is what it did NOT close.**
+  ⚠ **Merging does NOT make the hook live**: `nix/home.nix` ships it as a `home.file` store copy,
+  so the deployed hook keeps the OLD table until a `home-manager switch`. `readlink -f`, not the merge.
+  🔴 **`devrc-pytests` was RED at merge, on FIVE failures, NONE of them this branch's** — each
+  controlled at `origin/main` rather than assumed: `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`
+  (from #1551), `test_no_handoff_doc_exceeds_its_budget`, `test_every_mutation_anchor_occurs_exactly_once_in_its_target[mutation_battery_handoff_archive_and_cap.py]`,
+  `test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`, and a byte-identity verifier on
+  ANOTHER session's doc that has since gone green on main. Operator authorised merging on that
+  evidence. 🔴 **The process lesson: I first reported "two pre-existing reds" and there were FIVE.**
+  The CI log prints no `FAILED` lines — the runner prefixes every line, so `^FAILED` matches
+  nothing and the short-summary block lists only SKIPS. **Read the `_____ test_name _____` banners
+  under `= FAILURES =`, and reconcile the count against the summary** — 2 banners against
+  "4 failed" is the tell that you are not seeing them all.
+  ⚠ **The local full `scripts/tests` run is VOID as evidence** and must not be quoted either way:
+  the worktree was edited throughout its 89 minutes, so it belongs to no commit. None of its 130
+  failures named a file this PR touched; they clustered in the isolation/concurrency modules —
+  four suites contending on one box.
 
-- 🔴 **READ BEFORE ADDING ANYTHING TO THIS DOC: ~2.9 KB OF HEADROOM.** Measured 2026-09-14 —
-  **193,684 B** against the grandfathered allowance of **196,608 B** in
-  `scripts/lib/handoff_budget.py`. **Evict before you add.** Take a CLOSED block from
+- 🔴 **READ BEFORE ADDING ANYTHING TO THIS DOC — IT IS NEAR ITS SIZE CAP.** DERIVE the number,
+  do not quote one: `wc -c` this file against its entry in `scripts/lib/handoff_budget.py`
+  (`GRANDFATHERED`). A figure written here restales on the next edit — including this one — which
+  is this doc's own lesson about raw counts. **Evict before you add.** Take a CLOSED block from
   `## Open investigations` (several are merged history with "Next probe: none") and leave a
   one-line pointer to the merge sha — the 2026-09-07 and 2026-09-14 blocks show the shape.
   🔴 Raising the allowance is LAST; the ledger is a ratchet, not an exemption.
@@ -283,49 +284,15 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   2026-09-12 as #1508 `44bd8b0e`). `cairn-who` stays devrc-only and out-of-store; it is
   deliberately not part of the pin.
 
-### CLOSED-PENDING-MERGE 2026-09-08 — a SECOND cairn intermittent, distinct from the one rank 6 closed
-🔴 **This is NOT the flake the rank-6 investigation was about.** That one was
-`TestTheDeployedEntrypoint::test_a_TWO_LINE_token_file_authorises_BOTH_lines`. This is a
-different test, found by reading CI for a rate exactly as the stale kickoff asked — and unlike
-rank 6's, **this one carries its evidence**, which is why it was fixable rather than merely
-countable.
-- **Symptom + exact repro:** no local repro needed; it is in CI history.
-  `tests/test_subsystem_store_api.py::TestAReloadIsAtomicUnderLoad::test_no_observer_EVER_sees_a_table_that_is_neither`
-  fails with `AssertionError: only 1 reload(s) were driven inside the 3s budget, so at most one
-  swap was available to observe and the verdict below is about a static table` / `assert 1 >= 2`.
-- **Observed (with values), 2026-09-08:** the repo's **entire** CI history is **26 runs, 24
-  success / 2 failure** (published 2026-09-05). **Both failures are this same assertion**:
-  `e2cf6fe` 2026-09-07T04:21Z and `492191f` 2026-09-08T01:05Z — and the second **postdates #3's
-  merge** (2026-09-07T18:01Z), so it is not residue of the rank-6 work. ≈**2/26 (7.7%)**.
-  via: measurement
-- **Ruled out: that this is general runner load.** Wall-time discriminator per RULES — the
-  failing run took **497.47s** against a passing run's **477.52s**, ~4%. Load inflates every test
-  in a run; this inflated exactly one test's own budget, so it is a narrow timing dependency in
-  that one test. via: measurement
-- **Ruled out: that it is a product defect.** The assertion is a *positive control* the test
-  makes about itself, and it was CORRECT to refuse — with one swap there is nothing to observe.
-  The defect was that `ATOMICITY_SAMPLE_BUDGET_S = 3.0` bounded **both** the samplers and the
-  reload driver, so the deadline could stop the driver at `reloads == 1` and starve the control
-  it was written to police. Mechanism: one `reload_tokens` call outlasting the whole budget while
-  four sampler threads contend for the GIL. via: code
-- **Fixed in #5, and the fix is NOT just the obvious half.** `ATOMICITY_MIN_RELOADS = 2` is read
-  by **both** the loop and the assertion so they cannot drift. The driver breaks only on
-  `reloads >= MIN and deadline passed`, `range(400)` retained as the runaway bound. 🔴 **The
-  samplers are gated on the reload count too** — gating only the driver would let the minimum be
-  reached after every observer had stopped, satisfying `reloads >= 2` while making the "no third
-  state" verdict vacuous. Both original controls unchanged in strength.
-- **Control, before/after** (budget 0.35s, 0.5s injected per `reload_tokens` call): before →
-  **1** reload, FAIL; after → **2**, pass; after with MIN overridden to 5 → **5**, pass; before
-  with MIN overridden to 5 → **1**, same FAIL. The loop tracks the constant, not the clock.
-  via: measurement
-- 🔴 **A SURVIVING MUTANT, reported rather than hidden:** clear-then-refill *with no widened
-  window* **survives this test**. It was proven live by watching the structural sibling
-  `test_a_successful_reload_REBINDS_and_leaves_the_old_tuple_INTACT` go red on it. This is a
-  pre-existing limit that sibling's own docstring already states; #5 neither causes nor fixes it,
-  and nothing was adjusted to hide it. **Not filed as a work item** — no closing condition
-  distinguishes it from the sibling guard that already covers it. via: measurement
-- **Next probe:** none. Merge #5. If it recurs after that, the assertion now names the constant
-  it fell short of rather than the budget, so read the message.
+### EVICTED 2026-09-14 — the SECOND cairn intermittent (CLOSED)
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #5 `9213726`.** Block evicted for size, per the
+2026-09-07 convention. **The lesson that survives:** the failing assertion was a test's
+POSITIVE CONTROL ABOUT ITSELF and it was RIGHT to refuse — one shared budget bounded both
+the samplers and the reload driver, so the deadline could starve the control the test
+existed to police. The fix reads one constant (`ATOMICITY_MIN_RELOADS`) in BOTH the loop
+and the assertion so they cannot drift, and gates the SAMPLERS on it too — gating only the
+driver would satisfy the minimum after every observer had stopped, making the verdict
+vacuous. **Next probe: none.**
 
 ### EVICTED 2026-09-14 — rank 12, leakscan's coverage was an enumeration
 🔴 **CLOSED and MERGED as `ZacxDev/cairn` #6 `9d58f02`** (PR head `b5bd231`). The full block
@@ -1374,9 +1341,22 @@ belongs to that arc's own session. via: measurement
     accepted spelling, in which case the gate's docstring must stop implying otherwise.
     forcing: none
 
-26. 🔨 **IN FLIGHT as devrc #1657 — AND THIS ITEM'S HEADLINE WAS HALF FALSE. READ THE
-    CORRECTION BEFORE WORKING IT.** It said *"The handle table has TWO hand-maintained copies,
-    and both are drifted from `nix/agent-handles.nix` TODAY."* **ONE is.**
+26. ✅ **DONE 2026-09-14 — devrc #1657, squash `0808a820`. AND THIS ITEM'S HEADLINE WAS HALF
+    FALSE; the correction is the durable half.** It said *"The handle table has TWO
+    hand-maintained copies, and both are drifted from `nix/agent-handles.nix` TODAY."* **ONE is.**
+    **Closing condition MET, verified BY CONTENT at `origin/main`** (a squash makes
+    `merge-base --is-ancestor` false forever, so ancestry cannot answer this): `KC_PROD` present in
+    the hook; `scripts/tests/test_shell_env_nudge_handles.py` present; the `norm.startswith("/")`
+    guard present; `nix_block` consolidated and `_NIX_SECTION` gone; and `REPO_ENV_HANDLES`
+    **deliberately unchanged**, still `("DEVRC","HOMELAB","DATAPACKET","CIVITAI")`.
+    ⚠ **Merging does NOT make the hook live** — `nix/home.nix` ships it as a `home.file`
+    `/nix/store` copy, so the deployed `~/.claude/hooks/shell-env-nudge.py` carries the OLD table
+    until a `home-manager switch`. Verify with `readlink -f`, not with the merge.
+    ⚠ **Three audit rounds ran (0, 1, 2); the ladder stopped on the PROSE criterion, not on a clean
+    round** — round 2's fixes changed 12 hook lines, 0 executable. Round 1 found a real production
+    defect (the basename fallback claimed ABSOLUTE paths, naming the wrong cluster); round 2 found
+    that a fix-round comment of mine restated a claim `test_absolute_handle_paths.py` had already
+    RETRACTED. What #1657 did NOT close is **rank 28**.
     - ✅ **REAL, and fixed in #1657:** `scripts/claude-hooks/shell-env-nudge.py` carried 9 of 10 —
       **missing `KC_PROD`**, whose kubeconfig exists. Nothing in the tree read its
       `KC_VARS`/`REPO_VARS`, so the copy had no ledger and the failure is silent by construction
