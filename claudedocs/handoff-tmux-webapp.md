@@ -1283,8 +1283,41 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     host activity). Inducing a real gap means stopping the host agent or rolling the pod, which
     is a deploy-class action; decide whether it is worth it before doing it.
     forcing: none
-58. 🔴 **The reply control freezes on `queued` after a SUCCESSFUL delivery — fix the missing
-    broadcast.** Found by rank 55's drive; full measurements there and in card 517 comment 1314.
+58. ✅ **DONE 2026-09-14 — FIXED, MERGED AND VERIFIED IN PRODUCTION.** `ZacxDev/homelab-infra`
+    **#813** (squash `1a3bdef6`) + **#817** (squash `5890f3b9`), shipped as **clawgate 0.8.34**
+    (pod `clawgate-5b945c79fb-rcmf6`, `1/1`, 0 restarts, `health` → `0.8.34`).
+    🔴 **THE CLOSING CONDITION BELOW WAS MET CLAUSE BY CLAUSE, on the live pod**: scratch pane
+    `%102`, entry `14440` raised with `--session ''`, reply submitted through the real UI, and
+    `data-reply-state` observed by a MutationObserver installed BEFORE the click —
+    `ready` → **`queued` @ +580 ms** → **`sent` @ +6033 ms**, stable through +32.3 s, **no reload**.
+    The queue row was `claimed` @ +5.42 s and `completed` @ +5.48 s (`delivered`, pane `%102`), so
+    `completedAt` is later than the POST as the condition requires. The text ARRIVED: the pane shows
+    `scratch 0834 delivery check` then `scratch: command not found` — typed AND submitted.
+    🔴 **Why this is not a case that would have passed anyway:** the terminal transition landed at
+    **+5.4 s**, far beyond the ~1.17 s single post-POST refetch that was the panel's ONLY read
+    before the fix. Under 0.8.32 this exact timeline froze on `queued`.
+    **The fix:** an SSE `termwrite.changed` broadcast from the claim and result handlers, with three
+    surfaces subscribing — 6 effective payload lines (1 const, 2 broadcast calls, 3 `hx-trigger`
+    edits). Audited: Round 0 split the original PR; Round 1 returned safe-to-merge with its own
+    8-mutant battery confirming both broadcasts die individually for their own reasons.
+    ⚠ **RETRACTION — the sentence below claiming "a test for it cannot live in e2e as it stands"
+    was MINE AND IT WAS FALSE.** It restated a fact about the FIXTURE ("e2e has no host agent") as a
+    fact about the HARNESS. `e2e/tests/reply-delivery.spec.ts` already sets `CLAWGATE_TERMINAL_TOKEN`
+    and already makes credentialed POSTs, so **the spec can play the host agent itself** — and
+    `e2e/tests/task-sse-regroup.spec.ts` already existed to close this very seam class, opening
+    multiple browser contexts and guarding both rival explanations. #813 added exactly that leg: it
+    drives the real `claim`/`result` routes and was watched RED in two arms (claim suppressed →
+    `Expected "sending", Received "queued"` — the production symptom verbatim; result suppressed →
+    `Expected "sent", Received "sending"`, proving the two broadcasts are independently pinned).
+    Do not re-derive the retracted claim.
+    ⚠ **What is NOT closed:** the axis still sticks when the host agent **DIES**, because
+    `pending`+stale → `failed` (90 s TTL) and `claimed`+stale → `unknown` (10 min grace) are
+    TIME-driven, nothing broadcasts them (correctly — no row moves), and `#panel-attention` has no
+    poll. The session page (30 s) and tmux grid (60 s) self-heal; the attention panel does not.
+    Pre-existing, not a regression, and the post-fix frozen text (`sending`) is the safer error —
+    but "stop the axis freezing" closes one half of the class, not both.
+    ORIGINAL: 🔴 **The reply control freezes on `queued` after a SUCCESSFUL delivery — fix the
+    missing broadcast.** Found by rank 55's drive; full measurements there and in card 517 comment 1314.
     The row transitions to `delivered` in the claim/complete handlers and **nothing tells the
     browser**, so `#panel-attention`'s single post-POST refetch is the only read and it usually
     fires first. Fix direction: broadcast `clawgate:termwrite` (or an SSE `termwrite.changed`)
