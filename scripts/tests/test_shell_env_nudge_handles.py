@@ -59,6 +59,34 @@ stays green forever against a table that is missing half the handles — which i
 exactly the state this file was written to end. `claude/RULES.md`: a guard's
 DESCRIPTION claims coverage, so the body has to be as wide as the sentence.
 
+🔴 WHAT THIS PINS IS THE DECLARATION, AND A DECLARATION IS NOT AN EXPORT — SO
+THIS LEDGER CANNOT SEE, AND CURRENTLY BLESSES, A HANDLE THE SHELL NEVER SETS.
+`agent-handles.nix` DECLARES handles; both consumers then EXISTENCE-GUARD before
+exporting (`nix/programs/zsh/default.nix`, `exportIf "-d"` / `exportIf "-f"`), so
+a handle whose directory or file is absent on a host is declared and NOT
+exported. The hook's job is to name a handle the shell actually has, and pinning
+it to the declaration mandates the opposite.
+
+MEASURED on this host, and it is not hypothetical: `~/.kube/homelab-nebula.yaml`
+does not exist, `$KC_NEBULA` is UNSET — and the hook nudges `KUBECONFIG=$KC_NEBULA`
+anyway, which is precisely the failure
+`test_the_kubeconfig_table_is_exactly_the_nix_kubeconfigs_block` describes in its
+own `extra`-arm message ("expands to EMPTY … falls back to the DEFAULT context").
+That is PRE-EXISTING — `KC_NEBULA` has been in `KC_VARS` since the hook landed —
+but this ledger now makes its presence MANDATORY in both directions, so it is
+recorded here rather than left to be rediscovered.
+
+**The better design, named so it is not re-derived:** keep a hand-maintained list
+of handle NAMES and take the PATHS from `os.environ` —
+`{p: n for n in REPO_NAMES if (p := os.environ.get(n))}` — which is free at
+import, needs no file at runtime, is correct per-host by construction, and
+STRUCTURALLY cannot nudge an unexported handle. Deriving from the nix file at
+import is NOT the fix: the deployed hook is a `home.file` store copy, so reaching
+that file needs `$DEVRC` — the very mechanism it is trying to teach.
+**Closes when** the hook resolves paths from the environment and a test shows it
+emitting NO suggestion for a declared-but-unexported handle, RED before and GREEN
+after. Until then this ledger is the weaker invariant, knowingly.
+
 🔴 THE TABLE IS PARSED, NEVER RESTATED — and the parser is IMPORTED, not
 re-written. `test_absolute_handle_paths` already parses `agent-handles.nix` for
 its own gate. Writing a second regex here would make THREE copies of the thing
@@ -153,13 +181,29 @@ def test_the_nix_source_parses_to_a_usable_table():
     repo_names = {name for name, _ in repos}
     kc_names = {name for name, _ in kubeconfigs}
 
-    # The two blocks must stay disjoint, or `_repos()`'s subtraction silently
-    # drops a repo handle that happens to share a name with a kubeconfig one.
-    assert not (repo_names & kc_names), (
-        f"{sorted(repo_names & kc_names)} appears in BOTH the `repos` and "
-        f"`kubeconfigs` blocks of {HANDLES_NIX}. `_repos()` derives the repo half "
-        f"by subtracting the kubeconfig names, so an overlap would silently hide "
-        f"a repo handle from this gate."
+    # 🔴 THE DUPLICATE CHECK MUST READ THE RAW PARSE, NOT THE SUBTRACTED SET.
+    # An earlier draft asserted `not (repo_names & kc_names)` and was VACUOUS BY
+    # CONSTRUCTION: `_repos()` builds its half by SUBTRACTING the kubeconfig
+    # names, so that intersection is empty by set-difference identity whatever
+    # the nix file says. Measured on a planted tree — `SHARED` added to BOTH nix
+    # blocks with the hook carrying only the kubeconfig one — the module reported
+    # **5 passed** while `agent-handles.nix` declared a repo handle `REPO_VARS`
+    # did not carry, i.e. exactly the silent half
+    # `test_the_repo_table_is_exactly_the_nix_repos_block` says is undetectable
+    # from the hook's behaviour. `claude/RULES.md`: a guard's DESCRIPTION claims
+    # coverage, so check the body is as wide as the sentence.
+    #
+    # `_handle_table()` is the whole-file parse, so a name declared twice comes
+    # back as TWO entries — which is the observation the subtracted set has
+    # already destroyed. Same planted tree, this assertion: RED.
+    names = [name for name, _ in _handle_table()]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, (
+        f"{dupes} is declared more than once in {HANDLES_NIX} — in both the "
+        f"`repos` and `kubeconfigs` blocks, or twice in one. `_repos()` derives "
+        f"the repo half by subtracting the kubeconfig names, so a name in both "
+        f"blocks is dropped from the repo half and silently escapes "
+        f"`test_the_repo_table_is_exactly_the_nix_repos_block` entirely."
     )
 
     # Anchors by NAME. These two are the handles this repo's own tooling is
@@ -254,9 +298,15 @@ def test_no_kubeconfig_basename_shadows_another():
     handle and name the wrong CLUSTER, which is the worst outcome this hook can
     produce: not a missing hint, an actively misleading one.
 
-    This is a live hazard rather than a hypothetical — `homelab-kubeconfig`,
-    `workbench-kubeconfig`, `prod-kubeconfig` and `production-kubeconfig` are
-    four similar names across two repos, and nothing stops a fifth repeating one.
+    ⚠ THIS IS A FORWARD GUARD, NOT A LIVE DEFECT — an earlier draft of this
+    docstring said "a live hazard rather than a hypothetical" and that was FALSE.
+    Measured: the five basenames (`homelab-kubeconfig`, `workbench-kubeconfig`,
+    `production-kubeconfig`, `prod-kubeconfig`, `homelab-nebula.yaml`) are
+    pairwise DISTINCT, and were before this change too. What is true is the
+    likelihood argument — four similar names across two repos, and nothing stops
+    a fifth repeating one — and likelihood is not liveness. The distinction
+    matters because this sentence is the guard's whole justification and is the
+    decision input for anyone later asking whether to keep it.
     """
     mod = _hook()
     seen = {}
@@ -278,14 +328,10 @@ def test_no_kubeconfig_basename_shadows_another():
     )
 
 
-def test_the_hook_file_is_where_this_module_thinks_it_is():
-    """Ledger on the path this module resolves, derived from `HANDLES_NIX`.
-
-    Every assertion here imports the hook by path. If the hook MOVED, the import
-    would raise rather than pass, so this is not about a false green — it is so
-    the failure names the relocation instead of an opaque loader error.
-    """
-    assert HOOK.is_file(), (
-        f"{HOOK} does not exist. shell-env-nudge.py moved or was removed; this "
-        f"ledger, and the handle-table guarantee it provides, moved with it."
-    )
+# ⚠ DELETED, on measurement: `test_the_hook_file_is_where_this_module_thinks_it_is`.
+# It asserted `HOOK.is_file()` and justified itself as making a relocation legible
+# "instead of an opaque loader error". Measured by moving the hook aside and
+# running this module: the loader already raises
+# `FileNotFoundError: [Errno 2] No such file or directory: '<...>/scripts/claude-hooks/shell-env-nudge.py'`
+# — it names the exact path. The test added one sentence of prose and a fourth red
+# line, and by its own docstring was never guarding against a false green.
