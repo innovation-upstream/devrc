@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Discord Embed Enlarge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Enlarges Discord's native media embeds past their 400x300 cap, with a click-to-open lightbox (zoom, pan, per-message navigation).",
   "permissions": [],
   "content_scripts": [{

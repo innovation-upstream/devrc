@@ -709,8 +709,11 @@ test("REGRESSION: the container override is !important, or Discord's own CSS win
   var css = container.style.cssText;
   assert.match(css, /max-width: none !important/, "container max-width must win");
   assert.match(css, /max-height: none !important/, "container max-height must win");
-  assert.match(img.style.cssText, /max-width: 100% !important/,
-    "and the element side too");
+  // The element's max-width is now the viewport-aware cap, read from the
+  // exported constant so this assertion cannot drift away from the source.
+  assert.ok(img.style.cssText.includes(
+    "max-width: " + DEE.ENLARGED_MAX_WIDTH + " !important"),
+    "and the element side too — got: " + img.style.cssText);
 });
 
 test("SEAM: autoStart both scans what is already there AND subscribes for later", () => {
@@ -884,7 +887,11 @@ test("REGRESSION: applyOverride writes its FULL declaration set, not just the ca
   DEE.applyOverride(img);
 
   var el = img.style.cssText;
-  for (var decl of ["max-width: 100% !important", "max-height: none !important",
+  // max-width/max-height are read from the exported constants: the viewport cap
+  // replaced the old `100%` / `none` pair, and hardcoding the new values here
+  // would just recreate the drift the constants exist to prevent.
+  for (var decl of ["max-width: " + DEE.ENLARGED_MAX_WIDTH + " !important",
+                    "max-height: " + DEE.ENLARGED_MAX_HEIGHT + " !important",
                     "width: auto !important", "height: auto !important",
                     "object-fit: contain !important", "cursor: zoom-in !important"]) {
     assert.ok(el.includes(decl), "element must declare " + decl + " — got: " + el);
@@ -1175,4 +1182,330 @@ test("SEAM: findMessageContainer has ONE definition, and lightbox reads it", () 
     "nor keep its own copy of the walk depth");
   assert.ok(lb.includes("dee.findMessageContainer"),
     "it must consume the shared one");
+});
+
+// ===========================================================================
+// Round 5 — THE VIEWPORT CAP.
+//
+// applyOverride() removes Discord's 400x300 cap, and until this round it left
+// the enlarged media unbounded by TWO independent routes:
+//
+//   vertical   `max-height: none` on the element. Unbounded BY CONSTRUCTION —
+//              a tall image overflowed the window every time, resize or not.
+//   horizontal `max-width: 100%`, which resolves against the container whose
+//              OWN max-width applyOverride sets to `none` just above. The
+//              effective bound was therefore an ancestor chain that need not be
+//              viewport-bounded at all.
+//
+// 🔴 NO resize LISTENER, DELIBERATELY. The cap is CSS viewport units, which the
+// engine re-evaluates on resize for free: nothing to leak, nothing to go stale.
+//
+// 🔴 WHAT THESE TESTS CANNOT SEE. The fake DOM models NO viewport — no
+// innerWidth/innerHeight, no getBoundingClientRect, no layout. So every test
+// below pins the DECLARATIONS applyOverride writes, and that is precisely why
+// the fix is declarative: `92vh` is assertable here, `window.innerHeight * 0.92`
+// would not be. The RENDERED consequences of these declarations were measured
+// separately, in Brave/Chromium 144 over CDP, and are recorded in
+// embed_enlarge.js's own comments. NOTHING BELOW OBSERVES LAYOUT, and no test
+// here should be read as claiming to.
+// ===========================================================================
+
+const EMBED_SRC = readFileSync(
+  new URL("../extension/embed_enlarge.js", import.meta.url), "utf8");
+
+// Strip `//` comments so a source scan reads CODE and never prose — otherwise
+// the trap comment that NAMES `100vw` would trip the guard forbidding `100vw`.
+// The file has no block comments and no bare `//` inside any string or regex
+// literal (MEDIA_URL_RE spells its slashes `\/\/`, which are not adjacent), and
+// the constants test below pins BOTH preconditions instead of trusting them.
+function codeOnly(src) {
+  return src.split("\n").map(function (line) {
+    var i = line.indexOf("//");
+    return i === -1 ? line : line.slice(0, i);
+  }).join("\n");
+}
+
+// A capped Discord embed, enlarged. `naturalWidth`/`naturalHeight` are set so
+// the portrait and landscape cases are genuinely different fixtures rather than
+// the same square image twice.
+function enlargedImg(opts) {
+  DEE.forget();
+  var o = opts || {};
+  var container = new FakeElement("div", { class: "embed" });
+  container.style.setProperty("max-width", "400px", "important");
+  container.style.setProperty("max-height", "300px", "important");
+  var img = new FakeElement("img", {
+    src: o.src || "https://cdn.discordapp.com/attachments/1/2/media.png",
+  });
+  img.naturalWidth = o.naturalWidth === undefined ? 200 : o.naturalWidth;
+  img.naturalHeight = o.naturalHeight === undefined ? 4000 : o.naturalHeight;
+  container.appendChild(img);
+  var res = DEE.applyOverride(img);
+  return { container: container, img: img, res: res };
+}
+
+test("🔴 REGRESSION: a TALL embed is capped to the VIEWPORT, never `max-height: none`", () => {
+  // RED at 2882d2c7 (`max-height: none`), GREEN at HEAD. This is the vertical
+  // route, and it is the one broken by construction: no resize required.
+  var rig = enlargedImg({ naturalWidth: 200, naturalHeight: 4000 });
+  var mh = rig.img.style.getPropertyValue("max-height");
+  assert.notEqual(mh, "none",
+    "`max-height: none` IS the defect — a 200x4000 image runs off the bottom of " +
+    "the window on every enlarge");
+  assert.equal(mh, DEE.ENLARGED_MAX_VH + "vh",
+    "and it must be the exported constant, not a literal free to drift from it");
+  assert.equal(rig.img.style.getPropertyPriority("max-height"), "important",
+    "!important, or the stylesheet that set the original cap wins the cascade back");
+});
+
+test("🔴 REGRESSION: the HORIZONTAL bound is viewport-relative, not a bare `100%`", () => {
+  // The second, independent route. RED at 2882d2c7 (`100%`), GREEN at HEAD.
+  var rig = enlargedImg({ naturalWidth: 6000, naturalHeight: 400 });
+  var mw = rig.img.style.getPropertyValue("max-width");
+  assert.notEqual(mw, "100%",
+    "`100%` resolves against the container, whose own max-width applyOverride " +
+    "set to `none` just above the write site — that is an ancestor chain, not " +
+    "the viewport");
+  assert.ok(mw.includes(DEE.ENLARGED_MAX_VW + "vw"),
+    "the viewport half must be present — got: " + mw);
+  assert.equal(rig.img.style.getPropertyPriority("max-width"), "important",
+    "and !important on this axis too");
+});
+
+test("🔴 the width rule KEEPS its container constraint — `96vw` alone lets media escape the column", () => {
+  // 🔴 A test that only checked for the `vw` half would pass an implementation
+  // that dropped `100%`. Discord's message column is far narrower than the
+  // window, so a viewport-only cap lets media spill out of the column and across
+  // the sidebar — a different bug, not a simplification. Both halves, always.
+  var rig = enlargedImg();
+  var mw = rig.img.style.getPropertyValue("max-width");
+  assert.ok(mw.includes("100%"),
+    "the CONTAINER half must survive, or media escapes the message column — got: " + mw);
+  assert.ok(mw.includes(DEE.ENLARGED_MAX_VW + "vw"),
+    "and the VIEWPORT half, or the original unbounded bug is back — got: " + mw);
+  // Pin the WHOLE normalised string: a guard on individual words is walkable by
+  // rewording the declaration into something that still spells both fragments.
+  assert.equal(mw, "min(100%, " + DEE.ENLARGED_MAX_VW + "vw)",
+    "the exact declaration, so a reword cannot walk this guard");
+});
+
+test("🔴 SEAM: the cap SURVIVES unclipAncestors — ancestors unclipped AND the element capped", () => {
+  // Each half was verified in isolation above and in Round 4's unclip block.
+  // This is the COMBINED state neither one's own fixture ever builds: the two
+  // are written by different branches of applyOverride, in an order whose
+  // comment says the order is load-bearing.
+  DEE.forget();
+  var rig = clipRig({ innerStyle: "overflow: hidden; max-width: 400px" });
+  var res = DEE.applyOverride(rig.img);
+
+  assert.equal(res.removed, true, "precondition: the uncap half found its container");
+  assert.ok(res.unclipped >= 2,
+    "precondition: ancestors really were unclipped — got " + res.unclipped);
+  assert.equal(overflowOf(rig.inner), "visible/important",
+    "precondition: the clip that used to crop the media is gone");
+
+  assert.equal(rig.img.style.getPropertyValue("max-height"), DEE.ENLARGED_MAX_HEIGHT,
+    "the height cap must still be there once the clips are off — unclipping is " +
+    "exactly what lets unbounded media SPILL rather than be cropped");
+  assert.equal(rig.img.style.getPropertyValue("max-width"), DEE.ENLARGED_MAX_WIDTH,
+    "and the width cap with it");
+});
+
+test("🔴 UNDO: reclipAncestors restores the exact prior overflow, and NO cap leaks onto an ancestor", () => {
+  DEE.forget();
+  var rig = clipRig();
+  // Two DIFFERENT prior declarations, so a restore that hardcodes either one is
+  // caught: value and priority are both round-tripped, in both spellings.
+  rig.inner.style.setProperty("overflow", "hidden", "");
+  rig.outer.style.setProperty("overflow", "clip", "important");
+  DEE.applyOverride(rig.img);
+  assert.equal(overflowOf(rig.inner), "visible/important", "precondition: overridden");
+  assert.equal(overflowOf(rig.outer), "visible/important", "precondition: overridden");
+
+  var doc = {
+    querySelectorAll: function (sel) {
+      if (sel.indexOf("data-dee-unclipped") === -1) return [];
+      return [rig.inner, rig.outer, rig.row, rig.scroller, rig.chrome]
+        .filter(function (e) { return e.getAttribute("data-dee-unclipped") !== null; });
+    },
+  };
+  DEE.reclipAncestors(doc);
+  assert.equal(overflowOf(rig.inner), "hidden/",
+    "the exact prior value AND its empty priority");
+  assert.equal(overflowOf(rig.outer), "clip/important",
+    "and `important` where that is what was there");
+
+  // 🔴 THE CAP BELONGS TO THE ELEMENT. An ancestor carrying a viewport cap
+  // would survive every undo path there is — reclipAncestors only knows about
+  // `overflow` — so a leak here is permanent.
+  var VIEWPORT_LITERAL = /\d+v[wh]\b/;
+  assert.ok(VIEWPORT_LITERAL.test("max-height: 92vh"),
+    "positive control: this scanner CAN see a viewport literal, so the zeros " +
+    "below are a measurement and not a wiring failure");
+  for (var anc of [rig.inner, rig.outer, rig.row, rig.scroller, rig.chrome]) {
+    assert.ok(!VIEWPORT_LITERAL.test(String(anc.style.getPropertyValue("max-height") || "")),
+      "no viewport height cap may leak onto an ancestor");
+    assert.ok(!VIEWPORT_LITERAL.test(String(anc.style.getPropertyValue("max-width") || "")),
+      "nor a viewport width cap");
+  }
+  assert.ok(VIEWPORT_LITERAL.test(rig.img.style.getPropertyValue("max-height")),
+    "while the ELEMENT still carries it — otherwise the loop above passes " +
+    "because nothing anywhere was ever capped");
+});
+
+test("🔴 IDEMPOTENT: a second applyOverride neither re-applies the cap nor DRIFTS it", () => {
+  DEE.forget();
+  var container = new FakeElement("div", { class: "embed" });
+  container.style.setProperty("max-width", "400px", "important");
+  var img = new FakeElement("img", {
+    src: "https://cdn.discordapp.com/attachments/1/2/twice.png" });
+  container.appendChild(img);
+
+  DEE.applyOverride(img);
+  assert.equal(img.getAttribute("data-dee-enlarged"), "1", "precondition: marked");
+  assert.equal(img.style.getPropertyValue("max-height"), DEE.ENLARGED_MAX_HEIGHT,
+    "positive control: the FIRST call really did apply the cap");
+
+  // POISON both declarations. "Nothing changed" is unobservable when the second
+  // call would write the same value; moving each to a sentinel first makes a
+  // missing early-return VISIBLE rather than merely harmless. The container's
+  // sentinel is deliberately NOT `400px` — the first call already uncapped it to
+  // `none`, so asserting the original value would fail for the wrong reason.
+  img.style.setProperty("max-height", "1px", "important");
+  container.style.setProperty("max-width", "999px", "important");
+  var res = DEE.applyOverride(img);
+
+  assert.equal(res.ok, true);
+  assert.equal(res.removed, false, "the early return reports no container work");
+  assert.equal(img.style.getPropertyValue("max-height"), "1px",
+    "an already-enlarged element must not have its declarations re-written");
+  assert.equal(img.style.getPropertyValue("max-width"), DEE.ENLARGED_MAX_WIDTH,
+    "and the untouched half stays exactly as the first call left it");
+  assert.equal(container.style.getPropertyValue("max-width"), "999px",
+    "nor may its container be touched a second time");
+});
+
+test("🔴 NEGATIVE, AND REACHABLE: an avatar on the SAME CDN gets no viewport cap", () => {
+  // 🔴 REACHABLE BY CONSTRUCTION, not merely present. This <img> passes every
+  // earlier check in the chain — it is an element, it is an <img>, it sits in a
+  // capped and clipping container, querySelectorAll returns it, and its src IS
+  // on cdn.discordapp.com. The ONLY thing that rejects it is MEDIA_URL_RE's path
+  // prefix, so the guard is proven to EXECUTE rather than to be short-circuited
+  // by something upstream.
+  DEE.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'>" +
+    "<div class='avatarwrap' style='max-width: 40px; overflow: hidden'>" +
+    "<img src='https://cdn.discordapp.com/avatars/111/222/avatar.png' />" +
+    "</div>" +
+    "<div class='embed' style='max-width: 400px; overflow: hidden'>" +
+    "<img src='https://cdn.discordapp.com/attachments/1/2/real.png' />" +
+    "</div></div>");
+  var avatar = doc.querySelector(".avatarwrap img");
+  var real = doc.querySelector(".embed img");
+  var n = DEE.scan(doc.body);
+
+  // POSITIVE CONTROL first: a zero on the avatar is indistinguishable from a
+  // scan wired to nothing until the number is watched to MOVE on a case that
+  // must produce one.
+  assert.equal(n, 1, "exactly one element matched — the attachment, not the avatar");
+  assert.equal(real.style.getPropertyValue("max-height"), DEE.ENLARGED_MAX_HEIGHT,
+    "positive control: a real attachment in the SAME document IS capped");
+
+  assert.equal(avatar.getAttribute("data-dee-enlarged"), null,
+    "the avatar is never marked");
+  assert.equal(avatar.style.cssText, "",
+    "and carries no declaration at all — got: " + avatar.style.cssText);
+  assert.equal(doc.querySelector(".avatarwrap").style.cssText, "",
+    "nor does its container get uncapped");
+});
+
+test("🔴 TRAP: the cap is NOT `100vw` — `vw` INCLUDES the vertical scrollbar gutter", () => {
+  // 🔴 THIS IS THE TEST THAT STOPS SOMEONE "SIMPLIFYING" 96 TO 100.
+  // MEASURED 2026-09-04 in Brave/Chromium 144 (headless, CDP, 1000px window, a
+  // document with `overflow-y: scroll`): window.innerWidth 1000 but
+  // documentElement.clientWidth 985 — a 15px classic-scrollbar gutter. A `100vw`
+  // box rendered 1000.00px against those 985 usable px and pushed
+  // document scrollWidth (1000) past clientWidth (985): it GREW A HORIZONTAL
+  // SCROLLBAR. The 96vw box rendered 960.00px and did not. Discord's client
+  // always has a vertical scrollbar, so 100vw is a guaranteed overflow there.
+  assert.ok(DEE.ENLARGED_MAX_VW < 100,
+    "100vw overflows horizontally whenever a classic vertical scrollbar exists");
+  assert.ok(DEE.ENLARGED_MAX_VH < 100,
+    "and the height cap keeps the same margin, for the same kind of reason");
+
+  var code = codeOnly(EMBED_SRC);
+  assert.ok(/\b100v[wh]\b/.test("width: 100vw"),
+    "positive control: this pattern CAN match, so the assertion below is a " +
+    "measurement rather than a mis-spelled regex returning a reassuring zero");
+  assert.ok(!/\b100v[wh]\b/.test(code),
+    "no `100vw`/`100vh` may appear in CODE (the trap comment naming it is prose, " +
+    "and codeOnly() strips prose)");
+});
+
+test("🔴 the viewport constants are pinned BOTH ways — no drift, and no second copy", () => {
+  // FORWARD: the declaration strings are DERIVED from the numbers, so the number
+  // and the declaration are incapable of disagreeing.
+  assert.equal(typeof DEE.ENLARGED_MAX_VW, "number");
+  assert.equal(typeof DEE.ENLARGED_MAX_VH, "number");
+  assert.equal(DEE.ENLARGED_MAX_WIDTH, "min(100%, " + DEE.ENLARGED_MAX_VW + "vw)");
+  assert.equal(DEE.ENLARGED_MAX_HEIGHT, DEE.ENLARGED_MAX_VH + "vh");
+
+  // 🔴 AND THE USE MATCHES THE CONSTANT. Everything above is true of a dead
+  // export; only this pins that applyOverride actually writes it.
+  var rig = enlargedImg();
+  assert.equal(rig.img.style.getPropertyValue("max-width"), DEE.ENLARGED_MAX_WIDTH);
+  assert.equal(rig.img.style.getPropertyValue("max-height"), DEE.ENLARGED_MAX_HEIGHT);
+
+  var code = codeOnly(EMBED_SRC);
+
+  // 🔴 INSTRUMENT CHECK — validate codeOnly() before reading any zero from it.
+  // A stripper that mishandled MEDIA_URL_RE's `\/\/` would truncate the file and
+  // every "not found" below would be vacuously true.
+  // NB the regex literal spells its dots escaped (`cdn\.discordapp\.com`), so
+  // the plain-text host is NOT what to look for here — matching on it failed on
+  // the first run of this very assertion, which is the point of having it.
+  assert.ok(code.includes("(attachments|external)"),
+    "the stripper preserved the regex literal it could have eaten");
+  assert.ok(code.includes("var MEDIA_URL_RE"),
+    "and the declaration it belongs to");
+  assert.ok(code.includes("var ENLARGED_MAX_WIDTH"),
+    "and the constant declarations");
+  assert.ok(!code.includes("MESSAGE MEDIA ONLY"),
+    "while genuinely removing prose — otherwise it strips nothing and the " +
+    "`100vw` guard above passes only because it never sees the comment");
+
+  // 🔴 NO SECOND HARDCODED COPY. Both declarations are built by concatenation
+  // from the two numbers, so a viewport literal must not appear in code at all.
+  var LITERAL = /\d+v[wh]\b/g;
+  assert.ok(/\d+v[wh]\b/.test("max-width: 96vw"),
+    "positive control: the scanner can see a literal");
+  var hits = code.match(LITERAL);
+  assert.equal(hits, null,
+    "a hardcoded viewport literal reappeared in code — the constant can now " +
+    "drift away from its use: " + JSON.stringify(hits));
+
+  // Each number is declared exactly ONCE.
+  assert.equal((code.match(/ENLARGED_MAX_VW\s*=/g) || []).length, 1,
+    "ENLARGED_MAX_VW is declared exactly once");
+  assert.equal((code.match(/ENLARGED_MAX_VH\s*=/g) || []).length, 1,
+    "ENLARGED_MAX_VH is declared exactly once");
+
+  // 🔴 REVERSE DIRECTION: the constants are CONSUMED at the write site. Without
+  // this, replacing the setProperty argument with a literal would leave every
+  // assertion above green while the export became decoration.
+  assert.match(code, /setProperty\("max-width",\s*ENLARGED_MAX_WIDTH,\s*"important"\)/,
+    "applyOverride must write the constant, not a literal");
+  assert.match(code, /setProperty\("max-height",\s*ENLARGED_MAX_HEIGHT,\s*"important"\)/,
+    "on both axes");
+
+  // 🔴 AND THEY ARE NOT THE DETECTION THRESHOLDS. WIDTH_THRESHOLD/
+  // HEIGHT_THRESHOLD are px numbers findContainer READS off an ancestor to
+  // recognise Discord's cap; these are viewport units this code WRITES. Same
+  // shape, opposite direction — conflating them is the mistake this pins.
+  assert.notEqual(DEE.ENLARGED_MAX_VW, 500, "not WIDTH_THRESHOLD");
+  assert.notEqual(DEE.ENLARGED_MAX_VH, 400, "not HEIGHT_THRESHOLD");
+  assert.ok(!/(WIDTH|HEIGHT)_THRESHOLD/.test(
+    code.slice(code.indexOf("function applyOverride"))),
+    "applyOverride must never reach for a detection threshold as a size");
 });
