@@ -1,6 +1,6 @@
 # `handoff-tmux-webapp` — CLOSED ranked items, evicted 2026-09-14
 
-Verbatim copy of the 46 CLOSED items evicted from `claudedocs/handoff-tmux-webapp.md`'s
+Verbatim copy of the 47 CLOSED items evicted from `claudedocs/handoff-tmux-webapp.md`'s
 `## Next steps (ranked)` on 2026-09-14. **Nothing was deleted** — the live doc stood at
 327,624 B of a 327,680 B budget (56 B of headroom), so the next routine handoff write would have
 turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone. `claudedocs/refs/`
@@ -13,7 +13,7 @@ they were demoted rather than dropped. The pre-eviction doc is also at
 🔴 **Numbers here are RETIRED, never reused.** A rank is half a `claim-work` claim's identity, so
 re-minting one of these would point a new claim at closed work.
 
-Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 44, 46, 50, 51, 52, 55, 58, 61, 62
+Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 44, 46, 50, 51, 52, 55, 58, 61, 62
 
 ---
 
@@ -976,3 +976,62 @@ Evicted: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23,
 62. **Merge devrc #1660** (open, mergeable) — it records rank 58's closure and retracts the
     fixture-vs-harness claim. Unmerged, the retraction is invisible to the next session.
     forcing: none
+
+18. **`clawgate-ci`'s `go` leg reds on POSTGRES-BACKED tests under contention — a SIBLING of 17,
+    deliberately not folded into it.** Repo: `homelab-talos`, `containers/clawgate/internal/store/`
+    and `cmd/clawgatectl/`. 🔴 **Different leg, different mechanism, different closing condition:**
+    17 is an ephemeral server missing a 15s HEALTH-CHECK budget in `clawgate-e2e`/`ux-audit`; this
+    is `go test` itself timing out against Postgres inside `clawgate-ci`. Merging them would give
+    one item two closing conditions, and neither would ever be checkable.
+    **Measured 2026-09-02, and the discriminator is that the FAILING TEST MOVES:**
+    | PipelineRun | revision | failed |
+    |---|---|---|
+    | `clawgate-ci-btr4h` | `20a277d7` (not mine) | `TestSeamClientToServerMovesTheThreadCount` (30.03s), `TestDeleteSucceedsWhenArchiveFails` (10.35s) |
+    | `clawgate-ci-vrpc4` | `ea98254a` (rank 11) | `TestSweepArchivesEveryUndecidedRowInABatch`, on `pgstore: sweep iterate: timeout: context deadline exceeded` |
+    Three tests, two packages, two revisions, ~100 minutes apart, all timeout-shaped — and
+    `internal/ui`, the ONLY package rank 11's diff touched, PASSED in that same run (5.291s, 94.8%
+    coverage). Same family as devrc's diagnosed store-api fsync contention.
+    🔴 **THE DEV-HOST TIER IS STRUCTURALLY BLIND TO THIS, SO A LOCAL GREEN IS NOT A REBUTTAL.**
+    Measured, not assumed: `go test ./internal/store/ -run TestSweepArchivesEveryUndecidedRowInABatch`
+    prints `--- SKIP` with *"set CLAWGATE_TEST_DATABASE_URL to run the Postgres-backed
+    request-history tests"*. A local `20 ok / 0 FAIL` therefore says NOTHING about these tests, and
+    quoting it as though it did is the two-tier error this repo already documents.
+    Closing condition: a red on the `go` leg can be attributed to a diff without a re-run — the
+    store tests get their own Postgres with a bounded startup, or the failure names the contended
+    resource. Until then, read WHICH test failed and check whether it moved between runs before
+    debugging the diff.
+    🔴 **ROOT-CAUSED 2026-09-04 BY ANOTHER SESSION — DEVICE-ISOLATED, NOT CONTENTION IN GENERAL.**
+    Landed on `homelab-infra` `trunk` as `eff01a8f0` + its follow-ups: `clawgate-ci` is
+    **0-pass / 14-fail on node `talos-uvh-gtj`** against 3-pass elsewhere, and that node's system
+    disk (a Crucial M500) does **~90 ms per 4 KB fsync against ~1.5 ms**, i.e. ~59× slower. So the
+    discriminator is now the NODE, not just "did the failing test move". **Read the PipelineRun's
+    node before debugging a `go`-leg red.** Corroborated independently here on 2026-09-04:
+    `#680`'s `clawgate-ci` red had `step-go` **exit 0** with only `cmd/clawgatectl` failing on
+    `canceling statement due to statement timeout` during migrate, on that same node, while
+    `internal/api` and `internal/ui` both reported `ok` in the same run.
+    ⚠ This does NOT close the item — the closing condition is about attribution being possible
+    without a re-run, and that work is owned by the session that did the diagnosis. It is recorded
+    here so the next reader stops re-deriving the mechanism.
+    🔴 **THIRD INSTANCE, 2026-09-07, AND IT IS THE CLEANEST PAIR YET — SAME REVISION, OPPOSITE
+    VERDICTS.** On `#747`, a **9-line log-string diff** touching only `containers/clawgate/main.go`:
+    | run | revision | verdict |
+    |---|---|---|
+    | `clawgate-ci-b6ql9` | `020e28a1ee9ea…` | **Failed** |
+    | `clawgate-ci-rerun-6j6m5` | `020e28a1ee9ea…` — *byte-identical* | **Succeeded** |
+    Failing set was `TestFlagIdleWritesOnceUnderConcurrency` (14.23s),
+    `TestRequestHistorySurvivesDelete` (13.86s), `TestSweepArchivesExpiredRequests` (14.59s), plus
+    the `hook` leg's `not ok 39` — a bats case that timed out after **5s waiting on a detached
+    child**. Node was `talos-xr6-r7p`, i.e. **NOT** the known-bad `talos-uvh-gtj`, so the
+    device-isolated reading does not cover this one.
+    🔴 **THE DISCRIMINATOR THAT WORKED WAS WALL TIME, AND SPECIFICALLY *WHOSE* TIME MOVED.** The
+    whole run inflated — `internal/notes` **92.8s** and `internal/store` **48.0s** against
+    sub-second locally, top figure 111s — which is load, because a failed assertion inflates
+    exactly one test. Reading that before touching the diff is what turned a scary red on a
+    security-adjacent PR into a 90-second question.
+    **The re-run recipe, since it is now used often enough to be routine:** take the failed
+    PipelineRun's own `spec` (it carries `params.revision`), strip `tekton.dev/*` labels, give it
+    `generateName: clawgate-ci-rerun-`, and `kubectl create` it. A green re-run on the IDENTICAL
+    revision completes the attribution; a red one on the SAME tests refutes the contention reading.
+    forcing: gate — with 17 this makes three of the four clawgate checks capable of reds that are
+    not about the change, and this one is the worst of the three to dismiss: unlike 17 it can fail
+    on a package a Go diff genuinely touches, so "it is just the flake" will eventually be wrong.
