@@ -2090,6 +2090,159 @@ investigations_block(){
 }
 
 # ---------------------------------------------------------------------------
+# DOD — what ENDS this arc, put in front of the round that is about to extend it
+#
+# 🔴 THIS BLOCK IS THE POINT OF RULE (m), NOT A RENDERING OF IT. The refusal in
+# `handoff_doc.py` makes the field EXIST; nothing about a field in a document
+# stops round 14 from happening. What stops it is the finish line being on
+# screen at the moment the round chooses its work — which is here, in the digest
+# every `/resume` reads before it reads the doc.
+#
+# MEASURED (<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md in homelab-talos, 75
+# days / 299 arcs): the round-1 objective was met by round 1–7 in all five
+# deep-read arcs, which then ran 13–23 rounds; and of the 185 close-checks that
+# landed on an arc session only 21 (11%) closed one, median re-kickoff 1.0h. Both numbers describe rounds
+# that had no object to answer "is it done?" against.
+#
+# The grammar is `handoff_doc.py`'s — key, colon, a member of a closed
+# vocabulary, then the condition. Parsed here with the same shape rather than
+# shelling out to python: this script is the one thing a resume ALWAYS runs, and
+# it degrades to git-only on purpose.
+# ---------------------------------------------------------------------------
+dod_row(){
+  # stdout: `<kind>\t<detail>` for the first DECLARED field under a `## Goal`
+  # heading, or nothing. Fence-aware for `investigation_rows`' reason: a handoff
+  # routinely pastes a template into a code block, and a template is not a claim.
+  #
+  # 🔴 "DECLARED" IS `handoff_doc.closing_condition().is_declared`, NOT "parsed",
+  # AND THE THREE REJECTIONS BELOW ARE WHY. That predicate refuses an unknown
+  # kind and an empty condition as well as an absent field; an awk that printed
+  # every field it could PARSE would show the reader a finish line the writer
+  # refuses to accept — the seam disagreement in the opposite direction. Pinned
+  # case-by-case by `TestTheTwoParsersAgree` in `test_resume_state_dod.py`, over
+  # ONE shared matrix, because each parser is trivially green alone.
+  #
+  # It also stops at the FIRST field, declared or not, exactly as `_closing_in`
+  # returns on its first match — otherwise a malformed field would be silently
+  # skipped in favour of a later one and the two would disagree about which line
+  # the document meant.
+  awk '
+    # `\302\240` is U+00A0 NBSP: pythons `\s` is unicode-aware and awks
+    # `[ \t]` is not, so without it a NBSP after the colon made the writer
+    # declare a field the reader could not see (audit F5).
+    #
+    # \U0001f534 TWO RESIDUALS, MEASURED IN ROUND 2 AND NOT CLOSED — the comment
+    # above names a CLASS and this fixes one member of it.
+    #   (a) NBSP is admitted HERE only. `closing-condition<NBSP>:` and
+    #       `check <NBSP>the probe` still diverge, and so does U+2009.
+    #       Pre-existing, not introduced; the full class is every space
+    #       character pythons `\s` knows and this bracket does not.
+    #   (b) LOCALE-DEPENDENT. Under a UTF-8 locale gawk reads `\302\240`
+    #       as the NBSP CHARACTER (verified: `c2 a0 58` -> `58`, while
+    #       `c3 82 58`, `c2 a9 58` and `58 e2 80 a0` are untouched). Under
+    #       LC_ALL=C the same bracket matches BYTES, so a trailing `a0` of
+    #       an unrelated codepoint is eaten and the output is invalid
+    #       UTF-8. `dod_row` sets no locale. Do not `LC_ALL=C` this block.
+    function trim(s){ sub(/^[ \t\302\240*_`~]+/,"",s); sub(/[ \t\302\240]+$/,"",s); return s }
+    /^[ \t]*(```|~~~)/ { fence = !fence; next }
+    fence { next }
+    /^##[^#]/ {
+      h = tolower($0); sub(/^#+[ \t]*/,"",h); sub(/^[^0-9a-z]+/,"",h)
+      goal = (index(h, "goal") == 1)
+      next
+    }
+    !goal { next }
+    {
+      line = $0
+      # `{0,3}` MIRRORS pythons `_MARKUP`, which is bounded at three. Unbounded
+        # here let `**closing-condition****:` through on the reader side while
+        # the writer refused it — the seam disagreeing in its worse direction
+        # again (audit F5).
+        if (match(tolower(line), /(^|[^a-z0-9])closing-condition[*_`~]{0,3}[ \t]*:/)) {
+        rest = trim(substr(line, RSTART + RLENGTH))
+        if (!match(rest, /^[A-Za-z]+/)) next
+        kind = tolower(substr(rest, 1, RLENGTH))
+        detail = substr(rest, RLENGTH + 1)
+        # 🔴 THE KINDS TRAILING BOUNDARY, matching pythons `(?![A-Za-z0-9])`.
+        # Without it `check2` splits as kind `check` + detail `2 — …`, so the
+        # READER showed a finish line the WRITER refuses — the seam disagreeing
+        # in its worse direction. Found by round 1 of this PRs own audit (F5),
+        # outside the matrix TestTheTwoParsersAgree covered. NOTE: no apostrophe
+        # anywhere in this awk block — it lives inside a single-quoted shell
+        # string, so one would terminate the program mid-comment.
+        # NOTE: `next`, NOT `exit` — python does not MATCH this line at all
+        # (`_CLOSING` requires the kind boundary), so `_closing_in` moves to
+        # the next line and can still declare a well-formed field below it.
+        # `exit` ended the whole scan, so a malformed field above a good one
+        # made the READER show the loud NO-closing-condition banner for a doc
+        # the WRITER accepts. Round 2 of this PRs audit measured it: 5 seam
+        # divergences, 2 of them this. The `exit`s below are correct because
+        # python RETURNS on those — an unknown kind and an empty condition
+        # both parse, and the first field wins.
+        if (detail ~ /^[0-9]/) next
+        # ONE separator, and only when it is followed by space or end of line —
+        # or `check — --dry-run exits 0` loses a dash. The python side anchors
+        # the same way with a lookahead; awk has none, so the shape is tested
+        # first and stripped second.
+        if (detail ~ /^[ \t*_`~]*[:–—-]([ \t]|$)/)
+          sub(/^[ \t*_`~]*[:–—-][ \t]*/, "", detail)
+        else
+          sub(/^[ \t*_`~]*/, "", detail)
+        sub(/[ \t]+$/, "", detail)
+        if (kind != "check" && kind != "judgement") exit   # unknown kind
+        if (detail == "") exit                             # names a kind, no condition
+        printf "%s\t%s\n", kind, detail
+        exit
+      }
+    }
+  '
+}
+
+dod_block(){
+  echo "DOD"
+  if [ -z "$HANDOFF" ]; then
+    echo "  (no handoff — no arc to close)"
+    return
+  fi
+  local row kind detail
+  # `$HANDOFF_TEXT`, the copy handoff_freshness CHOSE — same rule as every other
+  # block, and for the same measured reason.
+  row=$(printf '%s\n' "$HANDOFF_TEXT" | dod_row)
+  if [ -z "$row" ]; then
+    # 🔴 LOUD HERE, AND DELIBERATELY **NOT** A `!` GAP. The first version raised
+    # one, and it fired on EVERY run: measured 2026-09-13, 0 of 183 handoff docs
+    # across devrc and homelab-talos carry the field. A gap on every document
+    # makes the `!! GAPS` banner — whose whole job is "a source did not answer,
+    # so what you just read is incomplete" — into a permanent fixture people
+    # scroll past, which is `claude/RULES.md`'s permanently-red-gate objection
+    # wearing a different hat. It took 49 tests red in one run, all of them
+    # asserting the ordinary no-gap path.
+    #
+    # It is also the wrong CHANNEL, by this script's own established rule: the
+    # CLAWGATE block already draws the line for a doc with no `clawgate-task:`
+    # field — nothing was asked, so nothing went unanswered — and a document
+    # that declares no finish line is that same case. Nothing failed to answer;
+    # the document simply says nothing, which is a fact about the document and
+    # belongs in the document's own block, in its own words, at 🔴.
+    echo "  🔴 this handoff declares NO closing-condition — there is nothing this"
+    echo "     round can be measured DONE against, so \"is this arc finished?\" is"
+    echo "     UNANSWERABLE here, which is NOT the same as unfinished."
+    echo "     Written before rule (m). Add one in a \`## Goal\` delta:"
+    echo "     \`closing-condition: check|judgement — <the thing itself>\`."
+    return
+  fi
+  IFS=$'\t' read -r kind detail <<<"$row"
+  printf '  closing-condition: %s — %s\n' "$kind" "$detail"
+  if [ "$kind" = "check" ]; then
+    echo "  ⇒ RUN IT before proposing work. Green ⇒ this arc is CLOSED; say so and stop."
+  else
+    echo "  ⇒ a NAMED person reads NAMED evidence. Nothing here closes it for them."
+  fi
+  echo "  ⇒ FROZEN at round 1. Anything outstanding that is not this line is a NEW arc,"
+  echo "     not another round of this one."
+}
+
+# ---------------------------------------------------------------------------
 
 # Gaps are the thing a reader skips. They used to print as bare `  ! …` lines
 # directly beneath a wall of `  - …` findings, and 2026-08-20 they were duly
@@ -2119,6 +2272,10 @@ main(){
   alerts_block
   clawgate_block
   investigations_block
+  # LAST of the blocks, deliberately: it is the question every other block's
+  # findings feed into ("given all that, is this arc finished?"), and it is the
+  # line the reader should still have in view when they reach DRIFT.
+  dod_block
   echo "DRIFT"
   # 🔴 UNCONDITIONAL, AND FIRST. This notice used to live in the `elif` chain
   # below, which meant ANY finding suppressed it — and the SKILL block made that

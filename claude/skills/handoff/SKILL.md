@@ -75,6 +75,11 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    ## Goal
    What we're trying to achieve and why (1–3 lines).
+   - **closing-condition:** `check` — a command/PR/alert a later session can RUN · or
+     `judgement` — a NAMED person reading NAMED evidence. 🔴 **FROZEN AT ROUND 1**:
+     later audits and asks do NOT extend it, they open a NEW arc. A close-check answers
+     THIS line with a VERDICT — ADDRESSED ⇒ arc CLOSED · NOT ⇒ name the one item —
+     never an inventory. Step 5 refuses a new doc without it, or an update dropping it.
 
    ## State now
    - Branch / PR: ...
@@ -105,6 +110,13 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    in flight `IN FLIGHT: <repo>#<pr>`; that marker is the SOFT half, the lock is
    the command `/resume` step 6 runs before touching an item. Worktrees do NOT
    prevent this. 📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
+   🔴 **AND IT IS RATCHETED: an audit finding is a DEFECT, not a rank.** Step 5 refuses
+   an update whose `forcing: none` count EXCEEDS the doc's. Batch findings under
+   `## Defects (batched)` and fix them in ONE round; closing one buys room for one.
+   📖 write-gate §G.
+
+   ## Defects (batched)
+   - Audit/review findings, one line each — fixed as a BATCH, never one rank per finding.
 
    ## Gotchas / decisions / dead-ends
    - Things already tried that didn't work; constraints; why X over Y.
@@ -155,7 +167,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    `status=proposed` ⇒ the diff is on screen and nothing has been written: not the doc, not a commit, not a ref. `no-advance` (4) and `no-change` (5) print **no diff at all** — a session that went nowhere gets no offer, not an empty one — report the line and stop.
 
-   🔴 **Four refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
+   🔴 **Six refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
 
    🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc, so the handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run says so and tells you not to re-run — re-running appends your findings twice. 🔴 **So `status=failed` is not by itself "nothing happened", and exit 3 is not a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 with no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path if step 5 never lands, and delete it once the commit exists.
 

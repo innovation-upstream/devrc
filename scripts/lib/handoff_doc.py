@@ -236,6 +236,8 @@ EXIT CODES
   8  unforced        — rule (j): a ranked item names no forcing function
   9  stale-base      — no usable doc here and the mainline has one
  10  unevidenced     — rule (k): an elimination names no way it was eliminated
+ 11  undefined-done  — rule (m): the arc names no closing condition
+ 12  rank-growth     — rule (n): the queue's `forcing: none` half grew
 """
 
 from __future__ import annotations
@@ -348,6 +350,25 @@ by rewording, an allowlist the author must pick from is not.
 the session reasoned rather than measured; it was that the doc did not SAY so,
 so a later reader could not tell the two apart. `via: assumed` is the honest
 label, it passes, and it is reported above the diff.
+"""
+
+EXIT_UNDEFINED_DONE = 11
+"""Rule (m). The arc declares no closing condition. Nothing written.
+
+Two arms share this code the way rule (i)'s two do: a NEW doc that never set a
+finish line, and an update that DELETES one the document had. One class ("after
+this run the arc has nothing that can end it"), two remedies, both printed.
+"""
+
+EXIT_RANK_GROWTH = 12
+"""Rule (n). The ranked queue's `forcing: none` half grew. Nothing written.
+
+🔴 NOT A QUEUE-LENGTH LIMIT, and reading it as one gets the design backwards.
+Items with an EXTERNAL forcing kind are not counted at all — an incident, the
+operator or a red gate can add as many ranks as they like. What is ratcheted is
+the SELF-GENERATED half, which the 75-day arc study found growing 2–6 items a
+round and reaching 54–84 in the worst arcs while under a third of the items
+carried any forcing function at all.
 """
 
 
@@ -1565,6 +1586,502 @@ def stamped_report(headings: typing.Sequence[str], today: str) -> str:
     )
 
 
+# --- rule (m): the arc declares what ENDS it ----------------------------------
+#
+# 🔴 THE MEASUREMENT THIS RULE EXISTS FOR, and it is about handoff ARCS rather
+# than about any one document. `<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md`
+# in homelab-talos read 75 days of telemetry — 745 doc-linked kickoff sessions
+# across 299 arcs — and deep-read the five longest. In ALL FIVE the round-1
+# objective was satisfied within 1–7 rounds; the arcs ran 13–23. Nothing in
+# those documents was wrong. What was missing was a written statement of what
+# would END them, so every later round had a ranked list and no finish line, and
+# "is this done?" had no object to be answered against.
+#
+# 🔴 SO THE GATE IS ON THE FIELD'S EXISTENCE, NOT ON ITS CONTENT — the same
+# posture as rules (j) and (k), for the same reason. Nothing here can tell a real
+# closing condition from a plausible sentence, and it does not try. It makes the
+# author name one, from a closed vocabulary, at the moment the arc is created.
+#
+# What each kind asserts, and the split is `claude/RULES.md`'s own — the
+# "out of scope ⇒ file it, but only once you can name the CLOSING CONDITION"
+# paragraph, which already distinguishes exactly these two and refuses a third:
+#   check       a MECHANICAL check: a merged PR, a cleared alert, a command
+#               exiting 0 — something a later session can RUN
+#   judgement   a NAMED human reading NAMED evidence ("X reads the transcript")
+# 🔴 THERE IS DELIBERATELY NO `soon`, `done`, `tbd` OR `ongoing`, and no third
+# kind for "someone will decide" — that phrase is the thing RULES.md names as
+# NOT a work item at all.
+CLOSING_KINDS: frozenset[str] = frozenset({"check", "judgement"})
+
+#: The field key. A NAMED FIELD, in the spirit of `FORCING_KEY` — not a keyword
+#: hunted for in prose, which `claude/RULES.md` says is walkable by rewording.
+CLOSING_KEY = "closing-condition"
+
+# The grammar is rule (j)'s, deliberately: key, colon, a member of a CLOSED
+# vocabulary, then free text. `_MARKUP` and the `(?<![A-Za-z0-9])` lookbehind are
+# shared with `_FORCING` for the measured reason recorded there — `\b` has no
+# boundary to match against `_`, so `_closing-condition: check_` fell through the
+# equivalent pattern and was refused with a remedy the author had carried out.
+#
+# 🔴 THE DETAIL IS CAPTURED RATHER THAN PATTERNED. `closing-condition: check`
+# with nothing after it names no check, and a regex that demanded a separator
+# would refuse `check: PR #123 merges` (a colon) while accepting `check —` with
+# an empty tail. The emptiness test lives in `closing_condition`, where it can
+# strip markup and separators first and say WHICH of the two it got.
+#
+# 🔴 AFTER THE COLON THE CLASS IS `[\s*_`~]*`, NOT `_MARKUP\s*`, AND THE
+# WIDENING IS A MEASURED FIX RATHER THAN GENEROSITY. `_MARKUP\s*` admits ONE run
+# of markup followed by whitespace — it cannot see markup, then whitespace, then
+# markup again. The step-2 template writes exactly that:
+#
+#     - **closing-condition:** `check` — a command a later session can RUN
+#                              ^^ ^      two runs, separated by a space
+#
+# so the pattern REFUSED the one spelling the skill teaches, while
+# `resume-state.sh`'s awk (whose class is flat) accepted it. Caught by
+# `TestTheTwoParsersAgree` in `test_resume_state_dod.py` and by nothing else:
+# both parsers were green in isolation, and the disagreement was the writer
+# refusing a document the reader would happily have shown a finish line from.
+# `claude/RULES.md`: "the defect lives in the SEAM nobody owns."
+#
+# The widening is bounded by what FOLLOWS it — a member of a closed
+# two-word vocabulary — so a longer markup run buys an author nothing.
+_CLOSING = re.compile(
+    rf"(?<![A-Za-z0-9]){CLOSING_KEY}{_MARKUP}\s*:[\s*_`~]*"
+    rf"([A-Za-z]+)(?![A-Za-z0-9])(.*)$",
+    re.IGNORECASE,
+)
+
+#: The FAIL-LOUD half, same idiom and same purpose as `_FORCING_ATTEMPT`: keep
+#: the grammar strict and REPORT what it turns away, rather than loosening it
+#: until a refusal fires on prose. Only ever consulted for a document already
+#: being refused, so the worst case is a refusal naming a line the author is
+#: looking at.
+#:
+#: It matches the KEY in the spellings a session actually reaches for — a space
+#: or an underscore where the hyphen belongs — and nothing else. It does NOT
+#: match a bare `check`/`judgement`: those are ordinary English, they occur in
+#: every handoff, and naming one as a near-miss would send the author to a line
+#: that was never trying to be this field.
+_CLOSING_ATTEMPT = re.compile(
+    r"(?<![A-Za-z0-9])closing[-_ ]?condition(?![A-Za-z0-9])", re.IGNORECASE
+)
+
+#: Leading markup and ONE separator between the kind and its free text. Stripped
+#: before the emptiness test so `check — ` and `check` are one case, not two.
+#:
+#: 🔴 THE SEPARATOR MUST BE FOLLOWED BY SPACE OR END, AND THE TRAILING RUN IS
+#: WHITESPACE-ONLY. Both bounds are there because the first draft mangled real
+#: details: a greedy `[\s*_`~:\-–—]+` ate the opening backtick of
+#: ``check — `gate.sh` exits 0`` (leaving ``gate.sh` exits 0``), and an
+#: unanchored separator ate one dash of `check — --dry-run exits 0`. The detail
+#: is not only an emptiness test — `resume-state.sh` PRINTS it every round — so
+#: a character eaten here is a character wrong on screen forever.
+_CLOSING_DETAIL_LEAD = re.compile(r"^[\s*_`~]*(?:[:\-–—](?=\s|$))?\s*")
+
+GOAL_PREFIX = "goal"
+
+
+class ClosingCondition(typing.NamedTuple):
+    """Rule (m)'s field as the document declares it — parsed, not judged."""
+
+    kind: str | None
+    """Lowercased declared kind, or None when no field parsed at all. A kind
+    OUTSIDE `CLOSING_KINDS` is reported AS DECLARED, because the author needs to
+    see what they typed in order to fix it."""
+    detail: str = ""
+    """The free text after the kind, markup and separators stripped."""
+    near_miss: str | None = None
+    """A line that spells the key in a shape `_CLOSING` cannot parse, or None.
+    Set only when `kind is None` — a field that parsed needs no diagnosis."""
+    fenced: bool = False
+    """True when the ONLY field found sits inside a code fence, where it does not
+    count. Same reason as `RankedItem.fenced`: the author can see the field in
+    their file, so `[no closing-condition: field]` reads as a lie. 🔴 THE STEP-2
+    TEMPLATE IS ITSELF A FENCED BLOCK CARRYING THIS FIELD, so a session that
+    pastes the template wholesale into its scratch file lands here — which is
+    precisely the case that must not be told the field is absent."""
+    heading: str | None = None
+    """The heading whose section carried the field. `None` when nothing parsed.
+    Set even for a field found OUTSIDE `## Goal`, which is how the refusal can
+    say "move it" instead of "add one"."""
+    in_goal: bool = False
+    """Was the field found under a `## Goal` heading?
+
+    🔴 PART OF `is_declared`, NOT DECORATION, and leaving it out was a real
+    defect in this rule's first draft: a well-formed field under `## State now`
+    satisfied the gate while `/resume` — which reads the Goal section — could
+    not see it. That is `claude/RULES.md`'s spelled-guard shape exactly: the
+    guard passes while the hazard exists in a different place."""
+
+    @property
+    def is_declared(self) -> bool:
+        return self.kind in CLOSING_KINDS and bool(self.detail) and self.in_goal
+
+
+def _closing_in(body: str) -> tuple[ClosingCondition | None, str | None, bool]:
+    """`(parsed field, near-miss line, saw a fenced field)` for one section body.
+
+    Split out from `closing_condition` so the whole-document walk can ask the
+    same question of a `## Goal` section and of every other section without
+    spelling the search twice — the wrong-section arm of the refusal depends on
+    the two searches being identical, or it would report a "move it" for a field
+    that the Goal search would have rejected anyway.
+    """
+    lines = body.splitlines()
+    flags = _unfenced_flags(lines)
+    near: str | None = None
+    fenced = False
+    for line, unfenced in zip(lines, flags):
+        found = _CLOSING.search(line)
+        if found and not unfenced:
+            fenced = True
+            continue
+        if found:
+            kind = found.group(1).lower()
+            detail = _CLOSING_DETAIL_LEAD.sub("", found.group(2)).strip()
+            return ClosingCondition(kind, detail), None, fenced
+        if unfenced and near is None and _CLOSING_ATTEMPT.search(line):
+            near = line.strip()
+    return None, near, fenced
+
+
+def closing_condition(text: str) -> ClosingCondition:
+    """Rule (m)'s field, read from `text`'s `## Goal` section(s).
+
+    🔴 SCOPED TO `## Goal`, AND THE SCOPE IS THE POINT rather than tidiness. The
+    field states what ends the ARC, so it belongs beside the arc's objective —
+    where `/resume` reads it on every round, and where a session choosing the
+    round's work cannot miss it. `Goal` is a REPLACE-bucket heading, so an update
+    that rewrites it rewrites the field, and one that omits it leaves the base's
+    alone; both are the behaviour this rule wants.
+
+    🔴 READ FROM THE MERGED DOCUMENT, WHICH IS THE OPPOSITE OF RULES (j)/(k).
+    Those read the UPDATE because their sections are the update's own. This one
+    must not: the overwhelmingly common delta omits `## Goal` entirely, so
+    reading the update would find nothing on almost every run and the rule would
+    be fail-open exactly where it is cheapest to satisfy. The caller supplies the
+    merge; see `undefined_done_report` for the grandfathering that keeps a merged
+    read from going permanently red on a corpus written before this rule.
+
+    A field outside `## Goal` is still FOUND and still reported — with its
+    heading — because "you wrote it under the wrong heading" and "you wrote no
+    field" are different problems with different fixes, and only one of them is
+    solved by writing the field again.
+    """
+    _pre, secs = split_sections(split_front_matter(text)[1])
+    fenced_anywhere = False
+    near_anywhere: str | None = None
+    elsewhere: ClosingCondition | None = None
+    for heading, body in secs:
+        parsed, near, fenced = _closing_in(body)
+        fenced_anywhere = fenced_anywhere or fenced
+        if near and near_anywhere is None:
+            near_anywhere = near
+        if parsed is None:
+            continue
+        if canonical_prefix(heading_text(heading)) == GOAL_PREFIX:
+            return parsed._replace(heading=heading_text(heading), in_goal=True)
+        if elsewhere is None:
+            elsewhere = parsed._replace(heading=heading_text(heading), in_goal=False)
+    if elsewhere is not None:
+        return elsewhere
+    return ClosingCondition(None, "", near_anywhere, fenced_anywhere, None, False)
+
+
+CLOSING_VOCAB_LINE = (
+    f"  The field is `{CLOSING_KEY}: <kind> — <the thing itself>`, in the "
+    f"document's `## Goal` section — `<kind>` one of: "
+    + ", ".join(sorted(CLOSING_KINDS))
+    + ".\n"
+    "  `check` = something a later session can RUN (a merged PR, a cleared "
+    "alert, a command exiting 0). `judgement` = a NAMED person reading NAMED "
+    "evidence. There is no kind for `someone will decide`."
+)
+
+#: Why the rule exists, in the words of the thing that measured it. Printed on
+#: BOTH the refusal and the advisory, because a gate whose reason is only in a
+#: commit message is a gate people route around.
+CLOSING_WHY = (
+    "  🔴 An arc with no written finish line does not finish. MEASURED over 75 "
+    "days / 299 arcs: the round-1 objective was met by round 1–7 in all five "
+    "deep-read arcs, which then ran 13–23 rounds. The field is FROZEN at round "
+    "1 — later audits and asks do NOT extend it, they open a NEW arc."
+)
+
+
+def undefined_done_report(
+    found: ClosingCondition, base_had_one: bool, is_new_doc: bool
+) -> str:
+    """Rule (m)'s refusal, or "" when this document may proceed.
+
+    🔴 THREE ARMS, AND THE GRANDFATHERING IS THE MIDDLE ONE. Refusing every
+    document that lacks the field would go red on the first update to every
+    handoff written before this rule — `claude/RULES.md` calls a
+    permanently-red gate worse than no gate, and this module has already been
+    bitten by exactly that shape (see `ranked_items` on why rule (j) reads the
+    update).
+
+      NEW DOC, no field        -> REFUSE. Round 1 is the only round at which the
+                                  finish line can honestly be set, and a new doc
+                                  has no history to grandfather.
+      BASE HAD ONE, merge does not -> REFUSE. That is a DELETION of the arc's
+                                  finish line, and it is the one way a document
+                                  that once complied stops complying.
+      NEITHER had one          -> "" here; `legacy_dod_report` advises instead.
+
+    The `is_declared` half is checked before the arms, so a document carrying a
+    field with an unknown kind or an empty detail is refused whichever arm it is
+    in — it declared nothing, and it is the author's own line, so the refusal is
+    clearable.
+    """
+    if found.is_declared:
+        return ""
+    if not (is_new_doc or base_had_one):
+        return ""
+    if base_had_one:
+        cause = (
+            f"  This document HAD a `{CLOSING_KEY}:` and the merged result does "
+            f"not. Deleting the arc's finish line is the one way a compliant "
+            f"document stops complying — restore it in your `## Goal` delta, or "
+            f"omit `## Goal` from the delta and the base's own field survives "
+            f"untouched."
+        )
+    else:
+        cause = (
+            f"  This is a NEW handoff doc, which makes this round 1 — the only "
+            f"round at which the finish line can honestly be set."
+        )
+    if found.fenced:
+        diag = (
+            f"  [fenced] the only `{CLOSING_KEY}:` found sits inside a code "
+            f"fence, where it does not count. If that is the step-2 TEMPLATE "
+            f"you pasted, fill in your own field OUTSIDE the fence; if it is "
+            f"yours, unfence it."
+        )
+    elif found.heading is not None and found.kind not in CLOSING_KINDS:
+        diag = (
+            f"  [unknown kind] `{found.kind}` under `## {_clip(found.heading, 60)}` "
+            f"is not one of the two — pick from the vocabulary above."
+        )
+    elif found.heading is not None and not found.detail:
+        diag = (
+            f"  [empty] `{CLOSING_KEY}: {found.kind}` under "
+            f"`## {_clip(found.heading, 60)}` names a KIND and no condition. Say "
+            f"which check, or which person reads which evidence."
+        )
+    elif found.heading is not None and not found.in_goal:
+        diag = (
+            f"  [wrong section] the field is under `## "
+            f"{_clip(found.heading, 60)}`, not `## Goal`. MOVE it — do not write "
+            f"a second one. `/resume` reads the Goal section, so a field "
+            f"anywhere else is invisible to every later round."
+        )
+    elif found.near_miss:
+        diag = (
+            f"  [unparsed] this line looks like the field and is not it: "
+            f"{_clip(found.near_miss, 96)}\n"
+            f"  Re-spell the key exactly `{CLOSING_KEY}:` — hyphen, no space."
+        )
+    else:
+        diag = f"  [no {CLOSING_KEY}: field] add one."
+    return (
+        f"status=undefined-done\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"{cause}\n"
+        f"{diag}\n"
+        f"{CLOSING_VOCAB_LINE}\n"
+        f"{CLOSING_WHY}"
+    )
+
+
+def legacy_dod_report(
+    found: ClosingCondition, is_new_doc: bool, history_unknown: bool = False
+) -> str:
+    """Rule (m)'s advisory for a pre-rule document, or "".
+
+    Silent when the field is there, and silent on a NEW doc — that case is a
+    refusal, and printing an advisory beside it would read as a second, softer
+    verdict on the same fact. Silent-when-clean for `self_generated_report`'s
+    stated reason: a reassuring line on every run gets skimmed and then read as
+    a guarantee.
+    """
+    if found.is_declared or is_new_doc:
+        return ""
+    # 🔴 "written before rule (m)" IS A CLAIM ABOUT HISTORY, so it may only be
+    # made when the history was READ. Round 2 caught it asserted in a repo with
+    # an unborn HEAD, where there is no history at all.
+    lead = (
+        # One sentence for both unknown-history shapes — the doc is in neither
+        # HEAD nor the mainline, or HEAD could not be read. Saying "git could
+        # not say" covered only the second and was false on the first, where
+        # git answered clearly.
+        f"⚠ This handoff declares no `{CLOSING_KEY}:`, and this checkout cannot "
+        f"show that it PREDATES rule (m) — the doc is in neither HEAD nor the "
+        f"mainline here, or HEAD could not be read. Grandfathered either way — "
+        f"this run proceeds."
+        if history_unknown else
+        f"⚠ This handoff declares no `{CLOSING_KEY}:` — it was written "
+        f"before rule (m) and is GRANDFATHERED, so this run proceeds."
+    )
+    return "\n".join(
+        [
+            lead,
+            "  Adding one is a `## Goal` delta — a line if the doc has that "
+            "section, the section plus a line if it does not (measured: 42 of "
+            "183 handoff docs have no heading that resolves to `goal`). Until "
+            "it has one, no round of this arc can answer "
+            "“is it done?” against anything.",
+            CLOSING_VOCAB_LINE,
+            CLOSING_WHY,
+        ]
+    )
+
+
+# --- rule (n): the rank queue does not GROW its unforced half -----------------
+#
+# 🔴 THE MECHANISM THIS RULE INTERRUPTS, measured in the same 75-day study: a
+# SELF-EXTENDING RANK QUEUE. Each round's audits and close-checks minted 2–6 new
+# ranked items — faster than rounds closed them — so the queue could not drain
+# however much the arc shipped. The worst four arcs went 0→76, 9→84, 1→55 and
+# 11→54 ranks. One of them recorded its own state as "54 items… Of the 29 live
+# items, only nine carry a forcing function".
+#
+# 🔴 SO THE RATCHET IS ON THE `forcing: none` HALF ONLY, AND THAT IS THE WHOLE
+# DESIGN. An item with an EXTERNAL forcing kind is answerable to something
+# outside the loop — an incident, the operator, a red gate — and work like that
+# must never be blocked by a queue-length rule. What compounds is the other half:
+# rule (j) already makes a self-generated item DECLARE itself (`forcing: none`,
+# "accepted and counted, and not eligible to be worked"), and this rule is what
+# makes the count it was being counted for actually bind.
+#
+# It is an ANTI-REGROWTH RATCHET, the same idiom as the repo's byte gates: the
+# number may fall freely and may not rise. Closing self-generated items is what
+# buys room for new ones, which is the behaviour the finding asks for.
+#
+# 🔴 WHAT IT DELIBERATELY DOES NOT DO: it does not match items across rounds.
+# Rank TEXT is rewritten between rounds and rank NUMBERS are re-pointed by
+# re-ranking, so any identity test would be a guess, and a guess here mis-reports
+# WHICH item is new — worse than reporting only that the count moved. The count
+# is the claim; the report prints the update's own `forcing: none` items so the
+# author can see the population, and says in its own words that it did not
+# identify which of them is the addition.
+UNFORCED_GROWTH_FLAG = "--rank-growth-approved"
+
+
+def is_self_generated(item: RankedItem) -> bool:
+    """Does this ranked item answer to nothing outside the loop?
+
+    🔴 THE PREDICATE IS "NOT EXTERNAL", NOT "== none", AND THE DIFFERENCE IS
+    WHAT KEEPS THIS RULE OFF THE PERMANENTLY-RED LIST. A legacy ranked item
+    carries NO `forcing:` field at all — 384 of them across the corpus rule (j)
+    was measured against, and rule (j) deliberately never refuses one, because
+    it reads the update and legacy items live in the base. Counting only the
+    literal `none` would therefore read every legacy base as ZERO
+    self-generated items, so the first honest re-tagging of a legacy queue —
+    the exact thing rule (j) is trying to produce — would look like pure GROWTH
+    and be refused. MEASURED: it took `test_forcing_none_is_ACCEPTED_and_
+    reported` red, on a base whose two items are untagged on purpose.
+
+    An untagged item asserts nothing external, so it belongs in the same
+    population as one that says so. ONE predicate over BOTH sides, for `claude/
+    RULES.md`'s one-rule-one-place reason; the asymmetry a reader will notice —
+    that an update can never contain an untagged item — is rule (j)'s doing, not
+    a second rule here.
+    """
+    return item.kind not in EXTERNAL_FORCING_KINDS
+
+
+def self_generated_rank_count(text: str) -> int:
+    """How many of `text`'s ranked next-steps answer to nothing external."""
+    return sum(1 for i in ranked_items(text) if is_self_generated(i))
+
+
+def rank_ratchet_skipped_report(
+    update_items: typing.Sequence[RankedItem], reason: str
+) -> str:
+    """Say that rule (n) did NOT run, or "" when there is nothing to disclose.
+
+    🔴 A SKIP THAT NOBODY SEES IS A PASS, AND THIS RULE HAS THREE OF THEM. Rule
+    (n) declines to judge when it cannot COUNT the base — git could not say
+    whether the doc exists in HEAD, or this checkout holds no usable copy, or
+    the ranked queue sits under a heading `ranked_items` does not recognise.
+    All three are the right call: `claude/RULES.md` refuses a zero that was
+    never measured. (It said TWO until round 3; the third arrived with the
+    unborn-HEAD fix and three narrations kept the old count.) But silence makes "I could not check" and "it passed" the same
+    observable, which is the shape that rule's own evidence is about.
+
+    Round 1 of this PR's audit measured the consequence: with the base
+    unreadable the queue went 3 -> 5 at exit 0 and nothing said so.
+
+    Printed ONLY when the update actually carries self-generated ranks — there
+    is nothing to disclose about a round that added none, and a line on every
+    run is one nobody reads by the third.
+    """
+    none_items = [i for i in update_items if is_self_generated(i)]
+    if not none_items:
+        return ""
+    return "\n".join(
+        [
+            f"\u26a0 RULE (n) DID NOT RUN, so this update's "
+            f"{len(none_items)} self-generated rank(s) were NOT ratcheted "
+            f"against the document: {reason}.",
+            "  This is NOT a pass — the comparison was not made. If you are "
+            "adding to the queue, the count you would have been held to is the "
+            "one in the document you cannot currently read.",
+        ]
+    )
+
+
+def rank_growth_report(
+    base_count: int, update_items: typing.Sequence[RankedItem], is_new_doc: bool
+) -> str:
+    """Rule (n)'s refusal, or "" when the queue did not grow its unforced half.
+
+    🔴 SILENT ON A NEW DOC, and this is the grandfathering rather than an
+    oversight. Round 1 legitimately opens with self-generated work — the finding
+    is about what happens AFTER round 1 ("ranks may only be added by operator
+    opt-in"), and a new document has no round 1 to have grown since.
+    `self_generated_report` still counts them, on every run, new doc included.
+    """
+    if is_new_doc:
+        return ""
+    none_items = [i for i in update_items if is_self_generated(i)]
+    if len(none_items) <= base_count:
+        return ""
+    return "\n".join(
+        [
+            "status=rank-growth",
+            "NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+            f"  The ranked queue's SELF-GENERATED half grows: {base_count} "
+            f"item(s) in the document answer to nothing external, "
+            f"{len(none_items)} in this update.",
+            *[
+                f"  {i.rank}. {_clip(i.text, 96)}"
+                for i in none_items[:EXISTING_SHOWN_MAX]
+            ],
+            "  ⚠ WHICH of these is the addition is NOT identified — rank text is "
+            "rewritten and rank numbers are re-pointed between rounds, so any "
+            "match across rounds would be a guess. The COUNT is the finding.",
+            "  Three ways forward, and the first is usually the right one:",
+            "    1. an audit finding is a DEFECT, not a rank — put it under a "
+            "`## Defects (batched)` heading and fix the batch in one round. A "
+            "defect list drains; a rank queue that grows by 2–6 a round does "
+            "not.",
+            "    2. if something outside this loop really is asking for it, say "
+            "so: `forcing: incident|user|gate|deadline|regression|security` is "
+            "not counted here at all.",
+            "    3. close one. The ratchet falls freely — closing a "
+            "`forcing: none` item buys room for a new one.",
+            f"  Operator opt-in overrides: {UNFORCED_GROWTH_FLAG}.",
+            "  🔴 MEASURED over 75 days / 299 arcs: rounds minted 2–6 new ranks "
+            "each, and the worst arcs reached 54–84 items with under a third "
+            "carrying any forcing function. The queue is why the arcs never "
+            "closed, not the work.",
+        ]
+    )
+
+
 # Rule (c). A section whose heading starts with one of these is DIAGNOSIS STATE
 # and appends; everything else is CURRENT STATE and is replaced. Matching is on
 # a lowercased prefix, not the whole heading, because the canonical spellings
@@ -2600,6 +3117,40 @@ class BaseCurrency(typing.NamedTuple):
         )
 
 
+def doc_tracked_at_head(repo: Path, relpath: str) -> bool | None:
+    """Is this doc in HEAD's tree? `None` when git could not answer.
+
+    🔴 THE WORKING COPY IS NOT THE DOCUMENT, AND `not base_text` CANNOT TELL THE
+    TWO APART. `: > claudedocs/handoff-<topic>.md` leaves a tracked document with
+    an empty working copy, which every text-only predicate reads as "there is no
+    document here" — so rule (n)'s ratchet switched OFF and rule (m) asserted
+    "This is a NEW handoff doc" about a file with a full history. Found by round
+    1 of this PR's own audit (F3), reproduced end to end: a queue went 3 -> 5
+    `forcing: none` at exit 0 and the merge replaced the committed document
+    wholesale.
+
+    ⚠ `None` is NOT `False`, and the caller must not collapse them. git failing
+    to answer is not evidence the doc is new; treating it as such would refuse a
+    grandfathered document on a repo this tool merely could not read.
+    """
+    # 🔴 `ls-tree`, NOT `cat-file -e`, AND THE FIRST DRAFT USED THE WRONG ONE.
+    # MEASURED: `git cat-file -e HEAD:<absent>` exits **128**, the same code a
+    # broken or absent HEAD gives — so the two cases this function exists to
+    # separate are indistinguishable through it. Read as "could not answer",
+    # that made EVERY genuinely-new doc look like it might exist, which
+    # switched rule (m)'s whole REFUSE arm off; the module's own suite caught
+    # it (8 tests) the moment the fix landed.
+    #
+    # `ls-tree` separates them cleanly: **rc 0 with empty output** is a real
+    # "absent from that tree", and rc 128 is reserved for "no such tree".
+    if git_allow(repo, "rev-parse", "--verify", "-q", "HEAD").code != 0:
+        return None  # no HEAD to ask about — not evidence either way
+    got = git_allow(repo, "ls-tree", "--name-only", "HEAD", "--", relpath)
+    if got.code != 0:
+        return None
+    return bool(got.out.strip())
+
+
 def base_currency(repo: Path, relpath: str) -> BaseCurrency:
     """Is the base doc behind its mainline? READ-ONLY, and it does NOT fetch.
 
@@ -3179,6 +3730,14 @@ def build_parser() -> argparse.ArgumentParser:
         "routine flag is one that gets passed by reflex.",
     )
     p.add_argument(
+        UNFORCED_GROWTH_FLAG,
+        action="store_true",
+        help="override the status=rank-growth refusal: let this update add a "
+        "self-generated (`forcing: none`) ranked item the document did not have. "
+        "This is the OPERATOR OPT-IN the arc study asks for — the default path "
+        "for an audit finding is a `## Defects (batched)` entry, not a new rank.",
+    )
+    p.add_argument(
         "--push",
         action="store_true",
         help="also push the commit. Requires --confirm; this is the half the gate exists for.",
@@ -3387,6 +3946,67 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_NO_CHANGE
 
+    # 🔴 THE ARC RULES NEED A THREE-WAY ANSWER, AND TWO-WAY WAS WRONG TWICE.
+    # "Is `base_text` empty?" conflates three different documents:
+    #
+    #   NEW ARC          nothing here, nothing on the mainline, nothing in HEAD.
+    #                    Rule (m) may demand a finish line; rule (n) may not
+    #                    ratchet (round 1 legitimately opens with its own work).
+    #   BASE UNREADABLE  a document exists — on the mainline, or in HEAD, or
+    #                    both — and this working copy is not it. NEITHER rule may
+    #                    compare against it: every count would be about a
+    #                    document nobody is editing.
+    #   BASE READABLE    the ordinary case. Both rules apply.
+    #
+    # Two MEASURED false positives, both found by round 1 of this PR's own audit,
+    # both on the middle row that did not exist before:
+    #   F1 rule (h)'s stale-base REFUSAL is gated on `--confirm`, so the PROPOSAL
+    #      run — the default first half of every `/handoff` — fell straight
+    #      through to rule (n), which reported "0 item(s) in the document" about a
+    #      mainline doc carrying 3, and printed three remedies none of which could
+    #      be carried out ("close one" is impossible at a floor of 0).
+    #   F3 `: > claudedocs/handoff-<topic>.md` emptied the working copy of a
+    #      TRACKED doc, which read as a new arc: the ratchet switched off, a queue
+    #      went 3 -> 5 at exit 0, and rule (m) asserted "This is a NEW handoff
+    #      doc" about a file with a full history.
+    #
+    # So the mainline reading alone is not enough — it is populated only when the
+    # mainline is AHEAD on this doc — and HEAD has to be asked too.
+    tracked_at_head = doc_tracked_at_head(repo, relpath)
+    # 🔴 `None` IS ITS OWN CASE, NOT A QUIET MEMBER OF "a doc may exist".
+    # Round 2 measured the cost of folding it in: in a repo with an UNBORN HEAD
+    # (a fresh `git init`, or `git checkout --orphan`) `doc_tracked_at_head`
+    # answers `None`, so a genuinely new arc was GRANDFATHERED — rule (m)'s
+    # refuse arm silently off — and the run printed two statements that were
+    # false about the document: that it "was written before rule (m)", and that
+    # the ratchet was skipped because "this checkout does not hold a readable
+    # copy of the doc … the count you would have been held to is the one in the
+    # document you cannot currently read". There is no document, anywhere.
+    #
+    # Folding is still the right FAIL DIRECTION — an unreadable repo must
+    # grandfather rather than refuse — so what changes is that the run SAYS
+    # which case it is in instead of borrowing the other one's words.
+    git_could_not_answer = tracked_at_head is None
+    doc_exists_elsewhere = (
+        currency.replaces_mainline_doc(base_text) or tracked_at_head is True
+    ) or git_could_not_answer
+    # 🔴 `bool(base_text.strip())` ALONE — the `replaces_mainline_doc` conjunct
+    # was PROVABLY DEAD and round 2 killed it by mutation. `nothing_to_merge_into`
+    # IS `not text.strip()`, and `replaces_mainline_doc` requires it, so the
+    # second operand can never change the result. It survived the full suite
+    # because no input can distinguish the two readings — the shape this module
+    # refuses elsewhere. Keeping it would also keep the false narrative that
+    # rule (m)'s fix lives here; the real fix is `is_new_doc` below.
+    base_readable = bool(base_text.strip())
+    # ⚠ `None` (git could not answer) is folded in with "a document exists", so
+    # an unreadable repo GRANDFATHERS a doc rather than refusing one. Round 3
+    # corrected this comment twice over: it quoted `tracked_at_head is not
+    # False`, an expression the same round deleted, and it called grandfathering
+    # "FAIL-CLOSED" ten lines above a comment calling it "grandfather rather
+    # than refuse". One name for one direction: this is the PERMISSIVE choice,
+    # taken because refusing on a repo we could not read is the worse error.
+    is_new_doc = not base_text.strip() and not doc_exists_elsewhere
+
     diff = unified(base_text, merged_text, relpath)
     print(f"doc: {relpath}")
     print(f"advanced: {args.advanced.strip()}")
@@ -3397,11 +4017,6 @@ def main(argv: list[str] | None = None) -> int:
     # the skill's contract pins one per run.
     if base_text:
         print(buckets_line(report.buckets))
-    # 🔴 Rule (j), with the bucket line and above the diff: it is a fact about the
-    # text the human is about to approve, so it has to arrive before the text.
-    budget_note = budget_warning(relpath, merged_text, base_text)
-    if budget_note:
-        print(budget_note)
     # 🔴 RULE (h) FIRST, above rule (f) and above the diff. It is the only one of
     # the three that can invalidate the OTHER two: a wrong base makes the bucket
     # line describe a merge nobody wanted and makes "nothing durable dropped"
@@ -3464,6 +4079,104 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_STALE_BASE
 
+    # 🔴 THE TWO ARC RULES SIT BELOW rule (h), NOT BESIDE (j)/(k) ABOVE, AND THE
+    # ORDER IS THE FIX FOR A MEASURED COLLISION. Both read the BASE, and rule (h)
+    # is the one that decides whether this checkout's base is the real document
+    # at all: a wrong base makes "this arc has no finish line" and "the queue
+    # grew" statements about a document nobody is editing. Same precedence
+    # argument the comment above rule (h) makes for rule (f) and the bucket line.
+    # They still refuse BEFORE the diff is printed, like every other refusal.
+
+    # ---- rule (n): the queue's self-generated half does not grow -------------
+    # Counted on the UPDATE (rule (j)'s reason: `Next steps` REPLACES, so the
+    # update's items ARE the doc's) against the BASE (which is what "grew" means).
+    # An update with no `Next steps` section has 0 items and cannot grow anything.
+    #
+    # 🔴 THREE SILENT SKIPS, AND EACH IS "I CANNOT MEASURE THIS", NOT "IT PASSED".
+    # This rule is the only one here that compares a count on BOTH sides, so it
+    # is the only one that can be wrong about the document rather than about the
+    # update — and a count presented as 0 when it was never taken is exactly the
+    # reassuring zero `claude/RULES.md` says to refuse to print.
+    #   (a) git could not answer whether the doc is in HEAD.
+    #   (b) `base_readable` — see the classification block above (audit F1/F3).
+    #   (c) the base must actually CARRY a canonical `## Next steps`. `ranked_items`
+    #       recognises only the heading `is_next_steps_heading` names, which is
+    #       deliberate and harmless for rule (j) because that rule reads ONLY the
+    #       update. Reading BOTH sides turns the same gap into a false GROWTH:
+    #       so MIGRATING such a queue onto the canonical heading, even while
+    #       SHRINKING it, was refused, permanently, and only
+    #       `--rank-growth-approved` cleared it. Audit F2.
+    #       🔴 EVERY POPULATION FIGURE FOR THIS RULE LIVES IN `write-gate.md`
+    #       §F AND NOWHERE ELSE — including the ones that retract earlier ones.
+    #       A round wrote a figure into both files, retracted it in the skill,
+    #       and left it standing here; the round that fixed that then restated
+    #       four MORE figures under a banner saying it was not restating them.
+    #       A second copy is a second thing to re-measure, whichever direction
+    #       it points. Read §F.
+    base_carries_a_ranked_queue = NEXT_STEPS_PREFIX in doc_shape(base_text).canonical
+    ratchet_skip = ""
+    if is_new_doc or args.rank_growth_approved:
+        pass  # round 1, or the operator opted in — both are DECISIONS, not gaps
+    elif git_could_not_answer and not base_text.strip():
+        # The THIRD reason. Distinct from the one below:
+        # there may be no document at all, so telling the author to go and read
+        # a count "in the document you cannot currently read" would be false.
+        ratchet_skip = (
+            "git could not say whether this doc exists in HEAD, so whether there "
+            "is a document to ratchet against is UNKNOWN"
+        )
+    elif not base_readable:
+        ratchet_skip = "this checkout does not hold a readable copy of the doc"
+    elif not base_carries_a_ranked_queue:
+        ratchet_skip = (
+            "the document's ranked queue is under a heading this tool does not "
+            "recognise, so its count could not be taken"
+        )
+    growth = (
+        ""
+        if args.rank_growth_approved or ratchet_skip
+        else rank_growth_report(self_generated_rank_count(base_text), items, is_new_doc)
+    )
+    if growth:
+        print(growth, file=sys.stderr)
+        return EXIT_RANK_GROWTH
+
+    # ---- rule (m): the arc declares what ENDS it ----------------------------
+    # Read from the MERGE, not the update — see `closing_condition`. The base is
+    # read too, so a document that HAD a finish line and would lose it is told
+    # that, rather than being told to add one it can see in its own file.
+    #
+    # 🔴 THE DELETION ARM NEEDS A READABLE BASE FOR THE SAME REASON rule (n) does:
+    # `base_had_one` off an unreadable base is False, which silently downgrades
+    # "you are DELETING the finish line" to the grandfathered advisory. The
+    # refusal arm is unaffected — `is_new_doc` is now false for a stale or
+    # emptied copy, so such a run is grandfathered rather than told it is round 1.
+    closing = closing_condition(merged_text)
+    undefined_done = undefined_done_report(
+        closing,
+        # `closing_condition("").is_declared` is already False for every
+        # blank base, so a `base_readable and …` conjunct here was dead too
+        # (round 2, mutation-proven). One predicate, stated once.
+        base_had_one=closing_condition(base_text).is_declared,
+        is_new_doc=is_new_doc,
+    )
+    if undefined_done:
+        print(undefined_done, file=sys.stderr)
+        return EXIT_UNDEFINED_DONE
+
+    # 🔴 #1648's size-budget warning, MOVED BELOW THE REFUSALS (audit F4). It
+    # still sits above the diff, which is where its own tests pin it and where it
+    # belongs — it is a fact about the text a human is about to approve. What it
+    # must NOT do is arrive on a run that then refuses: it asserts
+    # "`test_no_handoff_doc_exceeds_its_budget` WILL GO RED on `main`, and it
+    # fails for EVERYONE" and "this is a WARNING, not a refusal", and BOTH are
+    # false of a run whose stderr says `NOTHING WRITTEN`. The class is inherited
+    # (rule (h)'s stale-base refusal already sat below it), but rules (m) and (n)
+    # fire on ORDINARY rounds rather than on a rare stale clone, so this PR is
+    # what makes the contradiction common rather than theoretical.
+    budget_note = budget_warning(relpath, merged_text, base_text)
+    if budget_note:
+        print(budget_note)
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
@@ -3472,12 +4185,45 @@ def main(argv: list[str] | None = None) -> int:
     self_generated = self_generated_report(items)
     if self_generated:
         print(self_generated)
+    # Rule (n)'s SKIP disclosure, beside the advisories and for their reason:
+    # it is a statement about what this run did NOT check on the text below.
+    skipped = rank_ratchet_skipped_report(items, ratchet_skip) if ratchet_skip else ""
+    if skipped:
+        print(skipped)
     # Rule (k)'s advisory half, for the identical reason: an elimination the
     # author reasoned rather than measured is a statement about what the diff
     # is adding, so it belongs above the diff and not after it.
     assumed = assumed_report(bullets)
     if assumed:
         print(assumed)
+    # Rule (m)'s advisory half — the grandfathered arm. A document written before
+    # this rule is not refused (that would be red-by-construction on every legacy
+    # handoff), so the ONLY thing that ever surfaces its missing finish line is
+    # this line, above the diff, on every update until someone adds one.
+    # 🔴 `tracked_at_head is not True`, NOT `git_could_not_answer`. The
+    # sentence this gates is a claim about THIS DOC's history, and "absent from
+    # HEAD" is no-history just as much as "HEAD unreadable" is. Round 3 measured
+    # the commoner case: an ordinary repo with commits, a non-empty handoff doc
+    # present but UNTRACKED, no field -> "it was written before rule (m) and is
+    # GRANDFATHERED" about a document created seconds earlier. A hand-written
+    # doc, a template paste, a `git add` not yet committed, a copy into a fresh
+    # worktree — all of them land here, and an unborn HEAD is the RARE one.
+    # 🔴 "HAS HISTORY" IS THE PREDICATE, and round 4 caught the previous
+    # widening overshooting into its own mirror error. `tracked_at_head is not
+    # True` is also true when the doc is absent HERE but present on the MAINLINE
+    # — so a run that had just printed "origin/main has 1 commit(s) to this doc
+    # that this checkout does not" went on to say its history was unknown. Two
+    # adjacent lines of one transcript contradicting each other, and the same
+    # sin `legacy_dod_report`'s docstring names: a claim about what git could
+    # see, made on a run where git saw it.
+    #
+    # History is KNOWN when the doc is in HEAD, or when the mainline carries a
+    # copy. Everything else — absent from both, or HEAD unreadable — is the
+    # honest "this checkout cannot show it predates the rule".
+    history_known = tracked_at_head is True or currency.replaces_mainline_doc(base_text)
+    legacy_dod = legacy_dod_report(closing, is_new_doc, not history_known)
+    if legacy_dod:
+        print(legacy_dod)
     # Rule (l)'s advisory. Same slot, and it is the one of the three that names
     # a line the TOOL wrote rather than one the author did — which is exactly
     # why it must be on screen above the diff rather than left to be noticed in

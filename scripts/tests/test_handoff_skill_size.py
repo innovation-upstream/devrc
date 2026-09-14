@@ -251,7 +251,64 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # The body needed +355 B for the template clause plus the four marker names.
 # Sized at +600 to leave ~266 B — about half a mean 🔴 rule — above the floor,
 # rather than the 16 B an exact fit would have left. Still deliberately tight.
-MAX_BYTES = 27_000
+#
+# 🔴 2026-09-13: 27,000 -> 28,800 (+1,800). Lever 3, and it is case (a) of the
+# 2026-08-28 entry for the THIRD time — rules (m) and (n), which are two halves
+# of one finding rather than two unrelated asks.
+#
+# THE FINDING. `<homelab-talos>/claudedocs/audit-arc-rabbit-holes-2026-09-13.md` (homelab-talos)
+# read 75 days of session telemetry — 745 doc-linked kickoff sessions across 299
+# handoff ARCS — and deep-read the five longest. In ALL FIVE the round-1
+# objective was met within 1–7 rounds and the arc then ran 13–23. The arcs did
+# not stop shipping (~7 commits/session, flat); they shipped audit-fixes to
+# audit-fixes. Two mechanisms carried it: no document said what would END the
+# arc, and each round's audits minted 2–6 new ranked items (0->76, 9->84, 1->55,
+# 11->54) faster than rounds closed them.
+#
+#   lever 1, taken: every remedy is printed BY THE TOOL. Rule (m)'s refusal
+#     picks one of six causes (wrong section / empty / unknown kind / fenced /
+#     unparsed / absent) and renders that cause's own fix; rule (n)'s prints the
+#     three ways forward and the opt-in flag. The body carries no remedy text —
+#     and, unlike rule (j), it does NOT enumerate rule (m)'s six markers either,
+#     because there is no "only one of them means add a field" ambiguity to
+#     pre-empt: each remedy is self-contained at the moment it fires.
+#   lever 2, taken: the evidence — the 75-day counts, the five deep-read arcs,
+#     the per-round rank growth, the close-check re-open rate and why the report
+#     proposed a numeric audit-ladder cap that was NOT taken — went WHOLE to
+#     reference/write-gate.md §F and §G.
+#
+# 🔴 WHAT COULD NOT BE EVICTED, which is what this option owes a reader:
+#   a. the `closing-condition:` field and its TWO kinds, in the step-2 TEMPLATE.
+#      Case (a) verbatim: the executor writes the scratch file before step 5
+#      exists to refuse anything, so a vocabulary reachable only through the
+#      refusal makes EVERY new-doc run fail once and fix — red by construction
+#      on the ordinary path, which `claude/RULES.md` calls worse than no gate.
+#      Measured with the parser itself on 2026-09-13: 0 of 119 devrc handoff
+#      docs and 0 of 64 homelab-talos ones carry a field it accepts, so every
+#      new arc is that ordinary path until the habit exists.
+#   b. the rank-ratchet clause under `## Next steps`, for the same reason one
+#      step further on: the refusal fires on a scratch file whose ranks are
+#      already written, and the fix ("this is a defect, not a rank") is a
+#      DIFFERENT SECTION. An author who has not seen `## Defects (batched)` in
+#      the template has nowhere to move the finding TO.
+#   c. the two status names at step 5.
+#      `test_every_exit_code_the_module_can_return_is_documented` derives them
+#      from the module and requires each in the body.
+#
+# Sized against a +1,458 B need at ~3 mean 🔴 rules (572 B each), leaving ~390 B
+# — about two thirds of one rule — above the floor. Deliberately tight, for the
+# reason every entry above gives: the pressure is the point, and the answer to
+# the next round is lever 1 or 2, not another raise.
+#
+# 🔴 2026-09-13, same PR: 28,800 -> 28,700 (-100). RATCHETED DOWN, which is this
+# module's stated direction of travel, and the occasion is the one that usually
+# gets banked as slack instead: ROUND 0 OF THIS PR'S OWN AUDIT DELETED SOMETHING.
+# The `Audit ladder: <N> delta round(s)` line came out of the `## State now`
+# template (91 B) because nothing parsed it and the PR's `audit-claims` block
+# already carries the round count. Leaving the ceiling where it was would have
+# converted a deletion into headroom silently — which is how a ratchet stops
+# ratcheting. The need is therefore +1,367, not +1,458.
+MAX_BYTES = 28_700
 
 # Required working margin below the ceiling.
 #

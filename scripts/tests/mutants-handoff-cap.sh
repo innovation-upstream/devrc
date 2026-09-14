@@ -40,6 +40,15 @@
 # "mutation-verified" can be RE-DERIVED instead of believed.
 #
 #   bash scripts/tests/mutants-handoff-cap.sh        # exit 0 only if ALL ok
+#   MUTANT_FILTER='<ERE over ROW NAMES>' bash …      # a subset; see _row_selected
+#
+# 🔴 THE FILTER MATCHES ROW NAMES, AND ROW NAMES ARE NOT BLOCK-PREFIXED — so a
+# pattern that reads like a block selects a handful of rows and silently skips
+# the rest. MEASURED: `rule-[mn]` selects 4 of the 19 rows in the rule-(m)/(n)
+# blocks, skipping every row that pins a real defect. There is no block
+# selector; spell the rows you mean, and READ THE `PARTIAL SWEEP` LINE, which
+# prints how many were skipped. To re-derive rules (m) and (n) in full:
+#   MUTANT_FILTER='rule-m|rule-n|closing-|detail-strip|detail-separator|deleting-the-field|legacy-|stale-base-read|untagged-legacy|flat-count|operator-opt-in|refusal-claims|new-docs-are-ratcheted|a-kind-with-no-condition'
 #
 # Follows the convention `mutants-claim-work.sh` / `mutants-dead-guard.sh`
 # established, and for the reasons documented there:
@@ -167,8 +176,31 @@ failing() {
 # skill body; everything else — the DID-NOT-APPLY diff, the harness floor, the
 # WRONG-KILLER check, the restore — is shared, because a second copy of this
 # logic is the shape `claude/RULES.md` says regenerates the same bug at N sites.
+# 🔴 A ROW FILTER, AND IT CANNOT SWITCH OFF THE CONTROLS. `MUTANT_FILTER` is an
+# ERE matched against a row's NAME; unset runs everything. It exists because one
+# row costs a full suite run (~3 min here) and the battery is past 80 of them,
+# so "re-derive the block I just changed" was in practice "do not re-derive".
+#
+# 🔴 THE TWO CONTROLS ARE FORCED THROUGH ANY FILTER, which is the whole reason
+# this is safe to add. A filter that excluded `already-caught-positive-control`
+# would let a harness wired to nothing print a screen of `ok` — the exact shape
+# this file's header calls a clean sweep worth nothing — and one that excluded
+# the behaviour-free `SURVIVES` control would stop proving the rows key on
+# behaviour. Filtering them out is therefore not a user choice.
+#
+# 🔴 A FILTERED RUN SAYS SO IN ITS SUMMARY. A partial sweep reported as a full
+# one is `claude/RULES.md`'s "no silent caps": what was dropped is printed.
+FILTER_FORCED='already-caught-positive-control|comment-reword-control'
+SKIPPED=0
+_row_selected() { # _row_selected <name>
+  [ -z "${MUTANT_FILTER:-}" ] && return 0
+  grep -Eq "$FILTER_FORCED" <<<"$1" && return 0
+  grep -Eq "$MUTANT_FILTER" <<<"$1"
+}
+
 _run() { # _run <file> <pristine-copy> <name> <want> <sed-expr>
   local file="$1" orig="$2" name="$3" want="$4" expr="$5"
+  if ! _row_selected "$name"; then SKIPPED=$((SKIPPED+1)); return; fi
   ROWS=$((ROWS+1))
   sed "$expr" "$file" > "$T/m" 2>/dev/null
   if cmp -s "$file" "$T/m"; then
@@ -634,6 +666,18 @@ run 'mainline-measured-from-the-wrong-text' \
   's|            mainline = doc_shape(shown.out)|            mainline = doc_shape("")|'
 
 printf '\n== the round-4 regression must fail with the RIGHT message (#1093.1) ==\n'
+# ⚠ THE GUARD NAMES BOTH ROWS. Keying on the first alone meant
+# `MUTANT_FILTER='round-4-negative-control'` ran 5 rows and not that one, with
+# the accounting still balanced — an operator re-running a row by the name the
+# harness itself printed got a green (round 2, finding 9).
+# 🔴 THESE TWO ROWS DO NOT GO THROUGH `_run`, SO THEY DO NOT GO THROUGH
+# `_row_selected` EITHER — they increment ROWS by hand. Under MUTANT_FILTER
+# that made the accounting lie in two ways at once (audit F6): they ran
+# whatever the filter said, and `ROWS` counted them while `SKIPPED` did not,
+# so `9 row(s) … skipped 83` did not add up to the 90 `_run` sites. Gate the
+# pair explicitly. They are DIAGNOSTIC-QUALITY rows (which test message, not
+# which test), which is why they cannot simply become `run` calls.
+if _row_selected round-4-regression-message || _row_selected round-4-negative-control; then
 # 🔴 A DIAGNOSTIC-QUALITY ROW, so `_run` cannot score it: every other row asks
 # WHICH TEST died, this one asks WHICH MESSAGE it died with. Reverting
 # `replaces_mainline_doc` to the round-4 bug takes the LOUD branch, so the shape
@@ -719,6 +763,16 @@ else
     FAILURES=$((FAILURES+1))
   fi
 fi
+else
+  # 🔴 THIS `fi` CLOSES THE ROUND-4 SECTION AND NOTHING ELSE. Its first
+  # draft closed just above `== controls ==`, which swallowed the rule (k),
+  # (m) and (n) blocks — 57 rows skipped, 2 run, and the run still printed
+  # `0 failure(s)`. That is this file's own "a wrapper that reports nothing
+  # to do instead of erroring" trap, so the accounting guard at the end now
+  # refuses a run whose ROWS+SKIPPED do not add up to the sites in the file.
+  SKIPPED=$((SKIPPED+2))
+fi
+
 printf '\n== rule (k): an elimination names HOW it was eliminated (must be KILLED) ==\n'
 # The refusal deleted outright: no bullet is ever unevidenced.
 run 'elimination-refusal-never-fires' test_the_MEASURED_bullet_that_this_rule_exists_for_is_refused \
@@ -774,6 +828,146 @@ run 'fenced-filter-ignores-indent' test_an_unrelated_column_0_fence_does_not_for
 run 'rule-k-comment-reword-control' SURVIVES \
   's|# --- rule (k): an elimination names HOW it was eliminated|# --- rule k: elimination evidence (reworded comment)|'
 
+printf '\n== rule (m): the arc declares what ENDS it (must be KILLED) ==\n'
+# The refusal itself. Narrowest expression: the `if` that returns it.
+run 'rule-m-refusal-never-fires' test_a_new_doc_with_no_closing_condition_is_REFUSED \
+  's|^    if undefined_done:|    if False:|'
+# 🔴 THE `in_goal` HALF, ON ITS OWN ROW. This was a REAL defect in the rule's
+# first draft — a well-formed field under `## State now` satisfied the gate
+# while `resume-state.sh`, which parses the Goal section, could not see it.
+# `claude/RULES.md`'s spelled-guard shape: the guard passes while the hazard
+# sits somewhere the consumer cannot read.
+run 'closing-condition-accepted-anywhere' \
+  test_a_field_outside_the_Goal_section_does_NOT_satisfy_the_rule \
+  's|and bool(self.detail) and self.in_goal|and bool(self.detail)|'
+# The emptiness half, isolated from `in_goal` above for the enclosing-condition
+# reason this harness's header gives.
+run 'a-kind-with-no-condition-is-accepted' \
+  test_each_cause_is_named_with_its_own_marker \
+  's|and bool(self.detail) and self.in_goal|and self.in_goal|'
+# The vocabulary. An open set is what `soon`/`tbd`/`done` would walk straight
+# through, and it is the half a rewording cannot defeat.
+run 'closing-vocabulary-opened' \
+  test_each_cause_is_named_with_its_own_marker \
+  's|return self.kind in CLOSING_KINDS and|return self.kind is not None and|'
+# 🔴 THE TEMPLATE-SPELLING ROW, and it is the one this rule actually shipped
+# wrong. `_MARKUP\s*` cannot see markup-space-markup, which is exactly how the
+# step-2 template writes the field (`- **closing-condition:** `check` — …`), so
+# the writer refused the one spelling the skill teaches while the shell parser
+# accepted it. Reverting the class must go red.
+run 'closing-pattern-narrowed-to-one-markup-run' \
+  test_the_step_2_TEMPLATE_SPELLING_is_the_one_that_parses \
+  's@{CLOSING_KEY}{_MARKUP}\\s\*:\[\\s\*_`~\]\*@{CLOSING_KEY}{_MARKUP}\\s*:{_MARKUP}\\s*@'
+# The detail lead-strip, and BOTH measured mangles get their own row — the
+# leading class and the separator anchor are independent bounds, and one row
+# mutating the whole compile() at once could not tell you which one binds.
+#
+# ⚠ AN EARLIER SINGLE ROW HERE REPORTED `MUTATION DID NOT APPLY`, which the
+# harness scores as a FAILURE for exactly this reason: a `sed` that silently
+# misses reports the UNMUTATED file's behaviour, i.e. the most flattering
+# possible wrong answer. Both expressions below were checked to change EXACTLY
+# ONE LINE before they were written down.
+run 'detail-strip-eats-leading-markup' \
+  test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER \
+  's@r"\^\[\\s\*_`~\]\*@r"^[\\s*_`~:\\-–—]+@'
+run 'detail-separator-loses-its-anchor' \
+  test_the_detail_survives_the_parser_CHARACTER_FOR_CHARACTER \
+  's@(?=\\s|\$)@@'
+# The DELETION arm: a document that HAD a finish line and loses it.
+run 'deleting-the-field-is-not-noticed' \
+  test_an_update_that_DELETES_the_field_is_REFUSED \
+  's|        base_had_one=closing_condition(base_text).is_declared,|        base_had_one=False,|'
+# 🔴 THE GRANDFATHERING, IN BOTH DIRECTIONS. Removing it makes the gate
+# permanently red on a corpus where 0 of 183 docs comply; removing the advisory
+# makes a legacy doc silent forever, which is how it never gets fixed.
+run 'legacy-docs-are-refused-too' \
+  test_a_legacy_doc_is_ADVISED_not_refused \
+  's|    if not (is_new_doc or base_had_one):|    if False:|'
+run 'legacy-advisory-suppressed' \
+  test_a_legacy_doc_is_ADVISED_not_refused \
+  's|    legacy_dod = legacy_dod_report(closing, is_new_doc, not history_known)|    legacy_dod = ""|'
+# 🔴 PRECEDENCE. `not base_text` alone reads a STALE BASE as a new arc — the
+# false positive that took 19 tests red in one run.
+# ⚠ THIS ROW AND `deleting-the-field-is-not-noticed` HAVE BOTH BEEN REPOINTED
+# MORE THAN ONCE as later rounds rewrote the lines they target. The second time,
+# the deletion row went dead again and TWO successive audits missed it, because
+# every sweep they ran was FILTERED and the row was never selected. A row whose
+# sed no longer matches reports `MUTATION DID NOT APPLY`, which this harness
+# scores as a FAILURE — but only if it RUNS. That is why
+# `test_mutants_handoff_cap.py` now checks every row's expression against the
+# live source with no filter at all: the check that finds a dead row must not
+# itself be subject to the filter. Each replacement is checked to change
+# EXACTLY ONE LINE before being written.
+run 'stale-base-read-as-a-new-arc' \
+  test_a_STALE_BASE_is_not_reported_as_a_NEW_arc \
+  's|    is_new_doc = not base_text.strip() and not doc_exists_elsewhere|    is_new_doc = not base_text.strip()|'
+# BEHAVIOUR-FREE CONTROL for this block: the rows above must key on behaviour,
+# not on rule (m)'s own comment text.
+# 🔴 THE `None` DISTINCTION, WHICH WAS MUTATION-PROVEN DEAD. Round 2 collapsed
+# `tracked_at_head is not False` to `bool(tracked_at_head)` — exactly the
+# None/False distinction the fix claims — and it SURVIVED a full green 472-test
+# run, because the only guard on it fed a NON-GIT DIRECTORY, an input `main()`
+# refuses a screen earlier with EXIT_FAIL. These rows exist so that cannot
+# recur: they mutate the reachable predicate, and the killers reach it through
+# `main()` via an UNBORN HEAD.
+run 'None-collapsed-into-may-exist' \
+  test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
+  's|    git_could_not_answer = tracked_at_head is None|    git_could_not_answer = False|'
+run 'unborn-head-borrows-the-stale-base-wording' \
+  test_an_UNBORN_HEAD_gets_its_OWN_ratchet_skip_reason \
+  's|    elif git_could_not_answer and not base_text.strip():|    elif False:|'
+# 🔴 THE ROW THAT ACTUALLY ISOLATES THE ADVISORY WORDING. Round 3 measured
+# that two of its sibling rows are the SAME mutant: both die on
+# `assert res.returncode == hd.EXIT_OK` with rc 11, which is rule (m) refusing —
+# an EARLIER guard's error, and the harness says so itself by reporting
+# identical killer sets for them. None of them reaches the SENTENCE the fix is
+# about. This one drops the third argument, so `legacy_dod_report` falls back to
+# its default and prints "it was written before rule (m)" — the claim about
+# history — and dies on a MESSAGE assertion, not a returncode.
+run 'legacy-advisory-loses-its-history-qualifier' \
+  test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
+  's|legacy_dod_report(closing, is_new_doc, not history_known)|legacy_dod_report(closing, is_new_doc)|'
+# 🔴 AND THE FAIL DIRECTION ITSELF. Folding `None` toward "a doc may exist" is a
+# DECISION (grandfather rather than refuse on a repo we could not read); flip it
+# and a genuinely-unreadable repo starts refusing documents.
+run 'None-flipped-to-fail-closed' \
+  test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
+  's|    ) or git_could_not_answer|    ) and not git_could_not_answer|'
+run 'rule-m-comment-reword-control' SURVIVES \
+  's|# --- rule (m): the arc declares what ENDS it|# --- rule m: closing condition (reworded comment)|'
+
+printf '\n== rule (n): the rank queue does not GROW its unforced half (must be KILLED) ==\n'
+run 'rule-n-refusal-never-fires' \
+  test_adding_a_self_generated_rank_beyond_the_base_count_is_REFUSED \
+  's|^    if growth:|    if False:|'
+# 🔴 THE PREDICATE, AND IT WAS WRONG IN THE FIRST DRAFT. Counting only the
+# literal `none` reads every legacy base as ZERO, so the first honest re-tagging
+# of a legacy queue looks like pure growth and is refused — red on run one.
+run 'untagged-legacy-items-stop-counting' \
+  test_an_UNTAGGED_legacy_base_item_counts_as_SELF_GENERATED \
+  's|    return item.kind not in EXTERNAL_FORCING_KINDS|    return item.kind == "none"|'
+# The boundary: `<=` is what makes this a ratchet on GROWTH rather than a cap.
+run 'flat-count-refused-as-growth' \
+  test_a_FLAT_count_lands \
+  's|    if len(none_items) <= base_count:|    if len(none_items) < base_count:|'
+# The operator opt-in. A flag the code ignores is a refusal nobody can clear.
+run 'operator-opt-in-ignored' \
+  test_the_operator_opt_in_overrides \
+  's|        if args.rank_growth_approved|        if False|'
+# 🔴 THE HONESTY CLAUSE. The refusal must NOT claim to know which item is new —
+# rank text and rank numbers both move between rounds, so a match would be a
+# guess, and a guess names the wrong item.
+run 'refusal-claims-to-know-which-item' \
+  test_the_refusal_does_not_claim_to_know_WHICH_item_is_new \
+  's|"  ⚠ WHICH of these is the addition is NOT identified|"  ⚠ The last item listed is the addition|'
+# The new-doc grandfathering: round 1 legitimately opens with self-generated work.
+run 'new-docs-are-ratcheted-too' \
+  test_a_NEW_doc_is_silent \
+  's|^    if is_new_doc:|    if False:|'
+run 'rule-n-comment-reword-control' SURVIVES \
+  's|# --- rule (n): the rank queue does not GROW its unforced half|# --- rule n: rank ratchet (reworded comment)|'
+
+
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
 # is already known to catch. If this row ever reports SURVIVED, the harness is
@@ -785,5 +979,24 @@ run 'already-caught-positive-control' test_no_advance_is_still_4_on_an_undated_e
 run 'comment-reword-control' SURVIVES \
   's|# --- rule (j): a ranked item names an external forcing function|# --- rule j: ranked item forcing function (reworded comment)|'
 
+# 🔴 ACCOUNTING GUARD — every row site must be either RUN or SKIPPED.
+# `_run` is called once per row, plus the two hand-rolled round-4 rows that
+# increment ROWS directly. If those do not add up, a control-flow edit has
+# silently dropped whole blocks out of the sweep — which is exactly what a
+# mis-scoped `if` did here once, reporting `0 failure(s)` off 2 of 92 rows.
+# Counted from the FILE rather than from a literal, so it cannot go stale.
+SITES=$(( $(grep -c '^run \|^run_skill ' "$D/mutants-handoff-cap.sh") + 2 ))
+if [ $((ROWS + SKIPPED)) -ne "$SITES" ]; then
+  printf '\n\U0001f534 HARNESS BROKE: %d run + %d skipped = %d, but this file has %d row site(s).\n' \
+    "$ROWS" "$SKIPPED" "$((ROWS + SKIPPED))" "$SITES"
+  printf '   Rows vanished from the sweep entirely — usually a mis-scoped `if`.\n'
+  printf '   Every `ok` above is worthless until this adds up.\n'
+  FAILURES=$((FAILURES+1))
+fi
 printf '\n%d row(s), %d failure(s)\n' "$ROWS" "$FAILURES"
+if [ -n "${MUTANT_FILTER:-}" ]; then
+  printf '🔴 PARTIAL SWEEP: MUTANT_FILTER=%s skipped %d row(s). This is NOT a\n' \
+    "$MUTANT_FILTER" "$SKIPPED"
+  printf '   clean bill for the rows it did not run — re-run with it unset.\n'
+fi
 [ "$FAILURES" -eq 0 ] || exit 1
