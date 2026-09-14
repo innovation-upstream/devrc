@@ -101,27 +101,39 @@ def rendered(server):
     🔴 `new-session -d` returns when the SERVER is up, which says nothing about
     whether the pane command's `printf` has been read and parsed into the grid.
     MEASURED 2026-09-14: 30 of 30 immediate captures came back EMPTY, with the
-    URI arriving 15-25 ms later. Every grid-reading test was therefore passing
-    only when some unrelated earlier test happened to burn that much wall time
-    first — which made `test_the_grid_hyperlink_spans_the_wrap` fail 7 of 8 runs
-    in isolation while `test_tmux_stores_the_hyperlink_and_can_report_it` failed
-    1 of 3 in file order. ONE defect, two symptoms, ranked by run order.
+    URI arriving 15-25 ms later (independently re-measured at 3.2-23.5 ms,
+    median 14.0 ms, n=30 — the lower bound above is optimistic and the upper
+    one holds). A grid read was therefore passing only when some unrelated
+    earlier test happened to burn that much wall time first.
 
-    That ordering is why this is a fixture and not a retry on the one test that
-    was observed flaking: deleting that test — the standing recommendation
-    before this was measured — would have left the WORSE flake behind it, newly
-    first in line. One rule, one place.
+    ⚠ THE RATE IS LOAD-DEPENDENT, SO NO SINGLE FIGURE IS QUOTED HERE. Isolated,
+    `test_the_grid_hyperlink_spans_the_wrap` was measured at 7 of 8 failing on
+    one host-load and 3 of 8 on another; in file order it does not fail at all,
+    because the test before it pays the render time. An earlier draft of this
+    docstring quoted one run of each as though they were properties of the
+    tests, and labelled an ISOLATED run as file order. What reproduces is the
+    DIRECTION: isolated flakes, in-order does not.
+
+    🔴 THE LOAD-BEARING CLAIM, REPRODUCED TWICE INDEPENDENTLY: with the
+    fixture absent and only `test_tmux_stores_the_hyperlink_and_can_report_it`
+    deleted, `spans_the_wrap` still failed 3 of 10 — so deleting the reported
+    test on its own would have left a live flake behind it, newly first in
+    line. That is why the wait is a FIXTURE and not a retry on one test.
 
     🔴 IT CANNOT MASK A REAL BREAKAGE. On timeout it FAILS, loudly, quoting the
-    grid it did see, so an OSC 8 that never renders — the actual thing these
-    tests pin — is still RED and is distinguishable from a slow one. A bare
+    grid it did see, so an OSC 8 that never renders — the actual thing this
+    test pins — is still RED and is distinguishable from a slow one. A bare
     `sleep` would have been the masking version of this fix. Mutation-checked:
     with the OSC 8 wrapper removed from the pane payload the fixture fails with
     the message below and `Last capture: '\\n'`, never a pass.
 
-    Only the two grid-READING tests take this fixture. The tests that read a
-    server option or the key table keep plain `server`, so a genuine OSC 8
-    regression still leaves their independent signal green and legible.
+    Only the grid-READING test takes this fixture; the four that read the conf,
+    a server option or the key table do not, because they never read the grid
+    and would pay the poll for nothing. ⚠ That is the whole reason — an earlier
+    draft claimed it also kept "their independent signal green" under a genuine
+    OSC 8 regression, which is FALSE: dropping `terminal-features ,*:hyperlinks`
+    from the shipped conf reddens 2 of those 4, and this fixture is not on that
+    path at all.
     """
     deadline = time.monotonic() + RENDER_TIMEOUT_S
     last = ""
@@ -167,21 +179,26 @@ def test_running_tmux_accepts_the_hyperlinks_feature(server):
     assert "hyperlinks" in out.stdout, out.stdout
 
 
-def test_tmux_stores_the_hyperlink_and_can_report_it(rendered):
-    # ⚠ INVARIANT GUARD, not regression coverage: tmux PARSES OSC 8 from
-    # applications unconditionally (input.c), so the grid holds the URI
-    # whether or not terminal-features is set — this passed BEFORE the fix
-    # too. It pins the storage the fix DEPENDS on (a tmux upgrade dropping
-    # grid link storage would break the `o` binding silently).
-    # `capture-pane` prints to stdout only with -p; without it the capture
-    # goes to a paste buffer and stdout is silently empty.
-    out = tmux("capture-pane", "-p", "-H", "-t", "t")
-    assert out.returncode == 0, out.stderr
-    assert URI in out.stdout, out.stdout
+# 🔴 DELETED 2026-09-14: `test_tmux_stores_the_hyperlink_and_can_report_it`.
+# It read `capture-pane -p -H` and asserted the URI was in the grid. Removed
+# because it detected NOTHING that the test below does not, and the route it
+# read is one no shipped code path uses. MEASURED, against the SHIPPED
+# artifact rather than the test's own payload:
+#   - drop `set -as terminal-features ',*:hyperlinks'` from .tmux.conf
+#     -> it PASSED (so did the test below; the conf/option tests caught it).
+#   - the class both guards exist for — a tmux upgrade dropping the grid
+#     hyperlink format — is SILENT: an unknown `#{...}` expands to EMPTY with
+#     rc 0 (verified on tmux 3.7c: `#{copy_cursor_hyperlink_GONE}` -> `[]`,
+#     rc 0). The key-table test only greps the literal string and stays green.
+#     The test below is the ONLY one that asserts that format's VALUE, so it
+#     is the only one that goes red. The deleted test never read the format.
+# ⚠ Deleting it was NOT sufficient on its own and was never the whole fix —
+# see the `rendered` docstring: without the fixture the test below still
+# failed 3 of 10 with this one gone.
 
 
 def test_the_grid_hyperlink_spans_the_wrap(rendered):
-    # ⚠ INVARIANT GUARD, same caveat as above — measured: the copy-mode
+    # ⚠ INVARIANT GUARD, same caveat as the file docstring — measured: the copy-mode
     # format reads the full URI at the link's first cell AND on the wrapped
     # continuation row, which is what makes the whole wrapped link one
     # clickable span in Alacritty (per-cell scan across rows). The third
