@@ -1824,11 +1824,13 @@ _handoff_command() {
 #
 # 🔴 WHAT IS SENT IS THE REFERENCE, NOT `--instance`/`--tab`. That is a safety
 # property, not a style choice: the far end re-runs the SAME host check against
-# its OWN /whoami, so if `ssh_target()` ever pointed at the wrong machine (the
-# `10.42.0.10` gateway vs `10.42.0.100` laptop trap host_label.py documents) the
-# remote leg REFUSES with its own rc 4 instead of driving a same-labelled profile
-# over there. The check is made twice, independently, on the two machines it is
-# about — the same reason `peer-host` has the far end name itself.
+# its OWN /whoami, so if `ssh_target()` ever pointed at the wrong machine — the
+# nebula gateway-vs-laptop near-miss `host_label.py` documents, one digit apart
+# and both answering ssh — the remote leg REFUSES with its own rc 4 instead of
+# driving a same-labelled profile over there. The check is made twice,
+# independently, on the two machines it is about; the same reason `peer-host`
+# has the far end name itself. (The addresses are DESCRIBED, not spelled: this
+# file must contain no peer address literal, and a test here says so.)
 #
 # 🔴 AND THE LOCAL WIRE IS CLOSED, STRUCTURALLY. `BB_PROXY_TARGET` being set is
 # `cmd_op`'s refusal condition (see cmd_op), so once a reference has been
@@ -1878,8 +1880,8 @@ _bb_lib_dir() {
 #
 # 🔴 NO ADDRESS IS SPELLED HERE, AND THAT IS ENFORCED ELSEWHERE. `host_label.py`
 # owns the label→address mapping for the whole fleet precisely because a
-# restated address does not fail loudly: `10.42.0.10` is the homelab GATEWAY and
-# answers ssh perfectly happily when `10.42.0.100` (the laptop) was meant.
+# restated address does not fail loudly: the homelab GATEWAY's nebula address is
+# one digit off the laptop's and answers ssh perfectly happily in its place.
 # `scripts/tests/test_peer_host.py::test_no_module_redeclares_a_peer_address_literal`
 # refuses a second copy anywhere under `scripts/`.
 #
