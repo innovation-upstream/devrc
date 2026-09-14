@@ -108,12 +108,24 @@ is the PRIVATE proposal, not this doc.
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
   **23(c)** (upstream PR in `ZacxDev/cairn` — the arc's last unclosed piece);
   **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
-  those sites have no handle and therefore no remedy); **26 IN FLIGHT as #1657** (above);
-  **27**; **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
+  those sites have no handle and therefore no remedy);
+  **27**; **28** (the cwd-blind relative nudge — FILED 2026-09-14 by operator decision during
+  #1657's round-2 audit; pre-existing in kind, NOT a #1657 regression, and its frequency is
+  explicitly UNMEASURED); **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
   rank 18 predicted it would); **20 half two** (that CI leg has only ever been watched **pass**,
   so its red path is unproven); **4, 8, 21**; and the `m_index_store` `sys.path` item.
   ✅ The CLASS rank 23 did not close is CLOSED — rank 24, devrc **#1621**, squash **`df09a6c2`**.
-  **Rank 22 belongs to another session — do not take it.**
+  ✅ **26 is CLOSED** — #1657 `0808a820`, live on both hosts, verified by content.
+  **Rank 22 belongs to another session — do not take it.** ⚠ **Rank 20 is CLAIMED (~4 d old);
+  `claim-work` says if it is past TTL.**
+  🔴 **THIS BULLET AND THE RANKED LIST ARE TWO LEDGERS OF ONE FACT AND THEY DRIFTED WITHIN HOURS** —
+  26 read DONE in its item and IN FLIGHT here; 28 was filed and never added here. **Close or file a
+  rank ⇒ edit BOTH.** Same mechanism this doc already records for `How to verify`: two REPLACE
+  sections drift because only one is rewritten per pass.
+  ⚠ **`main` carries failing gates unrelated to this arc; they red every PR's `devrc-pytests`.**
+  Measured at `origin/main` with controls 2026-09-14: `test_runtime_shebangs` (#1551) and a clawgate
+  writeback seam UNOWNED, mutation-anchor ledger claimed. **Never read a red here as yours** — read
+  the `_____ test _____` banners under `= FAILURES =` and control each at `origin/main`.
 
 - ⚠ **ONE INSTRUCTED STEP WAS NEVER RUN, recorded so it is not mistaken for done.** An earlier
   kickoff said to re-run the two `test_guard_core.py` tests at `main` before trusting it and then
@@ -376,32 +388,16 @@ was to DERIVE coverage (`partition_tracked_files()` buckets every enumerated fil
   regression test is RED at base `3167e44` on its own assertion; the fixture uses a repo NAMED
   for its scope, because passing `--scope` would suppress the very window under test.
 
-### CLOSED 2026-09-09 — the three reds only the MERGED tree could find
-🔴 Each is a different lesson, and none would have appeared on the branch alone.
-- **A seam ledger doing its job, not an obstacle.** `test_store_root_ledger` went red because
-  `scripts/cairn-validate` is a **new** router through `subsystem_read_store`. That ledger
-  fails when the router set **GROWS** as well as when it shrinks, precisely so a new reader
-  cannot quietly start answering "where do I read?" for itself. A row was added. via: code
-- 🔴 **A guard structurally incapable of passing in one of the two tiers, and dev-host green
-  is what hid it.** `test_cairn_validate_defaults_its_store_to_the_SYNCED_CACHE_not_the_mirror`
-  asserted on **stdout**, which holds where the cache exists and the tool takes its success
-  path. The `nix build` tier's `$HOME` is `/build/home` with no `~/.cache/subsystem-store`, so
-  the tool exits down the not-found path and names the resolved root on **stderr**. The claim
-  is WHICH store the launcher chose, never whether one exists. ⚠ The implementing round wrote
-  *"I believe they are sandbox-safe, but that is reasoning, not a measurement."* It was
-  reasoning, and it was wrong. via: measurement
-- **Re-measured at TWO points, because one is not a general claim:** green with a real cache
-  root and green under a `$HOME` verified to have none; the mutant that drops the `--store`
-  prepend is KILLED at **both**, on the guard's own message. The negative half — the frozen
-  mirror's path must NOT appear — did not exist before and is what kills that mutant when both
-  paths happen to be printed. via: measurement
-- **A scan hit fixed by pinning a RELATIONSHIP rather than allowlisting a string.**
-  `test_runtime_shebangs` flagged a spelled `"#!"`. Its header reserves the allowlist for
-  sites solving the problem a verified way, **not for going green** — so the assertion now
-  pins that `cairn-validate`'s interpreter line equals `cairn-who`'s. Both are
-  `mkOutOfStoreSymlink` launchers run as bare commands from PATH, so they must agree; the
-  literal disappeared as a consequence rather than as the goal. via: code
-- **Next probe:** none. Fixed in `29f16402`, gate green on `48bb44e3` from two runners.
+### EVICTED 2026-09-14 — the three reds only the MERGED tree could find (CLOSED)
+🔴 **Fixed in `29f16402`, gate green on `48bb44e3` from two runners.** Evicted for size per the
+2026-09-07 convention. **The three lessons, which is all that outlives it:** (a) a SEAM LEDGER
+that fails when the router set GROWS as well as shrinks is doing its job, not obstructing —
+a new reader must not quietly start answering "where do I read?" for itself; (b) a guard can
+be STRUCTURALLY INCAPABLE of passing in one of two tiers and dev-host green is what hides it —
+an assertion on STDOUT broke where the sandbox `$HOME` has no cache and the tool takes its
+not-found path, printing to STDERR; the implementing round wrote *"I believe they are
+sandbox-safe, but that is reasoning, not a measurement"*, and it was wrong; (c) a scan hit is
+fixed by pinning a RELATIONSHIP, not by allowlisting a string. **Next probe: none.**
 
 ### Round 1 and round 3's guards — the mutation evidence, kept so nobody re-derives it
 - **Round 1's 🟡 was a guard NARROWER THAN ITS OWN DOCSTRING, not an inert one.** The decoy
