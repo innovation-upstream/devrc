@@ -25,16 +25,35 @@
 #     browser bw://workbench/main/12345 text
 #
 #   Either position works. The <host> field is VERIFIED against the bridge before
-#   the command runs, so a reference pasted into a session on the other host
-#   fails loudly instead of driving a same-labelled profile there.
+#   the command runs, so a reference pasted into a session on the other host is
+#   run ON that host over SSH instead of driving a same-labelled profile here.
 #
-#   That refusal is a HANDOFF, not a dead end. It exits 4 — a code this CLI uses
-#   for nothing else, so a caller can branch on "wrong host" instead of guessing
-#   at a generic 1 — and prints on STDERR the command to run on the naming host:
-#   your own command line, re-quoted, on the single line of the refusal that does
-#   NOT begin with "browser:". Nothing is sent and stdout stays empty. This CLI
-#   deliberately does not proxy the command across hosts (that would mean a
-#   non-loopback listener and a second token); the paste is the handoff.
+#   A foreign reference JUST WORKS — no flag, no paste step. The command executes
+#   on the naming host over SSH (the same transport ship.sh, peer-host and
+#   session-manager already use) and that host's stdout, stderr and exit code
+#   become this command's. NO LISTENER IS OPENED ANYWHERE: the bridge on both
+#   hosts still binds 127.0.0.1 only and still enforces its Host-header
+#   allowlist; the far `browser` talks to its OWN loopback exactly as it does for
+#   a human sitting there. What crosses is the REFERENCE, so the far end re-runs
+#   the same host check against its own bridge — the address is verified twice,
+#   independently, on the two machines it is about.
+#
+#   `screenshot` captures on the far host but writes the .png HERE and prints a
+#   LOCAL path: the bytes come back base64 over the same SSH channel and the
+#   local writer (PNG validation, mode 0600, 24h prune) is the one that runs.
+#
+#   🔴 EVERY op proxies, mutating ones included. A cross-host nav/click/type/open
+#   changes what is on the other machine's screen, and `browser activate` raises
+#   a window there. That is deliberate: this was offered as a read-only-first
+#   design with mutating ops behind a flag and declined in favour of a seamless
+#   one. There is no gate and no flag.
+#
+#   When the naming host cannot be REACHED, behaviour falls back to the handoff.
+#   It exits 4 — a code this CLI uses for nothing else, so a caller can branch on
+#   "the naming host could not be driven" instead of guessing at a generic 1 —
+#   and prints on STDERR the command to run on the naming host: your own command
+#   line, re-quoted, on the single line of the refusal that does NOT begin with
+#   "browser:". Nothing is sent to the local browser and stdout stays empty.
 #
 #   Combining a reference with --instance/--tab is an error, not a precedence
 #   question. For `type`, `js`/`eval` and `agent` — whose argument is arbitrary
@@ -310,8 +329,10 @@
 #      (`wake_with_frame_unsupported`). On success `result.data.wake.ok` is true,
 #      so `ok` is always present in both shapes.
 #   4  ONLY the wrong-host `bw://` refusal: the reference was minted on the OTHER
-#      host, so NOTHING was sent — see "Tab references" above. stdout is empty;
-#      stderr carries the command to run on the naming host.
+#      host AND that host could not be reached over SSH, so NOTHING was sent —
+#      see "Tab references" above. stdout is empty; stderr carries the command to
+#      run on the naming host. A reachable naming host does NOT produce a 4: its
+#      own exit code (0/1/3/4) is returned instead.
 set -uo pipefail
 
 # 🔴 THE ORIGINAL ARGV, CAPTURED BEFORE ANYTHING CONSUMES IT. Three later stages
@@ -1323,6 +1344,17 @@ _note_env_routing() {
 # adding a routing "target" to the command body.
 cmd_op() {
   local op="$1" extra="${2:-}"
+  # 🔴 THE LOCAL WIRE IS CLOSED ONCE A FOREIGN REFERENCE HAS A REMOTE TARGET.
+  # This is the safety property of the wrong-host guard, restated as an
+  # INVARIANT over every op rather than as one branch's `exit`: a reference
+  # naming host B must reach B or fail, never drive a same-labelled profile
+  # here. `screenshot` deliberately runs past the host check (its bytes have to
+  # be written locally), so "the branch exits first" is no longer true for every
+  # op and cannot be what the property rests on. It rests on this line, which no
+  # subcommand — present or future — can route around.
+  if [ -n "${BB_PROXY_TARGET:-}" ]; then
+    die "internal: op '${op}' tried to reach the LOCAL bridge while ${REF:-a bw:// reference} is being proxied to ${BB_PROXY_TARGET} — refusing (this would drive the wrong host's browser)"
+  fi
   local tgt=""
   if [ -n "$INSTANCE" ]; then tgt=",\"target\":$(json_str "$INSTANCE")"; fi
   # --tab injects an explicit numeric tab override (validated as an integer).
@@ -1757,12 +1789,23 @@ _shq() {
 # receiving CLI ignores. BB_FRAME survives the reference untouched, so a handoff
 # that dropped it would run against the top frame and answer about a different
 # document. Env-supplied only: a --frame FLAG is already in the argv below.
-_handoff_command() {
-  local a0="$BB_ARGV0" d _a
+#
+# 🔴 argv[0] IS ABSOLUTISED IN ONE PLACE (`_handoff_argv0`) BECAUSE TWO CALLERS
+# NEED IT. The printed handoff and the ssh-proxied screenshot command must name
+# the SAME entry point on the far host; two copies of this three-line `cd`/`pwd`
+# dance would be two chances to disagree about which binary runs over there.
+_handoff_argv0() {
+  local a0="$BB_ARGV0" d
   case "$a0" in
     */*) d="$(cd -- "$(dirname -- "$a0")" 2>/dev/null && pwd)" \
            && a0="${d}/$(basename -- "$a0")" ;;
   esac
+  printf '%s' "$a0"
+}
+
+_handoff_command() {
+  local a0 _a
+  a0="$(_handoff_argv0)"
   if [ -n "$FRAME" ] && [ "$FRAME_SRC" = "\$BB_FRAME" ]; then
     printf 'BB_FRAME=%s ' "$(_shq "$FRAME")"
   fi
@@ -1770,6 +1813,171 @@ _handoff_command() {
   for _a in ${BB_ORIG_ARGV[@]+"${BB_ORIG_ARGV[@]}"}; do
     printf ' '; _shq "$_a"
   done
+}
+
+# --- the cross-host PROXY: run the handoff command ON the naming host --------- #
+# 🔴 THE TRANSPORT IS SSH AND THERE IS NO NEW LISTENER. The bridge on EITHER host
+# still binds 127.0.0.1 only and still enforces its Host-header allowlist; what
+# crosses the network is an ssh session, and the far end's `browser` talks to its
+# OWN loopback exactly as it does when a human is sitting there. Nothing about
+# server.py changes, no second token is minted, and no port is opened.
+#
+# 🔴 WHAT IS SENT IS THE REFERENCE, NOT `--instance`/`--tab`. That is a safety
+# property, not a style choice: the far end re-runs the SAME host check against
+# its OWN /whoami, so if `ssh_target()` ever pointed at the wrong machine (the
+# `10.42.0.10` gateway vs `10.42.0.100` laptop trap host_label.py documents) the
+# remote leg REFUSES with its own rc 4 instead of driving a same-labelled profile
+# over there. The check is made twice, independently, on the two machines it is
+# about — the same reason `peer-host` has the far end name itself.
+#
+# 🔴 AND THE LOCAL WIRE IS CLOSED, STRUCTURALLY. `BB_PROXY_TARGET` being set is
+# `cmd_op`'s refusal condition (see cmd_op), so once a reference has been
+# resolved to a remote target NO code path in this file can reach the local
+# bridge — not the branch below, not a subcommand added next year. The guard the
+# task must not weaken is therefore stronger than it was: it used to be one
+# `exit 4`, and it is now an invariant over every op.
+BB_PROXY_TARGET=""            # `user@addr` once a foreign ref is being proxied
+_BB_PROXY_STDOUT=""           # the remote leg's stdout, sentinel stripped
+_BB_PROXY_RAN=0               # 1 = the remote leg actually executed
+
+#: 🔴 THE POSITIVE CONTROL OF THE PROXY PROTOCOL, and the ONLY thing that
+#: distinguishes "the far host ran the command and it failed" from "the far host
+#: was never reached". ssh's own exit status cannot: 255 is both "connect failed"
+#: and "the remote command exited 255", and a remote shell that dies before the
+#: command runs exits with codes this CLI also uses. So the remote leg PRINTS its
+#: own rc behind a versioned token; stdout without the token is `unreachable`,
+#: never a well-formed empty success. Same shape as `peer-host`'s SENTINEL.
+BB_PROXY_SENTINEL="BBPROXY1:"
+
+#: Generous by design — the peer answers over nebula at ~140 ms RTT, and this
+#: bounds the CONNECT only; the remote op gets as long as it needs (its own
+#: `curl -m 60` is the real bound, on that host).
+BB_SSH_CONNECT_TIMEOUT="${BROWSER_BRIDGE_SSH_CONNECT_TIMEOUT:-8}"
+
+# _bb_lib_dir — `scripts/lib` beside this CLI, resolved THROUGH the symlink.
+#
+# 🔴 `readlink -f` here, and deliberately NOT in `_handoff_command`, and the two
+# are answering different questions. The handoff prints a path for the OTHER
+# machine, where only the un-resolved path is guaranteed to exist. This resolves
+# a path for THIS process, where the deployed entry point
+# (~/.claude/skills/browser/browser) is an out-of-store symlink into the checkout
+# and `dirname $0` would land in ~/.claude/skills, which has no `lib/` sibling.
+_bb_lib_dir() {
+  local self="$BB_ARGV0" real
+  case "$self" in
+    */*) : ;;
+    *) self="$(command -v -- "$self" 2>/dev/null)" || return 1 ;;
+  esac
+  [ -n "$self" ] || return 1
+  real="$(readlink -f -- "$self" 2>/dev/null)" || return 1
+  [ -n "$real" ] || return 1
+  printf '%s/lib' "$(dirname -- "$(dirname -- "$real")")"
+}
+
+# _ssh_target_for LABEL — `user@addr` for a host label, from ONE table.
+#
+# 🔴 NO ADDRESS IS SPELLED HERE, AND THAT IS ENFORCED ELSEWHERE. `host_label.py`
+# owns the label→address mapping for the whole fleet precisely because a
+# restated address does not fail loudly: `10.42.0.10` is the homelab GATEWAY and
+# answers ssh perfectly happily when `10.42.0.100` (the laptop) was meant.
+# `scripts/tests/test_peer_host.py::test_no_module_redeclares_a_peer_address_literal`
+# refuses a second copy anywhere under `scripts/`.
+#
+# Empty stdout (not an exit code) is the failure signal, because every caller has
+# to branch on "no target" anyway: an unknown label, a checkout without `lib/`,
+# or a python that cannot import it all mean the same thing here — fall back to
+# the rc-4 handoff.
+_ssh_target_for() {
+  local lib
+  lib="$(_bb_lib_dir)" || return 0
+  [ -f "${lib}/host_label.py" ] || return 0
+  BB_HOST_LABEL_LIB="$lib" python3 -c '
+import os, sys
+sys.path.insert(0, os.environ["BB_HOST_LABEL_LIB"])
+try:
+    import host_label
+    sys.stdout.write(host_label.ssh_target(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+' "$1" 2>/dev/null || return 0
+}
+
+# _ssh_proxy TARGET COMMAND — run COMMAND on TARGET over ssh.
+#
+# On return: `_BB_PROXY_RAN=1` and the function's status is the REMOTE command's
+# own exit code, with its stdout in `_BB_PROXY_STDOUT` (sentinel line removed,
+# byte-identical otherwise apart from trailing newlines, which command
+# substitution eats on both sides of a plain local run too). `_BB_PROXY_RAN=0`
+# means the remote leg never ran — the caller falls back to the handoff.
+#
+# 🔴 STDERR IS BUFFERED, NOT STREAMED, AND THAT IS A CONTRACT NOT AN OVERSIGHT.
+# The refusal advertises that its pasteable command is the ONLY stderr line not
+# beginning with "browser:". ssh's own transport errors ("connect to host …:
+# Network is unreachable") do not begin with it, so on the fallback path they are
+# re-prefixed rather than emitted raw. When the remote leg DID run, its stderr is
+# replayed verbatim — those lines are the far `browser`'s own, already in the
+# convention.
+_ssh_proxy() {
+  local target="$1" cmd="$2" payload out last rc errf
+  _BB_PROXY_RAN=0; _BB_PROXY_STDOUT=""; _BB_PROXY_ERR=""
+  errf="$(mktemp "${TMPDIR:-/tmp}/browser-proxy-err.XXXXXX" 2>/dev/null)" || return 0
+  # POSIX sh/bash/zsh all read this identically; both hosts run one of the two,
+  # which is the same assumption the pasteable handoff line already makes.
+  payload="${cmd}
+__bb_rc=\$?
+printf '\\n%s%s\\n' '${BB_PROXY_SENTINEL}' \"\$__bb_rc\"
+exit \$__bb_rc"
+  # -n: this CLI never reads stdin, and an ssh that swallowed the caller's would
+  #     be a surprising side effect. -T: no pty, so no terminal escape noise.
+  out="$(ssh -n -T \
+             -o BatchMode=yes \
+             -o "ConnectTimeout=${BB_SSH_CONNECT_TIMEOUT}" \
+             -o StrictHostKeyChecking=accept-new \
+             -- "$target" "$payload" 2>"$errf")"
+  last="${out##*$'\n'}"
+  case "$last" in
+    "${BB_PROXY_SENTINEL}"*) rc="${last#"${BB_PROXY_SENTINEL}"}" ;;
+    *)                       rc="" ;;
+  esac
+  case "$rc" in ''|*[!0-9]*) rc="" ;; esac
+  if [ -z "$rc" ]; then
+    _BB_PROXY_ERR="$(cat "$errf" 2>/dev/null)"
+    rm -f "$errf"
+    return 0
+  fi
+  cat "$errf" >&2 2>/dev/null
+  rm -f "$errf"
+  # `${out%…}` strips the sentinel AND the newline that introduced it, so a
+  # remote stdout that did not end in a newline is not silently given one.
+  _BB_PROXY_STDOUT="${out%$'\n'*}"
+  _BB_PROXY_RAN=1
+  return "$rc"
+}
+
+# _print_handoff — #1598's rc-4 refusal, unchanged in shape, now reached only
+# when the naming host could not be driven. WHY is one extra line; the contract
+# (rc 4, one non-"browser:" line, nothing sent) is identical.
+_print_handoff() {
+  local why="$1" hcmd line
+  hcmd="$(_handoff_command)"
+  echo "browser: $REF was minted on '${REF_HOST}'; this bridge is '${_whost}'." >&2
+  echo "browser:   ${why}" >&2
+  if [ -n "${_BB_PROXY_ERR:-}" ]; then
+    # Re-prefixed so the "exactly one line without 'browser:'" contract holds.
+    printf '%s\n' "$_BB_PROXY_ERR" | while IFS= read -r line; do
+      echo "browser:   ssh: ${line#ssh: }" >&2
+    done
+  fi
+  echo "browser:   Nothing was sent to THIS host's browser. This CLI only ever talks to" >&2
+  echo "browser:   127.0.0.1, and a same-labelled profile here is a DIFFERENT browser —" >&2
+  echo "browser:   driving it is the failure this check exists to prevent, so it will not" >&2
+  echo "browser:   be attempted." >&2
+  echo "browser:   Run this ON '${REF_HOST}' — the next line, verbatim:" >&2
+  echo "$hcmd" >&2
+  echo "browser:   Exit code 4 means exactly this and nothing else (rc 1 is every other" >&2
+  echo "browser:   failure), and that command is the ONLY line of this refusal which does" >&2
+  echo "browser:   not begin with 'browser:' — so a caller can branch on 4 and lift it out." >&2
+  exit 4
 }
 
 # --- the reference's HOST field, checked against the bridge we are talking to - #
@@ -1830,29 +2038,38 @@ out("ok", label)
     echo "browser: this bridge ${_whost_why}, so $REF's host field" \
          "('${REF_HOST}') was NOT verified — proceeding." >&2
   elif [ "$_whost" != "$REF_HOST" ]; then
-    # 🔴 THE REFUSAL DOES NOT MOVE. Everything below is what happens AFTER it:
-    # nothing is sent, and the exit is non-zero. What changed is that "run it
-    # there" used to be the whole answer, leaving the session with no command to
-    # hand anyone and a caller with a generic rc 1 it could not tell from a
-    # malformed reference, a dead bridge or a 404.
+    # 🔴 THE CHECK DOES NOT MOVE AND IS NOT WEAKENED. Reaching here still means
+    # "this is the wrong machine", and the LOCAL browser is still never driven —
+    # `cmd_op` refuses outright for the rest of this process once
+    # BB_PROXY_TARGET is set. What changed is the answer to "so what now":
+    # #1598 printed a command for a human to paste; this runs it, on the machine
+    # the reference names, over ssh, and returns that machine's result here.
     #
-    # STDERR, not stdout, and that is the existing convention rather than a new
-    # decision: stdout is the JSON envelope and nothing else, so a caller doing
-    # `T=$(browser …)` on a refused command must get an EMPTY T. A shell command
-    # string on stdout would be strictly worse than empty — it parses as nothing
-    # and reads as data. rc 4 is the machine-readable half; the paste is the
-    # human half; both are on the stream that already carries diagnostics.
-    _hcmd="$(_handoff_command)"
-    echo "browser: $REF was minted on '${REF_HOST}'; this bridge is '${_whost}'." >&2
-    echo "browser:   Nothing was sent. This CLI only ever talks to 127.0.0.1, and a" >&2
-    echo "browser:   same-labelled profile here is a DIFFERENT browser — driving it is the" >&2
-    echo "browser:   failure this check exists to prevent, so it will not be attempted." >&2
-    echo "browser:   Run this ON '${REF_HOST}' — the next line, verbatim:" >&2
-    echo "$_hcmd" >&2
-    echo "browser:   Exit code 4 means exactly this and nothing else (rc 1 is every other" >&2
-    echo "browser:   failure), and that command is the ONLY line of this refusal which does" >&2
-    echo "browser:   not begin with 'browser:' — so a caller can branch on 4 and lift it out." >&2
-    exit 4
+    # STDERR/stdout split is unchanged: the remote leg's stdout becomes ours, its
+    # stderr becomes ours, and its exit code becomes ours. On a failure to REACH
+    # that machine we fall back to #1598's rc-4 handoff, so the paste is the
+    # safety net rather than the whole answer.
+    BB_PROXY_TARGET="$(_ssh_target_for "$REF_HOST")"
+    if [ -z "$BB_PROXY_TARGET" ]; then
+      _print_handoff "No SSH target is known for '${REF_HOST}', so it could not be driven from here."
+    fi
+    # 🔴 `screenshot` DEFERS, every other op runs here. The difference is where
+    # the RESULT has to land: a screenshot must be a .png on the CALLING host, so
+    # the remote leg is asked for `--data-url` (the bytes, base64, over this same
+    # ssh channel) and the LOCAL writer — the one that validates the PNG magic,
+    # mkstemps at 0600 and prunes — turns it into a local file. Deferring is safe
+    # because `cmd_op` is closed from this point on; the screenshot branch calls
+    # `_proxy_screenshot` instead, and there is no third way to reach the wire.
+    if [ "$sub" = "screenshot" ]; then
+      : # handled in the screenshot branch below
+    else
+      _ssh_proxy "$BB_PROXY_TARGET" "$(_handoff_command)"; _prc=$?
+      if [ "$_BB_PROXY_RAN" -eq 1 ]; then
+        printf '%s' "$_BB_PROXY_STDOUT"
+        exit "$_prc"
+      fi
+      _print_handoff "Tried to run it on '${REF_HOST}' over ssh (${BB_PROXY_TARGET}); that host did not answer."
+    fi
   fi
 fi
 
@@ -2392,7 +2609,33 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     fi
     # cmd_op runs in a command substitution, so its `die`/exit can't propagate
     # on its own — `|| exit 1` forwards an op/transport error to the caller.
-    resp="$(cmd_op screenshot "$full")" || exit 1
+    #
+    # 🔴 THE CROSS-HOST CASE SUBSTITUTES ONLY THE CAPTURE, NEVER THE WRITE.
+    # Criterion: the .png has to exist on the CALLING host. So the far host is
+    # asked for the raw data URL — the bytes, base64, back over the same ssh
+    # channel — and everything below (validate the base64, check the PNG magic,
+    # mkstemp 0600, prune, print the path or the compact envelope) runs HERE,
+    # unchanged, on the local filesystem. One writer, one place; the remote leg
+    # only ever supplies pixels. The flags above are parsed and validated
+    # LOCALLY first, so `--data-url` + a path is still an rc-1 usage error and
+    # never becomes a confusing remote one.
+    if [ -n "$BB_PROXY_TARGET" ]; then
+      # The far end gets the REFERENCE, not --instance/--tab, so it re-verifies
+      # the host field against its OWN /whoami — an independent second
+      # measurement that catches a wrong ssh address instead of trusting it.
+      _rcmd="$(_shq "$(_handoff_argv0)") $(_shq "$REF")"
+      [ -z "$FRAME" ] || _rcmd="${_rcmd} --frame $(_shq "$FRAME")"
+      _rcmd="${_rcmd} screenshot --data-url"
+      [ -z "$full" ] || _rcmd="${_rcmd} --fullpage"
+      _ssh_proxy "$BB_PROXY_TARGET" "$_rcmd"; _prc=$?
+      if [ "$_BB_PROXY_RAN" -ne 1 ]; then
+        _print_handoff "Tried to capture it on '${REF_HOST}' over ssh (${BB_PROXY_TARGET}); that host did not answer."
+      fi
+      [ "$_prc" -eq 0 ] || exit "$_prc"
+      resp="$_BB_PROXY_STDOUT"
+    else
+      resp="$(cmd_op screenshot "$full")" || exit 1
+    fi
     if [ "$dataurl" -eq 1 ]; then
       # Escape hatch: the raw response, data URL and all (pre-#211 behaviour).
       printf '%s\n' "$resp" | pretty

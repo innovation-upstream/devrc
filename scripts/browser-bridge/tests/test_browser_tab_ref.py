@@ -159,9 +159,64 @@ def bridge(tmp_path):
     for k in ("BB_INSTANCE", "BB_TAB", "BB_FRAME"):
         env.pop(k, None)
 
+    # 🔴 THE `ssh` STUB IS NOT OPTIONAL AND IT IS INSTALLED FOR EVERY TEST IN
+    # THIS FILE, INCLUDING THE ONES THAT PREDATE IT.
+    #
+    # A wrong-host reference now RUNS the command on the naming host. On the
+    # developer's own machine the naming host in `bw://workbench/…` is a real,
+    # reachable box — so without this stub, the pre-existing refusal tests would
+    # ssh to a live workstation and drive somebody's actual Brave session. That
+    # is not a flake risk, it is the test suite performing the exact action the
+    # feature is dangerous for. The stub makes the transport a fixture: the
+    # ADDRESS is still resolved for real (through host_label, so a test can
+    # assert the target), only the hop is faked.
+    #
+    # DEFAULT = UNREACHABLE, which is the safe default twice over: it is the
+    # rc-4 fallback path, so every #1598 handoff assertion keeps its meaning
+    # unchanged, and a test that forgets to install a proxying stub fails
+    # visibly rather than reaching the network.
+    binhome = tmp_path / "stub-bin"
+    binhome.mkdir()
+    sshlog = tmp_path / "ssh-invocations"
+    env["PATH"] = f"{binhome}{os.pathsep}" + env.get("PATH", "")
+    env["BROWSER_BRIDGE_SSH_LOG"] = str(sshlog)
+
+    def _install_ssh(body):
+        """Replace the stub `ssh`. `body` is POSIX sh; argv is the real ssh argv.
+
+        Every stub logs its full argv (NUL-separated records) to
+        BROWSER_BRIDGE_SSH_LOG first, so "was ssh called, and with what" is
+        answerable in tests that are about something else.
+        """
+        mockbin.write_exec(
+            binhome / "ssh",
+            'for a in "$@"; do printf \'%s\\0\' "$a" >> "$BROWSER_BRIDGE_SSH_LOG"; done\n'
+            'printf \'\\36\\0\' >> "$BROWSER_BRIDGE_SSH_LOG"\n' + body)
+
+    _install_ssh(
+        'echo "ssh: connect to host stubbed port 22: Network is unreachable" >&2\n'
+        'exit 255\n')
+
     class _Bridge:
         handler = _Handler
         bodies = _Handler.bodies
+        install_ssh = staticmethod(_install_ssh)
+        ssh_log = sshlog
+
+        @staticmethod
+        def ssh_calls():
+            """Every stub-ssh invocation as a list of argv lists."""
+            if not sshlog.exists():
+                return []
+            raw = sshlog.read_text()
+            calls, cur = [], []
+            for tok in raw.split("\0")[:-1]:
+                if tok == "\36":
+                    calls.append(cur)
+                    cur = []
+                else:
+                    cur.append(tok)
+            return calls
 
         @staticmethod
         def env_for_stub():
@@ -756,13 +811,13 @@ def test_a_SAME_LABELLED_profile_on_this_host_is_still_never_driven(bridge):
 
 
 def test_the_help_documents_exit_4_and_keeps_the_host_verification_sentence():
-    """🔴 CRITERION 4, pinned on the WHOLE NORMALISED SENTENCE, not on words.
+    """🔴 Pinned on the WHOLE NORMALISED SENTENCE, not on words.
 
     The artifact under test is prose, so a guard on keywords is walkable by
-    rewording. The sentence below is the one the task requires to stay accurate
-    — it still is: the check is unchanged, and 'fails loudly' is now a rc-4
-    failure that also hands over a command. A cosmetic reword of it fails this
-    test, and that is the price of a machine-readable claim.
+    rewording. Both sentences below describe behaviour a caller depends on and
+    both were REWRITTEN by #574: the check still runs, but its consequence is no
+    longer "fails loudly" — it is "runs it over there". A cosmetic reword of
+    either fails this test, and that is the price of a machine-readable claim.
     """
     r = subprocess.run(["bash", str(CLI), "--help"], capture_output=True,
                        text=True, timeout=CLI_TIMEOUT_S)
@@ -770,14 +825,23 @@ def test_the_help_documents_exit_4_and_keeps_the_host_verification_sentence():
     help_text = re.sub(r"\s+", " ", r.stdout)
     assert (
         "The <host> field is VERIFIED against the bridge before the command "
-        "runs, so a reference pasted into a session on the other host fails "
-        "loudly instead of driving a same-labelled profile there."
+        "runs, so a reference pasted into a session on the other host is run ON "
+        "that host over SSH instead of driving a same-labelled profile here."
     ) in help_text, "the host-verification sentence was reworded or removed"
+    # 🔴 The non-goal, stated where an operator reads it: SSH is the transport
+    # and no listener is opened. A future change that exposes the bridge on the
+    # mesh would make this sentence false, and this is where that is caught.
+    assert (
+        "NO LISTENER IS OPENED ANYWHERE: the bridge on both hosts still binds "
+        "127.0.0.1 only and still enforces its Host-header allowlist"
+    ) in help_text, "the loopback-only contract was reworded or removed"
     # The shipped behaviour, described: the code, the stream, the contract.
     assert "exits 4" in help_text
     assert "does NOT begin with \"browser:\"" in help_text
-    assert re.search(r"\b4\s+ONLY the wrong-host `bw://` refusal", help_text), (
-        "the EXIT CODES block does not list 4")
+    assert re.search(r"\b4\s+ONLY the wrong-host `bw://` refusal: the reference "
+                     r"was minted on the OTHER host AND that host could not be "
+                     r"reached over SSH", help_text), (
+        "the EXIT CODES block does not describe 4 as the UNREACHABLE fallback")
 
 
 # --------------------------------------------------------------------------- #
