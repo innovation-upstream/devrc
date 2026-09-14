@@ -38,6 +38,21 @@ is the PRIVATE proposal, not this doc.
     heavily loaded box. **It is not a pass and must not be reported as one**; the three Tekton
     legs on #1657 are the authoritative read. Log: this session's scratchpad `full-suite.log`.
 
+- 🔴 **READ BEFORE ADDING ANYTHING TO THIS DOC: ~2.9 KB OF HEADROOM.** Measured 2026-09-14 —
+  **193,684 B** against the grandfathered allowance of **196,608 B** in
+  `scripts/lib/handoff_budget.py`. **Evict before you add.** Take a CLOSED block from
+  `## Open investigations` (several are merged history with "Next probe: none") and leave a
+  one-line pointer to the merge sha — the 2026-09-07 and 2026-09-14 blocks show the shape.
+  🔴 Raising the allowance is LAST; the ledger is a ratchet, not an exemption.
+  ⚠ **This session had to do exactly that, and the way it learned is the lesson:** the note
+  warning the next writer about headroom CONSUMED the headroom, leaving 165 B. A doc that
+  warns about its own size is subject to the warning. One block (rank 12's leakscan entry,
+  merged `9d58f02`) was evicted to pay for it.
+  ⚠ Separately: `test_handoff_doc_size.py` is ALREADY RED on `main` for two OTHER docs
+  (`handoff-index-store-claims-accuracy.md` 7,091 B over; `handoff-handoff-search-index.md`
+  needing its ledger entry deleted) — confirmed at `origin/main` with a control, and claimed
+  by another session. Do not read that red as this doc's.
+
 - 🔴 **RANK 26'S PREMISE WAS HALF FALSE, AND THE REFUTATION IS THE DURABLE OUTPUT.** The item
   says "The handle table has TWO hand-maintained copies, and both are drifted." One is.
   `handoff_index.REPO_ENV_HANDLES` omitting `CIVITAI_CLI` is **NOT drift** — it is a deliberate
@@ -312,53 +327,16 @@ countable.
 - **Next probe:** none. Merge #5. If it recurs after that, the assertion now names the constant
   it fell short of rather than the budget, so read the message.
 
-### CLOSED 2026-09-08 — rank 12, leakscan's coverage was an enumeration (MERGED as `9d58f02`)
-- **Symptom + exact repro:** not a failure anyone saw — a silent gap. `git show
-  9213726:tests/leakscan.py` line 110: `TEXT_SUFFIXES` is a hand-written set, and
-  `tracked_files()` drops any file whose suffix is absent from it. The run then prints
-  `0 findings across N file(s)` where N is files SCANNED, never files present, so nothing in
-  the output distinguishes "clean" from "did not look".
-- **Observed (with values), 2026-09-08:** the tree is **39 tracked files**, suffix census
-  `.py` 26, `` (none) 4, `.md` 2, `.sh` 2, `.yml`/`.lock`/`.nix`/`.dockerignore`/`.json` 1
-  each. **Zero files contain a NUL byte and all 39 decode as valid UTF-8**, so the
-  enumeration happened to cover everything *today* — the hazard was entirely about the next
-  new type. Baseline run: `38 file(s) scanned`, 0 findings, rc 0 (39 minus the self-exempt
-  `tests/leakscan.py`). via: measurement
-- **Ruled out: that the existing guard test already closed it.**
-  `test_leakscan_covers_every_tracked_file.py` pinned the enumeration against the tracked
-  tree, which catches "a new type nobody added" at TEST time — but its own docstring said
-  *"THIS DOES NOT MAKE THE COVERAGE DERIVED, and that is still the better fix. A genuinely
-  derived scanner would not need this file."* The scanner itself still skipped silently.
-  via: code
-- **Ruled out: that a suffix fast-path was worth keeping alongside the derivation.** Keeping
-  it leaves the enumeration load-bearing, so the class stays open; the sniff is bounded at
-  8000 bytes, so a huge binary is not read in full anyway. via: code
-- **Fixed in `ZacxDev/cairn` #6, MERGED 2026-09-08 as `9d58f02`** (PR head was `b5bd231`).
-  `partition_tracked_files()`
-  buckets every enumerated file — including the directory skips — so
-  `set(scanned) | set(skipped)` equals the enumeration by construction and the test asserts
-  it without re-implementing any filtering. `enumerate_repo(root)` is parameterised so the
-  test module DRIVES it instead of keeping the copy it used to justify at length.
-  `main(argv=None)` was added because the new tests could not call `main()` at all —
-  `parse_args()` read pytest's argv and exited 2.
-- **Regression matrix, measured both ways:** RED at merge base `9213726` —
-  `test_a_tracked_text_file_of_an_UNFAMILIAR_TYPE_is_scanned` fails on its OWN assertion,
-  `assert 'notes.rst' in set()`: the base scanner returned an EMPTY scan set for a tracked
-  `.rst` holding a real hostname. GREEN at HEAD. ⚠ The sibling
-  `..._is_actually_REFUSED` also fails at base but for an API reason (`main()` takes no
-  argv there), so it is **NOT** regression evidence and was not counted as any.
-  via: measurement
-- **Mutation battery: 8/8 killed BY THEIR INTENDED TEST**, harness control watched green on
-  the pristine tree first, `PYTHONDONTWRITEBYTECODE=1`, every pattern required to match
-  exactly once (0 or 2 matches ⇒ INVALID, never a pass). Mutants: `is_binary` always False /
-  always True; sniff window one byte short; a suffix allowlist creeping back in; the fixture
-  file dropped instead of bucketed; `main` no longer printing skips; enumeration losing
-  `-z`; enumeration narrowed to cached-only. Tree diffed byte-identical against the
-  battery's snapshot afterwards. via: measurement
-- **Full suite 1703 passed / 0 failed, 547s local; CI `collected=1703 failed=0 floor=1648`.**
-  via: measurement
-- **Next probe:** none. Merged; the closing condition is met by content and was watched on
-  the merged tree (38 scanned / 1 skipped, the skip named, rc 0).
+### EVICTED 2026-09-14 — rank 12, leakscan's coverage was an enumeration
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #6 `9d58f02`** (PR head `b5bd231`). The full block
+— suffix census, the 8/8 mutation battery, the regression matrix at base `9213726` — was
+evicted to keep this doc under its size allowance, per the convention the 2026-09-07 block
+uses. Read it at `git show <this doc's pre-eviction rev>` or on the PR. **The lesson that
+survives, and the only reason to re-open it:** a scanner whose coverage is a hand-written
+suffix ENUMERATION prints `0 findings across N file(s)` where N is files SCANNED, never
+files present — so nothing in the output distinguishes *clean* from *did not look*. The fix
+was to DERIVE coverage (`partition_tracked_files()` buckets every enumerated file, so
+`scanned | skipped` equals the enumeration by construction). **Next probe: none.**
 
 ### `cairn validate` prints nothing on the PINNED client — fixed in the worktree, NOT committed, and the class is still open
 - **Symptom + exact repro:** after #1406 merges and a `home-manager switch`, the mandated
@@ -1441,6 +1419,36 @@ belongs to that arc's own session. via: measurement
     **Closing condition:** each figure re-derived from the module's own corpus/reference builders,
     with the comment AND the failure message updated together — or the counts deleted where they
     add nothing — merged.
+    forcing: none
+
+28. **`shell-env-nudge.py` is cwd-BLIND, so its relative-path arm can nudge the WRONG CLUSTER.**
+    Filed by operator decision during #1657's round-2 audit rather than fixed there — the remedy
+    changes `analyze()`'s signature and the core matching of a hook that fires on **every Bash
+    call**, which deserves its own PR and its own audit rounds.
+    **Measured at #1657's head:** `KUBECONFIG=./production-kubeconfig` → `$KC_PROD` and
+    `KUBECONFIG=some/other/tree/prod-kubeconfig` → `$KC_DPPROD`, from any cwd. `KC_BASENAMES` is
+    `{basename: handle}` and nothing resolves the path, so a relative kubeconfig in the wrong
+    directory is nudged to a handle naming a **different cluster** — and `$KC_PROD` (homelab) and
+    `$KC_DPPROD` (datapacket) really are different clusters.
+    ⚠ **Pre-existing in KIND** (`KC_HOMELAB`/`KC_WORKBENCH` already behaved this way); #1657 added
+    `KC_PROD`, which made the `production-kubeconfig` spelling newly reachable. #1657 closed the
+    ABSOLUTE arm only — an absolute path is no longer matched by basename.
+    🔴 **Do NOT justify this with "the empty handle silently takes the default context"** — that
+    sentence is RETRACTED in `scripts/tests/test_absolute_handle_paths.py` and needs a precondition
+    this host does not meet. The real harm is the case that needs no precondition: where the
+    wrongly-named handle IS exported, the command runs against the wrong cluster with no error.
+    **The remedy, named so it is not re-derived:** PostToolUse payloads carry `cwd` —
+    `scripts/claude-hooks/bash-guard.py`, `git-add-provenance-nudge.py` and `lib/guard_core.py`
+    all already read it. Resolve `os.path.realpath(os.path.join(cwd, norm))` against `KC_VARS` and
+    `KC_BASENAMES` becomes unnecessary, closing both arms exactly.
+    ⚠ **Frequency is UNMEASURED** — the corpus holds one relative-kubeconfig instance and it is the
+    counter-example. Measure before deciding this is worth the change; `claude/opencode-addendum.md`
+    already forbids the spelling outright, which is an argument for deleting the arm instead.
+    **Closing condition:** EITHER the hook resolves relative paths against the payload's `cwd` and a
+    test shows `KUBECONFIG=./production-kubeconfig` from a non-`homelab-talos` cwd producing NO
+    `$KC_PROD` suggestion — RED before, GREEN after, merged — OR the basename arm is deleted and the
+    hook's own suite updated, OR a decision is recorded here that a cwd-blind relative nudge is
+    accepted, in which case the guard comments in `shell-env-nudge.py` must stop implying otherwise.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
