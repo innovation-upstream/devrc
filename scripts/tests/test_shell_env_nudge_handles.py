@@ -106,6 +106,7 @@ not depend on which user or host runs it.
 """
 import importlib.util
 import os
+import re
 
 # The nix parser, imported rather than re-implemented — see the module docstring.
 # `_handle_table()` returns EVERY `NAME = "${home}/…";` entry in the file (both
@@ -114,9 +115,28 @@ import os
 # module from adding a third regex over the same file.
 from test_absolute_handle_paths import (  # noqa: E402
     HANDLES_NIX,
+    _NIX_ENTRY,
     _handle_table,
     _kubeconfig_table,
 )
+
+# The `repos = { ... };` attrset, isolated — the mirror of that module's
+# `_NIX_SECTION`, which is hardcoded to the `kubeconfigs` block. Only the ENTRY
+# pattern is shared (imported above); this adds the block boundary, which is the
+# one thing the imported module does not expose for this half.
+#
+# 🔴 THIS REPLACED A SUBTRACTION, AND THE SUBTRACTION WAS UNSOUND. `_repos()`
+# used to be "the whole-file parse minus the kubeconfig names", justified as
+# exact because the two blocks are disjoint. Disjointness gives
+# `repos ∩ kubeconfigs = ∅`; exactness ALSO needs
+# `_handle_table() ⊆ repos ∪ kubeconfigs`, which nothing asserted. Measured: add
+# a third block to `agent-handles.nix` —
+# `caches = { CACHE_X = "${home}/.cache/agent-x"; };` — and the old derivation
+# swept `CACHE_X` into the repo half, so
+# `test_the_repo_table_is_exactly_the_nix_repos_block` failed telling the reader
+# to ADD a never-exported, non-repo handle to `REPO_VARS`. It failed LOUD, which
+# capped the damage, but with an actively wrong remedy.
+_REPOS_BLOCK = re.compile(r"^\s*repos\s*=\s*\{(.*?)^\s*\};", re.M | re.S)
 
 HOOK = HANDLES_NIX.parent.parent / "scripts/claude-hooks/shell-env-nudge.py"
 
@@ -142,14 +162,22 @@ def _expected(entries, home):
 
 
 def _repos():
-    """The `repos` half: every parsed entry that is not a kubeconfig.
+    """The `repos` block of `agent-handles.nix`, LONGEST SUFFIX FIRST.
 
-    Derived rather than parsed again. The two nix blocks are disjoint by handle
-    name (asserted in `test_the_nix_source_parses_to_a_usable_table`), so the
-    subtraction is exact.
+    Parsed out of its OWN attrset, symmetric with `_kubeconfig_table()`, rather
+    than derived by subtracting the kubeconfig names from a whole-file parse —
+    see the `_REPOS_BLOCK` note above for why the subtraction was unsound.
     """
-    kc = {name for name, _ in _kubeconfig_table()}
-    return [(name, rel) for name, rel in _handle_table() if name not in kc]
+    text = HANDLES_NIX.read_text(encoding="utf-8")
+    m = _REPOS_BLOCK.search(text)
+    if not m:
+        raise AssertionError(
+            f"no `repos = {{ ... }};` block found in {HANDLES_NIX}. Every repo "
+            f"assertion in this module compares against that block; without it "
+            f"they compare against an empty set and pass vacuously."
+        )
+    entries = [(name, rel.rstrip("/")) for name, rel in _NIX_ENTRY.findall(m.group(1))]
+    return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
 
 
 def test_the_nix_source_parses_to_a_usable_table():
@@ -200,10 +228,28 @@ def test_the_nix_source_parses_to_a_usable_table():
     dupes = sorted({n for n in names if names.count(n) > 1})
     assert not dupes, (
         f"{dupes} is declared more than once in {HANDLES_NIX} — in both the "
-        f"`repos` and `kubeconfigs` blocks, or twice in one. `_repos()` derives "
-        f"the repo half by subtracting the kubeconfig names, so a name in both "
-        f"blocks is dropped from the repo half and silently escapes "
-        f"`test_the_repo_table_is_exactly_the_nix_repos_block` entirely."
+        f"`repos` and `kubeconfigs` blocks, or twice in one. The two blocks are "
+        f"pinned to two different consumer dicts, so a name in both makes this "
+        f"module's verdict depend on which block it reads first."
+    )
+
+    # 🔴 THE TWO BLOCKS MUST PARTITION THE WHOLE-FILE PARSE. `_handle_table()`
+    # matches every `NAME = "${home}/…";` in the file, wherever it sits. A THIRD
+    # attrset — `caches = { … };`, say — is parsed by it and belongs to neither
+    # consumer dict, so without this assertion it is simply invisible to this
+    # module: not a repo handle, not a kubeconfig handle, silently unpinned.
+    # This is the half that makes "disjoint" into "exhaustive", and it is the
+    # one the old subtraction got wrong in the opposite direction (it swept such
+    # a handle INTO the repo half and demanded `REPO_VARS` carry it).
+    known = {n for n, _ in _repos()} | {n for n, _ in kubeconfigs}
+    orphans = sorted(set(names) - known)
+    assert not orphans, (
+        f"{orphans} is declared in {HANDLES_NIX} but sits in NEITHER the `repos` "
+        f"nor the `kubeconfigs` block. This module pins those two blocks to the "
+        f"hook's two dicts; a handle outside both is exported by nix and checked "
+        f"by nothing here. Put it in one of the two blocks, or extend this module "
+        f"to cover the new one — do NOT add it to a consumer dict just to go "
+        f"green, which is what the previous derivation would have told you to do."
     )
 
     # Anchors by NAME. These two are the handles this repo's own tooling is
@@ -326,6 +372,56 @@ def test_no_kubeconfig_basename_shadows_another():
         f"{len(mod.KC_VARS)} — entries were lost building it, which is the "
         f"collision above by another route."
     )
+
+
+def test_an_absolute_path_is_not_matched_by_BASENAME_alone():
+    """REGRESSION. The basename fallback must fire for RELATIVE refs only.
+
+    `KC_BASENAMES` is `{basename(path): handle}` and the lookup site used to
+    consult it for ANY path whose exact match missed — absolute paths included.
+    An absolute path that merely ENDS in a known kubeconfig name is a DIFFERENT
+    FILE, so the nudge named the wrong cluster. Because `$KC_*` is
+    existence-guarded in nix, on a host where that handle is unset the suggestion
+    expands to EMPTY and `KUBECONFIG= kubectl` falls back to the DEFAULT context
+    — silently.
+
+    🔴 MEASURED BEFORE THE FIX, and the realistic case is the damaging one:
+    `claude/skills/auditloop/SKILL.md` documents the laptop's kubeconfigs at
+    `~/workspace/homelab-infra/{workbench,homelab,production}-kubeconfig`, while
+    `$KC_PROD` is guarded on the `homelab-talos` spelling. So an absolute
+    `.../homelab-infra/production-kubeconfig` was nudged as `$KC_PROD`.
+    Pre-existing for `KC_HOMELAB`/`KC_WORKBENCH`; adding `KC_PROD` completed it
+    to three of three, which is why it is fixed here rather than filed.
+
+    The positive control is in the same test on purpose: a bare zero from the
+    negative cases is indistinguishable from `analyze()` wired to nothing.
+    """
+    mod = _hook()
+    home = mod.HOME
+
+    # POSITIVE CONTROL — the relative spelling the fallback exists for STILL fires.
+    assert [v for v, _ in mod.analyze("KUBECONFIG=./prod-kubeconfig kubectl get pods")] == [
+        "KC_DPPROD"
+    ], "the relative-reference fallback stopped working — this fix went too far"
+
+    # And an EXACT absolute path still resolves, via KC_VARS rather than basename.
+    exact = f"{home}/workspace/homelab-talos/production-kubeconfig"
+    assert [v for v, _ in mod.analyze(f"KUBECONFIG={exact} kubectl get ns")] == ["KC_PROD"]
+
+    # NEGATIVE — absolute paths that only share a basename must NOT be claimed.
+    for bad in (
+        "/tmp/production-kubeconfig",
+        f"{home}/workspace/homelab-infra/production-kubeconfig",
+        f"{home}/workspace/homelab-infra/homelab-kubeconfig",
+        "/tmp/prod-kubeconfig",
+    ):
+        got = [v for v, _ in mod.analyze(f"KUBECONFIG={bad} kubectl get pods")]
+        assert got == [], (
+            f"{bad!r} shares a basename with a known kubeconfig but is a "
+            f"DIFFERENT FILE, and was nudged as {got}. That names the wrong "
+            f"cluster, and where the handle is unset it expands to empty and "
+            f"silently selects the default context."
+        )
 
 
 # ⚠ DELETED, on measurement: `test_the_hook_file_is_where_this_module_thinks_it_is`.

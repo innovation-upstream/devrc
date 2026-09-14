@@ -43,6 +43,9 @@ KC_VARS = {
     f"{HOME}/.kube/homelab-nebula.yaml": "KC_NEBULA",
 }
 # Relative kubeconfig references (e.g. datapacket's `KUBECONFIG=./prod-kubeconfig`) by basename.
+# 🔴 RELATIVE ONLY — see the `norm.startswith("/")` guard at the lookup site. An
+# ABSOLUTE path that merely ENDS in one of these names is a DIFFERENT FILE, and
+# nudging its handle names the wrong cluster.
 KC_BASENAMES = {os.path.basename(p): v for p, v in KC_VARS.items()}
 
 CACHE_DIR = f"{HOME}/.cache/claude-shell-env-nudge"
@@ -73,7 +76,19 @@ def analyze(cmd):
         if raw.startswith("$"):  # already a variable
             continue
         norm = _norm(raw)
-        var = KC_VARS.get(norm) or KC_BASENAMES.get(os.path.basename(norm))
+        var = KC_VARS.get(norm)
+        # 🔴 The basename fallback is for RELATIVE references only. Applied to an
+        # absolute path it matches a DIFFERENT FILE that happens to share a name
+        # and nudges a handle for the wrong cluster — and because $KC_* is
+        # existence-guarded, on a host where that handle is unset the suggestion
+        # expands to EMPTY and `KUBECONFIG= kubectl` silently falls back to the
+        # default context. Measured before this guard: an absolute
+        # `.../homelab-infra/production-kubeconfig` (the laptop's documented
+        # layout) was nudged as `$KC_PROD`, which is guarded on the
+        # `homelab-talos` spelling. `_norm` expands `~`, so `~/...` is absolute
+        # here and is covered.
+        if not var and not norm.startswith("/"):
+            var = KC_BASENAMES.get(os.path.basename(norm))
         if var:
             suggestions.setdefault(var, f"KUBECONFIG=${var} kubectl …")
 
