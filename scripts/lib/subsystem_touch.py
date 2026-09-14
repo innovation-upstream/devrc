@@ -384,6 +384,7 @@ from entry_shape import (  # noqa: E402
     store_host_line,
 )
 from entry_shape import scope_for_repo as _pinned_scope_for_repo  # noqa: E402
+import subsystem_read_store as _read_store  # noqa: E402
 
 __all__ = [
     "WRITER_ID",
@@ -529,6 +530,26 @@ UNSTAMPED = "unstamped (pre-instrumentation)"
 # one an agent copy-pastes off a `NO PATH FOOTPRINT?` block.
 WRITER_PLACEHOLDER = "<" + "|".join(KNOWN_WRITERS) + ">"
 
+#: The FROZEN pre-cutover mirror — THE one definition of that path, and no longer
+#: this CLI's default.
+#:
+#: 🔴 IT IS NOT A DEFAULT ANY MORE, AND THAT WAS THE BUG. Until this constant was
+#: demoted, `--store` defaulted to it, so every mandated invocation in
+#: `claude/skills/subsystem-index/SKILL.md` — none of which pass `--store` —
+#: censused, validated and reported touches against a directory the Cairn cutover
+#: froze `0444` and nothing refreshes (measured: mirror 161 entries, cache 244).
+#: That is the same defect `subsystem_recall`, `service_recon` and
+#: `subsystem-audit.py` each shipped and each had fixed one at a time; this module
+#: was the last holdout. The default now resolves through
+#: `subsystem_read_store.read_store_root()`, the one place that path is written
+#: down.
+#:
+#: 🔴 THE CONSTANT STAYS, because the mirror still has one legitimate reader:
+#: `cairn doctor` takes `mirror_root=subsystem_touch.DEFAULT_STORE_ROOT` to check
+#: the mirror is still frozen, and `subsystem_read_store` deliberately does not
+#: name the mirror (its `refusal_message` docstring says the mirror's path belongs
+#: to the writer half). Deleting it would push that spelling into `scripts/cairn`
+#: as a second copy.
 DEFAULT_STORE_ROOT = Path.home() / ".claude" / "analyze-service-index"
 
 # --- Which policy file governs a scope ------------------------------------------
@@ -6026,17 +6047,20 @@ def validate_command(store_root: str | Path, scope: str) -> str:
     refusal came from, so it cannot report a DIFFERENT store clean — the failure
     `malformed_refusal` exists to prevent, and the one
     `test_a_reject_in_ANOTHER_scope_gets_a_command_for_THAT_scope` guards.
-    ⚠ **But it is not the free choice an earlier draft implied, and the trade is
-    real.** `store` here is `build_report`'s argument, which in the ordinary path
-    is `args.store` — whose default is `DEFAULT_STORE_ROOT`, the FROZEN
-    pre-cutover mirror, NOT the synced cache the launcher would otherwise pick
-    (measured: mirror 161 entries, cache 244). The mandated invocations in
-    `claude/skills/subsystem-index/SKILL.md` pass no `--store`, so this emits a
-    command pointing at the frozen mirror. That is FAITHFUL — the malformed file
-    really is the one that was read — but it inherits a pre-existing question
-    this function does not answer and must not be read as settling: why does the
-    writer default to the frozen mirror at all? Do not "tidy" this by dropping
-    `--store`; that trades fidelity for freshness silently.
+    ⚠ **The fidelity rule stands, and the freshness half of the trade is now
+    GONE.** `store` here is `build_report`'s argument, which in the ordinary path
+    is `args.store`. That default used to be `DEFAULT_STORE_ROOT`, the FROZEN
+    pre-cutover mirror (measured: mirror 161 entries, cache 244), so a mandated
+    invocation from `claude/skills/subsystem-index/SKILL.md` — none pass
+    `--store` — emitted a command pointing at a directory nothing refreshes. An
+    earlier draft recorded that as an open question this function does not
+    answer: *why does the writer default to the frozen mirror at all?* It no
+    longer does — `--store` defaults to `read_store_root()`, the cairn-synced
+    cache, and an undateable default is refused outright. So this now emits the
+    store the reader actually read, which is both faithful AND fresh.
+    Do not "tidy" this by dropping `--store`: emitting it is what stops the
+    command reporting a DIFFERENT store clean, and that is a fidelity property
+    the default's freshness does not supply.
 
     `--validate` is NOT spelled here: the launcher prepends it with no value,
     which is the check-every-entry form. That seam is pinned BEHAVIOURALLY by
@@ -6507,6 +6531,31 @@ def _render_validation_unreachable(report: ValidationReport) -> list[str]:
 # --- CLI -----------------------------------------------------------------------
 
 
+class _StoreAction(argparse.Action):
+    """Records that `--store` was given EXPLICITLY, alongside its value.
+
+    🔴 THE DISTINCTION IS THE CONTRACT, NOT AN IMPLEMENTATION DETAIL, and it is
+    the SAME contract `subsystem_recall` and `subsystem-audit.py` carry — a
+    caller must not need two rules. The DEFAULT resolution is refused when the
+    store carries no snapshot stamp; an EXPLICIT `--store <path>` stays
+    permissive, because that is an operator naming a directory deliberately
+    (`prune-index`'s prescribed commands, `cairn-validate`'s post-write check,
+    every test fixture, a restored backup bundle).
+
+    Comparing the parsed value against the default cannot answer it: `--store
+    ~/.cache/subsystem-store` typed by hand is byte-identical to omitting the
+    flag, and the two must not behave the same. Recording the ACT of passing it
+    is the only thing that separates them, and it survives `--store=X`,
+    `--store X` and argparse's prefix abbreviations alike. (The sentinel spelling
+    `subsystem-audit.py` uses is not available here: `main` reads `args.store` as
+    a `str` in eight places.)
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):  # noqa: D102
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "store_explicit", True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subsystem-touch",
@@ -6523,7 +6572,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="PATH to the repo to read paths from — not a repo name (default: cwd)",
     )
     p.add_argument("--scope", default=None, help="override the derived store scope")
-    p.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="store root")
+    # 🔴 THE SYNCED CACHE, NOT `DEFAULT_STORE_ROOT`. See that constant's note:
+    # defaulting to the frozen mirror is what made every mandated invocation read
+    # a store that had stopped moving. Resolved at parser-BUILD time through
+    # `read_store_root()`, so the module global is the only place it is written.
+    p.add_argument(
+        "--store",
+        action=_StoreAction,
+        default=str(_read_store.read_store_root()),
+        help="store root (default: the cairn-synced read cache; explicit ⇒ permissive)",
+    )
+    # The other half of `_StoreAction`: absent the flag, nothing sets this.
+    p.set_defaults(store_explicit=False)
     p.add_argument(
         "--paths-from",
         default="git",
@@ -6697,6 +6757,31 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # 🔴 THE STORE MUST BE ABLE TO DATE ITSELF — placed HERE, after the
+    # flag-combination rejection above and before ANY store I/O, so a well-formed
+    # command reaches it and no earlier check can win on its behalf. The
+    # discriminator is the `.sync-stamp`, not the path, so it also catches a cache
+    # nobody has ever synced.
+    #
+    # 🔴 ONLY THE DEFAULT RESOLUTION IS REFUSED. `--store <path>` given explicitly
+    # is the operator naming a directory (see `_StoreAction`) and stays permissive
+    # whether or not that directory is stamped. Same exit code and same wording as
+    # `subsystem-recall` and `subsystem-audit`.
+    #
+    # ⚠ IT CAN PREEMPT THE `--paths-from` COMBINATION REFUSAL BELOW, which is a
+    # command-shaped 2. Unlike `subsystem_recall`, this CLI's argument refusals
+    # are not all in one block — that one sits inside the report path, past
+    # `--census`'s own store read — so there is no point that is after every
+    # command check AND before every store read. Placed EARLIER on purpose: a
+    # guard an earlier check can win on behalf of is a guard that does not run,
+    # and a caller whose default store cannot date itself must run `cairn sync`
+    # whichever flags they also got wrong. `--store <path>` reaches the later
+    # refusals unchanged.
+    read_store = _read_store.resolve_read_store(args.store)
+    if not read_store.stamped and not args.store_explicit:
+        print(_read_store.refusal_message("subsystem-touch", read_store), file=sys.stderr)
+        return _read_store.EXIT_UNSTAMPED_READ_STORE
 
     try:
         if args.census:

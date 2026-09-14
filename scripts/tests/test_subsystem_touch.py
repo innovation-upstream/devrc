@@ -101,6 +101,45 @@ from testlib.skills_mapping import (  # noqa: E402
 import subsystem_resolver as sr  # noqa: E402
 import subsystem_touch as st  # noqa: E402
 
+# After `subsystem_touch`, whose `cairn_pin.ensure()` puts the pinned client's
+# `lib/` on `sys.path`. `rc` is here so the refusal contract can be pinned
+# ACROSS the two CLIs rather than against this module's own spelling of it.
+import subsystem_read_store as rs  # noqa: E402
+import subsystem_recall as rc  # noqa: E402
+
+#: The host's REAL synced-cache root, captured at IMPORT time — before the
+#: autouse fixture below can repoint it. Asserted against; never read from.
+LIVE_CACHE_ROOT = rs.DEFAULT_CACHE_ROOT
+
+
+@pytest.fixture(autouse=True)
+def _no_test_here_can_reach_the_live_read_cache(tmp_path_factory, monkeypatch):
+    """🔴 STRUCTURAL, AND IT REPLACED A SOURCE SCAN.
+
+    `--store` used to default to the frozen mirror, so only an empty argv could
+    reach a real store and one literal check covered it. Now ANY `st.main` call
+    that omits `--store` resolves the host's synced cache — same disk, same
+    client-confidential entries — and the call sites here build their argv in
+    helpers (`self._argv(store)`, `_writer_argv(argv)`, a shared `_run`), so a
+    per-function scan for the literal `--store` reports them all as offenders
+    and would need an exclusion list to shut up. An exclusion list is how a guard
+    stops meaning anything; repointing the resolver makes the live cache
+    unreachable from this file whatever any argv says.
+
+    🔴 IT IS STAMPED, and that is the second half. An UNSTAMPED default is
+    refused with `EXIT_UNSTAMPED_READ_STORE`, so an empty directory here would
+    make every argument-refusal test return 4 instead of 2 on a host that has
+    never run `cairn sync` — green on a synced dev host and red in the `nix
+    build` sandbox, which is exactly the config-blind suite `claude/RULES.md`
+    names. A stamped synthetic directory makes the file host-independent in both
+    tiers. Tests that need the refusal repoint this again in their own bodies.
+    """
+    fake = tmp_path_factory.mktemp("not-the-real-cache")
+    (fake / rs.SYNC_STAMP).write_text(
+        "source: synthetic fixture, no real store\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rs, "DEFAULT_CACHE_ROOT", fake)
+
 
 TODAY = "2026-08-11"  # fixed: the pure layer takes the date, it never reads a clock
 
@@ -2304,6 +2343,134 @@ class TestNoRealStoreIsRead:
         assert st.DEFAULT_STORE_ROOT.parent.name == ".claude"
         assert f"~/.claude/{st.DEFAULT_STORE_ROOT.name}" in ANALYZE_STORE_DOC.read_text(
             encoding="utf-8"
+        )
+
+    def test_the_real_read_cache_is_outside_this_repo(self) -> None:
+        """The guard had to WIDEN when the CLI default moved: a check scoped to
+        the frozen mirror leaves the live synced cache — same disk, same
+        client-confidential entries — reachable by any call that omits
+        `--store`. `_no_test_here_can_reach_the_live_read_cache` is what makes
+        that unreachable; this is the claim about the path itself."""
+        assert ROOT not in LIVE_CACHE_ROOT.parents
+        assert not str(LIVE_CACHE_ROOT).startswith(str(ROOT))
+
+
+class TestTheCLIDefaultIsTheSyncedCacheNotTheFrozenMirror:
+    """🔴 THE WRITER-SIDE HALF OF THE CUTOVER DEFECT, PINNED.
+
+    `subsystem_recall`, `service_recon` and `subsystem-audit.py` each shipped a
+    default that resolved `~/.claude/analyze-service-index` — a FROZEN (`0444`)
+    per-host mirror nothing refreshes since the Cairn cutover — and each was
+    found and fixed one at a time. This module was the last holdout: its
+    `--store` default was the mirror, and none of the mandated invocations in
+    `claude/skills/subsystem-index/SKILL.md` pass `--store`, so every census,
+    every `--validate` and every touch report read a store that had stopped
+    moving (measured in the module: mirror 161 entries, cache 244). That is the
+    mechanism that strands an entry on one machine, invisible to every reader on
+    every host.
+
+    🔴 PINNED BEHAVIOURALLY, NOT AS A CONSTANT. "the literal changed" is walkable
+    by anyone editing the literal back, so what is asserted here is what the CLI
+    DOES: where the default resolves, that an undateable default is refused, that
+    an explicit `--store` is not, and that the refusal is the same wire contract
+    the reader already emits.
+    """
+
+    def test_the_default_TRACKS_the_resolver_rather_than_naming_a_path(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """🔴 THE ANTI-HARDCODE HALF, and it is why this is not an assertion
+        about a literal. Repoint the resolver at a directory nobody could have
+        typed into this module and the parser's default MOVES with it. The old
+        code — a constant on the right-hand side of `default=` — cannot satisfy
+        that however the constant is spelled, so "somebody edits the literal
+        back" is not a way through.
+
+        Asserted on the parser's DEFAULT, not on its help text: the help string
+        does not interpolate it, so a check against the text would pass for any
+        default at all.
+        """
+        elsewhere = tmp_path / "some-other-store"
+        monkeypatch.setattr(rs, "DEFAULT_CACHE_ROOT", elsewhere)
+        assert st._build_parser().get_default("store") == str(elsewhere)
+
+    def test_the_resolver_it_tracks_is_the_cache_and_NOT_the_frozen_mirror(self) -> None:
+        """The other half, against the HOST's real roots, captured at import.
+
+        Two-way: "is the cache" alone goes green again the moment somebody
+        repoints the resolver at the mirror, and "is not the mirror" alone is
+        satisfied by any third path.
+        """
+        assert LIVE_CACHE_ROOT == Path.home() / ".cache" / "subsystem-store"
+        assert LIVE_CACHE_ROOT != st.DEFAULT_STORE_ROOT
+
+    def test_store_explicit_is_a_PARSED_FACT_not_a_comparison(self) -> None:
+        """`--store <the cache>` and passing nothing produce identical values and
+        must not behave identically, so the ACT of passing the flag is what gets
+        recorded."""
+        p = st._build_parser()
+        assert p.parse_args([]).store_explicit is False
+        assert p.parse_args(["--store", "/x"]).store_explicit is True
+        assert p.parse_args(["--store=/x"]).store_explicit is True
+
+    def test_the_DEFAULT_refuses_a_store_that_cannot_date_itself(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """🔴 THE DISCRIMINATOR IS THE STAMP, NOT THE PATH — which is why this
+        repoints the cache at a perfectly ordinary, perfectly readable store and
+        still expects a refusal. A never-synced cache is the same state."""
+        store = _make_store(tmp_path / "s")           # readable, and UNSTAMPED
+        repo = _init_repo(tmp_path, SCOPE)
+        monkeypatch.setattr(rs, "DEFAULT_CACHE_ROOT", store)
+
+        rc_code = st.main(["--repo", str(repo), "--today", TODAY])
+
+        assert rc_code == rs.EXIT_UNSTAMPED_READ_STORE
+        err = capsys.readouterr().err
+        assert str(store) in err
+        assert rs.REMEDY in err
+
+    def test_an_EXPLICIT_store_stays_PERMISSIVE_on_the_same_directory(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The same unstamped directory, named on the command line, is read.
+
+        That is the operator naming a directory deliberately — what
+        `prune-index` prescribes, what `cairn-validate` passes after a write,
+        what every fixture in this file is, and what a restored backup bundle
+        would be. Sharing the fixture with the test above is the point: the ONLY
+        difference between the two calls is the flag.
+        """
+        store = _make_store(tmp_path / "s")           # the same unstamped store
+        repo = _init_repo(tmp_path, SCOPE)
+        monkeypatch.setattr(rs, "DEFAULT_CACHE_ROOT", store)
+
+        rc_code = st.main(["--repo", str(repo), "--store", str(store), "--today", TODAY])
+
+        assert rc_code != rs.EXIT_UNSTAMPED_READ_STORE
+        assert rs.REMEDY not in capsys.readouterr().err
+
+    def test_the_refusal_is_the_SAME_CONTRACT_the_reader_emits(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """🔴 ONE RULE, NOT TWO. A caller that sees this refusal from either CLI
+        must be able to act on it identically, so the exit code and the message
+        are compared against `subsystem-recall`'s ACTUAL output on the same
+        directory — not against this module's own spelling of them. The only
+        licensed difference is the program name.
+        """
+        store = _make_store(tmp_path / "s")
+        repo = _init_repo(tmp_path, SCOPE)
+        monkeypatch.setattr(rs, "DEFAULT_CACHE_ROOT", store)
+
+        touch_code = st.main(["--repo", str(repo), "--today", TODAY])
+        touch_err = capsys.readouterr().err
+        reader_code = rc.main(["--repo", str(repo)])
+        reader_err = capsys.readouterr().err
+
+        assert touch_code == reader_code == rs.EXIT_UNSTAMPED_READ_STORE
+        assert touch_err.replace("subsystem-touch", "<prog>") == reader_err.replace(
+            "subsystem-recall", "<prog>"
         )
 
 
