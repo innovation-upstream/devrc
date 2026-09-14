@@ -21,6 +21,26 @@ is the PRIVATE proposal, not this doc.
 - ✅ **2026-09-14 — RANK 26 MERGED: `innovation-upstream/devrc` #1657, squash `0808a820`.** Three
   audit rounds (0, 1, 2). Claim `cairn-oss-multi-instance-26` RELEASED. Verified BY CONTENT at
   `origin/main` — see rank 26 for the six checks. **Rank 28 is what it did NOT close.**
+  ✅ **LIVE ON BOTH HOSTS 2026-09-14 via `ship.sh`, verified BY CONTENT on each.** Both resolve
+  `~/.claude/hooks/shell-env-nudge.py` to the **identical** store path
+  `…zxj2viy1njgysr6jdl8q3xwqz2mrdha5-hm_shellenvnudge.py`, carrying `KC_PROD` and the
+  `norm.startswith("/")` guard. 🔴 **ROLLBACK POINTS — the only record: workbench was
+  generation 763, now 764; laptop is now 633.** (The long-carried "generation 713, rollback point
+  712" was STALE; a rollback number that has aged is useless for the one job it exists to do.)
+  🔴 **`ship.sh` exited 4 and its verdict was a FALSE NEGATIVE about the laptop — do not act on the
+  rc alone.** The remote leg's `git fetch` lost a ref-lock race (`cannot lock ref
+  'refs/remotes/origin/main': is at d4179fbd but expected 06287019` — another process had already
+  moved it), so ship printed `[laptop] converge exited 4` and
+  `cross-host agreement NOT COMPARED — 1 of 2`. Measured directly afterwards, the laptop was on
+  `main`, 0 behind, clean, no stale locks, its checkout carrying the fix and its DEPLOYED hook on
+  the same store path as the workbench. **Agreement holds; ship simply could not see it.** This is
+  the doc's own rule landing again — a `NOT COMPARED` verdict is not evidence of disagreement, and
+  the cure is to measure the thing (the resolved store path) rather than a proxy (ship's rc).
+  ⚠ **And the wrapper trap that nearly hid it:** the run was launched as
+  `bash ship.sh > log 2>&1; echo "SHIP_RC=$?" >> log`, so the BACKGROUND COMMAND exited **0** —
+  `echo`'s status — and was briefly reported as a clean ship. The real rc was **4**, inside the
+  log. Same family as the project-level `cmd | head; echo rc=$?` gotcha: **read the rc you
+  recorded, never the wrapper's.**
   ⚠ **Merging does NOT make the hook live**: `nix/home.nix` ships it as a `home.file` store copy,
   so the deployed hook keeps the OLD table until a `home-manager switch`. `readlink -f`, not the merge.
   🔴 **`devrc-pytests` was RED at merge, on FIVE failures, NONE of them this branch's** — each
