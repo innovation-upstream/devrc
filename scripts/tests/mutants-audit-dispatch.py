@@ -131,7 +131,16 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # 🔴 ROUND 18 RAISED IT AGAIN, 120 -> 122, at m = 128 — COUNTED from a green run
 # of the module (`128 passed`), `128 - min(50, max(1, 128 // 20))` = 128 - 6 =
 # 122, not derived by adding this round's one new test to 120.
-MIN_TESTS = 122
+#
+# 🔴 RAISED AGAIN 2026-09-14, 122 -> 131, at m = 137 — COUNTED from a green run of
+# the module (`137 passed`), `137 - min(50, max(1, 137 // 20))` = 137 - 6 = 131,
+# not derived by adding this round's two new tests to 122. Raised here rather
+# than left because a floor sitting 15 below the module is a floor that would
+# have vouched for a suite which had silently lost every test added since round
+# 16 — the exact shape `mutants-audit-ladder.sh` recorded twice before its own
+# floor was pinned to a test. This one still is not; it is maintained by this
+# comment and by whoever reads it.
+MIN_TESTS = 131
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
