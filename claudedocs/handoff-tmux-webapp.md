@@ -10,47 +10,55 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **THE LOOP ITSELF IS CLOSED AND PROVEN — a reply typed in the web UI lands in a
-REAL pane. Observed 2026-09-06 TWICE:** once via a token-API control that isolated
-the fault, and once end to end through the UI path after the fix. Rank 33 carries
-the evidence and the defect it found. (Carried forward across a Status replace —
-it is the arc's central result, not status.)
+🔴 **THE ARC SHIPPED. Both halves of the tmux page and the delivery axis are LIVE and OBSERVED
+in production — not merged-and-assumed.** Live clawgate is **0.8.34** (`clawgatectl health`).
 
-**Task 375 is CLOSED; clawgate is deployed at 0.8.32; both devrc PRs are MERGED.**
+| PR | state |
+|---|---|
+| devrc **#1611** | MERGED `80266b76` — `session-manager` publishes the scratch-slot `color` per snapshot row |
+| homelab-infra **#803** | MERGED `9f461167` — tmux page: per-host tabs, codename headings, colour, pretty/raw toggle, lazy full transcripts, per-card reply. **Deployed 0.8.33** |
+| homelab-infra **#804** | MERGED `9422fe6f` — chief identity/attribution (PR1). **Ships INERT by design** |
+| homelab-infra **#813** | MERGED `1a3bdef6` — the delivery-axis freeze fix. **Deployed 0.8.34** |
+| homelab-infra **#817** | MERGED `5890f3b9` — 5 walkable ledger guards made structural |
+| devrc **#1660** | **OPEN, mergeable** — records rank 58's closure + a retraction |
+| `hold/grid-freeform-axis` | pushed at `aa11176c8`, **no PR** — PR B, see rank 59 |
 
-| | | |
-|---|---|---|
-| devrc **#1575** | MERGED squash `1543844a` | clawgate stream-liveness probe → the skill's troubleshooting playbook |
-| devrc **#1515** | MERGED squash `cf77128d` | clawgate skill cross-session reach |
-| devrc **#1549** | CLOSED unmerged 05:00:00Z | superseded by **#1561**; see rank 50 |
+**Verified live, not inferred.** The tmux page: 105/105 slot dots painted by *computed style*, tabs
+defaulting to workbench, 39 groups with **0** raw `scratchN` headings, 5 `base` groups.
+The delivery axis, on the live pod with a MutationObserver installed before the click:
+`ready` → **`queued` @ +580 ms** → **`sent` @ +6033 ms**, stable to +32.3 s, **no reload**; queue row
+`claimed` @ +5.42 s, `completed` @ +5.48 s; the pane received the text typed AND submitted.
+🔴 **Why that is not a case that would have passed anyway:** the terminal transition at +5.4 s sits
+far beyond the ~1.17 s single post-POST refetch that was the panel's ONLY read before the fix.
 
-Both merges verified **by content on `origin/main`**, never by exit code — `gh pr merge … | tail`
-returns *tail's* status, so an `rc=0` read that way says nothing about the merge.
+**Audit ladders run this session:** #803 four rounds (0→3), #804 five rounds (0→4, closed clean),
+#811 round 0 (which produced the split), #813 round 0+1. Round 0 changed the outcome on **three** of
+them — it is the only round that can say *do not ship this shape*.
 
-**Task 519 — the measurement finally exists, on one host:**
+**Carried forward from the superseded status block — these are MEASUREMENTS, not status:**
+🔴 **The loop itself was closed and proven on 2026-09-06, twice** — a reply typed in the web UI
+lands in a REAL pane; once via a token-API control that isolated the fault, once end to end through
+the UI after the fix. Re-proven live 2026-09-12 (rank 55) and again 2026-09-14 on 0.8.34 (rank 58).
+
+**Task 519, criterion 1 — still ONE host only, and rank 53 turns on it:**
 
 | criterion | workbench | laptop |
 |---|---|---|
-| 1 — seconds-fresh, MEASURED | ✅ **2.0s and 3.1s** induced-append, twice | ❌ no number — host idle since 03:37Z |
+| 1 — seconds-fresh, MEASURED | ✅ **2.0 s and 3.1 s** induced-append, twice | ❌ no number — host idle |
 | 2 — rides the existing outbound connection | ✅ 52 accepted cursors | ✅ 4 accepted cursors, real byte offsets |
-| 3 — coverage past `MaxSessionsPerPush=8` | ✅ 52 sessions | n/a — only 7 sessions exist there |
+| 3 — coverage past `MaxSessionsPerPush=8` | ✅ 52 sessions | n/a — few sessions exist there |
 | 4 — bulk push still reconciles | ✅ incidental only | ✅ incidental only — never induced (rank 57) |
 
 🔴 **The laptop stream IS delivering** — the absence is a missing measurement, not a fault.
+Re-verified 2026-09-12: freshest laptop Claude pane 9.8 h idle, so rank 53 needs a human at that
+machine, not a fix. ⚠ `measure519.py` is UNTRACKED (`.opencode-dispatch/` is gitignored), so it is
+**not synced to the laptop** — a second blocker nobody had named.
 
-**Cards 517 / 518 / 519 after the browser work:** 518 **PASS** (behaviourally: toggled, reloaded,
-state persisted, 27 `data-tool-detail` disclosures). 517 — **the delivery axis WAS driven
-2026-09-12 (rank 55): a reply typed in the UI reached a real pane and the shell ran it.**
-Criteria 2 and 3 measured live; criterion 1 passes `ready`→`queued` and **FAILS `queued`→`sent`,
-which needs a reload** — a successful delivery renders "has not picked it up" indefinitely
-(rank 58, card comment 1314). The `disabled` state was a cross-site navigation artifact and
-same-site yields `ready`. The `/tmux` mount specifically is still unexercised and is unreachable
-with a disposable pane. 519 as above.
-
-⚠ **This Status block has now been stale TWICE in one arc.** It was ~551b4902-era at session
-start, and the version written at `6d6dfd0c` was already wrong an hour later (it said #1515 was
-"waiting on CI" and rank 52 was "close #1549"). **If this table and the clawgate board disagree,
-the board is newer** — a Stop hook forces a write-back on the card and nothing forces one here.
+🔴 **CLAWGATE HAS NO IMAGE AUTOMATION — merging deploys NOTHING.** The pin is a literal tag
+(`clusters/workbench/apps/clawgate/deployment.yaml`); there is no ImagePolicy/ImageRepository and no
+`$imagepolicy` setter. A deploy is a build + a pin bump, and **both** `deployment.yaml` and
+`cmd/clawgatectl/client.go`'s `buildVersion` must move in the SAME commit (`version_pin_test.go`
+enforces it; missing it reds `clawgate-ci` on every PR touching the module).
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1283,8 +1291,41 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     host activity). Inducing a real gap means stopping the host agent or rolling the pod, which
     is a deploy-class action; decide whether it is worth it before doing it.
     forcing: none
-58. 🔴 **The reply control freezes on `queued` after a SUCCESSFUL delivery — fix the missing
-    broadcast.** Found by rank 55's drive; full measurements there and in card 517 comment 1314.
+58. ✅ **DONE 2026-09-14 — FIXED, MERGED AND VERIFIED IN PRODUCTION.** `ZacxDev/homelab-infra`
+    **#813** (squash `1a3bdef6`) + **#817** (squash `5890f3b9`), shipped as **clawgate 0.8.34**
+    (pod `clawgate-5b945c79fb-rcmf6`, `1/1`, 0 restarts, `health` → `0.8.34`).
+    🔴 **THE CLOSING CONDITION BELOW WAS MET CLAUSE BY CLAUSE, on the live pod**: scratch pane
+    `%102`, entry `14440` raised with `--session ''`, reply submitted through the real UI, and
+    `data-reply-state` observed by a MutationObserver installed BEFORE the click —
+    `ready` → **`queued` @ +580 ms** → **`sent` @ +6033 ms**, stable through +32.3 s, **no reload**.
+    The queue row was `claimed` @ +5.42 s and `completed` @ +5.48 s (`delivered`, pane `%102`), so
+    `completedAt` is later than the POST as the condition requires. The text ARRIVED: the pane shows
+    `scratch 0834 delivery check` then `scratch: command not found` — typed AND submitted.
+    🔴 **Why this is not a case that would have passed anyway:** the terminal transition landed at
+    **+5.4 s**, far beyond the ~1.17 s single post-POST refetch that was the panel's ONLY read
+    before the fix. Under 0.8.32 this exact timeline froze on `queued`.
+    **The fix:** an SSE `termwrite.changed` broadcast from the claim and result handlers, with three
+    surfaces subscribing — 6 effective payload lines (1 const, 2 broadcast calls, 3 `hx-trigger`
+    edits). Audited: Round 0 split the original PR; Round 1 returned safe-to-merge with its own
+    8-mutant battery confirming both broadcasts die individually for their own reasons.
+    ⚠ **RETRACTION — the sentence below claiming "a test for it cannot live in e2e as it stands"
+    was MINE AND IT WAS FALSE.** It restated a fact about the FIXTURE ("e2e has no host agent") as a
+    fact about the HARNESS. `e2e/tests/reply-delivery.spec.ts` already sets `CLAWGATE_TERMINAL_TOKEN`
+    and already makes credentialed POSTs, so **the spec can play the host agent itself** — and
+    `e2e/tests/task-sse-regroup.spec.ts` already existed to close this very seam class, opening
+    multiple browser contexts and guarding both rival explanations. #813 added exactly that leg: it
+    drives the real `claim`/`result` routes and was watched RED in two arms (claim suppressed →
+    `Expected "sending", Received "queued"` — the production symptom verbatim; result suppressed →
+    `Expected "sent", Received "sending"`, proving the two broadcasts are independently pinned).
+    Do not re-derive the retracted claim.
+    ⚠ **What is NOT closed:** the axis still sticks when the host agent **DIES**, because
+    `pending`+stale → `failed` (90 s TTL) and `claimed`+stale → `unknown` (10 min grace) are
+    TIME-driven, nothing broadcasts them (correctly — no row moves), and `#panel-attention` has no
+    poll. The session page (30 s) and tmux grid (60 s) self-heal; the attention panel does not.
+    Pre-existing, not a regression, and the post-fix frozen text (`sending`) is the safer error —
+    but "stop the axis freezing" closes one half of the class, not both.
+    ORIGINAL: 🔴 **The reply control freezes on `queued` after a SUCCESSFUL delivery — fix the
+    missing broadcast.** Found by rank 55's drive; full measurements there and in card 517 comment 1314.
     The row transitions to `delivered` in the claim/complete handlers and **nothing tells the
     browser**, so `#panel-attention`'s single post-POST refetch is the only read and it usually
     fires first. Fix direction: broadcast `clawgate:termwrite` (or an SSE `termwrite.changed`)
@@ -1298,6 +1339,30 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     is in that rank, including the two facts that make the entry render at all).
     forcing: gate — card 517's criterion 1 names "visible without a page reload", and the hop
     that matters on a healthy host does not satisfy it.
+
+59. **PR B — the grid's free-form reply delivery axis**, parked at `hold/grid-freeform-axis`
+    (`aa11176c8`, ~460 payload lines + a JS hydrator + a new authed route + a new store read).
+    🔴 **Cut it from `trunk`, NEVER stacked on a merged branch** (this repo's CLAUDE.md bans stacked
+    PRs by name). Round 0 on #811 judged it worth its own review: by its author's own statement the
+    axis exists only in the tab that sent the reply and **goes blank on reload**. The alternative it
+    names — a per-session actor on the write row, letting the render-time lookup be "newest write
+    for this (host,pane) BY THIS SESSION" — would fix the reload gap too, but changes the meaning of
+    an audited credential column. Decide that before building.
+    forcing: none
+60. **The other half of the delivery freeze: the axis still sticks when the host agent DIES.**
+    `pending`+stale → `failed` (90 s TTL) and `claimed`+stale → `unknown` (10 min grace) are
+    TIME-driven; nothing broadcasts them (correctly — no row moves) and `#panel-attention` has no
+    poll. The session page (30 s) and tmux grid (60 s) self-heal; the attention panel does not.
+    Pre-existing, and the post-fix frozen text (`sending`) is the safer error — but "stop the axis
+    freezing" closed one half of the class.
+    forcing: none
+61. **`tekton/clawgate-e2e` is red on `trunk` — unbreak it or stop gating on it.** See the open
+    investigation above. A permanently-red gate trains everyone to click through, and this one has
+    already been merged past once this session (#817, knowingly, on `clawgate-ci` green).
+    forcing: gate
+62. **Merge devrc #1660** (open, mergeable) — it records rank 58's closure and retracts the
+    fixture-vs-harness claim. Unmerged, the retraction is invisible to the next session.
+    forcing: none
 
 ## Open investigations — live diagnosis state
 
@@ -2343,6 +2408,50 @@ are corrected in place.
   number the moment anything is typed there.
 - **Next probe:** run `.opencode-dispatch/tmux-ui-verify/scratch/measure519.py` from a Claude Code
   session ON THE LAPTOP. It needs no argument — it makes its own append.
+
+### `tekton/clawgate-e2e` is TIMING OUT on `trunk` — a gate going permanently red
+- as-of: 2026-09-13
+
+- **Symptom + exact repro:** `tekton/clawgate-e2e` reports FAILURE; the TaskRun ends
+  `TaskRunTimeout`, "failed to finish within 40m0s", with steps `e2e` and `verdict` both exit 1.
+  Reproduce: `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci | grep clawgate-e2e`.
+- **Observed (with values):** `becedef44` **Succeeded** 21:59Z · `1a3bdef6e` (#813 on trunk)
+  **Succeeded** 01:04Z · `189451188` (#817 head) **Failed/TaskRunTimeout** 01:32Z · `24be212e7`
+  (the 0.8.34 pin bump — a TWO-LINE version change) **Failed/TaskRunTimeout** 01:58Z. Box loadavg
+  47–54 throughout.
+- **Ruled out:** *#817 caused it.* It touches 8 files, all Go `_test.go` under `internal/`/`cmd/`,
+  **zero** e2e/TypeScript; `clawgate-e2e` runs Playwright, which never executes them. via: measurement
+- **Ruled out:** *a test assertion is failing.* Both failures are `TaskRunTimeout` at the 40m task
+  budget, not an assertion. via: measurement
+- **Ruled out:** *leaked local postgres containers are still holding resources.* Five orphaned
+  `clawgate-e2e-pg-*` (aged 5–30 h) were removed this session after a **validated** probe —
+  0 client connections each, with a positive control proving the probe reads 1 when a connection is
+  deliberately open. Load moved 52 → 47.7. via: measurement
+- 🔴 **NOT RULED OUT, and the subsystem store flagged it against me: a STRANDED ADVISORY LOCK, not
+  load.** `homelab-talos/clawgate` carries an `OPEN:` bullet (2026-09-08) titled *"A RED
+  `clawgate-e2e` CARRYING `SQLSTATE 57014` ON MIGRATE IS NOT AUTOMATICALLY LOAD — AND THE HARNESS'S
+  OWN TEXT PUSHES YOU THE WRONG WAY"*: a stranded session lock on a POOLED connection after a ctx
+  cancel makes the next migration die at the 10 s `statement_timeout`, an observable identical to
+  contention. It records that the harness's own *"startup slowness under node contention"* string is
+  **editorialising**, and that it already led one session to misfile the whole thing as saturation.
+  The rival fix (#503/#509) shipped with **no version pin bumped**, so a stale binary is possible.
+  **I did not discriminate**: the `step-e2e` pod for `clawgate-e2e-9g5m6` was reaped before I looked,
+  so I never checked whether these runs carried `SQLSTATE 57014` at all. via: assumed
+- **Leading hypothesis:** cluster/box saturation lengthens the Playwright run past the 40m TaskRun
+  budget — the spec carries documented load sensitivity (fixture setup clamped to 45 s) and the same
+  cluster timed out a **comment-only** commit. 🔴 **Held weakly, and NOT to be repeated as a
+  finding**: it is the exact conclusion the store's open bullet warns is reached by reading the
+  harness's own prose, and the two mechanisms share this observable. The discriminator is whether
+  `57014` appears on migrate and whether an advisory-lock WAIT is present — read the step logs
+  BEFORE the pod is reaped.
+- **Next probe:** 🔴 **capture the `step-e2e` logs BEFORE the pod is reaped** — that is what makes
+  this discriminable, and it is what tonight lost:
+  `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <e2e-pod> -c step-e2e --tail=-1 | grep -aE '57014|statement timeout|advisory'`
+  A hit ⇒ the stranded-lock mechanism, and check whether the harness's clawgate binary carries
+  #503/#509 (no pin was bumped, so version alone will not tell you). A clean miss under a QUIET box
+  ⇒ the 40 m budget or the spec is the defect. Then trigger a run and read the reason, not the colour:
+  `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci -o json | python3 -c 'import json,sys;[print(i["metadata"]["name"],(i.get("status",{}).get("conditions") or [{}])[0].get("reason")) for i in json.load(sys.stdin)["items"] if "clawgate-e2e" in i["metadata"]["name"]]'`
+  If it times out on a quiet box, the 40m budget or the spec is the defect, not the load.
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -3833,32 +3942,60 @@ are corrected in place.
   listed it — "as fresh as the last push", exactly as `clawgatectl tmux` warns. Do not read its
   absence or presence as live truth.
 
+- 🔴 **A `pgrep`/`grep -f` on a process name MATCHES YOUR OWN COMMAND LINE.** Counting "2 live
+  playwright processes" was **my own grep**, and that phantom count is the only thing that stopped
+  five orphaned containers being cleaned for hours. The rule is in `RULES.md` and was walked into
+  anyway. Use a real ownership signal (here: client connections), never a name pattern.
+- 🔴 **An IDENTICAL failure across N independent targets is a fact about your INSTRUMENT.** A
+  connection probe returned `<unreachable>` on all five containers; the cause was `-U postgres`
+  while the harness creates a `clawgate` role. Read as data it would have reported five wedged
+  databases. Validate, then re-read.
+- 🔴 **A claim about a FIXTURE is not a claim about the HARNESS.** "e2e has no host agent, so
+  `queued` is terminal by construction" was true of the fixture and false of the harness —
+  `reply-delivery.spec.ts` already sets `CLAWGATE_TERMINAL_TOKEN` and can play the agent itself, and
+  `task-sse-regroup.spec.ts` already existed to close that seam class. This was asserted twice in
+  prose before a Round 0 audit found the counter-evidence in the same directory.
+- 🔴 **An agent killed mid-mutation leaves the MUTATION APPLIED, and it looks like ordinary work.**
+  One died right after "now apply the decoy mutation"; its worktree held `attention.go` with the SSE
+  subscription stripped from `hx-trigger` and re-spelled on `data-note`. Committing it would have
+  silently unsubscribed the attention panel while the old spelled guard stayed green. **On resume,
+  diff every uncommitted file and classify it before trusting any of it.**
+- **Sweep the SHAPE, not the site.** Told to fix one walkable guard, a sweep found **five** of the
+  same shape (#817), and four more docstrings claiming a hand-maintained list "fails if the set
+  GROWS" when it measurably does not.
+- **Round 0 earns its place.** It split #811 (92-line fix vs ~460-line axis), retired six pieces of
+  dead code on #803, and refuted the "cannot verify without deploying" premise. It is the only round
+  that asks whether the change should EXIST.
+- **Deploy doc rot, unfixed:** `deploy.md` says to build via `DOCKER_HOST=ssh://zach@192.168.50.250`
+  — but a session running ON the workbench IS that daemon, and the ssh form fails
+  `Too many authentication failures`. Its CSS sanity figure "~36 KB" is stale-low; the real output is
+  **45,762 bytes**. Also: use the repo-pinned Tailwind **v3** from `node_modules`, not
+  `nix-shell -p tailwindcss`, which now ships v4.
+
 ## How to verify
 
 ```bash
-# 1. Both PRs actually landed — CONTENT, not exit code.
-gh pr view 1575 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
-gh pr view 1515 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
-git -C "$DEVRC" fetch origin main -q
-git -C "$DEVRC" cat-file -e origin/main:claude/skills/clawgate/reference/cross-session-reach.md && echo present
-git -C "$DEVRC" show origin/main:claude/skills/clawgate/reference/troubleshooting.md | grep -c 'stream/cursors'
+# the deployed version, at the CONSUMER — never from git log
+clawgatectl health                      # -> {"status":"ok","version":"0.8.34"}
+KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
+kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate \
+  -o custom-columns='READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,IMAGE:.spec.containers[0].image' --no-headers
 
-# 2. Card 519's number, reproducible in ~5s. Run it from a session on whichever host you want.
-python3 "$DEVRC"/.opencode-dispatch/tmux-ui-verify/scratch/measure519.py
-#    edit SESSION at the top to the session you are running in; it times its own appends.
-
-# 3. Per-host stream liveness. Header name is load-bearing: X-Clawgate-Token, NOT X-Hook-Token.
-set -a; . ~/.claude/clawgate.env; set +a
-curl -s -H "X-Clawgate-Token: $CLAWGATE_HOOK_TOKEN" "$CLAWGATE_API_URL/api/transcripts/stream/cursors" | jq '.sessions | length'
-curl -s -o /dev/null -w '%{http_code}\n' -H "X-Clawgate-Token: $CLAWGATE_HOOK_TOKEN" "$CLAWGATE_API_URL/api/nosuchroute"   # 404 control
-
-# 4. The tmux grid DOES auto-refresh — the refuted claim, settled from source.
-git -C "$HOMELAB" show origin/trunk:containers/clawgate/internal/ui/tmux.go | grep -n 'hx-trigger'
+# the colour producer is live (expect ~70 of ~85 rows carrying a #rrggbb)
+clawgatectl tmux windows | python3 -c 'import json,sys; ws=json.load(sys.stdin)["windows"]; print(sum(1 for w in ws if w.get("color")),"of",len(ws),"carry color")'
 ```
 
-🔴 **Not verifiable from any shell:** `/ui/tmux` is 401 without a session (control: `/health` 200).
-Card 517 additionally cannot be closed read-only at all — its criterion requires submitting a
-reply. See rank 55.
+**The tmux page** (`https://clawgate.zacx.dev/tmux`, needs a session): per-host tabs defaulting to
+workbench, group headings showing codenames (`Ivory`, `grove`) with the raw session name as a muted
+subtitle, cards `codename:index`, a coloured dot per group, a `Chat | Raw screen` toggle defaulting
+to Chat, slotless sessions headed `base`.
+
+**The delivery axis, end to end** — the only proof that counts. Rebuild the disposable harness
+(recipe in rank 55) and watch `data-reply-state` WITHOUT reloading; it must leave `queued`.
+🔴 `term launch` → resolve the new pane by **host + window index** (the codename is NOT unique —
+four panes shared "violet"), raise the entry with `env -u CLAUDE_CODE_SESSION_ID … --session ''`
+(the default session id is suppressed by `QuestionIsStale` because the raising session is busy),
+and operate ONLY on that entry id — every other control types into somebody's live pane.
 ## Run this first — the index, one read-only command
 ```bash
 cairn recall --repo ~/workspace/devrc
