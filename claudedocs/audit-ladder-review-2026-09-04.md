@@ -665,6 +665,15 @@ Both directions, and they do not cancel.
   #1274 10→0-churn, #1110 7→0-churn. **Every LINE count in this review is unaffected** — the
   churn command always had the exclusion. `RangeChurn` now carries both counts under separate
   names and the brief prints both with the excluded number stated.
+  🔴 **AND ONE CAVEAT RAN THE OTHER WAY, UNSTATED — the carrier counts above are ALSO an
+  OVER-count.** `find_carriers` tested for the SUBSTRING `audit-claims`, so a PR that merely
+  DISCUSSES the ledger was enumerated as a ladder. MEASURED on devrc #1440: its single match
+  sits inside a numbered claim line about `--emit-claims`, there is no fence, and it is not a
+  ladder. **That matters because every other caveat here is a FLOOR**, so a reader correcting
+  for the documented direction corrected the wrong way. Fixed 2026-09-13: the scan now matches
+  `audit-dispatch.py`'s own `_FENCE_OPEN`. ⚠ **Scope: the carrier COUNT moves, no rate does** —
+  a non-ladder carries no usable block, so it was already reported UNMEASURABLE and already
+  excluded from every downstream total.
   ⚠ **Three caveats on the counts.** (a) Every carrier count is a **FLOOR** — `gh` does not
   return REVIEW comments, so a block posted as a review is invisible, the same blind spot
   `audit-dispatch.py` warns about. (b) Two repos **hit the 400-PR scan limit**, so their
@@ -807,10 +816,12 @@ Both directions, and they do not cancel.
      `ladder-range-coverage.py`.
    - ⚠ **devrc, homelab-infra and talos-infra all HIT the 400-PR scan limit**, so their carrier
      counts are partial and the real totals are higher.
-   - 🔴 **The carrier population is OVER-counted in one direction too, and nothing said so
-     before now: `find_carriers` tests for the SUBSTRING `audit-claims`**, so a PR that merely
-     DISCUSSES the ledger in prose is enumerated as a carrier. Measured: devrc #1440 is one,
-     and it is not a ladder. Every other caveat on these counts is a floor; this one is not.
+   - ✅ **FIXED 2026-09-13 in `46ebb689` (#1649) — was: the carrier population is OVER-counted,
+     because `find_carriers` tested for the SUBSTRING `audit-claims`**, so a PR that merely
+     DISCUSSES the ledger was enumerated as a carrier (devrc #1440, not a ladder). The scan now
+     matches `audit-dispatch.py`'s own `_FENCE_OPEN`. Kept rather than deleted because the
+     DIRECTION is the lesson: every other caveat here is a floor, so a reader correcting for
+     the documented direction corrected backwards. ⚠ The carrier COUNT moved; no rate did.
    - 🔴 **`parse_claims_blocks` discards a block whose `round=<n>` header is well formed when
      its claims are not NUMBERED** — devrc #1586 writes them `🔴-1 FIXED — …`. Correct for the
      dispatcher, wrong for round identification, so this tool recovers the round from the
@@ -863,3 +874,30 @@ Both directions, and they do not cancel.
    ⚠ Filed because round 0 of `#1576` found the list had been produced with no owner:
    `claude/RULES.md` requires a closing condition and a named checker, and a measurement whose
    product is 40 named commits that nobody reads is a cost, not a capability.
+7. **Decide the `parse_claims_blocks` numbering gap** — it discards a block whose `round=<n>`
+   header is well formed when its claims are not NUMBERED (devrc #1586 writes `🔴-1 FIXED — …`).
+   Correct for the dispatcher, wrong for round identification; `ladder-stop-rationale.py` works
+   around it by reading the header objects directly. **2 of 201.** *Closes when* either
+   `parse_claims_blocks` accepts the shape and `audit-dispatch.py`'s own tests cover it, OR a
+   comment in that function records the divergence as deliberate and names this item.
+   *Checked by:* `scripts/tests/test_audit_dispatch.py` going green on a new case, or a reader
+   confirming the comment exists.
+8. **Raise or accept the 400-PR scan limit.** devrc, homelab-infra and talos-infra all HIT it,
+   so their carrier counts are partial and every total derived from them is low by an unknown
+   amount. *Closes when* a run at a limit high enough that no repo reports hitting it is
+   published, OR this item records that the partial counts are accepted and why.
+   *Checked by:* the run's own `⚠ The scan HIT ITS LIMIT` line being absent for all seven repos.
+
+🔴 **ACCEPTED LIMITS — deliberately NOT items, because none has a closing condition anybody
+could check.** `claude/RULES.md` says an object with no mechanical check and no named human
+judgement is not a work item, and minting one is worse than saying so. These are stated in the
+measurement's own output and are properties of the method, not gaps in it:
+- **The population is a FLOOR** — `gh` does not return REVIEW comments, so a round posted as a
+  review is invisible. `--json reviews` exists; using it would change the population mid-arc and
+  the enumerator is shared. There is no state in which this is "done".
+- **ONE comment per ladder is read**, and the whole comment is classified rather than a summary
+  section — which is why the #1157 compliance rate is a CEILING, not a floor.
+- **16 of 201 terminal rounds were identified from a PROSE HEADING and no block.**
+- **The rate measures what ladders SAID, not what they did.** It cannot distinguish a true
+  stated reason from a false one; #1132's self-report is internally inconsistent and this
+  review already records that.

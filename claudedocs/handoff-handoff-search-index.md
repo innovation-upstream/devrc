@@ -15,146 +15,41 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE YIELD FIGURE IN THIS DOC WAS WRONG — `1 of 20` IS RETRACTED, AND SO IS THE `0 of 16` THAT
-REPLACED IT. THE STEP STAYS WIRED.** Rank 1's re-measurement ran on 2026-09-11 and produced
-`0 of 16`; two independent audits then falsified it, and re-deriving it falsified the original
-`1 of 20` as well — **both came from the same broken instrument**. `#1518`, which retired the
-`/resume` step on the strength of that zero, was **closed unmerged**.
+🔴 **THE ARC IS CLOSED. Rank 1 shipped; ranks 1 and 2 are both done.**
 
-🔴 **WHAT THE INSTRUMENT COULD NOT SEE.** Its method step read *"was a hit DOCUMENT **opened**"*
-while the sentence it was quoted for read *"opened, **mentioned** or acted on"* — `claude/RULES.md`
-→ *"a guard's DESCRIPTION claims COVERAGE — check the implementation is as wide as the sentence."*
-Three compounding flaws in the transcript reader: the needle required a `handoff-` prefix the
-sessions' reports never use (they write `<repo>/<slug>`); assistant text was truncated at 400
-chars while the mentions sit at offset ~3,100; and for `Write`/`Edit` it captured `file_path` only,
-never the content — so a hit written INTO a handoff doc was structurally invisible.
+### Standing results — CARRIED FORWARD, not re-derived (this heading REPLACES, so they must be restated)
+- 🔴 **The yield figure was wrong TWICE and both readings are retracted** — `1 of 20`, then `0 of 16`,
+  both from the same broken instrument. `#1518`, which retired the `/resume` corpus step on that
+  zero, was **closed unmerged**. The step stays wired. **DO NOT RE-OPEN the yield measurement**;
+  ask the operator, who reads the `from handoff docs` line in every `/resume`.
+- 🔴 **Corrected, same criterion both windows (2026-09-11T23:30Z):** pre-fix **12 of 38 (32%)**,
+  post-fix **9 of 17 (53%)**. ⚠ That criterion OVERCOUNTS — step 5 *requires* reporting what step 4
+  recalled. Strict hand-verified count: **3 firm of 17** (`5320d1bf`, `8152b7fc`, `9b6235dd`).
+- 🔴 **The cost question was closed BY DELETION (2026-09-12):** the command is 180 B, the prose
+  defending it was 6,220 — 34:1, nearly all of it this arc's own changelog in an instruction file.
+- **`--exclude-slug` works:** 0 self-hit slots post-fix vs 23 of 60 (38%) before; own doc the #1 hit
+  0 times vs 13 of 20. Adoption **20 of 22 (91%)**, workbench-only.
+- **`#1399` and `#1571` merged, deployed, verified live on both hosts** by CONTENT with a negative
+  control (a squash makes ancestry read "not merged" forever).
 
-🔴 **CORRECTED, SAME CRITERION ON BOTH WINDOWS (as of 2026-09-11T23:30Z).** A session counts if it
-referenced a hit slug afterwards that it had not mentioned BEFORE the query:
-- **pre-fix (`#1332`..`#1399`): 12 of 38 (32%)**
-- **post-fix (`#1399`..): 9 of 17 (53%)**
-
-⚠ **That criterion OVERCOUNTS and must not be quoted as "yield".** Step 5 *requires* reporting what
-step 4 recalled, so several of the nine are compliance — their own text says "nothing bears on
-this". The strict count (a hit delivered information the session did not have AND a decision, probe
-or durable doc moved) is **3 firm of 17**, hand-verified:
-- `5320d1bf` — hit `cnpg-alerting-hardening` gave it the same `maxmemory` asymmetry from the other
-  side **with ticket `868kurzhm`**, which it reported and then wrote into its committed handoff as
-  a recall pointer. Zero mentions before the query; the search is the only possible source.
-- `8152b7fc` — hit `apps-build-consolidation` told it a DIFFERENT doc's "one line to public-launch"
-  item is **now false** after #4685. A hit correcting a stale belief is the value proposition.
-- `9b6235dd` — hit `gate-flake-store-api` supplied the tmpfs fixture's positive-control argument.
-
-**So the falsifier's condition never fired**, and the honest reading is the opposite of the one this
-doc carried for a day: yield is low-but-real and the `--exclude-slug` fix did not reduce it.
-
-🔴 **AND THE COST QUESTION IS NOW CLOSED BY DELETION (2026-09-12).** The command is **180 bytes**;
-the prose defending it was **6,220** — a 34:1 ratio, and almost all of it this arc's own changelog
-sitting in an instruction file. It is deleted; `resume/SKILL.md` drops 47,762 → 44,834 B. **The
-step stays, the cost objection is gone, and no yield number was needed to get there.** Two
-attempts at that number cost a shipped-then-closed PR, two audits and a correction PR, to
-adjudicate one line — see rank 1 for why it must not be re-opened.
-
-🔴 **WHAT SURVIVES UNCHANGED — the descriptive half was sound.** `--exclude-slug` works exactly as
-designed: **0 self-hit slots** post-fix against 23 of 60 (38%) before, and the session's own doc was
-the #1 hit **0 times** against 13 of 20. Adoption is near-total: every resuming session runs it with
-the flag. Those are the claims that were measured correctly.
-
-⚠ **The ranker observation is real but was over-read.** `[gotcha#0]` dominates the slots (**52 of
-60** as of 2026-09-11T23:30Z; the corpus grows, so re-derive rather than quoting this). That is
-worth fixing. It does NOT support "nothing useful is reachable" — **the one confirmed yielding hit
-was `[investigation#3]`**, i.e. it came through exactly the channel the generic-sections story said
-was crowded out.
-
-- **Adoption** is a separate claim and was measured on its own: **20 of 22 (91%)** post-fix on the
-  workbench against 2 of 11 (18%) before.
-
-- **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
-  `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
-  `#1295` (`3e7d79a4`) the `/resume` consumer · `#1307` (`bb6e46ee`) ARM the timer ·
-  `#1329` (`4ffb0cc6`) the adoption measurement · `#1332` (`8e9428ef`) the step-4 promotion ·
-  **`#1399` (`4a67ea73`) the yield answer + `--exclude-slug`** · **`#1476` (`723ed7c1`) the
-  close-out sweep**. Plus `homelab-infra` `d2c9c49a` — the rescued untracked handoff doc.
-- 🔴 **`#1399` DEPLOYED AND VERIFIED ON BOTH HOSTS 2026-09-09.** Merged, deployed and live are
-  three claims and all three were checked: content on `origin/main` (a squash makes the branch
-  head a permanent non-ancestor, so ancestry would read "not merged" forever, plus a negative
-  control that no mutant string leaked in); both hosts at `4a67ea73` resolving the IDENTICAL
-  store path `…-devrc-claude-skills/resume/SKILL.md`; the deployed copy carrying the flag; and
-  the deployed fence parsing (`bash -n` rc 0) on both.
-  ⚠ **`ship.sh` reached the laptop only under a manual `REMOTE_SSH=zach@10.42.0.100`** — its
-  default LAN address timed out. That split the run in two, so `ship.sh` printed
-  **`cross-host agreement NOT COMPARED` both times**; the agreement above was checked BY HAND,
-  not by the tool. Filed as rank 2 (it was rank 3 until rank 1 closed).
-- **Live end-to-end on the deployed path:** `in_scope_docs=402` of 403, `excluded=handoff-search-index`,
-  and all three hit slots holding documents from a different repo — i.e. the slots the session's
-  own handoff used to occupy are now spent on documents it has not read.
-- 🔴 **FOUR AUDIT ROUNDS, 23 FINDINGS, ZERO DEPLOY-BLOCKING — and the shape is the lesson.**
-  Round 1 found the flag was deletable to **INERT** with 304/304 green (nothing pinned that
-  `main()` forwards `exclude`); round 2 found a backwards remedy verb and a cross-backend
-  divergence *inside the divergence guard*; rounds 3 and 4 found **no behavioural defect at
-  all**. **Three of the four rounds caught coverage CLAIMED and not held** — a seam nothing
-  pinned, a "consolidation" that was dead-code-able, a sweep that missed a fifth site, four
-  unscoped test counts. Not one was a logic bug; the mechanism has been correct since round 1.
-  The ladder was stopped on the **stated prose-payload criterion**, written onto the PR so that
-  ending-on-criterion is distinguishable from converging.
-- **The measurements, with their as-of stamps — carried forward because a figure without one
-  cannot be re-run against.** Adoption **2026-09-07T02:25Z: 4 of 4** post-`#1332` (control
-  `cairn recall` 4/4) — the first, small-n reading. Adoption **2026-09-08T17:00Z: 20 of 22 (91%),
-  control 21/22**, measuring session excluded from both halves by session id. Pre-fix on the same
-  host, `#1295`..`#1332`: **11 runs, 2 queried (18%), control 10**. 🔴 Yield **2026-09-08: 1 of 20
-  — RETRACTED**, see "State now"; the instrument counted only hit docs OPENED and could not see a
-  hit MENTIONED or written into a doc. Corrected same-criterion figures are in "State now".
-  ⚠ The corpus grows, so a later re-run reports LARGER numbers rather than contradicting these.
-- **`#1332`'s own deploy (2026-09-06, both hosts at `8e9428ef`) is SUPERSEDED by `#1399`'s above**
-  and was verified the same way — `readlink -f` on both hosts resolving one store path. Kept as a
-  pointer only; the method is what carries forward, not the sha.
-- **Claim `handoff-search-index-1`: RELEASED** (twice — after `#1332` and again after `#1399`).
-  Merging does not release a claim; both were released by hand.
-- **Housekeeping done:** the `fix/handoff-search-exclude-own-doc` worktree removed and the branch
-  deleted local+remote; base clone re-synced; the cairn `devrc/handoff-index` entry's `OPEN:`
-  bullet closed (entry now shows no badges, 26/26 parse).
-- ⚠ **NOT verified, and no further work changes it:** anything a real Postgres server does with
-  `slug <> ALL(%s)` — no test in this repo reaches a database, so those are structural pins over
-  code that was READ — and the transcript-derived `23/60`, `13/20`, `1/20` figures, which are
-  judgement calls made reading sessions. Both audits said the same.
-- ⚠ **The laptop contributed 0 `/resume` runs throughout**, measured over ssh rather than
-  assumed, so every adoption and yield number in this doc is **workbench-only**.
-  🔴 **UPDATE 2026-09-12: "throughout" is bounded by this doc's own measurement windows, not
-  a permanent state — it has since expired.** Both checkpoints this doc made were correct
-  when made (see the "Residual, NOT measured" bullet below for the exact dates); laptop
-  `/resume` runs resumed afterwards. That does **not** weaken the workbench-only caveat on
-  THIS doc's own adoption/yield numbers, which remain workbench-only exactly as stated —
-  it only means "0 laptop runs" is no longer the live state going forward. A different doc,
-  `claudedocs/handoff-handoff-resume-skill-trace.md`, separately measured laptop `/resume`
-  directly against ClickHouse `activity.events` (a different instrument, a different
-  window) and found a nonzero laptop rate — see that doc rather than re-deriving it here.
-
-🔴 **`#1571` IS MERGED, SHIPPED AND VERIFIED LIVE ON BOTH HOSTS (2026-09-12).** Merged as
-`e52371c4`, verified by CONTENT on `origin/main` with a negative control (the three cut paragraphs
-return 0) because a squash makes ancestry read "not merged" forever. Both hosts converged at
-`6f1867b1` and — the check that actually matters — both `readlink -f ~/.claude/skills/resume/SKILL.md`
-resolve to the SAME store path `3zhmivln…-devrc-claude-skills/resume/SKILL.md` at **44,834 B**, with
-the command present and the cut changelog absent. Merged, deployed and live are three claims; all
-three were checked.
-⚠ **`ship.sh` took TWO passes, twice, and neither was a defect in the change.** Pass 1 returned
-**rc 19 (hosts disagree)** — `origin/main` moved between the two hosts' fetches, so each host landed
-internally-consistent on a DIFFERENT commit; a later run returned **rc 11 (verify-failed)** for the
-same reason. `main` moved three times during one run. Every per-host line was green in both; only
-the cross-host comparison caught it. **Read the per-host lines AND the final verdict — and note the
-background-wrapper reported `exit code 0` while the run's own `SHIP_RC` was 19.**
-
-🔴 **THE CAIRN ENTRY CARRIED THE RETRACTED NUMBER FOR A DAY AFTER THE DOC WAS FIXED (corrected
-2026-09-12).** `devrc/handoff-index` served `RESOLVED 4a67ea73: YIELD ANSWERED — 1 of 20` as a
-settled resolution, and its `## Pointers` line still read *"`SKILL.md` step 3 — the only consumer;
-queries per open item"* — stale since `#1332` on 2026-09-06. **That is the worst place for it:**
-`cairn recall` is the surviving retrieval surface and `/resume` step 4 reads it FIRST, so a future
-session would have been handed `1 of 20` as a pointer while this doc said it was retracted. Fixed by
-one `cairn put` (both lines) plus one `cairn append` (how the arc resolved); pod validated
-**32 of 32 entries parse, 0 malformed, 0 dropped lines, 0 out-of-reach markers**. 🔴 **This is the
-doc's OWN recorded gotcha recurring** — "a `RESOLVED:` bullet does not retire an `OPEN:` one …
-writing the resolution and retiring the marker are two edits, and only the first feels like
-progress" — committed here by the session that wrote that very sentence. **When you retract a figure
-in this doc, grep the STORE for it in the same turn.**
+### This session
+- 🔴 **RANK 1 SHIPPED — `#1637` merged (squash `67295ffba`).** A blank `--exclude-slug` now exits 2.
+  The predicate keys on the DERIVED SLUG, not the spelling, so `claudedocs`, `/` and `handoff-.md`
+  are caught too — none of which is blank. Verified on `origin/main` by content, with a negative
+  control (the retracted phrase returns 0). **Claim `handoff-search-index-1` RELEASED.**
+- **`#1639` merged (`d35c86558`)** — the previous handoff update.
+- ⚠ **BOTH WERE MERGED THROUGH A RED `devrc-pytests`, deliberately and with the operator's explicit
+  go-ahead.** The failures were INHERITED and proven so: `main` itself was red on the same two
+  tests, and both branches were 7-8 commits behind the fixes. After merging `origin/main` in,
+  `test_the_skill_did_not_grow` went green and the only survivor named **a doc neither PR touches**.
+  Everything each diff could reach was green (23,224/23,228 pytest; 1,449/1,449 node).
+- 🔴 **SPILLOVER, AND IT WAS SELF-INFLICTED: trimming this doc reddened `main` for everyone.**
+  `test_no_handoff_doc_exceeds_its_budget` caps EVERY `claudedocs/**/handoff-*.md` at once against a
+  grandfather ledger that is a **ratchet** — so this doc dropping to 59,805 B made its own
+  grandfathered entry STALE, which is a failure exactly like being over. **`#1650` fixes both
+  halves** (open, unmerged at the time of writing): `handoff-index-store-claims-accuracy.md`
+  72,598 → **59,735 B** by demoting dated evidence to `claudedocs/refs/`, and this doc's ledger entry
+  deleted. No allowance was raised.
 
 ## Open investigations — live diagnosis state
 
@@ -389,66 +284,36 @@ that block answers. Kept for the enumeration of the four spellings. Retired 2026
   third choices are worth reading. That is the next probe above, and it is the real question.
 
 ## Next steps (ranked)
-🔴 **RANK 1 IS CLOSED — AND IT WAS CLOSED BY DELETION, NOT BY MEASURING IT.** The question was
-*"is the corpus query worth what it costs?"* Measured 2026-09-12: **the command is 180 bytes and
-the prose defending it was 6,220 — a 34:1 ratio.** Almost the whole cost was this arc's own
-changelog living in an instruction file: the 5/6-vs-0/6 placement history, the
-denominators-that-reconcile paragraph, a byte-budget figure falsified twice. That prose is now
-deleted (−2,928 B from `resume/SKILL.md`, 47,762 → 44,834), the command stays, and the cost
-objection is gone without a yield number ever being needed.
+🔴 **NUMBERING IS STABLE — the rank is half a live claim's identity** (`claim-work --slug-for`).
+Ranks 1 and 2 are closed and keep their numbers.
 
-🔴 **DO NOT RE-OPEN THE YIELD MEASUREMENT.** It was attempted twice and was wrong both times, in
-opposite directions, for structurally different reasons — and each attempt cost far more than the
-line it was adjudicating: a shipped-then-closed PR (`#1518`), two adversarial audits, and a
-correction PR (`#1541`). **A measurement that costs orders of magnitude more than the thing it
-measures is the wrong instrument, however rigorous.** Three hand-verified cases where a hit
-changed what a session did are on record; that is enough to keep a 180-byte line.
-⚠ **If the question ever genuinely matters again, ASK THE OPERATOR** — he reads the
-`from handoff docs` line in every `/resume` report and is the single consumer. A thirty-second
-human answer beats transcript archaeology that has now failed twice.
-
-1. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
-   `--exclude-slug "  "` normalises to `""`, prints `excluded=` with nothing after it, leaves
-   `in_scope_docs == indexed_docs`, and returns the document the caller meant to drop — the exact
-   class three audit rounds closed everywhere else. The library layer accepts `[""]` too. Round 4
-   measured both; this PR deliberately fixed only the *advice* (the refusal no longer offers a
-   blank as its remedy) and NOT the behaviour, to keep the audit ladder's last round inside the
-   claim-correction criterion it stopped on. 🔴 The fix belongs at `main()` as an input rejection
-   (`RC_USAGE` / rc 2), never in the renderers — a `label or "(unnamed)"` there re-introduces the
-   falsy-string shape swept out of the decision path.
-   **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
-   with a test that watches it fail at the previous commit.
+1. ✅ **CLOSED — `#1637` merged (`67295ffba`), verified by content, claim released.**
    forcing: none
-2. ✅ **CLOSED — `ship.sh` ALREADY falls back to nebula; this item was stale, and the "evidence"
-   I added for it on 2026-09-12 was FALSE.** Shipped in **`#1439`** (squash `605b29ac`, merged
-   2026-09-09T19:15Z) with follow-ups `#1461` (stub helper) and `#1505` (a REFUSED HOST KEY was
-   reading as a dead host). The logic lives in `scripts/lib/host-role.sh`, which `ship.sh` sources —
-   **not in `ship.sh`**, which is why a grep of `ship.sh` for `LAPTOP_IP_SECONDARY` returns 0 and
-   reads as "absent". VERIFIED LIVE 2026-09-12 by running `ship.sh` with NO `REMOTE_SSH`:
-   `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop.`
-   ⚠ **THE ORIGINAL OBSERVATION WAS CORRECT AND IS CARRIED FORWARD — the item was filed honestly
-   and then fixed out from under it, hours later, on the same day.** 2026-09-09 shipping `4a67ea73`
-   (`#1399`, merged 07:29Z): the laptop converged only after a manual `REMOTE_SSH`, and the run
-   printed `cross-host agreement NOT COMPARED`. `#1439` merged at **19:15Z the same day** — about
-   twelve hours after that measurement and before anyone re-read the item. **Nothing is wrong with
-   how this was filed; what failed is that a ranked item has no owner watching for its own fix.**
-   🔴 **RETRACTED: "EVIDENCE STRENGTHENED — hit on FOUR consecutive `ship.sh` runs."** I never
-   observed the failure. I passed `REMOTE_SSH=zach@10.42.0.100` preemptively on all four runs
-   BECAUSE THIS DOC SAID THE GAP EXISTED, then reported my own workaround back as confirmation.
-   A workaround applied on a doc's authority is not evidence for the doc — it is the doc talking to
-   itself. ⚠ A stale leftover branch `fix/ship-nebula-fallback` (5 commits, `#1439`'s dev branch,
-   squash-merged so not an ancestor) was found unpushed in the shared clone and DELETED after
-   confirming line-by-line that all 20 of its branch-only lines were superseded by `#1461`/`#1505`.
+2. ✅ **CLOSED — `ship.sh` already falls back to nebula (`#1439`).** Do not re-open it from a kickoff
+   block that predates the retraction; that is what happened this session.
    forcing: none
 3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
-   `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
-   test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
-   does it, which is the intended signal.
+   `rebuild_delete_labels`. Its own round; the tripwire test
+   `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone does it.
    forcing: none
-4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
-   operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
-   rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
-   re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.
+4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces. 🔴 The fix
+   belongs at `main` as an input rejection (`RC_USAGE`), NEVER in the renderers.
+   forcing: none
+5. **The library layer still accepts `exclude=[""]`** — `_exclusion_list` in `handoff_index.py`.
+   `#1637` shut the only door argparse can open and named this one rather than widening into it.
+   **Closing condition:** a merged PR in which the library rejects a value deriving no slug.
+   forcing: none
+6. **35 archived docs changed SLUG.** `#1627` moved them to `claudedocs/archive/`; the index follows
+   (verified — a hit reads `devrc/archive/<topic>`), but a stored pointer holding a bare old slug no
+   longer resolves. **Closing condition:** a sweep of the cairn store and `claudedocs/` for such slugs.
+   forcing: none
+7. 🔴 **`subsystem_touch.DEFAULT_STORE_ROOT` STILL POINTS AT THE FROZEN MIRROR — a LIVE root cause,
+   found while trimming `handoff-index-store-claims-accuracy.md` and filed nowhere else.** That doc
+   carries a block marked RESOLVED whose root cause is not fixed; it is the mechanism that stranded
+   five whole entries and 24 dated bullets on one machine, invisible to every reader on every host.
+   The block was deliberately LEFT IN PLACE for that reason (and because it names a client path).
+   **Closing condition:** a merged PR repointing the default at the synced cache, with a test that
+   fails at the previous commit.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -739,85 +604,122 @@ human answer beats transcript archaeology that has now failed twice.
   merged. The collision is what surfaced that the work was done; treating it as a naming nuisance
   and picking `-2` would have hidden it and produced a duplicate implementation.
 
+- 🔴 **A RETRACTION INSIDE A DOC DOES NOT REACH THE KICKOFF BLOCK THAT POINTS AT IT.** This doc
+  retracted the rank-2 "four consecutive runs" evidence on 2026-09-12, in the same session that
+  fabricated it. The kickoff block generated alongside that write still asserted rank 2 was the
+  highest-value next action and restated the retracted evidence as fact — and that is what opened
+  the next session. **The kickoff is a SEPARATE ARTIFACT, generated once, and nothing re-derives it
+  when the doc is corrected.** The doc was right and the instruction pointing at it was wrong.
+  Generalises past this arc: **any summary written from a document is a fork of it, and only the
+  document gets fixed.** The cheap defence is the one that worked here — the session read the doc
+  before acting on the kickoff and the contradiction was visible in the first two minutes.
+- 🔴 **THE FAILURE MODE COMPOUNDS: a fabricated finding survived into a THIRD artifact.** The
+  original error was reporting a workaround back as confirmation ("the doc talking to itself"). It
+  was caught and retracted in the doc — but by then it had been copied into a kickoff block, where
+  it was still live a day later. **Retracting a claim means sweeping every copy of it, and a
+  retraction that names only the doc has swept one.** Same shape this doc already records for the
+  cairn store carrying `1 of 20` for a day after the doc was fixed — **third instance, third
+  surface.**
+- 🔴 **`| tail` ATE AN EXIT CODE IN THIS SESSION, ON THE ONE COMMAND THE WHOLE VERIFICATION TURNED
+  ON.** The first read of `--exclude-slug "  "` was piped to `tail -5` and reported `rc=0`, which
+  reads as "the fix does not work". Three unpiped checks beside it returned 2 correctly. This trap
+  is documented in `CLAUDE.md` and in this doc's own history and it still landed. **When rc IS the
+  assertion, redirect to /dev/null and echo `$?` — never pipe.** ⚠ zsh's `$PIPESTATUS` is also
+  wrong here: it is `$pipestatus[1]`, and the bash spelling silently returns empty.
+- 🔴 **AN AGENT'S MUTATION RESULTS WERE RE-RUN AND HELD — BUT THE RE-RUN IS WHAT MAKES THAT
+  SAYABLE.** `claude/RULES.md` mandates re-verifying a self-reported mutation sweep. Two of the five
+  claimed mutants were re-applied independently from a `cp -a` copy with `.git` removed; both died
+  on this guard's own rc-2 assertions, matching the report. **The value was not catching a lie — it
+  was that "killed by THIS guard's specific error" is now a first-hand claim rather than a quoted
+  one.** A green re-run is the expected outcome and is still worth its cost.
+- ✅ **ARCHIVED HANDOFF DOCS ARE STILL INDEXED — the corpus did NOT shrink when `#1627` landed.**
+  The risk was flagged before checking (the index globs `claudedocs/handoff-*.md`, and 35 docs had
+  just moved under `claudedocs/archive/`). Measured: `handoff_index.py` walks subdirectories and
+  slugs them WITH the subdirectory — a hit comes back as `devrc/archive/<topic>`. **The consequence
+  is a slug change, not a coverage loss**, and it is rank 6: anything holding a bare old slug now
+  names one that does not resolve. **Flagging a risk is not measuring it; this one took one command
+  and was benign.**
+- ⚠ **The base clone was `behind 1` at handoff time and `origin/main` moved again during the
+  session** (`30bad70c` → `db548c47`). This doc was authored from a fresh worktree off `origin/main`
+  because the base clone sits on `main`, which this repo forbids committing to — the same route this
+  doc's own gotcha recorded on 2026-09-12. **`main` is busy enough that a base-clone read is stale
+  within minutes**; `handoff_doc.py` resolves its base from the working tree, so authoring from a
+  stale clone would merge into an out-of-date document and report success.
+
+- 🔴 **SHRINKING A DOC CAN REDDEN `main` — the grandfather ledger is a RATCHET, and going UNDER is a
+  failure exactly like going OVER.** `test_no_handoff_doc_exceeds_its_budget` caps every
+  `claudedocs/**/handoff-*.md` at once; a doc listed in the ledger that now FITS must have its entry
+  DELETED, and until someone does, the suite is red for everybody. Measured 2026-09-13: this doc
+  dropped 67,076 → 59,805 B in a routine `/handoff` update and the gate went red on a **second**
+  finding nobody had touched. **Two consequences: the gate fails on a file you did not edit** (it is
+  fleet-wide, not per-doc), **and a size REDUCTION is a ledger event.** Check the gate after any
+  `State now` replace that cuts a lot.
+- 🔴 **AN INHERITED RED IS PROVABLE, AND THE PROOF IS CHEAP — `main`'s own status, plus ancestry of
+  the fix.** Both PRs showed `devrc-pytests` red. The discriminator was not re-reading the diff: it
+  was `gh api /commits/<main-sha>/statuses`, which showed **`main` red on the same two tests**, and
+  `git merge-base --is-ancestor <fix> <branch>`, which showed both branches LACKED the fixes (7-8
+  commits behind). Merging `origin/main` in turned one test green and left a failure naming a file
+  neither diff touches. **Three commands beat any amount of staring at your own change** — and the
+  commit subjects on `main` said it outright (`fix(clawgate skill): main is RED on the size ceiling`).
+- 🔴 **I CALLED TWO FAILURES "MINE" BEFORE CHECKING, AND BOTH WERE INHERITED.** The failing test
+  names *looked* reachable — one mentioned a skill and I had edited a skill; the other mentioned
+  handoff-doc size and I had edited a handoff doc. Both inferences were wrong: the first guards the
+  **clawgate** skill (which the diff never touches) and my doc had SHRUNK. **A test name that sounds
+  like your change is not evidence it is your change** — map the test to the file it actually asserts
+  on before claiming it.
+- 🔴 **A VERIFICATION CAN BE RIGHT BY LUCK — I confirmed "no byte ceiling on `resume/SKILL.md`" with
+  the grep `CLAUDE.md` explicitly warns is incomplete** (`MIN_HEADROOM|st_size <=`, documented there
+  as "NOT provably complete", wrong three times before). The conclusion survived — the growth test
+  guards clawgate, not resume — but the method could not have established it, and what made me
+  re-check was a CI failure, not the verification. **When a file's own docs say the discovery method
+  is incomplete, a clean result from it is not a measurement.**
+- ⚠ **`gh pr merge` printed NOTHING on success — no sha, no confirmation, no error.** Silence is not
+  a verdict either way; the merge state came from a separate `gh pr view --json state,mergeCommit`,
+  and the CONTENT check on `origin/main` is what actually proved it landed.
+- 🔴 **A `claudedocs/` doc is normally an eviction SINK and `prune-skill` says never to prune one** —
+  pruning a sink deletes what a previous prune put there. This one was the exception because it is
+  **gated by a hard ceiling** and was reddening `main`. Stated because it was a knowing departure
+  from a rule, not an oversight: **ask whether the doc is GATED before applying the sink rule.**
+- 🔴 **TRIMMING A DOC IS A PUBLIC-REPO EVENT, because slicing is how client identifiers PROPAGATE.**
+  `handoff-index-store-claims-accuracy.md` already contains a client path and real hostnames; a
+  verbatim line-range slice into a NEW file would have copied them into a fresh public artifact and
+  no reviewer would have looked twice at a "pure move". The new `claudedocs/refs/` file was scanned
+  independently (0 hits across seven identifier patterns) and the repo's three content gates re-run.
+  **Scan what you slice, not just what you write.**
+- 🔴 **VERBATIM LINE-RANGE SLICING MAKES CONTENT SURVIVAL STRUCTURAL — and the gap audit is what
+  proves it.** `#1650` was checked by an independent line-level accounting: **892 of 893** original
+  non-blank lines byte-identical in the doc or the refs file, with the single miss being a declared
+  ranked-list renumber. The loss mode this catches is the one slicing does NOT: a block *summarised*
+  into the core and sliced into no sidecar is silently gone **and looks like good pruning**.
+
 ## How to verify
 ```bash
-# 1. ADOPTION — the live question. THIS HOST only; run on both.
-#    🔴 CUT is now #1332's merge, NOT #1295's. Left at #1295's, the 14 pre-fix runs stay in the
-#    denominator and a fully successful fix reports ~10/24 and reads as a FAILURE.
-#    Controls watched to work: a MENTION is not an invocation (needle on `handoff_search.py --`,
-#    which also excludes the grep doing the measuring); the measuring session is excluded from
-#    the numerator by checking the session ids are distinct.
-python3 - <<'PY'
-import json, glob, os
-CUT = "2026-09-06T17:51:19"   # #1332 merged — raise again after the next such change
-runs, hits, cairn = set(), set(), set()
-for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
-    sid = os.path.basename(f)[:-6]
-    for line in open(f, errors="replace"):
-        if ("resume-state.sh" not in line and "handoff_search.py --" not in line
-                and "cairn recall" not in line):
-            continue
-        try: r = json.loads(line)
-        except Exception: continue
-        if r.get("timestamp", "")[:19] < CUT: continue
-        c = (r.get("message") or {}).get("content")
-        if not isinstance(c, list): continue
-        for b in c:
-            if not isinstance(b, dict) or b.get("type") != "tool_use": continue
-            cmd = (b.get("input") or {}).get("command", "")
-            if not isinstance(cmd, str): continue
-            if "resume-state.sh" in cmd: runs.add(sid)
-            if "handoff_search.py --" in cmd: hits.add(sid)
-            if "cairn recall" in cmd: cairn.add(sid)
-print(f"runs={len(runs)} queried={len(hits & runs)} cairn(control)={len(cairn & runs)}")
-PY
-#    2026-09-07T02:25Z baseline: workbench 4/4 (control 4/4); laptop 0 runs.
-#    2026-09-08T17:00Z re-run:   workbench 20/22 (91%), control 21/22; laptop STILL 0 runs
-#                                (measured over ssh, not assumed).
-#    🔴 THE SCRIPT ABOVE DOES **NO** SESSION-ID EXCLUSION — it printed 23/21/22, and the
-#    20/22 was reached by subtracting the measuring session BY HAND afterwards. Said plainly
-#    because an audit read the annotation as describing the script and could not reproduce it.
-#    If you want the exclusion mechanised, filter `sid` against your own session id; otherwise
-#    report the raw triple and say which one you subtracted.
-#    An independent re-run hours later (larger window): runs=36 queried=33 (92%), control 34.
-#    Pre-fix same host, #1295..#1332: 11 runs, 2 queried, control 10.
-#    ⚠ The laptop half needs the same script run THERE — this one reads only this host's
-#    ~/.claude/projects. A workbench-only number is not a fleet number.
+# RANK 1 — the fix, end to end. rc is the whole assertion; do NOT pipe (| tail eats the status).
+W=<worktree-or-repo>
+python3 $W/scripts/lib/handoff_search.py --offline --query x --limit 3 --exclude-slug "  " >/dev/null 2>&1; echo "rc=$?"   # 2
+python3 $W/scripts/lib/handoff_search.py --offline --query x --limit 3 --exclude-slug ""   >/dev/null 2>&1; echo "rc=$?"   # 2
+python3 $W/scripts/lib/handoff_search.py --offline --query x --limit 3 --exclude-slug claudedocs >/dev/null 2>&1; echo "rc=$?"  # 2 — the NON-blank empty-slug road
+python3 $W/scripts/lib/handoff_search.py --offline --query "handoff search index" --limit 3 \
+  --exclude-slug handoff-handoff-search-index.md 2>&1 | grep -E 'excluded=|indexed_docs'
+#   expect rc 0, `excluded=handoff-search-index`, and in_scope_docs LOWER than indexed_docs.
+#   🔴 Read the PAIR: `excluded=` proves the flag PARSED, the COUNT proves it MATCHED.
 
-# 2. The timer's OWN run — the only thing that tests the unit's environment:
-systemctl --user show handoff-index-sync.service -p Result -p ExecMainStatus
-journalctl --user -u handoff-index-sync.service --no-pager -n 20
+# RANK 1 — the guard is not walkable. Re-run the mutants rather than trusting a report.
+#   Copy the tree, `rm -f <copy>/.git` (a worktree's .git is a FILE — a cp -a copy commits to the
+#   REAL branch), clear __pycache__ between mutants, PYTHONDONTWRITEBYTECODE=1.
+#   predicate -> `not v.strip()`  MUST die on `'claudedocs' exited 0` / assert 0 == 2
+#   `if unusable:` -> `if False`  MUST die on rc 2, three assertions
+nix develop ~/workspace/devrc -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  scripts/tests/test_handoff_index.py -q -p no:cacheprovider \
+  -k TestABlankExclusionIsRefusedAtTheINPUT          # control: 4 passed
 
-# 3. The DB path answers (backend= is the discriminator, NOT the row count):
-#    🔴 `nix develop` IS REQUIRED, NOT JUST THE KUBECONFIG. A bare `python3` here dies with
-#    `psycopg2 is required` before it opens anything — the UNIT has the dependency, a hand-run
-#    does not, exactly as the unit has the KUBECONFIG a hand-run lacks. This line said
-#    `KUBECONFIG=… python3 …` until 2026-09-08 and could not have worked as written.
-KUBECONFIG=$KC_HOMELAB nix develop ~/workspace/devrc -c \
-  python3 ~/workspace/devrc/scripts/lib/handoff_search.py --query fsync --limit 3
-#    expect backend=postgres. backend=memory means it silently fell back and you verified nothing.
-#    2026-09-08: backend=postgres, indexed_sections=5125 — the SAME number the timer's own run
-#    reported writing, which is what makes the two agree rather than merely both be non-zero.
+# RANK 2 — the closure, checked at the DEPENDENCY. A grep of ship.sh returns 0 and reads as absent.
+grep -n LAPTOP_IP_SECONDARY ~/workspace/devrc/scripts/lib/host-role.sh   # the fallback lives HERE
+#   And the only real evidence: run `scripts/ship.sh` with NO `REMOTE_SSH` and watch it print
+#   `did not answer — falling back to …`. A run WITH the workaround proves nothing about the gap.
 
-# 3b. The exclusion actually frees slots (the rank-1 fix). A DIFFERENTIAL — one flag apart:
-Q="handoff search index adoption yield"
-python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" --limit 3 | grep '^──'
-python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" --limit 3 \
-  --exclude-slug claudedocs/handoff-handoff-search-index.md | grep -E '^──|excluded='
-#    expect: the first names devrc/handoff-search-index in its top slot(s); the second names it
-#    NOWHERE, prints `excluded=handoff-search-index` on the scope line, and reports an
-#    in_scope_docs LOWER than indexed_docs. 🔴 Do NOT assert "by one": the slug is excluded in
-#    EVERY repo, so two repos sharing a doc basename drop two. Measured 2026-09-08: 0 shared
-#    slugs between the reachable repos, so one is the usual case, never the contract.
-#    🔴 `excluded=` proves the flag PARSED; the COUNT proves it MATCHED — read both, because an
-#    unnormalisable value used to print a confident `excluded=<garbage>` and filter nothing.
-
-# 4. The consumer is LIVE, not merely merged (readlink is the arbiter):
-readlink -f ~/.claude/skills/resume/SKILL.md          # must resolve into /nix/store
-grep -c 'handoff_search.py --offline' ~/.claude/skills/resume/SKILL.md   # must be >=1
-#    🔴 Proves the text is DEPLOYED. Says NOTHING about whether it is FOLLOWED — that is check 1.
-
-# 5. The guard still holds (and its own mutants still die):
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_resume_handoff_search_wiring.py -q -p no:cacheprovider
+# RANK 6 — archived docs are still indexed, under an `archive/` slug:
+python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "browser bridge extension" --limit 6 \
+  2>&1 | grep -E '^──|indexed_docs'
+#   expect a hit spelled `devrc/archive/<topic>` — the prefix IS the finding.
 ```

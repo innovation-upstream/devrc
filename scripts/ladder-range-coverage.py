@@ -431,7 +431,36 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
 # Facts — `gh`, or a file so a test needs neither it nor a network
 # --------------------------------------------------------------------------- #
 
-def find_carriers(runner, repo, limit=300, state="all"):
+def _has_claims_fence(ad, bodies):
+    """Does ANY comment carry a real `audit-claims` FENCE?
+
+    🔴 THIS REPLACED A SUBSTRING TEST, AND THE SUBSTRING TEST OVER-COUNTED. It
+    was `"audit-claims" in body`, so a PR that merely DISCUSSES the ledger in
+    prose was enumerated as a carrier. MEASURED on devrc #1440: its only match
+    sits inside a numbered claim line talking about `--emit-claims`, there is no
+    fence, and it is not a ladder — fittingly, it is the PR that added round 0 to
+    the skill.
+
+    🔴 IT MATTERS BECAUSE IT RAN THE WRONG WAY. Every other caveat on a carrier
+    count here is a FLOOR (`gh` does not return review comments, so the scan
+    under-counts). This one was an OVER-count and was stated nowhere, so a reader
+    correcting for the documented direction would correct the wrong way.
+
+    ⚠ Scope, stated so nobody reads it as a number fix: a non-ladder carries no
+    usable block, so it was already reported UNMEASURABLE and already excluded
+    from every downstream total. What moves is the carrier COUNT, not a rate.
+
+    The fence grammar is `audit-dispatch.py`'s own `_FENCE_OPEN` — one rule, one
+    place, and the same object `parse_claims_blocks` matches with.
+    """
+    for body in bodies:
+        for line in (body or "").split("\n"):
+            if ad._FENCE_OPEN.match(line):
+                return True
+    return False
+
+
+def find_carriers(ad, runner, repo, limit=300, state="all"):
     """-> ([facts, …], note) for every PR in `repo` carrying an `audit-claims`
     fence, newest first.
 
@@ -473,7 +502,7 @@ def find_carriers(runner, repo, limit=300, state="all"):
     carriers = []
     for pr in data:
         bodies = [c.get("body", "") for c in pr.get("comments") or []]
-        if not any("audit-claims" in (b or "") for b in bodies):
+        if not _has_claims_fence(ad, bodies):
             continue
         carriers.append({
             "pr": pr.get("number"),
@@ -858,7 +887,7 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
         notes.append("--facts-file mode: no `gh` was consulted, so nothing here "
                      "was checked against the live PR")
     elif args.find_carriers:
-        facts_list, note = find_carriers(runner, args.repo, limit=args.limit)
+        facts_list, note = find_carriers(ad, runner, args.repo, limit=args.limit)
         notes.append(note)
         if args.list_only:
             print(note, file=out_stream)

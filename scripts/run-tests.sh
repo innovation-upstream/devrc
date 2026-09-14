@@ -667,10 +667,25 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           this FATAL naming the binary. `flake.nix`'s `gateTools` carries the
 #           package so both tiers and `nix develop` satisfy it.
 #
+# luajit:   scripts/tests/test_nvim_octo.py EXECUTES the review TUI's
+#           `octo-init.lua` under it — luajit is the Lua
+#           dialect neovim embeds — with `vim` and `require` stubbed. Same shape
+#           as tmux and zsh above: the thing under test CANNOT be reached by the
+#           structural reader beside it. That file installs a merge keystroke
+#           which must pass through a confirmation, and a keymap set by
+#           `vim.keymap.set` is not a config-table entry, so the Lua-table
+#           reader is blind to it — a merge key can appear, and an UNCONFIRMED
+#           one can appear, with every structural assertion green. That is not
+#           hypothetical: the guard named "no merge keystroke is declared" kept
+#           passing when a merge keystroke was added. The behavioural guards
+#           drive a `no` answer and watch the merge NOT happen, so without this
+#           binary they would report merge safety nobody measured. flake.nix's
+#           `gateTools` carries it for the sandbox and for `nix develop`.
+#
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf cairn)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf cairn luajit)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -3775,6 +3790,30 @@ EXPECTED_SKIPS=(
   # lands on one core, the fix is to make the CONTROL independent of the
   # runner's mode, not to delete this entry.
   "scripts/tests|only meaningful inside a real xdist worker|unset:DEVRC_XDIST_ACTIVE"
+  # `test_mutation_battery_anchors.py::test_the_PAIR_check_goes_RED_on_a_real_
+  # battery_COPY` is a NEGATIVE CONTROL that truncates a battery's first
+  # MULTI-SITE (`old`/`new` as tuples) row. A battery with no such row has
+  # nothing to truncate, so the control skips itself LOUDLY rather than passing
+  # — which is right, and is exactly the case this ledger exists to account for.
+  #
+  # 🔴 PINNED RATHER THAN RE-POINTED, and the standing preference above is for
+  # re-pointing whenever a test can be made to RUN. It cannot here: the control's
+  # subject is a tuple row, and inventing one so the control has something to
+  # chew on would put a contrived mutant in an instrument whose whole purpose is
+  # quotable evidence. The two batteries below are legitimately single-site.
+  #
+  # 🔴 MEASURED PRE-EXISTING: at ced40bdb — before the battery this change adds —
+  # the archive/cap entry was ALREADY unpinned, and running that one target
+  # reported `1 UNPINNED skip group` and `RESULT: FAIL`. So the first entry
+  # unbreaks a gate that was red on main; the second keeps it that way.
+  #
+  # ONE ENTRY PER BATTERY, not one widened regex: the accounting compares the
+  # skip TOTAL against the number of applicable ENTRIES (one test per entry), so
+  # a single entry absorbing both leaves 2 skips against 1 pin and stays red.
+  # Adding or removing a single-site battery means adding or removing a line
+  # here — that accounting cost is the mechanism, not an oversight.
+  "scripts/tests|mutation_battery_handoff_archive_and_cap[.]py has no multi-site row"
+  "scripts/tests|mutation_battery_investigation_rename[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a

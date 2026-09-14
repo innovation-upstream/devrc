@@ -21,37 +21,35 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- 🔴 **RANK 13 IS CLOSED — IMPLEMENTED, MERGED, SHIPPED AND CONSUMER-VERIFIED AGAINST THE REAL
-  VERDICTS THAT MOTIVATED IT. The arc's remaining open work is ONE NEW ITEM (rank 14, a flaky test
-  on `main`) plus the two DATED items.** Ranks 1–4, 7, 9, 10, 11, 12, 13 are closed tombstones;
-  rank 5 ANSWERED with no PR; ranks 6 and 8 are DATED.
+- ✅ **THE ARC IS CLOSED, AND NOTHING IN IT IS ACTIONABLE TODAY.** Every inherited objective is
+  merged, shipped and consumer-verified; both items the arc SPAWNED (ranks 13, 15) are closed. No PR
+  of mine is open, no claim is held, and every worktree/branch this arc created is cleaned up.
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
-  `#1603` 14daa42a · **`#1629` f839e720** · **`#1625` b9f40f82**. Closed unmerged on purpose:
-  `#1558`, `#1559`.
-- **Both hosts converged and VERIFIED at `f5942a24`.** ⚠ The first `ship.sh` returned **rc 19
-  HOSTS DISAGREE** — `origin/main` moved between the two legs' fetches, so each host landed on a
-  different sha while every per-host line stayed green. Exactly the documented case; the second
-  pass converged both. **Re-running is the remedy, not a workaround.**
-- 🔴 **`#1629` (`f839e720`) — the INHERITED census screen. CONSUMER-VERIFIED ON REAL DATA, and it
-  reproduced the pass condition written down BEFORE the code existed:**
-  ```
-  #1450  VERDICT: INHERITED — likely cured by rebase      (measured RIGHT — unchanged)
-  #1286  VERDICT: INHERITED — likely cured by rebase      (measured RIGHT — unchanged)
-  #1194  VERDICT: NOT EXPLAINED BY STALENESS              (measured FALSE — now DEMOTED)
-  census screen: 1 demoted  #1194   [244 guard nodeids derived in 18700ms]
-  ```
-  Derivation cost **18.7s**, better than the 28s the design budgeted for.
-- **`#1625` (`b9f40f82`)** — the arc close-out doc. Merged through a RED whose unreachability was
-  proven, see Gotchas.
-- 🔴 **NEW, AND NOT MINE: `main` CARRIES A FLAKY TEST THAT IS REDDENING PRs.** Filed as rank 14.
-  `scripts/tests/test_tmux_hyperlink_open.py::test_tmux_stores_the_hyperlink_and_can_report_it`
-  MEASURED on a clean `origin/main` checkout: **run 1 passed, runs 2 and 3 FAILED**. It reddened
-  `#1629`'s own CI.
-- **All claims RELEASED.**
-- **No `clawgate-task:` field recorded** — `resolve` exited **5** (0 tasks).
+  `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
+  `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · **`#1654` cfe4eb54**.
+- **Both hosts converged and VERIFIED at `a2c84a1c`.** (⚠ `main` has moved since — that is the last
+  sha this arc SHIPPED, not the current tip.)
+- 🔴 **TWO CLAIMS IN THE PREVIOUS UPDATE ARE NOW WRONG — corrected here rather than defended.**
+  Measured on clean `origin/main` `18a95e23`:
+  - **`test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` PASSES** (1 passed). It was
+    fixed by **`#1655`** (another session, merged). ⚠ **And it was never a rank-9 class instance.**
+    `#1655` establishes it was a **documented FALSE-POSITIVE RANGE** of a deliberately-short needle:
+    the offending doc **quotes the phrase as a grep PATTERN, never asserts it**, and the needle's own
+    comment predicts this outcome and prescribes reword-or-marker. My "third instance of the class,
+    still red" was wrong on both halves.
+  - **The tmux flake (rank 14) passed in that same run.** ⚠ That is **not** evidence it is fixed —
+    it is flaky (1 passed / 2 failed in 3 runs when measured). One green proves nothing here.
+- 🔴 **`main` IS STILL RED on `test_no_handoff_doc_exceeds_its_budget`**, owned by a FOREIGN doc:
+  `handoff-index-store-claims-accuracy.md`, **72,627 B, over the 65,536 B ceiling by 7,091 B**.
+  ⚠ **`#1650` is already OPEN for exactly this — do not duplicate it.** The same run also reports a
+  `now_fits` entry: some doc is back under the ceiling and its `GRANDFATHERED` row must be DELETED
+  (the ledger is a ratchet).
+- **No `clawgate-task:` field recorded** — `clawgate_handoff.sh resolve` exited **5** (0 tasks). Its
+  own output says an unknown session id also answers 200 with an empty array, so that is explicitly
+  **not** a clean bill of health.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -116,94 +114,77 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–4, 7, 9, 10, 11, 12 and 13 are CLOSED tombstones**; renumbering re-points every
-live claim. **Live: 14 (actionable now), 8 and 6 (DATED), 5 (answered, no PR).**
+the END. **Ranks 1–13 and 15 are CLOSED tombstones.** Live: **14** (another session's file), **8**
+and **6** (DATED), **5** (ANSWERED, no PR). 🔴 **Nothing here is actionable today.**
 
-1. **CLOSED** — `homelab-infra#792` merged in dry-run (`dbe47814`). Arming is rank 8.
+1. **CLOSED** — `homelab-infra#792` merged dry-run (`dbe47814`). Arming is rank 8.  forcing: none
+2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.  forcing: none
+3. **CLOSED — the store-api flake was fixed by `#1458`.** ⚠ `#1512` is no longer the measurement of
+   record: superseded by an ANCESTRY split over 400 PR heads — **0 of 99** verdicts on heads carrying
+   `ce9b55c3` vs **12 of 298** that do not, P(0) ≈ **0.017** (`devrc#1568` `8114a124`; table at
+   `handoff-gate-flake-store-api.md` rank 1). Keep `#1512` for "it was never the worst flake".
    forcing: none
-2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.
-   forcing: none
-3. **CLOSED — the store-api flake was already fixed by `#1458`.** ⚠ `#1512` is NO LONGER the
-   measurement of record: it split on `ce9b55c3`'s TIMESTAMP and its zero was underpowered
-   (4/125 → 0/45, P(0) ≈ 0.23). Superseded by an ANCESTRY split over 400 PR heads — **0 of 99**
-   verdicts on heads carrying the sha against **12 of 298** that do not, P(0) ≈ **0.017** — in
-   `devrc#1568` (`8114a124`), table at `handoff-gate-flake-store-api.md` rank 1. ⚠ `#1512`'s table
-   is not WRONG: re-splitting the same 397 verdicts by date reclassified 5 and **0 of 101
-   failures**. Cite the newer read; keep `#1512` for "it was never the worst flake".
-   forcing: none
-4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.
-   forcing: none
-5. **ANSWERED — NO PR, AND BOTH CANDIDATE FIXES WERE REFUTED.** `step-pytests` is **1177s = 94.4%**
-   of a 1247s gate pod (23 pods, 11h); `scripts/tests` is **582–778s** at 14,327 of 22,518 tests.
-   **Dependency realisation is NOT the cost — test execution is.** 🔴 A docs-only commit DOES bust
-   the derivation, and **198 of the last 400 `main` commits (49.5%) are docs-only**. Both obvious
-   fixes are dead: (a) **no cache left to hit** — the warm node-pinned `/nix` PVC was removed in
-   `homelab-talos 3c53d618a`, now a per-run `emptyDir` with **no substituters**; min `step-pytests`
-   over 23 runs is **956s**. (b) **excluding `claudedocs/` would blind real gates** — demonstrated
-   by turning the gate red with a one-word edit to THIS doc, which
-   `test_retracted_contention_figure.py` pins by digest.
-   ⏳ The one remaining lever is ONE LINE IN `homelab-talos`: raise `limits.cpu` 4→8 for
-   `step-pytests` in `devrc-ci-pipeline.yaml`, leaving `requests.cpu` at 2 (worker count follows the
-   cgroup quota — `-n 4` because the LIMIT is 4, not `nproc`). ⚠ Distinct from the reverted
-   `23887675`/`bb62668f`, which raised the REQUEST. ⚠ **3–6 min saving is INHERITED, not
-   re-derived.** Bursting to 8 cores produced the loopback-starvation flakes.
-   **Probe on a scratch pipeline, never on `devrc-ci`.**
+4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.  forcing: none
+5. **ANSWERED — NO PR, BOTH CANDIDATE FIXES REFUTED.** `step-pytests` is **1177s = 94.4%** of a
+   1247s gate pod (23 pods, 11h); `scripts/tests` is **582–778s** at 14,327 of 22,518 tests. **Test
+   execution is the cost, not dependency realisation.** (a) **No cache left to hit** — the warm
+   node-pinned `/nix` PVC was removed in `homelab-talos 3c53d618a`; per-run `emptyDir`, no
+   substituters, min `step-pytests` **956s**. (b) **Excluding `claudedocs/` would blind real gates**
+   — proven by turning the gate red with a one-word edit to this doc.
+   ⏳ One lever remains, in `homelab-talos`: `limits.cpu` 4→8 for `step-pytests`, `requests.cpu`
+   stays 2 (worker count follows the cgroup quota — `-n 4` because the LIMIT is 4, not `nproc`).
+   ⚠ Distinct from the reverted `23887675`/`bb62668f`, which raised the REQUEST. ⚠ 3–6 min saving is
+   INHERITED, not re-derived. Bursting to 8 produced the loopback-starvation flakes. **Scratch
+   pipeline, never `devrc-ci`.**
    forcing: none
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**,
-   TOGETHER with rank 4: that screen implements the same completeness-proving idea in **15 lines**
-   where `#1524` rebuilds it at ~885. 🔴 **EVIDENCE CUTS TOWARD DELETE**: the store-api flake it was
-   written around is at **0 of 99** verdicts post-fix, and **100 of 101** failure descriptions
-   truncate at 138 of the 140-char cap, which makes the screen unsatisfiable. ⚠ Both figures are a
-   READ-TIME population that cannot be re-derived. ⚠ **Not a decision — the date and "decide them
-   together" both stand.**
+   together with rank 4 (15 lines there vs ~885 in `#1524`). 🔴 Evidence cuts toward DELETE: the
+   store-api flake is at **0 of 99** post-fix, and **100 of 101** failure descriptions truncate at
+   138 of the 140-char cap, making the screen unsatisfiable. ⚠ Both are READ-TIME populations that
+   cannot be re-derived. ⚠ Not a decision — the date stands.
    forcing: none
-7. **CLOSED — `ZacxDev/homelab-infra#799` MERGED `0b14768a`.** Test-only; reconciled to nothing.
-   forcing: none
-8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK UNTIL ~2026-09-18, THEN ARM.** Operator set the
-   date. Criteria (i)–(iii) met non-vacuously on the first two post-deploy sweeps; (iv) needs the
-   window. Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` and `|= "closed-pr pass:"` in
-   Loki, hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` + the pinned literal at
-   `test_supersede_logic.py:2251`. 🔴 Zero `DRY-RUN would cancel` lines after a week is NOT a clean
-   bill. ⚠ Dry-run short-circuits BEFORE the re-read guard. ⚠ `#799` has merged into `trunk`, so
-   re-read line 2251 rather than trusting the number.
-   🔴 **RANK 13 IS NOW A COMPLETED WORKED EXAMPLE FOR THIS DECISION, not just a caution.** A
-   dry-run soak caught a **2-of-4 false rate** in a sibling tool that every mutation sweep and
-   merged-tree gate had passed, because the defect was in the tool's REASONING about real repo
-   history — invisible to any unit test. It took one afternoon to measure and fix. **Before arming
-   `#792`, ask what its soak structurally CANNOT see, and consider probing its selector against
-   ground truth the way rank 13's was.**
-   forcing: deadline — the operator set 2026-09-18.
-9. **CLOSED by `#1561`**, plus `#1567` for the second instance. 🔴 **The CLASS is mitigated, not
-   closed**: `#1603`'s `ledger-check.sh` makes it cheap to DETECT before merging (229s), and
-   `#1629` now uses the same derivation to stop the triage bot being fooled by it. Nothing
-   PREVENTS a new instance.
+7. **CLOSED — `homelab-infra#799` `0b14768a`.** Test-only; reconciled to nothing.  forcing: none
+8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK TO ~2026-09-18, THEN ARM.** Operator set the date.
+   Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` / `|= "closed-pr pass:"` in Loki,
+   hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` + the pinned literal at
+   `test_supersede_logic.py:2251` (re-read the line number; `#799` has landed since).
+   🔴 Zero `DRY-RUN would cancel` after a week is NOT a clean bill. ⚠ Dry-run short-circuits before
+   the re-read guard. 🔴 **Rank 13 is the WORKED EXAMPLE for this call** — a dry-run soak exposed a
+   **2-of-4 false rate** in a sibling tool that every mutation sweep and merged-tree gate had passed,
+   because the defect was in its REASONING about real repo history. **Ask what `#792`'s soak
+   structurally cannot see, and probe its selector against ground truth.**
+   forcing: deadline — 2026-09-18.
+9. **CLOSED by `#1561` + `#1567`.** 🔴 The CLASS is mitigated, not closed: `#1603`'s
+   `ledger-check.sh` DETECTS it in 229s and `#1629` stops the triage bot being fooled by it, but
+   nothing PREVENTS a new instance. ⚠ **The count is TWO known instances, not three** — see the
+   correction in `State now`; the needle guard was a documented false-positive range, not this class.
    forcing: none — owned by nobody.
-10. **CLOSED — `devrc#1600` MERGED `f99d3c1b`**, shipped, consumer VERIFIED RUNNING. Its arming
-    blocker was rank 13, now fixed.
+10. **CLOSED — `#1600` `f99d3c1b`**, shipped, consumer VERIFIED RUNNING (2h timer, dry-run pinned by
+    value, one clean run `Result=success` `ExecMainStatus=10`).  forcing: none
+11. **CLOSED — `#1603` `14daa42a`**, shipped, consumer VERIFIED (244 nodeids, 392 passed, **229s** —
+    not the 166s this doc once claimed).  forcing: none
+12. **CLOSED — `#1613` `264de70d`**, merged through a red proven unreachable from its diff.
     forcing: none
-11. **CLOSED — `devrc#1603` MERGED `14daa42a`**, shipped, consumer VERIFIED (244 nodeids, 392
-    passed, **229s**).
+13. **CLOSED — `#1629` `f839e720`**, shipped, CONSUMER-VERIFIED on the real verdicts: `#1450`/`#1286`
+    stay INHERITED, `#1194` demotes, 244 guards in 18.7s. ⚠ Fixes the bot's REASONING; does NOT arm
+    it — arming is still a separate, evidence-gated call.
     forcing: none
-12. **CLOSED — `devrc#1613` MERGED `264de70d`.**
+14. 🔴 **A FLAKY TMUX TEST — fix or delete it. ANOTHER SESSION'S FILE.**
+    `test_tmux_hyperlink_open.py::test_tmux_stores_the_hyperlink_and_can_report_it`, MEASURED **1
+    passed / 2 failed in 3 runs** on a clean `origin/main`; empty `capture-pane`, a render race. Its
+    own docstring calls it an **invariant guard, not regression coverage**, which is the strongest
+    argument for deleting it. ⚠ **It PASSED once on `18a95e23` — that is not evidence it is fixed;
+    run it three times.** 🔴 Raise or claim it; do not rewrite another session's test unilaterally.
+    forcing: gate — it reddens `main` and every branch inherits the noise.
+15. **CLOSED — `#1648` `a2c84a1c`, shipped and consumer-verified on the deployed tool.**
+    `handoff_doc.py` now warns an author, in the proposal run above the diff, when an update would
+    put the doc over its budget. 🔴 **It WARNS and never REFUSES, and that is forced**: a blocking
+    check deadlocks against `handoff-write-guard.py`, which blocks Stop until a handoff is written,
+    so a session on a doc already grandfathered OVER the ceiling could neither record its work nor
+    end its turn. Pinned by `test_the_over_budget_warning_REFUSES_NOTHING`. Ceiling/step/ledger moved
+    to `scripts/lib/handoff_budget.py`; `test_handoff_doc_size.py` still owns the policy.
+    ⚠ Closes the FEEDBACK gap, not the budget problem.
     forcing: none
-13. **CLOSED — `devrc#1629` MERGED `f839e720`, shipped, CONSUMER-VERIFIED ON THE REAL VERDICTS.**
-    The census screen demotes `#1194` to NOT EXPLAINED while leaving `#1450`/`#1286` INHERITED —
-    the pass condition written down before the code existed. 106 tests, mutation battery 4/4
-    killed, 462 passed on the merged tree.
-    ⚠ **This fixes the bot's REASONING; it does not arm it.** `--comment-mode dry-run` is still
-    pinned by value. Arming remains a separate, evidence-gated decision — and the right evidence is
-    another sweep read against ground truth, not a clean run.
-    forcing: none
-14. 🔴 **A FLAKY TEST ON `main` IS REDDENING UNRELATED PRs — decide whether to fix or delete it.**
-    `test_tmux_hyperlink_open.py::test_tmux_stores_the_hyperlink_and_can_report_it`, MEASURED
-    **1 passed / 2 failed in 3 runs** on a clean `origin/main`. Empty `capture-pane` output; a
-    render race. It reddened `#1629`. Its own docstring calls it an **INVARIANT GUARD, not
-    regression coverage**, which is the strongest argument for simply deleting it: it costs
-    everyone a red PR and, by its author's own note, proves nothing about the change that shipped
-    it. 🔴 **Another session's test, days old — do not rewrite it unilaterally; raise it or claim it
-    first.** ⚠ `claude/RULES.md`: a flaky test is FIXABLE — remove the timing dependency rather
-    than re-running.
-    forcing: gate — it reddens `main` and every branch cut from it inherits the noise.
 
 ## Decisions, so they are not re-litigated
 
@@ -225,19 +206,26 @@ live claim. **Live: 14 (actionable now), 8 and 6 (DATED), 5 (answered, no PR).**
 ## How to verify
 
 ```bash
-# rank 13, end to end on the DEPLOYED artifact, against the real verdicts
+# the three inherited objectives — all SQUASH merges, so verify by CONTENT, never ancestry
+gh pr view 1600 --repo innovation-upstream/devrc --json state,mergeCommit
+gh pr view 1603 --repo innovation-upstream/devrc --json state,mergeCommit
+gh pr view 799  --repo ZacxDev/homelab-infra    --json state,mergeCommit
+
+# rank 15's consumer, on the DEPLOYED tool — both arms, and the silence
+python3 ~/workspace/devrc/scripts/lib/handoff_doc.py --repo ~/workspace/devrc \
+  --topic gate-speed-and-ci-signal --update <a small delta> --advanced 'probe'   # ⚠ Size: … left
+#   an ~8 KB delta instead prints: 🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET
+
+# rank 13's consumer — the real verdicts it was built to fix
 cd ~/workspace/devrc && python3 scripts/stale-base-triage.py \
   --pr 1450 --pr 1286 --pr 1194 --comment-mode dry-run | grep -E 'VERDICT:|census screen'
-#   expect: 1450 INHERITED · 1286 INHERITED · 1194 NOT EXPLAINED · "1 demoted  #1194"
+#   expect 1450 INHERITED · 1286 INHERITED · 1194 NOT EXPLAINED · "1 demoted  #1194"
 
-# 🔴 rank 14 — the flake. RUN IT THREE TIMES; one green proves nothing.
+# what is ACTUALLY red on main right now — measure, do not trust this doc's age
 S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
-for i in 1 2 3; do (cd "$S" && nix develop ~/workspace/devrc -c python3 -m pytest \
-  "$S/scripts/tests/test_tmux_hyperlink_open.py" -k stores_the_hyperlink \
-  -q -p no:cacheprovider --rootdir="$S" 2>&1 | tail -1); done
-
-# both hosts on one sha (rc 19 means re-run, not failure)
-bash ~/workspace/devrc/scripts/ship.sh
+(cd "$S" && nix develop ~/workspace/devrc -c python3 -m pytest \
+  "$S/scripts/tests/test_handoff_doc_size.py" -q -p no:cacheprovider --rootdir="$S")
+# 🔴 rank 14 is FLAKY — run it THREE times; one green is not a verdict.
 ```
 
 ## Gotchas / decisions / dead-ends
@@ -327,92 +315,6 @@ bash ~/workspace/devrc/scripts/ship.sh
   written, and by review time the branch was **6 behind**. Zero file overlap and
   `mergeStateStatus: CLEAN`, so the risk was low, but the gated tree was no longer the merged
   tree. **A merged-tree claim carries an expiry that nothing prints.**
-
-### 2026-09-11 — verifying rank 2, and four instrument failures in one session
-
-- 🔴 **`git rev-parse $ref:path` in zsh returns a CONFIDENT WRONG 40-char sha.** `$r` followed by
-  `:s` is eaten as a **history substitute modifier**, so the command never asks what you think.
-  It printed a plausible blob id that made a file look CHANGED across three refs when
-  `git ls-tree` showed one identical blob (`c342720d`). **Brace it (`${r}:path`) or use
-  `git ls-tree`.** This is the documented unbraced-var trap, hit while actively reading the rule.
-- 🔴 **A mutation that edits a COMMENT reports SURVIVED having never run.** `classify`'s
-  fall-through was mutated with `.replace('return "error-other"', …, 1)` — and the FIRST
-  occurrence in the file is inside a comment *quoting that literal as prose*. The sweep was green
-  and meaningless. **Mutate by LINE NUMBER with an assert on the line's exact content.** Redone
-  properly, both fall-throughs are KILLED by named tests
-  (`test_an_UNRECOGNISED_state_is_never_green_end_to_end`).
-- 🔴 **zsh does not word-split, so `pytest $SEL` passed 50 paths as ONE argument** — pytest errored
-  `file or directory not found`, ran **`no tests ran in 0.00s`**, and the pipeline still **exited
-  0**. A merged-tree gate that observed nothing and reported success. Use an array, or `${=SEL}`,
-  and **assert the collected count moved** before believing a green.
-- 🔴 **I destroyed my own control by removing its worktree while it was still running**
-  (`FileNotFoundError: …/wt-control`, and it exited **0** anyway). The decision did not change
-  because the discriminating run had already finished — but that is luck, not justification.
-  **Do not tear down a tree a background job depends on.**
-- **A 1-of-4049 merged-tree failure was LOAD, and the mechanism was identified rather than
-  re-run-until-green.** `test_no_real_launchers.py::test_autouse_is_what_protects_a_test_that_
-  never_asks` died on a 300s `TimeoutExpired` on a *nested* pytest inside a run that took 3090s;
-  the same file alone on the same merged tree passes **80/80 in 254s**. ⚠ It was NOT dismissed on
-  shape: that file references `main-status-watch` four times, #1469 added its `NOLAUNCH_ACK` row,
-  and `ffe4e5d0` is precedent for this exact file breaking on a merge with main. The launcher
-  ledger's one real citation into the rewritten test file
-  (`test_the_trigger_verb_is_MUTATING_so_the_stub_fails_it_closed`) was checked and RESOLVES.
-- 🔴 **A PR green on its own branch is not a merged-tree claim, and #1502 was 12 commits behind.**
-  Zero file overlap and a clean textual merge — which is NOT safety — so the at-risk surfaces
-  (every test reading `CLAUDE.md`, the disk-accounting ledger, `scoped-tests`) were run on the
-  actual merged tree before merging.
-- **`#1502`'s own ladder repeated the arc's headline lesson twice more.** Round 4 caught round 3
-  **claiming a fix it had not made** — the PR body had been written from the finding list rather
-  than the diff. Round 5 then found three of round 3's own measured numbers stated **wider than
-  measured** ("21 mutants" → 16; "every mutant of classify's arms" → 35 of 60; "ZERO coverage" →
-  10 of 11). A fix round's own prose remains the likeliest next finding.
-- **A 100% kill rate is a broken harness, and was reported as such.** One verification sweep
-  returned 439/439 KILLED **with a RED negative control**; the whole 457-run sweep was voided
-  rather than reported. A span self-check also caught 1 mutant of 440 whose edit landed inside an
-  f-string and never made the change it claimed — reported VOID, not SURVIVED.
-- 🔴 **CLAUDE.md said `main-status-watch` was "NOT LIVE UNTIL A SWITCH" for a full day after
-  `ship.sh` had converged both hosts to `86b1ddec`.** The sentence was written before the deploy
-  and nothing re-read it. Corrected in `#1502` to a MEASURED liveness claim that names its own
-  re-measurement command. **A ⏳ "not live yet" note is a claim with an expiry that nothing prints.**
-- ⚠ **#792's dry-run soak cannot validate the guard its own best evidence needs.** devrc **#1500**
-  merged **14 seconds after** the sweep pod started — i.e. mid-tick, exactly the race the re-read
-  guard exists for. Dry-run short-circuits `cancel_all` BEFORE the re-read, so the soak shows the
-  SELECTOR is right while structurally never exercising the WRITE-path guard. Weigh that when
-  deciding rank 8.
-
-### 2026-09-11 — rank 3: a ranked item whose premise was wrong in both directions
-
-- 🔴 **"Needs a diagnosis" was FALSE — the diagnosis was already in the file, and excellent.** The
-  suite's own classifier had printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`
-  on run `devrc-ci-86zxj`: `server.py:_replace_bytes` fsyncs the file and then the parent dir
-  **inside the request, before the response is written**, and fsync blocks in uninterruptible sleep
-  — which is exactly the captured `TimeoutError` inside `socket.recv_into` (connection ESTABLISHED,
-  never answered). **Read the target file before believing a handoff's characterisation of it.**
-- 🔴 **AND IT WAS ALREADY FIXED, by a PR nobody connected to it.** `#1458` (`ce9b55c3`) sited the 18
-  remaining store roots — this class's among them — on **tmpfs** via `sited_root`. That removes the
-  mechanism rather than widening a bound: an fsync to RAM cannot stall on a contended disk. Nothing
-  recorded that the fix had LANDED, so the item stayed on the queue reading as live.
-  **A fix that is not written down where the symptom is described has not finished landing.**
-- **Measured, `tekton/devrc-pytests`, newest verdict per PR head, split on `ce9b55c3`:** pre-fix 125
-  verdicts / 29 genuine failures / **4** this test; post-fix 45 / 6 / **0**. `failure` and `error`
-  counted separately throughout — `error` is a broken gate, not a bad change.
-- 🔴 **THE ZERO WAS NEVER THE PROOF, and the comment now says so in the file.** At the pre-fix
-  per-verdict rate (3.2%) the expected count in 45 verdicts is ~1.4, so **P(observing 0) ≈ 0.23** —
-  a one-in-four coincidence. The mechanism's removal is what carries the claim. **A before/after
-  table is the easiest thing in this repo to over-read; state the power beside it or it will be
-  upgraded to "proven" by the next reader.**
-- 🔴 **IT WAS NEVER THE WORST FLAKE — it was the best-DOCUMENTED one.** Same pre-fix window:
-  `test_every_decrypt_family_VERDICT_is_pinned_WHOLE` failed **8** times to this test's **4**, and
-  is also at 0 post-fix. It had no long diagnosis attached and was never ranked. **Vividness is not
-  frequency: COUNT the failures before choosing which flake to chase.** This is the same error as
-  ranking by a memorable incident rather than by a census.
-- **`main` is a useless population for this question and that is structural.** Of 43 post-fix
-  pytests verdicts on `main`, **40 were artefacts** (~31 `superseded`, 4 `KILLED: the gate pod
-  died`, 4 `NO GATE POD`, 1 pending) leaving **3** authoritative successes. Use PR heads.
-- ⚠ **UNMEASURED, recorded rather than guessed:** the 760-test verification run emitted **3
-  warnings**, and this suite warns on `the spawn lost the port race and retried`. Only the tail was
-  captured, so whether those were port-race retries is **unknown**. If they were, the race is live
-  on this host — but nothing here claims that.
 
 ### 2026-09-12 — rank 4's ladder, and a red `main` nobody had fixed
 
@@ -825,26 +727,104 @@ bash ~/workspace/devrc/scripts/ship.sh
   first. `Gotchas` is APPEND-only, so the sha survives here permanently. **A measured figure that
   matters belongs under an APPEND heading; a REPLACE section is for status, and status is exactly
   what gets overwritten.**
+
+### 2026-09-13 — chasing one red found another, and one of them was mine
+
+- 🔴 **A RED I WAS GOING TO CALL "INHERITED" WAS PARTLY MINE.** `#1640`'s CI failed on
+  `test_no_handoff_doc_exceeds_its_budget`, and my diff touched no handoff doc — the textbook
+  unreachable-red shape. Probing clean `main` showed THREE violators and **one was the doc I had
+  grown in three merges that same session**. ⚠ **"My diff cannot reach it" and "I did not cause it"
+  are different claims**, and the gap between them is everything a session did EARLIER. Check the
+  second one before reaching for the word inherited.
+- 🔴 **TWO SECTIONS SHARING A HEADING ARE NOT NECESSARILY DUPLICATES.** `### 2026-09-12 — ship.sh rc
+  7` appears twice in this doc and I was about to delete one to save 2,032 B. **0 of the shorter
+  copy's 10 sentences appear in the longer** — same title, different content, written by two of my
+  own updates. Compare bodies, never titles.
+- 🔴 **THREE OF MY OWN SURVIVAL-CHECK NEEDLES WERE THE DEFECT, NOT THE CONTENT**, in one session:
+  `does not trust Authelia` (spans a line break), `pre-start note` (the flow file says
+  "pre-start **comment**"), and `mtime was **2 minutes old**` (asterisks placed differently). Every
+  one reported LOST for content that was present. **Normalise whitespace, and confirm a miss against
+  the defining file before believing your own grep.**
+- **The prune ladders are worth following in order.** `ledger-check.sh`'s ceiling wanted an EVICTION
+  (remedy 1, "usually the whole answer") and that is exactly what both fixes turned out to be —
+  demote verbatim to a sidecar, keep the imperative, leave a pointer. Neither needed a raised
+  number, which both playbooks rank LAST.
+- ⚠ **`skill-audit.py` quotes the GENERIC 12,288 B skill budget even for a file governed by its own
+  ceiling.** clawgate's gate is 15665, in
+  `test_clawgate_task_interview_guard.py::test_the_skill_did_not_grow`. The prune-skill doc says to
+  believe the governing gate over the generic number — read it before chasing 3 KB you do not owe.
+- 🔴 **READING THE DEMOTED FILE END TO END CAUGHT TWO DEFECTS EVERY STRUCTURAL CHECK PASSED**: a
+  sidecar section that began mid-sentence (the slice cut after the subject, which stayed in the
+  core), and a fact stated twice. Ceiling green, paths resolved, no orphans, survival check clean,
+  170-line gap audit clean. **Slicing guarantees content survives; it does not guarantee the result
+  is readable.**
+- ⚠ **My own CI waiter read "no checks reported" as settled.** After a push resets the checks, the
+  absence of a `pending` row is not a verdict. Fixed to require all three checks PRESENT and
+  settled. Four stale waiters also fired with empty output and **exit 0** — the shape that reads as
+  success.
+
+### 2026-09-13 — closing out: what a "closed" arc still had outstanding
+
+- 🔴 **THE RANKED LIST SAID RANK 15 WAS OPEN AFTER I HAD ALREADY SHIPPED IT.** `#1647` filed rank 15
+  as 🔴 actionable; `#1648` closed it twenty minutes later; nothing updated the doc in between, so
+  `main` carried an open item pointing at work that was merged, shipped and verified. A next session
+  would have `claim-work`ed it and rebuilt it — the exact duplicate-work failure that cost this arc
+  two PRs (`#1558`/`#1559`) earlier. **Found only by being asked "is anything outstanding?" and
+  CHECKING the doc on `main` rather than reciting what I remembered doing.**
+  Generalise: **when one PR files a ranked item and a later PR closes it, the doc is stale between
+  them, and the window is invisible** — the ranked list is the queue every `/resume` draws from, so
+  a stale OPEN is worse than a stale CLOSED.
+- **Worktree hygiene is part of finishing.** Eleven worktrees and thirteen branches were left behind
+  by this arc's merged-tree gates and fix branches. All were clean, and every one's work was
+  verified ON `main` BY CONTENT before removal — **their `commits-not-on-main` counts were 1–8 and
+  that is the SQUASH TRAP, not evidence of stranded work**; ancestry says unmerged forever after a
+  squash. ⚠ Eight similarly-named worktrees in that directory belong to OTHER sessions and were left
+  untouched; a name pattern is not ownership.
+- ⚠ **The rank-9 class produced a THIRD instance today, and it is still red on `main`.**
+  `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` fires on a handoff doc whose prose
+  DOCUMENTS a grep that was wrongly quoted as a clean sweep — spelling the needle to explain the
+  trap is what trips the guard. Same shape as `_KILL_MENTION_LEDGER` and `test_runtime_shebangs.py`.
+  **Three in one day is a rate, not a coincidence.**
+
+### 2026-09-13 — the close-out, and two of my own claims that did not survive it
+
+- 🔴 **I RECORDED A THIRD INSTANCE OF THE RANK-9 CLASS THAT WAS NOT ONE.**
+  `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` fired on a handoff doc, and I
+  wrote it up as "a guard tripped by prose documenting that guard — three in one day is a rate".
+  **`#1655` (another session) shows it is a documented FALSE-POSITIVE RANGE of a deliberately-short
+  needle**: the doc quotes the phrase as a grep PATTERN and never asserts it, and the needle's own
+  comment predicts exactly this and prescribes reword-or-marker. **The pattern I "found" was me
+  fitting a new observation to the class I had spent the day thinking about.** A rate claimed from
+  three points, one of which was a different phenomenon, is not a rate.
+- 🔴 **AND I LEFT IT ON `main` AS "STILL RED" AFTER SOMEBODY FIXED IT.** `#1654` merged with that
+  claim; `#1655` had already landed. **Re-measure before a close-out asserts a red** — a handoff's
+  last update is the one nobody re-checks.
+- ⚠ **ONE GREEN IS NOT A VERDICT ON A FLAKY TEST.** Rank 14's tmux test PASSED in the same run that
+  produced these corrections. Measured earlier at 1 passed / 2 failed in 3 runs, so that pass is a
+  sample, not a fix — recorded here because the next reader will see one green and be tempted.
+- **The close-out found a real gap by CHECKING rather than reciting.** Asked whether anything was
+  outstanding, reading the doc on `main` showed **rank 15 still marked 🔴 OPEN twenty minutes after
+  `#1648` shipped it** — `#1647` filed it, `#1648` closed it, nothing updated the doc between. A
+  next session would have claimed and rebuilt it. **When one PR files a ranked item and a later PR
+  closes it, the doc is stale in the window between, and that window is invisible.**
+- **Worktree hygiene is part of finishing.** Eleven worktrees and thirteen branches were removed;
+  all clean, each verified on `main` BY CONTENT first, because their `commits-not-on-main` counts of
+  1–8 are the SQUASH TRAP, not stranded work. ⚠ Eight similarly-named worktrees in that directory
+  belong to OTHER sessions and were left alone — **a name pattern is not ownership.**
+- **The budget warning shipped in `#1648` fired on its own author's close-out write** (`873 B left`),
+  and the right response was to take its advice: two more CLOSED dated sections went to
+  `claudedocs/refs/` in the same change, ending at 8,287 B of headroom. ⚠ The `#792` review section
+  was deliberately NOT evicted — rank 8 is live and dated, and that section is its arming evidence.
 ## Open investigations — live diagnosis state
 
-### RANK 2: #1469's audit ladder has not reached a clean round
-- **Symptom + exact repro:** `scripts/main-status-watch.py` (839 lines) ships and runs every 10
-  minutes on both hosts, but its audit ladder never terminated. Round 3 never ran, and a
-  95-mutant enumerated sweep died mid-run with its verdict unknown.
-- **Observed (with values):** the dead sweep had already surfaced one genuine survivor —
-  `print_header`'s sentinel branch — which the two earlier hand-written sweeps (self-reported
-  24/24 and 31/31) would never have included. Whether that survivor is fixed is **unknown as of
-  this writing**; confirming it is the first step of the in-flight agent's task.
-- **Ruled out:** "the hand-written sweeps were adequate, just unlucky" — falsified twice:
-  independent samples found survivors after both self-reported perfect scores, and one audit
-  found two survivors the author's own table did not contain. via: measurement
-- **Ruled out:** "capacity/load explains the sweep dying" — not investigated, and not assumed
-  either; the verdict was simply never read. via: assumed
-- **Leading hypothesis:** the enumerated sweep will find further survivors in the RC-code and
-  state-mutation families, because those are exactly what a hand-picked list omits.
-- **Next probe:** read the in-flight agent's survivor table when it reports. If it did not
-  finish, re-run the enumerated sweep under `PYTHONDONTWRITEBYTECODE=1` with a known-killed
-  positive-control mutant in every batch, and report the table rather than a score.
+### CLOSED investigation blocks — evicted 2026-09-13
+
+Four blocks that reached an answer (rank 2's ladder, rank 10's unread verdict, rank 10's
+ship-to-neither-host, rank 13's first false-INHERITED reading) were moved verbatim to
+`claudedocs/refs/gate-speed-and-ci-signal.md` when this doc went over its budget and reddened
+`main`. They are CLOSED, so the eviction costs a reader nothing live — but that file is **not**
+indexed by `handoff_search`, so go to it by path.
+
 
 ### RESOLVED — #1469's audit ladder (was rank 2)
 - **Closed at round 6.** Rounds 3/4/5 each produced findings; round 6 found none, so it ended
@@ -876,94 +856,6 @@ bash ~/workspace/devrc/scripts/ship.sh
 - **Next probe:** decide the design fix — scope the scanner off `claudedocs/`, or auto-classify a
   prose-only file that executes no tmux command. 🔴 Deliberately NOT taken unilaterally; classifying
   the doc unblocks `main` but does not close the loop.
-
-### RANK 10: #1600's merged-tree verdict is UNREAD — the run did not finish in session
-- **Symptom + exact repro:** `#1600` is green on its own branch at a base 24 commits behind `main`.
-  The question is whether the merge it creates is green. Repro:
-  `bash /tmp/.../scratchpad/mt1600-run.sh` — or rebuild it: worktree off `origin/main`, merge
-  `origin/pr-1600`, run every test file that reads `nix/home.nix` plus the PR's own new file.
-- **Observed (with values):** merge is textually clean — `Auto-merging nix/home.nix`, ort strategy,
-  `+450/-0` across 2 files, merge commit `01418433` on branch `mt/1600-merged` in worktree
-  `/home/zach/workspace/devrc-mt1600`. Selector found **72 test files**. Run reached **~35%** with
-  **zero failures so far** before the session ended. `origin/main` did not move during the run
-  (still `7e000e6b`), so the merged tree tested is the merged tree that would land.
-- **Ruled out:** "the three green checks settle it" — they are a claim about the PR branch at a
-  stale base; a clean textual merge is not a clean merge, and the at-risk surface here is a new
-  systemd unit against unit ledgers that live in OTHER files. via: code
-- **Ruled out:** "`scoped-tests.sh` can answer this" — it exits **4** on `nix/**`, a declared shared
-  surface, precisely because its mapper selects only files that NAME what changed and drops every
-  target reaching it through an import. via: doc
-- **Leading hypothesis:** it passes. The 35% already covered includes much of `scripts/tests/`, and
-  the unit is additive with its own master switch. Stated as a hypothesis because **the verdict was
-  never read** — this is exactly the "deployed ≠ verified" shape one level up.
-- **Next probe:** re-run the script and read `PYTEST_RC=` from
-  `scratchpad/mt1600.log`. 🔴 **Read the CONTENT, not the wrapper's exit code** — see the Gotchas
-  entry below; the first run of this very script reported wrapper exit 0 over `PYTEST_RC=4`.
-
-### 🔴 RANK 10 SHIPPED TO NEITHER HOST — the workbench is blocked by ANOTHER SESSION'S LIVE WIP
-- **Symptom + exact repro:** `bash ~/workspace/devrc/scripts/ship.sh` → **rc 7**. Workbench line:
-  `SKIPPED — cannot fast-forward to origin/main: could not switch to the main branch`, blocking file
-  `claude/skills/clawgate/SKILL.md`. Re-check with
-  `systemctl --user list-timers stale-base-triage.timer --all` (workbench: 0 timers, unit absent).
-- **Observed (with values):** the blocking file is **genuinely live WIP, not a stale orphan** — its
-  working copy sha1 `978ad806` matches **none** of the last 8 commits of that path, and its mtime was
-  **2 minutes old at the moment it was read** (`17:23:38`, read `17:25:49`). The diff is three
-  security-relevant RETRACTIONS to the clawgate skill: the LAN UI is *not* open (`/tasks/1` → 303 →
-  `/login`), `DELETE /api/tasks/{id}` is `requireHookToken` not unauthenticated (`server.go:699`),
-  and a credential-less `POST /agents` on the LAN returns **401**. Someone is writing that file now.
-- **Ruled out:** "`ship.sh` failed, so nothing deployed" — the LAPTOP leg SUCCEEDED
-  (`fast-forwarded main 7e000e6b -> f99d3c1b`, `552 checked, 0 dangling`, `✅ VERIFIED … + switched`).
-  Reading only the final `rc=7` would have gotten this backwards in both directions. via: command
-- **Ruled out:** "the laptop got the switch, so the sweep is running there" — its timer is
-  `UnitFileState=linked` with **0 timers listed** and `journalctl` `-- No entries --`, because the
-  `Install` block is `serverMode`-gated and the laptop has no `~/.server-mode`. That is CORRECT
-  behaviour, not a second bug. via: command
-- **Ruled out:** "just `git checkout origin/main -- <file>` and re-run ship" — that is the remedy
-  `ship.sh` itself prints, and here it would **destroy another session's uncommitted work while it is
-  mid-edit**. `claude/RULES.md` names docs-in-a-working-tree as unsaved work and names writing into a
-  tree another process is writing as its own hazard. **Deliberately NOT taken.** via: code
-- **Leading hypothesis:** nothing is wrong with `#1600`. This is purely the documented
-  diverged/dirty-host failure mode, and it will clear on its own once the other session commits or
-  parks that file — at which point `ship.sh` fast-forwards the workbench normally.
-- **Next probe:** re-check whether the file is still dirty, and only then re-ship:
-  `git -C ~/workspace/devrc status --short claude/skills/clawgate/SKILL.md` → if clean,
-  `bash ~/workspace/devrc/scripts/ship.sh` and **read every per-host line, not the final verdict**,
-  then `journalctl --user -u stale-base-triage -n 40 --no-pager` **on the workbench**.
-  🔴 If it is STILL dirty, that is the other session's to resolve — hand it over, do not clear it.
-
-### 🔴 RANK 13: the triage bot's FIRST live sweep produced a FALSE `INHERITED`, on a structural blind spot
-- **Symptom + exact repro:** `journalctl --user -u stale-base-triage --no-pager | grep -A14 'PR #1603'`
-  on the workbench. It ruled `devrc#1603` **INHERITED — likely cured by rebase**. It was not: the red
-  was caused by the PR's own diff, and a rebase would not have touched it.
-- **Observed (with values):** the bot's stated evidence was
-  `scripts/tests/test_runtime_shebangs.py` *is byte-identical at the PR head and the merge-base*
-  (`blobs: merge-base 91f2054bd73b  head 91f2054bd73b  main 4e44053c20c2`) *and main has moved it in
-  1 commit absent from the head* — `cfdb38997ba4`. **That commit's entire change to that file is an
-  18-line ALLOWLIST ENTRY for `scripts/tests/test_nvim_octo.py`**, an unrelated file. It could not
-  have cured `#1603`. The true cause was `#1603`'s own new controls in `test_census_scan.py` writing
-  env-resolved shebangs; replacing them with `testlib.mockbin.write_exec` turns the guard green
-  (9 passed), which is direct causal evidence rather than correlation.
-- **Ruled out:** "the verdict was right and my fix was unnecessary" — the guard fails at `8a88f255`
-  and passes at `323c6b6b`, with `main` held constant. The cause is in the PR. via: measurement
-- **Ruled out:** "a rebase would have cured it anyway" — the only commit `main` had on that file is
-  an allowlist row naming a different file; nothing in it reaches `test_census_scan.py`. via: command
-- **Ruled out:** "this is a one-off / bad luck" — the mechanism is structural, see below.
-  via: code
-- **Leading hypothesis — and it is precise.** The bot's INHERITED test is *"the failing TEST FILE is
-  unchanged in my branch, and `main` moved it in commits I lack."* That is sound for a test which
-  exercises code it names, and **systematically wrong for a repo-wide CENSUS/SCANNER guard**, where
-  the test file scans OTHER files and the offending change lives somewhere else entirely. For that
-  whole class, "the guard file is unchanged in my branch" is the NORMAL state of a genuine breakage,
-  so the heuristic fires exactly backwards. 🔴 **This repo is dense with that class** —
-  `_KILL_MENTION_LEDGER`, `_OWN_BOUND_LEDGER`, `test_runtime_shebangs.py`, and the targets
-  `#1603` itself was built to screen. It is the same class rank 9 records as "fixed in both known
-  instances, unaddressed as a class". **So the bot's worst false-positive mode coincides with this
-  repo's most common way of reddening `main`.**
-- **Next probe:** hand-check the other four INHERITED verdicts from this sweep
-  (`#1450 #1286 #1194 #1038`) against the same question — *is the named failing test a census/scanner
-  guard over files it does not name?* That converts one confirmed false positive into a RATE, which
-  is what the arming decision actually needs. ⚠ **Do not assume the other four are also false** —
-  `#1450` is 174 commits behind and may well be genuine; only `#1603` has been checked.
 
 ### ✅ RANK 13 PROBE RUN — the false-INHERITED rate is 2 of 4, and the predicate SEPARATES them 4/4
 - **Symptom + exact repro:** the triage bot's first live sweep named 5 PRs `INHERITED — likely cured

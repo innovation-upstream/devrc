@@ -836,6 +836,45 @@ def test_the_script_runs_and_its_usage_does_not_require_a_network():
     assert "--facts-file" in p.stdout
 
 
+def test_a_PR_that_merely_DISCUSSES_the_ledger_is_not_a_carrier(lrc, ad):
+    """🔴 `find_carriers` tested for the SUBSTRING `audit-claims`, so a PR that
+    only TALKS about the ledger was enumerated as a ladder.
+
+    MEASURED on devrc #1440: its single match sits inside a numbered claim line
+    discussing `--emit-claims`; there is no fence and it is not a ladder. The
+    direction is what makes it worth a guard — every other caveat on a carrier
+    count is a FLOOR (`gh` returns no review comments), so this one ran the
+    opposite way and was documented nowhere.
+
+    Hermetic: the `gh` call is faked, so this needs no network and no PR.
+    """
+    prose = ("Round 2 fixes. I used `--emit-claims` here; see the audit-claims "
+             "block convention in the skill.")
+    real = ("```audit-claims round=2 audited=aaaa1111..bbbb2222\n"
+            "1. a claim\n```")
+
+    def runner(cmd, cwd=None):
+        assert cmd[0] == "gh", cmd
+        return 0, json.dumps([
+            {"number": 1440, "title": "discusses the ledger only",
+             "headRefOid": "a" * 40, "baseRefName": "main",
+             "comments": [{"body": prose}]},
+            {"number": 1233, "title": "a real ladder",
+             "headRefOid": "b" * 40, "baseRefName": "main",
+             "comments": [{"body": real}]},
+        ]), ""
+
+    carriers, note = lrc.find_carriers(ad, runner, "owner/repo", limit=400)
+
+    numbers = [c["pr"] for c in carriers]
+    assert numbers == [1233], (
+        f"the prose-only PR was enumerated as a carrier: {numbers}")
+    # …and the positive control: the real ladder must still be found, or this
+    # guard would pass against a predicate that matches nothing.
+    assert 1233 in numbers
+    assert "1 carry" in note or "1 carry an" in note, note
+
+
 def test_the_batterys_floor_is_re_derived_from_this_modules_size():
     """🔴 `mutants-ladder-range-coverage.sh`'s `MIN_TESTS` must track THIS module.
 

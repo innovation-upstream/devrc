@@ -1106,6 +1106,13 @@ def test_the_unit_restart_triggers_name_EVERY_hard_dependency():
         # not merely unnoticed, it was locked in by its own guard. That is why the
         # test below derives the set from SOURCE instead.
         "scripts/lib/transcript_search.py",
+        # 🔴 THE ONE WITH NO IMPORT TO FIND. `host_label.py` — which this unit
+        # EXECS — opens this file by path for the fleet's address table. The
+        # source-derived ledger below scanned imports only, so it returned the
+        # empty set for host_label.py and both ledgers certified a complete unit
+        # while this was undeclared. Second demonstration in this same list that
+        # a hand-typed want-set grades its own omission as correct.
+        "scripts/lib/host-role.sh",
     }
     assert declared == want, (
         f"the transcript-push unit's restart triggers are {sorted(declared)}, want "
@@ -1199,6 +1206,12 @@ def test_the_RESIDENT_agent_restart_triggers_name_EVERY_module_it_imports():
         "scripts/lib/host_label.py",
         "scripts/lib/transcript_stream.py",
         "scripts/lib/transcript_search.py",
+        # 🔴 THE ONE WITH NO IMPORT TO FIND, ON THE UNIT WHERE STALENESS IS
+        # UNBOUNDED. `host_label.py` opens it by path for the fleet's address
+        # table; both ledgers scanned imports and saw nothing, so a correction to
+        # the fleet's addresses would land on disk while this RESIDENT process
+        # kept identifying the host from the old table.
+        "scripts/lib/host-role.sh",
     }
     assert declared == want, (
         f"the reply-agent's restart triggers are {sorted(declared)}, want {sorted(want)}. "
@@ -1214,6 +1227,15 @@ def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
 
     It scans for the loader idiom the agent actually uses — `os.path.join(_HERE,
     "lib", "<name>")` — plus the one transitive hop `transcript_stream` makes.
+
+    🔴 AND ONE HOP FURTHER, FOR THE DEPENDENCIES THAT ARE NOT IMPORTS. Every
+    module the agent loads is itself re-scanned for `scripts/lib` files it BUILDS
+    A PATH TO. That is what surfaces `host-role.sh`: `host_label.py` `open()`s it
+    for the fleet's address table, so neither this scanner's loader regex nor an
+    import walk could see it, and this RESIDENT unit — where a stale copy lasts
+    until somebody notices, not one tick — went without the trigger. A ledger
+    that grades an undeclared dependency as complete is worse than none, because
+    it stops the next person looking.
     """
     import re
 
@@ -1232,6 +1254,19 @@ def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
                         "transcript_stream.py — it is measuring nothing")
     loaded |= transitive
 
+    # 🔴 THE PATH-OPENED HOP. Same direction as the two above: what the loaded
+    # modules themselves reach for without an import.
+    libdir = REPO_ROOT / "scripts" / "lib"
+    opened = set()
+    for name in sorted(loaded):
+        if name.endswith(".py") and (libdir / name).is_file():
+            opened |= _lib_files_a_python_file_BUILDS_A_PATH_TO(libdir / name, libdir)
+    assert "host-role.sh" in opened, (
+        f"the path-opened hop found {sorted(opened)} — `host_label.py` opens "
+        "scripts/lib/host-role.sh for the fleet's address table, so this scanner is "
+        "wired to nothing and its contribution to `loaded` is meaningless")
+    loaded |= opened
+
     block = _reply_agent_unit_block()
     m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
     declared = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", m.group(1)))
@@ -1240,6 +1275,264 @@ def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
         f"the agent loads {sorted(missing)} at startup but the unit does not trigger on "
         "them — a resident service would keep running the old copy indefinitely"
     )
+
+
+def _snapshot_push_unit_block() -> str:
+    """The tmux-snapshot-push SERVICE block from nix/home.nix."""
+    text = HOME_NIX.read_text()
+    idx = text.index("systemd.user.services.tmux-snapshot-push")
+    end = text.index("systemd.user.services", idx + 10)
+    return text[idx:end]
+
+
+def test_the_SNAPSHOT_pusher_triggers_on_the_host_identity_files_ITS_COLLECTOR_READS():
+    """🔴 THE THIRD UNIT #1601 GAVE A HOST-IDENTITY DEPENDENCY AND THE ONE IT WAS
+    NOT DECLARED ON. `tmux-snapshot-push.sh` runs `session-manager`, which
+    imports `host_label.py`, which opens `host-role.sh` by path. The unit
+    declared its script and its collector and neither of those two, so this file
+    graded two units and left the third with no ledger at all.
+
+    WHAT A STALE ANSWER COSTS HERE IS NOT A MISSED SNAPSHOT. Every row this unit
+    ships is STAMPED with a host name and the read model upserts
+    latest-per-host — so a wrong label does not lose this machine's snapshot, it
+    OVERWRITES the other machine's with it.
+
+    DERIVED, NOT TYPED, for the chain it covers: the collector's own imports are
+    read from source and the host-identity module's path-opened files are read
+    from ITS source, so a second address-table file added tomorrow fails here.
+
+    ⚠ SCOPE, STATED AT THE WIDTH IT HOLDS — this is the HOST-IDENTITY chain, not
+    every dependency of this unit. Measured while writing it, `session-manager`
+    also imports `agent_ledger.py` and `clawgate_tasks.py` from `scripts/lib`,
+    and the unit declares neither. That is a real, PRE-EXISTING gap of the same
+    family, deliberately left for its own change rather than widened into this
+    one — it is recorded here so the next reader finds it rather than reading
+    this test as a complete ledger. It is not.
+    """
+    libdir = REPO_ROOT / "scripts" / "lib"
+    collector = REPO_ROOT / "scripts" / "session-manager"
+
+    imports = _lib_modules_a_python_file_imports(collector, libdir)
+    needed = {n for n in imports if n == "host_label.py"}
+    for name in sorted(needed):
+        needed |= _lib_files_a_python_file_BUILDS_A_PATH_TO(libdir / name, libdir)
+
+    # 🔴 TWO CONTROLS, one per direction of the scan. A reassuring `missing ==
+    # set()` is indistinguishable from a scanner that read nothing.
+    assert "host_label.py" in needed, (
+        f"the import scan of session-manager found {sorted(imports)} — it does not see "
+        "the module that decides which machine this is, so this ledger is measuring "
+        "nothing")
+    assert "host-role.sh" in needed, (
+        f"the path-opened hop found nothing in {sorted(needed)} — host_label.py opens "
+        "scripts/lib/host-role.sh for the fleet's address table, and a scanner blind "
+        "to that is exactly how this dependency went undeclared on three units")
+
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", _snapshot_push_unit_block(), re.S)
+    assert m, "the tmux-snapshot-push unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", m.group(1)))
+    missing = needed - declared
+    assert not missing, (
+        f"the tmux-snapshot-push unit hard-depends on {sorted(missing)} from "
+        "scripts/lib but does not declare them as restart triggers")
+
+
+def _activity_collector_unit_block() -> str:
+    """The activity-collector SERVICE block from nix/home.nix."""
+    text = HOME_NIX.read_text()
+    idx = text.index("systemd.user.services.activity-collector")
+    end = text.index("systemd.user.services", idx + 10)
+    return text[idx:end]
+
+
+def test_the_ACTIVITY_COLLECTOR_triggers_on_the_host_identity_files_IT_LOADS():
+    """🔴 THE FOURTH UNIT ON THE HOST-IDENTITY CHAIN, AND THE ONE THIS SAME FILE
+    WOULD HAVE LEFT UNLEDGERED AGAIN. The three tests above grade
+    transcript-push, tmux-reply-agent and tmux-snapshot-push. `collector.py` was
+    the ONE consumer that read `ACTIVITY_HOST` from the environment instead of
+    deriving it; now it loads `host_label.py` — which `open()`s `host-role.sh`
+    beside itself — so it acquired exactly the dependency the other three have,
+    and "graded N units and left the (N+1)th" is the pattern that produced every
+    finding in this family.
+
+    WHAT A STALE ANSWER COSTS HERE IS THE WORST OF THE FOUR. This unit is
+    `Restart=always` and long-lived: a oneshot on a timer picks up new code next
+    tick, but a correction to the fleet's ADDRESS TABLE lands on disk and this
+    daemon keeps stamping EVERY shipped row from the old one until something else
+    restarts it. Both files are symlinked-by-path store files, so the unit
+    definition does not change on its own — the same reason `collector.py` itself
+    already needed a trigger.
+
+    DERIVED, NOT TYPED: the daemon's imports and path-built filenames are read
+    from ITS source, the module's path-opened files from ITS source, so a second
+    address-table file added tomorrow fails here.
+
+    ⚠ SCOPE — the HOST-IDENTITY chain, not every dependency of this unit.
+    `collector.py` is otherwise stdlib-only (measured), so today the two sets
+    coincide; that is a fact about today's collector, not a property pinned here.
+
+    INVARIANT GUARD on a declaration this branch adds — there is no `origin/main`
+    state in which it could have gone red, because the dependency did not exist
+    there. Its sensitivity is the mutation row `MUT-C4` in
+    `scripts/tests/mutants-host-label.sh`.
+    """
+    libdir = REPO_ROOT / "scripts" / "lib"
+    collector = REPO_ROOT / "scripts" / "collector" / "collector.py"
+
+    needed = {n for n in _lib_modules_a_python_file_imports(collector, libdir)
+              if n == "host_label.py"}
+    for name in sorted(needed):
+        needed |= _lib_files_a_python_file_BUILDS_A_PATH_TO(libdir / name, libdir)
+
+    # 🔴 TWO CONTROLS, one per direction of the scan. A reassuring `missing ==
+    # set()` is indistinguishable from a scanner that read nothing.
+    assert "host_label.py" in needed, (
+        "the scan of collector.py does not see the module that decides which "
+        "machine this is, so this ledger is measuring nothing")
+    assert "host-role.sh" in needed, (
+        f"the path-opened hop found nothing in {sorted(needed)} — host_label.py opens "
+        "scripts/lib/host-role.sh for the fleet's address table, and a scanner blind "
+        "to that is exactly how this dependency went undeclared on three units")
+
+    block = _activity_collector_unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the activity-collector unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./scripts/(?:lib|collector)/([^}]+)\}",
+                              m.group(1)))
+    assert "collector.py" in declared, (
+        f"the extracted block is not the collector unit's trigger list: {declared}")
+    missing = needed - declared
+    assert not missing, (
+        f"the activity-collector unit hard-depends on {sorted(missing)} from "
+        "scripts/lib but does not declare them as restart triggers — a Restart=always "
+        "daemon then keeps stamping every row from a stale address table")
+
+
+def test_the_ACTIVITY_COLLECTOR_unit_REFUSES_TO_CACHE_BYTECODE():
+    """🔴 A RESTART IS NOT FRESH CODE — THE `.pyc` CACHE IS THE OTHER HALF.
+    The trigger ledger above guarantees the daemon is RESTARTED when
+    `host_label.py` changes. It says nothing about which bytes the restarted
+    daemon then loads, and here those can be the pre-edit ones:
+
+      * `~/.config/activity-collector/` is a real, WRITABLE directory (only the
+        leaves are store symlinks) and this daemon's interpreter writes into it —
+        an August `__pycache__/changed_paths.cpython-312.pyc` is still there,
+        having outlived every generation since.
+      * CPython validates a cached module on (source mtime-in-whole-SECONDS,
+        source size), and EVERY nix store path has `mtime = 1`. Across deploys
+        the mtime half is a constant, so the key degenerates to SIZE ALONE.
+
+    A size-preserving correction — an IP octet, a comparison operator, a typo —
+    is therefore invisible: `ship.sh` succeeds, the triggers fire, the unit
+    restarts, and this `Restart=always` daemon re-loads the OLD module and
+    stamps every shipped row from the old logic, across restarts and reboots.
+    The mechanism is reproduced end-to-end, with both controls, by
+    `test_a_SAME_SIZE_redeploy_is_INVISIBLE_when_the_daemon_may_cache_bytecode`
+    in `scripts/collector/tests/test_collector.py`.
+
+    🔴 WHY THIS GUARD READS THE UNIT AND NOT A RUNNING PROCESS. Both deployed-
+    layout harnesses in that file set `PYTHONDONTWRITEBYTECODE=1` in the child's
+    env — which is exactly why the suite was structurally blind to this: no test
+    it contains could ever have written a `.pyc` to go stale. The only artefact
+    that decides it in production is the unit's DECLARED environment, so that is
+    what is asserted here.
+
+    ⚠ IT PREVENTS THE WRITE, NOT THE READ OF AN EXISTING CACHE. Sound for this
+    pair only because the `lib/` entries land in the same change: no
+    `~/.config/activity-collector/lib/` exists on the workbench at generation
+    `af943906` (measured), so no `host_label` pyc has ever been written. See the
+    `nix/home.nix` comment for the purge if they ever land apart.
+
+    INVARIANT GUARD on a declaration this branch adds; its sensitivity is
+    `MUT-C10` in `scripts/tests/mutants-host-label.sh`.
+    """
+    block = _activity_collector_unit_block()
+    m = re.search(r"Environment = \[(.*?)\];", block, re.S)
+    assert m, "the activity-collector unit declares no Environment list at all"
+    env = re.findall(r'"([^"]*)"', m.group(1))
+    # Positive control on the extraction: a wrong or empty block would otherwise
+    # fail below for a reason that has nothing to do with bytecode caching.
+    assert any(e.startswith("PATH=") for e in env), (
+        f"the extracted list is not the collector unit's Environment: {env}")
+    assert "PYTHONDONTWRITEBYTECODE=1" in env, (
+        f"the activity-collector unit's Environment is {env} — it does not set "
+        "PYTHONDONTWRITEBYTECODE=1, so the daemon writes a __pycache__ into its "
+        "own deployed directory and a SIZE-PRESERVING correction to "
+        "lib/host_label.py is silently ignored on the next restart (every nix "
+        "store path has mtime=1, so size is the whole cache key).")
+
+
+def test_the_host_identity_pair_is_DEPLOYED_beside_the_collector():
+    """🔴 A RESTART TRIGGER IS NOT A DEPLOYMENT, AND THE COLLECTOR NEEDS BOTH.
+    A file not declared in `nix/home.nix` simply is not there: the switch
+    SUCCEEDS and the daemon silently degrades (it catches the ImportError by
+    design — a collector that will not start is worse than a mislabelled column),
+    so the failure is invisible from the unit's status. Exactly the shape
+    `test_collector_deploy_declares.py` exists for, one directory over.
+
+    BOTH FILES, the second being the one with no `import` to find:
+    `host_label.py` locates `host-role.sh` next to itself by path. Ship the `.py`
+    alone and the module degrades to the nebula-only `PEER_SSH` subset — right on
+    the mesh, quietly non-deriving off it, exit 0 either way.
+
+    DERIVED from the module's own source, so a second address-table file added
+    tomorrow fails here.
+
+    🔴 THE ATTRIBUTE PATH IS HALF A DECLARATION; THIS PINS THE `.source` TOO.
+    The first cut checked the source with `f"../scripts/lib/{name}" in text` — a
+    FILE-WIDE substring, already satisfied hundreds of lines away by the
+    `X-Restart-Triggers` list, so it could not see an entry wired to the WRONG
+    file. Two mutants stayed green on both ledgers: `lib/host_label.py` sourced
+    from `timeouts.py`, and — the realistic copy-paste slip — `lib/host-role.sh`
+    sourced from `host_label.py`. The second is the dangerous one: `host_label.py`
+    would then `open()` a "host-role.sh" that is Python, `parse_host_addrs`
+    returns `()`, and the module falls back to the nebula-only `PEER_SSH`
+    subset — the exact silent, mesh-dependent degradation this ledger exists to
+    prevent. So each name's own `.source` is extracted and compared, not
+    searched for.
+
+    INVARIANT GUARD on a declaration this branch adds; its sensitivity is
+    `MUT-C5`, `MUT-C8` and `MUT-C9` in `scripts/tests/mutants-host-label.sh`.
+    """
+    libdir = REPO_ROOT / "scripts" / "lib"
+    needed = {"host_label.py"} | _lib_files_a_python_file_BUILDS_A_PATH_TO(
+        libdir / "host_label.py", libdir)
+    assert "host-role.sh" in needed, (
+        f"the path-opened scan of host_label.py found {sorted(needed)} — it does "
+        "not see the address table the module opens by path, so this ledger is "
+        "measuring nothing")
+
+    text = HOME_NIX.read_text()
+    declared = set(re.findall(
+        r'home\.file\."\.config/activity-collector/lib/([^"]+)"', text))
+    assert declared, (
+        "nix/home.nix deploys no scripts/lib file beside the collector at all")
+    missing = needed - declared
+    assert not missing, (
+        f"nix/home.nix deploys {sorted(declared)} into "
+        f"~/.config/activity-collector/lib but collector.py's host-identity chain "
+        f"needs {sorted(missing)}. The switch will SUCCEED and the daemon will "
+        "quietly stop deriving its host label.")
+
+    # name -> the path THAT entry takes its bytes from. Scoped to each entry, so
+    # a `.source` naming a different file cannot be satisfied from elsewhere in
+    # the file (see the docstring).
+    sources = {
+        name: " ".join(src.split())
+        for name, src in re.findall(
+            r'home\.file\."\.config/activity-collector/lib/([^"]+)"'
+            r'\.source\s*=\s*([^;]+);', text)
+    }
+    for name in sorted(needed):
+        src = sources.get(name)
+        assert src is not None, (
+            f"the lib/{name} entry declares no `.source = …;` this ledger can "
+            "read (an attrset-form entry?) — it is deployed, but WHERE FROM is "
+            "unverified, so update this extraction rather than trusting it")
+        assert src == f"../scripts/lib/{name}", (
+            f"~/.config/activity-collector/lib/{name} is deployed FROM {src}, "
+            f"not from ../scripts/lib/{name}. The switch succeeds and the daemon "
+            "loads the wrong bytes under the right filename.")
 
 
 def _lib_modules_a_python_file_imports(path, libdir):
@@ -1265,7 +1558,23 @@ def _lib_modules_a_python_file_imports(path, libdir):
     how this repo loads siblings when a plain import will not do — and it is the
     idiom the resident-agent sibling test scans for, so a scanner here that could
     not see it would be narrower than the test it was modelled on.
+
+    🔴 AND IT NOW SEES A DEPENDENCY THAT IS NEITHER — A FILE OPENED BY PATH. An
+    import scanner's correct answer for `host_label.py` is the EMPTY SET (it
+    imports only stdlib), and `assert from_host_label == set()` is satisfied
+    identically by "read and empty" and by "cannot see what this file depends
+    on". It was the latter: `host_label.py` `open()`s `scripts/lib/host-role.sh`
+    for the fleet's address table, and that dependency was STRUCTURALLY invisible
+    here — the ledger passed green over it on three units. `.sh` as well as
+    `.py`, for the same reason the shell scanner takes both: `scripts/lib` really
+    holds shell helpers, and a `.py`-only rule could never have found this one.
     """
+    return (_lib_modules_a_python_file_IMPORTS_only(path, libdir)
+            | _lib_files_a_python_file_BUILDS_A_PATH_TO(path, libdir))
+
+
+def _lib_modules_a_python_file_IMPORTS_only(path, libdir):
+    """The import half of the scanner above, split out so each half is testable."""
     import ast
 
     src = path.read_text()
@@ -1280,6 +1589,65 @@ def _lib_modules_a_python_file_imports(path, libdir):
     found |= {m for m in re.findall(r'os\.path\.join\(\s*_HERE\s*,[^)]*?"([^"]+\.py)"', src)
               if (libdir / m).exists()}
     return found
+
+
+def _lib_files_a_python_file_BUILDS_A_PATH_TO(path, libdir):
+    r"""Every `scripts/lib` file `path` names in a PATH-BUILDING position, by AST.
+
+    🔴 THE ARM THAT WAS MISSING, AND THE SHAPE THAT HID BEHIND IT. `host_label.py`
+    has no `import host_role`; it does
+
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "host-role.sh")
+
+    and then `open()`s the result. An AST import walk returns `set()` for that
+    file — correctly, and uselessly: the ledger built on it declared three units
+    complete while a hard dependency of all three was undeclared.
+
+    🔴 A POSITION, NOT A GREP FOR FILENAMES, AND THE DIFFERENCE IS MEASURED. A
+    scan of every string constant would be wider but WRONG in a way that matters:
+    `host_label.py`'s own docstrings name `scripts/lib/opencode_search.py`,
+    `scripts/peer-host` and `session-manager` as places the address table is
+    consumed, so a plain constant scan mints a restart-trigger requirement for a
+    module the unit never opens. Requiring the string to sit where a path is
+    being CONSTRUCTED keeps prose out while keeping every real loader in.
+
+    THE THREE POSITIONS, each an idiom this repo actually uses:
+      * an argument to a call whose name ends in `join` — `os.path.join(…)`,
+        `p.joinpath(…)`;
+      * an argument to `open(…)`, for a literal path;
+      * the right operand of `/` — `Path(__file__).parent / "x.py"`, named in the
+        sibling ledger's own list of shapes that ESCAPE it.
+
+    ⚠ WHAT IT STILL CANNOT SEE, and this list is not a boast: an f-string
+    (`f"{n}.sh"`), a name assembled from variables, a filename read from config,
+    and anything reached through a helper that takes the name as an argument. The
+    direction is the same one the shell scanner argues for — an over-report is a
+    red test somebody reads, an under-report is a green one nobody does — but
+    "cannot fail silent" is a claim two earlier drafts of the shell scanner's
+    docstring made and both were false. Do not write it here.
+    """
+    import ast
+
+    def _spelling(fn):
+        if isinstance(fn, ast.Name):
+            return fn.id
+        if isinstance(fn, ast.Attribute):
+            return fn.attr
+        return ""
+
+    names = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Call):
+            spelled = _spelling(node.func)
+            if spelled == "open" or spelled.endswith("join"):
+                names |= {a.value for a in node.args
+                          if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+        elif (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+              and isinstance(node.right, ast.Constant)
+              and isinstance(node.right.value, str)):
+            names.add(node.right.value)
+    return {n for n in names
+            if n.endswith((".py", ".sh")) and (libdir / n).exists()}
 
 
 def _lib_modules_a_shell_file_references(src, libdir):
@@ -1497,7 +1865,11 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
           (see `_lib_modules_a_shell_file_references` for why that direction, and
           for the measurement that showed stripping changed nothing here);
       (c) `host_label.py` — the unit's THIRD runnable file (`transcript-push.sh`
-          execs it directly), whose own imports were previously never read.
+          execs it directly), read for its imports AND for the `scripts/lib`
+          files it BUILDS A PATH TO. The second half is new and it is why this
+          arm now finds something: `host-role.sh` is `open()`ed by path, so an
+          import-only scan returned the empty set and this ledger declared the
+          unit complete while a hard dependency was undeclared on three units.
 
     🔴 WHAT IT DOES NOT SEE, ENUMERATED BY RUNNING IT — an earlier version of
     this paragraph gestured at "a mechanism none of the three use", which names
@@ -1543,24 +1915,31 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
                  bounded: the consequence is a trigger declared for a file the
                  script stopped using, never a dependency the ledger cannot see.
 
-    ⚠ ARM (c) HAS NO ARM-EXCLUSIVE SENTINEL AND CANNOT BE GIVEN ONE HONESTLY —
-    its subject, `host_label.py`, imports only stdlib, so its correct result is
-    the empty set, and `assert from_host_label == set()` is satisfied identically
-    by "the arm ran" and "the arm is wired to nothing". Measured: blinding arm
-    (c) alone left the whole guard GREEN. What replaces it is a synthetic probe
-    of the SHARED helper and this call site's `libdir`. Stated precisely, because
-    the failure this whole round is about is a guard described more widely than
-    it works:
+    🔴 ARM (c) NOW HAS AN ARM-EXCLUSIVE SENTINEL, AND THE PARAGRAPH THAT SAID IT
+    "CANNOT BE GIVEN ONE HONESTLY" WAS DESCRIBING THE BUG. That paragraph read:
+    `host_label.py` imports only stdlib, so its correct result is the empty set,
+    and `assert from_host_label == set()` is satisfied identically by "the arm
+    ran" and "the arm is wired to nothing". Both premises were true of an
+    IMPORT-ONLY scanner and the conclusion — that the empty set was correct — was
+    false. `host_label.py` depends on `scripts/lib/host-role.sh`, which it
+    `open()`s by path; the scanner could not see it, so the ledger passed green
+    over an undeclared dependency of three units. The arm reads path-built
+    filenames now and `host-role.sh` is its sentinel: the builder does not
+    mention it and `transcript-push.sh` does not name it, so blinding arm (c)
+    fails HERE.
+
+    The synthetic probe of the SHARED helper is KEPT anyway, because it covers
+    something the sentinel does not — whether the `libdir` THIS call site passes
+    resolves at all:
 
       COVERED    the helper is live; the `libdir` passed here resolves
       NOT COVERED a defect confined to arm (c)'s own call site (wrong path
                  constant) while the helper stays healthy
 
     And the probe is not independently demonstrable: a mutation that breaks the
-    shared helper is caught by arm (a)'s control FIRST, so the probe never runs.
-    That is a real limit on what its presence proves, not a reason to delete it —
-    it is what makes arm (c)'s empty result mean "read and empty" rather than
-    "never read".
+    shared helper's import half is caught by arm (a)'s control FIRST, so the
+    probe never runs. That is a real limit on what its presence proves, not a
+    reason to delete it.
 
     ⚠ WHAT THIS GUARDS IS A DECLARATION, NOT AN OUTAGE — this unit is oneshot on a
     timer with a working-tree ExecStart, so a missing trigger costs one tick. The
@@ -1611,10 +1990,21 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
         "imports transcript_search — the helper or the `libdir` this call site passes "
         "is wrong, and arm (c)'s own empty result would be meaningless either way")
 
-    assert from_host_label == set(), (
-        f"host_label.py now imports {sorted(from_host_label)} from scripts/lib. That is "
-        "fine — declare them as triggers and update this assertion. It is a ledger of a "
-        "known-stdlib-only file, NOT the control; the control is the probe above")
+    # 🔴 ARM (c)'s ARM-EXCLUSIVE CONTROL. `host-role.sh` is reachable from NO
+    # other arm — the builder never mentions it and `transcript-push.sh` does not
+    # name it — so an arm (c) wired to nothing fails here rather than hiding
+    # behind another arm's hit. It is also the dependency the import-only scanner
+    # could not see, which is why this assertion used to read `== set()`.
+    assert "host-role.sh" in from_host_label, (
+        f"arm (c) found {sorted(from_host_label)} for host_label.py — it is not seeing "
+        "the file that module OPENS BY PATH for the fleet's address table. An "
+        "import-only scan returns the empty set here and this ledger then certifies "
+        "the unit complete while a hard dependency of three units is undeclared. That "
+        "is the exact defect this arm was widened to close")
+    assert from_host_label == {"host-role.sh"}, (
+        f"host_label.py now pulls in {sorted(from_host_label)} from scripts/lib. That "
+        "is fine — declare them as triggers and update this assertion. It is a ledger "
+        "of a known-narrow file, and its FIRST half above is the control")
 
     needed = from_builder | from_shell | from_host_label
 
@@ -1793,8 +2183,14 @@ def _agent_module():
 @pytest.mark.parametrize("env_body,want", [
     ('ACTIVITY_HOST=laptop\n', "laptop"),
     ('ACTIVITY_HOST="workbench"\n', "workbench"),
-    ('ACTIVITY_HOST=not-a-real-host\n', "workbench"),   # invalid -> default
-    ('', "workbench"),                                    # absent -> default
+    # 🔴 THESE TWO USED TO EXPECT `"workbench"`, AND THAT WAS #1601 WRITTEN DOWN
+    # AS A REQUIREMENT. An invalid or absent ACTIVITY_HOST made BOTH feeders emit
+    # the literal `workbench` — agreeing, which is all this test ever asked, and
+    # both wrong on the laptop. Now both REFUSE, which is still agreement and is
+    # also an answer nobody can act on by mistake. `None` means "neither feeder
+    # may produce a label".
+    ('ACTIVITY_HOST=not-a-real-host\n', None),   # invalid -> refusal
+    ('', None),                                   # absent  -> refusal
 ])
 def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, env_body, want):
     """🔴 THE ASSERTION IS THAT THE TWO AGREE, NOT THAT EITHER IS RIGHT. Pinning
@@ -1804,12 +2200,32 @@ def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, en
     The push is driven end to end (so the SHELL's resolution is what is measured,
     not a Python restatement of it) and compared with what the agent computes from
     the same file.
+
+    🔴 `HOST_LABEL_ADDRS=""` PINS THE THIRD FEEDER, WHICH BOTH HALVES NOW SHARE
+    (#1601). The fixture states a host; the machine running the suite would
+    otherwise cross-check that statement against its OWN address and raise on the
+    row that names the other machine — so the verdict would depend on which host
+    ran the suite. Set-but-empty says "holds none of the known addresses". The
+    third feeder is measured on its own in `test_host_label_identity.py`.
     """
     env_file = tmp_path / "activity-env"
     env_file.write_text(env_body)
 
     agent = _agent_module()
-    agent_label = agent.local_host_label(env={}, env_file=str(env_file))
+    prior = os.environ.get("HOST_LABEL_ADDRS")
+    os.environ["HOST_LABEL_ADDRS"] = ""
+    try:
+        if want is None:
+            with pytest.raises(agent.HostLabelError):
+                agent.local_host_label(env={}, env_file=str(env_file))
+            agent_label = None
+        else:
+            agent_label = agent.local_host_label(env={}, env_file=str(env_file))
+    finally:
+        if prior is None:
+            os.environ.pop("HOST_LABEL_ADDRS", None)
+        else:
+            os.environ["HOST_LABEL_ADDRS"] = prior
 
     # The shell half, through the real script. TRANSCRIPT_PUSH_HOST is deliberately
     # NOT set — that override is what the other tests use, and using it here would
@@ -1828,9 +2244,23 @@ def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, en
         "CLAWGATE_HOOK_TOKEN": "t",
         # Point the shared module at the fixture's env file.
         "HOST_LABEL_ENV_FILE": str(env_file),
+        "HOST_LABEL_ADDRS": "",
     })
     proc = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True,
                           env=env, timeout=180)
+
+    if want is None:
+        # The shell half's refusal is its OWN documented one: rc 3 and the
+        # "refusing to push under a guessed name" line, which it already emits
+        # when `python3 host_label.py` fails. The module now makes that path
+        # reachable from an unresolvable label rather than only a missing file.
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "refusing to push under a guessed name" in proc.stdout
+        assert not pushes(server), (
+            "the bulk feeder pushed under a host name nothing could justify, "
+            "while the stream agent refused — the two disagree about the SAME row")
+        return
+
     assert proc.returncode == 0, proc.stdout + proc.stderr
     pushed = json.loads(pushes(server)[0]["body"])["host"]
 
@@ -1866,6 +2296,68 @@ def test_the_push_REFUSES_rather_than_guessing_when_the_label_cannot_be_resolved
     assert not pushes(server), "a push went out under a guessed host name"
 
 
+def test_the_refusal_LOG_LINE_CARRIES_the_modules_own_diagnosis(
+    server, projects, tmp_path
+):
+    """🔴 THE UNIT'S ONLY OUTPUT IS THIS LINE, AND IT USED TO THROW THE DIAGNOSIS
+    AWAY. The call was `python3 "$HOST_LABEL_PY" 2>/dev/null`, so the journal
+    recorded a generic "could not resolve this host's label" for every cause
+    alike — a missing module file, an unresolvable machine, and a STATED LABEL
+    THAT CONTRADICTS THE MACHINE, which is the realistic one (it is what a
+    template-provisioned `~/.config/activity-collector/env` produces). The module
+    already writes the actionable text to stderr: which label was stated, which
+    the address derived, and WHICH FILE to edit. Every other consumer forwards
+    it; this one discarded it while failing every 5 minutes.
+
+    Asserted on the CONTENT the operator needs, not on the presence of any extra
+    text: the env-file path, both labels, and the module's own prefix.
+
+    🔴 STDOUT MUST STILL BE CLEAN OF IT AS A *NAME*. The forward goes through a
+    file, never `2>&1`, because this is a command substitution assigned to
+    HOST_NAME — so the run must still refuse (rc 3) rather than push under a
+    label spliced out of a diagnostic. Both halves are asserted.
+    """
+    projects("s", transcript("s", human_turn("hi")))
+    env_file = tmp_path / "activity-env"
+    env_file.write_text("ACTIVITY_HOST=laptop\n")
+
+    # The machine "holds" the WORKBENCH's real addresses while the file states
+    # `laptop` — the #1601 conflict, injected without depending on which of the
+    # two real machines runs this suite.
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import host_label as _hl  # noqa: E402
+    wb = " ".join(a for lbl, a in _hl.host_addrs() if lbl == "workbench")
+    assert wb, "the shared table knows no workbench address"
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_HOST": "",     # the override is empty, so resolution runs
+            "ACTIVITY_HOST": "",            # …and the ambient env states nothing
+            "HOST_LABEL_ENV_FILE": str(env_file),
+            "HOST_LABEL_ADDRS": wb,
+        },
+    )
+    assert proc.returncode == 3, f"rc={proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert not pushes(server), "a push went out under a contradicted host name"
+
+    out = proc.stdout
+    assert "refusing to push under a guessed name" in out
+    assert "host_label:" in out, (
+        "the module's own stderr is not in the log line — the unit is still "
+        f"discarding it. Got: {out!r}")
+    assert str(env_file) in out, (
+        "the log line does not name the FILE that made the wrong claim, which is "
+        f"the one thing an operator needs in order to fix it. Got: {out!r}")
+    for both in ("'laptop'", "'workbench'"):
+        assert both in out, (
+            "the log line must carry BOTH the stated label and the derived one; "
+            f"one alone does not say which is wrong. Got: {out!r}")
+
+
 def test_the_agent_reads_the_env_file_the_SHARED_MODULE_names(tmp_path):
     """🔴 THE PATH IS THE THIRD LITERAL, AND RE-EXPORTING THE OTHER TWO IS NOT
     ENOUGH. The consolidation re-exported HOST_NAMES and DEFAULT_LOCAL_HOST
@@ -1893,7 +2385,15 @@ def test_the_agent_reads_the_env_file_the_SHARED_MODULE_names(tmp_path):
         # no env_file= argument: the DEFAULT is what is under test
         "print(m.local_host_label(env={}))\n"
     )
-    env = dict(os.environ, HOST_LABEL_ENV_FILE=str(env_file))
+    # 🔴 `HOST_LABEL_ADDRS=""` PINS THE THIRD FEEDER (#1601). The fixture states
+    # `laptop`; the machine running this suite is usually the WORKBENCH, whose
+    # own address now cross-checks that statement and raises `HostLabelConflict`.
+    # Set-but-empty means "this machine holds none of the known addresses", so
+    # what is measured stays what the test is named for: WHICH FILE the agent's
+    # default `env_file` points at. Without it the verdict would depend on which
+    # of the two machines ran the suite.
+    env = dict(os.environ, HOST_LABEL_ENV_FILE=str(env_file),
+               HOST_LABEL_ADDRS="")
     env.pop("ACTIVITY_HOST", None)
     out = subprocess.run(
         [sys.executable, "-c", snippet, str(REPO_ROOT / "scripts" / "tmux-reply-agent")],

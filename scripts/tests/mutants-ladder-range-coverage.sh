@@ -81,8 +81,8 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED. The floor catches COLLAPSE, not growth; `run-tests.sh`'s own
-# formula is `m - min(50, max(1, m/20))`, which at m=27 is 26.
-# 🔴 IT HAS NOW FIRED FIVE TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
+# formula is `m - min(50, max(1, m/20))`, which at m=29 is 28.
+# 🔴 IT HAS NOW FIRED SIX TIMES, EVERY ONE ON ORDINARY GROWTH: 18→19 (pin said
 # 17), 19→20, 20→21, 21→25, 25→27. Not one was a refactor — each was tests added
 # while fixing something, the last two while fixing audit findings — and a
 # hand-maintained floor would have tolerated every one, widening from one test of
@@ -92,7 +92,7 @@ ROWS=0
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=27
+MIN_TESTS=28
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -306,6 +306,14 @@ run "the ROUND-REF row stops printing the matched span" \
     test_a_ROUND_REF_row_shows_the_MATCHED_SPAN "$LRC" \
     'f"[{c.round_span}] {c.subject[:60]}")' \
     'f"{c.subject[:74]}")'
+
+# 🔴 The carrier scan tested for the SUBSTRING `audit-claims`, which enumerated a
+# PR that merely DISCUSSES the ledger (devrc #1440). An OVER-count, in a
+# population whose every other caveat is a floor.
+run "the carrier scan goes back to a substring test" \
+    test_a_PR_that_merely_DISCUSSES_the_ledger_is_not_a_carrier "$LRC" \
+    '        if not _has_claims_fence(ad, bodies):' \
+    '        if not any("audit-claims" in (b or "") for b in bodies):'
 
 echo
 echo "== the labels that must NOT become a sized GAP =="

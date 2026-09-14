@@ -117,73 +117,20 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import handoff_index  # noqa: E402
+from handoff_budget import (  # noqa: E402
+    GRANDFATHER_STEP, GRANDFATHERED, MAX_BYTES, tightest_allowance)
 
 # The hard per-document ceiling. See "WHERE THE NUMBER COMES FROM" above.
 #
 # 🔴 An ANTI-REGROWTH ratchet, not a target. Ratcheting it DOWN as the corpus
 # gets pruned is welcome and is the intended direction of travel. Ratcheting it
-# UP requires saying in the commit message which document could not be expressed
-# in the budget, and why eviction was not the answer.
-#
-# ⚠ THE CURRENT SIZES ARE DELIBERATELY NOT WRITTEN DOWN HERE — they are derived
-# measurements edited in the same commits as the things they measure, and
-# test_rules_size.py records three consecutive rounds where exactly that went
-# stale inside its own PR. The failure messages PRINT current / ceiling / over-by
-# and the exact ledger line to paste; that is the authority.
-MAX_BYTES = 65_536
-
-# The quantum a grandfathered allowance is rounded up to. See "WHY THE ALLOWANCE
-# IS QUANTISED" above. One step is ~1.2 median documents, so it is a real
-# working margin rather than a rounding artefact.
-GRANDFATHER_STEP = 16_384
-
-# 🔴 THE LEDGER. Explicit and ENUMERATED, never a pattern — an unlisted document
-# over the ceiling is a failure by default.
-#
-# path -> allowance in bytes, which must be `ceil(measured / GRANDFATHER_STEP) *
-# GRANDFATHER_STEP`. Do not hand-compute it: every failure message prints the
-# exact line to paste.
-#
-# 🔴 REMOVING AN ENTRY IS THE GOAL. A doc that comes back under MAX_BYTES fails
-# (c) until its entry is deleted, so this dict can only shrink over time unless
-# someone deliberately adds to it.
-#
-# Measured 2026-09-13; the trailing comment is the size AT THAT MOMENT and is
-# informational — the enforced number is the allowance, and the measurement the
-# gate reads is the file.
-GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 327_680,               # 314,233 B
-    "claudedocs/handoff-audit-pr-ladder.md": 212_992,           # 197,391 B
-    "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
-    "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B
-    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,          #  99,215 B
-    "claudedocs/handoff-subsystem-store.md": 98_304,            #  95,922 B
-    "claudedocs/handoff-gate-flake-store-api.md": 98_304,       #  86,391 B
-    "claudedocs/handoff-tmux-restore-chain.md": 98_304,         #  84,569 B
-    "claudedocs/handoff-skill-chain-usage-audit.md": 81_920,    #  79,511 B
-    "claudedocs/handoff-cairn-task-linkage.md": 81_920,         #  76,743 B
-    # 🔴 THE TWELFTH ENTRY IS A MERGED-TREE FINDING, NOT A DAY-ONE MEASUREMENT,
-    # and it is worth a line because it is the shape this ledger will keep
-    # meeting. This doc did not exist when the ceiling was measured; it landed on
-    # `main` while this branch was open. The two changes share NO FILE — the
-    # branch never touched it and `main` never touched this module — so both
-    # sides were green and only the MERGED tree was red. `claude/RULES.md`:
-    # "DISJOINT FILES ARE NOT SAFETY … one side widens a function's required
-    # inputs, the other adds a CALLER". Here the gate is the widened input and a
-    # new document is the caller. Caught by merging `main` in and re-running,
-    # which is the check that rule asks for.
-    "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,   #  71,027 B
-    "claudedocs/handoff-handoff-search-index.md": 81_920,       #  67,076 B
-}
-
-
-def tightest_allowance(size: int, step: int = GRANDFATHER_STEP) -> int:
-    """The smallest multiple of `step` that fits `size`. PURE.
-
-    The one place the quantisation is expressed, so the ledger, the failure
-    messages and (e)'s check cannot disagree about what a correct entry is.
-    """
-    return max(step, math.ceil(size / step) * step)
+# 🔴 THE CEILING, THE STEP AND THE LEDGER NOW LIVE IN
+# `scripts/lib/handoff_budget.py`, imported above. This file still OWNS the
+# POLICY — it is what fails, it carries the rationale, and it prints the
+# playbook — but a SECOND reader appeared (`handoff_doc.py`, which warns an
+# author before a write), and production code importing a test module is a
+# direction this repo has nowhere else. Change a number THERE; the
+# assertions below are unchanged and still decide whether it is correct.
 
 
 def _eviction_playbook() -> str:

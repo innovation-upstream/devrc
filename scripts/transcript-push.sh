@@ -102,10 +102,26 @@ if [ -n "${TRANSCRIPT_PUSH_HOST:-}" ]; then
 else
   # 🔴 A FAILURE HERE IS FATAL, NOT A FALLBACK TO `uname -n`. Falling back is what
   # produced the defect above, and it would produce it again silently.
-  if ! HOST_NAME="$(python3 "$HOST_LABEL_PY" 2>/dev/null)" || [ -z "$HOST_NAME" ]; then
-    log "could not resolve this host's label via $HOST_LABEL_PY — refusing to push under a guessed name"
+  #
+  # 🔴 AND THE DIAGNOSIS IS FORWARDED, NOT DISCARDED. This used to be
+  # `2>/dev/null` plus a generic log line, so the journal recorded "could not
+  # resolve this host's label" and nothing else. The module's stderr is the only
+  # place that names WHICH label was stated, which one the address derived, and
+  # WHICH FILE to edit — and the realistic cause of this branch is a stated label
+  # that contradicts the machine, where the generic line tells an operator
+  # nothing actionable while the unit fails every 5 minutes. Every other consumer
+  # of this module already forwards the exception text.
+  #
+  # stderr goes to a FILE, never `2>&1`: this is a command substitution assigned
+  # to `HOST_NAME`, so anything merged onto stdout BECOMES the host name — the
+  # exact hazard `host_label.py`'s `__main__` keeps stdout empty for.
+  HOST_LABEL_ERR="$(mktemp "${TMPDIR:-/tmp}/transcript-push-hostlabel.XXXXXX")"
+  if ! HOST_NAME="$(python3 "$HOST_LABEL_PY" 2>"$HOST_LABEL_ERR")" || [ -z "$HOST_NAME" ]; then
+    log "could not resolve this host's label via $HOST_LABEL_PY — refusing to push under a guessed name: $(tr '\n' ' ' < "$HOST_LABEL_ERR")"
+    rm -f "$HOST_LABEL_ERR"
     exit 3
   fi
+  rm -f "$HOST_LABEL_ERR"
 fi
 
 # 🔴 THESE BOUNDS MUST STAY UNDER THE **DEPLOYED** SERVER'S OWN, AND "DEPLOYED"

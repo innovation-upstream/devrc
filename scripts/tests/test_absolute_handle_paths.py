@@ -73,9 +73,19 @@ turns each into `<any absolute prefix>/<suffix>`. Two consequences worth stating
 
 ⚠ A SECOND COPY OF THIS TABLE EXISTS and is deliberately NOT consulted:
 `scripts/claude-hooks/shell-env-nudge.py` keeps its own `REPO_VARS`/`KC_VARS`
-dicts, whose header says they must match. Reading the nix file is what makes this
-gate DRY against the SOURCE rather than against another copy; unifying the hook
-with it is separate work.
+dicts. Reading the nix file is what makes this gate DRY against the SOURCE rather
+than against another copy — that stays true, and the hook is still not consulted
+here.
+
+What changed: that copy is no longer UNPINNED. This paragraph used to end "unifying
+the hook with it is separate work", and while it said so the hook's `KC_VARS` was
+missing `KC_PROD` — from 2026-08-02, when that handle was declared, to 2026-09-14
+(~6 weeks), with nothing able to report it.
+`scripts/tests/test_shell_env_nudge_handles.py` now pins both of the hook's dicts
+to `agent-handles.nix` in BOTH directions, importing `_handle_table()` /
+`_kubeconfig_table()` from THIS module rather than writing a third regex over the
+same file. So a handle added to the nix source arms this gate automatically and
+reds that ledger until the hook is updated too.
 
 LONGEST MATCH WINS
 ------------------
@@ -283,7 +293,11 @@ _NIX_ENTRY = re.compile(r'^\s*([A-Z][A-Z0-9_]*)\s*=\s*"\$\{home\}/([^"]+)"\s*;',
 # two must be parsed SEPARATELY rather than filtered by a `KC_` name prefix --
 # a naming convention is a spelling, and a handle added to `kubeconfigs` under
 # some other name would silently go unarmed.
-_NIX_SECTION = re.compile(r"^\s*kubeconfigs\s*=\s*\{(.*?)^\s*\};", re.M | re.S)
+# ⚠ `_NIX_SECTION` lived here, hardcoded to `kubeconfigs`. It is now `nix_block(name)`
+# — same pattern, parameterised — because a second consumer needed the `repos` block
+# and started by writing its own copy. Removed rather than left beside its successor:
+# an unused-but-plausible parser reads as authoritative to whoever greps for one next,
+# and a fourth copy of this predicate is exactly what the consolidation was for.
 
 # The `${home}` half, as a pattern: ANY absolute prefix of one or more segments.
 # This is what makes the gate host-independent -- `/home/zach`, `/home/alice` and
@@ -351,6 +365,45 @@ def _handle_table() -> list[tuple[str, str]]:
     return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
 
 
+def nix_block(name: str, why: str) -> list[tuple[str, str]]:
+    """One named attrset of `agent-handles.nix`, LONGEST SUFFIX FIRST.
+
+    🔴 PARAMETERISED AND PUBLIC ON PURPOSE. `test_shell_env_nudge_handles` needs
+    the `repos` block the same way this module needs `kubeconfigs`, and it began
+    by adding a SECOND block regex of its own — at which point three copies of
+    this predicate existed over one file and they DISAGREED: on an inline
+    `repos = { A = "..."; };` the private copy over-captured into the next block
+    while `test_repo_path_guard`'s `split("repos = {")` copy silently dropped an
+    entry. `claude/RULES.md`: one rule, one place — a predicate open-coded at N
+    sites is wrong at N−1 of them.
+
+    🔴 A THIRD COPY SURVIVES AND IS NOT CONSOLIDATED HERE — named so this is not
+    read as finished. `scripts/tests/test_repo_path_guard.py` parses the same
+    block as `handles_nix.split("repos = {", 1)[1].split("};", 1)[0]`, and on the
+    inline shape above it drops an entry where this one over-captures. It is
+    pre-existing and belongs to another gate. **Closes when** that call site uses
+    `nix_block("repos", …)` and its suite is green.
+
+    ⚠ KNOWN LIMIT, stated rather than implied: `^\\s*\\};` requires the closing
+    brace to start its own line, which is the only shape `agent-handles.nix`
+    uses. An INLINE one-line attrset is not matched here and the search runs on
+    to the next block's closer. That is not fixed — it is named, so the next
+    reader does not have to re-derive it, and so nobody reads this as robust to
+    a reformat. The handle-name floors are what catch the consequence.
+
+    `why` is folded into the refusal so each caller says what ITS absence costs;
+    an empty return disarms that caller while every other assertion stays green.
+    """
+    text = HANDLES_NIX.read_text(encoding="utf-8")
+    m = re.compile(rf"^\s*{re.escape(name)}\s*=\s*\{{(.*?)^\s*\}};", re.M | re.S).search(text)
+    if not m:
+        raise AssertionError(
+            f"no `{name} = {{ ... }};` block found in {HANDLES_NIX}. {why}"
+        )
+    entries = [(n, rel.rstrip("/")) for n, rel in _NIX_ENTRY.findall(m.group(1))]
+    return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
+
+
 def _kubeconfig_table() -> list[tuple[str, str]]:
     """The `kubeconfigs` half of `agent-handles.nix`, LONGEST SUFFIX FIRST.
 
@@ -358,17 +411,12 @@ def _kubeconfig_table() -> list[tuple[str, str]]:
     disarms the whole `~` half while every other assertion stays green, so it is
     floored as a ledger by `test_the_kubeconfig_table_is_its_own_nix_section`.
     """
-    text = HANDLES_NIX.read_text(encoding="utf-8")
-    m = _NIX_SECTION.search(text)
-    if not m:
-        raise AssertionError(
-            f"no `kubeconfigs = {{ ... }};` block found in {HANDLES_NIX}. The "
-            "`~` half of this gate is built from that block; without it every "
-            "tilde-spelled kubeconfig assignment in the corpus goes UNCHECKED "
-            "while this module still reports PASS."
-        )
-    entries = [(name, rel.rstrip("/")) for name, rel in _NIX_ENTRY.findall(m.group(1))]
-    return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
+    return nix_block(
+        "kubeconfigs",
+        "The `~` half of this gate is built from that block; without it every "
+        "tilde-spelled kubeconfig assignment in the corpus goes UNCHECKED "
+        "while this module still reports PASS.",
+    )
 
 
 def _patterns() -> list[tuple[str, re.Pattern[str]]]:
