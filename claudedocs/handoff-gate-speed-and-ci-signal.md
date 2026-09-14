@@ -19,40 +19,34 @@ Answered and shipped. An iteration run went from a **~20-minute median to 18 sec
 pre-merge local full-suite ritual is **deleted**. Branch protection stays **off permanently by
 operator decision** (solo-contributor repo; they require the ability to ship immediately).
 
+- **closing-condition:** `check` — every live rank carries an external forcing function and
+  resolves: rank 8 armed or explicitly deferred past 2026-09-18, rank 6 decided on/after
+  2026-10-11, rank 16's two guards green on `origin/main`, and `#1681` merged. When those four
+  are true this doc is DONE and anything further opens a new arc.
+  ⚠ **Added 2026-09-14, RETROSPECTIVELY** — this doc predates rule (m) and was grandfathered. It
+  is therefore a reconstruction of the finish line, not one frozen at round 1, and it deliberately
+  names only what is ALREADY ranked rather than absorbing later asks.
+
 ## State now
 
-- ✅ **THE ARC IS CLOSED. Its one UNDELIVERED objective is now MEASURED rather than assumed** — see
-  rank 5: CI wall time never improved, and nothing that shipped could have moved it.
+- ✅ **THE ARC IS CLOSED. Rank 14 shipped this session after a FOUR-ROUND audit ladder** (round 0 +
+  three delta rounds), every round finding something the previous round's fix had introduced.
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
   `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
-  `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · `#1654` cfe4eb54 · **`#1658` 00afff8c**.
-- 🔴 **RETRACTED — "`main` IS STILL RED on `test_no_handoff_doc_exceeds_its_budget`" IS FALSE.**
-  `#1650` merged 2026-09-14T02:53Z; the gate run on `origin/main` `dbefe6fa` is **9 passed**. ⚠ This
-  is the SECOND time in two days this doc asserted a red that somebody else had already fixed —
-  `#1658` existed to correct the first. **A close-out's own red claim is the one nobody re-checks.**
-- ✅ **RANK 14 CLOSED — `#1671` `2b27bdae`**, doing BOTH halves of its own Next probe (poll with a
-  bounded deadline; delete the redundant guard). Verified by CONTENT on `origin/main`, not ancestry.
-  🔴 Its first draft claimed to OVERTURN a "delete" recommendation — RETRACTED, the doc never made
-  one. **Three audit rounds, each finding something the previous round's fix introduced**: the wait
-  gated the pane grid while the test asserted on the copy-mode snapshot (different objects); the
-  deletion dropped an rc check, so a tmux error was reported as a render failure; and the retry was
-  reached by NO test until one was written to force the race. ⚠ **`#{pane_in_mode}` is NOT the guard
-  for the last of those** — on tmux 3.7c it reports `2`, not a boolean, and never returns to `0`
-  across a cancel in that loop; an audit recommended it, and it hangs.
-- ⚠ **Merged through a RED `main`, knowingly.** Both failures
-  (`test_no_test_writes_a_usr_bin_env_shebang_at_runtime`,
-  `test_clawgate_writeback_guard.py::test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`)
-  reproduce on clean `origin/main` `6c8c94d2` with ZERO PR content and are unreachable from a test
-  file. 🔴 **Both are UNOWNED and still red.**
-- **The local half of the arc IS delivering, measured two independent ways** — see the 2026-09-14
-  gotcha. Local full-tier runs per merged PR: `gate.sh` **1.92 → 0.76**, `nix build .#checks`
-  **2.83 → 0.73**; `scoped-tests.sh` **0 → 0.67** (144 calls, 38–52 sessions). ⚠ Its per-PR rate is
-  **declining across its first five days** (1.24 → 0.71 → 0.32 → 0) — re-measure ~2026-09-28.
-- **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` exited **5** (0 tasks); an
-  unknown session id also answers 200 with an empty array, so that is **not** a clean bill.
+  `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · `#1654` cfe4eb54 · `#1658` 00afff8c ·
+  `#1671` **2b27bdae** · `#1672` **42efad37**.
+- ⏳ **`#1681` OPEN** — round 3's fixes to `#1671`, carrying a 🔴 that is currently ON `main`.
+- 🔴 **`main` IS RED on two UNOWNED guards** (rank 16). Both reproduce on clean `origin/main`
+  `6c8c94d2` with ZERO PR content. `#1671`/`#1672` were merged THROUGH them, knowingly.
+- **CI IMPACT, MEASURED — the arc's two halves have OPPOSITE answers.** Local delivering
+  (`gate.sh` 1.92→0.76 runs per merged PR, `nix build .#checks` 2.83→0.73, `scoped-tests.sh`
+  0→0.67); **CI wall time never moved and could NOT have** — see rank 5.
+- **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) with its positive control
+  showing the board reachable — which proves a correct id WOULD have resolved, **not** that this
+  session touched no task. Not a clean bill of health.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -117,8 +111,8 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–13 and 15 are CLOSED tombstones.** Live: **14** (IN FLIGHT as `#1671`), **8**
-(DUE 2026-09-18) and **6** (DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — now measured).
+the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (main is RED, unowned), **8**
+(DUE 2026-09-18) and **6** (DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — measured).
 
 1. **CLOSED** — `homelab-infra#792` merged dry-run (`dbe47814`). Arming is rank 8.  forcing: none
 2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.  forcing: none
@@ -188,20 +182,15 @@ the END. **Ranks 1–13 and 15 are CLOSED tombstones.** Live: **14** (IN FLIGHT 
     stay INHERITED, `#1194` demotes, 244 guards in 18.7s. ⚠ Fixes the bot's REASONING; does NOT arm
     it — arming is still a separate, evidence-gated call.
     forcing: none
-14. ⏳ **IN FLIGHT AS `#1671` — and the "delete it" recommendation this item carried was WRONG.**
-    MEASURED 2026-09-14, 30 trials: `new-session -d` returns when the tmux SERVER is up, not when
-    the pane's `printf` has rendered — **30 of 30** immediate captures were EMPTY, the URI arriving
-    **15–25 ms** later. So the flake is ORDER-DEPENDENT, and the named test is not its worst
-    **15–25 ms** later. ⚠ **The RATE is load-dependent and no figure should be quoted as a
-    property of the test**: `spans_the_wrap` measured 7 of 8 failing on one host-load and 3 of 8 on
-    another, and **0 of 8 in file order**. An earlier version of this item quoted one run of each as
-    a fixed asymmetry, and labelled an ISOLATED run as file order — both RETRACTED.
-    🔴 **What reproduces, twice independently: deleting the named test ALONE still left
-    `spans_the_wrap` failing 3 of 10.** So the fix is the fixture (one rule, one place) AND the
-    deletion — of the test that turned out to detect nothing the other one does not: it survives
-    both a `.tmux.conf` regression and a silent `copy_cursor_hyperlink` removal (an unknown
-    `#{...}` expands EMPTY at rc 0), which only `spans_the_wrap` catches.
-    forcing: gate — until `#1671` lands, `main` keeps reddening.
+14. **CLOSED — `#1671` `2b27bdae`**, verified by CONTENT. A render race: the wait gated the PANE
+    GRID while the test asserted on the COPY-MODE snapshot, a different object. Fixed in the
+    fixture; the redundant sibling guard DELETED (it survived every mutation of the shipped
+    `.tmux.conf`, and the silent `copy_cursor_hyperlink`-removal class is caught only by
+    `spans_the_wrap`). ⏳ **`#1681` OPEN — round 3's fixes**, incl. a 🔴: the reachability
+    guard was a TAUTOLOGY (`#{copy_cursor_hyperlink}` reads at the CURSOR, which on entry sits
+    past the link, so it read `''` regardless). Control: cancel broken + 1.0s deschedule →
+    merged guard 6 passed (mutant SURVIVES), fixed guard 1 failed.
+    forcing: gate — `#1681` is unmerged, so the tautological guard is what is on `main`.
 15. **CLOSED — `#1648` `a2c84a1c`, shipped and consumer-verified on the deployed tool.**
     `handoff_doc.py` now warns an author, in the proposal run above the diff, when an update would
     put the doc over its budget. 🔴 **It WARNS and never REFUSES, and that is forced**: a blocking
@@ -211,6 +200,11 @@ the END. **Ranks 1–13 and 15 are CLOSED tombstones.** Live: **14** (IN FLIGHT 
     to `scripts/lib/handoff_budget.py`; `test_handoff_doc_size.py` still owns the policy.
     ⚠ Closes the FEEDBACK gap, not the budget problem.
     forcing: none
+16. 🔴 **`main` IS RED ON TWO UNOWNED GUARDS, AND BOTH ARE GUARD-vs-GUARD CONFLICTS, not bugs.**
+    Diagnosed, NOT fixed — the fix is a judgement call in other sessions' files and was put to
+    the operator. Claim `main-red-shebang-and-writeback-guards` HELD. Detail + the measured
+    eliminations are in the Open investigations block below.
+    forcing: gate — every PR inherits both reds, and a permanently-red gate trains click-through.
 
 ## Decisions, so they are not re-litigated
 
@@ -232,26 +226,20 @@ the END. **Ranks 1–13 and 15 are CLOSED tombstones.** Live: **14** (IN FLIGHT 
 ## How to verify
 
 ```bash
-# the three inherited objectives — all SQUASH merges, so verify by CONTENT, never ancestry
-gh pr view 1600 --repo innovation-upstream/devrc --json state,mergeCommit
-gh pr view 1603 --repo innovation-upstream/devrc --json state,mergeCommit
-gh pr view 799  --repo ZacxDev/homelab-infra    --json state,mergeCommit
+# rank 14 landed — by CONTENT, never ancestry (squash merge)
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_tmux_hyperlink_open.py \
+  | grep -c "def test_the_copy_mode_retry_RECOVERS"        # expect 1
 
-# rank 15's consumer, on the DEPLOYED tool — both arms, and the silence
-python3 ~/workspace/devrc/scripts/lib/handoff_doc.py --repo ~/workspace/devrc \
-  --topic gate-speed-and-ci-signal --update <a small delta> --advanced 'probe'   # ⚠ Size: … left
-#   an ~8 KB delta instead prints: 🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET
-
-# rank 13's consumer — the real verdicts it was built to fix
-cd ~/workspace/devrc && python3 scripts/stale-base-triage.py \
-  --pr 1450 --pr 1286 --pr 1194 --comment-mode dry-run | grep -E 'VERDICT:|census screen'
-#   expect 1450 INHERITED · 1286 INHERITED · 1194 NOT EXPLAINED · "1 demoted  #1194"
-
-# what is ACTUALLY red on main right now — measure, do not trust this doc's age
+# rank 16 — BOTH reds, on a clean tree with ZERO PR content
 S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
 (cd "$S" && nix develop ~/workspace/devrc -c python3 -m pytest \
-  "$S/scripts/tests/test_handoff_doc_size.py" -q -p no:cacheprovider --rootdir="$S")
-# 🔴 rank 14 is FLAKY — run it THREE times; one green is not a verdict.
+  "$S/scripts/tests/test_runtime_shebangs.py" \
+  "$S/scripts/claude-hooks/tests/test_clawgate_writeback_guard.py" \
+  -q -p no:cacheprovider --rootdir="$S")        # expect 2 failed
+
+# the CI-impact measurement is re-runnable; both scripts are self-contained
+#   scratchpad/ci_durations.py   (GitHub per-status timestamps -> CI wall time)
+#   scratchpad/tool_adoption2.py (transcripts -> local gate/scoped-tests usage)
 ```
 
 ## Gotchas / decisions / dead-ends
@@ -342,36 +330,6 @@ S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
   `mergeStateStatus: CLEAN`, so the risk was low, but the gated tree was no longer the merged
   tree. **A merged-tree claim carries an expiry that nothing prints.**
 
-### 2026-09-12 — rank 4's ladder, and a red `main` nobody had fixed
-
-- 🔴 **A `-k` FILTER THAT MATCHES NOTHING PRINTS `N deselected` AND EXITS 0.** Checking whether `main`
-  was red, `-k 'kill_server_call_site' scripts/tests/` printed **`14194 deselected`** — the test lives
-  in `scripts/claude-hooks/tests/`, which that path never covered. "Deselected" is not "passed", and
-  the exit code cannot tell them apart. **Same silent-zero family as `pytest $VAR` under zsh** (one
-  argument, zero tests, exit 0), which I also hit today.
-- 🔴 **TWO AGENTS GAVE TWO DIFFERENT, BOTH-WRONG ANSWERS ABOUT THE SAME RED.** One said the test was
-  cured on `main` by `7344e76f`; the other named `f3e27aa3` as failing. Current `main` fails on a
-  THIRD file neither mentioned. Neither was lying — each measured a different tip of a moving branch.
-  **A claim about `main` decays in hours; re-measure at the moment you act.**
-- 🔴 **`pgrep -af <pattern>` MATCHED ITS OWN SHELL**, live, while I checked whether another worktree's
-  run was still going — the command line containing the pattern appeared in its own output. Harmless
-  on a read; it is exactly why a `-f` pattern must never reach `pkill`.
-- 🔴 **A GUARD IS TRIPPED BY ITS OWN DOCUMENTATION.** `_KILL_MENTION_LEDGER` pins every file mentioning
-  a wide tmux kill, so every handoff written ABOUT it becomes a new unclassified file. Three of its
-  four `claudedocs/` rows exist for that reason alone, and `main` went red again **within minutes** of
-  the PR that fixed the previous two. Generalise: **a guard whose trip condition is "a file mentions
-  X" will be tripped by the documentation of that guard.**
-- **A Pyright "Invalid character `\ud83d` in token" diagnostic was a FALSE POSITIVE** — the bytes were
-  a valid `f0 9f 94 b4` (U+1F534 🔴) and the file parsed fine. An IDE diagnostic is a claim like any
-  other; `ast.parse` is the arbiter.
-- **I destroyed one of my own controls by removing its worktree while it ran** (`FileNotFoundError:
-  …/wt-control`, exit **0** anyway). The decision did not change because the discriminating run had
-  already finished — luck, not justification. **Check for live processes before removing any worktree**
-  (`pgrep -af <path>`, reading the result rather than acting on a pattern).
-- **Round 0 earned its trial slot: `ran: 1 · changed the outcome: 1`.** Its F1/F2 are unreachable from
-  any of the nine correctness axes — a full checklist round would have passed a tool that fired on none
-  of its justifying cases. Recorded on `#1524` as a comment.
-
 ### 2026-09-12 — closing out: what I got wrong, and what the session actually proved
 
 - 🔴 **I INVESTED TWO PRs IN A PROBLEM ANOTHER SESSION WAS ALREADY SOLVING.** `#1558` and `#1559` both
@@ -404,96 +362,6 @@ S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
   defect to `TOTALS_RE` and the auditor had not filed it; and a `scoped-tests.sh PASS` claim was
   withdrawn as measured against a pre-rebase base. **Brief an agent with your reasoning and it may
   fix your reasoning — read the corrections rather than the conclusions.**
-
-### 2026-09-12 — the four-rank round, and the errors worth inheriting
-
-- 🔴 **zsh's NO-WORD-SPLITTING bit me FOUR times in one session, in four different shapes**, each
-  returning a confident wrong answer rather than an error: `pytest $SEL` (one pathspec ⇒
-  `no tests ran in 0.00s`, **exit 0**), `git diff -- $FILES` (one pathspec ⇒ **empty diff**, which I
-  briefly read as "round 1 changed nothing"), `set -- $p` (one string ⇒ `$2` empty), and
-  `-k <filter>` matching nothing (⇒ `14194 deselected`, which is not "passed"). **Writing the warning
-  into three agent briefs did not stop me walking into it. Use an array by default.**
-- 🔴 **A REBASE SILENTLY WIDENS A DELTA-AUDIT RANGE, and the tooling's own warning cannot see it.**
-  After rebasing `#1524`, `audit-dispatch.py` resolved `ebd6b436..3aec90b4` = **65 commits, only 8 of
-  them the PR's**. The script's widened-range warning watches for a missing claims block; mine parsed
-  fine. **And a commit range could not express that delta at all** — the fix round AMENDED earlier
-  commits, so the naive range showed ONE commit for six fixes. The honest delta was a TREE DIFF
-  (`ebd6b436` vs head, 6 files +681/−41).
-- 🔴 **I INVESTED TWO PRs IN A PROBLEM ANOTHER SESSION WAS ALREADY SOLVING.** `#1558` and `#1559` both
-  targeted the kill-mention treadmill; `#1561` closed it structurally while I argued about split-token
-  forms, and I closed both unmerged. Three sessions were visibly active in those files. **Sweep
-  `claim-work --list` and `gh pr list` BEFORE investing in an ad-hoc fix, not only before claiming a
-  ranked item.**
-- 🔴 **MY OWN HANDOFF BROKE `main`** — the paragraph documenting "this guard is tripped by its own
-  documentation" spelled the token literally and became the next offender the moment it landed.
-- 🔴 **I NEARLY COMMITTED ANOTHER PROCESS'S MUTANT** — copying a "verified" file out of a worktree
-  where a background positive-control run was mid-swap produced a copy containing
-  `UNCLASSIFIED-CONTROL`. Caught only by asserting expected marker counts before staging.
-  **Rebuild from the pristine ref; never copy from a tree another process is writing.**
-- 🔴 **CHECK A DEAD AGENT'S WORKTREE BEFORE RESUMING IT.** Four agents died on session limits this
-  session. One held its entire deliverable as **UNTRACKED files** (`scripts/ledger-check.sh`,
-  `scripts/testlib/census_scan.py`) — one `git clean` from gone, and the flake silently omits a new
-  file that is not `git add`ed. Another sat on an unpushed commit through **two** stops.
-- **Three agents corrected MY briefs, and every correction was right:** the status-fold premise
-  (first-wins over newest-first yields the NEWEST row, not the oldest); "stop at the first
-  `/`-prefixed positional" would have made `gh api /repos/o/r/x -X POST` read as CLEAN, a regression
-  in the only direction that matters; and rank 11's "seconds" was really ~3 minutes. **Brief an agent
-  with your reasoning and it may fix your reasoning — read the corrections, not just the conclusions.**
-- **A vacuous expectation survived a mutation sweep, twice, in two different agents' work**: widening
-  a module filter so NOTHING was selected produced exactly the `== []` the fixture asserted; and a
-  whole-file `replace(…, 1)` hit a COMMENT 3,700 lines before the code, scoring "arm the writer" as
-  SURVIVED having never touched it. **Scope a mutation to the narrowest expression and assert
-  `count == 1` on what you replaced.**
-- **I DID NOT PRUNE THIS DOC, deliberately.** It is 506 lines against a corpus where
-  `handoff-tmux-webapp.md` is 3809; `Gotchas` is append-only by design and `handoff_doc.py` has no
-  prune flag; and the ~74 replaceable lines are the retraction guards. The durable-drop warning caught
-  that two other sessions had just superseded my own `#1512` read with a better-powered one
-  (`#1568`, ancestry split, P(0) ≈ 0.017 vs my 0.23). **Pruning would have deleted work that improves
-  on mine.**
-
-### 2026-09-12 — rank 11's red: the PR reintroduced the failure it exists to prevent
-
-- 🔴 **A TEST THAT READS `git ls-files` IS A TEST THAT CANNOT PASS IN THE SANDBOX TIER.**
-  `tekton/devrc-pytests` was red on `#1603`'s own head `7d19f4c7` with
-  `test_the_runner_is_tracked_and_executable` reporting **`not tracked by git: []`** against
-  `scripts/ledger-check.sh` — a file tracked at mode **100755**. The message was FALSE. `nix build
-  .#checks…` builds from a `cp -r ${./.}` store copy with **no `.git`**, so `git ls-files` exits
-  **128** and prints nothing, and the assertion read that empty stdout as "untracked". Merged, it
-  would have been a **permanently-red gate on `main`** — which is the exact thing `#1603` was built
-  to stop. **A PR whose subject is "stop the guards that redden main" shipped a new one.**
-- 🔴 **REPRODUCED, NOT INFERRED — and the reproduction is what discriminated the two assertions.**
-  `git archive origin/pr-1603 | tar -x` into a scratch dir gives the sandbox shape exactly (no
-  `.git`, modes preserved). Probing it directly: the exec bit is **preserved** (`-rwxr-xr-x`), and
-  `git ls-files` returns **rc 128, empty stdout**. So of the test's two assertions only the git one
-  is tier-dependent — an empty result that would otherwise have been read as "either could be
-  failing". Running the test there reproduced the CI message verbatim.
-- **The fix mirrors a shape this repo had ALREADY SOLVED TWICE and nobody reused:**
-  `scripts/opencode/tests/test_dispatch.py::file_ship_problems` and
-  `scripts/tests/test_load_test_harness.py::deploy_carries`. Both carry long comments explaining
-  this precise failure — `test_dispatch.py`'s even records "five failures, all reporting a tracking
-  problem that did not exist". **The cost of the third instance was a red CI run and a session's
-  investigation; the search that would have prevented it was one grep for `not a git repo`.**
-- **The three checks, and which are tier-conditional — only ONE is:** existence proves the flake
-  carried the file inside the sandbox; the **exec bit is asserted unconditionally** (measured: both
-  `git archive` and the nix store copy preserve 100755, and a lost mode bit is a real regression the
-  sandbox CAN see); trackedness is made **conditional rather than skipped**, so it cannot go quietly
-  vacuous on the tier that does have a git dir.
-- 🔴 **The tier probe is a FUNCTION of the tree, not a module constant — and that is not style.**
-  A `GIT_DIR_PRESENT = ...` constant is a fixture that can only ever produce the value an assertion
-  about it names, so a mutant hardcoding it to `True` **survives on a dev host**, where the probe
-  returns `True` anyway. `test_dispatch.py` records that exact survivor. Also `.git` is a **FILE**
-  inside a worktree, so `.exists()` and never `.is_dir()` — this repo is developed in worktrees, and
-  `.is_dir()` would disable the tracking half everywhere it matters.
-- **Verification matrix, both tiers, identical counts:** dev-host tier (has `.git`) **29 passed**;
-  sandbox tier (no `.git`) **29 passed**; pre-fix sandbox tier **1 failed** (the reproduction).
-  🔴 **The equal counts are the evidence that nothing skipped itself** — a tier guard that silently
-  deselected its own tests would show as a lower count on one side, not as a failure.
-- **Mutation check, isolated to the narrowest expression:** deleting `if not git_present: return
-  problems` (asserted `count == 1` before writing, under `PYTHONDONTWRITEBYTECODE=1`) killed
-  `test_a_present_executable_runner_in_a_GIT_FREE_tree_reports_NOTHING` **with that guard's own
-  error string** (`is not git-tracked — \`git add\` it`), plus
-  `test_a_NON_EXECUTABLE_runner_is_reported_in_either_tier`. Killed for the right reason, and
-  reachable from an ordinary checkout.
 
 ### 2026-09-12 — instrument failures in this session
 
@@ -851,13 +719,43 @@ S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
   invocation SHAPE moved `gate.sh` from 3,793 matches to 1,184.
 - **The cluster could not answer this at all** — Tekton retains ~3.5 h of PipelineRuns (45 devrc-ci,
   all from today). GitHub's per-status timestamps are the only durable record of CI duration here.
+
+### 2026-09-14 — a four-round ladder in which every round's own PROSE was the next defect
+
+- 🔴 **THREE CONSECUTIVE ROUNDS FOUND A FALSE CLAIM WRITTEN BY THE PREVIOUS ROUND'S FIX**, and in
+  each case the CODE was fine. The shape is not "the fix was wrong", it is "the sentence explaining
+  the fix asserted a measurement that did not hold". Round 3's own tally: three of its four findings
+  were prose. **Budget for this — it is the ladder's steady state, not an anomaly.**
+- 🔴 **A REACHABILITY GUARD CAN BE A TAUTOLOGY, AND IT LOOKS EXACTLY LIKE A REAL ONE.** Round 2
+  added a test to prove a retry was reached, guarded by `assert empty != URI`. But
+  `#{copy_cursor_hyperlink}` reads at the COPY CURSOR, which on entering copy mode sits one cell
+  PAST a link ending at row 1 col 19 — so it read `''` whether or not the link had landed and the
+  assert could never fail. **The control that exposes it is a PAIR, not a mutation**: break the
+  thing AND perturb the timing. Merged guard → 6 passed (mutant SURVIVES); fixed guard → 1 failed.
+- 🔴 **"BREAKABLE" IS NOT "REACHED".** Mutating `cancel` to a no-op left the whole file GREEN,
+  because a module-scoped fixture had already rendered the grid before any test ran, so the retry's
+  body past iteration 1 never executed. The fix was a test that drives its OWN server with the link
+  emitted LATE — which needed the helper parameterised by socket. **Ask what state no existing test
+  can produce, then build it.**
+- 🔴 **AN AUDIT'S RECOMMENDED FIX IS A HYPOTHESIS.** Round 2 said "assert `cancel`'s rc, or branch
+  on `#{pane_in_mode}`". I implemented the second and it HUNG. Measured: it is a COUNT of stacked
+  modes (`1` on a clean pane, not a boolean), and here the pane starts in `view-mode` because the
+  fixture's fake `HOME` makes the conf's `session-created` hooks fail — so one `cancel` pops 2→1,
+  never 0. Control: shipped conf → view-mode 8/8; `-f /dev/null` → none 8/8.
+- ⚠ **I REFUTED ONE AUDIT FINDING WITH A CONTROL, AND WAS RIGHT TO.** Round 1 called a claim
+  unreproducible at 0-of-40; re-measured on the same tree, **17 failed of 24 at load 36**. Two of
+  three measurements reproduce it. **Re-measure before accepting a refutation, exactly as before
+  accepting a finding.**
+- **A repro pinned to a test NAME dies silently when the test is deleted** — rank 14's documented
+  repro would have become `5 deselected`, exit 5, ~0.1s: indistinguishable from a pass.
 ## Open investigations — live diagnosis state
 
 ### CLOSED investigation blocks — evicted 2026-09-13
 
-Five blocks that reached an answer (rank 2's ladder, rank 10's unread verdict, rank 10's
+Eight blocks that reached an answer (rank 2's ladder, rank 10's unread verdict, rank 10's
 ship-to-neither-host, rank 13's first false-INHERITED reading, and — 2026-09-14 — rank 13's
-PROBE RUN, whose rank is a closed tombstone) were moved verbatim to
+PROBE RUN, and — also 2026-09-14 — three CLOSED dated gotcha sections from
+rank 4, rank 11 and the four-rank round) were moved verbatim to
 `claudedocs/refs/gate-speed-and-ci-signal.md` when this doc went over its budget and reddened
 `main`. They are CLOSED, so the eviction costs a reader nothing live — but that file is **not**
 indexed by `handoff_search`, so go to it by path.
@@ -936,3 +834,35 @@ indexed by `handoff_search`, so go to it by path.
   URI to appear (poll with a bounded deadline) or delete the guard. 🔴 **Deliberately NOT taken
   unilaterally — it is another session's test, days old, and `claude/RULES.md` says a flaky test is
   FIXABLE rather than re-runnable, but the fix is the author's call.**
+
+### `main` is RED on two UNOWNED guards, and BOTH are guard-vs-guard conflicts rather than bugs
+- as-of: 2026-09-14
+- **Symptom + exact repro:** on a clean `origin/main` `6c8c94d2` worktree with zero PR content,
+  `pytest scripts/tests/test_runtime_shebangs.py scripts/claude-hooks/tests/test_clawgate_writeback_guard.py`
+  → **2 failed**. CI reports the pair as `failed=2` on every PR head.
+- **Observed (with values) — RED 1, `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`:**
+  **42 unpinned hits, ALL in `scripts/claude-hooks/tests/test_guard_core.py`**, all introduced by
+  ONE commit — `9b8969a8` (#1551), which taught the wide-kill guard to see kills *inside executed
+  scripts* and therefore had to write scripts. `git blame` on 4676 / 5161 / 6244 all → `9b8969a8`.
+- **Observed — RED 2, `test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`:** the hook's
+  `FLOW_DEPLOYED = "~/.claude/skills/clawgate/flows/task-pickup.md"`
+  (`clawgate-writeback-guard.py:496`); `claude/skills/clawgate/SKILL.md` contains that literal
+  **0** times (it says `flows/task-pickup.md`). The task-authoring path is **0** too.
+- **Ruled out:** "someone is already on them" — no `claim-work` entry, and no open PR touches
+  either file. via: command
+- **Ruled out:** "RED 1 is fixed by swapping the interpreter" — replaced all 40
+  `#!/usr/bin/env bash` with `#!/bin/sh`: **1639 passed** in `test_guard_core.py` (so the env
+  shebang is NOT load-bearing) but the scan **still fails** — it flags EVERY shebang a test
+  writes, not just `/usr/bin/env`. via: measurement
+- **Ruled out:** "just allowlist it" — the guard's own header says *"Do not add an ALLOWLIST entry
+  to get green"*, and one entry keyed on `#!` would exempt a 6,000-line file from a repo-wide
+  safety guard forever. via: doc
+- **Leading hypothesis:** RED 1 is rank 9's class generalised — *a guard banning pattern X is
+  tripped by the suite whose SUBJECT is X* (one fixture deliberately tests a **lying** shebang, so
+  its shebang is genuinely under test). RED 2 is a three-way pull: this seam guard requires the
+  literal path, `df09a6c2` (#1621) gates *against* a skill spelling out a path a handle names, and
+  `f45bb86e` (#1640) evicted content to satisfy the size ceiling.
+- **Next probe:** none needed — this is an operator decision, already put to them. RED 1:
+  allowlist-with-evidence (verified: these scripts are never dispatched via their shebang; they are
+  scanned, or invoked as `bash <path>`, which ignores it) **vs** routing all 42 through
+  `mockbin.write_exec`. RED 2: decide which of the three gates yields.
