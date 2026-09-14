@@ -18,6 +18,53 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+- ✅ **2026-09-14 — RANK 26 MERGED: `innovation-upstream/devrc` #1657, squash `0808a820`.** Three
+  audit rounds (0, 1, 2). Claim `cairn-oss-multi-instance-26` RELEASED. Verified BY CONTENT at
+  `origin/main` — see rank 26 for the six checks. **Rank 28 is what it did NOT close.**
+  ⚠ **Merging does NOT make the hook live**: `nix/home.nix` ships it as a `home.file` store copy,
+  so the deployed hook keeps the OLD table until a `home-manager switch`. `readlink -f`, not the merge.
+  🔴 **`devrc-pytests` was RED at merge, on FIVE failures, NONE of them this branch's** — each
+  controlled at `origin/main` rather than assumed: `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`
+  (from #1551), `test_no_handoff_doc_exceeds_its_budget`, `test_every_mutation_anchor_occurs_exactly_once_in_its_target[mutation_battery_handoff_archive_and_cap.py]`,
+  `test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`, and a byte-identity verifier on
+  ANOTHER session's doc that has since gone green on main. Operator authorised merging on that
+  evidence. 🔴 **The process lesson: I first reported "two pre-existing reds" and there were FIVE.**
+  The CI log prints no `FAILED` lines — the runner prefixes every line, so `^FAILED` matches
+  nothing and the short-summary block lists only SKIPS. **Read the `_____ test_name _____` banners
+  under `= FAILURES =`, and reconcile the count against the summary** — 2 banners against
+  "4 failed" is the tell that you are not seeing them all.
+  ⚠ **The local full `scripts/tests` run is VOID as evidence** and must not be quoted either way:
+  the worktree was edited throughout its 89 minutes, so it belongs to no commit. None of its 130
+  failures named a file this PR touched; they clustered in the isolation/concurrency modules —
+  four suites contending on one box.
+
+- 🔴 **READ BEFORE ADDING ANYTHING TO THIS DOC — IT IS NEAR ITS SIZE CAP.** DERIVE the number,
+  do not quote one: `wc -c` this file against its entry in `scripts/lib/handoff_budget.py`
+  (`GRANDFATHERED`). A figure written here restales on the next edit — including this one — which
+  is this doc's own lesson about raw counts. **Evict before you add.** Take a CLOSED block from
+  `## Open investigations` (several are merged history with "Next probe: none") and leave a
+  one-line pointer to the merge sha — the 2026-09-07 and 2026-09-14 blocks show the shape.
+  🔴 Raising the allowance is LAST; the ledger is a ratchet, not an exemption.
+  ⚠ **This session had to do exactly that, and the way it learned is the lesson:** the note
+  warning the next writer about headroom CONSUMED the headroom, leaving 165 B. A doc that
+  warns about its own size is subject to the warning. One block (rank 12's leakscan entry,
+  merged `9d58f02`) was evicted to pay for it.
+  ⚠ Separately: `test_handoff_doc_size.py` is ALREADY RED on `main` for two OTHER docs
+  (`handoff-index-store-claims-accuracy.md` 7,091 B over; `handoff-handoff-search-index.md`
+  needing its ledger entry deleted) — confirmed at `origin/main` with a control, and claimed
+  by another session. Do not read that red as this doc's.
+
+- 🔴 **RANK 26'S PREMISE WAS HALF FALSE, AND THE REFUTATION IS THE DURABLE OUTPUT.** The item
+  says "The handle table has TWO hand-maintained copies, and both are drifted." One is.
+  `handoff_index.REPO_ENV_HANDLES` omitting `CIVITAI_CLI` is **NOT drift** — it is a deliberate
+  exclusion, already pinned in BOTH directions with its reason recorded in source, by
+  `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`,
+  which **passes today** (measured). Implementing rank 26 as written would have deleted a
+  documented decision, added a zero-doc repo to the corpus, and narrowed the hosts `--prune`
+  can run from. **Rank 26's own closing condition is therefore wrong as stated** — "both are
+  corrected" cannot be met, because one of the two is already correct. Amend it to the hook
+  alone when marking the item done.
+
 - ✅ **2026-09-12 — THE RANK-23 ARC IS CLOSED. Two PRs merged, both verified BY CONTENT.**
   `innovation-upstream/devrc` **#1583** squash **`c1ecc830`** (rank 23(a)+(b)) and **#1597** squash
   **`a66b6fb3`** (the status line #1583 left stale, plus the open-items ledger). Claim
@@ -28,66 +75,55 @@ is the PRIVATE proposal, not this doc.
   🔴 **Ancestry cannot answer any of this — a squash makes `merge-base --is-ancestor` false
   forever. Every check above is a CONTENT check.**
 
-- 🔴 **THE DURABLE OUTPUT OF THIS SESSION IS NOT THE CODE — IT IS WHAT THREE AUDIT ROUNDS FOUND.
-  Zero 🔴 in any round; every finding was a FALSE CLAIM ABOUT THE CODE, and two were in my own
-  prose.** Round 0 refuted the PR's *stated rationale* (the old spelling's defect was
-  `Path(__file__)` naming the **running copy** — stale after `worktree remove` — not
-  cross-machine portability, which was measurably backwards: `nix/home.nix` deploys into
-  `${home}/workspace/devrc`, so any host resolving `cairn-validate` has the checkout at that same
-  path). Round 0 also **deleted a guard I wrote**, on measurement: the pre-existing
+- 🔴 **THE DURABLE OUTPUT OF THE 2026-09-12 SESSION WAS NOT THE CODE — IT IS WHAT THREE AUDIT
+  ROUNDS FOUND. Zero 🔴 in any round; every finding was a FALSE CLAIM ABOUT THE CODE, and two
+  were in that session's own prose.** Round 0 refuted the PR's *stated rationale* (the old
+  spelling's defect was `Path(__file__)` naming the **running copy** — stale after
+  `worktree remove` — not cross-machine portability, which was measurably backwards). Round 0
+  also **deleted a guard that session wrote**, on measurement: the pre-existing
   `test_cairn_flake_pin.py` already killed all three of its mutants behaviourally, in both tiers.
-  Round 2 found the remedy I added was **unrunnable** (bare `home-manager switch` cannot evaluate
-  `nix/home.nix`, which takes a required `cairnPackage`) and that I had **cited a guard that does
-  not guard** — `test_the_command_is_BUILT_not_typed` asserts the flag as a quoted ARGUMENT TOKEN,
-  not inside a message string, so the withdrawn fallback passed it. **The fix rounds, not the
-  original change, were where every finding lived.**
+  Round 2 found the added remedy **unrunnable** and that it had **cited a guard that does not
+  guard**. **The fix rounds, not the original change, were where every finding lived.**
 
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
-  **23(c)** (upstream PR in `ZacxDev/cairn`); ✅ **the CLASS rank 23 did not close is now
-  CLOSED — see rank 24** (devrc **#1621**, squash **`df09a6c2`**): a mechanical gate over the
-  `claude/**` + `CLAUDE.md` corpus rejects any absolute checkout path a handle already names,
-  and the sites are cleared. It is NOT in this list's open set any more; what rank 24 filed in
-  its place is ranks **25–27**; **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
+  **23(c)** (upstream PR in `ZacxDev/cairn` — the arc's last unclosed piece);
+  **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
+  those sites have no handle and therefore no remedy); **26 IN FLIGHT as #1657** (above);
+  **27**; **18(a)** (`nix/sessionVariables.nix:36` — slice 3 provably did NOT close it though
   rank 18 predicted it would); **20 half two** (that CI leg has only ever been watched **pass**,
   so its red path is unproven); **4, 8, 21**; and the `m_index_store` `sys.path` item.
+  ✅ The CLASS rank 23 did not close is CLOSED — rank 24, devrc **#1621**, squash **`df09a6c2`**.
   **Rank 22 belongs to another session — do not take it.**
 
-- ⚠ **ONE INSTRUCTED STEP WAS NEVER RUN, recorded so it is not mistaken for done.** The kickoff
-  said to re-run the two `test_guard_core.py` tests at `main` before trusting it and then push the
-  held rebase. **Those tests were never run.** Their purpose evaporated — #1508 was already merged
-  by another session as `44bd8b0e` before this session started, so there was nothing left to gate
-  — but the premise disappeared, the check did not pass. If an independent read of `main` was
-  wanted, it is still outstanding.
+- ⚠ **ONE INSTRUCTED STEP WAS NEVER RUN, recorded so it is not mistaken for done.** An earlier
+  kickoff said to re-run the two `test_guard_core.py` tests at `main` before trusting it and then
+  push the held rebase. **Those tests were never run.** Their purpose evaporated — #1508 was
+  already merged by another session as `44bd8b0e` — but the premise disappeared, the check did
+  not pass. If an independent read of `main` was wanted, it is still outstanding.
 
-- ✅ **RANK 3 SLICE 3 MERGED — #1508, squash `44bd8b0e`** (by another session, 03:42:52Z; claim
-  `cairn-oss-multi-instance-3` released). Verified by content: all five forked reader modules
-  `ABSENT` on `origin/main`; `scripts/lib/timeouts.py` REMAINS by design (never one of the five).
-  ⚠ `scripts/lib/subsystem_touch.py` still exists and **must** — it is the devrc-only WRITER,
-  deliberately absent from the OSS repo. Slice 3 consolidated the READER half only.
+- ✅ **RANK 3 SLICE 3 MERGED — #1508, squash `44bd8b0e`.** RE-VERIFIED BY CONTENT 2026-09-14 at
+  `origin/main`: all five forked reader modules (`host_identity`, `subsystem_resolver`,
+  `subsystem_recall`, `cairn_doctor`, `subsystem_read_store`) **ABSENT**;
+  `scripts/lib/timeouts.py` and `scripts/lib/subsystem_touch.py` **PRESENT by design** — the
+  latter is the devrc-only WRITER, deliberately absent from the OSS repo. Slice 3 consolidated
+  the READER half only.
 
 - ✅ **The kill-mention-ledger treadmill is CLOSED STRUCTURALLY by #1561 (`c0bbd6d9`)** —
-  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose, instead of
-  classifying each offending doc. ⚠ **This RETIRES the "THE MERGE IS BLOCKED BY A TREADMILL"
-  block that used to stand here**, and its instruction to go classify mentions. The lesson that
-  survives: three PRs of per-instance classification were the wrong altitude, and the design fix
-  landed while they were still being written.
+  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` makes the scanners skip tracked prose. The lesson
+  that survives: three PRs of per-instance classification were the wrong altitude, and the design
+  fix landed while they were still being written.
 
 - **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. The pinned client
   went live 2026-09-09, **generation 713, rollback point 712** — the only record of which
   generation to roll back to.
-  ✅ **CROSS-HOST AGREEMENT IS NOW COMPARED AND AGREES — 2 of 2 hosts, 2026-09-12.** `ship.sh`
-  converged both to devrc **`c337765e`** (rc 0, each reporting `VERIFIED … + switched` and 0 stale
-  managed artifacts), and the cairn pin was then read DIRECTLY on each rather than inferred from the
-  sha: both resolve `~/.local/bin/cairn` to the **identical** store path
-  `…-cairn-562a6ea/bin/cairn`.
-  ⚠ **Three facts in the sentence this replaces were stale, two of them asserting an absence that
-  had already been fixed.** (a) *"the laptop is still unreachable (100% packet loss, `ssh: No route
-  to host`)"* — it is unreachable **on the LAN only** (`192.168.50.155`); `ship.sh` hits that same
-  failure and **falls back to the nebula address** `10.42.0.100`, which answers. A ping to the LAN IP
-  is the wrong instrument for "is the laptop up", and it was the instrument used — twice.
-  (b) *"cross-host agreement stays `NOT COMPARED`"* — compared, above. (c) the deployed pin was
-  recorded as `cairn-c84c142`; it is **`cairn-562a6ea`** as of 2026-09-12.
+  ✅ **CROSS-HOST AGREEMENT IS COMPARED AND AGREES — 2 of 2 hosts, 2026-09-12.** `ship.sh`
+  converged both to devrc **`c337765e`** (rc 0, each reporting `VERIFIED … + switched`, 0 stale
+  managed artifacts); the cairn pin was read DIRECTLY on each rather than inferred from the sha:
+  both resolve `~/.local/bin/cairn` to the identical store path `…-cairn-562a6ea/bin/cairn`.
+  ⚠ The laptop is unreachable **on the LAN only** (`192.168.50.155`); `ship.sh` falls back to the
+  nebula address `10.42.0.100`, which answers. A ping to the LAN IP is the wrong instrument for
+  "is the laptop up".
   🔴 **A `NOT COMPARED` verdict ages into a false claim the moment its blocker clears, and nothing
   re-checks it. Re-measure before citing one — and measure the thing, not a proxy for it.**
   Operator-blocked ranks merged 2026-09-10
@@ -103,6 +139,11 @@ is the PRIVATE proposal, not this doc.
   `if sys.path[0] == str(lib)` guard is false when it runs and both entries survive. Blast radius
   today is nil — `timeouts` is the only overlapping name and nothing in `scripts/present/`
   imports it.)
+
+- ⚠ **No clawgate task is recorded for this session and none was invented.**
+  `clawgate_handoff.sh resolve` exited **5** (`NOTHING RESOLVED — 0 tasks`), which cannot
+  distinguish "this session touched no task" from "the id is wrong". It is not a clean bill of
+  health, and no `clawgate-task:` field was written.
 
 ## Open investigations — live diagnosis state
 
@@ -243,97 +284,26 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   2026-09-12 as #1508 `44bd8b0e`). `cairn-who` stays devrc-only and out-of-store; it is
   deliberately not part of the pin.
 
-### CLOSED-PENDING-MERGE 2026-09-08 — a SECOND cairn intermittent, distinct from the one rank 6 closed
-🔴 **This is NOT the flake the rank-6 investigation was about.** That one was
-`TestTheDeployedEntrypoint::test_a_TWO_LINE_token_file_authorises_BOTH_lines`. This is a
-different test, found by reading CI for a rate exactly as the stale kickoff asked — and unlike
-rank 6's, **this one carries its evidence**, which is why it was fixable rather than merely
-countable.
-- **Symptom + exact repro:** no local repro needed; it is in CI history.
-  `tests/test_subsystem_store_api.py::TestAReloadIsAtomicUnderLoad::test_no_observer_EVER_sees_a_table_that_is_neither`
-  fails with `AssertionError: only 1 reload(s) were driven inside the 3s budget, so at most one
-  swap was available to observe and the verdict below is about a static table` / `assert 1 >= 2`.
-- **Observed (with values), 2026-09-08:** the repo's **entire** CI history is **26 runs, 24
-  success / 2 failure** (published 2026-09-05). **Both failures are this same assertion**:
-  `e2cf6fe` 2026-09-07T04:21Z and `492191f` 2026-09-08T01:05Z — and the second **postdates #3's
-  merge** (2026-09-07T18:01Z), so it is not residue of the rank-6 work. ≈**2/26 (7.7%)**.
-  via: measurement
-- **Ruled out: that this is general runner load.** Wall-time discriminator per RULES — the
-  failing run took **497.47s** against a passing run's **477.52s**, ~4%. Load inflates every test
-  in a run; this inflated exactly one test's own budget, so it is a narrow timing dependency in
-  that one test. via: measurement
-- **Ruled out: that it is a product defect.** The assertion is a *positive control* the test
-  makes about itself, and it was CORRECT to refuse — with one swap there is nothing to observe.
-  The defect was that `ATOMICITY_SAMPLE_BUDGET_S = 3.0` bounded **both** the samplers and the
-  reload driver, so the deadline could stop the driver at `reloads == 1` and starve the control
-  it was written to police. Mechanism: one `reload_tokens` call outlasting the whole budget while
-  four sampler threads contend for the GIL. via: code
-- **Fixed in #5, and the fix is NOT just the obvious half.** `ATOMICITY_MIN_RELOADS = 2` is read
-  by **both** the loop and the assertion so they cannot drift. The driver breaks only on
-  `reloads >= MIN and deadline passed`, `range(400)` retained as the runaway bound. 🔴 **The
-  samplers are gated on the reload count too** — gating only the driver would let the minimum be
-  reached after every observer had stopped, satisfying `reloads >= 2` while making the "no third
-  state" verdict vacuous. Both original controls unchanged in strength.
-- **Control, before/after** (budget 0.35s, 0.5s injected per `reload_tokens` call): before →
-  **1** reload, FAIL; after → **2**, pass; after with MIN overridden to 5 → **5**, pass; before
-  with MIN overridden to 5 → **1**, same FAIL. The loop tracks the constant, not the clock.
-  via: measurement
-- 🔴 **A SURVIVING MUTANT, reported rather than hidden:** clear-then-refill *with no widened
-  window* **survives this test**. It was proven live by watching the structural sibling
-  `test_a_successful_reload_REBINDS_and_leaves_the_old_tuple_INTACT` go red on it. This is a
-  pre-existing limit that sibling's own docstring already states; #5 neither causes nor fixes it,
-  and nothing was adjusted to hide it. **Not filed as a work item** — no closing condition
-  distinguishes it from the sibling guard that already covers it. via: measurement
-- **Next probe:** none. Merge #5. If it recurs after that, the assertion now names the constant
-  it fell short of rather than the budget, so read the message.
+### EVICTED 2026-09-14 — the SECOND cairn intermittent (CLOSED)
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #5 `9213726`.** Block evicted for size, per the
+2026-09-07 convention. **The lesson that survives:** the failing assertion was a test's
+POSITIVE CONTROL ABOUT ITSELF and it was RIGHT to refuse — one shared budget bounded both
+the samplers and the reload driver, so the deadline could starve the control the test
+existed to police. The fix reads one constant (`ATOMICITY_MIN_RELOADS`) in BOTH the loop
+and the assertion so they cannot drift, and gates the SAMPLERS on it too — gating only the
+driver would satisfy the minimum after every observer had stopped, making the verdict
+vacuous. **Next probe: none.**
 
-### CLOSED 2026-09-08 — rank 12, leakscan's coverage was an enumeration (MERGED as `9d58f02`)
-- **Symptom + exact repro:** not a failure anyone saw — a silent gap. `git show
-  9213726:tests/leakscan.py` line 110: `TEXT_SUFFIXES` is a hand-written set, and
-  `tracked_files()` drops any file whose suffix is absent from it. The run then prints
-  `0 findings across N file(s)` where N is files SCANNED, never files present, so nothing in
-  the output distinguishes "clean" from "did not look".
-- **Observed (with values), 2026-09-08:** the tree is **39 tracked files**, suffix census
-  `.py` 26, `` (none) 4, `.md` 2, `.sh` 2, `.yml`/`.lock`/`.nix`/`.dockerignore`/`.json` 1
-  each. **Zero files contain a NUL byte and all 39 decode as valid UTF-8**, so the
-  enumeration happened to cover everything *today* — the hazard was entirely about the next
-  new type. Baseline run: `38 file(s) scanned`, 0 findings, rc 0 (39 minus the self-exempt
-  `tests/leakscan.py`). via: measurement
-- **Ruled out: that the existing guard test already closed it.**
-  `test_leakscan_covers_every_tracked_file.py` pinned the enumeration against the tracked
-  tree, which catches "a new type nobody added" at TEST time — but its own docstring said
-  *"THIS DOES NOT MAKE THE COVERAGE DERIVED, and that is still the better fix. A genuinely
-  derived scanner would not need this file."* The scanner itself still skipped silently.
-  via: code
-- **Ruled out: that a suffix fast-path was worth keeping alongside the derivation.** Keeping
-  it leaves the enumeration load-bearing, so the class stays open; the sniff is bounded at
-  8000 bytes, so a huge binary is not read in full anyway. via: code
-- **Fixed in `ZacxDev/cairn` #6, MERGED 2026-09-08 as `9d58f02`** (PR head was `b5bd231`).
-  `partition_tracked_files()`
-  buckets every enumerated file — including the directory skips — so
-  `set(scanned) | set(skipped)` equals the enumeration by construction and the test asserts
-  it without re-implementing any filtering. `enumerate_repo(root)` is parameterised so the
-  test module DRIVES it instead of keeping the copy it used to justify at length.
-  `main(argv=None)` was added because the new tests could not call `main()` at all —
-  `parse_args()` read pytest's argv and exited 2.
-- **Regression matrix, measured both ways:** RED at merge base `9213726` —
-  `test_a_tracked_text_file_of_an_UNFAMILIAR_TYPE_is_scanned` fails on its OWN assertion,
-  `assert 'notes.rst' in set()`: the base scanner returned an EMPTY scan set for a tracked
-  `.rst` holding a real hostname. GREEN at HEAD. ⚠ The sibling
-  `..._is_actually_REFUSED` also fails at base but for an API reason (`main()` takes no
-  argv there), so it is **NOT** regression evidence and was not counted as any.
-  via: measurement
-- **Mutation battery: 8/8 killed BY THEIR INTENDED TEST**, harness control watched green on
-  the pristine tree first, `PYTHONDONTWRITEBYTECODE=1`, every pattern required to match
-  exactly once (0 or 2 matches ⇒ INVALID, never a pass). Mutants: `is_binary` always False /
-  always True; sniff window one byte short; a suffix allowlist creeping back in; the fixture
-  file dropped instead of bucketed; `main` no longer printing skips; enumeration losing
-  `-z`; enumeration narrowed to cached-only. Tree diffed byte-identical against the
-  battery's snapshot afterwards. via: measurement
-- **Full suite 1703 passed / 0 failed, 547s local; CI `collected=1703 failed=0 floor=1648`.**
-  via: measurement
-- **Next probe:** none. Merged; the closing condition is met by content and was watched on
-  the merged tree (38 scanned / 1 skipped, the skip named, rc 0).
+### EVICTED 2026-09-14 — rank 12, leakscan's coverage was an enumeration
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #6 `9d58f02`** (PR head `b5bd231`). The full block
+— suffix census, the 8/8 mutation battery, the regression matrix at base `9213726` — was
+evicted to keep this doc under its size allowance, per the convention the 2026-09-07 block
+uses. Read it at `git show <this doc's pre-eviction rev>` or on the PR. **The lesson that
+survives, and the only reason to re-open it:** a scanner whose coverage is a hand-written
+suffix ENUMERATION prints `0 findings across N file(s)` where N is files SCANNED, never
+files present — so nothing in the output distinguishes *clean* from *did not look*. The fix
+was to DERIVE coverage (`partition_tracked_files()` buckets every enumerated file, so
+`scanned | skipped` equals the enumeration by construction). **Next probe: none.**
 
 ### `cairn validate` prints nothing on the PINNED client — fixed in the worktree, NOT committed, and the class is still open
 - **Symptom + exact repro:** after #1406 merges and a `home-manager switch`, the mandated
@@ -1371,21 +1341,50 @@ belongs to that arc's own session. via: measurement
     accepted spelling, in which case the gate's docstring must stop implying otherwise.
     forcing: none
 
-26. **The handle table has TWO hand-maintained copies, and both are drifted from
-    `nix/agent-handles.nix` TODAY.** `scripts/claude-hooks/shell-env-nudge.py` carries 9 of 10 —
-    **missing `KC_PROD`**, whose kubeconfig exists — so the runtime nudge is blind to the very
-    handle two of #1621's fixed sites use. `scripts/lib/handoff_index.py`'s `REPO_ENV_HANDLES` is
-    `("DEVRC","HOMELAB","DATAPACKET","CIVITAI")` — **missing `CIVITAI_CLI`**, whose checkout
-    exists.
-    ⚠ **Blast radius, stated honestly rather than at the altitude an audit reached for.** The
-    `KC_PROD` gap is LIVE but minor: a missed nudge, not a wrong cluster. The `CIVITAI_CLI` one is
-    **LATENT** — that checkout holds **0** handoff docs today, so it has no victim. An audit
-    described it as docs being *"silently outside the index"*; that was measured, and it is not
-    true today.
-    #1621 added no THIRD copy — it parses the source — but it reduced the count by none.
-    **Closing condition:** a test asserting that both hand-maintained handle sets equal the set
-    parsed from `nix/agent-handles.nix`, shown **RED** against today's tree and **GREEN** after
-    both are corrected — merged.
+26. ✅ **DONE 2026-09-14 — devrc #1657, squash `0808a820`. AND THIS ITEM'S HEADLINE WAS HALF
+    FALSE; the correction is the durable half.** It said *"The handle table has TWO
+    hand-maintained copies, and both are drifted from `nix/agent-handles.nix` TODAY."* **ONE is.**
+    **Closing condition MET, verified BY CONTENT at `origin/main`** (a squash makes
+    `merge-base --is-ancestor` false forever, so ancestry cannot answer this): `KC_PROD` present in
+    the hook; `scripts/tests/test_shell_env_nudge_handles.py` present; the `norm.startswith("/")`
+    guard present; `nix_block` consolidated and `_NIX_SECTION` gone; and `REPO_ENV_HANDLES`
+    **deliberately unchanged**, still `("DEVRC","HOMELAB","DATAPACKET","CIVITAI")`.
+    ⚠ **Merging does NOT make the hook live** — `nix/home.nix` ships it as a `home.file`
+    `/nix/store` copy, so the deployed `~/.claude/hooks/shell-env-nudge.py` carries the OLD table
+    until a `home-manager switch`. Verify with `readlink -f`, not with the merge.
+    ⚠ **Three audit rounds ran (0, 1, 2); the ladder stopped on the PROSE criterion, not on a clean
+    round** — round 2's fixes changed 12 hook lines, 0 executable. Round 1 found a real production
+    defect (the basename fallback claimed ABSOLUTE paths, naming the wrong cluster); round 2 found
+    that a fix-round comment of mine restated a claim `test_absolute_handle_paths.py` had already
+    RETRACTED. What #1657 did NOT close is **rank 28**.
+    - ✅ **REAL, and fixed in #1657:** `scripts/claude-hooks/shell-env-nudge.py` carried 9 of 10 —
+      **missing `KC_PROD`**, whose kubeconfig exists. Nothing in the tree read its
+      `KC_VARS`/`REPO_VARS`, so the copy had no ledger and the failure is silent by construction
+      (a `.get()` returning `None` and a nudge that never fires).
+    - 🔴 **NOT DRIFT — DO NOT "FIX" IT:** `scripts/lib/handoff_index.py`'s `REPO_ENV_HANDLES`
+      omitting `CIVITAI_CLI` is a **deliberate exclusion**, already pinned in BOTH directions with
+      its reason recorded in source by
+      `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`.
+      Measured 2026-09-14, and **independently confirmed by #1657's round-0 audit**: that test
+      passes. Adding the handle would add a zero-doc repo to the corpus and, because
+      `prune_config_refusal` requires EVERY `REPO_ENV_HANDLES` entry to be SET, narrow the hosts
+      an operator can `--prune` from.
+    🔴 **THE ORIGINAL CLOSING CONDITION IS THEREFORE UNMEETABLE AS WRITTEN** — "both are
+    corrected" cannot happen, because one of the two is already correct. **Amended:** the hook's
+    two dicts are pinned to `agent-handles.nix` in both directions, shown RED then GREEN, merged;
+    `REPO_ENV_HANDLES` is left alone.
+    ⚠ **The transferable lesson, which is the durable output:** an oversight and a documented
+    decision look IDENTICAL in the table itself — they differ only in whether something else pins
+    them. **Before "fixing" a table that omits an entry, grep for a test that ASSERTS the
+    omission.** This item's own honest caveat (that the `CIVITAI_CLI` gap was LATENT, 0 docs —
+    still true) measured the blast radius and never asked whether the omission was INTENDED.
+    ⚠ **Known-open, named rather than left to be rediscovered:** the #1657 ledger pins the hook
+    against the nix **DECLARATION**, and a declaration is not an **EXPORT** — both consumers
+    existence-guard (`exportIf "-d"`/`"-f"`). Measured: `~/.kube/homelab-nebula.yaml` is absent,
+    `$KC_NEBULA` is UNSET, and the hook nudges `KUBECONFIG=$KC_NEBULA` anyway. Pre-existing, not
+    introduced by #1657. **Closes when** the hook resolves paths from `os.environ` and a test
+    shows it emitting NO suggestion for a declared-but-unexported handle, RED before and GREEN
+    after.
     forcing: none
 
 27. **`scripts/tests/test_doc_path_rot.py` carries the same stale-census defect twice, over the
@@ -1400,6 +1399,36 @@ belongs to that arc's own session. via: measurement
     **Closing condition:** each figure re-derived from the module's own corpus/reference builders,
     with the comment AND the failure message updated together — or the counts deleted where they
     add nothing — merged.
+    forcing: none
+
+28. **`shell-env-nudge.py` is cwd-BLIND, so its relative-path arm can nudge the WRONG CLUSTER.**
+    Filed by operator decision during #1657's round-2 audit rather than fixed there — the remedy
+    changes `analyze()`'s signature and the core matching of a hook that fires on **every Bash
+    call**, which deserves its own PR and its own audit rounds.
+    **Measured at #1657's head:** `KUBECONFIG=./production-kubeconfig` → `$KC_PROD` and
+    `KUBECONFIG=some/other/tree/prod-kubeconfig` → `$KC_DPPROD`, from any cwd. `KC_BASENAMES` is
+    `{basename: handle}` and nothing resolves the path, so a relative kubeconfig in the wrong
+    directory is nudged to a handle naming a **different cluster** — and `$KC_PROD` (homelab) and
+    `$KC_DPPROD` (datapacket) really are different clusters.
+    ⚠ **Pre-existing in KIND** (`KC_HOMELAB`/`KC_WORKBENCH` already behaved this way); #1657 added
+    `KC_PROD`, which made the `production-kubeconfig` spelling newly reachable. #1657 closed the
+    ABSOLUTE arm only — an absolute path is no longer matched by basename.
+    🔴 **Do NOT justify this with "the empty handle silently takes the default context"** — that
+    sentence is RETRACTED in `scripts/tests/test_absolute_handle_paths.py` and needs a precondition
+    this host does not meet. The real harm is the case that needs no precondition: where the
+    wrongly-named handle IS exported, the command runs against the wrong cluster with no error.
+    **The remedy, named so it is not re-derived:** PostToolUse payloads carry `cwd` —
+    `scripts/claude-hooks/bash-guard.py`, `git-add-provenance-nudge.py` and `lib/guard_core.py`
+    all already read it. Resolve `os.path.realpath(os.path.join(cwd, norm))` against `KC_VARS` and
+    `KC_BASENAMES` becomes unnecessary, closing both arms exactly.
+    ⚠ **Frequency is UNMEASURED** — the corpus holds one relative-kubeconfig instance and it is the
+    counter-example. Measure before deciding this is worth the change; `claude/opencode-addendum.md`
+    already forbids the spelling outright, which is an argument for deleting the arm instead.
+    **Closing condition:** EITHER the hook resolves relative paths against the payload's `cwd` and a
+    test shows `KUBECONFIG=./production-kubeconfig` from a non-`homelab-talos` cwd producing NO
+    `$KC_PROD` suggestion — RED before, GREEN after, merged — OR the basename arm is deleted and the
+    hook's own suite updated, OR a decision is recorded here that a cwd-blind relative nudge is
+    accepted, in which case the guard comments in `shell-env-nudge.py` must stop implying otherwise.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -2272,16 +2301,72 @@ covers; pin it with `--config`, do not `cd`.
 - **`--emit-claims` PRINTS a skeleton; it does not post.** The block must be pasted into an **issue** comment — `gh pr view --json comments` does not return REVIEW comments, so a block posted as a review is invisible to the next round's brief.
 - **The audit briefs' `WHERE TO WORK` said `isolation: "worktree"` and that was wrong for every dispatch in this arc** — the flag worktrees the *dispatching session's* cwd repo, which was `datapacket-talos`, not devrc. Every audit agent was given an explicit override to build its own detached worktree off `refs/pull/<n>/head`. This is the documented cross-repo trap; the brief generator cannot know the caller's cwd.
 
+- 🔴 **2026-09-14 — A RANKED ITEM CAN NAME A SECOND DEFECT THAT IS ACTUALLY A GATED DECISION, AND
+  THE ITEM'S OWN "MEASURED" CAVEAT IS NOT ENOUGH TO CATCH IT.** Rank 26 asserted two drifted
+  handle tables. It even measured the second one's blast radius honestly — *"the `CIVITAI_CLI` one
+  is LATENT — that checkout holds 0 handoff docs today, so it has no victim"* — and that
+  measurement was correct (re-measured 2026-09-14: still 0). **What it never asked was whether the
+  omission was INTENDED.** It was: `test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`
+  pins `declared - REPO_ENV_HANDLES == {"CIVITAI_CLI"}` with the reason in source, and passes.
+  - **Ruled out: that the item was merely stale and the guard is newer.** The guard's own comment
+    records that the one-way version of it shipped while nix declared five handles and the module
+    read four — i.e. the guard was written BECAUSE of this exact class and predates the item.
+    via: code
+  - **Ruled out: that adding the handle would be harmless anyway.** It would add a zero-doc repo to
+    the corpus and, because `prune_config_refusal` requires EVERY `REPO_ENV_HANDLES` entry to be
+    SET, narrow the hosts an operator can `--prune` from. via: code
+  - **The transferable rule:** before "fixing" a table that omits an entry, `grep` for a test that
+    ASSERTS the omission. A deliberate exclusion and an oversight look identical in the table
+    itself; they differ only in whether something else pins them. One grep separates them.
+
+- 🔴 **2026-09-14 — `grep -cF` WITH A MULTI-LINE PATTERN SPLITS IT ONE-PATTERN-PER-LINE, SO A
+  TRAILING NEWLINE MATCHES EVERY LINE.** A mutation battery guarded each mutation with
+  `n=$(grep -cF -- "$old" "$f"); [ "$n" = 1 ] || INVALID`. Three of seven mutants — all valid —
+  were scored `INVALID: pattern matched 150 times` / `38 times`, because the patterns ended in a
+  newline and the empty final pattern matched every line of the file. **The harness failed, not
+  the mutations**, and it failed in the reassuring direction: it looked like the mutations were
+  ill-formed. Count multi-line patterns in Python (`s.count(old)`), never with `grep -c`.
+  This is the instrument-validation rule landing on the *battery's own* guard rather than on the
+  code under test. via: measurement
+
+- 🔴 **2026-09-14 — AN EMPTY `gh pr checks` ON A PR SECONDS OLD IS EVIDENCE OF NOTHING, AND THIS
+  SESSION WATCHED IT FLIP.** `gh pr checks 1657` returned `no checks reported on the branch`
+  immediately after `gh pr create`; minutes later the same command listed **three** Tekton gates
+  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`), all `pending`. Recorded as a
+  worked example because the failure mode is to write the empty read into a PR body or a handoff
+  as "no CI here". via: measurement
+
+- ⚠ **2026-09-14 — `How to verify` had gone stale against `State now` IN THE SAME DOC, and in the
+  direction that understates progress.** Its rank-3 block said *"slice 3 — NOT started; all five
+  duplicated modules still present"* while `State now` recorded slice 3 merged as #1508. Measured
+  at `origin/main`: all five ABSENT. `State now` was right. **A REPLACE section and an APPEND
+  section drift apart precisely because only one of them is rewritten each pass** — re-read the
+  REPLACE sections against each other before confirming an update. via: measurement
+
 ## How to verify
 
 🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
 
 ```bash
-# the four merges (all MERGED; content checks, not ancestry)
+# the four operator-blocked merges (all MERGED; content checks, not ancestry)
 gh pr view 785 -R ZacxDev/homelab-infra --json state,mergeCommit   # 37b5a71f8
 gh pr view 786 -R ZacxDev/homelab-infra --json state,mergeCommit   # 4c890c7ac
 gh pr view 787 -R ZacxDev/homelab-infra --json state,mergeCommit   # 936692ec7
 gh pr view 1447 -R innovation-upstream/devrc --json state,mergeCommit  # 719519fa9
+
+# rank 26 — IN FLIGHT. Not merged; do not report it as done.
+gh pr view 1657 -R innovation-upstream/devrc --json state,mergeCommit,mergeStateStatus
+gh pr checks 1657 -R innovation-upstream/devrc
+#   🔴 an EMPTY rollup on a young PR means NOT YET REGISTERED, never "no CI" — watched flip
+#   from `no checks reported` to three pending Tekton legs in one session.
+# once merged, verify BY CONTENT, then release the claim:
+git -C $DEVRC show origin/main:scripts/claude-hooks/shell-env-nudge.py | grep -c KC_PROD  # 1
+git -C $DEVRC cat-file -e origin/main:scripts/tests/test_shell_env_nudge_handles.py       # rc 0
+claim-work --release cairn-oss-multi-instance-26
+
+# rank 26's REFUTED half — this must PASS, and it is why CIVITAI_CLI is absent by design
+python3 -m pytest $DEVRC/scripts/tests/test_handoff_index.py \
+  -k test_every_handle_the_indexer_reads_is_exported_by_the_unit -q      # expect 1 passed
 
 # rank 13/7 — read the RUNNING container, never the manifest, and keep the control
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get deploy subsystem-store-api \
@@ -2298,16 +2383,22 @@ cairn recall --ref ci-leg --scope cairn        # 1 of 1 entry in `cairn/`
 KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get task devrc-ci-gate \
   -o jsonpath='{range .spec.steps[*]}{.name}{" "}{end}{"\n"}'
 #   expect: clone capture-etc seed-nix pytests nodetests cairn-client-runs verdict
-gh pr checks <any open devrc PR>               # expect tekton/devrc-cairn-client-runs listed
 #   🔴 HALF TWO IS UNMET: nothing here shows the leg goes RED when the client is stubbed.
 
 # rank 21 — still failing, re-verified 2026-09-10
 systemctl --user show analyze-service-index-commit.service -p Result -p ExecMainStatus
 #   expect Result=exit-code ExecMainStatus=1
 
-# rank 3 slice 3 — NOT started; all five duplicated modules still present
-ls ~/workspace/devrc/scripts/lib/{host_identity,subsystem_resolver,subsystem_recall,cairn_doctor,subsystem_read_store}.py
+# rank 3 slice 3 — MERGED (#1508 `44bd8b0e`). CORRECTED 2026-09-14: the line that used to sit
+# here said "NOT started; all five modules still present", which contradicted `State now` and
+# was wrong. The five READER modules are gone; the WRITER and `timeouts.py` stay by design.
+for m in host_identity subsystem_resolver subsystem_recall cairn_doctor subsystem_read_store; do
+  git -C $DEVRC cat-file -e "origin/main:scripts/lib/$m.py" 2>/dev/null && echo "$m PRESENT" \
+    || echo "$m ABSENT"
+done                                            # expect all five ABSENT
+git -C $DEVRC cat-file -e origin/main:scripts/lib/subsystem_touch.py   # rc 0 — PRESENT by design
 ```
-Expected: four MERGED shas; store on `0.8.0` with SIGHUP `1` and control `1`; the cairn
-scope holding one entry; a seven-step gate Task; rank 21 still `ExecMainStatus=1`; five
-module files still present.
+Expected: four MERGED shas; #1657 OPEN with three Tekton legs; the `REPO_ENV_HANDLES` ledger
+passing; store on `0.8.0` with SIGHUP `1` and control `1`; the cairn scope holding one entry;
+a seven-step gate Task; rank 21 still `ExecMainStatus=1`; five reader modules ABSENT and the
+writer PRESENT.
