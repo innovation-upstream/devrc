@@ -876,7 +876,7 @@ run 'detail-separator-loses-its-anchor' \
 # The DELETION arm: a document that HAD a finish line and loses it.
 run 'deleting-the-field-is-not-noticed' \
   test_an_update_that_DELETES_the_field_is_REFUSED \
-  's|        base_had_one=base_readable and closing_condition(base_text).is_declared,|        base_had_one=False,|'
+  's|        base_had_one=closing_condition(base_text).is_declared,|        base_had_one=False,|'
 # 🔴 THE GRANDFATHERING, IN BOTH DIRECTIONS. Removing it makes the gate
 # permanently red on a corpus where 0 of 183 docs comply; removing the advisory
 # makes a legacy doc silent forever, which is how it never gets fixed.
@@ -885,15 +885,19 @@ run 'legacy-docs-are-refused-too' \
   's|    if not (is_new_doc or base_had_one):|    if False:|'
 run 'legacy-advisory-suppressed' \
   test_a_legacy_doc_is_ADVISED_not_refused \
-  's|    legacy_dod = legacy_dod_report(closing, is_new_doc)|    legacy_dod = ""|'
+  's|    legacy_dod = legacy_dod_report(closing, is_new_doc, not history_known)|    legacy_dod = ""|'
 # 🔴 PRECEDENCE. `not base_text` alone reads a STALE BASE as a new arc — the
 # false positive that took 19 tests red in one run.
-# ⚠ BOTH THIS ROW AND `deleting-the-field-is-not-noticed` WERE REPOINTED after
-# round 2 rewrote the lines they target (`doc_exists_elsewhere` replaced the
-# mainline-only predicate; `base_readable` joined the deletion arm). They
-# reported `MUTATION DID NOT APPLY`, which this harness scores as a FAILURE
-# precisely so a stale sed cannot masquerade as a surviving guard. Each
-# replacement was checked to change EXACTLY ONE LINE before being written.
+# ⚠ THIS ROW AND `deleting-the-field-is-not-noticed` HAVE BOTH BEEN REPOINTED
+# MORE THAN ONCE as later rounds rewrote the lines they target. The second time,
+# the deletion row went dead again and TWO successive audits missed it, because
+# every sweep they ran was FILTERED and the row was never selected. A row whose
+# sed no longer matches reports `MUTATION DID NOT APPLY`, which this harness
+# scores as a FAILURE — but only if it RUNS. That is why
+# `test_mutants_handoff_cap.py` now checks every row's expression against the
+# live source with no filter at all: the check that finds a dead row must not
+# itself be subject to the filter. Each replacement is checked to change
+# EXACTLY ONE LINE before being written.
 run 'stale-base-read-as-a-new-arc' \
   test_a_STALE_BASE_is_not_reported_as_a_NEW_arc \
   's|    is_new_doc = not base_text.strip() and not doc_exists_elsewhere|    is_new_doc = not base_text.strip()|'
@@ -912,11 +916,8 @@ run 'None-collapsed-into-may-exist' \
 run 'unborn-head-borrows-the-stale-base-wording' \
   test_an_UNBORN_HEAD_gets_its_OWN_ratchet_skip_reason \
   's|    elif git_could_not_answer and not base_text.strip():|    elif False:|'
-# 🔴 AND THE FAIL DIRECTION ITSELF. Folding `None` toward "a doc may exist" is a
-# DECISION (grandfather rather than refuse on a repo we could not read); flip it
-# and a genuinely-unreadable repo starts refusing documents.
 # 🔴 THE ROW THAT ACTUALLY ISOLATES THE ADVISORY WORDING. Round 3 measured
-# that two of the three rows above are the SAME mutant: both die on
+# that two of its sibling rows are the SAME mutant: both die on
 # `assert res.returncode == hd.EXIT_OK` with rc 11, which is rule (m) refusing —
 # an EARLIER guard's error, and the harness says so itself by reporting
 # identical killer sets for them. None of them reaches the SENTENCE the fix is
@@ -925,7 +926,10 @@ run 'unborn-head-borrows-the-stale-base-wording' \
 # history — and dies on a MESSAGE assertion, not a returncode.
 run 'legacy-advisory-loses-its-history-qualifier' \
   test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
-  's|legacy_dod_report(closing, is_new_doc, tracked_at_head is not True)|legacy_dod_report(closing, is_new_doc)|'
+  's|legacy_dod_report(closing, is_new_doc, not history_known)|legacy_dod_report(closing, is_new_doc)|'
+# 🔴 AND THE FAIL DIRECTION ITSELF. Folding `None` toward "a doc may exist" is a
+# DECISION (grandfather rather than refuse on a repo we could not read); flip it
+# and a genuinely-unreadable repo starts refusing documents.
 run 'None-flipped-to-fail-closed' \
   test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
   's|    ) or git_could_not_answer|    ) and not git_could_not_answer|'

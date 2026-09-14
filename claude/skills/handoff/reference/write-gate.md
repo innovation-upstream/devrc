@@ -668,8 +668,12 @@ exactly is the number that matters: **3 live docs** —
 first and are unreachable. Corpus: 183 `handoff-*.md` across devrc and
 homelab-talos.
 
-🔴 **TWO RESIDUALS THIS SKIP DOES NOT CLOSE, both measured in round 2 and both
-left open deliberately rather than met with more machinery.**
+🔴 **RESIDUALS THIS SKIP DOES NOT CLOSE — left open deliberately rather than
+met with more machinery.** ⚠ This header carried a COUNT ("TWO") and a round
+number until a later round added a third bullet and left both standing — the
+very defect the module's three-skips narration had just been fixed for, recreated
+one file over. It carries neither now: a list that grows is not a place for a
+literal that does not.
 - A base carrying **BOTH** a canonical `## Next steps` and a reworded queue is
   still counted from the canonical one alone, so a PARTIAL migration — the
   natural intermediate state of the very fix this section prescribes — can still

@@ -7106,7 +7106,7 @@ class TestTheArcRulesOnlyCompareAgainstAUsableBase:
         res = run_tool(repo, "--new-effort", update=upd)
         assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
         blob = res.stdout + res.stderr
-        assert "git could not say whether the doc has any history" in blob, blob
+        assert "cannot show that it PREDATES rule (m)" in blob, blob
         assert "it was written before rule (m)" not in blob, blob
 
     def test_an_UNTRACKED_doc_is_not_told_it_PREDATES_rule_m(
@@ -7138,8 +7138,38 @@ class TestTheArcRulesOnlyCompareAgainstAUsableBase:
         res = run_tool(repo, update=upd, topic="untracked-topic")
         assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
         blob = res.stdout + res.stderr
-        assert "git could not say whether the doc has any history" in blob, blob
+        assert "cannot show that it PREDATES rule (m)" in blob, blob
         assert "it was written before rule (m)" not in blob, blob
+
+    def test_a_doc_ABSENT_here_but_ON_THE_MAINLINE_has_KNOWN_history(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE MIRROR ERROR — a claim about what git could see, made on a run
+        where git saw it. Round 4 caught the previous widening overshooting:
+        `tracked_at_head is not True` is also true when the doc is absent HERE
+        and present on the MAINLINE, so a run that had just printed
+
+            🔴 THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY — origin/main
+               has 1 commit(s) to this doc that this checkout does not
+
+        went on to say its history was unknown. Two adjacent lines of one
+        transcript contradicting each other.
+
+        The mainline copy IS history, so this document genuinely does predate
+        the rule and must be told so. `history_known` is the predicate; the
+        earlier `is not True` was a proxy that happened to agree on two of the
+        three shapes.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        assert hd.doc_tracked_at_head(
+            work, "claudedocs/handoff-sample-topic.md"
+        ) is False, "fixture is tracked here — the test would prove nothing"
+        upd = write_delta(tmp_path, "mainline.md", "## State now\n- moved on\n")
+        res = run_tool(work, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        blob = res.stdout + res.stderr
+        assert "it was written before rule (m)" in blob, blob
+        assert "cannot show that it PREDATES rule (m)" not in blob, blob
 
     def test_a_TRACKED_doc_IS_still_told_it_predates_the_rule(
         self, repo: Path, tmp_path: Path
@@ -7158,7 +7188,7 @@ class TestTheArcRulesOnlyCompareAgainstAUsableBase:
         assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
         blob = res.stdout + res.stderr
         assert "it was written before rule (m)" in blob, blob
-        assert "git could not say whether the doc has any history" not in blob, blob
+        assert "cannot show that it PREDATES rule (m)" not in blob, blob
 
     def test_an_UNBORN_HEAD_gets_its_OWN_ratchet_skip_reason(
         self, tmp_path: Path

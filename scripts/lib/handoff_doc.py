@@ -1912,9 +1912,14 @@ def legacy_dod_report(
     # made when the history was READ. Round 2 caught it asserted in a repo with
     # an unborn HEAD, where there is no history at all.
     lead = (
-        f"⚠ This handoff declares no `{CLOSING_KEY}:`, and git could not say "
-        f"whether the doc has any history here, so whether it PREDATES rule (m) "
-        f"is unknown. Grandfathered either way — this run proceeds."
+        # One sentence for both unknown-history shapes — the doc is in neither
+        # HEAD nor the mainline, or HEAD could not be read. Saying "git could
+        # not say" covered only the second and was false on the first, where
+        # git answered clearly.
+        f"⚠ This handoff declares no `{CLOSING_KEY}:`, and this checkout cannot "
+        f"show that it PREDATES rule (m) — the doc is in neither HEAD nor the "
+        f"mainline here, or HEAD could not be read. Grandfathered either way — "
+        f"this run proceeds."
         if history_unknown else
         f"⚠ This handoff declares no `{CLOSING_KEY}:` — it was written "
         f"before rule (m) and is GRANDFATHERED, so this run proceeds."
@@ -4092,7 +4097,7 @@ def main(argv: list[str] | None = None) -> int:
     # is the only one that can be wrong about the document rather than about the
     # update — and a count presented as 0 when it was never taken is exactly the
     # reassuring zero `claude/RULES.md` says to refuse to print.
-    #   (a) git could not answer whether the doc is in HEAD (round 3).
+    #   (a) git could not answer whether the doc is in HEAD.
     #   (b) `base_readable` — see the classification block above (audit F1/F3).
     #   (c) the base must actually CARRY a canonical `## Next steps`. `ranked_items`
     #       recognises only the heading `is_next_steps_heading` names, which is
@@ -4101,20 +4106,19 @@ def main(argv: list[str] | None = None) -> int:
     #       so MIGRATING such a queue onto the canonical heading, even while
     #       SHRINKING it, was refused, permanently, and only
     #       `--rank-growth-approved` cleared it. Audit F2.
-    #       🔴 THE POPULATION FIGURE LIVES IN ONE PLACE — `write-gate.md` §F —
-    #       and is deliberately NOT restated here. A previous round wrote "22
-    #       docs / 19 dated / 3 live" into BOTH, then retracted it in the skill
-    #       and left it standing in this module, which is the authoritative
-    #       artifact a maintainer actually reads. 22 does not reproduce (38 on a
-    #       wide predicate, 28 on a narrow one); what does is the corpus size,
-    #       183, and the 3 LIVE docs §F names individually. A second copy of a
-    #       measured number is how the retraction fails to land.
+    #       🔴 EVERY POPULATION FIGURE FOR THIS RULE LIVES IN `write-gate.md`
+    #       §F AND NOWHERE ELSE — including the ones that retract earlier ones.
+    #       A round wrote a figure into both files, retracted it in the skill,
+    #       and left it standing here; the round that fixed that then restated
+    #       four MORE figures under a banner saying it was not restating them.
+    #       A second copy is a second thing to re-measure, whichever direction
+    #       it points. Read §F.
     base_carries_a_ranked_queue = NEXT_STEPS_PREFIX in doc_shape(base_text).canonical
     ratchet_skip = ""
     if is_new_doc or args.rank_growth_approved:
         pass  # round 1, or the operator opted in — both are DECISIONS, not gaps
     elif git_could_not_answer and not base_text.strip():
-        # The THIRD reason (round 2, finding 1). Distinct from the one below:
+        # The THIRD reason. Distinct from the one below:
         # there may be no document at all, so telling the author to go and read
         # a count "in the document you cannot currently read" would be false.
         ratchet_skip = (
@@ -4204,7 +4208,20 @@ def main(argv: list[str] | None = None) -> int:
     # GRANDFATHERED" about a document created seconds earlier. A hand-written
     # doc, a template paste, a `git add` not yet committed, a copy into a fresh
     # worktree — all of them land here, and an unborn HEAD is the RARE one.
-    legacy_dod = legacy_dod_report(closing, is_new_doc, tracked_at_head is not True)
+    # 🔴 "HAS HISTORY" IS THE PREDICATE, and round 4 caught the previous
+    # widening overshooting into its own mirror error. `tracked_at_head is not
+    # True` is also true when the doc is absent HERE but present on the MAINLINE
+    # — so a run that had just printed "origin/main has 1 commit(s) to this doc
+    # that this checkout does not" went on to say its history was unknown. Two
+    # adjacent lines of one transcript contradicting each other, and the same
+    # sin `legacy_dod_report`'s docstring names: a claim about what git could
+    # see, made on a run where git saw it.
+    #
+    # History is KNOWN when the doc is in HEAD, or when the mainline carries a
+    # copy. Everything else — absent from both, or HEAD unreadable — is the
+    # honest "this checkout cannot show it predates the rule".
+    history_known = tracked_at_head is True or currency.replaces_mainline_doc(base_text)
+    legacy_dod = legacy_dod_report(closing, is_new_doc, not history_known)
     if legacy_dod:
         print(legacy_dod)
     # Rule (l)'s advisory. Same slot, and it is the one of the three that names
