@@ -30,6 +30,7 @@ fix exists (alacritty#1705 wontfix); the copy-mode `o` binding also answers
 "" (empty format) there.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -59,16 +60,36 @@ TMUX = shutil.which("tmux")
 # 15-25 ms, 3.2-23.5 ms (median 14.0), and 11.9-55.4 ms (median 20-21) — because
 # it moves with host load, and this box runs dozens of concurrent suites. A
 # "~400x headroom" claim derived from the first of those was wrong by the third.
-# What is actually being asserted: 10 s is far above any render latency observed
-# at any load, and it is a DEADLINE, not a delay — a healthy run returns as soon
-# as the grid holds the URI and never spends it, so raising it costs nothing.
+# What is actually being asserted: 10 s is far above any PANE-GRID render
+# latency observed at any load. It is a DEADLINE, not a delay — `rendered`
+# returns as soon as the grid holds the URI and never spends it.
 RENDER_TIMEOUT_S = 10.0
+# 🔴 A SECOND, SEPARATE CONSTANT — NOT a reuse of the one above, because the two
+# wait on DIFFERENT OBJECTS (see `enter_copy_mode_on_the_link`): the pane grid
+# vs the copy-mode screen's hyperlink table. One constant with one comment
+# describing only the first consumer is how a reader concludes "raising it costs
+# nothing" and is wrong — in the BROKEN case each consumer spends its deadline
+# in turn, so a genuine dropped-format regression takes 2x this to report,
+# against the ~0.1s an immediate assert used to take. Raise either only knowing
+# that.
+COPY_MODE_TIMEOUT_S = 10.0
+
+
+def tmux_on(sock, *args):
+    """Low-level: run a tmux command against an EXPLICIT socket.
+
+    Exists so the forced-race regression test can drive its OWN server. Keeping
+    every call bound to the module's `SOCK` is what made the retry below
+    unreachable by any test — a fixture had already rendered the grid before a
+    test could observe the race.
+    """
+    return subprocess.run(
+        ["tmux", "-L", sock, *args], capture_output=True, text=True, timeout=30
+    )
 
 
 def tmux(*args):
-    return subprocess.run(
-        ["tmux", "-L", SOCK, *args], capture_output=True, text=True, timeout=30
-    )
+    return tmux_on(SOCK, *args)
 
 
 @pytest.fixture(scope="module")
@@ -175,7 +196,7 @@ def rendered(server):
     )
 
 
-def enter_copy_mode_on_the_link(deadline_s=RENDER_TIMEOUT_S):
+def enter_copy_mode_on_the_link(sock=None, deadline_s=COPY_MODE_TIMEOUT_S):
     """Enter copy mode with the cursor on the link, and the hyperlink READABLE.
 
     🔴 THE PANE GRID AND THE COPY-MODE SCREEN ARE DIFFERENT OBJECTS. `rendered`
@@ -198,16 +219,28 @@ def enter_copy_mode_on_the_link(deadline_s=RENDER_TIMEOUT_S):
     It cannot mask a real failure: on timeout it FAILS and says the format
     stayed empty, which is exactly the tmux-dropped-the-format regression the
     surviving test exists to catch.
+
+    🔴 `cancel` IS THE WHOLE RETRY, SO ITS rc IS CHECKED — and checking
+    `copy-mode`'s rc does NOT cover it. MEASURED on tmux 3.7c: issuing
+    `copy-mode` at a pane ALREADY in copy mode returns rc 0, empty stderr, and
+    does NOT re-snapshot. So if `cancel` ever failed, every later `copy-mode`
+    would be an rc-0 no-op re-reading the same stale snapshot: the loop would
+    still LOOK like a retry, would spin to the deadline, and would then blame a
+    tmux regression for a harness fault — the exact defect the `rendered` rc
+    check above exists to prevent, one screen further down. `#{pane_in_mode}`
+    is asserted too, because an rc-0 `cancel` that left the pane in a mode
+    produces the same inert loop.
     """
+    sock = SOCK if sock is None else sock
     deadline = time.monotonic() + deadline_s
-    last = ""
     while True:
-        p = tmux("copy-mode", "-t", "t")
+        p = tmux_on(sock, "copy-mode", "-t", "t")
         assert p.returncode == 0, p.stderr
         for step in ("top-line", "start-of-line"):
-            s = tmux("send-keys", "-t", "t", "-X", step)
+            s = tmux_on(sock, "send-keys", "-t", "t", "-X", step)
             assert s.returncode == 0, (step, s.stderr)
-        out = tmux("display", "-p", "-t", "t", "#{copy_cursor_hyperlink}")
+        out = tmux_on(sock, "display", "-p", "-t", "t",
+                      "#{copy_cursor_hyperlink}")
         assert out.returncode == 0, out.stderr
         last = out.stdout.strip()
         if last == URI:
@@ -219,6 +252,23 @@ def enter_copy_mode_on_the_link(deadline_s=RENDER_TIMEOUT_S):
                 f"An UNKNOWN format expands to empty at rc 0, so this is also "
                 f"what a tmux that dropped `copy_cursor_hyperlink` looks like."
             )
+        c = tmux_on(sock, "send-keys", "-t", "t", "-X", "cancel")
+        assert c.returncode == 0, ("cancel FAILED — the retry below would be "
+                                   "an rc-0 no-op on a stale snapshot", c.stderr)
+        # 🔴 DO NOT ADD A `#{pane_in_mode} == 0` CHECK HERE. It is the obvious
+        # guard, an audit recommended it, and it is WRONG on tmux 3.7c — two
+        # ways, both measured after writing it and watching this loop hang:
+        #   - it does not report a BOOLEAN. In copy mode it reads `2`, so a
+        #     `== "1"` test is false while the pane is very much in a mode.
+        #   - it does not return to `0` across a cancel in THIS loop: each
+        #     iteration pushes a mode and pops one, so polling for `0` spins
+        #     until the deadline and turns a healthy retry into a failure.
+        # Measured directly: after an rc-0 `cancel`, `#{pane_in_mode}` still
+        # read `2` for the full 2 s it was polled — and the very next
+        # `copy-mode` re-read the format CORRECTLY. So re-entry works and the
+        # mode counter is simply not the signal for it. `cancel`'s rc, checked
+        # above, is the guard that is both cheap and true.
+        time.sleep(0.01)
         tmux("send-keys", "-t", "t", "-X", "cancel")
         time.sleep(0.01)
 
@@ -286,10 +336,16 @@ def test_the_grid_hyperlink_spans_the_wrap(rendered):
     # which is what makes the whole wrapped link one clickable span in
     # Alacritty (per-cell scan across rows). The third probe sits 10 columns
     # into the continuation row, still on the link.
-    # Copy mode is entered ONCE — `send-keys -X` outside copy mode exits 0
-    # and silently does nothing, which is how this test once failed green.
-    # 🔴 Entering it is delegated, because the copy-mode snapshot is a
-    # DIFFERENT object from the pane grid the fixture waited on.
+    # 🔴 Copy mode is entered by the delegate below — which may enter and
+    # cancel it SEVERAL times — and the three probes then run inside the one
+    # mode it leaves established. ⚠ A previous version of this comment said
+    # "entered ONCE" and explained the discipline with "`send-keys -X` outside
+    # copy mode exits 0 and silently does nothing". Both halves are wrong on the
+    # tmux this file pins: MEASURED on 3.7c, every `send-keys -X` verb outside
+    # copy mode returns rc **1** (`not in a mode`), so `:341` below does catch
+    # that case. The discipline still matters, for a different reason the old
+    # sentence did not describe — a pane left in a STALE mode, which is rc 0 and
+    # invisible; see the delegate's own note on `cancel`.
     enter_copy_mode_on_the_link()
     for label, nav in (
         ("row0 col0", ["top-line", "start-of-line"]),
@@ -303,6 +359,56 @@ def test_the_grid_hyperlink_spans_the_wrap(rendered):
         out = tmux("display", "-p", "-t", "t", "#{copy_cursor_hyperlink}")
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == URI, (label, out.stdout)
+
+
+def test_the_copy_mode_retry_RECOVERS_a_snapshot_taken_before_the_link_landed():
+    """🔴 REACHABILITY TEST for `enter_copy_mode_on_the_link`'s retry.
+
+    Without this, the retry is certified by NOTHING. On a healthy run the
+    module-scoped `rendered` fixture has already put the URI in the grid before
+    any test runs, so the first copy-mode snapshot always matches and the loop
+    body past iteration 1 never executes. MEASURED: replacing the `cancel` line
+    with `pass` left the whole file GREEN — a mutation that survives because the
+    happy path resolves anyway, which is the textbook unreachable-guard shape.
+
+    So this drives its OWN server, with the link emitted LATE and copy mode
+    entered BEFORE it lands — the only state in which the retry does work. It
+    asserts recovery, and it is the regression test for the `cancel` call:
+    with `cancel` removed it fails on the deadline instead of recovering.
+    """
+    assert TMUX, "tmux is not on PATH — the live-tmux tests cannot run"
+    sock = f"hint-open-race-{uuid.uuid4().hex[:8]}"
+    env = dict(os.environ, HOME="/nonexistent-tmux-hyperlink-test")
+    proc = subprocess.run(
+        ["tmux", "-L", sock, "-f", CONF, "new-session", "-d", "-x", "40",
+         "-y", "6", "-s", "t", "sh", "-c",
+         f"sleep 0.75; printf '{OSC8}'; sleep 300"],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    if proc.returncode != 0:
+        tmux_on(sock, "kill-server")
+        pytest.fail(f"tmux new-session failed: {proc.stderr}")
+    try:
+        # Enter copy mode NOW — the link is still ~0.75s away, so this
+        # snapshot is necessarily empty. This is the state the retry exists
+        # for, and the state no other test in this file can produce.
+        assert tmux_on(sock, "copy-mode", "-t", "t").returncode == 0
+        empty = tmux_on(sock, "display", "-p", "-t", "t",
+                        "#{copy_cursor_hyperlink}").stdout.strip()
+        assert empty != URI, (
+            "the link rendered before copy mode was entered, so this test did "
+            "NOT exercise the retry — raise the sleep in the pane command", empty)
+
+        # The delegate must now recover, which it can only do by cancelling
+        # and re-entering: a re-read inside this mode returns the same stale
+        # snapshot forever (measured, 0 of 2 recovered that way).
+        enter_copy_mode_on_the_link(sock=sock, deadline_s=COPY_MODE_TIMEOUT_S)
+
+        got = tmux_on(sock, "display", "-p", "-t", "t",
+                      "#{copy_cursor_hyperlink}").stdout.strip()
+        assert got == URI, got
+    finally:
+        tmux_on(sock, "kill-server")
 
 
 def test_the_binding_is_listed_by_tmux_in_both_tables(server):
