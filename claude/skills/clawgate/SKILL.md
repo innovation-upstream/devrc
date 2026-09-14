@@ -124,7 +124,8 @@ completion-comment shape, the ordering trap and the two-comments rule are all th
 
 🔴 **A hook ENFORCES this** (`clawgate-writeback-guard.py`): armed by the step-1 read, it **blocks
 Stop** when work followed and a live re-read shows no `claude-code` comment since. Commenting
-silences it; read-and-evaluate-only never fires. Detail: `flows/task-pickup.md`.
+silences it; read-and-evaluate-only never fires. Its block message names the flow by deployed path:
+`~/.claude/skills/clawgate/flows/task-pickup.md`.
 
 🔴 **Status gate — the only place `complete` is ever yours to set.** Criteria are
 **AUTHOR-SPECIFIED** only when the task body carries a `## Acceptance criteria` heading; anything
