@@ -1396,21 +1396,37 @@ belongs to that arc's own session. via: measurement
     accepted spelling, in which case the gate's docstring must stop implying otherwise.
     forcing: none
 
-26. **The handle table has TWO hand-maintained copies, and both are drifted from
-    `nix/agent-handles.nix` TODAY.** `scripts/claude-hooks/shell-env-nudge.py` carries 9 of 10 —
-    **missing `KC_PROD`**, whose kubeconfig exists — so the runtime nudge is blind to the very
-    handle two of #1621's fixed sites use. `scripts/lib/handoff_index.py`'s `REPO_ENV_HANDLES` is
-    `("DEVRC","HOMELAB","DATAPACKET","CIVITAI")` — **missing `CIVITAI_CLI`**, whose checkout
-    exists.
-    ⚠ **Blast radius, stated honestly rather than at the altitude an audit reached for.** The
-    `KC_PROD` gap is LIVE but minor: a missed nudge, not a wrong cluster. The `CIVITAI_CLI` one is
-    **LATENT** — that checkout holds **0** handoff docs today, so it has no victim. An audit
-    described it as docs being *"silently outside the index"*; that was measured, and it is not
-    true today.
-    #1621 added no THIRD copy — it parses the source — but it reduced the count by none.
-    **Closing condition:** a test asserting that both hand-maintained handle sets equal the set
-    parsed from `nix/agent-handles.nix`, shown **RED** against today's tree and **GREEN** after
-    both are corrected — merged.
+26. 🔨 **IN FLIGHT as devrc #1657 — AND THIS ITEM'S HEADLINE WAS HALF FALSE. READ THE
+    CORRECTION BEFORE WORKING IT.** It said *"The handle table has TWO hand-maintained copies,
+    and both are drifted from `nix/agent-handles.nix` TODAY."* **ONE is.**
+    - ✅ **REAL, and fixed in #1657:** `scripts/claude-hooks/shell-env-nudge.py` carried 9 of 10 —
+      **missing `KC_PROD`**, whose kubeconfig exists. Nothing in the tree read its
+      `KC_VARS`/`REPO_VARS`, so the copy had no ledger and the failure is silent by construction
+      (a `.get()` returning `None` and a nudge that never fires).
+    - 🔴 **NOT DRIFT — DO NOT "FIX" IT:** `scripts/lib/handoff_index.py`'s `REPO_ENV_HANDLES`
+      omitting `CIVITAI_CLI` is a **deliberate exclusion**, already pinned in BOTH directions with
+      its reason recorded in source by
+      `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`.
+      Measured 2026-09-14, and **independently confirmed by #1657's round-0 audit**: that test
+      passes. Adding the handle would add a zero-doc repo to the corpus and, because
+      `prune_config_refusal` requires EVERY `REPO_ENV_HANDLES` entry to be SET, narrow the hosts
+      an operator can `--prune` from.
+    🔴 **THE ORIGINAL CLOSING CONDITION IS THEREFORE UNMEETABLE AS WRITTEN** — "both are
+    corrected" cannot happen, because one of the two is already correct. **Amended:** the hook's
+    two dicts are pinned to `agent-handles.nix` in both directions, shown RED then GREEN, merged;
+    `REPO_ENV_HANDLES` is left alone.
+    ⚠ **The transferable lesson, which is the durable output:** an oversight and a documented
+    decision look IDENTICAL in the table itself — they differ only in whether something else pins
+    them. **Before "fixing" a table that omits an entry, grep for a test that ASSERTS the
+    omission.** This item's own honest caveat (that the `CIVITAI_CLI` gap was LATENT, 0 docs —
+    still true) measured the blast radius and never asked whether the omission was INTENDED.
+    ⚠ **Known-open, named rather than left to be rediscovered:** the #1657 ledger pins the hook
+    against the nix **DECLARATION**, and a declaration is not an **EXPORT** — both consumers
+    existence-guard (`exportIf "-d"`/`"-f"`). Measured: `~/.kube/homelab-nebula.yaml` is absent,
+    `$KC_NEBULA` is UNSET, and the hook nudges `KUBECONFIG=$KC_NEBULA` anyway. Pre-existing, not
+    introduced by #1657. **Closes when** the hook resolves paths from `os.environ` and a test
+    shows it emitting NO suggestion for a declared-but-unexported handle, RED before and GREEN
+    after.
     forcing: none
 
 27. **`scripts/tests/test_doc_path_rot.py` carries the same stale-census defect twice, over the
