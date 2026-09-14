@@ -14,9 +14,19 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Make the `nvim-octo` review TUI usable: nothing told the operator how to act in it. Three
 operator asks — a legend, an open-in-browser hotkey, and `?` to show the legend.
 
+closing-condition: judgement — the operator opens a NEW alacritty window, clicks a `repo#N`,
+and confirms on screen that `?` (and `g?` in a diff) shows this buffer's legend and that `\pm`
+prompts before merging. Nothing headless can close this; it is the one thing the arc was for.
+
 ## State now
-✅ **SHIPPED AND THE DEPLOY IS NOW VERIFIED — `#1653`, squash `d4179fbd`.**
-🔴 **STILL NOT EXERCISED BY A HUMAN.** Needs a NEW alacritty window (rank 1).
+✅ **CLOSED. The closing condition is MET** — the operator exercised it on a real screen on
+2026-09-14 and reported it works. Shipped as `#1653`, squash `d4179fbd`; deploy verified on
+both hosts; rank 1 discharged by the operator, not by a probe.
+
+⚠ **A NEW ask came out of that same sitting and is NOT part of this arc:** the commits /
+files / hunks *diff-reading* experience is poor, and the operator wants lazygit's. That is a
+separate arc against the review surface — it is deliberately NOT added to the ranked list
+below (rule (n)), and it does not reopen this one.
 
 **Deploy, measured after the fact** (the previous revision of this doc asserted "deployed to both
 hosts" while `ship.sh` was still running — see the Gotchas entry):
@@ -55,7 +65,11 @@ two_entry_boundary` on `claudedocs/handoff-index-store-claims-accuracy.md`), fix
 
 ## Open investigations — live diagnosis state
 
-### 🔴 Nothing here has been seen on a screen
+### ✅ RESOLVED 2026-09-14 — ~~Nothing here has been seen on a screen~~
+- **RETRACTED AS LIVE.** The operator exercised it on a real screen and it works. Everything
+  below is the headless record that PRECEDED that check; it is history, not an open question.
+  Retracted in the same change that closed the arc, rather than left to read as current —
+  which is the failure mode `/resume`'s INVESTIGATIONS block exists to catch.
 - as-of: 2026-09-13
 - **Symptom + exact repro:** n/a — this is an unexercised shipped feature, not a defect. Repro for
   the check: open a NEW alacritty window, click a `repo#N` mention, press `?`.
@@ -79,12 +93,12 @@ two_entry_boundary` on `claudedocs/handoff-index-store-claims-accuracy.md`), fix
 - **Next probe:** rank 1.
 
 ## Next steps (ranked)
-1. 🔴 **OPEN A NEW ALACRITTY WINDOW, then click a `repo#N` and press `?`.** The `nvim-octo` store
-   path is baked into alacritty's config and a running terminal already resolved the OLD one — an
-   existing window will show the pre-merge behaviour and look like the deploy failed. Then press
-   `\pm` and confirm the prompt names the PR, repo and `squash`, and that anything other than
-   `yes` aborts. Repo: devrc.
-   forcing: user — three operator asks, none yet seen on a screen.
+1. ~~**OPEN A NEW ALACRITTY WINDOW, then click a `repo#N` and press `?`.**~~ ✅ **CLOSED
+   2026-09-14 — the operator ran it on a real screen and reported it works.** This was the
+   arc's closing condition; it is discharged. (The standing gotcha survives it: the
+   `nvim-octo` store path is baked into alacritty's config, so an ALREADY-RUNNING terminal
+   still shows the old build and still looks like a failed deploy.) Repo: devrc.
+   forcing: none — discharged by the operator.
 2. **Four properties are KNOWN-UNGUARDED — recorded, not silently left.** Each survives a mutant
    green: deleting/inverting `table.sort(rows, M.row_order)` (legend renders in hash order);
    `CONFIRMED_VERBS`' `mode` is outside the pinned ledger (widening `approve_review` to insert
@@ -144,6 +158,21 @@ two_entry_boundary` on `claudedocs/handoff-index-store-claims-accuracy.md`), fix
   subsystem: `luajit` joined `gateTools` in this PR, so a base clone predating it has no
   interpreter and the suite fails its own precondition.
 
+- 🔴 **THIS DOC'S OWN "HOW TO VERIFY" SNIPPET RETURNED A FALSE 0 ON A HEALTHY DEPLOY.** It
+  grepped `"$NO"/bin/nvim-octo` for `CONFIRMED_VERBS`, but the wrapper only exports a PATH and
+  execs `nvim -c "Octo …"`; the config is FOUR store hops on (wrapper → neovim → `init.lua` →
+  `init.vim` → `octo-init.lua`). MEASURED 2026-09-14 on the workbench: the snippet printed `0`
+  while the deployed `octo-init.lua` was **byte-identical to the repo copy** and carried all 10
+  marker hits. **A verify snippet is a claim like any other and this one was never run** — the
+  arc wrote it from where the constant *lives in the source* rather than from where the deploy
+  *puts it*. The replacement resolves the whole click path and was run verbatim, under both the
+  ugrep-wrapped `grep` function and `command grep`, before being written down.
+- ⚠ **THE CI RED ON `#1666` WAS, AGAIN, ANOTHER EFFORT'S** — `test_every_mutation_anchor_occurs_
+  exactly_once_in_its_target[mutation_battery_handoff_archive_and_cap.py]`, fixed on `main` by
+  `c1600c93` which the branch predated by 10 commits. The branch's whole diff is ONE new doc and
+  zero `.py`, so it cannot reach that test; it passes on `main`'s tree (29 passed, 2 skipped).
+  **Second occurrence in one arc.** Read the failing test's NAME and ask whether the diff can
+  reach it, before debugging anything.
 - 🔴 **THIS DOC ASSERTED "DEPLOYED TO BOTH HOSTS" WHILE `ship.sh` WAS STILL RUNNING.** It was
   written from the merge, not from the deploy — the same shape as every other error this arc
   produced, and in the one document whose job is to be trusted next session. It happened to be
@@ -160,10 +189,23 @@ two_entry_boundary` on `claudedocs/handoff-index-store-claims-accuracy.md`), fix
 #   in a diff buffer -> press g?  -> same, and `?` still reverse-searches
 #   press \pm        -> prompt names the PR, the repo and `squash`; anything but yes aborts
 
-# The deployed wrapper carries the feature (run on the host you are testing)
-NO=$(grep -oE '/nix/store/[a-z0-9]*-nvim-octo' "$(readlink -f ~/.config/alacritty/alacritty.toml \
-  | xargs grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' | head -1)" | head -1)
-grep -c 'CONFIRMED_VERBS\|LEGEND_LHS' "$NO/bin/nvim-octo"   # non-zero
+# The deployed CLICK PATH carries the feature (run on the host you are testing).
+#
+# 🔴 DO NOT GREP THE WRAPPER. An earlier revision of this block did
+# (`grep -c 'CONFIRMED_VERBS\|LEGEND_LHS' "$NO/bin/nvim-octo"`) and it returns **0 on a
+# HEALTHY deploy** — `bin/nvim-octo` only exports a PATH and execs `nvim -c "Octo …"`. The
+# config is FOUR store hops further on, reached through the neovim wrapper's customRC, and
+# the false 0 reads exactly like a failed deploy. MEASURED 2026-09-14 on the workbench, on a
+# deploy that was in fact correct.
+AT=$(readlink -f ~/.config/alacritty/alacritty.toml)
+MO=$(grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' "$AT" | head -1)
+NO=$(grep -oE '/nix/store/[a-z0-9]+-nvim-octo' "$MO" | head -1)
+NV=$(grep -oE '/nix/store/[a-z0-9]+-neovim-[0-9.]+' "$NO"/bin/nvim-octo | head -1)
+IL=$(grep -aoE '/nix/store/[a-z0-9]+-init\.lua' "$NV"/bin/nvim | head -1)
+IV=$(grep -oE '/nix/store/[a-z0-9]+-init\.vim' "$IL" | head -1)
+OI=$(grep -oE '/nix/store/[a-z0-9]+-octo-init\.lua' "$IV" | head -1)
+grep -c 'CONFIRMED_VERBS\|LEGEND_LHS' "$OI"                 # non-zero (10 as shipped)
+cmp "$OI" ~/workspace/devrc/nix/pkgs/tools/nvim-octo/octo-init.lua && echo "== repo copy"
 
 # Headless, no window: the legend and the confirmation, per kind
 NVIM_APPNAME=nvim-octo-check "$NO/bin/nvim-octo" --help 2>/dev/null || true
