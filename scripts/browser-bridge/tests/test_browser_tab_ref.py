@@ -1453,10 +1453,12 @@ def test_an_explicitly_cleared_instance_forwards_NOTHING_and_leaks_NOTHING(bridg
 #       useless here, so the far host is asked for the data URL and the LOCAL
 #       writer makes the file.
 #
-# RED-AT-BASE MATRIX — see the module docstring's convention. Measured against
-# `18a95e23` (origin/main, the commit before this change) with only this file's
-# new section applied. The count is deliberately not restated here; the PR body
-# carries it, and a number in a comment is the thing that goes stale first.
+# RED-AT-BASE MATRIX — see the module docstring's convention. Measured at
+# `00afff8c` (origin/main) with ONLY this test file copied in: this whole file
+# went 25 FAILED / 110 passed there, and 135 passed at HEAD. The six cases here
+# that were GREEN at base each say so in their own docstring — they are
+# invariant guards, positive controls or non-goal pins, and none of them is
+# evidence that the proxy works.
 
 #: The remote leg's own rc, behind a versioned token — see `_ssh_proxy` in the
 #: CLI. Pinned against the CLI's literal by
@@ -1704,6 +1706,10 @@ def test_a_SAME_LABELLED_profile_here_is_never_driven_when_the_hop_FAILS(bridge)
 
     "The far host is down, so do it locally" is the plausible, wrong repair. It
     must stay a refusal.
+
+    INVARIANT GUARD, not regression coverage: green at `00afff8c` too, where
+    there was no proxy and the refusal was the only behaviour. It is what fails
+    if a future fallback ever reaches for the local bridge.
     """
     bridge.handler.host_label = "workbench"
     r = bridge.run("bw://laptop/work/12345", "nav", "https://example.invalid/x")
