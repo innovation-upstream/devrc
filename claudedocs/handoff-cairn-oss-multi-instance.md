@@ -105,8 +105,32 @@ is the PRIVATE proposal, not this doc.
   Round 2 found the added remedy **unrunnable** and that it had **cited a guard that does not
   guard**. **The fix rounds, not the original change, were where every finding lived.**
 
+- ✅ **2026-09-14 — RANK 23(c) IS CLOSED, so RANK 23 IS CLOSED ENTIRELY.** `ZacxDev/cairn` **#17**,
+  squash **`a2661371`**. Two audit rounds. Closing condition — "an upstream PR for (c)" — met, and
+  re-derived BY CONTENT at that repo's `origin/main`: zero scrub residue across `lib/` + `cairn`;
+  both MALFORMED remedies name `cairn validate --scope <scope>`; the false "does not ship" clause
+  gone; `tests/test_no_scrubbed_identifiers.py` present. ⚠ One `does not ship` remains at
+  `lib/subsystem_recall.py:5` and is CORRECT — it says the *writer module* is not shipped, which is
+  true and is the premise of the repo split. The retracted claim was the narrower one about a
+  single-FILE *check*.
+  🔴 **THE ITEM DESCRIBED ONE SITE; THERE WERE TWELVE.** The scrub used TWO replacement phrases
+  (`a writer` AND `the writer half`) plus a fabricated symbol (`entry_shape.build_report`, which
+  exists nowhere) — 4 + 8, enumerated. **A brief that names one instance of a scrub is naming a
+  sample, not a population; grep both directions before scoping.**
+  🔴 **AND THE FIRST FIX COMMITTED THE ERROR IT WAS FIXING.** The PR argued "a remedy naming a
+  capability the package lacks is worse than none", then wrote "a single-FILE check belongs to the
+  writer half, which this package does not ship" — FALSE: `subsystem_resolver.entry_mapping` +
+  `SubsystemEntry.from_mapping` ships here and `server/server.py:2570` runs it to refuse a
+  malformed PUT. A capability dis-claim is the same defect inverted. Round 0 caught it.
+  ⚠ **ALL THREE ROUNDS' FINDINGS WERE IN THE SCAFFOLDING, NEVER IN THE PACKAGE** — a vacuous
+  pattern with no positive control, a guard that flagged CORRECT prose on a line the PR itself
+  authored (a code-span regex spanning the gap BETWEEN two spans), a self-exemption pin blind to
+  its own upstream widening path, a verb guard reading 2 files while claiming "every", and a
+  silently-dropped non-UTF-8 bucket. The payload was verified by DRIVING it and never moved.
+  **That is the attribution gate's shape: the ladder was auditing itself.** Stopped by decision
+  after round 1, not on a clean round.
+
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
-  **23(c)** (upstream PR in `ZacxDev/cairn` — the arc's last unclosed piece);
   **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
   those sites have no handle and therefore no remedy);
   **27**; **28** (the cwd-blind relative nudge — FILED 2026-09-14 by operator decision during
@@ -732,40 +756,13 @@ Tekton legs sat on top of two deploy-blockers.
   `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
   measured **1536 passed, 0 failed** locally.
 
-### CLOSED 2026-09-12 — the kill-ledger treadmill, and why three of my PRs were the wrong altitude
-🔴 **THIS RETIRES THE `#1522` BLOCK ABOVE.** That block's diagnosis was right and its remedy was
-wrong: it treated each offending doc as a thing to classify. The class was closed structurally by
-someone else while I was still classifying instances.
-
-- **Resolved by:** `#1561` (`c0bbd6d9`) — *"stop the kill scanners reading `claudedocs/` — SIX docs
-  red-ed main in two hours and every fix was itself a doc"*. On `origin/main`:
-  `_PROSE_ONLY_PREFIXES = ("claudedocs/",)` at `:2624`, consumed by `_is_prose_only()` at `:2634`.
-  A prefix predicate, not row deletions. `#1557` was an intermediate step.
-- **`main` is GREEN**, measured at `b1abf6b1` with `__pycache__` cleared and
-  `PYTHONDONTWRITEBYTECODE=1`: **`1537 passed`**, 0 failed. via: measurement
-- 🔴 **My own merged handoff became an offender, and eliding my mention was NOT enough.**
-  `#1548`'s text quoted the wide-kill verb while documenting the breakage. `#1556` (`b62d1bf1`)
-  fixed it in two measured steps — elide my line: 2 failed → 1 failed; ledger the doc in both
-  allowlists: → **1536 passed**. The residual failure was at `:43` and `:2020`, **written by other
-  sessions** documenting the same breakage: with several authors writing at once, no one can elide
-  their way out. via: measurement
-- 🔴 **`#1556` was obsolete within the hour and is what made `#1549` conflict.** It added rows to
-  both allowlists shortly before `#1561` made every `claudedocs/` row unreachable. `git rebase
-  origin/main` on `#1549` conflicts in three hunks, and the HEAD side of the second IS `#1561`'s
-  landed implementation — resolving toward `#1549` would delete it. **Recommended closure as
-  superseded; not closed, it is not mine.** via: measurement
-- **Ruled out: that rebasing and merging `#1549` was the right move**, which is what I was asked to
-  do. Its fix is older and narrower than what landed: it scoped the *mention ledger*, `#1561`
-  scopes *both* scanners. Merging it regresses `main`. via: measurement
-- **Ruled out: that another ledger row would have worked.** After `#1556` merged, `main` went red
-  again on a **fourth** doc (`claudedocs/handoff-gate-speed-and-ci-signal.md`) inside the same
-  window, from a session unrelated to any of the three fixes. via: measurement
-- ⚠ **NOT established: whether scoping BOTH scanners is intended.** `#1561` exempts prose from the
-  ARGV scanner too, not just the mention census. A real call site inside a `claudedocs/` file would
-  now be unread. Flagged on `#1549`; nobody has answered it.
-- **The transferable rule:** *when a guard fires repeatedly and every fix is itself an instance of
-  what it guards, the guard's SCOPE is the defect — stop classifying and re-scope.* Three
-  locally-correct PRs of mine (`#1556` plus two earlier attempts) were each the wrong altitude.
+### EVICTED 2026-09-14 — the kill-ledger treadmill (CLOSED)
+🔴 **Closed STRUCTURALLY by devrc #1561 (`c0bbd6d9`)**: `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`
+makes the scanners skip tracked prose. Block evicted for size per the 2026-09-07 convention.
+**The lesson that survives:** three PRs of per-instance classification were the WRONG ALTITUDE,
+and the design fix landed while they were still being written. When you find yourself writing
+the third PR that classifies instances of one class, the class itself is the bug.
+**Next probe: none.**
 
 ### Rank 3 slice 3 MERGED 2026-09-12 — `#1508`, correcting this doc's own carried-forward line
 `origin/main` `44bd8b0e`: *"consolidate onto the pinned client — delete the five forked reader
@@ -1173,7 +1170,10 @@ belongs to that arc's own session. via: measurement
     forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
     Advisory, not blocking (see the retraction above)
 
-23. **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
+23. ✅ **CLOSED ENTIRELY 2026-09-14.** (a)+(b) devrc #1583 `c1ecc830`; **(c) `ZacxDev/cairn`
+    #17 `a2661371`** — see `State now`. The item said ONE scrubbed remedy; there were TWELVE
+    sites across two replacement phrases and a fabricated symbol.
+    **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
     (a) `claude/skills/resume/SKILL.md:128` still spells the post-write check as a bare
     `subsystem_touch.py --validate --scope <scope>` — **not on PATH, exits 127** — and `:150`
     carries the absolute `python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py` spelling.
