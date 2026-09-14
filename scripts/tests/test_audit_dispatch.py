@@ -7635,6 +7635,94 @@ def test_the_ledger_refuses_a_failed_command_rather_than_printing_zero(kw, expec
     )
 
 
+PROSE_SECTION = "## IF THIS PR'S PAYLOAD IS PROSE — the authorship determination"
+
+
+def test_the_prose_determination_ships_from_round_2_and_NOT_before():
+    """🔴 THE ROUND FLOOR IS ENFORCED IN CODE, not left to the prose in it.
+
+    On a prose payload the attribution gate cannot fire, so the ladder ends on a
+    STATED criterion — and what makes that criterion applicable rather than a
+    judgement is an AUTHORSHIP count, which needs a previous round's fix to
+    attribute findings to. Rounds 0 and 1 have none. Printing the section there
+    would put "here is how to decide you may stop" in front of a round that
+    structurally cannot answer it, which is how the withdrawn `#1678` draft came
+    to let round 1 stop at all.
+
+    Both directions are asserted: absent at 0 and 1, PRESENT at 2 and 3. A guard
+    that only checked the absence passes with the section deleted outright.
+    """
+    for rnd in ("0", "1"):
+        rc, out, err = run_main(["900", "--round", rnd])
+        assert rc == 0, err
+        assert PROSE_SECTION not in out, (
+            f"round {rnd} carries the authorship determination, which it cannot "
+            "apply: there is no previous round's fix for a finding to be "
+            "attributed to. That is the round-1 shortcut `#1678` shipped and "
+            "`#1682` retracted, re-entering through the brief."
+        )
+    for rnd in ("2", "3"):
+        rc, out, err = run_main(
+            ["900", "--round", rnd], comments=[CLAIMS_BLOCK_R2]
+        )
+        assert rc == 0, err
+        assert PROSE_SECTION in out, (
+            f"round {rnd}'s brief does not carry the authorship determination, "
+            "so the auditor who has to write the stop reason into the summary "
+            "never receives the method for deciding it."
+        )
+        assert ad.PROSE_DETERMINATION_THRESHOLD in out, (
+            "the section ships without its THRESHOLD, which is the whole of "
+            "what makes the determination a count rather than an argument"
+        )
+        assert ad.PROSE_DETERMINATION_FLOOR in out, (
+            "the section ships without the two-rounds-is-the-floor sentence — "
+            "the half that says round 1 can never satisfy it"
+        )
+        assert "only if YOU classified this PR's payload as prose" in out, (
+            "the section does not say it applies ONLY to a prose payload, so it "
+            "reads as a stop rule for every delta round of every PR. This "
+            "script deliberately does not classify; the condition is the "
+            "auditor's to apply and must be stated"
+        )
+
+
+def test_the_prose_determination_names_the_boundary_it_can_resolve():
+    """🔴 An EMPTY RESULT cannot name a boundary — so the two rounds differ.
+
+    At round 2 the range's own `<from>` IS the tip round 1 audited, so the brief
+    can print the sha. At round 3+ it is not — it is the anchor the cumulative
+    figure uses — and printing `prev_sha` there would name the tip round 2
+    audited, silently classifying round 1's own fix prose as the PR's. So the
+    later rounds get the route to the anchor and the NOT MEASURED escape,
+    never a sha this section cannot vouch for.
+    """
+    rc, out, err = run_main(["900", "--round", "2"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, err
+    section = out[out.index(PROSE_SECTION):]
+    assert "aaaa1111" in section and "which IS the tip round 1 audited" in section, (
+        "round 2 does not name the boundary sha it demonstrably has — the "
+        "auditor is sent to derive a value the brief already resolved"
+    )
+
+    rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, err
+    section = out[out.index(PROSE_SECTION):]
+    assert "aaaa1111" not in section, (
+        "round 3 prints the range anchor as the boundary. That sha is the tip "
+        "ROUND 2 audited, so round 1's own fix prose would be counted as the "
+        "PR's own — the count is then biased towards continuing forever"
+    )
+    assert "cumulative (since round 1)" in section, (
+        "round 3 does not route to the anchor that IS the boundary"
+    )
+    assert "NOT MEASURED" in section, (
+        "round 3 does not say what to do when that anchor is unrecoverable. An "
+        "unanswerable determination must read as 'not nameable this round', "
+        "never as a silently-passed precondition"
+    )
+
+
 def test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor():
     """An unmeasurable quantity is reported as unmeasured, never substituted."""
     bare = (
@@ -8795,6 +8883,19 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # Its evidence is therefore V42-V46, not a base ref: a fixture-reach fix
     # cannot be watched red anywhere, which is precisely why it goes unnoticed.
     "test_the_toolchain_probes_are_reachable_in_both_directions",
+    # 🔴 INVARIANT GUARDS, not regression coverage, and the distinction is the
+    # one this ledger exists to keep honest: `render_prose_determination` does
+    # not exist at `5df8f4e5`, so a red there is a section's ABSENCE and not a
+    # wrong answer — the same vacuous shape as the `_flake_check_names` entry
+    # above. Their evidence is their own two-directional controls: the first
+    # asserts the section ABSENT at rounds 0 and 1 AND PRESENT at 2 and 3 (an
+    # absence-only guard passes with the section deleted outright), and the
+    # second asserts the round-2 boundary sha is printed AND that the SAME sha
+    # is absent at round 3, where it would name the wrong tip. The mutation rows
+    # that reach them live in `mutants-audit-ladder.sh`, which sweeps the skill
+    # side of the same seam.
+    "test_the_prose_determination_ships_from_round_2_and_NOT_before",
+    "test_the_prose_determination_names_the_boundary_it_can_resolve",
     "test_the_invariant_clause_ledger_is_pinned_two_way",
     # 🔴 GREEN at `abc41024`, MEASURED — and it is the guard for finding 5, so
     # the temptation to file it as regression coverage is real and is refused

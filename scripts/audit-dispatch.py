@@ -3282,6 +3282,98 @@ def payload_summary_line(facts, cumulative):
             f"(since round 1: {cumulative}) · elapsed: Z")
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROSE LADDER'S DETERMINATION — TWO SENTENCES SHARED WITH THE SKILL.
+#
+# On a prose payload the attribution gate is structurally inert (every round
+# changes payload lines by construction), so the ladder's escape hatch is a
+# STATED criterion instead. `claude/skills/audit-pr/SKILL.md` states the rule for
+# the DISPATCHER; the brief states it for the AUDITOR, who is the one who has to
+# put the reason into the round's summary.
+#
+# 🔴 THESE TWO CONSTANTS ARE A SEAM, NOT A CONVENIENCE. `#1678` (`e8fa6fca`)
+# shipped a version of this shortcut and was retracted the same day; the measured
+# coverage gap it left behind is that WIDENING THE RULE'S SCOPE AND REFRESHING
+# THE PINNED CONSTANT IN THE SAME EDIT scored 17 passed and a fully green
+# mutation battery — both instruments were blind to the one word the rule rested
+# on. So the scope now has to agree with a file that edit does not touch:
+# `test_audit_ladder_stop_rule.py::test_the_determinations_SCOPE_matches_the_one_
+# every_brief_ships` asserts each of these is still verbatim in the skill.
+# Reword either side and the pair must be reworded together, in one commit,
+# which is the moment somebody notices the scope moved.
+PROSE_DETERMINATION_THRESHOLD = (
+    "**The reason is nameable when at least two-thirds of those findings are "
+    "ladder-authored — ⌈2n/3⌉ of n: two of two, two of three, three of four, "
+    "four of six.**"
+)
+PROSE_DETERMINATION_FLOOR = (
+    "Round 1 has no previous round to attribute to, so it can never satisfy "
+    "this: **two rounds is the floor, and no rule may move it.**"
+)
+
+
+def render_prose_determination(facts):
+    """The AUTHORSHIP determination — round >= 2 ONLY, and empty before that.
+
+    🔴 THE ROUND FLOOR IS THE WHOLE POINT OF THE SECTION, so it is enforced HERE
+    and not left to the prose inside it. Rounds 0 and 1 have no previous round's
+    fix for a finding to be attributed to, so the question this section asks is
+    unanswerable there — and printing it where it cannot be answered is exactly
+    how the withdrawn `#1678` draft came to let round 1 stop.
+
+    It is deliberately NOT conditioned on the payload being prose: this script
+    does not classify (`render_ledger` says so at length, and a file extension is
+    not the classifier), so the section states the condition and lets the auditor
+    apply it. A script-side guess here would be the `docs are not production`
+    keying the skill rejects, one file over.
+    """
+    if facts.round_no < 2:
+        return ""
+    if facts.round_no == 2:
+        boundary = (
+            f"`{facts.prev_sha}` — the `<from>` of THE RANGE above, which IS "
+            "the tip round 1 audited"
+            if facts.prev_sha else
+            "NOT RECOVERABLE from this run: no block carried a round-1 anchor, "
+            "so the stop is not nameable this round"
+        )
+    else:
+        boundary = (
+            "the anchor THE LEDGER's cumulative (since round 1) figure is "
+            "measured from. If that figure reads NOT MEASURED, the boundary is "
+            "not recoverable and the stop is not nameable this round"
+        )
+    return "\n".join([
+        "## IF THIS PR'S PAYLOAD IS PROSE — the authorship determination",
+        "",
+        "🔴 **Read this only if YOU classified this PR's payload as prose "
+        "above.** On a prose payload every round changes payload lines by "
+        "construction, so the attribution gate cannot fire and the ladder ends "
+        "on a STATED criterion instead. What follows is how that criterion is "
+        "DETERMINED rather than argued — it is the count, not a judgement.",
+        "",
+        f"The boundary between the PR's own prose and the ladder's own is "
+        f"{boundary}. For each finding this round that required a fix:",
+        "",
+        "```",
+        "git blame -L<line>,<line> <the sha you audited THIS round> -- <file>",
+        "git merge-base --is-ancestor <the blame sha> <the boundary sha>"
+        "   # rc 0 ⇒ the PR's own prose",
+        "```",
+        "",
+        PROSE_DETERMINATION_THRESHOLD,
+        "",
+        PROSE_DETERMINATION_FLOOR,
+        "",
+        "⚠ A finding you cannot attribute — no `file:line`, a sentence that is "
+        "MISSING, an unresolvable blame, or an unrecoverable boundary — counts "
+        "as NOT ladder-authored, and below the threshold you run the next "
+        "round. Nameable is not sufficient on its own: the severity, "
+        "blast-radius, swept-at-every-site and write-it-in-the-summary "
+        "preconditions in the skill all still have to hold.",
+    ])
+
+
 def render_ledger(facts):
     lines = ["## THE LEDGER — payload attribution for this round", ""]
     # 🔴 ROUND 8 — CROSS-REPO IS "NOT MEASURABLE FROM HERE", NEVER "COULD NOT
@@ -3575,6 +3667,10 @@ def render_brief(facts):
         render_invariants(),
         render_checklist(facts),
         render_ledger(facts),
+        # 🔴 AFTER the ledger, because it reads the ledger's cumulative anchor —
+        # and it returns "" for rounds 0 and 1, which `parts` drops, so those
+        # briefs are byte-identical to what they were.
+        render_prose_determination(facts),
         render_output_contract(facts),
     ]
     return f"\n\n{_bar()}\n\n".join(p for p in parts if p) + "\n"

@@ -384,6 +384,30 @@ run out** — a prose ladder that returns a clean round ends there, exactly like
 doubt, run the next round: this criterion is for the case where you can already name why the
 rounds will not stop on their own.
 
+🔴 **"WILL NOT STOP ON THEIR OWN" IS AN OBSERVATION ABOUT AUTHORSHIP, COUNTED
+RATHER THAN DELIBERATED — and never available before ROUND 2.** For each finding this round
+that required a fix, `git blame` the `file:line` it names at the sha you audited and ask ONE
+thing of the commit that wrote that line: is it inside the LADDER's own range — after the tip
+ROUND 1 audited — or is it the PR's own prose from before the ladder started? (`git merge-base
+--is-ancestor <blame-sha> <the tip round 1 audited>`; rc 0 ⇒ the PR's own prose. That tip is
+the `<from>` of THE RANGE at round 2, and the anchor THE LEDGER's cumulative figure uses after
+that.) Ladder-authored means the round is auditing text the ladder wrote; PR-authored means it
+is still converging on what the PR ships — and **no property of the DIFF separates those
+two**, which is why the retracted draft below could not. **The reason is nameable when at
+least two-thirds of those findings are ladder-authored — ⌈2n/3⌉ of n: two of two, two of
+three, three of four, four of six.** Round 1 has no previous round to attribute to, so it can
+never satisfy this: **two rounds is the floor, and no rule may move it.**
+
+⚠ **EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND, and this replaces the JUDGEMENT, not
+the other preconditions.** A finding with no `file:line`, one about a sentence that is MISSING,
+one whose blame you cannot resolve, and a round whose round-1 anchor is not recoverable (THE
+LEDGER reports it NOT MEASURED) all count as NOT ladder-authored — the same fail-safe
+direction as *Ambiguous is not zero*. Below the threshold, run the next round. **It is a rule
+about EVIDENCE, not a prediction:** it does not prove the ladder cannot converge, it makes two
+auditors reach the same answer from the same findings and lets a reader check which one they
+reached. The severity, blast-radius and swept-at-every-site preconditions above are unchanged
+and all still have to hold, and the count goes in the summary beside the reason.
+
 🔴 **WRITING IT DOWN IS THE WHOLE POINT, AND AN EARLIER REWORD DELETED IT.** "Can NAME" is a
 private mental state; a reader cannot check it. Without the rationale in the summary a report
 that ENDED the ladder on this escape hatch is **indistinguishable from one that converged** — the
@@ -391,9 +415,10 @@ findings, verdict and ledger line all look the same — so an operator cannot te
 remain" from "real 🟡s are deliberately unfixed". Those are opposite meanings. Measured: this
 requirement was dropped by `#1133`'s round-2 fix, which added the NAME precondition and removed
 the summary obligation in the same edit — **wider on one axis, narrower on another**, the exact
-shape this skill tells you to hunt for. 🔴 **This paragraph sits BELOW the ⚠ one on purpose: the
-"read the next paragraph" pointer is in the CRITERIA paragraph two above, and it means the ⚠
-caveat.** An earlier draft of this very fix inserted this history between the two and silently
+shape this skill tells you to hunt for. 🔴 **This paragraph sits BELOW the NOT-A-LICENCE caveat
+on purpose: the "read the next paragraph" pointer is in the CRITERIA paragraph that opens this
+section, and it means the ⚠ caveat IMMEDIATELY AFTER IT — never a count of paragraphs, which
+goes stale the moment one is inserted.** An earlier draft of this very fix inserted this history between the two and silently
 re-pointed it at itself — found by the next round. Both of those paragraphs are pinned WHOLE by
 `scripts/tests/test_audit_ladder_stop_rule.py`, and their ADJACENCY is asserted separately,
 because both pins pass while a paragraph sits between them. This paragraph is pinned by nothing —

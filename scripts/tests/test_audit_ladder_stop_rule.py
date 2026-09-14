@@ -207,13 +207,14 @@ is the positive control, so a red below is the mutant and not the harness.
 first recorded here were taken against a 5-test module that never existed, and
 M2/M5 have since gained assertions that also fire. 🔴 The module was **13 tests**
 as of 2026-08-31 (the escape-hatch pins), so the POS control rows below read 13.
-🔴 IT IS **16** NOW (#1427 added the carve-out pin, the dispatcher seam guard and
-the battery-floor pin), so those rows are a RECORD OF A PAST RUN, not a
-prediction of your next one -- read the ratio, never the literal. This was the
-last hand-maintained copy of the module's size in this file and it was already
-stale before #1427 touched it; the floor that used to be maintained the same way
-is now pinned by `test_the_batterys_floor_is_re_derived_from_this_modules_size`,
-which is the only number here you never have to update.
+🔴 IT HAS GROWN SEVERAL TIMES SINCE, AND THIS SENTENCE NO LONGER CARRIES THE
+CURRENT COUNT -- on purpose. Those rows are a RECORD OF A PAST RUN, not a
+prediction of your next one: read the ratio, never the literal. The count used
+to be restated here and was stale at every restatement (it said 13, then 16,
+each wrong within days). `bash scripts/tests/mutants-audit-ladder.sh
+--print-min-tests` and `test_the_batterys_floor_is_re_derived_from_this_modules_
+size` are the only numbers in this file's orbit that nobody has to maintain,
+which is why the prose defers to them instead of competing with them.
 
 ⚠ **A first draft of this note said "the per-mutant FAILED counts are unchanged
 because no mutant here touches the escape hatch". THAT WAS FALSE FOR M5** — and
@@ -382,6 +383,29 @@ recorded as SURVIVED off an 11-passed run.
   X6   evidence file truncated to 0 B ......... 2 failed
   M10  section moved ABOVE the stop rule,
        text byte-identical .................... 1 failed  (order pin only)
+
+🔴 THE PROSE HATCH'S DETERMINATION, AND WHY ITS SCOPE GUARD IS A SEAM
+--------------------------------------------------------------------
+Added 2026-09-14, after `#1678` (`e8fa6fca`) shipped a round-1 shortcut for this
+hatch and `#1682` (`d8e267f2`) retracted it the same day. The retraction's
+durable lesson is the design constraint: a converging prose ladder and a
+non-terminating one have the SAME 100%-prose diff, so **only what a ROUND
+OBSERVES can separate them**, never a property of the payload. The rule pinned
+here therefore keys on AUTHORSHIP of the lines this round's findings are about,
+is unavailable before round 2 by construction, and states the direction every
+uncertainty resolves in.
+
+🔴 ITS SCOPE IS GUARDED FROM A THIRD FILE, and that is not belt-and-braces. The
+measured gap `#1678` left is that widening a rule's scope AND refreshing the
+whole-paragraph constant -- which is literally what `_assert_pinned_once`'s
+failure message instructs -- scored **17 passed here AND `✅ 20 row(s), all as
+expected`** from the battery. A second constant in THIS file does not close
+that; the same edit refreshes it too. So the threshold and the round floor are
+also carried by `scripts/audit-dispatch.py`, which SHIPS them to the auditor in
+every round-2-and-later brief, and `test_the_determinations_SCOPE_matches_the_
+one_every_brief_ships` reads that copy. `mutants-audit-ladder.sh` carries the
+row that re-derives it: the pair mutation (skill + constant) is killed by that
+seam guard ALONE.
 
 🔴 M10 is this half's reachability control, and the analogue of M4. The
 attribution section is MOVED above the stop rule with its text byte-identical:
@@ -601,6 +625,63 @@ SKILL_HATCH_NOT_A_LICENCE = (
     "run out** — a prose ladder that returns a clean round ends there, exactly "
     "like any other. If in doubt, run the next round: this criterion is for the "
     "case where you can already name why the rounds will not stop on their own."
+)
+
+# 🔴 THE DETERMINATION -- what turns "once you can NAME why the rounds will not
+# stop on their own" from a private judgement into a COUNT. It sits directly
+# below the caveat above, and its position is asserted, for the same reason the
+# caveat's is: the criteria paragraph sends the reader to the caveat, and the
+# caveat is what the determination qualifies.
+#
+# 🔴 IT KEYS ON WHAT THE ROUND OBSERVES, NEVER ON WHAT THE DIFF IS, and that is
+# the whole lesson of the retraction two paragraphs below it in SKILL.md. `#1678`
+# (`e8fa6fca`) let the reason be named at ROUND 1 whenever the payload was
+# ENTIRELY prose -- a property true BY CONSTRUCTION for the whole prose class (90
+# of the last 119 first-parent commits on `main` touch only `.md`), which left the
+# 🔴 count as the only discriminating term and so re-implemented the
+# `deploy-blocking only` rule the same section rejects. A converging prose ladder
+# and a non-terminating one have the SAME diff; only the ROUND's findings
+# separate them.
+SKILL_PROSE_DETERMINATION = (
+    "🔴 **\"WILL NOT STOP ON THEIR OWN\" IS AN OBSERVATION ABOUT AUTHORSHIP, "
+    "COUNTED RATHER THAN DELIBERATED — and never available before ROUND 2.** "
+    "For each finding this round that required a fix, `git blame` the "
+    "`file:line` it names at the sha you audited and ask ONE thing of the "
+    "commit that wrote that line: is it inside the LADDER's own range — after "
+    "the tip ROUND 1 audited — or is it the PR's own prose from before the "
+    "ladder started? (`git merge-base --is-ancestor <blame-sha> <the tip round "
+    "1 audited>`; rc 0 ⇒ the PR's own prose. That tip is the `<from>` of THE "
+    "RANGE at round 2, and the anchor THE LEDGER's cumulative figure uses after "
+    "that.) Ladder-authored means the round is auditing text the ladder wrote; "
+    "PR-authored means it is still converging on what the PR ships — and **no "
+    "property of the DIFF separates those two**, which is why the retracted "
+    "draft below could not. **The reason is nameable when at least two-thirds "
+    "of those findings are ladder-authored — ⌈2n/3⌉ of n: two of two, two of "
+    "three, three of four, four of six.** Round 1 has no previous round to "
+    "attribute to, so it can never satisfy this: **two rounds is the floor, and "
+    "no rule may move it.**"
+)
+
+# 🔴 The fail-safe half, pinned WHOLE for the reason the caveat above is: every
+# operative sentence here is invertible into a rule that reads just as
+# reasonable and stops a CONVERGING ladder. "counts as NOT ladder-authored"
+# -> "counts as ladder-authored" silently moves every unattributable finding to
+# the stopping side; "Below the threshold, run the next round" -> "...stop" is
+# the `If in doubt, STOP` mutant one paragraph up, which SURVIVED a green suite
+# until it was pinned.
+SKILL_DETERMINATION_FAILSAFE = (
+    "⚠ **EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND, and this replaces "
+    "the JUDGEMENT, not the other preconditions.** A finding with no "
+    "`file:line`, one about a sentence that is MISSING, one whose blame you "
+    "cannot resolve, and a round whose round-1 anchor is not recoverable (THE "
+    "LEDGER reports it NOT MEASURED) all count as NOT ladder-authored — the "
+    "same fail-safe direction as *Ambiguous is not zero*. Below the threshold, "
+    "run the next round. **It is a rule about EVIDENCE, not a prediction:** it "
+    "does not prove the ladder cannot converge, it makes two auditors reach the "
+    "same answer from the same findings and lets a reader check which one they "
+    "reached. The severity, blast-radius and swept-at-every-site preconditions "
+    "above are unchanged and all still have to hold, and the count goes in the "
+    "summary beside the reason."
 )
 
 # `claude/RULES-ARCHIVE.md`, anchor `audit-fix-resets-gate` -- the evidence the
@@ -1407,6 +1488,140 @@ def test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat():
         "  This is positional on purpose: both strings are pinned separately, "
         "and BOTH those pins pass while the pointer points at the wrong text."
     )
+
+
+def test_the_determination_and_its_fail_safe_are_pinned_WHOLE():
+    """🔴 The COUNT that replaces the judgement, pinned as text.
+
+    Separate from the POSITION test below on purpose, and that split is what
+    makes either one re-derivable: a RELOCATION leaves both whole-string pins
+    byte-identical, so only an assertion that actually executes can see it.
+    `mutants-audit-ladder.sh` carries the relocation row that proves it, the
+    same way M4 and M10 do for the two older relationship assertions.
+    """
+    _assert_pinned_once(
+        SKILL_MD, SKILL_PROSE_DETERMINATION,
+        "the prose hatch's authorship determination",
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_DETERMINATION_FAILSAFE,
+        "the determination's fail-safe direction",
+    )
+
+
+def test_the_determination_follows_the_caveat_it_qualifies():
+    """🔴 POSITION. The caveat demands a distinction; this makes it decidable.
+
+    The criteria paragraph says "read the next paragraph", which is the
+    NOT-A-LICENCE caveat; the determination is what tells a reader WHICH of the
+    caveat's two cases -- non-terminating or converging -- they are in. A reader
+    who follows the pointer must land on the caveat and then, immediately, on
+    the method. Push the determination further down and the caveat goes back to
+    demanding a distinction it gives no way to make, which is the state the
+    operator reported sessions grinding in.
+
+    ⚠ This asserts the determination comes AFTER the caveat, never that nothing
+    may precede the caveat. Between the CRITERIA paragraph and the caveat
+    nothing may sit at all -- `test_the_escape_hatch_pointer_resolves_to_the_
+    NOT_A_LICENCE_caveat` owns that, and this test would still pass with the
+    determination inserted there, so the two are not substitutes.
+    """
+    paras = [p for p in _read(SKILL_MD).split("\n\n") if p.strip()]
+    normed = [_norm(p) for p in paras]
+    want_caveat = _norm(SKILL_HATCH_NOT_A_LICENCE)
+    want_det = _norm(SKILL_PROSE_DETERMINATION)
+    want_fail = _norm(SKILL_DETERMINATION_FAILSAFE)
+    for want, what in (
+        (want_caveat, "the not-a-licence caveat"),
+        (want_det, "the authorship determination"),
+        (want_fail, "the determination's fail-safe"),
+    ):
+        assert want in normed, (
+            f"\n\nclaude/skills/audit-pr/SKILL.md: {what} is not a standalone "
+            "PARAGRAPH carrying exactly the pinned text.\n"
+            "  TWO routes get you here, and they need different fixes: a blank "
+            "line was removed so it merged with a neighbour (invisible to the "
+            "whole-string pins, which normalise newlines away — this is the "
+            "only assertion that sees it), OR the paragraph was REWORDED, in "
+            "which case a sibling pin is red beside this one and THAT is the "
+            "message to read.\n"
+            "  This assertion is a PRECONDITION for the ordering checks below; "
+            "without it they would compare against a paragraph that no longer "
+            "exists and pass or fail for the wrong reason."
+        )
+    c, d, f = normed.index(want_caveat), normed.index(want_det), normed.index(want_fail)
+    assert d == c + 1, (
+        "\n\nclaude/skills/audit-pr/SKILL.md: the authorship determination "
+        f"(block {d}) no longer sits IMMEDIATELY after the not-a-licence "
+        f"caveat (block {c}).\n"
+        "  The caveat demands a distinction — non-terminating vs converging — "
+        "and the determination is the only thing that makes it decidable. "
+        "Separating them leaves a reader who followed 'read the next "
+        "paragraph' with the demand and not the method.\n"
+        "  History, rationale and the RETRACTED DRAFT record belong BELOW both."
+    )
+    assert f == d + 1, (
+        "\n\nclaude/skills/audit-pr/SKILL.md: the determination's fail-safe "
+        f"paragraph (block {f}) no longer sits IMMEDIATELY after the "
+        f"determination itself (block {d}).\n"
+        "  The threshold and the direction every uncertainty resolves in are "
+        "one rule. Read alone, the threshold is a licence to stop on a count "
+        "an auditor got to pick the denominator for."
+    )
+
+
+def test_the_determinations_SCOPE_matches_the_one_every_brief_ships():
+    """🔴 A SCOPE guard, and the reason it is a SEAM rather than a third pin.
+
+    MEASURED on the withdrawn `#1678`: widening that rule's scope from `ENTIRELY
+    prose` to `MOSTLY prose or otherwise hard to gate` AND refreshing the
+    whole-paragraph constant scored **17 passed** here and `✅ 20 row(s), all as
+    expected` from `mutants-audit-ladder.sh`. Both instruments were blind to the
+    single word the rule rested on -- because the pin's own failure message
+    tells you to update the constant, so one mechanical refresh buys silence.
+
+    A second constant in THIS file does not close that: the same edit refreshes
+    it. What closes it is a copy of the scope in a file that edit does not
+    touch. `scripts/audit-dispatch.py` carries these two sentences because every
+    round-2-and-later brief SHIPS them to the auditor, so the scope now has two
+    owners and moving it needs both -- which is the moment somebody notices.
+
+    ⚠ WHAT THIS DOES NOT DO. It does not stop a scope change; it makes one
+    visible in the diff and impossible to land in one file. And it is keyed to
+    the SENTENCES, not to the concept — a semantically identical restatement in
+    both files is invisible to it, exactly as note 1 in this module's header
+    records for every other pin here.
+    """
+    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
+    assert spec is not None and spec.loader is not None, (
+        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    skill = _norm(_read(SKILL_MD))
+    for name in ("PROSE_DETERMINATION_THRESHOLD", "PROSE_DETERMINATION_FLOOR"):
+        assert hasattr(mod, name), (
+            f"\n\n`scripts/audit-dispatch.py` no longer defines `{name}`.\n"
+            "  That constant is the OTHER owner of this rule's scope, and the "
+            "brief is where an auditor actually reads it. If you deleted the "
+            "brief section, delete this guard in the same commit and say in "
+            "the message that the scope is back to a single pin that a "
+            "constant-refresh walks past."
+        )
+        claim = _norm(getattr(mod, name))
+        assert claim in skill, (
+            f"\n\n`audit-dispatch.py`'s `{name}` is no longer verbatim in "
+            "claude/skills/audit-pr/SKILL.md.\n"
+            f"  The brief ships:\n    {claim}\n\n"
+            "  🔴 IF YOU ARE WIDENING THE RULE, STOP AND READ THE `RETRACTED "
+            "DRAFT` PARAGRAPHS IN THAT SKILL FIRST. A scope this test would "
+            "let through once already shipped and was withdrawn the same day: "
+            "its precondition reduced to the 🔴 count, which is the "
+            "`deploy-blocking only` rule the same section rejects.\n"
+            "  If the reword is deliberate, change BOTH files in one commit — "
+            "the skill, and the constant in audit-dispatch.py — and say in the "
+            "message which ladders now stop that did not."
+        )
 
 
 def test_the_rejected_cap_is_recorded_where_the_rule_lives():

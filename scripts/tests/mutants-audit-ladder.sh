@@ -113,10 +113,17 @@ RULES="$ROOT/claude/RULES.md"
 cp -a "$SKILL" "$T/skill.orig"
 cp -a "$EVID"  "$T/evid.orig"
 cp -a "$RULES" "$T/rules.orig"
+# 🔴 THE SUITE IS RESTORED TOO, and it is not decoration. `run_pair` (below) is
+# the only row shape that mutates the pinned CONSTANT as well as the document —
+# that pair is what reproduces the coverage gap `#1678` left — and without this
+# line every row after it would run against a module whose scope had already been
+# widened, scoring later mutants against the wrong baseline and never saying so.
+cp -a "$SUITE" "$T/suite.orig"
 restore() {
   cp -a "$T/skill.orig" "$SKILL"
   cp -a "$T/evid.orig"  "$EVID"
   cp -a "$T/rules.orig" "$RULES"
+  cp -a "$T/suite.orig" "$SUITE"
 }
 
 FAILURES=0
@@ -149,7 +156,7 @@ ROWS=0
 # `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
 # this_modules_size`, which reads the number below, counts the module, and
 # fails with the replacement value. Growth cannot silently outrun it again.
-MIN_TESTS=15
+MIN_TESTS=18
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on
@@ -276,6 +283,53 @@ run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
       printf '  ok %-46s killed by %s (also: %s)\n' "$name" "$want" "$extra"
     else
       printf '  ok %-46s killed by %s\n' "$name" "$want"
+    fi
+    return
+  fi
+  printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
+    "$name" "$(tr '\n' ',' <<<"$killers" | sed 's/,$//')" "$want"
+  FAILURES=$((FAILURES+1))
+}
+
+run_pair() { # run_pair <name> <expect> <fileA> <oldA> <newA> <fileB> <oldB> <newB>
+  # 🔴 THE SCOPE ROW SHAPE, AND THE ONLY ONE THAT REPRODUCES THE MEASURED GAP.
+  # Every other row here mutates the DOCUMENT and leaves the pin alone, so a
+  # whole-string pin kills it trivially. That is not the failure this battery
+  # missed. MEASURED on the withdrawn `#1678`: widening the rule's scope AND
+  # refreshing the pinned constant in the same edit -- which is exactly what the
+  # pin's own failure message instructs -- scored 17 passed and `✅ 20 row(s),
+  # all as expected`. Both instruments were blind. So a scope row has to mutate
+  # BOTH files, and be killed by a guard that reads a THIRD one.
+  #
+  # BOTH mutations are asserted to apply, and the FIRST is restored before
+  # returning on the second's failure: a half-applied pair scores a mutant that
+  # was never built.
+  local name="$1" want="$2" fa="$3" oa="$4" na="$5" fb="$6" ob="$7" nb="$8"
+  ROWS=$((ROWS+1))
+  if ! apply "$fa" "$oa" "$na"; then
+    printf '  🔴 %-46s MUTATION A DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); restore; return
+  fi
+  if ! apply "$fb" "$ob" "$nb"; then
+    printf '  🔴 %-46s MUTATION B DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); restore; return
+  fi
+  local killers; killers="$(failing)"
+  restore
+  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
+    printf '  🔴 %-46s HARNESS BROKE — %s\n' "$name" "$killers"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if [ -z "$killers" ]; then
+    printf '  🔴 %-46s SURVIVED — no test failed\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if grep -qx "$want" <<<"$killers"; then
+    local extra; extra="$(grep -vx "$want" <<<"$killers" | tr '\n' ',' | sed 's/,$//')"
+    if [ -n "$extra" ]; then
+      printf '  ok %-46s killed by %s (also: %s)\n' "$name" "$want" "$extra"
+    else
+      printf '  ok %-46s killed by %s ALONE\n' "$name" "$want"
     fi
     return
   fi
@@ -452,6 +506,44 @@ run "hatch: blank line before the caveat deleted" \
 ⚠ **THIS DOES NOT OVERRIDE'
 
 echo
+echo "== the DETERMINATION: what turns the hatch's judgement into a count =="
+# 🔴 THE ROUND FLOOR. Moving it to round 1 is not a hypothetical edit — it is
+# the rule `#1678` (`e8fa6fca`) actually shipped, and it was retracted the same
+# day because the precondition it left behind reduced to the 🔴 count. This row
+# exists so the next attempt cannot land it quietly.
+run "determination: round floor moved to ROUND 1" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'never available before ROUND 2.**' \
+    'nameable from ROUND 1 when the payload is entirely prose.**'
+# The fail-safe DIRECTION, inverted. Every unattributable finding moves to the
+# stopping side and the count silently becomes easier to reach — a reading a
+# reviewer would accept, and the same shape as the `If in doubt, STOP` mutant
+# three rows up, which survived a green suite until its paragraph was pinned.
+run "determination: unattributable -> ladder-authored" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'all count as NOT ladder-authored' \
+    'all count as ladder-authored'
+# 🔴 THE SCOPE ROW, AND THE REASON `run_pair` EXISTS. Widening the THRESHOLD and
+# refreshing the pinned constant in the same edit is what a dutiful author does
+# when a whole-string pin goes red — its own message tells them to. MEASURED on
+# `#1678`: that pair scored 17 passed AND `✅ 20 row(s), all as expected`. Here
+# both of this file's own pins stay GREEN by construction (the constant now
+# matches the widened document) and only the SEAM guard, which reads the copy of
+# the scope that ships in every brief, can see it.
+run_pair "determination: THRESHOLD widened, constant refreshed" \
+    test_the_determinations_SCOPE_matches_the_one_every_brief_ships \
+    "$SKILL" \
+    'when at
+least two-thirds of those findings' \
+    'when at
+least one of those findings' \
+    "$SUITE" \
+    'when at least two-thirds "
+    "of those findings' \
+    'when at least one "
+    "of those findings'
+
+echo
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
 # 🔴 These two are the rows the module's docstring marks as the reachability
 # controls, and they were the gap this harness shipped with: without them the
@@ -460,6 +552,17 @@ echo "== REACHABILITY: relocations that leave every string pin byte-identical ==
 run_move "stop clause moved to its OWN bullet in RULES.md" \
     test_the_stop_rule_shares_a_bullet_with_the_rule_it_bounds "$RULES" \
     't.replace("🔴 **A CLEAN round ENDS the ladder", "\n- 🔴 **A CLEAN round ENDS the ladder", 1)'
+# 🔴 The determination's own reachability control, and the analogue of M4/M10.
+# Both of its paragraphs are moved to the END of the section — below the
+# RETRACTED DRAFT record — with every byte identical, so both whole-string pins
+# stay GREEN and only the POSITION assertion can see it. That is what proves the
+# position test executes rather than restating the pins beside it. It is also
+# the realistic edit: a later author tidying "history to the bottom" would move
+# exactly this block, and a reader following "read the next paragraph" would
+# then get the caveat's demand with no method anywhere near it.
+run_move "determination moved BELOW the retraction record" \
+    test_the_determination_follows_the_caveat_it_qualifies "$SKILL" \
+    '(lambda a, b, c: t[:a] + t[b:c] + t[a:b] + t[c:])(t.rindex("\n\n", 0, t.index("IS AN OBSERVATION ABOUT AUTHORSHIP")) + 2, t.index("🔴 **WRITING IT DOWN"), t.index("## Mutation testing:"))'
 run_move "ATTRIBUTION section moved ABOVE the stop rule" \
     test_the_attribution_gate_comes_after_the_rule_it_bounds "$SKILL" \
     't[:t.index("### 🔴 A clean round ENDS the ladder.")] + t[t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD"):t.index("## Mutation testing:")] + t[t.index("### 🔴 A clean round ENDS the ladder."):t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD")] + t[t.index("## Mutation testing:"):]'
