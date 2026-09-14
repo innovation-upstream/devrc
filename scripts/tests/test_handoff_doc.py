@@ -6290,6 +6290,23 @@ def _legacy_repo(repo: Path) -> Path:
     return repo
 
 
+def _make_genuinely_new(repo: Path) -> None:
+    """Remove the handoff doc from the working tree AND from HEAD.
+
+    🔴 `unlink()` ALONE IS NOT A NEW ARC, and treating it as one is the defect
+    round 1 filed as F3. A tracked doc with no working copy still HAS a history
+    — rule (m) calling that "a NEW handoff doc" is a false statement inside a
+    refusal a reader acts on. So the fixtures for rule (m)'s REFUSE arm have to
+    make the doc genuinely absent, which is also what a real round 1 looks like.
+    """
+    doc = repo / "claudedocs" / "handoff-sample-topic.md"
+    if doc.exists():
+        doc.unlink()
+    _sh("git", "rm", "-q", "--cached", "--ignore-unmatch",
+        "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-qm", "no doc for this topic yet", cwd=repo)
+
+
 class TestTheArcDeclaresWhatEndsIt:
     """Rule (m). 📖 `claude/skills/handoff/reference/write-gate.md` §F."""
 
@@ -6298,7 +6315,7 @@ class TestTheArcDeclaresWhatEndsIt:
     def test_a_new_doc_with_no_closing_condition_is_REFUSED(
         self, repo: Path, tmp_path: Path
     ) -> None:
-        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _make_genuinely_new(repo)
         upd = write_delta(
             tmp_path, "nodod.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
         )
@@ -6313,7 +6330,7 @@ class TestTheArcDeclaresWhatEndsIt:
         than assumed: a `--confirm --push` that refuses must leave no doc, no
         commit and no ref — otherwise the gate is a speed bump."""
         doc = repo / "claudedocs" / "handoff-sample-topic.md"
-        doc.unlink()
+        _make_genuinely_new(repo)
         before = commit_shas(repo)
         upd = write_delta(
             tmp_path, "nodod2.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
@@ -6328,7 +6345,7 @@ class TestTheArcDeclaresWhatEndsIt:
         pass is not a gate, and this one is cheap to get wrong: the field's
         grammar is strict, so an over-tight pattern refuses the very shape the
         step-2 template teaches."""
-        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _make_genuinely_new(repo)
         upd = write_delta(
             tmp_path, "dod.md", GOAL_WITH_CONDITION + "\n" + EXTERNAL_STEP
         )
@@ -6344,7 +6361,7 @@ class TestTheArcDeclaresWhatEndsIt:
         BOLDED and BULLETED (`- **closing-condition:** check — …`); a pattern
         that only accepted the bare spelling would refuse every author who did
         exactly what they were shown."""
-        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _make_genuinely_new(repo)
         template_spelling = (
             "## Goal\nStop the drops.\n"
             "- **closing-condition:** `check` — `tools/probe.py` exits 0 on main\n"
@@ -6388,7 +6405,7 @@ class TestTheArcDeclaresWhatEndsIt:
         so no re-run could clear it. Five ways to write this field wrong, five
         different things to do about it — and each run must name ONLY its own,
         or the legend is noise."""
-        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _make_genuinely_new(repo)
         name = "cause-" + marker.strip("[]").replace(" ", "-") + ".md"
         upd = write_delta(tmp_path, name, goal + "\n" + EXTERNAL_STEP)
         res = run_tool(repo, update=upd)
@@ -6413,7 +6430,7 @@ class TestTheArcDeclaresWhatEndsIt:
         the consumer cannot read. `resume-state.sh`'s DOD block parses the
         `## Goal` section, so a field under any other heading is invisible to
         every later round — which is the only thing the field is FOR."""
-        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _make_genuinely_new(repo)
         upd = write_delta(
             tmp_path,
             "elsewhere.md",
@@ -6712,7 +6729,7 @@ class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
     def test_a_NEW_doc_is_silent(self, repo: Path, tmp_path: Path) -> None:
         """Round 1 legitimately opens with self-generated work; the finding is
         about what happens AFTER it. `self_generated_report` still counts them."""
-        (repo / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _make_genuinely_new(repo)
         upd = write_delta(
             tmp_path,
             "new.md",
@@ -6837,3 +6854,313 @@ def test_the_warning_is_printed_BEFORE_the_diff_in_the_real_proposal_flow():
     assert src.count("budget_note = budget_warning(") == 1
     assert src.count("print(budget_note)") == 1
     assert src.count("print(diff,") == 1
+
+
+class TestTheArcRulesOnlyCompareAgainstAUsableBase:
+    """Round 1's F1/F2/F3 — three ways rule (n) reported a count that was FALSE
+    about the document, and one way its ratchet switched off entirely.
+
+    🔴 EVERY ONE OF THESE IS A COUNT, NOT A CRASH. That is what made them
+    survivable to a green suite: the run exits with a real status, prints a real
+    number and offers real remedies, and only the number is wrong. `claude/
+    RULES.md` calls a reassuring zero from a measurement never taken the failure
+    to refuse; these are that, wearing a refusal's clothes.
+    """
+
+    def _steps(self, *items: str) -> str:
+        return "## Next steps (ranked)\n" + "".join(
+            f"{n}. {t}\n" for n, t in enumerate(items, 1)
+        )
+
+    # ---- F1: the stale base reaches the arc rules on a PROPOSAL run ---------
+
+    def test_a_STALE_BASE_does_not_make_rule_n_report_a_count(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE ORDERING WAS ONLY HALF A FIX. Rule (h)'s stale-base refusal is
+        gated on `--confirm`, so the PROPOSAL run — the default first half of
+        every `/handoff` — fell straight through it to rule (n). The document on
+        the mainline carries 3 `forcing: none` ranks; the local copy is absent,
+        so the count read 0 and the update's 5 looked like growth. All three
+        printed remedies are impossible at a floor of 0.
+
+        Watched to fail before the fix: rc 12, "0 item(s) in the document".
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        upd = write_delta(
+            tmp_path,
+            "stale-growth.md",
+            self._steps(*[f"Item {i}. forcing: none" for i in range(1, 6)]),
+        )
+        res = run_tool(work, update=upd)
+        assert res.returncode == hd.EXIT_OK, (
+            f"rule (n) judged a STALE base: rc={res.returncode}\n"
+            + res.stdout + res.stderr
+        )
+        assert "status=rank-growth" not in res.stderr
+        assert "0 item(s) in the document" not in res.stderr
+
+    def test_a_STALE_BASE_is_not_told_it_DELETED_a_finish_line(
+        self, tmp_path: Path
+    ) -> None:
+        """The same shape on rule (m)'s other arm. `base_had_one` read off an
+        unreadable base is False, so the deletion arm cannot fire — but nor may
+        the run claim the doc is new. It is GRANDFATHERED, which is the only
+        honest verdict about a document this checkout does not hold.
+
+        ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and labelled as one
+        because the matrix says so: this passed at HEAD^ as well. Rule (m)
+        already grandfathered a stale base before the fix, so the fix changed
+        nothing here. It stays because rule (m)'s two arms now read a shared
+        `base_readable`, and nothing else pins that this arm did not move."""
+        work = repo_lacking_the_doc(tmp_path)
+        upd = write_delta(
+            tmp_path, "stale-dod.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(work, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=undefined-done" not in res.stderr
+        assert "NEW handoff doc" not in res.stderr
+
+    # ---- F2: a base whose ranked queue this module cannot COUNT -------------
+
+    def test_MIGRATING_a_reworded_queue_onto_the_canonical_heading_is_not_GROWTH(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 A SHRINK REPORTED AS GROWTH. `ranked_items` sees only the heading
+        `is_next_steps_heading` names — fine for rule (j), which reads the update
+        alone. Rule (n) reads BOTH sides, so a base under `## Open items, ranked`
+        counted 0, and restating FEWER of those items under the canonical heading
+        was refused. Permanently: nothing about re-running clears it.
+
+        Measured over the real corpus: 22 of 183 handoff docs carry a ranked
+        queue under an unrecognised heading, 3 of them reachable.
+
+        Watched to fail before the fix: rc 12, "0 item(s) in the document
+        answer to nothing external, 2 in this update".
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.write_text(
+            BASE_DOC.replace(
+                "## Next steps (ranked)", "## Open items, ranked"
+            ),
+            encoding="utf-8",
+        )
+        _sh("git", "add", "claudedocs/handoff-sample-topic.md", cwd=repo)
+        _sh("git", "commit", "-qm", "a queue under a reworded heading", cwd=repo)
+        upd = write_delta(
+            tmp_path,
+            "migrate.md",
+            self._steps(
+                "Instrument the drain loop. forcing: none",
+                "Re-read the retry wrapper. forcing: none",
+            ),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, (
+            f"a SHRINK was refused as growth: rc={res.returncode}\n"
+            + res.stdout + res.stderr
+        )
+        assert "status=rank-growth" not in res.stderr
+        # …and the skip is DISCLOSED rather than silent, naming which of the two
+        # reasons applied, so a reader is not left thinking the queue was judged.
+        assert "RULE (n) DID NOT RUN" in res.stdout, res.stdout
+        assert "does not recognise" in res.stdout, res.stdout
+
+    def test_the_skip_is_NOT_a_blanket_off_switch(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL FOR BOTH SKIPS, and the reason they are two
+        conditions rather than one loose one: a base that DOES carry a canonical
+        `## Next steps` must still ratchet. Without this, "skip when you cannot
+        count" is indistinguishable from "never count"."""
+        upd = write_delta(
+            tmp_path,
+            "still-ratchets.md",
+            self._steps(*[f"Item {i}. forcing: none" for i in range(1, 6)]),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_RANK_GROWTH, res.stdout + res.stderr
+
+    # ---- F3: an EMPTIED working copy is not a new arc -----------------------
+
+    def test_EMPTYING_the_working_copy_does_not_switch_the_ratchet_OFF(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE FAIL-OPEN ONE, and the only round-1 finding that let a write
+        through rather than refusing one. `: > claudedocs/handoff-<topic>.md`
+        leaves a TRACKED document with an empty working copy; every text-only
+        predicate reads that as "no document", so `is_new_doc` was True, rule (n)
+        returned "" and the queue went 2 -> 5 at exit 0 — while the merge
+        replaced the committed document wholesale.
+
+        Watched to fail before the fix: rc 0.
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        assert doc.exists()
+        doc.write_text("   \n\n", encoding="utf-8")
+        upd = write_delta(
+            tmp_path,
+            "emptied.md",
+            self._steps(*[f"Item {i}. forcing: none" for i in range(1, 6)]),
+        )
+        res = run_tool(repo, update=upd)
+        # 🔴 THE HONEST OUTCOME IS A VISIBLE SKIP, NOT A REFUSAL, and the first
+        # draft of this test asked for the wrong one. An emptied working copy is
+        # the SAME situation as a stale base: the count cannot be taken, so
+        # refusing on it would be inventing a comparison. What must not happen
+        # is the pre-fix behaviour — the ratchet going quiet while the run reads
+        # like an ordinary pass.
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "RULE (n) DID NOT RUN" in res.stdout, (
+            "the ratchet skipped an EMPTIED tracked doc SILENTLY — a skip nobody "
+            "sees is a pass\n" + res.stdout
+        )
+        assert "does not hold a readable copy" in res.stdout, res.stdout
+
+    def test_an_EMPTIED_tracked_doc_is_not_called_a_NEW_handoff_doc(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The same input on rule (m). It got STRICTER rather than fail-open —
+        but it asserted "This is a NEW handoff doc" about a file with a full
+        history, which is a false statement in a refusal a reader acts on."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.write_text("   \n\n", encoding="utf-8")
+        upd = write_delta(
+            tmp_path, "emptied-dod.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, update=upd)
+        assert "NEW handoff doc" not in res.stderr, res.stderr
+
+    def test_a_GENUINELY_new_doc_is_still_treated_as_round_1(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE CONTROL THAT KEEPS THE TWO FIXES ABOVE FROM BEING A DELETION.
+        `doc_tracked_at_head` must say False for a doc that is genuinely absent
+        from HEAD, or rule (m)'s whole REFUSE arm — the round-1 case the rule
+        exists for — stops firing."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.unlink()
+        _sh("git", "rm", "-q", "--cached", "claudedocs/handoff-sample-topic.md", cwd=repo)
+        _sh("git", "commit", "-qm", "remove the doc from HEAD", cwd=repo)
+        upd = write_delta(
+            tmp_path, "genuinely-new.md", GOAL_WITHOUT_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNDEFINED_DONE, res.stdout + res.stderr
+        assert "NEW handoff doc" in res.stderr
+
+    def test_doc_tracked_at_head_keeps_None_distinct_from_False(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 `None` IS NOT `False`, and collapsing them inverts the fail
+        direction. git failing to answer is not evidence a doc is new; treated
+        as `False` it would refuse a grandfathered document on a repo this tool
+        merely could not read."""
+        empty = tmp_path / "not-a-repo"
+        empty.mkdir()
+        assert hd.doc_tracked_at_head(empty, "claudedocs/x.md") is None
+
+
+    def test_the_skip_disclosure_is_SILENT_when_the_update_adds_no_self_generated_rank(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE OTHER HALF OF THE DISCLOSURE, and the reason it is conditional.
+        A line printed on every unreadable-base run is one nobody reads by the
+        third; there is nothing to disclose about a round that added no
+        self-generated ranks, because the ratchet would have had nothing to say
+        about it either."""
+        work = repo_lacking_the_doc(tmp_path)
+        upd = write_delta(
+            tmp_path, "quiet.md", GOAL_WITH_CONDITION + "\n" + EXTERNAL_STEP
+        )
+        res = run_tool(work, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "RULE (n) DID NOT RUN" not in res.stdout, res.stdout
+
+class TestTheBudgetWarningDoesNotDescribeAWriteThatIsRefused:
+    """Round 1's F4. #1648's warning asserts `test_no_handoff_doc_exceeds_its_
+    budget` "will go RED on `main`, and it fails for EVERYONE", and that it is
+    "a WARNING, not a refusal". Both are false on a run whose stderr says
+    NOTHING WRITTEN."""
+
+    def _over_budget_repo(self, repo: Path) -> Path:
+        """`repo` with its handoff doc pushed OVER the 64 KiB ceiling.
+
+        🔴 THE PADDING IS THE WHOLE TEST, AND ITS ABSENCE MADE THE FIRST DRAFT
+        VACUOUS. `budget_warning` is silent unless the merged doc exceeds its
+        allowance, so against the ordinary fixture — a few hundred bytes — it
+        returns "" whatever the ordering is, and the assertion below passed
+        identically on PRE-FIX code. Measured: 5 of the round-1 regression tests
+        went red at HEAD^ and this one did not, which is what exposed it.
+        `claude/RULES.md`: a fixture that cannot distinguish two implementations
+        does not test between them.
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        padding = "\n".join(
+            f"- a durable gotcha worth keeping, number {i}" for i in range(2_000)
+        )
+        doc.write_text(
+            BASE_DOC.replace(
+                "## Gotchas / decisions / dead-ends",
+                "## Gotchas / decisions / dead-ends\n" + padding,
+            ),
+            encoding="utf-8",
+        )
+        assert len(doc.read_bytes()) > hd.handoff_budget.MAX_BYTES, (
+            "the fixture is UNDER the ceiling, so budget_warning stays silent "
+            "and this test cannot see the ordering it is named for"
+        )
+        _sh("git", "add", "claudedocs/handoff-sample-topic.md", cwd=repo)
+        _sh("git", "commit", "-qm", "a doc over its size budget", cwd=repo)
+        return repo
+
+    def test_the_fixture_DOES_trigger_the_warning_on_a_run_that_proceeds(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 POSITIVE CONTROL, AND IT RUNS FIRST. The assertion below is of the
+        form "this string is absent", which is also what a warning wired to
+        nothing produces. Watch the warning APPEAR on a run that reaches the
+        diff, so its absence on the refused run is a fact about the ordering."""
+        over = self._over_budget_repo(repo)
+        upd = write_delta(
+            tmp_path,
+            "proceeds.md",
+            "## Next steps (ranked)\n1. Ship it. forcing: gate — the soak blocks release\n",
+        )
+        res = run_tool(over, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "OVER ITS SIZE BUDGET" in res.stdout, res.stdout
+
+    def test_a_refused_run_does_not_also_warn_about_the_size_budget(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        over = self._over_budget_repo(repo)
+        upd = write_delta(
+            tmp_path,
+            "refused-and-warned.md",
+            "## Next steps (ranked)\n"
+            + "".join(f"{i}. Item {i}. forcing: none\n" for i in range(1, 6)),
+        )
+        res = run_tool(over, update=upd)
+        assert res.returncode == hd.EXIT_RANK_GROWTH, res.stdout + res.stderr
+        assert "OVER ITS SIZE BUDGET" not in res.stdout, (
+            "the size-budget warning described the consequences of a write this "
+            "run refused to make — it asserts the gate `will go RED on main` and "
+            "that it is `not a refusal`, and stderr says NOTHING WRITTEN\n"
+            + res.stdout
+        )
+
+    def test_an_ORDINARY_run_still_gets_the_warning(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL. Moving the note below the refusals must not
+        silence it on the runs it exists for — and its own tests pin it above
+        the diff, which this ordering keeps."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        src = TOOL.read_text(encoding="utf-8")
+        call = src.index("budget_note = budget_warning(")
+        printed = src.index("print(budget_note)", call)
+        diff = src.index("print(diff,", printed)
+        assert call < printed < diff, "the budget note must still print before the diff"

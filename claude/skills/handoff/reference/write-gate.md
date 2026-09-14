@@ -634,6 +634,41 @@ For the same reason both arc rules run BELOW rule (h)'s refusal rather than
 beside (j)/(k): a wrong base makes "this arc has no finish line" a statement
 about a document nobody is editing.
 
+🔴 **AND THAT ORDERING WAS ONLY HALF A FIX — round 1 of this PR's own audit
+measured the other half.** Rule (h)'s stale-base REFUSAL is gated on
+`--confirm`. The PROPOSAL run — the default first half of every `/handoff` — is
+not, so it fell straight through the ordering to rule (n), which reported *"0
+item(s) in the document answer to nothing external"* about a mainline document
+carrying **3**, and printed three remedies none of which could be carried out
+(*"close one — the ratchet falls freely"* is impossible at a floor of 0). A
+guard's POSITION is not its precondition: what the rules actually need is a base
+the tool has judged USABLE, and they now test that directly rather than
+inheriting it from where they sit. 🔴 The general shape, which is this repo's
+own: **a description that claims coverage ("both rules run below rule (h)") must
+be checked against what the code does on EVERY path, not on the one the author
+had in mind.**
+
+🔴 **A SECOND SOURCE OF A FALSE ZERO, same audit: the base may carry a ranked
+queue this module cannot COUNT.** `ranked_items` recognises only the heading
+`is_next_steps_heading` names — deliberate, and harmless for rule (j), which
+reads only the update. Rule (n) reads BOTH sides, so the same gap turns a
+reworded base heading into a false GROWTH: migrating such a queue onto the
+canonical heading **while shrinking it** was refused, permanently, clearable
+only by `--rank-growth-approved`. Measured over the real corpus — 183
+`handoff-*.md` across devrc and homelab-talos — **22** docs carry a ranked queue
+under an unrecognised heading that this counts as 0; 19 hit `status=dated-topic`
+first, leaving **3** live. The rule now SKIPS when the base carries no canonical
+`## Next steps`, because a count that was never taken must not be printed as 0.
+
+🔴 **AND "the working copy is empty" IS NOT "there is no document".**
+Emptying a TRACKED doc in place left it with a full history and a blank working
+copy, which read as a new arc: the ratchet switched off, a queue went 3 → 5 at
+exit 0, and rule (m) asserted *"This is a NEW handoff doc"* about it. The
+mainline reading alone could not see it — `currency.mainline` is populated only
+when the mainline is AHEAD on that doc — so `doc_tracked_at_head` asks HEAD as
+well, and `None` (the question could not be answered) is kept distinct from
+`False`, so an unreadable repo grandfathers a document rather than refusing one.
+
 ### `in_goal` is part of `is_declared`, and leaving it out was a real defect
 
 The rule's first draft accepted a well-formed field wherever it appeared. A
@@ -771,6 +806,22 @@ close-check something to be a verdict ABOUT: `ADDRESSED ⇒ the arc is CLOSED`,
 stated in the step-2 template beside the field, and `/resume` step 5 is required
 to render it. Without the field it was unenforceable prose, which is why the two
 ship together.
+
+### 🔴 NOTHING COUNTS, GATES OR READS `## Defects (batched)` — the growth can RELOCATE
+
+Stated plainly because it is the sharpest thing round 1 said about this design,
+and it is a limitation rather than a defect. The measured pathology is a
+self-extending list. Rule (n) stops that list growing **under one heading** and
+names `## Defects (batched)` as the relief valve — and that section is invisible
+to rule (j), to rule (n), to `/resume`'s digest and to the DRIFT block. So an
+arc can satisfy the ratchet by moving its growth one heading down, and **nothing
+would measure that it had.**
+
+That is accepted for now: a bounded, drainable defect list is the behaviour the
+report asked for, and gating it too would be building the second mechanism
+before the first has been shown to be used at all. The honest follow-up is an
+`/adoption-scan` in a month — does any doc gain the section, and does its rank
+queue actually stop growing? — not another guard now.
 
 ### `## Defects (batched)` is deliberately NOT a canonical heading
 

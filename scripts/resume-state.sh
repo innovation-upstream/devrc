@@ -2127,7 +2127,10 @@ dod_row(){
   # skipped in favour of a later one and the two would disagree about which line
   # the document meant.
   awk '
-    function trim(s){ sub(/^[ \t*_`~]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+    # `\302\240` is U+00A0 NBSP: pythons `\s` is unicode-aware and awks
+    # `[ \t]` is not, so without it a NBSP after the colon made the writer
+    # declare a field the reader could not see (audit F5).
+    function trim(s){ sub(/^[ \t\302\240*_`~]+/,"",s); sub(/[ \t\302\240]+$/,"",s); return s }
     /^[ \t]*(```|~~~)/ { fence = !fence; next }
     fence { next }
     /^##[^#]/ {
@@ -2138,11 +2141,23 @@ dod_row(){
     !goal { next }
     {
       line = $0
-      if (match(tolower(line), /(^|[^a-z0-9])closing-condition[*_`~]*[ \t]*:/)) {
+      # `{0,3}` MIRRORS pythons `_MARKUP`, which is bounded at three. Unbounded
+        # here let `**closing-condition****:` through on the reader side while
+        # the writer refused it — the seam disagreeing in its worse direction
+        # again (audit F5).
+        if (match(tolower(line), /(^|[^a-z0-9])closing-condition[*_`~]{0,3}[ \t]*:/)) {
         rest = trim(substr(line, RSTART + RLENGTH))
         if (!match(rest, /^[A-Za-z]+/)) next
         kind = tolower(substr(rest, 1, RLENGTH))
         detail = substr(rest, RLENGTH + 1)
+        # 🔴 THE KINDS TRAILING BOUNDARY, matching pythons `(?![A-Za-z0-9])`.
+        # Without it `check2` splits as kind `check` + detail `2 — …`, so the
+        # READER showed a finish line the WRITER refuses — the seam disagreeing
+        # in its worse direction. Found by round 1 of this PRs own audit (F5),
+        # outside the matrix TestTheTwoParsersAgree covered. NOTE: no apostrophe
+        # anywhere in this awk block — it lives inside a single-quoted shell
+        # string, so one would terminate the program mid-comment.
+        if (detail ~ /^[0-9]/) exit
         # ONE separator, and only when it is followed by space or end of line —
         # or `check — --dry-run exits 0` loses a dash. The python side anchors
         # the same way with a lookahead; awk has none, so the shape is tested

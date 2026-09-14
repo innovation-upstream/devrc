@@ -401,6 +401,36 @@ class TestTheTwoParsersAgree:
             "## Goal\nx\n- closing-condition: soon — nope\n"
             "- closing-condition: check — the probe passes\n",
         ),
+        # 🔴 THE FOUR ROUND-1 DIVERGENCES (audit F5). Every one of these was a
+        # REAL disagreement between the two parsers, found outside this matrix
+        # and pinned here so the matrix stops being the weak control it was.
+        # Three ran in the WORSE direction — the awk READER showed a finish line
+        # the python WRITER refuses, so `/resume` would print a condition no
+        # `/handoff` run would ever have accepted.
+        (
+            # awk `^[A-Za-z]+` had no trailing boundary, so this split as kind
+            # `check` + detail `2 — …` while python's `(?![A-Za-z0-9])` refused.
+            "digit-after-kind",
+            "## Goal\nx\n- closing-condition: check2 — the probe passes\n",
+        ),
+        (
+            # python's `_MARKUP` is bounded at 3; awk's run was unbounded.
+            "markup-run-of-four",
+            "## Goal\nx\n- **closing-condition****: check — the probe passes\n",
+        ),
+        (
+            # …and the boundary itself: three still parses on BOTH sides, so the
+            # bound is pinned from both directions rather than "long fails".
+            "markup-run-of-three",
+            "## Goal\nx\n- **closing-condition***: check — the probe passes\n",
+        ),
+        (
+            # The other direction: python's `\s` is unicode-aware, awk's `[ \t]`
+            # was not, so a NBSP after the colon made the WRITER declare a field
+            # the READER could not see.
+            "nbsp-after-the-colon",
+            "## Goal\nx\n- closing-condition:\u00a0check — the probe passes\n",
+        ),
         ("absent", "## Goal\nx\n"),
         (
             "wrong-section",

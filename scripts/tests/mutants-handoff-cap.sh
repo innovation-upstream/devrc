@@ -666,6 +666,14 @@ run 'mainline-measured-from-the-wrong-text' \
   's|            mainline = doc_shape(shown.out)|            mainline = doc_shape("")|'
 
 printf '\n== the round-4 regression must fail with the RIGHT message (#1093.1) ==\n'
+# 🔴 THESE TWO ROWS DO NOT GO THROUGH `_run`, SO THEY DO NOT GO THROUGH
+# `_row_selected` EITHER — they increment ROWS by hand. Under MUTANT_FILTER
+# that made the accounting lie in two ways at once (audit F6): they ran
+# whatever the filter said, and `ROWS` counted them while `SKIPPED` did not,
+# so `9 row(s) … skipped 83` did not add up to the 90 `_run` sites. Gate the
+# pair explicitly. They are DIAGNOSTIC-QUALITY rows (which test message, not
+# which test), which is why they cannot simply become `run` calls.
+if _row_selected round-4-regression-message; then
 # 🔴 A DIAGNOSTIC-QUALITY ROW, so `_run` cannot score it: every other row asks
 # WHICH TEST died, this one asks WHICH MESSAGE it died with. Reverting
 # `replaces_mainline_doc` to the round-4 bug takes the LOUD branch, so the shape
@@ -751,6 +759,16 @@ else
     FAILURES=$((FAILURES+1))
   fi
 fi
+else
+  # 🔴 THIS `fi` CLOSES THE ROUND-4 SECTION AND NOTHING ELSE. Its first
+  # draft closed just above `== controls ==`, which swallowed the rule (k),
+  # (m) and (n) blocks — 57 rows skipped, 2 run, and the run still printed
+  # `0 failure(s)`. That is this file's own "a wrapper that reports nothing
+  # to do instead of erroring" trap, so the accounting guard at the end now
+  # refuses a run whose ROWS+SKIPPED do not add up to the sites in the file.
+  SKIPPED=$((SKIPPED+2))
+fi
+
 printf '\n== rule (k): an elimination names HOW it was eliminated (must be KILLED) ==\n'
 # The refusal deleted outright: no bullet is ever unevidenced.
 run 'elimination-refusal-never-fires' test_the_MEASURED_bullet_that_this_rule_exists_for_is_refused \
@@ -854,7 +872,7 @@ run 'detail-separator-loses-its-anchor' \
 # The DELETION arm: a document that HAD a finish line and loses it.
 run 'deleting-the-field-is-not-noticed' \
   test_an_update_that_DELETES_the_field_is_REFUSED \
-  's|        base_had_one=closing_condition(base_text).is_declared,|        base_had_one=False,|'
+  's|        base_had_one=base_readable and closing_condition(base_text).is_declared,|        base_had_one=False,|'
 # 🔴 THE GRANDFATHERING, IN BOTH DIRECTIONS. Removing it makes the gate
 # permanently red on a corpus where 0 of 183 docs comply; removing the advisory
 # makes a legacy doc silent forever, which is how it never gets fixed.
@@ -866,9 +884,15 @@ run 'legacy-advisory-suppressed' \
   's|    legacy_dod = legacy_dod_report(closing, is_new_doc)|    legacy_dod = ""|'
 # 🔴 PRECEDENCE. `not base_text` alone reads a STALE BASE as a new arc — the
 # false positive that took 19 tests red in one run.
+# ⚠ BOTH THIS ROW AND `deleting-the-field-is-not-noticed` WERE REPOINTED after
+# round 2 rewrote the lines they target (`doc_exists_elsewhere` replaced the
+# mainline-only predicate; `base_readable` joined the deletion arm). They
+# reported `MUTATION DID NOT APPLY`, which this harness scores as a FAILURE
+# precisely so a stale sed cannot masquerade as a surviving guard. Each
+# replacement was checked to change EXACTLY ONE LINE before being written.
 run 'stale-base-read-as-a-new-arc' \
   test_a_STALE_BASE_is_not_reported_as_a_NEW_arc \
-  's|    is_new_doc = not base_text.strip() and not currency.replaces_mainline_doc(base_text)|    is_new_doc = not base_text.strip()|'
+  's|    is_new_doc = not base_text.strip() and not doc_exists_elsewhere|    is_new_doc = not base_text.strip()|'
 # BEHAVIOUR-FREE CONTROL for this block: the rows above must key on behaviour,
 # not on rule (m)'s own comment text.
 run 'rule-m-comment-reword-control' SURVIVES \
@@ -905,6 +929,7 @@ run 'new-docs-are-ratcheted-too' \
 run 'rule-n-comment-reword-control' SURVIVES \
   's|# --- rule (n): the rank queue does not GROW its unforced half|# --- rule n: rank ratchet (reworded comment)|'
 
+
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
 # is already known to catch. If this row ever reports SURVIVED, the harness is
@@ -916,6 +941,20 @@ run 'already-caught-positive-control' test_no_advance_is_still_4_on_an_undated_e
 run 'comment-reword-control' SURVIVES \
   's|# --- rule (j): a ranked item names an external forcing function|# --- rule j: ranked item forcing function (reworded comment)|'
 
+# 🔴 ACCOUNTING GUARD — every row site must be either RUN or SKIPPED.
+# `_run` is called once per row, plus the two hand-rolled round-4 rows that
+# increment ROWS directly. If those do not add up, a control-flow edit has
+# silently dropped whole blocks out of the sweep — which is exactly what a
+# mis-scoped `if` did here once, reporting `0 failure(s)` off 2 of 92 rows.
+# Counted from the FILE rather than from a literal, so it cannot go stale.
+SITES=$(( $(grep -c '^run \|^run_skill ' "$D/mutants-handoff-cap.sh") + 2 ))
+if [ $((ROWS + SKIPPED)) -ne "$SITES" ]; then
+  printf '\n\U0001f534 HARNESS BROKE: %d run + %d skipped = %d, but this file has %d row site(s).\n' \
+    "$ROWS" "$SKIPPED" "$((ROWS + SKIPPED))" "$SITES"
+  printf '   Rows vanished from the sweep entirely — usually a mis-scoped `if`.\n'
+  printf '   Every `ok` above is worthless until this adds up.\n'
+  FAILURES=$((FAILURES+1))
+fi
 printf '\n%d row(s), %d failure(s)\n' "$ROWS" "$FAILURES"
 if [ -n "${MUTANT_FILTER:-}" ]; then
   printf '🔴 PARTIAL SWEEP: MUTANT_FILTER=%s skipped %d row(s). This is NOT a\n' \
