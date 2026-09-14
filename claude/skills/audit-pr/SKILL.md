@@ -355,6 +355,21 @@ all three were editing.** It was caught only from OUTSIDE — by the audit of a 
 quoted the same number. Nothing pinned it either: no assertion read `op-selected`, so a fully
 green suite was silent.
 
+🔴 **WHEN A PR WITH A LIVE LADDER MUST TAKE UPSTREAM, MERGE — DO NOT REBASE.** A delta round's
+range starts at the `audited=` sha in the PR's last `audit-claims` block, and **a rebase rewrites
+that sha**, so it stops being an ancestor of HEAD and the range becomes underivable: the ladder's
+own boundary is destroyed by a routine sync. A merge commit keeps it an ancestor, so the range
+simply widens to `<audited>..<merge head>` and ONE round covers the fix delta *and* the conflict
+resolution. Where the repo squash-merges, the merge commit costs nothing on the mainline. Measured
+on civitai#4807: a rebase would have orphaned `1f3fd96433` mid-ladder, or cost a second round.
+
+⚠ **And the merge is itself a falsifying edit — the rule above is not rebase-only.** That same
+#4807 merge took a paragraph both PRs had rewritten, and the incoming side added one more prose
+mention of the identifier a count in that paragraph was counting: 20 at base, 21 on each side, **22
+merged**. So the sync that widens the range also stales content *inside* it. Fix such a count by
+FORM — record no total and carry the command that re-derives it — and declare the correction in the
+merge commit message, or the next round reads it as pre-audited content it need not check.
+
 **So, once per ladder and NOT per round — cheap, and it is the only thing that closes this:**
 re-derive every COUNT, VERSION and CROSS-REFERENCE the PR's files assert, against the CURRENT
 head, ignoring ranges entirely. Ask the LAST round to do it, or do it before merging. A number
