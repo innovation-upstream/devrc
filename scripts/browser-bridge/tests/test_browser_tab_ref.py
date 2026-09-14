@@ -53,6 +53,7 @@ it can be true in.**
 Run: nix develop ~/workspace/devrc -c python3 -m pytest \\
        scripts/browser-bridge/tests/test_browser_tab_ref.py -q
 """
+import base64
 import json
 import os
 import re
@@ -1479,13 +1480,55 @@ def _proxy_ssh(stdout="", stderr="", rc=0):
     """A stub `ssh` body that behaves as a REACHED host: it emits `stdout`,
     `stderr`, and then the sentinel line carrying `rc`.
 
+    🔴 THE SENTINEL GOES ON **STDERR**, matching what the CLI asks the remote
+    shell to do. It used to be the last line of stdout, which forced the CLI to
+    read the whole response into a shell variable just to strip that line — the
+    root of the E2BIG defect (see `test_a_LARGE_proxied_screenshot_leaves_no_temp_
+    file_and_no_E2BIG`). Keeping stdout pure is what lets the CLI `cat` it.
+    `test_the_remote_payload_sends_the_sentinel_to_STDERR` pins the two together.
+
     It stands in for the whole hop — the payload the CLI hands ssh is logged and
     asserted on separately, so nothing here has to interpret it.
     """
     return (f"printf '%s' {shlex.quote(stdout)}\n"
             f"printf '%s' {shlex.quote(stderr)} >&2\n"
-            f"printf '\\n{PROXY_SENTINEL}%s\\n' {int(rc)}\n"
+            f"printf '{PROXY_SENTINEL}%s\\n' {int(rc)} >&2\n"
             f"exit {int(rc)}\n")
+
+
+def _png_b64(width=220, height=220):
+    """A REAL, valid PNG of a chosen size, base64'd — big enough to trip E2BIG.
+
+    🔴 THE SIZE IS THE POINT AND IT IS NOT ARBITRARY. The defect needs ONE
+    argv/envp string over `MAX_ARG_STRLEN` (32 pages = 131 072 bytes); at
+    220x220 of incompressible noise the base64 is ~194 KB, comfortably over,
+    while the 1x1 fixture used elsewhere is ~100 bytes and CANNOT reproduce it.
+    A fixture that can only ever be small is invisible to this whole class.
+
+    It must also be a real PNG: the writer validates strict base64 AND the
+    8-byte signature, so a blob of X's would exercise the refusal path instead.
+    `zlib` level 0 (stored) keeps the noise from compressing away.
+    """
+    import struct
+    import zlib
+    raw = bytearray()
+    seed = 12345
+    for _ in range(height):
+        raw.append(0)                        # filter byte: None
+        for _ in range(width):
+            seed = (seed * 1103515245 + 12345) & 0xFFFFFFFF
+            raw += bytes(((seed >> 16) & 0xFF, (seed >> 8) & 0xFF, seed & 0xFF))
+
+    def chunk(tag, data):
+        body = tag + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 0))
+           + chunk(b"IEND", b""))
+    return base64.b64encode(png).decode(), len(png)
 
 
 def _screenshot_envelope(url="https://example.invalid/page"):
@@ -1756,7 +1799,7 @@ def test_the_LOCAL_WIRE_IS_CLOSED_once_a_proxy_target_is_set(bridge, tmp_path):
         "the screenshot proxy call was renamed; this mutation no longer targets it")
     mutated = src.replace(
         needle,
-        '_BB_PROXY_STDOUT="$(cmd_op screenshot "$full")"; _prc=$?; _BB_PROXY_RAN=1')
+        'resp="$(cmd_op screenshot "$full")"; _prc=$?; _BB_PROXY_RAN=1; _BB_PROXY_OUT=""')
     copy = root / "browser-bridge" / "browser"
     copy.write_text(mutated, encoding="utf-8")
     bridge.handler.host_label = "laptop"
@@ -1953,3 +1996,274 @@ def test_server_py_is_UNTOUCHED_by_this_feature():
         "server.py's Host-header allowlist was widened or reworded")
     assert 'os.environ.get("BROWSER_BRIDGE_HOST", "127.0.0.1")' in src, (
         "server.py no longer defaults to a loopback bind")
+
+
+# =========================================================================== #
+# The E2BIG / temp-file-leak defect — found by independent verification of #1662
+# =========================================================================== #
+# 🔴 WHAT HAPPENED, because the shape of these tests only makes sense with it.
+#
+#   `_ssh_proxy` used to capture the remote leg's stdout into a shell variable:
+#   `out="$(ssh …)"`. On a screenshot that is several hundred KB of base64. The
+#   very next `rm -f "$errf"` then died with **"Argument list too long"** and the
+#   temp file leaked — reproducibly, on every proxied screenshot of a real page.
+#
+#   The cause is not the argument (a 29-byte path) and not ARG_MAX (2 MB here
+#   against a 28 KB environment). Measured by instrumenting the live CLI:
+#
+#     * the invoking shell EXPORTED a variable called `out` — a generic name;
+#     * `local out` does NOT clear an inherited export attribute (bash prints
+#       `declare -x out=…` for the local; control: `local +x out` is clean, same
+#       value, same shell);
+#     * so the payload became ONE environment string, and the Linux per-string
+#       cap `MAX_ARG_STRLEN` is 32 pages = 131 072 bytes — far below ARG_MAX. Past
+#       it, EVERY `execve` in the process fails: `rm`, `cat`, `env`, `wc`, `true`
+#       all did. Threshold measured between 120 KB (fine) and 330 KB (fails).
+#
+#   Two independent conditions, so a test needs BOTH: an exported variable whose
+#   NAME the CLI reuses, and a payload over 128 KB. A fixture missing either one
+#   is green against the broken code.
+#
+# 🔴 AND THE FIRST FIX WAS ITSELF WRONG IN A WAY ONLY THE LEAK TEST CAUGHT: the
+#   temp files were registered by a helper called as `f="$(_bb_tmpfile …)"`, so
+#   the registration happened in a command-substitution SUBSHELL and the EXIT
+#   trap swept an empty list. The cleanup code was present, looked right, and
+#   removed nothing. That is why the assertion here is on FILES ON DISK and not
+#   on the presence of a trap.
+
+#: The kernel's per-string argv/envp cap — 32 pages. Named rather than spelled at
+#: the use site so the "is this fixture actually big enough" question is one read.
+MAX_ARG_STRLEN = 131_072
+
+
+def _proxy_tmp_files(tmpdir):
+    return sorted(p.name for p in Path(tmpdir).glob("browser-proxy-*"))
+
+
+def _big_screenshot_envelope():
+    b64, png_len = _png_b64()
+    assert len(b64) > MAX_ARG_STRLEN, (
+        f"the fixture base64 is {len(b64)} B, under MAX_ARG_STRLEN "
+        f"({MAX_ARG_STRLEN}) — it CANNOT reproduce the defect")
+    return json.dumps({
+        "ok": True,
+        "result": {"id": "c", "ok": True,
+                   "data": {"dataUrl": "data:image/png;base64," + b64,
+                            "url": "https://example.invalid/big"}}}), png_len
+
+
+def test_a_LARGE_proxied_screenshot_leaves_no_temp_file_and_no_E2BIG(bridge, tmp_path):
+    """🔴 THE REGRESSION TEST FOR THE DEFECT. Red at `bad7544e`.
+
+    Both reproduction conditions are supplied explicitly: `out` is EXPORTED into
+    the CLI's environment (the invoking shell happened to export it, which is
+    what made this environment-dependent and easy to miss), and the payload is
+    over MAX_ARG_STRLEN. Neither alone reproduces anything.
+
+    The observable is a file on disk, not a code shape: the broken version had
+    `rm -f "$errf"` right there in the source and it ran and failed.
+    """
+    envelope, png_len = _big_screenshot_envelope()
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=envelope + "\n"))
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    out = tmp_path / "big.png"
+    r = bridge.run(CANONICAL, "screenshot", str(out),
+                   env={"TMPDIR": str(tmpdir), "out": "/an/exported/generic/name"})
+    assert r.returncode == 0, r.stderr
+    assert "Argument list too long" not in r.stderr, (
+        f"an exec failed with E2BIG — the payload is back in an exported shell "
+        f"variable:\n{r.stderr}")
+    assert _proxy_tmp_files(tmpdir) == [], (
+        f"proxy temp files leaked: {_proxy_tmp_files(tmpdir)}")
+    # …and the feature still works at this size.
+    assert out.read_bytes()[:8] == PNG_MAGIC
+    assert len(out.read_bytes()) == png_len
+
+
+def test_the_leak_check_can_SEE_a_temp_file_positive_control(bridge, tmp_path):
+    """🔴 POSITIVE CONTROL for the assertion above.
+
+    `_proxy_tmp_files(...) == []` is a ZERO, and a zero is indistinguishable from
+    a glob wired to the wrong directory. This proves the glob CAN return
+    non-empty for the exact name shape the CLI creates, in the exact directory
+    the test points at.
+    """
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    assert _proxy_tmp_files(tmpdir) == []
+    (tmpdir / "browser-proxy-err.ABCDEF").write_text("x")
+    (tmpdir / "browser-proxy-out.ABCDEF").write_text("x")
+    assert _proxy_tmp_files(tmpdir) == ["browser-proxy-err.ABCDEF",
+                                        "browser-proxy-out.ABCDEF"]
+
+
+@pytest.mark.parametrize("case,ssh_body,expect_rc", [
+    ("remote ran and succeeded", _proxy_ssh(stdout='{"ok":true}\n'), 0),
+    ("remote ran and failed",    _proxy_ssh(stdout="", stderr="boom\n", rc=1), 1),
+    ("host unreachable",         "echo 'ssh: no route' >&2\nexit 255\n", 4),
+    ("reached but no sentinel",  "printf '%s' '{}'\nexit 0\n", 4),
+])
+def test_the_temp_files_are_removed_on_EVERY_exit_path(bridge, tmp_path, case,
+                                                       ssh_body, expect_rc):
+    """🔴 "Removed at the end of the function" is not "removed on every path".
+
+    `_ssh_proxy` returns early when the sentinel is missing, and its callers
+    `exit` from three different places — including `_print_handoff`, which never
+    returns. Each row here leaves the process by a different door.
+
+    INVARIANT GUARD — all four rows are GREEN at `bad7544e`. The old inline `rm`
+    did cover these paths *at small payload sizes*; what it could not survive was
+    the exec failing (the row above). This pins that replacing it with a trap did
+    not lose the coverage it had, and is NOT evidence the defect is fixed.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(ssh_body)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    r = bridge.run(CANONICAL, "text", env={"TMPDIR": str(tmpdir)})
+    assert r.returncode == expect_rc, f"{case}: rc={r.returncode}\n{r.stderr}"
+    assert _proxy_tmp_files(tmpdir) == [], (
+        f"{case}: proxy temp files leaked: {_proxy_tmp_files(tmpdir)}")
+
+
+def test_a_CLEANUP_THAT_CANNOT_RUN_says_so(bridge, tmp_path):
+    """🔴 A leak nobody is told about is how four stray files accumulated.
+
+    The directory is made read-only after the CLI has created its temp files, so
+    the unlink is refused. The requirement is not that cleanup always succeeds —
+    it is that a failure is never silent.
+    """
+    bridge.handler.host_label = "laptop"
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    # A stub ssh that seals the directory *after* the CLI has created its files.
+    bridge.install_ssh(
+        f"printf '%s' '{{\"ok\":true}}'\n"
+        f"printf '{PROXY_SENTINEL}0\\n' >&2\n"
+        f"chmod 500 {shlex.quote(str(tmpdir))}\n"
+        "exit 0\n")
+    r = bridge.run(CANONICAL, "text", env={"TMPDIR": str(tmpdir)})
+    tmpdir.chmod(0o700)                       # so tmp_path teardown can clean up
+    leftovers = _proxy_tmp_files(tmpdir)
+    if not leftovers:
+        pytest.skip("the unlink was not actually refused (running as root?), so "
+                    "this case cannot observe what it is about")
+    assert "remove it by hand" in r.stderr, (
+        f"temp files survived ({leftovers}) and NOTHING said so:\n{r.stderr}")
+    # Still a `browser:`-prefixed line, so the paste-line contract is untouched.
+    for line in r.stderr.splitlines():
+        if "remove it by hand" in line:
+            assert line.startswith("browser:"), line
+
+
+def test_a_LARGE_proxied_read_keeps_stdout_byte_exact(bridge, tmp_path):
+    """The payload now reaches stdout by `cat`, not by interpolating a variable.
+
+    Pinned at a size past MAX_ARG_STRLEN so the assertion is about the path that
+    was broken, and byte-for-byte so a `printf`-based reimplementation that eats
+    trailing newlines fails here.
+    """
+    body = ("x" * (MAX_ARG_STRLEN + 5000)) + "\n\n"
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout=body))
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    r = bridge.run(CANONICAL, "text",
+                   env={"TMPDIR": str(tmpdir), "out": "/an/exported/generic/name"})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == body, (
+        f"stdout is {len(r.stdout)} B, expected {len(body)} B "
+        f"(trailing newlines are part of the claim)")
+    assert "Argument list too long" not in r.stderr
+
+
+def test_the_remote_payload_sends_the_sentinel_to_STDERR(bridge):
+    """🔴 SEAM GUARD. Keeping stdout pure is what makes the `cat` possible.
+
+    Move the sentinel back onto stdout and the CLI must once again read the whole
+    response into a variable to strip it — reintroducing the defect. The stub in
+    this file emits it on stderr; this is what keeps the two one claim.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    payload = _ssh_payload(bridge)
+    sentinel_lines = [ln for ln in payload.splitlines() if PROXY_SENTINEL in ln]
+    assert len(sentinel_lines) == 1, payload
+    assert sentinel_lines[0].rstrip().endswith(">&2"), (
+        f"the remote is not asked to put the sentinel on stderr: "
+        f"{sentinel_lines[0]!r}")
+
+
+def test_the_SENTINEL_never_leaks_onto_the_callers_stderr(bridge):
+    """It is protocol, not output. A caller reading stderr must not see it.
+
+    INVARIANT GUARD (green at `bad7544e`, where the sentinel was on stdout and so
+    could not reach stderr anyway). It becomes load-bearing now that the sentinel
+    IS written to the remote's stderr: without it, moving the token would leak it
+    to every caller and nothing would say so.
+    """
+    bridge.handler.host_label = "laptop"
+    bridge.install_ssh(_proxy_ssh(stdout="{}\n", stderr="browser: a warning\n"))
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, r.stderr
+    assert "browser: a warning" in r.stderr
+    assert PROXY_SENTINEL not in r.stderr, r.stderr
+    assert PROXY_SENTINEL not in r.stdout, r.stdout
+
+
+def test_a_CLI_that_cannot_REACH_host_label_refuses_and_drives_nothing(bridge, tmp_path):
+    """🔴 FAIL-CLOSED UNDER A FAILURE NOBODY DESIGNED FOR — observed for real.
+
+    An independent verifier copied `browser` to /tmp to instrument it, which
+    silently broke its relative path to `scripts/lib/host_label.py`. That is the
+    exact shape where a resolver returning "" gets spliced into an ssh argv, or
+    worse, where the code shrugs and uses the LOCAL bridge. It must refuse.
+
+    The copy below is placed with NO `lib/` sibling, so `_ssh_target_for` finds
+    nothing — and `work` is a label that exists on both hosts, so a fall-through
+    would drive a real local profile.
+
+    INVARIANT GUARD — green at `bad7544e`; the behaviour was already correct and
+    was observed by accident during independent verification. It is written down
+    because "the resolver returned empty" is the shape that silently becomes an
+    `ssh ""` or a local drive, and nothing pinned it before.
+    """
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    copy = stray / "browser"
+    copy.write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
+    bridge.handler.host_label = "workbench"
+    r = subprocess.run(["bash", str(copy), "bw://laptop/work/12345", "nav",
+                        "https://guard-must-not-reach.invalid/"],
+                       env=bridge.env_for_stub(), capture_output=True,
+                       text=True, timeout=CLI_TIMEOUT_S)
+    assert r.returncode == 4, r.stderr
+    assert "No SSH target is known" in r.stderr, r.stderr
+    assert bridge.ssh_calls() == [], bridge.ssh_calls()
+    assert bridge.bodies == [], (
+        f"a foreign reference drove the LOCAL bridge when host_label could not "
+        f"be reached: {bridge.bodies}")
+
+
+def test_the_proxy_locals_are_all_declared_PLUS_X(bridge):
+    """🔴 STRUCTURAL GUARD on the half of the fix a behavioural test cannot see.
+
+    The payload no longer goes into a variable, so the export trap has nothing
+    big to attach to *today*. `+x` is what stops the next variable added to this
+    function from re-opening it — and its absence is silent until someone's shell
+    happens to export a matching name. Assert the declaration, since there is no
+    observable to assert.
+    """
+    src = CLI.read_text(encoding="utf-8")
+    body = src.split("_ssh_proxy() {", 1)[1].split("\n}", 1)[0]
+    locals_ = [ln.strip() for ln in body.splitlines()
+               if ln.strip().startswith("local ")]
+    assert locals_, "no `local` declarations found — did _ssh_proxy get renamed?"
+    for decl in locals_:
+        assert decl.startswith("local +x "), (
+            f"a local in _ssh_proxy is not `+x`, so an inherited export "
+            f"attribute can attach to it: {decl!r}")

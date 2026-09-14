@@ -1838,9 +1838,65 @@ _handoff_command() {
 # bridge — not the branch below, not a subcommand added next year. The guard the
 # task must not weaken is therefore stronger than it was: it used to be one
 # `exit 4`, and it is now an invariant over every op.
-BB_PROXY_TARGET=""            # `user@addr` once a foreign ref is being proxied
-_BB_PROXY_STDOUT=""           # the remote leg's stdout, sentinel stripped
-_BB_PROXY_RAN=0               # 1 = the remote leg actually executed
+
+# 🔴 `declare +x`, ON EVERY ONE OF THESE, AND IT IS NOT DECORATION — IT IS THE FIX
+# FOR A MEASURED DEFECT. See `_ssh_proxy`'s "THE EXPORT TRAP" note: a name this
+# script assigns may ALREADY carry the export attribute, inherited from the
+# caller's environment, and bash propagates that attribute even onto a `local`.
+# Anything this file then stores in such a name goes into the environment of
+# EVERY subsequent child process. `+x` strips the attribute and keeps the value.
+declare +x BB_PROXY_TARGET=""   # `user@addr` once a foreign ref is being proxied
+declare +x _BB_PROXY_OUT=""     # PATH to the file holding the remote leg's stdout
+declare +x _BB_PROXY_ERR=""     # the remote leg's stderr, when it could NOT be run
+declare +x _BB_PROXY_RC=""      # the remote command's own exit code, or ""
+declare +x _BB_PROXY_RAN=0      # 1 = the remote leg actually executed
+
+# --- temp files: created in one place, removed on EVERY exit path ------------- #
+# 🔴 AN `rm` AT THE END OF A FUNCTION IS NOT "REMOVED ON EVERY PATH". `_ssh_proxy`
+# has an early return, its callers `exit` from three different places, and `die`
+# can fire in between — each is a path an inline `rm` does not cover. Worse, the
+# measured failure was an `rm` that RAN AND FAILED (E2BIG, see below) while
+# reporting nothing this script noticed. So: one registry, one EXIT trap, and a
+# cleanup that SAYS SO when it cannot do its job.
+_BB_TMPFILES=()
+declare +x _BB_TMPFILE=""       # the path the LAST _bb_tmpfile call created
+
+# _bb_tmpfile SUFFIX — create a temp file, REGISTER it, and hand it back in
+# `$_BB_TMPFILE`.
+#
+# 🔴 IT RETURNS THROUGH A GLOBAL AND MUST NOT BE CALLED IN `$( )`. That reads as
+# clumsy and it is load-bearing: a command substitution is a SUBSHELL, so the
+# `_BB_TMPFILES+=(…)` below would land in a child and evaporate on its exit. The
+# first version of this did print the path, was called as
+# `f="$(_bb_tmpfile …)"`, and the EXIT trap then swept an EMPTY registry — the
+# files leaked exactly as before, with the cleanup code present and looking
+# right. Caught by the leak test, not by reading it.
+_bb_tmpfile() {
+  _BB_TMPFILE=""
+  local +x _bb_f
+  _bb_f="$(mktemp "${TMPDIR:-/tmp}/browser-$1.XXXXXX" 2>/dev/null)" || return 1
+  [ -n "$_bb_f" ] || return 1
+  _BB_TMPFILES+=("$_bb_f")
+  _BB_TMPFILE="$_bb_f"
+}
+
+# 🔴 NOT SILENT ON FAILURE. A cleanup that cannot run is a leak, and a leak
+# nobody is told about is how four stray `/tmp/browser-proxy-err.*` files
+# accumulated before anyone looked. Both the `rm` failing AND the file surviving
+# are reported — they are different failures (a refused unlink vs. an `rm` that
+# never executed at all), and the second is the one that actually happened.
+_bb_tmp_cleanup() {
+  local +x _bb_f
+  for _bb_f in ${_BB_TMPFILES[@]+"${_BB_TMPFILES[@]}"}; do
+    [ -n "$_bb_f" ] || continue
+    rm -f -- "$_bb_f" 2>/dev/null \
+      || echo "browser: could not remove temp file ${_bb_f} — remove it by hand" >&2
+    [ ! -e "$_bb_f" ] \
+      || echo "browser: temp file ${_bb_f} survived cleanup — remove it by hand" >&2
+  done
+  _BB_TMPFILES=()
+}
+trap _bb_tmp_cleanup EXIT
 
 #: 🔴 THE POSITIVE CONTROL OF THE PROXY PROTOCOL, and the ONLY thing that
 #: distinguishes "the far host ran the command and it failed" from "the far host
@@ -1907,53 +1963,93 @@ except Exception:
 # _ssh_proxy TARGET COMMAND — run COMMAND on TARGET over ssh.
 #
 # On return: `_BB_PROXY_RAN=1` and the function's status is the REMOTE command's
-# own exit code, with its stdout in `_BB_PROXY_STDOUT` (sentinel line removed,
-# byte-identical otherwise apart from trailing newlines, which command
-# substitution eats on both sides of a plain local run too). `_BB_PROXY_RAN=0`
-# means the remote leg never ran — the caller falls back to the handoff.
+# own exit code, with its stdout in the FILE named by `_BB_PROXY_OUT`.
+# `_BB_PROXY_RAN=0` means the remote leg never ran — the caller falls back to the
+# handoff, and `_BB_PROXY_ERR` then holds ssh's own complaint.
+#
+# 🔴 THE REMOTE STDOUT NEVER ENTERS A SHELL VARIABLE, AND THAT IS A BUG FIX, NOT
+# A STYLE PREFERENCE. ===== THE EXPORT TRAP =====
+#
+# The first version of this function did `out="$(ssh …)"`. On a screenshot that
+# holds ~600 KB of base64. MEASURED 2026-09-13, reproducible every run: the very
+# next `rm -f "$errf"` died with
+#     rm: Argument list too long
+# and the temp file leaked. `errf` is a 29-byte path, the environment was 28 KB
+# and ARG_MAX here is 2 MB, so none of the obvious explanations is the one. The
+# actual chain, established by instrumenting the live CLI (`declare -p out`
+# printed `declare -x out=…`, and `allexport` was OFF):
+#
+#   1. `out` is a GENERIC NAME that the invoking shell happened to EXPORT — at
+#      script start it already held a directory path with the `-x` attribute.
+#   2. `local out` does NOT clear that: bash propagates the export attribute onto
+#      the local instance. Confirmed by control — `local out` fails, `local +x
+#      out` succeeds, same value, same shell.
+#   3. So the 600 KB landed in the ENVIRONMENT of every subsequent child, as ONE
+#      env string. The Linux cap on a single argv/envp string is
+#      MAX_ARG_STRLEN = 32 pages = 131072 bytes — far below ARG_MAX — so EVERY
+#      `execve` from that point on returned E2BIG. `rm`, `cat`, `env`, `wc` and
+#      `true` all failed identically; measured threshold between 120 KB (fine)
+#      and 330 KB (fails).
+#
+# It is invisible in most environments and catastrophic in the ones that export a
+# name we use, so the fix is structural on both axes: (a) the payload goes to a
+# FILE and is never held in a variable, and (b) every local here is `_bb_`-named
+# AND `+x`, so no inherited attribute can attach to anything this function sets.
+#
+# 🔴 THE SENTINEL MOVED TO THE REMOTE'S STDERR. It used to be the last line of
+# stdout, which meant stdout had to be read into a variable to have that line
+# stripped — the very thing above. On stderr it is separated for free, and our
+# stdout becomes a byte-exact `cat` of the far side's, trailing newlines and all
+# (better than the old command-substitution round trip, which ate them).
 #
 # 🔴 STDERR IS BUFFERED, NOT STREAMED, AND THAT IS A CONTRACT NOT AN OVERSIGHT.
 # The refusal advertises that its pasteable command is the ONLY stderr line not
 # beginning with "browser:". ssh's own transport errors ("connect to host …:
 # Network is unreachable") do not begin with it, so on the fallback path they are
 # re-prefixed rather than emitted raw. When the remote leg DID run, its stderr is
-# replayed verbatim — those lines are the far `browser`'s own, already in the
-# convention.
+# replayed line by line — minus the sentinel, which is protocol and not output.
 _ssh_proxy() {
-  local target="$1" cmd="$2" payload out last rc errf
-  _BB_PROXY_RAN=0; _BB_PROXY_STDOUT=""; _BB_PROXY_ERR=""
-  errf="$(mktemp "${TMPDIR:-/tmp}/browser-proxy-err.XXXXXX" 2>/dev/null)" || return 0
+  local +x _bb_target="$1" _bb_cmd="$2" _bb_payload _bb_line _bb_acc _bb_errf
+  _BB_PROXY_RAN=0; _BB_PROXY_ERR=""; _BB_PROXY_RC=""; _BB_PROXY_OUT=""
+  # NOT `$( )` — see _bb_tmpfile: the registration must happen in THIS shell.
+  _bb_tmpfile proxy-err || return 0
+  _bb_errf="$_BB_TMPFILE"
+  _bb_tmpfile proxy-out || return 0
+  _BB_PROXY_OUT="$_BB_TMPFILE"
   # POSIX sh/bash/zsh all read this identically; both hosts run one of the two,
   # which is the same assumption the pasteable handoff line already makes.
-  payload="${cmd}
+  _bb_payload="${_bb_cmd}
 __bb_rc=\$?
-printf '\\n%s%s\\n' '${BB_PROXY_SENTINEL}' \"\$__bb_rc\"
+printf '%s%s\\n' '${BB_PROXY_SENTINEL}' \"\$__bb_rc\" >&2
 exit \$__bb_rc"
   # -n: this CLI never reads stdin, and an ssh that swallowed the caller's would
   #     be a surprising side effect. -T: no pty, so no terminal escape noise.
-  out="$(ssh -n -T \
-             -o BatchMode=yes \
-             -o "ConnectTimeout=${BB_SSH_CONNECT_TIMEOUT}" \
-             -o StrictHostKeyChecking=accept-new \
-             -- "$target" "$payload" 2>"$errf")"
-  last="${out##*$'\n'}"
-  case "$last" in
-    "${BB_PROXY_SENTINEL}"*) rc="${last#"${BB_PROXY_SENTINEL}"}" ;;
-    *)                       rc="" ;;
-  esac
-  case "$rc" in ''|*[!0-9]*) rc="" ;; esac
-  if [ -z "$rc" ]; then
-    _BB_PROXY_ERR="$(cat "$errf" 2>/dev/null)"
-    rm -f "$errf"
+  ssh -n -T \
+      -o BatchMode=yes \
+      -o "ConnectTimeout=${BB_SSH_CONNECT_TIMEOUT}" \
+      -o StrictHostKeyChecking=accept-new \
+      -- "$_bb_target" "$_bb_payload" >"$_BB_PROXY_OUT" 2>"$_bb_errf"
+  # One builtin pass over the (small, human-sized) stderr: lift the sentinel out,
+  # keep everything else. `|| [ -n … ]` so a final line with no newline is not
+  # dropped — ssh's own errors are newline-terminated, a killed remote's may not be.
+  _bb_acc=""
+  while IFS= read -r _bb_line || [ -n "$_bb_line" ]; do
+    case "$_bb_line" in
+      "${BB_PROXY_SENTINEL}"*) _BB_PROXY_RC="${_bb_line#"${BB_PROXY_SENTINEL}"}" ;;
+      *)                       _bb_acc="${_bb_acc}${_bb_line}"$'\n' ;;
+    esac
+  done < "$_bb_errf"
+  case "$_BB_PROXY_RC" in ''|*[!0-9]*) _BB_PROXY_RC="" ;; esac
+  if [ -z "$_BB_PROXY_RC" ]; then
+    # Never reached, or reached and killed before it could report: the caller
+    # falls back to the handoff and re-prefixes this onto stderr itself.
+    _BB_PROXY_ERR="$_bb_acc"
+    _BB_PROXY_OUT=""
     return 0
   fi
-  cat "$errf" >&2 2>/dev/null
-  rm -f "$errf"
-  # `${out%…}` strips the sentinel AND the newline that introduced it, so a
-  # remote stdout that did not end in a newline is not silently given one.
-  _BB_PROXY_STDOUT="${out%$'\n'*}"
+  printf '%s' "$_bb_acc" >&2
   _BB_PROXY_RAN=1
-  return "$rc"
+  return "$_BB_PROXY_RC"
 }
 
 # _print_handoff — #1598's rc-4 refusal, unchanged in shape, now reached only
@@ -2067,7 +2163,9 @@ out("ok", label)
     else
       _ssh_proxy "$BB_PROXY_TARGET" "$(_handoff_command)"; _prc=$?
       if [ "$_BB_PROXY_RAN" -eq 1 ]; then
-        printf '%s' "$_BB_PROXY_STDOUT"
+        # `cat`, not `printf "$var"`: byte-exact, and the payload never enters a
+        # shell variable — see THE EXPORT TRAP on _ssh_proxy.
+        cat -- "$_BB_PROXY_OUT"
         exit "$_prc"
       fi
       _print_handoff "Tried to run it on '${REF_HOST}' over ssh (${BB_PROXY_TARGET}); that host did not answer."
@@ -2596,6 +2694,14 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     if [ "$POS_SEEN" -eq 1 ] && [ -z "$POS" ]; then
       die "browser screenshot: the path must not be empty"
     fi
+    # 🔴 `+x` FOR THE SAME REASON `_ssh_proxy`'s LOCALS CARRY IT — see THE EXPORT
+    # TRAP there. `out` and `resp` are generic names an invoking shell may already
+    # EXPORT (this one exported `out`, which is how the trap was found), and
+    # `resp` holds the whole base64 capture on the LOCAL path — several hundred KB
+    # in one env string, past MAX_ARG_STRLEN, which would break every later exec
+    # exactly as it did on the proxy path. No such failure has been OBSERVED
+    # locally; this closes the class rather than a measured bug.
+    declare +x out resp
     out="$POS"
     if [ "$dataurl" -eq 1 ] && [ -n "$out" ]; then
       die "browser screenshot: --data-url and an explicit path are mutually exclusive"
@@ -2634,13 +2740,21 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         _print_handoff "Tried to capture it on '${REF_HOST}' over ssh (${BB_PROXY_TARGET}); that host did not answer."
       fi
       [ "$_prc" -eq 0 ] || exit "$_prc"
-      resp="$_BB_PROXY_STDOUT"
+      resp=""            # 🔴 stays EMPTY: the payload is the FILE, never a string
     else
+      _BB_PROXY_OUT=""
       resp="$(cmd_op screenshot "$full")" || exit 1
     fi
+    # _emit_response — the capture, on stdout, from whichever side produced it.
+    # ONE reader for both paths so the two cannot drift: locally it is the string
+    # `cmd_op` returned; cross-host it is the file `_ssh_proxy` filled, `cat`'d
+    # rather than interpolated (THE EXPORT TRAP, on _ssh_proxy).
+    _emit_response() {
+      if [ -n "$_BB_PROXY_OUT" ]; then cat -- "$_BB_PROXY_OUT"; else printf '%s' "$resp"; fi
+    }
     if [ "$dataurl" -eq 1 ]; then
       # Escape hatch: the raw response, data URL and all (pre-#211 behaviour).
-      printf '%s\n' "$resp" | pretty
+      { _emit_response; echo; } | pretty
     else
       # Extract the base64 payload of the data URL and write a .png. With an
       # explicit path, print just that path (unchanged, back-compat). With NO
@@ -2657,7 +2771,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
       #     the 8-byte PNG signature), so a malformed capture can never leave a
       #     0-byte ".png" behind that an agent Reads as if it were a screenshot.
       #   - temp captures are AUTO-PRUNED after 24h (best-effort, prefix-scoped).
-      printf '%s' "$resp" | python3 -c '
+      _emit_response | python3 -c '
 import json,sys,base64,binascii,re,os,stat,tempfile,time
 
 PREFIX = "browser-screenshot-"
