@@ -107,6 +107,37 @@ is what proved a *different* nginx was answering after the first fix.
 
 ---
 
+## 🔴 A BRIDGE `nav` IS NOT A CROSS-SITE NAVIGATION — testing SameSite with one gives a FALSE PASS
+
+Measured 2026-09-14 while closing comic-flex F2 (the masquerade banner vanishing on a
+cross-site entry). **A navigation with NO INITIATOR ORIGIN — the address bar, a
+bookmark, or `chrome.tabs.update`, which is what this bridge's `nav` uses — is treated
+as SAME-SITE, so the browser sends the cookie even when it is `SameSite=Strict`.**
+
+So `nav`-ing straight to the target URL cannot distinguish `Strict` from `Lax`. It would
+have reported **PASS on the unfixed code**, against the one defect the whole change
+existed to fix.
+
+The valid shape needs a real cross-site *initiator*:
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+T=<tabId>
+$BB --instance work --tab $T nav 'https://example.com/' --wake
+$BB --instance work --tab $T js '1+1'            # CONTROL: must be 2, or the plant below is a silent no-op
+$BB --instance work --tab $T js '(function(){var a=document.createElement("a");a.id="xsite";a.href="https://comics.zacx.dev/collections";document.body.appendChild(a);return a.href})()'
+$BB --instance work --tab $T wake
+$BB --instance work --tab $T click '#xsite'      # TRUSTED click — a JS .click() is not a user gesture
+```
+
+🔴 **The `js '1+1'` control is not ceremony.** `js` returns `null` on comics.zacx.dev
+(CSP — see the top of this file), so if you plant the link while still on that origin the
+call silently does nothing and the subsequent `click` finds no element. The control proves
+you are on an origin where the plant can work.
+
+Generalises past this app: **any** cookie-attribute or cross-origin behaviour needs the
+navigation to come FROM a page on another origin, not from the bridge.
+
 ## TWO LANES. Pick one before the first op — they differ in what they can SEE.
 
 | lane | host | auth | service worker |
