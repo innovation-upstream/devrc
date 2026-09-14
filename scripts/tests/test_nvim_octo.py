@@ -616,7 +616,11 @@ _LUA_PRELUDE = r"""
 -- than performs, so the scenario below can read what the file DID.
 RECORD = {keymaps = {}, notify = {}, merges = {}, prompts = {}, wins = {},
           applied = {}, buflines = nil, actions = {}, excmds = {},
-          delcmds = {}, setlines = {}, winbufs = {}}
+          delcmds = {}, setlines = {}, winbufs = {}, autocmds = {}}
+-- Drives the `maparg` stub: an lhs present here is MAPPED, i.e. no longer
+-- vim's own. Empty by default, which is the state a real review_diff buffer is
+-- in for every motion the legend's native section lists.
+MAPPED = {}
 -- Buffer handles are DISTINCT per creation, so "the buffer that was shown is
 -- the buffer the diagnosis was written into" is a real check and not an
 -- artefact of every handle being the same number.
@@ -637,7 +641,13 @@ end
 
 vim = {
   g = {},
-  o = {columns = 120, lines = 40},
+  -- 🔴 `diffopt` IS SEEDED WITH NEOVIM 0.12.5's REAL DEFAULT, not a convenient
+  -- short string. The whole point of `optlist_with` is that it must not throw
+  -- away settings this wrapper has no opinion about, and a two-entry fixture
+  -- could not tell a merge from an overwrite.
+  o = {columns = 120, lines = 40, wrap = true, linebreak = false,
+       fillchars = "",
+       diffopt = "internal,filler,closeoff,indent-heuristic,inline:char,linematch:40"},
   bo = autotable(),
   wo = autotable(),
   log = {levels = {ERROR = 4, WARN = 3, INFO = 2}},
@@ -650,6 +660,15 @@ vim = {
   }),
   fn = {
     strdisplaywidth = function(s) return #s end,
+    -- Real `maparg(lhs, "n", false, true)` returns a DICT — populated when the
+    -- key is mapped in this buffer, EMPTY when it is not. That empty/non-empty
+    -- distinction is the whole signal, so the stub models exactly it.
+    maparg = function(lhs, _mode, _abbr, _dict)
+      if MAPPED[lhs] then
+        return {lhs = lhs, rhs = "<Cmd>something<CR>", buffer = 1}
+      end
+      return {}
+    end,
     input = function(prompt)
       RECORD.prompts[#RECORD.prompts + 1] = prompt
       local a = table.remove(ANSWERS, 1)
@@ -669,6 +688,13 @@ vim = {
     end,
   },
   api = {
+    -- Recorded rather than performed, so a test can read what was registered
+    -- AND call the callback itself — an autocmd nothing can drive is an
+    -- autocmd nobody has watched work.
+    nvim_create_autocmd = function(events, opts)
+      RECORD.autocmds[#RECORD.autocmds + 1] = {events = events, opts = opts}
+      return #RECORD.autocmds
+    end,
     nvim_create_buf = function()
       NEXT_BUF = NEXT_BUF + 1
       return NEXT_BUF
@@ -1421,6 +1447,424 @@ def test_open_in_browser_was_ALREADY_bound_and_is_now_DISCOVERABLE(tmp_path):
         f"the legend renders a browser key that is not `<C-b>`, which means a "
         f"second binding was added instead of making the first one "
         f"discoverable: {kv['browser_row']}")
+
+
+# --------------------------------------------------------------------------- #
+# THE NATIVE DIFF MOTIONS — the source the generated legend structurally COULD
+# NOT SEE
+# --------------------------------------------------------------------------- #
+
+# 🔴 THE MOTIONS THE OPERATOR ASKED FOR BY NAME. The legend's list may grow;
+# this is the floor it may not drop below, and it is asserted as a SUBSET so a
+# future addition does not need an edit here. The behaviour of each — that `]c`
+# really moves to the next hunk, that `zc` really closes a fold — is NOT
+# assertable from luajit with a stubbed vim, and is pinned in the dev-host tier
+# by `scripts/devhost-tests/test_nvim_octo_diff_motions.py`, which drives a real
+# neovim into a real diff. Neither tier alone is the guard.
+REQUIRED_NATIVE_MOTIONS = ("]c", "[c", "zo", "zc", "zr", "zm", "zi")
+
+# The heading a reader uses to tell a vim built-in from a binding this repo
+# installs. Asserted as a whole normalised string below rather than as a
+# keyword, because a guard on WORDS is walkable by rewording.
+NATIVE_HEADING_NEEDLE = "VIM'S OWN diff motions"
+OCTO_HEADING_NEEDLE = "octo.nvim bindings"
+DOORS_HEADING_NEEDLE = "START HERE"
+
+
+def _lines_of(kind: str, tmp_path: Path, *, diff: bool, extra: str = ""):
+    """`legend_lines(kind)` as a python list, with diff mode driven explicitly."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'vim.wo[0].diff = %s' % ("true" if diff else "false"),
+        extra,
+        'for _, l in ipairs(NvimOcto.legend_lines(%s)) do KV("L", l) end'
+        % json.dumps(kind),
+    ]))
+    return kv.get("L", [])
+
+
+def test_a_DIFF_buffer_legend_LISTS_VIMS_OWN_hunk_and_fold_motions(tmp_path):
+    """🔴 REGRESSION. The legend generates from `config.values.mappings[kind]`,
+    and the keys that move between HUNKS are not in that table and never will
+    be: `reviews/file-entry.lua` calls `pcall(vim.cmd.diffthis)` and sets
+    `foldmethod = "diff"`, so `]c`, `[c` and the `z…` motions come from neovim
+    itself. A legend describing itself as "this buffer's bindings" while being
+    structurally unable to show the ones a reviewer reaches for first is a
+    description wider than its implementation.
+
+    RED at `e8fa6fca` — no native row exists there at all.
+    """
+    lines = _lines_of("review_diff", tmp_path, diff=True)
+    blob = "\n".join(lines)
+    assert NATIVE_HEADING_NEEDLE in blob, (
+        "a review_diff legend opened in a diff-mode buffer names no vim "
+        f"motions at all:\n{blob}")
+    for motion in REQUIRED_NATIVE_MOTIONS:
+        assert any(row.strip().startswith(motion + " ") for row in lines), (
+            f"{motion!r} is not listed in the diff legend:\n{blob}")
+
+
+def test_the_native_section_is_SEPARATELY_LABELLED_as_not_octos(tmp_path):
+    """🔴 THE SEPARATION IS THE ASK, NOT A PRESENTATION CHOICE. An octo binding
+    and a vim built-in are maintained by different people and break
+    differently, so the operator must be able to tell which is which from the
+    legend alone.
+
+    Asserted structurally, three ways, because any one alone is weak: the
+    native rows appear under their OWN heading, that heading comes AFTER octo's
+    (so a reader meets the authoritative list first), and no native motion is
+    smuggled into `legend_rows`, which is the generated octo list.
+
+    ⚠ INVARIANT GUARD as far as the ordering goes. The claim it really carries
+    — that the two sources are distinguishable at all — is red at `e8fa6fca`
+    for the trivial reason that neither heading exists there.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'vim.wo[0].diff = true',
+        'for i, l in ipairs(NvimOcto.legend_lines("review_diff")) do',
+        '  KV("L", i .. "|" .. l)',
+        'end',
+        'for _, r in ipairs(NvimOcto.legend_rows("review_diff")) do',
+        '  KV("octo_lhs", r.lhs)',
+        'end',
+        'for _, r in ipairs(NvimOcto.native_rows()) do',
+        '  KV("native_lhs", r.lhs)',
+        '  KV("native_source", r.source)',
+        'end',
+    ]))
+    rows = kv["L"]
+    octo_at = [int(r.split("|", 1)[0]) for r in rows
+               if OCTO_HEADING_NEEDLE in r]
+    native_at = [int(r.split("|", 1)[0]) for r in rows
+                 if NATIVE_HEADING_NEEDLE in r]
+    assert len(octo_at) == 1, f"expected one octo heading, got {octo_at}: {rows}"
+    assert len(native_at) == 1, (
+        f"expected one vim-motion heading, got {native_at}: {rows}")
+    assert octo_at[0] < native_at[0], (
+        "the vim built-ins are printed above octo's own bindings; the "
+        "authoritative list must come first")
+    heading = [r.split("|", 1)[1] for r in rows if NATIVE_HEADING_NEEDLE in r][0]
+    assert "NOT octo's" in heading, (
+        f"the native heading does not disown octo: {heading!r}")
+    # 🔴 THE SMUGGLING CHECK. `legend_rows` is the GENERATED octo list and the
+    # header's count is taken from it; a native motion appearing there would
+    # both mis-attribute the row and inflate a number a reader trusts.
+    assert set(kv["native_lhs"]) & set(kv["octo_lhs"]) == set(), (
+        f"a vim motion is also being reported as an octo binding: "
+        f"{sorted(set(kv['native_lhs']) & set(kv['octo_lhs']))}")
+    assert set(kv["native_source"]) == {"vim"}, kv["native_source"]
+    assert set(REQUIRED_NATIVE_MOTIONS) <= set(kv["native_lhs"]), kv["native_lhs"]
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_the_native_section_is_ABSENT_when_the_buffer_is_NOT_in_diff_mode(
+        tmp_path, kind: str):
+    """🔴 DERIVED FROM THE WINDOW, NOT FROM A LIST OF KIND NAMES. `]c` is
+    `next_comment` on the `pull_request`, `issue`, `review_thread` and
+    `discussion` tables — printing it under "vim's own diff motions" on one of
+    those buffers would be a straightforwardly false claim, and the legend is
+    the one surface whose job is to be true.
+
+    So the gate is `vim.wo[0].diff`, read off the window the legend is opened
+    from. Asserted over EVERY kind with diff mode off, which is also what makes
+    the previous test's green mean something: the same call with the same kind
+    must produce the section only when the window says diff.
+    """
+    lines = _lines_of(kind, tmp_path, diff=False)
+    blob = "\n".join(lines)
+    assert NATIVE_HEADING_NEEDLE not in blob, (
+        f"the {kind} legend advertises vim diff motions on a window that is "
+        f"not in diff mode:\n{blob}")
+    # ⚠ The assertion above is about the HEADING's absence, not about the
+    # motions' strings never appearing: `]c`/`[c` are legitimately octo rows on
+    # the comment-bearing kinds. The row COUNT below is the second, sharper
+    # reading of the same claim.
+    kv = _ok_lua(tmp_path, "\n".join([
+        'vim.wo[0].diff = false',
+        'KV("n", #NvimOcto.native_rows())',
+        'vim.wo[0].diff = true',
+        'KV("n_diff", #NvimOcto.native_rows())',
+    ]))
+    assert kv["n"] == ["0"], kv
+    # POSITIVE CONTROL, in the same run: the counter CAN move off zero, so the
+    # zero above is a measurement rather than a function wired to nothing.
+    assert int(kv["n_diff"][0]) == len(REQUIRED_NATIVE_MOTIONS), kv
+
+
+def test_a_motion_something_has_MAPPED_is_no_longer_reported_as_VIMS(tmp_path):
+    """🔴 THE ROW IS CHECKED AGAINST THE LIVE BUFFER, NOT AGAINST A BELIEF.
+    A built-in stops being a built-in the moment something maps it — and this
+    wrapper's own keymaps, octo's, and anything upstream adds all land on the
+    buffer before the legend is ever rendered. `vim.fn.maparg` in that buffer is
+    the only thing that knows.
+
+    Driven by mapping ONE motion and watching exactly that row disappear while
+    the others stay, so a filter that dropped everything (or nothing) fails.
+    """
+    body = "\n".join([
+        'vim.wo[0].diff = true',
+        'for _, r in ipairs(NvimOcto.native_rows()) do KV("lhs", r.lhs) end',
+    ])
+    free = _ok_lua(tmp_path, body)
+    taken = _ok_lua(tmp_path, body, setup='MAPPED["]c"] = true')
+    assert "]c" in free["lhs"], free
+    assert "]c" not in taken["lhs"], (
+        "`]c` is still advertised as vim's own after something mapped it: "
+        f"{taken['lhs']}")
+    assert len(taken["lhs"]) == len(free["lhs"]) - 1, (free, taken)
+    assert "[c" in taken["lhs"], (
+        f"the shadow filter dropped rows it was not asked about: {taken['lhs']}")
+
+
+def test_the_native_motions_the_operator_ASKED_FOR_are_all_declared(tmp_path):
+    """The floor, read out of the Lua rather than restated: every motion named
+    in the brief must be in `NATIVE_MOTIONS`, each with a non-empty description.
+    A row whose description is blank is a key with no answer beside it."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'for _, m in ipairs(NvimOcto.NATIVE_MOTIONS) do',
+        '  KV("motion", m.lhs .. "|" .. tostring(m.desc))',
+        'end',
+    ]))
+    declared = {row.split("|", 1)[0]: row.split("|", 1)[1] for row in kv["motion"]}
+    missing = [m for m in REQUIRED_NATIVE_MOTIONS if m not in declared]
+    assert not missing, f"missing native motions: {missing} (have {declared})"
+    blank = [k for k, v in declared.items() if not v.strip() or v == "nil"]
+    assert not blank, f"native motions with no description: {blank}"
+
+
+# --------------------------------------------------------------------------- #
+# THE DOORS — the entry points, promoted out of the alphabetical list
+# --------------------------------------------------------------------------- #
+
+def test_the_DOORS_are_promoted_ABOVE_the_alphabetical_list(tmp_path):
+    """🔴 REGRESSION. A clicked mention lands on the `pull_request` buffer, and
+    without `review_start` none of the review surface exists — no file panel, no
+    side-by-side diff, no hunk motions. Sorted alphabetically among forty-odd
+    rows it reads as no more important than a reaction emoji, which is the
+    operator's actual complaint.
+
+    RED at `e8fa6fca`, where the legend has exactly one section.
+    """
+    lines = _lines_of("pull_request", tmp_path, diff=False)
+    numbered = list(enumerate(lines, start=1))
+    doors = [i for i, l in numbered if DOORS_HEADING_NEEDLE in l]
+    octo = [i for i, l in numbered if OCTO_HEADING_NEEDLE in l]
+    assert len(doors) == 1 and len(octo) == 1, (doors, octo, lines)
+    assert doors[0] < octo[0], (
+        f"the doors section is not above the generated list: {lines}")
+    # `review_start` — the door itself — must be inside the promoted block,
+    # i.e. between the two headings.
+    door_rows = [l for i, l in numbered if doors[0] < i < octo[0]]
+    assert any("start a review" in l for l in door_rows), (
+        f"`review_start` is not in the promoted block: {door_rows}")
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_every_promoted_door_RESOLVES_to_a_real_generated_row(tmp_path, kind):
+    """🔴 THE ANTI-STALENESS GUARD ON THE ONE HAND-WRITTEN LEDGER IN THE
+    FEATURE. `PROMOTED_DOORS` names ACTIONS, never keys and never descriptions,
+    and the row is looked up in the generated rows — so the key and the wording
+    still come from the live config and cannot disagree with the body.
+
+    What a ledger of names CAN do is name something upstream has renamed, and
+    the promoted section would then quietly shrink. This fails instead: every
+    declared action must resolve, and the resolved row must be byte-identical to
+    the one in the body, which is what proves there is one source and not two.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'local kind = %s' % json.dumps(kind),
+        'for _, a in ipairs(NvimOcto.promoted_actions(kind)) do KV("want", a) end',
+        'for _, r in ipairs(NvimOcto.promoted_rows(kind)) do',
+        '  KV("got", r.action .. "\\1" .. r.lhs .. "\\1" .. r.desc)',
+        'end',
+        'for _, r in ipairs(NvimOcto.legend_rows(kind)) do',
+        '  KV("body", r.action .. "\\1" .. r.lhs .. "\\1" .. r.desc)',
+        'end',
+    ]))
+    want = kv.get("want", [])
+    got = kv.get("got", [])
+    assert [g.split("\1")[0] for g in got] == want, (
+        f"{kind}: promoted rows {got} do not match the declared doors {want} — "
+        f"an action in `PROMOTED_DOORS` no longer exists on this kind")
+    body = set(kv.get("body", []))
+    for row in got:
+        assert row in body, (
+            f"{kind}: the promoted row {row!r} is not byte-identical to any row "
+            f"in the generated body, so the section has its own copy of the key "
+            f"or the wording")
+
+
+def test_the_doors_ledger_COVERS_the_three_review_surfaces(tmp_path):
+    """The ledger is allowed to be empty for a kind — most kinds have no door.
+    But the three that carry the review chain must each have one, or the whole
+    promotion is decoration. Pinned two-way: named here, and each name has to
+    resolve (previous test).
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'for _, k in ipairs({%s}) do' % ", ".join(
+            json.dumps(k) for k in ALL_KINDS),
+        '  KV(k, #NvimOcto.promoted_actions(k))',
+        'end',
+    ]))
+    for kind in ("pull_request", "review_diff", "file_panel"):
+        assert int(kv[kind][0]) > 0, (
+            f"{kind} has no promoted door, so a reader meets its entry point "
+            f"only by scanning the alphabetical list")
+    assert int(kv["submit_win"][0]) == 0, (
+        "submit_win is a three-key verdict form; promoting anything there is "
+        "noise")
+
+
+# --------------------------------------------------------------------------- #
+# THE LAYOUT — the option merges and the derived file-panel height
+# --------------------------------------------------------------------------- #
+
+# neovim 0.12.5's own default, MEASURED on this host
+# (`nvim --headless --clean -u NONE -c 'echo &diffopt'`). Used as the input to
+# the merge below so the test can see a setting being dropped.
+NVIM_DEFAULT_DIFFOPT = (
+    "internal,filler,closeoff,indent-heuristic,inline:char,linematch:40")
+
+
+def test_optlist_with_REPLACES_by_NAME_and_KEEPS_everything_else(tmp_path):
+    """🔴 THE FAILURE THIS CLOSES IS SILENT AND EXPENSIVE. Assigning a bare
+    string to `diffopt` drops `filler` — the alignment rows that make a
+    side-by-side diff readable at all — and `internal`, the diff engine. And a
+    plain append leaves `linematch:40` AND `linematch:60` in one list.
+
+    Measured at four inputs, not one, because this is a function OF its
+    argument: the real default, a list already carrying our value, a list
+    carrying neither, and empty.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'KV("default", NvimOcto.optlist_with(%s, {"algorithm:histogram", "linematch:60"}))'
+        % json.dumps(NVIM_DEFAULT_DIFFOPT),
+        'KV("already", NvimOcto.optlist_with("filler,linematch:60", {"linematch:60"}))',
+        'KV("unrelated", NvimOcto.optlist_with("filler,iwhite", {"linematch:60"}))',
+        'KV("empty", NvimOcto.optlist_with("", {"diff:X"}))',
+    ]))
+    merged = kv["default"][0].split(",")
+    # Everything this wrapper has no opinion about SURVIVED…
+    for kept in ("internal", "filler", "closeoff", "indent-heuristic",
+                 "inline:char"):
+        assert kept in merged, (kept, merged)
+    # …the named setting was REPLACED rather than duplicated…
+    assert "linematch:40" not in merged, merged
+    assert merged.count("linematch:60") == 1, merged
+    assert merged.count("algorithm:histogram") == 1, merged
+    assert kv["already"] == ["filler,linematch:60"], kv["already"]
+    assert kv["unrelated"] == ["filler,iwhite,linematch:60"], kv["unrelated"]
+    assert kv["empty"] == ["diff:X"], kv["empty"]
+
+
+def test_the_editor_gets_a_MERGED_diffopt_and_an_UNWRAPPED_window(tmp_path):
+    """The live values the file actually set, not the helper in isolation — a
+    correct merge assigned to nothing would pass the test above."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'KV("diffopt", vim.o.diffopt)',
+        'KV("fillchars", vim.o.fillchars)',
+        'KV("wrap", tostring(vim.o.wrap))',
+    ]))
+    diffopt = kv["diffopt"][0].split(",")
+    assert "filler" in diffopt and "internal" in diffopt, diffopt
+    assert "linematch:60" in diffopt and "linematch:40" not in diffopt, diffopt
+    assert "algorithm:histogram" in diffopt, diffopt
+    assert "diff:" in kv["fillchars"][0], kv["fillchars"]
+    assert kv["wrap"] == ["false"], (
+        "`wrap` is still on globally, so a long line in one pane of a "
+        "side-by-side diff will de-align every row after it")
+
+
+def test_wrap_is_decided_by_the_BUFFER_and_flips_BOTH_ways(tmp_path):
+    """🔴 THE BUG A REAL EDITOR FOUND, PINNED. `wrap` is WINDOW-local — vim has
+    no buffer-local scope for it — so a hook that only ever turns wrapping ON
+    for octo's prose buffers leaves that window wrapping forever, including for
+    whatever is loaded into it next. octo's review layout loads every file's
+    diff into the SAME two windows (`reviews/layout.lua`), so exactly one prose
+    buffer in a reused window would have re-wrapped every diff after it.
+
+    So the predicate is asserted in BOTH directions, which is what separates it
+    from the first draft: prose ON, anything else OFF, legend ON.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
+        'KV("octo", tostring(NvimOcto.wants_wrap("octo")))',
+        'KV("legend", tostring(NvimOcto.wants_wrap(NvimOcto.LEGEND_FILETYPE)))',
+        'KV("lua", tostring(NvimOcto.wants_wrap("lua")))',
+        'KV("panel", tostring(NvimOcto.wants_wrap("octo_panel")))',
+        'KV("none", tostring(NvimOcto.wants_wrap("")))',
+        # The autocmd is registered AND is driveable: run its callback against a
+        # buffer whose filetype says prose, then against one that does not.
+        'KV("autocmds", #RECORD.autocmds)',
+        'local hook = nil',
+        'for _, a in ipairs(RECORD.autocmds) do',
+        '  if a.opts and type(a.opts.callback) == "function" then hook = a end',
+        'end',
+        'if hook == nil then FAIL("no autocmd with a callback was registered") end',
+        'local events = hook.events',
+        'if type(events) == "table" then',
+        '  KV("events", table.concat(events, ","))',
+        'else KV("events", tostring(events)) end',
+        'vim.bo[0].filetype = "octo"',
+        'hook.opts.callback()',
+        'KV("wrap_prose", tostring(vim.wo[0].wrap))',
+        'vim.bo[0].filetype = "lua"',
+        'hook.opts.callback()',
+        'KV("wrap_code", tostring(vim.wo[0].wrap))',
+    ]))
+    assert kv["octo"] == ["true"] and kv["legend"] == ["true"], kv
+    assert kv["lua"] == ["false"] and kv["panel"] == ["false"], kv
+    assert kv["none"] == ["false"], kv
+    # 🔴 THE EVENT SET IS THE FIX. `FileType` alone cannot see a window whose
+    # buffer changed without a filetype event, which is precisely the reused
+    # review window.
+    events = kv["events"][0].split(",")
+    assert "BufWinEnter" in events, (
+        f"the wrap hook does not fire when a buffer enters a window, so a "
+        f"reused review window keeps the previous buffer's wrapping: {events}")
+    assert kv["wrap_prose"] == ["true"], kv
+    assert kv["wrap_code"] == ["false"], (
+        "the hook never turns wrapping back OFF — this is the window-local "
+        "leak a real editor caught")
+
+
+@pytest.mark.parametrize("lines,want", [
+    (0, 6), (10, 6), (21, 6),          # the low clamp, its boundary, and below
+    (25, 7), (40, 11), (50, 14),       # the middle, where it actually follows
+    (64, 17), (65, 18), (200, 18),     # the high boundary and beyond
+])
+def test_the_file_panel_height_FOLLOWS_the_terminal(tmp_path, lines, want):
+    """🔴 MEASURED AT NINE POINTS, INCLUDING BOTH BOUNDARIES AND THE MIDDLE.
+    octo ships a flat `file_panel.size = 10` and opens the panel full-width
+    along the bottom, so that 10 comes out of the diff on every terminal: too
+    small on a tall window, a third of a short one.
+
+    A single measurement of a function OF the height would say nothing about
+    the function — a constant 6 and a constant 18 each pass one row of this
+    table. Both clamps and the sloped middle are what pin it.
+    """
+    kv = _ok_lua(tmp_path,
+                 'KV("size", NvimOcto.file_panel_size(%d))' % lines)
+    assert kv["size"] == [str(want)], (
+        f"file_panel_size({lines}) = {kv['size']}, expected {want}")
+
+
+def test_the_file_panel_size_the_CONFIG_gets_is_the_DERIVED_one(tmp_path):
+    """The helper being right buys nothing if the config was handed a literal.
+    Read back off `config.values`, which is what octo actually uses, and
+    compared against the function evaluated at the SAME height."""
+    kv = _ok_lua(tmp_path, "\n".join([
+        'KV("lines", vim.o.lines)',
+        'KV("live", tostring(CONF.values.file_panel and CONF.values.file_panel.size))',
+        'KV("derived", NvimOcto.file_panel_size(vim.o.lines))',
+    ]))
+    assert kv["live"] == kv["derived"], kv
+    assert kv["live"] != ["nil"], (
+        "octo was handed no `file_panel` block at all, so it is back on its "
+        "own flat default")
+    # NEGATIVE CONTROL on the comparison: the two sides must not be equal by
+    # accident of both being octo's shipped 10 at this fixture height.
+    assert kv["derived"] != ["10"], (
+        f"the fixture terminal height {kv['lines']} happens to derive octo's "
+        f"own default, so this comparison could not see a hardcoded 10")
 
 
 # --------------------------------------------------------------------------- #

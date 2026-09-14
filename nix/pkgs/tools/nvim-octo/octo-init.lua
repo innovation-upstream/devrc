@@ -11,6 +11,15 @@
 -- freely; do not move those settings into a computed expression, because a
 -- value the reader cannot see is a value nobody is checking.
 --
+-- ⚠ EXACTLY ONE VALUE IN THAT TABLE IS COMPUTED, AND THE EXEMPTION IS ARGUED
+-- RATHER THAN ASSUMED: `file_panel.size`. The rule above exists for SAFETY
+-- settings — a merge method or a picker whose value decides what a keystroke
+-- does to GitHub — and the panel's height decides nothing but how many rows of
+-- a file list are visible. Against that, the right answer genuinely differs
+-- between a 24-row terminal and an 80-row one, which no literal can express. It
+-- is still checked, and at nine heights rather than one:
+-- `test_the_file_panel_height_FOLLOWS_the_terminal`.
+--
 -- ⚠ `--` LINE COMMENTS ONLY. The test's comment stripper does not understand
 -- Lua long-bracket comments (`--[[ … ]]`) and would hand every structural
 -- reader the body of one as if it were configuration.
@@ -109,11 +118,155 @@
 -- colorscheme, no options — a window that looks broken in a second, unrelated
 -- way on top of the real failure. Everything that does not depend on octo is
 -- therefore done BEFORE the call, and the call itself is wrapped.
+--
+-- 🔴 `_G.NvimOcto` IS DECLARED HERE, NOT BESIDE ITS FIRST METHOD, FOR EXACTLY
+-- THAT REASON. The editor-options block below calls into it (`M.optlist_with`,
+-- `M.file_panel_size`), and the setup call reads `M.file_panel_size` too — so
+-- the table and the two PURE helpers have to exist before the options are set.
+-- The long note on why it is a WRITABLE GLOBAL, and what that assumes, sits
+-- with the rest of the methods further down; nothing about that changes here.
+local M = {}
+_G.NvimOcto = M
+
+-- 🔴 A COMMA-LIST OPTION IS MERGED, NEVER OVERWRITTEN, AND THE REASON IS
+-- MEASURED. neovim 0.12.5 ships `diffopt` as
+-- `internal,filler,closeoff,indent-heuristic,inline:char,linematch:40` — six
+-- settings this wrapper has an opinion about exactly TWO of. Assigning a bare
+-- string would silently drop `filler` (the alignment lines that make a
+-- side-by-side diff readable at all) and `internal` (the diff engine), which is
+-- the opposite of tuning the diff.
+--
+-- ⚠ AND `:append` IS NOT THE ANSWER EITHER, because these are NAMED settings:
+-- appending `linematch:60` to a list that already carries `linematch:40` leaves
+-- both, and which one wins is not something this file should be guessing. So a
+-- wanted entry REPLACES any existing entry with the same NAME — the part before
+-- the colon — and everything else is kept in place.
+--
+-- Pure, and takes the current value as an argument rather than reading it, so
+-- the tests can drive it at values this host does not happen to have.
+function M.optlist_with(current, wanted)
+  local drop = {}
+  for _, entry in ipairs(wanted) do
+    drop[tostring(entry):match("^[^:]*")] = true
+  end
+  local kept = {}
+  for entry in tostring(current or ""):gmatch("[^,]+") do
+    if not drop[entry:match("^[^:]*")] then
+      kept[#kept + 1] = entry
+    end
+  end
+  for _, entry in ipairs(wanted) do
+    kept[#kept + 1] = tostring(entry)
+  end
+  return table.concat(kept, ",")
+end
+
+-- `histogram` produces tighter, more human hunk boundaries than the default
+-- `myers` on code, and `linematch:60` lets neovim align changed lines INSIDE a
+-- hunk up to 60 lines instead of the shipped 40 — which is the difference
+-- between "this block was rewritten" and "these three lines moved".
+M.DIFF_OPTS = { "algorithm:histogram", "linematch:60" }
+
+-- ⚠ `fillchars` DEFAULTS TO THE EMPTY STRING, so nothing is being replaced
+-- here today — it goes through the same merge anyway, because the day neovim
+-- ships a default is not the day to discover that this line overwrote it. The
+-- filler rows in a diff are drawn with `-` by default, which reads as a wall of
+-- dashes between the two panes.
+M.FILL_CHARS = { "diff:╱" }
+
+-- 🔴 THE CHANGED-FILES PANEL IS A FRACTION OF THE TERMINAL, NOT A CONSTANT.
+-- octo ships `file_panel.size = 10` rows and opens the panel full-width along
+-- the BOTTOM (`reviews/file-panel.lua`: `sp`, `wincmd J`, `resize <size>`), so
+-- that 10 is taken out of the diff on every terminal. On a tall window it is
+-- needlessly small; on a short one it eats a third of the review.
+--
+-- ⚠ THE BOUNDS ARE THE POINT, NOT THE RATIO. 6 rows still shows a header plus
+-- several files; above 18 the panel stops being a list and starts being a
+-- second pane. Pure and parameterised so a test can measure it at more than one
+-- terminal height — a single measurement of a function OF the height would say
+-- nothing about the function.
+M.FILE_PANEL_MIN = 6
+M.FILE_PANEL_MAX = 18
+M.FILE_PANEL_FRACTION = 0.28
+
+function M.file_panel_size(editor_lines)
+  local want = math.floor((tonumber(editor_lines) or 0) * M.FILE_PANEL_FRACTION)
+  if want < M.FILE_PANEL_MIN then
+    return M.FILE_PANEL_MIN
+  end
+  if want > M.FILE_PANEL_MAX then
+    return M.FILE_PANEL_MAX
+  end
+  return want
+end
+
 vim.o.termguicolors = true
 vim.o.background = "dark"
 vim.o.laststatus = 2
 vim.o.number = true
 vim.o.signcolumn = "yes"
+
+-- 🔴 `wrap` OFF IS A DIFF SETTING, AND IT IS THE ONE THAT MATTERS MOST HERE.
+-- octo's review layout is two vertical splits running `diffthis`
+-- (`reviews/layout.lua`: `belowright vsp`), which lines the two revisions up
+-- row for row. A wrapped long line occupies two rows on one side and one on the
+-- other, and from there every subsequent row of that screenful is comparing
+-- unrelated text — the alignment that is the whole point of a side-by-side diff
+-- is gone, silently, and only on the files that happen to have a long line.
+--
+-- ⚠ IT IS RESTORED WHERE THE BUFFER IS PROSE, AND THE FILETYPE IS THE DERIVED
+-- WAY TO SAY SO. MEASURED against octo 2026-08-28: `filetype = "octo"` is set by
+-- `model/octo-buffer.lua` and `ui/writers.lua` on exactly the text-bearing
+-- surfaces — the PR, issue, discussion and review-thread buffers — while the
+-- file panel is `octo_panel` and a diff buffer keeps the reviewed FILE's own
+-- filetype. So the predicate below re-enables wrapping on every surface that
+-- holds a paragraph and on none that holds a diff, without naming one of them.
+-- (The same measurement is why the LEGEND rides `apply_mappings` rather than a
+-- FileType hook: three kinds never get the filetype. Here that is exactly the
+-- discrimination wanted.)
+--
+-- 🔴 `FileType` ALONE WAS WRONG, AND A REAL EDITOR IS WHAT SAID SO. `wrap` is
+-- WINDOW-local — vim has no buffer-local scope for it — so a `FileType octo`
+-- hook setting `vim.wo[0].wrap = true` leaves that window wrapping FOREVER,
+-- including for whatever is loaded into it next. MEASURED headless: open an
+-- octo buffer, `:enew` a lua file in the same window, `&wrap` is still on. That
+-- is not hypothetical here — octo's review layout LOADS EACH FILE'S DIFF INTO
+-- THE SAME TWO WINDOWS (`reviews/layout.lua`'s `left_winid`/`right_winid`), so
+-- one earlier prose buffer in a reused window would have silently unwrapped
+-- nothing and re-wrapped every diff after it.
+--
+-- So the rule is a PREDICATE over the buffer now in the window, re-evaluated on
+-- every event that can change that pairing, and it sets wrap in BOTH
+-- directions. One rule, one place: `M.wants_wrap` is the only thing that
+-- decides, and `M.WRAPPED_FILETYPES` is the only ledger of what counts as prose.
+M.LEGEND_FILETYPE = "octo-legend"
+
+M.WRAPPED_FILETYPES = {
+  -- octo's own text surfaces: PR, issue, discussion, review thread.
+  octo = true,
+  -- This wrapper's legend float. Its headings are full sentences and the float
+  -- is capped to `columns - 4`, so on a narrow terminal an unwrapped heading is
+  -- simply NOT ON SCREEN — see `show_legend`.
+  [M.LEGEND_FILETYPE] = true,
+}
+
+function M.wants_wrap(filetype)
+  return M.WRAPPED_FILETYPES[tostring(filetype)] == true
+end
+
+vim.o.wrap = false
+vim.o.linebreak = true
+vim.o.fillchars = M.optlist_with(vim.o.fillchars, M.FILL_CHARS)
+vim.o.diffopt = M.optlist_with(vim.o.diffopt, M.DIFF_OPTS)
+pcall(function()
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "FileType" }, {
+    callback = function()
+      vim.wo[0].wrap = M.wants_wrap(vim.bo[0].filetype)
+    end,
+    desc = "nvim-octo: wrap prose, never a diff — decided per BUFFER, not per "
+      .. "window, because `wrap` is window-local and the review reuses windows",
+  })
+end)
 
 -- Gruvbox, to match every other terminal this operator looks at (the alacritty
 -- palette in `nix/programs/alacritty/default.nix` is the same theme).
@@ -142,6 +295,16 @@ local ok, err = pcall(function()
   -- this is true (`reviews/init.lua`). A review opened from a clicked link must
   -- never touch a working tree — other sessions share these checkouts.
   use_local_fs = false,
+
+  -- 🔴 DERIVED FROM THE TERMINAL, NOT RESTATED. See `M.file_panel_size` above
+  -- for the bounds and why they, rather than the ratio, are the decision. This
+  -- is the ONE computed value in this table, and it is computed because the
+  -- right answer genuinely differs between a 24-row terminal and an 80-row one;
+  -- everything else here is a safety setting a reader must be able to see, and
+  -- stays a literal for that reason.
+  file_panel = {
+    size = M.file_panel_size(vim.o.lines),
+  },
 
   mappings_disable_default = true,
 
@@ -425,8 +588,10 @@ end
 -- because the operator's own neovim config never reaches it. It would NOT be
 -- acceptable in the daily editor — which is one more reason this is a separate
 -- wrapper. If a plugin is ever added here, that assumption is what changes.
-local M = {}
-_G.NvimOcto = M
+--
+-- ⚠ THE TABLE ITSELF IS DECLARED AT THE TOP OF THIS FILE, not here — the
+-- editor-options block needs two of its pure helpers before octo is set up.
+-- Everything below hangs off that same `M`.
 
 -- The leader characters, resolved the way neovim resolves them: unset (or
 -- empty) means the default backslash. Read at CALL time rather than captured,
@@ -749,6 +914,148 @@ function M.legend_rows(kind)
   return rows
 end
 
+-- ==========================================================================
+-- THE THINGS OCTO DID NOT BIND — VIM'S OWN DIFF MOTIONS
+-- ==========================================================================
+-- 🔴 THE LEGEND'S DESCRIPTION WAS WIDER THAN ITS IMPLEMENTATION, AND THAT IS
+-- THE DEFECT THIS SECTION CLOSES. It says it lists "this buffer's bindings"; it
+-- generates from `config.values.mappings[kind]`, which is ONE SOURCE of them.
+-- In a `review_diff` buffer the keys that actually move between HUNKS are not
+-- in that table and never will be: `reviews/file-entry.lua` calls
+-- `pcall(vim.cmd.diffthis)` and sets `foldmethod = "diff"`, `foldlevel = 0`, so
+-- `]c`, `[c` and the `z…` fold motions are live VIM BUILT-INS. A reader
+-- following the legend to navigate a diff found nothing, because the one thing
+-- it could not show was the one thing they wanted.
+--
+-- 🔴 SO IT IS A SEPARATELY LABELLED SECTION, AND THAT IS NOT COSMETIC. An octo
+-- binding and a vim built-in are maintained by different people and break
+-- differently: an octo key disappears when this wrapper's tables or upstream's
+-- change, a vim motion changes when neovim does, and neither this repo nor a
+-- test in it can promise the other's behaviour. Merging the two lists would
+-- have made one legend that is authoritative about half its own rows.
+--
+-- 🔴 THE LIST IS A LITERAL BECAUSE IT CANNOT BE DERIVED — VIM BUILT-INS ARE NOT
+-- ENUMERABLE FROM LUA. What IS derived is everything that decides whether a row
+-- is TRUE right now, and both halves are live rather than declared:
+--   * WHETHER the section appears at all — `vim.wo[0].diff`, read off the
+--     window the legend is being opened FROM. No kind is named anywhere here;
+--     `review_diff` is simply the kind octo runs `diffthis` on today, and a
+--     future kind that is also in diff mode gets the section with no edit.
+--   * WHETHER EACH ROW is still vim's — `vim.fn.maparg`, asked in that same
+--     buffer, after `apply_mappings` and this wrapper's own bindings have all
+--     run. A motion something has since MAPPED is no longer a vim built-in, and
+--     printing it under this heading would be the exact false claim the heading
+--     exists to prevent. It is not hypothetical: `]c` is `next_comment` on the
+--     `pull_request`, `issue`, `review_thread` and `discussion` tables.
+-- What is left unpinned by that is only "does `]c` still mean next hunk", and
+-- that is pinned by `scripts/devhost-tests/test_nvim_octo_diff_motions.py`,
+-- which drives a REAL neovim into a REAL diff and watches each of these keys
+-- do what its `desc` says.
+--
+-- ⚠ `zi` IS THE ODD ONE OUT — it toggles `foldenable`, so pressing it twice is
+-- how you get back. It is listed because "the fold machinery is hiding the rest
+-- of the file and I want it gone" is the question the other four do not answer.
+M.NATIVE_MOTIONS = {
+  { lhs = "]c", desc = "next changed hunk in this file" },
+  { lhs = "[c", desc = "previous changed hunk in this file" },
+  { lhs = "zo", desc = "open the fold under the cursor — show the unchanged lines it hides" },
+  { lhs = "zc", desc = "close the fold under the cursor again" },
+  { lhs = "zr", desc = "reveal one more level of context, whole file" },
+  { lhs = "zm", desc = "fold one more level away, whole file" },
+  { lhs = "zi", desc = "toggle folding off entirely (press again to restore)" },
+}
+
+-- Is the window this legend is being opened FROM in diff mode? Read at keypress
+-- time off window 0, which `show_legend` has not replaced yet — it builds the
+-- lines before it opens its float.
+function M.in_diff_mode()
+  local got, value = pcall(function()
+    return vim.wo[0].diff
+  end)
+  return got and value == true
+end
+
+-- 🔴 FAILS OPEN, DELIBERATELY, AND THE DIRECTION IS ARGUED RATHER THAN
+-- DEFAULTED. If `maparg` cannot be asked at all, this is not a neovim — and in
+-- that case `in_diff_mode()` has already returned false and no row is being
+-- rendered. Inside a real editor the only thing an unanswerable `maparg` can
+-- mean is that the check broke, and a row saying `]c` moves between hunks is
+-- still true of vim's defaults; a section that silently emptied itself is the
+-- staleness this whole legend was built to avoid.
+function M.key_is_unmapped(lhs)
+  local got, mapping = pcall(function()
+    return vim.fn.maparg(tostring(lhs), "n", false, true)
+  end)
+  if not got or type(mapping) ~= "table" then
+    return true
+  end
+  return next(mapping) == nil
+end
+
+function M.native_rows()
+  if not M.in_diff_mode() then
+    return {}
+  end
+  local out = {}
+  for _, motion in ipairs(M.NATIVE_MOTIONS) do
+    if M.key_is_unmapped(motion.lhs) then
+      out[#out + 1] = { action = motion.lhs, lhs = motion.lhs,
+                        desc = motion.desc, source = "vim" }
+    end
+  end
+  return out
+end
+
+-- ==========================================================================
+-- THE DOORS — the rows that have to be found FIRST, not alphabetically
+-- ==========================================================================
+-- 🔴 A CLICKED MENTION LANDS ON THE `pull_request` BUFFER, AND WITHOUT
+-- `review_start` NONE OF THE REVIEW SURFACE EXISTS. The file panel, the
+-- side-by-side diff, the per-file and per-hunk motions, the viewed-state
+-- toggle — every one of them lives on a buffer that only `<localleader>vs`
+-- opens. Sorted alphabetically among forty-odd rows, the one key that turns a
+-- text dump into a review reads as no more important than a reaction emoji.
+-- `review_commits` (`<localleader>C`) is the same shape one level in: it is the
+-- ONLY route to a per-commit diff, and it is bound on both review surfaces.
+--
+-- 🔴 ACTION NAMES, NOT KEYS, AND NOT DESCRIPTIONS. The row is looked up BY
+-- ACTION in the generated rows, so the key and the wording still come from the
+-- live config and this ledger cannot disagree with the body of the legend. What
+-- it CAN do is name an action that no longer exists — upstream renames things —
+-- and that is exactly what `test_every_promoted_door_RESOLVES_to_a_real_row`
+-- fails on, rather than letting the section quietly shrink.
+--
+-- ⚠ THE ROWS STILL APPEAR IN THE FULL LIST BELOW. The duplication is the point:
+-- the body stays a COMPLETE generated index — a reader scanning for `\C` finds
+-- it where they expect — and the count in the header goes on meaning "every
+-- binding on this buffer".
+local PROMOTED_DOORS = {
+  pull_request = { "review_start", "review_resume", "list_changed_files",
+                   "list_commits" },
+  review_diff = { "review_commits", "select_next_unviewed_entry",
+                  "focus_files", "toggle_viewed" },
+  file_panel = { "review_commits", "select_entry",
+                 "select_next_unviewed_entry", "toggle_viewed" },
+}
+
+function M.promoted_actions(kind)
+  return PROMOTED_DOORS[kind] or {}
+end
+
+function M.promoted_rows(kind)
+  local by_action = {}
+  for _, row in ipairs(M.legend_rows(kind)) do
+    by_action[row.action] = row
+  end
+  local out = {}
+  for _, action in ipairs(M.promoted_actions(kind)) do
+    if by_action[action] ~= nil then
+      out[#out + 1] = by_action[action]
+    end
+  end
+  return out
+end
+
 -- `#text` counts BYTES, and these lines carry em dashes; `strdisplaywidth` is
 -- the only thing that knows how wide they render. Guarded because this file is
 -- also executed outside neovim by the hermetic test, where falling back to the
@@ -778,24 +1085,54 @@ function M.legend_lines(kind)
       legend_key = M.resolve_lhs(binding.lhs)
     end
   end
+  -- 🔴 THE SECTIONS, AND WHY THERE ARE THREE. A flat alphabetical list is a
+  -- reference, and the operator's complaint was that it is not a ROUTE: the
+  -- entry points were buried and the keys that move between hunks were not
+  -- there at all. So: the doors first, the generated index second, and vim's
+  -- own motions LAST AND SEPARATELY LABELLED, because this repo cannot promise
+  -- their behaviour the way it can promise a binding it installs.
+  local promoted = M.promoted_rows(kind)
+  local native = M.native_rows()
+  -- One key column across all three sections, so the eye tracks down a single
+  -- edge instead of re-finding it at every heading.
   local keywidth = 1
-  for _, row in ipairs(rows) do
-    if #row.lhs > keywidth then
-      keywidth = #row.lhs
+  for _, group in ipairs({ rows, native }) do
+    for _, row in ipairs(group) do
+      if #row.lhs > keywidth then
+        keywidth = #row.lhs
+      end
     end
-  end
-  local body = {}
-  for _, row in ipairs(rows) do
-    body[#body + 1] = string.format("  %-" .. keywidth .. "s   %s", row.lhs, row.desc)
   end
   local lines = {
     string.format("octo legend — %s buffer — %d bindings — opened with %s",
       kind, #rows, tostring(legend_key)),
-    "",
   }
-  for _, line in ipairs(body) do
-    lines[#lines + 1] = line
+  local function section(heading, group)
+    if #group == 0 then
+      return
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = heading
+    for _, row in ipairs(group) do
+      lines[#lines + 1] =
+        string.format("  %-" .. keywidth .. "s   %s", row.lhs, row.desc)
+    end
   end
+  section(
+    string.format("START HERE — the %d keys that open the review itself:",
+      #promoted),
+    promoted)
+  section(
+    string.format("octo.nvim bindings — all %d on this buffer, "
+      .. "generated from its live config:", #rows),
+    rows)
+  -- The heading says whose keys these are and what makes them live, because a
+  -- row a reader cannot attribute is a row they cannot debug when it stops
+  -- working.
+  section(
+    string.format("VIM'S OWN diff motions — %d, NOT octo's: this buffer is in "
+      .. "diff mode, so neovim binds these itself:", #native),
+    native)
   -- The merge footer is emitted from the SAME table the merge keymap is
   -- installed from, so it appears exactly where a merge is actually bound and
   -- names exactly the key that was bound.
@@ -852,6 +1189,21 @@ function M.show_legend(kind)
     style = "minimal",
     border = "rounded",
   })
+
+  -- 🔴 THE LEGEND WRAPS EVEN THOUGH THE EDITOR DOES NOT, AND IT ASKS FOR THAT
+  -- THROUGH THE SAME PREDICATE EVERYTHING ELSE USES rather than setting `wrap`
+  -- itself. `M.WRAPPED_FILETYPES` is the one ledger of what counts as prose;
+  -- a second `vim.wo[win].wrap = true` here would be a second rule, and the
+  -- autocmd would overwrite it the moment focus returned to this float.
+  --
+  -- 🔴 AFTER `nvim_open_win`, NOT BEFORE — THE ORDER IS THE WHOLE POINT.
+  -- Setting a filetype fires `FileType`, and that hook writes to `vim.wo[0]`,
+  -- i.e. the CURRENT window. Before the float exists the current window is the
+  -- REVIEW DIFF, so doing this two lines earlier would turn wrapping on for the
+  -- diff the operator is reading.
+  pcall(function()
+    vim.bo[buf].filetype = M.LEGEND_FILETYPE
+  end)
 
   local function close()
     if vim.api.nvim_win_is_valid(win) then
