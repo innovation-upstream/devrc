@@ -54,9 +54,14 @@ SOCK = f"hint-open-{uuid.uuid4().hex[:8]}"
 # deferred assert in the `server` fixture is the pattern
 # test_tmux_reply_agent.py chose for the same runtime.
 TMUX = shutil.which("tmux")
-# Generous on purpose: the measured render is 15-25 ms, so this is ~400x the
-# observed need. It is a DEADLINE, not a delay — a healthy run returns as soon
-# as the grid holds the URI and never spends it.
+# Generous on purpose, and deliberately NOT justified by a multiple of the
+# observed render time. Three independent measurements of that time disagree —
+# 15-25 ms, 3.2-23.5 ms (median 14.0), and 11.9-55.4 ms (median 20-21) — because
+# it moves with host load, and this box runs dozens of concurrent suites. A
+# "~400x headroom" claim derived from the first of those was wrong by the third.
+# What is actually being asserted: 10 s is far above any render latency observed
+# at any load, and it is a DEADLINE, not a delay — a healthy run returns as soon
+# as the grid holds the URI and never spends it, so raising it costs nothing.
 RENDER_TIMEOUT_S = 10.0
 
 
@@ -114,11 +119,15 @@ def rendered(server):
     tests, and labelled an ISOLATED run as file order. What reproduces is the
     DIRECTION: isolated flakes, in-order does not.
 
-    🔴 THE LOAD-BEARING CLAIM, REPRODUCED TWICE INDEPENDENTLY: with the
-    fixture absent and only `test_tmux_stores_the_hyperlink_and_can_report_it`
-    deleted, `spans_the_wrap` still failed 3 of 10 — so deleting the reported
-    test on its own would have left a live flake behind it, newly first in
-    line. That is why the wait is a FIXTURE and not a retry on one test.
+    🔴 THE LOAD-BEARING CLAIM: with the fixture absent and only
+    `test_tmux_stores_the_hyperlink_and_can_report_it` deleted, the whole file
+    still flakes — so deleting the reported test on its own would NOT have
+    fixed it, and that is why the wait is a FIXTURE rather than a retry on one
+    test. Measured three times on that exact tree: 3 of 10 failing, then
+    **17 of 24 at load 36**, and once **0 of 40** — the third by an audit that
+    reported it as a refutation. Two of three reproduce it and the disagreement
+    is consistent with the same load-dependence as every other rate here, so
+    the claim stands; the single figure it used to quote did not.
 
     🔴 IT CANNOT MASK A REAL BREAKAGE. On timeout it FAILS, loudly, quoting the
     grid it did see, so an OSC 8 that never renders — the actual thing this
@@ -139,6 +148,21 @@ def rendered(server):
     last = ""
     while time.monotonic() < deadline:
         cap = tmux("capture-pane", "-p", "-H", "-t", "t")
+        # 🔴 CHECK rc, DO NOT JUST READ stdout. A failing `capture-pane` returns
+        # EMPTY stdout with its reason on stderr, which is indistinguishable
+        # from "not rendered yet" if you only look at stdout: the loop then
+        # burns the whole deadline and the message below blames the render,
+        # asserting the OPPOSITE of the truth. MEASURED: swapping `-H` for an
+        # unsupported flag produced exactly that, after 10.8s, while tmux's own
+        # `unknown flag` on stderr was printed nowhere. The test deleted above
+        # carried `assert out.returncode == 0, out.stderr`; losing that
+        # diagnostic with nothing in its place was a regression, not a tidy-up.
+        if cap.returncode != 0:
+            pytest.fail(
+                f"`capture-pane` FAILED (rc={cap.returncode}) — this is a tmux "
+                f"or invocation error, NOT the render race and NOT a missing "
+                f"hyperlink. stderr: {cap.stderr!r}"
+            )
         last = cap.stdout
         if URI in last:
             return
@@ -149,6 +173,54 @@ def rendered(server):
         f"catch, NOT the render race this fixture absorbs. "
         f"Last capture: {last!r}"
     )
+
+
+def enter_copy_mode_on_the_link(deadline_s=RENDER_TIMEOUT_S):
+    """Enter copy mode with the cursor on the link, and the hyperlink READABLE.
+
+    🔴 THE PANE GRID AND THE COPY-MODE SCREEN ARE DIFFERENT OBJECTS. `rendered`
+    waits on `capture-pane`, which reads the PANE grid; the assertion below
+    reads `#{copy_cursor_hyperlink}`, served from the COPY-MODE screen's own
+    hyperlink table — a separate snapshot taken when copy mode is ENTERED.
+    Waiting on the first does not gate the second, so a wait built only on
+    `capture-pane` can be fully satisfied while the asserted object is empty:
+    a guard that passes while the hazard it describes is live.
+
+    ⚠ HONEST SCOPE. An audit measured this residual at 2 of 180 isolated runs
+    (~1.1%) at host load 45-58 and found that retrying INSIDE one copy mode
+    recovered 0 of 2 while cancel-and-re-enter recovered 2 of 2 — which is why
+    the remedy here is re-ENTRY and not a re-read. I could NOT reproduce it:
+    0 of 250 trials at load 36, which argues against 1.1% at that load but
+    cannot rule the race out. It is fixed regardless, because waiting on the
+    object you assert on is free and strictly better than waiting on one that
+    merely correlates with it. **Do not read 0/250 as "there was no bug".**
+
+    It cannot mask a real failure: on timeout it FAILS and says the format
+    stayed empty, which is exactly the tmux-dropped-the-format regression the
+    surviving test exists to catch.
+    """
+    deadline = time.monotonic() + deadline_s
+    last = ""
+    while True:
+        p = tmux("copy-mode", "-t", "t")
+        assert p.returncode == 0, p.stderr
+        for step in ("top-line", "start-of-line"):
+            s = tmux("send-keys", "-t", "t", "-X", step)
+            assert s.returncode == 0, (step, s.stderr)
+        out = tmux("display", "-p", "-t", "t", "#{copy_cursor_hyperlink}")
+        assert out.returncode == 0, out.stderr
+        last = out.stdout.strip()
+        if last == URI:
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"`#{{copy_cursor_hyperlink}}` never became readable within "
+                f"{deadline_s}s of re-entering copy mode — last value {last!r}. "
+                f"An UNKNOWN format expands to empty at rc 0, so this is also "
+                f"what a tmux that dropped `copy_cursor_hyperlink` looks like."
+            )
+        tmux("send-keys", "-t", "t", "-X", "cancel")
+        time.sleep(0.01)
 
 
 def test_conf_appends_the_hyperlinks_terminal_feature():
@@ -198,15 +270,27 @@ def test_running_tmux_accepts_the_hyperlinks_feature(server):
 
 
 def test_the_grid_hyperlink_spans_the_wrap(rendered):
-    # ⚠ INVARIANT GUARD, same caveat as the file docstring — measured: the copy-mode
-    # format reads the full URI at the link's first cell AND on the wrapped
-    # continuation row, which is what makes the whole wrapped link one
-    # clickable span in Alacritty (per-cell scan across rows). The third
-    # probe sits 10 columns into the continuation row, still on the link.
+    # ⚠ INVARIANT GUARD, not regression coverage. The caveat in full, because
+    # it used to live in a sibling test that was deleted and a cross-reference
+    # to "the file docstring" pointed at prose that never carried it:
+    #   - tmux PARSES OSC 8 from applications UNCONDITIONALLY (input.c), so the
+    #     grid holds the URI whether or not `terminal-features` is set. This
+    #     test therefore passed BEFORE the shipped fix too — and that fact is
+    #     exactly what the deletion argument above rests on.
+    #   - `capture-pane` prints to stdout only with `-p`; without it the capture
+    #     goes to a paste buffer and stdout is silently EMPTY. That gotcha now
+    #     applies to the `rendered` fixture's own call, which is why it is
+    #     recorded here rather than lost with the test that used to state it.
+    # What this pins that nothing else does: the copy-mode format reads the
+    # full URI at the link's first cell AND on the wrapped continuation row,
+    # which is what makes the whole wrapped link one clickable span in
+    # Alacritty (per-cell scan across rows). The third probe sits 10 columns
+    # into the continuation row, still on the link.
     # Copy mode is entered ONCE — `send-keys -X` outside copy mode exits 0
     # and silently does nothing, which is how this test once failed green.
-    p = tmux("copy-mode", "-t", "t")
-    assert p.returncode == 0, p.stderr
+    # 🔴 Entering it is delegated, because the copy-mode snapshot is a
+    # DIFFERENT object from the pane grid the fixture waited on.
+    enter_copy_mode_on_the_link()
     for label, nav in (
         ("row0 col0", ["top-line", "start-of-line"]),
         ("row1 col0", ["top-line", "start-of-line", "cursor-down"]),
