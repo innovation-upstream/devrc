@@ -481,9 +481,13 @@ def find_carriers(ad, runner, repo, limit=300, state="all"):
     A carrier count from this is therefore a FLOOR, never a census, and the note
     it returns says so in the output rather than in this docstring alone.
     """
+    # `state` is requested for the SECOND consumer, `ladder-stop-rationale.py`:
+    # a ladder on an OPEN PR has not stopped, and classifying why it stopped
+    # would invent a stop that has not happened. It is carried here rather than
+    # fetched by a second `gh` call so both consumers see ONE population.
     cmd = ["gh", "pr", "list", "--repo", repo, "--state", state,
            "--limit", str(limit), "--json",
-           "number,comments,headRefOid,baseRefName,title"]
+           "number,comments,headRefOid,baseRefName,title,state"]
     rc, out, err = runner(cmd)
     if rc != 0:
         raise SystemExit(
@@ -506,6 +510,7 @@ def find_carriers(ad, runner, repo, limit=300, state="all"):
             "base": pr.get("baseRefName") or "",
             "comments": bodies,
             "title": pr.get("title") or "",
+            "state": pr.get("state") or "",
         })
     note = (
         f"{repo}: scanned {len(data)} PR(s) (state={state}, limit={limit}), "
