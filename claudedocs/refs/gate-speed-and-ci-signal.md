@@ -209,3 +209,59 @@ evicted: rank 8 is LIVE and dated 2026-09-18, and that section is its arming evi
   captured, so whether those were port-race retries is **unknown**. If they were, the race is live
   on this host — but nothing here claims that.
 
+
+
+## Evicted 2026-09-14 from the handoff (rank 13 is a CLOSED tombstone)
+
+### ✅ RANK 13 PROBE RUN — the false-INHERITED rate is 2 of 4, and the predicate SEPARATES them 4/4
+- **Symptom + exact repro:** the triage bot's first live sweep named 5 PRs `INHERITED — likely cured
+  by rebase`. That is a directly testable claim, so it was tested rather than argued:
+  `bash <scratch>/probe-inherited.sh` — for each PR, build the merged tree (PR head + current
+  `origin/main`) and run **only the named failing test** there. Passes ⇒ the bot was right; fails ⇒
+  the red is the PR's own and the verdict was false. A merge conflict is its own outcome, recorded,
+  never folded into a pass.
+- **Observed (with values), base `origin/main` = `14daa42a`:**
+
+  | PR | named failing test | file | merged-tree result | verdict |
+  |---|---|---|---|---|
+  | #1450 | `test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS` | `test_run_tests_targets.py` | **1 passed** | bot RIGHT |
+  | #1286 | `test_agent_without_any_tab_is_untouched` | `test_browser_tab_ref.py` | **1 passed** | bot RIGHT |
+  | #1603 | `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` | `test_runtime_shebangs.py` | **1 failed** | 🔴 **FALSE** |
+  | #1194 | `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` | `test_runtime_shebangs.py` | **1 failed** | 🔴 **FALSE** |
+  | #1038 | `test_every_historical_version_claim_still_exists` | `test_opencode_engine.py` | MERGE CONFLICT | UNTESTABLE |
+
+  **2 of 4 testable verdicts are FALSE (50%).** Both false ones are the SAME test — a repo-wide
+  census guard. Both correct ones are ordinary unit tests. 🔴 **The predicate proposed when there was
+  only one data point — *is the named failing test a census/scanner guard over files it does not
+  name?* — separates this sample 4 of 4.**
+- 🔴 **AND THE MECHANISM IS NOW SHARPER THAN "CENSUS GUARD": IN BOTH FALSE CASES THE OFFENDER IS A
+  NEW FILE THE PR ITSELF ADDS.** `#1194`'s failure names
+  `scripts/tests/test_break_glass_merge.py:65: GH_STUB = r'''…` — **one of `#1194`'s own files,
+  confirmed ABSENT from `main`**, so a rebase would carry the offending file along with the red.
+  `#1603`'s was its own new controls in `test_census_scan.py`. The guard file is byte-identical in
+  the branch *because the PR never touched the guard* — which is the normal state of this breakage,
+  not evidence of innocence.
+- **Ruled out:** "the single #1603 case was unrepresentative" — a second, independent instance
+  (`#1194`, a different PR, a different offending file, 450 commits behind) reproduces it exactly.
+  via: measurement
+- **Ruled out:** "the bot is simply unreliable / every INHERITED is suspect" — #1450 and #1286 were
+  both RIGHT on the merged tree, and both are ordinary unit tests whose evidence commit genuinely
+  fixed them. **The failure is a specific, identifiable class, not general noise.** via: measurement
+- **Ruled out:** "#1038 is a fifth data point" — its merged tree does not build (1 conflicting path
+  at 601 commits behind), so its verdict is UNTESTABLE by this method and is excluded from the rate
+  rather than assumed either way. via: command
+- 🔴 **Leading hypothesis — now with a ready-made fix, and the oracle already exists on `main`.**
+  This false-positive class is *exactly* the class `#1603` was built for: `scoped-tests.sh` maps a
+  diff to tests that NAME what you changed, and **a brand-new file names nothing** — the same
+  sentence appears in `ledger-check.sh`'s own header as its reason to exist. So the fix is: before
+  ruling INHERITED, ask whether the named failing test is in
+  **`scripts/testlib/census_scan.py::census_nodeids()`** — the AST derivation `#1603` merged as
+  `14daa42a`, which computes precisely "every test whose verdict depends on the repo's FILE SET".
+  If it is, the "test file unchanged in my branch" premise carries no information and the verdict
+  must be demoted to NOT EXPLAINED. **The two pieces of work were built independently in one session
+  and did not know about each other; the probe is what connected them.**
+- **Next probe:** implement the demotion above and re-run the sweep against the same five PRs — the
+  pass condition is `#1450`/`#1286` still INHERITED and `#1603`/`#1194` demoted to NOT EXPLAINED.
+  That is a regression test with a known-red baseline, which this repo requires anyway. ⚠ `#1038`
+  cannot serve as a fixture (its tree does not build); use it only as a reminder that a conflicted
+  PR needs its own outcome rather than a verdict.
