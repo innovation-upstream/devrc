@@ -232,6 +232,66 @@ def _swap(t, old, new):
     return t.replace(old, new, 1)
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROSE LADDER'S AUTHORSHIP DETERMINATION (Q-series).
+#
+# These rows exist because the sweep that produced them was run in a session
+# scratchpad, which is the exact failure `mutants-audit-ladder.sh`'s header
+# records: "every one of those runs happened in a session scratchpad that no
+# longer exists, so not a single row could be re-checked by anyone else". They
+# are checked in so the claim "each guard was watched to fail with its OWN
+# error" can be re-derived instead of believed.
+#
+# 🔴 THE SEAM ROWS ARE IN THE OTHER BATTERY. Widening the scope sentences this
+# script SHIPS is killed from `test_audit_ladder_stop_rule.py`, which `failing()`
+# does not run; `mutants-audit-ladder.sh` runs that module and already copies
+# this script, so the two rows live there. Recorded here because "the seam is
+# unswept" is the wrong conclusion to draw from their absence.
+#
+# 🔴 Q1 IS THE RETRACTED RULE ITSELF. `#1678` (`e8fa6fca`) let this hatch stop a
+# ladder at ROUND 1 and was withdrawn hours later; the mutation below is that
+# rule re-entering through the renderer rather than through the prose. Its
+# target carries the docstring terminator on purpose — `if facts.round_no < 2:\n
+# return ""` occurs TWICE in this script, and `_swap` refuses an ambiguous
+# target rather than editing whichever comes first. MEASURED: without the
+# prefix this row reported "target is AMBIGUOUS" and scored nothing.
+_DET_FLOOR = '    """\n    if facts.round_no < 2:\n        return ""'
+_DET_R3_BOUNDARY = (
+    '        boundary = (\n'
+    '            "the anchor THE LEDGER\'s cumulative (since round 1) figure is "'
+)
+_DET_PROSE_ONLY = (
+    '        "🔴 **Read this only if YOU classified this PR\'s payload as prose "\n'
+    '        "above.** On a prose payload every round changes payload lines by "'
+)
+
+
+def det_floor_to_round_one(t):
+    return _swap(t, _DET_FLOOR,
+                 '    """\n    if facts.round_no < 1:\n        return ""')
+
+
+def det_section_dropped(t):
+    return _swap(t, "        render_prose_determination(facts),\n", "")
+
+
+def det_r3_boundary_is_the_range_anchor(t):
+    return _swap(
+        t, _DET_R3_BOUNDARY,
+        '        boundary = (\n'
+        '            f"`{facts.prev_sha}` — the anchor. "\n'
+        '            "cumulative (since round 1) NOT MEASURED "',
+    )
+
+
+def det_prose_only_condition_dropped(t):
+    return _swap(
+        t, _DET_PROSE_ONLY,
+        '        "🔴 **Read this.** On a prose payload every round changes '
+        'payload lines by "',
+    )
+
+
 def add_unledgered_clause(t):
     marker = ")\n\nINVARIANTS_HEADING"
     return _swap(t, marker,
@@ -3199,6 +3259,36 @@ ROWS = [
     ("V69 `true` reached by `||` after the verdict grep",
      {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
      a_true_is_reached_by_or_after_the_verdict_grep),
+    # --------------------------------------------------------------------- #
+    # 🔴 THE PROSE LADDER'S AUTHORSHIP DETERMINATION — see the Q-series block
+    # beside the mutate functions for why these are checked in rather than
+    # recorded in a commit message. Q1 is the withdrawn `#1678` rule, re-entering
+    # through the renderer instead of through the prose.
+    # --------------------------------------------------------------------- #
+    ("Q1  the determination's round floor moved to ROUND 1",
+     {"test_the_prose_determination_ships_from_round_2_and_NOT_before"},
+     det_floor_to_round_one),
+    # Q2 kills two: with the section gone the boundary guard's own slice index
+    # raises before its assertions. Recorded rather than re-scoped — a deletion
+    # that takes a dependent guard with it is a true report, and pretending the
+    # set is smaller would be the row lying about what it observed.
+    ("Q2  the determination dropped from the brief",
+     {"test_the_prose_determination_ships_from_round_2_and_NOT_before",
+      "test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     det_section_dropped),
+    ("Q3  round 3+ prints THE RANGE's anchor as the boundary",
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     det_r3_boundary_is_the_range_anchor),
+    # 🔴 THE TWO SEAM ROWS ARE NOT HERE, AND THAT IS NOT AN OVERSIGHT. Widening
+    # the brief-side THRESHOLD or FLOOR is killed by a test in
+    # `test_audit_ladder_stop_rule.py`, and `failing()` above runs `TEST_REL`
+    # ALONE — so scored here they would read SURVIVED and be recorded as a
+    # coverage gap that does not exist. They live in `mutants-audit-ladder.sh`,
+    # whose suite IS that module and which already copies this script into its
+    # tree. A row must be scored by a harness that can see its killer.
+    ("Q4  the prose-ONLY condition dropped from the section",
+     {"test_the_prose_determination_ships_from_round_2_and_NOT_before"},
+     det_prose_only_condition_dropped),
 ]
 
 

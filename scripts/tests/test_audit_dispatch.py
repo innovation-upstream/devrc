@@ -7700,18 +7700,42 @@ def test_the_prose_determination_names_the_boundary_it_can_resolve():
     rc, out, err = run_main(["900", "--round", "2"], comments=[CLAIMS_BLOCK_R2])
     assert rc == 0, err
     section = out[out.index(PROSE_SECTION):]
-    assert "aaaa1111" in section and "which IS the tip round 1 audited" in section, (
-        "round 2 does not name the boundary sha it demonstrably has — the "
-        "auditor is sent to derive a value the brief already resolved"
+    # 🔴 A RELATIONSHIP OVER THE RENDERED BRIEF, NOT A LITERAL SHA, and the
+    # difference was MEASURED. Asserting `"aaaa1111" in section` made this test
+    # a second, weaker copy of `test_the_ledger_measures_from_the_tip_the_
+    # previous_round_audited` — so mutant N1 in `mutants-audit-dispatch.py`
+    # (`range_anchor` returns `<to>` again) killed BOTH, and that row exists to
+    # isolate the ledger guard. What this section actually claims is that its
+    # boundary IS the `<from>` THE RANGE printed; read that out of the same
+    # brief and the two move together, which is what the claim says they must.
+    ranged = re.search(r"Diff \*\*`([0-9a-f]+)\.\.", out)
+    assert ranged, (
+        "THE RANGE did not print a `<from>..<to>` diff range, so this test "
+        "cannot check the determination against it — it would pass or fail "
+        "for the wrong reason"
+    )
+    assert f"`{ranged.group(1)}`" in section, (
+        "round 2's determination does not name the boundary sha the brief "
+        f"already resolved (THE RANGE's `<from>` is {ranged.group(1)}). The "
+        "auditor is sent to derive a value that is three sections up"
+    )
+    assert "which IS the tip round 1 audited" in section, (
+        "round 2 names a sha without saying WHAT it is. At round 2 and only "
+        "at round 2 the range's `<from>` IS the tip round 1 audited; without "
+        "that sentence a reader cannot tell this from the round-3 case, where "
+        "the same field names the wrong tip"
     )
 
     rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
     assert rc == 0, err
     section = out[out.index(PROSE_SECTION):]
-    assert "aaaa1111" not in section, (
-        "round 3 prints the range anchor as the boundary. That sha is the tip "
-        "ROUND 2 audited, so round 1's own fix prose would be counted as the "
-        "PR's own — the count is then biased towards continuing forever"
+    ranged = re.search(r"Diff \*\*`([0-9a-f]+)\.\.", out)
+    assert ranged, "THE RANGE printed no diff range; nothing to compare against"
+    assert ranged.group(1) not in section, (
+        "round 3 prints THE RANGE's own anchor as the boundary. At round 3 "
+        "that sha is the tip ROUND 2 audited, so round 1's own fix prose would "
+        "be classified as the PR's own — biasing the count towards running "
+        "forever, which is the failure this whole rule exists to end"
     )
     assert "cumulative (since round 1)" in section, (
         "round 3 does not route to the anchor that IS the boundary"

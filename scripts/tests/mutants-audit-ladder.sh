@@ -119,11 +119,19 @@ cp -a "$RULES" "$T/rules.orig"
 # line every row after it would run against a module whose scope had already been
 # widened, scoring later mutants against the wrong baseline and never saying so.
 cp -a "$SUITE" "$T/suite.orig"
+# 🔴 AND THE DISPATCH SCRIPT, for the SEAM rows below. It is already copied into
+# the tree (the sixth file, above) because a guard IMPORTS it; the two seam rows
+# MUTATE it, so it needs an original to be put back from. Its killer lives in
+# THIS harness's suite and not in `mutants-audit-dispatch.py`, whose `failing()`
+# runs `test_audit_dispatch.py` alone and would score those rows SURVIVED.
+DISPATCH="$ROOT/scripts/audit-dispatch.py"
+cp -a "$DISPATCH" "$T/dispatch.orig"
 restore() {
   cp -a "$T/skill.orig" "$SKILL"
   cp -a "$T/evid.orig"  "$EVID"
   cp -a "$T/rules.orig" "$RULES"
   cp -a "$T/suite.orig" "$SUITE"
+  cp -a "$T/dispatch.orig" "$DISPATCH"
 }
 
 FAILURES=0
@@ -542,6 +550,21 @@ least one of those findings' \
     "of those findings' \
     'when at least one "
     "of those findings'
+
+# 🔴 THE OTHER END OF THE SEAM. The two rows above mutate the SKILL; these mutate
+# the copy `audit-dispatch.py` SHIPS to every round-2-and-later auditor, leaving
+# the skill untouched. Both directions matter: the guard exists so the scope
+# cannot move in ONE file, and a guard watched in only one direction is half a
+# guard. Neither of these is scoreable in `mutants-audit-dispatch.py` — that
+# harness runs `test_audit_dispatch.py` alone and cannot see this killer.
+run "seam: the BRIEF's threshold widened" \
+    test_the_determinations_SCOPE_matches_the_one_every_brief_ships "$DISPATCH" \
+    '    "**The reason is nameable when at least two-thirds of those findings are "' \
+    '    "**The reason is nameable when any of those findings are "'
+run "seam: the BRIEF's round floor inverted" \
+    test_the_determinations_SCOPE_matches_the_one_every_brief_ships "$DISPATCH" \
+    '    "Round 1 has no previous round to attribute to, so it can never satisfy "' \
+    '    "Round 1 may satisfy this when the payload is entirely prose, so "'
 
 echo
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
