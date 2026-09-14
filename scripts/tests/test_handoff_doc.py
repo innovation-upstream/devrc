@@ -7109,6 +7109,57 @@ class TestTheArcRulesOnlyCompareAgainstAUsableBase:
         assert "git could not say whether the doc has any history" in blob, blob
         assert "it was written before rule (m)" not in blob, blob
 
+    def test_an_UNTRACKED_doc_is_not_told_it_PREDATES_rule_m(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE COMMON CASE, and the one the first draft of this fix missed.
+
+        Round 3 measured it: keying the history claim on `git_could_not_answer`
+        covers an UNBORN HEAD — rare — while leaving the frequent shape false.
+        A doc present in the working tree but never committed has no history
+        either, in a repo whose HEAD reads perfectly, and it was still told "it
+        was written before rule (m) and is GRANDFATHERED" seconds after being
+        created. A hand-written doc, a template paste, a `git add` not yet
+        committed and a copy into a fresh worktree all land here.
+
+        So the predicate is `tracked_at_head is not True` — absent from HEAD is
+        no-history just as much as unreadable HEAD is.
+        """
+        doc = repo / "claudedocs" / "handoff-untracked-topic.md"
+        doc.write_text(
+            GOAL_WITHOUT_CONDITION + "\n## State now\n- fresh\n", encoding="utf-8"
+        )
+        assert hd.doc_tracked_at_head(
+            repo, "claudedocs/handoff-untracked-topic.md"
+        ) is False, "the fixture is tracked — this test would prove nothing"
+        upd = write_delta(
+            tmp_path, "untracked.md", "## State now\n- moved on\n"
+        )
+        res = run_tool(repo, update=upd, topic="untracked-topic")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        blob = res.stdout + res.stderr
+        assert "git could not say whether the doc has any history" in blob, blob
+        assert "it was written before rule (m)" not in blob, blob
+
+    def test_a_TRACKED_doc_IS_still_told_it_predates_the_rule(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL, without which the fix above is just "never
+        say it". A doc that genuinely IS in HEAD has a history, so the
+        grandfathering claim is true of it and must still be made — otherwise
+        widening the predicate would have deleted the sentence rather than
+        corrected it."""
+        legacy = _legacy_repo(repo)
+        assert hd.doc_tracked_at_head(
+            legacy, "claudedocs/handoff-sample-topic.md"
+        ) is True
+        upd = write_delta(tmp_path, "tracked.md", "## State now\n- moved on\n")
+        res = run_tool(legacy, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        blob = res.stdout + res.stderr
+        assert "it was written before rule (m)" in blob, blob
+        assert "git could not say whether the doc has any history" not in blob, blob
+
     def test_an_UNBORN_HEAD_gets_its_OWN_ratchet_skip_reason(
         self, tmp_path: Path
     ) -> None:

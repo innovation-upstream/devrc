@@ -431,6 +431,18 @@ class TestTheTwoParsersAgree:
             "nbsp-after-the-colon",
             "## Goal\nx\n- closing-condition:\u00a0check — the probe passes\n",
         ),
+        (
+            # 🔴 THE CASE THE `exit` -> `next` FIX EXISTS FOR, and the fix
+            # shipped WITHOUT it — round 3 reverted `next` to `exit` in a copy
+            # and BOTH suites that exercise `dod_row` stayed green (31 + 181).
+            # `malformed-first-then-good` below cannot see it: its first field
+            # is an unknown KIND, where both parsers correctly stop. A
+            # digit-boundary kind is different — python does not MATCH the line
+            # at all, so it scans on and declares the good field beneath.
+            "digit-boundary-first-then-good",
+            "## Goal\nx\n- closing-condition: check2 — nope\n"
+            "- closing-condition: check — the probe passes\n",
+        ),
         ("absent", "## Goal\nx\n"),
         (
             "wrong-section",

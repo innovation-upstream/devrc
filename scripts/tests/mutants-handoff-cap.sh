@@ -915,6 +915,17 @@ run 'unborn-head-borrows-the-stale-base-wording' \
 # 🔴 AND THE FAIL DIRECTION ITSELF. Folding `None` toward "a doc may exist" is a
 # DECISION (grandfather rather than refuse on a repo we could not read); flip it
 # and a genuinely-unreadable repo starts refusing documents.
+# 🔴 THE ROW THAT ACTUALLY ISOLATES THE ADVISORY WORDING. Round 3 measured
+# that two of the three rows above are the SAME mutant: both die on
+# `assert res.returncode == hd.EXIT_OK` with rc 11, which is rule (m) refusing —
+# an EARLIER guard's error, and the harness says so itself by reporting
+# identical killer sets for them. None of them reaches the SENTENCE the fix is
+# about. This one drops the third argument, so `legacy_dod_report` falls back to
+# its default and prints "it was written before rule (m)" — the claim about
+# history — and dies on a MESSAGE assertion, not a returncode.
+run 'legacy-advisory-loses-its-history-qualifier' \
+  test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
+  's|legacy_dod_report(closing, is_new_doc, tracked_at_head is not True)|legacy_dod_report(closing, is_new_doc)|'
 run 'None-flipped-to-fail-closed' \
   test_an_UNBORN_HEAD_is_not_told_the_doc_PREDATES_rule_m \
   's|    ) or git_could_not_answer|    ) and not git_could_not_answer|'

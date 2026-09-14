@@ -1997,11 +1997,13 @@ def rank_ratchet_skipped_report(
 ) -> str:
     """Say that rule (n) did NOT run, or "" when there is nothing to disclose.
 
-    🔴 A SKIP THAT NOBODY SEES IS A PASS, AND THIS RULE HAS TWO OF THEM. Rule
-    (n) declines to judge when it cannot COUNT the base — an unusable working
-    copy, or a ranked queue under a heading `ranked_items` does not recognise.
-    Both are the right call: `claude/RULES.md` refuses a zero that was never
-    measured. But silence makes "I could not check" and "it passed" the same
+    🔴 A SKIP THAT NOBODY SEES IS A PASS, AND THIS RULE HAS THREE OF THEM. Rule
+    (n) declines to judge when it cannot COUNT the base — git could not say
+    whether the doc exists in HEAD, or this checkout holds no usable copy, or
+    the ranked queue sits under a heading `ranked_items` does not recognise.
+    All three are the right call: `claude/RULES.md` refuses a zero that was
+    never measured. (It said TWO until round 3; the third arrived with the
+    unborn-HEAD fix and three narrations kept the old count.) But silence makes "I could not check" and "it passed" the same
     observable, which is the shape that rule's own evidence is about.
 
     Round 1 of this PR's audit measured the consequence: with the base
@@ -3991,9 +3993,13 @@ def main(argv: list[str] | None = None) -> int:
     # refuses elsewhere. Keeping it would also keep the false narrative that
     # rule (m)'s fix lives here; the real fix is `is_new_doc` below.
     base_readable = bool(base_text.strip())
-    # ⚠ `tracked_at_head is not False` — `None` (git could not answer) counts as
-    # "a document may exist", which is the FAIL-CLOSED direction for rule (m):
-    # an unreadable repo grandfathers a doc rather than refusing one.
+    # ⚠ `None` (git could not answer) is folded in with "a document exists", so
+    # an unreadable repo GRANDFATHERS a doc rather than refusing one. Round 3
+    # corrected this comment twice over: it quoted `tracked_at_head is not
+    # False`, an expression the same round deleted, and it called grandfathering
+    # "FAIL-CLOSED" ten lines above a comment calling it "grandfather rather
+    # than refuse". One name for one direction: this is the PERMISSIVE choice,
+    # taken because refusing on a repo we could not read is the worse error.
     is_new_doc = not base_text.strip() and not doc_exists_elsewhere
 
     diff = unified(base_text, merged_text, relpath)
@@ -4081,22 +4087,28 @@ def main(argv: list[str] | None = None) -> int:
     # update's items ARE the doc's) against the BASE (which is what "grew" means).
     # An update with no `Next steps` section has 0 items and cannot grow anything.
     #
-    # 🔴 TWO SILENT SKIPS, AND BOTH ARE "I CANNOT MEASURE THIS", NOT "IT PASSED".
+    # 🔴 THREE SILENT SKIPS, AND EACH IS "I CANNOT MEASURE THIS", NOT "IT PASSED".
     # This rule is the only one here that compares a count on BOTH sides, so it
     # is the only one that can be wrong about the document rather than about the
     # update — and a count presented as 0 when it was never taken is exactly the
     # reassuring zero `claude/RULES.md` says to refuse to print.
-    #   (a) `base_readable` — see the three-way block above (audit F1/F3).
-    #   (b) the base must actually CARRY a canonical `## Next steps`. `ranked_items`
+    #   (a) git could not answer whether the doc is in HEAD (round 3).
+    #   (b) `base_readable` — see the classification block above (audit F1/F3).
+    #   (c) the base must actually CARRY a canonical `## Next steps`. `ranked_items`
     #       recognises only the heading `is_next_steps_heading` names, which is
     #       deliberate and harmless for rule (j) because that rule reads ONLY the
     #       update. Reading BOTH sides turns the same gap into a false GROWTH:
-    #       measured over the real corpus (183 `handoff-*.md` across devrc and
-    #       homelab-talos), 22 docs carry a ranked queue under an unrecognised
-    #       heading that this counts as 0 — so MIGRATING such a queue onto the
-    #       canonical heading, even while SHRINKING it, was refused, permanently,
-    #       and only `--rank-growth-approved` cleared it. 19 of the 22 hit
-    #       `status=dated-topic` first; 3 were live. Audit F2.
+    #       so MIGRATING such a queue onto the canonical heading, even while
+    #       SHRINKING it, was refused, permanently, and only
+    #       `--rank-growth-approved` cleared it. Audit F2.
+    #       🔴 THE POPULATION FIGURE LIVES IN ONE PLACE — `write-gate.md` §F —
+    #       and is deliberately NOT restated here. A previous round wrote "22
+    #       docs / 19 dated / 3 live" into BOTH, then retracted it in the skill
+    #       and left it standing in this module, which is the authoritative
+    #       artifact a maintainer actually reads. 22 does not reproduce (38 on a
+    #       wide predicate, 28 on a narrow one); what does is the corpus size,
+    #       183, and the 3 LIVE docs §F names individually. A second copy of a
+    #       measured number is how the retraction fails to land.
     base_carries_a_ranked_queue = NEXT_STEPS_PREFIX in doc_shape(base_text).canonical
     ratchet_skip = ""
     if is_new_doc or args.rank_growth_approved:
@@ -4184,7 +4196,15 @@ def main(argv: list[str] | None = None) -> int:
     # this rule is not refused (that would be red-by-construction on every legacy
     # handoff), so the ONLY thing that ever surfaces its missing finish line is
     # this line, above the diff, on every update until someone adds one.
-    legacy_dod = legacy_dod_report(closing, is_new_doc, git_could_not_answer)
+    # 🔴 `tracked_at_head is not True`, NOT `git_could_not_answer`. The
+    # sentence this gates is a claim about THIS DOC's history, and "absent from
+    # HEAD" is no-history just as much as "HEAD unreadable" is. Round 3 measured
+    # the commoner case: an ordinary repo with commits, a non-empty handoff doc
+    # present but UNTRACKED, no field -> "it was written before rule (m) and is
+    # GRANDFATHERED" about a document created seconds earlier. A hand-written
+    # doc, a template paste, a `git add` not yet committed, a copy into a fresh
+    # worktree — all of them land here, and an unborn HEAD is the RARE one.
+    legacy_dod = legacy_dod_report(closing, is_new_doc, tracked_at_head is not True)
     if legacy_dod:
         print(legacy_dod)
     # Rule (l)'s advisory. Same slot, and it is the one of the three that names

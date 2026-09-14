@@ -675,6 +675,11 @@ left open deliberately rather than met with more machinery.**
   natural intermediate state of the very fix this section prescribes — can still
   be refused for shrinking. The skip keys on the heading's PRESENCE, not on
   whether the count is complete.
+- A single LINE carrying two `closing-condition:` spellings, the first with a
+  digit-boundary kind, still diverges: python's `re.search` retries at the
+  second occurrence and declares it, awk's `match()` sees one per line and moves
+  on. Contrived, pre-existing, and present under both `exit` and `next` — noted
+  so the residual list is not read as closed.
 - An UPDATE whose queue sits under an unrecognised heading is invisible to
   `ranked_items`, so rule (n) sees zero items, does not refuse, and does not
   disclose either (the disclosure is gated on the update carrying
@@ -842,7 +847,12 @@ would measure that it had.**
 🔴 **AND THE HOLE IS NOT ONE HEADING WIDE — round 2 corrected this paragraph.**
 `## Defects (batched)` is merely the destination this skill NAMES. The actual
 set is *every* heading `is_next_steps_heading` does not recognise, which §F
-measures at 28–38 real documents depending on the predicate. Measured end to
+measures at 28–38 existing documents depending on the predicate. ⚠ **Carry §F's
+caveat with that number, which an earlier draft dropped on the retelling:** all
+but **3** of those are unreachable behind `status=dated-topic`. The 28–38 sizes
+the population of EXISTING BASES; what is unbounded is the FUTURE case — any
+update that writes its queue under a heading nobody has used yet — and that is
+the half this section is really about. Measured end to
 end: five `forcing: none` ranks under `## Ranked next steps` in an update exit
 **0** with no refusal and no disclosure, while the same five under
 `## Next steps` exit **12**. A reader who took this section as "one heading" —
