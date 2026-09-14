@@ -29,25 +29,32 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 
 ## State now
 
-- ✅ **THE ARC IS CLOSED, AND RANK 16 — the last thing holding `main` red — IS FIXED AND IN FLIGHT.**
-  Rank 14's four-round ladder finished this session (`#1681` merged); both unowned reds are
-  diagnosed, fixed and open as PRs.
+- ✅ **THE ARC IS CLOSED, AND `main` IS GREEN — rank 16, the last thing holding it red, SHIPPED.**
+  Rank 14's four-round ladder finished this session (`#1681`), and both unowned reds are fixed
+  and merged (`#1692`, `#1690`).
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
   `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
   `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · `#1654` cfe4eb54 · `#1658` 00afff8c ·
-  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` **053aa1f4** · `#1683` **8881029e**.
-- ⏳ **OPEN: `#1690`** (RED 2 — restores the deployed flow path to `clawgate/SKILL.md`, 69 B) and
-  **`#1692`** (RED 1 — counted pin for `test_guard_core.py`'s interpreter-line fixtures).
-  🔴 **NEITHER IS MERGED, so `main` is still red on both.** Neither has been audited — the
-  pre-merge audit was OFFERED to the operator and not yet answered.
-- ✅ **THE COMBINED MERGED TREE IS GREEN — the claim that matters, and it is measured.**
-  `origin/main` `053aa1f4` + both branches (merge `555baa62`): **644 passed, 0 failed** across
+  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` **053aa1f4** · `#1683` **8881029e** ·
+  `#1692` **ff5585ef** · `#1690` **f88e5235**.
+- ✅ **`main` IS GREEN, MEASURED ON THE REAL TIP — not on a constructed tree.** A `git archive` of
+  `origin/main` **`f88e5235`**, zero PR content: **644 passed, 0 failed** across
   `test_runtime_shebangs.py`, `test_clawgate_writeback_guard.py` and
-  `test_clawgate_task_interview_guard.py` (which owns the SKILL.md ceiling). Gating each PR alone
-  would not have shown they do not interact.
+  `test_clawgate_task_interview_guard.py` (which owns the SKILL.md ceiling). The same trio was
+  **2 failed** on every tip from `6c8c94d2` through `8881029e`.
+  ⚠ **The pre-merge gate was NOT re-run after its base moved, by operator decision.** The
+  combined merged-tree run (`053aa1f4` + both branches, merge `555baa62`) was 644 passed, then
+  `#1683` moved `main` to `8881029e` and that claim expired unrefreshed. What redeems it is the
+  post-merge reading above, which is a STRONGER claim than the one skipped — but it arrived
+  AFTER the merge, so for the duration of the merge itself the gate was stale. Recorded because
+  the honest version of "it was fine" is "it was fine, and we found out afterwards".
+- ⚠ **NEITHER FIX WAS AUDITED.** The pre-merge audit was offered and declined for `#1690`
+  (a 69 B restore, every claim a measurement) and not run for `#1692`. `#1692` carries a stated,
+  UNCLOSED gap: *"nothing execs these fixtures" is measured, not enforced by a test* — the count
+  ledger bounds it by failing on a new site, which is a forcing function, not a proof.
 - **CI IMPACT, MEASURED — the arc's two halves have OPPOSITE answers.** Local delivering
   (`gate.sh` 1.92→0.76 runs per merged PR, `nix build .#checks` 2.83→0.73, `scoped-tests.sh`
   0→0.67); **CI wall time never moved and could NOT have** — see rank 5. Unchanged this session.
@@ -118,9 +125,9 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (both fixes IN FLIGHT as `#1690` +
-`#1692`; `main` stays red until they land), **8** (DUE 2026-09-18) and **6** (DUE 2026-10-11),
-**5** (ANSWERED, NOT DELIVERED — measured).
+the END. **Ranks 1–16 are CLOSED tombstones.** Live: **8** (DUE 2026-09-18) and **6**
+(DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — measured). 🔴 **With rank 16 closed, `main` is
+green and NOTHING here is blocking** — rank 8's date is the only thing with a clock on it.
 
 1. **CLOSED** — `homelab-infra#792` merged dry-run (`dbe47814`). Arming is rank 8.  forcing: none
 2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.  forcing: none
@@ -212,7 +219,8 @@ the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (both fixes IN FLI
     to `scripts/lib/handoff_budget.py`; `test_handoff_doc_size.py` still owns the policy.
     ⚠ Closes the FEEDBACK gap, not the budget problem.
     forcing: none
-16. ⏳ **BOTH REDS FIXED, BOTH IN FLIGHT — `#1690` (writeback seam) and `#1692` (shebang scan).**
+16. **CLOSED — `#1692` `ff5585ef` (shebang scan) + `#1690` `f88e5235` (writeback seam), and
+    `main` VERIFIED GREEN on the real tip `f88e5235`: 644 passed, 0 failed, zero PR content.**
     The operator answered: RED 2 → restore the literal; RED 1 → *"do we need this? can we
     simplify?"*, answered by measurement rather than by picking an option. 🔴 **The framing this
     item inherited — "guard-vs-guard conflicts" needing a gate to yield — is REFUTED for BOTH.**
@@ -297,22 +305,22 @@ the END. **Ranks 1–15 are CLOSED tombstones.** Live: **16** (both fixes IN FLI
 git -C ~/workspace/devrc show origin/main:scripts/tests/test_tmux_hyperlink_open.py | md5sum
 #   5c1c87536fd65523a8c4a12ffe2c227a  — byte-identical to the PR head's copy
 
-# rank 16 — is main STILL red? (it is, until #1690 and #1692 merge)
+# rank 16 — main GREEN, on the real tip, with zero PR content. Re-measure; do not trust this age.
 S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
 (cd "$S" && nix develop ~/workspace/devrc -c python3 -m pytest \
   "$S/scripts/tests/test_runtime_shebangs.py" \
   "$S/scripts/claude-hooks/tests/test_clawgate_writeback_guard.py" \
-  -q -p no:cacheprovider --rootdir="$S")        # 2 failed, until both PRs land
+  "$S/scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py" \
+  -q -p no:cacheprovider --rootdir="$S")        # 644 passed at f88e5235
 
-# the claim that justifies merging them TOGETHER — rebuild it, do not trust this doc's age
-W=$(mktemp -d); git -C ~/workspace/devrc worktree add --detach "$W" origin/main
-git -C "$W" merge --no-ff --no-edit origin/fix/clawgate-seam-deployed-path
-git -C "$W" merge --no-ff --no-edit origin/fix/shebang-scan-pin-guard-core-fixtures
-PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c python3 -m pytest \
-  "$W/scripts/tests/test_runtime_shebangs.py" \
-  "$W/scripts/claude-hooks/tests/test_clawgate_writeback_guard.py" \
-  "$W/scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py" \
-  -q -p no:cacheprovider --rootdir="$W"          # 644 passed
+# the counted pin can go RED in BOTH directions — the control that makes it a ledger
+python3 - <<'EOF'
+import sys; sys.path.insert(0, '/home/zach/workspace/devrc/scripts')
+from pathlib import Path
+from testlib import shebang_scan as S
+hits = S.scan_file(Path('/home/zach/workspace/devrc/scripts/claude-hooks/tests/test_guard_core.py'))
+print(sum('env bash' in l for _, l in hits), sum('env python3' in l for _, l in hits))  # 40 2
+EOF
 ```
 
 ## Gotchas / decisions / dead-ends
