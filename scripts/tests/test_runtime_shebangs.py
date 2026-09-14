@@ -197,7 +197,57 @@ ALLOWLIST = [
     ("scripts/tests/test_peer_host.py", "first.startswith",
      "shape (b) — ASSERTS the committed peer-host script's interpreter line has "
      "a shebang prefix; writes nothing and execs nothing"),
+    # 🔴 A FOURTH SHAPE, and the only one where the env-based interpreter line is
+    # the SUBJECT UNDER TEST rather than a stub's preamble. `guard_core.py` has a
+    # branch that exists solely to parse it — `_runs_as_shell` resolves
+    # `<env> bash` (and the `-S VAR=1 bash` form) to its real interpreter, because
+    # a directly-executed file is handed to whatever its interpreter line names.
+    # These 42 lines are the INPUT to that parser: they are written to disk and
+    # passed to `gc.evaluate()` as TEXT, never run.
+    #
+    # Two measurements make that concrete, and both are why `write_exec` is not
+    # the answer here (it owns a `/bin/sh` line and RAISES on a supplied one):
+    #   * MUTATION — disabling that one branch (`interp == "env"` → False, count
+    #     == 1, under PYTHONDONTWRITEBYTECODE=1) turns
+    #     `test_every_invocation_shape_that_runs_the_file_is_DENIED[{p}]` and
+    #     `[timeout 60 {p} /some/arg]` RED, and red for the branch's own reason:
+    #     the kill is ALLOWED because the file stopped being read as a shell
+    #     script. Both are DIRECT-execution shapes, which is the only arm that
+    #     consults an interpreter line at all. 🔴 And the paired control that
+    #     rules out the obvious "just respell them /bin/sh" fix: with
+    #     `_CRASH1_BODY` respelled AND the same mutant applied, all 7 of those
+    #     shapes PASS — the mutant SURVIVES, i.e. the respell buys green by
+    #     making the branch untested rather than by making it unnecessary.
+    #   * REACHABILITY — the hazard this guard exists to catch is an interpreter
+    #     that cannot resolve in the nix sandbox, which requires the file to be
+    #     EXECUTED. It is not: the file has 18 subprocess/exec sites and ZERO of
+    #     them lie in the span these fixtures occupy (4676–6244). Positive
+    #     control on that search: the same query finds all 18 elsewhere.
+    # The count of each shape is pinned below, so this is a ledger over 42 known
+    # lines rather than a standing exemption for a 6,000-line file.
+    # 🔴 The needles deliberately carry neither the interpreter's full path nor
+    # the shebang prefix, or this file's own
+    # `test_this_guards_source_does_not_match_itself` would flag these entries —
+    # the same trap every pin above records.
+    ("scripts/claude-hooks/tests/test_guard_core.py", "env bash",
+     "shape (d) — TEST DATA for guard_core._runs_as_shell's env-resolution "
+     "branch; written to disk and read by gc.evaluate() as text, never exec'd"),
+    ("scripts/claude-hooks/tests/test_guard_core.py", "env python3",
+     "shape (d) — a deliberately LYING interpreter line: the fixture asserts an "
+     "explicit `bash <file>` parses the file anyway. Nothing execs it"),
 ]
+
+# --- THE COUNT LEDGER ----------------------------------------------------------
+# An allowlist entry is keyed on (path, substring), so one entry covering a shape
+# that appears N times pre-approves the N+1th for free. For a 6,000-line file
+# whose SUBJECT is interpreter lines that is the whole exposure, so the two
+# entries above carry a count as well: a new site is a FAILURE that names the
+# number to re-verify and update, not a silent inheritance of someone else's
+# justification. Same discipline as the two-way accounting above.
+PINNED_COUNTS = {
+    ("scripts/claude-hooks/tests/test_guard_core.py", "env bash"): 40,
+    ("scripts/claude-hooks/tests/test_guard_core.py", "env python3"): 2,
+}
 
 
 def _offenders() -> list[tuple[str, int, str]]:
@@ -235,6 +285,37 @@ def test_every_allowlist_entry_still_matches_something():
     assert not stale, (
         "ALLOWLIST entries match nothing — the site changed. Re-verify how that "
         "file writes its shebang, then delete the pin:\n  " + "\n  ".join(stale))
+
+
+def test_every_counted_pin_still_covers_exactly_the_lines_it_was_verified_for():
+    """The count half of the ledger — BOTH directions, like the stale-pin test.
+
+    MORE hits than pinned means a site appeared that nobody verified, and it
+    would otherwise inherit the entry's justification for free. FEWER means the
+    fixtures moved, so the justification is about lines that no longer exist and
+    must be re-read rather than carried.
+    """
+    hits = _offenders()
+    wrong = []
+    for (rel, needle), expected in PINNED_COUNTS.items():
+        found = sum(1 for h in hits if h[0] == rel and needle in h[2])
+        if found != expected:
+            wrong.append(f"{rel} ~ {needle!r}: pinned {expected}, found {found}")
+    assert not wrong, (
+        "a counted pin no longer covers what it was verified for. Read the new "
+        "or missing site, confirm it is still TEST DATA that nothing execs, then "
+        "update PINNED_COUNTS in the SAME commit:\n  " + "\n  ".join(wrong))
+
+
+def test_the_count_ledger_only_names_entries_that_are_actually_pinned():
+    """Anti-vacuity, and the third direction the two tests above cannot see: a
+    `PINNED_COUNTS` key with no ALLOWLIST entry counts lines that the scan is
+    still failing on, which reads as coverage while providing none."""
+    keys = {(rel, needle) for rel, needle, _why in ALLOWLIST}
+    orphans = [k for k in PINNED_COUNTS if k not in keys]
+    assert not orphans, (
+        "PINNED_COUNTS names (path, needle) pairs that no ALLOWLIST entry "
+        "pins: %r" % (orphans,))
 
 
 def test_positive_control_the_scan_can_actually_find_an_offender(tmp_path):
