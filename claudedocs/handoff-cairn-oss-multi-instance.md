@@ -15,6 +15,16 @@ Spin `cairn` out into a public OSS repo that both a personal and a **civitai tea
 instance build from, then stand up that second instance so client notes live on client
 infrastructure. Decided by the operator over three rounds of questions; the full design
 is the PRIVATE proposal, not this doc.
+- **closing-condition:** `check` — a SECOND instance exists and serves client notes from
+  client infrastructure: a `cairn`-family store reachable at a civitai-side endpoint,
+  answering `cairn recall --scope <a civitai scope>` with entries written by a civitai
+  session, with the personal instance unaffected. ⚠ **FROZEN — this is the ORIGINAL ask,
+  and the arc has NOT met it.** Everything shipped so far (the OSS repo, the flake pin,
+  the consolidation, the CI legs, the scrub fixes) is the FIRST half — spinning `cairn`
+  out. **The second instance has not been stood up.** Ranks 4, 8 and 21 are the nearest
+  work to it; 25/27/28 and the audit residue are not. A close-check answering this line
+  today returns NOT ADDRESSED, and the one item is: **the civitai instance does not
+  exist yet.**
 
 ## State now
 
@@ -265,80 +275,19 @@ resurrect it from git history and re-derive its probes.
 - **Next probe:** none. If it recurs, the message is self-diagnosing — READ IT rather than
   re-running. Re-running to a green is what trains everyone to click through.
 
-### The devrc and OSS cairn CLIENTS HAVE FORKED — measured, and it is what rank 3's second half must resolve
-🔴 This is not a bug. It is the fact that makes rank 3 bigger than its one-line description,
-and re-deriving it costs a session an hour. **Do not re-measure it; verify it still holds.**
-- **Symptom + exact repro:** `diff -u ~/workspace/devrc/scripts/cairn ~/workspace/cairn/cairn`
-  and, per module, `diff ~/workspace/devrc/scripts/lib/<m>.py ~/workspace/cairn/lib/<m>.py`.
-- **Observed (with values), 2026-09-07:** the client diff is **259 lines (43 added / 116
-  removed)** going devrc→OSS. The removals are almost entirely **`cairn who`** — the
-  subcommand, `cmd_who`, `_who_timeout`, `_who_default_timeout`, `_cairn_who` and the parser
-  registration; `lib/cairn_who.py` is **absent from the OSS repo** (`git ls-files | grep who`
-  → nothing). The additions are `lib/timeouts.py`, a `CAIRN_MIRROR_ROOT` env var, and
-  `validate` re-implemented on the resolver instead of shelling a writer's `--validate`.
-  Per-module changed-line counts: `host_identity` **113**, `subsystem_resolver` **40**,
-  `subsystem_recall` **38**, `cairn_doctor` **21**, `subsystem_read_store` **4**.
-  devrc additionally has `scripts/lib/subsystem_touch.py` — the whole writer half, an order of
-  magnitude larger — against the OSS `lib/entry_shape.py`, which holds only the shared
-  vocabulary. devrc has **15** cairn/subsystem test files; OSS has **7**. via: measurement
-  🔴 **THE TWO RAW LINE COUNTS THAT USED TO BE HERE (`6,654` and `264`) ARE GONE ON PURPOSE —
-  BOTH WENT STALE, AND ONE OF THEM WAS STALED BY THIS DOC'S OWN PR.** The doc asserted 6,654
-  against a `subsystem_touch.py` that moved three times during this one PR — and 🔴 **the
-  replacement figures a first draft of THIS paragraph quoted went stale before it was even
-  merged, which is the argument, not an aside**: it said "6,693 at that PR's first commit", and a
-  REBASE one commit later re-parented that commit so it reads ~6,833. `entry_shape.py` is not one
-  number either — the local clone's HEAD and the rev `flake.lock` actually pins differ (330 vs
-  314), so even the derive command has to name WHICH rev. A raw line count of a file under active
-  edit restales within the same PR; it is the cross-round class this ladder already names — true
-  when written, falsified by a later commit, inside no round's diff range — and **nothing asserts
-  on any of these numbers, so no test can ever catch one.** The ORDER-OF-MAGNITUDE claim (≈20×)
-  is what the argument rests on and it is robust. If you need a figure, derive it AND say which
-  rev you measured: `wc -l scripts/lib/subsystem_touch.py`, and for the pinned side
-  `git -C ~/workspace/cairn show $(…flake.lock's cairn rev…):lib/entry_shape.py | wc -l` —
-  `HEAD` there is your clone's, not what devrc consumes. **Do not re-insert a bare count.**
-- **Ruled out: that the fork is behavioural and therefore expensive to reconcile.** I read
-  every module diff: **~90% is sanitisation prose** — docstrings rewriting `subsystem_touch`
-  to "the writer half"/`entry_shape` and removing named hosts and dates. The only real
-  behaviour change is `cairn_doctor`'s `mirror_root: Path | None` plus a `NOT_OBSERVABLE`
-  frozen-mirror check, which is a strict improvement. via: code
-- **Ruled out: that `cairn who`'s absence is an oversight to be undone.**
-  `claudedocs/proposal-cairn-session-capture.md:569` states it explicitly — the extraction
-  removed `cairn who` because session forensics on named hosts is *"not an operation on a
-  store"*. It is a decision, not drift. via: doc
-- **Leading hypothesis:** the OSS client is a near-superset of devrc's minus one
-  deliberately-excluded subcommand, so devrc can consume it if `cairn who` moves to its own
-  `cairn-who` binary — which is the seam the OSS cut already chose — and devrc's writer takes
-  its shared vocabulary from the pinned `entry_shape` instead of its own copies.
-- 🔴 **DECIDED BY THE OPERATOR, 2026-09-08: CONSOLIDATE ONTO THE PIN.** devrc deletes its five
-  duplicated `lib/` modules and takes them from the pinned flake; the writer takes its shared
-  vocabulary from the pinned `entry_shape` instead of its own copies. **The fork is CLOSED —
-  do not re-ask it**, and do not read the paragraph above as a live question. It was put with
-  the re-measured numbers below and with this trade named: the cost is that devrc's
-  `subsystem_touch.py` must take its vocabulary from the far smaller `entry_shape`, which is the
-  real work and the part that can surprise us. (Counts removed here too — see the block above.)
-- **RE-MEASURED 2026-09-08, after `cairn-who` merged (devrc #1381). The figures above are from
-  09-07 and have moved in BOTH directions.** This item says verify rather than re-derive; this
-  is that verification, and it changed the picture:
-  - the CLIENT diff **shrank**: 259 lines (43+/116−) → **142 (52+/74−)**. Most of the removals
-    were `cairn who`, which now lives in its own binary on both sides.
-  - the LIBRARY drift **widened**: `cairn_doctor` **21 → 43** changed lines, `host_identity`
-    **113 → 122**. `subsystem_resolver` (40), `subsystem_recall` (38) and
-    `subsystem_read_store` (4) are unmoved. The OSS side keeps taking PRs while devrc's copies
-    sit still, so this gap grows on its own — which is the argument for consolidating, and it
-    is stronger than it was yesterday.
-  - 🔴 **there are now TWO `timeouts.py`, one per side, 41 changed lines apart, created hours
-    apart on 2026-09-08** — devrc's by #1381, the OSS one by the extraction. The duplication
-    this item is about reproduced itself while the item sat open. The OSS copy also defines a
-    `DEFAULT_TIMEOUT = 60` that nothing imports; devrc's defines none.
-- 🔴 **THE PER-MODULE RAW FIGURES ABOVE ARE SUPERSEDED AS A PLANNING BASIS** by
-  "The cost of consolidating onto the pin is MEASURED" below — raw diffs are dominated by the
-  extraction's docstring rewrites and say almost nothing about what devrc gains or loses. Two
-  shorter restatements of this block (2026-09-08 and 2026-09-09, one of them saying only "not
-  re-measured this session") were EVICTED 2026-09-13 as copies; this is the one block.
-- **Next step:** rank 3's remaining slices, in order — pin the input in `flake.nix`, move
-  `~/.local/bin/cairn` into `/nix/store`, then the consolidation above (slice 3 MERGED
-  2026-09-12 as #1508 `44bd8b0e`). `cairn-who` stays devrc-only and out-of-store; it is
-  deliberately not part of the pin.
+### EVICTED 2026-09-14 — the devrc/OSS client fork (DECIDED and DELIVERED)
+🔴 **The question this block held open is CLOSED twice over:** the operator decided
+**CONSOLIDATE ONTO THE PIN** (2026-09-08, not to be re-asked — restated in `State now`), and
+rank 3 slice 3 DELIVERED it (#1508 `44bd8b0e`; all five forked reader modules ABSENT on
+`origin/main`, re-verified 2026-09-14). Evicted for size per the 2026-09-07 convention.
+**What survives, because it is what made the decision cheap:** the fork was ~90% SANITISATION
+PROSE, not behaviour — docstring rewrites and removed host names — so the reconciliation cost
+was never the raw diff. Two of the five modules were byte-identical once docstrings were
+stripped, and where they differed the PINNED side was the superset. 🔴 And the trap this block
+spent two rounds on: **a raw line count of a file under active edit restales inside its own
+PR** — the figures were falsified by a rebase before they merged, and nothing asserts on them,
+so no test can ever catch one. Derive a count and name the rev, or do not quote it.
+**Next probe: none.**
 
 ### EVICTED 2026-09-14 — the SECOND cairn intermittent (CLOSED)
 🔴 **CLOSED and MERGED as `ZacxDev/cairn` #5 `9213726`.** Block evicted for size, per the
@@ -2358,6 +2307,52 @@ covers; pin it with `--config`, do not `cd`.
   at `origin/main`: all five ABSENT. `State now` was right. **A REPLACE section and an APPEND
   section drift apart precisely because only one of them is rewritten each pass** — re-read the
   REPLACE sections against each other before confirming an update. via: measurement
+
+- 🔴 **2026-09-14 — MY INSTRUMENT FAILED FOUR TIMES IN ONE SESSION, ALWAYS IN THE
+  REASSURING DIRECTION, AND NEVER THE CODE UNDER TEST.** Four distinct shapes, each of
+  which would have been written up as a fact about the code if not re-checked:
+  (a) `grep -cF` with a MULTI-LINE pattern splits it one-pattern-per-line, so a trailing
+  newline matched every line and three VALID mutants were scored `INVALID: 150 matches`;
+  (b) a revert patch that silently NO-LONGER-MATCHED (a comment had been inserted between
+  its two lines), so the "RED control" ran against the FIXED tree and printed `5 passed` —
+  a control that reads exactly like a test failing to fail; (c) a latin-1 fixture written
+  with an em-dash, which is not latin-1 encodable, so the file was never created and the
+  mutant scored SURVIVED; (d) reading the WRONG pipelinerun — "newest failed" was a guess
+  and returned a **65-byte** log, i.e. a fast setup failure, whose emptiness read as
+  "nothing named". **The cure that worked every time: assert the instrument did its job
+  before reading its verdict** — match count exactly 1, file exists and has the encoding
+  you think, log is bigger than a banner, run attributed by timestamp not by recency.
+  via: measurement
+
+- 🔴 **2026-09-14 — A NARROWNESS CONTROL WHOSE FIXTURES LACK THE FEATURE UNDER TEST IS
+  STRUCTURALLY BLIND, AND READS AS COVERAGE.** A guard I wrote flagged CORRECT prose:
+  `` `[^`]*PHRASE[^`]*` `` opens at the CLOSING backtick of one inline code span and closes
+  at the OPENING backtick of the next, so prose BETWEEN two spans was matched. It shipped
+  with a "does not flag legitimate prose" control whose three fixtures were all
+  **backtick-free** — it could not observe the class at all. Measured on a line that very
+  PR had authored. **Ask what FEATURE the defect needs, then check your negative fixtures
+  HAVE it.** via: measurement
+
+- 🔴 **2026-09-14 — A BRIEF NAMING ONE INSTANCE OF A MECHANICAL DEFECT IS NAMING A SAMPLE,
+  NOT A POPULATION.** Rank 23(c) described ONE scrubbed remedy in `ZacxDev/cairn`. There
+  were **twelve**, across **two** different replacement phrases (`a writer` AND
+  `the writer half`) plus a fabricated symbol (`entry_shape.build_report`, which exists
+  nowhere in that package). Enumerated, not estimated: `git grep` at the base listed 12
+  lines; 4 were fixed in the first commit and 8 in the second. The same session's rank 26
+  had the mirror-image error in the other direction — the brief claimed TWO drifted tables
+  and one was a deliberate gated exclusion. **Count the population before scoping, in both
+  directions.** via: measurement
+
+- ⚠ **2026-09-14 — THREE AUDIT ROUNDS ON `ZacxDev/cairn` #17 FOUND ZERO DEFECTS IN THE
+  PACKAGE AND FIVE IN THE SCAFFOLDING I WROTE.** The payload was verified by DRIVING it
+  (both remedies printed end-to-end, the named command run, its output confirmed) and did
+  not move after round 0. Every finding after that was a guard: a pattern with no positive
+  control while the commit message claimed one existed; the prose false-positive above; a
+  self-exemption pin blind to its own upstream widening path; a verb guard reading 2 files
+  while claiming "every"; a silently-dropped non-UTF-8 bucket. **That is the attribution
+  gate's shape — the ladder auditing itself — so it was stopped BY DECISION after round 1,
+  not on a clean round.** Recorded because a report that stops on the prose criterion is
+  otherwise indistinguishable from one that converged. via: measurement
 
 ## How to verify
 
