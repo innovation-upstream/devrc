@@ -40,8 +40,11 @@ product claim in its name — "fails loudly" — while measuring only that
 prints `E5113`, ABANDONS THE REST OF THE FILE, runs the remaining rc lines,
 executes the appended `-c "Octo …"` anyway, and EXITS 0. Whenever a guard here
 is about what the EDITOR does rather than what our functions do, it can only
-assert the request the wrapper makes (delete this command, issue this quit) —
-never that neovim honoured it.
+assert the request the wrapper makes (delete this command, put these lines in
+this window, issue no quit) — never that neovim honoured it, and never what the
+result LOOKS like. The seam teardown's screen was captured separately, from a
+real neovim TUI in a pty replayed through a terminal emulator, and recorded in
+the PR.
 """
 from __future__ import annotations
 
@@ -613,7 +616,11 @@ _LUA_PRELUDE = r"""
 -- than performs, so the scenario below can read what the file DID.
 RECORD = {keymaps = {}, notify = {}, merges = {}, prompts = {}, wins = {},
           applied = {}, buflines = nil, actions = {}, excmds = {},
-          delcmds = {}}
+          delcmds = {}, setlines = {}, winbufs = {}}
+-- Buffer handles are DISTINCT per creation, so "the buffer that was shown is
+-- the buffer the diagnosis was written into" is a real check and not an
+-- artefact of every handle being the same number.
+local NEXT_BUF = 99
 ANSWERS = {}
 CURRENT_BUFFER = nil
 OCTO_MAPPINGS_MISSING = nil
@@ -634,10 +641,10 @@ vim = {
   bo = autotable(),
   wo = autotable(),
   log = {levels = {ERROR = 4, WARN = 3, INFO = 2}},
-  -- 🔴 A CALLABLE TABLE, like the real `vim.cmd`. The teardown calls
-  -- `vim.cmd("cquit <N>")`, which in a real neovim does not return; here it is
-  -- RECORDED so the scenario can read that the refusal actually reached for
-  -- the exit rather than merely announcing one.
+  -- 🔴 A CALLABLE TABLE, like the real `vim.cmd`, and EVERY ex-command is
+  -- recorded. The teardown used to end in `vim.cmd("cquit 69")`; it must not
+  -- any more, and "it issued no quit" is only a real assertion if a quit WOULD
+  -- have been observable here.
   cmd = setmetatable({colorscheme = function() end}, {
     __call = function(_, c) RECORD.excmds[#RECORD.excmds + 1] = tostring(c) end,
   }),
@@ -662,8 +669,21 @@ vim = {
     end,
   },
   api = {
-    nvim_create_buf = function() return 99 end,
-    nvim_buf_set_lines = function(_, _, _, _, lines) RECORD.buflines = lines end,
+    nvim_create_buf = function()
+      NEXT_BUF = NEXT_BUF + 1
+      return NEXT_BUF
+    end,
+    nvim_buf_set_lines = function(buf, _, _, _, lines)
+      RECORD.buflines = lines
+      RECORD.setlines[#RECORD.setlines + 1] = {buf = buf, lines = lines}
+    end,
+    -- 🔴 WHAT WAS PUT IN THE WINDOW, not merely what was written into some
+    -- buffer. The refusal's diagnosis is only legible if the window is
+    -- DISPLAYING it; a teardown that filled a buffer and never showed it would
+    -- otherwise read as a pass.
+    nvim_win_set_buf = function(win, buf)
+      RECORD.winbufs[#RECORD.winbufs + 1] = {win = win, buf = buf}
+    end,
     nvim_open_win = function(_, _, cfg)
       RECORD.wins[#RECORD.wins + 1] = cfg; return 77
     end,
@@ -817,98 +837,244 @@ def test_the_lua_harness_can_actually_fire(tmp_path):
     assert kv["merges"] == ["1"], kv
 
 
-def test_a_MISSING_SEAM_TEARS_THE_EDITOR_DOWN_rather_than_raising(tmp_path):
-    """🔴 THIS TEST USED TO CARRY THE PRODUCT CLAIM IN ITS NAME WHILE MEASURING
-    ONE LEVEL BELOW IT, AND THE CLAIM WAS FALSE.
+# The seam-broken scenario, as a setup string: an upstream rename modelled by
+# clearing the field, never by editing the code under test.
+_SEAM_GONE = 'MODULES["octo.utils"].apply_mappings = nil'
 
-    It was `..._FAILS_LOUDLY_when_apply_mappings_disappears`, and what it
-    actually proved was that `error()` escapes `dofile` under `luajit`. It
-    does. What it does NOT do is stop the review TUI: MEASURED on neovim
-    0.12.5, reproducing the wrapper's structure (`customRC` → `luafile`, then
-    `-c "Octo <N> <owner/repo>"`), an erroring `luafile` prints `E5113`,
-    abandons the rest of the lua file, RUNS THE REMAINING rc LINES, EXECUTES
-    THE `-c`, AND EXITS 0. The operator would have got a review window, an
-    error flash to dismiss, and every safety keymap silently gone — the exact
-    outcome raising was chosen to prevent.
+# A phrase that appears ONLY in the refusal's own diagnosis — not in the seam
+# message the caller passes, not in octo, not in neovim. Asserting on it is what
+# separates "the explanation is on screen" from "some text is on screen".
+_DIAGNOSIS_NEEDLE = "The `Octo` command has been DELETED"
 
-    So the guard now asserts the TEARDOWN, which is the product claim:
 
-      * an ERROR-level notification naming the seam, so the cause is not a
-        mystery;
-      * the `Octo` USER COMMAND IS DELETED — the structural half, because that
-        command is the only thing the appended `-c` can use to open a review
-        buffer;
-      * `cquit` is issued with the wrapper's refusal code, so the process
-        exits NON-ZERO rather than sitting there as an empty editor;
-      * and the wrap is NOT installed, i.e. nothing half-wired is left behind.
-
-    ⚠ WHAT THIS TIER CANNOT SEE: that a real neovim honours `cquit` from
-    inside a `luafile`, or that `nvim_del_user_command` really removes the
-    command octo created. Both were driven against a real headless neovim with
-    real octo.nvim and recorded in the PR; this tier proves the wrapper ASKS
-    for them, in the right order, on the right trigger.
-    """
-    kv = _ok_lua(tmp_path, "\n".join([
+def _teardown_kv(tmp_path, extra_setup: str = ""):
+    """Drive the seam-gone teardown and read back everything it DID."""
+    setup = _SEAM_GONE if not extra_setup else extra_setup + "\n" + _SEAM_GONE
+    return _ok_lua(tmp_path, "\n".join([
         'KV("loaded", "yes")',
+        # The notification is multi-line now, and a KV row is one line, so the
+        # newlines are flattened rather than silently truncating the value at
+        # the first one — which is exactly how this read as "nothing named the
+        # seam" the first time it was run.
         'for _, n in ipairs(RECORD.notify) do',
-        '  KV("notify", tostring(n.lvl) .. "|" .. n.msg)',
+        '  KV("notify", tostring(n.lvl) .. "|" .. n.msg:gsub("\\n", " / "))',
         'end',
         'for _, c in ipairs(RECORD.delcmds) do KV("delcmd", c) end',
         'for _, c in ipairs(RECORD.excmds) do KV("excmd", c) end',
+        'for _, w in ipairs(RECORD.winbufs) do',
+        '  KV("winbuf", tostring(w.win) .. "|" .. tostring(w.buf))',
+        'end',
+        'for _, s in ipairs(RECORD.setlines) do',
+        '  KV("setlines", tostring(s.buf) .. "|" .. table.concat(s.lines, " "))',
+        'end',
         'KV("seam", tostring(MODULES["octo.utils"].apply_mappings))',
-    ]), setup='MODULES["octo.utils"].apply_mappings = nil')
+    ]), setup=setup)
 
-    named = [n for n in kv.get("notify", []) if "apply_mappings" in n]
-    assert named, (
-        "nothing named the seam, so the operator gets an unexplained refusal: "
-        f"{kv.get('notify')}")
-    assert all(n.startswith("4|") for n in named), (
-        f"the seam failure was announced below ERROR level: {named}")
 
+def test_a_MISSING_SEAM_DELETES_THE_Octo_COMMAND(tmp_path):
+    """🔴 THE STRUCTURAL HALF OF THE REFUSAL, AND THE ONLY HALF THAT MAKES "no
+    half-wired review buffer" TRUE.
+
+    This test used to carry the product claim in its name while measuring one
+    level below it, as `..._FAILS_LOUDLY_when_apply_mappings_disappears` — what
+    it proved was that `error()` escapes `dofile` under `luajit`. It does. What
+    it does NOT do is stop the review TUI: MEASURED on neovim 0.12.5,
+    reproducing the wrapper's structure (`customRC` → `luafile`, then
+    `-c "Octo <N> <owner/repo>"`), an erroring `luafile` prints `E5113`,
+    abandons the rest of the lua file, RUNS THE REMAINING rc LINES, EXECUTES THE
+    `-c`, AND EXITS 0 — a review window with every safety keymap silently gone.
+
+    Deleting the `Octo` user command is what closes that, because that command
+    is the only thing the appended `-c` can open a review buffer with. MEASURED
+    against a real neovim with real octo.nvim: seam gone, the `-c` still runs
+    and `exists(':Octo')` is 0.
+
+    ⚠ WHAT THIS TIER CANNOT SEE: that `nvim_del_user_command` really removes the
+    command octo created. That is the headless run's claim; this one proves the
+    wrapper ASKS for it, on the right trigger.
+    """
+    kv = _teardown_kv(tmp_path)
     assert kv.get("delcmd") == ["Octo"], (
         "the `Octo` user command was NOT deleted, so the `-c \"Octo <N> "
         "<owner/repo>\"` the wrapper appends can still open a review buffer "
         f"with every safety keymap missing: {kv.get('delcmd')}")
-
-    quits = [c for c in kv.get("excmd", []) if c.startswith("cquit")]
-    assert quits == ["cquit 69"], (
-        "the process was not made to exit non-zero, so a refusal is "
-        f"indistinguishable from an editor with nothing in it: {kv.get('excmd')}")
-
     # The wrap must NOT have been installed over the missing seam.
     assert kv["seam"] == ["nil"], kv
 
-    # NEGATIVE CONTROL, both directions. With the seam present the same
-    # scenario must load AND must tear nothing down — otherwise "it deleted
-    # the command" could be something this file does unconditionally.
-    ok_kv = _ok_lua(tmp_path, "\n".join([
+
+def test_a_MISSING_SEAM_LEAVES_THE_EDITOR_UP_rather_than_quitting(tmp_path):
+    """🔴 THE REFUSAL MUST NOT QUIT, AND THIS IS A REVERSAL — IT USED TO
+    `cquit 69`.
+
+    The quit was the "status half": exit non-zero so anything reading a status
+    could see the failure. Nothing reads that status. `nvim-octo.sh` ends in
+    `exec nvim`, so nvim's code becomes the wrapper's, and the wrapper is
+    launched from an alacritty hint on a clicked mention — the terminal dies
+    with the process. MEASURED at the previous head: the seam-broken run exited
+    69 having rendered nothing, i.e. the window flashed and vanished, taking the
+    diagnosis with it. That is very close to the silent degradation this whole
+    refusal exists to end.
+
+    So the wrapper now issues NO ex-command at all on the refusal path and the
+    process exits 0. Both halves matter and both are asserted here: a mutant
+    that re-adds the quit must not be able to pass by leaving some other
+    teardown step intact.
+
+    ⚠ This tier reads what the wrapper ASKED FOR. `EXIT=0` from a real neovim
+    is the headless run's claim, recorded in the PR.
+    """
+    kv = _teardown_kv(tmp_path)
+    assert kv.get("excmd") is None, (
+        "the refusal issued an ex-command. It must not: the editor has to STAY "
+        "UP with the diagnosis in it, and a `cquit`/`qa` here is what made the "
+        f"window vanish before the operator could read anything: {kv.get('excmd')}")
+    # The other half of the same claim — a quit-free teardown that also stopped
+    # deleting the command would be a refusal that refuses nothing.
+    assert kv.get("delcmd") == ["Octo"], kv.get("delcmd")
+
+
+def test_a_MISSING_SEAM_PUTS_THE_DIAGNOSIS_IN_THE_WINDOW(tmp_path):
+    """🔴 THE LEGIBLE HALF, AND THE MESSAGE AREA CANNOT HOLD IT FOR LONG.
+
+    ⚠ THE OBVIOUS REASON IS WRONG AND WAS MEASURED WRONG. The expectation was
+    that `E492: Not an editor command: Octo` — which the appended
+    `-c "Octo <N> <owner/repo>"` produces once the command is deleted — would
+    land on the message line LAST and OVERWRITE the notification. It does not:
+    startup messages accumulate, so the first screen carries the whole
+    notification with the `E492` underneath it.
+
+    What goes wrong is the SECOND screen. MEASURED by capturing a real neovim
+    0.12.5 TUI in a pty and replaying it through a terminal emulator: the
+    `E492` forces a `Press ENTER or type command to continue` prompt, that
+    keypress clears the message area, and with the notification alone the
+    operator is left on the NEOVIM SPLASH SCREEN — "Nvim is open source and
+    freely distributable", "type :q<Enter> to exit" — in an empty `[No Name]`
+    buffer. One keystroke from the diagnosis to something indistinguishable
+    from a broken install.
+
+    So the explanation also goes where a keypress cannot erase it: a scratch
+    buffer that BECOMES THE WINDOW'S BUFFER. Both steps are asserted, and
+    against the SAME handle — writing lines into a buffer nobody displays is
+    exactly the failure that would otherwise read as a pass.
+    """
+    kv = _teardown_kv(tmp_path)
+
+    shown = kv.get("winbuf") or []
+    assert len(shown) == 1, (
+        "the refusal did not put anything in the window, so the operator is "
+        f"left with `E492` and no explanation: {shown}")
+    win, buf = shown[0].split("|", 1)
+    assert win == "0", f"the diagnosis went to some window other than the current one: {shown}"
+
+    written = {s.split("|", 1)[0]: s.split("|", 1)[1]
+               for s in kv.get("setlines", [])}
+    assert buf in written, (
+        "the buffer put in the window is not the buffer the diagnosis was "
+        f"written into: shown={buf} written={sorted(written)}")
+    body = written[buf]
+    assert _DIAGNOSIS_NEEDLE in body, (
+        "the displayed buffer does not explain the `E492` the operator is "
+        f"about to see, so the refusal still reads as a broken install: {body}")
+    assert "apply_mappings" in body, (
+        f"the displayed buffer does not name the seam that went missing: {body}")
+
+
+def test_the_refusal_is_announced_at_WARN_because_ERROR_ABORTS_THE_SCRIPT(tmp_path):
+    """🔴 THE LEVEL IS A MEASUREMENT, NOT A PREFERENCE, AND IT USED TO BE ERROR.
+
+    An ERROR-level `vim.notify` inside a `luafile` is promoted to a vim error by
+    the sourcing command. `pcall` cannot catch that — it is vim's own error
+    state, not a lua error. MEASURED from a real neovim 0.12.5 TUI in a pty: at
+    ERROR the operator's first screen was `Error in VIMINIT:`, `E5108: Lua: …`
+    and a stack traceback, and the rest of the generated rc was ABANDONED. At
+    WARN the same screen carries the diagnosis and nothing else.
+
+    The notification also carries the WHOLE refusal rather than just the seam
+    sentence, because the message area IS the first screen — before any
+    keypress — and it has to explain the `E492` that lands under it.
+    """
+    kv = _teardown_kv(tmp_path)
+    named = [n for n in kv.get("notify", []) if "apply_mappings" in n]
+    assert named, (
+        "nothing named the seam, so the operator gets an unexplained refusal: "
+        f"{kv.get('notify')}")
+    assert all(n.startswith("3|") for n in named), (
+        "the seam failure was announced at a level other than WARN. ERROR is "
+        "promoted to a thrown vim error inside a `luafile`, which replaces the "
+        f"diagnosis with a stack traceback: {named}")
+    assert all(_DIAGNOSIS_NEEDLE in n for n in named), (
+        "the notification carries only the seam sentence, so the first screen "
+        f"does not explain the `E492` that follows it: {named}")
+
+
+def test_a_PRESENT_SEAM_TEARS_NOTHING_DOWN(tmp_path):
+    """NEGATIVE CONTROL for every teardown assertion above. With the seam there,
+    the file must load AND must tear nothing down — otherwise "it deleted the
+    command" / "it filled the window" could be something this file does
+    unconditionally, and all four guards would be vacuous.
+    """
+    kv = _ok_lua(tmp_path, "\n".join([
         'KV("loaded", "yes")',
         'KV("delcmds", #RECORD.delcmds)',
         'KV("excmds", #RECORD.excmds)',
+        'KV("winbufs", #RECORD.winbufs)',
+        'KV("setlines", #RECORD.setlines)',
+        'KV("notify", #RECORD.notify)',
     ]))
-    assert ok_kv["loaded"] == ["yes"], ok_kv
-    assert ok_kv["delcmds"] == ["0"] and ok_kv["excmds"] == ["0"], ok_kv
+    assert kv["loaded"] == ["yes"], kv
+    assert kv["delcmds"] == ["0"], kv
+    assert kv["excmds"] == ["0"], kv
+    assert kv["winbufs"] == ["0"], kv
+    assert kv["setlines"] == ["0"], kv
+    assert kv["notify"] == ["0"], kv
 
 
 def test_the_teardown_survives_an_Octo_command_that_was_never_created(tmp_path):
     """When octo's own `setup()` threw, `commands.setup()` never ran and there
     is no `Octo` command to delete — and `nvim_del_user_command` RAISES on an
-    unknown name. An unguarded delete would abort the teardown before the
-    `cquit`, leaving exactly the half-wired editor it exists to prevent.
+    unknown name. An unguarded delete would abort the teardown before the step
+    that puts the diagnosis on screen, leaving the operator with a bare `E492`.
 
     The stub raises for that case, so this is watched rather than reasoned
-    about: the refusal must still reach the exit.
+    about: the refusal must still reach the window.
+    """
+    kv = _teardown_kv(tmp_path, extra_setup="OCTO_COMMAND_EXISTS = false")
+    assert kv.get("delcmd") is None, kv.get("delcmd")
+    assert len(kv.get("winbuf") or []) == 1, (
+        "a raise from the absent-command delete swallowed the diagnosis: "
+        f"{kv.get('winbuf')}")
+    assert kv.get("excmd") is None, kv.get("excmd")
+
+
+def test_the_refusal_text_wraps_to_the_width_it_is_given(tmp_path):
+    """🔴 A REFUSAL IS PROSE AND A WINDOW HAS A WIDTH. Unwrapped, the measured
+    screen broke every long line mid-word; `number` and `signcolumn` — which
+    this file turns on globally — cost six more columns on top.
+
+    Two points, not one: a narrow window and a wide one, because a wrapper that
+    ignored its argument would satisfy either alone.
     """
     kv = _ok_lua(tmp_path, "\n".join([
-        'for _, c in ipairs(RECORD.excmds) do KV("excmd", c) end',
-        'KV("delcmds", #RECORD.delcmds)',
-    ]), setup="\n".join([
-        'OCTO_COMMAND_EXISTS = false',
-        'MODULES["octo.utils"].apply_mappings = nil',
+        'local msg = string.rep("wordy ", 60)',
+        'for _, w in ipairs({40, 100}) do',
+        '  local longest = 0',
+        '  for _, line in ipairs(NvimOcto.refusal_lines(msg, w)) do',
+        '    if #line > longest then longest = #line end',
+        '  end',
+        '  KV("longest", tostring(w) .. ":" .. tostring(longest))',
+        'end',
+        'KV("title", NvimOcto.refusal_lines("x", 60)[1])',
     ]))
-    assert kv["delcmds"] == ["0"], kv
-    assert [c for c in kv.get("excmd", []) if c.startswith("cquit")] == [
-        "cquit 69"], kv.get("excmd")
+    widths = dict(p.split(":") for p in kv["longest"])
+    assert int(widths["40"]) <= 40, kv
+    assert int(widths["100"]) <= 100, kv
+    # ...and it actually USED the narrow one, rather than every line being short
+    # by accident of the fixture.
+    assert int(widths["40"]) > 20, kv
+    assert int(widths["100"]) > int(widths["40"]), (
+        "the width argument is ignored — both widths produced the same "
+        f"longest line, so the wrap is not a wrap: {kv}")
+    assert kv["title"] == ["nvim-octo: REFUSING to open a review buffer"], kv
 
 
 @pytest.mark.parametrize("kind", ALL_KINDS)

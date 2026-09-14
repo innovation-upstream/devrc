@@ -973,28 +973,137 @@ end
 -- below for the measurement that killed the previous mechanism. Split out as a
 -- named function so a test can drive it and read what it DID, and so the two
 -- halves are visibly two halves.
+
+-- Greedy word wrap, so the refusal reads as prose in a window of unknown
+-- width rather than as one line running off the right edge. `display_width`
+-- rather than `#` because these strings carry em dashes and backticks.
+local function wrap_text(text, width)
+  local out, line = {}, ""
+  for word in tostring(text):gmatch("%S+") do
+    local candidate = (line == "") and word or (line .. " " .. word)
+    if line ~= "" and display_width(candidate) > width then
+      out[#out + 1] = line
+      line = word
+    else
+      line = candidate
+    end
+  end
+  if line ~= "" then
+    out[#out + 1] = line
+  end
+  return out
+end
+
+-- 🔴 THE DIAGNOSIS SURFACE IS A BUFFER AS WELL AS THE MESSAGE AREA, AND THE
+-- REASON IS MEASURED — a real neovim 0.12.5 TUI captured in a pty and replayed
+-- through a terminal emulator, not reasoned about.
 --
--- The exit code is `EX_UNAVAILABLE`, matching the sysexits-style codes
--- `nvim-octo.sh` already uses for its own refusals (64 usage / 65 bad repo /
--- 66 bad number), so a non-zero status from this wrapper is always
--- attributable to a named cause.
-M.REFUSAL_EXIT_CODE = 69
+-- ⚠ AND THE OBVIOUS REASON IS WRONG, SO DO NOT RE-DERIVE IT. The expectation
+-- was that `E492: Not an editor command: Octo` — which the wrapper's appended
+-- `-c` produces once the command is deleted, after this file has finished —
+-- would land on the message line LAST and OVERWRITE the notification. It does
+-- not. Startup messages accumulate, so the FIRST screen carries the whole
+-- notification with the `E492` underneath it.
+--
+-- 🔴 WHAT ACTUALLY GOES WRONG IS THE SECOND SCREEN. The `E492` forces a
+-- `Press ENTER or type command to continue` prompt, and that keypress clears
+-- the message area. With the notification alone, what the operator is left
+-- looking at is the NEOVIM SPLASH SCREEN — "Nvim is open source and freely
+-- distributable", "type :q<Enter> to exit" — in an empty `[No Name]` buffer.
+-- That is indistinguishable from a broken install, and it is one keystroke
+-- away. So the explanation also goes somewhere a keypress cannot erase: the
+-- buffer the window is displaying.
+M.REFUSAL_TITLE = "nvim-octo: REFUSING to open a review buffer"
+
+-- Split from `show_refusal` so the text is readable without a window, which is
+-- how the hermetic test reads it.
+function M.refusal_lines(message, width)
+  width = math.max(28, math.min(tonumber(width) or 78, 100))
+  local lines = {}
+  -- The title goes through the same wrap as the body: it is 43 columns, and a
+  -- window narrower than that is exactly where an unwrapped line would run off
+  -- the edge and take the first word of the diagnosis with it.
+  for _, line in ipairs(wrap_text(M.REFUSAL_TITLE, width)) do
+    lines[#lines + 1] = line
+  end
+  lines[#lines + 1] = ""
+  for _, line in ipairs(wrap_text(message, width)) do
+    lines[#lines + 1] = line
+  end
+  lines[#lines + 1] = ""
+  -- The `E492` is this refusal working, not a second fault. Saying so here is
+  -- the difference between a diagnosis and two unexplained errors.
+  for _, line in ipairs(wrap_text(
+    "The `Octo` command has been DELETED, so no review buffer can open. The "
+      .. "`E492: Not an editor command: Octo` neovim reported on startup is "
+      .. "that deletion working — it is not a separate fault, and this "
+      .. "wrapper is not mis-installed.", width)) do
+    lines[#lines + 1] = line
+  end
+  lines[#lines + 1] = ""
+  for _, line in ipairs(wrap_text(
+    "Nothing was sent to GitHub and no review surface was opened. Quit with "
+      .. "`:qa`. Fixing this means updating octo-init.lua in devrc to the "
+      .. "seam octo.nvim now exposes.", width)) do
+    lines[#lines + 1] = line
+  end
+  return lines
+end
+
+-- Two columns of margin, so the text never touches the right edge.
+function M.refusal_width()
+  return (tonumber(vim.o.columns) or 80) - 2
+end
+
+-- The same text as one string, for the surfaces that take one: the startup
+-- notification and stderr. Written from `refusal_lines` rather than beside it
+-- so the two cannot drift.
+function M.refusal_text(message, width)
+  return table.concat(M.refusal_lines(message, width), "\n")
+end
+
+-- Replace the window's buffer with the diagnosis. Not a floating window: a
+-- float is dismissible and can be closed by the very keypress the operator
+-- uses to find out what happened, and this text must still be there when they
+-- look.
+function M.show_refusal(message)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false,
+    M.refusal_lines(message, M.refusal_width()))
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].modifiable = false
+  -- 🔴 THE GUTTER THIS FILE TURNS ON GLOBALLY (`number`, `signcolumn`) COSTS
+  -- SIX COLUMNS, and a refusal is prose, not code. Left on, every wrapped line
+  -- broke mid-word in the capture. Window-local, so nothing else is affected.
+  pcall(function()
+    vim.wo[0].number = false
+    vim.wo[0].signcolumn = "no"
+  end)
+  vim.api.nvim_win_set_buf(0, buf)
+  return buf
+end
 
 function M.refuse_to_start(message)
-  -- stderr FIRST, and unconditionally: `cquit` takes the message area with it,
-  -- and a terminal spawned by a clicked mention closes with the process. This
-  -- is the copy the operator sees when they run `nvim-octo` from a shell to
-  -- find out why the window vanished.
+  -- stderr as well, and unconditionally. It is the copy that survives for
+  -- anyone running `nvim-octo` from a shell, and the only copy left if every
+  -- window step below fails.
   pcall(function()
     io.stderr:write(message .. "\n")
   end)
-  -- 🔴 `pcall`, AND THE REASON IS MEASURED. An ERROR-level `vim.notify` inside
-  -- a `luafile` can be promoted to a thrown error by the sourcing command —
-  -- observed on neovim 0.12.5 when the quit below was neutralised, where the
-  -- message came back out as `Vim(luafile):…`. Unguarded, that would abort the
-  -- teardown BEFORE the two steps that make the refusal real, leaving exactly
-  -- the half-wired editor this function exists to prevent.
-  pcall(vim.notify, message, vim.log.levels.ERROR)
+  -- 🔴 WARN, NOT ERROR, AND THE LEVEL IS THE MEASUREMENT. An ERROR-level
+  -- `vim.notify` inside a `luafile` is promoted to a vim error by the sourcing
+  -- command — a LEVEL promotion `pcall` cannot catch, because it is vim's own
+  -- error state and not a lua error. Captured from a real neovim 0.12.5 TUI in
+  -- a pty: at ERROR the operator's first screen was `Error in VIMINIT:`,
+  -- `E5108: Lua: …` and a stack traceback, and the rest of the generated rc was
+  -- ABANDONED. At WARN the same screen carries the diagnosis and nothing else.
+  -- The `pcall` stays because a notify can still fail outright.
+  --
+  -- It carries the WHOLE refusal, not just the seam sentence, so the first
+  -- screen — which is the message area, before any keypress — already explains
+  -- the `E492` that is about to appear under it.
+  pcall(vim.notify, M.refusal_text(message, M.refusal_width()),
+    vim.log.levels.WARN)
   -- 1. The structural half — with no `Octo` command the `-c "Octo <N> <repo>"`
   --    the wrapper appends cannot produce a review buffer at all. `pcall`
   --    because the command does not exist when octo's own setup failed, and
@@ -1002,10 +1111,12 @@ function M.refuse_to_start(message)
   pcall(function()
     vim.api.nvim_del_user_command("Octo")
   end)
-  -- 2. The status half — the process exits non-zero instead of sitting there
-  --    as an empty editor. Does not return in a real neovim.
+  -- 2. The legible half — the editor STAYS UP with the explanation in the
+  --    window, which is the whole reason this wrapper no longer quits. It is
+  --    what the operator is left looking at once the startup messages are
+  --    acknowledged.
   pcall(function()
-    vim.cmd("cquit " .. tostring(M.REFUSAL_EXIT_CODE))
+    M.show_refusal(message)
   end)
   return false
 end
@@ -1046,21 +1157,30 @@ end
 --   1. DELETE THE `Octo` USER COMMAND. This is the structural half — it is
 --      what makes "no half-wired review buffer" true regardless of what else
 --      runs, because the `-c "Octo …"` the wrapper appends is the only thing
---      that opens one. It holds even if a later change drops the quit below.
---   2. `cquit` — the process EXITS NON-ZERO. This is what makes the failure
---      legible to anything that reads a status, and what stops an empty
---      editor being left on screen looking like a TUI that merely has nothing
---      in it yet.
--- Order matters: notify, then delete, then quit, because `cquit` does not
--- return.
+--      that opens one. MEASURED with the quit neutralised, so the deletion was
+--      isolated: the `-c` runs, `exists(':Octo')` is 0, no review buffer.
+--   2. PUT THE DIAGNOSIS IN THE WINDOW. The editor STAYS UP and the buffer it
+--      is displaying holds the explanation, so the operator can read it and
+--      close it themselves.
 --
--- ⚠ WHAT THE SHELL WRAPPER DOES WITH THAT NON-ZERO EXIT: nothing. `nvim-octo
--- .sh` ends in `exec nvim …`, so the shell is REPLACED — `writeShellApplication`'s
--- `set -o errexit` has no process left to act in, and nvim's status becomes
--- the wrapper's. That is the wanted behaviour; the cost is that the alacritty
--- window spawned by a clicked mention CLOSES rather than displaying the
--- diagnosis, so the message is also written to stderr for anyone running
--- `nvim-octo` from a shell.
+-- 🔴 IT USED TO `cquit 69` AND THAT WAS REMOVED ON PURPOSE — DO NOT PUT IT
+-- BACK WITHOUT REVISITING THIS. The quit added nothing structural (the
+-- deletion above is what stops a review buffer) and cost the only thing the
+-- operator could act on: the window VANISHED, taking the diagnosis with it.
+-- `nvim-octo` is launched from an alacritty hint on a clicked mention, so the
+-- terminal dies with the process. A window that flashes and disappears is very
+-- close to the silent degradation this whole refusal exists to end — the
+-- operator is left with a click that did nothing. So the wrapper now exits 0
+-- and the failure is legible on screen instead of in a status nobody reads.
+--
+-- ⚠ WHAT IS ON SCREEN IS MEASURED, NOT ASSUMED — captured from a real neovim
+-- TUI in a pty and replayed through a terminal emulator. The two things it
+-- found are both counter-intuitive, and both are written up in the teardown
+-- block above: an ERROR-level notification is promoted to a thrown vim error and
+-- replaces the diagnosis with a stack traceback, and a notification ALONE
+-- survives the first screen but is wiped by the `Press ENTER` the appended
+-- `-c`'s `E492` forces — leaving the operator on the neovim SPLASH SCREEN.
+-- Hence WARN, and hence the buffer.
 if ok then
   local got_utils, octo_utils = pcall(require, "octo.utils")
   if not got_utils or type(octo_utils) ~= "table"
