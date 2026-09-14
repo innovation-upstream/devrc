@@ -56,7 +56,7 @@ GRANDFATHER_STEP = 16_384
 # gate reads is the file.
 GRANDFATHERED: dict[str, int] = {
     "claudedocs/handoff-tmux-webapp.md": 262_144,               # 248,414 B
-    "claudedocs/handoff-audit-pr-ladder.md": 212_992,           # 197,391 B
+    "claudedocs/handoff-audit-pr-ladder.md": 196_608,           # 195,625 B
     "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
     "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B
     "claudedocs/handoff-nix-disk-cleanup.md": 114_688,          #  99,215 B
