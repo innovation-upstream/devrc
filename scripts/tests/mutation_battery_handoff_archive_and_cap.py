@@ -172,8 +172,22 @@ MUTANTS = [
      "    return {p: (root / p).stat().st_size for p in scan.paths "
      "if p.count('/') == 1}, scan",
      "test_the_scan_reaches_the_ARCHIVE_subdirectory"),
+    # ⚠ RE-ANCHORED, and the REASON generalises to C5 and C11 below: a row that
+    # anchors on a ledger line binds to its TRAILING MEASURED COMMENT too — the
+    # mutation is deleting the whole line, so the comment cannot be trimmed out
+    # of the anchor. That comment is re-measured whenever the allowance is
+    # bumped, which happens when the doc runs out of headroom. So the RIGHT
+    # entry to anchor on is the one with the MOST headroom, and this row had the
+    # LEAST: `handoff-tmux-webapp.md` measured 326,750 B against its 327,680 B
+    # allowance — 930 B — after growing 314,233 -> 323,642 -> 326,750 in two
+    # commits. The next `/handoff` append bumps the allowance, re-measures the
+    # comment, and takes this anchor to 0x, i.e. SURVIVED-while-testing-nothing:
+    # the exact defect this file's own re-anchor was fixing. Moved to
+    # `handoff-nix-disk-cleanup.md` (99,215 B of 114,688 — 15,473 B of headroom).
+    # 🔴 Re-check the headroom of whatever entry these three rows name whenever
+    # the ledger is edited; `handoff_budget.GRANDFATHERED` is the source.
     ("C4", "deletion", "silently drop a document from the ledger",
-     '    "claudedocs/handoff-tmux-webapp.md": 327_680,               # 314,233 B\n',
+     '    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,          #  99,215 B\n',
      "",
      "test_no_handoff_doc_exceeds_its_budget"),
     # ⚠ RE-ANCHORED: this row used to loosen `handoff-handoff-search-index.md`,
@@ -286,7 +300,14 @@ def main() -> int:
         raise SystemExit(f"no such mutant id(s): {unknown}")
     rows = [r for r in MUTANTS if not only or r[0] in only]
     suites = sorted({suite_of(r[0]) for r in rows})
-    saved = {p: p.read_text(encoding="utf-8") for p in {SH, CAP, IDX}}
+    # 🔴 `BUD` BELONGS HERE — this is the OUTER net, and it is the one that
+    # matters. The per-row `finally` restores after each mutant, but a run killed
+    # between rows (a timeout, a ^C) skips it, and then only this snapshot can
+    # put the tree back. MEASURED while writing this change: a foreground run hit
+    # a 10-minute cap and the SIGTERM left `scripts/resume-state.sh` carrying row
+    # A6's mutant — tracked source, silently modified. Adding a target without
+    # adding it here leaves that target the one file the net cannot restore.
+    saved = {p: p.read_text(encoding="utf-8") for p in {SH, CAP, IDX, BUD}}
 
     for suite in suites:
         ok, out = run_suite(suite)
