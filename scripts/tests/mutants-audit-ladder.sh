@@ -149,7 +149,7 @@ ROWS=0
 # `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
 # this_modules_size`, which reads the number below, counts the module, and
 # fails with the replacement value. Growth cannot silently outrun it again.
-MIN_TESTS=15
+MIN_TESTS=16
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on
@@ -356,10 +356,25 @@ run "'rollback' shaved out of the Gaps item" \
 run "whole 9-item checklist gutted" \
     test_the_operator_instructions_the_gate_depends_on_are_pinned "$SKILL" \
     '**Audit for:**' '**Audit for:** whatever seems off. ORIGINAL FOLLOWS:'
-run "cp -a .git hazard deleted" \
-    test_the_operator_instructions_the_gate_depends_on_are_pinned "$SKILL" \
-    ' — **`rm -f <copy>/.git` first**, since a worktree'"'"'s is a FILE pointing at the
-real git dir, so a commit in the copy lands on your branch —' ','
+# 🔴 ROW REMOVED 2026-09-14 — it had been scoring NOTHING since #1589 (`fb9fcd3d`).
+# It mutated a `cp -a`/`rm -f <copy>/.git` sentence in SKILL.md that #1589
+# deliberately RELOCATED into `audit-dispatch.py`'s invariant clauses, so the
+# target string stopped existing and every run printed
+#   🔴 cp -a .git hazard deleted   MUTATION DID NOT APPLY — result meaningless
+# i.e. `🔴 1 of 21 row(s) not as expected` on a clean `origin/main`. MEASURED on a
+# detached worktree of `origin/main` at `0325668c` while this row was untouched.
+# A battery that is permanently one-row red trains its reader to skip the verdict,
+# which `claude/RULES.md` rates worse than no gate at all.
+#
+# 🔴 THE HAZARD IS NOT UNGUARDED — it moved, it was not lost. `claude/RULES.md:100`
+# ("any COPY you make OF it") still carries it, and RULES.md is delivered to every
+# subagent, so the instruction reaches the auditor by a wider route than the skill
+# body did. `test_the_operator_instructions_the_gate_depends_on_are_pinned` no
+# longer pins that sentence either, which is why deleting the row loses no
+# assertion: it was orphaned from its own test, not merely stale.
+#
+# ⚠ If those warnings ever move BACK into SKILL.md, restore a row here rather than
+# assuming the RULES.md copy covers the skill's own wording.
 run "cross-repo worktree caveat inverted" \
     test_the_operator_instructions_the_gate_depends_on_are_pinned "$SKILL" \
     '🔴 `isolation:
@@ -430,10 +445,10 @@ doubt, STOP:'
 # structure rather than to text.
 run "hatch: blank line before the caveat deleted" \
     test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat "$SKILL" \
-    'open rather than absent.
+    'summary that you are paying it.
 
 ⚠ **THIS DOES NOT OVERRIDE' \
-    'open rather than absent.
+    'summary that you are paying it.
 ⚠ **THIS DOES NOT OVERRIDE'
 
 echo
