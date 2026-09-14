@@ -296,6 +296,35 @@ export function recordCapture(payload, sender) {
   }
 }
 
+/**
+ * Record, on the capture the click came from, the url actually being
+ * downloaded -- so `correlateCapture` tier 1 can still bind them when the two
+ * differ. Returns the capture it stamped, or null.
+ *
+ * IT MATCHES ON `srcUrl`, NOT ON RECENCY, and that is the entire value.
+ * Taking "the newest capture" here would reproduce the tier-3 defect this
+ * exists to remove: in a multi-image message the newest capture is whichever
+ * image the pointer crossed last, which is frequently NOT the one whose menu
+ * was clicked. Matching the clicked element's own src is what makes the
+ * binding deterministic.
+ *
+ * Newest-first among EQUAL matches, because one url can legitimately appear
+ * twice (the same image posted in two messages, or a re-render); the most
+ * recent right-click is the one being served.
+ */
+function stampDownloadUrl(srcUrl, downloadUrl) {
+  if (!srcUrl || !downloadUrl) return null;
+  const list = state.captures;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const c = list[i];
+    if (c.href === srcUrl || c.mediaSrc === srcUrl) {
+      c.downloadUrl = downloadUrl;
+      return c;
+    }
+  }
+  return null;
+}
+
 // --- the pending registry, and why it is PERSISTED -------------------------- //
 /**
  * Write the durable copy. Fire-and-forget everywhere: a failed write costs a
@@ -1401,6 +1430,16 @@ export async function onMenuClicked(info, tab) {
   // on Discord an image's src is a downscaled webp from the resizing proxy.
   const target = preferOriginalUrl(info.srcUrl, info.linkUrl) || info.pageUrl;
   if (!isHttpUrl(target)) return;
+  // KEEP TIER 1 REACHABLE. When the line above rewrote the url, the one we
+  // are about to download is a url the PAGE NEVER SERVED, so the capture taken
+  // on this right-click -- whose `href`/`mediaSrc` hold the element's own src
+  // -- can no longer be matched by `correlateCapture`'s exact-url tier, and
+  // every such download silently falls to tier 3 (most recent capture on the
+  // active tab). In a multi-image message that binds a download to a SIBLING
+  // image's context. Stamping the outgoing url onto the capture it came from
+  // restores the deterministic binding; same trick, and the same reason, as
+  // `playerDownload` synthesising a capture around its media url.
+  if (target !== info.srcUrl) stampDownloadUrl(info.srcUrl, target);
   // A MANIFEST IS ALWAYS A STREAM, including one served from Discord. This
   // test stays OUTSIDE the bypass below on purpose: an `.m3u8` has no single
   // file to save, so letting the bypass reach it would download a ~200-byte
