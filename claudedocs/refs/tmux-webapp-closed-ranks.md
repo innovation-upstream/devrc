@@ -25,18 +25,39 @@ The live queue therefore holds exactly: 47, 48, 49, 53, 54, 56, 57, 59, 60.
 🔴 **THE SECOND SWEEP EVICTED SIX — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED FOR DAYS
 WHILE STILL READING AS OPEN.** Six of the fifteen entries the queue then advertised were finished
 or fictional. **The mechanism is MEASURED, not guessed: the first sweep keyed on each rank's
-HEADING LINE, and every closure recorded only in a rank's BODY survived it.** The heading-line
-marker predicts eviction for **58 of 62** ranks, and all four exceptions are explained — 46, 61 and
-62 carried no marker but were closed by the sweep session itself; 53's heading says
-`WORKBENCH IS NOW DONE` while its laptop half is genuinely open, so it is a false positive of the
-predicate rather than a counter-example to the mechanism.
+HEADING LINE, and every closure recorded only in a rank's BODY survived it.** The predicate is
+**a heading carrying `✅`, `DONE` or `CLOSED`** — state it, because on bare `✅` the same data
+gives 59/62 and a reader who guesses that spelling concludes the claim is wrong. It predicts
+eviction for **58 of 62** ranks. The four exceptions:
+
+- **53 — false positive.** Its heading says `WORKBENCH IS NOW DONE` while its laptop half is
+  genuinely open. A defect of the predicate, not a counter-example to the mechanism.
+- **46, 61, 62 — no heading marker, evicted anyway.** 🔴 **WHY is NOT explained, and an earlier
+  draft of this paragraph asserted it was.** All three closed BEFORE the sweep commit
+  (`6c8c94d2`, 2026-09-14T05:57:57Z): `#797` at 09-11T23:39:55Z (2.3 days), `#1660` at
+  09-14T03:01:03Z (~3 h), `#1669` at 09-14T05:03:24Z (~55 min). **61**'s PR is the one whose
+  squash `08e052f0` this file's own header cites as the pre-eviction doc, i.e. the commit
+  immediately before the sweep — so it is plausibly the same session's work, and that is an
+  inference from adjacency, NOT a measurement. 46 and 62 closed 2.3 days and ~3 h earlier. ⚠ An
+  audit round reports having attributed all three to specific session ids from transcripts; that
+  was not re-verified here, so it is not asserted here.
+
+🔴 **SO THE NO-MARKER CLASS IS FOUR, NOT TWO — 42, 45, 46, 62 — AND THE SWEEP CAUGHT TWO OF THEM
+BY MEANS THIS DIAGNOSIS DOES NOT ACCOUNT FOR.** Do not supply one; it was not measured, and the
+draft that guessed ("closed by the sweep session itself") was false for two of the three. What is
+established is the FALSE-NEGATIVE direction: a body-only marker always survived. Why 46 and 62
+did not is open.
 
 The six split into two classes, and they need different remedies:
 
 - **17, 25, 26 — closure WAS recorded, in the body.** `CLOSED AS NOT-OURS` and two `✅ DONE …
   Claim released`. A scan that reads the whole body catches all three, in both sweeps.
 - **42, 45 — no marker anywhere.** Nobody had noticed `#749` closed 42; 45 was orphaned the moment
-  rank 51 was evicted out from under it. Only re-measuring against the code catches these.
+  rank 51 was evicted out from under it. Only re-measuring against the code catches these — and
+  **46 and 62 were in this same class and are already in this file**, so a body scan alone would
+  have left two of the four. ⚠ **Rank 46's entry below still reads `4 checks pending. IN FLIGHT:
+  ZacxDev/homelab-infra#797` — `#797` MERGED 2026-09-11T23:39:55Z**, recorded here because the
+  roster asserts every entry is closed and 46's own text is the reader's only evidence.
 
 🔴 **RETRACTED — "the first sweep evicted what was *marked* closed; these were not marked".** That
 was this file's own first explanation of the miss and it is FALSE: 17, 25 and 26 were all marked,
@@ -1188,8 +1209,10 @@ predicate that red-lines an open item trains everyone to click through.
 25. ✅ **DONE — and it said so in its own body since 2026-09-05, through two sweeps.**
     `ZacxDev/homelab-infra#695`, squash `8f6aa6d3a`, content-verified on trunk; the host-side half
     `innovation-upstream/devrc#1310` merged; claim released, re-confirmed 2026-09-14 against
-    `claim-work --list`. 🔴 Its note that this doc's **"Attention queue" section is STALE** — the
-    hook DOES raise `AskUserQuestion` to the queue — is a live gotcha and travels with it.
+    `claim-work --list`. ⚠ Its note that this doc's **"Attention queue" section is STALE** is
+    itself now stale: that section was CORRECTED 2026-09-04 and the row reads `✅ LIVE`. Nothing
+    to fix there — recorded so a reader is not sent after it. (Quoting a status instead of
+    re-measuring it is the habit this whole sweep exists to punish; this one was just cheap.)
     ORIGINAL, verbatim:
     25. **The transcript feeder — get Claude Code transcript content from both hosts into clawgate,
         read-only.** Repo: `ZacxDev/homelab-infra` (ingest) + `innovation-upstream/devrc` (the host-side
