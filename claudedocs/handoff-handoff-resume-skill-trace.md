@@ -17,33 +17,34 @@ Trace the handoff and resume skills end-to-end: their flows, cross-references,
 shared infrastructure, and usage patterns. No code changes — pure analysis.
 
 ## State now
-- Base clone sits on `main`; all work landed via PRs from worktrees. Both hosts converged
-  and VERIFIED at `bf72e04e` (`ship.sh`: 594/553 managed artifacts resolve, 0 dangling,
-  0 stale, cross-host agreement COMPARED).
-- 🔴 **`main` IS RED on two tests, NEITHER of them this session's work.** Measured against
-  `origin/main` in a detached worktree, not inferred:
-  - `test_no_handoff_doc_exceeds_its_budget` — `claudedocs/handoff-index-store-claims-accuracy.md`
-    is 67,213 B, over the 65,536 B ceiling by 1,677 B, and **not in the grandfather ledger**.
-  - `test_the_skill_did_not_grow` — `claude/skills/clawgate/SKILL.md` is 18,421 B against a
-    15,665 B ceiling, 2,756 B over. From `#1615` / `05f42bd1`.
-  Both remedies are "evict content from a document somebody else wrote", which is why this
-  session did not do them. **The 4-hourly main-green deadman will fire on both.**
-- **Seven PRs merged, shipped and verified by content this session:**
-  - `#1606` `44d8847d` — the zero-laptop-contribution claim REFUTED; the source doc's
-    residual marked EXPIRED.
-  - `#1608` `7e000e6b` — `q_browser_by_domain` quadratic `CROSS JOIN` → linear boundary
-    sweep; `activity-scan.py --days 30` completes again.
-  - `#1614` `e6a5ee0d` — `activity-scan.py` degrades ONE section on `CHQueryError`; exit
-    3 = PARTIAL.
-  - `#1618` `16bfd2cb` — open-investigation blocks carry a machine-visible AGE;
-    `resume-state.sh` prints `INVESTIGATIONS` and files `EXPIRED` past 14 days.
-  - `#1623` `e73c84ee` — this doc's previous update.
-  - `#1627` `6fa3e13f` — 35 docs archived to `claudedocs/archive/` + a test-enforced
-    per-document byte ceiling (`MAX_BYTES = 65_536`, quantised grandfather ledger).
-  - `#1634` `30bad70c`, `#1644` `bf72e04e` — the two regressions #1627 caused (below).
-- 🔴 NO `clawgate-task:` field. `clawgate_handoff.sh resolve` exited **6**: one task linked
-  (`#371`, role=`read`, Cairn phase 3) and NONE worked. Reading a task is not doing its
-  work, so this doc belongs to none of them. That is not a statement that the board is fine.
+- Base clone on `main`; all work landed via PRs from worktrees. `origin/main` is moving fast
+  (4 commits landed during this session alone) — re-fetch before trusting any measurement.
+- 🔴 **The two reds this doc's ranks 1 and 2 named are BOTH CLOSED. A THIRD red, which this
+  doc never named, is what `main` is red on now** — and it is the only one left.
+  - Rank 2 (clawgate SKILL.md) was **already green before this session opened**: `#1640`
+    (`f45bb86e`) paid #1615's eviction. This doc still called it red because it was written
+    from a measurement taken before #1640 merged. The kickoff repeated it.
+  - Rank 1 (`handoff-index-store-claims-accuracy.md`) was **already an open PR** — `#1650`,
+    claimed 3 h earlier by another session — and had grown from the 1,677 B this doc records
+    to **7,062 B** over. Closed by merging, not by new work.
+- **Three PRs merged this session (all verified by CONTENT, not ancestry):**
+  - `#1655` `18a95e23` — **mine.** The unnamed third red: a needle FALSE POSITIVE.
+  - `#1650` `d4c7d5b7` — the index-store eviction + the stale grandfather-entry deletion.
+    I pushed one commit onto it (the `refs/` marker, below) and merged `main` in.
+  - `#1651` `22ae0817` — search-index close-out. I merged `main` into it so its CI stopped
+    showing a false red; **no change to its diff**.
+- **Measured at `22ae0817` in a detached worktree — `main`'s current gate state:**
+  - `test_no_handoff_doc_exceeds_its_budget` — **GREEN** (9 passed)
+  - `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` — **GREEN**
+  - `test_every_mutation_anchor_occurs_exactly_once_in_its_target` — 🔴 **RED**, 6 anchors 0x
+- **IN FLIGHT:** `fix/reanchor-budget-battery` (worktree `…/scratchpad/anc`, uncommitted,
+  1 file, +27/-8). Anchors test green on it (29 passed, 2 skipped). **The mutation battery
+  re-run that would prove the six rows still KILL is still running** — see the investigation
+  block. Nothing committed, nothing pushed, no PR.
+- 🔴 NO `clawgate-task:` field. `clawgate_handoff.sh resolve` exited **5** — 0 tasks, with its
+  positive control confirming the board is reachable. Per its own message that is a REAL
+  reading but does NOT prove the session id is right, so it is not a statement that the board
+  is fine.
 
 ## Open investigations — live diagnosis state
 
@@ -198,51 +199,82 @@ that produced the wrong number. Kept below as originally written, not silently r
   which cuts the near-ceiling population but weakens the gate. Read the module's own
   "WHERE THE NUMBER COMES FROM" and "A DELIBERATE DEVIATION" sections first.
 
+### Do the six re-anchored battery rows still KILL, or only APPLY?
+- as-of: 2026-09-14
+- **Symptom + exact repro:** `#1648` (`a2c84a1c`) moved `MAX_BYTES`, `GRANDFATHERED` and
+  `tightest_allowance` out of `scripts/tests/test_handoff_doc_size.py` into
+  `scripts/lib/handoff_budget.py`. Six rows of
+  `scripts/tests/mutation_battery_handoff_archive_and_cap.py` stayed anchored on the old
+  file, where they now occur **0x**. Reproduce on plain `main`:
+  ```bash
+  git -C ~/workspace/devrc worktree add -f /tmp/anc --detach origin/main
+  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/anc/scripts/tests/test_mutation_battery_anchors.py -q
+  ```
+- **Observed (with values):** `6 anchor(s) do not occur EXACTLY ONCE` — C1
+  (`MAX_BYTES = 65_536`), C4 (`handoff-tmux-webapp.md` entry), C5
+  (`handoff-handoff-search-index.md` entry), C6 (`GRANDFATHERED: dict[str, int] = {`),
+  C8 (`return max(step, math.ceil(size / step) * step)`), C11 (`handoff-cairn-phase3.md`
+  entry) — **all 0x**. Per the battery's own docstring a 0x anchor prints `NOT-APPLIED` and
+  **scores as a SURVIVOR while testing nothing**, so `main` has carried six silently-inert
+  mutants since #1648.
+- **Ruled out:** that my merge of `main` into `#1650` caused it — the same test fails on
+  `9e83af8a` (pre-`#1651`) and on `22ae0817`, both untouched by me.
+  via: measurement (control run at two mainline shas)
+- **Ruled out:** that it is either merged PR's doing — neither `#1650` nor `#1651` touches
+  `test_handoff_doc_size.py` or the battery. via: code (`gh pr view --json files`)
+- **Ruled out:** a simple re-target for C5 — its ledger entry was legitimately DELETED by
+  `#1650` once the doc was pruned under `MAX_BYTES`, so there is nothing to re-anchor onto.
+  Re-anchored to `handoff-cairn-task-linkage.md` (76,743 B → quantises to 81,920, so 114,688
+  is exactly the same two steps of slack the row's description names). via: code + measurement
+- **Leading hypothesis:** the fix is complete and the rows will kill — C1/C4/C6/C8/C11 are
+  verbatim moves, so only their target file changed. **C5 is the one to doubt**: it is a
+  DIFFERENT entry, and nothing yet proves `test_no_handoff_doc_exceeds_its_budget` fails on
+  it the way it did on the old one.
+- 🔴 **Next probe:** read the battery verdict. A green anchors test proves only that the
+  anchor is APPLIED — the battery's own failure message demands the other half:
+  ```bash
+  cd <worktree> && nix develop ~/workspace/devrc -c python3 \
+    scripts/tests/mutation_battery_handoff_archive_and_cap.py
+  ```
+  Expect every C row `KILLED` by the test its row names; a `KILLED-WRONG-REASON` or
+  `SURVIVED` on C5 means the re-anchor is wrong. ⚠ It takes **>10 min** — run it detached,
+  never under a 10-minute foreground cap (see Gotchas).
+
 ## Next steps (ranked)
-<!-- Renumbered 2026-09-13: the previous rank 1 (archive+cap) shipped as #1627 and all
-     claims against this doc were released, so no live claim points at these numbers. -->
-1. **Unbreak `main`: the handoff-doc ceiling.** `claudedocs/handoff-index-store-claims-accuracy.md`
-   is 67,213 B, 1,677 B over, unlisted. The gate prints a remedy ladder — evict closed items,
-   then demote dated evidence to `claudedocs/refs/<topic>.md`, then split, and only then add a
-   ledger entry. Prefer eviction: 1,677 B is small and the doc is a handoff, so closed ranks
-   and merged-PR plans are the likely payload. Touches that doc and possibly
-   `scripts/tests/test_handoff_doc_size.py`.
-   forcing: gate — `main` is red on this test right now; the main-green deadman fires 4-hourly
-2. **Unbreak `main`: the clawgate skill ceiling.** `claude/skills/clawgate/SKILL.md` is
-   18,421 B against 15,665 B. Its own failure message carries the history and the rule:
-   "Any addition needs an eviction in the SAME commit." The addition came from `#1615`
-   (`05f42bd1`), so the eviction is that change's debt. Consider whether the content belongs
-   in `claude/skills/clawgate/flows/` or `reference/` rather than the body.
-   forcing: gate — `main` is red on this test right now
-3. **Demote `resume/SKILL.md` step 4 to `reference/`, and give the body a ceiling.**
+<!-- Renumbered 2026-09-14: previous ranks 1 and 2 are both CLOSED (rank 2 was already
+     closed before the session opened). Old 3-6 keep their content, shifted up. -->
+1. **Finish the battery re-anchor and open its PR.** Branch `fix/reanchor-budget-battery`
+   already exists with the change; it needs the battery verdict read, then a commit + PR.
+   Touches only `scripts/tests/mutation_battery_handoff_archive_and_cap.py`.
+   forcing: gate — `main` is red on `test_every_mutation_anchor_occurs_exactly_once_in_its_target`
+   right now, and the 4-hourly main-green deadman reproduces and toasts on it
+2. **Demote `resume/SKILL.md` step 4 to `reference/`, and give the body a ceiling.**
    MEASURED 2026-09-12: step 4 (the two recall surfaces) is **19,536 of 47,684 bytes — 41%**
    of the largest skill body in the repo, which has **no `reference/` dir** (19 other skills
-   do) and **no size ceiling**. This is the ONLY one of the operator's three stated drivers
-   for consolidation that "expire + archive + cap" does not touch. 🔴 Do NOT merge the two
-   commands into one wrapper: `cairn recall` is per-repo and `handoff_search` sweeps all four
-   repos including two client ones, and much of that prose exists because getting that wrong
-   leaks client content into a PUBLIC repo. 🔴 Do NOT retire `handoff_search`: its measured
-   yield was ~0 and the "1 of 20" figure was retracted as an instrument artifact, but the
-   2026-09-12 session is a genuine yield instance — a `skill-usage-telemetry` hit
-   ("`find-session`'s 'both hosts' claim was HALF FALSE") is what prompted the
-   instrument-validation control that cracked that investigation.
+   do) and **no size ceiling**. 🔴 Do NOT merge the two commands into one wrapper:
+   `cairn recall` is per-repo and `handoff_search` sweeps all four repos including two client
+   ones, and much of that prose exists because getting that wrong leaks client content into a
+   PUBLIC repo. 🔴 Do NOT retire `handoff_search`: its measured yield was ~0 and the "1 of 20"
+   figure was retracted as an instrument artifact, but the 2026-09-12 session is a genuine
+   yield instance — a `skill-usage-telemetry` hit ("`find-session`'s 'both hosts' claim was
+   HALF FALSE") is what prompted the instrument-validation control that cracked that
+   investigation.
    forcing: none
-4. **Build the `source='tool'` emission watcher** designed in the block below — per-session
+3. **Build the `source='tool'` emission watcher** designed in the block below — per-session
    cross-source consistency (`scripts/collector/tool_emission_watch.py`), sibling to
    `deadman.py`, verdicts `ok`/`gap`/`cannot-tell`. Positive control is the confirmed
    2026-09-05 laptop/`obs-read` case, a REAL fixture rather than a synthetic one.
    forcing: none
-5. **Port the boundary sweep to the two remaining `CROSS JOIN` sites** —
+4. **Port the boundary sweep to the two remaining `CROSS JOIN` sites** —
    `derived_attention_consistent` in `scripts/validation/invariants.py`, and the hand-run
-   query in `claude/skills/activity/reference/queries.md`. Same quadratic shape `#1608`
-   removed; narrower windows today. Verify with the same old-vs-new equality check.
+   query in `claude/skills/activity/reference/queries.md`.
    forcing: none
-6. **Retract the expired Tekton-capacity claim in `CLAUDE.md`.** It records capacity as "not
-   the constraint" (measured 2026-09-10, node at 14% CPU requests). MEASURED 2026-09-12: the
-   scheduler refused to place `devrc-ci-gxsd6-gate-pod` for 16 minutes — `0/5 nodes are
-   available: 1 Insufficient cpu, …`, `tekton-ci-1` at 98% CPU, 8 concurrent `devrc-ci` runs.
-   It drained unaided, so this is congestion not breakage — but that sentence is cited as the
-   reason a branch-protection question is settled.
+5. **Retract the expired Tekton-capacity claim in `CLAUDE.md`.** It records capacity as "not
+   the constraint" (measured 2026-09-10). MEASURED 2026-09-12: the scheduler refused to place
+   `devrc-ci-gxsd6-gate-pod` for 16 minutes — `0/5 nodes are available: 1 Insufficient cpu, …`,
+   `tekton-ci-1` at 98% CPU, 8 concurrent `devrc-ci` runs. It drained unaided, so this is
+   congestion not breakage — but that sentence is cited as the reason a branch-protection
+   question is settled, so a session will reason from it.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -371,28 +403,76 @@ that produced the wrong number. Kept below as originally written, not silently r
   as `no tests ran`. **When a check returns "nothing", the first hypothesis is that you broke
   the check.**
 
+- 🔴 **THIS DOC'S OWN RANKED LIST WAS WRONG IN BOTH ITEMS, AND THE KICKOFF COPIED IT
+  VERBATIM.** Rank 2 was closed before the session opened; rank 1 was an open PR and 4x
+  bigger than recorded. That is the THIRD consecutive session whose kickoff asserted a
+  retracted or stale claim (`d35c8655` records the last one). The mechanism is structural:
+  a rank is written from a measurement taken *before* the doc is committed, and **nothing
+  re-reads it**. **Re-measure every rank before acting on it** — `git show origin/main:<path>
+  | wc -c` costs one command and both of these would have been caught by it.
+- 🔴 **`gh pr list --state open` IS THE STEP THAT SAVED THE WORK HERE, AND `claim-work` ALONE
+  WOULD NOT HAVE.** The slug `claim-work` derives is `<doc>-<rank>`; the other session had
+  claimed the same work under a slug derived from its own topic
+  (`handoff-doc-oversize-claims-accuracy`), so the two never collided and my claim was
+  granted. The PR sweep is what showed `#1650` already did rank 1 — including a second
+  finding this doc never mentions. **Sweep open PRs even when your claim succeeds.**
+- 🔴 **A RED CHECK ON A PR IS NOT EVIDENCE ABOUT THAT PR — RUN THE CONTROL ON `main` FIRST.**
+  Both `#1650` and `#1651` showed red pytests on the same test. It was red on `origin/main`
+  all along; `#1651` touches ONE doc the test cannot reach. I nearly debugged #1650's diff.
+  The control is one command (run the failing test at `origin/main` in a detached worktree)
+  and it inverted the diagnosis. Verify staleness STRUCTURALLY, not by timestamp:
+  `git merge-base --is-ancestor <fix-sha> <pr-head>` answers "was the fix even in this tree".
+- 🔴 **A SCOPED GATE RUN CANNOT SUPPORT AN UNSCOPED CLAIM, AND I MADE THAT ERROR.** I said
+  "`main` is green except doc-size" having run only the two gates I was targeting. The
+  anchors red had been sitting there since `#1648`. The scoped run was the right tool for
+  iterating and the wrong basis for a sentence about `main`. **Name the tests you ran, or run
+  the tier.**
+- 🔴 **A `MAX_BYTES`-style CONSTANT EXTRACTION HAS A THIRD LEDGER: THE MUTATION BATTERY'S
+  TARGETS.** `#1648` moved three constants into `scripts/lib/handoff_budget.py` and left six
+  battery rows pointing at the file they came from. The rows did not fail loudly — they went
+  **0x**, which the battery scores as SURVIVED. So the tell is not a red battery; it is the
+  separate `test_mutation_battery_anchors.py`. Add this to the ledger-class list this doc
+  already carries: `test_no_public_ips.py`'s ALLOWLIST, `census_scan.py`/`ledger-check.sh`,
+  `test_mutation_battery_anchors.py`'s `BATTERIES` — **and now its `TARGETS` map.**
+- 🔴 **A BATTERY ROW ANCHORED ON A LEDGER ENTRY IS ONLY AS DURABLE AS THAT ENTRY, AND THIS
+  LEDGER IS DESIGNED TO SHRINK.** C5 anchored on `handoff-handoff-search-index.md`'s
+  grandfather entry; `#1650` deleted it — correctly, that is the ratchet working. Prefer
+  anchoring a row on something structural, or expect to re-anchor each time the ledger sheds
+  an entry.
+- 🔴 **THE MUTATION BATTERY TAKES >10 MIN AND A TIMEOUT KILL SKIPS ITS `finally` RESTORE.**
+  Measured: a foreground run hit a 10-minute cap and the SIGTERM left `scripts/resume-state.sh`
+  carrying row A6's mutant — tracked source, silently modified. Its docstring says "check
+  `git status` anyway if it dies hard" and that is not boilerplate. **Run it detached**, and
+  `git status` the worktree afterwards regardless. Confined to a worktree here; in a base
+  clone it would have been a mutated tracked file nobody was looking for.
+- **The needle false positive, for the next person who trips it:** `"no create route"` is a
+  deliberately short needle whose own comment predicts false positives and prescribes the fix
+  ("reword, or carry a retraction marker within `_MARKER_WINDOW`"). Two of the three sites
+  were a gotcha QUOTING a grep pattern, and both straddled a line wrap — so `grep -n` showed
+  **one** hit where the normalising scanner saw **two**. **Use the repo's own scanner
+  (`_normalise_for_scan` + `_RETRACTION_MARKERS` + `_MARKER_WINDOW`) behind a positive
+  control**; a raw grep understates the count and reads as precise.
+
 ## How to verify
-- `main`'s two reds, and whether they are still there:
+- `main`'s three gates, at whatever `origin/main` is now (re-fetch first — it moved 4x in one
+  session):
   ```bash
+  git -C ~/workspace/devrc fetch origin -q
   git -C ~/workspace/devrc worktree add -f /tmp/mchk --detach origin/main
-  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_handoff_doc_size.py -q -k budget
-  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py -q -k did_not_grow
+  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_handoff_doc_size.py -q            # expect 9 passed
+  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_mutation_battery_anchors.py -q    # RED until rank 1 lands
+  nix develop ~/workspace/devrc -c python3 -m pytest /tmp/mchk/scripts/tests/test_subsystem_store_api.py -q -k RETRACTED_two_entry_boundary
   git -C ~/workspace/devrc worktree remove /tmp/mchk --force
   ```
-- The archived-block age fix, on the DEPLOYED copy (not the repo):
+- The three merged PRs, by CONTENT not ancestry (a squash merge never makes the branch head
+  an ancestor):
   ```bash
-  bash ~/workspace/devrc/scripts/resume-state.sh claudedocs/archive/handoff-browser-bridge-2026-07-31.md
-  # expect: 🔴 EXPIRED 43d on both blocks.  `0d` means you are running a pre-#1644 copy —
-  # run scripts/ship.sh and re-read.
+  git -C ~/workspace/devrc show origin/main:claudedocs/handoff-index-store-claims-accuracy.md | grep -c "both spellings retracted"   # 1  (#1655)
+  git -C ~/workspace/devrc cat-file -e origin/main:claudedocs/refs/index-store-claims-accuracy.md                                    # exit 0 (#1650)
+  git -C ~/workspace/devrc show origin/main:scripts/lib/handoff_budget.py | grep -c "was the twelfth entry and is"                   # 1  (#1650)
   ```
-- Archiving did not hide docs from the corpus index — count docs, not sections, across a
-  mainline that actually contains the archive (a clone whose `refs/remotes/origin/main` is
-  moved; `handoff_search --offline` reads the MAINLINE REF, so comparing two working trees
-  proves nothing): pre-archive 118 docs / 1518 sections, post-archive **118** / 1523.
-- The seven PRs, by CONTENT not ancestry (a squash merge never makes the branch head an
-  ancestor):
-  ```bash
-  git -C ~/workspace/devrc ls-tree --name-only origin/main claudedocs/archive/ | wc -l   # 35
-  git -C ~/workspace/devrc show origin/main:scripts/session-analysis/activity-scan.py | grep -c SECTION_UNAVAILABLE_MARK
-  git -C ~/workspace/devrc show origin/main:scripts/resume-state.sh | grep -c INVESTIGATIONS
-  ```
+- The needle scan, with the control that makes its zero meaningful — load the repo's own
+  `_normalise_for_scan`/`_RETRACTION_MARKERS`/`_MARKER_WINDOW` from
+  `scripts/tests/test_subsystem_store_api.py`, assert a bare `"the pod has no create route at
+  all"` still reports as a FINDING, then scan the tracked corpus. A zero without that control
+  is indistinguishable from a scanner wired to nothing.
