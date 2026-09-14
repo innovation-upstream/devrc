@@ -432,6 +432,7 @@ in
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
+          { trigger = ":par"; replace = "proceed as recommended"; label = "Proceed as recommended"; search_terms = ["proceed" "recommended" ]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
           # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
           # mid-sentence FRAGMENT snippet has been pruned (:ds, :rns, :pst, :rnx).
