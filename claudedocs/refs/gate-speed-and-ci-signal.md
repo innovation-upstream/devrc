@@ -265,3 +265,126 @@ evicted: rank 8 is LIVE and dated 2026-09-18, and that section is its arming evi
   That is a regression test with a known-red baseline, which this repo requires anyway. ⚠ `#1038`
   cannot serve as a fixture (its tree does not build); use it only as a reminder that a conflicted
   PR needs its own outcome rather than a verdict.
+
+
+## Evicted 2026-09-14 from the handoff (CLOSED, dated)
+
+### 2026-09-12 — rank 4's ladder, and a red `main` nobody had fixed
+
+- 🔴 **A `-k` FILTER THAT MATCHES NOTHING PRINTS `N deselected` AND EXITS 0.** Checking whether `main`
+  was red, `-k 'kill_server_call_site' scripts/tests/` printed **`14194 deselected`** — the test lives
+  in `scripts/claude-hooks/tests/`, which that path never covered. "Deselected" is not "passed", and
+  the exit code cannot tell them apart. **Same silent-zero family as `pytest $VAR` under zsh** (one
+  argument, zero tests, exit 0), which I also hit today.
+- 🔴 **TWO AGENTS GAVE TWO DIFFERENT, BOTH-WRONG ANSWERS ABOUT THE SAME RED.** One said the test was
+  cured on `main` by `7344e76f`; the other named `f3e27aa3` as failing. Current `main` fails on a
+  THIRD file neither mentioned. Neither was lying — each measured a different tip of a moving branch.
+  **A claim about `main` decays in hours; re-measure at the moment you act.**
+- 🔴 **`pgrep -af <pattern>` MATCHED ITS OWN SHELL**, live, while I checked whether another worktree's
+  run was still going — the command line containing the pattern appeared in its own output. Harmless
+  on a read; it is exactly why a `-f` pattern must never reach `pkill`.
+- 🔴 **A GUARD IS TRIPPED BY ITS OWN DOCUMENTATION.** `_KILL_MENTION_LEDGER` pins every file mentioning
+  a wide tmux kill, so every handoff written ABOUT it becomes a new unclassified file. Three of its
+  four `claudedocs/` rows exist for that reason alone, and `main` went red again **within minutes** of
+  the PR that fixed the previous two. Generalise: **a guard whose trip condition is "a file mentions
+  X" will be tripped by the documentation of that guard.**
+- **A Pyright "Invalid character `\ud83d` in token" diagnostic was a FALSE POSITIVE** — the bytes were
+  a valid `f0 9f 94 b4` (U+1F534 🔴) and the file parsed fine. An IDE diagnostic is a claim like any
+  other; `ast.parse` is the arbiter.
+- **I destroyed one of my own controls by removing its worktree while it ran** (`FileNotFoundError:
+  …/wt-control`, exit **0** anyway). The decision did not change because the discriminating run had
+  already finished — luck, not justification. **Check for live processes before removing any worktree**
+  (`pgrep -af <path>`, reading the result rather than acting on a pattern).
+- **Round 0 earned its trial slot: `ran: 1 · changed the outcome: 1`.** Its F1/F2 are unreachable from
+  any of the nine correctness axes — a full checklist round would have passed a tool that fired on none
+  of its justifying cases. Recorded on `#1524` as a comment.
+
+### 2026-09-12 — rank 11's red: the PR reintroduced the failure it exists to prevent
+
+- 🔴 **A TEST THAT READS `git ls-files` IS A TEST THAT CANNOT PASS IN THE SANDBOX TIER.**
+  `tekton/devrc-pytests` was red on `#1603`'s own head `7d19f4c7` with
+  `test_the_runner_is_tracked_and_executable` reporting **`not tracked by git: []`** against
+  `scripts/ledger-check.sh` — a file tracked at mode **100755**. The message was FALSE. `nix build
+  .#checks…` builds from a `cp -r ${./.}` store copy with **no `.git`**, so `git ls-files` exits
+  **128** and prints nothing, and the assertion read that empty stdout as "untracked". Merged, it
+  would have been a **permanently-red gate on `main`** — which is the exact thing `#1603` was built
+  to stop. **A PR whose subject is "stop the guards that redden main" shipped a new one.**
+- 🔴 **REPRODUCED, NOT INFERRED — and the reproduction is what discriminated the two assertions.**
+  `git archive origin/pr-1603 | tar -x` into a scratch dir gives the sandbox shape exactly (no
+  `.git`, modes preserved). Probing it directly: the exec bit is **preserved** (`-rwxr-xr-x`), and
+  `git ls-files` returns **rc 128, empty stdout**. So of the test's two assertions only the git one
+  is tier-dependent — an empty result that would otherwise have been read as "either could be
+  failing". Running the test there reproduced the CI message verbatim.
+- **The fix mirrors a shape this repo had ALREADY SOLVED TWICE and nobody reused:**
+  `scripts/opencode/tests/test_dispatch.py::file_ship_problems` and
+  `scripts/tests/test_load_test_harness.py::deploy_carries`. Both carry long comments explaining
+  this precise failure — `test_dispatch.py`'s even records "five failures, all reporting a tracking
+  problem that did not exist". **The cost of the third instance was a red CI run and a session's
+  investigation; the search that would have prevented it was one grep for `not a git repo`.**
+- **The three checks, and which are tier-conditional — only ONE is:** existence proves the flake
+  carried the file inside the sandbox; the **exec bit is asserted unconditionally** (measured: both
+  `git archive` and the nix store copy preserve 100755, and a lost mode bit is a real regression the
+  sandbox CAN see); trackedness is made **conditional rather than skipped**, so it cannot go quietly
+  vacuous on the tier that does have a git dir.
+- 🔴 **The tier probe is a FUNCTION of the tree, not a module constant — and that is not style.**
+  A `GIT_DIR_PRESENT = ...` constant is a fixture that can only ever produce the value an assertion
+  about it names, so a mutant hardcoding it to `True` **survives on a dev host**, where the probe
+  returns `True` anyway. `test_dispatch.py` records that exact survivor. Also `.git` is a **FILE**
+  inside a worktree, so `.exists()` and never `.is_dir()` — this repo is developed in worktrees, and
+  `.is_dir()` would disable the tracking half everywhere it matters.
+- **Verification matrix, both tiers, identical counts:** dev-host tier (has `.git`) **29 passed**;
+  sandbox tier (no `.git`) **29 passed**; pre-fix sandbox tier **1 failed** (the reproduction).
+  🔴 **The equal counts are the evidence that nothing skipped itself** — a tier guard that silently
+  deselected its own tests would show as a lower count on one side, not as a failure.
+- **Mutation check, isolated to the narrowest expression:** deleting `if not git_present: return
+  problems` (asserted `count == 1` before writing, under `PYTHONDONTWRITEBYTECODE=1`) killed
+  `test_a_present_executable_runner_in_a_GIT_FREE_tree_reports_NOTHING` **with that guard's own
+  error string** (`is not git-tracked — \`git add\` it`), plus
+  `test_a_NON_EXECUTABLE_runner_is_reported_in_either_tier`. Killed for the right reason, and
+  reachable from an ordinary checkout.
+
+### 2026-09-12 — the four-rank round, and the errors worth inheriting
+
+- 🔴 **zsh's NO-WORD-SPLITTING bit me FOUR times in one session, in four different shapes**, each
+  returning a confident wrong answer rather than an error: `pytest $SEL` (one pathspec ⇒
+  `no tests ran in 0.00s`, **exit 0**), `git diff -- $FILES` (one pathspec ⇒ **empty diff**, which I
+  briefly read as "round 1 changed nothing"), `set -- $p` (one string ⇒ `$2` empty), and
+  `-k <filter>` matching nothing (⇒ `14194 deselected`, which is not "passed"). **Writing the warning
+  into three agent briefs did not stop me walking into it. Use an array by default.**
+- 🔴 **A REBASE SILENTLY WIDENS A DELTA-AUDIT RANGE, and the tooling's own warning cannot see it.**
+  After rebasing `#1524`, `audit-dispatch.py` resolved `ebd6b436..3aec90b4` = **65 commits, only 8 of
+  them the PR's**. The script's widened-range warning watches for a missing claims block; mine parsed
+  fine. **And a commit range could not express that delta at all** — the fix round AMENDED earlier
+  commits, so the naive range showed ONE commit for six fixes. The honest delta was a TREE DIFF
+  (`ebd6b436` vs head, 6 files +681/−41).
+- 🔴 **I INVESTED TWO PRs IN A PROBLEM ANOTHER SESSION WAS ALREADY SOLVING.** `#1558` and `#1559` both
+  targeted the kill-mention treadmill; `#1561` closed it structurally while I argued about split-token
+  forms, and I closed both unmerged. Three sessions were visibly active in those files. **Sweep
+  `claim-work --list` and `gh pr list` BEFORE investing in an ad-hoc fix, not only before claiming a
+  ranked item.**
+- 🔴 **MY OWN HANDOFF BROKE `main`** — the paragraph documenting "this guard is tripped by its own
+  documentation" spelled the token literally and became the next offender the moment it landed.
+- 🔴 **I NEARLY COMMITTED ANOTHER PROCESS'S MUTANT** — copying a "verified" file out of a worktree
+  where a background positive-control run was mid-swap produced a copy containing
+  `UNCLASSIFIED-CONTROL`. Caught only by asserting expected marker counts before staging.
+  **Rebuild from the pristine ref; never copy from a tree another process is writing.**
+- 🔴 **CHECK A DEAD AGENT'S WORKTREE BEFORE RESUMING IT.** Four agents died on session limits this
+  session. One held its entire deliverable as **UNTRACKED files** (`scripts/ledger-check.sh`,
+  `scripts/testlib/census_scan.py`) — one `git clean` from gone, and the flake silently omits a new
+  file that is not `git add`ed. Another sat on an unpushed commit through **two** stops.
+- **Three agents corrected MY briefs, and every correction was right:** the status-fold premise
+  (first-wins over newest-first yields the NEWEST row, not the oldest); "stop at the first
+  `/`-prefixed positional" would have made `gh api /repos/o/r/x -X POST` read as CLEAN, a regression
+  in the only direction that matters; and rank 11's "seconds" was really ~3 minutes. **Brief an agent
+  with your reasoning and it may fix your reasoning — read the corrections, not just the conclusions.**
+- **A vacuous expectation survived a mutation sweep, twice, in two different agents' work**: widening
+  a module filter so NOTHING was selected produced exactly the `== []` the fixture asserted; and a
+  whole-file `replace(…, 1)` hit a COMMENT 3,700 lines before the code, scoring "arm the writer" as
+  SURVIVED having never touched it. **Scope a mutation to the narrowest expression and assert
+  `count == 1` on what you replaced.**
+- **I DID NOT PRUNE THIS DOC, deliberately.** It is 506 lines against a corpus where
+  `handoff-tmux-webapp.md` is 3809; `Gotchas` is append-only by design and `handoff_doc.py` has no
+  prune flag; and the ~74 replaceable lines are the retraction guards. The durable-drop warning caught
+  that two other sessions had just superseded my own `#1512` read with a better-powered one
+  (`#1568`, ancestry split, P(0) ≈ 0.017 vs my 0.23). **Pruning would have deleted work that improves
+  on mine.**
