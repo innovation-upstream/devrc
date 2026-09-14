@@ -33,9 +33,20 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
   `#1650` merged 2026-09-14T02:53Z; the gate run on `origin/main` `dbefe6fa` is **9 passed**. ⚠ This
   is the SECOND time in two days this doc asserted a red that somebody else had already fixed —
   `#1658` existed to correct the first. **A close-out's own red claim is the one nobody re-checks.**
-- ⏳ **`#1671` OPEN — rank 14, doing BOTH halves of its own Next probe** (poll with a bounded
-  deadline; delete the redundant guard). Claim `gate-speed-and-ci-signal-14` held. 🔴 **Its first
-  draft claimed to OVERTURN a "delete" recommendation — RETRACTED, the doc never made one.**
+- ✅ **RANK 14 CLOSED — `#1671` `2b27bdae`**, doing BOTH halves of its own Next probe (poll with a
+  bounded deadline; delete the redundant guard). Verified by CONTENT on `origin/main`, not ancestry.
+  🔴 Its first draft claimed to OVERTURN a "delete" recommendation — RETRACTED, the doc never made
+  one. **Three audit rounds, each finding something the previous round's fix introduced**: the wait
+  gated the pane grid while the test asserted on the copy-mode snapshot (different objects); the
+  deletion dropped an rc check, so a tmux error was reported as a render failure; and the retry was
+  reached by NO test until one was written to force the race. ⚠ **`#{pane_in_mode}` is NOT the guard
+  for the last of those** — on tmux 3.7c it reports `2`, not a boolean, and never returns to `0`
+  across a cancel in that loop; an audit recommended it, and it hangs.
+- ⚠ **Merged through a RED `main`, knowingly.** Both failures
+  (`test_no_test_writes_a_usr_bin_env_shebang_at_runtime`,
+  `test_clawgate_writeback_guard.py::test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`)
+  reproduce on clean `origin/main` `6c8c94d2` with ZERO PR content and are unreachable from a test
+  file. 🔴 **Both are UNOWNED and still red.**
 - **The local half of the arc IS delivering, measured two independent ways** — see the 2026-09-14
   gotcha. Local full-tier runs per merged PR: `gate.sh` **1.92 → 0.76**, `nix build .#checks`
   **2.83 → 0.73**; `scoped-tests.sh` **0 → 0.67** (144 calls, 38–52 sessions). ⚠ Its per-PR rate is
