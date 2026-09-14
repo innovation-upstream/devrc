@@ -891,6 +891,13 @@ indexed by `handoff_search`, so go to it by path.
   ranked item's "strongest argument for deleting it" was read as a recommendation and is not one
   (this block's own Next probe names polling first and says the fix is the author's call), and the
   1-passed/2-failed figure is one sample of a LOAD-DEPENDENT rate, not a property of the test.
+- 🔴 **THE "EXACT REPRO" BELOW IS NOW A SILENT ZERO — DO NOT RUN IT AND READ THE RESULT.** It
+  selects `-k stores_the_hyperlink`, and `#1671` DELETES that test, so after it merges the command
+  matches nothing and exits **5** with `5 deselected` in ~0.1s. That reads exactly like "fixed".
+  The live equivalent is `-k spans_the_wrap`. **A repro pinned to a test NAME dies silently when
+  the test is renamed or removed** — the zero it returns is indistinguishable from a pass, which is
+  the same shape as this doc's own `#{copy_cursor_hyperlink}` finding: an absent thing answering
+  empty at rc 0.
 
 ### 🔴 RANK 14 (ORIGINAL, superseded by the block above): a flaky tmux test on `main` is reddening unrelated PRs
 - as-of: 2026-09-13
