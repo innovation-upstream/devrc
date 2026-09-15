@@ -295,6 +295,40 @@ _DET_REFLOW_BRANCH = (
 )
 _DET_BLAME_FLAGS = "git blame -w -M --porcelain "
 _DET_DIFF_FLAGS = "f\"git diff -U0 -w -M {emit_from or '<from>'}..{head_sha}\""
+# 🔴 The REFLOW command's own `-U0`. A separate literal from `_DET_DIFF_FLAGS`
+# on purpose: the defect that made this row necessary was exactly that the two
+# commands' context widths drifted apart while both looked correct in isolation.
+_DET_REFLOW_U0 = (
+    "f\"git diff -U0 -w -M --word-diff=porcelain {emit_from or '<from>'}..\""
+)
+# The narrowing clause — state (e) covers the PURE rewrap only, and the
+# written-down count is the mitigation for the case the detector cannot see.
+# The F1 concession's two load-bearing words. Mutated separately because they
+# understate the gap in two different directions: one about WHEN the gate
+# fires, one about WHICH ladders it can never fire for.
+_DET_GATE_CONSECUTIVE = "\"the scaffolding changes ZERO payload lines, so two CONSECUTIVE such \""
+_DET_UNCOVERED_SET = (
+    '    "CONSECUTIVE rounds are payload-free has neither mechanism — one "\n'
+    '    "alternating payload and scaffolding rounds included, which is a shape a "\n'
+)
+# The one-command check that settles the WHOLE-DIFF condition. Its absence is
+# how the narrowing reads as free: the enumerable conjunct gets mistaken for
+# the genuinely unanswerable PAYLOAD one.
+_DET_ONE_COMMAND_CHECK = (
+    '        + " **Whether THIS diff is whole-prose is a ONE-COMMAND check, not a "\n'
+    '        "classification anybody has to invent**: `git diff --name-only "\n'
+    '        "<from>..<to>`, then read whether every changed path is prose (`.md` "\n'
+    '        "here). It is yours to run — this script does not classify, "\n'
+    '        "deliberately — and it COULD be automated; it simply is not today. "\n'
+)
+_DET_REFLOW_NARROWING = (
+    '        "by the `-U0 --word-diff` command above. 🔴 **That command finds the "\n'
+    '        "PURE case only.** A round that rewraps a paragraph AND edits a word "\n'
+    '        "in it — the ordinary shape of a ladder fix — shows `+`/`-` words, is "\n'
+    '        "NOT state (e), stays scoreable and carries the SAME bias; for that "\n'
+    '        "case the written-down count IS the mitigation, and a `--word-diff` "\n'
+    '        "run that finds no reflow is NOT clearance.",\n'
+)
 _DET_RESTRAINTS = "        + PROSE_DETERMINATION_PRECONDITIONS,"
 _DET_THRESHOLD_CMP = (
     "    nameable = Fraction(ladder, attributable) >= PROSE_LADDER_SHARE_THRESHOLD"
@@ -406,6 +440,81 @@ def det_reflow_branch_dropped(t):
         "        return _not_measured(\n"
         '            "reflow", ladder, ladder + pr_authored,',
     )
+
+
+def det_reflow_command_loses_U0(t):
+    """Q17 — the SHIPPED defect, as a mutant. This is the state at `6bf15a8f`.
+
+    The rule counts the hunks of `git diff -U0 -w -M`; state (e) asks whether
+    one of THOSE hunks is word-identical. Without `-U0` the reflow command runs
+    at three lines of context and MERGES neighbouring changes, so a purely
+    rewrapped paragraph beside an edited one lands in a hunk that shows `+`/`-`
+    words and (e) can never fire. MEASURED on `ca3b787c..6bf15a8f --
+    claude/skills/audit-pr/SKILL.md`: 10 hunks with `-U0`, 4 without.
+
+    ⚠ NOT killable by a one-paragraph fixture — that is why round 20 shipped it
+    green. The killer runs the command this module EMITS against a two-paragraph
+    repo and compares the two commands' hunk SETS, which is a relationship no
+    reword of the flag can satisfy.
+    """
+    return _swap(
+        t, _DET_REFLOW_U0,
+        "f\"git diff -w -M --word-diff=porcelain {emit_from or '<from>'}..\"",
+    )
+
+
+def det_reflow_narrowing_dropped(t):
+    """Q18 — state (e)'s sentence goes back to being WIDER than its detector.
+
+    Restoring the pre-fix wording re-demotes the written-down count to a
+    backstop over a detector that covers the PURE rewrap only, so a runner whose
+    rewrap-plus-edit hunk shows word changes reads a clean detector result as
+    clearance. `claude/RULES.md`: a guard's DESCRIPTION claims COVERAGE.
+    """
+    return _swap(
+        t, _DET_REFLOW_NARROWING,
+        '        "by the `--word-diff` command above, and the written-down count "\n'
+        '        "is the backstop rather than the mitigation.",\n',
+    )
+
+
+def det_gate_concession_drops_CONSECUTIVE(t):
+    """Q19 — the attribution gate reads as reachable from any two such rounds.
+
+    It fires on two CONSECUTIVE zero-payload rounds. Without the word the
+    concession makes the narrowed scope look cheaper than it is, which is the
+    whole reason the concession exists.
+    """
+    return _swap(
+        t, _DET_GATE_CONSECUTIVE,
+        '"the scaffolding changes ZERO payload lines, so two such "',
+    )
+
+
+def det_uncovered_set_narrowed_back(t):
+    """Q20 — the uncovered set shrinks back to "every round touches payload".
+
+    The real set is any mixed-diff ladder in which no two CONSECUTIVE rounds are
+    payload-free. A ladder ALTERNATING payload and scaffolding rounds is in it
+    and would, under the narrow wording, read as covered by a gate that can
+    never fire for it.
+    """
+    return _swap(
+        t, _DET_UNCOVERED_SET,
+        '    "CONSECUTIVE rounds are payload-free has neither mechanism — and "\n'
+        '    "a scaffolding-carrying ladder whose every round DOES touch payload "\n',
+    )
+
+
+def det_one_command_check_dropped(t):
+    """Q21 — the section states a condition and no way to settle it.
+
+    `is the WHOLE DIFF prose?` is a one-command check; `is the PAYLOAD prose?`
+    is the classification no artefact carries. Deleting the first makes the
+    paragraph defend an unanswerable-classification claim about a population
+    that IS enumerable — which is how the narrowing reads as free.
+    """
+    return _swap(t, _DET_ONE_COMMAND_CHECK, '        + " "\n')
 
 
 def det_blame_loses_w_and_M(t):
@@ -3604,6 +3713,34 @@ ROWS = [
      {"test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
       "test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
      det_reflow_branch_dropped),
+    # ------------------------------------------------------------------- #
+    # 🔴 Q17-Q18 — the FIX ROUND against `#1712` round 1. Both are the state
+    # at `6bf15a8f`, i.e. RED_AT_BASE rows rather than guards: the reflow
+    # command really did ship without `-U0`, and state (e)'s sentence really
+    # was wider than its detector. Q17's killer runs the SHIPPED command
+    # against a two-paragraph git fixture; round 20's one-paragraph fixture
+    # could not distinguish the two context widths and scored it green.
+    # ------------------------------------------------------------------- #
+    ("Q17 the reflow command loses `-U0`, so it inspects hunks the rule "
+     "never counted and state (e) cannot fire",
+     {"test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit"},
+     det_reflow_command_loses_U0),
+    ("Q18 state (e)'s sentence goes back to being WIDER than its detector, "
+     "re-demoting the written-down count to a backstop",
+     {"test_a_rewrap_that_ALSO_edits_is_NOT_state_e_and_the_section_SAYS_so"},
+     det_reflow_narrowing_dropped),
+    ("Q19 the gap concession drops CONSECUTIVE, so the attribution gate reads "
+     "as reachable from any two zero-payload rounds",
+     {"test_the_F1_gap_concession_is_as_wide_as_the_gap"},
+     det_gate_concession_drops_CONSECUTIVE),
+    ("Q20 the uncovered set shrinks back to \"every round touches payload\", "
+     "so an ALTERNATING ladder reads as covered",
+     {"test_the_F1_gap_concession_is_as_wide_as_the_gap"},
+     det_uncovered_set_narrowed_back),
+    ("Q21 the section states the whole-prose condition and no way to settle "
+     "it, so an enumerable conjunct reads as an unanswerable classification",
+     {"test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition"},
+     det_one_command_check_dropped),
 
 ]
 

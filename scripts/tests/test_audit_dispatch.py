@@ -7721,23 +7721,101 @@ def test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_befor
             "which is narrower than the payload being prose and is the "
             "population the threshold was derived on"
         )
-        assert "Whether THIS diff is whole-prose is a ONE-COMMAND check" in out, (
-            "the section does not tell the runner HOW to settle the condition "
-            "it just stated. Round-0 finding F6 was that it referred to a "
-            "prose classification nobody had made; the round-2 delta finding "
-            "was that its replacement — 'Nothing upstream classifies that' — "
-            "had lost its antecedent to an edit AND defended an "
-            "unanswerable-classification claim about a population that is in "
-            "fact mechanically enumerable (`git diff --name-only`, every path "
-            "`.md`). The unanswerable question is the PAYLOAD one, and the "
-            "section must keep the two apart"
-        )
-        assert "whether the PAYLOAD is prose" in out, (
-            "the section no longer says WHICH classification no artefact "
-            "carries. Without it the whole-diff condition — which is a "
-            "one-command check — reads as the unanswerable one, which is the "
-            "confusion that made the narrowing look free"
-        )
+
+
+def test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition():
+    """🔴 THE CONDITION IT STATES MUST BE ONE THE RUNNER CAN ANSWER.
+
+    Round-0 finding F6 was that the section referred to a prose classification
+    nobody had made. Its replacement read *"Nothing upstream classifies that:
+    THE LEDGER asks you to call each file payload or scaffolding"* — and a delta
+    audit found that BOTH halves had rotted:
+
+      * the antecedent of "that" was the sentence naming the whole-prose
+        population, and the fix round DELETED it, so "that" came to point at a
+        sentence about converging ladders;
+      * the justification became false when the scope narrowed. *Is the PAYLOAD
+        prose?* genuinely needs a classification no artefact carries. *Is the
+        WHOLE DIFF prose?* is a one-command check — `git diff --name-only`, and
+        every changed path is `.md`. The paragraph was defending an
+        unanswerable-classification claim about a population that IS
+        mechanically enumerable, which hid that this conjunct could be
+        automated.
+
+    So the section must name the check for the condition it actually states,
+    AND keep saying which classification is the unanswerable one — dropping
+    either half lets the narrowing read as free again.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "the `--emit-claims` run carries no determination section at all, so "
+        "everything below would raise instead of asserting. Its companion "
+        "`..._ships_on_emit_claims_from_round_2_and_NOT_before` owns that claim."
+    )
+    assert "Whether THIS diff is whole-prose is a ONE-COMMAND check" in out, (
+        "the section does not tell the runner HOW to settle the condition it "
+        "just stated, so the whole-diff conjunct reads as a judgement call — "
+        "or, worse, as the unanswerable payload classification it is NOT"
+    )
+    assert "git diff --name-only" in out, (
+        "the section calls the condition a one-command check without naming "
+        "the command. A check nobody can run is a judgement call with a "
+        "confident adjective on it"
+    )
+    assert "whether the PAYLOAD is prose" in out, (
+        "the section no longer says WHICH classification no artefact carries. "
+        "Without it the whole-diff condition — which IS enumerable — reads as "
+        "the unanswerable one, and that confusion is what made the narrowing "
+        "look free"
+    )
+
+
+def test_the_F1_gap_concession_is_as_wide_as_the_gap():
+    """🔴 A CONCESSION THAT UNDERSTATES THE GAP IS WORSE THAN NO CONCESSION.
+
+    The scope was narrowed to whole-prose diffs, and the section concedes the
+    cost by pointing at the ordinary attribution gate as the mechanism that
+    covers what was narrowed away. Two clauses made that look cheaper than it is:
+
+      * *"two such rounds fire it"* — the gate requires two CONSECUTIVE
+        zero-payload rounds. Without the word, any two such rounds anywhere in a
+        ladder read as sufficient.
+      * *"a ladder whose EVERY round DOES touch payload has neither mechanism"*
+        — the uncovered set is larger. ANY mixed-diff ladder in which no two
+        CONSECUTIVE rounds are payload-free has neither, and a ladder
+        ALTERNATING payload and scaffolding rounds is the concrete shape. A
+        runner in it would read themselves as covered by a gate that can never
+        fire for them.
+
+    Asserted on the SHIPPED section rather than on the constant, because the
+    runner reads the section.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    assert "two CONSECUTIVE such rounds fire it" in out, (
+        "the concession drops CONSECUTIVE from the attribution gate's "
+        "precondition. The gate fires on two CONSECUTIVE zero-payload rounds; "
+        "written without the word it reads as reachable from any two such "
+        "rounds, which makes the narrowing look cheaper than it is"
+    )
+    assert "no TWO CONSECUTIVE rounds are payload-free" in out, (
+        "the concession still describes the uncovered set as a ladder whose "
+        "every round touches payload. It is wider: any mixed-diff ladder in "
+        "which no two consecutive rounds are payload-free has neither "
+        "mechanism, and a ladder ALTERNATING payload and scaffolding rounds "
+        "sits squarely in that set while reading as covered"
+    )
+    assert "alternating payload and scaffolding rounds" in out, (
+        "the wider uncovered set is stated abstractly with no shape a reader "
+        "can recognise themselves in. The alternating ladder is the concrete "
+        "case, and naming it is what turns the sentence into something a "
+        "runner can check against their own ladder"
+    )
 
 
 def test_the_prose_determination_is_NOT_in_the_auditors_brief():
@@ -9649,6 +9727,39 @@ RED_AT_BASE_R20: frozenset[str] = frozenset({
     "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
 })
 
+# 🔴 ROUND 21 — the delta re-audit of round 20's OWN fix, both 🔴s inside the
+# mechanism that round shipped. WATCHED RED at `6bf15a8f` by grafting THAT
+# commit's `scripts/audit-dispatch.py` over the working tree and running these
+# two tests unchanged:
+#
+#   test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit
+#       AssertionError: THE REFLOW COMMAND AND THE COUNTING COMMAND DISAGREE ON
+#       THE HUNKS. counting -> ['@@ -1,2 +1,2 @@', '@@ -4 +4 @@'], reflow ->
+#       ['@@ -1,5 +1,5 @@']. The shipped reflow command had no `-U0`, so at the
+#       default three lines of context the purely rewrapped paragraph merged
+#       with its edited neighbour and state (e) could not fire. A VALUE red,
+#       not an absence: the command existed and answered about the wrong hunks.
+#
+#   test_a_rewrap_that_ALSO_edits_is_NOT_state_e_and_the_section_SAYS_so
+#       AssertionError: the section does not say the command covers the PURE
+#       case only, so its sentence reads wider than its detector. missing:
+#       'PURE case'.
+#   test_the_F1_gap_concession_is_as_wide_as_the_gap
+#       AssertionError: the concession drops CONSECUTIVE from the attribution
+#       gate's precondition. At `6bf15a8f` the sentence read "so two such rounds
+#       fire it".
+#
+#   test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition
+#       AssertionError: the section does not tell the runner HOW to settle the
+#       condition it just stated. At `6bf15a8f` it read "Nothing upstream
+#       classifies that".
+RED_AT_BASE_R21: frozenset[str] = frozenset({
+    "test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit",
+    "test_a_rewrap_that_ALSO_edits_is_NOT_state_e_and_the_section_SAYS_so",
+    "test_the_F1_gap_concession_is_as_wide_as_the_gap",
+    "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -9665,6 +9776,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "10d437c9": RED_AT_BASE_R18,
     "4552b745": RED_AT_BASE_R19,
     "b9a53101": RED_AT_BASE_R20,
+    "6bf15a8f": RED_AT_BASE_R21,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -10605,6 +10717,51 @@ FIX_MATRIX = (
      "branch that reported the missing round-1 anchor",
      "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
      "RED@b9a53101", "Q14"),
+    # --------------------------------------------------------------------- #
+    # Round 21. Base `6bf15a8f`. BOTH 🔴s are inside round 20's own headline
+    # mechanism — the reflow detector and the fifth NOT-MEASURED state — and
+    # neither had any code that could catch it: nothing computes state (e), and
+    # the command is emitted for a HUMAN to run. That is the predicted shape of
+    # a delta round, and it is why the fixture below runs the command the
+    # module SHIPS instead of asserting about its spelling.
+    # --------------------------------------------------------------------- #
+    ("r21/F1 the shipped reflow command omitted `-U0`, so its hunks were not "
+     "the hunks the rule counts. MEASURED on this PR's own skill range "
+     "(`ca3b787c..6bf15a8f -- claude/skills/audit-pr/SKILL.md`): 10 hunks with "
+     "`-U0`, 4 without. Markdown paragraphs are one blank line apart, so a "
+     "purely rewrapped paragraph beside an edited one lands inside the merged "
+     "hunk, that hunk shows `+`/`-` words, and state (e) cannot fire. Round "
+     "20's fixture was ONE three-line paragraph, where the two context widths "
+     "are indistinguishable",
+     "test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit",
+     "RED@6bf15a8f", "Q17"),
+    ("r21/F2 state (e)'s SENTENCE was wider than its DETECTOR: it said \"a "
+     "round that REWRAPPED a paragraph inside its range\" while the detector "
+     "covers a hunk whose `-`/`+` sides are word-identical. A round that "
+     "rewraps AND edits — the ordinary shape of a ladder fix — satisfies the "
+     "sentence, fails the detector, stays scoreable and carries the FULL "
+     "re-blame bias. On the strength of the wider sentence the round demoted "
+     "the pre-existing unconditional caution to \"the backstop, not the "
+     "mitigation\", so a clean detector result read as clearance",
+     "test_a_rewrap_that_ALSO_edits_is_NOT_state_e_and_the_section_SAYS_so",
+     "RED@6bf15a8f", "Q18"),
+    ("r21/F3 the F1 gap concession was narrower than the gap: the attribution "
+     "gate needs two CONSECUTIVE zero-payload rounds and \"consecutive\" was "
+     "dropped, and the uncovered set is ANY mixed-diff ladder in which no two "
+     "consecutive rounds are payload-free — an alternating one included — not "
+     "only \"a ladder whose EVERY round DOES touch payload\"",
+     "test_the_F1_gap_concession_is_as_wide_as_the_gap",
+     "RED@6bf15a8f", "Q19, Q20"),
+    ("r21/F4 \"Nothing upstream classifies that\" lost its antecedent to this "
+     "round's own edit — \"that\" pointed at a sentence about converging "
+     "ladders — and its justification was false: `is the WHOLE DIFF prose?` is "
+     "a one-command check (`git diff --name-only`, every path `.md`), so the "
+     "paragraph defended an unanswerable-classification claim about a "
+     "population that IS mechanically enumerable, hiding that the conjunct "
+     "could be automated. The genuinely unanswerable question is the PAYLOAD "
+     "one, and the two are now named apart",
+     "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition",
+     "RED@6bf15a8f", "Q21"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -10637,7 +10794,10 @@ FIX_MATRIX = (
 # Round 20: m = 111 (printed from an import again — NOT 106 plus this round's
 # four; the import is the authority and it says 111), and
 # 111 - min(50, max(1, 111 // 20)) = 111 - 5 = 106.
-MIN_FIX_MATRIX_ROWS = 106
+# Round 21: m = 115 (printed from an import again — NOT 111 plus this round's
+# four; the import is the authority and it says 115), and
+# 115 - min(50, max(1, 115 // 20)) = 115 - 5 = 110.
+MIN_FIX_MATRIX_ROWS = 110
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
