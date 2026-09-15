@@ -28,6 +28,21 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+- ✅ **2026-09-15 — RANK 29'S CAIRN HALF IS MERGED: `ZacxDev/cairn` #24, squash `baee2f0`.**
+  Ladder: round 0 (requirements) → round 1 (full, 9 findings) → fix → round 2 (delta, 4 findings)
+  → fix → merge. Claim `cairn-oss-multi-instance-29` **RELEASED**. **Rank 29 stays OPEN**: its
+  closing condition needs BOTH PRs and **the devrc routing-table half has not started.**
+  Verified BY CONTENT at that repo's `origin/main` — a squash makes ancestry false forever:
+  `lib/cairn_instances.py` `startswith(".#")` · `internal/client/instances.go`
+  `HasPrefix(entry.Name(), ".#")` · `internal/client/state.go` `timeout int, instance string` ·
+  `tests/parity/harness.py` the `put-routed-to-a-NON-DEFAULT-instance` row — 1 each.
+  🔴 **THE PR'S OWN 6/6 GREEN WAS NOT THE MERGE CHECK.** It was last tested at `bcfaa19` (#29)
+  while `main` had reached `3c8707c` (#30), so the tree the merge would create had never run.
+  Built it: `go build`+`vet` ok, **13 packages ok** (incl. #30's new `internal/control`),
+  **100 passed** on the two ledgers + parity-contract + instances suites. Then merged.
+  ⚠ **`main` moved SIX times during the ladder (#25–#30)** — three rebases, twice onto a PR
+  touching a file this change touched. Budget one rebase per round on this repo.
+
 - ✅ **2026-09-14 — RANK 26 MERGED: `innovation-upstream/devrc` #1657, squash `0808a820`.** Three
   audit rounds (0, 1, 2). Claim `cairn-oss-multi-instance-26` RELEASED. Verified BY CONTENT at
   `origin/main` — see rank 26 for the six checks. **Rank 28 is what it did NOT close.**
@@ -145,7 +160,7 @@ is the PRIVATE proposal, not this doc.
   §9 phases A1→A2→A3→B→C→D→E→F→G. Measured against code, not read off the table:
   **A1 ✅** (repo public, leakscan with both controls) · **A2 ✅** (`reload_tokens` on cairn
   `origin/main`) · **A3 ✅** (devrc consumes the pinned flake, #1406 `9300f234`) ·
-  **B ⛔ NOT STARTED** · C–G not started.
+  **B ⏳ HALF DONE** — cairn merged `baee2f0`, devrc registry NOT started · C–G not started.
   🔴 **B is "client multi-instance, still ONE instance configured", and its closing condition is
   the point: *existing behaviour unchanged — provable BEFORE any data moves*.** It needs the
   scope→instance registry decisions 3 and 8 describe (explicit, **fails loud** on an unregistered
@@ -163,8 +178,11 @@ is the PRIVATE proposal, not this doc.
   unchanged-output claim with no control is indistinguishable from a harness wired to nothing.
 
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
-  🔴 **29 is the only one of these that advances the `## Goal`** — it is phase B, and C/D/E cannot
-  start until it lands. The rest are hygiene.
+  🔴 **29 is the only one of these that advances the `## Goal`**, and it is now HALF done — the
+  cairn mechanism is merged, **the devrc routing table is not written**. UNCLAIMED. The rest are
+  hygiene. ⚠ Rank 29 says C/D/E cannot start until B lands; **round 1's auditor measured that as
+  FALSE for C and D** (`server/seed.sh` and `server/verify-byte-identity.sh` touch no client
+  routing) — re-derive before sequencing off it.
   **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
   those sites have no handle and therefore no remedy);
   **27**; **28** (the cwd-blind relative nudge — FILED 2026-09-14 by operator decision during
@@ -1098,116 +1116,14 @@ belongs to that arc's own session. via: measurement
     forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
     Advisory, not blocking (see the retraction above)
 
-23. ✅ **CLOSED ENTIRELY 2026-09-14.** (a)+(b) devrc #1583 `c1ecc830`; **(c) `ZacxDev/cairn`
-    #17 `a2661371`** — see `State now`. The item said ONE scrubbed remedy; there were TWELVE
-    sites across two replacement phrases and a fabricated symbol.
-    **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
-    (a) `claude/skills/resume/SKILL.md:128` still spells the post-write check as a bare
-    `subsystem_touch.py --validate --scope <scope>` — **not on PATH, exits 127** — and `:150`
-    carries the absolute `python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py` spelling.
-    Both now have a one-word remedy (`cairn-validate`) and neither is pinned by any test, so
-    nothing will catch them drifting again. (b) `subsystem_touch.validate_command()`
-    (`scripts/lib/subsystem_touch.py`) still emits the absolute checkout-path spelling in the
-    `RECOVER —` block the skill tells writers to run verbatim. (c) 🟡8 from #1406's round-2
-    audit: the pinned package's own `🔴 MALFORMED —` remedy prints ``check a file with
-    `a writer --validate <path>` `` — the extraction scrub — which lives in `ZacxDev/cairn`,
-    not devrc, so it needs an upstream PR.
-    **Closing condition:** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 on
-    `origin/main`, and an upstream PR for (c).
-    ✅ **(a) AND (b) MERGED 2026-09-12 — devrc #1583, squash `c1ecc830`. (c) is NOT in it and
-    stays OPEN: it lives in `ZacxDev/cairn` and needs an upstream PR.**
-    **Closing condition MET, verified by CONTENT at `origin/main`** (a squash makes
-    `merge-base --is-ancestor` false forever, so ancestry cannot answer this):
-    `grep -c 'subsystem_touch.py --validate' claude/skills/` → **0**; `validate_command` emits
-    `cairn-validate --store … --scope …`; the RECOVER remedy carries
-    `--flake ~/workspace/devrc --impure`; both new guards present.
-    ⚠ **This line read "🔨 BUILT" for the first hours after the merge** — the same
-    status-drift class this very PR existed to fix, reintroduced by the PR that fixed it.
-    Written down rather than quietly corrected: a doc edited in the same commit as the work
-    it describes cannot record that work's own merge, so the status line is stale by
-    construction until someone comes back for it. **Do not treat a merged handoff edit as
-    self-updating.**
-    ⚠ **The line numbers in this item were STALE** — the two sites are `:135` and `:157`, not
-    `:128`/`:150`. Found by grepping the string, not by opening the named line.
-    - **(a)** both now spell `cairn-validate`. The `:157` site is the single-FILE form, so it
-      reads `cairn-validate --validate <path>`: the launcher prepends `--validate` with no value
-      and argparse's last occurrence wins, which its own docstring states.
-    - **(b)** `validate_command()` now emits `cairn-validate --store <root> --scope <scope>`.
-      🔴 **`--store` is emitted explicitly and that is NOT redundant** — the launcher's own
-      prepend is the SYNCED CACHE, while this function's contract is to check the store the
-      refusal actually came from. **Measured both ways** on the deployed pin: with an explicit
-      `--store`, the run's `store:` line names it, not the launcher's default; and a malformed
-      entry still exits **3**, untranslated.
-    - 🔴 **THE COST RANK 23 DID NOT ANTICIPATE, and it is the reusable part.** Six neighbouring
-      tests broke, because `test_the_recovery_command_ACTUALLY_RUNS_and_reproduces_the_diagnosis`
-      **executes** the emitted command. `python3 <abs path>` is runnable in BOTH tiers; a bare
-      `cairn-validate` is on `home.sessionPath` and the `nix build` tier has no reason to carry
-      it. **Exec'ing the real launcher would have made that guard structurally incapable of
-      passing in one tier while staying green on this host — the defect this repo already shipped
-      once.** So the launcher's prepend is MODELLED in one helper (`_writer_argv`), and the seam
-      is pinned by a new ledger test that reds if the launcher stops prepending `--validate`,
-      stops prepending `--store`, or stops appending the caller's argv.
-    - **Mutation battery: 6/6 killed BY THEIR INTENDED TEST**, each required to fail with its own
-      assertion's message; harness positive-control watched green on the pristine tree first;
-      `PYTHONDONTWRITEBYTECODE=1`; tree restored byte-identical.
-      🔴 **One mutant SURVIVED the first run and the fix is the lesson:** dropping `--store` was
-      invisible because the test modelled the launcher's default with the SAME value the command
-      emits, so the parse yielded the right root either way. It dies only against a sentinel the
-      caller's store can never equal. A fixture whose fields are not pairwise distinct cannot see
-      the mutant that collapses them.
-    🔴 **ROUND 0 OF THIS PR'S OWN AUDIT REFUTED THIS ITEM'S STATED RATIONALE. The fix stands; the
-    REASON printed on it was wrong, and it is retracted in the code, the PR and here.** The claim
-    was that `Path(__file__)` makes the command *"true for the machine that printed it and false
-    for anyone who pastes it elsewhere"*. Both halves fail:
-    - the old spelling emitted an **absolute** path, so cwd was never the failure mode; and
-    - `nix/home.nix` deploys the launcher as an `mkOutOfStoreSymlink` into
-      `${homePath}/workspace/devrc`, so **any host where `cairn-validate` resolves at all
-      necessarily has this checkout at that same absolute path** — the old command would have
-      worked there too. The new spelling's precondition is if anything **stronger**: it needs a
-      home-manager switch and a deployed pin, where the old one needed only python.
-    **The real defect, measured:** `Path(__file__).resolve()` names the **running copy**. Run from
-    a throwaway worktree — this repo's standing default for any file-modifying agent — it emitted
-    `python3 /tmp/wt-cairn-rank23/scripts/lib/subsystem_touch.py …`, a path about to be
-    `worktree remove`d. The recovery command went stale the moment the session that printed it
-    ended. **That is the durable reason; do not re-derive the portability one from this doc.**
-    🔴 **AND A GUARD I WROTE WAS DELETED BY THAT ROUND, ON MEASUREMENT.**
-    `test_the_LAUNCHER_still_prepends_what_this_command_omits` grepped the launcher's SOURCE TEXT
-    and its docstring asserted *"nothing else asserts it … which is a silent green"* — **false**.
-    Control: each of its three mutations run against `test_cairn_flake_pin.py` ALONE, with
-    `test_subsystem_touch.py` deselected — `--validate` prepend dropped → **3 failed**; `--store`
-    prepend dropped → **1 failed**; caller argv dropped → **2 failed**; pristine control green at
-    **15 passed** first. Those tests run the REAL launcher as a subprocess and read BOTH streams,
-    so they hold in the `nix build` tier; mine was SPELLED (baked double quotes ⇒ falsely red on a
-    legal refactor, green on a literal in a comment). **A second, weaker copy of a guard that
-    already exists reads as coverage while providing none.**
-    ⚠ **`--store` SURVIVED the round but is no longer claimed to be free.** `store` here is
-    `args.store`, whose default is `DEFAULT_STORE_ROOT` — the **frozen pre-cutover mirror**, not
-    the synced cache the launcher would otherwise pick (measured: mirror **161** entries, cache
-    **244**), and the mandated invocations in `subsystem-index/SKILL.md` pass no `--store`. Keeping
-    it is FAITHFUL (the malformed file really is in the store that was read) but it inherits an
-    unanswered question — why does the writer default to the frozen mirror at all? — which this
-    change must not be read as settling.
-    🔴 **ROUND 0's OTHER FINDING, FILED NOT FIXED: this item's closing condition is SPELLED, and
-    the CLASS is still open.** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 is
-    genuinely met, but `command grep -rn '/home/zach/workspace/devrc' claude/skills/` returns **21
-    occurrences across 9 files**, including **four literal
-    `python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py …` invocations in
-    `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`** — the write-protocol skill itself,
-    the primary consumer. No scanner gates this class. **Closing condition:** a mechanical gate
-    over `claude/skills/**` rejecting any quoted or emitted command that embeds an absolute
-    checkout path, plus those 21 sites cleared — merged, and watched red-then-green on a planted
-    violation. **Owner: unassigned; this is a new ranked item, not part of rank 23.**
-    ⚠ **A THIRD SITE OF THE SAME CLASS, FOUND WHILE FIXING (b) AND DELIBERATELY NOT FIXED:**
-    `scripts/lib/subsystem_touch.py:3991` and `:4712` emit
-    `python3 {SELF_PATH} --template <slug> --scope …` — the same absolute-checkout-path spelling,
-    in the `--template` command rather than `--validate`. It is outside this item's stated scope,
-    and unlike `--validate` it has **no one-word remedy**: there is no `cairn-template` launcher
-    to move it to, so closing it means first deciding whether to add one. **Closing condition:**
-    either a launcher exists and both sites name it, or a decision is recorded here that the
-    writer's `--template` path is meant to stay checkout-absolute. Named so it reads as
-    known-and-open rather than missed.
-    forcing: none
-
+23. ✅ **CLOSED ENTIRELY 2026-09-14** — (a)+(b) devrc **#1583** `c1ecc830`; (c) `ZacxDev/cairn`
+    **#17** `a2661371`. Claim RELEASED. Body DEMOTED 2026-09-15 to
+    `claudedocs/refs/cairn-oss-multi-instance.md` for the size budget — the durable lessons are
+    also in `State now` (three audit rounds found zero 🔴 and every finding was a FALSE CLAIM
+    ABOUT THE CODE, two of them in that session's own prose; and a brief naming ONE instance of
+    a scrub is naming a SAMPLE — there were twelve, over two replacement phrases plus a
+    fabricated symbol).
+    forcing: none — done
 24. ✅ **DONE 2026-09-13 — THE CLASS RANK 23 COULD NOT CLOSE IS CLOSED.** devrc **#1621**,
     squash **`df09a6c2`**. `scripts/tests/test_absolute_handle_paths.py` rejects any absolute
     checkout path in the `claude/**` + `CLAUDE.md` corpus that a handle from
@@ -1375,55 +1291,29 @@ belongs to that arc's own session. via: measurement
     accepted, in which case the guard comments in `shell-env-nudge.py` must stop implying otherwise.
     forcing: none
 
-29. 🔴 **PHASE B — the client goes multi-instance, still ONE instance configured. THE ONLY
-    REMAINING GOAL-ADVANCING ITEM, and it is a BUILD, not a wiring change.** Filed 2026-09-14
-    because B had no rank: A1/A2/A3 are ✅, ranks 25/27/28 and the audit residue do not advance
-    the `## Goal`, and the only ranked item that ever did (4) is closed.
-    **Measured 2026-09-14, enumerated not sampled:** the deployed client
-    (`…-cairn-1e7aedf/libexec/cairn/cairn:246`) resolves exactly ONE store — `SUBSYSTEM_STORE_URL`
-    from the env or `~/.config/subsystem-store/env` — and carries **no instance notion at all**;
-    the live config dir holds `env` alone; and `find … -print0 | xargs -0 grep` over devrc's
-    `*.py`/`*.nix`/`*.sh` for a scope→instance map returns **zero files** (enumerating, because
-    this host's `grep -r` is .gitignore-blind and would have returned the same zero for a
-    different reason). ⚠ The only multi-instance text anywhere is `lib/entry_shape.py:166-169`,
-    a comment instructing whoever adds routing to rewrite the per-host caveat — a TODO, not a
-    partial implementation. **So there is nothing to extend; B is net-new code.**
-    **The design is SETTLED — do not re-litigate it.** Proposal §5 + decisions 3/8, merged at
-    talos-infra `trunk:claudedocs/proposal-cairn-civitai-instance.md` (§11: "nothing in this
-    document is open"): an explicit checked-in `scope → ALIAS` map in devrc, **aliases only,
-    never a hostname**, pinned TWO-WAY in the manner of `claude/skill-tiers.json`, and an
-    unregistered scope **REFUSES** rather than defaulting — a default recreates the
-    writes-landing-in-a-store-nobody-reads shape that cost six entries in rank 23. New instances
-    are additive `~/.config/subsystem-store/instances/<alias>.env` files; `env` stays the
-    `personal` alias so the env-var override precedence the tests rely on is untouched. Cache
-    becomes `~/.cache/subsystem-store/<alias>/` with a per-alias `.sync-stamp`. ⚠ `DEFAULT_CACHE_ROOT`
-    carries a "THE one definition" comment AND a mutation battery — expect to EXTEND the sweep,
-    not move a constant. 🔴 **The mechanism ships in `ZacxDev/cairn`, the routing table stays in
-    devrc** (the OSS client knows how to route and nothing about who routes where), so this is
-    TWO PRs in two repos, and the devrc half cannot merge before the pin moves.
-    🔴 **An existing sentence becomes a LIE in the same change** (§5.4): every recall prints
-    "the store is PER-HOST and unreplicated … an absence below is an absence HERE", which under
-    routing is actively misleading — an absence may mean the scope lives elsewhere. Likewise
-    `doctor` reports PER-INSTANCE and must keep distinguishing configured-but-unreachable from
-    reachable-with-no-scopes, and `--all-scopes` fans out, labels each hit, and **fails loud** on
-    any unreachable instance — a silent partial makes "found nothing" a lie.
-    🔴 **Closing condition — §9's "existing behaviour unchanged, provable BEFORE any data moves",
-    made mechanical.** Closes when ALL of: (a) both PRs merged and verified BY CONTENT at each
-    `origin/main` — a squash makes ancestry false forever; (b) the two-way registry pin is watched
-    RED on a scope with no entry AND RED on an entry naming no scope, not asserted; (c) an
-    unregistered scope EXITS NON-ZERO naming the scope, proven by a test red against today's
-    single-store resolution; (d) exactly ONE instance stays configured and `cairn doctor` reports
-    one instance on BOTH hosts after `ship.sh` — read the resolved store path, never ship's rc;
-    (e) the unchanged-behaviour proof is a CAPTURED DIFF, not a claim — `recall --repo`,
-    `recall --scope`, explicit `--store`, and a `SUBSYSTEM_STORE_URL=` override each byte-identical
-    before and after against the same store, **with a positive control showing that diff CAN move**,
-    or the proof is indistinguishable from a harness wired to nothing; (f) the per-host caveat
-    string is rewritten. **Who checks:** (a)–(d) and (f) mechanically at the two `origin/main`s;
-    (e) by whoever takes this rank, recorded HERE with both arms of its control.
-    ⚠ **OUT OF SCOPE, and must not creep in:** deploying the civitai instance (C), moving any entry
-    (D/E), or adding a second instance to any config. B ships plumbing with one instance PRECISELY
-    so the routing change is proven before data moves.
-    forcing: none — but C/D/E cannot start until it lands, so it gates the rest of the arc
+29. ⏳ **PHASE B — HALF DONE. The cairn mechanism is MERGED (`ZacxDev/cairn` #24, squash
+    `baee2f0`, 2026-09-15); the devrc routing TABLE is not written.** Still the only item that
+    advances the `## Goal`. Design is SETTLED — proposal §5 + decisions 3/8 on talos-infra
+    `trunk:claudedocs/proposal-cairn-civitai-instance.md`: an explicit checked-in `scope → ALIAS`
+    map in devrc, **aliases only, never a hostname**, pinned TWO-WAY like `claude/skill-tiers.json`,
+    an unregistered scope REFUSES.
+    **What the cairn half shipped**, so the devrc half is written against it rather than re-derived:
+    the table is an INPUT — `~/.config/subsystem-store/routes.json`, or `$CAIRN_ROUTES`, a flat
+    JSON object of `scope → alias`, every other shape refused. `env` stays the `personal` alias;
+    extra instances are `instances/<alias>.env`; caches are SIBLINGS (`…/subsystem-store-<alias>`),
+    the default instance keeping `DEFAULT_CACHE_ROOT` byte-for-byte. 🔴 **Routing activates on
+    `len(instances) > 1`, NOT on the table's presence** — so dropping a table onto a one-instance
+    host changes nothing, which is what keeps phase B's "existing behaviour unchanged" true when
+    the devrc half lands. A table entry naming an alias this host has no config for still REFUSES.
+    🔴 **REMAINING closing condition:** the devrc PR merged and verified BY CONTENT, with the
+    two-way pin watched RED in BOTH directions (a scope with no entry; an entry naming no scope)
+    and an unregistered scope exiting non-zero naming the scope — each red at the pre-change tree,
+    not asserted. `cairn doctor` must still report ONE instance on both hosts after `ship.sh`,
+    read as the resolved store path and never as ship's rc.
+    ⚠ Declared and NOT closed by #24: `tests/parity/README.md` difference 8 — Go's READ verbs
+    refuse at exit 11 on a multi-instance host rather than routing. Unreachable today (no such
+    host, and `packages.cairn` is still the Python client) but it goes live at phase E.
+    forcing: none — but C/D/E sit behind it, so it gates the rest of the arc
 
 ## Gotchas / decisions / dead-ends
 
@@ -2383,7 +2273,53 @@ covers; pin it with `--config`, do not `cd`.
   not on a clean round.** Recorded because a report that stops on the prose criterion is
   otherwise indistinguishable from one that converged. via: measurement
 
+### 2026-09-15 — a ONE-TIME certification is not a GATE (`/the-algorithm`, operator-prompted)
+I raised a 🔴 that `tests/routing_mutants.py` and `tests/unchanged_output_capture.py` are run by
+**no CI job** (measured: 0 mentions each in `.github/workflows/ci.yml`, against 3 for
+`parity/harness.py` as the positive control) and recommended wiring them in. **RETRACTED one
+message later, under step 1 of the algorithm: the maker was me, minutes earlier.** Both are
+one-time instruments. The battery answers *"is this guard real?"* when the guard is written;
+re-running it forever re-answers a settled question at 39 mutants × two languages per CI run.
+The (e) capture is worse as a gate and it is checkable rather than arguable: `--base` defaults to
+`origin/main` and `lib/README.md` drives it at `--base 2301876`, **this branch's first commit** —
+so its claim is "output did not move across THIS PR", and once merged there is no "before". Its
+own recorded base had already gone stale five times, once per rebase. **The tests are the gate;
+the battery is what proved the tests work** — and the 1924-test, 98-case parity and conformance
+jobs are all wired in. Kept both harnesses in-repo, hand-run by design. **Do not re-file this.**
+
+### 2026-09-15 — a REBASE poisons a delta-audit range, and the range still looks ordinary
+`audit-dispatch.py --round N` builds `<prev-tip>..<head>`. After a rebase those ends sit on
+different bases, so the range sweeps in every upstream commit the rebase brought — round 2's
+literal `732fdb5..08b293a` pulled in #26 and #27, both already in `main`. Nothing errors and a
+wider range reads like an ordinary delta. **The auditor isolated it with
+`git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`; use that whenever the branch was
+rebased between rounds**, and say in the dispatch which commits the range actually spans.
+
 ## How to verify
+
+**Rank 29's cairn half LANDED** — content, never ancestry (squash `baee2f0`):
+```bash
+R=~/workspace/cairn; git -C $R fetch origin main
+git -C $R show origin/main:lib/cairn_instances.py        | grep -c 'startswith(".#")'
+git -C $R show origin/main:internal/client/state.go      | grep -c 'timeout int, instance string'
+git -C $R show origin/main:tests/parity/harness.py       | grep -c 'put-routed-to-a-NON-DEFAULT-instance'
+```
+Each must print 1.
+
+**Rank 29 is NOT closed** — the devrc routing table is the remaining half:
+```bash
+find $DEVRC -path $DEVRC/.git -prune -o -type f \( -name '*.py' -o -name '*.nix' \) -print0 \
+  | xargs -0 command grep -l "scope.*instance\|CAIRN_ROUTES" | head
+```
+Empty ⇒ still not written. 🔴 Enumerate; this host's `grep -r` is `.gitignore`-blind and would
+return the same zero for a different reason.
+
+---
+🔴 **Everything below is the PRE-EXISTING verification set for the still-open ranks. It is
+carried forward deliberately:** `How to verify` is a REPLACE section, and the tool's
+durable-line classifier flagged 2 lines while this whole block — the checks for ranks 11, 20,
+21 and rank 3 slice 3 — was in the dropped set. A silent classifier is not evidence.
+
 
 🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
 
