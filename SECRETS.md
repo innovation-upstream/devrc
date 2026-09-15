@@ -616,13 +616,64 @@ on it — has already been paid at least twice. 🔴 **If any of these anchors e
 turns out to be live, this section becomes the disclosure**, and the answer is
 rotation first, then editing this file — not the other way round.
 
-### 🔴 The structural gap this exposed — every content gate reads HEAD only
+## A client subdomain in reachable history — ALSO ADJUDICATED, do not re-raise
+
+> Second instance of the same shape, three years newer and adjudicated the same
+> way. Read this before opening a 🔴 on the cairn handoff doc's history.
+
+**What is there.** A **client subdomain** (a CF-proxied host on a client apex)
+was committed to this PUBLIC repo as prose — it recorded an operator's answer to
+"what hostname will this be served at" inside
+`claudedocs/handoff-cairn-oss-multi-instance.md`. It is **topology, not a
+credential**: nothing authenticates with it and knowing it grants nothing that
+DNS would not.
+
+**Scrubbed from HEAD** 2026-09-14 by `c48016dc` (PR #1700), which kept the
+substance of the decision — a dedicated subdomain rather than a path, CF-proxied
+— and dropped the literal. `test_no_client_hostnames` is green on HEAD and
+`git grep` over `origin/main` reports **0 occurrences**.
+
+**What remains, measured 2026-09-14** — the literal is still in history:
+
+| commit | reachable from `origin/main`? | occurrences |
+|---|---|---|
+| `38cb5d86` | **yes — ancestor** | 1 |
+| `bac48ff0` | no (its PR squash-merged) | 1 |
+| `b34c3372` | no (its PR squash-merged) | 4 |
+
+⚠ "Not an ancestor" is **not** "gone": both were pushed to GitHub before their
+branches were squash-merged and deleted, so they remain fetchable **by sha** on
+the remote. The reachability column says what `git log` will show a cloner, not
+what exists.
+
+⚠ `b34c3372` carries **four** occurrences because the handoff entry *documenting
+the leak* quoted the hostname three more times while investigating it. That is
+the recurrence worth remembering: **writing down a leak in a tracked file
+re-commits it.** Refer to it as "the client subdomain" — this section does.
+
+**Why nothing further is being done.** The exposure is **one commit reachable
+from `main`, landed the same day it was scrubbed** — hours, against the four to
+five years above. Rewriting history would force-push a public repo that is also
+a **two-host deploy target**, requiring every open PR and every active worktree
+to be rebased and both hosts re-converged; and it would **not** unpublish
+anything, since GitHub keeps orphaned objects fetchable by sha regardless. For
+a hostname with no live trust attached, that is cost without security gain.
+
+So: **accepted, not rewritten — a decision, not an oversight.** 🔴 The
+determination rests on it being TOPOLOGY. If a credential is ever found in this
+repo's history, none of the reasoning above transfers: rotate first, then
+adjudicate.
+
+### 🔴 The structural gap BOTH sections above expose — every content gate reads HEAD only
 
 `scripts/tests/test_no_public_ips.py`, `test_no_client_hostnames.py`,
 `test_no_captured_text.py` and `test_no_captured_markup.py` all enumerate tracked
 files via `git ls-files`. **None of them reads history.** That is exactly why
-these keys sat here for four to five years while every gate reported clean, and
-it means **a green run is a claim about HEAD and nothing else**.
+the keys sat here for four to five years while every gate reported clean — and
+why scrubbing the client subdomain from HEAD turned `test_no_client_hostnames`
+green while three commits still carried the literal. It means **a green run is a
+claim about HEAD and nothing else**, in both directions: it cannot see what
+history holds, and it goes quiet the moment HEAD is clean.
 
 The limitation is not left as prose:
 `test_no_captured_markup.py::test_the_gate_is_blind_to_git_history` DRIVES it —
