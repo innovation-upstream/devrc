@@ -22,56 +22,66 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   inventory of the 14 ranked items.
 
 ## State now
-- **Branch / PR — the stop-rule thread shipped a rule and WITHDREW it the same day:**
-  **`#1678`** (`e8fa6fca`, merged 16:34Z) added a round-1 shortcut to the prose escape
-  hatch; **`#1682`** (`d8e267f2`) RETRACTS it. Both hosts converged and were validated at
-  the CONSUMER after each: after the retraction, `md5 76747a4f` identical across
-  `origin/main`, workbench and laptop, `NAMEABLE AT ROUND 1` → **0** and `RETRACTED DRAFT`
-  → **1** on both. New sessions no longer load the withdrawn rule.
-- 🔴 **THE RETRACTION IS THE RESULT. `#1678` re-implemented the rule it was written to
-  avoid, and two independent audits caught it.** Both reproduced EVERY self-reported number
-  in that commit — the measurements were right and the RULE was wrong, which is why this is
-  a retraction and not a correction. Full argument in the investigation block below.
-- **STILL OPEN and NOT fixed by either PR: the operator's actual complaint.** Prose ladders
-  still take two rounds to reach the hatch. `#1682` restored a rule that is TRUE; it did not
-  make the ladder shorter. 🔴 **Deliberately NOT ranked** — `## Next steps` REPLACES on
-  update and this doc's own banner says the numbering is keyed to live `claim-work` refs, so
-  re-writing 14 items to append one was the larger risk. Work it from the investigation
-  block's **Next probe**, which is written to be run verbatim.
-- ⚠ **Open, unaudited, unmerged: `#1676`** — a repair to the SIBLING doc
-  `claudedocs/handoff-ladder-range-coverage.md`, whose `State now` and ranked list had
-  contradicted its own investigation section for ten hours and produced a `/resume` kickoff
-  ordering work that was already on `main`. Not this doc's queue; flagged so it is not lost.
-- **No `clawgate-task:` recorded** — `clawgate_handoff.sh resolve` exited **5**. Its
-  positive control answered 2 links for another session, so the board is reachable and the
-  token is accepted; but a wrong id also answers 200 with an empty array, so this is a
-  narrower claim than "this session touched no task" and is **not a clean bill of health**.
+- 🔴 **THE HOSTS ARE DIVERGENT RIGHT NOW, AND THE WORKBENCH IS THE ONE WITHOUT THE NEW RULE.**
+  `scripts/ship.sh` exited **rc 7** at 2026-09-14T19:4xZ: laptop fast-forwarded to
+  **`b9a53101`** and VERIFIED; **workbench SKIPPED** — `cannot fast-forward: could not switch
+  to the main branch`. Measured at the consumer: laptop `md5 443686a0` (= `origin/main`, new
+  rule present ×2); workbench `md5 76747a4f` (= the `#1682` retraction state, new rule **0**).
+  ⚠ **The divergence is SAFE, not dangerous** — the workbench serves the previous KNOWN-GOOD
+  text, so a workbench session gets no new rule rather than a wrong one. Re-run `ship.sh`
+  once the blocker below clears; `drift-check.sh` will keep reporting it until then.
+- 🔴 **THE BLOCKER IS ANOTHER SESSION'S LIVE WORK IN THE SHARED CLONE — DO NOT TAKE IT.**
+  `$DEVRC` is on **`feat/the-algorithm-skill`** (reflog `HEAD@{4}`: `checkout: moving from
+  main`), carrying **four** of that session's commits and, when measured, an uncommitted
+  `claudedocs/handoff-agent-overguarding.md` with an mtime minutes old. `ship.sh` REFUSED
+  rather than stashing — correct, the stash is repo-GLOBAL. **Switching that clone to `main`
+  to force the ship would yank a live session's branch and put its uncommitted edit in the
+  blast radius.** Wait for it, or ask that session to park; do not resolve it by checkout.
+- ✅ **THE THIRD ATTEMPT AT THE PROSE STOP RULE IS MERGED: `#1691` → `b9a53101`**, verified on
+  `origin/main` BY CONTENT — `PROSE_LADDER_SHARE_THRESHOLD = Fraction(2, 3)`,
+  `prose_stop_determination`, the founding-case fixture ×2, and the `RETRACTED DRAFT` record
+  all present. It counts **the pre-image LINES the round's own fix diff touched**, blamed
+  `-w -M` against the ladder anchor — never findings, never before round 2 (enforced in
+  `scripts/audit-dispatch.py`, not only in prose).
+- 🔴 **WHAT MADE ATTEMPT 3 DIFFERENT FROM 1 AND 2, and it is the thing to preserve:** its
+  threshold is DERIVED from the population it governs, and its founding case is PINNED IN
+  CODE. On the 29 prose rounds across 7 PRs, two-thirds sits in an **empty band 0.156 wide**
+  (nearest below 0.571, nearest above 0.727, nothing within ±0.05, flag-invariant) — versus
+  attempt 2's constant, which sat ON the population mean (66% vs 66.7%). `#1111` scores
+  **19/26 = 0.731** and PASSES, where the findings rule scored it 0-of-7 and FORBADE it.
+- ✅ **RE-VERIFIED INDEPENDENTLY THIS SESSION, not accepted from the agent:** 201 passed
+  across the three modules; `mutants-audit-ladder.sh` **✅ 32 rows all as expected**;
+  `mutants-audit-dispatch.py` **✅ 158 rows** at the prior head. 🔴 **And the founding-case
+  fixture was proven REACHABLE, not decorative** — mutating
+  `PROSE_LADDER_SHARE_THRESHOLD` to `Fraction(3, 4)` reds it BY NAME
+  (`[#1111 r2 — the founding case]`) plus the `[exactly two-thirds]` boundary case; restored
+  → 12 passed. That control is what neither earlier attempt had.
+- ⚠ **`main` is RED on `test_runtime_shebangs.py::test_no_test_writes_a_usr_bin_env_shebang_at_runtime`,
+  INHERITED and not from this arc.** Reproduced on a clean detached `origin/main` worktree at
+  `e0678387`; offenders are in `scripts/claude-hooks/tests/test_guard_core.py`. ⚠ **CI reports
+  `failed=2` and I identified only the NAMED one** — the second was never isolated. The same
+  `failed=2` signature appeared on `#1676` and `#1684`, pure docs PRs, which is why it reads
+  as inherited; that is inference, not a measurement of the second failure.
+- ⚠ **The nine correctness axes have NEVER run on this rule** — not on attempt 2, not on
+  attempt 3. Round 0 ran (on attempt 2) and its findings were fixed as a batch, and a corpus
+  replay ran; the nine axes did not. Merged on that basis deliberately, with the operator's
+  go-ahead.
 
 ### Carried forward through this `State now` replace — read before replacing it again
 - 🔴 **ROUND 0 IS NO LONGER ON TRIAL. Do not re-run the trial, do not re-derive the pair, and
-  do not delete the section.** The record lives in `claude/skills/audit-pr/SKILL.md`. Keep
-  reporting `ran: R · changed the outcome: C` per PR — not to re-decide the section, but
-  because it is the only signal for whether the TRIGGER is working. **This session's pair:
-  `ran: 1 · changed the outcome: 1`**, and the round ran AFTER the merge decision, which is
-  the failure that record names.
+  do not delete the section.** Keep reporting `ran: R · changed the outcome: C` per PR.
+  **This arc's running pair: `ran: 2 · changed the outcome: 2`** — `#1678` (round 0 arrived
+  after the merge, and the PR was retracted) and `#1691` (round 0 arrived with the decision
+  OPEN and produced the redesign). The second is the routing working as intended.
 - 🔴 **`#1532`, `#1533` and `#1543` were MERGED WITHOUT CI at the operator's explicit
-  instruction** (2026-09-11). The post-merge behavioural evidence in ranked item 7 is
-  therefore the ONLY evidence those three work. All three checks have since been run against
-  the MERGED tree, including the one that had only ever run on a branch.
-- ✅ **RETIRED 2026-09-14, and retired on EVIDENCE rather than by a replace swallowing it —
-  the `#1431` bullets that said "STILL OPEN … needs a human" and "It stays".** Verified live
-  this session: `gh issue view 1431` → **CLOSED**, and the written dismissal ranked item 9
-  cites (`issues/1431#issuecomment-5644071037`, author `ZacxDev`, 2026-09-12T06:04:56Z)
-  **exists**. Both items are satisfied, so the carried-forward pointer has done its job and
-  is retired deliberately. 🔴 **This is the bullet a prior session said must STAY because an
-  earlier update had dropped it silently — so it is being CLOSED, not dropped.** Do not
-  re-open it from the older `State now` text in git history.
-- ⚠ **"Deployed and green" is point-in-time.** `main` merges every few minutes here; a host
-  sha in this doc is stale the moment it is written. Re-run `ship.sh`/`drift-check.sh` rather
-  than trusting any sha recorded above.
-- ✅ **`#1287`** (`feat/workhost`) is **CLOSED**, with the operator's comparison written on
-  it. Carried because it is recorded in NO ranked item — every other closure this replace
-  drops (`#1547`, rank 1's trigger+trial, `#1431`) is held by ranked items 10, 1 and 9.
+  instruction** (2026-09-11); the post-merge behavioural evidence in ranked item 7 is the
+  only evidence those three work. All three checks have since been run on the MERGED tree.
+- ✅ **`#1287`** (`feat/workhost`) is **CLOSED**, with the operator's comparison written on it
+  — carried because no ranked item records it.
+- ✅ **`#1431` stays RETIRED** (verified 2026-09-14: issue CLOSED, dismissal comment
+  `issuecomment-5644071037` exists). Do not re-open it from older `State now` text.
+- ⚠ **"Deployed and green" is point-in-time**, and this entry is the proof: two hosts, two
+  different shas, inside one `ship.sh` run. Re-measure; never trust a sha recorded here.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -147,41 +157,54 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering PRESERVED where it was stable — live `claim-work` refs are keyed to it. Identify an item by its SUBJECT, never its rank.** ⚠ **Rank 12 was DUPLICATED on `main`** (a peer's `#1561` item and mine both took 12, two minutes apart); the recurrence-convention item moved to **13** and nothing was claimed on 12/13/14 when that was checked, so no live claim was re-pointed. Rank 14 is new.
-
-1. ✅ **FULLY DONE — nothing here to work. The trial closed at `ran: 6 · changed the outcome: 3` (the section STAYS) AND the trigger it called for is shipped, deployed and validated: `#1565` routes round 0 at PR-create time, `#1574` retired the retirement condition.** 🔴 **An earlier revision of this item told the next session to "delete the RETIREMENT CONDITION … recording the pair" — that is DONE, and an instruction to do already-finished work is the "stale in the direction of ALREADY DONE" hazard this very doc catalogues.** If you want the record, read `claude/skills/audit-pr/SKILL.md`; do not re-derive it. forcing: none
-2. ✅ **DONE — operator DECIDED 2026-09-11: IMPLEMENT §10. `#1532` is MERGED (`6fa09466`).** A shared-surface diff now REFUSES to produce a scoped verdict (exit 4, naming the path and pointing at `scripts/gate.sh --tier both`) rather than under-running silently. Re-measured first-hand at `018e483b` — and **the item's own headline figure was stale**: it said *"a `testlib` change runs 1 of 331 test files"*; the real range across all 24 `scripts/testlib/` modules is **0–10, median 1**. The substance was right and understated: `mockbin.py` selected **10** while **69** files across **7** targets reference it, and `gitenv.py` selected **2** while spanning **8**. 🔴 **The zero-select cases were already SAFE** (exit 4, verified) — the dangerous ones are the middle, because a run that executes *something* prints `RESULT: PASS`. ⚠ Deliberately NOT covered, and now tracked as item 8: `scripts/scoped-tests.sh` itself is not a trigger, so a change to the mapper is still validated by the mapper. forcing: none
-3. 🔴 **CLOSED — `ship.sh`'s laptop fallback WORKS; my own item was false.** I wrote "the nebula address is used to IDENTIFY the host and never as an SSH fallback" after hitting a LAN timeout early in this arc, and `#1439` had shipped the fallback by the time I wrote it down. Worse, I passed `LAPTOP_SSH=` as an override on BOTH later ship runs out of habit, so I never tested it. **Measured 2026-09-11 with the override removed** (`env -u LAPTOP_SSH ship.sh`): `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop`, then `VERIFIED`. `host-role.sh:120` emits both targets and `ship.sh:545` picks with `first_reachable_ssh`. A prior session had already struck this item; that session was right and I was about to re-assert it. **Do not re-open.** ⚠ **A SECOND session (2026-09-11) independently re-derived the same finding** before reading this line — two sessions have now spent time refuting the same false item, which is the cost of leaving a struck item phrased as a task. forcing: none
-4. ✅ **DONE — round 0 was run on `audit-pr/SKILL.md` itself; `#1587` + `#1589` merged, shipped and validated on both hosts.** The measurement that made it actionable was a REACH TABLE — which sections reach a dispatched auditor versus only the dispatching session — not the file size, because this skill has **no enforced byte ceiling** and arguing from one would have been arguing from a limit that does not exist. Results and both findings are in `State now`. 🔴 **Do not re-run this as a size exercise**: the remaining 49% of the file that reaches no brief is the DISPATCHER's decision material and is load-bearing — round 0 examined it and declined to cut it. forcing: none
+🔴 **Numbering PRESERVED and CLOSED ITEMS TOMBSTONED IN PLACE, never renumbered** — live
+`claim-work` refs are keyed to the rank. Identify an item by its SUBJECT, never its rank.
+🔴 **2026-09-14: ranks 1,2,3,4,6,7,9,10,12 were compressed to one-line tombstones** because
+this doc crossed its size budget and the ceiling test's own playbook says EVICT WHAT HAS
+CLOSED before raising a number. Each keeps its rank, its verdict, its sha and its forcing
+tag; the do-not-re-open warnings are preserved verbatim in substance. Full text is in git
+history — `git log -p -- claudedocs/handoff-audit-pr-ladder.md`. No OPEN item was touched.
+1. ✅ **DONE — round-0 trial CLOSED at `ran: 6 · changed the outcome: 3`; the section STAYS.**
+   Trigger shipped (`#1565` routes round 0 at PR-create) + `#1574` replaced the retirement
+   condition with a TRIAL RECORD. 🔴 Do not re-derive the pair or re-open the trial; the
+   record lives in `claude/skills/audit-pr/SKILL.md`. forcing: none
+2. ✅ **DONE — `#1532` MERGED (`6fa09466`).** A shared-surface diff now REFUSES a scoped
+   verdict (exit 4) rather than under-running silently. Re-measured at `018e483b`: the
+   dangerous case is the MIDDLE (a partial run prints `RESULT: PASS`), not the zero-select
+   one, which was already safe. Follow-on is rank 8. forcing: none
+3. 🔴 **CLOSED — `ship.sh`'s laptop nebula fallback WORKS; the item was FALSE.** Measured
+   2026-09-11 with `env -u LAPTOP_SSH`: LAN times out, falls back to `10.42.0.100`, VERIFIED.
+   🔴 **DO NOT RE-OPEN — TWO separate sessions have now independently refuted this**, which is
+   the cost of leaving a struck item phrased as a task. forcing: none
+4. ✅ **DONE — round 0 run on `audit-pr/SKILL.md` itself; `#1587` + `#1589` merged, shipped,
+   consumer-validated both hosts.** The actionable measurement was a REACH TABLE (which
+   sections reach a dispatched auditor), NOT file size. 🔴 Do not re-run as a size exercise:
+   this skill has no enforced byte ceiling and round 0 examined the remaining half and
+   declined to cut it. forcing: none
 5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm`. Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
-6. ✅ **DONE — `#1543` merged (`0b5ee924`), `main` un-redded.** It was red on two `guard_core` tests from two handoff docs classified in NEITHER of two separate allowlists.
-   forcing: none
-7. ✅ **DONE (2026-09-12) — shipped AND verified. Both hosts converged at `db7bf3ff`.**
-   🔴 **The operator explicitly chose to MERGE WITHOUT CI** (2026-09-11, worth the
-   risk because the queue was blocking other work), so `#1532`, `#1533` and `#1543`
-   landed on **unread checks** — which makes the post-merge behavioural evidence
-   below the only evidence there is. All three checks this item named have now been
-   run **against the merged tree**, not a branch:
-   (a) a `scripts/testlib/mockbin.py` edit exits **4** naming
-   `trigger: scripts/testlib/mockbin.py <- scripts/testlib/*`;
-   (b) an ordinary `scripts/dl-router/server.py` edit still scopes (**1 of 337**,
-   exit 0);
-   (c) re-run at `61f41adf`, the `#1431` control matrix is baseline **1 passed**,
-   `QUICK` override **1 failed**, `MIN_TESTS=$LOW` **1 failed**, floor drift
-   `15`→`9` **1 failed**, battery restored byte-identical.
-   ⚠ **(c) was the gap**: it had only ever been run on `#1533`'s branch, and a
-   branch result is not evidence about the tree the merge created. `ship.sh` also
-   hit **rc 19** on its first pass — the documented race where `origin/main` moves
-   between the two hosts' fetches — and the re-run landed both on one sha.
-   ⚠ **"Deployed and green" is a point-in-time reading.** `main` merges every few
-   minutes here; the hosts sit at `db7bf3ff` while `main` has already moved on.
-   forcing: none
+6. ✅ **DONE — `#1543` merged (`0b5ee924`), `main` un-redded** (two `guard_core` tests, two
+   handoff docs in NEITHER allowlist). Superseded structurally by rank 12. forcing: none
+7. ✅ **DONE (2026-09-12) — shipped and verified, both hosts at `db7bf3ff`.** All three checks
+   re-run against the MERGED tree, not a branch: the `testlib` trigger exits 4; an ordinary
+   `dl-router` edit still scopes; the `#1431` control matrix is red in all three arms.
+   ⚠ `#1532`/`#1533`/`#1543` landed on UNREAD CI at the operator's instruction, so that
+   post-merge evidence is the only evidence they work. forcing: none
 8. **Decide whether `scripts/scoped-tests.sh` itself should be a shared-surface trigger.** Today it is not, so a change to the mapper is validated by the mapper. Flagged on `#1532` rather than added, because it is outside the list the operator approved.
    forcing: none
-9. ✅ **DONE (2026-09-12) — `#1431` is CLOSED, both items satisfied.** Item 1's defect was fixed in `#1533` (`f3e27aa3`) with its `QUICK` control watched red against the MERGED tree at `61f41adf`. Item 2 — the only half no PR could satisfy — was dismissed in writing on the issue (`issues/1431#issuecomment-5644071037`), **by me as the reader, on the operator's explicit authorisation of 2026-09-12** rather than by the operator himself; the comment says so, because who wrote a dismissal is part of the dismissal. 🔴 **The dismissal is evidence-backed, not a restatement**: at 14 tests with `MIN_TESTS=12` the floor arm `total < MIN_TESTS` is FALSE, so the floor never fired — the pin did (expected floor 13, saw 12). And the false attribution propagates nowhere: `git grep "HARNESS could not run"` matches only the battery's own error PRINTER in two files, never the claim about which mechanism produced it. ⚠ Scope, stated: that is a claim about the tracked tree, not about the three merged commit messages that still carry the wrong sentence and will not be rewritten. forcing: none
-10. ✅ **DONE — `#1547` MERGED (`6ff4d215`, 2026-09-12T03:10:30Z).** Trial 3's finding is fixed on `main`: the banner in `scripts/tests/test_diagnose_disk_accounting.sh` now states the rule is declared in ONE file and is **self-attributed**, with the measurement and its positive control written beside it. Verified BY CONTENT (ancestry is false after a squash, forever, and proves nothing); target re-run on the merged tree — 231 ok, 0 failures, section 14 green. ⚠ **`grep -c 'Both files carry the sentence'` is STILL 1** and that is correct — the correction quotes the old wording, so the survivor must sit under *"An earlier version of this paragraph read"*. **Read the context, never the count.** forcing: none
+9. ✅ **DONE (2026-09-12) — `#1431` CLOSED, both items satisfied.** Defect fixed in `#1533`
+   (`f3e27aa3`) with its `QUICK` control watched red on the MERGED tree; item 2 dismissed in
+   writing (`issues/1431#issuecomment-5644071037`) by the reader on the operator's explicit
+   authorisation. ⚠ Scope: a claim about the tracked tree, not the three merged commit
+   messages that still carry the wrong sentence. forcing: none
+10. ✅ **DONE — `#1547` MERGED (`6ff4d215`).** Trial 3's false attribution fixed and
+    self-attributed. ⚠ `grep -c 'Both files carry the sentence'` is STILL 1 and that is
+    CORRECT — the correction quotes the old wording. **Read the context, never the count.**
+    forcing: none
 11. **The vetr DMARC monitor is laptop-only and rebuild-fragile.** Found by round-0 trial 5, re-verified independently: `nix/home.nix`'s `dmarc-watch` block makes the UNIT declarative while `ExecStart` points at `${workspace}/scratch/vetr/scripts/dmarc-alert.py` and a `~/.config/vetr/cloudflare-dns.env` credential that **nothing manages**. That path exists on the laptop (timer live) and **not on the workbench**, where the service is emitted as a store symlink and the timer is gated off. Either give the vetr scripts a managed home or state in the block's comment that this monitor is laptop-local. Also fix that comment's claim that a hand `systemctl --user start` "still works" — on the workbench it is `203/EXEC` plus a `notify-failure@` toast. 🔴 **Belongs to `claudedocs/handoff-dmarc-enforcement-and-spoofing.md`, not this ladder** — move it there rather than working it here. forcing: regression — a spoofing monitor with a verified true positive that will silently not exist on a rebuilt host
-12. ✅ **DONE (2026-09-12) — `#1561` MERGED (`c0bbd6d9`) and shipped: the kill scanners no longer read `claudedocs/`.** They red-ed `main` for the whole repo **six times in about two hours**, from at least four sessions, and *every* offender was prose in a handoff doc — one quoting the scanner's own `offenders=` output while documenting the failure, and one session's own merged handoff (`#1556`, "eliding it was not enough"). Each fix was itself a doc, so each fix could trip the next round. 🔴 **What it does NOT weaken:** the diff is ONE file (the test module); `bash-guard.py`, the hook that actually gates the Bash tool, is untouched and was verified on the shipped tree **by content, not exit code** — still `permissionDecision: "deny"` for a wide kill, silent on a harmless command. A markdown file executes nothing; every executable tree is scanned exactly as before. One predicate `_is_prose_only()` now serves BOTH scanners (they had separate lists, which is why one root cause held `main` red on two tests). Mutants: dropping the predicate from the ledger scan → red; widening the exemption to swallow `scripts/` → red. forcing: none
+12. ✅ **DONE (2026-09-12) — `#1561` MERGED (`c0bbd6d9`): the kill scanners no longer read
+    `claudedocs/`.** They red-ed `main` six times in ~2h from four sessions, every offender
+    prose in a handoff doc. 🔴 What it does NOT weaken: `bash-guard.py` is untouched and was
+    verified on the shipped tree BY CONTENT; a markdown file executes nothing. forcing: none
 13. **Decide the `Gotchas` recurrence convention — MEASURED at 183 bullets / ~101 KB inside a 164 KB doc, with five redundant families.** Found by round 0 on `#1581` (which also cut three bullets from that PR for it). The doc's established convention is a NEW full bullet per recurrence — `git grep -n 'TRAP AGAIN'` finds three separate bullets on the piped-`$?` trap alone — so each recurrence is monotonic growth with nothing to stop it. Measured families on `main`: `MUTATION DID NOT APPLY` ×3, timestamped-reading ×6, spelled/walkable guard ×2, `xargs -0 command grep` ×1, piped `$?` ×3. 🔴 **Two things deliberately NOT proposed, each for a reason:** this doc has **no byte ceiling** (the `MIN_HEADROOM|st_size <=` union returns 10 files, none under `claudedocs/`), so do not argue from a limit that does not exist; and **no new detector** — `scripts/lib/handoff_doc.py:179` refuses the class in terms (*"NO FUZZY MATCH IS ATTEMPTED — a similarity heuristic here would be exactly the clever-inference guard the operator's standing rule forbids"*), and no named instrument takes a `claudedocs/` doc (`/prune-skill` is `SKILL.md`, `/prune-memory` is `MEMORY.md`, `/prune-index` is the cairn store). So this is a per-family human judgement, not a tool. **Closing condition:** the operator reads the five-family table above and records, per family, either "collapse to one bullet" or "the convention stands" — in this doc, in writing. Until then it is a known, measured, accepted cost rather than an open defect. forcing: none
 14. 🔶 **STILL OPEN, BUT THE MEASUREMENT NOW ANSWERS 30 OF 49 RULES (was 17). `#1610` MERGED (`e01c7dad`, shipped + consumer-validated on both hosts); the dating fix is `fix/sweep-origin-dating`, UNMERGED.** 🔴 **THE REMAINING 19 ARE A DIFFERENT DEFECT AND RE-DATING WILL NOT TOUCH THEM** — their `apply` patterns match ordinary English, so they match before even their section existed: `guard-lost-its-reason` (`has none`) **232** pre-origin hits, `clean-round-ends-ladder` (`clean round`) **106**, then a tail at 13 and below. Tightening a pattern is not re-dating a rule. **That is the next step, and it is pattern work.** ✅ **What the dating fix bought:** `FIRED 14 → 27 · withheld 32 → 19 · UNFIRED 3`, 13 recovered, **0 regressed**. 🔴 **BOTH SINGLE-BOUND DATERS WERE MEASURED WRONG, IN OPPOSITE DIRECTIONS — do not re-derive either.** `git log -S` on a rule's CURRENT wording dates the REWORD (44 of 49 origins landed in 2026-08/09); dating at the SECTION HEADING recovered 13 and sent **two the other way** (`dispatch-blind` 0 → 437 pre-origin, `nine-axes` 0 → 29) because **headings get reworded too**. So origin is an **INTERVAL** and in-between matches are reported as `ambig` — unattributable — rather than resolved by fiat. 🔴 **A TRUNCATED HISTORY SCAN DOES NOT LOOK TRUNCATED:** the first build read **1 of 23** versions because `git log --follow --reverse` silently returns ONE commit (measured: `--follow` 23 · `--follow --reverse` 1 · `--reverse` 19, missing the pre-rename history). It dated the rules whose section existed back then and called the rest UNDATED — indistinguishable from a working dater with gaps, caught only because one rule went BACKWARDS from datable to UNDATED. `scan_reaches_current()` now REFUSES; ⚠ its limit is asserted, not implied (dropping the newest commit is NOT caught, since it changed no probe). ✅ **The standout row is unchanged: `base-is-current-tip` — 370 injected loads, ZERO applications.** ⚠ Still not a deletion case alone; silence can mean nobody violated it. ⚠ **Three caveats that survive:** `fired` counts APPLICATIONS not catches; the `AMBIGUOUS` verdict is test-pinned but has NEVER fired on the real corpus (untested-in-production branch); and neither bound is the rule's cited origin INCIDENT, which only its own prose names. ⚠ **The DECISION RULE round 0 flagged is still undefined** — an UNFIRED row licenses nothing while this item also says not to read silence as deadness. forcing: none
 
@@ -1228,6 +1251,48 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   rather than hidden: the ordering exists to avoid spending axes-work on something round 0
   would delete, and nothing could be deleted post-merge. Pair for this PR:
   `ran: 1 · changed the outcome: 1` (the retraction).
+
+- 🔴 **`ship.sh` rc 7 IS THE RULE ABOUT READING PER-HOST LINES, PAID IN FULL.** The run
+  fast-forwarded and VERIFIED the laptop with three green lines, then skipped the workbench —
+  and the only place that is visible is the per-host block and the final `incomplete (rc=7)`.
+  A reader who took the laptop's `✅ VERIFIED` as the verdict would have recorded a two-host
+  ship that never happened. **The verdict line is not the result; the per-host lines are.**
+  Corollary measured here: `cross-host agreement NOT COMPARED` is printed whenever only one
+  host reports a landed sha — that sentence is the tell, and it is easy to read past.
+- 🔴 **A `git show <ref>:<path>` THAT RETURNS NOTHING LOOKS EXACTLY LIKE AN EMPTY FILE, AND I
+  BRIEFLY BELIEVED IT.** Diagnosing the ship blocker I md5'd `git show HEAD:<path>` and
+  `git show origin/main:<path>` and got `d41d8cd98f00…` — the md5 of the EMPTY STRING — for
+  both, while `git diff --stat` showed 34 insertions/10 deletions. The contradiction was the
+  only tell; `2>/dev/null` had swallowed `fatal: path … exists on disk, but not in
+  'origin/main'`. **Use `git cat-file -e` to ask existence, never the emptiness of a piped
+  `git show`, and do not silence stderr on a probe whose whole job is to distinguish absent
+  from empty.** Same family as the rules' `--quiet`-comparison-against-an-absent-operand trap.
+- 🔴 **THE SHARED CLONE WAS ON ANOTHER SESSION'S BRANCH AGAIN, AND `ship.sh` IS WHAT CAUGHT
+  IT.** Not a `git status` at session start — the clone was on `main` and clean when this
+  session began, and moved under it hours later. The reflog named the switch
+  (`HEAD@{4}: checkout: moving from main to feat/the-algorithm-skill`). **A branch reading is
+  valid only at the instant you take it**; this session recorded "shared clone on main, clean"
+  early and it was already false by the time it mattered.
+- 🔴 **THREE ATTEMPTS AT ONE RULE IN ONE DAY, AND THE TWO FAILURES FAILED IN OPPOSITE
+  DIRECTIONS.** `#1678` was too PERMISSIVE (a conjunct true by construction collapsed it onto
+  the 🔴 count); `#1691`'s first design was too STRICT (it forbade its own founding case,
+  0-of-7 on a record where only 2.2% of fix items carry a `file:line`). **Both were caught by
+  replaying the founding case `#1111` by hand — which is why attempt 3 pins it as a test.**
+  The general lesson: when a rule cites a case as its evidence, that case is a REGRESSION
+  FIXTURE, not an anecdote, and a rule that cannot reproduce its own founding decision is
+  wrong however well its numbers check out.
+- 🔴 **EVERY NUMBER IN A COMMIT CAN BE REPRODUCIBLE AND THE RULE STILL WRONG.** Two
+  independent auditors reproduced every self-reported figure in `#1678` and it was retracted
+  hours later. **Verifying the CLAIMS is not verifying the DECISION**, and no gate in the
+  ladder distinguishes them — round 0's requirement question is the only thing that does.
+- ⚠ **`--delete-branch` failed twice on a branch an agent worktree still held.** Harmless
+  (`cannot delete branch … used by worktree at …`), but it leaves the local branch behind
+  after the remote one is gone. Remove the agent worktree first, then delete.
+- ⚠ **A `diff --stat` against a MOVED `origin/main` manufactures phantom deletions.** While an
+  agent was mid-run I read its worktree and saw ~855 lines of unrelated nvim/octo tests
+  apparently deleted; `git show --stat <its commit>` showed it had touched only its six files,
+  and `ahead` had gone 1→2 between two reads seconds apart. **Do not inspect a worktree an
+  agent is actively writing**, and diff against the branch point, not a ref that has moved.
 
 ## How to verify
 ```bash
