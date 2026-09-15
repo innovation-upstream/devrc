@@ -164,7 +164,7 @@ ROWS=0
 # `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
 # this_modules_size`, which reads the number below, counts the module, and
 # fails with the replacement value. Growth cannot silently outrun it again.
-MIN_TESTS=18
+MIN_TESTS=19
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on

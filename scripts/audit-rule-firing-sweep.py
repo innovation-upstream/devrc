@@ -70,7 +70,12 @@ SELF-CHECKS (it refuses to print a verdict unless both pass)
 * POSITIVE control — a phrase that MUST appear in the injected class (the skill
   heading). Zero there means the walk is wired to nothing, and the run exits 3.
 * NEGATIVE control — a sentinel that MUST appear nowhere. Non-zero means the
-  matcher is matching anything, and the run exits 3.
+  matcher is matching anything, and the run exits 3. 🔴 It is COMPUTED from a
+  seed rather than spelled out: written as a literal it poisoned its own
+  corpus, because reading this file writes the string into a transcript and the
+  corpus IS the transcripts. That had already happened — four of them, the
+  oldest predating the rows added in `#1691` — so the sweep refused to print
+  any verdict at all until 2026-09-14.
 
 Exit codes: 0 report printed · 3 a control failed · 4 no transcripts walked ·
 5 the rule ledger disagrees with SKILL.md (a probe no longer present).
@@ -79,6 +84,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import re
@@ -98,7 +104,29 @@ PROXIMITY = 600
 SEVERITY = re.compile(r"🔴|🟡|🟢|\bfinding\s*\d|\bF\d\b|\bseverity\b", re.I)
 
 POS_CONTROL = ("skill-heading", r"/audit-pr — adversarial PR audit")
-NEG_CONTROL = ("sentinel", r"zqxj-audit-sweep-negative-control-7f3a")
+
+# 🔴 THE SENTINEL IS COMPUTED, NEVER WRITTEN DOWN — and that is a BUG FIX, not
+# a flourish. Spelled as a literal it poisons its own corpus: the corpus is
+# `~/.claude/projects/**/*.jsonl`, so ANY session that READS this file writes
+# the sentinel into a transcript, the negative control counts a hit, and the
+# run exits 3 with no verdict — permanently, for everyone, and increasingly
+# with every session that investigates why. MEASURED 2026-09-14 before this
+# change: four transcripts carried the old literal, the earliest predating
+# `#1691`, so the instrument had been refusing to print for longer than
+# anybody had noticed. `claude/RULES.md`: a permanently-red gate is worse than
+# no gate.
+#
+# Assembling it from a digest means reading THIS source gives you the seed and
+# not the string, so the act of investigating cannot break the control again.
+# Hex only and no separators, because `NEG_CONTROL[1]` is used BOTH as a regex
+# and — by `test_the_negative_control_refuses_when_the_sentinel_appears` — as
+# literal corpus text; a character `re.escape` would touch makes those two
+# uses disagree.
+#
+# ⚠ It is still poisonable, just not by reading: printing the computed value
+# into a transcript would do it. Rotate by changing the seed.
+_NEG_SEED = b"audit-rule-firing-sweep negative control v2 2026-09-14"
+NEG_CONTROL = ("sentinel", "ns" + hashlib.sha256(_NEG_SEED).hexdigest()[:24])
 
 # ---------------------------------------------------------------------------
 # THE RULE LEDGER.
@@ -232,7 +260,13 @@ RULES: list[dict] = [
          apply=r"payload is prose|stated criterion|structurally inert"),
     dict(id="prose-hatch-authorship-count", name="the prose hatch's reason is COUNTED from the LINES the round's fix touched, never before round 2",
          probe="IS AN OBSERVATION ABOUT THE LINES THIS ROUND'S FIX TOUCHED",
-         apply=r"ladder.authored|pre.image lines|attributable pre.image"),
+         # `whole diff is prose` is the SCOPE clause added to that same
+         # paragraph in the fix round against `#1691`. It gets an alternation
+         # here rather than a row of its own: it is a conjunct of this rule,
+         # not a second rule, and a row per clause is how a ledger stops being
+         # readable.
+         apply=r"ladder.authored|pre.image lines|attributable pre.image"
+               r"|whole diff is prose"),
     dict(id="prose-hatch-not-measured-states", name="three states of the line count are NOT MEASURED rather than a number, and -w/-M are part of the rule",
          probe="EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND",
          apply=r"0 BY CONSTRUCTION|structural zero|no cap and no sample|re-?blames"),

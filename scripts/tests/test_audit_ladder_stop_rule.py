@@ -401,11 +401,19 @@ whole-paragraph constant -- which is literally what `_assert_pinned_once`'s
 failure message instructs -- scored **17 passed here AND `✅ 20 row(s), all as
 expected`** from the battery. A second constant in THIS file does not close
 that; the same edit refreshes it too. So the threshold and the round floor are
-also carried by `scripts/audit-dispatch.py`, which SHIPS them to the auditor in
-every round-2-and-later brief, and `test_the_determinations_SCOPE_matches_the_
-one_every_brief_ships` reads that copy. `mutants-audit-ladder.sh` carries the
-row that re-derives it: the pair mutation (skill + constant) is killed by that
-seam guard ALONE.
+also carried by `scripts/audit-dispatch.py`, which SHIPS them to the LADDER
+RUNNER in every round-2-and-later `--emit-claims` run, and
+`test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships`
+reads that copy. `mutants-audit-ladder.sh` carries the row that re-derives it:
+the pair mutation (skill + constant) is killed by that seam guard ALONE.
+
+⚠ THIS PARAGRAPH SAID "to the auditor in every round-2-and-later brief" and
+named `test_the_determinations_SCOPE_matches_the_one_every_brief_ships`. BOTH
+were false as merged: `c3c91cd6` moved the determination OFF the auditor's
+brief -- `test_audit_dispatch.py::test_the_prose_determination_is_NOT_in_the_
+auditors_brief` asserts exactly that -- and no test of that name has ever
+existed. The correct wording survived thirteen lines down, which is how a
+comment gets believed: the reader who checks reads the near copy.
 
 🔴 M10 is this half's reachability control, and the analogue of M4. The
 attribution section is MOVED above the stop rule with its text byte-identical:
@@ -658,7 +666,14 @@ SKILL_PROSE_DETERMINATION = (
     "🔴 **\"WILL NOT STOP ON THEIR OWN\" IS AN OBSERVATION ABOUT THE LINES THIS "
     "ROUND'S FIX TOUCHED, COUNTED RATHER THAN DELIBERATED — and never available "
     "before ROUND 2. The ⚠ caveat directly above demands a distinction; this "
-    "paragraph is the only thing that makes it.** The unit is LINES, never "
+    "paragraph is the only thing that makes it.** **This count governs a PR "
+    "whose WHOLE DIFF is prose, never merely one whose PAYLOAD is** — that is "
+    "the population it was derived on, and across ALL ladders two-thirds is an "
+    "ordinary point on a flat distribution rather than a gap. A PR that also "
+    "ships scaffolding is outside it and does not need it: a round whose fix "
+    "touches only the scaffolding changes ZERO payload lines, so two such "
+    "rounds fire the ordinary attribution gate, which stays the stop signal "
+    "there. The unit is LINES, never "
     "findings: a findings count needs a `file:line` per item and what a round "
     "RECORDS about its own fixes almost never carries one, so the denominator "
     "is chosen by whoever counts — and the one the PR record actually supports "
@@ -673,7 +688,7 @@ SKILL_PROSE_DETERMINATION = (
     "reason is nameable when at least TWO-THIRDS of the attributable pre-image "
     "lines are ladder-authored**, and the count goes in the summary as "
     "`<ladder>/<attributable>` so a reader sees the denominator and not just "
-    "the ratio. The three commands sit below the ⚠ paragraph that follows this "
+    "the ratio. The commands sit below the ⚠ paragraph that follows this "
     "one. Round 1 has no previous round to attribute to, so it can never "
     "satisfy this: **two rounds is the floor, and no rule may move it.**"
 )
@@ -690,7 +705,7 @@ SKILL_PROSE_DETERMINATION = (
 # and flipped 3 stop verdicts.
 SKILL_DETERMINATION_FAILSAFE = (
     "⚠ **EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND, this replaces the "
-    "JUDGEMENT and not the other preconditions, and three states are NOT "
+    "JUDGEMENT and not the other preconditions, and five states are NOT "
     "MEASURED rather than a number.** (a) A pre-image line you cannot blame, or "
     "a round you cannot blame in FULL — **there is no cap and no sample**; "
     "capping the corpus measurement at 400 lines moved the share on 8 of 159 "
@@ -699,15 +714,25 @@ SKILL_DETERMINATION_FAILSAFE = (
     "`<from>` — what a missing or bare `round=1` block leaves behind, 3 of 159 "
     "corpus rounds, every one of them a round 2: the share is then **0 BY "
     "CONSTRUCTION**, and a structural zero is not a measured zero. (c) An "
-    "anchor THE LEDGER reports NOT MEASURED. Each of those means run the next "
+    "anchor THE LEDGER reports NOT MEASURED. (d) A round whose fix only ADDED "
+    "text — an added line has no pre-image, so the round has NO attributable "
+    "line and 0/0 is not a share. (e) A round that REWRAPPED a paragraph "
+    "inside its range. Each of those means run the next "
     "round. **`-w` and `-M` are part of the rule, not a refinement** — without "
     "them a whitespace-only reindent counts as the round having edited that "
     "text; MEASURED, they moved the share on 34 of 159 rounds, on one from 0.25 "
-    "to 0.89, and flipped the stop verdict on 3. 🔴 **They do NOT fix a "
-    "REFLOW**: rewrapping a paragraph re-blames every line of it to the "
-    "rewrapper, which inflates ladder-authored and biases towards STOPPING, and "
-    "no blame flag can see it — which is why the count is written down where a "
-    "reader can challenge it. The severity, blast-radius and "
+    "to 0.89, and flipped the stop verdict on 3. 🔴 **A REFLOW IS THE ONE BIAS "
+    "IN THIS RULE THAT POINTS AT STOPPING, and it gets a COMMAND rather than a "
+    "caution**: rewrapping a paragraph re-blames every line of it to the "
+    "rewrapper, which inflates ladder-authored, and no blame flag can see it — "
+    "but `--word-diff` can, because a rewrapped hunk carries the SAME words on "
+    "both sides. That is state (e); writing the count down is the backstop, "
+    "not the mitigation, since a count taken through the bias is exactly as "
+    "wrong as the verdict it produces. ⚠ It NARROWS which rounds are scoreable "
+    "and does not move the number: the corpus derivation below was not re-run "
+    "with reflowed rounds excluded, and because the state resolves towards the "
+    "next round, shipping it un-re-derived is conservative. The severity, "
+    "blast-radius and "
     "swept-at-every-site preconditions above are unchanged and all still have "
     "to hold."
 )
@@ -721,8 +746,9 @@ SKILL_DETERMINATION_FAILSAFE = (
 # claim this constant keeps honest: change the number and you must re-derive,
 # and the paragraph says so in its own last sentence.
 SKILL_THRESHOLD_DERIVATION = (
-    "🔴 **THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS, AND ONLY "
-    "THERE IS IT A SEPARATOR.** Measured over every `audit-claims` carrier in "
+    "🔴 **THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS, AND THE "
+    "EVIDENCE FOR IT IS AN EMPTY BAND, NOT A PROOF.** Measured over every "
+    "`audit-claims` carrier in "
     "this repo — 600 PRs scanned, 90 carriers, 159 delta rounds measured, 157 "
     "with an attributable pre-image line: across ALL ladders two-thirds is an "
     "ordinary point on a flat distribution — nearest share below it 0.657, "
@@ -733,11 +759,20 @@ SKILL_THRESHOLD_DERIVATION = (
     "without `-w`/`-M`. 20 of those 29 are at or above it; of the 9 below, one "
     "(`#1108` round 2) is the structural zero the caveat above reports NOT "
     "MEASURED rather than as a count. `#1111` sits at **19/26 = 0.731**, on the "
-    "far side of the gap. ⚠ **The honest cost, and it is not small:** at round "
+    "far side of the gap. ⚠ **DO NOT READ THE GAP AS PROOF THE NUMBER IS "
+    "RIGHT.** At n=29 an empty ±0.05 band is weak evidence: under a uniform "
+    "null it happens about 5% of the time (0.9^29), this distribution is "
+    "concentrated high so the density near two-thirds is BELOW uniform, and "
+    "every share is a ratio of small integers (0.571 = 4/7, 0.727 = 8/11) — "
+    "gaps between low-denominator rationals near 2/3 are expected. It shows "
+    "two-thirds is not sitting on a cluster, and nothing stronger. ⚠ **The "
+    "honest cost, and it is not small:** at round "
     "2 only 3 of the 7 prose ladders reach it (their round-2 median share is "
-    "0.267), so for most prose PRs this rule does NOT fire at round 2 either — "
-    "it reaches 4 of 5 by round 4 and 5 of 5 by round 5. **Two rounds is the "
-    "floor; the measured typical price is three.** And n=7 PRs is a small "
+    "0.267), so for most prose PRs this rule does NOT fire at round 2 either. "
+    "**Two rounds is the floor.** How many ladders reach it by round 4 or 5 is "
+    "UNMEASURED — this paragraph said `4 of 5` and `5 of 5`, against a "
+    "denominator that is neither 7 nor recorded in the commit or the handoff, "
+    "so the clause is DELETED rather than repaired. And n=7 PRs is a small "
     "population: re-derive before moving the number, do not tune it."
 )
 
@@ -1685,6 +1720,14 @@ def test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships():
     reader of that artefact does not have. A guard over the permissive half
     alone certifies the half that does not need certifying.
 
+    🔴 FIVE NOW, AND THE FIFTH IS THE POPULATION. A delta audit of `#1691`
+    found the shipped scope (`this PR's payload is PROSE`) STRICTLY WIDER than
+    the population the threshold was derived on (`the PRs whose whole diff is
+    prose`), on which the skill's own measurement says two-thirds stops
+    discriminating -- the collapse that retracted `#1678`, in weakened form.
+    The scope was narrowed to the derived population, and that population is
+    now a seam owner like the rest.
+
     ⚠ WHAT THIS DOES NOT DO. It does not stop a scope change; it makes one
     visible in the diff and impossible to land in one file. And it is keyed to
     the SENTENCES, not to the concept — a semantically identical restatement in
@@ -1701,7 +1744,8 @@ def test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships():
     for name in ("PROSE_DETERMINATION_THRESHOLD",
                  "PROSE_DETERMINATION_FLOOR",
                  "PROSE_DETERMINATION_PRECONDITIONS",
-                 "PROSE_DETERMINATION_STRUCTURAL_ZERO"):
+                 "PROSE_DETERMINATION_STRUCTURAL_ZERO",
+                 "PROSE_DETERMINATION_POPULATION"):
         assert hasattr(mod, name), (
             f"\n\n`scripts/audit-dispatch.py` no longer defines `{name}`.\n"
             "  That constant is the OTHER owner of this rule's scope, and the "
@@ -1724,6 +1768,92 @@ def test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships():
             "the skill, and the constant in audit-dispatch.py — and say in the "
             "message which ladders now stop that did not."
         )
+
+
+# 🔴 ONE LITERAL, READ BY BOTH SIDES OF THE ASSERTION BELOW. Two spellings a
+# reader has to compare by eye is exactly the defect this guard exists for.
+GOVERNED_POPULATION = "whole diff is prose"
+
+
+def _dispatch_module():
+    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
+    assert spec is not None and spec.loader is not None, (
+        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_scope_SHIPPED_and_the_population_DERIVED_ON_are_the_same_one():
+    """🔴 A SEAM BETWEEN A NUMBER AND ITS WARRANT, and the defect it pins.
+
+    MEASURED on `#1691` as merged: `audit-dispatch.py` scoped the section to
+    "only when this PR's payload is PROSE, i.e. the `.md`/prompt text the PR
+    exists to ship", while the paragraph deriving its two-thirds threshold said
+    the rule "actually governs ... the PRs whose whole diff is prose, 29 rounds
+    over 7 PRs". `payload is prose` is STRICTLY WIDER, and the same paragraph
+    reports that across ALL ladders two-thirds is an ordinary point on a flat
+    distribution -- i.e. outside the derived population the COUNT conjunct
+    stops discriminating, which is the collapse that retracted `#1678` in
+    weakened form. `#1691` itself was the counterexample: a skill `.md`
+    payload, 1,620 diff lines, 1,519 of them `.py`/`.sh`.
+
+    🔴 WHY NARROWING RATHER THAN RE-DERIVING. Re-deriving on `payload is prose`
+    needs a payload classification NO ARTEFACT CARRIES -- `render_ledger` asks
+    a human for it per file, and the retracted draft's second false claim was
+    that such a classification already existed. A population nothing can
+    enumerate cannot be measured over. Narrowing also costs the section
+    nothing: where a diff ships scaffolding the ordinary attribution gate is
+    REACHABLE, because a round whose fix touches only the scaffolding changes
+    zero payload lines.
+
+    ⚠ WHAT THIS DOES NOT DO. It pins that both sides name the SAME population,
+    not that the population is the right one. Moving the rule to a different
+    population means re-deriving the number over it; `PROSE_STOP_FIXTURES` in
+    `test_audit_dispatch.py` is what makes that expensive on purpose.
+    """
+    mod = _dispatch_module()
+    scope = _norm(mod.PROSE_DETERMINATION_POPULATION)
+    assert GOVERNED_POPULATION.lower() in scope.lower(), (
+        "\n\n`audit-dispatch.py`'s `PROSE_DETERMINATION_POPULATION` no longer "
+        f"names the population `{GOVERNED_POPULATION}`.\n"
+        f"  It ships:\n    {scope}\n\n"
+        "  🔴 That constant is the SCOPE every round-2-and-later "
+        "`--emit-claims` run ships to the ladder runner, and the threshold "
+        "inside the section was derived on the population named above. A "
+        "scope wider than its derivation is the defect this guard exists for: "
+        "on the wider population the skill's own measurement says two-thirds "
+        "is an ordinary point on a flat distribution, so the count stops "
+        "discriminating and the rule collapses onto its remaining conjuncts.\n"
+        "  If you are MOVING the rule to another population, re-derive the "
+        "threshold over it and replace the corpus rows in "
+        "`test_audit_dispatch.py::PROSE_STOP_FIXTURES` in the same commit."
+    )
+    deriv = _norm(SKILL_THRESHOLD_DERIVATION)
+    assert GOVERNED_POPULATION.lower() in deriv.lower(), (
+        "\n\nthe pinned DERIVATION paragraph no longer names the population "
+        f"`{GOVERNED_POPULATION}` that the shipped scope claims it was derived "
+        "on. The two are one rule and must move together."
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_THRESHOLD_DERIVATION,
+        "the threshold's derivation (the warrant this scope points at)",
+    )
+    # The rendered artefact, not only the constants: a section that ships the
+    # narrow constant and re-states the wide scope in its own prose is exactly
+    # as wrong as one that never narrowed.
+    section = mod.render_prose_determination(2, "aaaa1111", "b" * 40, "cccc3333")
+    assert mod.PROSE_DETERMINATION_POPULATION in section, (
+        "the `--emit-claims` section no longer SHIPS the population sentence, "
+        "so the scope is narrow in a constant nobody reads"
+    )
+    assert "only when this PR's payload is PROSE" not in section, (
+        "\n\nthe shipped section has gone back to scoping itself on the "
+        "PAYLOAD being prose.\n"
+        "  That is the wider-than-its-derivation scope `#1691` merged with. "
+        "Read this test's docstring before restoring it."
+    )
 
 
 def test_the_rejected_cap_is_recorded_where_the_rule_lives():

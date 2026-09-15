@@ -386,7 +386,12 @@ rounds will not stop on their own.
 
 🔴 **"WILL NOT STOP ON THEIR OWN" IS AN OBSERVATION ABOUT THE LINES THIS ROUND'S FIX TOUCHED,
 COUNTED RATHER THAN DELIBERATED — and never available before ROUND 2. The ⚠ caveat directly
-above demands a distinction; this paragraph is the only thing that makes it.** The unit is
+above demands a distinction; this paragraph is the only thing that makes it.** **This count
+governs a PR whose WHOLE DIFF is prose, never merely one whose PAYLOAD is** — that is the
+population it was derived on, and across ALL ladders two-thirds is an ordinary point on a flat
+distribution rather than a gap. A PR that also ships scaffolding is outside it and does not
+need it: a round whose fix touches only the scaffolding changes ZERO payload lines, so two such
+rounds fire the ordinary attribution gate, which stays the stop signal there. The unit is
 LINES, never findings: a findings count needs a `file:line` per item and what a round RECORDS
 about its own fixes almost never carries one, so the denominator is chosen by whoever counts —
 and the one the PR record actually supports FORBIDS this section's founding case, `#1111`.
@@ -398,35 +403,43 @@ ROUND 1 audited — the PR's own prose, still converging on what it ships — or
 ladder's own text, which means the round is auditing what the ladder wrote? **The reason is
 nameable when at least TWO-THIRDS of the attributable pre-image lines are ladder-authored**,
 and the count goes in the summary as `<ladder>/<attributable>` so a reader sees the
-denominator and not just the ratio. The three commands sit below the ⚠ paragraph that follows
+denominator and not just the ratio. The commands sit below the ⚠ paragraph that follows
 this one. Round 1 has no previous round to attribute to, so it can never satisfy this: **two
 rounds is the floor, and no rule may move it.**
 
 ⚠ **EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND, this replaces the JUDGEMENT and not
-the other preconditions, and three states are NOT MEASURED rather than a number.** (a) A
+the other preconditions, and five states are NOT MEASURED rather than a number.** (a) A
 pre-image line you cannot blame, or a round you cannot blame in FULL — **there is no cap and
 no sample**; capping the corpus measurement at 400 lines moved the share on 8 of 159 rounds
 and in BOTH directions, so a partial count is a silent truncation and not a conservative one.
 (b) A round whose ladder anchor IS its own `<from>` — what a missing or bare `round=1` block
 leaves behind, 3 of 159 corpus rounds, every one of them a round 2: the share is then **0 BY
 CONSTRUCTION**, and a structural zero is not a measured zero. (c) An anchor THE LEDGER reports
-NOT MEASURED. Each of those means run the next round. **`-w` and `-M` are part of the rule,
+NOT MEASURED. (d) A round whose fix only ADDED text — an added line has no pre-image, so the
+round has NO attributable line and 0/0 is not a share. (e) A round that REWRAPPED a paragraph
+inside its range. Each of those means run the next round. **`-w` and `-M` are part of the rule,
 not a refinement** — without them a whitespace-only reindent counts as the round having edited
 that text; MEASURED, they moved the share on 34 of 159 rounds, on one from 0.25 to 0.89, and
-flipped the stop verdict on 3. 🔴 **They do NOT fix a REFLOW**: rewrapping a paragraph
-re-blames every line of it to the rewrapper, which inflates ladder-authored and biases towards
-STOPPING, and no blame flag can see it — which is why the count is written down where a reader
-can challenge it. The severity, blast-radius and swept-at-every-site preconditions above are
+flipped the stop verdict on 3. 🔴 **A REFLOW IS THE ONE BIAS IN THIS RULE THAT POINTS AT
+STOPPING, and it gets a COMMAND rather than a caution**: rewrapping a paragraph re-blames every
+line of it to the rewrapper, which inflates ladder-authored, and no blame flag can see it — but
+`--word-diff` can, because a rewrapped hunk carries the SAME words on both sides. That is state
+(e); writing the count down is the backstop, not the mitigation, since a count taken through the
+bias is exactly as wrong as the verdict it produces. ⚠ It NARROWS which rounds are scoreable and
+does not move the number: the corpus derivation below was not re-run with reflowed rounds
+excluded, and because the state resolves towards the next round, shipping it un-re-derived is
+conservative. The severity, blast-radius and swept-at-every-site preconditions above are
 unchanged and all still have to hold.
 
 ```
 git diff -U0 -w -M <from>..<to>                     # its `-<start>,<len>` hunks, len > 0
 git blame -w -M --porcelain <from> -- <file>        # once PER FILE, not once per line
 git merge-base --is-ancestor <blame-sha> <the tip round 1 audited>   # rc 0 ⇒ PR-authored
+git diff -w -M --word-diff=porcelain <from>..<to>   # a hunk with no +/- WORDS was only REWRAPPED
 ```
 
-🔴 **THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS, AND ONLY THERE IS IT A
-SEPARATOR.** Measured over every `audit-claims` carrier in this repo — 600 PRs scanned, 90
+🔴 **THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS, AND THE EVIDENCE FOR IT IS AN
+EMPTY BAND, NOT A PROOF.** Measured over every `audit-claims` carrier in this repo — 600 PRs scanned, 90
 carriers, 159 delta rounds measured, 157 with an attributable pre-image line: across ALL
 ladders two-thirds is an ordinary point on a flat distribution — nearest share below it 0.657,
 nearest above it two-thirds exactly, 12 rounds within ±0.05. Across the rounds this rule
@@ -434,11 +447,18 @@ actually governs — the PRs whose whole diff is prose, 29 rounds over 7 PRs —
 nearest below **0.571**, nearest above **0.727**, and **zero** rounds within ±0.05, identical
 with and without `-w`/`-M`. 20 of those 29 are at or above it; of the 9 below, one (`#1108`
 round 2) is the structural zero the caveat above reports NOT MEASURED rather than as a count.
-`#1111` sits at **19/26 = 0.731**, on the far side of the gap. ⚠ **The honest cost, and
+`#1111` sits at **19/26 = 0.731**, on the far side of the gap. ⚠ **DO NOT READ THE GAP AS PROOF
+THE NUMBER IS RIGHT.** At n=29 an empty ±0.05 band is weak evidence: under a uniform null it
+happens about 5% of the time (0.9^29), this distribution is concentrated high so the density
+near two-thirds is BELOW uniform, and every share is a ratio of small integers (0.571 = 4/7,
+0.727 = 8/11) — gaps between low-denominator rationals near 2/3 are expected. It shows
+two-thirds is not sitting on a cluster, and nothing stronger. ⚠ **The honest cost, and
 it is not small:** at round 2 only 3 of the 7 prose ladders reach it (their round-2 median share
-is 0.267), so for most prose PRs this rule does NOT fire at round 2 either — it reaches 4 of 5
-by round 4 and 5 of 5 by round 5. **Two rounds is the floor; the measured typical price is
-three.** And n=7 PRs is a small population: re-derive before moving the number, do not tune it.
+is 0.267), so for most prose PRs this rule does NOT fire at round 2 either. **Two rounds is the
+floor.** How many ladders reach it by round 4 or 5 is UNMEASURED — this paragraph said `4 of 5`
+and `5 of 5`, against a denominator that is neither 7 nor recorded in the commit or the handoff,
+so the clause is DELETED rather than repaired. And n=7 PRs is a small
+population: re-derive before moving the number, do not tune it.
 
 🔴 **WRITING IT DOWN IS THE WHOLE POINT, AND AN EARLIER REWORD DELETED IT.** "Can NAME" is a
 private mental state; a reader cannot check it. Without the rationale in the summary a report
@@ -448,9 +468,12 @@ remain" from "real 🟡s are deliberately unfixed". Those are opposite meanings.
 requirement was dropped by `#1133`'s round-2 fix, which added the NAME precondition and removed
 the summary obligation in the same edit — **wider on one axis, narrower on another**, the exact
 shape this skill tells you to hunt for. 🔴 **This paragraph sits BELOW the NOT-A-LICENCE caveat
-on purpose: the "read the next paragraph" pointer is in the CRITERIA paragraph that opens this
-section, and it means the ⚠ caveat IMMEDIATELY AFTER IT — never a count of paragraphs, which
-goes stale the moment one is inserted.** An earlier draft of this very fix inserted this history between the two and silently
+on purpose: the "read the next paragraph" pointer is in the CRITERIA paragraph — the one
+beginning "Stop on this" — and it means the ⚠ caveat IMMEDIATELY AFTER IT, never a count of
+paragraphs, which goes stale the moment one is inserted. ⚠ This sentence said "the CRITERIA
+paragraph that OPENS this section" and that was itself a stale positional reference: the
+section opens with the "For a docs/skill/prompt PR" paragraph and the criteria are second. Name
+the paragraph by its words.** An earlier draft of this very fix inserted this history between the two and silently
 re-pointed it at itself — found by the next round. Both of those paragraphs are pinned WHOLE by
 `scripts/tests/test_audit_ladder_stop_rule.py`, and their ADJACENCY is asserted separately,
 because both pins pass while a paragraph sits between them. This paragraph is pinned by nothing —

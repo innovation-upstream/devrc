@@ -7637,7 +7637,7 @@ def test_the_ledger_refuses_a_failed_command_rather_than_printing_zero(kw, expec
 
 
 PROSE_SECTION = (
-    "## BEFORE YOU DECIDE WHETHER TO RUN ANOTHER ROUND — for a PROSE payload"
+    "## BEFORE YOU DECIDE WHETHER TO RUN ANOTHER ROUND — for a WHOLE-PROSE diff"
 )
 # A bare `round=1` block: `round_one_anchor` reads it as the tip round 1
 # audited, and `emit_anchor` reads the SAME sha as the next block's `<from>`.
@@ -7709,11 +7709,13 @@ def test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_befor
             "the section ships without the two-rounds-is-the-floor sentence — "
             "the half that says round 1 can never satisfy it"
         )
-        assert "only when this PR's payload is PROSE" in out, (
-            "the section does not say it applies ONLY to a prose payload, so it "
-            "reads as a stop rule for every delta round of every PR. This "
-            "script deliberately does not classify; the condition is the "
-            "runner's to apply and must be stated"
+        assert ad.PROSE_DETERMINATION_POPULATION in out, (
+            "the section does not state the POPULATION it governs, so it reads "
+            "as a stop rule for every delta round of every PR. This script "
+            "deliberately does not classify; the condition is the runner's to "
+            "apply and must be stated — and it is the WHOLE DIFF being prose, "
+            "which is narrower than the payload being prose and is the "
+            "population the threshold was derived on"
         )
         assert "Nothing upstream classifies that" in out, (
             "the section still implies a prose classification was made "
@@ -7879,25 +7881,24 @@ def test_the_prose_determination_names_the_boundary_it_can_resolve():
         "the normal case says the anchor IS this round's own `<from>`, so a "
         "runner cannot tell a measurable round from an unmeasurable one"
     )
-    # 🔴 ALL THREE STATES SHIP, not only the one that owns a seam constant.
+    # 🔴 EVERY STATE SHIPS, not only the one that owns a seam constant.
     # MEASURED on the first render of this section: it shipped (b) alone —
     # prefix and all — which read as a fragment AND silently dropped the other
     # two, the same half-delivery shape as round-0 finding F2 one paragraph
-    # down. A brief cannot assume the reader has the skill.
-    assert "Three states are NOT MEASURED rather than a number" in section, (
+    # down. A brief cannot assume the reader has the skill. The SET is pinned
+    # by `..._are_the_set_the_code_RETURNS` below; this loop is the shipped
+    # half of it, kept here because this test already holds the section.
+    count_word = ad._COUNT_WORDS[len(ad.PROSE_NOT_MEASURED_STATES)]
+    assert f"{count_word} states are NOT MEASURED rather than a number" in section, (
         "the section does not say how many NOT MEASURED states there are, so a "
         "runner meeting one of them has no way to know the list is complete"
     )
-    for frag, what in (
-        ("(a) A pre-image line you cannot blame", "the unblameable line"),
-        ("there is no cap and no sample", "the no-cap rule"),
-        (ad.PROSE_DETERMINATION_STRUCTURAL_ZERO, "the structural zero"),
-        ("(c) An anchor THE LEDGER reports NOT MEASURED", "the missing anchor"),
-    ):
+    for key, frag in ad.PROSE_NOT_MEASURED_STATES.items():
         assert frag in section, (
-            f"the section ships without {what}. Every one of these means 'run "
-            "the next round' for a DIFFERENT reason, and a runner who only has "
-            "some of them will read the missing ones as a measured miss."
+            f"the section ships without the `{key}` state. Every one of these "
+            "means 'run the next round' for a DIFFERENT reason, and a runner "
+            "who only has some of them will read the missing ones as a "
+            "measured miss."
         )
 
     # The collision: a bare round-1 block makes the anchor and `<from>` one sha.
@@ -7982,6 +7983,14 @@ PROSE_STOP_FIXTURES = [
     ("a pre-image line could not be blamed", 19, 6, 2,
      {"blame_failures": 1}, None),
     ("a fix that only ADDED text", 0, 0, 2, {}, None),
+    # The two states this round added. Both would score at or above two-thirds
+    # on their counts alone (19/25 = 0.76), so a row that returned a NUMBER
+    # here would STOP the ladder — which is why they are `None` and not
+    # `False`: the flag has to beat the arithmetic, not agree with it.
+    ("THE LEDGER reports the anchor NOT MEASURED", 19, 6, 2,
+     {"anchor_not_measured": True}, None),
+    ("a round that rewrapped a paragraph", 19, 6, 2,
+     {"reflowed": True}, None),
 ]
 
 
@@ -8009,6 +8018,154 @@ def test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture(
         "population it governs — the paragraph names the corpus and the "
         "commands — and replace these rows with the new measurement in the "
         "SAME commit. Do not tune the number against this table."
+    )
+
+
+# (state key -> the kwargs that drive it). `only-additions` is driven by the
+# COUNTS rather than a flag, so it carries none.
+NOT_MEASURED_DRIVERS = {
+    "structural-zero": {"anchor_is_own_from": True},
+    "no-anchor": {"anchor_not_measured": True},
+    "unblameable": {"blame_failures": 1},
+    "reflow": {"reflowed": True},
+    "only-additions": {},
+}
+
+
+def test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS():
+    """🔴 PIN THE SET, NOT THE COUNT — and this is the defect that named it.
+
+    MEASURED on `#1691` as merged: the shipped prose enumerated (a) an
+    unblameable line, (b) the anchor being the round's own `<from>`, and (c) an
+    anchor THE LEDGER reports NOT MEASURED. `prose_stop_determination` returned
+    a DIFFERENT three — (b), (a), and `attributable == 0`, the round whose fix
+    only ADDED text. So one shipped state had no parameter in the function at
+    all and one returned state had no sentence, and the guard was green
+    throughout because it asserted the WORD "Three". A count of declarations is
+    not a count of instances.
+
+    TWO DIRECTIONS, and both are needed:
+      * every documented state is REACHABLE — driven here, one per row, and
+        each must come back with its own key;
+      * every reachable state is DOCUMENTED — enforced in the module by
+        `_not_measured`, which refuses a key the ledger does not carry, and
+        checked here by comparing the two sets.
+
+    ⚠ NOT A PIN ON WHICH STATES SHOULD EXIST. Adding a sixth is one edit to
+    `PROSE_NOT_MEASURED_STATES` plus a branch plus a row here; the point is
+    that it cannot be fewer than three of those.
+    """
+    produced = {}
+    for key, kw in NOT_MEASURED_DRIVERS.items():
+        ladder, pr_authored = (0, 0) if key == "only-additions" else (19, 6)
+        got = ad.prose_stop_determination(
+            ladder, pr_authored, round_no=2, **kw
+        )
+        assert got.nameable is None, (
+            f"`{key}` ({kw}) returned nameable={got.nameable!r}, not None. "
+            "NOT MEASURED and a measured miss take the same ACTION and make "
+            "opposite CLAIMS; only None says the round was not scoreable."
+        )
+        assert got.state == key, (
+            f"driving `{key}` produced state {got.state!r}. The driver table "
+            "and the branch have drifted, so this row is scoring a state "
+            "nobody asked about."
+        )
+        assert got.reason.startswith("NOT MEASURED"), got
+        produced[key] = got
+    assert set(produced) == set(ad.PROSE_NOT_MEASURED_STATES), (
+        "\n\nthe NOT MEASURED states this module can RETURN are not the ones "
+        "it SHIPS.\n"
+        f"  returned: {sorted(produced)}\n"
+        f"  shipped:  {sorted(ad.PROSE_NOT_MEASURED_STATES)}\n\n"
+        "  A shipped state with no branch is a promise the code cannot keep; "
+        "a branch with no sentence reaches a runner as a bare `NOT MEASURED` "
+        "they have no list to place. Add BOTH, in one commit."
+    )
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    section = out[out.index(PROSE_SECTION):]
+    for key, sentence in ad.PROSE_NOT_MEASURED_STATES.items():
+        assert sentence in section, (
+            f"the `{key}` state is returnable but its sentence does not ship"
+        )
+
+
+def test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero():
+    """🔴 ONE PREDICATE, ONE PLACE — the FOURTH open-coded site.
+
+    `same_commit` exists because `audited=` carries an 8-char abbreviation
+    while `git rev-parse HEAD` returns 40, and its own docstring calls a plain
+    `==` "the quiet way this whole guard would fail to fire"; `anchor_is_head`
+    carries the comment "a predicate open-coded at three sites is wrong at two
+    of them". The determination renderer open-coded it a fourth time as
+    `anchor != emit_from`.
+
+    The live shape is ordinary: the round-1 block carries `aaaa1111` and the
+    runner passes `--audited` pasted from `rev-parse`, so the two name ONE
+    commit in two spellings. Compared with `!=` the section then prints "the
+    tip ROUND 1 audited" over a range that is empty BY CONSTRUCTION, and the
+    share of 0 the runner computes reads as a measurement.
+
+    Both axes in one case, because one fixture that differs only in LENGTH
+    would pass against a `==` that was merely case-folded, and vice versa.
+    """
+    long_mixed = "AAAA1111" + "f" * 32
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims", "--audited", long_mixed],
+        comments=[CLAIMS_BLOCK_R1_BARE],
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "no determination section, so nothing below is asserting what it says"
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert "which IS this round's own `<from>`" in section, (
+        "\n\nthe anchor and this round's `<from>` are the SAME COMMIT in two "
+        "spellings and the section did not notice.\n"
+        "  Use `same_commit(anchor, emit_from)`, never `==`/`!=`: the anchor "
+        "is an 8-char abbreviation typed by a human and `<from>` is usually a "
+        "40-char sha pasted from `rev-parse`."
+    )
+    assert "0 BY CONSTRUCTION" in section, (
+        "a structural zero was printed as an ordinary measurable boundary"
+    )
+
+
+def test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there():
+    """A boundary line must not name an artefact the state proves absent.
+
+    The `not emit_from` branch said "**this block** carries no `<from>`". It is
+    reached when NO parseable block exists at all — a delta round with no
+    `audit-claims` comment, which is the live case — so it sent the reader to
+    inspect a block that does not exist, and it SHADOWED the only branch that
+    reported the missing round-1 anchor. Both facts are now on the line.
+
+    ⚠ The run also REFUSES the brief (rc 2) because a delta round with no
+    parseable block is refused; `--emit-claims` still emits, which is why this
+    state is reachable at all.
+    """
+    rc, out, err = run_main(["900", "--round", "2", "--emit-claims"], comments=[])
+    assert PROSE_SECTION in out, (
+        f"no determination section on a blockless round (rc {rc}). Its "
+        "companion `..._ships_on_emit_claims_from_round_2_and_NOT_before` "
+        "owns the presence claim."
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert "this block carries no" not in section, (
+        "the boundary line blames `this block` on a run that parsed no block"
+    )
+    assert "no `audit-claims` block in this PR's record carries a `<from>`" in section, (
+        f"the boundary does not name what is missing. Got:\n{section[:600]}"
+    )
+    assert "no block carried a round-1 anchor either" in section, (
+        "the missing ANCHOR is not reported. It used to be, in an `else` this "
+        "branch shadowed — two absent facts, one of them silently dropped."
+    )
+    assert "NOT MEASURED" in section, (
+        "an unanswerable determination must read as NOT MEASURED"
     )
 
 
@@ -9189,6 +9346,40 @@ RED_AT_BASE_R19: frozenset[str] = frozenset({
     "test_the_prose_determination_is_NOT_in_the_auditors_brief",
 })
 
+# 🔴 Round 20 — the FIX ROUND against `#1691` (`b9a53101`) as merged, so this
+# base is a commit on `main` rather than a draft head. TWO of the round's three
+# new tests are here; the third is a ledger and is filed as one.
+#
+# WATCHED RED at `b9a53101` by extracting that tree with `git archive`, copying
+# this module onto it, and running the three names. ⚠ ONE STEP MATTERS AND IS
+# EASY TO SKIP: this round renames the section heading, so the grafted copy had
+# `PROSE_SECTION` reverted to the base's spelling first. Without that all three
+# fail on `PROSE_SECTION not in out` — a red about a HEADING, which would have
+# been recorded here as evidence about a defect it never reached. The measured
+# outcomes after the revert, all of them:
+#
+#   test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero
+#       AssertionError — "which IS this round's own `<from>`" is NOT in the
+#       section. THE defect: `render_prose_determination` open-coded
+#       `anchor != emit_from`, the fourth site of a predicate `same_commit`
+#       owns, so an 8-char anchor against a 40-char `<from>` naming ONE commit
+#       read as an ordinary measurable boundary. Regression coverage.
+#
+#   test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there
+#       AssertionError — "this block carries no `<from>`" IS in the section on
+#       a run that parsed no block at all. Regression coverage.
+#
+#   test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS
+#       AttributeError: 'ProseStop' object has no attribute 'state'. An
+#       ABSENCE red, the shape RED_AT_BASE_R15 refuses — so it is NOT here.
+#       The defect it corresponds to is real (the shipped three states and the
+#       returned three were different sets) and its evidence is the Q-series
+#       mutation rows plus the two-way set comparison it performs.
+RED_AT_BASE_R20: frozenset[str] = frozenset({
+    "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero",
+    "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -9204,6 +9395,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "7de5b0bd": RED_AT_BASE_R17,
     "10d437c9": RED_AT_BASE_R18,
     "4552b745": RED_AT_BASE_R19,
+    "b9a53101": RED_AT_BASE_R20,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -9318,6 +9510,14 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # comment on RED_AT_BASE_R19 carries the measurement.
     "test_the_determination_ships_its_RESTRAINING_half_too",
     "test_the_determination_mandates_the_whitespace_and_move_blame_flags",
+    # Round 20's LEDGER. It compares the NOT MEASURED states the module can
+    # RETURN against the ones the section SHIPS, in both directions — the pin
+    # that replaces the count word `#1691` shipped. Grafted onto `b9a53101` it
+    # dies with `AttributeError: 'ProseStop' object has no attribute 'state'`,
+    # an absence red, so it is a guard and not regression coverage. Its
+    # evidence is the Q13/Q14 mutation rows, and the structural half is in the
+    # module: `_not_measured` REFUSES a state key the ledger does not carry.
+    "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
     # ------------------------------------------------------------------- #
     "test_the_ledger_says_the_base_was_not_fetched",
     "test_missing_clause_check_warns_and_never_blocks",

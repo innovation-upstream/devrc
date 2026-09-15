@@ -302,6 +302,48 @@ def test_the_positive_control_refuses_a_corpus_with_no_skill_text(tmp_path):
     assert "claim about the instrument" in r.stderr
 
 
+def test_the_negative_control_sentinel_is_not_a_literal_in_the_source(mod):
+    """🔴 A LITERAL SENTINEL POISONS ITS OWN CORPUS. Watched red at `b9a53101`.
+
+    The corpus this sweep walks is `~/.claude/projects/**/*.jsonl` — every
+    Claude Code transcript on the box. So a sentinel spelled out in this
+    script's source is written into a transcript by any session that READS the
+    source, the negative control then counts a hit, and the run exits 3 with no
+    verdict. Permanently: each investigation into why adds another copy.
+
+    MEASURED 2026-09-14, before the fix: four transcripts carried the literal,
+    the earliest predating `#1691` — so the instrument had been refusing to
+    print for longer than anyone had noticed, and `#1691` added two rule rows
+    to an already-dead sweep. `claude/RULES.md` says a permanently-red gate is
+    worse than no gate.
+
+    ⚠ WHAT THIS DOES NOT DO. It cannot stop the computed value being printed
+    into a transcript by a session that goes looking for it; rotating the seed
+    is the recovery. What it stops is the failure mode that actually occurred,
+    where merely reading the file was enough.
+    """
+    src = SCRIPT.read_text()
+    sentinel = mod.NEG_CONTROL[1]
+    assert sentinel not in src, (
+        "\n\nthe negative-control sentinel is spelled out in "
+        f"{SCRIPT}.\n"
+        "  Reading this file then writes it into a session transcript, and the "
+        "transcripts ARE the corpus — so the control fails from that moment "
+        "on and the sweep never prints a verdict again. Build it from a seed "
+        "(see `_NEG_SEED`) instead of writing it down."
+    )
+    assert re.fullmatch(r"[0-9a-z]+", sentinel), (
+        f"the sentinel {sentinel!r} carries a character that `re.escape` would "
+        "touch. It is used BOTH as a regex and as literal corpus text by "
+        "`..._refuses_when_the_sentinel_appears`, so those two uses would "
+        "silently disagree."
+    )
+    assert len(sentinel) >= 16, (
+        f"the sentinel {sentinel!r} is short enough to occur by accident, "
+        "which would fail the control for a reason that is not a defect"
+    )
+
+
 def test_the_negative_control_refuses_when_the_sentinel_appears(tmp_path, mod):
     """If the sentinel is ever matched the matcher is matching anything."""
     sentinel = mod.NEG_CONTROL[1]
