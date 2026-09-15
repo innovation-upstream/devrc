@@ -10,55 +10,31 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **THE ARC SHIPPED. Both halves of the tmux page and the delivery axis are LIVE and OBSERVED
-in production — not merged-and-assumed.** Live clawgate is **0.8.34** (`clawgatectl health`).
+**This session ran the tmux-webapp rank queue AND clawgate task 593 (tmux page feedback). Both advanced; neither is finished.**
 
-| PR | state |
-|---|---|
-| devrc **#1611** | MERGED `80266b76` — `session-manager` publishes the scratch-slot `color` per snapshot row |
-| homelab-infra **#803** | MERGED `9f461167` — tmux page: per-host tabs, codename headings, colour, pretty/raw toggle, lazy full transcripts, per-card reply. **Deployed 0.8.33** |
-| homelab-infra **#804** | MERGED `9422fe6f` — chief identity/attribution (PR1). **Ships INERT by design** |
-| homelab-infra **#813** | MERGED `1a3bdef6` — the delivery-axis freeze fix. **Deployed 0.8.34** |
-| homelab-infra **#817** | MERGED `5890f3b9` — 5 walkable ledger guards made structural |
-| devrc **#1660** | **OPEN, mergeable** — records rank 58's closure + a retraction |
-| `hold/grid-freeform-axis` | pushed at `aa11176c8`, **no PR** — PR B, see rank 59 |
+### devrc — the rank queue, MERGED
+- **`#1688`** (squash `8472945a`) — evicted ranks **9, 17, 25, 26, 42, 45**. Six of the fifteen entries the queue advertised were finished or fictional. 🔴 Rank 42's three residuals had been closed by `ZacxDev/homelab-infra#749` days earlier; a session claimed it and paid a full recon round re-deriving that.
+- **`#1703`** (squash `b72aec3b`) — rank **47** closed. Ledger allowance ratcheted `262_144 → 245_760`.
+- Live queue on `main`: **48, 49, 53, 54, 56, 57, 59, 60**. Claims `tmux-webapp-42` / `-47` both RELEASED.
 
-**Verified live, not inferred.** The tmux page: 105/105 slot dots painted by *computed style*, tabs
-defaulting to workbench, 39 groups with **0** raw `scratchN` headings, 5 `base` groups.
-The delivery axis, on the live pod with a MutationObserver installed before the click:
-`ready` → **`queued` @ +580 ms** → **`sent` @ +6033 ms**, stable to +32.3 s, **no reload**; queue row
-`claimed` @ +5.42 s, `completed` @ +5.48 s; the pane received the text typed AND submitted.
-🔴 **Why that is not a case that would have passed anyway:** the terminal transition at +5.4 s sits
-far beyond the ~1.17 s single post-POST refetch that was the panel's ONLY read before the fix.
+### clawgate task 593 — items 1, 2, 3, 9 DONE; items 4–8 NOT STARTED
+- **`ZacxDev/homelab-infra#824` MERGED** (squash `81b10cddc`) — item 1: session groups default to **collapsed**; group key moved to `cg.tmux.v3.group.*` storing EXPANDED state (absent = collapsed). `ACKPREFIX` deliberately left at v2. Includes the **parked-draft summary badge** (`data-tmux-group-parked`), which closes a regression item 1 itself introduced.
+- **`ZacxDev/homelab-infra#826` OPEN**, head `6fad0e252`, branch `feat/tmux-593-items-2-3-9`, worktree `~/workspace/homelab-tmux593b` — items 2 (duplicate host header removed), 3 (Chat/Raw toggle per-card, swap-scoped), 9 (the card's contradicting age deleted).
+- **Task 595 CREATED** — the carousel, split out by operator decision, plus two scope additions from audits: bulk expand/collapse, and a bulk Chat/Raw control.
 
-**Audit ladders run this session:** #803 four rounds (0→3), #804 five rounds (0→4, closed clean),
-#811 round 0 (which produced the split), #813 round 0+1. Round 0 changed the outcome on **three** of
-them — it is the only round that can say *do not ship this shape*.
+### Gates on `6fad0e252`
+- `go test ./internal/ui/` rc=0, **511 passed / 0 failed**; `go test ./...` rc=0, **24 packages ok**
+- **FULL e2e suite, 34 spec files: rc=0, 225 passed / 0 failed / 0 flaky / 2 skipped** (32.3m)
+- gitops pre-push gate: all legs pass
 
-**Carried forward from the superseded status block — these are MEASUREMENTS, not status:**
-🔴 **The loop itself was closed and proven on 2026-09-06, twice** — a reply typed in the web UI
-lands in a REAL pane; once via a token-API control that isolated the fault, once end to end through
-the UI after the fix. Re-proven live 2026-09-12 (rank 55) and again 2026-09-14 on 0.8.34 (rank 58).
+🔴 **`#826`'s `tekton/clawgate-e2e` was RED at the previous head (`04cef09c3`): "9 failed, 216 passed".** That is the breakage `6fad0e252` repairs. **Re-read that check before merging** — it had not re-run at handoff time.
 
-**Task 519, criterion 1 — still ONE host only, and rank 53 turns on it:**
-
-| criterion | workbench | laptop |
-|---|---|---|
-| 1 — seconds-fresh, MEASURED | ✅ **2.0 s and 3.1 s** induced-append, twice | ❌ no number — host idle |
-| 2 — rides the existing outbound connection | ✅ 52 accepted cursors | ✅ 4 accepted cursors, real byte offsets |
-| 3 — coverage past `MaxSessionsPerPush=8` | ✅ 52 sessions | n/a — few sessions exist there |
-| 4 — bulk push still reconciles | ✅ incidental only | ✅ incidental only — never induced (rank 57) |
-
-🔴 **The laptop stream IS delivering** — the absence is a missing measurement, not a fault.
-Re-verified 2026-09-12: freshest laptop Claude pane 9.8 h idle, so rank 53 needs a human at that
-machine, not a fix. ⚠ `measure519.py` is UNTRACKED (`.opencode-dispatch/` is gitignored), so it is
-**not synced to the laptop** — a second blocker nobody had named.
-
-🔴 **CLAWGATE HAS NO IMAGE AUTOMATION — merging deploys NOTHING.** The pin is a literal tag
-(`clusters/workbench/apps/clawgate/deployment.yaml`); there is no ImagePolicy/ImageRepository and no
-`$imagepolicy` setter. A deploy is a build + a pin bump, and **both** `deployment.yaml` and
-`cmd/clawgatectl/client.go`'s `buildVersion` must move in the SAME commit (`version_pin_test.go`
-enforces it; missing it reds `clawgate-ci` on every PR touching the module).
+### Operator decisions taken this session (recorded because an audit flagged they were unattributed)
+1. **Item 2** → delete the section header *inside the tab panel*, NOT the top strip. Asked with the strip as an explicit option.
+2. **Item 9** → drop the card's header age entirely, rather than relabel or re-source it.
+3. **Item 3** → swap-scoped, NOT persisted; resets to Chat on reload.
+4. **Item 7** → GFM tables in `markdown.go`, server-side (not yet built).
+5. **Carousel, bulk expand/collapse, bulk Chat/Raw** → all on 595; do 593 first.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1424,6 +1400,25 @@ are corrected in place.
   `clawgate-ci` and `clawgate-ux-audit` still carry the retracted PVC story, and one asserts
   `grep -n claimName` returns "exactly two non-comment hits" when it returns one. #821 points at it
   rather than widening. That is the one piece of this arc left undone, and it is doc-rot, not risk.
+
+### 🔴 A NARROWED e2e RUN WAS QUOTED AS "THE TIER" TWICE, AND IT LEFT `trunk` BROKEN ONCE
+- as-of: 2026-09-15
+- **Symptom + exact repro:** `containers/clawgate/e2e/tests/tmux-page.spec.ts` — all 9 tests fail. Repro: `cd containers/clawgate && ./e2e/run.sh tmux-page.spec.ts`.
+- **Observed (with values):** on `#826` head `04cef09c3` → `Expected: 1, Received: 18` at `tmux-page.spec.ts:156`, the shared `openTmuxTab` helper asserting `toHaveCount(1)` on `#panel-tmux [data-session-view-choice][aria-pressed="true"]`. Item 3 made that count the CARD count. `tekton/clawgate-e2e` reported `e2e failed: 9 failed, 216 passed, 2 skipped` on that head.
+- **Observed — the DISCRIMINATING CONTROL:** clean `origin/trunk` worktree (`#824` merged, none of `#826`) run of the same spec → **4 failed / 5 passed**, the SAME four. So four of the nine predate `#826` and are `#824`'s damage, already on `main`.
+- **Ruled out:** "`#826` caused all nine" — the trunk control failed 4 without any of `#826`'s changes. `via: measurement`
+- **Ruled out:** "CI cannot see this" — an audit asserted CI runs no e2e; **FALSE**. `tekton/clawgate-e2e` is a SEPARATE check from `clawgate-ci` and caught it. The clawgate skill documents exactly that. `via: measurement`
+- **Ruled out:** "expand every group in `openTmuxTab`" as the fix — a page-wide sweep clicks groups in `hidden` host panels and times out; **measured 7 failures instead of 4**. Must be scoped to `[data-tmux-host-tab-panel]:not([hidden])`. `via: measurement`
+- **Leading hypothesis:** RESOLVED. Cause is `#824`'s collapsed-by-default: cards are present-but-not-visible, so `.fill()` times out and `intersect once` never fires for the lazy transcript mount. `6fad0e252` fixes all 9 and therefore repairs `main`'s pre-existing break.
+- **Next probe:** `gh pr checks 826 --repo ZacxDev/homelab-infra` — confirm `tekton/clawgate-e2e` is green on `6fad0e252` before merging.
+
+### 🔴 TWO GUARDS I WROTE WERE WALKABLE, AND THE PR BODY CITED ONE AS PROOF
+- as-of: 2026-09-15
+- **Symptom + exact repro:** both guards passed while the thing they claimed to protect was broken.
+- **Observed (with values):** (a) item 2's check was `strings.Contains(htmlSrc, "tmux session(s)")` — one literal phrase. Re-adding the header as `<h2>{host}</h2><span>45 windows / 3 sessions</span>` restores the exact duplication and **SURVIVED**. (b) the `data-tmux-host-fresh` "survivor" arm used `strings.Contains(htmlSrc, "data-tmux-host-fresh")` — and `renderTmuxString` renders `tmuxGroupScript`, whose prune guard SPELLS that attribute in a `getAttribute()` call. **Renaming the emitted attribute on the strip left the test GREEN.**
+- **Ruled out:** "the arms are fine, the audit misread them" — both mutants were run and both survived. `via: measurement`
+- **Leading hypothesis:** RESOLVED in `6fad0e252`. Both now parse the DOM; both mutants die by their own guard's message; control green.
+- **Next probe:** none. Recorded because the shape recurs — **a substring match over a whole rendered page can match the JS that READS an attribute rather than the markup that EMITS it.**
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -2967,30 +2962,39 @@ are corrected in place.
   `## Next steps (ranked)` now carries this rule; the failure mode is that closing and evicting are
   two different actions and only the first feels like finishing.
 
+- 🔴 **`./e2e/run.sh <one-spec>` IS NOT THE e2e TIER.** Quoted as one twice this session. It hid a 9-test break in a sibling spec AND left `trunk` broken by `#824`. The full suite is 34 spec files / ~225 tests / **~32 min**; it needs `nohup` + a wait loop, not a foreground call (the tool call times out at 10m).
+- 🔴 **`tekton/clawgate-e2e` EXISTS and DOES run Playwright** — separate from `tekton/clawgate-ci`, which is Go-only. An audit claimed CI runs no e2e; that is false and cost a wrong attribution. **Read all four checks on a clawgate PR.**
+- 🔴 **A fresh clawgate worktree has no `web/static/app.css`** (gitignored), which reds `TestTheStylesheetCarriesNoNewTestOnlyClasses` until tailwind is run. Environment, not a defect.
+- 🔴 **A Go raw string cannot contain a backtick, escaped or not.** `tmuxGroupScript`/`tmuxViewScript` are backtick-delimited raw strings; putting `` `foo` `` in a comment inside them breaks the build. Cost two build failures.
+- ⚠ **`| tail` eats the exit status, and the harness's own "exit code 0" is the PIPELINE's.** A background `pytest … | tail` was reported as `exit code 0` over a real `1 failed, 875 passed`. Capture `rc=$?` on the command's own line and read the summary; quote the PAIR.
+- ⚠ **A Go `0 passed / 0 failed` is a COMPILE failure, not a clean run.**
+- **Deleting a feature means deleting its tests — and keeping what they KNEW.** Item 9 removed 6; each site carries a note recording the discovery, so it is not paid for twice.
+- **Five of my claims were falsified by audits this session**, four of one shape: asserting a property of a guard without running it.
+
 ## How to verify
 
 ```bash
-# the deployed version, at the CONSUMER — never from git log
-clawgatectl health                      # -> {"status":"ok","version":"0.8.34"}
-KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
-kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate \
-  -o custom-columns='READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,IMAGE:.spec.containers[0].image' --no-headers
+# the FULL e2e tier — not one spec. ~32 min; run it detached.
+cd ~/workspace/homelab-tmux593b/containers/clawgate
+nix-shell -p tailwindcss --run "tailwindcss -i web/css/input.css -o web/static/app.css --minify"
+nohup ./e2e/run.sh > /tmp/e2e.log 2>&1 &
+# then wait on CONTENT, never on a pipe's exit code:
+until grep -qE '^\s+[0-9]+ (passed|failed)' /tmp/e2e.log; do sleep 30; done
+grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped)' /tmp/e2e.log
+grep -oE 'tests/[a-z0-9-]+\.spec\.ts' /tmp/e2e.log | sort -u | wc -l   # expect 34
 
-# the colour producer is live (expect ~70 of ~85 rows carrying a #rrggbb)
-clawgatectl tmux windows | python3 -c 'import json,sys; ws=json.load(sys.stdin)["windows"]; print(sum(1 for w in ws if w.get("color")),"of",len(ws),"carry color")'
+# the Go tier, counted rather than read off `ok`
+go test ./internal/ui/ -count=1 -v 2>&1 | grep -c '^--- PASS'   # expect 511
+go test ./... -count=1
+
+# all FOUR checks on the PR — clawgate-e2e is the one that catches this class
+gh pr checks 826 --repo ZacxDev/homelab-infra
+
+# the live queue and its lock, before touching any rank
+git -C ~/workspace/devrc show origin/main:claudedocs/handoff-tmux-webapp.md \
+  | sed -n '/^## Next steps (ranked)/,/^## Open investigations/p' | grep -oE '^[0-9]+\.'
+claim-work --list
 ```
-
-**The tmux page** (`https://clawgate.zacx.dev/tmux`, needs a session): per-host tabs defaulting to
-workbench, group headings showing codenames (`Ivory`, `grove`) with the raw session name as a muted
-subtitle, cards `codename:index`, a coloured dot per group, a `Chat | Raw screen` toggle defaulting
-to Chat, slotless sessions headed `base`.
-
-**The delivery axis, end to end** — the only proof that counts. Rebuild the disposable harness
-(recipe in rank 55) and watch `data-reply-state` WITHOUT reloading; it must leave `queued`.
-🔴 `term launch` → resolve the new pane by **host + window index** (the codename is NOT unique —
-four panes shared "violet"), raise the entry with `env -u CLAUDE_CODE_SESSION_ID … --session ''`
-(the default session id is suppressed by `QuestionIsStale` because the raising session is busy),
-and operate ONLY on that entry id — every other control types into somebody's live pane.
 ## Run this first — the index, one read-only command
 ```bash
 cairn recall --repo ~/workspace/devrc
