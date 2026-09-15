@@ -730,69 +730,6 @@ directions. Read both halves — either one alone is wrong.**
 - **Next probe:** run `.opencode-dispatch/tmux-ui-verify/scratch/measure519.py` from a Claude Code
   session ON THE LAPTOP. It needs no argument — it makes its own append.
 
-### `tekton/clawgate-e2e` is TIMING OUT on `trunk` — a gate going permanently red
-- as-of: 2026-09-13
-
-- **Symptom + exact repro:** `tekton/clawgate-e2e` reports FAILURE; the TaskRun ends
-  `TaskRunTimeout`, "failed to finish within 40m0s", with steps `e2e` and `verdict` both exit 1.
-  Reproduce: `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci | grep clawgate-e2e`.
-- **Observed (with values):** `becedef44` **Succeeded** 21:59Z · `1a3bdef6e` (#813 on trunk)
-  **Succeeded** 01:04Z · `189451188` (#817 head) **Failed/TaskRunTimeout** 01:32Z · `24be212e7`
-  (the 0.8.34 pin bump — a TWO-LINE version change) **Failed/TaskRunTimeout** 01:58Z. Box loadavg
-  47–54 throughout.
-- **Ruled out:** *#817 caused it.* It touches 8 files, all Go `_test.go` under `internal/`/`cmd/`,
-  **zero** e2e/TypeScript; `clawgate-e2e` runs Playwright, which never executes them. via: measurement
-- **Ruled out:** *a test assertion is failing.* Both failures are `TaskRunTimeout` at the 40m task
-  budget, not an assertion. via: measurement
-- **Ruled out:** *leaked local postgres containers are still holding resources.* Five orphaned
-  `clawgate-e2e-pg-*` (aged 5–30 h) were removed this session after a **validated** probe —
-  0 client connections each, with a positive control proving the probe reads 1 when a connection is
-  deliberately open. Load moved 52 → 47.7. via: measurement
-- 🔴 **NOT RULED OUT, and the subsystem store flagged it against me: a STRANDED ADVISORY LOCK, not
-  load.** `homelab-talos/clawgate` carries an `OPEN:` bullet (2026-09-08) titled *"A RED
-  `clawgate-e2e` CARRYING `SQLSTATE 57014` ON MIGRATE IS NOT AUTOMATICALLY LOAD — AND THE HARNESS'S
-  OWN TEXT PUSHES YOU THE WRONG WAY"*: a stranded session lock on a POOLED connection after a ctx
-  cancel makes the next migration die at the 10 s `statement_timeout`, an observable identical to
-  contention. It records that the harness's own *"startup slowness under node contention"* string is
-  **editorialising**, and that it already led one session to misfile the whole thing as saturation.
-  The rival fix (#503/#509) shipped with **no version pin bumped**, so a stale binary is possible.
-  **I did not discriminate**: the `step-e2e` pod for `clawgate-e2e-9g5m6` was reaped before I looked,
-  so I never checked whether these runs carried `SQLSTATE 57014` at all. via: assumed
-- **Leading hypothesis:** cluster/box saturation lengthens the Playwright run past the 40m TaskRun
-  budget — the spec carries documented load sensitivity (fixture setup clamped to 45 s) and the same
-  cluster timed out a **comment-only** commit. 🔴 **Held weakly, and NOT to be repeated as a
-  finding**: it is the exact conclusion the store's open bullet warns is reached by reading the
-  harness's own prose, and the two mechanisms share this observable. The discriminator is whether
-  `57014` appears on migrate and whether an advisory-lock WAIT is present — read the step logs
-  BEFORE the pod is reaped.
-- **Next probe:** 🔴 **capture the `step-e2e` logs BEFORE the pod is reaped** — that is what makes
-  this discriminable, and it is what tonight lost:
-  `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <e2e-pod> -c step-e2e --tail=-1 | grep -aE '57014|statement timeout|advisory'`
-  A hit ⇒ the stranded-lock mechanism, and check whether the harness's clawgate binary carries
-  #503/#509 (no pin was bumped, so version alone will not tell you). A clean miss under a QUIET box
-  ⇒ the 40 m budget or the spec is the defect. Then trigger a run and read the reason, not the colour:
-  `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci -o json | python3 -c 'import json,sys;[print(i["metadata"]["name"],(i.get("status",{}).get("conditions") or [{}])[0].get("reason")) for i in json.load(sys.stdin)["items"] if "clawgate-e2e" in i["metadata"]["name"]]'`
-  If it times out on a quiet box, the 40m budget or the spec is the defect, not the load.
-
-### 🔴 A NARROWED e2e RUN WAS QUOTED AS "THE TIER" TWICE, AND IT LEFT `trunk` BROKEN ONCE
-- as-of: 2026-09-15
-- **Symptom + exact repro:** `containers/clawgate/e2e/tests/tmux-page.spec.ts` — all 9 tests fail. Repro: `cd containers/clawgate && ./e2e/run.sh tmux-page.spec.ts`.
-- **Observed (with values):** on `#826` head `04cef09c3` → `Expected: 1, Received: 18` at `tmux-page.spec.ts:156`, the shared `openTmuxTab` helper asserting `toHaveCount(1)` on `#panel-tmux [data-session-view-choice][aria-pressed="true"]`. Item 3 made that count the CARD count. `tekton/clawgate-e2e` reported `e2e failed: 9 failed, 216 passed, 2 skipped` on that head.
-- **Observed — the DISCRIMINATING CONTROL:** clean `origin/trunk` worktree (`#824` merged, none of `#826`) run of the same spec → **4 failed / 5 passed**, the SAME four. So four of the nine predate `#826` and are `#824`'s damage, already on `main`.
-- **Ruled out:** "`#826` caused all nine" — the trunk control failed 4 without any of `#826`'s changes. `via: measurement`
-- **Ruled out:** "CI cannot see this" — an audit asserted CI runs no e2e; **FALSE**. `tekton/clawgate-e2e` is a SEPARATE check from `clawgate-ci` and caught it. The clawgate skill documents exactly that. `via: measurement`
-- **Ruled out:** "expand every group in `openTmuxTab`" as the fix — a page-wide sweep clicks groups in `hidden` host panels and times out; **measured 7 failures instead of 4**. Must be scoped to `[data-tmux-host-tab-panel]:not([hidden])`. `via: measurement`
-- **Leading hypothesis:** RESOLVED. Cause is `#824`'s collapsed-by-default: cards are present-but-not-visible, so `.fill()` times out and `intersect once` never fires for the lazy transcript mount. `6fad0e252` fixes all 9 and therefore repairs `main`'s pre-existing break.
-- **Next probe:** `gh pr checks 826 --repo ZacxDev/homelab-infra` — confirm `tekton/clawgate-e2e` is green on `6fad0e252` before merging.
-
-### 🔴 TWO GUARDS I WROTE WERE WALKABLE, AND THE PR BODY CITED ONE AS PROOF
-- as-of: 2026-09-15
-- **Symptom + exact repro:** both guards passed while the thing they claimed to protect was broken.
-- **Observed (with values):** (a) item 2's check was `strings.Contains(htmlSrc, "tmux session(s)")` — one literal phrase. Re-adding the header as `<h2>{host}</h2><span>45 windows / 3 sessions</span>` restores the exact duplication and **SURVIVED**. (b) the `data-tmux-host-fresh` "survivor" arm used `strings.Contains(htmlSrc, "data-tmux-host-fresh")` — and `renderTmuxString` renders `tmuxGroupScript`, whose prune guard SPELLS that attribute in a `getAttribute()` call. **Renaming the emitted attribute on the strip left the test GREEN.**
-- **Ruled out:** "the arms are fine, the audit misread them" — both mutants were run and both survived. `via: measurement`
-- **Leading hypothesis:** RESOLVED in `6fad0e252`. Both now parse the DOM; both mutants die by their own guard's message; control green.
-- **Next probe:** none. Recorded because the shape recurs — **a substring match over a whole rendered page can match the JS that READS an attribute rather than the markup that EMITS it.**
-
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
   is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
@@ -2346,7 +2283,7 @@ directions. Read both halves — either one alone is wrong.**
 
 - 🔴 **A RECON AGENT'S "IT DOES NOT EXIST IN THE REPO" CAN BE TRUE OF THE SOURCE AND FALSE OF THE BEHAVIOUR.** Asked to locate item 6's `selection_menu`, a thorough read-only agent grepped the whole worktree case-insensitively, found **zero** hits, and reported the item needed re-pointing. It was right about the grep and wrong about the system: `selection_menu` is a **`session-manager` waiting-signal NAME that arrives in the DATA**, reaches the UI as `TmuxWaitingSignal.Signal` (`internal/ui/tmux.go:202-203`) and is rendered by `waitingEvidence` (`:2956`, emitted `:2608`). Taking the conclusion at face value would have cost a round trip to the operator asking what the item meant. **When a grep says a user-visible string is absent, ask where the string is PRODUCED before concluding the feature is absent** — a value that is data on this side of a wire is a literal on the other.
 - 🔴 **`origin/trunk..HEAD` LISTING COMMITS IS NOT EVIDENCE OF UNMERGED WORK AFTER A SQUASH.** It listed all four of #826's commits minutes after the squash landed, and `git diff --stat origin/trunk HEAD` showed 794 deletions on top — both readings say "do not delete this worktree, work would be lost". Both are artefacts: the deletions were trunk's OWN newer commits in files the branch predates. The discriminating check is per-file and takes one loop — for each file the branch changed, `git diff --quiet origin/trunk HEAD -- <file>`; all six were byte-identical. **Verify a squash by CONTENT, and scope the diff to the files the branch actually touched**, or trunk's unrelated movement reads as your work going missing.
-- 🔴 **THE HANDOFF SIZE GATE'S PLAYBOOK FORBIDS THE OBVIOUS FIX.** `## Gotchas` is **133,129 B — 54% of this document**, far more than `## Open investigations` (89,982 B), and moving it is what a size-driven read reaches for first. The playbook explicitly refuses: *"DO NOT satisfy this by deleting an open investigation, a gotcha or a ruled-out theory"*, because those are the sections whose whole value is that a future session does not repeat the work. **Read the playbook's ORDER before picking a target** — step 1 (evict what has CLOSED) freed 46,902 B on its own and needed no judgement calls. Pruning `## Gotchas` is still worth doing, but it is separating each imperative from its worked example, one at a time — judgement work, not a size exercise, and it must not be done under deadline.
+- 🔴 **THE HANDOFF SIZE GATE'S PLAYBOOK FORBIDS THE OBVIOUS FIX.** `## Gotchas` is by a wide margin the largest section of this document — larger than every other section combined — and moving it is what a size-driven read reaches for first. The playbook explicitly refuses: *"DO NOT satisfy this by deleting an open investigation, a gotcha or a ruled-out theory"*, because those are the sections whose whole value is that a future session does not repeat the work. **Read the playbook's ORDER before picking a target** — step 1 (evict what has CLOSED) is the biggest win available and needs no judgement calls. Pruning `## Gotchas` is still worth doing, but it is separating each imperative from its worked example, one at a time — judgement work, not a size exercise, and it must not be done under deadline. ⚠ **The per-section byte figures are deliberately NOT written down here.** They are derived measurements that go stale in the same commit that edits the sections — this bullet once carried `133,129 B / 54%` and `89,982 B`, and both were already wrong in the PR that shipped them. That is the precedent `scripts/lib/handoff_budget.py` sets for the ceiling itself (*"THE CURRENT SIZES ARE DELIBERATELY NOT WRITTEN DOWN HERE"*). Measure at the moment you need it: `LC_ALL=C awk '/^## /{s=$0} {n[s]+=length($0)+1} END{for(k in n) printf "%8d  %s\n", n[k], k}' claudedocs/handoff-tmux-webapp.md | sort -rn` (`LC_ALL=C` is what makes `length()` count bytes rather than characters).
 - **The doc-size ceiling lives in `scripts/lib/handoff_budget.py`, not in the test that owns the assertions.** `scripts/tests/test_handoff_doc_size.py` imports `MAX_BYTES`/`GRANDFATHER_STEP`/`GRANDFATHERED` from there; grepping the test for `MAX_BYTES =` finds the import, not the value. ⚠ And the test module cannot be imported outside the dev shell (`import pytest` at module scope), so `nix develop ~/workspace/devrc -c python3` or a plain grep of the lib is the way to read a constant.
 - **`claudedocs/refs/` is exempt from the size ceiling because the scanner globs `handoff-*.md`** — a refs file does not match the pattern. ⚠ That exemption is also why a demoted block is invisible to `handoff_search`: the pointer left behind in the doc is the only route back to it.
 

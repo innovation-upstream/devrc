@@ -211,8 +211,10 @@ read `COULD NOT RUN: clawgate-ci stopped before any leg reported`. Attribution, 
 evidence: #592's diff contains **zero Go files**, so it cannot have slowed the `go` step, and
 **#591 — which does touch Go — passed the same pipeline nine minutes later** (`clawgate-ci-hsdlk`,
 rev `d687fcaa`, Succeeded). `ZacxDev/homelab-infra#572` (raise that budget) is **MERGED** — 2026-08-31 18:36Z. Read the
-`TaskRunTimeout` investigation below before recording it as the fix: it addresses one of the two
-causes.
+investigation headed **🔴 `TaskRunTimeout` IN clawgate-ci HAS TWO DISTINCT CAUSES, AND `#572` ONLY
+FIXES ONE**, in `claudedocs/handoff-tmux-webapp.md` — NOT the `TaskRunTimeout` investigation in this
+file, which is a different one (rank 61 `clawgate-e2e`, node I/O) with a different conclusion —
+before recording it as the fix: it addresses one of the two causes.
 ⚠ **The leg that never ran was `hook` — the one #592 exists to exercise** — so merging on the
 "COULD NOT RUN means broken gate" convention alone would have shipped it with zero CI coverage of
 the thing it changed. It was merged on a **local reproduction of that exact leg instead**: the same
@@ -277,7 +279,9 @@ blind**: `EXAMINED > 0` still holds and the `BODIES == grep -c '^@test '` equali
 → rank 15.
 
 ⚠ **Neither PR's `clawgate-ci` ever ran the leg that covers it** — #592's timed out before the
-`hook` leg (see the TaskRunTimeout investigation above). The bats coverage claim for #592 rests on
+`hook` leg (see the investigation headed **🔴 `TaskRunTimeout` IN clawgate-ci HAS TWO DISTINCT
+CAUSES, AND `#572` ONLY FIXES ONE**, in `claudedocs/handoff-tmux-webapp.md`). The bats coverage
+claim for #592 rests on
 a local reproduction of that leg in the same `docker.io/bats/bats:1.11.1` image, not on CI.
 
 ### ⚠ SUPERSEDED (its hypothesis only) — `test_subsystem_store_api.py` HAS RECURRED
@@ -290,7 +294,9 @@ and the "pull `fix/xdist-parametrize-values-deterministic`" instruction are wron
 - **Symptom + exact repro:** `devrc#1162` — a **one-markdown-file** PR — was blocked by
   `tekton/devrc-pytests` on
   `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_the_body_is_DISCARDED[record0-…]`.
-  That is the **same case name** this doc already records from `devrc#1056`, in the block above.
+  That is the **same case name** recorded from `devrc#1056` in **⚠ SUPERSEDED —
+  `test_subsystem_store_api.py` is FLAKY on `main`, and nothing is fixing it**, earlier in this
+  file.
 - **Observed (with values):** the failure is attached to head `74e39bea`
   (`FAILED: pytests — FAILING: TestTheActorComesFromTheTOKEN…`). The **immediately preceding**
   head of the same branch, `e1d1318f`, failed a DIFFERENT test
@@ -587,10 +593,55 @@ are corrected in place.
   --priority low --title '<scratch>'`, then update the ids in
   `.opencode-dispatch/tmux-ui-verify/brief4-NOT-DISPATCHED.md` and run it.
 
+### `tekton/clawgate-e2e` is TIMING OUT on `trunk` — a gate going permanently red
+- as-of: 2026-09-13
+
+- **Symptom + exact repro:** `tekton/clawgate-e2e` reports FAILURE; the TaskRun ends
+  `TaskRunTimeout`, "failed to finish within 40m0s", with steps `e2e` and `verdict` both exit 1.
+  Reproduce: `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci | grep clawgate-e2e`.
+- **Observed (with values):** `becedef44` **Succeeded** 21:59Z · `1a3bdef6e` (#813 on trunk)
+  **Succeeded** 01:04Z · `189451188` (#817 head) **Failed/TaskRunTimeout** 01:32Z · `24be212e7`
+  (the 0.8.34 pin bump — a TWO-LINE version change) **Failed/TaskRunTimeout** 01:58Z. Box loadavg
+  47–54 throughout.
+- **Ruled out:** *#817 caused it.* It touches 8 files, all Go `_test.go` under `internal/`/`cmd/`,
+  **zero** e2e/TypeScript; `clawgate-e2e` runs Playwright, which never executes them. via: measurement
+- **Ruled out:** *a test assertion is failing.* Both failures are `TaskRunTimeout` at the 40m task
+  budget, not an assertion. via: measurement
+- **Ruled out:** *leaked local postgres containers are still holding resources.* Five orphaned
+  `clawgate-e2e-pg-*` (aged 5–30 h) were removed this session after a **validated** probe —
+  0 client connections each, with a positive control proving the probe reads 1 when a connection is
+  deliberately open. Load moved 52 → 47.7. via: measurement
+- 🔴 **NOT RULED OUT, and the subsystem store flagged it against me: a STRANDED ADVISORY LOCK, not
+  load.** `homelab-talos/clawgate` carries an `OPEN:` bullet (2026-09-08) titled *"A RED
+  `clawgate-e2e` CARRYING `SQLSTATE 57014` ON MIGRATE IS NOT AUTOMATICALLY LOAD — AND THE HARNESS'S
+  OWN TEXT PUSHES YOU THE WRONG WAY"*: a stranded session lock on a POOLED connection after a ctx
+  cancel makes the next migration die at the 10 s `statement_timeout`, an observable identical to
+  contention. It records that the harness's own *"startup slowness under node contention"* string is
+  **editorialising**, and that it already led one session to misfile the whole thing as saturation.
+  The rival fix (#503/#509) shipped with **no version pin bumped**, so a stale binary is possible.
+  **I did not discriminate**: the `step-e2e` pod for `clawgate-e2e-9g5m6` was reaped before I looked,
+  so I never checked whether these runs carried `SQLSTATE 57014` at all. via: assumed
+- **Leading hypothesis:** cluster/box saturation lengthens the Playwright run past the 40m TaskRun
+  budget — the spec carries documented load sensitivity (fixture setup clamped to 45 s) and the same
+  cluster timed out a **comment-only** commit. 🔴 **Held weakly, and NOT to be repeated as a
+  finding**: it is the exact conclusion the store's open bullet warns is reached by reading the
+  harness's own prose, and the two mechanisms share this observable. The discriminator is whether
+  `57014` appears on migrate and whether an advisory-lock WAIT is present — read the step logs
+  BEFORE the pod is reaped.
+- **Next probe:** 🔴 **capture the `step-e2e` logs BEFORE the pod is reaped** — that is what makes
+  this discriminable, and it is what tonight lost:
+  `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <e2e-pod> -c step-e2e --tail=-1 | grep -aE '57014|statement timeout|advisory'`
+  A hit ⇒ the stranded-lock mechanism, and check whether the harness's clawgate binary carries
+  #503/#509 (no pin was bumped, so version alone will not tell you). A clean miss under a QUIET box
+  ⇒ the 40 m budget or the spec is the defect. Then trigger a run and read the reason, not the colour:
+  `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci -o json | python3 -c 'import json,sys;[print(i["metadata"]["name"],(i.get("status",{}).get("conditions") or [{}])[0].get("reason")) for i in json.load(sys.stdin)["items"] if "clawgate-e2e" in i["metadata"]["name"]]'`
+  If it times out on a quiet box, the 40m budget or the spec is the defect, not the load.
+
 ### ✅ RESOLVED 2026-09-14 — rank 61 `clawgate-e2e` `TaskRunTimeout` is NODE I/O, not a stranded lock
 
 - as-of: 2026-09-14
-- Supersedes the `clawgate-e2e` is TIMING OUT block above — its next probe is spent.
+- Supersedes **`tekton/clawgate-e2e` is TIMING OUT on `trunk` — a gate going permanently red**,
+  earlier in this file — its next probe is spent.
 - **Evidence:** `claudedocs/refs/clawgate-e2e-tasktimeout-node-io.md`
 - **Ruled out:** a stranded `pg_advisory_lock` — `57014` hits the migration DDL, not a lock wait, and
   the checkpointer's own fsync ran 130.6s/37.8s/35.2s/32.1s. via: measurement
@@ -641,4 +692,23 @@ are corrected in place.
   `clawgate-ci` and `clawgate-ux-audit` still carry the retracted PVC story, and one asserts
   `grep -n claimName` returns "exactly two non-comment hits" when it returns one. #821 points at it
   rather than widening. That is the one piece of this arc left undone, and it is doc-rot, not risk.
+
+### 🔴 A NARROWED e2e RUN WAS QUOTED AS "THE TIER" TWICE, AND IT LEFT `trunk` BROKEN ONCE
+- as-of: 2026-09-15
+- **Symptom + exact repro:** `containers/clawgate/e2e/tests/tmux-page.spec.ts` — all 9 tests fail. Repro: `cd containers/clawgate && ./e2e/run.sh tmux-page.spec.ts`.
+- **Observed (with values):** on `#826` head `04cef09c3` → `Expected: 1, Received: 18` at `tmux-page.spec.ts:156`, the shared `openTmuxTab` helper asserting `toHaveCount(1)` on `#panel-tmux [data-session-view-choice][aria-pressed="true"]`. Item 3 made that count the CARD count. `tekton/clawgate-e2e` reported `e2e failed: 9 failed, 216 passed, 2 skipped` on that head.
+- **Observed — the DISCRIMINATING CONTROL:** clean `origin/trunk` worktree (`#824` merged, none of `#826`) run of the same spec → **4 failed / 5 passed**, the SAME four. So four of the nine predate `#826` and are `#824`'s damage, already on `main`.
+- **Ruled out:** "`#826` caused all nine" — the trunk control failed 4 without any of `#826`'s changes. `via: measurement`
+- **Ruled out:** "CI cannot see this" — an audit asserted CI runs no e2e; **FALSE**. `tekton/clawgate-e2e` is a SEPARATE check from `clawgate-ci` and caught it. The clawgate skill documents exactly that. `via: measurement`
+- **Ruled out:** "expand every group in `openTmuxTab`" as the fix — a page-wide sweep clicks groups in `hidden` host panels and times out; **measured 7 failures instead of 4**. Must be scoped to `[data-tmux-host-tab-panel]:not([hidden])`. `via: measurement`
+- **Leading hypothesis:** RESOLVED. Cause is `#824`'s collapsed-by-default: cards are present-but-not-visible, so `.fill()` times out and `intersect once` never fires for the lazy transcript mount. `6fad0e252` fixes all 9 and therefore repairs `main`'s pre-existing break.
+- **Next probe:** `gh pr checks 826 --repo ZacxDev/homelab-infra` — confirm `tekton/clawgate-e2e` is green on `6fad0e252` before merging.
+
+### 🔴 TWO GUARDS I WROTE WERE WALKABLE, AND THE PR BODY CITED ONE AS PROOF
+- as-of: 2026-09-15
+- **Symptom + exact repro:** both guards passed while the thing they claimed to protect was broken.
+- **Observed (with values):** (a) item 2's check was `strings.Contains(htmlSrc, "tmux session(s)")` — one literal phrase. Re-adding the header as `<h2>{host}</h2><span>45 windows / 3 sessions</span>` restores the exact duplication and **SURVIVED**. (b) the `data-tmux-host-fresh` "survivor" arm used `strings.Contains(htmlSrc, "data-tmux-host-fresh")` — and `renderTmuxString` renders `tmuxGroupScript`, whose prune guard SPELLS that attribute in a `getAttribute()` call. **Renaming the emitted attribute on the strip left the test GREEN.**
+- **Ruled out:** "the arms are fine, the audit misread them" — both mutants were run and both survived. `via: measurement`
+- **Leading hypothesis:** RESOLVED in `6fad0e252`. Both now parse the DOM; both mutants die by their own guard's message; control green.
+- **Next probe:** none. Recorded because the shape recurs — **a substring match over a whole rendered page can match the JS that READS an attribute rather than the markup that EMITS it.**
 

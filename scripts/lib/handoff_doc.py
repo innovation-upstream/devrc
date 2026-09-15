@@ -2864,7 +2864,10 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
     if grandfathered and after <= handoff_budget.MAX_BYTES and gated:
         # Gated only: the ledger it tells you to edit lives in THIS repo. An
         # ungated repo reaching here did so by a relpath COLLISION with devrc's
-        # ledger — which also silently handed it an allowance of up to 245,760 B.
+        # ledger — which also silently handed it an allowance as large as the
+        # biggest entry in handoff_budget.GRANDFATHERED. No figure is quoted:
+        # that ledger is edited by the same commits that shrink the docs, so a
+        # number here is stale the moment one entry ratchets down.
         return (f"✅ This doc is now {after:,} B, back under the "
                 f"{handoff_budget.MAX_BYTES:,} B ceiling — DELETE its "
                 f"`GRANDFATHERED` entry in scripts/lib/handoff_budget.py in this "
