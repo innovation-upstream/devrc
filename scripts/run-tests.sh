@@ -2318,7 +2318,25 @@ TARGET_FLOORS=(
   # concurrent PR that lands with fewer tests. That is a repo-wide decision, not this
   # change's to make silently.
   "scripts/check-clickup-addressed/tests|232"
-  "scripts/claude-hooks/tests/test_guard_core.py|1260"
+  # 2026-09-14, 1260 -> 1589. 🔴 THE GATE FORCED THIS ONE, and it had already turned
+  # `main` RED for everybody: 1639 collected against a drift ceiling of 1575
+  # (1260 + max(60, 1260/4 = 315)), with ALL 1639 PASSING and `failed=0`. That shape is
+  # the whole reason the ceiling check exists — and it is also why the red was expensive
+  # to read: a commit status carries only the `FAILING:` list and the TOTAL, so a run
+  # that fails on a GUARD rather than a test posts `failure` with `failed=0` and NAMES
+  # NOTHING. It was found by reading the step log, never from the check.
+  # The number is copied VERBATIM from the line the gate printed, not computed here:
+  #   Raise the TARGET_FLOORS entry to
+  #   "scripts/claude-hooks/tests/test_guard_core.py|1589"
+  # i.e. 1639 - min(50, max(1, 1639/20 = 81)) = 1639 - 50 = 1589.
+  # ⚠ The floor fell 379 behind because this target grew and nothing re-pinned it —
+  # most of it at 9b8969a8 (#1551), which taught the wide-kill guard to see kills inside
+  # EXECUTED scripts and therefore had to write ~40 fixture scripts. The same growth is
+  # what `#1692` ledgered on the shebang side; only the floor was left.
+  # ⚠ Measured as a PARTIAL run (`--targets` on this one file) on the merged tree, 1639
+  # passed / 0 skipped / 0 failed in 357s. A PARTIAL run is still floor-guarded, which is
+  # the property being used here; it is NOT a full-gate verdict and is not quoted as one.
+  "scripts/claude-hooks/tests/test_guard_core.py|1589"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
   #   _suggested_floor 78 = 78 - min(50, max(1, 78/20 = 3)) = 78 - 3 = 75.
