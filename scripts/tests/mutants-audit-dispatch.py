@@ -2747,7 +2747,10 @@ ROWS = [
      {"test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
       "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
       "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement",
-      "test_the_prose_determination_names_the_boundary_it_can_resolve"},
+      "test_the_prose_determination_names_the_boundary_it_can_resolve",
+      # The fix round's F2 test is built on `CLAIMS_BLOCK_R1_BARE`, so it
+      # depends on this fallback to have an anchor at all.
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      range_anchor_loses_the_bare_fallback),
     # 🔴 THE MIRROR IMAGE, and the reason the two readers are separate
     # functions: "one anchor everywhere" is wrong on the WRITER's side, and it
@@ -2931,8 +2934,15 @@ ROWS = [
      {"test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
       "test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer"},
      the_range_hand_rolls_its_degenerate_causes),
+    # 🟢 A SECOND WITNESS, AND IT IS WORTH SAYING WHY. The fix round's F2 test
+    # exists for the LENGTH axis — an 8-char `audited=` against a 40-char
+    # `<from>` — and it was written with a MIXED-CASE anchor as well, so that a
+    # `==` which had merely been case-folded could not pass it. This row is the
+    # proof that the second axis is really exercised: re-case-sensitising
+    # `same_commit` kills it too, which a length-only fixture would not notice.
     ("Y12 same_commit goes back to case-sensitive",
-     {"test_an_uppercase_audited_sha_still_trips_the_degenerate_guard"},
+     {"test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      same_commit_is_case_sensitive),
     ("Y13 WHERE TO WORK drops the private-worktree note",
      {"test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
