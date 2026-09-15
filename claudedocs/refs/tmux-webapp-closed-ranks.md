@@ -1312,8 +1312,33 @@ predicate that red-lines an open item trains everyone to click through.
         after deploy — not inferred from a green test.
         forcing: none
 
-47. ✅ **ANSWERED 2026-09-14, AND THE ANSWER IS *NO* — the collapse defect was NOT the operator's
-    symptom, and `#796` cannot have fixed it.** Closed by measurement plus one operator answer.
+47. ✅ **CLOSED 2026-09-14 — the fix is UNCONFIRMED against the symptom, which is the closing
+    condition as written.** The operator reports the symptom gone and names the workbench Brave
+    `work` profile as where they saw it; nothing measurable distinguishes which change fixed it.
+    🔴 **RETRACTED IN REVIEW — the first version of this entry claimed "the answer is NO, `#796`
+    CANNOT have fixed it", and that was FALSE.** It rested on "a v1 zero proves no group was ever
+    collapsed here, because nothing in the app ever deletes a v1 key." The immortality is real but
+    it **begins at `#797`** — and `#796` merged **6 h 10 m earlier**, inside the window where v1
+    keys were deleted by two ordinary paths. Measured at `#796`'s own merge commit `e77b79f5b`:
+    `setCollapsed(k, false)` calls `s.removeItem(PREFIX + k)`, so **un-collapsing deletes the
+    key**; and `prune()` (`:1372`, arms at `:1379`/`:1382`) scanned `PREFIX`/`ACKPREFIX`, which
+    **were the v1 spellings then**, so v1 keys were garbage-collected whenever a project left the
+    page. A v1 zero today is therefore **uninformative** about the v1 era.
+    🔴 **THE ERROR WAS THE TIME AXIS, AND THE EVIDENCE WAS TWELVE LINES AWAY.** `prune()` was read
+    on CURRENT trunk and its property asserted of the PAST — the exact thing `RULES.md` names
+    ("current source is evidence about CURRENT behaviour, never what the code did BEFORE a fix").
+    The `removeItem` that refutes it sits ~12 lines below the `var PREFIX` constants this entry
+    already quotes from that same blob. **Reading the right commit is not enough if you read only
+    the line you went looking for.**
+    ⚠ **AND THE CONCLUSION WOULD NOT HAVE FOLLOWED EVEN IF THE PREMISE HELD.** `#796`'s diff is
+    server-side Go (`needsHuman`, used in `groupByProject` and `tmuxWindowCard`); it never touches
+    the `tmuxGroupScript` JS and never reads `PREFIX`. It has **three** observable effects and only
+    the force-open one needs a collapse key — the `WAITING ON YOU` group badge and the card's
+    waiting-evidence banner render regardless. So "no collapse state" would rule out one of three
+    effects, not the PR. Which reading "sessions appear missing" has — *cards absent* vs *could not
+    find the window that needed me* — was never pinned down, and it decides this.
+    🔴 **SO: `#796` IS NOT RULED OUT. It remains a candidate alongside `#797` and `#803`, and none
+    of the three was measured.** Do not read this entry as eliminating any of them.
     🔴 **THE ITEM'S OWN INSTRUCTION NAMED A DEAD KEY PREFIX.** It says to read
     `cg.tmux.group.*`. That was the LIVE namespace when the item was written (2026-09-11T21:55Z)
     and was retired **1 h 44 m later** by `#797` (2026-09-11T23:39Z), which re-keyed the group
@@ -1329,34 +1354,38 @@ predicate that red-lines an open item trains everyone to click through.
         cg.tmux.v2.group.*   (v2, LIVE)  ->  0
         whole origin: 2 keys — cg.session.view.<uuid>, htmx-history-cache
 
-    🔴 **THE TWO ZEROS ARE NOT EQUALLY STRONG, AND THE WEAK ONE IS THE LIVE NAMESPACE.**
-    `prune()` (`internal/ui/tmux.go:2100`) has exactly two arms, both testing the v2 `PREFIX` /
-    `ACKPREFIX` (`:2107`, `:2110`), so a v1 key matches NEITHER and **nothing in the app ever
-    deletes one** — deliberately, per the comment at `:1758`. v2 keys ARE removed, on un-collapse
-    (`:1973`) and by `prune()`. Therefore:
+    🔴 **NEITHER ZERO PROVES WHAT THE FIRST VERSION OF THIS ENTRY CLAIMED.** The retraction above
+    has the measurement; what survives is only this, and it is weak:
 
-    | namespace | a zero proves |
-    |---|---|
-    | v1 | **no group was EVER collapsed here** — the keys are immortal |
-    | v2 | only that nothing is collapsed RIGHT NOW |
+    | namespace | a zero proves | it does NOT prove |
+    |---|---|---|
+    | v1 | nothing is stored under the dead prefix today | **anything about the v1 era** — the key was deleted on un-collapse (`removeItem`, `e77b79f5b`) and pruned whenever the project left the page |
+    | v2 | nothing is collapsed RIGHT NOW | that nothing ever was |
 
-    **The v1 zero is the load-bearing one, and it settles the item.** `#796` operated on the v1
-    namespace — ⚠ **shown directly, not inferred from merge dates**, because the date-ordering
-    version is the weaker claim and this arc has been burned by exactly that: at `#796`'s own
-    merge commit `e77b79f5b`, `internal/ui/tmux.go:1231-1232` read
-    `var PREFIX = 'cg.tmux.group.'` / `var ACKPREFIX = 'cg.tmux.waitack.'`, and `tmux.go` is one
-    of the three files `#796`'s diff touches. (v1 was introduced by `#660`, 2026-09-03; current
-    trunk carries the v2 spellings at `:1959-1960`.) This profile has never held a v1 key, so
-    there was never any collapse state for `#796` to force open. It is a real fix for a real bug;
-    it is **not** a fix for the reported symptom.
-    ⚠ **A near-miss worth recording, because it is this file's own recurring trap:** the first
-    attempt to read that constant piped `git show` into `grep -nE` and returned **nothing**, which
-    reads exactly like "the namespace did not exist there" and would have inverted the conclusion.
-    `git grep` over the same commit — a second tool that fails differently — found both lines.
-    **An empty match set is a claim about the instrument until a second one agrees.**
-    ⚠ **The one hole, stated rather than papered over:** a manual `localStorage.clear()` would
-    also produce a v1 zero, and nothing distinguishes that from "never collapsed" after the fact.
-    The origin holding only 2 keys is consistent with either.
+    The immortality property is real on CURRENT trunk — `prune()` (`:2100`) has two arms, both
+    testing the v2 `PREFIX`/`ACKPREFIX` (`:2107`, `:2110`), so a v1 key matches neither, per the
+    deliberate comment at `:1758`. **It simply does not extend backwards past `#797`**, and `#796`
+    is on the far side of that line.
+    ⚠ **HOLES, ENUMERATED RATHER THAN COUNTED — an earlier draft said "the one hole" and named the
+    LEAST likely member of the family, which reads as an exhaustive residual-risk statement and is
+    not one.** A v1 zero today is consistent with all of:
+    1. never collapsed;
+    2. collapsed, then un-collapsed — `removeItem`, no deliberate act required;
+    3. collapsed, then the project left the page and v1-era `prune()` swept it;
+    4. a manual `localStorage.clear()`;
+    5. a different profile, a profile reset, or another origin — this read covers ONE origin in ONE
+       profile;
+    6. **the phone**, which the ORIGINAL text below names as *"the untested case"* and which this
+       closure never measured. It is retired by the operator's statement that they saw the symptom
+       on the workbench `work` profile — **an answer, not a measurement**, and it is recorded that
+       way so a reader can weigh it.
+    ⚠ **A near-miss worth recording:** the first read of the `var PREFIX` constant piped `git show`
+    into `grep -nE` and returned **nothing**, which reads exactly like "the namespace did not exist
+    there". `git grep` over the same commit found both lines. ⚠ It does **not** reproduce — a later
+    audit ran the same shape successfully — so the cause was probably the pattern, not the pipe,
+    and no mechanism is asserted here. The lesson stands either way and is already a standing rule
+    (`RULES.md` → "Cross-check against a second tool that fails differently"); this is one worked
+    instance of it, not a new rule.
     🔴 **WHAT DID FIX IT IS NOT ESTABLISHED, AND NO MECHANISM IS OFFERED.** The operator reports
     the symptom is gone. The page was rebuilt twice in the interval — `#797` (regroup to
     host -> session -> window) and `#803` (full rebuild) — so either is a candidate and neither was
