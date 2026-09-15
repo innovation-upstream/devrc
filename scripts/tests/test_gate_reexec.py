@@ -69,6 +69,18 @@ _AMBIENT_GATE_VARS = (
     # none for the two variables the refusal was added to catch.
     "DEVRC_TARGETS",
     "MIN_TESTS",
+    # 🔴 THE GO TIER'S THREE, and they arrived with the SAME blindness one turn
+    # deeper. The refusal loop that names them was wrapped onto a second line
+    # with a backslash, and the harvester below matched `for … in … ; do` on ONE
+    # line only — so it stopped seeing the ENTIRE list, including the two above
+    # that the comment right there says it was written to catch.
+    # `DEVRC_GATE_GO_RUNNER` is read a second time as `${DEVRC_GATE_GO_RUNNER:-…}`
+    # and so stayed visible; `MIN_GO_TESTS` and `MAX_GO_SKIPS` are named NOWHERE
+    # else in gate.sh except comments, so they were invisible outright. The
+    # asymmetry is the only reason this failed loudly instead of silently.
+    "DEVRC_GATE_GO_RUNNER",
+    "MIN_GO_TESTS",
+    "MAX_GO_SKIPS",
 )
 
 
@@ -304,7 +316,7 @@ def test_a_relative_path_invocation_survives_the_re_exec(tmp_path):
     assert proc.returncode == 0, combined
 
 
-def _env_vars_gate_sh_reads() -> set[str]:
+def _env_vars_gate_sh_reads(path: Path = None) -> set[str]:
     """Every environment variable gate.sh reads, DERIVED FROM THE SOURCE.
 
     🔴 A LITERAL LIST HERE IS THE BUG THIS FUNCTION REPLACES. The predecessor of
@@ -321,9 +333,19 @@ def _env_vars_gate_sh_reads() -> set[str]:
     is correct because both halves are real. Comment lines are excluded, so
     documenting a variable cannot satisfy the test that checks it is documented.
     """
-    lines = GATE.read_text().splitlines()
+    lines = (path or GATE).read_text().splitlines()
     body_start = next(i for i in range(1, len(lines)) if not lines[i].startswith("#"))
     body = "\n".join(l for l in lines[body_start:] if not l.lstrip().startswith("#"))
+    # 🔴 A BACKSLASH CONTINUATION IS ONE SHELL LINE AND MUST BE ONE LINE HERE.
+    # The `for … in … ; do` harvest below anchors on `^` and cannot span a
+    # newline, so a list wrapped across two lines matched NOTHING and every name
+    # in it went unharvested — silently, because an empty match set and "this
+    # loop reads no environment variables" are the same observation. That is the
+    # reassuring zero this whole function's docstring is about, and it happened:
+    # the go tier's refusal loop wrapped, and `DEVRC_TARGETS`/`MIN_TESTS`
+    # disappeared from the ledger a second time. Join them before scanning so
+    # the harvester sees what the SHELL sees.
+    body = re.sub(r"\\\n[ \t]*", " ", body)
     first_read: dict[str, int] = {}
     for m in re.finditer(r"\$\{([A-Z][A-Z0-9_]*)(?::-|:\+|:=|:\?|-|\+)", body):
         first_read.setdefault(m.group(1), m.start())
@@ -354,6 +376,48 @@ def test_the_env_var_derivation_can_actually_see_a_variable():
     # NEGATIVE CONTROL: a name gate.sh assigns before reading is not an env var.
     assert "TIER" not in found, sorted(found)
     assert "LOG_DIR" not in found, sorted(found)
+
+
+def test_the_derivation_sees_a_refusal_list_WRAPPED_ACROSS_LINES(tmp_path):
+    """🔴 THE CONTROL THAT WOULD HAVE CAUGHT IT, AND IT IS HERMETIC ON PURPOSE.
+
+    The harvester anchors its `for … in … ; do` match on `^`, so a list wrapped
+    with a backslash matched nothing and EVERY name in it went unharvested. That
+    is invisible by construction: "the regex found no loop" and "the loop reads
+    nothing" produce the identical empty set, so the two-way pin reported full
+    coverage over a hole. It happened twice — once for `DEVRC_TARGETS`/
+    `MIN_TESTS` through indirect expansion, then again for the whole list the
+    moment the go tier's three names made it too long for one line.
+
+    Pinned against a SYNTHETIC script rather than against gate.sh, so gate.sh
+    reformatting its own loop can never quietly retire this control. `WRAPPED_C`
+    is reachable ONLY through the continuation — a harvester that stops at the
+    backslash returns the first two and looks fine.
+    """
+    script = tmp_path / "wrapped.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'echo "${VISIBLE_ONE:-x}"\n'
+        "#   WRAPPED_D   documented here and read NOWHERE — the negative control\n"
+        "for _v in WRAPPED_A WRAPPED_B \\\n"
+        "          WRAPPED_C; do\n"
+        '  [ -n "${!_v+x}" ] && exit 2\n'
+        "done\n"
+    )
+    found = _env_vars_gate_sh_reads(script)
+    assert "VISIBLE_ONE" in found, (
+        "the derivation could not see a plain expansion in the synthetic "
+        f"script — the control itself is broken. found={sorted(found)}")
+    for name in ("WRAPPED_A", "WRAPPED_B", "WRAPPED_C"):
+        assert name in found, (
+            f"{name} was not harvested from a backslash-continued refusal list. "
+            "Every name after the continuation is unscrubbed and unpinned, and "
+            f"nothing says so. found={sorted(found)}")
+    # NEGATIVE CONTROL on this control: a name only ever mentioned in a COMMENT
+    # is not a read, continuation or not — documenting a variable must not be
+    # able to satisfy the guard that checks it is scrubbed.
+    assert "WRAPPED_D" not in found, sorted(found)
 
 
 def test_the_help_text_documents_every_env_var_the_script_reads():

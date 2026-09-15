@@ -89,6 +89,15 @@
 #                         verdict. Listed because gate.sh reads it in that
 #                         refusal — see DEVRC_GATE_ALLOW_AMBIENT below.
 #   DEVRC_TARGETS         same: run-tests.sh's target narrowing, refused here.
+#   MIN_GO_TESTS          the go tier's equivalent of MIN_TESTS — its GLOBAL
+#                         collected-test floor — and refused here for the same
+#                         reason. Undocumented for as long as the go tier had
+#                         existed: the derivation that pins this block against
+#                         what the script reads had gone blind on a wrapped
+#                         refusal list, so it asked for nothing.
+#   MAX_GO_SKIPS          the go tier's skip budget, which is 0. Overriding it
+#                         lets skipped tests pass as run, so it weakens what a
+#                         green means and is refused alongside the rest.
 #   DEVRC_GATE_NO_REEXEC  =1 to run against the ambient PATH instead of
 #                         re-entering `nix develop`. See the RE-EXEC block.
 #   DEVRC_GATE_ENV        =1 means "already inside a sanctioned gate
