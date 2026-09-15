@@ -394,9 +394,13 @@ def test_the_derivation_sees_a_refusal_list_WRAPPED_ACROSS_LINES(tmp_path):
     is reachable ONLY through the continuation — a harvester that stops at the
     backslash returns the first two and looks fine.
     """
-    script = tmp_path / "wrapped.sh"
-    script.write_text(
-        "#!/usr/bin/env bash\n"
+    # 🔴 `write_exec` OWNS THE SHEBANG. A test that writes its own is
+    # what `test_runtime_shebangs.py` forbids: `patchShebangs` fixes the source
+    # tree and cannot reach a file written at RUNTIME. This script is parsed
+    # rather than executed, but the guard is on the WRITE, not the run — and
+    # `_env_vars_gate_sh_reads` skips line 0, so the shebang must still be there.
+    script = write_exec(
+        tmp_path / "wrapped.sh",
         "set -eu\n"
         'echo "${VISIBLE_ONE:-x}"\n'
         "#   WRAPPED_D   documented here and read NOWHERE — the negative control\n"
