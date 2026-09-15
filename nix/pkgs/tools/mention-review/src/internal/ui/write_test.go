@@ -1,11 +1,14 @@
 package ui
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/innovation-upstream/devrc/mention-review/internal/cfg"
 	"github.com/innovation-upstream/devrc/mention-review/internal/ghapi"
+	"github.com/innovation-upstream/devrc/mention-review/internal/udiff"
 )
 
 // 🔴 LAYER 2 FOR THE WRITE HALF — KEYS ARE PRESSED AND THE RESULT IS ASSERTED.
@@ -407,6 +410,112 @@ func TestASnapshotThatLosesItsLoginMidComposeStopsTheSend(t *testing.T) {
 	}
 	if !strings.HasPrefix(next.Notice(), "REFUSED") {
 		t.Errorf("notice = %q, want REFUSED", next.Notice())
+	}
+}
+
+// --- the intent → API-call mapping -------------------------------------------
+
+// callRecorder is a Runner that records the arguments it was handed.
+type callRecorder struct{ calls []string }
+
+func (c *callRecorder) FetchPR(context.Context, string, string, int) (*ghapi.Snapshot, error) {
+	return fixturePR(), nil
+}
+func (c *callRecorder) FetchDiff(context.Context, string, string, int) (*udiff.Diff, error) {
+	return &udiff.Diff{}, nil
+}
+func (c *callRecorder) OpenBrowser(string) error { return nil }
+func (c *callRecorder) PostComment(_ context.Context, o, n string, num int, body string) error {
+	c.calls = append(c.calls, fmt.Sprintf("PostComment %s/%s#%d body=%q", o, n, num, body))
+	return nil
+}
+func (c *callRecorder) SubmitReview(_ context.Context, o, n string, num int, event, body string) error {
+	c.calls = append(c.calls, fmt.Sprintf("SubmitReview %s/%s#%d event=%s body=%q", o, n, num, event, body))
+	return nil
+}
+func (c *callRecorder) Merge(_ context.Context, o, n string, num int, method string) error {
+	c.calls = append(c.calls, fmt.Sprintf("Merge %s/%s#%d method=%s", o, n, num, method))
+	return nil
+}
+
+// 🔴 THE HIGHEST-CONSEQUENCE MAPPING IN THIS PHASE, AND IT LIVES IN `Run` WHERE
+// NOTHING ELSE CAN SEE IT.
+//
+// Three DIFFERENT intents — approve, request changes, submit review — collapse
+// onto ONE endpoint, distinguished only by an `event` string. A swap there
+// approves where the operator asked to BLOCK, and every other test in this
+// package passes: `Step` emitted the right intent, the ledger agreed, the
+// prompt named the right verb, and the wrong verdict went to GitHub.
+//
+// ⚠ IT RUNS THE RETURNED `tea.Cmd`. A `tea.Cmd` is an opaque `func() tea.Msg`,
+// so asserting on the value is impossible — but CALLING it against a recording
+// runner is not, and that is the only way this mapping is observable.
+func TestRunMapsEachWriteIntentToItsOwnCall(t *testing.T) {
+	cases := []struct {
+		intent Intent
+		want   string
+	}{
+		{
+			PostComment{Owner: fxOwner, Name: fxName, Num: fxNum, Body: "a note"},
+			`PostComment gardenersguild/trowelcast#1559 body="a note"`,
+		},
+		{
+			Approve{Owner: fxOwner, Name: fxName, Num: fxNum},
+			`SubmitReview gardenersguild/trowelcast#1559 event=APPROVE body=""`,
+		},
+		{
+			RequestChanges{Owner: fxOwner, Name: fxName, Num: fxNum, Body: "split this"},
+			`SubmitReview gardenersguild/trowelcast#1559 event=REQUEST_CHANGES body="split this"`,
+		},
+		{
+			SubmitReview{Owner: fxOwner, Name: fxName, Num: fxNum, Body: "a remark"},
+			`SubmitReview gardenersguild/trowelcast#1559 event=COMMENT body="a remark"`,
+		},
+		{
+			MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod},
+			`Merge gardenersguild/trowelcast#1559 method=rebase`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.intent.intentName(), func(t *testing.T) {
+			rec := &callRecorder{}
+			cmd := Run(c.intent, rec)
+			if cmd == nil {
+				t.Fatal("Run returned no command")
+			}
+			msg := cmd()
+			if len(rec.calls) != 1 || rec.calls[0] != c.want {
+				t.Fatalf("calls = %q, want exactly [%q]", rec.calls, c.want)
+			}
+			// 🔴 AND THE RESULT MESSAGE NAMES THE VERB. A `WriteDone` carrying
+			// the wrong verb would put the wrong word in the notice, which is
+			// the only thing the operator reads after the write.
+			done, ok := msg.(WriteDone)
+			if !ok {
+				t.Fatalf("the command returned %T, want WriteDone", msg)
+			}
+			if done.Verb != c.intent.intentName() {
+				t.Errorf("WriteDone.Verb = %q, want %q", done.Verb, c.intent.intentName())
+			}
+			if done.Err != nil {
+				t.Errorf("WriteDone.Err = %v, want nil", done.Err)
+			}
+		})
+	}
+
+	// 🔴 THE THREE REVIEW EVENTS MUST BE THREE DISTINCT STRINGS. Without this,
+	// a `ghapi` change that collapsed two of the constants onto one value would
+	// leave every case above passing — each would assert the value it was given.
+	seen := map[string]bool{}
+	for _, e := range ghapi.ReviewEvents() {
+		if seen[e] {
+			t.Errorf("the review event %q is spelled twice — two verbs would "+
+				"submit the same verdict", e)
+		}
+		seen[e] = true
+	}
+	if len(seen) != 3 {
+		t.Errorf("there are %d distinct review events, want 3", len(seen))
 	}
 }
 
