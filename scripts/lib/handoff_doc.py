@@ -2771,11 +2771,47 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
 BUDGET_NEAR_BYTES = 4_096
 
 
-def budget_warning(relpath: str, merged_text: str, base_text: str) -> str:
+# The ceiling gate's population is the tree that CONTAINS it: its own
+# `REPO_ROOT` is `Path(__file__).resolve().parent.parent.parent`, so it walks
+# whatever checkout it ships in — the base clone, a worktree, any future clone.
+# Hence the predicate below is DERIVED from that fact rather than hardcoding a
+# path: a repo is gated iff it ships the gate.
+BUDGET_GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
+
+
+def gate_enforces_budget(repo: Path) -> bool:
+    """Does `test_no_handoff_doc_exceeds_its_budget` actually READ this repo?
+
+    🔴 IT DOES NOT READ EVERY REPO, AND SAYING OTHERWISE COST A REAL SESSION
+    REAL WORK. The gate enumerates `claudedocs/` under its OWN root, so a
+    handoff doc in any repo that does not ship it is enforced by NOTHING. A
+    warning that nevertheless announced "will go RED on `main`, and it fails for
+    EVERYONE" drove, in `civitai/cli` on 2026-09-14/15: five evictions in two
+    days, 35,517 B moved to `refs/`, and a heading-delimited slice that removed
+    27,991 B — the whole ranked list — one step before a commit. None of it was
+    required by any gate. See `civitai/cli#618`.
+
+    Path-equality against a known root would be wrong: in a worktree the gate's
+    own `REPO_ROOT` is the WORKTREE, not the base clone.
+    """
+    try:
+        return (repo / BUDGET_GATE_RELPATH).is_file()
+    except OSError:
+        # An unreadable repo path is not evidence of a gate. Fail toward the
+        # weaker claim: we never invent a gate we could not see.
+        return False
+
+
+def budget_warning(relpath: str, merged_text: str, base_text: str, *,
+                   gated: bool) -> str:
     """A one-block warning, or "" when there is nothing worth saying.
 
     Silent by default: a doc with room says nothing, because a line that prints
     on every run is a line nobody reads by the third one.
+
+    🔴 `gated` IS REQUIRED AND HAS NO DEFAULT, deliberately. A default is how the
+    false claim survived: every caller got the devrc answer whether or not it was
+    writing to devrc. Pass `gate_enforces_budget(repo)`.
     """
     if not relpath.startswith("claudedocs/") or "/handoff-" not in "/" + relpath:
         return ""
@@ -2793,8 +2829,14 @@ def budget_warning(relpath: str, merged_text: str, base_text: str) -> str:
             f"🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET: {after:,} B "
             f"against {which} of {allowance:,} B, over by {after - allowance:,} B "
             f"({sign}{delta:,} B this update).",
-            "  `test_no_handoff_doc_exceeds_its_budget` will go RED on `main`, and it "
-            "fails for EVERYONE — the next unrelated PR inherits it.",
+            ("  `test_no_handoff_doc_exceeds_its_budget` will go RED on `main`, and it "
+             "fails for EVERYONE — the next unrelated PR inherits it."
+             if gated else
+             "  ⚠ NO GATE ENFORCES THIS IN THIS REPO — it ships no "
+             f"`{BUDGET_GATE_RELPATH}`, and that test only reads the tree it "
+             "lives in. Nothing will go red, nothing is inherited by anyone. "
+             "Treat the number as JUDGEMENT about what the next session has to "
+             "read, and do not evict on it as though a build were failing."),
             "  Fix in the order that test's own playbook prescribes, and raising a "
             "number is LAST: evict what has CLOSED (usually the whole answer), then "
             "demote dated evidence to `claudedocs/refs/<topic>.md` leaving a pointer, "
@@ -4174,7 +4216,8 @@ def main(argv: list[str] | None = None) -> int:
     # (rule (h)'s stale-base refusal already sat below it), but rules (m) and (n)
     # fire on ORDINARY rounds rather than on a rare stale clone, so this PR is
     # what makes the contradiction common rather than theoretical.
-    budget_note = budget_warning(relpath, merged_text, base_text)
+    budget_note = budget_warning(relpath, merged_text, base_text,
+                                 gated=gate_enforces_budget(repo))
     if budget_note:
         print(budget_note)
     warning = dropped_durable_report(report.dropped)

@@ -6754,9 +6754,74 @@ class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
 DOC = "claudedocs/handoff-example-topic.md"
 
 
-def _budget(relpath, after_bytes, before_bytes=1000):
-    """Drive `budget_warning` with texts of an exact size, not a real document."""
-    return hd.budget_warning(relpath, "x" * after_bytes, "x" * before_bytes)
+def _budget(relpath, after_bytes, before_bytes=1000, *, gated=True):
+    """Drive `budget_warning` with texts of an exact size, not a real document.
+
+    `gated=True` is the devrc answer, which is what every assertion written
+    before #1648's repo-awareness fix assumed. It is the HELPER's default, never
+    the function's — `budget_warning` requires the argument.
+    """
+    return hd.budget_warning(relpath, "x" * after_bytes, "x" * before_bytes,
+                             gated=gated)
+
+
+def test_the_RED_gate_claim_is_made_ONLY_where_the_gate_actually_READS():
+    """🔴 THE PAIR. `test_no_handoff_doc_exceeds_its_budget` enumerates
+    `claudedocs/` under its OWN root, so it is blind to every repo that does not
+    ship it — and the warning announced "will go RED on `main`, and it fails for
+    EVERYONE" regardless. Measured cost in `civitai/cli` (see #618): five
+    evictions, 35,517 B moved to `refs/`, and a slice that removed 27,991 B —
+    the entire ranked list — one step before a commit, none of it required by
+    any gate.
+
+    Both directions asserted, because only the pair is a claim about the branch:
+    a test that checked one side passes with `gated` ignored entirely.
+    """
+    over = hd.handoff_budget.MAX_BYTES + 1
+
+    yes = _budget(DOC, over, gated=True)
+    assert "will go RED on `main`" in yes, yes
+    assert "fails for EVERYONE" in yes, yes
+
+    no = _budget(DOC, over, gated=False)
+    assert "will go RED on `main`" not in no, no
+    assert "fails for EVERYONE" not in no, no
+    assert "NO GATE ENFORCES THIS IN THIS REPO" in no, no
+    # It still REPORTS the size — the number is judgement, not noise to suppress.
+    assert "OVER ITS SIZE BUDGET" in no, no
+    assert "over by 1 B" in no, no
+    # ...and it must not tell you to evict as though a build were failing.
+    assert "do not evict on it as though a build were failing" in no, no
+
+
+def test_gate_enforces_budget_is_DERIVED_from_where_the_gate_lives(tmp_path):
+    """Not path equality against a known root: in a WORKTREE the gate's own
+    `REPO_ROOT` is the worktree, so a hardcoded devrc path answers wrong there.
+    A repo is gated iff it SHIPS the gate."""
+    ungated = tmp_path / "norepo"
+    (ungated / "claudedocs").mkdir(parents=True)
+    assert hd.gate_enforces_budget(ungated) is False
+
+    gated = tmp_path / "hasgate"
+    (gated / "scripts" / "tests").mkdir(parents=True)
+    (gated / hd.BUDGET_GATE_RELPATH).write_text("# the gate\n", encoding="utf-8")
+    assert hd.gate_enforces_budget(gated) is True
+
+    # POSITIVE CONTROL on the fixture: the two differ ONLY by that one file.
+    assert (gated / hd.BUDGET_GATE_RELPATH).is_file()
+    assert not (ungated / hd.BUDGET_GATE_RELPATH).exists()
+
+
+def test_budget_warning_REFUSES_to_guess_whether_a_gate_exists():
+    """A default is how the false claim survived: every caller silently got the
+    devrc answer. The argument is keyword-ONLY and has no default."""
+    import inspect
+    sig = inspect.signature(hd.budget_warning)
+    p = sig.parameters["gated"]
+    assert p.kind is inspect.Parameter.KEYWORD_ONLY, p.kind
+    assert p.default is inspect.Parameter.empty, f"a default reintroduces the bug: {p.default!r}"
+    with pytest.raises(TypeError):
+        hd.budget_warning(DOC, "x" * 10, "x" * 5)
 
 
 def test_an_update_that_goes_OVER_the_ceiling_warns_loudly():
