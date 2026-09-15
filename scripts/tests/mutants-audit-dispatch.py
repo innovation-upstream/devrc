@@ -78,6 +78,12 @@ TEST_REL = "scripts/tests/test_audit_dispatch.py"
 # below, so the test module IMPORTS this file — and a scratch tree without it
 # fails at collection, which reads as "the mutant killed everything".
 HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
+# Non-stdlib modules `TEST_REL` imports at module scope. See the copy loop in
+# `main()` for why they have to be in the sandbox at all.
+TESTLIB_RELS = (
+    "scripts/testlib/__init__.py",
+    "scripts/testlib/hermetic_git.py",
+)
 
 # 🔴 A COLLAPSE floor, not a growth floor — same rule as
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
@@ -3894,6 +3900,15 @@ def main() -> int:
         shutil.copy(REPO / SCRIPT_REL, root / SCRIPT_REL)
         shutil.copy(REPO / TEST_REL, root / TEST_REL)
         shutil.copy(REPO / HARNESS_REL, root / HARNESS_REL)
+        # 🔴 THE SANDBOX MUST CARRY WHAT THE TEST MODULE IMPORTS. It does not
+        # copy `conftest.py` (deliberately — the point is a minimal tree), so
+        # `scripts/` is not on `sys.path` and the module inserts it itself.
+        # These are the only non-stdlib modules it needs. Miss one and pytest
+        # dies during COLLECTION, which surfaces as `only 0 test(s) ran` — the
+        # floor check below catches it, and this comment is where to look.
+        (root / "scripts" / "testlib").mkdir(parents=True, exist_ok=True)
+        for rel in TESTLIB_RELS:
+            shutil.copy(REPO / rel, root / rel)
         if (root / ".git").exists():
             print("🔴 the copy carries a .git — refusing to run")
             return 2

@@ -3599,6 +3599,20 @@ def render_prose_determination(round_no, emit_from, head_sha, anchor):
     whether the payload is PROSE. So the section now states the condition
     outright instead of referring to a classification that was never made.
 
+    ⚠ AND THE REPLACEMENT ROTTED TOO — two ways, both found by a delta audit of
+    the round that wrote it. It read "Nothing upstream classifies that", whose
+    antecedent that same round DELETED, so "that" came to point at a sentence
+    about converging ladders. Worse, the justification stopped being true the
+    moment the scope narrowed: *is the PAYLOAD prose?* does need a
+    classification no artefact carries, but *is the WHOLE DIFF prose?* — the
+    condition this section now states — is a ONE-COMMAND check (`git diff
+    --name-only`, every path `.md`). The paragraph was defending an
+    unanswerable-classification claim about a population that IS mechanically
+    enumerable, which hid that this conjunct could be automated. It now names
+    the command, says out loud that automating it is possible and simply has
+    not been done, and keeps the genuinely unanswerable PAYLOAD question
+    labelled as the separate thing it is.
+
     🔴 AND THE CONDITION IT STATES IS NARROWER THAN THE ONE IT SHIPPED WITH.
     `#1691` scoped this to "this PR's payload is PROSE" while the threshold
     inside it was derived on the PRs whose WHOLE DIFF is prose — a strictly

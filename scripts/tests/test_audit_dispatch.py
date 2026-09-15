@@ -537,10 +537,19 @@ from pathlib import Path
 
 import pytest
 
-from testlib.hermetic_git import hermetic_git_env
-
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "audit-dispatch.py"
+
+# 🔴 EXPLICIT, NOT VIA `conftest.py`. This module is also executed inside
+# `mutants-audit-dispatch.py`'s sandbox, which is a three-file tree — script,
+# this file, the harness — with no conftest and therefore no `scripts/` on
+# `sys.path`. An import that works under pytest and not under the battery makes
+# the battery report `0 test(s) ran`, i.e. a harness failure wearing the
+# clothes of a clean tree. The harness copies `testlib/hermetic_git.py` for the
+# same reason; keep the two in step.
+sys.path.insert(0, str(REPO / "scripts"))
+
+from testlib.hermetic_git import hermetic_git_env  # noqa: E402
 
 
 def _load():
