@@ -73,7 +73,12 @@ func Classify(haveToken bool, statusCode int) AuthState {
 		return AuthNoToken
 	}
 	switch statusCode {
-	case http.StatusOK:
+	case http.StatusOK, http.StatusCreated:
+		// ⚠ `201 Created` JOINED THIS ARM WITH THE PHASE-2 WRITES, and it is a
+		// widening of a SHARED predicate rather than a second one at the write
+		// call sites. `POST /issues/{n}/comments` answers 201 where every
+		// Phase-1 read answered 200; classifying that as `AuthOther` would have
+		// rendered a successful comment as an ERROR card.
 		return AuthOK
 	case http.StatusUnauthorized:
 		return AuthRejected

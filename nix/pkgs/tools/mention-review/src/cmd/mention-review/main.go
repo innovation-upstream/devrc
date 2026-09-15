@@ -1,11 +1,14 @@
 // Command mention-review is a single-purpose TUI for reading one GitHub pull
 // request, spawned by the Alacritty mention-hint path.
 //
-// 🔴 PHASE 1 IS READ-ONLY. There are no write actions — no comment, no
-// approve, no merge. The confirmation ledger in `internal/ui/intents.go` exists
-// and is enforced two-way so Phase 2 cannot add one silently, but today it is
-// legitimately empty and its test says so with a positive control rather than
-// asserting a bare zero.
+// 🔴 PHASE 2 CAN WRITE: comment, approve, request changes, submit review,
+// merge. Four of the five prompt first; a PR-level comment does not, per §3.7,
+// because it is additive and trivially reversible. The two-way ledger in
+// `internal/ui/intents.go` is what makes that list machine-readable: a sixth
+// write verb in neither set fails the suite.
+//
+// 🔴 PR-LEVEL COMMENTS ONLY. Inline diff-line commenting needs review-thread
+// positioning against the diff, and the operator ruled it out of this phase.
 //
 // Usage: mention-review <owner/repo> <number>
 // Exit:  64 wrong argument count · 65 malformed owner/repo · 66 bad number
@@ -21,6 +24,7 @@ import (
 	"github.com/cli/go-gh/v2/pkg/auth"
 
 	"github.com/innovation-upstream/devrc/mention-review/internal/argv"
+	"github.com/innovation-upstream/devrc/mention-review/internal/cfg"
 	"github.com/innovation-upstream/devrc/mention-review/internal/ghapi"
 	"github.com/innovation-upstream/devrc/mention-review/internal/ui"
 )
@@ -56,6 +60,19 @@ func main() {
 
 	app := ui.New(args.Owner, args.Name, args.Num)
 	app.SetRunner(ui.LiveRunner{C: client})
+
+	// 🔴 A CONFIG THAT CANNOT BE READ DISABLES MERGING; IT DOES NOT EXIT, AND
+	// IT DOES NOT SUBSTITUTE A METHOD. The empty string is the `UNKNOWN`
+	// sentinel, and the merge key then refuses in words on screen. Exiting here
+	// would flash a window and vanish; guessing `squash` is the exact failure
+	// `nvim-octo`'s wrapper refuses, because a merge dispatched with a method
+	// nobody chose is the wrong commit shape.
+	method, cerr := cfg.ResolveMergeMethod(cfg.Path())
+	if cerr != nil {
+		fmt.Fprintln(os.Stderr, "mention-review:", cerr)
+		method = ""
+	}
+	app.SetMergeMethod(method)
 
 	p := tea.NewProgram(app)
 	if _, err := p.Run(); err != nil {

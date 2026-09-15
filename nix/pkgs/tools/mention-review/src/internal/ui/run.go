@@ -23,6 +23,15 @@ type Runner interface {
 	FetchPR(ctx context.Context, owner, name string, num int) (*ghapi.Snapshot, error)
 	FetchDiff(ctx context.Context, owner, name string, num int) (*udiff.Diff, error)
 	OpenBrowser(url string) error
+
+	// 🔴 THE THREE WRITES ARE ON THE SAME INTERFACE AS THE READS, AND THAT IS
+	// THE WHOLE SAFETY STORY FOR THE TEST SUITE. `App.runner` is nil in every
+	// pure test, so no test can reach GitHub even by mistake; the one
+	// end-to-end test substitutes a fake that records calls. There is no
+	// package-level client anywhere in this program.
+	PostComment(ctx context.Context, owner, name string, num int, body string) error
+	SubmitReview(ctx context.Context, owner, name string, num int, event, body string) error
+	Merge(ctx context.Context, owner, name string, num int, method string) error
 }
 
 // Run converts ONE intent into a command.
@@ -54,6 +63,41 @@ func Run(i Intent, r Runner) tea.Cmd {
 			// so a failed browser launch must never take the TUI down with it.
 			_ = r.OpenBrowser(v.URL)
 			return nil
+		}
+
+	// --- the writes (§3.7) ---------------------------------------------------
+	//
+	// 🔴 EACH ONE RETURNS `WriteDone` CARRYING THE VERB, SUCCESS OR FAILURE.
+	// A write that returned `nil` on success would leave the UI unable to tell
+	// "it worked" from "the command never ran", which is the empty-result trap:
+	// nothing happened is the observable that the most causes share.
+	case PostComment:
+		return func() tea.Msg {
+			return WriteDone{Verb: v.intentName(),
+				Err: r.PostComment(context.Background(), v.Owner, v.Name, v.Num, v.Body)}
+		}
+	case Approve:
+		return func() tea.Msg {
+			return WriteDone{Verb: v.intentName(),
+				Err: r.SubmitReview(context.Background(), v.Owner, v.Name, v.Num,
+					ghapi.ReviewApprove, "")}
+		}
+	case RequestChanges:
+		return func() tea.Msg {
+			return WriteDone{Verb: v.intentName(),
+				Err: r.SubmitReview(context.Background(), v.Owner, v.Name, v.Num,
+					ghapi.ReviewRequestChanges, v.Body)}
+		}
+	case SubmitReview:
+		return func() tea.Msg {
+			return WriteDone{Verb: v.intentName(),
+				Err: r.SubmitReview(context.Background(), v.Owner, v.Name, v.Num,
+					ghapi.ReviewComment, v.Body)}
+		}
+	case MergePR:
+		return func() tea.Msg {
+			return WriteDone{Verb: v.intentName(),
+				Err: r.Merge(context.Background(), v.Owner, v.Name, v.Num, v.Method)}
 		}
 	}
 	panic("ui.Run: unhandled intent " + i.intentName())
@@ -113,4 +157,21 @@ func (l LiveRunner) FetchDiff(ctx context.Context, owner, name string, num int) 
 // exactly this reason, and the packaging puts it in `runtimeInputs` too.
 func (LiveRunner) OpenBrowser(url string) error {
 	return exec.Command("xdg-open", url).Start()
+}
+
+// The three writes are one-line delegations on purpose: every decision about
+// what may be sent — the verb, the body, the merge method — was made in `Step`,
+// where a test can see it. This layer must not be able to change the meaning of
+// an intent it was handed.
+
+func (l LiveRunner) PostComment(ctx context.Context, owner, name string, num int, body string) error {
+	return l.C.PostComment(ctx, owner, name, num, body)
+}
+
+func (l LiveRunner) SubmitReview(ctx context.Context, owner, name string, num int, event, body string) error {
+	return l.C.SubmitReview(ctx, owner, name, num, event, body)
+}
+
+func (l LiveRunner) Merge(ctx context.Context, owner, name string, num int, method string) error {
+	return l.C.Merge(ctx, owner, name, num, method)
 }
