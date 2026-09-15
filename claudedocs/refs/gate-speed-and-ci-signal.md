@@ -450,3 +450,32 @@ them remain live in `claudedocs/handoff-gate-speed-and-ci-signal.md`.
   allowlist-with-evidence (verified: these scripts are never dispatched via their shebang; they are
   scanned, or invoked as `bash <path>`, which ignores it) **vs** routing all 42 through
   `mockbin.write_exec`. RED 2: decide which of the three gates yields.
+
+### EVICTED 2026-09-14 — rank 13's probe section (rank 13 is CLOSED)
+Verbatim.
+
+### 2026-09-12 — rank 13's probe: testing the claim instead of arguing about it
+
+- 🔴 **"INHERITED — LIKELY CURED BY REBASE" IS A FALSIFIABLE CLAIM, AND FALSIFYING IT COST MINUTES.**
+  Build the merged tree, run ONLY the named failing test: passes ⇒ right, fails ⇒ false. Four PRs,
+  four answers, each test under 4 seconds. **The temptation was to reason from the test's name about
+  whether it "looked like" a census guard; the merged tree answers the actual question and the
+  reasoning would have been a guess dressed as analysis.**
+- **The one-data-point predicate SURVIVED contact with more data, which is not the usual outcome.**
+  With only `#1603` in hand the proposed discriminator was *is the named failing test a census guard
+  over files it does not name?* On four cases it separates 4/4 — and it did NOT merely confirm a
+  prior: it also predicted the two TRUE positives correctly, which is the half that could have
+  falsified it.
+- 🔴 **A 50% FALSE RATE IS A DIFFERENT OBJECT FROM ONE FALSE POSITIVE.** One is an anecdote that
+  invites "it was unlucky"; a rate with a named mechanism and a clean split is a specification for
+  the fix. **Rank 13 went from "decide whether this can ever be armed" to "implement this demotion
+  and re-run the sweep" purely by spending ten minutes measuring.**
+- ⚠ **A MERGE CONFLICT IS NOT A PASS AND NOT A FAILURE.** `#1038` (601 commits behind, 1 conflicting
+  path) has no merged tree, so its verdict is UNTESTABLE and is excluded from the rate rather than
+  quietly counted. The probe script reports it as its own outcome — the same discipline as
+  `COULD NOT MEASURE` elsewhere in this repo. **A denominator of 4, stated, beats a denominator of 5
+  that hides one.**
+- **The probe script refuses to read silence as success**: it greps for a countable
+  `N passed`/`N failed` line and reports `COULD NOT MEASURE — no countable verdict` otherwise,
+  because a pytest selection that matches nothing prints `no tests ran` and **exits 0** — the
+  silent-zero family this doc has now been bitten by three separate ways.

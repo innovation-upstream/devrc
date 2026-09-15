@@ -535,32 +535,6 @@ S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
   the merge did not happen** — on `#1600` the pinning worktree was clean and its single commit's
   content was exactly what had landed.
 
-### 2026-09-12 — rank 13's probe: testing the claim instead of arguing about it
-
-- 🔴 **"INHERITED — LIKELY CURED BY REBASE" IS A FALSIFIABLE CLAIM, AND FALSIFYING IT COST MINUTES.**
-  Build the merged tree, run ONLY the named failing test: passes ⇒ right, fails ⇒ false. Four PRs,
-  four answers, each test under 4 seconds. **The temptation was to reason from the test's name about
-  whether it "looked like" a census guard; the merged tree answers the actual question and the
-  reasoning would have been a guess dressed as analysis.**
-- **The one-data-point predicate SURVIVED contact with more data, which is not the usual outcome.**
-  With only `#1603` in hand the proposed discriminator was *is the named failing test a census guard
-  over files it does not name?* On four cases it separates 4/4 — and it did NOT merely confirm a
-  prior: it also predicted the two TRUE positives correctly, which is the half that could have
-  falsified it.
-- 🔴 **A 50% FALSE RATE IS A DIFFERENT OBJECT FROM ONE FALSE POSITIVE.** One is an anecdote that
-  invites "it was unlucky"; a rate with a named mechanism and a clean split is a specification for
-  the fix. **Rank 13 went from "decide whether this can ever be armed" to "implement this demotion
-  and re-run the sweep" purely by spending ten minutes measuring.**
-- ⚠ **A MERGE CONFLICT IS NOT A PASS AND NOT A FAILURE.** `#1038` (601 commits behind, 1 conflicting
-  path) has no merged tree, so its verdict is UNTESTABLE and is excluded from the rate rather than
-  quietly counted. The probe script reports it as its own outcome — the same discipline as
-  `COULD NOT MEASURE` elsewhere in this repo. **A denominator of 4, stated, beats a denominator of 5
-  that hides one.**
-- **The probe script refuses to read silence as success**: it greps for a countable
-  `N passed`/`N failed` line and reports `COULD NOT MEASURE — no countable verdict` otherwise,
-  because a pytest selection that matches nothing prints `no tests ran` and **exits 0** — the
-  silent-zero family this doc has now been bitten by three separate ways.
-
 ### 2026-09-13 — implementing rank 13: the fix, and what implementing it taught
 
 - 🔴 **MY OWN TEST CAUGHT A FAIL-OPEN BUG IN MY OWN DESIGN, AND IT WAS THE BUG I WAS FIXING.**
@@ -912,6 +886,10 @@ indexed by `handoff_search`, so go to it by path.
 **Two more went the same way on 2026-09-14**, both labelled superseded by this doc itself and
 both belonging to CLOSED ranks: rank 14's ORIGINAL flaky-tmux diagnosis, and `main` is RED on two
 UNOWNED guards. The blocks that SUPERSEDE them stay here.
+
+**And one more on 2026-09-14**: rank 13's PROBE section (*testing the claim instead of
+arguing about it*), evicted to make room for rank 5's measurement. Rank 13 is a tombstone and
+its probe reached an answer; the lesson it carries is restated in rank 13's own entry.
 
 
 ### RESOLVED — #1469's audit ladder (was rank 2)
