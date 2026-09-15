@@ -6754,9 +6754,131 @@ class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
 DOC = "claudedocs/handoff-example-topic.md"
 
 
-def _budget(relpath, after_bytes, before_bytes=1000):
-    """Drive `budget_warning` with texts of an exact size, not a real document."""
-    return hd.budget_warning(relpath, "x" * after_bytes, "x" * before_bytes)
+def _budget(relpath, after_bytes, before_bytes=1000, *, gated=True):
+    """Drive `budget_warning` with texts of an exact size, not a real document.
+
+    `gated=True` is the devrc answer, which is what every assertion written
+    before the repo-awareness fix (#1714) assumed. #1648 is the PR that ADDED
+    `budget_warning` — i.e. the one that introduced the repo-blind claim — so do
+    not chase it looking for the fix. It is the HELPER's default, never the
+    function's: `budget_warning` requires the argument.
+    """
+    return hd.budget_warning(relpath, "x" * after_bytes, "x" * before_bytes,
+                             gated=gated)
+
+
+def test_the_RED_gate_claim_is_made_ONLY_where_the_gate_actually_READS():
+    """🔴 THE PAIR. `test_no_handoff_doc_exceeds_its_budget` enumerates
+    `claudedocs/` under its OWN root, so it is blind to every repo that does not
+    ship it — and the warning announced "will go RED on `main`, and it fails for
+    EVERYONE" regardless. Measured cost in `civitai/cli` (see #618): five
+    evictions, 35,517 B moved to `refs/`, and a slice that removed 27,991 B —
+    the entire ranked list — one step before a commit, none of it required by
+    any gate.
+
+    Both directions asserted, because only the pair is a claim about the branch:
+    a test that checked one side passes with `gated` ignored entirely.
+    """
+    over = hd.handoff_budget.MAX_BYTES + 1
+
+    yes = _budget(DOC, over, gated=True)
+    assert "will go RED on `main`" in yes, yes
+    assert "fails for EVERYONE" in yes, yes
+
+    no = _budget(DOC, over, gated=False)
+    # The INTENT, not the wording: no claim that a gate will fail or that anyone
+    # else inherits it. Asserted as absences of the gated text plus one presence,
+    # so a reword of the ungated message does not silently drop the guarantee.
+    assert "will go RED on `main`" not in no, no
+    assert "fails for EVERYONE" not in no, no
+    assert "NO GATE" in no, no
+    # It still REPORTS the size — the number transfers even where the gate does not.
+    assert "over by 1 B" in no, no
+    assert f"{over:,} B" in no, no
+
+
+def test_EVERY_branch_that_names_the_gate_is_repo_aware():
+    """🔴 ROUND 0's F1/F3: the repo-awareness landed on ONE of the three branches
+    that make a gate claim, which is the "one rule, one place" shape that
+    regenerates the same bug at the sites nobody changed.
+
+    The NEAR band matters most: it fires BEFORE the OVER band, so it is the
+    sentence an author meets FIRST, and it said "cheaper than doing it under a
+    red `main`" in repos that have no such `main`.
+    """
+    ceiling = hd.handoff_budget.MAX_BYTES
+
+    # NEAR band — inside the warn window, under the ceiling.
+    near = ceiling - 10
+    assert "red `main`" in _budget(DOC, near, gated=True)
+    ungated_near = _budget(DOC, near, gated=False)
+    assert "red `main`" not in ungated_near, ungated_near
+    assert "no gate enforces it here" in ungated_near, ungated_near
+    # it still REPORTS the size — the number transfers, the deadline does not
+    assert f"{near:,} B" in ungated_near
+
+    # OVER band — the ladder is devrc-only; the number is not.
+    over = ceiling + 1
+    ungated_over = _budget(DOC, over, gated=False)
+    assert "SIZE ONLY, NO GATE" in ungated_over, ungated_over
+    assert "over by 1 B" in ungated_over, ungated_over
+    for prescription in ("evict what has CLOSED", "claudedocs/refs/",
+                         "raising a number is LAST", "will go RED"):
+        assert prescription not in ungated_over, (prescription, ungated_over)
+
+    # GRANDFATHERED-recovery band — names a ledger file an ungated repo lacks.
+    path, allowance = next(iter(hd.handoff_budget.GRANDFATHERED.items()))
+    assert allowance > ceiling, "fixture assumes a raised entry"
+    assert "GRANDFATHERED" in _budget(path, ceiling - 1, gated=True)
+    assert _budget(path, ceiling - 1, gated=False) == "", \
+        "an ungated repo has no scripts/lib/handoff_budget.py to edit"
+
+
+def test_the_ungated_branch_ALSO_refuses_nothing():
+    """The 🔴 load-bearing property, asserted on the branch that is now the
+    MAJORITY case — 53 handoff docs across the ungated repos already exceed
+    64 KiB, so this output is the default one, not the exception."""
+    out = _budget(DOC, hd.handoff_budget.MAX_BYTES * 4, gated=False)
+    assert isinstance(out, str)
+    assert out, "silence would hide the size entirely"
+
+
+def test_gate_enforces_budget_is_DERIVED_from_where_the_gate_lives(tmp_path):
+    """Not path equality against a known root: in a WORKTREE the gate's own
+    `REPO_ROOT` is the worktree, so a hardcoded devrc path answers wrong there.
+    A repo is gated iff it SHIPS the gate."""
+    ungated = tmp_path / "norepo"
+    (ungated / "claudedocs").mkdir(parents=True)
+    assert hd.gate_enforces_budget(ungated) is False
+
+    gated = tmp_path / "hasgate"
+    (gated / "scripts" / "tests").mkdir(parents=True)
+    (gated / hd.BUDGET_GATE_RELPATH).write_text("# the gate\n", encoding="utf-8")
+    assert hd.gate_enforces_budget(gated) is True
+
+    # 🔴 A REAL CONTROL, NOT THE IMPLEMENTATION RESTATED. Asserting
+    # `(gated / RELPATH).is_file()` here cannot fail once the call above passed —
+    # the function's whole body is that expression, so it would be an expectation
+    # derived from the code under test and labelled as a control. Instead: show
+    # the answer FLIPS on the one thing that differs, in the same directory.
+    assert hd.gate_enforces_budget(ungated) is False
+    (ungated / "scripts" / "tests").mkdir(parents=True)
+    (ungated / hd.BUDGET_GATE_RELPATH).write_text("# the gate\n", encoding="utf-8")
+    assert hd.gate_enforces_budget(ungated) is True, (
+        "adding the gate did not flip the predicate — the fixture, not the code, "
+        "is what these assertions were measuring")
+
+
+def test_budget_warning_REFUSES_to_guess_whether_a_gate_exists():
+    """A default is how the false claim survived: every caller silently got the
+    devrc answer. The argument is keyword-ONLY and has no default."""
+    import inspect
+    sig = inspect.signature(hd.budget_warning)
+    p = sig.parameters["gated"]
+    assert p.kind is inspect.Parameter.KEYWORD_ONLY, p.kind
+    assert p.default is inspect.Parameter.empty, f"a default reintroduces the bug: {p.default!r}"
+    with pytest.raises(TypeError):
+        hd.budget_warning(DOC, "x" * 10, "x" * 5)
 
 
 def test_an_update_that_goes_OVER_the_ceiling_warns_loudly():
@@ -7261,8 +7383,26 @@ class TestTheBudgetWarningDoesNotDescribeAWriteThatIsRefused:
             "the fixture is UNDER the ceiling, so budget_warning stays silent "
             "and this test cannot see the ordering it is named for"
         )
-        _sh("git", "add", "claudedocs/handoff-sample-topic.md", cwd=repo)
+        # 🔴 THIS FIXTURE IS DELIBERATELY *GATED*, and it used to be so by
+        # accident. These tests are about the warning's ORDERING (it prints
+        # before the diff; it does not print on a refused run), so they need the
+        # branch whose wording they assert — the devrc one. Before #1714 every
+        # repo got that branch; now a repo that ships no
+        # `scripts/tests/test_handoff_doc_size.py` correctly gets the
+        # size-only text instead, and this synthetic repo ships nothing. Stating
+        # it here keeps the assertions below verbatim rather than re-pointing
+        # them at whichever branch happens to fire. The ungated branch has its
+        # own unit coverage (`test_EVERY_branch_that_names_the_gate_is_repo_aware`).
+        gate = repo / hd.BUDGET_GATE_RELPATH
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text("# presence is what makes this repo gated\n", encoding="utf-8")
+        _sh("git", "add", "claudedocs/handoff-sample-topic.md",
+            hd.BUDGET_GATE_RELPATH, cwd=repo)
         _sh("git", "commit", "-qm", "a doc over its size budget", cwd=repo)
+        assert hd.gate_enforces_budget(repo), (
+            "the fixture must be GATED or the assertions below anchor on a "
+            "branch that no longer fires"
+        )
         return repo
 
     def test_the_fixture_DOES_trigger_the_warning_on_a_run_that_proceeds(
