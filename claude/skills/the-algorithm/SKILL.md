@@ -1,6 +1,6 @@
 ---
 name: the-algorithm
-description: "Apply the 5-step algorithm (question requirements → delete → simplify → accelerate → automate, in that order) before adding or changing any guard, test, rule, process, or automation. Use when a change adds verification machinery, when asked 'do we need this test/guard/rule', when something reads over-engineered or wasteful, when pruning tests/rules, or when reviewing a PR that adds a guard. Not for product features themselves."
+description: "Apply the 5-step algorithm — question requirements, delete, simplify, accelerate, automate, in that order — before adding or changing any guard, test, rule, process, or automation. Use for: 'do we need this test/guard/rule', over-engineered or wasteful verification, pruning tests/rules, or a PR that adds a guard. Not product features."
 ---
 
 # The algorithm — guards, tests, rules, processes
