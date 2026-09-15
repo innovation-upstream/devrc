@@ -72,8 +72,10 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 - **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) again this session. An
   unknown session id answers 200 with an empty array, so that cannot distinguish "touched no
   task" from "wrong id". Not a clean bill of health.
-- **Claim `gate-speed-and-ci-signal-8` is HELD** by this session — release it when the arming
-  decision is taken (or explicitly deferred) on 2026-09-18.
+- **Claim `gate-speed-and-ci-signal-8` is RELEASED.** The probe it was taken for is done and
+  shipped (`#1702`); the arming ACT is four days out, and a claim held by a gone session is
+  invisible to its holder and blocking to everyone else. 🔴 **The 09-18 session must take it
+  again** — `claim-work --slug-for <this doc> 8`, then claim.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
