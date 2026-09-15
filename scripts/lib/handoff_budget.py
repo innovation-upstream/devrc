@@ -79,8 +79,8 @@ GRANDFATHERED: dict[str, int] = {
     # which is the check that rule asks for.
     "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,
     # `claudedocs/handoff-handoff-search-index.md` was the twelfth entry and is
-    # GONE: it was pruned back to 59,805 B and now fits under MAX_BYTES on its
-    # own, so check (c) demands the entry be deleted rather than left standing.
+    # GONE: it was pruned back under MAX_BYTES on its own, so check (c) demands
+    # the entry be deleted rather than left standing.
     # That is the ratchet working — an entry is not a permanent exemption, and
     # leaving it here would have let the doc regrow 22 KB unobserved.
 }
