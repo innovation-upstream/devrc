@@ -1340,11 +1340,20 @@ predicate that red-lines an open item trains everyone to click through.
     | v1 | **no group was EVER collapsed here** — the keys are immortal |
     | v2 | only that nothing is collapsed RIGHT NOW |
 
-    **The v1 zero is the load-bearing one, and it settles the item:** `#796` merged
-    2026-09-11T17:29:35Z, BEFORE the v2 migration, so its force-open fix operated on the v1
-    namespace — and this profile has never held a v1 key. There was never any collapse state for
-    it to force open. `#796` is a real fix for a real bug; it is **not** a fix for the reported
-    symptom.
+    **The v1 zero is the load-bearing one, and it settles the item.** `#796` operated on the v1
+    namespace — ⚠ **shown directly, not inferred from merge dates**, because the date-ordering
+    version is the weaker claim and this arc has been burned by exactly that: at `#796`'s own
+    merge commit `e77b79f5b`, `internal/ui/tmux.go:1231-1232` read
+    `var PREFIX = 'cg.tmux.group.'` / `var ACKPREFIX = 'cg.tmux.waitack.'`, and `tmux.go` is one
+    of the three files `#796`'s diff touches. (v1 was introduced by `#660`, 2026-09-03; current
+    trunk carries the v2 spellings at `:1959-1960`.) This profile has never held a v1 key, so
+    there was never any collapse state for `#796` to force open. It is a real fix for a real bug;
+    it is **not** a fix for the reported symptom.
+    ⚠ **A near-miss worth recording, because it is this file's own recurring trap:** the first
+    attempt to read that constant piped `git show` into `grep -nE` and returned **nothing**, which
+    reads exactly like "the namespace did not exist there" and would have inverted the conclusion.
+    `git grep` over the same commit — a second tool that fails differently — found both lines.
+    **An empty match set is a claim about the instrument until a second one agrees.**
     ⚠ **The one hole, stated rather than papered over:** a manual `localStorage.clear()` would
     also produce a v1 zero, and nothing distinguishes that from "never collapsed" after the fact.
     The origin holding only 2 keys is consistent with either.
