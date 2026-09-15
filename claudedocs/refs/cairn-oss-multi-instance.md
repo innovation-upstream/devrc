@@ -177,3 +177,117 @@ about what devrc would gain or lose. Do not re-derive this — verify it still h
   pin says ``a writer --validate``) should be updated or deleted as cairn-owned. The brief says
   update the expectation to the PINNED string and never weaken an assertion to a substring.
 
+---
+
+## DEMOTED 2026-09-15 — rank 23's body (CLOSED: devrc #1583 `c1ecc830`, cairn #17 `a2661371`)
+Moved out of the handoff for the size budget; the rank now carries a one-line pointer here. Nothing below is an open thread.
+
+23. ✅ **CLOSED ENTIRELY 2026-09-14.** (a)+(b) devrc #1583 `c1ecc830`; **(c) `ZacxDev/cairn`
+    #17 `a2661371`** — see `State now`. The item said ONE scrubbed remedy; there were TWELVE
+    sites across two replacement phrases and a fabricated symbol.
+    **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
+    (a) `claude/skills/resume/SKILL.md:128` still spells the post-write check as a bare
+    `subsystem_touch.py --validate --scope <scope>` — **not on PATH, exits 127** — and `:150`
+    carries the absolute `python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py` spelling.
+    Both now have a one-word remedy (`cairn-validate`) and neither is pinned by any test, so
+    nothing will catch them drifting again. (b) `subsystem_touch.validate_command()`
+    (`scripts/lib/subsystem_touch.py`) still emits the absolute checkout-path spelling in the
+    `RECOVER —` block the skill tells writers to run verbatim. (c) 🟡8 from #1406's round-2
+    audit: the pinned package's own `🔴 MALFORMED —` remedy prints ``check a file with
+    `a writer --validate <path>` `` — the extraction scrub — which lives in `ZacxDev/cairn`,
+    not devrc, so it needs an upstream PR.
+    **Closing condition:** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 on
+    `origin/main`, and an upstream PR for (c).
+    ✅ **(a) AND (b) MERGED 2026-09-12 — devrc #1583, squash `c1ecc830`. (c) is NOT in it and
+    stays OPEN: it lives in `ZacxDev/cairn` and needs an upstream PR.**
+    **Closing condition MET, verified by CONTENT at `origin/main`** (a squash makes
+    `merge-base --is-ancestor` false forever, so ancestry cannot answer this):
+    `grep -c 'subsystem_touch.py --validate' claude/skills/` → **0**; `validate_command` emits
+    `cairn-validate --store … --scope …`; the RECOVER remedy carries
+    `--flake ~/workspace/devrc --impure`; both new guards present.
+    ⚠ **This line read "🔨 BUILT" for the first hours after the merge** — the same
+    status-drift class this very PR existed to fix, reintroduced by the PR that fixed it.
+    Written down rather than quietly corrected: a doc edited in the same commit as the work
+    it describes cannot record that work's own merge, so the status line is stale by
+    construction until someone comes back for it. **Do not treat a merged handoff edit as
+    self-updating.**
+    ⚠ **The line numbers in this item were STALE** — the two sites are `:135` and `:157`, not
+    `:128`/`:150`. Found by grepping the string, not by opening the named line.
+    - **(a)** both now spell `cairn-validate`. The `:157` site is the single-FILE form, so it
+      reads `cairn-validate --validate <path>`: the launcher prepends `--validate` with no value
+      and argparse's last occurrence wins, which its own docstring states.
+    - **(b)** `validate_command()` now emits `cairn-validate --store <root> --scope <scope>`.
+      🔴 **`--store` is emitted explicitly and that is NOT redundant** — the launcher's own
+      prepend is the SYNCED CACHE, while this function's contract is to check the store the
+      refusal actually came from. **Measured both ways** on the deployed pin: with an explicit
+      `--store`, the run's `store:` line names it, not the launcher's default; and a malformed
+      entry still exits **3**, untranslated.
+    - 🔴 **THE COST RANK 23 DID NOT ANTICIPATE, and it is the reusable part.** Six neighbouring
+      tests broke, because `test_the_recovery_command_ACTUALLY_RUNS_and_reproduces_the_diagnosis`
+      **executes** the emitted command. `python3 <abs path>` is runnable in BOTH tiers; a bare
+      `cairn-validate` is on `home.sessionPath` and the `nix build` tier has no reason to carry
+      it. **Exec'ing the real launcher would have made that guard structurally incapable of
+      passing in one tier while staying green on this host — the defect this repo already shipped
+      once.** So the launcher's prepend is MODELLED in one helper (`_writer_argv`), and the seam
+      is pinned by a new ledger test that reds if the launcher stops prepending `--validate`,
+      stops prepending `--store`, or stops appending the caller's argv.
+    - **Mutation battery: 6/6 killed BY THEIR INTENDED TEST**, each required to fail with its own
+      assertion's message; harness positive-control watched green on the pristine tree first;
+      `PYTHONDONTWRITEBYTECODE=1`; tree restored byte-identical.
+      🔴 **One mutant SURVIVED the first run and the fix is the lesson:** dropping `--store` was
+      invisible because the test modelled the launcher's default with the SAME value the command
+      emits, so the parse yielded the right root either way. It dies only against a sentinel the
+      caller's store can never equal. A fixture whose fields are not pairwise distinct cannot see
+      the mutant that collapses them.
+    🔴 **ROUND 0 OF THIS PR'S OWN AUDIT REFUTED THIS ITEM'S STATED RATIONALE. The fix stands; the
+    REASON printed on it was wrong, and it is retracted in the code, the PR and here.** The claim
+    was that `Path(__file__)` makes the command *"true for the machine that printed it and false
+    for anyone who pastes it elsewhere"*. Both halves fail:
+    - the old spelling emitted an **absolute** path, so cwd was never the failure mode; and
+    - `nix/home.nix` deploys the launcher as an `mkOutOfStoreSymlink` into
+      `${homePath}/workspace/devrc`, so **any host where `cairn-validate` resolves at all
+      necessarily has this checkout at that same absolute path** — the old command would have
+      worked there too. The new spelling's precondition is if anything **stronger**: it needs a
+      home-manager switch and a deployed pin, where the old one needed only python.
+    **The real defect, measured:** `Path(__file__).resolve()` names the **running copy**. Run from
+    a throwaway worktree — this repo's standing default for any file-modifying agent — it emitted
+    `python3 /tmp/wt-cairn-rank23/scripts/lib/subsystem_touch.py …`, a path about to be
+    `worktree remove`d. The recovery command went stale the moment the session that printed it
+    ended. **That is the durable reason; do not re-derive the portability one from this doc.**
+    🔴 **AND A GUARD I WROTE WAS DELETED BY THAT ROUND, ON MEASUREMENT.**
+    `test_the_LAUNCHER_still_prepends_what_this_command_omits` grepped the launcher's SOURCE TEXT
+    and its docstring asserted *"nothing else asserts it … which is a silent green"* — **false**.
+    Control: each of its three mutations run against `test_cairn_flake_pin.py` ALONE, with
+    `test_subsystem_touch.py` deselected — `--validate` prepend dropped → **3 failed**; `--store`
+    prepend dropped → **1 failed**; caller argv dropped → **2 failed**; pristine control green at
+    **15 passed** first. Those tests run the REAL launcher as a subprocess and read BOTH streams,
+    so they hold in the `nix build` tier; mine was SPELLED (baked double quotes ⇒ falsely red on a
+    legal refactor, green on a literal in a comment). **A second, weaker copy of a guard that
+    already exists reads as coverage while providing none.**
+    ⚠ **`--store` SURVIVED the round but is no longer claimed to be free.** `store` here is
+    `args.store`, whose default is `DEFAULT_STORE_ROOT` — the **frozen pre-cutover mirror**, not
+    the synced cache the launcher would otherwise pick (measured: mirror **161** entries, cache
+    **244**), and the mandated invocations in `subsystem-index/SKILL.md` pass no `--store`. Keeping
+    it is FAITHFUL (the malformed file really is in the store that was read) but it inherits an
+    unanswered question — why does the writer default to the frozen mirror at all? — which this
+    change must not be read as settling.
+    🔴 **ROUND 0's OTHER FINDING, FILED NOT FIXED: this item's closing condition is SPELLED, and
+    the CLASS is still open.** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 is
+    genuinely met, but `command grep -rn '/home/zach/workspace/devrc' claude/skills/` returns **21
+    occurrences across 9 files**, including **four literal
+    `python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py …` invocations in
+    `claude/skills/subsystem-index/SKILL.md:73, 93, 113, 218`** — the write-protocol skill itself,
+    the primary consumer. No scanner gates this class. **Closing condition:** a mechanical gate
+    over `claude/skills/**` rejecting any quoted or emitted command that embeds an absolute
+    checkout path, plus those 21 sites cleared — merged, and watched red-then-green on a planted
+    violation. **Owner: unassigned; this is a new ranked item, not part of rank 23.**
+    ⚠ **A THIRD SITE OF THE SAME CLASS, FOUND WHILE FIXING (b) AND DELIBERATELY NOT FIXED:**
+    `scripts/lib/subsystem_touch.py:3991` and `:4712` emit
+    `python3 {SELF_PATH} --template <slug> --scope …` — the same absolute-checkout-path spelling,
+    in the `--template` command rather than `--validate`. It is outside this item's stated scope,
+    and unlike `--validate` it has **no one-word remedy**: there is no `cairn-template` launcher
+    to move it to, so closing it means first deciding whether to add one. **Closing condition:**
+    either a launcher exists and both sites name it, or a decision is recorded here that the
+    writer's `--template` path is meant to stay checkout-absolute. Named so it reads as
+    known-and-open rather than missed.
+    forcing: none
