@@ -2822,6 +2822,25 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
     delta = after - before
     sign = "+" if delta >= 0 else ""
 
+    if after > allowance and not gated:
+        # 🔴 REPORT THE NUMBER, PRESCRIBE NOTHING. The remediation ladder is what
+        # actually cost bytes in civitai/cli#618 — 35,517 B went to
+        # `claudedocs/refs/` because a step told someone to put it there — not the
+        # word "RED". Outside devrc that ladder has no authority: it cites a
+        # playbook in a test the repo does not ship. The SIZE still transfers
+        # (measured across the other repos' corpora), so the number stays.
+        which = ("its grandfathered allowance" if grandfathered
+                 else "the handoff-document ceiling")
+        return "\n".join([
+            f"⚠ SIZE ONLY, NO GATE: {after:,} B against {which} of "
+            f"{allowance:,} B, over by {after - allowance:,} B "
+            f"({sign}{delta:,} B this update).",
+            f"  This repo ships no `{BUDGET_GATE_RELPATH}`, and that test reads "
+            "only the tree it lives in — nothing will go red and nothing is "
+            "inherited by anyone. Treat it as JUDGEMENT about what the next "
+            "session has to read, not as a build to fix.",
+        ])
+
     if after > allowance:
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
@@ -2829,14 +2848,8 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             f"🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET: {after:,} B "
             f"against {which} of {allowance:,} B, over by {after - allowance:,} B "
             f"({sign}{delta:,} B this update).",
-            ("  `test_no_handoff_doc_exceeds_its_budget` will go RED on `main`, and it "
-             "fails for EVERYONE — the next unrelated PR inherits it."
-             if gated else
-             "  ⚠ NO GATE ENFORCES THIS IN THIS REPO — it ships no "
-             f"`{BUDGET_GATE_RELPATH}`, and that test only reads the tree it "
-             "lives in. Nothing will go red, nothing is inherited by anyone. "
-             "Treat the number as JUDGEMENT about what the next session has to "
-             "read, and do not evict on it as though a build were failing."),
+            "  `test_no_handoff_doc_exceeds_its_budget` will go RED on `main`, and it "
+            "fails for EVERYONE — the next unrelated PR inherits it.",
             "  Fix in the order that test's own playbook prescribes, and raising a "
             "number is LAST: evict what has CLOSED (usually the whole answer), then "
             "demote dated evidence to `claudedocs/refs/<topic>.md` leaving a pointer, "
@@ -2848,7 +2861,10 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "against the write-back guard, and an unrecorded session costs more.",
         ])
 
-    if grandfathered and after <= handoff_budget.MAX_BYTES:
+    if grandfathered and after <= handoff_budget.MAX_BYTES and gated:
+        # Gated only: the ledger it tells you to edit lives in THIS repo. An
+        # ungated repo reaching here did so by a relpath COLLISION with devrc's
+        # ledger — which also silently handed it an allowance of up to 245,760 B.
         return (f"✅ This doc is now {after:,} B, back under the "
                 f"{handoff_budget.MAX_BYTES:,} B ceiling — DELETE its "
                 f"`GRANDFATHERED` entry in scripts/lib/handoff_budget.py in this "
@@ -2857,10 +2873,13 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 
     headroom = allowance - after
     if headroom < BUDGET_NEAR_BYTES:
+        tail = ("evicting what has CLOSED now is cheaper than doing it under a "
+                "red `main`." if gated else
+                "no gate enforces it here, so this is a note about readability, "
+                "not a deadline.")
         return (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
-                f"update or two will go over; evicting what has CLOSED now is "
-                f"cheaper than doing it under a red `main`.")
+                f"update or two will go over; {tail}")
     return ""
 
 
