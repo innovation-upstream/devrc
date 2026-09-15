@@ -51,42 +51,22 @@ GRANDFATHER_STEP = 16_384
 # (c) until its entry is deleted, so this dict can only shrink over time unless
 # someone deliberately adds to it.
 #
-# 🔴 THE TRAILING COMMENT HAS NO GUARANTEED PROVENANCE. It is a size that was
-# true of something at some point, and that is the whole of what can be said
-# about it. Two of these never matched the tree AT ALL: the lines for
-# `handoff-cairn-oss-multi-instance.md` (191,946 B) and
-# `handoff-gate-speed-and-ci-signal.md` (71,027 B) were both written by
-# `a2c84a1c`, where those documents measured 184,565 B and 79,309 B. So the
-# earlier claim here — "the size when THAT ENTRY was last written" — is false,
-# and no replacement claim is offered: TREAT EVERY ONE OF THEM AS POSSIBLY
-# STALE. Measured when this block was written, 4 of 11 disagreed with the file,
-# by up to 7,665 B, and NOTHING checks them: the gate's `stale` category means
-# "a ledger entry matching no document", never "a comment disagreeing with a
-# size". That count is itself a snapshot — the pattern is the point, not the 4.
-#
-# 🔴 THE GATE READS THE FILE, NOT THE COMMENT, and so should you — `stat -c %s
-# <path>`. Do not infer headroom by subtracting a comment from an allowance; on
-# `handoff-cairn-oss-multi-instance.md` that arithmetic said ~4.6 KB of headroom
-# when the real figure was 1,060 B. (This is the same reason the ceiling's own
-# sizes are not written down further up: a derived measurement in prose goes
-# stale in the commit that edits what it measures.)
-#
-# The one narrow thing that IS true: an entry's comment is rewritten every time
-# its ALLOWANCE moves (verified across every commit that has touched this file).
-# That is a fact about the allowance column, NOT a currency guarantee for the
-# comment — a document can grow right up to its allowance without either number
-# moving, which is how the four above went stale.
+# 🔴 NO MEASURED SIZE IS RECORDED HERE — see the ⚠ note above `MAX_BYTES` for
+# why. Read the file (`stat -c %s <path>`); every failure message prints
+# current / allowance / over-by and the exact line to paste, and that is the
+# authority. An allowance only ever changes by a deliberate edit to its line
+# below.
 GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 212_992,               # 198,977 B
-    "claudedocs/handoff-audit-pr-ladder.md": 196_608,           # 195,625 B
-    "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
-    "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B
-    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,          #  99,215 B
-    "claudedocs/handoff-subsystem-store.md": 98_304,            #  95,922 B
-    "claudedocs/handoff-gate-flake-store-api.md": 98_304,       #  86,391 B
-    "claudedocs/handoff-tmux-restore-chain.md": 98_304,         #  84,569 B
-    "claudedocs/handoff-skill-chain-usage-audit.md": 81_920,    #  79,511 B
-    "claudedocs/handoff-cairn-task-linkage.md": 81_920,         #  76,743 B
+    "claudedocs/handoff-tmux-webapp.md": 212_992,
+    "claudedocs/handoff-audit-pr-ladder.md": 196_608,
+    "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,
+    "claudedocs/handoff-cairn-phase3.md": 163_840,
+    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,
+    "claudedocs/handoff-subsystem-store.md": 98_304,
+    "claudedocs/handoff-gate-flake-store-api.md": 98_304,
+    "claudedocs/handoff-tmux-restore-chain.md": 98_304,
+    "claudedocs/handoff-skill-chain-usage-audit.md": 81_920,
+    "claudedocs/handoff-cairn-task-linkage.md": 81_920,
     # 🔴 THE TWELFTH ENTRY IS A MERGED-TREE FINDING, NOT A DAY-ONE MEASUREMENT,
     # and it is worth a line because it is the shape this ledger will keep
     # meeting. This doc did not exist when the ceiling was measured; it landed on
@@ -97,7 +77,7 @@ GRANDFATHERED: dict[str, int] = {
     # inputs, the other adds a CALLER". Here the gate is the widened input and a
     # new document is the caller. Caught by merging `main` in and re-running,
     # which is the check that rule asks for.
-    "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,   #  71,027 B
+    "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,
     # `claudedocs/handoff-handoff-search-index.md` was the twelfth entry and is
     # GONE: it was pruned back to 59,805 B and now fits under MAX_BYTES on its
     # own, so check (c) demands the entry be deleted rather than left standing.
