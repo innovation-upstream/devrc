@@ -775,7 +775,9 @@ belongs to that arc's own session. via: measurement
 
 4. ✅ **CLOSED 2026-09-14 — MERGED. `civitai/talos-infra#1414`, squash `c9b1c4e03`.**
    All four §11 questions answered by the operator: **Zach-only at launch but PER-IDENTITY
-   from day one**; **`cairn.civitai.com`, CF-proxied**; **Zach the sole token admin for now**;
+   from day one**; **a DEDICATED subdomain on the client apex (not a path on an existing
+   host), CF-proxied** — the literal is deliberately not written here, see below; **Zach the
+   sole token admin for now**;
    **OSS contributions OPEN from day one** (the one answer that went against the
    recommendation, recorded as such). 🔴 Its §8 blocker table was STALE FOR NINE DAYS —
    blocker 2 (token reload) LANDED while the PR sat open (`server/server.py:5049
@@ -786,6 +788,17 @@ belongs to that arc's own session. via: measurement
    enabled. **Closes when** both exist on `origin/main` and the file names the leak gate
    (`tests/leakscan.py`) and the test command — land it BEFORE advertising the repo, so a
    first contributor meets a documented gate rather than a surprising one.
+   🔴 **THE HOSTNAME ANSWER IS SCRUBBED ON PURPOSE — do not "restore" it.** This doc
+   originally spelled the client subdomain literally, and **devrc is a PUBLIC repo**, so a
+   client's internal topology was committed to it. `test_no_client_hostnames` caught it here
+   on 2026-09-14, red on `main`, and the guard's own playbook applies: this value is a
+   DECISION RECORD, nothing in tracked source opens it, so the substance stays and the
+   literal goes. What the operator actually decided — a dedicated subdomain rather than a
+   path, CF-proxied — is above and is the part a reader needs. ⚠ The literal is still in
+   this repo's REACHABLE HISTORY (three commits); the content gates enumerate `git ls-files`
+   and are structurally blind to history (`SECRETS.md` → "Dead credentials in reachable
+   history"), so this scrub stops the leak GROWING and does not remove it. Rewrite-vs-accept
+   is an operator call and has not been made.
    (Historical: four open questions in §11; none blocked A3.) **RE-VERIFIED LIVE 2026-09-09: still OPEN** (`state: OPEN`,
    `mergedAt: null`).
    🔴 **AND A RECONCILER FALSE POSITIVE TO NOT FALL FOR AGAIN.** `resume-state.sh` reported
