@@ -479,3 +479,47 @@ Verbatim.
   `N passed`/`N failed` line and reports `COULD NOT MEASURE — no countable verdict` otherwise,
   because a pytest selection that matches nothing prints `no tests ran` and **exits 0** — the
   silent-zero family this doc has now been bitten by three separate ways.
+
+### EVICTED 2026-09-14 — rank 13's implementation section (rank 13 is CLOSED)
+Verbatim.
+
+### 2026-09-13 — implementing rank 13: the fix, and what implementing it taught
+
+- 🔴 **MY OWN TEST CAUGHT A FAIL-OPEN BUG IN MY OWN DESIGN, AND IT WAS THE BUG I WAS FIXING.**
+  `census_scan.analyze()` on a mis-rooted path **RETURNS AN EMPTY RESULT rather than raising**. The
+  first `CensusIndex` trusted that, so a wrong root would have answered "not a census guard" for
+  every test in the repo — failing OPEN into precisely the false-INHERITED bug under repair. Caught
+  only because the fail-safe was written as a test driven at a real empty directory rather than
+  asserted about a stub. **Write the unhappy path as a test against reality, not as a comment.**
+- 🔴 **MY FIRST FLOOR WAS THE WRONG SHAPE AND THE SUITE SAID SO IMMEDIATELY.** Mirroring
+  `ledger-check.sh`'s `MIN_NODEIDS` (a count floor) turned **every end-to-end fixture repo** into
+  COULD NOT MEASURE: a small repo with genuinely no census guards is a TRUE answer, not a broken
+  scan. The trip is now `parsed == 0` — "did the scan read anything at all" — and the
+  production-strength claim lives in the suite as a positive control. **A guard that cannot
+  distinguish "small" from "broken" fails the wrong way.**
+- 🔴 **I DESTROYED MY OWN UNCOMMITTED IMPLEMENTATION WITH THE MUTATION BATTERY.** The battery
+  restored between mutants with `git checkout -- <file>` against a tree whose changes were **never
+  committed**, reverting the entire implementation to `origin/main`. Recovered by re-applying all
+  six blocks with `count == 1` assertions, re-verifying at 106 passed, and committing BEFORE
+  re-running. **A mutation battery needs a COMMITTED baseline, not merely a green one** — this is
+  `claude/RULES.md`'s "restore from `cp -a`, not `git checkout --`" with the emphasis moved to
+  *when* you are allowed to start.
+- **The battery itself then worked: 4/4 killed**, control green both ends, tree restored clean —
+  drop the index at the call site → wiring guard red; screen computes but never acts → demotion
+  red; fail open on unbuildable → fail-safe red; drop the `parsed == 0` trip → mis-rooted red.
+- 🔴 **"RED AT BASE" WAS STRUCTURAL, NOT BEHAVIOURAL, AND SAYING SO MATTERS.** The 9 base failures
+  are all `AttributeError: no attribute 'CensusIndex'` — they prove the tests need the new code,
+  NOT that behaviour changed. The behavioural delta is pinned separately on both sides with the
+  IDENTICAL fixture: base asserts ALPHA is INHERITED (still green at HEAD), the new test asserts the
+  same fixture demotes, and the two differ ONLY in the oracle's answer. **A regression matrix that
+  is really an import error should be labelled as one.**
+- **The screen defaults to OFF (`census=None`), so its WIRING is what can rot** — dropping the
+  argument at the one production call site would make it silently inert while all 106 tests still
+  pass. Pinned STRUCTURALLY over the AST at both call sites, with a positive control proving the
+  scan can see the spelling it forbids.
+- ⚠ **`mapfile` DOES NOT EXIST IN zsh, and the Bash tool runs zsh.** An inline selector using it
+  found **0 files**; the run refused on its own floor instead of reporting a green over nothing.
+  Put any `mapfile`/array selector in a `#!/usr/bin/env bash` script file.
+- ⚠ **`grep … | head` returns HEAD's status, so `|| echo "none"` never fires.** Hit twice in one
+  session while checking reachability, and once it truncated a `find` so a tracked file looked
+  absent. **Capture to a variable and branch on `$?`.**
