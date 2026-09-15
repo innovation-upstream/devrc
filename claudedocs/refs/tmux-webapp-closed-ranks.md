@@ -21,9 +21,9 @@ you need a number** — it is the one list a reader can check against the entrie
 🔴 **Numbers here are RETIRED, never reused.** A rank is half a `claim-work` claim's identity, so
 re-minting one of these would point a new claim at closed work.
 
-Evicted: 1–46, 50, 51, 52, 55, 58, 61, 62
+Evicted: 1–47, 50, 51, 52, 55, 58, 61, 62
 
-The live queue therefore holds exactly: 47, 48, 49, 53, 54, 56, 57, 59, 60.
+The live queue therefore holds exactly: 48, 49, 53, 54, 56, 57, 59, 60.
 
 🔴 **THE SECOND SWEEP EVICTED SIX — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED FOR DAYS
 WHILE STILL READING AS OPEN.** Six of the fifteen entries the queue then advertised were finished
@@ -61,6 +61,17 @@ THE THIRD.** That is the correction that matters to anyone building the determin
 THIS DIAGNOSIS DOES NOT ACCOUNT FOR.** A body scan alone would have left two of the four. What IS
 established is the FALSE-NEGATIVE direction: **no rank with a body-only marker was ever evicted** —
 measured over all 62. Why 46 and 62 were caught is open.
+
+🔴 **AND A THIRD WAY A RANK GOES STALE THAT NO MARKER SCAN CAN SEE: ITS INSTRUCTION ROTS WHILE ITS
+STATUS STAYS TRUE.** Rank 47 was never closed, never marked, and read as perfectly live — while the
+`cg.tmux.group.*` prefix it told you to measure was retired **1 h 44 m after it was written**, by
+`#797`, a PR of this same arc. The item stayed open and correct-looking; only its *method* died.
+Run literally it returns a structural zero and reads as a confident measurement of nothing.
+**A rank that names a key, path, flag, selector or command is carrying a DEPENDENCY nobody
+re-checks** — so when a sweep meets an item whose instruction names a concrete identifier, verify
+the identifier still exists before running it, and treat "the result was zero/empty" as the
+suspicious case rather than the clean one. No scan over CLOSURE markers will ever catch this class,
+because nothing about the item is closed.
 
 The remedies, by class:
 
@@ -1300,3 +1311,91 @@ predicate that red-lines an open item trains everyone to click through.
         `/session/{id}` and from the tmux page, sourced from the transcript, verified on the live pod
         after deploy — not inferred from a green test.
         forcing: none
+
+47. ✅ **CLOSED 2026-09-14 — the fix is UNCONFIRMED against the symptom, which is the closing
+    condition as written.** The operator reports the symptom gone and names the workbench Brave
+    `work` profile as where they saw it; nothing measurable distinguishes which change fixed it.
+    🔴 **RETRACTED IN REVIEW — the first version of this entry claimed "the answer is NO, `#796`
+    CANNOT have fixed it", and that was FALSE.** It rested on "a v1 zero proves no group was ever
+    collapsed here, because nothing in the app ever deletes a v1 key." The immortality is real but
+    it **begins at `#797`** — and `#796` merged **6 h 10 m earlier**, inside the window where v1
+    keys were deleted by two ordinary paths. Measured at `#796`'s own merge commit `e77b79f5b`:
+    `setCollapsed(k, false)` calls `s.removeItem(PREFIX + k)`, so **un-collapsing deletes the
+    key**; and `prune()` (`:1372`, arms at `:1379`/`:1382`) scanned `PREFIX`/`ACKPREFIX`, which
+    **were the v1 spellings then**, so v1 keys were garbage-collected whenever a project left the
+    page. A v1 zero today is therefore **uninformative** about the v1 era.
+    🔴 **THE ERROR WAS THE TIME AXIS, AND THE EVIDENCE WAS TWELVE LINES AWAY.** `prune()` was read
+    on CURRENT trunk and its property asserted of the PAST — the exact thing `RULES.md` names
+    ("current source is evidence about CURRENT behaviour, never what the code did BEFORE a fix").
+    The `removeItem` that refutes it sits ~12 lines below the `var PREFIX` constants this entry
+    already quotes from that same blob. **Reading the right commit is not enough if you read only
+    the line you went looking for.**
+    ⚠ **AND THE CONCLUSION WOULD NOT HAVE FOLLOWED EVEN IF THE PREMISE HELD.** `#796`'s diff is
+    server-side Go (`needsHuman`, used in `groupByProject` and `tmuxWindowCard`); it never touches
+    the `tmuxGroupScript` JS and never reads `PREFIX`. It has **three** observable effects and only
+    the force-open one needs a collapse key — the `WAITING ON YOU` group badge and the card's
+    waiting-evidence banner render regardless. So "no collapse state" would rule out one of three
+    effects, not the PR. Which reading "sessions appear missing" has — *cards absent* vs *could not
+    find the window that needed me* — was never pinned down, and it decides this.
+    🔴 **SO: `#796` IS NOT RULED OUT. It remains a candidate alongside `#797` and `#803`, and none
+    of the three was measured.** Do not read this entry as eliminating any of them.
+    🔴 **THE ITEM'S OWN INSTRUCTION NAMED A DEAD KEY PREFIX.** It says to read
+    `cg.tmux.group.*`. That was the LIVE namespace when the item was written (2026-09-11T21:55Z)
+    and was retired **1 h 44 m later** by `#797` (2026-09-11T23:39Z), which re-keyed the group
+    identity from `<project>` to `<host>|<session>` under `cg.tmux.v2.group.`. Following the
+    instruction literally today reads a namespace nothing writes, gets a structural zero, and
+    reports "collapse is not active" having measured nothing. **A stale claim invalidated by a
+    LATER change of the same arc, with nothing pointing at it** — the shape this doc keeps hitting.
+    **MEASURED** on the profile the operator names as where they saw it (Brave `work`, workbench,
+    origin `https://clawgate.zacx.dev`), with a positive control proving each predicate matches
+    its real key shape (`v1=1 v2g=1 v2a=1` against synthetic keys) so a zero is a real zero:
+
+        cg.tmux.group.*      (v1, dead)  ->  0
+        cg.tmux.v2.group.*   (v2, LIVE)  ->  0
+        whole origin: 2 keys — cg.session.view.<uuid>, htmx-history-cache
+
+    🔴 **NEITHER ZERO PROVES WHAT THE FIRST VERSION OF THIS ENTRY CLAIMED.** The retraction above
+    has the measurement; what survives is only this, and it is weak:
+
+    | namespace | a zero proves | it does NOT prove |
+    |---|---|---|
+    | v1 | nothing is stored under the dead prefix today | **anything about the v1 era** — the key was deleted on un-collapse (`removeItem`, `e77b79f5b`) and pruned whenever the project left the page |
+    | v2 | nothing is collapsed RIGHT NOW | that nothing ever was |
+
+    The immortality property is real on CURRENT trunk — `prune()` (`:2100`) has two arms, both
+    testing the v2 `PREFIX`/`ACKPREFIX` (`:2107`, `:2110`), so a v1 key matches neither, per the
+    deliberate comment at `:1758`. **It simply does not extend backwards past `#797`**, and `#796`
+    is on the far side of that line.
+    ⚠ **HOLES, ENUMERATED RATHER THAN COUNTED — an earlier draft said "the one hole" and named the
+    LEAST likely member of the family, which reads as an exhaustive residual-risk statement and is
+    not one.** A v1 zero today is consistent with all of:
+    1. never collapsed;
+    2. collapsed, then un-collapsed — `removeItem`, no deliberate act required;
+    3. collapsed, then the project left the page and v1-era `prune()` swept it;
+    4. a manual `localStorage.clear()`;
+    5. a different profile, a profile reset, or another origin — this read covers ONE origin in ONE
+       profile;
+    6. **the phone**, which the ORIGINAL text below names as *"the untested case"* and which this
+       closure never measured. It is retired by the operator's statement that they saw the symptom
+       on the workbench `work` profile — **an answer, not a measurement**, and it is recorded that
+       way so a reader can weigh it.
+    ⚠ **A near-miss worth recording:** the first read of the `var PREFIX` constant piped `git show`
+    into `grep -nE` and returned **nothing**, which reads exactly like "the namespace did not exist
+    there". `git grep` over the same commit found both lines. ⚠ It does **not** reproduce — a later
+    audit ran the same shape successfully — so the cause was probably the pattern, not the pipe,
+    and no mechanism is asserted here. The lesson stands either way and is already a standing rule
+    (`RULES.md` → "Cross-check against a second tool that fails differently"); this is one worked
+    instance of it, not a new rule.
+    🔴 **WHAT DID FIX IT IS NOT ESTABLISHED, AND NO MECHANISM IS OFFERED.** The operator reports
+    the symptom is gone. The page was rebuilt twice in the interval — `#797` (regroup to
+    host -> session -> window) and `#803` (full rebuild) — so either is a candidate and neither was
+    measured. **Do not supply a cause**; this arc has now produced three retracted explanations
+    written under exactly this pressure.
+    Closing condition as written ("the fix is unconfirmed against it") is MET — negatively, which
+    is a real answer and not a failure to answer.
+    ORIGINAL, verbatim:
+    47. **Confirm the tmux collapse defect was the operator's actual symptom.** #796 fixed a real
+       force-open bug, but the connected Brave profile has **zero** `cg.tmux.group.*` keys, so the
+       collapse is not active there. Read that localStorage on the device where sessions appear
+       missing (a phone is the untested case).
+       forcing: user — the operator reported missing sessions; the fix is unconfirmed against it.
