@@ -83,14 +83,14 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 35
-MEASURED_TIER_A_ENTRIES = 22
-MEASURED_TIER_A_CHARS = 7_617
+MEASURED_ENTRIES = 36
+MEASURED_TIER_A_ENTRIES = 23
+MEASURED_TIER_A_CHARS = 7_510
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_802
-# ...and what the same 35 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 3,542 chars.
-MEASURED_ALL_TIER_A_CHARS = 11_344
+MEASURED_UNDER_LEDGER_CHARS = 7_695
+# ...and what the same 36 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 3,316 chars.
+MEASURED_ALL_TIER_A_CHARS = 11_011
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -98,6 +98,13 @@ MEASURED_ALL_TIER_A_CHARS = 11_344
 # The ceiling sits EXACTLY ON MEASURED_TIER_A_CHARS — 0 headroom, so the next
 # tier-A addition of any size reds this gate. The mean tier-A entry is
 # 7,617 / 22 = 346.2.
+#
+# 2026-09-14: adding `the-algorithm` (tier A) and cutting mechanism prose from
+# five descriptions put MEASURED_TIER_A_CHARS at 7,510 across 23 entries — the
+# ceiling was left at 7,617, so headroom is 107, NOT 0. The mean tier-A entry is
+# 7,510 / 23 = 326.5; headroom below the mean bounds an AVERAGE entry, not every
+# entry. Do not treat the 107 as licence — the descriptions gate above this one
+# is still pinned at 0 headroom and reds on the next addition.
 #
 # The 254 chars of headroom this paragraph used to assert were consumed by the
 # RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an
