@@ -51,20 +51,22 @@ GRANDFATHER_STEP = 16_384
 # (c) until its entry is deleted, so this dict can only shrink over time unless
 # someone deliberately adds to it.
 #
-# Measured 2026-09-13; the trailing comment is the size AT THAT MOMENT and is
-# informational — the enforced number is the allowance, and the measurement the
-# gate reads is the file.
+# 🔴 NO MEASURED SIZE IS RECORDED HERE — see the ⚠ note above `MAX_BYTES` for
+# why. Read the file (`stat -c %s <path>`); every failure message prints
+# current / allowance / over-by and the exact line to paste, and that is the
+# authority. An allowance only ever changes by a deliberate edit to its line
+# below.
 GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 245_760,               # 242,155 B
-    "claudedocs/handoff-audit-pr-ladder.md": 196_608,           # 195,625 B
-    "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
-    "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B
-    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,          #  99,215 B
-    "claudedocs/handoff-subsystem-store.md": 98_304,            #  95,922 B
-    "claudedocs/handoff-gate-flake-store-api.md": 98_304,       #  86,391 B
-    "claudedocs/handoff-tmux-restore-chain.md": 98_304,         #  84,569 B
-    "claudedocs/handoff-skill-chain-usage-audit.md": 81_920,    #  79,511 B
-    "claudedocs/handoff-cairn-task-linkage.md": 81_920,         #  76,743 B
+    "claudedocs/handoff-tmux-webapp.md": 212_992,
+    "claudedocs/handoff-audit-pr-ladder.md": 196_608,
+    "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,
+    "claudedocs/handoff-cairn-phase3.md": 163_840,
+    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,
+    "claudedocs/handoff-subsystem-store.md": 98_304,
+    "claudedocs/handoff-gate-flake-store-api.md": 98_304,
+    "claudedocs/handoff-tmux-restore-chain.md": 98_304,
+    "claudedocs/handoff-skill-chain-usage-audit.md": 81_920,
+    "claudedocs/handoff-cairn-task-linkage.md": 81_920,
     # 🔴 THE TWELFTH ENTRY IS A MERGED-TREE FINDING, NOT A DAY-ONE MEASUREMENT,
     # and it is worth a line because it is the shape this ledger will keep
     # meeting. This doc did not exist when the ceiling was measured; it landed on
@@ -75,10 +77,10 @@ GRANDFATHERED: dict[str, int] = {
     # inputs, the other adds a CALLER". Here the gate is the widened input and a
     # new document is the caller. Caught by merging `main` in and re-running,
     # which is the check that rule asks for.
-    "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,   #  71,027 B
+    "claudedocs/handoff-gate-speed-and-ci-signal.md": 81_920,
     # `claudedocs/handoff-handoff-search-index.md` was the twelfth entry and is
-    # GONE: it was pruned back to 59,805 B and now fits under MAX_BYTES on its
-    # own, so check (c) demands the entry be deleted rather than left standing.
+    # GONE: it was pruned back under MAX_BYTES on its own, so check (c) demands
+    # the entry be deleted rather than left standing.
     # That is the ratchet working — an entry is not a permanent exemption, and
     # leaving it here would have let the doc regrow 22 KB unobserved.
 }
