@@ -51,18 +51,33 @@ GRANDFATHER_STEP = 16_384
 # (c) until its entry is deleted, so this dict can only shrink over time unless
 # someone deliberately adds to it.
 #
-# The trailing comment is the size when THAT ENTRY was last written (most of
-# them: 2026-09-13) and is informational — the enforced number is the allowance,
-# and the measurement the gate reads is the file.
+# 🔴 THE TRAILING COMMENT HAS NO GUARANTEED PROVENANCE. It is a size that was
+# true of something at some point, and that is the whole of what can be said
+# about it. Two of these never matched the tree AT ALL: the lines for
+# `handoff-cairn-oss-multi-instance.md` (191,946 B) and
+# `handoff-gate-speed-and-ci-signal.md` (71,027 B) were both written by
+# `a2c84a1c`, where those documents measured 184,565 B and 79,309 B. So the
+# earlier claim here — "the size when THAT ENTRY was last written" — is false,
+# and no replacement claim is offered: TREAT EVERY ONE OF THEM AS POSSIBLY
+# STALE. Measured when this block was written, 4 of 11 disagreed with the file,
+# by up to 7,665 B, and NOTHING checks them: the gate's `stale` category means
+# "a ledger entry matching no document", never "a comment disagreeing with a
+# size". That count is itself a snapshot — the pattern is the point, not the 4.
 #
-# 🔴 IT IS NOT A DATED SNAPSHOT THAT EXCUSES A STALE NUMBER. An entry's comment
-# is rewritten every time its allowance moves, so "the header says 2026-09-13"
-# is not an argument for leaving it wrong — that argument was made for
-# `handoff-tmux-webapp.md` and was false: the line had been rewritten on
-# 2026-09-15 (245_760/242,155 -> 212_992/204,328) two days after that date.
-# Update the comment in the same commit that changes the document.
+# 🔴 THE GATE READS THE FILE, NOT THE COMMENT, and so should you — `stat -c %s
+# <path>`. Do not infer headroom by subtracting a comment from an allowance; on
+# `handoff-cairn-oss-multi-instance.md` that arithmetic said ~4.6 KB of headroom
+# when the real figure was 1,060 B. (This is the same reason the ceiling's own
+# sizes are not written down further up: a derived measurement in prose goes
+# stale in the commit that edits what it measures.)
+#
+# The one narrow thing that IS true: an entry's comment is rewritten every time
+# its ALLOWANCE moves (verified across every commit that has touched this file).
+# That is a fact about the allowance column, NOT a currency guarantee for the
+# comment — a document can grow right up to its allowance without either number
+# moving, which is how the four above went stale.
 GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 212_992,               # 198,678 B
+    "claudedocs/handoff-tmux-webapp.md": 212_992,               # 198,977 B
     "claudedocs/handoff-audit-pr-ladder.md": 196_608,           # 195,625 B
     "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
     "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B
