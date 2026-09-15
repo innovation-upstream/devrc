@@ -527,6 +527,8 @@ import importlib.util
 import io
 import json
 import re
+import shlex
+import subprocess
 import sys
 import tempfile
 import tokenize
@@ -534,6 +536,8 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+
+from testlib.hermetic_git import hermetic_git_env
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "audit-dispatch.py"
@@ -7717,12 +7721,22 @@ def test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_befor
             "which is narrower than the payload being prose and is the "
             "population the threshold was derived on"
         )
-        assert "Nothing upstream classifies that" in out, (
-            "the section still implies a prose classification was made "
-            "upstream. Round-0 finding F6: no artefact carries one — THE "
-            "LEDGER asks payload-vs-scaffolding, which is a different "
-            "question — so the section must state the condition rather than "
-            "refer to a classification that was never made"
+        assert "Whether THIS diff is whole-prose is a ONE-COMMAND check" in out, (
+            "the section does not tell the runner HOW to settle the condition "
+            "it just stated. Round-0 finding F6 was that it referred to a "
+            "prose classification nobody had made; the round-2 delta finding "
+            "was that its replacement — 'Nothing upstream classifies that' — "
+            "had lost its antecedent to an edit AND defended an "
+            "unanswerable-classification claim about a population that is in "
+            "fact mechanically enumerable (`git diff --name-only`, every path "
+            "`.md`). The unanswerable question is the PAYLOAD one, and the "
+            "section must keep the two apart"
+        )
+        assert "whether the PAYLOAD is prose" in out, (
+            "the section no longer says WHICH classification no artefact "
+            "carries. Without it the whole-diff condition — which is a "
+            "one-command check — reads as the unanswerable one, which is the "
+            "confusion that made the narrowing look free"
         )
 
 
@@ -7837,6 +7851,261 @@ def test_the_determination_mandates_the_whitespace_and_move_blame_flags():
         "paragraph to the rewrapper and no blame flag sees it — the one "
         "residual bias in this rule, and it points at stopping."
     )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE REFLOW COMMAND, RUN — not asserted about.
+# --------------------------------------------------------------------------- #
+# The round that added state (e) shipped a `--word-diff` command WITHOUT `-U0`
+# and validated it on a fixture that could not tell the difference: ONE
+# three-line paragraph, where `-U0` and the default three lines of context
+# produce identical hunks. The rule counts the hunks of `git diff -U0 -w -M`;
+# the reflow detector must therefore look at THE SAME HUNKS, and at default
+# context it does not — neighbouring changes merge.
+#
+# MEASURED on this PR's own skill range (`ca3b787c..6bf15a8f --
+# claude/skills/audit-pr/SKILL.md`): 10 hunks with `-U0`, 4 without. Markdown
+# paragraphs sit one blank line apart, so a purely rewrapped paragraph beside an
+# edited one lands inside the merged hunk, that hunk carries the neighbour's
+# `+`/`-` words, and state (e) cannot fire on a diff that contains a pure
+# reflow.
+#
+# So the fixture below is TWO paragraphs one blank line apart: the first purely
+# rewrapped (same words, different line breaks), the second edited by one word.
+# Both halves of the shipped rule are exercised against real git, and the
+# assertion is a RELATIONSHIP — the two commands must agree on the hunk set —
+# rather than a spelling of the flag, which a reworded command would walk past.
+_REFLOW_DOC_BASE = (
+    "alpha beta gamma delta epsilon zeta eta\n"
+    "theta iota kappa lambda mu nu xi omicron pi rho sigma tau.\n"
+    "\n"
+    "second paragraph mentions upsilon phi chi psi and\n"
+    "omega before it finally stops here.\n"
+)
+# Paragraph 1: the SAME words, re-wrapped. Paragraph 2: one word edited.
+_REFLOW_DOC_HEAD = (
+    "alpha beta gamma delta epsilon\n"
+    "zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau.\n"
+    "\n"
+    "second paragraph mentions upsilon phi chi PSI and\n"
+    "omega before it finally stops here.\n"
+)
+
+
+def _reflow_fixture_repo(tmp_path):
+    """A two-commit repo: rewrap one paragraph, edit the next. -> (repo, base, head)."""
+    repo = tmp_path / "reflow-fixture"
+    repo.mkdir()
+    env = hermetic_git_env()
+
+    def git(*args):
+        p = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        assert p.returncode == 0, f"git {args} failed: {p.stderr or p.stdout}"
+        return p.stdout
+
+    git("init", "--quiet", "-b", "main")
+    doc = repo / "doc.md"
+    doc.write_text(_REFLOW_DOC_BASE, encoding="utf-8")
+    git("add", "doc.md")
+    git("commit", "--quiet", "-m", "base")
+    base = git("rev-parse", "HEAD").strip()
+    doc.write_text(_REFLOW_DOC_HEAD, encoding="utf-8")
+    git("add", "doc.md")
+    git("commit", "--quiet", "-m", "round fix: rewrap one para, edit the next")
+    head = git("rev-parse", "HEAD").strip()
+    return repo, base, head, env
+
+
+def _shipped_git_line(section, *, word_diff):
+    """The git command the SECTION ships, comment stripped. Never a copy of it."""
+    hits = [
+        ln for ln in section.splitlines()
+        if ln.startswith("git diff ") and (("--word-diff" in ln) == word_diff)
+    ]
+    assert len(hits) == 1, (
+        f"expected exactly ONE shipped `git diff` line with word_diff="
+        f"{word_diff}; got {hits}. The section's command block changed shape, "
+        "so this guard is reading the wrong line — fix the extractor before "
+        "trusting anything it reports."
+    )
+    return hits[0].split("#")[0].strip()
+
+
+def _hunk_headers(out):
+    """`@@ … @@` headers only, trailing context dropped."""
+    return [
+        ln[: ln.index(" @@") + 3]
+        for ln in out.splitlines()
+        if ln.startswith("@@ ") and " @@" in ln[3:]
+    ]
+
+
+def _word_changes_per_hunk(out):
+    """[(header, count of +/- WORD lines)] over a --word-diff=porcelain run."""
+    per, cur, n = [], None, 0
+    for ln in out.splitlines():
+        if ln.startswith("@@ "):
+            if cur is not None:
+                per.append((cur, n))
+            cur, n = ln[: ln.index(" @@") + 3], 0
+        elif cur is not None and ln[:1] in "+-":
+            n += 1
+    if cur is not None:
+        per.append((cur, n))
+    return per
+
+
+def test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit(tmp_path):
+    """🔴 THE DETECTOR MUST SEE THE HUNKS THE RULE COUNTS. Run it; don't assert about it.
+
+    `claude/RULES.md`: a guard's DESCRIPTION claims COVERAGE. The shipped
+    sentence says a hunk with no `+`/`-` WORDS was only rewrapped — true only
+    of the hunks `git diff -U0 -w -M` produces, which is what the count uses.
+    Dropping `-U0` from the reflow command silently changes the hunks, and the
+    previous round's single-paragraph fixture was structurally unable to see
+    that: with one paragraph the two context settings agree.
+
+    Two claims, and the first is the one a reworded flag cannot walk past:
+      * the two shipped commands agree on the HUNK SET — a relationship;
+      * inside that set the purely rewrapped hunk carries NO `+`/`-` words and
+        the edited one DOES, which is the positive control proving the parser
+        can see word changes at all rather than returning a reassuring zero.
+    """
+    repo, base, head, env = _reflow_fixture_repo(tmp_path)
+    section = ad.render_prose_determination(2, base, head, "aaaa1111")
+    counting = _shipped_git_line(section, word_diff=False)
+    reflow = _shipped_git_line(section, word_diff=True)
+
+    def run(cmd):
+        p = subprocess.run(
+            ["git", "-C", str(repo), *shlex.split(cmd)[1:]],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        assert p.returncode == 0, f"`{cmd}` failed: {p.stderr or p.stdout}"
+        return p.stdout
+
+    count_hunks = _hunk_headers(run(counting))
+    reflow_out = run(reflow)
+    per_hunk = _word_changes_per_hunk(reflow_out)
+
+    assert [h for h, _ in per_hunk] == count_hunks, (
+        "\n\n🔴 THE REFLOW COMMAND AND THE COUNTING COMMAND DISAGREE ON THE "
+        "HUNKS.\n"
+        f"  counting (`{counting}`) -> {count_hunks}\n"
+        f"  reflow   (`{reflow}`) -> {[h for h, _ in per_hunk]}\n\n"
+        "  The rule counts the pre-image lines of the COUNTING command's "
+        "hunks, and state (e) asks whether one of THOSE hunks is word-"
+        "identical. A reflow command run at a different context width merges "
+        "neighbouring changes, so it answers that question about hunks the "
+        "rule never counted.\n"
+        "  The usual cause is a missing `-U0`. Markdown paragraphs are one "
+        "blank line apart, so at the default three lines of context a purely "
+        "rewrapped paragraph merges with an EDITED neighbour, the merged hunk "
+        "carries `+`/`-` words, and state (e) can never fire — which points "
+        "the rule at STOPPING, the one direction it must not be biased in."
+    )
+    pure = [h for h, n in per_hunk if n == 0]
+    edited = [h for h, n in per_hunk if n > 0]
+    assert pure, (
+        "\n\n🔴 STATE (e) DID NOT FIRE on a diff that contains a PURE reflow.\n"
+        f"  per-hunk +/- word counts: {per_hunk}\n"
+        "  The fixture's first paragraph is re-wrapped with the SAME words, so "
+        "exactly one hunk must carry no `+`/`-` word line. If every hunk shows "
+        "word changes the detector is blind to the state it exists for."
+    )
+    assert edited, (
+        "\n\n🔴 POSITIVE CONTROL FAILED: no hunk shows a `+`/`-` word at all.\n"
+        f"  per-hunk +/- word counts: {per_hunk}\n"
+        "  The fixture's SECOND paragraph changes `psi` to `PSI`, so the "
+        "parser must see word changes somewhere. A run where nothing shows "
+        "them cannot distinguish 'no reflow-only hunk' from 'wired to "
+        "nothing', and its zero above would be unearned."
+    )
+
+
+def test_a_rewrap_that_ALSO_edits_is_NOT_state_e_and_the_section_SAYS_so(tmp_path):
+    """🔴 THE SENTENCE MAY NOT BE WIDER THAN THE DETECTOR.
+
+    A round that rewraps a paragraph AND edits a word in it is the ORDINARY
+    shape of a ladder fix. It carries the full re-blame bias — `git blame -w -M`
+    re-attributes every unedited line the rewrap moved to the rewrapper — and it
+    is NOT detectable, because the hunk is not word-identical. So it stays
+    scoreable, and the only thing standing between it and a wrong STOP is the
+    written-down count.
+
+    A previous round described state (e) as "a round that REWRAPPED a paragraph
+    inside its range", which covers this case, while the detector does not. On
+    the strength of that wider sentence it DEMOTED the written-down count to a
+    "backstop, not the mitigation" — so a runner whose hunk showed word changes
+    would have read a clean detector result as clearance. This asserts both
+    halves of the repair: the fixture case is invisible to the detector, and the
+    shipped prose says the count is the mitigation for it.
+    """
+    repo = tmp_path / "rewrap-plus-edit"
+    repo.mkdir()
+    env = hermetic_git_env()
+
+    def git(*args):
+        p = subprocess.run(["git", "-C", str(repo), *args],
+                           capture_output=True, text=True, env=env, check=False)
+        assert p.returncode == 0, f"git {args} failed: {p.stderr or p.stdout}"
+        return p.stdout
+
+    git("init", "--quiet", "-b", "main")
+    doc = repo / "doc.md"
+    doc.write_text(_REFLOW_DOC_BASE, encoding="utf-8")
+    git("add", "doc.md")
+    git("commit", "--quiet", "-m", "base")
+    base = git("rev-parse", "HEAD").strip()
+    # ONE paragraph, rewrapped AND edited: `gamma` -> `GAMMA`.
+    doc.write_text(
+        "alpha beta GAMMA delta epsilon\n"
+        "zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau.\n"
+        "\n"
+        "second paragraph mentions upsilon phi chi psi and\n"
+        "omega before it finally stops here.\n",
+        encoding="utf-8",
+    )
+    git("add", "doc.md")
+    git("commit", "--quiet", "-m", "round fix: rewrap AND edit one paragraph")
+    head = git("rev-parse", "HEAD").strip()
+
+    section = ad.render_prose_determination(2, base, head, "aaaa1111")
+    reflow = _shipped_git_line(section, word_diff=True)
+    p = subprocess.run(
+        ["git", "-C", str(repo), *shlex.split(reflow)[1:]],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert p.returncode == 0, f"`{reflow}` failed: {p.stderr or p.stdout}"
+    per_hunk = _word_changes_per_hunk(p.stdout)
+    assert per_hunk and all(n > 0 for _, n in per_hunk), (
+        "\n\nA rewrap that ALSO edits a word registered as a PURE reflow.\n"
+        f"  per-hunk +/- word counts: {per_hunk}\n"
+        "  If it did, state (e) would swallow the ordinary shape of a ladder "
+        "fix and every such round would become unscoreable. It must not; the "
+        "point of this test is that the detector CANNOT see this case, which "
+        "is why the prose below has to say so."
+    )
+    for needle, why in (
+        ("PURE case", "the section does not say the command covers the PURE "
+                      "case only, so its sentence reads wider than its detector"),
+        ("is NOT state (e), stays scoreable",
+         "the section does not say a rewrap-plus-edit round is still "
+         "SCOREABLE — a runner would read it as covered by (e) and stop "
+         "measuring"),
+        ("the written-down count IS the mitigation",
+         "the section still demotes the written-down count to a backstop. For "
+         "the case the detector cannot see, that count is the ONLY mitigation "
+         "there is"),
+        ("is NOT clearance",
+         "the section does not warn that a clean `--word-diff` result is not "
+         "clearance — which is exactly how the narrower detector gets read as "
+         "the wider sentence"),
+    ):
+        assert needle in section, f"\n\n{why}.\n  missing: {needle!r}"
 
 
 def test_the_prose_determination_names_the_boundary_it_can_resolve():
@@ -10304,7 +10573,9 @@ FIX_MATRIX = (
      "distribution — so outside the derived population the COUNT conjunct "
      "stops discriminating, which is the collapse that retracted `#1678` in "
      "weakened form. `#1691` itself was the counterexample: a skill `.md` "
-     "payload, 1,620 diff lines, 1,519 of them `.py`/`.sh`. Fixed by "
+     "payload, 1,620 diff lines, 1,536 of them `.py`/`.sh` (insertions over "
+     "`merge-base(c9922212, b9a53101)..c9922212`; shipped as 1,519 for one "
+     "round and did not reproduce). Fixed by "
      "NARROWING the scope to the derived population rather than re-deriving "
      "the number, because `payload is prose` is a classification no artefact "
      "carries — the guard is a fifth seam constant plus "

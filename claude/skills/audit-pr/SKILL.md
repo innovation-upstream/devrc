@@ -391,9 +391,12 @@ governs a PR whose WHOLE DIFF is prose, never merely one whose PAYLOAD is** — 
 population it was derived on, and across ALL ladders two-thirds is an ordinary point on a flat
 distribution rather than a gap. A PR that also ships scaffolding is OUTSIDE it, and there the
 ordinary attribution gate is REACHABLE: a round whose fix touches only the scaffolding changes
-ZERO payload lines, so two such rounds fire it. ⚠ That is why the narrowing costs less than it
-looks — not that it is free. A scaffolding-carrying ladder whose every round DOES touch payload
-has neither mechanism, and ends only by converging. The unit is
+ZERO payload lines, so two CONSECUTIVE such rounds fire it. ⚠ That is why the narrowing costs
+less than it looks — not that it is free, and the uncovered set is WIDER than a ladder whose
+every round touches payload. ANY mixed-diff ladder in which no TWO CONSECUTIVE rounds are
+payload-free has neither mechanism — one alternating payload and scaffolding rounds included,
+which is a shape a runner would otherwise read as covered by a gate that can never fire — and
+ends only by converging. The unit is
 LINES, never findings: a findings count needs a `file:line` per item and what a round RECORDS
 about its own fixes almost never carries one, so the denominator is chosen by whoever counts —
 and the one the PR record actually supports FORBIDS this section's founding case, `#1111`.
@@ -418,26 +421,32 @@ and in BOTH directions, so a partial count is a silent truncation and not a cons
 leaves behind, 3 of 159 corpus rounds, every one of them a round 2: the share is then **0 BY
 CONSTRUCTION**, and a structural zero is not a measured zero. (c) An anchor THE LEDGER reports
 NOT MEASURED. (d) A round whose fix only ADDED text — an added line has no pre-image, so the
-round has NO attributable line and 0/0 is not a share. (e) A round that REWRAPPED a paragraph
-inside its range. Each of those means run the next round. **`-w` and `-M` are part of the rule,
+round has NO attributable line and 0/0 is not a share. (e) A round carrying a PURELY REWRAPPED
+hunk inside its range — the same words on both sides and nothing else changed. Each of those
+means run the next round. **`-w` and `-M` are part of the rule,
 not a refinement** — without them a whitespace-only reindent counts as the round having edited
 that text; MEASURED, they moved the share on 34 of 159 rounds, on one from 0.25 to 0.89, and
 flipped the stop verdict on 3. 🔴 **A REFLOW IS THE ONE BIAS IN THIS RULE THAT POINTS AT
-STOPPING, and it gets a COMMAND rather than a caution**: rewrapping a paragraph re-blames every
-line of it to the rewrapper, which inflates ladder-authored, and no blame flag can see it — but
-`--word-diff` can, because a rewrapped hunk carries the SAME words on both sides. That is state
-(e); writing the count down is the backstop, not the mitigation, since a count taken through the
-bias is exactly as wrong as the verdict it produces. ⚠ It NARROWS which rounds are scoreable and
-does not move the number: the corpus derivation below was not re-run with reflowed rounds
-excluded, and because the state resolves towards the next round, shipping it un-re-derived is
-conservative. The severity, blast-radius and swept-at-every-site preconditions above are
+STOPPING, and the command below catches its PURE case ONLY**: rewrapping a paragraph re-blames
+every line of it to the rewrapper, which inflates ladder-authored, and no blame flag can see
+it — `--word-diff` sees it only where the hunk carries the SAME words on both sides, which is
+why that command carries `-U0`: at default context a rewrapped paragraph and an EDITED
+neighbour merge into ONE hunk, the words stop matching, and state (e) never fires. That is
+state (e). 🔴 **A round that rewraps a paragraph AND edits a word inside it — the ordinary
+shape of a ladder fix — is NOT state (e), stays SCOREABLE, and carries the FULL bias. For that
+case WRITING THE COUNT DOWN IS THE MITIGATION, not a backstop, and a `--word-diff` run that
+reports no pure reflow is NOT clearance.** ⚠ Both (d) and (e) NARROW which rounds are scoreable
+and neither moves the number: the corpus derivation below was not re-run with either of them
+excluded, so it differs from the population it governs on TWO axes, and because both states
+resolve towards the next round, shipping it un-re-derived is conservative.
+The severity, blast-radius and swept-at-every-site preconditions above are
 unchanged and all still have to hold.
 
 ```
 git diff -U0 -w -M <from>..<to>                     # its `-<start>,<len>` hunks, len > 0
 git blame -w -M --porcelain <from> -- <file>        # once PER FILE, not once per line
 git merge-base --is-ancestor <blame-sha> <the tip round 1 audited>   # rc 0 ⇒ PR-authored
-git diff -w -M --word-diff=porcelain <from>..<to>   # a hunk with no +/- WORDS was only REWRAPPED
+git diff -U0 -w -M --word-diff=porcelain <from>..<to>   # -U0 or a neighbouring EDIT merges in
 ```
 
 🔴 **THE THRESHOLD IS DERIVED FROM THE POPULATION IT GOVERNS, AND THE EVIDENCE FOR IT IS AN
@@ -452,9 +461,13 @@ round 2) is the structural zero the caveat above reports NOT MEASURED rather tha
 `#1111` sits at **19/26 = 0.731**, on the far side of the gap. ⚠ **DO NOT READ THE GAP AS PROOF
 THE NUMBER IS RIGHT.** At n=29 an empty ±0.05 band is weak evidence: under a uniform null it
 happens about 5% of the time (0.9^29), this distribution is concentrated high so the density
-near two-thirds is BELOW uniform, and every share is a ratio of small integers (0.571 = 4/7,
-0.727 = 8/11) — gaps between low-denominator rationals near 2/3 are expected. It shows
-two-thirds is not sitting on a cluster, and nothing stronger. ⚠ **The honest cost, and
+near two-thirds is BELOW uniform, and the two shares bounding the band are ratios of SMALL
+integers (0.571 = 4/7, 0.727 = 8/11), where a gap near 2/3 is expected. ⚠ That last clause is
+weaker than an earlier wording made it: it said EVERY share is such a ratio, and that is false
+three sentences up — `#1111` is 19/26, and at denominator 26 both 17/26 = 0.654 and
+18/26 = 0.692 fall INSIDE the ±0.05 band. So the band was not empty for want of an available
+rational, which makes the evidence somewhat stronger than the sentence claimed. The conclusion
+does not move: it shows two-thirds is not sitting on a cluster, and nothing stronger. ⚠ **The honest cost, and
 it is not small:** at round 2 only 3 of the 7 prose ladders reach it (their round-2 median share
 is 0.267), so for most prose PRs this rule does NOT fire at round 2 either. **Two rounds is the
 floor.** How many ladders reach it by round 4 or 5 is UNMEASURED — this paragraph said `4 of 5`

@@ -267,7 +267,12 @@ RULES: list[dict] = [
          # readable.
          apply=r"ladder.authored|pre.image lines|attributable pre.image"
                r"|whole diff is prose"),
-    dict(id="prose-hatch-not-measured-states", name="three states of the line count are NOT MEASURED rather than a number, and -w/-M are part of the rule",
+    # ⚠ The count word here read `three` for two rounds after the section grew
+    # to FIVE — the adjacent row above was updated in the same commit and this
+    # one was not, which is the recurring SHAPE this rule's own precondition
+    # tells you to sweep at every site. Re-derive the word from
+    # `PROSE_NOT_MEASURED_STATES` when the set changes; do not hand-count it.
+    dict(id="prose-hatch-not-measured-states", name="five states of the line count are NOT MEASURED rather than a number, and -w/-M are part of the rule",
          probe="EVERY UNCERTAINTY RESOLVES TOWARDS THE NEXT ROUND",
          apply=r"0 BY CONSTRUCTION|structural zero|no cap and no sample|re-?blames"),
     dict(id="mutation-deletion-easy-half", name="deletion-mutants are the EASY half",

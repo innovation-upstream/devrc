@@ -3324,7 +3324,9 @@ PROSE_DETERMINATION_THRESHOLD = (
 # found MISSING. The threshold above was derived on the PRs whose WHOLE DIFF is
 # prose (29 rounds over 7 PRs) and shipped here scoped to "this PR's payload is
 # PROSE", which is strictly wider: `#1691` itself is a skill `.md` payload whose
-# diff is 1,620 lines, 1,519 of them `.py`/`.sh`. On the wider population the
+# diff is 1,620 lines, 1,536 of them `.py`/`.sh`. (Both figures are INSERTIONS
+# over `git merge-base c9922212 b9a53101`..`c9922212`; the `.py`/`.sh` half read
+# 1,519 for one round and did not reproduce.) On the wider population the
 # skill's own measurement says two-thirds is an ordinary point on a flat
 # distribution, so the COUNT conjunct stops discriminating — the same collapse
 # that retracted `#1678`, in weakened form.
@@ -3334,20 +3336,34 @@ PROSE_DETERMINATION_THRESHOLD = (
 # classification NO ARTEFACT CARRIES — `render_ledger` asks a human to make it
 # per file, and the retracted draft's second false claim was exactly that such a
 # classification existed. A population you cannot enumerate mechanically cannot
-# be measured over. The narrowing also costs nothing the section was buying: on
+# be measured over. The narrowing costs LESS than it looks, and NOT nothing: on
 # a diff that ships scaffolding the ordinary attribution gate is REACHABLE (the
 # `#498` shape), so the hatch's founding premise — the gate cannot fire — does
 # not hold there.
+#
+# ⚠ THAT CONCESSION USED TO BE NARROWER THAN THE GAP, in two ways a delta audit
+# of this round's own fix caught. (1) The gate needs two CONSECUTIVE zero-payload
+# rounds, and "consecutive" was dropped, which made it look reachable from any
+# two such rounds anywhere in the ladder. (2) The uncovered set was written as
+# "a ladder whose EVERY round DOES touch payload", and it is larger than that:
+# ANY mixed-diff ladder in which no two CONSECUTIVE rounds are payload-free has
+# neither mechanism — a ladder alternating payload and scaffolding rounds is the
+# concrete shape, and a runner in it would have read themselves as covered by a
+# gate that can never fire for them.
 PROSE_DETERMINATION_POPULATION = (
     "**This count governs a PR whose WHOLE DIFF is prose, never merely one "
     "whose PAYLOAD is** — that is the population it was derived on, and across "
     "ALL ladders two-thirds is an ordinary point on a flat distribution rather "
     "than a gap. A PR that also ships scaffolding is OUTSIDE it, and there the "
     "ordinary attribution gate is REACHABLE: a round whose fix touches only "
-    "the scaffolding changes ZERO payload lines, so two such rounds fire it. "
-    "⚠ That is why the narrowing costs less than it looks — not that it is "
-    "free. A scaffolding-carrying ladder whose every round DOES touch payload "
-    "has neither mechanism, and ends only by converging."
+    "the scaffolding changes ZERO payload lines, so two CONSECUTIVE such "
+    "rounds fire it. ⚠ That is why the narrowing costs less than it looks — "
+    "not that it is free, and the uncovered set is WIDER than a ladder whose "
+    "every round touches payload. ANY mixed-diff ladder in which no TWO "
+    "CONSECUTIVE rounds are payload-free has neither mechanism — one "
+    "alternating payload and scaffolding rounds included, which is a shape a "
+    "runner would otherwise read as covered by a gate that can never fire — "
+    "and ends only by converging."
 )
 PROSE_DETERMINATION_FLOOR = (
     "Round 1 has no previous round to attribute to, so it can never satisfy "
@@ -3383,15 +3399,26 @@ PROSE_DETERMINATION_STRUCTURAL_ZERO = (
 # `test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS`
 # drives every key and pins the set two-way.
 #
-# 🔴 (e) IS NEW AND IT IS THE RULE'S ONLY UNSAFE-DIRECTION BIAS, CLOSED
-# DETERMINISTICALLY. `git blame -w -M` cannot see a rewrapped paragraph: the
-# rewrap re-blames every line of it to the rewrapper, which inflates
-# ladder-authored and biases towards STOPPING. The shipped mitigation was
-# "write the count down", which is prose over a count that is exactly as wrong
-# as the verdict it produces. A reflow IS detectable — a hunk whose `-` and `+`
-# sides are word-identical under `--word-diff` — so it is a NOT MEASURED state
-# with its own command, and the written-down count is the backstop rather than
-# the fix.
+# 🔴 (e) COVERS THE **PURE** REWRAP AND NOTHING ELSE — the DESCRIPTION used to
+# be wider than the DETECTOR, which is `claude/RULES.md`'s "a guard's
+# DESCRIPTION claims COVERAGE — check the implementation is as wide as the
+# sentence". `git blame -w -M` cannot see a rewrapped paragraph: the rewrap
+# re-blames every line of it to the rewrapper, which inflates ladder-authored
+# and biases towards STOPPING. A PURE reflow IS detectable — a hunk whose `-`
+# and `+` sides are word-identical under `-U0 --word-diff` — so THAT is a NOT
+# MEASURED state with its own command.
+#
+# 🔴 WHAT THE DETECTOR DOES NOT COVER, AND WHY THE WRITTEN-DOWN COUNT IS STILL
+# THE MITIGATION. A round that rewraps a paragraph AND edits a word in it is
+# the ORDINARY shape of a ladder fix; it satisfies no word-identity test, is
+# therefore scoreable, and carries the FULL bias. An earlier wording of this
+# section demoted the count to a "backstop, not the mitigation" on the strength
+# of a detector that covers only the pure case — so a runner whose hunk showed
+# word changes would have read a clean detector result as clearance. For the
+# rewrap-plus-edit case the written-down count is THE mitigation, and this PR's
+# own range is the live demonstration: `git diff -U0 -w -M ca3b787c..6bf15a8f`
+# over the skill edits a paragraph AND rewraps its tail, and `--word-diff` over
+# that range reports 80 `+`/`-` word lines, so nothing in it reads as a reflow.
 #
 # MEASURED 2026-09-14 on a three-line paragraph rewrapped across different line
 # breaks, with BOTH controls run:
@@ -3404,9 +3431,24 @@ PROSE_DETERMINATION_STRUCTURAL_ZERO = (
 #   * POSITIVE CONTROL, same rewrap plus one word changed: `-gamma` / `+GAMMA`.
 #     So the detector separates a pure reflow from a reflow that also edits,
 #     rather than swallowing both.
-# ⚠ It NARROWS which rounds are scoreable and does not move the
-# threshold; the corpus derivation was NOT re-run with reflowed rounds excluded,
-# and because the state resolves towards the next round that is conservative.
+#
+# 🔴 THAT FIXTURE WAS A SINGLE THREE-LINE PARAGRAPH, AND IT COULD NOT SEE THE
+# ONE DEFECT THAT MATTERED: with one paragraph, `-U0` and the default three
+# lines of context produce the SAME hunks, so the command shipped WITHOUT `-U0`
+# and the fixture stayed green. MEASURED on this PR's own skill range
+# (`ca3b787c..6bf15a8f`): the COUNTING command `git diff -U0 -w -M` yields 10
+# hunks, the reflow command as shipped yields 4 — markdown paragraphs sit one
+# blank line apart, so three lines of context merge a purely rewrapped paragraph
+# into its edited neighbour, the merged hunk shows `+`/`-` words, and (e) never
+# fires. The minimal form: with `-U0` the hunk is `@@ -1,2 +1,2 @@` and carries
+# no `+`/`-` words; without it the hunk is `@@ -1,4 +1,4 @@` and carries the
+# neighbour's. `test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit` is the
+# two-paragraph fixture that pins it, and it runs the command this module SHIPS
+# rather than a copy.
+# ⚠ Both (d) and (e) NARROW which rounds are scoreable and neither moves the
+# threshold; the corpus derivation was NOT re-run with either excluded — so it
+# differs from the governed population on TWO axes, not one — and because both
+# states resolve towards the next round that is conservative.
 PROSE_NOT_MEASURED_STATES = {
     "unblameable": (
         "(a) A pre-image line you cannot blame, or a round you cannot blame in "
@@ -3422,14 +3464,20 @@ PROSE_NOT_MEASURED_STATES = {
         "share."
     ),
     "reflow": (
-        "(e) A round that REWRAPPED a paragraph inside its range — the one "
-        "bias in this rule that points at STOPPING, invisible to `-w`/`-M` and "
-        "found instead by the `--word-diff` command: a hunk whose `-` and `+` "
-        "sides are word-identical was only rewrapped."
+        "(e) A round carrying a PURELY REWRAPPED hunk inside its range — one "
+        "whose `-` and `+` sides are word-identical under the `-U0 "
+        "--word-diff` command, invisible to `-w`/`-M`. It is the PURE case "
+        "ONLY: a round that rewraps a paragraph AND edits a word in it carries "
+        "the same STOPPING bias, is NOT this state, stays scoreable, and is "
+        "mitigated by writing the count down."
     ),
 }
 # Spelled out rather than digits because the sentence reads as prose. A set size
-# with no word here is a KeyError at import, not a silently wrong sentence.
+# with no word here is a KeyError, not a silently wrong sentence. ⚠ At CALL
+# time, not at import: this lookup lives inside `render_prose_determination`,
+# which returns "" for round < 2, so a seventh state imports cleanly and raises
+# only on a round-2-or-later `--emit-claims` run. That is still loud, and it is
+# a later moment than an earlier wording of this comment claimed.
 _COUNT_WORDS = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}
 
 # The fraction the sentence above names, as the exact rational the fixtures are
@@ -3605,8 +3653,16 @@ def render_prose_determination(round_no, emit_from, head_sha, anchor):
         "",
         "🔴 **This is for YOU, the ladder runner, not for the auditor.** "
         + PROSE_DETERMINATION_POPULATION
-        + " Nothing upstream classifies that: THE LEDGER asks you to call each "
-        "file payload or scaffolding, which is a different question. On a "
+        + " **Whether THIS diff is whole-prose is a ONE-COMMAND check, not a "
+        "classification anybody has to invent**: `git diff --name-only "
+        "<from>..<to>`, then read whether every changed path is prose (`.md` "
+        "here). It is yours to run — this script does not classify, "
+        "deliberately — and it COULD be automated; it simply is not today. "
+        "⚠ Do not read that as the wider claim it replaced. What NO artefact "
+        "carries is whether the PAYLOAD is prose: THE LEDGER asks you to call "
+        "each file payload or scaffolding, which is a different question, and "
+        "that unanswerable one is exactly why the scope above is the WHOLE "
+        "DIFF rather than the payload. On a "
         "whole-prose diff every round changes payload lines by construction, "
         "so the attribution gate cannot fire and the ladder ends on a STATED "
         "criterion instead — DETERMINED rather than argued.",
@@ -3625,12 +3681,20 @@ def render_prose_determination(round_no, emit_from, head_sha, anchor):
         "     # once PER FILE, not once per line",
         "git merge-base --is-ancestor <blame-sha> "
         f"{anchor or '<the tip round 1 audited>'}   # rc 0 ⇒ PR-authored",
-        # 🔴 THE REFLOW COMMAND — state (e), and the reason it is deterministic
-        # rather than "write the count down". `-w`/`-M` cannot see a rewrap;
-        # `--word-diff` can, because a rewrapped hunk has the SAME words on
-        # both sides.
-        f"git diff -w -M --word-diff=porcelain {emit_from or '<from>'}.."
-        f"{head_sha}   # a hunk with no +/- WORDS was only REWRAPPED",
+        # 🔴 THE REFLOW COMMAND — state (e). `-w`/`-M` cannot see a rewrap;
+        # `--word-diff` can, because a PURELY rewrapped hunk has the SAME words
+        # on both sides.
+        #
+        # 🔴 `-U0` IS NOT OPTIONAL, AND ITS ABSENCE SHIPPED ONCE. The rule
+        # counts the hunks of `git diff -U0 -w -M`; a reflow command run at the
+        # DEFAULT three lines of context produces DIFFERENT hunks, because
+        # neighbouring changes merge. Markdown paragraphs are one blank line
+        # apart, so a purely rewrapped paragraph next to an edited one lands
+        # inside the merged hunk, that hunk shows `+`/`-` words, and (e) cannot
+        # fire. MEASURED on `ca3b787c..6bf15a8f -- claude/skills/audit-pr/
+        # SKILL.md`: 10 hunks with `-U0`, 4 without.
+        f"git diff -U0 -w -M --word-diff=porcelain {emit_from or '<from>'}.."
+        f"{head_sha}   # -U0 or a neighbouring EDIT merges in",
         "```",
         "",
         PROSE_DETERMINATION_THRESHOLD,
@@ -3641,9 +3705,13 @@ def render_prose_determination(round_no, emit_from, head_sha, anchor):
         "over 159 corpus rounds they move the share on 34 of them, on one from "
         "0.25 to 0.89, and flip the stop verdict on 3. They do NOT fix a "
         "REFLOW, which re-blames a whole paragraph to the rewrapper and biases "
-        "towards STOPPING — so a rewrapped hunk is NOT MEASURED, found by the "
-        "`--word-diff` command above, and the written-down count is the "
-        "backstop rather than the mitigation.",
+        "towards STOPPING — so a PURELY rewrapped hunk is NOT MEASURED, found "
+        "by the `-U0 --word-diff` command above. 🔴 **That command finds the "
+        "PURE case only.** A round that rewraps a paragraph AND edits a word "
+        "in it — the ordinary shape of a ladder fix — shows `+`/`-` words, is "
+        "NOT state (e), stays scoreable and carries the SAME bias; for that "
+        "case the written-down count IS the mitigation, and a `--word-diff` "
+        "run that finds no reflow is NOT clearance.",
         "",
         # 🔴 EVERY NOT-MEASURED STATE, FROM THE LEDGER THE FUNCTION RETURNS.
         # The first render of this section shipped (b) alone, prefix and all;

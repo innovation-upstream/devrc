@@ -409,11 +409,17 @@ the pair mutation (skill + constant) is killed by that seam guard ALONE.
 
 ⚠ THIS PARAGRAPH SAID "to the auditor in every round-2-and-later brief" and
 named `test_the_determinations_SCOPE_matches_the_one_every_brief_ships`. BOTH
-were false as merged: `c3c91cd6` moved the determination OFF the auditor's
+were stale as merged: `c3c91cd6` moved the determination OFF the auditor's
 brief -- `test_audit_dispatch.py::test_the_prose_determination_is_NOT_in_the_
-auditors_brief` asserts exactly that -- and no test of that name has ever
-existed. The correct wording survived thirteen lines down, which is how a
-comment gets believed: the reader who checks reads the near copy.
+auditors_brief` asserts exactly that -- and RENAMED the test to
+`..._every_emit_claims_run_ships` in the same commit. ⚠ A first correction of
+this paragraph said "no test of that name has ever existed", and THAT was
+false: it existed at `751404a1` (`test_audit_ladder_stop_rule.py:1573`) and was
+renamed by `c3c91cd6`. "Never existed" is the worse error of the two, because
+it tells a future reader not to look -- and looking is what turns a dangling
+name back into the rename that explains the paragraph. The correct wording
+survived thirteen lines down, which is how a comment gets believed: the reader
+who checks reads the near copy.
 
 🔴 M10 is this half's reachability control, and the analogue of M4. The
 attribution section is MOVED above the stop rule with its text byte-identical:
@@ -672,10 +678,14 @@ SKILL_PROSE_DETERMINATION = (
     "ordinary point on a flat distribution rather than a gap. A PR that also "
     "ships scaffolding is OUTSIDE it, and there the ordinary attribution gate "
     "is REACHABLE: a round whose fix touches only the scaffolding changes ZERO "
-    "payload lines, so two such rounds fire it. ⚠ That is why the narrowing "
-    "costs less than it looks — not that it is free. A scaffolding-carrying "
-    "ladder whose every round DOES touch payload has neither mechanism, and "
-    "ends only by converging. The unit is LINES, never "
+    "payload lines, so two CONSECUTIVE such rounds fire it. ⚠ That is why the "
+    "narrowing costs less than it looks — not that it is free, and the "
+    "uncovered set is WIDER than a ladder whose every round touches payload. "
+    "ANY mixed-diff ladder in which no TWO CONSECUTIVE rounds are payload-free "
+    "has neither mechanism — one alternating payload and scaffolding rounds "
+    "included, which is a shape a runner would otherwise read as covered by a "
+    "gate that can never fire — and ends only by converging. The unit is "
+    "LINES, never "
     "findings: a findings count needs a `file:line` per item and what a round "
     "RECORDS about its own fixes almost never carries one, so the denominator "
     "is chosen by whoever counts — and the one the PR record actually supports "
@@ -718,22 +728,29 @@ SKILL_DETERMINATION_FAILSAFE = (
     "CONSTRUCTION**, and a structural zero is not a measured zero. (c) An "
     "anchor THE LEDGER reports NOT MEASURED. (d) A round whose fix only ADDED "
     "text — an added line has no pre-image, so the round has NO attributable "
-    "line and 0/0 is not a share. (e) A round that REWRAPPED a paragraph "
-    "inside its range. Each of those means run the next "
+    "line and 0/0 is not a share. (e) A round carrying a PURELY REWRAPPED hunk "
+    "inside its range — the same words on both sides and nothing else changed. "
+    "Each of those means run the next "
     "round. **`-w` and `-M` are part of the rule, not a refinement** — without "
     "them a whitespace-only reindent counts as the round having edited that "
     "text; MEASURED, they moved the share on 34 of 159 rounds, on one from 0.25 "
     "to 0.89, and flipped the stop verdict on 3. 🔴 **A REFLOW IS THE ONE BIAS "
-    "IN THIS RULE THAT POINTS AT STOPPING, and it gets a COMMAND rather than a "
-    "caution**: rewrapping a paragraph re-blames every line of it to the "
+    "IN THIS RULE THAT POINTS AT STOPPING, and the command below catches its "
+    "PURE case ONLY**: rewrapping a paragraph re-blames every line of it to the "
     "rewrapper, which inflates ladder-authored, and no blame flag can see it — "
-    "but `--word-diff` can, because a rewrapped hunk carries the SAME words on "
-    "both sides. That is state (e); writing the count down is the backstop, "
-    "not the mitigation, since a count taken through the bias is exactly as "
-    "wrong as the verdict it produces. ⚠ It NARROWS which rounds are scoreable "
-    "and does not move the number: the corpus derivation below was not re-run "
-    "with reflowed rounds excluded, and because the state resolves towards the "
-    "next round, shipping it un-re-derived is conservative. The severity, "
+    "`--word-diff` sees it only where the hunk carries the SAME words on both "
+    "sides, which is why that command carries `-U0`: at default context a "
+    "rewrapped paragraph and an EDITED neighbour merge into ONE hunk, the words "
+    "stop matching, and state (e) never fires. That is state (e). 🔴 **A round "
+    "that rewraps a paragraph AND edits a word inside it — the ordinary shape "
+    "of a ladder fix — is NOT state (e), stays SCOREABLE, and carries the FULL "
+    "bias. For that case WRITING THE COUNT DOWN IS THE MITIGATION, not a "
+    "backstop, and a `--word-diff` run that reports no pure reflow is NOT "
+    "clearance.** ⚠ Both (d) and (e) NARROW which rounds are scoreable and "
+    "neither moves the number: the corpus derivation below was not re-run with "
+    "either of them excluded, so it differs from the population it governs on "
+    "TWO axes, and because both states resolve towards the next round, shipping "
+    "it un-re-derived is conservative. The severity, "
     "blast-radius and "
     "swept-at-every-site preconditions above are unchanged and all still have "
     "to hold."
@@ -765,8 +782,14 @@ SKILL_THRESHOLD_DERIVATION = (
     "RIGHT.** At n=29 an empty ±0.05 band is weak evidence: under a uniform "
     "null it happens about 5% of the time (0.9^29), this distribution is "
     "concentrated high so the density near two-thirds is BELOW uniform, and "
-    "every share is a ratio of small integers (0.571 = 4/7, 0.727 = 8/11) — "
-    "gaps between low-denominator rationals near 2/3 are expected. It shows "
+    "the two shares bounding the band are ratios of SMALL integers "
+    "(0.571 = 4/7, 0.727 = 8/11), where a gap near 2/3 is expected. ⚠ That "
+    "last clause is weaker than an earlier wording made it: it said EVERY "
+    "share is such a ratio, and that is false three sentences up — `#1111` is "
+    "19/26, and at denominator 26 both 17/26 = 0.654 and 18/26 = 0.692 fall "
+    "INSIDE the ±0.05 band. So the band was not empty for want of an available "
+    "rational, which makes the evidence somewhat stronger than the sentence "
+    "claimed. The conclusion does not move: it shows "
     "two-thirds is not sitting on a cluster, and nothing stronger. ⚠ **The "
     "honest cost, and it is not small:** at round "
     "2 only 3 of the 7 prose ladders reach it (their round-2 median share is "
@@ -1183,6 +1206,25 @@ def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
+def _dispatch_module():
+    """Import `scripts/audit-dispatch.py` as a module. THE ONLY copy.
+
+    🔴 ONE RULE, ONE PLACE (`claude/RULES.md`). This loader was open-coded at
+    THREE sites in this file, byte-identical, and a fourth was named
+    `_dispatch_module` beside two of them -- a consolidation that consolidated
+    nothing. Three copies of six lines is not a bug today; it is the shape that
+    becomes one when the load needs a flag, a cache or a better failure
+    message, because whoever adds it adds it to the copy they are looking at.
+    """
+    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
+    assert spec is not None and spec.loader is not None, (
+        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _read(path: Path) -> str:
     # errors="replace", not strict: a truncation landing mid-character (likely
     # in a file full of em-dashes and 🔴) would otherwise raise
@@ -1475,12 +1517,7 @@ def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
     Deliberately the ID and not the clause TEXT -- `test_audit_dispatch.py`
     owns the text pin, and a second copy here would drift against it.
     """
-    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
-    assert spec is not None and spec.loader is not None, (
-        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _dispatch_module()
     ids = {clause.id for clause in mod.INVARIANT_CLAUSES}
     assert "nit-is-not-a-finding" in ids, (
         "`scripts/audit-dispatch.py` no longer EMITS a clause with the id "
@@ -1736,12 +1773,7 @@ def test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships():
     both files is invisible to it, exactly as note 1 in this module's header
     records for every other pin here.
     """
-    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
-    assert spec is not None and spec.loader is not None, (
-        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _dispatch_module()
     skill = _norm(_read(SKILL_MD))
     for name in ("PROSE_DETERMINATION_THRESHOLD",
                  "PROSE_DETERMINATION_FLOOR",
@@ -1777,16 +1809,6 @@ def test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships():
 GOVERNED_POPULATION = "whole diff is prose"
 
 
-def _dispatch_module():
-    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
-    assert spec is not None and spec.loader is not None, (
-        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def test_the_scope_SHIPPED_and_the_population_DERIVED_ON_are_the_same_one():
     """🔴 A SEAM BETWEEN A NUMBER AND ITS WARRANT, and the defect it pins.
 
@@ -1799,16 +1821,21 @@ def test_the_scope_SHIPPED_and_the_population_DERIVED_ON_are_the_same_one():
     distribution -- i.e. outside the derived population the COUNT conjunct
     stops discriminating, which is the collapse that retracted `#1678` in
     weakened form. `#1691` itself was the counterexample: a skill `.md`
-    payload, 1,620 diff lines, 1,519 of them `.py`/`.sh`.
+    payload, 1,620 diff lines, 1,536 of them `.py`/`.sh` -- both INSERTION
+    counts over `merge-base(c9922212, b9a53101)..c9922212`. (The second figure
+    shipped as 1,519 for one round and did not reproduce.)
 
     🔴 WHY NARROWING RATHER THAN RE-DERIVING. Re-deriving on `payload is prose`
     needs a payload classification NO ARTEFACT CARRIES -- `render_ledger` asks
     a human for it per file, and the retracted draft's second false claim was
     that such a classification already existed. A population nothing can
-    enumerate cannot be measured over. Narrowing also costs the section
-    nothing: where a diff ships scaffolding the ordinary attribution gate is
-    REACHABLE, because a round whose fix touches only the scaffolding changes
-    zero payload lines.
+    enumerate cannot be measured over. Narrowing costs the section LESS than it
+    looks and NOT nothing: where a diff ships scaffolding the ordinary
+    attribution gate is REACHABLE, because a round whose fix touches only the
+    scaffolding changes zero payload lines -- but that gate needs two
+    CONSECUTIVE such rounds, so ANY mixed-diff ladder in which no two
+    consecutive rounds are payload-free (one ALTERNATING payload and
+    scaffolding rounds, for instance) has neither mechanism and is uncovered.
 
     ⚠ WHAT THIS DOES NOT DO. It pins that both sides name the SAME population,
     not that the population is the right one. Moving the rule to a different
