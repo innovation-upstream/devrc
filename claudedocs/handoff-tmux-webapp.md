@@ -7,34 +7,35 @@ clawgate-task: 375
 A **clawgate feature**: a webapp that visually organizes and gives live terminal interaction
 with tmux sessions across workbench + laptop, with a composable view system agents can drive,
 and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
+- **closing-condition:** `check` — `clawgatectl task get 593` reports `ready_for_review` with
+  all ten acceptance criteria evidenced in a card comment (each regression test watched RED at
+  its base commit and green at HEAD). 🔴 **FROZEN AT ROUND 1.** Task 595 (the carousel, bulk
+  expand/collapse, bulk Chat/Raw) is a NEW arc and does NOT extend this one; neither does any
+  audit finding on the PRs this arc produced. Added 2026-09-15 — this doc predated rule (m) and
+  had been UNANSWERABLE against a closing condition for its whole life.
 
 ## Status
 
-**This session ran the tmux-webapp rank queue AND clawgate task 593 (tmux page feedback). Both advanced; neither is finished.**
+**This session RESUMED: it merged the in-flight PR and dispatched the next batch. Neither the arc nor task 593 is finished.**
 
-### devrc — the rank queue, MERGED
-- **`#1688`** (squash `8472945a`) — evicted ranks **9, 17, 25, 26, 42, 45**. Six of the fifteen entries the queue advertised were finished or fictional. 🔴 Rank 42's three residuals had been closed by `ZacxDev/homelab-infra#749` days earlier; a session claimed it and paid a full recon round re-deriving that.
-- **`#1703`** (squash `b72aec3b`) — rank **47** closed. Ledger allowance ratcheted `262_144 → 245_760`.
-- Live queue on `main`: **48, 49, 53, 54, 56, 57, 59, 60**. Claims `tmux-webapp-42` / `-47` both RELEASED.
+### clawgate task 593 — items 1, 2, 3, 9 DONE and MERGED; items 4–8 IN FLIGHT
+- **`ZacxDev/homelab-infra#824` MERGED** (squash `81b10cddc`) — item 1: session groups default to **collapsed**; group key moved to `cg.tmux.v3.group.*` storing EXPANDED state (absent = collapsed). `ACKPREFIX` deliberately left at v2. Includes the **parked-draft summary badge** (`data-tmux-group-parked`), closing a regression item 1 itself introduced.
+- **`ZacxDev/homelab-infra#826` MERGED 2026-09-15T16:40:49Z** (squash **`248a0c4ed`**) — items 2, 3, 9. The previous session left it OPEN with `clawgate-e2e` RED at head `04cef09c3` (9 failed / 216 passed) and `6fad0e252` pushed as the repair but **never re-run**. This session re-read the checks: **all four green on `6fad0e252`** — `clawgate-e2e` **225 passed / 2 skipped** (the full 34-spec tier), `clawgate-ci`, `gitops-validate` (10 legs), `ux-audit-clawgate`.
+  🔴 **The squash was verified BY CONTENT, never by ancestry.** All six files the branch touched are byte-identical between the branch head and `origin/trunk`. `origin/trunk..HEAD` still lists four commits — that is the documented squash artefact, NOT unmerged work, and reading it as unmerged is what would have stopped the worktree being cleaned up.
+  Worktree `~/workspace/homelab-tmux593b` REMOVED, branch deleted locally and on the remote, `homelab-talos` base clone fast-forwarded to `248a0c4ed`.
+- **Items 4–8 IN FLIGHT** — branch `feat/tmux-593-items-4-8`, worktree `~/workspace/homelab-tmux593c`, based on `248a0c4ed`. Branch was pushed EMPTY before any work, so a concurrent session can see it. Claim `clawgate-593-items-4-8` is HELD — release it when the PR lands.
+- **Task 595** holds the carousel, bulk expand/collapse and bulk Chat/Raw. Do 593 first.
 
-### clawgate task 593 — items 1, 2, 3, 9 DONE; items 4–8 NOT STARTED
-- **`ZacxDev/homelab-infra#824` MERGED** (squash `81b10cddc`) — item 1: session groups default to **collapsed**; group key moved to `cg.tmux.v3.group.*` storing EXPANDED state (absent = collapsed). `ACKPREFIX` deliberately left at v2. Includes the **parked-draft summary badge** (`data-tmux-group-parked`), which closes a regression item 1 itself introduced.
-- **`ZacxDev/homelab-infra#826` OPEN**, head `6fad0e252`, branch `feat/tmux-593-items-2-3-9`, worktree `~/workspace/homelab-tmux593b` — items 2 (duplicate host header removed), 3 (Chat/Raw toggle per-card, swap-scoped), 9 (the card's contradicting age deleted).
-- **Task 595 CREATED** — the carousel, split out by operator decision, plus two scope additions from audits: bulk expand/collapse, and a bulk Chat/Raw control.
+### 🔴 THREE OPERATOR DECISIONS, TAKEN BEFORE THE WORK — do not re-litigate
+1. **Item 6 (`selection_menu`)** → filter ONLY the `selection_menu` signal out of the waiting-evidence line, and ONLY when the card also renders structured question options. `trailing_question` and `context_exhausted` always survive; `selection_menu` still renders when no options are shown. Chosen over "drop it unconditionally" and "drop the whole evidence block", both offered, because the block exists so the operator can DISAGREE with a scraped `waiting: true` verdict and the `needsHuman` gate is deliberately wider than `== TriageWaiting`.
+2. **Item 4 (structured tool cards)** → a tool-name table in `internal/ui` for exactly Bash/Edit/AskUserQuestion, with raw-JSON fallback for unrecognised tools, parse failures, and the payloads `clampToolInput` truncated mid-token at 4000 chars. Chosen over "raw always available behind a toggle" and "generic key/value for all tools".
+3. **Item 5 (max height)** → clamp the tmux card's pretty panel (`max-h-64`, mirroring its Raw sibling at `tmux.go:2656` but WITHOUT `flex-col-reverse` — a transcript reads top-down) AND move `open full session →` ABOVE the transcript. `/session/{id}` is deliberately NOT clamped. Chosen over "clamp only" and "lazy-load older messages on scroll-up".
 
-### Gates on `6fad0e252`
-- `go test ./internal/ui/` rc=0, **511 passed / 0 failed**; `go test ./...` rc=0, **24 packages ok**
-- **FULL e2e suite, 34 spec files: rc=0, 225 passed / 0 failed / 0 flaky / 2 skipped** (32.3m)
-- gitops pre-push gate: all legs pass
+### devrc — the doc's own size gate
+- **`docs/tmux-webapp-evict-closed`** (commit `61ab9487`) — this doc stood at **245,697 B against a 245,760 B allowance: 63 B**. 21 of 40 CLOSED `### ` blocks demoted verbatim to `claudedocs/refs/tmux-webapp-closed-investigations.md`; **245,697 → 198,795 B**. The allowance was NOT raised (playbook step 4, and it was not needed).
 
-🔴 **`#826`'s `tekton/clawgate-e2e` was RED at the previous head (`04cef09c3`): "9 failed, 216 passed".** That is the breakage `6fad0e252` repairs. **Re-read that check before merging** — it had not re-run at handoff time.
-
-### Operator decisions taken this session (recorded because an audit flagged they were unattributed)
-1. **Item 2** → delete the section header *inside the tab panel*, NOT the top strip. Asked with the strip as an explicit option.
-2. **Item 9** → drop the card's header age entirely, rather than relabel or re-source it.
-3. **Item 3** → swap-scoped, NOT persisted; resets to Chat on reload.
-4. **Item 7** → GFM tables in `markdown.go`, server-side (not yet built).
-5. **Carousel, bulk expand/collapse, bulk Chat/Raw** → all on 595; do 593 first.
+### 🔴 NOT VERIFIED
+Items 4–8 are being implemented as this doc is written. **No gate has been run on `feat/tmux-593-items-4-8`, no PR exists, and nothing about criteria 4–8 is claimed.** Criterion 10 is satisfied for items 1, 2, 3, 9 only.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -2343,24 +2344,38 @@ directions. Read both halves — either one alone is wrong.**
 - **Deleting a feature means deleting its tests — and keeping what they KNEW.** Item 9 removed 6; each site carries a note recording the discovery, so it is not paid for twice.
 - **Five of my claims were falsified by audits this session**, four of one shape: asserting a property of a guard without running it.
 
+- 🔴 **A RECON AGENT'S "IT DOES NOT EXIST IN THE REPO" CAN BE TRUE OF THE SOURCE AND FALSE OF THE BEHAVIOUR.** Asked to locate item 6's `selection_menu`, a thorough read-only agent grepped the whole worktree case-insensitively, found **zero** hits, and reported the item needed re-pointing. It was right about the grep and wrong about the system: `selection_menu` is a **`session-manager` waiting-signal NAME that arrives in the DATA**, reaches the UI as `TmuxWaitingSignal.Signal` (`internal/ui/tmux.go:202-203`) and is rendered by `waitingEvidence` (`:2956`, emitted `:2608`). Taking the conclusion at face value would have cost a round trip to the operator asking what the item meant. **When a grep says a user-visible string is absent, ask where the string is PRODUCED before concluding the feature is absent** — a value that is data on this side of a wire is a literal on the other.
+- 🔴 **`origin/trunk..HEAD` LISTING COMMITS IS NOT EVIDENCE OF UNMERGED WORK AFTER A SQUASH.** It listed all four of #826's commits minutes after the squash landed, and `git diff --stat origin/trunk HEAD` showed 794 deletions on top — both readings say "do not delete this worktree, work would be lost". Both are artefacts: the deletions were trunk's OWN newer commits in files the branch predates. The discriminating check is per-file and takes one loop — for each file the branch changed, `git diff --quiet origin/trunk HEAD -- <file>`; all six were byte-identical. **Verify a squash by CONTENT, and scope the diff to the files the branch actually touched**, or trunk's unrelated movement reads as your work going missing.
+- 🔴 **THE HANDOFF SIZE GATE'S PLAYBOOK FORBIDS THE OBVIOUS FIX.** `## Gotchas` is **133,129 B — 54% of this document**, far more than `## Open investigations` (89,982 B), and moving it is what a size-driven read reaches for first. The playbook explicitly refuses: *"DO NOT satisfy this by deleting an open investigation, a gotcha or a ruled-out theory"*, because those are the sections whose whole value is that a future session does not repeat the work. **Read the playbook's ORDER before picking a target** — step 1 (evict what has CLOSED) freed 46,902 B on its own and needed no judgement calls. Pruning `## Gotchas` is still worth doing, but it is separating each imperative from its worked example, one at a time — judgement work, not a size exercise, and it must not be done under deadline.
+- **The doc-size ceiling lives in `scripts/lib/handoff_budget.py`, not in the test that owns the assertions.** `scripts/tests/test_handoff_doc_size.py` imports `MAX_BYTES`/`GRANDFATHER_STEP`/`GRANDFATHERED` from there; grepping the test for `MAX_BYTES =` finds the import, not the value. ⚠ And the test module cannot be imported outside the dev shell (`import pytest` at module scope), so `nix develop ~/workspace/devrc -c python3` or a plain grep of the lib is the way to read a constant.
+- **`claudedocs/refs/` is exempt from the size ceiling because the scanner globs `handoff-*.md`** — a refs file does not match the pattern. ⚠ That exemption is also why a demoted block is invisible to `handoff_search`: the pointer left behind in the doc is the only route back to it.
+
 ## How to verify
 
 ```bash
-# the FULL e2e tier — not one spec. ~32 min; run it detached.
-cd ~/workspace/homelab-tmux593b/containers/clawgate
-nix-shell -p tailwindcss --run "tailwindcss -i web/css/input.css -o web/static/app.css --minify"
-nohup ./e2e/run.sh > /tmp/e2e.log 2>&1 &
-# then wait on CONTENT, never on a pipe's exit code:
-until grep -qE '^\s+[0-9]+ (passed|failed)' /tmp/e2e.log; do sleep 30; done
-grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped)' /tmp/e2e.log
-grep -oE 'tests/[a-z0-9-]+\.spec\.ts' /tmp/e2e.log | sort -u | wc -l   # expect 34
+# 🔴 THE CURRENT WORKTREE IS 593c. `~/workspace/homelab-tmux593b` was REMOVED when #826 merged.
+cd ~/workspace/homelab-tmux593c/containers/clawgate
 
-# the Go tier, counted rather than read off `ok`
-go test ./internal/ui/ -count=1 -v 2>&1 | grep -c '^--- PASS'   # expect 511
+# a fresh worktree has NO web/static/app.css (gitignored) -> TestTheStylesheetCarriesNoNewTestOnlyClasses
+# reds until tailwind runs. Use the repo-pinned v3 from node_modules, NOT `nix-shell -p tailwindcss` (v4).
+npm run build:css
+
+# the FULL e2e tier — NOT one spec. ~32 min; run it detached (the tool call times out at 10m).
+nohup ./e2e/run.sh > /tmp/e2e-593c.log 2>&1 &
+# wait on CONTENT, never on a pipe's exit code:
+until grep -qE '^\s+[0-9]+ (passed|failed)' /tmp/e2e-593c.log; do sleep 30; done
+grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped)' /tmp/e2e-593c.log
+grep -oE 'tests/[a-z0-9-]+\.spec\.ts' /tmp/e2e-593c.log | sort -u | wc -l   # expect 34
+
+# the Go tier, counted rather than read off `ok` (a 0/0 is a COMPILE failure, not a clean run)
+go test ./internal/ui/ -count=1 -v 2>&1 | grep -c '^--- PASS'   # baseline at 248a0c4ed is 511
 go test ./... -count=1
 
 # all FOUR checks on the PR — clawgate-e2e is the one that catches this class
-gh pr checks 826 --repo ZacxDev/homelab-infra
+gh pr checks <n> --repo ZacxDev/homelab-infra
+
+# this doc's own size gate, before any /handoff write
+stat -c '%s' ~/workspace/devrc/claudedocs/handoff-tmux-webapp.md   # allowance is in scripts/lib/handoff_budget.py
 
 # the live queue and its lock, before touching any rank
 git -C ~/workspace/devrc show origin/main:claudedocs/handoff-tmux-webapp.md \
