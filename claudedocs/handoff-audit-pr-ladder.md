@@ -16,10 +16,18 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 - **closing-condition:** `judgement` — the operator reads a proposal for a stop rule keyed
   on an OBSERVABLE (not a class property) and records in this doc either "implement it" or
-  "the two-round cost stands". 🔴 **FROZEN AT ROUND 1 of this arc's stop-rule thread.** The
-  2026-09-14 attempt is CLOSED (shipped and retracted, below); this condition governs the
-  NEXT attempt and nothing else. A close-check answers this line with a VERDICT, never an
-  inventory of the 14 ranked items.
+  "the two-round cost stands".
+- ✅ **MET 2026-09-15. THE OPERATOR RECORDED: "IMPLEMENT IT". THIS ARC IS CLOSED.** The
+  verdict is on the rule that is already shipped and live — `#1691` (`b9a53101`), hardened
+  by `#1712` (`8512eede`): the prose hatch's stop reason is COUNTED from the pre-image LINES
+  the round's own fix diff touched (`git blame -w -M` against the ladder anchor, ≥2/3
+  ladder-authored, never before round 2, enforced in `audit-dispatch.py` rather than only in
+  prose). That is an OBSERVABLE, which is exactly what this condition asked for and what the
+  retracted `#1678` draft was not.
+- 🔴 **DO NOT RE-OPEN THIS ARC, AND DO NOT RUN ANOTHER ROUND OF IT.** A condition frozen at
+  round 1 is answered once. Ranks 5, 8, 11, 13 and 14 below are **a different thread** that
+  never depended on the stop rule; work them as their own arc with their own closing
+  condition, not as rounds of this one. Anything else outstanding is a NEW arc.
 
 ## State now
 - 🔴 **THE #1712 LADDER IS CLOSED AND MERGED. Round 24's delta re-audit over
@@ -117,56 +125,29 @@ Full text — every measured value, every refuted theory — is in git history:
   this ladder must say what it OBSERVES, not what the diff IS.
 
 ## Next steps (ranked)
-🔴 **Numbering PRESERVED and CLOSED ITEMS TOMBSTONED IN PLACE, never renumbered** — live
-`claim-work` refs are keyed to the rank. Identify an item by its SUBJECT, never its rank.
-🔴 **2026-09-14: ranks 1,2,3,4,6,7,9,10,12 were compressed to one-line tombstones** because
-this doc crossed its size budget and the ceiling test's own playbook says EVICT WHAT HAS
-CLOSED before raising a number. Each keeps its rank, its verdict, its sha and its forcing
-tag; the do-not-re-open warnings are preserved verbatim in substance. Full text is in git
-history — `git log -p -- claudedocs/handoff-audit-pr-ladder.md`. No OPEN item was touched.
-1. ✅ **DONE — round-0 trial CLOSED at `ran: 6 · changed the outcome: 3`; the section STAYS.**
-   Trigger shipped (`#1565` routes round 0 at PR-create) + `#1574` replaced the retirement
-   condition with a TRIAL RECORD. 🔴 Do not re-derive the pair or re-open the trial; the
-   record lives in `claude/skills/audit-pr/SKILL.md`. forcing: none
-2. ✅ **DONE — `#1532` MERGED (`6fa09466`).** A shared-surface diff now REFUSES a scoped
-   verdict (exit 4) rather than under-running silently. Re-measured at `018e483b`: the
-   dangerous case is the MIDDLE (a partial run prints `RESULT: PASS`), not the zero-select
-   one, which was already safe. Follow-on is rank 8. forcing: none
-3. 🔴 **CLOSED — `ship.sh`'s laptop nebula fallback WORKS; the item was FALSE.** Measured
-   2026-09-11 with `env -u LAPTOP_SSH`: LAN times out, falls back to `10.42.0.100`, VERIFIED.
-   🔴 **DO NOT RE-OPEN — TWO separate sessions have now independently refuted this**, which is
-   the cost of leaving a struck item phrased as a task. forcing: none
-4. ✅ **DONE — round 0 run on `audit-pr/SKILL.md` itself; `#1587` + `#1589` merged, shipped,
-   consumer-validated both hosts.** The actionable measurement was a REACH TABLE (which
-   sections reach a dispatched auditor), NOT file size. 🔴 Do not re-run as a size exercise:
-   this skill has no enforced byte ceiling and round 0 examined the remaining half and
-   declined to cut it. forcing: none
+🔴 **THE ARC THIS LIST BELONGED TO IS CLOSED (see `## Goal`).** What remains is a separate
+thread. **Numbering PRESERVED — identify an item by its SUBJECT, never its rank**, because a
+rank is half a `claim-work` slug's identity and re-ranking silently re-points live claims.
+🔴 **2026-09-15: ranks 1, 2, 3, 4, 6, 7, 9, 10 and 12 — every CLOSED item — are compressed to
+the single ledger line below**, paying for this update's size exactly as the ceiling test's
+playbook prescribes (EVICT WHAT HAS CLOSED before raising a number). Each keeps its rank and
+its sha; full text is in git history: `git log -p -- claudedocs/handoff-audit-pr-ladder.md`.
+**No OPEN item was touched, and nothing was renumbered.**
+- **CLOSED ranks —** 1 round-0 trial closed at `ran: 6 · changed the outcome: 3`, section
+  STAYS, trigger shipped (`#1565`/`#1574`) · 2 `#1532` `6fa09466` shared-surface refusal ·
+  3 `ship.sh` nebula fallback WORKS, the item was FALSE — 🔴 **three sessions have now
+  refuted it, DO NOT RE-OPEN** · 4 round 0 on `audit-pr/SKILL.md`, `#1587`+`#1589`, 🔴 not a
+  size exercise · 6 `#1543` `0b5ee924` · 7 all three checks re-run on the MERGED tree,
+  `db7bf3ff` · 9 `#1431` CLOSED, dismissal `issues/1431#issuecomment-5644071037` ·
+  10 `#1547` `6ff4d215`, 🔴 `grep -c 'Both files carry the sentence'` is STILL 1 and that is
+  CORRECT — read the context, never the count · 12 `#1561` `c0bbd6d9`, and it weakens
+  `bash-guard.py` in no way. forcing: none
 5. **`1e844f1e`** — another session's cairn handoff commit, pushed but unmerged, parked on `origin/feat/audit-pr-round-0-algorithm`. Not this arc's to merge; flagged so it is not mistaken for dead. forcing: none
-6. ✅ **DONE — `#1543` merged (`0b5ee924`), `main` un-redded** (two `guard_core` tests, two
-   handoff docs in NEITHER allowlist). Superseded structurally by rank 12. forcing: none
-7. ✅ **DONE (2026-09-12) — shipped and verified, both hosts at `db7bf3ff`.** All three checks
-   re-run against the MERGED tree, not a branch: the `testlib` trigger exits 4; an ordinary
-   `dl-router` edit still scopes; the `#1431` control matrix is red in all three arms.
-   ⚠ `#1532`/`#1533`/`#1543` landed on UNREAD CI at the operator's instruction, so that
-   post-merge evidence is the only evidence they work. forcing: none
 8. **Decide whether `scripts/scoped-tests.sh` itself should be a shared-surface trigger.** Today it is not, so a change to the mapper is validated by the mapper. Flagged on `#1532` rather than added, because it is outside the list the operator approved.
    forcing: none
-9. ✅ **DONE (2026-09-12) — `#1431` CLOSED, both items satisfied.** Defect fixed in `#1533`
-   (`f3e27aa3`) with its `QUICK` control watched red on the MERGED tree; item 2 dismissed in
-   writing (`issues/1431#issuecomment-5644071037`) by the reader on the operator's explicit
-   authorisation. ⚠ Scope: a claim about the tracked tree, not the three merged commit
-   messages that still carry the wrong sentence. forcing: none
-10. ✅ **DONE — `#1547` MERGED (`6ff4d215`).** Trial 3's false attribution fixed and
-    self-attributed. ⚠ `grep -c 'Both files carry the sentence'` is STILL 1 and that is
-    CORRECT — the correction quotes the old wording. **Read the context, never the count.**
-    forcing: none
 11. **The vetr DMARC monitor is laptop-only and rebuild-fragile.** Found by round-0 trial 5, re-verified independently: `nix/home.nix`'s `dmarc-watch` block makes the UNIT declarative while `ExecStart` points at `${workspace}/scratch/vetr/scripts/dmarc-alert.py` and a `~/.config/vetr/cloudflare-dns.env` credential that **nothing manages**. That path exists on the laptop (timer live) and **not on the workbench**, where the service is emitted as a store symlink and the timer is gated off. Either give the vetr scripts a managed home or state in the block's comment that this monitor is laptop-local. Also fix that comment's claim that a hand `systemctl --user start` "still works" — on the workbench it is `203/EXEC` plus a `notify-failure@` toast. 🔴 **Belongs to `claudedocs/handoff-dmarc-enforcement-and-spoofing.md`, not this ladder** — move it there rather than working it here. forcing: regression — a spoofing monitor with a verified true positive that will silently not exist on a rebuilt host
-12. ✅ **DONE (2026-09-12) — `#1561` MERGED (`c0bbd6d9`): the kill scanners no longer read
-    `claudedocs/`.** They red-ed `main` six times in ~2h from four sessions, every offender
-    prose in a handoff doc. 🔴 What it does NOT weaken: `bash-guard.py` is untouched and was
-    verified on the shipped tree BY CONTENT; a markdown file executes nothing. forcing: none
-13. **Decide the `Gotchas` recurrence convention — MEASURED at 183 bullets / ~101 KB inside a 164 KB doc, with five redundant families.** Found by round 0 on `#1581` (which also cut three bullets from that PR for it). The doc's established convention is a NEW full bullet per recurrence — `git grep -n 'TRAP AGAIN'` finds three separate bullets on the piped-`$?` trap alone — so each recurrence is monotonic growth with nothing to stop it. Measured families on `main`: `MUTATION DID NOT APPLY` ×3, timestamped-reading ×6, spelled/walkable guard ×2, `xargs -0 command grep` ×1, piped `$?` ×3. 🔴 **Two things deliberately NOT proposed, each for a reason:** this doc has **no byte ceiling** (the `MIN_HEADROOM|st_size <=` union returns 10 files, none under `claudedocs/`), so do not argue from a limit that does not exist; and **no new detector** — `scripts/lib/handoff_doc.py:179` refuses the class in terms (*"NO FUZZY MATCH IS ATTEMPTED — a similarity heuristic here would be exactly the clever-inference guard the operator's standing rule forbids"*), and no named instrument takes a `claudedocs/` doc (`/prune-skill` is `SKILL.md`, `/prune-memory` is `MEMORY.md`, `/prune-index` is the cairn store). So this is a per-family human judgement, not a tool. **Closing condition:** the operator reads the five-family table above and records, per family, either "collapse to one bullet" or "the convention stands" — in this doc, in writing. Until then it is a known, measured, accepted cost rather than an open defect. forcing: none
-14. 🔶 **STILL OPEN, BUT THE MEASUREMENT NOW ANSWERS 30 OF 49 RULES (was 17). `#1610` MERGED (`e01c7dad`, shipped + consumer-validated on both hosts); the dating fix is `fix/sweep-origin-dating`, UNMERGED.** 🔴 **THE REMAINING 19 ARE A DIFFERENT DEFECT AND RE-DATING WILL NOT TOUCH THEM** — their `apply` patterns match ordinary English, so they match before even their section existed: `guard-lost-its-reason` (`has none`) **232** pre-origin hits, `clean-round-ends-ladder` (`clean round`) **106**, then a tail at 13 and below. Tightening a pattern is not re-dating a rule. **That is the next step, and it is pattern work.** ✅ **What the dating fix bought:** `FIRED 14 → 27 · withheld 32 → 19 · UNFIRED 3`, 13 recovered, **0 regressed**. 🔴 **BOTH SINGLE-BOUND DATERS WERE MEASURED WRONG, IN OPPOSITE DIRECTIONS — do not re-derive either.** `git log -S` on a rule's CURRENT wording dates the REWORD (44 of 49 origins landed in 2026-08/09); dating at the SECTION HEADING recovered 13 and sent **two the other way** (`dispatch-blind` 0 → 437 pre-origin, `nine-axes` 0 → 29) because **headings get reworded too**. So origin is an **INTERVAL** and in-between matches are reported as `ambig` — unattributable — rather than resolved by fiat. 🔴 **A TRUNCATED HISTORY SCAN DOES NOT LOOK TRUNCATED:** the first build read **1 of 23** versions because `git log --follow --reverse` silently returns ONE commit (measured: `--follow` 23 · `--follow --reverse` 1 · `--reverse` 19, missing the pre-rename history). It dated the rules whose section existed back then and called the rest UNDATED — indistinguishable from a working dater with gaps, caught only because one rule went BACKWARDS from datable to UNDATED. `scan_reaches_current()` now REFUSES; ⚠ its limit is asserted, not implied (dropping the newest commit is NOT caught, since it changed no probe). ✅ **The standout row is unchanged: `base-is-current-tip` — 370 injected loads, ZERO applications.** ⚠ Still not a deletion case alone; silence can mean nobody violated it. ⚠ **Three caveats that survive:** `fired` counts APPLICATIONS not catches; the `AMBIGUOUS` verdict is test-pinned but has NEVER fired on the real corpus (untested-in-production branch); and neither bound is the rule's cited origin INCIDENT, which only its own prose names. ⚠ **The DECISION RULE round 0 flagged is still undefined** — an UNFIRED row licenses nothing while this item also says not to read silence as deadness. forcing: none
+13. **Decide the `Gotchas` recurrence convention — MEASURED at 183 bullets / ~101 KB inside a 164 KB doc, with five redundant families.** Found by round 0 on `#1581`. The doc's established convention is a NEW full bullet per recurrence — `git grep -n 'TRAP AGAIN'` finds three separate bullets on the piped-`$?` trap alone — so each recurrence is monotonic growth with nothing to stop it. Measured families on `main`: `MUTATION DID NOT APPLY` ×3, timestamped-reading ×6, spelled/walkable guard ×2, `xargs -0 command grep` ×1, piped `$?` ×3. 🔴 **Two things deliberately NOT proposed:** ⚠ **the "no byte ceiling" half is now FALSE and is retracted** — this doc HAS one (`scripts/tests/test_handoff_doc_size.py`, which caps every `claudedocs/**/handoff-*.md` and is why the last two updates had to evict), so that argument is available after all and the item is cheaper than it reads; and **no new detector** — `scripts/lib/handoff_doc.py:179` refuses the class in terms, and no named instrument takes a `claudedocs/` doc (`/prune-skill` is `SKILL.md`, `/prune-memory` is `MEMORY.md`, `/prune-index` is the cairn store). **Closing condition:** the operator reads the five-family table and records, per family, "collapse to one bullet" or "the convention stands" — in this doc, in writing. forcing: none
+14. 🔶 **STILL OPEN. THE MEASUREMENT ANSWERS 30 OF 49 RULES (was 17). `#1610` MERGED (`e01c7dad`, shipped + consumer-validated both hosts); the dating fix is `fix/sweep-origin-dating`, UNMERGED.** 🔴 **THE REMAINING 19 ARE A DIFFERENT DEFECT AND RE-DATING WILL NOT TOUCH THEM** — their `apply` patterns match ordinary English, so they match before their section existed: `guard-lost-its-reason` (`has none`) **232** pre-origin hits, `clean-round-ends-ladder` (`clean round`) **106**, then a tail at 13 and below. Tightening a pattern is not re-dating a rule. **That is the next step, and it is pattern work.** ✅ **What the dating fix bought:** `FIRED 14 → 27 · withheld 32 → 19 · UNFIRED 3`, 13 recovered, **0 regressed**. 🔴 **BOTH SINGLE-BOUND DATERS WERE MEASURED WRONG, IN OPPOSITE DIRECTIONS — do not re-derive either.** `git log -S` on a rule's CURRENT wording dates the REWORD (44 of 49 origins landed in 2026-08/09); dating at the SECTION HEADING recovered 13 and sent **two the other way** (`dispatch-blind` 0 → 437, `nine-axes` 0 → 29) because **headings get reworded too**. So origin is an **INTERVAL** and in-between matches are `ambig` — unattributable — rather than resolved by fiat. 🔴 **A TRUNCATED HISTORY SCAN DOES NOT LOOK TRUNCATED:** the first build read **1 of 23** versions because `git log --follow --reverse` silently returns ONE commit (`--follow` 23 · `--follow --reverse` 1 · `--reverse` 19). It called the rest UNDATED — indistinguishable from a working dater with gaps, caught only because one rule went BACKWARDS from datable to UNDATED. `scan_reaches_current()` now REFUSES; ⚠ its limit is asserted, not implied. ✅ **`base-is-current-tip` — 370 injected loads, ZERO applications.** ⚠ Not a deletion case alone; silence can mean nobody violated it. ⚠ **Three surviving caveats:** `fired` counts APPLICATIONS not catches; the `AMBIGUOUS` verdict is test-pinned but has NEVER fired on the real corpus; and neither bound is the rule's cited origin INCIDENT. ⚠ **The DECISION RULE round 0 flagged is still undefined.** forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
