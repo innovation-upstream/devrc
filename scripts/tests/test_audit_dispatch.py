@@ -7910,6 +7910,20 @@ def test_the_determination_mandates_the_whitespace_and_move_blame_flags():
     `#1688` r3 towards stopping, `#1121` r2 and `#1110` r4 away from it. The
     first draft of this section shipped a bare `git blame` with none of them,
     which was round-0 finding F4.
+
+    🔴 THIS GUARD WAS WALKABLE FOR ONE ROUND, AND ONLY THE BATTERY SAW IT.
+    Round 21's fix for its OWN finding added the missing `-U0` to the REFLOW
+    command, which gave the section a SECOND line containing the substring
+    `git diff -U0 -w -M` — one at `6bf15a8f`, two at `da65bf2b`. This test was
+    a bare `"git diff -U0 -w -M" in section`, so mutant Q8 (the COUNTING
+    command loses `-w -M`) left the reflow line satisfying the membership test
+    and SURVIVED a 212-test green suite. `claude/RULES.md`: a `count=1` text
+    replace on a pattern that occurs more than once, and a guard on WORDS is
+    walkable the moment a second copy of the words exists.
+
+    So each command is now read as its own LINE through `_shipped_git_line`,
+    which refuses anything but EXACTLY ONE match — either command losing its
+    flags fails here independently, and Q8/Q22 are the two rows that hold that.
     """
     rc, out, err = run_main(
         ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
@@ -7922,11 +7936,31 @@ def test_the_determination_mandates_the_whitespace_and_move_blame_flags():
         "claim and is the message to read."
     )
     section = out[out.index(PROSE_SECTION):]
-    assert "git diff -U0 -w -M" in section, (
-        "the section's diff command has no `-w -M`. Without `-w` a "
-        "whitespace-only reindent enters the operand as a line the round "
-        "'edited'; without `-M` a rename enters it as a whole-file delete."
-    )
+    counting = _shipped_git_line(section, word_diff=False).split()
+    reflow = _shipped_git_line(section, word_diff=True).split()
+    for flag in ("-U0", "-w", "-M"):
+        assert flag in counting, (
+            f"the section's COUNTING diff command has no `{flag}`: "
+            f"`{' '.join(counting)}`. Without `-w` a whitespace-only reindent "
+            "enters the operand as a line the round 'edited'; without `-M` a "
+            "rename enters it as a whole-file delete; without `-U0` the hunks "
+            "it counts are not the hunks this rule is written about."
+        )
+    # ⚠ The REFLOW command's own `-U0` is deliberately NOT pinned here, and
+    # that is not an omission. It is a RELATIONSHIP — the two commands must
+    # produce the SAME hunk set — owned by
+    # `test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit`, which RUNS
+    # both against a two-paragraph git fixture instead of asserting about their
+    # spelling, and whose row is Q17. Re-pinning the spelling here would only
+    # make this test a second, weaker killer for a row that already has one.
+    for flag in ("-w", "-M"):
+        assert flag in reflow, (
+            f"the section's REFLOW diff command has no `{flag}`: "
+            f"`{' '.join(reflow)}`. The reflow command must be the SAME "
+            "measurement as the counting one, narrowed by `--word-diff`. One "
+            "that sees a reindent or a rename the counting command does not "
+            "answers state (e) about hunks the rule never counted."
+        )
     assert "git blame -w -M --porcelain" in section, (
         "the section's blame command has no `-w -M`. Without them a reindent "
         "or an intra-file move re-attributes the line to whoever moved it, "
@@ -10771,6 +10805,24 @@ FIX_MATRIX = (
      "one, and the two are now named apart",
      "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition",
      "RED@6bf15a8f", "Q21"),
+    # --------------------------------------------------------------------- #
+    # Round 22. Base `da65bf2b`. The finding is round 21's OWN fix: nothing in
+    # the change was wrong, and it still cost a guard. Only the battery saw it
+    # — 212 tests green, Q8 SURVIVED — which is the whole argument for running
+    # the battery on a round whose suite is already clean.
+    # --------------------------------------------------------------------- #
+    ("r22/F1 round 21's `-U0` fix made the F4 guard VACUOUS. Adding `-U0` to "
+     "the REFLOW command gave the section a SECOND line carrying the substring "
+     "`git diff -U0 -w -M` (1 occurrence at `6bf15a8f`, 2 at `da65bf2b`), and "
+     "the guard was a bare `\"git diff -U0 -w -M\" in section`. Q8 — the "
+     "COUNTING command losing both flags — then SURVIVED a 212-test green "
+     "suite, because the reflow line kept satisfying the membership test. A "
+     "guard on WORDS is walkable the moment a second copy of the words exists. "
+     "It now reads each command's own LINE through `_shipped_git_line`, which "
+     "refuses anything but exactly one match, and Q22 was added so the reflow "
+     "command is covered ALONE rather than as a side effect of Q8",
+     "test_the_determination_mandates_the_whitespace_and_move_blame_flags",
+     "GUARD", "Q8, Q22"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor

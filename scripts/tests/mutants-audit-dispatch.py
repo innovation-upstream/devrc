@@ -301,10 +301,18 @@ _DET_REFLOW_BRANCH = (
 )
 _DET_BLAME_FLAGS = "git blame -w -M --porcelain "
 _DET_DIFF_FLAGS = "f\"git diff -U0 -w -M {emit_from or '<from>'}..{head_sha}\""
-# 🔴 The REFLOW command's own `-U0`. A separate literal from `_DET_DIFF_FLAGS`
-# on purpose: the defect that made this row necessary was exactly that the two
+# 🔴 The REFLOW command, whole. A separate literal from `_DET_DIFF_FLAGS` on
+# purpose: the defect that made Q17 necessary was exactly that the two
 # commands' context widths drifted apart while both looked correct in isolation.
-_DET_REFLOW_U0 = (
+#
+# 🔴 AND THE TWO ARE INDISTINGUISHABLE IN THE RENDERED SECTION, which is what
+# made the F4 guard vacuous for a round. `_DET_DIFF_FLAGS` and this literal are
+# unambiguous HERE — one ends `{head_sha}\"`, the other `..\"` — but both emit a
+# line carrying the substring `git diff -U0 -w -M`, so a test asserting that
+# substring against the section cannot say WHICH command it found. Q8 and Q22
+# mutate the two separately for exactly that reason; a single row over a shared
+# spelling would report coverage neither of them has.
+_DET_REFLOW_COMMAND = (
     "f\"git diff -U0 -w -M --word-diff=porcelain {emit_from or '<from>'}..\""
 )
 # The narrowing clause — state (e) covers the PURE rewrap only, and the
@@ -464,8 +472,29 @@ def det_reflow_command_loses_U0(t):
     reword of the flag can satisfy.
     """
     return _swap(
-        t, _DET_REFLOW_U0,
+        t, _DET_REFLOW_COMMAND,
         "f\"git diff -w -M --word-diff=porcelain {emit_from or '<from>'}..\"",
+    )
+
+
+def det_reflow_loses_w_and_M(t):
+    """Q22 — the REFLOW command loses `-w` and `-M`, the COUNTING one keeps them.
+
+    Q8's twin, and the row that did not exist while the F4 guard was a bare
+    `"git diff -U0 -w -M" in section`. That guard could not tell the two
+    commands apart, so ONE row over the shared spelling was reporting coverage
+    of both while covering neither alone.
+
+    The defect is real and not cosmetic: the rule counts the pre-image lines of
+    `git diff -U0 -w -M`'s hunks, and state (e) asks whether one of THOSE hunks
+    is word-identical. A reflow command without `-w`/`-M` answers that question
+    over a different hunk set — a whitespace-only reindent or a rename it can
+    see and the counting command cannot — so a hunk the rule never counted can
+    clear, or fail to clear, state (e).
+    """
+    return _swap(
+        t, _DET_REFLOW_COMMAND,
+        "f\"git diff -U0 --word-diff=porcelain {emit_from or '<from>'}..\"",
     )
 
 
@@ -3640,7 +3669,15 @@ ROWS = [
       # lying about what it saw.
       "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero",
       "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
-      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS"},
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+      # Round 21's two new guards, recorded the same way and for the same
+      # reason. Both slice the output on the section heading, so a wholesale
+      # deletion takes them with it. Round 22 OBSERVED them firing and wrote
+      # them down rather than re-scoping the tests to look away: this row's
+      # claim is "here is everything that went red", and a set trimmed to the
+      # ones that feel on-topic is the row lying about what it saw.
+      "test_the_F1_gap_concession_is_as_wide_as_the_gap",
+      "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition"},
      det_section_dropped),
     # ⚠ Q3 AND Q13 ARE NOT DUPLICATES, and the overlap is the point. Q3
     # rewrites the collision BRANCH so a structural zero prints as an ordinary
@@ -3652,8 +3689,15 @@ ROWS = [
      {"test_the_prose_determination_names_the_boundary_it_can_resolve",
       "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      det_collision_reads_as_an_ordinary_boundary),
+    # Q4's second killer is round 21's own doing, and is RECORDED rather than
+    # re-scoped. `PROSE_DETERMINATION_POPULATION` is the literal this row
+    # replaces, and round 21 moved the F1 gap concession INTO it — so dropping
+    # the population statement now also drops the concession, and the guard
+    # over the concession fails. That is a true report about what this mutation
+    # deletes, not over-coverage to be hidden by narrowing either test.
     ("Q4  the prose-ONLY condition dropped from the section",
-     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before"},
+     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+      "test_the_F1_gap_concession_is_as_wide_as_the_gap"},
      det_prose_only_condition_dropped),
     # Q5/Q6 are round-0 finding F2 as mutants. The graft at `4552b745` shows
     # `..._ships_its_RESTRAINING_half_too` raising on an ABSENT surface there
@@ -3671,9 +3715,19 @@ ROWS = [
     ("Q7  git blame loses -w and -M",
      {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
      det_blame_loses_w_and_M),
-    ("Q8  git diff loses -w and -M",
+    # 🔴 Q8 IS THE COUNTING COMMAND ALONE, AND Q22 IS THE REFLOW ONE. They were
+    # one row's worth of claimed coverage until round 22. Q17's fix added `-U0`
+    # to the reflow command, which gave the section a SECOND line containing
+    # `git diff -U0 -w -M`; the F4 guard was a bare membership test on that
+    # substring, so Q8 SURVIVED a green 212-test suite — the reflow line kept
+    # satisfying it while the counting command shipped with neither flag. The
+    # guard now reads each command's own line, and it takes BOTH rows to say so.
+    ("Q8  the COUNTING git diff loses -w and -M",
      {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
      det_diff_loses_w_and_M),
+    ("Q22 the REFLOW git diff loses -w and -M, the counting one keeps them",
+     {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+     det_reflow_loses_w_and_M),
     # 🔴 Q9/Q10 ARE THE THRESHOLD ITSELF, IN BOTH DIRECTIONS, and they are the
     # only rows here that reach the arithmetic rather than the prose. Q10 is
     # the shape that withdrew the findings-keyed draft: a threshold that
