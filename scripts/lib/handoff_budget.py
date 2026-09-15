@@ -57,7 +57,7 @@ GRANDFATHER_STEP = 16_384
 # authority. An allowance only ever changes by a deliberate edit to its line
 # below.
 GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 212_992,
+    "claudedocs/handoff-tmux-webapp.md": 180_224,
     "claudedocs/handoff-audit-pr-ladder.md": 196_608,
     "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,
     "claudedocs/handoff-cairn-phase3.md": 163_840,
