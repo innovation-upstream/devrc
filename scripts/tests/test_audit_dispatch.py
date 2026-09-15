@@ -10296,6 +10296,44 @@ FIX_MATRIX = (
      "exists; the restraints now ship with it",
      "test_the_prose_determination_is_NOT_in_the_auditors_brief",
      "RED@4552b745", "Q5, Q6"),
+    ("r20/F1 the stop rule's SCOPE was wider than the population its "
+     "threshold was DERIVED on: `audit-dispatch.py` shipped \"only when this "
+     "PR's payload is PROSE\" while the derivation paragraph measured \"the "
+     "PRs whose whole diff is prose\", and the same paragraph reports that "
+     "across ALL ladders two-thirds is an ordinary point on a flat "
+     "distribution — so outside the derived population the COUNT conjunct "
+     "stops discriminating, which is the collapse that retracted `#1678` in "
+     "weakened form. `#1691` itself was the counterexample: a skill `.md` "
+     "payload, 1,620 diff lines, 1,519 of them `.py`/`.sh`. Fixed by "
+     "NARROWING the scope to the derived population rather than re-deriving "
+     "the number, because `payload is prose` is a classification no artefact "
+     "carries — the guard is a fifth seam constant plus "
+     "`test_the_scope_SHIPPED_and_the_population_DERIVED_ON_are_the_same_one` "
+     "in the ladder module",
+     "test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+     "GUARD", "Q4"),
+    ("r20/F2 `render_prose_determination` open-coded `anchor != emit_from`, "
+     "the FOURTH site of a predicate `same_commit` owns — whose own docstring "
+     "calls a plain `==` between an 8-char `audited=` and a 40-char "
+     "`rev-parse` sha \"the quiet way this whole guard would fail to fire\". "
+     "An anchor and a `<from>` naming ONE commit in two spellings then "
+     "rendered as an ordinary measurable boundary, so a share of 0 that is 0 "
+     "BY CONSTRUCTION read as a measurement",
+     "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero",
+     "RED@b9a53101", "Q13"),
+    ("r20/F3 the NOT-MEASURED states the section SHIPPED and the ones the "
+     "function RETURNED were different sets — `attributable == 0` had no "
+     "sentence and state (c) had no parameter — and the guard was green "
+     "because it pinned the WORD \"Three\". Fixed by one ledger "
+     "(`PROSE_NOT_MEASURED_STATES`) that the paragraph is BUILT from and that "
+     "`_not_measured` refuses to construct outside",
+     "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+     "GUARD", "Q15, Q16"),
+    ("r20/F9 the blockless boundary said \"**this block** carries no "
+     "`<from>`\" on a run that parsed no block at all, and SHADOWED the only "
+     "branch that reported the missing round-1 anchor",
+     "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
+     "RED@b9a53101", "Q14"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -10325,7 +10363,10 @@ FIX_MATRIX = (
 # and 104 - min(50, max(1, 104 // 20)) = 104 - 5 = 99.
 # Round 19: m = 106 (printed from an import again, NOT 104 plus this round's
 # two), and 106 - min(50, max(1, 106 // 20)) = 106 - 5 = 101.
-MIN_FIX_MATRIX_ROWS = 101
+# Round 20: m = 111 (printed from an import again — NOT 106 plus this round's
+# four; the import is the authority and it says 111), and
+# 111 - min(50, max(1, 111 // 20)) = 111 - 5 = 106.
+MIN_FIX_MATRIX_ROWS = 106
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a

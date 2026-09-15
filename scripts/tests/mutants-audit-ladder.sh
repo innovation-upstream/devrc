@@ -563,12 +563,23 @@ run "derivation: 're-derive, do not tune' deleted" \
 # 🔴 THE HONEST-COST SENTENCE. It is the half a reader would most like to lose:
 # without it the rule reads as a shortcut that fires at round 2, when measured
 # it fires there for 3 of 7 prose ladders.
+#
+# ⚠ REAIMED. This row used to delete "; the measured typical price is three",
+# and the fix round DELETED that clause itself: it rested on the same
+# unexplained `4 of 5` / `5 of 5` denominator, which appears in neither the
+# commit record nor the handoff. So the row now walks the measured half that
+# survives — the one with a denominator a reader can check.
 run "derivation: the measured round-2 price deleted" \
     test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
-    '**Two rounds is the floor; the measured typical price is
-three.**' \
-    '**Two rounds is the
-floor.**'
+    'at round 2 only 3 of the 7 prose ladders reach it' \
+    'at round 2 most prose ladders reach it'
+# 🔴 THE HEDGE ON THE GAP. `zero rounds within ±0.05` at n=29 is weak evidence,
+# not proof, and the paragraph now says so. Deleting the hedge restores the
+# over-strong "AND ONLY THERE IS IT A SEPARATOR" reading the fix round removed.
+run "derivation: the n=29 hedge on the gap deleted" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'At n=29 an empty ±0.05 band is weak evidence' \
+    'At n=29 an empty ±0.05 band settles it'
 # 🔴 THE SCOPE ROW, AND THE REASON `run_pair` EXISTS. Widening the THRESHOLD and
 # refreshing the pinned constant in the same edit is what a dutiful author does
 # when a whole-string pin goes red — its own message tells them to. MEASURED on
@@ -612,6 +623,33 @@ run "seam: the EMITTED structural-zero rule reworded" \
     test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
     '    "(b) A round whose ladder anchor IS its own `<from>` — what a missing or "' \
     '    "(b) A round whose ladder anchor is unusual — what a missing or "'
+# 🔴 THE FIFTH SEAM OWNER — the POPULATION, and the row that re-derives the fix
+# round's priority finding. `#1691` shipped a scope (`payload is PROSE`)
+# STRICTLY WIDER than the population its threshold was derived on (`whole diff
+# is prose`), on which the skill's own measurement says two-thirds is an
+# ordinary point rather than a gap. This mutant is that widening, in the file
+# the ladder runner actually reads.
+run "seam: the EMITTED population widened back to the PAYLOAD" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "**This count governs a PR whose WHOLE DIFF is prose, never merely one "' \
+    '    "**This count governs a PR whose PAYLOAD is prose, and also one "'
+# 🔴 THE REACHABILITY CONTROL FOR THE NUMBER-vs-WARRANT SEAM, and the shape the
+# seam guard CANNOT see. Here the DERIVATION paragraph is widened -- in the
+# skill AND in this module's pinned constant, one mechanical refresh, exactly
+# what a whole-string pin's failure message instructs -- while the SCOPE the
+# emitter ships stays narrow. Every whole-string pin is then green and so is
+# the seam guard, because the paragraph carrying the scope is untouched. The
+# only assertion that can see it is the one comparing the two POPULATIONS, and
+# the state it catches is the `#1691` defect in mirror image: the number's
+# warrant moved and its scope did not.
+run_pair "derivation: POPULATION widened, constant refreshed" \
+    test_the_scope_SHIPPED_and_the_population_DERIVED_ON_are_the_same_one \
+    "$SKILL" \
+    'actually governs — the PRs whose whole diff is prose, 29' \
+    'actually governs — the PRs whose payload is prose, 29' \
+    "$SUITE" \
+    'actually governs — the PRs whose whole diff is prose, 29 "' \
+    'actually governs — the PRs whose payload is prose, 29 "'
 
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
 # 🔴 These two are the rows the module's docstring marks as the reachability

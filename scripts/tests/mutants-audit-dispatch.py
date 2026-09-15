@@ -269,8 +269,29 @@ _DET_COLLISION = (
     "            f\"`{anchor}`, which IS this round's own `<from>` — so every \""
 )
 _DET_PROSE_ONLY = (
-    '        "🔴 **This is for YOU, the ladder runner, not for the auditor — and "\n'
-    "        \"only when this PR's payload is PROSE**, i.e. the `.md`/prompt text the \""
+    '        "🔴 **This is for YOU, the ladder runner, not for the auditor.** "\n'
+    "        + PROSE_DETERMINATION_POPULATION\n"
+)
+# 🔴 The FOURTH open-coded site of `same_commit`, restored. See Q13.
+_DET_COLLISION_PREDICATE = (
+    "    elif anchor and not same_commit(anchor, emit_from):"
+)
+# 🔴 The boundary line that blamed a block the state proves absent. See Q14.
+_DET_NO_BLOCK_BOUNDARY = (
+    '            "**NOT RECOVERABLE from this run** — no `audit-claims` block in "\n'
+    '            "this PR\'s record carries a `<from>` for this round, so there is "\n'
+    '            "no range and no operand"\n'
+    '            + (f" (a round-1 anchor `{anchor}` IS on the record, but an anchor "\n'
+    '               "with no range measures nothing)" if anchor else\n'
+    '               ", and no block carried a round-1 anchor either")\n'
+    '            + ". The determination is NOT MEASURED this round: run the next one"'
+)
+# 🔴 The NOT-MEASURED ledger's reflow row, and the branch that reaches it.
+_DET_REFLOW_ROW = '    "reflow": ('
+_DET_REFLOW_BRANCH = (
+    "    if reflowed:\n"
+    "        return _not_measured(\n"
+    '            "reflow", ladder, ladder + pr_authored,'
 )
 _DET_BLAME_FLAGS = "git blame -w -M --porcelain "
 _DET_DIFF_FLAGS = "f\"git diff -U0 -w -M {emit_from or '<from>'}..{head_sha}\""
@@ -278,8 +299,14 @@ _DET_RESTRAINTS = "        + PROSE_DETERMINATION_PRECONDITIONS,"
 _DET_THRESHOLD_CMP = (
     "    nameable = Fraction(ladder, attributable) >= PROSE_LADDER_SHARE_THRESHOLD"
 )
+# 🔴 REAIMED BY THE FIX ROUND. `_not_measured` is now the ONLY constructor for
+# a NOT MEASURED verdict — one predicate, one place — so the mutant that turns
+# "not scoreable" into "scored a miss" belongs on it rather than on the
+# structural-zero branch it used to target. Same hazard, wider reach: it now
+# covers all five states at once, and the per-state distinction is what Q13/Q15
+# and the driver table cover.
 _DET_STRUCTURAL_ZERO = (
-    "    if anchor_is_own_from:\n        return ProseStop(\n            None,"
+    '    return ProseStop(None, ladder, attributable, "NOT MEASURED: " + why, state)'
 )
 
 
@@ -318,10 +345,66 @@ def det_collision_reads_as_an_ordinary_boundary(t):
 
 
 def det_prose_only_condition_dropped(t):
+    """The section ships with no statement of the POPULATION it governs.
+
+    Reaimed by the fix round: the scope moved into
+    `PROSE_DETERMINATION_POPULATION` and narrowed from "this PR's payload is
+    PROSE" to "this PR's WHOLE DIFF is prose", which is the population the
+    threshold was derived on. Dropping it leaves the section reading as a stop
+    rule for every delta round of every PR.
+    """
     return _swap(
         t, _DET_PROSE_ONLY,
-        '        "🔴 **This is for YOU, the ladder runner.** "\n'
-        '        "This PR ships prose, i.e. the `.md`/prompt text the "',
+        '        "🔴 **This is for YOU, the ladder runner.** "\n',
+    )
+
+
+def det_collision_predicate_back_to_equality(t):
+    """Q13 — `same_commit` open-coded as `!=` for the FOURTH time.
+
+    `same_commit`'s own docstring calls a plain `==` between an 8-char
+    `audited=` and a 40-char `rev-parse` sha "the quiet way this whole guard
+    would fail to fire", and `anchor_is_head` carries "a predicate open-coded
+    at three sites is wrong at two of them". `#1691` made it four. Under the
+    mutant a structural zero renders as an ordinary measurable boundary.
+    """
+    return _swap(t, _DET_COLLISION_PREDICATE,
+                 "    elif anchor and anchor != emit_from:")
+
+
+def det_no_block_boundary_blames_a_block(t):
+    """Q14 — the boundary line names an artefact the state proves absent."""
+    return _swap(
+        t, _DET_NO_BLOCK_BOUNDARY,
+        '            "**NOT RECOVERABLE from this run** — this block carries no "\n'
+        '            "`<from>`, so there is no range and no operand. The "\n'
+        '            "determination is NOT MEASURED this round: run the next one"',
+    )
+
+
+def det_reflow_state_dropped_from_the_ledger(t):
+    """Q15 — a state the code can RETURN is deleted from the shipped ledger.
+
+    This is the `#1691` defect in the opposite direction: there, a returnable
+    state had no sentence. `_not_measured` now REFUSES an undocumented key, so
+    the mutant turns a silent omission into a loud one — which is the point of
+    making the ledger the constructor's gate rather than a parallel list.
+    """
+    return _swap(t, _DET_REFLOW_ROW, '    "reflow-DELETED": (')
+
+
+def det_reflow_branch_dropped(t):
+    """Q16 — a REWRAPPED round scores a number instead of NOT MEASURED.
+
+    The reflow is the rule's only bias towards STOPPING, so deleting the branch
+    restores exactly the unsafe direction the fix round closed: the count is
+    computed through a paragraph re-blamed wholesale to the rewrapper.
+    """
+    return _swap(
+        t, _DET_REFLOW_BRANCH,
+        "    if False:\n"
+        "        return _not_measured(\n"
+        '            "reflow", ladder, ladder + pr_authored,',
     )
 
 
@@ -345,22 +428,22 @@ def det_restraints_dropped(t):
 
 
 def det_not_measured_states_a_and_c_dropped(t):
-    """Ship (b) alone — the state that owns a seam constant — and drop the two
+    """Ship (b) alone — the state that owns a seam constant — and drop the rest.
 
-    that do not. This is what the FIRST render of this section actually did, and
-    it is the half-delivery shape of round-0 finding F2 reappearing one
-    paragraph down: a guard bound to the constant sees nothing, because the
-    constant is still there.
+    This is what the FIRST render of this section actually did, and it is the
+    half-delivery shape of round-0 finding F2 reappearing one paragraph down: a
+    guard bound to the constant sees nothing, because the constant is still
+    there. Reaimed by the fix round, which builds the paragraph from
+    `PROSE_NOT_MEASURED_STATES` — so the mutant now has to bypass the ledger,
+    which is exactly the edit a guard on the COUNT WORD would still wave
+    through.
     """
     return _swap(
         t,
-        '        "⚠ **Three states are NOT MEASURED rather than a number, and each "\n'
-        '        "means run the next round.** (a) A pre-image line you cannot blame, or "\n'
-        '        "a round you cannot blame in FULL — there is no cap and no sample; "\n'
-        '        "capping the corpus measurement at 400 lines moved the share on 8 of "\n'
-        '        "159 rounds and in BOTH directions. "\n'
-        "        + PROSE_DETERMINATION_STRUCTURAL_ZERO\n"
-        '        + " (c) An anchor THE LEDGER reports NOT MEASURED.",',
+        '        "⚠ **" + _COUNT_WORDS[len(PROSE_NOT_MEASURED_STATES)]\n'
+        '        + " states are NOT MEASURED rather than a number, and each "\n'
+        '        "means run the next round.** "\n'
+        '        + " ".join(PROSE_NOT_MEASURED_STATES.values()),',
         '        "⚠ One state is NOT MEASURED rather than a number. "\n'
         "        + PROSE_DETERMINATION_STRUCTURAL_ZERO,",
     )
@@ -402,7 +485,7 @@ def det_structural_zero_reads_as_a_measurement(t):
     """`None` -> `False`. Same ACTION (run the next round), different CLAIM."""
     return _swap(
         t, _DET_STRUCTURAL_ZERO,
-        "    if anchor_is_own_from:\n        return ProseStop(\n            False,")
+        '    return ProseStop(False, ladder, attributable, "NOT MEASURED: " + why, state)')
 
 
 def add_unledgered_clause(t):
@@ -3461,8 +3544,29 @@ ROWS = [
      det_not_measured_states_a_and_c_dropped),
     ("Q11 a structural zero returned as a measured miss",
      {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture",
-      "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not"},
+      "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not",
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS"},
      det_structural_zero_reads_as_a_measurement),
+    # ------------------------------------------------------------------- #
+    # 🔴 Q13-Q16 — the FIX ROUND against `#1691` as merged. Q13 and Q14 are the
+    # two defects that also carry regression tests (`RED_AT_BASE_R20`); Q15 and
+    # Q16 are the evidence for the NOT-MEASURED-set ledger, which grafts onto
+    # `b9a53101` as an ABSENCE red and is therefore filed as a guard.
+    # ------------------------------------------------------------------- #
+    ("Q13 the anchor/<from> predicate open-coded as `!=` again",
+     {"test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
+     det_collision_predicate_back_to_equality),
+    ("Q14 the blockless boundary blames a block that is not there",
+     {"test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there"},
+     det_no_block_boundary_blames_a_block),
+    ("Q15 a returnable NOT-MEASURED state deleted from the shipped ledger",
+     {"test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+      "test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
+     det_reflow_state_dropped_from_the_ledger),
+    ("Q16 a REWRAPPED round scores a number instead of NOT MEASURED",
+     {"test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+      "test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
+     det_reflow_branch_dropped),
 
 ]
 
