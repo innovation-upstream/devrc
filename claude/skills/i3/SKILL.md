@@ -1,6 +1,6 @@
 ---
 name: i3
-description: "Drive the i3 window manager — query windows/workspaces/layouts, focus/move/resize/arrange, screenshot the desktop and analyze it, type/click/scroll and read the clipboard via xdotool. Use for: what's on my screen, which workspace, focus or move a window, arrange a layout, screenshot my desktop, type or click into a GUI app, send a desktop notification. Editing the i3 config -> `devrc-dx`; the bar -> `bar`."
+description: "Drive the i3 window manager. Use for: what's on my screen, which workspace, focus or move a window, arrange a layout, screenshot my desktop, type or click into a GUI app, send a desktop notification. Editing the i3 config -> `devrc-dx`; the bar -> `bar`."
 argument-hint: "<action> [args] — e.g. 'status', 'windows 2', 'focus Brave-browser', 'screenshot', 'type hello', 'key ctrl+s', 'arrange dev'"
 allowed-tools: Bash, Read
 ---

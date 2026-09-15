@@ -1,6 +1,6 @@
 ---
 name: tekton
-description: "Operate the homelab Tekton CI/CD platform — Pipelines/Triggers/Dashboard, the GitHub webhook (tekton-webhook.zacx.dev), the naida-ux-audit pipeline, and clawgate-ci (the real pre-merge gate). Use for: Tekton, the homelab CI platform, clawgate-ci, the Tekton webhook/dashboard/EventListener, adding a pipeline, a trigger that did not fire, the hostNetwork host-port collision."
+description: "Operate the homelab Tekton CI/CD platform — Pipelines/Triggers/Dashboard, the GitHub webhook, the naida-ux-audit pipeline, and clawgate-ci (the real pre-merge gate). Use for: Tekton, the homelab CI platform, clawgate-ci, the Tekton webhook/dashboard/EventListener, adding a pipeline, a trigger that did not fire, the hostNetwork host-port collision."
 ---
 
 # Tekton — homelab CI/CD platform

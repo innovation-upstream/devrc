@@ -304,8 +304,16 @@ MIN_LISTING_ENTRIES = 30
 #     which is exactly the surface tier B would have removed.
 # HEADROOM IS STILL 0 BY CHOICE: pinned to the exact new measure, so the NEXT
 # addition of any size reddens this gate and forces the same conversation.
+# 🔴 LOWERED 11,170 -> 10,832 ACROSS 36 ENTRIES on 2026-09-14: admitted
+# `the-algorithm` (tier A) and paid for it the playbook's step-1 way — mechanism
+# prose cut from five descriptions (browser, i3, opencode, signal, tekton) and
+# four more (clickup, prune-index, session-manager, initiative-scan). No trigger
+# phrase and no disambiguation clause was touched. Two tier-B demotions were
+# tried and REVERTED: this constant sums every entry regardless of the ledger
+# (see the warning above), so demotion does not move it. Headroom is 0 by
+# choice, re-pinned to the exact measurement.
 # If you are reading this while adding a skill: you do not get to raise it too.
-LISTING_TOTAL_CEILING_CHARS = 11_170
+LISTING_TOTAL_CEILING_CHARS = 10_832
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries

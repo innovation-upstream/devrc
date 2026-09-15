@@ -1,6 +1,6 @@
 ---
 name: initiative-scan
-description: "Run the on-demand cross-repo initiative scan — every initiative with its momentum (active/slowing/stalled), last-touched, commits/PRs, next-step and the live tmux session hosting it; also snapshots/restores the tmux workspace across a reboot. Use for \"what am I working on\", \"what's in flight\", \"what's stalled\", \"where did I leave X\", \"which session is X in\". The durable board is `initiatives`."
+description: "Cross-repo initiative scan — every initiative with its momentum and the live tmux session hosting it. Use for \"what am I working on\", \"what's in flight\", \"what's stalled\", \"where did I leave X\", \"which session is X in\". The durable board is `initiatives`."
 argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] [--exclude-slugs A,B] | snapshot | restore [--dry-run] | show — runs scripts/session-analysis/initiative-scan.py; defaults to --days 4 --tmux"
 allowed-tools: Bash
 ---
