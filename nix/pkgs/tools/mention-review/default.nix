@@ -3,7 +3,11 @@
 # WHAT IT IS FOR: the same job `nvim-octo` does today. A clicked GitHub `repo#N`
 # mention in the terminal opens a review surface instead of a browser tab.
 #
-# 🔴 PHASE 1. READ-ONLY. `nvim-octo` IS STILL THE PACKAGE THE CLICK PATH USES.
+# 🔴 PHASE 2. IT CAN COMMENT, APPROVE, REQUEST CHANGES, SUBMIT A REVIEW AND
+# MERGE — four of those five behind a y/N confirmation naming the repo, the
+# number, the merge method and the AUTHENTICATED LOGIN (§10.2, cli/cli#14370).
+#
+# 🔴 `nvim-octo` IS STILL THE PACKAGE THE CLICK PATH USES.
 # `scripts/mention-open.py`'s `REVIEW_EXE` still says `nvim-octo`, deliberately:
 # the retirement is a separate, later, revertable step, and the proposal is
 # explicit that it ships "only after the operator has used the new TUI for a

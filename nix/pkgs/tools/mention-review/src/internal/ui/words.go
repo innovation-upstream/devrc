@@ -176,6 +176,23 @@ func (l LoadState) Word() StateWord {
 	return StateWord{"FAILED", styBad}
 }
 
+// ModeWord names which key table is live.
+//
+// 🔴 THE MODE IS A MEANING-BEARING STATE, AND IT IS THE ONE WHERE GETTING IT
+// WRONG IS EXPENSIVE. An operator who believes they are browsing while the app
+// is waiting on y/N will press `y` for some other reason. A border colour
+// cannot carry that, and the operator's font renders the severity circles as
+// one indistinguishable glyph anyway.
+func ModeWord(m Mode) StateWord {
+	switch m {
+	case ModeCompose:
+		return StateWord{m.Word(), styWarn}
+	case ModeConfirm:
+		return StateWord{m.Word(), styBad}
+	}
+	return StateWord{m.Word(), styDim}
+}
+
 // MeaningBearingStates is the LEDGER `words_test.go` walks.
 //
 // 🔴 TWO-WAY, AND THAT IS THE POINT. The test asserts every entry renders a
@@ -224,6 +241,10 @@ func MeaningBearingStates() []StateWord {
 		LoadLoading.Word(),
 		LoadReady.Word(),
 		LoadFailed.Word(),
+
+		ModeWord(ModeBrowse),
+		ModeWord(ModeCompose),
+		ModeWord(ModeConfirm),
 
 		{Word: ghapi.AuthNoToken.Word(), Style: styBad},
 		{Word: ghapi.AuthRejected.Word(), Style: styBad},

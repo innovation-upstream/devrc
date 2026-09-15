@@ -32,15 +32,25 @@ const (
 	fxName  = "trowelcast"
 	fxNum   = 1559
 	fxRepo  = fxOwner + "/" + fxName
+
+	// 🔴 THE FIXTURE LOGIN AND MERGE METHOD ARE BOTH CHOSEN TO BE UNREACHABLE
+	// BY ACCIDENT. §5.5: "the merge method fixture is not the string the
+	// default would produce if the config read were deleted." `cfg`'s declared
+	// default is `squash`, so the fixture is `rebase` — a mutant that hardcodes
+	// the default, or that drops `MergeMethod` and falls back, renders `SQUASH`
+	// into a prompt the assertion pins as `REBASE` and dies.
+	fxViewer      = "a-reviewer"
+	fxMergeMethod = "rebase"
+	fxTitle       = "Refresh the stale context before running"
 )
 
 func fixturePR() *ghapi.Snapshot {
 	return &ghapi.Snapshot{
-		ViewerLogin:      "a-reviewer",
+		ViewerLogin:      fxViewer,
 		Kind:             ghapi.KindPullRequest,
 		Repo:             fxRepo,
 		Num:              fxNum,
-		Title:            "Refresh the stale context before running",
+		Title:            fxTitle,
 		State:            "OPEN",
 		URL:              "https://github.com/" + fxRepo + "/pull/1559",
 		Author:           "an-author",
@@ -101,6 +111,10 @@ func ready(t *testing.T) App {
 	t.Helper()
 	a := New(fxOwner, fxName, fxNum)
 	a.Width, a.Height = 140, 40
+	// ⚠ SET EXPLICITLY, because `New` deliberately leaves it EMPTY — an App
+	// that was never told the method must refuse to merge rather than guess.
+	// A fixture that relied on a default would make that refusal untestable.
+	a.SetMergeMethod(fxMergeMethod)
 	a, _ = a.Step(PRLoaded{Snap: fixturePR()})
 	a, _ = a.Step(DiffLoaded{Diff: fixtureDiff(t)})
 	return a
@@ -522,6 +536,13 @@ func intentsEqual(got, want []Intent) bool {
 }
 
 // stubRunner satisfies Runner without touching the network.
+//
+// 🔴 EVERY WRITE METHOD RETURNS WITHOUT DOING ANYTHING, AND NONE OF THEM HAS A
+// NETWORK CALL IN IT. This type is the only Runner the non-end-to-end tests can
+// see, and `App.runner` is nil in every pure test — so a test cannot reach
+// GitHub even by mistake. `nonet_test.go` is the second lock: a transport that
+// refuses any non-loopback host, with a control proving it rejects a real
+// GitHub URL.
 type stubRunner struct{}
 
 func (stubRunner) FetchPR(context.Context, string, string, int) (*ghapi.Snapshot, error) {
@@ -530,4 +551,9 @@ func (stubRunner) FetchPR(context.Context, string, string, int) (*ghapi.Snapshot
 func (stubRunner) FetchDiff(context.Context, string, string, int) (*udiff.Diff, error) {
 	return &udiff.Diff{}, nil
 }
-func (stubRunner) OpenBrowser(string) error { return nil }
+func (stubRunner) OpenBrowser(string) error                                       { return nil }
+func (stubRunner) PostComment(context.Context, string, string, int, string) error { return nil }
+func (stubRunner) SubmitReview(context.Context, string, string, int, string, string) error {
+	return nil
+}
+func (stubRunner) Merge(context.Context, string, string, int, string) error { return nil }

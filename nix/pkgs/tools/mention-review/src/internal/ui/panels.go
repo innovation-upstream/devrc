@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+
 	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 
@@ -39,7 +40,11 @@ func (a App) render() string {
 			a.Width, a.Height, minWidth, minHeight))
 	}
 	footer := a.renderFooter()
+	bar := a.renderBar()
 	bodyH := a.Height - lipgloss.Height(footer)
+	if bar != "" {
+		bodyH -= lipgloss.Height(bar)
+	}
 
 	var body string
 	switch {
@@ -52,7 +57,96 @@ func (a App) render() string {
 	default:
 		body = a.renderPanels(bodyH)
 	}
+	if bar != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, body, bar, footer)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, footer)
+}
+
+// renderBar is the write surface: the confirmation line, the compose buffer, or
+// the last outcome. Empty in the ordinary browsing case.
+//
+// 🔴 THE CONFIRMATION IS RENDERED AS THE STORED STRING, VERBATIM. It is not
+// rebuilt here from the intent, because then the sentence asserted by
+// `confirm_test.go` and the sentence on screen would be two derivations that
+// could drift — and the whole point of pinning the WHOLE normalised string is
+// that what the operator reads is what was pinned.
+func (a App) renderBar() string {
+	switch a.mode {
+	case ModeConfirm:
+		if a.pending == nil {
+			// A mode with no pending intent is a bug, and it says so rather
+			// than rendering an empty bar that looks like an ordinary screen.
+			return styBad.Render("CONFIRM — no pending action; this is a bug.")
+		}
+		return lipgloss.NewStyle().Padding(0, 1).Render(lipgloss.JoinHorizontal(lipgloss.Top,
+			ModeWord(ModeConfirm).Render(), styDim.Render("  "), styTitle.Render(a.pending.Prompt)))
+
+	case ModeCompose:
+		// ⚠ THE HEADER ALREADY LEADS WITH THE MODE WORD. `ComposeHeader` starts
+		// "COMPOSING …", so prefixing `ModeWord(ModeCompose)` here printed it
+		// twice — and a duplicated word reads as a rendering fault rather than
+		// as emphasis. The confirm arm above does prefix it, because its
+		// payload is the prompt and the prompt does not name the mode.
+		head := ComposeHeader(a.compose.Verb, a.Repo()+"#"+itoa(a.Num), a.viewerLogin())
+		return lipgloss.NewStyle().Padding(0, 1).Render(lipgloss.JoinVertical(lipgloss.Left,
+			ModeWord(ModeCompose).Style.Render(head),
+			styText.Render(a.composeRender()),
+		))
+	}
+	if a.notice != "" {
+		return lipgloss.NewStyle().Padding(0, 1).Render(styWarn.Render(a.notice))
+	}
+	return ""
+}
+
+func (a App) viewerLogin() string {
+	if a.Snap == nil || a.Snap.ViewerLogin == "" {
+		// 🔴 A WORD, NOT A BLANK. An empty login rendered as nothing reads as
+		// "this field is broken"; `UNKNOWN LOGIN` reads as the §10.2 hazard it
+		// actually is — and the write gate refuses in that state anyway.
+		return "UNKNOWN LOGIN"
+	}
+	return a.Snap.ViewerLogin
+}
+
+// composeBarLines is how many body rows the compose bar shows.
+//
+// 🔴 A FIXED NUMBER, AND THAT IS WHY THE FRAME CANNOT OVERFLOW. `relayout`
+// sizes the diff viewport against `lipgloss.Height(renderBar())`; if the bar
+// could grow as the operator typed, the layout computed when compose OPENED
+// would be wrong by however many lines they went on to write, and the bottom of
+// the frame would push off the terminal. A window over the buffer keeps the
+// height constant while still following the cursor.
+const composeBarLines = 4
+
+// composeRender draws the buffer with a visible cursor, in exactly
+// `composeBarLines` rows.
+//
+// ⚠ THE CURSOR IS A CHARACTER, NOT A TERMINAL CURSOR POSITION. `tea.View`'s
+// `Cursor` field would be the native way, and it is deliberately not used: the
+// bar is composed with `lipgloss.JoinVertical`, so its absolute screen
+// coordinates are not known here, and a cursor placed at a guessed coordinate
+// is worse than a visible marker. `▏` survives colour removal, which is the
+// constraint every other state in this program is held to.
+func (a App) composeRender() string {
+	cur := clamp(a.compose.Cur, 0, len(a.compose.Buf))
+	withCursor := string(a.compose.Buf[:cur]) + "▏" + string(a.compose.Buf[cur:])
+	lines := strings.Split(withCursor, "\n")
+
+	// The window follows the cursor's LINE, so a long comment scrolls rather
+	// than hiding the end the operator is typing at.
+	curLine := strings.Count(string(a.compose.Buf[:cur]), "\n")
+	start := clamp(curLine-composeBarLines+1, 0, max(0, len(lines)-composeBarLines))
+	end := start + composeBarLines
+	if end > len(lines) {
+		end = len(lines)
+	}
+	out := append([]string(nil), lines[start:end]...)
+	for len(out) < composeBarLines {
+		out = append(out, "")
+	}
+	return strings.Join(out, "\n")
 }
 
 // renderFooter renders the GENERATED help.
@@ -63,7 +157,12 @@ func (a App) render() string {
 // asserts the two SETS are equal in both directions so that stays true when
 // somebody adds a binding.
 func (a App) renderFooter() string {
-	line := a.help.View(Keys)
+	// 🔴 THE FOOTER RENDERS *THIS MODE'S* HELP. A footer that always showed the
+	// browse keys would be a legend that lies the moment a confirmation is
+	// pending — the same defect the preceding arc existed to fix, hidden inside
+	// a mode. `keys_test.go` asserts the dispatched and helped sets are equal
+	// PER MODE, so this cannot be half-true.
+	line := a.help.View(modeKeys{a.mode})
 	if a.Snap != nil && a.Snap.ViewerLogin != "" {
 		// 🔴 THE AUTHENTICATED LOGIN IS ON SCREEN AT ALL TIMES (§10.2).
 		// cli/cli#14370: the OS keyring is not partitioned by account, so the
@@ -372,8 +471,17 @@ func (a App) renderCard(h int, title, body string) string {
 // --- layout helpers ---------------------------------------------------------
 
 func (a *App) relayout() {
-	footerH := lipgloss.Height(a.renderFooter())
-	bodyH := max(minHeight, a.Height-footerH)
+	// 🔴 THE BAR IS PART OF THE LAYOUT, NOT AN OVERLAY. `render` subtracts its
+	// height from the body; if `relayout` did not subtract the SAME height, the
+	// diff viewport would still be sized for a bar-less frame and the bottom
+	// rows would push off the terminal the moment a confirmation appeared.
+	// Both call `renderBar()`, so they cannot disagree — and `composeBarLines`
+	// is what stops that height moving while the operator types.
+	chromeH := lipgloss.Height(a.renderFooter())
+	if bar := a.renderBar(); bar != "" {
+		chromeH += lipgloss.Height(bar)
+	}
+	bodyH := max(minHeight, a.Height-chromeH)
 
 	leftW := leftColWidth
 	if a.Width < leftColWidth*2 {
