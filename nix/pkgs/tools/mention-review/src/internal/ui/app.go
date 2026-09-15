@@ -49,6 +49,21 @@ type DiffLoaded struct {
 	Err  error
 }
 
+// WriteDone carries the outcome of ONE write (§3.7's five verbs).
+//
+// 🔴 A WRITE REPORTS BACK IN WORDS AND THEN RE-READS THE PR. A merge that
+// succeeded leaves every panel on screen asserting the PR is still OPEN, which
+// is a screen that lies about the thing the operator just did. So a successful
+// write emits `FetchPR` — the ONE place in this program where an intent is
+// produced by something other than a keypress, which is why `intents_test.go`
+// walks messages as well as keys.
+type WriteDone struct {
+	// Verb is the intent's registry name, so the notice can say which verb
+	// finished without the UI re-deriving it from the error text.
+	Verb string
+	Err  error
+}
+
 // --- the model --------------------------------------------------------------
 
 // App is the root model. It owns everything more than one panel reads (§3.2).
@@ -63,6 +78,16 @@ type App struct {
 	Err   error
 	Focus Panel
 
+	// MergeMethod is what `internal/cfg` resolved at startup.
+	//
+	// 🔴 EMPTY MEANS UNKNOWN, AND UNKNOWN MEANS REFUSE. `New` does not fill it
+	// in: an App that was never told the method must not merge with a plausible
+	// one. This mirrors `nvim-octo`'s `MERGE_METHOD_UNKNOWN` sentinel, which
+	// exists because a mutation replacing it with `"squash"` survived a fully
+	// green suite there — nothing reached the arm. Here the arm is reached from
+	// the keyboard, by a test.
+	MergeMethod string
+
 	Width, Height int
 
 	// Per-panel cursors. A sub-model owns state only IT reads.
@@ -74,6 +99,25 @@ type App struct {
 	body     viewport.Model // the issue card / error card body
 	help     help.Model
 	showFull bool
+
+	// mode is which key table is live. See keys.go — the modes are DISJOINT,
+	// which is why `q` cannot quit out from under a pending confirmation.
+	mode Mode
+
+	// compose is the body being typed, when mode == ModeCompose.
+	compose composeState
+
+	// pending is the built-but-unsent write intent, when mode == ModeConfirm.
+	//
+	// 🔴 THE INTENT IS BUILT BEFORE THE PROMPT IS SHOWN, AND THE PROMPT IS
+	// BUILT FROM THAT INTENT. The value the operator reads and the value the
+	// runner sends are then the same object, not two derivations that could
+	// drift.
+	pending *pendingWrite
+
+	// notice is the last outcome, in words: a refusal, an abort, or a write
+	// result. Never a colour, never an icon.
+	notice string
 
 	// runner is the effect surface. 🔴 NOT A PACKAGE-LEVEL GLOBAL: a global
 	// would make `Update` depend on process state, and a test that forgot to
@@ -189,19 +233,34 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 		a.syncDiffViewport()
 		return a, nil
 
+	case WriteDone:
+		return a.stepWriteDone(m)
+
 	case tea.KeyPressMsg:
 		return a.stepKey(m)
 	}
 	return a, nil
 }
 
-// stepKey walks the ONE dispatch table.
+// stepKey walks the dispatch table FOR THE CURRENT MODE.
+//
+// 🔴 THERE IS NO FALL-THROUGH TO ANOTHER MODE'S TABLE. A key that this mode
+// does not bind does nothing, which is what makes "while a confirmation is
+// pending, `q` does not quit" a structural fact rather than an ordering
+// accident.
 func (a App) stepKey(k tea.KeyPressMsg) (App, []Intent) {
-	for _, b := range Dispatch() {
+	for _, b := range DispatchFor(a.mode) {
 		if !key.Matches(k, b.Binding) {
 			continue
 		}
 		return a.act(b.Action)
+	}
+	// 🔴 TEXT ENTRY IS THE ONLY THING THAT RUNS AFTER THE TABLE, AND ONLY IN
+	// COMPOSE MODE. It is last so a bound chord can never be typed into the
+	// buffer instead of acting, and it is mode-scoped so an ordinary `y` in
+	// browse mode still means nothing.
+	if a.mode == ModeCompose && k.Text != "" {
+		return a.composeInsert(k.Text), nil
 	}
 	return a, nil
 }
@@ -247,6 +306,34 @@ func (a App) act(act Action) (App, []Intent) {
 		a.Focus = a.nextFocusable(-1)
 		a.relayout()
 		return a, nil
+
+	// --- the write verbs (§3.7) ---------------------------------------------
+	case ActComment, ActRequestChanges, ActSubmitReview:
+		return a.beginCompose(act), nil
+	case ActApprove:
+		return a.propose(Approve{Owner: a.Owner, Name: a.Name, Num: a.Num})
+	case ActMerge:
+		return a.proposeMerge()
+
+	// --- compose mode --------------------------------------------------------
+	case ActComposeNewline:
+		return a.composeInsert("\n"), nil
+	case ActComposeBackspace:
+		return a.composeBackspace(), nil
+	case ActComposeLeft:
+		return a.composeMove(-1), nil
+	case ActComposeRight:
+		return a.composeMove(+1), nil
+	case ActComposeCancel:
+		return a.composeCancel(), nil
+	case ActComposeSend:
+		return a.composeSend()
+
+	// --- confirm mode --------------------------------------------------------
+	case ActConfirmYes:
+		return a.confirmYes()
+	case ActConfirmNo:
+		return a.confirmNo(), nil
 	}
 
 	// Everything below moves a cursor inside the focused panel.
@@ -405,6 +492,14 @@ func (a App) Init() tea.Cmd {
 // SetRunner installs the effect surface. Called once, at startup, by main —
 // and by the one end-to-end test, with a fake.
 func (a *App) SetRunner(r Runner) { a.runner = r }
+
+// SetMergeMethod installs the method `internal/cfg` resolved.
+//
+// 🔴 CALLING IT WITH "" IS MEANINGFUL: it says the config could not be read,
+// and the merge key then refuses in words instead of asking. `main` passes ""
+// on a config error deliberately rather than exiting — a TUI that vanished
+// because a config file was malformed would teach the operator nothing.
+func (a *App) SetMergeMethod(m string) { a.MergeMethod = m }
 
 // Update is the thin impure shell over Step. 🔴 IT CONTAINS NO LOGIC — every
 // branch lives in Step, where a test can see it.

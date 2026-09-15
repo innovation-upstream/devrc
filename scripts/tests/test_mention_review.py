@@ -1,5 +1,11 @@
-"""Guards for `mention-review` — the Phase-1 Go PR-review TUI — and for the
-THIRD GATE TIER it brought with it.
+"""Guards for `mention-review` — the Go PR-review TUI — and for the THIRD GATE
+TIER it brought with it.
+
+⚠ IT CAN WRITE NOW. Phase 2 added comment / approve / request changes / submit
+review / merge. The behavioural guards for those live in the Go suite, where
+`Step` is pure and a test can assert "this keypress produced zero intents". What
+is here is the same thing that was always here: the SEAMS between files the Go
+compiler never reads together.
 
 🔴 WHY ANY OF THIS IS IN PYTHON AT ALL. The Go suite tests the program. These
 test the SEAMS the Go suite structurally cannot see: whether the tier is wired
@@ -302,7 +308,101 @@ def test_the_runner_refuses_rather_than_passing_when_go_is_missing(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Phase 1 leaves the click path alone
+# Phase 2 can approve and merge — so NO TEST MAY REACH THE LIVE API
+# --------------------------------------------------------------------------- #
+
+def _go_packages() -> dict[str, dict]:
+    """Every Go package dir under src/, with its imports split test/non-test.
+
+    🔴 DERIVED FROM THE TREE, NOT LISTED. A hardcoded package list is the shape
+    that rots: a new package doing HTTP would simply not be in it, and the guard
+    below would pass without ever having looked at it.
+    """
+    out: dict[str, dict] = {}
+    src = PKG / "src"
+    for path in sorted(src.rglob("*.go")):
+        rel = path.parent.relative_to(src).as_posix()
+        entry = out.setdefault(rel, {"prod": set(), "tests": [], "dir": path.parent})
+        text = path.read_text(encoding="utf-8")
+        imports = set(re.findall(r'"([^"]+)"', text))
+        if path.name.endswith("_test.go"):
+            entry["tests"].append(path)
+        else:
+            entry["prod"] |= imports
+    return out
+
+
+def test_every_go_package_that_can_reach_github_carries_the_loopback_guard():
+    """🔴 THE WRITE PHASE'S MOST IMPORTANT SEAM: a test that reaches the real
+    API would approve or merge a real pull request with the operator's token.
+
+    "Every test uses a fake" is a claim about the tests that exist today. The
+    mechanism is a `TestMain` that replaces `http.DefaultTransport` with one
+    refusing any non-loopback host — and this pins WHICH packages must carry it,
+    derived from what they import rather than from a list somebody maintains.
+
+    ⚠ `cmd/*` IS EXEMPT, WITH A REASON AND A SUBSTITUTE. Its tests run the
+    BUILT BINARY as a subprocess, so an in-process transport cannot cover them;
+    asserting the guard there would be a guard claiming coverage it does not
+    have. The compensating property is asserted separately below: those tests
+    run the binary with an empty credential environment, so there is no token
+    for it to authenticate with even if a case did reach the network.
+    """
+    packages = _go_packages()
+    assert packages, "no Go packages were discovered — a broken glob, not an empty tree"
+
+    required, exempt = [], []
+    for name, entry in sorted(packages.items()):
+        reaches = (
+            "net/http" in entry["prod"]
+            or any(i.endswith("/internal/ghapi") for i in entry["prod"])
+        )
+        if not reaches:
+            continue
+        (exempt if name.startswith("cmd/") else required).append(name)
+
+    # 🔴 POSITIVE CONTROL: the derivation must have SELECTED something. An
+    # import scan that matched nothing would report no violations and read as a
+    # clean bill of health — the silent zero this repo keeps getting bitten by.
+    assert len(required) >= 2, (
+        f"the scan selected {required} as network-reaching; the ui and ghapi "
+        f"packages must both be in it, or the import matching is broken"
+    )
+
+    for name in required:
+        entry = packages[name]
+        bodies = "\n".join(p.read_text(encoding="utf-8") for p in entry["tests"])
+        assert "http.DefaultTransport = " in bodies, (
+            f"package {name} can reach GitHub and no test file installs the "
+            f"loopback-only transport. This phase can approve and merge pull "
+            f"requests; add a TestMain like internal/ghapi/nonet_test.go's."
+        )
+        assert "BLOCKED" in bodies, (
+            f"package {name} installs a transport but nothing refuses a host — "
+            f"a transport that blocks nothing reads as a guarantee and is none"
+        )
+        # 🔴 AND THE GUARD ITSELF MUST BE CONTROLLED. A blocking transport with
+        # no test proving it blocks api.github.com is the instrument nobody
+        # validated.
+        assert "api.github.com" in bodies, (
+            f"package {name}'s loopback guard has no NEGATIVE CONTROL — nothing "
+            f"feeds it a real GitHub URL and watches it refuse"
+        )
+
+    # The exempt half is asserted too, so the exemption cannot silently widen.
+    for name in exempt:
+        entry = packages[name]
+        bodies = "\n".join(p.read_text(encoding="utf-8") for p in entry["tests"])
+        assert "GH_CONFIG_DIR=/nonexistent" in bodies, (
+            f"package {name} is exempt from the in-process loopback guard "
+            f"because it runs the binary as a subprocess — and it no longer "
+            f"clears the credential environment, which was the substitute"
+        )
+    assert exempt, "nothing is exempt; the cmd package should be"
+
+
+# --------------------------------------------------------------------------- #
+# The click path is STILL not flipped
 # --------------------------------------------------------------------------- #
 
 def test_phase_1_does_NOT_flip_the_click_path_to_the_new_tui():
@@ -312,6 +412,12 @@ def test_phase_1_does_NOT_flip_the_click_path_to_the_new_tui():
     the new TUI for a real review" — a condition nothing headless can close. So
     `REVIEW_EXE` still names `nvim-octo`, and this pins that rather than leaving
     it to be noticed.
+
+    ⚠ PHASE 2 DID NOT FLIP IT EITHER, AND THAT IS WHY THE NAME STILL SAYS
+    PHASE 1. The condition this guards is not "phase 1 is current" but "the
+    retirement has not happened", which is Phase 4's job. Adding write actions
+    made the new TUI more capable, not more deployed: it is still invoked by
+    hand.
 
     ⚠ THIS TEST IS EXPECTED TO BE DELETED, NOT EDITED, when the flip happens.
     It is a guard on a PHASE, and a phase that ends takes its guard with it.

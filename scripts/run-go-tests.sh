@@ -149,6 +149,16 @@ cd "$ROOT" || { echo "run-go-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   internal/udiff          12   diff parsing + hunk navigation
 #   internal/ui             53   Step, the ledgers, the words, one end-to-end
 #
+# RE-MEASURED 2026-09-15 by this runner, after Phase 2 added the write actions
+# (`internal/cfg` is new, and it is the merge-method resolver):
+#
+#   cmd/mention-review       5   unchanged
+#   internal/argv           29
+#   internal/cfg            12   the ABSENT-vs-UNREADABLE split, both directions
+#   internal/ghapi          38   + the three REST writes and the loopback guard
+#   internal/udiff          12   unchanged
+#   internal/ui            112   + the confirmation ledger, the prompts, the modes
+#
 # ⚠ THE FIRST VERSION OF THIS TABLE CARRIED GUESSED FLOORS — 9/7/10/11/22, typed
 # before anything had been run. `cmd/mention-review` has FIVE tests, so its
 # floor of 9 was unsatisfiable and the tier was red on a green suite. A floor is
@@ -159,9 +169,10 @@ GO_MODULE="nix/pkgs/tools/mention-review/src"
 PACKAGES=(
   "cmd/mention-review|4"
   "internal/argv|27"
-  "internal/ghapi|18"
+  "internal/cfg|11"
+  "internal/ghapi|37"
   "internal/udiff|11"
-  "internal/ui|51"
+  "internal/ui|107"
 )
 
 # --- GUARD 2: discovery + the two-way pin --------------------------------------

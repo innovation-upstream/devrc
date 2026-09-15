@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -43,6 +44,14 @@ type fakeRunner struct {
 	gotName  string
 	gotNum   int
 	diffErr  error
+
+	// 🔴 THE WRITE LEDGER OF THE FAKE. Every write the program performs lands
+	// here as a string, so the end-to-end test can assert on WHAT WAS SENT
+	// rather than on the absence of an error — and, critically, can assert that
+	// a scripted keypress sent NOTHING. "No write happened" is the claim this
+	// phase most needs to be able to make, and it is only checkable against a
+	// recorder that would have recorded one.
+	writes []string
 }
 
 func (f *fakeRunner) FetchPR(_ context.Context, owner, name string, num int) (*ghapi.Snapshot, error) {
@@ -76,10 +85,40 @@ func (f *fakeRunner) OpenBrowser(url string) error {
 	return nil
 }
 
+func (f *fakeRunner) PostComment(_ context.Context, owner, name string, num int, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes = append(f.writes,
+		fmt.Sprintf("PostComment %s/%s#%d body=%q", owner, name, num, body))
+	return nil
+}
+
+func (f *fakeRunner) SubmitReview(_ context.Context, owner, name string, num int, event, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes = append(f.writes,
+		fmt.Sprintf("SubmitReview %s/%s#%d event=%s body=%q", owner, name, num, event, body))
+	return nil
+}
+
+func (f *fakeRunner) Merge(_ context.Context, owner, name string, num int, method string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes = append(f.writes,
+		fmt.Sprintf("Merge %s/%s#%d method=%s", owner, name, num, method))
+	return nil
+}
+
 func (f *fakeRunner) counts() (pr, dif int, opened []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.prCalls, f.difCalls, append([]string(nil), f.opened...)
+}
+
+func (f *fakeRunner) writesSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.writes...)
 }
 
 func TestEndToEndTheProgramFetchesWiresAndQuits(t *testing.T) {
@@ -87,6 +126,7 @@ func TestEndToEndTheProgramFetchesWiresAndQuits(t *testing.T) {
 
 	app := New(fxOwner, fxName, fxNum)
 	app.SetRunner(fake)
+	app.SetMergeMethod(fxMergeMethod)
 
 	inR, inW := io.Pipe()
 	defer inW.Close()
@@ -124,7 +164,39 @@ func TestEndToEndTheProgramFetchesWiresAndQuits(t *testing.T) {
 	p.Send(keyPress("tab"))
 	p.Send(keyPress("]"))
 	p.Send(keyPress("o"))
-	time.Sleep(50 * time.Millisecond)
+
+	// 🔴 THE MERGE THAT MUST NOT HAPPEN, DRIVEN THROUGH THE REAL LOOP. `m`
+	// raises the confirmation; `n` aborts it. Nothing may reach the runner.
+	// This is asserted WITHOUT a timing window: `p.Send` is a queue, so the
+	// comment write scripted below cannot land before these two have been
+	// processed — and the final assertion is that the write ledger contains
+	// EXACTLY the comment.
+	p.Send(keyPress("m"))
+	p.Send(keyPress("n"))
+
+	// 🔴 AND THE WRITE THAT MUST: compose a comment and send it. `c` opens the
+	// buffer, the two runes are typed into it (they are NOT bindings in compose
+	// mode), `ctrl+d` sends. A comment is the one verb §3.7 does not confirm.
+	p.Send(keyPress("c"))
+	p.Send(keyPress("o"))
+	p.Send(keyPress("k"))
+	p.Send(keyPress("ctrl+d"))
+
+	// Wait for the write AND for the re-read it triggers, rather than sleeping.
+	// 🔴 QUITTING BEFORE THE RE-READ LANDS WOULD MAKE THE COUNT ASSERTION BELOW
+	// A RACE, and a flaky test is a test that gets re-run instead of read.
+	writeDeadline := time.Now().Add(10 * time.Second)
+	for {
+		prN, difN, _ := fake.counts()
+		if len(fake.writesSeen()) >= 1 && prN >= 2 && difN >= 2 {
+			break
+		}
+		if time.Now().After(writeDeadline) {
+			t.Fatalf("the composed comment never completed: writes=%v pr=%d diff=%d",
+				fake.writesSeen(), prN, difN)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	p.Send(keyPress("q"))
 
 	select {
@@ -146,13 +218,31 @@ func TestEndToEndTheProgramFetchesWiresAndQuits(t *testing.T) {
 
 	pr, dif, opened := fake.counts()
 
-	// 🔴 EXACTLY ONE GRAPHQL READ. This is the Phase-0 kill criterion, held at
-	// the level where a retry loop or a duplicated Init would break it.
-	if pr != 1 {
-		t.Errorf("FetchPR was called %d times, want exactly 1", pr)
+	// 🔴 THE WRITE LEDGER IS EXACTLY THE COMMENT. One entry means the aborted
+	// merge sent nothing AND the composed comment sent the right thing — and
+	// the pair is what makes each half meaningful: an empty ledger would also
+	// satisfy "no merge happened", by the program being wired to nothing.
+	writes := fake.writesSeen()
+	wantWrite := `PostComment ` + fxRepo + `#1559 body="ok"`
+	if len(writes) != 1 || writes[0] != wantWrite {
+		t.Errorf("writes = %q, want exactly [%q]\n"+
+			"(more than one entry means the ABORTED merge still reached the "+
+			"runner, which is the defect this phase exists to prevent)",
+			writes, wantWrite)
 	}
-	if dif != 1 {
-		t.Errorf("FetchDiff was called %d times, want exactly 1", dif)
+
+	// 🔴 EXACTLY ONE GRAPHQL READ *BEFORE* THE WRITE, AND A SECOND AFTER IT.
+	// A successful write re-reads the PR, because every panel still describes
+	// the state before it. Two is therefore the correct number here and one
+	// would mean the refresh never happened — this is the Phase-0 kill
+	// criterion held at the level where a retry loop would still break it.
+	if pr != 2 {
+		t.Errorf("FetchPR was called %d times, want exactly 2 "+
+			"(the initial read, plus the re-read a successful write triggers)", pr)
+	}
+	if dif != 2 {
+		t.Errorf("FetchDiff was called %d times, want exactly 2 "+
+			"(each PR read is followed by the diff read GraphQL cannot serve)", dif)
 	}
 	// The argv reached the client unmangled — the whole point of the seam.
 	if fake.gotOwner != fxOwner || fake.gotName != fxName || fake.gotNum != fxNum {
