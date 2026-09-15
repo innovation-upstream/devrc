@@ -1,5 +1,5 @@
 ---
-clawgate-task: 375
+clawgate-task: 593
 ---
 # Handoff: tmux-webapp — 2026-08-26
 
@@ -7,43 +7,49 @@ clawgate-task: 375
 A **clawgate feature**: a webapp that visually organizes and gives live terminal interaction
 with tmux sessions across workbench + laptop, with a composable view system agents can drive,
 and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
-- **closing-condition:** `check` — `clawgatectl task get 593` reports `ready_for_review` with
-  all ten acceptance criteria evidenced in a card comment (each regression test watched RED at
-  its base commit and green at HEAD). 🔴 **FROZEN AT ROUND 1.** Task 595 (the carousel, bulk
-  expand/collapse, bulk Chat/Raw) is a NEW arc and does NOT extend this one; neither does any
-  audit finding on the PRs this arc produced. Added 2026-09-15 — this doc predated rule (m) and
-  had been UNANSWERABLE against a closing condition for its whole life.
+- **closing-condition:** `check` — `clawgatectl task get 595` reports `complete`, with all
+  **12** of its acceptance criteria evidenced in a card comment (each regression test watched
+  RED at its base commit and green at HEAD). 🔴 **FROZEN AT ROUND 1** for the 595 arc: audit
+  findings on the PRs it produces do NOT extend it, and neither does task 522 or 521.
+  ⚠ 595's criteria sit under a real `## Acceptance criteria` heading, so the status gate reads
+  them as AUTHOR-SPECIFIED and `complete` is available — but they were written by a prior
+  `claude-code` session, not by the operator. **Say so when you close it**; the gate keys on the
+  heading, not on who typed it.
+  ✅ **The PREVIOUS closing-condition — `task get 593` reports `ready_for_review` with all ten
+  items evidenced — was MET on 2026-09-15 and that arc is CLOSED.** It is replaced rather than
+  deleted because 595 is the next arc on the same effort; the old line would otherwise make
+  `/resume` report ADDRESSED and stop before picking anything up.
 
 ## Status
 
-**This session RESUMED, merged the in-flight PR, shipped the remaining clawgate work, and ran a five-round audit ladder to a deliberate close. Three PRs are open.**
+**This session closed the task 593 arc end to end — resumed it, merged three PRs, shipped a release, and ran a five-round audit ladder to a deliberate stop. Everything it started is merged, deployed and cleaned up. Nothing is in flight.**
 
-### clawgate task 593 — ALL TEN ITEMS NOW IMPLEMENTED
-- **`ZacxDev/homelab-infra#824` MERGED** (`81b10cddc`) — item 1, collapsed-by-default + the parked-draft badge.
-- **`ZacxDev/homelab-infra#826` MERGED** (`248a0c4ed`) — items 2, 3, 9. The previous session left it OPEN with `clawgate-e2e` RED at `04cef09c3` and `6fad0e252` pushed as the repair but never re-run. All four checks went green on `6fad0e252` (**e2e 225 passed / 2 skipped**, the full 34-spec tier). Squash verified BY CONTENT — all six touched files byte-identical between branch head and `origin/trunk`.
-- **`ZacxDev/homelab-infra#829` OPEN** — items 4–8, branch `feat/tmux-593-items-4-8`, worktree `~/workspace/homelab-tmux593c`, base `248a0c4ed`, 5 commits. **Gates green: `go test ./internal/ui/` 538 `--- PASS` (baseline 511); full e2e 224 passed / 1 flaky / 2 skipped / 0 failed, 34 specs, 40.9 min.** 27 new tests: **20 watched RED at base, 7 labelled in-source as INVARIANT/BOUNDARY and NOT counted as regression coverage.** 30 mutants, all killed by a named test's own assertion.
-  🔴 **#829 is UN-AUDITED — no round 0, no correctness round.** 🔴 **And no browser verification of any of the five items.**
-- Claim `clawgate-593-items-4-8` is **still HELD**. Release when #829 lands.
-- Task 595 still holds the carousel, bulk expand/collapse and bulk Chat/Raw.
+### clawgate task 593 — CLOSED, MERGED AND LIVE
+| item | PR | squash |
+|---|---|---|
+| 1 — collapsed by default + parked-draft badge | `#824` | `81b10cddc` |
+| 2, 3, 9 — host header, per-card toggle, contradicting age | `#826` | `248a0c4ed` |
+| 4, 5, 6, 7, 8 — the chat-rendering batch | `#829` | `9b1828606` |
+| carousel, bulk expand/collapse, bulk Chat/Raw | → **task 595** | split by operator decision |
 
-### devrc — the doc's own size gate, and a five-round ladder
-- **`#1718` OPEN** (`docs/tmux-webapp-evict-closed`, head `02cf4810`) — evicts CLOSED investigation blocks to `claudedocs/refs/tmux-webapp-closed-investigations.md` and ratchets the allowance `245_760 → 212_992`. The doc stood at **245,697 B against a 245,760 B allowance: 63 B**; the next routine `/handoff` write would have red-lined `test_no_handoff_doc_exceeds_its_budget` on `main` for everyone.
-  - `61ab9487` moved **21 of 40** blocks (245,697 → 198,795 B, freed 46,902 B), enumerated not pattern-matched.
-  - `d0d0dddd` moved **3 more** after round 1 found them closed — **24 in refs, 16 retained.** 🔴 **My claim "19 blocks stay — every one still open" was FALSE for 3 of 19**, because I enumerated the eviction set from HEADINGS. That is the identical predicate failure `claudedocs/refs/tmux-webapp-closed-ranks.md` already records for the rank sweep, reproduced one section over. **One of the three had its closure declared in a DIFFERENT FILE, so no same-file scan could have found it.**
-- **`#1720` OPEN** (`docs/tmux-webapp-prune-gotchas`) — prunes `## Gotchas` 134,719 → 95,071 B. **CI fully green.** 🔴 **Based on `#1718` at `bc8e1131` and therefore needs a REBASE onto `02cf4810` before it can land.**
-- 🔴 **`#1718`'s CI has been `pending` on all four checks for hours across six pushes.** That is the documented `timeouts.tasks` shape — a run that hits it posts nothing and the checks stay pending forever; only a fresh push clears it, and repeated pushes have not. **Read the PipelineRuns in `tekton-ci` before believing either "wedged" or "not yet scheduled" — an absent verdict cannot distinguish them.**
+Card is `ready_for_review` with 10 comments. `#826` was merged on four green checks after a re-read (`clawgate-e2e` **225 passed / 2 skipped**, the full 34-spec tier) — the previous session had left it RED at `04cef09c3` with the repair pushed but never re-run.
 
-### 🔴 THE AUDIT LADDER ON #1718 IS CLOSED AT ROUND 5 — DO NOT RE-OPEN IT
-Rounds 0–5 ran; the rationale is a PR comment on #1718 and is the authority. In brief: **every one of five rounds found its finding in prose a previous round had written to explain itself**, four of them about the same eleven trailing size comments in `handoff_budget.py`. Round 5's verdict: *"The pattern did not break; it recursed."*
+**Evidence for items 4–8:** 27 new tests — **20 watched RED at base `248a0c4ed`, 7 labelled in-source as INVARIANT/BOUNDARY and explicitly NOT counted as regression coverage.** 30 mutants, all killed by a named test's own assertion, zero panics, zero compile errors. Full e2e tier 224 passed / 1 flaky / 2 skipped / 0 failed across 34 spec files.
 
-Stopped on the **prose escape hatch**, with its measurement: **26 of 36 attributable pre-image lines ladder-authored (72%)** on round 5's range, **11/11** on round 4's — both clear two-thirds. The attribution gate was structurally inert throughout (a docs PR's payload is ~100% of every diff by construction), so it could never have ended this.
+### 🔴 DEPLOYED — clawgate `0.8.35` is live
+Pin commit **`89a98441d`** on `trunk`; live health `{"status":"ok","version":"0.8.35"}`; pod `1/1 Running` ~20s after `flux reconcile`. Live was `0.8.34`, built before all three PRs — **clawgate has no Flux image automation, so every one of those merges was inert until this release.**
 
-**Deliberately left open, recorded on the PR so they read as open rather than absent:** the deleted anchor-selection rule in the mutation battery (bounded — a 0x anchor is caught by a collected test, not silent); an over-broad coverage claim restated at three sites; and `test_handoff_doc_size.py:164-166` still naming itself as the home of the ceiling and ledger, which moved to `handoff_budget.py` in `a2c84a1c`.
+Gate on the built tree: `go build`/`go vet` clean, `go test ./... -count=1` **24 ok / 0 FAIL rc=0**. CSS **45,895 B** with `.h-14` present (cwd trap did not fire). Both pins moved in one commit and `TestDeployPinMatchesClientBuildVersion` was COUNTED — real `=== RUN` + `--- PASS`.
 
-### 🔴 NOT VERIFIED
-- **#829**: un-audited, no browser verification, and its one e2e flake (`routing.spec.ts:194`) was NOT run against `trunk` to prove it pre-existing.
-- **#1718 / #1720**: neither `nix build` sandbox tier was run by any round; every gate number in the ladder is dev-host tier. No merged-tree run against current `main`.
-- Task 593's card is at `in_progress`, deliberately — `ready_for_review` would claim ten items done while five sit in an unmerged, unaudited PR.
+### devrc — the handoff doc's own size gate
+- **`#1718` MERGED `d6e94dd29`** — 24 CLOSED investigation blocks demoted to `claudedocs/refs/tmux-webapp-closed-investigations.md`; allowance `245_760 → 212_992`. The doc had **63 B** of headroom.
+- **`#1720` MERGED `f5d13b9af`** — `## Gotchas` pruned 142,214 → 102,023 B (284 → 202 bullets); allowance `→ 180_224`. Doc **245,697 → 164,360 B (−33%)** across the session.
+- 🔴 **The `#1718` audit ladder is CLOSED at round 5 — do not re-open it.** Five rounds, every one finding its finding in prose a previous round wrote; four about the same eleven `handoff_budget.py` comments, which were ultimately DELETED rather than described a fifth time. Stopped on the prose escape hatch at **26/36 (72%) ladder-authored pre-image lines**. The rationale is a PR comment on `#1718` and is the authority.
+
+### 🔴 NOT VERIFIED — the top of the next session's list
+1. **No browser verification of items 4–8, at all.** The structured bash/edit/askuserquestion cards, the `max-h-64` clamp, the GFM tables, the reveal control and the relocated "open full session" link have never been looked at. No e2e spec was written for these five items. **0.8.35 is the first time they face a human.**
+2. **`#829` was merged UN-AUDITED** by operator decision — no round 0, no correctness round.
+3. **Deployed ≠ verified.** What is confirmed is the rollout and that the process on :30302 is the one the new image started.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -192,14 +198,31 @@ From the analyze-service index (**recall — verify before relying on**):
 ## Next steps (ranked)
 
 
-🔴 **Ranks 1–47, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They are lessons rather than status, which is why they were demoted and not dropped. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — an item completed AFTER a sweep must be evicted in the same change that closes it, or the queue offers finished work to the next session. This doc stood at 327,624 B of a 327,680 B budget (56 B), and the next routine handoff write would have turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone; `claudedocs/refs/` is exempt from that test, `claudedocs/handoff-*.md` is not.
+🔴 **Ranks 1–47, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They are lessons rather than status, which is why they were demoted and not dropped. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — an item completed AFTER a sweep must be evicted in the same change that closes it, or the queue offers finished work to the next session.
 
 🔴 **A SECOND SWEEP 2026-09-14 EVICTED SIX MORE — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED FOR DAYS WHILE STILL READING AS OPEN.** Six of the fifteen entries the queue advertised were finished or fictional. **The mechanism is measured, not guessed: the first sweep keyed on each rank's HEADING LINE — a heading carrying `✅`, `DONE` or `CLOSED` — and every closure recorded only in a rank's BODY survived it**, predicting eviction for 58 of 62 ranks. Of the four exceptions, 53 is a false positive of the predicate (`WORKBENCH IS NOW DONE` in the heading, laptop half genuinely open); 61's closure was written as a `### ✅ RESOLVED` heading in the **Open investigations** section, a THIRD location; and 46 and 62 carried no marker anywhere and were evicted anyway — 🔴 **why is NOT explained, and an earlier draft of this sentence guessed "closed by the sweep session itself", which was false for two of the three it named.** What IS established is the false-NEGATIVE direction: **no rank with a body-only marker was ever evicted**, measured over all 62.
 
-🔴 **THE MARKER LIVES IN THREE PLACES, AND A SCAN THAT READS ONLY THE RANK BODY MISSES THE THIRD.** Heading line → 58 of 62, evicted. Body only → 17, 25, 26, **survived**. A `###` heading in another section → 61, evicted. Nowhere at all → **42, 45, 46, 62** — the sweep caught 46 and 62 and missed 42 and 45. So **the no-marker class is FOUR, not two**, and a body scan alone would have left two of them. A session claimed 42, re-derived from source that all three residuals were already gone, and paid a full recon round for it. **When you sweep: read each rank's WHOLE body, read the `###` headings elsewhere in the doc, and re-measure anything still carrying no marker against the code.** The deterministic version — a test failing when a live-queue rank carries `✅ DONE`/`CLOSED` — does not exist yet; it would have caught 17, 25, 26 and 61, and it needs care, because rank 53 would be its first false positive.
+🔴 **THE MARKER LIVES IN THREE PLACES, AND A SCAN THAT READS ONLY THE RANK BODY MISSES THE THIRD.** Heading line → 58 of 62, evicted. Body only → 17, 25, 26, **survived**. A `###` heading in another section → 61, evicted. Nowhere at all → **42, 45, 46, 62**. **When you sweep: read each rank's WHOLE body, read the `###` headings elsewhere in the doc, and re-measure anything still carrying no marker against the code.** 🔴 **This class recurred THIS session in a different section** — the `#1718` eviction set was enumerated from HEADINGS and left three closed investigations behind, one of whose closure was declared in a *different file*, so no same-file scan could have found it.
 
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
+63. **Local-dispatch clawgate task 595 — the host session carousel, plus bulk expand/collapse and
+    bulk Chat/Raw.** THE NEXT ITEM, and the operator asked for it by name. Card is `open` with
+    **12 acceptance criteria** under a real `## Acceptance criteria` heading (so the status gate
+    reads them AUTHOR-SPECIFIED and `complete` is reachable — but a prior `claude-code` session
+    wrote them, so say that when closing). Repo `homelab-talos`, `containers/clawgate/internal/ui/`;
+    entry points named by the card: `tmuxHostTabs` (`tmux.go:1332`), `tmuxHostTabPanel` (`:1374`),
+    `tmuxSessionSection` (`:1659`), `tmuxWindowCard` (`:2430`).
+    🔴 **Read `wantOpen` (`:2125`) and `tmuxGroupScript`'s docstring (`:1748`) BEFORE touching
+    visibility** — `wantOpen` is documented as "THE POLICY, AND THE ONLY DEFINITION OF IT", and a
+    carousel showing one session at a time interacts directly with the collapse policy that task
+    593 just migrated to `cg.tmux.v3.group.*` (absent = collapsed).
+    ⚠ Criterion 3 demands the suite SET the viewport at mobile/desktop/ultrawide — a config
+    pinning one width is structurally blind to the other two. Criterion 11 names a real mutant
+    class from `#824`: a force-open path that wrote `setExpanded(k,false)` survived BOTH tiers.
+    ⚠ Check task **522**'s status first — the card says it also reshapes this page, and two
+    concurrent layout rewrites need an agreed order.
+    forcing: user — the operator asked for this card by name as the next session's work.
 48. **Re-spec task 521 around a per-agent token.** `tier` discriminates the DOOR (`token` vs
    `browser`), not the caller; one shared `CLAWGATE_TERMINAL_TOKEN` makes every machine caller
    identical. `requireAgentToken` (`internal/api/agent.go:30-46`) already resolves a per-agent
@@ -224,19 +247,15 @@ From the analyze-service index (**recall — verify before relying on**):
     are far under the 30s htmx fallback and the 300s bulk push, which is what makes it the
     stream. **Re-run that same script from a session ON THE LAPTOP and the laptop number
     follows** — no clawgate change needed, only an active session there.
-    ORIGINAL: Measure criterion 1 of task 519 on the LAPTOP. The stream is confirmed delivering from
-    that host (4 sessions with `reason: accepted` and real byte offsets on
-    `GET /api/transcripts/stream/cursors`), but there is no latency NUMBER because no laptop
-    session has been active since 03:37Z — an idle host cannot demonstrate stream latency. The
-    probe: one active Claude turn on the laptop, then re-run the tmux x transcript join and look
-    for a 0-5s gap the way the workbench sessions show. Repo: none — it is a measurement.
     forcing: gate — task 519's own closing condition names both hosts and a measured number, and
     that is the only criterion still unmet.
-54. **The operator-facing half of 519/517/518 — `/ui/tmux` needs a signed-in human.** Measured:
-    `/ui/tmux` returns 401 without a session, with `/health` 200 as the control, so no shell can
-    exercise it. Three cards are waiting on one visit: 519 (seconds-fresh session view), 517
-    (reply-delivery state renders, `#754` merged), 518 (JSONL chat view renders, `#753` merged).
-    forcing: user — all three cards name an operator observation in their closing condition.
+54. **The operator-facing half of 519/517/518 — `/ui/tmux` needs a signed-in human.** Measured
+    again 2026-09-15 on 0.8.35: `/ui/tmux` returns **401** without a session, with `/health` 200
+    as the control, so no shell can exercise it. Three cards are waiting on one visit: 519
+    (seconds-fresh session view), 517 (reply-delivery state renders, `#754` merged), 518 (JSONL
+    chat view renders, `#753` merged). 🔴 **Items 4–8 of task 593 now join this list** — they are
+    live in 0.8.35 and have never been seen in a browser.
+    forcing: user — all four cards name an operator observation in their closing condition.
 
 56. **Decide whether 519's criterion 1 should keep naming the RENDER hop.** What is measured is
     propagation to clawgate's READ MODEL (2.0s/3.1s). The criterion says "visible on
@@ -1871,32 +1890,43 @@ before deciding it does not apply.
   ladder RELOCATES bytes rather than retiring them** — this arc's refs files grew 80,353 → 115,045 B
   in a single day while the gated number fell.
 
+- 🔴 **CLAWGATE HAS NO IMAGE AUTOMATION — MERGING TO `trunk` DEPLOYS NOTHING, SILENTLY.** Three PRs' worth of task 593 sat inert on `trunk` while the cluster kept pulling `0.8.34`. The pin is an immutable literal tag and there is no `ImageRepository`/`ImagePolicy`. **`git log` is not evidence a code change is live; `clawgatectl health` and the live pin are.**
+- 🔴 **PROVE THE IMAGE CARRIES YOUR CODE BEFORE PUSHING IT.** A pin landing after your merge does not mean the image was built from it — that cost a release at 0.8.20. Cheap method that worked here: `docker create` the candidate, `docker cp` the binary out, and grep it for a literal only your change introduces — with a **positive control** (a literal that predates it) and a **negative control** (an invented string). Measured for 0.8.35: `data-tool-detail-shape` 1, `data-tmux-chat-clamp` 1, control 3, negative 0.
+- 🔴 **`deploy.md` IS DOC-ROTTED IN THREE PLACES, ALL MEASURED THIS SESSION.** (a) It says to build via `DOCKER_HOST=ssh://zach@192.168.50.250` — a session running ON the workbench IS that daemon and the ssh form fails. (b) It says `nix-shell -p tailwindcss`, which now ships **v4**; the repo pins **v3** in `package.json`, so use `./node_modules/.bin/tailwindcss`. (c) Its CSS sanity figure "~36 KB" is stale-low — the real output is **45,895 B**. ✅ And its docker.io warning is now WRONG in the good direction: `docker pull docker.io/library/alpine` **succeeds from the workbench**, so a clawgate build no longer has to run on the laptop.
+- 🔴 **A FRESH CLAWGATE WORKTREE HAS NO `node_modules`** (gitignored) and no `web/static/app.css`. Symlink `node_modules` from the base clone rather than reinstalling — and **`rm` the symlink, never the target**, before `worktree remove --force`.
+- 🔴 **THE HEADING-ONLY SWEEP FAILED AGAIN, IN A NEW SECTION.** The `#1718` eviction set was enumerated from `### ` HEADINGS, so three investigations whose closure was recorded only in their BODY were left behind — and **one of those had its closure declared in a DIFFERENT FILE**, so no same-file scan could ever have found it. This is the identical predicate failure `claudedocs/refs/tmux-webapp-closed-ranks.md` records for the rank sweep. **Read bodies, and read the other file.**
+- 🔴 **"NOTHING READS IT" IS A CLAIM ABOUT THE READERS YOU THOUGHT OF.** An audit established that nothing reads `handoff_budget.py`'s trailing size comments — true of every consumer reading dict **values**, and false: a mutation-battery row anchored on the whole ledger line INCLUDING the comment, and the anchors test counts that anchor **as text**. Deleting them would have taken it to **0x — SURVIVED while testing nothing.** Caught only because the brief demanded a positive control instead of inheriting the claim. **Ask what reads the file as SOURCE, not just what imports it.**
+- 🔴 **AN `audit-claims` BLOCK WITH NO NUMBERED LINES SILENTLY WIDENS THE NEXT ROUND'S RANGE.** `audit-dispatch.py` anchors on the newest block it can PARSE, so an unparseable round-3 block made round 4's range span two rounds' fixes. **It is announced on stderr, once, and nowhere in the brief** — a wider range reads as a perfectly ordinary delta. Read stderr before dispatching.
+- 🔴 **A PROSE LADDER RECURSES RATHER THAN CONVERGING, AND THE ATTRIBUTION GATE CANNOT STOP IT.** Five rounds on `#1718`, every one finding its finding in prose a previous round wrote; four about the same eleven comments, each round replacing a falsified description with a new one. The only thing that ended the class was **deleting the subject matter**. On a docs PR the payload is ~100% of every diff by construction, so the two-consecutive-zero-payload gate is structurally inert — the prose escape hatch and its ladder-authored measurement are the only stop.
+- 🔴 **AN EMPTY RESULT CANNOT DISTINGUISH TWO MECHANISMS.** `#1718`'s four checks read `pending` for hours and I named it as the documented `timeouts.tasks` shape. The discriminating read refuted it: the PipelineRuns were **Succeeding**, zero pods pending, and one was literally `Cancelled` — **each of my own six pushes superseded the previous run before it could report.** Read `kubectl -n tekton-ci get pipelinerun` before naming a cause for a missing verdict.
+- ⚠ **`clawgatectl` is nix-built from the LOCAL tree, so after a deploy it prints `note: server 0.8.35, clawgatectl built for 0.8.34` until a `home-manager switch`.** `deploy.md` says that note means you forgot to bump `client.go` — here both pins moved in one commit and `TestDeployPinMatchesClientBuildVersion` passed, so on THIS host it means the installed binary predates the commit. Two causes, one symptom.
+
 ## How to verify
 
 ```bash
-# 🔴 THE CURRENT WORKTREE IS 593c. `~/workspace/homelab-tmux593b` was REMOVED when #826 merged.
-cd ~/workspace/homelab-tmux593c/containers/clawgate
+# THE LIVE SURFACE — 0.8.35 carries all ten items of task 593
+clawgatectl health                      # expect version 0.8.35
+KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
+kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate -o wide
+# 🔴 /ui/tmux is 401 without a session — that is CORRECT, and it is why no shell can check the UI.
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/ui/tmux   # 401
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/health    # 200, the control
 
-# a fresh worktree has NO web/static/app.css (gitignored) -> TestTheStylesheetCarriesNoNewTestOnlyClasses
-# reds until tailwind runs. Use the repo-pinned v3 from node_modules, NOT `nix-shell -p tailwindcss` (v4).
-npm run build:css
+# BEFORE STARTING 595 — the card, and the policy it must not break
+clawgatectl task get 595 | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status']);print(d['body'])"
+clawgatectl task get 522 | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])"  # order conflict?
+git -C ~/workspace/homelab-talos grep -n 'func wantOpen' -- containers/clawgate/internal/ui/tmux.go
 
-# the FULL e2e tier — NOT one spec. ~32 min; run it detached (the tool call times out at 10m).
-nohup ./e2e/run.sh > /tmp/e2e-593c.log 2>&1 &
-# wait on CONTENT, never on a pipe's exit code:
-until grep -qE '^\s+[0-9]+ (passed|failed)' /tmp/e2e-593c.log; do sleep 30; done
-grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped)' /tmp/e2e-593c.log
-grep -oE 'tests/[a-z0-9-]+\.spec\.ts' /tmp/e2e-593c.log | sort -u | wc -l   # expect 34
+# the FULL e2e tier — NOT one spec. ~40 min; detached, and wait on CONTENT not a pipe's rc.
+# (a fresh worktree needs node_modules symlinked from the base clone, and app.css built from
+#  INSIDE containers/clawgate with ./node_modules/.bin/tailwindcss — v3, not nix-shell's v4)
+nohup ./e2e/run.sh > /tmp/e2e-595.log 2>&1 &
+until grep -qE '^\s+[0-9]+ (passed|failed)' /tmp/e2e-595.log; do sleep 30; done
+grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped)' /tmp/e2e-595.log
+grep -oE 'tests/[a-z0-9-]+\.spec\.ts' /tmp/e2e-595.log | sort -u | wc -l   # expect 34
 
-# the Go tier, counted rather than read off `ok` (a 0/0 is a COMPILE failure, not a clean run)
-go test ./internal/ui/ -count=1 -v 2>&1 | grep -c '^--- PASS'   # baseline at 248a0c4ed is 511
-go test ./... -count=1
-
-# all FOUR checks on the PR — clawgate-e2e is the one that catches this class
-gh pr checks <n> --repo ZacxDev/homelab-infra
-
-# this doc's own size gate, before any /handoff write
-stat -c '%s' ~/workspace/devrc/claudedocs/handoff-tmux-webapp.md   # allowance is in scripts/lib/handoff_budget.py
+# the Go tier, COUNTED (a 0/0 is a compile failure, not a clean run)
+go test ./internal/ui/ -count=1 -v 2>&1 | grep -c '^--- PASS'   # baseline at 9b1828606 is 538
 
 # the live queue and its lock, before touching any rank
 git -C ~/workspace/devrc show origin/main:claudedocs/handoff-tmux-webapp.md \
