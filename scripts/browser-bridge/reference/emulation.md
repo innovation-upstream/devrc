@@ -378,6 +378,16 @@ browser js 'innerWidth+"x"+innerHeight'           # → the REAL window size
 Same command, two answers, depending on the flag. That is why the annotation
 exists.
 
+🔴 **So carry `innerWidth` in the SAME expression as every measurement and assert
+it equals the width you asked for — never trust that `emulate` took.** A missing
+`--wake` is only ONE of the two ways a read silently reports the real window; the
+other is the emulation never having applied at all, because the tab is not owned
+by this session (`not_owned_tab` — routine for a driver making separate ssh
+invocations, see `reference/tabs-instances.md`). The two are different mechanisms
+with different fixes, they produce the *identical* symptom — a viewport sweep
+whose readings are all the real window width — and asserting `vw` is the only
+check that catches both. Measured 2026-09-15.
+
 ## What emulation changes about other ops
 
 ### `screenshot` — the fast path is disabled

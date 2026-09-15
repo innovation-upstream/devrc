@@ -126,6 +126,33 @@ Now each session can own its own tab:
   id change: ownership lives in the server's memory with a 900s idle TTL reaped
   on every touch, so a tab still mapped to an old `ppid:` id self-releases
   within 15 minutes (and the real Brave tab is never closed by a reclaim).
+- 🔴 **THE POSIX-SID FIX IS PER *LOGIN*, AND EVERY `ssh host cmd` IS ITS OWN
+  LOGIN — so a driver that makes SEPARATE ssh invocations gets a NEW id every
+  call and owns nothing it opened in a previous one.** The paragraph above is
+  easy to read as "solved"; it is solved *within* one login, which is exactly not
+  the case here. Measured 2026-09-15 driving the laptop from the workbench:
+  `open` in call 1, `emulate` in call 2 → `not_owned_tab` (`emulate` is the only
+  owned-tab-only op, so nothing else refuses and the mismatch stays invisible).
+  🔴 **The damage is silent when the refusal is suppressed** — the emulation
+  no-ops and every subsequent read returns the **REAL window width**, so a sweep
+  over six viewports yields six identical readings that look like six viewports.
+  **Remedy — export a stable id in the REMOTE shell**, which sits above the
+  fallback in the precedence list:
+  ```bash
+  SID=bb-$$          # any stable token — reuse the SAME one for EVERY call
+  BB=~/workspace/devrc/scripts/browser-bridge/browser
+  ssh "$HOST" "export CLAUDE_CODE_SESSION_ID=$SID; $BB --instance work open https://example.com"
+  ssh "$HOST" "export CLAUDE_CODE_SESSION_ID=$SID; $BB --instance work emulate --width 1440 --height 900"
+  ```
+  (`$SID` is expanded LOCALLY by the double quotes, so the remote shell receives
+  the literal token — that is the point. Angle-bracket placeholders are avoided
+  here deliberately: pasted into a shell, `=<stable-token>` is an input
+  redirection, not an assignment.)
+  🔴 **And assert the viewport rather than assuming it: echo `innerWidth` in the
+  SAME expression as every measurement and check it equals the width you asked
+  for.** That one assertion catches this bug *and* the unrelated
+  `emulation.md` trap where a read without `--wake` returns the real window size
+  — two different mechanisms, one tell, and no other check sees both.
 - **⚠ Concurrent drivers that may share a session id (subagents): pass explicit
   `--tab`.** Sibling subagents of ONE parent share identity — a subagent inherits
   the parent's `CLAUDE_CODE_SESSION_ID` and the same `$TMUX_PANE`, and there is NO
