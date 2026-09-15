@@ -137,6 +137,22 @@ func TestMergingWithAnUnknownMethodRefusesRatherThanGuessing(t *testing.T) {
 	if next.Mode() != ModeBrowse {
 		t.Errorf("mode = %s, want BROWSE — there is nothing to confirm", next.Mode().Word())
 	}
+	// 🔴 THE NOTICE MUST BE *THIS* REFUSAL, NOT MERELY A REFUSAL.
+	//
+	// ⚠ MEASURED: asserting only the `REFUSED` prefix let a mutant SURVIVE.
+	// Disabling `proposeMerge`'s method check does not produce a merge — a
+	// second lock catches it, because `ConfirmPrompt` cannot build a sentence
+	// naming an empty method — but it produces a DIFFERENT notice: "no
+	// confirmation prompt could be built … this is a bug", which tells the
+	// operator nothing about what to fix. The two refusals are different facts
+	// and the operator reads the difference, so the test asserts the specific
+	// one.
+	if !strings.Contains(next.Notice(), "the merge method could not be read from the config") {
+		t.Errorf("notice = %q, want the merge-method refusal specifically — a "+
+			"generic REFUSED here means the method check was bypassed and some "+
+			"OTHER lock caught it, with a message that does not name the fix",
+			next.Notice())
+	}
 	if !strings.HasPrefix(next.Notice(), "REFUSED") {
 		t.Errorf("notice = %q, want a REFUSED notice", next.Notice())
 	}

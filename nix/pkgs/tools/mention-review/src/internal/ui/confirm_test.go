@@ -237,6 +237,68 @@ func TestTheComposeBarShowsWhatWasTyped(t *testing.T) {
 	}
 }
 
+// 🔴 THE FOOTER FOLLOWS THE MODE, AND THAT IS A SEPARATE CLAIM FROM THE LEDGER
+// PASSING. `keys_test.go` asserts the dispatched and helped SETS agree per
+// mode; it says nothing about which mode `renderFooter` actually asks for. A
+// footer wired to `ModeBrowse` unconditionally would satisfy every ledger
+// assertion and still show `q quit` while a merge confirmation was on screen —
+// the field exists, and only a BRANCH on it is a guard.
+func TestTheFooterFollowsTheMode(t *testing.T) {
+	cases := []struct {
+		name string
+		keys []string
+		mode Mode
+	}{
+		{"browse", nil, ModeBrowse},
+		{"composing", []string{"c"}, ModeCompose},
+		{"confirming", []string{"m"}, ModeConfirm},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, _ := pressAll(ready(t), c.keys...)
+			if a.Mode() != c.mode {
+				t.Fatalf("fixture is wrong: mode = %s, want %s", a.Mode().Word(), c.mode.Word())
+			}
+			footer := stripANSI(a.renderFooter())
+			for _, b := range Keys.ShortHelpFor(c.mode) {
+				h := b.Help()
+				if !strings.Contains(footer, h.Desc) {
+					t.Errorf("the footer does not carry %q for mode %s\nfooter: %s",
+						h.Desc, c.mode.Word(), footer)
+				}
+			}
+			// 🔴 AND THE OTHER MODES' HELP IS ABSENT. Without this half, a
+			// footer that concatenated every mode's keys would pass the loop
+			// above — and that footer is a legend that lies in all three modes
+			// at once.
+			for _, other := range Modes() {
+				if other == c.mode {
+					continue
+				}
+				for _, b := range Keys.ShortHelpFor(other) {
+					d := b.Help().Desc
+					if inShortHelp(c.mode, d) {
+						continue // a description both modes legitimately share
+					}
+					if strings.Contains(footer, d) {
+						t.Errorf("in mode %s the footer carries %q, which belongs "+
+							"to mode %s\nfooter: %s", c.mode.Word(), d, other.Word(), footer)
+					}
+				}
+			}
+		})
+	}
+}
+
+func inShortHelp(m Mode, desc string) bool {
+	for _, b := range Keys.ShortHelpFor(m) {
+		if b.Help().Desc == desc {
+			return true
+		}
+	}
+	return false
+}
+
 // The notice is rendered, not merely stored — the DTO-field trap again.
 func TestANoticeReachesTheScreen(t *testing.T) {
 	a := ready(t)

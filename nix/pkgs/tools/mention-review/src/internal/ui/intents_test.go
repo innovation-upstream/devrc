@@ -50,7 +50,13 @@ type walkState struct {
 // test that assigned `a.mode = ModeConfirm` would be asserting against a state
 // the program might have no way to enter — and would keep passing if the key
 // that is supposed to enter it stopped working.
-func reachableStates(t *testing.T) []walkState {
+func reachableStates(t *testing.T) []walkState { return buildStates(t, false) }
+
+// browseStates is the subset built WITHOUT pressing any key. See the comment
+// inside `buildStates` for why the browse sweep must not share the modal list.
+func browseStates(t *testing.T) []walkState { return buildStates(t, true) }
+
+func buildStates(t *testing.T, browseOnly bool) []walkState {
 	t.Helper()
 	base := func() App {
 		a := New(fxOwner, fxName, fxNum)
@@ -82,7 +88,14 @@ func reachableStates(t *testing.T) []walkState {
 		return a
 	}
 
-	states := []walkState{
+	// 🔴 THE BROWSE STATES ARE BUILT WITHOUT PRESSING ANY KEY, AND THAT
+	// SEPARATION IS LOAD-BEARING. `browseStates` below is what the
+	// no-confirmed-write-from-browse sweep drives, and it must not depend on a
+	// key chain — a mutant that made `m` fire a merge directly ALSO breaks the
+	// chain that builds the `confirm-merge` fixture, so a combined list kills
+	// that mutant with the FIXTURE's error instead of the sweep's. Measured:
+	// it did exactly that on the first run of this battery.
+	browse := []walkState{
 		{"loading", base()},
 		{"ready-pr", readyPR()},
 		{"ready-issue", func() App {
@@ -95,6 +108,21 @@ func reachableStates(t *testing.T) []walkState {
 		}()},
 		{"ready-pr-no-viewer-login", noLogin()},
 		{"ready-pr-unknown-merge-method", noMethod()},
+	}
+	for _, s := range browse {
+		if s.app.Mode() != ModeBrowse {
+			t.Fatalf("state %q is in mode %s, want BROWSE", s.name, s.app.Mode().Word())
+		}
+	}
+	if len(browse) < 4 {
+		t.Fatal("the browse state list is too short to be measuring anything")
+	}
+	if browseOnly {
+		return browse
+	}
+
+	states := append([]walkState(nil), browse...)
+	states = append(states, []walkState{
 		{"composing-comment", press(readyPR(), "c")},
 		{"composing-request-changes", press(readyPR(), "R")},
 		{"composing-submit-review", press(readyPR(), "v")},
@@ -108,28 +136,25 @@ func reachableStates(t *testing.T) []walkState {
 		// from any state it drove. That is exactly the vacuity the write-verb
 		// positive control exists to catch, caught on its first run.
 		{"confirm-submit-review", press(readyPR(), "v", "n", "o", "ctrl+d")},
-	}
+	}...)
 
-	// 🔴 THE FIXTURES MUST BE THE STATES THEY CLAIM TO BE. A `press` chain that
-	// silently failed to change mode would make every modal walk below a second
+	// 🔴 THE MODAL FIXTURES MUST BE THE STATES THEY CLAIM TO BE. A `press` chain
+	// that silently failed to change mode would make every modal walk a second
 	// copy of the browse walk — passing, and measuring nothing.
 	want := map[string]Mode{
-		"loading": ModeBrowse, "ready-pr": ModeBrowse, "ready-issue": ModeBrowse,
-		"failed": ModeBrowse, "ready-pr-no-viewer-login": ModeBrowse,
-		"ready-pr-unknown-merge-method": ModeBrowse,
-		"composing-comment":             ModeCompose,
-		"composing-request-changes":     ModeCompose,
-		"composing-submit-review":       ModeCompose,
-		"composing-with-text":           ModeCompose,
-		"confirm-approve":               ModeConfirm,
-		"confirm-merge":                 ModeConfirm,
-		"confirm-request-changes":       ModeConfirm,
-		"confirm-submit-review":         ModeConfirm,
+		"composing-comment":         ModeCompose,
+		"composing-request-changes": ModeCompose,
+		"composing-submit-review":   ModeCompose,
+		"composing-with-text":       ModeCompose,
+		"confirm-approve":           ModeConfirm,
+		"confirm-merge":             ModeConfirm,
+		"confirm-request-changes":   ModeConfirm,
+		"confirm-submit-review":     ModeConfirm,
 	}
 	for _, s := range states {
 		w, ok := want[s.name]
 		if !ok {
-			t.Fatalf("state %q has no expected mode — add one", s.name)
+			continue // a browse state, already checked above
 		}
 		if s.app.Mode() != w {
 			t.Fatalf("state %q is in mode %s, want %s — the key chain that builds "+
@@ -354,7 +379,11 @@ func TestTheConfirmationLedgerComparisonCanActuallyGoRed(t *testing.T) {
 // fails it too.
 func TestNoConfirmedWriteIsEmittedFromBrowseMode(t *testing.T) {
 	checked := 0
-	for _, s := range reachableStates(t) {
+	// ⚠ `browseStates`, NOT `reachableStates` — see `buildStates`. The modal
+	// fixtures are built by pressing keys, so the very mutation this test
+	// exists to catch also breaks them, and a combined list kills the mutant
+	// with the FIXTURE's error instead of this assertion's.
+	for _, s := range browseStates(t) {
 		if s.app.Mode() != ModeBrowse {
 			continue
 		}
