@@ -212,8 +212,9 @@ evidence: #592's diff contains **zero Go files**, so it cannot have slowed the `
 **#591 — which does touch Go — passed the same pipeline nine minutes later** (`clawgate-ci-hsdlk`,
 rev `d687fcaa`, Succeeded). `ZacxDev/homelab-infra#572` (raise that budget) is **MERGED** — 2026-08-31 18:36Z. Read the
 investigation headed **🔴 `TaskRunTimeout` IN clawgate-ci HAS TWO DISTINCT CAUSES, AND `#572` ONLY
-FIXES ONE**, in `claudedocs/handoff-tmux-webapp.md` — NOT the `TaskRunTimeout` investigation in this
-file, which is a different one (rank 61 `clawgate-e2e`, node I/O) with a different conclusion —
+FIXES ONE**, in `claudedocs/handoff-tmux-webapp.md` — NOT any of the `TaskRunTimeout` investigations
+in this file, which are different ones (chiefly rank 61 `clawgate-e2e`, node I/O) with a different
+conclusion —
 before recording it as the fix: it addresses one of the two causes.
 ⚠ **The leg that never ran was `hook` — the one #592 exists to exercise** — so merging on the
 "COULD NOT RUN means broken gate" convention alone would have shipped it with zero CI coverage of
@@ -594,6 +595,14 @@ are corrected in place.
   `.opencode-dispatch/tmux-ui-verify/brief4-NOT-DISPATCHED.md` and run it.
 
 ### `tekton/clawgate-e2e` is TIMING OUT on `trunk` — a gate going permanently red
+🔴 **SUPERSEDED — ITS `Next probe` BELOW IS SPENT. DO NOT RUN IT.** Read the block headed
+**✅ RESOLVED 2026-09-14 — rank 61 `clawgate-e2e` `TaskRunTimeout` is NODE I/O, not a stranded
+lock**, below in this file, first. That block captured the `step-e2e` logs this one lost and
+answered the discriminator: `57014` hits the migration DDL, not a lock wait, so the "NOT RULED
+OUT" stranded-advisory-lock mechanism is **REFUTED** and the weakly-held saturation hypothesis is
+**superseded by node I/O**. This block is closed by SUPERSESSION, not by its own body — its body
+still reads open, and that is the point of this banner. Kept verbatim because the eliminations
+are still true and the reasoning is the value.
 - as-of: 2026-09-13
 
 - **Symptom + exact repro:** `tekton/clawgate-e2e` reports FAILURE; the TaskRun ends

@@ -51,11 +51,18 @@ GRANDFATHER_STEP = 16_384
 # (c) until its entry is deleted, so this dict can only shrink over time unless
 # someone deliberately adds to it.
 #
-# Measured 2026-09-13; the trailing comment is the size AT THAT MOMENT and is
-# informational — the enforced number is the allowance, and the measurement the
-# gate reads is the file.
+# The trailing comment is the size when THAT ENTRY was last written (most of
+# them: 2026-09-13) and is informational — the enforced number is the allowance,
+# and the measurement the gate reads is the file.
+#
+# 🔴 IT IS NOT A DATED SNAPSHOT THAT EXCUSES A STALE NUMBER. An entry's comment
+# is rewritten every time its allowance moves, so "the header says 2026-09-13"
+# is not an argument for leaving it wrong — that argument was made for
+# `handoff-tmux-webapp.md` and was false: the line had been rewritten on
+# 2026-09-15 (245_760/242,155 -> 212_992/204,328) two days after that date.
+# Update the comment in the same commit that changes the document.
 GRANDFATHERED: dict[str, int] = {
-    "claudedocs/handoff-tmux-webapp.md": 212_992,               # 204,328 B
+    "claudedocs/handoff-tmux-webapp.md": 212_992,               # 198,678 B
     "claudedocs/handoff-audit-pr-ladder.md": 196_608,           # 195,625 B
     "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,  # 191,946 B
     "claudedocs/handoff-cairn-phase3.md": 163_840,              # 154,141 B
