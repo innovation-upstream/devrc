@@ -53,9 +53,18 @@ repos that gate structurally cannot read.
   `claudedocs/` under that root only. `civitai/cli` ships no such file, so the sentence is
   false there. Measured end-to-end after the fix: `civitai/cli` → *"NO GATE ENFORCES THIS IN
   THIS REPO"*; devrc → *"will go RED on `main`"*.
-- **Measured cost before the fix**, in `civitai/cli` 2026-09-14/15: **five evictions in two
-  days, 35,517 B moved to `claudedocs/refs/`, and a heading-delimited slice that removed
-  27,991 B — an entire ranked list — one step before a commit.** None required by any gate.
+- **Cost before the fix**, in `civitai/cli` 2026-09-14/15 — 🔴 **stated at the precision each
+  figure actually has, after `devrc#1714`'s round 0 re-derived them:**
+  - **35,517 B moved to `claudedocs/refs/`** — MEASURED, exact: that is the byte size of
+    `claudedocs/refs/external-issue-513-numeric-username.md`, committed in `e464652`.
+  - **"five evictions"** — NARRATIVE, not measurement. It counts five *named items* in that
+    doc's own prose, not five byte deltas. Per-revision the net over the two days is **+592 B**,
+    with one large committed shrink (`e39250b`, 65,019 → 49,696 B). Do not quote it as a
+    measurement, and do not infer a byte total from it.
+  - **27,991 B near-loss** — SELF-REPORT, not re-derivable. Nothing was committed, so it exists
+    only in the prose of the effort that made the claim — the same author as the requirement.
+  - And the figure nobody claimed: after all of it the doc is **65,580 B, still 44 B OVER** the
+    ceiling it was being evicted against. Which is the point — nothing enforced it.
 - **Ruled out:** *"compare the repo path against a known devrc root"* — **via: code**. In a
   WORKTREE the gate's own `REPO_ROOT` is the worktree, not the base clone, and this repo's
   agents work in worktrees constantly. The predicate is derived instead: a repo is gated iff
