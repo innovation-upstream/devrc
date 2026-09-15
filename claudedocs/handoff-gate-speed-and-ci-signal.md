@@ -152,26 +152,36 @@ is blocking** — rank 8's date is the only thing with a clock on it.
    `handoff-gate-flake-store-api.md` rank 1). Keep `#1512` for "it was never the worst flake".
    forcing: none
 4. **CLOSED** — `#1524` merged `58bfb747`, shipped, consumer verified.  forcing: none
-5. **ANSWERED — NO PR, BOTH CANDIDATE FIXES REFUTED.** `step-pytests` is **1177s = 94.4%** of a
-   1247s gate pod (23 pods, 11h); `scripts/tests` is **582–778s** at 14,327 of 22,518 tests. **Test
-   execution is the cost, not dependency realisation.** (a) **No cache left to hit** — the warm
-   node-pinned `/nix` PVC was removed in `homelab-talos 3c53d618a`; per-run `emptyDir`, no
-   substituters, min `step-pytests` **956s**. (b) **Excluding `claudedocs/` would blind real gates**
-   — proven by turning the gate red with a one-word edit to this doc.
-   ⏳ One lever remains, in `homelab-talos`: `limits.cpu` 4→8 for `step-pytests`, `requests.cpu`
-   stays 2 (worker count follows the cgroup quota — `-n 4` because the LIMIT is 4, not `nproc`).
-   ⚠ Distinct from the reverted `23887675`/`bb62668f`, which raised the REQUEST. ⚠ 3–6 min saving is
-   INHERITED, not re-derived. Bursting to 8 produced the loopback-starvation flakes. **Scratch
-   pipeline, never `devrc-ci`.**
-   🔴 **MEASURED: CI HAS NOT GOT FASTER, AND NOTHING SHIPPED COULD HAVE MADE IT.** 123 real
-   `tekton/devrc-main-pytests` runs over 852 `main` commits: median **1082s before `#1429` →
-   1260s after**, a monotone climb with **no step at the boundary**. Normalised it is FLAT —
-   **48–57 s per 1,000 collected tests** throughout — so the growth is SUITE GROWTH (19,440 →
-   23,089 collected in 14 days), not regression. `#1429` could not have moved CI by
-   construction: it changed `min(nproc, 4)` → `min(nproc, quota, 8)`, and in the `devrc-ci` pod
-   both yield **4**. **This rank is the arc's one UNDELIVERED objective.**
-   forcing: none — but the operator's original question was "can we make it faster", and for CI
-   the answer is still no.
+5. **ANSWERED — NO PR, AND THE LAST LEVER IS NOW MEASURED RATHER THAN PENDING.** `step-pytests`
+   is **1177s = 94.4%** of a 1247s gate pod; test EXECUTION is the cost. (a) **No cache left to
+   hit** (the warm `/nix` PVC went in `homelab-talos 3c53d618a`). (b) **Excluding `claudedocs/`
+   would blind real gates.** 🔴 **CI HAS NOT GOT FASTER AND `#1429` COULD NOT HAVE MADE IT** —
+   `min(nproc, 4)` → `min(nproc, quota, 8)` yields **4** either way in the `devrc-ci` pod; the
+   median climb 1082s → 1260s is SUITE GROWTH (48–57 s/1,000 collected, flat).
+   🔴 **2026-09-14 — the `limits.cpu` 4→8 lever was investigated and IS NOT RECOMMENDED. Do not
+   open it as a one-line PR.** The mechanism is real (devrc's formula is `min(nproc, cgroup quota,
+   8)`, so limit 8 ⇒ `-n 8`) but the cost side is already on the record:
+   • **It WIDENS the gap `devrc-ci-pipeline.yaml` itself calls THE DEFECT** — "the scheduler packs
+   by REQUEST and the cgroup bursts to the LIMIT" — from 2× to 4×, since `requests.cpu` stays 2.
+   • **The symmetric fix was already run and reverted the same evening** (2026-08-29, request
+   2→4): execution improved exactly as predicted (pytests 1277s → 808/915s) and **zero runs
+   succeeded that hour** — 45m unscheduled, two TaskRunTimeouts at 60m. The manifest keeps that
+   reasoning verbatim precisely so nobody re-proposes it.
+   • **Measured 2026-09-14 on the live cluster, 6h:** `step-pytests` throttles **13.6%** of CFS
+   periods (238,886 periods; positive control — the counter moves), mean draw **1.33 cores** top
+   pod, agreeing with the manifest's own p50 1097m / p99 3178m **against a 4000m limit**.
+   ⚠ **This does NOT settle it and must not be quoted as if it did**: the draw is low *because*
+   `-n 4` is low, so "it isn't using its limit" is weak evidence. What is missing is the number
+   that would settle it — `container_cpu_cfs_throttled_seconds_total` is **not exported here**
+   (row_count 0), so the saving cannot be bounded in seconds from Prometheus.
+   🔴 **The requirement is the thing to question, not the config.** Nothing gates a merge here,
+   both checks are advisory, and the median run is 19.2 min. Spending a scratch-pipeline
+   experiment plus a GitOps change on an advisory check, to chase an INHERITED (never re-derived)
+   3–6 min, against a documented starvation mode, is poor value. **If it is ever done it is a
+   SCRATCH pipeline, never `devrc-ci`** — that constraint stands.
+   forcing: none — and the operator's original question, "can we make it faster", still has the
+   answer NO for CI. That is the arc's one undelivered objective and it is undelivered on
+   purpose, not by omission.
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**,
    together with rank 4 (15 lines there vs ~885 in `#1524`). 🔴 Evidence cuts toward DELETE: the
    store-api flake is at **0 of 99** post-fix, and **100 of 101** failure descriptions truncate at
@@ -535,73 +545,6 @@ S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
   the merge did not happen** — on `#1600` the pinning worktree was clean and its single commit's
   content was exactly what had landed.
 
-### 2026-09-12 — rank 13's probe: testing the claim instead of arguing about it
-
-- 🔴 **"INHERITED — LIKELY CURED BY REBASE" IS A FALSIFIABLE CLAIM, AND FALSIFYING IT COST MINUTES.**
-  Build the merged tree, run ONLY the named failing test: passes ⇒ right, fails ⇒ false. Four PRs,
-  four answers, each test under 4 seconds. **The temptation was to reason from the test's name about
-  whether it "looked like" a census guard; the merged tree answers the actual question and the
-  reasoning would have been a guess dressed as analysis.**
-- **The one-data-point predicate SURVIVED contact with more data, which is not the usual outcome.**
-  With only `#1603` in hand the proposed discriminator was *is the named failing test a census guard
-  over files it does not name?* On four cases it separates 4/4 — and it did NOT merely confirm a
-  prior: it also predicted the two TRUE positives correctly, which is the half that could have
-  falsified it.
-- 🔴 **A 50% FALSE RATE IS A DIFFERENT OBJECT FROM ONE FALSE POSITIVE.** One is an anecdote that
-  invites "it was unlucky"; a rate with a named mechanism and a clean split is a specification for
-  the fix. **Rank 13 went from "decide whether this can ever be armed" to "implement this demotion
-  and re-run the sweep" purely by spending ten minutes measuring.**
-- ⚠ **A MERGE CONFLICT IS NOT A PASS AND NOT A FAILURE.** `#1038` (601 commits behind, 1 conflicting
-  path) has no merged tree, so its verdict is UNTESTABLE and is excluded from the rate rather than
-  quietly counted. The probe script reports it as its own outcome — the same discipline as
-  `COULD NOT MEASURE` elsewhere in this repo. **A denominator of 4, stated, beats a denominator of 5
-  that hides one.**
-- **The probe script refuses to read silence as success**: it greps for a countable
-  `N passed`/`N failed` line and reports `COULD NOT MEASURE — no countable verdict` otherwise,
-  because a pytest selection that matches nothing prints `no tests ran` and **exits 0** — the
-  silent-zero family this doc has now been bitten by three separate ways.
-
-### 2026-09-13 — implementing rank 13: the fix, and what implementing it taught
-
-- 🔴 **MY OWN TEST CAUGHT A FAIL-OPEN BUG IN MY OWN DESIGN, AND IT WAS THE BUG I WAS FIXING.**
-  `census_scan.analyze()` on a mis-rooted path **RETURNS AN EMPTY RESULT rather than raising**. The
-  first `CensusIndex` trusted that, so a wrong root would have answered "not a census guard" for
-  every test in the repo — failing OPEN into precisely the false-INHERITED bug under repair. Caught
-  only because the fail-safe was written as a test driven at a real empty directory rather than
-  asserted about a stub. **Write the unhappy path as a test against reality, not as a comment.**
-- 🔴 **MY FIRST FLOOR WAS THE WRONG SHAPE AND THE SUITE SAID SO IMMEDIATELY.** Mirroring
-  `ledger-check.sh`'s `MIN_NODEIDS` (a count floor) turned **every end-to-end fixture repo** into
-  COULD NOT MEASURE: a small repo with genuinely no census guards is a TRUE answer, not a broken
-  scan. The trip is now `parsed == 0` — "did the scan read anything at all" — and the
-  production-strength claim lives in the suite as a positive control. **A guard that cannot
-  distinguish "small" from "broken" fails the wrong way.**
-- 🔴 **I DESTROYED MY OWN UNCOMMITTED IMPLEMENTATION WITH THE MUTATION BATTERY.** The battery
-  restored between mutants with `git checkout -- <file>` against a tree whose changes were **never
-  committed**, reverting the entire implementation to `origin/main`. Recovered by re-applying all
-  six blocks with `count == 1` assertions, re-verifying at 106 passed, and committing BEFORE
-  re-running. **A mutation battery needs a COMMITTED baseline, not merely a green one** — this is
-  `claude/RULES.md`'s "restore from `cp -a`, not `git checkout --`" with the emphasis moved to
-  *when* you are allowed to start.
-- **The battery itself then worked: 4/4 killed**, control green both ends, tree restored clean —
-  drop the index at the call site → wiring guard red; screen computes but never acts → demotion
-  red; fail open on unbuildable → fail-safe red; drop the `parsed == 0` trip → mis-rooted red.
-- 🔴 **"RED AT BASE" WAS STRUCTURAL, NOT BEHAVIOURAL, AND SAYING SO MATTERS.** The 9 base failures
-  are all `AttributeError: no attribute 'CensusIndex'` — they prove the tests need the new code,
-  NOT that behaviour changed. The behavioural delta is pinned separately on both sides with the
-  IDENTICAL fixture: base asserts ALPHA is INHERITED (still green at HEAD), the new test asserts the
-  same fixture demotes, and the two differ ONLY in the oracle's answer. **A regression matrix that
-  is really an import error should be labelled as one.**
-- **The screen defaults to OFF (`census=None`), so its WIRING is what can rot** — dropping the
-  argument at the one production call site would make it silently inert while all 106 tests still
-  pass. Pinned STRUCTURALLY over the AST at both call sites, with a positive control proving the
-  scan can see the spelling it forbids.
-- ⚠ **`mapfile` DOES NOT EXIST IN zsh, and the Bash tool runs zsh.** An inline selector using it
-  found **0 files**; the run refused on its own floor instead of reporting a green over nothing.
-  Put any `mapfile`/array selector in a `#!/usr/bin/env bash` script file.
-- ⚠ **`grep … | head` returns HEAD's status, so `|| echo "none"` never fires.** Hit twice in one
-  session while checking reachability, and once it truncated a `find` so a tracked file looked
-  absent. **Capture to a variable and branch on `$?`.**
-
 ### 2026-09-13 — two PRs, two unreachable reds, two different causes
 
 - 🔴 **BOTH OPEN PRs WERE RED ON TESTS THEIR DIFFS COULD NOT REACH, AND THE TWO REDS HAD DIFFERENT
@@ -897,6 +840,32 @@ Measured against the whole soak (Loki `{app="tekton-supersede"}`, 2026-09-11T06:
   `resolvable` in one sweep **17**, median **3**. Every one of those leaves the ref absent, which
   the selector reads as "do not cancel". The fail-closed direction is not theoretical here — it
   fired 13 times in 3.8 days and cost nothing but cancels.
+
+### 2026-09-14 — rank 5's last lever, investigated instead of shipped
+
+- 🔴 **I WAS ASKED TO OPEN THE `limits.cpu` 4→8 PR AND DID NOT, ON EVIDENCE IN THE TARGET REPO.**
+  Reading `devrc-ci-pipeline.yaml` before editing it found the symmetric experiment already run
+  and reverted (2026-08-29, `requests.cpu` 2→4): execution improved exactly as predicted and
+  **zero runs succeeded in the hour that followed**. The manifest keeps that reasoning verbatim
+  with the note *"deleting them would invite the same change again"* — which is exactly what
+  rank 5 was about to do. **Read the target file's own history before treating a ranked item as
+  a one-liner.**
+- **The measurement, with its controls:** 6h on the live cluster, `step-pytests` throttles
+  **13.6%** of CFS periods over **238,886** periods (positive control: the periods counter moves,
+  so the fraction is a reading, not a wiring artefact); mean draw **1.33 cores** on the busiest
+  gate pod, agreeing with the manifest's independent p50 1097m / p99 3178m against a 4000m limit.
+- 🔴 **AND I ALMOST OVER-CLAIMED FROM IT.** "It only draws 1.3 of 4 cores, so a bigger limit buys
+  nothing" is WRONG as stated: the draw is low *because* `-n 4` is low. The throttle fraction is
+  the better evidence and it points the other way — the step does press its ceiling. **A number
+  that agrees with the conclusion you already reached deserves the harder read, not the quicker
+  one.**
+- ⚠ **The number that would settle it is not available here:**
+  `container_cpu_cfs_throttled_seconds_total` returns **row_count 0** in this Prometheus, so the
+  saving cannot be bounded in seconds. `..._throttled_periods_total` IS exported. Say which
+  metric answered and which did not, rather than quoting the one that happened to exist.
+- **Requirement questioned, per `the-algorithm`:** nothing gates a merge in this repo, both checks
+  are advisory, median run 19.2 min, and the saving is INHERITED and never re-derived. The lever
+  is not refuted — it is **not worth the experiment it would take to justify it.**
 ## Open investigations — live diagnosis state
 
 ### CLOSED investigation blocks — evicted 2026-09-13
@@ -912,6 +881,15 @@ indexed by `handoff_search`, so go to it by path.
 **Two more went the same way on 2026-09-14**, both labelled superseded by this doc itself and
 both belonging to CLOSED ranks: rank 14's ORIGINAL flaky-tmux diagnosis, and `main` is RED on two
 UNOWNED guards. The blocks that SUPERSEDE them stay here.
+
+**And one more on 2026-09-14**: rank 13's PROBE section (*testing the claim instead of
+arguing about it*), evicted to make room for rank 5's measurement. Rank 13 is a tombstone and
+its probe reached an answer; the lesson it carries is restated in rank 13's own entry.
+
+Rank 13's IMPLEMENTATION section went with it. ⚠ It carries three lessons that are NOT
+rank-13-specific and are worth the path lookup: a fail-open `census_scan.analyze()` on a
+mis-rooted path, a mutation battery that restored with `git checkout --` against an
+UNCOMMITTED tree and destroyed its own implementation, and `mapfile` not existing in zsh.
 
 
 ### RESOLVED — #1469's audit ladder (was rank 2)
