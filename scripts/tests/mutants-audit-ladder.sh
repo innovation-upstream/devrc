@@ -113,10 +113,25 @@ RULES="$ROOT/claude/RULES.md"
 cp -a "$SKILL" "$T/skill.orig"
 cp -a "$EVID"  "$T/evid.orig"
 cp -a "$RULES" "$T/rules.orig"
+# 🔴 THE SUITE IS RESTORED TOO, and it is not decoration. `run_pair` (below) is
+# the only row shape that mutates the pinned CONSTANT as well as the document —
+# that pair is what reproduces the coverage gap `#1678` left — and without this
+# line every row after it would run against a module whose scope had already been
+# widened, scoring later mutants against the wrong baseline and never saying so.
+cp -a "$SUITE" "$T/suite.orig"
+# 🔴 AND THE DISPATCH SCRIPT, for the SEAM rows below. It is already copied into
+# the tree (the sixth file, above) because a guard IMPORTS it; the two seam rows
+# MUTATE it, so it needs an original to be put back from. Its killer lives in
+# THIS harness's suite and not in `mutants-audit-dispatch.py`, whose `failing()`
+# runs `test_audit_dispatch.py` alone and would score those rows SURVIVED.
+DISPATCH="$ROOT/scripts/audit-dispatch.py"
+cp -a "$DISPATCH" "$T/dispatch.orig"
 restore() {
   cp -a "$T/skill.orig" "$SKILL"
   cp -a "$T/evid.orig"  "$EVID"
   cp -a "$T/rules.orig" "$RULES"
+  cp -a "$T/suite.orig" "$SUITE"
+  cp -a "$T/dispatch.orig" "$DISPATCH"
 }
 
 FAILURES=0
@@ -149,7 +164,7 @@ ROWS=0
 # `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
 # this_modules_size`, which reads the number below, counts the module, and
 # fails with the replacement value. Growth cannot silently outrun it again.
-MIN_TESTS=15
+MIN_TESTS=18
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on
@@ -276,6 +291,53 @@ run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
       printf '  ok %-46s killed by %s (also: %s)\n' "$name" "$want" "$extra"
     else
       printf '  ok %-46s killed by %s\n' "$name" "$want"
+    fi
+    return
+  fi
+  printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
+    "$name" "$(tr '\n' ',' <<<"$killers" | sed 's/,$//')" "$want"
+  FAILURES=$((FAILURES+1))
+}
+
+run_pair() { # run_pair <name> <expect> <fileA> <oldA> <newA> <fileB> <oldB> <newB>
+  # 🔴 THE SCOPE ROW SHAPE, AND THE ONLY ONE THAT REPRODUCES THE MEASURED GAP.
+  # Every other row here mutates the DOCUMENT and leaves the pin alone, so a
+  # whole-string pin kills it trivially. That is not the failure this battery
+  # missed. MEASURED on the withdrawn `#1678`: widening the rule's scope AND
+  # refreshing the pinned constant in the same edit -- which is exactly what the
+  # pin's own failure message instructs -- scored 17 passed and `✅ 20 row(s),
+  # all as expected`. Both instruments were blind. So a scope row has to mutate
+  # BOTH files, and be killed by a guard that reads a THIRD one.
+  #
+  # BOTH mutations are asserted to apply, and the FIRST is restored before
+  # returning on the second's failure: a half-applied pair scores a mutant that
+  # was never built.
+  local name="$1" want="$2" fa="$3" oa="$4" na="$5" fb="$6" ob="$7" nb="$8"
+  ROWS=$((ROWS+1))
+  if ! apply "$fa" "$oa" "$na"; then
+    printf '  🔴 %-46s MUTATION A DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); restore; return
+  fi
+  if ! apply "$fb" "$ob" "$nb"; then
+    printf '  🔴 %-46s MUTATION B DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); restore; return
+  fi
+  local killers; killers="$(failing)"
+  restore
+  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
+    printf '  🔴 %-46s HARNESS BROKE — %s\n' "$name" "$killers"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if [ -z "$killers" ]; then
+    printf '  🔴 %-46s SURVIVED — no test failed\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if grep -qx "$want" <<<"$killers"; then
+    local extra; extra="$(grep -vx "$want" <<<"$killers" | tr '\n' ',' | sed 's/,$//')"
+    if [ -n "$extra" ]; then
+      printf '  ok %-46s killed by %s (also: %s)\n' "$name" "$want" "$extra"
+    else
+      printf '  ok %-46s killed by %s ALONE\n' "$name" "$want"
     fi
     return
   fi
@@ -452,6 +514,105 @@ run "hatch: blank line before the caveat deleted" \
 ⚠ **THIS DOES NOT OVERRIDE'
 
 echo
+echo "== the DETERMINATION: what turns the hatch's judgement into a count =="
+# 🔴 THE ROUND FLOOR. Moving it to round 1 is not a hypothetical edit — it is
+# the rule `#1678` (`e8fa6fca`) actually shipped, and it was retracted the same
+# day because the precondition it left behind reduced to the 🔴 count. This row
+# exists so the next attempt cannot land it quietly.
+run "determination: round floor moved to ROUND 1" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'and never available before ROUND 2. The ⚠ caveat directly' \
+    'and nameable from ROUND 1 when the payload is prose. The ⚠ caveat directly'
+# 🔴 THE OPERAND, SWAPPED BACK TO FINDINGS. This is not a hypothetical either:
+# it is the rule this PR's own first draft shipped, and the reason it was
+# re-keyed is that a recorded fix item almost never carries a `file:line`, so
+# the denominator becomes whatever the counter picks — and on the record the
+# rule must read, it scored `#1111` at 0 of 7 and FORBADE the case the section
+# rests on.
+run "determination: operand swapped back to FINDINGS" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'The unit is
+LINES, never findings' \
+    'The unit is
+FINDINGS, never lines'
+# The fail-safe DIRECTION, inverted: a cap turns a full count into whatever the
+# first N lines happen to say. MEASURED — a 400-line cap moved the share on 8
+# of 159 corpus rounds and in BOTH directions, so this is not a conservative
+# simplification, it is a different measurement wearing the same number.
+run "determination: a CAP reintroduced on the operand" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    '**there is no cap and
+no sample**' \
+    '**cap it at the first 400
+pre-image lines**'
+# The structural zero, re-read as a measurement. Same ACTION, different CLAIM —
+# `claude/RULES.md`'s `empty-result` rule, and 3 of 159 corpus rounds are in
+# exactly this state.
+run "determination: a structural zero becomes a measured zero" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'and a structural zero is not a measured zero' \
+    'and a structural zero counts as a measured zero'
+# 🔴 THE DERIVATION. A threshold with no derivation is a number somebody picked,
+# and the defect a round-0 audit found in this PR's first draft was not the
+# fraction but that it sat on the population MEAN. Deleting the sentence that
+# says re-derive-do-not-tune is the edit that makes the next move invisible.
+run "derivation: 're-derive, do not tune' deleted" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    'population: re-derive before moving the number, do not tune it.' \
+    'population.'
+# 🔴 THE HONEST-COST SENTENCE. It is the half a reader would most like to lose:
+# without it the rule reads as a shortcut that fires at round 2, when measured
+# it fires there for 3 of 7 prose ladders.
+run "derivation: the measured round-2 price deleted" \
+    test_the_determination_and_its_fail_safe_are_pinned_WHOLE "$SKILL" \
+    '**Two rounds is the floor; the measured typical price is
+three.**' \
+    '**Two rounds is the
+floor.**'
+# 🔴 THE SCOPE ROW, AND THE REASON `run_pair` EXISTS. Widening the THRESHOLD and
+# refreshing the pinned constant in the same edit is what a dutiful author does
+# when a whole-string pin goes red — its own message tells them to. MEASURED on
+# `#1678`: that pair scored 17 passed AND `✅ 20 row(s), all as expected`. Here
+# both of this file's own pins stay GREEN by construction (the constant now
+# matches the widened document) and only the SEAM guard, which reads the copy of
+# the scope that ships in every `--emit-claims` run, can see it.
+run_pair "determination: THRESHOLD widened, constant refreshed" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships \
+    "$SKILL" \
+    'nameable when at least TWO-THIRDS of the attributable pre-image lines' \
+    'nameable when at least ONE of the attributable pre-image lines' \
+    "$SUITE" \
+    'reason is nameable when at least TWO-THIRDS of the attributable pre-image "
+    "lines' \
+    'reason is nameable when at least ONE of the attributable pre-image "
+    "lines'
+
+# 🔴 THE OTHER END OF THE SEAM. The rows above mutate the SKILL; these mutate
+# the copy `audit-dispatch.py` SHIPS to every round-2-and-later ladder runner,
+# leaving the skill untouched. Both directions matter: the guard exists so the
+# scope cannot move in ONE file, and a guard watched in only one direction is
+# half a guard. None of these is scoreable in `mutants-audit-dispatch.py` —
+# that harness runs `test_audit_dispatch.py` alone and cannot see this killer.
+run "seam: the EMITTED threshold widened" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "**The reason is nameable when at least TWO-THIRDS of the attributable "' \
+    '    "**The reason is nameable when any of the attributable "'
+run "seam: the EMITTED round floor inverted" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "Round 1 has no previous round to attribute to, so it can never satisfy "' \
+    '    "Round 1 may satisfy this when the payload is entirely prose, so "'
+# 🔴 THE TWO NEW SEAM OWNERS — round-0 finding F2. Before this PR the emitted
+# copy carried the THRESHOLD and the FLOOR and neither restraint, so a guard
+# over the seam certified the permissive half alone.
+run "seam: the EMITTED restraints reworded" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "· and the recurring SHAPE swept at every site rather than at the one that "' \
+    '    "· and the recurring SHAPE swept at the site that "'
+run "seam: the EMITTED structural-zero rule reworded" \
+    test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships "$DISPATCH" \
+    '    "(b) A round whose ladder anchor IS its own `<from>` — what a missing or "' \
+    '    "(b) A round whose ladder anchor is unusual — what a missing or "'
+
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
 # 🔴 These two are the rows the module's docstring marks as the reachability
 # controls, and they were the gap this harness shipped with: without them the
@@ -460,6 +621,17 @@ echo "== REACHABILITY: relocations that leave every string pin byte-identical ==
 run_move "stop clause moved to its OWN bullet in RULES.md" \
     test_the_stop_rule_shares_a_bullet_with_the_rule_it_bounds "$RULES" \
     't.replace("🔴 **A CLEAN round ENDS the ladder", "\n- 🔴 **A CLEAN round ENDS the ladder", 1)'
+# 🔴 The determination's own reachability control, and the analogue of M4/M10.
+# Both of its paragraphs are moved to the END of the section — below the
+# RETRACTED DRAFT record — with every byte identical, so both whole-string pins
+# stay GREEN and only the POSITION assertion can see it. That is what proves the
+# position test executes rather than restating the pins beside it. It is also
+# the realistic edit: a later author tidying "history to the bottom" would move
+# exactly this block, and a reader following "read the next paragraph" would
+# then get the caveat's demand with no method anywhere near it.
+run_move "determination moved BELOW the retraction record" \
+    test_the_determination_follows_the_caveat_it_qualifies "$SKILL" \
+    '(lambda a, b, c: t[:a] + t[b:c] + t[a:b] + t[c:])(t.rindex("\n\n", 0, t.index("IS AN OBSERVATION ABOUT THE LINES")) + 2, t.index("🔴 **WRITING IT DOWN"), t.index("## Mutation testing:"))'
 run_move "ATTRIBUTION section moved ABOVE the stop rule" \
     test_the_attribution_gate_comes_after_the_rule_it_bounds "$SKILL" \
     't[:t.index("### 🔴 A clean round ENDS the ladder.")] + t[t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD"):t.index("## Mutation testing:")] + t[t.index("### 🔴 A clean round ENDS the ladder."):t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD")] + t[t.index("## Mutation testing:"):]'

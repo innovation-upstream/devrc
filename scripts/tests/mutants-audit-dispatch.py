@@ -131,7 +131,23 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # 🔴 ROUND 18 RAISED IT AGAIN, 120 -> 122, at m = 128 — COUNTED from a green run
 # of the module (`128 passed`), `128 - min(50, max(1, 128 // 20))` = 128 - 6 =
 # 122, not derived by adding this round's one new test to 120.
-MIN_TESTS = 122
+#
+# 🔴 RAISED AGAIN 2026-09-14, 122 -> 131, at m = 137 — COUNTED from a green run of
+# the module (`137 passed`), `137 - min(50, max(1, 137 // 20))` = 137 - 6 = 131,
+# not derived by adding this round's two new tests to 122. Raised here rather
+# than left because a floor sitting 15 below the module is a floor that would
+# have vouched for a suite which had silently lost every test added since round
+# 16 — the exact shape `mutants-audit-ladder.sh` recorded twice before its own
+# floor was pinned to a test. This one still is not; it is maintained by this
+# comment and by whoever reads it.
+#
+# 🔴 ROUND 19 RAISED IT AGAIN, 131 -> 147, at m = 154 — COUNTED from this
+# harness's own `POS  unmutated copy .......... 154 passed` line, put through
+# the same formula, `154 - min(50, max(1, 154 // 20))` = 154 - 7 = 147. NOT
+# derived by adding this round's new tests to 131, and the jump is larger than
+# the test count because one of them is parametrized over a twelve-row fixture
+# ledger.
+MIN_TESTS = 147
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -221,6 +237,172 @@ def _swap(t, old, new):
     """A UNIQUE literal substring, replaced once. See `_require_unique`."""
     _require_unique(t.count(old), f"{old[:70]!r}…")
     return t.replace(old, new, 1)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROSE LADDER'S AUTHORSHIP DETERMINATION (Q-series).
+#
+# These rows exist because the sweep that produced them was run in a session
+# scratchpad, which is the exact failure `mutants-audit-ladder.sh`'s header
+# records: "every one of those runs happened in a session scratchpad that no
+# longer exists, so not a single row could be re-checked by anyone else". They
+# are checked in so the claim "each guard was watched to fail with its OWN
+# error" can be re-derived instead of believed.
+#
+# 🔴 THE SEAM ROWS ARE IN THE OTHER BATTERY. Widening the scope sentences this
+# script SHIPS is killed from `test_audit_ladder_stop_rule.py`, which `failing()`
+# does not run; `mutants-audit-ladder.sh` runs that module and already copies
+# this script, so the two rows live there. Recorded here because "the seam is
+# unswept" is the wrong conclusion to draw from their absence.
+#
+# 🔴 Q1 IS THE RETRACTED RULE ITSELF. `#1678` (`e8fa6fca`) let this hatch stop a
+# ladder at ROUND 1 and was withdrawn hours later; the mutation below is that
+# rule re-entering through the renderer rather than through the prose. Its
+# target carries the docstring terminator on purpose — a bare `if ... < 2:` line
+# has near-twins in this script, and `_swap` refuses an ambiguous target rather
+# than editing whichever comes first. MEASURED on the previous spelling: without
+# the prefix this row reported "target is AMBIGUOUS" and scored nothing.
+_DET_FLOOR = '    """\n    if round_no < 2:\n        return ""'
+_DET_COLLISION = (
+    "    elif anchor:\n"
+    "        boundary = (\n"
+    "            f\"`{anchor}`, which IS this round's own `<from>` — so every \""
+)
+_DET_PROSE_ONLY = (
+    '        "🔴 **This is for YOU, the ladder runner, not for the auditor — and "\n'
+    "        \"only when this PR's payload is PROSE**, i.e. the `.md`/prompt text the \""
+)
+_DET_BLAME_FLAGS = "git blame -w -M --porcelain "
+_DET_DIFF_FLAGS = "f\"git diff -U0 -w -M {emit_from or '<from>'}..{head_sha}\""
+_DET_RESTRAINTS = "        + PROSE_DETERMINATION_PRECONDITIONS,"
+_DET_THRESHOLD_CMP = (
+    "    nameable = Fraction(ladder, attributable) >= PROSE_LADDER_SHARE_THRESHOLD"
+)
+_DET_STRUCTURAL_ZERO = (
+    "    if anchor_is_own_from:\n        return ProseStop(\n            None,"
+)
+
+
+def det_floor_to_round_one(t):
+    return _swap(t, _DET_FLOOR,
+                 '    """\n    if round_no < 1:\n        return ""')
+
+
+def det_section_dropped(t):
+    return _swap(
+        t,
+        "        determination = render_prose_determination(\n"
+        "            args.round_no, facts.emit_from, head_sha, "
+        "round_one_anchor(blocks)\n"
+        "        )\n"
+        "        if determination:\n"
+        '            print("\\n" + determination, file=out_stream)\n',
+        "",
+    )
+
+
+def det_collision_reads_as_an_ordinary_boundary(t):
+    """The structural-zero case rendered as if it were measurable.
+
+    This is the `empty-result` trap in its live form: the anchor and the
+    round's own `<from>` are one sha, every pre-image line then blames at or
+    below it, and the share is 0 whatever the ladder did. Printing that as an
+    ordinary boundary turns "not scoreable" into "scored zero".
+    """
+    return _swap(
+        t, _DET_COLLISION,
+        "    elif anchor:\n"
+        "        boundary = (\n"
+        '            f"`{anchor}` — the tip ROUND 1 audited. so every "',
+    )
+
+
+def det_prose_only_condition_dropped(t):
+    return _swap(
+        t, _DET_PROSE_ONLY,
+        '        "🔴 **This is for YOU, the ladder runner.** "\n'
+        '        "This PR ships prose, i.e. the `.md`/prompt text the "',
+    )
+
+
+def det_blame_loses_w_and_M(t):
+    """F4 as a mutant. A bare blame is a DIFFERENT measurement, not a laxer one:
+
+    measured over 159 corpus rounds it moves the share on 34 of them, on
+    `#1688` r3 from 0.253 to 0.889, and flips the stop verdict on 3.
+    """
+    return _swap(t, _DET_BLAME_FLAGS, "git blame --porcelain ")
+
+
+def det_diff_loses_w_and_M(t):
+    return _swap(t, _DET_DIFF_FLAGS,
+                 "f\"git diff -U0 {emit_from or '<from>'}..{head_sha}\"")
+
+
+def det_restraints_dropped(t):
+    """F2 as a mutant: the permission ships and its four limits do not."""
+    return _swap(t, _DET_RESTRAINTS, '        + "",')
+
+
+def det_not_measured_states_a_and_c_dropped(t):
+    """Ship (b) alone — the state that owns a seam constant — and drop the two
+
+    that do not. This is what the FIRST render of this section actually did, and
+    it is the half-delivery shape of round-0 finding F2 reappearing one
+    paragraph down: a guard bound to the constant sees nothing, because the
+    constant is still there.
+    """
+    return _swap(
+        t,
+        '        "⚠ **Three states are NOT MEASURED rather than a number, and each "\n'
+        '        "means run the next round.** (a) A pre-image line you cannot blame, or "\n'
+        '        "a round you cannot blame in FULL — there is no cap and no sample; "\n'
+        '        "capping the corpus measurement at 400 lines moved the share on 8 of "\n'
+        '        "159 rounds and in BOTH directions. "\n'
+        "        + PROSE_DETERMINATION_STRUCTURAL_ZERO\n"
+        '        + " (c) An anchor THE LEDGER reports NOT MEASURED.",',
+        '        "⚠ One state is NOT MEASURED rather than a number. "\n'
+        "        + PROSE_DETERMINATION_STRUCTURAL_ZERO,",
+    )
+
+
+def det_conjunct_label_dropped(t):
+    """The restraints ship as TEXT but nothing says they are CONJUNCTS.
+
+    The narrower half of F2, and the one a reword reaches first: a paragraph
+    that lists four conditions without saying every one of them must hold reads
+    as context for the permission above it.
+    """
+    return _swap(
+        t,
+        '        "⚠ **NAMEABLE IS NOT SUFFICIENT.** Every one of these still has to hold, "',
+        '        "⚠ Some background on the preconditions. "',
+    )
+
+
+def det_threshold_widened_to_a_half(t):
+    """The number, moved. Every fixture row is a real corpus round, so this has
+
+    to kill on the rows either side of two-thirds and not on the arithmetic.
+    """
+    return _swap(t, _DET_THRESHOLD_CMP,
+                 "    nameable = Fraction(ladder, attributable) >= Fraction(1, 2)")
+
+
+def det_threshold_narrowed_to_three_quarters(t):
+    """The direction that FORBIDS `#1111` — the defect that withdrew the
+
+    findings-keyed draft, re-entering as an off-by-a-twelfth on the fraction.
+    """
+    return _swap(t, _DET_THRESHOLD_CMP,
+                 "    nameable = Fraction(ladder, attributable) >= Fraction(3, 4)")
+
+
+def det_structural_zero_reads_as_a_measurement(t):
+    """`None` -> `False`. Same ACTION (run the next round), different CLAIM."""
+    return _swap(
+        t, _DET_STRUCTURAL_ZERO,
+        "    if anchor_is_own_from:\n        return ProseStop(\n            False,")
 
 
 def add_unledgered_clause(t):
@@ -2470,10 +2652,19 @@ ROWS = [
     # fixes are the SAME mechanism: the round-1 assumption warning asks
     # `range_anchor` what the next round will anchor on, so dropping the bare
     # fallback makes that anchor None and the warning silent again.
+    # 🔴 N2 GAINED A FOURTH KILLER IN ROUND 19, and it is the same mechanism a
+    # third time: the prose determination's COLLISION case — the anchor and the
+    # round's own `<from>` being one sha — is reached from a BARE `round=1`
+    # block, which is exactly what this fallback makes readable. Drop the
+    # fallback and that block anchors nothing, so the collision never arises and
+    # the guard over it goes red. Recorded rather than re-scoped: it is a true
+    # report about a real coupling, and the alternative is a fixture that stops
+    # exercising the state 3 of 159 corpus rounds are actually in.
     ("N2  the bare round-1 fallback is dropped",
      {"test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
       "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
-      "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement"},
+      "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement",
+      "test_the_prose_determination_names_the_boundary_it_can_resolve"},
      range_anchor_loses_the_bare_fallback),
     # 🔴 THE MIRROR IMAGE, and the reason the two readers are separate
     # functions: "one anchor everywhere" is wrong on the WRITER's side, and it
@@ -3190,6 +3381,89 @@ ROWS = [
     ("V69 `true` reached by `||` after the verdict grep",
      {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
      a_true_is_reached_by_or_after_the_verdict_grep),
+    # --------------------------------------------------------------------- #
+    # --------------------------------------------------------------------- #
+    # 🔴 THE PROSE LADDER'S LINE-AUTHORSHIP DETERMINATION — see the Q-series
+    # block beside the mutate functions. Q1 is the withdrawn `#1678` rule
+    # re-entering through the renderer instead of through the prose; Q9 is the
+    # defect that withdrew this PR's OWN first draft, re-entering as a fraction.
+    #
+    # 🔴 THE SEAM ROWS ARE NOT HERE, AND THAT IS NOT AN OVERSIGHT. Widening the
+    # scope SENTENCES this script ships is killed by a test in
+    # `test_audit_ladder_stop_rule.py`, and `failing()` above runs `TEST_REL`
+    # ALONE — so scored here they would read SURVIVED and be recorded as a
+    # coverage gap that does not exist. They live in `mutants-audit-ladder.sh`,
+    # whose suite IS that module and which already copies this script into its
+    # tree. A row must be scored by a harness that can see its killer.
+    # --------------------------------------------------------------------- #
+    # Q1 kills two, and the second is worth knowing rather than hiding: with the
+    # floor at round 1 the determination — which carries its own fenced command
+    # block — prints beside the round-1 `audit-claims` skeleton, and the
+    # round-trip guard that reads the emitted block back through this script's
+    # own parser then has two fences to choose from. So the withdrawn `#1678`
+    # rule does not merely permit a wrong stop, it corrupts the artefact the
+    # NEXT round anchors on. Recorded, not re-scoped.
+    ("Q1  the determination's round floor moved to ROUND 1",
+     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+      "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
+     det_floor_to_round_one),
+    # Q2 kills five: with the section gone every guard over it fails, four of
+    # them on the explicit "carries no determination section at all" assertion
+    # that replaced a bare slice index. Recorded rather than re-scoped — a
+    # deletion that takes its dependants with it is a true report, and
+    # pretending the set is smaller would be the row lying about what it saw.
+    ("Q2  the determination dropped from --emit-claims",
+     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+      "test_the_prose_determination_names_the_boundary_it_can_resolve",
+      "test_the_determination_ships_its_RESTRAINING_half_too",
+      "test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+     det_section_dropped),
+    ("Q3  the anchor/<from> COLLISION printed as an ordinary boundary",
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     det_collision_reads_as_an_ordinary_boundary),
+    ("Q4  the prose-ONLY condition dropped from the section",
+     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before"},
+     det_prose_only_condition_dropped),
+    # Q5/Q6 are round-0 finding F2 as mutants. The graft at `4552b745` shows
+    # `..._ships_its_RESTRAINING_half_too` raising on an ABSENT surface there
+    # rather than failing on the defect, so it is filed as a guard and these
+    # rows are its evidence instead.
+    ("Q5  the four restraints dropped from the shipped section",
+     {"test_the_determination_ships_its_RESTRAINING_half_too"},
+     det_restraints_dropped),
+    ("Q6  the restraints ship but nothing says they are CONJUNCTS",
+     {"test_the_determination_ships_its_RESTRAINING_half_too"},
+     det_conjunct_label_dropped),
+    # Q7/Q8 are finding F4. `-w`/`-M` are not a refinement: over 159 corpus
+    # rounds they move the share on 34, on `#1688` r3 from 0.253 to 0.889, and
+    # flip the stop verdict on 3.
+    ("Q7  git blame loses -w and -M",
+     {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+     det_blame_loses_w_and_M),
+    ("Q8  git diff loses -w and -M",
+     {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+     det_diff_loses_w_and_M),
+    # 🔴 Q9/Q10 ARE THE THRESHOLD ITSELF, IN BOTH DIRECTIONS, and they are the
+    # only rows here that reach the arithmetic rather than the prose. Q10 is
+    # the shape that withdrew the findings-keyed draft: a threshold that
+    # FORBIDS `#1111`, the case this whole section rests on.
+    ("Q9  threshold widened to one half",
+     {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
+     det_threshold_widened_to_a_half),
+    ("Q10 threshold narrowed to three quarters — FORBIDS #1111",
+     {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
+     det_threshold_narrowed_to_three_quarters),
+    # Q12 is the half-delivery shape a second time, one paragraph down from the
+    # one F2 named — and the guard that catches it is deliberately NOT bound to
+    # the seam constant, because the constant survives this edit intact.
+    ("Q12 the (a) and (c) NOT-MEASURED states dropped",
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     det_not_measured_states_a_and_c_dropped),
+    ("Q11 a structural zero returned as a measured miss",
+     {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture",
+      "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not"},
+     det_structural_zero_reads_as_a_measurement),
+
 ]
 
 

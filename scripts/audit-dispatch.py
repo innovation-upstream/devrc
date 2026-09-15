@@ -161,6 +161,7 @@ import subprocess
 import sys
 from collections import namedtuple
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -3282,6 +3283,229 @@ def payload_summary_line(facts, cumulative):
             f"(since round 1: {cumulative}) · elapsed: Z")
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROSE LADDER'S DETERMINATION — FOUR SENTENCES SHARED WITH THE SKILL.
+#
+# On a prose payload the attribution gate is structurally inert (every round
+# changes payload lines by construction), so the ladder's escape hatch is a
+# STATED criterion instead. `claude/skills/audit-pr/SKILL.md` states the rule;
+# this script ships it to the one actor who can apply it.
+#
+# 🔴 WHICH ACTOR — AND IT IS NOT THE AUDITOR. That was round-0 finding F2 against
+# this PR's first draft, and one level deeper than F2 itself went. The first
+# draft put this section in the BRIEF, i.e. in front of the read-only subagent,
+# carrying the PERMISSIVE half of the rule with the four restraining
+# preconditions left behind in a skill that subagent never receives. Shipping
+# those too would have fixed the half-delivery — but not the addressing: the
+# operand is THIS ROUND'S OWN FIX DIFF, which does not exist when the auditor
+# writes its report. The fixes land afterwards, and the one command the ladder
+# runs afterwards is `--emit-claims`. So the section moved there, where both the
+# actor and the operand exist, and it now carries the preconditions as well. The
+# skill already says the auditor's verdict is "advisory for the human, never the
+# ladder's stop signal"; a stop rule in the auditor's brief contradicted that.
+#
+# 🔴 THESE CONSTANTS ARE A SEAM, NOT A CONVENIENCE. `#1678` (`e8fa6fca`)
+# shipped a version of this shortcut and was retracted the same day; the measured
+# coverage gap it left behind is that WIDENING THE RULE'S SCOPE AND REFRESHING
+# THE PINNED CONSTANT IN THE SAME EDIT scored 17 passed and a fully green
+# mutation battery — both instruments were blind to the one word the rule rested
+# on. So the scope has to agree with a file that edit does not touch:
+# `test_audit_ladder_stop_rule.py::test_the_determinations_SCOPE_matches_the_one_
+# every_emit_claims_run_ships` asserts each of these is still verbatim in the
+# skill. Reword either side and the pair must be reworded together, in one
+# commit, which is the moment somebody notices the scope moved.
+PROSE_DETERMINATION_THRESHOLD = (
+    "**The reason is nameable when at least TWO-THIRDS of the attributable "
+    "pre-image lines are ladder-authored**, and the count goes in the summary "
+    "as `<ladder>/<attributable>` so a reader sees the denominator and not "
+    "just the ratio."
+)
+PROSE_DETERMINATION_FLOOR = (
+    "Round 1 has no previous round to attribute to, so it can never satisfy "
+    "this: **two rounds is the floor, and no rule may move it.**"
+)
+# 🔴 THE RESTRAINING HALF — F2. Without these the section states a permission
+# and none of its limits, which is how a rule reads wider than it is.
+PROSE_DETERMINATION_PRECONDITIONS = (
+    "No 🔴 · no blast radius beyond \"the document contains a false sentence\" "
+    "· and the recurring SHAPE swept at every site rather than at the one that "
+    "was reported. Record what you are NOT fixing, on the PR, so the next "
+    "reader knows it is open rather than absent."
+)
+# 🔴 THE STRUCTURAL ZERO. A round whose anchor IS its own `<from>` cannot score
+# anything but 0, and `claude/RULES.md`'s `empty-result` rule is exactly that an
+# absence cannot distinguish two mechanisms: a measured 0 says the round was
+# editing the PR's own prose, a structural 0 says nothing at all.
+PROSE_DETERMINATION_STRUCTURAL_ZERO = (
+    "(b) A round whose ladder anchor IS its own `<from>` — what a missing or "
+    "bare `round=1` block leaves behind, 3 of 159 corpus rounds, every one of "
+    "them a round 2: the share is then **0 BY CONSTRUCTION**, and a structural "
+    "zero is not a measured zero."
+)
+
+# The fraction the sentence above names, as the exact rational the fixtures are
+# scored against. `Fraction` and not a float: `19/26 >= 2/3` is a question about
+# integers, and the corpus rows that pin it sit 0.064 and 0.095 either side.
+PROSE_LADDER_SHARE_THRESHOLD = Fraction(2, 3)
+
+ProseStop = namedtuple("ProseStop", "nameable ladder attributable reason")
+
+
+def prose_stop_determination(ladder, pr_authored, *, round_no,
+                             anchor_is_own_from=False, blame_failures=0):
+    """-> ProseStop. `nameable` is None for NOT MEASURED, never a number.
+
+    🔴 THE WHOLE RULE'S ARITHMETIC, IN ONE PLACE, so that `#1111` can be a
+    REGRESSION FIXTURE instead of a manual check. The rule that preceded this
+    one — count FINDINGS, require ⌈2n/3⌉ — was never executed by anything, so
+    nobody noticed it scored this section's own founding case at 0 of 7 and
+    FORBADE it. By lines `#1111` is 19/26 and PASSES;
+    `test_audit_dispatch.py::test_the_founding_case_and_its_neighbours_are_a_
+    REGRESSION_fixture` is what keeps that true.
+
+    🔴 EVERY UNCERTAIN STATE RETURNS `nameable=None`, WHICH IS NOT `False`. Both
+    mean "run the next round", so the ACTION is the same — but only one of them
+    is a claim about the round, and a reader who cannot tell them apart cannot
+    tell a ladder still converging on the PR's prose from one whose record was
+    too thin to ask. That distinction is `claude/RULES.md`'s `empty-result`
+    rule, and `anchor_is_own_from` is the case that made it concrete.
+    """
+    if round_no < 2:
+        return ProseStop(
+            False, ladder, ladder + pr_authored,
+            "round 1 has no previous round to attribute to — two rounds is the "
+            "floor, and no rule may move it",
+        )
+    if anchor_is_own_from:
+        return ProseStop(
+            None, ladder, ladder + pr_authored,
+            "NOT MEASURED: the ladder anchor IS this round's own `<from>`, so "
+            "every pre-image line blames at or below it and the share is 0 BY "
+            "CONSTRUCTION. A missing or bare `round=1` block leaves this "
+            "state; the round is not scoreable, it did not score zero",
+        )
+    if blame_failures:
+        return ProseStop(
+            None, ladder, ladder + pr_authored,
+            f"NOT MEASURED: {blame_failures} pre-image line(s) could not be "
+            "blamed. There is no cap and no sample — a partial count is a "
+            "silent truncation, and it moves the share in BOTH directions",
+        )
+    attributable = ladder + pr_authored
+    if attributable == 0:
+        return ProseStop(
+            None, ladder, 0,
+            "NOT MEASURED: the round's fix has no pre-image line at all — it "
+            "only ADDED text, which is attributable to nobody",
+        )
+    nameable = Fraction(ladder, attributable) >= PROSE_LADDER_SHARE_THRESHOLD
+    return ProseStop(
+        nameable, ladder, attributable,
+        f"{ladder}/{attributable} ladder-authored pre-image lines, "
+        f"{'at or above' if nameable else 'below'} two-thirds",
+    )
+
+
+def render_prose_determination(round_no, emit_from, head_sha, anchor):
+    """The LINE-authorship determination — round >= 2 ONLY, empty before that.
+
+    🔴 THE ROUND FLOOR IS THE WHOLE POINT OF THE SECTION, so it is enforced HERE
+    and not left to the prose inside it. Rounds 0 and 1 have no previous round's
+    fix for a line to be attributed to, so the question this section asks is
+    unanswerable there — and printing it where it cannot be answered is exactly
+    how the withdrawn `#1678` draft came to let round 1 stop.
+
+    It is deliberately NOT conditioned on the payload being prose: this script
+    does not classify (`render_ledger` says so at length, and a file extension is
+    not the classifier), so the section states the condition and lets the ladder
+    runner apply it. A script-side guess here would be the `docs are not
+    production` keying the skill rejects, one file over. ⚠ THE OLD WORDING SAID
+    "only if YOU classified this PR's payload as prose ABOVE", and no artefact
+    carries that classification — round-0 finding F6. THE LEDGER asks for
+    payload-vs-scaffolding, which is a different question; nothing anywhere asks
+    whether the payload is PROSE. So the section now states the condition
+    outright instead of referring to a classification that was never made.
+    """
+    if round_no < 2:
+        return ""
+    if not emit_from:
+        boundary = (
+            "**NOT RECOVERABLE from this run** — this block carries no "
+            "`<from>`, so there is no range and no operand. The determination "
+            "is NOT MEASURED this round: run the next one"
+        )
+    elif anchor and anchor != emit_from:
+        boundary = f"`{anchor}` — the tip ROUND 1 audited"
+    elif anchor:
+        boundary = (
+            f"`{anchor}`, which IS this round's own `<from>` — so every "
+            "pre-image line blames at or below it and the share is **0 BY "
+            "CONSTRUCTION**. That is NOT MEASURED, not a zero: run the next "
+            "round. (A missing or bare `round=1` block leaves this state)"
+        )
+    else:
+        boundary = (
+            "**NOT RECOVERABLE from this run** — no block carried a round-1 "
+            "anchor, so the determination is NOT MEASURED: run the next round"
+        )
+    return "\n".join([
+        _bar(),
+        "",
+        "## BEFORE YOU DECIDE WHETHER TO RUN ANOTHER ROUND — for a PROSE payload",
+        "",
+        "🔴 **This is for YOU, the ladder runner, not for the auditor — and "
+        "only when this PR's payload is PROSE**, i.e. the `.md`/prompt text the "
+        "PR exists to ship. Nothing upstream classifies that: THE LEDGER asks "
+        "you to call each file payload or scaffolding, which is a different "
+        "question. On a prose payload every round changes payload lines by "
+        "construction, so the attribution gate cannot fire and the ladder ends "
+        "on a STATED criterion instead — DETERMINED rather than argued.",
+        "",
+        f"Boundary: {boundary}.",
+        "",
+        f"Operand: the PRE-IMAGE lines of `{emit_from or '<from>'}.."
+        f"{head_sha}` — this round's own fix diff, the lines it MODIFIED or "
+        "DELETED. A purely ADDED line has no pre-image and counts in neither "
+        "column.",
+        "",
+        "```",
+        f"git diff -U0 -w -M {emit_from or '<from>'}..{head_sha}"
+        "        # its `-<start>,<len>` hunks, len > 0",
+        f"git blame -w -M --porcelain {emit_from or '<from>'} -- <file>"
+        "     # once PER FILE, not once per line",
+        "git merge-base --is-ancestor <blame-sha> "
+        f"{anchor or '<the tip round 1 audited>'}   # rc 0 ⇒ PR-authored",
+        "```",
+        "",
+        PROSE_DETERMINATION_THRESHOLD,
+        "",
+        PROSE_DETERMINATION_FLOOR,
+        "",
+        "⚠ **`-w` and `-M` are part of the rule, not a refinement** — measured "
+        "over 159 corpus rounds they move the share on 34 of them, on one from "
+        "0.25 to 0.89, and flip the stop verdict on 3. They do NOT fix a "
+        "REFLOW, which re-blames a whole paragraph to the rewrapper and biases "
+        "towards STOPPING; that is why the count is written down.",
+        "",
+        # 🔴 ALL THREE NOT-MEASURED STATES, not just the one with a constant.
+        # The first render of this section shipped (b) alone, prefix and all,
+        # which read as a fragment AND quietly dropped the other two — the same
+        # half-delivery shape as F2, one paragraph down.
+        "⚠ **Three states are NOT MEASURED rather than a number, and each "
+        "means run the next round.** (a) A pre-image line you cannot blame, or "
+        "a round you cannot blame in FULL — there is no cap and no sample; "
+        "capping the corpus measurement at 400 lines moved the share on 8 of "
+        "159 rounds and in BOTH directions. "
+        + PROSE_DETERMINATION_STRUCTURAL_ZERO
+        + " (c) An anchor THE LEDGER reports NOT MEASURED.",
+        "",
+        "⚠ **NAMEABLE IS NOT SUFFICIENT.** Every one of these still has to hold, "
+        "and they are reproduced here rather than named because a rule that "
+        "ships only its permissive half reads wider than it is — "
+        + PROSE_DETERMINATION_PRECONDITIONS,
+    ])
+
+
 def render_ledger(facts):
     lines = ["## THE LEDGER — payload attribution for this round", ""]
     # 🔴 ROUND 8 — CROSS-REPO IS "NOT MEASURABLE FROM HERE", NEVER "COULD NOT
@@ -3575,6 +3799,13 @@ def render_brief(facts):
         render_invariants(),
         render_checklist(facts),
         render_ledger(facts),
+        # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
+        # It shipped here in this PR's first draft and round-0 finding F2 caught
+        # the half-delivery; moving it to the `--emit-claims` path fixed the
+        # addressing as well. The brief goes to a read-only auditor whose
+        # verdict this skill calls "advisory for the human, never the ladder's
+        # stop signal", and whose report is written BEFORE the fix diff the rule
+        # counts even exists. See `render_prose_determination`.
         render_output_contract(facts),
     ]
     return f"\n\n{_bar()}\n\n".join(p for p in parts if p) + "\n"
@@ -4614,6 +4845,16 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         print("Paste this into the PR comment for this round, so the NEXT "
               "round can read it:\n", file=out_stream)
         print(skeleton, file=out_stream)
+        # 🔴 AFTER the block, and addressed to the LADDER RUNNER. This is the
+        # one moment in a round when the operand the prose stop rule counts —
+        # this round's own fix diff — exists: `--emit-claims` runs after the
+        # fixes land. It is empty for rounds 0 and 1, so those runs are
+        # byte-identical to what they were.
+        determination = render_prose_determination(
+            args.round_no, facts.emit_from, head_sha, round_one_anchor(blocks)
+        )
+        if determination:
+            print("\n" + determination, file=out_stream)
         if brief_refused is not None:
             # 🔴 SAID AT THE POINT THE OPERATOR IS LOOKING, not only in the
             # refusal scrolled off above: this run printed a BLOCK and no

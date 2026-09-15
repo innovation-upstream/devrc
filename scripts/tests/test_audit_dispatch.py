@@ -530,6 +530,7 @@ import re
 import sys
 import tempfile
 import tokenize
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -7635,6 +7636,427 @@ def test_the_ledger_refuses_a_failed_command_rather_than_printing_zero(kw, expec
     )
 
 
+PROSE_SECTION = (
+    "## BEFORE YOU DECIDE WHETHER TO RUN ANOTHER ROUND — for a PROSE payload"
+)
+# A bare `round=1` block: `round_one_anchor` reads it as the tip round 1
+# audited, and `emit_anchor` reads the SAME sha as the next block's `<from>`.
+# That collision is the structural-zero state, and it is what a round-1
+# `--emit-claims` with no `--audited` leaves behind -- 3 of 159 corpus rounds.
+CLAIMS_BLOCK_R1_BARE = (
+    "```audit-claims round=1 audited=aaaa1111\n"
+    "1. the first round's fixes\n"
+    "```"
+)
+# A bare block on a LATER round carries no round-1 anchor at all.
+CLAIMS_BLOCK_R2_BARE = (
+    "```audit-claims round=2 audited=bbbb2222\n"
+    "1. the second round's fixes\n"
+    "```"
+)
+
+
+def test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before():
+    """🔴 THE ROUND FLOOR IS ENFORCED IN CODE, not left to the prose in it.
+
+    On a prose payload the attribution gate cannot fire, so the ladder ends on a
+    STATED criterion — and what makes that criterion applicable rather than a
+    judgement is a LINE-authorship count over this round's own fix diff. Rounds
+    0 and 1 have no previous round to attribute those lines to. Printing the
+    section there would put "here is how to decide you may stop" in front of a
+    round that structurally cannot answer it, which is how the withdrawn `#1678`
+    draft came to let round 1 stop at all.
+
+    Both directions are asserted: absent at 0 and 1, PRESENT at 2 and 3. A guard
+    that only checked the absence passes with the section deleted outright.
+
+    ⚠ Round 0 reaches the absence by a DIFFERENT route and the test says so
+    rather than folding the two together: `--round 0 --emit-claims` refuses
+    outright (rc 4, "round 0 has no fixes to claim"), so the section's own
+    floor is never consulted there. Round 1 is the case that exercises it.
+    """
+    rc, out, err = run_main(["900", "--round", "0", "--emit-claims"])
+    assert rc == 4, (
+        "round 0 no longer REFUSES to emit a block. This test leans on that "
+        f"refusal for its round-0 half; rc={rc}, stderr={err!r}"
+    )
+    assert PROSE_SECTION not in out, "round 0 printed the determination"
+    for rnd in ("1",):
+        rc, out, err = run_main(["900", "--round", rnd, "--emit-claims"])
+        assert rc == 0, err
+        assert PROSE_SECTION not in out, (
+            f"round {rnd} carries the authorship determination, which it cannot "
+            "apply: there is no previous round's fix for a line to be "
+            "attributed to. That is the round-1 shortcut `#1678` shipped and "
+            "`#1682` retracted, re-entering through the emitter."
+        )
+    for rnd in ("2", "3"):
+        rc, out, err = run_main(
+            ["900", "--round", rnd, "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+        )
+        assert rc == 0, err
+        assert PROSE_SECTION in out, (
+            f"round {rnd}'s `--emit-claims` run does not carry the authorship "
+            "determination, so the ladder runner — who has just landed this "
+            "round's fixes and is deciding whether to run another — never "
+            "receives the method for deciding it."
+        )
+        assert ad.PROSE_DETERMINATION_THRESHOLD in out, (
+            "the section ships without its THRESHOLD, which is the whole of "
+            "what makes the determination a count rather than an argument"
+        )
+        assert ad.PROSE_DETERMINATION_FLOOR in out, (
+            "the section ships without the two-rounds-is-the-floor sentence — "
+            "the half that says round 1 can never satisfy it"
+        )
+        assert "only when this PR's payload is PROSE" in out, (
+            "the section does not say it applies ONLY to a prose payload, so it "
+            "reads as a stop rule for every delta round of every PR. This "
+            "script deliberately does not classify; the condition is the "
+            "runner's to apply and must be stated"
+        )
+        assert "Nothing upstream classifies that" in out, (
+            "the section still implies a prose classification was made "
+            "upstream. Round-0 finding F6: no artefact carries one — THE "
+            "LEDGER asks payload-vs-scaffolding, which is a different "
+            "question — so the section must state the condition rather than "
+            "refer to a classification that was never made"
+        )
+
+
+def test_the_prose_determination_is_NOT_in_the_auditors_brief():
+    """🔴 ADDRESSING, and it is round-0 finding F2 taken one level deeper.
+
+    F2 said the brief shipped the PERMISSIVE half of this rule with its four
+    restraining preconditions left behind in a skill the dispatched auditor
+    never receives. Shipping the preconditions too would have fixed the
+    half-delivery and left the addressing wrong: the operand is THIS ROUND'S OWN
+    FIX DIFF, which does not exist when the auditor writes its report, and this
+    skill's own Output section calls the auditor's verdict "advisory for the
+    human, never the ladder's stop signal".
+
+    So the brief must carry NONE of it. Asserted over the rounds where the
+    section exists at all — a brief that never had it would pass this
+    vacuously, which is why the companion test above asserts the emitter DOES
+    carry it at the same rounds.
+    """
+    for rnd in ("2", "3", "5"):
+        rc, out, err = run_main(["900", "--round", rnd], comments=[CLAIMS_BLOCK_R2])
+        assert rc == 0, err
+        assert PROSE_SECTION not in out, (
+            f"round {rnd}'s BRIEF carries the ladder's stop determination. That "
+            "brief is pasted into a read-only auditor's prompt, and the rule "
+            "counts a diff that does not exist yet when the auditor writes."
+        )
+        for name, what in (
+            ("PROSE_DETERMINATION_THRESHOLD", "the threshold"),
+            ("PROSE_DETERMINATION_FLOOR", "the round floor"),
+            ("PROSE_DETERMINATION_STRUCTURAL_ZERO", "the structural-zero rule"),
+        ):
+            assert getattr(ad, name) not in out, (
+                f"round {rnd}'s BRIEF carries {what} of the ladder's stop rule "
+                "even though the section heading is gone — so the rule leaked "
+                "back to the auditor a sentence at a time."
+            )
+
+
+def test_the_determination_ships_its_RESTRAINING_half_too():
+    """🔴 ROUND-0 FINDING F2: a rule that ships only its permission reads wider.
+
+    The criteria paragraph in `claude/skills/audit-pr/SKILL.md` carries four
+    restraints — no 🔴, no blast radius beyond "the document contains a false
+    sentence", the recurring SHAPE swept at every site, and record what you are
+    NOT fixing. The first draft of this section NAMED them and shipped none of
+    them, in an artefact whose whole reason to exist is that a brief cannot
+    assume the reader has the skill.
+
+    Asserted against the CONSTANT and not a phrase, so the seam guard in
+    `test_audit_ladder_stop_rule.py` — which requires that constant to be
+    verbatim in the skill — is what stops the two drifting apart.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "the `--emit-claims` run carries no determination section at all, so "
+        "everything below would raise instead of asserting. Its companion "
+        "`..._ships_on_emit_claims_from_round_2_and_NOT_before` owns that "
+        "claim and is the message to read."
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert ad.PROSE_DETERMINATION_PRECONDITIONS in section, (
+        "the determination ships its permission without the restraints that "
+        "bound it. A reader of this section alone would stop a ladder on an "
+        "unfixed 🔴, on any blast radius, having swept one site of a recurring "
+        "shape, and without recording what was left open."
+    )
+    assert "NAMEABLE IS NOT SUFFICIENT" in section, (
+        "the restraints ship as text but nothing says they are CONJUNCTS. The "
+        "count is one of five terms, not the rule."
+    )
+
+
+def test_the_determination_mandates_the_whitespace_and_move_blame_flags():
+    """🔴 `-w` and `-M` ARE THE RULE, and a bare blame is a different measurement.
+
+    MEASURED over 159 corpus delta rounds: `git diff -U0 -w -M` plus
+    `git blame -w -M` moved the ladder-authored share on 34 of them against the
+    bare pair, on `#1688` round 3 from 0.253 to 0.889 (68 of its 95 pre-image
+    lines were whitespace-only churn), and flipped the STOP verdict on 3 —
+    `#1688` r3 towards stopping, `#1121` r2 and `#1110` r4 away from it. The
+    first draft of this section shipped a bare `git blame` with none of them,
+    which was round-0 finding F4.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "the `--emit-claims` run carries no determination section at all, so "
+        "everything below would raise instead of asserting. Its companion "
+        "`..._ships_on_emit_claims_from_round_2_and_NOT_before` owns that "
+        "claim and is the message to read."
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert "git diff -U0 -w -M" in section, (
+        "the section's diff command has no `-w -M`. Without `-w` a "
+        "whitespace-only reindent enters the operand as a line the round "
+        "'edited'; without `-M` a rename enters it as a whole-file delete."
+    )
+    assert "git blame -w -M --porcelain" in section, (
+        "the section's blame command has no `-w -M`. Without them a reindent "
+        "or an intra-file move re-attributes the line to whoever moved it, "
+        "which inflates ladder-authored and biases towards STOPPING."
+    )
+    assert "They do NOT fix a\nREFLOW" in section or "do NOT fix a REFLOW" in section, (
+        "the section claims the flags handle the whitespace class without "
+        "saying what they do NOT handle. A markdown REFLOW re-blames a whole "
+        "paragraph to the rewrapper and no blame flag sees it — the one "
+        "residual bias in this rule, and it points at stopping."
+    )
+
+
+def test_the_prose_determination_names_the_boundary_it_can_resolve():
+    """🔴 An EMPTY RESULT cannot name a boundary — so the three states differ.
+
+    The boundary is the tip ROUND 1 audited. Three things can be true of it and
+    they are NOT the same claim, which is `claude/RULES.md`'s `empty-result`
+    rule applied to this rule's own operand:
+
+      * it is recoverable and BELOW this round's `<from>` — the normal case,
+        and the section prints the sha;
+      * it IS this round's own `<from>` — a missing or bare `round=1` block
+        leaves this, and every pre-image line then blames at or below it, so
+        the share is 0 BY CONSTRUCTION. That is NOT MEASURED, not a zero;
+      * no block carries one at all — NOT MEASURED for a different reason.
+
+    All three mean "run the next round", so the ACTION never distinguishes
+    them; only the printed reason does.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "the `--emit-claims` run carries no determination section at all, so "
+        "everything below would raise instead of asserting. Its companion "
+        "`..._ships_on_emit_claims_from_round_2_and_NOT_before` owns that "
+        "claim and is the message to read."
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert "`aaaa1111` — the tip ROUND 1 audited" in section, (
+        "the normal case does not name the boundary sha, so the runner is sent "
+        "to derive a value the record already carries"
+    )
+    # 🔴 THE DISCRIMINATOR IS THE BOUNDARY LINE, NOT THE PHRASE. The
+    # structural-zero RULE ships in every copy of this section (it is one of
+    # the three NOT MEASURED states), so `"0 BY CONSTRUCTION" not in section`
+    # would be red on a correct normal case. MEASURED: it was, on the first
+    # draft of this assertion. What must differ between the two cases is what
+    # the Boundary line SAYS about this round.
+    assert "which IS this round's own `<from>`" not in section, (
+        "the normal case says the anchor IS this round's own `<from>`, so a "
+        "runner cannot tell a measurable round from an unmeasurable one"
+    )
+    # 🔴 ALL THREE STATES SHIP, not only the one that owns a seam constant.
+    # MEASURED on the first render of this section: it shipped (b) alone —
+    # prefix and all — which read as a fragment AND silently dropped the other
+    # two, the same half-delivery shape as round-0 finding F2 one paragraph
+    # down. A brief cannot assume the reader has the skill.
+    assert "Three states are NOT MEASURED rather than a number" in section, (
+        "the section does not say how many NOT MEASURED states there are, so a "
+        "runner meeting one of them has no way to know the list is complete"
+    )
+    for frag, what in (
+        ("(a) A pre-image line you cannot blame", "the unblameable line"),
+        ("there is no cap and no sample", "the no-cap rule"),
+        (ad.PROSE_DETERMINATION_STRUCTURAL_ZERO, "the structural zero"),
+        ("(c) An anchor THE LEDGER reports NOT MEASURED", "the missing anchor"),
+    ):
+        assert frag in section, (
+            f"the section ships without {what}. Every one of these means 'run "
+            "the next round' for a DIFFERENT reason, and a runner who only has "
+            "some of them will read the missing ones as a measured miss."
+        )
+
+    # The collision: a bare round-1 block makes the anchor and `<from>` one sha.
+    rc, out, err = run_main(
+        ["900", "--round", "2", "--emit-claims"], comments=[CLAIMS_BLOCK_R1_BARE]
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "the `--emit-claims` run carries no determination section at all, so "
+        "everything below would raise instead of asserting. Its companion "
+        "`..._ships_on_emit_claims_from_round_2_and_NOT_before` owns that "
+        "claim and is the message to read."
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert "which IS this round's own `<from>`" in section, (
+        "the anchor and the range's `<from>` are the SAME sha and the section "
+        "does not say so. Every pre-image line then blames at or below the "
+        "anchor, so the count is 0 whatever the ladder did."
+    )
+    assert "0 BY CONSTRUCTION" in section, (
+        "a structural zero is printed as if it were a measurement. A measured "
+        "0 says the round was editing the PR's own prose; a structural 0 says "
+        "nothing at all, and only one of them is evidence."
+    )
+
+    # No round-1 anchor anywhere in the record.
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--emit-claims"], comments=[CLAIMS_BLOCK_R2_BARE]
+    )
+    assert rc == 0, err
+    assert PROSE_SECTION in out, (
+        "the `--emit-claims` run carries no determination section at all, so "
+        "everything below would raise instead of asserting. Its companion "
+        "`..._ships_on_emit_claims_from_round_2_and_NOT_before` owns that "
+        "claim and is the message to read."
+    )
+    section = out[out.index(PROSE_SECTION):]
+    assert "no block carried a round-1 anchor" in section, (
+        "with no recoverable anchor the section must say which fact is "
+        "missing; `#1646` is the live instance and it posts no `round=1` block"
+    )
+    assert "NOT MEASURED" in section, (
+        "an unanswerable determination must read as NOT MEASURED, never as a "
+        "silently-passed precondition"
+    )
+
+
+# 🔴 THE REGRESSION FIXTURE — REAL ROUNDS, MEASURED, AND `#1111` IS THE FIRST
+# ROW. Every number below was measured on 2026-09-14 over the `audit-claims`
+# carriers of this repo (600 PRs scanned, 90 carriers, 159 delta rounds), with
+# `git diff -U0 -w -M` and `git blame -w -M`, blaming EVERY pre-image line of
+# `<from>..<to>` at `<from>` against `round_one_anchor`.
+#
+# 🔴 WHY `#1111` IS PINNED RATHER THAN CHECKED BY HAND. The rule this replaces
+# counted FINDINGS: it scored `#1111`'s round-2 block at 0 of 7 ladder-authored
+# (that block carries seven fix items and ZERO `file:line` tokens; the record is
+# complete — 0 reviews, 0 review comments) and needed 5, so it FORBADE the case
+# its own section is built on. Nothing executed that rule, so nothing said so.
+# This ledger is what makes the next such change fail instead.
+#
+# The two neighbours are the corpus rows closest to the threshold on either
+# side, so a threshold that moves in EITHER direction kills a row here:
+#   `#1220` r6 = 4/7  = 0.571  — the nearest prose round BELOW two-thirds
+#   `#1111` r2 = 19/26 = 0.731 — the nearest prose round ABOVE it
+# and the 0.156 gap between them is the band the threshold sits in.
+PROSE_STOP_FIXTURES = [
+    # (label, ladder, pr_authored, round_no, kwargs, want_nameable)
+    ("#1111 r2 — the founding case", 19, 7, 2, {}, True),
+    ("#1220 r6 — nearest prose round below", 4, 3, 6, {}, False),
+    ("#1326 r2 — a clear stop", 22, 4, 2, {}, True),
+    ("#1542 r2 — a clear keep-going", 4, 11, 2, {}, False),
+    ("#1570 r5 — a large round that stops", 92, 21, 5, {}, True),
+    ("#1570 r2 — a large round that does not", 36, 196, 2, {}, False),
+    # The inclusive boundary, both sides of it, on denominators no other row
+    # uses: 2/3 exactly qualifies, one line short of it does not.
+    ("exactly two-thirds", 200, 100, 4, {}, True),
+    ("one line short of two-thirds", 199, 101, 4, {}, False),
+    # The floor, and the two NOT MEASURED states. `None` is not `False`.
+    ("round 1 can never satisfy it", 25, 1, 1, {}, False),
+    ("anchor IS the round's own <from>", 0, 17, 2,
+     {"anchor_is_own_from": True}, None),
+    ("a pre-image line could not be blamed", 19, 6, 2,
+     {"blame_failures": 1}, None),
+    ("a fix that only ADDED text", 0, 0, 2, {}, None),
+]
+
+
+@pytest.mark.parametrize(
+    "label,ladder,pr_authored,round_no,kw,want", PROSE_STOP_FIXTURES,
+    ids=[f[0] for f in PROSE_STOP_FIXTURES],
+)
+def test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture(
+    label, ladder, pr_authored, round_no, kw, want
+):
+    got = ad.prose_stop_determination(
+        ladder, pr_authored, round_no=round_no, **kw
+    )
+    assert got.nameable is want, (
+        f"\n\n{label}: `prose_stop_determination({ladder}, {pr_authored}, "
+        f"round_no={round_no}, **{kw})` returned nameable={got.nameable!r}, "
+        f"expected {want!r}.\n"
+        f"  reason it gave: {got.reason}\n\n"
+        "  🔴 IF THIS IS THE `#1111` ROW, READ THE `RETRACTED DRAFT` AND THE "
+        "THRESHOLD-DERIVATION PARAGRAPHS IN claude/skills/audit-pr/SKILL.md "
+        "BEFORE CHANGING ANYTHING. That PR is the evidence the prose escape "
+        "hatch exists on, and a rule that forbids it is the defect that "
+        "withdrew this PR's own first draft.\n"
+        "  If you moved the threshold deliberately, re-derive it from the "
+        "population it governs — the paragraph names the corpus and the "
+        "commands — and replace these rows with the new measurement in the "
+        "SAME commit. Do not tune the number against this table."
+    )
+
+
+def test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not():
+    """🔴 NOT MEASURED and BELOW THRESHOLD take the same action, so say which.
+
+    Both mean "run the next round". A reader who cannot tell them apart cannot
+    tell a ladder still converging on the PR's own prose from one whose record
+    was too thin to ask — and `claude/RULES.md` says plainly that an empty
+    result cannot distinguish two mechanisms.
+    """
+    below = ad.prose_stop_determination(4, 11, round_no=2)
+    assert below.nameable is False and "below two-thirds" in below.reason, below
+    assert "NOT MEASURED" not in below.reason, (
+        "a measured miss is labelled NOT MEASURED, which claims less evidence "
+        "than the round actually produced"
+    )
+    for kw in ({"anchor_is_own_from": True}, {"blame_failures": 2}):
+        got = ad.prose_stop_determination(0, 17, round_no=2, **kw)
+        assert got.nameable is None, got
+        assert got.reason.startswith("NOT MEASURED"), (
+            f"{kw} produced a reason that does not announce itself as "
+            f"unmeasured: {got.reason!r}"
+        )
+
+
+def test_the_determinations_threshold_constant_and_its_sentence_agree():
+    """The number the code uses and the number the prose states are one rule.
+
+    ⚠ WHAT THIS IS NOT. It is a SPELLING check, and a weak one — the sentence
+    could say two-thirds while meaning something else. The real guard on the
+    number is `PROSE_STOP_FIXTURES` above, which is behavioural: move the
+    threshold in either direction and a real corpus row goes red. This one only
+    catches the cheapest drift, where the constant is edited and the sentence
+    shipped beside it is not.
+    """
+    assert ad.PROSE_LADDER_SHARE_THRESHOLD == Fraction(2, 3), (
+        "the threshold is no longer two-thirds. The sentence "
+        "`PROSE_DETERMINATION_THRESHOLD` ships to every ladder runner and the "
+        "derivation paragraph in the skill names the corpus it came from — "
+        "move all three together, or none."
+    )
+    assert "TWO-THIRDS" in ad.PROSE_DETERMINATION_THRESHOLD, (
+        "the sentence shipped to the runner no longer names two-thirds while "
+        "the code still uses it"
+    )
+
+
 def test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor():
     """An unmeasurable quantity is reported as unmeasured, never substituted."""
     bare = (
@@ -8730,6 +9152,43 @@ RED_AT_BASE_R18: frozenset[str] = frozenset({
     "test_the_stop_note_prescribes_something_that_actually_stops",
 })
 
+# 🔴 Round 19 — the prose ladder's stop rule re-keyed from FINDINGS to LINES.
+# ONE test is filed here, and the other three candidates were REJECTED after
+# the graft was actually run rather than assumed.
+#
+# WATCHED RED at `4552b745`, the head of this PR's own first draft, by copying
+# this module onto a detached worktree of that commit and running the six new
+# names. The measured outcomes, all of them:
+#
+#   test_..._is_NOT_in_the_auditors_brief            AssertionError — "round 2's
+#       BRIEF carries the threshold of the ladder's stop rule". THE defect
+#       (round-0 finding F2): at `4552b745` the determination shipped in the
+#       auditor's brief, which goes to a read-only subagent whose verdict this
+#       skill calls "advisory for the human, never the ladder's stop signal",
+#       and whose report is written before the fix diff the rule counts exists.
+#       Regression coverage, and it is here.
+#
+#   test_..._ships_its_RESTRAINING_half_too          ValueError: substring not
+#   test_..._mandates_the_whitespace_and_move_blame_flags   found
+#   test_..._names_the_boundary_it_can_resolve       ValueError: substring not
+#                                                    found
+#       NOT regression coverage, and NOT filed as such. Each raises because the
+#       `--emit-claims` surface they guard does not exist at `4552b745` at all —
+#       a red for ABSENCE, the same shape `RED_AT_BASE_R15` calls an arity red
+#       and refuses. The defects they correspond to (F2's half-delivery, F4's
+#       bare `git blame`) are real, and their evidence is the MUTATION rows in
+#       `mutants-audit-dispatch.py`, which walk the shipped section.
+#
+#   test_..._ships_on_emit_claims_from_round_2...    AssertionError — the emit
+#       run does not carry the determination. Also a surface red, also not
+#       filed here; the ROUND FLOOR it guards was already enforced at the base.
+#
+#   test_the_founding_case_and_its_neighbours...     AttributeError on
+#       `prose_stop_determination`, 12 of 12 rows. An absent function.
+RED_AT_BASE_R19: frozenset[str] = frozenset({
+    "test_the_prose_determination_is_NOT_in_the_auditors_brief",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -8744,6 +9203,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "ba321c06": RED_AT_BASE_R16,
     "7de5b0bd": RED_AT_BASE_R17,
     "10d437c9": RED_AT_BASE_R18,
+    "4552b745": RED_AT_BASE_R19,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -8795,6 +9255,18 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # Its evidence is therefore V42-V46, not a base ref: a fixture-reach fix
     # cannot be watched red anywhere, which is precisely why it goes unnoticed.
     "test_the_toolchain_probes_are_reachable_in_both_directions",
+    # 🔴 INVARIANT GUARDS, not regression coverage, and the distinction is the
+    # one this ledger exists to keep honest: `render_prose_determination` does
+    # not exist at `5df8f4e5`, so a red there is a section's ABSENCE and not a
+    # wrong answer — the same vacuous shape as the `_flake_check_names` entry
+    # above. Their evidence is their own two-directional controls: the first
+    # asserts the section ABSENT at rounds 0 and 1 AND PRESENT at 2 and 3 (an
+    # absence-only guard passes with the section deleted outright), and the
+    # second asserts the round-2 boundary sha is printed AND that the SAME sha
+    # is absent at round 3, where it would name the wrong tip. The mutation rows
+    # that reach them live in `mutants-audit-ladder.sh`, which sweeps the skill
+    # side of the same seam.
+    "test_the_prose_determination_names_the_boundary_it_can_resolve",
     "test_the_invariant_clause_ledger_is_pinned_two_way",
     # 🔴 GREEN at `abc41024`, MEASURED — and it is the guard for finding 5, so
     # the temptation to file it as regression coverage is real and is refused
@@ -8820,6 +9292,33 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_the_ledger_shows_the_files_and_refuses_to_classify_them",
     "test_the_ledger_refuses_a_failed_command_rather_than_printing_zero",
     "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
+    # ------------------------------------------------------------------- #
+    # The prose ladder's LINE-authorship determination. Three of its guards
+    # are regression coverage and live in RED_AT_BASE_R19 with the matrix;
+    # these four are not, and each says why in its own docstring:
+    #   * the ROUND FLOOR was already enforced at the base — what moved is
+    #     the SURFACE it is enforced on, so a red graft here is a red about
+    #     where the section prints, not about a defect;
+    #   * the FIXTURE TABLE is a ledger of measured corpus rows. At the base
+    #     `prose_stop_determination` does not exist, so a graft errors on
+    #     arity rather than failing on the rule — and this module's own
+    #     precedent (RED_AT_BASE_R15) says an arity red is not regression
+    #     coverage. What it pins is real and checked: move the threshold in
+    #     either direction and a real row goes red;
+    #   * the two reason/threshold guards are invariants over a function this
+    #     change introduces.
+    "test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+    "test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture",
+    "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not",
+    "test_the_determinations_threshold_constant_and_its_sentence_agree",
+    # These two correspond to REAL findings (F2's half-delivery, F4's bare
+    # `git blame`) but are filed as guards, not regression coverage: the graft
+    # at `4552b745` shows them raising on an absent surface rather than failing
+    # on the defect. Their evidence is the Q-series mutation rows. The ledger
+    # comment on RED_AT_BASE_R19 carries the measurement.
+    "test_the_determination_ships_its_RESTRAINING_half_too",
+    "test_the_determination_mandates_the_whitespace_and_move_blame_flags",
+    # ------------------------------------------------------------------- #
     "test_the_ledger_says_the_base_was_not_fetched",
     "test_missing_clause_check_warns_and_never_blocks",
     "test_parse_claims_blocks_reads_only_the_fence",
@@ -9586,6 +10085,17 @@ FIX_MATRIX = (
      "quoted regex (`\"RESULT:|panic\"`) and on the `&` of a `2>&1`",
      "test_the_cached_build_fallback_is_emitted_with_its_guards",
      "RED@7de5b0bd", "V69"),
+    ("r19/F2 the prose ladder's stop determination shipped in the AUDITOR'S "
+     "BRIEF, carrying the permissive half (threshold, round floor) while the "
+     "four restraints it depends on — no 🔴, no blast radius beyond \"the "
+     "document contains a false sentence\", the recurring SHAPE swept at every "
+     "site, record what you are NOT fixing — stayed in a skill the dispatched "
+     "subagent never receives. Fixed by moving the section to the "
+     "`--emit-claims` path, which is the one command a ladder runs AFTER the "
+     "fixes land, i.e. the only moment the operand (this round's own fix diff) "
+     "exists; the restraints now ship with it",
+     "test_the_prose_determination_is_NOT_in_the_auditors_brief",
+     "RED@4552b745", "Q5, Q6"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor

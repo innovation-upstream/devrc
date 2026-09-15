@@ -1856,17 +1856,27 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
   — false. `render_ledger` (`scripts/audit-dispatch.py`) tells round 1 *"Start the ledger at
   your round 2"* and `emit_claims_skeleton` emits no classification field, so the permission
   depended on an artefact the pipeline never produces. via: code
-- **Leading hypothesis:** the real discriminator is not what the diff IS but what the ROUND
-  OBSERVES — specifically, whether this round's findings are predominantly about text a
-  PREVIOUS round's fix wrote. That is unobservable at round 1 by construction, so **two
-  rounds is the floor** and the operator's complaint cannot be fixed by stopping earlier. It
-  CAN be fixed by making round 2's determination deterministic instead of a judgement call,
-  which is what the quoted session spent its time on.
-- **Next probe:** draft the stop rule keyed on that observable — *"the stop is nameable at
-  the first round whose findings are predominantly about the previous round's own fix
-  prose"* — and, before proposing it, run the control the last attempt failed: with the draft
-  in place, widen its scope wording and confirm a guard goes red. 🔴 **That control is the
-  one that matters**: with `#1678` in place, widening `ENTIRELY prose` → `MOSTLY prose or
-  otherwise hard to gate` and refreshing the pinned constant scored **17 passed AND
-  `✅ 20 row(s), all as expected`** — both instruments were blind to the single word the
-  rule rested on. Any next attempt needs a battery row on its SCOPE, not only its presence.
+- **Leading hypothesis (CONFIRMED in shape, WRONG in its unit — see below):** the real
+  discriminator is not what the diff IS but what the ROUND OBSERVES. Unobservable at round 1
+  by construction, so **two rounds is the floor** and the complaint cannot be fixed by
+  stopping earlier — only by making the determination deterministic.
+- ✅ **ANSWERED by `#1691`, and the operand moved: the observable is LINES, not FINDINGS.**
+  The findings-keyed draft was measured against the real corpus and was broken in the
+  OPPOSITE direction to `#1678` — a recorded fix item almost never carries a `file:line`,
+  so the denominator is whoever counts, and on the record the rule must read it scored
+  **`#1111` at 0 of 7 and FORBADE it**. By LINES `#1111` is **19/26 = 0.731**. Measured
+  2026-09-14 over 600 PRs scanned / 90 `audit-claims` carriers / **159 delta rounds**, with
+  `git diff -U0 -w -M` and `git blame -w -M`, every pre-image line blamed and **no cap**:
+  across all ladders two-thirds is an ordinary point (12 of 157 rounds within ±0.05), but
+  across the population the rule GOVERNS — prose-only PRs, 29 rounds over 7 PRs — it sits in
+  a **gap 0.156 wide**: nearest share below **0.571**, nearest above **0.727**, **zero**
+  rounds within ±0.05, unchanged by the blame flags. ⚠ **The measured price is three rounds,
+  not two:** at round 2 only 3 of the 7 prose ladders reach it (round-2 median share 0.267).
+  Two rounds remains the floor; three is what it typically costs. The rule now lives on the
+  `--emit-claims` path, not in the auditor's brief — the operand is the round's own fix
+  diff, which does not exist when the auditor writes.
+- ✅ **The SCOPE control this block demanded is now RUN, and it is a battery row.** The gap
+  it names — with `#1678` in place, widening its scope AND refreshing the pinned constant in
+  one edit scored 17 passed and a fully green battery — is closed by `run_pair` in
+  `mutants-audit-ladder.sh`: it mutates the skill and the pin together and is killed by the
+  SEAM guard ALONE. The seam has four owners now, not two.
