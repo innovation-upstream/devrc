@@ -153,7 +153,7 @@ TESTLIB_RELS = (
 # derived by adding this round's new tests to 131, and the jump is larger than
 # the test count because one of them is parametrized over a twelve-row fixture
 # ledger.
-MIN_TESTS = 147
+MIN_TESTS = 155
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
