@@ -10858,7 +10858,10 @@ FIX_MATRIX = (
 # Round 21: m = 115 (printed from an import again — NOT 111 plus this round's
 # four; the import is the authority and it says 115), and
 # 115 - min(50, max(1, 115 // 20)) = 115 - 5 = 110.
-MIN_FIX_MATRIX_ROWS = 110
+# Round 22: m = 116 (printed from an import again — NOT 115 plus this round's
+# one; the import is the authority and it says 116), and
+# 116 - min(50, max(1, 116 // 20)) = 116 - 5 = 111.
+MIN_FIX_MATRIX_ROWS = 111
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
