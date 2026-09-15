@@ -3674,7 +3674,8 @@ in
       # right per run and wrong forever".)
       # rc 10 = RED REPRODUCED and rc 12 = BLIND both fail the unit on purpose.
       SuccessExitStatus = 11;
-      # Two attempts x two tiers. The pytests derivation alone ran 18 min on a
+      # Two attempts x three tiers (pytests, nodetests, gotests). The pytests
+      # derivation alone ran 18 min on a
       # loaded box, so a 420s budget like drift-check's would kill this mid-build
       # and report a timeout as a failure — an alarm about the alarm.
       TimeoutStartSec = 5400;

@@ -30,7 +30,9 @@ type Runner interface {
 // 🔴 A DEFAULT CASE THAT PANICS, NOT ONE THAT SILENTLY RETURNS nil. A new
 // intent that nobody wired would otherwise be a keypress that does nothing,
 // forever, with no error anywhere — the exact silent-zero shape this repo keeps
-// getting bitten by. `run_test.go` asserts every registered intent is handled,
+// getting bitten by. `intents_test.go`'s
+// `TestEveryRegisteredIntentIsHandledByRun` asserts every registered intent is
+// handled — there is no `run_test.go`, and this comment named one for a while —
 // so the panic is unreachable in a passing build and is the backstop for a
 // build that is not.
 func Run(i Intent, r Runner) tea.Cmd {

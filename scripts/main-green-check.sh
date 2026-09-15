@@ -421,7 +421,7 @@ tier_verdict() {
 ATTEMPT_VERDICT=""
 attempt_all_tiers() {
   local attempt="$1" tier rc v overall=green
-  for tier in pytests nodetests; do
+  for tier in pytests nodetests gotests; do
     run_tier "$tier" "$attempt"; rc=$?
     v="$(tier_verdict "$LOGDIR/${tier}.attempt${attempt}.log" "$rc")"
     say "  attempt $attempt · $tier · rc=$rc · verdict=$v"

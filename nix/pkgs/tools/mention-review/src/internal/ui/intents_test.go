@@ -2,102 +2,33 @@ package ui
 
 import (
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/innovation-upstream/devrc/mention-review/internal/ghapi"
 )
 
-// 🔴 LAYER 3(b) — THE DESTRUCTIVE-VERB LEDGER, TWO-WAY.
+// 🔴 LAYER 3(b) — THE REGISTRY, DRIVEN FROM THE KEYBOARD.
 //
-// An enumerated CONFIRMED set and an explicitly enumerated NOT_CONFIRMED set;
-// their union must equal the set of WRITE intents. A new write verb in neither
-// list fails the suite, in either direction.
+// ⚠ THE §3.7 CONFIRMATION LEDGER IS NOT HERE, AND ITS ABSENCE IS THE POINT.
+// Phase 1 emits no write intents, so `LedgerViolations(KnownIntents())` was a
+// provable constant `nil` over two empty map literals — a guard that READS as
+// coverage while providing none, which this repo holds to be worse than no
+// guard. It is deleted rather than carried: the Intent SEAM is what had to
+// exist from day one, and the ledger is purely additive over it. 🔴 PHASE 2 —
+// the first write verb — MUST REINTRODUCE IT, with the positive control that
+// version carried (a test-local write intent in neither set, reported with the
+// guard's own error string).
 //
-// 🔴 PHASE 1 HAS NO WRITE INTENTS, SO THE PRODUCTION HALF OF THIS GUARD IS
-// LEGITIMATELY VACUOUS — and a vacuous guard reads as coverage while providing
-// none, which this repo holds to be worse than no guard at all. So the guard is
-// not left to speak for itself: `TestTheLedgerCatchesAnUnledgeredWriteIntent`
-// feeds it a write intent that is in neither set and asserts it reports it,
-// with THIS guard's own error string. Report the pair, never the bare zero.
+// What survives is the half that was never vacuous: the registry is driven from
+// `Dispatch()` over every reachable app state, and every registered intent must
+// be handled by `Run`.
 
-func TestTheProductionLedgerAndRegistryAgree(t *testing.T) {
-	v := LedgerViolations(KnownIntents())
-	if len(v) != 0 {
-		t.Errorf("ledger violations:\n  %s", strings.Join(v, "\n  "))
-	}
-	// 🔴 THE POSITIVE CONTROL'S OTHER HALF, stated in the same test so the zero
-	// above is never read alone: the registry is NOT empty, so "no violations"
-	// is a claim about real intents rather than about an empty loop.
-	if len(KnownIntents()) == 0 {
-		t.Fatal("the intent registry is EMPTY — the zero above means nothing")
-	}
-	t.Logf("checked %d registered intents, %d of them writes; violations=0",
-		len(KnownIntents()), countWrites(KnownIntents()))
-}
+// unregisteredIntent exists ONLY in this file. It is the positive control for
+// `Run`'s panic backstop below: an intent `Run` does not handle must panic, or
+// the loop that walks the registry proves nothing.
+type unregisteredIntent struct{}
 
-// testWrite is a write intent that exists ONLY in this file. It is the positive
-// control for the ledger: production has no write intents yet, so without it
-// the guard could be wired to nothing and still be green.
-type testWrite struct{}
-
-func (testWrite) intentName() string { return "TestOnlyWrite" }
-func (testWrite) Write() bool        { return true }
-
-func TestTheLedgerCatchesAnUnledgeredWriteIntent(t *testing.T) {
-	v := LedgerViolations(append(KnownIntents(), testWrite{}))
-	want := `write intent "TestOnlyWrite" is in neither CONFIRMED nor NOT_CONFIRMED`
-	if !containsString(v, want) {
-		t.Fatalf("the ledger did NOT report an unledgered write intent.\n"+
-			"got:  %v\nwant: %s", v, want)
-	}
-	// 🔴 AND IT MUST FAIL WITH *THIS* GUARD'S OWN ERROR. A violation reported
-	// by some other arm would be green for the wrong reason and would stay
-	// green with this arm deleted.
-	if len(v) != 1 {
-		t.Errorf("expected exactly the one violation, got %d: %v", len(v), v)
-	}
-}
-
-func TestTheLedgerCatchesAnEntryNamingNoIntent(t *testing.T) {
-	Confirmed["GhostVerb"] = true
-	defer delete(Confirmed, "GhostVerb")
-
-	v := LedgerViolations(KnownIntents())
-	want := `CONFIRMED names "GhostVerb", which is not a registered intent`
-	if !containsString(v, want) {
-		t.Fatalf("the ledger did NOT report a dangling CONFIRMED entry.\n"+
-			"got:  %v\nwant: %s", v, want)
-	}
-}
-
-func TestTheLedgerCatchesAVerbInBothSets(t *testing.T) {
-	Confirmed["TestOnlyWrite"] = true
-	NotConfirmed["TestOnlyWrite"] = "for the control"
-	defer func() {
-		delete(Confirmed, "TestOnlyWrite")
-		delete(NotConfirmed, "TestOnlyWrite")
-	}()
-
-	v := LedgerViolations(append(KnownIntents(), testWrite{}))
-	want := `write intent "TestOnlyWrite" is in BOTH CONFIRMED and NOT_CONFIRMED`
-	if !containsString(v, want) {
-		t.Fatalf("got: %v\nwant: %s", v, want)
-	}
-}
-
-// A READ intent must not be ledgered — a confirmation prompt for a read is
-// noise, and an entry for one means somebody mislabelled the intent.
-func TestTheLedgerCatchesALedgeredReadIntent(t *testing.T) {
-	Confirmed["FetchPR"] = true
-	defer delete(Confirmed, "FetchPR")
-
-	v := LedgerViolations(KnownIntents())
-	want := `read intent "FetchPR" is listed in CONFIRMED`
-	if !containsString(v, want) {
-		t.Fatalf("got: %v\nwant: %s", v, want)
-	}
-}
+func (unregisteredIntent) intentName() string { return "TestOnlyUnregistered" }
 
 // 🔴 THIS IS WHAT MAKES THE REGISTRY LOAD-BEARING RATHER THAN DECORATIVE.
 //
@@ -186,25 +117,6 @@ func TestEveryRegisteredIntentIsHandledByRun(t *testing.T) {
 					"a new intent could be added and silently do nothing")
 			}
 		}()
-		_ = Run(testWrite{}, stubRunner{})
+		_ = Run(unregisteredIntent{}, stubRunner{})
 	}()
-}
-
-func countWrites(is []Intent) int {
-	n := 0
-	for _, i := range is {
-		if i.Write() {
-			n++
-		}
-	}
-	return n
-}
-
-func containsString(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
-		}
-	}
-	return false
 }

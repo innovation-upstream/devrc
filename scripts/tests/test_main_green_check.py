@@ -146,7 +146,7 @@ def test_POSITIVE_CONTROL_the_harness_can_observe_a_pass(world):
     r = _run(world, stub)
     assert r.returncode == RC_GREEN, r.stdout + r.stderr
     assert "GREEN" in r.stdout
-    assert _calls(world) == ["pytests", "nodetests"], "both tiers must run"
+    assert _calls(world) == ["pytests", "nodetests", "gotests"], "every tier must run"
 
 
 # ── the arms ─────────────────────────────────────────────────────────────────
@@ -176,12 +176,12 @@ def test_the_retry_does_NOT_loop_until_green(world):
     permanently-broken main as clean, which inverts its entire purpose.
 
     Measured mechanically: with a gate that fails forever, the stub must be
-    invoked exactly 4 times (2 tiers x 2 attempts) and no more.
+    invoked exactly 6 times (3 tiers x 2 attempts) and no more.
     """
     stub = _stub(world, 'echo "RESULT: FAIL (exit=1)"; exit 1\n')
     r = _run(world, stub)
     assert r.returncode == RC_RED
-    assert len(_calls(world)) == 4, _calls(world)
+    assert len(_calls(world)) == 6, _calls(world)
 
 
 def test_a_green_verdict_is_MEMOIZED_on_the_sha_and_reruns_nothing(world):
@@ -203,7 +203,7 @@ def test_the_memo_is_INVALIDATED_when_main_moves(world):
     _advance_main(world)
     r = _run(world, stub)
     assert r.returncode == RC_GREEN
-    assert len(_calls(world)) == before + 2, "a moved main must re-run both tiers"
+    assert len(_calls(world)) == before + 3, "a moved main must re-run every tier"
 
 
 def test_force_overrides_the_memo(world):
@@ -212,7 +212,7 @@ def test_force_overrides_the_memo(world):
     before = len(_calls(world))
     r = _run(world, stub, "--force")
     assert r.returncode == RC_GREEN
-    assert len(_calls(world)) == before + 2
+    assert len(_calls(world)) == before + 3
 
 
 def test_a_RED_main_that_has_not_moved_still_reports_RED(world):
@@ -689,7 +689,7 @@ def test_the_production_path_builds_the_two_sandbox_derivations():
         "measured to set NIX_CONFIG to the bare word `experimental-features` "
         "and make every nix invocation hard-error.")
     tiers = re.search(r'for tier in ([a-z ]+); do', src)
-    assert tiers and tiers.group(1).split() == ["pytests", "nodetests"], (
+    assert tiers and tiers.group(1).split() == ["pytests", "nodetests", "gotests"], (
         "the tier list moved: %r" % (tiers.group(1) if tiers else None))
     assert src.count('build "$CLONE') == 1, (
         "more than one nix build invocation — the one-at-a-time property is "
