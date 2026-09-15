@@ -78,6 +78,12 @@ TEST_REL = "scripts/tests/test_audit_dispatch.py"
 # below, so the test module IMPORTS this file — and a scratch tree without it
 # fails at collection, which reads as "the mutant killed everything".
 HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
+# Non-stdlib modules `TEST_REL` imports at module scope. See the copy loop in
+# `main()` for why they have to be in the sandbox at all.
+TESTLIB_RELS = (
+    "scripts/testlib/__init__.py",
+    "scripts/testlib/hermetic_git.py",
+)
 
 # 🔴 A COLLAPSE floor, not a growth floor — same rule as
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
@@ -269,17 +275,86 @@ _DET_COLLISION = (
     "            f\"`{anchor}`, which IS this round's own `<from>` — so every \""
 )
 _DET_PROSE_ONLY = (
-    '        "🔴 **This is for YOU, the ladder runner, not for the auditor — and "\n'
-    "        \"only when this PR's payload is PROSE**, i.e. the `.md`/prompt text the \""
+    '        "🔴 **This is for YOU, the ladder runner, not for the auditor.** "\n'
+    "        + PROSE_DETERMINATION_POPULATION\n"
+)
+# 🔴 The FOURTH open-coded site of `same_commit`, restored. See Q13.
+_DET_COLLISION_PREDICATE = (
+    "    elif anchor and not same_commit(anchor, emit_from):"
+)
+# 🔴 The boundary line that blamed a block the state proves absent. See Q14.
+_DET_NO_BLOCK_BOUNDARY = (
+    '            "**NOT RECOVERABLE from this run** — no `audit-claims` block in "\n'
+    '            "this PR\'s record carries a `<from>` for this round, so there is "\n'
+    '            "no range and no operand"\n'
+    '            + (f" (a round-1 anchor `{anchor}` IS on the record, but an anchor "\n'
+    '               "with no range measures nothing)" if anchor else\n'
+    '               ", and no block carried a round-1 anchor either")\n'
+    '            + ". The determination is NOT MEASURED this round: run the next one"'
+)
+# 🔴 The NOT-MEASURED ledger's reflow row, and the branch that reaches it.
+_DET_REFLOW_ROW = '    "reflow": ('
+_DET_REFLOW_BRANCH = (
+    "    if reflowed:\n"
+    "        return _not_measured(\n"
+    '            "reflow", ladder, ladder + pr_authored,'
 )
 _DET_BLAME_FLAGS = "git blame -w -M --porcelain "
 _DET_DIFF_FLAGS = "f\"git diff -U0 -w -M {emit_from or '<from>'}..{head_sha}\""
+# 🔴 The REFLOW command, whole. A separate literal from `_DET_DIFF_FLAGS` on
+# purpose: the defect that made Q17 necessary was exactly that the two
+# commands' context widths drifted apart while both looked correct in isolation.
+#
+# 🔴 AND THE TWO ARE INDISTINGUISHABLE IN THE RENDERED SECTION, which is what
+# made the F4 guard vacuous for a round. `_DET_DIFF_FLAGS` and this literal are
+# unambiguous HERE — one ends `{head_sha}\"`, the other `..\"` — but both emit a
+# line carrying the substring `git diff -U0 -w -M`, so a test asserting that
+# substring against the section cannot say WHICH command it found. Q8 and Q22
+# mutate the two separately for exactly that reason; a single row over a shared
+# spelling would report coverage neither of them has.
+_DET_REFLOW_COMMAND = (
+    "f\"git diff -U0 -w -M --word-diff=porcelain {emit_from or '<from>'}..\""
+)
+# The narrowing clause — state (e) covers the PURE rewrap only, and the
+# written-down count is the mitigation for the case the detector cannot see.
+# The F1 concession's two load-bearing words. Mutated separately because they
+# understate the gap in two different directions: one about WHEN the gate
+# fires, one about WHICH ladders it can never fire for.
+_DET_GATE_CONSECUTIVE = "\"the scaffolding changes ZERO payload lines, so two CONSECUTIVE such \""
+_DET_UNCOVERED_SET = (
+    '    "CONSECUTIVE rounds are payload-free has neither mechanism — one "\n'
+    '    "alternating payload and scaffolding rounds included, which is a shape a "\n'
+)
+# The one-command check that settles the WHOLE-DIFF condition. Its absence is
+# how the narrowing reads as free: the enumerable conjunct gets mistaken for
+# the genuinely unanswerable PAYLOAD one.
+_DET_ONE_COMMAND_CHECK = (
+    '        + " **Whether THIS diff is whole-prose is a ONE-COMMAND check, not a "\n'
+    '        "classification anybody has to invent**: `git diff --name-only "\n'
+    '        "<from>..<to>`, then read whether every changed path is prose (`.md` "\n'
+    '        "here). It is yours to run — this script does not classify, "\n'
+    '        "deliberately — and it COULD be automated; it simply is not today. "\n'
+)
+_DET_REFLOW_NARROWING = (
+    '        "by the `-U0 --word-diff` command above. 🔴 **That command finds the "\n'
+    '        "PURE case only.** A round that rewraps a paragraph AND edits a word "\n'
+    '        "in it — the ordinary shape of a ladder fix — shows `+`/`-` words, is "\n'
+    '        "NOT state (e), stays scoreable and carries the SAME bias; for that "\n'
+    '        "case the written-down count IS the mitigation, and a `--word-diff` "\n'
+    '        "run that finds no reflow is NOT clearance.",\n'
+)
 _DET_RESTRAINTS = "        + PROSE_DETERMINATION_PRECONDITIONS,"
 _DET_THRESHOLD_CMP = (
     "    nameable = Fraction(ladder, attributable) >= PROSE_LADDER_SHARE_THRESHOLD"
 )
+# 🔴 REAIMED BY THE FIX ROUND. `_not_measured` is now the ONLY constructor for
+# a NOT MEASURED verdict — one predicate, one place — so the mutant that turns
+# "not scoreable" into "scored a miss" belongs on it rather than on the
+# structural-zero branch it used to target. Same hazard, wider reach: it now
+# covers all five states at once, and the per-state distinction is what Q13/Q15
+# and the driver table cover.
 _DET_STRUCTURAL_ZERO = (
-    "    if anchor_is_own_from:\n        return ProseStop(\n            None,"
+    '    return ProseStop(None, ladder, attributable, "NOT MEASURED: " + why, state)'
 )
 
 
@@ -318,11 +393,163 @@ def det_collision_reads_as_an_ordinary_boundary(t):
 
 
 def det_prose_only_condition_dropped(t):
+    """The section ships with no statement of the POPULATION it governs.
+
+    Reaimed by the fix round: the scope moved into
+    `PROSE_DETERMINATION_POPULATION` and narrowed from "this PR's payload is
+    PROSE" to "this PR's WHOLE DIFF is prose", which is the population the
+    threshold was derived on. Dropping it leaves the section reading as a stop
+    rule for every delta round of every PR.
+    """
     return _swap(
         t, _DET_PROSE_ONLY,
-        '        "🔴 **This is for YOU, the ladder runner.** "\n'
-        '        "This PR ships prose, i.e. the `.md`/prompt text the "',
+        '        "🔴 **This is for YOU, the ladder runner.** "\n',
     )
+
+
+def det_collision_predicate_back_to_equality(t):
+    """Q13 — `same_commit` open-coded as `!=` for the FOURTH time.
+
+    `same_commit`'s own docstring calls a plain `==` between an 8-char
+    `audited=` and a 40-char `rev-parse` sha "the quiet way this whole guard
+    would fail to fire", and `anchor_is_head` carries "a predicate open-coded
+    at three sites is wrong at two of them". `#1691` made it four. Under the
+    mutant a structural zero renders as an ordinary measurable boundary.
+    """
+    return _swap(t, _DET_COLLISION_PREDICATE,
+                 "    elif anchor and anchor != emit_from:")
+
+
+def det_no_block_boundary_blames_a_block(t):
+    """Q14 — the boundary line names an artefact the state proves absent."""
+    return _swap(
+        t, _DET_NO_BLOCK_BOUNDARY,
+        '            "**NOT RECOVERABLE from this run** — this block carries no "\n'
+        '            "`<from>`, so there is no range and no operand. The "\n'
+        '            "determination is NOT MEASURED this round: run the next one"',
+    )
+
+
+def det_reflow_state_dropped_from_the_ledger(t):
+    """Q15 — a state the code can RETURN is deleted from the shipped ledger.
+
+    This is the `#1691` defect in the opposite direction: there, a returnable
+    state had no sentence. `_not_measured` now REFUSES an undocumented key, so
+    the mutant turns a silent omission into a loud one — which is the point of
+    making the ledger the constructor's gate rather than a parallel list.
+    """
+    return _swap(t, _DET_REFLOW_ROW, '    "reflow-DELETED": (')
+
+
+def det_reflow_branch_dropped(t):
+    """Q16 — a REWRAPPED round scores a number instead of NOT MEASURED.
+
+    The reflow is the rule's only bias towards STOPPING, so deleting the branch
+    restores exactly the unsafe direction the fix round closed: the count is
+    computed through a paragraph re-blamed wholesale to the rewrapper.
+    """
+    return _swap(
+        t, _DET_REFLOW_BRANCH,
+        "    if False:\n"
+        "        return _not_measured(\n"
+        '            "reflow", ladder, ladder + pr_authored,',
+    )
+
+
+def det_reflow_command_loses_U0(t):
+    """Q17 — the SHIPPED defect, as a mutant. This is the state at `6bf15a8f`.
+
+    The rule counts the hunks of `git diff -U0 -w -M`; state (e) asks whether
+    one of THOSE hunks is word-identical. Without `-U0` the reflow command runs
+    at three lines of context and MERGES neighbouring changes, so a purely
+    rewrapped paragraph beside an edited one lands in a hunk that shows `+`/`-`
+    words and (e) can never fire. MEASURED on `ca3b787c..6bf15a8f --
+    claude/skills/audit-pr/SKILL.md`: 10 hunks with `-U0`, 4 without.
+
+    ⚠ NOT killable by a one-paragraph fixture — that is why round 20 shipped it
+    green. The killer runs the command this module EMITS against a two-paragraph
+    repo and compares the two commands' hunk SETS, which is a relationship no
+    reword of the flag can satisfy.
+    """
+    return _swap(
+        t, _DET_REFLOW_COMMAND,
+        "f\"git diff -w -M --word-diff=porcelain {emit_from or '<from>'}..\"",
+    )
+
+
+def det_reflow_loses_w_and_M(t):
+    """Q22 — the REFLOW command loses `-w` and `-M`, the COUNTING one keeps them.
+
+    Q8's twin, and the row that did not exist while the F4 guard was a bare
+    `"git diff -U0 -w -M" in section`. That guard could not tell the two
+    commands apart, so ONE row over the shared spelling was reporting coverage
+    of both while covering neither alone.
+
+    The defect is real and not cosmetic: the rule counts the pre-image lines of
+    `git diff -U0 -w -M`'s hunks, and state (e) asks whether one of THOSE hunks
+    is word-identical. A reflow command without `-w`/`-M` answers that question
+    over a different hunk set — a whitespace-only reindent or a rename it can
+    see and the counting command cannot — so a hunk the rule never counted can
+    clear, or fail to clear, state (e).
+    """
+    return _swap(
+        t, _DET_REFLOW_COMMAND,
+        "f\"git diff -U0 --word-diff=porcelain {emit_from or '<from>'}..\"",
+    )
+
+
+def det_reflow_narrowing_dropped(t):
+    """Q18 — state (e)'s sentence goes back to being WIDER than its detector.
+
+    Restoring the pre-fix wording re-demotes the written-down count to a
+    backstop over a detector that covers the PURE rewrap only, so a runner whose
+    rewrap-plus-edit hunk shows word changes reads a clean detector result as
+    clearance. `claude/RULES.md`: a guard's DESCRIPTION claims COVERAGE.
+    """
+    return _swap(
+        t, _DET_REFLOW_NARROWING,
+        '        "by the `--word-diff` command above, and the written-down count "\n'
+        '        "is the backstop rather than the mitigation.",\n',
+    )
+
+
+def det_gate_concession_drops_CONSECUTIVE(t):
+    """Q19 — the attribution gate reads as reachable from any two such rounds.
+
+    It fires on two CONSECUTIVE zero-payload rounds. Without the word the
+    concession makes the narrowed scope look cheaper than it is, which is the
+    whole reason the concession exists.
+    """
+    return _swap(
+        t, _DET_GATE_CONSECUTIVE,
+        '"the scaffolding changes ZERO payload lines, so two such "',
+    )
+
+
+def det_uncovered_set_narrowed_back(t):
+    """Q20 — the uncovered set shrinks back to "every round touches payload".
+
+    The real set is any mixed-diff ladder in which no two CONSECUTIVE rounds are
+    payload-free. A ladder ALTERNATING payload and scaffolding rounds is in it
+    and would, under the narrow wording, read as covered by a gate that can
+    never fire for it.
+    """
+    return _swap(
+        t, _DET_UNCOVERED_SET,
+        '    "CONSECUTIVE rounds are payload-free has neither mechanism — and "\n'
+        '    "a scaffolding-carrying ladder whose every round DOES touch payload "\n',
+    )
+
+
+def det_one_command_check_dropped(t):
+    """Q21 — the section states a condition and no way to settle it.
+
+    `is the WHOLE DIFF prose?` is a one-command check; `is the PAYLOAD prose?`
+    is the classification no artefact carries. Deleting the first makes the
+    paragraph defend an unanswerable-classification claim about a population
+    that IS enumerable — which is how the narrowing reads as free.
+    """
+    return _swap(t, _DET_ONE_COMMAND_CHECK, '        + " "\n')
 
 
 def det_blame_loses_w_and_M(t):
@@ -345,22 +572,22 @@ def det_restraints_dropped(t):
 
 
 def det_not_measured_states_a_and_c_dropped(t):
-    """Ship (b) alone — the state that owns a seam constant — and drop the two
+    """Ship (b) alone — the state that owns a seam constant — and drop the rest.
 
-    that do not. This is what the FIRST render of this section actually did, and
-    it is the half-delivery shape of round-0 finding F2 reappearing one
-    paragraph down: a guard bound to the constant sees nothing, because the
-    constant is still there.
+    This is what the FIRST render of this section actually did, and it is the
+    half-delivery shape of round-0 finding F2 reappearing one paragraph down: a
+    guard bound to the constant sees nothing, because the constant is still
+    there. Reaimed by the fix round, which builds the paragraph from
+    `PROSE_NOT_MEASURED_STATES` — so the mutant now has to bypass the ledger,
+    which is exactly the edit a guard on the COUNT WORD would still wave
+    through.
     """
     return _swap(
         t,
-        '        "⚠ **Three states are NOT MEASURED rather than a number, and each "\n'
-        '        "means run the next round.** (a) A pre-image line you cannot blame, or "\n'
-        '        "a round you cannot blame in FULL — there is no cap and no sample; "\n'
-        '        "capping the corpus measurement at 400 lines moved the share on 8 of "\n'
-        '        "159 rounds and in BOTH directions. "\n'
-        "        + PROSE_DETERMINATION_STRUCTURAL_ZERO\n"
-        '        + " (c) An anchor THE LEDGER reports NOT MEASURED.",',
+        '        "⚠ **" + _COUNT_WORDS[len(PROSE_NOT_MEASURED_STATES)]\n'
+        '        + " states are NOT MEASURED rather than a number, and each "\n'
+        '        "means run the next round.** "\n'
+        '        + " ".join(PROSE_NOT_MEASURED_STATES.values()),',
         '        "⚠ One state is NOT MEASURED rather than a number. "\n'
         "        + PROSE_DETERMINATION_STRUCTURAL_ZERO,",
     )
@@ -402,7 +629,7 @@ def det_structural_zero_reads_as_a_measurement(t):
     """`None` -> `False`. Same ACTION (run the next round), different CLAIM."""
     return _swap(
         t, _DET_STRUCTURAL_ZERO,
-        "    if anchor_is_own_from:\n        return ProseStop(\n            False,")
+        '    return ProseStop(False, ladder, attributable, "NOT MEASURED: " + why, state)')
 
 
 def add_unledgered_clause(t):
@@ -2664,7 +2891,10 @@ ROWS = [
      {"test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
       "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
       "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement",
-      "test_the_prose_determination_names_the_boundary_it_can_resolve"},
+      "test_the_prose_determination_names_the_boundary_it_can_resolve",
+      # The fix round's F2 test is built on `CLAIMS_BLOCK_R1_BARE`, so it
+      # depends on this fallback to have an anchor at all.
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      range_anchor_loses_the_bare_fallback),
     # 🔴 THE MIRROR IMAGE, and the reason the two readers are separate
     # functions: "one anchor everywhere" is wrong on the WRITER's side, and it
@@ -2848,8 +3078,15 @@ ROWS = [
      {"test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
       "test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer"},
      the_range_hand_rolls_its_degenerate_causes),
+    # 🟢 A SECOND WITNESS, AND IT IS WORTH SAYING WHY. The fix round's F2 test
+    # exists for the LENGTH axis — an 8-char `audited=` against a 40-char
+    # `<from>` — and it was written with a MIXED-CASE anchor as well, so that a
+    # `==` which had merely been case-folded could not pass it. This row is the
+    # proof that the second axis is really exercised: re-case-sensitising
+    # `same_commit` kills it too, which a length-only fixture would not notice.
     ("Y12 same_commit goes back to case-sensitive",
-     {"test_an_uppercase_audited_sha_still_trips_the_degenerate_guard"},
+     {"test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      same_commit_is_case_sensitive),
     ("Y13 WHERE TO WORK drops the private-worktree note",
      {"test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
@@ -3112,8 +3349,16 @@ ROWS = [
      {"test_the_clone_grant_covers_only_the_write_the_recipe_makes",
       "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
      the_clone_grant_permits_fetching_again),
+    # 🟢 A SECOND WITNESS, and it confirms a REACHABILITY claim rather than a
+    # behaviour. The fix round's F9 test reaches the blockless boundary only
+    # because this refusal falls through to `--emit-claims` instead of
+    # returning outright — its docstring says so. Under this mutant nothing is
+    # emitted, so the test goes red: the fall-through really is what makes that
+    # state reachable, which is the half a reachability claim usually asserts
+    # without evidence.
     ("V23 REFUSAL 1 blocks the remedy it prescribes",
-     {"test_every_command_a_refusal_prescribes_actually_runs"},
+     {"test_every_command_a_refusal_prescribes_actually_runs",
+      "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there"},
      the_no_block_refusal_blocks_its_own_remedy),
     ("V24 an ASSUMED base branch is recorded as read",
      {"test_no_brief_states_an_assumed_base_branch_as_a_fact"},
@@ -3416,13 +3661,43 @@ ROWS = [
      {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
       "test_the_prose_determination_names_the_boundary_it_can_resolve",
       "test_the_determination_ships_its_RESTRAINING_half_too",
-      "test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+      "test_the_determination_mandates_the_whitespace_and_move_blame_flags",
+      # The fix round's three, all of which slice the output on the section
+      # heading. Recorded rather than re-scoped, for the reason this row's
+      # comment already gives: a deletion that takes its dependants with it is
+      # a TRUE report, and pretending the set is smaller would be the row
+      # lying about what it saw.
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero",
+      "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+      # Round 21's two new guards, recorded the same way and for the same
+      # reason. Both slice the output on the section heading, so a wholesale
+      # deletion takes them with it. Round 22 OBSERVED them firing and wrote
+      # them down rather than re-scoping the tests to look away: this row's
+      # claim is "here is everything that went red", and a set trimmed to the
+      # ones that feel on-topic is the row lying about what it saw.
+      "test_the_F1_gap_concession_is_as_wide_as_the_gap",
+      "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition"},
      det_section_dropped),
+    # ⚠ Q3 AND Q13 ARE NOT DUPLICATES, and the overlap is the point. Q3
+    # rewrites the collision BRANCH so a structural zero prints as an ordinary
+    # boundary; Q13 leaves the branch alone and breaks the PREDICATE that
+    # reaches it. Either defect produces the same wrong sentence, so the
+    # LONGER/MIXED-CASE test fires on both — one of them through a spelling
+    # difference the base could not even see.
     ("Q3  the anchor/<from> COLLISION printed as an ordinary boundary",
-     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve",
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      det_collision_reads_as_an_ordinary_boundary),
+    # Q4's second killer is round 21's own doing, and is RECORDED rather than
+    # re-scoped. `PROSE_DETERMINATION_POPULATION` is the literal this row
+    # replaces, and round 21 moved the F1 gap concession INTO it — so dropping
+    # the population statement now also drops the concession, and the guard
+    # over the concession fails. That is a true report about what this mutation
+    # deletes, not over-coverage to be hidden by narrowing either test.
     ("Q4  the prose-ONLY condition dropped from the section",
-     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before"},
+     {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
+      "test_the_F1_gap_concession_is_as_wide_as_the_gap"},
      det_prose_only_condition_dropped),
     # Q5/Q6 are round-0 finding F2 as mutants. The graft at `4552b745` shows
     # `..._ships_its_RESTRAINING_half_too` raising on an ABSENT surface there
@@ -3440,9 +3715,19 @@ ROWS = [
     ("Q7  git blame loses -w and -M",
      {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
      det_blame_loses_w_and_M),
-    ("Q8  git diff loses -w and -M",
+    # 🔴 Q8 IS THE COUNTING COMMAND ALONE, AND Q22 IS THE REFLOW ONE. They were
+    # one row's worth of claimed coverage until round 22. Q17's fix added `-U0`
+    # to the reflow command, which gave the section a SECOND line containing
+    # `git diff -U0 -w -M`; the F4 guard was a bare membership test on that
+    # substring, so Q8 SURVIVED a green 212-test suite — the reflow line kept
+    # satisfying it while the counting command shipped with neither flag. The
+    # guard now reads each command's own line, and it takes BOTH rows to say so.
+    ("Q8  the COUNTING git diff loses -w and -M",
      {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
      det_diff_loses_w_and_M),
+    ("Q22 the REFLOW git diff loses -w and -M, the counting one keeps them",
+     {"test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+     det_reflow_loses_w_and_M),
     # 🔴 Q9/Q10 ARE THE THRESHOLD ITSELF, IN BOTH DIRECTIONS, and they are the
     # only rows here that reach the arithmetic rather than the prose. Q10 is
     # the shape that withdrew the findings-keyed draft: a threshold that
@@ -3457,12 +3742,65 @@ ROWS = [
     # one F2 named — and the guard that catches it is deliberately NOT bound to
     # the seam constant, because the constant survives this edit intact.
     ("Q12 the (a) and (c) NOT-MEASURED states dropped",
-     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve",
+      # The fix round's ledger sees it too, from the other side: the paragraph
+      # is now BUILT from `PROSE_NOT_MEASURED_STATES`, so bypassing the ledger
+      # is exactly the edit the two-way set comparison exists to catch.
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS"},
      det_not_measured_states_a_and_c_dropped),
     ("Q11 a structural zero returned as a measured miss",
      {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture",
-      "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not"},
+      "test_the_determinations_reason_never_reads_as_a_measurement_when_it_is_not",
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS"},
      det_structural_zero_reads_as_a_measurement),
+    # ------------------------------------------------------------------- #
+    # 🔴 Q13-Q16 — the FIX ROUND against `#1691` as merged. Q13 and Q14 are the
+    # two defects that also carry regression tests (`RED_AT_BASE_R20`); Q15 and
+    # Q16 are the evidence for the NOT-MEASURED-set ledger, which grafts onto
+    # `b9a53101` as an ABSENCE red and is therefore filed as a guard.
+    # ------------------------------------------------------------------- #
+    ("Q13 the anchor/<from> predicate open-coded as `!=` again",
+     {"test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
+     det_collision_predicate_back_to_equality),
+    ("Q14 the blockless boundary blames a block that is not there",
+     {"test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there"},
+     det_no_block_boundary_blames_a_block),
+    ("Q15 a returnable NOT-MEASURED state deleted from the shipped ledger",
+     {"test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+      "test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
+     det_reflow_state_dropped_from_the_ledger),
+    ("Q16 a REWRAPPED round scores a number instead of NOT MEASURED",
+     {"test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS",
+      "test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture"},
+     det_reflow_branch_dropped),
+    # ------------------------------------------------------------------- #
+    # 🔴 Q17-Q18 — the FIX ROUND against `#1712` round 1. Both are the state
+    # at `6bf15a8f`, i.e. RED_AT_BASE rows rather than guards: the reflow
+    # command really did ship without `-U0`, and state (e)'s sentence really
+    # was wider than its detector. Q17's killer runs the SHIPPED command
+    # against a two-paragraph git fixture; round 20's one-paragraph fixture
+    # could not distinguish the two context widths and scored it green.
+    # ------------------------------------------------------------------- #
+    ("Q17 the reflow command loses `-U0`, so it inspects hunks the rule "
+     "never counted and state (e) cannot fire",
+     {"test_the_reflow_command_FIRES_on_a_rewrap_beside_an_edit"},
+     det_reflow_command_loses_U0),
+    ("Q18 state (e)'s sentence goes back to being WIDER than its detector, "
+     "re-demoting the written-down count to a backstop",
+     {"test_a_rewrap_that_ALSO_edits_is_NOT_state_e_and_the_section_SAYS_so"},
+     det_reflow_narrowing_dropped),
+    ("Q19 the gap concession drops CONSECUTIVE, so the attribution gate reads "
+     "as reachable from any two zero-payload rounds",
+     {"test_the_F1_gap_concession_is_as_wide_as_the_gap"},
+     det_gate_concession_drops_CONSECUTIVE),
+    ("Q20 the uncovered set shrinks back to \"every round touches payload\", "
+     "so an ALTERNATING ladder reads as covered",
+     {"test_the_F1_gap_concession_is_as_wide_as_the_gap"},
+     det_uncovered_set_narrowed_back),
+    ("Q21 the section states the whole-prose condition and no way to settle "
+     "it, so an enumerable conjunct reads as an unanswerable classification",
+     {"test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition"},
+     det_one_command_check_dropped),
 
 ]
 
@@ -3616,6 +3954,15 @@ def main() -> int:
         shutil.copy(REPO / SCRIPT_REL, root / SCRIPT_REL)
         shutil.copy(REPO / TEST_REL, root / TEST_REL)
         shutil.copy(REPO / HARNESS_REL, root / HARNESS_REL)
+        # 🔴 THE SANDBOX MUST CARRY WHAT THE TEST MODULE IMPORTS. It does not
+        # copy `conftest.py` (deliberately — the point is a minimal tree), so
+        # `scripts/` is not on `sys.path` and the module inserts it itself.
+        # These are the only non-stdlib modules it needs. Miss one and pytest
+        # dies during COLLECTION, which surfaces as `only 0 test(s) ran` — the
+        # floor check below catches it, and this comment is where to look.
+        (root / "scripts" / "testlib").mkdir(parents=True, exist_ok=True)
+        for rel in TESTLIB_RELS:
+            shutil.copy(REPO / rel, root / rel)
         if (root / ".git").exists():
             print("🔴 the copy carries a .git — refusing to run")
             return 2
