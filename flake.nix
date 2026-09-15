@@ -108,10 +108,38 @@
         nvim-octo = import ./nix/pkgs/tools/nvim-octo { pkgs = final; };
       };
 
+      # ---------------------------------------------------------------------
+      # mention-review — the Go replacement for nvim-octo, PHASE 1 (read-only).
+      #
+      # 🔴 IT IS AN OVERLAY ATTRIBUTE FOR THE SAME REASON nvim-octo IS, AND FOR
+      # A REASON THAT DOES NOT APPLY YET.
+      #
+      # Today `mention-open.py` still spawns `nvim-octo`, so `pkgs.mention-review`
+      # is NOT in the Alacritty hint wrapper's `lib.makeBinPath` — and it must
+      # not be: `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_
+      # every_executable_the_handler_spawns` pins that list TWO-WAY, so a package
+      # the handler does not spawn fails the suite as "dead weight in the
+      # closure". That is the system working.
+      #
+      # It is spelled as an overlay attribute anyway so that the day the click
+      # path flips, the wrapper entry is `pkgs.mention-review` — which is the
+      # spelling that reader's `pkgs\.[A-Za-z0-9_-]+` scan can SEE. A local
+      # `let`-bound derivation would make the wrapper look like it pins nothing.
+      #
+      # 🔴 IT CAN EVALUATE TO `null`. `nix/pkgs/tools/mention-review/default.nix`
+      # yields null when it cannot read exactly one `var buildVersion` line out
+      # of the Go source — a package that cannot state truthfully what it is
+      # building is not installed, rather than labelled with a guess. The
+      # consumer in `nix/pkgs/tools/default.nix` filters nulls.
+      # ---------------------------------------------------------------------
+      mentionReviewOverlay = final: _prev: {
+        mention-review = import ./nix/pkgs/tools/mention-review { pkgs = final; };
+      };
+
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
-        overlays = [ nvimOctoOverlay ];
+        overlays = [ nvimOctoOverlay mentionReviewOverlay ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the
@@ -176,6 +204,20 @@
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
         pkgs.rsync pkgs.zsh pkgs.age pkgs.dash
+        # 🔴 go — THE THIRD TEST TIER'S TOOLCHAIN. `scripts/run-go-tests.sh`
+        # exits 3 when `go` is not on PATH rather than reporting a pass, so
+        # without this entry the dev-host go tier is UNRUNNABLE from the very
+        # shell the FATAL tells you to enter. It is here for the identical
+        # reason `nodejs` is: one list, so `nix develop` and every check tier
+        # satisfy the precondition from one place.
+        #
+        # ⚠ IT COSTS THE OTHER TWO TIERS A LARGER CLOSURE, and that is stated
+        # rather than waved away. `gateTools` backs `checks.pytests` and
+        # `checks.nodetests` too, so adding go invalidates their build cache
+        # once and grows what a cold CI store must fetch. The alternative — a
+        # go-only tool list — is a second hand-maintained copy, which is
+        # precisely the drift this binding was hoisted to prevent.
+        pkgs.go
         # 🔴 cairn — THE PINNED CLIENT, AND IT IS NOT A TEST-ONLY CONVENIENCE.
         # devrc deleted its five forked reader modules and resolves them from
         # this package at runtime (`scripts/lib/cairn_pin.py`: `which cairn` ->
@@ -614,6 +656,94 @@
             bash scripts/run-node-tests.sh . || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "checks.nodetests: run-node-tests.sh exited $rc — failing the derivation." >&2
+              exit "$rc"
+            fi
+            touch "$out"
+          '';
+
+        # ---------------------------------------------------------------------
+        # 🔴 THE THIRD TIER. Go, and it is a SEPARATE derivation from the
+        # package the hosts install, on purpose.
+        #
+        # `nix/pkgs/tools/mention-review/default.nix` sets `doCheck = false`.
+        # Verified in the pinned nixpkgs rather than assumed:
+        # `pkgs/build-support/go/module.nix` defaults `doCheck` to TRUE and its
+        # check phase runs `buildGoDir test` over every test directory — so on a
+        # package in `home.packages` a red Go test FAILS A `home-manager switch`,
+        # which `ship.sh` reports as a SKIPPED host: the failure mode this repo's
+        # CLAUDE.md documents as silently stopping all future delivery to that
+        # machine. The tests belong in a gate leg, not in the deploy path,
+        # exactly as `pytests` and `nodetests` are separate from it.
+        #
+        # 🔴 AND WHETHER CI BUILDS IT IS DECIDED IN ANOTHER REPO — the same
+        # caveat the `cairn-client-runs` block below spells out at length.
+        # `devrc-ci-pipeline.yaml` lives in the infra repo and hardcodes its legs
+        # (`LEG` ∈ {pytests, nodetests} when this was written), with no
+        # `nix flake check` and no loop. So this output exists and may be built
+        # by nobody. Check, do not assume:
+        #
+        #     gh pr checks <any devrc PR>     # is a `gotests` leg listed?
+        #
+        # 🔴 UNTIL YOU HAVE CHECKED, ASSUME IT GATES NOTHING. Run it by hand:
+        #     nix build .#checks.x86_64-linux.gotests
+        # (~27 s on this host, measured; one at a time — a combined invocation
+        # with the other checks contends on the store and produces FALSE
+        # failures.)
+        #
+        # 🔴 NO NETWORK IN THE SANDBOX, AND `goModules` IS A *VENDOR TREE*, NOT
+        # A MODULE CACHE. Measured, not assumed: its output is
+        # `charm.land/ github.com/ golang.org/ gopkg.in/ modules.txt` — the
+        # `vendor/` layout. Pointing `GOMODCACHE` at it fails with
+        # `go: could not create module cache: mkdir …/pkg: permission denied`,
+        # which is what the first version of this block did. It is COPIED into
+        # the module as `vendor/` and used with `-mod=vendor`, so this leg tests
+        # the SAME dependency set the deployed binary is built from rather than
+        # a second resolution of it — and needs no network to do it.
+        gotests =
+        pkgs.runCommandLocal "devrc-gotests"
+          {
+            # 🔴 `stdenv.cc` IS LOAD-BEARING, NOT PADDING. Without a C
+            # compiler `go test` cannot build `runtime/cgo`, which `net` pulls
+            # in for its cgo resolver — so every package that transitively
+            # imports `net/http` fails to build. MEASURED here: four of five
+            # packages reported `[build failed]` with
+            # `cgo: C compiler "gcc" not found`, and `internal/argv` passed
+            # because it imports nothing but `strings`.
+            #
+            # ⚠ THE ALTERNATIVE — `CGO_ENABLED=0` — WAS REJECTED. It would make
+            # this tier compile the code DIFFERENTLY from the way
+            # `buildGoModule` compiles the binary the hosts install, and a tier
+            # that builds differently is blind to different things. The whole
+            # value of a second tier is that its blind spots differ from the
+            # dev host's by ACCIDENT of environment, not by a flag we chose.
+            nativeBuildInputs = [
+              pkgs.go pkgs.bash pkgs.git pkgs.gnugrep pkgs.coreutils pkgs.stdenv.cc
+            ];
+          }
+          ''
+            cp -r ${./.} src
+            chmod -R u+w src
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
+            export GOCACHE="$TMPDIR/go-build"
+            export GOPATH="$TMPDIR/go"
+            # The vendor tree, copied WRITABLE — the store copy is read-only and
+            # the go tool wants to stat/lock inside it.
+            cp -r ${pkgs.mention-review.goModules} src/nix/pkgs/tools/mention-review/src/vendor
+            chmod -R u+w src/nix/pkgs/tools/mention-review/src/vendor
+            export GOFLAGS="-mod=vendor"
+            export GOPROXY=off
+            cd src
+            # The runner pins its package list two-way, asserts per-package
+            # TEST-COUNT floors, counts `go test -json` records rather than
+            # reading an exit code, and caps SKIPS at zero. Read its header
+            # before changing this line.
+            #
+            # rc captured explicitly — same reason as checks.pytests above.
+            rc=0
+            bash scripts/run-go-tests.sh . || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "checks.gotests: run-go-tests.sh exited $rc — failing the derivation." >&2
               exit "$rc"
             fi
             touch "$out"

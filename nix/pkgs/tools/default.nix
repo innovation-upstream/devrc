@@ -65,3 +65,19 @@ with pkgs; [
 # and not fetchFromGitHub, and it yields [] on a host without that checkout
 # rather than failing the switch.
 ++ (import ./clawgatectl.nix { inherit pkgs workspace; })
+# mention-review — PHASE 1 of the nvim-octo replacement, read-only.
+#
+# 🔴 ON PATH SO THE OPERATOR CAN RUN IT BY HAND. The click path still spawns
+# `nvim-octo`; the proposal is explicit that the retirement ships "only after
+# the operator has used the new TUI for a real review", and nothing headless can
+# close that condition. `mention-review <owner/repo> <number>` is how that
+# happens. Flipping the click over is one line in `mention-open.py`.
+#
+# 🔴 THE NULL FILTER IS LOAD-BEARING, NOT DEFENSIVE. The derivation evaluates to
+# `null` when it cannot read exactly one `var buildVersion` line out of the Go
+# source — deliberately, so a binary is never labelled with a guessed version.
+# Without this filter that null would land in `home.packages` and fail the
+# SWITCH, which ship.sh reports as a SKIPPED host: the failure mode this repo's
+# CLAUDE.md documents as silently stopping all future delivery to that machine.
+# The whole point of the null is to be quieter than that.
+++ (pkgs.lib.optional (pkgs.mention-review != null) pkgs.mention-review)

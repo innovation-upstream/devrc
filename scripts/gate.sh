@@ -62,10 +62,17 @@
 # A MISSING scope line is therefore NOT a pass either; it lands in the same 91.
 #
 # Usage:
-#   scripts/gate.sh [--tier pytest|node|both] [--set hermetic|all]
+#   scripts/gate.sh [--tier pytest|node|go|all] [--set hermetic|all]
 #                   [--timeout SECS] [--log-dir DIR] [ROOT]
 #
-#     --tier both      (default) run both runners; the gate is red if either is.
+#     --tier all       (default) run ALL THREE runners; the gate is red if any
+#                      is. 🔴 `both` IS ACCEPTED AND MEANS `all` — it is kept as
+#                      an alias rather than as its old two-tier meaning, on
+#                      purpose: a caller who typed `both` before Go existed
+#                      wanted "the whole gate", and silently excluding a whole
+#                      language from it is the "list that only grows when
+#                      somebody remembers" defect the runners' own headers are
+#                      written against. The alias errs toward MORE coverage.
 #     --set            passed through to run-tests.sh (pytest tier only).
 #     --timeout SECS   wall-clock cap per tier (default 3600, 0 disables). A
 #                      tier that hits it is FAIL with reason=timeout, never a
@@ -82,6 +89,15 @@
 #                         verdict. Listed because gate.sh reads it in that
 #                         refusal — see DEVRC_GATE_ALLOW_AMBIENT below.
 #   DEVRC_TARGETS         same: run-tests.sh's target narrowing, refused here.
+#   MIN_GO_TESTS          the go tier's equivalent of MIN_TESTS — its GLOBAL
+#                         collected-test floor — and refused here for the same
+#                         reason. Undocumented for as long as the go tier had
+#                         existed: the derivation that pins this block against
+#                         what the script reads had gone blind on a wrapped
+#                         refusal list, so it asked for nothing.
+#   MAX_GO_SKIPS          the go tier's skip budget, which is 0. Overriding it
+#                         lets skipped tests pass as run, so it weakens what a
+#                         green means and is refused alongside the rest.
 #   DEVRC_GATE_NO_REEXEC  =1 to run against the ambient PATH instead of
 #                         re-entering `nix develop`. See the RE-EXEC block.
 #   DEVRC_GATE_ENV        =1 means "already inside a sanctioned gate
@@ -114,7 +130,8 @@
 #           the more actionable finding, so narrowing only decides the verdict
 #           of a run that otherwise passed.
 #
-# TEST SEAM: DEVRC_GATE_PYTEST_RUNNER / DEVRC_GATE_NODE_RUNNER override the
+# TEST SEAM: DEVRC_GATE_PYTEST_RUNNER / DEVRC_GATE_NODE_RUNNER /
+# DEVRC_GATE_GO_RUNNER override the
 # runner paths. They exist so the negative controls in
 # scripts/tests/test_gate_exit_truthfulness.py can drive this script against a
 # runner that is forced red, forced to hang, or forced to LIE (exit 0 while
@@ -138,7 +155,7 @@ if [ ! -f "$GATE_SELF" ]; then
   exit 2
 fi
 
-TIER="both"
+TIER="all"
 SET="hermetic"
 TIMEOUT="${DEVRC_GATE_TIMEOUT:-3600}"
 LOG_DIR=""
@@ -146,7 +163,7 @@ ROOT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tier) TIER="${2:-both}"; shift; [ $# -gt 0 ] && shift ;;
+    --tier) TIER="${2:-all}"; shift; [ $# -gt 0 ] && shift ;;
     --tier=*) TIER="${1#*=}"; shift ;;
     --set) SET="${2:-hermetic}"; shift; [ $# -gt 0 ] && shift ;;
     --set=*) SET="${1#*=}"; shift ;;
@@ -163,8 +180,12 @@ while [ $# -gt 0 ]; do
 done
 
 case "$TIER" in
-  pytest|node|both) : ;;
-  *) echo "gate: FATAL — unknown --tier '$TIER' (want pytest|node|both)" >&2; exit 2 ;;
+  # `both` is an ALIAS for `all`, normalised here so every consumer below sees
+  # one spelling. See the usage block for why it widened rather than kept its
+  # old two-tier meaning.
+  both) TIER="all" ;;
+  pytest|node|go|all) : ;;
+  *) echo "gate: FATAL — unknown --tier '$TIER' (want pytest|node|go|all)" >&2; exit 2 ;;
 esac
 case "$TIMEOUT" in
   ''|*[!0-9]*) echo "gate: FATAL — --timeout must be a whole number of seconds, got '$TIMEOUT'" >&2; exit 2 ;;
@@ -177,7 +198,7 @@ esac
 # only after paying the full run; catching them here costs nothing and names the
 # variable, which is the whole remedy.
 #
-# 🔴 ALL FOUR, NOT JUST `DEVRC_TARGETS`. An earlier revision of this block said
+# 🔴 ALL SEVEN, NOT JUST `DEVRC_TARGETS`. An earlier revision of this block said
 # that variable was "the ONLY way its pytest tier gets narrowed", and that was
 # false in three directions — an over-broad claim beside an asymmetric refusal,
 # which reads as coverage and provides none:
@@ -187,6 +208,15 @@ esac
 #                              `RESULT: PASS (exit=0)` yields a green gate with
 #                              NOTHING run, and no later check can see it
 #   MIN_TESTS                  overrides the collected-test floor
+#   DEVRC_GATE_GO_RUNNER       the same hazard as its two siblings, one tier
+#                              over. Added WITH the go tier rather than after
+#                              somebody noticed — the asymmetric refusal above
+#                              is the defect this list exists to avoid, and a
+#                              new tier that skips it reintroduces it.
+#   MIN_GO_TESTS               overrides the go tier's global floor
+#   MAX_GO_SKIPS               overrides its skip budget, which is 0 — an
+#                              ambient value here turns "every test skipped"
+#                              into a green tier
 # The runner-replacement pair is the worst of them and is exactly what the
 # in-repo tests use to drive this script against a forced-green stub. That seam
 # is legitimate FOR TESTS and must never be reachable by accident from a shell.
@@ -195,7 +225,8 @@ esac
 # mirror defect (they asked for something and got something else with no word
 # said), and this script's doctrine is that such a mistake must be loud.
 _gate_ambient=()
-for _v in DEVRC_TARGETS DEVRC_GATE_PYTEST_RUNNER DEVRC_GATE_NODE_RUNNER MIN_TESTS; do
+for _v in DEVRC_TARGETS DEVRC_GATE_PYTEST_RUNNER DEVRC_GATE_NODE_RUNNER \
+          DEVRC_GATE_GO_RUNNER MIN_TESTS MIN_GO_TESTS MAX_GO_SKIPS; do
   [ -n "${!_v+x}" ] && _gate_ambient+=("$_v=${!_v}")
 done
 # 🔴 COMPARE AGAINST THE STRING, not emptiness. `-z` accepted ANY non-empty
@@ -277,6 +308,7 @@ cd "$ROOT" || { echo "gate: FATAL — cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
 PYTEST_RUNNER="${DEVRC_GATE_PYTEST_RUNNER:-$ROOT/scripts/run-tests.sh}"
 NODE_RUNNER="${DEVRC_GATE_NODE_RUNNER:-$ROOT/scripts/run-node-tests.sh}"
+GO_RUNNER="${DEVRC_GATE_GO_RUNNER:-$ROOT/scripts/run-go-tests.sh}"
 
 if [ -z "$LOG_DIR" ]; then
   LOG_DIR="$(mktemp -d -t devrc-gate-XXXXXX)"
@@ -466,11 +498,14 @@ run_tier() { # $1 = label, $2.. = command
   echo
 }
 
-if [ "$TIER" = "pytest" ] || [ "$TIER" = "both" ]; then
+if [ "$TIER" = "pytest" ] || [ "$TIER" = "all" ]; then
   run_tier pytest bash "$PYTEST_RUNNER" --set "$SET" "$ROOT"
 fi
-if [ "$TIER" = "node" ] || [ "$TIER" = "both" ]; then
+if [ "$TIER" = "node" ] || [ "$TIER" = "all" ]; then
   run_tier node bash "$NODE_RUNNER" "$ROOT"
+fi
+if [ "$TIER" = "go" ] || [ "$TIER" = "all" ]; then
+  run_tier go bash "$GO_RUNNER" "$ROOT"
 fi
 
 echo "======================== GATE ========================"

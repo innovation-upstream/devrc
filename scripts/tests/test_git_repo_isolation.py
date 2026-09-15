@@ -99,8 +99,8 @@ RUN_TESTS = SCRIPTS / "run-tests.sh"
 CONFTEST = SCRIPTS / "tests" / "conftest.py"
 
 # Every entry point that resolves a repo root with
-# `git rev-parse --show-toplevel` and then runs tests. All four carry GUARD 9's
-# `unset`, and all four must run it BEFORE that line — see
+# `git rev-parse --show-toplevel` and then runs tests. All five carry GUARD 9's
+# `unset`, and all five must run it BEFORE that line — see
 # test_every_runner_clears_BEFORE_it_resolves_its_root.
 #
 # 🔴 `githooks/tests-on-push.sh` IS ONE OF THEM and #683 left it out, while this
@@ -108,7 +108,7 @@ CONFTEST = SCRIPTS / "tests" / "conftest.py"
 # the `git push` path — the path the incident travelled — and resolves
 # `REPO_ROOT` with exactly the vulnerable expression.
 #
-# 🔴 FIVE SPELLINGS RATHER THAN ONE SOURCED FILE, and the reason is measured,
+# 🔴 SEVEN SPELLINGS RATHER THAN ONE SOURCED FILE, and the reason is measured,
 # not aesthetic: `testlib/runner_patch.py` writes a patched COPY of
 # `run-tests.sh` into a tmp dir and about fifteen tests drive that copy. A copy
 # cannot source a sibling `lib/` that was never copied with it — the first
@@ -117,6 +117,7 @@ CONFTEST = SCRIPTS / "tests" / "conftest.py"
 # owned once, in `testlib/gitenv.py`, and every spelling is pinned to them here.
 RUNNERS = (SCRIPTS / "run-tests.sh",
            SCRIPTS / "run-node-tests.sh",
+           SCRIPTS / "run-go-tests.sh",
            SCRIPTS / "gate.sh",
            ROOT / "githooks" / "tests-on-push.sh")
 
@@ -410,7 +411,7 @@ def test_the_shell_and_python_pointer_ledgers_agree(runner):
     resolvable only by luck; a name in a runner and not in Python leaves a bare
     `pytest` exposed. Either way the guard claims coverage it does not have.
 
-    `commit.sh` is in this list for a different reason from the four runners:
+    `commit.sh` is in this list for a different reason from the five runners:
     nothing there resolves a ROOT, but it is the file that COMMITS, so a name
     missing from its copy is a repository somebody else's content can land in.
     """

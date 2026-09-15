@@ -202,15 +202,15 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 # 1. THE LEDGER: what redirects git at a repository
 # --------------------------------------------------------------------------- #
-# 🔴 ORDERED and EXACT. Each of the SIX shell files above spells the same names
-# in a `DEVRC_GIT_REPO_POINTERS` array — the four runners have to, because the
+# 🔴 ORDERED and EXACT. Each of the SEVEN shell files above spells the same names
+# in a `DEVRC_GIT_REPO_POINTERS` array — the five runners have to, because the
 # non-pytest targets (HOOK_TESTS, SHELL_TESTS, the node tier) never load a pytest
 # plugin, and because an inherited GIT_DIR corrupts each runner's ROOT resolution
 # before any Python runs; `commit.sh` has to because no test tier reaches it at
 # all, and `claim-work.sh` because an exported GIT_DIR BEATS `-C` and would send
 # its throwaway-repo setup at the operator's repository instead.
 # `test_git_repo_isolation.py::test_the_shell_and_python_pointer_ledgers_agree` is
-# parametrised over all SIX (`POINTER_CLEARERS`) and fails if any diverges from
+# parametrised over all SEVEN (`POINTER_CLEARERS`) and fails if any diverges from
 # this tuple in EITHER direction. Adding a name here without adding it there would
 # leave those targets unprotected while this docstring claimed otherwise.
 #

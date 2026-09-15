@@ -1865,6 +1865,25 @@ PINNED_PATH_CLOBBERS = {
         "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, openrgb, "
         "espanso, "
         "home-manager or nixos-rebuild"),
+    "test_mention_review.py": (
+        '"PATH"' + ': str(stub)',
+        "the go tier's missing-toolchain guard. `scripts/run-go-tests.sh` exits "
+        "3 when `go` is not on PATH rather than reporting a pass, because a "
+        "missing toolchain means the tier measured NOTHING and calling that "
+        "success is how a gate goes green over an untested language. 🔴 "
+        "REPLACING is required to reach that branch at all: `go` is present on "
+        "the dev host AND in the sandbox (it is in `gateTools`), so no amount "
+        "of PREPENDING can make it unfindable, and a prepending version would "
+        "measure the environment instead of the runner. The directory is "
+        "CONSTRUCTED in tmp_path — one symlink per NAMED tool from an "
+        "enumerated list (bash, git, grep, mktemp, dirname, cat, sed, head, "
+        "rm, env, uname, tr, sort, wc) — and the test asserts BOTH halves of "
+        "its own control: that `go` is absent from it, and that at least five "
+        "tools resolved, so the runner does not simply die for want of `bash` "
+        "and produce an exit code that says nothing about `go`. No "
+        "HAZARD_VOCABULARY name is reachable through it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, "
+        "openrgb, espanso, home-manager or nixos-rebuild"),
     "test_rig_control.py": (
         '"PATH"' + ': "/usr/bin/false"',
         "deliberately makes yad unfindable; /usr/bin/false holds no binaries, so "

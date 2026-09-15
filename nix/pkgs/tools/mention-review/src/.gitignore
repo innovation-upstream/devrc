@@ -1,0 +1,14 @@
+# 🔴 `vendor/` IS BUILD OUTPUT HERE, NEVER SOURCE.
+#
+# `checks.gotests` materialises a vendor tree inside the sandbox copy of this
+# module — `cp -r ${pkgs.mention-review.goModules} …/vendor` — because the nix
+# sandbox has no network and `goModules` IS a vendor layout. Reproducing that
+# locally to debug the sandbox tier is a normal thing to do, and it leaves a
+# ~40 MB tree sitting right here.
+#
+# Committing it would be worse than large: `go` prefers `vendor/` over the
+# module cache whenever it is present and consistent, so a stale committed copy
+# would silently become the dependency set the dev-host tier tests — while
+# `buildGoModule` keeps building the binary from `go.sum` + `vendorHash`. The
+# two tiers would then compile different code with nothing saying so.
+vendor/
