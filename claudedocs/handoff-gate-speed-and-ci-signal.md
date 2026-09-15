@@ -925,7 +925,24 @@ UNOWNED guards. The blocks that SUPERSEDE them stay here.
   two earlier hand-written sweeps that self-reported 24/24 and 31/31. After fixes 73, then 58 —
   each remaining one justified (23 are `say()` log-narration deletions, deliberately unpinned).
 
-### `main` goes red every time someone writes a handoff ABOUT the tmux-kill ledger
+### ✅ RESOLVED (retired 2026-09-14) — `main` went red every time someone wrote a handoff ABOUT the tmux-kill ledger
+- **Resolution: option 1 of the Next probe shipped, in `#1561` `c0bbd6d9`** — the scanner is scoped
+  off `claudedocs/` by `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`
+  (`test_guard_core.py:2673`), with a **two-way control** beside it
+  (*"THE CONTROL FOR THE `claudedocs/` EXEMPTION, IN BOTH DIRECTIONS"*, :2811) so the exemption
+  cannot silently widen into a hole. MEASURED on `origin/main` `cbbe38fc`: the ledger holds **14
+  rows, 0 of them `claudedocs/`** (it held four, three of which existed only because someone
+  documented the guard), and the repro below now reports **1 passed**.
+- 🔴 **THIS BLOCK WAS A STALE OPEN FOR THREE DAYS, AND THAT IS THE DURABLE PART.** `#1561` landed
+  2026-09-11 and rank 9 recorded it; nothing retired the investigation, so the doc kept a live
+  `Next probe: decide the design fix` for a fix that had already shipped — with a 🔴 *"deliberately
+  NOT taken unilaterally"* on it, which is precisely the wording that makes a next session claim it
+  and rebuild it. This doc already warns that **a stale OPEN is worse than a stale CLOSED**; here
+  is the instance. Found only by being asked *"is anything outstanding?"* and running the block's
+  own repro instead of reciting rank 9. **When a ranked item closes an investigation, retire the
+  investigation in the SAME change.**
+- **The diagnosis below is kept VERBATIM — its leading hypothesis was RIGHT**, and it is the
+  general statement of the class rank 9 tracks.
 - **Symptom + exact repro:** `nix develop ~/workspace/devrc -c python3 -m pytest
   scripts/claude-hooks/tests/test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_
   classified` on a clean `origin/main` worktree. Fails with the unclassified file named.
@@ -941,9 +958,9 @@ UNOWNED guards. The blocks that SUPERSEDE them stay here.
 - **Leading hypothesis:** any guard whose trip condition is "a file mentions X" will be tripped by the
   documentation of that guard. This is the "permanently-red gate trains everyone to click through"
   shape in slow motion.
-- **Next probe:** decide the design fix — scope the scanner off `claudedocs/`, or auto-classify a
-  prose-only file that executes no tmux command. 🔴 Deliberately NOT taken unilaterally; classifying
-  the doc unblocks `main` but does not close the loop.
+- **Next probe:** ~~decide the design fix — scope the scanner off `claudedocs/`, or auto-classify a
+  prose-only file that executes no tmux command~~ — **DONE, see Resolution above. There is no probe
+  left here and this line is not an instruction.**
 
 ### ✅ RESOLVED 2026-09-14 — RANK 14's flaky tmux test: a render race, fixed in `#1671`
 - **Resolution:** the Next probe's FIRST option (poll with a bounded deadline) shipped as a
