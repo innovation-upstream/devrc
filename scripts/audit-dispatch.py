@@ -3391,7 +3391,20 @@ PROSE_DETERMINATION_STRUCTURAL_ZERO = (
 # as the verdict it produces. A reflow IS detectable — a hunk whose `-` and `+`
 # sides are word-identical under `--word-diff` — so it is a NOT MEASURED state
 # with its own command, and the written-down count is the backstop rather than
-# the fix. ⚠ It NARROWS which rounds are scoreable and does not move the
+# the fix.
+#
+# MEASURED 2026-09-14 on a three-line paragraph rewrapped across different line
+# breaks, with BOTH controls run:
+#   * `git diff -U0 -w -M` DOES report the hunk — 3 pre-image lines, all of
+#     them re-blamed to the rewrapper. So the bias is real and (e) is
+#     reachable, not a theoretical state. (`-w` does NOT suppress a rewrap:
+#     the words move BETWEEN lines, so the lines genuinely differ.)
+#   * `--word-diff=porcelain` on that same hunk emits NO line beginning `+` or
+#     `-` — only context words and `~` newline markers.
+#   * POSITIVE CONTROL, same rewrap plus one word changed: `-gamma` / `+GAMMA`.
+#     So the detector separates a pure reflow from a reflow that also edits,
+#     rather than swallowing both.
+# ⚠ It NARROWS which rounds are scoreable and does not move the
 # threshold; the corpus derivation was NOT re-run with reflowed rounds excluded,
 # and because the state resolves towards the next round that is conservative.
 PROSE_NOT_MEASURED_STATES = {
