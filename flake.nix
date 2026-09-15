@@ -109,7 +109,9 @@
       };
 
       # ---------------------------------------------------------------------
-      # mention-review — the Go replacement for nvim-octo, PHASE 1 (read-only).
+      # mention-review — the Go replacement for nvim-octo. PHASE 2: it can
+      # comment, approve, request changes, submit a review and merge, four of
+      # those five behind a y/N confirmation naming the authenticated login.
       #
       # 🔴 IT IS AN OVERLAY ATTRIBUTE FOR THE SAME REASON nvim-octo IS, AND FOR
       # A REASON THAT DOES NOT APPLY YET.
