@@ -24,19 +24,25 @@ repos that gate structurally cannot read.
 
 ## State now
 
-- Branch `fix/budget-warning-repo-aware` @ `ff82a791`, worktree
-  `/home/zach/workspace/devrc-budget-repo-aware`. **PR `devrc#1714` is OPEN and has NOT
-  been audited** — `/audit-pr 1714` round 0 was offered at PR-create and not run.
-- Two files: `scripts/lib/handoff_doc.py` (the predicate + the branch + the call site) and
-  `scripts/tests/test_handoff_doc.py` (three new tests, one helper signature change).
-- **458 passed** across `test_handoff_doc.py` + `test_handoff_doc_size.py` under
-  `PYTHONDONTWRITEBYTECODE=1`. No existing assertion was weakened: the `_budget` helper
-  defaults to `gated=True`, which is the devrc answer every pre-existing assertion assumed.
+- Branch `fix/budget-warning-repo-aware` @ **`e2535bfb`** (was `ff82a791`), worktree
+  `/home/zach/workspace/devrc-budget-repo-aware`. **`devrc#1714` round 0 HAS NOW RUN** —
+  5 findings, all folded in. The nine correctness axes have NOT.
+- **CI is not settled and is not merely slow:** the three Tekton checks
+  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`) sat `PENDING` for ~10
+  minutes with `startedAt=0001-01-01T00:00:00Z` — a zero timestamp, i.e. **queued or never
+  picked up, not running**. `mergeable=MERGEABLE/UNSTABLE`. 🔴 Do not merge through checks
+  that never reported; the `tekton` skill is the way in.
+- `devrc#1715` (this doc) is OPEN and reports **no checks** on its branch.
+- Two files: `scripts/lib/handoff_doc.py`, `scripts/tests/test_handoff_doc.py`.
+  **460 passed** across `test_handoff_doc.py` + `test_handoff_doc_size.py`, under
+  **`PYTHONDONTWRITEBYTECODE=1`** — kept because a mutation sweep against a stale `.pyc` scores
+  SURVIVED without the mutant ever executing. No existing assertion was weakened: `_budget`
+  defaults to `gated=True`, the devrc answer every pre-existing assertion assumed.
+- **Provenance, carried forward:** this work came out of `civitai/cli#618`'s round-0 audit
+  (finding F2), not from a devrc session. The cli arc that surfaced it is **CLOSED**.
 - **No `clawgate-task:` field.** `resolve` exited **5** — 0 tasks, and an unknown session id
-  also answers `200` with an empty array, so that zero cannot distinguish "touched no task"
-  from "wrong id". Not a clean bill of health. None written, none invented.
-- This work came out of `civitai/cli#618`'s round-0 audit (finding F2), not from a devrc
-  session. The cli arc that surfaced it is CLOSED.
+  also answers `200` with an empty array, so the zero cannot distinguish "touched no task"
+  from "wrong id". Not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -74,19 +80,54 @@ repos that gate structurally cannot read.
   with `Parameter.empty`, and a test asserts that so a future default fails loudly.
 - **Next probe:** `/audit-pr 1714` round 0, then merge. Nothing about the code is open.
 
+### 🔴 RESOLVED by round 0: the repo-awareness had landed on ONE of THREE branches
+- as-of: 2026-09-15
+
+- **Symptom + exact repro:** with `ff82a791` applied, call `budget_warning` on a doc in the
+  NEAR band (under the ceiling, inside the warn window) with `gated=False`. It returns
+  *"evicting what has CLOSED now is cheaper than doing it under a red `main`"* — the identical
+  false claim the PR exists to delete.
+- **Observed (with values):** `budget_warning` has **three** branches that name the gate, and
+  only the OVER one had been made repo-aware. (1) NEAR band — and it fires **BEFORE** the OVER
+  band, so it is the sentence an author meets FIRST; the `civitai/cli` doc sat at 64,988–65,580 B,
+  inside or adjacent to it, all session. (2) the grandfathered-recovery branch, which tells you
+  to edit `scripts/lib/handoff_budget.py` — a file an ungated repo does not have, reachable by a
+  relpath COLLISION with devrc's ledger that also silently grants an allowance of up to
+  245,760 B. (3) the OVER branch, already fixed.
+- 🔴 **The deeper finding, and the better diagnosis than the PR's own:** relabelling the RED
+  sentence was not the fix. **The remediation LADDER is what cost the bytes** — 35,517 B went to
+  `claudedocs/refs/` because a step said to put it there, not because of the word "RED" — and
+  outside devrc that ladder cites a playbook in a test the repo does not ship. The ungated OVER
+  branch is now two lines: the size, and why it is not a gate.
+- **Ruled out:** *"drop the size number outside devrc too"* — **via: measurement**. The 65,536 B
+  threshold transfers: it fails **11.6%** of datapacket's corpus vs **9.2%** of devrc's. The
+  number is defensible everywhere; only the prescriptions are devrc-local.
+- **Ruled out:** *"the PR is the weaker half of a fix, and registering repos in the gate's
+  corpus is the better one"* — **via: code**. `this_repos_corpus()` is `REPO_ROOT`-rooted by
+  construction and runs in a `nix build` hermetic tier from a `cp -r ${./.}` store copy where no
+  other repo exists and the `$DEVRC/$HOMELAB/$DATAPACKET/$CIVITAI` handles are all unset.
+  Cross-repo enforcement can only be PER-REPO — each repo shipping its own gate — which is
+  exactly what `BUDGET_GATE_RELPATH` already makes automatic.
+- **Blast radius, measured:** 3 of the 4 registered repo handles are ungated, and **53 handoff
+  docs across them already exceed 64 KiB** (homelab 13, datapacket 37, cli 3) against devrc's
+  ~11. The ungated branch is the MAJORITY output, not the exception.
+- **Next probe:** the nine correctness axes on `#1714`, once Tekton reports.
+
 ## Next steps (ranked)
 
 🔴 Numbering stable — rank is half a `claim-work` slug's identity.
 
-1. **`/audit-pr 1714` round 0, then the nine axes, then merge.** It changes a warning every
-   session reads, so a wrong branch is silently load-bearing.
-   forcing: gate — an unaudited change to the line that tells everyone whether a gate failed.
-2. **Consider making the premise TRUE for the repos that want it** — register more repos in
-   the gate's corpus, or add a per-repo ceiling — rather than only removing the false claim.
-   `handoff_index.default_repos()` is `[devrc, homelab-talos, civit/datapacket-talos,
-   civit/civitai]`; `civit/cli` is in neither it nor `REPO_ENV_HANDLES`. **A separate effort
-   by the closing condition above.** forcing: none
-3. **Remove the two worktrees when `#1714` merges** — `devrc-budget-repo-aware` and
+1. **Get `#1714`'s Tekton checks to actually RUN, then the nine axes, then merge.** They are
+   `PENDING` with a zero `startedAt`, which is queued-or-dropped rather than slow. The `tekton`
+   skill owns this. 🔴 **A check that never reported is not a check that passed.**
+   forcing: gate — an unaudited, unverified change to the line that tells every session whether
+   a gate failed.
+2. **Consider making the premise TRUE where enforcement is wanted** — have a repo ship its own
+   `scripts/tests/test_handoff_doc_size.py`, which `BUDGET_GATE_RELPATH` already honours. Round
+   0 established that a central cross-repo corpus is NOT achievable (see the ruled-out above),
+   so per-repo is the only shape. **A separate effort by this doc's closing condition.**
+   forcing: none
+3. **Remove the two worktrees when `#1714` merges** — `devrc-budget-repo-aware`,
    `devrc-handoff-budget`. forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -109,6 +150,27 @@ repos that gate structurally cannot read.
 - **`pytest` is not on the bare PATH on this host.** `direnv exec <worktree>` was not enough
   either; `nix develop <worktree> -c python3 -m pytest …` is what works. `ledger-check.sh`
   re-execs into the dev shell itself, which is why it does not hit this.
+
+- 🔴 **THE WRITE-BACK GUARD FIRED TWICE THIS SESSION ON TEST FIXTURE STRINGS.**
+  `handoff-example-topic.md` and `handoff-sample-topic.md` are both `claudedocs/handoff-*.md`
+  literals inside `scripts/tests/test_handoff_doc.py` — a `DOC` constant and a fixture path.
+  Neither is a document anyone read. The guard matches the NAME SHAPE, so editing the test file
+  that exercises handoff docs looks exactly like reading one. Harmless both times (there was
+  real work to record anyway), but **do not treat such a trigger as evidence a doc was
+  consulted**, and do not let it push you into writing a handoff for an effort that has none.
+- 🔴 **A PRE-EXISTING TEST BREAKING WAS THE MOST USEFUL SIGNAL IN THE FIX ROUND.**
+  `test_the_fixture_DOES_trigger_the_warning_on_a_run_that_proceeds` builds a synthetic git repo
+  that ships no gate, so under the fix it became correctly UNGATED and its anchor stopped
+  firing. Its subject is the warning's ORDERING, not which branch — so the fix was to create the
+  gate file in the fixture and assert `gate_enforces_budget(repo)`, making its gatedness
+  EXPLICIT where it had been accidental, and keeping every pre-existing assertion verbatim
+  rather than re-pointing it at whatever fires. **Re-pointing would have been the silent
+  coverage loss.**
+- **A "POSITIVE CONTROL" can be the implementation restated.** Round 0's F4:
+  `assert (gated / BUDGET_GATE_RELPATH).is_file()` cannot fail once
+  `gate_enforces_budget(gated)` has passed, because that expression IS the function body. A real
+  control shows the answer FLIP on the one thing that differs — add the gate to the ungated
+  fixture in place and re-ask.
 
 ## How to verify
 
