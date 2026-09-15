@@ -30,50 +30,50 @@ operator decision** (solo-contributor repo; they require the ability to ship imm
 ## State now
 
 - ✅ **THE ARC IS CLOSED, `main` IS GREEN, AND IT IS DEPLOYED TO BOTH HOSTS.** Rank 14's
-  four-round ladder finished this session (`#1681`), both unowned reds are fixed and merged
-  (`#1692`, `#1690`), and `ship.sh` converged workbench + laptop. Ranks 1–16 are all tombstones;
+  four-round ladder finished (`#1681`), both unowned reds are fixed and merged (`#1692`,
+  `#1690`), and `ship.sh` converged workbench + laptop. Ranks 1–16 are all tombstones;
   **rank 8's 2026-09-18 date is the only thing left with a clock on it.**
+- 🔴 **2026-09-14 — RANK 8's PROBE RAN. The soak's evidence is satisfied AND it is three
+  times thinner than this doc claimed; the arming decision is unchanged and still the
+  operator's.** Full measurements in the dated Gotchas section below. Headline: the soak is
+  **3.8 days, not 16**; **~38% of its sweeps are missing from Loki**; arming would have made
+  **87 cancels over 3.77 days (~23/day, ~20.1 pod-hours reclaimed)**, of which **86 are runs
+  pass 1 could never have caught**; and it would have destroyed **50 real (success/failure)
+  verdicts**. Two defects the soak can see only in hindsight are now measured, both in the
+  ANNOTATION rather than the cancel decision, and one of them fires on an **open** PR.
 - **Commit ledger** (`State now` is REPLACED every update — re-carry it or it is lost):
   `#1429` a0839ec4 · `#1445` cace96d9 · `#1469` 86b1ddec · `#1471` 4ab87a64 · `#1482` 972fbcbd ·
   `#1488` d835fe51 · `#1489` b315cdd3 · `#1502` ffef57bc · `#1512` 189689c1 · `#1567` 6f1867b1 ·
   `#1524` 58bfb747 · `homelab-infra#799` 0b14768a · `#1600` f99d3c1b · `#1613` 264de70d ·
   `#1603` 14daa42a · `#1629` f839e720 · `#1625` b9f40f82 · `#1631` ced40bdb · `#1640` f45bb86e ·
   `#1645` 3a3bede7 · `#1647` 3ff2bef9 · `#1648` a2c84a1c · `#1654` cfe4eb54 · `#1658` 00afff8c ·
-  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` 053aa1f4 · `#1683` 8881029e ·
-  `#1692` **ff5585ef** · `#1690` **f88e5235** · `#1693` **6a629a45**.
-- ✅ **`main` IS GREEN, MEASURED ON THE REAL TIP — not on a constructed tree.** A `git archive` of
-  `origin/main` **`f88e5235`**, zero PR content: **644 passed, 0 failed** across
-  `test_runtime_shebangs.py`, `test_clawgate_writeback_guard.py` and
-  `test_clawgate_task_interview_guard.py` (which owns the SKILL.md ceiling). The same trio was
-  **2 failed** on every tip from `6c8c94d2` through `8881029e`.
-  ⚠ **The pre-merge gate was NOT re-run after its base moved, by operator decision.** The
-  combined merged-tree run (`053aa1f4` + both branches, merge `555baa62`) was 644 passed, then
-  `#1683` moved `main` to `8881029e` and that claim expired unrefreshed. What redeems it is the
-  post-merge reading above, which is a STRONGER claim than the one skipped — but it arrived
-  AFTER the merge, so for the duration of the merge itself the gate was stale. Recorded because
-  the honest version of "it was fine" is "it was fine, and we found out afterwards".
-- ⚠ **NEITHER FIX WAS AUDITED.** The pre-merge audit was offered and declined for `#1690`
-  (a 69 B restore, every claim a measurement) and not run for `#1692`. `#1692` carries a stated,
-  UNCLOSED gap: *"nothing execs these fixtures" is measured, not enforced by a test* — the count
-  ledger bounds it by failing on a new site, which is a forcing function, not a proof.
-- ✅ **DEPLOYED AND VERIFIED, stated separately from "merged" because they are different claims.**
-  `ship.sh` rc **0**: both hosts at **`f88e5235`**, cross-host agreement CONFIRMED
-  (`local=workbench remote=laptop`), 598 / 557 managed artifacts resolve, **0 dangling, 0 stale**
-  on each. That matters here because `#1690` changes `claude/skills/clawgate/SKILL.md`, a
-  nix-managed path a `git pull` cannot move.
-  ⚠ **The hosts sit one commit behind `origin/main` (`6a629a45`) and that is FINE** — the only
-  commit since is this handoff doc, under `claudedocs/`, which nix does not deploy. Do not
-  re-ship for it.
-- 🔴 **ONE HOST CARRIES CONTENT THAT IS ON NO BRANCH — the workbench, and it is NOT this arc's
-  work.** See the dated gotcha below. Nothing to fix here; it is another session's live WIP.
+  `#1671` 2b27bdae · `#1672` 42efad37 · `#1681` 053aa1f4 · `#1683` 8881029e · `#1692` ff5585ef ·
+  `#1690` f88e5235 · `#1693` 6a629a45 · `homelab-infra#792` **dbe47814** (dry-run, NOT armed).
+- ✅ **`main` WAS GREEN, MEASURED ON THE REAL TIP `f88e5235`** — a `git archive`, zero PR
+  content: **644 passed, 0 failed** across `test_runtime_shebangs.py`,
+  `test_clawgate_writeback_guard.py` and `test_clawgate_task_interview_guard.py`. ⚠ **That
+  reading is 2026-09-14 and `main` has moved to `b9a53101` since** — re-measure with the
+  command under `How to verify` rather than trusting this line's age.
+- ⚠ **NEITHER RANK-16 FIX WAS AUDITED.** `#1690` (a 69 B restore) was offered an audit and
+  declined; `#1692` was not audited and carries a stated, UNCLOSED gap: *"nothing execs these
+  fixtures" is measured, not enforced by a test* — the count ledger bounds it by failing on a
+  new site, which is a forcing function, not a proof.
+- ✅ **DEPLOYED AND VERIFIED (a different claim from "merged").** `ship.sh` rc **0**: both hosts
+  at `f88e5235`, cross-host agreement CONFIRMED, 598 / 557 managed artifacts resolve, **0
+  dangling, 0 stale** on each.
+- 🔴 **THE BASE CLONE IS ANOTHER SESSION'S WORKING TREE RIGHT NOW.** On 2026-09-14 `~/workspace/devrc`
+  sat on branch `feat/the-algorithm-skill` with 13 staged paths, and its HEAD moved twice
+  during this session. This session did all its writing in a worktree off `origin/main`
+  (`docs/rank8-soak-blindspots`). **`git branch --show-current` in the base clone before ANY
+  write** — the branch you started on is not the branch you are on.
 - **CI IMPACT, MEASURED — the arc's two halves have OPPOSITE answers.** Local delivering
   (`gate.sh` 1.92→0.76 runs per merged PR, `nix build .#checks` 2.83→0.73, `scoped-tests.sh`
-  0→0.67); **CI wall time never moved and could NOT have** — see rank 5. Unchanged this session.
-- **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) twice this session, each
-  time with its positive control showing the board reachable — which proves a correct id WOULD
-  have resolved, **not** that this session touched no task. Not a clean bill of health.
-- **Claim `main-red-shebang-and-writeback-guards` is RELEASED.** Base clone fast-forwarded to
-  `6a629a45`; every worktree this session made is removed with nothing stranded.
+  0→0.67); **CI wall time never moved and could NOT have** — see rank 5. Unchanged.
+- **No `clawgate-task:` recorded.** `resolve` exited **5** (0 tasks) again this session. An
+  unknown session id answers 200 with an empty array, so that cannot distinguish "touched no
+  task" from "wrong id". Not a clean bill of health.
+- **Claim `gate-speed-and-ci-signal-8` is HELD** by this session — release it when the arming
+  decision is taken (or explicitly deferred) on 2026-09-18.
 
 ## 🔴 Gotchas, measured — these are the ones that cost time
 
@@ -138,9 +138,9 @@ copy got fixed — twice, including by the commit whose message argued for one-r
 ## Next steps (ranked)
 
 🔴 **RANKS ARE IDENTITY** — `claim-work --slug-for <this doc> <rank>` before acting. New items go at
-the END. **Ranks 1–16 are CLOSED tombstones.** Live: **8** (DUE 2026-09-18) and **6**
-(DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — measured). 🔴 **With rank 16 closed, `main` is
-green and NOTHING here is blocking** — rank 8's date is the only thing with a clock on it.
+the END. **Ranks 1–4, 7, 9–16 are CLOSED tombstones.** Live: **8** (DUE 2026-09-18, evidence now
+COMPLETE) and **6** (DUE 2026-10-11), **5** (ANSWERED, NOT DELIVERED — measured). 🔴 **NOTHING here
+is blocking** — rank 8's date is the only thing with a clock on it.
 
 1. **CLOSED** — `homelab-infra#792` merged dry-run (`dbe47814`). Arming is rank 8.  forcing: none
 2. **CLOSED** — `#1469`'s ladder, `#1502`, shipped and consumer-verified.  forcing: none
@@ -161,16 +161,13 @@ green and NOTHING here is blocking** — rank 8's date is the only thing with a 
    ⚠ Distinct from the reverted `23887675`/`bb62668f`, which raised the REQUEST. ⚠ 3–6 min saving is
    INHERITED, not re-derived. Bursting to 8 produced the loopback-starvation flakes. **Scratch
    pipeline, never `devrc-ci`.**
-   🔴 **2026-09-14 — MEASURED: CI HAS NOT GOT FASTER, AND NOTHING SHIPPED COULD HAVE MADE IT.**
-   123 real `tekton/devrc-main-pytests` runs over 852 `main` commits (durations from
-   `/commits/{sha}/statuses`, `error` rows and 28 sub-300s nix-cache replays excluded and named):
-   median **1082s before `#1429` → 1260s after**, a monotone climb with **no step at the
-   boundary**. Normalised it is FLAT — **48–57 s per 1,000 collected tests** throughout — so the
-   growth is SUITE GROWTH (19,440 → 23,089 collected in 14 days), not regression.
-   🔴 **`#1429` could not have moved CI by construction**: it changed `min(nproc, 4)` →
-   `min(nproc, quota, 8)`, and in the `devrc-ci` pod both yield **4** — `run-tests.sh`'s own
-   comment says so. Verified live on `homelab-talos` `trunk`: `requests.cpu: "2"`,
-   `limits.cpu: "4"`, unchanged. **This rank is the arc's one UNDELIVERED objective.**
+   🔴 **MEASURED: CI HAS NOT GOT FASTER, AND NOTHING SHIPPED COULD HAVE MADE IT.** 123 real
+   `tekton/devrc-main-pytests` runs over 852 `main` commits: median **1082s before `#1429` →
+   1260s after**, a monotone climb with **no step at the boundary**. Normalised it is FLAT —
+   **48–57 s per 1,000 collected tests** throughout — so the growth is SUITE GROWTH (19,440 →
+   23,089 collected in 14 days), not regression. `#1429` could not have moved CI by
+   construction: it changed `min(nproc, 4)` → `min(nproc, quota, 8)`, and in the `devrc-ci` pod
+   both yield **4**. **This rank is the arc's one UNDELIVERED objective.**
    forcing: none — but the operator's original question was "can we make it faster", and for CI
    the answer is still no.
 6. **The flake screen in `main-status-watch.py` is probably inert** — decide on/after **2026-10-11**,
@@ -180,25 +177,31 @@ green and NOTHING here is blocking** — rank 8's date is the only thing with a 
    cannot be re-derived. ⚠ Not a decision — the date stands.
    forcing: none
 7. **CLOSED — `homelab-infra#799` `0b14768a`.** Test-only; reconciled to nothing.  forcing: none
-8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — SOAK TO ~2026-09-18, THEN ARM.** Operator set the date.
-   Read `{app="tekton-supersede"} |= "DRY-RUN would cancel"` / `|= "closed-pr pass:"` in Loki,
-   hand-check 2–3 named PRs, then flip `supersede-cronjob.yaml` + the pinned literal at
-   `test_supersede_logic.py:2251` (re-read the line number; `#799` has landed since).
-   🔴 Zero `DRY-RUN would cancel` after a week is NOT a clean bill. ⚠ Dry-run short-circuits before
-   the re-read guard. 🔴 **Rank 13 is the WORKED EXAMPLE for this call** — a dry-run soak exposed a
-   **2-of-4 false rate** in a sibling tool that every mutation sweep and merged-tree gate had passed,
-   because the defect was in its REASONING about real repo history. **Ask what `#792`'s soak
-   structurally cannot see, and probe its selector against ground truth.**
-   ✅ **2026-09-14 — the soak is LIVE and NOT SILENT** (the check this item demands): live env
-   `CLOSED_PR_MODE = dry-run`, cronjob running `* * * * *` for 16 days, and a real hit in the
-   current logs — `DRY-RUN would cancel devrc-ci-bhrld (innovation-upstream/devrc#1663 was
-   merged before this run finished)`, `closed-pr pass: mode=dry-run resolvable=6 closed=1
-   skipped=277`. Nothing to do until the date; the evidence precondition is satisfied.
+8. 🔴 **ARM `#792` (`CLOSED_PR_MODE: on`) — THE EVIDENCE PRECONDITION IS NOW FULLY DISCHARGED.
+   THE DECISION IS THE OPERATOR'S, ON 2026-09-18.** Operator set the date; this item does not
+   move it. Flip `supersede-cronjob.yaml` + the pinned literal at `test_supersede_logic.py`
+   (**re-read the line number — it was 2251 and `#799` has landed since**).
+   ✅ **2026-09-14 — the probe this item demanded RAN, over the whole soak rather than one
+   tick, and cross-checked against GitHub ground truth.** Every number and every instrument
+   control is in the dated Gotchas section below; the four things that change the decision:
+   (a) **the soak is 3.8 days, not 16** — this item said 16 and that was the CronJob's age, not
+   the mode's; at the 09-18 date it will be **7 days**;
+   (b) **~38% of its sweeps never reached Loki** (Prometheus: 1415 Jobs/24h ≈ 99% of ticks ran),
+   so every "we never saw X" from this soak — the zero-false-cancel claim included — covers
+   about **62%** of sweeps;
+   (c) **both defects it exposed are in the ANNOTATION, not the cancel** — a GitHub
+   read-after-write race (`state=closed` 2.8 s before `merged=true`) and a close→reopen race
+   that would cancel the sole live run of an **OPEN** PR. Dry-run buries both under correct
+   repeats; **arming keeps only the first line, which is the one most likely to be wrong**;
+   (d) **86 of 87 selections are runs pass 1 could never have caught** — #792 is not redundant —
+   against a cost of **50 real (success/failure) verdicts** replaced by cancel-`error`, incl.
+   4 in `vetrllc/*`, where `vetr-app` has **no push leg** to re-post one.
+   🔴 **NOT a recommendation either way** — the trade is real in both directions and the date
+   stands. What is no longer true is "we have not looked".
    forcing: deadline — 2026-09-18.
 9. **CLOSED by `#1561` + `#1567`.** 🔴 The CLASS is mitigated, not closed: `#1603`'s
    `ledger-check.sh` DETECTS it in 229s and `#1629` stops the triage bot being fooled by it, but
-   nothing PREVENTS a new instance. ⚠ **The count is TWO known instances, not three** — see the
-   correction in `State now`; the needle guard was a documented false-positive range, not this class.
+   nothing PREVENTS a new instance. ⚠ **The count is TWO known instances, not three.**
    forcing: none — owned by nobody.
 10. **CLOSED — `#1600` `f99d3c1b`**, shipped, consumer VERIFIED RUNNING (2h timer, dry-run pinned by
     value, one clean run `Result=success` `ExecMainStatus=10`).  forcing: none
@@ -208,92 +211,28 @@ green and NOTHING here is blocking** — rank 8's date is the only thing with a 
     forcing: none
 13. **CLOSED — `#1629` `f839e720`**, shipped, CONSUMER-VERIFIED on the real verdicts: `#1450`/`#1286`
     stay INHERITED, `#1194` demotes, 244 guards in 18.7s. ⚠ Fixes the bot's REASONING; does NOT arm
-    it — arming is still a separate, evidence-gated call.
+    it — arming is still a separate, evidence-gated call. 🔴 **It is also the WORKED EXAMPLE rank 8
+    was told to follow, and rank 8 now has its own answer** — a dry-run soak read against ground
+    truth found, in both cases, a defect no mutation sweep or merged-tree gate could reach.
     forcing: none
-14. **CLOSED — `#1671` `2b27bdae`**, verified by CONTENT. A render race: the wait gated the PANE
-    GRID while the test asserted on the COPY-MODE snapshot, a different object. Fixed in the
-    fixture; the redundant sibling guard DELETED (it survived every mutation of the shipped
-    `.tmux.conf`, and the silent `copy_cursor_hyperlink`-removal class is caught only by
-    `spans_the_wrap`). ✅ **ROUND 3 LANDED TOO — `#1681` `053aa1f4`**, verified by CONTENT
-    (`origin/main`'s copy of the file is byte-identical to the PR head's, md5 `5c1c8753`), which
-    retires the tautological reachability guard (`#{copy_cursor_hyperlink}` reads at the CURSOR,
-    which on entry sits past the link, so it read `''` regardless). Gated on the MERGED tree
-    before merging, not on the PR branch: touched file **6 passed × 3 runs**, and the
-    inherited-red control unchanged at **exactly 2** — which is what made the red inherited
-    rather than introduced. **The ladder is four rounds and is OVER: round 3 was the last, and
-    it produced no round 4** — `claude/RULES.md` says a clean round ENDS the ladder.
+14. **CLOSED — `#1671` `2b27bdae` + `#1681` `053aa1f4`**, verified by CONTENT (`origin/main`'s copy
+    of `test_tmux_hyperlink_open.py` byte-identical to the PR head's, md5 `5c1c8753`). A render
+    race: the wait gated the PANE GRID while the test asserted on the COPY-MODE snapshot. **The
+    ladder is four rounds and is OVER: round 3 was the last, and it produced no round 4.**
     forcing: none
 15. **CLOSED — `#1648` `a2c84a1c`, shipped and consumer-verified on the deployed tool.**
-    `handoff_doc.py` now warns an author, in the proposal run above the diff, when an update would
-    put the doc over its budget. 🔴 **It WARNS and never REFUSES, and that is forced**: a blocking
-    check deadlocks against `handoff-write-guard.py`, which blocks Stop until a handoff is written,
-    so a session on a doc already grandfathered OVER the ceiling could neither record its work nor
-    end its turn. Pinned by `test_the_over_budget_warning_REFUSES_NOTHING`. Ceiling/step/ledger moved
-    to `scripts/lib/handoff_budget.py`; `test_handoff_doc_size.py` still owns the policy.
-    ⚠ Closes the FEEDBACK gap, not the budget problem.
-    forcing: none
-16. **CLOSED — `#1692` `ff5585ef` (shebang scan) + `#1690` `f88e5235` (writeback seam), and
-    `main` VERIFIED GREEN on the real tip `f88e5235`: 644 passed, 0 failed, zero PR content.**
-    The operator answered: RED 2 → restore the literal; RED 1 → *"do we need this? can we
-    simplify?"*, answered by measurement rather than by picking an option. 🔴 **The framing this
-    item inherited — "guard-vs-guard conflicts" needing a gate to yield — is REFUTED for BOTH.**
-    RED 2 was not a three-way pull (the #1621 guard does not cover `~/.claude/…`, and the ceiling
-    had 125 B of headroom); RED 1's literals turned out to be TEST DATA for a production parser,
-    so no guard had to yield there either. Detail + every measurement is in the Open
-    investigations block below. Claim `main-red-shebang-and-writeback-guards` still HELD —
-    release it when both merge.
-    forcing: gate — until both land, every PR still inherits both reds, and a permanently-red
-    gate trains click-through.
-
-\n\n## Open investigations — live diagnosis state
-
-### RESOLVED — rank 16's two reds: BOTH "guard-vs-guard conflict" readings were wrong
-- as-of: 2026-09-14
-- 🔴 **SUPERSEDES the block `main` is RED on two UNOWNED guards …**, now EVICTED to
-  `claudedocs/refs/gate-speed-and-ci-signal.md`. That block's
-  framing — two gates in genuine conflict, needing an operator to decide which one yields — is
-  **refuted for both reds**, and its "Next probe: none needed, this is an operator decision" is
-  no longer the instruction to follow. Its *observations* (42 hits, all in `test_guard_core.py`,
-  all from `9b8969a8`; `FLOW_DEPLOYED` absent from SKILL.md) all reproduced exactly.
-- **RED 2 — measured, not argued.** The claimed three-way pull had only one live leg. #1621's
-  handle guard does **not** cover this path: `test_absolute_handle_paths.py` says so in its own
-  source (*"NO handle names `.claude`, so arming `~` for every handle reports ZERO
-  `~/.claude/…` findings"*) and uses that very shape as an example in its guidance text. And the
-  ceiling had room — SKILL.md was **15540 B against 15665**, so restoring the sentence #1640
-  evicted cost **69 B** and landed at **15609** (56 B headroom). `#1690`, 742 passed.
-- **RED 1 — the literals are TEST DATA for a production parser, which inverts the question.**
-  `guard_core._runs_as_shell` carries a branch existing solely to resolve an env-based
-  interpreter line (`<env> bash`, and the `-S VAR=1 bash` form), because a DIRECTLY-executed
-  file is handed to whatever that line names. Mutating `interp == "env"` → False (narrowest
-  expression, `count == 1`, `PYTHONDONTWRITEBYTECODE=1`) **KILLS**
-  `test_every_invocation_shape_that_runs_the_file_is_DENIED[{p}]` and
-  `[timeout 60 {p} /some/arg]` — and kills them for the branch's own reason: the kill is ALLOWED
-  because the file stopped being read as shell. Only the two DIRECT-execution shapes die, which
-  is the only arm that consults an interpreter line at all.
-- 🔴 **Ruled out — "just respell them `/bin/sh`" (the fix that looks obvious and is wrong).**
-  With `_CRASH1_BODY` respelled AND the same mutant applied, all **7** invocation shapes PASS:
-  the mutant **SURVIVES**. The respell buys green by making the branch UNTESTED, not by making
-  it unnecessary. via: measurement
-- **Ruled out — `testlib.mockbin.write_exec`.** It owns a `/bin/sh` line and RAISES on a
-  supplied one, so it is the respell above wearing a helper's clothes — unavailable here for
-  exactly the reason the control shows. via: code
-- **Ruled out — the sandbox hazard is present at these sites.** It needs the file EXECUTED. The
-  file has **18** subprocess/exec sites and **0** of them lie in the fixture span (4676–6244);
-  the bodies go to `gc.evaluate()` as TEXT. Positive control on that search: the same query
-  finds all 18 elsewhere, so the zero is a reading, not a wiring fault. via: measurement
-- **Ruled out — a plain allowlist entry is enough.** An entry keyed on `(path, substring)`
-  covering 40 lines pre-approves the 41st for free, in a 6,000-line file whose SUBJECT is
-  interpreter lines. So `#1692` gives the two entries a **COUNT** (`PINNED_COUNTS`), making it a
-  ledger over 42 known lines. Negative controls, each applied to a `cp -a` copy and reverted to
-  byte-identical (`cmp`): extra site → RED · site removed → count RED *and* scan RED (a
-  `/bin/sh` line is still an offender under shape 1) · orphan key → both new tests RED.
-  via: measurement
-- ⚠ **STATED, NOT ENFORCED:** "nothing execs these fixtures" is measured, not pinned by a test —
-  a static "does this span exec anything" check would go quietly vacuous. What bounds it is the
-  count ledger: a new site fails the suite and forces someone to re-verify the premise.
-- **Next probe:** none for the diagnosis. What remains is a decision: audit `#1690`/`#1692`
-  (offered, unanswered) and merge, then `claim-work --release
-  main-red-shebang-and-writeback-guards`.
+    `handoff_doc.py` warns an author, in the proposal run above the diff, when an update would put
+    the doc over its budget. 🔴 **It WARNS and never REFUSES, and that is forced**: a blocking check
+    deadlocks against `handoff-write-guard.py`. Pinned by
+    `test_the_over_budget_warning_REFUSES_NOTHING`. ⚠ Closes the FEEDBACK gap, not the budget
+    problem.  forcing: none
+16. **CLOSED — `#1692` `ff5585ef` (shebang scan) + `#1690` `f88e5235` (writeback seam).** 🔴 **The
+    framing this item inherited — "guard-vs-guard conflicts" needing a gate to yield — is REFUTED
+    for BOTH.** RED 2 was not a three-way pull (the #1621 guard does not cover `~/.claude/…`, and
+    the ceiling had 125 B of headroom); RED 1's literals turned out to be TEST DATA for a
+    production parser, so no guard had to yield there either.
+    forcing: gate — DISCHARGED when both landed; carried verbatim because it is why the item
+    was worked, not a live claim.
 
 ## Decisions, so they are not re-litigated
 
@@ -315,26 +254,30 @@ green and NOTHING here is blocking** — rank 8's date is the only thing with a 
 ## How to verify
 
 ```bash
-# rank 14 / #1681 landed — by CONTENT, never ancestry (squash merge)
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_tmux_hyperlink_open.py | md5sum
-#   5c1c87536fd65523a8c4a12ffe2c227a  — byte-identical to the PR head's copy
+# rank 8 — is the soak still live and still DRY-RUN? (the one thing that must not drift)
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get cronjob tekton-supersede \
+  -o jsonpath='{.spec.schedule} suspend={.spec.suspend}{"\n"}{range .spec.jobTemplate.spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}'
+#   -> * * * * * suspend=false ... DRY_RUN=false CLOSED_PR_MODE=dry-run   (2026-09-14)
 
-# rank 16 — main GREEN, on the real tip, with zero PR content. Re-measure; do not trust this age.
+# rank 8 — re-run the probe. Loki is reachable WITHOUT a port-forward on the NodePort.
+curl -s "http://192.168.50.94:30310/loki/api/v1/query_range" -H 'X-Scope-OrgID: fake' \
+  --get --data-urlencode 'query={app="tekton-supersede"} |= "DRY-RUN would cancel"' \
+  --data-urlencode "start=$(( ($(date +%s) - 7*86400) ))000000000" \
+  --data-urlencode "end=$(date +%s)000000000" --data-urlencode 'limit=5000' | wc -c
+# 🔴 CHUNK IT (6h) AND ASSERT no chunk returned `limit` rows — at limit, Loki TRUNCATES SILENTLY.
+
+# rank 8 — the completeness control: how many sweeps ACTUALLY ran, independent of Loki?
+~/workspace/devrc/scripts/obs-read --cluster homelab --backend prometheus --since 5m --json \
+  --query 'count(count by (job_name) (max_over_time(kube_job_owner{owner_name="tekton-supersede"}[24h])))'
+#   -> 1415 (≈99% of 1440 ticks). Negative control: append -NOPE to owner_name -> matched_nothing.
+
+# rank 16 — main GREEN, on the real tip, zero PR content. Re-measure; do not trust this age.
 S=$(mktemp -d); git -C ~/workspace/devrc archive origin/main | tar -x -C "$S"
 (cd "$S" && nix develop ~/workspace/devrc -c python3 -m pytest \
   "$S/scripts/tests/test_runtime_shebangs.py" \
   "$S/scripts/claude-hooks/tests/test_clawgate_writeback_guard.py" \
   "$S/scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py" \
   -q -p no:cacheprovider --rootdir="$S")        # 644 passed at f88e5235
-
-# the counted pin can go RED in BOTH directions — the control that makes it a ledger
-python3 - <<'EOF'
-import sys; sys.path.insert(0, '/home/zach/workspace/devrc/scripts')
-from pathlib import Path
-from testlib import shebang_scan as S
-hits = S.scan_file(Path('/home/zach/workspace/devrc/scripts/claude-hooks/tests/test_guard_core.py'))
-print(sum('env bash' in l for _, l in hits), sum('env python3' in l for _, l in hits))  # 40 2
-EOF
 ```
 
 ## Gotchas / decisions / dead-ends
@@ -873,6 +816,85 @@ EOF
   running a skill nobody can find in git until the next switch rebuilds without it — and nothing
   announces that either. Worth a `git status --short` on both hosts before quoting any host as
   "at `origin/main`".
+
+### 2026-09-14 — rank 8's probe: what `#792`'s dry-run soak structurally CANNOT see
+
+Measured against the whole soak (Loki `{app="tekton-supersede"}`, 2026-09-11T06:21Z →
+2026-09-15T00:46Z) and cross-checked against GitHub's own PR timelines. **87 distinct
+(run, PR) claims, 84 PRs, 4 repos, 3 owners, 1190 `DRY-RUN would cancel` lines.**
+
+- 🔴 **THE SOAK IS 3.8 DAYS, NOT 16 — and this doc said 16.** `CLOSED_PR_MODE=dry-run` went
+  live when `#792` merged at **2026-09-11T06:19:03Z**; the first `closed-pr pass:` line is
+  **06:21:15Z**, two minutes later (a Flux reconcile). The CronJob is 16 days old; the MODE is
+  not. **Positive control, so the 3.8 is a reading and not a retention artefact:** the same
+  query reaches back to **2026-09-08T00:41Z** (Loki keeps ~7 days) and returns
+  `tekton-supersede` lines throughout that window with **zero** `closed-pr` lines in it. At the
+  operator's 09-18 date the soak will be **7 days**.
+- 🔴 **THE SOAK CANNOT SEE ITS OWN COMPLETENESS, AND ~38% OF IT IS MISSING.** Loki holds
+  **4342** `scanned=` lines (== 4342 `done:` — whole pods are lost, not lines) over a window in
+  which Prometheus says **1415 Jobs ran per 24 h** — 61/1h, 360/6h, 717/12h, i.e. **~99% of the
+  every-minute schedule**, with `owner_name="tekton-supersede-NOPE"` as the negative control
+  (`matched_nothing`). In the soak window Loki recorded **3387 of 5427 minutes (62%)**, mean gap
+  1.6 min, max **28 min**. **So every "we never saw X" from this soak — including "no false
+  cancels" — is a claim about ~62% of sweeps.** Of the 87 claims, 16 appeared exactly once, so
+  by the same sampling rate roughly **10 further claims were never observed at all**.
+- 🔴 **CORRECTION TO THIS DOC: the soak exercises the re-read guard, continuously.** This doc
+  said dry-run "exercises neither the re-read guard nor the `expect` coordinate re-check". Half
+  wrong: `cancel_all` is SHARED, and pass 1 is armed — **356 real cancels in 7 days**, each
+  through the re-read, the annotate PATCH and the cancel PATCH. Only `expect` is genuinely dead
+  code (pass 1 passes `None`). ⚠ **And "exercised" is not "observed to fire": ZERO `SKIP` lines
+  in 356 cancels** — the re-read guard's positive branch has never once been taken, so it is
+  proven to RUN and unproven to CATCH. `ci.zacx.dev/cancelled-because` appears on **0 of 296**
+  live PipelineRuns (`superseded-by` on 24): pass 2 has written nothing, ever.
+- 🔴 **ARMING KEEPS ONLY THE FIRST LINE OF EACH CLAIM, AND THE FIRST LINE IS THE ONE MOST LIKELY
+  TO BE WRONG.** Median claim repeats **10×** (max 51) because dry-run lets the run live; armed,
+  sweep 1 cancels and lines 2..N never exist. **2 of 87 first lines disagree with the PR's final
+  state**, and in dry-run both are buried under 8–26 correct repeats.
+- 🔴 **DEFECT 1, MEASURED — GitHub's `state` flips to `closed` BEFORE `merged` flips true.**
+  `devrc#1687` merged at **18:09:02Z**; the sweep at **18:09:04.78Z (2.8 s later)** read
+  `state=closed, merged=false` and would have annotated the cancel *"#1687 was **closed** before
+  this run finished"* for a **merged** PR. The next sweep (18:10:05Z) read `merged=true`. Not
+  deterministic — `#1500` read correctly at **1.4 s**. Consequence is a wrong audit trail on
+  exactly the runs cancelled fastest; the cancel itself is right either way.
+- 🔴 **DEFECT 2, MEASURED — the close→reopen race cancels the sole live run of an OPEN PR.**
+  `devrc#1542`: **closed 03:04:47Z → REOPENED 03:05:11Z → the sweep at 03:05:12.58Z**, 1.6 s
+  AFTER the reopen, claimed `devrc-ci-nzlfp`. **Neither guard catches it**: the re-read checks
+  liveness and keying, `expect` checks the run's PR *coordinates*, and **nothing re-reads
+  GitHub's state at cancel time**. It was harmless only by luck — the reopen's own run
+  `devrc-ci-5c8lk` existed by 03:06:02 and pass 1 superseded `nzlfp` anyway, 50 s later. That
+  also MEASURES the reopen argument end to end (this doc previously had it only from the
+  EventListener's `body.action` allowlist). **n=1 in 3.8 days**, so the soak's power to see this
+  class at all is one sample.
+- **WHAT ARMING DESTROYS, which dry-run is DEFINED to hide** — dry-run lets the run finish, so
+  the verdict the soak leaves intact is exactly the verdict arming removes. **85 of 87 claimed
+  runs posted a terminal status after the first claim: 50 a REAL verdict (success/failure), 35
+  only `error`** (already broken — nothing lost), 2 nothing. 44 of the 50 are devrc, where the
+  unkeyed `devrc-ci-push-main` leg re-posts an authoritative verdict post-merge. **4 are
+  `vetrllc/*`, and `vetr-app` has no push leg** — arming is cross-tenant.
+- **WHAT ARMING BUYS: ~20.1 pod-hours over 3.77 days = 5.3 pod-hours/day, ~23 cancels/day.**
+  Median claimed run had **10.8 more minutes** to burn (max 49.9). **86 of 87 are runs pass 1
+  could NEVER have caught** (only `nzlfp` was later superseded) — `#792` is not redundant with
+  pass 1. ⚠ **87 is an UPPER bound on cancels**: 18 of 85 had **< 60 s** left, so the re-read's
+  `already done` branch wins and no cancel lands. It is simultaneously a LOWER bound on
+  occurrences, per the 38% log loss.
+- ⚠ **INSTRUMENT TRAP, hit and caught: `obs-read`'s Loki streams row gives ONE `sample` line per
+  stream, not the stream.** Parsing samples yielded **59** distinct claims; the real figure is
+  **87** — a 32% undercount that reads exactly like a complete inventory. The fix is a
+  server-side aggregation (`sum by (run,pr,verb) (count_over_time(… | regexp "…" [30d]))` → 88
+  series) or raw `query_range`, **chunked, asserting no chunk returned `limit` rows**.
+  Cross-checked two differently-failing instruments: obs-read counted 1000 lines over 30d, the
+  raw fetch 1190 over 31d. Consistent.
+- ⚠ **`closed_at` FROM THE CURRENT API IS THE *LAST* CLOSE, NOT THE ONE THAT WAS LIVE.** My
+  false-positive detector flagged `#1542` at **lag −962 s** — a claim emitted 16 minutes "before
+  the PR closed". It was not a selector fault: the PR had closed, reopened and merged, and the
+  API reports only the final `closed_at`. **Read `/issues/{n}/events` for the transition
+  timeline before calling a lag a false positive.** The event timeline is what turned a spurious
+  finding into Defect 2.
+- **Cost of the fail-closed paths, for scale:** 3440 `closed-pr pass:` summary lines,
+  `states_read < resolvable` in **13** of them (GitHub 500s, `EHOSTUNREACH`, DNS, timeouts). Max
+  `resolvable` in one sweep **17**, median **3**. Every one of those leaves the ref absent, which
+  the selector reads as "do not cancel". The fail-closed direction is not theoretical here — it
+  fired 13 times in 3.8 days and cost nothing but cancels.
 ## Open investigations — live diagnosis state
 
 ### CLOSED investigation blocks — evicted 2026-09-13
@@ -937,4 +959,3 @@ UNOWNED guards. The blocks that SUPERSEDE them stay here.
   the test is renamed or removed** — the zero it returns is indistinguishable from a pass, which is
   the same shape as this doc's own `#{copy_cursor_hyperlink}` finding: an absent thing answering
   empty at rc 0.
-
