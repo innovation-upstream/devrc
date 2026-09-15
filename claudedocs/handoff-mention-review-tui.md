@@ -20,28 +20,27 @@ notifications and repo browse are dropped.
   this; Phase 4 (deleting `nvim-octo`) is gated on it by the proposal's own rollback section.
 
 ## State now
-- **Branch / PR:** `feat/mention-review-phase1` → **devrc#1698**, OPEN, head `21e5683b`,
-  rebased onto current `main`, 0 behind. CI re-running at time of writing.
-- **Spec is merged:** `claudedocs/proposal-pr-review-tui.md` (#1696, squash `02b54fe4`),
-  ~1,300 lines. It is the authority for Phases 2–4; read it before continuing.
-- **Merged this session (all verified by content on `origin/main`, not by ancestry):**
-  - **#1666** `0325668c` — closed out the octo legend arc.
-  - **#1686** `c05e4f2d` — octo diff legend gained vim's own `]c`/`[c` + fold motions in a
-    separately-labelled section, `\vs`/`\C` promoted, `file_panel` follows terminal height.
-    **Shipped to BOTH hosts** (`ship.sh` rc=0, both at `c05e4f2d`).
-  - **#1696** `02b54fe4` — the proposal.
-- **#1698 contains:** Phase 0 spike + Phase 1 read-only slice + a **third gate tier**
-  (`scripts/run-go-tests.sh`), 45 files. Then four fixes from `the-algorithm` (below).
-- **Deploy status, stated honestly:** `mention-review` is **NOT deployed and NOT on PATH**.
-  The Alacritty click path still spawns `nvim-octo`. Nothing about the new TUI has been seen
-  on a screen by anyone.
-
-**Phase 0's three kill criteria all PASSED** (none tripped):
-- query: **1 HTTP round trip**, counted with a `RoundTripper` wrapper. 663ms / 536ms / 402ms.
-- auth: go-gh v2.16.0; measured as a triple — real config `OK`, no config `NO TOKEN`,
-  bogus `GH_TOKEN` → 401 `TOKEN REJECTED`.
-- renderer: **318µs @1k · 347µs @4k · 342µs @10k**, flat. Control: `SoftWrap=true` → 21.55ms
-  @10k (63×), proving the benchmark reads the buffer.
+- 🔴 **THE SPEC IS `claudedocs/proposal-pr-review-tui.md`** (#1696, squash `02b54fe4`, ~1,300
+  lines), merged to `main`. **It is the authority for Phases 2–4 — read it before continuing.**
+  Its §12 open questions and §11 phasing are what the ranked list below draws from.
+- **Earlier merges in this arc's prehistory:** `#1666` `0325668c` (closed the octo legend arc);
+  `#1686` `c05e4f2d` (octo's own diff legend gained vim's `]c`/`[c` + fold motions, `\vs`/`\C`
+  promoted) — **shipped to BOTH hosts**, `ship.sh` rc=0, and that is the surface a click still
+  opens today.
+- 🔴 **PHASE 0 + PHASE 1 ARE MERGED.** `devrc#1698` → squash **`7b827d13`**. Verified on
+  `origin/main` by CONTENT (not ancestry): `movement_test.go` present, `scripts/run-go-tests.sh`
+  present, `scripts/main-green-check.sh:424` reads `for tier in pytests nodetests gotests`.
+- **This doc's own first revision merged too** — `devrc#1713`, squash `4b6c42a3`.
+- ⚠ **#1698 was merged with CI still PENDING**, on the operator's explicit "merge now". The
+  basis was a LOCAL run on the rebased tree: Go suite 5/5 packages ok, 199 passed across
+  `test_runtime_shebangs.py`, `test_gate_reexec.py`, `test_git_repo_isolation.py`,
+  `test_main_green_check.py`, `test_no_client_hostnames.py`. **That is a narrower claim than a
+  green CI run** — no Tekton leg ever reported on the final head `f6103dc9`.
+- **Deploy status, unchanged and still honest:** `mention-review` is **NOT deployed, NOT on
+  PATH, and has never been seen on a screen.** The Alacritty click path still spawns
+  `nvim-octo`. Phase 4 (retirement) remains gated on the operator using it for a real review.
+- **Next unit of work is Phase 2** (write actions), plus the `gotests` CI leg in
+  **homelab-talos** — see the ranked list.
 
 ## Open investigations — live diagnosis state
 
@@ -65,23 +64,43 @@ notifications and repo browse are dropped.
   mirroring the `nodetests` one. Closes when `gh pr checks` on ANY devrc PR lists
   `tekton/devrc-gotests`.
 
+### The `gotests` CI leg — pipeline LOCATED, change not yet made (supersedes the 2026-09-14 block above)
+- as-of: 2026-09-15
+- **Supersedes** the earlier block of the same subject; its "Next probe" said *find the
+  pipeline*. It is found. Everything else in that block still holds.
+- **Symptom + exact repro:** `gh pr checks <any devrc PR>` lists `tekton/devrc-pytests`,
+  `tekton/devrc-nodetests`, `tekton/devrc-cairn-client-runs` and **no** `tekton/devrc-gotests`.
+- **Observed (with values):** the pipeline is `clusters/homelab/apps/tekton-pipelines/triggers/
+  devrc-ci-pipeline.yaml` in **homelab-talos**, alongside `devrc-ci-triggertemplate.yaml`.
+  Confirmed present. The deadman half is now CLOSED on main (`gotests` in the tier loop), so
+  `main` is covered every 4 hours; **PR-time coverage is still zero.** via: command
+- **Ruled out:** that the leg could be added from inside devrc — it cannot; the pipeline is a
+  different repo. via: command
+- 🔴 **Constraint that changes how this is done:** `homelab-talos` is GitOps-reconciled from
+  `trunk`, and its own `CLAUDE.md` declares that **committing to the main branch IS deploying**
+  — the one repo with that exception. A pipeline edit there is a live CI change, not a PR that
+  waits for review.
+- **Next probe:** add a `gotests` leg mirroring the `nodetests` one in
+  `devrc-ci-pipeline.yaml`. **Closes when `gh pr checks` on any devrc PR lists
+  `tekton/devrc-gotests`.**
+
 ## Next steps (ranked)
-1. **Merge devrc#1698 once CI is green.** All four `the-algorithm` fixes are in and were
-   re-verified independently (matrix below). The only expected reds are inherited. Repo: devrc.
-   forcing: gate — the PR is the gate for Phases 2–4; nothing proceeds until it lands.
-2. **Answer proposal §12.4 before Phase 2: inline diff-line comments, or PR-level only?**
-   Inline needs review-thread positioning against the diff and is materially more work.
-   Phase 2 (write actions) cannot be specced without it. Repo: devrc.
-   forcing: user — only the operator can answer it.
-3. **Add a `gotests` leg to `devrc-ci-pipeline.yaml`** in the infra repo (see the open
-   investigation above). Repo: infra (NOT devrc).
-   forcing: gate — ~7,000 lines and 119 Go tests currently have zero PR-time coverage.
-4. **Phase 2 — write actions** (comment · approve · request changes · submit review · merge),
-   all behind the confirmation ledger of proposal §3.7. Reintroduce the write-intent ledger
-   deleted in #1698. Repo: devrc.
+1. **Add the `gotests` leg to `devrc-ci-pipeline.yaml`** in **homelab-talos** (NOT devrc).
+   ~7,000 Go lines and 119 Go tests have zero PR-time coverage. See the investigation above for
+   the path and the trunk-is-deploy constraint. Repo: homelab-talos.
+   forcing: gate — merged code with no gate on it.
+2. 🔴 **CONFIRM OR REVERSE THE §12.4 ASSUMPTION BEFORE PHASE 2 CODE EXISTS.** The operator said
+   "proceed" without answering directly, so Phase 2 is being specced **PR-level comments only,
+   NO inline diff-line positioning**. That is an ASSUMPTION recorded as one, not an answer.
+   Reversing it before code is cheap; after Phase 2 lands it is a rework. Repo: devrc.
+   forcing: user — only the operator can settle it.
+3. **Phase 2 — write actions**: comment · approve · request changes · submit review · merge,
+   all behind the confirmation ledger of proposal §3.7. **Reintroduce the write-intent ledger**
+   deleted in #1698 (`Confirmed`/`NotConfirmed`/`LedgerViolations`/`Write()`), which was removed
+   as a phasing judgement on the explicit understanding that Phase 2 brings it back. Repo: devrc.
    forcing: none
-5. **Phase 3 — speed work**: local-clone probe, PR-ref fetch RACING the API, bounded on-disk
-   cache. 🔴 Must be a RACE, not a preference — see Gotchas. Repo: devrc.
+4. **Phase 3 — speed work**: local-clone probe, PR-ref fetch **RACING** the API, bounded on-disk
+   cache (0600), per-commit diff. 🔴 A race, never a preference — see Gotchas. Repo: devrc.
    forcing: none
 
 ## Defects (batched)
@@ -142,37 +161,53 @@ notifications and repo browse are dropped.
   still holds `feat/mention-review-phase1`, which forced a detached rebase. A stale worktree
   holds its branch repo-globally at whatever commit it stopped on.
 
+- 🔴 **`test_no_test_writes_a_usr_bin_env_shebang_at_runtime` IS WIDER THAN ITS NAME.** It
+  rejects **any** self-written shebang, not just `/usr/bin/env` — MEASURED: replacing
+  `#!/usr/bin/env bash` with `#!/bin/sh` in a test fixture was still RED. The only remedy is the
+  one it names, `testlib.mockbin.write_exec`, which owns the shebang so a call site cannot
+  supply one. And the shebang could not simply be deleted: `_env_vars_gate_sh_reads` computes
+  `body_start` over `range(1, …)`, so line 0 is skipped by construction.
+- 🔴 **FOUR INHERITED REDS AND ONE SELF-CAUSED, AND THE SELF-CAUSED ONE CAME LAST.** Three
+  branch-behind-main reds in a row (`test_NO_TRACKED_FILE_ASSERTS…`, `test_every_mutation_
+  anchor…`, `test_no_client_subdomain_literal…`) trained the reflex "the red is not ours"; the
+  fourth WAS ours — `c5570bbc`'s fixture writing its own shebang. **The pattern is the hazard:
+  check whether the diff can reach the failing test EVERY time, including the time after three
+  consecutive noes.**
+- 🔴 **A guard that a change ADDS TO can be blinded by the addition.** `c5570bbc`: adding three
+  names to `gate.sh`'s refusal loop wrapped it onto a second line, and the ledger's harvester
+  anchored its regex on ONE line — so it matched nothing and silently stopped seeing
+  `DEVRC_TARGETS` and `MIN_TESTS`, the two it existed to catch. *"The regex found no loop" and
+  "the loop reads nothing" are the same empty set, so a blind harvester reports FULL COVERAGE.*
+  It only failed loudly by accident. The fix joins continuations before scanning and adds a
+  control pinned against a **synthetic** script, so `gate.sh` reformatting its own loop cannot
+  make the control vacuous.
+- **Re-prove a control after editing the fixture it runs on.** Changing the synthetic script to
+  `write_exec` changed what the control is made of; that it still PASSED is a different claim
+  from that it can still go RED. Re-ran the continuation-join mutation and confirmed it fails.
+- ⚠ **A merge on local evidence is not a merge on CI.** #1698 landed with all three Tekton legs
+  `pending`. Locally verified, and that distinction is recorded here rather than smoothed over.
+
 ## How to verify
 ```bash
-# The four algorithm fixes, all re-verified independently on 2026-09-14:
-#  1. RUNNERS registration — scripts/tests/test_git_repo_isolation.py:120
-#  2. deadman tier loop    — scripts/main-green-check.sh:424 reads "pytests nodetests gotests"
-#  3. ledger deleted       — grep -c 'LedgerViolations\|IntentTypeName' intents.go  → 0
-#  4. movement coverage    — see the mutation below
+# Phase 0+1 are on main — verify by CONTENT, never by ancestry (squash merges break ancestry):
+git -C ~/workspace/devrc cat-file -e origin/main:nix/pkgs/tools/mention-review/src/internal/ui/movement_test.go
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/run-go-tests.sh
+git -C ~/workspace/devrc show origin/main:scripts/main-green-check.sh | sed -n '424p'
+#   -> for tier in pytests nodetests gotests; do
 
-W=<a worktree at feat/mention-review-phase1>
-S="$W/nix/pkgs/tools/mention-review/src"
+# The Go tier (still the ONLY thing that runs these 119 tests at PR time: nothing):
+nix develop ~/workspace/devrc -c bash scripts/run-go-tests.sh .
 
-# Go suite (5 packages green)
-nix develop "$W" -c bash -c "cd '$S' && go clean -testcache && go test ./..."
-
-# 🔴 FIX 4's ACCEPTANCE CRITERION — invert the four movement arms in
-# internal/ui/app.go:283-290 (PageUp/PageDown swap, Top<->Bottom) and confirm
-# movement_test.go goes RED. Observed: 3 tests, 10 assertions, literal values:
-#   "one ctrl+d from the top -> diffCur = 0, want 10"
-#   "G from line 100 -> diffCur = 0, want 201"
-# POSITIVE CONTROL (proves the suite discriminates): mutate
-# internal/udiff/udiff.go:309  h.LineIndex > from  ->  >= from
+# 🔴 THE MOVEMENT COVERAGE — the live defect #1698 closed. Invert the four arms in
+# internal/ui/app.go:283-290 (PageUp/PageDown swap, Top<->Bottom); movement_test.go
+# MUST go red with literal values ("G from line 100 -> diffCur = 0, want 201").
+# POSITIVE CONTROL: internal/udiff/udiff.go:309  h.LineIndex > from -> >= from
 #   kills 3 tests across 2 packages.
 
-# The deployed octo click path (the CURRENT surface — still what a click opens).
-# 🔴 Do NOT grep bin/nvim-octo; it returns 0 on a HEALTHY deploy. Four store hops on:
-AT=$(readlink -f ~/.config/alacritty/alacritty.toml)
-MO=$(grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' "$AT" | head -1)
-NO=$(grep -oE '/nix/store/[a-z0-9]+-nvim-octo' "$MO" | head -1)
-NV=$(grep -oE '/nix/store/[a-z0-9]+-neovim-[0-9.]+' "$NO"/bin/nvim-octo | head -1)
-IL=$(grep -aoE '/nix/store/[a-z0-9]+-init\.lua' "$NV"/bin/nvim | head -1)
-IV=$(grep -oE '/nix/store/[a-z0-9]+-init\.vim' "$IL" | head -1)
-OI=$(grep -oE '/nix/store/[a-z0-9]+-octo-init\.lua' "$IV" | head -1)
-grep -c 'NATIVE_MOTIONS' "$OI"        # 2 as shipped in #1686
+# 🔴 THE GATE LEDGER — remove the continuation join in
+# scripts/tests/test_gate_reexec.py (`body = re.sub(r"\\\n[ \t]*", " ", body)`);
+# test_the_derivation_sees_a_refusal_list_WRAPPED_ACROSS_LINES MUST go red.
+
+# Has the gotests leg landed yet? (rank 1's closing condition)
+gh pr checks <any open devrc PR> | grep gotests   # non-empty == done
 ```
