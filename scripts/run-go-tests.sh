@@ -157,7 +157,8 @@ cd "$ROOT" || { echo "run-go-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   internal/cfg            12   the ABSENT-vs-UNREADABLE split, both directions
 #   internal/ghapi          38   + the three REST writes and the loopback guard
 #   internal/udiff          12   unchanged
-#   internal/ui            122   + the confirmation ledger, the prompts, the modes
+#   internal/ui            135   + the confirmation ledger, the prompts, the modes,
+#                                  and the frame-fits-the-terminal layout guard
 #
 # ⚠ THE FIRST VERSION OF THIS TABLE CARRIED GUESSED FLOORS — 9/7/10/11/22, typed
 # before anything had been run. `cmd/mention-review` has FIVE tests, so its
@@ -172,7 +173,7 @@ PACKAGES=(
   "internal/cfg|11"
   "internal/ghapi|37"
   "internal/udiff|11"
-  "internal/ui|116"
+  "internal/ui|128"
 )
 
 # --- GUARD 2: discovery + the two-way pin --------------------------------------

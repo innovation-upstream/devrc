@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+
 	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 
@@ -82,9 +83,14 @@ func (a App) renderBar() string {
 			ModeWord(ModeConfirm).Render(), styDim.Render("  "), styTitle.Render(a.pending.Prompt)))
 
 	case ModeCompose:
+		// ⚠ THE HEADER ALREADY LEADS WITH THE MODE WORD. `ComposeHeader` starts
+		// "COMPOSING …", so prefixing `ModeWord(ModeCompose)` here printed it
+		// twice — and a duplicated word reads as a rendering fault rather than
+		// as emphasis. The confirm arm above does prefix it, because its
+		// payload is the prompt and the prompt does not name the mode.
 		head := ComposeHeader(a.compose.Verb, a.Repo()+"#"+itoa(a.Num), a.viewerLogin())
 		return lipgloss.NewStyle().Padding(0, 1).Render(lipgloss.JoinVertical(lipgloss.Left,
-			ModeWord(ModeCompose).Render()+styDim.Render("  "+head),
+			ModeWord(ModeCompose).Style.Render(head),
 			styText.Render(a.composeRender()),
 		))
 	}
@@ -104,7 +110,18 @@ func (a App) viewerLogin() string {
 	return a.Snap.ViewerLogin
 }
 
-// composeRender draws the buffer with a visible cursor.
+// composeBarLines is how many body rows the compose bar shows.
+//
+// 🔴 A FIXED NUMBER, AND THAT IS WHY THE FRAME CANNOT OVERFLOW. `relayout`
+// sizes the diff viewport against `lipgloss.Height(renderBar())`; if the bar
+// could grow as the operator typed, the layout computed when compose OPENED
+// would be wrong by however many lines they went on to write, and the bottom of
+// the frame would push off the terminal. A window over the buffer keeps the
+// height constant while still following the cursor.
+const composeBarLines = 4
+
+// composeRender draws the buffer with a visible cursor, in exactly
+// `composeBarLines` rows.
 //
 // ⚠ THE CURSOR IS A CHARACTER, NOT A TERMINAL CURSOR POSITION. `tea.View`'s
 // `Cursor` field would be the native way, and it is deliberately not used: the
@@ -113,11 +130,23 @@ func (a App) viewerLogin() string {
 // is worse than a visible marker. `▏` survives colour removal, which is the
 // constraint every other state in this program is held to.
 func (a App) composeRender() string {
-	if len(a.compose.Buf) == 0 {
-		return "▏"
-	}
 	cur := clamp(a.compose.Cur, 0, len(a.compose.Buf))
-	return string(a.compose.Buf[:cur]) + "▏" + string(a.compose.Buf[cur:])
+	withCursor := string(a.compose.Buf[:cur]) + "▏" + string(a.compose.Buf[cur:])
+	lines := strings.Split(withCursor, "\n")
+
+	// The window follows the cursor's LINE, so a long comment scrolls rather
+	// than hiding the end the operator is typing at.
+	curLine := strings.Count(string(a.compose.Buf[:cur]), "\n")
+	start := clamp(curLine-composeBarLines+1, 0, max(0, len(lines)-composeBarLines))
+	end := start + composeBarLines
+	if end > len(lines) {
+		end = len(lines)
+	}
+	out := append([]string(nil), lines[start:end]...)
+	for len(out) < composeBarLines {
+		out = append(out, "")
+	}
+	return strings.Join(out, "\n")
 }
 
 // renderFooter renders the GENERATED help.
@@ -442,8 +471,17 @@ func (a App) renderCard(h int, title, body string) string {
 // --- layout helpers ---------------------------------------------------------
 
 func (a *App) relayout() {
-	footerH := lipgloss.Height(a.renderFooter())
-	bodyH := max(minHeight, a.Height-footerH)
+	// 🔴 THE BAR IS PART OF THE LAYOUT, NOT AN OVERLAY. `render` subtracts its
+	// height from the body; if `relayout` did not subtract the SAME height, the
+	// diff viewport would still be sized for a bar-less frame and the bottom
+	// rows would push off the terminal the moment a confirmation appeared.
+	// Both call `renderBar()`, so they cannot disagree — and `composeBarLines`
+	// is what stops that height moving while the operator types.
+	chromeH := lipgloss.Height(a.renderFooter())
+	if bar := a.renderBar(); bar != "" {
+		chromeH += lipgloss.Height(bar)
+	}
+	bodyH := max(minHeight, a.Height-chromeH)
 
 	leftW := leftColWidth
 	if a.Width < leftColWidth*2 {

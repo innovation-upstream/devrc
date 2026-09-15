@@ -82,12 +82,12 @@ func (a App) writeGate() (string, bool) {
 func (a App) beginCompose(verb Action) App {
 	if notice, ok := a.writeGate(); !ok {
 		a.notice = notice
-		return a
+		return a.settled()
 	}
 	a.mode = ModeCompose
 	a.compose = composeState{Verb: verb}
 	a.notice = ""
-	return a
+	return a.settled()
 }
 
 // propose builds a confirmed write intent and parks it behind the prompt.
@@ -99,14 +99,14 @@ func (a App) beginCompose(verb Action) App {
 func (a App) propose(i Intent) (App, []Intent) {
 	if notice, ok := a.writeGate(); !ok {
 		a.notice = notice
-		return a, nil
+		return a.settled(), nil
 	}
 	if !RequiresConfirmation(i) {
 		// A caller bug: this path is only for ledgered-CONFIRMED verbs. Saying
 		// so beats silently confirming something the ledger says need not be,
 		// or silently acting on something it says must be.
 		a.notice = "REFUSED — " + i.intentName() + " is not a confirmed verb; this is a bug."
-		return a, nil
+		return a.settled(), nil
 	}
 	prompt, ok := ConfirmPrompt(i, a.Snap)
 	if !ok {
@@ -115,12 +115,12 @@ func (a App) propose(i Intent) (App, []Intent) {
 		// describe what I am about to do" is not to do it.
 		a.notice = "REFUSED — no confirmation prompt could be built for " +
 			i.intentName() + ", so nothing was sent."
-		return a, nil
+		return a.settled(), nil
 	}
 	a.mode = ModeConfirm
 	a.pending = &pendingWrite{Intent: i, Prompt: prompt}
 	a.notice = ""
-	return a, nil
+	return a.settled(), nil
 }
 
 // proposeMerge is `propose` plus the method check.
@@ -133,13 +133,13 @@ func (a App) propose(i Intent) (App, []Intent) {
 func (a App) proposeMerge() (App, []Intent) {
 	if notice, ok := a.writeGate(); !ok {
 		a.notice = notice
-		return a, nil
+		return a.settled(), nil
 	}
 	if a.MergeMethod == "" {
 		a.notice = "REFUSED — the merge method could not be read from the config, " +
 			"so it is UNKNOWN. Refusing rather than guessing: a merge dispatched " +
 			"with a method nobody chose is the wrong commit shape."
-		return a, nil
+		return a.settled(), nil
 	}
 	return a.propose(MergePR{
 		Owner: a.Owner, Name: a.Name, Num: a.Num, Method: a.MergeMethod,
@@ -194,7 +194,7 @@ func (a App) composeCancel() App {
 	a.compose = composeState{}
 	a.notice = "DISCARDED — nothing was sent to GitHub."
 	a.pending = nil
-	return a
+	return a.settled()
 }
 
 // ComposeBody is the buffer as a string. Exported so the one end-to-end test
@@ -232,7 +232,7 @@ func (a App) composeSend() (App, []Intent) {
 		// comment is a comment nobody meant to post. Refusing here names the
 		// problem; letting it through names it in server prose.
 		a.notice = "REFUSED — the body is empty, so there is nothing to send."
-		return a, nil
+		return a.settled(), nil
 	}
 	verb := a.compose.Verb
 	var i Intent
@@ -247,7 +247,7 @@ func (a App) composeSend() (App, []Intent) {
 		a.notice = "REFUSED — the compose buffer has no verb; this is a bug."
 		a.mode = ModeBrowse
 		a.compose = composeState{}
-		return a, nil
+		return a.settled(), nil
 	}
 
 	if notice, ok := a.writeGate(); !ok {
@@ -258,7 +258,7 @@ func (a App) composeSend() (App, []Intent) {
 		a.notice = notice
 		a.mode = ModeBrowse
 		a.compose = composeState{}
-		return a, nil
+		return a.settled(), nil
 	}
 
 	a.mode = ModeBrowse
@@ -267,7 +267,7 @@ func (a App) composeSend() (App, []Intent) {
 		return a.propose(i)
 	}
 	a.notice = "SENDING — " + i.intentName() + " as " + a.Snap.ViewerLogin + "."
-	return a, []Intent{i}
+	return a.settled(), []Intent{i}
 }
 
 // --- confirm mode ------------------------------------------------------------
@@ -282,10 +282,10 @@ func (a App) confirmYes() (App, []Intent) {
 	a.mode = ModeBrowse
 	if notice, ok := a.writeGate(); !ok {
 		a.notice = notice
-		return a, nil
+		return a.settled(), nil
 	}
 	a.notice = "SENDING — " + i.intentName() + " as " + a.Snap.ViewerLogin + "."
-	return a, []Intent{i}
+	return a.settled(), []Intent{i}
 }
 
 func (a App) confirmNo() App {
@@ -296,7 +296,7 @@ func (a App) confirmNo() App {
 	a.pending = nil
 	a.mode = ModeBrowse
 	a.notice = "ABORTED — " + name + "was NOT sent to GitHub."
-	return a
+	return a.settled()
 }
 
 // --- the result --------------------------------------------------------------
@@ -308,11 +308,26 @@ func (a App) stepWriteDone(m WriteDone) (App, []Intent) {
 		// the error becomes a notice rather than replacing the screen with a
 		// card — the same judgement `DiffLoaded` makes one message up.
 		a.notice = "FAILED — " + m.Verb + ": " + m.Err.Error()
-		return a, nil
+		return a.settled(), nil
 	}
 	a.notice = "DONE — " + m.Verb + " succeeded; re-reading the pull request."
+	a = a.settled()
 	// 🔴 RE-READ, because every panel still describes the PR as it was BEFORE
 	// the write. A screen that says OPEN after a successful merge is the same
 	// class of lie as a file list that is quietly short.
 	return a, []Intent{FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+}
+
+// settled re-lays-out after anything that changes the BAR.
+//
+// 🔴 THE MODE AND THE NOTICE ARE LAYOUT, NOT DECORATION. Both change the height
+// of the bar between the panels and the footer, and `relayout` is what sizes
+// the diff viewport against the space that is left. Without this, opening a
+// compose buffer or raising a confirmation would leave the viewport sized for a
+// bar-less frame and push the bottom rows off the terminal — which is invisible
+// to every assertion about STATE, and is why `layout_test.go` measures the
+// rendered frame's height instead.
+func (a App) settled() App {
+	a.relayout()
+	return a
 }
