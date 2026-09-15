@@ -861,9 +861,36 @@ Both directions, and they do not cancel.
    #1108, #1219 here) still has its round-1 churn unmeasured. The script says so per ladder
    rather than inventing a number, because what "round 1" means for a ledger that begins at 2
    is a judgement about that PR, not arithmetic.
-6. **Decide what happens to the 40 UNLEDGERED ROUNDS the census names** — its own output says
-   *"Read them; the subjects are printed above"*, and nothing owns doing that. Two acceptable
-   closures, and a third that is not:
+6. ~~**Decide what happens to the 40 UNLEDGERED ROUNDS the census names.**~~ **CLOSED
+   2026-09-14 by the FIRST closure below — the interior ones were READ, and on the current
+   devrc population there is exactly ONE.**
+
+   **THE FINDING, recorded per PR as the closing condition requires.** Re-ran the census over
+   the full devrc carrier population (`--find-carriers --limit 400`: **62 carriers found, 60
+   measured**). Gap-commit census: **INTERIOR round-ref 0 · merge 0 · unclassified 1, of 1
+   interior commit in total**; TAIL round-ref 7 · merge 18 · unclassified 33, of 58. Totals
+   interior **191** lines / tail **6,727**.
+
+   The single interior gap is **`#1326`, round 7 `to` → round 8 `from`,
+   `404ec208..b9848f9d`, 191 lines** — `docs(proposal): eight of nine open questions
+   answered`, the operator's design decisions 9–16 written into a proposal doc. **Was that
+   delta ever re-audited under another round's block? NO.** Round 8's block anchors PAST it
+   and rounds 8→9 and 9→head are both TIGHT, so the commit is inside no round's range and no
+   later block covers it. It is a decisions record rather than code, which is why the gap is
+   uninteresting in substance — but the answer to the item's question is a clean no.
+
+   ⚠ **THE POPULATION IS NOT THE ONE THIS ITEM WAS WRITTEN AGAINST, and saying so is the
+   point.** The "40" and the "1 of 40 on devrc" came from a **20-ladder** run; this is **60
+   ladders**. A fresh measurement, not that census resolving — the interior class did not
+   shrink from 1 to 1, it was re-counted over a superset and came back 1. ⚠ The scan **HIT
+   its 400-PR limit**, so every devrc total here is a FLOOR (that is open item **8**).
+
+   🔴 **The TAIL ones remain deliberately unread** — the item put them out of scope because
+   they are the ambiguous class, and that is unchanged. This closure asserts nothing about
+   the 58 tail commits.
+
+   *Original item, for the record:* its own output said *"Read them; the subjects are printed
+   above"*, and nothing owned doing that. Two acceptable closures, and a third that is not:
    - ✅ *Closes when* a session reads the **interior** ones — **1 of the 40 on devrc**, so this
      is small — and records per PR whether the round's delta was ever re-audited under another
      round's block. The TAIL ones are the ambiguous class and are deliberately NOT in scope.
