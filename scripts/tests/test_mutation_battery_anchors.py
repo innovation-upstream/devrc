@@ -569,6 +569,22 @@ def test_the_dispatch_batterys_floor_is_re_derived_from_its_target_module():
         "unreadable floor must NOT be treated as a passing one."
     )
 
+    # 🔴 `--collect-only` IS LOAD-BEARING BEYOND SPEED, and this was MEASURED
+    # rather than reasoned. A nested pytest that RUNS would fire
+    # `nogit_plugin.no_real_git` -- a `scope="session", autouse=True` fixture
+    # that `scripts/tests/conftest.py` imports, so `-p` is not needed to get it
+    # -- and, inheriting `DEVRC_TEST_GIT_GUARD_DIR` from the runner, would
+    # append its own `control-<pid>` marker to the ONE shared guard file that
+    # GUARD 10's ledger counts. Collection never reaches fixture setup, so this
+    # child writes nothing. CONTROL, both arms under a shared guard dir with
+    # `-p testlib.nogit_plugin`: markers=1 with `nogit_plugin.NESTED_ENV` set
+    # and markers=1 without it -- identical, because the fixture never runs.
+    #
+    # 🔴 SO DO NOT MAKE THIS A REAL RUN without setting that flag. The moment
+    # `--collect-only` comes off, the child starts writing markers and GUARD
+    # 10 reports "N session marker(s), expected 1" -- which reads as "this
+    # target ran WITHOUT the guard", a false red on the check that exists to
+    # catch a true one. The plugin's own NESTED_ENV comment names that shape.
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", str(target),
          "--collect-only", "-q", "-p", "no:cacheprovider"],
