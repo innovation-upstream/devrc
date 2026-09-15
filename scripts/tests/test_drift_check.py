@@ -288,6 +288,18 @@ class Fleet:
             # origin is a file:// path, so the slug derivation refuses before gh
             # is ever consulted — two independent reasons, deliberately.)
             DRIFT_GH=str(self.bin / "gh"),
+            # 🔴 THE SEVENTH HERMETICITY SEAM, and the same one `gh` already
+            # paid for. The routing-table arm runs `cairn routes --check`, which
+            # on this machine reads the operator's real store OVER THE NETWORK
+            # and REFRESHES their cache — so left to its default every test in
+            # this file would make an outbound call and write outside tmp_path.
+            # A read-only breach is still a breach, and this one is not even
+            # read-only.
+            #
+            # Defaulted to a path inside tmp_path that does not exist, so the arm
+            # takes its SKIPPED branch. A test that wants it to answer calls
+            # `stub_cairn()`, exactly like `stub_gh`.
+            DRIFT_CAIRN=str(self.bin / "cairn"),
             # Pinned into tmp_path: the unreachable streak is PERSISTENT state,
             # and left to its default ($XDG_STATE_HOME/…) these tests would both
             # write to the operator's real state dir and inherit a streak from
@@ -382,6 +394,29 @@ class Fleet:
             body.append("echo '%s'" % stdout.replace("'", "'\\''"))
         body.append("exit %d" % exit_code)
         write_exec(self.bin / "gh", "\n".join(body) + "\n")
+
+    def stub_cairn(self, stdout="", stderr="", exit_code=0, log=None):
+        """Install a stub `cairn` for the routing-table arm.
+
+        🔴 THE ARM READS BOTH STREAMS, so both are drivable. `routes --check`
+        prints the table and its SUMMARY LINE on stdout and its findings — 🔴
+        problems and ⚠ notes — on stderr, and the arm branches on the summary
+        LINE rather than on the exit code, because a client with no `routes`
+        verb, a refusal to grade against a stale cache and a table with real
+        problems are three different facts that all exit non-zero.
+
+        The real binary is never executed by this suite: it reads the operator's
+        store over the network and refreshes their cache.
+        """
+        body = []
+        if log is not None:
+            body.append('printf "%s\\n" "$*" >> ' + f"'{log}'")
+        if stdout:
+            body.append("cat <<'CAIRN_OUT_EOF'\n%s\nCAIRN_OUT_EOF" % stdout)
+        if stderr:
+            body.append("cat >&2 <<'CAIRN_ERR_EOF'\n%s\nCAIRN_ERR_EOF" % stderr)
+        body.append("exit %d" % exit_code)
+        write_exec(self.bin / "cairn", "\n".join(body) + "\n")
 
     def set_origin(self, url):
         """Point the work clone's origin at `url`.
@@ -1784,6 +1819,17 @@ UNIT_PATH_REQUIREMENTS = {
     # default is the bare word `gh`), which is what puts it in THIS table rather
     # than the child one below.
     "gh": "pkgs.gh",
+    # The cairn routing-table arm. Same silent-failure shape again: without the
+    # pinned client on the unit PATH the arm prints SKIPPED on every timer run
+    # forever, from a unit that looks correct. The attr is `cairnPackage`, not a
+    # `pkgs.*` name — the client is a FLAKE INPUT threaded into this module, and
+    # spelling it `pkgs.cairn` would silently install a different program.
+    "cairn": "cairnPackage",
+    # Used by the same arm to read `cairn routes --check`'s own output: the
+    # summary line is the only evidence the grading ran, so the arm branches on
+    # the LINE rather than on an exit code that cannot tell "the table has
+    # problems" from "the client has no `routes` verb".
+    "grep": "pkgs.gnugrep",
 }
 
 # 🔴 A SECOND SEAM, AND THE TABLE ABOVE STRUCTURALLY CANNOT SEE IT. The phase-2
@@ -1930,6 +1976,35 @@ def test_the_reverse_path_guard_can_actually_see_a_new_command(tmp_path):
     )
 
 
+def _drift_unit_binpath_attrs():
+    """The attribute LIST inside the drift-check unit's `lib.makeBinPath [ … ]`.
+
+    🔴 THE LIST, NOT THE BLOCK, AND THE DIFFERENCE IS A GUARD THAT WAS SPELLED
+    RATHER THAN STRUCTURAL. The assertion below used to be
+    `attr in _drift_service_block()` — a substring test over ~90 lines that are
+    mostly PROSE explaining why each entry is there. So a comment naming the
+    attribute satisfies it: MEASURED while adding `cairnPackage`, deleting it
+    from the PATH left the suite fully green, because the paragraph above the
+    line says the word. A guard a comment can satisfy asserts nothing about the
+    unit, and the failure it is supposed to catch is the silent one this whole
+    table exists for — an arm reporting COULD NOT MEASURE forever from a unit
+    that looks correct.
+    """
+    block = _drift_service_block()
+    m = re.search(r'"PATH=\$\{lib\.makeBinPath \[([^\]]*)\]\}"', block)
+    assert m, (
+        "the drift-check unit declares no `PATH=${lib.makeBinPath [ … ]}` — this "
+        "extraction is now wired to nothing, which would make every assertion "
+        "below vacuous:\n" + block
+    )
+    attrs = m.group(1).split()
+    # POSITIVE CONTROL on the extraction itself: an empty or one-element list is
+    # what a broken regex looks like, and `attr not in []` would fail every case
+    # for a reason that has nothing to do with the unit.
+    assert len(attrs) >= 5, f"the PATH list parsed to {attrs!r}"
+    return attrs
+
+
 @pytest.mark.parametrize("cmd,attr", sorted(UNIT_PATH_REQUIREMENTS.items()))
 def test_every_command_the_checker_runs_is_on_the_unit_path(cmd, attr):
     scripts_src = DRIFT.read_text() + HOST_ROLE_LIB.read_text()
@@ -1944,9 +2019,13 @@ def test_every_command_the_checker_runs_is_on_the_unit_path(cmd, attr):
         f"{cmd!r} is pinned as a PATH requirement but the scripts no longer call "
         f"it — drop it from UNIT_PATH_REQUIREMENTS (the pin is the accounting)"
     )
-    assert attr in _drift_service_block(), (
+    attrs = _drift_unit_binpath_attrs()
+    assert attr in attrs, (
         f"the drift-check unit's PATH is missing {attr} — {cmd!r} would not resolve "
-        f"under systemd, which has none of the login shell's PATH"
+        f"under systemd, which has none of the login shell's PATH. The list is "
+        f"{attrs!r}. 🔴 Naming it in a COMMENT does not count: this asserts the "
+        f"makeBinPath list, because the old block-substring form was satisfied by "
+        f"the prose that explains the entry."
     )
 
 
@@ -4158,6 +4237,15 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
                    DRIFT.read_text())
     assert m4, "no DRIFT_GH_TIMEOUT default in drift-check.sh"
     gh = int(m4.group(1))
+    # The cairn routing-table arm is a FOURTH capped subprocess, and the same
+    # kind of addition again: `cairn routes --check` REFRESHES the read-through
+    # cache before grading (it refuses to grade against a stale one), so it is a
+    # real network call. Exactly one call site, and it runs only on the local
+    # leg — so one multiple, not two.
+    m6 = re.search(r'DRIFT_ROUTES_TIMEOUT="\$\{DRIFT_ROUTES_TIMEOUT:-(\d+)\}"',
+                   DRIFT.read_text())
+    assert m6, "no DRIFT_ROUTES_TIMEOUT default in drift-check.sh"
+    routes = int(m6.group(1))
 
     block = _drift_service_block()
     m3 = re.search(r"TimeoutStartSec = (\d+);", block)
@@ -4227,14 +4315,15 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     probe = n_candidates * probe_cap
 
     needed = (2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2
-              + GH_CALLS * gh + probe + 60)
+              + GH_CALLS * gh + probe + routes + 60)
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
         "%ds + a %ds phase-2 scan + %d branch-protection probes at %ds + %ds of "
-        "address probing + 60s of devrc fetch/ssh = %ds. systemd would kill the "
-        "run and the deadman would report nothing, on a schedule."
+        "address probing + a %ds cairn routes --check + 60s of devrc fetch/ssh "
+        "= %ds. systemd would kill the run and the deadman would report nothing, "
+        "on a schedule."
         % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, GH_CALLS, gh,
-           probe, needed)
+           probe, routes, needed)
     )
 
 
@@ -5395,6 +5484,230 @@ def test_the_extractor_reports_only_the_enum_values_it_finds(tmp_path):
     fact = _parity_fact(home)
     assert fact == "alpha=name-only"
     assert "SECRET" not in fact
+
+
+# --------------------------------------------------------------------------- #
+# THE CAIRN ROUTING TABLE (information only — no rc)
+#
+# `claude/cairn-routes.json` says which INSTANCE each subsystem-store scope lives
+# on. nix/home.nix deploys it to ~/.config/subsystem-store/routes.json and
+# `cairn routes --check` grades it against the scopes this host actually holds.
+#
+# 🔴 THE DESIGN DECISION THESE TESTS PIN: the arm sets NO rc, and that is not
+# "this is unimportant". At ONE configured instance `Routing.check` cannot
+# produce a problem over a table whose every value is `personal` — an unnamed
+# live scope resolves to the sole instance, a table entry naming an empty scope
+# is a NOTE by construction, and the one direction that refuses at a single
+# instance needs an alias no host configures. An rc that cannot fire is a guard
+# nobody has watched go red, which `claude/RULES.md` calls worse than none. The
+# findings are printed; the code belongs with the change that makes it reachable.
+#
+# 🔴 AND EVERY NON-MATCH SAYS WHY. SKIPPED (no client), COULD NOT MEASURE (a
+# client with no `routes` verb, a store it could not read LIVE, a timeout) and
+# NOT DEPLOYED (no table on this host) are three different facts, and none of
+# them may read as "the table matches this host".
+# --------------------------------------------------------------------------- #
+
+# The shapes `cairn routes --check` really emits, cut to what the arm reads.
+# Pinned against the verb's own source rather than invented: the summary line is
+# `routes: N entr{y,ies}, M scope(s) across K instance(s), P problem(s), Q
+# note(s)` on stdout, findings are `🔴 cairn: …` / `⚠ cairn: …` on stderr, and an
+# undeployed table prints `routes: NONE configured …`.
+ROUTES_CLEAN_OUT = (
+    "instances: personal\n"
+    "routes: /home/fx/.config/subsystem-store/routes.json\n"
+    "  alpha -> personal\n"
+    "routes: 1 entry, 1 scope(s) across 1 instance(s), 0 problem(s), 0 note(s)"
+)
+ROUTES_PROBLEM_OUT = (
+    "instances: personal\n"
+    "routes: /home/fx/.config/subsystem-store/routes.json\n"
+    "  alpha -> elsewhere\n"
+    "routes: 1 entry, 1 scope(s) across 1 instance(s), 1 problem(s), 0 note(s)"
+)
+ROUTES_PROBLEM_ERR = (
+    "🔴 cairn: the routing table routes `alpha` to instance `elsewhere`, "
+    "which is not configured on this host"
+)
+
+
+def _routes_block(out):
+    """Just the [routes] lines, so an assertion cannot be satisfied by a word
+    belonging to some other arm's output."""
+    return "\n".join(ln for ln in out.splitlines() if ln.startswith("[routes]"))
+
+
+def test_a_host_with_no_cairn_client_is_SKIPPED_with_a_reason(fleet):
+    """🔴 THE DEFAULT STATE OF EVERY OTHER TEST IN THIS FILE, asserted once here
+    so it is a decided branch rather than an accident of the fixture.
+
+    A skip must never read as a match: nothing was graded, and the line says so
+    and names the remedy.
+    """
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, out
+    assert "SKIPPED" in block, block
+    assert "NOT 'the table matches this host'" in block, block
+    assert "home-manager switch" in block, block
+
+
+def test_the_arm_actually_runs_routes_check(fleet, tmp_path):
+    """🔴 POSITIVE CONTROL. Every verdict below is read off a stub's output, and
+    a stub that was never invoked would produce the SKIPPED line — which another
+    test already asserts, so a wiring fault would look like a passing suite.
+
+    So: the argv is logged and pinned. `--check` is the load-bearing half (bare
+    `routes` prints and exits 0, grading nothing).
+    """
+    log = tmp_path / "cairn-argv"
+    fleet.catch_up()
+    fleet.stub_cairn(stdout=ROUTES_CLEAN_OUT, log=log)
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert log.read_text().split() == ["routes", "--check"], log.read_text()
+
+
+def test_a_clean_table_is_reported_as_agreement_with_its_own_caveat(fleet):
+    """...and the caveat is asserted, not just the verdict.
+
+    A green here is a NARROWER claim than it looks at one instance: it says the
+    table names no unreachable alias and no vanished scope, not that every live
+    scope is registered. A line that said only "matches" would be the confident
+    half of a two-part fact.
+    """
+    fleet.catch_up()
+    fleet.stub_cairn(stdout=ROUTES_CLEAN_OUT)
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, out
+    assert "agree (0 problems)" in block, block
+    assert "narrower than it looks" in block, block
+    assert "DISAGREE" not in block, block
+
+
+def test_a_table_with_problems_is_reported_loudly_and_still_sets_no_rc(fleet):
+    """🔴 THE FINDING PATH, and the no-rc decision in the same assertion.
+
+    Both halves matter: the 🔴 line from cairn must reach the output (an arm that
+    swallowed it would report a disagreement nobody can act on), and the exit
+    code must stay 0 with the reason named — so a reader who wants an rc is sent
+    to the header rather than left guessing that the arm forgot.
+    """
+    fleet.catch_up()
+    fleet.stub_cairn(stdout=ROUTES_PROBLEM_OUT, stderr=ROUTES_PROBLEM_ERR,
+                     exit_code=11)
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, f"the routes arm set an exit code it does not own\n{out}"
+    assert "DISAGREE" in block, block
+    assert "not configured on this host" in block, block
+    assert "1 problem(s)" in block, block
+    assert "WHY NO rc" in block, block
+
+
+def test_notes_are_printed_and_do_not_read_as_a_disagreement(fleet):
+    """⚠ DIRECTION TWO IS A NOTE. cairn grades "the table names a scope that
+    holds no entry" as an observation it CANNOT decide — a snapshot ships entry
+    files, so an empty scope and a retired one look identical — and exits 0. The
+    arm must carry the note through and still report agreement."""
+    fleet.catch_up()
+    out_clean = ROUTES_CLEAN_OUT.replace("0 note(s)", "1 note(s)")
+    fleet.stub_cairn(
+        stdout=out_clean,
+        stderr="⚠ cairn: the routing table names scope `ghost`, which holds no "
+               "entry on any configured instance",
+        exit_code=0)
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, out
+    assert "ghost" in block, block
+    assert "agree (0 problems)" in block, block
+    assert "DISAGREE" not in block, block
+
+
+def test_a_client_without_the_routes_verb_is_COULD_NOT_MEASURE(fleet):
+    """🔴 THE SHAPE THAT MADE THIS ARM BRANCH ON THE LINE, NOT THE CODE.
+
+    A client older than the pin has no `routes` verb: argparse exits 2 with a
+    usage error and no summary line. Read as an exit code that is merely
+    non-zero, that is indistinguishable from "the table has problems" — a
+    confident DRIFT report about a client that graded nothing.
+    """
+    fleet.catch_up()
+    fleet.stub_cairn(stderr="cairn: error: argument {sync,recall,...}: "
+                            "invalid choice: 'routes'", exit_code=2)
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, out
+    assert "COULD NOT MEASURE" in block, block
+    assert "NOT a match" in block, block
+    assert "DISAGREE" not in block, block
+    # the client's own words are surfaced, so the cause is diagnosable from the
+    # journal rather than only from a re-run
+    assert "invalid choice" in block, block
+
+
+def test_a_refusal_to_grade_against_a_stale_cache_is_COULD_NOT_MEASURE(fleet):
+    """The OTHER exit-11 shape, and the reason exit 11 alone cannot be trusted.
+
+    cairn refuses to grade a table against an instance it did not read LIVE,
+    because a stale cache invents findings in both directions — and it signals
+    that refusal with the same code a real problem uses.
+    """
+    fleet.catch_up()
+    fleet.stub_cairn(
+        stdout="instances: personal\nroutes: /home/fx/.config/subsystem-store/routes.json",
+        stderr="🔴 cairn: REFUSING to grade the table — instance `personal` was "
+               "not read LIVE",
+        exit_code=11)
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, out
+    assert "COULD NOT MEASURE" in block, block
+    assert "DISAGREE" not in block, block
+    assert "REFUSING" in block, block
+
+
+def test_an_undeployed_table_is_NOT_DEPLOYED_not_drift(fleet):
+    """🔴 THE PERMANENTLY-RED-GATE GUARD, the same one the tier arm carries.
+
+    Neither host had a routing table when this landed — deploying it is an
+    operator act (`home-manager switch`). If that counted as a disagreement the
+    arm would print a 🔴 on every run from the moment it shipped.
+    """
+    fleet.catch_up()
+    fleet.stub_cairn(
+        stdout="instances: personal\n"
+               "routes: NONE configured — every scope resolves to `personal`")
+    rc, out = fleet.check("--no-remote")
+    block = _routes_block(out)
+    assert rc == 0, out
+    assert "NOT DEPLOYED" in block, block
+    assert "not drift" in block, block
+    assert "DISAGREE" not in block, block
+
+
+def test_the_arm_does_not_run_under_no_local(fleet):
+    """It grades THIS host's store; there is no way to ask the other one without
+    sending a live store read across the ssh hop. Saying so beats a silent
+    absence — under --no-local the block still prints, and says nothing was
+    evaluated."""
+    fleet.stub_ssh(0, stdout="[laptop] clean")
+    fleet.stub_cairn(stdout=ROUTES_CLEAN_OUT)
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    block = _routes_block(out)
+    assert "NOT EVALUATED" in block, block
+    assert "agree" not in block, block
+
+
+def test_the_routes_timeout_is_rejected_when_not_an_integer(fleet):
+    """It bounds a real network call, so it is validated like every sibling
+    tunable rather than interpolated raw into a `timeout` invocation."""
+    rc, out = fleet.check("--no-remote", DRIFT_ROUTES_TIMEOUT="not-a-number")
+    assert rc == 2, out
+    assert "DRIFT_ROUTES_TIMEOUT" in out, out
 
 
 # --------------------------------------------------------------------------- #

@@ -1584,6 +1584,42 @@ in
   home.file.".local/bin/cairn-validate".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-validate";
 
+  # 🔴 THE CAIRN ROUTING TABLE — which INSTANCE each scope lives on. The pinned
+  # client can be pointed at more than one store, and it deliberately ships NO
+  # scope->instance map of its own: the table is an INPUT FILE, because a public
+  # tool carrying somebody's scope list would be publishing their org chart. This
+  # line is devrc's half of that seam, and `claude/cairn-routes.json` is the
+  # table. `scripts/lib/cairn_routes.py` carries the documentation the JSON
+  # cannot (see below); `scripts/tests/test_cairn_routes.py` grades it
+  # deterministically; the `[routes]` arm of `scripts/drift-check.sh` grades it
+  # LIVE against this host.
+  #
+  # 🔴 A home.file STORE COPY, AND THE THREE LINES ABOVE ARE NOT THE PRECEDENT TO
+  # FOLLOW. `cairn-who` and `cairn-validate` are `mkOutOfStoreSymlink` because
+  # each is a SCRIPT that resolves its siblings through
+  # `Path(__file__).resolve().parent / "lib"` — out-of-store is what keeps that
+  # import working. Nothing imports a data file, so that argument does not reach
+  # this line, and the opposite one does: this table decides WHERE A DURABLE
+  # WRITE LANDS. An out-of-store symlink would repoint it the instant anyone
+  # checked out a branch in the checkout — a scope's entries would start landing
+  # on a different instance because someone was reviewing a PR. A store copy
+  # changes only on a `home-manager switch`, which is the granularity a routing
+  # decision deserves. Do not "tidy" these four lines into agreement.
+  #
+  # ⚠ THE TABLE CANNOT CARRY ITS OWN `_doc`, unlike `claude/skill-tiers.json`.
+  # `cairn_instances.load_routes` accepts EXACTLY a flat object of string ->
+  # string: a `_doc` ARRAY raises and takes every `cairn` verb on this host to
+  # exit 11, and a `_doc` STRING is worse — it parses as a route for a scope
+  # literally named `_doc`, so nothing errors and the registry claims a scope
+  # nobody has. Hence flat, documentation-free, with the prose here and in
+  # `scripts/lib/cairn_routes.py`.
+  #
+  # ⚠ THIS MANAGES ONE FILE, NOT THE DIRECTORY. `~/.config/subsystem-store/` also
+  # holds `env` — the host-local 0600 credential file for the default instance,
+  # deliberately unmanaged and deliberately not in git. Adding a file beside it
+  # must never become managing the directory that contains it.
+  home.file.".config/subsystem-store/routes.json".source = ../claude/cairn-routes.json;
+
   # 🔴 `peer-host` — "which MACHINE is this peer session on", ON PATH for exactly
   # the rationale `claim-work` states above: the caller is A SESSION IN ANOTHER
   # REPO deciding where to route work, and such a session cannot resolve an
@@ -3560,7 +3596,15 @@ in
       # undifferentiated `+ 60` literal — raising that 10s to 120s moves nothing
       # in the test. An earlier version of this comment said it "counts both",
       # which described coverage one term wider than the implementation.
-      TimeoutStartSec = 420;
+      #
+      # 🔴 RAISED 420 -> 440 when the cairn routing-table arm landed. That arm
+      # runs `cairn routes --check`, bounded by $DRIFT_ROUTES_TIMEOUT (default
+      # 20s) — a REAL network call, because cairn refuses to grade a table
+      # against a cache it did not refresh. The test's model now carries that
+      # term, so the 10s of slack recorded above is preserved rather than spent:
+      # needed went 410 -> 430 against a 440 ceiling. Do not read the raise as
+      # headroom for anything else.
+      TimeoutStartSec = 440;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
@@ -3589,7 +3633,18 @@ in
         # ⚠ gh needs credentials, which are NOT on this PATH: under the user
         # manager it reads ~/.config/gh (HOME is set below). If that is ever
         # absent the arm says COULD NOT MEASURE rather than reporting drift.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux pkgs.gh ]}"
+        # 🔴 cairnPackage IS FOR THE ROUTING-TABLE ARM, and it is the same silent
+        # failure the three notes above record: without the pinned client on this
+        # PATH the arm prints SKIPPED — no usable cairn binary — on every timer
+        # run, forever, from a unit that looks correct. It is the PINNED package
+        # rather than `%h/.local/bin/cairn` for the reason spelled out on the
+        # `analyze-service-index-backup` unit: that path is a home-manager
+        # symlink into /nix/store and may point at a generation this unit was not
+        # built against. ⚠ `cairn routes --check` REFRESHES the read-through
+        # cache (it refuses to grade against a stale one), so this entry is what
+        # makes the unit do a network read; the checkout ban in the script's
+        # header is unaffected.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux pkgs.gh cairnPackage ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
@@ -3605,6 +3660,10 @@ in
         "${../scripts/lib/skill_tier_facts.py}"
         "${../scripts/lib/skill_tiers.py}"
         "${../claude/skill-tiers.json}"
+        # The cairn routing-table arm. The table is listed for the same reason
+        # the tier ledger is: re-pointing a scope changes what the unit would
+        # REPORT without any script changing at all.
+        "${../claude/cairn-routes.json}"
       ];
     };
   };
