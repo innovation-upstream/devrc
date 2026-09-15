@@ -68,7 +68,7 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
   at 37.3h active silence, last ClickHouse row `2026-09-09 16:50:25` UTC, every other laptop
   pair ok in the same run.)
 
-### 🔴 OPEN — three WORKBENCH GUI sources DEAD (as-of 2026-09-14, NEW — not the item above)
+### ⚠ DIAGNOSED, awaiting an OPERATOR MODEL DECISION — three WORKBENCH GUI sources read DEAD (2026-09-14, NEW — not the item above)
 - as-of: 2026-09-14
 - **Symptom + exact repro:** `python3 ~/workspace/devrc/scripts/collector/deadman.py` → exit 1,
   `rows=14788 evaluated=20 dead=3`.
@@ -82,14 +82,44 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
   `keys` are all ok at 0.0h silence in the same run. via: measurement
 - **Ruled out — this session's two `home-manager switch`es:** the silences (16.8–32.7h) predate
   the session. via: measurement
-- **Leading hypothesis:** whatever starts the workbench's GUI-session capture is not running —
-  the three DEAD sources are exactly the graphical ones, and they died at three different times
-  (28.8 / 16.8 / 32.7h), which argues against one shared restart and for three independent
-  stops or a common parent that has been down across all three.
-- **Next probe:** the `activity` skill owns source revival. `systemctl --user list-units --all
-  '*keylog*' '*i3*' '*browser*' --no-pager` on the workbench, then that skill's per-source
-  revival path. `activity-collector.service` itself is `active running` — the collector is NOT
-  the failure.
+- 🔴 **DIAGNOSED — NOTHING IS BROKEN. This is ABSENCE, and the alarm is a MODEL defect.**
+  An earlier draft of this entry guessed "whatever starts the workbench's GUI capture is not
+  running". **That is REFUTED** — do not re-derive it.
+- **Ruled out — the units are down:** all three are `active running` on the workbench.
+  `keylog` restarted `2026-09-14 20:59:52 CDT` (that was a `home-manager switch` from THIS
+  session — the `activity` skill documents that a switch restarts these daemons),
+  `i3-source` up since `09-11 12:28:35` with no `i3 connection closed` since,
+  `browser-activity-receiver` since `09-06`. via: measurement
+- 🔴 **Ruled out — the emit path is broken. POSITIVE CONTROL, which is what makes this a
+  diagnosis rather than a guess:** both `i3` and `browser` emitted AFTER the cliff — `i3`
+  4 rows on 09-12, `browser` 2 rows on 09-11. source → spool → collector → ClickHouse
+  demonstrably still works. ⚠ `keys` has **NO post-cliff positive control** (last row
+  `09-09 20:03:49`), so its path is inferred from its siblings, not proven.
+- **Observed — a clean cliff on 2026-09-09, all three at once** (daily row counts):
+  through 09-09 `keys` 2,075/d · `i3` 1,097/d · `browser` 295/d; then 09-10 nothing,
+  09-11 `browser` 2 + `i3` 5, 09-12 `i3` 4, nothing after.
+- **Ruled out — a fleet-wide GUI-source defect:** the LAPTOP's `keys`/`i3`/`browser` are live
+  right now (0 / 2 / 14 minutes ago). A human types on one keyboard at a time. via: measurement
+- **Conclusion:** the operator moved to the laptop around 2026-09-09 and has not driven the
+  workbench's X session since. The workbench's graphical stack is healthy and idle.
+- 🔴 **So why does the deadman still convict it? Because workbench ACTIVE TIME keeps
+  advancing without a human.** Silence is counted in active buckets, and
+  `deadman.PRESENCE_SOURCES` = `keys` `i3` `tmux` `zsh`. On this box `tmux` (4,843 rows/3d)
+  and `zsh` (211) are driven by the AGENT sessions running in tmux — so the workbench's
+  human-presence clock runs at full speed with nobody there, and its three genuinely-idle GUI
+  sources burn through their 2.0h budgets. **This is the 2026-08-11 failure mode in a narrower
+  shape:** that fix converted presence to an allowlist and removed the obviously-agent sources
+  (`claude`/`tool`/`opencode`/`browser-bridge`), but `tmux` and `zsh` remain agent-drivable and
+  were left in.
+- 🔴 **DO NOT "fix" this by widening a budget or adding an exception.** The `activity` skill is
+  explicit that nothing in this checker is hand-listed and that an exception table is precisely
+  what it exists to avoid — and `the-algorithm` says the fix for over-guarding is never another
+  guard. The open question is a MODEL one and is the operator's: should a bucket count as
+  human-present only when marked by a source an agent CANNOT drive? Answering yes costs
+  detection latency on a box where the human genuinely is present, which is the trade the
+  skill's COST section already documents.
+- **Until it is answered:** the deadman stays rc 1 and the `tlm` pill stays red on a fleet where
+  nothing is wrong — a standing false alarm, which is its own cost.
 
 ## Next steps (ranked)
 1. ✅ **DONE — #1699 MERGED (`37b3bd07`) and SHIPPED to both hosts.**
