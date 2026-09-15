@@ -389,9 +389,11 @@ COUNTED RATHER THAN DELIBERATED — and never available before ROUND 2. The ⚠ 
 above demands a distinction; this paragraph is the only thing that makes it.** **This count
 governs a PR whose WHOLE DIFF is prose, never merely one whose PAYLOAD is** — that is the
 population it was derived on, and across ALL ladders two-thirds is an ordinary point on a flat
-distribution rather than a gap. A PR that also ships scaffolding is outside it and does not
-need it: a round whose fix touches only the scaffolding changes ZERO payload lines, so two such
-rounds fire the ordinary attribution gate, which stays the stop signal there. The unit is
+distribution rather than a gap. A PR that also ships scaffolding is OUTSIDE it, and there the
+ordinary attribution gate is REACHABLE: a round whose fix touches only the scaffolding changes
+ZERO payload lines, so two such rounds fire it. ⚠ That is why the narrowing costs less than it
+looks — not that it is free. A scaffolding-carrying ladder whose every round DOES touch payload
+has neither mechanism, and ends only by converging. The unit is
 LINES, never findings: a findings count needs a `file:line` per item and what a round RECORDS
 about its own fixes almost never carries one, so the denominator is chosen by whoever counts —
 and the one the PR record actually supports FORBIDS this section's founding case, `#1111`.

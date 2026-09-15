@@ -3342,10 +3342,12 @@ PROSE_DETERMINATION_POPULATION = (
     "**This count governs a PR whose WHOLE DIFF is prose, never merely one "
     "whose PAYLOAD is** — that is the population it was derived on, and across "
     "ALL ladders two-thirds is an ordinary point on a flat distribution rather "
-    "than a gap. A PR that also ships scaffolding is outside it and does not "
-    "need it: a round whose fix touches only the scaffolding changes ZERO "
-    "payload lines, so two such rounds fire the ordinary attribution gate, "
-    "which stays the stop signal there."
+    "than a gap. A PR that also ships scaffolding is OUTSIDE it, and there the "
+    "ordinary attribution gate is REACHABLE: a round whose fix touches only "
+    "the scaffolding changes ZERO payload lines, so two such rounds fire it. "
+    "⚠ That is why the narrowing costs less than it looks — not that it is "
+    "free. A scaffolding-carrying ladder whose every round DOES touch payload "
+    "has neither mechanism, and ends only by converging."
 )
 PROSE_DETERMINATION_FLOOR = (
     "Round 1 has no previous round to attribute to, so it can never satisfy "
