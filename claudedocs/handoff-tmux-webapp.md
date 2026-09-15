@@ -207,7 +207,7 @@ From the analyze-service index (**recall — verify before relying on**):
 ## Next steps (ranked)
 
 
-🔴 **Ranks 1–46, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They are lessons rather than status, which is why they were demoted and not dropped. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — an item completed AFTER a sweep must be evicted in the same change that closes it, or the queue offers finished work to the next session. This doc stood at 327,624 B of a 327,680 B budget (56 B), and the next routine handoff write would have turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone; `claudedocs/refs/` is exempt from that test, `claudedocs/handoff-*.md` is not.
+🔴 **Ranks 1–47, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They are lessons rather than status, which is why they were demoted and not dropped. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — an item completed AFTER a sweep must be evicted in the same change that closes it, or the queue offers finished work to the next session. This doc stood at 327,624 B of a 327,680 B budget (56 B), and the next routine handoff write would have turned `test_no_handoff_doc_exceeds_its_budget` red on `main` for everyone; `claudedocs/refs/` is exempt from that test, `claudedocs/handoff-*.md` is not.
 
 🔴 **A SECOND SWEEP 2026-09-14 EVICTED SIX MORE — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED FOR DAYS WHILE STILL READING AS OPEN.** Six of the fifteen entries the queue advertised were finished or fictional. **The mechanism is measured, not guessed: the first sweep keyed on each rank's HEADING LINE — a heading carrying `✅`, `DONE` or `CLOSED` — and every closure recorded only in a rank's BODY survived it**, predicting eviction for 58 of 62 ranks. Of the four exceptions, 53 is a false positive of the predicate (`WORKBENCH IS NOW DONE` in the heading, laptop half genuinely open); 61's closure was written as a `### ✅ RESOLVED` heading in the **Open investigations** section, a THIRD location; and 46 and 62 carried no marker anywhere and were evicted anyway — 🔴 **why is NOT explained, and an earlier draft of this sentence guessed "closed by the sweep session itself", which was false for two of the three it named.** What IS established is the false-NEGATIVE direction: **no rank with a body-only marker was ever evicted**, measured over all 62.
 
@@ -215,11 +215,6 @@ From the analyze-service index (**recall — verify before relying on**):
 
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
-47. **Confirm the tmux collapse defect was the operator's actual symptom.** #796 fixed a real
-   force-open bug, but the connected Brave profile has **zero** `cg.tmux.group.*` keys, so the
-   collapse is not active there. Read that localStorage on the device where sessions appear
-   missing (a phone is the untested case).
-   forcing: user — the operator reported missing sessions; the fix is unconfirmed against it.
 48. **Re-spec task 521 around a per-agent token.** `tier` discriminates the DOOR (`token` vs
    `browser`), not the caller; one shared `CLAWGATE_TERMINAL_TOKEN` makes every machine caller
    identical. `requireAgentToken` (`internal/api/agent.go:30-46`) already resolves a per-agent
