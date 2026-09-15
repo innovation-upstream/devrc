@@ -388,3 +388,65 @@ evicted: rank 8 is LIVE and dated 2026-09-18, and that section is its arming evi
   that two other sessions had just superseded my own `#1512` read with a better-powered one
   (`#1568`, ancestry split, P(0) ≈ 0.017 vs my 0.23). **Pruning would have deleted work that improves
   on mine.**
+
+### EVICTED 2026-09-14 — two superseded blocks from CLOSED ranks 14 and 16
+Verbatim. Each was already labelled superseded in the handoff; the blocks that supersede
+them remain live in `claudedocs/handoff-gate-speed-and-ci-signal.md`.
+
+### 🔴 RANK 14 (ORIGINAL, superseded by the block above): a flaky tmux test on `main` is reddening unrelated PRs
+- as-of: 2026-09-13
+- **Symptom + exact repro:** on a clean checkout of `origin/main`,
+  `nix develop ~/workspace/devrc -c python3 -m pytest
+  scripts/tests/test_tmux_hyperlink_open.py -k stores_the_hyperlink -q` — run it **three times**.
+- **Observed (with values):** **1 passed / 2 failed in 3 consecutive runs** on `origin/main`
+  `80266b76`, same tree, same command, nothing else changed. The failure is
+  `assert URI in out.stdout` where **`out.stdout` is EMPTY** — `capture-pane -p -H -t t` returned
+  nothing, `returncode == 0`. Local `tmux 3.7c`. It also reddened `#1629`'s CI
+  (`FAILING: test_tmux_stores_the_hyperlink_and_can_report_it | … failed=2`), whose diff touches
+  only `scripts/stale-base-triage.py` and its test and cannot reach tmux.
+- **Ruled out:** "`#1629` caused it" — the diff cannot reach tmux, and the test fails on a clean
+  `origin/main` worktree with no PR content at all. via: measurement
+- **Ruled out:** "`main` is deterministically RED" — run 1 PASSED. This is a flake, not a break,
+  and the distinction changes who must act and how urgently. via: measurement
+- **Ruled out:** "`capture-pane -H` is unsupported here" — the flag parses; the failure is an
+  EMPTY capture, not an error, and it succeeds on some runs. via: command
+- **Leading hypothesis:** a race between the tmux server rendering the OSC 8 sequence into the grid
+  and `capture-pane` reading it. The test's own docstring calls it an **INVARIANT GUARD, not
+  regression coverage**, and notes it passed before the fix too — so it is a guard whose failure
+  costs everyone a red PR while proving nothing about the change that introduced it.
+- **Next probe:** `git log --diff-filter=A -- scripts/tests/test_tmux_hyperlink_open.py` to confirm
+  it arrived with `c794c9a7` (`#1622`, OSC 8 hyperlinks), then either make the capture wait for the
+  URI to appear (poll with a bounded deadline) or delete the guard. 🔴 **Deliberately NOT taken
+  unilaterally — it is another session's test, days old, and `claude/RULES.md` says a flaky test is
+  FIXABLE rather than re-runnable, but the fix is the author's call.**
+### `main` is RED on two UNOWNED guards, and BOTH are guard-vs-guard conflicts rather than bugs
+- as-of: 2026-09-14
+- **Symptom + exact repro:** on a clean `origin/main` `6c8c94d2` worktree with zero PR content,
+  `pytest scripts/tests/test_runtime_shebangs.py scripts/claude-hooks/tests/test_clawgate_writeback_guard.py`
+  → **2 failed**. CI reports the pair as `failed=2` on every PR head.
+- **Observed (with values) — RED 1, `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`:**
+  **42 unpinned hits, ALL in `scripts/claude-hooks/tests/test_guard_core.py`**, all introduced by
+  ONE commit — `9b8969a8` (#1551), which taught the wide-kill guard to see kills *inside executed
+  scripts* and therefore had to write scripts. `git blame` on 4676 / 5161 / 6244 all → `9b8969a8`.
+- **Observed — RED 2, `test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints`:** the hook's
+  `FLOW_DEPLOYED = "~/.claude/skills/clawgate/flows/task-pickup.md"`
+  (`clawgate-writeback-guard.py:496`); `claude/skills/clawgate/SKILL.md` contains that literal
+  **0** times (it says `flows/task-pickup.md`). The task-authoring path is **0** too.
+- **Ruled out:** "someone is already on them" — no `claim-work` entry, and no open PR touches
+  either file. via: command
+- **Ruled out:** "RED 1 is fixed by swapping the interpreter" — replaced all 40
+  `#!/usr/bin/env bash` with `#!/bin/sh`: **1639 passed** in `test_guard_core.py` (so the env
+  shebang is NOT load-bearing) but the scan **still fails** — it flags EVERY shebang a test
+  writes, not just `/usr/bin/env`. via: measurement
+- **Ruled out:** "just allowlist it" — the guard's own header says *"Do not add an ALLOWLIST entry
+  to get green"*, and one entry keyed on `#!` would exempt a 6,000-line file from a repo-wide
+  safety guard forever. via: doc
+- **Leading hypothesis:** RED 1 is rank 9's class generalised — *a guard banning pattern X is
+  tripped by the suite whose SUBJECT is X* (one fixture deliberately tests a **lying** shebang, so
+  its shebang is genuinely under test). RED 2 is a three-way pull: this seam guard requires the
+  literal path, `df09a6c2` (#1621) gates *against* a skill spelling out a path a handle names, and
+  `f45bb86e` (#1640) evicted content to satisfy the size ceiling.
+- **Next probe:** none needed — this is an operator decision, already put to them. RED 1:
+  allowlist-with-evidence (verified: these scripts are never dispatched via their shebang; they are
+  scanned, or invoked as `bash <path>`, which ignores it) **vs** routing all 42 through
+  `mockbin.write_exec`. RED 2: decide which of the three gates yields.
