@@ -56,6 +56,8 @@ from __future__ import annotations
 import importlib.util
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -490,4 +492,135 @@ def test_the_PAIR_check_goes_RED_on_a_real_battery_COPY(battery, tmp_path):
     assert any(b.startswith(row[0] + "-TRUNCATED:") for b in bad), (
         "the pair check did not report the truncated row — it cannot see the "
         f"failure it exists for. offenders={bad!r}"
+    )
+
+
+def test_the_dispatch_batterys_floor_is_re_derived_from_its_target_module():
+    """🔴 STRUCTURAL replacement for "remember to re-derive the floor".
+
+    `mutants-audit-dispatch.py` carries a hand-maintained `MIN_TESTS` that
+    floors how many tests must RUN before it will score a mutant, and its own
+    comment block says out loud that nothing pins it: *"it is maintained by
+    this comment and by whoever reads it."* That is what failed. The floor was
+    set at m = 154 by round 19 and the target module reached 163 over rounds
+    20-23, so no single round's diff ever looked wrong and the gap reached 16
+    -- past the 15 that same block names as the point where a floor would
+    vouch for a suite that had silently lost every test added since round 16.
+    A floor that is too LOW never complains, so nothing surfaced it.
+
+    The floor is NOT hypothetical: during round 21 the sandbox lost an import
+    and the harness reported `only 0 test(s) ran (floor 147)` instead of
+    scoring 170 mutants SURVIVED. This guard protects that.
+
+    ⚠ THIS FILE IS IN `NOT_TABLE_DRIVEN`, AND THAT IS A DIFFERENT PROPERTY.
+    The exemption is from the ANCHOR pins -- it builds mutants with functions
+    rather than a `MUTANTS` table -- and says nothing about its floor. Do not
+    read the exemption as covering this.
+
+    🔴 THE COUNT IS A REAL COLLECTION, NOT A REGEX, AND THAT IS THE WHOLE
+    DIFFERENCE FROM THE SIBLING GUARD. `test_the_batterys_floor_is_re_derived_
+    from_this_modules_size` counts `^\\s*def test_` and asserts the target
+    parametrises nothing, which holds for its small shell battery. Here it
+    does not: `test_audit_dispatch.py` carries SIX `parametrize` decorators,
+    and MEASURED at the commit that added this guard the regex counts **141**
+    against **163** collected. A floor derived from 141 is 134 -- **21 below**
+    the correct 155, in the silent direction. So this asks pytest, in a
+    subprocess, which is not re-entering pytest in-process.
+
+    🔴 DELIBERATELY TIGHTER THAN `run-tests.sh`'s BAND, and the reason is the
+    module size. That gate tolerates `collected > floor + max(60, floor/4)`
+    because its targets hold thousands of tests. Over a 163-test module a
+    60-test band would permit exactly the collapse this harness exists to
+    detect, so the floor here must be at least the formula's own value. The
+    cost is stated rather than discovered: **adding one test to the target
+    reddens this guard**, and that is the intended behaviour -- the error
+    prints the replacement number, so the bump is mechanical. Four rounds of
+    prose asking authors to do it by hand is what this replaces.
+
+    Both directions are checked. A floor left too HIGH already fails loudly
+    (the harness refuses to run), but it is a cheap second assertion here and
+    it names the fix instead of surfacing as `THE HARNESS could not run`.
+    """
+    harness = HERE / "mutants-audit-dispatch.py"
+    target = HERE / "test_audit_dispatch.py"
+    assert harness.is_file() and target.is_file(), (
+        f"expected both {harness.name} and {target.name} in {HERE}. If either "
+        "moved, re-point this guard; if either was deleted, delete this guard "
+        "in the same commit rather than leaving a pin on a missing file."
+    )
+
+    # 🔴 STRUCTURAL, so no conditional override can make the floor depend on
+    # the environment (devrc #1431). `^\s*` and not `^`: the column-0 anchor is
+    # precisely what let an INDENTED override inside an `if` go unseen there.
+    assignments = re.findall(r"^\s*MIN_TESTS\s*=", harness.read_text(encoding="utf-8"), re.M)
+    assert len(assignments) == 1, (
+        f"expected exactly ONE `MIN_TESTS =` assignment in {harness.name}, "
+        f"found {len(assignments)}. A second one -- including an indented "
+        "override inside an `if` -- makes the floor depend on the environment, "
+        "so no single value this guard reads is the one a given run uses."
+    )
+
+    # 🔴 READ THE EFFECTIVE VALUE BY IMPORT, never by regexing the source text.
+    # `_load` runs no side effects (everything is under `__main__`), and an
+    # import sees whatever the module actually binds.
+    floor = _load("mutants-audit-dispatch.py").MIN_TESTS
+    assert isinstance(floor, int), (
+        f"{harness.name} binds MIN_TESTS={floor!r}, which is not an int. An "
+        "unreadable floor must NOT be treated as a passing one."
+    )
+
+    # 🔴 `--collect-only` IS LOAD-BEARING BEYOND SPEED, and this was MEASURED
+    # rather than reasoned. A nested pytest that RUNS would fire
+    # `nogit_plugin.no_real_git` -- a `scope="session", autouse=True` fixture
+    # that `scripts/tests/conftest.py` imports, so `-p` is not needed to get it
+    # -- and, inheriting `DEVRC_TEST_GIT_GUARD_DIR` from the runner, would
+    # append its own `control-<pid>` marker to the ONE shared guard file that
+    # GUARD 10's ledger counts. Collection never reaches fixture setup, so this
+    # child writes nothing. CONTROL, both arms under a shared guard dir with
+    # `-p testlib.nogit_plugin`: markers=1 with `nogit_plugin.NESTED_ENV` set
+    # and markers=1 without it -- identical, because the fixture never runs.
+    #
+    # 🔴 SO DO NOT MAKE THIS A REAL RUN without setting that flag. The moment
+    # `--collect-only` comes off, the child starts writing markers and GUARD
+    # 10 reports "N session marker(s), expected 1" -- which reads as "this
+    # target ran WITHOUT the guard", a false red on the check that exists to
+    # catch a true one. The plugin's own NESTED_ENV comment names that shape.
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(target),
+         "--collect-only", "-q", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, (
+        f"collecting {target.name} exited {proc.returncode}; this guard cannot "
+        "read the real test count, and an unreadable count must NOT be treated "
+        f"as a passing one.\nstdout={proc.stdout[-2000:]!r}\n"
+        f"stderr={proc.stderr[-2000:]!r}"
+    )
+    # 🔴 PARSING OUTPUT MAKES ITS FORMAT A DEPENDENCY. A miss here must be LOUD,
+    # never a quiet zero that reads as a clean floor.
+    found = re.search(r"^(\d+) tests? collected", proc.stdout, re.M)
+    assert found, (
+        "could not find pytest's `N tests collected` line in the collection "
+        "output -- the format changed, or nothing was collected. Either way "
+        "this guard measured NOTHING and must not pass.\n"
+        f"stdout={proc.stdout[-2000:]!r}"
+    )
+    m = int(found.group(1))
+    assert m > 0, f"{target.name} collected 0 tests; the floor is meaningless."
+
+    expected = m - min(50, max(1, m // 20))
+    assert floor >= expected, (
+        f"`{harness.name}` floors at MIN_TESTS={floor}, but {target.name} now "
+        f"collects {m} tests, and this repo's floor formula "
+        f"`m - min(50, max(1, m // 20))` gives {expected}.\n\n"
+        f"  Set MIN_TESTS = {expected} in {harness.name}, and ADD AN ENTRY to "
+        "the comment block above it saying so.\n\n"
+        "  A floor left BELOW the target's size is invisible: the battery goes "
+        "on printing `all as expected` while tests it was meant to sweep "
+        "quietly disappear. That is how it drifted 16 low across four rounds."
+    )
+    assert floor <= m, (
+        f"`{harness.name}` floors at MIN_TESTS={floor}, above the {m} tests "
+        f"{target.name} collects, so the harness will refuse to run at all "
+        f"(`only {m} test(s) ran (floor {floor})`). Set MIN_TESTS = {expected}."
     )

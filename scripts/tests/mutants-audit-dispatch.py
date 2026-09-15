@@ -153,7 +153,27 @@ TESTLIB_RELS = (
 # derived by adding this round's new tests to 131, and the jump is larger than
 # the test count because one of them is parametrized over a twelve-row fixture
 # ledger.
-MIN_TESTS = 147
+#
+# 🔴 RAISED AGAIN 2026-09-15, 147 -> 155, at m = 163 — COUNTED from this
+# harness's own `POS  unmutated copy .......... 163 passed` line, put through
+# the same formula, `163 - min(50, max(1, 163 // 20))` = 163 - 8 = 155. NOT
+# derived by adding rounds 20-23's new tests to 147.
+#
+# 🔴 THIS RAISE IS NOT ANY ONE ROUND'S DRIFT, AND THAT IS WHY IT WAS MISSED.
+# The floor was set at m = 154 by round 19 and the module reached 163 over
+# rounds 20-23, so no single round's diff ever looked wrong. The gap had
+# reached 16 — one more than the 15 the round-18 paragraph above names as the
+# point where a floor would vouch for a suite that had silently lost every
+# test added since round 16. Round 23 saw it and correctly DECLINED to fix it
+# (its brief scoped a MIN_TESTS change to "if the module grew", and it added
+# no tests); it named the closing condition instead.
+#
+# 🔴 A FLOOR THAT IS TOO LOW NEVER COMPLAINS — that is the whole reason this
+# sat for four rounds, and it is the direction no green run can report.
+# Negative control WATCHED, not assumed: at `MIN_TESTS = 999` the harness
+# refuses with `🔴 THE HARNESS could not run: only 163 test(s) ran (floor
+# 999) — the harness, not the tree`. So the check is reached and enforcing.
+MIN_TESTS = 155
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
