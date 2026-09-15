@@ -3205,8 +3205,16 @@ ROWS = [
      {"test_the_clone_grant_covers_only_the_write_the_recipe_makes",
       "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
      the_clone_grant_permits_fetching_again),
+    # 🟢 A SECOND WITNESS, and it confirms a REACHABILITY claim rather than a
+    # behaviour. The fix round's F9 test reaches the blockless boundary only
+    # because this refusal falls through to `--emit-claims` instead of
+    # returning outright — its docstring says so. Under this mutant nothing is
+    # emitted, so the test goes red: the fall-through really is what makes that
+    # state reachable, which is the half a reachability claim usually asserts
+    # without evidence.
     ("V23 REFUSAL 1 blocks the remedy it prescribes",
-     {"test_every_command_a_refusal_prescribes_actually_runs"},
+     {"test_every_command_a_refusal_prescribes_actually_runs",
+      "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there"},
      the_no_block_refusal_blocks_its_own_remedy),
     ("V24 an ASSUMED base branch is recorded as read",
      {"test_no_brief_states_an_assumed_base_branch_as_a_fact"},
