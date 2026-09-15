@@ -3499,10 +3499,25 @@ ROWS = [
      {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
       "test_the_prose_determination_names_the_boundary_it_can_resolve",
       "test_the_determination_ships_its_RESTRAINING_half_too",
-      "test_the_determination_mandates_the_whitespace_and_move_blame_flags"},
+      "test_the_determination_mandates_the_whitespace_and_move_blame_flags",
+      # The fix round's three, all of which slice the output on the section
+      # heading. Recorded rather than re-scoped, for the reason this row's
+      # comment already gives: a deletion that takes its dependants with it is
+      # a TRUE report, and pretending the set is smaller would be the row
+      # lying about what it saw.
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero",
+      "test_a_run_with_NO_BLOCK_does_not_blame_a_block_that_is_not_there",
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS"},
      det_section_dropped),
+    # ⚠ Q3 AND Q13 ARE NOT DUPLICATES, and the overlap is the point. Q3
+    # rewrites the collision BRANCH so a structural zero prints as an ordinary
+    # boundary; Q13 leaves the branch alone and breaks the PREDICATE that
+    # reaches it. Either defect produces the same wrong sentence, so the
+    # LONGER/MIXED-CASE test fires on both — one of them through a spelling
+    # difference the base could not even see.
     ("Q3  the anchor/<from> COLLISION printed as an ordinary boundary",
-     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve",
+      "test_a_LONGER_OR_MIXED_CASE_anchor_is_still_the_structural_zero"},
      det_collision_reads_as_an_ordinary_boundary),
     ("Q4  the prose-ONLY condition dropped from the section",
      {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before"},
@@ -3540,7 +3555,11 @@ ROWS = [
     # one F2 named — and the guard that catches it is deliberately NOT bound to
     # the seam constant, because the constant survives this edit intact.
     ("Q12 the (a) and (c) NOT-MEASURED states dropped",
-     {"test_the_prose_determination_names_the_boundary_it_can_resolve"},
+     {"test_the_prose_determination_names_the_boundary_it_can_resolve",
+      # The fix round's ledger sees it too, from the other side: the paragraph
+      # is now BUILT from `PROSE_NOT_MEASURED_STATES`, so bypassing the ledger
+      # is exactly the edit the two-way set comparison exists to catch.
+      "test_the_NOT_MEASURED_states_the_section_SHIPS_are_the_set_the_code_RETURNS"},
      det_not_measured_states_a_and_c_dropped),
     ("Q11 a structural zero returned as a measured miss",
      {"test_the_founding_case_and_its_neighbours_are_a_REGRESSION_fixture",
