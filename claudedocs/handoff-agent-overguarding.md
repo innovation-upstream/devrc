@@ -13,25 +13,39 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
 - **closing-condition:** `check` — the PR carrying this work is merged, `scripts/ship.sh` has converged BOTH hosts, and on both hosts `readlink -f ~/.claude/skills/the-algorithm/SKILL.md` terminates in `/nix/store` AND `scripts/sync-skill-tiers.py` (dry-run) reports no diff.
 
 ## State now
-- Branch / PR: workbench checkout was on `main`, in sync with origin/main; this doc + the 13 staged files are on branch `feat/the-algorithm-skill` (staged work UNCOMMITTED; doc committed separately by the handoff gate). PR: not yet opened.
+- Branch / PR: **`feat/the-algorithm-skill` → PR #1699 OPEN** (this doc + the 13 files, committed and pushed). Sibling security PR: **#1700** on `fix/scrub-client-subdomain`, off `main`, one file.
 - DONE this session:
   - Measured the over-guarding (all live 2026-09-14): last 6w = 1,326 non-merge commits, 407 guard (31%), 287 touching NO product file, guard churn +352k lines; 268 of 408 test files added in 6w; 414k test LOC vs 126k product LOC (3.3:1); ~30 of 251 `scripts/tests/` files are meta-guards (doc ceilings, prose pins, mutation batteries for ceilings).
   - Telemetry (Claude transcripts, devrc, 14d): 97 sessions, 21.5B cache-read tokens; **41.2% of 20,913 Bash calls are test/gate runs** (8,616); 32% of edits touch guard files. Fleet 14d: 495 sessions, 81.9B cache-read, 681 AskUserQuestion, 91 interruptions.
   - Shipped `claude/skills/the-algorithm/SKILL.md` (tier A in `claude/skill-tiers.json`, two-way pin satisfied).
   - Paid the two listing ratchets per their printed playbooks: mechanism prose cut from 9 descriptions (browser, i3, opencode, signal, tekton, clickup, prune-index, session-manager, initiative-scan — zero trigger phrases or disambiguation clauses touched); `LISTING_TOTAL_CEILING_CHARS` re-pinned 11,170→10,832 in `scripts/tests/test_skill_descriptions.py`; `MEASURED_*` constants in `scripts/tests/test_skill_tiers.py` copied from the failure's printed values (36 / 23 / 7,510 / 7,695 / 11,011).
   - Workbench deployed via `home-manager switch --impure` — VERIFIED live: `readlink -f ~/.claude/skills/the-algorithm/SKILL.md` → `/nix/store/mygfci9zjv14z4g868kyi9dip2324df2-devrc-claude-skills/the-algorithm/SKILL.md`; `~/.config/opencode/commands/the-algorithm.md` generated.
-- IN FLIGHT: the 13 staged files (skill + ledger + 9 description cuts + 2 test re-pins) — UNCOMMITTED, branch `feat/the-algorithm-skill`. Laptop NOT converged (post-merge `ship.sh`). `sync-skill-tiers.py` NOT applied on any host (operator act, dry-run default; drift-check reports NOT ADOPTED, no rc, until applied).
+- IN FLIGHT: **two open PRs awaiting merge — #1699 (the skill) and #1700 (the scrub)**; nothing uncommitted. Laptop NOT converged (post-merge `ship.sh`). `sync-skill-tiers.py` NOT applied on any host (operator act, dry-run default; drift-check reports NOT ADOPTED, no rc, until applied).
 - Verify status (honest): ledger gates 61/61 green; corpus guards 297/297; census run 401 passed with 1 PRE-EXISTING red (client-hostname leak below — unrelated to this diff). Full scoped sweep abandoned >15 min under box load — NOT run to completion; no full-suite pass is claimed.
 
 ## Open investigations — live diagnosis state
 
-### test_no_client_hostnames red: client subdomain committed to this PUBLIC repo (as-of 2026-09-14)
+### ✅ CLOSED 2026-09-14 — client subdomain scrubbed from HEAD; history exposure sized and left to the operator
 - as-of: 2026-09-14
-- **Symptom + exact repro:** `nix develop ~/workspace/devrc -c python3 -m pytest scripts/tests/test_no_client_hostnames.py::test_no_client_subdomain_literal_is_committed -q` → FAILED; blocks `scoped-tests.sh`'s ledger-check (`STOPPED at the repo-census guards`, rc 1).
-- **Observed (with values):** assertion names `claudedocs/handoff-cairn-oss-multi-instance.md:778: cairn.civitai.com` — "a CLIENT subdomain is committed to a PUBLIC repo — this is internal topology"; the line reads "from day one**; **`cairn.civitai.com`, CF-proxied**; **Zach the sole token admin for now**".
-- **Ruled out:** this session's diff — the named file is not among the 13 staged paths and the failure predates them. via: code
-- **Leading hypothesis:** a prior cairn session committed the real client hostname into the doc prose.
-- **Next probe:** scrub to a `*.example.test` form in the doc, then `git -C ~/workspace/devrc log --all --oneline -S 'cairn.civitai.com'` to size history exposure — the content gates read `git ls-files` and are BLIND to git history (see `SECRETS.md` → "Dead credentials in reachable history"); if the hostname is in reachable history, history-rewrite-vs-accept is an operator call.
+- 🔴 **DO NOT SPELL THE HOSTNAME IN THIS DOC.** The first version of this entry quoted the
+  literal three times while documenting the leak, which re-committed the same client topology
+  to the same public repo — and would have carried it to `main` through the PR that closes
+  rank 1. Refer to it as "the client subdomain"; the scan matches prose, not just code.
+- **Was:** `test_no_client_hostnames::test_no_client_subdomain_literal_is_committed` FAILED on
+  `main` — a client subdomain was committed to this PUBLIC repo at
+  `claudedocs/handoff-cairn-oss-multi-instance.md:778`, where it recorded an operator answer.
+  It also blocked `scoped-tests.sh` at its repo-census stage (rc 1) on every branch.
+- **Fixed by:** PR #1700 — the guard's own playbook: a decision record that nothing in tracked
+  source opens, so the substance stays ("a DEDICATED subdomain on the client apex, CF-proxied")
+  and the literal goes. Controls run rather than assumed: scanner on `HEAD` content → 1 hit,
+  on the scrubbed tree → 0. `test_no_client_hostnames.py` + `test_handoff_doc_size.py` 27 passed.
+- 🔴 **STILL OPEN — operator call, not a defect:** the literal remains in REACHABLE HISTORY.
+  Exactly one carrying commit is an ancestor of `origin/main` (`38cb5d86`, landed 2026-09-14,
+  so the exposure is hours old, not years); `bac48ff0` and `b34c3372` are on unmerged branches.
+  All four content gates enumerate `git ls-files` and are structurally blind to history
+  (`SECRETS.md` → "Dead credentials in reachable history"), so the scrub stops the leak
+  GROWING and does not remove it. History-rewrite-vs-accept on a public repo whose `main` is
+  also a deploy target has NOT been decided.
 
 ### laptop/opencode DEAD (as-of 2026-09-14)
 - as-of: 2026-09-14
@@ -42,9 +56,19 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
 - **Next probe:** `ssh zach@10.42.0.100 "systemctl --user list-units --all 'opencode*' --no-pager; journalctl --user -u 'opencode*' -n 30 --no-pager; ls -la ~/.local/state/activity/spool/ | tail -5"`
 
 ## Next steps (ranked)
-1. Branch + PR + merge the 13 staged files (the-algorithm skill, ledger entry, 9 description cuts, 2 test re-pins), then `scripts/ship.sh`. IN FLIGHT: devrc branch `feat/the-algorithm-skill` (staged, uncommitted).
+1. **PR #1699 OPEN** — the 13 files are committed and pushed on `feat/the-algorithm-skill`
+   (the-algorithm skill, ledger entry, 9 description cuts, 2 test re-pins). Remaining: merge,
+   then `scripts/ship.sh` to converge BOTH hosts (laptop has never been converged).
+   ⚠ A follow-up commit on that branch fixes a trap worth knowing: the skill file sat `AM`, so
+   `git commit` wrote the INDEX's 430-char description while the 61-passed gate run read the
+   WORKING TREE's 336-char one. The first commit was red (3 failures, proven in a detached
+   worktree at that sha) against a 0-headroom ceiling. **A green gate run describes the tree
+   pytest read — check `git status` for an `AM` before quoting it for a commit.**
    forcing: user
-2. Scrub `cairn.civitai.com` from `claudedocs/handoff-cairn-oss-multi-instance.md` and size history exposure (investigation above).
+2. ✅ **DONE — PR #1700 open.** Client subdomain scrubbed from `handoff-cairn-oss-multi-instance.md`
+   (investigation above). History exposure sized: one commit reachable from `main`, hours old.
+   The remaining half — rewrite vs accept — is an operator decision and is NOT a work item
+   until someone makes it.
    forcing: security
 3. Diagnose laptop/opencode DEAD (investigation above; deadman rc=1 measured 2026-09-14).
    forcing: incident
