@@ -1399,3 +1399,44 @@ predicate that red-lines an open item trains everyone to click through.
        collapse is not active there. Read that localStorage on the device where sessions appear
        missing (a phone is the untested case).
        forcing: user — the operator reported missing sessions; the fix is unconfirmed against it.
+
+### 63 — CLOSED 2026-09-16: task 595 shipped as clawgate 0.8.36 (PR #830, squash `e846d87b5`; pin `f2dbfbcc1`). Evicted in the same change that closed it. Verbatim below.
+
+63. **Local-dispatch clawgate task 595 — the host session carousel, plus bulk expand/collapse and
+    bulk Chat/Raw.** 🔴 **IMPLEMENTED, AWAITING REVIEW AND MERGE: `ZacxDev/homelab-infra#830`,
+    head `436e0d769`, base `trunk` @ `89a98441d`, 6 files, 4/4 checks PASS (counted).** Card 595 is
+    `ready_for_review` with 5 comments; comment 1451 carries the per-criterion evidence and the
+    NOT-verified list, and separates what was independently re-verified from what the implementing
+    agent reported. **Read it before touching this item.** 🔴 **NOT MERGED, NOT DEPLOYED** — and
+    merging alone deploys nothing here (no Flux image automation), so shipping it is the separate
+    build→push→bump-both-pins operation. Live is still `0.8.35`.
+    ✅ **Criterion 11 is genuinely closed, and the e2e case is what closes it.** Mutant M1
+    (dropping the `return` from the force-open skip branch, `tmux.go:2559`) was re-run
+    independently: it applies exactly once, COMPILES, the **Go tier PASSES** under it — the same
+    blindness that let this class survive both tiers on `#824` — and the e2e case kills it by its
+    own assertion (`tmux-carousel.spec.ts:616`, message at :667), failing on retry too. The other
+    six mutants in the sweep are the implementing agent's claim and were **not** re-run.
+    🔴 **SIXTEEN acceptance criteria, not 12** — 1–7 in the card body, 8–12 in comment 1422 (bulk
+    expand/collapse), 13–16 in comment 1428 (bulk Chat/Raw). The operator confirmed all 16 are in
+    scope on 2026-09-15. Any prose saying "12" predates comment 1428. They sit under a real
+    `## Acceptance criteria` heading so the status gate reads them AUTHOR-SPECIFIED and `complete`
+    is reachable — but a prior `claude-code` session wrote them, so say that when closing.
+    Repo `homelab-talos`, `containers/clawgate/internal/ui/tmux.go`.
+    🔴 **EVERY LINE NUMBER THE CARD QUOTES IS STALE — 593's three PRs moved them.** Measured on
+    `origin/trunk` 2026-09-15: `tmuxHostTabs` **:1296** (card says 1332), `tmuxHostTabPanel`
+    **:1338** (1374), `tmuxSessionSection` **:1638** (1659), `tmuxWindowCard` **:2512** (2430),
+    `tmuxGroupScript` **:1941** (1748).
+    🔴 **`wantOpen` IS NOT A GO FUNCTION — `git grep 'func wantOpen'` returns a FALSE ZERO.** It is
+    a JavaScript function at **:2173**, inside the backtick-delimited Go raw string returned by
+    `tmuxGroupScript()`; so are `setExpanded` (**:2019**) and `applyViews` (**:2362**, inside
+    `tmuxViewScript()`). The "THE POLICY, AND THE ONLY DEFINITION OF IT" comment is at **:2163**.
+    Read :1750–:1932 and :2173 before touching visibility — a carousel showing one session at a
+    time interacts directly with the collapse policy 593 migrated to `cg.tmux.v3.group.*`
+    (absent = collapsed).
+    ⚠ Criterion 3 demands the suite SET the viewport at mobile/desktop/ultrawide — a config
+    pinning one width is structurally blind to the other two. Criterion 11 names a real mutant
+    class from `#824`: a force-open path that wrote `setExpanded(k,false)` survived BOTH tiers.
+    ✅ **Task 522's order conflict is CHECKED AND CLEARED** — `open` but untouched since
+    2026-09-07 and blocked behind 521, itself blocked on 375, which cannot close while the
+    `agent-pods` Kustomization stays Flux-suspended. No concurrent layout rewrite.
+    forcing: user — the operator asked for this card by name as the next session's work.
