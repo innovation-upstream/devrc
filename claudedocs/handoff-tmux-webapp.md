@@ -7,51 +7,57 @@ clawgate-task: 595
 A **clawgate feature**: a webapp that visually organizes and gives live terminal interaction
 with tmux sessions across workbench + laptop, with a composable view system agents can drive,
 and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
-- **closing-condition:** `check` — `clawgatectl task get 595` reports `complete`, with all
-  **16** of its acceptance criteria evidenced in a card comment (each regression test watched
-  RED at its base commit and green at HEAD). 🔴 **FROZEN AT ROUND 1** for the 595 arc: audit
-  findings on the PRs it produces do NOT extend it, and neither does task 522 or 521.
-  🔴 **THE COUNT WAS 12 UNTIL 2026-09-15 AND THAT WAS WRONG.** 595 carries **16** criteria: 1–7
-  in the card body, 8–12 in comment 1422 (bulk expand/collapse), 13–16 in comment 1428 (bulk
-  Chat/Raw, posted 06:00Z). This line said "12" in three places while the doc's own 593 table
-  named bulk Chat/Raw as 595's scope — the count was carried forward from before comment 1428
-  and nothing re-derived it. **The operator confirmed all 16 are in scope.** A closing condition
-  that under-specifies the finish line by four criteria is how an arc closes while a third of it
-  is unbuilt.
-  ⚠ 595's criteria sit under a real `## Acceptance criteria` heading, so the status gate reads
-  them as AUTHOR-SPECIFIED and `complete` is available — but they were written by a prior
-  `claude-code` session, not by the operator. **Say so when you close it**; the gate keys on the
-  heading, not on who typed it.
-  ✅ **The PREVIOUS closing-condition — `task get 593` reports `ready_for_review` with all ten
-  items evidenced — was MET on 2026-09-15 and that arc is CLOSED.** It is replaced rather than
-  deleted because 595 is the next arc on the same effort; the old line would otherwise make
-  `/resume` report ADDRESSED and stop before picking anything up.
+- **closing-condition:** `judgement` — **Zach opens `https://clawgate.zacx.dev/tmux` in a browser
+  and says whether the tmux page is right.** Nothing an agent can run closes this. The evidence to
+  put in front of him is named and already shipped: task 595's carousel, bulk expand/collapse and
+  bulk Chat/Raw (live in `0.8.36`), task 593's items 4–8 (live in `0.8.35`), and cards 517/518/519.
+  🔴 **FROZEN AT ROUND 1.** Audit findings on anything already merged do NOT extend this arc.
+  🔴 **Why this is a `judgement` and not a `check`:** `/ui/tmux` returns **401** without a session,
+  so no shell, no curl and no agent can reach the page. **Every automated tier here is structurally
+  incapable of answering it** — that is not a gap to close with more tests, it is the shape of the
+  remaining work. An agent can ship more; only the operator can say it is right.
+  ✅ **The PREVIOUS closing-condition — `clawgatectl task get 595` reports `complete` with all 16
+  criteria evidenced — was MET on 2026-09-16 and THAT ARC IS CLOSED.** 595 is `complete` with 6
+  comments; comment 1451 carries the per-criterion evidence, the final comment the deploy chain.
+  Shipped as **clawgate `0.8.36`** (PR `#830`, squash `e846d87b5`; pin commit `f2dbfbcc1`).
+  ⚠ Its 16 criteria were authored by a prior `claude-code` session, not by the operator — the
+  status gate keys on the `## Acceptance criteria` heading, not on who typed it.
+  It is replaced rather than deleted because the browser visit is the next arc on the same effort;
+  the old line would otherwise make `/resume` report ADDRESSED and stop.
 
 ## Status
 
-**The 593 arc is CLOSED and live as `0.8.35`. The 595 arc is IMPLEMENTED and awaiting review —
-`ZacxDev/homelab-infra#830`, 4/4 checks pass. It is NOT merged and NOT deployed, and merging it
-would deploy nothing anyway (no Flux image automation).**
+**Task 595 is CLOSED, merged and LIVE as clawgate `0.8.36`. Task 593 is CLOSED and live as
+`0.8.35`. Nothing is in flight. The entire remaining queue for this effort is blocked on one
+thing an agent cannot do: a human looking at the page.**
 
-### 🔴 task 595 — implemented, reviewed by nobody, deployed nowhere
-- **PR `ZacxDev/homelab-infra#830`** — head `436e0d769`, base `trunk` @ `89a98441d`, 2 commits,
-  6 files (3 spec/TS, 3 Go), `MERGEABLE`. Checks **counted, 4 registered / 4 resolved / 0 pending**:
-  `clawgate-ci`, `clawgate-e2e` (238 tests, 2 skipped), `gitops-validate` (10 legs),
-  `ux-audit-clawgate` — all pass.
-- **Card 595 is `ready_for_review`, 5 comments.** Comment 1451 is the evidence of record: the
-  per-criterion table, the red-at-base matrix, and an explicit NOT-verified list — and it
-  **separates independently re-verified claims from the implementing agent's reported ones.**
-- ✅ **Criterion 11 re-verified independently** (the `#824` class): mutant M1 applies exactly once,
-  compiles, **passes the Go tier**, and is killed by the e2e case's own assertion, on retry too.
-  So the e2e case — not the Go source guard — is what closes that class. **Six of the seven
-  mutants were NOT re-run.**
-- 🔴 **Scope was settled by the operator at SIXTEEN criteria**, not the 12 this doc carried.
-- 🔴 **Still unseen by a human.** `/ui/tmux` is 401 without a session, so no shell can reach it.
-  595 now joins 593's items 4–8 and cards 517/518/519 in the queue of work no browser has shown.
-- **Not tested on a real phone, and not against the real fleet** (39 groups, 2 hosts) — the swipe
-  is a synthesized touch sequence in headless Chromium, on 3–4-session fixtures.
-- **Claim `tmux-webapp-63` released** — the implementation is done and captured in the PR and the
-  card, so holding it would only block whoever picks up the merge.
+### ✅ task 595 — shipped 2026-09-16 as `0.8.36`
+- **PR `#830`** squash-merged `e846d87b5`, on 4/4 green checks, against a trunk that **had not
+  moved since the PR's base** — so the branch CI tested WAS the merged tree. Verified by content
+  afterwards, never by ancestry.
+- **Pin commit `f2dbfbcc1`** — both pins in ONE commit; `TestDeployPinMatchesClientBuildVersion`
+  watched `=== RUN` + `--- PASS`.
+- **Deploy verified as a CHAIN**: the image was proved to carry the code before the pin moved
+  (`data-tmux-carousel-index` 2, `data-tmux-session-jump` 2, `data-tmux-announce-host` 1;
+  positive control 1, negative control 0) → the running pod's `imageID` is that exact digest
+  `sha256:9206bd08…` → 1 desired/current/updated/available, old ReplicaSet at 0 → the consumer
+  answers `{"status":"ok","version":"0.8.36"}`.
+- ✅ **Criterion 11 re-verified independently**: mutant M1 applies once, compiles, **passes the Go
+  tier**, and is killed by the e2e case's own assertion — so the e2e case, not the source guard,
+  is what closes the `#824` class. **Six of the seven mutants were NOT re-run.**
+- 🔴 **Rank 63 was EVICTED to `claudedocs/refs/tmux-webapp-closed-ranks.md` in the same change
+  that closed it** (commit `74376aec`), demotion checked with a positive and a negative control.
+
+### 🔴 NOT VERIFIED — and it is now the WHOLE remaining queue
+1. **Nobody has looked at any of this in a browser.** `/ui/tmux` is **401** without a session
+   (re-measured on `0.8.36`; `/health` 200 as the control). Live and unseen: 595's carousel +
+   bulk controls, 593's items 4–8, and cards 517/518/519.
+2. **Never run against the real fleet** (39 groups, 2 hosts) — fixtures of 3–4 sessions only.
+3. **No real touch device.** The swipe is a synthesized sequence in headless Chromium;
+   `Input.synthesizeScrollGesture` was measured INERT in that build.
+4. **`#829` was merged UN-AUDITED** by operator decision, and **#830 was merged without an audit
+   round** on the operator's direct instruction to merge and ship. Both stated, neither hidden.
+5. The `ux-audit-clawgate` **findings doc has never been read** — only its check state.
 
 ### clawgate task 593 — CLOSED, MERGED AND LIVE
 | item | PR | squash |
@@ -69,11 +75,6 @@ Card is `ready_for_review` with 10 comments. `#826` was merged on four green che
 Pin commit **`89a98441d`** on `trunk`; live health `{"status":"ok","version":"0.8.35"}`; pod `1/1 Running` ~20s after `flux reconcile`. Live was `0.8.34`, built before all three PRs — **clawgate has no Flux image automation, so every one of those merges was inert until this release.**
 
 Gate on the built tree: `go build`/`go vet` clean, `go test ./... -count=1` **24 ok / 0 FAIL rc=0**. CSS **45,895 B** with `.h-14` present (cwd trap did not fire). Both pins moved in one commit and `TestDeployPinMatchesClientBuildVersion` was COUNTED — real `=== RUN` + `--- PASS`.
-
-### 🔴 NOT VERIFIED — the top of the next session's list
-1. **No browser verification of items 4–8, at all.** The structured bash/edit/askuserquestion cards, the `max-h-64` clamp, the GFM tables, the reveal control and the relocated "open full session" link have never been looked at. No e2e spec was written for these five items. **0.8.35 is the first time they face a human.**
-2. **`#829` was merged UN-AUDITED** by operator decision — no round 0, no correctness round.
-3. **Deployed ≠ verified.** What is confirmed is the rollout and that the process on :30302 is the one the new image started.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -230,44 +231,6 @@ From the analyze-service index (**recall — verify before relying on**):
 
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
-63. **Local-dispatch clawgate task 595 — the host session carousel, plus bulk expand/collapse and
-    bulk Chat/Raw.** 🔴 **IMPLEMENTED, AWAITING REVIEW AND MERGE: `ZacxDev/homelab-infra#830`,
-    head `436e0d769`, base `trunk` @ `89a98441d`, 6 files, 4/4 checks PASS (counted).** Card 595 is
-    `ready_for_review` with 5 comments; comment 1451 carries the per-criterion evidence and the
-    NOT-verified list, and separates what was independently re-verified from what the implementing
-    agent reported. **Read it before touching this item.** 🔴 **NOT MERGED, NOT DEPLOYED** — and
-    merging alone deploys nothing here (no Flux image automation), so shipping it is the separate
-    build→push→bump-both-pins operation. Live is still `0.8.35`.
-    ✅ **Criterion 11 is genuinely closed, and the e2e case is what closes it.** Mutant M1
-    (dropping the `return` from the force-open skip branch, `tmux.go:2559`) was re-run
-    independently: it applies exactly once, COMPILES, the **Go tier PASSES** under it — the same
-    blindness that let this class survive both tiers on `#824` — and the e2e case kills it by its
-    own assertion (`tmux-carousel.spec.ts:616`, message at :667), failing on retry too. The other
-    six mutants in the sweep are the implementing agent's claim and were **not** re-run.
-    🔴 **SIXTEEN acceptance criteria, not 12** — 1–7 in the card body, 8–12 in comment 1422 (bulk
-    expand/collapse), 13–16 in comment 1428 (bulk Chat/Raw). The operator confirmed all 16 are in
-    scope on 2026-09-15. Any prose saying "12" predates comment 1428. They sit under a real
-    `## Acceptance criteria` heading so the status gate reads them AUTHOR-SPECIFIED and `complete`
-    is reachable — but a prior `claude-code` session wrote them, so say that when closing.
-    Repo `homelab-talos`, `containers/clawgate/internal/ui/tmux.go`.
-    🔴 **EVERY LINE NUMBER THE CARD QUOTES IS STALE — 593's three PRs moved them.** Measured on
-    `origin/trunk` 2026-09-15: `tmuxHostTabs` **:1296** (card says 1332), `tmuxHostTabPanel`
-    **:1338** (1374), `tmuxSessionSection` **:1638** (1659), `tmuxWindowCard` **:2512** (2430),
-    `tmuxGroupScript` **:1941** (1748).
-    🔴 **`wantOpen` IS NOT A GO FUNCTION — `git grep 'func wantOpen'` returns a FALSE ZERO.** It is
-    a JavaScript function at **:2173**, inside the backtick-delimited Go raw string returned by
-    `tmuxGroupScript()`; so are `setExpanded` (**:2019**) and `applyViews` (**:2362**, inside
-    `tmuxViewScript()`). The "THE POLICY, AND THE ONLY DEFINITION OF IT" comment is at **:2163**.
-    Read :1750–:1932 and :2173 before touching visibility — a carousel showing one session at a
-    time interacts directly with the collapse policy 593 migrated to `cg.tmux.v3.group.*`
-    (absent = collapsed).
-    ⚠ Criterion 3 demands the suite SET the viewport at mobile/desktop/ultrawide — a config
-    pinning one width is structurally blind to the other two. Criterion 11 names a real mutant
-    class from `#824`: a force-open path that wrote `setExpanded(k,false)` survived BOTH tiers.
-    ✅ **Task 522's order conflict is CHECKED AND CLEARED** — `open` but untouched since
-    2026-09-07 and blocked behind 521, itself blocked on 375, which cannot close while the
-    `agent-pods` Kustomization stays Flux-suspended. No concurrent layout rewrite.
-    forcing: user — the operator asked for this card by name as the next session's work.
 48. **Re-spec task 521 around a per-agent token.** `tier` discriminates the DOOR (`token` vs
    `browser`), not the caller; one shared `CLAWGATE_TERMINAL_TOKEN` makes every machine caller
    identical. `requireAgentToken` (`internal/api/agent.go:30-46`) already resolves a per-agent
