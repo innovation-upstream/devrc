@@ -1,20 +1,24 @@
 # mention-review — a single-purpose Go TUI for reading one GitHub pull request.
 #
-# WHAT IT IS FOR: the same job `nvim-octo` does today. A clicked GitHub `repo#N`
+# WHAT IT IS FOR: the job `nvim-octo` used to do. A clicked GitHub `repo#N`
 # mention in the terminal opens a review surface instead of a browser tab.
 #
 # 🔴 PHASE 2. IT CAN COMMENT, APPROVE, REQUEST CHANGES, SUBMIT A REVIEW AND
 # MERGE — four of those five behind a y/N confirmation naming the repo, the
 # number, the merge method and the AUTHENTICATED LOGIN (§10.2, cli/cli#14370).
 #
-# 🔴 `nvim-octo` IS STILL THE PACKAGE THE CLICK PATH USES.
-# `scripts/mention-open.py`'s `REVIEW_EXE` still says `nvim-octo`, deliberately:
-# the retirement is a separate, later, revertable step, and the proposal is
-# explicit that it ships "only after the operator has used the new TUI for a
-# real review". Until then this binary is on PATH and invoked by hand:
-#     mention-review <owner/repo> <number>
-# Flipping the click path over is ONE line in `mention-open.py`, and flipping it
-# back is the same line.
+# 🔴 THIS IS NOW THE PACKAGE THE CLICK PATH USES.
+# `scripts/mention-open.py`'s `REVIEW_EXE` names `mention-review`, and the
+# Alacritty wrapper's `makeBinPath` pins this derivation. Those two must move
+# TOGETHER — `test_mention_open.py`'s two-way ledger fails in both directions.
+# It is still runnable by hand, unchanged: `mention-review <owner/repo> <number>`
+#
+# ⚠ ROLLBACK IS A REVERT PLUS A SWITCH, NOT "ONE LINE" — and the proposal's
+# §rollback still says the old thing. `nvim-octo` was on NO path but that
+# wrapper's, so flipping `REVIEW_EXE` back alone would spawn a binary that is
+# not installed: the click would open a terminal that flashes and vanishes.
+# Octo's derivation and its 75 tests are deliberately still here (this was the
+# click flip, NOT the Phase 4 retirement), so the revert is clean.
 #
 # ---------------------------------------------------------------------------
 # 🔴 SOURCE REFERENCE STRATEGY: A LOCAL PATH INSIDE THIS REPO.

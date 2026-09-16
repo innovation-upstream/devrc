@@ -34,9 +34,9 @@ let
   # a hope, and it fails in BOTH directions, so a package nobody spawns is a
   # finding too.
   #
-  # ⚠ `pkgs.nvim-octo` IS THE SECOND ENTRY THE argv[0] READER CANNOT SEE, and
-  # it needs a THIRD reader rather than the `-c` one above. The review TUI is
-  # spawned as `alacritty … -e nvim-octo <repo> <num>`: argv[0] is the terminal
+  # ⚠ `pkgs.mention-review` IS THE SECOND ENTRY THE argv[0] READER CANNOT SEE,
+  # and it needs a THIRD reader rather than the `-c` one above. The review TUI is
+  # spawned as `alacritty … -e mention-review <repo> <num>`: argv[0] is the terminal
   # and the `-e` payload is one level down, exactly like `fzf` — but `fzf`
   # sits after a `-c` inside a shell script, and this sits after a `-e` as a
   # bare command. `_exec_payload_commands` in `test_mention_open.py` reads the
@@ -48,6 +48,17 @@ let
   # silent dead end `open_tui`'s `shutil.which` pre-flight exists to convert
   # into a browser fallback plus one toast. Both halves are real; the pre-flight
   # is what makes a MISSING entry survivable, not what makes it acceptable.
+  #
+  # ⚠ `pkgs.nvim-octo` USED TO BE HERE and is REMOVED, because `REVIEW_EXE` now
+  # spawns `mention-review`. The ledger above fails in BOTH directions, so
+  # leaving octo listed beside its replacement would be dead weight rather than
+  # a fallback — and it would not act as one anyway: `open_tui`'s `shutil.which`
+  # pre-flight falls back to the BROWSER, never to a second TUI. Octo's
+  # derivation and its 75 tests are deliberately untouched (this is the click
+  # flip, NOT the Phase 4 retirement), so reverting this commit restores it
+  # whole. ⚠ That revert plus a `home-manager switch` IS the rollback — the
+  # proposal's "flip REVIEW_EXE back, one line" is no longer accurate, because
+  # octo is on no PATH but this one.
   #
   # ⚠ `pkgs.gh` USED TO BE HERE and is REMOVED. Its comment justified it as
   # "PASS 3's only tool" — PASS 3 was the GitHub-wide namesake search, which is
@@ -61,7 +72,7 @@ let
       # relying on the inherited PATH is not enough: a click landing in that
       # window would find none of these by bare name.
       pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify
-      pkgs.alacritty pkgs.fzf pkgs.nvim-octo
+      pkgs.alacritty pkgs.fzf pkgs.mention-review
     ]}:$PATH
     exec ${pkgs.python312}/bin/python3 \
       ${config.home.homeDirectory}/workspace/devrc/scripts/mention-open.py "$@"

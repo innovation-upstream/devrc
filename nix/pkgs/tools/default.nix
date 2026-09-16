@@ -65,13 +65,15 @@ with pkgs; [
 # and not fetchFromGitHub, and it yields [] on a host without that checkout
 # rather than failing the switch.
 ++ (import ./clawgatectl.nix { inherit pkgs workspace; })
-# mention-review — PHASE 1 of the nvim-octo replacement, read-only.
+# mention-review — the nvim-octo replacement. Phase 2: it can also write.
 #
-# 🔴 ON PATH SO THE OPERATOR CAN RUN IT BY HAND. The click path still spawns
-# `nvim-octo`; the proposal is explicit that the retirement ships "only after
-# the operator has used the new TUI for a real review", and nothing headless can
-# close that condition. `mention-review <owner/repo> <number>` is how that
-# happens. Flipping the click over is one line in `mention-open.py`.
+# 🔴 ON PATH FOR TWO REASONS NOW. It is still run by hand
+# (`mention-review <owner/repo> <number>`), and since the click path was flipped
+# it is ALSO what an Alacritty `repo#N` hint spawns — see `REVIEW_EXE` in
+# `scripts/mention-open.py` and the wrapper's `makeBinPath` in
+# `nix/programs/alacritty/default.nix`, which a two-way ledger keeps in sync.
+# ⚠ This entry is NOT what puts it on the click path's PATH — that wrapper pins
+# its own closure precisely so a click landing during a switch still works.
 #
 # 🔴 THE NULL FILTER IS LOAD-BEARING, NOT DEFENSIVE. The derivation evaluates to
 # `null` when it cannot read exactly one `var buildVersion` line out of the Go
