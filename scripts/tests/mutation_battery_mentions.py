@@ -536,15 +536,23 @@ MUTANTS: list[tuple] = [
                         "`sh -c` line prints `fzf: not found` into a terminal "
                         "that immediately closes — a silent dead click, green "
                         "in every suite",
-     # ⚠ RE-ANCHORED when `pkgs.nvim-octo` joined this line (the review TUI).
-     # The anchor is the WHOLE line, so it went to 0x the moment the line grew
-     # a third package — and an anchor at 0x reports `NOT APPLIED` and scores as
-     # a SURVIVOR without testing anything, which is the silent green
-     # test_mutation_battery_anchors.py exists to catch. It did.
-     # The mutation itself is unchanged in KIND: drop `pkgs.fzf` and keep the
-     # rest, so the row still means "the picker's `sh -c` line cannot find fzf".
-     "      pkgs.alacritty pkgs.fzf pkgs.nvim-octo\n",
-     "      pkgs.alacritty pkgs.nvim-octo\n",
+     # ⚠ RE-ANCHORED TWICE NOW, for the SAME structural reason both times: the
+     # anchor is the WHOLE line, so ANY change to the wrapper's package list
+     # takes it to 0x. First when `pkgs.nvim-octo` joined the line (the review
+     # TUI), then again when the click path was flipped and that entry became
+     # `pkgs.mention-review`. An anchor at 0x reports `NOT APPLIED` and scores
+     # as a SURVIVOR without testing anything — the silent green
+     # test_mutation_battery_anchors.py exists to catch. It caught both.
+     # The mutation is unchanged in KIND: drop `pkgs.fzf` and keep the rest, so
+     # the row still means "the picker's `sh -c` line cannot find fzf".
+     #
+     # 🔴 EXPECT TO DO THIS AGAIN AT PHASE 4, and note WHY the anchor is not
+     # narrowed to just `pkgs.fzf ` to stop it: a whole-line anchor is what
+     # makes the mutant's REPLACEMENT unambiguous, and a substring anchor would
+     # match the package list of any future wrapper that happens to pin fzf.
+     # The breakage is loud, the test names this file, and the fix is one line.
+     "      pkgs.alacritty pkgs.fzf pkgs.mention-review\n",
+     "      pkgs.alacritty pkgs.mention-review\n",
      "the wrapper's PATH is MISSING"),
     # ---- F15: the round-1 audit's findings, as mutants ----------------------
     ("K54", "deletion", "the picker loses `-i`, so fzf is SMART-CASE: a query "
