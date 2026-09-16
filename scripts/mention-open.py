@@ -32,10 +32,12 @@ RESOLUTION
 WHERE IT OPENS
 --------------
 Resolution says WHICH reference; `open_target` says on WHICH SURFACE. A GitHub
-issue or pull request can open in `nvim-octo` — neovim with octo.nvim, a full
-review-and-merge TUI packaged at `nix/pkgs/tools/nvim-octo/` — instead of a
-browser tab. Everything else (a clawgate task, a ClickUp id, any GitHub URL
-that is not `/issues/N` or `/pull/N`) is always `xdg-open`.
+issue or pull request can open in `mention-review` — a purpose-built Go/Bubble
+Tea review-and-merge TUI packaged at `nix/pkgs/tools/mention-review/` — instead
+of a browser tab. (It was `nvim-octo` until the click path was flipped; that
+package is still in the tree, but nothing spawns it.) Everything else (a
+clawgate task, a ClickUp id, any GitHub URL that is not `/issues/N` or
+`/pull/N`) is always `xdg-open`.
 
 The TUI is taken only when this host HAS it, and the browser stays reachable
 from two directions: `browser` in the marker file at
@@ -280,7 +282,7 @@ MENTION_TARGET_PATH = Path(
 #
 # `TARGET_BROWSER` is `xdg-open`, which is what every click did before the
 # review TUI existed and what every click still does for a clawgate task, a
-# ClickUp id, or a GitHub reference this host cannot open in `nvim-octo`.
+# ClickUp id, or a GitHub reference this host cannot open in `mention-review`.
 TARGET_TUI = "tui"
 TARGET_BROWSER = "browser"
 TARGET_VALUES = (TARGET_TUI, TARGET_BROWSER)
@@ -1765,16 +1767,21 @@ def open_browser(url: str) -> int:
 # opened there.
 REVIEW_CLASS = "float,mention-review"
 
-# The wrapper that runs neovim with octo.nvim configured. Packaged as
-# `nix/pkgs/tools/nvim-octo/` and pinned onto the hint wrapper's PATH by
-# `nix/programs/alacritty/default.nix`.
+# The review TUI. Packaged as `nix/pkgs/tools/mention-review/` and pinned onto
+# the hint wrapper's PATH by `nix/programs/alacritty/default.nix`.
+#
+# ⚠ THIS WAS `nvim-octo` AND THE FLIP IS NOT JUST THIS LINE. The wrapper's
+# `makeBinPath` must name the same binary — a two-way ledger in
+# `test_mention_open.py` fails in both directions — and because octo was on no
+# PATH but that wrapper's, rolling back means reverting BOTH plus a
+# `home-manager switch`, not editing this constant alone.
 #
 # 🔴 A MODULE CONSTANT AND NOT A LITERAL IN TWO PLACES. It is both the name
 # `tui_available()` looks up and the `-e` payload below; two spellings of one
 # name is how a rename leaves a pre-flight checking a binary nobody spawns.
 # `test_mention_open.py` resolves this constant out of the SYNTAX TREE for the
 # same reason `PICKER_SH` is resolved — see `_exec_payload_commands`.
-REVIEW_EXE = "nvim-octo"
+REVIEW_EXE = "mention-review"
 
 
 def tui_available() -> bool:
@@ -1831,7 +1838,7 @@ def open_target(url: str) -> str:
          it was a second spelling of this rung with a strictly smaller reach.
       2. THE DEFAULT: the TUI when this host actually has it, the browser when
          it does not. SILENT in the second case, deliberately — a host with no
-         `nvim-octo` has not lost anything it had, and toasting on every click
+         `mention-review` has not lost anything it had, and toasting on every click
          to say so is the noise this handler must not make. The announcement
          belongs where the TUI was actually ASKED for and could not run, which
          is `open_tui`'s pre-flight.
@@ -1862,7 +1869,7 @@ def open_tui(url: str) -> tuple[int, str]:
     🔴 THE `which` PRE-FLIGHT IS LOAD-BEARING, NOT DEFENSIVE POLISH, AND A
     POST-SPAWN FALLBACK STRUCTURALLY CANNOT REPLACE IT. Alacritty exits 0
     whether its `-e` command exits 0 or 127, and `Popen` never waits — so a
-    missing or broken `nvim-octo` is a window that flashes and vanishes, with
+    missing or broken `mention-review` is a window that flashes and vanishes, with
     nothing for this process to observe. That is the identical silent dead end
     `pick()` pre-flights `fzf` for, one surface over.
 
@@ -1897,10 +1904,11 @@ def open_tui(url: str) -> tuple[int, str]:
         # reports `<computed>` and reddens a guard about something else
         # entirely.
         #
-        # 🔴 THE `-c "Octo …"` STRING IS BUILT INSIDE THE NIX WRAPPER, NOT HERE.
-        # `nvim-octo` takes `<owner/repo> <number>` as two ordinary argv
-        # entries and assembles the ex-command itself, so no quoting hazard
-        # reaches this file and argv[0] stays the constant the ledger needs.
+        # 🔴 THE PAYLOAD TAKES TWO PLAIN ARGV ENTRIES, SO NO QUOTING HAZARD
+        # REACHES THIS FILE and argv[0] stays the constant the ledger needs.
+        # `mention-review` parses `<owner/repo> <number>` itself and exits
+        # 64/65/66 — deliberately the same contract `nvim-octo.sh` had, which
+        # is why flipping REVIEW_EXE needed no change to this spawn.
         #
         # 🔴 NO `-o window.dimensions.*` HERE, ON PURPOSE — see REVIEW_CLASS.
         # i3 sizes this window in `ppt`, which is a percent of the OUTPUT rect

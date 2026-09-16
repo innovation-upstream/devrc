@@ -402,58 +402,59 @@ def test_every_go_package_that_can_reach_github_carries_the_loopback_guard():
 
 
 # --------------------------------------------------------------------------- #
-# The click path is STILL not flipped
+# The click path IS flipped — and the two halves must agree
 # --------------------------------------------------------------------------- #
+#
+# ⚠ TWO PHASE GUARDS WERE DELETED HERE, NOT EDITED, and their own docstrings
+# asked for exactly that: `test_phase_1_does_NOT_flip_the_click_path_to_the_new_
+# tui` and `test_the_alacritty_wrapper_does_not_yet_pin_the_new_tui`. They
+# pinned "the retirement has not happened". It has now happened for the CLICK
+# PATH, so a guard named for Phase 1 asserting Phase 4's state would be a test
+# whose name lies. Editing them to accept `mention-review` is the move they
+# explicitly warned against.
+#
+# 🔴 WHAT REPLACES THEM IS NOT NOTHING. The seam is still covered, and by a
+# STRICTLY STRONGER guard that already existed:
+# `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_every_executable
+# _the_handler_spawns` reads `REVIEW_EXE` out of the SYNTAX TREE and pins it
+# against the wrapper's `makeBinPath` TWO-WAY — a spawn with no package is
+# "inert in production with a green suite", a package with no spawn is "dead
+# weight in the closure". That test does not care WHICH binary the constant
+# names, so it keeps working across this flip and across any future one, which
+# is precisely why the phase-pinned pair was redundant once the phase ended.
 
-def test_phase_1_does_NOT_flip_the_click_path_to_the_new_tui():
-    """🔴 THE RETIREMENT IS A SEPARATE, LATER, REVERTABLE STEP.
 
-    The proposal is explicit that `nvim-octo` ships until "the operator has used
-    the new TUI for a real review" — a condition nothing headless can close. So
-    `REVIEW_EXE` still names `nvim-octo`, and this pins that rather than leaving
-    it to be noticed.
+def test_the_click_path_and_the_wrapper_name_the_SAME_tui():
+    """🔴 A RELATIONSHIP, NOT A VALUE — it must not re-pin a literal.
 
-    ⚠ PHASE 2 DID NOT FLIP IT EITHER, AND THAT IS WHY THE NAME STILL SAYS
-    PHASE 1. The condition this guards is not "phase 1 is current" but "the
-    retirement has not happened", which is Phase 4's job. Adding write actions
-    made the new TUI more capable, not more deployed: it is still invoked by
-    hand.
+    The pair this replaces asserted `nvim-octo` by name and would have to be
+    rewritten on every flip; this asserts only that the two files AGREE, so it
+    survives a future retirement or a rollback without edit.
 
-    ⚠ THIS TEST IS EXPECTED TO BE DELETED, NOT EDITED, when the flip happens.
-    It is a guard on a PHASE, and a phase that ends takes its guard with it.
-    Editing it to accept `mention-review` would leave a test whose name says
-    Phase 1 asserting Phase 4.
+    ⚠ IT IS DELIBERATELY NOT A SECOND COPY OF THE TWO-WAY LEDGER in
+    `test_mention_open.py` — that one resolves the constant from the AST and is
+    the authority. This is the cheap cross-file read, and it exists so a flip
+    that updates ONE of the two files fails HERE with a message naming both,
+    rather than only inside a ledger whose failure text is about closures.
     """
     src = MENTION_OPEN.read_text(encoding="utf-8")
     m = re.search(r'REVIEW_EXE\s*=\s*"([^"]+)"', src)
     assert m, "mention-open.py no longer declares REVIEW_EXE"
-    assert m.group(1) == "nvim-octo", (
-        f"REVIEW_EXE is {m.group(1)!r}. If the click path has been flipped to "
-        f"mention-review on purpose, DELETE this test — it guards Phase 1, "
-        f"which has ended."
-    )
+    exe = m.group(1)
 
-
-def test_the_alacritty_wrapper_does_not_yet_pin_the_new_tui():
-    """The mirror of the test above, and it is enforced by a guard that already
-    exists rather than by this one.
-
-    `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_every_
-    executable_the_handler_spawns` pins that list TWO-WAY: a package the handler
-    does not spawn fails as "dead weight in the closure". So adding
-    `pkgs.mention-review` there before flipping `REVIEW_EXE` would already be
-    red. This asserts the current, consistent state so the pair is visible in
-    one place.
-    """
     nix_src = (ROOT / "nix" / "programs" / "alacritty" / "default.nix").read_text(encoding="utf-8")
-    m = re.search(r"makeBinPath\s*\[(.*?)\]", nix_src, re.S)
-    assert m, "the mentionOpen wrapper no longer calls lib.makeBinPath"
-    body = re.sub(r"#[^\n]*", "", m.group(1))
-    assert "pkgs.nvim-octo" in body, "positive control: the wrapper DOES pin the review TUI"
-    assert "pkgs.mention-review" not in body, (
-        "the wrapper pins pkgs.mention-review while REVIEW_EXE still spawns "
-        "nvim-octo — that is dead weight, and test_mention_open.py's two-way "
-        "ledger will say so too"
+    m2 = re.search(r"makeBinPath\s*\[(.*?)\]", nix_src, re.S)
+    assert m2, "the mentionOpen wrapper no longer calls lib.makeBinPath"
+    # Comments in that block are PROSE ABOUT the packages — this file's own
+    # history has a `pkgs.gh` named in one for months after it was removed.
+    body = re.sub(r"#[^\n]*", "", m2.group(1))
+    listed = set(re.findall(r"pkgs\.([A-Za-z0-9_-]+)", body))
+    assert listed, "positive control: the wrapper DOES pin a PATH"
+
+    assert exe in listed, (
+        f"REVIEW_EXE spawns {exe!r} but the Alacritty wrapper's PATH pins "
+        f"{sorted(listed)}. The click opens a terminal that flashes and "
+        f"vanishes — alacritty exits 0 whether its `-e` command exits 0 or 127."
     )
 
 

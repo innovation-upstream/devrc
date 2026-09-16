@@ -1493,13 +1493,19 @@ def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns()
     PROVIDER = {"git": "pkgs.git", "tmux": "pkgs.tmux",
                 "xdg-open": "pkgs.xdg-utils", "notify-send": "pkgs.libnotify",
                 "alacritty": "pkgs.alacritty", "fzf": "pkgs.fzf",
-                # nvim-octo — the review TUI, supplied by the OVERLAY in
+                # mention-review — the review TUI, supplied by the OVERLAY in
                 # flake.nix rather than by nixpkgs. It is spelled `pkgs.X` for
                 # exactly this reader: a `let`-bound derivation would not match
                 # the `pkgs\.[A-Za-z0-9_-]+` scan below, so the wrapper would
                 # look like it pins nothing and this seam would stop covering
                 # the binary the review click cannot run without.
-                "nvim-octo": "pkgs.nvim-octo"}
+                #
+                # ⚠ THIS WAS `nvim-octo` UNTIL THE CLICK PATH WAS FLIPPED. The
+                # key is whatever `REVIEW_EXE` spawns, so it moves with that
+                # constant — and because the ledger below is two-way, the
+                # wrapper's PATH must move in the SAME commit or one of the two
+                # directions goes red.
+                "mention-review": "pkgs.mention-review"}
     # python312 is the interpreter the wrapper `exec`s by store path.
     INTERPRETER = {"pkgs.python312"}
 
@@ -1520,11 +1526,12 @@ def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns()
         "positive control on the SECOND reader: the picker's `sh -c` line must "
         "still be visible to _shell_child_commands, or this test silently stops "
         "covering the binary the picker cannot run without")
-    assert "nvim-octo" in spawned, (
+    assert "mention-review" in spawned, (
         "positive control on the THIRD reader: the review terminal's `-e` "
         "payload must still be visible to _exec_payload_commands, or this test "
         "silently stops covering the binary a review click cannot run without "
-        "— and `pkgs.nvim-octo` in the wrapper would then read as dead weight")
+        "— and `pkgs.mention-review` in the wrapper would then read as dead "
+        "weight")
     needed = {PROVIDER[e] for e in spawned if e in PROVIDER}
     unknown = spawned - set(PROVIDER)
     assert not unknown, (
@@ -6511,17 +6518,67 @@ def _fzf_filter(rows: list[str], query: str) -> list[str]:
 # GraphQL call), that the merge mappings are gone from the LIVE buffer — is
 # stated as unverified in the PR rather than implied by a green test here.
 #
-# ⚠ `nvim-octo` IS DELIBERATELY NOT STUBBED ONTO PATH BY THE SUITE. It is in
+# ⚠ THE REVIEW TUI IS DELIBERATELY NOT STUBBED ONTO PATH BY THE SUITE. It is in
 # `nolaunch.ACKNOWLEDGED_UNSTUBBED`, not `HOST_LAUNCHERS`, because it is only
 # ever reached as `alacritty`'s `-e` payload and alacritty IS stubbed. A
 # consequence worth naming: `tui_available()` is FALSE by default in every test
 # in this file, so every test that does not say otherwise exercises the browser
 # path. Each test below that wants the TUI says so explicitly.
+#
+# 🔴 THAT "FALSE BY DEFAULT" IS NOW ENFORCED, AND FOR YEARS IT WAS ONLY TRUE BY
+# ACCIDENT. The sentence above was written when `REVIEW_EXE` was `nvim-octo`,
+# which lived only inside the Alacritty wrapper's closure and so was on no PATH
+# anywhere — the claim held because `which` always missed, not because anything
+# made it miss. `REVIEW_EXE` now names `mention-review`, which IS in
+# `home.packages` so it can be run by hand, and the accident ended: 22 tests in
+# this file went red at once. `_the_review_tui_is_NOT_on_the_hosts_PATH` (an
+# autouse fixture beside the `tui` one) pins the lookup, so what this paragraph
+# asserts is now a property of the suite rather than of the box it runs on.
 # --------------------------------------------------------------------------- #
 GH_PULL_URL = "https://github.com/gardenersguild/trowelcast/pull/1559"
 GH_ISSUE_URL = "https://github.com/gardenersguild/trowelcast/issues/1559"
 CLAWGATE_URL = "https://clawgate.zacx.dev/tasks/7"
 CLICKUP_URL = "https://app.clickup.com/t/868abc123"
+
+
+@pytest.fixture(autouse=True)
+def _the_review_tui_is_NOT_on_the_hosts_PATH(monkeypatch):
+    """🔴 THE SUITE MUST NOT BE DECIDED BY WHAT IS INSTALLED ON THE BOX.
+
+    `tui_available()` is `shutil.which(REVIEW_EXE)`, and `open_target` reads it
+    to decide whether the TUI is the DEFAULT rung. So every test that asserts a
+    `repo#N` click reaches the BROWSER is really asserting "the review TUI is
+    not installed here" — an invariant no test states and nothing enforces.
+
+    🔴 IT WAS TRUE BY ACCIDENT FOR THE WHOLE LIFE OF THIS FILE, AND THE ACCIDENT
+    ENDED. `nvim-octo` lived only inside the Alacritty wrapper's closure and was
+    on no PATH anywhere, so `which` always missed. Flipping `REVIEW_EXE` to
+    `mention-review` — which IS in `home.packages`, precisely so it can be run
+    by hand — turned **22** of these tests red at once, every one of them a test
+    about the picker, telemetry or auto-open that has nothing to do with the
+    TUI. MEASURED 2026-09-16 on the workbench.
+
+    ⚠ THE TWO TIERS WOULD HAVE DISAGREED, which is the worse half. The dev host
+    has `mention-review` on PATH; the `nix build` sandbox does not. Without this
+    pin the same commit is RED locally and GREEN in CI, and the tier that gates
+    PRs is the one that cannot see it.
+
+    Two deliberate escapes, both of which win because they patch LATER than a
+    fixture: the `tui` fixture replaces `tui_available` wholesale (that is its
+    job — it drives both rungs), and
+    `test_tui_available_asks_about_the_REVIEW_EXE_and_nothing_else` re-patches
+    `shutil.which` in its own body to exercise the predicate itself. This pins
+    the PATH lookup rather than the predicate so that second one stays real.
+    """
+    import shutil as _shutil
+    real_which = _shutil.which
+
+    def which(name, *a, **k):
+        if name == MO.REVIEW_EXE:
+            return None
+        return real_which(name, *a, **k)
+
+    monkeypatch.setattr(_shutil, "which", which)
 
 
 @pytest.fixture
@@ -6576,7 +6633,7 @@ def test_the_review_terminal_runs_the_TUI_with_the_repo_then_the_number(tui):
     assert len(tui.spawns) == 1, tui.spawns
     argv = tui.spawns[0]
     assert argv[0] == "alacritty", argv
-    assert argv[-3] == MO.REVIEW_EXE == "nvim-octo", argv
+    assert argv[-3] == MO.REVIEW_EXE == "mention-review", argv
     assert argv[-2:] == ["gardenersguild/trowelcast", "1559"], argv
     # The `-e` really is what introduces the payload, not a coincidence of
     # position: a future flag inserted after it would break the wrapper.
