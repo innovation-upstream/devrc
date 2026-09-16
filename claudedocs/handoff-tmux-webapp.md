@@ -29,28 +29,29 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**The 593 arc is CLOSED, merged and live as `0.8.35`. The 595 arc is now OPEN and its
-implementation is IN FLIGHT. Nothing from the 595 arc has shipped: no PR exists, no acceptance
-criterion has been evidenced, no test has been run.**
+**The 593 arc is CLOSED and live as `0.8.35`. The 595 arc is IMPLEMENTED and awaiting review —
+`ZacxDev/homelab-infra#830`, 4/4 checks pass. It is NOT merged and NOT deployed, and merging it
+would deploy nothing anyway (no Flux image automation).**
 
-### 🔴 task 595 — IN FLIGHT, nothing verified
-- **Branch `feat/tmux-session-carousel-bulk-controls`** on `ZacxDev/homelab-infra`, cut off
-  `origin/trunk` at `89a98441d`, **pushed** — so a concurrent session sweeping `gh pr list` /
-  `git ls-remote` can see the work is taken. Worktree
-  `/home/zach/workspace/homelab-talos-595-2439101` (PID-unique), `node_modules` symlinked from
-  the base clone, one-line `use flake` `.envrc` (the tracked one renders SOPS secrets a fresh
-  worktree lacks — **`git checkout -- .envrc` before committing**). ⚠ `worktree add -b … origin/trunk`
-  set the upstream to `origin/trunk`; re-pointed with `push -u` before any work.
-- **Card 595 is `in_progress`** with a write-back comment recording the branch, the settled
-  16-criterion scope, the anchor corrections, and an explicit NOT-verified list. Claim
-  `tmux-webapp-63` is **HELD** — release it when the card closes.
-- **Scope settled by the operator 2026-09-15: all SIXTEEN criteria**, not the 12 this doc carried.
-- **Cards 521 and 522 were READ ONLY** — status checks for the order-conflict question, no work
-  done on either. Their write-back guards were dismissed rather than answered, because a junk
-  comment permanently silences that guard for the card.
-- 🔴 **The version pin was deliberately NOT bumped.** clawgate has no Flux image automation, so a
-  pin landing without a matching image build produces an `ImagePullBackOff` on merge. Pin bump and
-  image build are ONE operation; releasing is a separate operator decision.
+### 🔴 task 595 — implemented, reviewed by nobody, deployed nowhere
+- **PR `ZacxDev/homelab-infra#830`** — head `436e0d769`, base `trunk` @ `89a98441d`, 2 commits,
+  6 files (3 spec/TS, 3 Go), `MERGEABLE`. Checks **counted, 4 registered / 4 resolved / 0 pending**:
+  `clawgate-ci`, `clawgate-e2e` (238 tests, 2 skipped), `gitops-validate` (10 legs),
+  `ux-audit-clawgate` — all pass.
+- **Card 595 is `ready_for_review`, 5 comments.** Comment 1451 is the evidence of record: the
+  per-criterion table, the red-at-base matrix, and an explicit NOT-verified list — and it
+  **separates independently re-verified claims from the implementing agent's reported ones.**
+- ✅ **Criterion 11 re-verified independently** (the `#824` class): mutant M1 applies exactly once,
+  compiles, **passes the Go tier**, and is killed by the e2e case's own assertion, on retry too.
+  So the e2e case — not the Go source guard — is what closes that class. **Six of the seven
+  mutants were NOT re-run.**
+- 🔴 **Scope was settled by the operator at SIXTEEN criteria**, not the 12 this doc carried.
+- 🔴 **Still unseen by a human.** `/ui/tmux` is 401 without a session, so no shell can reach it.
+  595 now joins 593's items 4–8 and cards 517/518/519 in the queue of work no browser has shown.
+- **Not tested on a real phone, and not against the real fleet** (39 groups, 2 hosts) — the swipe
+  is a synthesized touch sequence in headless Chromium, on 3–4-session fixtures.
+- **Claim `tmux-webapp-63` released** — the implementation is done and captured in the PR and the
+  card, so holding it would only block whoever picks up the merge.
 
 ### clawgate task 593 — CLOSED, MERGED AND LIVE
 | item | PR | squash |
@@ -230,10 +231,19 @@ From the analyze-service index (**recall — verify before relying on**):
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
 63. **Local-dispatch clawgate task 595 — the host session carousel, plus bulk expand/collapse and
-    bulk Chat/Raw.** 🔴 **IN FLIGHT: branch `feat/tmux-session-carousel-bulk-controls` on
-    `ZacxDev/homelab-infra`, pushed, cut off `origin/trunk` at `89a98441d`. No PR yet.** Card is
-    `in_progress` with a write-back comment; claim `tmux-webapp-63` is HELD. Do not re-draw this
-    item without reading that comment and `git ls-remote origin 'refs/heads/feat/tmux-session*'`.
+    bulk Chat/Raw.** 🔴 **IMPLEMENTED, AWAITING REVIEW AND MERGE: `ZacxDev/homelab-infra#830`,
+    head `436e0d769`, base `trunk` @ `89a98441d`, 6 files, 4/4 checks PASS (counted).** Card 595 is
+    `ready_for_review` with 5 comments; comment 1451 carries the per-criterion evidence and the
+    NOT-verified list, and separates what was independently re-verified from what the implementing
+    agent reported. **Read it before touching this item.** 🔴 **NOT MERGED, NOT DEPLOYED** — and
+    merging alone deploys nothing here (no Flux image automation), so shipping it is the separate
+    build→push→bump-both-pins operation. Live is still `0.8.35`.
+    ✅ **Criterion 11 is genuinely closed, and the e2e case is what closes it.** Mutant M1
+    (dropping the `return` from the force-open skip branch, `tmux.go:2559`) was re-run
+    independently: it applies exactly once, COMPILES, the **Go tier PASSES** under it — the same
+    blindness that let this class survive both tiers on `#824` — and the e2e case kills it by its
+    own assertion (`tmux-carousel.spec.ts:616`, message at :667), failing on retry too. The other
+    six mutants in the sweep are the implementing agent's claim and were **not** re-run.
     🔴 **SIXTEEN acceptance criteria, not 12** — 1–7 in the card body, 8–12 in comment 1422 (bulk
     expand/collapse), 13–16 in comment 1428 (bulk Chat/Raw). The operator confirmed all 16 are in
     scope on 2026-09-15. Any prose saying "12" predates comment 1428. They sit under a real
