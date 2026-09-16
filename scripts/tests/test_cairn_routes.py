@@ -318,10 +318,10 @@ def test_control_a_doc_STRING_would_parse_as_a_ROUTE(tmp_path):
     that the guard is needed, because the reader cannot supply it.
     """
     path = tmp_path / "routes.json"
-    path.write_text(json.dumps({"_doc": "personal", "a": "personal"}),
+    path.write_text(json.dumps({"_doc": PERSONAL, "a": PERSONAL}),
                     encoding="utf-8")
     loaded = cairn_routes.load_table(path)
-    assert loaded == {"_doc": "personal", "a": "personal"}
+    assert loaded == {"_doc": PERSONAL, "a": PERSONAL}
 
 
 def test_control_a_well_formed_fixture_loads(tmp_path):

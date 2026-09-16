@@ -166,6 +166,24 @@ WIRE_CONSTANTS: tuple[tuple[object, str, object], ...] = (
     # A RENDERED TOKEN two renderers emit and `analyze-service/SKILL.md` tells
     # the reader to relay ("the `stamp:` lines").
     (rs, "STAMP_PREFIX", "  stamp: "),
+    # 🔴 AN ALIAS THAT IS BOTH A FILE'S CONTENT AND A DIRECTORY NAME — arrived
+    # with the `baee2f0` pin bump, and the sweep below caught it with no pin.
+    # Two boundaries, either of which makes it a wire fact:
+    #   * every VALUE in devrc's checked-in routing table `claude/cairn-routes.json`
+    #     is this literal — all 25 of them — and `scripts/tests/test_cairn_routes.py`
+    #     asserts they equal this constant. Change it upstream with no pin here and
+    #     that table silently stops naming a configured instance, which is a
+    #     REFUSED read/write per `Routing.alias_for`'s row 3, not a warning.
+    #   * `cache_root_for` returns `root.parent / f"{root.name}-{alias}"` for any
+    #     other alias and `DEFAULT_CACHE_ROOT` UNCHANGED for this one. So this
+    #     string is the sentinel that keeps every existing host's populated cache
+    #     where it is; changing it orphans all of them into a silent full re-sync.
+    # ⚠ Its sibling `_ALIAS` (the spelling regex) is NOT here and needs no excuse:
+    # `_module_scope_assignments` drops every name starting with `_`, so it is
+    # FILTERED by the sweep rather than pinned or listed in NOT_WIRE_FACTS — which
+    # is empty. Do not "complete" the pair by adding it; the reverse-direction
+    # assertion below would then fail on a name the sweep never reports.
+    (rs, "DEFAULT_ALIAS", "personal"),
     # A STATUS other code and `analyze-service/SKILL.md` match on by name.
     (srec, "INDEX_UNSTAMPED", "store-unstamped"),
     # A PREFIX a JSON consumer parses to tell "read" from "refused".
