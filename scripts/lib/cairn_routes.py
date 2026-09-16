@@ -17,7 +17,6 @@ lives here so it is reviewed, diffable and deployed like everything else.
   * `nix/home.nix`                        deploys it to
                                           ~/.config/subsystem-store/routes.json
   * `scripts/tests/test_cairn_routes.py`  grades it, deterministically
-  * `scripts/drift-check.sh`              grades it LIVE, host-locally
 
 so the parsing, the reconciliation and the deploy path are named HERE, once.
 `claude/RULES.md` -> "One rule, one place".
@@ -48,8 +47,8 @@ says, and its docstring's row 3 is explicit: a table entry naming an alias this
 host has NO CONFIG FOR raises `UnroutedScope` — at one instance exactly as at
 many. So an entry `"civitai": "civitai"` written before any host carries
 `instances/civitai.env` does not lie dormant; it REFUSES every read and write of
-that scope, on every host, immediately. The two-way pin below cannot catch that
-one — `cairn routes --check` can, and does, which is why the live arm exists.
+that scope, on every host, immediately. That is why the SHIPPED table's values
+are pinned to `DEFAULT_ALIAS` by a test, rather than left to review.
 
 WHAT THE TWO CHECKS SEE, AND WHAT THEY CANNOT
 ---------------------------------------------
@@ -72,11 +71,21 @@ either of them:
   direction three  a table entry naming an alias no instance provides -> a
                  PROBLEM, at any instance count. This is the one above.
 
-🔴 SO A GREEN `routes --check` ON A ONE-INSTANCE HOST IS A NARROWER CLAIM THAN
-IT LOOKS. It says the table names no unreachable alias and no scope that has
-gone missing; it CANNOT say every live scope is registered, because at one
-instance that is not yet a defect. The deterministic suite is what pins
-direction one, by grading a fixture at two aliases.
+🔴 SO NOTHING IN THIS REPO GRADES THE TABLE AGAINST THE LIVE STORE, AND THE
+HONEST VERSION OF THAT SENTENCE IS THE POINT OF THIS PARAGRAPH. A
+`drift-check.sh` arm running `cairn routes --check` was written and WITHDRAWN
+before merge: on a one-instance host, over a table whose every value is
+`DEFAULT_ALIAS`, direction one produces no output at all (nothing refuses, so
+`check` appends nothing), direction three cannot fire (the only alias named is
+the one `discover()` always builds), and direction two is the NOTE cairn's own
+docstring calls undecidable from a snapshot. The arm's `DISAGREE` branch was
+reachable only from a stub.
+
+What the deterministic suite therefore pins is a TWO-WAY PIN OVER FIXTURES —
+`routing_for` at two aliases, which is the configuration where each direction
+has teeth — and NOT the table against this machine's scopes. Do not read a
+green suite as the second claim. The live pin belongs with the change that makes
+it reachable: the first host to configure a second instance.
 """
 from __future__ import annotations
 
@@ -99,30 +108,24 @@ import cairn_pin  # noqa: E402
 cairn_pin.ensure()
 
 from cairn_instances import (  # noqa: E402
-    ROUTES_ENV,
     ROUTES_FILE_NAME,
     RoutingConfigError,
     UnroutedScope,
     load_routes,
-    routes_file,
     routing_for,
 )
 from subsystem_read_store import DEFAULT_ALIAS  # noqa: E402
 
 __all__ = [
     "DEFAULT_ALIAS",
-    "REPO_ROOT",
-    "ROUTES_ENV",
     "ROUTES_FILE_NAME",
     "RoutingConfigError",
     "TABLE_PATH",
     "UnroutedScope",
     "aliases_used",
     "check",
-    "deployed_path",
     "load_table",
     "routing_for",
-    "scopes",
 ]
 
 
@@ -137,11 +140,6 @@ def load_table(path: Path | None = None) -> dict[str, str]:
     claim.
     """
     return load_routes(path or TABLE_PATH)
-
-
-def scopes(table: dict[str, str]) -> list[str]:
-    """Every scope the table names, sorted."""
-    return sorted(table)
 
 
 def aliases_used(table: dict[str, str]) -> list[str]:
@@ -167,15 +165,3 @@ def check(table: dict[str, str], live_scopes, aliases=None):
     different one to grade a host.
     """
     return routing_for(table, aliases or aliases_used(table)).check(live_scopes)
-
-
-def deployed_path() -> Path:
-    """Where the deployed table lives on THIS host.
-
-    Asked of cairn (`routes_file`), never spelled, because the rule is the
-    client's: `$CAIRN_ROUTES` if set, else `routes.json` beside the default
-    instance's config file. The `home.file` entry in `nix/home.nix` writes the
-    default location; a host that has moved `$SUBSYSTEM_STORE_CONFIG` has moved
-    this with it, and a spelled constant here would report the wrong file.
-    """
-    return routes_file()[0]

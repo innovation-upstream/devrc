@@ -66,25 +66,13 @@
 # the local-checkout half of both holes, and closes it for shapes nobody has
 # enumerated. Neither layer covers a runtime-built mutation of the REMOTE host.
 #
-# THE ONLY FILES THIS SCRIPT WRITES ITSELF are its streak counters under
+# THE ONLY FILES THIS SCRIPT WRITES are its streak counters under
 # $DRIFT_STATE_DIR (default $XDG_STATE_HOME/drift-check): the consecutive-
 # unreachable counter per remote role, and the consecutive-UNMEASURED counter per
 # (host, built-source scope) that rc 18 rides on. They live outside every repo,
 # and `test_the_only_files_the_deadman_writes_are_the_streak_counters` holds that
 # ledger — as an asserted set of REDIRECTION TARGETS, so it pins that nothing
 # else is written, not how many counter files exist.
-#
-# ⚠ ONE CHILD PROCESS WRITES MORE THAN THAT, AND SAYING SO IS BETTER THAN A
-# CLAIM THAT READS CLEAN AND IS FALSE. The routing-table arm runs
-# `cairn routes --check`, which REFRESHES the read-through cache under
-# $XDG_CACHE_HOME/subsystem-store — the same write any ordinary `cairn recall`
-# performs, outside every repo and outside every checkout. It is not avoidable
-# by passing `--no-sync`: cairn REFUSES to grade a table against an instance it
-# did not read LIVE, because a stale cache invents findings in BOTH directions
-# (a scope added elsewhere reads as "the table does not name it", one deleted
-# elsewhere as "the table names a scope that does not exist"). So the choice is
-# a cache refresh or no live grading at all. The CHECKOUT ban above is
-# unaffected and unconditional.
 #
 # ── HOST IDENTITY ─────────────────────────────────────────────────────────────
 # Both machines report hostname `nixos`, so identity comes from local IPv4
@@ -758,17 +746,6 @@
 #                    host. Deliberately NOT forwarded over ssh — the comparison
 #                    happens in the driver, and every value sent across that hop
 #                    is one that has to be proved safe.
-#   DRIFT_CAIRN       the `cairn` binary the routing-table arm runs (default
-#                    `cairn`, resolved from PATH). Exists so the suite can drive
-#                    that arm against a stub, and — pointed at a path that does
-#                    not exist — keep every OTHER test from reaching the
-#                    operator's real store and the network. Same role as
-#                    DRIFT_GH and DRIFT_SESSION_MANAGER, and for the same
-#                    measured reason. NOT forwarded over ssh: the arm is
-#                    local-only (see "CAIRN ROUTING TABLE" below).
-#   DRIFT_ROUTES_TIMEOUT  seconds `cairn routes --check` may take (default 20,
-#                    integer). It REFRESHES the read-through cache, so it is a
-#                    network call and needs a bound like every sibling here.
 #   DRIFT_SKIP_SSH_PROBE=1  do not probe the remote host's addresses; use the
 #                    first derived candidate as-is. The probe (LAN, then nebula)
 #                    exists because a host that is merely off-LAN otherwise reads
@@ -893,13 +870,6 @@ DRIFT_GH_TIMEOUT="${DRIFT_GH_TIMEOUT:-20}"
 # COULD NOT MEASURE, never DRIFT: stopping early means we did not look, and
 # "did not look" must never read as "nothing gates main".
 DRIFT_GH_RULESET_MAX="${DRIFT_GH_RULESET_MAX:-5}"
-# The cairn routing-table arm. Spelled as an explicit unset-test rather than
-# `${DRIFT_CAIRN:-cairn}` for the reason given for DRIFT_GH above: this binary is
-# resolved from the unit's PATH, and
-# `test_every_command_the_checker_runs_is_on_the_unit_path` looks for exactly
-# that spelling of the word `cairn` as a COMMAND NAME.
-if [ -z "${DRIFT_CAIRN+set}" ]; then DRIFT_CAIRN=cairn; fi
-DRIFT_ROUTES_TIMEOUT="${DRIFT_ROUTES_TIMEOUT:-20}"
 
 # 🔴 Both tunables are INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST
 # (piped to `bash -s` over ssh), so a non-integer value is remote code execution
@@ -1019,7 +989,6 @@ require_int DRIFT_SRC_FETCH_TIMEOUT "$DRIFT_SRC_FETCH_TIMEOUT"
 # Same again for the branch-protection probe's cap.
 require_int DRIFT_GH_TIMEOUT "$DRIFT_GH_TIMEOUT"
 require_int DRIFT_GH_RULESET_MAX "$DRIFT_GH_RULESET_MAX"
-require_int DRIFT_ROUTES_TIMEOUT "$DRIFT_ROUTES_TIMEOUT"
 # Floored at 1 HERE rather than via require_positive_int: that helper's zero-arm
 # prints an rc-23 story about nix-read paths and `hits=` counts, none of which
 # applies to this cap — an operator debugging this exit would be sent to a
@@ -2642,94 +2611,6 @@ else
     echo "[tiers] ledger asks for $T_NW name-only override(s); every other skill keeps its description."
     tier_report "$LOCAL_ROLE" "$(fact_of "$LOCAL_OUT" skill-overrides)" "$T_WANT" "$T_NW"
     tier_report "$REMOTE_ROLE" "$(fact_of "$REMOTE_OUT" skill-overrides)" "$T_WANT" "$T_NW"
-  fi
-fi
-echo
-
-# ── CAIRN ROUTING TABLE (information only — see WHY NO rc) ────────────────────
-# 🔴 WHAT THIS MEASURES. `claude/cairn-routes.json` says which INSTANCE each
-# subsystem-store scope lives on; `nix/home.nix` deploys it to
-# ~/.config/subsystem-store/routes.json, and `cairn routes --check` grades it
-# against the scopes this host actually holds. The table is in git, the SCOPES
-# are not — they are whatever has been written to the store — so nothing keeps
-# the two together except this arm and
-# `scripts/tests/test_cairn_routes.py`, which grades only what a table can say
-# about ITSELF.
-#
-# 🔴 LOCAL-ONLY, DELIBERATELY, AND THAT IS A LIMIT WORTH STATING. The remote leg
-# runs a fixed $PAYLOAD over ssh and this grading needs a live store read on the
-# far side; every value that crosses that hop is one that has to be proved safe,
-# and the payload does not carry it. So a drifted table on the OTHER host is not
-# seen here. What IS seen for both hosts is the repo currency check above: the
-# table ships in the checkout, so a host that is BEHIND carries an old table and
-# says so under its own role.
-#
-# 🔴 WHY NO rc — AND IT IS NOT "THIS IS UNIMPORTANT". At ONE configured instance
-# `Routing.check` CANNOT produce a problem over the shipped table, by
-# construction rather than by luck:
-#   * a live scope the table does not name resolves to the sole instance
-#     (`alias_for` rows 1-2), so it is not a finding;
-#   * a table entry naming a scope that holds no entry is a NOTE, never a
-#     problem — a snapshot ships entry FILES, so an empty scope and a retired
-#     one look identical;
-#   * the one direction that DOES refuse at a single instance is an entry naming
-#     an alias this host has no config for (row 3), and every value in the
-#     shipped table is `personal`, which every host has.
-# An exit code that cannot fire is a guard nobody has watched go red, and
-# `claude/RULES.md` is explicit that reading as coverage while providing none is
-# worse than providing none. The findings are PRINTED — loudly — and the code
-# belongs with the change that makes it reachable: the first host to configure a
-# second instance. At that point direction one becomes a real refusal and this
-# arm should take the next free code.
-#
-# 🔴 A SKIP SAYS WHY. No cairn, no `routes` verb (a client older than the pin),
-# no deployed table, or a refusal to grade against a cache it could not refresh
-# — each prints its own reason. None of them is "the table matches this host".
-echo "=== cairn routing table (claude/cairn-routes.json vs this host's scopes) ==="
-if [ "$DO_LOCAL" != 1 ]; then
-  echo "[routes] NOT EVALUATED — --no-local, and this arm only grades the local host."
-elif ! command -v "$DRIFT_CAIRN" >/dev/null 2>&1; then
-  echo "[routes] SKIPPED — no usable cairn binary at $DRIFT_CAIRN."
-  echo "[routes]   Nothing was graded. This is NOT 'the table matches this host'."
-  echo "[routes]   fix: home-manager switch (the pinned client lands at ~/.local/bin/cairn)."
-else
-  R_OUT="$(timeout "$DRIFT_ROUTES_TIMEOUT" "$DRIFT_CAIRN" routes --check 2>&1)"
-  R_RC=$?
-  # The summary line is the only evidence the grading actually RAN. Every other
-  # outcome — a client with no `routes` verb, a refusal to grade against a stale
-  # cache, a timeout — leaves it absent, and each of those exits non-zero in a
-  # way that is indistinguishable from "the table has problems" if the code is
-  # read on its own. So branch on the LINE, never on the code.
-  R_SUM="$(printf '%s\n' "$R_OUT" | grep -E '^routes: [0-9]+ entr' | head -n 1)"
-  if printf '%s\n' "$R_OUT" | grep -q 'NONE configured'; then
-    echo "[routes] NOT DEPLOYED — this host has no routing table yet."
-    echo "[routes]   That is the pre-phase-B state, not drift: every scope resolves to the"
-    echo "[routes]   default instance exactly as it always has. Deploy it with:"
-    echo "[routes]     home-manager switch --flake ~/workspace/devrc --impure"
-  elif [ -z "$R_SUM" ]; then
-    # 🔴 NO BACKTICKS IN THESE STRINGS, and it is not a style rule. The passivity
-    # tokenizer in test_drift_check.py treats a backtick as command substitution
-    # even when the shell would not — so a markdown-style quoted word inside an
-    # echo becomes a COMMAND WORD the unit-PATH ledger then demands an entry for.
-    echo "[routes] COULD NOT MEASURE — cairn routes --check produced no verdict, rc $R_RC."
-    echo "[routes]   Causes that look alike here: a client older than the pin with no routes verb,"
-    echo "[routes]   a store it could not read LIVE (cairn refuses to grade against a stale"
-    echo "[routes]   cache), or the ${DRIFT_ROUTES_TIMEOUT}s bound. This is NOT a match. Its output:"
-    printf '%s\n' "$R_OUT" | head -n 8 | sed 's|^|[routes]     |'
-  else
-    echo "[routes] $R_SUM"
-    printf '%s\n' "$R_OUT" | grep -E '^(🔴|⚠) cairn: ' | sed 's|^|[routes]   |'
-    if [ "$R_RC" != 0 ]; then
-      echo "[routes] 🔴 the table and this host DISAGREE — see the 🔴 lines above."
-      echo "[routes]   A problem means a write to that scope REFUSES. Fix claude/cairn-routes.json"
-      echo "[routes]   (or configure the named instance), then home-manager switch."
-      echo "[routes]   No rc is set — see WHY NO rc in this arm's header before adding one."
-    else
-      echo "[routes] the table and this host agree (0 problems)."
-      echo "[routes]   ⚠ narrower than it looks at ONE instance: an unregistered live scope is"
-      echo "[routes]   not yet a defect there. The ⚠ lines above, if any, are the observations"
-      echo "[routes]   this check CAN make — read them rather than the count."
-    fi
   fi
 fi
 echo

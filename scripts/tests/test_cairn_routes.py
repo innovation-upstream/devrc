@@ -10,12 +10,22 @@ publishing their org chart. `claude/cairn-routes.json` is devrc's copy of that
 input, `nix/home.nix` deploys it to `~/.config/subsystem-store/routes.json`,
 `scripts/lib/cairn_routes.py` reads it, and this module grades it.
 
-🔴 THE DETERMINISTIC HALF ONLY. Nothing here reads `~/.cache/subsystem-store` or
-any other host-local path, so it runs identically in both tiers. The LIVE
-two-way pin — the table against the scopes this machine actually holds — is
-`cairn routes --check`, driven by the `[routes]` arm of `scripts/drift-check.sh`.
-That split is deliberate: a suite that asked the operator's cache would be green
-or red according to which machine ran it.
+🔴 THIS IS A TWO-WAY PIN OVER FIXTURES, NOT OVER REALITY, AND THE DIFFERENCE IS
+THE FIRST THING A READER SHOULD TAKE FROM THIS FILE. Nothing here reads
+`~/.cache/subsystem-store` or any other host-local path, so it runs identically
+in both tiers — and so it CANNOT say the table matches the scopes this machine
+holds. What it pins is that each direction of `Routing.check` has teeth in the
+configuration where teeth exist (`routing_for` at TWO aliases), and that the
+shipped table is well-formed and all-default.
+
+⚠ THERE IS NO LIVE ARM, DELIBERATELY. A `drift-check.sh` arm running
+`cairn routes --check` was written and WITHDRAWN before merge: on a one-instance
+host over an all-default table, direction one produces no output at all
+(nothing refuses, so `check` appends nothing), direction three cannot fire (the
+only alias named is the one `discover()` always builds), and direction two is
+the NOTE cairn's own docstring calls undecidable from a snapshot. It belongs
+with the change that makes it reachable — the first host to configure a second
+instance.
 
 🔴 WHY EVERY VALUE IS `personal`, WHICH IS THE ASSERTION MOST LIKELY TO BE
 "FIXED" BY SOMEONE READING IT AS A PLACEHOLDER. Phase B's closing condition is
@@ -157,10 +167,16 @@ def test_the_table_carries_no_documentation_block(table):
 
 
 # --------------------------------------------------------------------------- #
-# The reconciliation, RED IN BOTH DIRECTIONS
+# The reconciliation, RED IN BOTH DIRECTIONS — over FIXTURES
 #
 # Driven through `routing_for`, which builds a `Routing` with no filesystem —
 # it exists precisely so a table can be graded without discovering a host.
+#
+# 🔴 EVERY CASE HERE MUST BE ABLE TO GO RED ON ITS OWN INPUT. A "check" whose
+# inputs cannot disagree belongs nowhere in this block: one used to — it passed
+# the shipped table's own values as the alias set, so all three directions were
+# empty by construction and no table content could make it fail. It sat here
+# reading as coverage. Before adding a case, name the input that reds it.
 # --------------------------------------------------------------------------- #
 
 def test_control_a_live_scope_the_table_does_not_name_is_a_problem():
@@ -261,17 +277,6 @@ def test_control_row_three_refuses_even_at_one_instance():
     assert len(problems) == 1 and "alpha" in problems[0], problems
 
 
-def test_the_shipped_table_is_self_consistent_at_the_aliases_it_names(table):
-    """The shipped table, graded against ITSELF: every alias it routes to is one
-    it also names, so row 3 cannot fire on a host that configures exactly the
-    aliases this table asks for. Direction one cannot fire here (the live set IS
-    the table's keys) and neither can direction two — which is the point: this
-    asserts only what a table can assert about itself, and the live two-way pin
-    is `cairn routes --check` in drift-check.sh."""
-    problems, notes = cairn_routes.check(table, set(table))
-    assert (problems, notes) == ((), ()), (problems, notes)
-
-
 # --------------------------------------------------------------------------- #
 # NEGATIVE CONTROLS on the reader — the shapes a table may not have
 # --------------------------------------------------------------------------- #
@@ -324,7 +329,6 @@ def test_control_a_well_formed_fixture_loads(tmp_path):
                     encoding="utf-8")
     loaded = cairn_routes.load_table(path)
     assert loaded == {"alpha": "second-store", "beta": PERSONAL}
-    assert cairn_routes.scopes(loaded) == ["alpha", "beta"]
     assert cairn_routes.aliases_used(loaded) == [PERSONAL, "second-store"]
 
 

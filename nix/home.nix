@@ -1590,9 +1590,19 @@ in
   # tool carrying somebody's scope list would be publishing their org chart. This
   # line is devrc's half of that seam, and `claude/cairn-routes.json` is the
   # table. `scripts/lib/cairn_routes.py` carries the documentation the JSON
-  # cannot (see below); `scripts/tests/test_cairn_routes.py` grades it
-  # deterministically; the `[routes]` arm of `scripts/drift-check.sh` grades it
-  # LIVE against this host.
+  # cannot (see below) and `scripts/tests/test_cairn_routes.py` grades it.
+  #
+  # 🔴 NOTHING GRADES THIS FILE AGAINST THE LIVE STORE, AND THAT IS DELIBERATE
+  # AS OF THIS COMMIT. A `drift-check.sh` arm running `cairn routes --check`
+  # was written and then withdrawn: at ONE configured instance, over a table
+  # whose every value is the default alias, `Routing.check` cannot produce a
+  # PROBLEM at all — an unnamed live scope resolves to the sole instance rather
+  # than refusing, and the one direction that does refuse needs an alias no
+  # host configures. The arm's only reachable production output was a NOTE that
+  # cairn's own docstring calls undecidable from a snapshot. It belongs with the
+  # change that makes it reachable: the first host to configure a second
+  # instance. Until then, the deterministic suite is the whole gate, and saying
+  # so beats an arm whose green means less than it reads.
   #
   # 🔴 A home.file STORE COPY, AND THE THREE LINES ABOVE ARE NOT THE PRECEDENT TO
   # FOLLOW. `cairn-who` and `cairn-validate` are `mkOutOfStoreSymlink` because
@@ -3596,15 +3606,7 @@ in
       # undifferentiated `+ 60` literal — raising that 10s to 120s moves nothing
       # in the test. An earlier version of this comment said it "counts both",
       # which described coverage one term wider than the implementation.
-      #
-      # 🔴 RAISED 420 -> 440 when the cairn routing-table arm landed. That arm
-      # runs `cairn routes --check`, bounded by $DRIFT_ROUTES_TIMEOUT (default
-      # 20s) — a REAL network call, because cairn refuses to grade a table
-      # against a cache it did not refresh. The test's model now carries that
-      # term, so the 10s of slack recorded above is preserved rather than spent:
-      # needed went 410 -> 430 against a 440 ceiling. Do not read the raise as
-      # headroom for anything else.
-      TimeoutStartSec = 440;
+      TimeoutStartSec = 420;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
@@ -3633,18 +3635,7 @@ in
         # ⚠ gh needs credentials, which are NOT on this PATH: under the user
         # manager it reads ~/.config/gh (HOME is set below). If that is ever
         # absent the arm says COULD NOT MEASURE rather than reporting drift.
-        # 🔴 cairnPackage IS FOR THE ROUTING-TABLE ARM, and it is the same silent
-        # failure the three notes above record: without the pinned client on this
-        # PATH the arm prints SKIPPED — no usable cairn binary — on every timer
-        # run, forever, from a unit that looks correct. It is the PINNED package
-        # rather than `%h/.local/bin/cairn` for the reason spelled out on the
-        # `analyze-service-index-backup` unit: that path is a home-manager
-        # symlink into /nix/store and may point at a generation this unit was not
-        # built against. ⚠ `cairn routes --check` REFRESHES the read-through
-        # cache (it refuses to grade against a stale one), so this entry is what
-        # makes the unit do a network read; the checkout ban in the script's
-        # header is unaffected.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux pkgs.gh cairnPackage ]}"
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux pkgs.gh ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
@@ -3660,10 +3651,6 @@ in
         "${../scripts/lib/skill_tier_facts.py}"
         "${../scripts/lib/skill_tiers.py}"
         "${../claude/skill-tiers.json}"
-        # The cairn routing-table arm. The table is listed for the same reason
-        # the tier ledger is: re-pointing a scope changes what the unit would
-        # REPORT without any script changing at all.
-        "${../claude/cairn-routes.json}"
       ];
     };
   };
