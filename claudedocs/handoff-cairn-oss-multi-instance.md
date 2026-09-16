@@ -28,10 +28,55 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
+- ⏳ **2026-09-16 — RANK 29'S DEVRC HALF IS IN FLIGHT: `innovation-upstream/devrc` #1726**, head
+  `3416c3dd`, `MERGEABLE`. Claim `cairn-oss-multi-instance-29` **HELD** — do not release it on
+  merge; see its rank. **Contents:** `claude/cairn-routes.json` (25 scopes, flat, key-sorted,
+  **every value `personal`**), the `flake.lock` bump `1e7aedf`→`baee2f0`, a `home.file` STORE-COPY
+  deploy to `~/.config/subsystem-store/routes.json`, `scripts/lib/cairn_routes.py` (delegating to
+  cairn's `routing_for`/`check`, not re-implementing them), and `scripts/tests/test_cairn_routes.py`.
+  🔴 **The flake bump was MECHANICALLY REQUIRED and its blast radius is NOT what it looks like.**
+  The deployed client was pre-#24 and had no `routes` verb at all. The bump spans 17 commits /
+  62,750 insertions, but the **Go server, Go client and dual-run harness (#21/#22/#23/#26) and the
+  control plane (#29/#30) DO NOT REACH devrc** — `packages.cairn` stays the Python client, and
+  `nix/home.nix` deploys `${cairnPackage}/bin/cairn`. What DOES ship at the next `home-manager
+  switch` is the **Python reader rewrite** (`subsystem_read_store`, `subsystem_recall`,
+  `subsystem_resolver`, `cairn_doctor`, `entry_shape`, + new `cairn_instances`), consumed via
+  `CAIRN_LIB` by **three systemd units** — `handoff-index-sync`, `present-regen`,
+  `analyze-service-index-backup` — **and a fourth consumer that is not a unit**:
+  `scripts/subsystem-store-api/Dockerfile`, staged from the pinned `lib/` by `build-push.sh`.
+  Phase B's "existing behaviour unchanged" is proven here for ROUTING ONLY; the reader rewrite
+  rides the same lockfile line and is covered by cairn #24's ladder upstream, not by this PR.
+  **Two operator decisions, 2026-09-16, not to be re-litigated:** the live two-way pin goes in
+  `drift-check.sh`, NOT the unit suite (a unit test needing `~/.cache/subsystem-store` is
+  structurally incapable of passing in the Tekton tier); and **that arm is DEFERRED to phase C/E**
+  — round 0 measured that at one instance over an all-`personal` table its only reachable output
+  is direction two, which cairn's own docstring calls undecidable from a snapshot, while direction
+  one emits NOTHING and direction three is unreachable. `scripts/drift-check.sh` is byte-identical
+  to `main` on this branch. Rank 29's closing condition was **AMENDED** in the same pass — read it.
+  ⚠ **CI: all four Tekton statuses `pending` at 14:05Z, `check-runs` total 0. NOT a verdict** —
+  re-read SHA-pinned (`gh api "repos/innovation-upstream/devrc/commits/<head>/status"`) and read
+  `completed_at`, never a rollup resolved at call time.
+  🔴 **THE LADDER'S OWN PROSE WAS AGAIN THE FINDING, TWICE, AND ONCE IN THREE FILES.** Round 0
+  returned `requirement questioned` + 3 deletion candidates, zero code defects. Two cuts were made
+  (a guard grading the table against its OWN keys with its OWN values as the alias set — measured
+  `((), ())` across five table shapes, so no content could redden it; and ~25 lines of dead module
+  API). Then the FIX round wrote a guard docstring asserting `pkgs.bash` sits OUTSIDE the
+  drift-check unit's PATH list (**it is 4th of 11**, `nix/home.nix:3592`) and that a unit without
+  it "would run nothing" (**false** — `ExecStart` names an absolute `${pkgs.bash}/bin/bash`; the
+  real consequence is the bare-name `bash -c "$PAYLOAD"` at `drift-check.sh:2365`, local arm only).
+  The guard was RIGHT and its reason was wrong: exactly 1 of 11 rows is **WALKABLE** because
+  `ExecStart` spells the attr a second time inside the block, so the old substring form passed with
+  the entry deleted. Sweeping the siblings then found a magic `>= 5` floor, a "~90 lines" that
+  measured **141**, and an over-broad *"every `cairn` verb exits 11"* — narrowed to **"every verb
+  that RESOLVES AN INSTANCE"** in **three files**, `--help` being the counter-example. **Sweep
+  every claim in the commit the way you swept the hardest one.**
+
 - ✅ **2026-09-15 — RANK 29'S CAIRN HALF IS MERGED: `ZacxDev/cairn` #24, squash `baee2f0`.**
   Ladder: round 0 (requirements) → round 1 (full, 9 findings) → fix → round 2 (delta, 4 findings)
-  → fix → merge. Claim `cairn-oss-multi-instance-29` **RELEASED**. **Rank 29 stays OPEN**: its
-  closing condition needs BOTH PRs and **the devrc routing-table half has not started.**
+  → fix → merge. Claim `cairn-oss-multi-instance-29` was RELEASED here and **re-taken 2026-09-15
+  for the devrc half** — see the bullet above. **Rank 29 stays OPEN**: its closing condition needs
+  BOTH PRs. ⚠ The clause that stood here, *"the devrc routing-table half has not started"*, was
+  true when written and is now superseded by #1726.
   Verified BY CONTENT at that repo's `origin/main` — a squash makes ancestry false forever:
   `lib/cairn_instances.py` `startswith(".#")` · `internal/client/instances.go`
   `HasPrefix(entry.Name(), ".#")` · `internal/client/state.go` `timeout int, instance string` ·
@@ -178,9 +223,12 @@ is the PRIVATE proposal, not this doc.
   unchanged-output claim with no control is indistinguishable from a harness wired to nothing.
 
 - 🔴 **STILL OPEN, NONE BLOCKING, NONE OWNED** (each has a closing condition at its rank):
-  🔴 **29 is the only one of these that advances the `## Goal`**, and it is now HALF done — the
-  cairn mechanism is merged, **the devrc routing table is not written**. UNCLAIMED. The rest are
-  hygiene. ⚠ Rank 29 says C/D/E cannot start until B lands; **round 1's auditor measured that as
+  🔴 **29 is the only one of these that advances the `## Goal`.** BOTH halves are now written —
+  the cairn mechanism merged (#24 `baee2f0`), the devrc table **IN FLIGHT as #1726**, CLAIMED
+  (`cairn-oss-multi-instance-29`). 🔴 **Still NOT closed, and merging #1726 does not close it**:
+  its amended condition also needs `cairn doctor` reporting ONE instance on BOTH hosts after a
+  `ship.sh`, which is an operator step. Release the claim only then. The rest are hygiene.
+  ⚠ Rank 29 says C/D/E cannot start until B lands; **round 1's auditor measured that as
   FALSE for C and D** (`server/seed.sh` and `server/verify-byte-identity.sh` touch no client
   routing) — re-derive before sequencing off it.
   **25** (the repo-handle `~` sweep — read its 129-of-177 decomposition BEFORE scoping: 48 of
@@ -364,29 +412,17 @@ was to DERIVE coverage (`partition_tracked_files()` buckets every enumerated fil
   `nix build github:ZacxDev/cairn/<rev>#cairn` then exercise each verb against a fixture
   cache and diff against `scripts/cairn`.
 
-### The `cairn` client never built a FOCUS WINDOW — FIXED on a branch, suite result unread
-- **Symptom + exact repro:** run both readers against the same store at the same instant.
-  `cairn recall --repo ~/workspace/devrc --no-sync | grep 'FEATURED IN FULL'` versus
-  `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc | grep 'FEATURED IN FULL'`.
-- **Observed (with values), 2026-09-08:** client →
-  `most-recent fallback — newest entry file in \`devrc/\` (no handoff doc to read a path
-  window from)`; module → `resolved via claudedocs/handoff-cairn-oss-multi-instance.md — 11
-  of 48 quoted path(s) name it: devrc/scripts/cairn, scripts/lib/timeouts.py …`.
-  🔴 The parenthetical was **wrong about the world**, not merely unhelpful: the handoff doc
-  was there and the client never looked. `grep -c focus_window <client>` → **0**, while
-  `focus_window` is in the module's `__all__`. via: measurement
-- **Ruled out: that this is cosmetic.** It inverts the advice every skill gives — the wrapper
-  `/resume` step 4 PRESCRIBES was strictly worse than the raw module it says not to use. This
-  session ate it: the featured entry came back as `tests`, unrelated to the effort. via: measurement
-- **Ruled out: that the fix needs a new condition.** The module already has one
-  (`mode == DEFAULT_MODE and args.scope is None`); the client now mirrors it rather than
-  inventing a rule, so `--scope` still falls back — correct, not a bug. via: code
-- **Leading hypothesis:** none needed; cause and fix are both known. Branch
-  `fix/client-focus-window` passes `focus_paths`/`focus_source` and its output is byte-for-byte
-  the module's.
-- **Next probe:** read `/tmp/focus-suite.log` for `PYTEST_RC=`. Green ⇒ open the PR. The
-  regression test is RED at base `3167e44` on its own assertion; the fixture uses a repo NAMED
-  for its scope, because passing `--scope` would suppress the very window under test.
+### EVICTED 2026-09-16 — the client's missing FOCUS WINDOW (CLOSED)
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #9, squash `a3c84db`**; evicted for size to pay for the
+rank-29 update, per the 2026-09-07 convention. Verified TWO ways, neither of them ancestry:
+`focus_window`/`focus_paths`/`focus_source` occur **3×** in `origin/main:cairn` against a positive
+control of 3, and a live `cairn recall --repo ~/workspace/devrc` on 2026-09-15 printed
+`resolved via claudedocs/…` rather than the `most-recent fallback` that WAS the symptom. The
+block's `fix/client-focus-window` branch is gone and its "next probe" named a `/tmp` log that no
+longer exists — **a next probe pointing into `/tmp` expires silently and reads as actionable
+forever.** The lesson that survives: the client's fallback message asserted *"no handoff doc to
+read a path window from"* when the doc was right there — **a fallback that explains itself is
+making a claim about the world, and that claim can be false.** **Next probe: none.**
 
 ### EVICTED 2026-09-14 — the three reds only the MERGED tree could find (CLOSED)
 🔴 **Fixed in `29f16402`, gate green on `48bb44e3` from two runners.** Evicted for size per the
@@ -1301,15 +1337,33 @@ belongs to that arc's own session. via: measurement
     the table is an INPUT — `~/.config/subsystem-store/routes.json`, or `$CAIRN_ROUTES`, a flat
     JSON object of `scope → alias`, every other shape refused. `env` stays the `personal` alias;
     extra instances are `instances/<alias>.env`; caches are SIBLINGS (`…/subsystem-store-<alias>`),
-    the default instance keeping `DEFAULT_CACHE_ROOT` byte-for-byte. 🔴 **Routing activates on
-    `len(instances) > 1`, NOT on the table's presence** — so dropping a table onto a one-instance
-    host changes nothing, which is what keeps phase B's "existing behaviour unchanged" true when
-    the devrc half lands. A table entry naming an alias this host has no config for still REFUSES.
-    🔴 **REMAINING closing condition:** the devrc PR merged and verified BY CONTENT, with the
-    two-way pin watched RED in BOTH directions (a scope with no entry; an entry naming no scope)
-    and an unregistered scope exiting non-zero naming the scope — each red at the pre-change tree,
-    not asserted. `cairn doctor` must still report ONE instance on both hosts after `ship.sh`,
-    read as the resolved store path and never as ship's rc.
+    the default instance keeping `DEFAULT_CACHE_ROOT` byte-for-byte. 🔴 **LABELLING activates on
+    `len(instances) > 1`, NOT on the table's presence — but ROUTING is a SECOND predicate and the
+    earlier wording here conflated them.** It read *"dropping a table onto a one-instance host
+    changes nothing"*, and that is OVER-BROAD in the direction that ships a defect: `alias_for`
+    consults the TABLE FIRST whatever `multi_instance` says, and its **row 3 — an entry naming an
+    alias this host has no config for — REFUSES at one instance exactly as at many.** The correct
+    sentence is **"an UNREGISTERED scope changes nothing at one instance"**. Following the old one
+    means shipping the FINAL ledger (`storage-resolver: civitai`) at phase B, which breaks every
+    read of those scopes on both hosts the moment it deploys. **That is why the phase-B table
+    routes every scope to `personal`; the cutover to `civitai` is phase E** (§9), not this item.
+    🔴 **REMAINING closing condition — AMENDED 2026-09-16, because the original was UNSATISFIABLE
+    IN BOTH DIRECTIONS.** It read "the two-way pin watched RED in BOTH directions (a scope with no
+    entry; an entry naming no scope)", echoing proposal §5.2. Neither half can happen: **direction
+    two was deliberately demoted to a NOTE upstream in cairn #24**, on a measurement in
+    `Routing.check`'s own docstring — a snapshot ships entry FILES, so an empty scope and a retired
+    one are indistinguishable, and grading it at exit 11 made `routes --check` refuse every
+    pre-registered scope; nothing in devrc can restore it. And **direction one is a NON-DEFECT at
+    one instance by design** — `alias_for` resolves an unnamed scope to the sole instance, so
+    `check` appends nothing. So: **two-way pinned OVER FIXTURES at phase B** (`routing_for` at two
+    aliases, red in both directions, each red at the pre-change tree rather than asserted), **over
+    REALITY at phase C/E**, when a second configured instance makes direction one a real refusal.
+    Plus: the devrc PR merged and verified BY CONTENT, an unregistered scope exiting non-zero
+    naming the scope, and `cairn doctor` still reporting ONE instance on both hosts after
+    `ship.sh`, read as the resolved store path and never as ship's rc.
+    ⚠ **Proposal §5.2 still states the impossible version** (*"fails the suite … fails it too"*).
+    Superseded in practice, deliberately NOT amended — operator call 2026-09-16, to avoid a second
+    repo's review cycle. Read this item, not §5.2, when closing rank 29.
     ⚠ Declared and NOT closed by #24: `tests/parity/README.md` difference 8 — Go's READ verbs
     refuse at exit 11 on a multi-instance host rather than routing. Unreachable today (no such
     host, and `packages.cairn` is still the Python client) but it goes live at phase E.
@@ -2306,13 +2360,35 @@ git -C $R show origin/main:tests/parity/harness.py       | grep -c 'put-routed-t
 ```
 Each must print 1.
 
-**Rank 29 is NOT closed** — the devrc routing table is the remaining half:
+**Rank 29's devrc half is IN FLIGHT** — `innovation-upstream/devrc` **#1726**:
 ```bash
-find $DEVRC -path $DEVRC/.git -prune -o -type f \( -name '*.py' -o -name '*.nix' \) -print0 \
-  | xargs -0 command grep -l "scope.*instance\|CAIRN_ROUTES" | head
+git -C $DEVRC fetch origin main
+git -C $DEVRC grep -c '"devrc": "personal"' origin/main -- claude/cairn-routes.json
+git -C $DEVRC grep -c 'cairn-routes.json' origin/main -- nix/home.nix
 ```
-Empty ⇒ still not written. 🔴 Enumerate; this host's `grep -r` is `.gitignore`-blind and would
-return the same zero for a different reason.
+Both non-zero ⇒ merged and deployed-by-config. Zero on the FIRST with a non-zero on
+`git -C $DEVRC grep -c load_table origin/main -- scripts/lib/cairn_routes.py` as the positive
+control ⇒ partially landed; both zero ⇒ not merged.
+
+🔴 **THE RECIPE THAT USED TO SIT HERE COULD NEVER MATCH ANYTHING, AND THIS IS THE DURABLE HALF.**
+It was `find … -print0 | xargs -0 command grep -l …`, read as *"empty ⇒ still not written"*.
+**`command` is a shell BUILTIN, so `xargs` cannot exec it: the pipeline exits 127**
+(`xargs: failed to run command 'command': No such file or directory`) and, with the customary
+`2>/dev/null`, prints NOTHING — indistinguishable from a clean zero. Measured 2026-09-15 against
+a positive control that fires: the identical `find` piped to the real `grep -l` returns 5+ files.
+Rank 29's three "nothing exists" measurements at filing time were taken with this form, so they
+were RIGHT WITHOUT BEING EVIDENCE. The `grep -r` hazard it was written to dodge is real — this
+host's `grep` is a function honouring `.gitignore` — but **`command grep` is not the dodge**;
+`git grep` (above) or the real binary from `whence -p grep` is. Same family as this repo's
+`cmd | head; echo rc=$?` gotcha: **the status you read belonged to something else.**
+
+⚠ **And a second false instrument, measured 2026-09-16 on #1726: `gh pr diff` SERVED A STALE
+PATCH.** It rendered an entire withdrawn 120-line arm — `DRIFT_CAIRN`, `stub_cairn`, a
+`UNIT_PATH_REQUIREMENTS` row — at a head where `git grep` counted **0** of every one of those
+tokens against a positive control of 15, and where `git diff origin/main <head> -- <file>` was
+empty. It caught up minutes later. **Verify a PR's contents from the FETCHED head
+(`git fetch origin refs/pull/<n>/head:<ref>`), never from `gh pr diff`** — the GitHub-side patch
+lags exactly like the check rollup does, and a stale patch reads as an implementer's false report.
 
 ---
 🔴 **Everything below is the PRE-EXISTING verification set for the still-open ranks. It is
