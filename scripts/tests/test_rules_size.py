@@ -546,7 +546,37 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # 1,329 B ceiling-relative and 429 B FLOOR-relative -- held at the same precedent
 # as above rather than widened, so the next new rule pays ceiling too and this
 # does not become a habit of buying room in advance.
-MAX_BYTES = 42_450
+# 2026-09-16 -- THE NEXT NEW RULE PAID CEILING AGAIN, as the 2026-08-28 entry
+# said it would have to. Floor-relative slack going in was 17 B, so nothing of
+# any size fit: the 412 B of rules added since the last bump had consumed the
+# whole 429 B margin, which is the ratchet working rather than failing.
+#
+# WHICH INSTRUCTION WOULD NOT FIT: the `command grep` sub-case of the ugrep rule
+# -- `find … -print0 | xargs -0 command grep` exits 127 (`command` is a builtin,
+# `xargs` execs a binary) and prints nothing, which reads as a clean zero, while
+# the hardening is also UNNECESSARY because under `xargs` the function never
+# applies. It is admitted on recurrence, not on novelty: FIVE independent arcs
+# hit it and each wrote it into their own handoff -- mention-picker, nix-disk-
+# cleanup, skill-tiering, audit-pr-ladder (twice) and cairn-oss-multi-instance --
+# and none reached the file that loads every session, so each arc paid the
+# discovery cost again and one lost a real measurement ("reported ZERO referrers
+# where there were some"). The rule it attaches to is the one that INDUCES the
+# error, which is why it belongs there and not as a new bullet. Evidence in the
+# archive under `grep-gitignore-blind`.
+#
+# EVICTION WAS RE-RUN, NOT ASSUMED EXHAUSTED, by the identical documented method
+# (core lines >=120 B, whitespace-normalised, longest-common-block against the
+# WHOLE archive with `*Supports:` lines excluded, threshold 34 B): 80 lines
+# scanned, 26 blocks matched, largest still the 107 B sops-retraction checksum-
+# guard sentence that IS the rule, and every other match imperative, scope or
+# failure-shape text the playbook keeps. Yield: 0 B. Fourth consecutive run to
+# return nothing.
+#
+# NAME THE BASE: RULES.md is 41,754 B at this commit, so post-bump slack is
+# 1,329 B ceiling-relative and 429 B FLOOR-relative -- held at the same precedent
+# as the two entries above rather than widened, so the next new rule pays ceiling
+# too and this does not become a habit of buying room in advance.
+MAX_BYTES = 43_083
 
 # Required working margin below the ceiling.
 #
