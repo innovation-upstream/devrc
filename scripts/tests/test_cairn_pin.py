@@ -475,52 +475,111 @@ def test_scope_derivation_still_comes_from_the_pin(tmp_path):
 
 
 # =============================================================================
-# Wording the pin sanitised away — pinned so it cannot change unnoticed
+# The remedy the pinned reader prints — now a REAL command, and pinned as one
 # =============================================================================
 
-#: 🔴 THE PINNED READER TELLS OPERATORS TO RUN A NON-COMMAND, AND devrc CANNOT
-#: REWRITE IT. Both strings below come from inside the packaged client. The OSS
-#: extraction replaced devrc's `subsystem_touch.py --validate <path>` with
-#: `a writer --validate <path>` — correct for a repo that ships no writer, and a
-#: REGRESSION here, because devrc does ship one and this is the store's most
-#: common failure path: an entry that will not parse.
+#: ⚠ HISTORY, BECAUSE THE CLOSING CONDITION WAS MET DIFFERENTLY THAN PREDICTED.
+#: This guard used to pin `a writer --validate <path>` at two sites inside the
+#: packaged reader. The OSS extraction had replaced devrc's
+#: `subsystem_touch.py --validate <path>` with that phrase — correct for a repo
+#: that ships no writer, and a REGRESSION for devrc, because the reader's most
+#: common failure path (an entry that will not parse) then told an operator to
+#: run something that is not a command. The stated closing condition was "cairn
+#: lets a consumer INJECT the remedy spelling". Upstream did something simpler:
+#: the pin bump to `baee2f0` replaced both sites with `cairn validate --scope
+#: <scope>`, a verb the packaged client actually has.
 #:
-#: devrc's real equivalent is `cairn-validate <path>` — on PATH, and MEASURED to
-#: accept a file path (`subsystem-touch validate: <path>`, rc 0), not just
-#: `--scope`. Nothing devrc owns prints these strings, so this is pinned and
-#: documented rather than fixed.
-#:
-#: **Closing condition:** a `ZacxDev/cairn` change letting a consumer inject the
-#: remedy spelling (the same hook the `repo_path_missing_message` regression
-#: needs), merged and the pin bumped — at which point this guard goes red and
-#: both strings are replaced with devrc's command in the same commit.
+#: 🔴 SO THE PROPERTY, NOT THE PHRASE, IS WHAT IS PINNED NOW — and it is pinned
+#: by EXECUTING the remedy rather than by reading it. The whole defect was "this
+#: string is not a command"; a test that only compares text can be satisfied by
+#: the next plausible-looking sentence, and the question it has to answer is one
+#: only the binary can.
 SANITISED_REMEDY = "a writer --validate <path>"
-DEVRC_REAL_REMEDY = "cairn-validate <path>"
+PINNED_REMEDY = "cairn validate --scope <scope>"
 
 
-def test_the_pinned_readers_validate_remedy_is_a_NON_COMMAND_here():
-    """Pinned as OBSERVED. Two sites; both are user-facing.
+def _pinned_client_binary() -> Path:
+    """The `cairn` executable belonging to the PINNED lib, not to PATH.
+
+    Derived from `pinned_lib_dir()` (`<store>/libexec/cairn/lib`), so the binary
+    executed below is the same build whose SOURCE the assertions read. A
+    `shutil.which("cairn")` here could resolve a different generation and the
+    two halves of this test would be about two clients.
+    """
+    exe = _pin().parents[2] / "bin" / "cairn"
+    assert exe.is_file(), f"the pinned package has no bin/cairn at {exe}"
+    return exe
+
+
+def test_the_pinned_readers_validate_remedy_is_a_REAL_COMMAND():
+    """Pinned as OBSERVED, then EXECUTED. Two sites; both are user-facing.
 
     🔴 THE COUNT IS PART OF THE CLAIM. Asserting only "the string appears" would
     survive a pin that fixed ONE site and left the other, which is the half-fix
-    that reads as done — so the occurrences are counted, and a positive control
+    that reads as done — so the occurrences are counted, and a length check
     proves the reader source was actually read.
+
+    🔴 AND THE OLD PHRASE IS ASSERTED ABSENT, not merely un-asserted. A guard
+    that only looked for the new wording would stay green over a client that
+    printed both, which is exactly what a partially-applied upstream fix looks
+    like.
     """
     src = pinned("subsystem_recall").read_text(encoding="utf-8")
     assert len(src) > 10_000, "the pinned reader source came back suspiciously short"
-    n = src.count(SANITISED_REMEDY)
-    assert n == 2, (
-        f"the pinned reader names `{SANITISED_REMEDY}` {n} time(s), expected 2. "
-        f"If this went to 0, upstream fixed the wording — replace both call "
-        f"sites' expectations with devrc's real command `{DEVRC_REAL_REMEDY}` "
-        f"and delete this guard. If it grew, a third user-facing site now tells "
-        f"an operator to run something that is not a command."
+
+    stale = src.count(SANITISED_REMEDY)
+    assert stale == 0, (
+        f"the pinned reader still names `{SANITISED_REMEDY}` {stale} time(s). "
+        f"That phrase is not a command anywhere, and it was replaced upstream in "
+        f"`baee2f0` — a client printing it again is a REGRESSION, not a wording "
+        f"preference."
     )
-    # The devrc-side remedy this regression costs a reader. Asserted so the
-    # alternative named in the comment above cannot quietly stop existing.
+    n = src.count(PINNED_REMEDY)
+    assert n == 2, (
+        f"the pinned reader names `{PINNED_REMEDY}` {n} time(s), expected 2. If "
+        f"this went to 0 the wording moved again: re-derive it from the reader "
+        f"and re-pin BOTH halves of this test, including the execution below. If "
+        f"it grew, a third user-facing site now names the remedy and should be "
+        f"read to confirm it is still the right one there."
+    )
+
+    # 🔴 THE HALF READING CANNOT DO. `validate` must be a verb this client
+    # accepts, and `--scope` an option of that verb — the two facts the old
+    # non-command phrase failed. `--help` is the read-only way to ask; a real
+    # `--scope` run would need a store.
+    proc = subprocess.run(
+        [str(_pinned_client_binary()), "validate", "--help"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"the pinned client refuses `cairn validate --help` (rc "
+        f"{proc.returncode}), so the remedy its own reader prints is not a "
+        f"command it has:\n{proc.stderr[:800]}"
+    )
+    assert "--scope" in proc.stdout, (
+        "the pinned client's `validate` verb has no `--scope` option, so the "
+        f"remedy `{PINNED_REMEDY}` names a flag that does not exist:\n"
+        f"{proc.stdout[:800]}"
+    )
+
+    # NEGATIVE CONTROL for the execution: a verb this client does NOT have must
+    # fail, or the assertion above is satisfied by a binary that exits 0 on
+    # anything.
+    bogus = subprocess.run(
+        [str(_pinned_client_binary()), "validate-nothing", "--help"],
+        capture_output=True, text=True,
+    )
+    assert bogus.returncode != 0, (
+        "the pinned client exits 0 on a verb it does not have, so proving "
+        "`validate` exists by running it proves nothing"
+    )
+
+    # devrc's own writer-side validator still exists. It is a DIFFERENT tool
+    # (`scripts/cairn-validate`, the write-protocol parse check) and the reason
+    # this section once existed; kept asserted so a claim about it cannot rot.
     assert (ROOT / "scripts" / "cairn-validate").is_file(), (
-        "devrc's `cairn-validate` is gone, so the remedy this guard documents as "
-        "the real one no longer exists and the comment above is now false"
+        "devrc's `cairn-validate` is gone — the writer-side parse check this "
+        "section's history names no longer exists"
     )
 
 
