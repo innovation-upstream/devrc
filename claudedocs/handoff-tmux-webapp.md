@@ -1,5 +1,5 @@
 ---
-clawgate-task: 593
+clawgate-task: 595
 ---
 # Handoff: tmux-webapp — 2026-08-26
 
@@ -7,22 +7,57 @@ clawgate-task: 593
 A **clawgate feature**: a webapp that visually organizes and gives live terminal interaction
 with tmux sessions across workbench + laptop, with a composable view system agents can drive,
 and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
-- **closing-condition:** `check` — `clawgatectl task get 595` reports `complete`, with all
-  **12** of its acceptance criteria evidenced in a card comment (each regression test watched
-  RED at its base commit and green at HEAD). 🔴 **FROZEN AT ROUND 1** for the 595 arc: audit
-  findings on the PRs it produces do NOT extend it, and neither does task 522 or 521.
-  ⚠ 595's criteria sit under a real `## Acceptance criteria` heading, so the status gate reads
-  them as AUTHOR-SPECIFIED and `complete` is available — but they were written by a prior
-  `claude-code` session, not by the operator. **Say so when you close it**; the gate keys on the
-  heading, not on who typed it.
-  ✅ **The PREVIOUS closing-condition — `task get 593` reports `ready_for_review` with all ten
-  items evidenced — was MET on 2026-09-15 and that arc is CLOSED.** It is replaced rather than
-  deleted because 595 is the next arc on the same effort; the old line would otherwise make
-  `/resume` report ADDRESSED and stop before picking anything up.
+- **closing-condition:** `judgement` — **Zach opens `https://clawgate.zacx.dev/tmux` in a browser
+  and says whether the tmux page is right.** Nothing an agent can run closes this. The evidence to
+  put in front of him is named and already shipped: task 595's carousel, bulk expand/collapse and
+  bulk Chat/Raw (live in `0.8.36`), task 593's items 4–8 (live in `0.8.35`), and cards 517/518/519.
+  🔴 **FROZEN AT ROUND 1.** Audit findings on anything already merged do NOT extend this arc.
+  🔴 **Why this is a `judgement` and not a `check`:** `/ui/tmux` returns **401** without a session,
+  so no shell, no curl and no agent can reach the page. **Every automated tier here is structurally
+  incapable of answering it** — that is not a gap to close with more tests, it is the shape of the
+  remaining work. An agent can ship more; only the operator can say it is right.
+  ✅ **The PREVIOUS closing-condition — `clawgatectl task get 595` reports `complete` with all 16
+  criteria evidenced — was MET on 2026-09-16 and THAT ARC IS CLOSED.** 595 is `complete` with 6
+  comments; comment 1451 carries the per-criterion evidence, the final comment the deploy chain.
+  Shipped as **clawgate `0.8.36`** (PR `#830`, squash `e846d87b5`; pin commit `f2dbfbcc1`).
+  ⚠ Its 16 criteria were authored by a prior `claude-code` session, not by the operator — the
+  status gate keys on the `## Acceptance criteria` heading, not on who typed it.
+  It is replaced rather than deleted because the browser visit is the next arc on the same effort;
+  the old line would otherwise make `/resume` report ADDRESSED and stop.
 
 ## Status
 
-**This session closed the task 593 arc end to end — resumed it, merged three PRs, shipped a release, and ran a five-round audit ladder to a deliberate stop. Everything it started is merged, deployed and cleaned up. Nothing is in flight.**
+**Task 595 is CLOSED, merged and LIVE as clawgate `0.8.36`. Task 593 is CLOSED and live as
+`0.8.35`. Nothing is in flight. The entire remaining queue for this effort is blocked on one
+thing an agent cannot do: a human looking at the page.**
+
+### ✅ task 595 — shipped 2026-09-16 as `0.8.36`
+- **PR `#830`** squash-merged `e846d87b5`, on 4/4 green checks, against a trunk that **had not
+  moved since the PR's base** — so the branch CI tested WAS the merged tree. Verified by content
+  afterwards, never by ancestry.
+- **Pin commit `f2dbfbcc1`** — both pins in ONE commit; `TestDeployPinMatchesClientBuildVersion`
+  watched `=== RUN` + `--- PASS`.
+- **Deploy verified as a CHAIN**: the image was proved to carry the code before the pin moved
+  (`data-tmux-carousel-index` 2, `data-tmux-session-jump` 2, `data-tmux-announce-host` 1;
+  positive control 1, negative control 0) → the running pod's `imageID` is that exact digest
+  `sha256:9206bd08…` → 1 desired/current/updated/available, old ReplicaSet at 0 → the consumer
+  answers `{"status":"ok","version":"0.8.36"}`.
+- ✅ **Criterion 11 re-verified independently**: mutant M1 applies once, compiles, **passes the Go
+  tier**, and is killed by the e2e case's own assertion — so the e2e case, not the source guard,
+  is what closes the `#824` class. **Six of the seven mutants were NOT re-run.**
+- 🔴 **Rank 63 was EVICTED to `claudedocs/refs/tmux-webapp-closed-ranks.md` in the same change
+  that closed it** (commit `74376aec`), demotion checked with a positive and a negative control.
+
+### 🔴 NOT VERIFIED — and it is now the WHOLE remaining queue
+1. **Nobody has looked at any of this in a browser.** `/ui/tmux` is **401** without a session
+   (re-measured on `0.8.36`; `/health` 200 as the control). Live and unseen: 595's carousel +
+   bulk controls, 593's items 4–8, and cards 517/518/519.
+2. **Never run against the real fleet** (39 groups, 2 hosts) — fixtures of 3–4 sessions only.
+3. **No real touch device.** The swipe is a synthesized sequence in headless Chromium;
+   `Input.synthesizeScrollGesture` was measured INERT in that build.
+4. **`#829` was merged UN-AUDITED** by operator decision, and **#830 was merged without an audit
+   round** on the operator's direct instruction to merge and ship. Both stated, neither hidden.
+5. The `ux-audit-clawgate` **findings doc has never been read** — only its check state.
 
 ### clawgate task 593 — CLOSED, MERGED AND LIVE
 | item | PR | squash |
@@ -40,16 +75,6 @@ Card is `ready_for_review` with 10 comments. `#826` was merged on four green che
 Pin commit **`89a98441d`** on `trunk`; live health `{"status":"ok","version":"0.8.35"}`; pod `1/1 Running` ~20s after `flux reconcile`. Live was `0.8.34`, built before all three PRs — **clawgate has no Flux image automation, so every one of those merges was inert until this release.**
 
 Gate on the built tree: `go build`/`go vet` clean, `go test ./... -count=1` **24 ok / 0 FAIL rc=0**. CSS **45,895 B** with `.h-14` present (cwd trap did not fire). Both pins moved in one commit and `TestDeployPinMatchesClientBuildVersion` was COUNTED — real `=== RUN` + `--- PASS`.
-
-### devrc — the handoff doc's own size gate
-- **`#1718` MERGED `d6e94dd29`** — 24 CLOSED investigation blocks demoted to `claudedocs/refs/tmux-webapp-closed-investigations.md`; allowance `245_760 → 212_992`. The doc had **63 B** of headroom.
-- **`#1720` MERGED `f5d13b9af`** — `## Gotchas` pruned 142,214 → 102,023 B (284 → 202 bullets); allowance `→ 180_224`. Doc **245,697 → 164,360 B (−33%)** across the session.
-- 🔴 **The `#1718` audit ladder is CLOSED at round 5 — do not re-open it.** Five rounds, every one finding its finding in prose a previous round wrote; four about the same eleven `handoff_budget.py` comments, which were ultimately DELETED rather than described a fifth time. Stopped on the prose escape hatch at **26/36 (72%) ladder-authored pre-image lines**. The rationale is a PR comment on `#1718` and is the authority.
-
-### 🔴 NOT VERIFIED — the top of the next session's list
-1. **No browser verification of items 4–8, at all.** The structured bash/edit/askuserquestion cards, the `max-h-64` clamp, the GFM tables, the reveal control and the relocated "open full session" link have never been looked at. No e2e spec was written for these five items. **0.8.35 is the first time they face a human.**
-2. **`#829` was merged UN-AUDITED** by operator decision — no round 0, no correctness round.
-3. **Deployed ≠ verified.** What is confirmed is the rollout and that the process on :30302 is the one the new image started.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -206,23 +231,6 @@ From the analyze-service index (**recall — verify before relying on**):
 
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
-63. **Local-dispatch clawgate task 595 — the host session carousel, plus bulk expand/collapse and
-    bulk Chat/Raw.** THE NEXT ITEM, and the operator asked for it by name. Card is `open` with
-    **12 acceptance criteria** under a real `## Acceptance criteria` heading (so the status gate
-    reads them AUTHOR-SPECIFIED and `complete` is reachable — but a prior `claude-code` session
-    wrote them, so say that when closing). Repo `homelab-talos`, `containers/clawgate/internal/ui/`;
-    entry points named by the card: `tmuxHostTabs` (`tmux.go:1332`), `tmuxHostTabPanel` (`:1374`),
-    `tmuxSessionSection` (`:1659`), `tmuxWindowCard` (`:2430`).
-    🔴 **Read `wantOpen` (`:2125`) and `tmuxGroupScript`'s docstring (`:1748`) BEFORE touching
-    visibility** — `wantOpen` is documented as "THE POLICY, AND THE ONLY DEFINITION OF IT", and a
-    carousel showing one session at a time interacts directly with the collapse policy that task
-    593 just migrated to `cg.tmux.v3.group.*` (absent = collapsed).
-    ⚠ Criterion 3 demands the suite SET the viewport at mobile/desktop/ultrawide — a config
-    pinning one width is structurally blind to the other two. Criterion 11 names a real mutant
-    class from `#824`: a force-open path that wrote `setExpanded(k,false)` survived BOTH tiers.
-    ⚠ Check task **522**'s status first — the card says it also reshapes this page, and two
-    concurrent layout rewrites need an agreed order.
-    forcing: user — the operator asked for this card by name as the next session's work.
 48. **Re-spec task 521 around a per-agent token.** `tier` discriminates the DOOR (`token` vs
    `browser`), not the caller; one shared `CLAWGATE_TERMINAL_TOKEN` makes every machine caller
    identical. `requireAgentToken` (`internal/api/agent.go:30-46`) already resolves a per-agent
@@ -1901,6 +1909,48 @@ before deciding it does not apply.
 - 🔴 **AN EMPTY RESULT CANNOT DISTINGUISH TWO MECHANISMS.** `#1718`'s four checks read `pending` for hours and I named it as the documented `timeouts.tasks` shape. The discriminating read refuted it: the PipelineRuns were **Succeeding**, zero pods pending, and one was literally `Cancelled` — **each of my own six pushes superseded the previous run before it could report.** Read `kubectl -n tekton-ci get pipelinerun` before naming a cause for a missing verdict.
 - ⚠ **`clawgatectl` is nix-built from the LOCAL tree, so after a deploy it prints `note: server 0.8.35, clawgatectl built for 0.8.34` until a `home-manager switch`.** `deploy.md` says that note means you forgot to bump `client.go` — here both pins moved in one commit and `TestDeployPinMatchesClientBuildVersion` passed, so on THIS host it means the installed binary predates the commit. Two causes, one symptom.
 
+- 🔴 **The `#1718` audit ladder is CLOSED at round 5 — do not re-open it.** Five rounds, every one finding its finding in prose a previous round wrote; four about the same eleven `handoff_budget.py` comments, which were ultimately DELETED rather than described a fifth time. Stopped on the prose escape hatch at **26/36 (72%) ladder-authored pre-image lines**. The rationale is a PR comment on `#1718` and is the authority. *(Carried here from `## Status` 2026-09-15 — it is a standing instruction, not status, and a REPLACE section would have deleted it.)*
+- 🔴 **THIS DOC'S OWN `How to verify` BLOCK CARRIED A COMMAND THAT RETURNS A FALSE ZERO, AND IT
+  WAS THE ONE PRESCRIBED FOR THE MOST LOAD-BEARING READ IN THE NEXT ARC.** It said
+  `git grep -n 'func wantOpen' -- containers/clawgate/internal/ui/tmux.go`. That returns
+  **nothing** — `wantOpen` is a **JavaScript** function inside the backtick-delimited Go raw
+  string returned by `tmuxGroupScript()` (`:2173`), not a Go declaration; so are `setExpanded`
+  (`:2019`) and `applyViews` (`:2362`, in `tmuxViewScript()`). A session running the doc's own
+  instruction gets a clean empty result and concludes the policy function does not exist —
+  immediately after the doc told it `wantOpen` is "THE POLICY, AND THE ONLY DEFINITION OF IT".
+  **A `func <name>` grep is a claim about the LANGUAGE the symbol is written in.** When a repo
+  embeds one language inside another's string literals, grep for the bare name first and let the
+  hit tell you what it is. Generalises past Go: the same shape hides every symbol in an embedded
+  SQL, shell or template string.
+- 🔴 **A CARD'S `## Context from recon` SECTION ROTS FASTER THAN THE CARD, AND ITS OWN "VERIFY, DO
+  NOT TRUST" WARNING IS NOT ENOUGH — VERIFY MEANS RE-DERIVE THE NUMBERS, NOT RE-READ THE PROSE.**
+  All five of 595's quoted line numbers were stale within days, moved by the three PRs of the
+  task it was explicitly split from (`tmuxHostTabs` 1332→1296, `tmuxHostTabPanel` 1374→1338,
+  `tmuxSessionSection` 1659→1638, `tmuxWindowCard` 2430→**2512**, `tmuxGroupScript` 1748→**1941**).
+  The card even says "Do 593 first" — so the staleness was *scheduled by the card itself* and
+  nobody re-ran the greps. **Any line number written into a card or a doc is a measurement with a
+  shelf life measured in merges; re-derive the whole set in one grep before quoting any of it.**
+- 🔴 **A DERIVED COUNT IN A CLOSING CONDITION GOES STALE THE MOMENT THE CARD GROWS, AND THE
+  CLOSING CONDITION IS THE WORST PLACE FOR ONE.** This doc's `closing-condition` said "all **12**
+  acceptance criteria" in three places while the card carried **16** — comment 1428 added 13–16
+  hours before the doc was written, and the same doc's own 593 table names bulk Chat/Raw as 595's
+  scope. So the doc contained both the right scope and the wrong count. **An arc would have
+  closed with a quarter of it unbuilt, and the close-check would have read GREEN.** Count the
+  criteria at the moment you check, from the card's three surfaces (body + every
+  `## Acceptance criteria — additions` comment); never carry a criteria count in prose.
+- ⚠ **A handoff's front-matter `clawgate-task:` is not updated by writing a new closing
+  condition.** This doc's front matter still read `593` — a card that is `ready_for_review` and
+  finished — while the closing condition named 595, so `resume-state.sh` dutifully reconciled the
+  *finished* card and reported it, and the live card sat unmentioned. The two live in different
+  places and nothing cross-checks them. **When an arc hands over to a new card, move the front
+  matter in the same delta as the closing condition** — `clawgate_handoff.sh resolve` names the
+  worked task and prints the exact line to record.
+- ⚠ **`git worktree add -b <b> origin/trunk` sets the new branch's upstream to `origin/trunk`**,
+  so a bare `git push` targets trunk — on this repo that is a deploy. Re-point immediately with
+  `git push -u origin <b>`, which also publishes the branch for the duplicate-work sweep. (The
+  rule was already in this section for `origin/<x>`; recording that it fired again, on `trunk`,
+  in the ordinary course of setting up a feature branch.)
+
 ## How to verify
 
 ```bash
@@ -1912,10 +1962,18 @@ kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate -o wide
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/ui/tmux   # 401
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/health    # 200, the control
 
-# BEFORE STARTING 595 — the card, and the policy it must not break
-clawgatectl task get 595 | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status']);print(d['body'])"
-clawgatectl task get 522 | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])"  # order conflict?
-git -C ~/workspace/homelab-talos grep -n 'func wantOpen' -- containers/clawgate/internal/ui/tmux.go
+# TASK 595 — the card, its SIXTEEN criteria, and the in-flight branch
+clawgatectl task get 595 | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status']);print(d['body']);[print(c['body']) for c in d['comments']]"
+git -C $HOMELAB ls-remote origin 'refs/heads/feat/tmux-session*'   # is the branch still live?
+claim-work --check tmux-webapp-63
+
+# 🔴 THE POLICY `wantOpen` IS JAVASCRIPT IN A GO RAW STRING — `func wantOpen` RETURNS A FALSE ZERO.
+# Grep the BARE NAME and let the hit tell you what it is.
+git -C $HOMELAB grep -n -E 'wantOpen|setExpanded|applyViews|cg\.tmux\.v3\.group' \
+  origin/trunk -- containers/clawgate/internal/ui/tmux.go
+# re-derive EVERY entry point in one call; the card's numbers are stale by construction
+git -C $HOMELAB grep -n -E 'func (tmuxHostTabs|tmuxHostTabPanel|tmuxSessionSection|tmuxWindowCard|tmuxGroupScript|tmuxViewScript)' \
+  origin/trunk -- containers/clawgate/internal/ui/tmux.go
 
 # the FULL e2e tier — NOT one spec. ~40 min; detached, and wait on CONTENT not a pipe's rc.
 # (a fresh worktree needs node_modules symlinked from the base clone, and app.css built from
