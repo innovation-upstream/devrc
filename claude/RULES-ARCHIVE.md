@@ -961,6 +961,26 @@ shared the empty submodule, so the control was blind to the variable that matter
 ## grep-gitignore-blind
 *Supports: 🔴 "`grep` here is a FUNCTION wrapping ugrep, and `-r` HONOURS `.gitignore`."*
 
+**The `command grep` sub-case, measured 2026-09-16.** The rule above tells you `grep` is a shell
+function, and the natural "hardening" of its own prescribed remedy is to write
+`find … -print0 | xargs -0 command grep`. That form **cannot ever match anything**: `command` is a
+shell builtin, `xargs` execs a binary, so it fails with
+`xargs: failed to run command 'command': No such file or directory` and exits **127**. With the
+customary `2>/dev/null` it prints nothing, which is indistinguishable from a clean zero. The
+hardening is also unnecessary — under `xargs` the function never applies, so the prescribed plain
+`grep` already reaches the binary (measured the same day: prescribed form returns 3 files at rc 0,
+hardened form 127).
+
+**Recurrence is why it reached RULES.md rather than staying a handoff note: FIVE independent arcs
+hit it and each wrote it up privately** — `handoff-mention-picker-instrumentation-and-tui.md`
+("SILENTLY FINDS NOTHING"), `handoff-nix-disk-cleanup.md` ("SILENTLY MEASURES NOTHING — it
+reported ZERO referrers where there were some", i.e. a real measurement lost),
+`handoff-skill-tiering-and-ci-cache.md`, `handoff-audit-pr-ladder.md` (twice), and
+`handoff-cairn-oss-multi-instance.md`. Not one of those notes reached the file that loads every
+session, so each arc paid the discovery cost again. In the last of them the broken form was the
+recipe a *ranked item's own closing check* was built on, so three "nothing exists" measurements
+were right without being evidence.
+
 Measured 2026-08-20 on the workbench. `type grep` resolves to a **shell function** defined in
 the Claude shell snapshot, wrapping **ugrep 7.5.0** — not GNU grep. ugrep's recursive mode
 honours `.gitignore`, so `grep -r` silently skips exactly the directories generated artefacts
