@@ -7,74 +7,72 @@ clawgate-task: 595
 A **clawgate feature**: a webapp that visually organizes and gives live terminal interaction
 with tmux sessions across workbench + laptop, with a composable view system agents can drive,
 and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
-- **closing-condition:** `judgement` — **Zach opens `https://clawgate.zacx.dev/tmux` in a browser
-  and says whether the tmux page is right.** Nothing an agent can run closes this. The evidence to
-  put in front of him is named and already shipped: task 595's carousel, bulk expand/collapse and
-  bulk Chat/Raw (live in `0.8.36`), task 593's items 4–8 (live in `0.8.35`), and cards 517/518/519.
+- **closing-condition:** `judgement` — **Zach opens `https://clawgate.zacx.dev/tmux` and says
+  the tmux page is RIGHT.** Nothing an agent can run closes this: `/ui/tmux` returns 401 without
+  a session, so every automated tier is structurally incapable of answering it.
   🔴 **FROZEN AT ROUND 1.** Audit findings on anything already merged do NOT extend this arc.
-  🔴 **Why this is a `judgement` and not a `check`:** `/ui/tmux` returns **401** without a session,
-  so no shell, no curl and no agent can reach the page. **Every automated tier here is structurally
-  incapable of answering it** — that is not a gap to close with more tests, it is the shape of the
-  remaining work. An agent can ship more; only the operator can say it is right.
-  ✅ **The PREVIOUS closing-condition — `clawgatectl task get 595` reports `complete` with all 16
-  criteria evidenced — was MET on 2026-09-16 and THAT ARC IS CLOSED.** 595 is `complete` with 6
-  comments; comment 1451 carries the per-criterion evidence, the final comment the deploy chain.
-  Shipped as **clawgate `0.8.36`** (PR `#830`, squash `e846d87b5`; pin commit `f2dbfbcc1`).
-  ⚠ Its 16 criteria were authored by a prior `claude-code` session, not by the operator — the
-  status gate keys on the `## Acceptance criteria` heading, not on who typed it.
-  It is replaced rather than deleted because the browser visit is the next arc on the same effort;
-  the old line would otherwise make `/resume` report ADDRESSED and stop.
+  ⚠ **ROUND 1 OF THIS JUDGEMENT WAS RENDERED ON 2026-09-16 AND THE ANSWER WAS "NOT RIGHT"** —
+  seven defects, all now shipped in `0.8.37`. The condition is **still open** because it asks
+  for *right*, not for *an answer*, and the fixes have not been looked at. **This is the same
+  arc, not a new one**: the next visit re-answers the same line.
+  ✅ **The PREVIOUS closing-condition — `clawgatectl task get 595` reports `complete` — was MET
+  on 2026-09-16.** Card 595 is `complete` with 6 comments; shipped as `0.8.36`.
 
 ## Status
 
-**Task 595 is CLOSED, merged and LIVE as clawgate `0.8.36`. Task 593 is CLOSED and live as
-`0.8.35`. Nothing is in flight. The entire remaining queue for this effort is blocked on one
-thing an agent cannot do: a human looking at the page.**
+**Five things shipped this session; nothing is in flight. clawgate went `0.8.35` → `0.8.38`
+across three releases, and the Stop hook changed on both hosts. The entire remaining queue for
+this effort is blocked on one thing no agent can do: a human looking at the page.**
 
-### ✅ task 595 — shipped 2026-09-16 as `0.8.36`
-- **PR `#830`** squash-merged `e846d87b5`, on 4/4 green checks, against a trunk that **had not
-  moved since the PR's base** — so the branch CI tested WAS the merged tree. Verified by content
-  afterwards, never by ancestry.
-- **Pin commit `f2dbfbcc1`** — both pins in ONE commit; `TestDeployPinMatchesClientBuildVersion`
-  watched `=== RUN` + `--- PASS`.
-- **Deploy verified as a CHAIN**: the image was proved to carry the code before the pin moved
-  (`data-tmux-carousel-index` 2, `data-tmux-session-jump` 2, `data-tmux-announce-host` 1;
-  positive control 1, negative control 0) → the running pod's `imageID` is that exact digest
-  `sha256:9206bd08…` → 1 desired/current/updated/available, old ReplicaSet at 0 → the consumer
-  answers `{"status":"ok","version":"0.8.36"}`.
-- ✅ **Criterion 11 re-verified independently**: mutant M1 applies once, compiles, **passes the Go
-  tier**, and is killed by the e2e case's own assertion — so the e2e case, not the source guard,
-  is what closes the `#824` class. **Six of the seven mutants were NOT re-run.**
-- 🔴 **Rank 63 was EVICTED to `claudedocs/refs/tmux-webapp-closed-ranks.md` in the same change
-  that closed it** (commit `74376aec`), demotion checked with a positive and a negative control.
+### ✅ Shipped — three clawgate releases in one session
+| what | PR | squash | release |
+|---|---|---|---|
+| task 595 — carousel, bulk expand/collapse, bulk Chat/Raw (16 criteria) | `#830` | `e846d87b5` | **0.8.36** (`f2dbfbcc1`) |
+| operator browser feedback, seven items | `#832` | `658069955` | **0.8.37** (`9466966ea`) |
+| Stop hook — suppress AUTONOMOUS stops | `#833` | `cdd5f002f` | *(no image — see below)* |
+| attention `resolved_by`, migration 0036 | `#834` | `a00bd1775` | **0.8.38** (`a772d5805`) |
+| session-stop mining report | devrc `#1731` | `bf931694` | n/a |
 
-### 🔴 NOT VERIFIED — and it is now the WHOLE remaining queue
-1. **Nobody has looked at any of this in a browser.** `/ui/tmux` is **401** without a session
-   (re-measured on `0.8.36`; `/health` 200 as the control). Live and unseen: 595's carousel +
-   bulk controls, 593's items 4–8, and cards 517/518/519.
-2. **Never run against the real fleet** (39 groups, 2 hosts) — fixtures of 3–4 sessions only.
-3. **No real touch device.** The swipe is a synthesized sequence in headless Chromium;
-   `Input.synthesizeScrollGesture` was measured INERT in that build.
-4. **`#829` was merged UN-AUDITED** by operator decision, and **#830 was merged without an audit
-   round** on the operator's direct instruction to merge and ship. Both stated, neither hidden.
-5. The `ux-audit-clawgate` **findings doc has never been read** — only its check state.
+*(Prior arc, for the record: **task 593** — ten items, `#824`/`#826`/`#829` — closed and live as
+**`0.8.35`**, pin `89a98441d`. Its items 4–8 are still among the never-browser-verified set.)*
 
-### clawgate task 593 — CLOSED, MERGED AND LIVE
-| item | PR | squash |
-|---|---|---|
-| 1 — collapsed by default + parked-draft badge | `#824` | `81b10cddc` |
-| 2, 3, 9 — host header, per-card toggle, contradicting age | `#826` | `248a0c4ed` |
-| 4, 5, 6, 7, 8 — the chat-rendering batch | `#829` | `9b1828606` |
-| carousel, bulk expand/collapse, bulk Chat/Raw | → **task 595** | split by operator decision |
+Every release verified as a **chain**, never as a status: image proved to carry the code before
+the pin moved (literal counts + positive and negative controls) → running pod's `imageID` is
+that exact digest → EndpointSlice shows only the new pod serving → consumer answers the new
+version. `0.8.38` additionally confirmed `db: applied migration 0036_attention_resolved_by.sql`
+**in the production pod's log** — a pod that starts is not a migration that ran.
 
-Card is `ready_for_review` with 10 comments. `#826` was merged on four green checks after a re-read (`clawgate-e2e` **225 passed / 2 skipped**, the full 34-spec tier) — the previous session had left it RED at `04cef09c3` with the repair pushed but never re-run.
+### 🔴 The Stop hook is LIVE ON BOTH HOSTS, and it had no image
+`~/.claude/settings.json` on both machines points at
+`~/workspace/homelab-talos/containers/clawgate/hook/*.sh`, so **the `git pull` WAS the deploy** —
+no image, no pin, no switch. Verified by content (suppression 0 → 3 occurrences per host),
+`bash -n` clean, and **49/49 bats against the deployed copy**. ⚠ The laptop was **6 commits
+behind** and would have run the OLD hook silently; nothing converges that repo (`ship.sh` is
+scoped to devrc), so it was pulled by hand.
 
-**Evidence for items 4–8:** 27 new tests — **20 watched RED at base `248a0c4ed`, 7 labelled in-source as INVARIANT/BOUNDARY and explicitly NOT counted as regression coverage.** 30 mutants, all killed by a named test's own assertion, zero panics, zero compile errors. Full e2e tier 224 passed / 1 flaky / 2 skipped / 0 failed across 34 spec files.
+### Hosts
+`ship.sh` rc 0 — both at `588b6625`, cross-host agreement COMPARED. `clawgatectl` **0.8.38 on
+both**, matching the server, verified by a cross-host round trip that MOVED A NUMBER (laptop
+`view create` → workbench `view ls`), not by a matching version triple.
+⚠ The first `ship.sh` run exited **rc 4** on a laptop ref-lock race
+(`cannot lock ref 'refs/remotes/origin/main': is at … but expected …`); the refs were already at
+the NEWER value, no stale locks, no concurrent git — a clean re-run converged. **Read the
+per-host lines, not the verdict.**
 
-### 🔴 DEPLOYED — clawgate `0.8.35` is live
-Pin commit **`89a98441d`** on `trunk`; live health `{"status":"ok","version":"0.8.35"}`; pod `1/1 Running` ~20s after `flux reconcile`. Live was `0.8.34`, built before all three PRs — **clawgate has no Flux image automation, so every one of those merges was inert until this release.**
+### 🔴 NOT VERIFIED — still the whole remaining queue
+1. **Nobody has seen `0.8.37` or `0.8.38` in a browser.** The seven fixes, 593's items 4–8 and
+   cards 517/518/519 are all live and unlooked-at.
+2. **`resolved_by` has no data yet** — forward-only by design; pre-0036 rows are NULL and a live
+   read returns `0` with `resolvedBy` set. It accrues from now.
+3. **The 21.5% / 5.5% suppression figures are INHERITED from the mining report**, not re-derived,
+   and **not measured against the live queue**. That is what `resolved_by` now makes checkable.
+4. **Nothing touched the live deployment during `#834`** — its evidence is a throwaway Postgres
+   and the harness; no real browser tap or `clawgatectl` resolve has exercised the new column.
+5. **`#832` and `#833` were merged without an audit round**, on operator instruction. Said, not hidden.
 
-Gate on the built tree: `go build`/`go vet` clean, `go test ./... -count=1` **24 ok / 0 FAIL rc=0**. CSS **45,895 B** with `.h-14` present (cwd trap did not fire). Both pins moved in one commit and `TestDeployPinMatchesClientBuildVersion` was COUNTED — real `=== RUN` + `--- PASS`.
+### Open PR
+**devrc `#1735`** — corrects two stale auth claims in this doc. OPEN, MERGEABLE, checks pending
+at hand-off.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -257,12 +255,18 @@ From the analyze-service index (**recall — verify before relying on**):
     follows** — no clawgate change needed, only an active session there.
     forcing: gate — task 519's own closing condition names both hosts and a measured number, and
     that is the only criterion still unmet.
-54. **The operator-facing half of 519/517/518 — `/ui/tmux` needs a signed-in human.** Measured
-    again 2026-09-15 on 0.8.35: `/ui/tmux` returns **401** without a session, with `/health` 200
-    as the control, so no shell can exercise it. Three cards are waiting on one visit: 519
-    (seconds-fresh session view), 517 (reply-delivery state renders, `#754` merged), 518 (JSONL
-    chat view renders, `#753` merged). 🔴 **Items 4–8 of task 593 now join this list** — they are
-    live in 0.8.35 and have never been seen in a browser.
+54. **The operator-facing half of 519/517/518 — `/ui/tmux` needs a signed-in human.**
+    ✅ **THE VISIT HAPPENED ONCE, 2026-09-16, AND IT PAID FOR ITSELF IMMEDIATELY** — the operator
+    opened the page on `0.8.36` and returned **seven** defects no test tier had found, two of
+    which were worse than reported (a permanently-blanked off-screen card; a transcript that at
+    base never received a new message at all). All seven shipped in **`0.8.37`**.
+    🔴 **BUT IT IS NOT CLOSED: nobody has looked at `0.8.37` or `0.8.38`.** The fixes themselves
+    are unseen, and the same three cards still wait — 519 (seconds-fresh session view), 517
+    (reply-delivery state renders, `#754` merged), 518 (JSONL chat view renders, `#753` merged),
+    plus items 4–8 of task 593 and now all seven feedback items.
+    ⚠ Re-measured on `0.8.38`: `/ui/tmux` still returns **401** without a session (`/health` 200
+    as the control), so this remains structurally unreachable by any agent — **more tests cannot
+    substitute, and that is the point of this item, not a gap in it.**
     forcing: user — all four cards name an operator observation in their closing condition.
 
 56. **Decide whether 519's criterion 1 should keep naming the RENDER hop.** What is measured is
@@ -1951,45 +1955,91 @@ before deciding it does not apply.
   rule was already in this section for `origin/<x>`; recording that it fired again, on `trunk`,
   in the ordinary course of setting up a feature branch.)
 
+- 🔴 **A SCOPING BRIEF'S GREP CAN BE STRUCTURALLY UNABLE TO SEE HALF THE CALLERS, AND THE AGENT
+  THAT OVERRIDES IT IS RIGHT.** Scoping `resolved_by` I grepped `\.Resolve(` and found **two**
+  callers. There are **six**: three bulk store methods (`ResolveOpenForSession`,
+  `ResolveOpenQuestionsForSessionNotSeenSince`, `ResolveOpenIdleNotSeenSince`) cannot match that
+  pattern — `\.Resolve(` requires the `(` immediately after. One of the three is the **idle
+  reaper, which closes the most rows on a busy host**. Following the brief would have left
+  `resolved_by IS NULL` meaning *"pre-0036 OR reaped"*, destroying the exact property the brief
+  named as a hard requirement. **A prefix-anchored grep over method names is a claim about
+  spelling, not about callers** — search the bare verb, or the column the methods write.
+- 🔴 **TWO ARTIFACTS AGREEING IS NOT A MEASUREMENT WHEN ONE WAS COPIED FROM THE OTHER.** This
+  doc said `requireSession` is "a literal `return next`" citing `auth.go:40-42`. It is a REAL
+  gate at `:349`, and two of the three bullets in that section were stale in the same direction
+  (both named routes are behind it too). The claim ALSO sat in a source comment in
+  `internal/api/attention_test.go`, so a reader who checked the code found the doc's own error
+  repeated and read it as corroboration. **A line-number citation rots silently; a claim
+  duplicated into a comment rots invisibly.** Corrected in devrc `#1735` + homelab-infra `#834`.
+- 🔴 **THE ASYNC `Agent` TOOL RETURNS ITS `tool_result` AT LAUNCH, NOT AT COMPLETION — SO
+  "tool_use WITHOUT tool_result" REPORTS ZERO OUTSTANDING AGENTS FOREVER.** Building the
+  Stop-hook detector, THREE independent wrong versions were constructed and killed, each
+  returning a confident plausible answer: (a) that one, which would have shipped the suppression
+  **inert**; (b) scanning only list-shaped `content` for completions — the notification arrives
+  as a **plain STRING** `content`, so this found zero and would have suppressed **every** stop,
+  silencing the queue; (c) `jq` without **`-R`**, where `inputs` parses the JSON itself and
+  `fromjson?` errors on every record while `?` swallows them — **measured 0 records vs 5682**.
+  The validated rule: launch = a `tool_result` containing `Async agent launched` (id from
+  `agentId: <hex>`); completion = a string `content` containing `<task-id><hex></task-id>`;
+  outstanding = launched **minus** notified. **Validate any such detector against a case whose
+  answer you already know independently** — three wrong versions all looked correct.
+- 🔴 **AN EQUIVALENT MUTANT IS NOT A GAP, AND REPORTING IT AS ONE IS A FALSE FINDING.**
+  Re-verifying `#833`'s fail-open guarantee I cut my own mutant (`|| echo detector-failed` on the
+  call) and it SURVIVED. It was **unreachable**: the detector ends `|| true`, so it can never
+  return non-zero and the mutation hooked a condition that cannot occur. The reachable version —
+  making the *error path print* — was killed by the named test. **A survivor obliges you to ask
+  whether the mutant can execute before you call the guard weak.**
+- ⚠ **A `home-manager switch` blanks `~/.nix-profile` for ~30s and will break a concurrent
+  mutation battery with `go: command not found`.** It happened to a sibling agent mid-run during
+  this session's switch; recovery is an absolute `/nix/store/…/bin/go`. **Do not run a switch
+  while an agent is mid-battery**, and treat `command not found` in a battery as an environment
+  event, not a mutant verdict.
+- ⚠ **A background-task "exit code 0" can belong to the LAUNCHER, not the work.** A detached
+  `nohup … & echo started` reports 0 immediately; reading that as the e2e verdict would have
+  inverted a mutation result. **Read the run's own output file for a verdict line**, never the
+  wrapper's status — and an empty log means "still running", not "passed".
+- ⚠ **A rollout that reports success can still show an old pod Running AND READY.** Seen on both
+  `0.8.37` and `0.8.38`. Both times it was a genuine mid-cascade snapshot, settled on re-read —
+  but the discriminating check is the **EndpointSlice** (`ready=false` = draining, not serving),
+  not the Deployment's replica counts and not `rollout status`.
+- ⚠ **`clawgate-ux-audit` reds under node contention and a same-revision re-run clears it.**
+  `#833` went red there while three checks passed; the walk had succeeded on four recent
+  revisions. Re-running the PipelineRun from its own spec on the identical revision returned
+  **Succeeded** — and that **re-reports the GitHub status without a commit**, so the green
+  applies to exactly the reviewed code. Assert the `revision` param in the re-run script.
+
 ## How to verify
 
 ```bash
-# THE LIVE SURFACE — 0.8.35 carries all ten items of task 593
-clawgatectl health                      # expect version 0.8.35
-KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
-kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate -o wide
-# 🔴 /ui/tmux is 401 without a session — that is CORRECT, and it is why no shell can check the UI.
-curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/ui/tmux   # 401
+# THE LIVE SURFACE — 0.8.38
+clawgatectl health                      # expect 0.8.38
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/ui/tmux   # 401, expected
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/health    # 200, the control
 
-# TASK 595 — the card, its SIXTEEN criteria, and the in-flight branch
-clawgatectl task get 595 | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status']);print(d['body']);[print(c['body']) for c in d['comments']]"
-git -C $HOMELAB ls-remote origin 'refs/heads/feat/tmux-session*'   # is the branch still live?
-claim-work --check tmux-webapp-63
+# 🔴 THE DEPLOY IS A CHAIN — a version that CHANGED is not evidence YOUR change shipped
+KC=$KC_WORKBENCH
+kubectl --kubeconfig $KC -n clawgate get pod -l app=clawgate \
+  -o jsonpath='{range .items[*]}{.status.containerStatuses[*].imageID}{"\n"}{end}'   # digest
+kubectl --kubeconfig $KC -n clawgate get endpointslice -l kubernetes.io/service-name=clawgate \
+  -o jsonpath='{range .items[*].endpoints[*]}{.targetRef.name}{" ready="}{.conditions.ready}{"\n"}{end}'
+kubectl --kubeconfig $KC -n clawgate logs -l app=clawgate | grep -i 'applied migration'
 
-# 🔴 THE POLICY `wantOpen` IS JAVASCRIPT IN A GO RAW STRING — `func wantOpen` RETURNS A FALSE ZERO.
-# Grep the BARE NAME and let the hit tell you what it is.
-git -C $HOMELAB grep -n -E 'wantOpen|setExpanded|applyViews|cg\.tmux\.v3\.group' \
-  origin/trunk -- containers/clawgate/internal/ui/tmux.go
-# re-derive EVERY entry point in one call; the card's numbers are stale by construction
-git -C $HOMELAB grep -n -E 'func (tmuxHostTabs|tmuxHostTabPanel|tmuxSessionSection|tmuxWindowCard|tmuxGroupScript|tmuxViewScript)' \
-  origin/trunk -- containers/clawgate/internal/ui/tmux.go
+# THE STOP HOOK IS LIVE FROM THE WORKING TREE — no image, no switch. Per host:
+grep -c CLAWGATE_SUPPRESS_AUTONOMOUS $HOMELAB/containers/clawgate/hook/clawgate-stop-hook.sh  # 3
+(cd $HOMELAB/containers/clawgate/hook && nix-shell -p bats jq --run "bats tests/clawgate-stop-hook.bats")
 
-# the FULL e2e tier — NOT one spec. ~40 min; detached, and wait on CONTENT not a pipe's rc.
-# (a fresh worktree needs node_modules symlinked from the base clone, and app.css built from
-#  INSIDE containers/clawgate with ./node_modules/.bin/tailwindcss — v3, not nix-shell's v4)
-nohup ./e2e/run.sh > /tmp/e2e-595.log 2>&1 &
-until grep -qE '^\s+[0-9]+ (passed|failed)' /tmp/e2e-595.log; do sleep 30; done
-grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped)' /tmp/e2e-595.log
-grep -oE 'tests/[a-z0-9-]+\.spec\.ts' /tmp/e2e-595.log | sort -u | wc -l   # expect 34
+# 🔴 DOES SUPPRESSION ACTUALLY FIRE? (the 21.5% claim is INHERITED, not measured here)
+grep 'attention raise SUPPRESSED' ~/.cache/clawgate/*.log 2>/dev/null | tail -5
+clawgatectl attention ls | head -20        # is the queue visibly thinner?
 
-# the Go tier, COUNTED (a 0/0 is a compile failure, not a clean run)
-go test ./internal/ui/ -count=1 -v 2>&1 | grep -c '^--- PASS'   # baseline at 9b1828606 is 538
+# 🔴 THE NEW MEASUREMENT — forward-only, so it is EMPTY until entries resolve
+curl -s 'http://192.168.50.250:30302/api/attention?state=resolved&limit=50' \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);e=d if isinstance(d,list) else d.get('entries',[]);\
+from collections import Counter;print(Counter(x.get('resolvedBy') or 'NULL(pre-0036)' for x in e))"
 
-# the live queue and its lock, before touching any rank
-git -C ~/workspace/devrc show origin/main:claudedocs/handoff-tmux-webapp.md \
-  | sed -n '/^## Next steps (ranked)/,/^## Open investigations/p' | grep -oE '^[0-9]+\.'
-claim-work --list
+# both hosts agree, and clawgatectl matches the server
+bash $DEVRC/scripts/ship.sh            # read the PER-HOST lines, not the verdict
+clawgatectl --version                  # expect 0.8.38 on BOTH hosts
 ```
 ## Run this first — the index, one read-only command
 ```bash
