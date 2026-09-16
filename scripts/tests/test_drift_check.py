@@ -1935,24 +1935,36 @@ def _drift_unit_binpath_attrs():
 
     🔴 THE LIST, NOT THE BLOCK, AND THE DIFFERENCE IS A GUARD THAT WAS SPELLED
     RATHER THAN STRUCTURAL. The assertion below used to be
-    `attr in _drift_service_block()` — a substring test over ~90 lines of which
-    most are PROSE explaining why each entry is there, plus an `ExecStart`. Any
-    line in the block that happens to spell the attribute satisfies it.
+    `attr in _drift_service_block()` — a substring test over the WHOLE unit
+    block, which is 141 lines of which 113 are comment/prose explaining why each
+    entry is there, plus an `ExecStart`. Any line in it that happens to spell the
+    attribute satisfies the test.
 
-    🔴 AND ONE ROW IS ALREADY WALKED BY THE SHIPPED FILE, so this is a live hole
-    and not a hypothetical. `ExecStart = "${pkgs.bash}/bin/bash …"` names
-    `pkgs.bash` OUTSIDE the PATH list. MEASURED on this tree, `pkgs.bash`
-    deleted from `makeBinPath` and nothing else changed:
+    🔴 EXACTLY ONE ROW IS ALREADY WALKABLE, AND THE HOLE IS IN THE GUARD, NOT IN
+    THE UNIT. Say it that way round: `pkgs.bash` IS in the PATH list — 4th of 11
+    — and nothing is missing from the unit's PATH today. What the `ExecStart`
+    line does is put a SECOND spelling of the string `pkgs.bash` inside the
+    block, so for THAT row the old form is satisfied by the ExecStart alone and
+    would not notice the list entry going away. MEASURED on this tree by
+    deleting `pkgs.bash` from `makeBinPath` and changing nothing else:
 
         old form (`attr in _drift_service_block()`)  21 passed   <- GREEN
-        this form (`attr in attrs`)                  1 failed    <- `assert
-                                                     'pkgs.bash' in [...]`
+        this form (`attr in attrs`)                  1 failed, 20 passed
+                                                     [bash-pkgs.bash]
 
-    A unit whose PATH has no `bash` would run nothing — the deadman's own
-    ExecStart is `${pkgs.bash}/bin/bash`, and its payloads are handed to `bash`
-    — and the guard whose docstring calls itself the accounting said so
-    cheerfully. A guard a comment (or a sibling setting) can satisfy asserts
-    nothing about the unit.
+    Derive the walkable set rather than trusting this count: it is the attrs in
+    the list that also appear elsewhere in `_drift_service_block()`. At this
+    commit that set is exactly `{pkgs.bash}`.
+
+    ⚠ AND THE CONSEQUENCE IS NARROWER THAN "THE UNIT WOULD NOT RUN" — an earlier
+    version of this docstring said that and it was false. `ExecStart` names an
+    ABSOLUTE `${pkgs.bash}/bin/bash`, so systemd starts the unit whatever PATH
+    says. What resolves `bash` by BARE NAME is the LOCAL leg: `bash -c
+    "$PAYLOAD"`, inside the `[ "$DO_LOCAL" = 1 ]` arm of `scripts/drift-check.sh`
+    (line 2365 at `cd33c271`; grep the expression rather than the number). The
+    remote leg's `ssh … bash -s` resolves on the OTHER host's PATH and is not
+    evidence about this unit. That is the whole consequence; do not reach past
+    it.
     """
     block = _drift_service_block()
     m = re.search(r'"PATH=\$\{lib\.makeBinPath \[([^\]]*)\]\}"', block)
@@ -1962,9 +1974,15 @@ def _drift_unit_binpath_attrs():
         "below vacuous:\n" + block
     )
     attrs = m.group(1).split()
-    # POSITIVE CONTROL on the extraction itself: an empty or one-element list is
-    # what a broken regex looks like, and `attr not in []` would fail every case
-    # for a reason that has nothing to do with the unit.
+    # POSITIVE CONTROL on the EXTRACTION, and 5 is deliberately not the real
+    # count. MEASURED 11 entries at this commit; any floor below that catches the
+    # failure this guards — a regex that matched nothing or a fragment, which
+    # would make `attr not in attrs` fail every row for a reason that has nothing
+    # to do with the unit. A floor AT 11 would be a different check wearing this
+    # one's name: it would red on every legitimate PATH edit, and the per-row
+    # assertion below already owns the list's CONTENTS. So: low enough to never
+    # fire on a real edit, high enough that a one- or two-token misparse cannot
+    # pass. 5 has no other significance.
     assert len(attrs) >= 5, f"the PATH list parsed to {attrs!r}"
     return attrs
 

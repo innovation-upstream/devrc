@@ -1618,8 +1618,11 @@ in
   #
   # ⚠ THE TABLE CANNOT CARRY ITS OWN `_doc`, unlike `claude/skill-tiers.json`.
   # `cairn_instances.load_routes` accepts EXACTLY a flat object of string ->
-  # string: a `_doc` ARRAY raises and takes every `cairn` verb on this host to
-  # exit 11, and a `_doc` STRING is worse — it parses as a route for a scope
+  # string: a `_doc` ARRAY raises, and MEASURED against the pinned client with
+  # such a table, every verb that RESOLVES AN INSTANCE exits 11 — `routes`,
+  # `doctor`, `ls-entries` and `validate` all did, while `--help` still exits 0,
+  # so "every verb" would be the overstatement. A `_doc` STRING is worse — it
+  # parses as a route for a scope
   # literally named `_doc`, so nothing errors and the registry claims a scope
   # nobody has. Hence flat, documentation-free, with the prose here and in
   # `scripts/lib/cairn_routes.py`.

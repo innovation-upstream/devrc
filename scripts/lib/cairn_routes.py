@@ -135,7 +135,9 @@ def load_table(path: Path | None = None) -> dict[str, str]:
     🔴 NOT A SECOND PARSER, AND THAT IS THE WHOLE VALUE OF THIS FUNCTION. The
     consumer of this file is the pinned client; a `json.load` here would accept
     shapes the client refuses, so the suite could be green over a table that
-    takes every `cairn` verb on the host to exit 11. Going through
+    takes every verb that RESOLVES AN INSTANCE to exit 11 (measured against the
+    pinned client: `routes`, `doctor`, `ls-entries`, `validate` — `--help` still
+    exits 0). Going through
     `load_routes` means "it parsed here" and "it parses there" are the same
     claim.
     """

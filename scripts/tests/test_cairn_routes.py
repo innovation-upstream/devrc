@@ -154,8 +154,11 @@ def test_the_table_carries_no_documentation_block(table):
 
     `claude/skill-tiers.json` opens with a `_doc` array and a test that keeps it
     alive. This table must NOT copy that, and the reason is structural: an array
-    value raises `RoutingConfigError` and takes every `cairn` verb on the host to
-    exit 11, while a STRING value parses cleanly — as a route for a scope
+    value raises `RoutingConfigError`, which `main()` maps to exit 11 — measured
+    against the pinned client, `routes`, `doctor`, `ls-entries` and `validate`
+    all exit 11 over such a table while `--help` still exits 0, so the claim is
+    "every verb that resolves an instance", not "every verb". A STRING value
+    parses cleanly — as a route for a scope
     literally named `_doc`. The second failure is the dangerous one, because
     nothing errors. The prose lives in `scripts/lib/cairn_routes.py`'s module
     docstring and beside the `home.file` entry in `nix/home.nix`.
