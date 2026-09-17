@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // 🔴 WHY THIS FILE EXISTS — FIVE ACTIONS WERE NEVER PRESSED BY ANY TEST.
@@ -270,5 +273,361 @@ func TestTheOverviewBodyPagesAndJumpsToItsEnds(t *testing.T) {
 	// And `ctrl+d` at the bottom is inert.
 	if got, _ := bottom.Step(keyPress("ctrl+d")); got.body.YOffset() != 90 {
 		t.Errorf("ctrl+d at the bottom -> YOffset = %d, want 90", got.body.YOffset())
+	}
+}
+
+// --- J / K: the diff-viewport pan ---------------------------------------------
+//
+// 🔴 THESE ASSERT A PAN AND A NON-MOVE AT THE SAME TIME, AND THE SECOND HALF IS
+// THE POINT. `J`/`K` are vim's `ctrl+e`/`ctrl+y`: they move the WINDOW and leave
+// `diffCur`, `fileCur` and `commitCur` exactly where they were. A version wired
+// through `move()`/`moveIn()` would move a cursor; a version that called
+// `syncDiffViewport()` afterwards would move the window and then immediately
+// `EnsureVisible` it straight back to the cursor — a feature that looks
+// implemented and does nothing on screen. Both halves are asserted below.
+//
+// 🔴 THE FIXTURE OVERSHOOTS THE STEP ON PURPOSE. 202 buffer lines, a 20-row
+// viewport and a 182-line scroll range: none is a multiple of 3, and the half
+// page is 10. A fixture sized in multiples of the step lets a `3 -> 1` mutant
+// land on the same final offset and survive a fully green suite.
+
+const (
+	// scrollFixtureHeight is the viewport height the diff-scroll fixture pins.
+	// 20 % 3 == 2 — see the note above.
+	scrollFixtureHeight = 20
+	// scrollFixtureBottom is the LAST offset the fixture can reach. MEASURED
+	// from the fixture by the clamp test below rather than computed from the
+	// viewport's own rule. 182 % 3 == 2, so a clamp assertion cannot be
+	// satisfied by a wrong step.
+	scrollFixtureBottom = 182
+
+	// The cursors the fixture starts on. 🔴 ALL NON-ZERO, PAIRWISE DISTINCT,
+	// AND DISTINCT FROM THE STEP AND ITS MULTIPLES (3, 6, 9, 12) AND FROM THE
+	// BUFFER BOUNDS (0, 20, 182, 202). A cursor that starts at 0 cannot see a
+	// mutant that resets it to 0.
+	scrollFixtureDiffCur   = 7
+	scrollFixtureFileCur   = 1
+	scrollFixtureCommitCur = 2
+)
+
+// errScrollFixture is the synthetic failure the nil-diff case injects.
+var errScrollFixture = errors.New("the diff read failed")
+
+// scrollable is a loaded App whose diff viewport has room to move, focused on
+// `focus`, with all three cursors parked on distinctive non-zero values.
+func scrollable(t *testing.T, focus Panel) App {
+	t.Helper()
+	a := bigApp(t, 200)
+	if got := len(a.Diff.Lines); got != bigDiffLines {
+		t.Fatalf("fixture drifted: the big diff parsed to %d lines, want %d", got, bigDiffLines)
+	}
+	a.Focus = focus
+	a.commitCur = scrollFixtureCommitCur
+	a.fileCur = scrollFixtureFileCur
+	a.diffCur = scrollFixtureDiffCur
+	a.vp.SetHeight(scrollFixtureHeight)
+	a.syncDiffViewport()
+
+	// 🔴 THE FIXTURE PINS ITS OWN STARTING POINT. Every expectation below is an
+	// offset relative to 0, so a fixture that silently started scrolled would
+	// move them all together and still read green.
+	if got := a.vp.Height(); got != scrollFixtureHeight {
+		t.Fatalf("the test failed to pin the viewport height: %d, want %d",
+			got, scrollFixtureHeight)
+	}
+	if got := a.vp.YOffset(); got != 0 {
+		t.Fatalf("the fixture starts scrolled to %d, want 0 — cursor line %d is inside "+
+			"the first %d rows, so EnsureVisible should not have moved anything",
+			got, scrollFixtureDiffCur, scrollFixtureHeight)
+	}
+	// POSITIVE CONTROL ON THE FIXTURE: the viewport must have somewhere to go,
+	// or every "it scrolled" assertion below is satisfied by a no-op.
+	if got := a.vp.TotalLineCount(); got <= scrollFixtureHeight {
+		t.Fatalf("the buffer is %d lines in a %d-row viewport — it cannot scroll at "+
+			"all, so this fixture measures nothing", got, scrollFixtureHeight)
+	}
+	return a
+}
+
+// cursors is the triple `J`/`K` must never touch, as one comparable value.
+type cursors struct{ commit, file, diff int }
+
+func cursorsOf(a App) cursors {
+	return cursors{commit: a.commitCur, file: a.fileCur, diff: a.diffCur}
+}
+
+// 🔴 THE STEP IS EXACTLY THREE, AND THE TWO DIRECTIONS ARE OPPOSITE. Two presses
+// pin the STEP — one press from 0 cannot tell 3 from any other single jump — and
+// the return journey pins each arm's SIGN independently.
+func TestScrollDiffPansTheViewportByExactlyThreeLinesPerPress(t *testing.T) {
+	a := scrollable(t, PanelDiff)
+
+	down1, intents := a.Step(keyPress("J"))
+	if len(intents) != 0 {
+		t.Errorf("J emitted %v — panning a viewport is local", intents)
+	}
+	if got := down1.vp.YOffset(); got != 3 {
+		t.Errorf("one J from offset 0 -> YOffset = %d, want 3", got)
+	}
+
+	down2, _ := down1.Step(keyPress("J"))
+	if got := down2.vp.YOffset(); got != 6 {
+		t.Errorf("two J from offset 0 -> YOffset = %d, want 6", got)
+	}
+
+	up1, intents := down2.Step(keyPress("K"))
+	if len(intents) != 0 {
+		t.Errorf("K emitted %v — panning a viewport is local", intents)
+	}
+	if got := up1.vp.YOffset(); got != 3 {
+		t.Errorf("K from offset 6 -> YOffset = %d, want 3", got)
+	}
+
+	up2, _ := up1.Step(keyPress("K"))
+	if got := up2.vp.YOffset(); got != 0 {
+		t.Errorf("a second K -> YOffset = %d, want 0", got)
+	}
+}
+
+// 🔴 THE DEFINING TEST. From EVERY panel, `J` pans the diff viewport and leaves
+// all three cursors byte-identical. If a cursor moves, the feature is wrong — it
+// has become a cursor key with a capital letter.
+func TestScrollDiffPansFromEveryPanelAndMovesNoCursor(t *testing.T) {
+	want := cursors{
+		commit: scrollFixtureCommitCur,
+		file:   scrollFixtureFileCur,
+		diff:   scrollFixtureDiffCur,
+	}
+	for _, p := range []Panel{PanelOverview, PanelCommits, PanelFiles, PanelDiff} {
+		t.Run(p.Title(), func(t *testing.T) {
+			a := scrollable(t, p)
+			if got := cursorsOf(a); got != want {
+				t.Fatalf("the fixture starts at %+v, want %+v", got, want)
+			}
+			bodyBefore := a.body.YOffset()
+
+			down, intents := a.Step(keyPress("J"))
+			if len(intents) != 0 {
+				t.Errorf("J in %s emitted %v", p.Title(), intents)
+			}
+			if got := down.vp.YOffset(); got != 3 {
+				t.Errorf("J in %s -> diff YOffset = %d, want 3 — the pan must work "+
+					"from every panel, not only the Diff one", p.Title(), got)
+			}
+			if got := cursorsOf(down); got != want {
+				t.Errorf("J in %s moved a cursor: %+v, want %+v unchanged — J pans the "+
+					"window, it is not a cursor key", p.Title(), got, want)
+			}
+			// 🔴 AND IT IS NOT THE FOCUSED PANEL'S OWN SCROLLER. The Overview
+			// body has its own viewport, which `j`/`k` drive; `J` must leave it
+			// alone, or the binding means two different things in two panels.
+			if got := down.body.YOffset(); got != bodyBefore {
+				t.Errorf("J in %s moved the Overview body viewport to %d, want %d",
+					p.Title(), got, bodyBefore)
+			}
+
+			up, _ := down.Step(keyPress("K"))
+			if got := up.vp.YOffset(); got != 0 {
+				t.Errorf("K in %s -> diff YOffset = %d, want 0", p.Title(), got)
+			}
+			if got := cursorsOf(up); got != want {
+				t.Errorf("K in %s moved a cursor: %+v, want %+v unchanged", p.Title(), got, want)
+			}
+
+			// 🔴 AND THE PAN SURVIVES LEAVING THE CURSOR BEHIND — THIS IS THE
+			// INERT-FEATURE DETECTOR. A `scrollDiff` that ends in
+			// `syncDiffViewport()` still passes every assertion above, because
+			// three lines is not enough to push cursor line 7 out of a 20-row
+			// window and `EnsureVisible` correctly does nothing. Five presses
+			// (offset 15) put it above the window, where a stray
+			// `EnsureVisible(7)` would yank the view back to 7 and the feature
+			// would be dead on screen while reading as implemented. MEASURED:
+			// with that mutation, the assertions above stay GREEN and this one
+			// goes red.
+			far := a
+			for i := 0; i < 5; i++ {
+				far, _ = far.Step(keyPress("J"))
+			}
+			if got := far.vp.YOffset(); got != 15 {
+				t.Errorf("five J in %s -> diff YOffset = %d, want 15 — the window must "+
+					"STAY where it was panned to, above cursor line %d, rather than "+
+					"snapping back to it", p.Title(), got, scrollFixtureDiffCur)
+			}
+			if got := cursorsOf(far); got != want {
+				t.Errorf("five J in %s moved a cursor: %+v, want %+v unchanged",
+					p.Title(), got, want)
+			}
+		})
+	}
+}
+
+// 🔴 THIS IS WHAT JUSTIFIES A SECOND BINDING. In the panel where `j` is already
+// live, `J` must do something DIFFERENT: `j` moves `diffCur` and leaves the
+// window alone (the new line is already on screen), `J` moves the window and
+// leaves `diffCur` alone. Asserted as a PAIR from ONE starting state, because
+// either half alone is satisfied by a `J` that is a second spelling of `j`.
+func TestInTheDiffPanelCapitalJPansWhileLowercaseJMovesTheCursor(t *testing.T) {
+	a := scrollable(t, PanelDiff)
+	// Park the cursor deep enough that the window has already followed it, so
+	// "the window did not move" is a claim about a window that CAN move.
+	a.diffCur = 100
+	a.syncDiffViewport()
+	if got := a.vp.YOffset(); got != 100 {
+		t.Fatalf("the fixture did not follow the cursor to line 100: YOffset = %d", got)
+	}
+
+	lower, _ := a.Step(keyPress("j"))
+	if lower.diffCur != 101 {
+		t.Errorf("j from line 100 -> diffCur = %d, want 101", lower.diffCur)
+	}
+	if got := lower.vp.YOffset(); got != 100 {
+		t.Errorf("j from line 100 -> YOffset = %d, want 100 — line 101 is already on "+
+			"screen, so the window has no reason to move", got)
+	}
+
+	upper, _ := a.Step(keyPress("J"))
+	if upper.diffCur != 100 {
+		t.Errorf("J from line 100 -> diffCur = %d, want 100 — J is not a cursor key",
+			upper.diffCur)
+	}
+	if got := upper.vp.YOffset(); got != 103 {
+		t.Errorf("J from line 100 -> YOffset = %d, want 103", got)
+	}
+	// ⚠ AND THE FILE CURSOR SEPARATES THEM TOO. `j` drags the Files highlight
+	// onto whatever file the diff cursor landed in (`syncFileCursorFromDiff`);
+	// `J` touches nothing, so the fixture's `fileCur` survives.
+	if lower.fileCur != 0 {
+		t.Errorf("j left fileCur = %d, want 0 (the big fixture has one file)", lower.fileCur)
+	}
+	if upper.fileCur != scrollFixtureFileCur {
+		t.Errorf("J left fileCur = %d, want %d unchanged", upper.fileCur, scrollFixtureFileCur)
+	}
+}
+
+// 🔴 BOTH ENDS, AND NEITHER PANICS. `K` at the top must not produce a negative
+// offset and `J` at the bottom must not run past the last line.
+func TestScrollDiffClampsAtBothEndsWithoutPanicking(t *testing.T) {
+	top := scrollable(t, PanelDiff)
+	if got := top.vp.YOffset(); got != 0 {
+		t.Fatalf("the fixture is not at the top: YOffset = %d", got)
+	}
+	stay, _ := top.Step(keyPress("K"))
+	if got := stay.vp.YOffset(); got != 0 {
+		t.Errorf("K at the top -> YOffset = %d, want 0 — an offset must never go negative", got)
+	}
+
+	// Driven to the end WITHOUT pressing either key under test, so this case
+	// cannot be rescued by the other arm being right.
+	bottom := scrollable(t, PanelDiff)
+	bottom.vp.SetYOffset(bigDiffLines * 2) // the viewport clamps this itself
+	if got := bottom.vp.YOffset(); got != scrollFixtureBottom {
+		t.Fatalf("fixture drifted: the last reachable offset is %d, want %d — every "+
+			"clamp expectation below is relative to it", got, scrollFixtureBottom)
+	}
+	past, _ := bottom.Step(keyPress("J"))
+	if got := past.vp.YOffset(); got != scrollFixtureBottom {
+		t.Errorf("J at the bottom -> YOffset = %d, want %d", got, scrollFixtureBottom)
+	}
+	// ⚠ AND THE LAST PARTIAL STEP IS A STEP, NOT A REFUSAL. Two lines from the
+	// end, `J` moves those two rather than declining because three do not fit.
+	near := scrollable(t, PanelDiff)
+	near.vp.SetYOffset(scrollFixtureBottom - 2)
+	short, _ := near.Step(keyPress("J"))
+	if got := short.vp.YOffset(); got != scrollFixtureBottom {
+		t.Errorf("J two lines from the end -> YOffset = %d, want %d", got, scrollFixtureBottom)
+	}
+}
+
+// 🔴 NO DIFF, NO PAN, NO PANIC — AND THE SECOND SUB-CASE IS THE ONE THAT MEANS
+// ANYTHING. A freshly loading App has an EMPTY viewport, so its inertness is a
+// property of the viewport, not of this code. The reachable state that separates
+// them is a diff read that FAILED AFTER one succeeded: `DiffLoaded{Err}` nils
+// `Diff` without rebuilding the content, so the viewport still holds the
+// previous diff's 202 lines and would scroll them happily. Only the
+// `Diff == nil` guard in `scrollDiff` stops it.
+func TestScrollDiffIsInertWhenThereIsNoDiff(t *testing.T) {
+	t.Run("still loading", func(t *testing.T) {
+		a := New(fxOwner, fxName, fxNum)
+		a.Width, a.Height = 140, 40
+		if a.Diff != nil {
+			t.Fatal("fixture is wrong: a freshly built App already has a diff")
+		}
+		for _, k := range []string{"J", "K"} {
+			next, intents := a.Step(keyPress(k)) // must not panic
+			if got := next.vp.YOffset(); got != 0 {
+				t.Errorf("%s while loading -> YOffset = %d, want 0", k, got)
+			}
+			if len(intents) != 0 {
+				t.Errorf("%s while loading emitted %v", k, intents)
+			}
+		}
+	})
+
+	t.Run("the diff read failed over a populated viewport", func(t *testing.T) {
+		a := scrollable(t, PanelDiff)
+		a, _ = a.Step(DiffLoaded{Err: errScrollFixture})
+		if a.Diff != nil {
+			t.Fatal("DiffLoaded{Err} left a diff behind — this case is not the one it claims")
+		}
+		// POSITIVE CONTROL: the stale content really is still there, so an
+		// unguarded ScrollDown WOULD have moved. Without this the assertion
+		// below passes against an empty viewport and proves nothing.
+		if got := a.vp.TotalLineCount(); got != bigDiffLines {
+			t.Fatalf("the viewport was emptied by the failure (%d lines) — the guard "+
+				"under test is unreachable from this state, so this case is vacuous", got)
+		}
+		for _, k := range []string{"J", "K"} {
+			next, _ := a.Step(keyPress(k))
+			if got := next.vp.YOffset(); got != 0 {
+				t.Errorf("%s with no diff -> YOffset = %d, want 0 — the viewport still "+
+					"holds the previous diff's lines, and scrolling them shows the "+
+					"operator a diff that is no longer loaded", k, got)
+			}
+		}
+	})
+}
+
+// 🔴 THE PAN IS NOT STICKY, AND THAT IS STATED RATHER THAN DISCOVERED. Anything
+// that calls `relayout()` — `tab`, `?`, a resize — ends in
+// `EnsureVisible(diffCur, 0, 0)` and snaps the window back to the cursor. That
+// is vim-like and acceptable; it is pinned here so the next person reads it as a
+// decision rather than rediscovering it as a bug.
+func TestRelayoutSnapsAScrolledViewportBackToTheCursor(t *testing.T) {
+	// FOUR presses, not three: four put the window (offset 12) past cursor line
+	// 7, so "not visible" is genuinely true when relayout runs. Three would
+	// leave line 7 on screen and EnsureVisible would correctly do nothing.
+	panned := scrollable(t, PanelDiff)
+	for i := 0; i < 4; i++ {
+		panned, _ = panned.Step(keyPress("J"))
+	}
+	if got := panned.vp.YOffset(); got != 12 {
+		t.Fatalf("four J -> YOffset = %d, want 12", got)
+	}
+	if panned.diffCur != scrollFixtureDiffCur {
+		t.Fatalf("four J moved diffCur to %d", panned.diffCur)
+	}
+
+	for _, c := range []struct {
+		name string
+		step func(App) App
+	}{
+		{"tab", func(a App) App { n, _ := a.Step(keyPress("tab")); return n }},
+		{"?", func(a App) App { n, _ := a.Step(keyPress("?")); return n }},
+		{"resize", func(a App) App {
+			n, _ := a.Step(tea.WindowSizeMsg{Width: 120, Height: 36})
+			return n
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			back := c.step(panned)
+			if got := back.vp.YOffset(); got != scrollFixtureDiffCur {
+				t.Errorf("%s after a pan -> YOffset = %d, want %d (the cursor's line) — "+
+					"relayout ends in EnsureVisible, which is the STATED behaviour",
+					c.name, got, scrollFixtureDiffCur)
+			}
+			if back.diffCur != scrollFixtureDiffCur {
+				t.Errorf("%s moved diffCur to %d", c.name, back.diffCur)
+			}
+		})
 	}
 }

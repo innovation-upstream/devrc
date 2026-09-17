@@ -37,6 +37,7 @@ feature.
 | `element-references.md` | task body carries extension-picked element refs |
 | `prior-work-recall.md` | the `prior work` step: hit counts, flags, why the guard is an `if` |
 | `auth-doors.md` | 🔴 which door takes which credential; the retraction, measured BOTH ways |
+| `chief.md` | driving chief: verbs, creds, arming |
 
 ## Flow files
 `flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
@@ -72,7 +73,7 @@ clawgate" links were inert (PR #802).
 🔴 **`POST /api/auto-approve-all` arms a global auto-approve window over EVERY future request in
 EVERY project — never fire it to test a theory.**
 ⚠ **Measured WRONG IN BOTH DIRECTIONS — re-measure, never quote from memory.** Evidence, the
-per-door table and the two corrected routes: `~/.claude/skills/clawgate/reference/auth-doors.md`.
+per-door table and the two corrected routes: `auth-doors.md`.
 
 ---
 

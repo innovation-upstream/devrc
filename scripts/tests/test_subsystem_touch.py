@@ -1821,11 +1821,15 @@ class TestSkillDocsArePinned:
         # It pinned `cairn sync && cairn validate --scope <scope>` until
         # `~/.local/bin/cairn` became the PINNED OSS package, which reimplements
         # `validate` on the reader's resolver instead of shelling THIS module.
-        # MEASURED on one scope of the live cache, both clients at the locked
-        # rev: the package writes 0 B to STDOUT (77 B of banner on stderr) and
-        # exits 0, against this writer's 5,766 B of stdout carrying `entry shape:`,
-        # `marker reachability:` and `dropped lines:` — the last meaning content
-        # is ALREADY LOST. Both "green"; only one looked. So the CLAIM below
+        # MEASURED 2026-09-17 on scope `devrc`, both clients at the locked rev:
+        # the package writes 55 B to STDOUT (one summary line, plus 76 B of
+        # banner on stderr) and exits 0, against this writer's 6,677 B of stdout
+        # carrying `entry shape:`, `marker reachability:` and `dropped lines:` —
+        # the last meaning content is ALREADY LOST and having no counterpart in
+        # the package's output at all. Both "green"; only one says what was lost.
+        # ⚠ This comment used to say 0 B / 5,766 B, true before the pinned rev
+        # added an unconditional summary line to `cmd_validate`; do not re-derive
+        # the 0 — the discriminator is WHAT each reports. So the CLAIM below
         # stopped being true of the old spelling: the writer no longer finds its
         # own defect when the skill says `cairn validate`, because the writer is
         # no longer what runs. The pin moves to the writer's own invocation,

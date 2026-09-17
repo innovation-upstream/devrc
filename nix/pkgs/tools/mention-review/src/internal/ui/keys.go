@@ -76,6 +76,12 @@ type KeyMap struct {
 	Top      key.Binding
 	Bottom   key.Binding
 
+	// ScrollDiffDown/Up are vim's `ctrl+e`/`ctrl+y`, not a cursor move: they
+	// pan the DIFF VIEWPORT and leave every cursor where it was. See
+	// `App.scrollDiff`.
+	ScrollDiffDown key.Binding
+	ScrollDiffUp   key.Binding
+
 	NextHunk key.Binding
 	PrevHunk key.Binding
 	NextFile key.Binding
@@ -120,6 +126,15 @@ var Keys = KeyMap{
 	PageDown: key.NewBinding(key.WithKeys("ctrl+d", "pgdown"), key.WithHelp("C-d", "half page down")),
 	Top:      key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
 	Bottom:   key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
+
+	// 🔴 BARE CAPITALS, AND THEY ARE A SECOND BINDING RATHER THAN A MODE ON
+	// `j`/`k` ON PURPOSE. `J`/`K` mean "scroll the diff" from EVERY panel, so
+	// the operator can read past the cursor without losing their place — vim's
+	// `ctrl+e`/`ctrl+y`. A pending-key state machine (`]h`, `[h`) was tried and
+	// abandoned: `G` and `R` prove this key table matches a bare capital
+	// directly, so no machine is needed.
+	ScrollDiffDown: key.NewBinding(key.WithKeys("J"), key.WithHelp("J", "scroll diff down")),
+	ScrollDiffUp:   key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "scroll diff up")),
 
 	NextHunk: key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "next hunk")),
 	PrevHunk: key.NewBinding(key.WithKeys("["), key.WithHelp("[", "prev hunk")),
@@ -176,14 +191,22 @@ const (
 	ActPageDown  Action = "PageDown"
 	ActTop       Action = "Top"
 	ActBottom    Action = "Bottom"
-	ActNextHunk  Action = "NextHunk"
-	ActPrevHunk  Action = "PrevHunk"
-	ActNextFile  Action = "NextFile"
-	ActPrevFile  Action = "PrevFile"
-	ActBrowser   Action = "Browser"
-	ActRetry     Action = "Retry"
-	ActFullHelp  Action = "FullHelp"
-	ActQuit      Action = "Quit"
+
+	// 🔴 THEIR OWN ACTIONS, NOT A `move()` ARM. `move`/`moveIn` are CURSOR
+	// movers — `moveIn` clamps against a cursor range and the `PanelFiles` arm
+	// drags `diffCur` to a file start — so routing a viewport pan through them
+	// would move the very cursors this binding exists to leave alone.
+	ActScrollDiffDown Action = "ScrollDiffDown"
+	ActScrollDiffUp   Action = "ScrollDiffUp"
+
+	ActNextHunk Action = "NextHunk"
+	ActPrevHunk Action = "PrevHunk"
+	ActNextFile Action = "NextFile"
+	ActPrevFile Action = "PrevFile"
+	ActBrowser  Action = "Browser"
+	ActRetry    Action = "Retry"
+	ActFullHelp Action = "FullHelp"
+	ActQuit     Action = "Quit"
 
 	ActComment        Action = "Comment"
 	ActApprove        Action = "Approve"
@@ -227,6 +250,8 @@ func Dispatch() []Bound {
 		{ModeBrowse, ActPageDown, Keys.PageDown},
 		{ModeBrowse, ActTop, Keys.Top},
 		{ModeBrowse, ActBottom, Keys.Bottom},
+		{ModeBrowse, ActScrollDiffDown, Keys.ScrollDiffDown},
+		{ModeBrowse, ActScrollDiffUp, Keys.ScrollDiffUp},
 		{ModeBrowse, ActNextHunk, Keys.NextHunk},
 		{ModeBrowse, ActPrevHunk, Keys.PrevHunk},
 		{ModeBrowse, ActNextFile, Keys.NextFile},
@@ -267,6 +292,15 @@ func DispatchFor(m Mode) []Bound {
 // ShortHelpFor is the persistent footer row for a mode — on by default, as the
 // operator asked. It is a SUBSET of that mode's FullHelp, chosen for width, not
 // a second list with its own text.
+//
+// ⚠ `J`/`K` ARE DELIBERATELY NOT HERE, AND THE REASON IS MEASURED. The browse
+// row already renders 146 columns wide (measured at the `ready` fixture, which
+// carries a viewer login), i.e. it OVERFLOWS even a 140-column terminal before
+// anything is added; two more entries make an existing overflow worse. Every
+// other scrolling key — `C-u`, `C-d`, `g`, `G` — is likewise FullHelp-only, so
+// `?` is where the operator already looks for this class of binding. The two
+// keys are still in `FullHelpFor`, which is what the ledger and the legend test
+// bind to.
 func (k KeyMap) ShortHelpFor(m Mode) []key.Binding {
 	switch m {
 	case ModeCompose:
@@ -299,7 +333,7 @@ func (k KeyMap) FullHelpFor(m Mode) [][]key.Binding {
 	return [][]key.Binding{
 		{k.NextPanel, k.PrevPanel},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
-		{k.NextHunk, k.PrevHunk, k.NextFile, k.PrevFile},
+		{k.ScrollDiffDown, k.ScrollDiffUp, k.NextHunk, k.PrevHunk, k.NextFile, k.PrevFile},
 		{k.Comment, k.Approve, k.RequestChanges, k.SubmitReview, k.Merge},
 		{k.Browser, k.Retry, k.FullHelpToggle, k.Quit},
 	}

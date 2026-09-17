@@ -298,6 +298,16 @@ func (a App) act(act Action) (App, []Intent) {
 		a.Err = nil
 		return a, []Intent{FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}}
 
+	// --- the diff viewport pan (§ `J`/`K`) -----------------------------------
+	//
+	// 🔴 HANDLED HERE, BEFORE THE FALL-THROUGH TO `move()`, AND THAT PLACEMENT
+	// IS THE FEATURE. `move()` switches on `a.Focus`; these two must mean the
+	// same thing in all four panels, so they must never reach it.
+	case ActScrollDiffDown:
+		return a.scrollDiff(+diffScrollStep), nil
+	case ActScrollDiffUp:
+		return a.scrollDiff(-diffScrollStep), nil
+
 	case ActNextPanel:
 		a.Focus = a.nextFocusable(+1)
 		a.relayout()
@@ -354,6 +364,51 @@ func (a App) nextFocusable(dir int) Panel {
 
 func (a App) isPullRequest() bool {
 	return a.Snap != nil && a.Snap.Kind == ghapi.KindPullRequest
+}
+
+// diffScrollStep is how far ONE `J`/`K` press pans the diff viewport.
+//
+// ⚠ THREE LINES, NOT ONE AND NOT A PAGE. One line is too slow to be worth a
+// second binding when `j` already exists, and a page is what `C-d`/`C-u`
+// already do; three is the step a reader uses to peek past the cursor without
+// losing the surrounding context. It is a NAMED constant so a test can pin the
+// literal offset and a mutant that changes it has exactly one place to hide.
+const diffScrollStep = 3
+
+// scrollDiff pans the DIFF VIEWPORT by n lines — positive is down — and touches
+// NOTHING ELSE.
+//
+// 🔴 IT MUST NOT CALL `syncDiffViewport()`. That function ends in
+// `EnsureVisible(diffCur, 0, 0)`, which yanks the view straight back to the
+// cursor: calling it here would leave a feature that looks implemented, passes
+// a naive "did Step return without error" test, and does literally nothing on
+// screen. The style closure `syncDiffViewport` installed is still correct after
+// a pan, because the CURSOR did not move — which is the whole point of the
+// binding.
+//
+// 🔴 IT IS NOT ON THE `move()` PATH EITHER. `moveIn` clamps against a cursor
+// range and `move`'s `PanelFiles` arm drags `diffCur` to a file start, so a
+// viewport pan routed through them would move the cursors it exists to leave
+// alone.
+//
+// ⚠ THE `a.Diff == nil` GUARD IS REACHABLE AND LOAD-BEARING, not a nil-check
+// reflex. `DiffLoaded{Err: …}` sets `Diff` to nil WITHOUT rebuilding the
+// viewport's content — a state the program enters when a write's follow-up
+// re-read succeeds for the PR and fails for the diff — so the viewport still
+// holds the previous diff's lines and would happily scroll them.
+func (a App) scrollDiff(n int) App {
+	if a.Diff == nil {
+		return a
+	}
+	// ⚠ The viewport clamps for us: `ScrollDown`/`ScrollUp` return early at the
+	// bottom/top and go through `SetYOffset`, which clamps to `[0, maxYOffset]`.
+	// A hand-rolled clamp here would be a second copy of that rule.
+	if n >= 0 {
+		a.vp.ScrollDown(n)
+	} else {
+		a.vp.ScrollUp(-n)
+	}
+	return a
 }
 
 // move applies a cursor action to whichever panel has focus.

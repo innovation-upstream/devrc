@@ -1553,11 +1553,14 @@ in
   # the pair above rather than a variant of either. It is not `cairn validate`:
   # once a host has switched, `~/.local/bin/cairn` is the pinned OSS package,
   # whose `validate` reimplements the check on the READER's resolver instead of
-  # shelling this repo's writer — measured on one scope of the live cache, both
-  # clients at the locked rev: 0 bytes of STDOUT (a 77-byte stderr banner) and
-  # exit 0, where the writer prints 5,766 B on stdout carrying `entry shape:`,
-  # `marker reachability:` and `dropped lines:`. Both "green"; one of them is
-  # empty on the stream you read. So `claude/skills/subsystem-index/SKILL.md` must name the
+  # shelling this repo's writer — measured 2026-09-17 on scope `devrc`, both
+  # clients at the locked rev: 55 B of STDOUT (one summary line, plus a 76-byte
+  # stderr banner) and exit 0, where the writer prints 6,677 B on stdout carrying
+  # `entry shape:`, `marker reachability:` and `dropped lines:`. Both "green";
+  # only one says what was lost. ⚠ This comment used to say 0 bytes / 5,766 B,
+  # which was true before the pinned rev added an unconditional summary line to
+  # `cmd_validate`; do not re-derive the 0 — the discriminator is WHAT each
+  # reports. So `claude/skills/subsystem-index/SKILL.md` must name the
   # writer, and before this line the only spelling that RAN was a literal
   # `python3 /home/…/devrc/scripts/lib/subsystem_touch.py` — an absolute checkout
   # path inside the protocol this whole change exists to decouple from the
@@ -4332,6 +4335,14 @@ in
         # triggers, which is what makes the omission an asymmetry rather than a
         # policy.
         "${../scripts/lib/host_label.py}"
+        # The tail size is NEGOTIATED with the server, and this module is what
+        # reads the server's answer out of the digest pre-flight. It is a SOFT
+        # dependency by design — the script logs and falls back to
+        # TAIL_FALLBACK when it cannot run — but it decides HOW MUCH OF EACH
+        # SESSION this unit delivers, which is the same thing the builder beside
+        # it decides. A change here that never reached the running unit would be
+        # invisible in exactly the way the builder's omission was.
+        "${../scripts/lib/transcript_limits.py}"
         # The builder's own import, and the oldest omission in this list:
         # build_transcript_push.py has imported transcript_search since the
         # feeder shipped, and cannot run without it —
