@@ -897,6 +897,13 @@ the DOD block's own section saying the question is UNANSWERABLE, which is
 explicitly not the same as unfinished.
 
 
+## Demoted from the core — the worked example for step 1's diagnosis capture
+
+VERBATIM from `/handoff` step 1. What a useless capture and a useful one look like
+side by side, which is the shape the imperative in the body states in the abstract:
+
+   "We looked into the CSP issue" is worthless; "`frame-ancestors` on app.example.test = `https://example.test https://*.example.test` — does NOT include `gen-matrix.embed.example.test`, confirmed via response header on GET /apps/run/dogfood-manual" is the whole point.
+
 ## Demoted from the core — the merge's own warnings and refusal statuses
 
 Every line below is VERBATIM from `/handoff` step 5.

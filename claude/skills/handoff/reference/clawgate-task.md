@@ -8,6 +8,10 @@ Loaded from `/handoff` steps 1 and 2. Every line below is VERBATIM from the core
 
      Each linked row carries a **`role`**, and the verdict RANKS by it instead of counting links: `worked` (this session commented on the task or flipped its status), `created` (it FILED the task), `read` (it only fetched it). `worked` is the signal because `claude/skills/clawgate/flows/task-pickup.md` mandates the comment/status write-back on every pickup and a Stop hook blocks the turn without it.
 
+     🔴 **The exit-6 output says which of FOUR cases it is**: several WORKED tasks; **no worked task at all** beside one or more `created`/`read` links; a role the tool does not recognise; or several tasks with roles unavailable. Do not record more than one, ever. The **no-worked** case is not "pick one" — filing or reading a task is not doing its work, so the doc most likely belongs to **none** of them; record nothing unless you recognise one, and a lone `created` row is this case, not a resolution.
+
+     ⚠ **With no `role` on ANY row (an older server)** the verdict falls back to "exactly one task" and prints `ROLES UNAVAILABLE` — read the rows yourself before recording. On **3 or 4** say the board was not reached; never treat silence as "no task".
+
      🔴 **CAPTURE the status — a PIPE EATS it**: `… | tail; echo "rc=$?"` prints 0 for a real 5. Use `out=$(… resolve 2>&1); rc=$?`. 📖 `~/.claude/skills/handoff/reference/exit-code.md`.
 
      ⚠ **Even a `worked` row is a CANDIDATE, not proof this session did the work this doc describes** — it records that the board accepted a write, nothing more. Read the title before recording it, and prefer asking over recording a task you do not recognise. One known blind spot: `created` is TERMINAL upstream and outranks `worked`, so a session that FILED a task and then worked it stays `created` and lands in the no-worked case.
