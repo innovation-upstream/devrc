@@ -40,12 +40,19 @@ staleness it was run to measure.
 🔴 **`cairn validate` IS NOT THE WRITE-PROTOCOL CHECK, and it stops being one
 silently, at exit 0.** Once a host has run `home-manager switch`, the client on
 PATH is the pinned OSS package, which reimplements `validate` on the reader's
-resolver instead of shelling the writer. MEASURED on one scope of the live cache,
-both clients at the locked rev: the package writes **0 bytes to stdout** (a
-77-byte state banner on stderr) and exits 0, where the writer prints **5,766
-bytes on stdout** with `entry shape:`, `marker reachability:` and `dropped
-lines:` — the last meaning content is ALREADY LOST. Both are "green"; one of them
-is empty on the stream you read. **The mandated post-write check is
+resolver instead of shelling the writer. MEASURED 2026-09-17 on scope `devrc`,
+both clients at the locked rev: the package writes **55 bytes to stdout** — one
+summary line counting how many of the scope's entries parse and how many are
+malformed, plus a 76-byte state banner on stderr — and exits 0, where the writer
+prints **6,677 bytes on stdout** with `entry shape:`, `marker reachability:` and
+`dropped lines:` — the last meaning content is ALREADY LOST, and having no counterpart in
+the package's output at all. Both are "green"; only one of them says what was
+lost. ⚠ **An earlier form of this paragraph said the package writes 0 BYTES, and
+that is now STALE** — true before the pinned rev added an unconditional summary
+line to `cmd_validate`, precisely so a clean scope would stop being
+byte-identical to a validate that parsed nothing. The discriminator is WHAT each
+reports, not whether either is silent; do not re-derive the 0. **The mandated
+post-write check is
 `cairn sync && cairn-validate --scope <scope>`** — the SAME spelling `subsystem-index`
 names, which is the point: two skills naming one mandated command in two ways is
 how one of them goes unpinned and drifts. 🔴 **The `cairn sync` is load-bearing,

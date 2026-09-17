@@ -4,11 +4,17 @@
 🔴 IT EXISTS BECAUSE `cairn validate` STOPPED BEING THIS CHECK. `~/.local/bin/cairn`
 is the pinned OSS package once a host has switched, and its `validate` reimplements
 the check on the READER's resolver rather than shelling this repo's writer. Measured
-on one scope of the live cache, both clients at the locked rev: the package writes 0
-bytes to stdout (a 77-byte banner on stderr) and exits 0, where
-`scripts/lib/subsystem_touch.py --validate` prints 5,766 B carrying `entry shape:`,
+2026-09-17 on scope `devrc`, both clients at the locked rev: the package writes 55 B
+to stdout — one summary line, `33 of 33 entry file(s) parse, 0 malformed`, plus a
+76-byte banner on stderr — and exits 0, where
+`scripts/lib/subsystem_touch.py --validate` prints 6,677 B carrying `entry shape:`,
 `marker reachability:` and `dropped lines:` — the last meaning content is ALREADY
-LOST. Both are "green"; only one of them looked. So the write protocol has to name
+LOST, and absent from the package's output entirely. Both are "green"; only one of
+them says what was lost. ⚠ This paragraph used to say the package writes 0 BYTES,
+which was true before the pinned rev added that unconditional summary line (added so
+a clean scope would stop being byte-identical to a validate that parsed nothing).
+The discriminator is WHAT each reports, not whether either is silent — do not
+re-derive the 0. So the write protocol has to name
 the writer, and the only spelling that ran before this file was a literal
 `python3 /home/…/devrc/scripts/lib/subsystem_touch.py …` — an absolute checkout path
 baked into a protocol whose whole point is that agents work in other repos. A bare

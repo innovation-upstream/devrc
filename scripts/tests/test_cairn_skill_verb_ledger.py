@@ -254,31 +254,83 @@ def test_a_named_verb_appears_in_the_skill_body(verb: str) -> None:
 #
 # 🔴 On (4): `cairn validate --scope <scope>` (space) is a REAL runnable command
 # — it even syncs by default — which is what makes the swap survivable by eye.
-# It is still the wrong check. `scripts/cairn-validate`'s own header records the
-# measurement: on one live scope the packaged client wrote **0 bytes to stdout**
-# and exited 0, where the writer wrote **5,766 B** carrying `entry shape:`,
-# `marker reachability:` and `dropped lines:` — the last meaning content is
-# ALREADY LOST. Their EXIT TABLES also disagree (malformed entry: writer **3**,
-# package **5**), so the two must not be read for each other.
+# It is still the wrong check, and the reason is WHAT EACH ONE REPORTS. Measured
+# 2026-09-17 on scope `devrc` at the pinned rev (`flake.lock` → ZacxDev/cairn
+# `baee2f0`), both clients:
+#
+#     cairn validate --no-sync --scope devrc   rc 0, stdout    55 B, stderr 76 B
+#         "cairn: devrc: 33 of 33 entry file(s) parse, 0 malformed"
+#     cairn-validate --scope devrc             rc 0, stdout 6,677 B, stderr  0 B
+#         carries `entry shape:`, `marker reachability:` AND `dropped lines:`
+#
+# So the package answers "do the files parse"; the writer answers "what is wrong,
+# and what is ALREADY LOST" — `dropped lines:` has no counterpart in the package's
+# output at all. Their EXIT TABLES also disagree (malformed entry: writer **3**,
+# package **5**, where the package's 3 means "unreachable, no cache"), so the two
+# must not be read for each other.
+#
+# ⚠ THE OLDER FORM OF THIS PARAGRAPH — "the package wrote 0 BYTES to stdout" — is
+# STALE, and this guard shipped it once before being caught. It was true before
+# the pinned rev added an unconditional summary line to `cmd_validate`, precisely
+# so that "a CLEAN scope printed NOTHING and exited 0, which is byte-identical to
+# a validate that parsed no files at all" would stop being possible. The claim is
+# left here corrected rather than deleted because it is quoted in two other
+# places (`claude/skills/cairn/SKILL.md`, `scripts/cairn-validate`'s header) and
+# the next reader to meet it should know it was measured, not assumed.
 #
 # Matching runs over WHITESPACE-NORMALISED text, so reflowing a paragraph — which
 # markdown prose gets constantly, including in the very PR that added this — is
-# not a spelling change. The placeholder is matched as a shape (`<...>`) rather
-# than the literal `<scope>`, so renaming it to `<SCOPE>` cannot walk the guard.
+# not a spelling change.
 POST_WRITE_CHECK = "cairn sync && cairn-validate --scope <scope>"
 _SYNC_PREFIX = "cairn sync && "
-_VALIDATE_RE = re.compile(r"cairn(?P<sep>[- ])validate\s+--scope\s+<[A-Za-z_-]+>")
+
+# 🔴 WHAT THIS MATCHES IS THE `--scope` INVOCATION, NOT THE BINARY NAME — and the
+# distinction is the whole of finding F-1 from round 1. An earlier form required
+# the literal ` --scope <placeholder>`, so FIVE real spellings of the same mandate
+# walked it, each measured as a SURVIVING mutant against a killed positive
+# control: `--scope=<scope>`, `--scope devrc` (a literal scope), `<scope1>`,
+# `--store X --scope <scope>` (an intervening flag), and — worst — `cairn validate
+# --scope=<scope>`, the PACKAGED client, which property (4) exists to catch.
+#
+# It must NOT simply widen to `cairn[- ]validate\b`: nine legitimate mentions in
+# these same files are not the mandate at all — bare references to the binary, the
+# single-file `--validate <path>` form, and the prose in BOTH skills that names
+# `cairn validate` expressly to say it is NOT this check. Requiring a `--scope`
+# argument separates them without a hand-written exemption per sentence.
+#
+# `[^`]{0,40}?` bounds the gap and cannot cross a backtick, so the match stays
+# inside one markdown code span: `\`cairn-validate\` IS NOT \`cairn validate\``
+# cannot be stitched into a false hit, and neither can a `cairn-validate` in one
+# sentence and a `--scope` two paragraphs later that normalisation brought closer.
+_VALIDATE_RE = re.compile(
+    r"cairn(?P<sep>[- ])validate(?P<mid>[^`]{0,40}?)--scope(?:=|\s)\s*(?P<val>[^\s`]+)"
+)
+
+# 🔴 A NEGATIVE EXAMPLE IS NOT A MANDATE. Without this, these two files became
+# unable to document the bare form as the thing NOT to do — writing "❌ Never run
+# `cairn-validate --scope <scope>` on its own" fails property (3) with a message
+# asserting the file is wrong, while the prose is saying exactly what the guard
+# means. Same remedy and same shape as `_unmarked_retractions` in
+# `test_subsystem_store_api.py`, which this file's own docstring already cites: a
+# marker within a short window exempts the quotation.
+_NEGATIVE_MARKERS = ("❌", "NOT:", "Never run", "never run", "do NOT run")
+_MARKER_WINDOW = 60
 
 # 🔴 TWO-WAY, and the VALUE is the count. A per-file boolean cannot see a file
 # that drops one of its two mandates, which is the SHRINK half of the docstring.
+# Keys are REPO-RELATIVE PATHS, not skill names: three deployed skills live
+# OUTSIDE `claude/skills/` (see `_skill_bodies`), so a bare name is both
+# ambiguous and a silent-overwrite hazard in the dict comprehension below.
 POST_WRITE_SITES: dict[str, int] = {
-    "cairn": 2,             # the verb table row, and the prose mandate below it
-    "subsystem-index": 2,   # the prose mandate, and the runnable command fence
+    # the verb table row, and the prose mandate below it
+    "claude/skills/cairn/SKILL.md": 2,
+    # the prose mandate, and the runnable command fence
+    "claude/skills/subsystem-index/SKILL.md": 2,
 }
 
 # Named rather than omitted. An exemption is auditable; an absence is the defect.
 READ_TIME_EXEMPT: dict[str, str] = {
-    "resume": (
+    "claude/skills/resume/SKILL.md": (
         "a READ-time diagnostic, not the write protocol: it is reached only from "
         "the `🔴 NO <heading>` badge in `cairn recall` output, and `cairn recall` "
         "syncs before it reads, so the cache is already fresh at that point. It "
@@ -288,22 +340,40 @@ READ_TIME_EXEMPT: dict[str, str] = {
 
 
 def _skill_bodies() -> dict[str, str]:
-    """Every tracked `claude/skills/*/SKILL.md`, keyed by skill name.
+    """Every tracked `SKILL.md` in the repo, keyed by repo-relative path.
 
-    Derived, never enumerated — a fourth skill is caught automatically, and a
-    fourth skill is exactly what the hand-written tuple missed.
+    🔴 NOT `claude/skills/**` — that was finding F-2 from round 1, and it is the
+    `resume` blind spot one directory over. THREE deployed skills live elsewhere:
+    `scripts/browser-bridge/SKILL.md`, `scripts/dl-router/SKILL.md` and
+    `scripts/opencode/SKILL.md` are symlinked onto `~/.claude/skills/` by
+    `nix/home.nix`, which calls them "the SAME deliberate exception". They are
+    agent-loaded skills like any other, so one of them teaching the unsynced form
+    is exactly the failure this ledger exists to catch — and a scan rooted at
+    `claude/skills` could never see it. Derived, never enumerated: 36 tracked
+    SKILL.md today, and a 37th is picked up without editing this file.
     """
-    root = REPO / "claude" / "skills"
     return {
-        p.parent.name: p.read_text(encoding="utf-8")
+        str(p.relative_to(REPO)): p.read_text(encoding="utf-8")
         for p in P.repo_files(REPO)
-        if p.name == "SKILL.md" and root in p.parents
+        if p.name == "SKILL.md"
     }
 
 
 def _occurrences(text: str) -> list[re.Match[str]]:
-    """Matches over whitespace-normalised text, so a reflow is not a change."""
-    return list(_VALIDATE_RE.finditer(" ".join(text.split())))
+    """Matches over whitespace-normalised text, so a reflow is not a change.
+
+    An occurrence carrying a negative-example marker within `_MARKER_WINDOW`
+    characters before it is dropped: it is prose ABOUT the wrong spelling, not a
+    mandate to use it.
+    """
+    normalised = " ".join(text.split())
+    out = []
+    for m in _VALIDATE_RE.finditer(normalised):
+        window = normalised[max(0, m.start() - _MARKER_WINDOW):m.start()]
+        if any(marker in window for marker in _NEGATIVE_MARKERS):
+            continue
+        out.append(m)
+    return out
 
 
 def _naming_skills() -> dict[str, list[re.Match[str]]]:
@@ -321,16 +391,18 @@ def test_the_set_of_skills_naming_the_write_protocol_check_is_the_declared_ledge
 
     grew = sorted(found - declared)
     assert not grew, (
-        f"skill(s) {grew} name the write-protocol check and are in NEITHER ledger. "
-        f"Decide which: add a count to POST_WRITE_SITES if it mandates the check "
-        f"after a write, or a reason to READ_TIME_EXEMPT if it does not. Leaving "
-        f"it out is how `resume` sat outside this guard while naming the bare form."
+        f"SKILL.md file(s) {grew} invoke the write-protocol check with --scope and "
+        f"are in NEITHER ledger. Decide which: add a count to POST_WRITE_SITES if "
+        f"it mandates the check after a write, or a reason to READ_TIME_EXEMPT if "
+        f"it does not. Leaving it out is how `claude/skills/resume/SKILL.md` sat "
+        f"outside this guard while naming the bare form."
     )
     shrank = sorted(declared - found)
     assert not shrank, (
-        f"skill(s) {shrank} are declared as naming the write-protocol check and "
-        f"no longer do. A mandate that vanishes is the failure this ledger exists "
-        f"to catch — delete the ledger row deliberately, or restore the mandate."
+        f"SKILL.md file(s) {shrank} are declared as naming the write-protocol "
+        f"check and no longer do. A mandate that vanishes is the failure this "
+        f"ledger exists to catch — delete the ledger row deliberately, or restore "
+        f"the mandate."
     )
 
 
@@ -346,9 +418,9 @@ def test_a_post_write_site_names_the_check_the_declared_number_of_times(skill: s
     want = POST_WRITE_SITES[skill]
     got = len(_naming_skills().get(skill, []))
     assert got == want, (
-        f"claude/skills/{skill}/SKILL.md names the write-protocol check {got} "
-        f"time(s); POST_WRITE_SITES declares {want}. If a site was added or "
-        f"removed deliberately, move the number — do not leave it disagreeing."
+        f"{skill} invokes the write-protocol check {got} time(s); "
+        f"POST_WRITE_SITES declares {want}. If a site was added or removed "
+        f"deliberately, move the number — do not leave it disagreeing."
     )
 
 
@@ -361,6 +433,10 @@ def test_every_post_write_occurrence_carries_the_load_bearing_sync_prefix(skill:
     cache"), and `cairn-validate` prepends `--store <the synced cache>` with no
     network path of its own. So an unsynced run cleanly parses the PRE-WRITE
     bytes — a silent pass on the exact defect the check exists to catch.
+
+    `&&` is the right connector and not a convenience: `cairn sync` exits non-zero
+    when it could not refresh even though a cache survived, so a failed sync SKIPS
+    the validate rather than validating stale bytes under a green verdict.
     """
     body = _skill_bodies()[skill]
     normalised = " ".join(body.split())
@@ -369,10 +445,12 @@ def test_every_post_write_occurrence_carries_the_load_bearing_sync_prefix(skill:
         if not normalised[:m.start()].endswith(_SYNC_PREFIX)
     ]
     assert not stray, (
-        f"claude/skills/{skill}/SKILL.md names the write-protocol check at "
-        f"normalised offset(s) {stray} WITHOUT the load-bearing {_SYNC_PREFIX!r} "
-        f"prefix. An unsynced validate parses the PRE-WRITE bytes and passes "
-        f"silently. The mandated spelling is {POST_WRITE_CHECK!r}."
+        f"{skill} invokes the write-protocol check at normalised offset(s) "
+        f"{stray} WITHOUT the load-bearing {_SYNC_PREFIX!r} prefix. An unsynced "
+        f"validate parses the PRE-WRITE bytes and passes silently. The mandated "
+        f"spelling is {POST_WRITE_CHECK!r}. (If this is prose ABOUT the wrong "
+        f"spelling rather than a mandate, mark it: one of {_NEGATIVE_MARKERS} "
+        f"within {_MARKER_WINDOW} characters before it exempts the quotation.)"
     )
 
 
@@ -380,19 +458,27 @@ def test_no_skill_spells_the_check_with_the_PACKAGED_client() -> None:
     """🔴 `cairn validate` (space) is a real command and the WRONG check.
 
     Not a typo guard: the packaged client reimplements the check on the READER's
-    resolver. Measured on one live scope (`scripts/cairn-validate`'s header): the
-    package wrote 0 bytes to stdout and exited 0 where the writer wrote 5,766 B
-    including `dropped lines:`. Both "green"; only one looked. Their exit tables
-    also disagree — malformed entry is 3 from the writer, 5 from the package — so
-    a skill that names the wrong one sends a reader to the wrong exit-code table.
+    resolver, so the two answer different questions. Measured 2026-09-17 on scope
+    `devrc` at the pinned rev — package 55 B of stdout ("33 of 33 entry file(s)
+    parse, 0 malformed"), writer 6,677 B carrying `entry shape:`, `marker
+    reachability:` and `dropped lines:`, the last having no counterpart in the
+    package's output at all. Both exit 0; only one of them says what was LOST.
+    Their exit tables also disagree — malformed entry is 3 from the writer and 5
+    from the package, whose own 3 means "unreachable, no cache" — so a skill that
+    names the wrong one sends a reader to the wrong table as well as the wrong
+    check.
+
+    🔴 This fires on the `--scope` INVOCATION, not on the binary name, which is
+    what lets both skills keep saying "`cairn-validate` IS NOT `cairn validate`"
+    in prose without tripping it.
     """
     wrong = sorted(
         name for name, ms in _naming_skills().items()
         if any(m.group("sep") == " " for m in ms)
     )
     assert not wrong, (
-        f"skill(s) {wrong} spell the write-protocol check with the PACKAGED "
-        f"client (`cairn validate`, space) instead of the devrc writer "
+        f"SKILL.md file(s) {wrong} invoke the write-protocol check with the "
+        f"PACKAGED client (`cairn validate`, space) instead of the devrc writer "
         f"(`cairn-validate`, hyphen). The package does not run the write-protocol "
         f"check and its exit codes differ; use {POST_WRITE_CHECK!r}."
     )
