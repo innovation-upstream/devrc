@@ -62,11 +62,15 @@ type treeNode struct {
 	deletions int
 
 	changeType string
-	// fileIndex is the index into `Snap.Files` for a file, and -1 for a
-	// directory. ⚠ IT IS NOT AN INDEX INTO `Diff.Files` — those two lists come
-	// from two different endpoints and nothing guarantees their order.
-	fileIndex int
 }
+
+// 🔴 THERE IS DELIBERATELY NO `fileIndex` ON A NODE OR A ROW. An earlier draft
+// carried one — the row's position in `Snap.Files` — and nothing ever read it.
+// It is left out rather than kept "for later" because the only thing anyone
+// would plausibly reach for it to do is the exact mistake this whole change
+// exists to prevent: resolving a row's diff file by an ORDINAL. `Snap.Files`
+// comes from GraphQL and `Diff.Files` from the REST files endpoint; the only
+// identity the two share is the PATH.
 
 // FileRow is one VISIBLE row of the Files panel: the flattened tree, with every
 // collapsed subtree already removed.
@@ -82,7 +86,6 @@ type FileRow struct {
 	Additions  int
 	Deletions  int
 	ChangeType string
-	FileIndex  int
 }
 
 // buildFileTree turns a flat path list into a compacted directory tree.
@@ -92,8 +95,8 @@ type FileRow struct {
 // be a second ordering rule to keep in sync with nothing, and first-appearance
 // keeps a file list that is already grouped reading in its original order.
 func buildFileTree(files []ghapi.File) *treeNode {
-	root := &treeNode{isDir: true, fileIndex: -1}
-	for i, f := range files {
+	root := &treeNode{isDir: true}
+	for _, f := range files {
 		segs := pathSegments(f.Path)
 		cur := root
 		for _, s := range segs[:len(segs)-1] {
@@ -105,7 +108,6 @@ func buildFileTree(files []ghapi.File) *treeNode {
 			additions:  f.Additions,
 			deletions:  f.Deletions,
 			changeType: f.ChangeType,
-			fileIndex:  i,
 		})
 	}
 	// 🔴 THE ROOT IS NEVER COMPACTED INTO. It is not rendered, so merging it
@@ -145,10 +147,9 @@ func (n *treeNode) childDir(name string) *treeNode {
 		}
 	}
 	child := &treeNode{
-		name:      name,
-		path:      joinPath(n.path, name),
-		isDir:     true,
-		fileIndex: -1,
+		name:  name,
+		path:  joinPath(n.path, name),
+		isDir: true,
 	}
 	n.children = append(n.children, child)
 	return child
@@ -227,7 +228,6 @@ func flattenTree(root *treeNode, collapsed map[string]bool) []FileRow {
 					Additions:  c.additions,
 					Deletions:  c.deletions,
 					ChangeType: c.changeType,
-					FileIndex:  c.fileIndex,
 				})
 				continue
 			}
@@ -240,7 +240,6 @@ func flattenTree(root *treeNode, collapsed map[string]bool) []FileRow {
 				Expanded:  expanded,
 				Additions: c.additions,
 				Deletions: c.deletions,
-				FileIndex: -1,
 			})
 			if expanded {
 				walk(c, depth+1)
