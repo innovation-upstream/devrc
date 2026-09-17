@@ -195,7 +195,10 @@ func TestBuildingTheTreeFromAFlatPathList(t *testing.T) {
 			},
 		},
 		{
-			name: "two directories stay separate and keep first-appearance order",
+			// Both are directories, so the directories-first rule does not
+			// separate them and first-appearance decides: `zeta` stays above
+			// `alpha` even though `alpha` sorts first alphabetically.
+			name: "two directories stay separate and keep first-appearance order WITHIN the directory group",
 			files: []ghapi.File{
 				{Path: "zeta/late.go", ChangeType: "MODIFIED", Additions: 1, Deletions: 1},
 				{Path: "alpha/early.go", ChangeType: "MODIFIED", Additions: 2, Deletions: 2},
@@ -208,16 +211,44 @@ func TestBuildingTheTreeFromAFlatPathList(t *testing.T) {
 			},
 		},
 		{
-			name: "a directory holding BOTH a file and a subdirectory",
+			// 🔴 THE FILE ARRIVES FIRST AND THE SUBDIRECTORY STILL RENDERS ABOVE
+			// IT. Under the first-appearance ordering this replaced, `top.go`
+			// was row 1 and `nested` row 2.
+			name: "a directory holding BOTH a file and a subdirectory puts the subdirectory FIRST",
 			files: []ghapi.File{
 				{Path: "src/top.go", ChangeType: "MODIFIED", Additions: 4, Deletions: 2},
 				{Path: "src/nested/inner.go", ChangeType: "ADDED", Additions: 8, Deletions: 0},
 			},
 			want: []rowShape{
 				{0, "dir-open", "src", 12, 2},
-				{1, "MODIFIED", "top.go", 4, 2},
 				{1, "dir-open", "nested", 8, 0},
 				{2, "ADDED", "inner.go", 8, 0},
+				{1, "MODIFIED", "top.go", 4, 2},
+			},
+		},
+		{
+			// 🔴 THE CASE THAT FAILS UNDER FIRST-APPEARANCE ORDER, AT TWO LEVELS
+			// AT ONCE, and with two files in the same group so the WITHIN-group
+			// order is pinned at the same time.
+			//
+			// First-appearance would render this as
+			//   top.go / svc / api.go / z.go / inner / deep.go
+			// — the file above the directory at the root, and `inner` below the
+			// two files inside `svc`. Directories-first moves BOTH.
+			name: "a subdirectory sorts above a file that appeared before it, at every level",
+			files: []ghapi.File{
+				{Path: "top.go", ChangeType: "MODIFIED", Additions: 1, Deletions: 1},
+				{Path: "svc/api.go", ChangeType: "MODIFIED", Additions: 2, Deletions: 0},
+				{Path: "svc/z.go", ChangeType: "ADDED", Additions: 4, Deletions: 0},
+				{Path: "svc/inner/deep.go", ChangeType: "ADDED", Additions: 8, Deletions: 3},
+			},
+			want: []rowShape{
+				{0, "dir-open", "svc", 14, 3},
+				{1, "dir-open", "inner", 8, 3},
+				{2, "ADDED", "deep.go", 8, 3},
+				{1, "MODIFIED", "api.go", 2, 0},
+				{1, "ADDED", "z.go", 4, 0},
+				{0, "MODIFIED", "top.go", 1, 1},
 			},
 		},
 		{

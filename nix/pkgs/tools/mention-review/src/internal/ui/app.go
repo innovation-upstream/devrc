@@ -107,9 +107,16 @@ type App struct {
 	fileRowCur int
 
 	// fileTree is the built directory tree, and fileRows its flattened visible
-	// rows. 🔴 BOTH ARE CACHES REBUILT ON A STATE CHANGE, NEVER PER FRAME —
-	// `filesBody` runs every frame and `panels.go` carries the measurement of
-	// what per-frame work in a panel renderer costs.
+	// rows.
+	//
+	// 🔴 THEY ARE STATE BECAUSE THE CURSOR INDEXES THEM, NOT AS A SPEED
+	// OPTIMISATION. `fileRowCur` above is an index into `fileRows`, and both
+	// `moveIn` (in `stepKey`) and `clampCursors` read `len(a.fileRows)` to
+	// bound it — none of that is on a render path, so a list that
+	// existed only inside `filesBody` would leave the cursor indexing nothing
+	// between frames. That is a correctness requirement, and it holds however
+	// cheap the rebuild is. ⚠ `panels.go`'s per-frame-styling measurement is
+	// about 10,000 DIFF LINES; it is prior art here, not this field's reason.
 	fileTree *treeNode
 	fileRows []FileRow
 
@@ -125,13 +132,11 @@ type App struct {
 	// `setCollapsed` and `revealFile` replace the map; nothing writes through it.
 	collapsedDirs map[string]bool
 
-	// diffFileByPath resolves a file PATH to its index in `Diff.Files`.
-	//
-	// 🔴 BY PATH, NEVER BY ROW ORDINAL. `Snap.Files` comes from GraphQL and
-	// `Diff.Files` from the REST files endpoint; the tree then re-orders rows
-	// relative to both. A row-ordinal lookup would open a DIFFERENT file's hunk
-	// and look entirely correct on screen.
-	diffFileByPath map[string]int
+	// 🔴 THERE IS DELIBERATELY NO PATH -> `Diff.Files` INDEX HERE. One existed,
+	// and it was a cache of `Diff` that nothing kept honest: every assignment to
+	// `Diff` owed it a rebuild, two branches of `Step` paid that by hand, and no
+	// test or type could see a third that did not. `selectRow` reads `Diff`
+	// directly instead — see its header.
 
 	vp       viewport.Model
 	body     viewport.Model // the issue card / error card body
@@ -265,13 +270,11 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 			// card would throw away a working screen. The Diff panel says so
 			// and everything else keeps working.
 			a.Diff = nil
-			a.diffFileByPath = nil
 			a.Err = m.Err
 			return a, nil
 		}
 		a.Diff = m.Diff
 		a.diffCur = 0
-		a.indexDiffFilesByPath()
 		a.rebuildDiffContent()
 		a.syncDiffViewport()
 		return a, nil

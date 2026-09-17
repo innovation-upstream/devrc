@@ -681,8 +681,12 @@ func walkTo(t *testing.T, a App, row int) App {
 }
 
 // diffIndexOfPath is the test's own lookup, written out rather than borrowed
-// from `App.diffFileByPath` — an expectation derived from the map under test
-// would agree with it however wrong the map was.
+// from the scan inside `App.selectRow` — an expectation derived from the code
+// under test would agree with it however wrong that code was. 🔴 DO NOT
+// "SIMPLIFY" THIS INTO A CALL TO THE IMPLEMENTATION; being a second,
+// independent spelling is the whole point of it. (It was written against a
+// PATH -> index map that `selectRow` has since stopped keeping, and it needed
+// no change, which is the property working.)
 func diffIndexOfPath(t *testing.T, a App, path string) int {
 	t.Helper()
 	for i, f := range a.Diff.Files {

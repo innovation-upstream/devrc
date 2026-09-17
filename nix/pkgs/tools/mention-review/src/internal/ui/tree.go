@@ -9,15 +9,24 @@ import (
 // 🔴 THE FILES PANEL IS A DIRECTORY TREE, AND THE TREE IS BUILT WHEN `Snap`
 // ARRIVES — NEVER IN `filesBody()`.
 //
-// `filesBody` runs on EVERY frame. Per-frame work in a panel renderer is an
-// already-measured incident in this program: the diff viewport styled every
-// line per frame and missed the 60 fps budget by 276% at 10,000 lines (the
-// table is in `panels.go`, above the viewport section). Splitting paths,
-// allocating nodes and walking a trie 60 times a second would be the same
-// defect one panel to the left. So the tree is built once per snapshot
-// (`App.rebuildFileTree`), the VISIBLE rows are flattened once per
-// collapse/expand (`App.rebuildFileRows`), and the renderer only formats the
-// rows it was handed.
+// 🔴 THE REASON IS STATE, NOT SPEED. `App.fileRows` HAS to outlive a frame,
+// because `App.fileRowCur` is an index INTO it, and `moveIn` and
+// `clampCursors` bound that cursor by `len(a.fileRows)` — all of which happens
+// while handling a KEY, off the render path entirely. A tree rebuilt inside
+// `filesBody` would be a second tree that the cursor does not index, so the
+// cursor would be meaningless between frames. Building it where `Snap` changes
+// (`App.rebuildFileTree`) and re-flattening it where the collapse state changes
+// (`App.rebuildFileRows`) is what makes the cursor refer to something; the
+// renderer then only formats the rows it was handed.
+//
+// ⚠ AND NOT BECAUSE PER-FRAME WORK HERE WAS MEASURED AS A HAZARD — IT WAS NOT.
+// `panels.go` carries a real incident (the diff viewport styling every line per
+// frame, 276% of the 60 fps budget at 10,000 lines), and it is RELATED PRIOR
+// ART ONLY: that measurement is about 10,000 diff lines, while this is ~100
+// files of ~7 path segments, roughly two orders of magnitude smaller. Quoting
+// it as this code's justification would state a number beyond the scope it was
+// taken at, and would argue against cheap linear work in this panel that is
+// perfectly fine — see `selectRow`.
 //
 // 🔴 THE ROWS ARE NOT POSITIONALLY PARALLEL TO `Snap.Files` ANY MORE, AND THAT
 // IS THE WHOLE HAZARD OF THIS CHANGE. A flat list let ONE integer index both
@@ -90,10 +99,17 @@ type FileRow struct {
 
 // buildFileTree turns a flat path list into a compacted directory tree.
 //
-// Child order is FIRST-APPEARANCE order within each directory — one rule, and
-// a deterministic one. It is deliberately NOT "directories first": that would
-// be a second ordering rule to keep in sync with nothing, and first-appearance
-// keeps a file list that is already grouped reading in its original order.
+// 🔴 CHILD ORDER IS DIRECTORIES FIRST, THEN FILES, AND FIRST-APPEARANCE ORDER
+// WITHIN EACH OF THOSE TWO GROUPS. The operator chose it, shown both options,
+// because it is what GitHub's "Files changed" sidebar does — and GitHub is the
+// reference this whole panel is built against, so matching it is the point
+// rather than a tie-break. An earlier draft used first-appearance order alone;
+// that was never asked for.
+//
+// First-appearance is well defined here and is what keeps the WITHIN-group
+// order deterministic without a second comparison: `files` arrives in the
+// API's order, a directory node is created where its first file is seen, and a
+// file node where the file is seen. Nothing is sorted alphabetically.
 func buildFileTree(files []ghapi.File) *treeNode {
 	root := &treeNode{isDir: true}
 	for _, f := range files {
@@ -110,6 +126,9 @@ func buildFileTree(files []ghapi.File) *treeNode {
 			changeType: f.ChangeType,
 		})
 	}
+	// 🔴 BEFORE COMPACTION, so a merged node inherits an already-grouped child
+	// list and the rule does not have to be applied twice.
+	dirsFirst(root)
 	// 🔴 THE ROOT IS NEVER COMPACTED INTO. It is not rendered, so merging it
 	// with its only child would produce a leading "/" on the first row.
 	for i, c := range root.children {
@@ -138,6 +157,23 @@ func pathSegments(p string) []string {
 		return []string{p}
 	}
 	return out
+}
+
+// dirsFirst reorders every node's children so subdirectories sit above files,
+// keeping first-appearance order WITHIN each of the two groups — a STABLE
+// partition, not a sort. See `buildFileTree`'s header for why this order.
+func dirsFirst(n *treeNode) {
+	dirs := make([]*treeNode, 0, len(n.children))
+	var files []*treeNode
+	for _, c := range n.children {
+		if !c.isDir {
+			files = append(files, c)
+			continue
+		}
+		dirs = append(dirs, c)
+		dirsFirst(c)
+	}
+	n.children = append(dirs, files...)
 }
 
 func (n *treeNode) childDir(name string) *treeNode {
@@ -307,24 +343,6 @@ func (a *App) rebuildFileRows() {
 	a.fileRows = flattenTree(a.fileTree, a.collapsedDirs)
 }
 
-// indexDiffFilesByPath builds the PATH -> `Diff.Files` index once per diff.
-func (a *App) indexDiffFilesByPath() {
-	if a.Diff == nil {
-		a.diffFileByPath = nil
-		return
-	}
-	m := make(map[string]int, len(a.Diff.Files))
-	for i, f := range a.Diff.Files {
-		// ⚠ FIRST WINS. Two entries with one path is a disagreement inside the
-		// API response, not something to resolve by silently preferring the
-		// later one.
-		if _, dup := m[f.Path]; !dup {
-			m[f.Path] = i
-		}
-	}
-	a.diffFileByPath = m
-}
-
 // currentRow is the row under the Files cursor.
 func (a App) currentRow() (FileRow, bool) {
 	if a.fileRowCur < 0 || a.fileRowCur >= len(a.fileRows) {
@@ -359,6 +377,17 @@ func (a App) SelectedFilePath() string {
 // the tree's rows are the GraphQL list grouped by directory. Reusing the row's
 // ordinal — or even its `Snap.Files` index — would open a different file's hunk
 // the moment those orders diverge, which grouping alone is enough to cause.
+//
+// 🔴 THE SCAN IS DELIBERATE, AND IT REPLACED A PATH -> INDEX MAP. The map was
+// a cache of `a.Diff`, so it carried a standing obligation to be rebuilt every
+// time `a.Diff` was assigned — discharged by hand in two branches of `Step` and
+// checked by nothing. A future assignment that forgot leaves a map describing
+// the PREVIOUS diff, and this function then silently returns, or opens a hunk
+// belonging to a file that is no longer on screen. Reading `a.Diff` directly
+// cannot be stale, which deletes that whole class rather than one instance of
+// it. The cost is a scan over a few hundred entries on a KEYPRESS — not a
+// render path, and this file already scans that list three more times on the
+// same keystroke (`revealFile`, `rowIndexOf`, `dirPathsOnTheWayTo`).
 func (a *App) selectRow() {
 	if a.Diff == nil {
 		return
@@ -367,8 +396,16 @@ func (a *App) selectRow() {
 	if !ok || r.IsDir {
 		return
 	}
-	i, ok := a.diffFileByPath[r.Path]
-	if !ok {
+	// ⚠ FIRST WINS. Two entries with one path is a disagreement inside the API
+	// response, not something to resolve by silently preferring the later one.
+	i := -1
+	for n, f := range a.Diff.Files {
+		if f.Path == r.Path {
+			i = n
+			break
+		}
+	}
+	if i < 0 {
 		// A file the Files panel knows about and the diff does not. The two
 		// lists come from two endpoints; saying nothing is better than jumping
 		// the diff somewhere arbitrary.
