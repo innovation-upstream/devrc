@@ -17,7 +17,8 @@ everything.
 🔴 THIS IS THE NINTH ENFORCED BYTE CEILING IN THE REPO AND THE SIXTH ON A SKILL
 BODY -- it follows an established pattern, it did not invent one. The census,
 RE-DERIVED 2026-09-17 (an earlier version of this header said "SIXTH ... FOURTH",
-undercounting by three; see the method note below for how that happened):
+undercounting the gates by three and the skill bodies by two; see the method note
+below for how that happened):
 
     claude/RULES.md                         test_rules_size.py
     scripts/browser-bridge/SKILL.md         browser-bridge/tests/test_skill_size.py     [body]
