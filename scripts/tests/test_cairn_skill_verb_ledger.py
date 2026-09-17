@@ -76,6 +76,7 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -298,23 +299,50 @@ _SYNC_PREFIX = "cairn sync && "
 # `cairn validate` expressly to say it is NOT this check. Requiring a `--scope`
 # argument separates them without a hand-written exemption per sentence.
 #
-# `[^`]{0,40}?` bounds the gap and cannot cross a backtick, so the match stays
-# inside one markdown code span: `\`cairn-validate\` IS NOT \`cairn validate\``
-# cannot be stitched into a false hit, and neither can a `cairn-validate` in one
-# sentence and a `--scope` two paragraphs later that normalisation brought closer.
+# The gap is bounded three ways, and each one closes a measured escape:
+#   * it cannot cross a BACKTICK, so `\`cairn-validate\` IS NOT \`cairn validate\``
+#     cannot be stitched into a false hit;
+#   * it cannot cross another `cairn`, because `sep` must describe the binary that
+#     actually carries the `--scope`. Round 2 finding N-2: inside a ``` fence there
+#     are no backticks at all, so `cairn-validate --validate F` on one line and
+#     `cairn validate --scope <scope>` on the next collapsed into ONE match whose
+#     `sep` was the HYPHEN — property (4) went green while the PACKAGED client was
+#     the command being mandated, and the count under-reported 2 commands as 1.
+#     Both skills already put two commands in one fence; the real one survived
+#     only because a trailing `#` comment happened to push the gap past 40 chars;
+#   * 40 characters, so an unrelated `--scope` further down a paragraph cannot be
+#     reached. A genuinely longer invocation is a deliberate miss, not an oversight.
 _VALIDATE_RE = re.compile(
-    r"cairn(?P<sep>[- ])validate(?P<mid>[^`]{0,40}?)--scope(?:=|\s)\s*(?P<val>[^\s`]+)"
+    r"cairn(?P<sep>[- ])validate(?P<mid>(?:(?!cairn)[^`]){0,40}?)"
+    r"--scope(?:=|\s)\s*(?P<val>[^\s`]+)"
 )
 
 # 🔴 A NEGATIVE EXAMPLE IS NOT A MANDATE. Without this, these two files became
 # unable to document the bare form as the thing NOT to do — writing "❌ Never run
-# `cairn-validate --scope <scope>` on its own" fails property (3) with a message
-# asserting the file is wrong, while the prose is saying exactly what the guard
+# `cairn-validate --scope <scope>` on its own" failed property (3) with a message
+# asserting the file is wrong, while the prose was saying exactly what the guard
 # means. Same remedy and same shape as `_unmarked_retractions` in
 # `test_subsystem_store_api.py`, which this file's own docstring already cites: a
 # marker within a short window exempts the quotation.
+#
+# 🔴 IT IS A WALK SURFACE, SO IT IS BOUNDED THREE WAYS — round 2 finding N-3
+# demonstrated all three escapes against the unbounded first version:
+#   * SAME PARAGRAPH. The scan is paragraph-scoped, so a `## ❌ Common mistakes`
+#     HEADING can no longer silence the first mandate of the section beneath it.
+#     Whole-document normalisation had erased the paragraph break and made them
+#     adjacent. Paragraph scope is also the right unit for reflow-immunity: a
+#     reflow rewraps WITHIN a paragraph, which is exactly what stays normalised.
+#   * NO SENTENCE TERMINATOR between the marker and the match. "❌ Do not skip it.
+#     Run `cairn sync && cairn validate --scope <scope>`" is a POSITIVE mandate
+#     wearing a marker, and it silenced property (4) — the packaged client
+#     mandated, guard green.
+#   * the window, unchanged at 60, matching `_unmarked_retractions`.
+# The exemption deliberately applies to ALL FOUR properties, not only (3): a
+# marked negative example of the WRONG BINARY is prose these skills want to be
+# able to write, and both already write its unparameterised cousin.
 _NEGATIVE_MARKERS = ("❌", "NOT:", "Never run", "never run", "do NOT run")
 _MARKER_WINDOW = 60
+_SENTENCE_END = re.compile(r"[.!?]")
 
 # 🔴 TWO-WAY, and the VALUE is the count. A per-file boolean cannot see a file
 # that drops one of its two mandates, which is the SHRINK half of the docstring.
@@ -359,24 +387,59 @@ def _skill_bodies() -> dict[str, str]:
     }
 
 
-def _occurrences(text: str) -> list[re.Match[str]]:
-    """Matches over whitespace-normalised text, so a reflow is not a change.
+class _Hit(NamedTuple):
+    """One mandate, located well enough to name in a failure message.
 
-    An occurrence carrying a negative-example marker within `_MARKER_WINDOW`
-    characters before it is dropped: it is prose ABOUT the wrong spelling, not a
-    mandate to use it.
+    🔴 CARRYING `synced` AND `sep` RATHER THAN A RAW MATCH IS THE POINT. The
+    previous version handed callers a `re.Match` and expected each to re-derive
+    the surrounding text to answer its own question — which is how "is `m.start()`
+    an offset into the same string you are slicing?" became a question anyone had
+    to ask (round 2 checked it; it was fine, and it should not have been askable).
+    Each property is decided HERE, against the paragraph the match came from, and
+    a caller can only read the answer.
     """
-    normalised = " ".join(text.split())
-    out = []
-    for m in _VALIDATE_RE.finditer(normalised):
-        window = normalised[max(0, m.start() - _MARKER_WINDOW):m.start()]
-        if any(marker in window for marker in _NEGATIVE_MARKERS):
+
+    para: int       # index of the paragraph it was found in
+    offset: int     # offset within that paragraph's normalised text
+    sep: str        # "-" = the devrc writer, " " = the packaged client
+    synced: bool    # does it carry the load-bearing `cairn sync && ` prefix
+
+
+def _occurrences(text: str) -> list[_Hit]:
+    """Mandates in `text`, paragraph by paragraph, negative examples removed.
+
+    Normalisation is PER PARAGRAPH, not whole-document: a reflow rewraps within a
+    paragraph, so this keeps a reflow from reading as a spelling change (the
+    round-0 false positive) WITHOUT letting a heading or a previous paragraph sit
+    adjacent to a mandate (round 2 finding N-3).
+    """
+    out: list[_Hit] = []
+    for i, para in enumerate(re.split(r"\n\s*\n", text)):
+        normalised = " ".join(para.split())
+        if not normalised:
             continue
-        out.append(m)
+        for m in _VALIDATE_RE.finditer(normalised):
+            window = normalised[max(0, m.start() - _MARKER_WINDOW):m.start()]
+            # A marker only disclaims what FOLLOWS it in the same sentence. Once a
+            # sentence has ended, the next clause is a fresh instruction. Measure
+            # from the CLOSEST marker, not the first: an early marker whose
+            # sentence has since ended must not decide a later one's case.
+            nearest = max(
+                (window.rfind(mk) for mk in _NEGATIVE_MARKERS if mk in window),
+                default=-1,
+            )
+            if nearest >= 0 and not _SENTENCE_END.search(window[nearest:]):
+                continue
+            out.append(_Hit(
+                para=i,
+                offset=m.start(),
+                sep=m.group("sep"),
+                synced=normalised[:m.start()].endswith(_SYNC_PREFIX),
+            ))
     return out
 
 
-def _naming_skills() -> dict[str, list[re.Match[str]]]:
+def _naming_skills() -> dict[str, list[_Hit]]:
     hits = {name: _occurrences(body) for name, body in _skill_bodies().items()}
     return {name: ms for name, ms in hits.items() if ms}
 
@@ -438,15 +501,13 @@ def test_every_post_write_occurrence_carries_the_load_bearing_sync_prefix(skill:
     when it could not refresh even though a cache survived, so a failed sync SKIPS
     the validate rather than validating stale bytes under a green verdict.
     """
-    body = _skill_bodies()[skill]
-    normalised = " ".join(body.split())
     stray = [
-        m.start() for m in _occurrences(body)
-        if not normalised[:m.start()].endswith(_SYNC_PREFIX)
+        f"paragraph {h.para}, offset {h.offset}"
+        for h in _occurrences(_skill_bodies()[skill]) if not h.synced
     ]
     assert not stray, (
-        f"{skill} invokes the write-protocol check at normalised offset(s) "
-        f"{stray} WITHOUT the load-bearing {_SYNC_PREFIX!r} prefix. An unsynced "
+        f"{skill} invokes the write-protocol check at {stray} "
+        f"WITHOUT the load-bearing {_SYNC_PREFIX!r} prefix. An unsynced "
         f"validate parses the PRE-WRITE bytes and passes silently. The mandated "
         f"spelling is {POST_WRITE_CHECK!r}. (If this is prose ABOUT the wrong "
         f"spelling rather than a mandate, mark it: one of {_NEGATIVE_MARKERS} "
@@ -473,8 +534,8 @@ def test_no_skill_spells_the_check_with_the_PACKAGED_client() -> None:
     in prose without tripping it.
     """
     wrong = sorted(
-        name for name, ms in _naming_skills().items()
-        if any(m.group("sep") == " " for m in ms)
+        name for name, hits in _naming_skills().items()
+        if any(h.sep == " " for h in hits)
     )
     assert not wrong, (
         f"SKILL.md file(s) {wrong} invoke the write-protocol check with the "

@@ -168,9 +168,15 @@ cairn-validate --validate <a-file-on-disk>       # a scratch file BEFORE you sen
 🔴 **`cairn-validate` IS NOT `cairn validate`** — two binaries, one of which runs these
 checks. `cairn-validate` launches this writer. After a host's `home-manager switch`,
 `~/.local/bin/cairn` is the pinned OSS package, whose `validate` runs the READER's resolver:
-measured on one live scope, both at the locked rev, it writes **0 B to stdout** (77 B of
-banner on stderr) and exits 0, where this writer prints **5,766 B of stdout** with all three
-blocks below. Both "green"; one is empty on the stream you read. ⚠ Exit codes differ too —
+measured 2026-09-17 on scope `devrc`, both at the locked rev, it writes **55 B to stdout**
+— one summary line counting how many of the scope's entries parse and how many are
+malformed, plus a 76 B state banner on stderr — and exits 0, where this writer prints
+**6,677 B of stdout** with all three blocks below. Both "green"; only one says what was
+lost. ⚠ **An earlier form of this paragraph said 0 B / 5,766 B, and that is now STALE** —
+the 0 was true before the pinned rev added an unconditional summary line to `cmd_validate`,
+precisely so a clean scope would stop being byte-identical to a validate that parsed
+nothing. The discriminator is WHAT each reports, not whether either is silent; do not
+re-derive the 0. ⚠ Exit codes differ too —
 writer **3** on a malformed entry, packaged client **5** (`EXIT_CORRUPT`; its `3` is
 `EXIT_UNREACHABLE_NO_CACHE`).
 
