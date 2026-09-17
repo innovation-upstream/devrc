@@ -317,32 +317,41 @@ _VALIDATE_RE = re.compile(
     r"--scope(?:=|\s)\s*(?P<val>[^\s`]+)"
 )
 
-# 🔴 A NEGATIVE EXAMPLE IS NOT A MANDATE. Without this, these two files became
-# unable to document the bare form as the thing NOT to do — writing "❌ Never run
-# `cairn-validate --scope <scope>` on its own" failed property (3) with a message
-# asserting the file is wrong, while the prose was saying exactly what the guard
-# means. Same remedy and same shape as `_unmarked_retractions` in
-# `test_subsystem_store_api.py`, which this file's own docstring already cites: a
-# marker within a short window exempts the quotation.
+# 🔴 A NEGATIVE EXAMPLE IS NOT A MANDATE, AND THE EXEMPTION IS AN EXPLICIT
+# SENTINEL RATHER THAN A GUESS ABOUT PROSE. Without any exemption these files
+# became unable to document the bare form as the thing NOT to do: writing the
+# counter-example failed property (3) with a message asserting the file was
+# wrong, while the prose was saying exactly what the guard means.
 #
-# 🔴 IT IS A WALK SURFACE, SO IT IS BOUNDED THREE WAYS — round 2 finding N-3
-# demonstrated all three escapes against the unbounded first version:
-#   * SAME PARAGRAPH. The scan is paragraph-scoped, so a `## ❌ Common mistakes`
-#     HEADING can no longer silence the first mandate of the section beneath it.
-#     Whole-document normalisation had erased the paragraph break and made them
-#     adjacent. Paragraph scope is also the right unit for reflow-immunity: a
-#     reflow rewraps WITHIN a paragraph, which is exactly what stays normalised.
-#   * NO SENTENCE TERMINATOR between the marker and the match. "❌ Do not skip it.
-#     Run `cairn sync && cairn validate --scope <scope>`" is a POSITIVE mandate
-#     wearing a marker, and it silenced property (4) — the packaged client
-#     mandated, guard green.
-#   * the window, unchanged at 60, matching `_unmarked_retractions`.
+# 🔴 THE FIRST TWO ATTEMPTS SNIFFED FOR WORDS — `❌`, `Never run`, `NOT:` — WITHIN
+# A WINDOW, AND TWO CONSECUTIVE AUDIT ROUNDS FOUND HOLES IN IT. Round 2 found
+# three (a heading silencing the section beneath it, a marker in the previous
+# paragraph, and `❌ Do not skip it. Run <the packaged client>` — a POSITIVE
+# mandate wearing a marker). Round 3 found three more in the fix for those: any
+# non-period clause joiner walked it (`— run …`, `: run …`), a tight list item
+# leaked the marker across a bullet boundary, and `e.g.` or a version number
+# between marker and command produced a FALSE POSITIVE on a legitimate
+# counter-example. Each fix was a narrower guess about English.
+#
+# `claude/RULES.md`: *"Prefer deterministic/structural fixes over prompt-tuning,
+# prose instructions, or suffix/keyword heuristics."* So the heuristic is GONE.
+# A counter-example is marked by a sentinel that ordinary prose cannot produce
+# and that a human never writes by accident:
+#
+#     <!-- not-a-mandate --> ❌ Never run `cairn-validate --scope <scope>` alone.
+#
+# It is an HTML comment, so it is invisible in rendered markdown and inert to
+# every reader; it must sit in the same block and within `_SENTINEL_WINDOW`
+# characters before the command. That closes all six escapes at once — there is
+# no word to spell around, no clause boundary to argue about, and no abbreviation
+# that can be mistaken for one — and it makes every exemption greppable, which a
+# keyword heuristic never was.
+#
 # The exemption deliberately applies to ALL FOUR properties, not only (3): a
-# marked negative example of the WRONG BINARY is prose these skills want to be
+# marked counter-example of the WRONG BINARY is prose these skills want to be
 # able to write, and both already write its unparameterised cousin.
-_NEGATIVE_MARKERS = ("❌", "NOT:", "Never run", "never run", "do NOT run")
-_MARKER_WINDOW = 60
-_SENTENCE_END = re.compile(r"[.!?]")
+_NOT_A_MANDATE = "<!-- not-a-mandate -->"
+_SENTINEL_WINDOW = 120
 
 # 🔴 TWO-WAY, and the VALUE is the count. A per-file boolean cannot see a file
 # that drops one of its two mandates, which is the SHRINK half of the docstring.
@@ -395,43 +404,42 @@ class _Hit(NamedTuple):
     the surrounding text to answer its own question — which is how "is `m.start()`
     an offset into the same string you are slicing?" became a question anyone had
     to ask (round 2 checked it; it was fine, and it should not have been askable).
-    Each property is decided HERE, against the paragraph the match came from, and
+    Each property is decided HERE, against the block the match came from, and
     a caller can only read the answer.
     """
 
-    para: int       # index of the paragraph it was found in
-    offset: int     # offset within that paragraph's normalised text
+    block: int      # index of the block it was found in
+    offset: int     # offset within that block's normalised text
     sep: str        # "-" = the devrc writer, " " = the packaged client
     synced: bool    # does it carry the load-bearing `cairn sync && ` prefix
 
 
-def _occurrences(text: str) -> list[_Hit]:
-    """Mandates in `text`, paragraph by paragraph, negative examples removed.
+# A BLOCK is the unit the sentinel must share with the command it disclaims.
+# Blank lines separate blocks, and so does the start of a list item, a table row
+# or a heading: round 3 finding F3 showed a sentinel in one tight bullet leaking
+# onto the next, which is the shape markdown uses most.
+_BLOCK_BREAK = re.compile(r"\n\s*\n|\n(?=\s*(?:[-*+]\s|\d+\.\s|\||#))")
 
-    Normalisation is PER PARAGRAPH, not whole-document: a reflow rewraps within a
-    paragraph, so this keeps a reflow from reading as a spelling change (the
-    round-0 false positive) WITHOUT letting a heading or a previous paragraph sit
-    adjacent to a mandate (round 2 finding N-3).
+
+def _occurrences(text: str) -> list[_Hit]:
+    """Mandates in `text`, block by block, sentinel-marked counter-examples removed.
+
+    Normalisation is PER BLOCK, not whole-document: a reflow rewraps WITHIN a
+    block, so this keeps a reflow from reading as a spelling change (the round-0
+    false positive) without letting a heading, a previous paragraph or a
+    neighbouring bullet sit adjacent to a mandate (round 2 N-3, round 3 F3).
     """
     out: list[_Hit] = []
-    for i, para in enumerate(re.split(r"\n\s*\n", text)):
-        normalised = " ".join(para.split())
+    for i, block in enumerate(_BLOCK_BREAK.split(text)):
+        normalised = " ".join(block.split())
         if not normalised:
             continue
         for m in _VALIDATE_RE.finditer(normalised):
-            window = normalised[max(0, m.start() - _MARKER_WINDOW):m.start()]
-            # A marker only disclaims what FOLLOWS it in the same sentence. Once a
-            # sentence has ended, the next clause is a fresh instruction. Measure
-            # from the CLOSEST marker, not the first: an early marker whose
-            # sentence has since ended must not decide a later one's case.
-            nearest = max(
-                (window.rfind(mk) for mk in _NEGATIVE_MARKERS if mk in window),
-                default=-1,
-            )
-            if nearest >= 0 and not _SENTENCE_END.search(window[nearest:]):
+            window = normalised[max(0, m.start() - _SENTINEL_WINDOW):m.start()]
+            if _NOT_A_MANDATE in window:
                 continue
             out.append(_Hit(
-                para=i,
+                block=i,
                 offset=m.start(),
                 sep=m.group("sep"),
                 synced=normalised[:m.start()].endswith(_SYNC_PREFIX),
@@ -502,16 +510,17 @@ def test_every_post_write_occurrence_carries_the_load_bearing_sync_prefix(skill:
     the validate rather than validating stale bytes under a green verdict.
     """
     stray = [
-        f"paragraph {h.para}, offset {h.offset}"
+        f"block {h.block}, offset {h.offset}"
         for h in _occurrences(_skill_bodies()[skill]) if not h.synced
     ]
     assert not stray, (
         f"{skill} invokes the write-protocol check at {stray} "
         f"WITHOUT the load-bearing {_SYNC_PREFIX!r} prefix. An unsynced "
         f"validate parses the PRE-WRITE bytes and passes silently. The mandated "
-        f"spelling is {POST_WRITE_CHECK!r}. (If this is prose ABOUT the wrong "
-        f"spelling rather than a mandate, mark it: one of {_NEGATIVE_MARKERS} "
-        f"within {_MARKER_WINDOW} characters before it exempts the quotation.)"
+        f"spelling is {POST_WRITE_CHECK!r}. (If this is a COUNTER-EXAMPLE "
+        f"rather than a mandate, mark it: the literal sentinel {_NOT_A_MANDATE!r} "
+        f"in the SAME block and within {_SENTINEL_WINDOW} characters before it "
+        f"exempts the command. Nothing else exempts anything.)"
     )
 
 
@@ -543,3 +552,127 @@ def test_no_skill_spells_the_check_with_the_PACKAGED_client() -> None:
         f"(`cairn-validate`, hyphen). The package does not run the write-protocol "
         f"check and its exit codes differ; use {POST_WRITE_CHECK!r}."
     )
+
+
+# ── `_occurrences` DECIDES EVERYTHING ABOVE, SO IT IS TESTED DIRECTLY ────────
+# 🔴 THE FOUR TESTS ABOVE RUN AGAINST THE LIVE CORPUS, AND THE LIVE CORPUS DOES
+# NOT EXERCISE THE DECISION LOGIC. Round 3 finding F1, measured: the block split,
+# the sentinel, the window and the `cairn` tempering could EACH be deleted and all
+# sixteen tests stayed GREEN — seven surviving mutants against a positive control
+# that did go red. The cause is simple and was invisible from the corpus side: no
+# governed file contains a sentinel, so that whole branch never executed, and the
+# three ledgered files happen not to contain the shapes the split exists to
+# separate. A guard reading as coverage while providing none is the exact defect
+# this PR exists to oppose, so the decision logic gets fixtures of its own.
+#
+# Every case below is a REGRESSION test — each string is a shape that was
+# measured to walk some earlier version of this guard during the #1738 audit
+# ladder, named by its finding. They are synthetic on purpose: the corpus cannot
+# be relied on to keep containing them.
+_MANDATE = "cairn sync && cairn-validate --scope <scope>"
+
+
+class TestTheOccurrenceScanner:
+    """Direct fixtures for `_occurrences`, one per constraint it implements."""
+
+    def test_a_plain_mandate_is_found(self) -> None:
+        """POSITIVE CONTROL. Without this, every 'not found' below is
+        indistinguishable from a scanner wired to nothing."""
+        hits = _occurrences(f"After a write, run `{_MANDATE}`.")
+        assert len(hits) == 1
+        assert hits[0].sep == "-" and hits[0].synced is True
+
+    def test_a_bare_mandate_is_found_and_reported_unsynced(self) -> None:
+        hits = _occurrences("Run `cairn-validate --scope <scope>`.")
+        assert len(hits) == 1 and hits[0].synced is False
+
+    @pytest.mark.parametrize("spelling", [
+        "cairn-validate --scope=<scope>",          # round 1 F-1, M10
+        "cairn-validate --scope devrc",            # round 1 F-1, M11
+        "cairn-validate --scope <scope1>",         # round 1 F-1, M13
+        "cairn-validate --store X --scope <scope>",  # round 1 F-1, M14
+        "cairn validate --scope=<scope>",          # round 1 F-1, M12 (packaged)
+    ])
+    def test_every_spelling_of_the_invocation_is_seen(self, spelling: str) -> None:
+        """🔴 Round 1 F-1. The regex once required a literal ` --scope <x>`, so all
+        five of these walked it while mandating the very command it polices."""
+        assert len(_occurrences(f"Run `{spelling}`.")) == 1
+
+    def test_a_bare_binary_mention_is_NOT_a_mandate(self) -> None:
+        """The other half of F-1: widening to `cairn[- ]validate` would pull in
+        nine legitimate mentions in the governed files. Requiring `--scope` is
+        what separates naming the binary from invoking it."""
+        assert _occurrences("`cairn-validate` IS NOT `cairn validate`.") == []
+        assert _occurrences("The fix is `cairn-validate --validate <path>`.") == []
+
+    def test_the_gap_between_binary_and_scope_is_bounded(self) -> None:
+        """40 characters. A longer invocation is a deliberate miss, not an
+        oversight — stated here so the bound is a decision and not an accident."""
+        assert len(_occurrences(f"`cairn-validate {'x' * 39} --scope <s>`")) == 0
+        assert len(_occurrences(f"`cairn-validate {'x' * 20} --scope <s>`")) == 1
+
+    def test_the_gap_cannot_cross_another_cairn(self) -> None:
+        """🔴 Round 3 N-2. Inside a fence there are no backticks to stop the gap,
+        so two commands collapsed into ONE match whose `sep` was the HYPHEN —
+        property (4) green while the PACKAGED client carried the `--scope`."""
+        hits = _occurrences(
+            "```\ncairn-validate --validate F\ncairn validate --scope <scope>\n```"
+        )
+        assert len(hits) == 1
+        assert hits[0].sep == " ", "the packaged client must be the one reported"
+
+    def test_the_gap_cannot_cross_a_backtick(self) -> None:
+        assert _occurrences("`cairn-validate` and separately `--scope <scope>`") == []
+
+    def test_a_reflow_of_correct_prose_is_not_a_change(self) -> None:
+        """🔴 Round 0 M3. This is why matching is normalised at all; a markdown
+        paragraph gets rewrapped constantly."""
+        flat = f"the mandated post-write check is `{_MANDATE}` — the SAME spelling"
+        wrapped = f"the mandated post-write check is `cairn sync &&\ncairn-validate --scope <scope>` — the SAME spelling"
+        assert len(_occurrences(flat)) == len(_occurrences(wrapped)) == 1
+        assert _occurrences(flat)[0].synced == _occurrences(wrapped)[0].synced is True
+
+    # ── the sentinel ────────────────────────────────────────────────────────
+    def test_the_sentinel_exempts_a_counter_example(self) -> None:
+        assert _occurrences(
+            f"{_NOT_A_MANDATE} ❌ Never run `cairn-validate --scope <scope>` alone."
+        ) == []
+
+    def test_WORDS_ALONE_DO_NOT_EXEMPT(self) -> None:
+        """🔴 THE WHOLE REASON THE SENTINEL EXISTS. Two audit rounds found six
+        ways to walk a keyword heuristic; these are four of them, and every one
+        must now be SEEN. `claude/RULES.md`: prefer a deterministic fix."""
+        for prose in (
+            "❌ Never run `cairn-validate --scope <scope>` alone.",        # no sentinel
+            "❌ Do not skip it. Run `cairn validate --scope <scope>`.",     # round 2 N3a
+            "❌ Never run it bare — run `cairn validate --scope <scope>`",  # round 3 F2
+            "❌ Never run e.g. `cairn-validate --scope <scope>` alone.",    # round 3 F4
+        ):
+            assert len(_occurrences(prose)) == 1, f"walked by: {prose!r}"
+
+    def test_the_sentinel_does_not_reach_across_a_blank_line(self) -> None:
+        """🔴 Round 2 N3c."""
+        assert len(_occurrences(
+            f"{_NOT_A_MANDATE} ❌ never do this.\n\nAfter a write: `cairn-validate --scope <scope>`"
+        )) == 1
+
+    def test_the_sentinel_does_not_reach_across_a_heading(self) -> None:
+        """🔴 Round 2 N3b."""
+        assert len(_occurrences(
+            f"{_NOT_A_MANDATE} bad.\n## Common mistakes\nRun `cairn-validate --scope <scope>`."
+        )) == 1
+
+    def test_the_sentinel_does_not_reach_across_a_tight_list_item(self) -> None:
+        """🔴 Round 3 F3 — the shape markdown uses most, and the one a
+        paragraph-only split could not separate."""
+        assert len(_occurrences(
+            f"- {_NOT_A_MANDATE} never the bare form\n"
+            f"- Always run `cairn validate --scope <scope>`"
+        )) == 1
+
+    def test_the_sentinel_window_is_TIGHT(self) -> None:
+        """A sentinel far enough away is not about this command."""
+        near = f"{_NOT_A_MANDATE} {'x' * 40} `cairn-validate --scope <s>`"
+        far = f"{_NOT_A_MANDATE} {'x' * 400} `cairn-validate --scope <s>`"
+        assert _occurrences(near) == []
+        assert len(_occurrences(far)) == 1
