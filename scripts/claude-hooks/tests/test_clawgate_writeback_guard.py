@@ -1051,8 +1051,9 @@ def test_the_ladder_costs_EXACTLY_ONE_forced_continuation(home, capsys):
     were wrong in turn: it said two and delivered three (the third rung's
     `additionalContext` went into the CLI's `blockingErrors` array exactly like a
     block), and then it said two and MEANT two, which the corpus showed was one block
-    too many — 31 of the 32 fire-2 ladders that ever occurred punished a session for
-    complying with fire 1. Counted here off the emitted JSON, over a 5-Stop run whose
+    too many — 35 of the 37 fire-2 ladders in the corpus punished a session for
+    complying with fire 1 (unit: (transcript file, task id)). Counted here off the
+    emitted JSON, over a 5-Stop run whose
     length equals neither MAX_BLOCKS (1) nor MAX_FIRES (3)."""
     seed()
     forced = 0
@@ -1859,7 +1860,7 @@ def test_MULTI_TURN_work_fires_once_per_turn_and_then_STOPS(home, capsys):
     turns: block, systemMessage, systemMessage, silence. Driven with 4, which is
     neither MAX_BLOCKS (1) nor MAX_FIRES (3).
 
-    🔴 THIS IS THE SHAPE THAT WAS MEASURED WRONG 31 TIMES OUT OF 32 — a session that
+    🔴 THIS IS THE SHAPE THAT WAS MEASURED WRONG 35 TIMES OUT OF 37 — a session that
     COMPLIED (it wrote the Done comment) and then kept working, outdating its own
     comment by doing so. It used to cost TWO forced continuations; it now costs one,
     and every later turn reaches the operator without re-querying the model. The
@@ -3344,24 +3345,38 @@ def test_authored_NEVER_climbs_to_a_block_however_many_stops(home):
 # =========================================================================== #
 # THE ONE-RUNG LADDER — MAX_BLOCKS = 1
 #
-# 🔴 WHAT THIS SECTION IS AND IS NOT. Exactly ONE test here is a REGRESSION test —
-# `test_REGRESSION_a_COMPLYING_session_is_not_blocked_a_SECOND_time` — and it is RED
-# on pre-change code, where the second Stop returned `decision: "block"`. Everything
-# else is an INVARIANT GUARD: fire 1, the could-not-measure ladder and the dismiss
-# escape all behaved this way before the change too, and are pinned here because
-# lowering a block cap is exactly the kind of edit that quietly takes a rung with it.
-# Labelled rather than counted as regression coverage, per RULES.md.
+# 🔴 WHAT THIS SECTION IS AND IS NOT — MEASURED AGAINST THE BASE HOOK, NOT ASSERTED.
+# This comment used to say exactly ONE test here was a regression test and that
+# everything else "behaved this way before the change too". That justifying clause was
+# FALSE of fire 2, which is the new behaviour. MEASURED by running this file's seven
+# tests against the base hook (`b34cdbe0`, MAX_BLOCKS = 2) — THREE go red:
+#
+#   test_REGRESSION_a_COMPLYING_session_is_not_blocked_a_SECOND_time   RED at base
+#   test_the_SECOND_Stop_still_REACHES_the_operator_as_a_systemMessage RED at base
+#   test_the_notice_rung_is_reached_at_fire_2_AND_fire_3_then_silence  RED at base
+#
+# All three pin fire 2, which at base was a second `decision: "block"`. The remaining
+# four ARE invariant guards — fire 1, its negative control, the could-not-measure
+# ladder and the dismiss escape all behaved this way before the change, and are pinned
+# here because lowering a block cap is exactly the kind of edit that quietly takes a
+# rung with it. Labelled rather than counted as regression coverage, per RULES.md; the
+# old wording under-claimed coverage, which is the safe direction and still wrong.
 #
 # 🔴 THE TRADE THIS SECTION ENCODES, STATED SO NO READER MISTAKES IT FOR A PURE WIN.
-# Rung 2 fired 32 times in the whole corpus: 31 re-arms (a write-back landed between
-# fire 1 and fire 2 and later work outdated it) and 1 legitimate — and that 1 WORKED,
-# producing both a comment and a status flip on task 525. The lost case degrades to a
-# `systemMessage` the operator sees and the model does not; whether a notice alone
-# would have produced the same write-back is NOT MEASURABLE and nothing here asserts
-# that it would.
+# Rung 2 fired 37 times in the corpus — unit `(transcript file, task id)`, subagent
+# transcripts included: 35 re-arms (a write-back landed between fire 1 and fire 2 and
+# later work outdated it) and 2 legitimate — and BOTH of those WORKED, producing a
+# write-back after fire 2 on tasks 430 and 525. (The "31 wrong for 1 right" this
+# section used to quote came from a scan that captured only the first task id in a
+# multi-task blocking message; see the module docstring of
+# `claudedocs/clawgate-writeback-rung2-corpus-scan.py`.) The lost case degrades to a
+# `systemMessage` the operator sees and the model does not — for at most two more
+# turns, since MAX_FIRES caps notices as well as blocks — and whether a notice alone
+# would have produced the same write-back is NOT MEASURABLE; nothing here asserts that
+# it would.
 # =========================================================================== #
 #: A comment that EXISTS but that later work has OUTDATED — the re-arm shape, and the
-#: one that accounts for 31 of the 32 fire-2 ladders in the corpus.
+#: one that accounts for 35 of the 37 fire-2 ladders in the corpus.
 #:
 #: 🔴 TWO CONSTANTS, BECAUSE THE TWO HARNESSES PUT "the last work event" IN DIFFERENT
 #: PLACES AND ONE VALUE CANNOT SERVE BOTH. The unit-level fixtures seed work at a FIXED
@@ -3389,7 +3404,7 @@ def test_REGRESSION_a_COMPLYING_session_is_not_blocked_a_SECOND_time(home, tmp_p
 
     At pre-change code the second Stop returned `decision: "block"` — a session was
     forced to continue for having obeyed the first block and then kept working. That
-    is 31 of the 32 fire-2 ladders in the corpus. Here the second Stop must NOT force
+    is 35 of the 37 fire-2 ladders in the corpus. Here the second Stop must NOT force
     a continuation.
 
     The board fixture carries a `claude-code` comment the whole time; it is the LAST
