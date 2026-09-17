@@ -64,11 +64,15 @@ down" is reporting the same observable as "the ritual was followed".
 ESCALATION LADDER — per session, per task id
 ---------------------------------------------
     fire 1  ->  decision: block      (FORCED CONTINUATION; `reason` reaches the model)
-    fire 2  ->  decision: block      (FORCED CONTINUATION)
+    fire 2  ->  decision: block      (FORCED CONTINUATION) — UNLESS a `claude-code`
+                comment for THIS task id has landed since fire 1, in which case it is
+                SILENT. See "RUNG 2 IS CONDITIONAL" below for the measurement.
     fire 3  ->  systemMessage        (the turn ENDS; operator sees it, model does not)
     fire 4+ ->  silent
 
-    TRUE COST of a measured missing write-back: exactly TWO forced continuations.
+    TRUE COST of a measured missing write-back: at most TWO forced continuations, and
+    exactly ONE whenever the model answered the first block — which is what 31 of the
+    32 measured second blocks were.
     TRUE COST of a "could not measure" notice:  ZERO forced continuations, and it
     runs on its OWN counter (`unknown-<id>`), so a board that is down for the first
     Stops cannot spend the block budget a genuinely missing write-back needs later.
@@ -124,19 +128,55 @@ size; the reads were done with plain `bytes.find` in Python.)
         let Kt = wue(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP, 8);
         if (Kt > 0 && yo > Kt) … "A hook blocked the turn from ending N consecutive
         times — overriding and ending turn."
-    Our MAX_BLOCKS = 2 is deliberately far stricter than that 8. A guard that has to
-    be overridden by the harness has already lost the operator. 🔴 That cap counts
-    `additionalContext` rungs TOO — which is why fire 3 is a `systemMessage`.
+    Our MAX_BLOCKS = 2 is deliberately far stricter than that 8, and rung 2 of those
+    two is itself conditional (below). A guard that has to be overridden by the
+    harness has already lost the operator. 🔴 That cap counts `additionalContext`
+    rungs TOO — which is why fire 3 is a `systemMessage`.
 
 🔴 THERE IS DELIBERATELY NO `stop_hook_active` GATE, and that is the one place this
 hook diverges from the CLI's own advice ("check stop_hook_active and return success
 while it's true"). That advice exists to stop an unbounded block loop; the ladder
-above bounds it at 2 per task instead, and the SECOND block is the whole point — it
-is what catches a turn that acknowledged the first block and still stopped without
-writing. Skipping the second Stop would make fire 2 unreachable in the only shape it
-matters. The interaction with MAX_TASKS is named rather than hidden: several tasks
-each blocking twice can in principle stack toward the CLI's 8, at which point the
-CLI ends the turn with a warning — a graceful ceiling, not a wedge.
+above bounds it at 2 per task instead. Fire 2 still has to be REACHED — that is what
+the absence of the gate buys — because reaching it is what lets a LIVE read decide
+whether it should fire at all (next section). The interaction with MAX_TASKS is named
+rather than hidden: several tasks each blocking twice can in principle stack toward
+the CLI's 8, at which point the CLI ends the turn with a warning — a graceful
+ceiling, not a wedge.
+
+🔴 RUNG 2 IS CONDITIONAL, AND THE ARGUMENT THAT USED TO STAND HERE IS RETIRED BY
+MEASUREMENT. This passage read, in 🔴: "the SECOND block is the whole point — it is
+what catches a turn that acknowledged the first block and still stopped without
+writing." That shape is real. It happened ONCE IN 32. Measured over the whole
+transcript corpus, 170 blocking errors, split by fire ordinal:
+
+    fire 1 — 138 blocks; 43.5% of them at sessions that had already commented
+    fire 2 —  32 blocks; 100% at sessions that had already commented, and
+              31 of those 32 had a comment land BETWEEN fire 1 and fire 2
+
+That second row is the whole finding: the model COMPLIED with the first block, wrote
+the comment, kept working — and the new work event moved the anchor past the comment
+it had just written, so the card read "missing" again and it was blocked a second
+time FOR COMPLYING. Rung 2 was firing 31 wrong for 1 right.
+
+So fire 2 now blocks only when NO `claude-code` comment for THAT TASK ID has arrived
+since fire 1 — which is precisely the one-in-32 case the old sentence claimed to be
+catching, and it still fires there. `blocked-<id>` records when fire 1 fired;
+`comment_since_block` scans the SAME live payload `writeback_state` has just read, so
+the suppression is a live measurement like everything else in this hook and costs no
+extra subprocess. It is keyed on the task id because the payload it reads IS that
+task's — a comment on a neighbouring card cannot reach it.
+
+🔴 FIRE 1 IS UNTOUCHED, AND THAT IS WHY THIS IS A NOISE CUT AND NOT A WEAKENING. A
+genuinely missing write-back is still caught by the first block, every time, on every
+path. What this removes is 31 of 170 blocks (18.2%) that punished compliance, with
+ZERO true misses newly let through: a card that never receives a comment has no
+comment to suppress with, so it still blocks twice exactly as it did before.
+
+🔴 IT IS NOT RE-ANCHORED ON THE STATUS FLIP, and that was investigated rather than
+assumed. Keying the guard on `status` instead of the comment is BACKWARDS: a flip to
+`ready_for_review`/`complete` is ALREADY satisfying, via the CLOSED_STATUSES
+short-circuit at the top of `writeback_state`, so anchoring on it would delete the
+comment arm and fire roughly 60x more.
 
 🔴 THE SUBAGENT RULE IS ASYMMETRIC: A SUBAGENT'S **READ** DOES NOT ARM THE PARENT,
 A SUBAGENT'S **WORK** DOES COUNT AS THE SESSION'S WORK. Two rounds of this file got
@@ -220,8 +260,11 @@ at most TWO forced continuations and one `systemMessage`, then silence forever f
 that task in that session. A `Done` comment written within CLOCK_SKEW_ALLOWANCE_SECS
 of the last work event already satisfies it, so the shape that actually costs is
 "comment, then keep working for more than the allowance, then stop" — which is a turn
-whose write-back genuinely is stale. Pinned by tests, so the noise is measured rather
-than discovered in production.
+whose write-back genuinely is stale. 🔴 THAT SHAPE IS ALSO EXACTLY THE ONE RUNG 2 NO
+LONGER CHARGES FOR: it is a comment that landed after fire 1, so the second block is
+suppressed and the real cost of a complying multi-turn session is ONE forced
+continuation, not two. Pinned by tests, so the noise is measured rather than
+discovered in production.
 
 🔴 HOT PATH. PostToolUse fires after EVERY tool call of every session, and
 agent-ledger-hook.py already costs ~21 ms there. The fast path is: one dict read for
@@ -445,6 +488,11 @@ LIVE_AGENT_STATUSES = frozenset(("pending", "provisioning", "running"))
 
 # Per session, per task id. See the ladder in the module docstring; both are read
 # out of the CLI bundle's own cap of 8, which this is deliberately stricter than.
+#
+# 🔴 MAX_BLOCKS = 2 IS A CEILING, NOT A SCHEDULE. `escalate` still maps fires 1 and 2
+# to "block", but `stop_decision` withholds the SECOND one whenever a `claude-code`
+# comment for that task landed after the first — 31 of 32 measured second blocks were
+# that case. See "RUNG 2 IS CONDITIONAL" in the module docstring.
 MAX_BLOCKS = 2
 MAX_FIRES = 3
 
@@ -593,6 +641,20 @@ STATE_WORK = "work"
 # MAX_TASKS census counts only those too — so a tombstone can neither be mistaken for
 # a tracked task nor consume a tracking slot. See `dismiss` for the incident.
 DISMISSED_PREFIX = "dismissed-"
+
+# 🔴 THE FIRST-BLOCK STAMP. Its own prefix, for the same reason DISMISSED_PREFIX has
+# one: `tracked_ids` takes only names starting `read-` and `record_read`'s MAX_TASKS
+# census counts only those, so this can neither be mistaken for a tracked task nor
+# consume a tracking slot. Deliberately outside `read-`/`fires-`/`unknown-`/
+# `dismissed-`/`.tmp-read-` too.
+#
+# 🔴 `dismiss` does NOT remove it, and that is not an oversight. A dismissal writes an
+# ABSOLUTE tombstone, so `record_read` refuses to re-arm the task and `tracked_ids`
+# never yields it again in that session — the stamp is unreachable from that moment on
+# and ages out with the session dir under `prune`'s existing TTL. Adding it to
+# `dismiss`'s removal list would change the `removed` set that `dismiss_report` prints
+# and that a test pins as a whole string, to delete a file nothing can read.
+BLOCKED_PREFIX = "blocked-"
 
 
 # --------------------------------------------------------------------------- #
@@ -857,6 +919,49 @@ def bump_fires(state_dir, task_id, kind="fires"):
     except Exception:
         pass
     return n
+
+
+def _blocked_path(state_dir, task_id):
+    return os.path.join(state_dir, "%s%d" % (BLOCKED_PREFIX, int(task_id)))
+
+
+def first_block_ts(state_dir, task_id):
+    """When this session's FIRST block for this task fired, or None.
+
+    None is the LOUD direction and it is the one the absent file produces: no first
+    block recorded means nothing can be suppressed, so the ladder behaves exactly as
+    it did before this stamp existed. A truncated or unwritable stamp therefore costs
+    a second block rather than silently disabling rung 2 — the same failing direction
+    `last_work_ts` takes, and the conservative one for a guard.
+    """
+    try:
+        with open(_blocked_path(state_dir, task_id)) as fh:
+            return fh.read().strip() or None
+    except Exception:                     # noqa: BLE001
+        return None
+
+
+def record_first_block(state_dir, task_id, now=None):
+    """Stamp the FIRST block emitted for this task. Returns whether it wrote.
+
+    Idempotent, exactly like `record_read` and for the same reason: the window rung 2
+    measures over starts at the FIRST block, so a later block must never move it. A
+    second block that moved the anchor forward would make the comment that answered
+    the first one look old, which is the bug this whole change exists to remove.
+
+    Best-effort — a stamp that cannot be written leaves `first_block_ts` at None, i.e.
+    at the pre-change behaviour, never at a silence the state cannot justify.
+    """
+    path = _blocked_path(state_dir, task_id)
+    if os.path.exists(path):
+        return False
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(now_iso(now))
+        return True
+    except Exception:                     # noqa: BLE001
+        return False
 
 
 def dismiss(state_dir, task_id, now=None):
@@ -1307,6 +1412,56 @@ def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
     return "missing"
 
 
+def comment_since_block(task, blocked_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS):
+    """Has a `claude-code` comment landed on THIS card since the FIRST block fired?
+
+    🔴 THE ONLY THING THAT RETIRES RUNG 2. Measured over the transcript corpus, 31 of
+    the 32 second blocks had a comment land between fire 1 and fire 2 — the model
+    complied, kept working, and the moving work anchor made the card read "missing"
+    again. This is what tells those apart from the one turn in 32 that acknowledged
+    the block and still stopped without writing.
+
+    🔴 IT IS KEYED ON THE TASK, NOT ON "ANY COMMENT", AND THAT IS STRUCTURAL RATHER
+    THAN ASSERTED. `task` is the payload `stop_decision` just fetched FOR THIS ID, so
+    a comment on a neighbouring card is not in this list at all and cannot reach this
+    function. Matching on "some comment somewhere since the block" is a real error —
+    it was made once while deriving the measurement above — and the way it is kept out
+    is that there is no second card's comments to confuse it with.
+
+    🔴 EVERY RESOLUTION RULE HERE MIRRORS `writeback_state`, deliberately: same author
+    allowlist, same retracted skip, same unparseable-`createdAt` -> satisfied, same
+    skew allowance (the stamp is THIS host's clock, `createdAt` is the SERVER's). Two
+    functions reading one comment list by two different rules is how a card ends up
+    "missing" and "answered" at once. The unparseable arm is not reachable THROUGH
+    `stop_decision` — such a comment makes `writeback_state` return "written" and the
+    task is skipped long before this runs — but disagreeing with the sibling function
+    on a payload neither caller produces today is a trap for whoever adds the second
+    caller, so it agrees instead.
+
+    🔴 FALSE IS THE LOUD DIRECTION. No stamp, an unparseable stamp, a payload this
+    hook cannot read, a comments field that is not a list — all leave the block
+    standing, i.e. at the behaviour that shipped before this existed.
+    """
+    since = parse_ts(blocked_ts)
+    if since is None:
+        return False
+    if not isinstance(task, dict):
+        return False
+    comments = task.get("comments")
+    if not isinstance(comments, list):
+        return False
+    cutoff = since - skew
+    for c in comments:
+        if not isinstance(c, dict) or c.get("author") != AGENT_AUTHOR:
+            continue
+        if c.get("retracted"):
+            continue                      # withdrawn: it is not an answer
+        ts = parse_ts(c.get("createdAt"))
+        if ts is None or ts >= cutoff:
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # The text the operator's model actually reads
 # --------------------------------------------------------------------------- #
@@ -1496,7 +1651,7 @@ def post_tool_use(data, now=None):
 # Stop
 # --------------------------------------------------------------------------- #
 def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
-                  clock=time.monotonic):
+                  clock=time.monotonic, now=None):
     """Pure-ish decision for a Stop payload -> (kind, text) with kind in
     {"silent", "notice", "block"}. Side effect: it bumps the per-task fire counters,
     which is what the ladder is made of.
@@ -1561,6 +1716,11 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
         if remaining <= 0:
             break
         err = "the board returned a task payload this hook could not read"
+        # Bound BEFORE the try so the rung-2 suppression below can never read an
+        # unbound name off a reader that raised. `None` is also the right VALUE there:
+        # `comment_since_block` refuses a non-dict, i.e. it does not suppress, which is
+        # the loud direction — though the "unknown" arm already `continue`s first.
+        task = None
         try:
             task = reader(tid, timeout=min(PER_TASK_TIMEOUT_SECS, remaining))
             state = writeback_state(task, first_read_ts, work_ts=worked_at,
@@ -1594,6 +1754,26 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
         rung = escalate(bump_fires(state_dir, tid))
         if rung == "silent":
             continue
+        if rung == "block":
+            # 🔴 RUNG 2 ONLY FIRES WHEN IT WAS NOT ANSWERED. `prior` is None on the
+            # FIRST block — nothing has been recorded yet — so fire 1 is untouched by
+            # every line here and a card that never receives a comment still blocks
+            # twice. What is withheld is the second block at a session that already
+            # did what the first block asked: 31 of 32 measured. See "RUNG 2 IS
+            # CONDITIONAL" in the module docstring for the corpus split.
+            #
+            # The counter was ALREADY bumped above and is deliberately not refunded.
+            # Spending it keeps the ladder bounded at MAX_FIRES per task, so a session
+            # whose work keeps outrunning its comments reaches the fire-3
+            # `systemMessage` and then silence, instead of re-measuring a suppressed
+            # rung 2 on every Stop for the rest of its life.
+            prior = first_block_ts(state_dir, tid)
+            if prior is not None and comment_since_block(task, prior):
+                continue
+            # AFTER the suppression check, so the stamp read above is always the
+            # FIRST block's. `record_first_block` is itself idempotent, so an emitted
+            # rung 2 cannot move the anchor either.
+            record_first_block(state_dir, tid, now=now)
         (blocks if rung == "block" else notices).append(
             missing_text(tid, first_read_ts, session_id))
 

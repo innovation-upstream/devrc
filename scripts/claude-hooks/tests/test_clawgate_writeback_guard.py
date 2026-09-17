@@ -1093,6 +1093,383 @@ def test_the_ladder_is_per_task_id_not_per_session(home):
 
 
 # =========================================================================== #
+# 9a. RUNG 2 IS CONDITIONAL — the second block is withheld once it was ANSWERED
+#
+# 🔴 THE REGRESSION THESE EXIST FOR. Measured over the whole transcript corpus: 170
+# blocking errors, of which fire 2 accounted for 32 — 100% at sessions that had
+# already commented, and 31 of the 32 had the comment land BETWEEN fire 1 and fire 2.
+# The model complied with the first block, kept working, and the moving work anchor
+# made the card read "missing" again, so it was blocked a second time FOR COMPLYING.
+# Rung 2 fired 31 wrong for 1 right.
+#
+# 🔴 EVERY INSTANT BELOW IS A PINNED LITERAL PAIR (RFC3339 string + epoch), never
+# computed from another constant or from `time.time()` — the same rule the file's
+# READ_TS/READ_EPOCH pair already follows, and for the same reason: a fixture derived
+# from the value under test cannot see a mutant that moves it, and a "now" would make
+# these pass or fail by the calendar. The pairing is itself asserted below.
+#
+# The spacing is deliberate and none of it sits on a boundary: every gap that matters
+# is 180 s or more against CLOCK_SKEW_ALLOWANCE_SECS = 120, and none is a whole
+# multiple of it, so no fixture here can pass by landing exactly on the step.
+#
+#   12:00 read  ->  12:07 work A  ->  12:09 BLOCK 1  ->  12:14 the answer comment
+#                                 ->  12:31 work B   ->  12:33 Stop 2
+# =========================================================================== #
+WORK_A_TS = "2026-08-15T12:07:00.000000Z"
+WORK_A_EPOCH = 1786795620.0
+BLOCK1_TS = "2026-08-15T12:09:00.000000Z"
+BLOCK1_EPOCH = 1786795740.0
+ANSWER_TS = "2026-08-15T12:14:00.000000Z"       # the comment that answers block 1
+ANSWER_EPOCH = 1786796040.0
+WORK_B_TS = "2026-08-15T12:31:00.000000Z"       # ...then the session kept working
+WORK_B_EPOCH = 1786797060.0
+STOP2_TS = "2026-08-15T12:33:00.000000Z"
+STOP2_EPOCH = 1786797180.0
+# A comment that predates block 1 by more than the skew allowance: it answers nothing.
+PRE_BLOCK_TS = "2026-08-15T12:04:00.000000Z"
+PRE_BLOCK_EPOCH = 1786795440.0
+# ...and one from before the card was even read, used where a stale comment has to be
+# present without being mistakable for an answer at ANY anchor in this section.
+STALE_TS = "2026-08-15T11:50:00.000000Z"
+STALE_EPOCH = 1786794600.0
+
+
+class ByTask:
+    """A live reader that answers DIFFERENTLY PER TASK ID.
+
+    🔴 The whole point of one of these tests is that a comment on card M must not
+    suppress a block on card N, and a `Reader` that returns one payload for every id
+    structurally cannot express that — it would hand card N card M's comments and the
+    test would "pass" against a bug it never built.
+    """
+
+    def __init__(self, by_id):
+        self.by_id, self.calls = by_id, []
+
+    def __call__(self, task_id, timeout=None):
+        self.calls.append((task_id, timeout))
+        return self.by_id[task_id]
+
+
+@pytest.mark.parametrize("iso,epoch", [
+    (WORK_A_TS, WORK_A_EPOCH), (BLOCK1_TS, BLOCK1_EPOCH),
+    (ANSWER_TS, ANSWER_EPOCH), (WORK_B_TS, WORK_B_EPOCH),
+    (STOP2_TS, STOP2_EPOCH), (PRE_BLOCK_TS, PRE_BLOCK_EPOCH),
+    (STALE_TS, STALE_EPOCH),
+])
+def test_the_instants_this_section_names_are_the_instants_it_uses(iso, epoch):
+    """The positive control on the fixtures themselves. Each pair is written by hand
+    twice — once as the string the board would emit, once as the epoch the state
+    writers take — and a typo in either half would silently move a fixture off the
+    ordering the tests below reason about while every one of them still passed."""
+    assert guard.parse_ts(iso) == epoch
+
+
+def _first_block(task_id=193, comments=()):
+    """Drive fire 1 for `task_id` and return the session dir. Fire 1 is the SUBJECT of
+    half these tests, so it is always driven through the real `stop_decision` rather
+    than by writing `blocked-<id>` by hand: a fixture that hand-stamped the anchor
+    could not see a change that stopped fire 1 from recording it."""
+    sd = seed(task_id=task_id, work_ts=WORK_A_EPOCH)
+    r = Reader(result=task(comments=comments, task_id=task_id))
+    v = guard.stop_decision(payload("Stop"), reader=r, now=BLOCK1_EPOCH)
+    assert v[0] == "block", v
+    return sd
+
+
+def test_a_comment_since_the_FIRST_block_suppresses_the_SECOND(home, capsys):
+    """🔴 THE REGRESSION. RED at the base commit (the second Stop emitted a second
+    `decision:"block"`), GREEN after.
+
+    The full measured shape, not a shortcut: block 1 -> a `claude-code` comment for
+    THIS task lands -> the session keeps working, so the work anchor moves PAST the
+    comment and the card still reads "missing" -> Stop. That second block is the one
+    that fired 31 times wrong for 1 right, and it is what must not happen here.
+    """
+    sd = _first_block()
+    guard.record_work(sd, now=WORK_B_EPOCH)       # ...and it kept working
+    r = Reader(result=task(comments=[comment(created=ANSWER_TS)]))
+    # Measured first: the card really is still "missing" — the suppression is doing
+    # the work, not a fixture that accidentally satisfied `writeback_state`.
+    assert guard.writeback_state(task(comments=[comment(created=ANSWER_TS)]),
+                                 READ_TS, work_ts=WORK_B_TS) == "missing"
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r,
+                                              now=STOP2_EPOCH))
+    assert out is None
+    assert not forces_a_continuation(out)
+
+
+def test_the_ANSWERED_second_stop_is_the_ONLY_thing_that_moved(home, capsys):
+    """The negative half of the same run: with NO comment, the second Stop still
+    blocks. This is the one-in-32 case — a turn that acknowledged block 1 and stopped
+    without writing — and it is the behaviour being KEPT, not removed."""
+    sd = _first_block()
+    guard.record_work(sd, now=WORK_B_EPOCH)
+    r = Reader(result=task(comments=[]))
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r,
+                                              now=STOP2_EPOCH))
+    assert out["decision"] == "block"
+    assert forces_a_continuation(out)
+
+
+def test_fire_1_blocks_whether_or_not_a_comment_already_exists(home, capsys):
+    """🔴 FIRE 1 IS UNTOUCHED ON EVERY PATH, which is the entire safety argument: a
+    genuinely missing write-back is still caught the first time. Driven with a stale
+    `claude-code` comment already on the card — the state that suppresses rung 2 —
+    because an implementation that keyed the suppression on "a comment exists" rather
+    than on "a comment arrived since block 1" would go green on the empty case and
+    silently delete fire 1 here."""
+    seed(work_ts=WORK_A_EPOCH)
+    r = Reader(result=task(comments=[comment(created=STALE_TS)]))
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r,
+                                              now=BLOCK1_EPOCH))
+    assert out["decision"] == "block"
+    assert forces_a_continuation(out)
+
+
+def test_a_comment_that_PREDATES_the_first_block_does_not_suppress(home, capsys):
+    """The boundary the suppression is defined by. The comment is real, is authored by
+    `claude-code`, and is NOT an answer to block 1 because it was already there — so
+    rung 2 fires exactly as it did before. 180 s clear of the skew allowance in the
+    direction that matters, so this cannot pass by sitting on the step."""
+    sd = _first_block()
+    guard.record_work(sd, now=WORK_B_EPOCH)
+    r = Reader(result=task(comments=[comment(created=PRE_BLOCK_TS)]))
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r,
+                                              now=STOP2_EPOCH))
+    assert out["decision"] == "block"
+
+
+def test_a_comment_on_a_DIFFERENT_task_does_not_suppress_this_one(home, capsys):
+    """🔴 KEYED ON THE TASK ID, AND BOTH DIRECTIONS IN ONE RUN. Two cards are read and
+    worked; both block at fire 1; then a comment lands on 194 ONLY. The second Stop
+    must suppress 194 and still block 193.
+
+    This exact error — matching any comment instead of the blocked card's own — was
+    made once while deriving the corpus measurement, so it is pinned rather than
+    argued. Asserting only the suppressed half would be satisfied by a guard that
+    suppressed everything.
+    """
+    seed(task_id=193, work_ts=WORK_A_EPOCH)
+    seed(task_id=194, work_ts=WORK_A_EPOCH)
+    sd = state_dir()
+    both = ByTask({193: task(comments=[], task_id=193),
+                   194: task(comments=[], task_id=194)})
+    first = guard.stop_decision(payload("Stop"), reader=both, now=BLOCK1_EPOCH)
+    assert first[0] == "block"
+    assert "task status 193" in first[1] and "task status 194" in first[1]
+
+    guard.record_work(sd, now=WORK_B_EPOCH)
+    answered = ByTask({193: task(comments=[], task_id=193),
+                       194: task(comments=[comment(created=ANSWER_TS)],
+                                 task_id=194)})
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=answered,
+                                              now=STOP2_EPOCH))
+    assert out["decision"] == "block"
+    assert "task status 193" in out["reason"]
+    assert "task status 194" not in out["reason"]
+
+
+def test_an_ANSWERED_ladder_costs_ONE_forced_continuation_not_two(home, capsys):
+    """🔴 THE NUMBER, MEASURED OFF THE EMITTED JSON — the same instrument
+    `test_the_ladder_costs_EXACTLY_TWO_forced_continuations` uses for the unanswered
+    ladder, so the two claims are comparable rather than two spellings.
+
+    Run over 5 Stops, a length equal to neither MAX_BLOCKS (2) nor MAX_FIRES (3). The
+    suppressed rung still SPENDS its counter, so the ladder ends where it always did:
+    fire 3 relents to a `systemMessage` and fire 4+ is silent. A suppression that
+    refunded the counter would re-measure rung 2 on every Stop forever, and this
+    sequence would read ["block", None, None, None, None].
+    """
+    sd = _first_block()
+    guard.record_work(sd, now=WORK_B_EPOCH)
+    shapes, forced = [], 0
+    for _ in range(4):
+        r = Reader(result=task(comments=[comment(created=ANSWER_TS)]))
+        out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r,
+                                                  now=STOP2_EPOCH))
+        forced += bool(forces_a_continuation(out))
+        shapes.append(None if out is None
+                      else ("block" if "decision" in out else sorted(out)[0]))
+    assert shapes == [None, "systemMessage", None, None]
+    assert forced == 0                    # ...on top of fire 1's single block
+    assert guard.stop_decision(payload("Stop"), reader=Reader(
+        result=task(comments=[comment(created=ANSWER_TS)])),
+        now=STOP2_EPOCH) == ("silent", "")
+
+
+# --------------------------------------------------------------------------- #
+# the anchor, and the predicate, as units
+# --------------------------------------------------------------------------- #
+def test_fire_1_records_the_anchor_and_a_later_block_never_moves_it(home):
+    """Idempotent for the same reason `record_read` is: the window rung 2 measures
+    over starts at the FIRST block. An anchor that crept forward on every block would
+    make the comment that answered block 1 look old again — the exact bug."""
+    sd = _first_block()
+    assert guard.first_block_ts(sd, 193) == guard.now_iso(BLOCK1_EPOCH)
+    assert guard.record_first_block(sd, 193, now=STOP2_EPOCH) is False
+    assert guard.first_block_ts(sd, 193) == guard.now_iso(BLOCK1_EPOCH)
+
+
+def test_no_anchor_at_all_leaves_the_second_block_exactly_as_it_was(home, capsys):
+    """🔴 THE FAIL-LOUD DIRECTION, and it is what makes an unwritable state dir safe.
+    With no `blocked-<id>` on disk — a stamp that could not be written, or state from
+    a build that predates it — rung 2 fires, i.e. the pre-change behaviour. Driven at
+    fire 2 with an answering comment present, so the ONLY thing withholding the block
+    would be the anchor."""
+    sd = seed(work_ts=WORK_B_EPOCH)
+    with open(guard._fires_path(sd, 193), "w") as fh:
+        fh.write("1")                     # the next fire is 2
+    assert guard.first_block_ts(sd, 193) is None
+    r = Reader(result=task(comments=[comment(created=ANSWER_TS)]))
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r,
+                                              now=STOP2_EPOCH))
+    assert out["decision"] == "block"
+
+
+def test_the_first_block_stamp_is_invisible_to_tracked_ids_and_the_census(home):
+    """Same hazard the dismissal tombstone has: both readers of this directory scan it
+    BY NAME, so a stamp starting `read-` would make `tracked_ids` yield a card nobody
+    read and burn a MAX_TASKS slot per block. Driven at the cap — five stamps, then
+    five reads that must ALL land, against MAX_TASKS = 5."""
+    sd = state_dir()
+    os.makedirs(sd, exist_ok=True)
+    for tid in (300, 301, 302, 303, 304):
+        assert guard.record_first_block(sd, tid, now=BLOCK1_EPOCH) is True
+    assert guard.tracked_ids(sd) == {}
+    landed = [tid for tid in (400, 401, 402, 403, 404)
+              if guard.record_read(sd, tid)]
+    assert landed == [400, 401, 402, 403, 404]
+    assert guard.record_read(sd, 405) is False
+    # Two-way, because either direction would collide: a prefix that CONTAINS one of
+    # the others is as broken as one the others contain.
+    for other in ("read-", "fires-", "unknown-", guard.DISMISSED_PREFIX,
+                  ".tmp-read-"):
+        assert not guard.BLOCKED_PREFIX.startswith(other), other
+        assert not other.startswith(guard.BLOCKED_PREFIX), other
+
+
+@pytest.mark.parametrize("comments,expected", [
+    ([comment(created=ANSWER_TS)], True),                       # after the block
+    ([comment(created=PRE_BLOCK_TS)], False),                   # before it
+    ([], False),                                                # nothing at all
+    ([comment(created=ANSWER_TS, author="zach")], False),       # not this agent
+    ([comment(created=ANSWER_TS, author="drafter")], False),
+    ([comment(created=ANSWER_TS, retracted=True)], False),      # withdrawn
+    ([comment(created="not a timestamp")], True),               # see the docstring
+    ([comment(created=PRE_BLOCK_TS), comment(created=ANSWER_TS)], True),
+])
+def test_comment_since_block_takes_the_same_view_writeback_state_does(comments,
+                                                                     expected):
+    """🔴 ONE COMMENT LIST, ONE SET OF RULES. Same author allowlist, same retracted
+    skip, same unparseable-`createdAt` -> satisfied resolution as `writeback_state`.
+    Two functions reading one list by two different rules is how a card ends up
+    "missing" and "answered" at the same time."""
+    assert guard.comment_since_block(task(comments=comments), BLOCK1_TS) is expected
+
+
+@pytest.mark.parametrize("blocked_ts", [None, "", "   ", "garbage", 42])
+def test_an_unusable_anchor_suppresses_NOTHING(blocked_ts):
+    assert guard.comment_since_block(
+        task(comments=[comment(created=ANSWER_TS)]), blocked_ts) is False
+
+
+@pytest.mark.parametrize("payload_obj", [
+    None, "a string", 42, {"comments": "not a list"}, {"comments": 7},
+])
+def test_a_payload_this_hook_cannot_READ_suppresses_nothing(payload_obj):
+    """Loud, not quiet: an unrecognised shape leaves the block standing. A guard that
+    went silent on a payload it could not parse would be walkable by any board
+    change."""
+    assert guard.comment_since_block(payload_obj, BLOCK1_TS) is False
+
+
+def test_the_skew_allowance_is_the_SAME_one_writeback_state_uses():
+    """🔴 BOTH SIDES OF THE BOUNDARY, at values that are not multiples of the step.
+    The stamp is written from THIS host's clock and `createdAt` comes from the SERVER's,
+    so the allowance is the same 120 s `writeback_state` applies to the other anchor —
+    and the direction it errs in is SUPPRESSION, which is the cheap one: rung 2 is
+    worth 1 in 32, and fire 1 has already fired."""
+    inside = guard.now_iso(BLOCK1_EPOCH - guard.CLOCK_SKEW_ALLOWANCE_SECS + 30)
+    outside = guard.now_iso(BLOCK1_EPOCH - guard.CLOCK_SKEW_ALLOWANCE_SECS - 30)
+    # ...and the step ITSELF. `>=`, not `>`: a comment landing exactly on the allowance
+    # is inside it. Without this third point a `>=` -> `>` mutant survives the pair
+    # above untouched, because neither of them sits on the boundary.
+    on_the_step = guard.now_iso(BLOCK1_EPOCH - guard.CLOCK_SKEW_ALLOWANCE_SECS)
+    assert guard.comment_since_block(
+        task(comments=[comment(created=inside)]), BLOCK1_TS) is True
+    assert guard.comment_since_block(
+        task(comments=[comment(created=outside)]), BLOCK1_TS) is False
+    assert guard.comment_since_block(
+        task(comments=[comment(created=on_the_step)]), BLOCK1_TS) is True
+
+
+def test_the_anchor_is_READ_before_it_is_WRITTEN(home):
+    """🔴 THE ORDER IS A CLAIM, AND THE OTHER ONE TOUCHES FIRE 1. Recording fire 1's
+    anchor BEFORE consulting it makes the suppression check read the stamp this very
+    Stop just wrote — so a `claude-code` comment inside the skew window of the block
+    instant could withhold FIRE 1, the one rung this change must leave alone.
+
+    Pinned as a call sequence, the same idiom `dismiss`'s tombstone-before-removal
+    order uses: the behavioural shape that order opens needs a work event stamped
+    AFTER the Stop that reports it, which is contrived, while the ordering itself is
+    not."""
+    seed(work_ts=WORK_A_EPOCH)
+    order = []
+    real_read, real_write = guard.first_block_ts, guard.record_first_block
+    guard.first_block_ts = lambda *a, **k: (order.append("read"),
+                                            real_read(*a, **k))[1]
+    guard.record_first_block = lambda *a, **k: (order.append("write"),
+                                                real_write(*a, **k))[1]
+    try:
+        r = Reader(result=task(comments=[]))
+        kind, _ = guard.stop_decision(payload("Stop"), reader=r, now=BLOCK1_EPOCH)
+    finally:
+        guard.first_block_ts, guard.record_first_block = real_read, real_write
+    assert kind == "block"
+    assert order == ["read", "write"]
+
+
+def test_the_suppression_spawns_no_EXTRA_live_read(home):
+    """It reads the payload `writeback_state` was already handed, so a second Stop
+    costs exactly the one subprocess it always cost. Counted, not asserted in prose."""
+    sd = _first_block()
+    guard.record_work(sd, now=WORK_B_EPOCH)
+    r = Reader(result=task(comments=[comment(created=ANSWER_TS)]))
+    guard.stop_decision(payload("Stop"), reader=r, now=STOP2_EPOCH)
+    assert len(r.calls) == 1
+
+
+def test_the_suppression_holds_END_TO_END_through_the_real_hook(home, tmp_path):
+    """🔴 THROUGH `main()` AND A REAL `clawgatectl`, not just `stop_decision`. The
+    in-process tests pin the decision; this pins that nothing between the decision and
+    stdout re-introduces the block — the same reason the delegated and closed cases
+    each have an end-to-end twin in this file."""
+    sd = seed(work_ts=WORK_A_EPOCH)
+    b = tmp_path / "bin"
+    b.mkdir()
+    mockbin.write_exec(b / "clawgatectl",
+                       "printf '%%s\\n' '%s'\n" % json.dumps(task(comments=[])))
+    first = run_hook(payload("Stop"), home, path_extra=b)
+    assert json.loads(first.stdout)["decision"] == "block"
+    # 🔴 THE REAL HOOK WROTE THE ANCHOR — asserted here, because that is the half a
+    # subprocess can prove and an in-process test cannot. Its VALUE is the subprocess's
+    # wall clock, which no fixture can reach, so it is then restamped onto this
+    # section's timeline: leaving it at "now" would put the anchor a month AFTER every
+    # comment in this file and the run would pass for the wrong reason.
+    assert guard.first_block_ts(sd, 193) is not None
+    with open(guard._blocked_path(sd, 193), "w") as fh:
+        fh.write(guard.now_iso(BLOCK1_EPOCH))
+
+    guard.record_work(sd, now=WORK_B_EPOCH)
+    mockbin.write_exec(b / "clawgatectl",
+                       "printf '%%s\\n' '%s'\n"
+                       % json.dumps(task(comments=[comment(created=ANSWER_TS)])))
+    second = run_hook(payload("Stop"), home, path_extra=b)
+    assert second.stdout.strip() == "", second.stdout
+
+
+# =========================================================================== #
 # 9b. STATE HOUSEKEEPING
 # =========================================================================== #
 def test_prune_drops_stale_session_state_and_keeps_fresh(home):

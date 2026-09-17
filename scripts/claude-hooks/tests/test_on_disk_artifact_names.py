@@ -163,11 +163,16 @@ def test_the_writeback_guard_writes_EXACTLY_these_paths(home):
     against a green suite: `.cache`, `claude-clawgate-writeback`, `s`, `work`,
     `dismissals` and (below) `.tmp`.
 
-    `read-`, `fires-`, `unknown-` and `dismissed-` are in the list too and were
-    already killable — they are carried here anyway, because the value of this
-    assertion is that it covers the WHOLE set. Pinning only the names a past
+    `read-`, `fires-`, `unknown-`, `dismissed-` and `blocked-` are in the list too
+    and were already killable — they are carried here anyway, because the value of
+    this assertion is that it covers the WHOLE set. Pinning only the names a past
     sweep happened to find is how this class survived the sweep that found
     `dismissed-`.
+
+    🔴 THE DOCSTRING SAYS **WHOLE** SET, SO A NEW WRITER BELONGS HERE THE DAY IT
+    LANDS. `blocked-<id>` — the first-block anchor the conditional rung 2 measures
+    against — is the most recent one; leaving it out would have made this test read
+    as covering a tree it no longer covered, which is worse than not covering it.
     """
     guard = load(os.path.join(HOOKS, "clawgate-writeback-guard.py"), "wbguard_names")
     sd = guard._state_dir({"session_id": SESSION})
@@ -176,12 +181,14 @@ def test_the_writeback_guard_writes_EXACTLY_these_paths(home):
     guard.record_work(sd, now=1786797000.0)
     guard.bump_fires(sd, TASK_A)                       # the MEASURED counter
     guard.bump_fires(sd, TASK_A, "unknown")            # the COULD-NOT-MEASURE one
+    guard.record_first_block(sd, TASK_A, now=1786797000.0)   # the rung-2 anchor
     guard.write_dismissal_tombstone(sd, TASK_B, now=1786797000.0)
     guard.record_dismissal(TASK_B, SESSION, [], now=1786797000.0)
 
     root = ".cache/claude-clawgate-writeback"
     assert paths_under(home) == sorted([
         "%s/dismissals" % root,
+        "%s/s/%s/blocked-%d" % (root, SESSION, TASK_A),
         "%s/s/%s/dismissed-%d" % (root, SESSION, TASK_B),
         "%s/s/%s/fires-%d" % (root, SESSION, TASK_A),
         "%s/s/%s/read-%d" % (root, SESSION, TASK_A),
