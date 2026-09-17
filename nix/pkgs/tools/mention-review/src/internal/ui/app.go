@@ -110,21 +110,38 @@ type App struct {
 	// rows.
 	//
 	// 🔴 THEY ARE STATE BECAUSE THE CURSOR INDEXES THEM, NOT AS A SPEED
-	// OPTIMISATION. `fileRowCur` above is an index into `fileRows`, and both
-	// `moveIn` (in `move`) and `clampCursors` read `len(a.fileRows)` to
-	// bound it — none of that is on a render path, so a list that
-	// existed only inside `filesBody` would leave the cursor indexing nothing
-	// between frames. That is a correctness requirement, and it holds however
-	// cheap the rebuild is. ⚠ `panels.go`'s per-frame-styling measurement is
-	// about 10,000 DIFF LINES; it is prior art here, not this field's reason.
+	// OPTIMISATION. `fileRowCur` above is an index into `fileRows`, and
+	// `moveIn` (called from `move`) reads `len(a.fileRows)` to bound it — not
+	// on a render path, so a list that existed only inside `filesBody` would
+	// leave the cursor indexing nothing between frames. That is a correctness
+	// requirement, and it holds however cheap the rebuild is.
+	//
+	// ⚠ `moveIn` IS THE ONLY LIVE BOUND ON THIS CURSOR. This comment named
+	// `clampCursors` as a second one and that was FALSE: `clampCursors` has a
+	// single call site, in `Step`'s `PRLoaded`, immediately after
+	// `rebuildFileTree` has already put the cursor on a row that exists — so
+	// its `fileRowCur` line cannot move it, and deleting that line leaves the
+	// package green. The line is kept as a bound on a state nothing currently
+	// produces; it is not evidence that this cursor is checked anywhere else.
+	//
+	// ⚠ `panels.go`'s per-frame-styling measurement is about 10,000 DIFF LINES;
+	// it is prior art here, not this field's reason.
 	fileTree *treeNode
 	fileRows []FileRow
 
 	// collapsedDirs holds the paths of the directories the operator has closed.
 	//
-	// 🔴 EMPTY MEANS FULLY EXPANDED, AND THAT IS THE DEFAULT ON EVERY OPEN. No
-	// PR may get a worse first screen than it had before the tree existed: every
-	// changed file is visible the moment the panel appears.
+	// 🔴 EMPTY MEANS FULLY EXPANDED, AND THAT IS THE STATE A FRESHLY BUILT App
+	// IS IN. No PR may get a worse first screen than it had before the tree
+	// existed: every changed file is visible the moment the panel appears.
+	//
+	// 🔴 "ON EVERY OPEN" IS WHAT THIS USED TO SAY AND IT WAS TOO WIDE.
+	// `PRLoaded` also arrives mid-session — a successful write re-reads the PR
+	// — and resetting this set there discarded the operator's collapse state on
+	// the most common write flow there is. `rebuildFileTree` carries it across
+	// a re-read instead, pruned to the directories the new tree still has; see
+	// its header. The first open is still fully expanded because an App that
+	// has never loaded one has nothing in here.
 	//
 	// 🔴 COPY-ON-WRITE. `App` travels BY VALUE through `Step`, so a map mutated
 	// in place would also change the App the caller is still holding — and every

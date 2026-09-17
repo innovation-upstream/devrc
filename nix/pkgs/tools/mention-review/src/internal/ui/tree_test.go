@@ -452,6 +452,16 @@ func TestCollapsingADirectoryHidesExactlyItsSubtree(t *testing.T) {
 // 🔴 EVERY CHANGED FILE IS VISIBLE ON OPEN. No PR may get a worse first screen
 // than it had before this panel became a tree, so the default collapse set is
 // EMPTY and every file row is present.
+//
+// ⚠ THIS IS AN INVARIANT GUARD, NOT A REGRESSION GUARD, AND IT IS LABELLED SO
+// BECAUSE IT WAS COUNTED AS ONE. `treeApp` builds a fresh `New()` App, whose
+// `collapsedDirs` is already nil and whose `fileRowCur` is already 0 before
+// `PRLoaded` is ever handled — so this passes whether or not `rebuildFileTree`
+// writes those fields at all. MEASURED: mutants deleting `a.collapsedDirs = nil`
+// and deleting `a.fileRowCur = 0` each SURVIVED it. What this pins is the FIRST
+// screen; what a RE-READ does to that state is a different claim and is pinned
+// by `TestARereadKeepsTheClosedDirectoriesAndTheCursorsFile` below, which starts
+// from an App that is deliberately not in the default state.
 func TestTheTreeStartsFullyExpanded(t *testing.T) {
 	a := treeApp(t)
 	if len(a.collapsedDirs) != 0 {
@@ -475,6 +485,168 @@ func TestTheTreeStartsFullyExpanded(t *testing.T) {
 	}
 	if len(visible) != len(a.Snap.Files) {
 		t.Errorf("%d file rows for %d changed files", len(visible), len(a.Snap.Files))
+	}
+}
+
+// --- a re-read ---------------------------------------------------------------
+//
+// 🔴 `PRLoaded` IS NOT ONLY THE FIRST OPEN. `stepWriteDone` emits `FetchPR`
+// after every successful write, and that comes back as a second `PRLoaded` in
+// the middle of a review. The tests below are the ones that drive it twice.
+
+// reread hands the App a second `PRLoaded` carrying `files`, the way a
+// successful write's re-fetch does.
+func reread(a App, files []ghapi.File) App {
+	snap := fixturePR()
+	snap.Files = files
+	next, _ := a.Step(PRLoaded{Snap: snap})
+	return next
+}
+
+// rereadFiles is `treeFiles()` in a DIFFERENT ORDER, which is what makes the
+// cursor assertions below discriminating.
+//
+// 🔴 THE POINT IS THAT THE ANCHOR'S ROW INDEX MOVES. Under this order
+// `src/b/deep` is created before `src/a`, so `three.go` sits at a different row
+// than it did on the first read — an implementation that remembered the cursor
+// as an ORDINAL would restore it onto a different row and still look plausible.
+// The re-read fixture is deliberately the SAME FOUR FILES, so nothing here can
+// be explained by the file simply being gone.
+func rereadFiles() []ghapi.File {
+	return []ghapi.File{
+		{Path: "src/root.go", ChangeType: "ADDED", Additions: 7, Deletions: 0},
+		{Path: "src/b/deep/three.go", ChangeType: "RENAMED",
+			PreviousPath: "src/b/deep/old.go", Additions: 23, Deletions: 6},
+		{Path: "src/a/one.go", ChangeType: "MODIFIED", Additions: 5, Deletions: 1},
+		{Path: "src/a/two.go", ChangeType: "MODIFIED", Additions: 11, Deletions: 4},
+	}
+}
+
+// 🔴 A SUCCESSFUL WRITE MUST NOT THROW AWAY THE OPERATOR'S PLACE. Comment on a
+// sixty-file PR and the re-read used to hand back a fully expanded tree with
+// the cursor on row 0 — the collapse state discarded outright, and the cursor
+// reset where it had previously survived.
+//
+// 🔴 THIS STARTS FROM A NON-DEFAULT STATE ON PURPOSE. A fresh `New()` App
+// already has an empty collapse set and a zero cursor, so a test driven from
+// one cannot tell "preserved" from "reset" — see the label on
+// `TestTheTreeStartsFullyExpanded`. Here a directory is closed and the cursor is
+// parked on a file several rows down BEFORE the second `PRLoaded`.
+func TestARereadKeepsTheClosedDirectoriesAndTheCursorsFile(t *testing.T) {
+	const anchor = "src/b/deep/three.go"
+
+	a := treeApp(t)
+
+	// Close `src/a` — row 1 on the first read's order.
+	a.fileRowCur = 1
+	if r, _ := a.currentRow(); r.Path != "src/a" || !r.IsDir {
+		t.Fatalf("row 1 is %+v, want the `src/a` directory row", r)
+	}
+	a, _ = a.Step(keyPress("enter"))
+	if !a.collapsedDirs["src/a"] {
+		t.Fatalf("`enter` on `src/a` left %v collapsed", a.collapsedDirs)
+	}
+
+	// Park the cursor on a FILE, several rows from 0.
+	a.fileRowCur = a.rowIndexOf(anchor)
+	if a.fileRowCur <= 0 {
+		t.Fatalf("%s is at row %d; the cursor has to start somewhere other than "+
+			"0 or this test cannot tell preservation from a reset", anchor, a.fileRowCur)
+	}
+	before := a.fileRowCur
+	beforeRows := shapesOf(a.fileRows)
+
+	a = reread(a, rereadFiles())
+
+	// The closed directory is STILL closed.
+	if !a.collapsedDirs["src/a"] {
+		t.Errorf("after a re-read `src/a` is open again (collapsed = %v) — a "+
+			"successful write must not re-expand the tree the operator closed", a.collapsedDirs)
+	}
+	// Stated as the operator would see it: the two files under `src/a` have no
+	// row, and the rest of the tree does.
+	for _, hidden := range []string{"src/a/one.go", "src/a/two.go"} {
+		if i := a.rowIndexOf(hidden); i >= 0 {
+			t.Errorf("%s is visible at row %d after the re-read, inside a directory "+
+				"that was closed:\n%+v", hidden, i, shapesOf(a.fileRows))
+		}
+	}
+
+	// The cursor is on the SAME FILE, found by path.
+	if got := a.SelectedFilePath(); got != anchor {
+		t.Errorf("after a re-read the cursor is on %q (row %d of\n%+v), want %q — "+
+			"the file it was on before", got, a.fileRowCur, shapesOf(a.fileRows), anchor)
+	}
+	// 🔴 AND BY PATH RATHER THAN BY INDEX: the row NUMBER moved, so holding the
+	// old ordinal would have been wrong here and indistinguishable everywhere
+	// the two orders happen to agree.
+	if a.fileRowCur == before {
+		t.Fatalf("%s is at row %d both before and after the re-read — the fixture "+
+			"cannot tell a path-keyed restore from an index-keyed one. Rows were\n"+
+			"%+v\nand are now\n%+v", anchor, before, beforeRows, shapesOf(a.fileRows))
+	}
+
+	// 🔴 AND IT SURVIVES THE SECOND MESSAGE OF THE SAME FLOW. `PRLoaded` asks
+	// for the diff, so a real re-read is two messages and `DiffLoaded` is the
+	// one the operator actually ends on. It resets `diffCur` by design — a new
+	// diff, read from the top — and this asserts it does not take the FILES
+	// cursor with it, which is a claim about a seam neither message's own test
+	// covers.
+	restored := a.fileRowCur
+	a, _ = a.Step(DiffLoaded{Diff: treeDiff(t)})
+	if a.fileRowCur != restored || a.SelectedFilePath() != anchor {
+		t.Errorf("the DiffLoaded that follows a re-read moved the Files cursor from "+
+			"row %d (%s) to row %d (%q)", restored, anchor, a.fileRowCur, a.SelectedFilePath())
+	}
+	if !a.collapsedDirs["src/a"] {
+		t.Errorf("the DiffLoaded that follows a re-read re-opened `src/a` (collapsed = %v)",
+			a.collapsedDirs)
+	}
+}
+
+// 🔴 A COLLAPSE ENTRY NAMING A DIRECTORY THE NEW READ DOES NOT HAVE IS DROPPED.
+// The entry is a path and nothing else removes it, so keeping it would make a
+// directory that left the PR and came back reappear ALREADY CLOSED, from a
+// decision the operator made about a different file list — and would let the
+// set grow for the length of a session.
+//
+// ⚠ ITS RIVAL IS NOT THE CODE THIS REPLACED — SAY SO RATHER THAN LET IT READ AS
+// A REGRESSION GUARD. Against the previous behaviour (`collapsedDirs = nil` on
+// every `PRLoaded`) this test PASSES, trivially: a set that is emptied wholesale
+// cannot hold a stale entry. MEASURED, by running it against that code. What it
+// discriminates is the wrong version of the FIX — preserving the set without
+// pruning it — and a mutant that returns `collapsed` unchanged does kill it.
+func TestARereadDropsCollapseEntriesForDirectoriesThatAreGone(t *testing.T) {
+	a := treeApp(t)
+	a.fileRowCur = 1
+	a, _ = a.Step(keyPress("enter")) // close `src/a`
+	if !a.collapsedDirs["src/a"] {
+		t.Fatalf("setup: `src/a` is not closed (%v)", a.collapsedDirs)
+	}
+
+	// A read in which `src/a` does not exist at all.
+	gone := []ghapi.File{
+		{Path: "src/b/deep/three.go", ChangeType: "RENAMED",
+			PreviousPath: "src/b/deep/old.go", Additions: 23, Deletions: 6},
+		{Path: "src/root.go", ChangeType: "ADDED", Additions: 7, Deletions: 0},
+	}
+	a = reread(a, gone)
+	if a.collapsedDirs["src/a"] {
+		t.Errorf("`src/a` is not in the PR any more and is still in the collapse "+
+			"set %v", a.collapsedDirs)
+	}
+	if len(a.collapsedDirs) != 0 {
+		t.Errorf("collapse set is %v, want nothing left once its only entry's "+
+			"directory is gone", a.collapsedDirs)
+	}
+
+	// 🔴 THE CONSEQUENCE, WHICH IS THE PART THAT MATTERS: when those files come
+	// back, the directory is OPEN. Without the prune this row would be closed
+	// and the assertion above would be a claim about a map nobody reads.
+	a = reread(a, treeFiles())
+	if got := shapesOf(a.fileRows); !shapesEqual(got, treeFixtureRows) {
+		t.Errorf("after `src/a` returned the rows are\n%+v\nwant the fully expanded\n%+v",
+			got, treeFixtureRows)
 	}
 }
 
@@ -508,6 +680,37 @@ func TestTheChevronsAreOnScreenAndSurviveColourRemoval(t *testing.T) {
 	// they are not.
 	if chevronExpanded == chevronCollapsed {
 		t.Fatal("the two chevrons are the same character; open and closed are indistinguishable")
+	}
+
+	// 🔴 AND NOW THE LITERAL BYTES, WHICH IS THE ONLY PART OF THIS TEST THAT
+	// PINS WHICH GLYPH MEANS WHICH.
+	//
+	// Every assertion above is written THROUGH `chevronExpanded` /
+	// `chevronCollapsed`, so all of it is invariant under any consistent
+	// renaming of the two — including SWAPPING THEIR VALUES, which makes every
+	// open directory draw the closed glyph and every closed one the open glyph.
+	// MEASURED: the whole package stays green under that swap. The identity
+	// check just above catches only the degenerate case where both are the same
+	// character, and `rowShape` spells "dir-open"/"dir-closed" rather than
+	// reading a chevron, so no construction test can see it either. These two
+	// assertions name the characters themselves and are the only thing that can.
+	//
+	// ⚠ THE CONTRAST MUST STAY A SHAPE, NOT A COLOUR — the operator's font
+	// renders the severity circles as one glyph, so a DOWN-pointing triangle
+	// against a RIGHT-pointing one is what survives both `stripANSI` and his
+	// terminal. Changing either literal here means changing the glyph a human
+	// reads, which is the point of writing them out.
+	openRow := strings.SplitN(open, "\n", 2)[0]
+	if !strings.HasPrefix(openRow, "▾ ") {
+		t.Errorf("the EXPANDED `src` row is %q, want it to lead with the "+
+			"down-pointing chevron \"▾\" — the two chevron constants may be "+
+			"swapped, which no other assertion in this package can see", openRow)
+	}
+	closedRow := strings.SplitN(closed, "\n", 2)[0]
+	if !strings.HasPrefix(closedRow, "▸ ") {
+		t.Errorf("the COLLAPSED `src` row is %q, want it to lead with the "+
+			"right-pointing chevron \"▸\" — the two chevron constants may be "+
+			"swapped, which no other assertion in this package can see", closedRow)
 	}
 }
 

@@ -10,9 +10,10 @@ import (
 // ARRIVES — NEVER IN `filesBody()`.
 //
 // 🔴 THE REASON IS STATE, NOT SPEED. `App.fileRows` HAS to outlive a frame,
-// because `App.fileRowCur` is an index INTO it, and `moveIn` and
-// `clampCursors` bound that cursor by `len(a.fileRows)` — all of which happens
-// while handling a KEY, off the render path entirely. A tree rebuilt inside
+// because `App.fileRowCur` is an index INTO it, and `moveIn` bounds that cursor
+// by `len(a.fileRows)` — which happens while handling a KEY, off the render
+// path entirely. (This used to name `clampCursors` as a second bound; it is
+// not one — see `App.fileTree`'s comment.) A tree rebuilt inside
 // `filesBody` would be a second tree that the cursor does not index, so the
 // cursor would be meaningless between frames. Building it where `Snap` changes
 // (`App.rebuildFileTree`) and re-flattening it where the collapse state changes
@@ -324,17 +325,75 @@ func dirNodes(root *treeNode) []*treeNode {
 // --- the App's half ----------------------------------------------------------
 
 // rebuildFileTree is called when `Snap` changes, and NOWHERE ON A RENDER PATH.
+//
+// 🔴 `PRLoaded` IS NOT ONLY THE FIRST OPEN, AND THIS FUNCTION MUST NOT ASSUME
+// IT IS. A successful write re-reads the pull request — `stepWriteDone` emits
+// `FetchPR`, which comes back as a second `PRLoaded` — so this runs again in
+// the middle of a review. Throwing the collapse set and the cursor away here
+// put the operator back at a fully expanded tree on row 0 every time they
+// posted a comment on a sixty-file PR, which is the most common write there is.
+// So both are carried across: what was closed stays closed, and the cursor
+// stays on the same FILE.
+//
+// 🔴 CARRIED BY PATH, NEVER BY INDEX. The file list is free to differ between
+// two reads — that is the entire reason for re-reading — so a row ordinal names
+// a different file on the other side of the rebuild, which is the same mistake
+// `selectRow`'s header is about. The collapse set is already keyed by path;
+// the cursor is remembered as the path it was on and looked up again, falling
+// back to row 0 when that path is no longer a visible row.
 func (a *App) rebuildFileTree() {
+	// The cursor's row as a PATH, captured BEFORE the rows it indexes are
+	// replaced. "" when there is no row under it, which restores to row 0.
+	anchor := ""
+	if r, ok := a.currentRow(); ok {
+		anchor = r.Path
+	}
 	if a.Snap == nil {
 		a.fileTree, a.fileRows, a.collapsedDirs = nil, nil, nil
 		a.fileRowCur = 0
 		return
 	}
 	a.fileTree = buildFileTree(a.Snap.Files)
-	// 🔴 FULLY EXPANDED ON EVERY OPEN (see App.collapsedDirs).
-	a.collapsedDirs = nil
+	// 🔴 EMPTY MEANS FULLY EXPANDED, AND AN App THAT HAS NEVER LOADED ONE HAS
+	// AN EMPTY SET — so the FIRST open is still fully expanded (see
+	// App.collapsedDirs) without this branching on which open it is.
+	a.collapsedDirs = retainExistingDirs(a.collapsedDirs, a.fileTree)
 	a.rebuildFileRows()
 	a.fileRowCur = 0
+	if i := a.rowIndexOf(anchor); i >= 0 {
+		a.fileRowCur = i
+	}
+}
+
+// retainExistingDirs is the collapse set carried across a rebuild, minus every
+// entry naming a directory the new tree does not have.
+//
+// 🔴 THE PRUNE IS NOT HYGIENE. An entry is a path and nothing removes it
+// otherwise, so a directory that leaves the PR and later comes back would
+// reappear ALREADY CLOSED, from a decision the operator made about a different
+// file list. Dropping it is also what stops the set growing for the length of a
+// session. It builds a NEW map and never writes through the old one — the
+// copy-on-write contract on `App.collapsedDirs` — and returns nil rather than
+// an empty map so "fully expanded" keeps one spelling.
+func retainExistingDirs(collapsed map[string]bool, root *treeNode) map[string]bool {
+	if len(collapsed) == 0 {
+		return nil
+	}
+	alive := make(map[string]bool, len(collapsed))
+	for _, d := range dirNodes(root) {
+		alive[d.path] = true
+	}
+	var next map[string]bool
+	for p, v := range collapsed {
+		if !v || !alive[p] {
+			continue
+		}
+		if next == nil {
+			next = make(map[string]bool, len(collapsed))
+		}
+		next[p] = true
+	}
+	return next
 }
 
 // rebuildFileRows re-flattens the visible rows. Called when the collapse state
@@ -462,11 +521,19 @@ func cloneCollapsed(m map[string]bool) map[string]bool {
 // ⚠ IT MOVES NO DIFF CURSOR. Opening and closing directories is navigation; the
 // diff stays exactly where the operator left it, and the next diff-cursor move
 // re-reveals whatever it needs (`syncFileCursorFromDiff`).
+//
+// 🔴 IT MOVES NO FILES CURSOR EITHER, AND DOES NOT NEED TO. Every caller —
+// `treeExpand`, `treeCollapse`, `treeToggle`, which are all three of them —
+// passes the path of the row the cursor is ON. A directory's own row index
+// cannot change when it opens or closes: `flattenTree` is a pre-order walk, so
+// every row ABOVE this directory is untouched and only rows below it appear or
+// disappear. The cursor is therefore still on the same row afterwards by
+// construction. An anchor-restore block lived here for that job and was dead
+// on all three callers — deleting it, INCLUDING its trailing clamp, left the
+// package green. 🔴 A caller passing a path OTHER than the current row's would
+// break that argument; there is no such caller, and adding one means restoring
+// the cursor handling here rather than assuming it.
 func (a *App) setCollapsed(path string, collapsed bool) {
-	anchor := ""
-	if r, ok := a.currentRow(); ok {
-		anchor = r.Path
-	}
 	next := cloneCollapsed(a.collapsedDirs)
 	if collapsed {
 		next[path] = true
@@ -475,15 +542,6 @@ func (a *App) setCollapsed(path string, collapsed bool) {
 	}
 	a.collapsedDirs = next
 	a.rebuildFileRows()
-
-	// Keep the cursor on the row it was on; if that row is no longer visible —
-	// it was inside what just closed — fall back to the directory itself.
-	if i := a.rowIndexOf(anchor); i >= 0 {
-		a.fileRowCur = i
-	} else if i := a.rowIndexOf(path); i >= 0 {
-		a.fileRowCur = i
-	}
-	a.fileRowCur = clamp(a.fileRowCur, 0, max(0, len(a.fileRows)-1))
 }
 
 func (a App) rowIndexOf(path string) int {
@@ -533,8 +591,18 @@ func (a App) treeExpand() App {
 	}
 	if !r.IsDir {
 		// A file has nothing to expand — `l` OPENS it, i.e. moves to the pane
-		// that shows it. The diff cursor is already in this file, because
-		// landing on the row put it there.
+		// that shows it.
+		//
+		// ⚠ IT MOVES THE FOCUS AND NOTHING ELSE, AND CANNOT CLAIM THE DIFF
+		// CURSOR IS ALREADY IN THIS FILE. `selectRow` normally put it there
+		// when the cursor landed on this row, but it returns having moved
+		// nothing when `a.Diff` is nil (the diff read failed, or has not
+		// arrived yet) and when `Diff.Files` carries no entry for this path —
+		// the tree's list and the diff's come from two endpoints that each cap
+		// at 100 files and are free to disagree. In those cases `l` shifts the
+		// focus to a diff that is still wherever the operator left it. That is
+		// the behaviour rather than a missing guard: `selectRow` refuses to
+		// jump the diff somewhere arbitrary, and this must not undo that.
 		a.Focus = PanelDiff
 		a.relayout()
 		return a
