@@ -150,6 +150,30 @@ RULES: list[dict] = [
          apply=r"not return REVIEW comments|review comments? (are|is)[^.]{0,40}invisible|post the block as an ISSUE comment"),
     dict(id="emit-claims-audited", name="post the block with --emit-claims --audited <tip>",
          probe="--emit-claims --audited", apply=r"--emit-claims|--audited\b"),
+    # --- added for #1739's three rules. All three were WRITTEN 2026-09-17, so
+    # `fired` is expected to be 0 on the first sweep; UNFIRED here means "nobody
+    # has violated it yet", never that the row is broken (blind spot 4). Each
+    # `apply` is deliberately anchored on the rule's own DISTINCTIVE artifact —
+    # the comment-count tell, the literal placeholder, `git diff` as the source —
+    # because the generic words these rules are about ("posted", "prose", "diff")
+    # saturate the pre-origin corpus and would mark the row UNRELIABLE and
+    # withhold its number (blind spot 3).
+    dict(id="emitting-is-not-posting", name="emitting a claims block is not posting it",
+         probe="EMITTING IS NOT POSTING",
+         apply=(r"emitting is not posting|no audit-claims block in any of the"
+                r"|comment count rather than an error|naming a COMMENT COUNT"
+                r"|--emit-claims\b[^.]{0,60}(did not|does not|never|failed to) post"
+                r"|block[^.]{0,40}(was |is )never posted")),
+    dict(id="claims-file-placeholders", name="--claims-file leaves placeholders the auditor must substitute",
+         probe="is the offline seam",
+         apply=(r"--claims-file\b|<the PR's head sha>"
+                r"|zero placeholders|placeholders? remain"
+                r"|headRefOid,baseRefName")),
+    dict(id="reconstruct-from-diff", name="reconstruct a lost claims block from the DIFF, not a handoff's prose",
+         probe="derive it from the DIFF, never from a handoff's prose",
+         apply=(r"derive it from the DIFF|reconstruct\w*[^.]{0,60}from the diff"
+                r"|from the DIFF, not[^.]{0,30}prose"
+                r"|prose carries the framing")),
     dict(id="round0-first", name="run --round 0 first",
          probe="RUN `--round 0` FIRST", apply=r"--round 0\b|\bround 0\b|round-0\b"),
     dict(id="round0-at-pr-create", name="run round 0 at PR-CREATE time",
