@@ -1236,14 +1236,20 @@ def test_main_backstop_swallows_an_unexpected_error(monkeypatch, capsys):
 
     It was unkillable because nothing in a realistic payload can make the guarded block
     raise — every helper already fails closed on its own. So reach it directly: make
-    should_nudge() raise, and require main() to still exit 0 having written nothing.
+    the decision path raise, and require main() to still exit 0 having written nothing.
+
+    🔴 IT PATCHES `decide`, NOT `should_nudge`, AND THAT IS NOT COSMETIC. main() reads
+    `decide` (it needs the reason, not only the verdict), so a patch on `should_nudge`
+    is never called — the test would still pass, on a payload that simply does not
+    fire, having exercised nothing. That is the unreachable-guard shape this very
+    docstring is about, one layer along.
     """
     import io
 
     def boom(_data):
         raise RuntimeError("simulated defect inside the decision path")
 
-    monkeypatch.setattr(nsn, "should_nudge", boom)
+    monkeypatch.setattr(nsn, "decide", boom)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload(FIRING))))
     with pytest.raises(SystemExit) as exc:
         nsn.main()
@@ -1257,7 +1263,11 @@ def test_main_exits_zero_even_when_it_fires(monkeypatch, capsys, tmp_path):
     always 0. A non-zero exit from a Stop hook is how the old blocking behaviour looked."""
     import io
     monkeypatch.setattr(nsn, "_state_root", lambda: str(tmp_path / "s"))
-    monkeypatch.setattr(nsn, "should_nudge", lambda _d: True)
+    # 🔴 `decide`, not `should_nudge` — main() reads the record, so a patch on the
+    # bool view is inert and this test would assert on a turn that never fired.
+    monkeypatch.setattr(nsn, "decide", lambda _d: {
+        "fire": True, "reason": "", "suppressors": [],
+        "msg_chars": 900, "tool_uses": 3})
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload(FIRING))))
     with pytest.raises(SystemExit) as exc:
         nsn.main()

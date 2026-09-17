@@ -153,6 +153,12 @@ nothing else: no directory creation, no state read, no subprocess, and it does n
 import `shutil` (see the deferred-import note). Unlike its precedent this hook spawns
 NO subprocess on ANY path, Stop included: condition 3 is filesystem-only.
 
+🔴 THE TELEMETRY IS STOP-ONLY AND IS NOT ON THAT PATH. `hook_telemetry` (and through
+it `spool_emit`, which drags in `base64`/`datetime`/`socket`) is imported from
+`main()`'s Stop arm and from nowhere else, so a PostToolUse call — the one that fires
+after every tool call of every session — never loads it and pays nothing. Same
+reasoning as the `shutil` note below, and the same measurement behind it.
+
 WHAT THIS STRUCTURALLY CANNOT SEE (say it here, not in a report nobody re-reads):
   * the 2 never-started sessions of the 16. They produced zero assistant turns, so no
     Stop fired and no hook of any kind could have reached them. Named because it
@@ -825,6 +831,170 @@ def is_handoff_write(data):
 
 
 # --------------------------------------------------------------------------- #
+# Telemetry — ONE row per decision this guard reaches at Stop.
+#
+# WHY IT IS HERE AT ALL. This guard's whole output is a decision that is INVISIBLE to
+# every downstream measurement: `activity.events` records no hook invocation, so
+# "did the guard fire, on which doc, and did the session comply?" could previously
+# only be answered by inferring it from transcript prose — and the guard's own block
+# text CONTAINS the strings that define compliance, which is how a measurement of a
+# sibling guard came back at a bogus 100.0%. A row emitted at the moment of the
+# decision, carrying the DOC KEY it was reasoning about, makes that a query. The
+# missing per-entity key is not hypothetical either: a lift figure for the sibling
+# guard was wrong (+5.3pp against a correct +10.1pp) because the detector matched any
+# task id rather than the blocked one.
+#
+# 🔴 WHAT MAY GO IN A ROW: the doc KEY (already sanitized to `[A-Za-z0-9_.-]` by
+# `_sanitize`), enums, booleans and counts. Never the doc's PATH (it contains $HOME),
+# never the block text, never anything read out of a document. The emitter enforces
+# that structurally — see `hook_telemetry`'s `_SAFE_TOKEN` — but the call site is the
+# privacy boundary and this is it.
+#
+# 🔴 IT CANNOT COST THE TURN OR THE VERDICT. Nothing here emits; `stop_decision` only
+# APPENDS DICTS to a caller-supplied list. `main()` emits them after the verdict has
+# been written to stdout, in its own handler, so a telemetry failure can neither
+# suppress a block nor delay one.
+# --------------------------------------------------------------------------- #
+HOOK_NAME = "handoff-write-guard"
+
+# The act this guard looks for: a handoff write since the doc's first read, by any of
+# the three satisfaction routes. Named in the row so a consumer never has to infer
+# what `satisfied` meant.
+SATISFIER = "handoff-write"
+
+ENTITY_DOC = "handoff-doc"
+ENTITY_SESSION = "session"
+
+# 🔴 SPELLED AS LITERALS, NOT IMPORTED, and pinned against `hook_telemetry.DECISIONS`
+# by an ASSERTED LEDGER (`test_hook_telemetry.py::
+# test_the_decision_vocabulary_is_pinned_two_way`). An import would make this hook's
+# decision path depend on a module that is absent on a host without the collector —
+# the one host where it must behave exactly as it did before.
+DECISION_FIRED = "fired"
+DECISION_ARMED = "armed"
+DECISION_SUPPRESSED = "suppressed"
+DECISION_UNMEASURED = "could-not-measure"
+
+# Session-level refusals that mean the live read FAILED rather than came back clean.
+# 🔴 Their own value, never folded into a clean one. `ledger-unreadable` appears here
+# AND as a per-doc reason: the same fact is reachable at two depths — a record
+# `tracked_docs` could not parse at all (session level) and one whose read stamp
+# `doc_state` could not parse (per doc). One token, because a consumer asking "how
+# often could this guard not measure?" wants both.
+UNMEASURED_SESSION_REASONS = frozenset({"no-session", "ledger-unreadable"})
+
+# 🔴 THE CLOSED REASON VOCABULARY, pinned two-way against this file's own emitters by
+# `test_hook_telemetry.py::test_the_guards_reason_vocabulary_is_pinned_two_way`.
+REASONS = frozenset({
+    "not-stop", "subagent", "no-session", "no-state", "no-work", "no-tracked-docs",
+    "handoff-written", "handoff-missing", "ladder-spent", "ledger-unreadable",
+})
+
+
+def _session_row(rows, session_id, reason):
+    """Append the session-level record for a Stop that never reached a doc.
+
+    🔴 THESE ARE THE DENOMINATOR. A row set holding only fires cannot answer "out of
+    how many?" — it is a numerator wearing a rate, which is exactly the defect this
+    instrumentation exists to remove. So a Stop that refuses at the very first gate
+    still produces a row.
+
+    🔴 `measured` IS DERIVED FROM THE REASON, not passed in. One rule, one place: a
+    caller that could disagree with `UNMEASURED_SESSION_REASONS` is a second copy of
+    the same predicate, and this repo re-fixed exactly that shape five times before
+    consolidating it.
+    """
+    if rows is None:
+        return None
+    measured = reason not in UNMEASURED_SESSION_REASONS
+    row = {"hook": HOOK_NAME,
+           "decision": (DECISION_SUPPRESSED if measured
+                        else DECISION_UNMEASURED),
+           "session": session_id or None,
+           "entity": session_id or None,
+           "entity_kind": ENTITY_SESSION,
+           "satisfier": SATISFIER,
+           # Never evaluated: none of these gates reaches the satisfaction check.
+           "satisfied": None,
+           "measured": bool(measured),
+           "reason": reason}
+    rows.append(row)
+    return row
+
+
+def _doc_row(rows, session_id, key, decision, reason, satisfied=None,
+             measured=True, fire=None, rung=None):
+    """Append the per-doc record. `key` is the ledger key — a sanitized BASENAME,
+    never the resolved path, which carries $HOME."""
+    if rows is None:
+        return None
+    extra = {}
+    if fire is not None:
+        extra["fire"] = fire
+    if rung is not None:
+        extra["rung"] = rung
+    row = {"hook": HOOK_NAME,
+           "decision": decision,
+           "session": session_id or None,
+           "entity": key,
+           "entity_kind": ENTITY_DOC,
+           "satisfier": SATISFIER,
+           "satisfied": satisfied,
+           "measured": bool(measured),
+           "reason": reason,
+           "extra": extra}
+    rows.append(row)
+    return row
+
+
+def _unreadable_read_records(state_dir):
+    """True when the session dir holds `read-` entries and `tracked_docs` returned
+    NONE of them — i.e. every record it kept was unparseable.
+
+    🔴 AN OBSERVATION, NOT A GATE. It is consulted only to label a telemetry row, it
+    is reached only when `tracked_docs` already came back empty, and no verdict
+    depends on it. Errors are swallowed to False: a state dir that cannot be listed is
+    not evidence of an unreadable record.
+    """
+    try:
+        return any(n.startswith("read-") for n in os.listdir(state_dir))
+    except Exception:                     # noqa: BLE001
+        return False
+
+
+def _telemetry():
+    """The shared emitter module, or None. Never raises.
+
+    The deployed guard is `~/.claude/hooks/handoff-write-guard.py`, so Python has
+    already put `~/.claude/hooks/` on `sys.path` and the plain import resolves. The
+    explicit insert is the fallback for every other way this file is loaded — a test
+    importing it by path, a run out of the repo — where `sys.path[0]` is something
+    else.
+    """
+    try:
+        import hook_telemetry
+        return hook_telemetry
+    except Exception:                     # noqa: BLE001
+        pass
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import hook_telemetry
+        return hook_telemetry
+    except Exception:                     # noqa: BLE001 — no telemetry is a no-op
+        return None
+
+
+def _emit_telemetry(rows):
+    """Ship the collected decision records. Returns how many were written."""
+    ht = _telemetry()
+    if ht is None:
+        return 0
+    return ht.emit_rows(rows)
+
+
+# --------------------------------------------------------------------------- #
 # The verdict for one tracked doc
 # --------------------------------------------------------------------------- #
 def doc_state(state_dir, rec):
@@ -967,30 +1137,61 @@ def post_tool_use(data, now=None):
 # --------------------------------------------------------------------------- #
 # Stop
 # --------------------------------------------------------------------------- #
-def stop_decision(data):
+def stop_decision(data, rows=None):
     """Pure-ish decision for a Stop payload -> (kind, text), kind in
     {"silent", "notice", "block"}. Side effect: it bumps the per-doc fire counters,
-    which is what the ladder is made of."""
+    which is what the ladder is made of.
+
+    🔴 `rows` IS AN OUT-PARAMETER AND IS NOT OPTIONAL BEHAVIOUR — it is optional
+    OBSERVATION. Pass a list and this appends one telemetry record per decision it
+    reaches (one per tracked doc, or one session-level record for a Stop that never
+    reaches a doc); pass nothing and not one line of this function behaves
+    differently. That shape is what lets every existing caller and test stay exactly
+    as it was while the decision becomes measurable. The records are DICTS, not
+    emissions: nothing here touches the spool, so a decision cannot be delayed or
+    lost by telemetry. `main()` owns the emission, after the verdict has reached
+    stdout. See `_emit_telemetry`.
+    """
     d = data if isinstance(data, dict) else {}
+    session_id = d.get("session_id") or ""
+
+    def refuse(reason):
+        _session_row(rows, session_id, reason)
+        return ("silent", "")
+
     if d.get("hook_event_name") not in (None, "Stop"):
-        return ("silent", "")             # 🔴 SubagentStop and friends: refused
+        return refuse("not-stop")         # 🔴 SubagentStop and friends: refused
     if d.get("agent_id"):
-        return ("silent", "")
+        return refuse("subagent")
     state_dir = _state_dir(d)
-    if state_dir is None or not os.path.exists(state_dir):
-        return ("silent", "")
+    if state_dir is None:
+        # No session id at all: there is nothing to resolve a ledger against, so this
+        # is a could-not-measure rather than a clean "nothing was owed".
+        return refuse("no-session")
+    if not os.path.exists(state_dir):
+        return refuse("no-state")
     if not work_happened(state_dir):
         # 🔴 THE FALSE-POSITIVE KILLER. A session that resumed a doc, reconciled it,
         # reported that nothing had moved and stopped owes the record NOTHING — and
         # the measurement agrees: legitimate `no-change` declines were counted
         # separately and were ZERO, so this case is already handled by the skill.
-        return ("silent", "")
+        return refuse("no-work")
 
     docs = tracked_docs(state_dir)
     if not docs:
-        return ("silent", "")
+        # 🔴 AN EMPTY LEDGER AND AN UNREADABLE ONE ARE NOT THE SAME FACT, AND THEY
+        # SHARE AN OBSERVABLE. `tracked_docs` skips a record it cannot parse —
+        # correctly, since it must not produce a verdict about a document nobody can
+        # name — so `{}` covers both "this session read no handoff" and "every record
+        # it kept was truncated". Reporting the second as a clean measurement is
+        # precisely the defect this instrumentation exists to remove, one level up
+        # from `doc_state`'s own "unknown". The extra `listdir` is charged ONLY when
+        # somebody is observing: it changes no verdict, and both arms still return
+        # ("silent", "").
+        if rows is not None and _unreadable_read_records(state_dir):
+            return refuse("ledger-unreadable")
+        return refuse("no-tracked-docs")
 
-    session_id = d.get("session_id") or ""
     blocks, notices = [], []
     # No `[:MAX_DOCS]` slice: `record_read` refuses to create a fourth `read-` file, so
     # `tracked_docs` structurally cannot return more than MAX_DOCS and a slice here
@@ -999,17 +1200,36 @@ def stop_decision(data):
         rec = docs[key]
         state = doc_state(state_dir, rec)
         if state == "written":
+            _doc_row(rows, session_id, key, DECISION_SUPPRESSED, "handoff-written",
+                     satisfied=True)
             continue
         if state == "unknown":
             # 🔴 NEVER blocks, and spends its OWN counter. Cannot-measure is reported,
             # never enforced — and never at the expense of the block budget a measured
             # miss will need if the state becomes readable later in this session.
-            if escalate(bump_fires(state_dir, key, "unknown")) != "silent":
+            n = bump_fires(state_dir, key, "unknown")
+            rung = escalate(n)
+            if rung != "silent":
                 notices.append(unknown_text(rec.get("doc", key), key, session_id))
+            # 🔴 `could-not-measure` WHETHER OR NOT IT SPOKE. The ladder decides who
+            # hears about it; it does not change what was measured, and folding a
+            # spent-ladder unknown into `armed` would make an unreadable ledger
+            # indistinguishable from a measured miss the guard had stopped nagging
+            # about. `rung` rides along in `extra` so the two are separable.
+            _doc_row(rows, session_id, key, DECISION_UNMEASURED, "ledger-unreadable",
+                     satisfied=None, measured=False, fire=n, rung=rung)
             continue
-        rung = escalate(bump_fires(state_dir, key))
+        n = bump_fires(state_dir, key)
+        rung = escalate(n)
         if rung == "silent":
+            # Eligible and measured, withheld by the ladder's own budget — ARMED,
+            # not suppressed. A compliance rate that counted these as "nothing owed"
+            # would be wrong by exactly the size of the ladder.
+            _doc_row(rows, session_id, key, DECISION_ARMED, "ladder-spent",
+                     satisfied=False, fire=n, rung=rung)
             continue
+        _doc_row(rows, session_id, key, DECISION_FIRED, "handoff-missing",
+                 satisfied=False, fire=n, rung=rung)
         (blocks if rung == "block" else notices).append(
             missing_text(rec.get("doc", key), key, rec.get("first_read_ts", "?"),
                          session_id))
@@ -1152,10 +1372,13 @@ def main():
         if event == "PostToolUse":
             post_tool_use(data)
         elif event == "Stop":
-            emit(*stop_decision(data))
+            rows = []
+            emit(*stop_decision(data, rows=rows))
             # AFTER the decision has been emitted: the operator's turn never waits on
             # housekeeping, and a prune that raises cannot suppress a verdict already
-            # written.
+            # written. The telemetry goes first of the two because it is the cheaper
+            # of them and because `prune` can legitimately walk a large cache.
+            _emit_telemetry(rows)
             prune()
         # every other event, SubagentStop included, is not ours
     except Exception:                     # noqa: BLE001 — see the fail-open note above

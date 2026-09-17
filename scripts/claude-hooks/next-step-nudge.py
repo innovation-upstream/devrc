@@ -466,11 +466,6 @@ def suppressed_by(text):
     return [name for name, rx in SUPPRESSORS if rx.search(t)]
 
 
-def names_next_step(text):
-    """True if the turn already names a next step, asks, or offers a marked choice."""
-    return bool(suppressed_by(text))
-
-
 def is_terminal_prompt(prompt):
     return bool(prompt) and bool(TERMINAL_PROMPT.match(prompt))
 
@@ -666,22 +661,39 @@ NUDGE = (
 )
 
 
-def should_nudge(data, transcript_reader=_turn_shape):
-    """Pure decision, no side effects. True => this turn should be nudged.
+def decide(data, transcript_reader=_turn_shape):
+    """The gates, as a RECORD rather than a bool: `{"fire", "reason", "suppressors",
+    "msg_chars", "tool_uses"}`.
 
-    Split out from main() so the gates can be tested directly AND mutation-tested one at
-    a time; main() adds only the claim and the exit-2 emission.
+    🔴 THE REASON IS THE POINT, and it is why this exists beside `should_nudge` rather
+    than inside it. Until this hook emitted telemetry, the only observable of a
+    non-fire was SILENCE — and "the turn already named a next step", "the operator
+    asked a one-line question" and "the transcript could not be read at all" all
+    produce exactly that. A measurement forced to infer which one happened from
+    transcript prose is the shape that returned a bogus 100.0% compliance rate
+    elsewhere in this repo: the guard's own message contained the strings that defined
+    the answer. Naming the gate HERE, at the moment it decides, removes the inference.
+
+    `reason` is a CLOSED vocabulary — one token per gate, plus `""` when it fires.
+    `should_nudge` below is the bool view of the same computation, so the two can never
+    disagree about whether to nudge; nothing about the existing decision changed.
     """
+    def no(reason, **kw):
+        rec = {"fire": False, "reason": reason, "suppressors": [],
+               "msg_chars": None, "tool_uses": None}
+        rec.update(kw)
+        return rec
+
     if not isinstance(data, dict):
-        return False
+        return no("bad-payload")
     if data.get("hook_event_name") not in (None, "Stop"):
-        return False          # SubagentStop and friends: a subagent's turn never
-    if data.get("agent_id"):  # reaches the operator, so it owes them no next step.
-        return False
+        return no("not-stop")  # SubagentStop and friends: a subagent's turn never
+    if data.get("agent_id"):   # reaches the operator, so it owes them no next step.
+        return no("subagent")
     if data.get("stop_hook_active"):
-        return False          # never nudge two Stops in a row
+        return no("stop-hook-active")   # never nudge two Stops in a row
     if os.environ.get(OPT_OUT_ENV):
-        return False          # headless / batch caller: nobody is here to read it
+        return no("opt-out")   # headless / batch caller: nobody is here to read it
 
     # 🔴 There is deliberately NO `stop_reason` gate. An earlier revision had one —
     # "max_tokens/tool_use is truncation, not a considered end" — and it was DEAD: the
@@ -694,27 +706,45 @@ def should_nudge(data, transcript_reader=_turn_shape):
     # indistinguishable from one that works, and it invited a maintainer to trust it.
 
     msg = data.get("last_assistant_message")
-    if not isinstance(msg, str) or len(msg) < MIN_MESSAGE_CHARS:
-        return False
+    if not isinstance(msg, str):
+        return no("no-message")
+    if len(msg) < MIN_MESSAGE_CHARS:
+        return no("message-too-short", msg_chars=len(msg))
 
-    if names_next_step(msg):
-        return False
+    hits = suppressed_by(msg)
+    if hits:
+        return no("named-next-step", suppressors=hits, msg_chars=len(msg))
 
     path = data.get("transcript_path")
     if not isinstance(path, str) or not path:
-        return False
+        return no("no-transcript-path", msg_chars=len(msg))
     shape = transcript_reader(path)
     if shape is None:
-        return False          # cannot establish the turn's shape -> stay silent
+        # cannot establish the turn's shape -> stay silent. 🔴 A COULD-NOT-MEASURE,
+        # never a clean "nothing was owed" — see `decision_for` below.
+        return no("shape-unreadable", msg_chars=len(msg))
     prompt, tools = shape
     if tools < 1:
-        return False          # no work in this turn -> nothing to have a next step for
+        # no work in this turn -> nothing to have a next step for
+        return no("no-tool-use", msg_chars=len(msg), tool_uses=tools)
     if prompt is not None:
         if is_terminal_prompt(prompt):
-            return False
+            return no("terminal-prompt", msg_chars=len(msg), tool_uses=tools)
         if is_short_question(prompt):
-            return False
-    return True
+            return no("short-question", msg_chars=len(msg), tool_uses=tools)
+    return {"fire": True, "reason": "", "suppressors": [],
+            "msg_chars": len(msg), "tool_uses": tools}
+
+
+def should_nudge(data, transcript_reader=_turn_shape):
+    """Pure decision, no side effects. True => this turn should be nudged.
+
+    The bool view of `decide` — kept as the named predicate because it is what every
+    gate test drives and what main() reads. Split out from main() so the gates can be
+    tested directly AND mutation-tested one at a time; main() adds only the claim and
+    the emission.
+    """
+    return decide(data, transcript_reader=transcript_reader)["fire"]
 
 
 def emit(text=NUDGE):
@@ -737,20 +767,189 @@ def emit(text=NUDGE):
     sys.stdout.write("\n")
 
 
+# --------------------------------------------------------------------------- #
+# Telemetry — ONE row per Stop this hook sees, fired or not.
+#
+# 🔴 THE NON-FIRES ARE THE POINT. This hook fires on ~5% of turns; a row set that
+# contained only fires would be a numerator with no denominator, which is exactly the
+# shape that produced a bogus 100.0% compliance rate elsewhere in this repo. So every
+# Stop emits, and the `decision` says which population the row belongs to.
+#
+# 🔴 IT CANNOT COST THE TURN. `hook_telemetry.emit_decision` swallows every failure,
+# writes one O_APPEND line to a local spool, spawns nothing and opens no socket; the
+# import below is guarded twice over. The emission happens AFTER the nudge has been
+# written to stdout, so the model never waits on bookkeeping.
+# --------------------------------------------------------------------------- #
+HOOK_NAME = "next-step-nudge"
+
+# The act whose ABSENCE makes this hook fire: a forward-looking construction in the
+# tail of the final message. Named in the row so a consumer never has to infer what
+# "satisfied" meant for this hook.
+SATISFIER = "next-step-line"
+
+# Reasons that mean the hook was ELIGIBLE and was withheld by its own once-per-session
+# budget — not by a gate saying no next step was owed. A rate computed without
+# separating these is off by the size of the budget.
+ARMED_REASONS = frozenset({"already-fired", "claim-lost"})
+
+# Reasons where the live read this decision rests on did NOT succeed. 🔴 Their own
+# decision value, never folded into a clean one: a transcript that could not be read
+# and a turn that owed nothing produce the same silence.
+UNMEASURED_REASONS = frozenset({"bad-payload", "no-transcript-path",
+                                "shape-unreadable"})
+
+# Reasons reached BEFORE the suppressors are consulted. For these, `satisfied` is
+# None — "never evaluated" — and not False. 🔴 The distinction is the same one
+# `could-not-measure` makes one level up: a field that reports "we looked and found
+# nothing" for a case where nobody looked is how a denominator quietly acquires rows
+# that do not belong in it.
+PRE_SUPPRESSOR_REASONS = frozenset({"bad-payload", "not-stop", "subagent",
+                                    "stop-hook-active", "opt-out", "no-message",
+                                    "message-too-short"})
+
+# 🔴 THE CLOSED REASON VOCABULARY, pinned two-way against `decide`'s own returns by
+# `test_hook_telemetry.py::test_the_reason_vocabulary_is_pinned_two_way_against_decide`
+# — a token here that no branch produces, or a branch producing a token not here,
+# fails the suite. Without that a consumer's `WHERE reason IN (…)` silently drops a
+# whole population the day a gate is added.
+REASONS = frozenset({
+    "", "already-fired", "claim-lost", "named-next-step", "no-tool-use",
+    "terminal-prompt", "short-question", "no-transcript-path", "shape-unreadable",
+}) | ARMED_REASONS | UNMEASURED_REASONS | PRE_SUPPRESSOR_REASONS
+
+
+def satisfied_for(rec):
+    """Did the hook find the satisfying act? True / False / None. Pure.
+
+    None is "never evaluated", and it is not a hedge: seven of this hook's gates
+    return before the suppressors are ever run.
+    """
+    if not isinstance(rec, dict):
+        return None
+    reason = rec.get("reason") or ""
+    if reason in PRE_SUPPRESSOR_REASONS:
+        return None
+    return reason == "named-next-step"
+
+
+# 🔴 THE VOCABULARY IS SPELLED HERE AS LITERALS, NOT IMPORTED — and it is pinned
+# against `hook_telemetry.DECISIONS` by an ASSERTED LEDGER
+# (`test_hook_telemetry.py::test_the_decision_vocabulary_is_pinned_two_way`) rather
+# than by an import. Importing them would make `decision_for` — a pure function — fail
+# on a host where the collector is absent, which is the one host where this hook must
+# behave exactly as it did before. A test that fails when either side moves is what
+# stops the two spellings drifting; a comment would not be.
+DECISION_FIRED = "fired"
+DECISION_ARMED = "armed"
+DECISION_SUPPRESSED = "suppressed"
+DECISION_UNMEASURED = "could-not-measure"
+
+
+def decision_for(rec):
+    """`(decision, reason)` for a `decide()` record plus main()'s claim outcome. Pure.
+
+    Split out from `_emit_telemetry` so the mapping — which is the whole semantic
+    content of the row — is testable without a spool, a filesystem or a subprocess.
+    """
+    if not isinstance(rec, dict):
+        return (DECISION_UNMEASURED, "bad-payload")
+    reason = rec.get("reason") or ""
+    if rec.get("fired"):
+        return (DECISION_FIRED, "")
+    if reason in ARMED_REASONS:
+        return (DECISION_ARMED, reason)
+    if reason in UNMEASURED_REASONS:
+        return (DECISION_UNMEASURED, reason)
+    return (DECISION_SUPPRESSED, reason)
+
+
+def _telemetry():
+    """The shared emitter module, or None. Never raises.
+
+    The deployed hook is `~/.claude/hooks/next-step-nudge.py`, so Python has already
+    put `~/.claude/hooks/` on `sys.path` and the plain import resolves. The explicit
+    path insert is the fallback for every other way this file is loaded — a test
+    importing it by path, an operator running it out of the repo — where the script
+    directory is NOT what `sys.path[0]` holds.
+    """
+    try:
+        import hook_telemetry
+        return hook_telemetry
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import hook_telemetry
+        return hook_telemetry
+    except Exception:  # noqa: BLE001 — no telemetry is a no-op, never an error
+        return None
+
+
+def _emit_telemetry(data, rec):
+    """Emit this Stop's single decision row. Best-effort; returns the line or "".
+
+    The ENTITY is the session, because that is the only thing this hook reasons about:
+    it has no per-document or per-task subject. It is emitted as an entity anyway —
+    rather than left implicit in the `session` column — so a consumer can join hooks
+    with different entity kinds in one query without special-casing this one.
+    """
+    ht = _telemetry()
+    if ht is None:
+        return ""
+    decision, reason = decision_for(rec)
+    session = data.get("session_id") if isinstance(data, dict) else None
+    extra = {}
+    if isinstance(rec, dict):
+        if rec.get("suppressors"):
+            # Suppressor NAMES — `asks`, `commits`, `offers`, … — which is the whole
+            # closed set this hook can report. Never the matched text.
+            extra["suppressors"] = rec["suppressors"]
+        for key in ("msg_chars", "tool_uses"):
+            if rec.get(key) is not None:
+                extra[key] = rec[key]
+    return ht.emit_decision(
+        HOOK_NAME, decision,
+        session=session,
+        entity=session,
+        entity_kind="session",
+        satisfier=SATISFIER,
+        satisfied=satisfied_for(rec),
+        measured=(reason not in UNMEASURED_REASONS),
+        reason=reason,
+        extra=extra)
+
+
 def main():
     # 🔴 ONE exit, and it is always 0. Nothing inside the try may call sys.exit(): a
     # SystemExit is a BaseException, so `except Exception` would NOT catch it and the
     # earlier `except SystemExit: raise` arm below it was unreachable decoration. The
     # structure is now "do the work, swallow anything, exit 0" — which is the whole
     # fail-open claim, expressed so that there is exactly one place to read it.
+    data = None
+    rec = None
     try:
         data = json.load(sys.stdin)
-        if should_nudge(data):
+        rec = decide(data)
+        if rec["fire"]:
             state_dir = _state_dir(data)
-            if not already_fired(state_dir) and claim(state_dir):
+            if already_fired(state_dir):
+                rec["reason"] = "already-fired"
+            elif claim(state_dir):
                 emit()
+                rec["fired"] = True
+            else:
+                rec["reason"] = "claim-lost"
     except Exception:
         pass      # fail-open HERE means silence — see the module docstring.
+    # 🔴 AFTER the decision has reached stdout, and in its OWN handler: a telemetry
+    # failure must not be able to suppress a nudge that was already written, and a
+    # payload that blew up above still deserves a `could-not-measure` row.
+    try:
+        _emit_telemetry(data, rec)
+    except Exception:  # noqa: BLE001
+        pass
     sys.exit(0)
 
 

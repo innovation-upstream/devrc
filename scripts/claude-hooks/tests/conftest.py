@@ -278,3 +278,31 @@ except ModuleNotFoundError as _guard9_exc:  # pragma: no cover - harness-only pa
         "PYTHONPATH=<repo>/scripts (see `_pytest` in "
         "scripts/tests/test_hook_tests_dir_collects.py)."
     ) from _guard9_exc
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 SPOOL ISOLATION FOR THIS DIRECTORY — measured, not precautionary.
+#
+# `scripts/claude-hooks/hook_telemetry.py` appends a `source=hook` row to
+# `<ACTIVITY_SPOOL_DIR>/current.log` on every Stop-hook decision, and the activity
+# collector ships that spool to the operator's production ClickHouse. Several suites
+# here drive a hook's `main()` IN PROCESS, so the row lands wherever this process
+# resolves the spool — and `spool_emit.default_spool_dir()` falls back to
+# `${XDG_STATE_HOME:-~/.local/state}/activity/spool` when the variable is absent.
+#
+# MEASURED on this branch: `pytest scripts/claude-hooks/tests/test_next_step_nudge.py
+# -k main` with `ACTIVITY_SPOOL_DIR` unset wrote **2 rows** into the fallback spool.
+# `scripts/run-tests.sh` exports the variable (GUARD 8) so the gate never saw it; a
+# bare `pytest`, which is the documented way to run one of these files, did.
+#
+# This is the same fix GUARD 8 applied one level up, attached where it covers every
+# module in this directory rather than in the one suite that noticed. It is autouse
+# and unconditional: a test that wants its own spool simply sets the variable again
+# (monkeypatch is per-test and ordered), and a test that wants the REAL spool has no
+# business existing.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _devrc_hook_spool_isolation(tmp_path_factory, monkeypatch):
+    spool = tmp_path_factory.mktemp("hook-spool")
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(spool))
+    return spool

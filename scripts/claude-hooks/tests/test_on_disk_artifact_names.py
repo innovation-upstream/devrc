@@ -632,6 +632,23 @@ OWNS_NO_ON_DISK_STATE = {
                                  # docstring names. The enumeration, not the scan, is
                                  # what covers this entry.
     "guard_core.py",             # pure predicate library
+    "hook_telemetry.py",         # 🔴 IT DOES WRITE TO DISK — one appended line per
+                                 # Stop-hook decision — but NOT to a hook cache, and
+                                 # this registry is the ledger of `~/.cache/…` names
+                                 # that a `home-manager switch` can orphan under a
+                                 # live session. The one path it writes is the
+                                 # activity spool, whose name is resolved by
+                                 # `spool_emit.default_spool_dir()` — a COLLECTOR
+                                 # constant, pinned by the collector's own suite and
+                                 # by `scripts/tests/test_activity_spool_isolation.py`
+                                 # — and it holds no session-scoped anchor that a
+                                 # rename could strand: an orphaned spool line is one
+                                 # unshipped telemetry row, not a guard going quiet.
+                                 # CACHE_LITERAL cannot match it (the spool lives
+                                 # under `.local/state`, which that pattern does not
+                                 # name), so the ENUMERATION is what covers this
+                                 # entry, not the scan — the same blind spot
+                                 # `bg-command-capture.py` above records.
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
                                  # seam is pinned by test_registrar_activation.py
     "session-stamp.py",          # delegates every path to lib/session_trailer.py,

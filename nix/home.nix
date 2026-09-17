@@ -1727,6 +1727,38 @@ in
   home.file.".claude/hooks/next-step-nudge.py" = {
     source = ../scripts/claude-hooks/next-step-nudge.py;
   };
+  # 🔴 THE STOP-HOOK DECISION EMITTER — the shared library behind next-step-nudge.py
+  # and handoff-write-guard.py, and the reason both of them are now measurable.
+  #
+  # Seven Stop hooks fire ~20,700 times per six weeks on this host and NONE of them
+  # reaches activity.events: the `claude` source tails the same transcripts but keeps
+  # only prompt/command/session-summary. Every question about what a hook decided had
+  # to be answered by inferring it from transcript prose, and in one session that cost
+  # three wrong answers — a bogus 100.0% compliance rate (each guard's own re-fired
+  # message contains the strings that define compliance), a lift figure wrong by 4.8pp
+  # (the detector matched ANY task id, because no per-entity key was recorded), and a
+  # hypothesis that could not be tested at all (85 of 92 comment bodies went via
+  # --body-file and never reached the transcript). This makes them a query.
+  #
+  # One `source=hook kind=stop-decision` row per Stop, carrying the decision
+  # (armed/fired/suppressed/could-not-measure), the ENTITY it was reasoning about, the
+  # satisfying act it looked for and whether the live read succeeded. It appends ONE
+  # line to the local activity spool — no network, no subprocess, no argv payload —
+  # and every failure path is a silent no-op, because a Stop hook that raises is felt
+  # at the exact moment a session is trying to end.
+  #
+  # 🔴 It ships HERE, beside the hooks, for the guard_core.py reason: a hook is
+  # invoked with its ~/.claude/hooks/ copy as the script argument, so Python puts THAT
+  # directory on sys.path and a library the hook imports must sit in it. It reaches
+  # `spool_emit` at ~/.config/activity-collector/keylog/ — deployed below — and is a
+  # silent no-op on a host where that is absent.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch succeeds with the two hooks deployed and the module missing — the #452
+  # shape, where every component is tested and the seam is owned by nobody.
+  home.file.".claude/hooks/hook_telemetry.py" = {
+    source = ../scripts/claude-hooks/hook_telemetry.py;
+  };
   # 🔴 THE AGENT ACTIVITY LEDGER — writer 1 (Claude Code), plus the shared module
   # it and `scripts/session-manager` BOTH read the record shape from.
   #
