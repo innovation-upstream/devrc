@@ -3872,6 +3872,32 @@ class TestSkillDocsArePinned:
         ),
     ]
 
+    @staticmethod
+    def _assert_resume_reference_pin(text: str, sentence: str, why: str) -> None:
+        """The pin predicate, as ONE function so the positive control below can
+        exercise the same code the real pins run.
+
+        🔴 IT WAS NOT ONE FUNCTION UNTIL 2026-09-17, AND THE CONTROL CERTIFIED
+        NOTHING. `test_a_reworded_RESUME_pin_is_still_caught_in_its_new_home`
+        claimed rewording "must make the SAME predicate the real test uses go
+        red" and then never invoked it: its live assertions duplicated the real
+        pin and ended on `sentence not in reworded`, which is a tautology of
+        `str.replace`. MEASURED: gutting the real pin's assertion to `assert
+        True` left the control GREEN and all 55 tests in the class green, while
+        the identical mutation on the HANDOFF twin (`_assert_rationale_pin`,
+        below in this file) correctly failed with DID NOT RAISE. Extracted here
+        so the two are the same shape.
+        """
+        assert sentence in text, (
+            f"claude/skills/resume/reference/cairn-recall.md no longer contains the "
+            f"sentence pinning {why}.\n"
+            f"  missing: {sentence!r}\n"
+            f"  Either restore it or change the pinned `subsystem_recall` module in\n"
+            f"  the SAME commit. If you moved the sentence BACK into SKILL.md, move\n"
+            f"  this row back to RESUME_SENTENCES too — a pin pointing at the wrong\n"
+            f"  file passes or fails for the wrong reason."
+        )
+
     @pytest.mark.parametrize(
         "sentence,why",
         RESUME_SENTENCES_REFERENCE,
@@ -3883,15 +3909,8 @@ class TestSkillDocsArePinned:
         """The half of step 4 that moved to `reference/cairn-recall.md` in the
         2026-09-17 prune. Same predicate, different file — see the comment on
         RESUME_REFERENCE for why the pin had to move rather than widen."""
-        doc = RESUME_REFERENCE.read_text(encoding="utf-8")
-        assert sentence in doc, (
-            f"claude/skills/resume/reference/cairn-recall.md no longer contains the "
-            f"sentence pinning {why}.\n"
-            f"  missing: {sentence!r}\n"
-            f"  Either restore it or change the pinned `subsystem_recall` module in\n"
-            f"  the SAME commit. If you moved the sentence BACK into SKILL.md, move\n"
-            f"  this row back to RESUME_SENTENCES too — a pin pointing at the wrong\n"
-            f"  file passes or fails for the wrong reason."
+        self._assert_resume_reference_pin(
+            RESUME_REFERENCE.read_text(encoding="utf-8"), sentence, why
         )
 
     def test_a_reworded_RESUME_pin_is_still_caught_in_its_new_home(self) -> None:
@@ -3905,15 +3924,17 @@ class TestSkillDocsArePinned:
         the file they now point at rather than against some file somewhere.
         """
         real = RESUME_REFERENCE.read_text(encoding="utf-8")
-        for sentence, _why in self.RESUME_SENTENCES_REFERENCE:
+        for sentence, why in self.RESUME_SENTENCES_REFERENCE:
             assert sentence in real, "precondition: the pin passes on the real text"
             # A plausible REWORDING, not a deletion — the drift that actually
             # happens when someone "tightens" a paragraph.
             reworded = real.replace(sentence, "the output shape is described elsewhere")
             assert reworded != real, f"the rewrite was a no-op for {sentence!r}"
-            assert sentence not in reworded, (
-                f"the rewrite left {sentence!r} behind, so the assertion below "
-                f"would prove nothing"
+            with pytest.raises(AssertionError) as caught:
+                self._assert_resume_reference_pin(reworded, sentence, why)
+            assert sentence in str(caught.value), (
+                "the failure must name the missing sentence, or a maintainer "
+                "cannot tell which pin broke"
             )
 
     def test_the_resume_reference_pin_can_report_absence(self) -> None:

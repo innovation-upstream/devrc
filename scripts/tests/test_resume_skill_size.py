@@ -14,22 +14,47 @@ before any work starts". One H2 (`Steps`) carried 50,742 B of it, and the skill
 routed to NO `reference/` sidecar at all, which is why the body carried
 everything.
 
-🔴 THIS IS THE SIXTH BYTE GATE IN THE REPO AND THE FOURTH ON A SKILL BODY -- it
-follows an established pattern, it did not invent one. The set at the time this
-landed:
+🔴 THIS IS THE NINTH ENFORCED BYTE CEILING IN THE REPO AND THE SIXTH ON A SKILL
+BODY -- it follows an established pattern, it did not invent one. The census,
+RE-DERIVED 2026-09-17 (an earlier version of this header said "SIXTH ... FOURTH",
+undercounting by three; see the method note below for how that happened):
 
     claude/RULES.md                         test_rules_size.py
-    scripts/browser-bridge/SKILL.md         browser-bridge/tests/test_skill_size.py
-    claude/skills/prune-skill/SKILL.md      test_prune_skill_size.py
-    claude/skills/session-manager/SKILL.md  test_session_manager_skill_size.py
-    claude/skills/handoff/SKILL.md          test_handoff_skill_size.py
-    claude/skills/resume/SKILL.md           this module
+    scripts/browser-bridge/SKILL.md         browser-bridge/tests/test_skill_size.py     [body]
+    claude/skills/prune-skill/SKILL.md      test_prune_skill_size.py                    [body]
+    claude/skills/session-manager/SKILL.md  test_session_manager_skill_size.py          [body]
+    claude/skills/handoff/SKILL.md          test_handoff_skill_size.py                  [body]
+    claude/skills/clawgate/SKILL.md         claude-hooks/tests/
+                                              test_clawgate_task_interview_guard.py     [body]
+    claude/skills/resume/SKILL.md           this module                                 [body]
     claudedocs/**/handoff-*.md              test_handoff_doc_size.py  (many files, not one)
+    scripts/browser-bridge/reference/       browser-bridge/tests/
+      validation-prompt.md                    test_validation_prompt.py  (a skill SIDECAR)
 
-⚠ CLAUDE.md carries a bullet naming that set and a union grep that finds it
-(`MIN_HEADROOM|st_size <=`). This module uses `MIN_HEADROOM_BYTES`, so the grep
-finds it -- but the bullet's PROSE list is hand-maintained and was updated in the
-same commit as this file. If you add a seventh, update it there too.
+🔴 HOW THIS WAS DERIVED, BECAUSE THE PREVIOUS NUMBER WAS DERIVED BY COPYING.
+CLAUDE.md gives a union grep -- `git grep -lE 'MIN_HEADROOM|st_size <=' -- scripts/`
+-- and says in the same breath that it is NOT provably complete. Both halves bit:
+
+  * the union grep returns 12 paths. READ each one: 8 are real doc ceilings and 4
+    are over-matches (`dl-router/server.py` compares file sizes while deduping;
+    `present/measure.py`, `skill-audit.py` and `test_skill_audit.py` READ another
+    gate's constants rather than owning one). Counting the hits gives 12; counting
+    the gates gives 8.
+  * a NINTH is INVISIBLE to that grep: `test_validation_prompt.py` owns
+    `MAX_DOC_BYTES` and asserts `size <= MAX_DOC_BYTES`, matching neither pattern.
+    It was found by sweeping module-level `MAX_*BYTES` constants instead --
+    a different, also-incomplete method. Two methods, two different misses.
+
+  Each half alone is worse: `MIN_HEADROOM` alone finds 7 of the 8 (it misses
+  clawgate); `st_size <=` alone finds 2 (clawgate, plus this module only because
+  this very paragraph quotes the pattern) and misses six.
+
+⚠ SO THE NUMBER ABOVE IS A MEASUREMENT WITH A KNOWN BLIND SPOT, NOT A CENSUS.
+There is still no test enumerating ceilinged docs two-way, which is the only
+thing that would stop this recurring. CLAUDE.md's bullet carries the same list
+and was corrected in the same commit as this file; if you add a tenth, update it
+there too -- and re-derive rather than incrementing, which is how the first
+number here was wrong in both directions at once.
 
 WHAT THE CEILING PROTECTS -- AND WHAT IT MUST NOT DO
 ----------------------------------------------------

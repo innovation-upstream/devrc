@@ -355,9 +355,15 @@ _SENTINEL_WINDOW = 120
 
 # 🔴 TWO-WAY, and the VALUE is the count. A per-file boolean cannot see a file
 # that drops one of its two mandates, which is the SHRINK half of the docstring.
-# Keys are REPO-RELATIVE PATHS, not skill names: three deployed skills live
-# OUTSIDE `claude/skills/` (see `_skill_bodies`), so a bare name is both
+# Keys are REPO-RELATIVE `SKILL.md` PATHS, not skill names: three deployed skills
+# live OUTSIDE `claude/skills/` (see `_skill_sources`), so a bare name is both
 # ambiguous and a silent-overwrite hazard in the dict comprehension below.
+#
+# ⚠ A KEY NAMES THE WHOLE SKILL, body plus `reference/`/`flows/` sidecars, so the
+# count below is the skill's TOTAL. Both post-write sites happen to state their
+# mandates in the body today; a demotion to a sidecar would keep the count and
+# change `_Hit.source`, which is exactly the outcome we want — the obligation
+# belongs to the skill, not to one of its files.
 POST_WRITE_SITES: dict[str, int] = {
     # the verb table row, and the prose mandate below it
     "claude/skills/cairn/SKILL.md": 2,
@@ -371,13 +377,29 @@ READ_TIME_EXEMPT: dict[str, str] = {
         "a READ-time diagnostic, not the write protocol: it is reached only from "
         "the `🔴 NO <heading>` badge in `cairn recall` output, and `cairn recall` "
         "syncs before it reads, so the cache is already fresh at that point. It "
-        "must still name the WRITER (`cairn-validate`), which property (4) pins."
+        "must still name the WRITER (`cairn-validate`), which property (4) pins. "
+        "⚠ Since the 2026-09-17 prune the sentence lives in this skill's sidecar "
+        "`claude/skills/resume/reference/cairn-recall.md`, NOT in the body — "
+        "which is why the scan reads a skill's whole directory, and what "
+        "`…_is_satisfied_by_its_SIDECAR` below pins."
     ),
 }
 
 
-def _skill_bodies() -> dict[str, str]:
-    """Every tracked `SKILL.md` in the repo, keyed by repo-relative path.
+# 🔴 A SKILL IS ITS DIRECTORY, NOT ITS `SKILL.md`. `claude/CLAUDE.md` defines two
+# sibling dirs that ship with a skill and are loaded by the agent on demand:
+# `reference/` (durable facts) and `flows/` (procedures). Both are deployed by the
+# same `home.file` copy as the body, so a mandate written into either is an
+# instruction the agent will read — and until 2026-09-17 neither was scanned.
+_SIDECAR_DIRS = ("reference", "flows")
+
+
+def _skill_sources() -> dict[str, dict[str, str]]:
+    """Every tracked skill, keyed by its `SKILL.md` repo-relative path.
+
+    The value maps each repo-relative path that makes up that skill's
+    agent-loaded body — the `SKILL.md` itself plus every tracked `*.md` under its
+    `reference/` or `flows/` dir, at any depth — to that file's text.
 
     🔴 NOT `claude/skills/**` — that was finding F-2 from round 1, and it is the
     `resume` blind spot one directory over. THREE deployed skills live elsewhere:
@@ -388,12 +410,44 @@ def _skill_bodies() -> dict[str, str]:
     is exactly the failure this ledger exists to catch — and a scan rooted at
     `claude/skills` could never see it. Derived, never enumerated: 36 tracked
     SKILL.md today, and a 37th is picked up without editing this file.
+
+    🔴 AND THE SAME CLASS ONE LEVEL DOWN — F-2's mirror image, MEASURED as a real
+    failure rather than reasoned about. The scan above reads `SKILL.md` FILES; the
+    `resume` prune (#1745) moved this skill's `cairn-validate` sentence into
+    `claude/skills/resume/reference/cairn-recall.md`, and the SHRINK arm fired on
+    a mandate that had not vanished at all — it had moved one directory down,
+    into a file the scan could not see. The blind spot is not merely that false
+    alarm: a skill could have taught the UNSYNCED form, or the PACKAGED client,
+    from a sidecar and all four properties would have passed. F-2 was "the scan is
+    rooted too narrowly across the repo"; this is "the scan is rooted too narrowly
+    inside a skill". Fixing it makes the guard WIDER, and the `resume` row is now
+    satisfied by the sidecar rather than by the body — which
+    `test_the_read_time_exemption_for_resume_is_satisfied_by_its_SIDECAR` pins,
+    so a future move back into the body is a decision and not an accident.
+
+    The ledgers stay keyed by `SKILL.md` because the QUESTION they answer is
+    per-skill — "does this skill teach the check, and in which spelling" — and an
+    agent loading `/resume` can reach every file below that key. `_Hit.source`
+    carries which one, so nothing is lost from a failure message.
     """
-    return {
-        str(p.relative_to(REPO)): p.read_text(encoding="utf-8")
-        for p in P.repo_files(REPO)
-        if p.name == "SKILL.md"
-    }
+    files = list(P.repo_files(REPO))
+    # skill DIR -> the repo-relative key that names it
+    skills = {p.parent: str(p.relative_to(REPO)) for p in files if p.name == "SKILL.md"}
+    sources: dict[str, dict[str, str]] = {key: {} for key in skills.values()}
+    for p in files:
+        if p.suffix != ".md":
+            continue
+        owner: str | None = None
+        if p.name == "SKILL.md" and p.parent in skills:
+            owner = skills[p.parent]
+        else:
+            for parent in p.parents:
+                if parent.name in _SIDECAR_DIRS and parent.parent in skills:
+                    owner = skills[parent.parent]
+                    break
+        if owner is not None:
+            sources[owner][str(p.relative_to(REPO))] = p.read_text(encoding="utf-8")
+    return sources
 
 
 class _Hit(NamedTuple):
@@ -406,12 +460,18 @@ class _Hit(NamedTuple):
     to ask (round 2 checked it; it was fine, and it should not have been askable).
     Each property is decided HERE, against the block the match came from, and
     a caller can only read the answer.
+
+    `source` is the repo-relative path the hit came from, which stopped being the
+    ledger key when the scan widened to a skill's sidecars: a skill is now keyed
+    by its `SKILL.md` and may be mandating the check from `reference/<topic>.md`.
+    A failure naming only the key would send a maintainer to the wrong file.
     """
 
     block: int      # index of the block it was found in
     offset: int     # offset within that block's normalised text
     sep: str        # "-" = the devrc writer, " " = the packaged client
     synced: bool    # does it carry the load-bearing `cairn sync && ` prefix
+    source: str = ""  # repo-relative path the text came from
 
 
 # A BLOCK is the unit the sentinel must share with the command it disclaims.
@@ -421,7 +481,7 @@ class _Hit(NamedTuple):
 _BLOCK_BREAK = re.compile(r"\n\s*\n|\n(?=\s*(?:[-*+]\s|\d+\.\s|\||#))")
 
 
-def _occurrences(text: str) -> list[_Hit]:
+def _occurrences(text: str, source: str = "") -> list[_Hit]:
     """Mandates in `text`, block by block, sentinel-marked counter-examples removed.
 
     Normalisation is PER BLOCK, not whole-document: a reflow rewraps WITHIN a
@@ -443,13 +503,109 @@ def _occurrences(text: str) -> list[_Hit]:
                 offset=m.start(),
                 sep=m.group("sep"),
                 synced=normalised[:m.start()].endswith(_SYNC_PREFIX),
+                source=source,
             ))
     return out
 
 
+def _skill_hits(key: str) -> list[_Hit]:
+    """Every mandate anywhere in one skill — body and sidecars, path-ordered."""
+    return [
+        h
+        for src, text in sorted(_skill_sources()[key].items())
+        for h in _occurrences(text, src)
+    ]
+
+
 def _naming_skills() -> dict[str, list[_Hit]]:
-    hits = {name: _occurrences(body) for name, body in _skill_bodies().items()}
-    return {name: ms for name, ms in hits.items() if ms}
+    hits = {key: _skill_hits(key) for key in _skill_sources()}
+    return {key: ms for key, ms in hits.items() if ms}
+
+
+def test_the_scan_sees_a_real_corpus_AND_reaches_sidecars() -> None:
+    """POSITIVE CONTROL on the widened scan, in BOTH halves.
+
+    `claude/RULES.md`: a reassuring zero from a scan wired to nothing is
+    indistinguishable from a clean result — and widening a scan adds a SECOND way
+    to be wired to nothing, which the old control could not see. Before the
+    widening every skill had exactly one source, so "the scan found 36 skills"
+    stayed true with the sidecar walk deleted.
+
+    So this asserts the corpus is non-trivial AND that at least one skill
+    genuinely contributes a file that is not its `SKILL.md`. It is deliberately
+    NOT a pinned count: the sidecar corpus grows constantly and a ratchet here
+    would be a permanently-red gate over prose nobody is guarding.
+    """
+    sources = _skill_sources()
+    assert len(sources) >= 30, (
+        f"only {len(sources)} SKILL.md found — suspect `repo_files`, not the repo"
+    )
+    assert all(key in files for key, files in sources.items()), (
+        "a skill key that does not map to its own SKILL.md means the owner "
+        "attribution below is wrong"
+    )
+    sidecars = {
+        src
+        for files in sources.values()
+        for src in files
+        if not src.endswith("/SKILL.md")
+    }
+    assert sidecars, (
+        "the scan reached NO sidecar at all. Every 'not found' this module "
+        "reports about a sidecar would be vacuous — suspect `_SIDECAR_DIRS` or "
+        "the parent walk in `_skill_sources`."
+    )
+
+
+def test_the_scan_does_NOT_swallow_every_md_beside_a_skill() -> None:
+    """The other edge of the widening: `reference/` and `flows/` are the loadable
+    sidecars `CLAUDE.md` defines, and the scan must stop there.
+
+    Two concrete files decide it, both real and both under a skill's directory:
+    `scripts/browser-bridge/reference/errors.md` IS part of that skill and must be
+    in; `scripts/browser-bridge/tests/fixtures/oopif-rig/README.md` is a TEST
+    FIXTURE and must not be. Scanning fixtures would make a deliberate
+    counter-example in test data fail a guard about what a skill TEACHES — a
+    false red with no correct fix.
+    """
+    files = _skill_sources()["scripts/browser-bridge/SKILL.md"]
+    assert "scripts/browser-bridge/reference/errors.md" in files, (
+        "a `reference/` sidecar of a skill outside `claude/skills/` was not "
+        "attributed to it — the parent walk is wrong for those three skills"
+    )
+    assert "scripts/browser-bridge/README.md" not in files
+    assert (
+        "scripts/browser-bridge/tests/fixtures/oopif-rig/README.md" not in files
+    ), "the scan reached test fixtures, which are not agent-loaded skill content"
+
+
+def test_the_read_time_exemption_for_resume_is_satisfied_by_its_SIDECAR() -> None:
+    """🔴 REGRESSION TEST for the break this widening fixes. Measured: at
+    `origin/main` merged with #1745 and BEFORE this change, the SHRINK arm failed
+    with `['claude/skills/resume/SKILL.md'] are declared as naming the
+    write-protocol check and no longer do` — the sentence had not vanished, it
+    had moved into `reference/cairn-recall.md` one directory down.
+
+    Pinning WHERE it is satisfied from, rather than only THAT it is, is what
+    stops this from silently reverting: if the sentence moves back into the body
+    this goes red and a maintainer updates the ledger reason deliberately.
+    """
+    hits = _naming_skills().get("claude/skills/resume/SKILL.md", [])
+    assert hits, (
+        "the resume skill no longer names `cairn-validate --scope` anywhere in "
+        "its body or sidecars — see READ_TIME_EXEMPT for why it must"
+    )
+    assert {h.source for h in hits} == {
+        "claude/skills/resume/reference/cairn-recall.md"
+    }, (
+        f"the resume skill's read-time diagnostic is stated in "
+        f"{sorted({h.source for h in hits})}, not (only) in the sidecar "
+        f"READ_TIME_EXEMPT names. Move the ledger reason in the SAME commit."
+    )
+    assert all(h.sep == "-" for h in hits), (
+        "property (4): the exemption's reason says the resume skill must still "
+        "name the WRITER `cairn-validate`, not the packaged `cairn validate`"
+    )
 
 
 def test_the_set_of_skills_naming_the_write_protocol_check_is_the_declared_ledger() -> None:
@@ -462,16 +618,19 @@ def test_the_set_of_skills_naming_the_write_protocol_check_is_the_declared_ledge
 
     grew = sorted(found - declared)
     assert not grew, (
-        f"SKILL.md file(s) {grew} invoke the write-protocol check with --scope and "
+        f"skill(s) {grew} invoke the write-protocol check with --scope and "
         f"are in NEITHER ledger. Decide which: add a count to POST_WRITE_SITES if "
         f"it mandates the check after a write, or a reason to READ_TIME_EXEMPT if "
         f"it does not. Leaving it out is how `claude/skills/resume/SKILL.md` sat "
-        f"outside this guard while naming the bare form."
+        f"outside this guard while naming the bare form. (A key names the whole "
+        f"skill DIRECTORY — body plus `reference/`/`flows/` sidecars — so the "
+        f"mandate may be in a sidecar; `_skill_hits(<key>)` says which file.)"
     )
     shrank = sorted(declared - found)
     assert not shrank, (
-        f"SKILL.md file(s) {shrank} are declared as naming the write-protocol "
-        f"check and no longer do. A mandate that vanishes is the failure this "
+        f"skill(s) {shrank} are declared as naming the write-protocol "
+        f"check and no longer do, in their body OR any `reference/`/`flows/` "
+        f"sidecar. A mandate that vanishes is the failure this "
         f"ledger exists to catch — delete the ledger row deliberately, or restore "
         f"the mandate."
     )
@@ -485,13 +644,19 @@ def test_a_post_write_site_names_the_check_the_declared_number_of_times(skill: s
     a reader scans, once in the prose that explains why the `cairn sync` is
     load-bearing. Dropping either leaves the other, and a boolean "does this file
     mention it" cannot tell.
+
+    ⚠ THE COUNT IS OVER THE WHOLE SKILL — body plus `reference/`/`flows/`
+    sidecars — since the scan widened. A number that moves because a mandate was
+    DEMOTED to a sidecar has not changed the skill's obligations, so it must be
+    re-derived rather than reasoned about: run the test and read what it prints.
     """
     want = POST_WRITE_SITES[skill]
-    got = len(_naming_skills().get(skill, []))
-    assert got == want, (
-        f"{skill} invokes the write-protocol check {got} time(s); "
+    hits = _skill_hits(skill)
+    assert len(hits) == want, (
+        f"{skill} invokes the write-protocol check {len(hits)} time(s); "
         f"POST_WRITE_SITES declares {want}. If a site was added or removed "
-        f"deliberately, move the number — do not leave it disagreeing."
+        f"deliberately, move the number — do not leave it disagreeing.\n"
+        f"  found at: {[f'{h.source}:{h.block}/{h.offset}' for h in hits]}"
     )
 
 
@@ -510,8 +675,8 @@ def test_every_post_write_occurrence_carries_the_load_bearing_sync_prefix(skill:
     the validate rather than validating stale bytes under a green verdict.
     """
     stray = [
-        f"block {h.block}, offset {h.offset}"
-        for h in _occurrences(_skill_bodies()[skill]) if not h.synced
+        f"{h.source} block {h.block}, offset {h.offset}"
+        for h in _skill_hits(skill) if not h.synced
     ]
     assert not stray, (
         f"{skill} invokes the write-protocol check at {stray} "
@@ -543,11 +708,12 @@ def test_no_skill_spells_the_check_with_the_PACKAGED_client() -> None:
     in prose without tripping it.
     """
     wrong = sorted(
-        name for name, hits in _naming_skills().items()
+        f"{name} ({', '.join(sorted({h.source for h in hits if h.sep == ' '}))})"
+        for name, hits in _naming_skills().items()
         if any(h.sep == " " for h in hits)
     )
     assert not wrong, (
-        f"SKILL.md file(s) {wrong} invoke the write-protocol check with the "
+        f"skill(s) {wrong} invoke the write-protocol check with the "
         f"PACKAGED client (`cairn validate`, space) instead of the devrc writer "
         f"(`cairn-validate`, hyphen). The package does not run the write-protocol "
         f"check and its exit codes differ; use {POST_WRITE_CHECK!r}."
