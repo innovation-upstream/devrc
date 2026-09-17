@@ -155,9 +155,19 @@ NO subprocess on ANY path, Stop included: condition 3 is filesystem-only.
 
 🔴 THE TELEMETRY IS STOP-ONLY AND IS NOT ON THAT PATH. `hook_telemetry` (and through
 it `spool_emit`, which drags in `base64`/`datetime`/`socket`) is imported from
-`main()`'s Stop arm and from nowhere else, so a PostToolUse call — the one that fires
-after every tool call of every session — never loads it and pays nothing. Same
-reasoning as the `shutil` note below, and the same measurement behind it.
+`_emit_telemetry`, which `main()` calls on every event but which RETURNS BEFORE THE
+IMPORT when there are no rows — and a PostToolUse call produces none. So the hot path
+never loads it and pays nothing. Same reasoning as the `shutil` note below, and the
+same measurement behind it.
+
+⚠ SAY IT AS A GUARD, NOT AS A CALL-SITE FACT, BECAUSE THE CALL-SITE SPELLING WAS FALSE
+FOR A COMMIT. At `4e384b6f` this paragraph read "imported from `main()`'s Stop arm and
+from nowhere else" — true at `0a8034ae`, where the call sat inside `elif event ==
+"Stop":`, and false the moment the emission moved into its own handler. MEASURED then:
+a PostToolUse payload left `'hook_telemetry' in sys.modules` True. The property is now
+`_emit_telemetry`'s early return rather than where the call is written, and
+`test_hook_telemetry.py::test_a_post_tool_use_call_does_not_IMPORT_the_emitter` pins it
+with the Stop path as its positive control.
 
 WHAT THIS STRUCTURALLY CANNOT SEE (say it here, not in a report nobody re-reads):
   * the 2 never-started sessions of the 16. They produced zero assistant turns, so no
@@ -854,14 +864,14 @@ def is_handoff_write(data):
 # was backwards: sanitizing is exactly what turns arbitrary text INTO the shape
 # `hook_telemetry._SAFE_TOKEN` admits. MEASURED on this branch, before the fix — the
 # `Read` arm of `handoff_read_docs` takes `tool_input.file_path` VERBATIM (only the
-# `Bash` arm goes through `HANDOFF_PATH_RX`), `_is_handoff_basename` is
-# `^handoff-.*\.md$` and `.*` matches spaces, so
+# `Bash` arm goes through `HANDOFF_PATH_RX`), and `_is_handoff_basename` is
+# `HANDOFF_BASENAME_RX` (`:277`), BOTH of whose arms use `.*`, which matches spaces:
 #
 #     Read(file_path=".../claudedocs/handoff- <a sentence someone typed>.md")
 #
-# arrived in the payload as one underscore-joined token of up to 120 characters — past
-# a boundary the module advertised as construction-proof. The emitter cannot see that:
-# it is handed a compliant string and has no way to ask where it came from.
+# arrived in the payload as one underscore-joined token of up to 120 characters. The
+# emitter cannot see that: it is handed a compliant string and has no way to ask where
+# it came from.
 #
 # So the call site enforces the other half, and `telemetry_entity` is it: the key rides
 # along only when `_sanitize(basename) == basename`, i.e. when the ledger key IS the
@@ -870,6 +880,23 @@ def is_handoff_write(data):
 # and the omission is visible rather than silent. The guard's VERDICT is untouched — it
 # still arms, blocks and dismisses on exactly the same documents as before; only what
 # leaves this process changed.
+#
+# 🔴 WHAT THAT DOES **NOT** BUY, BECAUSE TWO ROUNDS IN A ROW OVERSTATED IT. Refusing a
+# REWRITING is not refusing a NAME. A basename that is already token-shaped needs no
+# laundering and is admitted whole, and that is the ordinary case rather than an edge:
+# this repo's own handoffs are `handoff-task-spec-drafter-2026-06-24.md`. MEASURED on
+# the final tree — a `handoff-<snake_case sentence>.md`, a `handoff-<kebab-case
+# sentence>.md` and a `<snake_case sentence>_HANDOFF.md` (the second arm of
+# `HANDOFF_BASENAME_RX` needs no prefix) each shipped as `entity`, against
+# `handoff- a sentence.md -> None` as the negative control. Nor is an admitted key
+# evidence that a FILE exists: `_resolve` requires only the DIRECTORY, deliberately, so
+# a `Read` of a path that was never on disk arms the guard and its basename ships —
+# measured, `entity_kind='handoff-doc'`, `decision='fired'`.
+#
+# So what `entity` carries is a NAME someone or something chose, ≤120 chars, not
+# guaranteed to name a file — going to the operator's own authenticated ClickHouse, as
+# the join key this instrumentation exists to add. That is the honest description; a
+# length cap or a hash is an operator decision nobody has made.
 #
 # 🔴 IT CANNOT COST THE VERDICT, AND IT CANNOT SUPPRESS ONE. Nothing here emits;
 # `stop_decision` only APPENDS DICTS to a caller-supplied list. `main()` emits them
@@ -977,7 +1004,11 @@ def telemetry_entity(key, rec):
     🔴 THIS IS THE CALL SITE'S HALF OF THE PRIVACY BOUNDARY — see the section header
     above for the measurement. `hook_telemetry._SAFE_TOKEN` rejects a string with a
     space in it; it cannot reject one that `_sanitize` already rewrote INTO that shape,
-    and `_is_handoff_basename` is `^handoff-.*\\.md$`, whose `.*` matches spaces,
+    and `_is_handoff_basename` is `HANDOFF_BASENAME_RX` (`:277`) —
+
+        (?:^handoff-.*\\.md$)|(?:^.*HANDOFF.*\\.md$)
+
+    — TWO arms, the second needing no prefix at all, and `.*` in both matches spaces,
     commas and everything else a sentence is made of.
 
     So the test is not "does the key look safe" — a laundered key always does — it is
@@ -986,6 +1017,21 @@ def telemetry_entity(key, rec):
     text. `_sanitize` is asked rather than a second character class restated here, so
     the two cannot drift; the `== key` arm additionally refuses a record whose stored
     path does not correspond to the key it is filed under.
+
+    ⚠ WHAT IT RETURNS IS A NAME, NOT A CERTIFICATE. Read the section header's "what
+    that does NOT buy": a key that never needed laundering — any `snake_case` or
+    `kebab-case` basename, which is how this repo names its own handoffs — is admitted
+    whole, and `_resolve` requires only the doc's DIRECTORY to exist, so the name need
+    not belong to a file that was ever on disk. This function bounds the REWRITING, and
+    that is all it bounds.
+
+    ⚠ `_sanitize(base) == base` AND `== key` ARE NOT INDEPENDENT, AND THE REDUNDANCY IS
+    DELIBERATE — do not "fix the suite" for it. `key` reaching production is always a
+    `doc_key(...)` output and `_sanitize` is idempotent, so on every call `main()` makes
+    the `== key` arm already implies the first: a mutant deleting `_sanitize(base) ==`
+    SURVIVES the suite, and it is an EQUIVALENT MUTANT rather than a test gap. The
+    conjunct stays because this is a PUBLIC function the suites drive directly with a
+    `key` of their choosing, where the two arms genuinely differ.
 
     THE COST, NAMED: a handoff doc legitimately named with a `%`, a `~`, a `+` (all
     admitted by `HANDOFF_PATH_RX`) or a basename over 120 characters is reported with no
@@ -1155,7 +1201,25 @@ def _emit_telemetry(rows):
 
     ⚠ "accepted", not "on disk" — `hook_telemetry.emit_rows`' own docstring says why,
     and nothing here should be read as a claim that bytes landed.
+
+    🔴 THE EMPTY-ROWS RETURN IS WHAT KEEPS THE IMPORT OFF THE HOT PATH, and it is not a
+    micro-optimisation — it is the difference between two claims this file makes
+    elsewhere being true and being false. `main()` calls this UNCONDITIONALLY, after
+    `telemetry_rows`, which returns `[]` for every PostToolUse call; without this line
+    `_telemetry()` runs there and imports `hook_telemetry` after EVERY tool call of
+    EVERY session. MEASURED on this branch before the fix: a PostToolUse payload left
+    `'hook_telemetry' in sys.modules` True (`spool_emit` stayed False — it is loaded
+    lazily one level further in). The import was measured at +0.3-1.6 ms against a
+    ~0.1 ms hot path, while `_stop_token`'s docstring refuses an `os.urandom(8)` on
+    that same path at 0.0002 ms — the module docstring's "never loads it and pays
+    nothing" and that refusal are BOTH restored by this return, and both are false
+    without it.
+
+    ⚠ `HOOK_TELEMETRY_OFF` does NOT substitute for it: the kill switch is read inside
+    `hook_telemetry`, so reaching it already means the import was paid.
     """
+    if not rows:
+        return 0
     ht = _telemetry()
     if ht is None:
         return 0

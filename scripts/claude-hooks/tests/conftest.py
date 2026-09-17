@@ -280,11 +280,24 @@ except ModuleNotFoundError as _guard9_exc:  # pragma: no cover - harness-only pa
     ) from _guard9_exc
 
 
-# 🔴 GUARD 8's SECOND ENTRY POINT, THE SAME SHAPE AS GUARD 9 ABOVE — one
+# 🔴 GUARD 8's SECOND ENTRY POINT — the same ARRANGEMENT as GUARD 9 above: one
 # implementation, two registrations, no per-directory copy of the rule.
 # `scripts/run-tests.sh` loads `testlib/spool_plugin.py` with `-p` for every target;
 # this import is what gives a BARE `pytest scripts/claude-hooks/tests/...` — the
 # documented way to run one of these files — the same session-wide floor.
+#
+# ⚠ THE ARRANGEMENT IS THE SAME; THE IMPORT IS NOT, AND THIS COMMENT USED TO SAY "THE
+# SAME SHAPE AS GUARD 9" WITHOUT QUALIFYING IT. GUARD 9's import is wrapped in
+# `try/except ModuleNotFoundError` re-raising a named `RuntimeError`; this one is BARE,
+# deliberately. The diagnostic GUARD 9 prints names the only cause either import has
+# ever had — a COPY of this conftest whose harness did not export
+# `PYTHONPATH=<repo>/scripts` — and that cause makes `testlib` unimportable for BOTH.
+# GUARD 9's import runs FIRST, so a second copy of the same message here could never
+# execute for it: an unreachable guard, which reads as coverage while providing none.
+# The one case GUARD 9 does not cover is a `testlib` that imports while
+# `spool_plugin` is missing, and there the bare `ModuleNotFoundError` naming
+# `testlib.spool_plugin` already IS the diagnosis. So: comment corrected, code left
+# alone, and the reason written down rather than the symmetry restored.
 #
 # 🔴 IT BUYS OBSERVABILITY, WHICH THE AUTOUSE FIXTURE BELOW CANNOT. The fixture
 # redirects the spool and that is all: "0 rows leaked" from it is the same reassuring

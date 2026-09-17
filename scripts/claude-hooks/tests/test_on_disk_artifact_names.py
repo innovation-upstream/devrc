@@ -73,9 +73,15 @@ HOW EACH NAME IS PINNED HERE
       the constant, which a `MODULE.STATE_WORK == "work"` assertion would not.
 
   Fixture values are pairwise distinct and distinct from every constant the code
-  names — task ids 307 and 911 against `MAX_TASKS=5` / `MAX_FIRES=3` /
-  `MAX_BLOCKS=2`, and session/agent ids that no module defines — so a mutant that
-  hardcodes a literal cannot satisfy an assertion by accident.
+  names — task ids 307 and 911 against the `MAX_TASKS` / `MAX_FIRES` / `MAX_BLOCKS`
+  ladder caps, and session/agent ids that no module defines — so a mutant that
+  hardcodes a literal cannot satisfy an assertion by accident. ⚠ Their VALUES are
+  deliberately NOT restated here. This line read `MAX_BLOCKS=2` while a concurrent
+  change was taking one module's copy of it to 1; a literal quoted in prose is a
+  claim that goes stale with nothing going red, and the distinctness argument never
+  needed the numbers — only that no cap equals 307 or 911. ⚠ Nothing enforces that;
+  it is a property of the fixtures chosen here, re-checked by reading the modules,
+  not a guard. Name the constants, not their values.
 
   ONE of the fifteen is deliberately NOT pinned as a literal: `agent_ledger`'s
   `.ledger.` temp prefix. What is load-bearing there is that a temp file cannot be

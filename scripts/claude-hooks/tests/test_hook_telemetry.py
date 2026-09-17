@@ -721,6 +721,64 @@ def test_a_post_tool_use_call_writes_no_row(env):
     assert rows(env["spool"]) == []
 
 
+def _imported_modules(script, payload, env):
+    """Which modules a REAL hook process imported, read out of `-X importtime`.
+
+    🔴 THE INSTRUMENT IS NOT THE ROW COUNT, AND THAT DISTINCTION IS THE WHOLE TEST.
+    "Zero rows on the hot path" was already asserted above and stayed green through the
+    defect this pins: the emitter was imported, decided it had nothing to ship, and
+    wrote nothing. A count cannot see a cost that produces no output, so the cost is
+    read directly — `-X importtime` names every module the interpreter loaded, on
+    stderr, for the process that actually ran.
+    """
+    e = dict(os.environ)
+    e["ACTIVITY_SPOOL_DIR"] = str(env["spool"])
+    e["HOME"] = str(env["home"])
+    r = subprocess.run([sys.executable, "-X", "importtime", script],
+                       input=json.dumps(payload), capture_output=True, text=True,
+                       env=e, timeout=_HOOK_TIMEOUT_SECONDS)
+    assert r.returncode == 0, r.stderr
+    out = set()
+    for line in r.stderr.splitlines():
+        if line.startswith("import time:"):
+            out.add(line.rsplit("|", 1)[-1].strip())
+    # The instrument's own positive control: `-X importtime` reports EVERY import, so a
+    # run that parsed nothing (a format change, a flag that stopped working) would hand
+    # back an empty set and make every absence assertion below vacuously true.
+    assert "json" in out, sorted(out)
+    return out
+
+
+def test_a_post_tool_use_call_does_not_IMPORT_the_emitter(env):
+    """🔴 A COST THE ROW COUNT CANNOT SEE — and it was live at `4e384b6f`.
+
+    REGRESSION, not an invariant guard. `0a8034ae` called `_emit_telemetry` from inside
+    `elif event == "Stop":`; the round-1 fix moved the call out to its own handler so a
+    raising verdict path could not swallow the telemetry, and `main()` then reached it
+    on EVERY event. MEASURED at `4e384b6f`: a PostToolUse payload left
+    `'hook_telemetry' in sys.modules` True. Nothing went wrong — `telemetry_rows`
+    returns `[]` there, so no row was written and
+    `test_a_post_tool_use_call_writes_no_row` stayed green — the import was simply paid
+    after every tool call of every session, at +0.3-1.6 ms against a path measured at
+    ~0.1 ms, by a hook whose own `_stop_token` docstring refuses an `os.urandom(8)`
+    (0.0002 ms) on it as too expensive.
+
+    The fix is `_emit_telemetry`'s `if not rows: return 0`. The Stop half below is the
+    POSITIVE CONTROL and is not optional: an emitter that had simply stopped being
+    importable would satisfy the first assertion while shipping nothing at all.
+    """
+    doc = arm_guard(env)
+    hot = _imported_modules(GUARD, {"hook_event_name": "PostToolUse",
+                                    "session_id": SESSION_A, "tool_name": "Read",
+                                    "tool_input": {"file_path": str(doc)},
+                                    "cwd": str(doc.parent)}, env)
+    assert "hook_telemetry" not in hot and "spool_emit" not in hot, sorted(hot)
+
+    stop = _imported_modules(GUARD, {"hook_event_name": "Stop",
+                                     "session_id": SESSION_A}, env)
+    assert "hook_telemetry" in stop and "spool_emit" in stop, sorted(stop)
+
+
 def test_a_subagent_stop_is_recorded_as_refused_not_dropped(env):
     """The refusals are the DENOMINATOR, so they are rows — with a reason. A row set
     holding only fires is a numerator wearing a rate, which is the exact shape that
@@ -897,11 +955,19 @@ def test_the_fallback_mapping_is_pure_and_total(data, rows_in, completed, cli, w
 # 4c. THE CALL SITE'S HALF OF THE PRIVACY BOUNDARY
 # --------------------------------------------------------------------------- #
 # 🔴 `_SAFE_TOKEN` REJECTS PROSE AND ADMITS LAUNDERED PROSE, AND THE GUARD USED TO
-# LAUNDER. `_is_handoff_basename` is `^handoff-.*\.md$` — `.*` matches spaces — and the
-# `Read` arm of `handoff_read_docs` takes `tool_input.file_path` VERBATIM (only the
-# `Bash` arm goes through `HANDOFF_PATH_RX`). `doc_key` then ran `_sanitize`, which maps
-# every disallowed character to `_`, producing exactly the shape the emitter admits.
-# Measured at 0a8034ae, end to end through the real hook.
+# LAUNDER. `_is_handoff_basename` is `HANDOFF_BASENAME_RX`,
+# `(?:^handoff-.*\.md$)|(?:^.*HANDOFF.*\.md$)` — two arms, the second needing no
+# prefix, and `.*` in both matches spaces — and the `Read` arm of `handoff_read_docs`
+# takes `tool_input.file_path` VERBATIM (only the `Bash` arm goes through
+# `HANDOFF_PATH_RX`). `doc_key` then ran `_sanitize`, which maps every disallowed
+# character to `_`, producing exactly the shape the emitter admits. Measured at
+# 0a8034ae, end to end through the real hook.
+#
+# ⚠ WHAT THE FIX BOUNDS IS THE REWRITING, AND THESE TESTS ASSERT ONLY THAT. A name that
+# never needed laundering — any `snake_case` or `kebab-case` basename, which is how
+# this repo names its own handoffs — is still admitted whole, by design and as the
+# common case. `hook_telemetry`'s promise 3(c) states that residual; nothing below
+# should be read as coverage of it.
 # --------------------------------------------------------------------------- #
 PROSE_DOC_NAME = ("handoff- acme corp wants the refund before friday, "
                   "escalate to legal.md")

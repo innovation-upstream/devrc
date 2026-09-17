@@ -53,6 +53,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -768,6 +769,42 @@ def test_prune_drops_only_state_older_than_the_ttl(home):
     os.utime(os.path.join(root, "new"), (now - 60,) * 2)
     assert guard.prune(now=now) == ["old"]
     assert sorted(os.listdir(root)) == ["new"]
+
+
+def _stale_dir(name="pruneable-0d41"):
+    """A state dir old enough for `prune` to sweep, named so no fixture collides."""
+    root = guard._state_root()
+    path = os.path.join(root, name)
+    os.makedirs(path, exist_ok=True)
+    old = time.time() - guard.STATE_TTL_SECS - 3600
+    os.utime(path, (old, old))
+    return path
+
+
+def test_the_hot_path_does_NOT_prune_and_a_stop_does(home, repo):
+    """🔴 `prune` IS STOP-ONLY, AND NOTHING PINNED IT ONCE IT STOPPED BEING LEXICAL.
+
+    At `0a8034ae` the call sat INSIDE `elif event == "Stop":`, so its position was the
+    property. The round-1 restructure moved it below the dispatch under `if completed:`
+    — behaviour unchanged, but the property became a boolean nobody asserted. MEASURED
+    on this tree: mutating that line to `if True:` leaves `test_hook_telemetry.py`
+    entirely green (97 passed) AND this file green with this test deselected (69
+    passed) — neither of the two suites measured saw it.
+    `prune` walks every session state dir and `rmtree`s the stale ones, on a path that
+    fires after every tool call of every session; that is the cost this pins.
+
+    Both halves are load-bearing. The Stop half is the POSITIVE CONTROL — without it a
+    `prune` that had simply stopped being called anywhere would pass the first
+    assertion, and the state root would grow forever instead.
+    """
+    stale = _stale_dir()
+    r = run_hook(read_tool(str(repo / "claudedocs" / "handoff-x.md")))
+    assert r.returncode == 0
+    assert os.path.isdir(stale), "PostToolUse pruned; `prune` reached the hot path"
+
+    r = run_hook(payload(event="Stop"))
+    assert r.returncode == 0
+    assert not os.path.exists(stale), "a Stop did not prune; the control is dead"
 
 
 # --------------------------------------------------------------------------- #

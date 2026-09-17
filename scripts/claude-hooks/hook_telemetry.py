@@ -67,32 +67,66 @@ CONTRACT — THREE HARD PROMISES
      no-op. There is deliberately no HTTP client, no subprocess and no argv payload:
      a `payload build failed` argv trap already cost this repo a ~96%-dead hook.
 
-  3. 🔴 NO CAPTURED TEXT — AND THE GUARANTEE IS TWO-PART, BECAUSE THIS MODULE ALONE
-     CANNOT DELIVER IT. Read both halves; the first one on its own is the claim this
-     file used to make, and it was FALSE.
+  3. 🔴 NO MESSAGE BODIES, PROMPTS OR TRANSCRIPT TEXT — AND THAT IS NARROWER THAN "NO
+     TEXT A HUMAN OR A MODEL CHOSE". Read all three parts. The first one alone is the
+     claim this file made at `0a8034ae`; the first two are the claim it made at
+     `4e384b6f`; BOTH were false, in different shapes, and part (c) is the residual
+     neither of them admitted.
 
      (a) HERE: every value that reaches the payload must be an ID, SLUG, ENUM, BOOLEAN
          or COUNT, and that is checked rather than promised — a string is admitted only
          if it matches `_SAFE_TOKEN`, a character class with NO SPACE in it. A value
          that fails is DROPPED WHOLE rather than truncated-and-shipped, and every drop
          is COUNTED (`dropped` in the payload) so it is visible rather than invisible.
-         This is structural, not spelled: it does not look for words that indicate
-         prose, it admits only shapes prose cannot take.
+         This is structural, not spelled: it does not look for words, it looks at
+         SHAPE. What that buys is bounded and is stated in (c): a shape test admits
+         every string that already has the shape.
 
-     (b) 🔴 AT THE CALL SITE: a caller must not LAUNDER. `_SAFE_TOKEN` rejects prose;
-         it cannot reject prose that was already rewritten into token shape, and a
-         sanitizer that maps every disallowed character to `_` does exactly that.
-         MEASURED on this branch before the fix: `handoff-write-guard` keyed its ledger
-         on `_sanitize(basename)`, and a `Read` of
+     (b) 🔴 AT THE CALL SITE: a caller must not LAUNDER. `_SAFE_TOKEN` rejects a string
+         with a space in it; it cannot reject one that was already rewritten into token
+         shape, and a sanitizer that maps every disallowed character to `_` does exactly
+         that. MEASURED on this branch before the round-1 fix: `handoff-write-guard`
+         keyed its ledger on `_sanitize(basename)`, and a `Read` of
          `claudedocs/handoff- <a sentence someone typed>.md` arrived here as one
-         underscore-joined token that `_SAFE_TOKEN` admitted — up to 120 characters of
-         operator- or model-chosen text, past a boundary advertised as
-         construction-proof. So "prose cannot satisfy `_SAFE_TOKEN` by construction" is
-         true of PROSE and false of LAUNDERED prose, and the second half of the promise
-         is the call site's: pass a value you did not rewrite. `handoff-write-guard`
-         now enforces that explicitly — it drops its entity when sanitizing the
-         basename was not a no-op (`telemetry_entity` there), which is the only way the
-         round trip can be known to have changed nothing.
+         underscore-joined token that `_SAFE_TOKEN` admitted. `handoff-write-guard` now
+         enforces the other half — it drops its entity when sanitizing the basename was
+         not a no-op (`telemetry_entity` there), which is the only way the round trip
+         can be known to have changed nothing.
+
+     (c) 🔴 WHAT IS STILL ADMITTED, AND IT IS THE COMMON CASE, NOT AN EDGE. (a) and (b)
+         together stop text that HAD to be rewritten to fit. They do nothing about text
+         that never needed rewriting, because a name is a string somebody chose and
+         `snake_case` and `kebab-case` are exactly the shapes `_SAFE_TOKEN` admits —
+         which is also how this repo's own handoffs are named
+         (`handoff-task-spec-drafter-2026-06-24.md`), so the admitting branch is the
+         normal one. MEASURED on the final tree, with `handoff- a sentence.md -> None`
+         as the working negative control and `handoff-tmux-webapp.md` as the positive
+         one, every one of these was ADMITTED WHOLE:
+
+             handoff-<forty more characters of snake_case sentence>.md
+             handoff-<forty more characters of kebab-case sentence>.md
+             <a snake_case sentence>_HANDOFF.md      (the second arm of the guard's
+                                                      basename regex needs no prefix)
+
+         SO SAY WHAT `entity` IS, RATHER THAN WHAT IT CANNOT BE: a NAME that a person
+         or a model chose, up to 120 characters (`_sanitize`'s own truncation, and
+         `_MAX_LEN` here), admitted only when sanitizing it was a no-op. It is NOT
+         guaranteed to correspond to a file that exists — `handoff-write-guard`'s
+         `_resolve` requires only the DIRECTORY to exist, deliberately, so that a
+         handoff living on an unmerged branch still arms the guard. MEASURED on the
+         final tree: a `Read` of a path that was never on disk produced a real row,
+         `entity_kind='handoff-doc'`, `decision='fired'`, carrying the 69-character
+         basename from the tool call.
+
+         🔴 THIS IS A LIMIT ON WHAT MAY BE CLAIMED, NOT A LIVE LEAK. The destination is
+         the operator's own authenticated ClickHouse, and the entity is the join key
+         this instrumentation exists to add — a row without it is the numerator-with-no
+         -denominator defect all over again. Narrowing it further (a length cap, a
+         hash) is an OPERATOR decision that has not been made, and hashing would cost
+         the human readability that makes the key usable in a query. What is forbidden
+         is writing a sentence here that a maintainer could read as "the shape check
+         makes prose unreachable" — because it does not, and a maintainer who believed
+         it would delete `telemetry_entity` as redundant.
 
 WHY A SECOND EMITTER MODULE AND NOT `scripts/collector/invocation.py`
 ----------------------------------------------------------------------
@@ -206,9 +240,17 @@ OFF_ENV = "HOOK_TELEMETRY_OFF"
 # whether a string LOOKS like a token; it cannot ask where the token came from. A call
 # site that replaces every disallowed character with `_` hands it a compliant string
 # built out of arbitrary text, and it is admitted — measured on this branch, see
-# promise 3(b) in the module docstring. "Prose cannot satisfy this by construction" is
-# therefore a claim about PROSE, not about every value that can reach here; the other
-# half is the call site's obligation not to rewrite.
+# promise 3(b) in the module docstring. The other half is the call site's obligation
+# not to rewrite.
+#
+# 🔴 AND EVEN BOTH HALVES TOGETHER DO NOT MAKE PROSE UNREACHABLE — SEE PROMISE 3(c).
+# This regex stops a MESSAGE BODY, because one carries a space within the first few
+# tokens. It does not stop a `snake_case` or `kebab-case` NAME, which is a string
+# somebody chose and is already exactly this shape, needs no laundering, and passes
+# `telemetry_entity`'s no-op test unchanged. Anything written here that reads as "prose
+# cannot satisfy this by construction" is FALSE and has been twice: what is true is
+# that prose cannot satisfy it WITHOUT BEING REWRITTEN, and (b) is what refuses the
+# rewriting.
 # --------------------------------------------------------------------------- #
 _MAX_LEN = 120
 _MAX_LIST = 8
