@@ -111,7 +111,7 @@ type App struct {
 	//
 	// 🔴 THEY ARE STATE BECAUSE THE CURSOR INDEXES THEM, NOT AS A SPEED
 	// OPTIMISATION. `fileRowCur` above is an index into `fileRows`, and both
-	// `moveIn` (in `stepKey`) and `clampCursors` read `len(a.fileRows)` to
+	// `moveIn` (in `move`) and `clampCursors` read `len(a.fileRows)` to
 	// bound it — none of that is on a render path, so a list that
 	// existed only inside `filesBody` would leave the cursor indexing nothing
 	// between frames. That is a correctness requirement, and it holds however
