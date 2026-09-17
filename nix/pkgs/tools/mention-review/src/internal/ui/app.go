@@ -92,8 +92,46 @@ type App struct {
 
 	// Per-panel cursors. A sub-model owns state only IT reads.
 	commitCur int
-	fileCur   int
 	diffCur   int
+
+	// fileRowCur is the Files panel's cursor, and it indexes `fileRows` — the
+	// VISIBLE TREE ROWS — not `Snap.Files`.
+	//
+	// 🔴 IT REPLACED A `fileCur` THAT INDEXED TWO DIFFERENT LISTS. That one
+	// integer was read as an index into `Snap.Files` (to render) and into
+	// `Diff.Files` (to jump the diff), which worked only while the two were
+	// positionally parallel. A tree interleaves directory rows with file rows
+	// and groups files by directory, so "the Nth row" is no longer "the Nth
+	// file" in either list. Everything downstream derives from this cursor: the
+	// selected ROW (`currentRow`), and from it the selected FILE BY PATH.
+	fileRowCur int
+
+	// fileTree is the built directory tree, and fileRows its flattened visible
+	// rows. 🔴 BOTH ARE CACHES REBUILT ON A STATE CHANGE, NEVER PER FRAME —
+	// `filesBody` runs every frame and `panels.go` carries the measurement of
+	// what per-frame work in a panel renderer costs.
+	fileTree *treeNode
+	fileRows []FileRow
+
+	// collapsedDirs holds the paths of the directories the operator has closed.
+	//
+	// 🔴 EMPTY MEANS FULLY EXPANDED, AND THAT IS THE DEFAULT ON EVERY OPEN. No
+	// PR may get a worse first screen than it had before the tree existed: every
+	// changed file is visible the moment the panel appears.
+	//
+	// 🔴 COPY-ON-WRITE. `App` travels BY VALUE through `Step`, so a map mutated
+	// in place would also change the App the caller is still holding — and every
+	// test in this package compares a `next` against the `a` it came from.
+	// `setCollapsed` and `revealFile` replace the map; nothing writes through it.
+	collapsedDirs map[string]bool
+
+	// diffFileByPath resolves a file PATH to its index in `Diff.Files`.
+	//
+	// 🔴 BY PATH, NEVER BY ROW ORDINAL. `Snap.Files` comes from GraphQL and
+	// `Diff.Files` from the REST files endpoint; the tree then re-orders rows
+	// relative to both. A row-ordinal lookup would open a DIFFERENT file's hunk
+	// and look entirely correct on screen.
+	diffFileByPath map[string]int
 
 	vp       viewport.Model
 	body     viewport.Model // the issue card / error card body
@@ -201,6 +239,9 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 		}
 		a.Load = LoadReady
 		a.Snap = m.Snap
+		// 🔴 THE TREE IS BUILT HERE, WHERE THE FILE LIST CHANGES — not in
+		// `filesBody`, which runs every frame. See tree.go's header.
+		a.rebuildFileTree()
 		a.clampCursors()
 		if m.Snap.Kind == ghapi.KindIssue {
 			// 🔴 THE ISSUE CARD IS TERMINAL. No comment posting, no labels, no
@@ -224,11 +265,13 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 			// card would throw away a working screen. The Diff panel says so
 			// and everything else keeps working.
 			a.Diff = nil
+			a.diffFileByPath = nil
 			a.Err = m.Err
 			return a, nil
 		}
 		a.Diff = m.Diff
 		a.diffCur = 0
+		a.indexDiffFilesByPath()
 		a.rebuildDiffContent()
 		a.syncDiffViewport()
 		return a, nil
@@ -307,6 +350,19 @@ func (a App) act(act Action) (App, []Intent) {
 		return a.scrollDiff(+diffScrollStep), nil
 	case ActScrollDiffUp:
 		return a.scrollDiff(-diffScrollStep), nil
+
+	// --- the Files tree ------------------------------------------------------
+	//
+	// 🔴 BROWSE MODE ONLY, AND THE FILES PANEL ONLY. `enter`, `left` and `right`
+	// are all bound in COMPOSE mode; the tables are disjoint, so there is no
+	// collision — but a handler that acted regardless of focus would make `←`
+	// jump the Files cursor while the operator is reading the diff.
+	case ActTreeExpand:
+		return a.treeExpand(), nil
+	case ActTreeCollapse:
+		return a.treeCollapse(), nil
+	case ActTreeToggle:
+		return a.treeToggle(), nil
 
 	case ActNextPanel:
 		a.Focus = a.nextFocusable(+1)
@@ -442,17 +498,13 @@ func (a App) move(act Action) App {
 		}
 	case PanelFiles:
 		if a.Snap != nil {
-			n := len(a.Snap.Files)
-			before := a.fileCur
-			a.moveIn(act, &a.fileCur, n)
-			if a.fileCur != before && a.Diff != nil {
-				// 🔴 CROSS-PANEL EFFECTS GO THROUGH THE ROOT, NOT THROUGH A
-				// POINTER BETWEEN SUB-MODELS (§3.2). Selecting a file moves the
-				// diff cursor; the Files panel does not hold the Diff panel.
-				if start := a.Diff.FileStart(a.fileCur); start >= 0 {
-					a.diffCur = start
-					a.syncDiffViewport()
-				}
+			// 🔴 THE CURSOR WALKS ROWS, NOT FILES. Directory rows are part of
+			// the sequence `j`/`k` steps through, which is what makes a
+			// collapsed tree navigable at all.
+			before := a.fileRowCur
+			a.moveIn(act, &a.fileRowCur, len(a.fileRows))
+			if a.fileRowCur != before {
+				a.selectRow()
 			}
 		}
 	case PanelDiff:
@@ -502,13 +554,26 @@ func (a App) move(act Action) App {
 
 // syncFileCursorFromDiff keeps the Files panel's highlight on whatever file the
 // diff cursor is inside — the other half of the one-way cross-panel link.
+//
+// 🔴 IT REVEALS, IT DOES NOT ONLY HIGHLIGHT. If the diff cursor moves into a
+// file inside a COLLAPSED directory, highlighting a row that is not on screen
+// would leave the operator reading a diff the Files panel silently disagrees
+// with. So the panel opens whatever it has to and the highlighted file is
+// ALWAYS visible.
+//
+// ⚠ THIS IS ALSO WHAT `}`/`{` AND `]`/`[` REACH. Those four stay DIFF-ordered —
+// they are Diff-panel keys and "the next file" means the next file in the
+// review, not the next row of the tree — but every one of them ends here, so
+// each of them now opens the directory it lands in.
 func (a *App) syncFileCursorFromDiff() {
 	if a.Diff == nil {
 		return
 	}
-	if f := a.Diff.FileAt(a.diffCur); f >= 0 {
-		a.fileCur = f
+	f := a.Diff.FileAt(a.diffCur)
+	if f < 0 || f >= len(a.Diff.Files) {
+		return
 	}
+	a.revealFile(a.Diff.Files[f].Path)
 }
 
 func (a *App) clampCursors() {
@@ -516,7 +581,7 @@ func (a *App) clampCursors() {
 		return
 	}
 	a.commitCur = clamp(a.commitCur, 0, max(0, len(a.Snap.Commits)-1))
-	a.fileCur = clamp(a.fileCur, 0, max(0, len(a.Snap.Files)-1))
+	a.fileRowCur = clamp(a.fileRowCur, 0, max(0, len(a.fileRows)-1))
 }
 
 func (a App) browserURL() string {

@@ -355,20 +355,29 @@ func TestSelectingAFileMovesTheDiffCursorIntoIt(t *testing.T) {
 	if len(a.Snap.Files) < 2 {
 		t.Fatal("fixture needs at least two files for this to mean anything")
 	}
-	next, _ := a.Step(keyPress("j"))
-	if next.fileCur != 1 {
-		t.Fatalf("fileCur = %d, want 1", next.fileCur)
+	// ⚠ TWO PRESSES, BECAUSE ROW 0 IS THE `pkg/` DIRECTORY. The fixture's two
+	// files share one directory, so the tree is
+	// [0 pkg/, 1 handler.go, 2 widget.go].
+	next, _ := pressAll(a, "j", "j")
+	if next.fileRowCur != 2 {
+		t.Fatalf("fileRowCur = %d, want 2", next.fileRowCur)
+	}
+	if got := next.SelectedFilePath(); got != "pkg/widget.go" {
+		t.Fatalf("selected %q, want pkg/widget.go", got)
 	}
 	wantStart := next.Diff.FileStart(1)
 	if next.diffCur != wantStart {
-		t.Errorf("diffCur = %d, want %d (the start of file 1)", next.diffCur, wantStart)
+		t.Errorf("diffCur = %d, want %d (the start of pkg/widget.go)", next.diffCur, wantStart)
 	}
-	// And the reverse link: moving the diff cursor back into file 0 moves the
-	// Files highlight with it.
+	// And the reverse link: moving the diff cursor back into the first file
+	// moves the Files highlight with it.
 	next.Focus = PanelDiff
 	back, _ := next.Step(keyPress("{"))
-	if back.fileCur != 0 {
-		t.Errorf("after `{`, fileCur = %d, want 0", back.fileCur)
+	if got := back.SelectedFilePath(); got != "pkg/handler.go" {
+		t.Errorf("after `{`, the Files panel has %q selected, want pkg/handler.go", got)
+	}
+	if back.fileRowCur != 1 {
+		t.Errorf("after `{`, fileRowCur = %d, want 1", back.fileRowCur)
 	}
 }
 

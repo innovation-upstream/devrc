@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-
-	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/innovation-upstream/devrc/mention-review/internal/ghapi"
 	"github.com/innovation-upstream/devrc/mention-review/internal/udiff"
@@ -242,7 +241,7 @@ func (a App) overviewBody(w, h int) string {
 	s := a.Snap
 	rows := []string{
 		styTitle.Render("#" + itoa(s.Num) + "  " + truncate(s.Title, w-8)),
-		styDim.Render(s.Author + "  ") + styGood.Render("+"+itoa(s.Additions)) +
+		styDim.Render(s.Author+"  ") + styGood.Render("+"+itoa(s.Additions)) +
 			styDim.Render(" / ") + styBad.Render("-"+itoa(s.Deletions)),
 		"",
 		kv("STATE ", PRStateWord(s.State, s.IsDraft)),
@@ -306,25 +305,65 @@ func (a App) commitsBody(w, h int) string {
 	return strings.Join(window(rows, a.commitCur, h), "\n")
 }
 
+// filesBody renders the DIRECTORY TREE.
+//
+// 🔴 IT BUILDS NOTHING. `a.fileRows` was flattened when the snapshot arrived or
+// when a directory was opened or closed; this function formats the rows it was
+// handed and windows them. See tree.go's header for why: this runs on every
+// frame, and the diff viewport one pane to the right is the measured example of
+// what per-frame work in a renderer costs.
 func (a App) filesBody(w, h int) string {
 	if a.Snap == nil || len(a.Snap.Files) == 0 {
 		return styDim.Render("NO FILES")
 	}
-	var rows []string
-	for i, f := range a.Snap.Files {
-		mark := FileWord(f.ChangeType)
-		count := fmt.Sprintf("+%d -%d", f.Additions, f.Deletions)
-		name := truncate(f.Path, max(1, w-len(count)-3))
-		line := mark.Render() + " " + name + " " + styDim.Render(count)
-		if i == a.fileCur && a.Focus == PanelFiles {
-			line = styCursor.Render(mark.Word + " " + name + " " + count)
-		}
-		rows = append(rows, line)
+	rows := make([]string, 0, len(a.fileRows)+1)
+	for i, r := range a.fileRows {
+		rows = append(rows, a.renderFileRow(r, i, w))
 	}
 	if a.Snap.FilesTruncated {
 		rows = append(rows, styWarn.Render("TRUNCATED — more files than one page"))
 	}
-	return strings.Join(window(rows, a.fileCur, h), "\n")
+	// 🔴 WINDOWED ON THE ROW CURSOR, which is the only cursor that indexes
+	// `rows`. Windowing on a FILE index would scroll to the wrong row the
+	// moment a directory row appeared above it.
+	return strings.Join(window(rows, a.fileRowCur, h), "\n")
+}
+
+// renderFileRow formats ONE tree row into `w` columns.
+//
+// 🔴 A DIRECTORY ROW TRUNCATES FROM THE LEFT AND A FILE ROW FROM THE RIGHT, AND
+// THAT ASYMMETRY IS THE POINT. A compacted chain's informative half is its TAIL
+// — `nix/pkgs/tools/mention…` says nothing, `…/internal/ui` says everything —
+// while a file row shows a BASENAME, whose head is what identifies it. Note the
+// tree is a width WIN for files: dropping the directory prefix frees far more
+// columns than the indent costs.
+func (a App) renderFileRow(r FileRow, i, w int) string {
+	indent := strings.Repeat("  ", r.Depth)
+	count := fmt.Sprintf("+%d -%d", r.Additions, r.Deletions)
+	// indent + one marker column + a space either side of the name.
+	avail := max(1, w-len(indent)-len(count)-3)
+
+	mark := FileWord(r.ChangeType)
+	name := truncate(r.Name, avail)
+	if r.IsDir {
+		// ⚠ The chevron is a SHAPE, not a colour — it survives colour removal
+		// the way the `M`/`A`/`D` letters on a file row do.
+		glyph := chevronCollapsed
+		if r.Expanded {
+			glyph = chevronExpanded
+		}
+		mark = StateWord{glyph, styDim}
+		name = truncateLeft(r.Name, avail)
+	}
+
+	if i == a.fileRowCur && a.Focus == PanelFiles {
+		return indent + styCursor.Render(mark.Word+" "+name+" "+count)
+	}
+	body := name
+	if r.IsDir {
+		body = styTitle.Render(name)
+	}
+	return indent + mark.Render() + " " + body + " " + styDim.Render(count)
 }
 
 // --- the diff viewport ------------------------------------------------------
@@ -515,6 +554,26 @@ func truncate(s string, w int) string {
 		return string(r[:w])
 	}
 	return string(r[:w-1]) + "…"
+}
+
+// truncateLeft keeps the TAIL and puts the ellipsis at the FRONT.
+//
+// 🔴 IT EXISTS FOR COMPACTED DIRECTORY ROWS. `truncate` cuts the tail, which on
+// a joined path is the half that carries the meaning: in a 30-column panel
+// `nix/pkgs/tools/mention…` identifies nothing, while `…/internal/ui` names the
+// directory exactly.
+func truncateLeft(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= w {
+		return s
+	}
+	if w <= 1 {
+		return string(r[len(r)-w:])
+	}
+	return "…" + string(r[len(r)-(w-1):])
 }
 
 // clip takes the first h rows.

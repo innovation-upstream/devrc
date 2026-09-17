@@ -188,9 +188,15 @@ func TestNextFileJumpsToTheStartOfTheFollowingFile(t *testing.T) {
 		t.Errorf("} from the first file -> diffCur = %d, want 4", next.diffCur)
 	}
 	// The Files panel follows the diff cursor, as `{` already asserts in the
-	// other direction.
-	if next.fileCur != 1 {
-		t.Errorf("} left fileCur = %d, want 1", next.fileCur)
+	// other direction. ⚠ ROW 2, NOT FILE 1: the `ready` fixture's two files
+	// live under `pkg/`, so the tree is [0 pkg/, 1 handler.go, 2 widget.go] and
+	// the SECOND file is the THIRD row. Asserting the path as well as the index
+	// is what makes this a claim about the right file rather than an ordinal.
+	if next.fileRowCur != 2 {
+		t.Errorf("} left fileRowCur = %d, want 2", next.fileRowCur)
+	}
+	if got := next.SelectedFilePath(); got != "pkg/widget.go" {
+		t.Errorf("} selected %q, want pkg/widget.go", got)
 	}
 
 	// On the LAST file `}` is inert rather than wrapping or running off the end.
@@ -280,7 +286,7 @@ func TestTheOverviewBodyPagesAndJumpsToItsEnds(t *testing.T) {
 //
 // 🔴 THESE ASSERT A PAN AND A NON-MOVE AT THE SAME TIME, AND THE SECOND HALF IS
 // THE POINT. `J`/`K` are vim's `ctrl+e`/`ctrl+y`: they move the WINDOW and leave
-// `diffCur`, `fileCur` and `commitCur` exactly where they were. A version wired
+// `diffCur`, `fileRowCur` and `commitCur` exactly where they were. A version wired
 // through `move()`/`moveIn()` would move a cursor; a version that called
 // `syncDiffViewport()` afterwards would move the window and then immediately
 // `EnsureVisible` it straight back to the cursor — a feature that looks
@@ -305,8 +311,12 @@ const (
 	// AND DISTINCT FROM THE STEP AND ITS MULTIPLES (3, 6, 9, 12) AND FROM THE
 	// BUFFER BOUNDS (0, 20, 182, 202). A cursor that starts at 0 cannot see a
 	// mutant that resets it to 0.
+	//
+	// ⚠ `scrollFixtureRowCur` INDEXES TREE ROWS. `bigApp(t, 200)` has one file,
+	// `pkg/generated/module_000.go`, whose single-child chain compacts to two
+	// rows: [0 `pkg/generated`, 1 `module_000.go`]. Row 1 is the file row.
 	scrollFixtureDiffCur   = 7
-	scrollFixtureFileCur   = 1
+	scrollFixtureRowCur    = 1
 	scrollFixtureCommitCur = 2
 )
 
@@ -323,7 +333,7 @@ func scrollable(t *testing.T, focus Panel) App {
 	}
 	a.Focus = focus
 	a.commitCur = scrollFixtureCommitCur
-	a.fileCur = scrollFixtureFileCur
+	a.fileRowCur = scrollFixtureRowCur
 	a.diffCur = scrollFixtureDiffCur
 	a.vp.SetHeight(scrollFixtureHeight)
 	a.syncDiffViewport()
@@ -350,10 +360,10 @@ func scrollable(t *testing.T, focus Panel) App {
 }
 
 // cursors is the triple `J`/`K` must never touch, as one comparable value.
-type cursors struct{ commit, file, diff int }
+type cursors struct{ commit, row, diff int }
 
 func cursorsOf(a App) cursors {
-	return cursors{commit: a.commitCur, file: a.fileCur, diff: a.diffCur}
+	return cursors{commit: a.commitCur, row: a.fileRowCur, diff: a.diffCur}
 }
 
 // 🔴 THE STEP IS EXACTLY THREE, AND THE TWO DIRECTIONS ARE OPPOSITE. Two presses
@@ -395,7 +405,7 @@ func TestScrollDiffPansTheViewportByExactlyThreeLinesPerPress(t *testing.T) {
 func TestScrollDiffPansFromEveryPanelAndMovesNoCursor(t *testing.T) {
 	want := cursors{
 		commit: scrollFixtureCommitCur,
-		file:   scrollFixtureFileCur,
+		row:    scrollFixtureRowCur,
 		diff:   scrollFixtureDiffCur,
 	}
 	for _, p := range []Panel{PanelOverview, PanelCommits, PanelFiles, PanelDiff} {
@@ -475,6 +485,15 @@ func TestInTheDiffPanelCapitalJPansWhileLowercaseJMovesTheCursor(t *testing.T) {
 	if got := a.vp.YOffset(); got != 100 {
 		t.Fatalf("the fixture did not follow the cursor to line 100: YOffset = %d", got)
 	}
+	// 🔴 THE FILES CURSOR IS PARKED ON THE *DIRECTORY* ROW, WHICH IS WHAT MAKES
+	// THE PAIR BELOW DISCRIMINATING. `j` drags it onto the file the diff cursor
+	// is in (row 1); `J` must leave it on row 0. Start it on row 1 and both keys
+	// produce the same number and the assertion proves nothing.
+	a.fileRowCur = 0
+	if r, ok := a.currentRow(); !ok || !r.IsDir {
+		t.Fatalf("row 0 of the big fixture is not a directory row (%+v) — this "+
+			"test's starting point is wrong", r)
+	}
 
 	lower, _ := a.Step(keyPress("j"))
 	if lower.diffCur != 101 {
@@ -495,12 +514,13 @@ func TestInTheDiffPanelCapitalJPansWhileLowercaseJMovesTheCursor(t *testing.T) {
 	}
 	// ⚠ AND THE FILE CURSOR SEPARATES THEM TOO. `j` drags the Files highlight
 	// onto whatever file the diff cursor landed in (`syncFileCursorFromDiff`);
-	// `J` touches nothing, so the fixture's `fileCur` survives.
-	if lower.fileCur != 0 {
-		t.Errorf("j left fileCur = %d, want 0 (the big fixture has one file)", lower.fileCur)
+	// `J` touches nothing, so the fixture's row cursor survives.
+	if lower.fileRowCur != 1 {
+		t.Errorf("j left fileRowCur = %d, want 1 — the big fixture's one file is "+
+			"row 1, under its compacted `pkg/generated` directory row", lower.fileRowCur)
 	}
-	if upper.fileCur != scrollFixtureFileCur {
-		t.Errorf("J left fileCur = %d, want %d unchanged", upper.fileCur, scrollFixtureFileCur)
+	if upper.fileRowCur != 0 {
+		t.Errorf("J left fileRowCur = %d, want 0 unchanged", upper.fileRowCur)
 	}
 }
 
@@ -629,5 +649,547 @@ func TestRelayoutSnapsAScrolledViewportBackToTheCursor(t *testing.T) {
 				t.Errorf("%s moved diffCur to %d", c.name, back.diffCur)
 			}
 		})
+	}
+}
+
+// --- the Files panel's directory tree -----------------------------------------
+//
+// 🔴 THE CURSOR HALF. `tree_test.go` owns construction, compaction, aggregation
+// and rendering; what follows is what a KEY does — which row the cursor lands
+// on, and what that does to the diff. The fixture is `treeApp`, whose tree
+// order, `Snap.Files` order and `Diff.Files` order are three DIFFERENT orders on
+// purpose (it proves that about itself before returning).
+
+// walkTo drives the Files cursor down to `row` with `j`.
+//
+// 🔴 IT IS BOUNDED, AND THE BOUND IS NOT PARANOIA. The first draft was a bare
+// `for a.fileRowCur < row { press("j") }`, and against a tree that produced NO
+// rows it spun forever: the test binary hung, `go test` was killed, and the
+// harness reading its output reported a tidy "5 tests failed" for a run that had
+// never finished. An unreachable row is a FAILURE with a name, not a hang.
+func walkTo(t *testing.T, a App, row int) App {
+	t.Helper()
+	for i := 0; i <= len(a.fileRows)+2; i++ {
+		if a.fileRowCur == row {
+			return a
+		}
+		a, _ = a.Step(keyPress("j"))
+	}
+	t.Fatalf("`j` never reached row %d — the cursor stopped at %d of %d rows:\n%+v",
+		row, a.fileRowCur, len(a.fileRows), shapesOf(a.fileRows))
+	return a
+}
+
+// diffIndexOfPath is the test's own lookup, written out rather than borrowed
+// from `App.diffFileByPath` — an expectation derived from the map under test
+// would agree with it however wrong the map was.
+func diffIndexOfPath(t *testing.T, a App, path string) int {
+	t.Helper()
+	for i, f := range a.Diff.Files {
+		if f.Path == path {
+			return i
+		}
+	}
+	t.Fatalf("%q is in the Files panel and in no diff file", path)
+	return -1
+}
+
+// 🔴 THE REGRESSION TEST FOR THE CORE HAZARD OF THIS CHANGE: A ROW REACHES ITS
+// DIFF FILE BY PATH, NEVER BY AN INDEX.
+//
+// Before the tree, ONE integer indexed both `Snap.Files` and `Diff.Files`, which
+// worked only while the two were positionally parallel. Grouping by directory
+// re-orders rows relative to both lists, and the two lists come from two
+// different endpoints and may disagree with each other as well. Every wrong
+// mapping still opens SOME file's hunk and looks entirely correct on screen.
+//
+// The expectations below are LITERALS read off the fixture, and the failure
+// message names what each rival mapping would have produced.
+func TestTheFilesPanelResolvesItsDiffFileByPathAndNotByAnyIndex(t *testing.T) {
+	a := treeApp(t)
+
+	// row -> the file it shows, and that file's position in `Diff.Files`.
+	cases := []struct {
+		row       int
+		path      string
+		diffIndex int
+	}{
+		{2, "src/a/one.go", 3},
+		{3, "src/a/two.go", 1},
+		{5, "src/b/deep/three.go", 2},
+		{6, "src/root.go", 0},
+	}
+
+	// 🔴 THE INSTRUMENT CHECK. For each row, work out what the rival mappings
+	// would say, and require that at least one row separates each of them from
+	// the truth. Without this, a fixture whose orders happened to coincide would
+	// let an index-based implementation pass every assertion below.
+	sepRow, sepFileOrdinal, sepSnapIndex := false, false, false
+	for fileOrdinal, c := range cases {
+		if c.row != c.diffIndex {
+			sepRow = true
+		}
+		if fileOrdinal != c.diffIndex {
+			sepFileOrdinal = true
+		}
+		snapIndex := -1
+		for i, f := range a.Snap.Files {
+			if f.Path == c.path {
+				snapIndex = i
+			}
+		}
+		if snapIndex != c.diffIndex {
+			sepSnapIndex = true
+		}
+	}
+	for _, s := range []struct {
+		name string
+		ok   bool
+	}{
+		{"the ROW ordinal", sepRow},
+		{"the ordinal among FILE rows", sepFileOrdinal},
+		{"the `Snap.Files` index", sepSnapIndex},
+	} {
+		if !s.ok {
+			t.Fatalf("no row in this fixture separates the correct mapping from %s — "+
+				"an index-based implementation would pass this test", s.name)
+		}
+	}
+
+	// Walk the panel with `j`, the way the operator does, and check every file
+	// row on the way down.
+	for _, c := range cases {
+		a = walkTo(t, a, c.row)
+		if got := a.SelectedFilePath(); got != c.path {
+			t.Fatalf("row %d shows %q, want %q — the FIXTURE has drifted", c.row, got, c.path)
+		}
+		want := a.Diff.FileStart(diffIndexOfPath(t, a, c.path))
+		if a.diffCur != want {
+			t.Errorf("selecting row %d (%s) put the diff cursor at line %d, want %d "+
+				"— by the row ordinal that would be %d",
+				c.row, c.path, a.diffCur, want, a.Diff.FileStart(c.row))
+		}
+		// And the diff really is inside that file, stated without `FileStart`
+		// so a broken `FileStart` cannot satisfy both halves.
+		if got := a.Diff.Files[a.Diff.FileAt(a.diffCur)].Path; got != c.path {
+			t.Errorf("selecting row %d (%s) opened %q in the diff", c.row, c.path, got)
+		}
+	}
+}
+
+// 🔴 THE CROSS-PANEL INVARIANT, OVER EVERY FILE IN THE FIXTURE: moving the diff
+// cursor into a file leaves that file's row BOTH highlighted AND visible —
+// including when its directory started CLOSED. Spot-checking one file would
+// miss exactly the file whose ancestors need opening.
+func TestEveryFileIsRevealedAndHighlightedWhenTheDiffCursorEntersIt(t *testing.T) {
+	a := treeApp(t)
+	// Start with EVERY directory closed, which is the state that makes this
+	// test about revealing rather than about highlighting.
+	a.collapsedDirs = map[string]bool{"src": true, "src/a": true, "src/b/deep": true}
+	a.rebuildFileRows()
+	if len(a.fileRows) != 1 || !a.fileRows[0].IsDir {
+		t.Fatalf("the fixture is not fully collapsed: %+v", shapesOf(a.fileRows))
+	}
+	a.Focus = PanelDiff
+
+	// `g` puts the cursor on line 0, then `}` walks the files IN DIFF ORDER —
+	// which is what those keys mean, and is deliberately not the tree's order.
+	a, _ = a.Step(keyPress("g"))
+	for i := range a.Diff.Files {
+		if i > 0 {
+			a, _ = a.Step(keyPress("}"))
+		}
+		want := a.Diff.Files[i].Path
+		if got := a.Diff.Files[a.Diff.FileAt(a.diffCur)].Path; got != want {
+			t.Fatalf("the diff cursor is in %q, want %q — the walk is wrong", got, want)
+		}
+		// HIGHLIGHTED: the Files cursor is on that file's row.
+		if got := a.SelectedFilePath(); got != want {
+			t.Errorf("the diff is showing %s and the Files panel has %q selected", want, got)
+		}
+		// VISIBLE: that row is in the flattened rows at all...
+		found := -1
+		for j, r := range a.fileRows {
+			if !r.IsDir && r.Path == want {
+				found = j
+			}
+		}
+		if found < 0 {
+			t.Errorf("%s has no visible row — its directory was never opened:\n%+v",
+				want, shapesOf(a.fileRows))
+			continue
+		}
+		if found != a.fileRowCur {
+			t.Errorf("%s is at row %d and the cursor is on row %d", want, found, a.fileRowCur)
+		}
+		// ...and it is on the rendered screen, which is the claim the operator
+		// would actually make.
+		base := want[strings.LastIndex(want, "/")+1:]
+		if body := stripANSI(a.filesBody(30, 20)); !strings.Contains(body, base) {
+			t.Errorf("%s is not on the rendered Files panel:\n%s", want, body)
+		}
+	}
+
+	// POSITIVE CONTROL ON THE REVEAL: the directories really were closed and
+	// really did open, so "visible" above is not a fact about a tree that was
+	// never collapsed.
+	if len(a.collapsedDirs) != 0 {
+		t.Errorf("%v is still collapsed after visiting every file", a.collapsedDirs)
+	}
+	if got := shapesOf(a.fileRows); !shapesEqual(got, treeFixtureRows) {
+		t.Errorf("after the walk the tree is\n%+v\nwant fully expanded\n%+v",
+			got, treeFixtureRows)
+	}
+}
+
+// 🔴 A DIRECTORY ROW IS PURE NAVIGATION — LANDING ON ONE MUST NOT MOVE THE DIFF.
+// A directory is not something the diff can show, so jerking the diff to its
+// first file would make it impossible to walk PAST a directory while reading:
+// every step through the tree would throw away the operator's place.
+// 🔴 HOW THE CURSOR ARRIVES AT THE DIRECTORY ROW IS THE WHOLE TEST, AND AN
+// EARLIER VERSION OF IT GOT THAT WRONG AND WAS VACUOUS. MEASURED: a mutant that
+// made a directory row jump the diff to its FIRST DESCENDANT FILE survived a
+// fully green suite, because that draft stepped UP onto `src/a` from
+// `src/a/one.go` — which IS `src/a`'s first descendant, so the wrong answer and
+// the right answer were the same number. Every case below therefore lands on a
+// directory whose first descendant is NOT the file the diff is currently in,
+// and each one asserts that about itself before asserting anything else.
+func TestLandingOnADirectoryRowLeavesTheDiffCursorByteIdentical(t *testing.T) {
+	// firstDescendantOf is the file a "jump to the directory's contents"
+	// implementation would pick — the rival this test must be able to see.
+	firstDescendantOf := func(a App, dir string) string {
+		for _, r := range a.fileRows {
+			if !r.IsDir && strings.HasPrefix(r.Path, dir+"/") {
+				return r.Path
+			}
+		}
+		return ""
+	}
+
+	for _, c := range []struct {
+		name string
+		from int    // the FILE row the cursor starts on
+		key  string // the key that lands it on a directory row
+		dir  string // the directory row it must land on
+		file string // the file the diff must STAY in
+	}{
+		{"stepping DOWN onto src/b/deep", 3, "j", "src/b/deep", "src/a/two.go"},
+		{"jumping to the TOP onto src", 3, "g", "src", "src/a/two.go"},
+		{"paging UP onto src", 6, "ctrl+u", "src", "src/root.go"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := walkTo(t, treeApp(t), c.from)
+			if got := a.SelectedFilePath(); got != c.file {
+				t.Fatalf("row %d shows %q, want %q", c.from, got, c.file)
+			}
+			diffBefore, offBefore := a.diffCur, a.vp.YOffset()
+
+			// 🔴 THE INSTRUMENT CHECK, PER CASE.
+			if rival := firstDescendantOf(a, c.dir); rival == c.file {
+				t.Fatalf("%s's first descendant IS %s — landing on it cannot tell a "+
+					"directory row that leaves the diff alone from one that jumps to "+
+					"its first file", c.dir, c.file)
+			}
+
+			next, intents := a.Step(keyPress(c.key))
+			if len(intents) != 0 {
+				t.Errorf("moving onto a directory row emitted %v", intents)
+			}
+			r, ok := next.currentRow()
+			if !ok || !r.IsDir || r.Path != c.dir {
+				t.Fatalf("%q landed on %+v, want the %s directory row", c.key, r, c.dir)
+			}
+			if next.diffCur != diffBefore {
+				t.Errorf("landing on the %s row moved the diff cursor from %d to %d "+
+					"— a directory is pure navigation, and jumping the diff would "+
+					"throw away the operator's place every time they walked past one",
+					c.dir, diffBefore, next.diffCur)
+			}
+			if got := next.vp.YOffset(); got != offBefore {
+				t.Errorf("landing on the %s row scrolled the diff viewport from %d to %d",
+					c.dir, offBefore, got)
+			}
+			// And the diff is still showing the same FILE, stated in the
+			// operator's terms rather than as a line number.
+			if got := next.Diff.Files[next.Diff.FileAt(next.diffCur)].Path; got != c.file {
+				t.Errorf("landing on the %s row left the diff showing %q, want %q",
+					c.dir, got, c.file)
+			}
+
+			// 🔴 POSITIVE CONTROL, IN THE SAME SUB-TEST. A `selectRow` wired to
+			// nothing would satisfy every assertion above. Moving onto a
+			// different FILE row MUST move the diff.
+			onto := walkTo(t, next, 5) // src/b/deep/three.go
+			if got := onto.SelectedFilePath(); got != "src/b/deep/three.go" {
+				t.Fatalf("the control step selected %q", got)
+			}
+			if onto.diffCur == diffBefore {
+				t.Fatal("moving onto a DIFFERENT file row did not move the diff either " +
+					"— the assertions above are about a cross-panel link that is dead")
+			}
+		})
+	}
+}
+
+// 🔴 EACH TREE KEY, ON EACH KIND OF ROW, WITH LITERAL EXPECTATIONS.
+func TestTheTreeKeysExpandCollapseAndToggle(t *testing.T) {
+	// rowAt walks the cursor down to `row` with `j` from a fresh fixture.
+	rowAt := func(t *testing.T, row int) App {
+		t.Helper()
+		return walkTo(t, treeApp(t), row)
+	}
+
+	t.Run("h collapses an open directory and l opens it again", func(t *testing.T) {
+		a := rowAt(t, 1) // src/a, open
+		closed, intents := a.Step(keyPress("h"))
+		if len(intents) != 0 {
+			t.Errorf("`h` emitted %v — collapsing is local", intents)
+		}
+		want := []rowShape{
+			{0, "dir-open", "src", 46, 11},
+			{1, "dir-closed", "a", 16, 5},
+			{1, "dir-open", "b/deep", 23, 6},
+			{2, "RENAMED", "three.go", 23, 6},
+			{1, "ADDED", "root.go", 7, 0},
+		}
+		if got := shapesOf(closed.fileRows); !shapesEqual(got, want) {
+			t.Errorf("after `h` on src/a the rows are\n%+v\nwant\n%+v", got, want)
+		}
+		// The cursor stays ON the directory it just closed.
+		if r, _ := closed.currentRow(); r.Path != "src/a" {
+			t.Errorf("`h` left the cursor on %q, want src/a", r.Path)
+		}
+		// ...and `l` puts it back, exactly.
+		reopened, _ := closed.Step(keyPress("l"))
+		if got := shapesOf(reopened.fileRows); !shapesEqual(got, treeFixtureRows) {
+			t.Errorf("after `l` the rows are\n%+v\nwant\n%+v", got, treeFixtureRows)
+		}
+		// ⚠ AND NEITHER KEY TOUCHED THE DIFF. Opening and closing directories
+		// is navigation; the diff stays where the operator left it.
+		if closed.diffCur != a.diffCur || reopened.diffCur != a.diffCur {
+			t.Errorf("collapse/expand moved the diff cursor: %d -> %d -> %d",
+				a.diffCur, closed.diffCur, reopened.diffCur)
+		}
+	})
+
+	t.Run("the arrow keys are the same two actions", func(t *testing.T) {
+		a := rowAt(t, 1)
+		byLetter, _ := a.Step(keyPress("h"))
+		byArrow, _ := a.Step(keyPress("left"))
+		if !shapesEqual(shapesOf(byLetter.fileRows), shapesOf(byArrow.fileRows)) {
+			t.Errorf("`h` and `←` disagree:\n%+v\nvs\n%+v",
+				shapesOf(byLetter.fileRows), shapesOf(byArrow.fileRows))
+		}
+		openByLetter, _ := byLetter.Step(keyPress("l"))
+		openByArrow, _ := byArrow.Step(keyPress("right"))
+		if !shapesEqual(shapesOf(openByLetter.fileRows), shapesOf(openByArrow.fileRows)) {
+			t.Error("`l` and `→` disagree")
+		}
+	})
+
+	t.Run("h on a FILE row selects its parent directory", func(t *testing.T) {
+		a := rowAt(t, 2) // src/a/one.go, depth 2
+		up, _ := a.Step(keyPress("h"))
+		if up.fileRowCur != 1 {
+			t.Errorf("`h` on src/a/one.go -> row %d, want 1 (the src/a row)", up.fileRowCur)
+		}
+		if r, _ := up.currentRow(); r.Path != "src/a" || !r.IsDir {
+			t.Errorf("`h` landed on %+v, want the src/a directory row", r)
+		}
+		// 🔴 IT STEPS OUT, IT DOES NOT CLOSE. src/a must still be open, or the
+		// key would mean two things on one press.
+		if !up.fileRows[1].Expanded {
+			t.Error("`h` on a file row CLOSED its parent as well as selecting it")
+		}
+		// And it did not move the diff — it landed on a directory row.
+		if up.diffCur != a.diffCur {
+			t.Errorf("`h` onto the parent row moved the diff cursor to %d", up.diffCur)
+		}
+
+		// A DEPTH-1 file row steps out to the top-level directory.
+		root := rowAt(t, 6) // src/root.go, depth 1
+		outer, _ := root.Step(keyPress("h"))
+		if r, _ := outer.currentRow(); r.Path != "src" {
+			t.Errorf("`h` on src/root.go landed on %q, want src", r.Path)
+		}
+	})
+
+	t.Run("h on a CLOSED directory steps out to its parent", func(t *testing.T) {
+		a := rowAt(t, 1)
+		closed, _ := a.Step(keyPress("h")) // src/a is now closed, cursor on it
+		out, _ := closed.Step(keyPress("h"))
+		if r, _ := out.currentRow(); r.Path != "src" {
+			t.Errorf("a second `h` landed on %q, want src", r.Path)
+		}
+		if out.fileRows[1].Expanded {
+			t.Error("stepping out re-opened src/a")
+		}
+	})
+
+	t.Run("h at the top level is inert", func(t *testing.T) {
+		a := treeApp(t) // row 0 is `src`, depth 0, and it is open
+		closed, _ := a.Step(keyPress("h"))
+		if closed.fileRowCur != 0 {
+			t.Errorf("`h` on the top row moved to %d", closed.fileRowCur)
+		}
+		stay, _ := closed.Step(keyPress("h")) // now closed; there is no parent
+		if stay.fileRowCur != 0 {
+			t.Errorf("`h` on a closed top-level row moved to %d", stay.fileRowCur)
+		}
+		if !shapesEqual(shapesOf(stay.fileRows), shapesOf(closed.fileRows)) {
+			t.Error("`h` at the top level changed the rows")
+		}
+	})
+
+	t.Run("l on an already-open directory is inert", func(t *testing.T) {
+		a := rowAt(t, 1)
+		same, intents := a.Step(keyPress("l"))
+		if len(intents) != 0 {
+			t.Errorf("`l` emitted %v", intents)
+		}
+		if same.fileRowCur != a.fileRowCur || same.Focus != PanelFiles {
+			t.Errorf("`l` on an open directory moved to row %d / panel %v",
+				same.fileRowCur, same.Focus)
+		}
+		if got := shapesOf(same.fileRows); !shapesEqual(got, treeFixtureRows) {
+			t.Error("`l` on an open directory changed the rows")
+		}
+	})
+
+	t.Run("l on a FILE row focuses the Diff panel", func(t *testing.T) {
+		a := rowAt(t, 2)
+		open, intents := a.Step(keyPress("l"))
+		if len(intents) != 0 {
+			t.Errorf("`l` emitted %v — focusing a panel is local", intents)
+		}
+		if open.Focus != PanelDiff {
+			t.Errorf("`l` on a file row left focus on %v, want the Diff panel", open.Focus)
+		}
+		// It opens THIS file: the diff cursor stays in src/a/one.go.
+		if got := open.Diff.Files[open.Diff.FileAt(open.diffCur)].Path; got != "src/a/one.go" {
+			t.Errorf("`l` on the src/a/one.go row left the diff in %q", got)
+		}
+		if open.fileRowCur != a.fileRowCur {
+			t.Errorf("`l` moved the Files cursor to %d", open.fileRowCur)
+		}
+	})
+
+	t.Run("enter toggles a directory both ways", func(t *testing.T) {
+		a := rowAt(t, 1)
+		closed, intents := a.Step(keyPress("enter"))
+		if len(intents) != 0 {
+			t.Errorf("`enter` emitted %v", intents)
+		}
+		if closed.fileRows[1].Expanded {
+			t.Error("`enter` on an open directory did not close it")
+		}
+		reopened, _ := closed.Step(keyPress("enter"))
+		if !reopened.fileRows[1].Expanded {
+			t.Error("a second `enter` did not re-open it")
+		}
+		if got := shapesOf(reopened.fileRows); !shapesEqual(got, treeFixtureRows) {
+			t.Errorf("enter/enter did not return to the opening state:\n%+v", got)
+		}
+	})
+
+	t.Run("enter on a FILE row focuses the Diff panel", func(t *testing.T) {
+		a := rowAt(t, 5) // src/b/deep/three.go
+		open, _ := a.Step(keyPress("enter"))
+		if open.Focus != PanelDiff {
+			t.Errorf("`enter` on a file row left focus on %v", open.Focus)
+		}
+		if got := open.Diff.Files[open.Diff.FileAt(open.diffCur)].Path; got != "src/b/deep/three.go" {
+			t.Errorf("`enter` left the diff in %q", got)
+		}
+	})
+
+	t.Run("the tree keys are inert outside the Files panel", func(t *testing.T) {
+		for _, p := range []Panel{PanelOverview, PanelCommits, PanelDiff} {
+			for _, k := range []string{"h", "l", "left", "right", "enter"} {
+				a := treeApp(t)
+				a.Focus = p
+				next, intents := a.Step(keyPress(k))
+				if len(intents) != 0 {
+					t.Errorf("%q in %s emitted %v", k, p.Title(), intents)
+				}
+				if next.Focus != p {
+					t.Errorf("%q in %s changed focus to %v", k, p.Title(), next.Focus)
+				}
+				if next.fileRowCur != a.fileRowCur {
+					t.Errorf("%q in %s moved the Files cursor to %d",
+						k, p.Title(), next.fileRowCur)
+				}
+				if !shapesEqual(shapesOf(next.fileRows), shapesOf(a.fileRows)) {
+					t.Errorf("%q in %s changed the tree", k, p.Title())
+				}
+			}
+		}
+	})
+
+	// 🔴 AND THEY DO NOT REACH COMPOSE MODE. `enter`, `left` and `right` are all
+	// bound in the compose table; the tables are disjoint, and this is the
+	// assertion that says so in behaviour rather than in a comment.
+	t.Run("compose mode still owns enter, left and right", func(t *testing.T) {
+		a, _ := pressAll(treeApp(t), "c", "a", "b")
+		if a.Mode() != ModeCompose {
+			t.Fatalf("mode = %s, want COMPOSING", a.Mode().Word())
+		}
+		nl, _ := a.Step(keyPress("enter"))
+		if got := nl.ComposeBody(); got != "ab\n" {
+			t.Errorf("`enter` while composing produced %q, want %q", got, "ab\n")
+		}
+		if nl.Focus != a.Focus {
+			t.Errorf("`enter` while composing changed focus to %v", nl.Focus)
+		}
+		left, _ := a.Step(keyPress("left"))
+		if left.compose.Cur != 1 {
+			t.Errorf("`←` while composing put the compose cursor at %d, want 1", left.compose.Cur)
+		}
+		if left.fileRowCur != a.fileRowCur {
+			t.Errorf("`←` while composing moved the FILES cursor to %d", left.fileRowCur)
+		}
+	})
+}
+
+// 🔴 THE NEW BINDINGS ARE IN THE LEGEND, SPELLED OUT — the defect this keymap
+// arc exists to fix is an invisible binding. Asserted by their LITERAL rendered
+// words, like `J`/`K` above, rather than by echoing `Keys.TreeExpand.Help()`
+// back at itself: that would pass against an empty legend and an empty binding
+// alike.
+//
+// ⚠ THE EXPANDED LEGEND, NOT THE PERSISTENT FOOTER. The browse row already
+// renders 146 columns and overflows a 140-column terminal; `J`/`K` set the
+// precedent that this class of key lives behind `?`.
+func TestTheLegendCarriesTheTreeBindings(t *testing.T) {
+	a := treeApp(t)
+	a.Width, a.Height = 140, 40
+	a.relayout()
+
+	full, intents := a.Step(keyPress("?"))
+	if len(intents) != 0 {
+		t.Errorf("`?` emitted %v", intents)
+	}
+	if !full.showFull {
+		t.Fatal("`?` did not expand the help")
+	}
+	legend := stripANSI(full.renderFooter())
+
+	for _, want := range []string{
+		"l/→", "expand dir / open file",
+		"h/←", "collapse dir / go to parent",
+		"enter", "toggle dir",
+	} {
+		if !strings.Contains(legend, want) {
+			t.Errorf("the expanded legend does not carry %q\nlegend:\n%s", want, legend)
+		}
+	}
+	// POSITIVE CONTROL for the matcher: a phrase in no binding must be absent.
+	if strings.Contains(legend, "expand every directory") {
+		t.Error("the legend matcher matches text that is in no binding")
+	}
+	// ⚠ AND NOT IN THE PERSISTENT FOOTER, which is where the width budget is.
+	short := stripANSI(a.renderFooter())
+	if strings.Contains(short, "toggle dir") {
+		t.Error("a tree binding landed in the persistent footer, which already overflows")
 	}
 }
