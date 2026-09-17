@@ -47,6 +47,33 @@ READ>`.** `--emit-claims` runs after the fixes land, so every sha it can see is 
 `--audited` and HEAD is *assumed* — it says so on stderr, because the next round then diffs a range
 that is empty by construction and a finding-free pass over it reads as a clean round.
 
+🔴 **EMITTING IS NOT POSTING — the two halves fail independently, and a handoff that records the
+`--emit-claims` command as the next step reads as if the step were done.** The flag PRINTS a
+skeleton; it does not post, and the same run *refuses its own brief* for the missing block ("the two
+halves are independent"), so a session can run the documented command, see output, and leave the
+ladder with no anchor. Measured 2026-09-16 on `civitai/civitai#4886`: round 1's block was never
+posted, and `--round 2` refused with `no audit-claims block in any of the 5 comment(s) read`. **The
+tell is a refusal naming a COMMENT COUNT rather than an error.** Check both surfaces before
+concluding it is absent — `gh api repos/<o>/<r>/issues/<n>/comments` *and* `.../pulls/<n>/comments`,
+since the script reads only the first.
+
+🔴 **`--claims-file <path>` is the offline seam, and its cost is INVISIBLE in the brief's own
+commands.** It unblocks a delta round with no public write — useful when the repo is public and the
+block has not been cleared for posting — but it consults no `gh`, so the run never learns
+`headRefOid` or `baseRefName`. The brief then carries the literal string `<the PR's head sha>` in the
+range **and in the payload-attribution command that gates the ladder's own stop condition**, plus
+`origin/main` as an assumed default it flags but cannot check. An auditor that does not substitute
+measures an empty range and reads it as zero payload — the ladder then never ends. **Resolve both
+yourself and substitute before dispatching** (`gh pr view <n> --repo <o>/<r> --json
+headRefOid,baseRefName`), then assert **zero** placeholders remain. It is a workaround, not a
+replacement: the block still lives nowhere durable, so the next session pays the reconstruction
+again.
+
+🔴 **Reconstructing a lost block: derive it from the DIFF, never from a handoff's prose.** Prose says
+why a fix is correct, which is exactly the framing a blind round must not receive — three framed
+audits confirmed a claim that one blind pass refuted. `git diff <from> <to>` yields what was
+*claimed*, and it surfaces items the prose never separated.
+
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
 🔴 **RUN `--round 0` FIRST — the requirements & deletion pass (its own section below).** It asks
