@@ -126,6 +126,14 @@ class _Recorder(HTTPServer):
         # model a server with no session cap — but do NOT make that the default
         # again; see `_Handler.do_POST`.
         self.max_sessions = DEPLOYED_MAX_SESSIONS_PER_PUSH
+        # 🔴 A BODY-SIZE CEILING, WHICH IS A DIFFERENT REFUSAL FROM THE SESSION
+        # COUNT ABOVE AND MUST NOT BE MODELLED AS THE SAME ONE. The app names its
+        # own cap in a JSON body; a PROXY answers 413 with an nginx HTML page the
+        # app never sees. Traced and measured 2026-09-16 on the laptop's clawgate
+        # route: no `client_max_body_size` was declared for that listener, so
+        # nginx's 1m default applied — 1,048,576 B reached the app, 1,048,577 B
+        # did not. None = no proxy in front, which is the workbench's NodePort.
+        self.max_body_bytes = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -174,6 +182,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "error": f"transcript: too many sessions in one push: "
                              f"{n} > {self.server.max_sessions}"}).encode())
                 return
+        if self.server.max_body_bytes is not None and len(raw) > self.server.max_body_bytes:
+            self._reply(413, b"<html><head><title>413 Request Entity Too Large</title></head></html>")
+            return
         self._reply(self.server.push_status, self.server.push_body)
 
     def log_message(self, format, *args):  # noqa: A002
@@ -650,41 +661,110 @@ def test_the_aggregate_byte_bound_stops_the_push_before_the_session_count_does(
     assert total <= budget + per, f"the push carried {total} bytes against a {budget}-byte budget"
 
 
-def test_the_client_bounds_sit_UNDER_the_servers_not_at_them(server, projects, tmp_path):
-    """🔴 A CLIENT TUNED EXACTLY TO THE SERVER'S CAP TURNS ANY ROUNDING
-    DISAGREEMENT INTO A FEEDER THAT FAILS EVERY TICK while looking correctly
-    configured. The server's numbers are read here as LITERALS on purpose — this
-    is a cross-repo contract and the point is to fail loudly when clawgate
-    changes one.
+def test_the_client_bounds_are_SAFE_AGAINST_BOTH_server_versions(server, projects, tmp_path):
+    """🔴 THE TAIL SIZE IS NOW NEGOTIATED, AND THIS GUARD CHANGED SHAPE WITH IT.
+
+    It used to assert a single hardcoded default sat UNDER a single hardcoded
+    server cap. That was the right guard while the client's tail size was a
+    HOST-SIDE BELIEF about a server constant — and the belief is exactly what went
+    wrong: the script sent 192 KiB while clawgate's `transcript.MaxTailBytes` said
+    256 KiB, the bulk push REPLACES the stored tail, and so the DEPLOYED
+    truncation was 96.13% against a server that believed 94.23%. Neither repo
+    could see it.
+
+    The script now reads `limits.maxTailBytes` out of the digest pre-flight and
+    uses `min(server, TAIL_CEILING)`. So the thing to guard is no longer one
+    number against one cap; it is that the two REMAINING host-side numbers are
+    safe against BOTH server versions that exist in the world at once:
+
+      TAIL_FALLBACK — what a server advertising NOTHING gets. That is the
+        currently-deployed clawgate, whose cap is 256 KiB. This number must sit
+        under THAT.
+      TAIL_CEILING — the most this host will ever read, whatever a server claims.
+        It must not exceed the NEW server's cap of 1 MiB.
+
+    🔴 THE CEILING IS ALLOWED TO EQUAL THE NEW CAP, AND THE OLD GUARD'S "UNDER,
+    NOT AT" RULE DOES NOT APPLY TO IT. That rule existed because a rounding
+    disagreement between two independently-maintained numbers becomes a feeder
+    that fails every tick. There is no longer a disagreement to round: the value
+    comes FROM the server, and `build_transcript_push.read_tail` drops a leading
+    partial record, so the tail it emits is `<= tail_bytes` by construction and
+    `NormalizePush` admits `len(tail) == MaxTailBytes`. The behavioural half of
+    that claim is asserted below rather than left to this paragraph.
+
+    Both server numbers are still LITERALS on purpose: this is a cross-repo
+    contract, and the point is to fail loudly when clawgate changes one.
     """
-    server_max_tail_bytes = 256 * 1024  # transcript.MaxTailBytes
-    # 🔴 RAISED FROM 8 TO 128 WITH THE SERVER, AND THE PAIR MOVED FOR A REASON,
-    # NOT TO MAKE A TEST PASS. 8 was a COVERAGE cap wearing a safety cap's
-    # clothes: measured 2026-09-07 against ~93 live windows, at most 8 sessions
-    # could carry a transcript per push, so most session cards had no conversation
-    # to show at all. The ceiling the count was standing in for is the AGGREGATE
-    # tail bytes, which the server now bounds directly (transcript.MaxPushTailBytes)
-    # — so the count is free to rise and the third assertion below is the one now
-    # doing the work the second used to pretend to do.
+    deployed_max_tail_bytes = 256 * 1024  # transcript.MaxTailBytes BEFORE task 603
+    new_max_tail_bytes = 1024 * 1024  # transcript.MaxTailBytes AFTER task 603
     server_max_sessions = 128  # transcript.MaxSessionsPerPush
     server_max_push_bytes = 4 * 1024 * 1024  # transcript.MaxPushTailBytes
 
     text = SCRIPT.read_text()
-    tail_default = _shell_default(text, "TAIL_BYTES", "TRANSCRIPT_PUSH_TAIL_BYTES")
+    ceiling = _shell_default(text, "TAIL_CEILING", "TRANSCRIPT_PUSH_TAIL_CEILING")
+    fallback = _shell_default(text, "TAIL_FALLBACK", "TRANSCRIPT_PUSH_TAIL_FALLBACK")
     sess_default = _shell_default(text, "MAX_PER_PUSH", "TRANSCRIPT_PUSH_MAX_SESSIONS")
-    bytes_default = _shell_default(text, "MAX_PUSH_BYTES", "TRANSCRIPT_PUSH_MAX_BYTES")
 
-    assert tail_default < server_max_tail_bytes, (
-        f"the default tail ({tail_default}) is not UNDER the server's cap ({server_max_tail_bytes})"
+    assert fallback < deployed_max_tail_bytes, (
+        f"the fallback tail ({fallback}) is not UNDER the cap of a server that advertises "
+        f"nothing ({deployed_max_tail_bytes}) — that server is the one running right now"
+    )
+    assert ceiling <= new_max_tail_bytes, (
+        f"the host ceiling ({ceiling}) is above the server's cap ({new_max_tail_bytes}); "
+        f"a push of that size is refused WHOLE, taking every other session in the body with it"
     )
     assert sess_default < server_max_sessions, (
         f"the default session count ({sess_default}) is not UNDER the server's cap ({server_max_sessions})"
     )
-    assert bytes_default < server_max_push_bytes, (
-        f"the default aggregate ({bytes_default}) is not UNDER the server's cap "
-        f"({server_max_push_bytes}) — this is the bound that actually holds now that the "
+    # The AGGREGATE is derived in the script as max(900000, 3 * TAIL_BYTES). Its
+    # worst case is at the ceiling, and that is the number that must clear the
+    # server's aggregate bound.
+    derived_aggregate = max(900000, 3 * ceiling)
+    assert derived_aggregate < server_max_push_bytes, (
+        f"the derived aggregate at the ceiling ({derived_aggregate}) is not UNDER the server's "
+        f"cap ({server_max_push_bytes}) — this is the bound that actually holds now that the "
         f"session count is {sess_default}"
     )
+
+
+def test_the_builder_never_emits_MORE_than_the_tail_bytes_it_was_asked_for(projects, tmp_path):
+    """🔴 THE BEHAVIOURAL HALF OF "the ceiling may EQUAL the server's cap".
+
+    If `read_tail` could ever return more bytes than requested, a negotiated tail
+    of exactly `MaxTailBytes` would be refused by `NormalizePush` — and refused
+    WHOLE, taking every other session in the same body with it. The claim is
+    asserted here over a range of sizes rather than stated in a comment.
+
+    ⚠ The sizes deliberately do NOT sit on a power-of-two boundary or on a
+    multiple of the record length: a fixture whose size lands exactly on the cut
+    point cannot see an off-by-one at the cut.
+    """
+    body = transcript(
+        "sess-big",
+        *[assistant_turn(f"reply {i} " + "x" * 137) for i in range(1400)],
+    )
+    path = projects("sess-big", body)
+    digest = tmp_path / "digest.json"
+    digest.write_text(json.dumps({"sessions": []}))
+
+    seen = []
+    for want in (9_999, 40_001, 196_608, 250_007):
+        proc = run_builder(projects.root, digest, tmp_path, tail_bytes=want)
+        assert proc.returncode == 0, proc.stderr
+        doc = json.loads(proc.stdout)
+        tail = doc["sessions"][0]["tail"]
+        seen.append(len(tail))
+        assert len(tail) <= want, (
+            f"asked for {want} tail bytes and the builder emitted {len(tail)} — a negotiated "
+            f"tail equal to the server's cap would be refused, and refused WHOLE"
+        )
+    # 🔴 THE PAIRED NON-ZERO. "<= want" is satisfied by a builder that emits
+    # NOTHING, so the sizes must also be seen to MOVE with the request.
+    assert len(set(seen)) > 1 and max(seen) > 9_999, (
+        f"the emitted tail sizes {seen} did not move with the requested size — this test "
+        f"would pass against a builder that returns an empty tail"
+    )
+    assert path.stat().st_size > 250_007, "the fixture is smaller than the largest request"
 
 
 def _shell_default(text: str, var: str, env_name: str) -> int:
@@ -1113,6 +1193,13 @@ def test_the_unit_restart_triggers_name_EVERY_hard_dependency():
         # while this was undeclared. Second demonstration in this same list that
         # a hand-typed want-set grades its own omission as correct.
         "scripts/lib/host-role.sh",
+        # 🔴 THE TAIL SIZE IS NEGOTIATED WITH THE SERVER, AND THIS MODULE READS
+        # THE ANSWER. The script falls back when it cannot run, so this is a SOFT
+        # dependency — but it decides HOW MUCH OF EACH SESSION this unit
+        # delivers, which is exactly what the builder beside it decides. The
+        # omission it guards against is the one this list has now demonstrated
+        # three times: a change that never reaches the running unit, invisible.
+        "scripts/lib/transcript_limits.py",
     }
     assert declared == want, (
         f"the transcript-push unit's restart triggers are {sorted(declared)}, want "
@@ -2450,3 +2537,273 @@ def test_the_BULK_push_dedupes_and_strips_session_ids_TOO(server, projects, tmp_
         "matches, and the same batch is re-sent on every tick for ever.")
     assert "" not in trimmed, f"an id that strips to empty was pushed: {ids}"
     assert "healthy" in trimmed, "the innocent session was dropped along with the duplicates"
+
+
+# ── 9. the tail size is NEGOTIATED with the server (clawgate task 603) ───────
+#
+# 🔴 WHY THIS SECTION EXISTS. The feeder's tail size was the REAL ingest bound
+# and nobody could see it: this script sent 192 KiB while clawgate's
+# `transcript.MaxTailBytes` said 256 KiB, and the bulk push REPLACES the stored
+# tail — so the stored tail was pinned at 192 KiB whatever the server believed.
+# Measured 2026-09-16 over 7,537 real session files: the server thought 94.23% of
+# sessions were truncated; the DEPLOYED figure was 96.13%. Raising the server
+# constant alone delivered nothing.
+#
+# The number now comes FROM the running server, via the digest pre-flight this
+# script already calls every tick.
+
+
+def _advertise(tail_bytes):
+    """A digest body from a server that advertises its ingest bounds."""
+    return json.dumps(
+        {
+            "sessions": [],
+            "limits": {
+                "maxTailBytes": tail_bytes,
+                "maxPushTailBytes": 4 * 1024 * 1024,
+                "maxSessionsPerPush": 128,
+            },
+        }
+    ).encode()
+
+
+def _pushed_tail_len(server):
+    assert pushes(server), "nothing was pushed"
+    doc = json.loads(pushes(server)[-1]["body"])
+    return len(doc["sessions"][0]["tail"])
+
+
+def _big_session(projects, turns=4700):
+    """A session comfortably larger than every bound under test.
+
+    ⚠ Its size is deliberately not a power of two and not a multiple of the
+    record length, so a fixture that happens to land exactly on a cut point
+    cannot hide an off-by-one at the cut.
+    """
+    body = transcript(
+        "sess-big",
+        *[assistant_turn(f"turn {i} " + "x" * 211) for i in range(turns)],
+    )
+    f = projects("sess-big", body)
+    assert f.stat().st_size > 1024 * 1024, "the fixture is smaller than the 1 MiB ceiling"
+    return f
+
+
+def test_the_feeder_ADOPTS_the_servers_advertised_tail_bound(server, projects, tmp_path):
+    """🔴 THE NUMBER MUST MOVE. A test that only asserted "a push happened" would
+    pass against a feeder that ignored `limits` entirely, which is the exact
+    defect this whole mechanism exists to remove."""
+    _big_session(projects)
+    server.digest_body = _advertise(1024 * 1024)
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = _pushed_tail_len(server)
+    assert got > 196608, (
+        f"the server advertised a 1 MiB tail and the feeder still sent {got} bytes — "
+        f"the advertised bound was ignored"
+    )
+    assert got <= 1024 * 1024, f"sent {got} bytes against an advertised cap of {1024 * 1024}"
+
+
+def test_a_server_that_advertises_NOTHING_gets_the_OLD_192_KiB_tail(server, projects, tmp_path):
+    """🔴 THIS IS WHAT MAKES THE TWO REPOS' CHANGES ORDER-INDEPENDENT.
+
+    The currently-deployed clawgate does not send `limits`. Shipping this feeder
+    before the server must therefore change NOTHING — not "degrade gracefully",
+    nothing at all — or the safe deploy order stops being "either".
+    """
+    _big_session(projects)
+    server.digest_body = json.dumps({"sessions": []}).encode()  # no `limits` key
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = _pushed_tail_len(server)
+    assert got <= 196608, (
+        f"a server advertising nothing was sent a {got}-byte tail; the fallback is 196608 "
+        f"and anything above it would be refused WHOLE by the deployed 256 KiB server"
+    )
+    # The paired non-zero: the tail is a real one, not an empty push that would
+    # satisfy "<= 196608" trivially.
+    assert got > 100000, f"the fallback push carried only {got} bytes — the fixture never reached it"
+
+
+def test_an_absurd_advertised_bound_is_CLAMPED_by_the_host_ceiling(server, projects, tmp_path):
+    """The server's number bounds how many bytes this HOST reads off local disk
+    and puts on the wire. A server that is wrong — buggy, rolled back, or simply
+    not the one this host thought it was talking to — must not be able to make
+    this script read gigabytes."""
+    _big_session(projects)
+    server.digest_body = _advertise(512 * 1024 * 1024)
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = _pushed_tail_len(server)
+    assert got <= 1024 * 1024, f"a 512 MiB advertised bound produced a {got}-byte tail"
+
+
+def test_a_LOWER_advertised_bound_is_FOLLOWED_DOWN(server, projects, tmp_path):
+    """🔴 THE NEGOTIATION IS NOT A ONE-WAY RATCHET. A server that lowered its cap
+    — a rollback, or a deliberate reduction — would otherwise be sent tails it
+    rejects, and `NormalizePush` refuses the WHOLE push on one oversized tail, so
+    every other session in the same body is lost with it."""
+    _big_session(projects)
+    server.digest_body = _advertise(40_000)
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = _pushed_tail_len(server)
+    assert got <= 40_000, (
+        f"the server lowered its bound to 40000 and the feeder sent {got} bytes — the whole "
+        f"push would be refused, taking every other session with it"
+    )
+
+
+def test_an_UNREADABLE_limits_field_falls_back_rather_than_aborting(server, projects, tmp_path):
+    """The pre-flight has already succeeded, so the feeder is working. Refusing
+    to push because one OPTIONAL field could not be read would turn a cosmetic
+    problem into silence — which is this pipe's only failure mode."""
+    _big_session(projects)
+    server.digest_body = json.dumps(
+        {"sessions": [], "limits": {"maxTailBytes": "not a number"}}
+    ).encode()
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _pushed_tail_len(server) <= 196608
+
+
+# ── 10. a 413 is retried ONCE at a smaller tail ──────────────────────────────
+
+
+def test_a_413_from_a_PROXY_is_retried_once_at_a_smaller_tail(server, projects, tmp_path):
+    """🔴 THE FAILURE THIS RECOVERS FROM HAS HAPPENED, AND IT LASTED 19 HOURS.
+
+    On 2026-09-09 a raised bound produced 228 consecutive 413s and transcript
+    push was 100% dead on BOTH hosts, because nothing retried and nothing backed
+    off. The realistic way it recurs now is a deploy-ordering mistake: the server
+    advertises a 1 MiB tail before the proxy in front of it has been given room
+    for the body that implies.
+
+    The stub models the PROXY, not the app — a body ceiling, answered with
+    nginx's HTML page — because that is the shape the laptop actually hits.
+    """
+    _big_session(projects)
+    server.digest_body = _advertise(1024 * 1024)
+    server.max_body_bytes = 300_000  # a proxy far tighter than the advertised tail
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    out = proc.stdout + proc.stderr
+    posts = pushes(server)
+    assert len(posts) == 2, (
+        f"a 413 produced {len(posts)} push attempt(s), want exactly 2 — one retry, never a loop.\n{out}"
+    )
+    assert len(posts[1]["body"]) < len(posts[0]["body"]), (
+        f"the retry sent {len(posts[1]['body'])}B against the first attempt's "
+        f"{len(posts[0]['body'])}B — it did not back off"
+    )
+    # 🔴 THE NUMBERS THAT CAUSED IT ARE IN THE LOG. Last time this fired the
+    # journal recorded the HTTP code and not the sizes, so the diagnosis needed a
+    # reproduction rather than a read.
+    assert "REFUSED 413" in out, out
+    assert "tail=" in out and "aggregate=" in out and "body=" in out, out
+    # Both attempts were refused, so this is a real problem and the unit says so.
+    assert proc.returncode == 5, out
+
+
+def test_a_413_RECOVERS_when_the_smaller_tail_fits(server, projects, tmp_path):
+    """The positive control for the test above: the retry is not merely a second
+    doomed attempt, it can SUCCEED."""
+    _big_session(projects)
+    server.digest_body = _advertise(1024 * 1024)
+    # Tight enough to refuse a 1 MiB tail, roomy enough for the halved one.
+    server.max_body_bytes = 700_000
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    posts = pushes(server)
+    assert len(posts) == 2, f"want one retry, got {len(posts)} attempt(s)\n{out}"
+    assert "retrying once at tail=" in out, out
+    assert "attempt 2" in out, out
+
+
+def test_a_413_at_the_FALLBACK_tail_does_NOT_retry(server, projects, tmp_path):
+    """🔴 TODAY'S BEHAVIOUR, UNCHANGED. At the fallback there is nothing left to
+    back off to, and a second identical attempt would double the load on a server
+    that is already refusing. This is also what keeps the change inert against the
+    currently-deployed server."""
+    _big_session(projects)
+    server.digest_body = json.dumps({"sessions": []}).encode()  # no `limits`
+    server.max_body_bytes = 1000
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        conf_text="CLAWGATE_HOOK_TOKEN=t\n",
+        env_extra={"CLAWGATE_API_URL": base_url(server)},
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 5, out
+    assert len(pushes(server)) == 1, (
+        f"the feeder retried at the fallback tail ({len(pushes(server))} attempts) — there is "
+        f"nothing to back off to and a second attempt just doubles the load\n{out}"
+    )
+
+
+# ── 11. transcript_limits.py, directly ──────────────────────────────────────
+
+
+def test_effective_tail_bytes_rejects_every_shape_that_is_not_a_positive_int():
+    from lib import transcript_limits as tl
+
+    ceiling, fallback = 1024 * 1024, 196608
+    for doc in (
+        None,
+        [],
+        {},
+        {"limits": None},
+        {"limits": []},
+        {"limits": {}},
+        {"limits": {"maxTailBytes": None}},
+        {"limits": {"maxTailBytes": "1048576"}},
+        {"limits": {"maxTailBytes": 0}},
+        {"limits": {"maxTailBytes": -1}},
+        {"limits": {"maxTailBytes": 1.5}},
+        {"limits": {"maxTailBytes": True}},  # bool is an int subclass in Python
+    ):
+        assert tl.effective_tail_bytes(doc, ceiling, fallback) == fallback, doc
+    # 🔴 THE PAIRED NON-ZERO. Every assertion above is "== fallback", which an
+    # implementation that ALWAYS returns the fallback satisfies identically.
+    assert tl.effective_tail_bytes({"limits": {"maxTailBytes": 500000}}, ceiling, fallback) == 500000
+    assert tl.effective_tail_bytes({"limits": {"maxTailBytes": 9 << 30}}, ceiling, fallback) == ceiling
