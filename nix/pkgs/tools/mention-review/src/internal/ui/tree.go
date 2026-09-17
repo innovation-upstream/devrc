@@ -334,8 +334,12 @@ func (a App) currentRow() (FileRow, bool) {
 }
 
 // SelectedFilePath is the path of the file the Files cursor is on, or "" when
-// it is on a directory row or there are no rows. Exported for the end-to-end
-// test; the package reads it through `currentRow`.
+// it is on a directory row or there are no rows.
+//
+// ⚠ "" IS A REAL ANSWER, NOT A MISSING ONE — a directory row is a legitimate
+// place for the cursor to be, and it is precisely the state in which nothing is
+// selected. Exported alongside `Repo`, `Mode` and `ComposeBody`, which are the
+// same shape of read-only accessor.
 func (a App) SelectedFilePath() string {
 	r, ok := a.currentRow()
 	if !ok || r.IsDir {
