@@ -795,7 +795,7 @@ than reporting only that the count moved. The refusal says so in its own words
 and prints the whole `forcing: none` population instead.
 
 It is also silent on a NEW doc. Round 1 legitimately opens with self-generated
-work; the finding is about what happens after it. `self_generated_report` still
+work; the finding is about what happens after it. `declared_forcing_none_report` still
 counts them on every run, new doc included.
 
 ### The audit-ladder cap that was proposed and NOT taken
