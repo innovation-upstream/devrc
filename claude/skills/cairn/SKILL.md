@@ -33,7 +33,7 @@ staleness it was run to measure.
 | find a hunk by text | `cairn search '<query>'` (`--all-scopes` to search every scope) |
 | what does the cache actually hold | `cairn ls-entries` |
 | parse-check the cached entries | `cairn validate` — ⚠ see below, it is NOT the write-protocol check |
-| the WRITE-protocol parse check | `cairn-validate --scope <scope>` — a SEPARATE binary, see below |
+| the WRITE-protocol parse check | `cairn sync && cairn-validate --scope <scope>` — a SEPARATE binary, see below |
 | which sessions/windows/transcripts worked a task | `cairn-who <task>` (`--json`, `--host`, `--no-windows`) — a SEPARATE binary |
 | diagnose anything above going wrong | `cairn doctor` |
 
@@ -46,9 +46,15 @@ both clients at the locked rev: the package writes **0 bytes to stdout** (a
 bytes on stdout** with `entry shape:`, `marker reachability:` and `dropped
 lines:` — the last meaning content is ALREADY LOST. Both are "green"; one of them
 is empty on the stream you read. **The mandated post-write check is
-`cairn-validate --scope <scope>`** — the SAME spelling `subsystem-index` names,
-which is the point: two skills naming one mandated command in two ways is how
-one of them goes unpinned and drifts. It is a devrc-only launcher over
+`cairn sync && cairn-validate --scope <scope>`** — the SAME spelling `subsystem-index`
+names, which is the point: two skills naming one mandated command in two ways is
+how one of them goes unpinned and drifts. 🔴 **The `cairn sync` is load-bearing,
+not decoration**: `cairn append` writes to the pod and does NOT touch the local
+cache, and `cairn-validate` reads that cache PERMISSIVELY, so an unsynced run
+cleanly parses the PRE-WRITE bytes — a silent pass on the exact defect the check
+exists to catch. This file said `cairn-validate` alone until 2026-09-16 while
+`subsystem-index` said the full form, i.e. the drift this sentence warns about had
+already happened here. It is a devrc-only launcher over
 `scripts/lib/subsystem_touch.py` and lands on PATH in the same switch that swaps
 `cairn`. It cannot be a `cairn` subcommand: `cairn` is the pinned OSS package,
 and the writer it runs is devrc-only and deliberately absent from that repo.

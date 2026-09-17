@@ -213,3 +213,59 @@ def test_a_named_verb_appears_in_the_skill_body(verb: str) -> None:
         f"{SKILL} never names the `{verb}` verb, but VERB_LEDGER marks it {NAMED} "
         f"because: {reason}"
     )
+
+
+# ── the post-write check is named by TWO skills; pin the RELATIONSHIP ───────
+# 🔴 This is a SEAM guard, not a component guard. Both files already say, in
+# prose, that "two skills naming one mandated command in two ways is how one of
+# them goes unpinned and drifts" — and on 2026-09-16 exactly that had happened:
+# subsystem-index/SKILL.md carried `cairn sync && cairn-validate --scope
+# <scope>` while cairn/SKILL.md carried the bare `cairn-validate --scope
+# <scope>` and asserted, falsely, that it was "the SAME spelling". Nothing could
+# see it, because each file was internally consistent and neither was pinned
+# against the other.
+#
+# The `cairn sync` is the load-bearing half: `cairn append` writes to the pod and
+# does NOT touch the local cache, and `cairn-validate` reads that cache
+# PERMISSIVELY, so an unsynced run cleanly parses the PRE-WRITE bytes — a silent
+# pass on the exact defect the check exists to catch.
+SUBSYSTEM_INDEX_SKILL = REPO / "claude" / "skills" / "subsystem-index" / "SKILL.md"
+POST_WRITE_CHECK = "cairn sync && cairn-validate --scope <scope>"
+_BARE = "cairn-validate --scope <scope>"
+
+
+def _bare_occurrences_not_preceded_by_sync(text: str) -> list[int]:
+    """Offsets where the bare form appears WITHOUT the `cairn sync && ` prefix.
+
+    A plain `_BARE not in text` can never work: the bare string is a SUBSTRING of
+    the full one, so it is present even when every site is correct. The question
+    is only ever whether each occurrence carries the prefix.
+    """
+    prefix = "cairn sync && "
+    out, i = [], text.find(_BARE)
+    while i != -1:
+        if not text[:i].endswith(prefix):
+            out.append(i)
+        i = text.find(_BARE, i + 1)
+    return out
+
+
+def test_both_skills_name_the_post_write_check_and_name_it_the_same_way() -> None:
+    """🔴 Fails when the set of skills naming this command GROWS or SHRINKS out of step.
+
+    Asserted in both directions, because a count cannot say WHICH side moved.
+    """
+    for path in (SKILL, SUBSYSTEM_INDEX_SKILL):
+        text = path.read_text(encoding="utf-8")
+        assert POST_WRITE_CHECK in text, (
+            f"{path.name} does not name the mandated post-write check "
+            f"{POST_WRITE_CHECK!r}. Both skills must name it identically — that "
+            f"is the drift both files warn about in prose."
+        )
+        stray = _bare_occurrences_not_preceded_by_sync(text)
+        assert not stray, (
+            f"{path.name} names the BARE {_BARE!r} at offset(s) {stray} without "
+            f"the load-bearing `cairn sync && ` prefix. An unsynced validate "
+            f"parses the PRE-WRITE bytes and passes silently, which is the "
+            f"defect the check exists to catch."
+        )
