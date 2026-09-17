@@ -112,41 +112,47 @@ func TestEveryDispatchedBindingHasAHelpEntryAndViceVersa(t *testing.T) {
 type observable struct {
 	focus     Panel
 	commitCur int
-	fileCur   int
-	diffCur   int
-	diffYOff  int
-	bodyYOff  int
-	mode      Mode
-	showFull  bool
-	quitting  bool
-	notice    string
-	compose   string
-	composeAt int
-	prompt    string
-	load      LoadState
-	hasErr    bool
-	hasDiff   bool
-	hasSnap   bool
+	// fileRowCur is the Files panel's cursor over VISIBLE TREE ROWS, and
+	// fileRows how many there are — so a key that only OPENS or CLOSES a
+	// directory is visible to the ledger. Without the count, a collapse that
+	// left the cursor where it was would read as a dead action.
+	fileRowCur int
+	fileRows   int
+	diffCur    int
+	diffYOff   int
+	bodyYOff   int
+	mode       Mode
+	showFull   bool
+	quitting   bool
+	notice     string
+	compose    string
+	composeAt  int
+	prompt     string
+	load       LoadState
+	hasErr     bool
+	hasDiff    bool
+	hasSnap    bool
 }
 
 func observe(a App) observable {
 	o := observable{
-		focus:     a.Focus,
-		commitCur: a.commitCur,
-		fileCur:   a.fileCur,
-		diffCur:   a.diffCur,
-		diffYOff:  a.vp.YOffset(),
-		bodyYOff:  a.body.YOffset(),
-		mode:      a.mode,
-		showFull:  a.showFull,
-		quitting:  a.Quitting,
-		notice:    a.notice,
-		compose:   string(a.compose.Buf),
-		composeAt: a.compose.Cur,
-		load:      a.Load,
-		hasErr:    a.Err != nil,
-		hasDiff:   a.Diff != nil,
-		hasSnap:   a.Snap != nil,
+		focus:      a.Focus,
+		commitCur:  a.commitCur,
+		fileRowCur: a.fileRowCur,
+		fileRows:   len(a.fileRows),
+		diffCur:    a.diffCur,
+		diffYOff:   a.vp.YOffset(),
+		bodyYOff:   a.body.YOffset(),
+		mode:       a.mode,
+		showFull:   a.showFull,
+		quitting:   a.Quitting,
+		notice:     a.notice,
+		compose:    string(a.compose.Buf),
+		composeAt:  a.compose.Cur,
+		load:       a.Load,
+		hasErr:     a.Err != nil,
+		hasDiff:    a.Diff != nil,
+		hasSnap:    a.Snap != nil,
 	}
 	if a.pending != nil {
 		o.prompt = a.pending.Prompt
@@ -171,10 +177,10 @@ func liveStates(t *testing.T) []walkState {
 	// 🔴 EVERY CURSOR HERE IS INTERNALLY CONSISTENT, AND THAT IS NOT TIDINESS —
 	// IT IS WHAT MAKES THE LEDGER ABLE TO SEE A DEAD ACTION AT ALL. `act()`
 	// ends by falling through to `move()`, whose Diff arm runs
-	// `syncFileCursorFromDiff()` unconditionally. Feed it a state whose
-	// `fileCur` DISAGREES with `FileAt(diffCur)` — which `scrollable` does on
+	// `syncFileCursorFromDiff()` unconditionally. Feed it a state whose Files
+	// cursor DISAGREES with `FileAt(diffCur)` — which `scrollable` does on
 	// purpose, so the movement tests can see a cursor being touched — and an
-	// unhandled action "changes something" by dragging `fileCur` into
+	// unhandled action "changes something" by dragging that cursor into
 	// agreement. MEASURED: with `scrollable` here, a dispatched action with no
 	// handler at all was reported LIVE. So this list must not reuse it.
 	for _, p := range []Panel{PanelOverview, PanelCommits, PanelFiles, PanelDiff} {
@@ -185,10 +191,14 @@ func liveStates(t *testing.T) []walkState {
 		a.commitCur = 1
 		a.syncFileCursorFromDiff()
 		a.syncDiffViewport()
-		if a.fileCur != a.Diff.FileAt(a.diffCur) {
-			t.Fatalf("the %s ledger state is inconsistent (fileCur=%d, FileAt=%d) — a "+
-				"dead action would read as live from it", p.Title(), a.fileCur,
-				a.Diff.FileAt(a.diffCur))
+		// 🔴 COMPARED BY PATH, because the Files cursor indexes TREE ROWS and
+		// `FileAt` indexes `Diff.Files`. Comparing the two integers would be
+		// the very index-conflation this panel stopped doing.
+		want := a.Diff.Files[a.Diff.FileAt(a.diffCur)].Path
+		if got := a.SelectedFilePath(); got != want {
+			t.Fatalf("the %s ledger state is inconsistent (selected %q, the diff "+
+				"cursor is in %q) — a dead action would read as live from it",
+				p.Title(), got, want)
 		}
 		states = append(states, walkState{"big-diff-mid-" + p.Title(), a})
 	}
