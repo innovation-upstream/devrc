@@ -280,8 +280,33 @@ except ModuleNotFoundError as _guard9_exc:  # pragma: no cover - harness-only pa
     ) from _guard9_exc
 
 
+# 🔴 GUARD 8's SECOND ENTRY POINT, THE SAME SHAPE AS GUARD 9 ABOVE — one
+# implementation, two registrations, no per-directory copy of the rule.
+# `scripts/run-tests.sh` loads `testlib/spool_plugin.py` with `-p` for every target;
+# this import is what gives a BARE `pytest scripts/claude-hooks/tests/...` — the
+# documented way to run one of these files — the same session-wide floor.
+#
+# 🔴 IT BUYS OBSERVABILITY, WHICH THE AUTOUSE FIXTURE BELOW CANNOT. The fixture
+# redirects the spool and that is all: "0 rows leaked" from it is the same reassuring
+# zero a guard wired to nothing prints. The plugin writes a per-session MARKER
+# recording the `ACTIVITY_SPOOL_DIR` the process actually saw, and deliberately emits
+# one row down the REAL fallback path to prove the leak counter for this target can
+# move at all — the positive/negative control pair `run-tests.sh` requires and fails a
+# target for lacking. `scripts/tests/conftest.py` has carried this exact line through
+# the runner for months, which is the evidence it does not double-count a target's
+# session markers: the conftest's copy SHADOWS the plugin's for items in this
+# directory, so exactly one fixture instance runs.
+#
+# `test_hook_telemetry.py::test_this_directorys_conftest_is_a_spool_guard_entry_point`
+# asserts the module OBJECT, not the spelling — a mutant that moves this import under
+# `if False:` leaves both words on the page and must still go red.
+from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
+
+
 # --------------------------------------------------------------------------- #
-# 🔴 SPOOL ISOLATION FOR THIS DIRECTORY — measured, not precautionary.
+# 🔴 PER-TEST SPOOL NARROWING — measured, not precautionary, and DEFENCE IN DEPTH
+# beside the session-wide floor imported above (the same pairing
+# `scripts/tests/conftest.py` documents: the floor protects, this narrows).
 #
 # `scripts/claude-hooks/hook_telemetry.py` appends a `source=hook` row to
 # `<ACTIVITY_SPOOL_DIR>/current.log` on every Stop-hook decision, and the activity

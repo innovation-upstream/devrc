@@ -39,9 +39,26 @@ CONTRACT — THREE HARD PROMISES
   1. 🔴 FAIL-OPEN, ALWAYS, SILENTLY. These are Stop hooks: a raising, blocking or
      chatty emitter perturbs the operator's turn at the exact moment a session is
      trying to end. Every path here returns a value; nothing raises, nothing writes to
-     stdout or stderr, nothing spawns a process, nothing opens a socket. The worst case
-     is byte-identical to this module not existing. `emit_decision` returns "" on any
-     failure and call sites still wrap it as defence-in-depth.
+     stdout or stderr, nothing spawns a process, nothing opens a socket.
+     `emit_decision` returns "" on any failure and call sites still wrap it as
+     defence-in-depth.
+
+     🔴 AND NOTHING BLOCKS ON A SPOOL FILE THAT IS NOT A REGULAR FILE — stated
+     separately because "does not raise" does NOT imply "does not hang", and a hang is
+     STRICTLY WORSE than this module not existing. MEASURED: with a FIFO at
+     `<spool>/current.log` and no reader, `spool_emit.emit`'s `open(..., "a")` blocks
+     forever and the hook never exits; the wired hook did not return within 12 s. So
+     `emit_decision` stats the target first and refuses anything that is not a regular
+     file (see `_spool_target_is_a_regular_file`).
+
+     🔴 WHAT THAT DOES NOT COVER, NAMED RATHER THAN IMPLIED. The check is a `stat`
+     before an `open`, so it is TOCTOU-racy against a writer that swaps the path in
+     between, and it cannot bound an ordinary write to an ordinary file that stalls in
+     the kernel (a hung NFS mount, a device that stopped responding). The honest claim
+     is therefore bounded: no reachable NON-REGULAR spool target can block a hook, and
+     a pathological FILESYSTEM still can. Bounding the latter needs a timeout around
+     the write, which is `spool_emit`'s to own — it is the shared collector module with
+     its own consumers, and this module must not fork its behaviour.
 
   2. 🔴 NO NETWORK ON THE HOOK PATH. The row is a single `O_APPEND` line to the local
      spool via `spool_emit` — the same v1 line the collector daemon already ships. The
@@ -50,15 +67,32 @@ CONTRACT — THREE HARD PROMISES
      no-op. There is deliberately no HTTP client, no subprocess and no argv payload:
      a `payload build failed` argv trap already cost this repo a ~96%-dead hook.
 
-  3. 🔴 NO CAPTURED TEXT, ENFORCED STRUCTURALLY RATHER THAN BY CONVENTION. Every value
-     that reaches the payload must be an ID, SLUG, ENUM, BOOLEAN or COUNT — and that is
-     checked, not promised: a string value is admitted only if it matches
-     `_SAFE_TOKEN`, a character class with NO SPACE in it. Prose cannot satisfy that by
-     construction, so a comment body, a prompt, an assistant message or a transcript
-     excerpt is DROPPED rather than truncated-and-shipped. Dropped values are COUNTED
-     (`dropped` in the payload) so a silent drop is visible rather than invisible.
-     🔴 This is a structural guard, not a spelled one: it does not look for words that
-     indicate prose, it admits only shapes that prose cannot take.
+  3. 🔴 NO CAPTURED TEXT — AND THE GUARANTEE IS TWO-PART, BECAUSE THIS MODULE ALONE
+     CANNOT DELIVER IT. Read both halves; the first one on its own is the claim this
+     file used to make, and it was FALSE.
+
+     (a) HERE: every value that reaches the payload must be an ID, SLUG, ENUM, BOOLEAN
+         or COUNT, and that is checked rather than promised — a string is admitted only
+         if it matches `_SAFE_TOKEN`, a character class with NO SPACE in it. A value
+         that fails is DROPPED WHOLE rather than truncated-and-shipped, and every drop
+         is COUNTED (`dropped` in the payload) so it is visible rather than invisible.
+         This is structural, not spelled: it does not look for words that indicate
+         prose, it admits only shapes prose cannot take.
+
+     (b) 🔴 AT THE CALL SITE: a caller must not LAUNDER. `_SAFE_TOKEN` rejects prose;
+         it cannot reject prose that was already rewritten into token shape, and a
+         sanitizer that maps every disallowed character to `_` does exactly that.
+         MEASURED on this branch before the fix: `handoff-write-guard` keyed its ledger
+         on `_sanitize(basename)`, and a `Read` of
+         `claudedocs/handoff- <a sentence someone typed>.md` arrived here as one
+         underscore-joined token that `_SAFE_TOKEN` admitted — up to 120 characters of
+         operator- or model-chosen text, past a boundary advertised as
+         construction-proof. So "prose cannot satisfy `_SAFE_TOKEN` by construction" is
+         true of PROSE and false of LAUNDERED prose, and the second half of the promise
+         is the call site's: pass a value you did not rewrite. `handoff-write-guard`
+         now enforces that explicitly — it drops its entity when sanitizing the
+         basename was not a no-op (`telemetry_entity` there), which is the only way the
+         round trip can be known to have changed nothing.
 
 WHY A SECOND EMITTER MODULE AND NOT `scripts/collector/invocation.py`
 ----------------------------------------------------------------------
@@ -96,12 +130,29 @@ ROW SHAPE
   * `measured` says whether the live read the decision rests on succeeded. A row with
     `measured=False` carries `decision="could-not-measure"`; the pair is redundant on
     purpose, so a consumer filtering on either one gets the same population.
+
+🔴 THE DENOMINATOR UNIT IS NOT THE SAME FOR EVERY HOOK — SAY WHICH BEFORE DIVIDING
+-----------------------------------------------------------------------------------
+"A row on every Stop" is true of `next-step-nudge`, which reasons about the session
+and emits exactly ONE row per Stop. It is NOT true of `handoff-write-guard`, which
+reasons per tracked DOCUMENT and emits one row per DECISION — up to `MAX_DOCS` of them
+for a single Stop. Counting guard rows therefore counts decisions, not Stops, and a
+rate whose denominator is `count(*)` over that hook is wrong by however many documents
+each session had open.
+
+So the guard stamps every row of one Stop with the same `stop` extra — a per-process
+random token — and the Stop count is `uniqExact(stop)`. The nudge does not carry one:
+for a hook that emits one row per Stop the row IS the Stop, and a column that only ever
+holds distinct values buys nothing. A consumer wanting one expression across both hooks
+should use `coalesce(stop, session || '/' || toString(ts))`, or simply group the nudge
+by row.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import stat
 import sys
 
 SOURCE = "hook"
@@ -120,7 +171,15 @@ KIND = "stop-decision"
 # whose gates said no work was owed, and a schema that cannot tell them apart makes
 # every compliance rate off by the size of the budget.
 # --------------------------------------------------------------------------- #
-DECISION_FIRED = "fired"            # the hook emitted something the model/operator saw
+# 🔴 `fired` MEANS "THE HOOK ACTED ON A MEASURED FINDING", NOT "THE OPERATOR SAW
+# SOMETHING". The two came apart in `handoff-write-guard`: a doc whose state could not
+# be read spends its own rung of the escalation ladder and can emit an operator-visible
+# NOTICE while the row correctly records `could-not-measure`, because what was
+# unmeasurable does not become measured by being spoken about. So visibility is NOT
+# derivable from `decision` — it is `rung` in `extra` (`silent` / `notice` / `block`)
+# that says whether anything reached a human, and a consumer asking "how often did this
+# hook speak?" must read that, never `decision = 'fired'`.
+DECISION_FIRED = "fired"            # acted on a measured finding
 DECISION_ARMED = "armed"            # eligible, but withheld by a budget/claim
 DECISION_SUPPRESSED = "suppressed"  # a substantive gate said no action was owed
 DECISION_UNMEASURED = "could-not-measure"   # the live read failed; NOT a clean result
@@ -133,16 +192,23 @@ DECISIONS = frozenset({DECISION_FIRED, DECISION_ARMED,
 OFF_ENV = "HOOK_TELEMETRY_OFF"
 
 # --------------------------------------------------------------------------- #
-# The privacy boundary, as a shape rather than a word list.
+# The privacy boundary's FIRST HALF, as a shape rather than a word list.
 #
-# 🔴 THERE IS NO SPACE IN THIS CHARACTER CLASS, AND THAT IS THE WHOLE GUARD. Every
-# value a wired hook passes is an id, a slug, an enum or a count; every form of
-# captured text this repo forbids — a comment body, a prompt, an assistant message, a
-# transcript excerpt — contains whitespace within the first few tokens. A truncating
-# cap would SHIP the first 120 characters of a leaked message; this drops it whole.
-# The cost is named rather than hidden: a legitimate value that happens to carry a
-# space is dropped too, and the `dropped` counter is how that becomes visible instead
-# of silent.
+# 🔴 THERE IS NO SPACE IN THIS CHARACTER CLASS, AND THAT IS HALF THE GUARD. Every value
+# a wired hook passes is an id, a slug, an enum or a count; every form of captured text
+# this repo forbids — a comment body, a prompt, an assistant message, a transcript
+# excerpt — contains whitespace within the first few tokens. A truncating cap would
+# SHIP the first 120 characters of a leaked message; this drops it whole. The cost is
+# named rather than hidden: a legitimate value that happens to carry a space is dropped
+# too, and the `dropped` counter is how that becomes visible instead of silent.
+#
+# 🔴 AND IT IS ONLY HALF, BECAUSE A CALLER CAN LAUNDER PAST IT. This regex decides
+# whether a string LOOKS like a token; it cannot ask where the token came from. A call
+# site that replaces every disallowed character with `_` hands it a compliant string
+# built out of arbitrary text, and it is admitted — measured on this branch, see
+# promise 3(b) in the module docstring. "Prose cannot satisfy this by construction" is
+# therefore a claim about PROSE, not about every value that can reach here; the other
+# half is the call site's obligation not to rewrite.
 # --------------------------------------------------------------------------- #
 _MAX_LEN = 120
 _MAX_LIST = 8
@@ -268,13 +334,18 @@ def build_payload(hook, decision, entity=None, entity_kind=None, satisfier=None,
     # collision is visible in `dropped` rather than being a schema corruption nobody
     # can see. Enumerated from the fixed list itself, so a new fixed field is covered
     # without a second list to keep in step.
+    #
+    # 🔴 THE `[:_MAX_EXTRA]` TRUNCATION IS COUNTED TOO. It used to be the ONE place this
+    # module dropped a value silently, which contradicted the only promise it makes
+    # about drops — that they are visible in `dropped` rather than invisible. A row over
+    # the cap looked identical to a caller that never passed those keys.
     reserved = {name for name, _ in fields}
+    dropped_collisions = 0
     if isinstance(extra, dict):
         extras = [(k, v) for k, v in extra.items() if k not in reserved]
         dropped_collisions = len(extra) - len(extras)
+        dropped_collisions += max(0, len(extras) - _MAX_EXTRA)
         fields.extend(extras[:_MAX_EXTRA])
-    else:
-        dropped_collisions = 0
     payload, dropped = {}, dropped_collisions
     for key, raw in fields:
         k = coerce(key)
@@ -291,14 +362,21 @@ def build_payload(hook, decision, entity=None, entity_kind=None, satisfier=None,
     return payload
 
 
-def build_fields(hook, decision, session=None, duration_ms=None, **kw):
+def build_fields(hook, decision, session=None, **kw):
     """The spool field dict for one decision row. Pure.
 
-    `source`/`kind`/`text`/`session`/`duration_ms` are the v1 line's own columns;
-    everything else lives in the JSON `payload`. `session` is emitted as a top-level
-    column rather than inside the payload because that is the join key against
-    `source='claude'` rows — the per-entity key whose absence produced the wrong lift
-    figure this module exists for.
+    `source`/`kind`/`text`/`session` are the v1 line's own columns; everything else
+    lives in the JSON `payload`. `session` is emitted as a top-level column rather than
+    inside the payload because that is the join key against `source='claude'` rows —
+    the per-entity key whose absence produced the wrong lift figure this module exists
+    for.
+
+    🔴 THERE IS NO `duration_ms` PARAMETER. One was written here and had no call site
+    anywhere in the tree — a v1 column this module does not measure, whose coercion
+    branch no test could reach and no mutation could kill. Deleted rather than kept as
+    a shape a reader would mistake for a supported field. `spool_emit` writes it as a
+    plain scalar if a future caller genuinely measures one, so adding it back is a
+    two-line change made at the point there is something to put in it.
     """
     name = coerce(hook)
     fields = {
@@ -312,23 +390,51 @@ def build_fields(hook, decision, session=None, duration_ms=None, **kw):
     sess = coerce(session)
     if isinstance(sess, str) and sess:
         fields["session"] = sess
-    if duration_ms is not None:
-        d = coerce(duration_ms)
-        if isinstance(d, (int, float)) and not isinstance(d, bool):
-            fields["duration_ms"] = int(d)
     return fields
 
 
 # --------------------------------------------------------------------------- #
 # Emission
 # --------------------------------------------------------------------------- #
+def _spool_target_is_a_regular_file(se, spool_dir):
+    """False ONLY when `<spool>/current.log` exists and is not a regular file.
+
+    🔴 THIS IS THE ANTI-HANG CHECK, AND A HANG IS WORSE THAN A CRASH. `spool_emit.emit`
+    opens the log with a blocking `open(..., "a")`. On a FIFO with no reader that call
+    never returns, so the Stop hook never exits and the operator's turn never ends —
+    MEASURED: the wired hook did not come back within 12 s. `spool_emit` swallows
+    `OSError`, which covers every way the write can FAIL and none of the ways it can
+    WAIT, so this is the only place the wait can be refused without changing a shared
+    collector module out from under its other consumers.
+
+    🔴 ABSENT MEANS PROCEED, and that is the common case rather than an edge: the log
+    does not exist until the first emit creates it, and `stat` on a missing path raises
+    `FileNotFoundError`. Every other `OSError` (a permission-denied parent, ENOTDIR
+    because the spool dir is itself a file) is also proceed — those are states
+    `spool_emit`'s own handler already turns into a silent no-op, and refusing them
+    here would be a second copy of a decision already made correctly one layer down.
+
+    ⚠ TOCTOU: this stats, then `emit` opens. A writer that replaces the path in the gap
+    defeats it. Named rather than hidden — the threat model is a misconfigured
+    `ACTIVITY_SPOOL_DIR`, not an adversary racing a Stop hook.
+    """
+    try:
+        d = spool_dir if spool_dir is not None else se.default_spool_dir()
+        st = os.stat(os.path.join(str(d), se.CURRENT_NAME))
+    except OSError:
+        return True
+    return stat.S_ISREG(st.st_mode)
+
+
 def emit_decision(hook, decision, spool_dir=None, **kw):
     """Emit ONE decision row, best-effort. Returns the written line, or "".
 
-    🔴 NEVER RAISES AND NEVER PRINTS. `except Exception` rather than `except
-    BaseException` is deliberate: `SystemExit` and `KeyboardInterrupt` must sail
-    through — swallowing the first would let a telemetry call cancel a hook's own
-    exit, which is the opposite of not perturbing the turn.
+    🔴 NEVER RAISES, NEVER PRINTS AND NEVER BLOCKS ON A NON-REGULAR SPOOL TARGET.
+    `except Exception` rather than `except BaseException` is deliberate: `SystemExit`
+    and `KeyboardInterrupt` must sail through — swallowing the first would let a
+    telemetry call cancel a hook's own exit, which is the opposite of not perturbing
+    the turn. The blocking half is `_spool_target_is_a_regular_file`; read its
+    docstring for what that promise does NOT cover.
     """
     try:
         if os.environ.get(OFF_ENV):
@@ -336,17 +442,29 @@ def emit_decision(hook, decision, spool_dir=None, **kw):
         se = spool_emit_module()
         if se is None:
             return ""
+        if not _spool_target_is_a_regular_file(se, spool_dir):
+            return ""
         return se.emit(build_fields(hook, decision, **kw), spool_dir=spool_dir)
     except Exception:  # noqa: BLE001 — telemetry never costs its caller anything
         return ""
 
 
 def emit_rows(rows, spool_dir=None):
-    """Emit a list of `{hook, decision, ...}` dicts. Returns the number written.
+    """Emit a list of `{hook, decision, ...}` dicts. Returns the number ACCEPTED.
 
     Per-row isolation: one malformed row does not cost the rows after it. The return
     value is a COUNT rather than a bool so a caller — or a positive control in a test —
     can watch the number move.
+
+    🔴 "ACCEPTED", NOT "ON DISK", AND THE DIFFERENCE IS NOT PEDANTRY. `spool_emit.emit`
+    swallows its own `OSError` and STILL returns the line, so a row counted here may
+    have reached nothing: an unwritable spool dir, a full disk and a `current.log` that
+    is a directory all produce a non-empty return. What this number does establish is
+    that the row was built, passed the privacy boundary and was handed to the emitter —
+    which is what a positive control here needs, because the alternative it is
+    distinguishing is a caller wired to nothing. A control that must prove BYTES landed
+    has to read the spool file back; the suites here do exactly that (`rows(spool)`),
+    and this count is deliberately not offered as a substitute for it.
     """
     n = 0
     try:

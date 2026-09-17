@@ -775,10 +775,20 @@ def emit(text=NUDGE):
 # shape that produced a bogus 100.0% compliance rate elsewhere in this repo. So every
 # Stop emits, and the `decision` says which population the row belongs to.
 #
-# 🔴 IT CANNOT COST THE TURN. `hook_telemetry.emit_decision` swallows every failure,
-# writes one O_APPEND line to a local spool, spawns nothing and opens no socket; the
-# import below is guarded twice over. The emission happens AFTER the nudge has been
-# written to stdout, so the model never waits on bookkeeping.
+# 🔴 IT CANNOT SUPPRESS THE NUDGE. `hook_telemetry.emit_decision` swallows every
+# failure, writes one O_APPEND line to a local spool, spawns nothing and opens no
+# socket; the import below is guarded twice over, and the emission happens AFTER the
+# nudge has been written to stdout, so no telemetry failure can cost a nudge that was
+# already emitted.
+#
+# ⚠ IT CAN STILL DELAY THE TURN — an earlier wording here said "the model never waits
+# on bookkeeping", and that was false. The CLI waits for the hook PROCESS to exit, not
+# for its first write, so work after stdout is still on the critical path. The cost was
+# MEASURED rather than argued away: +8.8 ms at load ~20 and +11.8 ms at load ~47, 60
+# fresh processes per arm, against the Stop chain's 709 ms p50 — and the PR's own
+# latency table is what makes that a bounded claim instead of a hope. `hook_telemetry`
+# additionally refuses a spool target that would block FOREVER (a FIFO), which is the
+# only case where "delay" stops being a rounding error.
 # --------------------------------------------------------------------------- #
 HOOK_NAME = "next-step-nudge"
 

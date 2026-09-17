@@ -44,6 +44,7 @@ exists for) or delete their nudge state (the one
 
 run:  python -m pytest scripts/claude-hooks/tests/test_hook_telemetry.py -q
 """
+import ast
 import base64
 import importlib.machinery
 import importlib.util
@@ -164,11 +165,21 @@ def decoded_line_text(spool):
     return "\n".join(out)
 
 
-def run_hook(script, payload, env, extra_env=None):
+# 🔴 EVERY HOOK RUN IS BOUNDED. A Stop hook that does not return is strictly worse
+# than one that crashes — the operator's turn never ends — and the failure mode is
+# REAL: `spool_emit.emit` opens the log with a blocking `open(..., "a")`, which never
+# returns on a FIFO with no reader (measured: >12 s, no exit). Without a timeout here
+# that defect wedges the whole suite instead of failing one test, and a wedged suite
+# gets read as an infrastructure problem. Generous enough that only a true hang trips
+# it: a hook run is single-digit milliseconds.
+_HOOK_TIMEOUT_SECONDS = 30
+
+
+def run_hook(script, payload, env, extra_env=None, timeout=_HOOK_TIMEOUT_SECONDS):
     e = dict(os.environ)
     e.update(extra_env or {})
     return subprocess.run([sys.executable, script], input=json.dumps(payload),
-                          capture_output=True, text=True, env=e)
+                          capture_output=True, text=True, env=e, timeout=timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -723,6 +734,443 @@ def test_a_subagent_stop_is_recorded_as_refused_not_dropped(env):
 
 
 # --------------------------------------------------------------------------- #
+# 4b. THE UNMEASURABLE STOP IS STILL A ROW — REGRESSION, red at 0a8034ae
+#
+# 🔴 WHY THIS BLOCK IS THE MOST LOAD-BEARING IN THE FILE. At 0a8034ae the guard's
+# `_emit_telemetry(rows)` sat inside the same `try` as `json.load(sys.stdin)` and the
+# whole verdict path, under one `except Exception: pass`. Anything that raised first
+# took the telemetry with it, so the Stop wrote NO row — and the population that
+# disappeared is exactly the UNMEASURABLE one. A compliance rate computed from the
+# surviving rows then reads clean over a guard that was breaking: a numerator with no
+# denominator, which is the defect this whole module exists to remove, reintroduced one
+# level up. Measured then, with ACTIVITY_SPOOL_DIR pointed at a scratch dir:
+#
+#     malformed stdin -> handoff-write-guard.py   rc=0  rows=0   <- the row vanished
+#     malformed stdin -> next-step-nudge.py       rc=0  rows=1   <- does it right
+#     well-formed Stop -> handoff-write-guard.py  rc=0  rows=1   <- positive control
+#
+# Every test below is RED at 0a8034ae and green at HEAD.
+# --------------------------------------------------------------------------- #
+HOSTILE_PAYLOADS = {
+    "not-json": "not json at all",
+    "json-list": '["a","b"]',            # `(data or {}).get` -> AttributeError
+    "empty-list": "[]",                  # falsy, so `.get` does NOT raise — still bad
+    "json-null": "null",
+    "json-string": '"a bare string"',
+}
+
+
+def run_hook_raw(script, raw, env, extra_env=None):
+    """Drive a hook with RAW stdin bytes — `run_hook` JSON-encodes, which cannot
+    produce the malformed payloads this block is about."""
+    e = dict(os.environ)
+    e.update(extra_env or {})
+    return subprocess.run([sys.executable, script], input=raw, capture_output=True,
+                          text=True, env=e, timeout=_HOOK_TIMEOUT_SECONDS)
+
+
+@pytest.mark.parametrize("script,hook", [(GUARD, "handoff-write-guard"),
+                                         (NUDGE, "next-step-nudge")])
+@pytest.mark.parametrize("case", sorted(HOSTILE_PAYLOADS))
+def test_an_unreadable_payload_is_a_ROW_not_a_silence(env, script, hook, case):
+    """🔴 THE REGRESSION. Both hooks, every shape of payload that cannot be decided on.
+
+    The assertion is on the discriminating FIELDS, not on "a row exists": a row that
+    arrived saying `suppressed` would be worse than none, because it would add a clean
+    observation to the denominator for a Stop nobody could measure."""
+    r = run_hook_raw(script, HOSTILE_PAYLOADS[case], env)
+    assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
+    got = payloads(env["spool"], hook)
+    assert len(got) == 1, (case, got)
+    assert got[0]["decision"] == "could-not-measure"
+    assert got[0]["measured"] is False
+    assert got[0]["reason"] == "bad-payload"
+
+
+def test_a_readable_stop_is_still_exactly_one_row(env):
+    """POSITIVE CONTROL for the parametrized test above, and it is not optional: a
+    guard that emitted a `bad-payload` row for EVERY invocation would satisfy every
+    assertion up there while destroying the denominator it exists to protect."""
+    r = run_hook_raw(GUARD, json.dumps({"hook_event_name": "Stop",
+                                        "session_id": SESSION_B}), env)
+    assert r.returncode == 0
+    got = payloads(env["spool"], "handoff-write-guard")
+    assert len(got) == 1 and got[0]["reason"] == "no-state", got
+
+
+def test_a_post_tool_use_call_STILL_writes_no_row_after_the_fallback_was_added(env):
+    """NEGATIVE CONTROL for the fallback. The `bad-payload` arm fires on an unreadable
+    payload REGARDLESS of event — the event name is the thing that could not be read —
+    so the obvious way to get it wrong is to widen it into the PostToolUse path, which
+    fires after every tool call of every session. A readable PostToolUse payload must
+    still be silent."""
+    arm_guard(env)
+    assert rows(env["spool"]) == []
+
+
+def test_the_guard_emits_a_row_when_the_DECISION_PATH_raises(env, monkeypatch):
+    """🔴 THE THIRD TRIGGER, AND IT IS NOT REACHABLE THROUGH STDIN. A defect inside
+    `stop_decision` was swallowed by the same handler, so a Stop that broke MIDWAY
+    recorded nothing. Reached directly, the way the nudge's own backstop test does.
+
+    The row is `hook-raised`, not `bad-payload`: the payload was fine and the hook was
+    not. Folding them into one token would report an input problem for a code defect.
+    """
+    import io
+    mod = load(GUARD, "guard_raising_main")
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated defect inside the decision path")
+
+    monkeypatch.setattr(mod, "stop_decision", boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"hook_event_name": "Stop", "session_id": SESSION_A})))
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 0
+    got = payloads(env["spool"], "handoff-write-guard")
+    assert len(got) == 1, got
+    assert got[0]["decision"] == "could-not-measure"
+    assert got[0]["measured"] is False and got[0]["reason"] == "hook-raised"
+    assert got[0]["_session"] == SESSION_A
+
+
+def test_a_PARTIAL_stop_keeps_the_decisions_it_reached_and_marks_the_break(env,
+                                                                          monkeypatch):
+    """A raise AFTER some decisions were recorded. Those rows are real observations and
+    must survive; the break gets its own row beside them, so a partial Stop can never
+    be counted as a complete one. Both halves asserted — keeping the rows without
+    marking the break, or marking it while dropping them, each passes half of this."""
+    mod = load(GUARD, "guard_partial_main")
+    real = mod.stop_decision
+
+    def half(data, rows=None, stop=None):
+        real({"hook_event_name": "Stop", "session_id": SESSION_A, "agent_id": "x"},
+             rows=rows, stop=stop)
+        raise RuntimeError("simulated defect after one decision was recorded")
+
+    import io
+    monkeypatch.setattr(mod, "stop_decision", half)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"hook_event_name": "Stop", "session_id": SESSION_A})))
+    with pytest.raises(SystemExit):
+        mod.main()
+    got = payloads(env["spool"], "handoff-write-guard")
+    assert [p["reason"] for p in got] == ["subagent", "hook-raised"], got
+    # Same Stop, so the same `stop` token — this is what makes the pair countable as
+    # ONE Stop rather than two.
+    assert got[0]["stop"] == got[1]["stop"] and got[0]["stop"]
+
+
+def test_a_dismiss_run_is_not_a_stop_and_writes_no_row(env, tmp_path):
+    """NEGATIVE CONTROL for the fallback's `cli` arm. `--dismiss` reads no stdin and
+    decides no event; a row there would invent a Stop that never happened and inflate
+    every denominator by however often the escape hatch is used."""
+    r = subprocess.run([sys.executable, GUARD, "--dismiss", "handoff-x.md",
+                        "--session", SESSION_A], capture_output=True, text=True,
+                       env=dict(os.environ), timeout=_HOOK_TIMEOUT_SECONDS)
+    assert r.returncode == 0 and "handoff write-back guard" in r.stdout
+    assert rows(env["spool"]) == []
+
+
+@pytest.mark.parametrize("data,rows_in,completed,cli,want", [
+    (None, None, False, False, ["bad-payload"]),          # stdin never parsed
+    (["a"], None, False, False, ["bad-payload"]),         # a JSON list
+    ("str", None, False, False, ["bad-payload"]),
+    (None, None, False, True, []),                        # --dismiss
+    ({"hook_event_name": "PostToolUse"}, None, True, False, []),
+    ({"hook_event_name": "Stop"}, [], True, False, []),    # decided, nothing to report
+    ({"hook_event_name": "Stop"}, [], False, False, ["hook-raised"]),
+])
+def test_the_fallback_mapping_is_pure_and_total(data, rows_in, completed, cli, want):
+    """The mapping alone, with no stdin, no spool and no subprocess — the same split
+    `next-step-nudge.decision_for` gets, and for the same reason: the mapping IS the
+    semantic content, so it should be testable without any of the machinery."""
+    mod = load(GUARD, "guard_fallback_map")
+    got = mod.telemetry_rows(data, rows_in, completed=completed, cli=cli)
+    assert [r["reason"] for r in got] == want, got
+    for row in got:
+        assert row["decision"] == "could-not-measure" and row["measured"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 4c. THE CALL SITE'S HALF OF THE PRIVACY BOUNDARY
+# --------------------------------------------------------------------------- #
+# 🔴 `_SAFE_TOKEN` REJECTS PROSE AND ADMITS LAUNDERED PROSE, AND THE GUARD USED TO
+# LAUNDER. `_is_handoff_basename` is `^handoff-.*\.md$` — `.*` matches spaces — and the
+# `Read` arm of `handoff_read_docs` takes `tool_input.file_path` VERBATIM (only the
+# `Bash` arm goes through `HANDOFF_PATH_RX`). `doc_key` then ran `_sanitize`, which maps
+# every disallowed character to `_`, producing exactly the shape the emitter admits.
+# Measured at 0a8034ae, end to end through the real hook.
+# --------------------------------------------------------------------------- #
+PROSE_DOC_NAME = ("handoff- acme corp wants the refund before friday, "
+                  "escalate to legal.md")
+
+
+def arm_guard_with_name(env, basename, session):
+    """`arm_guard`, but with the doc's basename chosen by the caller."""
+    docdir = env["tmp"] / ("repo-" + session) / "claudedocs"
+    docdir.mkdir(parents=True, exist_ok=True)
+    doc = docdir / basename
+    doc.write_text("resumed\n")
+    run_hook(GUARD, {"hook_event_name": "PostToolUse", "session_id": session,
+                     "tool_name": "Read", "tool_input": {"file_path": str(doc)},
+                     "cwd": str(docdir)}, env)
+    run_hook(GUARD, {"hook_event_name": "PostToolUse", "session_id": session,
+                     "tool_name": "Bash",
+                     "tool_input": {"command": "git commit -m x"},
+                     "cwd": str(docdir)}, env)
+    os.utime(str(doc), (1_000_000, 1_000_000))
+    return doc
+
+
+def test_a_LAUNDERED_doc_name_cannot_reach_the_payload(env):
+    """🔴 REGRESSION, red at 0a8034ae — the full click path, not the helper. The whole
+    sentence arrived in `entity` as one underscore-joined token."""
+    arm_guard_with_name(env, PROSE_DOC_NAME, SESSION_A)
+    r = run_hook(GUARD, {"hook_event_name": "Stop", "session_id": SESSION_A}, env)
+    assert json.loads(r.stdout)["decision"] == "block"   # the VERDICT is unchanged
+    body = decoded_line_text(env["spool"])
+    for word in ("acme", "corp", "refund", "friday", "escalate", "legal"):
+        assert word not in body, (word, body)
+    p = payloads(env["spool"], "handoff-write-guard")[0]
+    # The row still EXISTS and still counts — a dropped entity is not a dropped Stop.
+    assert p["decision"] == "fired" and p["entity"] is None
+    assert p["unnameable-entity"] is True
+
+
+def test_an_ORDINARY_doc_name_still_carries_its_key(env):
+    """🔴 POSITIVE CONTROL, and it is the whole reason the fix is a round-trip check
+    rather than a blanket drop. A boundary that dropped every entity would pass the
+    test above and destroy the per-entity key this module was built to add — the exact
+    absence that made a lift figure wrong by 4.8pp."""
+    arm_guard_with_name(env, "handoff-%s.md" % DOC_TOPIC, SESSION_B)
+    run_hook(GUARD, {"hook_event_name": "Stop", "session_id": SESSION_B}, env)
+    p = payloads(env["spool"], "handoff-write-guard")[0]
+    assert p["entity"] == "handoff-%s.md" % DOC_TOPIC
+    assert "unnameable-entity" not in p
+
+
+@pytest.mark.parametrize("basename,admitted", [
+    ("handoff-alpha.md", True),
+    ("SESSION-HANDOFF.md", True),
+    ("handoff-a b.md", False),              # the space `.*` lets through
+    ("handoff-a,b.md", False),
+    ("handoff-a%20b.md", False),            # `%` is in HANDOFF_PATH_RX, not in the key
+    ("handoff-" + "x" * 130 + ".md", False),   # truncated at 120 -> not the name
+])
+def test_telemetry_entity_admits_only_a_key_that_was_never_rewritten(basename,
+                                                                     admitted):
+    """The predicate alone. 🔴 The test is NOT "does the key look safe" — a laundered
+    key always does — it is "was the key a REWRITING of the name"."""
+    mod = load(GUARD, "guard_entity_pred")
+    key = mod.doc_key(basename)
+    rec = {"doc": "/somewhere/claudedocs/" + basename}
+    got = mod.telemetry_entity(key, rec)
+    assert (got is not None) is admitted, (basename, key, got)
+    if admitted:
+        assert got == basename
+
+
+def test_telemetry_entity_refuses_a_record_it_cannot_check(env):
+    """A ledger record with no usable `doc` cannot be checked against its own name, so
+    the key is not admitted. The quiet direction: an entity nobody can verify is worth
+    less than the guarantee it would cost."""
+    mod = load(GUARD, "guard_entity_norec")
+    assert mod.telemetry_entity("handoff-x.md", {}) is None
+    assert mod.telemetry_entity("handoff-x.md", None) is None
+    assert mod.telemetry_entity("handoff-x.md", {"doc": 7}) is None
+    # ...and the key must correspond to the record it is filed under.
+    assert mod.telemetry_entity("handoff-y.md",
+                                {"doc": "/c/claudedocs/handoff-x.md"}) is None
+
+
+# --------------------------------------------------------------------------- #
+# 4d. NOTHING BLOCKS — a hang is strictly worse than not existing
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("script,expect", [(NUDGE, "hookSpecificOutput"),
+                                           (GUARD, "decision")])
+def test_a_FIFO_spool_does_not_hang_the_hook(env, tmp_path, script, expect):
+    """🔴 REGRESSION for the contract's blocking half, red at 0a8034ae.
+
+    `spool_emit.emit` opens `current.log` with a blocking `open(..., "a")`. On a FIFO
+    with no reader that call NEVER RETURNS — measured at 0a8034ae, the hook had not
+    exited after 12 s — so the operator's turn never ends. The module's contract said
+    the worst case was "byte-identical to this module not existing" and enumerated
+    raising, printing, spawning and socket-opening; it did not say *blocking*, and a
+    hang is strictly worse than every case it did name.
+
+    The timeout is the assertion: `subprocess.run` raises `TimeoutExpired` at
+    0a8034ae, which is a red test rather than a wedged suite."""
+    fifo_dir = tmp_path / ("fifo-" + os.path.basename(script))
+    fifo_dir.mkdir()
+    os.mkfifo(str(fifo_dir / "current.log"))
+    if script is GUARD:
+        arm_guard(env)
+    payload = ({"hook_event_name": "Stop", "session_id": SESSION_A}
+               if script is GUARD else firing_stop(env))
+    r = run_hook(script, payload, env, {"ACTIVITY_SPOOL_DIR": str(fifo_dir)},
+                 timeout=15)
+    assert r.returncode == 0
+    assert expect in json.loads(r.stdout)      # the verdict is unchanged
+    assert r.stderr == ""
+    assert rows(env["spool"]) == []            # nothing fell back to the good spool
+
+
+def _call_bounded(seconds, fn, *a, **kw):
+    """Run `fn` with a hard wall-clock bound, IN THIS PROCESS. Raises on overrun.
+
+    🔴 THIS EXISTS BECAUSE THE TEST BELOW WEDGED A MUTATION SWEEP. Asserting
+    `emit_decision(..., spool_dir=<a FIFO>) == ""` in process is safe only while the
+    refusal is in place — and a mutation sweep's whole job is to remove it. With the
+    call site deleted, `spool_emit`'s blocking `open` never returned and pytest sat
+    there forever: not a SURVIVED mutant, not a KILLED one, just a run that never
+    finished, which is the least informative outcome available and the one that gets
+    read as "the harness is broken". `subprocess.run(timeout=)` covers the hooks
+    because they are children; this covers the in-process calls, which have no parent
+    to time them out.
+
+    SIGALRM is process-wide and pytest is single-threaded here, so the window is this
+    call and nothing else; the alarm is always cancelled in a `finally`.
+    """
+    import signal
+
+    def _boom(signum, frame):
+        raise TimeoutError("call did not return within %ss — it BLOCKED" % seconds)
+
+    old = signal.signal(signal.SIGALRM, _boom)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return fn(*a, **kw)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_the_fifo_refusal_is_the_ONLY_thing_that_changed(env, HT, tmp_path):
+    """POSITIVE CONTROL for the refusal. A guard that refused EVERY spool would pass
+    the test above having disabled the emitter entirely — the same reassuring zero as a
+    scanner wired to nothing. The pair: a FIFO writes 0, a regular file writes 1, and
+    the predicate is asserted directly in both directions.
+
+    🔴 THE `current.log` MUST ALREADY EXIST BEFORE THE ADMITTING ASSERTION, AND THE
+    FIRST DRAFT DID NOT DO THAT — the mutation sweep caught it. A spool whose log has
+    not been created yet takes the `except OSError: return True` arm, so
+    `_spool_target_is_a_regular_file` returns True **without ever reaching the
+    `S_ISREG` line**. A mutant replacing that line with `return False` therefore
+    SURVIVED this test: every assertion held, because the branch under test was never
+    executed. It is the enclosing-condition trap from `claude/RULES.md` — the fixture's
+    own state kept the guard's assertion unreachable. So the emit that CREATES the log
+    comes first, and the admitting assertion is made against a file proven to exist.
+
+    Every in-process emit here is BOUNDED — see `_call_bounded` for the sweep this
+    cost."""
+    se = HT.spool_emit_module()
+    assert se is not None
+
+    fifo_dir = tmp_path / "fifo-pred"
+    fifo_dir.mkdir()
+    os.mkfifo(str(fifo_dir / "current.log"))
+    assert HT._spool_target_is_a_regular_file(se, fifo_dir) is False
+    assert _call_bounded(10, HT.emit_decision, "h", "fired",
+                         spool_dir=fifo_dir) == ""
+
+    # The ABSENT arm — a log that does not exist yet must proceed, since that is the
+    # ordinary first emit and not an edge case.
+    assert HT._spool_target_is_a_regular_file(se, tmp_path / "never-created") is True
+    assert _call_bounded(10, HT.emit_decision, "h", "fired", entity="e1",
+                         spool_dir=env["spool"]) != ""
+
+    # ...and NOW the S_ISREG arm itself, on a log proven to be a real regular file.
+    assert (env["spool"] / "current.log").is_file()
+    assert HT._spool_target_is_a_regular_file(se, env["spool"]) is True
+    assert _call_bounded(10, HT.emit_decision, "h", "fired", entity="e2",
+                         spool_dir=env["spool"]) != ""
+    assert len(rows(env["spool"])) == 2
+
+
+def test_the_in_process_bound_can_itself_go_red(tmp_path):
+    """🔴 NEGATIVE CONTROL FOR `_call_bounded`. A timeout helper that silently never
+    fires turns the test above back into the thing that wedged the sweep, with every
+    assertion still green. Feed it a call that MUST overrun and watch it raise."""
+    import time
+    with pytest.raises(TimeoutError):
+        _call_bounded(0.2, time.sleep, 5)
+    # ...and it must not fire on a call that returns in time, or it would fail the
+    # suite for reasons that have nothing to do with blocking.
+    assert _call_bounded(5, lambda: "fast") == "fast"
+
+
+# --------------------------------------------------------------------------- #
+# 4e. EVERY DROP IS COUNTED — the module's only promise about dropping
+# --------------------------------------------------------------------------- #
+def test_extras_over_the_cap_are_COUNTED_not_silently_truncated(env, HT):
+    """🔴 REGRESSION, red at 0a8034ae. `fields.extend(extras[:_MAX_EXTRA])` truncated
+    AFTER `dropped` had been computed, so the keys past the cap vanished with no trace
+    — the one place this module dropped a value silently, against the single promise it
+    makes about drops. A row over the cap was byte-identical to a caller that never
+    passed those keys."""
+    n = HT._MAX_EXTRA
+    extra = {"k%02d" % i: i for i in range(n + 3)}
+    HT.emit_decision("h", HT.DECISION_SUPPRESSED, extra=extra,
+                     spool_dir=env["spool"])
+    p = payloads(env["spool"])[0]
+    assert p["dropped"] == 3, p
+    assert sum(1 for k in p if k.startswith("k")) == n
+
+
+def test_an_extra_at_exactly_the_cap_drops_nothing(env, HT):
+    """The boundary from the other side — the control that keeps the count above from
+    being satisfied by an off-by-one that over-reports."""
+    HT.emit_decision("h", HT.DECISION_SUPPRESSED,
+                     extra={"k%02d" % i: i for i in range(HT._MAX_EXTRA)},
+                     spool_dir=env["spool"])
+    assert "dropped" not in payloads(env["spool"])[0]
+
+
+# --------------------------------------------------------------------------- #
+# 4f. THE DENOMINATOR UNIT — the guard emits one row per DECISION, not per Stop
+# --------------------------------------------------------------------------- #
+def test_every_row_of_ONE_stop_shares_a_stop_id(env):
+    """🔴 WITHOUT THIS THE GUARD HAS NO DENOMINATOR OF ITS OWN. It emits one row per
+    tracked DOC, so `count(*)` counts documents and any rate built on it is wrong by
+    however many handoffs the session had open. `uniqExact(stop)` is the Stop count.
+
+    Two docs in one Stop, then a SECOND Stop: the first two must share a token and the
+    third must not, which is the pair that separates a real id from a constant."""
+    docdir = env["tmp"] / "multi" / "claudedocs"
+    docdir.mkdir(parents=True)
+    for topic in ("alpha", "beta"):
+        doc = docdir / ("handoff-%s.md" % topic)
+        doc.write_text("resumed\n")
+        run_hook(GUARD, {"hook_event_name": "PostToolUse", "session_id": SESSION_A,
+                         "tool_name": "Read", "tool_input": {"file_path": str(doc)},
+                         "cwd": str(docdir)}, env)
+        os.utime(str(doc), (1_000_000, 1_000_000))
+    run_hook(GUARD, {"hook_event_name": "PostToolUse", "session_id": SESSION_A,
+                     "tool_name": "Bash",
+                     "tool_input": {"command": "git commit -m x"},
+                     "cwd": str(docdir)}, env)
+
+    run_hook(GUARD, {"hook_event_name": "Stop", "session_id": SESSION_A}, env)
+    first = payloads(env["spool"], "handoff-write-guard")
+    assert len(first) == 2, first                  # one row per DOC, not per Stop
+    assert first[0]["stop"] == first[1]["stop"] and first[0]["stop"]
+
+    run_hook(GUARD, {"hook_event_name": "Stop", "session_id": SESSION_A}, env)
+    allrows = payloads(env["spool"], "handoff-write-guard")
+    assert len({p["stop"] for p in allrows}) == 2, [p["stop"] for p in allrows]
+
+
+def test_the_nudge_carries_no_stop_id_because_its_row_IS_the_stop(env):
+    """The asymmetry, asserted rather than left to a comment. A field that would only
+    ever hold distinct values buys nothing, and a consumer must be able to read the
+    absence as "one row per Stop" instead of as an oversight."""
+    run_hook(NUDGE, firing_stop(env), env)
+    assert "stop" not in payloads(env["spool"], "next-step-nudge")[0]
+
+
+# --------------------------------------------------------------------------- #
 # 5. Ledger guards — three files spell the vocabulary, nothing else makes them agree
 # --------------------------------------------------------------------------- #
 def source(path):
@@ -767,18 +1215,161 @@ def test_the_nudge_reason_vocabulary_is_pinned_two_way_against_decide():
     assert mod.ARMED_REASONS.isdisjoint(mod.UNMEASURED_REASONS)
 
 
+# Which positional argument of each row builder carries the reason token.
+_ROW_BUILDERS = {"_session_row": 2, "_doc_row": 5}
+# The one name a builder is legitimately called with that is NOT a token: `refuse`'s
+# own parameter, which this parser reads from the `refuse("…")` call sites instead.
+_REASON_PASS_THROUGH = frozenset({"reason"})
+
+
+def guard_reason_tokens(path):
+    """Every reason token the guard hands to a telemetry row builder. By AST.
+
+    🔴 THIS PARSER WAS A REGEX AND THE REGEX WAS THE BUG. It matched
+    `DECISION_[A-Z]+, "<token>"` — adjacency on ONE LINE — so wrapping a call across
+    two lines silently dropped that call site from `produced`, and the ledger then
+    reported the token as STALE: a pin failing for a formatting change while a genuinely
+    missing token would fail identically. `claude/RULES.md` → "parsing output makes its
+    FORMAT a dependency you did not pin". The AST has no format.
+
+    Module-level string constants are resolved, so a token spelled as `BAD_PAYLOAD` is
+    found without this file carrying a second list of constant names to keep in step.
+    🔴 An argument this cannot resolve is a FAILURE, never a skip — a silently ignored
+    call site is exactly how a token leaves the ledger without anyone noticing.
+    """
+    tree = ast.parse(source(path), filename=path)
+    consts = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    consts[target.id] = node.value.value
+
+    out, unresolved = set(), []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        name = node.func.id
+        if name == "refuse":
+            arg = node.args[0] if node.args else None
+        elif name in _ROW_BUILDERS:
+            idx = _ROW_BUILDERS[name]
+            arg = node.args[idx] if len(node.args) > idx else None
+        else:
+            continue
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            out.add(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in consts:
+            out.add(consts[arg.id])
+        elif isinstance(arg, ast.Name) and arg.id in _REASON_PASS_THROUGH:
+            continue
+        else:
+            unresolved.append("%s(line %d): %s" % (name, node.lineno,
+                                                   ast.dump(arg) if arg else "MISSING"))
+    return out, unresolved
+
+
 def test_the_guards_reason_vocabulary_is_pinned_two_way():
     """The same ledger on the other hook: every token handed to `_session_row` or
     `_doc_row`, against the declared set."""
-    src = source(GUARD)
-    produced = set(re.findall(r'\brefuse\("([a-z-]+)"\)', src))
-    produced |= set(re.findall(r'DECISION_[A-Z]+, "([a-z-]+)"', src))
+    produced, unresolved = guard_reason_tokens(GUARD)
     mod = load(GUARD, "guard_vocab")
+    assert not unresolved, (
+        "a telemetry row builder is called with a reason this pin cannot resolve, so "
+        "its token is outside the ledger: %s" % unresolved)
     assert produced, "the parser found no call sites — it is wired to nothing"
     assert produced == mod.REASONS, (
         "unaccounted: %s ; stale: %s"
         % (sorted(produced - mod.REASONS), sorted(mod.REASONS - produced)))
     assert mod.UNMEASURED_SESSION_REASONS <= mod.REASONS
+
+
+def test_that_ledgers_parser_can_see_a_call_the_regex_version_missed():
+    """🔴 NEGATIVE CONTROL FOR THE PARSER ITSELF — the half that makes the pin above
+    evidence rather than a claim. A ledger built by a parser that silently skips call
+    sites reports a clean set over an incomplete one, and the previous regex did
+    exactly that: it required `DECISION_X, "token"` on ONE line.
+
+    Both shapes are fed to the real parser here: the wrapped call the regex could not
+    see, and a token spelled as a module constant, which it also could not see. If
+    either comes back missing, the ledger is measuring less than it claims to.
+    """
+    import tempfile
+    src = (
+        'A_CONSTANT_TOKEN = "via-constant"\n'
+        'def f(rows, sid, key, rec):\n'
+        '    _doc_row(rows, sid, key, rec, DECISION_FIRED,\n'
+        '             "wrapped-across-lines", satisfied=False)\n'
+        '    _session_row(rows, sid, A_CONSTANT_TOKEN)\n'
+        '    _session_row(rows, sid, "plain-literal")\n'
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+        fh.write(src)
+        probe = fh.name
+    try:
+        got, unresolved = guard_reason_tokens(probe)
+        assert not unresolved, unresolved
+        assert got == {"wrapped-across-lines", "via-constant", "plain-literal"}, got
+        # And the shape it must REFUSE rather than skip: a reason it cannot resolve.
+        with open(probe, "a") as fh:
+            fh.write('    _session_row(rows, sid, some_unknown_name)\n')
+        _, unresolved2 = guard_reason_tokens(probe)
+        assert unresolved2, "an unresolvable reason must fail, not be silently dropped"
+    finally:
+        os.unlink(probe)
+
+
+def test_this_directorys_conftest_is_a_spool_guard_entry_point():
+    """🔴 THE LEAK THIS CHANGE CAUSED IS PINNED BY THIS TEST AND BY NOTHING ELSE.
+
+    Several suites in this directory drive a hook's `main()` IN PROCESS, so a row lands
+    wherever the process resolves the spool — and `spool_emit.default_spool_dir()` falls
+    back to `${XDG_STATE_HOME:-~/.local/state}/activity/spool`, which the collector ships
+    to the operator's production ClickHouse. MEASURED on this branch: `pytest
+    test_next_step_nudge.py -k main` with `ACTIVITY_SPOOL_DIR` unset wrote 2 real rows.
+    `scripts/run-tests.sh` exports the variable for every target (GUARD 8), so the gate
+    never saw it; a bare `pytest` — the documented way to run one of these files — did.
+
+    Deleting or narrowing the conftest's wiring would reopen that with every test in
+    this directory still green, which is the definition of a fix pinned by nothing.
+
+    🔴 STRUCTURAL, NOT SPELLED — copied from
+    `test_git_repo_isolation.py::test_every_conftest_is_a_second_entry_point`, whose own
+    docstring records that a spelled version SURVIVED a mutant moving the import under
+    `if False:`: both words were still on the page. What pytest acts on is the module
+    OBJECT's attribute, and it must be the plugin's own function, not a same-named
+    look-alike.
+
+    ⚠ SCOPE: this pins THIS directory, the one this change touched. Four of the six
+    conftests under `scripts/` still have no GUARD 8 second entry point; widening that
+    is a change of its own and is deliberately not smuggled in here.
+    """
+    import importlib.util
+
+    if os.path.join(ROOT, "scripts") not in sys.path:
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from testlib import spool_plugin            # noqa: PLC0415
+
+    path = os.path.join(HERE, "conftest.py")
+    spec = importlib.util.spec_from_file_location("_devrc_hook_conftest_probe", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    got = getattr(module, "no_real_activity_spool", None)
+    assert got is spool_plugin.no_real_activity_spool, (
+        "scripts/claude-hooks/tests/conftest.py does not re-export "
+        "`no_real_activity_spool` from testlib.spool_plugin, so a bare "
+        "`pytest scripts/claude-hooks/tests/...` runs with no session-wide spool "
+        "floor and no per-target marker (found: %r)" % (got,))
+
+    # The per-test narrowing fixture is defence in depth beside that floor, and its
+    # absence is a real narrowing of protection — asserted as an OBJECT for the same
+    # reason as above.
+    narrow = getattr(module, "_devrc_hook_spool_isolation", None)
+    assert callable(narrow), (
+        "the per-test spool-narrowing fixture is gone from this directory's conftest")
 
 
 def test_the_emitter_is_declared_as_a_hook_library_module():
