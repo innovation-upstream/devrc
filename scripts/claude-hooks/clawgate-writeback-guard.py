@@ -64,14 +64,43 @@ down" is reporting the same observable as "the ritual was followed".
 ESCALATION LADDER — per session, per task id
 ---------------------------------------------
     fire 1  ->  decision: block      (FORCED CONTINUATION; `reason` reaches the model)
-    fire 2  ->  decision: block      (FORCED CONTINUATION)
-    fire 3  ->  systemMessage        (the turn ENDS; operator sees it, model does not)
+    fire 2  ->  systemMessage        (the turn ENDS; operator sees it, model does not)
+    fire 3  ->  systemMessage        (same)
     fire 4+ ->  silent
 
-    TRUE COST of a measured missing write-back: exactly TWO forced continuations.
+    TRUE COST of a measured missing write-back: exactly ONE forced continuation.
     TRUE COST of a "could not measure" notice:  ZERO forced continuations, and it
     runs on its OWN counter (`unknown-<id>`), so a board that is down for the first
     Stops cannot spend the block budget a genuinely missing write-back needs later.
+
+🔴 RUNG 2 USED TO BE A SECOND BLOCK, AND RETIRING IT GIVES UP A DEMONSTRATED WIN.
+That is the honest framing and it belongs first, not in a footnote. Measured over the
+whole transcript corpus by a STRUCTURAL `tool_use` scan (not text matching): 32 fire-2
+ladders exist in total. **31 of them (96.9%) were RE-ARMS** — a write-back act landed
+BETWEEN fire 1 and fire 2, i.e. the model complied with the first block, kept working
+past its own comment, and was blocked a second time for having complied. **Exactly 1
+was legitimate, and that one WORKED**: task 525's fire 2 was followed by a comment AND
+a status flip. So rung 2 is not a mechanism that never worked. It worked 1-for-1 in
+the population it exists for — once in six weeks.
+
+It is retired anyway, because one event per six weeks does not justify what keeping it
+costs. The alternative that was actually built and then rejected (PR #1747) kept rung
+2 conditionally — suppress it once the first block had been answered — for ~530 lines,
+a new per-blocked-task on-disk artifact, and an audit-confirmed path where a STALE
+STAMP COULD SUPPRESS FIRE 1, which is the rung carrying the entire yield. New
+persistent state invites precisely that failure; a constant cannot have it.
+
+🔴 WHAT THE LOST CASE DEGRADES TO — AND WHAT IS NOT KNOWN ABOUT IT. Fire 2 does not go
+silent. MEASURED, not assumed, by driving six Stops through the real `stop_decision`
+and `emit` against a card with zero comments: `block, notice, notice, silent, silent,
+silent`. `escalate(2)` returns "notice" and `emit` writes `{"systemMessage": …}`
+carrying the SAME `missing_text` body a block would have carried — so the operator
+still sees the miss, on every recurring turn, and the model is simply no longer
+compelled to continue. There are TWO notice rungs now rather than one, because
+MAX_FIRES is unchanged at 3. 🔴 Whether a notice ALONE would have produced task 525's
+write-back is NOT MEASURABLE: that session was driven by a block, and nothing in the
+corpus records what it would have done without one. Nothing here claims the outcome
+would have been the same. It is a trade with a known cost and an unknown residual.
 
 🔴 `additionalContext` IS NOT A NON-BLOCKING CHANNEL ON Stop, AND THE FIRST VERSION
 OF THIS FILE WAS WRONG ABOUT THAT. Re-derived from the installed bundle (see the
@@ -124,19 +153,26 @@ size; the reads were done with plain `bytes.find` in Python.)
         let Kt = wue(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP, 8);
         if (Kt > 0 && yo > Kt) … "A hook blocked the turn from ending N consecutive
         times — overriding and ending turn."
-    Our MAX_BLOCKS = 2 is deliberately far stricter than that 8. A guard that has to
+    Our MAX_BLOCKS = 1 is deliberately far stricter than that 8. A guard that has to
     be overridden by the harness has already lost the operator. 🔴 That cap counts
-    `additionalContext` rungs TOO — which is why fire 3 is a `systemMessage`.
+    `additionalContext` rungs TOO — which is why every rung above the first is a
+    `systemMessage`.
 
 🔴 THERE IS DELIBERATELY NO `stop_hook_active` GATE, and that is the one place this
 hook diverges from the CLI's own advice ("check stop_hook_active and return success
 while it's true"). That advice exists to stop an unbounded block loop; the ladder
-above bounds it at 2 per task instead, and the SECOND block is the whole point — it
-is what catches a turn that acknowledged the first block and still stopped without
-writing. Skipping the second Stop would make fire 2 unreachable in the only shape it
-matters. The interaction with MAX_TASKS is named rather than hidden: several tasks
-each blocking twice can in principle stack toward the CLI's 8, at which point the
-CLI ends the turn with a warning — a graceful ceiling, not a wedge.
+above bounds it at ONE block per task instead, which is stricter than the gate the
+advice asks for — a `stop_hook_active` check would still permit a block on every Stop
+that is not itself a continuation, and this permits one per task, full stop. 🔴 The
+second block that used to live here is GONE, and the argument that justified it is
+RETRACTED, not merely trimmed: it claimed the second Stop "catches a turn that
+acknowledged the first block and still stopped without writing", and the corpus says
+that is what happened 1 time in 32 — the other 31 caught a turn that HAD written and
+then kept working. See the ladder section above for the measurement and for the win
+being given up. The interaction with MAX_TASKS is named rather than hidden: several
+tasks blocking once each can in principle stack toward the CLI's 8, at which point the
+CLI ends the turn with a warning — a graceful ceiling, not a wedge. That stack is now
+half what it was, since no single task can contribute more than one block to it.
 
 🔴 THE SUBAGENT RULE IS ASYMMETRIC: A SUBAGENT'S **READ** DOES NOT ARM THE PARENT,
 A SUBAGENT'S **WORK** DOES COUNT AS THE SESSION'S WORK. Two rounds of this file got
@@ -215,13 +251,27 @@ question asked weeks later.
 
 MULTI-TURN COST OF THE WORK ANCHOR
 -----------------------------------
-Work that spans several turns fires once per turn until the per-task ladder is spent:
-at most TWO forced continuations and one `systemMessage`, then silence forever for
-that task in that session. A `Done` comment written within CLOCK_SKEW_ALLOWANCE_SECS
-of the last work event already satisfies it, so the shape that actually costs is
-"comment, then keep working for more than the allowance, then stop" — which is a turn
-whose write-back genuinely is stale. Pinned by tests, so the noise is measured rather
-than discovered in production.
+🔴 THE OLD VERSION OF THIS SECTION WAS FALSIFIED BY THE CORPUS, AND ITS WORDING IS THE
+REASON RUNG 2 SURVIVED AS LONG AS IT DID. It said the shape that actually costs is
+"comment, then keep working for more than the allowance, then stop — which is a turn
+whose write-back genuinely is stale", i.e. it filed the cost under "correctly nagging
+a stale turn". That is wrong twice over. It is not an edge case: it is **31 of the 32
+fire-2 ladders that have ever occurred**. And it is not a stale turn misbehaving: it
+is the ordinary shape of COMPLIANT multi-turn work — read the card, get blocked, write
+back, keep working — where the session outdates its own comment BY COMPLYING and was
+then blocked a second time for it. Under a two-rung ladder, complying bought a session
+a second forced continuation.
+
+THE REAL COST UNDER THE ONE-RUNG LADDER. Work spanning several turns still fires once
+per turn until the per-task ladder is spent, but the shape of that spend has changed:
+**exactly ONE forced continuation, ever, per task per session**, then two
+`systemMessage` rungs (fires 2 and 3) that end the turn rather than extending it, then
+silence forever for that task in that session. A complying multi-turn session
+therefore pays one interruption for the first miss and, for every re-arm after it,
+only an operator-visible line the model never sees. A `Done` comment written within
+CLOCK_SKEW_ALLOWANCE_SECS of the last work event still satisfies the guard outright,
+so a session that writes back LAST pays nothing at all. Pinned by tests, so the noise
+is measured rather than discovered in production.
 
 🔴 HOT PATH. PostToolUse fires after EVERY tool call of every session, and
 agent-ledger-hook.py already costs ~21 ms there. The fast path is: one dict read for
@@ -445,7 +495,15 @@ LIVE_AGENT_STATUSES = frozenset(("pending", "provisioning", "running"))
 
 # Per session, per task id. See the ladder in the module docstring; both are read
 # out of the CLI bundle's own cap of 8, which this is deliberately stricter than.
-MAX_BLOCKS = 2
+#
+# 🔴 MAX_BLOCKS IS 1 BECAUSE RUNG 2 WAS MEASURED WRONG 31 TIMES FOR 1 RIGHT — and the
+# 1 right was a REAL WIN (task 525 wrote back after its fire 2), so this constant is a
+# trade, not a bug fix. MAX_FIRES stays 3, so fires 2 AND 3 are `systemMessage`
+# notices: a measured miss still reaches the operator every turn it recurs, it just
+# stops forcing the model to continue. The corpus split, the win being given up, the
+# counterfactual that is NOT measurable, and the ~530-line alternative that was built
+# and rejected are all in the ESCALATION LADDER section of the module docstring.
+MAX_BLOCKS = 1
 MAX_FIRES = 3
 
 # At most this many distinct task ids are tracked per session, so a session that
@@ -1018,6 +1076,11 @@ def prune(ttl=STATE_TTL_SECS, now=None):
 
 def escalate(fire_number):
     """1-based fire number -> "block" | "notice" | "silent".
+
+    With MAX_BLOCKS = 1 exactly ONE fire per task can block and fires 2 and 3 both
+    relent — MEASURED end to end, not inferred from this arithmetic; see the ladder
+    section of the module docstring for the emitted shapes and for the corpus split
+    (31 wrong, 1 right) that retired the second block.
 
     "notice" is the rung that RELENTS. It used to be named "context" and emitted
     `hookSpecificOutput.additionalContext`, which the CLI feeds into the same
