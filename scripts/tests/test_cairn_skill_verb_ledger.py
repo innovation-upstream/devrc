@@ -72,6 +72,7 @@ still reaches the file, matching the `VERB_LEDGER["create"]` row's own wording.
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import re
 import sys
@@ -394,6 +395,7 @@ READ_TIME_EXEMPT: dict[str, str] = {
 _SIDECAR_DIRS = ("reference", "flows")
 
 
+@functools.lru_cache(maxsize=1)
 def _skill_sources() -> dict[str, dict[str, str]]:
     """Every tracked skill, keyed by its `SKILL.md` repo-relative path.
 
@@ -429,6 +431,15 @@ def _skill_sources() -> dict[str, dict[str, str]]:
     per-skill — "does this skill teach the check, and in which spelling" — and an
     agent loading `/resume` can reach every file below that key. `_Hit.source`
     carries which one, so nothing is lost from a failure message.
+
+    ⚠ MEMOISED, and the returned dict must be treated as READ-ONLY — it is the
+    same object on every call. Each call shells out to `git ls-files` and reads
+    ~130 markdown files, and the widening turned one such walk per test into one
+    per (test x skill). MEASURED on this module, same tree, same box: 5.9s before
+    the widening, 11.8s widened-uncached, 7.9s widened-cached — so the cache buys
+    back most of what the wider scan costs, and the residue is the sidecar reads
+    themselves. Nothing in this repo writes to a skill during the run, so there is
+    nothing to invalidate; a test that ever needs to would have to clear it.
     """
     files = list(P.repo_files(REPO))
     # skill DIR -> the repo-relative key that names it
