@@ -73,11 +73,17 @@ still reaches the file, matching the `VERB_LEDGER["create"]` row's own wording.
 from __future__ import annotations
 
 import importlib.util
+import re
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+
+from testlib import public_ip_scan as P  # noqa: E402
+
 CAIRN_CLI = REPO / "scripts" / "cairn"
 SKILL = REPO / "claude" / "skills" / "cairn" / "SKILL.md"
 
@@ -215,57 +221,178 @@ def test_a_named_verb_appears_in_the_skill_body(verb: str) -> None:
     )
 
 
-# ── the post-write check is named by TWO skills; pin the RELATIONSHIP ───────
-# 🔴 This is a SEAM guard, not a component guard. Both files already say, in
-# prose, that "two skills naming one mandated command in two ways is how one of
-# them goes unpinned and drifts" — and on 2026-09-16 exactly that had happened:
-# subsystem-index/SKILL.md carried `cairn sync && cairn-validate --scope
-# <scope>` while cairn/SKILL.md carried the bare `cairn-validate --scope
-# <scope>` and asserted, falsely, that it was "the SAME spelling". Nothing could
-# see it, because each file was internally consistent and neither was pinned
-# against the other.
+# ── the post-write check: a DERIVED ledger over EVERY skill body ────────────
+# 🔴 A SEAM guard, not a component guard. Both `cairn` and `subsystem-index`
+# already say, in prose, that "two skills naming one mandated command in two
+# ways is how one of them goes unpinned and drifts" — and on 2026-09-16 exactly
+# that had happened: `subsystem-index/SKILL.md` carried `cairn sync &&
+# cairn-validate --scope <scope>` while `cairn/SKILL.md` carried the bare form
+# and asserted, falsely, that it was "the SAME spelling". Nothing could see it,
+# because each file was internally consistent and neither was pinned against
+# the other.
 #
-# The `cairn sync` is the load-bearing half: `cairn append` writes to the pod and
-# does NOT touch the local cache, and `cairn-validate` reads that cache
-# PERMISSIVELY, so an unsynced run cleanly parses the PRE-WRITE bytes — a silent
-# pass on the exact defect the check exists to catch.
-SUBSYSTEM_INDEX_SKILL = REPO / "claude" / "skills" / "subsystem-index" / "SKILL.md"
+# 🔴 THERE IS NO HAND-WRITTEN LIST OF THE SITES TO SCAN, AND THAT IS THE FIX.
+# The first version of this guard (#1738, pre-audit) iterated a hardcoded
+# 2-tuple of paths. Its docstring claimed it "fails when the set of skills
+# naming this command GROWS or SHRINKS" and it could do neither, because the set
+# it compared against was the tuple itself. Measured at that revision, the set
+# was ALREADY three: `claude/skills/resume/SKILL.md` named the bare form and was
+# outside the guard's field of view. A hand-maintained ledger of SITES is the
+# same shape as the bug it guards against, so the sites are DERIVED from
+# `git ls-files` (`public_ip_scan.repo_files`) at scan time and the only asserted
+# numbers are the two ledgers below.
+#
+# Four properties, each with its own failing assertion so a mutant dies for the
+# right reason (`claude/RULES.md` → "unreachable-guards"):
+#   1. the derived set of skills naming the check EQUALS the declared ledgers —
+#      fails when it GROWS (a fourth skill, undecided) or SHRINKS (a mandate
+#      silently deleted);
+#   2. each post-write site names it the DECLARED NUMBER of times — deleting one
+#      of two sites inside a file is a SHRINK a per-file boolean cannot see;
+#   3. every post-write occurrence carries the load-bearing `cairn sync && `;
+#   4. no skill spells it with the PACKAGED client.
+#
+# 🔴 On (4): `cairn validate --scope <scope>` (space) is a REAL runnable command
+# — it even syncs by default — which is what makes the swap survivable by eye.
+# It is still the wrong check. `scripts/cairn-validate`'s own header records the
+# measurement: on one live scope the packaged client wrote **0 bytes to stdout**
+# and exited 0, where the writer wrote **5,766 B** carrying `entry shape:`,
+# `marker reachability:` and `dropped lines:` — the last meaning content is
+# ALREADY LOST. Their EXIT TABLES also disagree (malformed entry: writer **3**,
+# package **5**), so the two must not be read for each other.
+#
+# Matching runs over WHITESPACE-NORMALISED text, so reflowing a paragraph — which
+# markdown prose gets constantly, including in the very PR that added this — is
+# not a spelling change. The placeholder is matched as a shape (`<...>`) rather
+# than the literal `<scope>`, so renaming it to `<SCOPE>` cannot walk the guard.
 POST_WRITE_CHECK = "cairn sync && cairn-validate --scope <scope>"
-_BARE = "cairn-validate --scope <scope>"
+_SYNC_PREFIX = "cairn sync && "
+_VALIDATE_RE = re.compile(r"cairn(?P<sep>[- ])validate\s+--scope\s+<[A-Za-z_-]+>")
+
+# 🔴 TWO-WAY, and the VALUE is the count. A per-file boolean cannot see a file
+# that drops one of its two mandates, which is the SHRINK half of the docstring.
+POST_WRITE_SITES: dict[str, int] = {
+    "cairn": 2,             # the verb table row, and the prose mandate below it
+    "subsystem-index": 2,   # the prose mandate, and the runnable command fence
+}
+
+# Named rather than omitted. An exemption is auditable; an absence is the defect.
+READ_TIME_EXEMPT: dict[str, str] = {
+    "resume": (
+        "a READ-time diagnostic, not the write protocol: it is reached only from "
+        "the `🔴 NO <heading>` badge in `cairn recall` output, and `cairn recall` "
+        "syncs before it reads, so the cache is already fresh at that point. It "
+        "must still name the WRITER (`cairn-validate`), which property (4) pins."
+    ),
+}
 
 
-def _bare_occurrences_not_preceded_by_sync(text: str) -> list[int]:
-    """Offsets where the bare form appears WITHOUT the `cairn sync && ` prefix.
+def _skill_bodies() -> dict[str, str]:
+    """Every tracked `claude/skills/*/SKILL.md`, keyed by skill name.
 
-    A plain `_BARE not in text` can never work: the bare string is a SUBSTRING of
-    the full one, so it is present even when every site is correct. The question
-    is only ever whether each occurrence carries the prefix.
+    Derived, never enumerated — a fourth skill is caught automatically, and a
+    fourth skill is exactly what the hand-written tuple missed.
     """
-    prefix = "cairn sync && "
-    out, i = [], text.find(_BARE)
-    while i != -1:
-        if not text[:i].endswith(prefix):
-            out.append(i)
-        i = text.find(_BARE, i + 1)
-    return out
+    root = REPO / "claude" / "skills"
+    return {
+        p.parent.name: p.read_text(encoding="utf-8")
+        for p in P.repo_files(REPO)
+        if p.name == "SKILL.md" and root in p.parents
+    }
 
 
-def test_both_skills_name_the_post_write_check_and_name_it_the_same_way() -> None:
-    """🔴 Fails when the set of skills naming this command GROWS or SHRINKS out of step.
+def _occurrences(text: str) -> list[re.Match[str]]:
+    """Matches over whitespace-normalised text, so a reflow is not a change."""
+    return list(_VALIDATE_RE.finditer(" ".join(text.split())))
 
-    Asserted in both directions, because a count cannot say WHICH side moved.
+
+def _naming_skills() -> dict[str, list[re.Match[str]]]:
+    hits = {name: _occurrences(body) for name, body in _skill_bodies().items()}
+    return {name: ms for name, ms in hits.items() if ms}
+
+
+def test_the_set_of_skills_naming_the_write_protocol_check_is_the_declared_ledger() -> None:
+    """🔴 Fails when the set GROWS or SHRINKS. Both directions, separately named.
+
+    A count alone cannot say WHICH side moved, so the two are asserted apart.
     """
-    for path in (SKILL, SUBSYSTEM_INDEX_SKILL):
-        text = path.read_text(encoding="utf-8")
-        assert POST_WRITE_CHECK in text, (
-            f"{path.name} does not name the mandated post-write check "
-            f"{POST_WRITE_CHECK!r}. Both skills must name it identically — that "
-            f"is the drift both files warn about in prose."
-        )
-        stray = _bare_occurrences_not_preceded_by_sync(text)
-        assert not stray, (
-            f"{path.name} names the BARE {_BARE!r} at offset(s) {stray} without "
-            f"the load-bearing `cairn sync && ` prefix. An unsynced validate "
-            f"parses the PRE-WRITE bytes and passes silently, which is the "
-            f"defect the check exists to catch."
-        )
+    found = set(_naming_skills())
+    declared = set(POST_WRITE_SITES) | set(READ_TIME_EXEMPT)
+
+    grew = sorted(found - declared)
+    assert not grew, (
+        f"skill(s) {grew} name the write-protocol check and are in NEITHER ledger. "
+        f"Decide which: add a count to POST_WRITE_SITES if it mandates the check "
+        f"after a write, or a reason to READ_TIME_EXEMPT if it does not. Leaving "
+        f"it out is how `resume` sat outside this guard while naming the bare form."
+    )
+    shrank = sorted(declared - found)
+    assert not shrank, (
+        f"skill(s) {shrank} are declared as naming the write-protocol check and "
+        f"no longer do. A mandate that vanishes is the failure this ledger exists "
+        f"to catch — delete the ledger row deliberately, or restore the mandate."
+    )
+
+
+@pytest.mark.parametrize("skill", sorted(POST_WRITE_SITES))
+def test_a_post_write_site_names_the_check_the_declared_number_of_times(skill: str) -> None:
+    """🔴 The COUNT is the SHRINK detector inside a single file.
+
+    `cairn/SKILL.md` states the mandate twice on purpose — once in the verb table
+    a reader scans, once in the prose that explains why the `cairn sync` is
+    load-bearing. Dropping either leaves the other, and a boolean "does this file
+    mention it" cannot tell.
+    """
+    want = POST_WRITE_SITES[skill]
+    got = len(_naming_skills().get(skill, []))
+    assert got == want, (
+        f"claude/skills/{skill}/SKILL.md names the write-protocol check {got} "
+        f"time(s); POST_WRITE_SITES declares {want}. If a site was added or "
+        f"removed deliberately, move the number — do not leave it disagreeing."
+    )
+
+
+@pytest.mark.parametrize("skill", sorted(POST_WRITE_SITES))
+def test_every_post_write_occurrence_carries_the_load_bearing_sync_prefix(skill: str) -> None:
+    """🔴 The `cairn sync` is the half that does the work.
+
+    `cairn append` writes to the pod and does NOT touch the local cache
+    (`libexec/cairn/cairn` → `cmd_append`: "never queued, never written to the
+    cache"), and `cairn-validate` prepends `--store <the synced cache>` with no
+    network path of its own. So an unsynced run cleanly parses the PRE-WRITE
+    bytes — a silent pass on the exact defect the check exists to catch.
+    """
+    body = _skill_bodies()[skill]
+    normalised = " ".join(body.split())
+    stray = [
+        m.start() for m in _occurrences(body)
+        if not normalised[:m.start()].endswith(_SYNC_PREFIX)
+    ]
+    assert not stray, (
+        f"claude/skills/{skill}/SKILL.md names the write-protocol check at "
+        f"normalised offset(s) {stray} WITHOUT the load-bearing {_SYNC_PREFIX!r} "
+        f"prefix. An unsynced validate parses the PRE-WRITE bytes and passes "
+        f"silently. The mandated spelling is {POST_WRITE_CHECK!r}."
+    )
+
+
+def test_no_skill_spells_the_check_with_the_PACKAGED_client() -> None:
+    """🔴 `cairn validate` (space) is a real command and the WRONG check.
+
+    Not a typo guard: the packaged client reimplements the check on the READER's
+    resolver. Measured on one live scope (`scripts/cairn-validate`'s header): the
+    package wrote 0 bytes to stdout and exited 0 where the writer wrote 5,766 B
+    including `dropped lines:`. Both "green"; only one looked. Their exit tables
+    also disagree — malformed entry is 3 from the writer, 5 from the package — so
+    a skill that names the wrong one sends a reader to the wrong exit-code table.
+    """
+    wrong = sorted(
+        name for name, ms in _naming_skills().items()
+        if any(m.group("sep") == " " for m in ms)
+    )
+    assert not wrong, (
+        f"skill(s) {wrong} spell the write-protocol check with the PACKAGED "
+        f"client (`cairn validate`, space) instead of the devrc writer "
+        f"(`cairn-validate`, hyphen). The package does not run the write-protocol "
+        f"check and its exit codes differ; use {POST_WRITE_CHECK!r}."
+    )
