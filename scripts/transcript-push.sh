@@ -153,21 +153,48 @@ fi
 #                so an oversized body was refused by the PROXY and the app never
 #                saw it — the app's limits are irrelevant once that happens.
 #
-# ⚠ THE PROXY'S ACTUAL BYTE LIMIT IS UNMEASURED. No `client_max_body_size` /
-# `proxy-body-size` is set for clawgate in homelab-talos, which SUGGESTS nginx's
-# 1 MiB default, but that is an inference from an absent annotation and the route
-# above was not traced to the config that serves it. What IS measured: 3 MiB was
-# refused, and 817,481 B went through with HTTP 200 on 2026-09-10. MAX_PUSH_BYTES
-# is set below that observed-good size rather than at any believed ceiling.
+# ✅ THE PROXY'S BYTE LIMIT IS NOW TRACED AND MEASURED, AND THE SENTENCE ABOVE
+# THIS ONE USED TO SAY IT WAS NEITHER. Traced 2026-09-16 in
+# homelab-talos `clusters/homelab/apps/nebula/gateway/nginx.conf`: the
+# `listen 10.42.0.10:8109` block — the laptop's clawgate route — declared NO
+# `client_max_body_size` at any level, while fifteen neighbouring blocks each
+# declare their own. So nginx's compile-time default of `1m` applied, inherited
+# and invisible. The live ConfigMap was byte-identical to git.
 #
-# 🔴 BEFORE RAISING EITHER OF THESE, VERIFY THE RUNNING SERVER — do not raise
-# them because a clawgate PR or release note says the cap moved. `merged` is not
-# `deployed`, and that is exactly the distinction this block got wrong. The cheap
-# check is to run this script by hand and read the response body: the app names
-# its own cap in the refusal.
-TAIL_BYTES="${TRANSCRIPT_PUSH_TAIL_BYTES:-196608}"     # 192 KiB; server cap believed 256 KiB (UNVERIFIED)
+# Then MEASURED against that exact listener from the laptop, with a deliberately
+# INVALID bearer token so a body that reaches the app is refused before anything
+# is stored:
+#
+#     1,048,575 B  -> HTTP 401      (reached clawgate)
+#     1,048,576 B  -> HTTP 401      (reached clawgate)
+#     1,048,577 B  -> HTTP 413 nginx (refused by the proxy)
+#
+# Exactly 1 MiB, inclusive. The old "3 MiB was refused, 817,481 B went through"
+# pair was consistent with that and could not locate it.
+#
+# 🔴 THE CEILING IS NO LONGER A HOST-SIDE GUESS AT A SERVER CONSTANT. The tail
+# size is now NEGOTIATED: `GET /api/transcripts/digest` — the pre-flight this
+# script already calls every tick — carries the server's own
+# `limits.maxTailBytes`, and the effective value is min(server, ceiling below).
+# A server that does not advertise one gets TAIL_FALLBACK, which is the value
+# this script used before, so pointing a new feeder at an old server changes
+# nothing. See scripts/lib/transcript_limits.py.
+#
+# 🔴 STILL VERIFY THE RUNNING SERVER BEFORE RAISING THE CEILING — do not raise it
+# because a clawgate PR or release note says the cap moved. `merged` is not
+# `deployed`. The negotiation makes that mistake much harder, because the number
+# now comes FROM the running server rather than from a belief about it.
+TAIL_CEILING="${TRANSCRIPT_PUSH_TAIL_CEILING:-1048576}" # 1 MiB; the most this host will ever read per session
+TAIL_FALLBACK="${TRANSCRIPT_PUSH_TAIL_FALLBACK:-196608}" # 192 KiB — what a server advertising nothing gets
+# An explicit TRANSCRIPT_PUSH_TAIL_BYTES still wins over the negotiation, for a
+# deliberate override and for the tests.
+TAIL_BYTES="${TRANSCRIPT_PUSH_TAIL_BYTES:-}"
 MAX_PER_PUSH="${TRANSCRIPT_PUSH_MAX_SESSIONS:-8}"      # deployed app cap 8, MEASURED from its refusal
-MAX_PUSH_BYTES="${TRANSCRIPT_PUSH_MAX_BYTES:-900000}"  # ~879 KiB, under the ingress's inferred 1 MiB
+# The AGGREGATE raw-tail budget. Derived from TAIL_BYTES once that is known, and
+# never below the 900,000 this script has been using: at the fallback tail the
+# derivation is 589,824, so max() keeps today's behaviour EXACTLY unchanged
+# against a server that advertises nothing.
+MAX_PUSH_BYTES="${TRANSCRIPT_PUSH_MAX_BYTES:-}"
 # How far back to consider a transcript at all. 24h keeps a session readable the
 # morning after; older ones are past the server's retention anyway.
 MAX_AGE_HOURS="${TRANSCRIPT_PUSH_MAX_AGE_HOURS:-24}"
@@ -272,6 +299,29 @@ case "$HTTP" in
     ;;
 esac
 
+# ── 1b. adopt the server's advertised ingest bounds ──────────────────────────
+# 🔴 A FAILURE HERE FALLS BACK, IT DOES NOT ABORT. The pre-flight has already
+# succeeded, so the feeder is working; refusing to push because one optional
+# field could not be read would turn a cosmetic problem into silence — which is
+# this pipe's only failure mode and the one the whole suite is built around.
+LIMITS_PY="${TRANSCRIPT_PUSH_LIMITS:-$(dirname "$(readlink -f "$0")")/lib/transcript_limits.py}"
+if [ -z "$TAIL_BYTES" ]; then
+  # stderr to a FILE, never 2>&1: this is a command substitution assigned to a
+  # variable that becomes a byte count, so anything merged onto stdout BECOMES
+  # that count. Same hazard, same fix, as the host-label resolution above.
+  LIMITS_ERR="$(mktemp "${TMPDIR:-/tmp}/transcript-push-limits.XXXXXX")"
+  if ! TAIL_BYTES="$(python3 "$LIMITS_PY" "$DIGEST" "$TAIL_CEILING" "$TAIL_FALLBACK" 2>"$LIMITS_ERR")" \
+     || [ -z "$TAIL_BYTES" ]; then
+    log "could not read the server's advertised tail bound (using $TAIL_FALLBACK): $(tr '\n' ' ' <"$LIMITS_ERR" | cut -c1-200)"
+    TAIL_BYTES="$TAIL_FALLBACK"
+  fi
+  rm -f "$LIMITS_ERR"
+fi
+if [ -z "$MAX_PUSH_BYTES" ]; then
+  MAX_PUSH_BYTES=$(( TAIL_BYTES * 3 ))
+  [ "$MAX_PUSH_BYTES" -lt 900000 ] && MAX_PUSH_BYTES=900000
+fi
+
 # ── 2. build the payload ─────────────────────────────────────────────────────
 # 🔴 stdout and stderr to SEPARATE files. A merged capture would splice the
 # builder's diagnostics into the JSON document, and the failure would present as
@@ -287,65 +337,103 @@ if [ ! -r "$BUILDER" ]; then
   exit 3
 fi
 
-set +e
-timeout "$BUILD_TIMEOUT" python3 "$BUILDER" \
-  --projects-dir "$PROJECTS_DIR" \
-  --digest "$DIGEST" \
-  --host "$HOST_NAME" \
-  --tail-bytes "$TAIL_BYTES" \
-  --max-sessions "$MAX_PER_PUSH" \
-  --max-push-bytes "$MAX_PUSH_BYTES" \
-  --max-age-hours "$MAX_AGE_HOURS" \
-  --max-candidates "$MAX_CANDIDATES" \
-  >"$PAYLOAD" 2>"$WORK/build.err"
-BUILD_RC=$?
-set -e
-if [ "$BUILD_RC" -eq 10 ]; then
-  log "nothing to push — every recent session already matches the server's digest"
-  exit 0
-fi
-if [ "$BUILD_RC" -ne 0 ]; then
-  if [ "$BUILD_RC" -eq 124 ]; then
-    log "builder TIMED OUT after ${BUILD_TIMEOUT}s (rc=124)"
-  else
-    log "builder failed (rc=$BUILD_RC): $(tr '\n' ' ' <"$WORK/build.err" | cut -c1-400)"
+# 🔴 THE PUSH IS RETRIED ONCE ON A 413, AT A SMALLER TAIL, AND THE REFUSAL IS
+# LOGGED WITH THE NUMBERS THAT CAUSED IT.
+#
+# Two ceilings can answer 413 and they fail differently — the APP (naming its own
+# cap in a JSON body) and the PROXY (an nginx HTML page the app never sees). This
+# script cannot tell which without reading the body, and it does not need to: the
+# corrective action is the same, and it is the action an operator took by hand
+# twice already. On 2026-09-09 a raised session count produced 228 consecutive
+# 413s and transcript push was 100% dead on both hosts for ~19 hours, because
+# nothing here retried and nothing here backed off.
+#
+# 🔴 ONE RETRY, NEVER A LOOP. A backoff that keeps halving would turn a
+# permanent misconfiguration into a slow, quiet, self-repairing degradation —
+# exactly the silence this pipe's failure mode already is. One retry recovers a
+# deploy-ordering mistake; a second failure is a real problem and exits non-zero
+# so the unit reports it.
+ATTEMPT=1
+while :; do
+  set +e
+  timeout "$BUILD_TIMEOUT" python3 "$BUILDER" \
+    --projects-dir "$PROJECTS_DIR" \
+    --digest "$DIGEST" \
+    --host "$HOST_NAME" \
+    --tail-bytes "$TAIL_BYTES" \
+    --max-sessions "$MAX_PER_PUSH" \
+    --max-push-bytes "$MAX_PUSH_BYTES" \
+    --max-age-hours "$MAX_AGE_HOURS" \
+    --max-candidates "$MAX_CANDIDATES" \
+    >"$PAYLOAD" 2>"$WORK/build.err"
+  BUILD_RC=$?
+  set -e
+  if [ "$BUILD_RC" -eq 10 ]; then
+    log "nothing to push — every recent session already matches the server's digest"
+    exit 0
   fi
-  exit 3
-fi
+  if [ "$BUILD_RC" -ne 0 ]; then
+    if [ "$BUILD_RC" -eq 124 ]; then
+      log "builder TIMED OUT after ${BUILD_TIMEOUT}s (rc=124)"
+    else
+      log "builder failed (rc=$BUILD_RC): $(tr '\n' ' ' <"$WORK/build.err" | cut -c1-400)"
+    fi
+    exit 3
+  fi
 
-BYTES=$(wc -c <"$PAYLOAD")
+  BYTES=$(wc -c <"$PAYLOAD")
 
-# ── 3. push ──────────────────────────────────────────────────────────────────
-set +e
-HTTP=$(curl -sS --config "$CURL_CFG" \
-  --max-time "$CURL_TIMEOUT" \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  --data-binary "@$PAYLOAD" \
-  -o "$BODY" -w '%{http_code}' \
-  "$API_URL/api/transcripts" 2>"$WORK/curl.err")
-CURL_RC=$?
-set -e
+  # ── 3. push ──────────────────────────────────────────────────────────────────
+  set +e
+  HTTP=$(curl -sS --config "$CURL_CFG" \
+    --max-time "$CURL_TIMEOUT" \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary "@$PAYLOAD" \
+    -o "$BODY" -w '%{http_code}' \
+    "$API_URL/api/transcripts" 2>"$WORK/curl.err")
+  CURL_RC=$?
+  set -e
 
-if [ "$CURL_RC" -ne 0 ]; then
-  log "push to $API_URL failed (curl rc=$CURL_RC): $(tr '\n' ' ' <"$WORK/curl.err" | cut -c1-300)"
-  exit 4
-fi
+  if [ "$CURL_RC" -ne 0 ]; then
+    log "push to $API_URL failed (curl rc=$CURL_RC): $(tr '\n' ' ' <"$WORK/curl.err" | cut -c1-300)"
+    exit 4
+  fi
 
-case "$HTTP" in
-  2[0-9][0-9]) : ;;
-  404)
-    log "server at $API_URL has no /api/transcripts route (HTTP 404) — it predates the transcript read model; deploy the server first"
-    exit 5
-    ;;
-  30[0-35-9]|3[1-9][0-9])
-    log "server at $API_URL REDIRECTED the push (HTTP $HTTP) and NOTHING was stored — this script does not follow redirects; point CLAWGATE_API_URL at the origin, not an ingress"
-    exit 5
-    ;;
-  *)
-    log "push not accepted (HTTP '${HTTP}'): $(tr '\n' ' ' <"$BODY" | cut -c1-300)"
-    exit 5
-    ;;
-esac
+  case "$HTTP" in
+    2[0-9][0-9]) : ;;
+    404)
+      log "server at $API_URL has no /api/transcripts route (HTTP 404) — it predates the transcript read model; deploy the server first"
+      exit 5
+      ;;
+    30[0-35-9]|3[1-9][0-9])
+      log "server at $API_URL REDIRECTED the push (HTTP $HTTP) and NOTHING was stored — this script does not follow redirects; point CLAWGATE_API_URL at the origin, not an ingress"
+      exit 5
+      ;;
+    413)
+      # 🔴 THE NUMBERS THAT CAUSED IT GO IN THE LOG, EVERY TIME. This refusal is
+      # the only place the real ceiling is ever observed, and the last time it
+      # fired the journal recorded the HTTP code and not the sizes — so the
+      # diagnosis needed a reproduction rather than a read.
+      if [ "$ATTEMPT" -ge 2 ] || [ "$TAIL_BYTES" -le "$TAIL_FALLBACK" ]; then
+        log "push REFUSED 413 at tail=${TAIL_BYTES}B aggregate=${MAX_PUSH_BYTES}B body=${BYTES}B after ${ATTEMPT} attempt(s): $(tr '\n' ' ' <"$BODY" | cut -c1-300)"
+        exit 5
+      fi
+      NEW_TAIL=$(( TAIL_BYTES / 2 ))
+      [ "$NEW_TAIL" -lt "$TAIL_FALLBACK" ] && NEW_TAIL="$TAIL_FALLBACK"
+      log "push REFUSED 413 at tail=${TAIL_BYTES}B aggregate=${MAX_PUSH_BYTES}B body=${BYTES}B — retrying once at tail=${NEW_TAIL}B: $(tr '\n' ' ' <"$BODY" | cut -c1-200)"
+      TAIL_BYTES="$NEW_TAIL"
+      MAX_PUSH_BYTES=$(( TAIL_BYTES * 3 ))
+      [ "$MAX_PUSH_BYTES" -lt 900000 ] && MAX_PUSH_BYTES=900000
+      ATTEMPT=2
+      continue
+      ;;
+    *)
+      log "push not accepted (HTTP '${HTTP}'): $(tr '\n' ' ' <"$BODY" | cut -c1-300)"
+      exit 5
+      ;;
+  esac
 
-log "pushed ${BYTES}B to $API_URL (HTTP $HTTP): $(tr -d '\n' <"$BODY" | cut -c1-200)"
+  log "pushed ${BYTES}B to $API_URL (HTTP $HTTP, tail=${TAIL_BYTES}B, attempt ${ATTEMPT}): $(tr -d '\n' <"$BODY" | cut -c1-200)"
+  break
+done

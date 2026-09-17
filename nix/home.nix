@@ -4332,6 +4332,14 @@ in
         # triggers, which is what makes the omission an asymmetry rather than a
         # policy.
         "${../scripts/lib/host_label.py}"
+        # The tail size is NEGOTIATED with the server, and this module is what
+        # reads the server's answer out of the digest pre-flight. It is a SOFT
+        # dependency by design — the script logs and falls back to
+        # TAIL_FALLBACK when it cannot run — but it decides HOW MUCH OF EACH
+        # SESSION this unit delivers, which is the same thing the builder beside
+        # it decides. A change here that never reached the running unit would be
+        # invisible in exactly the way the builder's omission was.
+        "${../scripts/lib/transcript_limits.py}"
         # The builder's own import, and the oldest omission in this list:
         # build_transcript_push.py has imported transcript_search since the
         # feeder shipped, and cannot run without it —
