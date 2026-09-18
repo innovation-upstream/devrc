@@ -28,10 +28,21 @@ type recorder struct {
 	reply  string
 }
 
+// ⚠ `/graphql` IS ANSWERED BUT NOT RECORDED, AND BOTH HALVES ARE DELIBERATE.
+// `Merge` re-reads mergeability before every dispatch, so this fake has to be
+// able to answer that read — but the assertions in this file are all of the form
+// "a WRITE was sent / was not sent", and recording the read would make
+// `rec.method != ""` true for a merge that refused. The merge gate's own reads
+// are counted in `mergegate_test.go`, which exists for exactly that.
 func (r *recorder) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if strings.HasSuffix(req.URL.Path, "/graphql") {
+			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":`+
+				`{"mergeable":"`+MergeableYes+`","mergeStateStatus":"CLEAN"}}}}`)
+			return
+		}
 		r.method, r.path = req.Method, req.URL.Path
 		raw, _ := io.ReadAll(req.Body)
 		r.body = map[string]any{}

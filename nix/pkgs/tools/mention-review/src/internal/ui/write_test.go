@@ -58,6 +58,155 @@ func TestPressingMergeRaisesAConfirmationAndEmitsNothing(t *testing.T) {
 	}
 }
 
+// 🔴 THE MERGE INTENT IS INDEPENDENT OF THE SNAPSHOT'S MERGEABILITY, AND THAT
+// INDEPENDENCE IS THE GUARD.
+//
+// A previous version of this program carried the snapshot's `mergeable` on the
+// intent, and `ghapi.Merge` re-read the live value ONLY when that field said
+// UNKNOWN. The hazard it was built for is the base branch moving AFTER the
+// snapshot was fetched — in which case the field says `MERGEABLE`, the gate
+// stays silent, and the merge goes out against a state nobody checked. The read
+// is unconditional now, so this layer must hand the gate NOTHING about
+// mergeability; anything it handed over would be the stale answer.
+//
+// ⚠ THE ASSERTION IS THAT THREE DIFFERENT SNAPSHOTS PRODUCE ONE IDENTICAL
+// INTENT — a whole-struct comparison, not a check that one named field is
+// absent. Re-adding a field and threading it makes the three differ and fails
+// here; a check phrased against the field's name would have to be rewritten to
+// notice the same thing under a different spelling.
+func TestTheMergeIntentIsTheSameWhateverTheSnapshotSaysAboutMergeability(t *testing.T) {
+	// ⚠ FOUR STATES, INCLUDING THE FIXTURE'S OWN AND THE EMPTY STRING. If they
+	// all produce one intent, no part of the snapshot's mergeability reached it.
+	states := []string{fxMergeable, ghapi.MergeableUnknown, ghapi.MergeableNo, ""}
+	seen := map[MergePR][]string{}
+	for _, state := range states {
+		a := ready(t)
+		snap := fixturePR()
+		snap.Mergeable = state
+		a, _ = a.Step(PRLoaded{Snap: snap})
+
+		next, intents := a.Step(keyPress("m"))
+		if len(intents) != 0 {
+			t.Fatalf("snapshot=%q: `m` emitted %v — a merge must not be one keypress away",
+				state, intents)
+		}
+		got, ok := next.pending.Intent.(MergePR)
+		if !ok {
+			t.Fatalf("snapshot=%q: the pending intent is %T, want MergePR", state, next.pending.Intent)
+		}
+		seen[got] = append(seen[got], state)
+	}
+	if len(seen) != 1 {
+		t.Errorf("the merge intent VARIES with the snapshot's mergeability — %d distinct "+
+			"intents across %d snapshots: %v. The value the operator was looking at is "+
+			"reaching the merge gate, which is the stale read the gate exists to replace.",
+			len(seen), len(states), seen)
+	}
+	// POSITIVE CONTROL ON THE COMPARISON: it CAN report more than one. A `seen`
+	// map that collapsed everything would satisfy the check above while seeing
+	// nothing — the silent zero, spelled as a silent one.
+	//
+	// ⚠ MEASURED AS A DELTA, not against the literal 2, so this control reads
+	// correctly whether or not the assertion above held. Phrased as `!= 2` it
+	// would fire a second, misleading failure on any tree where the intents
+	// already varied.
+	before := len(seen)
+	// ⚠ `squash` — `fxMergeMethod` is `rebase`, so this key cannot collide with
+	// any intent the loop produced.
+	seen[MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: "squash"}] = nil
+	if len(seen) != before+1 {
+		t.Errorf("the intent comparison cannot tell a new MergePR value from the ones "+
+			"already seen (%d keys before, %d after) — every assertion above is vacuous",
+			before, len(seen))
+	}
+}
+
+// 🔴 `m` ON A PULL REQUEST THAT IS ALREADY OVER RAISES NO CONFIRMATION AT ALL.
+//
+// `writeGate` answers loaded / is-a-PR / viewer-login-known, and NONE of those
+// is false for a merged pull request — so `m` was reachable on one, the client
+// spent its poll bound learning nothing (`mergeable` reads UNKNOWN forever once
+// a PR is not open), and the operator was told to press `m` again.
+//
+// ⚠ THIS LAYER READS THE SNAPSHOT, WHICH CAN BE STALE, SO IT IS NOT THE SAFETY
+// NET — `ghapi.Merge` re-reads live and refuses there too. This one exists so a
+// state already on screen does not cost a round trip to be refused. Both call
+// `ghapi.TerminalPRState`, so "already over" has ONE definition.
+//
+// ⚠ AND IT IS NOT IN `writeGate`: commenting on a merged pull request is
+// legitimate, and a refusal placed there would take the other four verbs with it
+// — which the last subtest asserts directly.
+func TestPressingMergeOnAPullRequestThatIsAlreadyOverRefusesAndEmitsNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		state  string
+		merged bool
+		want   string
+	}{
+		{"merged", ghapi.PRStateMerged, true, "MERGED"},
+		{"closed", ghapi.PRStateClosed, false, "CLOSED"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := ready(t)
+			snap := fixturePR()
+			snap.State, snap.Merged = tc.state, tc.merged
+			a, _ = a.Step(PRLoaded{Snap: snap})
+
+			next, intents := a.Step(keyPress("m"))
+
+			if len(intents) != 0 {
+				t.Fatalf("`m` on an already-%s pull request emitted %v", tc.want, intents)
+			}
+			if next.Mode() != ModeBrowse {
+				t.Errorf("`m` left the app in mode %s, want BROWSE — no confirmation "+
+					"should have been raised", next.Mode().Word())
+			}
+			if next.pending != nil {
+				t.Errorf("a merge confirmation is pending on an already-%s pull request: %+v",
+					tc.want, next.pending.Intent)
+			}
+			notice := next.Notice()
+			if !strings.HasPrefix(notice, "REFUSED") {
+				t.Errorf("notice = %q, want it to begin REFUSED", notice)
+			}
+			if !strings.Contains(notice, tc.want) {
+				t.Errorf("the refusal does not name the state %q: %q", tc.want, notice)
+			}
+			if !strings.Contains(notice, "NOTHING WAS SENT") {
+				t.Errorf("the refusal does not say that nothing was sent: %q", notice)
+			}
+		})
+	}
+	// 🔴 POSITIVE CONTROL ON THE PLACEMENT: an OPEN pull request still raises the
+	// confirmation, so the refusals above are a claim about the state rather than
+	// about `m` having stopped working.
+	t.Run("an open pull request still raises the confirmation", func(t *testing.T) {
+		next, intents := ready(t).Step(keyPress("m"))
+		if len(intents) != 0 {
+			t.Fatalf("`m` emitted %v — a merge must not be one keypress away", intents)
+		}
+		if next.Mode() != ModeConfirm || next.pending == nil {
+			t.Fatalf("`m` on an OPEN pull request raised no confirmation (mode %s)",
+				next.Mode().Word())
+		}
+	})
+	// 🔴 AND THE REFUSAL IS MERGE-ONLY. Put in `writeGate` it would refuse every
+	// write verb; commenting on a merged pull request is a normal thing to do.
+	t.Run("the other write verbs are untouched on a merged pull request", func(t *testing.T) {
+		a := ready(t)
+		snap := fixturePR()
+		snap.State, snap.Merged = ghapi.PRStateMerged, true
+		a, _ = a.Step(PRLoaded{Snap: snap})
+
+		next, _ := a.Step(keyPress("c"))
+		if next.Mode() != ModeCompose {
+			t.Errorf("`c` on a merged pull request left mode %s, want COMPOSE — the "+
+				"merge refusal has leaked into the shared write gate", next.Mode().Word())
+		}
+	})
+}
+
 func TestConfirmingAMergeEmitsExactlyThatIntent(t *testing.T) {
 	a := ready(t)
 	next, intents := pressAll(a, "m", "y")
@@ -488,6 +637,9 @@ func TestRunMapsEachWriteIntentToItsOwnCall(t *testing.T) {
 			`SubmitReview gardenersguild/trowelcast#1559 event=COMMENT body="a remark"`,
 		},
 		{
+			// ⚠ NOTHING ABOUT MERGEABILITY CROSSES THIS SEAM. `Run` forwards the
+			// method and the reference; the live merge state is read by
+			// `ghapi.Merge` itself, at the moment of the write.
 			MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod},
 			`Merge gardenersguild/trowelcast#1559 method=rebase`,
 		},
@@ -546,6 +698,48 @@ func TestASuccessfulWriteRereadsThePullRequest(t *testing.T) {
 			"describes the PR as it was BEFORE the write", intents, want)
 	}
 	if !strings.Contains(next.Notice(), "MergePR") {
+		t.Errorf("notice = %q, want it to name the verb", next.Notice())
+	}
+}
+
+// 🔴 THE RECOVERY ROUTE `proposeMerge`'S COMMENT NAMES, PINNED — BECAUSE THAT
+// COMMENT WAS WRONG.
+//
+// It said the only way out of the stale-CLOSED merge refusal was to relaunch.
+// `r` is inert on a healthy screen, which is the true half; but `stepWriteDone`
+// emits `FetchPR` after EVERY successful write, and the terminal refusal covers
+// `m` alone — `c` on a pull request that reads CLOSED is still legitimate. So
+// posting a comment re-reads the pull request and a snapshot that was stale
+// CLOSED is replaced.
+//
+// ⚠ THE SEQUENCE IS THE POINT, NOT THE SECOND HALF ALONE. The refusal is raised
+// FIRST, from the same app state, so this is a claim about a recovery from a
+// condition that actually holds rather than about `WriteDone` in the abstract —
+// which `TestASuccessfulWriteRereadsThePullRequest` already covers for `MergePR`
+// on a healthy screen.
+func TestACommentOnAPullRequestThatReadsClosedStillRereadsIt(t *testing.T) {
+	a := ready(t)
+	snap := fixturePR()
+	snap.State, snap.Merged = ghapi.PRStateClosed, false
+	a, _ = a.Step(PRLoaded{Snap: snap})
+
+	refused, mergeIntents := a.Step(keyPress("m"))
+	if len(mergeIntents) != 0 {
+		t.Fatalf("`m` on a CLOSED pull request emitted %v", mergeIntents)
+	}
+	if !strings.Contains(refused.Notice(), "CLOSED") {
+		t.Fatalf("`m` on a CLOSED pull request did not raise the refusal this test is "+
+			"about: %q", refused.Notice())
+	}
+
+	next, intents := a.Step(WriteDone{Verb: "PostComment"})
+	want := []Intent{FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	if !intentsEqual(intents, want) {
+		t.Fatalf("a successful comment on a pull request that reads CLOSED emitted %v, "+
+			"want %v — without the re-read, relaunching really would be the only way out "+
+			"of a stale CLOSED, and `proposeMerge`'s comment says otherwise", intents, want)
+	}
+	if !strings.Contains(next.Notice(), "PostComment") {
 		t.Errorf("notice = %q, want it to name the verb", next.Notice())
 	}
 }

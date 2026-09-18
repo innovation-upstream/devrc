@@ -44,7 +44,9 @@ func (c *Client) FetchFiles(ctx context.Context, owner, name string, num int) (f
 	}
 	var raw []restFile
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, false, &APIError{State: AuthOther, Detail: "unreadable files response: " + err.Error()}
+		// ⚠ Redacted and clipped — see `Client.detail` and its call site in
+		// `Mergeability`: `json.SyntaxError` quotes one byte of the body.
+		return nil, false, &APIError{State: AuthOther, Detail: c.detail("unreadable files response: " + err.Error())}
 	}
 	for _, f := range raw {
 		files = append(files, File{

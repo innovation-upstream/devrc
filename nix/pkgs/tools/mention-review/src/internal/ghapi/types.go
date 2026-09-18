@@ -1,6 +1,88 @@
 package ghapi
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// The `mergeable` enum, as WORDS, in one place.
+//
+// 🔴 `UNKNOWN` IS NOT A BLOCKER AND IS NOT A GO-AHEAD — IT IS "ASK AGAIN".
+// GitHub computes mergeability asynchronously and resets it to null/UNKNOWN
+// every time the base branch moves. Reading that as a conflict refuses merges
+// that are fine; reading it as MERGEABLE dispatches a merge into the recompute
+// window, which is the failure this vocabulary exists to make legible.
+//
+// ⚠ ALL THREE HAVE A PRODUCTION READER, WHICH IS WHY ALL THREE ARE HERE.
+// `MergeableNo` in particular was for a while named only by tests — the merge
+// gate answers a conflict through its `default:` arm, generically — and a
+// constant only the tests read is a vocabulary entry with nobody speaking it.
+// `ui.MergeWord` now switches on it, so the word the screen shows and the word
+// the gate refuses on are the same string rather than two spellings.
+const (
+	MergeableYes     = "MERGEABLE"
+	MergeableNo      = "CONFLICTING"
+	MergeableUnknown = "UNKNOWN"
+)
+
+// NormalizeMergeable maps what the server sent onto that vocabulary.
+//
+// 🔴 AN EMPTY STRING IS `UNKNOWN`. GraphQL answers null while the computation
+// is in flight and the decoder turns null into "", so "" and "UNKNOWN" are the
+// SAME condition arriving by two routes — a predicate that handled only the
+// spelled one would let the in-flight case straight through to a merge.
+func NormalizeMergeable(s string) string {
+	t := strings.ToUpper(strings.TrimSpace(s))
+	if t == "" {
+		return MergeableUnknown
+	}
+	return t
+}
+
+// The `PullRequestState` enum, as WORDS, in one place — the same treatment the
+// mergeability vocabulary above gets, and for the same reason.
+const (
+	PRStateOpen   = "OPEN"
+	PRStateClosed = "CLOSED"
+	PRStateMerged = "MERGED"
+)
+
+// TerminalPRState answers "is this pull request already finished, and in which
+// word" — "" when it is not, `MERGED` or `CLOSED` when it is.
+//
+// 🔴 ONE PREDICATE, TWO CALLERS, AND THEY ARE IN DIFFERENT PACKAGES. The merge
+// gate in `write.go` refuses on the LIVE read; `ui.App.proposeMerge` refuses on
+// the SNAPSHOT so the keypress does not cost a round trip to be told no. Two
+// open-coded copies of "is this PR over" would be two chances to disagree about
+// what MERGED means, which is the shape this repo keeps re-fixing.
+//
+// 🔴 IT REFUSES ONLY ON A POSITIVELY TERMINAL ANSWER, AND THE ASYMMETRY IS
+// DELIBERATE. An empty or unrecognised `state` returns "" — NOT terminal —
+// because the cost of the two mistakes is not symmetric: reading an absent field
+// as CLOSED would refuse every merge the moment GitHub renamed or omitted it,
+// while reading it as OPEN costs at most one wasted write, which GitHub refuses
+// and the renderer now shows in full rather than as two words. ⚠ The `405 Pull
+// Request is not mergeable` wording quoted elsewhere for that refusal is
+// REPORTED, not measured — no response body was captured — so this asymmetry
+// rests on the rendering rather than on that string. A missing field is a thing
+// we do not know, and this function says so by declining to answer.
+//
+// ⚠ `merged` IS READ BESIDE `state`, not instead of it. They are separate
+// fields on the same object and GitHub has always agreed with itself about them;
+// taking either as sufficient means a response where only one of the two arrived
+// is still answered correctly.
+func TerminalPRState(state string, merged bool) string {
+	if merged {
+		return PRStateMerged
+	}
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case PRStateMerged:
+		return PRStateMerged
+	case PRStateClosed:
+		return PRStateClosed
+	}
+	return ""
+}
 
 // Kind is what `issueOrPullRequest`'s `__typename` answered.
 //
