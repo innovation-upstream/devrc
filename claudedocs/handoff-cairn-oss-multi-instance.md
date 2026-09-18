@@ -563,12 +563,17 @@ still resolves to the same rank. Merge shas, so a reader can still find each one
 🔴 **PASS 3, 2026-09-18 — ranks 7, 13, 15, 16, 17, 19 and 22 joined them**, bodies moved VERBATIM to
 that same refs file § DEMOTED 2026-09-18 (pass 3), each stamped with its own sha256 and verified
 byte-identical there against a case-mutant control. **Those seven keep an in-place pointer AND their
-durable lesson** — read the lesson here, the narrative there. Recovered 8,231 B gross, which is what
-makes room for **phase E** (phase D was already written and inside the pre-pass measurement).
-🔴 **Headroom went 159 B → 7,918 B — read that AFTER figure, do not add the two numbers.** 472 B of
-in-place pointers were added back, so 159 + 8,231 overstates it. ⚠ **An open thread must NOT be
-demoted to `refs/`** — the 2026-09-18 pass moved three of rank 22's open residuals there and they
-were restored; check for that before demoting anything.
+durable lesson** — read the lesson here, the narrative there. It recovered enough gross to make room
+for **phase E** (phase D was already written, and inside the pre-pass measurement).
+🔴 **NO HEADROOM FIGURE IS QUOTED HERE, DELIBERATELY — DERIVE IT, because a number stated inside the
+file it measures is stale on the commit that states it.** Three successive rounds of this PR quoted
+one and each was falsified by its own commit (1,743 → 427 → 7,918, the last wrong the moment it was
+written). `scripts/lib/handoff_doc.py:2884-2888` states the same rule for the ledger it prints.
+```bash
+D=claudedocs/handoff-cairn-oss-multi-instance.md; echo $(( 98304 - $(wc -c < "$D") ))   # bytes free
+```
+⚠ **An open thread must NOT be demoted to `refs/`** — the 2026-09-18 pass moved three of rank 22's
+open residuals there and they were restored; check for that before demoting anything.
 
 **What did NOT close with them, kept HERE on purpose — do not read the ledger line as "all
 done":**
@@ -798,10 +803,12 @@ done":**
        recurrence.
     2. 🔴 **STILL OPEN BY DECISION, AND ITS FORCING EVENT HAS NOW PASSED UNDECIDED. The same gap
        exists in the OSS repo:** `ZacxDev/cairn`'s `tests/test_subsystem_store_api.py` has the
-       identical **18 open-coded / 5 sited** split and the same one-fixture guard. It was deferred
-       with *"decide it when slice 3 is planned, not by default"* — **slice 3 MERGED 2026-09-12
-       (`#1508` `44bd8b0e`), so nobody decided.** Closes when someone fixes it upstream or records
-       a decision not to.
+       identical **18 open-coded / 5 sited** split and the same one-fixture guard (`:19716`). It was
+       deferred with *"decide it when slice 3 is planned, not by default"* — **slice 3 MERGED
+       2026-09-12 (`#1508` `44bd8b0e`), so nobody decided.** ⚠ **Its CI is GitHub-hosted with no
+       single-node pin, so the TRIGGER is weaker there** — carried forward because dropping it
+       inflates the urgency, which is the exact harm this item's own retraction names. Closes when
+       someone fixes it upstream or records a decision not to.
     3. ⚠ A **second, distinct** timeout flake also reddened that PR and is NOT this one —
        `claudedocs/handoff-gate-flake-store-api.md` rank 7 is the live item. **Read that, not this.**
     forcing: gate — advisory, not blocking

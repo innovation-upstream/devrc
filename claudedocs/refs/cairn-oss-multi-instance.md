@@ -1693,6 +1693,16 @@ had 159 B of headroom against its 98,304 B allowance and could not absorb anothe
 Every block below is byte-identical to what the doc held at `5b32dd4f`; the doc keeps a
 one-line pointer plus each item's durable lesson.
 
+🔴 **RANK 22'S BLOCK BELOW CONTAINS THREE `⚠ STILL OPEN` BULLETS, AND THIS FILE'S OWN PREAMBLE SAYS
+AN OPEN THREAD MUST NEVER LIVE HERE. THAT WAS A MISTAKE IN THIS PASS.** It was corrected on
+2026-09-18 by **restoring all three to the indexed handoff doc**, which is their home; they are
+**not** removed from the block below, because these blocks are a byte-identical snapshot whose
+sha256 stamps ARE the preservation proof, and editing one would falsify it.
+**So: the copies below are DATED EVIDENCE as of `5b32dd4f`, not the live items** — they have already
+drifted (the copy below still defers residual 2 "until slice 3 is planned"; slice 3 merged
+2026-09-12, which the indexed copy records and this one cannot). **Read rank 22 in the handoff doc,
+never here.**
+
 ### rank 7 (demoted 2026-09-18, sha256 1ba9a5145c8e820a)
 
 7. ✅ **CLOSED 2026-09-10 — `ZacxDev/homelab-infra` #787, squash `936692ec7`.** The
