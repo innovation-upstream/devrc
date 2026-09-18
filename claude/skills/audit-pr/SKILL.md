@@ -43,9 +43,13 @@ as a review is invisible to the script even though a human can see it on the PR.
 in the same stderr line — post the block as an ISSUE comment.
 
 🔴 **Post the round's block with `--round N --emit-claims --audited <the tip that round's audit
-READ>`.** `--emit-claims` runs after the fixes land, so every sha it can see is a FIX tip; omit
-`--audited` and HEAD is *assumed* — it says so on stderr, because the next round then diffs a range
-that is empty by construction and a finding-free pass over it reads as a clean round.
+READ> --payload <the payload lines this round's fixes changed>`.** `--emit-claims` runs after the
+fixes land, so every sha it can see is a FIX tip; omit `--audited` and HEAD is *assumed* — it says
+so on stderr, because the next round then diffs a range that is empty by construction and a
+finding-free pass over it reads as a clean round. **`--payload` is what arms the attribution gate
+below**: omit it and the block carries `payload=<count>`, which the next round reads as UNMEASURED
+and cannot stop on — the field is the only machine-readable record of the number, and the ledger's
+`X` in a summary is prose nothing parses.
 
 🔴 **EMITTING IS NOT POSTING — the two halves fail independently, and a handoff that records the
 `--emit-claims` command as the next step reads as if the step were done.** The flag PRINTS a
@@ -356,6 +360,23 @@ prints nothing, silently, with rc 0. Keep stderr on the terminal — folding it 
 Stop.** File the remaining scaffolding findings as one follow-up task naming the file, closed when
 its PR merges or a named reader dismisses it in writing. A round that touches payload never trips
 this.
+
+🔴 **The gate is ENFORCED, and the number comes from YOU.** Post each round's block with
+`--payload N` — the payload lines THAT round's fixes changed, from your own classification of the
+ledger's file list — and the assembler REFUSES the next round (exit 5) when the two most recent
+blocks record `payload=0` for CONSECUTIVE rounds. **It fails OPEN:** a block with no readable
+`payload=` field is not a zero, so an unstated count never stops a ladder, and
+`--override-attribution-gate "<why>"` continues one — with the reason required, and recorded in the
+brief and above the block so it lands on the PR.
+
+⚠ **It was prose here until 2026-09-17, and prose lost.** MEASURED on `civitai/talos-infra` #1531:
+the condition was met **and stated in writing at the end of round 3** — round 2's ledger reads "zero
+payload lines changed" verbatim and rounds 3–11 each repeat it — and the ladder ran **nine more
+rounds**: 12 rounds, 33 findings, every one prose in a comment, the functional payload (two `image:`
+references) unmoved since round 0, and the last five commits rendering a byte-identical `kustomize
+build` (10,843 B, `cmp` rc 0). devrc #1712 reached **round 24** with `payload lines changed THIS
+round: 0`. A stop condition a runner can re-read and decline is a suggestion; this one now costs an
+explicit flag and leaves a record on the PR.
 
 ⚠ **This does not retract the two rules above, and is not a cap in disguise.** #498's rounds were
 not wasted in the sense those rules deny — every one found something real. The waste is on a

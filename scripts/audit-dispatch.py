@@ -88,8 +88,8 @@ broken question, not a clean round, and the range section, the ledger and
 auditor who diffs nothing finds nothing, and the `stop-rule` clause then
 converts that into "the ladder ENDS".
 
-🔴 THREE REFUSALS, AND THEY ARE NOT THE SAME KIND
---------------------------------------------------
+🔴 FOUR REFUSALS, AND THEY ARE NOT THE SAME KIND
+-------------------------------------------------
 1. **`--round N` for N ≥ 2 with no parseable claims block REFUSES to emit**
    (exit 2), naming what it looked for and where. An empty "what was claimed
    fixed" section silently turns a delta re-audit into a blind full audit — a
@@ -123,6 +123,26 @@ converts that into "the ladder ENDS".
    there would be a FALSE POSITIVE on a correct value. The downstream cost is
    bounded and correctly attributed: `rev-list` exits 128 and the ledger prints
    COULD NOT MEASURE naming the command, one round later.
+4. **The ATTRIBUTION GATE refuses a delta brief (exit 5)** when the two most
+   recent blocks BOTH record `payload=0` for CONSECUTIVE rounds. That is the
+   skill's own stop condition, and until this existed nothing evaluated it:
+   MEASURED on `civitai/talos-infra` #1531, whose round 2 ledger said "zero
+   payload lines changed" and whose rounds 3-11 each said the same — twelve
+   rounds, 33 findings, every one prose in a comment, the two `image:`
+   references unmoved since round 0 and the last five commits rendering
+   byte-identical `kustomize build` output. devrc #1712 reached ROUND 24 with
+   `payload lines changed THIS round: 0`. The gate was stated in writing and
+   overridden nine times on one PR, which is what a prose gate is.
+   🔴 IT FAILS OPEN, DELIBERATELY AND IN EVERY DIRECTION. A block with no
+   `payload=` field, an unreadable one, a gap in the round numbers, or a brief
+   already refused for another reason all leave it SILENT — because every
+   `audit-claims` block posted before this shipped carries no such field, and
+   `claude/skills/audit-pr/SKILL.md` is emphatic that this is not a round cap
+   and that a false stop on a CONVERGING ladder is the failure that matters.
+   An ABSENT field is not a zero: a zero you did not watch the command EARN is
+   not a zero. The override is `--override-attribution-gate <reason>`, the
+   reason is REQUIRED, and it is recorded in the brief and above the emitted
+   block so it lands on the PR rather than in one operator's shell history.
 
 🔴 EVERY NUMBER HERE IS ABOUT THE PR, NOT ABOUT YOUR CHECKOUT
 -------------------------------------------------------------
@@ -145,6 +165,13 @@ naming that cause when it does not hold.
   ordinary names (`':!*test*'` swallows `attestation/`, `latest/`,
   `inspector/`; it keeps `FooTest.java` and `login.cy.ts`). So the ledger prints
   the changed-file list and leaves X blank for a human.
+  🔴 BUT IT NOW CARRIES THE HUMAN'S ANSWER AS A NUMBER. The classification is
+  still theirs; `--payload N` writes it into the emitted block's header as
+  `payload=N`, and this script's own parser reads it back. That is the whole
+  difference between the attribution gate being a sentence in a skill and being
+  refusal 4 above — and it is also the mechanical half of the skill's "ONE
+  NUMBER, ONE NAME" rule, which devrc #1132 broke by carrying "payload lines"
+  and "executable payload" with different values on one prose line.
 * **It does not `git fetch`.** The brief it writes forbids the auditor from
   writing to the shared checkout; doing it here would be the same write. `<base>`
   is therefore only as current as the operator's last fetch, and the brief SAYS
@@ -695,7 +722,68 @@ _HEADER_ROUND = re.compile(r"\bround=(\d+)\b")
 _HEADER_AUDITED = re.compile(r"\baudited=(\S+)")
 _CLAIM_ITEM = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
 
-ClaimsBlock = namedtuple("ClaimsBlock", "round_no audited_from audited_to items")
+# 🔴 THE PER-ROUND PAYLOAD COUNT, AS A FIELD RATHER THAN AS PROSE. Until this
+# existed the number lived only in `payload_summary_line`'s literal `X`, which a
+# human types into a comment — so the ladder's own stop condition was
+# unevaluable by anything, and `attribution_stop` below could not have been
+# written at all.
+#
+# TWO regexes on purpose, and the second one is the point: `payload=abc` and
+# `payload=-1` must come back as UNREADABLE, never as absent and never as a
+# zero. "Absent" and "unreadable" both fail the gate open, but they are
+# different facts and only one of them is worth a word to the operator.
+# `(?!\S)` is what stops `payload=0abc` being read as `0` — the same
+# silent-truncation shape `--audited` was measured suffering in round 5.
+_HEADER_PAYLOAD = re.compile(r"\bpayload=(\d+)(?!\S)")
+_HEADER_PAYLOAD_PRESENT = re.compile(r"\bpayload=(\S*)")
+
+# 🔴 THE ONE SPELLING OF "no payload count was stated for this round", written
+# into the emitted header when `--payload` is omitted and recognised here so it
+# is not reported as a typo. It must be something `_HEADER_PAYLOAD` CANNOT read
+# as a number — that is what makes the next round's gate fail open on it rather
+# than consume a 0 nobody measured — and ONE constant rather than two, for
+# `TIP_PLACEHOLDER`'s reason: open-coded at the reader and the writer, it is one
+# reword away from two spellings only one of which any guard recognises.
+PAYLOAD_PLACEHOLDER = "<count>"
+
+# `payload` defaults to None so every existing four-argument construction — in
+# this module and in the test suites — keeps meaning "no payload field", which
+# is exactly what a legacy block carries.
+ClaimsBlock = namedtuple(
+    "ClaimsBlock", "round_no audited_from audited_to items payload",
+    defaults=(None,),
+)
+
+
+def payload_from_header(header):
+    """-> (count, unreadable_raw) for one `audit-claims` header.
+
+    Pure, and the ONLY reader of the field: `(None, None)` for a header with no
+    `payload=` at all, `(None, '<raw>')` for one this script cannot read as a
+    non-negative integer, `(n, None)` otherwise.
+
+    🔴 IT NEVER RETURNS 0 FOR A FIELD IT COULD NOT READ. That is the whole
+    contract the gate rests on — `claude/RULES.md`'s "a zero you did not watch
+    the command EARN is not a zero", and `claude/skills/audit-pr/SKILL.md`'s
+    "Ambiguous is not zero: the gate does not fire and the ladder continues".
+    """
+    ok = _HEADER_PAYLOAD.search(header or "")
+    if ok:
+        return int(ok.group(1)), None
+    present = _HEADER_PAYLOAD_PRESENT.search(header or "")
+    if present:
+        # 🔴 THE PLACEHOLDER IS NOT A TYPO, so it is not reported as one. It is
+        # what THIS SCRIPT writes when no `--payload` was stated, and
+        # `--emit-claims` already says so loudly on stderr at the moment it
+        # writes it. Reporting it again at every downstream read would make the
+        # ordinary no-count emit warn twice and put a "malformed" note on a
+        # block this script produced itself — the permanently-red gate
+        # `claude/RULES.md` names. Both spellings still fail the gate OPEN;
+        # what differs is only whether a human is told.
+        if present.group(1) == PAYLOAD_PLACEHOLDER:
+            return None, None
+        return None, present.group(1)
+    return None, None
 
 
 def _items_from_body(body_lines):
@@ -769,6 +857,20 @@ def parse_claims_blocks(texts):
                 i = close_at + 1
                 continue
 
+            payload, payload_raw = payload_from_header(header)
+            if payload_raw is not None:
+                # A REPORT, never a rejection: the block is still perfectly
+                # usable for claims and for its anchor, and refusing it would
+                # make a typo in a field this script only READS cost the
+                # operator their whole delta round.
+                malformed.append(
+                    f"an `audit-claims round={r.group(1)}` block whose "
+                    f"`payload=` field is not a non-negative integer "
+                    f"(`payload={payload_raw}`). The attribution gate reads "
+                    "that field and an unreadable one is NOT a zero, so the "
+                    "gate cannot evaluate this round and the ladder continues."
+                )
+
             spec = a.group(1)
             frm, _, to = spec.partition("..")
             if not to:
@@ -812,7 +914,7 @@ def parse_claims_blocks(texts):
                     "backticks."
                 )
 
-            blocks.append(ClaimsBlock(int(r.group(1)), frm, to, items))
+            blocks.append(ClaimsBlock(int(r.group(1)), frm, to, items, payload))
             i = close_at + 1
     return blocks, malformed
 
@@ -946,6 +1048,102 @@ def round_one_anchor(blocks):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE ATTRIBUTION GATE — the skill's stop condition, as a BRANCH.
+# --------------------------------------------------------------------------- #
+# `claude/skills/audit-pr/SKILL.md`: "Two consecutive rounds whose fixes changed
+# zero payload lines ⇒ the ladder has left the PR. Stop." It was prose with
+# nothing evaluating it, and prose loses: on `civitai/talos-infra` #1531 the
+# condition was met AND STATED IN WRITING at the end of round 3 — round 2's
+# ledger reads "zero payload lines changed" verbatim and rounds 3-11 each repeat
+# it — and the ladder ran nine more rounds, 33 findings, every one of them prose
+# in a comment, with the functional payload (two `image:` references) unmoved
+# since round 0 and the last five commits rendering a byte-identical
+# `kustomize build` (10,843 B, `cmp` rc 0). devrc #1712 reached ROUND 24 with
+# `payload lines changed THIS round: 0`.
+#
+# 🔴 EVERY UNKNOWN FAILS OPEN, AND THAT IS NOT TIMIDITY — IT IS THE MEASURED
+# FAILURE DIRECTION. The skill rejects a round cap outright (#505's round 4
+# caught a ReDoS that round 3's own fix introduced), so a FALSE stop on a
+# converging ladder costs more than a late one. Four states therefore return
+# `fires=False` with the reason named rather than guessed at:
+#   * fewer than two blocks this script can read;
+#   * the two newest blocks are not CONSECUTIVE rounds — a missing intermediate
+#     block is a documented, ordinary state (`gh pr view --json comments`
+#     returns ISSUE comments only), and two zero rounds with an unknown round
+#     between them are not two consecutive zero rounds;
+#   * either block carries no `payload=` field — the state of EVERY block posted
+#     before this shipped, so firing here would have made the gate a
+#     permanently-red one on its first day;
+#   * either field is unreadable — `payload_from_header` returns None, never 0.
+#
+# 🔴 AND IT IS SCOPED TO A DELTA ROUND. Round 0 reports and does not move the
+# ladder; round 1 is a first, full audit. Stopping either on the strength of
+# blocks from a previous ladder is a refusal the operator cannot act on.
+ATTRIBUTION_STOP_ROUNDS = 2
+
+AttributionStop = namedtuple("AttributionStop", "fires newer older why")
+
+
+def attribution_stop(blocks, round_no):
+    """-> AttributionStop over the blocks a delta round would be framed on.
+
+    Pure and independently testable, like `parse_claims_blocks`: a refusal is
+    only trustworthy if it can be driven with no network and no PR.
+
+    `why` is populated on BOTH paths — it says why the gate fired, or which of
+    the fail-open states this corpus is in. A refusal that cannot say what it
+    read is indistinguishable from one wired to nothing.
+    """
+    if round_no < ATTRIBUTION_STOP_ROUNDS:
+        return AttributionStop(
+            False, None, None,
+            f"round {round_no} is not a delta round, so no ladder of this PR's "
+            "own rounds is being continued",
+        )
+    # Ties resolve to the LAST block seen, matching `newest_block` — one round
+    # posting two blocks is a human re-posting a correction.
+    by_round = {}
+    for b in blocks:
+        by_round[b.round_no] = b
+    if len(by_round) < ATTRIBUTION_STOP_ROUNDS:
+        return AttributionStop(
+            False, None, None,
+            f"only {len(by_round)} readable claims block(s) — the gate needs "
+            f"{ATTRIBUTION_STOP_ROUNDS} CONSECUTIVE rounds",
+        )
+    newer = by_round[max(by_round)]
+    older = by_round.get(newer.round_no - 1)
+    if older is None:
+        return AttributionStop(
+            False, newer, None,
+            f"the newest block is round {newer.round_no} and no block for "
+            f"round {newer.round_no - 1} was read, so there is no pair of "
+            "CONSECUTIVE rounds to compare",
+        )
+    if newer.payload is None or older.payload is None:
+        missing = [
+            f"round {b.round_no}" for b in (older, newer) if b.payload is None
+        ]
+        return AttributionStop(
+            False, newer, older,
+            "no readable `payload=` field on " + " and ".join(missing)
+            + " — an ABSENT field is not a zero",
+        )
+    if newer.payload == 0 and older.payload == 0:
+        return AttributionStop(
+            True, newer, older,
+            f"rounds {older.round_no} and {newer.round_no} both record "
+            "`payload=0`",
+        )
+    return AttributionStop(
+        False, newer, older,
+        f"round {older.round_no} records `payload={older.payload}` and round "
+        f"{newer.round_no} records `payload={newer.payload}` — a round that "
+        "touches payload never trips this",
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Process boundary — ONE runner, injected, so every test is hermetic.
 # --------------------------------------------------------------------------- #
 
@@ -978,12 +1176,17 @@ Facts = namedtuple(
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
-    "base_assumed_reason repo_unknown_reason round_zero",
+    "base_assumed_reason repo_unknown_reason round_zero payload gate_override",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
     # not readable, which `render_checklist` reports rather than hiding.
-    defaults=(None,),
+    #
+    # `payload` and `gate_override` are appended for the same reason and carry
+    # the same meaning for None: no `--payload` was stated (so the emitted block
+    # carries a PLACEHOLDER and the next round's gate cannot evaluate this
+    # round), and no `--override-attribution-gate` was passed.
+    defaults=(None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -4011,6 +4214,47 @@ def render_output_contract(facts):
     ])
 
 
+GATE_OVERRIDE_HEAD = "## 🔴 THE ATTRIBUTION GATE WAS OVERRIDDEN FOR THIS ROUND"
+
+
+def render_gate_override(facts):
+    """The override's record IN THE BRIEF — "" when there is nothing to record.
+
+    🔴 AN OVERRIDE THAT LEAVES NO TRACE IS NOT AN OVERRIDE, IT IS A BYPASS.
+    `claude/skills/audit-pr/SKILL.md` ends a ladder on this gate; a run that
+    continues past it is asserting the gate is wrong about THIS ladder, and that
+    assertion belongs where the next reader will meet it — the brief the next
+    auditor reads, and (see `emit_claims_skeleton`) above the block that gets
+    pasted onto the PR. Two places, because they have different readers and a
+    record only the operator sees is the state #1531 was already in.
+
+    It is addressed to the AUDITOR as well as to the record: an auditor who
+    knows the ladder is running past its own stop condition can say so, and the
+    skill's own instruction is to spend a long ladder's round asking what would
+    have to be true for the work to be unnecessary.
+    """
+    if not facts.gate_override:
+        return ""
+    return "\n".join([
+        GATE_OVERRIDE_HEAD,
+        "",
+        "The two most recent `audit-claims` blocks both record `payload=0`, "
+        "which is this skill's stop condition: **two consecutive rounds whose "
+        "fixes changed no payload lines means the ladder has left the PR.** "
+        "This brief was assembled anyway, under an explicit override.",
+        "",
+        "    stated reason: " + facts.gate_override,
+        "",
+        "🔴 **That reason is a CLAIM, and you are one of its readers.** If this "
+        "round's findings are again about scaffolding the ladder itself wrote, "
+        "say so in your report and say that the stop condition was already met "
+        "— the measured failure here is 12 rounds and 33 findings on a PR whose "
+        "shipped payload had not moved since round 0, every stop stated in "
+        "prose and overridden. A round that reports only that is a stopping "
+        "round.",
+    ])
+
+
 def render_brief(facts):
     if facts.round_no == 0:
         kind = "ROUND 0 — REQUIREMENTS & DELETION pass (NOT a correctness audit)"
@@ -4038,6 +4282,7 @@ def render_brief(facts):
         render_invariants(),
         render_checklist(facts),
         render_ledger(facts),
+        render_gate_override(facts),
         # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
         # It shipped here in this PR's first draft and round-0 finding F2 caught
         # the half-delivery; moving it to the `--emit-claims` path fixed the
@@ -4087,6 +4332,17 @@ def emit_claims_skeleton(facts, head_sha):
     empty by construction. The fallback is kept (a bare sha is still readable,
     and refusing here would break the remedy the delta refusal advertises) and
     `main` warns LOUDLY on exactly that spelling instead.
+
+    🔴 A FIFTH FIELD, AND ITS PLACEMENT IN THE HEADER IS LOAD-BEARING.
+    `payload=` is written BEFORE `audited=`, never after, because
+    `_EMITTED_AUDITED` captures everything after `audited=` TO END OF LINE on
+    purpose — that to-EOL capture is what detects `--audited "abc 123"` being
+    silently truncated to `abc` by the `\\S+` parser. Put `payload=` after it and
+    the round trip compares `A..B payload=0` against a reconstruction of `A..B`
+    and REFUSES every emit, correctly by its own rule and uselessly. Measured by
+    reading both regexes rather than by running one: the parser is
+    order-independent (`_HEADER_PAYLOAD` searches the whole header), so only the
+    EMITTER has to care, and this is the one place that decides.
     """
     if facts.emit_from:
         audited = f"{facts.emit_from}..{head_sha}"
@@ -4097,7 +4353,13 @@ def emit_claims_skeleton(facts, head_sha):
         # the ledger stays measurable; the assumption is what `main` warns
         # about, because it is an assumption and not a measurement.
         audited = head_sha
-    return "\n".join([
+    # 🔴 A PLACEHOLDER, NOT A ZERO, when `--payload` was not stated. The next
+    # round's gate then reads the field as UNREADABLE and stays silent, which is
+    # the whole fail-open contract: the alternative — defaulting to 0 — would
+    # stop a ladder on a number nobody measured, which is the false refusal the
+    # skill's "not a cap" clause exists to prevent.
+    payload = PAYLOAD_PLACEHOLDER if facts.payload is None else facts.payload
+    lines = [
         # 🔴 THE LEGEND, added in round 5. The code and the docstrings above
         # were adjudicated correct and consistent; the failure is at the HUMAN
         # end, because a person reasons from the emitted block and the block
@@ -4105,14 +4367,31 @@ def emit_claims_skeleton(facts, head_sha):
         # wrong way round in two consecutive briefs and the agent had to
         # override both. It sits OUTSIDE the fence, so the parser drops it.
         "  legend: `<from>` = the tip THIS round's audit READ · `<to>` = the "
-        "head THIS round's FIXES produced. Different shas — `<from>` is older.",
+        "head THIS round's FIXES produced. Different shas — `<from>` is older. "
+        "`payload=` = the payload lines THIS round's fixes changed, from YOUR "
+        "classification of the ledger's file list.",
+    ]
+    # 🔴 THE OVERRIDE'S RECORD, and it goes HERE because this is the text that
+    # gets pasted onto the PR. An override recorded only on the operator's
+    # terminal is an override nobody can audit — and #1531's whole failure was a
+    # stop condition that lived in prose nobody re-read. OUTSIDE the fence, like
+    # the legend: a non-numbered line INSIDE the body is folded into the claim
+    # above it by `_items_from_body`, which would corrupt claim 2.
+    if facts.gate_override:
+        lines.append(
+            "  🔴 attribution gate OVERRIDDEN for this round — stated reason: "
+            f"{facts.gate_override}"
+        )
+    lines += [
         "",
-        f"```audit-claims round={facts.round_no} audited={audited}",
+        f"```audit-claims round={facts.round_no} payload={payload} "
+        f"audited={audited}",
         "1. <one line per thing this round's fixes CLAIM to have addressed — "
         "WHAT was claimed, never WHY it is correct>",
         "2. <one line, same rule>",
         "```",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 # 🔴 THE ROUND-TRIP GUARD — round 5. `--audited` accepted ANY string and the
@@ -4180,6 +4459,62 @@ EMIT_REFUSAL_HEADER = "🔴 REFUSING TO EMIT an `audit-claims` block"
 _EMITTED_AUDITED = re.compile(
     r"^`{3,}audit-claims[^\n]*?\baudited=([^\n]*)$", re.M
 )
+
+# The payload field as PRINTED. Not `[^\n]*` like the one above: `payload=` is
+# emitted BEFORE `audited=` (see `emit_claims_skeleton`), so a to-EOL capture
+# here would swallow the audited range and compare two different quantities.
+_EMITTED_PAYLOAD = re.compile(r"^`{3,}audit-claims[^\n]*?\bpayload=(\S*)", re.M)
+
+
+def emitted_payload_reads_back_as_written(skeleton):
+    """-> None when the PAYLOAD field survives this script's own parser.
+
+    🔴 THE SAME ROUND TRIP AS `emitted_block_reads_back_as_written`, ONE FIELD
+    OVER, and it exists because the gate is only as good as this number. A
+    header that prints `payload=0` and parses back as None is not a
+    conservative failure here: it is the ladder's stop condition silently
+    unevaluable, which is the state #1531 ran twelve rounds in.
+
+    Separate from its sibling on purpose. That function compares the audited
+    header with ITSELF and never with `emit_from`, and round 5 measured what
+    coupling two claims into one check costs — mutants cascading into five
+    unrelated tests and a wrong-field bug answered with a misleading "it does
+    not parse". This asks exactly one question: does the number printed come
+    back as the same number?
+    """
+    m = _EMITTED_PAYLOAD.search(skeleton)
+    if not m:
+        return "the block this run would emit carries no `payload=` field at all"
+    raw = m.group(1)
+    blocks, malformed = parse_claims_blocks([skeleton])
+    if len(blocks) != 1:
+        why = "; ".join(malformed) or "no reason reported"
+        return (
+            "the block this run would emit does not parse as exactly one "
+            f"`audit-claims` block ({len(blocks)} found: {why})"
+        )
+    back = blocks[0].payload
+    if raw == PAYLOAD_PLACEHOLDER:
+        # The deliberate no-count spelling. It MUST come back unreadable — a
+        # placeholder that parsed as a number would hand the next round's gate
+        # a measurement nobody made.
+        if back is not None:
+            return (
+                f"the header carries the placeholder `payload={raw}`, but this "
+                f"script's OWN parser reads it back as the number {back!r}. A "
+                "placeholder that parses is worse than one that does not: the "
+                "next round's attribution gate would consume it as a measured "
+                "count"
+            )
+        return None
+    if str(back) != raw:
+        return (
+            f"the header carries `payload={raw}`, but this script's OWN parser "
+            f"reads it back as {back!r}. The attribution gate consumes that "
+            "field, and a field that does not round-trip either stops a "
+            "converging ladder or fails to stop one that has left the PR"
+        )
+    return None
 
 
 def emitted_block_reads_back_as_written(skeleton):
@@ -4271,6 +4606,44 @@ def missing_clauses(brief):
 # --------------------------------------------------------------------------- #
 
 REFUSAL_HEADER = "🔴 REFUSING TO EMIT a delta re-audit brief"
+
+# 🔴 ITS OWN EXIT CODE, and it is 5 — not 2, which means "your claims ledger is
+# unreadable, fix it and re-run", and not 4, which means "this emit would
+# corrupt the next round's anchor". This one means THE LADDER IS DONE, which is
+# a different action: post the remaining scaffolding findings as one follow-up
+# task and stop. Collapsing it into 2 would tell a caller to go fix a ledger
+# that is perfectly correct.
+ATTRIBUTION_STOP_RC = 5
+ATTRIBUTION_REFUSAL_HEADER = (
+    "🔴 REFUSING TO ASSEMBLE another round — THE ATTRIBUTION GATE HAS FIRED"
+)
+OVERRIDE_FLAG = "--override-attribution-gate"
+OVERRIDE_REFUSAL_HEADER = (
+    "🔴 REFUSING TO OVERRIDE the attribution gate"
+)
+
+# 🔴 A SEAM, NOT A CONVENIENCE — the same construction as the
+# `PROSE_DETERMINATION_*` constants above and for the same measured reason. This
+# paragraph is the MECHANISM of the skill's stop condition: what the operator
+# must write for the gate to see anything, what the gate does, and which way it
+# fails. If it lived only in `claude/skills/audit-pr/SKILL.md` the enforcement
+# could be deleted here and the skill would go on promising it; if it lived only
+# here the operator would never be told to pass `--payload` and the field would
+# never be written, which is a gate nobody evaluates — the exact state #1531 ran
+# twelve rounds in. So it is shipped in the refusal and pinned verbatim in the
+# skill by `test_the_payload_field_the_gate_enforces_is_documented_in_the_skill`,
+# and moving it needs both files in one commit.
+ATTRIBUTION_GATE_ENFORCEMENT = (
+    "🔴 **The gate is ENFORCED, and the number comes from YOU.** Post each "
+    "round's block with `--payload N` — the payload lines THAT round's fixes "
+    "changed, from your own classification of the ledger's file list — and the "
+    "assembler REFUSES the next round (exit 5) when the two most recent blocks "
+    "record `payload=0` for CONSECUTIVE rounds. **It fails OPEN:** a block with "
+    "no readable `payload=` field is not a zero, so an unstated count never "
+    "stops a ladder, and `--override-attribution-gate \"<why>\"` continues one "
+    "— with the reason required, and recorded in the brief and above the block "
+    "so it lands on the PR."
+)
 
 
 def _read_checklist(repo_dir):
@@ -4385,6 +4758,31 @@ def build_parser():
     ap.add_argument("--claims-file",
                     help="read claims-block text from this file instead of the "
                          "PR's comments (offline/testing seam)")
+    # 🔴 THE NUMBER THE LADDER'S STOP CONDITION CONSUMES. It is a HUMAN's answer
+    # — this script does not classify payload vs scaffolding and the skill says
+    # it cannot be done by pathspec — so the flag carries it and the emitted
+    # header records it. Omitted, the block carries `payload=<count>` and the
+    # next round's gate stays silent: a count nobody stated is not a zero.
+    ap.add_argument("--payload", metavar="N", type=int,
+                    help="payload lines THIS round's fixes changed, from your "
+                         "classification of the ledger's file list. Written "
+                         "into the `--emit-claims` block as `payload=N`, where "
+                         "the NEXT round's attribution gate reads it. Omit it "
+                         "and the field is a PLACEHOLDER the gate cannot "
+                         "evaluate — said so on stderr.")
+    # 🔴 THE ESCAPE HATCH, AND ITS REASON IS NOT OPTIONAL. A false stop on a
+    # converging ladder is the failure the skill's "this is NOT a round cap"
+    # clause exists to prevent (#505's round 4 caught a ReDoS that round 3's own
+    # fix introduced), so the gate must be overridable — and an override with no
+    # stated reason is exactly the unfalsifiable stop-and-go #1531 ran twelve
+    # rounds of, so it is refused.
+    ap.add_argument("--override-attribution-gate", metavar="REASON",
+                    dest="gate_override",
+                    help="assemble the brief even though the two most recent "
+                         "blocks both record `payload=0`. REASON is required "
+                         "and is recorded in the brief AND above the emitted "
+                         "block, so it lands on the PR rather than in one "
+                         "shell's history.")
     return ap
 
 
@@ -4521,6 +4919,50 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         ]), file=err_stream)
         return 4
 
+    # 🔴 A NEGATIVE PAYLOAD COUNT IS NOT A COUNT. `argparse` accepts `-3`
+    # happily, `_HEADER_PAYLOAD` then cannot read the emitted `payload=-3`, and
+    # the round trip below would refuse it — one station later and with a
+    # message about a parser rather than about the number the operator typed.
+    # Refused here, in the same family and with the same rc as every other
+    # `--emit-claims` input refusal, because there is no reading of it the
+    # operator meant.
+    if args.payload is not None and args.payload < 0:
+        print("\n".join([
+            f"{EMIT_REFUSAL_HEADER}: `--payload` was given a NEGATIVE count "
+            f"({args.payload}).",
+            "",
+            "  It is a count of lines this round's fixes changed, so it is 0 or "
+            "more. 0 is a meaningful and consequential value — two consecutive "
+            "rounds of it end the ladder — which is why it may not be spelled "
+            "by accident.",
+        ]), file=err_stream)
+        return 4
+
+    # 🔴 AN OVERRIDE WITH NO REASON IS THE THING THE GATE EXISTS TO STOP.
+    # `--override-attribution-gate ""` is the empty-`--audited` shape one flag
+    # over, and worse: the flag would still SUPPRESS the stop (it is not falsy
+    # as a presence test if tested with `is not None`, and is falsy if tested
+    # with `if`), so whichever way the branch below were spelled, one of the two
+    # readings silently continues a ladder past its stop condition with the
+    # record blank. #1531's twelve rounds each stated a reason in prose that
+    # nobody could check; a blank one cannot even be read.
+    if args.gate_override is not None and not args.gate_override.strip():
+        print("\n".join([
+            f"{OVERRIDE_REFUSAL_HEADER}: "
+            f"`{OVERRIDE_FLAG}` was given an EMPTY reason "
+            f"({args.gate_override!r}).",
+            "",
+            "  The reason is the whole point of the flag: it is recorded in the "
+            "brief and above the emitted block, so the next reader can see "
+            "that this ladder ran past its own stop condition and why. An "
+            "empty one records nothing while still suppressing the stop.",
+            "",
+            f"  Pass what you would have written on the PR: `{OVERRIDE_FLAG} "
+            '"round 3 fixed a 🔴 in the payload; the count is 0 because the fix '
+            'landed in the previous round\'s commit"`.',
+        ]), file=err_stream)
+        return ATTRIBUTION_STOP_RC
+
     # A flag that silently does nothing is the shape this module refuses
     # everywhere else: `--audited` is written by `--emit-claims` and by nothing
     # else, so passing it to a plain assembly run is a no-op the operator would
@@ -4557,6 +4999,17 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "`--round 1 --emit-claims --audited <the tip round 1 read>`.",
         ]), file=err_stream)
         return 4
+
+    # The same no-op shape, one flag over: `--payload` is written by
+    # `--emit-claims` and by nothing else.
+    if args.payload is not None and not args.emit_claims:
+        print(
+            f"⚠ --payload {args.payload} is only ever written into the block "
+            "--emit-claims prints, which this run does not pass. The flag "
+            "changed NOTHING — no round's payload count was recorded, and the "
+            "attribution gate reads that field.",
+            file=err_stream,
+        )
 
     if args.audited and not args.emit_claims:
         print(
@@ -4808,6 +5261,76 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             return 2
         brief_refused = 2
 
+    # ------------------------------------------------------------------ #
+    # 🔴 REFUSAL 4 — THE ATTRIBUTION GATE. The ladder has left the PR.
+    # ------------------------------------------------------------------ #
+    # `attribution_stop` carries the whole decision and every fail-open state;
+    # this branch only reports it. Ordered AFTER refusals 1 and 1b and gated on
+    # `brief_refused is None` for a reason that is itself a fail-open choice: a
+    # run whose ledger this script already called unreadable has no business
+    # also telling the operator their ladder is over. Fix the ledger, re-run,
+    # and the gate then evaluates what is actually there — two refusals for two
+    # different causes, in the order that makes the second one trustworthy.
+    stop = attribution_stop(blocks, args.round_no)
+    if stop.fires and brief_refused is None and not args.gate_override:
+        print("\n".join([
+            f"{ATTRIBUTION_REFUSAL_HEADER} for round {args.round_no} of PR "
+            f"#{args.pr}.",
+            "",
+            f"  read: {stop.why}",
+            f"        round {stop.older.round_no} — "
+            f"{len(stop.older.items)} claim(s), `payload=0`",
+            f"        round {stop.newer.round_no} — "
+            f"{len(stop.newer.items)} claim(s), `payload=0`",
+            "",
+            "  `claude/skills/audit-pr/SKILL.md`: two consecutive rounds whose "
+            "fixes changed zero payload lines means the ladder is auditing "
+            "ITSELF — a fix round writes new guards and the next delta round "
+            "diffs them, so the ladder manufactures its own next round's "
+            "findings and a stop rule keyed to FINDINGS can never fire.",
+            "",
+            "  🔴 ENDING IT HERE IS THE CORRECT OUTCOME, not a failure of this "
+            "run. File the remaining scaffolding findings as ONE follow-up task "
+            "naming the file, closed when its PR merges or when a named reader "
+            "dismisses it in writing.",
+            "",
+            "  MEASURED, which is why this is a refusal and not a sentence: on "
+            "`civitai/talos-infra` #1531 this condition was met AND STATED IN "
+            "WRITING at the end of round 3, and the ladder ran nine more rounds "
+            "— 33 findings, every one prose in a comment, the shipped payload "
+            "unmoved since round 0, and the last five commits rendering a "
+            "byte-identical build. devrc #1712 reached round 24 the same way.",
+            "",
+            "  " + ATTRIBUTION_GATE_ENFORCEMENT,
+            "",
+            "  If this ladder really is still converging, that flag is the "
+            "answer and using it is not a failure either — two rounds is the "
+            "floor and no rule may move it, and this gate counts the FIXES, "
+            "never the rounds.",
+        ]), file=err_stream)
+        if not args.emit_claims:
+            return ATTRIBUTION_STOP_RC
+        # Same scope as every refusal here: the BRIEF is withheld, and the emit
+        # half still runs. The operator may legitimately need to post the block
+        # for the round that just ran — refusing that too would make the record
+        # of the stopping round impossible to write.
+        brief_refused = ATTRIBUTION_STOP_RC
+
+    # 🔴 AN OVERRIDE THAT OVERRODE NOTHING IS A FLAG THAT SILENTLY DID NOTHING,
+    # and worse than the `--audited` version of that shape: it leaves an
+    # override RECORD on the PR for a gate that never fired, which reads as
+    # "this ladder ran past its stop condition" when it did not. Warned rather
+    # than refused — a runner who passes it pre-emptively on a converging
+    # ladder has done nothing wrong — and the record is suppressed below, where
+    # `gate_override` is only carried into `Facts` when the gate actually fired.
+    if args.gate_override and not stop.fires:
+        print(
+            f"⚠ {OVERRIDE_FLAG} was passed and the attribution gate did NOT "
+            f"fire: {stop.why}. Nothing was overridden and no override is "
+            "recorded in the brief or in the emitted block.",
+            file=err_stream,
+        )
+
     # 🔴 `--audited` OVERRIDES THE WRITER'S ANCHOR AND NEVER THE READER'S. It
     # states the tip THIS round's audit read — the same quantity `emit_anchor`
     # recovers from the previous block, supplied instead of derived, and for
@@ -4929,6 +5452,13 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # never prints, and reading the skill twice per run to no effect is
         # the kind of dead work round 0 itself exists to delete.
         round_zero=round_zero_reader(repo_dir) if args.round_no == 0 else None,
+        payload=args.payload,
+        # 🔴 CARRIED ONLY WHEN THE GATE ACTUALLY FIRED. `args.gate_override` is
+        # what the operator TYPED; this field is what gets RECORDED, and
+        # recording an override of a gate that never fired would put a false
+        # sentence in the brief and on the PR — the exact defect class this
+        # module keeps finding (a field read as a stronger fact than it carries).
+        gate_override=args.gate_override if stop.fires else None,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run
@@ -5060,7 +5590,51 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # warning it already is. Everything the gate does cover comes from a
         # human: `--audited` typed on the command line, or `emit_anchor`
         # recovered from a block someone typed into a PR comment.
+        # 🔴 SAID EVERY TIME, because the silence it replaces is the whole
+        # defect: with no count in the header the next round's gate cannot
+        # evaluate this round, and a gate nobody evaluates never fires — which
+        # is the state #1531 ran twelve rounds in. It is a WARNING and not a
+        # refusal: the number is a human judgement this script cannot make, and
+        # refusing an emit for want of it would block the remedy every other
+        # refusal here prescribes.
+        if facts.payload is None:
+            print(
+                "⚠ --payload was not passed, so the block below carries "
+                f"`payload={PAYLOAD_PLACEHOLDER}` and the NEXT round's "
+                "attribution gate cannot evaluate this round — an unreadable "
+                "field is not a zero, so the gate stays silent and the ladder "
+                "continues. Classify THE LEDGER's file list (payload is what "
+                "the PR exists to ship) and re-run with `--payload <n>`, or "
+                "replace the placeholder by hand before posting.",
+                file=err_stream,
+            )
         skeleton = emit_claims_skeleton(facts, head_sha)
+        # 🔴 THE PAYLOAD ROUND TRIP IS ASKED ON EVERY EMIT, NOT ONLY WHEN
+        # `emit_from` IS SET. Its sibling below is gated on `emit_from` because
+        # the BARE spelling deliberately has no `<from>`; this field is written
+        # by every emit, in both spellings, and the placeholder path is checked
+        # too — a placeholder that PARSED would hand the next round's gate a
+        # count nobody measured, which is the one failure direction that ends a
+        # converging ladder.
+        why_payload = emitted_payload_reads_back_as_written(skeleton)
+        if why_payload:
+            print("\n".join([
+                f"{EMIT_REFUSAL_HEADER} for round {args.round_no} of PR "
+                f"#{args.pr}: its `payload=` field would not survive this "
+                "script's own parser.",
+                "",
+                f"  {why_payload}.",
+                "",
+                "  the block that was NOT emitted:",
+                "",
+                "      " + "\n      ".join(skeleton.splitlines()),
+                "",
+                "  That field is what the next round's attribution gate reads. "
+                "Re-run with `--payload <a non-negative integer>`, or omit the "
+                "flag entirely and post the placeholder — the gate then stays "
+                "silent, which is correct for a count nobody stated.",
+            ]), file=err_stream)
+            return 4
         if facts.emit_from:
             why = emitted_block_reads_back_as_written(skeleton)
             if why:
