@@ -428,7 +428,7 @@ in
           # re-broke on every snippet edit. NOTHING enforces this coupling now —
           # if attribution matters for a term, check it by hand.
           { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
-          { trigger = ":acq"; replace = "ask clarifying questions and recommend improvements and anything useful to include"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
+          { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
