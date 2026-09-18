@@ -1866,13 +1866,27 @@ class _FakeTerminal:
     exists for.
 
     🔴 IT WRITES THE `--print-query` LINE, AND DERIVES WHETHER TO FROM THE REAL
-    `PICKER_SH`. fzf with `--print-query` writes the query FIRST and the
-    selection SECOND; a fake that wrote only the selection would be a friendlier
-    peer than the real one in exactly the direction that hides the bug — the
-    read loop would look correct while production returned the operator's typed
-    text as the chosen row. Reading `MO.PICKER_QUERY_LINE` rather than spelling
-    the flag means dropping `--print-query` from `PICKER_SH` moves this fake
-    with it, instead of leaving a fixture asserting a contract nobody has.
+    `PICKER_SH`. A fake that wrote only the selection would be a friendlier peer
+    than the real one in exactly the direction that hides the bug — the read loop
+    would look correct while production returned the operator's typed text as the
+    chosen row. Reading `MO.PICKER_QUERY_LINE` rather than spelling the flag
+    means dropping `--print-query` from `PICKER_SH` moves this fake with it,
+    instead of leaving a fixture asserting a contract nobody has.
+
+    🔴 THE THREE ENDINGS ARE MEASURED AGAINST fzf 0.74.3, NOT ASSUMED — AND THE
+    FIRST VERSION OF THIS FAKE GOT THE ABORT WRONG, which made it friendlier
+    than the real thing in the very way the paragraph above warns about. Driven
+    through a pty, three samples per ending:
+
+        selection          ->  `<query>\\n<row>\\n`   (2 lines; query may be "")
+        ENTER, no match    ->  `<query>\\n`           (1 line, exit 0)
+        ESC / Ctrl-C abort ->  NOTHING AT ALL         (0 bytes, exit 130)
+
+    So `choose=None` with an EMPTY query models an ABORT and writes nothing —
+    which is byte-for-byte what this fake did before `--print-query` existed —
+    while `choose=None` with a query models ENTER-WITH-NO-MATCH and writes the
+    query line alone. Collapsing those two would let a test claim the abort path
+    records a query verdict, which it does not.
     """
 
     def __init__(self, choose: str | None = None, *, answer_early: bool = False,
@@ -1901,10 +1915,9 @@ class _FakeTerminal:
             wfh = open(choice_fifo, "w", encoding="utf-8")
 
             def answer():
-                # What fzf writes: the query line (only under `--print-query`),
-                # then the selection. An ABORT writes the query ALONE, which is
-                # `choose is None` — so a dismissal after typing still puts one
-                # line in the pipe, exactly as the real binary does.
+                # The three MEASURED endings — see the class docstring.
+                if self.choose is None and not self.query:
+                    return                      # ABORT: fzf writes NOTHING
                 if MO.PICKER_QUERY_LINE is not None:
                     wfh.write(self.query + "\n")
                 if self.choose is not None:
@@ -8897,7 +8910,16 @@ def test_a_DISMISSED_picker_carries_the_ORDERING_dims_and_whether_a_QUERY_was_ty
     judged by, and until now they were the same row.
 
     The ordering dims ride along for the same reason: a dismissal is only
-    evidence ABOUT the ordering if the ordering was in the list."""
+    evidence ABOUT the ordering if the ordering was in the list.
+
+    🔴 WHAT THIS TEST DOES *NOT* PROVE, SAID HERE BECAUSE ITS FIRST DRAFT
+    CLAIMED IT. `pick` is STUBBED, so this asserts the PLUMBING — that whatever
+    `pick` recorded reaches the row. It is NOT evidence that a real Esc
+    dismissal records anything, and MEASURED against fzf 0.74.3 it does not:
+    an abort writes ZERO BYTES, so `queried` is NOT MEASURED there. The ending
+    the flag really covers on this arm is ENTER-WITH-NO-MATCH, which writes the
+    query line alone. `test_a_real_ABORT_records_NO_query_verdict_at_all` pins
+    the limit so nobody reads this test as the wider claim."""
     _ordering_fixture(monkeypatch, tmp_path)
 
     def _dismiss_after_typing(c, mesg=""):
@@ -9139,6 +9161,46 @@ def test_the_picker_OUTPUT_LINE_count_is_DERIVED_from_the_flag_not_spelled():
     # one — from a DIFFERENT line. A single-line reader that also claimed a
     # query line would return the query as the row.
     assert MO.PICKER_QUERY_LINE != MO.PICKER_ROW_LINE
+
+
+def test_a_real_ABORT_records_NO_query_verdict_at_all(monkeypatch):
+    """🔴 THE LIMIT OF `--print-query`, PINNED BECAUSE THE FIRST DRAFT OF THIS
+    FEATURE CLAIMED THE OPPOSITE IN THREE COMMENTS AND THE PR BODY.
+
+    MEASURED against fzf 0.74.3 through a pty, three samples plus a Ctrl-C and a
+    positive control: an ESC/Ctrl-C abort writes **zero bytes** and exits 130 —
+    `--print-query` covers the two endings where fzf has a result to print, and
+    an abort is not one of them. So an aborted picker carries NO query line, and
+    `queried` must come out NOT MEASURED rather than `False`.
+
+    Why it is worth a test rather than a comment: `False` would mean "the
+    operator scrolled to their row", which is the population "is the
+    pre-computed order being consulted?" is measured FROM. Filing every abort
+    there would answer symptom 1 with the wrong number, in the reassuring
+    direction.
+
+    The two endings are driven side by side so the assertion cannot be satisfied
+    by a reader that never records anything."""
+    if MO.PICKER_QUERY_LINE is None:      # pragma: no cover — flag dropped
+        pytest.skip("--print-query is not set, so there is no query line")
+
+    # ENTER WITH NO MATCH — fzf writes the query line ALONE. This is the
+    # POSITIVE CONTROL: the dismissal arm CAN record a verdict.
+    MO.set_pick_queried(None)
+    _term, url = _drive_picker(monkeypatch, choose=None, query="zqx-no-match")
+    assert url == "", url
+    assert MO.last_pick_queried() is True, (
+        "POSITIVE CONTROL FAILED: an Enter-with-no-match wrote a query line and "
+        "nothing recorded it, so the None below says nothing about the abort")
+
+    # ABORT — fzf writes NOTHING, so there is no verdict to record.
+    MO.set_pick_queried(None)
+    _term2, url2 = _drive_picker(monkeypatch, choose=None, query="")
+    assert url2 == "", url2
+    assert MO.last_pick_queried() is None, (
+        f"an aborted picker recorded {MO.last_pick_queried()!r} — fzf writes "
+        f"ZERO BYTES on an abort, so any verdict here is invented, and `False` "
+        f"would file the click under 'the operator scrolled'")
 
 
 def test_a_TORN_query_line_is_NOT_MEASURED_rather_than_read_half_written(

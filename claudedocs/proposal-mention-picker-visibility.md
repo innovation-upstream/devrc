@@ -208,6 +208,42 @@ picks are made with an **empty** query, symptom 1 is rare and A/B are not worth 
 cost. If most are typed, the rate says which.
 *Pros:* the cheapest correct order of operations, and the only one that does not guess.
 *Cons:* costs a few days of clicks before anything changes.
+🔴 *And it has a measured blind spot — read §3.1 before relying on the rate.*
+
+**(D) `--bind 'esc:print-query+abort'` — close the abort blind spot.** See §3.1.
+
+#### 3.1 🔴 `queried` does not cover every click — measured, not assumed
+
+Driven through a pty against **fzf 0.74.3**, three samples per ending plus a Ctrl-C and a
+positive control:
+
+| ending | what fzf writes | `queried` |
+|---|---|---|
+| a selection (PICKED) | `<query>\n<row>\n` — query may be empty | **present** |
+| ENTER, query matched nothing | `<query>\n`, exit 0 | **present** |
+| ESC / Ctrl-C abort | **nothing at all**, 0 bytes, exit 130 | **absent — NOT MEASURED** |
+
+`--print-query` covers the two endings where fzf has a result to print; an abort is not
+one of them. **The first draft of this work asserted that an abort writes the query
+alone, in three code comments and the PR body. It does not.** Corrected, and pinned by
+`test_a_real_ABORT_records_NO_query_verdict_at_all`.
+
+Consequences for reading the data:
+
+* The **picked** rate — which is what symptom 1 is actually about — is complete.
+* The **dismissal** arm's `queried` rate covers the Enter-with-no-match ending only. That
+  ending is the most diagnostic dismissal there is ("I typed the repo name and the list
+  went empty" — the exact case `pick()`'s docstring has always named as unanswerable), so
+  it is not a trivial slice; but do **not** read it as "of all dismissals".
+* Three-valued is what keeps this honest. A `False` default would file every abort under
+  "the operator scrolled", which is the population the whole question is measured from —
+  wrong in the reassuring direction.
+
+**Option (D)**, if the abort gap matters: `--bind 'esc:print-query+abort'`. **Measured:
+it works** — Esc then writes `<query>\n` (Ctrl-C still writes nothing), the picker closes
+exactly as before, and nothing on screen changes. It was **not** taken in this PR because
+it rebinds a key on the live click path, and that is the operator's call. It is one flag,
+reversible, and the pinned-string/metacharacter guards already cover `PICKER_SH`.
 
 **Recommendation: (C) then (A).** (C) because the question is now measurable and was not
 before; (A) because it is additive, reversible, and helps *both* while the operator

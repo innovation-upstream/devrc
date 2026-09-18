@@ -1378,6 +1378,22 @@ def click_dims(repo: str = "", platform: str = "",
     query text is dropped where it is read — see `_PICK_QUERIED`; three-valued,
     so an unmeasured picker omits it rather than claiming the operator scrolled.
 
+    🔴 WHICH CLICKS ACTUALLY CARRY IT, MEASURED RATHER THAN CLAIMED — AND IT IS
+    NARROWER THAN THE FIRST DRAFT OF THIS PARAGRAPH SAID. fzf writes the query
+    line only on the two endings where it has a result to print (see
+    `PICKER_SH`):
+      * PICKED                      -> present. This is the dominant case and
+        the one symptom 1 is about.
+      * dismissed by ENTER, NO MATCH -> present, and it is the most diagnostic
+        dismissal there is.
+      * dismissed by ESC / Ctrl-C    -> **ABSENT**. fzf writes nothing at all on
+        an abort, so the dim is NOT MEASURED, not `False`.
+    So "a dismissal after typing is distinguishable from one after scrolling" is
+    TRUE of the Enter ending and FALSE of the abort ending. The three-valued
+    design is what keeps that honest instead of filing every abort under
+    "scrolled" — but a consumer must not read the dismissal arm's `queried` rate
+    as covering all dismissals.
+
     ⚠ NO `ordered_rank` DIM, DELIBERATELY. The chosen row's position WITHIN the
     ranked block is `rank - pinned_above`, and both of those are already emitted
     beside the `ordered` flag that says whether the subtraction means anything.
@@ -2237,11 +2253,28 @@ PICKER_LINES = 22
 # reach a sink. A length, a prefix or a hash would each be a weaker version of
 # the same leak; a bool answers the question completely.
 #
-# ⚠ IT CHANGES THE OUTPUT SHAPE, WHICH THE READ LOOP OWNS. fzf now writes
-# `<query>\n` and then `<selection>\n`, and on an abort it writes the query
-# ALONE. `run_picker`'s loop therefore waits for TWO lines instead of one and
-# takes the SECOND as the row; taking the first — which is what the pre-change
-# loop did — would open whatever the operator typed, or nothing.
+# 🔴 THE OUTPUT CONTRACT, MEASURED AGAINST fzf 0.74.3 RATHER THAN ASSUMED — AND
+# THE ASSUMPTION WAS WRONG. Driven through a pty, three samples per ending:
+#   * a SELECTION        -> `<query>\n<row>\n`   (2 lines; the query may be empty)
+#   * ENTER, NO MATCH    -> `<query>\n`          (1 line, exit 0)
+#   * ESC / Ctrl-C ABORT -> **NOTHING AT ALL**   (0 bytes, exit 130)
+# The first draft of this comment said an abort "writes the query ALONE". It does
+# not — `--print-query` covers the two exits where fzf has a result to print, and
+# an abort is not one of them. Nothing downstream breaks (0 bytes is what the
+# pre-change loop already saw on a dismissal), but the CAPABILITY is narrower
+# than it was written to be: see `click_dims`' `queried` paragraph for exactly
+# which clicks carry the dim.
+#
+# ⚠ SO THE READ LOOP WAITS FOR TWO LINES AND TAKES THE SECOND AS THE ROW. Taking
+# the first — which is what the pre-change loop did — would open whatever the
+# operator typed, or nothing. The one-line and zero-line endings both fall
+# through to the `proc.poll()` arm, exactly as a dismissal always did.
+#
+# ⚠ `--bind 'esc:print-query+abort'` WOULD close the abort gap — MEASURED, it
+# makes Esc write `<query>\n` (Ctrl-C still writes nothing). It is NOT taken
+# here: it rebinds a key on the operator's live click path, and that is their
+# call. It is written up as an option in
+# `claudedocs/proposal-mention-picker-visibility.md`.
 #
 # ⚠ NOTHING ON SCREEN MOVES. `--print-query` is a stdout contract; the prompt,
 # the pointer, the colours, the header and the match ORDER are untouched. The
@@ -2571,12 +2604,17 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
         # row — `row_to_url` maps that to nothing, every pick becomes
         # `unmapped-row`, and the picker opens nothing at all.
         #
-        # ⚠ AN ABORT STILL WRITES ONE LINE, AND THAT EXIT IS UNCHANGED. fzf
-        # prints the query and leaves on Esc, so the loop does not get its second
-        # newline and falls through to the `proc.poll()` arm below exactly as a
-        # dismissal always did. The only difference is that the query line is now
-        # there to be read — which is how a dismissal AFTER TYPING becomes
-        # distinguishable from one after scrolling.
+        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE TWO OF THEM. ENTER
+        # WITH NO MATCH writes one line (the query); an ESC/Ctrl-C ABORT writes
+        # ZERO BYTES — measured, see `PICKER_SH`. Neither reaches the second
+        # newline, so both fall through to the `proc.poll()` arm below exactly as
+        # a dismissal always did, and `row` comes out "" either way.
+        #
+        # 🔴 THE CONSEQUENCE IS A REAL LIMIT, NOT A DETAIL: an ABORT carries no
+        # query line, so `queried` stays NOT MEASURED there. What the flag does
+        # buy on this arm is the ENTER-WITH-NO-MATCH ending — "I typed the repo
+        # name and the list went empty", which is the exact case `pick()`'s
+        # docstring has always named as indistinguishable from a change of mind.
         out = b""
         outcome = PICKED_DISMISSED
         while out.count(b"\n") < PICKER_OUT_LINES:
