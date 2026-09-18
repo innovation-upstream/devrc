@@ -169,12 +169,20 @@ does not look like the ranking is working".
 
 ### Symptom 1 — fzf re-sorts the moment the operator types
 
-What is already **measured and settled** (pinned in the suite, do not re-derive):
+What is already **measured and settled**. ⚠ These two are **not this doc's measurements** —
+they were taken 2026-09-11 and are pinned by
+`test_adding_index_to_the_TIEBREAK_would_change_NOTHING_on_a_TYPED_query` and
+`test_REAL_fzf_lets_our_PRECOMPUTED_ORDER_decide_a_TIE`, which is where the numbers live.
+Quoted here so nobody re-derives them; read the tests, not this line, if they matter:
 
 * `--tiebreak=end,index` is a **no-op**: 520 of 520 (corpus, query) pairs byte-identical
   to `--tiebreak=end`; positive control `--tiebreak=length` differed on 438. fzf appends
   `index` implicitly.
 * Input order decides an **exact tie** and nothing else.
+
+One measurement here **is** this doc's own: `--print-query` does **not** change fzf's
+ranking — same corpus, same query, byte-identical output once the query line is dropped,
+with `--tiebreak=length` as the positive control (fzf 0.74.3).
 
 So there is no tiebreak flag to add. The real options:
 
