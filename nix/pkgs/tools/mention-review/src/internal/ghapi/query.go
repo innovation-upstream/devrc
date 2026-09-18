@@ -245,8 +245,11 @@ const maxReflectedErrorEntries = 5
 // interpolates the server's `mergeable` string — measured at 5,081 runes,
 // unclipped and unredacted, from a probe server.
 //
-// 🔴 ROUND 3 MADE IT THREE, AND THE THIRD TIME WAS A CLAIM ABOUT ENFORCEMENT
-// RATHER THAN ABOUT COVERAGE. This comment said the four paths "are enumerated
+// 🔴 AND ROUND 3 FOUND A SECOND FALSE SENTENCE IN THIS SAME BLOCK — THREE IN
+// THIS FILE ALL TOLD, THE THIRD ABOUT ENFORCEMENT RATHER THAN ABOUT COVERAGE.
+// (The count above stays at TWO: it belongs to the "WHOLE composed detail"
+// claim, and merging the two tallies is how a record of one defect swallows
+// another.) This comment said the four paths "are enumerated
 // on `TestNoErrorPathEverCarriesTheToken`, which fails if a fifth appears
 // unledgered". That test is a hand-written four-row table walked by a `for`
 // loop: it enumerates nothing, counts nothing and inspects no source. A FIFTH
