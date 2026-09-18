@@ -561,31 +561,14 @@ done":**
 10. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`.**
     forcing: none — done
 
-11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.**
-    **RE-VERIFIED LIVE 2026-09-08, still refused:** `cairn create --scope cairn --ref
-    rank11-probe --file <f>` → **rc 6**, `🔴 cairn: the store REFUSED the write [not-found]`.
-    Nothing was written. The local cache still holds **23** scopes with `cairn` absent, and
-    `subsystem_recall.py --repo ~/workspace/cairn` reports `status=scope-absent`.
-    ⚠ This is what made THIS session's `/handoff` step 4 dead-end: the rank-12 lessons could
-    not be recorded under a `cairn` scope and live in this doc's Gotchas instead — the exact
-    "cairn-repo lessons keep landing elsewhere" cost this item names.
-    ⚠ Note the invocation: `--file` is REQUIRED, and omitting it exits **2** (argparse) —
-    which is NOT the refusal and must not be read as one.
-    🔨 **DECIDED AND IN A PR 2026-09-09 — `ZacxDev/homelab-infra` #785**, `tekton/gitops-validate`
-    **pass**. Adds `cairn` to the token's scope allowlist: 23 → 24 scopes, all 23 originals
-    still present (sorted set difference `removed: []` / `added: [cairn]`), decrypted
-    before/after diff a SINGLE line. Live pod and the tracked secret agreed on the before
-    state, so this was not a git-only claim.
-    ⚠ **A `sops` trap worth keeping:** `sops` resolves `.sops.yaml` from the INVOKING CWD, not
-    from the file path. Run from another checkout it loads that repo's rules and dies with
-    `no matching creation rules found` on a file this repo's catch-all covers perfectly well.
-    Pin it with `--config`, do not `cd`.
-    ✅ **CLOSED 2026-09-10 — CONDITION EXERCISED, NOT INFERRED.** After #785 merged and
-    the pod rolled, `cairn create --scope cairn --ref ci-leg --file <f>` returned
-    `created scope=cairn ref=ci-leg revision=dc4d8212`, **rc 0** — it had returned rc 6
-    `[not-found]` for this item's entire life. The rc was CAPTURED, not piped (a pipe
-    returns `tail`'s status and reads a refusal as a write). The scope now holds a real
-    first entry, verified round-tripping from the pod: `1 of 1 entry in cairn/`.
+11. ✅ **CLOSED 2026-09-10 — the `cairn` scope was added to the store token's allowlist
+    (`ZacxDev/homelab-infra` #785), and the condition was EXERCISED not inferred:** `cairn create`
+    returned `created scope=cairn ref=ci-leg revision=dc4d8212` **rc 0** after returning rc 6
+    `[not-found]` for this item's entire life. Body demoted.
+    🔴 **Two lessons:** the rc was CAPTURED, not piped — **a pipe returns `tail`'s status and reads
+    a refusal as a write**; and `sops` resolves `.sops.yaml` from the INVOKING CWD, not the file
+    path, so running it from another checkout dies with `no matching creation rules found` on a file
+    this repo's catch-all covers — pin it with `--config`, do not `cd`.
     forcing: none — done
 
 13. ✅ **CLOSED 2026-09-10 — `ZacxDev/cairn` #8 `3167e44`; published `…:0.8.0`.** Body demoted.
