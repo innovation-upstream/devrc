@@ -1027,6 +1027,20 @@ HERMETIC_TARGETS=(
   # orphaned by the switch that deploys it. Gated here because it is the only test
   # that asserts a property ACROSS the hook modules, so no per-hook target owns it.
   scripts/claude-hooks/tests/test_on_disk_artifact_names.py
+  # Same reason again — a FILE, not the directory. The Stop-hook DECISION EMITTER and
+  # the two hooks wired to it. Seven Stop hooks fire ~20,700 times per six weeks on
+  # this host and none of them reached activity.events, so every question about what a
+  # hook decided had to be inferred from transcript prose — which returned a bogus
+  # 100.0% compliance rate, a lift figure wrong by 4.8pp (no per-entity key) and one
+  # hypothesis that could not be tested at all. What is gated here is the CONTRACT that
+  # lets the emitter exist on a Stop path: exit 0 with byte-identical stdout and empty
+  # stderr under four hostile spool states (with its own negative control, an emitter
+  # that raises), the structural privacy boundary that keeps captured text out of the
+  # payload (with its positive control, the same keys carrying ids), and the
+  # positive/negative control pair for the instrument itself — a zero from an emitter
+  # wired to nothing is indistinguishable from a clean pass, so no zero here is
+  # asserted without a sibling that watches the count move.
+  scripts/claude-hooks/tests/test_hook_telemetry.py
   # Same reason again — a FILE, not the directory. The backgrounded-command
   # capture log (ClickUp 868ktvqf9). It fires PreToolUse AND PostToolUse on every
   # Bash call, so its fail-open contract is felt on every command the operator
@@ -2606,6 +2620,27 @@ TARGET_FLOORS=(
   # the three satisfaction routes, each checked alone plus its negative control.
   #   _suggested_floor 69 = 69 - min(50, max(1, 69/20 = 3)) = 66.
   "scripts/claude-hooks/tests/test_handoff_write_guard.py|66"
+  # 2026-09-17, the Stop-hook DECISION EMITTER arrives as a NEW target: 96 collected,
+  # 0 skipped, measured by pytest on this branch. The count is dominated by the
+  # fail-open battery (two hooks x four hostile spool states, each asserting exit
+  # status, byte-identical stdout, empty stderr AND a zero row count so a case that
+  # stopped being hostile goes red; plus an emitter that raises at import and on call,
+  # x both hooks) and by the coercion table's rejected/admitted pairs. No new skips,
+  # so EXPECTED_SKIPS is untouched.
+  #
+  # ⚠ IT WAS 55 AND THE AUDIT FIXES TOOK IT TO 96. What the 41 buy, in one line each:
+  # the unmeasurable Stop is a ROW and not a silence (five hostile payloads x two
+  # hooks, plus a decision path that raises, plus the pure mapping) — the 🔴 finding
+  # the emission being inside main()'s single handler produced; the call site's half of
+  # the privacy boundary (a laundered doc name cannot reach the payload, with its
+  # positive control and the predicate's own table); a FIFO spool that must not HANG a
+  # Stop hook; the extras cap counting its own drops; and the per-Stop id that gives
+  # this hook a denominator of its own.
+  #   _suggested_floor 96 = 96 - min(50, max(1, 96/20 = 4)) = 96 - 4 = 92.
+  # The number is the gate's own function applied to the collected count, not
+  # arithmetic reconciled by hand — if this line conflicts, re-run the gate on the
+  # MERGED tree and copy what it prints.
+  "scripts/claude-hooks/tests/test_hook_telemetry.py|92"
   # 2026-08-21, the backgrounded-command capture log (868ktvqf9) arrives as a NEW
   # target: 80 collected, 0 skipped, measured by this gate on this branch.
   #   _suggested_floor 80 = 80 - min(50, max(1, 80/20 = 4)) = 76.
