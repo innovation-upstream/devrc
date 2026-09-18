@@ -1887,11 +1887,20 @@ def the_toolchain_reason_names_the_shared_checkout_again(t):
 
 
 def the_emitted_block_loses_its_legend(t):
+    """🔴 RETARGETED when the legend gained its `payload=` sentence.
+
+    MEASURED before the retarget: `MUTATION DID NOT APPLY — target absent`,
+    which is the failure this harness's header calls the most flattering
+    possible wrong answer — an unmutated file reporting "the guard held". The
+    trailing `"",` also left this list, so the target is the legend STRING
+    alone now.
+    """
     return _swap(
         t,
         '        "  legend: `<from>` = the tip THIS round\'s audit READ · `<to>` = the "\n'
-        '        "head THIS round\'s FIXES produced. Different shas — `<from>` is older.",\n'
-        '        "",\n',
+        '        "head THIS round\'s FIXES produced. Different shas — `<from>` is older. "\n'
+        '        "`payload=` = the payload lines THIS round\'s fixes changed, from YOUR "\n'
+        '        "classification of the ledger\'s file list.",\n',
         "",
     )
 

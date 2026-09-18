@@ -11602,7 +11602,16 @@ def test_the_gate_override_is_refused_without_a_reason_and_records_one_given():
         comments=two_zero_payload_rounds(),
     )
     assert rc_e == 0, f"the override run refused the emit half (rc {rc_e})"
-    assert reason in out_e.split("```audit-claims")[0], (
+    # 🔴 `rsplit`, NOT `split`, and mutant C2 is why. The LAST `audit-claims`
+    # fence in this output is the emitted skeleton's; an earlier one can appear
+    # inside the brief whenever the claims section reproduces text that carries
+    # a fence — which is exactly what C2 (claims read from the whole comment)
+    # makes it do. Spelled `split(...)[0]` this asserted "the reason precedes
+    # the FIRST fence anywhere in the output", so C2 killed it and the row
+    # stopped isolating what it names. The claim that matters is the emitted
+    # BLOCK's fence.
+    above_the_block = out_e.rsplit("```audit-claims", 1)[0]
+    assert reason in above_the_block, (
         "the emitted block carries no override record ABOVE its fence, so "
         f"pasting it onto the PR leaves no trace of the stop:\n{out_e}"
     )
