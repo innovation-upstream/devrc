@@ -141,6 +141,32 @@ func (a App) proposeMerge() (App, []Intent) {
 			"with a method nobody chose is the wrong commit shape."
 		return a.settled(), nil
 	}
+	// 🔴 A PULL REQUEST THAT IS ALREADY MERGED OR CLOSED IS REFUSED HERE TOO, AND
+	// THE REDUNDANCY WITH `ghapi.Merge` IS WANTED — THEY ANSWER DIFFERENT
+	// QUESTIONS OFF DIFFERENT DATA.
+	//
+	// This one reads the SNAPSHOT: it is free, it is instant, and it stops the
+	// operator from confirming a merge that a round trip is about to refuse. So:
+	// this is the UX, `ghapi.Merge` is the safety net, and neither subsumes the
+	// other. Both call `ghapi.TerminalPRState`, so "already over" has one
+	// definition rather than two.
+	//
+	// ⚠ THE SNAPSHOT CAN BE STALE BOTH WAYS, AND ONE OF THOSE HAS NO IN-APP
+	// RECOVERY. A pull request merged by somebody else since the fetch still
+	// looks OPEN here — harmless, because the live read catches it. One REOPENED
+	// since the fetch still looks CLOSED, and this refuses a merge that would
+	// have been fine; `r` is inert on a healthy screen (see `ActRetry`), so the
+	// only way out today is to relaunch. That is the cheaper of the two
+	// mistakes and it is chosen, not overlooked.
+	//
+	// ⚠ IT IS NOT IN `writeGate`. That gate covers all five verbs, and commenting
+	// on a merged pull request is a perfectly reasonable thing to do — putting
+	// this there would refuse the four verbs that are still legitimate.
+	if over := ghapi.TerminalPRState(a.Snap.State, a.Snap.Merged); over != "" {
+		a.notice = "REFUSED — this pull request is already " + over +
+			", so there is nothing to merge. NOTHING WAS SENT."
+		return a.settled(), nil
+	}
 	// ⚠ THE SNAPSHOT'S MERGEABILITY IS NOT READ HERE AND MUST NOT BE. The panel
 	// shows it, and what the panel shows is a fact about when the snapshot was
 	// fetched. `ghapi.Merge` re-reads it at the moment of the write; carrying

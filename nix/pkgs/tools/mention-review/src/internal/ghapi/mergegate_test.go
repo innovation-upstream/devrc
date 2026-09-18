@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +47,35 @@ type mergeFake struct {
 	putMethod    string
 	// graphqlStatus, when non-zero, makes the read fail instead of answering.
 	graphqlStatus int
+	// prState and merged are the pull request's own `state`/`merged`, which the
+	// gate reads BEFORE it looks at mergeability. ⚠ THE DEFAULT IS `OPEN`, and
+	// that is the realistic fixture — every response the real API returns for a
+	// pull request carries this field, and a fake that omitted it would be
+	// testing the gate against a shape the server never sends.
+	prState string
+	merged  bool
+}
+
+// gqlIdent matches a GraphQL identifier, which is how `requestedFields` turns a
+// query document into the set of words it names.
+var gqlIdent = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+
+// requestedFields is the set of identifiers a GraphQL document mentions.
+//
+// 🔴 THE FAKE HONOURS THE QUERY, AND THAT IS NOT DECORATION. A real GraphQL
+// server returns a field ONLY if it was asked for. A fake that answered every
+// field regardless is blind to the one mutation that matters most here —
+// deleting `state merged` from `MergeableQuery` — because the decode struct
+// would keep working against a response the real server would never send.
+// MEASURED: with the unconditional fake, a mutant that shortened the query to
+// `{ mergeable }` SURVIVED the whole suite; with this, it is killed by the
+// terminal-pull-request test.
+func requestedFields(query string) map[string]bool {
+	set := map[string]bool{}
+	for _, tok := range gqlIdent.FindAllString(query, -1) {
+		set[tok] = true
+	}
+	return set
 }
 
 func (f *mergeFake) handler() http.HandlerFunc {
@@ -58,16 +89,33 @@ func (f *mergeFake) handler() http.HandlerFunc {
 				_, _ = io.WriteString(w, `{"message":"Bad credentials"}`)
 				return
 			}
+			var req struct {
+				Query string `json:"query"`
+			}
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &req)
+			asked := requestedFields(req.Query)
+
 			i := f.graphqlCalls - 1
 			if i >= len(f.states) {
 				i = len(f.states) - 1
 			}
-			value := "null"
-			if f.states[i] != "" {
-				value = `"` + f.states[i] + `"`
+			var fields []string
+			if asked["mergeable"] {
+				value := "null"
+				if f.states[i] != "" {
+					value = `"` + f.states[i] + `"`
+				}
+				fields = append(fields, `"mergeable":`+value)
 			}
-			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"mergeable":`+
-				value+`,"mergeStateStatus":"UNKNOWN"}}}}`)
+			if asked["state"] {
+				fields = append(fields, `"state":"`+f.prState+`"`)
+			}
+			if asked["merged"] {
+				fields = append(fields, `"merged":`+strconv.FormatBool(f.merged))
+			}
+			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{`+
+				strings.Join(fields, ",")+`}}}}`)
 			return
 		}
 		f.putCalls++
@@ -93,7 +141,7 @@ func (f *mergeFake) seen() (graphql, put int, method string) {
 // the real bound `NewClient` installs.
 func newMergeFake(t *testing.T, attempts int, states ...string) (*Client, *mergeFake, func()) {
 	t.Helper()
-	f := &mergeFake{states: states}
+	f := &mergeFake{states: states, prState: PRStateOpen}
 	srv := httptest.NewServer(f.handler())
 	c := NewClient("tok-mergegate-fixture", srv.Client())
 	c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
@@ -251,6 +299,218 @@ func TestAConflictFoundOnlyByTheLiveReadStopsTheMerge(t *testing.T) {
 	}
 }
 
+// 🔴 A MERGED OR CLOSED PULL REQUEST IS REFUSED FOR THE RIGHT REASON, AND THE
+// OPERATOR IS NOT TOLD TO TRY AGAIN.
+//
+// MEASURED 2026-09-18 against the public `innovation-upstream/devrc` with a
+// read-only GraphQL probe: `mergeable` is `UNKNOWN` PERMANENTLY once a pull
+// request is not open — #1760 (MERGED) → UNKNOWN, #1701 (CLOSED) → UNKNOWN,
+// #1761 (OPEN) → MERGEABLE. So the fixtures below answer `null` for
+// mergeability, which is exactly what the server sends for these two.
+//
+// 🔴 THE REGRESSION IS THE GATE'S OWN. Before the gate existed the merge PUT
+// went out and GitHub answered `405 Pull Request is not mergeable`, which the
+// renderer shows in full — a true and actionable card. A gate that replaced that
+// with "still recomputing, press `m` again" would be a net LOSS for this case:
+// false, and non-terminating, because the advice can never come true.
+//
+// ⚠ THE FORBIDDEN STRINGS ARE THE POINT OF THE TEST, so they are written out
+// here rather than derived from the message under test.
+func TestATerminalPullRequestIsRefusedWithTheAccurateReasonAndNoRetryAdvice(t *testing.T) {
+	cases := []struct {
+		name    string
+		prState string
+		merged  bool
+		want    string
+	}{
+		{"merged", PRStateMerged, true, PRStateMerged},
+		{"closed", PRStateClosed, false, PRStateClosed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// "" is JSON `null` — the in-flight spelling, and the one a terminal
+			// pull request answers with forever.
+			c, f, done := newMergeFake(t, 4, "")
+			defer done()
+			f.mu.Lock()
+			f.prState, f.merged = tc.prState, tc.merged
+			f.mu.Unlock()
+
+			err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase")
+			if err == nil {
+				t.Fatal("a pull request that is already over was merged")
+			}
+			got := err.Error()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("the refusal does not name the state %q: %s", tc.want, got)
+			}
+			if !strings.Contains(got, "NOTHING WAS SENT") {
+				t.Errorf("the refusal does not say that nothing was sent: %s", got)
+			}
+			// 🔴 THE RETRY ADVICE MUST BE ABSENT. This is the whole finding: the
+			// UNKNOWN branch's wording is correct for a recompute and FALSE here,
+			// because no amount of pressing `m` reopens a merged pull request.
+			for _, forbidden := range []string{
+				"press `m` again in a moment",
+				"recomputes this whenever the base branch moves",
+				"still reports mergeability UNKNOWN",
+			} {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("the refusal tells the operator a false story — it contains %q: %s",
+						forbidden, got)
+				}
+			}
+			graphql, put, _ := f.seen()
+			if put != 0 {
+				t.Fatalf("a MERGE REQUEST was sent for a %s pull request (%d PUTs)", tc.want, put)
+			}
+			// 🔴 AND IT COSTS ONE READ, NOT THE WHOLE BOUND. `mergeable` never
+			// resolves for these, so a gate that polled first would sit silent for
+			// the full interval before saying something it already knew.
+			if graphql != 1 {
+				t.Errorf("the gate made %d reads, want exactly 1 — a terminal pull "+
+					"request cannot become mergeable, so spending the poll bound on "+
+					"one is pure silence", graphql)
+			}
+		})
+	}
+}
+
+// 🔴 POSITIVE CONTROL ON THE FAKE ITSELF: it OMITS a field the query did not
+// ask for.
+//
+// Without this, `requestedFields` could be wired to nothing — the fake would
+// answer every field unconditionally, the terminal tests above would still pass,
+// and a query that stopped asking for `state merged` would sail through a green
+// suite while production read every pull request as open. This drives the fake
+// directly, with a query that asks for `mergeable` alone, and watches the two
+// fields disappear from the body.
+func TestTheMergeFakeAnswersOnlyTheFieldsTheQueryAsksFor(t *testing.T) {
+	f := &mergeFake{states: []string{MergeableYes}, prState: PRStateMerged, merged: true}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	post := func(query string) string {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"query": query})
+		resp, err := srv.Client().Post(srv.URL+"/graphql", "application/json",
+			strings.NewReader(string(payload)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		return string(raw)
+	}
+
+	// The shipped query asks for all three, so all three come back.
+	full := post(MergeableQuery)
+	for _, want := range []string{`"mergeable"`, `"state"`, `"merged"`} {
+		if !strings.Contains(full, want) {
+			t.Errorf("the shipped query did not get %s back: %s", want, full)
+		}
+	}
+	// A narrowed query gets only what it named.
+	narrow := post(`query{ repository { pullRequest { mergeable } } }`)
+	if !strings.Contains(narrow, `"mergeable"`) {
+		t.Errorf("a query asking for `mergeable` did not get it: %s", narrow)
+	}
+	for _, unwanted := range []string{`"state"`, `"merged"`} {
+		if strings.Contains(narrow, unwanted) {
+			t.Errorf("the fake answered %s for a query that never asked for it — its "+
+				"selection filter is wired to nothing, so every mutant that narrows "+
+				"`MergeableQuery` would SURVIVE: %s", unwanted, narrow)
+		}
+	}
+}
+
+// 🔴 THE PREDICATE ANSWERS ONLY WHEN IT KNOWS, AND THE ASYMMETRY IS DELIBERATE.
+//
+// An absent or unrecognised `state` is NOT terminal: reading a missing field as
+// CLOSED would refuse every merge the moment GitHub renamed or omitted it, while
+// reading it as open costs one wasted write whose 405 the renderer now shows in
+// full. The two mistakes do not cost the same, so the predicate declines rather
+// than guesses.
+func TestTerminalPRStateAnswersOnlyOnAPositivelyTerminalPullRequest(t *testing.T) {
+	cases := []struct {
+		state  string
+		merged bool
+		want   string
+	}{
+		{PRStateOpen, false, ""},
+		{"open", false, ""},
+		{"", false, ""},
+		{"   ", false, ""},
+		{"SOMETHING_GITHUB_ADDED_LATER", false, ""},
+		{PRStateMerged, false, PRStateMerged},
+		{"merged", false, PRStateMerged},
+		{PRStateClosed, false, PRStateClosed},
+		{" closed ", false, PRStateClosed},
+		// `merged` alone is enough, and it WINS over a state that disagrees —
+		// two fields on one object, and a response carrying only one of them is
+		// still answered correctly.
+		{"", true, PRStateMerged},
+		{PRStateOpen, true, PRStateMerged},
+		{PRStateClosed, true, PRStateMerged},
+	}
+	for _, tc := range cases {
+		if got := TerminalPRState(tc.state, tc.merged); got != tc.want {
+			t.Errorf("TerminalPRState(%q, %v) = %q, want %q", tc.state, tc.merged, got, tc.want)
+		}
+	}
+	// The three words are distinct, or every branch above is the same branch.
+	if PRStateOpen == PRStateClosed || PRStateOpen == PRStateMerged || PRStateClosed == PRStateMerged {
+		t.Fatal("two of the three pull-request state words are the same string")
+	}
+}
+
+// 🔴 THE REFUSAL DESCRIBES WHAT IT ACTUALLY DID.
+//
+// `awaitMergeable` clamps a bound below 1 up to 1, so a misconfigured client
+// spent exactly one read and the message said "after 1 re-reads over 0s" — it
+// called the first read a RE-read, and reported a duration of zero as though it
+// had waited. A refusal that misstates its own work is one the operator cannot
+// judge.
+//
+// ⚠ THE EXPECTED STRINGS ARE WRITTEN OUT HERE, not composed from the constants
+// the message uses.
+func TestTheUnknownRefusalNamesHowManyReadsItActuallyMade(t *testing.T) {
+	t.Run("a single read is not a re-read and took no time", func(t *testing.T) {
+		c, _, done := newMergeFake(t, 1, MergeableUnknown)
+		defer done()
+		err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase")
+		if err == nil {
+			t.Fatal("a merge was dispatched while mergeability was UNKNOWN")
+		}
+		got := err.Error()
+		if !strings.Contains(got, "after 1 read.") {
+			t.Errorf("a one-attempt gate does not say it made one read: %s", got)
+		}
+		for _, forbidden := range []string{"re-read", "over 0s", "1 reads"} {
+			if strings.Contains(got, forbidden) {
+				t.Errorf("the refusal contains %q, which misdescribes a single read: %s",
+					forbidden, got)
+			}
+		}
+	})
+	t.Run("several reads name the count and the elapsed wait", func(t *testing.T) {
+		// newMergeFake uses a 1 ms interval, so three attempts wait 2 ms.
+		c, _, done := newMergeFake(t, 3, MergeableUnknown)
+		defer done()
+		err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase")
+		if err == nil {
+			t.Fatal("a merge was dispatched while mergeability was UNKNOWN")
+		}
+		got := err.Error()
+		if !strings.Contains(got, "after 3 reads over 2ms.") {
+			t.Errorf("the refusal does not name 3 reads over 2ms: %s", got)
+		}
+		if strings.Contains(got, "re-read") {
+			t.Errorf("the refusal still calls the first read a re-read: %s", got)
+		}
+	})
+}
+
 // 🔴 A FAILED READ IS NOT A GO-AHEAD. If the poll itself cannot be performed,
 // the merge does not happen — an error deciding "probably fine" is how a guard
 // becomes decoration.
@@ -285,7 +545,7 @@ func TestMergeabilityReportsAMissingPullRequestRatherThanGuessing(t *testing.T) 
 
 	got, err := c.Mergeability(context.Background(), wOwner, wName, wNum)
 	if err == nil {
-		t.Fatalf("a null pull request returned %q and no error", got)
+		t.Fatalf("a null pull request returned %+v and no error", got)
 	}
 	var ae *APIError
 	if !asAPIError(err, &ae) || ae.State != AuthNotFound {

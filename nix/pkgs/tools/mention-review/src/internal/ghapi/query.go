@@ -225,6 +225,17 @@ const maxReflectedErrorEntries = 5
 // server-supplied string of any length, so capping the COUNT still permits a
 // pathological body to produce a megabyte-long card. Runes rather than bytes so
 // the truncation cannot land inside a codepoint.
+//
+// 🔴 "THE WHOLE DETAIL" MEANS EVERY DETAIL THIS CLIENT BUILDS OUT OF SERVER
+// CONTENT, AND UNTIL THIS COMMIT THAT SENTENCE WAS FALSE. It bounded only what
+// flowed through `do` — the REST/HTTP-status path. A GraphQL 200 carrying
+// `errors[0].message` went out through `Mergeability` and `decodeSnapshot`
+// UNCLIPPED and, worse, UNREDACTED. MEASURED by the round-1 audit of #1761: a
+// fake GraphQL server echoing the credential in that field produced a
+// 5,057-rune detail with the token intact. Both decoders now go through
+// `Client.decodeGQLError`, which does exactly what `do` does. The invariant is
+// pinned by `TestNoErrorPathEverCarriesTheToken` and
+// `TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail`.
 const maxDetailRunes = 400
 
 // apiMessage renders GitHub's error body into the one line the card shows.
@@ -261,11 +272,25 @@ func apiMessage(body []byte, status string) string {
 		Errors  []json.RawMessage `json:"errors"`
 	}
 	if json.Unmarshal(body, &env) != nil {
-		// ⚠ NOT NECESSARILY UNPARSEABLE. Some endpoints answer with `errors` as
-		// something other than an array, which fails the decode above while the
-		// `message` is perfectly readable — so the narrow shape is tried before
-		// the body is given up on. Widening what we render must not NARROW what
-		// we render for a shape that used to work.
+		// ⚠ NOT NECESSARILY UNPARSEABLE — and this paragraph used to overstate
+		// what is known. An `errors` key holding something other than an array
+		// fails the decode above while the `message` beside it is perfectly
+		// readable, so the narrow shape is tried before the body is given up on.
+		//
+		// ⚠ NO RESPONSE THIS PROGRAM HAS CAPTURED CARRIES THAT SHAPE. An earlier
+		// version of this comment asserted "some endpoints answer with `errors`
+		// as something other than an array" as established fact, beside a
+		// neighbouring fallback in `renderErrorEntry` that is honestly labelled
+		// NOT ATTESTED — two evidentiary standards in one function. The
+		// justification is the same as that neighbour's and does not need a
+		// sighting: the alternative to rendering the readable `message` is
+		// throwing it away for a key we failed to parse, and a card that shows
+		// the status line alone when the server said more is the empty-result
+		// trap. The BEHAVIOUR is measured, and pinned by
+		// `TestAnErrorsKeyThatIsNotAnArrayStillYieldsTheMessage`.
+		//
+		// Widening what we render must not NARROW what we render for a shape
+		// that used to work.
 		var narrow struct {
 			Message string `json:"message"`
 		}
@@ -399,16 +424,27 @@ func (c *Client) Fetch(ctx context.Context, owner, name string, num int) (*Snaps
 	if err != nil {
 		return nil, err
 	}
-	return decodeSnapshot(body, owner+"/"+name, num)
+	return c.decodeSnapshot(body, owner+"/"+name, num)
 }
 
 // MergeableQuery is the SECOND read this client can make, and it is deliberately
-// tiny: two scalars off the pull request, nothing else.
+// tiny: three scalars off the pull request, nothing else.
 //
 // 🔴 IT IS NOT `Query` WITH A FILTER. The panel read pulls 100 files, 100
 // commits, 50 reviews and a check rollup; re-running it to answer one enum
 // would make a bounded poll expensive enough that nobody would keep the bound
 // honest. This costs one small round trip per attempt.
+//
+// 🔴 `state` AND `merged` ARE HERE BECAUSE `mergeable` CANNOT ANSWER "IS THIS
+// ALREADY OVER". MEASURED against the public `innovation-upstream/devrc` on
+// 2026-09-18 with a read-only GraphQL probe: `mergeable` is `UNKNOWN`
+// PERMANENTLY for any pull request that is not open — #1760 (MERGED) → UNKNOWN,
+// #1701 (CLOSED) → UNKNOWN, #1761 (OPEN) → MERGEABLE. Without these two fields
+// the gate reads a merged PR as "still recomputing", spends its whole poll
+// bound, and tells the operator to press `m` again — advice that can never come
+// true. `mergeStateStatus` does not help either: it reads `UNKNOWN` for the same
+// pull requests, which is why this query no longer asks for it (it was requested
+// and then never decoded).
 //
 // ⚠ `pullRequest(number:)`, not `issueOrPullRequest`. The only caller is the
 // merge gate, and merging an issue is not a thing — a number that resolves to
@@ -416,14 +452,27 @@ func (c *Client) Fetch(ctx context.Context, owner, name string, num int) (*Snaps
 const MergeableQuery = `
 query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
-    pullRequest(number:$number){ mergeable mergeStateStatus }
+    pullRequest(number:$number){ mergeable state merged }
   }
 }`
 
-// Mergeability re-reads just the merge state. It returns the NORMALISED word,
-// so "" from the server is `UNKNOWN` rather than an empty string the caller
-// would have to re-interpret.
-func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) (string, error) {
+// MergeRead is everything the tiny second read answers.
+//
+// 🔴 A STRUCT RATHER THAN A BARE STRING, because "may this merge go out" is not
+// one question. `Mergeable` says whether the tree can be merged; `Terminal` says
+// whether there is anything left to merge at all, and the second one is silent
+// in the first one's vocabulary.
+type MergeRead struct {
+	// Mergeable is the NORMALISED word, so "" from the server is `UNKNOWN`
+	// rather than an empty string the caller would have to re-interpret.
+	Mergeable string
+	// Terminal is `MERGED`, `CLOSED`, or "" when the pull request is still
+	// open — `TerminalPRState`'s answer, not a raw field.
+	Terminal string
+}
+
+// Mergeability re-reads the merge state.
+func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) (MergeRead, error) {
 	payload, err := json.Marshal(map[string]any{
 		"query": MergeableQuery,
 		"variables": map[string]any{
@@ -431,17 +480,17 @@ func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) 
 		},
 	})
 	if err != nil {
-		return "", err
+		return MergeRead{}, err
 	}
 	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return "", err
+		return MergeRead{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	body, err := c.do(ctx, req)
 	if err != nil {
-		return "", err
+		return MergeRead{}, err
 	}
 
 	var r struct {
@@ -449,31 +498,66 @@ func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) 
 			Repository *struct {
 				PullRequest *struct {
 					Mergeable string `json:"mergeable"`
+					State     string `json:"state"`
+					Merged    bool   `json:"merged"`
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return MergeRead{}, &APIError{State: AuthOther, Detail: "unreadable response: " + err.Error()}
+	}
+	if gqlErr := c.decodeGQLError(body); gqlErr != nil {
+		return MergeRead{}, gqlErr
+	}
+	if r.Data.Repository == nil || r.Data.Repository.PullRequest == nil {
+		return MergeRead{}, &APIError{
+			State:  AuthNotFound,
+			Detail: fmt.Sprintf("%s/%s#%d is not a pull request this token can read", owner, name, num),
+		}
+	}
+	pr := r.Data.Repository.PullRequest
+	return MergeRead{
+		Mergeable: NormalizeMergeable(pr.Mergeable),
+		Terminal:  TerminalPRState(pr.State, pr.Merged),
+	}, nil
+}
+
+// decodeGQLError turns a GraphQL envelope's `errors[]` into the APIError both
+// GraphQL reads return — or nil when the envelope carries none.
+//
+// 🔴 ONE RULE, ONE PLACE, AND THE DUPLICATION IS WHY THE BUG EXISTED.
+// `Mergeability` and `decodeSnapshot` each carried a verbatim copy of this
+// mapping, and NEITHER of them redacted or clipped: `Detail: r.Errors[0].Message`
+// handed the server's own string straight to the UI while the REST path one
+// screen up did `clipDetail(c.redact(apiMessage(…)))`. A predicate open-coded at
+// N sites is typically wrong at N−1 of them in the same direction, and here it
+// was wrong at both. Consolidating is what makes the two agree by construction
+// rather than by anyone remembering.
+//
+// 🔴 REDACT FIRST, CLIP SECOND — the same order, for the same reason, as the
+// call site in `do`: clipping first could cut a reflected token in half and
+// leave the surviving prefix un-redacted.
+//
+// ⚠ An unparseable body is NOT this function's to report. Both callers decode
+// the body for their own shape first and answer `unreadable response` there, so
+// returning nil here means "no `errors[]` to speak of", never "the body was
+// fine".
+func (c *Client) decodeGQLError(body []byte) error {
+	var env struct {
 		Errors []struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return "", &APIError{State: AuthOther, Detail: "unreadable response: " + err.Error()}
+	if err := json.Unmarshal(body, &env); err != nil || len(env.Errors) == 0 {
+		return nil
 	}
-	if len(r.Errors) > 0 {
-		st := AuthOther
-		if r.Errors[0].Type == "NOT_FOUND" {
-			st = AuthNotFound
-		}
-		return "", &APIError{State: st, Detail: r.Errors[0].Message}
+	st := AuthOther
+	if env.Errors[0].Type == "NOT_FOUND" {
+		st = AuthNotFound
 	}
-	if r.Data.Repository == nil || r.Data.Repository.PullRequest == nil {
-		return "", &APIError{
-			State:  AuthNotFound,
-			Detail: fmt.Sprintf("%s/%s#%d is not a pull request this token can read", owner, name, num),
-		}
-	}
-	return NormalizeMergeable(r.Data.Repository.PullRequest.Mergeable), nil
+	return &APIError{State: st, Detail: clipDetail(c.redact(env.Errors[0].Message))}
 }
 
 // --- decoding ---------------------------------------------------------------
@@ -487,10 +571,9 @@ type gqlResponse struct {
 			Node *gqlNode `json:"issueOrPullRequest"`
 		} `json:"repository"`
 	} `json:"data"`
-	Errors []struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"errors"`
+	// ⚠ NO `errors` FIELD. It used to be declared here and decoded inline, which
+	// is how this path came to render an unredacted, unclipped server string.
+	// `Client.decodeGQLError` owns that half of the envelope for BOTH reads.
 }
 
 type gqlActor struct {
@@ -582,21 +665,22 @@ type gqlNode struct {
 	} `json:"rollup"`
 }
 
-// ErrNotFound is returned when the reference does not resolve. 🔴 A GraphQL
-// 200 with `repository: null` is the SAME user-facing condition as a REST 404
-// — "not visible to this token" — and collapsing them here is what stops the
-// UI needing two code paths for one meaning.
-func decodeSnapshot(body []byte, repo string, num int) (*Snapshot, error) {
+// decodeSnapshot turns the one GraphQL read into a Snapshot.
+//
+// 🔴 A GraphQL 200 with `repository: null` is the SAME user-facing condition as
+// a REST 404 — "not visible to this token" — and collapsing them here is what
+// stops the UI needing two code paths for one meaning.
+//
+// ⚠ A METHOD, NOT A FREE FUNCTION, AND THAT IS THE POINT OF THE CHANGE. It has
+// to reach `Client.redact` to hand `errors[0].message` to the UI safely, and a
+// decoder with no client is a decoder that structurally cannot redact.
+func (c *Client) decodeSnapshot(body []byte, repo string, num int) (*Snapshot, error) {
 	var r gqlResponse
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, &APIError{State: AuthOther, Detail: "unreadable response: " + err.Error()}
 	}
-	if len(r.Errors) > 0 {
-		st := AuthOther
-		if r.Errors[0].Type == "NOT_FOUND" {
-			st = AuthNotFound
-		}
-		return nil, &APIError{State: st, Detail: r.Errors[0].Message}
+	if gqlErr := c.decodeGQLError(body); gqlErr != nil {
+		return nil, gqlErr
 	}
 	if r.Data.Repository == nil || r.Data.Repository.Node == nil {
 		return nil, &APIError{

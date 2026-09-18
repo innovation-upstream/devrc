@@ -162,6 +162,48 @@ func TestAnEmptyOrUnparseableBodyStillYieldsTheStatusLine(t *testing.T) {
 	}
 }
 
+// 🔴 AN `errors` KEY THAT IS NOT AN ARRAY STILL YIELDS THE MESSAGE.
+//
+// `apiMessage`'s wide decode declares `errors` as `[]json.RawMessage`, so a body
+// where that key holds anything else fails the whole unmarshal — including the
+// `message` beside it, which is perfectly readable. The narrow retry exists for
+// exactly that, and until now it had NO TEST while its comment asserted the
+// shape as established fact. The comment is now honest about the evidence
+// (no response this program has captured carries it) and this pins the
+// behaviour, which IS measured.
+//
+// ⚠ THE EXPECTED STRING IS THE WHOLE COMPOSED DETAIL, not a `Contains`. A
+// substring check would pass for a renderer that also emitted an empty
+// `[…]` bracket group or dropped the status prefix.
+func TestAnErrorsKeyThatIsNotAnArrayStillYieldsTheMessage(t *testing.T) {
+	want := statusLine(http.StatusUnprocessableEntity) + ": Validation Failed"
+	for _, shape := range []string{
+		`{"message":"Validation Failed","errors":"boom"}`,
+		`{"message":"Validation Failed","errors":7}`,
+		`{"message":"Validation Failed","errors":{"field":"q"}}`,
+	} {
+		t.Run(shape, func(t *testing.T) {
+			c, done := newErrorClient(t, "tok-apimessage-fixture",
+				http.StatusUnprocessableEntity, shape)
+			defer done()
+			if got := detailOf(t, c); got != want {
+				t.Errorf("detail = %q, want %q — the readable `message` was thrown "+
+					"away because a sibling key failed to parse", got, want)
+			}
+		})
+	}
+	// POSITIVE CONTROL: the SAME message with `errors` as a real array renders
+	// MORE than the string above, so the equality is a claim about the narrow
+	// retry rather than about a renderer that only ever emits status+message.
+	c, done := newErrorClient(t, "tok-apimessage-fixture", http.StatusUnprocessableEntity,
+		`{"message":"Validation Failed","errors":[{"resource":"Search","field":"q","code":"missing"}]}`)
+	defer done()
+	if got := detailOf(t, c); got == want {
+		t.Fatal("an `errors` ARRAY rendered identically to a non-array one — the wide " +
+			"decode is wired to nothing and every case above proves nothing")
+	}
+}
+
 // 🔴 THE CAP IS REAL AND THE REMAINDER IS COUNTED. A clipped list that did not
 // say it was clipped would be the quietly-short-file-list defect in a card.
 func TestTheErrorEntryCapBoundsTheListAndReportsTheRemainder(t *testing.T) {

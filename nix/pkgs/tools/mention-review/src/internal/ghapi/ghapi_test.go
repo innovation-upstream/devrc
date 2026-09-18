@@ -76,6 +76,19 @@ func TestA403WithBudgetLeftIsNotCalledRateLimited(t *testing.T) {
 
 // --- decodeSnapshot ----------------------------------------------------------
 
+// decodeFixture decodes a body through a real client, because `decodeSnapshot`
+// is a METHOD now — it has to reach `Client.redact` before it can put a server
+// string into an error.
+//
+// ⚠ THE TOKEN IS A NON-EMPTY FIXTURE THAT APPEARS IN NO BODY BELOW. An empty
+// token would make `redact` a no-op, so every test in this file would be
+// decoding through a client that structurally cannot redact — a green that
+// proves nothing about the shipped path. The leak tests further down supply
+// their own token and their own body carrying it.
+func decodeFixture(body []byte, repo string, num int) (*Snapshot, error) {
+	return NewClient("tok-decode-fixture-appears-in-no-body", nil).decodeSnapshot(body, repo, num)
+}
+
 const prFixture = `{"data":{
   "viewer":{"login":"a-reviewer"},
   "repository":{"issueOrPullRequest":{
@@ -122,7 +135,7 @@ const prFixture = `{"data":{
 }}`
 
 func TestDecodeAPullRequestPopulatesEveryPanel(t *testing.T) {
-	s, err := decodeSnapshot([]byte(prFixture), "gardenersguild/trowelcast", 1559)
+	s, err := decodeFixture([]byte(prFixture), "gardenersguild/trowelcast", 1559)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +217,7 @@ func TestAPagedFileListIsMarkedTruncated(t *testing.T) {
 	node["files"].(map[string]any)["pageInfo"].(map[string]any)["hasNextPage"] = true
 	raw, _ := json.Marshal(doc)
 
-	s, err := decodeSnapshot(raw, "gardenersguild/trowelcast", 1559)
+	s, err := decodeFixture(raw, "gardenersguild/trowelcast", 1559)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +226,7 @@ func TestAPagedFileListIsMarkedTruncated(t *testing.T) {
 	}
 	// And the negative control, from the unmodified fixture, so "true" above is
 	// a claim about the field rather than about a constant.
-	s2, _ := decodeSnapshot([]byte(prFixture), "gardenersguild/trowelcast", 1559)
+	s2, _ := decodeFixture([]byte(prFixture), "gardenersguild/trowelcast", 1559)
 	if s2.FilesTruncated {
 		t.Error("the unmodified fixture also reports truncated — the field is ignored")
 	}
@@ -238,7 +251,7 @@ const issueFixture = `{"data":{
 // kind — and must not find out, because it carries a test-pinned property that
 // THE CLICK PATH MAKES NO NETWORK CALL.
 func TestDecodeAnIssueYieldsTheCardFieldsAndNoPRFields(t *testing.T) {
-	s, err := decodeSnapshot([]byte(issueFixture), "gardenersguild/trowelcast", 1656)
+	s, err := decodeFixture([]byte(issueFixture), "gardenersguild/trowelcast", 1656)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +271,7 @@ func TestDecodeAnIssueYieldsTheCardFieldsAndNoPRFields(t *testing.T) {
 }
 
 func TestANullRepositoryIsReportedAsNotFound(t *testing.T) {
-	s, err := decodeSnapshot([]byte(`{"data":{"viewer":{"login":"x"},"repository":null}}`),
+	s, err := decodeFixture([]byte(`{"data":{"viewer":{"login":"x"},"repository":null}}`),
 		"gardenersguild/trowelcast", 1559)
 	if s != nil {
 		t.Errorf("returned a snapshot for a null repository: %+v", s)
@@ -277,7 +290,7 @@ func TestANullRepositoryIsReportedAsNotFound(t *testing.T) {
 
 func TestAGraphQLNotFoundErrorIsReportedAsNotFound(t *testing.T) {
 	body := `{"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"}]}`
-	_, err := decodeSnapshot([]byte(body), "gardenersguild/trowelcast", 1559)
+	_, err := decodeFixture([]byte(body), "gardenersguild/trowelcast", 1559)
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.State != AuthNotFound {
 		t.Fatalf("err = %v, want a NOT_FOUND APIError", err)
@@ -359,32 +372,182 @@ func TestAnEmptyTokenShortCircuitsBeforeTheNetwork(t *testing.T) {
 
 // 🔴 THE TOKEN IS NEVER IN AN ERROR. §10.4: the cards say which condition holds
 // and nothing more.
+//
+// 🔴 THE NAME IS A UNIVERSAL CLAIM, SO THE IMPLEMENTATION HAS TO BE ONE — AND
+// FOR A WHILE IT WAS NOT. This test used to exercise exactly one path: an HTTP
+// 401 whose BODY echoed the credential, decoded by `do`. It read as coverage of
+// every error path while providing coverage of one, which is worse than no
+// coverage because it stops anyone looking. It did not cover the GraphQL 200
+// carrying `errors[0].message`, and that path was genuinely leaking: both
+// `Fetch` and `Mergeability` returned `Detail: r.Errors[0].Message` raw, with no
+// `redact` and no `clipDetail`.
+//
+// 🔴 THE LEDGER BELOW IS THE CLAIM. Every one of these is a path that turns
+// SERVER-SUPPLIED text into an `APIError.Detail` the UI renders:
+//
+//  1. an HTTP failure status, body decoded by `apiMessage` inside `do`;
+//  2. a GraphQL 200 whose `errors[]` is decoded by the panel read (`Fetch`);
+//  3. a GraphQL 200 whose `errors[]` is decoded by the merge gate's read
+//     (`Mergeability`).
+//
+// Paths NOT listed carry no server text at all: `unreadable response: …` is the
+// JSON decoder's own prose, and the NOT-FOUND details are composed from the
+// owner/name/number this program already holds. If a fourth reflecting path is
+// added, it belongs in this ledger.
 func TestNoErrorPathEverCarriesTheToken(t *testing.T) {
 	const secret = "gho_thisisnotarealtokenitisatestfixture"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		// Even a server that echoes the credential back must not get it into
-		// an error the UI renders.
-		_, _ = w.Write([]byte(`{"message":"Bad credentials for ` + secret + `"}`))
-	}))
-	defer srv.Close()
 
-	c := NewClient(secret, srv.Client())
-	c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
-	_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
-	if err == nil {
-		t.Fatal("expected an error")
+	// Each case answers ONE canned body and then calls ONE client method.
+	paths := []struct {
+		name   string
+		status int
+		body   string
+		call   func(*Client) error
+	}{
+		{
+			name:   "an HTTP failure body decoded by `do`",
+			status: http.StatusUnauthorized,
+			body:   `{"message":"Bad credentials for ` + secret + `"}`,
+			call: func(c *Client) error {
+				_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+				return err
+			},
+		},
+		{
+			name:   "a GraphQL errors[] entry on the panel read",
+			status: http.StatusOK,
+			body: `{"errors":[{"type":"FORBIDDEN","message":"the credential ` + secret +
+				` may not read this"}]}`,
+			call: func(c *Client) error {
+				_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+				return err
+			},
+		},
+		{
+			name:   "a GraphQL errors[] entry on the merge gate's read",
+			status: http.StatusOK,
+			body: `{"errors":[{"type":"FORBIDDEN","message":"the credential ` + secret +
+				` may not read this"}]}`,
+			call: func(c *Client) error {
+				_, err := c.Mergeability(context.Background(), "gardenersguild", "trowelcast", 1559)
+				return err
+			},
+		},
 	}
-	// ⚠ THE SERVER ECHOED IT, SO THIS *CAN* FAIL — which is what makes the
-	// assertion evidence rather than a tautology. The client must not reflect
-	// the credential out of a response body it did not construct.
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("the token leaked into an error string: %q", err.Error())
+
+	for _, p := range paths {
+		t.Run(p.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Even a server that echoes the credential back must not get it
+				// into an error the UI renders.
+				w.WriteHeader(p.status)
+				_, _ = w.Write([]byte(p.body))
+			}))
+			defer srv.Close()
+
+			c := NewClient(secret, srv.Client())
+			c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+			err := p.call(c)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			// ⚠ THE SERVER ECHOED IT, SO THIS *CAN* FAIL — which is what makes the
+			// assertion evidence rather than a tautology. The client must not
+			// reflect the credential out of a response body it did not construct.
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("the token leaked into an error string: %q", err.Error())
+			}
+			// POSITIVE CONTROL 1: the error is not empty, so "does not contain" is
+			// not satisfied by there being no error text at all.
+			if err.Error() == "" {
+				t.Fatal("the error is empty — the leak check observed nothing")
+			}
+			// POSITIVE CONTROL 2: the redaction MARKER is present, so the check
+			// above is not satisfied by the whole message having been dropped.
+			if !strings.Contains(err.Error(), "<redacted>") {
+				t.Errorf("the server's message was discarded rather than redacted, so "+
+					"this case would pass with no redaction at all: %q", err.Error())
+			}
+		})
 	}
-	// The positive control: the error is not empty, so "does not contain" is
-	// not satisfied by there being no error text at all.
-	if err.Error() == "" {
-		t.Error("the error is empty — the leak check observed nothing")
+}
+
+// 🔴 A GRAPHQL `errors[0].message` IS CLIPPED LIKE EVERY OTHER DETAIL, AND IT
+// USED NOT TO BE.
+//
+// `maxDetailRunes`' own docstring says it "caps the WHOLE composed detail, after
+// redaction", and that sentence was false: the cap lived at the single call site
+// inside `do`, so a GraphQL 200 carrying a 5,000-rune `errors[0].message` went
+// to the UI at full length. Both GraphQL decoders share `decodeGQLError` now,
+// which is where the cap moved to.
+//
+// ⚠ THE CEILING IS ABSOLUTE AND IS NOT MADE OF THE CONSTANT UNDER TEST. A
+// mutant that raises `maxDetailRunes` still "clips", at its own number, so an
+// assertion phrased only against that constant cannot see it. Same trap, same
+// control, as `TestOnePathologicalEntryCannotBlowUpTheCard`.
+func TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail(t *testing.T) {
+	// 5,000 runes in one entry — the shape the auditor measured coming out
+	// intact at 5,057.
+	huge := strings.Repeat("qwertyuiop", 500)
+	body := `{"errors":[{"type":"INTERNAL","message":"` + huge + `"}]}`
+
+	calls := map[string]func(*Client) error{
+		"the panel read": func(c *Client) error {
+			_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+			return err
+		},
+		"the merge gate's read": func(c *Client) error {
+			_, err := c.Mergeability(context.Background(), "gardenersguild", "trowelcast", 1559)
+			return err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			c := NewClient("tok-graphql-clip-fixture", srv.Client())
+			c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+
+			err := call(c)
+			if err == nil {
+				t.Fatal("a GraphQL errors[] response was reported as a success")
+			}
+			var ae *APIError
+			if !errors.As(err, &ae) {
+				t.Fatalf("err is %T, want *APIError: %v", err, err)
+			}
+			const cardCeiling = 600
+			n := len([]rune(ae.Detail))
+			if n > cardCeiling {
+				t.Errorf("the detail is %d runes — past the %d-rune ceiling a single "+
+					"terminal line can carry, whatever `maxDetailRunes` says", n, cardCeiling)
+			}
+			if n != maxDetailRunes {
+				t.Errorf("the detail is %d runes, want it clipped to exactly %d", n, maxDetailRunes)
+			}
+			if !strings.HasSuffix(ae.Detail, "…") {
+				t.Errorf("a clipped detail must say it was clipped: %q", ae.Detail)
+			}
+			// POSITIVE CONTROL: a SHORT GraphQL message is not padded or cut, so
+			// the equality above is a claim about clipping rather than about a
+			// decoder that always emits the same length.
+			srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"errors":[{"type":"INTERNAL","message":"something went wrong"}]}`))
+			}))
+			defer srv2.Close()
+			c2 := NewClient("tok-graphql-clip-fixture", srv2.Client())
+			c2.SetBaseURLs(srv2.URL+"/graphql", srv2.URL)
+			err2 := call(c2)
+			var ae2 *APIError
+			if !errors.As(err2, &ae2) {
+				t.Fatalf("err2 is %T, want *APIError: %v", err2, err2)
+			}
+			if ae2.Detail != "something went wrong" {
+				t.Errorf("a short GraphQL message came back as %q, want it verbatim", ae2.Detail)
+			}
+		})
 	}
 }
 

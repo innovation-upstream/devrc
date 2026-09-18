@@ -39,6 +39,48 @@ func NormalizeMergeable(s string) string {
 	return t
 }
 
+// The `PullRequestState` enum, as WORDS, in one place — the same treatment the
+// mergeability vocabulary above gets, and for the same reason.
+const (
+	PRStateOpen   = "OPEN"
+	PRStateClosed = "CLOSED"
+	PRStateMerged = "MERGED"
+)
+
+// TerminalPRState answers "is this pull request already finished, and in which
+// word" — "" when it is not, `MERGED` or `CLOSED` when it is.
+//
+// 🔴 ONE PREDICATE, TWO CALLERS, AND THEY ARE IN DIFFERENT PACKAGES. The merge
+// gate in `write.go` refuses on the LIVE read; `ui.App.proposeMerge` refuses on
+// the SNAPSHOT so the keypress does not cost a round trip to be told no. Two
+// open-coded copies of "is this PR over" would be two chances to disagree about
+// what MERGED means, which is the shape this repo keeps re-fixing.
+//
+// 🔴 IT REFUSES ONLY ON A POSITIVELY TERMINAL ANSWER, AND THE ASYMMETRY IS
+// DELIBERATE. An empty or unrecognised `state` returns "" — NOT terminal —
+// because the cost of the two mistakes is not symmetric: reading an absent field
+// as CLOSED would refuse every merge the moment GitHub renamed or omitted it,
+// while reading it as OPEN costs at most one wasted write, which GitHub refuses
+// and the renderer now shows in full rather than as two words. A missing field
+// is a thing we do not know, and this function says so by declining to answer.
+//
+// ⚠ `merged` IS READ BESIDE `state`, not instead of it. They are separate
+// fields on the same object and GitHub has always agreed with itself about them;
+// taking either as sufficient means a response where only one of the two arrived
+// is still answered correctly.
+func TerminalPRState(state string, merged bool) string {
+	if merged {
+		return PRStateMerged
+	}
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case PRStateMerged:
+		return PRStateMerged
+	case PRStateClosed:
+		return PRStateClosed
+	}
+	return ""
+}
+
 // Kind is what `issueOrPullRequest`'s `__typename` answered.
 //
 // 🔴 THE SERVER ANSWERS THIS, NOT US. `mention-open.py` builds `/pull/{id}` for

@@ -121,6 +121,92 @@ func TestTheMergeIntentIsTheSameWhateverTheSnapshotSaysAboutMergeability(t *test
 	}
 }
 
+// 🔴 `m` ON A PULL REQUEST THAT IS ALREADY OVER RAISES NO CONFIRMATION AT ALL.
+//
+// `writeGate` answers loaded / is-a-PR / viewer-login-known, and NONE of those
+// is false for a merged pull request — so `m` was reachable on one, the client
+// spent its poll bound learning nothing (`mergeable` reads UNKNOWN forever once
+// a PR is not open), and the operator was told to press `m` again.
+//
+// ⚠ THIS LAYER READS THE SNAPSHOT, WHICH CAN BE STALE, SO IT IS NOT THE SAFETY
+// NET — `ghapi.Merge` re-reads live and refuses there too. This one exists so a
+// state already on screen does not cost a round trip to be refused. Both call
+// `ghapi.TerminalPRState`, so "already over" has ONE definition.
+//
+// ⚠ AND IT IS NOT IN `writeGate`: commenting on a merged pull request is
+// legitimate, and a refusal placed there would take the other four verbs with it
+// — which the last subtest asserts directly.
+func TestPressingMergeOnAPullRequestThatIsAlreadyOverRefusesAndEmitsNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		state  string
+		merged bool
+		want   string
+	}{
+		{"merged", ghapi.PRStateMerged, true, "MERGED"},
+		{"closed", ghapi.PRStateClosed, false, "CLOSED"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := ready(t)
+			snap := fixturePR()
+			snap.State, snap.Merged = tc.state, tc.merged
+			a, _ = a.Step(PRLoaded{Snap: snap})
+
+			next, intents := a.Step(keyPress("m"))
+
+			if len(intents) != 0 {
+				t.Fatalf("`m` on an already-%s pull request emitted %v", tc.want, intents)
+			}
+			if next.Mode() != ModeBrowse {
+				t.Errorf("`m` left the app in mode %s, want BROWSE — no confirmation "+
+					"should have been raised", next.Mode().Word())
+			}
+			if next.pending != nil {
+				t.Errorf("a merge confirmation is pending on an already-%s pull request: %+v",
+					tc.want, next.pending.Intent)
+			}
+			notice := next.Notice()
+			if !strings.HasPrefix(notice, "REFUSED") {
+				t.Errorf("notice = %q, want it to begin REFUSED", notice)
+			}
+			if !strings.Contains(notice, tc.want) {
+				t.Errorf("the refusal does not name the state %q: %q", tc.want, notice)
+			}
+			if !strings.Contains(notice, "NOTHING WAS SENT") {
+				t.Errorf("the refusal does not say that nothing was sent: %q", notice)
+			}
+		})
+	}
+	// 🔴 POSITIVE CONTROL ON THE PLACEMENT: an OPEN pull request still raises the
+	// confirmation, so the refusals above are a claim about the state rather than
+	// about `m` having stopped working.
+	t.Run("an open pull request still raises the confirmation", func(t *testing.T) {
+		next, intents := ready(t).Step(keyPress("m"))
+		if len(intents) != 0 {
+			t.Fatalf("`m` emitted %v — a merge must not be one keypress away", intents)
+		}
+		if next.Mode() != ModeConfirm || next.pending == nil {
+			t.Fatalf("`m` on an OPEN pull request raised no confirmation (mode %s)",
+				next.Mode().Word())
+		}
+	})
+	// 🔴 AND THE REFUSAL IS MERGE-ONLY. Put in `writeGate` it would refuse every
+	// write verb; commenting on a merged pull request is a normal thing to do.
+	t.Run("the other write verbs are untouched on a merged pull request", func(t *testing.T) {
+		a := ready(t)
+		snap := fixturePR()
+		snap.State, snap.Merged = ghapi.PRStateMerged, true
+		a, _ = a.Step(PRLoaded{Snap: snap})
+
+		next, _ := a.Step(keyPress("c"))
+		if next.Mode() != ModeCompose {
+			t.Errorf("`c` on a merged pull request left mode %s, want COMPOSE — the "+
+				"merge refusal has leaked into the shared write gate", next.Mode().Word())
+		}
+	})
+}
+
 func TestConfirmingAMergeEmitsExactlyThatIntent(t *testing.T) {
 	a := ready(t)
 	next, intents := pressAll(a, "m", "y")

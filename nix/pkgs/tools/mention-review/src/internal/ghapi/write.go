@@ -132,35 +132,55 @@ const (
 )
 
 // awaitMergeable reads mergeability, and keeps reading while it says UNKNOWN,
-// until it resolves or the bound is spent. It returns the last state seen and
-// how many reads it took.
+// until it resolves or the bound is spent. It returns the last read and how many
+// reads it took.
 //
 // 🔴 IT POLLS A READ. It does NOT retry a write: a merge that has already been
 // dispatched and failed is the operator's call, not this loop's.
-func (c *Client) awaitMergeable(ctx context.Context, owner, name string, num int) (string, int, error) {
+//
+// 🔴 A TERMINAL PULL REQUEST ENDS THE LOOP ON THE SPOT. `mergeable` is UNKNOWN
+// PERMANENTLY once a PR is merged or closed (measured — see `MergeableQuery`),
+// so polling one spends the whole bound to learn nothing. The caller refuses on
+// `Terminal` before it ever looks at `Mergeable`; breaking here is what stops
+// that refusal costing the whole poll bound in silence first.
+func (c *Client) awaitMergeable(ctx context.Context, owner, name string, num int) (MergeRead, int, error) {
 	attempts := c.pollAttempts
 	if attempts < 1 {
 		attempts = 1
 	}
-	state := MergeableUnknown
+	read := MergeRead{Mergeable: MergeableUnknown}
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				return state, i, ctx.Err()
+				return read, i, ctx.Err()
 			case <-time.After(c.pollInterval):
 			}
 		}
-		s, err := c.Mergeability(ctx, owner, name, num)
+		r, err := c.Mergeability(ctx, owner, name, num)
 		if err != nil {
-			return state, i + 1, err
+			return read, i + 1, err
 		}
-		state = s
-		if state != MergeableUnknown {
-			return state, i + 1, nil
+		read = r
+		if read.Terminal != "" || read.Mergeable != MergeableUnknown {
+			return read, i + 1, nil
 		}
 	}
-	return state, attempts, nil
+	return read, attempts, nil
+}
+
+// readsSpent says how much looking the gate did, in words a human can read.
+//
+// ⚠ IT EXISTS BECAUSE THE INLINE VERSION COULD LIE. The message used to call
+// every read a "re-read" — including the first, which re-reads nothing — and
+// compute the elapsed time as `(reads-1) * interval`, so a client configured
+// with one attempt printed "after 1 re-reads over 0s". A refusal that misstates
+// what it did is a refusal the operator cannot act on.
+func readsSpent(reads int, interval time.Duration) string {
+	if reads <= 1 {
+		return "1 read"
+	}
+	return fmt.Sprintf("%d reads over %s", reads, time.Duration(reads-1)*interval)
 }
 
 // Merge merges the pull request with the method it was given.
@@ -187,6 +207,12 @@ func (c *Client) awaitMergeable(ctx context.Context, owner, name string, num int
 //
 // The rule is the operator's own, recorded in
 // `claudedocs/handoff-mention-review-tui.md`: "never merge on a stale `CLEAN`".
+//
+// 🔴 THE SAME READ ANSWERS "IS THERE ANYTHING LEFT TO MERGE", AND IT HAS TO,
+// BECAUSE `mergeable` CANNOT. A merged or closed pull request reports
+// `mergeable: UNKNOWN` forever, so the poll below would spend its whole bound
+// and then tell the operator to press `m` again — on a PR where that can never
+// work. `state`/`merged` ride the same tiny query and are checked FIRST.
 //
 // ⚠ WHAT THE READ COSTS, MEASURED: a warm authenticated round trip is ~0.17 s
 // (see `Client`'s comment in query.go), spent on a keypress that is already
@@ -218,13 +244,48 @@ func (c *Client) Merge(ctx context.Context, owner, name string, num int, method 
 	// 🔴 NO CONDITION IN FRONT OF THIS CALL. Whatever guards it would test is a
 	// fact about a past read, and the thing being guarded against is that read
 	// having gone out of date.
-	state, reads, err := c.awaitMergeable(ctx, owner, name, num)
+	read, reads, err := c.awaitMergeable(ctx, owner, name, num)
 	if err != nil {
 		// 🔴 A FAILED READ IS NOT A GO-AHEAD. An error deciding "probably fine"
 		// is how a guard becomes decoration.
+		//
+		// ⚠ AND THE TRADE IS PAID IN FULL, NOT SOFTENED. The read is NOT retried:
+		// ONE transient 502 on the FIRST attempt aborts the merge with the rest
+		// of the bound unspent, and the operator sees a network error where
+		// they expected a merge. That is a real cost and it is chosen — a failed
+		// read cannot distinguish "the server hiccupped" from "the server is
+		// telling us something", and pressing `m` again is cheap while an
+		// unwanted merge is not. Do not read this loop as retrying anything.
 		return err
 	}
-	switch state {
+	if read.Terminal != "" {
+		// 🔴 A MERGED OR CLOSED PULL REQUEST IS NOT AN UNRESOLVED ONE, AND
+		// TELLING THE OPERATOR TO TRY AGAIN WOULD BE A FALSE STORY.
+		//
+		// MEASURED 2026-09-18 against the public `innovation-upstream/devrc` with
+		// a read-only GraphQL probe: `mergeable` answers `UNKNOWN` PERMANENTLY for
+		// any pull request that is not open (#1760 MERGED → UNKNOWN, #1701 CLOSED
+		// → UNKNOWN, #1761 OPEN → MERGEABLE), and `mergeStateStatus` says UNKNOWN
+		// too. Without this arm the gate below reads a merged PR as "still
+		// recomputing", spends the whole bound, and prints "press `m` again in a
+		// moment" — advice that can never come true, on a loop that never
+		// terminates.
+		//
+		// 🔴 THIS ARM IS A REGRESSION GUARD ON THE GATE ITSELF. Before the gate
+		// existed the merge PUT went out and GitHub refused it — reportedly with
+		// `405 Pull Request is not mergeable` — which the renderer one file over
+		// now shows in full rather than as two words. That is a TRUE, actionable
+		// answer, and a gate that replaced it with a false one would have made
+		// this whole change a net loss for the merged case.
+		//
+		// The wording says only what the read established, and deliberately does
+		// NOT tell the operator to retry.
+		return &APIError{State: AuthOther, Detail: fmt.Sprintf(
+			"refusing to merge: GitHub reports this pull request is already %s, "+
+				"so there is nothing to merge. NOTHING WAS SENT, and pressing `m` "+
+				"again will not change this.", read.Terminal)}
+	}
+	switch read.Mergeable {
 	case MergeableYes:
 		// Resolved, and resolved NOW. Fall through to the one write.
 	case MergeableUnknown:
@@ -249,13 +310,13 @@ func (c *Client) Merge(ctx context.Context, owner, name string, num int, method 
 		// instruction to the operator, not a verdict about the pull request.
 		return &APIError{State: AuthOther, Detail: fmt.Sprintf(
 			"refusing to merge: GitHub still reports mergeability UNKNOWN after "+
-				"%d re-reads over %s. It recomputes this whenever the base branch "+
-				"moves. NOTHING WAS SENT — press `m` again in a moment.",
-			reads, time.Duration(reads-1)*c.pollInterval)}
+				"%s. It recomputes this whenever the base branch moves. "+
+				"NOTHING WAS SENT — press `m` again in a moment.",
+			readsSpent(reads, c.pollInterval))}
 	default:
 		return &APIError{State: AuthOther, Detail: fmt.Sprintf(
 			"refusing to merge: GitHub reports mergeability %s, not %s. "+
-				"NOTHING WAS SENT.", state, MergeableYes)}
+				"NOTHING WAS SENT.", read.Mergeable, MergeableYes)}
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", c.rest, owner, name, num)
 	return c.write(ctx, http.MethodPut, url, map[string]any{"merge_method": method})
