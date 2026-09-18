@@ -32,12 +32,14 @@ loads, the client is happy, and the table quietly claims a scope nobody has.
 So the table ships flat and documentation-free, and the prose lives here and in
 the pointer comment beside the `home.file` entry in `nix/home.nix`.
 
-🔴 EVERY VALUE IS `personal` TODAY, AND THAT IS THE POINT OF THE PHASE, NOT AN
-OVERSIGHT. `personal` is `subsystem_read_store.DEFAULT_ALIAS` — the alias of the
-long-standing `~/.config/subsystem-store/env`, unmoved. Phase B's closing
-condition is "existing behaviour unchanged": the table is DEPLOYED and GRADED
-before any scope is re-assigned, so the registry exists before the cutover
-needs it (that cutover is phase E).
+🔴 VALUES WERE ALL `personal` UNTIL PHASE E (2026-09-18). They are not now: five
+scopes were re-pointed to `civitai` and one row added, after BOTH hosts were
+confirmed to carry `instances/civitai.env`. `personal` is still
+`subsystem_read_store.DEFAULT_ALIAS` — the long-standing
+`~/.config/subsystem-store/env`, unmoved — and is still the value for every
+scope phase E did not move. **The rule is no longer "all default"; it is "every
+value names an alias some host has a config for"**, pinned by
+`test_every_scope_routes_to_a_CONFIGURED_instance`.
 
 ⚠ AND ROUTING A SCOPE SOMEWHERE ELSE TODAY WOULD BREAK IT, WHICH IS THE
 NON-OBVIOUS HALF. It is tempting to read "one instance means routing is off" and

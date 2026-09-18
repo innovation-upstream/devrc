@@ -16,27 +16,30 @@ THE FIRST THING A READER SHOULD TAKE FROM THIS FILE. Nothing here reads
 in both tiers — and so it CANNOT say the table matches the scopes this machine
 holds. What it pins is that each direction of `Routing.check` has teeth in the
 configuration where teeth exist (`routing_for` at TWO aliases), and that the
-shipped table is well-formed and all-default.
+shipped table is well-formed and names only CONFIGURED aliases.
 
-⚠ THERE IS NO LIVE ARM, DELIBERATELY. A `drift-check.sh` arm running
-`cairn routes --check` was written and WITHDRAWN before merge: on a one-instance
-host over an all-default table, direction one produces no output at all
-(nothing refuses, so `check` appends nothing), direction three cannot fire (the
-only alias named is the one `discover()` always builds), and direction two is
-the NOTE cairn's own docstring calls undecidable from a snapshot. It belongs
-with the change that makes it reachable — the first host to configure a second
-instance.
+🔴 THERE IS STILL NO LIVE ARM, AND AS OF PHASE E THAT IS OWED WORK RATHER THAN A
+DECISION. A `drift-check.sh` arm running `cairn routes --check` was written and
+WITHDRAWN before merge, because on a one-instance host over an all-default table
+direction one produces no output at all (nothing refuses, so `check` appends
+nothing), direction three cannot fire (the only alias named is the one
+`discover()` always builds), and direction two is the NOTE cairn's own docstring
+calls undecidable from a snapshot. Its stated return condition was "the first
+host to configure a second instance" — **that condition was met on 2026-09-18 and
+this file's guard is a DECLARED ledger standing in for the live check.** The
+substitution is named here so it is not mistaken for the arm.
 
-🔴 WHY EVERY VALUE IS `personal`, WHICH IS THE ASSERTION MOST LIKELY TO BE
-"FIXED" BY SOMEONE READING IT AS A PLACEHOLDER. Phase B's closing condition is
-"existing behaviour unchanged"; the scope CUTOVER is a later phase. And the
-table is not inert until then: `Routing.alias_for` consults it FIRST whatever
-`multi_instance` says, so an entry naming an alias this host has no config for
-REFUSES — at ONE instance exactly as at many (row 3 of that method's docstring,
-pinned below by `test_control_row_three_refuses_even_at_one_instance`). Writing
-tomorrow's assignments today would therefore not lie dormant; it would make
-those scopes unreadable on every host until the matching `instances/<alias>.env`
-exists.
+🔴 VALUES ARE NO LONGER ALL `personal` — phase E (2026-09-18) re-pointed five
+scopes and added one, after BOTH hosts were confirmed to carry
+`instances/civitai.env`. The rule that replaced the all-default pin is
+`CONFIGURED_ALIASES`: a value may name any alias some host is declared to have a
+config for. **The table was never inert, and that is why the order matters:**
+`Routing.alias_for` consults it FIRST whatever `multi_instance` says, so an entry
+naming an alias this host has no config for REFUSES — at ONE instance exactly as
+at many (row 3 of that method's docstring, pinned below by
+`test_control_row_three_refuses_even_at_one_instance`). Writing tomorrow's
+assignments today does not lie dormant; it makes those scopes unreadable on every
+host until the matching `instances/<alias>.env` exists.
 
 🔴 AND NOTE WHAT DIRECTION ONE NEEDS. "A scope exists and the table does not name
 it" is only a PROBLEM with more than one instance — at one, `alias_for` resolves
@@ -62,15 +65,17 @@ import cairn_routes  # noqa: E402
 HOME_NIX = REPO_ROOT / "nix" / "home.nix"
 
 # 🔴 VACUITY FLOOR on the table itself. Every other assertion in this module is
-# satisfied by an EMPTY table: "every value is personal" is true of no values,
-# and both reconciliation directions report nothing. 25 scopes were measured on
-# the synced store when this landed (2026-09-15); the floor is set below that so
-# an ordinary prune is not a gate failure, but a table that has collapsed is.
+# satisfied by an EMPTY table: "every value names a configured alias" is true of
+# no values, and both reconciliation directions report nothing. 25 scopes were
+# measured on the synced store when this landed (2026-09-15) and 26 after phase E
+# added a row (2026-09-18); the floor is set below that so an ordinary prune is
+# not a gate failure, but a table that has collapsed is.
 MIN_SCOPES = 20
 
-# The alias every entry carries today, and the one this repo's hosts have a
-# config for. Not spelled — read from cairn, so a rename upstream reds this file
-# rather than silently making the whole table unroutable.
+# The DEFAULT alias — the one a host has without configuring anything. Since phase
+# E it is no longer the only value in the table. Not spelled — read from cairn, so
+# a rename upstream reds this file rather than silently making the whole table
+# unroutable.
 PERSONAL = cairn_routes.DEFAULT_ALIAS
 
 # A second alias NO host configures, used only to make `routing_for` model a
@@ -118,15 +123,22 @@ def test_the_shipped_table_parses_under_cairns_own_reader(table):
 
 
 #: 🔴 THE ALIASES SOME HOST IS KNOWN TO HAVE A CONFIG FILE FOR. Adding a member is
-#: the DELIBERATE ACT this module exists to make visible, and it is only correct
-#: AFTER every host carries `~/.config/subsystem-store/instances/<alias>.env`.
+#: only correct AFTER every host carries
+#: `~/.config/subsystem-store/instances/<alias>.env`.
 #:
-#: Why a declared ledger and not a live check: `Routing.alias_for` refuses a table
-#: entry naming an alias THIS host has no config for — at one configured instance
-#: exactly as at many — so a premature re-point does not lie dormant, it breaks the
-#: scope on every machine immediately. But CI has no instance files at all, so a
-#: test cannot observe the real precondition. What it CAN do is force the widening
-#: to appear in a reviewable diff, next to this comment.
+#: 🔴 BE HONEST ABOUT WHAT THIS IS: a DECLARATION, not a measurement, and it CANNOT
+#: CHECK ITS OWN STATED CONDITION. The instance files live on two hosts and CI has
+#: none, so nothing here observes whether an alias is really configured. It is a
+#: stand-in for the `drift-check.sh` `[routes]` arm described in this module's
+#: docstring, which became reachable at phase E and has not been built.
+#: **Do not read a green run as evidence that an alias is configured anywhere.**
+#: What it does buy: a widening cannot be a silent side effect of re-pointing a
+#: scope, because it has to appear here, next to this paragraph.
+#:
+#: An earlier revision also pinned this set with `== {"personal", "civitai"}` in a
+#: second test. That was deleted: with one source three lines above the assertion,
+#: it compared a constant to its own literal, re-hardcoded the alias `PERSONAL`
+#: deliberately does not spell, and duplicated the subset check below.
 #:
 #:   personal — `~/.config/subsystem-store/env`, the long-standing default.
 #:   civitai  — `instances/civitai.env`, added 2026-09-18 (phase D) and verified
@@ -159,23 +171,6 @@ def test_every_scope_routes_to_a_CONFIGURED_instance(table):
         f"first, verify with `cairn routes`, and only then add the alias to "
         f"CONFIGURED_ALIASES above."
     )
-
-
-def test_the_CONFIGURED_ALIASES_ledger_is_pinned(table):
-    """🔴 FAILS WHEN THE SET GROWS *OR* SHRINKS — the point is that widening it
-    cannot be a silent side effect of re-pointing a scope.
-
-    Without this, a scope could be sent to a brand-new alias by adding that alias
-    to `CONFIGURED_ALIASES` in the same edit, and the test above would pass while
-    every read of that scope refused on both machines.
-    """
-    assert CONFIGURED_ALIASES == {"personal", "civitai"}, (
-        "CONFIGURED_ALIASES changed. That is allowed, and it is exactly the "
-        "moment to prove the precondition: every host must ALREADY carry "
-        "`instances/<alias>.env` for each member. Update this pin in the same "
-        "commit, and say in the message which hosts you checked."
-    )
-    assert set(cairn_routes.aliases_used(table)) <= CONFIGURED_ALIASES
 
 
 def test_the_keys_are_sorted_so_an_edit_is_a_one_line_diff(table):
