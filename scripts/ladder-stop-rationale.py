@@ -789,7 +789,20 @@ def main(argv=None, runner=None, out_stream=sys.stdout, err_stream=sys.stderr):
                                           for f in facts]))
     else:
         for repo in args.repo:
-            carriers, note = lrc.find_carriers(runner, repo, limit=args.limit)
+            # 🔴 `ad` IS THE FIRST ARGUMENT, and omitting it is not a style
+            # slip: `find_carriers(ad, runner, repo, …)` takes the fence
+            # grammar from `audit-dispatch.py` rather than re-typing it, so the
+            # module is a parameter. Shipped without it in #1643, which made
+            # every non-`--facts-file` run a `TypeError` — the live path had
+            # never run. Pinned behaviourally by
+            # `test_the_live_repo_path_actually_CALLS_the_shared_enumerator`.
+            #
+            # 🔴 `state="all"` IS EXPLICIT BECAUSE THIS CONSUMER DEPENDS ON IT.
+            # The `not-terminated` class exists only for OPEN PRs; a narrower
+            # state would drop them from the population and every live ladder
+            # would silently be classified as though it had stopped.
+            carriers, note = lrc.find_carriers(ad, runner, repo,
+                                               limit=args.limit, state="all")
             notes.append(note)
             per_repo.append((repo, [classify_carrier(ad, f) for f in carriers]))
 
