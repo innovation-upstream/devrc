@@ -724,11 +724,16 @@ func TestTheDiffIsReadableBeforeThePanelQueryAnswers(t *testing.T) {
 
 // 🔴 `tab` MUST CYCLE ALL FOUR PANELS WHILE THE SKELETON IS UP.
 //
-// `nextFocusable` used to ask `isPullRequest()`, which is false for the WHOLE
-// loading window because `Snap` is still nil. So the first `tab` collapsed focus
-// to Overview and every later press re-entered the same arm and stayed there —
-// through `DiffLoaded`, through `PRLoaded`, forever. `j`/`k` then scrolled an
+// `nextFocusable` used to ask whether a PULL REQUEST had loaded, which is false
+// for the WHOLE loading window because `Snap` is still nil. So the first `tab`
+// collapsed focus to Overview and every later press re-entered the same arm and
+// stayed there, for as long as the panel query was out — `j`/`k` scrolling an
 // empty Overview body while a readable diff sat one pane to the right.
+//
+// ⚠ A DEAD WINDOW, NOT A DEAD SESSION. An earlier version of this comment said
+// "forever"; MEASURED at e2154173 focus recovers on the first press AFTER
+// `PRLoaded` (`1 Overview` → tab → `2 Commits`). The window is the panel query's
+// latency, a measured median 855 ms here — worth fixing, and bounded.
 //
 // ⚠ THE SKELETON IS WHAT MADE THIS REACHABLE, WHICH IS WHY IT IS THIS PR'S BUG
 // TO FIX. The latent state existed at base, but a loading App drew a full-width
@@ -932,16 +937,98 @@ func TestRetryFiresOnADiffFailureOverAHealthyPage(t *testing.T) {
 // ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes at the base of the
 // fix too, because `r` was inert everywhere there. It is the half that stops the
 // fix from being written as "always retry".
-func TestRetryIsStillInertOnAHealthyScreen(t *testing.T) {
-	if _, intents := ready(t).Step(keyPress("r")); len(intents) != 0 {
-		t.Errorf("`r` on a fully loaded screen emitted %v — re-fetching would "+
-			"move the cursor out from under the operator", intents)
+// 🔴 EVERY CONJUNCT OF `diffIsRetryable` GETS ITS OWN STATE HERE, BECAUSE ALL
+// THREE SURVIVED MUTATION WHEN THIS TEST ONLY DROVE TWO SCREENS. An audit cut
+// one mutant per term and each one lived through the whole package: the test
+// exercised a loaded pull request and the skeleton, and neither distinguishes
+// the terms. The states below are chosen so that exactly one term is what stops
+// the key in each — which is what makes them kill their own mutant rather than
+// die on somebody else's condition.
+func TestRetryIsStillInertOnEveryScreenThatDoesNotOfferIt(t *testing.T) {
+	const detail = "the patch endpoint reset the connection"
+	diffErr := DiffLoaded{Err: &ghapi.APIError{State: ghapi.AuthOther, Detail: detail}}
+
+	cases := []struct {
+		name string
+		why  string
+		app  App
+	}{
+		{
+			"fully loaded pull request",
+			"`Diff == nil` is the term that stops it — the page is READY and " +
+				"nothing failed, so re-fetching would move the cursor",
+			ready(t),
+		},
+		{
+			"skeleton, nothing failed yet",
+			"`Load == LoadReady` is the term — both reads are still in flight, " +
+				"so this would duplicate them",
+			sized(t),
+		},
+		{
+			// 🔴 THE ONE THE OLD TEST NEVER BUILT, AND THE WORST MUTANT.
+			// An issue sits at LoadReady with Diff == nil and Err == nil, so
+			// `Err != nil` is the ONLY term standing between `r` and a
+			// guaranteed 404 against `/pulls/{issue}/files` — which
+			// `diffResultIsMoot` then swallows, so the operator sees NOTHING
+			// while the tool hammers the API for as long as they keep pressing.
+			"issue card",
+			"`Err != nil` is the term — an issue is READY with no diff and no error",
+			func() App {
+				a, _ := sized(t).Step(PRLoaded{Snap: fixtureIssue()})
+				return a
+			}(),
+		},
+		{
+			// 🔴 A DIFF FAILURE THAT ARRIVED BEFORE THE PANELS. Only reachable
+			// since the reads went parallel. Here `Err != nil` and `Diff == nil`
+			// both hold, so `Load == LoadReady` is the only term left — and the
+			// Diff panel says LOADING DIFF here, advertising nothing, so a press
+			// would be invisible work.
+			"diff failed first, panel query still out",
+			"`Load == LoadReady` is the term — the panel says LOADING DIFF",
+			func() App {
+				a, _ := sized(t).Step(diffErr)
+				return a
+			}(),
+		},
+		{
+			// 🔴 AFTER A SUCCESSFUL RETRY. Nothing clears `Err` once the diff
+			// lands, so this screen has `Err != nil` AND `Load == LoadReady`;
+			// `Diff == nil` is the only term stopping `r` from looping.
+			"diff failed, then a retry succeeded",
+			"`Diff == nil` is the term — the diff is back, so `r` must stop",
+			func() App {
+				a := deliver(t, false, PRLoaded{Snap: fixturePR()}, diffErr)
+				a, _ = a.Step(keyPress("r"))
+				a, _ = a.Step(DiffLoaded{Diff: fixtureDiff(t)})
+				return a
+			}(),
+		},
 	}
-	// And on the skeleton, where nothing has failed and both reads are already
-	// in flight.
-	if _, intents := sized(t).Step(keyPress("r")); len(intents) != 0 {
-		t.Errorf("`r` during the skeleton emitted %v — both reads are already "+
-			"in flight, so this would duplicate them", intents)
+
+	for _, c := range cases {
+		// The screen must not be advertising the key either — the legend and the
+		// key are one predicate now, so a state where `r` is inert must also be a
+		// state where nothing offered it.
+		if screen := stripANSI(c.app.render()); strings.Contains(screen, "`r` retries") {
+			t.Errorf("%s: the screen OFFERS `r` on a state where it is inert — "+
+				"the legend and the key have come apart\n%s", c.name, screen)
+		}
+		if _, intents := c.app.Step(keyPress("r")); len(intents) != 0 {
+			t.Errorf("%s: `r` emitted %v, want nothing (%s)", c.name, intents, c.why)
+		}
+	}
+
+	// 🔴 POSITIVE CONTROL. Five states in which `r` does nothing is also what a
+	// program with no retry at all produces. The screen that DOES offer the key
+	// must still fire it — asserted by value.
+	live := deliver(t, false, PRLoaded{Snap: fixturePR()}, diffErr)
+	_, intents := live.Step(keyPress("r"))
+	want := []Intent{FetchDiff{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	if !intentsEqual(intents, want) {
+		t.Fatalf("the retryable screen emitted %v, want %v — the five zeros above "+
+			"are a claim about a key that was never wired", intents, want)
 	}
 }
 

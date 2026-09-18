@@ -311,11 +311,16 @@ func (a App) diffBody() string {
 		// skeleton of every issue the operator opens, one frame before the issue
 		// card replaces it.
 		//
+		// 🔴 THE PREDICATE IS `diffIsRetryable`, NOT A SECOND SPELLING OF IT.
+		// This arm prints "`r` retries" and `act`'s `ActRetry` arm is what makes
+		// `r` do something; they were two inline conditions that happened to
+		// agree, and nothing bound them. See `diffIsRetryable`'s header for why
+		// each of its three terms is load-bearing.
+		//
 		// ⚠ `LoadFailed` CANNOT REACH HERE — `render` takes the error-card arm
-		// first — so this reads as the two states that can: LOADING (say
-		// nothing yet) and READY (this really is a pull request whose diff
-		// failed).
-		if a.Err != nil && a.Load == LoadReady {
+		// first — so the states that can are LOADING (say nothing yet) and READY
+		// (this really is a pull request whose diff failed).
+		if a.diffIsRetryable() {
 			return lipgloss.JoinVertical(lipgloss.Left,
 				styBad.Render("DIFF UNAVAILABLE"),
 				"",

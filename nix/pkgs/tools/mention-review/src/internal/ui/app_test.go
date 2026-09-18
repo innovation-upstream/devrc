@@ -293,9 +293,18 @@ func TestOpenBrowserWorksOnAFailureCard(t *testing.T) {
 	}
 }
 
-// `r` re-fetches ONLY from a failed state, and it is inert otherwise —
-// re-fetching under the operator would move the cursor out from under them.
-func TestRetryOnlyFiresFromAFailedState(t *testing.T) {
+// `r` on a FAILED PAGE re-reads both legs, and it is inert on a screen with
+// nothing wrong with it — re-fetching under the operator would move the cursor
+// out from under them.
+//
+// 🔴 THIS IS NO LONGER THE WHOLE CONTRACT FOR `r`, AND THE NAME USED TO SAY IT
+// WAS. It was `TestRetryOnlyFiresFromAFailedState`, which is the first thing
+// anyone greps when asking "when does `r` fire?" — and since the diff-retry
+// landed, "only from a failed state" is false. The OTHER firing condition is
+// `diffIsRetryable()` (a healthy page whose diff failed), covered by
+// `TestRetryFiresOnADiffFailureOverAHealthyPage` in `coldopen_test.go`. A test
+// name that asserts a contract the payload has broken is worse than no name.
+func TestRetryOnAFailedPageRefetchesBothLegs(t *testing.T) {
 	a := New(fxOwner, fxName, fxNum)
 	a, _ = a.Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthRateLimited}})
 	next, intents := a.Step(keyPress("r"))

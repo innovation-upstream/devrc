@@ -418,22 +418,25 @@ func (a App) act(act Action) (App, []Intent) {
 		}
 		// 🔴 A FAILED DIFF OVER A HEALTHY PAGE IS RETRYABLE, AND IT IS THE ONE
 		// SCREEN THAT ADVERTISES THIS KEY. `diffBody`'s failure arm prints
-		// "`r` retries · `o` opens it in the browser", and until now `r` there
-		// returned nothing at all — a legend that lies, which is the exact defect
-		// the generated footer exists to prevent one pane over.
+		// "`r` retries · `o` opens it in the browser", and `r` there returned
+		// nothing at all — a legend that lies, which is the exact defect the
+		// generated footer exists to prevent one pane over.
 		//
-		// 🔴 IT IS NOT A HYPOTHETICAL SCREEN EITHER. `stepWriteDone` re-reads
-		// BOTH legs after a successful write, so a diff leg that fails on that
-		// re-read lands the operator on DIFF UNAVAILABLE with the success notice
-		// still on the bar — a state that could not be reached before the reads
-		// were paired.
+		// ⚠ THAT SCREEN IS A PRE-EXISTING `main` DEFECT, NOT ONE THIS PR CREATED,
+		// AND AN EARLIER WORDING HERE CLAIMED OTHERWISE. It said the state "could
+		// not be reached before the reads were paired"; MEASURED on `main` at
+		// 2b131bf2, driving WriteDone{ok} -> PRLoaded{ok} -> FetchDiff ->
+		// DiffLoaded{Err} reaches DIFF UNAVAILABLE with the legend up, the success
+		// notice still on the bar, and `r` emitting nothing. Pairing the reads
+		// changed WHICH MESSAGE emits the diff read, not whether this screen
+		// exists. The fix is still right; the justification was not.
 		//
 		// ⚠ ONLY THE DIFF, AND THE SNAPSHOT IS LEFT ALONE. Re-reading the panels
 		// would rebuild the file tree and clamp the cursors under the operator,
 		// which is what the "inert on a healthy screen" rule below is protecting.
 		// Nothing is being scrolled out from under anyone here: `Diff == nil` is
 		// precisely the state in which there is no diff cursor to move.
-		if a.Load == LoadReady && a.Diff == nil && a.Err != nil {
+		if a.diffIsRetryable() {
 			return a, []Intent{FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num}}
 		}
 		// ⚠ `r` IS INERT ON AN OTHERWISE HEALTHY SCREEN, DELIBERATELY.
@@ -511,9 +514,10 @@ func (a App) act(act Action) (App, []Intent) {
 // 🔴 ONE PREDICATE, TWO READERS, AND THAT IS THE WHOLE POINT. `render` picks the
 // frame and `nextFocusable` decides where `tab` may land; when those were two
 // separate conditions they disagreed, and the disagreement was invisible because
-// each was individually correct. `TestFocusAgreesWithWhatIsActuallyRendered`
-// binds this to the rendered OUTPUT rather than to a second copy of the
-// condition, so a third reader cannot drift either.
+// each was individually correct. `TestTabReachesEveryPanelTheFrameActuallyDraws`
+// is what holds them together: it presses `tab` and compares where focus lands
+// against the four panel titles found in the RENDERED FRAME, so neither reader
+// is checked against a second copy of the condition.
 func (a App) panelsAreOnScreen() bool {
 	// A failed page is one full-width error card. No panels, and `tab` must
 	// leave focus on Overview so `j`/`k` scroll the card's body.
@@ -533,13 +537,20 @@ func (a App) panelsAreOnScreen() bool {
 //
 // 🔴 IT ASKS WHAT IS ON SCREEN, NOT WHETHER A PULL REQUEST HAS LOADED. Those
 // came apart the moment the skeleton started drawing panels before `Snap`
-// existed: `isPullRequest()` is false for the WHOLE loading window, so `tab`
-// collapsed focus to Overview and — because every later press re-entered the
-// same arm — never came back, not on `DiffLoaded` and not on `PRLoaded`. The
-// operator got `j`/`k` scrolling an empty Overview body while a readable diff
-// sat one pane to the right. The skeleton is what made that reachable: before
-// it, a loading App drew a card, so there were no panels to navigate and no
-// focus marker inviting anyone to try.
+// existed: the old predicate was false for the WHOLE loading window, so `tab`
+// collapsed focus to Overview and stayed there for as long as the panel query
+// was out — `j`/`k` scrolling an empty Overview body while a readable diff sat
+// one pane to the right. The skeleton is what made that reachable: before it, a
+// loading App drew a card, so there were no panels to navigate and no focus
+// marker inviting anyone to try.
+//
+// ⚠ IT WAS A DEAD WINDOW, NOT A DEAD SESSION, AND AN EARLIER WORDING HERE SAID
+// "never came back, not on DiffLoaded and not on PRLoaded". That is FALSE.
+// MEASURED at e2154173, focus went `4 Diff` → tab → `1 Overview` → tab →
+// `1 Overview` → DiffLoaded+tab → `1 Overview` → PRLoaded+tab → `2 Commits` →
+// tab → `3 Files`: it recovers on the FIRST press after `PRLoaded`. The window
+// is the panel query's own latency — a measured median 855 ms on this host —
+// which is long enough to matter and is the whole of it.
 func (a App) nextFocusable(dir int) Panel {
 	if !a.panelsAreOnScreen() {
 		return PanelOverview
@@ -548,8 +559,33 @@ func (a App) nextFocusable(dir int) Panel {
 	return Panel(((int(a.Focus)+dir)%n + n) % n)
 }
 
-func (a App) isPullRequest() bool {
-	return a.Snap != nil && a.Snap.Kind == ghapi.KindPullRequest
+// diffIsRetryable reports whether `r` re-reads the DIFF ALONE — and it is the
+// same predicate that decides whether the Diff panel PRINTS that offer.
+//
+// 🔴 ONE PREDICATE, TWO READERS, FOR THE SECOND TIME IN THIS FILE. `act`'s
+// `ActRetry` arm fires the key and `panels.go`'s `diffBody` draws the legend that
+// names it. Spelled separately — which is how they shipped one round ago — they
+// agreed only by coincidence, and any drift reproduces exactly the bug that round
+// fixed: a legend offering a key that does nothing, or a key firing on a screen
+// that never advertised it. The lesson was already written down six lines up for
+// `panelsAreOnScreen` and simply was not applied twice.
+//
+// 🔴 ALL THREE CONJUNCTS ARE LOAD-BEARING AND EACH IS PINNED BY ITS OWN TEST,
+// because all three survived mutation when this was an inline condition:
+//
+//   - `Load == LoadReady` — not `!= LoadFailed`. During the skeleton the Diff
+//     panel says LOADING DIFF and advertises nothing, so a press there would be
+//     invisible work.
+//   - `Diff == nil` — a successful retry leaves `Err` set (nothing clears it, and
+//     nothing reads it once `Diff` is non-nil), so without this the key stays
+//     live on a healthy screen and `r` re-fetches a diff that is already there.
+//   - `Err != nil` — THE ONE THAT MATTERS. An ISSUE sits at `LoadReady` with
+//     `Diff == nil` and `Err == nil`, so dropping this makes every `r` press on
+//     an issue card emit a `FetchDiff` against `/pulls/{issue}/files` — a
+//     guaranteed 404, swallowed by `diffResultIsMoot`, invisible to the operator,
+//     for as long as they keep pressing.
+func (a App) diffIsRetryable() bool {
+	return a.Load == LoadReady && a.Diff == nil && a.Err != nil
 }
 
 // diffScrollStep is how far ONE `J`/`K` press pans the diff viewport.
