@@ -1238,7 +1238,7 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
     # absent range table short-circuits `_ordered_universe` before it reads the
     # pick log or sorts anything. See the docstring.
     assert ordered == ["12"], ordered
-    rows, state, _counts, _age, _ranges = real_ordering(
+    rows, state, _counts, _age, _ranges, _contrib = real_ordering(
         MO.repo_universe(MO.discover_repos(), []), "12")
     assert state == MO.ORDER_APPLIED, (
         f"the ordering DEGRADED to {state!r}, so the ledger above says nothing "
@@ -1864,10 +1864,21 @@ class _FakeTerminal:
     rows first would be a friendlier peer than the real one and would hide the
     deadlock `test_a_payload_LARGER_than_a_pipe_buffer_still_reaches_the_picker`
     exists for.
+
+    🔴 IT WRITES THE `--print-query` LINE, AND DERIVES WHETHER TO FROM THE REAL
+    `PICKER_SH`. fzf with `--print-query` writes the query FIRST and the
+    selection SECOND; a fake that wrote only the selection would be a friendlier
+    peer than the real one in exactly the direction that hides the bug — the
+    read loop would look correct while production returned the operator's typed
+    text as the chosen row. Reading `MO.PICKER_QUERY_LINE` rather than spelling
+    the flag means dropping `--print-query` from `PICKER_SH` moves this fake
+    with it, instead of leaving a fixture asserting a contract nobody has.
     """
 
-    def __init__(self, choose: str | None = None, *, answer_early: bool = False):
+    def __init__(self, choose: str | None = None, *, answer_early: bool = False,
+                 query: str = ""):
         self.choose = choose
+        self.query = query
         # 🔴 `answer_early` MODELS WHAT fzf ACTUALLY DOES, and without it this
         # fake is a FRIENDLIER PEER THAN THE REAL ONE. fzf answers the moment the
         # operator presses a key — it does NOT wait to drain the list — and then
@@ -1888,19 +1899,28 @@ class _FakeTerminal:
             # The shell's own order: both redirections, THEN the program.
             rfh = open(rows_fifo, "r", encoding="utf-8")
             wfh = open(choice_fifo, "w", encoding="utf-8")
+
+            def answer():
+                # What fzf writes: the query line (only under `--print-query`),
+                # then the selection. An ABORT writes the query ALONE, which is
+                # `choose is None` — so a dismissal after typing still puts one
+                # line in the pipe, exactly as the real binary does.
+                if MO.PICKER_QUERY_LINE is not None:
+                    wfh.write(self.query + "\n")
+                if self.choose is not None:
+                    wfh.write(self.choose + "\n")
+
             with wfh:
                 if self.answer_early:
                     # Answer, then hang up WITHOUT draining — the real thing.
-                    if self.choose is not None:
-                        wfh.write(self.choose + "\n")
-                        wfh.flush()
+                    answer()
+                    wfh.flush()
                     self.payload = rfh.read(4096)
                     rfh.close()
                 else:
                     with rfh:
                         self.payload = rfh.read()
-                        if self.choose is not None:
-                            wfh.write(self.choose + "\n")
+                        answer()
             self._done.set()
 
         self._thread = threading.Thread(target=serve, daemon=True)
@@ -1923,8 +1943,8 @@ class _FakeTerminal:
 
 
 def _drive_picker(monkeypatch, candidates=None, mesg="", choose=None,
-                  answer_early=False):
-    term = _FakeTerminal(choose, answer_early=answer_early)
+                  answer_early=False, query=""):
+    term = _FakeTerminal(choose, answer_early=answer_early, query=query)
     monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
     url = MO.pick(candidates if candidates is not None else ONE_CANDIDATE,
                   mesg=mesg)
@@ -1974,16 +1994,22 @@ def test_the_picker_ranks_by_TIEBREAK_END_which_is_the_whole_reason_for_fzf(
                 "392-row universe is usable"),
     ("--select-1", "auto-accepts a single match, which is precisely the "
                    "one-row GUESSED-repo picker that #1336 made unconfirmable"),
-    ("--print-query", "makes fzf hand back text the operator TYPED as if it "
-                      "were a selection — `row_to_url` matches nothing, so it "
-                      "is dismissal-shaped by accident. This is what rofi "
-                      "needed `-no-custom` for"),
     ("--no-sort", "turns off ranking entirely, which is the pre-#1373 bug"),
 ])
 def test_the_picker_does_NOT_pass(flag, why, monkeypatch):
-    """Four flags REJECTED, each with its measurement. Asserted on the argv
+    """Three flags REJECTED, each with its measurement. Asserted on the argv
     rather than left in a comment: every one of them is a plausible-looking
-    addition whose damage is invisible in a green suite."""
+    addition whose damage is invisible in a green suite.
+
+    ⚠ `--print-query` WAS THE FOURTH AND IS NOW SET, DELIBERATELY. Its ban read
+    "makes fzf hand back text the operator TYPED as if it were a selection", and
+    the FIRST HALF of that is true while the SECOND is a property of the READ,
+    not of the flag: `run_picker` now takes the row from `PICKER_ROW_LINE` — the
+    line AFTER the query — so typed text still cannot become a selection, which
+    `test_TYPED_FREE_TEXT_can_never_come_back_as_a_selection` asserts at the
+    boundary rather than on the flag. What the flag buys is the one signal that
+    separates "I typed the repo name anyway" from "the wrong repo sat on top",
+    and the query is reduced to a BOOLEAN where it is read."""
     term, _url = _drive_picker(monkeypatch)
     assert flag not in term.sh_script(), f"{flag}: {why}"
 
@@ -2127,12 +2153,77 @@ def test_a_DISMISSAL_opens_nothing(monkeypatch):
 
 def test_TYPED_FREE_TEXT_can_never_come_back_as_a_selection(monkeypatch):
     """🔴 `-no-custom`'S REPLACEMENT, ASSERTED AT THE BOUNDARY RATHER THAN ON A
-    FLAG. fzf structurally cannot return the query (that would need
-    `--print-query`, whose absence is pinned above) — but the property that
-    matters is what `pick` does with a row it did not offer. Feed it one and it
-    must open NOTHING, exactly like a dismissal."""
+    FLAG — AND THAT PLACEMENT IS NOW LOAD-BEARING RATHER THAN MERELY BETTER.
+    `--print-query` IS set, so fzf DOES hand the query back; the property that
+    matters was never the flag's absence but what `pick` does with a row it did
+    not offer. Feed it one and it must open NOTHING, exactly like a dismissal.
+
+    Both arms are driven: free text arriving where the SELECTION goes, and the
+    query line itself carrying text that is not a row."""
     _term, url = _drive_picker(monkeypatch, choose="kubectl-neat")
-    assert url == ""
+    assert url == "", "free text in the selection line became a URL"
+    _term2, url2 = _drive_picker(monkeypatch, choose=None,
+                                 query="kubectl-neat")
+    assert url2 == "", (
+        "the `--print-query` line became a selection — the row must be read "
+        "from PICKER_ROW_LINE, never from the first line")
+
+
+def test_a_TYPED_QUERY_is_recorded_as_a_BOOLEAN_and_the_TEXT_is_never_kept(
+        monkeypatch):
+    """🔴 THE DIM THAT SEPARATES TWO OPERATOR COMPLAINTS, AND THE DISCLOSURE
+    BOUNDARY THAT MAKES IT SAFE. The pre-computed order reaches fzf as INPUT
+    ORDER only, which `--tiebreak=end` consults on an exact TIE — so a typed
+    query hands ordering to fzf's own score and our rank stops being what the
+    operator sees. "I end up typing the repo name anyway" and "the wrong repo
+    sits at the top" are otherwise the SAME telemetry row.
+
+    ⚠ THE QUERY HERE IS NOT A REPOSITORY NAME AND NOT A SUBSTRING OF ONE — the
+    point is that NOTHING of it survives, so the fixture is a value that would
+    be unmistakable if it did."""
+    row = MO.picker_rows(ONE_CANDIDATE)[0]
+    _term, url = _drive_picker(monkeypatch, choose=row, query="zqx-typed-query")
+    assert url == ONE_CANDIDATE[0]["url"], "positive control: the pick worked"
+    assert MO.last_pick_queried() is True, (
+        "a typed query was not recorded — symptom 1 and symptom 2 are still "
+        "the same row")
+    # 🔴 THE TEXT IS NOWHERE. Not in the holder (which is typed `bool | None`),
+    # and not in any dim the emitter can build.
+    assert MO._PICK_QUERIED[0] is True, MO._PICK_QUERIED
+    blob = repr(MO.click_dims(repo="acme/one", platform="github",
+                              queried=MO.last_pick_queried()))
+    assert "zqx-typed-query" not in blob, (
+        f"the QUERY TEXT reached a telemetry dim: {blob}")
+
+
+def test_an_EMPTY_query_is_FALSE_and_an_UNSHOWN_picker_is_NOT_MEASURED(
+        monkeypatch):
+    """🔴 THREE-VALUED, AND THE THIRD VALUE IS THE POINT. `False` means the
+    operator scrolled to their row — the case where the pre-computed order was
+    the thing they used. A picker that was never shown must NOT land in that
+    bucket, or "the ordering is being consulted" is measured partly from clicks
+    that had no list.
+
+    The positive control comes first: this fixture CAN produce `False`, so the
+    `None` below is a fact about the unshown path rather than a flat reader."""
+    MO.set_pick_queried(None)
+    row = MO.picker_rows(ONE_CANDIDATE)[0]
+    _term, url = _drive_picker(monkeypatch, choose=row, query="")
+    assert url == ONE_CANDIDATE[0]["url"]
+    assert MO.last_pick_queried() is False, (
+        "POSITIVE CONTROL FAILED: an empty query did not record False, so the "
+        "None asserted below cannot be attributed to the unshown path")
+
+    # `pick()` imports `shutil` locally, so patching the module's own `which`
+    # is what reaches its pre-flight — the same door the missing-fzf tests use.
+    MO.set_pick_queried(None)
+    import shutil as _sh  # noqa: PLC0415
+    monkeypatch.setattr(_sh, "which", lambda _n: None)
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert MO.last_pick_queried() is None, (
+        "a picker that was never shown recorded a query verdict — an unshown "
+        "click must be NOT MEASURED, not `False`")
 
 
 def test_a_payload_LARGER_than_a_pipe_buffer_still_reaches_the_picker(
@@ -2353,6 +2444,26 @@ def _picker_flags() -> list[str]:
     return flags
 
 
+def _drop_query_line(lines: list[str]) -> list[str]:
+    """fzf's output with the `--print-query` line removed, derived from the real
+    `PICKER_SH` rather than from a literal.
+
+    🔴 THE PROBES BELOW MEASURE RANKING, AND `--print-query` CHANGES THE OUTPUT
+    SHAPE WITHOUT CHANGING THE RANK. They take the picker's OWN flags (see
+    `_picker_flags`) precisely so a flag that DOES move the ranking cannot be
+    dropped from a probe and leave it green — which means they also inherit the
+    ones that only move the output, and those have to be unwrapped here rather
+    than filtered out of the flag list. Filtering it out of `_picker_flags`
+    instead would put a hand-maintained exception list between the probes and
+    the thing they are probing.
+
+    Keyed on `MO.PICKER_QUERY_LINE`, so removing the flag from `PICKER_SH`
+    makes this a no-op automatically."""
+    if MO.PICKER_QUERY_LINE is None:
+        return lines
+    return lines[MO.PICKER_QUERY_LINE + 1:]
+
+
 def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
     """The row a REAL interactive fzf selects on Enter, driven through a pty."""
     import fcntl     # noqa: PLC0415 — only this pair needs them
@@ -2407,7 +2518,11 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
             "fzf never drew its prompt in 20s — this test measured nothing. "
             f"terminal saw: {drawn[-400:]!r}")
         os.write(master, b"\r")
-        got = _drain(r_out, lambda b: b"\n" in b, time.monotonic() + 20)
+        # `--print-query` writes the query first, so the SELECTION is the last
+        # of `PICKER_OUT_LINES` lines — wait for that many, not for one.
+        want = MO.PICKER_OUT_LINES
+        got = _drain(r_out, lambda b: b.count(b"\n") >= want,
+                     time.monotonic() + 20)
     finally:
         os.close(r_out)
         os.close(master)
@@ -2415,10 +2530,12 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
             os.waitpid(pid, 0)
         except (ChildProcessError, OSError):  # pragma: no cover
             pass
-    assert b"\n" in got, (
-        f"interactive fzf returned nothing for query {query!r} — the "
+    assert got.count(b"\n") >= MO.PICKER_OUT_LINES, (
+        f"interactive fzf returned {got.count(chr(10).encode())} of the "
+        f"{MO.PICKER_OUT_LINES} lines it must for query {query!r} — the "
         f"measurement did not happen, so neither did the assertion")
-    return got.decode("utf-8", "replace").split("\n")[0]
+    lines = got.decode("utf-8", "replace").split("\n")
+    return _drop_query_line(lines)[0]
 
 
 def test_REAL_INTERACTIVE_fzf_opens_on_the_FIRST_INPUT_ROW_with_no_query():
@@ -2501,7 +2618,7 @@ def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
 # created the hole, so the shape is pinned rather than the first word alone.
 # --------------------------------------------------------------------------- #
 EXPECTED_PICKER_SH = (
-    'fzf -i --tiebreak=end --layout=reverse --info=inline '
+    'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -6505,7 +6622,7 @@ def _fzf_filter(rows: list[str], query: str) -> list[str]:
     """`fzf --filter` under the PICKER'S OWN flags — see `_picker_flags`."""
     out = subprocess.run(["fzf", "--filter", query, *_picker_flags()],
                          input="\n".join(rows), capture_output=True, text=True)
-    return [r for r in out.stdout.split("\n") if r]
+    return [r for r in _drop_query_line(out.stdout.split("\n")) if r]
 
 
 # --------------------------------------------------------------------------- #
@@ -7596,7 +7713,9 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     widest = MO.click_dims(repo="acme/widget", platform="github",
                            picker_shown=True, offered_total=7, rank=3,
                            plausibility=MO.CLASS_BELOW, reason="selected",
-                           ordered=True, pinned_above=2, surface="tui")
+                           ordered=True, pinned_above=2, surface="tui",
+                           ordering=MO.ORDER_APPLIED, tier_a=5, tier_b=1,
+                           queried=True)
     assert set(widest) == set(MO.CLICK_DIM_FIELDS), (
         f"`click_dims` produces {sorted(widest)} but the ledger names "
         f"{sorted(MO.CLICK_DIM_FIELDS)} — update CLICK_DIM_FIELDS in the SAME "
@@ -7611,7 +7730,9 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     assert widest == {"repo": "acme/widget", "platform": "github",
                       "picker_shown": True, "offered_total": 7, "rank": 3,
                       "plausibility": "below", "reason": "selected",
-                      "ordered": True, "pinned_above": 2, "surface": "tui"}
+                      "ordered": True, "pinned_above": 2, "surface": "tui",
+                      "ordering": "applied", "tier_a": 5, "tier_b": 1,
+                      "queried": True}
     # 🔴 THE LEDGER IS PINNED AGAINST THE FUNCTION'S OWN SIGNATURE TOO, so a
     # parameter added without a ledger row fails here rather than on the day a
     # consumer notices a column it was never told about.
@@ -8605,3 +8726,416 @@ def test_the_opener_reader_can_actually_fire():
     assert _surface_returning_openers(prop)["open_w"] == [("propagate", "open_tui")]
     # An unannotated function is not an opener.
     assert _surface_returning_openers("def helper(u):\n    return 0, X\n") == {}
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 MAKING THE NEXT CLICK ATTRIBUTABLE
+#
+# The operator reported three symptoms on the same feature and the telemetry
+# could separate NONE of them:
+#   1. "I end up typing the repo name anyway" — the pre-computed order reaches
+#      fzf as INPUT ORDER, which `--tiebreak=end` consults on an exact TIE, so a
+#      typed query hands ordering to fzf's own score.
+#   2. "the wrong repo sits at the top" — a ranking-quality claim.
+#   3. "the top rows are clawgate/pane guesses, not repos" — the ordered block
+#      starts at row 1 or 2.
+# 1 and 2 were the SAME ROW; 3 was visible only as `pinned_above`, which nothing
+# pinned on the commonest shape. And neither TIER was named at all, on a feature
+# whose two hosts differ: MEASURED 2026-09-18, one host has no `picks.jsonl`, so
+# Tier B is structurally inert there and every click still emitted an identical
+# row.
+# --------------------------------------------------------------------------- #
+def _ordering_fixture(monkeypatch, tmp_path, pane="", table=None):
+    """A click shape that reaches the ordering, with a real range table."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: pane)
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: sorted(FAKE_UNIVERSE.values()))
+    monkeypatch.setattr(MO, "open_url", lambda u: 0)
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    table if table is not None
+                    else {v: 9000 for v in FAKE_UNIVERSE.values()})
+
+
+def test_a_PICKED_row_names_the_ORDERING_STATE_and_what_each_TIER_CONTRIBUTED(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE DIMS THAT TURN "IT RANKED WRONG" INTO AN ANSWERABLE QUESTION.
+    `rank` says where the chosen row sat. Nothing said whether the ordering was
+    RUNNING, nor which of the two tiers was in the sort that produced that rank
+    — so a complaint could not be attributed to Tier A, to Tier B, or to a
+    degraded table that meant neither ran.
+
+    ⚠ EVERY ASSERTED NUMBER IS DISTINCT FROM EVERY OTHER CONSTANT IN THE
+    FIXTURE. The universe is 3 rows, exactly 2 of them have a range entry, and
+    the pick log names exactly 1 of them — so `tier_a=2` cannot be confused with
+    `tier_b=1`, with `offered_total`, with the rank, or with a hardcoded 0."""
+    rows = sorted(FAKE_UNIVERSE.values())
+    assert len(rows) == 3, rows
+    # Two of the three are in the table; the third is UNKNOWN to Tier A.
+    _ordering_fixture(monkeypatch, tmp_path,
+                      table={rows[0]: 9000, rows[1]: 9000})
+    # ...and exactly ONE of them has ever been picked, so Tier B knows one row.
+    assert MO.record_pick(rows[0], "1291", MO.PICKS_PATH,
+                          via=MO.PICK_VIA_PICKER)
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[1]["url"])
+    assert MO.main(["#1291"]) == 0
+
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["outcome"] == MO.CLICK_PICKED, payload
+    assert payload["ordering"] == MO.ORDER_APPLIED, (
+        f"the click does not say whether the ordering ran — a complaint about "
+        f"the rank cannot be told from a degraded range table: {payload}")
+    assert payload["tier_a"] == 2, (
+        f"two of the three offered rows have a range-table entry; Tier A could "
+        f"classify exactly those: {payload}")
+    assert payload["tier_b"] == 1, (
+        f"exactly one offered row carries a non-zero pick score, so Tier B "
+        f"contributed to exactly one row's position: {payload}")
+
+
+def test_a_host_with_NO_pick_log_reports_tier_b_ZERO_while_one_WITH_picks_does_not(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE MEASUREMENT THAT MOTIVATED ALL OF THIS. MEASURED 2026-09-18:
+    `picks.jsonl` does not exist on one of the two hosts, so every click there
+    sorts with `scores == {}` and Tier B is inert — and the operator who says
+    "it ranked wrong" does not know which host they were on. Before this dim the
+    two hosts emitted IDENTICAL rows.
+
+    Both arms are driven in one test, because a `tier_b=0` asserted alone is
+    satisfied by a field wired to a constant. The pick log is the ONLY thing
+    that changes between them."""
+    _ordering_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[1]["url"])
+
+    assert not MO.PICKS_PATH.exists(), "the fixture already has a pick log"
+    assert MO.main(["#1291"]) == 0
+    cold = _click_events(spool)[0]["payload"]
+    assert cold["tier_b"] == 0, (
+        f"a host with no pick log must report Tier B contributing nothing: "
+        f"{cold}")
+    assert cold["ordering"] == MO.ORDER_APPLIED, (
+        f"Tier A DID run here — `tier_b=0` must not be readable as `the "
+        f"ordering did not happen`: {cold}")
+
+    # 🔴 THE CONTROL: the SAME click on a host that has picked before.
+    for repo in sorted(FAKE_UNIVERSE.values())[:2]:
+        assert MO.record_pick(repo, "1291", MO.PICKS_PATH,
+                              via=MO.PICK_VIA_PICKER)
+    assert MO.main(["#1291"]) == 0
+    warm = _click_events(spool)[1]["payload"]
+    assert warm["tier_b"] == 2, (
+        f"POSITIVE CONTROL FAILED: two repositories have been picked and Tier "
+        f"B still reports {warm.get('tier_b')!r} — the field is not measuring "
+        f"the pick log at all, and the zero above means nothing: {warm}")
+
+
+def test_a_DEGRADED_ordering_names_its_STATE_and_omits_NEITHER_tier_count(
+        monkeypatch, tmp_path, spool):
+    """🔴 `stale` AND `no-table` ARE THE TWO WAYS THE ORDERING SILENTLY IS NOT
+    THERE, and they need different next moves from the operator — a host that
+    never ran the generator versus a unit that stopped. The rows come back
+    UNORDERED in both, so both tiers contributed nothing and the counts are 0.
+
+    ⚠ THE COUNTS ARE `0` HERE AND ABSENT ON THE AUTO PATH, AND THAT ASYMMETRY IS
+    THE POINT. Here a picker WAS shown and the ordering was asked and declined;
+    there was no list at all. `ordering` is what distinguishes them."""
+    _ordering_fixture(monkeypatch, tmp_path)
+    # Age the table past the staleness threshold — the same file, one mtime.
+    stale = MO.KNOWN_RANGES_PATH
+    when = time.time() - (MO.STALE_MAPPING_DAYS + 3) * 86400
+    os.utime(stale, (when, when))
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[1]["url"])
+    assert MO.main(["#1291"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["ordering"] == MO.ORDER_STALE, (
+        f"a stale range table must be reported as such — otherwise a click "
+        f"that was never ordered is read as one the ordering got wrong: "
+        f"{payload}")
+    assert payload["tier_a"] == 0 and payload["tier_b"] == 0, payload
+    assert "plausibility" not in payload, (
+        f"no ordering ran, so no class was measured: {payload}")
+
+
+def test_an_AUTO_OPEN_names_NO_ordering_and_NO_tier_counts(spy, spool):
+    """🔴 AN ABSENCE, NOT A ZERO — the same argument `rank` makes one field
+    along. Nothing was offered on the auto path, so the ordering was never
+    asked: `ordering="no-table"` would name a host state this click did not
+    measure, and `tier_a=0`/`tier_b=0` would land in the same bucket as a real
+    ordering that learned nothing. A consumer averaging Tier B's contribution
+    would then be dragged toward zero by every click that never reached it."""
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["outcome"] == MO.CLICK_AUTO_OPEN, payload
+    for absent in ("ordering", "tier_a", "tier_b", "queried"):
+        assert absent not in payload, (
+            f"the auto path emitted {absent}={payload[absent]!r}; no list was "
+            f"built and no picker was shown, so any value is fabricated: "
+            f"{payload}")
+
+
+def test_a_DISMISSED_picker_carries_the_ORDERING_dims_and_whether_a_QUERY_was_typed(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE ARM WHERE `queried` MATTERS MOST. A dismissal AFTER TYPING is the
+    operator narrowing the list and still not finding their row — a ranking or a
+    universe complaint. A dismissal with an EMPTY query is somebody who changed
+    their mind. Those are opposite readings of the denominator the ordering is
+    judged by, and until now they were the same row.
+
+    The ordering dims ride along for the same reason: a dismissal is only
+    evidence ABOUT the ordering if the ordering was in the list."""
+    _ordering_fixture(monkeypatch, tmp_path)
+
+    def _dismiss_after_typing(c, mesg=""):
+        MO.set_pick_reason(MO.PICK_REASON_DISMISSED)
+        MO.set_pick_queried(True)
+        return ""
+
+    monkeypatch.setattr(MO, "pick", _dismiss_after_typing)
+    assert MO.main(["#1291"]) == 0
+    typed = _click_events(spool)[0]["payload"]
+    assert typed["outcome"] == MO.CLICK_DISMISSED, typed
+    assert typed["queried"] is True, (
+        f"a dismissal after typing is indistinguishable from one after "
+        f"scrolling: {typed}")
+    assert typed["ordering"] == MO.ORDER_APPLIED, typed
+    assert typed["tier_a"] == 3, typed
+
+    # 🔴 THE CONTROL — the same arm, nothing typed. Without it `queried` could
+    # be a field wired to `True`.
+    def _dismiss_after_scrolling(c, mesg=""):
+        MO.set_pick_reason(MO.PICK_REASON_DISMISSED)
+        MO.set_pick_queried(False)
+        return ""
+
+    monkeypatch.setattr(MO, "pick", _dismiss_after_scrolling)
+    assert MO.main(["#1291"]) == 0
+    scrolled = _click_events(spool)[1]["payload"]
+    assert scrolled["queried"] is False, (
+        f"POSITIVE CONTROL FAILED: the field did not move when the query did, "
+        f"so the `True` above is not a measurement: {scrolled}")
+
+
+def test_a_STUBBED_picker_OMITS_queried_rather_than_claiming_the_operator_scrolled(
+        monkeypatch, tmp_path, spool):
+    """🔴 THREE-VALUED, AND THE THIRD VALUE IS WHAT KEEPS THE OTHER TWO HONEST.
+    `main()` resets the flag to NOT MEASURED before calling `pick`, so a picker
+    that never ran — or a build of fzf that wrote no query line — omits the dim.
+    Defaulting to `False` would put those clicks in the "scrolled to their row"
+    bucket, which is the exact population "is the pre-computed order being
+    consulted?" is measured from."""
+    _ordering_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="":
+                        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+                        or c[1]["url"])
+    MO.set_pick_queried(True)          # poisoned: a stale value must not survive
+    assert MO.main(["#1291"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert "queried" not in payload, (
+        f"a stubbed picker reported a query verdict — either the reset is gone "
+        f"or an unmeasured click is being counted as a scroll: {payload}")
+    assert payload["ordering"] == MO.ORDER_APPLIED, (
+        f"positive control: this click really did reach the ordering, so the "
+        f"absence above is about `queried` and not about the arm: {payload}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 SYMPTOM 3 — HOW MANY ROWS SIT ABOVE THE ORDERED BLOCK
+#
+# The ledger the suite did NOT have. `test_a_PINNED_row_is_NOT_reported_as_one_
+# the_ORDERING_ranked` pins that a pinned row is not REPORTED as ranked; nothing
+# pinned HOW MANY rows are pinned on the shapes the operator actually clicks. So
+# "the ranking works" and "the top of the list is ranked" could diverge with the
+# suite green, which is exactly the operator's third complaint.
+# --------------------------------------------------------------------------- #
+_PINNED_SHAPES = [
+    # (shape, pane repo, rows pinned above the ordered block, what they are)
+    ("a bare `#N` nothing attributes", "", 1, ("clawgate",)),
+    ("a bare `#N` the tmux pane attributes", PANE_GUESS, 2,
+     ("clawgate", "github")),
+]
+
+
+@pytest.mark.parametrize("shape,pane,expect_pinned,kinds", _PINNED_SHAPES)
+def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
+        shape, pane, expect_pinned, kinds, monkeypatch, tmp_path, spool):
+    """🔴 THE TOP OF THE LIST IS NOT THE TOP OF THE RANKING, AND THIS IS THE
+    LEDGER OF BY HOW MUCH. On both ambiguous shapes the operator actually
+    clicks, the ordered block starts at row 1 or row 2 — so `rank=0` is
+    UNREACHABLE for a ranked row on either, and a consumer reading "chosen rank
+    clusters near 0" is reading the pinned rows.
+
+    Asserted on the PLATFORM of each pinned row, never on a repository name:
+    the kinds are what the operator sees at the top, and the name is private.
+
+    ⚠ IT PINS A COUNT THE HANDLER MUST NOT CHANGE SILENTLY. Whether those rows
+    SHOULD be pinned is the operator's call (see
+    `claudedocs/proposal-mention-picker-visibility.md`); this fails when the
+    answer changes without one."""
+    _ordering_fixture(monkeypatch, tmp_path, pane=pane)
+    seen: dict = {}
+
+    def _capture(c, mesg=""):
+        seen["platforms"] = [x["platform"] for x in c]
+        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+        return c[expect_pinned]["url"]        # the FIRST ordered row
+
+    monkeypatch.setattr(MO, "pick", _capture)
+    assert MO.main(["#1291"]) == 0
+    assert tuple(seen["platforms"][:expect_pinned]) == kinds, (
+        f"{shape}: the rows above the ordered block are "
+        f"{seen['platforms'][:expect_pinned]}, expected {list(kinds)}")
+
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["pinned_above"] == expect_pinned, (
+        f"{shape}: {payload['pinned_above']} rows reported above the ordered "
+        f"block, measured {expect_pinned}")
+    assert payload["rank"] == expect_pinned, (
+        f"{shape}: the FIRST ordered row is at absolute row "
+        f"{payload['rank']}, not {expect_pinned} — the fixture moved")
+    assert payload["ordered"] is True, payload
+    # 🔴 AND THE WHOLE POINT: within the block it is row 0, while its ABSOLUTE
+    # row is not. A consumer that reads `rank` alone measures the pinning.
+    assert payload["rank"] - payload["pinned_above"] == 0, payload
+    assert payload["rank"] != 0, (
+        f"{shape}: the first ORDERED row is at absolute row 0, so this shape "
+        f"pins nothing and the parametrisation is wrong")
+
+
+def test_the_WITHIN_block_rank_is_DERIVABLE_from_the_emitted_dims():
+    """⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST — LABELLED ONE BECAUSE THE
+    BUG IT DESCRIBES HAS NEVER EXISTED. It pins the REASON there is no
+    `ordered_rank` dim: the within-block position is `rank - pinned_above`, and
+    both operands plus the `ordered` flag that says whether the subtraction
+    means anything are already in the payload. A fourth field carrying the
+    difference would be a second source of truth that can disagree with the
+    first.
+
+    What it buys: if `rank` ever stops being the ABSOLUTE row index — the one
+    change that would silently break every consumer's subtraction — this says
+    so, and the ledger stops claiming a derivation that no longer holds."""
+    assert {"rank", "pinned_above", "ordered"} <= set(MO.CLICK_DIM_FIELDS)
+    assert "ordered_rank" not in MO.CLICK_DIM_FIELDS, (
+        "a derived field was added beside the two it is derived from — pick "
+        "one source of truth")
+    dims = MO.click_dims(rank=7, pinned_above=2, ordered=True)
+    assert dims["rank"] - dims["pinned_above"] == 5, dims
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SEAM NEITHER MODULE'S SUITE CAN SEE
+# --------------------------------------------------------------------------- #
+def _load_invocation():
+    """The collector's `invocation` module, loaded FROM ITS PATH.
+
+    🔴 BY PATH, NOT BY `import invocation`. The handler puts `scripts/collector`
+    on `sys.path` and one test in this file replaces `sys.modules["invocation"]`
+    with `None`; a bare import would then read whatever that left behind, and a
+    seam guard that certifies the wrong module certifies nothing."""
+    path = HANDLER.parent / "collector" / "invocation.py"
+    spec = importlib.util.spec_from_file_location("_seam_invocation", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert Path(mod.__file__) == path, mod.__file__
+    return mod
+
+
+def test_the_click_DIM_ledger_FITS_the_collectors_own_dim_CAP():
+    """🔴 THE CAP TRUNCATES SILENTLY, AND THE ROW STILL PARSES. `invocation.
+    sanitize_dims` slices `list(dims.items())[:_MAX_DIMS]`, so a ledger longer
+    than the cap loses its LAST entries — the NEWEST fields, which are exactly
+    the ones a new measurement depends on — with no error and no log line. The
+    payload a consumer receives looks well-formed and is missing the column the
+    instrument was added for.
+
+    🔴 NEITHER SUITE CAN SEE THIS ALONE. `test_invocation.py` asserts only
+    `len(out) <= _MAX_DIMS`, which the truncation SATISFIES; this file's ledger
+    test drives `click_dims`, which never reaches the collector. It is the seam,
+    and the guard has to live on the relationship.
+
+    The control is driven in the same run: a ledger one entry PAST the cap must
+    lose a field, or this comparison cannot see the hazard it names."""
+    inv = _load_invocation()
+    assert len(MO.CLICK_DIM_FIELDS) <= inv._MAX_DIMS, (
+        f"`CLICK_DIM_FIELDS` has {len(MO.CLICK_DIM_FIELDS)} entries and "
+        f"`invocation._MAX_DIMS` is {inv._MAX_DIMS} — the last "
+        f"{len(MO.CLICK_DIM_FIELDS) - inv._MAX_DIMS} would be dropped from "
+        f"every row, silently. Raise the cap in the SAME commit as the field.")
+    # POSITIVE CONTROL on the reader: the cap really does drop fields, so the
+    # comparison above is a measurement rather than an arithmetic identity.
+    over = {f"k{i}": i for i in range(inv._MAX_DIMS + 1)}
+    kept = inv.sanitize_dims(over)
+    assert len(kept) == inv._MAX_DIMS and len(kept) < len(over), (
+        f"the collector did NOT truncate {len(over)} dims to {inv._MAX_DIMS} — "
+        f"this guard is asserting against a cap that does not bite: {kept}")
+    # ...and it is the LAST-inserted keys that go, which is why the newest
+    # field is the one that vanishes.
+    assert f"k{inv._MAX_DIMS}" not in kept, sorted(kept)
+    assert "k0" in kept, sorted(kept)
+
+
+def test_every_ORDER_STATE_is_emittable_as_a_click_dim_and_nothing_else_is():
+    """🔴 LEDGERED OR DROPPED, THE OTHER HALF. `click_dims` drops an `ordering`
+    value that is not in `ORDER_STATES` — the same posture `surface` has —
+    because a state no consumer has been told about is worse than a missing
+    field. That drop must not be able to happen SILENTLY to a real state, so the
+    ledger is driven through the emitter in both directions."""
+    for state in MO.ORDER_STATES:
+        assert MO.click_dims(ordering=state)["ordering"] == state, state
+    assert len(set(MO.ORDER_STATES)) == 3, MO.ORDER_STATES
+    for bad in ("applied ", "APPLIED", "degraded", "", "ordered"):
+        assert "ordering" not in MO.click_dims(ordering=bad), bad
+    # `ordering_state` itself can only ever produce ledgered values — the other
+    # side of the same relationship, so a fourth state added there cannot slip
+    # past the emitter unnoticed.
+    assert MO.ordering_state({}, None) in MO.ORDER_STATES
+    assert MO.ordering_state({"a/b": 1}, 0.0) in MO.ORDER_STATES
+    assert MO.ordering_state({"a/b": 1}, MO.STALE_MAPPING_DAYS + 1) in \
+        MO.ORDER_STATES
+
+
+def test_the_picker_OUTPUT_LINE_count_is_DERIVED_from_the_flag_not_spelled():
+    """🔴 THE TWO MUST MOVE TOGETHER OR THE PICKER STALLS. `run_picker` waits
+    for `PICKER_OUT_LINES` newlines; drop `--print-query` from `PICKER_SH` and
+    leave the count at 2 and every pick waits for a line fzf will never write,
+    until the child exits. Deriving the count from the string is what makes that
+    impossible — this asserts the derivation, not the current value.
+
+    Both directions are driven against the real predicate, so a constant
+    hardcoded to today's answer fails."""
+    assert MO.PICKER_OUT_LINES == (2 if "--print-query" in MO.PICKER_SH else 1)
+    assert MO.PICKER_ROW_LINE == MO.PICKER_OUT_LINES - 1
+    assert (MO.PICKER_QUERY_LINE is None) == (MO.PICKER_OUT_LINES == 1)
+    # The row is always read from the LAST line, and the query — when there is
+    # one — from a DIFFERENT line. A single-line reader that also claimed a
+    # query line would return the query as the row.
+    assert MO.PICKER_QUERY_LINE != MO.PICKER_ROW_LINE
+
+
+def test_every_click_row_names_the_HOST_it_was_clicked_on(spy, spool):
+    """⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST, AND IT IS LABELLED ONE
+    BECAUSE THIS HAS ALWAYS BEEN TRUE. `spool_emit` auto-fills `host=` on every
+    v1 line, so a click row already carries the host and no dim is needed — the
+    operator's "I do not know which host I was on" is answered by a field that
+    was there all along.
+
+    It is pinned rather than assumed because the two hosts DIFFER in exactly the
+    way that matters: one has no `picks.jsonl`, so Tier B is inert there. A row
+    without a host makes `tier_b=0` unattributable, and the field lives in
+    another module whose own tests have no reason to keep it."""
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    events = _click_events(spool)
+    assert len(events) == 1, events
+    host = events[0].get("host")
+    assert host, (
+        f"the click row carries no `host` field — a Tier B count cannot be "
+        f"attributed to the host whose pick log produced it: {events[0]}")
+    assert "host" not in events[0]["payload"], (
+        f"the host is a LINE field, not a dim — duplicating it into the payload "
+        f"spends one of the collector's capped dim slots on a column the "
+        f"consumer already has: {events[0]['payload']}")

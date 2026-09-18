@@ -48,7 +48,23 @@ KIND = "invocation"
 
 # Defence-in-depth caps. Safe dims are short NAMES/versions/booleans; anything
 # larger is almost certainly a mistake (a leaked query/body), so we bound it.
-_MAX_DIMS = 12
+#
+# 🔴 THE COUNT CAP TRUNCATES SILENTLY, AND THAT IS A MEASURED HAZARD RATHER THAN
+# A THEORETICAL ONE. `sanitize_dims` slices `list(dims.items())[:_MAX_DIMS]`, so
+# a caller that grows past the cap loses its LAST-INSERTED dims — the newest
+# fields, which are exactly the ones a new measurement depends on — with no
+# error, no log line and a row that still looks well-formed. `mention-open` was
+# at 10 dims and one change away from 14; at the old cap of 12 the two newest
+# would simply not have been in the payload, and the instrument would have been
+# read as evidence.
+#
+# So the cap is a bound on ACCIDENT (a leaked body arriving as a dict), not a
+# budget a deliberate caller is expected to fit inside. It is raised here to
+# leave a caller room to grow, and the callers that care pin their own field
+# ledger against it — `test_mention_open.py::test_the_click_DIM_ledger_FITS_the_
+# collectors_own_dim_CAP` is the seam guard, because neither module's suite can
+# see this on its own.
+_MAX_DIMS = 24
 _MAX_KEY_LEN = 64
 _MAX_VALUE_LEN = 120
 _MAX_LIST_ITEMS = 12

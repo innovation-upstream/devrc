@@ -1268,9 +1268,16 @@ CLASS_NAMES = {
 # `test_the_click_telemetry_DIM_ledger_is_pinned_two_way`. A field added without
 # a ledger entry, or an entry naming no field, fails the suite — the shape of a
 # telemetry row is a contract with a consumer that is not in this repo.
+#
+# 🔴 THE LEDGER IS ALSO A BUDGET, AND EXCEEDING IT IS SILENT. `invocation.
+# sanitize_dims` slices `list(dims.items())[:_MAX_DIMS]`, so a ledger longer than
+# that cap loses its LAST entries — the newest fields, which are exactly the ones
+# a new measurement depends on — with no error and a row that still parses.
+# `test_the_click_DIM_ledger_FITS_the_collectors_own_dim_CAP` is the seam guard:
+# neither module's suite can see this from its own side.
 CLICK_DIM_FIELDS = ("repo", "platform", "picker_shown", "offered_total",
                     "rank", "plausibility", "reason", "ordered", "pinned_above",
-                    "surface")
+                    "surface", "ordering", "tier_a", "tier_b", "queried")
 
 
 def click_dims(repo: str = "", platform: str = "",
@@ -1281,7 +1288,11 @@ def click_dims(repo: str = "", platform: str = "",
                reason: str | None = None,
                ordered: bool | None = None,
                pinned_above: int | None = None,
-               surface: str | None = None) -> dict:
+               surface: str | None = None,
+               ordering: str | None = None,
+               tier_a: int | None = None,
+               tier_b: int | None = None,
+               queried: bool | None = None) -> dict:
     """The payload dims for one click outcome. Pure, no I/O, no clock.
 
     🔴 AN UNMEASURABLE FIELD IS OMITTED, NEVER ZEROED — AND THIS IS THE WHOLE
@@ -1341,6 +1352,39 @@ def click_dims(repo: str = "", platform: str = "",
     absence-vs-zero error as `rank` on the auto path. Values are pinned to
     `CLICK_SURFACES`; an unledgered one is DROPPED rather than shipped, because
     a surface no consumer has been told about is worse than a missing field.
+
+    🔴 `ordering`, `tier_a` AND `tier_b` ARE WHAT MAKE A COMPLAINT ATTRIBUTABLE,
+    AND WITHOUT THEM "IT RANKED WRONG" HAS NO ANSWER. `rank` says where the
+    chosen row sat; none of the existing dims says whether the ordering was
+    RUNNING, nor which tier was in it. MEASURED 2026-09-18: one host has no
+    `picks.jsonl`, so Tier B is inert there and contributes exactly nothing,
+    while the other host's log grows — and the two emit identical rows today.
+      * `ordering` is `ordering_state`'s verdict (`applied`/`no-table`/`stale`),
+        LEDGERED OR DROPPED against `ORDER_STATES` for the reason `surface` is.
+      * `tier_a` / `tier_b` are ROW COUNTS — how many ordered rows the range
+        table could classify, and how many carry a non-zero pick score. Counts,
+        never contents: the universe names private repositories.
+    All three are ABSENT when no ordering ran (the auto-open path, and any
+    picker holding no universe rows), which is the same absence-is-not-a-zero
+    rule `rank` follows: `tier_b=0` must mean "ran, learned nothing", and only
+    omitting it keeps "did not run" out of that bucket.
+
+    🔴 `queried` IS THE DIM THAT SEPARATES TWO COMPLAINTS THE REST CANNOT. The
+    pre-computed order reaches fzf as INPUT ORDER only, which `--tiebreak=end`
+    consults on an exact TIE — so a typed query hands ordering to fzf's own
+    score and our rank becomes invisible. "I end up typing the repo name anyway"
+    (the ordering was never consulted) and "the wrong repo sits at the top" (it
+    was, and it was wrong) are otherwise the SAME row. It is a BOOLEAN and the
+    query text is dropped where it is read — see `_PICK_QUERIED`; three-valued,
+    so an unmeasured picker omits it rather than claiming the operator scrolled.
+
+    ⚠ NO `ordered_rank` DIM, DELIBERATELY. The chosen row's position WITHIN the
+    ranked block is `rank - pinned_above`, and both of those are already emitted
+    beside the `ordered` flag that says whether the subtraction means anything.
+    A fourth field carrying the difference would be a second source of truth
+    that can disagree with the first, for a value a consumer computes in one
+    subtraction. `test_the_WITHIN_block_rank_is_derivable_from_the_emitted_dims`
+    pins the relationship instead.
     """
     dims: dict = {"repo": repo, "platform": platform}
     if picker_shown is not None:
@@ -1364,6 +1408,18 @@ def click_dims(repo: str = "", platform: str = "",
     # the other half: it fails rather than letting the drop be silent.
     if surface is not None and surface in CLICK_SURFACES:
         dims["surface"] = surface
+    # 🔴 LEDGERED OR DROPPED, exactly as `surface` is: `ordering_state` owns this
+    # vocabulary and a fourth spelling arriving here is a value no consumer has
+    # been told about. `test_every_ORDER_STATE_is_emittable_as_a_click_dim` is
+    # the other half — it fails rather than letting the drop be silent.
+    if ordering is not None and ordering in ORDER_STATES:
+        dims["ordering"] = ordering
+    if tier_a is not None:
+        dims["tier_a"] = int(tier_a)
+    if tier_b is not None:
+        dims["tier_b"] = int(tier_b)
+    if queried is not None:
+        dims["queried"] = bool(queried)
     return dims
 
 
@@ -2164,11 +2220,48 @@ PICKER_LINES = 22
 # comment said "1/41 with and without" beside "0 rows without", which is
 # self-contradictory: rank is undefined on an empty set. (41 and 392 came from a
 # scratch corpus, not this one; 392 is the real universe's row count.)
+#
+# 🔴 `--print-query` IS INSTRUMENTATION, NOT UX, AND IT IS WHAT MAKES ONE
+# OPERATOR COMPLAINT ANSWERABLE. The pre-computed order reaches fzf only as INPUT
+# ORDER, which `--tiebreak=end` consults on an exact TIE — so the first keystroke
+# hands ordering to fzf's own score and the ranking becomes invisible to anyone
+# who TYPES rather than scrolls. "I end up typing the repo name anyway" and "the
+# wrong repo sits at the top" are then the SAME telemetry row, and only one of
+# them is a ranking defect. `--print-query` makes fzf write the query as the
+# first output line, which is the one signal that separates them.
+#
+# 🔴 THE QUERY TEXT NEVER LEAVES `run_picker`. It is REDUCED TO A BOOLEAN at the
+# point it is read (`set_pick_queried`) and the string is dropped — it is text
+# the operator typed, which on this picker is a fragment of a PRIVATE repository
+# name, and this module's disclosure rule says nothing but the chosen row may
+# reach a sink. A length, a prefix or a hash would each be a weaker version of
+# the same leak; a bool answers the question completely.
+#
+# ⚠ IT CHANGES THE OUTPUT SHAPE, WHICH THE READ LOOP OWNS. fzf now writes
+# `<query>\n` and then `<selection>\n`, and on an abort it writes the query
+# ALONE. `run_picker`'s loop therefore waits for TWO lines instead of one and
+# takes the SECOND as the row; taking the first — which is what the pre-change
+# loop did — would open whatever the operator typed, or nothing.
+#
+# ⚠ NOTHING ON SCREEN MOVES. `--print-query` is a stdout contract; the prompt,
+# the pointer, the colours, the header and the match ORDER are untouched. The
+# picker UX decision the operator still owns is a separate question — see
+# `claudedocs/proposal-mention-picker-visibility.md`.
 PICKER_SH = (
-    'fzf -i --tiebreak=end --layout=reverse --info=inline '
+    'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
+
+# How many lines fzf writes to the choice FIFO: the query, then the selection.
+# 🔴 DERIVED FROM `PICKER_SH`, NEVER A LOOSE LITERAL — dropping `--print-query`
+# and leaving this at 2 makes the read loop wait for a line that never comes, so
+# every pick would stall until the child exits. `test_the_picker_OUTPUT_LINE_
+# count_is_derived_from_the_FLAG` is the guard.
+PICKER_OUT_LINES = 2 if "--print-query" in PICKER_SH else 1
+# Which of those lines is the chosen row, and which is the query.
+PICKER_ROW_LINE = PICKER_OUT_LINES - 1
+PICKER_QUERY_LINE = 0 if PICKER_OUT_LINES > 1 else None
 
 # How long the picker may stay open before it is abandoned. Inherited from the
 # rofi call this replaced, unchanged: it is "the operator walked away", not a
@@ -2311,6 +2404,33 @@ def last_pick_reason() -> str:
     return _PICK_REASON[0]
 
 
+# 🔴 DID THE OPERATOR TYPE? A BOOLEAN, AND THE QUERY TEXT IS NEVER STORED.
+# `run_picker` reads fzf's `--print-query` line and calls `set_pick_queried` with
+# the result of `bool(query.strip())`; the string is dropped in that expression
+# and exists nowhere else. That is the disclosure boundary, and it is placed at
+# the READ rather than at the emit on purpose — a holder containing the text
+# would be one `emit_click(query=...)` away from publishing a private repository
+# name, and a boundary you have to remember is not one.
+#
+# ⚠ THREE-VALUED, FOR THE REASON `picker_was_shown` IS. `None` is NOT MEASURED —
+# a stubbed `pick`, a picker that was never shown, a build of fzf that wrote no
+# query line — and it OMITS the dim rather than shipping a `False` a consumer
+# would count as "scrolled". False and absent are different facts.
+_PICK_QUERIED: list[bool | None] = [None]
+
+
+def set_pick_queried(queried: bool | None) -> None:
+    """Record WHETHER the most recent picker had a non-empty query. Total:
+    anything that is not a bool becomes `None` (not measured), so a caller that
+    hands this a string cannot store one."""
+    _PICK_QUERIED[0] = queried if isinstance(queried, bool) else None
+
+
+def last_pick_queried() -> bool | None:
+    """Did the most recent `pick()` in this process carry a typed query?"""
+    return _PICK_QUERIED[0]
+
+
 def picker_was_shown(reason: str) -> bool | None:
     """Did the operator actually see a list? `None` means NOT MEASURED.
 
@@ -2444,9 +2564,22 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
             os.close(wfd)
 
         # --- read the selection back ------------------------------------- #
+        # 🔴 `PICKER_OUT_LINES` LINES, NOT ONE — AND THE COUNT IS DERIVED FROM
+        # THE FLAG rather than spelled here. `--print-query` makes fzf write the
+        # query first and the selection second, so a loop that stopped at the
+        # FIRST newline would return the text the operator TYPED as the chosen
+        # row — `row_to_url` maps that to nothing, every pick becomes
+        # `unmapped-row`, and the picker opens nothing at all.
+        #
+        # ⚠ AN ABORT STILL WRITES ONE LINE, AND THAT EXIT IS UNCHANGED. fzf
+        # prints the query and leaves on Esc, so the loop does not get its second
+        # newline and falls through to the `proc.poll()` arm below exactly as a
+        # dismissal always did. The only difference is that the query line is now
+        # there to be read — which is how a dismissal AFTER TYPING becomes
+        # distinguishable from one after scrolling.
         out = b""
         outcome = PICKED_DISMISSED
-        while b"\n" not in out:
+        while out.count(b"\n") < PICKER_OUT_LINES:
             r, _w, _x = select.select([rfd], [], [], 0.2)
             if r:
                 chunk = os.read(rfd, 65536)
@@ -2464,7 +2597,15 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
                 except BlockingIOError:
                     pass
                 break
-        row = out.decode("utf-8", "replace").split("\n", 1)[0]
+        lines = out.decode("utf-8", "replace").split("\n")
+        # 🔴 REDUCED TO A BOOLEAN HERE, AND THE STRING IS DROPPED IN THIS
+        # EXPRESSION. See `_PICK_QUERIED`: the query is a fragment of a PRIVATE
+        # repository name and this is the only place it exists.
+        if PICKER_QUERY_LINE is not None and len(lines) > PICKER_QUERY_LINE + 1:
+            # `> line + 1` means the query line is COMPLETE — a trailing newline
+            # arrived after it. A half-written line is not a measurement.
+            set_pick_queried(bool(lines[PICKER_QUERY_LINE].strip()))
+        row = lines[PICKER_ROW_LINE] if len(lines) > PICKER_ROW_LINE else ""
         if row:
             # A row that arrived is an ANSWER even if the deadline passed while
             # it was in flight — the operator chose, and discarding that because
@@ -2486,15 +2627,21 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     """Ask fzf which candidate to open. Returns the chosen URL, or "" if the
     operator dismissed the picker (which must open NOTHING).
 
-    🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND THE REASON IS THAT THE PICKER
-    CANNOT TELL THE TWO EXITS APART. fzf does not return the query, so "I typed
-    `kubectl-neat` and the list went empty" and "I changed my mind" BOTH arrive
-    back here as no selection. There is no signal that separates them — not the
-    exit code, not stdout — so a toast fired after a dismissal would fire after
-    every dismissal, which is the noise this handler must not make. The
+    🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND IT STAYS THERE. "I typed
+    `kubectl-neat` and the list went empty" and "I changed my mind" both arrive
+    back here as no selection, and a toast fired after a dismissal would fire
+    after EVERY dismissal, which is the noise this handler must not make. The
     diagnosis therefore goes where it costs nothing and is read BEFORE the
     choice: a header above the list, on the operator's own screen, which is the
     one surface the universe may already reach. See `universe_note`.
+
+    ⚠ THE REASON GIVEN HERE USED TO BE "fzf does not return the query", AND THAT
+    IS NO LONGER TRUE — `PICKER_SH` passes `--print-query`, so the two exits ARE
+    now distinguishable. The conclusion is unchanged and the argument is
+    narrower: the query is reduced to a BOOLEAN at the read (`_PICK_QUERIED`)
+    and the text is never kept, so there is nothing to put in a toast even if
+    one were wanted. Telling the two apart is a question for the DATASET, which
+    is what that boolean is for.
 
     🔴 FUZZY MATCHING IS LOAD-BEARING, not a nicety, and it is fzf's DEFAULT —
     which is why nothing below spells it. It is the entire reason the namesake
@@ -2502,11 +2649,13 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     rather than a wall: the operator types `talos-inf` and the list collapses.
     `--exact` would take it away; the suite pins its ABSENCE for that reason.
 
-    🔴 fzf NEVER RETURNS THE QUERY, which is what rofi needed `-no-custom` for.
-    Free text the operator TYPED would come back as a row `row_to_url` cannot
-    match — dismissal-shaped, but by accident. fzf prints a SELECTED item or
-    nothing; the flag that would break that is `--print-query`, and the suite
-    pins its absence.
+    🔴 FREE TEXT THE OPERATOR TYPED CAN NEVER BE OPENED, which is what rofi
+    needed `-no-custom` for. `--print-query` IS set now, so the query line is in
+    fzf's output — but `run_picker` takes the row from `PICKER_ROW_LINE` (the
+    SECOND line) and `row_to_url` then matches on the URL suffix, so a query
+    reaching either would map to nothing rather than to a page. The suite pins
+    both halves: the line the row is taken from, and that a typed query cannot
+    become a URL.
 
     🔴 WITH AN EMPTY QUERY fzf PRESERVES INPUT ORDER, so the clawgate row stays
     FIRST on a bare `#N`. Sorting only applies to a scored match set, and an
@@ -3005,9 +3154,30 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
 def _ordered_universe(
         universe: list[str],
         num: str) -> tuple[list[str], str, tuple[int, int], float | None,
-                           dict[str, int]]:
-    """`(rows, state, (plausible, impossible), age_days, ranges)` — the impure
-    composer.
+                           dict[str, int], tuple[int, int]]:
+    """`(rows, state, (plausible, impossible), age_days, ranges, (tier_a,
+    tier_b))` — the impure composer.
+
+    🔴 THE SIXTH ELEMENT IS "DID EACH TIER ACTUALLY CONTRIBUTE ANYTHING", AND IT
+    EXISTS BECAUSE `state == "applied"` DOES NOT ANSWER THAT. `applied` says the
+    range table was present and fresh enough to sort on; it says nothing about
+    whether the table had an entry for any row on screen, and NOTHING AT ALL
+    about Tier B. MEASURED 2026-09-18: one of the two hosts has no `picks.jsonl`
+    at all, so every click there runs with `scores == {}` and Tier B is
+    structurally inert — a click on that host and a click on the other emit an
+    IDENTICAL row, and "the ordering put the wrong repo on top" cannot be
+    attributed to a tier that was never in the sort.
+
+    `tier_a` is how many of the ORDERED ROWS the range table had an entry for —
+    the rows Tier A could classify at all, as opposed to leaving `UNKNOWN`.
+    `tier_b` is how many of them carry a NON-ZERO pick score. Both are COUNTS OF
+    ROWS, never their contents: the offered universe names private repositories
+    and nothing here may carry one to a sink (see the CLICK-PATH TELEMETRY
+    block).
+
+    ⚠ `(0, 0)` IN EVERY DEGRADED STATE, for the same reason `ranges` is `{}`
+    there: no ordering ran, so neither tier contributed, and the caller omits
+    both dims rather than shipping a zero that reads as "ran, found nothing".
 
     🔴 THE `ranges` DICT COMES BACK FOR THE SAME "ONE MEASUREMENT, TWO READERS"
     REASON THE AGE DOES, and it is the FIFTH element rather than a second
@@ -3059,7 +3229,7 @@ def _ordered_universe(
     age = ranges_age_days()
     state = ordering_state(ranges, age)
     if state != ORDER_APPLIED:
-        return (universe, state, (0, 0), age, {})
+        return (universe, state, (0, 0), age, {}, (0, 0))
     # 🔴 ONE CLOCK READING, TWO READERS — the same discipline `mapping_age_days`
     # states for the mtime. `load_picks` decides which rows are inside the age
     # cap and `pick_scores` decides how much each one decays; two independent
@@ -3073,9 +3243,14 @@ def _ordered_universe(
     # Counted from the SAME `ranges` dict the sort used, not re-read: a header
     # that disagreed with the order beside it would read as a bug in the note.
     classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
+    # Counted from the SAME `ranges` and `scores` the sort used — a second read
+    # could disagree with the order the operator is looking at, which is the
+    # rule `_ordered_universe`'s docstring states for the age and the table.
+    contrib = (sum(1 for r in rows if r.lower() in ranges),
+               sum(1 for r in rows if scores.get(r.lower(), 0.0)))
     return (rows, state,
             (classes.count(CLASS_PLAUSIBLE), classes.count(CLASS_IMPOSSIBLE)),
-            age, ranges)
+            age, ranges, contrib)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3224,6 +3399,10 @@ def main(argv: list[str] | None = None) -> int:
     # read — see `_ordered_universe`. It stays `{}` when no ordering ran, which
     # is the predicate the telemetry reads.
     order_ranges: dict[str, int] = {}
+    # How many ordered rows each tier could say anything about — see
+    # `_ordered_universe`. `(0, 0)` while no ordering has run, which is what the
+    # telemetry reads to OMIT both dims rather than ship a misleading zero.
+    order_contrib = (0, 0)
     _universe_rows: list[list[dict]] = []
 
     def universe_rows() -> list[dict]:
@@ -3244,9 +3423,11 @@ def main(argv: list[str] | None = None) -> int:
         the alternative is a reader re-deriving that three-way exclusivity from
         scratch. What it must NOT do is read as a live optimisation."""
         nonlocal order_state, order_counts, order_age, order_ranges
+        nonlocal order_contrib
         if not _universe_rows:
             (rows, order_state, order_counts, order_age,
-             order_ranges) = _ordered_universe(universe_repos, num)
+             order_ranges, order_contrib) = _ordered_universe(universe_repos,
+                                                             num)
             _universe_rows.append(universe_candidates(num, rows))
         return _universe_rows[0]
 
@@ -3478,12 +3659,29 @@ def main(argv: list[str] | None = None) -> int:
         if extra:
             mesg = f"{mesg} · {extra}" if mesg else extra
 
+    # 🔴 WHICH TIERS WERE ACTUALLY IN THE SORT THE OPERATOR IS LOOKING AT.
+    # Keyed on `universe_shown` — the same predicate `ordering_note` uses, and
+    # set by ALL THREE arms that put universe rows into `candidates` and by none
+    # that does not — so a picker holding only measured rows never claims an
+    # ordering it did not do. An ordering that did not run OMITS all three dims:
+    # `tier_b=0` has to mean "ran, learned nothing" or the host with no pick log
+    # is indistinguishable from every click that never reached the sort.
+    order_dims = ({"ordering": order_state,
+                   "tier_a": order_contrib[0], "tier_b": order_contrib[1]}
+                  if universe_shown else {})
+
     # 🔴 RESET BEFORE THE CALL, SO A STUBBED `pick` CANNOT INHERIT A STALE
     # REASON. `main()` runs once per process, but a test calling it twice would
-    # otherwise read the first click's reason on the second.
+    # otherwise read the first click's reason on the second. The query flag
+    # carries the same hazard one field along and is reset with it — and it
+    # resets to `None` (NOT MEASURED) rather than to `False`, because a stubbed
+    # picker that never typed anything is not the same fact as an operator who
+    # scrolled.
     set_pick_reason(PICK_REASON_UNATTRIBUTED)
+    set_pick_queried(None)
     url = pick(candidates, mesg=mesg)
     reason = last_pick_reason()
+    queried = last_pick_queried()
     if not url:
         # 🔴 A DISMISSAL IS A MEASUREMENT, NOT A NON-EVENT — and it is the
         # DENOMINATOR the ordering question needs. "Did the plausibility
@@ -3501,12 +3699,18 @@ def main(argv: list[str] | None = None) -> int:
         # `pick()` now records WHICH — see the `PICK_REASON_*` block — and
         # `picker_was_shown` is three-valued so an unmeasured case omits the
         # field rather than guessing.
+        #
+        # 🔴 `queried` MATTERS MOST ON THIS ARM. A dismissal AFTER TYPING is the
+        # operator narrowing the list and still not finding the row — a ranking
+        # or a universe complaint; a dismissal with an EMPTY query is somebody
+        # who changed their mind. Those are opposite readings of the same
+        # denominator, and until now they were the same row.
         emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
                    else CLICK_NO_SELECTION,
                    picker_shown=picker_was_shown(reason),
                    offered_total=len(candidates),
                    pinned_above=pinned_above,
-                   reason=reason)
+                   reason=reason, queried=queried, **order_dims)
         return 0
     # 🔴 RECORDED *AFTER* THE CHOICE AND *BEFORE* THE OPEN, AND IT CANNOT BLOCK
     # EITHER. `record_pick` swallows every OSError (see it), so a read-only home
@@ -3559,7 +3763,8 @@ def main(argv: list[str] | None = None) -> int:
                offered_total=len(candidates),
                rank=picked_rank, plausibility=picked_class,
                ordered=picked_ordered if picked_rank is not None else None,
-               pinned_above=pinned_above, reason=reason, surface=surface)
+               pinned_above=pinned_above, reason=reason, surface=surface,
+               queried=queried, **order_dims)
     return rc
 
 
