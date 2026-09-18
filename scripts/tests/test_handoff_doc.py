@@ -6728,7 +6728,7 @@ class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
 
     def test_a_NEW_doc_is_silent(self, repo: Path, tmp_path: Path) -> None:
         """Round 1 legitimately opens with self-generated work; the finding is
-        about what happens AFTER it. `self_generated_report` still counts them."""
+        about what happens AFTER it. `declared_forcing_none_report` still counts them."""
         _make_genuinely_new(repo)
         upd = write_delta(
             tmp_path,
