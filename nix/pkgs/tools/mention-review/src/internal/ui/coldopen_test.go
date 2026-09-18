@@ -719,3 +719,261 @@ func TestTheDiffIsReadableBeforeThePanelQueryAnswers(t *testing.T) {
 		t.Errorf("the metadata panels do not say they are still loading\n%s", screen)
 	}
 }
+
+// --- the skeleton's focus window ----------------------------------------------
+
+// 🔴 `tab` MUST CYCLE ALL FOUR PANELS WHILE THE SKELETON IS UP.
+//
+// `nextFocusable` used to ask `isPullRequest()`, which is false for the WHOLE
+// loading window because `Snap` is still nil. So the first `tab` collapsed focus
+// to Overview and every later press re-entered the same arm and stayed there —
+// through `DiffLoaded`, through `PRLoaded`, forever. `j`/`k` then scrolled an
+// empty Overview body while a readable diff sat one pane to the right.
+//
+// ⚠ THE SKELETON IS WHAT MADE THIS REACHABLE, WHICH IS WHY IT IS THIS PR'S BUG
+// TO FIX. The latent state existed at base, but a loading App drew a full-width
+// card there: no panels, no focus marker, nothing inviting anyone to press
+// `tab`. This PR draws four bordered panels with a focus marker and a readable
+// diff in exactly that window.
+func TestTabCyclesEveryPanelDuringTheSkeleton(t *testing.T) {
+	a := sized(t)
+	if a.Snap != nil {
+		t.Fatal("this fixture is supposed to be the pre-snapshot skeleton")
+	}
+	// Four presses from the default must visit all four panels and return.
+	seen := map[Panel]bool{a.Focus: true}
+	start := a.Focus
+	for i := 0; i < int(panelCount); i++ {
+		a, _ = a.Step(keyPress("tab"))
+		seen[a.Focus] = true
+	}
+	if a.Focus != start {
+		t.Errorf("four `tab` presses ended on %v, want back at %v", a.Focus, start)
+	}
+	// 🔴 BY NAME, NOT BY COUNT. A cycle that visited Overview four times has the
+	// right number of presses and the wrong behaviour.
+	for _, p := range []Panel{PanelOverview, PanelCommits, PanelFiles, PanelDiff} {
+		if !seen[p] {
+			t.Errorf("`tab` never reached %s during the skeleton — focus is "+
+				"collapsing to one panel and staying there", p.Title())
+		}
+	}
+}
+
+// 🔴 AND THE COLLAPSE STILL HAPPENS WHERE IT SHOULD. An issue card and an error
+// card are each ONE full-width box; parking focus on three panels that are not
+// drawn would leave `j`/`k` doing nothing, and on the error card it is Overview
+// that scrolls the card's body.
+//
+// ⚠ THIS DIRECTION IS AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes at
+// base too. It is here because the fix above could so easily have been written
+// as "always cycle", and nothing else in the suite would have noticed.
+func TestTabStaysOnOverviewWhereThereAreNoPanels(t *testing.T) {
+	cases := []struct {
+		name string
+		app  App
+	}{
+		{"issue card", func() App {
+			a, _ := sized(t).Step(PRLoaded{Snap: fixtureIssue()})
+			return a
+		}()},
+		{"error card", func() App {
+			a, _ := sized(t).Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthNoToken}})
+			return a
+		}()},
+	}
+	for _, c := range cases {
+		a := c.app
+		for i := 0; i < 3; i++ {
+			a, _ = a.Step(keyPress("tab"))
+			if a.Focus != PanelOverview {
+				t.Errorf("%s: `tab` #%d moved focus to %v, want Overview — that "+
+					"panel is not on screen", c.name, i+1, a.Focus)
+			}
+		}
+	}
+}
+
+// 🔴 `tab` REACHES EVERY PANEL THE FRAME ACTUALLY DRAWS, IN EVERY STATE.
+//
+// ⚠ AN EARLIER VERSION OF THIS TEST WAS NAMED FOR FOCUS AND NEVER PRESSED A KEY.
+// It compared `panelsAreOnScreen()` against the rendered titles — two readings
+// that agree by construction — so it passed on the very tree whose `tab` was
+// broken, while its name read as coverage of exactly that bug. What makes this
+// version real is that it drives the KEYBOARD against the RENDERED OUTPUT: for
+// every state, if the frame draws four panels then `tab` must visit all four,
+// and if it draws a card then focus must stay where the card's body scrolls.
+// Neither side is the predicate under test.
+func TestTabReachesEveryPanelTheFrameActuallyDraws(t *testing.T) {
+	states := []struct {
+		name string
+		app  App
+	}{
+		{"skeleton", sized(t)},
+		{"skeleton with the diff already in", func() App {
+			a, _ := sized(t).Step(DiffLoaded{Diff: fixtureDiff(t)})
+			return a
+		}()},
+		{"ready pull request", ready(t)},
+		{"issue card", func() App {
+			a, _ := sized(t).Step(PRLoaded{Snap: fixtureIssue()})
+			return a
+		}()},
+		{"error card", func() App {
+			a, _ := sized(t).Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthRejected}})
+			return a
+		}()},
+	}
+	drawn, notDrawn := 0, 0
+	for _, s := range states {
+		screen := stripANSI(s.app.render())
+		// Read from the FRAME: all four titles, or it is not the panel layout.
+		onScreen := strings.Contains(screen, "1 Overview") &&
+			strings.Contains(screen, "2 Commits") &&
+			strings.Contains(screen, "3 Files") &&
+			strings.Contains(screen, "4 Diff")
+
+		// Drive the KEYBOARD and see where focus can go.
+		//
+		// ⚠ ONLY POST-`tab` POSITIONS COUNT. Seeding this with the STARTING focus
+		// made the card states look like `tab` had moved through two panels when
+		// it had moved through one — `FocusDefault` is the Diff panel, which the
+		// operator never navigated to. That false positive was in this test's
+		// first draft and it reported a bug that does not exist. Four presses
+		// from any start visit all four panels anyway, so the seed bought nothing.
+		a := s.app
+		visited := map[Panel]bool{}
+		for i := 0; i < int(panelCount); i++ {
+			a, _ = a.Step(keyPress("tab"))
+			visited[a.Focus] = true
+		}
+
+		if onScreen {
+			drawn++
+			for _, p := range []Panel{PanelOverview, PanelCommits, PanelFiles, PanelDiff} {
+				if !visited[p] {
+					t.Errorf("%s: the frame DRAWS %s but `tab` can never reach it — "+
+						"the operator is looking at a panel the keyboard has "+
+						"written off\n%s", s.name, p.Title(), screen)
+				}
+			}
+			continue
+		}
+		notDrawn++
+		if len(visited) != 1 || !visited[PanelOverview] {
+			t.Errorf("%s: the frame draws NO panels but `tab` moved focus around "+
+				"%d of them — those keys land on boxes that are not there",
+				s.name, len(visited))
+		}
+	}
+	// 🔴 POSITIVE CONTROL ON BOTH SIDES. If every state agreed at `false` the
+	// loop above would pass over a program that never draws a panel, and if every
+	// state agreed at `true` it would pass over one that never draws a card.
+	if drawn < 2 || notDrawn < 2 {
+		t.Fatalf("the sweep saw %d panel frames and %d card frames — it needs both "+
+			"to be measuring the agreement rather than one constant", drawn, notDrawn)
+	}
+}
+
+// --- `r` on a diff that failed over a healthy page -----------------------------
+
+// 🔴 THE KEY THE DIFF PANEL ADVERTISES ACTUALLY WORKS NOW.
+//
+// `diffBody`'s failure arm prints "`r` retries · `o` opens it in the browser".
+// `ActRetry` returned immediately unless `Load == LoadFailed`, and that arm can
+// only render at `LoadReady` — so the one screen that names this key was the one
+// screen where it did nothing. A legend that lies is the defect the generated
+// footer exists to prevent one pane over.
+//
+// ⚠ IT ASKS FOR THE DIFF ALONE. Re-reading the panels would rebuild the file
+// tree and clamp the cursors under the operator, which is what "inert on a
+// healthy screen" protects.
+func TestRetryFiresOnADiffFailureOverAHealthyPage(t *testing.T) {
+	const detail = "the patch endpoint reset the connection"
+	a := deliver(t, false, PRLoaded{Snap: fixturePR()},
+		DiffLoaded{Err: &ghapi.APIError{State: ghapi.AuthOther, Detail: detail}})
+
+	// The screen really is the one that advertises the key.
+	screen := stripANSI(a.render())
+	if !strings.Contains(screen, "DIFF UNAVAILABLE") || !strings.Contains(screen, "`r` retries") {
+		t.Fatalf("this fixture is not the screen that names `r`\n%s", screen)
+	}
+
+	next, intents := a.Step(keyPress("r"))
+	want := []Intent{FetchDiff{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	if !intentsEqual(intents, want) {
+		t.Fatalf("`r` on DIFF UNAVAILABLE emitted %v, want %v — the panel names "+
+			"this key and it did nothing", intents, want)
+	}
+	// 🔴 AND THE PAGE IS NOT THROWN AWAY. A retry that reset Load or dropped the
+	// snapshot would blank three working panels to re-fetch the fourth.
+	if next.Load != LoadReady {
+		t.Errorf("Load = %v, want LoadReady — the page never failed", next.Load)
+	}
+	if next.Snap == nil {
+		t.Error("the snapshot was discarded by a DIFF retry")
+	}
+
+	// The whole loop: the retry's result lands and the failure leaves the screen.
+	done, _ := next.Step(DiffLoaded{Diff: fixtureDiff(t)})
+	after := stripANSI(done.render())
+	if strings.Contains(after, "DIFF UNAVAILABLE") || strings.Contains(after, detail) {
+		t.Errorf("the failure is still on screen after a successful retry\n%s", after)
+	}
+	if !strings.Contains(after, "pkg/handler.go") {
+		t.Errorf("the retried diff is not on screen\n%s", after)
+	}
+}
+
+// 🔴 AND `r` IS STILL INERT ON A SCREEN WITH NOTHING WRONG WITH IT. The pair is
+// what makes the test above a claim about the failure state rather than about
+// `r` having been made unconditional.
+//
+// ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes at the base of the
+// fix too, because `r` was inert everywhere there. It is the half that stops the
+// fix from being written as "always retry".
+func TestRetryIsStillInertOnAHealthyScreen(t *testing.T) {
+	if _, intents := ready(t).Step(keyPress("r")); len(intents) != 0 {
+		t.Errorf("`r` on a fully loaded screen emitted %v — re-fetching would "+
+			"move the cursor out from under the operator", intents)
+	}
+	// And on the skeleton, where nothing has failed and both reads are already
+	// in flight.
+	if _, intents := sized(t).Step(keyPress("r")); len(intents) != 0 {
+		t.Errorf("`r` during the skeleton emitted %v — both reads are already "+
+			"in flight, so this would duplicate them", intents)
+	}
+}
+
+// --- the issue arm's second assignment -----------------------------------------
+
+// 🔴 AN ISSUE NEVER CARRIES A DIFF, AND THIS IS WHY `a.Diff = nil` IS THERE.
+//
+// ⚠ IT IS AN INVARIANT GUARD ON MODEL STATE, AND IT IS NOT SCREEN-OBSERVABLE —
+// said plainly because an audit found the line SURVIVING the whole package when
+// mutated, and a guard nobody can see is exactly the thing this repo deletes
+// rather than keeps quiet about. The pairing it defends against cannot come from
+// the API: `/pulls/{n}/files` 404s for an issue number, so a successful diff
+// beside an issue snapshot is unreachable in production, and `renderIssueCard`
+// reads no diff, so nothing would look wrong if the field were left set. What it
+// buys is a coherent model — the issue card is terminal, and a terminal screen
+// holding a live diff is a state the next reader of `a.Diff` would have to
+// handle for no reason.
+func TestAnIssueNeverCarriesADiff(t *testing.T) {
+	for _, o := range bothOrders {
+		got := deliver(t, o.diffFirst,
+			PRLoaded{Snap: fixtureIssue()}, DiffLoaded{Diff: fixtureDiff(t)})
+		if got.Diff != nil {
+			t.Errorf("%s: the issue card is holding a diff of %d files",
+				o.name, len(got.Diff.Files))
+		}
+	}
+	// 🔴 POSITIVE CONTROL: the SAME delivery against a PULL REQUEST keeps it, so
+	// the nil above is about the issue arm and not about a Step that drops every
+	// diff it is handed.
+	pr := deliver(t, true, PRLoaded{Snap: fixturePR()}, DiffLoaded{Diff: fixtureDiff(t)})
+	if pr.Diff == nil {
+		t.Fatal("the pull-request path dropped the diff too — the assertion above " +
+			"is about Step being wired to nothing, not about issues")
+	}
+}

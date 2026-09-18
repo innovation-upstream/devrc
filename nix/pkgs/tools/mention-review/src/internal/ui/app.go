@@ -329,8 +329,17 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 // 🔴 IT IS A STATE TEST, NOT A "DID WE SPECULATE" FLAG. A boolean would have to
 // be set correctly on every path that starts a read and cleared on every path
 // that consumes one; this asks the only question that matters — is there a Diff
-// panel on screen for an answer to go into — and both of its arms are reachable
-// in EITHER arrival order.
+// panel on screen for an answer to go into.
+//
+// ⚠ IT ONLY EVER FIRES PANEL-FIRST, AND SAYING OTHERWISE IS WRONG. An earlier
+// wording claimed both arms were reachable "in EITHER arrival order"; they are
+// not. In a DIFF-FIRST cold open this runs with `Load == LoadLoading` and
+// `Snap == nil`, so neither arm returns true and the result is KEPT — that order
+// is handled downstream by the `PRLoaded` issue arm, which clears what the
+// speculative read left behind. Both mechanisms are needed and they are
+// different code; `TestOpeningAnIssueNeverShowsADiffError` drives both orders
+// and the mutation battery kills each one separately (M2 panel-first, M3
+// diff-first).
 //
 // ⚠ DISCARDED, NOT CANCELLED, AND THE REASON IS NOT "CANCELLATION IS HARD".
 // Cancelling would mean a `context.CancelFunc` living on `App`, and `App`
@@ -402,14 +411,35 @@ func (a App) act(act Action) (App, []Intent) {
 		return a, []Intent{OpenBrowser{URL: url}}
 
 	case ActRetry:
-		if a.Load != LoadFailed {
-			// ⚠ `r` IS INERT ON A HEALTHY SCREEN, DELIBERATELY. Re-fetching
-			// under the operator would move the cursor out from under them.
-			return a, nil
+		if a.Load == LoadFailed {
+			a.Load = LoadLoading
+			a.Err = nil
+			return a, a.ReadIntents()
 		}
-		a.Load = LoadLoading
-		a.Err = nil
-		return a, a.ReadIntents()
+		// 🔴 A FAILED DIFF OVER A HEALTHY PAGE IS RETRYABLE, AND IT IS THE ONE
+		// SCREEN THAT ADVERTISES THIS KEY. `diffBody`'s failure arm prints
+		// "`r` retries · `o` opens it in the browser", and until now `r` there
+		// returned nothing at all — a legend that lies, which is the exact defect
+		// the generated footer exists to prevent one pane over.
+		//
+		// 🔴 IT IS NOT A HYPOTHETICAL SCREEN EITHER. `stepWriteDone` re-reads
+		// BOTH legs after a successful write, so a diff leg that fails on that
+		// re-read lands the operator on DIFF UNAVAILABLE with the success notice
+		// still on the bar — a state that could not be reached before the reads
+		// were paired.
+		//
+		// ⚠ ONLY THE DIFF, AND THE SNAPSHOT IS LEFT ALONE. Re-reading the panels
+		// would rebuild the file tree and clamp the cursors under the operator,
+		// which is what the "inert on a healthy screen" rule below is protecting.
+		// Nothing is being scrolled out from under anyone here: `Diff == nil` is
+		// precisely the state in which there is no diff cursor to move.
+		if a.Load == LoadReady && a.Diff == nil && a.Err != nil {
+			return a, []Intent{FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+		}
+		// ⚠ `r` IS INERT ON AN OTHERWISE HEALTHY SCREEN, DELIBERATELY.
+		// Re-fetching under the operator would move the cursor out from under
+		// them.
+		return a, nil
 
 	// --- the diff viewport pan (§ `J`/`K`) -----------------------------------
 	//
@@ -476,12 +506,42 @@ func (a App) act(act Action) (App, []Intent) {
 	return a.move(act), nil
 }
 
+// panelsAreOnScreen reports whether THIS frame draws the four panels.
+//
+// 🔴 ONE PREDICATE, TWO READERS, AND THAT IS THE WHOLE POINT. `render` picks the
+// frame and `nextFocusable` decides where `tab` may land; when those were two
+// separate conditions they disagreed, and the disagreement was invisible because
+// each was individually correct. `TestFocusAgreesWithWhatIsActuallyRendered`
+// binds this to the rendered OUTPUT rather than to a second copy of the
+// condition, so a third reader cannot drift either.
+func (a App) panelsAreOnScreen() bool {
+	// A failed page is one full-width error card. No panels, and `tab` must
+	// leave focus on Overview so `j`/`k` scroll the card's body.
+	if a.Load == LoadFailed {
+		return false
+	}
+	// An issue is one full-width card too. Everything else — including the
+	// LOADING skeleton, where `Snap` is still nil — draws all four.
+	return a.Snap == nil || a.Snap.Kind == ghapi.KindPullRequest
+}
+
 // nextFocusable cycles focus, skipping panels that do not exist in the current
 // state. 🔴 An issue has no commits, files or diff, so `tab` on an issue card
 // must not park the cursor on three empty boxes — it stays on Overview, which
-// is the only panel an issue HAS.
+// is the only panel an issue HAS. Same for the error card, whose body is the
+// only thing there is to scroll.
+//
+// 🔴 IT ASKS WHAT IS ON SCREEN, NOT WHETHER A PULL REQUEST HAS LOADED. Those
+// came apart the moment the skeleton started drawing panels before `Snap`
+// existed: `isPullRequest()` is false for the WHOLE loading window, so `tab`
+// collapsed focus to Overview and — because every later press re-entered the
+// same arm — never came back, not on `DiffLoaded` and not on `PRLoaded`. The
+// operator got `j`/`k` scrolling an empty Overview body while a readable diff
+// sat one pane to the right. The skeleton is what made that reachable: before
+// it, a loading App drew a card, so there were no panels to navigate and no
+// focus marker inviting anyone to try.
 func (a App) nextFocusable(dir int) Panel {
-	if !a.isPullRequest() {
+	if !a.panelsAreOnScreen() {
 		return PanelOverview
 	}
 	n := int(panelCount)

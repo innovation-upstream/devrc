@@ -49,7 +49,12 @@ func (a App) render() string {
 	switch {
 	case a.Load == LoadFailed:
 		body = a.renderCard(bodyH, a.errorCardTitle(), a.body.View())
-	case a.Snap != nil && a.Snap.Kind == ghapi.KindIssue:
+	case !a.panelsAreOnScreen():
+		// 🔴 THE SAME PREDICATE `nextFocusable` READS. Spelled as its own
+		// condition here, this arm and the focus rule drifted apart the moment
+		// the skeleton arrived. With `LoadFailed` already taken above, this is
+		// exactly "a snapshot that is not a pull request" — i.e. the issue card —
+		// so `a.Snap` is non-nil whenever this runs.
 		body = a.renderIssueCard(bodyH)
 	default:
 		// 🔴 THE SKELETON AND THE LOADED SCREEN ARE THE SAME FRAME. `LoadLoading`
