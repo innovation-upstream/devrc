@@ -83,50 +83,50 @@
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
       # build without relying on an ambient NIXPKGS_ALLOW_UNFREE / --impure.
       # ---------------------------------------------------------------------
-      # 🔴 THE OVERLAY EXISTS SO ONE PACKAGE IS SPELLED `pkgs.nvim-octo`, AND
-      # THAT SPELLING IS LOAD-BEARING RATHER THAN COSMETIC.
-      #
-      # `nvim-octo` is consumed in two places: `nix/pkgs/tools/default.nix`
-      # (so the operator has it on PATH) and — the one that matters — the hint
-      # wrapper's `lib.makeBinPath` in `nix/programs/alacritty/default.nix`.
-      # That list is pinned against `mention-open.py`'s own syntax tree by
+      # ⚠ `nvimOctoOverlay` USED TO BE HERE and is REMOVED (Phase 4). It put
+      # `pkgs.nvim-octo` into the package set so the Alacritty hint wrapper's
+      # `lib.makeBinPath` could name it in the `pkgs.<name>` spelling that
       # `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_every_
-      # executable_the_handler_spawns`, which reads the block TEXTUALLY and
-      # matches `pkgs\.[A-Za-z0-9_-]+`. A local `let`-bound derivation is not
-      # spelled that way, so it would be INVISIBLE to the reader: the wrapper
-      # would look like it pins nothing for `nvim-octo`, and the seam that test
-      # exists to hold — "everything the handler spawns is on the wrapper's
-      # PATH" — would quietly stop covering the review TUI.
+      # executable_the_handler_spawns` can SEE. That reason transferred whole
+      # to `mentionReviewOverlay` below when the click path flipped, and octo's
+      # derivation, its wrapper, its Lua config and its two suites are now
+      # deleted — so the overlay had no remaining consumer. Rollback is
+      # `git revert` of the Phase 4 commit plus a `home-manager switch`.
       #
-      # So the package is put into the package set instead of being threaded as
-      # an argument. `callPackage` is not used: the derivation takes `pkgs`
-      # whole (it reaches `pkgs.vimPlugins`, `pkgs.neovim` and
-      # `pkgs.writeShellApplication`), so it is called with `final` directly —
-      # which also means a later overlay can still override it.
-      # ---------------------------------------------------------------------
-      nvimOctoOverlay = final: _prev: {
-        nvim-octo = import ./nix/pkgs/tools/nvim-octo { pkgs = final; };
-      };
-
+      # 🔴 AND NOTHING WOULD HAVE CAUGHT IT IF IT HAD BEEN LEFT BEHIND — DO NOT
+      # ASSUME OTHERWISE. The obvious belief is that a stale
+      # `import ./nix/pkgs/tools/nvim-octo` over a deleted directory fails flake
+      # evaluation, so the overlay and the directory are forced into one commit
+      # by the evaluator. That is FALSE, and it was MEASURED on this change: an
+      # overlay attribute is LAZY, so with the directory gone and the overlay
+      # left in `overlays = [ … ]`,
+      # `nix build --dry-run --impure .#homeConfigurations.zach.activationPackage`
+      # still succeeded and printed the same six derivations. Forcing the
+      # attribute directly (`.#homeConfigurations.zach.pkgs.nvim-octo`) DOES
+      # error with `path '…/nix/pkgs/tools/nvim-octo' does not exist` — that was
+      # the positive control proving the probe can see the fault at all — so the
+      # evaluator catches a dangling CONSUMER and is blind to a dangling
+      # PRODUCER. The two were put in one commit because that is correct
+      # housekeeping, NOT because a gate enforced it.
       # ---------------------------------------------------------------------
       # mention-review — the Go replacement for nvim-octo. PHASE 2: it can
       # comment, approve, request changes, submit a review and merge, four of
       # those five behind a y/N confirmation naming the authenticated login.
       #
-      # 🔴 IT IS AN OVERLAY ATTRIBUTE FOR THE SAME REASON nvim-octo IS, AND FOR
-      # A REASON THAT DOES NOT APPLY YET.
+      # 🔴 IT IS AN OVERLAY ATTRIBUTE SO THE WRAPPER CAN NAME IT AS
+      # `pkgs.mention-review`, AND THAT SPELLING IS LOAD-BEARING.
       #
-      # Today `mention-open.py` still spawns `nvim-octo`, so `pkgs.mention-review`
-      # is NOT in the Alacritty hint wrapper's `lib.makeBinPath` — and it must
-      # not be: `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_
-      # every_executable_the_handler_spawns` pins that list TWO-WAY, so a package
-      # the handler does not spawn fails the suite as "dead weight in the
-      # closure". That is the system working.
+      # `mention-open.py`'s `REVIEW_EXE` now spawns `mention-review`, so
+      # `pkgs.mention-review` IS in the Alacritty hint wrapper's
+      # `lib.makeBinPath` — and it must be:
+      # `test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_
+      # every_executable_the_handler_spawns` pins that list TWO-WAY, so a spawn
+      # with no package is "inert in production with a green suite" and a
+      # package with no spawn is "dead weight in the closure".
       #
-      # It is spelled as an overlay attribute anyway so that the day the click
-      # path flips, the wrapper entry is `pkgs.mention-review` — which is the
-      # spelling that reader's `pkgs\.[A-Za-z0-9_-]+` scan can SEE. A local
-      # `let`-bound derivation would make the wrapper look like it pins nothing.
+      # That reader matches `pkgs\.[A-Za-z0-9_-]+` TEXTUALLY, so a local
+      # `let`-bound derivation would be INVISIBLE to it and the wrapper would
+      # look like it pins nothing. Hence the package set, not an argument.
       #
       # 🔴 IT CAN EVALUATE TO `null`. `nix/pkgs/tools/mention-review/default.nix`
       # yields null when it cannot read exactly one `var buildVersion` line out
@@ -141,7 +141,7 @@
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
-        overlays = [ nvimOctoOverlay mentionReviewOverlay ];
+        overlays = [ mentionReviewOverlay ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the
@@ -263,17 +263,16 @@
         # wrapper's PATH — so the gate environment carrying it is not a
         # test-only convenience.
         pkgs.fzf
-        # 🔴 luajit, for the SAME reason as tmux and fzf above: a guard that
-        # cannot be written against a stub. `nix/pkgs/tools/nvim-octo/
-        # octo-init.lua` installs a merge keystroke that must pass through a
-        # confirmation, and a keymap set by `vim.keymap.set` is INVISIBLE to
-        # the structural Lua-table reader in test_nvim_octo.py — the config
-        # section stays green whether the confirmation is on the path or not.
-        # The only honest guard EXECUTES that file (luajit is the dialect
-        # neovim embeds) with `vim` and `require` stubbed, and watches a `no`
-        # answer fail to reach the merge. Without this entry that suite has no
-        # interpreter and reports merge safety it never measured.
-        pkgs.luajit
+        # ⚠ `pkgs.luajit` USED TO BE HERE and is REMOVED (Phase 4). Its only
+        # consumer was `scripts/tests/test_nvim_octo.py`, which EXECUTED
+        # `nix/pkgs/tools/nvim-octo/octo-init.lua` under it to watch a `no`
+        # answer fail to reach a merge — a behaviour no structural Lua-table
+        # reader could see. Both that suite and the Lua file are deleted, so
+        # nothing in either tier runs Lua any more. `REQUIRED_TOOLS` in
+        # `scripts/run-tests.sh` dropped `luajit` in the SAME commit; the two
+        # lists are pinned two-way (see that file's GUARD 1 header), so an
+        # entry left here would be an orphan whose justification names files
+        # that no longer exist.
       ];
     in
     {

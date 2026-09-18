@@ -44,8 +44,10 @@ func main() {
 	if aerr != nil {
 		// 🔴 BEFORE DRAWING ANYTHING. This is the ONE failure that exits rather
 		// than rendering a card, because there is no window to keep open yet —
-		// exactly as `nvim-octo` behaves today, and the contract
-		// `scripts/tests/test_nvim_octo.py` pins.
+		// exactly as `nvim-octo` behaved, and the contract
+		// `scripts/tests/test_nvim_octo.py` pinned. ⚠ Both were deleted in
+		// Phase 4; `internal/argv`'s package comment names the git incantation
+		// that recovers them, and `main_test.go` is what pins this wiring now.
 		fmt.Fprintln(os.Stderr, aerr.Msg)
 		os.Exit(aerr.Code)
 	}
