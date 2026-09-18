@@ -59,7 +59,7 @@ GRANDFATHER_STEP = 16_384
 GRANDFATHERED: dict[str, int] = {
     "claudedocs/handoff-tmux-webapp.md": 180_224,
     "claudedocs/handoff-audit-pr-ladder.md": 196_608,
-    "claudedocs/handoff-cairn-oss-multi-instance.md": 196_608,
+    "claudedocs/handoff-cairn-oss-multi-instance.md": 114_688,
     "claudedocs/handoff-cairn-phase3.md": 163_840,
     "claudedocs/handoff-nix-disk-cleanup.md": 114_688,
     "claudedocs/handoff-subsystem-store.md": 98_304,
