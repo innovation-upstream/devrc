@@ -18,15 +18,53 @@ is the PRIVATE proposal, not this doc.
 - **closing-condition:** `check` — a SECOND instance exists and serves client notes from
   client infrastructure: a `cairn`-family store reachable at a civitai-side endpoint,
   answering `cairn recall --scope <a civitai scope>` with entries written by a civitai
-  session, with the personal instance unaffected. ⚠ **FROZEN — this is the ORIGINAL ask,
-  and the arc has NOT met it.** Everything shipped so far (the OSS repo, the flake pin,
-  the consolidation, the CI legs, the scrub fixes) is the FIRST half — spinning `cairn`
-  out. **The second instance has not been stood up.** Ranks 4, 8 and 21 are the nearest
-  work to it; 25/27/28 and the audit residue are not. A close-check answering this line
-  today returns NOT ADDRESSED, and the one item is: **the civitai instance does not
-  exist yet.**
+  session, with the personal instance unaffected. ⚠ **FROZEN — this is the ORIGINAL ask.**
+  ✅ **MET 2026-09-18 by phase D** (see `State now`): two entries written by a civitai session,
+  byte-identical on the PVC, served to BOTH hosts; personal unaffected **on entry counts** — which
+  cannot see the routing change phase D also made, recorded in `State now`.
+  🔴 **ONE QUALIFIER ON *THIS CONDITION*, not on the arc (several items remain open — see
+  `Next steps`): the route came from a `$CAIRN_ROUTES` OVERRIDE, NOT THE SHIPPED TABLE**, which is
+  still all-`personal` by a deliberate tested invariant. Met as WORDED; NOT yet reproducible from
+  committed config, since a session without that override gets **rc 11**, correctly. Making it
+  durable is **phase E**.
 
 ## State now
+
+- ✅ **2026-09-18 — PHASE D IS CLOSED. THE STORE SERVES CLIENT NOTES WRITTEN BY A CIVITAI SESSION,
+  BYTE-IDENTICAL, TO BOTH HOSTS. The arc's `## Goal` is MET as worded** (read its qualifier —
+  routing is an override, not committed config). Claim `cairn-oss-multi-instance-phase-d` RELEASED.
+  - **Written:** scope `civitai-developer-docs`, two entries — `developer-docs-site`
+    (`revision=85779666cbc89bd1`, 4,746 B) written this session, and `apps`
+    (`revision=232cbe6db29bf18a`) **rescued from the frozen pre-cutover mirror**, where it was
+    orphaned in no live store. Both byte-identical against `/data`. 🔴 **A `revision` IS the leading
+    16 hex of the file's own sha256** — checkable, not an opaque id.
+  - 🔴 **WHY THAT SCOPE, AND WHY IT IS NOT A MIGRATION.** Of the token's **14** allowlisted scopes,
+    exactly two (`civitai-developer-docs`, `civitai-app-requests`) were absent from BOTH the routing
+    table and the personal store — verified against a positive control — so it has no readers and no
+    prior live copy. **A brand-new scope was NOT available:** the allowlist is a snapshot with no
+    wildcard, and an unlisted scope reads back byte-identically to one that does not exist.
+  - **Durability:** a manual run of the (suspended) backup CronJob over real content —
+    `census: scopes=1 entries=2`, `cairn-backups/daily/cairn-20260918T030002Z.tar.gz`, round-trip
+    verified AND restore-checked; the #1551 mount fix confirmed live first. **Both CronJobs remain
+    suspended** — unsuspending them is an open item.
+  - ⚠ **BOTH HOSTS NOW CARRY `instances/civitai.env`** (0600, 281 B, token fingerprint
+    `d9904a784be2` on each — matching `civitai/talos-infra:clusters/production/apps/cairn/README.md:343`,
+    an independent check that the right row was taken). `len(instances) > 1` is now TRUE on both, and
+    it has **two** consequences, not one:
+    - cosmetic: every `recall` banners `cairn[personal]:` / `cairn[civitai]:` where it said `cairn:`.
+    - 🔴 **BEHAVIOURAL, AND THIS IS THE ONE THAT BITES: A SCOPE THE TABLE DOES NOT NAME NOW REFUSES
+      AT rc 11 ON BOTH HOSTS. It used to resolve to `personal`.** `Routing.alias_for` returns
+      `DEFAULT_ALIAS` for an unnamed scope **only** `if not self.multi_instance`; at two instances it
+      raises `UnroutedScope`. So the FIRST write to any scope not in the 25-row table — a new repo, a
+      new subsystem — now fails, and unblocking it is a devrc PR editing `claude/cairn-routes.json`
+      plus a `home-manager switch` on both hosts. **Measured 2026-09-18: latent, not firing** — live
+      scopes 25, table 25, symmetric difference EMPTY on *both* hosts, so no existing scope is
+      affected. It fires on the next NEW one.
+      ⚠ Phase D changed the CLIENT's routing behaviour, and "personal unaffected" was measured on
+      ENTRY COUNTS, which cannot see that. Both claims are true; they are about different things.
+  - ⚠ **STILL ORPHANED: `civitai-app-requests/app-requests.md`** (1,803 B) exists only in the frozen
+    mirror. Surfaced by `doctor`'s `personal/token-scopes` PROBLEM, which is **pre-existing** and is
+    the check earning its keep. Moving it is a decision, not a cleanup.
 
 - ✅ **2026-09-17/18 — PHASE C IS CLOSED. A SECOND INSTANCE IS DEPLOYED ON CIVITAI PRODUCTION
   INFRASTRUCTURE AND THE RESTORE DRILL PASSED END TO END.** Four PRs, all merged and verified BY
@@ -34,10 +72,8 @@ is the PRIVATE proposal, not this doc.
   server image), `civitai/talos-infra` **#1542** `40bd630dd` (the manifests), **#1548** `ec5db6fde`
   (backup bucket + credential), **#1551** `6834ac0f2` (the mount fix + gate 23). Claim
   `cairn-oss-multi-instance-phase-c` RELEASED.
-  🔴 **THE ARC'S `## Goal` IS STILL NOT ADDRESSED AND PHASE C DOES NOT ADDRESS IT.** The condition
-  needs the store answering *with entries written by a civitai session*. Nothing has been written
-  yet: the `civitai` scope answers `scope-absent`. That is phase **D** (seed + byte-identity) and
-  phase **E** (registry cutover). Do not read "phase C closed" as the arc closing.
+  ⚠ **SUPERSEDED 2026-09-18 by the phase-D block above** — its closing "Goal STILL NOT ADDRESSED /
+  `scope-absent`" was true when written and is now false. Phase **E** is what remains.
 
 - 🔴 **THE LIVE INSTANCE — the facts a next session needs and should not re-derive.**
   Namespace `cairn` on the civitai production cluster; pod Ready, 0 restarts, on `talos-avt-y6z`;
@@ -49,42 +85,33 @@ is the PRIVATE proposal, not this doc.
   `kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/<scope>'`
   → `401` without the token, `200` + `X-Store-Status:` with it.
 
-- 🔴 **THE IMAGE: `ghcr.io/civitai/*` IS PRIVATE AND THE PULL NEEDS A PACKAGE-LEVEL GRANT THAT NO
-  API CAN SET.** `cairn-store` has `repository: null`, so a classic PAT has nothing to inherit from
-  and `ghcr-cred` 403s until `civitai-deploy` is invited with Read **through the GitHub UI**
-  (org → Packages → cairn-store → Package settings). The operator did this 2026-09-17. **A re-mirror
-  under a new name needs it again** — and the failure is `ImagePullBackOff`, not an auth message.
-  The mirror is MANUAL by choice: pushing to the civitai org from `ZacxDev/cairn`'s public CI would
-  put a client credential in a public repo. `skopeo copy` by DIGEST; both sides then carry the
-  identical digest, which is what makes "both clusters pull the same tag" checkable.
+- 🔴 **THE IMAGE PULL NEEDS A PACKAGE-LEVEL GRANT NO API CAN SET.** `cairn-store` has
+  `repository: null`, so a classic PAT inherits nothing and `ghcr-cred` 403s until `civitai-deploy`
+  is invited with Read **through the GitHub UI** (org → Packages → cairn-store → Package settings);
+  done 2026-09-17. 🔴 **A re-mirror under a new name needs it AGAIN, and it presents as
+  `ImagePullBackOff`, not as an auth error.** The mirror stays MANUAL — public CI pushing to the
+  civitai org would put a client credential in a public repo — and `skopeo copy` by DIGEST is what
+  makes "both clusters pull the same image" checkable.
 
-- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** The CronJob set
-  `persistentVolumeClaim.readOnly: true` on the **volume**, so the CSI driver mounted the block
-  device `-o ro` while the server held the same device **rw** on the same node. ext4 refuses:
-  `already mounted … Can't mount, would change RO state`. 20 retries over 24 minutes, and it would
-  never have succeeded. **`ReadWriteOnce` is NOT the cause** — both pods are on one node and RWO is
-  per-node. Fix: drop `readOnly` from the **claim reference**, keep it on the container's
-  `volumeMounts`, so the kubelet reuses the rw mount and the backup still cannot write.
-  ⚠ Probable cause, **stated as probable**: §6's storage delta. A hostpath volume tolerates a ro
-  co-mount; a LINSTOR block device does not.
-  🔴 **WHAT IT COST TO FIND vs WHAT IT WOULD HAVE COST:** the CronJob ships suspended, so this would
-  have surfaced at the first unsuspend — *after* phase D seeded ~110 real entries. And it is worse
-  than the "green CronJob" trap the closing condition was written against: this job could not have
-  gone green at all, so alerting on backup success would have fired only once someone depended on it.
-  **Gate 23 (`ro-pvc-comount`) now pins the RELATIONSHIP cross-file** — no workload may request a
-  PVC read-only while another mounts it read-write — watched RED against the pre-fix manifests.
+- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** `readOnly: true` on
+  the **claim reference** made the CSI driver mount the block device `-o ro` while the server held it
+  **rw** on the same node; ext4 refuses (`would change RO state`). **`ReadWriteOnce` is NOT the
+  cause** — both pods are on one node and RWO is per-node. Fix: `readOnly` belongs on the container's
+  `volumeMounts`, never the claim. ⚠ Probable, stated as probable: a LINSTOR block device does not
+  tolerate a ro co-mount where a hostpath does. 🔴 **The shape worth keeping: this job could not have
+  gone green AT ALL, so alerting on backup success would have fired only once someone depended on it
+  — and it ships suspended, so it would have surfaced only after phase D seeded.** Now pinned
+  cross-file by gate 23 (`ro-pvc-comount`), watched RED against the pre-fix manifests.
+  ✅ **EXERCISED at phase D over real content** — a manual run of the fixed CronJob completed,
+  round-trip verified and restore-checked.
 
-- ✅ **THE DRILL'S EVIDENCE, because "a restore, not a green CronJob" is the closing condition and
-  this is what satisfies it.** Canary `datapacket-talos/cairn-drill-canary.md`, 132 B,
-  `sha256:c4de5e4e0b9f3fb26dd9255ffda4370d513327076ce47f475135c71022b756cd`, **verified to index**
-  (`recalled`) before backing up — a wrong shape indexes EMPTY and makes the drill unpassable in a
-  way that looks like a failed restore. Backup job **Complete**, `failedMountEvents=0`, census
-  **1 entry / 1 scope**, archive 392 B. Pulled OUT via `mc cat` (the tenant image has no `tar`, so
-  `kubectl cp` out of it fails): local sha256 `032a51cd…` **matched the published sidecar**. Canary
-  destroyed → store reported **`scope-empty`**, i.e. the loss was real and not just a missing file.
-  Restored → canary back at **`c4de5e4e…` byte-identical**, and the store served it again
-  (`recalled`). `backup.py`'s in-job "restore-check" cannot supply this: it never writes to a volume.
-  Drill artifacts removed; CronJobs still suspended.
+- ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
+  written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
+  restored **byte-identical** (`c4de5e4e…`) and served again. **Drill artifacts removed** —
+  re-verified 2026-09-18, `/data` holds only `civitai-developer-docs/`. The whole procedure, the
+  `mc cat` extraction, the entry-shape trap, and why `backup.py`'s in-job restore-check cannot
+  supply this evidence, are all in
+  `civitai/talos-infra:clusters/production/apps/cairn/README.md` — read it there, not here.
 
 - 🔴 **THE BACKUP CREDENTIAL IS SCOPED AND CANNOT DELETE — verified on the live policy, not the
   manifest.** `cairn-backup-write` grants `ListBucket/ListBucketMultipartUploads/GetBucketLocation`
@@ -103,7 +130,8 @@ is the PRIVATE proposal, not this doc.
      someone else (`3a9ed6c1e`).
 
 - 🔴 **ROUTING IS DETERMINISTIC ALREADY; THE GAP IS THAT NOTHING CHECKS THE *ASSIGNMENTS*.** Both
-  hosts: 25 entries, **all → `personal`**, no `instances/` dir, `cairn routes` → `instances: personal`.
+  hosts: 25 entries, **all → `personal`** — that half stands. ⚠ **Its "no `instances/` dir" half is
+  STALE since phase D**: both hosts now report `instances: personal, civitai`.
   So every scope resolves personally and the civitai server has **no client pointed at it**. The
   two-way pin grades *presence* (is every live scope named? does every named scope exist?) and never
   **"is each scope pointing at the RIGHT instance?"** — which is the axis that decides where durable
@@ -116,22 +144,47 @@ is the PRIVATE proposal, not this doc.
   `cairn routes` reports two instances on both, and only then flip the table.** Miss one host and
   ~110 entries' worth of scopes refuse on it. §7 step 6 does not state this order.
 
-- 🔴 **DEFERRED, WITH A CLOSING CONDITION — the routing durability design. DUE BEFORE PHASE E.**
-  The operator proposed routing everything to homelab plus per-scope two-way mirroring, and after
-  pushback asked to "circle back and land on the right durable reliable long term design". **Closes
-  when** the operator records a choice between (a) fail-loud routing + freshness observability and
-  (b) per-scope bidirectional mirroring, in this doc's decisions, over NAMED evidence: §10's "two
-  writable stores … bites silently" judgement, the conflict semantics `cairn put` would need (it
-  REWRITES entries, so two writers need a merge rule that does not exist), and a measured answer to
-  "which copy is current". **Checked by** the operator in writing — not by a command. **Phase E is
-  the forcing function**: the cutover is where the choice becomes expensive to reverse.
-  ⚠ **The operator's stated worry is "not knowing WHICH copy is current"** — observability, which
-  duplication makes *harder*, not easier. Three things to measure during D/E so the decision is
-  cheap: what the per-host cache actually serves during a civitai outage; whether `put` conflicts
-  are reachable at all (the store's own `[cairn: actor/session]` attribution answers it); and what a
-  two-instance `cairn doctor` reports.
+- ✅ **DECIDED 2026-09-18 — (a) FAIL-LOUD ROUTING + FRESHNESS OBSERVABILITY; mirroring REJECTED.
+  This UNBLOCKS PHASE E.** The decision itself lives in `## Gotchas / decisions / dead-ends` (an
+  APPEND section, so it outlives this one). **Its NAMED EVIDENCE — three phase-D measurements, each
+  one a reason (b) lost:**
+  1. **"Which copy is current" is ALREADY answered, automatically, in one line.** With the civitai
+     store unreachable and the cache warm, `recall` returns **rc 0** and banners
+     `⚠ cairn[civitai]: cached — <url> unreachable: [Errno -2] … — SERVED FROM CACHE, cache 3m old`.
+     Reads survive an outage, and the answer carries its own provenance AND age. The operator's
+     stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
+     duplication makes it harder, not easier. via: measurement
+  2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
+     unconditional rewrite.** `scripts/subsystem-store-api/server.py:233-234` — the SERVER contract,
+     in this repo — states `PUT /api/v1/entry/<scope>/<ref>` *"replaces the whole file behind a
+     **REQUIRED `If-Match`**; a stale revision is a **412** and the file is untouched"*, and `create`
+     refuses an existing ref. So two writers do not silently clobber; the second gets a 412. A merge
+     rule is still absent, but the failure it would have to cover is **fail-loud, not silent loss**,
+     which removes (b)'s strongest argument. 🔴 **That contract predates the premise it refutes** —
+     so the doc asserted an unconditional rewrite while the repo already said otherwise, and the
+     check was one `grep` away the whole time. ⚠ Still NOT exercised: no live 412 was provoked.
+     ⚠ And the server scopes its attribution guarantee to `POST /bullets` — **a PUT writes the
+     caller's bytes verbatim**, so `[cairn: actor/session]` does not self-populate on that path.
+     via: code
+  3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
+     (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
+     (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
+  🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
+  already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
+  remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
+  adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
+  the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
+  configures*. 🔴 **THE GUARD PHASE E MUST EDIT, NAMED HERE SO IT IS NOT MET AS A SURPRISE RED:**
+  `devrc:scripts/tests/test_cairn_routes.py:120`
+  `test_every_scope_routes_to_the_default_instance_today`, whose docstring says *"Do not 'finish the
+  migration' by editing this file"* and whose assert message states the precondition — a scope may
+  be re-pointed only once some host carries `instances/<alias>.env`. **That precondition is now
+  satisfied on both hosts.**
 
-- ⚠ **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
+- ⚠ **Carried forward (durable — a REPLACE would drop these):** 🔴 **the ROUTING DURABILITY decision
+  is in `## Gotchas / decisions / dead-ends`** — an APPEND heading, so it survives a REPLACE without
+  anyone re-carrying it; this bullet is itself inside `State now` and is a reminder, not a mechanism.
+  The fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. `m_index_store` still
   restores `sys.path` on the success path only — closes when a test asserting `sys.path == before`
   after a successful call is shown RED against today's conditional `finally` and GREEN after.
@@ -144,11 +197,11 @@ is the PRIVATE proposal, not this doc.
   `clawgate_handoff.sh resolve` exited **5** (`NOTHING RESOLVED — 0 tasks`), which cannot
   distinguish "this session touched no task" from "the id is wrong". Not a clean bill of health.
 
-- ⚠ **The doc was cut 196,581 → 101,909 B** (devrc #1757 `53c9b981d`), 107 KB moved **verbatim** to
-  `claudedocs/refs/cairn-oss-multi-instance.md` with per-block preservation proof and a case-mutant
-  control. The allowance was **tightened** 196,608 → 114,688, never raised. **The ranked list was
-  deliberately NOT rewritten**: it predates the `forcing:` requirement and carries none, so a
-  rewrite would have meant inventing forcing functions for hygiene items.
+- ⚠ **Size: the allowance is `98_304` and the authority is `scripts/lib/handoff_budget.py:62`, never
+  a sentence in this doc** — one here read "114,688" (that is `handoff-nix-disk-cleanup.md`'s row)
+  until 2026-09-18. The 2026-09-17 cut (devrc #1757 `53c9b981d`) moved 107 KB **verbatim** to
+  `claudedocs/refs/cairn-oss-multi-instance.md`. **The ranked list was deliberately NOT rewritten**:
+  it predates the `forcing:` requirement, so a rewrite would have meant inventing forcing functions.
 
 ## Open investigations — live diagnosis state
 
@@ -473,12 +526,6 @@ and the design fix landed while they were still being written. When you find you
 the third PR that classifies instances of one class, the class itself is the bug.
 **Next probe: none.**
 
-### Rank 3 slice 3 MERGED 2026-09-12 — `#1508`, correcting this doc's own carried-forward line
-`origin/main` `44bd8b0e`: *"consolidate onto the pinned client — delete the five forked reader
-modules"*. **`State now`'s carried-forward block still calls it BUILT, NOT MERGED** — that line was
-true when I wrote it and is now false. Recorded here rather than by replacing `State now`, which
-belongs to that arc's own session. via: measurement
-
 ### An unexplained backup archive at 2026-09-17T21:03:27Z that no surviving Job accounts for
 - as-of: 2026-09-17
 - **Symptom + exact repro:** `mc ls --recursive nvme/cairn-backups/` lists TWO archives —
@@ -513,6 +560,20 @@ still resolves to the same rank. Merge shas, so a reader can still find each one
 **4** `civitai/talos-infra#1414` `c9b1c4e03` · **12** `ZacxDev/cairn#6` `9d58f02` ·
 **23** devrc #1583 `c1ecc830` + `ZacxDev/cairn#17` `a2661371` · **24** devrc #1621 `df09a6c2` ·
 **26** devrc #1657 `0808a820`.
+🔴 **PASS 3, 2026-09-18 — ranks 7, 13, 15, 16, 17, 19 and 22 joined them**, bodies moved VERBATIM to
+that same refs file § DEMOTED 2026-09-18 (pass 3), each stamped with its own sha256 and verified
+byte-identical there against a case-mutant control. **Those seven keep an in-place pointer AND their
+durable lesson** — read the lesson here, the narrative there. It recovered enough gross to make room
+for **phase E** (phase D was already written, and inside the pre-pass measurement).
+🔴 **NO HEADROOM FIGURE IS QUOTED HERE, DELIBERATELY — DERIVE IT, because a number stated inside the
+file it measures is stale on the commit that states it.** Three successive rounds of this PR quoted
+one and each was falsified by its own commit (1,743 → 427 → 7,918, the last wrong the moment it was
+written). `scripts/lib/handoff_doc.py:2884-2888` states the same rule for the ledger it prints.
+```bash
+D=claudedocs/handoff-cairn-oss-multi-instance.md; echo $(( 98304 - $(wc -c < "$D") ))   # bytes free
+```
+⚠ **An open thread must NOT be demoted to `refs/`** — the 2026-09-18 pass moved three of rank 22's
+open residuals there and they were restored; check for that before demoting anything.
 
 **What did NOT close with them, kept HERE on purpose — do not read the ledger line as "all
 done":**
@@ -542,18 +603,9 @@ done":**
 6. ✅ **DONE AND MERGED 2026-09-07 — `ZacxDev/cairn` #3, `8e4ef84`.**
    forcing: none — done
 
-7. ✅ **CLOSED 2026-09-10 — `ZacxDev/homelab-infra` #787, squash `936692ec7`.** The
-   no-reload paragraph is retired in the SAME commit that moves `image:` to `0.8.0`, which is
-   what its own expiry clause required: retiring it early leaves the next operator waiting for
-   a reload the image will never perform, retiring it late has them replace the pod for
-   nothing. What replaces it names the SIGHUP command, keeps the pre-flight advice rescoped to
-   pod REPLACEMENTS (startup is still `exit 78` on a malformed file, deliberately), and keeps
-   the rule that the running container answers the question — with the positive control the
-   original had, plus the `sh -c` that stops your own shell expanding the glob.
-   ✅ **CLOSED 2026-09-10.** #787 squash `936692ec7`; the store serves `0.8.0` and the
-   RUNNING container carries SIGHUP (0 → 1, positive control held). The retired
-   paragraph's own rule survives it: which behaviour an image has is answered by the
-   running container, never by a comment's age.
+7. ✅ **CLOSED 2026-09-10 — `ZacxDev/homelab-infra` #787 `936692ec7`.** Body demoted.
+   🔴 **Lesson:** which behaviour an image has is answered by the RUNNING CONTAINER, never by a
+   comment's age.
    forcing: none — done
 
 8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.**
@@ -594,75 +646,35 @@ done":**
     first entry, verified round-tripping from the pod: `1 of 1 entry in cairn/`.
     forcing: none — done
 
-13. ✅ **CLOSED 2026-09-10 — BOTH HALVES. The publish path shipped (`ZacxDev/cairn` #8,
-    squash `3167e44`) and the publish happened:**
-    `harbor.homelab.lan/library/subsystem-store-api:0.8.0`, digest
-    `sha256:55cbd1d6c186142c5fd5e4f3ca37ad0dfc3836db5e603374def041778080c7fd`, built from
-    `c84c142`; verified by pulling the tag BACK and re-running the script's controls (11 SIGHUP
-    occurrences, `/data` empty), not by trusting the push. `homelab-infra`'s `image:` names it
-    as of #787 squash `936692ec7`, with the store serving it.
-    ⚠ **The "decide nix vs Dockerfile" premise was the WRONG FORK** and is retired — Harbor is a
-    LAN host, so this is a local `docker build` + push, not CI. #8 ports devrc's
-    `scripts/subsystem-store-api/build-push.sh` in with the registry as a REQUIRED parameter
-    (`CAIRN_REGISTRY`) rather than a hardcoded internal hostname, which in a public repo is both
-    a leak and wrong for any other operator.
-    🔴 **THE DURABLE LESSONS, kept because each is a shape rather than a fact about #8:**
-    - **A raw diff cannot characterise an extraction.** The raw `server.py` diff against the
-      deployed copy is 659 lines and says nothing, because the extraction rewrote docstrings
-      wholesale. Stripping comments+docstrings and diffing the executable token stream
-      (file-against-itself control = 0) gives **638 tokens cairn HAS and the deployed copy
-      lacks** against **17 the deployed copy has and cairn lacks, every one a fragment of a
-      reworded error-message STRING** — so the cairn server is a strict behavioural SUPERSET.
-    - **A publish control must assert the BEHAVIOUR, not just the artefact.** The script's
-      controls are `/data` empty (a public repo must not ship a store), the code IMPORTs (the
-      positive half — an image with no filesystem reports the same reassuring zero), and **the
-      image's `server.py` carries SIGHUP**, so "we published the new server" and "the new server
-      does the thing" are not one unchecked claim. That guard was WATCHED to fail in place, for
-      its own reason; a first attempt ran the mutant from `/tmp`, where `ROOT` became `/` and the
-      BUILD failed instead — a mutant dying for a bystander's reason, not counted.
-    - 🔴 **THE PRE-PUBLISH TAG CHECK FAILED ITS POSITIVE CONTROL.**
-      `docker manifest inspect …:0.7.0` reported the LIVE, CURRENTLY-DEPLOYED tag ABSENT, so the
-      reassuring `0.8.0 absent — safe to publish` beside it carried NO information. Cause: the
-      client-side trust store does not carry harbor's CA while the DAEMON's does. **Never probe
-      harbor with `docker manifest inspect` from this host** — see the Gotchas entry for the
-      one-command discriminator.
+13. ✅ **CLOSED 2026-09-10 — `ZacxDev/cairn` #8 `3167e44`; published `…:0.8.0`.** Body demoted.
+    🔴 **Three lessons, each a SHAPE, not a fact about #8:** (a) a raw diff cannot characterise an
+    EXTRACTION — strip comments+docstrings and diff the executable token stream, with a
+    file-against-itself control; (b) a publish control must assert the BEHAVIOUR, not just the
+    artefact — an image with no filesystem reports the same reassuring zero; (c) 🔴 **never probe
+    harbor with `docker manifest inspect` from this host** — it reported the LIVE, currently-deployed
+    tag ABSENT, so the reassuring `safe to publish` beside it carried NO information.
     forcing: none — done
 
 14. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`** (same PR as rank 10).
     forcing: gate — it turned the public repo's only CI gate red on 2 of its first 26 runs
 
-15. ✅ **DONE AND LIVE 2026-09-09 — `ZacxDev/cairn` #7 `059ec17`, reaching this host via the
-    pin bump in devrc #1433 and a `home-manager switch` (generation 713).**
-    **Closing condition MET, exercised on this host:** `cairn recall --ref cairn --scope devrc`
-    exits **0** and prints ONE entry (71 lines). It exited **2** for the whole life of this
-    item. All four flags the digest's footer prescribes now work (`--ref`, `--list`,
-    `--limit`, `--page`), and the refusals are the module's own, shared not copied.
+15. ✅ **DONE AND LIVE 2026-09-09 — `ZacxDev/cairn` #7 `059ec17`, reaching this host via devrc
+    #1433 and a `home-manager switch`.** Body demoted.
     forcing: none — done
-16. ✅ **DONE — devrc #1433, squash `4a362c8d`.** `checks.cairn-client-runs` builds the pinned
-    package and RUNS it: `validate` against a one-entry fixture cache must report
-    `1 of 1 entry file(s) parse`, and `doctor --no-sync` must produce a report (its exit code
-    deliberately NOT asserted — with no pod, token or network a non-zero verdict is CORRECT).
-    The same PR bumped the pin `9213726` → `c84c1429`.
-    **Closing condition MET and EXERCISED, not asserted:** green against the real client, and
-    RED with the client stubbed to `exit 0`, failing with the check's OWN message rather than
-    a bystander's; tree restored byte-identical after.
-    🔴 **WHAT IT FOUND ON ITS FIRST RUN, and the reason the item was worth doing:** the pinned
-    client's `validate` printed NOTHING on a clean store and exited 0 — and that verb is the
-    post-write check the index protocol MANDATES, so every store write validated by the
-    packaged client was passing vacuously. **cairn's OWN CI did not catch it** (1709 tests
-    green while the verb was inert, because its covering test asserted only `rc == 0` and the
-    absence of an error string). Fixed upstream in `ZacxDev/cairn` #11 `c84c1429`. That is the
-    empirical answer to "won't upstream catch a broken client" — no, it did not.
-    ⚠ **It is an OUTPUT, not yet a GATE — see rank 20.**
+16. ✅ **DONE — devrc #1433 `4a362c8d`.** `checks.cairn-client-runs` builds the pinned package and
+    RUNS it; closing condition exercised, and RED with the client stubbed to `exit 0`. Body demoted.
+    🔴 **What it found on its FIRST run, which is why the item was worth doing:** the pinned client's
+    `validate` printed NOTHING on a clean store and exited 0 — and that verb is the post-write check
+    the index protocol MANDATES, so every store write validated by the packaged client was passing
+    vacuously. **cairn's OWN CI did not catch it** (1709 tests green while the verb was inert). That
+    is the empirical answer to "won't upstream catch a broken client": no, it did not.
+    ⚠ It is an OUTPUT, not yet a GATE — see rank 20.
     forcing: gate
 
-17. ✅ **DONE AND MERGED 2026-09-09 — `ZacxDev/cairn` #10, squash `934ec38e`.** The
-    `--timeout` comment promised a second resolver (`who` + its helper) that was removed
-    before publication, so it named two symbols that never existed in this repo. It now names
-    `_store_timeout`, the only resolver. **Closing condition MET on `origin/main`: both
-    removed names grep to 0.** ⚠ A first draft explained the history by NAMING them, which
-    fixed the defect while making the mechanical check report it UNFIXED — a false negative
-    manufactured by the fix. The explanation survives without the spelling.
+17. ✅ **DONE AND MERGED 2026-09-09 — `ZacxDev/cairn` #10 `934ec38e`.** Body demoted.
+    ⚠ **Lesson:** a first draft explained the history by NAMING the removed symbols, which fixed the
+    defect while making the mechanical check report it UNFIXED — a false negative manufactured by
+    the fix. The explanation survives without the spelling.
     forcing: none — done
 18. **Three deferred findings from #1406's round-1 audit, none blocking.** (a)
     `nix/sessionVariables.nix` hardcodes `.claude/analyze-service-index`, a SECOND `.nix`
@@ -689,16 +701,10 @@ done":**
     forcing: none
 
 
-19. ✅ **DONE, MERGED AND LIVE 2026-09-09 — `ZacxDev/cairn` #9, squash `a3c84db1`.** The
-    client never built a focus window, so its digest could ONLY ever say `most-recent
-    fallback` — the wrapper every skill prescribes was strictly WORSE than the raw module it
-    says not to use, and its parenthetical ("no handoff doc to read a path window from") was
-    WRONG ABOUT THE WORLD, not merely unhelpful.
-    **Closing condition MET, exercised on this host after the switch:** `cairn recall --repo
-    <devrc>` now reports `resolved via claudedocs/handoff-cairn-oss-multi-instance.md — 16 of
-    64 quoted path(s) name it`. The condition used is the MODULE'S own
-    (`mode == DEFAULT_MODE and args.scope is None`), so `--scope` still falls back — correct,
-    not a bug.
+19. ✅ **DONE, MERGED AND LIVE 2026-09-09 — `ZacxDev/cairn` #9 `a3c84db1`.** Body demoted.
+    🔴 **Lesson:** the client's fallback asserted *"no handoff doc to read a path window from"* when
+    the doc was right there — **a fallback that explains itself is making a claim about the world,
+    and that claim can be false.**
     forcing: none — done
 20. **Wire `checks.cairn-client-runs` into CI — it currently runs only on demand.**
     `devrc-ci-pipeline.yaml` (in the infra repo, NOT devrc) hardcodes exactly two legs:
@@ -773,62 +779,39 @@ done":**
     firing exits 0.
     forcing: none
 
-22. ✅ **CLOSED 2026-09-12 — the store-api fsync flake. REMEDIED AND MERGED (`#1458`, squash
-    `ce9b55c3`, 2026-09-10) AND VERIFIED BY THE FLAKE RATE, which was the half that actually
-    closes it: the test is named in **0 of 99** `tekton/devrc-pytests` verdicts on heads
-    CARRYING the sha against **12 of 298** that do not (4.03%), P(0) ≈ **0.017**.**
-    🔴 **VERIFIED BY CONTENT ON `origin/main`, NEVER BY ANCESTRY** — a squash makes
-    `merge-base --is-ancestor` false forever: `sited_root`, `_DISK_ROOTED_ALLOWLIST`,
-    `test_the_operand_NODE_TYPE_is_not_what_decides_either` and `slowfsync.c`'s
-    `skip_tmpfs_enabled` are all present. 🔴 **The zero is not what establishes the fix — the
-    mechanism being gone is.** via: measurement
-    ⚠ **It was merged with `tekton/devrc-pytests` RED**, on the second, unrelated flake below.
-    "merged" and "merged green" are different claims and only the first is true here.
-    🔴 **THE DIAGNOSIS STANDS AND IS THE DURABLE HALF. `server.py:_replace_bytes` issues TWO
-    `fsync`s — the file, then the parent directory — inside the request and before the response
-    is written.** `fsync` blocks in uninterruptible D-state, is bounded by nothing, and burns no
-    CPU, so it is invisible to every CPU-shaped metric; the handler's `timeout = 15` is a SOCKET
-    timeout and does not reach a syscall. Four occurrences, all in the write path, all
-    `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_CONTROL…`.
-    **Grep `MECHANISM =` FIRST on any recurrence** — the instrument already exists and three
-    occurrences were spent before anyone read it.
-    🔴 **RETRACTED, MEASURED 2026-09-10: THE TEKTON CHECKS ARE NOT REQUIRED, AND THIS ITEM
-    ASSERTED THE OPPOSITE FOR ITS WHOLE LIFE.** Earlier revisions — and the rounds of PR
-    commentary built on them — said devrc requires both checks with `enforce_admins: true`, so a
-    red gate "blocks everyone". Two independent surfaces read the same minute disagree: classic
-    branch protection on `main` returns **no required status checks and `enforce_admins:
-    false`**, and the repository has **no rulesets and no rules applying to `main`**. The gates
-    are **advisory**. That does not make a red gate harmless — it makes it the *other* hazard,
-    the one nobody is forced to look at — but "nobody can merge" was false, and it inflated the
-    urgency of every gate item in this doc. ⚠ A protection setting is a point-in-time reading:
-    **re-read it, do not cite this line.** via: measurement
-    🔴 **A GREEN GATE ON `#1458` IS NOT THE VERIFIER** — the gate validating a gate fix is not
-    independent evidence, and one green cannot separate "the fix worked" from "this run would
-    not have flaked". The verifier is the flake RATE against a fresh baseline:
-    `claudedocs/handoff-gate-flake-store-api.md` rank 1.
-    ⚠ **STILL OPEN — NOT VERIFIED IN CI, and this is the whole residual:** nothing was measured
-    in CI. The dev host has `/tmp` on ext4 and `/dev/shm` on tmpfs; **if the gate container has
-    no usable tmpfs, `store_root` falls back to disk BY DESIGN and this changes nothing there.**
-    First thing to check if it recurs, and checkable directly — the `store:` path in a failure
-    log separates the two by construction (`devrc-store-*` = sited, `pytest-of-*` = fell back).
-    ⚠ **STILL OPEN BY DECISION — THE SAME GAP EXISTS IN THE OSS REPO.** Measured 2026-09-09:
-    `ZacxDev/cairn`'s `tests/test_subsystem_store_api.py` has the identical **18 open-coded / 5
-    sited** split and the same one-fixture guard (`:19716`). Its CI is GitHub-hosted with no
-    single-node pin, so the trigger is weaker — but it is the same defect, in the copy the fork
-    consolidates ONTO (rank 3 slice 3). Not fixed here to avoid duplicating work the
-    consolidation may delete; **decide it when slice 3 is planned, not by default.**
-    ⚠ **A SECOND, DISTINCT TIMEOUT FLAKE REDDENED THIS PR AND IT IS NOT THIS ONE.** Tests in
-    `scripts/tests/test_run_tests_targets.py` spawn a nested `run-tests.sh` bounded at **120 s**
-    and are SIGKILLed at it (`subprocess.TimeoutExpired`, rc `-9`) — **not** an assertion
-    failure, and no part of `#1458`'s diff can reach that file. 🔴 **Four claims this item made
-    about it are RETRACTED, measured false 2026-09-11; the live item is
-    `claudedocs/handoff-gate-flake-store-api.md` rank 7. READ THAT, NOT THIS.**
-    📄 **The demoted evidence — the 18-vs-5 siting measurement, the one-site-wide guard, what
-    `#1458` ships, the `slowfsync.c` red-before-green, the independent mutation re-run, the
-    flake-rate population/predicate/residuals and the four retracted claims verbatim — is
-    `claudedocs/refs/cairn-oss-multi-instance.md`.**
-    forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
-    Advisory, not blocking (see the retraction above)
+22. ✅ **CLOSED 2026-09-12 — the store-api fsync flake. `#1458` `ce9b55c3`, verified by the flake
+    RATE (named in **0 of 99** verdicts on heads carrying the sha against **12 of 298** without).**
+    Body demoted. 🔴 **The zero is not what establishes the fix — the mechanism being gone is.**
+    🔴 **THE DIAGNOSIS IS THE DURABLE HALF:** `server.py:_replace_bytes` issues TWO `fsync`s — the
+    file, then the parent directory — **inside the request and before the response is written**.
+    `fsync` blocks in uninterruptible D-state, is bounded by nothing and **burns no CPU**, so it is
+    invisible to every CPU-shaped metric; the handler's `timeout = 15` is a SOCKET timeout and does
+    not reach a syscall. **Grep `MECHANISM =` FIRST on any recurrence** — the instrument already
+    exists and three occurrences were spent re-deriving what it prints.
+    🔴 **RETRACTED, AND WORTH KEEPING RETRACTED: devrc's Tekton checks are NOT required and
+    `enforce_admins` is FALSE.** Earlier revisions of this item asserted the opposite for its whole
+    life, which inflated the urgency of every gate item in this doc. A red gate is still the *other*
+    hazard — the one nobody is forced to look at. ⚠ A protection setting is point-in-time: re-read
+    it, do not cite this line.
+    🔴 **THREE RESIDUALS STAYED OPEN WHEN THE ITEM CLOSED — kept HERE, in an indexed doc, because
+    the eviction playbook forbids demoting an open thread to `refs/` and the 2026-09-18 pass did it
+    anyway.**
+    1. ⚠ **STILL OPEN — the fix was never verified IN CI.** The dev host has `/tmp` on ext4 and
+       `/dev/shm` on tmpfs; **if the gate container has no usable tmpfs, `store_root` falls back to
+       disk BY DESIGN and the fix changes nothing there.** The discriminator is in any failure log's
+       `store:` path — `devrc-store-*` = sited, `pytest-of-*` = fell back. Check that FIRST on any
+       recurrence.
+    2. 🔴 **STILL OPEN BY DECISION, AND ITS FORCING EVENT HAS NOW PASSED UNDECIDED. The same gap
+       exists in the OSS repo:** `ZacxDev/cairn`'s `tests/test_subsystem_store_api.py` has the
+       identical **18 open-coded / 5 sited** split and the same one-fixture guard (`:19716`). It was
+       deferred with *"decide it when slice 3 is planned, not by default"* — **slice 3 MERGED
+       2026-09-12 (`#1508` `44bd8b0e`), so nobody decided.** ⚠ **Its CI is GitHub-hosted with no
+       single-node pin, so the TRIGGER is weaker there** — carried forward because dropping it
+       inflates the urgency, which is the exact harm this item's own retraction names. Closes when
+       someone fixes it upstream or records a decision not to.
+    3. ⚠ A **second, distinct** timeout flake also reddened that PR and is NOT this one —
+       `claudedocs/handoff-gate-flake-store-api.md` rank 7 is the live item. **Read that, not this.**
+    forcing: gate — advisory, not blocking
 
 25. **The repo-handle `~/workspace/<handle>/…` sites the kubeconfig arm deliberately deferred.**
     #1621 armed the `~` spelling for **kubeconfig** handles only — an operator decision, on the
@@ -926,18 +909,31 @@ done":**
     empty scope and a retired one are indistinguishable, and grading it at exit 11 made
     `routes --check` refuse every pre-registered scope; nothing in devrc can restore it. And
     **direction one is a NON-DEFECT at one instance by design** — `alias_for` resolves an unnamed
-    scope to the sole instance, so `check` appends nothing. **At phase C/E, when a second configured
-    instance makes direction one a real refusal, the pin moves OVER REALITY and the deferred
-    `[routes]` drift-check arm becomes reachable.** That is the work §5.2 was actually describing.
+    scope to the sole instance, so `check` appends nothing. **When a second configured instance makes
+    direction one a real refusal, the pin moves OVER REALITY and the deferred `[routes]` drift-check
+    arm becomes reachable.** That is the work §5.2 was actually describing. ✅ **THAT TRIGGER FIRED AT
+    PHASE D, NOT AT E** — this line said "At phase C/E"; both hosts are multi-instance as of
+    2026-09-18, so the arm is reachable NOW and `nix/home.nix`'s note parking it against "the first
+    host to configure a second instance" is discharged.
     ⚠ **Proposal §5.2 still states the impossible version.** Superseded in practice, deliberately
     NOT amended — operator call 2026-09-16, to avoid a second repo's review cycle. Read this item,
     not §5.2.
     ⚠ Declared and NOT closed by #24: `tests/parity/README.md` difference 8 — Go's READ verbs
-    refuse at exit 11 on a multi-instance host rather than routing. Unreachable today (no such
-    host, and `packages.cairn` is still the Python client) but it goes live at phase E.
+    refuse at exit 11 on a multi-instance host rather than routing. 🔴 **"Unreachable today (no such
+    host)" IS NOW FALSE — both hosts went multi-instance at phase D.** The ONLY thing still holding
+    this back is that `packages.cairn` is the Python client; swapping it in makes difference 8 live
+    immediately, not at phase E.
     forcing: none — but C/D/E sit behind it, so it gates the rest of the arc
 
 ## Gotchas / decisions / dead-ends
+
+### ✅ 2026-09-18 — DECISION: routing durability is (a) FAIL-LOUD. Mirroring REJECTED.
+🔴 **Operator decision, NOT to be re-litigated.** Per-scope bidirectional mirroring is rejected;
+routing fails loud and freshness is observable. **Recorded HERE, in an APPEND section, because that
+is what "recorded in this doc's decisions" required** — the fuller block in `State now` sits under a
+REPLACE heading and will not survive the next `/handoff`. The three measurements behind it, and what
+phase E therefore does NOT have to build, are in that block while it lasts; the decision itself is
+this paragraph.
 
 ### 2026-09-10 — SIX AUDIT ROUNDS ON `homelab-infra#786`, AND WHAT ENDED THEM (body DEMOTED)
 🔴 **A CLASSIFIER GRADED BY READING WILL BE REWRITTEN UNTIL SOMETHING EXECUTES IT.** The cairn
@@ -1064,6 +1060,67 @@ rebased between rounds**, and say in the dispatch which commits the range actual
   `test_cairn_flake_pin.py` already killed all three of its mutants behaviourally, in both tiers.
   **The fix rounds, not the original change, were where every finding lived.**
 
+### 2026-09-18 — PHASE D AND THE DECISION SHIPPED AS `innovation-upstream/devrc` #1763 — OPEN, 4 AUDIT ROUNDS
+🔴 **THE PR IS OPEN AND IS WHERE THIS SESSION'S WHOLE OUTPUT LIVES.** `#1763`, branch
+`docs/cairn-routing-durability-decision`, head **`43fddffe`**, worktree
+`/home/zach/workspace/devrc-cairn-decision`. Six commits: the decision + phase-D record, then
+round-0/1/2/3 fixes, then the eviction. Four Tekton legs were `pending` at handoff time — **read
+them SHA-pinned** (`gh api repos/innovation-upstream/devrc/commits/<sha>/status`), not `gh pr checks`.
+⚠ **Round 4 was IN FLIGHT when this was written** and its verdict is not recorded here. Its range is
+`818c0b28..43fddffe`. Read the `audit-claims` issue comments on the PR for rounds 1-3.
+
+🔴 **WHAT THE LADDER CAUGHT, because each is a shape and three were in prose a FIX round wrote:**
+- **Round 0 (requirements & deletion)** — the PR's own body identified that the doc's stated size
+  allowance was wrong and corrected it *only in the PR description*, leaving the doc wrong. **A PR
+  whose job is correcting stale claims left one live in the artifact people actually read.** It also
+  caught the PR invoking devrc `CLAUDE.md`'s "any addition needs an eviction in the SAME commit"
+  while not obeying it.
+- **Round 1** — phase D changed the **CLIENT's routing** on both hosts and the doc had recorded only
+  the cosmetic half. See `State now`; that finding is the reason the rc-11 paragraph exists.
+- **Round 2** — four false sentences the round-1 fix wrote, incl. **"the lesson that is NOT in the
+  runbook" about a lesson the runbook states verbatim**, and a verification block that printed
+  something other than what it said (`entry-files=` rides `X-Store-Snapshot`, and the round's own
+  `grep` discarded it).
+- **Round 3** — the eviction **demoted three `⚠ STILL OPEN` residuals into `refs/`**, which the
+  eviction playbook and the refs file's own preamble both forbid. Restored to rank 22.
+🔴 **THE TRANSFERABLE ONE: I was careful about LESSONS and blind to OPEN RESIDUALS.** When
+condensing a closed item, the lesson is the part you will remember to keep and the open thread is
+the part you will not. Grep for `STILL OPEN` before demoting anything.
+
+### 2026-09-18 — `/prune-memory` IS THE WRONG INSTRUMENT FOR A HANDOFF DOC, AND AN AUDIT RECOMMENDED IT
+🔴 **Read a skill's BODY before accepting it as the instrument.** Round 0 named `/prune-memory` for
+shrinking this doc. It operates on `MEMORY.md`, its topic files and `ARCHIVE.md`, against a 12 KB
+target with section caps named "Critical safety" and "Feedback" — **none of which is a handoff doc**.
+The right instrument was inside the gate that was failing: `_eviction_playbook()` in
+`scripts/tests/test_handoff_doc_size.py`, whose ordered steps are **1 evict what has closed** ("usually
+the whole answer") · 2 demote dated evidence to a sibling `claudedocs/refs/<topic>.md` and leave a
+pointer · 3 split by initiative · **4 raise the allowance, LAST**. It carries one hard prohibition:
+**do not satisfy the gate by deleting an open investigation, a gotcha or a ruled-out theory.**
+
+### 2026-09-18 — UNFILED: three cairn OPERATIONAL facts belong in `claude/skills/cairn/SKILL.md`
+⚠ **Recorded here because nothing else caught them, and the index is the wrong home.** The
+subsystem-index `--pr 1763` window returned `status=no-match` (1 path examined, real zero for that
+window) and proposed no write; its skill-homes lead named `claude/skills/cairn/SKILL.md`, which is
+correct — these are ops-gotchas about the tool, not a subsystem pointer sheet. **Not filed: it needs
+its own devrc PR and this session had an audit round in flight.** The three:
+1. 🔴 **Configuring a SECOND instance changes routing, not just labelling.** `alias_for` resolves an
+   unnamed scope to the default **only** `if not self.multi_instance`; at two instances it raises
+   `UnroutedScope` (**rc 11**). So the first write to any scope absent from the table starts failing
+   on every host the moment a second instance exists.
+2. **`cairn create`'s `revision` IS the leading 16 hex of the entry file's own sha256** — a content
+   claim you can verify with `sha256sum`, not an opaque id.
+3. **A token's scope allowlist is a snapshot with NO wildcard, and an unlisted scope reads back
+   byte-identically to one that does not exist** — never a permission error. Adding a scope is a
+   two-place change (the token row AND the write).
+
+### 2026-09-18 — "MOVED VERBATIM" IS A CLAIM; PROVE IT WITH A NEGATIVE CONTROL
+When demoting bodies to `refs/`, assert each block byte-identically present in the destination
+**and** run a one-character mutant that must NOT be found. A preservation check that cannot fail
+proves nothing. Also run a LOSS detector — content present before and absent from **both** files
+after — and positive-control it (an empty corpus must report a large number, not zero).
+⚠ **And check the substance, not the spelling:** verifying a restore by grepping the ORIGINAL
+strings after rewording them returns 0 and reads as a failed restore. That happened here.
+
 ## How to verify
 
 **Phase C is closed** — content at `origin/trunk`, then the live artifact:
@@ -1073,21 +1130,38 @@ git -C $DATAPACKET ls-tree -r --name-only origin/trunk -- clusters/production/ap
 KUBECONFIG=$KC_DPPROD kubectl -n cairn get pods -o wide
 KUBECONFIG=$KC_DPPROD kubectl -n cairn get cronjobs -o custom-columns='NAME:.metadata.name,SUSPEND:.spec.suspend'
 ```
-Expect a Ready pod on `talos-avt-y6z` and **both CronJobs suspended** until phase D.
+Expect a Ready pod on `talos-avt-y6z`. ⚠ **Both CronJobs are still suspended AFTER phase D** —
+unsuspending them is an open item, not a leftover.
 
 **The store answers, and enforces auth** (token never leaves the pod):
 ```bash
 KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'wget -qO- http://127.0.0.1:8102/healthz'
-KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/civitai 2>&1 | head -8'
 ```
-Expect `ok`, then `200 OK` with `X-Store-Status: scope-absent` (nothing seeded yet — that is phase D).
+Expect `ok`. ⚠ **Probe a SEEDED scope — `civitai-developer-docs`, not `civitai`**, which was never
+seeded and returns `scope-absent` whether or not anything works. The probe is below.
 
-**Routing has NOT been cut over** (and must not be, before the design decision):
+**Phase D is seeded; the TABLE is still not cut over** (that is phase E):
 ```bash
-cairn routes | head -2        # instances: personal   — exactly ONE
+cairn routes | head -2   # instances: personal, civitai  — TWO since phase D
 python3 -c "import json,collections;d=json.load(open('$HOME/.config/subsystem-store/routes.json'));print(len(d),dict(collections.Counter(d.values())))"
 ```
-Expect `25 {'personal': 25}` and no `instances/` directory on either host.
+Expect `25 {'personal': 25}` — the shipped table is unchanged — and `instances/civitai.env`
+present on BOTH hosts. 🔴 **The seeded scope is reachable only under a `$CAIRN_ROUTES` override
+(the shipped table plus `"civitai-developer-docs": "civitai"`); without one, `cairn recall --scope
+civitai-developer-docs` exits 11.** ⚠ **Expected FOR THIS SCOPE ONLY. `Routing.alias_for` raises
+`UnroutedScope` on THREE paths and they need DIFFERENT remedies — read the message, it names the
+right one:** a table entry naming an alias this host has no config for wants
+`instances/<alias>.env` (**this is the one phase E creates**, at any instance count); ≥2 instances
+with no table wants a table; ≥2 instances and a table lacking the scope wants a row. Do not assume
+"rc 11 ⇒ add a table row".
+```bash
+python3 -c "import json,os;t=json.load(open(os.path.expanduser('~/.config/subsystem-store/routes.json')));t['civitai-developer-docs']='civitai';json.dump(t,open('/tmp/r.json','w'))"
+CAIRN_ROUTES=/tmp/r.json cairn recall --scope civitai-developer-docs   # rc 0, banner cairn[civitai]
+KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/civitai-developer-docs 2>&1 | grep -E "X-Store-Status|X-Store-Snapshot"'
+```
+Expect `X-Store-Status: recalled`. ⚠ `entry-files=` rides **`X-Store-Snapshot`, not
+`X-Store-Status`**, and is a **store-wide** total, not this scope's count — 2 at phase D, growing
+with any later write anywhere in the store.
 
 **Gate 23 exists and the mount defect cannot return:**
 ```bash
