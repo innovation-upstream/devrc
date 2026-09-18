@@ -50,11 +50,17 @@ HAZARD_VOCABULARY = (
     # `alacritty`'s `-e` payload (which is why it is ACKNOWLEDGED rather than
     # stubbed — see test_no_real_launchers.py).
     #
-    # 🔴 BOTH STAY LISTED THOUGH ONLY ONE IS SPAWNED TODAY. `REVIEW_EXE` now
-    # names `mention-review`; `nvim-octo` is spawned by nothing since the click
-    # flip. This vocabulary is deliberately WIDER than the ledger, and dropping
-    # the retired name would mean a rollback — or Phase 4 being reverted —
-    # silently reintroduces an unaccounted launcher.
+    # 🔴 BOTH STAY LISTED THOUGH ONLY ONE EXISTS TODAY. `REVIEW_EXE` names
+    # `mention-review`; `nvim-octo` is spawned by nothing since the click flip,
+    # and since PHASE 4 its derivation, overlay and suites are DELETED — so no
+    # tier can even build the binary. The name stays anyway, and the retirement
+    # is the reason rather than an argument against it: this vocabulary is
+    # deliberately WIDER than the ledger, and a `git revert` of the Phase 4
+    # commit plus a `home-manager switch` IS the documented rollback. Dropping
+    # the name would make that rollback reintroduce an unaccounted launcher
+    # silently — the scan would go quiet at exactly the moment a real binary
+    # came back. Keeping it costs one acknowledged row in
+    # `test_no_real_launchers.py`, which is the cheaper side of that trade.
     "nvim-octo", "mention-review",
     "xdg-open", "openrgb", "ddcutil", "brightnessctl", "xset",
     "pactl", "playerctl", "espanso",

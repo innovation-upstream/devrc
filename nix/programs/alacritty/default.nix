@@ -53,12 +53,14 @@ let
   # spawns `mention-review`. The ledger above fails in BOTH directions, so
   # leaving octo listed beside its replacement would be dead weight rather than
   # a fallback — and it would not act as one anyway: `open_tui`'s `shutil.which`
-  # pre-flight falls back to the BROWSER, never to a second TUI. Octo's
-  # derivation and its 75 tests are deliberately untouched (this is the click
-  # flip, NOT the Phase 4 retirement), so reverting this commit restores it
-  # whole. ⚠ That revert plus a `home-manager switch` IS the rollback — the
-  # proposal's "flip REVIEW_EXE back, one line" is no longer accurate, because
-  # octo is on no PATH but this one.
+  # pre-flight falls back to the BROWSER, never to a second TUI.
+  # 🔴 THE ROLLBACK MOVED, AND THIS LINE USED TO SAY OTHERWISE. It read
+  # "octo's derivation and its 75 tests are deliberately untouched … so
+  # reverting this commit restores it whole", which was true of the click flip
+  # and is FALSE now: PHASE 4 deleted the derivation, its flake overlay and
+  # both its suites. Restoring octo means reverting the PHASE 4 commit as well
+  # as this one, then `home-manager switch` — nothing shorter works, because
+  # there is no longer a `pkgs.nvim-octo` for this list to name.
   #
   # ⚠ `pkgs.gh` USED TO BE HERE and is REMOVED. Its comment justified it as
   # "PASS 3's only tool" — PASS 3 was the GitHub-wide namesake search, which is
