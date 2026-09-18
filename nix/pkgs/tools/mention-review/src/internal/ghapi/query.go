@@ -239,10 +239,18 @@ const maxDetailRunes = 400
 //	 "documentation_url":"…","status":"422"}
 //
 // The old version of this function returned `m.Message` alone, so every 422
-// from any of the three write verbs rendered as two words that explain nothing
-// — which is exactly what a merge dispatched during a base-branch recompute
-// showed the operator: `unprocessable entity`, twice, with no reason and no
-// status code.
+// from any of the three write verbs rendered as two words that explain nothing.
+//
+// ⚠ THAT IS THE MEASURED PART; THE NEXT STEP IS NOT, AND IS NOT CLAIMED. On
+// 2026-09-17 the operator pressed `m` and read `unprocessable entity` with
+// nothing else on screen — that is a report of what was SHOWN, and this
+// function is why nothing more could be shown. WHY GitHub answered 422 is
+// UNKNOWN: the response body was never captured and cannot be recovered, so
+// neither a base-branch recompute nor anything else is established as the
+// cause. An earlier version of this comment named one; it was a plausible
+// story, not a measurement. The value of carrying `errors[]` does not rest on
+// it — had this function been rendering `errors[]` at the time, the reason
+// would be in the transcript and this paragraph would not need to exist.
 //
 // It falls back to the status line when the body is empty or unparseable, and
 // 🔴 it still never reflects a request header back: the only inputs are the
@@ -339,7 +347,16 @@ func renderErrorEntry(raw json.RawMessage) string {
 			return label
 		}
 	}
-	// A bare string entry — some endpoints answer `"errors":["…"]`.
+	// A bare string entry — `"errors":["…"]`.
+	//
+	// ⚠ THIS SHAPE AND THE RAW-JSON FALLBACK BELOW ARE NOT ATTESTED BY ANY
+	// RESPONSE THIS PROGRAM HAS CAPTURED. Only the object shape above has been
+	// seen (the `GET /search/issues?q=` envelope quoted on `apiMessage`). They
+	// are kept anyway, and the reason is not "GitHub might": it is that the
+	// alternative to echoing an entry we do not recognise is DROPPING it, and a
+	// card that silently omits the server's only stated reason is the
+	// empty-result trap. They are cheap insurance against a shape nobody has
+	// seen, not a claim that one exists.
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return strings.TrimSpace(s)

@@ -571,4 +571,4 @@ func (stubRunner) PostComment(context.Context, string, string, int, string) erro
 func (stubRunner) SubmitReview(context.Context, string, string, int, string, string) error {
 	return nil
 }
-func (stubRunner) Merge(context.Context, string, string, int, string, string) error { return nil }
+func (stubRunner) Merge(context.Context, string, string, int, string) error { return nil }

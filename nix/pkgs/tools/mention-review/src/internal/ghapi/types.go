@@ -12,6 +12,13 @@ import (
 // every time the base branch moves. Reading that as a conflict refuses merges
 // that are fine; reading it as MERGEABLE dispatches a merge into the recompute
 // window, which is the failure this vocabulary exists to make legible.
+//
+// ⚠ ALL THREE HAVE A PRODUCTION READER, WHICH IS WHY ALL THREE ARE HERE.
+// `MergeableNo` in particular was for a while named only by tests — the merge
+// gate answers a conflict through its `default:` arm, generically — and a
+// constant only the tests read is a vocabulary entry with nobody speaking it.
+// `ui.MergeWord` now switches on it, so the word the screen shows and the word
+// the gate refuses on are the same string rather than two spellings.
 const (
 	MergeableYes     = "MERGEABLE"
 	MergeableNo      = "CONFLICTING"

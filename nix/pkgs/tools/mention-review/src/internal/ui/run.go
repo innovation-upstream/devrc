@@ -31,11 +31,11 @@ type Runner interface {
 	// package-level client anywhere in this program.
 	PostComment(ctx context.Context, owner, name string, num int, body string) error
 	SubmitReview(ctx context.Context, owner, name string, num int, event, body string) error
-	// 🔴 `mergeable` IS THE SNAPSHOT'S STATE, PASSED THROUGH UNCHANGED. The
-	// client polls a re-read before dispatching when it says UNKNOWN; this
-	// layer must not decide that, because then the decision would live where no
-	// pure test can see it.
-	Merge(ctx context.Context, owner, name string, num int, method, mergeable string) error
+	// ⚠ NO `mergeable` PARAMETER. The client reads it itself, immediately
+	// before dispatching — see `ghapi.Merge`. Threading the snapshot's value
+	// through this interface would hand the gate the stale answer it exists to
+	// replace.
+	Merge(ctx context.Context, owner, name string, num int, method string) error
 }
 
 // Run converts ONE intent into a command.
@@ -101,7 +101,7 @@ func Run(i Intent, r Runner) tea.Cmd {
 	case MergePR:
 		return func() tea.Msg {
 			return WriteDone{Verb: v.intentName(),
-				Err: r.Merge(context.Background(), v.Owner, v.Name, v.Num, v.Method, v.Mergeable)}
+				Err: r.Merge(context.Background(), v.Owner, v.Name, v.Num, v.Method)}
 		}
 	}
 	panic("ui.Run: unhandled intent " + i.intentName())
@@ -176,6 +176,6 @@ func (l LiveRunner) SubmitReview(ctx context.Context, owner, name string, num in
 	return l.C.SubmitReview(ctx, owner, name, num, event, body)
 }
 
-func (l LiveRunner) Merge(ctx context.Context, owner, name string, num int, method, mergeable string) error {
-	return l.C.Merge(ctx, owner, name, num, method, mergeable)
+func (l LiveRunner) Merge(ctx context.Context, owner, name string, num int, method string) error {
+	return l.C.Merge(ctx, owner, name, num, method)
 }

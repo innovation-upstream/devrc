@@ -52,55 +52,72 @@ func TestPressingMergeRaisesAConfirmationAndEmitsNothing(t *testing.T) {
 	if !ok {
 		t.Fatalf("the pending intent is %T, want MergePR", next.pending.Intent)
 	}
-	want := MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod,
-		Mergeable: fxMergeable}
+	want := MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod}
 	if got != want {
 		t.Errorf("pending = %+v, want %+v", got, want)
 	}
 }
 
-// 🔴 THE INTENT CARRIES THE MERGEABILITY THE OPERATOR WAS LOOKING AT.
+// 🔴 THE MERGE INTENT IS INDEPENDENT OF THE SNAPSHOT'S MERGEABILITY, AND THAT
+// INDEPENDENCE IS THE GUARD.
 //
-// `ghapi.Merge` re-reads mergeability only when this field says UNKNOWN — that
-// is the whole base-branch-recompute guard — so a `proposeMerge` that dropped
-// the field would send every merge as "UNKNOWN" (an extra round trip on each
-// one) and one that invented a value would skip the guard entirely. Neither is
-// visible to any assertion about the PROMPT, which names the method and the
-// login and says nothing about this.
-func TestTheMergeIntentCarriesTheSnapshotsMergeability(t *testing.T) {
-	// ⚠ THREE VALUES, NONE OF THEM THE FIXTURE'S OWN. The fixture snapshot says
-	// MERGEABLE, so a mutant that read the fixture, or hardcoded the common
-	// case, produces MERGEABLE for all three and dies here.
-	for _, state := range []string{ghapi.MergeableUnknown, ghapi.MergeableNo, ""} {
-		t.Run("snapshot="+state, func(t *testing.T) {
-			a := ready(t)
-			snap := fixturePR()
-			snap.Mergeable = state
-			a, _ = a.Step(PRLoaded{Snap: snap})
+// A previous version of this program carried the snapshot's `mergeable` on the
+// intent, and `ghapi.Merge` re-read the live value ONLY when that field said
+// UNKNOWN. The hazard it was built for is the base branch moving AFTER the
+// snapshot was fetched — in which case the field says `MERGEABLE`, the gate
+// stays silent, and the merge goes out against a state nobody checked. The read
+// is unconditional now, so this layer must hand the gate NOTHING about
+// mergeability; anything it handed over would be the stale answer.
+//
+// ⚠ THE ASSERTION IS THAT THREE DIFFERENT SNAPSHOTS PRODUCE ONE IDENTICAL
+// INTENT — a whole-struct comparison, not a check that one named field is
+// absent. Re-adding a field and threading it makes the three differ and fails
+// here; a check phrased against the field's name would have to be rewritten to
+// notice the same thing under a different spelling.
+func TestTheMergeIntentIsTheSameWhateverTheSnapshotSaysAboutMergeability(t *testing.T) {
+	// ⚠ FOUR STATES, INCLUDING THE FIXTURE'S OWN AND THE EMPTY STRING. If they
+	// all produce one intent, no part of the snapshot's mergeability reached it.
+	states := []string{fxMergeable, ghapi.MergeableUnknown, ghapi.MergeableNo, ""}
+	seen := map[MergePR][]string{}
+	for _, state := range states {
+		a := ready(t)
+		snap := fixturePR()
+		snap.Mergeable = state
+		a, _ = a.Step(PRLoaded{Snap: snap})
 
-			next, intents := a.Step(keyPress("m"))
-			if len(intents) != 0 {
-				t.Fatalf("`m` emitted %v", intents)
-			}
-			got, ok := next.pending.Intent.(MergePR)
-			if !ok {
-				t.Fatalf("the pending intent is %T, want MergePR", next.pending.Intent)
-			}
-			if got.Mergeable != state {
-				t.Errorf("the intent carries Mergeable=%q, want the snapshot's %q",
-					got.Mergeable, state)
-			}
-			// And the rest of the intent is unchanged by the new field.
-			if got.Method != fxMergeMethod || got.Num != fxNum {
-				t.Errorf("intent = %+v", got)
-			}
-		})
+		next, intents := a.Step(keyPress("m"))
+		if len(intents) != 0 {
+			t.Fatalf("snapshot=%q: `m` emitted %v — a merge must not be one keypress away",
+				state, intents)
+		}
+		got, ok := next.pending.Intent.(MergePR)
+		if !ok {
+			t.Fatalf("snapshot=%q: the pending intent is %T, want MergePR", state, next.pending.Intent)
+		}
+		seen[got] = append(seen[got], state)
 	}
-	// POSITIVE CONTROL: the DEFAULT fixture still yields its own value, so the
-	// three cases above are the field being carried rather than a constant.
-	next, _ := ready(t).Step(keyPress("m"))
-	if got := next.pending.Intent.(MergePR).Mergeable; got != fxMergeable {
-		t.Errorf("the unmodified fixture produced Mergeable=%q, want %q", got, fxMergeable)
+	if len(seen) != 1 {
+		t.Errorf("the merge intent VARIES with the snapshot's mergeability — %d distinct "+
+			"intents across %d snapshots: %v. The value the operator was looking at is "+
+			"reaching the merge gate, which is the stale read the gate exists to replace.",
+			len(seen), len(states), seen)
+	}
+	// POSITIVE CONTROL ON THE COMPARISON: it CAN report more than one. A `seen`
+	// map that collapsed everything would satisfy the check above while seeing
+	// nothing — the silent zero, spelled as a silent one.
+	//
+	// ⚠ MEASURED AS A DELTA, not against the literal 2, so this control reads
+	// correctly whether or not the assertion above held. Phrased as `!= 2` it
+	// would fire a second, misleading failure on any tree where the intents
+	// already varied.
+	before := len(seen)
+	// ⚠ `squash` — `fxMergeMethod` is `rebase`, so this key cannot collide with
+	// any intent the loop produced.
+	seen[MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: "squash"}] = nil
+	if len(seen) != before+1 {
+		t.Errorf("the intent comparison cannot tell a new MergePR value from the ones "+
+			"already seen (%d keys before, %d after) — every assertion above is vacuous",
+			before, len(seen))
 	}
 }
 
@@ -108,8 +125,7 @@ func TestConfirmingAMergeEmitsExactlyThatIntent(t *testing.T) {
 	a := ready(t)
 	next, intents := pressAll(a, "m", "y")
 
-	want := []Intent{MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod,
-		Mergeable: fxMergeable}}
+	want := []Intent{MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod}}
 	if !intentsEqual(intents, want) {
 		t.Fatalf("`m` then `y` emitted %v, want %v", intents, want)
 	}
@@ -496,8 +512,8 @@ func (c *callRecorder) SubmitReview(_ context.Context, o, n string, num int, eve
 	c.calls = append(c.calls, fmt.Sprintf("SubmitReview %s/%s#%d event=%s body=%q", o, n, num, event, body))
 	return nil
 }
-func (c *callRecorder) Merge(_ context.Context, o, n string, num int, method, mergeable string) error {
-	c.calls = append(c.calls, fmt.Sprintf("Merge %s/%s#%d method=%s mergeable=%s", o, n, num, method, mergeable))
+func (c *callRecorder) Merge(_ context.Context, o, n string, num int, method string) error {
+	c.calls = append(c.calls, fmt.Sprintf("Merge %s/%s#%d method=%s", o, n, num, method))
 	return nil
 }
 
@@ -535,13 +551,11 @@ func TestRunMapsEachWriteIntentToItsOwnCall(t *testing.T) {
 			`SubmitReview gardenersguild/trowelcast#1559 event=COMMENT body="a remark"`,
 		},
 		{
-			// ⚠ `CONFLICTING`, WHICH THE FIXTURE SNAPSHOT DOES NOT CARRY. The
-			// fixture says MERGEABLE, so a `Run` that ignored the intent's field
-			// and read the snapshot's — or that hardcoded the common value —
-			// would produce `mergeable=MERGEABLE` here and be caught.
-			MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod,
-				Mergeable: ghapi.MergeableNo},
-			`Merge gardenersguild/trowelcast#1559 method=rebase mergeable=CONFLICTING`,
+			// ⚠ NOTHING ABOUT MERGEABILITY CROSSES THIS SEAM. `Run` forwards the
+			// method and the reference; the live merge state is read by
+			// `ghapi.Merge` itself, at the moment of the write.
+			MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod},
+			`Merge gardenersguild/trowelcast#1559 method=rebase`,
 		},
 	}
 	for _, c := range cases {

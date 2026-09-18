@@ -28,10 +28,21 @@ type recorder struct {
 	reply  string
 }
 
+// ⚠ `/graphql` IS ANSWERED BUT NOT RECORDED, AND BOTH HALVES ARE DELIBERATE.
+// `Merge` re-reads mergeability before every dispatch, so this fake has to be
+// able to answer that read — but the assertions in this file are all of the form
+// "a WRITE was sent / was not sent", and recording the read would make
+// `rec.method != ""` true for a merge that refused. The merge gate's own reads
+// are counted in `mergegate_test.go`, which exists for exactly that.
 func (r *recorder) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if strings.HasSuffix(req.URL.Path, "/graphql") {
+			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":`+
+				`{"mergeable":"`+MergeableYes+`","mergeStateStatus":"CLEAN"}}}}`)
+			return
+		}
 		r.method, r.path = req.Method, req.URL.Path
 		raw, _ := io.ReadAll(req.Body)
 		r.body = map[string]any{}
@@ -180,7 +191,7 @@ func TestMergeSendsThePutAndTheMethod(t *testing.T) {
 	// ⚠ `rebase`, NOT `squash`. The declared default is `squash`, so a mutant
 	// that ignored the argument and used the default would produce the default
 	// here and be caught.
-	if err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase", MergeableYes); err != nil {
+	if err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase"); err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
 	if rec.method != http.MethodPut {
@@ -202,7 +213,7 @@ func TestMergeRefusesAnEmptyOrUnknownMethodWithoutSendingAnything(t *testing.T) 
 		t.Run("method="+method, func(t *testing.T) {
 			c, rec, done := newRecorded(t, http.StatusOK, "")
 			defer done()
-			err := c.Merge(context.Background(), wOwner, wName, wNum, method, MergeableYes)
+			err := c.Merge(context.Background(), wOwner, wName, wNum, method)
 			if err == nil {
 				t.Fatalf("merge with method %q was accepted", method)
 			}
@@ -219,7 +230,7 @@ func TestMergeRefusesAnEmptyOrUnknownMethodWithoutSendingAnything(t *testing.T) 
 	// validation and not a merge path that is broken outright.
 	c, rec, done := newRecorded(t, http.StatusOK, `{"merged":true}`)
 	defer done()
-	if err := c.Merge(context.Background(), wOwner, wName, wNum, "squash", MergeableYes); err != nil {
+	if err := c.Merge(context.Background(), wOwner, wName, wNum, "squash"); err != nil {
 		t.Fatalf("a valid method was refused: %v", err)
 	}
 	if rec.method != http.MethodPut {
@@ -249,7 +260,7 @@ func TestAWriteWithNoTokenNeverReachesTheNetwork(t *testing.T) {
 	c := NewClient("", srv.Client())
 	c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
 
-	err := c.Merge(context.Background(), wOwner, wName, wNum, "squash", MergeableYes)
+	err := c.Merge(context.Background(), wOwner, wName, wNum, "squash")
 	if err == nil {
 		t.Fatal("a merge with no token was accepted")
 	}

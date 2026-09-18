@@ -141,13 +141,12 @@ func (a App) proposeMerge() (App, []Intent) {
 			"with a method nobody chose is the wrong commit shape."
 		return a.settled(), nil
 	}
-	// 🔴 THE SNAPSHOT'S MERGEABILITY RIDES ALONG. It is read here, where the
-	// operator's decision is made, rather than in the runner — and it is what
-	// tells `ghapi.Merge` whether GitHub is mid-recompute against a base branch
-	// that just moved. `writeGate` above has already established `a.Snap != nil`.
+	// ⚠ THE SNAPSHOT'S MERGEABILITY IS NOT READ HERE AND MUST NOT BE. The panel
+	// shows it, and what the panel shows is a fact about when the snapshot was
+	// fetched. `ghapi.Merge` re-reads it at the moment of the write; carrying
+	// this value along would be offering that gate the stale answer.
 	return a.propose(MergePR{
 		Owner: a.Owner, Name: a.Name, Num: a.Num, Method: a.MergeMethod,
-		Mergeable: a.Snap.Mergeable,
 	})
 }
 

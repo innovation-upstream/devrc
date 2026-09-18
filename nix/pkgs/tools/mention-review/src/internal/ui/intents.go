@@ -142,20 +142,18 @@ func (SubmitReview) Write() bool        { return true }
 // provably the same value — a runner that re-read the config could merge with a
 // method the operator never saw.
 //
-// 🔴 `Mergeable` IS CARRIED FOR THE SAME REASON, and it is the SNAPSHOT's value
-// — the state the operator was looking at when they pressed `m`. `ghapi.Merge`
-// re-reads mergeability only when this says UNKNOWN, so the field decides
-// whether a merge costs an extra round trip; a runner that re-derived it would
-// be answering a question about a different moment.
+// 🔴 MERGEABILITY IS DELIBERATELY *NOT* ON THIS INTENT, AND THAT IS THE OPPOSITE
+// OF THE RULE ABOVE FOR A REASON. `Method` is carried because the prompt and the
+// request must be the same value the operator saw. Mergeability is the one thing
+// that must NOT be the value the operator saw: the base branch can move between
+// the snapshot and the keypress, and the whole point of `ghapi.Merge`'s gate is
+// to read it again at the moment of the write. A field here would be a stale
+// answer offered to a function whose job is to distrust exactly that.
 type MergePR struct {
 	Owner  string
 	Name   string
 	Num    int
 	Method string
-	// Mergeable is MERGEABLE | CONFLICTING | UNKNOWN, or "" for the null the
-	// server returns while it recomputes — `ghapi.NormalizeMergeable` treats
-	// that as UNKNOWN rather than as a fourth state.
-	Mergeable string
 }
 
 func (MergePR) intentName() string { return "MergePR" }

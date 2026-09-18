@@ -62,9 +62,16 @@ func statusLine(code int) string {
 }
 
 // detailOf runs a real write against the fake and returns the APIError detail.
+//
+// ⚠ `PostComment`, NOT `Merge`. The rendering under test lives in `do`, which
+// every verb shares, and the servers in this file answer the SAME canned failure
+// to every path. `Merge` re-reads mergeability before it writes, so it would
+// fail on that READ and the detail returned here would be the read's — the same
+// string, arrived at through a path this file is not about. A comment post is
+// one request, so what is measured is unambiguous.
 func detailOf(t *testing.T, c *Client) string {
 	t.Helper()
-	err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase", MergeableYes)
+	err := c.PostComment(context.Background(), wOwner, wName, wNum, "a body the fake ignores")
 	if err == nil {
 		t.Fatal("the failure was reported as a success")
 	}

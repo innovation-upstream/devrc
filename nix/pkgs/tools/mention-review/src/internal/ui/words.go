@@ -57,14 +57,22 @@ func ReviewWord(decision string) StateWord {
 // measured on a merged PR in this repo. Rendering it as CLEAN would be a
 // guess presented as a fact; rendering it as CONFLICT would be alarming and
 // wrong. It gets its own word.
+//
+// 🔴 THE `mergeable` ENUM IS READ THROUGH `ghapi.NormalizeMergeable`, NOT
+// OPEN-CODED. This switch used to spell the predicate itself — `case "UNKNOWN",
+// "":` beside the merge gate's own copy — and the two DISAGREED: the gate
+// trimmed and upper-cased, this did neither, so ` unknown ` rendered as the
+// MERGEABLE branch here while the gate called it UNKNOWN. One rule, one place:
+// a predicate open-coded at two sites is typically wrong at one of them, and
+// unifying them is what makes the disagreement audible.
 func MergeWord(mergeable, stateStatus string, merged bool) StateWord {
 	if merged {
 		return StateWord{"MERGED", styMerged}
 	}
-	switch mergeable {
-	case "CONFLICTING":
+	switch ghapi.NormalizeMergeable(mergeable) {
+	case ghapi.MergeableNo:
 		return StateWord{"CONFLICT", styBad}
-	case "UNKNOWN", "":
+	case ghapi.MergeableUnknown:
 		return StateWord{"UNKNOWN", styDim}
 	}
 	// MERGEABLE — the finer detail lives in mergeStateStatus.
