@@ -1356,14 +1356,20 @@ def click_dims(repo: str = "", platform: str = "",
     🔴 `ordering`, `tier_a` AND `tier_b` ARE WHAT MAKE A COMPLAINT ATTRIBUTABLE,
     AND WITHOUT THEM "IT RANKED WRONG" HAS NO ANSWER. `rank` says where the
     chosen row sat; none of the existing dims says whether the ordering was
-    RUNNING, nor which tier was in it. MEASURED 2026-09-18: one host has no
-    `picks.jsonl`, so Tier B is inert there and contributes exactly nothing,
-    while the other host's log grows — and the two emit identical rows today.
+    RUNNING, nor which tier was in it.
       * `ordering` is `ordering_state`'s verdict (`applied`/`no-table`/`stale`),
         LEDGERED OR DROPPED against `ORDER_STATES` for the reason `surface` is.
-      * `tier_a` / `tier_b` are ROW COUNTS — how many ordered rows the range
-        table could classify, and how many carry a non-zero pick score. Counts,
-        never contents: the universe names private repositories.
+        It is NOT derivable from what was already emitted: `ordered` is a
+        POSITIONAL fact about the chosen row, and `plausibility` is present only
+        when that row was ordered.
+      * `tier_b` is a ROW COUNT — how many ordered rows carry a non-zero pick
+        score. It is the tier that grows with use, and nothing else on the row
+        tracks that. Counts, never contents: the universe names private repos.
+      * `tier_a` is the same shape but NEAR-CONSTANT — read it as a
+        partial-table detector; `_ordered_universe` explains why at length, with
+        the measurement.
+    ⚠ THE CROSS-HOST ARGUMENT THAT USED TO BE HERE IS RETRACTED — measured, all
+    85 click rows came from one host. See `_ordered_universe`.
     All three are ABSENT when no ordering ran (the auto-open path, and any
     picker holding no universe rows), which is the same absence-is-not-a-zero
     rule `rank` follows: `tier_b=0` must mean "ran, learned nothing", and only
@@ -3200,18 +3206,41 @@ def _ordered_universe(
     EXISTS BECAUSE `state == "applied"` DOES NOT ANSWER THAT. `applied` says the
     range table was present and fresh enough to sort on; it says nothing about
     whether the table had an entry for any row on screen, and NOTHING AT ALL
-    about Tier B. MEASURED 2026-09-18: one of the two hosts has no `picks.jsonl`
-    at all, so every click there runs with `scores == {}` and Tier B is
-    structurally inert — a click on that host and a click on the other emit an
-    IDENTICAL row, and "the ordering put the wrong repo on top" cannot be
-    attributed to a tier that was never in the sort.
+    about Tier B — which is the tier whose contribution GROWS with use, so "was
+    a learned preference in this sort, and over how many rows" is a question the
+    existing dims cannot answer at any point in time.
 
-    `tier_a` is how many of the ORDERED ROWS the range table had an entry for —
-    the rows Tier A could classify at all, as opposed to leaving `UNKNOWN`.
-    `tier_b` is how many of them carry a NON-ZERO pick score. Both are COUNTS OF
-    ROWS, never their contents: the offered universe names private repositories
-    and nothing here may carry one to a sink (see the CLICK-PATH TELEMETRY
-    block).
+    `tier_b` is how many of the ORDERED ROWS carry a NON-ZERO pick score.
+    `tier_a` is how many the range table had an entry for — see the warning
+    below, because that one is near-constant today.
+
+    Both are COUNTS OF ROWS, never their contents: the offered universe names
+    private repositories and nothing here may carry one to a sink (see the
+    CLICK-PATH TELEMETRY block).
+
+    🔴 RETRACTED JUSTIFICATION, KEPT SO NOBODY RE-DERIVES IT. This paragraph
+    used to read: "one of the two hosts has no `picks.jsonl`, so a click there
+    and a click on the other emit an IDENTICAL row" — and called that the
+    strongest reason a complaint could not be attributed. **MEASURED against the
+    activity dataset 2026-09-18: all 85 `mention-open` click rows ever recorded
+    came from the host that HAS the pick log. ZERO came from the host without
+    one.** The ambiguity never produced a row. Both rival explanations for that
+    zero were ruled out rather than assumed — the other host emitted 20,649
+    other tool-invocation rows in 30 days (so its telemetry is alive), and the
+    emitter imports and emits from its checkout. And even if a click did happen
+    there, `spool_emit` auto-fills `host=` on every v1 line, so the two-host case
+    was already attributable by a column that predates this change.
+
+    ⚠ `tier_a` IS NEAR-CONSTANT AND THAT IS STRUCTURAL, NOT A COINCIDENCE.
+    `regen-known-repos.py::build_ranges` keys the table OFF THE UNIVERSE ("KEYED
+    OFF THE UNIVERSE, NOT OFF THE API ROWS"), so coverage is 100% by
+    construction — measured 395 universe rows, 395 table entries, 0 uncovered —
+    and while that holds `tier_a == offered_total - pinned_above`, both of which
+    are already on the row. It earns its slot for ONE reason: the ranges leg of
+    that generator is deliberately non-fatal ("A FAILED *RANGES* LEG IS NOT EXIT
+    3") and its lookups are batched per-batch, so a PARTIALLY populated table is
+    reachable — and `ordering == applied` cannot see it. Read `tier_a` as a
+    partial-table detector, never as a measure of how much Tier A did.
 
     ⚠ `(0, 0)` IN EVERY DEGRADED STATE, for the same reason `ranges` is `{}`
     there: no ordering ran, so neither tier contributed, and the caller omits

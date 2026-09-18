@@ -41,12 +41,13 @@ prior picks at that row's own timestamp.
 reference numbers 86–4895, against a 394-row universe and a 394-entry range table.
 Provenance split: 65 `picker`, 9 `auto`, 35 untagged (pre-`via` rows). 0 unparseable.
 
-🔴 **It could only be measured on ONE of the two hosts.** `picks.jsonl` **does not
-exist** on the other one, so Tier B is structurally inert there and *that host has no
-pick history to replay at all*. Every number below describes the host that has a log.
-What could **not** be measured: the other host's ranking quality (no ground truth
-exists), and whether any of these picks was preceded by a typed query (nothing recorded
-it until this PR).
+🔴 **It could only be measured on ONE of the two hosts — and that host is where every
+observed click happens.** `picks.jsonl` does not exist on the other one, so it has no pick
+history to replay; **measured, it has also never emitted a single click row** (§1.5). So
+this is not a half-measured population: the replay covers **100% of observed clicks**.
+What could **not** be measured: whether any of these picks was preceded by a typed query
+(nothing recorded it until this PR), and what would happen if the operator started
+clicking on the other host.
 
 ### 1.1 Accuracy
 
@@ -122,10 +123,28 @@ class sizes for #1761: plausible 4 · below 159 · impossible 232
 ```
 
 So on this host **Tier A classifies every row and Tier B is inert** — 4 repositories rank
-above 391, and the ranking that produces that is Tier A's alone. This is the state the
-operator may have been clicking in, and until this PR the row it emitted was byte-identical
-to one from the host where Tier B *is* running. That asymmetry is the single strongest
-reason the complaint could not be answered.
+above 391, and the ranking that produces that is Tier A's alone.
+
+🔴 **BUT THE OPERATOR WAS NOT CLICKING HERE, AND AN EARLIER DRAFT OF THIS SECTION SAID
+THEY MIGHT HAVE BEEN.** It called the two-host asymmetry "the single strongest reason the
+complaint could not be answered". **Measured against the activity dataset: all 85
+`mention-open` click rows ever recorded — 2026-09-12 to today — came from the host that
+HAS the pick log. Zero from this one.** Both rival explanations for that zero were ruled
+out rather than assumed: this host emitted **20,649** other tool-invocation rows in 30
+days (so its telemetry is alive, most recent minutes ago), and its checkout's emitter
+imports and emits. The clicks simply do not happen here. And `host` is auto-filled on
+every v1 spool line anyway, so the two-host case was already attributable by a column
+that predates this work.
+
+**Two things follow, and the second is good news the first draft buried:**
+
+1. The cross-host argument is **withdrawn**. `tier_b` earns its place on a narrower claim
+   — it tracks how much learned preference was in the sort **on the emitting host, over
+   time**, which nothing else on the row carries.
+2. **§1's replay is stronger than it was reported.** It was framed as "one of two hosts,
+   the other unmeasurable". In fact the host it ran on is where **100% of observed clicks
+   happen**, so the 109-pick replay covers the entire observed click population — there is
+   no unmeasured second population, only a host that does not click.
 
 ---
 
@@ -314,6 +333,37 @@ against, which is the point of having it before the decision rather than after.
 
 ---
 
+## When to read the data, and how much of it there will be
+
+🔴 **Nothing schedules this read, so it needs a named closing condition or it is not a
+work item.** The condition: **the operator, or a session resuming from this doc, runs the
+query below and records the answer in this file.** It is closed when this section carries
+a measured `queried` rate — not when a week has passed.
+
+```
+-- the rate symptom 1 turns on, on the PICKED arm
+SELECT countIf(JSONExtractBool(payload,'queried')) AS typed,
+       countIf(JSONHas(payload,'queried'))          AS measured,
+       count()                                      AS picked_rows
+FROM activity.events
+WHERE source='tool' AND kind='invocation' AND text='mention-open'
+  AND JSONExtractString(payload,'outcome')='picked'
+  AND ts > '<the deploy date>'
+```
+
+⚠ **The two arms fill at very different rates — measured, so the week-later reader does
+not mistake a 10-row sample for an answer.** Over the 6.7 days to 2026-09-18 the sink took
+**85** click rows: **71 picked · 9 auto-open · 5 dismissed**, rising from 3/day to ~21/day.
+
+* **Picked arm** — ~100+ rows within a week of deploying. Readable.
+* **Dismissal arm** — ~5 per week, and `queried` covers only the Enter-with-no-match subset
+  of those (§3.1). At this rate it needs **roughly two months** before it says anything.
+
+So the PR's framing that `queried` "matters most on the dismissal arm" is right about
+*diagnostic value per row* and wrong about *when you can act on it*. Read the picked arm
+first; treat the dismissal arm as a slow-burn signal, and do not hold up a symptom-1
+decision waiting for it.
+
 ## Appendix — what was NOT measured
 
 * The ranking quality on the host with no `picks.jsonl`. There is no pick history there,
@@ -323,3 +373,6 @@ against, which is the point of having it before the decision rather than after.
 * Whether reordering `order_universe`'s sort key recovers the top-1 (§ symptom 2, option 2).
 * Whether a visible class marker perturbs fzf's own scoring (§ symptom 1, option A).
 * The range table in force at each historical pick — the replay used today's.
+* Whether a **partially populated** range table has ever occurred. `tier_a` exists to
+  detect it (the generator's ranges leg is deliberately non-fatal), but coverage is 100%
+  today — 395 universe rows, 395 table entries — so the dim has never had anything to say.

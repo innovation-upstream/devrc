@@ -42,12 +42,63 @@ def test_build_fields_shape():
     assert p["cluster"] == "dpprod" and p["preset"] == "dp-5xx-rate"
 
 
+def test_a_COUNT_truncation_is_ANNOUNCED_not_silent():
+    """🔴 THE CAP USED TO REMOVE A COLUMN WITH NO TRACE, AND THE ROW STILL
+    PARSED. `sanitize_dims` slices `[:_MAX_DIMS]`, so a caller that outgrew the
+    cap lost its LAST-INSERTED dims — the newest fields, i.e. exactly the ones a
+    new measurement depends on — with no error and no log line. MEASURED on
+    `mention-open`: a 14-dim ledger against a cap of 12 kept 12, and the
+    instrument would have been read as evidence.
+
+    🔴 THE TEST ABOVE CANNOT SEE THAT. `len(out) <= _MAX_DIMS` is SATISFIED by
+    the truncation — it is the one assertion a silent drop always passes. Only a
+    guard on the ANNOUNCEMENT catches it, which is why this exists beside it
+    rather than inside it.
+
+    Same contract and same spelling as `claude-hooks/hook_telemetry.py`'s
+    `dropped`, whose comment records that the silent version "contradicted the
+    only promise it makes". One rule, one place.
+
+    Every number here is distinct from `_MAX_DIMS` and from every other constant
+    in the fixture, so no assertion can be satisfied by a neighbour's value."""
+    over = {f"k{i}": i for i in range(INV._MAX_DIMS + 3)}
+    out = INV.sanitize_dims(over)
+    assert len(out) == INV._MAX_DIMS + 1, (
+        f"expected {INV._MAX_DIMS} kept dims plus `dropped`: {sorted(out)}")
+    assert out["dropped"] == 3, (
+        f"three dims were removed and the row claims {out.get('dropped')!r} — a "
+        f"consumer cannot tell a complete row from a truncated one: {out}")
+    # ABSENT when nothing was lost, so the absence is readable as "complete".
+    assert "dropped" not in INV.sanitize_dims({"a": 1}), INV.sanitize_dims({"a": 1})
+    # Exactly at the cap is NOT a truncation.
+    exact = INV.sanitize_dims({f"k{i}": i for i in range(INV._MAX_DIMS)})
+    assert "dropped" not in exact and len(exact) == INV._MAX_DIMS, sorted(exact)
+    # 🔴 A CALLER CANNOT FORGE IT. The field's job is to be trustworthy about
+    # loss, so a caller-supplied `dropped` must not be able to mask a real one.
+    # `dropped` is itself one of the caller's items, so this dict holds
+    # `_MAX_DIMS + 5` entries in total and exactly 5 must be reported lost.
+    forged = INV.sanitize_dims({"dropped": 0, **{f"k{i}": i
+                                                 for i in range(INV._MAX_DIMS + 4)}})
+    assert forged["dropped"] == 5, (
+        f"a caller-supplied `dropped` survived and hid a real truncation of 5: "
+        f"{forged['dropped']!r}")
+    # ...and it reaches the PAYLOAD, not just this dict.
+    payload = json.loads(INV.build_fields("t", "o", dims=over)["payload"])
+    assert payload["dropped"] == 3, payload
+
+
 def test_sanitize_caps_count_and_length():
     big = {f"k{i}": "x" for i in range(50)}
     big["huge"] = "y" * 500
     big["list"] = ["a" * 500] * 50
     out = INV.sanitize_dims(big)
-    assert len(out) <= INV._MAX_DIMS
+    # 🔴 THE CAP BOUNDS *CALLER* DIMS. `dropped` is the emitter's own annotation
+    # about what it removed, not one of them, so it may sit one over — and this
+    # is written as an exact allowance rather than a loosened `+ 1`, so a second
+    # unannounced key cannot ride in behind it. See
+    # `test_a_COUNT_truncation_is_ANNOUNCED_not_silent`.
+    assert len(out) <= INV._MAX_DIMS + (1 if "dropped" in out else 0)
+    assert len(out) - ("dropped" in out) <= INV._MAX_DIMS
     if "huge" in out:
         assert len(out["huge"]) <= INV._MAX_VALUE_LEN
     if "list" in out:

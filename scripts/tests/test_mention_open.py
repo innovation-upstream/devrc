@@ -8810,11 +8810,17 @@ def test_a_PICKED_row_names_the_ORDERING_STATE_and_what_each_TIER_CONTRIBUTED(
 
 def test_a_host_with_NO_pick_log_reports_tier_b_ZERO_while_one_WITH_picks_does_not(
         monkeypatch, tmp_path, spool):
-    """🔴 THE MEASUREMENT THAT MOTIVATED ALL OF THIS. MEASURED 2026-09-18:
-    `picks.jsonl` does not exist on one of the two hosts, so every click there
-    sorts with `scores == {}` and Tier B is inert — and the operator who says
-    "it ranked wrong" does not know which host they were on. Before this dim the
-    two hosts emitted IDENTICAL rows.
+    """🔴 TIER B IS THE TIER WHOSE CONTRIBUTION GROWS WITH USE, AND NOTHING ELSE
+    ON THE ROW TRACKS IT. A cold host sorts with `scores == {}` — Tier A's order
+    alone — and a warm one does not; the rank means a different thing in each,
+    and before this dim the two were the same row.
+
+    ⚠ THE MOTIVATION FIRST WRITTEN HERE WAS RETRACTED. It said the two HOSTS
+    emit identical rows because one has no `picks.jsonl`. Measured against the
+    activity dataset: all 85 click rows ever recorded came from the host that
+    HAS the log, zero from the one without — so that ambiguity has never
+    produced a row, and `host` is on every v1 spool line anyway. The claim that
+    survives is about the SAME host over TIME, which is what this test drives.
 
     Both arms are driven in one test, because a `tier_b=0` asserted alone is
     satisfied by a field wired to a constant. The pick log is the ONLY thing
@@ -9116,13 +9122,23 @@ def test_the_click_DIM_ledger_FITS_the_collectors_own_dim_CAP():
     # comparison above is a measurement rather than an arithmetic identity.
     over = {f"k{i}": i for i in range(inv._MAX_DIMS + 1)}
     kept = inv.sanitize_dims(over)
-    assert len(kept) == inv._MAX_DIMS and len(kept) < len(over), (
+    caller_dims = len(kept) - ("dropped" in kept)
+    assert caller_dims == inv._MAX_DIMS and caller_dims < len(over), (
         f"the collector did NOT truncate {len(over)} dims to {inv._MAX_DIMS} — "
         f"this guard is asserting against a cap that does not bite: {kept}")
     # ...and it is the LAST-inserted keys that go, which is why the newest
     # field is the one that vanishes.
     assert f"k{inv._MAX_DIMS}" not in kept, sorted(kept)
     assert "k0" in kept, sorted(kept)
+    # 🔴 AND THE DROP IS NOW ANNOUNCED. Raising the cap only moves the cliff —
+    # what stops the NEXT caller silently losing its newest field is that the
+    # row says so. Absent when nothing was dropped, so a consumer can read the
+    # absence as "nothing lost" rather than comparing counts.
+    assert kept.get("dropped") == 1, (
+        f"the collector truncated a dim and did NOT say so — a row missing its "
+        f"newest field while parsing cleanly is the whole hazard: {kept}")
+    assert "dropped" not in inv.sanitize_dims({"a": 1, "b": 2}), (
+        "a row that lost nothing must not carry a `dropped` key")
 
 
 def test_every_ORDER_STATE_is_emittable_as_a_click_dim_and_nothing_else_is():
@@ -9262,10 +9278,14 @@ def test_every_click_row_names_the_HOST_it_was_clicked_on(spy, spool):
     operator's "I do not know which host I was on" is answered by a field that
     was there all along.
 
-    It is pinned rather than assumed because the two hosts DIFFER in exactly the
-    way that matters: one has no `picks.jsonl`, so Tier B is inert there. A row
-    without a host makes `tier_b=0` unattributable, and the field lives in
-    another module whose own tests have no reason to keep it."""
+    It is pinned rather than assumed because the field lives in ANOTHER module
+    whose own tests have no reason to keep it, and because it is what makes a
+    `tier_b` count attributable to the pick log that produced it.
+
+    ⚠ NOT because the two hosts differ in practice — measured, all 85 click rows
+    came from one of them. That was the first draft's reason and it was wrong;
+    see `test_a_host_with_NO_pick_log_reports_tier_b_ZERO_while_one_WITH_picks_
+    does_not`."""
     # Synthetic, for the reason the auto-path test above states.
     assert MO.main(["zzzsynthorg/zzzsynthrepo#1065"]) == 0
     events = _click_events(spool)
