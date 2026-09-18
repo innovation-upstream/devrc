@@ -66,10 +66,8 @@ is the PRIVATE proposal, not this doc.
   server image), `civitai/talos-infra` **#1542** `40bd630dd` (the manifests), **#1548** `ec5db6fde`
   (backup bucket + credential), **#1551** `6834ac0f2` (the mount fix + gate 23). Claim
   `cairn-oss-multi-instance-phase-c` RELEASED.
-  ⚠ **SUPERSEDED 2026-09-18 by the phase-D block above, and the correction is recorded rather than
-  overwritten.** This block used to end *"THE ARC'S `## Goal` IS STILL NOT ADDRESSED … the `civitai`
-  scope answers `scope-absent`"*. That was true when written and is now false: phase D seeded the
-  store and the Goal is met as worded. Phase **E** (registry cutover) is what remains.
+  ⚠ **SUPERSEDED 2026-09-18 by the phase-D block above** — its closing "Goal STILL NOT ADDRESSED /
+  `scope-absent`" was true when written and is now false. Phase **E** is what remains.
 
 - 🔴 **THE LIVE INSTANCE — the facts a next session needs and should not re-derive.**
   Namespace `cairn` on the civitai production cluster; pod Ready, 0 restarts, on `talos-avt-y6z`;
@@ -135,10 +133,8 @@ is the PRIVATE proposal, not this doc.
      someone else (`3a9ed6c1e`).
 
 - 🔴 **ROUTING IS DETERMINISTIC ALREADY; THE GAP IS THAT NOTHING CHECKS THE *ASSIGNMENTS*.** Both
-  hosts: 25 entries, **all → `personal`**. ⚠ **STALE AS OF 2026-09-18 IN ITS SECOND HALF** — this
-  read "no `instances/` dir, `cairn routes` → `instances: personal`"; phase D added
-  `instances/civitai.env` to BOTH hosts, so `cairn routes` now reports `instances: personal, civitai`.
-  The TABLE half is unchanged and still all-`personal`.
+  hosts: 25 entries, **all → `personal`** — that half stands. ⚠ **Its "no `instances/` dir" half is
+  STALE since phase D**: both hosts now report `instances: personal, civitai`.
   So every scope resolves personally and the civitai server has **no client pointed at it**. The
   two-way pin grades *presence* (is every live scope named? does every named scope exist?) and never
   **"is each scope pointing at the RIGHT instance?"** — which is the axis that decides where durable
@@ -163,12 +159,17 @@ is the PRIVATE proposal, not this doc.
      stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
      duplication makes it harder, not easier. via: measurement
   2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
-     unconditional rewrite.** The shipped client documents `put` as *"replace a whole entry behind
-     an **If-Match precondition**"* and `create` as refusing a ref that already exists. So two
-     writers do not silently clobber — the second gets a loud precondition failure. A merge rule is
-     still absent, but the failure mode it would have to cover is **fail-loud, not silent loss**,
-     which removes (b)'s strongest argument. ⚠ Read off the client's own interface; a real If-Match
-     collision was NOT exercised. via: code
+     unconditional rewrite.** `scripts/subsystem-store-api/server.py:233-234` — the SERVER contract,
+     in this repo — states `PUT /api/v1/entry/<scope>/<ref>` *"replaces the whole file behind a
+     **REQUIRED `If-Match`**; a stale revision is a **412** and the file is untouched"*, and `create`
+     refuses an existing ref. So two writers do not silently clobber; the second gets a 412. A merge
+     rule is still absent, but the failure it would have to cover is **fail-loud, not silent loss**,
+     which removes (b)'s strongest argument. 🔴 **That contract predates the premise it refutes** —
+     so the doc asserted an unconditional rewrite while the repo already said otherwise, and the
+     check was one `grep` away the whole time. ⚠ Still NOT exercised: no live 412 was provoked.
+     ⚠ And the server scopes its attribution guarantee to `POST /bullets` — **a PUT writes the
+     caller's bytes verbatim**, so `[cairn: actor/session]` does not self-populate on that path.
+     via: code
   3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
      (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
      (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
@@ -193,7 +194,9 @@ is the PRIVATE proposal, not this doc.
 
 - ⚠ **The doc was cut 196,581 → 101,909 B** (devrc #1757 `53c9b981d`), 107 KB moved **verbatim** to
   `claudedocs/refs/cairn-oss-multi-instance.md` with per-block preservation proof and a case-mutant
-  control. The allowance was **tightened** 196,608 → 114,688, never raised. **The ranked list was
+  control. 🔴 **CORRECTED 2026-09-18: this line read "tightened 196,608 → 114,688"; the allowance is
+  `98_304`.** The authority is `scripts/lib/handoff_budget.py:62`, never this sentence — 114,688 is
+  `handoff-nix-disk-cleanup.md`'s row. Tightened, never raised, stands. **The ranked list was
   deliberately NOT rewritten**: it predates the `forcing:` requirement and carries none, so a
   rewrite would have meant inventing forcing functions for hygiene items.
 
@@ -519,12 +522,6 @@ makes the scanners skip tracked prose. Block evicted for size per the 2026-09-07
 and the design fix landed while they were still being written. When you find yourself writing
 the third PR that classifies instances of one class, the class itself is the bug.
 **Next probe: none.**
-
-### Rank 3 slice 3 MERGED 2026-09-12 — `#1508`, correcting this doc's own carried-forward line
-`origin/main` `44bd8b0e`: *"consolidate onto the pinned client — delete the five forked reader
-modules"*. **`State now`'s carried-forward block still calls it BUILT, NOT MERGED** — that line was
-true when I wrote it and is now false. Recorded here rather than by replacing `State now`, which
-belongs to that arc's own session. via: measurement
 
 ### An unexplained backup archive at 2026-09-17T21:03:27Z that no surviving Job accounts for
 - as-of: 2026-09-17
@@ -1137,13 +1134,9 @@ cairn routes | head -2   # instances: personal, civitai  — TWO since phase D
 python3 -c "import json,collections;d=json.load(open('$HOME/.config/subsystem-store/routes.json'));print(len(d),dict(collections.Counter(d.values())))"
 ```
 Expect `25 {'personal': 25}` — the shipped table is unchanged — and `instances/civitai.env`
-present on BOTH hosts. 🔴 **The seeded scope is reachable only under the phase-D
-`$CAIRN_ROUTES` override; without it `cairn recall --scope civitai-developer-docs` exits 11, and
-that refusal is CORRECT, not a regression.** Reconstruct the override with:
-```bash
-python3 -c "import json,os;t=json.load(open(os.path.expanduser('~/.config/subsystem-store/routes.json')));t['civitai-developer-docs']='civitai';json.dump(dict(sorted(t.items())),open('/tmp/routes-phase-d.json','w'),indent=2)"
-CAIRN_ROUTES=/tmp/routes-phase-d.json cairn recall --scope civitai-developer-docs
-```
+present on BOTH hosts. 🔴 **The seeded scope is reachable only under a `$CAIRN_ROUTES` override
+(the shipped table plus `"civitai-developer-docs": "civitai"`); without one, `cairn recall --scope
+civitai-developer-docs` exits 11, and that refusal is CORRECT, not a regression.**
 
 **Gate 23 exists and the mount defect cannot return:**
 ```bash
