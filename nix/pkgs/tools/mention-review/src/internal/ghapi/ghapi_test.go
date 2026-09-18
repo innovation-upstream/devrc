@@ -515,13 +515,21 @@ func TestAnEmptyTokenShortCircuitsBeforeTheNetwork(t *testing.T) {
 //  3. a GraphQL 200 whose `errors[]` is decoded by the merge gate's read
 //     (`Mergeability`);
 //  4. the merge gate's `default:` refusal, which interpolates the SERVER's
-//     `mergeable` word (`NormalizeMergeable` of `pr.Mergeable`) into the card.
+//     `mergeable` word (`NormalizeMergeable` of `pr.Mergeable`) into the card;
+//  5. `do`'s transport error, whose `url.Error` names the LAST request URL —
+//     which a server chooses, because this client follows redirects and sets no
+//     `CheckRedirect`. ⚠ IT IS NOT EXERCISED BY THE TABLE BELOW, and that is
+//     deliberate rather than an omission: no credential is known to reach it
+//     (the token is header-only and Go strips userinfo passwords), so it is the
+//     unbounded-card hazard and not a leak. Its clip is pinned by
+//     `TestATransportErrorNeverCarriesAnUnclippedRedirectTarget`.
 //
 // 🔴 ENTRY 4 IS THE ONE A COMMENT SAID COULD NOT EXIST. Round 1 added entries 2
 // and 3 and closed the ledger with "Paths NOT listed carry no server text at
 // all" — while `write.go`'s `default:` arm interpolated `read.Mergeable` with no
-// `redact` and no `clipDetail`, measured at 5,133 unclipped runes from a probe
-// server. `mergeable` is a GraphQL ENUM, so a CONFORMING server cannot send text
+// `redact` and no `clipDetail`, measured at 5,081 unclipped runes from a probe
+// server (`mergegate_test.go`'s fixture reproduces that length).
+// `mergeable` is a GraphQL ENUM, so a CONFORMING server cannot send text
 // there — which is exactly as true of `errors[0].message`, and this file treats
 // that one as a real defect. The threat model is a proxy or a gateway, not the
 // schema, and it does not stop at one field.
@@ -537,7 +545,20 @@ func TestAnEmptyTokenShortCircuitsBeforeTheNetwork(t *testing.T) {
 // `unreadable response: …` / `unreadable files response: …` details are the JSON
 // decoder's own prose — which can quote one offending byte of the body, so they
 // go through `Client.detail` too rather than resting on that being harmless.
-// If a fifth reflecting path is added, it belongs in this ledger.
+//
+// 🔴 THIS LEDGER IS AN INSTRUCTION TO MAINTAINERS. NOTHING ABOUT IT IS
+// ENFORCED, AND `query.go` USED TO SAY OTHERWISE. The table below is
+// hand-written and walked by a `for` loop: it enumerates no call site, counts no
+// `Client.detail` invocation and inspects no source, so a sixth reflecting path
+// added tomorrow leaves it green. `query.go` claimed this test "fails if a fifth
+// appears unledgered" while entry 5 above already existed unledgered — the third
+// time a completeness sentence in this change has been false. What IS enforced,
+// mechanically, is narrower and lives elsewhere:
+// `TestEveryAPIErrorDetailIsRoutedOrLedgered` derives every `&APIError{…}`
+// construction from the package source and fails on a `Detail` that is neither a
+// literal, nor routed through `Client.detail`, nor ledgered with a reason. It
+// cannot tell you whether a path carries SERVER text; it can tell you that no
+// path reaches the UI unbounded and unexamined.
 func TestNoErrorPathEverCarriesTheToken(t *testing.T) {
 	const secret = "gho_thisisnotarealtokenitisatestfixture"
 
@@ -722,6 +743,84 @@ func TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail(t *testing.T) {
 				t.Errorf("a short GraphQL message came back as %q, want it verbatim", ae2.Detail)
 			}
 		})
+	}
+}
+
+// 🔴 THE FIFTH REFLECTING PATH: A REDIRECT TARGET THE SERVER CHOSE.
+//
+// `do` reported a transport failure as `"could not reach api.github.com: " +
+// err.Error()` with no `Client.detail`. This client sets no `CheckRedirect`, so
+// Go follows redirects and the resulting `url.Error` names the LAST request URL
+// — a string the SERVER supplied, in a `Location` header. MEASURED at
+// `cb7c7949`: a 5,000-rune redirect path produced a detail past 5,000 runes,
+// longer than the merge-gate path the same change was fixing, while `query.go`
+// asserted that a fifth such path could not appear unnoticed. ⚠ NO EXACT LENGTH
+// IS QUOTED, because it moves with the ephemeral port inside the reflected URL —
+// the assertion below is a ceiling, not an equality, for that reason.
+//
+// ⚠ THIS IS AN UNBOUNDED CARD, NOT A LEAK, AND THE TEST CLAIMS ONLY THAT. The
+// token is header-only and Go strips userinfo passwords out of a `url.Error`, so
+// nothing here says a credential can reach this string.
+//
+// ⚠ THE CEILING IS ABSOLUTE AND IS NOT MADE OF THE CONSTANT UNDER TEST. A mutant
+// that raises `maxDetailRunes` still "clips", at its own number.
+func TestATransportErrorNeverCarriesAnUnclippedRedirectTarget(t *testing.T) {
+	var target string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	// ⚠ IT REDIRECTS TO ITSELF, so the client gives up after ten hops rather than
+	// dialling a port this test guessed at — the failure is deterministic and
+	// stays on loopback.
+	target = srv.URL + "/" + strings.Repeat("z", 5000)
+
+	c := NewClient("tok-redirect-clip-fixture", srv.Client())
+	c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+
+	_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+	if err == nil {
+		t.Fatal("a redirect loop was reported as a success")
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err is %T, want *APIError: %v", err, err)
+	}
+	// This case proves nothing unless it went down the transport arm.
+	if !strings.HasPrefix(ae.Detail, "could not reach api.github.com: ") {
+		t.Fatalf("this is not `do`'s transport path: %.160q", ae.Detail)
+	}
+	const cardCeiling = 600
+	if n := len([]rune(ae.Detail)); n > cardCeiling {
+		t.Errorf("the detail is %d runes — past the %d-rune ceiling a single terminal "+
+			"line can carry, whatever `maxDetailRunes` says. The server's redirect "+
+			"target reached the card unclipped: %.160q", n, cardCeiling, ae.Detail)
+	}
+	if !strings.HasSuffix(ae.Detail, "…") {
+		t.Errorf("a 5,000-rune redirect target produced a detail with no clip marker: %.160q",
+			ae.Detail)
+	}
+
+	// 🔴 POSITIVE CONTROL: AN ORDINARY SHORT TRANSPORT FAILURE COMES THROUGH
+	// WHOLE. Without it the assertions above are satisfied by a path that
+	// truncates everything, including the one word that says what went wrong.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	c2 := NewClient("tok-redirect-clip-fixture", nil)
+	c2.SetBaseURLs(deadURL+"/graphql", deadURL)
+	_, err2 := c2.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+	var ae2 *APIError
+	if !errors.As(err2, &ae2) {
+		t.Fatalf("err2 is %T, want *APIError: %v", err2, err2)
+	}
+	if strings.Contains(ae2.Detail, "…") {
+		t.Errorf("a short dial failure was clipped — the bound is wired to something much "+
+			"smaller than a card: %q", ae2.Detail)
+	}
+	if !strings.HasPrefix(ae2.Detail, "could not reach api.github.com: ") {
+		t.Errorf("a short dial failure lost the sentence that names the condition: %q", ae2.Detail)
 	}
 }
 

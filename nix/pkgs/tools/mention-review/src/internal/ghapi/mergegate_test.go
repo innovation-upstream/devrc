@@ -57,10 +57,13 @@ type mergeFake struct {
 }
 
 // gqlIdent matches a GraphQL identifier, which is how `requestedFields` turns a
-// query document into the set of words it names.
+// query document into the fields it names.
 var gqlIdent = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 
-// requestedFields is the set of identifiers a GraphQL document mentions.
+func gqlSpace(b byte) bool { return b == ' ' || b == '\n' || b == '\t' || b == '\r' }
+
+// requestedFields maps every field a GraphQL document names onto the KEY a
+// server answers it under.
 //
 // 🔴 THE FAKE HONOURS THE QUERY, AND THAT IS NOT DECORATION. A real GraphQL
 // server returns a field ONLY if it was asked for. A fake that answered every
@@ -70,12 +73,50 @@ var gqlIdent = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 // MEASURED: with the unconditional fake, a mutant that shortened the query to
 // `{ mergeable }` SURVIVED the whole suite; with this, it is killed by the
 // terminal-pull-request test.
-func requestedFields(query string) map[string]bool {
-	set := map[string]bool{}
-	for _, tok := range gqlIdent.FindAllString(query, -1) {
-		set[tok] = true
+//
+// 🔴 A KEY, NOT A PRESENCE BIT, AND THE ALIAS IS WHY. A server keys an ALIASED
+// selection by the alias: `prState: state` comes back as `{"prState":…}` and
+// `state` is absent from the body entirely. A fake that answered `"state"` there
+// would satisfy a decoder reading the `state` json tag while production read
+// nothing — so an alias mutant survived a green suite. MEASURED at `cb7c7949`:
+// aliasing `state` in `MergeableQuery` left `go test ./internal/ghapi/` `ok`.
+//
+// Argument lists are skipped rather than scanned, because `commits(last:100)`
+// names `last` in front of a colon and that is not an alias.
+func requestedFields(query string) map[string]string {
+	out := map[string]string{}
+	alias := ""
+	for i := 0; i < len(query); i++ {
+		if query[i] == '(' {
+			j := strings.IndexByte(query[i:], ')')
+			if j < 0 {
+				break
+			}
+			i += j
+			continue
+		}
+		loc := gqlIdent.FindStringIndex(query[i:])
+		if loc == nil || loc[0] != 0 {
+			continue
+		}
+		name := query[i : i+loc[1]]
+		i += loc[1] - 1
+		k := i + 1
+		for k < len(query) && gqlSpace(query[k]) {
+			k++
+		}
+		if k < len(query) && query[k] == ':' {
+			alias = name
+			i = k
+			continue
+		}
+		key := name
+		if alias != "" {
+			key, alias = alias, ""
+		}
+		out[name] = key
 	}
-	return set
+	return out
 }
 
 func (f *mergeFake) handler() http.HandlerFunc {
@@ -100,19 +141,22 @@ func (f *mergeFake) handler() http.HandlerFunc {
 			if i >= len(f.states) {
 				i = len(f.states) - 1
 			}
+			// ⚠ THE RESPONSE KEY, NOT THE FIELD NAME. An aliased selection comes
+			// back under its alias, which is what a real server does and what makes
+			// an alias mutant visible here.
 			var fields []string
-			if asked["mergeable"] {
+			if key := asked["mergeable"]; key != "" {
 				value := "null"
 				if f.states[i] != "" {
 					value = `"` + f.states[i] + `"`
 				}
-				fields = append(fields, `"mergeable":`+value)
+				fields = append(fields, `"`+key+`":`+value)
 			}
-			if asked["state"] {
-				fields = append(fields, `"state":"`+f.prState+`"`)
+			if key := asked["state"]; key != "" {
+				fields = append(fields, `"`+key+`":"`+f.prState+`"`)
 			}
-			if asked["merged"] {
-				fields = append(fields, `"merged":`+strconv.FormatBool(f.merged))
+			if key := asked["merged"]; key != "" {
+				fields = append(fields, `"`+key+`":`+strconv.FormatBool(f.merged))
 			}
 			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{`+
 				strings.Join(fields, ",")+`}}}}`)
@@ -428,6 +472,26 @@ func TestTheMergeFakeAnswersOnlyTheFieldsTheQueryAsksFor(t *testing.T) {
 				"`MergeableQuery` would SURVIVE: %s", unwanted, narrow)
 		}
 	}
+
+	// 🔴 AN ALIASED SELECTION COMES BACK UNDER ITS ALIAS. A fake keyed by the
+	// FIELD name answers `"state"` here, the decoder's `state` json tag finds it,
+	// and a mutant that aliases the field in `MergeableQuery` SURVIVES while
+	// production reads nothing at all — MEASURED at `cb7c7949`.
+	aliased := post(`query{ repository { pullRequest { mergeable prState: state merged } } }`)
+	if !strings.Contains(aliased, `"prState"`) {
+		t.Errorf("an aliased `state` did not come back under its alias: %s", aliased)
+	}
+	if strings.Contains(aliased, `"state":`) {
+		t.Errorf("the fake answered `state` for a document that aliased it to `prState` — "+
+			"it is keyed by the field name rather than the response key, so every alias "+
+			"mutant would SURVIVE: %s", aliased)
+	}
+	// And an UNaliased field beside it is still keyed by its own name, so the
+	// assertion above is about aliases rather than about a fake that renames
+	// everything.
+	if !strings.Contains(aliased, `"merged"`) {
+		t.Errorf("an unaliased `merged` lost its own name: %s", aliased)
+	}
 }
 
 // 🔴 THE PREDICATE ANSWERS ONLY WHEN IT KNOWS, AND THE ASYMMETRY IS DELIBERATE.
@@ -525,7 +589,8 @@ func TestTheUnknownRefusalNamesHowManyReadsItActuallyMade(t *testing.T) {
 // `write.go`'s `default:` arm interpolates `read.Mergeable` — which is
 // `NormalizeMergeable` of a string the SERVER sent — straight into the card. At
 // `d2ec72c3` it did so with no `clipDetail` and no `redact`, and a probe server
-// measured a 5,133-rune unclipped, unredacted detail out of it, while two
+// measured a 5,081-rune unclipped, unredacted detail out of it — the length the
+// fixture below still reproduces — while two
 // comments one file over asserted that every server-derived detail was bounded
 // and that no unlisted path carried server text.
 //

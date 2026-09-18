@@ -158,7 +158,19 @@ func (c *Client) do(ctx context.Context, req *http.Request) ([]byte, error) {
 	req.Header.Set("User-Agent", c.ua)
 	resp, err := c.http.Do(req.WithContext(ctx))
 	if err != nil {
-		return nil, &APIError{State: AuthOther, Detail: "could not reach api.github.com: " + err.Error()}
+		// 🔴 THE TRANSPORT ERROR IS SERVER-DERIVED TOO, AND IT DID NOT LOOK IT.
+		// This client sets no `CheckRedirect`, so Go follows redirects and the
+		// `url.Error` names the LAST request URL — which a server chose, in a
+		// `Location` header. MEASURED at `cb7c7949`: a `302` whose target carried
+		// 5,000 junk runes produced a detail past 5,000 runes — longer than the
+		// merge-gate path this same change was fixing. ⚠ NO EXACT LENGTH IS
+		// QUOTED: it moves with the ephemeral port in the reflected URL, so the
+		// reproducible claim is the order of magnitude, not a figure.
+		// ⚠ NO CREDENTIAL IS KNOWN TO REACH HERE — the token is header-only and
+		// Go strips userinfo passwords from a `url.Error` — so this is the
+		// unbounded-card hazard rather than a leak. `Client.detail` costs nothing
+		// and bounds it either way.
+		return nil, &APIError{State: AuthOther, Detail: c.detail("could not reach api.github.com: " + err.Error())}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -230,16 +242,30 @@ const maxReflectedErrorEntries = 5
 // `decodeSnapshot` UNCLIPPED and UNREDACTED (measured: a 5,057-rune detail with
 // the token intact). Round 2: the fix said "every detail this client builds out
 // of server content" and MISSED the merge gate's `default:` arm, which
-// interpolates the server's `mergeable` string — measured at 5,133 runes,
+// interpolates the server's `mergeable` string — measured at 5,081 runes,
 // unclipped and unredacted, from a probe server.
 //
-// So the honest form of the claim is a LEDGER, not an adjective. Every path
-// that turns server content into an `APIError.Detail` goes through
-// `Client.detail` (redact then clip); the four of them are enumerated on
-// `TestNoErrorPathEverCarriesTheToken`, which fails if a fifth appears
-// unledgered. `TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail` and
-// `TestTheMergeabilityRefusalNeverReflectsTheServersWordUnclipped` pin the
-// clipping half.
+// 🔴 ROUND 3 MADE IT THREE, AND THE THIRD TIME WAS A CLAIM ABOUT ENFORCEMENT
+// RATHER THAN ABOUT COVERAGE. This comment said the four paths "are enumerated
+// on `TestNoErrorPathEverCarriesTheToken`, which fails if a fifth appears
+// unledgered". That test is a hand-written four-row table walked by a `for`
+// loop: it enumerates nothing, counts nothing and inspects no source. A FIFTH
+// path existed at the moment the sentence was written — `do`'s transport error,
+// which interpolated a redirect target the server chose — and the suite was
+// green.
+//
+// So the enforcement is now BUILT rather than asserted.
+// `TestEveryAPIErrorDetailIsRoutedOrLedgered` (detailrouting_test.go) parses
+// this package's non-test sources, finds every `&APIError{…}` construction, and
+// requires each one's `Detail` to be a string literal, a call through
+// `Client.detail`, or an expression named in an explicit ledger with a reason.
+// A new unrouted path fails it. It says nothing about WHICH paths carry server
+// text — that judgement is what the ledger entries record — and the hand-written
+// ledger on `TestNoErrorPathEverCarriesTheToken` remains an INSTRUCTION to
+// maintainers, not a check. `TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail`,
+// `TestTheMergeabilityRefusalNeverReflectsTheServersWordUnclipped` and
+// `TestATransportErrorNeverCarriesAnUnclippedRedirectTarget` pin the clipping
+// half, path by path.
 const maxDetailRunes = 400
 
 // apiMessage renders GitHub's error body into the one line the card shows.
@@ -584,10 +610,11 @@ func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) 
 // both callers decode the body for their own shape first and answer
 // `unreadable response` there, and they run before this does.
 //
-// ⚠ THE IRONY IS WORTH RECORDING: the commit that narrowed this path's handling
-// of a non-array `errors` is the same commit that WIDENED `apiMessage`'s
-// tolerance for the identical shape (see its `narrow` fallback). One function
-// learned to read past it and its neighbour learned to mistake it for absence.
+// ⚠ THE IRONY IS WORTH RECORDING: while `d2ec72c3` was narrowing this path's
+// handling of a non-array `errors`, `apiMessage` had just been WIDENED to
+// tolerate the identical shape (its `narrow` fallback, added in `2dffe5a8`). Two
+// commits, not one: one function learned to read past it and its neighbour
+// learned to mistake it for absence.
 func (c *Client) decodeGQLError(body []byte) error {
 	var probe struct {
 		Errors json.RawMessage `json:"errors"`
@@ -617,7 +644,11 @@ func (c *Client) decodeGQLError(body []byte) error {
 
 // detail is redact-then-clip, in ONE place.
 //
-// 🔴 THE ORDER IS THE WHOLE POINT AND IT WAS OPEN-CODED AT THREE SITES. `redact`
+// 🔴 THE ORDER IS THE WHOLE POINT AND IT WAS OPEN-CODED AT TWO SITES — with a
+// THIRD that should have carried it and did not. `git grep "clipDetail\|c.redact"
+// d2ec72c3 -- internal/ghapi/` returns the ordering at `query.go:179` (`do`) and
+// `query.go:560` (the GraphQL decode); `write.go`'s `default:` arm had neither,
+// so it was a MISSING site rather than a third copy. Two is enough: `redact`
 // looks for the exact secret this client holds; clipping first could cut a
 // reflected token in half and leave the surviving prefix un-redacted, because
 // the needle would no longer be in the haystack. Clipping AFTER can only ever

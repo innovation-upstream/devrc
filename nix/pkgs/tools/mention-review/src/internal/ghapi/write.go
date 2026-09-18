@@ -325,8 +325,10 @@ func (c *Client) Merge(ctx context.Context, owner, name string, num int, method 
 		// 🔴 THIS IS THE FOURTH REFLECTING PATH, AND TWO COMMENTS USED TO ASSERT
 		// THERE WERE THREE. `read.Mergeable` is `NormalizeMergeable(…)` of a
 		// string the SERVER sent; it was interpolated here with no clip and no
-		// redaction, and a probe server measured a 5,133-rune unclipped,
-		// unredacted detail out of this line. `maxDetailRunes`' docstring claimed
+		// redaction, and a probe server measured a 5,081-rune unclipped,
+		// unredacted detail out of this line — the length this file's own fixture
+		// still reproduces (`strings.Repeat("qwertyuiop", 500)` plus the 81 runes
+		// of sentence around it). `maxDetailRunes`' docstring claimed
 		// "EVERY DETAIL THIS CLIENT BUILDS OUT OF SERVER CONTENT" and
 		// `TestNoErrorPathEverCarriesTheToken`'s ledger claimed "paths NOT listed
 		// carry no server text at all". Both were false HERE.

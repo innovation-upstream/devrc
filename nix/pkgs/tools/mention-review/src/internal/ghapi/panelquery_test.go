@@ -37,27 +37,38 @@ import (
 // a real GraphQL server does — and then asks the actual consumer predicate.
 // Query, decode and consumer are asserted as one relationship.
 
-// prFragmentSelections returns the fields the panel `Query` selects DIRECTLY on
-// the PullRequest: the scalars that land in a `Snapshot` field, and nothing
-// nested.
+// prFragmentSelections maps each field the panel `Query` selects DIRECTLY on the
+// PullRequest — the scalars that land in a `Snapshot` field, nothing nested —
+// onto the KEY a server answers it under.
 //
 // 🔴 A FLAT IDENTIFIER SET IS NOT ENOUGH HERE, AND THAT IS THE WHOLE REASON THIS
 // FUNCTION EXISTS. `requestedFields` (mergegate_test.go) is sufficient for
 // `MergeableQuery` because that document is four lines long and names each word
-// once. The panel `Query` names `state` in FOUR places — the Issue fragment, the
-// PullRequest fragment, the review nodes, and the check-rollup contexts — so a
+// once. The panel `Query` names `state` in FIVE places — the Issue fragment, the
+// PullRequest fragment, the review nodes, the check rollup's own `state`, and
+// the `... on StatusContext` arm inside its contexts — so a
 // flat set still reports `state` as selected after it has been deleted from the
 // pull request. A fake built on the flat set would answer `state` for a mutant
 // that stopped asking for it, and the mutant would SURVIVE. That exact blindness
 // is asserted below, against a probe document, so this claim is checked rather
 // than believed.
 //
+// 🔴 AND THE KEY IS THE ALIAS WHERE THERE IS ONE. A server answers `prState:
+// state` as `{"prState":…}`, with no `state` in the body at all; a fake that
+// emitted `"state"` for it would feed the decoder's `state` json tag while
+// production got nothing. MEASURED at `cb7c7949`: aliasing `state` on the
+// PullRequest fragment left `go test ./internal/ghapi/` `ok`. This document
+// already aliases one selection (`rollup: commits(last:1)`), so the shape is not
+// hypothetical.
+//
 // The rule: an identifier at the fragment's own brace depth whose next
-// non-space character is not `{`, `(` or `:` — which excludes selections with
-// children (`author{login}`), selections with arguments (`commits(last:100)`)
-// and aliases (`rollup: commits(…)`).
-func prFragmentSelections(query string) map[string]bool {
-	out := map[string]bool{}
+// non-space character is not `{` or `(` — which excludes selections with
+// children (`author{login}`) and selections with arguments (`commits(last:100)`,
+// `rollup: commits(…)`). An identifier followed by `:` is an ALIAS, and binds to
+// the selection after it. Argument lists are skipped rather than scanned,
+// because `last:100` is a parameter and not an alias.
+func prFragmentSelections(query string) map[string]string {
+	out := map[string]string{}
 	const marker = "... on PullRequest"
 	i := strings.Index(query, marker)
 	if i < 0 {
@@ -71,16 +82,25 @@ func prFragmentSelections(query string) map[string]bool {
 	body = body[open+1:]
 
 	depth := 0
+	alias := ""
 	for j := 0; j < len(body); j++ {
 		switch body[j] {
 		case '{':
 			depth++
+			alias = ""
 			continue
 		case '}':
 			if depth == 0 {
 				return out // the fragment's own closing brace
 			}
 			depth--
+			continue
+		case '(':
+			k := strings.IndexByte(body[j:], ')')
+			if k < 0 {
+				return out
+			}
+			j += k
 			continue
 		}
 		if depth != 0 {
@@ -93,13 +113,23 @@ func prFragmentSelections(query string) map[string]bool {
 		name := body[j : j+loc[1]]
 		j += loc[1] - 1
 		k := j + 1
-		for k < len(body) && (body[k] == ' ' || body[k] == '\n' || body[k] == '\t' || body[k] == '\r') {
+		for k < len(body) && gqlSpace(body[k]) {
 			k++
 		}
-		if k < len(body) && (body[k] == '{' || body[k] == '(' || body[k] == ':') {
+		if k < len(body) && body[k] == ':' {
+			alias = name
+			j = k
 			continue
 		}
-		out[name] = true
+		if k < len(body) && (body[k] == '{' || body[k] == '(') {
+			alias = ""
+			continue
+		}
+		key := name
+		if alias != "" {
+			key, alias = alias, ""
+		}
+		out[name] = key
 	}
 	return out
 }
@@ -130,18 +160,21 @@ func (f *panelFake) handler() http.HandlerFunc {
 		_ = json.Unmarshal(raw, &req)
 		asked := prFragmentSelections(req.Query)
 
+		// ⚠ THE RESPONSE KEY, NOT THE FIELD NAME. An aliased selection comes back
+		// under its alias, which is what a real server does and what makes an
+		// alias mutant visible here instead of silently passing.
 		fields := []string{`"__typename":"PullRequest"`}
-		if asked["number"] {
-			fields = append(fields, `"number":1559`)
+		if key := asked["number"]; key != "" {
+			fields = append(fields, `"`+key+`":1559`)
 		}
-		if asked["title"] {
-			fields = append(fields, `"title":"`+f.title+`"`)
+		if key := asked["title"]; key != "" {
+			fields = append(fields, `"`+key+`":"`+f.title+`"`)
 		}
-		if asked["state"] {
-			fields = append(fields, `"state":"`+f.state+`"`)
+		if key := asked["state"]; key != "" {
+			fields = append(fields, `"`+key+`":"`+f.state+`"`)
 		}
-		if asked["merged"] {
-			fields = append(fields, `"merged":`+strconv.FormatBool(f.merged))
+		if key := asked["merged"]; key != "" {
+			fields = append(fields, `"`+key+`":`+strconv.FormatBool(f.merged))
 		}
 		f.lastBody = `{"data":{"viewer":{"login":"a-reviewer"},` +
 			`"repository":{"issueOrPullRequest":{` + strings.Join(fields, ",") + `}}}}`
@@ -262,6 +295,37 @@ func TestThePanelQuerySelectsTheFieldsTheTerminalPRGuardReads(t *testing.T) {
 					"panel `Query` would SURVIVE: %s", unwanted, body)
 			}
 		}
+
+		// 🔴 AND AN ALIASED SELECTION COMES BACK UNDER ITS ALIAS. Pinning that
+		// only through a mutant of the SHIPPED document is not enough: the
+		// shipped one aliases nothing, so a fake re-keyed to the field name
+		// behaves identically and SURVIVES on its own — MEASURED — while
+		// silently re-enabling every alias mutant it was meant to catch.
+		aliased := `query{ repository{ issueOrPullRequest(number:1){ __typename
+		  ... on PullRequest { prState: state merged } } } }`
+		payload2, _ := json.Marshal(map[string]any{"query": aliased})
+		resp2, err := srv.Client().Post(srv.URL+"/graphql", "application/json",
+			strings.NewReader(string(payload2)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp2.Body.Close()
+		raw2, _ := io.ReadAll(resp2.Body)
+		body2 := string(raw2)
+		if !strings.Contains(body2, `"prState"`) {
+			t.Errorf("an aliased `state` did not come back under its alias: %s", body2)
+		}
+		if strings.Contains(body2, `"state":`) {
+			t.Errorf("the fake answered `state` for a document that aliased it to `prState` — "+
+				"it is keyed by the field name rather than the response key, so a query that "+
+				"aliased the field would decode into an empty `Snapshot.State` in production "+
+				"while every test here stayed green: %s", body2)
+		}
+		// The unaliased neighbour keeps its own name, so the check above is about
+		// aliasing rather than about a fake that renames everything.
+		if !strings.Contains(body2, `"merged"`) {
+			t.Errorf("an unaliased `merged` lost its own name: %s", body2)
+		}
 	})
 }
 
@@ -292,13 +356,13 @@ query{
 }`
 	sel := prFragmentSelections(probe)
 	for _, name := range []string{"number", "title"} {
-		if !sel[name] {
+		if sel[name] == "" {
 			t.Errorf("%q is selected directly on the PullRequest and the extractor missed it", name)
 		}
 	}
 	for _, name := range []string{"state", "merged", "login", "author", "reviews", "rollup",
 		"nodes", "commit", "statusCheckRollup"} {
-		if sel[name] {
+		if sel[name] != "" {
 			t.Errorf("the extractor reports %q as selected on the PullRequest, but the probe "+
 				"names it only in a sibling fragment or a nested selection — so it is a flat "+
 				"identifier set in disguise and cannot see a mutant that narrows the fragment",
@@ -312,10 +376,38 @@ query{
 	// this function exists.
 	flat := requestedFields(probe)
 	for _, name := range []string{"state", "merged"} {
-		if !flat[name] {
+		if flat[name] == "" {
 			t.Errorf("the flat identifier set does NOT report %q for the probe — the reason "+
 				"`prFragmentSelections` exists no longer holds, and one of the two should go",
 				name)
+		}
+	}
+
+	// 🔴 THE SECOND BLINDNESS, AND THE CONTROL THAT SAYS IT IS CLOSED: AN ALIAS.
+	// A server answers `prState: state` under the ALIAS, so an extractor that
+	// reported the field's own name would have the fake emit `"state"`, the
+	// decoder would find it, and the mutant would SURVIVE while production read
+	// nothing. MEASURED at `cb7c7949`, with the whole package `ok`.
+	const aliasedProbe = `
+query{
+  repository{
+    issueOrPullRequest(number:1){
+      __typename
+      ... on PullRequest { number title prState: state merged }
+    }
+  }
+}`
+	al := prFragmentSelections(aliasedProbe)
+	if al["state"] != "prState" {
+		t.Errorf("the extractor keys `state` as %q for a document that asked for "+
+			"`prState: state` — the fake answers under a key the server would never "+
+			"use, so every alias mutant SURVIVES", al["state"])
+	}
+	// The unaliased neighbours keep their own names, so the assertion above is
+	// about aliasing rather than about an extractor that renames everything.
+	for _, name := range []string{"number", "title", "merged"} {
+		if al[name] != name {
+			t.Errorf("an unaliased %q is keyed as %q, want its own name", name, al[name])
 		}
 	}
 
@@ -327,7 +419,7 @@ query{
 		t.Fatal("the extractor found NO directly-selected fields on the shipped panel " +
 			"`Query` — it is returning an empty set, and the guard above is vacuous")
 	}
-	if shipped["login"] || shipped["oid"] || shipped["isResolved"] {
+	if shipped["login"] != "" || shipped["oid"] != "" || shipped["isResolved"] != "" {
 		t.Errorf("the extractor reports a NESTED field as directly selected on the shipped "+
 			"query: %v", shipped)
 	}
