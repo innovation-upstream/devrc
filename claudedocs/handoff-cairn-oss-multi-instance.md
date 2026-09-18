@@ -1053,6 +1053,67 @@ rebased between rounds**, and say in the dispatch which commits the range actual
   `test_cairn_flake_pin.py` already killed all three of its mutants behaviourally, in both tiers.
   **The fix rounds, not the original change, were where every finding lived.**
 
+### 2026-09-18 — PHASE D AND THE DECISION SHIPPED AS `innovation-upstream/devrc` #1763 — OPEN, 4 AUDIT ROUNDS
+🔴 **THE PR IS OPEN AND IS WHERE THIS SESSION'S WHOLE OUTPUT LIVES.** `#1763`, branch
+`docs/cairn-routing-durability-decision`, head **`43fddffe`**, worktree
+`/home/zach/workspace/devrc-cairn-decision`. Six commits: the decision + phase-D record, then
+round-0/1/2/3 fixes, then the eviction. Four Tekton legs were `pending` at handoff time — **read
+them SHA-pinned** (`gh api repos/innovation-upstream/devrc/commits/<sha>/status`), not `gh pr checks`.
+⚠ **Round 4 was IN FLIGHT when this was written** and its verdict is not recorded here. Its range is
+`818c0b28..43fddffe`. Read the `audit-claims` issue comments on the PR for rounds 1-3.
+
+🔴 **WHAT THE LADDER CAUGHT, because each is a shape and three were in prose a FIX round wrote:**
+- **Round 0 (requirements & deletion)** — the PR's own body identified that the doc's stated size
+  allowance was wrong and corrected it *only in the PR description*, leaving the doc wrong. **A PR
+  whose job is correcting stale claims left one live in the artifact people actually read.** It also
+  caught the PR invoking devrc `CLAUDE.md`'s "any addition needs an eviction in the SAME commit"
+  while not obeying it.
+- **Round 1** — phase D changed the **CLIENT's routing** on both hosts and the doc had recorded only
+  the cosmetic half. See `State now`; that finding is the reason the rc-11 paragraph exists.
+- **Round 2** — four false sentences the round-1 fix wrote, incl. **"the lesson that is NOT in the
+  runbook" about a lesson the runbook states verbatim**, and a verification block that printed
+  something other than what it said (`entry-files=` rides `X-Store-Snapshot`, and the round's own
+  `grep` discarded it).
+- **Round 3** — the eviction **demoted three `⚠ STILL OPEN` residuals into `refs/`**, which the
+  eviction playbook and the refs file's own preamble both forbid. Restored to rank 22.
+🔴 **THE TRANSFERABLE ONE: I was careful about LESSONS and blind to OPEN RESIDUALS.** When
+condensing a closed item, the lesson is the part you will remember to keep and the open thread is
+the part you will not. Grep for `STILL OPEN` before demoting anything.
+
+### 2026-09-18 — `/prune-memory` IS THE WRONG INSTRUMENT FOR A HANDOFF DOC, AND AN AUDIT RECOMMENDED IT
+🔴 **Read a skill's BODY before accepting it as the instrument.** Round 0 named `/prune-memory` for
+shrinking this doc. It operates on `MEMORY.md`, its topic files and `ARCHIVE.md`, against a 12 KB
+target with section caps named "Critical safety" and "Feedback" — **none of which is a handoff doc**.
+The right instrument was inside the gate that was failing: `_eviction_playbook()` in
+`scripts/tests/test_handoff_doc_size.py`, whose ordered steps are **1 evict what has closed** ("usually
+the whole answer") · 2 demote dated evidence to a sibling `claudedocs/refs/<topic>.md` and leave a
+pointer · 3 split by initiative · **4 raise the allowance, LAST**. It carries one hard prohibition:
+**do not satisfy the gate by deleting an open investigation, a gotcha or a ruled-out theory.**
+
+### 2026-09-18 — UNFILED: three cairn OPERATIONAL facts belong in `claude/skills/cairn/SKILL.md`
+⚠ **Recorded here because nothing else caught them, and the index is the wrong home.** The
+subsystem-index `--pr 1763` window returned `status=no-match` (1 path examined, real zero for that
+window) and proposed no write; its skill-homes lead named `claude/skills/cairn/SKILL.md`, which is
+correct — these are ops-gotchas about the tool, not a subsystem pointer sheet. **Not filed: it needs
+its own devrc PR and this session had an audit round in flight.** The three:
+1. 🔴 **Configuring a SECOND instance changes routing, not just labelling.** `alias_for` resolves an
+   unnamed scope to the default **only** `if not self.multi_instance`; at two instances it raises
+   `UnroutedScope` (**rc 11**). So the first write to any scope absent from the table starts failing
+   on every host the moment a second instance exists.
+2. **`cairn create`'s `revision` IS the leading 16 hex of the entry file's own sha256** — a content
+   claim you can verify with `sha256sum`, not an opaque id.
+3. **A token's scope allowlist is a snapshot with NO wildcard, and an unlisted scope reads back
+   byte-identically to one that does not exist** — never a permission error. Adding a scope is a
+   two-place change (the token row AND the write).
+
+### 2026-09-18 — "MOVED VERBATIM" IS A CLAIM; PROVE IT WITH A NEGATIVE CONTROL
+When demoting bodies to `refs/`, assert each block byte-identically present in the destination
+**and** run a one-character mutant that must NOT be found. A preservation check that cannot fail
+proves nothing. Also run a LOSS detector — content present before and absent from **both** files
+after — and positive-control it (an empty corpus must report a large number, not zero).
+⚠ **And check the substance, not the spelling:** verifying a restore by grepping the ORIGINAL
+strings after rewording them returns 0 and reads as a failed restore. That happened here.
+
 ## How to verify
 
 **Phase C is closed** — content at `origin/trunk`, then the live artifact:
