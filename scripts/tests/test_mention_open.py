@@ -8868,7 +8868,13 @@ def test_an_AUTO_OPEN_names_NO_ordering_and_NO_tier_counts(spy, spool):
     asked: `ordering="no-table"` would name a host state this click did not
     measure, and `tier_a=0`/`tier_b=0` would land in the same bucket as a real
     ordering that learned nothing. A consumer averaging Tier B's contribution
-    would then be dragged toward zero by every click that never reached it."""
+    would then be dragged toward zero by every click that never reached it.
+
+    ⚠ NOT REGRESSION COVERAGE — MEASURED GREEN AT `35580612`, where these dims
+    do not exist so their absence is vacuous. What it IS: the guard against
+    adding them to this arm, which is the obvious-looking tidy-up. Mutant M4
+    (the auto emit gains `ordering=order_state, tier_a=…, tier_b=…`) is KILLED
+    by this test, with this message."""
     assert MO.main(["civitai/talos-infra#1065"]) == 0
     payload = _click_events(spool)[0]["payload"]
     assert payload["outcome"] == MO.CLICK_AUTO_OPEN, payload
@@ -8976,7 +8982,14 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
     ⚠ IT PINS A COUNT THE HANDLER MUST NOT CHANGE SILENTLY. Whether those rows
     SHOULD be pinned is the operator's call (see
     `claudedocs/proposal-mention-picker-visibility.md`); this fails when the
-    answer changes without one."""
+    answer changes without one.
+
+    ⚠ AN INVARIANT GUARD BY THE BASE MATRIX — MEASURED GREEN AT `35580612`,
+    because `rank` and `pinned_above` already shipped and no bug ever violated
+    this. It is not counted as regression coverage. It is live against a
+    reachable mutation (M9, `pinned_above = 0` on the guessed arm, KILLED here)
+    and it is the guard every symptom-3 option in the proposal must go red
+    against — which is why it exists BEFORE that decision rather than after."""
     _ordering_fixture(monkeypatch, tmp_path, pane=pane)
     seen: dict = {}
 
@@ -9059,7 +9072,15 @@ def test_the_click_DIM_ledger_FITS_the_collectors_own_dim_CAP():
     and the guard has to live on the relationship.
 
     The control is driven in the same run: a ledger one entry PAST the cap must
-    lose a field, or this comparison cannot see the hazard it names."""
+    lose a field, or this comparison cannot see the hazard it names.
+
+    🔴 THE MATRIX, BECAUSE THIS ONE IS SUBTLE. Green at `35580612` — the ledger
+    was 10 fields and the cap 12, so there was nothing to catch. RED against
+    this change's own ledger (14) with the pre-change cap (12), with the message
+    below; and in that same run `test_the_click_telemetry_DIM_ledger_is_pinned_
+    two_way` — the file's existing ledger guard — PASSED. That is the
+    measurement behind "neither suite can see it": the truncation is invisible
+    to every test that does not compare the two modules."""
     inv = _load_invocation()
     assert len(MO.CLICK_DIM_FIELDS) <= inv._MAX_DIMS, (
         f"`CLICK_DIM_FIELDS` has {len(MO.CLICK_DIM_FIELDS)} entries and "
@@ -9115,6 +9136,58 @@ def test_the_picker_OUTPUT_LINE_count_is_DERIVED_from_the_flag_not_spelled():
     # one — from a DIFFERENT line. A single-line reader that also claimed a
     # query line would return the query as the row.
     assert MO.PICKER_QUERY_LINE != MO.PICKER_ROW_LINE
+
+
+def test_a_TORN_query_line_is_NOT_MEASURED_rather_than_read_half_written(
+        monkeypatch):
+    """🔴 A HALF-WRITTEN LINE IS NOT A MEASUREMENT, AND THIS TEST EXISTS BECAUSE
+    A MUTATION SWEEP PROVED NOTHING REACHED THE CHECK. `run_picker` requires the
+    query line to be TERMINATED (`len(lines) > PICKER_QUERY_LINE + 1`) before it
+    records a verdict; loosening that to `>` SURVIVED the entire suite (mutant
+    M11), because every other fixture writes whole lines.
+
+    The peer here writes bytes with NO trailing newline and then exits — which
+    is what a child killed mid-write leaves in the pipe. `run_picker` drains the
+    remainder on `proc.poll()`, so those bytes DO reach the parser; without the
+    terminator check they would be read as a complete query and recorded as
+    "the operator typed", which is the value symptom 1 is measured from.
+
+    ⚠ NOT A HYPOTHETICAL ABOUT fzf — fzf writes whole lines. It is about the
+    parser being total on what the pipe can hold, and the reason it is written
+    down is that the guard was otherwise UNREACHABLE and would have been deleted
+    by the next reader as dead defensiveness."""
+    if MO.PICKER_QUERY_LINE is None:      # pragma: no cover — flag dropped
+        pytest.skip("--print-query is not set, so there is no query line")
+
+    class _TornTerminal(_FakeTerminal):
+        def popen(self, argv, **kwargs):
+            self.argv = list(argv)
+            rows_fifo, choice_fifo = argv[-3], argv[-2]
+
+            def serve():
+                rfh = open(rows_fifo, "r", encoding="utf-8")
+                wfh = open(choice_fifo, "w", encoding="utf-8")
+                with wfh, rfh:
+                    self.payload = rfh.read()
+                    wfh.write("torn")     # 🔴 NO newline, then the peer exits
+                self._done.set()
+
+            self._thread = threading.Thread(target=serve, daemon=True)
+            self._thread.start()
+            return self
+
+    term = _TornTerminal(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+    MO.set_pick_queried(None)
+    url = MO.pick(ONE_CANDIDATE)
+    # POSITIVE CONTROL: the torn bytes really did reach the parser, or this test
+    # is about a pipe that was never read.
+    assert term.payload, "the peer never received the rows — nothing was parsed"
+    assert url == "", f"a torn line became a selection: {url!r}"
+    assert MO.last_pick_queried() is None, (
+        f"a half-written query line was recorded as {MO.last_pick_queried()!r} "
+        f"— an unterminated line is NOT MEASURED, and counting it as a typed "
+        f"query is the value symptom 1 is read from")
 
 
 def test_every_click_row_names_the_HOST_it_was_clicked_on(spy, spool):
