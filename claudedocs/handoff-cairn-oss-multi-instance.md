@@ -135,25 +135,54 @@ is the PRIVATE proposal, not this doc.
   # 1. refresh both caches, THEN diff every flipped scope byte-for-byte.
   cairn sync
   P=~/.cache/subsystem-store; C=~/.cache/subsystem-store-civitai
-  bad=0
-  for s in civitai-app-model-benchmarking civitai-app-sensei \
-           civitai-block-generate-from-model civitai-developer-docs \
-           civitai-gpu-fleet claude-pool; do
-    for f in $(cd "$P/$s" 2>/dev/null && ls -1 *.md 2>/dev/null); do
+  FLIPPED="civitai-app-model-benchmarking civitai-app-sensei
+           civitai-block-generate-from-model civitai-developer-docs
+           civitai-gpu-fleet claude-pool"
+
+  bad=0; files=0; scopes=0
+  for s in $FLIPPED; do
+    # A scope name that matches NEITHER side is a TYPO, not a clean scope.
+    if [ ! -d "$P/$s" ] && [ ! -d "$C/$s" ]; then
+      echo "UNKNOWN-SCOPE $s"; bad=$((bad+1)); continue
+    fi
+    scopes=$((scopes+1))
+    # The property is personal ⊆ civitai BY CONTENT: nothing readable today may
+    # become unreadable after the flip. An entry only on the civitai side is
+    # fine — that is the destination's own, and `civitai-developer-docs` is
+    # exactly that case (0 personal entries, 2 civitai) by design.
+    for f in $(ls -1 "$P/$s" 2>/dev/null | grep '\.md$'); do
+      files=$((files+1))
       [ -f "$C/$s/$f" ] || { echo "MISSING  $s/$f"; bad=$((bad+1)); continue; }
       cmp -s "$P/$s/$f" "$C/$s/$f" || { echo "DIVERGED $s/$f"; bad=$((bad+1)); }
     done
   done
-  echo "flipped-scope defects: $bad"     # must be 0
+  echo "scopes seen: $scopes (MUST be 6)  files compared: $files (MUST be >= 16)  defects: $bad (MUST be 0)"
 
-  # 2. NEGATIVE CONTROL — the same loop over a HELD-BACK scope must find defects,
-  #    or step 1's zero is a fact about a broken loop, not about the stores.
-  hb=0
-  for f in $(cd "$P/datapacket-talos" && ls -1 *.md); do
-    cmp -s "$P/datapacket-talos/$f" "$C/datapacket-talos/$f" 2>/dev/null || hb=$((hb+1))
+  # 2. NEGATIVE CONTROL. It must prove the ONE behaviour step 1's zero rests on:
+  #    that `cmp -s` detects a byte difference between two files that BOTH
+  #    exist. Counting "absent" and "diverged" together does NOT prove it — on a
+  #    day when every held-back defect is an absence, a merely-non-zero control
+  #    passes while never exercising `cmp` at all.
+  hb_div=0; hb_abs=0
+  for f in $(ls -1 "$P/datapacket-talos" 2>/dev/null | grep '\.md$'); do
+    if [ ! -f "$C/datapacket-talos/$f" ]; then hb_abs=$((hb_abs+1))
+    elif ! cmp -s "$P/datapacket-talos/$f" "$C/datapacket-talos/$f"; then hb_div=$((hb_div+1)); fi
   done
-  echo "held-back defects: $hb"          # must be NON-zero
+  echo "held-back diverged: $hb_div (MUST be >= 1)  absent: $hb_abs"
   ```
+
+  🔴 **THE THREE `MUST`s ON THAT FIRST LINE ARE THE POINT, AND THEY WERE ADDED AFTER THIS EXACT
+  PROCEDURE WAS CAUGHT PASSING VACUOUSLY.** Its first version reported only `defects: 0`, and
+  round 3 of #1769 measured two ways it lied: run it with all six scope names mistyped by one
+  character and it prints `flipped-scope defects: 0` having compared **nothing**; and as
+  originally shipped it silently checked **5 of 6** scopes, because
+  `~/.cache/subsystem-store/civitai-developer-docs` does not exist and
+  `cd … 2>/dev/null && ls … 2>/dev/null` swallows both failures. The old negative control could
+  not see either, because it walked a DIFFERENT scope that does exist — so "loop 1 enumerated
+  nothing" produced the procedure's own pass condition. **A zero is a fact about the loop until
+  the loop says how much it looked at.** The repo already had this right elsewhere:
+  `scripts/subsystem-store-api/verify-byte-identity.sh` exits 4 on a zero-scope run rather than
+  passing trivially.
 
   **Any defect ⇒ do not switch.** Repair with a routing override that names only the scopes you
   are repairing, so a typo cannot write somewhere else — `CAIRN_ROUTES=<file> cairn put --scope

@@ -1952,7 +1952,19 @@ eviction playbook (DEMOTE DATED EVIDENCE). The handoff keeps each one's transfer
 
 Moved VERBATIM from `claudedocs/handoff-cairn-oss-multi-instance.md` to buy the
 headroom phase E's cutover procedure needs; that doc was 86 bytes from its
-98,304 B allowance. Each block is stamped with the sha256 of the exact text
+98,304 B allowance.
+
+🔴 **THE STAMP RECIPE, STATED — without it a verifier gets a FALSE ALARM on the last block.**
+The hashed unit is the block **as it stood in the handoff at `a888abaf0`**: from its `### ` heading
+through the blank line that separated it from the next heading, trailing newline included — i.e.
+`git show a888abaf0:claudedocs/handoff-cairn-oss-multi-instance.md`, split on `^### `, hash each
+chunk. It is **not** "the bytes between this stamp and the next one here". For eleven of the
+twelve those happen to coincide; for the **last** block (`7a2f884f…`) they do not, because nothing
+follows it in this file and so it carries no trailing blank line. A reader who re-derives the
+naive way computes `aaf272bd…` for that one and concludes the demotion was not verbatim. It was —
+all twelve were verified byte-identical at demotion time against a mutated-copy negative control.
+
+Each block is stamped with the sha256 of the exact text
 that was moved, so the verbatim claim is checkable rather than asserted.
 
 <!-- sha256:a092ebd30956f0c51e26b2bdbb37e4e8e42977dcfd72c1194129b6bf26da0951 -->
