@@ -488,6 +488,26 @@ the third PR that classifies instances of one class, the class itself is the bug
   between 20:31 and 21:05. If neither shows it, the open question is what else can write to
   `cairn-backups` — the credential is `PutObject`-capable and lives in the namespace.
 
+### 🔴 127 entries of client data on one node, and the backup has NEVER run on a schedule
+- as-of: 2026-09-18
+- **Symptom + exact repro:** `KUBECONFIG=$KC_DPPROD kubectl -n cairn get cronjobs -o custom-columns='NAME:.metadata.name,SUSPEND:.spec.suspend,LASTSCHEDULE:.status.lastScheduleTime'`
+- **Observed:** `cairn-backup true <none>` · `cairn-backup-mirror-b2 true <none>`. `<none>` is the
+  load-bearing part — **neither has ever fired.** Store: **13 scopes / 127 entries**;
+  `kubectl -n cairn get jobs` → `No resources found`. via: measurement
+- **Ruled out: that phase D's backup covers this.** That was a hand-made Job when the store held
+  **2** entries (`census: scopes=1 entries=2`). ~125 entries have no off-node copy. via: measurement
+- **Ruled out: that the personal store is a copy.** 4 entries have DIVERGED
+  (`datapacket-talos/{claude-pool,minio,postgres,search-meilisearch}.md`) and `civitai/feedback.md`
+  is personal-only. Byte-compared with a negative control. via: measurement
+- **Leading hypothesis:** not a defect — phase D seeded and nobody unsuspended. The app README's
+  *"until phase D unsuspends them this store has one node and no copy"* is still literally true.
+- **Next probe — this is the ACTION:** drop `suspend: true` from
+  `civitai/talos-infra:clusters/production/apps/cairn/backup-cronjob.yaml` (worktree recipe, that
+  repo's `CLAUDE.md` rule 10), then watch ONE scheduled run reach `Complete` and read its `census:` /
+  `restore: verified` lines. #1551's mount fix is live and was exercised at phase D. 🔴 **Do NOT
+  unsuspend the B2 mirror in the same change** — it mirrors what MinIO holds, so it is worthless
+  until the primary has run once.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -1084,6 +1104,29 @@ proves nothing. Also run a LOSS detector — content present before and absent f
 after — and positive-control it (an empty corpus must report a large number, not zero).
 ⚠ **And check the substance, not the spelling:** verifying a restore by grepping the ORIGINAL
 strings after rewording them returns 0 and reads as a failed restore. That happened here.
+
+### 2026-09-18 — PHASE E FIRST SIX: shipped, INERT, and what blocks the rest
+🔴 **`innovation-upstream/devrc` #1769 OPEN** (`feat/cairn-phase-e-first-six`), gates green, **rounds
+0–1 audited, round 2 NOT run.** Six rows → `civitai`: **five re-pointed + one NEW row**
+(`civitai-developer-docs`) — two different acts; the PR title's "six re-pointed" is wrong and is
+corrected in a PR comment, not silently edited.
+🔴 **INERT UNTIL BOTH HOSTS SWITCH.** `nix/home.nix` ships the table as a `home.file` STORE COPY, so
+nothing changes until `home-manager switch` per host; both still read `25 {'personal': 25}`. **Switch
+BOTH, then `cairn routes` on each** — while only one has switched, the same scope routes to different
+stores on the two machines, silently.
+🔴 **WHY ONLY SIX.** 125 entries were migrated FIRST (127/127 byte-identical, negative-controlled),
+because re-pointing does not move entries and a flip-before-migrate reads `scope-empty` at **rc 0**
+with reassuring prose — caught by no test and no client refusal. The other 7 carry a `README.md`
+**scope policy file** (`cairn recall` calls it *"authoritative for this scope"*); it has no
+`service:` field, so it is not an entry and **no cairn verb writes one**.
+`datapacket-talos/prometheus-stack` is separately blocked: `monitoring.md` claims it in `aliases:`
+while it also exists as its own 11.5 KB entry — personal tolerates the ambiguity, civitai resolves
+the alias first and refuses. Enumerated across all 12 scopes: **exactly one collision**.
+⚠ **devrc is PUBLIC** (`isPrivate=false`) and three sites in that PR's own prose justify the table
+living here with *"a public tool that shipped somebody's scope list would be publishing their org
+chart"*. Incremental exposure is small — `main` already carries the endpoint, namespace and token
+fingerprint — but the reasoning does not survive contact with its destination. Operator-facing,
+undecided.
 
 ## How to verify
 
