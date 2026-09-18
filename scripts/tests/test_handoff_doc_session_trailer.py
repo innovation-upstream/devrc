@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from lib import handoff_doc as hd  # noqa: E402
 from lib import session_trailer as st  # noqa: E402
 from testlib.hermetic_git import hermetic_git_env  # noqa: E402
+from testlib.mockbin import write_exec  # noqa: E402
 
 SID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 OTHER = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
@@ -99,9 +100,7 @@ def _repo_with_hook(tmp_path: Path, hook_body: str) -> Path:
     work = tmp_path / "w"
     work.mkdir()
     _sh("git", "init", "-q", "-b", "main", cwd=work)
-    hook = work / ".git" / "hooks" / "prepare-commit-msg"
-    hook.write_text(hook_body, encoding="utf-8")
-    hook.chmod(0o755)
+    write_exec(work / ".git" / "hooks" / "prepare-commit-msg", hook_body)
     return work
 
 
@@ -125,8 +124,10 @@ class TestTheTwoWritersCompose:
         module could make such a hook produce one trailer, so the test would pin
         a guarantee the code cannot offer.
         """
+        # 🔴 NO SHEBANG HERE — `mockbin.write_exec` owns it, and a repo guard
+        # (`test_runtime_shebangs.py`) fails any test that writes its own. That
+        # guard caught this exact line on the merged-tree gate run.
         hook = (
-            "#!/bin/sh\n"
             f"grep -q '^{st.TRAILER_KEY}:' \"$1\" && exit 0\n"
             f"printf '\\n{st.TRAILER_KEY}: {SID}\\n' >> \"$1\"\n"
             "exit 0\n"

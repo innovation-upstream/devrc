@@ -73,8 +73,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from transcript_search import (  # noqa: E402
-    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, canonical_skill_name, search,
-    search_peers,
+    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, canonical_skill_name,
+    find_transcript, search, search_peers,
 )
 from opencode_search import search_opencode  # noqa: E402
 import handoff_arc  # noqa: E402
@@ -1030,34 +1030,41 @@ _UUIDISH = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 def session_genesis(session_id, root=None):
     """The opening user message of `session_id`, or '' when unreadable.
 
-    Reads the transcript directly by filename rather than walking the corpus: the
-    id IS the filename, so this is one glob instead of a 15-second search.
+    🔴 THE LOOKUP IS `transcript_search.find_transcript`, NOT A GLOB OF OUR OWN.
+    An earlier revision globbed `*/<id>.jsonl` here and that was wrong twice
+    over. (1) It is a SECOND spelling of a predicate that already exists — one
+    rule, one place. (2) `find_transcript` additionally applies
+    `is_corpus_member`, so an id belonging to a `subagents/` transcript resolves
+    to None; the raw glob happily returned one, and a subagent is not a resumable
+    session. (3) Corpus globbing is a REGISTERED, TWO-WAY-PINNED ledger
+    (`JSONL_GLOB_SITES` in `scripts/tests/test_transcript_search.py`), whose
+    guard asserts globbing lives in exactly ONE module — so the private glob
+    turned two tests red on the merged tree. Registering a new ledger entry was
+    the expensive fix for a duplicate that should not exist; deleting it is the
+    cheap one.
     """
-    base = Path(root or ROOT)
+    path = find_transcript(session_id, root=root if root is not None else ROOT)
+    if path is None:
+        return ""
     try:
-        matches = list(base.glob(f"*/{session_id}.jsonl"))
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") != "user":
+                    continue
+                msg = rec.get("message") or {}
+                content = msg.get("content")
+                if isinstance(content, list):
+                    content = " ".join(
+                        c.get("text", "") for c in content
+                        if isinstance(c, dict))
+                if isinstance(content, str) and content.strip():
+                    return content
     except OSError:
         return ""
-    for path in matches:
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    if rec.get("type") != "user":
-                        continue
-                    msg = rec.get("message") or {}
-                    content = msg.get("content")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            c.get("text", "") for c in content
-                            if isinstance(c, dict))
-                    if isinstance(content, str) and content.strip():
-                        return content
-        except OSError:
-            continue
     return ""
 
 
@@ -1149,6 +1156,17 @@ def run_arc(a, _since=None):
 
     report = handoff_arc.resolve_arc(repo, rel, reader_rows=reader_rows,
                                      readers_measured=readers_measured)
+    if readers_measured:
+        # 🔴 NAME THE CORPUS WE DID NOT SEARCH. The reader walk is
+        # `--claude-only` because `ArcMember.resume_command()` emits
+        # `claude --resume`, which is the WRONG command for an opencode row — a
+        # defensible constraint, but silently dropping a whole runtime is the
+        # scoped-zero-as-absence pattern this report exists to refuse. Say it
+        # rather than let the chain read as complete.
+        report.unmeasured_notes.append(
+            "the opencode corpus was NOT searched for readers (the arc walk is "
+            "--claude-only, because a resume command is runtime-specific), so an "
+            "opencode session that resumed this doc is NOT in this chain")
     if a.json:
         print(json.dumps({
             "doc": report.doc,
@@ -1181,17 +1199,58 @@ def arc_annotation(r, arc_counts=None):
     measured on one arc, the slug appears in 48 sessions of which 3 opened with
     it. Annotating all 48 would be noise on 45 of them.
 
-    `arc_counts` maps doc basename -> member count. Absent or missing => the
-    count is NOT printed, because an unmeasured count rendered as `(0 sessions)`
-    would read as "this arc is empty" for a doc with a dozen members.
+    `arc_counts` maps doc basename -> writer count from `arc_writer_counts`.
+    Absent or missing => the count is NOT printed, because an unmeasured count
+    rendered as `(0 sessions)` would read as "this arc is empty" for a doc with a
+    dozen members.
+
+    🔴 THE COUNT IS RENDERED AS A FLOOR (`3+ sessions`) AND THAT IS NOT HEDGING.
+    It comes from the doc's git trailers alone, because the reader half needs a
+    corpus walk and paying one PER HIT would cost more than the query itself.
+    Writers are therefore a strict subset of the arc: every unstamped commit and
+    every session that resumed without committing is missing from it. Printing
+    that subset as a bare `(3 sessions)` would be a precise-looking undercount of
+    exactly the kind this tool's coverage line exists to refuse — so the `+` is
+    the honest rendering, and `--arc` is where the full membership is resolved.
     """
     basename = _arc_doc_in_genesis(r.get("genesis") or "")
     if not basename:
         return None
     n = (arc_counts or {}).get(basename)
-    suffix = f" ({n} sessions)" if isinstance(n, int) and n > 0 else ""
+    suffix = f" ({n}+ sessions)" if isinstance(n, int) and n > 0 else ""
     return (f"   arc: {basename}{suffix} — "
             f"find-session.py --arc {basename}")
+
+
+def arc_writer_counts(rows, repo_lookup=None):
+    """`{doc basename: distinct writer sessions}` for the docs `rows` name.
+
+    One git walk per DISTINCT doc, not per hit — a result set naming three docs
+    costs three walks whatever its length. Docs that resolve to no repo are
+    simply absent from the map, which `arc_annotation` renders as no count
+    rather than as a zero.
+    """
+    lookup = repo_lookup or arc_repo_for
+    counts = {}
+    # 🔴 `seen` IS SEPARATE FROM `counts`, and the difference is the whole point.
+    # Keying the skip on `counts` alone re-walked every doc that resolved to NO
+    # repo — once per hit — because such a doc never lands in `counts`. A result
+    # set of 50 hits naming one absent doc paid 50 lookups for 0 answers.
+    seen = set()
+    for r in rows:
+        basename = _arc_doc_in_genesis(r.get("genesis") or "")
+        if not basename or basename in seen:
+            continue
+        seen.add(basename)
+        repo, rel = lookup(basename)
+        if repo is None:
+            continue
+        try:
+            commits = handoff_arc.doc_commits(repo, rel)
+        except handoff_arc.GitUnavailable:
+            continue
+        counts[basename] = len({sid for c in commits for sid in c.session_ids})
+    return counts
 
 
 def _arc_doc_in_genesis(genesis):
@@ -1457,13 +1516,14 @@ def main(argv=None):
         print(f"{len(results)} session(s) matched {' '.join(a.terms)!r}"
               + (f" (showing {len(shown)})" if len(shown) < len(results) else "")
               + "\n")
+        arc_counts = arc_writer_counts(shown)
         for i, r in enumerate(shown, 1):
             lines = render_archive_hit(i, r)
             # 🔴 THE ANNOTATION, ON THE ORDINARY PATH. This is what removes the
             # round trip the operator reported: find a session, see it belongs to
             # an arc, and get the command to resolve the rest — without having to
             # know `--arc` exists.
-            note = arc_annotation(r)
+            note = arc_annotation(r, arc_counts)
             if note:
                 lines.insert(-1, note)
             print("\n".join(lines))

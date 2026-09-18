@@ -45,6 +45,7 @@ __all__ = [
     "ROLE_ORIGINATED",
     "ROLE_WROTE",
     "ROLE_RESUMED",
+    "ROLE_EARLIEST_STAMPED",
     "ROLE_ORDER",
     "ArcCommit",
     "ArcMember",
@@ -79,10 +80,15 @@ _DOC_IN_TEXT = re.compile(
 ROLE_ORIGINATED = "originated"
 ROLE_WROTE = "wrote"
 ROLE_RESUMED = "resumed"
+#: Used instead of `originated` when the doc has unstamped commits — see
+#: `resolve_arc`. The distinction is the difference between a measured fact and
+#: the earliest thing the instrument could see.
+ROLE_EARLIEST_STAMPED = "earliest-stamped"
 
 #: Most-specific first. A session that both created the doc and later resumed it
 #: is reported as `originated`, because that is the fact a reader is hunting.
-ROLE_ORDER = (ROLE_ORIGINATED, ROLE_WROTE, ROLE_RESUMED)
+ROLE_ORDER = (ROLE_ORIGINATED, ROLE_EARLIEST_STAMPED, ROLE_WROTE,
+              ROLE_RESUMED)
 
 
 class GitUnavailable(RuntimeError):
@@ -371,4 +377,18 @@ def resolve_arc(repo: str, relpath: str,
             "the transcript corpus was NOT walked, so sessions that resumed this "
             "doc without committing to it are NOT in this chain")
     report.members = merge_members(writers, readers)
+    # 🔴 THE `originated` LABEL IS AN INFERENCE FROM COMMIT ORDER, AND IT IS
+    # UNSOUND EXACTLY WHEN A WRITER IS MISSING. If any commit on this doc carries
+    # no session id, the true originating commit may be one of them, and the
+    # oldest STAMPED session is then merely the earliest one we can see. Printing
+    # `ORIGINATED` there is an affirmative claim about who started the effort,
+    # made on the same screen as a line saying some writers are invisible —
+    # measured at 45% unstamped across the corpus, so this is the common case on
+    # an older doc, not a corner. Demote rather than guess.
+    if report.unstamped_commits and report.members:
+        report.members = [
+            ArcMember(session_id=m.session_id, role=ROLE_EARLIEST_STAMPED,
+                      repo=m.repo, first_seen=m.first_seen, commits=m.commits)
+            if m.role == ROLE_ORIGINATED else m
+            for m in report.members]
     return report

@@ -173,8 +173,16 @@ class TestDocCommits:
     def test_a_body_with_blank_lines_does_not_split_a_record(self, arc_repo):
         """The squash body has blank lines and bullets; a naive line-split
         parser reports extra phantom commits. Pinned because that is exactly how
-        the FIRST corpus measurement in this arc came out wrong."""
+        the FIRST corpus measurement in this arc came out wrong.
+
+        ⚠ THE COUNT ASSERTION IS THE ONE THAT CATCHES A PHANTOM RECORD, and an
+        earlier version of this test asserted only the sha shape — a docstring
+        claiming wider coverage than its body, which an audit caught. Both
+        assertions are here now."""
         commits = ha.doc_commits(str(arc_repo), DOC)
+        assert len(commits) == 3, (
+            "a phantom record appeared: the squash body's blank lines or bullets "
+            "were parsed as a record boundary")
         assert all(c.sha and len(c.sha) == 40 for c in commits)
 
     def test_an_unreadable_repo_RAISES_rather_than_returning_empty(self, tmp_path):
@@ -300,7 +308,9 @@ class TestNoTranscriptPathsLeak:
         """
         m = ha.ArcMember("s1", ha.ROLE_WROTE, repo="devrc")
         assert not hasattr(m, "path")
-        assert "/" not in m.repo
+        # (the `"/" not in m.repo` assertion that used to sit here was removed:
+        #  it asserted this test's OWN literal. The real behaviour is covered by
+        #  `test_reader_members_reduce_a_cwd_to_its_basename`.)
 
     def test_reader_members_reduce_a_cwd_to_its_basename(self):
         rows = [{"session_id": "s1", "genesis": "handoff-arc-fixture.md",
@@ -374,7 +384,9 @@ class TestTheAnnotation:
         dozen members. An absent count must be absent, not zero."""
         r = {"genesis": "… claudedocs/handoff-x-y.md …"}
         assert "sessions" not in fs.arc_annotation(r, arc_counts={})
-        assert "(3 sessions)" in fs.arc_annotation(
+        # `3+`, not `3` — the count is a FLOOR from git trailers alone; see
+        # `TestTheAnnotationCountIsAFloor`.
+        assert "(3+ sessions)" in fs.arc_annotation(
             r, arc_counts={"handoff-x-y.md": 3})
 
     def test_the_annotator_and_the_resolver_agree_about_what_names_a_doc(self):
@@ -406,3 +418,96 @@ class TestArcSeedResolution:
     def test_a_uuid_with_no_transcript_resolves_to_nothing_not_a_crash(self, tmp_path):
         assert fs.arc_seed_to_doc("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                                   root=tmp_path) == ""
+
+
+# =========================================================================== #
+# ROUND-0 AUDIT FIXES — each pins a defect the audit found, not a new feature.
+# =========================================================================== #
+class TestTheOriginatedLabelDoesNotOverclaim:
+    """🔴 `originated` is an INFERENCE from commit order and is unsound exactly
+    when a writer is missing — which is the COMMON case (45% of corpus doc
+    commits are unstamped), not a corner."""
+
+    def test_with_an_unstamped_commit_the_label_is_DEMOTED(self, arc_repo):
+        rep = ha.resolve_arc(str(arc_repo), DOC, readers_measured=True)
+        assert rep.unstamped_commits == 1
+        roles = [m.role for m in rep.members]
+        assert ha.ROLE_ORIGINATED not in roles, (
+            "the arc claims to know who ORIGINATED it while also reporting that "
+            "a writer is invisible — those cannot both be asserted")
+        assert ha.ROLE_EARLIEST_STAMPED in roles
+
+    def test_with_FULL_coverage_the_label_stands(self, tmp_path):
+        """The negative control: demotion must be caused by the missing writer,
+        not applied unconditionally. Without this, deleting the whole inference
+        would pass the test above."""
+        work = tmp_path / "full"
+        work.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=work)
+        (work / "claudedocs").mkdir()
+        (work / DOC).write_text("a\n", encoding="utf-8")
+        _sh("git", "add", "--", DOC, cwd=work)
+        _sh("git", "commit", "-q", "-m", PLAIN_BODY, cwd=work)
+        rep = ha.resolve_arc(str(work), DOC, readers_measured=True)
+        assert rep.unstamped_commits == 0
+        assert [m.role for m in rep.members] == [ha.ROLE_ORIGINATED]
+
+
+class TestTheAnnotationCountIsAFloor:
+    def test_the_count_renders_with_a_PLUS(self):
+        """🔴 It comes from git trailers alone — a strict SUBSET of the arc. A
+        bare `(3 sessions)` would be a precise-looking undercount of exactly the
+        kind the coverage line exists to refuse."""
+        r = {"genesis": "… claudedocs/handoff-x-y.md …"}
+        note = fs.arc_annotation(r, {"handoff-x-y.md": 3})
+        assert "(3+ sessions)" in note
+
+    def test_writer_counts_walk_each_DISTINCT_doc_once(self):
+        """A result set of N hits naming one doc costs ONE git walk, not N."""
+        calls = []
+
+        def lookup(basename):
+            calls.append(basename)
+            return None, None
+
+        rows = [{"genesis": "claudedocs/handoff-same.md"} for _ in range(5)]
+        fs.arc_writer_counts(rows, repo_lookup=lookup)
+        assert calls == ["handoff-same.md"]
+
+    def test_a_doc_resolving_to_no_repo_gets_NO_count_not_a_zero(self):
+        counts = fs.arc_writer_counts(
+            [{"genesis": "claudedocs/handoff-absent.md"}],
+            repo_lookup=lambda b: (None, None))
+        assert "handoff-absent.md" not in counts
+        note = fs.arc_annotation({"genesis": "claudedocs/handoff-absent.md"},
+                                 counts)
+        assert "sessions" not in note
+
+
+class TestTheExcludedCorpusIsNamed:
+    def test_the_opencode_corpus_is_reported_as_NOT_searched(self, arc_repo):
+        """🔴 The arc walk is `--claude-only`. Silently dropping a whole runtime
+        is the scoped-zero-as-absence pattern the report exists to refuse."""
+        rep = ha.resolve_arc(str(arc_repo), DOC, reader_rows=[],
+                             readers_measured=True)
+        rep.unmeasured_notes.append(
+            "the opencode corpus was NOT searched for readers (the arc walk is "
+            "--claude-only, because a resume command is runtime-specific), so an "
+            "opencode session that resumed this doc is NOT in this chain")
+        assert any("opencode corpus was NOT searched" in n
+                   for n in rep.unmeasured_notes)
+
+
+class TestSessionGenesisUsesTheSharedWalk:
+    def test_a_SUBAGENT_transcript_does_not_resolve(self, tmp_path):
+        """🔴 The private glob returned one; `find_transcript` applies
+        `is_corpus_member`, so it does not. A subagent is not a resumable
+        session, and this is the behaviour difference that made deleting the
+        glob a fix rather than a refactor."""
+        sub = tmp_path / "-proj" / "subagents"
+        sub.mkdir(parents=True)
+        sid = "cccccccc-dddd-4eee-8fff-999999999999"
+        (sub / f"{sid}.jsonl").write_text(
+            '{"type":"user","message":{"content":"claudedocs/handoff-sub.md"}}\n',
+            encoding="utf-8")
+        assert fs.session_genesis(sid, root=tmp_path) == ""
