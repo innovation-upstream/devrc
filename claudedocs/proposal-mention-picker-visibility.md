@@ -16,8 +16,8 @@ The only thing shipped alongside this doc is INSTRUMENTATION (`ordering`, `tier_
 ## 0. The problem, restated
 
 The two-tier ranker (Tier A: number-range plausibility; Tier B: learned picks) is
-landed, runs, and demonstrably orders the list — a live click ranks a handful of
-repositories above ~390. The operator reports three symptoms anyway:
+landed, runs, and demonstrably orders the list — measured live in §1.5, a `#1761` click
+ranks **4** repositories above 391. The operator reports three symptoms anyway:
 
 | # | Symptom | Status before this work |
 |---|---|---|
@@ -109,6 +109,23 @@ weighted. Re-tuning the constants cannot move this number; changing the **sort k
 
 That median of **2** is the important number: after Tier A, the answer is typically one
 of ~2 rows out of 394. The ranking is not the weak link.
+
+### 1.5 The other host, measured live through the new instrumentation
+
+Run on the host with **no** `picks.jsonl`, for reference `#1761`, reporting counts only:
+
+```
+universe rows = 395   ordering state = applied   table age = 0.28 d   table entries = 395
+tier_a (rows the table can classify) = 395
+tier_b (rows carrying a pick score)  = 0
+class sizes for #1761: plausible 4 · below 159 · impossible 232
+```
+
+So on this host **Tier A classifies every row and Tier B is inert** — 4 repositories rank
+above 391, and the ranking that produces that is Tier A's alone. This is the state the
+operator may have been clicking in, and until this PR the row it emitted was byte-identical
+to one from the host where Tier B *is* running. That asymmetry is the single strongest
+reason the complaint could not be answered.
 
 ---
 
