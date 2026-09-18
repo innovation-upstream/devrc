@@ -692,7 +692,11 @@ func TestRunMapsEachWriteIntentToItsOwnCall(t *testing.T) {
 func TestASuccessfulWriteRereadsThePullRequest(t *testing.T) {
 	a := ready(t)
 	next, intents := a.Step(WriteDone{Verb: "MergePR"})
-	want := []Intent{FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	// 🔴 THE PAIR, NOT `FetchPR` ALONE. `PRLoaded` stopped chasing the diff when
+	// the cold open was parallelised, so a re-read that asked only for the pull
+	// request would leave the Diff panel showing the PRE-WRITE patch forever —
+	// the same lie as a panel that still says OPEN, one pane to the right.
+	want := readPair()
 	if !intentsEqual(intents, want) {
 		t.Fatalf("a successful write emitted %v, want %v — every panel still "+
 			"describes the PR as it was BEFORE the write", intents, want)
@@ -733,7 +737,7 @@ func TestACommentOnAPullRequestThatReadsClosedStillRereadsIt(t *testing.T) {
 	}
 
 	next, intents := a.Step(WriteDone{Verb: "PostComment"})
-	want := []Intent{FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	want := readPair()
 	if !intentsEqual(intents, want) {
 		t.Fatalf("a successful comment on a pull request that reads CLOSED emitted %v, "+
 			"want %v — without the re-read, relaunching really would be the only way out "+

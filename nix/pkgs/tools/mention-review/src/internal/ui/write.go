@@ -351,7 +351,12 @@ func (a App) stepWriteDone(m WriteDone) (App, []Intent) {
 	// 🔴 RE-READ, because every panel still describes the PR as it was BEFORE
 	// the write. A screen that says OPEN after a successful merge is the same
 	// class of lie as a file list that is quietly short.
-	return a, []Intent{FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+	//
+	// 🔴 BOTH READS, VIA `ReadIntents`. `PRLoaded` no longer chases the diff
+	// itself — see `ReadIntents`' header — so a re-read that asked only for the
+	// pull request would leave the Diff panel showing the pre-write patch
+	// forever. That is the same lie one pane to the right.
+	return a, a.ReadIntents()
 }
 
 // settled re-lays-out after anything that changes the BAR.
