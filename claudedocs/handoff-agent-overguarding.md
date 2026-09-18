@@ -68,6 +68,36 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
   at 37.3h active silence, last ClickHouse row `2026-09-09 16:50:25` UTC, every other laptop
   pair ok in the same run.)
 
+### 🔴 SPLIT 2026-09-18 — `workbench/keys` is BROKEN (a real defect); `browser`/`i3` are the model defect
+
+🔴 **READ THIS BEFORE THE 2026-09-14 ENTRY BELOW — it is PARTLY RETRACTED.** That entry
+concluded "NOTHING IS BROKEN, this is ABSENCE" for all three sources. Re-measured
+2026-09-18, that is **right for `browser`/`i3` and WRONG for `keys`.** The three are two
+different problems and were only ever one entry because they went quiet together.
+
+- **`workbench/keys` — GENUINELY BROKEN, and now it HAS the positive control the
+  2026-09-14 entry said it lacked.** On **2026-09-15 03:54–04:03 UTC** the workbench's X
+  session carried confirmed HUMAN activity: `i3 window-focus Brave-browser` ("Model
+  Benchmarking — Civitai Apps"), **10 `browser nav` rows** across `civitai.com/apps/run/*`
+  over 8 minutes, then `i3 window-focus Alacritty` ("zach@nixos:~/workspace/devrc").
+  `keylog.service` was running throughout — started `2026-09-14 21:48:14 CDT`, an hour
+  BEFORE that window, `NRestarts=0`, no errors in its journal, spin-capture never fired —
+  and emitted **ZERO rows**. Nine days of total silence (last row `2026-09-09 20:03:49`)
+  while the laptop's `keys` is continuously live.
+  **Not idleness: a human drove that X session and the keylogger recorded none of it.**
+  - **Ruled out — the X connection:** `i3-source` reports focus events off the SAME X
+    server in that same window. So this is **XRecord specifically**, not the connection.
+    via: measurement
+  - **Next probe (needs the operator AT the workbench):** `systemctl --user restart keylog`,
+    then type into any window and confirm rows appear —
+    `SELECT max(ts) FROM activity.events WHERE host='workbench' AND source='keys'`.
+    🔴 **Do NOT "verify" this with `xdotool type`/`key`** — injecting keystrokes into
+    whatever the operator has focused is a `pkill`-class action on their session, and a
+    terminal is one of the windows it could land in.
+- **`workbench/browser` + `i3` — ABSENCE, as originally diagnosed.** Both emitted
+  normally during the 09-15 window and have simply been idle since (last rows
+  `2026-09-15 04:02`/`04:03`). The model defect below is the whole story for these two.
+
 ### ⚠ DIAGNOSED, awaiting an OPERATOR MODEL DECISION — three WORKBENCH GUI sources read DEAD (2026-09-14, NEW — not the item above)
 - as-of: 2026-09-14
 - **Symptom + exact repro:** `python3 ~/workspace/devrc/scripts/collector/deadman.py` → exit 1,
@@ -82,6 +112,9 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
   `keys` are all ok at 0.0h silence in the same run. via: measurement
 - **Ruled out — this session's two `home-manager switch`es:** the silences (16.8–32.7h) predate
   the session. via: measurement
+- 🔴 **PARTLY RETRACTED 2026-09-18 — see the SPLIT entry above. This conclusion holds for
+  `browser`/`i3` and is WRONG for `keys`, which is genuinely broken.** The rest of this
+  entry — the model defect, the presence-source argument — stands unchanged.
 - 🔴 **DIAGNOSED — NOTHING IS BROKEN. This is ABSENCE, and the alarm is a MODEL defect.**
   An earlier draft of this entry guessed "whatever starts the workbench's GUI capture is not
   running". **That is REFUTED** — do not re-derive it.
