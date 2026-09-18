@@ -80,40 +80,19 @@ is the PRIVATE proposal, not this doc.
   `kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/<scope>'`
   → `401` without the token, `200` + `X-Store-Status:` with it.
 
-- 🔴 **THE IMAGE PULL NEEDS A PACKAGE-LEVEL GRANT NO API CAN SET.** `cairn-store` has
-  `repository: null`, so a classic PAT inherits nothing and `ghcr-cred` 403s until `civitai-deploy`
-  is invited with Read **through the GitHub UI** (org → Packages → cairn-store → Package settings);
-  done 2026-09-17. 🔴 **A re-mirror under a new name needs it AGAIN, and it presents as
-  `ImagePullBackOff`, not as an auth error.** The mirror stays MANUAL — public CI pushing to the
-  civitai org would put a client credential in a public repo — and `skopeo copy` by DIGEST is what
-  makes "both clusters pull the same image" checkable.
+- 🔴 **PHASE C's dated evidence is DEMOTED** to `claudedocs/refs/cairn-oss-multi-instance.md`
+  § DEMOTED 2026-09-18 (pass 4); the runbook is
+  `civitai/talos-infra:clusters/production/apps/cairn/README.md`. **The four lessons that outlive it:**
+  (a) the ghcr pull needs a **package-level grant no API can set**, and a re-mirror under a new name
+  needs it AGAIN — it presents as `ImagePullBackOff`, never as an auth error; (b) 🔴 **the backup
+  CronJob could not have gone green AT ALL** (`readOnly` on the claim reference, not the mount), so
+  alerting on backup SUCCESS would have fired only once someone depended on it — now pinned
+  cross-file by gate 23; (c) the drill passed by DESTROY-and-restore, which `backup.py`'s in-job
+  restore-check cannot supply because it never writes to a volume; (d) the backup credential has
+  **no `s3:DeleteObject`** and reaches one bucket, proven by exercise with a negative control.
 
-- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** `readOnly: true` on
-  the **claim reference** made the CSI driver mount the block device `-o ro` while the server held it
-  **rw** on the same node; ext4 refuses (`would change RO state`). **`ReadWriteOnce` is NOT the
-  cause** — both pods are on one node and RWO is per-node. Fix: `readOnly` belongs on the container's
-  `volumeMounts`, never the claim. ⚠ Probable, stated as probable: a LINSTOR block device does not
-  tolerate a ro co-mount where a hostpath does. 🔴 **The shape worth keeping: this job could not have
-  gone green AT ALL, so alerting on backup success would have fired only once someone depended on it
-  — and it ships suspended, so it would have surfaced only after phase D seeded.** Now pinned
-  cross-file by gate 23 (`ro-pvc-comount`), watched RED against the pre-fix manifests.
-  ✅ **EXERCISED at phase D over real content** — a manual run of the fixed CronJob completed,
-  round-trip verified and restore-checked.
 
-- ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
-  written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
-  restored **byte-identical** (`c4de5e4e…`) and served again. **Drill artifacts removed** —
-  re-verified 2026-09-18, no drill canary remains. ⚠ `/data` now holds **13 scopes / 127
-  entries** after phase E's migration, not one. The whole procedure, the
-  `mc cat` extraction, the entry-shape trap, and why `backup.py`'s in-job restore-check cannot
-  supply this evidence, are all in
-  `civitai/talos-infra:clusters/production/apps/cairn/README.md` — read it there, not here.
 
-- 🔴 **THE BACKUP CREDENTIAL IS SCOPED AND CANNOT DELETE — verified on the live policy, not the
-  manifest.** `cairn-backup-write` grants `ListBucket/ListBucketMultipartUploads/GetBucketLocation`
-  on `cairn-backups` and `AbortMultipartUpload/GetObject/ListMultipartUploadParts/PutObject` on
-  `cairn-backups/*`. **No `s3:DeleteObject`**, one bucket only. ILM `daily/` 90 days. Scoping also
-  proven by exercise with a negative control (`mc ls` against another bucket → Access Denied).
 
 - 🔴 **FOUR OPERATOR DECISIONS, 2026-09-17, NOT TO BE RE-LITIGATED.**
   1. **Residency (decision 4) is NO LONGER BINDING** — "don't care". A local copy of client notes is
@@ -141,45 +120,8 @@ is the PRIVATE proposal, not this doc.
   ~110 entries' worth of scopes refuse on it. §7 step 6 does not state this order.
 
 - ✅ **DECIDED 2026-09-18 — (a) FAIL-LOUD ROUTING + FRESHNESS OBSERVABILITY; mirroring REJECTED.
-  This UNBLOCKS PHASE E.** The decision itself lives in `## Gotchas / decisions / dead-ends` (an
-  APPEND section, so it outlives this one). **Its NAMED EVIDENCE — three phase-D measurements, each
-  one a reason (b) lost:**
-  1. **"Which copy is current" is ALREADY answered, automatically, in one line.** With the civitai
-     store unreachable and the cache warm, `recall` returns **rc 0** and banners
-     `⚠ cairn[civitai]: cached — <url> unreachable: [Errno -2] … — SERVED FROM CACHE, cache 3m old`.
-     Reads survive an outage, and the answer carries its own provenance AND age. The operator's
-     stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
-     duplication makes it harder, not easier. via: measurement
-  2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
-     unconditional rewrite.** `scripts/subsystem-store-api/server.py:233-234` — the SERVER contract,
-     in this repo — states `PUT /api/v1/entry/<scope>/<ref>` *"replaces the whole file behind a
-     **REQUIRED `If-Match`**; a stale revision is a **412** and the file is untouched"*, and `create`
-     refuses an existing ref. So two writers do not silently clobber; the second gets a 412. A merge
-     rule is still absent, but the failure it would have to cover is **fail-loud, not silent loss**,
-     which removes (b)'s strongest argument. 🔴 **That contract predates the premise it refutes** —
-     so the doc asserted an unconditional rewrite while the repo already said otherwise, and the
-     check was one `grep` away the whole time. ⚠ Still NOT exercised: no live 412 was provoked.
-     ⚠ And the server scopes its attribution guarantee to `POST /bullets` — **a PUT writes the
-     caller's bytes verbatim**, so `[cairn: actor/session]` does not self-populate on that path.
-     via: code
-  3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
-     (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
-     (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
-  🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
-  already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
-  remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
-  adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
-  the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
-  configures*. ✅ **DONE 2026-09-18 — that guard has been replaced.**
-  `test_every_scope_routes_to_the_default_instance_today` (the all-`personal` pin, phase B's closing
-  condition) is retired; `devrc:scripts/tests/test_cairn_routes.py` now carries
-  `test_every_scope_routes_to_a_CONFIGURED_instance` over a `CONFIGURED_ALIASES` set. ⚠ **A second
-  test PINNING that set was written and then DELETED** — with one source three lines above the
-  assertion it compared a constant to its own literal. **So widening the set is caught by REVIEW,
-  not by a test.** 🔴 **CI cannot observe the real precondition** — no instance files — and the set
-  covers neither REMOVAL nor whether a scope's ENTRIES were migrated; see its comment. **Adding an
-  alias is only correct AFTER every host carries `instances/<alias>.env`; say which hosts you
-  checked in the commit message.**
+  This UNBLOCKED PHASE E.** The decision AND its three measurements now live in
+  `## Gotchas / decisions / dead-ends` — an APPEND section, so they outlive this one.
 
 - ⚠ **Carried forward (durable — a REPLACE would drop these):** 🔴 **the ROUTING DURABILITY decision
   is in `## Gotchas / decisions / dead-ends`** — an APPEND heading, so it survives a REPLACE without
@@ -931,9 +873,48 @@ done":**
 🔴 **Operator decision, NOT to be re-litigated.** Per-scope bidirectional mirroring is rejected;
 routing fails loud and freshness is observable. **Recorded HERE, in an APPEND section, because that
 is what "recorded in this doc's decisions" required** — the fuller block in `State now` sits under a
-REPLACE heading and will not survive the next `/handoff`. The three measurements behind it, and what
-phase E therefore does NOT have to build, are in that block while it lasts; the decision itself is
-this paragraph.
+REPLACE heading. 🔴 **The three measurements were MOVED here on 2026-09-18 rather than left there
+to be dropped** — durable content under a REPLACE heading is deleted on the next update, which is
+the hazard `handoff_doc.py` warns about and this arc walked into once already.
+
+**THE NAMED EVIDENCE — three phase-D measurements, each one a reason (b) lost:**
+
+1. **"Which copy is current" is ALREADY answered, automatically, in one line.** With the civitai
+   store unreachable and the cache warm, `recall` returns **rc 0** and banners
+   `⚠ cairn[civitai]: cached — <url> unreachable: [Errno -2] … — SERVED FROM CACHE, cache 3m old`.
+   Reads survive an outage, and the answer carries its own provenance AND age. The operator's
+   stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
+   duplication makes it harder, not easier. via: measurement
+2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
+   unconditional rewrite.** `scripts/subsystem-store-api/server.py:233-234` — the SERVER contract,
+   in this repo — states `PUT /api/v1/entry/<scope>/<ref>` *"replaces the whole file behind a
+   **REQUIRED `If-Match`**; a stale revision is a **412** and the file is untouched"*, and `create`
+   refuses an existing ref. So two writers do not silently clobber; the second gets a 412. A merge
+   rule is still absent, but the failure it would have to cover is **fail-loud, not silent loss**,
+   which removes (b)'s strongest argument. 🔴 **That contract predates the premise it refutes** —
+   so the doc asserted an unconditional rewrite while the repo already said otherwise, and the
+   check was one `grep` away the whole time. ⚠ Still NOT exercised: no live 412 was provoked.
+   ⚠ And the server scopes its attribution guarantee to `POST /bullets` — **a PUT writes the
+   caller's bytes verbatim**, so `[cairn: actor/session]` does not self-populate on that path.
+   via: code
+3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
+   (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
+   (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
+🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
+already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
+remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
+adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
+the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
+configures*. ✅ **DONE 2026-09-18 — that guard has been replaced.**
+`test_every_scope_routes_to_the_default_instance_today` (the all-`personal` pin, phase B's closing
+condition) is retired; `devrc:scripts/tests/test_cairn_routes.py` now carries
+`test_every_scope_routes_to_a_CONFIGURED_instance` over a `CONFIGURED_ALIASES` set. ⚠ **A second
+test PINNING that set was written and then DELETED** — with one source three lines above the
+assertion it compared a constant to its own literal. **So widening the set is caught by REVIEW,
+not by a test.** 🔴 **CI cannot observe the real precondition** — no instance files — and the set
+covers neither REMOVAL nor whether a scope's ENTRIES were migrated; see its comment. **Adding an
+alias is only correct AFTER every host carries `instances/<alias>.env`; say which hosts you
+checked in the commit message.**
 
 ### 2026-09-10 — SIX AUDIT ROUNDS ON `homelab-infra#786`, AND WHAT ENDED THEM (body DEMOTED)
 🔴 **A CLASSIFIER GRADED BY READING WILL BE REWRITTEN UNTIL SOMETHING EXECUTES IT.** The cairn

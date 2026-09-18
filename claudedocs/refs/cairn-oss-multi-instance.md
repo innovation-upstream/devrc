@@ -1869,3 +1869,52 @@ never here.**
     forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
     Advisory, not blocking (see the retraction above)
 
+## DEMOTED 2026-09-18 (pass 4) — phase C's dated evidence, moved VERBATIM
+
+Phase C is CLOSED and its operational runbook lives in
+`civitai/talos-infra:clusters/production/apps/cairn/README.md`. Evicted under step 2 of the
+eviction playbook (DEMOTE DATED EVIDENCE). The handoff keeps each one's transferable LESSON.
+
+### (demoted 2026-09-18, sha256 8c0b2c4b9fa596a2)
+
+- 🔴 **THE IMAGE PULL NEEDS A PACKAGE-LEVEL GRANT NO API CAN SET.** `cairn-store` has
+  `repository: null`, so a classic PAT inherits nothing and `ghcr-cred` 403s until `civitai-deploy`
+  is invited with Read **through the GitHub UI** (org → Packages → cairn-store → Package settings);
+  done 2026-09-17. 🔴 **A re-mirror under a new name needs it AGAIN, and it presents as
+  `ImagePullBackOff`, not as an auth error.** The mirror stays MANUAL — public CI pushing to the
+  civitai org would put a client credential in a public repo — and `skopeo copy` by DIGEST is what
+  makes "both clusters pull the same image" checkable.
+
+### (demoted 2026-09-18, sha256 2a2bd2886beedc0c)
+
+- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** `readOnly: true` on
+  the **claim reference** made the CSI driver mount the block device `-o ro` while the server held it
+  **rw** on the same node; ext4 refuses (`would change RO state`). **`ReadWriteOnce` is NOT the
+  cause** — both pods are on one node and RWO is per-node. Fix: `readOnly` belongs on the container's
+  `volumeMounts`, never the claim. ⚠ Probable, stated as probable: a LINSTOR block device does not
+  tolerate a ro co-mount where a hostpath does. 🔴 **The shape worth keeping: this job could not have
+  gone green AT ALL, so alerting on backup success would have fired only once someone depended on it
+  — and it ships suspended, so it would have surfaced only after phase D seeded.** Now pinned
+  cross-file by gate 23 (`ro-pvc-comount`), watched RED against the pre-fix manifests.
+  ✅ **EXERCISED at phase D over real content** — a manual run of the fixed CronJob completed,
+  round-trip verified and restore-checked.
+
+### (demoted 2026-09-18, sha256 cc9aed7299522b73)
+
+- ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
+  written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
+  restored **byte-identical** (`c4de5e4e…`) and served again. **Drill artifacts removed** —
+  re-verified 2026-09-18, no drill canary remains. ⚠ `/data` now holds **13 scopes / 127
+  entries** after phase E's migration, not one. The whole procedure, the
+  `mc cat` extraction, the entry-shape trap, and why `backup.py`'s in-job restore-check cannot
+  supply this evidence, are all in
+  `civitai/talos-infra:clusters/production/apps/cairn/README.md` — read it there, not here.
+
+### (demoted 2026-09-18, sha256 1e1c6d444e0834b8)
+
+- 🔴 **THE BACKUP CREDENTIAL IS SCOPED AND CANNOT DELETE — verified on the live policy, not the
+  manifest.** `cairn-backup-write` grants `ListBucket/ListBucketMultipartUploads/GetBucketLocation`
+  on `cairn-backups` and `AbortMultipartUpload/GetObject/ListMultipartUploadParts/PutObject` on
+  `cairn-backups/*`. **No `s3:DeleteObject`**, one bucket only. ILM `daily/` 90 days. Scoping also
+  proven by exercise with a negative control (`mc ls` against another bucket → Access Denied).
+
