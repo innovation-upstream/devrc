@@ -174,12 +174,14 @@ is the PRIVATE proposal, not this doc.
   remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
   adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
   the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
-  configures*. 🔴 **THE GUARD PHASE E MUST EDIT, NAMED HERE SO IT IS NOT MET AS A SURPRISE RED:**
-  `devrc:scripts/tests/test_cairn_routes.py:120`
-  `test_every_scope_routes_to_the_default_instance_today`, whose docstring says *"Do not 'finish the
-  migration' by editing this file"* and whose assert message states the precondition — a scope may
-  be re-pointed only once some host carries `instances/<alias>.env`. **That precondition is now
-  satisfied on both hosts.**
+  configures*. ✅ **DONE 2026-09-18 — that guard has been replaced.**
+  `test_every_scope_routes_to_the_default_instance_today` (the all-`personal` pin, phase B's closing
+  condition) is retired; `devrc:scripts/tests/test_cairn_routes.py` now carries
+  `test_every_scope_routes_to_a_CONFIGURED_instance` plus a **pinned `CONFIGURED_ALIASES` ledger**
+  that fails when the set GROWS or SHRINKS. 🔴 **CI cannot observe the real precondition** — it has
+  no instance files — so the ledger forces a widening into a reviewable diff instead. **Adding an
+  alias is only correct AFTER every host carries `instances/<alias>.env`; say which hosts you
+  checked in the commit message.**
 
 - ⚠ **Carried forward (durable — a REPLACE would drop these):** 🔴 **the ROUTING DURABILITY decision
   is in `## Gotchas / decisions / dead-ends`** — an APPEND heading, so it survives a REPLACE without

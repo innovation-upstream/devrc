@@ -117,26 +117,65 @@ def test_the_shipped_table_parses_under_cairns_own_reader(table):
     assert all(isinstance(k, str) and isinstance(v, str) for k, v in table.items())
 
 
-def test_every_scope_routes_to_the_default_instance_today(table):
-    """🔴 PHASE B's CLOSING CONDITION, asserted rather than described.
+#: 🔴 THE ALIASES SOME HOST IS KNOWN TO HAVE A CONFIG FILE FOR. Adding a member is
+#: the DELIBERATE ACT this module exists to make visible, and it is only correct
+#: AFTER every host carries `~/.config/subsystem-store/instances/<alias>.env`.
+#:
+#: Why a declared ledger and not a live check: `Routing.alias_for` refuses a table
+#: entry naming an alias THIS host has no config for — at one configured instance
+#: exactly as at many — so a premature re-point does not lie dormant, it breaks the
+#: scope on every machine immediately. But CI has no instance files at all, so a
+#: test cannot observe the real precondition. What it CAN do is force the widening
+#: to appear in a reviewable diff, next to this comment.
+#:
+#:   personal — `~/.config/subsystem-store/env`, the long-standing default.
+#:   civitai  — `instances/civitai.env`, added 2026-09-18 (phase D) and verified
+#:              present on BOTH hosts (0600, matching token fingerprint) BEFORE
+#:              the first scope was re-pointed here.
+CONFIGURED_ALIASES = {PERSONAL, "civitai"}
 
-    Do not "finish the migration" by editing this file. An entry naming an alias
-    no host has a config for REFUSES every read and write of that scope
-    IMMEDIATELY — at one configured instance exactly as at many — so a premature
-    cutover does not sit dormant until a second store exists, it breaks the
-    scope on every machine. See `test_control_row_three_refuses_even_at_one_
-    instance` below, which is that refusal watched happening.
+
+def test_every_scope_routes_to_a_CONFIGURED_instance(table):
+    """🔴 SUPERSEDES `test_every_scope_routes_to_the_default_instance_today`.
+
+    That test pinned every value to `personal` and told you not to edit the file —
+    correct while exactly one instance existed, and phase B's closing condition.
+    Phase D configured a second instance on both hosts, so the invariant it was
+    standing in for is now expressible directly: a scope may name any alias some
+    host actually has a config for, and nothing else.
+
+    See `test_control_row_three_refuses_even_at_one_instance` below, which is the
+    refusal this guard exists to prevent, watched happening.
     """
-    wrong = sorted(s for s, a in table.items() if a != PERSONAL)
-    assert wrong == [], (
-        f"these scopes route somewhere other than `{PERSONAL}`: {wrong}.\n"
-        f"Phase B ships the registry with existing behaviour UNCHANGED — "
-        f"`{PERSONAL}` is the long-standing ~/.config/subsystem-store/env, "
-        f"unmoved. A scope may only be re-pointed once some host actually "
-        f"carries `instances/<alias>.env` for its new alias; until then the "
-        f"entry refuses the scope outright rather than waiting."
+    unknown = sorted(
+        f"{s} -> {a}" for s, a in table.items() if a not in CONFIGURED_ALIASES
     )
-    assert cairn_routes.aliases_used(table) == [PERSONAL]
+    assert unknown == [], (
+        f"these scopes route to an alias no host is declared to have a config "
+        f"for: {unknown}.\n"
+        f"`Routing.alias_for` REFUSES such an entry immediately, on every host, "
+        f"at any instance count — it does not wait for a second store to exist. "
+        f"Add `~/.config/subsystem-store/instances/<alias>.env` to EVERY host "
+        f"first, verify with `cairn routes`, and only then add the alias to "
+        f"CONFIGURED_ALIASES above."
+    )
+
+
+def test_the_CONFIGURED_ALIASES_ledger_is_pinned(table):
+    """🔴 FAILS WHEN THE SET GROWS *OR* SHRINKS — the point is that widening it
+    cannot be a silent side effect of re-pointing a scope.
+
+    Without this, a scope could be sent to a brand-new alias by adding that alias
+    to `CONFIGURED_ALIASES` in the same edit, and the test above would pass while
+    every read of that scope refused on both machines.
+    """
+    assert CONFIGURED_ALIASES == {"personal", "civitai"}, (
+        "CONFIGURED_ALIASES changed. That is allowed, and it is exactly the "
+        "moment to prove the precondition: every host must ALREADY carry "
+        "`instances/<alias>.env` for each member. Update this pin in the same "
+        "commit, and say in the message which hosts you checked."
+    )
+    assert set(cairn_routes.aliases_used(table)) <= CONFIGURED_ALIASES
 
 
 def test_the_keys_are_sorted_so_an_edit_is_a_one_line_diff(table):
