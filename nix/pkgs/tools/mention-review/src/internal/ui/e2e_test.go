@@ -101,11 +101,11 @@ func (f *fakeRunner) SubmitReview(_ context.Context, owner, name string, num int
 	return nil
 }
 
-func (f *fakeRunner) Merge(_ context.Context, owner, name string, num int, method string) error {
+func (f *fakeRunner) Merge(_ context.Context, owner, name string, num int, method, mergeable string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.writes = append(f.writes,
-		fmt.Sprintf("Merge %s/%s#%d method=%s", owner, name, num, method))
+		fmt.Sprintf("Merge %s/%s#%d method=%s mergeable=%s", owner, name, num, method, mergeable))
 	return nil
 }
 

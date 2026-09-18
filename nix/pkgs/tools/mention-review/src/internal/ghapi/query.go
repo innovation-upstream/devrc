@@ -109,6 +109,13 @@ type Client struct {
 	endpoint string // GraphQL endpoint; overridable so tests can point at a fake
 	rest     string // REST base;     same
 	ua       string
+
+	// The bound on the mergeability re-read `Merge` performs when the snapshot
+	// says UNKNOWN. Fields rather than bare constants ONLY so a test can run
+	// the loop without spending real seconds — `NewClient` is the single place
+	// the production values are set, and a test pins those defaults.
+	pollAttempts int
+	pollInterval time.Duration
 }
 
 // NewClient takes the token as a value rather than resolving it, so the whole
@@ -118,17 +125,25 @@ func NewClient(token string, hc *http.Client) *Client {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &Client{
-		http:     hc,
-		token:    token,
-		endpoint: "https://api.github.com/graphql",
-		rest:     "https://api.github.com",
-		ua:       "mention-review",
+		http:         hc,
+		token:        token,
+		endpoint:     "https://api.github.com/graphql",
+		rest:         "https://api.github.com",
+		ua:           "mention-review",
+		pollAttempts: mergeablePollAttempts,
+		pollInterval: mergeablePollInterval,
 	}
 }
 
 // SetBaseURLs points the client at a fake server. Test seam only.
 func (c *Client) SetBaseURLs(graphql, rest string) {
 	c.endpoint, c.rest = graphql, rest
+}
+
+// SetMergeablePoll shortens the mergeability re-read. Test seam only — nothing
+// in `main` calls it, so the production bound is the one `NewClient` sets.
+func (c *Client) SetMergeablePoll(attempts int, interval time.Duration) {
+	c.pollAttempts, c.pollInterval = attempts, interval
 }
 
 func (c *Client) do(ctx context.Context, req *http.Request) ([]byte, error) {
@@ -156,7 +171,12 @@ func (c *Client) do(ctx context.Context, req *http.Request) ([]byte, error) {
 	}
 	st := ClassifyResponse(true, resp.StatusCode, remaining)
 	if st != AuthOK {
-		e := &APIError{State: st, Detail: c.redact(apiMessage(body, resp.Status))}
+		// 🔴 REDACT FIRST, CLIP SECOND, AND THE ORDER IS LOAD-BEARING. `redact`
+		// looks for the exact secret this client holds; clipping first could cut
+		// a reflected token in half and leave the surviving prefix un-redacted,
+		// because the needle would no longer be in the haystack. Clipping AFTER
+		// can only ever shorten a string the secret has already left.
+		e := &APIError{State: st, Detail: clipDetail(c.redact(apiMessage(body, resp.Status)))}
 		if st == AuthRateLimited {
 			if v := resp.Header.Get("x-ratelimit-reset"); v != "" {
 				if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -188,16 +208,157 @@ func (c *Client) redact(s string) string {
 	return strings.ReplaceAll(s, c.token, "<redacted>")
 }
 
-// apiMessage pulls GitHub's own `message` out of an error body. Falls back to
-// the status line. 🔴 It never reflects a request header back.
+// maxReflectedErrorEntries caps how many `errors[]` entries are rendered into
+// one card.
+//
+// 🔴 A CAP, BECAUSE THE CONTENT IS THE SERVER'S AND NOT OURS. A validation
+// failure over a large payload can carry one entry per field; the card is a
+// single line in a bar the operator reads under time pressure, and an unbounded
+// reflection would push the panels off the screen. Five is enough to show the
+// SHAPE of the failure — the count of the rest is still reported, as `+N more`,
+// so a clipped list can never be mistaken for the whole one.
+const maxReflectedErrorEntries = 5
+
+// maxDetailRunes caps the WHOLE composed detail, after redaction.
+//
+// 🔴 THE ENTRY CAP ALONE IS NOT A BOUND. One entry's `message` is a
+// server-supplied string of any length, so capping the COUNT still permits a
+// pathological body to produce a megabyte-long card. Runes rather than bytes so
+// the truncation cannot land inside a codepoint.
+const maxDetailRunes = 400
+
+// apiMessage renders GitHub's error body into the one line the card shows.
+//
+// 🔴 IT CARRIES `errors[]`, AND THAT IS THE WHOLE POINT. GitHub puts a GENERIC
+// string in `message` for every validation failure and the ACTUAL reason in
+// `errors[]`. MEASURED on 2026-09-17 against the real API with a read-only
+// probe (`GET /search/issues?q=`):
+//
+//	{"message":"Validation Failed",
+//	 "errors":[{"resource":"Search","field":"q","code":"missing"}],
+//	 "documentation_url":"…","status":"422"}
+//
+// The old version of this function returned `m.Message` alone, so every 422
+// from any of the three write verbs rendered as two words that explain nothing
+// — which is exactly what a merge dispatched during a base-branch recompute
+// showed the operator: `unprocessable entity`, twice, with no reason and no
+// status code.
+//
+// It falls back to the status line when the body is empty or unparseable, and
+// 🔴 it still never reflects a request header back: the only inputs are the
+// response body and the status line.
 func apiMessage(body []byte, status string) string {
-	var m struct {
-		Message string `json:"message"`
+	var env struct {
+		Message string            `json:"message"`
+		Errors  []json.RawMessage `json:"errors"`
 	}
-	if json.Unmarshal(body, &m) == nil && m.Message != "" {
-		return m.Message
+	if json.Unmarshal(body, &env) != nil {
+		// ⚠ NOT NECESSARILY UNPARSEABLE. Some endpoints answer with `errors` as
+		// something other than an array, which fails the decode above while the
+		// `message` is perfectly readable — so the narrow shape is tried before
+		// the body is given up on. Widening what we render must not NARROW what
+		// we render for a shape that used to work.
+		var narrow struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &narrow) == nil && narrow.Message != "" {
+			return joinDetail(status, narrow.Message)
+		}
+		return status
 	}
-	return status
+
+	detail := joinDetail(status, env.Message)
+
+	shown, extra := env.Errors, 0
+	if len(shown) > maxReflectedErrorEntries {
+		extra = len(shown) - maxReflectedErrorEntries
+		shown = shown[:maxReflectedErrorEntries]
+	}
+	rendered := make([]string, 0, len(shown)+1)
+	for _, raw := range shown {
+		if s := renderErrorEntry(raw); s != "" {
+			rendered = append(rendered, s)
+		}
+	}
+	if extra > 0 {
+		rendered = append(rendered, fmt.Sprintf("+%d more", extra))
+	}
+	if len(rendered) > 0 {
+		detail += " [" + strings.Join(rendered, "; ") + "]"
+	}
+	return detail
+}
+
+// joinDetail puts the STATUS LINE in front of the server's prose.
+//
+// 🔴 THE CODE IS PART OF THE ANSWER. A card reading `Validation Failed` cannot
+// be told apart from a card reading `Not Found` by anybody deciding what to do
+// next; `422 Unprocessable Entity: Validation Failed` can.
+func joinDetail(status, message string) string {
+	switch {
+	case message == "":
+		return status
+	case status == "":
+		return message
+	}
+	return status + ": " + message
+}
+
+// renderErrorEntry turns ONE `errors[]` entry into readable text.
+//
+// 🔴 TWO SHAPES, BOTH REAL, AND THE CODE-ONLY ONE IS THE MEASURED ONE. An entry
+// may carry human prose in `message`, or nothing but `resource`/`field`/`code`
+// — the envelope quoted above is the second kind, and rendering it as an empty
+// string would lose the only fact in the response. A `code` with no prose is
+// still the reason, so it is printed.
+func renderErrorEntry(raw json.RawMessage) string {
+	var obj struct {
+		Message  string `json:"message"`
+		Resource string `json:"resource"`
+		Field    string `json:"field"`
+		Code     string `json:"code"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		label := obj.Resource
+		if obj.Field != "" {
+			if label != "" {
+				label += "."
+			}
+			label += obj.Field
+		}
+		text := obj.Message
+		if text == "" {
+			text = obj.Code
+		}
+		switch {
+		case label != "" && text != "":
+			return label + ": " + text
+		case text != "":
+			return text
+		case label != "":
+			return label
+		}
+	}
+	// A bare string entry — some endpoints answer `"errors":["…"]`.
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	// Anything else is echoed as the JSON it is, rather than dropped. An entry
+	// this code does not understand is still the server's reason, and a silent
+	// drop is the empty-result trap: "nothing happened" is the observable the
+	// most causes share.
+	return strings.TrimSpace(string(raw))
+}
+
+// clipDetail bounds the rendered detail. 🔴 CALLED AFTER `redact`, never before
+// — see the comment at its call site in `do`.
+func clipDetail(s string) string {
+	r := []rune(s)
+	if len(r) <= maxDetailRunes {
+		return s
+	}
+	return string(r[:maxDetailRunes-1]) + "…"
 }
 
 // Fetch performs the one GraphQL read and decodes it into a Snapshot.
@@ -222,6 +383,80 @@ func (c *Client) Fetch(ctx context.Context, owner, name string, num int) (*Snaps
 		return nil, err
 	}
 	return decodeSnapshot(body, owner+"/"+name, num)
+}
+
+// MergeableQuery is the SECOND read this client can make, and it is deliberately
+// tiny: two scalars off the pull request, nothing else.
+//
+// 🔴 IT IS NOT `Query` WITH A FILTER. The panel read pulls 100 files, 100
+// commits, 50 reviews and a check rollup; re-running it to answer one enum
+// would make a bounded poll expensive enough that nobody would keep the bound
+// honest. This costs one small round trip per attempt.
+//
+// ⚠ `pullRequest(number:)`, not `issueOrPullRequest`. The only caller is the
+// merge gate, and merging an issue is not a thing — a number that resolves to
+// an issue returns null here, which the decode reports rather than guesses at.
+const MergeableQuery = `
+query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){ mergeable mergeStateStatus }
+  }
+}`
+
+// Mergeability re-reads just the merge state. It returns the NORMALISED word,
+// so "" from the server is `UNKNOWN` rather than an empty string the caller
+// would have to re-interpret.
+func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"query": MergeableQuery,
+		"variables": map[string]any{
+			"owner": owner, "name": name, "number": num,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	body, err := c.do(ctx, req)
+	if err != nil {
+		return "", err
+	}
+
+	var r struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					Mergeable string `json:"mergeable"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", &APIError{State: AuthOther, Detail: "unreadable response: " + err.Error()}
+	}
+	if len(r.Errors) > 0 {
+		st := AuthOther
+		if r.Errors[0].Type == "NOT_FOUND" {
+			st = AuthNotFound
+		}
+		return "", &APIError{State: st, Detail: r.Errors[0].Message}
+	}
+	if r.Data.Repository == nil || r.Data.Repository.PullRequest == nil {
+		return "", &APIError{
+			State:  AuthNotFound,
+			Detail: fmt.Sprintf("%s/%s#%d is not a pull request this token can read", owner, name, num),
+		}
+	}
+	return NormalizeMergeable(r.Data.Repository.PullRequest.Mergeable), nil
 }
 
 // --- decoding ---------------------------------------------------------------

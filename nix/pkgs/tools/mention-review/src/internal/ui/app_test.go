@@ -42,6 +42,12 @@ const (
 	fxViewer      = "a-reviewer"
 	fxMergeMethod = "rebase"
 	fxTitle       = "Refresh the stale context before running"
+
+	// The fixture snapshot's mergeability. ⚠ It is the RESOLVED value, so a test
+	// that wants the recompute window must set UNKNOWN explicitly rather than
+	// inherit it — and the merge-gate assertions use `CONFLICTING`, a third
+	// value this fixture never produces.
+	fxMergeable = "MERGEABLE"
 )
 
 func fixturePR() *ghapi.Snapshot {
@@ -61,7 +67,7 @@ func fixturePR() *ghapi.Snapshot {
 		Additions:        312,
 		Deletions:        40,
 		ChangedFiles:     2,
-		Mergeable:        "MERGEABLE",
+		Mergeable:        fxMergeable,
 		MergeStateStatus: "BLOCKED",
 		ReviewDecision:   "CHANGES_REQUESTED",
 		Commits: []ghapi.Commit{
@@ -565,4 +571,4 @@ func (stubRunner) PostComment(context.Context, string, string, int, string) erro
 func (stubRunner) SubmitReview(context.Context, string, string, int, string, string) error {
 	return nil
 }
-func (stubRunner) Merge(context.Context, string, string, int, string) error { return nil }
+func (stubRunner) Merge(context.Context, string, string, int, string, string) error { return nil }

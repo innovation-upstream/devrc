@@ -180,7 +180,7 @@ func TestMergeSendsThePutAndTheMethod(t *testing.T) {
 	// ⚠ `rebase`, NOT `squash`. The declared default is `squash`, so a mutant
 	// that ignored the argument and used the default would produce the default
 	// here and be caught.
-	if err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase"); err != nil {
+	if err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase", MergeableYes); err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
 	if rec.method != http.MethodPut {
@@ -202,7 +202,7 @@ func TestMergeRefusesAnEmptyOrUnknownMethodWithoutSendingAnything(t *testing.T) 
 		t.Run("method="+method, func(t *testing.T) {
 			c, rec, done := newRecorded(t, http.StatusOK, "")
 			defer done()
-			err := c.Merge(context.Background(), wOwner, wName, wNum, method)
+			err := c.Merge(context.Background(), wOwner, wName, wNum, method, MergeableYes)
 			if err == nil {
 				t.Fatalf("merge with method %q was accepted", method)
 			}
@@ -219,7 +219,7 @@ func TestMergeRefusesAnEmptyOrUnknownMethodWithoutSendingAnything(t *testing.T) 
 	// validation and not a merge path that is broken outright.
 	c, rec, done := newRecorded(t, http.StatusOK, `{"merged":true}`)
 	defer done()
-	if err := c.Merge(context.Background(), wOwner, wName, wNum, "squash"); err != nil {
+	if err := c.Merge(context.Background(), wOwner, wName, wNum, "squash", MergeableYes); err != nil {
 		t.Fatalf("a valid method was refused: %v", err)
 	}
 	if rec.method != http.MethodPut {
@@ -249,7 +249,7 @@ func TestAWriteWithNoTokenNeverReachesTheNetwork(t *testing.T) {
 	c := NewClient("", srv.Client())
 	c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
 
-	err := c.Merge(context.Background(), wOwner, wName, wNum, "squash")
+	err := c.Merge(context.Background(), wOwner, wName, wNum, "squash", MergeableYes)
 	if err == nil {
 		t.Fatal("a merge with no token was accepted")
 	}

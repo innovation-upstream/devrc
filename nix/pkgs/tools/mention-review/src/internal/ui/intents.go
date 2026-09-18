@@ -141,11 +141,21 @@ func (SubmitReview) Write() bool        { return true }
 // confirmation prompt names the method, and the prompt and the request must be
 // provably the same value — a runner that re-read the config could merge with a
 // method the operator never saw.
+//
+// 🔴 `Mergeable` IS CARRIED FOR THE SAME REASON, and it is the SNAPSHOT's value
+// — the state the operator was looking at when they pressed `m`. `ghapi.Merge`
+// re-reads mergeability only when this says UNKNOWN, so the field decides
+// whether a merge costs an extra round trip; a runner that re-derived it would
+// be answering a question about a different moment.
 type MergePR struct {
 	Owner  string
 	Name   string
 	Num    int
 	Method string
+	// Mergeable is MERGEABLE | CONFLICTING | UNKNOWN, or "" for the null the
+	// server returns while it recomputes — `ghapi.NormalizeMergeable` treats
+	// that as UNKNOWN rather than as a fourth state.
+	Mergeable string
 }
 
 func (MergePR) intentName() string { return "MergePR" }

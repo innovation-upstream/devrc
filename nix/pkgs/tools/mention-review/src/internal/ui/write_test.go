@@ -52,9 +52,55 @@ func TestPressingMergeRaisesAConfirmationAndEmitsNothing(t *testing.T) {
 	if !ok {
 		t.Fatalf("the pending intent is %T, want MergePR", next.pending.Intent)
 	}
-	want := MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod}
+	want := MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod,
+		Mergeable: fxMergeable}
 	if got != want {
 		t.Errorf("pending = %+v, want %+v", got, want)
+	}
+}
+
+// 🔴 THE INTENT CARRIES THE MERGEABILITY THE OPERATOR WAS LOOKING AT.
+//
+// `ghapi.Merge` re-reads mergeability only when this field says UNKNOWN — that
+// is the whole base-branch-recompute guard — so a `proposeMerge` that dropped
+// the field would send every merge as "UNKNOWN" (an extra round trip on each
+// one) and one that invented a value would skip the guard entirely. Neither is
+// visible to any assertion about the PROMPT, which names the method and the
+// login and says nothing about this.
+func TestTheMergeIntentCarriesTheSnapshotsMergeability(t *testing.T) {
+	// ⚠ THREE VALUES, NONE OF THEM THE FIXTURE'S OWN. The fixture snapshot says
+	// MERGEABLE, so a mutant that read the fixture, or hardcoded the common
+	// case, produces MERGEABLE for all three and dies here.
+	for _, state := range []string{ghapi.MergeableUnknown, ghapi.MergeableNo, ""} {
+		t.Run("snapshot="+state, func(t *testing.T) {
+			a := ready(t)
+			snap := fixturePR()
+			snap.Mergeable = state
+			a, _ = a.Step(PRLoaded{Snap: snap})
+
+			next, intents := a.Step(keyPress("m"))
+			if len(intents) != 0 {
+				t.Fatalf("`m` emitted %v", intents)
+			}
+			got, ok := next.pending.Intent.(MergePR)
+			if !ok {
+				t.Fatalf("the pending intent is %T, want MergePR", next.pending.Intent)
+			}
+			if got.Mergeable != state {
+				t.Errorf("the intent carries Mergeable=%q, want the snapshot's %q",
+					got.Mergeable, state)
+			}
+			// And the rest of the intent is unchanged by the new field.
+			if got.Method != fxMergeMethod || got.Num != fxNum {
+				t.Errorf("intent = %+v", got)
+			}
+		})
+	}
+	// POSITIVE CONTROL: the DEFAULT fixture still yields its own value, so the
+	// three cases above are the field being carried rather than a constant.
+	next, _ := ready(t).Step(keyPress("m"))
+	if got := next.pending.Intent.(MergePR).Mergeable; got != fxMergeable {
+		t.Errorf("the unmodified fixture produced Mergeable=%q, want %q", got, fxMergeable)
 	}
 }
 
@@ -62,7 +108,8 @@ func TestConfirmingAMergeEmitsExactlyThatIntent(t *testing.T) {
 	a := ready(t)
 	next, intents := pressAll(a, "m", "y")
 
-	want := []Intent{MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod}}
+	want := []Intent{MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod,
+		Mergeable: fxMergeable}}
 	if !intentsEqual(intents, want) {
 		t.Fatalf("`m` then `y` emitted %v, want %v", intents, want)
 	}
@@ -449,8 +496,8 @@ func (c *callRecorder) SubmitReview(_ context.Context, o, n string, num int, eve
 	c.calls = append(c.calls, fmt.Sprintf("SubmitReview %s/%s#%d event=%s body=%q", o, n, num, event, body))
 	return nil
 }
-func (c *callRecorder) Merge(_ context.Context, o, n string, num int, method string) error {
-	c.calls = append(c.calls, fmt.Sprintf("Merge %s/%s#%d method=%s", o, n, num, method))
+func (c *callRecorder) Merge(_ context.Context, o, n string, num int, method, mergeable string) error {
+	c.calls = append(c.calls, fmt.Sprintf("Merge %s/%s#%d method=%s mergeable=%s", o, n, num, method, mergeable))
 	return nil
 }
 
@@ -488,8 +535,13 @@ func TestRunMapsEachWriteIntentToItsOwnCall(t *testing.T) {
 			`SubmitReview gardenersguild/trowelcast#1559 event=COMMENT body="a remark"`,
 		},
 		{
-			MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod},
-			`Merge gardenersguild/trowelcast#1559 method=rebase`,
+			// ⚠ `CONFLICTING`, WHICH THE FIXTURE SNAPSHOT DOES NOT CARRY. The
+			// fixture says MERGEABLE, so a `Run` that ignored the intent's field
+			// and read the snapshot's — or that hardcoded the common value —
+			// would produce `mergeable=MERGEABLE` here and be caught.
+			MergePR{Owner: fxOwner, Name: fxName, Num: fxNum, Method: fxMergeMethod,
+				Mergeable: ghapi.MergeableNo},
+			`Merge gardenersguild/trowelcast#1559 method=rebase mergeable=CONFLICTING`,
 		},
 	}
 	for _, c := range cases {

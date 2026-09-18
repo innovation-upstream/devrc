@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/innovation-upstream/devrc/mention-review/internal/cfg"
 )
@@ -111,6 +112,55 @@ func (c *Client) SubmitReview(ctx context.Context, owner, name string, num int, 
 	return c.write(ctx, http.MethodPost, url, payload)
 }
 
+// The bound on the mergeability re-read below.
+//
+// 🔴 BOUNDED, AND SMALL. This poll sits between the operator's `y` and the
+// merge, so every attempt is time they are watching a bar that says nothing.
+// GitHub's recompute after a base-branch move normally settles in a second or
+// two; four reads spread over ~2.1 s of waiting covers that without turning a
+// keypress into a hang. Past the bound the answer is "ask again", never "wait
+// longer" — an unbounded poll is how a UI stops being able to say what it is
+// doing.
+//
+// ⚠ THE FIRST READ IS IMMEDIATE. The snapshot that said UNKNOWN may be minutes
+// old, so sleeping before looking would pay for a wait that has already been
+// served.
+const (
+	mergeablePollAttempts = 4
+	mergeablePollInterval = 700 * time.Millisecond
+)
+
+// awaitMergeable re-reads mergeability until it resolves or the bound is spent.
+// It returns the last state seen and how many reads it took.
+//
+// 🔴 IT POLLS A READ. It does NOT retry a write: a merge that has already been
+// dispatched and failed is the operator's call, not this loop's.
+func (c *Client) awaitMergeable(ctx context.Context, owner, name string, num int) (string, int, error) {
+	attempts := c.pollAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	state := MergeableUnknown
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return state, i, ctx.Err()
+			case <-time.After(c.pollInterval):
+			}
+		}
+		s, err := c.Mergeability(ctx, owner, name, num)
+		if err != nil {
+			return state, i + 1, err
+		}
+		state = s
+		if state != MergeableUnknown {
+			return state, i + 1, nil
+		}
+	}
+	return state, attempts, nil
+}
+
 // Merge merges the pull request with the method it was given.
 //
 // 🔴 THE METHOD IS VALIDATED AGAINST `cfg.ValidMergeMethod`, THE SAME PREDICATE
@@ -118,7 +168,20 @@ func (c *Client) SubmitReview(ctx context.Context, owner, name string, num int, 
 // would have rejected cannot arrive here by another route and be sent anyway.
 // And an EMPTY method is the `UNKNOWN` sentinel, which must never become a
 // request — the UI refuses first, and this is the second lock on the same door.
-func (c *Client) Merge(ctx context.Context, owner, name string, num int, method string) error {
+//
+// 🔴 `mergeable` IS THE SNAPSHOT'S VALUE, CARRIED IN RATHER THAN RE-READ HERE,
+// for the same reason `method` is: the intent the operator confirmed is the
+// thing that gets acted on. When it says UNKNOWN this REFUSES OR POLLS — it
+// never forwards — which is the same judgement the two refusals above make.
+//
+// MEASURED 2026-09-17: two merges pressed 25 s before and 20 s after the base
+// branch moved both came back `unprocessable entity` and nothing on screen said
+// why; the PR merged unchanged two minutes later. GitHub resets `mergeable` to
+// null while it recomputes against the new base, and a merge dispatched into
+// that window fails. The repo's own recorded lesson is "poll it — never merge
+// on a stale CLEAN, and never read UNKNOWN as a blocker", and this is that
+// lesson as code.
+func (c *Client) Merge(ctx context.Context, owner, name string, num int, method, mergeable string) error {
 	if method == "" {
 		return &APIError{State: AuthOther,
 			Detail: "refusing to merge with an UNKNOWN method — a merge dispatched " +
@@ -128,6 +191,27 @@ func (c *Client) Merge(ctx context.Context, owner, name string, num int, method 
 		return &APIError{State: AuthOther,
 			Detail: fmt.Sprintf("refusing to merge with method %q: not one of %s",
 				method, strings.Join(cfg.MergeMethods(), ", "))}
+	}
+	if NormalizeMergeable(mergeable) == MergeableUnknown {
+		state, reads, err := c.awaitMergeable(ctx, owner, name, num)
+		if err != nil {
+			return err
+		}
+		switch state {
+		case MergeableYes:
+			// It resolved. Fall through to the one write.
+		case MergeableUnknown:
+			return &APIError{State: AuthOther, Detail: fmt.Sprintf(
+				"refusing to merge: GitHub still reports mergeability UNKNOWN after "+
+					"%d re-reads over %s. It recomputes this whenever the base branch "+
+					"moves, and a merge sent into that window fails as `unprocessable "+
+					"entity`. NOTHING WAS SENT — press `m` again in a moment.",
+				reads, time.Duration(reads-1)*c.pollInterval)}
+		default:
+			return &APIError{State: AuthOther, Detail: fmt.Sprintf(
+				"refusing to merge: GitHub reports mergeability %s, not %s. "+
+					"NOTHING WAS SENT.", state, MergeableYes)}
+		}
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", c.rest, owner, name, num)
 	return c.write(ctx, http.MethodPut, url, map[string]any{"merge_method": method})

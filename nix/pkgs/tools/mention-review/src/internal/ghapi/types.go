@@ -1,6 +1,36 @@
 package ghapi
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// The `mergeable` enum, as WORDS, in one place.
+//
+// 🔴 `UNKNOWN` IS NOT A BLOCKER AND IS NOT A GO-AHEAD — IT IS "ASK AGAIN".
+// GitHub computes mergeability asynchronously and resets it to null/UNKNOWN
+// every time the base branch moves. Reading that as a conflict refuses merges
+// that are fine; reading it as MERGEABLE dispatches a merge into the recompute
+// window, which is the failure this vocabulary exists to make legible.
+const (
+	MergeableYes     = "MERGEABLE"
+	MergeableNo      = "CONFLICTING"
+	MergeableUnknown = "UNKNOWN"
+)
+
+// NormalizeMergeable maps what the server sent onto that vocabulary.
+//
+// 🔴 AN EMPTY STRING IS `UNKNOWN`. GraphQL answers null while the computation
+// is in flight and the decoder turns null into "", so "" and "UNKNOWN" are the
+// SAME condition arriving by two routes — a predicate that handled only the
+// spelled one would let the in-flight case straight through to a merge.
+func NormalizeMergeable(s string) string {
+	t := strings.ToUpper(strings.TrimSpace(s))
+	if t == "" {
+		return MergeableUnknown
+	}
+	return t
+}
 
 // Kind is what `issueOrPullRequest`'s `__typename` answered.
 //
