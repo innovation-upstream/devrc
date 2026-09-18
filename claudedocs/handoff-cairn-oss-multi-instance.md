@@ -402,32 +402,35 @@ output distinguishes *clean* from *did not look*. The fix was to DERIVE coverage
 enumeration by construction). Full block — suffix census, 8/8 mutation battery, regression matrix
 — is on the PR. **Next probe: none.**
 
-### `cairn validate` prints nothing on the PINNED client — fixed in the worktree, NOT committed, and the class is still open
-- **Symptom + exact repro:** after #1406 merges and a `home-manager switch`, the mandated
-  post-write check in `subsystem-index` returns exit 0 and prints only a state banner.
-  Repro: `CAIRN_MIRROR_ROOT=$HOME/.claude/analyze-service-index
-  /nix/store/5zlb4zpk91b2ypppadg1d80s7y3wanh8-cairn-9213726/bin/cairn validate --scope devrc --no-sync`
-  against `python3 ~/workspace/devrc/scripts/cairn validate --scope devrc --no-sync`.
-- **Observed (with values):** packaged client **rc 0, 76 bytes, 0 contract blocks**; the
-  in-repo fork **rc 0, 5,842 bytes, 4 blocks**. The writer invoked directly
-  (`subsystem_touch.py --store ~/.cache/subsystem-store --validate --scope devrc`) gives
-  **rc 0, 5,765 bytes**, `entry shape:` / `marker reachability:` / `dropped lines:` and
-  `OK — 31 of 31`. The OSS client reimplements `validate` on the reader's resolver instead of
-  shelling the writer. via: measurement
-- **Ruled out:** that anything programmatic breaks — the only caller is a human via the
-  skill; every script, hook, skill and systemd unit was grepped. via: command
-- **Ruled out:** that the exit-code change 3 → 5 is a regression — `3` is
-  `EXIT_UNREACHABLE_NO_CACHE` in the client's own table and `5` is `EXIT_CORRUPT`, so the
-  fork was leaking the writer's namespace and the packaged code is more coherent. via: code
-- **Leading hypothesis:** RESOLVED for `validate` — both skills now route the post-write
-  check at the writer, and `test_subsystem_touch.py`'s pinned-sentence ledger was moved in
-  the same change (it went red and caught this, which is the mechanism working). What is
-  NOT resolved is the CLASS: an audit measured 5 of 6 verbs byte-identical to the fork, so
-  `validate` was the only diverging verb TODAY, and nothing in devrc's gate would notice the
-  next one. That is rank 16.
-- **Next probe:** none for `validate`. For the class, run rank 16's check:
-  `nix build github:ZacxDev/cairn/<rev>#cairn` then exercise each verb against a fixture
-  cache and diff against `scripts/cairn`.
+### `cairn validate` is NO LONGER SILENT, and it is STILL NOT the write-protocol check — the CLASS is open
+🔴 **THE LIVE IMPERATIVE: the mandated post-write check stays pointed at `cairn-validate`, the
+launcher — never at the packaged client's `cairn validate`.** This doc's own `State now` still
+records *"this verb is the mandated post-write check"*, and **that clause is false**; acting on
+it routes the check back at a client that does not run it and re-opens the 🔴 that #1406's
+round-1 audit closed. Fix the sentence wherever it appears.
+- **The correction history, because it is the point and not incidental.** First reading
+  (2026-09-08): the packaged `validate` printed **nothing** — rc 0, 76 B, **0 of 4** contract
+  blocks, against the in-repo fork's 5,842 B. cairn **#11** then made it print a parse count, so
+  the second reading (2026-09-09, pin `cairn-c84c142`) is **56 B, rc 0, 0 of 3 blocks** against
+  the launcher's 6,119 B and **3 of 3**. 🔴 **#11 removed the SILENCE, not the BLINDNESS** — the
+  `dropped lines:` advisory, whose non-zero means content is **ALREADY LOST**, still never runs
+  on the packaged client, and neither do the other two. **A check that was silent becoming one
+  that looks like it worked is strictly harder to notice**, which is why the sentence matters
+  more than the bug would.
+- **Ruled out: that the differing totals (33 vs 32) indicate a defect.** The packaged client
+  syncs live; the launcher reads the local cache. Different stores. via: measurement
+- **Ruled out: that the exit-code change 3 → 5 is a regression.** `3` is
+  `EXIT_UNREACHABLE_NO_CACHE` and `5` is `EXIT_CORRUPT` in the client's own table — the fork was
+  leaking the writer's namespace and the packaged code is more coherent. via: code
+- 🔴 **WHAT IS NOT RESOLVED IS THE CLASS, AND IT IS RANK 16.** An audit measured **5 of 6** verbs
+  byte-identical to the fork, so `validate` was the only diverging verb TODAY and **nothing in
+  devrc's gate would notice the next one.**
+- **Next probe:** none for `validate` itself. For the class, run rank 16's check —
+  `nix build github:ZacxDev/cairn/<rev>#cairn`, exercise each verb against a fixture cache and
+  diff against `scripts/cairn`. **If someone wants ONE binary again, the closing condition is
+  the packaged `validate` emitting all three blocks — measure it, do not read a changelog.**
+- Both superseded narratives moved verbatim to
+  `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17 (pass 2).
 
 ### EVICTED — the client's missing FOCUS WINDOW (CLOSED, `ZacxDev/cairn` #9 `a3c84db`)
 🔴 **Two lessons.** (a) The client's fallback asserted *"no handoff doc to read a path window
@@ -540,36 +543,6 @@ EVICTED 2026-09-13; the two facts worth carrying out of them are here:
   click through, and with `enforce_admins: true` on devrc a permanently-red required check
   blocks everyone.** Whichever is chosen, `MECHANISM =` is now the first thing to grep.
 
-### 🔴 2026-09-09 — `cairn validate` is NO LONGER SILENT, and it is STILL NOT the write-protocol check
-🔴 **CORRECTION TO A LINE IN THIS DOC'S OWN `State now`.** It records
-*"`cairn validate --scope devrc` → `devrc: 33 of 33 entry file(s) parse, 0 malformed`
-(cairn #11; was SILENT, **and this verb is the mandated post-write check**)"*. The first half
-is true. **The clause after the semicolon is false, and it is the dangerous half** — acting on
-it routes the mandated check back at a client that does not run it, re-opening the 🔴 that
-#1406's round-1 audit closed.
-- **Symptom + exact repro:** on the CURRENTLY DEPLOYED pin (`cairn-c84c142`, generation 713),
-  same scope, same moment:
-  `cairn validate --scope devrc` vs `cairn-validate --scope devrc`.
-- **Observed (with values), 2026-09-09:** packaged client → **56 B stdout**, 187 B stderr,
-  rc 0, and **0 of 3 contract blocks**; its entire stdout is
-  `cairn: devrc: 33 of 33 entry file(s) parse, 0 malformed`. The launcher → **6,119 B**,
-  rc 0, **3 of 3** blocks — `entry shape:`, `marker reachability:`, `dropped lines:` — and
-  `OK — 32 of 32`. via: measurement
-- **What cairn #11 actually changed:** it made the verb print a **parse count** where it
-  printed nothing. That removes the *silence*, not the *blindness*. The
-  `dropped lines:` advisory — the one whose non-zero means content is **ALREADY LOST** — still
-  never runs on the packaged client, and neither do the other two.
-- **Ruled out: that the differing totals (33 vs 32) indicate a defect.** The packaged client
-  syncs live (232 entries) and the launcher reads the local cache; they are counting different
-  stores. via: measurement
-- 🔴 **This is the round-1 🔴 reasserting itself IN THE DOCUMENTATION rather than in the
-  code** — a check that was *silent* becoming a check that *looks like it worked* is strictly
-  harder to notice, which is why the sentence matters more than the bug would.
-- **Next probe:** none needed for the fact. Fix the sentence wherever it appears, and keep the
-  mandated post-write check pointed at `cairn-validate`. If someone wants ONE binary again,
-  the closing condition is the packaged `validate` emitting all three blocks — measure it,
-  do not read a changelog.
-
 ### EVICTED 2026-09-17 — `test_check_sops_enc_payloads.py`'s single `homelab-infra` CI failure (CLOSED, no repro)
 One failure observed by a round-2 audit of `ZacxDev/homelab-infra#786` at head `993643baa`;
 **52 of 52 in six separate full-suite runs** on this host, including at that same head. Leading
@@ -657,34 +630,17 @@ truncated line, false against the file). 🔴 **Read the file, not the status li
 verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17.
 **Next probe: none.**
 
-### `#1522` (not mine) is red on BOTH kill guards, and its latest commit made it worse
-- **Symptom + exact repro:** at head `480b014f`, detached worktree, `__pycache__` cleared,
-  `PYTHONDONTWRITEBYTECODE=1`:
-  `nix develop <wt> --command python3 -m pytest <wt>/scripts/claude-hooks/tests/test_guard_core.py -q`
-  → **`2 failed, 1534 passed`**.
-- **Observed (with values):** census — `added: ['claudedocs/handoff-tmux-webapp.md'], removed: []`;
-  scanner — `offenders: [('claudedocs/handoff-tmux-webapp.md', '<the wide-kill verb>')]`. The
-  mention is real, at `handoff-tmux-webapp.md:3409`, and is on `origin/main` too.
-  🔴 **THE VERB IS ELIDED HERE ON PURPOSE — AND ELISION ALONE WAS NOT ENOUGH, WHICH IS THE
-  LESSON.** An earlier revision of this bullet quoted it literally and made THIS doc an offender,
-  red on `origin/main` (`f3e27aa3`: `added: ['claudedocs/handoff-cairn-oss-multi-instance.md']`).
-  Eliding it dropped the count from 2 failures to 1 — and the doc **still** matched, at `:43` and
-  `:2020`, both written by OTHER sessions documenting this same breakage. **A census over prose
-  that mentions a command turns every write-up of the census into a new entry**, and with several
-  sessions writing about it at once, no single author can elide their way out. So this doc IS
-  ledgered (both allowlists), and the elision stays as the cheap half: don't add the sixth,
-  seventh and eighth mention while the row already covers you.
-- **Ruled out: that the rows it deleted were wrong.** Its commit says they "recorded a mention
-  that does not exist"; `grep -n` finds it at `:3409` at that same head. via: measurement
-- **Ruled out: that `f346ba28` was already green.** It was **1 failed** — only its own new doc
-  missing from `quoting_is_the_point`. So `480b014f` went 1 → 2. via: measurement
-- **Leading hypothesis:** the shape is **two allowlists, one file** — `_KILL_MENTION_LEDGER` and
-  `quoting_is_the_point` must BOTH be edited, and three separate attempts today each populated
-  one. The durable fix is to have the scanner read the ledger directly: an entry classified
-  `prose:` IS the set `quoting_is_the_point` names.
-- **Next probe:** restore both `handoff-tmux-webapp.md` rows and add
-  `handoff-ci-flakes-and-misattribution.md` to `quoting_is_the_point`. That exact combination
-  measured **1536 passed, 0 failed** locally.
+### EVICTED 2026-09-17 — `#1522`'s double kill-guard red (CLOSED; #1522 MERGED 2026-09-12 `05:50:05Z`)
+🔴 **THE ONE LIVE CONSTRAINT, AND IT BINDS ANYONE EDITING THIS DOC: the wide-kill verb is ELIDED
+here on purpose, and elision ALONE was not enough.** An earlier revision quoted it literally and
+made THIS doc an offender, red on `origin/main`; eliding it dropped 2 failures to 1 and the doc
+**still** matched at two sites written by OTHER sessions documenting the same breakage. So this
+doc IS ledgered in **both** allowlists (`_KILL_MENTION_LEDGER` and `quoting_is_the_point`), and
+the elision stays as the cheap half — **do not add the sixth, seventh and eighth mention while
+the row already covers you.** The class itself was closed structurally by devrc #1561
+(`c0bbd6d9`, `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`), which is what retired this block's own
+next probe. Body moved verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED
+2026-09-17 (pass 2). **Next probe: none.**
 
 ### EVICTED 2026-09-14 — the kill-ledger treadmill (CLOSED)
 🔴 **Closed STRUCTURALLY by devrc #1561 (`c0bbd6d9`)**: `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`
@@ -1165,111 +1121,34 @@ packaging, the shared-clone write hazards (`home-manager switch --flake`, `hando
 is MOVED VERBATIM to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17.** It is
 closed history from merged PRs. Read it there before re-deriving anything about this arc.
 
-### 🔴 2026-09-13 — `gh pr merge --auto` MERGED IMMEDIATELY through a pending gate, because devrc's checks are ADVISORY
-- **What happened:** #1635's three Tekton checks were `pending`. `gh pr merge 1635 --squash --delete-branch --auto` was run *specifically* to defer the merge until they went green. It exited **rc 0 with no output**, and the PR was **already `MERGED`** — at `05:46:46Z`, while all three statuses still read `pending` as of `05:45:14Z`.
-- **Mechanism:** `--auto` arms GitHub's auto-merge, which waits on **REQUIRED** checks. devrc's `tekton/devrc-*` are **commit statuses that are not required**, so there was nothing to wait on and the request degenerated to an immediate merge. `autoMergeRequest` reads `null` afterwards — it never armed.
-- **Why it is expensive:** it fails by **merging**, not by erroring, and `rc 0` + empty output looks exactly like success. The tell is only visible after the fact: `gh pr view <n> --json autoMergeRequest,state` → `autoMergeRequest=null` **and** `state=MERGED` in the same read.
-- **Do instead:** on a repo with no required checks, `--auto` is a no-op — poll the checks to terminal yourself and merge only then (a `Monitor` until-loop over `gh pr checks --json name,bucket`, asserting a **minimum check count** so an unregistered rollup cannot settle it instantly). Do not reach for `--auto` as a safety.
-- **Recovery when it does fire:** the gate is not lost, only re-ordered. Verify the MERGED tree directly instead of waiting on a status attached to an already-merged commit — `git worktree add --detach /tmp/x origin/main` then run the gates there. Done here: **124 passed** (`test_absolute_handle_paths.py` + `test_doc_path_rot.py`) on `origin/main` after the merge, plus a planted violation watched red. The tree is verified; the ORDER was wrong.
+### 🔴 2026-09-13 — `gh pr merge --auto` MERGES IMMEDIATELY here (body DEMOTED)
+**`--auto` waits on REQUIRED checks; devrc's `tekton/devrc-*` are commit statuses that are not
+required, so there is nothing to wait on and the request degenerates to an immediate merge.** It
+fails BY MERGING, at `rc 0` with no output. The after-the-fact tell is one read:
+`gh pr view <n> --json autoMergeRequest,state` → `autoMergeRequest=null` **and** `state=MERGED`.
+**Do instead:** poll the checks to terminal yourself and assert a **minimum check count** so an
+unregistered rollup cannot settle instantly; never reach for `--auto` as a safety. **Recovery:**
+the gate is re-ordered, not lost — `git worktree add --detach /tmp/x origin/main` and run the
+gates on the MERGED tree. Worked example (#1635) moved verbatim to
+`claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17 (pass 2).
 
 ### 🔴 2026-09-13 — NO local pre-push hook runs in this clone, so the delta gates are CI-only here
 - **Measured:** `/home/zach/workspace/devrc/.git/hooks/pre-push` **does not exist** and `core.hooksPath` is **unset** (global and local). Two independent sessions' agents reported the same thing while pushing to `fix/skills-absolute-checkout-paths` and `docs/handoff-rank24-closed`.
 - **Consequence:** every push in this arc was **locally ungated** — the doc-rot / skill-path / handle-path gates did not evaluate any change before it left the machine. Whatever Tekton posts is the only check, and per the gotcha above a Tekton status can be *bypassed at merge time* and can also register *after* a merge.
 - **Not diagnosed:** whether the hook was never installed in this clone, or was installed and later lost. `scripts/install-hooks.sh` exists and is the documented one-time install; nobody ran it here. **Closing condition if picked up:** `git -C <repo> config core.hooksPath` resolves, or `.git/hooks/pre-push` exists, AND a deliberately-bad push is watched to be REFUSED locally — a hook that exists but never fires is the same as none.
 
-### 2026-09-13 — the rank-24 arc's own process notes
-- **`claim-work --slug-for <doc> <rank>` was used on a rank that did not yet exist as a numbered item.** Rank 24 lived only as prose inside rank 23's body, so the slug had to be inferred. It worked, but the numbering is half a claim's identity — **file the ranked item first, then claim it**, or two sessions can derive different slugs for the same work. Ranks 24–27 are now numbered in `## Next steps (ranked)`.
-- **`audit-dispatch.py` resolves the PR against the CWD's repo.** Run from a different clone it fails with `Could not resolve to a PullRequest with the number of <n>` — which reads as a bad PR number, not a wrong cwd. Run it as `(cd <the PR's worktree> && python3 $DEVRC/scripts/audit-dispatch.py <n> …)`.
-- **`--emit-claims` PRINTS a skeleton; it does not post.** The block must be pasted into an **issue** comment — `gh pr view --json comments` does not return REVIEW comments, so a block posted as a review is invisible to the next round's brief.
-- **The audit briefs' `WHERE TO WORK` said `isolation: "worktree"` and that was wrong for every dispatch in this arc** — the flag worktrees the *dispatching session's* cwd repo, which was `datapacket-talos`, not devrc. Every audit agent was given an explicit override to build its own detached worktree off `refs/pull/<n>/head`. This is the documented cross-repo trap; the brief generator cannot know the caller's cwd.
-
-- 🔴 **2026-09-14 — A RANKED ITEM CAN NAME A SECOND DEFECT THAT IS ACTUALLY A GATED DECISION, AND
-  THE ITEM'S OWN "MEASURED" CAVEAT IS NOT ENOUGH TO CATCH IT.** Rank 26 asserted two drifted
-  handle tables. It even measured the second one's blast radius honestly — *"the `CIVITAI_CLI` one
-  is LATENT — that checkout holds 0 handoff docs today, so it has no victim"* — and that
-  measurement was correct (re-measured 2026-09-14: still 0). **What it never asked was whether the
-  omission was INTENDED.** It was: `test_handoff_index.py::TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads`
-  pins `declared - REPO_ENV_HANDLES == {"CIVITAI_CLI"}` with the reason in source, and passes.
-  - **Ruled out: that the item was merely stale and the guard is newer.** The guard's own comment
-    records that the one-way version of it shipped while nix declared five handles and the module
-    read four — i.e. the guard was written BECAUSE of this exact class and predates the item.
-    via: code
-  - **Ruled out: that adding the handle would be harmless anyway.** It would add a zero-doc repo to
-    the corpus and, because `prune_config_refusal` requires EVERY `REPO_ENV_HANDLES` entry to be
-    SET, narrow the hosts an operator can `--prune` from. via: code
-  - **The transferable rule:** before "fixing" a table that omits an entry, `grep` for a test that
-    ASSERTS the omission. A deliberate exclusion and an oversight look identical in the table
-    itself; they differ only in whether something else pins them. One grep separates them.
-
-- 🔴 **2026-09-14 — `grep -cF` WITH A MULTI-LINE PATTERN SPLITS IT ONE-PATTERN-PER-LINE, SO A
-  TRAILING NEWLINE MATCHES EVERY LINE.** A mutation battery guarded each mutation with
-  `n=$(grep -cF -- "$old" "$f"); [ "$n" = 1 ] || INVALID`. Three of seven mutants — all valid —
-  were scored `INVALID: pattern matched 150 times` / `38 times`, because the patterns ended in a
-  newline and the empty final pattern matched every line of the file. **The harness failed, not
-  the mutations**, and it failed in the reassuring direction: it looked like the mutations were
-  ill-formed. Count multi-line patterns in Python (`s.count(old)`), never with `grep -c`.
-  This is the instrument-validation rule landing on the *battery's own* guard rather than on the
-  code under test. via: measurement
-
-- 🔴 **2026-09-14 — AN EMPTY `gh pr checks` ON A PR SECONDS OLD IS EVIDENCE OF NOTHING, AND THIS
-  SESSION WATCHED IT FLIP.** `gh pr checks 1657` returned `no checks reported on the branch`
-  immediately after `gh pr create`; minutes later the same command listed **three** Tekton gates
-  (`devrc-pytests`, `devrc-nodetests`, `devrc-cairn-client-runs`), all `pending`. Recorded as a
-  worked example because the failure mode is to write the empty read into a PR body or a handoff
-  as "no CI here". via: measurement
-
-- ⚠ **2026-09-14 — `How to verify` had gone stale against `State now` IN THE SAME DOC, and in the
-  direction that understates progress.** Its rank-3 block said *"slice 3 — NOT started; all five
-  duplicated modules still present"* while `State now` recorded slice 3 merged as #1508. Measured
-  at `origin/main`: all five ABSENT. `State now` was right. **A REPLACE section and an APPEND
-  section drift apart precisely because only one of them is rewritten each pass** — re-read the
-  REPLACE sections against each other before confirming an update. via: measurement
-
-- 🔴 **2026-09-14 — MY INSTRUMENT FAILED FOUR TIMES IN ONE SESSION, ALWAYS IN THE
-  REASSURING DIRECTION, AND NEVER THE CODE UNDER TEST.** Four distinct shapes, each of
-  which would have been written up as a fact about the code if not re-checked:
-  (a) `grep -cF` with a MULTI-LINE pattern splits it one-pattern-per-line, so a trailing
-  newline matched every line and three VALID mutants were scored `INVALID: 150 matches`;
-  (b) a revert patch that silently NO-LONGER-MATCHED (a comment had been inserted between
-  its two lines), so the "RED control" ran against the FIXED tree and printed `5 passed` —
-  a control that reads exactly like a test failing to fail; (c) a latin-1 fixture written
-  with an em-dash, which is not latin-1 encodable, so the file was never created and the
-  mutant scored SURVIVED; (d) reading the WRONG pipelinerun — "newest failed" was a guess
-  and returned a **65-byte** log, i.e. a fast setup failure, whose emptiness read as
-  "nothing named". **The cure that worked every time: assert the instrument did its job
-  before reading its verdict** — match count exactly 1, file exists and has the encoding
-  you think, log is bigger than a banner, run attributed by timestamp not by recency.
-  via: measurement
-
-- 🔴 **2026-09-14 — A NARROWNESS CONTROL WHOSE FIXTURES LACK THE FEATURE UNDER TEST IS
-  STRUCTURALLY BLIND, AND READS AS COVERAGE.** A guard I wrote flagged CORRECT prose:
-  `` `[^`]*PHRASE[^`]*` `` opens at the CLOSING backtick of one inline code span and closes
-  at the OPENING backtick of the next, so prose BETWEEN two spans was matched. It shipped
-  with a "does not flag legitimate prose" control whose three fixtures were all
-  **backtick-free** — it could not observe the class at all. Measured on a line that very
-  PR had authored. **Ask what FEATURE the defect needs, then check your negative fixtures
-  HAVE it.** via: measurement
-
-- 🔴 **2026-09-14 — A BRIEF NAMING ONE INSTANCE OF A MECHANICAL DEFECT IS NAMING A SAMPLE,
-  NOT A POPULATION.** Rank 23(c) described ONE scrubbed remedy in `ZacxDev/cairn`. There
-  were **twelve**, across **two** different replacement phrases (`a writer` AND
-  `the writer half`) plus a fabricated symbol (`entry_shape.build_report`, which exists
-  nowhere in that package). Enumerated, not estimated: `git grep` at the base listed 12
-  lines; 4 were fixed in the first commit and 8 in the second. The same session's rank 26
-  had the mirror-image error in the other direction — the brief claimed TWO drifted tables
-  and one was a deliberate gated exclusion. **Count the population before scoping, in both
-  directions.** via: measurement
-
-- ⚠ **2026-09-14 — THREE AUDIT ROUNDS ON `ZacxDev/cairn` #17 FOUND ZERO DEFECTS IN THE
-  PACKAGE AND FIVE IN THE SCAFFOLDING I WROTE.** The payload was verified by DRIVING it
-  (both remedies printed end-to-end, the named command run, its output confirmed) and did
-  not move after round 0. Every finding after that was a guard: a pattern with no positive
-  control while the commit message claimed one existed; the prose false-positive above; a
-  self-exemption pin blind to its own upstream widening path; a verb guard reading 2 files
-  while claiming "every"; a silently-dropped non-UTF-8 bucket. **That is the attribution
-  gate's shape — the ladder auditing itself — so it was stopped BY DECISION after round 1,
-  not on a clean round.** Recorded because a report that stops on the prose criterion is
-  otherwise indistinguishable from one that converged. via: measurement
+### 2026-09-13/14 — the rank-24 arc's own process notes (body DEMOTED)
+Rank 24 is itself demoted now. Its ~14 process notes — the `claim-work` slug derived for a rank
+that was not yet numbered, `audit-dispatch.py` resolving the PR against the CWD's repo, the
+`--emit-claims` issue-vs-review-comment trap, the `isolation: "worktree"` cross-repo override,
+and the instrument-failure catalogue (`grep -cF` splitting a multi-line pattern, a revert patch
+that silently no-longer-matched, a latin-1 fixture that was never written, the wrong pipelinerun
+read) — moved verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17
+(pass 2). 🔴 **The two rules worth carrying on the reading surface:** *before "fixing" a table
+that omits an entry, `grep` for a test that ASSERTS the omission* — a deliberate exclusion and an
+oversight look identical in the table itself; and *a brief naming ONE instance of a mechanical
+defect is naming a SAMPLE, not a population* — rank 23(c) described one scrubbed remedy and there
+were twelve.
 
 ### 2026-09-15 — a ONE-TIME certification is not a GATE (`/the-algorithm`, operator-prompted)
 I raised a 🔴 that `tests/routing_mutants.py` and `tests/unchanged_output_capture.py` are run by
