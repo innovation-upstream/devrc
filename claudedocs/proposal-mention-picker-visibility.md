@@ -247,7 +247,7 @@ positive control:
 | ending | what fzf writes | `queried` |
 |---|---|---|
 | a selection (PICKED) | `<query>\n<row>\n` — query may be empty | **present** |
-| ENTER, query matched nothing | `<query>\n`, exit 0 | **present** |
+| ENTER, query matched nothing | `<query>\n`, exit **1** | **present** |
 | ESC / Ctrl-C abort | **nothing at all**, 0 bytes, exit 130 | **absent — NOT MEASURED** |
 
 `--print-query` covers the two endings where fzf has a result to print; an abort is not
@@ -359,17 +359,22 @@ not mistake a 10-row sample for an answer.** Over the 6.7 days to 2026-09-18 the
 * **Dismissal arm** — ~5 per week, and `queried` covers only the Enter-with-no-match subset
   of those (§3.1). At this rate it needs **roughly two months** before it says anything.
 
-🔴 **AND THE DISMISSAL ARM'S `queried` IS NOT A RATE AT ALL — DO NOT AVERAGE IT.** On that
-arm the dim is present only for the Enter-with-no-match ending (an abort writes nothing),
+🔴 **AND UNDER `reason = 'dismissed'`, `queried` IS NOT A RATE AT ALL — DO NOT AVERAGE IT.**
+There the dim is present only for the Enter-with-no-match ending (an abort writes nothing),
 and on that ending it is `True` **by construction**: the picker always holds rows, so an
 empty query always matches something and always yields a selection — a non-empty query is
 the only way to reach that ending. Averaging it returns ~100% however the operator behaves.
 That is a self-selected sub-population read as a rate, which is **worse than an absent
 number**, because it looks like an answer.
 
-Treat a present `queried` on the dismissal arm as an **event** — "this click was a typed
-query that matched nothing", the most diagnostic dismissal there is — and never as a
-denominator. The query above is scoped to `outcome='picked'` for exactly this reason.
+⚠ **Scoped to the REASON, not to the arm.** That arm emits two outcomes (`dismissed` and
+`no-selection`) across seven reasons, and `unmapped-row` is a counter-example — fzf wrote
+both lines there, so `queried` is measured and *can* be `False`. `reason` is an emitted dim,
+so filter on it.
+
+Treat a present `queried` under `dismissed` as an **event** — "this click was a typed query
+that matched nothing", the most diagnostic dismissal there is — and never as a denominator.
+The query above is scoped to `outcome='picked'` for exactly this reason.
 
 So "matters most on the dismissal arm" was right about *diagnostic value per row* and wrong
 twice over: about when you can act on it, and about it being a rate.

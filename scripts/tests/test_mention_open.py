@@ -1879,7 +1879,7 @@ class _FakeTerminal:
     through a pty, three samples per ending:
 
         selection          ->  `<query>\\n<row>\\n`   (2 lines; query may be "")
-        ENTER, no match    ->  `<query>\\n`           (1 line, exit 0)
+        ENTER, no match    ->  `<query>\\n`           (1 line, exit 1)
         ESC / Ctrl-C abort ->  NOTHING AT ALL         (0 bytes, exit 130)
 
     So `choose=None` with an EMPTY query models an ABORT and writes nothing —
@@ -9235,11 +9235,22 @@ def test_a_real_ABORT_records_NO_query_verdict_at_all(monkeypatch):
     """🔴 THE LIMIT OF `--print-query`, PINNED BECAUSE THE FIRST DRAFT OF THIS
     FEATURE CLAIMED THE OPPOSITE IN THREE COMMENTS AND THE PR BODY.
 
-    MEASURED against fzf 0.74.3 through a pty, three samples plus a Ctrl-C and a
-    positive control: an ESC/Ctrl-C abort writes **zero bytes** and exits 130 —
-    `--print-query` covers the two endings where fzf has a result to print, and
-    an abort is not one of them. So an aborted picker carries NO query line, and
-    `queried` must come out NOT MEASURED rather than `False`.
+    🔴 WHAT THIS PINS, AND WHERE THE MEASUREMENT ACTUALLY LIVES — SAID PLAINLY
+    BECAUSE THE TEST'S NAME SAYS "REAL". It drives `_FakeTerminal`, NOT fzf. The
+    fzf behaviour it encodes — an ESC/Ctrl-C abort writes **zero bytes** and
+    exits 130 — was measured OUT OF BAND (pty, fzf 0.74.3, three samples plus a
+    Ctrl-C and a positive control) and is recorded in `PICKER_SH`'s comment; the
+    fake's abort branch was written in the SAME commit as this test, so if that
+    belief were wrong this test could not notice. That is the friendlier-peer
+    hazard the fake's own docstring names, and it is not closable here: fzf's
+    `--filter` mode cannot express an abort, and this file's real-fzf family is
+    deliberately non-interactive.
+
+    So read it as: **given the measured contract, the HANDLER does the right
+    thing.** It has real teeth on production code — mutating the terminator
+    check kills it with its own message (mutant M11) — and the contract it rests
+    on is re-measured whenever `PICKER_SH` changes, which is what the
+    whole-string pin on that constant is for.
 
     Why it is worth a test rather than a comment: `False` would mean "the
     operator scrolled to their row", which is the population "is the

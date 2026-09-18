@@ -503,21 +503,26 @@ MUTANTS: list[tuple] = [
     ("K48", "deletion", "the picker loses `--tiebreak=end`, so fzf falls back to "
                         "its LENGTH tiebreak — the exact rofi defect the swap "
                         "was made to escape, with every behavioural test green",
-     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf -i --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline "
+     "--print-query '\n",
+     "    'fzf -i --layout=reverse --info=inline --print-query '\n",
      "without --tiebreak=end"),
     ("K49", "operand swap", "the tiebreak becomes `length`, which is rofi's "
                             "behaviour spelled as an fzf flag — a mutant that "
                             "looks deliberate in a diff",
-     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf -i --tiebreak=length --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline "
+     "--print-query '\n",
+     "    'fzf -i --tiebreak=length --layout=reverse --info=inline "
+     "--print-query '\n",
      "without --tiebreak=end"),
     ("K50", "widening", "`--exact` is added, which MEASURED does not fix the tie "
                         "(rank 27 either way) and narrows the match set from 56 "
                         "rows to 21 — the fuzzy narrowing a 392-row universe "
                         "depends on",
-     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf -i --tiebreak=end --exact --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline "
+     "--print-query '\n",
+     "    'fzf -i --tiebreak=end --exact --layout=reverse --info=inline "
+     "--print-query '\n",
      "--exact: MEASURED not to fix the tie"),
     ("K51", "deletion", "the header COUNT stops being derived from the header "
                         "lines, so `--header-lines` disagrees with what was "
@@ -560,8 +565,10 @@ MUTANTS: list[tuple] = [
                         "operator cannot tell the empty list from a dismissal. "
                         "MEASURED on `_eponymous_corpus()` (195 rows), query "
                         "`NimbusWorks`: 0 matched without, 15 with",
-     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline "
+     "--print-query '\n",
+     "    'fzf --tiebreak=end --layout=reverse --info=inline "
+     "--print-query '\n",
      "the picker lost `-i`"),
     ("K55", "deletion", "`BrokenPipeError` stops being handled, so a selection "
                         "made before the rows finish writing is DISCARDED and a "
@@ -789,7 +796,8 @@ MUTANTS += [
      "               offered_total=len(candidates),\n"
      "               rank=picked_rank, plausibility=picked_class,\n"
      "               ordered=picked_ordered if picked_rank is not None else None,\n"
-     "               pinned_above=pinned_above, reason=reason, surface=surface)\n"
+     "               pinned_above=pinned_above, reason=reason, surface=surface,\n"
+     "               queried=queried, **order_dims)\n"
      "    return rc\n",
      "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
      "               picker_shown=picker_was_shown(reason),\n"
@@ -797,7 +805,8 @@ MUTANTS += [
      "               rank=picked_rank, plausibility=picked_class,\n"
      "               ordered=picked_ordered if picked_rank is not None else None,\n"
      "               pinned_above=pinned_above, reason=reason,\n"
-     "               surface=CLICK_SURFACE_BROWSER)\n"
+     "               surface=CLICK_SURFACE_BROWSER,\n"
+     "               queried=queried, **order_dims)\n"
      "    return open_reference(url)[0]\n",
      "PICKER click did not record"),
 
@@ -874,9 +883,10 @@ MUTANTS += [
                         "never opened, putting a never-opened click into every "
                         "per-surface count",
      "                   pinned_above=pinned_above,\n"
-     "                   reason=reason)\n",
+     "                   reason=reason, queried=queried, **order_dims)\n",
      "                   pinned_above=pinned_above,\n"
-     "                   reason=reason, surface=CLICK_SURFACE_BROWSER)\n",
+     "                   reason=reason, queried=queried, **order_dims,\n"
+     "                   surface=CLICK_SURFACE_BROWSER)\n",
      "reported a surface for a reference that was never"),
     # 🔴 THE SAME MUTATION ON THE *OTHER* CALL SITE, AND IT IS NOT A DUPLICATE.
     # An earlier version of the ordering test drove the AUTO arm only, so K82

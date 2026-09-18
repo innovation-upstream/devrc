@@ -92,27 +92,43 @@ def sanitize_dims(dims) -> dict:
     caps cardinality/size but is NOT a content scrubber — the call site must only
     pass safe values in the first place (see the module PRIVACY note).
 
-    🔴 A COUNT TRUNCATION IS REPORTED, NEVER SILENT. Past `_MAX_DIMS` the extra
-    keys are dropped and a `dropped: <n>` key is added saying how many — so a
-    caller that outgrew the cap produces a row that SAYS SO, instead of one that
-    parses cleanly and is missing the newest field. The key is present ONLY when
-    something was dropped, so a consumer can treat its absence as "nothing lost"
-    rather than having to compare counts. Same contract, same spelling, as
+    🔴 A DIM THAT VANISHES IS REPORTED, NEVER SILENT. When a whole column is
+    removed, a `dropped: <n>` key is added saying how many — so a caller that
+    outgrew a bound produces a row that SAYS SO, instead of one that parses
+    cleanly and is missing its newest field. Same contract, same spelling, as
     `scripts/claude-hooks/hook_telemetry.py`'s `dropped`.
 
-    ⚠ IT COUNTS THE COUNT CAP ONLY. A value truncated by `_MAX_VALUE_LEN`, or a
-    list clipped to `_MAX_LIST_ITEMS`, is NOT counted here — those shorten a
-    value the consumer still receives, while this one removes a column
-    entirely. Widening it later is a deliberate change with its own argument;
-    what must not happen is a whole dim vanishing unannounced.
+    🔴 THE KEY IS OWNED BY THIS FUNCTION, NOT BY THE CALLER. Any caller-supplied
+    `dropped` is discarded — it cannot MASK a real count and it cannot FORGE one
+    on a row that lost nothing. An earlier version only overwrote it when a
+    truncation had happened, which left the forge direction open
+    (`{"a": 1, "dropped": 7}` came back claiming a loss that never occurred).
+    So: absent ⇒ nothing was lost, present ⇒ this function lost exactly that
+    many, and neither reading depends on trusting the caller.
+
+    ⚠ TWO BOUNDS REMOVE A COLUMN AND BOTH ARE COUNTED: `_MAX_DIMS` (the extra
+    items past the cap) and `_MAX_KEY_LEN` (two long keys that truncate to the
+    SAME prefix — the later one overwrites the earlier, so a dim disappears).
+    The key-collision arm is the one an earlier draft of this docstring missed
+    while promising "what must not happen is a whole dim vanishing unannounced".
+
+    ⚠ AND TWO BOUNDS ARE DELIBERATELY *NOT* COUNTED: `_MAX_VALUE_LEN` and
+    `_MAX_LIST_ITEMS`. Those SHORTEN a value the consumer still receives, which
+    is a different fact from losing the column. Widening `dropped` to cover them
+    would be a deliberate change with its own argument.
     """
     out: dict = {}
     if not isinstance(dims, dict):
         return out
-    items = list(dims.items())
+    items = [(k, v) for k, v in dims.items() if str(k)[:_MAX_KEY_LEN] != "dropped"]
     dropped = max(0, len(items) - _MAX_DIMS)
     for k, v in items[:_MAX_DIMS]:
         key = str(k)[:_MAX_KEY_LEN]
+        # A key that collides with one already written removes that column. It
+        # is counted here rather than at the end because only the loop can see
+        # it — `len(items)` cannot.
+        if key in out:
+            dropped += 1
         if isinstance(v, bool) or v is None:
             out[key] = v
         elif isinstance(v, (int, float)):
@@ -121,10 +137,8 @@ def sanitize_dims(dims) -> dict:
             out[key] = [str(x)[:_MAX_VALUE_LEN] for x in list(v)[:_MAX_LIST_ITEMS]]
         else:
             out[key] = str(v)[:_MAX_VALUE_LEN]
-    # 🔴 LAST, AND UNCONDITIONALLY OVERWRITING. A caller that passes its own
-    # `dropped` dim must not be able to hide this one — the field's whole job is
-    # to be trustworthy about loss, and a caller-supplied value would make it a
-    # claim by the very code that lost the data. Set after the loop so it wins.
+    # LAST, so it describes the whole pass. The caller's own `dropped` was
+    # filtered out above, so this is never a claim by the code that lost data.
     if dropped:
         out["dropped"] = dropped
     return out

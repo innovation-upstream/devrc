@@ -1408,19 +1408,28 @@ def click_dims(repo: str = "", platform: str = "",
     design is what keeps that honest instead of filing every abort under
     "scrolled".
 
-    🔴 AND THE DISMISSAL ARM'S `queried` IS NOT A RATE — DO NOT AVERAGE IT. On
-    that arm the dim is present ONLY for the Enter-with-no-match ending, and on
-    that ending it is `True` BY CONSTRUCTION: the picker always holds rows, so an
-    EMPTY query always matches something and always yields a selection. A
-    non-empty query is the only way to reach Enter-with-no-match at all.
-    Averaging `queried` over dismissals therefore returns ~100% however the
-    operator behaves — a self-selected sub-population read as a rate, which is
-    worse than an absent number because it looks like an answer.
+    🔴 AND WHERE `reason == "dismissed"`, `queried` IS NOT A RATE — DO NOT
+    AVERAGE IT. Under that reason the dim is present only for the
+    Enter-with-no-match ending (an abort writes nothing), and there it is `True`
+    BY CONSTRUCTION: the picker always holds rows, so an EMPTY query always
+    matches something and always yields a selection — a non-empty query is the
+    only way to reach Enter-with-no-match at all. Averaging it therefore returns
+    ~100% however the operator behaves: a self-selected sub-population read as a
+    rate, which is worse than an absent number because it looks like an answer.
 
-    **The rate lives on the PICKED arm**, where all three endings are
-    represented and `False` is reachable. On the dismissal arm treat a present
-    `queried` as an EVENT — "this click was a typed query that matched nothing"
-    — and never as a denominator.
+    ⚠ SCOPED TO THE REASON, NOT TO THE ARM — AND AN EARLIER DRAFT SAID "THE
+    DISMISSAL ARM", WHICH IS WIDER THAN THE TRUTH. That arm emits TWO outcomes
+    (`dismissed` and `no-selection`) over seven reasons, and `unmapped-row` is a
+    counter-example: fzf wrote BOTH lines there — a real selection whose row
+    `row_to_url` could not map — so `queried` is measured and CAN be `False`. A
+    consumer reading the wider sentence would mislabel that row, and a `False`
+    appearing on the arm would read as the invariant being broken. `reason` is
+    already an emitted dim, so the scoping costs nothing.
+
+    **The rate lives on the PICKED arm**, where every ending is represented and
+    `False` is reachable. Elsewhere treat a present `queried` as an EVENT —
+    under `dismissed`, "this click was a typed query that matched nothing" —
+    and never as a denominator.
 
     ⚠ NO `ordered_rank` DIM, DELIBERATELY. The chosen row's position WITHIN the
     ranked block is `rank - pinned_above`, and both of those are already emitted
@@ -2284,10 +2293,19 @@ PICKER_LINES = 22
 # 🔴 THE OUTPUT CONTRACT, MEASURED AGAINST fzf 0.74.3 RATHER THAN ASSUMED — AND
 # THE ASSUMPTION WAS WRONG. Driven through a pty, three samples per ending:
 #   * a SELECTION        -> `<query>\n<row>\n`   (2 lines; the query may be empty)
-#   * ENTER, NO MATCH    -> `<query>\n`          (1 line, exit 0)
+#   * ENTER, NO MATCH    -> `<query>\n`          (1 line, exit 1)
 #   * ESC / Ctrl-C ABORT -> **NOTHING AT ALL**   (0 bytes, exit 130)
-# The first draft of this comment said an abort "writes the query ALONE". It does
-# not — `--print-query` covers the two exits where fzf has a result to print, and
+# ⚠ THIS TABLE HAS BEEN WRONG TWICE, IN THE SAME FOUR PLACES. Draft 1 said an
+# abort "writes the query ALONE" — it writes nothing. Draft 2 then asserted
+# `exit 0` for the NO-MATCH row, which was never measured (the probe that
+# corrected the abort row captured its BYTES and not its status); fzf returns
+# **1** when it has no selection, and 0 only when it does. Re-measured, two
+# samples per ending. Nothing branches on the status — `run_picker` reads only
+# `proc.poll() is not None`, and alacritty masks the child's code anyway (see
+# `PICKED_NEVER_SHOWN`) — so this is provenance, which is exactly why it has to
+# be right: it is the corrected claim that replaced a wrong one.
+#
+# `--print-query` covers the two exits where fzf has a result to print, and
 # an abort is not one of them. Nothing downstream breaks (0 bytes is what the
 # pre-change loop already saw on a dismissal), but the CAPABILITY is narrower
 # than it was written to be: see `click_dims`' `queried` paragraph for exactly
@@ -3807,15 +3825,14 @@ def main(argv: list[str] | None = None) -> int:
         # `picker_was_shown` is three-valued so an unmeasured case omits the
         # field rather than guessing.
         #
-        # ⚠ `queried` ON THIS ARM IS AN EVENT, NOT A RATE — see `click_dims`, and
-        # this comment used to say it "MATTERS MOST" here, which oversold it. An
-        # abort writes nothing at all, so the dim is present only for the
-        # Enter-with-no-match ending, where it is `True` BY CONSTRUCTION: the
-        # picker always holds rows, so an empty query always matches and always
-        # selects. A present `queried` here therefore means "a typed query
-        # matched nothing" — the most diagnostic dismissal there is — while
-        # AVERAGING it returns ~100% however the operator behaves. The RATE lives
-        # on the picked arm, where `False` is reachable.
+        # ⚠ UNDER `reason == "dismissed"`, `queried` IS AN EVENT, NOT A RATE —
+        # see `click_dims`. This comment used to say it "MATTERS MOST" here,
+        # which oversold it, and then said "this arm", which is WIDER than the
+        # truth: the arm also emits `no-selection` over seven reasons, and
+        # `unmapped-row` carries a MEASURED `queried` that can be `False`. Under
+        # `dismissed` specifically, an abort writes nothing so the dim appears
+        # only for Enter-with-no-match, where it is `True` by construction —
+        # diagnostic per row, meaningless averaged. The RATE is the picked arm's.
         emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
                    else CLICK_NO_SELECTION,
                    picker_shown=picker_was_shown(reason),
