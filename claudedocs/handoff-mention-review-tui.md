@@ -20,40 +20,46 @@ notifications and repo browse are dropped.
   this; Phase 4 (deleting `nvim-octo`) is gated on it by the proposal's own rollback section.
 
 ## State now
-- 🔴 **THE SPEC IS `claudedocs/proposal-pr-review-tui.md`** (#1696, `02b54fe4`), merged.
-  **Authority for Phases 3–4 — read it before continuing.**
-- **Lineage, all merged and verified by content on `origin/main`:** `#1666` `0325668c` (closed
-  the octo legend arc) · `#1686` `c05e4f2d` (octo's OWN diff legend gained vim's `]c`/`[c` +
-  fold motions — still the surface a click opens) · `#1696` `02b54fe4` (the proposal) ·
-  **`#1698` `7b827d13` (Phase 0 + Phase 1 + the Go gate tier)** · `#1723` `e49bbace` (Phase 2) ·
-  **`#1728` `ba0c5aeb` (the previous revision of THIS doc).**
-- ✅ **PHASE 2 IS MERGED AND DEPLOYED.** `devrc#1723` → squash **`e49bbace`**. Five write verbs
-  (comment · approve · request changes · submit review · merge) behind the §3.7 confirmation
-  ledger. The write-intent ledger #1698 deleted is **reinstated and no longer vacuous**.
-- ✅ **THE `gotests` CI LEG IS LIVE — the previous revision's rank 1 is CLOSED by its own
-  mechanical condition.** `ZacxDev/homelab-infra#827` → `a05f355da` on `trunk` (GitOps, so the
-  merge WAS the deploy). Measured on the next devrc PR: `tekton/devrc-gotests pass — TOTAL:
-  pass=119`, and on #1723 itself **pass=231**. The 119 Go tests that had zero PR-time coverage
-  now gate PRs. Re-measured 2026-09-16: all four legs
-  (`pytests`/`nodetests`/`gotests`/`cairn-client-runs`) posted SUCCESS on #1728.
-- ✅ **DEPLOYED TO BOTH HOSTS**, re-verified live 2026-09-16: `mention-review` **0.2.0** on PATH
-  on workbench AND laptop; argv contract `64`/`65`/`66` read without a pipe; the Phase-2 string
-  `cannot be undone` present in the **wrapped** binary **beside a passing positive control**.
-- 🔴 **IT HAS NOW BEEN SEEN ON A SCREEN — BUT NOT BY THE OPERATOR, SO THE ARC IS STILL OPEN.**
-  An agent drove it headlessly (detached tmux, private socket) against **#1728** (1 file,
-  3 hunks) and **#1726** (8 files, +791/-35). It renders, navigates and is fast. **This does
-  NOT close the closing condition**, which names the operator's judgement on a real review —
-  an agent's report is evidence FOR that judgement, never a substitute.
-- **Teed up for the operator:** a detached tmux session **`review-1628`** on the DEFAULT server
-  runs `mention-review innovation-upstream/devrc 1628` (a determinism fix, 2 files +76/-3,
-  code not prose). `tmux attach -t review-1628`. ⚠ Ephemeral — a reboot or a `tmux kill-server`
-  takes it; relaunch with the same one-liner.
-- 🔴 **THE CLICK PATH IS STILL `nvim-octo`, DELIBERATELY.** `REVIEW_EXE` unchanged. This is the
-  first code that can approve and merge on the operator's behalf, so it is run by hand.
-- **§12.4 IS ANSWERED, not assumed:** **PR-level comments only, no inline diff-line
-  positioning.** Operator decision 2026-09-15. Nothing in the code computes a diff position.
+- 🔴 **THE SPEC IS `claudedocs/proposal-pr-review-tui.md`** (#1696, `02b54fe4`). ⚠ Its rollback
+  section is now WRONG — see the click-path bullet.
+- **Lineage, verified by content on `origin/main`:** `#1696` `02b54fe4` (proposal) · `#1698`
+  `7b827d13` (Phase 0+1 + the Go gate tier) · `#1723` `e49bbace` (Phase 2) · `#1728` `ba0c5aeb`
+  and `#1729` `b34cdbe0` (this doc) · **`#1734` `588b6625` (the click flip)** · **`#1741`
+  `b2a8e8ab` (J/K diff scroll)** · **`#1748` `ece01d4f` (the Files tree)**.
+- ✅ **THE CLICK PATH IS `mention-review` NOW — `nvim-octo` IS SPAWNED BY NOTHING.** `REVIEW_EXE`
+  and the Alacritty wrapper's `makeBinPath` both name it; a two-way ledger in
+  `test_mention_open.py` fails if they disagree. Verified live under the wrapper's OWN PATH:
+  `tui_available() = True` resolving to the deployed store path, with the negative control
+  `which("nvim-octo") = None`.
+  🔴 **ROLLBACK IS A REVERT PLUS A `home-manager switch`, NOT "flip one line".** Octo was on no
+  PATH but that wrapper's, so flipping `REVIEW_EXE` back alone spawns a binary that is not
+  installed — a terminal that flashes and vanishes. Its derivation and 75 tests are untouched
+  (this was NOT Phase 4), so the revert is clean.
+- ✅ **SHIPPED TO BOTH HOSTS, `mention-review 0.3.0`**, at `61faa675`: 618/577 managed artifacts,
+  0 dangling, 0 stale, `2 hosts compared`. The deployed binary carries the tree on both, checked
+  with a positive AND a negative control.
+- ✅ **What a click now gives you:** the directory tree (`h`/`l`/`enter`, directories above files
+  at every level, single-child chains compacted), `J`/`K` panning the diff 3 lines from any
+  panel, and the collapse state + cursor surviving a write-triggered re-read (restored BY PATH).
+- ✅ **THE `gotests` CI LEG IS LIVE** (`ZacxDev/homelab-infra#827` → `a05f355da` on `trunk`;
+  GitOps, so the merge WAS the deploy). Measured `pass=119` on the first devrc PR after it,
+  `pass=231` on #1723, `pass=293` on #1748 — the Go tests gate PRs, and `gotests` is the leg
+  that carried every TUI change this session.
+- **§12.4 IS ANSWERED, not assumed:** PR-level comments only, no inline diff-line positioning.
+  Operator decision 2026-09-15. Nothing in the code computes a diff position.
 - **The `pkill -x nvim` incident cost nothing** — operator confirmed no editor was lost. The
-  prohibition stays in every dispatch brief regardless.
+  prohibition stays in every dispatch brief regardless, and none of this session's five
+  dispatches used a process-name pattern.
+- ⚠ **Supersedes the 0.2.0 deploy line:** both hosts were verified at `mention-review` 0.2.0 on
+  2026-09-16; they are now at **0.3.0**, re-verified the same way (wrapper → wrapped binary,
+  positive AND negative control).
+- 🔴 **THE CLOSING CONDITION IS STILL OPEN.** The operator said *"it looks good"* about an
+  AGENT's driven report and asked for it on the click path — a strong signal, and NOT the line
+  this doc froze: a REAL review, on a real screen, said to beat octo at reading a diff. Nothing
+  in this session closes it.
+- ⚠ **`ece01d4f` was merged over an UNATTRIBUTED red** (`pytests`, 5 of 23,895) on the operator's
+  explicit "get it shipped". `gotests` — the leg that covers it — was green at `pass=293`. The
+  red turned out to be the `main` outage below, reachable by no Go diff.
 
 ## Open investigations — live diagnosis state
 
@@ -127,41 +133,74 @@ notifications and repo browse are dropped.
 - **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
   (merge) against it. **Operator-only** — an agent must not run a live write verb.
 
+### RESOLVED — `main` was RED for hours; a skill PRUNE cut text that two-way ledgers pin
+- as-of: 2026-09-17
+- **Retracted as live.** Fixed by `#1756` → `61faa675`, shipped to both hosts. History below.
+- **Symptom + exact repro:** `nix build .#checks.x86_64-linux.pytests` → 17 failures; a dev-host
+  run of the three handoff suites → 13. Every PR's `pytests` leg red regardless of its diff.
+- **Observed (with values):** `d2844af6` (#1750) pruned `claude/skills/handoff/SKILL.md`
+  27,419 → 19,421 B and removed **all 8 refusal markers** across rules (j) and (k) —
+  `[no via: field]`, `[no forcing: field]`, `[unknown kind`, `[unparsed`, `[fenced]` — which
+  `scripts/lib/handoff_doc.py` still prints. 17 pinned sentences total. Assertion text:
+  *"the module prints '[no via: field]' for rule (k) and claude/skills/handoff/SKILL.md never
+  mentions it — an executor hits an undocumented marker at the moment it is about to push."*
+  via: measurement
+- **Ruled out:** that PR #1748 (the Files tree) caused it — the sandbox tier reproduced all 17
+  on a tree built BEFORE that merge, and the PR touches zero `.md` and nothing outside
+  `internal/ui`. via: measurement
+- **Ruled out:** that it was a TWO-TIER divergence — **this was MY first diagnosis and it was
+  WRONG.** I tracked the one test CI NAMED (`test_every_red_paragraph_is_a_ledger_rule…`),
+  which genuinely passes on the dev host; the other 16 fail in BOTH tiers. A CI summary names
+  ONE failure, never the failure set. via: measurement
+- **Ruled out:** that restoring the text would breach the byte ceiling and force an eviction —
+  I presented that as a fork needing an operator decision BEFORE measuring it. Budget is
+  `MAX_BYTES 21,200 − MIN_HEADROOM 900 = 20,300`; the file was at 19,421, so there were **879
+  bytes** free. There was no fork. via: measurement
+- **Next probe:** none — closed. ⚠ Residual: the fix lands at **20,088 B, 212 bytes of
+  headroom**. The squeeze that caused this is paid down, not resolved.
+
 ## Next steps (ranked)
-1. 🔴 **USE `mention-review` FOR A REAL REVIEW — `tmux attach -t review-1628`** (or
-   `mention-review <owner/repo> <N>` for any other PR; 0.2.0 is on PATH on both hosts). This is
-   the arc's closing condition and nothing headless substitutes — an agent has now confirmed it
-   renders, navigates and paints in ~1s, which is evidence FOR the judgement, not the judgement.
-   Press `?` for the legend, read the diff, form a view vs octo. Repo: devrc.
+1. 🔴 **USE `mention-review` FOR A REAL REVIEW — just click a `repo#N` mention.** It is the
+   click path on both hosts at 0.3.0; nothing needs running by hand any more. This is the arc's
+   closing condition and nothing headless substitutes: an agent has confirmed it renders,
+   navigates, paints in ~1.0s and survives a write, which is evidence FOR the judgement, not the
+   judgement. Repo: devrc.
    forcing: user — the closing condition names the operator reading real evidence.
 2. **Phase 3 — the speed work**: local-clone probe, PR-ref fetch **RACING** the API, bounded
-   on-disk cache (0600), per-commit diff. 🔴 A RACE, never a preference — see Gotchas. ⚠ Read
-   the ~1.0s first-paint measurement below BEFORE scoping this: the first read is already at
-   the API floor, so Phase 3's win is the 2nd..Nth read. Repo: devrc.
+   on-disk cache (0600), per-commit diff. ⚠ Read the ~1.0s first-paint measurement in Gotchas
+   BEFORE scoping: the FIRST read is already at the API floor, so the win is the 2nd..Nth.
+   Repo: devrc.
    forcing: none
 3. **Phase 4 — retirement**, its own PR: delete `nix/pkgs/tools/nvim-octo/` (3 files),
    `test_nvim_octo.py` (67 tests), `test_nvim_octo_diff_motions.py` (8), the `nvimOctoOverlay`,
-   and `luajit` from `REQUIRED_TOOLS`. 🔴 **GATED ON RANK 1.** Repo: devrc.
+   `luajit` from `REQUIRED_TOOLS`, and the PROSE-ONLY `nvim-octo` row in
+   `test_no_real_launchers.py`. 🔴 **GATED ON RANK 1.** Repo: devrc.
    forcing: none
 
 ## Defects (batched)
-- 🔴 **The first `]` from the top of a diff produces no visible movement.** Reproduced twice;
-  `g`,`j`,`]` works. **NOT an off-by-one** — `internal/udiff/udiff.go:308` `NextHunk` is
-  `h.LineIndex > from`, strictly after, exactly as its docstring says. The cursor starts on the
-  file-header line ABOVE hunk 1, so the first press is spent arriving at a header already on
-  screen. A papercut on the first thing a reviewer does; fix is where the cursor STARTS, not
-  the search predicate.
+- 🔴 **`scripts/lib/handoff_doc.py`'s pins have only 212 B of headroom** in
+  `claude/skills/handoff/SKILL.md` (20,088 of a 20,300 budget). The next addition needs an
+  eviction in the SAME commit — the exact squeeze that produced the outage above. The durable
+  fix is moving narrative into `claude/skills/handoff/reference/*.md`, which cost 0 until loaded.
+- 🔴 **169 agent worktrees are registered in this clone**, oldest 2026-08-13. A stale worktree
+  holds its branch repo-globally: it forced a detached rebase earlier in this arc and blocked a
+  branch checkout twice today. `scripts/worktree-prune` exists. Not run — removing 169 at once
+  is high blast radius and some may belong to other sessions.
+- `movement_test.go`'s `paging_UP_onto_src` case cannot catch a dir-row-moves-the-diff mutant:
+  `src`'s first DIFF-ORDER descendant is the file the cursor was already in. Two of three
+  subtests catch it. Pre-existing, reported rather than papered over.
 - Two guards still claim more than they check: `scripts/tests/test_mention_review.py:122`
   (claims it pins the tier set; does not check `main-green-check.sh`) and `:361` (claims a slug
   check; there is none). The third — `internal/ui/words.go:179-184` — was CLOSED by Phase 2.
-- `keys_test.go`'s structural half compares `Dispatch()` against `FullHelp()`/`ShortHelp()`,
-  both built from the SAME literal — it asserts the keymap agrees with itself.
-- Round 0 on homelab#827 left three deletion candidates, all PRE-EXISTING, none blocking:
-  D1 the 13-site per-leg `*-context` param chain (consolidating it would make a fifth leg
-  nearly free AND structurally kill the status-clobber hazard); D2/D3 per-leg duplication in
-  `test_devrc_notify_empty_context_guard.py` and `test_nix_cache_persistence.py`.
-- The pipeline's `enforce_admins: true` belief survives at ~8 PRE-EXISTING sites in
-  `devrc-ci-pipeline.yaml` and `ci-priority-classes.yaml`.
+- `keys_test.go`'s OLD structural half was replaced in #1748 — ⚠ and the handoff's description
+  of that defect was WRONG: it said the guard "asserts the keymap agrees with itself", but
+  `Dispatch()` and `FullHelpFor()` are separately maintained, so a missing legend entry DID
+  fail. The real gap was narrower: a binding present in both whose action nothing implements
+  (`act()` falls through to `move()`, which ignores unknown actions). Fixed with a behavioural
+  ledger over 22 reachable states.
+- Round 0 on homelab#827 left three deletion candidates, all PRE-EXISTING, none blocking (D1 the
+  13-site per-leg `*-context` param chain; D2/D3 per-leg duplication in
+  `test_devrc_notify_empty_context_guard.py` and `test_nix_cache_persistence.py`).
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **"Local git first (~0ms)" is WRONG on the FIRST read, and that framing came from me.**
@@ -319,35 +358,89 @@ notifications and repo browse are dropped.
   well attested that the cheap move is mechanical: **read the failing test's name and the
   branch's distance from `main` BEFORE reading the diff.**
 
+- 🔴 **A GUARD EXPRESSED THROUGH ITS OWN CONSTANTS IS INVARIANT UNDER SWAPPING THEM.**
+  `TestTheChevronsAreOnScreenAndSurviveColourRemoval` asserted via `chevronExpanded`/
+  `chevronCollapsed`, so **I swapped their VALUES and the whole package stayed GREEN** — every
+  expanded directory rendering `▸` and every collapsed one `▾`, the open/closed state backwards,
+  suite passing. `rowShape` spells `"dir-open"`/`"dir-closed"`, so the shape tests were blind
+  too. Fix: assert the literal bytes once. **Ask of any text guard: can it pass while the hazard
+  exists in a different spelling?**
+- 🔴 **RESTORING PRUNED PROSE: PUNCTUATION AND PLACEMENT ARE LOAD-BEARING.** `TestSkillAndModule
+  Agree` pins the WHOLE NORMALISED CLAUSE. My restore added a period after `it**` and sat one
+  line above another paragraph with no blank line, so the normaliser JOINED them — it cleared 5
+  failures and INTRODUCED 2. Derive the expected text from the test/module constant
+  (`_FENCED_LEGEND`, `_NO_PROMOTE`), never from memory or composed prose.
+- 🔴 **`nix build … | tail` EXITED 0 WITH NO VERDICT AT ALL**, beside an
+  `error (ignored): SQLite database … is busy`. The build had not reported. Read the runner's
+  own `RESULT:` out of `nix log <drv>` with a positive control (count the `passed` lines) —
+  never the piped status. Both sandbox runs this session had to be read that way.
+- 🔴 **MEASURE BEFORE PRESENTING A FORK.** I offered the operator a choice between "restore the
+  text" and "relax the ledger" on the belief that the byte ceiling made them exclusive. It
+  didn't — 879 bytes were free. A fork presented without measuring costs a decision the operator
+  should never have been asked for.
+- 🔴 **`ship.sh` rc=7 SKIPPED THE WORKBENCH while printing healthy per-host lines.** A working
+  copy of `claude/skills/audit-pr/SKILL.md` blocked the fast-forward. **Byte-identical to a
+  NEWER commit (`origin/main`) proves PRE-APPLIED content, not WIP** — the mirror of RULES.md's
+  stale-orphan rule, and equally safe to discard. Hash before deciding; copy aside anyway.
+  **Read every per-host line, never the final verdict.**
+- 🔴 **FLIPPING `REVIEW_EXE` BROKE 22 TESTS THAT HAD NOTHING TO DO WITH THE TUI.**
+  `tui_available()` is `shutil.which(REVIEW_EXE)`, so every test asserting a click reaches the
+  BROWSER was really asserting *"the review TUI is not installed here"* — an invariant the file's
+  comment CLAIMED and nothing enforced. True by accident while octo was on no PATH; false the
+  moment `mention-review` entered `home.packages`. ⚠ **The two tiers would have DISAGREED** —
+  the dev host has the binary, the `nix build` sandbox does not — so the same commit was RED
+  locally and GREEN in CI. Now pinned by an autouse fixture.
+- 🔴 **THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING, AND IT HAPPENED TWICE.** A
+  commit whose whole subject was "a comment must not assert what it has not established" asserted
+  `moveIn` is called "in `stepKey`" — MEASURED, `stepKey` ends at line 312 and the call is at 508
+  inside `move()`. It came from MY brief wording it loosely; the fixer checked, found it
+  imprecise, and substituted a DIFFERENT wrong name. **If you cannot state a true reason, write
+  that it has none.**
+- ✅ **MEASURED — time-to-first-paint ~1.0s** (3 runs, 8-file PR, 100ms poll). Against this doc's
+  own 0.66–0.90s REST-diff figure that is essentially ONE round-trip: the program adds almost
+  nothing. Phase 3 cannot improve the first read.
+- 🔴 **I MANUFACTURED A 32.5s FALSE MEASUREMENT.** A `tmux send-keys 'q'` with no `Enter` left a
+  stray `q` on the command line, so the next send ran `qmention-review …`; my poll loop ran to
+  its 300×0.1s cap and I recorded the cap as the number. **The tell was three identical readings
+  equal to the ceiling.** Any bounded wait returns a plausible duration on failure unless success
+  is recorded separately — carry a `matched=0/1` flag and PRINT it.
+- **Driving the TUI from an agent works and is repeatable:** detached tmux on a PRIVATE socket
+  (`tmux -L <probe>`), `capture-pane -p` to read frames, `send-keys` to drive. Read the PANE
+  TITLE (`> 4 Diff <path>`) for state, never a fixed line number — a line probe conflates the
+  sticky file header with viewport content and invents findings. `kill-session`/`kill-server` on
+  the DEFAULT socket is blocked by a hook, correctly.
+- 🔴 **AN AGENT MUST NOT PRESS A WRITE KEY** (`c`/`a`/`R`/`v`/`m`) — they act on real GitHub as
+  the operator. Every dispatch this session carried that, and none was pressed.
+
 ## How to verify
 ```bash
-# 🔴 RANK 1 — the closing condition. Already running, detached, on the DEFAULT tmux server:
-tmux attach -t review-1628
-#   ? legend · j/k line · ]/[ hunk · }/{ file · tab panel · q quit
+# 🔴 RANK 1 — the closing condition. Just click a repo#N mention in the terminal.
+#   ? legend · j/k line · J/K pan diff · ]/[ hunk · }/{ file · h/l/enter tree · tab panel · q
 #   ⚠ press j once before your first ] — see Defects.
-#   If the session is gone: mention-review innovation-upstream/devrc <N>
 
-# Phase 2 is on main — verify by CONTENT, never ancestry (squash breaks ancestry):
-git -C ~/workspace/devrc cat-file -e origin/main:nix/pkgs/tools/mention-review/src/internal/ui/write.go
-git -C ~/workspace/devrc show origin/main:claudedocs/handoff-mention-review-tui.md | wc -l   # 288+ == #1728 landed
+# The click path, end to end, WITHOUT raising a window (the predicate a click runs):
+W=$(grep -oE '/nix/store/[a-z0-9]+-alacritty-mention-open' \
+      "$(readlink -f ~/.config/alacritty/alacritty.toml)" | head -1)
+WPATH=$(grep -oP '(?<=export PATH=)[^\n]*' "$W" | head -1 | sed 's/:\$PATH$//')
+env -i PATH="$WPATH" python3 -c "
+import importlib.util,os,shutil
+s=importlib.util.spec_from_file_location('mo',os.path.expanduser('~/workspace/devrc/scripts/mention-open.py'))
+m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print('REVIEW_EXE',m.REVIEW_EXE,'| tui_available',m.tui_available(),
+      '| NEG CONTROL nvim-octo',shutil.which('nvim-octo'))"
+#   -> mention-review | True | None
 
-# 🔴 THE DEPLOYED BINARY — follow the WRAPPER, and run the POSITIVE CONTROL FIRST.
-# `bin/mention-review` is a makeWrapper SCRIPT; grepping it returns 0 on a HEALTHY deploy.
+# The DEPLOYED binary — follow the WRAPPER; `bin/mention-review` is a makeWrapper SCRIPT and
+# grepping IT returns 0 on a HEALTHY deploy. Positive control FIRST.
 B=$(readlink -f "$(command -v mention-review)")
-R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B" | tail -1)
-grep -ac 'usage: mention-review' "$R"    # POSITIVE CONTROL — must be 1, else your probe is wrong
-grep -ac 'cannot be undone' "$R"         # 1 == Phase 2 write verbs present
+R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
+grep -ac 'usage: mention-review' "$R"   # POSITIVE CONTROL — must be 1
+mention-review --version                # 0.3.0
 
-# Time-to-first-paint, WITH the instrument validated (see Gotchas — a loop with no
-# match flag reports its own timeout as a measurement):
-tmux -L probe new-session -d -s t -x 240 -y 60
-tmux -L probe send-keys -t t C-c; tmux -L probe send-keys -t t 'clear' Enter   # no stray keys
-start=$(date +%s%N); tmux -L probe send-keys -t t 'mention-review <owner/repo> <N>' Enter
-ok=0; for i in $(seq 1 100); do
-  tmux -L probe capture-pane -t t -p | grep -q CHECKS && { ok=1; break; }; sleep 0.1; done
-echo "matched=$ok  $(( ($(date +%s%N) - start)/1000000 )) ms"   # matched=1 or the number is junk
-tmux -L probe kill-server                                       # NEVER on the default socket
+# The Go tier (the leg that gates this code at PR time):
+nix develop ~/workspace/devrc -c bash scripts/run-go-tests.sh .   # internal/ui pass>=197
 
-# The argv contract — read WITHOUT a pipe, a pipe eats the status:
-out=$(mention-review 2>&1); echo $?      # 64 ; bad repo -> 65 ; bad number -> 66
+# 🔴 A SANDBOX verdict is NOT the piped exit code — one exited 0 having reported nothing:
+nix build .#checks.x86_64-linux.pytests --no-link   # build ALONE; concurrent = false failures
+nix log /nix/store/<drv>.drv | grep -E 'RESULT:|SCOPE:'
 ```
