@@ -43,6 +43,22 @@ import collections
 import json
 import os
 import re
+import sys
+
+# 🔴 THE SHARED ENUMERATOR, not a fourth hand-rolled walk. `transcript_search` exists
+# because three private walks of this corpus disagreed, and
+# `test_the_jsonl_glob_site_ledger_is_pinned_two_way` fails any new one rather than
+# letting it pass unseen -- which is how this file was caught.
+#
+# It costs nothing here: `iter_transcripts` yields SESSION transcripts only
+# (`is_corpus_member` rejects `subagents/agent-*.jsonl`), and MEASURED over this
+# corpus all 170 clawgate blocking errors and all 37 fire-2 ladders sit in session
+# transcripts -- ZERO in subagent ones. So the split below is identical either way.
+# ⚠ That also retires the reason the 37-vs-32 denominator gap was attributed to:
+# it was the multi-id expansion documented above, never subagent inclusion.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "scripts", "lib"))
+import transcript_search  # noqa: E402
 
 ROOT = os.path.expanduser("~/.claude/projects")
 
@@ -91,39 +107,36 @@ def main():
     widths = collections.Counter()
     stamps = []
 
-    for dirpath, _dirs, files in os.walk(ROOT):
-        for fn in files:
-            if not fn.endswith(".jsonl"):
+    for _p in transcript_search.iter_transcripts(ROOT):
+        path = str(_p)
+        try:
+            blob = open(path, "rb").read()
+        except OSError:
+            continue
+        if b"clawgate write-back MISSING" not in blob:
+            continue
+        recs = []
+        for raw in blob.split(b"\n"):
+            if raw.strip():
+                try:
+                    recs.append(json.loads(raw))
+                except ValueError:
+                    pass
+        store[path] = recs
+        for i, o in enumerate(recs):
+            a = o.get("attachment")
+            if not isinstance(a, dict) or a.get("type") != "hook_blocking_error":
                 continue
-            path = os.path.join(dirpath, fn)
-            try:
-                blob = open(path, "rb").read()
-            except OSError:
+            be = a.get("blockingError")
+            txt = (be.get("blockingError") if isinstance(be, dict) else str(be)) or ""
+            ids = sorted(set(IDS.findall(txt)))
+            if not ids:
                 continue
-            if b"clawgate write-back MISSING" not in blob:
-                continue
-            recs = []
-            for raw in blob.split(b"\n"):
-                if raw.strip():
-                    try:
-                        recs.append(json.loads(raw))
-                    except ValueError:
-                        pass
-            store[path] = recs
-            for i, o in enumerate(recs):
-                a = o.get("attachment")
-                if not isinstance(a, dict) or a.get("type") != "hook_blocking_error":
-                    continue
-                be = a.get("blockingError")
-                txt = (be.get("blockingError") if isinstance(be, dict) else str(be)) or ""
-                ids = sorted(set(IDS.findall(txt)))
-                if not ids:
-                    continue
-                widths[len(ids)] += 1
-                if o.get("timestamp"):
-                    stamps.append(o["timestamp"])
-                for tid in ids:            # EVERY id, not just the first
-                    ladders[(path, tid)].append(i)
+            widths[len(ids)] += 1
+            if o.get("timestamp"):
+                stamps.append(o["timestamp"])
+            for tid in ids:            # EVERY id, not just the first
+                ladders[(path, tid)].append(i)
 
     rearm, legit = [], []
     for (path, tid), idx in ladders.items():
