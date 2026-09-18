@@ -82,7 +82,7 @@ python3 $DEVRC/scripts/find-session.py <terms> --live [--tail 80]
   `archive.live_coverage_complete: false` beside `live_ids_measured: true`. Do not report
   an `<UNMEASURED>` hit as finished.
 - 🔴 **These flags reach the ARCHIVE leg ONLY** — `--skill`, `--any`, `--project`, `--since`,
-  `--all-time`, `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. (That
+  `--all-time`, `--claude-only`, `--opencode-only`, `--all`, `--arc` — and the tool names them on stderr. (That
   list is `ARCHIVE_ONLY_FLAGS` in the script and is pinned against this line by
   `test_find_session_skill_contract.py`; it carries no count, because a count is a claim
   nothing enforces.) Surface
@@ -103,10 +103,10 @@ python3 $DEVRC/scripts/find-session.py <terms> --live [--tail 80]
   also pins each one against the behaviour it describes. Do not reword them here alone; an
   earlier hand-written version of this table shipped two claims the code contradicted.
 - `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0. 🔴 NOR a claim about coverage: a `--tail` that resolved to ONE window exits 0 even when a host did not answer, so another window may match on the host that was never asked. This is the code a caller ACTS on — read `tail.coverage_complete` before treating the resolution as unique.
-- `2` — bad arguments: `--tail` without `--live`, `--tail` below 1, `--limit` below 1, an unparseable `--since`, `--since` together with `--all-time` (they name two different windows), `--live` with no search terms (it matches a window's task/label/codename, so `--skill` alone is an ARCHIVE query), a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), `--claude-only` with `--opencode-only` (between them they search no corpus at all), `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one, or a malformed command line rejected by argparse ITSELF inside `main`'s first statement (an unknown flag, or a non-integer `--limit`/`--tail`). 🔴 That last one is the only exit 2 this module RAISES rather than returns — `parse_args` raises `SystemExit` — so an in-process caller must catch it, not read a return value.
+- `2` — bad arguments: `--tail` without `--live`, `--tail` below 1, `--limit` below 1, an unparseable `--since`, `--since` together with `--all-time` (they name two different windows), `--live` with no search terms (it matches a window's task/label/codename, so `--skill` alone is an ARCHIVE query), a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), `--claude-only` with `--opencode-only` (between them they search no corpus at all), `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one, an `--arc` seed that resolves to no handoff doc (a slug naming nothing, or a session id whose opening message names no doc — which is NOT an empty arc), or a malformed command line rejected by argparse ITSELF inside `main`'s first statement (an unknown flag, or a non-integer `--limit`/`--tail`). 🔴 That last one is the only exit 2 this module RAISES rather than returns — `parse_args` raises `SystemExit` — so an in-process caller must catch it, not read a return value.
 - `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
 - `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.
-- Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json` rather than on the
+- `5` — `--arc` ONLY: the doc was named but NOT MEASURED — no repo handle ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI) this shell can see holds it. 🔴 This is not an empty arc and must never be reported as one: nothing was read at all.
   code alone — `tail.coverage_complete` is `null` when the scan never ran, `false` when it
   ran and a host was missing. `--live` composes with `--json`, which then emits
   `{live, archive, tail}` instead of the bare array.
@@ -120,6 +120,37 @@ python3 $DEVRC/scripts/find-session.py <terms> --live [--tail 80]
 The live scan is `session-manager scan --json --lean --no-ch --match …`; the match
 predicate lives THERE, not in `find-session.py`, so the two tools cannot disagree. Details:
 `~/.claude/skills/session-manager/reference/payload-contract.md`.
+
+## 🔴 `--arc` — the session ended in a handoff; who picked it up?
+
+The round trip this kills: you find an old session, resume it, discover it ended in a
+`/handoff`, and search AGAIN for whoever continued. `--arc` resolves the whole chain.
+
+```bash
+python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, path, or SESSION ID
+```
+
+- **Two halves, unioned, each blind to what the other sees.** WRITERS come from the doc's
+  commit trailers — durable, and they include the **originating** session, which never
+  resumed from the doc it created and so appears in no transcript search. READERS come from
+  the transcript corpus: sessions whose OPENING message names the doc. A session working the
+  arc right now, with nothing committed, is visible only to the second.
+- 🔴 **Matched on the GENESIS, not on a mention.** Measured on one arc: the slug appears in
+  **48** sessions of which **3** opened with it. A keyword search for a doc name is ~6%
+  precision; that is why this is a flag and not advice to grep.
+- 🔴 **It always prints what it could NOT see** — `N of M commit(s) on this doc carry no
+  session id — those writers are NOT in this chain`, printed **even when N is 0**. Corpus-wide
+  coverage was 55% at time of writing and 87% for the month, so on older docs that line is the
+  difference between a chain and a chain that merely looks complete.
+- **Ordinary results are annotated too**, so you do not need to know this flag exists: a hit
+  whose genesis names a handoff doc prints `arc: handoff-<slug>` and the ready-made command.
+- **Corpus-wide, like `--skill`** — an arc spans the whole effort (one doc runs to 64 commits),
+  so the 12-day default would truncate the chain and present the tail as the whole thing. An
+  explicit `--since` still wins.
+- **Ids and repo labels only, never transcript paths** — paths name the client repo they sit
+  under and this repo is PUBLIC.
+- **Exit 5 is not an empty arc.** It means no repo handle this shell can see holds the doc, so
+  nothing was read at all.
 
 ## What to do (the archive search)
 

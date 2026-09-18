@@ -216,8 +216,8 @@ def test_the_contract_codes_are_the_scripts_own_EXIT_constants():
     a parallel set of integers."""
     declared = {code for code, _ in fs.EXIT_CONTRACT}
     assert declared == {fs.EXIT_OK, fs.EXIT_USAGE, fs.EXIT_AMBIGUOUS,
-                        fs.EXIT_UNAVAILABLE}
-    assert len(declared) == 4, "two codes collapsed onto one integer"
+                        fs.EXIT_UNAVAILABLE, fs.EXIT_ARC_UNMEASURED}
+    assert len(declared) == 5, "two codes collapsed onto one integer"
 
 
 def test_no_code_appears_twice_in_the_contract():
@@ -498,6 +498,10 @@ EXIT_2_CAUSES = (
     ("`--skill` with `--opencode-only` — that corpus carries no skill "
      "attribution, so the combination has no answer rather than an empty one",
      (["--skill", "browser", "--opencode-only"],)),
+    ("an `--arc` seed that resolves to no handoff doc (a slug naming "
+     "nothing, or a session id whose opening message names no doc — which "
+     "is NOT an empty arc)",
+     (["--arc", "README.md"], ["--arc", "not-a-doc-or-a-uuid/"])),
     # 🔴 NOT A `return EXIT_USAGE` SITE, AND THAT IS THE POINT. argparse exits 2
     # from inside `parse_args`, so this cause has no line in `main` for the
     # traced-union gate to cover — it is named here because a caller branching
@@ -608,7 +612,7 @@ def test_the_bare_literal_scan_CAN_fire():
 # COUNT is ratcheted instead: a tenth site cannot appear without someone
 # editing this number, and the failure message tells them what to do. A
 # tripwire, not a proof, and labelled as one so nobody reads it as more.
-EXIT_USAGE_SITE_COUNT = 10
+EXIT_USAGE_SITE_COUNT = 11
 
 
 def _exit_usage_sites(tree):

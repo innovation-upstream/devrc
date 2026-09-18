@@ -65,6 +65,7 @@ Examples:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, time, timedelta
@@ -76,6 +77,7 @@ from transcript_search import (  # noqa: E402
     search_peers,
 )
 from opencode_search import search_opencode  # noqa: E402
+import handoff_arc  # noqa: E402
 
 # Reassigned by tests to point at a tmp corpus. Read at CALL time, never captured.
 ROOT = DEFAULT_ROOT
@@ -153,6 +155,14 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_AMBIGUOUS = 3      # --tail could not resolve to exactly one window
 EXIT_UNAVAILABLE = 4    # --tail only: something the tail needed was not measured
+# 🔴 ITS OWN CODE RATHER THAN REUSING 4. Exit 4's "`--tail` ONLY" claim is a real
+# contract — `test_every_EXIT_UNAVAILABLE_source_is_on_the_tail_path` enforces it
+# STRUCTURALLY, so it stays true of code nobody has written yet. Widening it to
+# cover the arc path would have deleted that guarantee for every existing caller
+# to save one constant. The arc's failure is also a genuinely different fact: not
+# "the tail could not be measured" but "no checkout this shell can see holds the
+# doc", which is emphatically NOT "the arc is empty".
+EXIT_ARC_UNMEASURED = 5
 
 # --------------------------------------------------------------------------- #
 # 🔴 THE EXIT CONTRACT, AS DATA — because the shipped doc got it wrong TWICE
@@ -213,7 +223,10 @@ EXIT_CONTRACT = (
                  "`--claude-only` with `--opencode-only` (between them they "
                  "search no corpus at all), `--skill` with `--opencode-only` — "
                  "that corpus carries no skill attribution, so the combination "
-                 "has no answer rather than an empty one, or a malformed "
+                 "has no answer rather than an empty one, an `--arc` seed that "
+                 "resolves to no handoff doc (a slug naming nothing, or a "
+                 "session id whose opening message names no doc — which is NOT "
+                 "an empty arc), or a malformed "
                  "command line rejected by argparse ITSELF inside `main`'s "
                  "first statement (an unknown flag, or a non-integer "
                  "`--limit`/`--tail`). 🔴 That last one is the only exit 2 this "
@@ -231,6 +244,11 @@ EXIT_CONTRACT = (
                        "nothing matched while a host was unreachable. Without "
                        "`--tail` a failed scan still exits 0 and says so in the "
                        "LIVE section."),
+    (EXIT_ARC_UNMEASURED, "`--arc` ONLY: the doc was named but NOT "
+                          "MEASURED — no repo handle ($DEVRC, $HOMELAB, "
+                          "$DATAPACKET, $CIVITAI) this shell can see holds "
+                          "it. 🔴 This is not an empty arc and must never be "
+                          "reported as one: nothing was read at all."),
 )
 
 
@@ -245,6 +263,7 @@ WINDOW_DEFAULT = "default"        # nothing asked; DEFAULT_SINCE_DAYS applied
 WINDOW_EXPLICIT = "explicit"      # --since
 WINDOW_ALL_TIME = "all-time"      # --all-time
 WINDOW_SKILL_EXEMPT = "skill-exempt"   # --skill, unwindowed on purpose
+WINDOW_ARC_EXEMPT = "arc-exempt"       # --arc, unwindowed for the same reason
 
 
 def resolve_window(a, now=None):
@@ -258,6 +277,13 @@ def resolve_window(a, now=None):
     🔴 `--skill` IS EXEMPT — see `DEFAULT_SINCE_DAYS`. An EXPLICIT `--since` is
     still honoured alongside `--skill`: the exemption removes a default nobody
     asked for, it does not override an instruction somebody gave.
+
+    🔴 `--arc` IS EXEMPT FOR THE SAME REASON, and it matters more here. An arc
+    spans however long the effort ran — the measured ones run days to weeks, and
+    `handoff-tmux-webapp.md` spans 64 commits — so a 12-day default would silently
+    truncate the chain to its recent tail and present that as the whole thing.
+    That is precisely the "a count under a window reported as an absence" failure
+    the window notice exists to prevent, reached from inside the tool.
     """
     if a.since:
         return datetime.fromisoformat(a.since), WINDOW_EXPLICIT
@@ -265,6 +291,8 @@ def resolve_window(a, now=None):
         return None, WINDOW_ALL_TIME
     if getattr(a, "skill", ""):
         return None, WINDOW_SKILL_EXEMPT
+    if getattr(a, "arc", ""):
+        return None, WINDOW_ARC_EXEMPT
     base = now or datetime.now()
     cutoff = (base - timedelta(days=DEFAULT_SINCE_DAYS)).replace(
         hour=0, minute=0, second=0, microsecond=0)
@@ -617,6 +645,9 @@ ARCHIVE_ONLY_FLAGS = (
     ("skill", "--skill", "the live scan has NO skill-attribution axis — a "
                          "window's task/label/codename cannot say which skill "
                          "ran in it"),
+    ("arc", "--arc", "an ARC is a doc's commit history joined to the transcript "
+                     "corpus; a live window carries neither, so the scan has no "
+                     "axis that could answer it"),
 )
 
 # The destinations that DO reach the live leg (or steer both). Pinned beside the
@@ -844,6 +875,14 @@ def build_parser():
                    help="with --live: print the last N scrollback lines of the "
                         "matched window. REFUSES on an ambiguous match rather "
                         "than guessing (exit 3), and lists the candidates.")
+    p.add_argument("--arc", default=None, metavar="SEED",
+                   help="resolve a whole handoff ARC — every session that "
+                        "worked one handoff doc. SEED is a doc slug, a doc "
+                        "path, or a session id. Unions the doc's commit "
+                        "trailers (which include the ORIGINATING session) with "
+                        "the sessions whose opening message names the doc. "
+                        "Corpus-wide like --skill: an arc is a historical "
+                        "question.")
     return p
 
 
@@ -984,6 +1023,187 @@ def render_archive_hit(i, r, state=None):
     return out
 
 
+_UUIDISH = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def session_genesis(session_id, root=None):
+    """The opening user message of `session_id`, or '' when unreadable.
+
+    Reads the transcript directly by filename rather than walking the corpus: the
+    id IS the filename, so this is one glob instead of a 15-second search.
+    """
+    base = Path(root or ROOT)
+    try:
+        matches = list(base.glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return ""
+    for path in matches:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("type") != "user":
+                        continue
+                    msg = rec.get("message") or {}
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            c.get("text", "") for c in content
+                            if isinstance(c, dict))
+                    if isinstance(content, str) and content.strip():
+                        return content
+        except OSError:
+            continue
+    return ""
+
+
+def arc_seed_to_doc(seed, root=None):
+    """Resolve an `--arc` seed to a handoff doc basename, or ''.
+
+    Accepts a slug/basename/path directly; a SESSION ID is resolved by reading
+    that session's opening message, which is where `/handoff`'s kickoff line puts
+    the doc path. That indirection is the whole point of the flag: the operator
+    starts from a session they found, not from a doc they already know.
+    """
+    # 🔴 THE UUID TEST MUST COME FIRST. `doc_basename` deliberately accepts a
+    # bare topic (`foo` -> `handoff-foo.md`), so it accepts a UUID too and
+    # returns `handoff-<uuid>.md` — a doc that cannot exist. Ordering it after
+    # made the session-id branch UNREACHABLE, and the failure was silent: the
+    # caller got a clean "no repo holds that doc" for a session id that resolves
+    # perfectly well. Caught by `test_a_uuid_seed_reads_the_sessions_OPENING_message`.
+    if _UUIDISH.match((seed or "").strip()):
+        return handoff_arc.doc_in_text(session_genesis(seed.strip(), root=root))
+    return handoff_arc.doc_basename(seed)
+
+
+def arc_repo_for(basename, env=None):
+    """`(repo_path, relpath)` for the repo holding this doc, or `(None, None)`.
+
+    Searches every repo in `handoff_index.REPO_ENV_HANDLES` — on this host devrc,
+    homelab-talos, datapacket-talos and civitai — because an arc belongs to
+    whichever repo owns its doc and the operator should not have to say which.
+
+    ⚠ TWO of those are CLIENT repos, so a caller rendering the result must print
+    the repo LABEL and never the transcript path; `handoff_arc.ArcMember` has no
+    path field, which is how that is enforced rather than remembered.
+    """
+    src = os.environ if env is None else env
+    for handle in ("DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI"):
+        root = (src.get(handle) or "").strip()
+        if not root:
+            continue
+        for rel in (f"claudedocs/{basename}", f"claudedocs/archive/{basename}"):
+            if (Path(root) / rel).exists():
+                return root, rel
+    return None, None
+
+
+def render_arc(report, unresolved_note=None):
+    """The human rendering of an arc. Ids and repo LABELS only — never a path."""
+    out = [f"ARC: {report.doc}  (repo {report.repo or 'unknown'})", ""]
+    if not report.members:
+        out.append("  no sessions resolved")
+    for i, m in enumerate(report.members, 1):
+        when = (m.first_seen or "")[:16].replace("T", " ")
+        out.append(f"{i}. [{when or 'time UNMEASURED'}] {m.role.upper():10} "
+                   f"{m.session_id}")
+        out.append(f"   resume: {m.resume_command()}")
+        if m.commits:
+            out.append(f"   commits: {' '.join(c[:8] for c in m.commits)}")
+        out.append("")
+    # 🔴 ALWAYS PRINTED, INCLUDING WHEN IT IS ZERO — see `handoff_arc.coverage_line`.
+    out.append(handoff_arc.coverage_line(report))
+    for note in report.unmeasured_notes:
+        out.append(f"! {note}")
+    if unresolved_note:
+        out.append(f"! {unresolved_note}")
+    return "\n".join(out)
+
+
+def run_arc(a, _since=None):
+    """Resolve and print one arc. Returns an exit code."""
+    basename = a.arc
+    repo, rel = arc_repo_for(basename)
+    if repo is None:
+        print(f"--arc: no repo handle holds claudedocs/{basename}. 🔴 This is "
+              "NOT 'the arc is empty' — it means every $DEVRC/$HOMELAB/"
+              "$DATAPACKET/$CIVITAI checkout this shell can see lacks the doc, "
+              "so nothing was measured at all.", file=sys.stderr)
+        return EXIT_ARC_UNMEASURED
+
+    # The reader half: walk the corpus for the doc name, then keep only the
+    # sessions that OPENED with it. Terms are replaced deliberately — an arc
+    # query is about one doc, not about whatever else the caller typed.
+    reader_rows, readers_measured = [], False
+    try:
+        arc_args = parse_args([basename, "--all-time", "--claude-only"])
+        rows = archive_search(arc_args, None)
+        reader_rows = [render(r) for r in rows]
+        readers_measured = True
+    except Exception as exc:                      # noqa: BLE001
+        print(f"(the transcript walk failed: {exc})", file=sys.stderr)
+
+    report = handoff_arc.resolve_arc(repo, rel, reader_rows=reader_rows,
+                                     readers_measured=readers_measured)
+    if a.json:
+        print(json.dumps({
+            "doc": report.doc,
+            "repo": report.repo,
+            "members": [{"session_id": m.session_id, "role": m.role,
+                         "repo": m.repo, "first_seen": m.first_seen,
+                         "commits": list(m.commits),
+                         "resume": m.resume_command()}
+                        for m in report.members],
+            "total_commits": report.total_commits,
+            "unstamped_commits": report.unstamped_commits,
+            "coverage": handoff_arc.coverage_line(report),
+            "readers_measured": report.readers_measured,
+            "unmeasured": report.unmeasured_notes,
+        }, indent=2))
+        return EXIT_OK
+    print(render_arc(report))
+    return EXIT_OK
+
+
+def arc_annotation(r, arc_counts=None):
+    """`arc: handoff-<slug> (N sessions)` for a hit whose GENESIS names a doc.
+
+    🔴 THIS IS THE HALF THAT FIXES THE REPORTED PAIN. The operator's complaint was
+    not "I cannot resolve an arc"; it was "I find a session, resume it, discover
+    it ended in a handoff, and have to search AGAIN". A flag they must already
+    know about does not fix that — a line on the ordinary result does.
+
+    Keyed on the GENESIS, not on the body, for the reason `handoff_arc` explains:
+    measured on one arc, the slug appears in 48 sessions of which 3 opened with
+    it. Annotating all 48 would be noise on 45 of them.
+
+    `arc_counts` maps doc basename -> member count. Absent or missing => the
+    count is NOT printed, because an unmeasured count rendered as `(0 sessions)`
+    would read as "this arc is empty" for a doc with a dozen members.
+    """
+    basename = _arc_doc_in_genesis(r.get("genesis") or "")
+    if not basename:
+        return None
+    n = (arc_counts or {}).get(basename)
+    suffix = f" ({n} sessions)" if isinstance(n, int) and n > 0 else ""
+    return (f"   arc: {basename}{suffix} — "
+            f"find-session.py --arc {basename}")
+
+
+def _arc_doc_in_genesis(genesis):
+    """The handoff doc basename a session OPENED with, or None.
+
+    Delegates to `handoff_arc.doc_in_text` rather than re-spelling the pattern:
+    the reader and the annotator must agree about what counts as naming a doc, and
+    two copies of a predicate are wrong at one site eventually.
+    """
+    return handoff_arc.doc_in_text(genesis or "") or None
+
+
 def _tail_outcome(a, live):
     """Resolve `--tail` to ONE window, or REFUSE and say why.
 
@@ -1104,10 +1324,26 @@ def main(argv=None):
     if raw_skill is not None and not a.skill:
         print(f"--skill {raw_skill!r} names no skill", file=sys.stderr)
         return EXIT_USAGE
-    if not a.terms and not a.skill:
-        print("nothing to search for: give at least one term, or --skill NAME",
-              file=sys.stderr)
+    # 🔴 `--arc` NAMES ITS OWN QUERY, so it satisfies "something to search for"
+    # the way `--skill` does. Without this clause `--arc <doc>` alone — the
+    # spelling the annotation prints, and therefore the one a caller will paste —
+    # would exit 2 telling them to add a term.
+    if not a.terms and not a.skill and not a.arc:
+        print("nothing to search for: give at least one term, --skill NAME, "
+              "or --arc SEED", file=sys.stderr)
         return EXIT_USAGE
+    if a.arc:
+        seed_doc = arc_seed_to_doc(a.arc)
+        if not seed_doc:
+            print(f"--arc {a.arc!r} resolves to no handoff doc. Pass a slug "
+                  "(`handoff-foo`), a basename, a path under claudedocs/, or a "
+                  "session id whose opening message names one. 🔴 A session id "
+                  "that resolves to NOTHING is not the same as an empty arc: "
+                  "that session may simply never have been handed a handoff "
+                  "doc, or its transcript may have been pruned.",
+                  file=sys.stderr)
+            return EXIT_USAGE
+        a.arc = seed_doc
     # 🔴 TWO CORPUS SELECTORS THAT BETWEEN THEM SELECT NOTHING. `archive_search`
     # skips opencode under `--claude-only` and skips the local Claude walk AND
     # `search_peers` under `--opencode-only`, so the pair searches NO corpus and
@@ -1182,6 +1418,14 @@ def main(argv=None):
             print(notice, file=sys.stderr)
 
     # ------------------------------------------------------------------ #
+    # 🔴 THE ARC PATH. Answered from git + the transcript corpus; the live fleet
+    # has no axis that could contribute, which is why `--arc` is in
+    # ARCHIVE_ONLY_FLAGS and why this runs before the live branch.
+    # ------------------------------------------------------------------ #
+    if a.arc:
+        return run_arc(a)
+
+    # ------------------------------------------------------------------ #
     # THE CLASSIC PATH — unchanged, byte for byte, including `--json`'s
     # bare-list shape. `--live` is opt-in precisely so no existing caller's
     # output moves.
@@ -1214,7 +1458,15 @@ def main(argv=None):
               + (f" (showing {len(shown)})" if len(shown) < len(results) else "")
               + "\n")
         for i, r in enumerate(shown, 1):
-            print("\n".join(render_archive_hit(i, r)))
+            lines = render_archive_hit(i, r)
+            # 🔴 THE ANNOTATION, ON THE ORDINARY PATH. This is what removes the
+            # round trip the operator reported: find a session, see it belongs to
+            # an arc, and get the command to resolve the rest — without having to
+            # know `--arc` exists.
+            note = arc_annotation(r)
+            if note:
+                lines.insert(-1, note)
+            print("\n".join(lines))
         return EXIT_OK
 
     # ------------------------------------------------------------------ #
