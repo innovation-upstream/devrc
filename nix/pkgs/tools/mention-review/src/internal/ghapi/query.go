@@ -171,12 +171,9 @@ func (c *Client) do(ctx context.Context, req *http.Request) ([]byte, error) {
 	}
 	st := ClassifyResponse(true, resp.StatusCode, remaining)
 	if st != AuthOK {
-		// 🔴 REDACT FIRST, CLIP SECOND, AND THE ORDER IS LOAD-BEARING. `redact`
-		// looks for the exact secret this client holds; clipping first could cut
-		// a reflected token in half and leave the surviving prefix un-redacted,
-		// because the needle would no longer be in the haystack. Clipping AFTER
-		// can only ever shorten a string the secret has already left.
-		e := &APIError{State: st, Detail: clipDetail(c.redact(apiMessage(body, resp.Status)))}
+		// 🔴 REDACT FIRST, CLIP SECOND, AND THE ORDER IS LOAD-BEARING — see
+		// `Client.detail`, which is where that order now lives.
+		e := &APIError{State: st, Detail: c.detail(apiMessage(body, resp.Status))}
 		if st == AuthRateLimited {
 			if v := resp.Header.Get("x-ratelimit-reset"); v != "" {
 				if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -226,16 +223,23 @@ const maxReflectedErrorEntries = 5
 // pathological body to produce a megabyte-long card. Runes rather than bytes so
 // the truncation cannot land inside a codepoint.
 //
-// 🔴 "THE WHOLE DETAIL" MEANS EVERY DETAIL THIS CLIENT BUILDS OUT OF SERVER
-// CONTENT, AND UNTIL THIS COMMIT THAT SENTENCE WAS FALSE. It bounded only what
-// flowed through `do` — the REST/HTTP-status path. A GraphQL 200 carrying
-// `errors[0].message` went out through `Mergeability` and `decodeSnapshot`
-// UNCLIPPED and, worse, UNREDACTED. MEASURED by the round-1 audit of #1761: a
-// fake GraphQL server echoing the credential in that field produced a
-// 5,057-rune detail with the token intact. Both decoders now go through
-// `Client.decodeGQLError`, which does exactly what `do` does. The invariant is
-// pinned by `TestNoErrorPathEverCarriesTheToken` and
-// `TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail`.
+// 🔴 THIS SENTENCE HAS NOW BEEN FALSE TWICE, AND EACH TIME A COMMENT DECLARED
+// THE CLASS CLOSED WHILE ONE MEMBER OF IT WAS OPEN. Round 1: the cap bounded
+// only what flowed through `do` — the REST/HTTP-status path — while a GraphQL
+// 200 carrying `errors[0].message` went out through `Mergeability` and
+// `decodeSnapshot` UNCLIPPED and UNREDACTED (measured: a 5,057-rune detail with
+// the token intact). Round 2: the fix said "every detail this client builds out
+// of server content" and MISSED the merge gate's `default:` arm, which
+// interpolates the server's `mergeable` string — measured at 5,133 runes,
+// unclipped and unredacted, from a probe server.
+//
+// So the honest form of the claim is a LEDGER, not an adjective. Every path
+// that turns server content into an `APIError.Detail` goes through
+// `Client.detail` (redact then clip); the four of them are enumerated on
+// `TestNoErrorPathEverCarriesTheToken`, which fails if a fifth appears
+// unledgered. `TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail` and
+// `TestTheMergeabilityRefusalNeverReflectsTheServersWordUnclipped` pin the
+// clipping half.
 const maxDetailRunes = 400
 
 // apiMessage renders GitHub's error body into the one line the card shows.
@@ -505,7 +509,11 @@ func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) 
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
-		return MergeRead{}, &APIError{State: AuthOther, Detail: "unreadable response: " + err.Error()}
+		// ⚠ REDACTED AND CLIPPED LIKE EVERYTHING ELSE, even though this is the
+		// decoder's own prose. `json.SyntaxError` quotes the OFFENDING BYTE of
+		// the body, so "the decoder's prose carries no server text" is very
+		// nearly true rather than true — and `Client.detail` costs nothing.
+		return MergeRead{}, &APIError{State: AuthOther, Detail: c.detail("unreadable response: " + err.Error())}
 	}
 	if gqlErr := c.decodeGQLError(body); gqlErr != nil {
 		return MergeRead{}, gqlErr
@@ -518,7 +526,20 @@ func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) 
 	}
 	pr := r.Data.Repository.PullRequest
 	return MergeRead{
-		Mergeable: NormalizeMergeable(pr.Mergeable),
+		// 🔴 REDACTED BEFORE NORMALISATION, AND THAT ORDER IS NOT COSMETIC.
+		// `NormalizeMergeable` UPPERCASES whatever the server sent, and `redact`
+		// looks for the EXACT secret this client holds — so a token reflected in
+		// this field and redacted afterwards would not be found, and the whole
+		// credential would reach the card with only its case changed. This is the
+		// same class as the redact-before-clip order one screen up, on a
+		// transform nobody thought of as destructive.
+		//
+		// ⚠ `mergeable` IS A GRAPHQL ENUM, so a CONFORMING server cannot send
+		// arbitrary text here. That is exactly as true of `errors[0].message`
+		// under this file's own stated threat model — "this code did not
+		// construct it and cannot vouch for it" — which the round-1 audit treated
+		// as a real defect. A proxy or an enterprise gateway is not the schema.
+		Mergeable: NormalizeMergeable(c.redact(pr.Mergeable)),
 		Terminal:  TerminalPRState(pr.State, pr.Merged),
 	}, nil
 }
@@ -539,26 +560,70 @@ func (c *Client) Mergeability(ctx context.Context, owner, name string, num int) 
 // call site in `do`: clipping first could cut a reflected token in half and
 // leave the surviving prefix un-redacted.
 //
-// ⚠ An unparseable body is NOT this function's to report. Both callers decode
-// the body for their own shape first and answer `unreadable response` there, so
-// returning nil here means "no `errors[]` to speak of", never "the body was
-// fine".
+// 🔴 "NO `errors` KEY" AND "AN `errors` KEY I CANNOT READ" ARE DIFFERENT
+// ANSWERS, AND COLLAPSING THEM MANUFACTURED A FALSE DIAGNOSIS. The first
+// version of this function decoded straight into `[]struct{…}` and returned nil
+// on ANY unmarshal failure. That was survivable while both callers still
+// declared their own `errors` field and reported `unreadable response` for
+// themselves; consolidating the mapping here DELETED those declarations, so a
+// body whose `errors` is an object rather than an array — `{"errors":{"message":
+// "you may not do that"}}` — decoded cleanly into the callers' own structs
+// (which no longer mention `errors`), returned nil here, and fell through to the
+// NOT-FOUND arm below the call site. MEASURED at `d2ec72c3`: `Fetch` answered
+// `NOT FOUND — o/n#1 is not visible to this token` and `Mergeability` answered
+// `NOT FOUND — o/n#1 is not a pull request this token can read`, for a response
+// nobody had managed to read. That sends the operator to fix a token permission
+// that is fine. At `264a567f` both answered `AuthOther — unreadable response`.
+//
+// So the `errors` key is probed as RAW JSON first, and only then decoded: an
+// absent or null or empty `errors` is "nothing to speak of" and returns nil; an
+// `errors` that is PRESENT and does not decode is reported as unreadable, which
+// is what it is.
+//
+// ⚠ A body that is not JSON AT ALL is still not this function's to report —
+// both callers decode the body for their own shape first and answer
+// `unreadable response` there, and they run before this does.
+//
+// ⚠ THE IRONY IS WORTH RECORDING: the commit that narrowed this path's handling
+// of a non-array `errors` is the same commit that WIDENED `apiMessage`'s
+// tolerance for the identical shape (see its `narrow` fallback). One function
+// learned to read past it and its neighbour learned to mistake it for absence.
 func (c *Client) decodeGQLError(body []byte) error {
-	var env struct {
-		Errors []struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"errors"`
+	var probe struct {
+		Errors json.RawMessage `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &env); err != nil || len(env.Errors) == 0 {
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return nil
+	}
+	if len(probe.Errors) == 0 || string(probe.Errors) == "null" {
+		return nil
+	}
+	var entries []struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(probe.Errors, &entries); err != nil {
+		return &APIError{State: AuthOther, Detail: c.detail("unreadable response: " + err.Error())}
+	}
+	if len(entries) == 0 {
 		return nil
 	}
 	st := AuthOther
-	if env.Errors[0].Type == "NOT_FOUND" {
+	if entries[0].Type == "NOT_FOUND" {
 		st = AuthNotFound
 	}
-	return &APIError{State: st, Detail: clipDetail(c.redact(env.Errors[0].Message))}
+	return &APIError{State: st, Detail: c.detail(entries[0].Message)}
 }
+
+// detail is redact-then-clip, in ONE place.
+//
+// 🔴 THE ORDER IS THE WHOLE POINT AND IT WAS OPEN-CODED AT THREE SITES. `redact`
+// looks for the exact secret this client holds; clipping first could cut a
+// reflected token in half and leave the surviving prefix un-redacted, because
+// the needle would no longer be in the haystack. Clipping AFTER can only ever
+// shorten a string the secret has already left. A two-step rule spelled out at
+// every call site is a rule that will be spelled wrong at one of them.
+func (c *Client) detail(s string) string { return clipDetail(c.redact(s)) }
 
 // --- decoding ---------------------------------------------------------------
 
@@ -677,7 +742,8 @@ type gqlNode struct {
 func (c *Client) decodeSnapshot(body []byte, repo string, num int) (*Snapshot, error) {
 	var r gqlResponse
 	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, &APIError{State: AuthOther, Detail: "unreadable response: " + err.Error()}
+		// ⚠ Redacted and clipped for the same reason as `Mergeability`'s copy.
+		return nil, &APIError{State: AuthOther, Detail: c.detail("unreadable response: " + err.Error())}
 	}
 	if gqlErr := c.decodeGQLError(body); gqlErr != nil {
 		return nil, gqlErr

@@ -61,8 +61,11 @@ const (
 // because the cost of the two mistakes is not symmetric: reading an absent field
 // as CLOSED would refuse every merge the moment GitHub renamed or omitted it,
 // while reading it as OPEN costs at most one wasted write, which GitHub refuses
-// and the renderer now shows in full rather than as two words. A missing field
-// is a thing we do not know, and this function says so by declining to answer.
+// and the renderer now shows in full rather than as two words. ⚠ The `405 Pull
+// Request is not mergeable` wording quoted elsewhere for that refusal is
+// REPORTED, not measured — no response body was captured — so this asymmetry
+// rests on the rendering rather than on that string. A missing field is a thing
+// we do not know, and this function says so by declining to answer.
 //
 // ⚠ `merged` IS READ BESIDE `state`, not instead of it. They are separate
 // fields on the same object and GitHub has always agreed with itself about them;

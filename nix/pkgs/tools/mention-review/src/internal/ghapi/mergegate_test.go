@@ -309,10 +309,16 @@ func TestAConflictFoundOnlyByTheLiveReadStopsTheMerge(t *testing.T) {
 // mergeability, which is exactly what the server sends for these two.
 //
 // 🔴 THE REGRESSION IS THE GATE'S OWN. Before the gate existed the merge PUT
-// went out and GitHub answered `405 Pull Request is not mergeable`, which the
-// renderer shows in full — a true and actionable card. A gate that replaced that
-// with "still recomputing, press `m` again" would be a net LOSS for this case:
-// false, and non-terminating, because the advice can never come true.
+// went out and GitHub refused it — REPORTEDLY with `405 Pull Request is not
+// mergeable`. ⚠ That string is a report and not a measurement: no response body
+// from 2026-09-17 was captured and none can be recovered. The hedge is the same
+// one `write.go` and `types.go` carry, deliberately — this claim is spelled in
+// four places and two of them used to state flat what the other two hedged,
+// which is the two-evidentiary-standards defect round 1 was convened to fix.
+// What IS established is that a refusal carrying a server message is rendered in
+// full rather than as two words. A gate that replaced a true refusal with "still
+// recomputing, press `m` again" would be a net LOSS for this case: false, and
+// non-terminating, because the advice can never come true.
 //
 // ⚠ THE FORBIDDEN STRINGS ARE THE POINT OF THE TEST, so they are written out
 // here rather than derived from the message under test.
@@ -428,9 +434,12 @@ func TestTheMergeFakeAnswersOnlyTheFieldsTheQueryAsksFor(t *testing.T) {
 //
 // An absent or unrecognised `state` is NOT terminal: reading a missing field as
 // CLOSED would refuse every merge the moment GitHub renamed or omitted it, while
-// reading it as open costs one wasted write whose 405 the renderer now shows in
-// full. The two mistakes do not cost the same, so the predicate declines rather
-// than guesses.
+// reading it as open costs one wasted write whose refusal the renderer now shows
+// in full rather than as two words. ⚠ The specific `405 Pull Request is not
+// mergeable` wording is REPORTED and not measured — see the terminal-pull-request
+// test above — so the asymmetry rests on the rendering, not on that string.
+// The two mistakes do not cost the same, so the predicate declines rather than
+// guesses.
 func TestTerminalPRStateAnswersOnlyOnAPositivelyTerminalPullRequest(t *testing.T) {
 	cases := []struct {
 		state  string
@@ -507,6 +516,80 @@ func TestTheUnknownRefusalNamesHowManyReadsItActuallyMade(t *testing.T) {
 		}
 		if strings.Contains(got, "re-read") {
 			t.Errorf("the refusal still calls the first read a re-read: %s", got)
+		}
+	})
+}
+
+// 🔴 THE FOURTH REFLECTING PATH: THE REFUSAL THAT QUOTES THE SERVER'S OWN WORD.
+//
+// `write.go`'s `default:` arm interpolates `read.Mergeable` — which is
+// `NormalizeMergeable` of a string the SERVER sent — straight into the card. At
+// `d2ec72c3` it did so with no `clipDetail` and no `redact`, and a probe server
+// measured a 5,133-rune unclipped, unredacted detail out of it, while two
+// comments one file over asserted that every server-derived detail was bounded
+// and that no unlisted path carried server text.
+//
+// ⚠ THE CLIP IS ON THE SERVER'S WORD, NOT ON THE SENTENCE. Clipping the composed
+// detail would cut `NOTHING WAS SENT.` off the end exactly when the server sent
+// something pathological — so this test asserts the clip AND the survival of the
+// clause the operator must read.
+//
+// ⚠ THE CEILING IS ABSOLUTE AND IS NOT MADE OF THE CONSTANT UNDER TEST. A mutant
+// that raises `maxDetailRunes` still "clips", at its own number.
+func TestTheMergeabilityRefusalNeverReflectsTheServersWordUnclipped(t *testing.T) {
+	t.Run("a pathological word is clipped and the refusal survives it", func(t *testing.T) {
+		huge := strings.Repeat("qwertyuiop", 500) // 5,000 runes
+		c, f, done := newMergeFake(t, 4, huge)
+		defer done()
+
+		err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase")
+		if err == nil {
+			t.Fatal("a merge went out on a mergeability word nobody recognised")
+		}
+		var ae *APIError
+		if !asAPIError(err, &ae) {
+			t.Fatalf("err is %T, want *APIError: %v", err, err)
+		}
+		// A terminal line's worth, whatever `maxDetailRunes` says.
+		const cardCeiling = 600
+		if n := len([]rune(ae.Detail)); n > cardCeiling {
+			t.Errorf("the refusal is %d runes — past the %d-rune ceiling a single terminal "+
+				"line can carry. The server's `mergeable` string reached the card unclipped: %.120q",
+				n, cardCeiling, ae.Detail)
+		}
+		if !strings.Contains(ae.Detail, "…") {
+			t.Errorf("a 5,000-rune server word produced a detail with no clip marker: %.120q",
+				ae.Detail)
+		}
+		// 🔴 THE CLAUSE THE OPERATOR MUST READ SURVIVED. Clipping the composed
+		// sentence instead of the server's word would have eaten it.
+		if !strings.HasSuffix(ae.Detail, "NOTHING WAS SENT.") {
+			t.Errorf("the refusal no longer ends by saying nothing was sent — the clip was "+
+				"applied to the whole sentence rather than to the server's word: %.200q",
+				ae.Detail)
+		}
+		if _, put, _ := f.seen(); put != 0 {
+			t.Fatalf("a MERGE REQUEST was sent (%d PUTs)", put)
+		}
+	})
+
+	// 🔴 POSITIVE CONTROL: a SHORT unrecognised word comes through verbatim, so
+	// the assertions above are a claim about clipping rather than about a refusal
+	// that always says the same thing.
+	t.Run("a short unrecognised word is reported in full", func(t *testing.T) {
+		c, _, done := newMergeFake(t, 4, "SOMETHING_GITHUB_ADDED_LATER")
+		defer done()
+
+		err := c.Merge(context.Background(), wOwner, wName, wNum, "rebase")
+		if err == nil {
+			t.Fatal("a merge went out on a mergeability word nobody recognised")
+		}
+		if !strings.Contains(err.Error(), "SOMETHING_GITHUB_ADDED_LATER") {
+			t.Errorf("the refusal does not name the state the server sent: %v", err)
+		}
+		if strings.Contains(err.Error(), "…") {
+			t.Errorf("a 28-rune word was clipped — the bound is wired to something much "+
+				"smaller than a card: %v", err)
 		}
 	})
 }

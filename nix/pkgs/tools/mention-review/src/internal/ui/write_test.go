@@ -702,6 +702,48 @@ func TestASuccessfulWriteRereadsThePullRequest(t *testing.T) {
 	}
 }
 
+// 🔴 THE RECOVERY ROUTE `proposeMerge`'S COMMENT NAMES, PINNED — BECAUSE THAT
+// COMMENT WAS WRONG.
+//
+// It said the only way out of the stale-CLOSED merge refusal was to relaunch.
+// `r` is inert on a healthy screen, which is the true half; but `stepWriteDone`
+// emits `FetchPR` after EVERY successful write, and the terminal refusal covers
+// `m` alone — `c` on a pull request that reads CLOSED is still legitimate. So
+// posting a comment re-reads the pull request and a snapshot that was stale
+// CLOSED is replaced.
+//
+// ⚠ THE SEQUENCE IS THE POINT, NOT THE SECOND HALF ALONE. The refusal is raised
+// FIRST, from the same app state, so this is a claim about a recovery from a
+// condition that actually holds rather than about `WriteDone` in the abstract —
+// which `TestASuccessfulWriteRereadsThePullRequest` already covers for `MergePR`
+// on a healthy screen.
+func TestACommentOnAPullRequestThatReadsClosedStillRereadsIt(t *testing.T) {
+	a := ready(t)
+	snap := fixturePR()
+	snap.State, snap.Merged = ghapi.PRStateClosed, false
+	a, _ = a.Step(PRLoaded{Snap: snap})
+
+	refused, mergeIntents := a.Step(keyPress("m"))
+	if len(mergeIntents) != 0 {
+		t.Fatalf("`m` on a CLOSED pull request emitted %v", mergeIntents)
+	}
+	if !strings.Contains(refused.Notice(), "CLOSED") {
+		t.Fatalf("`m` on a CLOSED pull request did not raise the refusal this test is "+
+			"about: %q", refused.Notice())
+	}
+
+	next, intents := a.Step(WriteDone{Verb: "PostComment"})
+	want := []Intent{FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	if !intentsEqual(intents, want) {
+		t.Fatalf("a successful comment on a pull request that reads CLOSED emitted %v, "+
+			"want %v — without the re-read, relaunching really would be the only way out "+
+			"of a stale CLOSED, and `proposeMerge`'s comment says otherwise", intents, want)
+	}
+	if !strings.Contains(next.Notice(), "PostComment") {
+		t.Errorf("notice = %q, want it to name the verb", next.Notice())
+	}
+}
+
 func TestAFailedWriteIsANoticeAndNotAPageFailure(t *testing.T) {
 	a := ready(t)
 	next, intents := a.Step(WriteDone{

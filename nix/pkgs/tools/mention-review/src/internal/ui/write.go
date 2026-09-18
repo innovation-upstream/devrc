@@ -151,13 +151,19 @@ func (a App) proposeMerge() (App, []Intent) {
 	// other. Both call `ghapi.TerminalPRState`, so "already over" has one
 	// definition rather than two.
 	//
-	// ⚠ THE SNAPSHOT CAN BE STALE BOTH WAYS, AND ONE OF THOSE HAS NO IN-APP
-	// RECOVERY. A pull request merged by somebody else since the fetch still
-	// looks OPEN here — harmless, because the live read catches it. One REOPENED
-	// since the fetch still looks CLOSED, and this refuses a merge that would
-	// have been fine; `r` is inert on a healthy screen (see `ActRetry`), so the
-	// only way out today is to relaunch. That is the cheaper of the two
+	// ⚠ THE SNAPSHOT CAN BE STALE BOTH WAYS. A pull request merged by somebody
+	// else since the fetch still looks OPEN here — harmless, because the live
+	// read catches it. One REOPENED since the fetch still looks CLOSED, and this
+	// refuses a merge that would have been fine. That is the cheaper of the two
 	// mistakes and it is chosen, not overlooked.
+	//
+	// ⚠ RECOVERING FROM IT DOES NOT REQUIRE A RELAUNCH, AND THIS COMMENT USED TO
+	// SAY IT DID. `r` is inert on a healthy screen (see `ActRetry`), which is the
+	// true half — but `stepWriteDone` emits `FetchPR` after EVERY successful
+	// write, and the terminal refusal here covers `m` alone (`c` on a merged pull
+	// request stays legitimate, as `write_test.go` asserts directly). So posting
+	// a comment refreshes the snapshot and clears a stale CLOSED, and relaunching
+	// is one route out rather than the only one.
 	//
 	// ⚠ IT IS NOT IN `writeGate`. That gate covers all five verbs, and commenting
 	// on a merged pull request is a perfectly reasonable thing to do — putting

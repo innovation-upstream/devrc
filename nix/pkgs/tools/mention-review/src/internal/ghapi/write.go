@@ -272,11 +272,19 @@ func (c *Client) Merge(ctx context.Context, owner, name string, num int, method 
 		// terminates.
 		//
 		// 🔴 THIS ARM IS A REGRESSION GUARD ON THE GATE ITSELF. Before the gate
-		// existed the merge PUT went out and GitHub refused it — reportedly with
-		// `405 Pull Request is not mergeable` — which the renderer one file over
-		// now shows in full rather than as two words. That is a TRUE, actionable
-		// answer, and a gate that replaced it with a false one would have made
-		// this whole change a net loss for the merged case.
+		// existed the merge PUT went out and GitHub refused it.
+		//
+		// ⚠ ONE EVIDENTIARY STANDARD, STATED AT THE WEAKEST LEVEL ANY OF THESE
+		// SENTENCES CAN SUPPORT — the same claim is spelled in four places and
+		// they must not disagree. The string `405 Pull Request is not mergeable`
+		// is REPORTED, not measured: no response body from 2026-09-17 was
+		// captured and none can be recovered, which is exactly what the comment
+		// on `Merge` says about the 422s. What IS established, by
+		// `apimessage_test.go`, is that a refusal carrying a server message is
+		// now rendered IN FULL rather than as two words — so whatever GitHub
+		// answers reaches the operator. A gate that replaced a true refusal with
+		// a false one would have made this whole change a net loss for the merged
+		// case, and that argument stands on the rendering, not on the 405.
 		//
 		// The wording says only what the read established, and deliberately does
 		// NOT tell the operator to retry.
@@ -314,9 +322,28 @@ func (c *Client) Merge(ctx context.Context, owner, name string, num int, method 
 				"NOTHING WAS SENT — press `m` again in a moment.",
 			readsSpent(reads, c.pollInterval))}
 	default:
+		// 🔴 THIS IS THE FOURTH REFLECTING PATH, AND TWO COMMENTS USED TO ASSERT
+		// THERE WERE THREE. `read.Mergeable` is `NormalizeMergeable(…)` of a
+		// string the SERVER sent; it was interpolated here with no clip and no
+		// redaction, and a probe server measured a 5,133-rune unclipped,
+		// unredacted detail out of this line. `maxDetailRunes`' docstring claimed
+		// "EVERY DETAIL THIS CLIENT BUILDS OUT OF SERVER CONTENT" and
+		// `TestNoErrorPathEverCarriesTheToken`'s ledger claimed "paths NOT listed
+		// carry no server text at all". Both were false HERE.
+		//
+		// 🔴 THE CLIP IS ON THE SERVER'S WORD, NOT ON THE COMPOSED SENTENCE.
+		// Clipping the whole detail would cut `NOTHING WAS SENT.` off the end —
+		// the one clause the operator must read — precisely when the server sent
+		// something pathological enough to need clipping. So the bound applies to
+		// the only part this client did not write.
+		//
+		// ⚠ The redaction that actually catches a reflected credential happens
+		// EARLIER, in `Mergeability`, before `NormalizeMergeable` uppercases the
+		// string past recognition. This one is the belt: it holds for a
+		// `MergeRead` built by some future second route.
 		return &APIError{State: AuthOther, Detail: fmt.Sprintf(
 			"refusing to merge: GitHub reports mergeability %s, not %s. "+
-				"NOTHING WAS SENT.", read.Mergeable, MergeableYes)}
+				"NOTHING WAS SENT.", c.detail(read.Mergeable), MergeableYes)}
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", c.rest, owner, name, num)
 	return c.write(ctx, http.MethodPut, url, map[string]any{"merge_method": method})
