@@ -18,15 +18,47 @@ is the PRIVATE proposal, not this doc.
 - **closing-condition:** `check` — a SECOND instance exists and serves client notes from
   client infrastructure: a `cairn`-family store reachable at a civitai-side endpoint,
   answering `cairn recall --scope <a civitai scope>` with entries written by a civitai
-  session, with the personal instance unaffected. ⚠ **FROZEN — this is the ORIGINAL ask,
-  and the arc has NOT met it.** Everything shipped so far (the OSS repo, the flake pin,
-  the consolidation, the CI legs, the scrub fixes) is the FIRST half — spinning `cairn`
-  out. **The second instance has not been stood up.** Ranks 4, 8 and 21 are the nearest
-  work to it; 25/27/28 and the audit residue are not. A close-check answering this line
-  today returns NOT ADDRESSED, and the one item is: **the civitai instance does not
-  exist yet.**
+  session, with the personal instance unaffected. ⚠ **FROZEN — this is the ORIGINAL ask.**
+  ✅ **MET 2026-09-18 by phase D** (see `State now`): the store serves two entries written by a
+  civitai session, byte-identical on the PVC, to BOTH hosts, with personal measured unaffected.
+  🔴 **ONE QUALIFIER, AND IT IS THE WHOLE OF WHAT IS LEFT: the route came from a `$CAIRN_ROUTES`
+  OVERRIDE, NOT THE SHIPPED TABLE** — which is still all-`personal` by a deliberate tested
+  invariant. So the condition is met as WORDED and is NOT yet reproducible from committed config:
+  a session without that override gets **rc 11**, correctly. Making it durable is **phase E**,
+  now unblocked by the routing-durability decision below. ⚠ Everything before phase C (the OSS
+  repo, the flake pin, the consolidation, the CI legs, the scrub fixes) was the FIRST half —
+  spinning `cairn` out — and is not what met this line.
 
 ## State now
+
+- ✅ **2026-09-18 — PHASE D IS CLOSED. THE STORE SERVES CLIENT NOTES WRITTEN BY A CIVITAI SESSION,
+  BYTE-IDENTICAL, TO BOTH HOSTS. The arc's `## Goal` is MET as worded** (read its qualifier —
+  routing is an override, not committed config). Claim `cairn-oss-multi-instance-phase-d` RELEASED.
+  - **What was written.** Scope `civitai-developer-docs`, two entries:
+    `developer-docs-site` (`revision=85779666cbc89bd1`, 4,746 B) written this session, and `apps`
+    (`revision=232cbe6db29bf18a`) **rescued from the frozen pre-cutover mirror**, where it was
+    orphaned in no live store. Both verified byte-identical against `/data` on the PVC.
+    🔴 **`create`'s `revision` IS the leading 16 hex of the file's own sha256** — so a revision is a
+    content claim you can check, not an opaque id.
+  - 🔴 **WHY THAT SCOPE, AND WHY IT IS NOT A MIGRATION.** Of the token's **14** allowlisted scopes,
+    exactly two (`civitai-developer-docs`, `civitai-app-requests`) were absent from BOTH the routing
+    table and the personal store — verified against a positive control. So it has no readers and no
+    prior live copy: a pure addition, not a phase-E re-point. **A brand-new scope was NOT available**
+    — the token allowlist is a snapshot with no wildcard, and an unlisted scope reads back
+    byte-identically to one that does not exist.
+  - **Durability.** A manual run of the (still-suspended) backup CronJob over the real content:
+    `census: scopes=1 entries=2`, uploaded to `cairn-backups/daily/cairn-20260918T030002Z.tar.gz`,
+    round-trip verified AND restore-checked. The #1551 mount fix confirmed live first (`readOnly`
+    ABSENT on the claim reference, PRESENT on the container mount). **Both CronJobs remain
+    suspended** — unsuspending them is still an open item.
+  - ⚠ **BOTH HOSTS NOW CARRY `instances/civitai.env`** (0600, 281 B, token fingerprint
+    `d9904a784be2` on each — which MATCHES the value this repo's README documents, an independent
+    check that the right row was taken). Consequence to expect rather than discover: **labelling is
+    now active on both hosts**, so every `recall` banners `cairn[personal]:` / `cairn[civitai]:`
+    where it used to say `cairn:`. That is `len(instances) > 1`, exactly as rank 29 predicted.
+  - ⚠ **STILL ORPHANED: `civitai-app-requests/app-requests.md`** (1,803 B) exists only in the frozen
+    mirror. Surfaced by `doctor`'s `personal/token-scopes` PROBLEM, which is **pre-existing** and is
+    the check earning its keep. Moving it is a decision, not a cleanup.
 
 - ✅ **2026-09-17/18 — PHASE C IS CLOSED. A SECOND INSTANCE IS DEPLOYED ON CIVITAI PRODUCTION
   INFRASTRUCTURE AND THE RESTORE DRILL PASSED END TO END.** Four PRs, all merged and verified BY
@@ -34,10 +66,10 @@ is the PRIVATE proposal, not this doc.
   server image), `civitai/talos-infra` **#1542** `40bd630dd` (the manifests), **#1548** `ec5db6fde`
   (backup bucket + credential), **#1551** `6834ac0f2` (the mount fix + gate 23). Claim
   `cairn-oss-multi-instance-phase-c` RELEASED.
-  🔴 **THE ARC'S `## Goal` IS STILL NOT ADDRESSED AND PHASE C DOES NOT ADDRESS IT.** The condition
-  needs the store answering *with entries written by a civitai session*. Nothing has been written
-  yet: the `civitai` scope answers `scope-absent`. That is phase **D** (seed + byte-identity) and
-  phase **E** (registry cutover). Do not read "phase C closed" as the arc closing.
+  ⚠ **SUPERSEDED 2026-09-18 by the phase-D block above, and the correction is recorded rather than
+  overwritten.** This block used to end *"THE ARC'S `## Goal` IS STILL NOT ADDRESSED … the `civitai`
+  scope answers `scope-absent`"*. That was true when written and is now false: phase D seeded the
+  store and the Goal is met as worded. Phase **E** (registry cutover) is what remains.
 
 - 🔴 **THE LIVE INSTANCE — the facts a next session needs and should not re-derive.**
   Namespace `cairn` on the civitai production cluster; pod Ready, 0 restarts, on `talos-avt-y6z`;
@@ -103,7 +135,10 @@ is the PRIVATE proposal, not this doc.
      someone else (`3a9ed6c1e`).
 
 - 🔴 **ROUTING IS DETERMINISTIC ALREADY; THE GAP IS THAT NOTHING CHECKS THE *ASSIGNMENTS*.** Both
-  hosts: 25 entries, **all → `personal`**, no `instances/` dir, `cairn routes` → `instances: personal`.
+  hosts: 25 entries, **all → `personal`**. ⚠ **STALE AS OF 2026-09-18 IN ITS SECOND HALF** — this
+  read "no `instances/` dir, `cairn routes` → `instances: personal`"; phase D added
+  `instances/civitai.env` to BOTH hosts, so `cairn routes` now reports `instances: personal, civitai`.
+  The TABLE half is unchanged and still all-`personal`.
   So every scope resolves personally and the civitai server has **no client pointed at it**. The
   two-way pin grades *presence* (is every live scope named? does every named scope exist?) and never
   **"is each scope pointing at the RIGHT instance?"** — which is the axis that decides where durable
@@ -116,20 +151,32 @@ is the PRIVATE proposal, not this doc.
   `cairn routes` reports two instances on both, and only then flip the table.** Miss one host and
   ~110 entries' worth of scopes refuse on it. §7 step 6 does not state this order.
 
-- 🔴 **DEFERRED, WITH A CLOSING CONDITION — the routing durability design. DUE BEFORE PHASE E.**
-  The operator proposed routing everything to homelab plus per-scope two-way mirroring, and after
-  pushback asked to "circle back and land on the right durable reliable long term design". **Closes
-  when** the operator records a choice between (a) fail-loud routing + freshness observability and
-  (b) per-scope bidirectional mirroring, in this doc's decisions, over NAMED evidence: §10's "two
-  writable stores … bites silently" judgement, the conflict semantics `cairn put` would need (it
-  REWRITES entries, so two writers need a merge rule that does not exist), and a measured answer to
-  "which copy is current". **Checked by** the operator in writing — not by a command. **Phase E is
-  the forcing function**: the cutover is where the choice becomes expensive to reverse.
-  ⚠ **The operator's stated worry is "not knowing WHICH copy is current"** — observability, which
-  duplication makes *harder*, not easier. Three things to measure during D/E so the decision is
-  cheap: what the per-host cache actually serves during a civitai outage; whether `put` conflicts
-  are reachable at all (the store's own `[cairn: actor/session]` attribution answers it); and what a
-  two-instance `cairn doctor` reports.
+- ✅ **DECIDED 2026-09-18 — THE ROUTING DURABILITY DESIGN IS (a) FAIL-LOUD ROUTING + FRESHNESS
+  OBSERVABILITY. NOT to be re-litigated; per-scope bidirectional mirroring is REJECTED.** Operator
+  decision, recorded here because this item's closing condition was "the operator records a choice
+  … in this doc's decisions, over NAMED evidence". **This UNBLOCKS PHASE E.**
+  🔴 **The decision rests on three measurements taken during phase D, and each one is why (b) lost.**
+  1. **"Which copy is current" is ALREADY answered, automatically, in one line.** With the civitai
+     store unreachable and the cache warm, `recall` returns **rc 0** and banners
+     `⚠ cairn[civitai]: cached — <url> unreachable: [Errno -2] … — SERVED FROM CACHE, cache 3m old`.
+     Reads survive an outage, and the answer carries its own provenance AND age. The operator's
+     stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
+     duplication makes it harder, not easier. via: measurement
+  2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
+     unconditional rewrite.** The shipped client documents `put` as *"replace a whole entry behind
+     an **If-Match precondition**"* and `create` as refusing a ref that already exists. So two
+     writers do not silently clobber — the second gets a loud precondition failure. A merge rule is
+     still absent, but the failure mode it would have to cover is **fail-loud, not silent loss**,
+     which removes (b)'s strongest argument. ⚠ Read off the client's own interface; a real If-Match
+     collision was NOT exercised. via: code
+  3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
+     (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
+     (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
+  🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
+  already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
+  remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
+  adds **no new machinery**; it re-points scopes and replaces the all-`personal` invariant (below)
+  with the (a)-shaped one: *every value names an alias this host configures*.
 
 - ⚠ **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. `m_index_store` still
@@ -1080,14 +1127,23 @@ Expect a Ready pod on `talos-avt-y6z` and **both CronJobs suspended** until phas
 KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'wget -qO- http://127.0.0.1:8102/healthz'
 KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/civitai 2>&1 | head -8'
 ```
-Expect `ok`, then `200 OK` with `X-Store-Status: scope-absent` (nothing seeded yet — that is phase D).
+Expect `ok`, then `200 OK`. ⚠ **The `/recall/civitai` path above returns `scope-absent` and always
+did — `civitai` is not a seeded scope.** Phase D seeded **`civitai-developer-docs`**; probe that
+instead and expect `X-Store-Status: recalled` with `entry-files=2`.
 
-**Routing has NOT been cut over** (and must not be, before the design decision):
+**Phase D is seeded; the TABLE is still not cut over** (that is phase E):
 ```bash
-cairn routes | head -2        # instances: personal   — exactly ONE
+cairn routes | head -2   # instances: personal, civitai  — TWO since phase D
 python3 -c "import json,collections;d=json.load(open('$HOME/.config/subsystem-store/routes.json'));print(len(d),dict(collections.Counter(d.values())))"
 ```
-Expect `25 {'personal': 25}` and no `instances/` directory on either host.
+Expect `25 {'personal': 25}` — the shipped table is unchanged — and `instances/civitai.env`
+present on BOTH hosts. 🔴 **The seeded scope is reachable only under the phase-D
+`$CAIRN_ROUTES` override; without it `cairn recall --scope civitai-developer-docs` exits 11, and
+that refusal is CORRECT, not a regression.** Reconstruct the override with:
+```bash
+python3 -c "import json,os;t=json.load(open(os.path.expanduser('~/.config/subsystem-store/routes.json')));t['civitai-developer-docs']='civitai';json.dump(dict(sorted(t.items())),open('/tmp/routes-phase-d.json','w'),indent=2)"
+CAIRN_ROUTES=/tmp/routes-phase-d.json cairn recall --scope civitai-developer-docs
+```
 
 **Gate 23 exists and the mount defect cannot return:**
 ```bash
