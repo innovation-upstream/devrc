@@ -67,10 +67,18 @@ KIND = "invocation"
 # consolidation a bug-finding instrument, and this is that.
 #
 # So the cap stays a bound on ACCIDENT (a leaked body arriving as a dict) rather
-# than a budget a deliberate caller must fit inside, and 24 is chosen only to
-# leave the widest current caller (14) room to grow without re-litigating the
-# number — a drop is now visible whatever it is set to.
-_MAX_DIMS = 24
+# than a budget a deliberate caller must fit inside — and a drop is now visible
+# whatever it is set to.
+#
+# 🔴 WHICH IS WHY IT IS 16 AND NOT HIGHER. The cap is this module's ceiling on
+# how much an ACCIDENT can carry — `_MAX_DIMS` x `_MAX_VALUE_LEN` — and it
+# applies to EVERY caller, including ones that gained nothing from the raise.
+# An earlier version of this change took it to 24 for headroom; that doubled the
+# leak ceiling for a second, uninvolved caller to buy room nobody had asked for.
+# 16 clears the widest current ledger (14) with room for two more fields, and
+# the next caller to need more raises it deliberately — now against a `dropped`
+# counter that makes the old silent failure impossible either way.
+_MAX_DIMS = 16
 _MAX_KEY_LEN = 64
 _MAX_VALUE_LEN = 120
 _MAX_LIST_ITEMS = 12

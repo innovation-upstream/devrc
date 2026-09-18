@@ -213,7 +213,7 @@ which rows the ranker likes; costs no behaviour change; no new disclosure surfac
 name is not a repository name); reversible in one line.
 *Cons:* does not make fzf *order* by our rank, it only makes our opinion legible — an
 operator who types a 3-char query still gets fzf's order among the matches; row width is
-finite and the picker is 120 cols; a marker that is fuzzy-matchable can itself perturb
+finite and the picker is **110 cols** (`PICKER_COLUMNS`); a marker that is fuzzy-matchable can itself perturb
 fzf's scoring (a leading token matches queries), so it would need to sit where the match
 cannot reach it or be measured not to.
 
@@ -355,14 +355,24 @@ WHERE source='tool' AND kind='invocation' AND text='mention-open'
 not mistake a 10-row sample for an answer.** Over the 6.7 days to 2026-09-18 the sink took
 **85** click rows: **71 picked · 9 auto-open · 5 dismissed**, rising from 3/day to ~21/day.
 
-* **Picked arm** — ~100+ rows within a week of deploying. Readable.
+* **Picked arm** — ~100+ rows within a week of deploying. **This is where the rate lives.**
 * **Dismissal arm** — ~5 per week, and `queried` covers only the Enter-with-no-match subset
   of those (§3.1). At this rate it needs **roughly two months** before it says anything.
 
-So the PR's framing that `queried` "matters most on the dismissal arm" is right about
-*diagnostic value per row* and wrong about *when you can act on it*. Read the picked arm
-first; treat the dismissal arm as a slow-burn signal, and do not hold up a symptom-1
-decision waiting for it.
+🔴 **AND THE DISMISSAL ARM'S `queried` IS NOT A RATE AT ALL — DO NOT AVERAGE IT.** On that
+arm the dim is present only for the Enter-with-no-match ending (an abort writes nothing),
+and on that ending it is `True` **by construction**: the picker always holds rows, so an
+empty query always matches something and always yields a selection — a non-empty query is
+the only way to reach that ending. Averaging it returns ~100% however the operator behaves.
+That is a self-selected sub-population read as a rate, which is **worse than an absent
+number**, because it looks like an answer.
+
+Treat a present `queried` on the dismissal arm as an **event** — "this click was a typed
+query that matched nothing", the most diagnostic dismissal there is — and never as a
+denominator. The query above is scoped to `outcome='picked'` for exactly this reason.
+
+So "matters most on the dismissal arm" was right about *diagnostic value per row* and wrong
+twice over: about when you can act on it, and about it being a rate.
 
 ## Appendix — what was NOT measured
 

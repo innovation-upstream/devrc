@@ -125,10 +125,19 @@ repos into this PUBLIC repository. It may go to the operator's own screen and
 NOWHERE ELSE: never to a log, never to activity.events, never to a test fixture,
 never to stderr. `notify()` prints, so the refusal paths below name only the
 clicked text — never a row from the universe. ⚠ THE TELEMETRY SINK ADDED IN
-2026-09 DOES NOT WEAKEN THIS. It reports the one row the operator opened and
-three scalars about the list (rank, size, class); `click_dims` is never handed
-the candidate list at all, so there is no argument through which an offered row
-could reach it.
+2026-09 DOES NOT WEAKEN THIS. It reports the one row the operator opened plus
+SCALARS about the list — a rank, a size, a class name, two row COUNTS, an
+ordering state; `click_dims` is never handed the candidate list at all, so there
+is no argument through which an offered row could reach it. (This sentence said
+"three scalars" and was stale at fourteen dims; the count is deliberately not
+restated here — `CLICK_DIM_FIELDS` is the ledger, pinned two-way.)
+
+🔴 AND ONE DIM IS A DIFFERENT CATEGORY FROM ALL THE OTHERS: `queried` is derived
+from what the operator TYPED, not from a row. The query on this picker is a
+fragment of a private repository name, so it is reduced to a BOOLEAN at the point
+it is read and the string exists nowhere else — see `_PICK_QUERIED`, which owns
+that argument. It is named HERE because this paragraph is the contract a reader
+relies on, and "input" was a category it did not previously cover.
 
 🔴 THE SAME RULE COVERS TWO MORE FILES THIS HANDLER NOW TOUCHES, and both are
 0600 under the same directory, outside every checkout:
@@ -1397,8 +1406,21 @@ def click_dims(repo: str = "", platform: str = "",
     So "a dismissal after typing is distinguishable from one after scrolling" is
     TRUE of the Enter ending and FALSE of the abort ending. The three-valued
     design is what keeps that honest instead of filing every abort under
-    "scrolled" — but a consumer must not read the dismissal arm's `queried` rate
-    as covering all dismissals.
+    "scrolled".
+
+    🔴 AND THE DISMISSAL ARM'S `queried` IS NOT A RATE — DO NOT AVERAGE IT. On
+    that arm the dim is present ONLY for the Enter-with-no-match ending, and on
+    that ending it is `True` BY CONSTRUCTION: the picker always holds rows, so an
+    EMPTY query always matches something and always yields a selection. A
+    non-empty query is the only way to reach Enter-with-no-match at all.
+    Averaging `queried` over dismissals therefore returns ~100% however the
+    operator behaves — a self-selected sub-population read as a rate, which is
+    worse than an absent number because it looks like an answer.
+
+    **The rate lives on the PICKED arm**, where all three endings are
+    represented and `False` is reachable. On the dismissal arm treat a present
+    `queried` as an EVENT — "this click was a typed query that matched nothing"
+    — and never as a denominator.
 
     ⚠ NO `ordered_rank` DIM, DELIBERATELY. The chosen row's position WITHIN the
     ranked block is `rank - pinned_above`, and both of those are already emitted
@@ -3214,6 +3236,21 @@ def _ordered_universe(
     `tier_a` is how many the range table had an entry for — see the warning
     below, because that one is near-constant today.
 
+    🔴 "ORDERED ROWS" MEANS THE SORT'S OUTPUT, NOT THE ROWS ON SCREEN, AND ON
+    ONE ARM THOSE DIFFER. The guessed arm DEDUPES the pane's own repository out
+    of the block it appends (`extra = [c for c in universe_rows() if c["url"]
+    not in seen]`) because that repo is already pinned above — and its own
+    comment says "the pane's repo is usually IN the universe too". So on that
+    shape the counts describe a SUPERSET of what was appended. MEASURED: a pane
+    repo that is in the universe gives `offered_total=4, pinned_above=2`, two
+    ranked rows on screen and `tier_a=3`.
+
+    That is the honest thing to count — the sort really did rank all of them,
+    and the dedup happens afterwards — but it means **a consumer must NOT
+    normalise these by `offered_total - pinned_above`**: the ratio can exceed 1.
+    They are a property of the SORT, not of the screen. Pinned by
+    `test_the_tier_counts_describe_the_SORT_not_the_rows_on_SCREEN`.
+
     Both are COUNTS OF ROWS, never their contents: the offered universe names
     private repositories and nothing here may carry one to a sink (see the
     CLICK-PATH TELEMETRY block).
@@ -3726,7 +3763,10 @@ def main(argv: list[str] | None = None) -> int:
         if extra:
             mesg = f"{mesg} · {extra}" if mesg else extra
 
-    # 🔴 WHICH TIERS WERE ACTUALLY IN THE SORT THE OPERATOR IS LOOKING AT.
+    # 🔴 WHICH TIERS WERE IN THE SORT THAT PRODUCED THIS LIST — a property of the
+    # SORT, not of the rows on screen. The guessed arm dedupes the pane's repo
+    # out of the appended block, so the counts can exceed `offered_total -
+    # pinned_above`; `_ordered_universe` measures that and says so.
     # Keyed on `universe_shown` — the same predicate `ordering_note` uses, and
     # set by ALL THREE arms that put universe rows into `candidates` and by none
     # that does not — so a picker holding only measured rows never claims an
@@ -3767,11 +3807,15 @@ def main(argv: list[str] | None = None) -> int:
         # `picker_was_shown` is three-valued so an unmeasured case omits the
         # field rather than guessing.
         #
-        # 🔴 `queried` MATTERS MOST ON THIS ARM. A dismissal AFTER TYPING is the
-        # operator narrowing the list and still not finding the row — a ranking
-        # or a universe complaint; a dismissal with an EMPTY query is somebody
-        # who changed their mind. Those are opposite readings of the same
-        # denominator, and until now they were the same row.
+        # ⚠ `queried` ON THIS ARM IS AN EVENT, NOT A RATE — see `click_dims`, and
+        # this comment used to say it "MATTERS MOST" here, which oversold it. An
+        # abort writes nothing at all, so the dim is present only for the
+        # Enter-with-no-match ending, where it is `True` BY CONSTRUCTION: the
+        # picker always holds rows, so an empty query always matches and always
+        # selects. A present `queried` here therefore means "a typed query
+        # matched nothing" — the most diagnostic dismissal there is — while
+        # AVERAGING it returns ~100% however the operator behaves. The RATE lives
+        # on the picked arm, where `False` is reachable.
         emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
                    else CLICK_NO_SELECTION,
                    picker_shown=picker_was_shown(reason),

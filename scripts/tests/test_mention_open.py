@@ -8852,6 +8852,58 @@ def test_a_host_with_NO_pick_log_reports_tier_b_ZERO_while_one_WITH_picks_does_n
         f"the pick log at all, and the zero above means nothing: {warm}")
 
 
+def test_the_tier_counts_describe_the_SORT_not_the_rows_on_SCREEN(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE SHAPE EVERY OTHER TIER TEST IN THIS FILE IS STRUCTURALLY BLIND TO.
+    `PANE_GUESS` is DELIBERATELY outside `FAKE_UNIVERSE` — that is its whole
+    point elsewhere — so no other test ever reaches the guessed arm's DEDUP,
+    where `extra = [c for c in universe_rows() if c["url"] not in seen]` drops
+    the pane's own repository from the block it appends because that row is
+    already pinned above.
+
+    On that shape the tier counts describe the sort's OUTPUT, which is a
+    SUPERSET of the rows on screen. That is the honest thing to count — the sort
+    really did rank all of them — but it means a consumer normalising by
+    `offered_total - pinned_above` gets a ratio ABOVE 1, and the comment at the
+    emit site used to claim these were the tiers "in the sort the operator is
+    looking at".
+
+    ⚠ THE FIXTURE USES A PANE REPO THAT *IS* IN THE UNIVERSE, which is the only
+    way to reach the branch. Every asserted number is distinct: 3 universe rows,
+    2 pinned, 2 ranked on screen, `tier_a` 3."""
+    universe = sorted(FAKE_UNIVERSE.values())
+    assert len(universe) == 3, universe
+    pane = universe[0]          # 🔴 IN the universe — this is the whole point
+    _ordering_fixture(monkeypatch, tmp_path, pane=pane)
+    seen: dict = {}
+
+    def _capture(c, mesg=""):
+        seen["n"] = len(c)
+        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+        return c[-1]["url"]
+
+    monkeypatch.setattr(MO, "pick", _capture)
+    assert MO.main(["#1291"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+
+    # POSITIVE CONTROL: the dedup really fired — one universe row was dropped,
+    # so the list is clawgate + pane + (3 - 1) universe rows.
+    assert payload["offered_total"] == 4, (
+        f"the dedup did not fire, so this test is not on the branch it exists "
+        f"for: {payload}")
+    assert payload["pinned_above"] == 2, payload
+    on_screen = payload["offered_total"] - payload["pinned_above"]
+    assert on_screen == 2, payload
+
+    assert payload["tier_a"] == 3, (
+        f"tier_a counts the ORDERED UNIVERSE (3 rows), not the rows appended: "
+        f"{payload}")
+    assert payload["tier_a"] > on_screen, (
+        f"tier_a ({payload['tier_a']}) must be able to EXCEED the rows on "
+        f"screen ({on_screen}) — that is the property a consumer has to know "
+        f"about before normalising by it: {payload}")
+
+
 def test_a_DEGRADED_ordering_names_its_STATE_and_omits_NEITHER_tier_count(
         monkeypatch, tmp_path, spool):
     """🔴 `stale` AND `no-table` ARE THE TWO WAYS THE ORDERING SILENTLY IS NOT
