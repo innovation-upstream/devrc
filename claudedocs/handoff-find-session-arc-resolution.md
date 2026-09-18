@@ -24,19 +24,23 @@ session that picked the work back up. Sibling efforts on the same tool, differen
   passes on the merged tree. 🔴 FROZEN AT ROUND 1.
 
 ## State now
-- Branch: `docs/handoff-find-session-arc` (worktree `~/workspace/devrc-fs-arc`, pushed).
-  Base clone is on `main` and was NOT committed to — devrc forbids it.
-- **Nothing is implemented.** This session produced the design and its measurements only.
-  A clawgate task body is drafted and was awaiting operator approval at session end
-  (scratch path below); the task may or may not have been posted.
-- 🔴 NO `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session. An unknown session id answers 200 with an EMPTY ARRAY, so this cannot
-  distinguish "touched no task" from "wrong id". It is NOT a statement that the board is fine.
-- Four design decisions settled WITH THE OPERATOR 2026-09-18, not open: reader **and**
-  trailer-write in the first cut · annotate ordinary results (not `--arc`-only) · all four
-  repos with origin labels · report the unstamped gap as a count, never guess.
-- Task body draft: `<scratchpad>/task-body.md` (session 8951d8f0). If the task was not
-  posted, that body is the spec — re-derive nothing.
+- **BUILT AND PUSHED: `#1777`** (`feat/find-session-arc`, commit `4020db48`, worktree
+  `~/workspace/devrc-arc-impl`). Implements clawgate task **#626**, which this session also
+  authored and then picked up. Task is `in_progress`; it will finish at **`ready_for_review`,
+  never `complete`** — this session wrote the acceptance criteria, and grading an exam you
+  wrote is what the status gate exists to stop.
+- **11 of 12 acceptance criteria verified.** The outstanding one is criterion 12, the pytest
+  gate on the MERGED tree (`a3aeed07` = `origin/main` `97c20d06` + `4020db48`); it was still
+  running at session end. 🔴 **Do not claim the gate passed — read it.**
+- 48 new tests; **866 passing** across `test_find_session_arc.py`,
+  `test_handoff_doc_session_trailer.py`, `test_find_session_skill_{contract,cli}.py`,
+  `test_find_session_live.py`, `test_handoff_doc.py`, `test_session_trailer.py`,
+  `test_session_stamp_seam.py`. That is a set of modules I NAMED, not a tier — it cannot
+  support a claim about `main`.
+- `#1776` (the doc that opened this arc) MERGED as `d5d009de`.
+- 🔴 NO `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
+  session, which cannot distinguish "touched none" from "wrong id". Task #626 is nonetheless
+  this session's, by creation; the field is absent because the resolver could not confirm it.
 
 ## Open investigations — live diagnosis state
 
@@ -88,19 +92,46 @@ session that picked the work back up. Sibling efforts on the same tool, differen
   If it is ever reworded the reader must degrade to scanning for a
   `claudedocs/handoff-*.md` path, NOT silently return fewer rows.
 
+### The handoff write-back guard fires on a doc name that only exists in a TEST FIXTURE
+- as-of: 2026-09-18
+- **Symptom + exact repro:** at session end the Stop guard reported
+  `this session read handoff-x-y.md` and demanded a handoff for it. **No such document
+  exists.** `handoff-x-y.md` is a synthetic string in
+  `scripts/tests/test_find_session_arc.py`, used to exercise the annotation predicate.
+  ```bash
+  grep -rn "handoff-x-y.md" ~/workspace/devrc-arc-impl/scripts/tests/
+  git -C ~/workspace/devrc ls-files 'claudedocs/**/handoff-x-y.md'   # empty — no such doc
+  ```
+- **Observed (with values):** the guard named `handoff-x-y.md` with a read timestamp of
+  `2026-09-18T22:49:45Z`, which is when the test file carrying that fixture was being edited.
+  The earlier firing in the same session correctly named the real
+  `handoff-handoff-resume-skill-trace.md`, so the guard is not simply broken — it is matching
+  a doc-shaped STRING rather than a doc that exists.
+- **Ruled out:** that a doc by that name was created and deleted — it appears in no commit on
+  this branch and `git ls-files` finds nothing. via: command
+- **Ruled out:** that it came from the arc reader's output — the reader prints real basenames
+  from git, and this name has never been in any repo. via: code + measurement
+- **Leading hypothesis:** the guard's doc detector scans session activity for a
+  `handoff-*.md`-shaped token without checking the file EXISTS. Writing tests ABOUT handoff
+  docs therefore arms it against fixtures. Self-referential and cheap to fix: require the path
+  to resolve in a repo before counting it as a read.
+- **Next probe:** read the detector in `scripts/claude-hooks/handoff-write-guard.py` and check
+  whether the candidate is existence-tested. If not, gate it on `git ls-files` (or a `Path.exists`
+  against the repo's `claudedocs/`), and add a fixture-shaped negative control — a test whose
+  body contains a plausible `handoff-*.md` string that must NOT arm the guard.
+
 ## Next steps (ranked)
-1. **Update and merge `#1754`, then `#1753`.** Both are one branch-update from green;
-   the diagnosis above is complete. #1754 first — it is what stops the closed
-   `handoff-resume-skill-trace` arc being re-opened by every future `/resume`.
-   forcing: gate — two PRs blocked 24h on a red proven to be inherited, with the
-   merged-tree control already green at 451 passed.
-2. **Implement `find-session --arc` + the `handoff_doc.py` trailer**, to the spec in the
-   drafted clawgate task body. Touches `scripts/find-session.py`,
-   `scripts/lib/handoff_doc.py`, `claude/skills/find-session/SKILL.md`, and new tests.
+1. **Read the merged-tree gate result and finish task #626.** The run is
+   `scripts/gate.sh --tier pytest` on `a3aeed07`; its log path is printed in its own output.
+   🔴 Its exit status is authoritative, and **90 (could-not-vouch) and 91 (PARTIAL) are not
+   passes**. Then post the completion comment on #626 with per-criterion evidence and flip to
+   `ready_for_review`.
+   forcing: gate — a shipped PR with one acceptance criterion unmeasured.
+2. **Fix the write-back guard's fixture false positive** per the investigation above.
    forcing: none
-3. **Confirm the `/handoff` kickoff string is unconditional** (the probe above). Cheap,
-   and it is the assumption rank 2's reader leg rests on.
-   forcing: none
+3. **Update and merge `#1754` then `#1753`** — still open, still one branch-update from green;
+   the inherited-red diagnosis is in `handoff-handoff-resume-skill-trace.md` and is complete.
+   forcing: gate — two PRs blocked on a red proven inherited, merged tree measured green.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`git log --format='%(trailers:key=Claude-Session-Id)'` IS THE WRONG READER AND IT
@@ -150,21 +181,72 @@ session that picked the work back up. Sibling efforts on the same tool, differen
   on a feature branch for exactly that reason. Check `git branch --show-current` before
   step 5, every time — the tool will not check it for you.
 
+- 🔴 **MY OWN MUTATION BATTERY WAS WIRED TO NOTHING ON ITS FIRST RUN, AND IT LOOKED LIKE A
+  CLEAN SWEEP.** Every row printed blank. Cause: the row `T="$A $B"` then `pytest $T` — and
+  **zsh does not word-split**, so pytest received ONE bogus path, collected nothing, and never
+  printed a `passed`/`failed` line for the grep to find. The documented trap, hit while
+  building the instrument that was supposed to catch defects. **The fix that mattered was
+  running an unmutated CONTROL row first and requiring it to print `0 failed / 48 passed`** —
+  a battery whose control prints nothing is measuring nothing, and every row after it is a
+  fabricated SURVIVED.
+- 🔴 **A MUTATION FIXTURE MUST BE COPIED FROM REALITY, NOT RECONSTRUCTED FROM THE STORY YOU
+  TELL ABOUT IT.** The first `SQUASH_BODY` put the `Claude-Session-Id:` trailer LAST — a
+  perfectly plausible squash shape, and one git's own parser reads correctly. The control went
+  GREEN for both readers and *correctly reported itself as wired to nothing*. The real shape
+  (`f9ef66e4`) has the trailer **mid-message with ordinary prose after it**, which is what
+  makes the final block a non-trailer block. The trailing prose IS the mechanism. Had the
+  control been written to simply assert the reader works, the wrong fixture would have shipped
+  and the premise would have rested on nothing.
+- 🔴 **`git log --format='%(trailers:key=…)'` IS THE WRONG READER AND UNDERCOUNTS SILENTLY.**
+  197 of 593 (33%) against a `^Claude-Session-Id:` scan of `%B` at 327 (55%) — a 40% relative
+  undercount on commits whose trailer is plainly visible. `session_trailer.py:383` already
+  documented it; I hit it anyway and quoted 33% before catching it. Read the BODY.
+- 🔴 **A PERMISSIVE PARSER MADE A WHOLE BRANCH UNREACHABLE, SILENTLY.** `doc_basename` accepts a
+  bare topic (`foo` -> `handoff-foo.md`) — so it accepted a UUID too and returned
+  `handoff-<uuid>.md`, a doc that cannot exist. Ordering the UUID test AFTER it made the
+  session-id seed branch dead code, and the failure mode was a *clean* "no repo holds that doc"
+  for a session id that resolves perfectly. Found only because a test asserted the resolved
+  value rather than that the call did not crash. **When two parsers can both accept an input,
+  the more specific one runs first.**
+- 🔴 **THE BASH GUARD JUDGED THE WRONG REPO BECAUSE MY COMMAND USED `$W`.** `git -C $W commit`
+  was blocked as a commit to `main` — the guard cannot resolve a shell variable, so it judged
+  the CWD (`~/workspace/devrc`, on `main`) instead of the worktree. The guard says so in its own
+  message. **Pass `-C` an absolute path for any git write from a worktree**, or the protection
+  fires on the wrong subject and the real subject goes unchecked.
+- **Decision: exit 5, not a widened exit 4.** `run_arc`'s could-not-measure case initially
+  returned `EXIT_UNAVAILABLE`, which reddened
+  `test_every_EXIT_UNAVAILABLE_source_is_on_the_tail_path` — a STRUCTURAL guard keeping exit 4's
+  "`--tail` ONLY" claim true of code nobody has written yet. The ledger offered "change
+  EXIT_CONTRACT and the doc together"; taking that would have deleted a real guarantee to save
+  a constant. A fifth code was registered instead. **This is a deliberate deviation from the
+  task's own criteria, made against the criteria and in favour of the existing contract.**
+- **Five ledgers broke on one new flag, and all five were REGISTERED rather than exempted:**
+  `ARCHIVE_ONLY_FLAGS`, `EXIT_USAGE_SITE_COUNT` (10 -> 11), `EXIT_2_CAUSES`,
+  `test_the_contract_codes_are_the_scripts_own_EXIT_constants`, and the two pinned SKILL.md
+  tables. Each failure message named its own fix — they are worth reading rather than working
+  around.
+- **The seam nobody owns, closed on purpose:** `test_the_arc_reader_can_read_back_what_this_tool_wrote`
+  is the only test that builds the combined state of the writer (`handoff_doc.commit_message`)
+  and the reader (`handoff_arc.resolve_arc`). Both were hermetically tested apart; a trailer
+  written in a form the reader cannot parse is a defect neither module's own suite can see.
+- ⚠ **A test docstring of mine over-claimed and was corrected before merge.** The hook-compose
+  test said its stand-in hook "appends unconditionally — so a blind append would read 2". The
+  hook actually checks first, and the M7 mutation proved the point: a naive appender left that
+  test GREEN and was killed only by the unit test. The docstring now states exactly what the
+  test does and does not cover. **A guard's description is a claim; check it is as wide as its
+  body.**
+
 ## How to verify
 ```bash
-# the two stuck PRs — is the red still inherited?
-git -C ~/workspace/devrc fetch origin -q
-gh pr checks 1754 --repo innovation-upstream/devrc
-git -C ~/workspace/devrc merge-base --is-ancestor 61faa675 \
-  $(git -C ~/workspace/devrc rev-parse origin/docs/handoff-arc-closed)   # false ⇒ inherited
+# the arc, end to end (expect 3 members and the coverage line)
+python3 ~/workspace/devrc-arc-impl/scripts/find-session.py --arc handoff-handoff-resume-skill-trace
 
-# the trailer-parser trap, both instruments, on the same corpus
+# the two readers on the same commit — the premise, measured both ways
 git -C ~/workspace/devrc log --format='%(trailers:key=Claude-Session-Id,valueonly=true)' \
-  -- 'claudedocs/handoff-*.md' | grep -c .        # UNDERCOUNTS
+  -- 'claudedocs/handoff-*.md' | grep -c .      # UNDERCOUNTS (33%)
 git -C ~/workspace/devrc log --format='%B' -- 'claudedocs/handoff-*.md' \
-  | grep -c '^Claude-Session-Id:'                 # the honest reader
+  | grep -c '^Claude-Session-Id:'               # the honest reader (55%)
 
-# the genesis discriminator (expect a large raw set, 3 after the filter)
-python3 ~/workspace/devrc/scripts/find-session.py handoff-handoff-resume-skill-trace \
-  --all-time --any --claude-only --limit 60 --json
+# the guard false positive: a doc the guard named, that does not exist
+git -C ~/workspace/devrc ls-files 'claudedocs/**/handoff-x-y.md'   # empty
 ```
