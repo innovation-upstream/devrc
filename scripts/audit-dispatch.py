@@ -1094,7 +1094,12 @@ def attribution_stop(blocks, round_no):
     the fail-open states this corpus is in. A refusal that cannot say what it
     read is indistinguishable from one wired to nothing.
     """
-    if round_no < ATTRIBUTION_STOP_ROUNDS:
+    # 🔴 A LITERAL `2`, AND NOT `ATTRIBUTION_STOP_ROUNDS`, THOUGH THEY AGREE
+    # TODAY. This one says "delta rounds start at 2" — the same fact every other
+    # gate in this module spells `>= 2` / `< 2` — while the constant says "two
+    # consecutive zero rounds end a ladder". Two different claims sharing one
+    # literal is how a change to either silently moves the other.
+    if round_no < 2:
         return AttributionStop(
             False, None, None,
             f"round {round_no} is not a delta round, so no ladder of this PR's "
