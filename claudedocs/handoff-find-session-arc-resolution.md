@@ -24,23 +24,19 @@ session that picked the work back up. Sibling efforts on the same tool, differen
   passes on the merged tree. 🔴 FROZEN AT ROUND 1.
 
 ## State now
-- **BUILT AND PUSHED: `#1777`** (`feat/find-session-arc`, commit `4020db48`, worktree
-  `~/workspace/devrc-arc-impl`). Implements clawgate task **#626**, which this session also
-  authored and then picked up. Task is `in_progress`; it will finish at **`ready_for_review`,
-  never `complete`** — this session wrote the acceptance criteria, and grading an exam you
-  wrote is what the status gate exists to stop.
-- **11 of 12 acceptance criteria verified.** The outstanding one is criterion 12, the pytest
-  gate on the MERGED tree (`a3aeed07` = `origin/main` `97c20d06` + `4020db48`); it was still
-  running at session end. 🔴 **Do not claim the gate passed — read it.**
-- 48 new tests; **866 passing** across `test_find_session_arc.py`,
-  `test_handoff_doc_session_trailer.py`, `test_find_session_skill_{contract,cli}.py`,
-  `test_find_session_live.py`, `test_handoff_doc.py`, `test_session_trailer.py`,
-  `test_session_stamp_seam.py`. That is a set of modules I NAMED, not a tier — it cannot
-  support a claim about `main`.
-- `#1776` (the doc that opened this arc) MERGED as `d5d009de`.
-- 🔴 NO `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
-  session, which cannot distinguish "touched none" from "wrong id". Task #626 is nonetheless
-  this session's, by creation; the field is absent because the resolver could not confirm it.
+- **`#1777` now carries the round-0 audit fixes: `3d810fe7`.** The FIRST merged-tree gate run
+  **FAILED (3 tests)**; all three were mine and all three are fixed. A clean re-run on a fresh
+  merged tree (`4cd35276` = `origin/main` `97c20d06` + `3d810fe7`) was in flight at session end.
+  🔴 **No gate pass is claimed.**
+- **`#1778`** carries this doc. **Task `#626` is still `in_progress`** — the completion comment
+  waits on the clean gate, and will flip to **`ready_for_review`, never `complete`** (this
+  session wrote the criteria).
+- Round 0 of `/audit-pr 1777` ran and produced real findings: ledger `round 0 · requirements:
+  14 (unattributed: 2) · deletion candidates: 8`. **The nine correctness axes have NOT been
+  run** — round 0 reports and cannot end a ladder, so the checklist pass is still outstanding.
+- 908 tests green across the named affected modules INCLUDING `test_transcript_search.py`,
+  which the audit added to that set and which my own first run had omitted. That is still a
+  set of modules I NAMED, not a tier.
 
 ## Open investigations — live diagnosis state
 
@@ -120,18 +116,48 @@ session that picked the work back up. Sibling efforts on the same tool, differen
   against the repo's `claudedocs/`), and add a fixture-shaped negative control — a test whose
   body contains a plausible `handoff-*.md` string that must NOT arm the guard.
 
+### The write-back guard's fixture false positive — CONFIRMED, second instance
+- as-of: 2026-09-18
+- **Symptom + exact repro:** the Stop guard has now fired TWICE in one session naming a
+  handoff doc that has never existed — first `handoff-x-y.md`, then `handoff-same.md`. Both
+  are synthetic strings inside `scripts/tests/test_find_session_arc.py`.
+  ```bash
+  grep -rn "handoff-x-y.md\|handoff-same.md" ~/workspace/devrc-arc-impl/scripts/tests/
+  git -C ~/workspace/devrc ls-files 'claudedocs/**/handoff-x-y.md' 'claudedocs/**/handoff-same.md'
+  ```
+- **Observed (with values):** `git ls-files` returns EMPTY for both. The second firing came
+  minutes after adding `test_writer_counts_walk_each_DISTINCT_doc_once`, whose fixture rows are
+  `{"genesis": "claudedocs/handoff-same.md"}`. The guard's real firing earlier in the session
+  (on `handoff-handoff-resume-skill-trace.md`) was correct, so the detector works — it simply
+  does not check that the doc EXISTS.
+- **Ruled out:** that one of these was a real doc created and deleted — neither appears in any
+  commit on any branch of this work. via: command (`git ls-files`, `git log --all`)
+- **Ruled out:** that it is reading the arc reader's OUTPUT — the reader prints basenames
+  derived from `git log`, and neither name has ever been in a repo. via: code + measurement
+- 🔴 **CONFIRMED mechanism (upgraded from hypothesis by the second instance):** the detector
+  matches a `handoff-*.md`-shaped TOKEN in session activity without an existence check. Writing
+  tests ABOUT handoff docs therefore arms it against its own fixtures — and this PR's whole
+  subject is handoff docs, so it will keep firing for as long as this work continues.
+- **Next probe:** read the candidate extraction in
+  `scripts/claude-hooks/handoff-write-guard.py`; gate it on the path resolving in a repo
+  (`git ls-files` or `Path.exists()` under `claudedocs/`). Add a negative control: a test whose
+  body contains a plausible `handoff-*.md` string that must NOT arm the guard — without that
+  control the fix is unfalsifiable, since the guard's normal state is silence.
+
 ## Next steps (ranked)
-1. **Read the merged-tree gate result and finish task #626.** The run is
-   `scripts/gate.sh --tier pytest` on `a3aeed07`; its log path is printed in its own output.
-   🔴 Its exit status is authoritative, and **90 (could-not-vouch) and 91 (PARTIAL) are not
-   passes**. Then post the completion comment on #626 with per-criterion evidence and flip to
-   `ready_for_review`.
-   forcing: gate — a shipped PR with one acceptance criterion unmeasured.
-2. **Fix the write-back guard's fixture false positive** per the investigation above.
+1. **Read the clean merged-tree gate (`4cd35276`) and finish task #626.** 🔴 **Read the
+   GATE's own verdict line, not a shell exit status** — see the Gotchas entry below; the first
+   run's completion notification said `exit code 0` over `GATE: RESULT=FAIL exit=1`. Then post
+   the per-criterion completion comment and flip to `ready_for_review`.
+   forcing: gate — a shipped PR whose last full-tier run FAILED, with fixes since.
+2. **Run the nine correctness axes on `#1777`** (`/audit-pr 1777`). Round 0 is not a substitute
+   and explicitly cannot end a ladder.
+   forcing: gate — an unaudited PR whose round 0 found 3 defects in code that was already green
+   on the modules its author chose to run.
+3. **Fix the write-back guard's fixture false positive** per the confirmed investigation above.
    forcing: none
-3. **Update and merge `#1754` then `#1753`** — still open, still one branch-update from green;
-   the inherited-red diagnosis is in `handoff-handoff-resume-skill-trace.md` and is complete.
-   forcing: gate — two PRs blocked on a red proven inherited, merged tree measured green.
+4. **Update and merge `#1754` then `#1753`** — still one branch-update from green.
+   forcing: gate — two PRs blocked on a red proven inherited.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`git log --format='%(trailers:key=Claude-Session-Id)'` IS THE WRONG READER AND IT
@@ -236,17 +262,59 @@ session that picked the work back up. Sibling efforts on the same tool, differen
   test does and does not cover. **A guard's description is a claim; check it is as wide as its
   body.**
 
+- 🔴 **A BACKGROUND TASK'S "exit code 0" WAS MY OWN `echo`, AND IT SAT OVER A FAILING GATE.**
+  The run was `gate.sh > log 2>&1; echo "GATE_RC=$?" >> log`. The harness reports the exit of
+  the COMPOUND command — the `echo` — so the completion notification read `exit code 0` while
+  the log's own last lines read `GATE: RESULT=FAIL exit=1`, 3 tests failed. This is the
+  documented "a trailing command swallows the status" trap, reached through a *notification*
+  rather than a pipe, which is a route the rule's own wording does not picture. 🔴 **Read the
+  runner's own `RESULT:`/`GATE:` line. Never a wrapper's exit status, and never a task
+  notification's.**
+- 🔴 **I MUTATED THE TREE A GATE WAS READING, MID-RUN.** While verifying an audit finding I
+  copied a fixed `find-session.py` into the merged worktree the gate was walking. Its verdict is
+  therefore about no single tree and is void whatever it said. **A gate run owns its worktree
+  for its whole duration** — verify a finding in a SEPARATE tree, and if you have touched the
+  one under test, throw the run away and rebuild. The re-run uses a fresh worktree for exactly
+  this reason.
+- 🔴 **ROUND 0 FOUND A DEFECT CLASS THE GATE STRUCTURALLY COULD NOT: A PROMISE THE CODE COULD
+  NOT KEEP.** `arc_counts` was threaded through `arc_annotation` and supplied by no production
+  caller, so the `(N sessions)` the OPERATOR selected in an `AskUserQuestion` could never print
+  — while both branches were covered by tests and every suite was green. **Dead parameter
+  surface with test coverage on the unreachable branch reads as a feature.** The tell is not a
+  red test; it is asking who the requirement's author was and whether the shipped code satisfies
+  it.
+- 🔴 **FIXING THAT SURFACED A SECOND BUG IN THE FIX — the dedup keyed on the RESULT map rather
+  than a `seen` set**, so a doc resolving to NO repo was re-walked once per hit (50 hits naming
+  one absent doc = 50 lookups, 0 answers). Caught by a test asserting the call COUNT, not the
+  return value. An audit fix resets the verification gate; budget for the fix's own defect.
+- 🔴 **A ROLE LABEL IS A CLAIM. `ORIGINATED` WAS AN INFERENCE PRINTED AS A FACT.** It came from
+  commit order and is unsound exactly when a writer is missing — 45% of corpus doc commits are
+  unstamped — so on an older doc it asserted who started an effort on the same screen as a line
+  saying some writers are invisible. Now `earliest-stamped` whenever coverage is incomplete.
+  **The negative control is the load-bearing half**: without a test proving the demotion is
+  CAUSED by the missing writer, deleting the whole inference would pass.
+- 🔴 **A PRIVATE GLOB OF A SHARED CORPUS IS A LEDGER VIOLATION, AND IT WAS ALSO A BUG.**
+  `session_genesis` globbed `*/{id}.jsonl` itself; `JSONL_GLOB_SITES` pins corpus globbing to
+  ONE module and two tests went red on the merged tree. `transcript_search.find_transcript` is
+  the existing spelling AND is stricter — it applies `is_corpus_member`, so a `subagents/` id
+  resolves to nothing, where the raw glob returned one. **Deleting the duplicate was cheaper
+  than registering it, and it fixed a defect nobody had reported.**
+- ⚠ **My own count was understated, not overstated, and an audit corrected it:** the PR says
+  "48 new tests"; measured across both new modules it is ~60. Recorded because the reflex is to
+  assume a self-reported number is inflated.
+- **Decision, recorded so it is not re-litigated:** the annotation's count is rendered as a
+  FLOOR (`3+ sessions`) rather than exact. It counts git writers only; readers need a corpus
+  walk and paying one PER HIT would cost more than the query. A bare `(3 sessions)` would be a
+  precise-looking undercount, which is the failure the coverage line exists to refuse.
+
 ## How to verify
 ```bash
-# the arc, end to end (expect 3 members and the coverage line)
+# the clean merged-tree gate — read the GATE line, never a shell status
+grep -E 'RESULT:|GATE:|TOTAL collected' <the gate log named in its own output>
+
+# the guard false positive: two docs the guard demanded, neither of which exists
+git -C ~/workspace/devrc ls-files 'claudedocs/**/handoff-x-y.md' 'claudedocs/**/handoff-same.md'
+
+# the demoted role and the named excluded corpus
 python3 ~/workspace/devrc-arc-impl/scripts/find-session.py --arc handoff-handoff-resume-skill-trace
-
-# the two readers on the same commit — the premise, measured both ways
-git -C ~/workspace/devrc log --format='%(trailers:key=Claude-Session-Id,valueonly=true)' \
-  -- 'claudedocs/handoff-*.md' | grep -c .      # UNDERCOUNTS (33%)
-git -C ~/workspace/devrc log --format='%B' -- 'claudedocs/handoff-*.md' \
-  | grep -c '^Claude-Session-Id:'               # the honest reader (55%)
-
-# the guard false positive: a doc the guard named, that does not exist
-git -C ~/workspace/devrc ls-files 'claudedocs/**/handoff-x-y.md'   # empty
 ```
