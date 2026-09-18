@@ -192,7 +192,12 @@ SKILL_RELS = (
 # `170 - min(50, max(1, 170 // 20))` = 170 - 8 = 162. NOT derived by adding the
 # attribution gate's seven new tests to 155, which is the arithmetic the
 # paragraphs above record going wrong three times.
-MIN_TESTS = 162
+# 🔴 RAISED AGAIN 2026-09-18, 162 -> 164, at m = 172 — COUNTED the same way,
+# from a green run of the module (`172 passed`) put through the same formula,
+# `172 - min(50, max(1, 172 // 20))` = 172 - 8 = 164. Two tests were added by
+# `fix/audit-dispatch-rc5-overload`; the number is still the formula's output
+# on a counted m, NOT 162 + 2.
+MIN_TESTS = 164
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -2586,6 +2591,34 @@ def the_emitted_block_loses_its_override_record(t):
     )
 
 
+def the_empty_reason_refusal_returns_the_gates_verdict(t):
+    """G11 — the OVERLOADED EXIT CODE, restored.
+
+    🔴 THE NARROWEST EXPRESSION THAT CAN BE WRONG, deliberately: the return
+    VALUE alone, with the guard's condition and its entire message untouched.
+    A mutant that deleted the branch would prove nothing about the code —
+    `claude/RULES.md`: a mutation that removes a guard together with its
+    enclosing condition dies for the wrong reason.
+
+    This is what `80379e83` shipped. The refusal fires in argument validation,
+    before any claims block is read and before `attribution_stop` runs, so it
+    answered `ATTRIBUTION_STOP_RC` — "the ladder has left the PR, post the
+    remaining findings and stop" — for `--override-attribution-gate ""` at
+    round 1 with no claims blocks in existence. Its stderr is unaffected by
+    this mutation, which is exactly why a message-only assertion cannot see it.
+
+    The anchor carries the comment that FOLLOWS the return: a bare
+    `        return 4` has seven near-twins in this script, and `_swap` refuses
+    an ambiguous target rather than editing whichever comes first.
+    """
+    return _swap(
+        t,
+        "        return 4\n\n    # A flag that silently does nothing",
+        "        return ATTRIBUTION_STOP_RC"
+        "\n\n    # A flag that silently does nothing",
+    )
+
+
 def absent_payload_field_reads_as_zero(t):
     """G3 — the FAIL-CLOSED mutation: an absent field becomes a measured 0.
 
@@ -4001,10 +4034,15 @@ ROWS = [
     # 🔴 G1-G10 — THE ATTRIBUTION GATE. Killer sets MEASURED by this harness,
     # not predicted: the rows below were run and the reported sets copied in.
     # ------------------------------------------------------------------- #
+    # 🔴 G1 GAINED A FOURTH KILLER, MEASURED, not predicted: the exit-code split
+    # added a test that asserts the GATE still answers 5 on a firing corpus, so
+    # a gate that never fires now fails it too. The row still isolates what it
+    # names — every one of the four is about the gate firing.
     ("G1  the gate never fires — the verdict inverted",
      {"test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
       "test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less",
-      "test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+      "test_the_gate_override_is_refused_without_a_reason_and_records_one_given",
+      "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers"},
      gate_never_fires),
     ("G2  ONE zero round ends the ladder (`and` -> `or`)",
      {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
@@ -4038,6 +4076,13 @@ ROWS = [
     ("G10 the emitted block loses its override record",
      {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
      the_emitted_block_loses_its_override_record),
+    # 🔴 G11 IS THE SHIPPED DEFECT ITSELF, not a hypothetical. The killer set
+    # below was MEASURED by this harness, not predicted.
+    ("G11 the empty-reason INPUT refusal returns the gate's verdict again",
+     {"test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict",
+      "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
+      "test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     the_empty_reason_refusal_returns_the_gates_verdict),
 ]
 
 

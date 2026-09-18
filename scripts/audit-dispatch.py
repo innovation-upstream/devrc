@@ -103,9 +103,20 @@ converts that into "the ladder ENDS".
    positive rate is set by whatever a human typed. It runs over `--check FILE`
    and over the READ-BACK of `--out` — never over the in-memory string, where
    it was unreachable by construction and could not have fired for any input.
-3. **`--emit-claims` REFUSES (exit 4) to print a block whose `<from>` this
-   script's OWN parser reads back as something else**, and refuses an empty
-   `--audited` outright. The flag used to accept any string: `abc 123` emitted
+3. **A VALUE THIS SCRIPT WILL NOT ACT ON IS REFUSED, exit 4 — "fix what you
+   typed and re-run".** SIX sites in `main`'s argument validation, all before
+   any PR, git or claims block is consulted (a negative `--round`; an empty
+   `--audited`; a whitespace-carrying `--audited`; a negative `--payload`; an
+   empty `--override-attribution-gate` reason; `--round 0 --emit-claims`), and
+   TWO more at emit time, where the block this run is about to print is fed
+   back through this script's own parser. 🔴 THIS ITEM NAMES A FAMILY RATHER
+   THAN `--emit-claims` BECAUSE THE FIFTH SITE USED TO RETURN 5 — item 4's
+   ATTRIBUTION GATE verdict — so `--override-attribution-gate ""` answered "the
+   ladder has left the PR" at round 1, with no claims blocks in existence and
+   the gate structurally unable to fire. Its stderr said the right thing; the
+   number did not, and the number is the only part of a refusal a caller can
+   branch on. Two refusals demanding different actions may not share one.
+   The round-trip half: the flag used to accept any string: `abc 123` emitted
    ``audited=abc 123..<head>``, which parses back as `from=''`, `to='abc'`, so
    the next round diffed `abc..HEAD`; `e06461f7..dd601793` corrupted `<to>`
    instead and cascaded into the round after that. A refusal and NOT a warning,
@@ -143,6 +154,9 @@ converts that into "the ladder ENDS".
    not a zero. The override is `--override-attribution-gate <reason>`, the
    reason is REQUIRED, and it is recorded in the brief and above the emitted
    block so it lands on the PR rather than in one operator's shell history.
+   🔴 EXIT 5 IS THIS GATE'S AND NOTHING ELSE'S. An EMPTY reason is item 3's
+   exit 4 — an input refusal, not a verdict — so a caller reading 5 may act on
+   "the ladder is done" without also reading the stderr.
 
 🔴 EVERY NUMBER HERE IS ABOUT THE PR, NOT ABOUT YOUR CHECKOUT
 -------------------------------------------------------------
@@ -4613,11 +4627,20 @@ def missing_clauses(brief):
 REFUSAL_HEADER = "🔴 REFUSING TO EMIT a delta re-audit brief"
 
 # 🔴 ITS OWN EXIT CODE, and it is 5 — not 2, which means "your claims ledger is
-# unreadable, fix it and re-run", and not 4, which means "this emit would
-# corrupt the next round's anchor". This one means THE LADDER IS DONE, which is
-# a different action: post the remaining scaffolding findings as one follow-up
-# task and stop. Collapsing it into 2 would tell a caller to go fix a ledger
-# that is perfectly correct.
+# unreadable, fix it and re-run", and not 4, which means "this run's INPUT was
+# refused: a flag value this script will not act on". This one means THE LADDER
+# IS DONE, which is a different action: post the remaining scaffolding findings
+# as one follow-up task and stop. Collapsing it into 2 would tell a caller to go
+# fix a ledger that is perfectly correct.
+#
+# 🔴 SO IT IS RETURNED BY THE GATE AND BY NOTHING ELSE — a VERDICT about the
+# ladder, never a complaint about an argument. That sentence was FALSE for the
+# life of #1765: the empty-`--override-attribution-gate` refusal returned this
+# constant from argument validation, so `--override-attribution-gate ""`
+# answered "the ladder has left the PR" at round 1 with no claims blocks in
+# existence, where the gate cannot fire at all. Its stderr was unambiguous and
+# the number was not, and the number is what an exit code is FOR. It now returns
+# 4 with the rest of the input refusals; the two sites below are the only ones.
 ATTRIBUTION_STOP_RC = 5
 ATTRIBUTION_REFUSAL_HEADER = (
     "🔴 REFUSING TO ASSEMBLE another round — THE ATTRIBUTION GATE HAS FIRED"
@@ -4951,6 +4974,23 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # readings silently continues a ladder past its stop condition with the
     # record blank. #1531's twelve rounds each stated a reason in prose that
     # nobody could check; a blank one cannot even be read.
+    #
+    # 🔴 IT RETURNS 4, NOT `ATTRIBUTION_STOP_RC`, AND THAT IS THE WHOLE
+    # DIFFERENCE BETWEEN THE TWO CLAIMS. This is an INPUT refusal — it fires
+    # here, at argument-validation time, BEFORE the claims blocks are read and
+    # before `attribution_stop` is ever evaluated, so it fires identically on a
+    # corpus where the gate could not possibly fire. MEASURED at `80379e83`:
+    # `--round 1` with NO claims blocks at all returned 5, which told the
+    # caller "the ladder has left the PR, post the remaining findings and
+    # stop" when the truth was "your flag value was empty". The stderr said the
+    # right thing; the NUMBER — the one machine-readable part, and the one a
+    # caller branches on — said the ladder's verdict. 4 is the code every other
+    # bad-value refusal in this function already returns (`--round`,
+    # `--audited`, `--payload`), including its immediate sibling twenty lines
+    # above, and it is spelled as a bare literal for the same reason they are:
+    # eight sites spell this one family, and naming only this one would leave
+    # the family half-spelled — the state the module docstring's item 3 now
+    # enumerates in full.
     if args.gate_override is not None and not args.gate_override.strip():
         print("\n".join([
             f"{OVERRIDE_REFUSAL_HEADER}: "
@@ -4966,7 +5006,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             '"round 3 fixed a 🔴 in the payload; the count is 0 because the fix '
             'landed in the previous round\'s commit"`.',
         ]), file=err_stream)
-        return ATTRIBUTION_STOP_RC
+        return 4
 
     # A flag that silently does nothing is the shape this module refuses
     # everywhere else: `--audited` is written by `--emit-claims` and by nothing

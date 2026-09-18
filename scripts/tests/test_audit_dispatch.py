@@ -9821,6 +9821,23 @@ RED_AT_BASE_R22: frozenset[str] = frozenset({
     "test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
 })
 
+# 🔴 THE OVERLOADED EXIT CODE. Base `80379e83`, the branch point for
+# `fix/audit-dispatch-rc5-overload`. BOTH are regression coverage, not guards,
+# and the distinction from `RED_AT_BASE_R22` above is the point: every symbol
+# these two name — `ATTRIBUTION_STOP_RC`, `OVERRIDE_REFUSAL_HEADER`,
+# `OVERRIDE_FLAG` — already EXISTS at `80379e83` (#1765 shipped them), so a red
+# there is a wrong ANSWER and not an `AttributeError` about a missing name.
+#
+# MEASURED at `80379e83` with this module copied in unchanged, under
+# `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`: both fail on rc 5 where 4 is
+# required — the empty-`--override-attribution-gate` refusal returned the
+# attribution gate's own verdict from argument validation, including at round 1
+# with no claims blocks at all, where the gate cannot fire.
+RED_AT_BASE_R23: frozenset[str] = frozenset({
+    "test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict",
+    "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -9839,6 +9856,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "b9a53101": RED_AT_BASE_R20,
     "6bf15a8f": RED_AT_BASE_R21,
     "93685e1d": RED_AT_BASE_R22,
+    "80379e83": RED_AT_BASE_R23,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -10889,6 +10907,28 @@ FIX_MATRIX = (
      "not have been evaluated by anything",
      "test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
      "RED@93685e1d", "G1-G3"),
+
+    # --------------------------------------------------------------------- #
+    # THE OVERLOADED EXIT CODE. Base `80379e83`. A finding against the round
+    # that shipped the gate: the refusal message was right and the NUMBER was
+    # not, which is the half a caller branches on.
+    # --------------------------------------------------------------------- #
+    ("gate/2 `ATTRIBUTION_STOP_RC` was returned by an INPUT refusal as well as "
+     "by the gate, so one number carried two claims. "
+     "`--override-attribution-gate \"\"` answered 5 — 'the ladder has left the "
+     "PR, post the remaining findings and stop' — from argument validation, "
+     "before any claims block was read; MEASURED at `80379e83` it answered 5 "
+     "at round 1 with no claims blocks in existence, where the gate is "
+     "structurally unable to fire. The stderr was unambiguous throughout, so "
+     "only a caller reading the code was misled — and the code is what an exit "
+     "code is for",
+     "test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict",
+     "RED@80379e83", "G11"),
+    ("gate/2b the two codes were never asserted to DIFFER, so nothing would "
+     "have caught the collapse in either direction — including a fix that "
+     "moved the GATE's own verdict instead of the input refusal",
+     "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
+     "RED@80379e83", "G1, G11"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -11364,6 +11404,19 @@ EXPECTED_GATE_RC = 5
 EXPECTED_GATE_REFUSAL = "🔴 REFUSING TO ASSEMBLE another round"
 EXPECTED_OVERRIDE_FLAG = "--override-attribution-gate"
 
+# 🔴 A LITERAL FOR THE SAME REASON, AND IT HAS NO CONSTANT TO NAME ANYWAY. The
+# input-refusal family in `main` is spelled as a bare `4` at all eight of its
+# sites, so there is nothing to import; and even if there were, the regression
+# tests below must fail at `80379e83` on the ANSWER (rc 5 — the gate's verdict
+# returned for an empty flag value) rather than on a missing symbol.
+#
+# 🔴 THE PAIR IS WHAT MATTERS, NOT EITHER NUMBER. The defect these two describe
+# is that ONE number meant TWO things, so the tests below assert the two are
+# DIFFERENT as well as asserting each value, and
+# `test_the_gate_override_is_refused_without_a_reason_and_records_one_given`
+# carries the two-way check against the script's own constant.
+EXPECTED_INPUT_REFUSAL_RC = 4
+
 
 def payload_block(round_no, payload, frm="aaaa1111", to="bbbb2222",
                   claim=None, field=True):
@@ -11578,6 +11631,16 @@ def test_the_gate_override_is_refused_without_a_reason_and_records_one_given():
         f"the refusal header {ad.ATTRIBUTION_REFUSAL_HEADER!r} no longer opens "
         f"with {EXPECTED_GATE_REFUSAL!r}, which the regression test greps for"
     )
+    # 🔴 THE TWO CODES MUST STAY DISTINCT. The gate's verdict ("the ladder has
+    # left the PR, stop") and an input refusal ("fix what you typed") demand
+    # different actions from a caller that branches on the number, so collapsing
+    # them back into one value is the defect `80379e83` shipped.
+    assert ad.ATTRIBUTION_STOP_RC != EXPECTED_INPUT_REFUSAL_RC, (
+        f"the attribution gate's verdict is now rc {ad.ATTRIBUTION_STOP_RC}, "
+        f"the same number as the input-refusal family. One number for two "
+        "claims is what the empty-reason refusal shipped as, and the stderr "
+        "being unambiguous does not help a caller reading the code."
+    )
 
     reason = "round 4 fixed a blocker whose payload landed in round 3's commit"
     rc, out, err = run_main(
@@ -11635,9 +11698,13 @@ def test_the_gate_override_is_refused_without_a_reason_and_records_one_given():
             ["900", "--round", "5", ad.OVERRIDE_FLAG, empty],
             comments=two_zero_payload_rounds(),
         )
-        assert rc2 == ad.ATTRIBUTION_STOP_RC, (
-            f"an override with reason {empty!r} was accepted (rc {rc2}) — it "
-            f"suppresses the stop and records nothing:\n{err2}"
+        # 🔴 THE INPUT-REFUSAL CODE, NOT THE GATE'S. This is a bad flag VALUE
+        # caught in argument validation, not a verdict about the ladder — see
+        # the two regression tests below, which pin the distinction.
+        assert rc2 == EXPECTED_INPUT_REFUSAL_RC, (
+            f"an override with reason {empty!r} was accepted or mis-coded "
+            f"(rc {rc2}, want {EXPECTED_INPUT_REFUSAL_RC}) — it suppresses the "
+            f"stop and records nothing:\n{err2}"
         )
         assert ad.OVERRIDE_REFUSAL_HEADER in err2, (
             f"the empty-reason refusal does not name itself:\n{err2}"
@@ -11658,6 +11725,114 @@ def test_the_gate_override_is_refused_without_a_reason_and_records_one_given():
     )
     assert "did NOT fire" in err3, (
         f"the no-op override is silent, which reads as recorded:\n{err3}"
+    )
+
+
+def test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict():
+    """🔴 REGRESSION. Red at `80379e83` — where this returned rc 5.
+
+    `ATTRIBUTION_STOP_RC` is a VERDICT ABOUT THE LADDER: "the gate has fired,
+    post the remaining findings and stop." The empty-reason refusal is a
+    different claim — "the flag value you typed was empty" — and it fires in
+    argument validation, BEFORE any claims block is read and before
+    `attribution_stop` is evaluated at all. At `80379e83` both returned 5.
+
+    🔴 THE UNCONDITIONAL CASE IS THE ONE THAT PROVES IT. Round 1 with NO claims
+    blocks in existence is a corpus where the gate is structurally unable to
+    fire, and `--override-attribution-gate ""` returned 5 there too — a stop
+    verdict for a ladder that had not taken a second step. A caller branching
+    on the number alone was told the ladder was done.
+
+    The stderr was never ambiguous (it carries `OVERRIDE_REFUSAL_HEADER` and
+    none of the gate's prose), which is why this went unnoticed; asserted below
+    so the fix is not read as having moved the message.
+    """
+    for corpus, what in (
+        (two_zero_payload_rounds(), "a corpus where the gate FIRES"),
+        ([], "a corpus where the gate CANNOT fire"),
+    ):
+        # Round 1 for the empty corpus: round >= 2 with no parseable block is
+        # its own refusal (exit 2), which would answer a different question.
+        round_no = "5" if corpus else "1"
+        rc, out, err = run_main(
+            ["900", "--round", round_no, EXPECTED_OVERRIDE_FLAG, ""],
+            comments=corpus,
+        )
+        assert rc == EXPECTED_INPUT_REFUSAL_RC, (
+            f"an EMPTY `{EXPECTED_OVERRIDE_FLAG}` reason returned rc {rc} on "
+            f"{what}, not the input-refusal code "
+            f"{EXPECTED_INPUT_REFUSAL_RC}. At `80379e83` it returned "
+            f"{EXPECTED_GATE_RC} — the attribution gate's own verdict — which "
+            f"tells a caller the ladder has left the PR when the truth is that "
+            f"a flag value was empty:\n{err}"
+        )
+        assert ad.OVERRIDE_REFUSAL_HEADER in err, (
+            f"the empty-reason refusal does not name itself on {what}:\n{err}"
+        )
+        assert ad.ATTRIBUTION_REFUSAL_HEADER not in err, (
+            f"an INPUT refusal printed the attribution gate's refusal header "
+            f"on {what}, so the message now agrees with the wrong code rather "
+            f"than the fix agreeing with the message:\n{err}"
+        )
+        assert not out.strip(), (
+            f"a brief was emitted for a refused override on {what}:\n"
+            f"{out[:400]}"
+        )
+
+    # 🔴 THE FAMILY, driven rather than asserted about. Its immediate sibling
+    # twenty lines up in the same function is a bad flag VALUE caught at the
+    # same station, and it has always returned this code. If these two ever
+    # disagree again, one of them is mis-filed.
+    rc_sib, _out_sib, err_sib = run_main(
+        ["900", "--round", "3", "--emit-claims", "--audited", "bbbb2222",
+         "--payload", "-3"],
+        comments=[],
+    )
+    assert rc_sib == EXPECTED_INPUT_REFUSAL_RC, (
+        f"the sibling input refusal (a negative `--payload`) returned rc "
+        f"{rc_sib}, so this test's notion of the input-refusal family is not "
+        f"the script's:\n{err_sib}"
+    )
+
+
+def test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers():
+    """🔴 REGRESSION, and it pins the DISTINCTION rather than either value.
+
+    Red at `80379e83`: one corpus, driven two ways, produced 5 BOTH times, so
+    the number carried no information a caller could act on. The defect was
+    never "5 is wrong" — it was that 5 meant two things.
+
+    🔴 THIS IS ALSO THE HALF THAT MUST NOT MOVE. The real gate stop — two
+    consecutive `payload=0` rounds, no override flag — still returns
+    `ATTRIBUTION_STOP_RC`, and splitting the input refusal out of it is exactly
+    the change that could have taken it with it. Asserted here beside its twin
+    so a fix in either direction cannot quietly collapse them again.
+    """
+    corpus = two_zero_payload_rounds()
+
+    rc_gate, out_gate, err_gate = run_main(["900", "--round", "5"],
+                                           comments=corpus)
+    assert rc_gate == EXPECTED_GATE_RC, (
+        f"the attribution gate's own stop returned rc {rc_gate}, not "
+        f"{EXPECTED_GATE_RC}. Splitting the empty-reason refusal out of this "
+        f"code must not change what the GATE returns:\n{err_gate}"
+    )
+    assert EXPECTED_GATE_REFUSAL in err_gate and not out_gate.strip()
+
+    rc_input, _out_input, err_input = run_main(
+        ["900", "--round", "5", EXPECTED_OVERRIDE_FLAG, ""], comments=corpus
+    )
+    assert rc_input == EXPECTED_INPUT_REFUSAL_RC, (
+        f"the empty-reason refusal returned rc {rc_input} on the same corpus, "
+        f"not {EXPECTED_INPUT_REFUSAL_RC}:\n{err_input}"
+    )
+
+    assert rc_gate != rc_input, (
+        f"ONE corpus, TWO different failures, ONE exit code ({rc_gate}). That "
+        "is the defect: a caller branching on the number is told 'the ladder "
+        "has left the PR — post the remaining findings and stop' when the "
+        "truth is 'your flag value was empty, fix it and re-run'. The two "
+        "demand different actions, so they may not share a code."
     )
 
 
