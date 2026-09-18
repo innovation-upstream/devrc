@@ -795,7 +795,7 @@ than reporting only that the count moved. The refusal says so in its own words
 and prints the whole `forcing: none` population instead.
 
 It is also silent on a NEW doc. Round 1 legitimately opens with self-generated
-work; the finding is about what happens after it. `self_generated_report` still
+work; the finding is about what happens after it. `declared_forcing_none_report` still
 counts them on every run, new doc included.
 
 ### The audit-ladder cap that was proposed and NOT taken
@@ -895,3 +895,39 @@ is not a gap — nothing was asked, so nothing went unanswered — and a documen
 that declares no finish line is that same case. What replaced it is a 🔴 line in
 the DOD block's own section saying the question is UNANSWERABLE, which is
 explicitly not the same as unfinished.
+
+
+## Demoted from the core — the worked example for step 1's diagnosis capture
+
+VERBATIM from `/handoff` step 1. What a useless capture and a useful one look like
+side by side, which is the shape the imperative in the body states in the abstract:
+
+   "We looked into the CSP issue" is worthless; "`frame-ancestors` on app.example.test = `https://example.test https://*.example.test` — does NOT include `gen-matrix.embed.example.test`, confirmed via response header on GET /apps/run/dogfood-manual" is the whole point.
+
+## Demoted from the core — the merge's own warnings and refusal statuses
+
+Every line below is VERBATIM from `/handoff` step 5.
+
+   **The doc's YAML front matter survives this merge** — `split_front_matter` carries the base's block through, so a delta that starts with prose rather than a `## ` heading can no longer silently drop the `clawgate-task:` field. Put a front-matter block in your delta ONLY when you mean to change the recorded task; an explicit one wins. 🔴 **The NEW-doc case inverts that:** there is no base block to carry, so the delta's own front matter is the doc's only chance at one — if step 1 resolved a task, it must be at line 1 of the scratch file.
+
+   🔴 **Status header REPLACED, findings APPENDED — which is why the tool merges rather than you rewriting the file.** `State now`/`Next steps`/`How to verify` are current state and are overwritten; `Open investigations`/`Findings`/`Gotchas` append and the earlier text survives **verbatim** even when your block supersedes it — the value is seeing a prior reading was *corrected*, not finding it gone. 🔴 **Appending is HALF the job — retire the superseded heading in the SAME delta, and delete any now-wrong INSTRUCTION in it.** 📖 supersede. A section your delta omits is untouched. The append allowlist is **three prefixes wide**, everything else replaces, so the run prints a **`buckets:`** line naming where each section you touched landed — read it; the next paragraph is a consequence of it. (A NEW doc replaces nothing and gets no such line; that absence is not a fault.)
+
+   🔴 **`THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY` / `THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE`.** The base comes from `--repo`'s working tree, so a stale clone merges into an out-of-date document and reports success. It names the mainline's commit count for **this doc** (mainline **derived**, never assumed `main`), both copies' section/line counts, and which tell fired. 🔴 **A FLOOR: silence is not evidence the base is current**, and it never fetches. 📖 rule (h) in `handoff_doc.py` carries the measured incident. Two outcomes, and they differ:
+
+   - **a usable doc here but behind ⇒ WARNING, exit 0.** The merge can still classify its sections, so a knowingly-behind clone is legitimate.
+
+   - **no USABLE doc here (missing, empty or whitespace) while the mainline has one ⇒ on `--confirm`, `status=stale-base` (exit 9), NOTHING WRITTEN.** The proposal run warns and prints the diff; it never prints that line, so its absence is not a clean bill. Every section would arrive NEW and **replace the committed document** with your delta — usually a clone never re-synced after a WORKTREE authored it. Read the real copy via the `git show <ref>:<path>` it prints, then re-run against a current clone; `--allow-replacing-mainline-doc` overrides. 🔴 **`--push`'s `behind` check does NOT cover this** — it compares a different ref, so a current feature branch sails past it.
+
+   🔴 **`This replace DROPS N line(s) that look DURABLE` — a WARNING, never a refusal.** Durable content under a REPLACE heading (usually `State now`) is deleted on the next update, and in a long diff a stale-status `-` line looks exactly like a measured-finding one. It classifies the deletions **above** the diff with base line numbers. Move that line under an APPEND heading, or carry it forward. 🔴 **A FLOOR: a silent run is NOT evidence that nothing durable was dropped** — read the diff anyway.
+
+   🔴 **Six refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
+
+   🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc, so the handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run says so and tells you not to re-run — re-running appends your findings twice. 🔴 **So `status=failed` is not by itself "nothing happened", and exit 3 is not a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 with no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path if step 5 never lands, and delete it once the commit exists.
+
+   🔴 **Two more statuses exist and both mean NOTHING WAS WRITTEN OR IS SAFE — read them, do not retry blindly.**
+
+   - **`status=behind` (exit 6)** — `--push` was asked for and the remote has commits this checkout does not, so the push would be rejected and the commit would be **stranded on a shared branch**: the state that silently blocks `ship.sh`. Nothing was written. It prints the exact `merge --ff-only`, and the preserve→verify→`reset --keep` path if that refuses. Fast-forward, then re-run the identical command.
+
+   - **`status=push-failed`** — the pre-check passed and the push still failed (the remote can move in between; that race cannot be designed away). 🔴 **The COMMIT EXISTS** — true of this and of the one `failed` arm above, and of nothing else here. The message names it and hands over preserve→verify→`reset --keep` **in that order**. Do not leave it — an un-pushed commit on a shared branch is invisible until `ship.sh` skips that host.
+
+   🔴 **`--confirm` WITHOUT `--push` leaves a real commit in this checkout only — and it says so.** `status=written commit=<sha> branch=<b>` is followed by `NOT PUSHED` plus the exact command: a `git push` on a feature branch, or the preserve-on-a-topic-branch route on a shared one (several repos forbid committing to theirs). A **SUCCESS, not a refusal** — exit 0 — but push it or open a PR **in this session**: an un-pushed handoff is one only you can read. 🔴 **Do NOT retry by re-running with `--push`**: the doc already carries the update, so a second run exits 5 `no-change` or **appends your findings twice**.

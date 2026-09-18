@@ -68,6 +68,20 @@ from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
 MODULE_PATH = pinned("subsystem_recall")
 TOUCH_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 RESUME_DOC = ROOT / "claude" / "skills" / "resume" / "SKILL.md"
+# 🔴 /resume step 4's `cairn recall` OUTPUT SURFACE moved here 2026-09-17, when the
+# body was pruned 51,356 -> under its new ceiling (`test_resume_skill_size.py`).
+# The step keeps every IMPERATIVE; what a reader consults only once a block has
+# actually fired — the flags, the index badges, the featured-entry pick,
+# `MALFORMED`, the exit codes — is on-demand depth and costs nothing until opened.
+# The pin table below is split the same way, for the reason the HANDOFF split
+# ~400 lines down already gives: A PIN HAS TO MOVE WITH ITS SENTENCE. One left
+# pointing at SKILL.md after the sentence went to the sidecar passes or fails for
+# the wrong file, and a pin that quietly stops covering anything is worse than no
+# pin. `test_a_reworded_RESUME_pin_is_still_caught_in_its_new_home` is the
+# positive control that these still bite where they now point.
+RESUME_REFERENCE = (
+    ROOT / "claude" / "skills" / "resume" / "reference" / "cairn-recall.md"
+)
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 # The body that must ROUTE to the sidecar is the one that carries the protocol,
 # which since 2026-08-24 is the `subsystem-index` skill rather than /handoff.
@@ -3758,6 +3772,17 @@ class TestSkillDocsArePinned:
             "(it shows a diff; the y/N was retired 2026-08-15)",
         ),
         ("sensitivity=", "the store is client-confidential and this repo is PUBLIC"),
+    ]
+
+    # 🔴 THE SAME TABLE, FOR THE SENTENCES THAT MOVED (2026-09-17). Each of these
+    # describes what the tool PRINTS — a badge, a pick, a page order, a flag's
+    # effect. None of them is reachable before `cairn recall` has run and put the
+    # thing on screen, which is exactly the "consult it when the block fires"
+    # shape the prune moves to `reference/`. The IMPERATIVES they serve stayed in
+    # the body above (`RECALL, NEVER LIVE OBSERVATION`, `sensitivity=`,
+    # `Non-blocking, always`, the three `scope-*` statuses), so no warning was
+    # separated from the instruction it guards.
+    RESUME_SENTENCES_REFERENCE: list[tuple[str, str]] = [
         # --- the digest, and the claim it replaced -------------------------
         (
             "never truncated",
@@ -3847,19 +3872,117 @@ class TestSkillDocsArePinned:
         ),
     ]
 
+    @staticmethod
+    def _assert_resume_reference_pin(text: str, sentence: str, why: str) -> None:
+        """The pin predicate, as ONE function so the positive control below can
+        exercise the same code the real pins run.
+
+        🔴 IT WAS NOT ONE FUNCTION UNTIL 2026-09-17, AND THE CONTROL CERTIFIED
+        NOTHING. `test_a_reworded_RESUME_pin_is_still_caught_in_its_new_home`
+        claimed rewording "must make the SAME predicate the real test uses go
+        red" and then never invoked it: its live assertions duplicated the real
+        pin and ended on `sentence not in reworded`, which is a tautology of
+        `str.replace`. MEASURED: gutting the real pin's assertion to `assert
+        True` left the control GREEN and all 55 tests in the class green, while
+        the identical mutation on the HANDOFF twin (`_assert_rationale_pin`,
+        below in this file) correctly failed with DID NOT RAISE. Extracted here
+        so the two are the same shape.
+        """
+        assert sentence in text, (
+            f"claude/skills/resume/reference/cairn-recall.md no longer contains the "
+            f"sentence pinning {why}.\n"
+            f"  missing: {sentence!r}\n"
+            f"  Either restore it or change the pinned `subsystem_recall` module in\n"
+            f"  the SAME commit. If you moved the sentence BACK into SKILL.md, move\n"
+            f"  this row back to RESUME_SENTENCES too — a pin pointing at the wrong\n"
+            f"  file passes or fails for the wrong reason."
+        )
+
+    @pytest.mark.parametrize(
+        "sentence,why",
+        RESUME_SENTENCES_REFERENCE,
+        ids=[w for _, w in RESUME_SENTENCES_REFERENCE],
+    )
+    def test_resume_step_sentence_in_the_cairn_sidecar(
+        self, sentence: str, why: str
+    ) -> None:
+        """The half of step 4 that moved to `reference/cairn-recall.md` in the
+        2026-09-17 prune. Same predicate, different file — see the comment on
+        RESUME_REFERENCE for why the pin had to move rather than widen."""
+        self._assert_resume_reference_pin(
+            RESUME_REFERENCE.read_text(encoding="utf-8"), sentence, why
+        )
+
+    def test_a_reworded_RESUME_pin_is_still_caught_in_its_new_home(self) -> None:
+        """🔴 POSITIVE CONTROL on the 2026-09-17 move itself. The failure this
+        guards against is not "the sentence vanished" but "the pin followed it
+        and went inert" — a table repointed at a file that happens to contain
+        everything is indistinguishable from one that asserts nothing.
+
+        Rewording each moved sentence IN the sidecar's real text must make the
+        SAME predicate the real test uses go red, proving the pins bite against
+        the file they now point at rather than against some file somewhere.
+        """
+        real = RESUME_REFERENCE.read_text(encoding="utf-8")
+        for sentence, why in self.RESUME_SENTENCES_REFERENCE:
+            assert sentence in real, "precondition: the pin passes on the real text"
+            # A plausible REWORDING, not a deletion — the drift that actually
+            # happens when someone "tightens" a paragraph.
+            reworded = real.replace(sentence, "the output shape is described elsewhere")
+            assert reworded != real, f"the rewrite was a no-op for {sentence!r}"
+            with pytest.raises(AssertionError) as caught:
+                self._assert_resume_reference_pin(reworded, sentence, why)
+            assert sentence in str(caught.value), (
+                "the failure must name the missing sentence, or a maintainer "
+                "cannot tell which pin broke"
+            )
+
+    def test_the_resume_reference_pin_can_report_absence(self) -> None:
+        """Negative control on the sidecar pin, matching the one over SKILL.md: a
+        check against a doc that happens to contain everything is
+        indistinguishable from one pointed at the wrong file."""
+        text = RESUME_REFERENCE.read_text(encoding="utf-8")
+        assert "a sentence deliberately absent from the resume reference" not in text
+
+    def test_the_resume_body_ROUTES_to_the_cairn_sidecar_and_it_exists(self) -> None:
+        """Splitting the output surface out is only safe if the body still points
+        at it AND the pointer resolves — otherwise step 4 documents a command
+        whose whole output vocabulary is nowhere a reader can reach.
+
+        🔴 The DEPLOYED path is what is asserted. `resume` is a `home.file`
+        skill, so an agent reads it from `~/.claude/skills/`; a bare
+        `reference/cairn-recall.md` would resolve against that agent's cwd and
+        simply not be found, which is the defect a prune most often causes.
+        """
+        doc = RESUME_DOC.read_text(encoding="utf-8")
+        assert "~/.claude/skills/resume/reference/cairn-recall.md" in doc, (
+            "claude/skills/resume/SKILL.md no longer routes to its cairn-recall "
+            "sidecar by its DEPLOYED path — step 4 would name flags, badges and "
+            "exit codes with nowhere to look them up."
+        )
+        assert RESUME_REFERENCE.exists(), f"the routed-to sidecar is gone: {RESUME_REFERENCE}"
+
     def test_the_RETRACTED_cost_claim_is_not_reasserted(self) -> None:
         """🔴 NEGATIVE CONTROL ON THE CORRECTION. "it costs a page, not a dump"
         was measured FALSE for `datapacket-talos` (31,485 B, and incomplete). The
         sentence may appear only as the thing being retracted, never as a live
         claim — so the bare phrase must not occur without the retraction beside
-        it."""
-        doc = RESUME_DOC.read_text(encoding="utf-8")
-        if "costs a page, not a dump" in doc:
-            assert "was false" in doc, (
-                "claude/skills/resume/SKILL.md asserts 'costs a page, not a dump' again "
-                "without retracting it. It was measured false on the scope holding 25 of "
-                "the store's 29 entries."
-            )
+        it.
+
+        🔴 Reads the BODY *and* the sidecar since 2026-09-17. The claim and its
+        retraction both moved to `reference/cairn-recall.md`; a check still
+        scoped to SKILL.md alone would have gone vacuously green on a file that
+        can no longer contain either half — the exact "quietly stops covering
+        anything" failure the pin-move comment warns about.
+        """
+        for path in (RESUME_DOC, RESUME_REFERENCE):
+            doc = path.read_text(encoding="utf-8")
+            if "costs a page, not a dump" in doc:
+                assert "was false" in doc, (
+                    f"{path} asserts 'costs a page, not a dump' again "
+                    "without retracting it. It was measured false on the scope holding "
+                    "25 of the store's 29 entries."
+                )
 
     def test_the_documented_flags_EXIST(self) -> None:
         """🔴 A skill is prose whose executor is an LLM, so a flag it names that

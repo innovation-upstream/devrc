@@ -308,7 +308,7 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # already carries the round count. Leaving the ceiling where it was would have
 # converted a deletion into headroom silently — which is how a ratchet stops
 # ratcheting. The need is therefore +1,367, not +1,458.
-MAX_BYTES = 28_700
+MAX_BYTES = 21_200
 
 # Required working margin below the ceiling.
 #
