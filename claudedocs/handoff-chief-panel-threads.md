@@ -90,6 +90,45 @@ this.
   against the live database, plus `SELECT name FROM pg_available_extensions WHERE name='pg_trgm';`
   before any index is even considered.
 
+### ✅ RESOLVED — Does `hx-preserve` survive an ancestor `innerHTML` swap in the vendored htmx, and where does a `fixed` child of the panel actually land?
+as-of: 2026-09-18
+**Both halves ANSWERED the same day the block was written. Supersedes the block of the same
+name above — do not re-derive it.**
+- **`hx-preserve` works, and was read out of the vendored htmx 2.0.4 rather than out of docs:**
+  the sweep is `fragment.querySelectorAll("[hx-preserve], [data-hx-preserve]")` →
+  `document.getElementById(id)`, on the main swap path for every swap style including
+  `innerHTML`. ⚠ **But the modern-Chrome pantry path (`Element.moveBefore`) uses
+  `querySelector("#"+id)` — a CSS SELECTOR — so a preserved id must be a valid CSS
+  identifier.** A raw session id is not guaranteed to be; that is why the pagination fix
+  (`ZacxDev/homelab-infra#851`) uses a letter-leading literal prefix plus `replyScopeSlug`
+  rather than `sessionChatBodyID`'s raw-id shape.
+- **The containing-block hazard is CONFIRMED, and a browser found a second defect reasoning
+  would have missed: a 12px SLIVER.** `translate-x-full` moves the shut list by 100% of its
+  OWN width to its containing block's right edge — and `#chief-panel-body` carries `p-3`, so
+  that edge is 12px INSIDE the panel. Measured at 1280×720: shut list `1268→1703` against a
+  panel ending at `1280`, leaving a visible strip of its background and ring down the right of
+  the conversation. **The panel's own `overflow-hidden` cannot fix it — the sliver is inside
+  it**; the clip has to be on the body root (`relative overflow-hidden`).
+- Geometry settled: `absolute inset-0` sub-view of the panel's own column. Desktop panel
+  `820→1280` (w 460) with the list `833→1268`, inside it. At 390×844 the panel is the whole
+  screen (`max-w-full` caps the stored 460px inline width), `document.scrollWidth` = 390.
+- ⚠ **Two specs failed against a CORRECT layout by sampling mid-transition** (`right=1703`,
+  and `517` on a 390px phone against a settled `343`). Any assertion on this panel's geometry
+  must wait for the slide to settle.
+
+### ✅ RESOLVED — How many `chat_messages` rows are there, and does thread search need an index?
+as-of: 2026-09-18
+**MEASURED against the live clawgate Postgres (`clawgate-postgres-88947b8b7-7gm8n`, PG 16.15),
+2026-09-18. Supersedes the block of the same name above.**
+- `chat_messages`: **34 rows**, relation size **248 kB**. By kind: `text` 12, `tool_result` 11,
+  `tool_call` 11 — and **no `''`-kind rows**, so filtering on `kind='text'` misses nothing.
+- `chat_sessions`: 5 total; the chief (agent 71) holds 2.
+- `pg_trgm` is **available (1.6) but NOT installed**.
+- **Verdict: plain `ILIKE`, no index, no extension** — a seq scan of 248 kB is sub-millisecond.
+- 🔴 **The snippet must be cut IN SQL, and the reason is a measurement: the longest single
+  `text` body is 174,163 bytes.** Returning whole bodies to pick a snippet client-side is 174 KB
+  over the wire for one result.
+
 ## Next steps (ranked)
 
 1. **Land `feat/chief-intro-and-threads`** — review the agent's PR against `trunk` in
@@ -170,6 +209,63 @@ this.
   never a description; bind once and listen on `document`, not `document.body`. `sessionDrawer`'s
   checkbox-hack a11y shape encodes two previous axe findings — do **not** re-add `aria-hidden`
   or `tabindex="-1"` to the checkbox.
+
+### Added 2026-09-18 (later the same day) — three corrections to this doc's own instructions
+
+- 🔴 **THIS DOC TOLD A FUTURE SESSION TO DO SOMETHING INERT, AND THE CORRECTION IS THE POINT
+  OF THIS ENTRY.** The recorded mechanism for remembering the picked thread — *"have
+  `chiefPanelScript` apply it to the body's `hx-get`"* — **does not work.** Measured in the
+  vendored htmx 2.0.4 bundle: `wt(t,n,e)` reads `te(t,"hx-"+r)` and hands it to `de(...)`, so
+  **the path is captured in a closure at PROCESS time**; `#chief-panel-body` is swapped
+  `innerHTML` and the element is therefore never re-processed. Rewriting the attribute alone
+  changes nothing on the wire.
+  🔴 **This package had ALREADY solved and documented it** — `internal/ui/components.go:3858`,
+  PR `ZacxDev/homelab-infra#727` on `#tasks-list`, where the attribute read
+  `/ui/tasks?limit=100` while the wire carried a bare `/ui/tasks`. The working idiom is the
+  attribute rewrite **plus** an `htmx:configRequest` listener scoped by element id, and **the
+  test must assert off the WIRE, never off the attribute** — asserting the attribute is what
+  makes this bug invisible.
+- 🔴 **THERE IS NO axe HELPER IN THE GATING e2e TIER — this doc's verification plan named one
+  that does not exist.** `@axe-core/playwright` lives only under `e2e/ux-audit/`, which runs
+  from `playwright.ux-audit.config.ts` and by design "can never red `make e2e`"; it is not in
+  `package.json` either. **The `axe` hits in `e2e/tests/*.spec.ts` are the word *axes*, the
+  plural of *axis*** — a grep that matched a substring of an unrelated word and read as a
+  present capability. Adding it to the correctness tier is a new dependency AND a new pattern,
+  so it was left as an operator decision; a11y is pinned structurally in Go instead
+  (`TestTheThreadListCheckboxKeepsItsAccessibleShape`, guarding both previously-paid axe
+  findings). ⚠ The existing `internal/ui/a11y_test.go` scan is real and DID fire — it caught
+  four `text-slate-500` contrast violations in the first draft.
+- **The panel's title bar cannot host the launchers as plain shell markup.** `ChiefPanel()` is
+  rendered by the shell on every tab and the shell deliberately does NOT resolve the chief —
+  that absent lookup is what makes the body lazy. Both launchers therefore arrive by
+  `hx-swap-oob` (18 existing uses in `components.go`).
+- ⚠ **A duplicate-id test that splices a whole response into the body reports a FALSE
+  duplicate.** htmx *extracts* `hx-swap-oob` elements before swapping the remainder, so no
+  settled document ever holds both copies. A correct counter must perform the oob swap the way
+  htmx does, and carry a positive control naming the ids the walk must have seen.
+- **`operatorFAB` navigates** — it is a boosted `<a href="/operator">`, so it never mounts a
+  second chat in the shell. That closes the duplicate-id question this doc left open as "an
+  argument, not a guard".
+- 🔴 **`core.hooksPath` measured 2026-09-18: repo-locally set to
+  `/home/zach/workspace/homelab-talos/.githooks`, global unset — a THIRD spelling**, distinct
+  from both values devrc's `CLAUDE.md` records (`githooks/` and `.git/hooks`). The pre-push
+  gate RAN, PASSED all five legs, and **did NOT rewrite the branch** (contrast task #322).
+  This does not contradict `CLAUDE.md` — it confirms its instruction to re-measure rather than
+  carry the value in prose.
+- ⚠ **"Red at trunk" is a COMPILE failure for every new-feature test here**, because each names
+  symbols that do not exist on `trunk`. That is honest but uninformative, so the real evidence
+  is a mutation matrix (28 mutants, 28 killed). Two of those are worth carrying:
+  **(a)** one mutant SURVIVED because the guard did `strings.Contains(script,
+  "htmx:configRequest")` over the WHOLE rendered script, and deleting the listener left the
+  phrase behind **in the comment explaining why it exists** — green with the mechanism gone.
+  Assertions on rendered script must run against comment-STRIPPED code, with a two-way control
+  on the stripper. **(b)** one mutant died for the WRONG reason: dropping the `agent_id` scope
+  produced a pgx encode error rather than a scoping failure, so it had to be rebuilt keeping
+  `$1` bound and typed before the scoping assertion could kill it.
+- ⚠ **One test does NOT guard what its name suggests:** *"a DELETED remembered thread heals to
+  the latest"* PASSES under the mutant that removes the `configRequest` listener, because
+  falling back to latest is also exactly what a BROKEN memory does. It guards the fallback,
+  not the mechanism.
 
 ## Defects (batched)
 
