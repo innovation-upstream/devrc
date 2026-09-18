@@ -272,15 +272,34 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 			// structurally cannot know whether `#N` is an issue or a PR — it
 			// builds `/pull/{id}` for everything and lets github.com redirect.
 			// There is nothing to fetch a diff for.
+			//
+			// 🔴 AND THE SPECULATIVE DIFF READ IS DISCARDED HERE, BECAUSE THE
+			// OTHER ARRIVAL ORDER EXISTS. `ReadIntents` asks for the diff before
+			// anything knows this is an issue, so that read's 404 can land
+			// BEFORE this message — in which case `diffResultIsMoot` never saw
+			// it and `a.Err` already holds it. Clearing both fields here is what
+			// makes "opening an issue shows no diff error" true in EITHER order
+			// rather than in the one a test happened to script.
+			a.Diff = nil
+			a.Err = nil
 			a.setBody(m.Snap.Body)
 			return a, nil
 		}
 		a.relayout()
-		// The three metadata panels are usable NOW; the diff is a second read
-		// because GraphQL cannot return patch text.
-		return a, []Intent{FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+		// 🔴 NO `FetchDiff` HERE ANY MORE — IT WAS ALREADY ASKED FOR. This arm
+		// used to emit it, which is what serialised a cold open into
+		// t_graphql + t_rest. `ReadIntents` emits the pair together; re-emitting
+		// it here would buy a second, duplicate REST read and nothing else.
+		return a, nil
 
 	case DiffLoaded:
+		// 🔴 THE DIFF READ IS SPECULATIVE NOW, SO ITS RESULT CAN BE MOOT.
+		// See `diffResultIsMoot` for which two screens have nowhere to put an
+		// answer, and why the in-flight request is DISCARDED rather than
+		// cancelled.
+		if a.diffResultIsMoot() {
+			return a, nil
+		}
 		if m.Err != nil {
 			// 🔴 A DIFF FAILURE IS NOT A PAGE FAILURE. The metadata panels are
 			// already on screen and still true; replacing them with an error
@@ -303,6 +322,37 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 		return a.stepKey(m)
 	}
 	return a, nil
+}
+
+// diffResultIsMoot reports whether a `DiffLoaded` may be dropped on the floor.
+//
+// 🔴 IT IS A STATE TEST, NOT A "DID WE SPECULATE" FLAG. A boolean would have to
+// be set correctly on every path that starts a read and cleared on every path
+// that consumes one; this asks the only question that matters — is there a Diff
+// panel on screen for an answer to go into — and both of its arms are reachable
+// in EITHER arrival order.
+//
+// ⚠ DISCARDED, NOT CANCELLED, AND THE REASON IS NOT "CANCELLATION IS HARD".
+// Cancelling would mean a `context.CancelFunc` living on `App`, and `App`
+// travels BY VALUE through a pure `Step` that every test in this package
+// compares against the value it came from. The saving it would buy is the
+// remainder of one small in-flight response — by the time `PRLoaded` says ISSUE
+// the request has already been sent. That trade is not worth a live handle in a
+// value-typed model, so the result is read and dropped. `run.go` stays the only
+// place a context exists.
+func (a App) diffResultIsMoot() bool {
+	// The PAGE failed, so the error card owns the screen and `a.Err` is the
+	// page's own error. A diff result here would overwrite that: `errorCardTitle`
+	// reads `a.Err` while the card BODY was built from the `PRLoaded` error, so
+	// the operator would read a title about the diff over a body about the pull
+	// request.
+	if a.Load == LoadFailed {
+		return true
+	}
+	// An ISSUE has no diff, and §4's card is terminal. The speculative read
+	// against `/pulls/{n}` 404s for one, and that 404 is an EXPECTED result, not
+	// something the operator did or can act on.
+	return a.Snap != nil && a.Snap.Kind != ghapi.KindPullRequest
 }
 
 // stepKey walks the dispatch table FOR THE CURRENT MODE.
@@ -359,7 +409,7 @@ func (a App) act(act Action) (App, []Intent) {
 		}
 		a.Load = LoadLoading
 		a.Err = nil
-		return a, []Intent{FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+		return a, a.ReadIntents()
 
 	// --- the diff viewport pan (§ `J`/`K`) -----------------------------------
 	//
@@ -618,7 +668,51 @@ func (a App) browserURL() string {
 
 // --- the impure half --------------------------------------------------------
 
-// Init fires the one GraphQL read.
+// ReadIntents is the pair of reads ONE open of a reference needs, and it is the
+// only place that pair is spelled.
+//
+// 🔴 THE TWO READS ARE CONCURRENT, AND NOTHING EVER FORCED THEM TO BE
+// OTHERWISE. `FetchDiff` needs `Owner`, `Name` and `Num`; all three come from
+// argv and are known before a byte has left this machine. The diff request used
+// to be emitted from `Step`'s `PRLoaded` arm instead, so a cold open paid
+// t_graphql THEN t_rest in series — the project handoff recorded that first
+// read as "already at the API floor", and it was not.
+//
+// MEASURED on this host, one public 4-file / 1,395-line pull request, five
+// BASE/AFTER pairs run INTERLEAVED (the host moves faster than one block of
+// five), each open driven headlessly in its own tmux socket, poll granularity
+// 12–18 ms, every reading recorded with its own matched flag:
+//
+//	                     in series      concurrent
+//	 diff readable        1,206 ms          667 ms   (medians; AFTER won 5 of 5)
+//	 first frame            204 ms          230 ms   (process start, not the API)
+//
+// ⚠ THE SECOND ROW IS NOT A WIN AND IS NOT CLAIMED AS ONE. The first frame was
+// already painted before any network call; the skeleton changed what it shows,
+// and lays out four boxes where a card used to be, which is what the ~26 ms
+// costs.
+//
+// 🔴 ONE RULE, ONE PLACE. Three sites want "read this reference": `Init`, the
+// `r` retry, and the re-read after a successful write. Spelled separately, the
+// pair is one forgetful edit away from regrowing the serialisation at a site
+// nobody re-measures — so `TestEveryFetchPRTravelsWithAFetchDiff` walks the
+// keyboard AND the messages and asserts the two always travel together.
+//
+// ⚠ IT IS PURE AND RETURNS DATA, like every other intent producer here. `Init`
+// below is the only impure part, and all it does is hand these to the runner.
+func (a App) ReadIntents() []Intent {
+	return []Intent{
+		FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num},
+		FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num},
+	}
+}
+
+// Init fires BOTH reads at once.
+//
+// 🔴 `tea.Batch`, WHOSE CONTRACT IS "concurrently with no ordering guarantees".
+// That is the whole change: `tea.Sequence` would run them one after the other
+// and buy nothing. The consequence is a new reachable state — `DiffLoaded` can
+// now arrive BEFORE `PRLoaded` — which `Step` handles in both orders.
 //
 // ✅ `Init() tea.Cmd` IS UNCHANGED IN v2. It churned during the beta and
 // reverted; several secondary sources still say otherwise and they are wrong.
@@ -626,7 +720,7 @@ func (a App) Init() tea.Cmd {
 	if a.runner == nil {
 		return nil
 	}
-	return Run(FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}, a.runner)
+	return tea.Batch(RunAll(a.ReadIntents(), a.runner)...)
 }
 
 // SetRunner installs the effect surface. Called once, at startup, by main —

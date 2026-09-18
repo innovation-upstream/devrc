@@ -128,11 +128,25 @@ func ready(t *testing.T) App {
 
 // --- the fetch sequence ------------------------------------------------------
 
-// 🔴 EXACTLY ONE GRAPHQL READ, AND THE DIFF IS THE SECOND — because GraphQL
-// cannot return patch text. The assertion is on the VALUE of the intent, not
-// on its count, so a mutant that emitted the right number of the wrong thing
-// does not survive.
-func TestLoadingAPullRequestAsksForTheDiffAndNothingElse(t *testing.T) {
+// readPair is the two reads ONE open must emit, spelled LITERALLY.
+//
+// 🔴 IT IS NOT `a.ReadIntents()`. An expectation derived from the function under
+// test is satisfied by whatever that function returns — including an empty
+// slice, which would make every assertion below vacuous while reading as
+// coverage. These are the argv values the fixture was built from, written out.
+func readPair() []Intent {
+	return []Intent{
+		FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum},
+		FetchDiff{Owner: fxOwner, Name: fxName, Num: fxNum},
+	}
+}
+
+// 🔴 `PRLoaded` NO LONGER CHASES THE DIFF, BECAUSE THE DIFF WAS ALREADY ASKED
+// FOR. This is the assertion that goes red if the serialisation grows back: a
+// `FetchDiff` emitted here would be a second, duplicate REST round trip, and the
+// sequential cold open — t_graphql THEN t_rest — is precisely what it used to
+// buy.
+func TestAPanelReplyAsksForNothingFurther(t *testing.T) {
 	a := New(fxOwner, fxName, fxNum)
 	if a.Load != LoadLoading {
 		t.Fatalf("a fresh App is in state %v", a.Load)
@@ -141,9 +155,16 @@ func TestLoadingAPullRequestAsksForTheDiffAndNothingElse(t *testing.T) {
 	if next.Load != LoadReady {
 		t.Errorf("Load = %v, want LoadReady", next.Load)
 	}
-	want := []Intent{FetchDiff{Owner: fxOwner, Name: fxName, Num: fxNum}}
-	if !intentsEqual(intents, want) {
-		t.Errorf("intents = %v, want %v", intents, want)
+	if len(intents) != 0 {
+		t.Errorf("PRLoaded emitted %v — the diff read has been in flight since "+
+			"Init, so anything here is a duplicate round trip", intents)
+	}
+	// 🔴 POSITIVE CONTROL, IN THE SAME TEST. The zero above is a claim about
+	// THIS branch; without a case that produces reads, it is equally satisfied
+	// by an App that never reads anything. The pair is asserted BY VALUE, so a
+	// mutant emitting the right count of the wrong thing does not survive.
+	if got := New(fxOwner, fxName, fxNum).ReadIntents(); !intentsEqual(got, readPair()) {
+		t.Fatalf("ReadIntents() = %v, want %v", got, readPair())
 	}
 }
 
@@ -166,11 +187,18 @@ func TestLoadingAnIssueEmitsZeroIntents(t *testing.T) {
 	if next.Load != LoadReady {
 		t.Errorf("Load = %v, want LoadReady — an issue is a successful load", next.Load)
 	}
-	// The positive control, in the same test.
-	_, prIntents := New(fxOwner, fxName, fxNum).Step(PRLoaded{Snap: fixturePR()})
-	if len(prIntents) == 0 {
-		t.Fatal("the PULL REQUEST path also emitted nothing — the zero above " +
-			"is a claim about Step being wired to nothing, not about issues")
+	// The positive control, in the same test, and it drives the SAME `Step`.
+	//
+	// ⚠ IT IS NO LONGER THE PULL-REQUEST ARM OF `PRLoaded`. That arm now emits
+	// nothing either — the diff read moved to `Init` — so it stopped being a
+	// control and would have made this test vacuous in a way nothing announced.
+	// The retry path is a message-driven read that is still non-empty.
+	failed, _ := New(fxOwner, fxName, fxNum).
+		Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthNotFound}})
+	_, retryIntents := failed.Step(keyPress("r"))
+	if len(retryIntents) == 0 {
+		t.Fatal("the RETRY path also emitted nothing — the zero above is a claim " +
+			"about Step being wired to nothing, not about issues")
 	}
 }
 
@@ -271,7 +299,9 @@ func TestRetryOnlyFiresFromAFailedState(t *testing.T) {
 	a := New(fxOwner, fxName, fxNum)
 	a, _ = a.Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthRateLimited}})
 	next, intents := a.Step(keyPress("r"))
-	want := []Intent{FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	// 🔴 BOTH READS. A retry that re-read the pull request alone would leave a
+	// recovered screen with a permanently empty Diff panel.
+	want := readPair()
 	if !intentsEqual(intents, want) {
 		t.Fatalf("intents = %v, want %v", intents, want)
 	}

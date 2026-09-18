@@ -49,11 +49,26 @@ func (a App) render() string {
 	switch {
 	case a.Load == LoadFailed:
 		body = a.renderCard(bodyH, a.errorCardTitle(), a.body.View())
-	case a.Load == LoadLoading:
-		body = a.renderCard(bodyH, "LOADING — "+a.Repo()+"#"+itoa(a.Num), "")
 	case a.Snap != nil && a.Snap.Kind == ghapi.KindIssue:
 		body = a.renderIssueCard(bodyH)
 	default:
+		// 🔴 THE SKELETON AND THE LOADED SCREEN ARE THE SAME FRAME. `LoadLoading`
+		// used to get its own full-width card reading "LOADING — owner/repo#N",
+		// so a cold open drew a card, threw it away, and drew a four-panel layout
+		// in its place. The panel bodies each say what they are waiting for
+		// instead — chrome, borders, titles and footer are on screen from the
+		// first frame and nothing under the operator's eye moves when the reads
+		// land.
+		//
+		// ⚠ THIS DOES NOT MOVE t_first_frame AND IS NOT CLAIMED TO. The card was
+		// already painted before any network call — measured at a median 204 ms
+		// after `tmux new-session`, which is process exec, not the API, and the
+		// skeleton's own median is 230 ms because four boxes cost more to lay
+		// out than one card. What it changes is WHAT the first frame shows, that
+		// the layout no longer reflows, and — with the reads now parallel — that
+		// the Diff panel can render the moment the diff arrives instead of
+		// waiting for a metadata query it no longer depends on. See
+		// `ReadIntents` for the measurement.
 		body = a.renderPanels(bodyH)
 	}
 	if bar != "" {
@@ -234,9 +249,20 @@ func (a App) currentFilePath() string {
 
 // --- panel bodies -----------------------------------------------------------
 
+// overviewBody is the top-left box.
+//
+// 🔴 WITH NO SNAPSHOT IT NAMES WHAT IS BEING WAITED FOR, IT DOES NOT GO BLANK.
+// This is the skeleton's only identifying text: the reference the process was
+// launched with, which comes from argv and is therefore known before any read
+// returns. An empty box reads as a broken panel; the card this replaced at least
+// said which pull request it was loading, and that must not be lost.
 func (a App) overviewBody(w, h int) string {
 	if a.Snap == nil {
-		return ""
+		return strings.Join(clip([]string{
+			styTitle.Render("#" + itoa(a.Num) + "  " + truncate(a.Repo(), max(1, w-8))),
+			"",
+			kv("STATE ", a.Load.Word()),
+		}, h), "\n")
 	}
 	s := a.Snap
 	rows := []string{
@@ -264,7 +290,21 @@ func (a App) overviewBody(w, h int) string {
 // to show, so it is the pane that explains why.
 func (a App) diffBody() string {
 	if a.Diff == nil {
-		if a.Err != nil {
+		// 🔴 A DIFF FAILURE IS NOT REPORTABLE UNTIL THE PANEL QUERY HAS
+		// ANSWERED, AND `LoadReady` IS THAT ANSWER. The diff read is speculative
+		// — `ReadIntents` fires it before anything knows whether `#N` is a pull
+		// request at all, because `mention-open.py` builds `/pull/{id}` for
+		// every reference and lets github.com redirect. While the panel query is
+		// still out, a 404 from the diff leg is indistinguishable from "this is
+		// an ISSUE", so reporting it would flash DIFF UNAVAILABLE across the
+		// skeleton of every issue the operator opens, one frame before the issue
+		// card replaces it.
+		//
+		// ⚠ `LoadFailed` CANNOT REACH HERE — `render` takes the error-card arm
+		// first — so this reads as the two states that can: LOADING (say
+		// nothing yet) and READY (this really is a pull request whose diff
+		// failed).
+		if a.Err != nil && a.Load == LoadReady {
 			return lipgloss.JoinVertical(lipgloss.Left,
 				styBad.Render("DIFF UNAVAILABLE"),
 				"",
@@ -286,8 +326,17 @@ func kv(label string, w StateWord) string {
 	return styDim.Render(label+": ") + w.Render()
 }
 
+// 🔴 "NO COMMITS" AND "LOADING COMMITS" ARE DIFFERENT CLAIMS AND THE SKELETON
+// MADE THE DIFFERENCE VISIBLE. While `Snap` is nil nothing knows how many
+// commits this pull request has, so printing the empty-case word would be the
+// panel asserting a fact it does not have — the same defect as a file list that
+// is quietly short. Before the skeleton this arm was unreachable on screen,
+// because a loading App drew a card instead of panels.
 func (a App) commitsBody(w, h int) string {
-	if a.Snap == nil || len(a.Snap.Commits) == 0 {
+	if a.Snap == nil {
+		return styDim.Render("LOADING COMMITS")
+	}
+	if len(a.Snap.Commits) == 0 {
 		return styDim.Render("NO COMMITS")
 	}
 	var rows []string
@@ -313,7 +362,12 @@ func (a App) commitsBody(w, h int) string {
 // frame, and the diff viewport one pane to the right is the measured example of
 // what per-frame work in a renderer costs.
 func (a App) filesBody(w, h int) string {
-	if a.Snap == nil || len(a.Snap.Files) == 0 {
+	// 🔴 SAME DISTINCTION AS `commitsBody`: with no snapshot the file list is
+	// UNKNOWN, not empty.
+	if a.Snap == nil {
+		return styDim.Render("LOADING FILES")
+	}
+	if len(a.Snap.Files) == 0 {
 		return styDim.Render("NO FILES")
 	}
 	rows := make([]string, 0, len(a.fileRows)+1)
