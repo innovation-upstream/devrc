@@ -679,20 +679,27 @@ func (a App) browserURL() string {
 // read as "already at the API floor", and it was not.
 //
 // MEASURED on this host, one public 4-file / 1,395-line pull request, five
-// BASE/AFTER pairs run INTERLEAVED (the host moves faster than one block of
-// five), each open driven headlessly in its own tmux socket, poll granularity
-// 12–18 ms, every reading recorded with its own matched flag:
+// rounds run INTERLEAVED (the host moves faster than one block of five — two
+// blocked BASE runs minutes apart gave medians of 1,190 ms and 847 ms), each
+// open driven headlessly in its own tmux socket, poll granularity 12–16 ms,
+// every reading recorded with its own matched flag:
 //
-//	                     in series      concurrent
-//	 diff readable        1,206 ms          667 ms   (medians; AFTER won 5 of 5)
-//	 first frame            204 ms          230 ms   (process start, not the API)
+//	                   in series    concurrent
+//	diff readable       1,212 ms       922 ms   medians; concurrent won 5 of 5
+//	first frame           277 ms       285 ms   process start, not the API
 //
-// ⚠ THE SECOND ROW IS NOT A WIN AND IS NOT CLAIMED AS ONE. The first frame was
-// already painted before any network call, so there was nothing there to win;
-// the skeleton changed WHAT it shows, not when. The ~26 ms is real in the sense
-// that the skeleton was slower in all five pairs, and it is UNATTRIBUTED: the
-// measurement cannot separate four boxes costing more to lay out than one card
-// from process start-up noise, and no experiment here tried to.
+// ⚠ THE SECOND ROW IS NOISE, NOT A COST. It is inside the run-to-run spread and
+// has no consistent direction across rounds. The first frame was already painted
+// before any network call, so there was never anything there to win.
+//
+// ⚠ 922 ms IS `max(t_graphql, t_rest)`, AND THE SLOWER LEG IS THE GRAPHQL ONE.
+// Timed separately over five rounds, the REST diff landed FIRST every time —
+// t_rest median 666 ms against t_graphql 855 ms. So the floor this function can
+// reach is the PANEL query, not the diff: 922 - 855 = 67 ms of render and poll
+// granularity above it. Worth writing down because the proposal's M5/M6 figures
+// (0.54–0.69 s GraphQL, 0.66 s REST) read the other way round, and a future
+// change that assumes the diff is the long pole will be reasoning from the wrong
+// leg.
 //
 // 🔴 ONE RULE, ONE PLACE. Three sites want "read this reference": `Init`, the
 // `r` retry, and the re-read after a successful write. Spelled separately, the
