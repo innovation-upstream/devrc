@@ -2565,15 +2565,29 @@ def absent_payload_field_reads_as_zero(t):
     )
 
 
-def placeholder_parses_as_zero(t):
-    """G4 — the no-count placeholder becomes a readable 0.
+def a_no_count_emit_writes_a_zero(t):
+    """G4 — the EMITTER writes 0 instead of the placeholder when no count was
+    stated. Fail-closed one station earlier: every `--emit-claims` run without
+    `--payload` would put a zero nobody measured into the field the next round's
+    gate consumes, so two such rounds would end a ladder on nothing.
 
-    Fail-closed one station earlier: every `--emit-claims` run without
-    `--payload` would then write a zero nobody measured into the field the next
-    round's gate consumes.
+    🔴 IT TARGETS THE EMITTER, AND THE PARSER SIDE CANNOT BE MUTATED IN
+    ISOLATION AT ALL. MEASURED: `PAYLOAD_PLACEHOLDER = "<count>"` -> `"0"`, and
+    equally `payload_from_header`'s placeholder branch returning `0, None`, make
+    the emitted header's field parse back as a number — which
+    `emitted_payload_reads_back_as_written` correctly refuses, at rc 4, on EVERY
+    no-count emit. 22 tests then fail, so the row measures the blast radius of
+    the round-trip refusal rather than the placeholder's meaning. That cascade
+    is not a defect (it proves that guard's placeholder branch is REACHABLE from
+    `main`, which no valid input can demonstrate); it just cannot be a row that
+    isolates. This mutation keeps the placeholder constant intact, so the round
+    trip passes and only the emitter's choice is under test.
     """
-    return _swap(t, 'PAYLOAD_PLACEHOLDER = "<count>"',
-                 'PAYLOAD_PLACEHOLDER = "0"')
+    return _swap(
+        t,
+        "    payload = PAYLOAD_PLACEHOLDER if facts.payload is None else facts.payload",
+        "    payload = 0 if facts.payload is None else facts.payload",
+    )
 
 
 def override_recorded_when_the_gate_did_not_fire(t):
@@ -3965,9 +3979,9 @@ ROWS = [
      {"test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field",
       "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
      absent_payload_field_reads_as_zero),
-    ("G4  the no-count PLACEHOLDER parses as a zero",
+    ("G4  a no-count emit writes a ZERO instead of the placeholder",
      {"test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
-     placeholder_parses_as_zero),
+     a_no_count_emit_writes_a_zero),
     ("G5  an override is RECORDED for a gate that never fired",
      {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
      override_recorded_when_the_gate_did_not_fire),
