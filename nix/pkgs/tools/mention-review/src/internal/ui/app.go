@@ -567,11 +567,13 @@ func (a App) nextFocusable(dir int) Panel {
 // names it. Spelled separately — which is how they shipped one round ago — they
 // agreed only by coincidence, and any drift reproduces exactly the bug that round
 // fixed: a legend offering a key that does nothing, or a key firing on a screen
-// that never advertised it. The lesson was already written down six lines up for
-// `panelsAreOnScreen` and simply was not applied twice.
+// that never advertised it. The lesson was already written down for
+// `panelsAreOnScreen` above and simply was not applied twice.
 //
-// 🔴 ALL THREE CONJUNCTS ARE LOAD-BEARING AND EACH IS PINNED BY ITS OWN TEST,
-// because all three survived mutation when this was an inline condition:
+// 🔴 ALL THREE CONJUNCTS ARE LOAD-BEARING, AND EACH IS PINNED BY ITS OWN CASE
+// INSIDE `TestRetryIsStillInertOnEveryScreenThatDoesNotOfferIt` — three cases in
+// one test, not three tests. All three survived mutation when this was an inline
+// condition and no case distinguished them:
 //
 //   - `Load == LoadReady` — not `!= LoadFailed`. During the skeleton the Diff
 //     panel says LOADING DIFF and advertises nothing, so a press there would be

@@ -229,8 +229,10 @@ func TestADiffFailureOnAPullRequestIsStillReported(t *testing.T) {
 // reads are parallel. At that instant a 404 from the diff leg and "this is an
 // issue" are the same observation, so the panel must not pick one.
 //
-// ⚠ THIS IS NOT THE SAME CLAIM AS `TestAPageFailureKeepsItsOwnErrorOverADiff
-// Failure`, AND THE TWO ARE DELIBERATELY BOTH HERE. They were reviewed as
+// ⚠ NOT THE SAME CLAIM AS THE PAGE-FAILURE TEST, AND THE TWO ARE DELIBERATELY
+// BOTH HERE — see `TestAPageFailureKeepsItsOwnErrorOverADiffFailure`, whose name
+// is on one line here ON PURPOSE: wrapped across a line break it is invisible to
+// the grep a maintainer runs. They were reviewed as
 // possible duplicates and they are not: this one drives `LoadLoading` with NO
 // page error and guards `diffBody`'s `Load == LoadReady` condition; that one
 // drives `LoadFailed` WITH a page error and guards `diffResultIsMoot`'s
@@ -930,20 +932,34 @@ func TestRetryFiresOnADiffFailureOverAHealthyPage(t *testing.T) {
 	}
 }
 
-// 🔴 AND `r` IS STILL INERT ON A SCREEN WITH NOTHING WRONG WITH IT. The pair is
-// what makes the test above a claim about the failure state rather than about
-// `r` having been made unconditional.
+// 🔴 `r` IS INERT ON EVERY SCREEN THAT DOES NOT OFFER IT — AND FIRES ON THE ONE
+// THAT DOES. Both halves are here, and the second is what makes the first mean
+// anything.
 //
-// ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes at the base of the
-// fix too, because `r` was inert everywhere there. It is the half that stops the
-// fix from being written as "always retry".
-// 🔴 EVERY CONJUNCT OF `diffIsRetryable` GETS ITS OWN STATE HERE, BECAUSE ALL
-// THREE SURVIVED MUTATION WHEN THIS TEST ONLY DROVE TWO SCREENS. An audit cut
-// one mutant per term and each one lived through the whole package: the test
-// exercised a loaded pull request and the skeleton, and neither distinguishes
-// the terms. The states below are chosen so that exactly one term is what stops
-// the key in each — which is what makes them kill their own mutant rather than
-// die on somebody else's condition.
+// 🔴 THIS IS REGRESSION COVERAGE, NOT AN INVARIANT GUARD, AND THE COMMENT HERE
+// SAID THE OPPOSITE. That label was true of the two-screen version this replaced;
+// it stopped being true when the positive control at the bottom was added.
+// MEASURED: force `diffIsRetryable` to return `false` — `main`'s behaviour — and
+// this test FAILS, on the control's own line, with "the five zeros above are a
+// claim about a key that was never wired". The mislabel was not cosmetic: a
+// maintainer who believes the zeros prove nothing about the retry feature deletes
+// the control as duplicating `TestRetryFiresOnADiffFailureOverAHealthyPage`, and
+// is left with a test that passes on a build where `r` is wired to nothing —
+// exactly the vacuity the control exists to prevent.
+//
+// 🔴 EVERY CONJUNCT OF `diffIsRetryable` IS COVERED, BECAUSE ALL THREE SURVIVED
+// MUTATION WHEN THIS TEST ONLY DROVE TWO SCREENS. An audit cut one mutant per
+// term and each lived through the whole package: the old test exercised a loaded
+// pull request and the skeleton, and neither distinguishes the terms.
+//
+// ⚠ ONLY THREE OF THE FIVE STATES ISOLATE A SINGLE TERM, and an earlier version
+// of this comment claimed all of them did. `ready(t)` has `Diff != nil` AND
+// `Err == nil`; `sized(t)` has `Load == LoadLoading` AND `Err == nil`. They are
+// kept because they are the two screens an operator is actually on most of the
+// time, not because they attribute anything. The three ADDED below — issue card,
+// diff-failed-first, retry-succeeded — are the ones where exactly one term stops
+// the key, and they are what make each mutant die on its own case rather than on
+// somebody else's condition.
 func TestRetryIsStillInertOnEveryScreenThatDoesNotOfferIt(t *testing.T) {
 	const detail = "the patch endpoint reset the connection"
 	diffErr := DiffLoaded{Err: &ghapi.APIError{State: ghapi.AuthOther, Detail: detail}}
