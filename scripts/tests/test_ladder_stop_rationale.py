@@ -26,6 +26,8 @@ words, and says so on its line. PR numbers and counts are not captured text.
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import json
 import re
 import subprocess
 import sys
@@ -36,7 +38,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 SCRIPT = SCRIPTS / "ladder-stop-rationale.py"
-RANGE_COVERAGE = SCRIPTS / "ladder-range-coverage.py"
+# ⚠ `ladder-range-coverage.py`'s path is NOT a constant here any more. It used to
+# be, so two guards could grep its SOURCE TEXT; both are gone (see
+# `test_find_carriers_carries_STATE_through_for_this_consumer`) and the sibling
+# is now reached the way production reaches it — `lsr.load_siblings()`.
 
 
 def _load(path, name):
@@ -66,6 +71,30 @@ def _block(round_no, frm="a" * 8, to="b" * 8, claim="a claim"):
 
 def _facts(pr, comments, state="MERGED"):
     return {"pr": pr, "state": state, "comments": comments}
+
+
+# A `gh pr list --json …` payload of the shape `find_carriers` parses: one
+# MERGED carrier (a ladder that STOPPED) and one OPEN carrier (a live one, which
+# is the whole reason `state` is carried through the seam). Entirely synthetic —
+# the PR numbers are out of range and the prose is written here, not captured.
+MERGED_CARRIER_PR = 424242
+OPEN_CARRIER_PR = 424243
+
+
+def _gh_pr_list_payload():
+    return json.dumps([
+        {"number": MERGED_CARRIER_PR, "title": "a ladder that stopped",
+         "state": "MERGED", "headRefOid": "a" * 40, "baseRefName": "main",
+         "comments": [{"body": _block(2) + "\n## Round 2 — CLEAN.\n"}]},
+        {"number": OPEN_CARRIER_PR, "title": "a ladder still running",
+         "state": "OPEN", "headRefOid": "c" * 40, "baseRefName": "main",
+         "comments": [{"body": _block(1)}]},
+        # A non-carrier, so the enumerator's predicate has something to reject:
+        # this one merely mentions the ledger and carries no fence.
+        {"number": 424244, "title": "mentions the ledger only",
+         "state": "MERGED", "headRefOid": "d" * 40, "baseRefName": "main",
+         "comments": [{"body": "the audit-claims ledger is discussed here\n"}]},
+    ])
 
 
 # --------------------------------------------------------------------------- #
@@ -594,8 +623,13 @@ def test_it_REUSES_the_shared_parser_and_enumerator_rather_than_copying_them():
         if "audit-claims" in ln and "re.compile" in ln
     ]
     assert not copies, f"this script re-types the fence grammar: {copies}"
-    assert "parse_claims_blocks" in src, "the shared block parser is not used"
-    assert "find_carriers" in src, "the shared carrier enumerator is not used"
+    # 🔴 THE TWO `assert "<name>" in src` LINES THAT USED TO BE HERE ARE DELETED,
+    # AND THEIR DELETION IS THE POINT. `assert "find_carriers" in src` passed
+    # for the entire life of #1643 while EVERY `--repo` run died on
+    # `TypeError: find_carriers() missing 1 required positional argument`. A
+    # grep for a NAME cannot see whether the name is called, called correctly,
+    # or called at all — it matched the comment prose as readily as the call.
+    # The two tests below invoke both entry points instead.
     code = [ln for ln in src.splitlines()
             if "gh" in ln and "pr" in ln and "list" in ln
             and not ln.lstrip().startswith(("#", "*", "⚠", "🔴"))
@@ -604,19 +638,187 @@ def test_it_REUSES_the_shared_parser_and_enumerator_rather_than_copying_them():
         "this script builds its own `gh pr list` instead of going through "
         f"`find_carriers` — two populations, one report: {code}")
 
+    # 🔴 BOTH ASSERTIONS ABOVE ARE REASSURING ZEROES, so each needs a POSITIVE
+    # CONTROL: an empty match set is indistinguishable from a predicate wired to
+    # nothing. Feed each one a line it MUST match and watch the count move.
+    def _copies(text):
+        return [ln for ln in text.splitlines()
+                if "audit-claims" in ln and "re.compile" in ln]
 
-def test_find_carriers_carries_STATE_through_for_this_consumer():
+    def _own_gh(text):
+        return [ln for ln in text.splitlines()
+                if "gh" in ln and "pr" in ln and "list" in ln
+                and not ln.lstrip().startswith(("#", "*", "⚠", "🔴"))
+                and '"""' not in ln and "`" not in ln]
+
+    assert _copies('_F = re.compile(r"```audit-claims")'), (
+        "the fence-copy predicate matches nothing — its zero above is not "
+        "evidence")
+    assert _own_gh('    cmd = ["gh", "pr", "list", "--repo", repo]'), (
+        "the own-`gh pr list` predicate matches nothing — its zero above is "
+        "not evidence")
+    # …and the same two predicates over the real source must still be the zero
+    # asserted above, so the controls cannot be read as the result.
+    assert _copies(src) == [] and _own_gh(src) == []
+
+
+def test_the_live_repo_path_actually_CALLS_the_shared_enumerator(lsr):
+    """🔴 REGRESSION for the defect the deleted grep could not see.
+
+    `main`'s `--repo` branch — everything that is not `--facts-file` — shipped
+    in #1643 as
+
+        lrc.find_carriers(runner, repo, limit=args.limit)
+
+    against `find_carriers(ad, runner, repo, limit=300, state="all")`. Three
+    required positionals, two supplied, so EVERY live run was
+
+        TypeError: find_carriers() missing 1 required positional argument: 'repo'
+
+    rc 1, reproduced on 2026-09-17 at `93685e1d`. The tool's live path had never
+    run once. The guard that was supposed to catch it asserted the STRING
+    `find_carriers` appeared in the source.
+
+    So this one drives `main` down that exact branch with an injected runner.
+    The real `find_carriers` is invoked, so an arity or keyword mismatch is a
+    TypeError raised HERE. It needs no network: the only `gh` call the branch
+    makes goes through the runner.
+    """
+    spawned = []
+
+    def runner(cmd, cwd=None):    # noqa: ARG001
+        spawned.append(cmd)
+        assert cmd[0] == "gh", cmd
+        return 0, _gh_pr_list_payload(), ""
+
+    out = []
+
+    class _S:
+        def write(self, s):
+            out.append(s)
+
+    rc = lsr.main(["--repo", "owner/repo", "--limit", "50"], runner=runner,
+                  out_stream=_S())
+    text = "".join(out)
+
+    assert rc == lsr.EXIT_OK, f"the live path did not complete: rc={rc}\n{text}"
+    # The POSITIVE CONTROL for the enumerator: it must have spawned the one
+    # `gh pr list` and come back with carriers. A run that enumerated NOTHING
+    # would return EXIT_NOTHING_MEASURABLE above, so a reassuring zero cannot
+    # pass as a pass here.
+    assert len(spawned) == 1, f"expected ONE `gh pr list`, got {spawned}"
+    assert f"#{MERGED_CARRIER_PR}" in text, text
+    assert f"#{OPEN_CARRIER_PR}" in text, text
+    assert "2 carrier(s)" in text, text
+    # …and the classification really ran over the enumerated population, rather
+    # than the report merely echoing the numbers.
+    assert "clean-round" in text and "not-terminated" in text, text
+
+
+def test_main_BINDS_find_carriers_with_the_parser_module_and_state_all(lsr,
+                                                                      monkeypatch):
+    """🔴 The signature pin, one level below the behavioural guard above.
+
+    The behavioural test proves the call completes; this proves it is the call
+    that was MEANT — the arguments are checked against the callee's real
+    signature by `inspect.signature().bind()`, which is what fails loudly on the
+    #1643 shape, and the bound values are then asserted by IDENTITY:
+
+      * `ad` must be the `audit-dispatch` module. It is a parameter precisely so
+        the fence grammar is not re-typed; passing anything else would give the
+        enumerator a different grammar than the classifier uses.
+      * `state` must resolve to `"all"`. This consumer's `not-terminated` class
+        exists only for OPEN PRs; a narrower state drops them from the
+        population and every live ladder is classified as though it had stopped.
+
+    The wrapper DELEGATES to the real function, so this is a pin on the live
+    call and not a stub the production code could diverge from.
+    """
+    lrc, ad_mod = lsr.load_siblings()
+    real = lrc.find_carriers
+    sig = inspect.signature(real)
+    seen = []
+
+    def recording(*a, **kw):
+        bound = sig.bind(*a, **kw)      # TypeError on an arity/keyword mismatch
+        bound.apply_defaults()
+        seen.append(dict(bound.arguments))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(lrc, "find_carriers", recording)
+    monkeypatch.setattr(lsr, "load_siblings", lambda *a, **k: (lrc, ad_mod))
+
+    def runner(cmd, cwd=None):    # noqa: ARG001
+        return 0, _gh_pr_list_payload(), ""
+
+    class _S:
+        def write(self, s):
+            pass
+
+    rc = lsr.main(["--repo", "owner/repo", "--limit", "50"], runner=runner,
+                  out_stream=_S())
+    assert rc == lsr.EXIT_OK
+
+    assert len(seen) == 1, f"`find_carriers` was called {len(seen)} time(s)"
+    call = seen[0]
+    assert call["ad"] is ad_mod, (
+        "`find_carriers` was not handed the `audit-dispatch` module, so the "
+        f"enumerator's fence grammar is not the classifier's: {call['ad']!r}")
+    assert call["repo"] == "owner/repo", call
+    assert call["limit"] == 50, call
+    assert call["state"] == "all", (
+        "this consumer needs state=all — a narrower state drops OPEN PRs from "
+        f"the population and `not-terminated` becomes unreachable: {call}")
+
+
+def test_find_carriers_carries_STATE_through_for_this_consumer(lsr, ad):
     """🔴 The seam guard. This script's `not-terminated` class is only possible
     because `find_carriers` requests `state`; drop that field and every OPEN
-    ladder is silently classified as though it had stopped. Asserted on the
-    ENUMERATOR, where the regression would happen."""
-    src = RANGE_COVERAGE.read_text(encoding="utf-8")
-    assert "number,comments,headRefOid,baseRefName,title,state" in src, (
+    ladder is silently classified as though it had stopped.
+
+    ⚠ This USED TO BE two `in src` greps against `ladder-range-coverage.py` —
+    `"number,comments,headRefOid,baseRefName,title,state" in src` and
+    `'"state": pr.get("state")' in src`. Both are walkable by rewording (a
+    reordered `--json` field list breaks the first while requesting `state`
+    perfectly well) and neither could observe whether this consumer ever reached
+    the enumerator at all — which, per the regression above, it never did. So
+    the seam is now driven end to end: enumerate, then classify the enumerated
+    dicts, and require the OPEN/MERGED split to survive the whole way.
+    """
+    lrc, _ad = lsr.load_siblings()
+    cmds = []
+
+    def runner(cmd, cwd=None):    # noqa: ARG001
+        cmds.append(cmd)
+        return 0, _gh_pr_list_payload(), ""
+
+    carriers, note = lrc.find_carriers(ad, runner, "owner/repo", limit=50,
+                                       state="all")
+
+    assert len(cmds) == 1, f"the enumerator spawned {cmds}"
+    cmd = cmds[0]
+    assert "--state" in cmd and cmd[cmd.index("--state") + 1] == "all", cmd
+    fields = cmd[cmd.index("--json") + 1].split(",")
+    assert "state" in fields, (
         "`find_carriers` no longer requests `state`, so "
-        "`ladder-stop-rationale.py` cannot tell a stopped ladder from a live one"
-    )
-    assert '"state": pr.get("state")' in src, (
+        f"`ladder-stop-rationale.py` cannot tell a stopped ladder from a live "
+        f"one: {fields}")
+
+    by_pr = {c["pr"]: c for c in carriers}
+    assert sorted(by_pr) == sorted([MERGED_CARRIER_PR, OPEN_CARRIER_PR]), (
+        f"the enumerated population is wrong: {sorted(by_pr)}")
+    assert by_pr[OPEN_CARRIER_PR]["state"] == "OPEN", (
         "`find_carriers` requests `state` but does not pass it through")
+    assert by_pr[MERGED_CARRIER_PR]["state"] == "MERGED", by_pr
+
+    # The seam, both directions: OPEN is EXCLUDED as not-terminated, MERGED is
+    # classified. One direction alone would pass against a classifier that
+    # answered `not-terminated` for everything, or for nothing.
+    assert lsr.classify_carrier(ad, by_pr[OPEN_CARRIER_PR]).label == \
+        lsr.NOT_TERMINATED
+    assert lsr.classify_carrier(ad, by_pr[MERGED_CARRIER_PR]).label == \
+        lsr.CLEAN
+    assert "2 carry" in note, note
 
 
 def test_the_script_runs_and_its_usage_needs_no_network():
