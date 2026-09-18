@@ -49,11 +49,32 @@ func (a App) render() string {
 	switch {
 	case a.Load == LoadFailed:
 		body = a.renderCard(bodyH, a.errorCardTitle(), a.body.View())
-	case a.Load == LoadLoading:
-		body = a.renderCard(bodyH, "LOADING — "+a.Repo()+"#"+itoa(a.Num), "")
 	case a.Snap != nil && a.Snap.Kind == ghapi.KindIssue:
 		body = a.renderIssueCard(bodyH)
 	default:
+		// 🔴 THE SKELETON AND THE LOADED SCREEN ARE THE SAME FRAME. `LoadLoading`
+		// used to get its own full-width card reading "LOADING — owner/repo#N",
+		// so a cold open drew a card, threw it away, and drew a four-panel layout
+		// in its place. The panel bodies each say what they are waiting for
+		// instead — chrome, borders, titles and footer are on screen from the
+		// first frame and nothing under the operator's eye moves when the reads
+		// land.
+		//
+		// 🔴 AND IT IS WORTH 187 ms ON THE HEADLINE NUMBER, WHICH IS NOT OBVIOUS
+		// AND WAS NEARLY LOST. Without this arm the diff cannot be drawn until
+		// `PRLoaded` lands, so a cold open reaches a readable diff at
+		// max(t_graphql, t_rest); with it, the diff paints the moment it
+		// arrives, so the cost is t_rest alone. That only pays if the REST leg
+		// is the FASTER one — and on this host it is, by 189 ms. MEASURED, five
+		// interleaved rounds: t_rest median 666 ms against t_graphql 855 ms,
+		// REST first in 5 of 5. See `ReadIntents` for the full table.
+		//
+		// ⚠ THIS DOES NOT MOVE t_first_frame AND IS NOT CLAIMED TO. The card was
+		// already painted before any network call, so there was never anything
+		// there to win: 277 ms in series, 285 ms concurrent, 287 ms with this
+		// arm — no consistent direction across rounds, i.e. a null, not a cost.
+		// What it changes is WHAT the first frame shows and that the layout no
+		// longer reflows.
 		body = a.renderPanels(bodyH)
 	}
 	if bar != "" {
@@ -234,9 +255,20 @@ func (a App) currentFilePath() string {
 
 // --- panel bodies -----------------------------------------------------------
 
+// overviewBody is the top-left box.
+//
+// 🔴 WITH NO SNAPSHOT IT NAMES WHAT IS BEING WAITED FOR, IT DOES NOT GO BLANK.
+// This is the skeleton's only identifying text: the reference the process was
+// launched with, which comes from argv and is therefore known before any read
+// returns. An empty box reads as a broken panel; the card this replaced at least
+// said which pull request it was loading, and that must not be lost.
 func (a App) overviewBody(w, h int) string {
 	if a.Snap == nil {
-		return ""
+		return strings.Join(clip([]string{
+			styTitle.Render("#" + itoa(a.Num) + "  " + truncate(a.Repo(), max(1, w-8))),
+			"",
+			kv("STATE ", a.Load.Word()),
+		}, h), "\n")
 	}
 	s := a.Snap
 	rows := []string{
@@ -264,7 +296,21 @@ func (a App) overviewBody(w, h int) string {
 // to show, so it is the pane that explains why.
 func (a App) diffBody() string {
 	if a.Diff == nil {
-		if a.Err != nil {
+		// 🔴 A DIFF FAILURE IS NOT REPORTABLE UNTIL THE PANEL QUERY HAS
+		// ANSWERED, AND `LoadReady` IS THAT ANSWER. The diff read is speculative
+		// — `ReadIntents` fires it before anything knows whether `#N` is a pull
+		// request at all, because `mention-open.py` builds `/pull/{id}` for
+		// every reference and lets github.com redirect. While the panel query is
+		// still out, a 404 from the diff leg is indistinguishable from "this is
+		// an ISSUE", so reporting it would flash DIFF UNAVAILABLE across the
+		// skeleton of every issue the operator opens, one frame before the issue
+		// card replaces it.
+		//
+		// ⚠ `LoadFailed` CANNOT REACH HERE — `render` takes the error-card arm
+		// first — so this reads as the two states that can: LOADING (say
+		// nothing yet) and READY (this really is a pull request whose diff
+		// failed).
+		if a.Err != nil && a.Load == LoadReady {
 			return lipgloss.JoinVertical(lipgloss.Left,
 				styBad.Render("DIFF UNAVAILABLE"),
 				"",
@@ -286,8 +332,17 @@ func kv(label string, w StateWord) string {
 	return styDim.Render(label+": ") + w.Render()
 }
 
+// 🔴 "NO COMMITS" AND "LOADING COMMITS" ARE DIFFERENT CLAIMS AND THE SKELETON
+// MADE THE DIFFERENCE VISIBLE. While `Snap` is nil nothing knows how many
+// commits this pull request has, so printing the empty-case word would be the
+// panel asserting a fact it does not have — the same defect as a file list that
+// is quietly short. Before the skeleton this arm was unreachable on screen,
+// because a loading App drew a card instead of panels.
 func (a App) commitsBody(w, h int) string {
-	if a.Snap == nil || len(a.Snap.Commits) == 0 {
+	if a.Snap == nil {
+		return styDim.Render("LOADING COMMITS")
+	}
+	if len(a.Snap.Commits) == 0 {
 		return styDim.Render("NO COMMITS")
 	}
 	var rows []string
@@ -313,7 +368,12 @@ func (a App) commitsBody(w, h int) string {
 // frame, and the diff viewport one pane to the right is the measured example of
 // what per-frame work in a renderer costs.
 func (a App) filesBody(w, h int) string {
-	if a.Snap == nil || len(a.Snap.Files) == 0 {
+	// 🔴 SAME DISTINCTION AS `commitsBody`: with no snapshot the file list is
+	// UNKNOWN, not empty.
+	if a.Snap == nil {
+		return styDim.Render("LOADING FILES")
+	}
+	if len(a.Snap.Files) == 0 {
 		return styDim.Render("NO FILES")
 	}
 	rows := make([]string, 0, len(a.fileRows)+1)

@@ -684,22 +684,28 @@ func (a App) browserURL() string {
 // open driven headlessly in its own tmux socket, poll granularity 12–16 ms,
 // every reading recorded with its own matched flag:
 //
-//	                   in series    concurrent
-//	diff readable       1,212 ms       922 ms   medians; concurrent won 5 of 5
-//	first frame           277 ms       285 ms   process start, not the API
+//	                   in series   concurrent   + skeleton
+//	diff readable       1,212 ms      922 ms       735 ms
+//	first frame           277 ms      285 ms       287 ms
 //
-// ⚠ THE SECOND ROW IS NOISE, NOT A COST. It is inside the run-to-run spread and
-// has no consistent direction across rounds. The first frame was already painted
-// before any network call, so there was never anything there to win.
+// Medians. Concurrent beat series in 5 of 5 rounds, and +skeleton beat
+// concurrent-alone in 5 of 5.
 //
-// ⚠ 922 ms IS `max(t_graphql, t_rest)`, AND THE SLOWER LEG IS THE GRAPHQL ONE.
-// Timed separately over five rounds, the REST diff landed FIRST every time —
-// t_rest median 666 ms against t_graphql 855 ms. So the floor this function can
-// reach is the PANEL query, not the diff: 922 - 855 = 67 ms of render and poll
-// granularity above it. Worth writing down because the proposal's M5/M6 figures
-// (0.54–0.69 s GraphQL, 0.66 s REST) read the other way round, and a future
-// change that assumes the diff is the long pole will be reasoning from the wrong
-// leg.
+// ⚠ THE SECOND ROW IS A NULL, NOT A COST. It is inside the run-to-run spread
+// with no consistent direction across rounds. The first frame was already
+// painted before any network call, so there was never anything there to win.
+//
+// 🔴 922 ms IS `max(t_graphql, t_rest)` AND 735 ms IS `t_rest` — WHICH IS ONLY A
+// WIN BECAUSE THE GRAPHQL LEG IS THE SLOWER ONE HERE. Timed separately over five
+// rounds, the REST diff landed FIRST every time: t_rest median 666 ms against
+// t_graphql 855 ms. The two differences close to 2 ms (922-735=187,
+// 855-666=189), which is what identifies the skeleton's early-diff paint as the
+// mechanism rather than leaving it a correlation.
+//
+// 🔴 THE PROPOSAL'S M5/M6 FIGURES READ THE OTHER WAY ROUND (0.54–0.69 s GraphQL,
+// 0.66 s REST) AND REASONING FROM THEM IS HOW THE SKELETON GOT REMOVED FROM THIS
+// PR ONCE, BEFORE THE LEGS WERE RE-TIMED AND IT CAME BACK. A stored measurement
+// is a claim about the day it was taken. Re-take it before building on it.
 //
 // 🔴 ONE RULE, ONE PLACE. Three sites want "read this reference": `Init`, the
 // `r` retry, and the re-read after a successful write. Spelled separately, the

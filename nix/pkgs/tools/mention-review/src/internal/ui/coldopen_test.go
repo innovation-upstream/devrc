@@ -223,6 +223,43 @@ func TestADiffFailureOnAPullRequestIsStillReported(t *testing.T) {
 	}
 }
 
+// 🔴 WHILE THE PANEL QUERY IS STILL OUT, A DIFF FAILURE SAYS NOTHING.
+//
+// This is the frame between the two replies, which only exists because the
+// reads are parallel. At that instant a 404 from the diff leg and "this is an
+// issue" are the same observation, so the panel must not pick one.
+//
+// ⚠ THIS IS NOT THE SAME CLAIM AS `TestAPageFailureKeepsItsOwnErrorOverADiff
+// Failure`, AND THE TWO ARE DELIBERATELY BOTH HERE. They were reviewed as
+// possible duplicates and they are not: this one drives `LoadLoading` with NO
+// page error and guards `diffBody`'s `Load == LoadReady` condition; that one
+// drives `LoadFailed` WITH a page error and guards `diffResultIsMoot`'s
+// `LoadFailed` arm. The states are disjoint and so are the guards — which is
+// shown rather than asserted: in the mutation battery M4 (drop `diffBody`'s
+// condition) is killed by THIS test and not by that one, and M1 (drop the
+// `LoadFailed` arm) is killed by that one and not by this. Delete either and a
+// mutant survives.
+func TestADiffFailureIsSilentUntilThePanelQueryAnswers(t *testing.T) {
+	const detail = "no pull request found for this reference"
+	a, _ := sized(t).Step(DiffLoaded{Err: &ghapi.APIError{State: ghapi.AuthNotFound, Detail: detail}})
+
+	screen := stripANSI(a.render())
+	if strings.Contains(screen, "DIFF UNAVAILABLE") || strings.Contains(screen, detail) {
+		t.Errorf("a diff failure was reported before the panel query answered — "+
+			"at this instant it is indistinguishable from an ISSUE\n%s", screen)
+	}
+	if !strings.Contains(screen, "LOADING DIFF") {
+		t.Errorf("the Diff panel does not say it is still waiting\n%s", screen)
+	}
+	// 🔴 THE SAME APP, ONE MESSAGE LATER, DOES REPORT IT. Without this the
+	// assertion above is satisfied by a panel that can never report anything.
+	ready, _ := a.Step(PRLoaded{Snap: fixturePR()})
+	if !strings.Contains(stripANSI(ready.render()), detail) {
+		t.Fatal("the failure is STILL silent once the panel query said PULL " +
+			"REQUEST — the suppression above is unconditional, not scoped")
+	}
+}
+
 // --- the page itself failing -------------------------------------------------
 
 // 🔴 A DIFF RESULT MUST NOT OVERWRITE THE PAGE'S OWN ERROR, IN EITHER ORDER.
@@ -233,6 +270,11 @@ func TestADiffFailureOnAPullRequestIsStillReported(t *testing.T) {
 // different failures, which is worse than either alone. Both legs failing at
 // once is the ordinary case for a dead token or a lost network, so this is not
 // an exotic interleaving.
+//
+// ⚠ ITS SIBLING IS `TestADiffFailureIsSilentUntilThePanelQueryAnswers`, WHICH IS
+// A DIFFERENT CLAIM. That one is `LoadLoading` with no page error; this one is
+// `LoadFailed` with one. See its header for the mutation evidence that neither
+// subsumes the other.
 //
 // ⚠ THE TWO ORDERS ARE CAUGHT BY DIFFERENT CODE AND ARE NOT EQUALLY NEW.
 // Panel-first needs `diffResultIsMoot`'s `LoadFailed` arm and is RED without it.
@@ -560,4 +602,120 @@ func maxTime(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// --- the skeleton -------------------------------------------------------------
+
+// 🔴 THE CHROME IS ON SCREEN BEFORE ANY READ RETURNS.
+//
+// A loading App used to render one full-width card reading "LOADING —
+// owner/repo#N", so a cold open drew a card, discarded it, and drew a four-panel
+// layout in its place. Now the first frame IS the layout. The assertion is on
+// all four panel titles by their literal words, because the numbers in them are
+// what `tab` navigates by and a skeleton missing one is a layout that will still
+// reflow.
+//
+// ⚠ THIS IS NOT A CLAIM THAT THE FIRST FRAME GOT FASTER. It did not: the card
+// was already painted before any network call. What changed is what it shows.
+func TestTheSkeletonPaintsTheChromeBeforeAnythingLoads(t *testing.T) {
+	a := sized(t)
+	screen := stripANSI(a.render())
+
+	for _, want := range []string{"1 Overview", "2 Commits", "3 Files", "4 Diff"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("the skeleton is missing the panel %q\n%s", want, screen)
+		}
+	}
+	// It names the reference it is loading — which comes from argv, so it is
+	// known before a byte has left this machine. Losing that was the one thing
+	// the card said that the panels had to keep saying.
+	if !strings.Contains(screen, "#1559") {
+		t.Errorf("the skeleton does not name the reference being opened\n%s", screen)
+	}
+	// ⚠ THE OWNER, NOT THE WHOLE `owner/name`. The Overview box is 34 columns,
+	// so `gardenersguild/trowelcast` is TRUNCATED there — asserting the full
+	// spelling would be a claim about the panel width, not about the skeleton.
+	if !strings.Contains(screen, fxOwner) {
+		t.Errorf("the skeleton does not name the repository\n%s", screen)
+	}
+	if !strings.Contains(screen, LoadLoading.Word().Word) {
+		t.Errorf("the skeleton does not say it is %s\n%s",
+			LoadLoading.Word().Word, screen)
+	}
+	// 🔴 AND THE FOOTER — the generated help is part of the chrome, and it is
+	// the half that tells a first-time operator how to leave.
+	if !strings.Contains(screen, "quit") {
+		t.Errorf("the skeleton has no footer help\n%s", screen)
+	}
+}
+
+// 🔴 A PANEL THAT HAS NOT LOADED MUST NOT CLAIM THE LIST IS EMPTY.
+//
+// "NO COMMITS" and "LOADING COMMITS" are different claims, and until the
+// skeleton existed the difference was invisible: a loading App drew a card, so
+// the `Snap == nil` arm of these bodies was never on screen. Now it is, and
+// printing the empty-case word would be a panel asserting a fact it does not
+// have.
+func TestALoadingPanelDoesNotClaimTheListIsEmpty(t *testing.T) {
+	a := sized(t)
+	screen := stripANSI(a.render())
+
+	for _, forbidden := range []string{"NO COMMITS", "NO FILES"} {
+		if strings.Contains(screen, forbidden) {
+			t.Errorf("a skeleton that has loaded nothing says %q — that is a claim "+
+				"about the pull request, and nothing here knows it\n%s",
+				forbidden, screen)
+		}
+	}
+	for _, want := range []string{"LOADING COMMITS", "LOADING FILES", "LOADING DIFF"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("the skeleton does not say %q\n%s", want, screen)
+		}
+	}
+
+	// 🔴 THE POSITIVE CONTROL, AND IT IS THE HALF THAT MAKES THE ZEROS ABOVE
+	// MEAN ANYTHING: a pull request that really HAS no commits and no files
+	// still says so. Without it, deleting both words entirely would pass.
+	empty := fixturePR()
+	empty.Commits = nil
+	empty.Files = nil
+	loaded, _ := sized(t).Step(PRLoaded{Snap: empty})
+	loadedScreen := stripANSI(loaded.render())
+	for _, want := range []string{"NO COMMITS", "NO FILES"} {
+		if !strings.Contains(loadedScreen, want) {
+			t.Errorf("a LOADED pull request with an empty list does not say %q — "+
+				"the word was not made conditional, it was deleted\n%s",
+				want, loadedScreen)
+		}
+	}
+}
+
+// 🔴 THE DIFF PANEL RENDERS AS SOON AS THE DIFF ARRIVES, WITHOUT WAITING FOR
+// THE PANEL QUERY.
+//
+// This is the second half of the latency win and it only works because the
+// skeleton and the parallel reads landed together: the frame between the two
+// replies is a real layout, so a diff that wins the race is readable at
+// t_rest rather than at max(t_graphql, t_rest).
+func TestTheDiffIsReadableBeforeThePanelQueryAnswers(t *testing.T) {
+	a, _ := sized(t).Step(DiffLoaded{Diff: fixtureDiff(t)})
+
+	screen := stripANSI(a.render())
+	if a.Load != LoadLoading {
+		t.Fatalf("Load = %v — this test is about the frame BEFORE the panel "+
+			"query answers", a.Load)
+	}
+	// The diff's own content, and the file path in the Diff panel's title —
+	// which is the marker the latency probe reads for `t_diff_readable`.
+	for _, want := range []string{"pkg/handler.go", "ctx.refresh()"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("the diff is not readable before the panel query answered: "+
+				"missing %q\n%s", want, screen)
+		}
+	}
+	// And the left column still says it is waiting, rather than lying about
+	// what it does not have.
+	if !strings.Contains(screen, "LOADING COMMITS") {
+		t.Errorf("the metadata panels do not say they are still loading\n%s", screen)
+	}
 }
