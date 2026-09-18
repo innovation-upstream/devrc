@@ -2561,6 +2561,31 @@ def gate_fires_on_one_zero_round(t):
     )
 
 
+def the_emitted_block_loses_its_override_record(t):
+    """G10 — the override's record ON THE PR, deleted from the EMITTER.
+
+    🔴 MEASURED SURVIVING, which is why this row exists. The only test that
+    claims this — `test_the_gate_override_is_refused_without_a_reason_and_
+    records_one_given` — asked whether the reason appears "before the fence",
+    and the BRIEF is printed to the same stream, carries the same reason and
+    sits before every fence. So this deletion left the suite green in BOTH
+    spellings that test has had: `split("```audit-claims")[0]` and
+    `rsplit("```audit-claims", 1)[0]`. The brief stays in the auditor's
+    terminal; the BLOCK is what gets pasted onto the PR, so the half that was
+    unguarded is the half the record exists for.
+    """
+    return _swap(
+        t,
+        '    if facts.gate_override:\n'
+        '        lines.append(\n'
+        '            "  🔴 attribution gate OVERRIDDEN for this round — stated '
+        'reason: "\n'
+        '            f"{facts.gate_override}"\n'
+        '        )\n',
+        "",
+    )
+
+
 def absent_payload_field_reads_as_zero(t):
     """G3 — the FAIL-CLOSED mutation: an absent field becomes a measured 0.
 
@@ -3973,7 +3998,7 @@ ROWS = [
      det_one_command_check_dropped),
 
     # ------------------------------------------------------------------- #
-    # 🔴 G1-G9 — THE ATTRIBUTION GATE. Killer sets MEASURED by this harness,
+    # 🔴 G1-G10 — THE ATTRIBUTION GATE. Killer sets MEASURED by this harness,
     # not predicted: the rows below were run and the reported sets copied in.
     # ------------------------------------------------------------------- #
     ("G1  the gate never fires — the verdict inverted",
@@ -4006,6 +4031,13 @@ ROWS = [
     ("G9  a NEGATIVE payload count reaches the header",
      {"test_a_negative_payload_count_is_refused_at_the_input"},
      a_negative_payload_count_is_accepted),
+    # 🔴 G10 WAS ADDED BECAUSE IT SURVIVED. The row is the one that was missing
+    # when the override's PR-side record went unguarded — see the mutator's
+    # docstring for the measurement, and the assertion it now holds in
+    # `test_the_gate_override_is_refused_without_a_reason_and_records_one_given`.
+    ("G10 the emitted block loses its override record",
+     {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     the_emitted_block_loses_its_override_record),
 ]
 
 

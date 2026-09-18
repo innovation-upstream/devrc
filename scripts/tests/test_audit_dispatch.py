@@ -11602,15 +11602,29 @@ def test_the_gate_override_is_refused_without_a_reason_and_records_one_given():
         comments=two_zero_payload_rounds(),
     )
     assert rc_e == 0, f"the override run refused the emit half (rc {rc_e})"
-    # 🔴 `rsplit`, NOT `split`, and mutant C2 is why. The LAST `audit-claims`
-    # fence in this output is the emitted skeleton's; an earlier one can appear
-    # inside the brief whenever the claims section reproduces text that carries
-    # a fence — which is exactly what C2 (claims read from the whole comment)
-    # makes it do. Spelled `split(...)[0]` this asserted "the reason precedes
-    # the FIRST fence anywhere in the output", so C2 killed it and the row
-    # stopped isolating what it names. The claim that matters is the emitted
-    # BLOCK's fence.
-    above_the_block = out_e.rsplit("```audit-claims", 1)[0]
+    # 🔴 THE WINDOW STARTS AT THE PASTE INSTRUCTION, AND THAT IS THE WHOLE
+    # ASSERTION. "Before a fence" was VACUOUS in BOTH earlier spellings —
+    # MEASURED: delete the EMITTER's override line from
+    # `emit_claims_skeleton` and this test stayed green under
+    # `split("```audit-claims")[0]` (as fa08be10 shipped it) AND under
+    # `rsplit(..., 1)[0]` (as 848fac8b repaired it), because the BRIEF goes to
+    # the same stream, carries `GATE_OVERRIDE_HEAD` and this same reason, and
+    # sits before every fence. The brief's copy is asserted separately above;
+    # what this one is about is the text that gets PASTED onto the PR, so the
+    # window is the block's own preamble. Mutant `G10` now holds it.
+    #
+    # `rsplit` is kept for the reason 848fac8b gives — mutant C2 (claims read
+    # from the whole comment) can put a fence in reproduced claim text — but
+    # that fence is in the BRIEF, so the marker already excludes it and C2 goes
+    # on isolating what it names.
+    paste_marker = "Paste this into the PR comment"
+    assert paste_marker in out_e, (
+        f"the emit half printed no {paste_marker!r} line, so this assertion "
+        f"cannot find the block it is about — it would otherwise pass on the "
+        f"brief's copy of the reason:\n{out_e}"
+    )
+    above_the_block = out_e[out_e.index(paste_marker):].rsplit(
+        "```audit-claims", 1)[0]
     assert reason in above_the_block, (
         "the emitted block carries no override record ABOVE its fence, so "
         f"pasting it onto the PR leaves no trace of the stop:\n{out_e}"
