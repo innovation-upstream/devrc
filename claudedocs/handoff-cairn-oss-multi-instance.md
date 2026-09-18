@@ -21,8 +21,8 @@ is the PRIVATE proposal, not this doc.
   session, with the personal instance unaffected. ⚠ **FROZEN — this is the ORIGINAL ask.**
   ✅ **MET 2026-09-18 by phase D** (see `State now`): the store serves two entries written by a
   civitai session, byte-identical on the PVC, to BOTH hosts, with personal measured unaffected.
-  🔴 **ONE QUALIFIER, AND IT IS THE WHOLE OF WHAT IS LEFT: the route came from a `$CAIRN_ROUTES`
-  OVERRIDE, NOT THE SHIPPED TABLE** — which is still all-`personal` by a deliberate tested
+  🔴 **ONE QUALIFIER ON *THIS CONDITION* — not on the arc, which has several open items (see
+  `Next steps`): the route came from a `$CAIRN_ROUTES` OVERRIDE, NOT THE SHIPPED TABLE** — which is still all-`personal` by a deliberate tested
   invariant. So the condition is met as WORDED and is NOT yet reproducible from committed config:
   a session without that override gets **rc 11**, correctly. Making it durable is **phase E**,
   now unblocked by the routing-durability decision below. ⚠ Everything before phase C (the OSS
@@ -52,10 +52,20 @@ is the PRIVATE proposal, not this doc.
     ABSENT on the claim reference, PRESENT on the container mount). **Both CronJobs remain
     suspended** — unsuspending them is still an open item.
   - ⚠ **BOTH HOSTS NOW CARRY `instances/civitai.env`** (0600, 281 B, token fingerprint
-    `d9904a784be2` on each — which MATCHES the value this repo's README documents, an independent
-    check that the right row was taken). Consequence to expect rather than discover: **labelling is
-    now active on both hosts**, so every `recall` banners `cairn[personal]:` / `cairn[civitai]:`
-    where it used to say `cairn:`. That is `len(instances) > 1`, exactly as rank 29 predicted.
+    `d9904a784be2` on each — matching `civitai/talos-infra:clusters/production/apps/cairn/README.md:343`,
+    an independent check that the right row was taken). `len(instances) > 1` is now TRUE on both, and
+    it has **two** consequences, not one:
+    - cosmetic: every `recall` banners `cairn[personal]:` / `cairn[civitai]:` where it said `cairn:`.
+    - 🔴 **BEHAVIOURAL, AND THIS IS THE ONE THAT BITES: A SCOPE THE TABLE DOES NOT NAME NOW REFUSES
+      AT rc 11 ON BOTH HOSTS. It used to resolve to `personal`.** `Routing.alias_for` returns
+      `DEFAULT_ALIAS` for an unnamed scope **only** `if not self.multi_instance`; at two instances it
+      raises `UnroutedScope`. So the FIRST write to any scope not in the 25-row table — a new repo, a
+      new subsystem — now fails, and unblocking it is a devrc PR editing `claude/cairn-routes.json`
+      plus a `home-manager switch` on both hosts. **Measured 2026-09-18: latent, not firing** — live
+      scopes 25, table 25, symmetric difference EMPTY on *both* hosts, so no existing scope is
+      affected. It fires on the next NEW one.
+      ⚠ Phase D changed the CLIENT's routing behaviour, and "personal unaffected" was measured on
+      ENTRY COUNTS, which cannot see that. Both claims are true; they are about different things.
   - ⚠ **STILL ORPHANED: `civitai-app-requests/app-requests.md`** (1,803 B) exists only in the frozen
     mirror. Surfaced by `doctor`'s `personal/token-scopes` PROBLEM, which is **pre-existing** and is
     the check earning its keep. Moving it is a decision, not a cleanup.
@@ -88,33 +98,24 @@ is the PRIVATE proposal, not this doc.
   put a client credential in a public repo. `skopeo copy` by DIGEST; both sides then carry the
   identical digest, which is what makes "both clusters pull the same tag" checkable.
 
-- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** The CronJob set
-  `persistentVolumeClaim.readOnly: true` on the **volume**, so the CSI driver mounted the block
-  device `-o ro` while the server held the same device **rw** on the same node. ext4 refuses:
-  `already mounted … Can't mount, would change RO state`. 20 retries over 24 minutes, and it would
-  never have succeeded. **`ReadWriteOnce` is NOT the cause** — both pods are on one node and RWO is
-  per-node. Fix: drop `readOnly` from the **claim reference**, keep it on the container's
-  `volumeMounts`, so the kubelet reuses the rw mount and the backup still cannot write.
-  ⚠ Probable cause, **stated as probable**: §6's storage delta. A hostpath volume tolerates a ro
-  co-mount; a LINSTOR block device does not.
-  🔴 **WHAT IT COST TO FIND vs WHAT IT WOULD HAVE COST:** the CronJob ships suspended, so this would
-  have surfaced at the first unsuspend — *after* phase D seeded ~110 real entries. And it is worse
-  than the "green CronJob" trap the closing condition was written against: this job could not have
-  gone green at all, so alerting on backup success would have fired only once someone depended on it.
-  **Gate 23 (`ro-pvc-comount`) now pins the RELATIONSHIP cross-file** — no workload may request a
-  PVC read-only while another mounts it read-write — watched RED against the pre-fix manifests.
+- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** `readOnly: true` on
+  the **claim reference** made the CSI driver mount the block device `-o ro` while the server held it
+  **rw** on the same node; ext4 refuses (`would change RO state`). **`ReadWriteOnce` is NOT the
+  cause** — both pods are on one node and RWO is per-node. Fix: `readOnly` belongs on the container's
+  `volumeMounts`, never the claim. ⚠ Probable, stated as probable: a LINSTOR block device does not
+  tolerate a ro co-mount where a hostpath does. 🔴 **The shape worth keeping: this job could not have
+  gone green AT ALL, so alerting on backup success would have fired only once someone depended on it
+  — and it ships suspended, so it would have surfaced only after phase D seeded.** Now pinned
+  cross-file by gate 23 (`ro-pvc-comount`), watched RED against the pre-fix manifests.
+  ✅ **EXERCISED at phase D over real content** — a manual run of the fixed CronJob completed,
+  round-trip verified and restore-checked.
 
-- ✅ **THE DRILL'S EVIDENCE, because "a restore, not a green CronJob" is the closing condition and
-  this is what satisfies it.** Canary `datapacket-talos/cairn-drill-canary.md`, 132 B,
-  `sha256:c4de5e4e0b9f3fb26dd9255ffda4370d513327076ce47f475135c71022b756cd`, **verified to index**
-  (`recalled`) before backing up — a wrong shape indexes EMPTY and makes the drill unpassable in a
-  way that looks like a failed restore. Backup job **Complete**, `failedMountEvents=0`, census
-  **1 entry / 1 scope**, archive 392 B. Pulled OUT via `mc cat` (the tenant image has no `tar`, so
-  `kubectl cp` out of it fails): local sha256 `032a51cd…` **matched the published sidecar**. Canary
-  destroyed → store reported **`scope-empty`**, i.e. the loss was real and not just a missing file.
-  Restored → canary back at **`c4de5e4e…` byte-identical**, and the store served it again
-  (`recalled`). `backup.py`'s in-job "restore-check" cannot supply this: it never writes to a volume.
-  Drill artifacts removed; CronJobs still suspended.
+- ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
+  written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
+  restored **byte-identical** (`c4de5e4e…`) and served again. 🔴 **The lesson that is NOT in the
+  runbook: `backup.py`'s in-job "restore-check" cannot supply this evidence — it never writes to a
+  volume**, so only an out-of-band destroy-and-restore grades the procedure. Full procedure, the
+  `mc cat` extraction and the entry-shape trap: `civitai/talos-infra:clusters/production/apps/cairn/README.md`.
 
 - 🔴 **THE BACKUP CREDENTIAL IS SCOPED AND CANNOT DELETE — verified on the live policy, not the
   manifest.** `cairn-backup-write` grants `ListBucket/ListBucketMultipartUploads/GetBucketLocation`
@@ -176,10 +177,20 @@ is the PRIVATE proposal, not this doc.
   🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
   already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
   remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
-  adds **no new machinery**; it re-points scopes and replaces the all-`personal` invariant (below)
-  with the (a)-shaped one: *every value names an alias this host configures*.
+  adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
+  the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
+  configures*. 🔴 **THE GUARD PHASE E MUST EDIT, NAMED HERE SO IT IS NOT MET AS A SURPRISE RED:**
+  `devrc:scripts/tests/test_cairn_routes.py:120`
+  `test_every_scope_routes_to_the_default_instance_today`, whose docstring says *"Do not 'finish the
+  migration' by editing this file"* and whose assert message states the precondition — a scope may
+  be re-pointed only once some host carries `instances/<alias>.env`. **That precondition is now
+  satisfied on both hosts.**
 
-- ⚠ **Carried forward (durable — a REPLACE would drop these):** the fork decision stands,
+- ⚠ **Carried forward (durable — a REPLACE would drop these):** 🔴 **the ROUTING DURABILITY design is
+  (a) FAIL-LOUD + freshness observability, operator 2026-09-18, mirroring REJECTED, not to be
+  re-litigated** — carried HERE because the decision block above sits under `State now`, a REPLACE
+  heading the next `/handoff` overwrites, and its own closing condition was "recorded in this doc's
+  decisions". The fork decision stands,
   **CONSOLIDATE ONTO THE PIN**, operator 2026-09-08, **not to be re-asked**. `m_index_store` still
   restores `sys.path` on the success path only — closes when a test asserting `sys.path == before`
   after a successful call is shown RED against today's conditional `finally` and GREEN after.
@@ -192,13 +203,11 @@ is the PRIVATE proposal, not this doc.
   `clawgate_handoff.sh resolve` exited **5** (`NOTHING RESOLVED — 0 tasks`), which cannot
   distinguish "this session touched no task" from "the id is wrong". Not a clean bill of health.
 
-- ⚠ **The doc was cut 196,581 → 101,909 B** (devrc #1757 `53c9b981d`), 107 KB moved **verbatim** to
-  `claudedocs/refs/cairn-oss-multi-instance.md` with per-block preservation proof and a case-mutant
-  control. 🔴 **CORRECTED 2026-09-18: this line read "tightened 196,608 → 114,688"; the allowance is
-  `98_304`.** The authority is `scripts/lib/handoff_budget.py:62`, never this sentence — 114,688 is
-  `handoff-nix-disk-cleanup.md`'s row. Tightened, never raised, stands. **The ranked list was
-  deliberately NOT rewritten**: it predates the `forcing:` requirement and carries none, so a
-  rewrite would have meant inventing forcing functions for hygiene items.
+- ⚠ **Size: the allowance is `98_304` and the authority is `scripts/lib/handoff_budget.py:62`, never
+  a sentence in this doc** — one here read "114,688" (that is `handoff-nix-disk-cleanup.md`'s row)
+  until 2026-09-18. The 2026-09-17 cut (devrc #1757 `53c9b981d`) moved 107 KB **verbatim** to
+  `claudedocs/refs/cairn-oss-multi-instance.md`. **The ranked list was deliberately NOT rewritten**:
+  it predates the `forcing:` requirement, so a rewrite would have meant inventing forcing functions.
 
 ## Open investigations — live diagnosis state
 
@@ -970,15 +979,20 @@ done":**
     empty scope and a retired one are indistinguishable, and grading it at exit 11 made
     `routes --check` refuse every pre-registered scope; nothing in devrc can restore it. And
     **direction one is a NON-DEFECT at one instance by design** — `alias_for` resolves an unnamed
-    scope to the sole instance, so `check` appends nothing. **At phase C/E, when a second configured
-    instance makes direction one a real refusal, the pin moves OVER REALITY and the deferred
-    `[routes]` drift-check arm becomes reachable.** That is the work §5.2 was actually describing.
+    scope to the sole instance, so `check` appends nothing. **When a second configured instance makes
+    direction one a real refusal, the pin moves OVER REALITY and the deferred `[routes]` drift-check
+    arm becomes reachable.** That is the work §5.2 was actually describing. ✅ **THAT TRIGGER FIRED AT
+    PHASE D, NOT AT E** — this line said "At phase C/E"; both hosts are multi-instance as of
+    2026-09-18, so the arm is reachable NOW and `nix/home.nix`'s note parking it against "the first
+    host to configure a second instance" is discharged.
     ⚠ **Proposal §5.2 still states the impossible version.** Superseded in practice, deliberately
     NOT amended — operator call 2026-09-16, to avoid a second repo's review cycle. Read this item,
     not §5.2.
     ⚠ Declared and NOT closed by #24: `tests/parity/README.md` difference 8 — Go's READ verbs
-    refuse at exit 11 on a multi-instance host rather than routing. Unreachable today (no such
-    host, and `packages.cairn` is still the Python client) but it goes live at phase E.
+    refuse at exit 11 on a multi-instance host rather than routing. 🔴 **"Unreachable today (no such
+    host)" IS NOW FALSE — both hosts went multi-instance at phase D.** The ONLY thing still holding
+    this back is that `packages.cairn` is the Python client; swapping it in makes difference 8 live
+    immediately, not at phase E.
     forcing: none — but C/D/E sit behind it, so it gates the rest of the arc
 
 ## Gotchas / decisions / dead-ends
@@ -1117,16 +1131,15 @@ git -C $DATAPACKET ls-tree -r --name-only origin/trunk -- clusters/production/ap
 KUBECONFIG=$KC_DPPROD kubectl -n cairn get pods -o wide
 KUBECONFIG=$KC_DPPROD kubectl -n cairn get cronjobs -o custom-columns='NAME:.metadata.name,SUSPEND:.spec.suspend'
 ```
-Expect a Ready pod on `talos-avt-y6z` and **both CronJobs suspended** until phase D.
+Expect a Ready pod on `talos-avt-y6z`. ⚠ **Both CronJobs are still suspended AFTER phase D** —
+unsuspending them is an open item, not a leftover.
 
 **The store answers, and enforces auth** (token never leaves the pod):
 ```bash
 KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'wget -qO- http://127.0.0.1:8102/healthz'
-KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/civitai 2>&1 | head -8'
 ```
-Expect `ok`, then `200 OK`. ⚠ **The `/recall/civitai` path above returns `scope-absent` and always
-did — `civitai` is not a seeded scope.** Phase D seeded **`civitai-developer-docs`**; probe that
-instead and expect `X-Store-Status: recalled` with `entry-files=2`.
+Expect `ok`. ⚠ **Probe a SEEDED scope — `civitai-developer-docs`, not `civitai`**, which was never
+seeded and returns `scope-absent` whether or not anything works. The probe is below.
 
 **Phase D is seeded; the TABLE is still not cut over** (that is phase E):
 ```bash
@@ -1136,7 +1149,15 @@ python3 -c "import json,collections;d=json.load(open('$HOME/.config/subsystem-st
 Expect `25 {'personal': 25}` — the shipped table is unchanged — and `instances/civitai.env`
 present on BOTH hosts. 🔴 **The seeded scope is reachable only under a `$CAIRN_ROUTES` override
 (the shipped table plus `"civitai-developer-docs": "civitai"`); without one, `cairn recall --scope
-civitai-developer-docs` exits 11, and that refusal is CORRECT, not a regression.**
+civitai-developer-docs` exits 11.** ⚠ **That refusal is expected FOR THIS SCOPE ONLY — do NOT read
+it as "rc 11 is fine here".** An rc 11 on any OTHER scope is the unnamed-scope refusal described in
+`State now`, and it is a real block needing a table row, not a phase-D artefact.
+```bash
+CAIRN_ROUTES=/tmp/r.json cairn recall --scope civitai-developer-docs   # after adding the row
+KUBECONFIG=$KC_DPPROD kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/civitai-developer-docs 2>&1 | grep X-Store-Status'
+```
+Expect `status=recalled`. ⚠ `entry-files=` on that header is a **store-wide** total, not this
+scope's count — it was 2 at phase D and grows with any later write anywhere in the store.
 
 **Gate 23 exists and the mount defect cannot return:**
 ```bash
