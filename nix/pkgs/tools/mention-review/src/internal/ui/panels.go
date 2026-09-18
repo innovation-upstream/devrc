@@ -62,13 +62,13 @@ func (a App) render() string {
 		//
 		// ⚠ THIS DOES NOT MOVE t_first_frame AND IS NOT CLAIMED TO. The card was
 		// already painted before any network call — measured at a median 204 ms
-		// after `tmux new-session`, which is process exec, not the API, and the
-		// skeleton's own median is 230 ms because four boxes cost more to lay
-		// out than one card. What it changes is WHAT the first frame shows, that
-		// the layout no longer reflows, and — with the reads now parallel — that
-		// the Diff panel can render the moment the diff arrives instead of
-		// waiting for a metadata query it no longer depends on. See
-		// `ReadIntents` for the measurement.
+		// after `tmux new-session`, which is process exec, not the API — and the
+		// skeleton's own median is 230 ms, i.e. slightly WORSE, for a reason
+		// this measurement did not isolate. What it changes is WHAT the first
+		// frame shows, that the layout no longer reflows, and — with the reads
+		// now parallel — that the Diff panel can render the moment the diff
+		// arrives instead of waiting for a metadata query it no longer depends
+		// on. See `ReadIntents` for the measurement.
 		body = a.renderPanels(bodyH)
 	}
 	if bar != "" {

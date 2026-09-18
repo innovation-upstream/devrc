@@ -688,9 +688,11 @@ func (a App) browserURL() string {
 //	 first frame            204 ms          230 ms   (process start, not the API)
 //
 // ⚠ THE SECOND ROW IS NOT A WIN AND IS NOT CLAIMED AS ONE. The first frame was
-// already painted before any network call; the skeleton changed what it shows,
-// and lays out four boxes where a card used to be, which is what the ~26 ms
-// costs.
+// already painted before any network call, so there was nothing there to win;
+// the skeleton changed WHAT it shows, not when. The ~26 ms is real in the sense
+// that the skeleton was slower in all five pairs, and it is UNATTRIBUTED: the
+// measurement cannot separate four boxes costing more to lay out than one card
+// from process start-up noise, and no experiment here tried to.
 //
 // 🔴 ONE RULE, ONE PLACE. Three sites want "read this reference": `Init`, the
 // `r` retry, and the re-read after a successful write. Spelled separately, the
