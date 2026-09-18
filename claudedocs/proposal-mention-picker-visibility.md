@@ -222,8 +222,9 @@ fzf then filters by the query but preserves input order among the survivors, so 
 survives typing completely.
 *Pros:* the only option that actually makes the pre-computed order the final arbiter
 under a query; one flag.
-*Cons:* throws away fzf's match-quality ordering — type `civitai` and you get *our* order
-among matches rather than the best match first, which on a 394-row universe is a real
+*Cons:* throws away fzf's match-quality ordering — type an owner name like `acme` (synthetic;
+this repo is public and a real third-party name must not be used as an example) and you get
+*our* order among matches rather than the best match first, which on a 394-row universe is a real
 loss when Tier A is UNKNOWN for the rows involved. The suite currently bans this flag as
 "turns off ranking entirely, which is the pre-#1373 bug" — that ban was written when there
 was no pre-sort; now there is one, so the flag means "our ranking wins" rather than "no
