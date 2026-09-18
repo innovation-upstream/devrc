@@ -103,10 +103,21 @@ def test_the_table_is_not_empty(table):
     assert len(table) >= MIN_SCOPES, (
         f"claude/cairn-routes.json names only {len(table)} scope(s), below the "
         f"{MIN_SCOPES} vacuity floor. Re-derive the population with `cairn sync` "
-        f"then `ls -1d ~/.cache/subsystem-store*/*/` — the trailing `*` on the ROOT "
-        f"matters, because extra instances use SIBLING caches "
-        f"(`subsystem-store-<alias>`) and the un-starred glob under-counts on a "
-        f"multi-instance host. Then fix the table — do not "
+        f"then "
+        f"`ls -1d ~/.cache/subsystem-store*/*/ | xargs -n1 basename | sort -u | wc -l`. "
+        f"🔴 BOTH halves of that pipeline matter and each fixes a DIFFERENT "
+        f"miscount, in OPPOSITE directions. The trailing `*` on the ROOT is "
+        f"needed because extra instances use SIBLING caches "
+        f"(`subsystem-store-<alias>`), so the un-starred glob UNDER-counts on a "
+        f"multi-instance host. The `basename | sort -u` is needed because a "
+        f"scope present in two instances then appears TWICE, so the starred "
+        f"glob alone OVER-counts by exactly the number of shared scopes — "
+        f"measured 2026-09-18 on a two-instance host: 25 un-starred, 38 starred, "
+        f"26 de-duplicated, against a 26-row table. An operator reads this "
+        f"message only when the floor has already tripped, so a count that is "
+        f"12 too high walks them toward adding rows that already exist — the "
+        f"same 'fix the table' error this message warns against, larger and in "
+        f"the other direction. Then fix the table — do not "
         f"lower this floor to make a collapsed table pass."
     )
 
@@ -148,6 +159,23 @@ def test_the_shipped_table_parses_under_cairns_own_reader(table):
 #:     `scope-empty` / `status=scope-absent` at **rc 0** with reassuring prose —
 #:     no refusal anywhere. That is this table's worst failure mode and it is
 #:     currently guarded by NOTHING. Migrate first, verify, then flip.
+#:     🔴 AND THE VARIANT THAT ACTUALLY FIRED, WHICH THE PARAGRAPH ABOVE DOES NOT
+#:     DESCRIBE: total absence is the LOUD case — it at least yields `scope-empty`.
+#:     The live one is PARTIAL STALENESS, which yields NO signal at all. A scope
+#:     whose ref NAMES all match but whose BYTES are behind reads back rc 0, full
+#:     entry list, clean banner, content silently missing. Measured 2026-09-18 on
+#:     `civitai-gpu-fleet` — one of the scopes this very commit re-points — where
+#:     two entries were behind by one bullet each, one of them a 🔴 record of a
+#:     measured live security incident. **So a name-set comparison is NOT
+#:     sufficient verification; compare BYTES.** A `revision` is the leading 16
+#:     hex of the entry's own sha256, so this is checkable rather than opaque.
+#:     🔴 AND IT DECAYS: until the table flips, writes still route to the old
+#:     instance, so a verified scope goes stale again within hours (measured: 4
+#:     diverged entries at 19:20Z, 13 by 22:26Z the same day). **Verification is
+#:     only valid immediately before the `home-manager switch`, never at
+#:     PR-authoring time.** The cutover procedure in
+#:     `claudedocs/handoff-cairn-oss-multi-instance.md` carries the steps; CI
+#:     cannot do any of this, because it has no store access.
 #:
 #: An earlier revision also pinned this set with `== {"personal", "civitai"}` in a
 #: second test. That was deleted: with one source three lines above the assertion,
