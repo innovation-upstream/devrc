@@ -259,11 +259,27 @@ const maxReflectedErrorEntries = 5
 //
 // So the enforcement is now BUILT rather than asserted.
 // `TestEveryAPIErrorDetailIsRoutedOrLedgered` (detailrouting_test.go) parses
-// this package's non-test sources, finds every `&APIError{…}` construction, and
-// requires each one's `Detail` to be a string literal, a call through
-// `Client.detail`, or an expression named in an explicit ledger with a reason.
-// A new unrouted path fails it. It says nothing about WHICH paths carry server
-// text — that judgement is what the ledger entries record — and the hand-written
+// this package's non-test sources, finds every `APIError` composite literal and
+// every assignment to a `.Detail` selector, and requires each `Detail` to be a
+// string literal, a call through `Client.detail`, or an expression named — at
+// its own `file:function` site — in an explicit ledger with a reason. A
+// positional `APIError{…}` literal fails it, because the field names it reads
+// are not there.
+//
+// 🔴 AND ROUND 4 FOUND A FOURTH — FOUR FALSE SENTENCES ALL TOLD, TWO OF THEM
+// ABOUT ENFORCEMENT. (The "WHOLE composed detail" coverage count above still
+// reads TWO, for the same reason it did not move last round.) Three comments and
+// the pull request said the guard proves "no `Detail` reaches the UI unbounded
+// and unexamined" — a PROPERTY, and wider than any scanner that reads one
+// package's syntax can establish. Two ordinary Go shapes walked straight through
+// it with the suite green, both measured: an assignment after construction, and
+// a positional literal. The fix was to CLOSE those two shapes and then to write
+// the MECHANISM instead of the property — what it parses, what it requires, what
+// it cannot see — which is what the paragraph above and `detailrouting_test.go`'s
+// header now do. Write the next claim that way and there is no fifth.
+//
+// It says nothing about WHICH paths carry server text — that judgement is what
+// the ledger entries record — and the hand-written
 // ledger on `TestNoErrorPathEverCarriesTheToken` remains an INSTRUCTION to
 // maintainers, not a check. `TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail`,
 // `TestTheMergeabilityRefusalNeverReflectsTheServersWordUnclipped` and

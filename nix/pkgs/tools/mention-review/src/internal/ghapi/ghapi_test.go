@@ -554,11 +554,14 @@ func TestAnEmptyTokenShortCircuitsBeforeTheNetwork(t *testing.T) {
 // appears unledgered" while entry 5 above already existed unledgered — the third
 // time a completeness sentence in this change has been false. What IS enforced,
 // mechanically, is narrower and lives elsewhere:
-// `TestEveryAPIErrorDetailIsRoutedOrLedgered` derives every `&APIError{…}`
-// construction from the package source and fails on a `Detail` that is neither a
-// literal, nor routed through `Client.detail`, nor ledgered with a reason. It
-// cannot tell you whether a path carries SERVER text; it can tell you that no
-// path reaches the UI unbounded and unexamined.
+// `TestEveryAPIErrorDetailIsRoutedOrLedgered` parses this package's own non-test
+// `.go` files and fails on a `Detail` — set either as an `APIError` literal's
+// keyed `Detail:` element or by assignment to a `.Detail` selector — that is
+// neither a literal, nor routed through `Client.detail`, nor ledgered at its own
+// `file:function` site with a reason. That is the whole of it: it reads syntax,
+// in one package, so it cannot tell you whether a path carries SERVER text, and
+// it cannot see a `Detail` set outside this package, through an interface, or by
+// reflection. It is a check on the shapes it parses, not a proof about the UI.
 func TestNoErrorPathEverCarriesTheToken(t *testing.T) {
 	const secret = "gho_thisisnotarealtokenitisatestfixture"
 

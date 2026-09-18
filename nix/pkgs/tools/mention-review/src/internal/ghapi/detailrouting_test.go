@@ -1,6 +1,7 @@
 package ghapi
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
@@ -22,52 +23,80 @@ import (
 // THIRD time a completeness sentence in this file's neighbourhood was false.
 //
 // So this derives the set from the source instead of restating it. It parses
-// every non-test file in the package, finds every `&APIError{…}` construction,
-// and requires each one's `Detail` to be one of three things:
+// every non-test file in the package, finds every `APIError` composite literal
+// and every assignment to a `.Detail` selector in it, and requires each `Detail`
+// to be one of three things:
 //
 //   - absent, or built only from string literals;
 //   - routed through `Client.detail` (redact then clip);
 //   - an expression named in `detailLedger` below, with a reason.
 //
-// 🔴 BE PRECISE ABOUT WHAT THIS DOES AND DOES NOT CLAIM. It cannot tell whether
-// an expression carries SERVER text — that judgement is a human one, and writing
-// it down is what a ledger entry is for. What it enforces is that no `Detail`
-// reaches the UI unbounded and un-examined: a new unrouted expression fails
-// until somebody either routes it or states, in a sentence that ships with the
-// code, why it needs no routing.
+// 🔴 STATE THE MECHANISM, NOT A PROPERTY. This comment used to say the guard
+// enforces "that no `Detail` reaches the UI unbounded and un-examined" — wider
+// than the code, and the FOURTH over-wide sentence in this change (the tally is
+// kept on `maxDetailRunes` in `query.go`). What the scanner actually reads is:
+// this package's own non-test `.go` files, parsed with `go/parser`; inside them,
+// composite literals whose type is the identifier `APIError`, their keyed
+// `Detail:` element, and assignments whose left-hand side is a selector named
+// `Detail`. A POSITIONAL `APIError{…}` literal is an error rather than a skip,
+// because the scanner cannot tell which element is the `Detail` field.
+//
+// What it therefore cannot see: a `Detail` set outside this package, through an
+// interface, by reflection, or by `encoding/json` unmarshalling into the struct;
+// nor what a ledgered expression evaluates to, since a ledger entry names an
+// expression at one site and not the value that expression produces. It also
+// cannot tell whether an expression carries SERVER text — that judgement is a
+// human one, and writing it down is what a ledger entry is for.
 
 // detailLedger names every `APIError.Detail` sub-expression that is NOT a string
 // literal and NOT routed through `Client.detail`, with the reason it needs no
 // routing.
 //
-// 🔴 IT IS PINNED TWO-WAY. An entry naming an expression no construction uses
-// fails the test too, so a route that later starts going through `Client.detail`
-// cannot leave a stale excuse behind for the next one.
+// 🔴 THE KEY IS A SITE, NOT A WORD: `file.go:Func: expr`. Keying on the bare
+// expression excused an IDENTIFIER wherever it appeared. MEASURED at `d70ce112`:
+// with the key `name`, writing `name := "unreadable files response: " + err.Error()`
+// in `diff.go` and then `Detail: name` passed the suite — absolved by an entry
+// whose reason ("the argv this program was started with") was written for
+// `write.go`, about a different value, in a different function. A reason is an
+// argument about one expression in one place, so the key has to carry the place.
+//
+// 🔴 IT IS PINNED TWO-WAY. An entry naming a site no construction uses fails the
+// test too, so a route that later starts going through `Client.detail` cannot
+// leave a stale excuse behind for the next one.
 var detailLedger = map[string]string{
-	"event": "the caller's own argument, being REJECTED for not being one of " +
-		"`ReviewEvents()`; it never came from a response",
-	"strings.Join(ReviewEvents(), \", \")": "this package's own three constants",
-	"method": "the caller's own argument, being REJECTED for not being one of " +
-		"`cfg.MergeMethods()`; it never came from a response",
-	"strings.Join(cfg.MergeMethods(), \", \")": "the config package's own constants",
-	"read.Terminal": "`TerminalPRState`'s answer, which is `PRStateMerged`, " +
-		"`PRStateClosed` or the empty string — a closed vocabulary this package " +
-		"owns. The server's `state` string is matched AGAINST those words and " +
-		"never echoed: an unrecognised one yields \"\", which this arm does not " +
-		"reach",
-	"readsSpent(reads, c.pollInterval)": "this package's own count and duration, " +
-		"formatted by `readsSpent`",
-	"MergeableYes": "this package's own constant, named as the state the refusal " +
-		"wanted; the SERVER's word beside it in that same sentence IS routed",
-	"owner": "the argv this program was started with",
-	"name":  "the argv this program was started with",
-	"num":   "the argv this program was started with",
-	"repo":  "`owner+\"/\"+name`, composed from argv by the caller",
+	"write.go:Client.SubmitReview: event": "the caller's own argument, being " +
+		"REJECTED for not being one of `ReviewEvents()`; it never came from a response",
+	"write.go:Client.SubmitReview: strings.Join(ReviewEvents(), \", \")": "this " +
+		"package's own three constants",
+	"write.go:Client.Merge: method": "the caller's own argument, being REJECTED " +
+		"for not being one of `cfg.MergeMethods()`; it never came from a response",
+	"write.go:Client.Merge: strings.Join(cfg.MergeMethods(), \", \")": "the config " +
+		"package's own constants",
+	"write.go:Client.Merge: read.Terminal": "`TerminalPRState`'s answer, which is " +
+		"`PRStateMerged`, `PRStateClosed` or the empty string — a closed vocabulary " +
+		"this package owns. The server's `state` string is matched AGAINST those " +
+		"words and never echoed: an unrecognised one yields \"\", which this arm " +
+		"does not reach",
+	"write.go:Client.Merge: readsSpent(reads, c.pollInterval)": "this package's own " +
+		"count and duration, formatted by `readsSpent`",
+	"write.go:Client.Merge: MergeableYes": "this package's own constant, named as " +
+		"the state the refusal wanted; the SERVER's word beside it in that same " +
+		"sentence IS routed",
+	"query.go:Client.Mergeability: owner":  "the argv this program was started with",
+	"query.go:Client.Mergeability: name":   "the argv this program was started with",
+	"query.go:Client.Mergeability: num":    "the argv this program was started with",
+	"query.go:Client.decodeSnapshot: num":  "the argv this program was started with",
+	"query.go:Client.decodeSnapshot: repo": "`owner+\"/\"+name`, composed from argv by the caller",
 }
 
-// apiErrorDetail is one `&APIError{…}` construction the scan found.
+// apiErrorDetail is one place the scan found an `APIError.Detail` being set — a
+// composite literal's keyed `Detail:` element, or an assignment to a `.Detail`
+// selector.
 type apiErrorDetail struct {
 	file string
+	// fn is the enclosing function, so a ledger entry binds to a site rather
+	// than to an identifier that any file may spell.
+	fn   string
 	line int
 	// routed is true when the `Detail` expression calls `Client.detail`.
 	routed bool
@@ -78,45 +107,138 @@ type apiErrorDetail struct {
 	hasDetail bool
 }
 
-// scanAPIErrorDetails parses `src` and reports every `APIError` composite
-// literal in it.
+// key is the `detailLedger` key for one leaf of this record.
+func (r apiErrorDetail) key(leaf string) string {
+	return r.file + ":" + r.fn + ": " + leaf
+}
+
+// scanAPIErrorDetails parses `src` and reports every place an `APIError.Detail`
+// is set in it: the keyed `Detail:` element of an `APIError` composite literal,
+// and any assignment whose left-hand side is a selector named `Detail`.
 //
-// ⚠ `filename` is used for reporting and to let the caller feed this synthetic
-// source, which is how the controls below check the scanner can go both red and
-// green.
+// 🔴 A POSITIONAL `APIError{…}` LITERAL IS AN ERROR, NOT A SKIP. Field order is
+// not in the AST, so the scanner cannot say which element is `Detail` — and the
+// old code stepped over it silently while still counting it, which both hid the
+// detail AND raised the anti-degenerate floor it would otherwise have tripped.
+//
+// ⚠ `filename` is used for reporting, for the ledger key, and to let the caller
+// feed this synthetic source, which is how the controls below check the scanner
+// can go both red and green.
 func scanAPIErrorDetails(filename, src string) ([]apiErrorDetail, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
 		return nil, err
 	}
+	funcs := funcSpans(f)
 	var out []apiErrorDetail
+	var scanErr error
 	ast.Inspect(f, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		id, ok := lit.Type.(*ast.Ident)
-		if !ok || id.Name != "APIError" {
-			return true
-		}
-		rec := apiErrorDetail{file: filename, line: fset.Position(lit.Pos()).Line}
-		for _, el := range lit.Elts {
-			kv, ok := el.(*ast.KeyValueExpr)
-			if !ok {
-				continue
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				sel, ok := lhs.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Detail" || len(node.Rhs) == 0 {
+					continue
+				}
+				// A multi-value assignment (`a.Detail, b = f()`) has one RHS
+				// for several LHS; walk that one rather than dropping the case.
+				rhs := node.Rhs[0]
+				if len(node.Rhs) == len(node.Lhs) {
+					rhs = node.Rhs[i]
+				}
+				rec := apiErrorDetail{
+					file:      filename,
+					fn:        enclosingFunc(funcs, lhs.Pos()),
+					line:      fset.Position(lhs.Pos()).Line,
+					hasDetail: true,
+				}
+				rec.routed, rec.leaves = walkDetail(fset, rhs)
+				out = append(out, rec)
 			}
-			key, ok := kv.Key.(*ast.Ident)
-			if !ok || key.Name != "Detail" {
-				continue
+		case *ast.CompositeLit:
+			id, ok := node.Type.(*ast.Ident)
+			if !ok || id.Name != "APIError" {
+				return true
 			}
-			rec.hasDetail = true
-			rec.routed, rec.leaves = walkDetail(fset, kv.Value)
+			rec := apiErrorDetail{
+				file: filename,
+				fn:   enclosingFunc(funcs, node.Pos()),
+				line: fset.Position(node.Pos()).Line,
+			}
+			for _, el := range node.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					if scanErr == nil {
+						scanErr = fmt.Errorf("%s:%d constructs an APIError with POSITIONAL "+
+							"fields. The scanner cannot tell which element is `Detail`, so it "+
+							"cannot check it. Write the field names — `&APIError{State: …, "+
+							"Detail: …}`",
+							filename, fset.Position(el.Pos()).Line)
+					}
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok || key.Name != "Detail" {
+					continue
+				}
+				rec.hasDetail = true
+				rec.routed, rec.leaves = walkDetail(fset, kv.Value)
+			}
+			out = append(out, rec)
 		}
-		out = append(out, rec)
 		return true
 	})
+	if scanErr != nil {
+		return nil, scanErr
+	}
 	return out, nil
+}
+
+// funcSpan is one top-level function's name and source extent.
+type funcSpan struct {
+	name       string
+	start, end token.Pos
+}
+
+func funcSpans(f *ast.File) []funcSpan {
+	var out []funcSpan
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		name := fd.Name.Name
+		if fd.Recv != nil && len(fd.Recv.List) == 1 {
+			name = recvTypeName(fd.Recv.List[0].Type) + "." + name
+		}
+		out = append(out, funcSpan{name: name, start: fd.Pos(), end: fd.End()})
+	}
+	return out
+}
+
+func recvTypeName(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.StarExpr:
+		return recvTypeName(v.X)
+	case *ast.IndexExpr:
+		return recvTypeName(v.X)
+	case *ast.Ident:
+		return v.Name
+	}
+	return "?"
+}
+
+// enclosingFunc names the top-level function containing `pos`. A construction
+// outside any function — a package-level `var`, say — is keyed `<file-level>`
+// rather than dropped.
+func enclosingFunc(spans []funcSpan, pos token.Pos) string {
+	for _, s := range spans {
+		if pos >= s.start && pos < s.end {
+			return s.name
+		}
+	}
+	return "<file-level>"
 }
 
 // walkDetail decomposes a `Detail` expression.
@@ -197,7 +319,7 @@ func TestEveryAPIErrorDetailIsRoutedOrLedgered(t *testing.T) {
 	for name, body := range srcs {
 		found, err := scanAPIErrorDetails(name, body)
 		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
+			t.Fatalf("scanning %s: %v", name, err)
 		}
 		all = append(all, found...)
 	}
@@ -205,25 +327,26 @@ func TestEveryAPIErrorDetailIsRoutedOrLedgered(t *testing.T) {
 	used := map[string]bool{}
 	for _, rec := range all {
 		for _, leaf := range rec.leaves {
-			used[leaf] = true
-			if _, ok := detailLedger[leaf]; ok {
+			k := rec.key(leaf)
+			used[k] = true
+			if _, ok := detailLedger[k]; ok {
 				continue
 			}
 			t.Errorf("%s:%d builds an APIError.Detail out of %s, which is neither a "+
 				"string literal nor routed through `Client.detail`.\n"+
-				"Route it — `Detail: c.detail(…)` — or add it to `detailLedger` with "+
+				"Route it — `Detail: c.detail(…)` — or add %q to `detailLedger` with "+
 				"the reason it needs no routing. An unrouted detail is unbounded: the "+
 				"server decides how long the card is.",
-				rec.file, rec.line, leaf)
+				rec.file, rec.line, leaf, k)
 		}
 	}
 	// 🔴 THE LEDGER IS PINNED THE OTHER WAY TOO. A stale excuse is an excuse the
 	// next unrouted expression can be filed under by accident.
-	for leaf := range detailLedger {
-		if !used[leaf] {
-			t.Errorf("`detailLedger` names %s, which no APIError.Detail in this package "+
+	for k := range detailLedger {
+		if !used[k] {
+			t.Errorf("`detailLedger` names %q, which no APIError.Detail in this package "+
 				"builds. Delete the entry — a reason kept past the code it excused is a "+
-				"reason nobody will re-read.", leaf)
+				"reason nobody will re-read.", k)
 		}
 	}
 
@@ -332,5 +455,127 @@ func f() error { return &APIError{State: AuthNoToken} }`)
 	}
 	if len(none) != 1 || none[0].hasDetail || len(none[0].leaves) != 0 {
 		t.Errorf("a construction with no Detail was read as %+v", none)
+	}
+}
+
+// 🔴 THE TWO SHAPES THE SCANNER USED TO WALK STRAIGHT PAST. Both were measured
+// at `d70ce112`: written into `diff.go` in place of the routed call, each left
+// the package guard above GREEN.
+//
+//   - `ae := &APIError{State: …}` followed by `ae.Detail = "…" + err.Error()` —
+//     no `Detail:` element exists, so the keyed-element loop saw nothing.
+//   - `&APIError{AuthOther, "…" + err.Error(), time.Time{}}` — every element is
+//     positional, the `KeyValueExpr` assertion failed, and the `continue` threw
+//     the field away while the record still counted toward the floor.
+func TestTheDetailScannerSeesAssignedAndPositionalDetails(t *testing.T) {
+	const assigned = `package p
+func f(err error) error {
+	ae := &APIError{State: AuthOther}
+	ae.Detail = "unreadable files response: " + err.Error()
+	return ae
+}`
+	got, err := scanAPIErrorDetails("assign.go", assigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The composite literal and the assignment are two separate records.
+	if len(got) != 2 {
+		t.Fatalf("the scanner reported %d records for a literal plus an assignment "+
+			"to its `Detail`, want 2: %+v", len(got), got)
+	}
+	var assign *apiErrorDetail
+	for i := range got {
+		if len(got[i].leaves) > 0 {
+			assign = &got[i]
+		}
+	}
+	if assign == nil {
+		t.Fatal("`x.Detail = \"…\" + err.Error()` produced no leaf — the assignment " +
+			"arm never ran, so the detail reaches the card unexamined")
+	}
+	if assign.routed {
+		t.Error("an unrouted assigned detail was classified as routed")
+	}
+	if len(assign.leaves) != 1 || assign.leaves[0] != "err.Error()" {
+		t.Errorf("leaves = %q, want exactly [\"err.Error()\"]", assign.leaves)
+	}
+	if !assign.hasDetail {
+		t.Error("an assigned `Detail` was recorded as having no Detail")
+	}
+
+	const positional = `package p
+import "time"
+func f(err error) error {
+	return &APIError{AuthOther, "unreadable: " + err.Error(), time.Time{}}
+}`
+	recs, err := scanAPIErrorDetails("positional.go", positional)
+	if err == nil {
+		t.Errorf("a POSITIONAL APIError literal was accepted, and read as %+v. The "+
+			"scanner cannot name its fields, so accepting it hides the `Detail` while "+
+			"still counting the construction", recs)
+	}
+}
+
+// 🔴 A LEDGER ENTRY EXCUSES A SITE, NOT A WORD. The same identifier in a
+// different function, or in a different file, must not inherit the excuse: the
+// reason written beside an entry is an argument about one expression in one
+// place.
+func TestALedgerKeyBindsTheExpressionToItsSite(t *testing.T) {
+	const twoFuncs = `package p
+func alpha(err error) error {
+	return &APIError{State: AuthOther, Detail: "a: " + err.Error()}
+}
+func beta(err error) error {
+	return &APIError{State: AuthOther, Detail: "b: " + err.Error()}
+}`
+	a, err := scanAPIErrorDetails("one.go", twoFuncs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a) != 2 || len(a[0].leaves) != 1 || len(a[1].leaves) != 1 {
+		t.Fatalf("expected two one-leaf records, got %+v", a)
+	}
+	if a[0].key(a[0].leaves[0]) == a[1].key(a[1].leaves[0]) {
+		t.Errorf("the same expression in two different functions produced ONE key "+
+			"(%q) — one function's excuse would absolve the other",
+			a[0].key(a[0].leaves[0]))
+	}
+
+	// Same function name, different file: the key must still separate them.
+	b, err := scanAPIErrorDetails("two.go", `package p
+func alpha(err error) error {
+	return &APIError{State: AuthOther, Detail: "a: " + err.Error()}
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 1 || len(b[0].leaves) != 1 {
+		t.Fatalf("expected one one-leaf record, got %+v", b)
+	}
+	if a[0].key(a[0].leaves[0]) == b[0].key(b[0].leaves[0]) {
+		t.Errorf("the same expression in identically-named functions in two files "+
+			"produced ONE key (%q) — the key is not carrying the file",
+			b[0].key(b[0].leaves[0]))
+	}
+
+	// A method's receiver type is part of the name, so two `Client.x` and
+	// `other.x` methods do not share one excuse either.
+	m, err := scanAPIErrorDetails("three.go", `package p
+type other struct{}
+func (c *Client) alpha(err error) error {
+	return &APIError{State: AuthOther, Detail: "a: " + err.Error()}
+}
+func (o *other) alpha(err error) error {
+	return &APIError{State: AuthOther, Detail: "a: " + err.Error()}
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 2 || len(m[0].leaves) != 1 || len(m[1].leaves) != 1 {
+		t.Fatalf("expected two one-leaf records, got %+v", m)
+	}
+	if m[0].key(m[0].leaves[0]) == m[1].key(m[1].leaves[0]) {
+		t.Errorf("two same-named methods on different receivers produced ONE key (%q)",
+			m[0].key(m[0].leaves[0]))
 	}
 }
