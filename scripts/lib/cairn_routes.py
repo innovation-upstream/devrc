@@ -49,8 +49,11 @@ says, and its docstring's row 3 is explicit: a table entry naming an alias this
 host has NO CONFIG FOR raises `UnroutedScope` — at one instance exactly as at
 many. So an entry `"civitai": "civitai"` written before any host carries
 `instances/civitai.env` does not lie dormant; it REFUSES every read and write of
-that scope, on every host, immediately. That is why the SHIPPED table's values
-are pinned to `DEFAULT_ALIAS` by a test, rather than left to review.
+that scope, on every host, immediately. That is why a scope may be
+re-pointed only once some host carries the matching `instances/<alias>.env` —
+what `test_every_scope_routes_to_a_CONFIGURED_instance` stands in for. 🔴 It
+STANDS IN FOR that condition and does not CHECK it: CI has no instance files, so
+nothing here observes whether an alias is configured anywhere.
 
 WHAT THE TWO CHECKS SEE, AND WHAT THEY CANNOT
 ---------------------------------------------
@@ -149,8 +152,9 @@ def load_table(path: Path | None = None) -> dict[str, str]:
 def aliases_used(table: dict[str, str]) -> list[str]:
     """Every INSTANCE alias the table routes to, sorted and deduplicated.
 
-    This is the set a host must be able to configure. Today it is exactly
-    `[DEFAULT_ALIAS]`; the day it grows, a host that has not grown with it
+    This is the set a host must be able to configure. Since phase E
+    (2026-09-18) it is `['civitai', 'personal']`, not `[DEFAULT_ALIAS]` alone;
+    when it grows again, a host that has not grown with it
     REFUSES the scopes pointing at the new alias (row 3 in the module
     docstring), which is what makes this worth naming rather than deriving
     inline at each call site.

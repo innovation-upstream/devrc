@@ -103,7 +103,10 @@ def test_the_table_is_not_empty(table):
     assert len(table) >= MIN_SCOPES, (
         f"claude/cairn-routes.json names only {len(table)} scope(s), below the "
         f"{MIN_SCOPES} vacuity floor. Re-derive the population with `cairn sync` "
-        f"then `ls -1d ~/.cache/subsystem-store/*/`, and fix the table — do not "
+        f"then `ls -1d ~/.cache/subsystem-store*/*/` — the trailing `*` on the ROOT "
+        f"matters, because extra instances use SIBLING caches "
+        f"(`subsystem-store-<alias>`) and the un-starred glob under-counts on a "
+        f"multi-instance host. Then fix the table — do not "
         f"lower this floor to make a collapsed table pass."
     )
 
@@ -134,6 +137,17 @@ def test_the_shipped_table_parses_under_cairns_own_reader(table):
 #: **Do not read a green run as evidence that an alias is configured anywhere.**
 #: What it does buy: a widening cannot be a silent side effect of re-pointing a
 #: scope, because it has to appear here, next to this paragraph.
+#:
+#: 🔴 TWO DIRECTIONS IT DOES NOT COVER, NAMED SO THEY ARE NOT MISTAKEN FOR COVERED:
+#:  1. REMOVAL. Retire `instances/<alias>.env` from the hosts and this set still
+#:     names the alias, the suite still passes, and every scope routed there
+#:     refuses `rc 11` fleet-wide. Membership here is not evidence of presence.
+#:  2. MIGRATION. This says an alias is CONFIGURED; it says nothing about whether
+#:     a scope's ENTRIES were copied to that store first. Re-point a scope whose
+#:     entries are not there and the suite passes, while the client returns
+#:     `scope-empty` / `status=scope-absent` at **rc 0** with reassuring prose —
+#:     no refusal anywhere. That is this table's worst failure mode and it is
+#:     currently guarded by NOTHING. Migrate first, verify, then flip.
 #:
 #: An earlier revision also pinned this set with `== {"personal", "civitai"}` in a
 #: second test. That was deleted: with one source three lines above the assertion,
@@ -302,8 +316,8 @@ def test_control_row_three_refuses_even_at_one_instance():
     and at many, because resolving it would be a write landing in a store nobody
     decided on.
 
-    That is the entire reason every value in the shipped table is `personal`
-    today, so it is asserted rather than trusted.
+    That is the entire reason a value may name only an alias some host has a
+    config for, so it is asserted rather than trusted.
     """
     routing = cairn_routes.routing_for({"alpha": OTHER}, (PERSONAL,))
     assert routing.multi_instance is False

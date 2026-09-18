@@ -22,11 +22,9 @@ is the PRIVATE proposal, not this doc.
   ✅ **MET 2026-09-18 by phase D** (see `State now`): two entries written by a civitai session,
   byte-identical on the PVC, served to BOTH hosts; personal unaffected **on entry counts** — which
   cannot see the routing change phase D also made, recorded in `State now`.
-  🔴 **ONE QUALIFIER ON *THIS CONDITION*, not on the arc (several items remain open — see
-  `Next steps`): the route came from a `$CAIRN_ROUTES` OVERRIDE, NOT THE SHIPPED TABLE**, which is
-  still all-`personal` by a deliberate tested invariant. Met as WORDED; NOT yet reproducible from
-  committed config, since a session without that override gets **rc 11**, correctly. Making it
-  durable is **phase E**.
+  ✅ **And reproducible from COMMITTED config since phase E** (2026-09-18) — phase D reached it
+  through a `$CAIRN_ROUTES` override; six scopes now ship as `civitai` in the table itself. The
+  remaining scopes are phase E's later slices. Several arc items stay open — see `Next steps`.
 
 ## State now
 
@@ -52,16 +50,13 @@ is the PRIVATE proposal, not this doc.
     an independent check that the right row was taken). `len(instances) > 1` is now TRUE on both, and
     it has **two** consequences, not one:
     - cosmetic: every `recall` banners `cairn[personal]:` / `cairn[civitai]:` where it said `cairn:`.
-    - 🔴 **BEHAVIOURAL, AND THIS IS THE ONE THAT BITES: A SCOPE THE TABLE DOES NOT NAME NOW REFUSES
-      AT rc 11 ON BOTH HOSTS. It used to resolve to `personal`.** `Routing.alias_for` returns
-      `DEFAULT_ALIAS` for an unnamed scope **only** `if not self.multi_instance`; at two instances it
-      raises `UnroutedScope`. So the FIRST write to any scope not in the 25-row table — a new repo, a
-      new subsystem — now fails, and unblocking it is a devrc PR editing `claude/cairn-routes.json`
-      plus a `home-manager switch` on both hosts. **Measured 2026-09-18: latent, not firing** — live
-      scopes 25, table 25, symmetric difference EMPTY on *both* hosts, so no existing scope is
-      affected. It fires on the next NEW one.
-      ⚠ Phase D changed the CLIENT's routing behaviour, and "personal unaffected" was measured on
-      ENTRY COUNTS, which cannot see that. Both claims are true; they are about different things.
+    - 🔴 **BEHAVIOURAL, AND IT BITES: A SCOPE THE TABLE DOES NOT NAME NOW REFUSES AT rc 11 ON BOTH
+      HOSTS — it used to resolve to `personal`.** `alias_for` returns `DEFAULT_ALIAS` for an unnamed
+      scope **only** `if not self.multi_instance`. Unblocking one is a devrc PR plus a
+      `home-manager switch` on both hosts. **Latent, not firing:** live scopes and table rows agree
+      exactly on both (25/25, then 26/26 after phase E). It fires on the next NEW scope.
+      ⚠ "Personal unaffected" was measured on ENTRY COUNTS, which cannot see a routing change. Both
+      claims are true and they are about different things.
   - ⚠ **STILL ORPHANED: `civitai-app-requests/app-requests.md`** (1,803 B) exists only in the frozen
     mirror. Surfaced by `doctor`'s `personal/token-scopes` PROBLEM, which is **pre-existing** and is
     the check earning its keep. Moving it is a decision, not a cleanup.
@@ -108,7 +103,8 @@ is the PRIVATE proposal, not this doc.
 - ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
   written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
   restored **byte-identical** (`c4de5e4e…`) and served again. **Drill artifacts removed** —
-  re-verified 2026-09-18, `/data` holds only `civitai-developer-docs/`. The whole procedure, the
+  re-verified 2026-09-18, no drill canary remains. ⚠ `/data` now holds **13 scopes / 127
+  entries** after phase E's migration, not one. The whole procedure, the
   `mc cat` extraction, the entry-shape trap, and why `backup.py`'s in-job restore-check cannot
   supply this evidence, are all in
   `civitai/talos-infra:clusters/production/apps/cairn/README.md` — read it there, not here.
@@ -177,9 +173,11 @@ is the PRIVATE proposal, not this doc.
   configures*. ✅ **DONE 2026-09-18 — that guard has been replaced.**
   `test_every_scope_routes_to_the_default_instance_today` (the all-`personal` pin, phase B's closing
   condition) is retired; `devrc:scripts/tests/test_cairn_routes.py` now carries
-  `test_every_scope_routes_to_a_CONFIGURED_instance` plus a **pinned `CONFIGURED_ALIASES` ledger**
-  that fails when the set GROWS or SHRINKS. 🔴 **CI cannot observe the real precondition** — it has
-  no instance files — so the ledger forces a widening into a reviewable diff instead. **Adding an
+  `test_every_scope_routes_to_a_CONFIGURED_instance` over a `CONFIGURED_ALIASES` set. ⚠ **A second
+  test PINNING that set was written and then DELETED** — with one source three lines above the
+  assertion it compared a constant to its own literal. **So widening the set is caught by REVIEW,
+  not by a test.** 🔴 **CI cannot observe the real precondition** — no instance files — and the set
+  covers neither REMOVAL nor whether a scope's ENTRIES were migrated; see its comment. **Adding an
   alias is only correct AFTER every host carries `instances/<alias>.env`; say which hosts you
   checked in the commit message.**
 
