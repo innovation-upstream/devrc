@@ -27,50 +27,59 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Round 2 of the operator's tmux-page feedback SHIPPED, and the chief tier went from
-built-but-switched-off to ARMED, DEPLOYED and EXERCISED — all in one session.** Live: clawgate
-**0.8.41**.
+**Four clawgate releases shipped and verified this session — `0.8.41` → `0.8.44`. The arc's
+closing condition is UNCHANGED and still NOT met: 602 is `complete`, 603 is
+`ready_for_review`.** Everything below descends from rank 68 (grade the four review-ready
+cards), which is what surfaced the defects.
 
-⚠ Front matter still reads `clawgate-task: 595` and was deliberately left alone. This session
-resolved **7 WORKED tasks** (rc 6) — 595, 593, 517, 518, 375, 521, 522 — so there is no single
-owner to record; the existing readable field stands rather than being guessed at.
+Live: **`0.8.44`**, pod digest `sha256:9412719c…`, both hosts converged, `drift-check` rc 0.
 
-### Releases cut and verified this session
-| version | pin commit | what |
+### Releases cut and verified
+| version | ships | proved before the pin moved |
 |---|---|---|
-| `0.8.39` | `5c8243a75` | tmux round 2 (`#837`), transcript archive (`#835`), chief auth ledgers (`#836`) |
-| `0.8.40` | `2273a9dab`… (`d42bd6ca4`) | task 607 — `#839` re-tier + `#840` transcript grant |
-| `0.8.41` | `2273a9dab` | task 522 — chief slide-out + per-window recap (`#842`) |
+| `0.8.42` | `#843` chief panel input | `data-chief-panel-loaded` 1, neg 0 |
+| `0.8.43` | `#846` grid drafts + `#847` machine chat read | `__cgReplyDrafts` 2, `api/agents/{name}/messages` 1 |
+| `0.8.44` | `#848` recap session fork | `webchat:recap` 1 + all three prior markers as regression controls |
 
-Each verified the same way: image proved to carry the code **before** the pin moved (markers + a
-positive and a negative control), smoke container answered the version, **running pod digest ==
-pushed digest**, 1/1/1, old ReplicaSets at 0, consumer `/health` answered.
+Each: image markers read from the **extracted binary** with a positive and negative control
+BEFORE the pin moved, pushed digest == running pod digest, `/health` answered.
 
-### 🔴 The chief door is ARMED — and proven, not merely configured
-Commit `70d689337`. Banner: `AGENT-IDENTIFIED door: CONFIGURED`.
-- Credential is agent **id 71**'s `hooks_token` — canonical name **`zesty-stoat`**, displayName
-  `chief`, namespace `devpod-zesty-stoat`. 🔴 **The canonical name is NOT `chief`** (`POST /agents`
-  generates it and it is the namespace identity); `#842` ships a fixture with a **decoy agent
-  slugged `chief`** so a slug lookup fails loudly. Resolve by id or displayName.
-- Verified distinct from the hook and terminal tokens **before** writing — the server refuses to
-  serve if they collide. Written with `sops set`, read back from the ciphertext, all five
-  pre-existing keys confirmed intact.
-- **Exercised, not assumed**: `GET /api/tmux/snapshot` and `GET /api/transcripts/{id}` both return
-  **200 on the chief token, byte-identical to the hook token** (178,910 B and 1,132,239 B), junk
-  bearer 401. And from **inside chief's own pod**, `clawgatectl tmux ls` returns the live read model.
-- The pod holds only `CLAWGATE_API_URL` + `CLAWGATE_HOOK_TOKEN` (**`#838` is still held**), and that
-  hook value IS row 71's own token — which is why the existing verb reaches the new tier.
+### 🔴 ONE BUG CLASS, FOUND FOUR TIMES — a periodic/SSE `innerHTML` swap discarding user state
+An audit of **all 68 swap sites** (`internal/ui/*.go`) found the shape at seven. Three fixed:
 
-### Cards closed
-**602** `complete` · **593**, **517**, **518**, **375**, **595** `complete` · **607**, **522**,
-**603**, **521** `ready_for_review`. 🔴 593/517/518 were closed by **operator decision** — none
-carries author-written criteria, so the gate would have held them; what closed them is two real
-browser review rounds.
+1. **`#chief-panel-body`** — `restore()` bound to `htmx:afterSettle` dispatched the panel's open
+   event unconditionally, re-fetching the body ~1×/s and destroying the chat form. Measured:
+   **111 `/ui/chief/panel` in 5 min** live; **449 and 546 refetches across THREE settles** in e2e
+   at `2273a9dab`. Fixed `0.8.42` by a loaded-mark on the body element (NOT a `once` on the
+   trigger — that breaks the re-open case). **Verified by typing**: a dogfood run typed a string,
+   waited 95 s across **80 grid settles**, text survived.
+2. **`#panel-tmux`** — `replyFreeText` is a bare `Input` with **no server-rendered value**, inside a
+   target that re-swaps on a 60 s poll + every snapshot push, holding **~88 reply boxes** on the
+   control whose action is `tmux send-keys` + ENTER. Fixed `0.8.43` (`#846`) by ONE module in
+   `reply.go` keyed on `ReplyViewDOMID`, not a save/restore per mount.
+3. **recap session fork** — see Open investigations; fixed `0.8.44` (`#848`).
 
-### 🔴 Merged but NOT yet exercised by a human
-`0.8.41`'s slide-out and recap have never been used. Live DOM confirms they RENDER — 79 cards, **79
-recap elements**, `#chief-panel` present (positive control `#panel-tmux` 1, negative 0) — but
-rendering is not working. **An opencode dogfood run is IN FLIGHT** (see Open investigations).
+🔴 **Still OPEN, same class, no PR:** the two **pagination** cases (`#chat-body`'s "load earlier"
+and the tmux card transcript mount — these are a periodic refetch issuing a URL that forgot its
+cursor, NOT lost drafts, so a restore script patches the wrong layer), plus `<details>` open
+state and scroll position on `#raw-body`/`#chat-body`.
+
+### The machine-tier chat read — the operator's own ask, closed end to end
+`GET /api/agents/{name}/messages` + `clawgatectl agent messages` (`#847`, `0.8.43`). Before it,
+NO machine credential could read an agent's chat: the only reader was
+`GET /ui/agents/{name}/chat-log` behind `requireSession`. Verified live: **200** on the hook
+token, **401** on no credential and **401** on junk; default read returns the operator's
+conversation with no `?session=`. The `kubectl exec` into `chat_messages` used earlier is retired.
+
+### Operator actions taken (destructive, recorded)
+- **Deleted `chat_sessions` 54 and 56** for `zesty-stoat` — empty orphans from earlier rollouts
+  that sorted ahead of session 55. The `DELETE` carried its own `NOT EXISTS (… chat_messages …)`
+  guard, so it could not have removed content; both confirmed empty at the moment of deletion.
+- **Re-raised attention entry 16499 as 16614** (datapacket-talos `#477` access question). It had
+  been resolved by a dogfood agent, not by the operator. Structured options were not restorable
+  via the CLI and ride in the body as text.
+- **`home-manager switch` on BOTH hosts**, and the laptop's `homelab-talos` fast-forwarded
+  (it was **38 behind**, **16 within `containers/clawgate`**), closing a `drift-check` rc 17.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -273,12 +282,15 @@ From the analyze-service index (**recall — verify before relying on**):
 
 
 
-68. **Grade the four `ready_for_review` cards — 607, 522, 603, 521 — on the LIVE page.** Every one
-    ends there for the same reason: a criterion only the operator can close. 522's closing condition
-    names *"the operator on the live page"*; 603's "load earlier" has never been clicked; 607's
-    criteria were written by a `claude-code` session (see its comment 1515) so grading them here
-    would be self-grading. `clawgate.zacx.dev/tmux` on `0.8.41`.
-    forcing: user — the operator asked for chief to be usable and these are the cards that say so.
+🔴 **Rank 68 — "grade the four `ready_for_review` cards on the LIVE page" — is CLOSED and EVICTED in
+this change.** All four were graded on `0.8.42`–`0.8.44`. 522: slide-out open/resize/persist PROVEN;
+recaps 78/79 naming their input; c2/c3/c5/c6 COULD NOT TEST. 603: criterion 4 FAILS live — "load
+earlier" fires, the server answers, and a periodic refetch reverts it (now rank 72). 607: not
+gradable on a page by construction — its criteria are a credential matrix; the chat read shipped on
+`requireHookToken`, not the agent tier. 521 criterion 4: 2.5 of 5 — layout management and a pane
+write never demonstrated, and `chief write` is untestable from this host (see Open investigations).
+🔴 The number is NOT reusable — a rank is half a `claim-work` identity.
+
 69. **Decide `ZacxDev/homelab-infra#838` now that 607 has landed.** It is a HELD draft that renders
     `CLAWGATE_CHIEF_TOKEN` into **every** agent pod. When it was held the credential opened ONE
     approval-gated route; after 607 it opens **tmux windows, attention raise/resolve and the
@@ -297,6 +309,25 @@ is no REPORT: the run died ~3 minutes in on a rejected write to the system temp 
 capabilities 1–4 of 8. The verdict, the four PROVEN rows, the four COULD-NOT-TEST rows and the
 correction of its one apparent defect are in `claudedocs/refs/tmux-webapp-closed-investigations.md`.
 🔴 The number is NOT reusable — a rank is half a `claim-work` identity.
+
+72. **Fix the two PAGINATION cases from the swap audit** — `#chat-body`'s "load earlier" and the
+    tmux card transcript mount. 🔴 These are NOT lost drafts: the periodic refetch issues a URL that
+    has forgotten its `before=` cursor, so a draft-restore script patches the wrong layer. The fix is
+    for the refetch to carry the cursor, or for the earlier-pages region to be a SIBLING of the
+    polled region the way `#chat-form` is a sibling of `#chat-log`. Repo `ZacxDev/homelab-infra`,
+    `containers/clawgate/internal/ui/session_view.go` + `tmux.go`.
+    forcing: user — the operator asked for full transcript retention (card 603); measured live, the
+    41 earlier messages appear and are reverted within 2–12 s, so the feature does not work.
+74. **Add a STATIC guard for the swap class** — a Go test that renders each shell, finds every
+    element carrying a periodic or SSE `hx-trigger`, and fails when an `<input>`/`<textarea>`/
+    `<details>`/`overflow-auto` node sits INSIDE its target without an allowlist entry. Assert the
+    RELATIONSHIP (target id → descendant set), not the presence of an attribute. Would have caught
+    all seven sites at once.
+    forcing: regression — the same class shipped four times and every instance reached production.
+75. **`devrc/claude/skills/clawgate/reference/chief.md` is still FALSE** (carried from rank 70,
+    which names the 401-from-a-pod table). Now ALSO stale on the chat read's tier: `#847` shipped on
+    `requireHookToken`, NOT the agent tier, so a reader is told an agent credential reaches it.
+    forcing: regression — a shipped doc contradicts shipped code.
 
 ## Open investigations — live diagnosis state
 
@@ -635,6 +666,50 @@ correction of its one apparent defect are in `claudedocs/refs/tmux-webapp-closed
   that tab. 🔴 **Do not fix anything until it reports which mechanism the numbers support**; a
   theory that explains the symptom is not evidence for it, and one fix for this symptom has
   already shipped and not resolved it.
+
+### ⚠ CORRECTION — "the recap session needs a stable key" was WRONG, and the first fix reproduced the bug
+- as-of: 2026-09-18
+- **Symptom + exact repro:** read chief's chat with no `?session=` after any pod rollout →
+  `count: 0` while the conversation sits one session back.
+- **Observed (with values):** `zesty-stoat` carried four sessions; 54 and 56 were EMPTY and created
+  **29 s and 24 s after two rollouts** (`chat_sessions.created_at` vs ReplicaSet
+  `creationTimestamp`). `recapSessionKey` called `CreateSession` behind an **in-memory** guard that
+  dies with the process. `chat_sessions.updated_at DEFAULT now()` (migration 0009) + both
+  `LatestOrCreateSession` and `ListSessions` order `updated_at DESC, id DESC` ⇒ each new row is
+  instantly the newest, which is where `chief ask` posts and what the machine read defaults to.
+- **Ruled out:** *a deterministic session key fixes it* — it stops the row MULTIPLYING and leaves it
+  NEWEST, so the first read after any deploy still answers `count: 0`. That version passed all four
+  CI checks. `via: measurement`
+- **Ruled out:** *the recap session earns its isolation* — a recap turn is NEVER persisted;
+  `AddChatMessage` appears on the kickoff, operator and web-chat paths and **ZERO** times on the
+  recap path, so machine traffic could never reach any transcript. The row was permanently empty.
+  `via: code`
+- **Ruled out:** *the default-session tiebreak is the bug* — the read MUST resolve where `chief ask`
+  writes or you ask in one session and read another. Changing it would break that invariant and
+  leave the cause untouched. `via: code`
+- **Leading hypothesis:** none — closed. The fix is a DELETION: `recapSessionKey` is a pure function
+  of the agent name, owning no row (`#848`, `0.8.44`). The separation that matters is the gateway
+  context, bought by the session KEY STRING alone — `Provisioner.Chat` consults no row.
+- **Next probe:** none for the cause. The standing check that it has not regressed, after ANY
+  rollout: `select id, session_key, created_at from chat_sessions where agent_id=(select id from
+  agents where name='zesty-stoat') order by id;` — a NEW row appearing within ~30 s of a pod coming
+  up means it is back.
+
+### 🔴 `chief write` is untestable from the workbench — the client credential was never provisioned
+- as-of: 2026-09-18
+- **Symptom + exact repro:** `clawgatectl chief write --host workbench --pane '%42' --text '…'`
+  → exit 2, *"refusing to send an agent-attributed terminal write with no chief credential …
+  CLAWGATE_CHIEF_TOKEN is not set."*
+- **Observed (with values):** the SERVER's door is armed — `CLAWGATE_CHIEF_TOKEN` is wired into the
+  clawgate Deployment env (verified `kubectl get deploy … env` → 1 match) since `70d689337`
+  (2026-09-17). The CLIENT on the workbench has no such variable in `~/.claude/clawgate.env`.
+- **Ruled out:** *it timed out waiting for an operator approval* — it refused CLIENT-SIDE before any
+  request, so no approval was ever raised and the operator was never interrupted. `via: measurement`
+- **Leading hypothesis:** the chief token was provisioned server-side and into chief's own pod, and
+  nobody rendered it into the operator's CLI env file.
+- **Next probe:** decide whether the workbench CLI SHOULD hold it. It is a third secret whose whole
+  point is agent attribution, so giving it to the operator's shell may be wrong by design — in
+  which case `chief write` is only ever exercised from inside a pod and that should be written down.
 
 ## Gotchas
 🔴 **Dated evidence for this section — the measurements, run ids, byte counts, PR numbers, the
@@ -1857,26 +1932,54 @@ before deciding it does not apply.
   was a symlink into the base clone; it was a real directory. `rm -f` on a directory is a harmless
   no-op, so nothing was lost — but the removal ran on an unverified claim.
 
+- 🔴 **`audit-dispatch.py` defaults to the CWD's repo.** `audit-pr 847` from devrc silently produced
+  a brief for **devrc's** #847 — a different, already-merged PR — internally consistent and entirely
+  wrong. Pass `--repo <owner>/<name>` for any cross-repo PR. Caught by reading the brief's first
+  line before dispatching.
+- 🔴 **CI is not evidence a fix works.** All four checks passed on `8829dbb5b`, the recap fix that
+  would have reproduced the bug on the next read. Round 0 of the audit caught it; CI could not.
+- 🔴 **A test can be vacuous in a way only a control reveals.** The first draft of
+  `TestRecapsDoNotBecomeTheSessionEverythingElseResolvesTo` asserted ORDERING and **passed against
+  the design it was written to reject** — the fake assigns `UpdatedAt` from a counter, not `now()`,
+  so it cannot reproduce the production ordering. Re-assert on the ROW COUNT, which needs no clock.
+- **A positive control can be blind.** "0 recap log lines" looked like evidence recaps had not run;
+  that path only logs on errors. The instrument that DID discriminate: the recap cache is
+  per-process, so `ready` recaps with real text on a fresh pod prove the generator ran there.
+- **Never revert to measure a red baseline without committing first.** Lost the chief-panel fix that
+  way and had to re-apply it from context; every later red baseline was taken after a checkpoint.
+- **The `--ff-only` push guard earns its keep.** The `0.8.44` cut refused because three commits from
+  other sessions had landed on trunk mid-build; rebased after confirming none touched clawgate.
+- **opencode dies on ANY absolute path, including a shell redirect.** Three runs lost to it. The
+  wording that worked names `>`/`>>`, `tee`, `cp`, `mv`, `mktemp` and directory creation explicitly
+  — "write artifacts under X" does not cover a redirect. Also: `~/.config/opencode/skills/browser/`
+  ships `SKILL.md` and the CLI and **no `reference/`**, so a brief must name
+  `scripts/browser-bridge/reference/` relative to `--dir`.
+- **`/tmux` in a brief reads as a filesystem path** and preflight refuses it. Write "the tmux grid
+  page", or a full `http://…` URL.
+- ⚠ **Laptop `nix/system/apply-networkmanager-openvpn.sh` is UNTRACKED** — a staged sudo script that
+  exists on that host and in no commit. Not touched; one `checkout` from silent deletion.
+
 ## How to verify
+
 ```bash
-# what is actually deployed (the consumer's own answer, never the pin)
-curl -s http://192.168.50.250:30302/health
+# the live version and that both hosts agree
+curl -s http://192.168.50.250:30302/health          # -> 0.8.44
+bash $DEVRC/scripts/drift-check.sh; echo "rc=$?"    # -> rc 0 (do NOT pipe: a pipe eats the status)
 
-# is the chief door armed, and does it say so?
-KC=/home/zach/workspace/homelab-talos/workbench-kubeconfig
-kubectl --kubeconfig $KC -n clawgate logs deploy/clawgate --since=10m | grep "AGENT-IDENTIFIED door"
+# the chat read, through the interface rather than the database
+clawgatectl agent messages zesty-stoat --limit 3    # -> the operator's conversation, no ?session=
 
-# chief's capabilities, from INSIDE its own pod — the end-to-end proof
-P=$(kubectl --kubeconfig $KC -n devpod-zesty-stoat get pods -o jsonpath='{.items[0].metadata.name}')
-kubectl --kubeconfig $KC -n devpod-zesty-stoat exec "$P" -c agent -- clawgatectl tmux ls | head -20
-
-# the dogfood run
-tail -n 60 /home/zach/workspace/devrc/.opencode-dispatch/20260917-201600-chief-capability-dogfood.log
+# the recap fork has not regressed — run after ANY rollout
+KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate exec clawgate-postgres-88947b8b7-7gm8n -- \
+  psql -U clawgate -d clawgate -tAc \
+  "select id, session_key, created_at from chat_sessions
+   where agent_id=(select id from agents where name='zesty-stoat') order by id;"
+# a NEW row within ~30s of a pod coming up = the fork is back
 ```
-🔴 `/ui/tmux` needs a signed-in human — no curl reaches it. The workbench Brave `work` profile is
-now signed in to the LAN address, so the bridge can read it; the public name still needs a passkey.
-🔴 **`clawgatectl health` reports the SERVER. A pin bump is not a deploy and a deploy is not a
-consumer** — check the running pod's `imageID` against the digest that was pushed.
+
+🔴 **The grid-draft fix (`#846`) is verified at the e2e tier only** — red at `4053f28e2`, green at
+HEAD, plus 258 tests in CI. **No human has typed into a grid reply box and watched it survive a
+refresh.** That is the one consumer check this session did not make.
 ## Run this first — the index, one read-only command
 ```bash
 cairn recall --repo ~/workspace/devrc
@@ -1895,3 +1998,18 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 
 ⚠ **This doc spans TWO repos.** The design lives in `devrc`; all the code lives in
 `homelab-talos` (remote `ZacxDev/homelab-infra`) under `containers/clawgate/`.
+## Defects (batched)
+
+- `internal/api/machine_agents_chat_test.go` — the "browser route unchanged" check was
+  `if rec.Code == StatusOK { t.Log(…) }`, asserting on neither branch. Made real it FAILED at 404:
+  the fixture has a nil `Provisioner` and that route registers after the provisioner gate. Deleted
+  rather than propped up; `routes.golden` + `agentRowRoutes` already pin the claim. FIXED in `#847`.
+- `chief_recap_test.go::TestTheRecapSessionIsSeparateFromTheOperatorsOwnThread` — its "created ONCE"
+  half called `recapSessionKey` twice on the SAME `*Server`, so the in-memory cache answered the
+  second call and the store was never reached. Vacuous w.r.t. the defect. DELETED in `#848`.
+- `e2e/tests/chief-panel.spec.ts:361` — marks `#chief-panel` (the shell, never swapped) while its
+  comment claims it protects "whatever is half-typed in it". The swap target is
+  `#chief-panel-body`. Still present; the new case beside it marks the BODY.
+- `e2e/tests/tmux-page.spec.ts` — "a reply sent from a GRID CARD…" ends on `toHaveValue('')` after a
+  Send. Correct as written, but **indistinguishable from a refresh that ate the text**. Not a bug;
+  the new sibling case separates send from refresh. Left as-is deliberately.
