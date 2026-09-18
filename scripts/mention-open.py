@@ -887,10 +887,12 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
 
     THE SORT KEY, IN ORDER OF AUTHORITY:
       1. the Tier A CLASS — plausible, below, unknown, impossible;
-      2. the Tier B SCORE, descending — the operator's own picks;
-      3. `max_ref - num` ascending, for PLAUSIBLE rows only — a repository whose
+      2. `max_ref - num` ascending, for PLAUSIBLE rows only — a repository whose
          head is just past `N` is a better fit than one that passed it a
-         thousand references ago.
+         thousand references ago. 0 for every other class, so it cannot reorder
+         rows it says nothing about;
+      3. the Tier B SCORE, descending — the operator's own picks, breaking ties
+         the two above leave.
 
     🔴 AND THAT IS THE WHOLE KEY — THERE IS DELIBERATELY NO NAME IN IT. A
     trailing `name.lower()` was tried and REMOVED: it makes the function
@@ -902,14 +904,46 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
     Determinism is unaffected: the input is deterministic and the sort is
     stable.
 
-    🔴 TIER B SITS *UNDER* THE CLASS AND *OVER* THE DISTANCE, AND BOTH HALVES OF
-    THAT ARE DELIBERATE. Under the class, because a learned preference is
-    evidence about the OPERATOR and the class is evidence about the REPOSITORY —
-    no number of past picks makes a repo with zero references able to answer
-    `#1291`. Over the distance, because an actual past pick at a nearby number
-    is a measurement, while `max_ref - num` is a heuristic about heads; and
-    because only rows the operator has really chosen carry a non-zero score, so
-    this reorders a handful of rows rather than the list.
+    🔴 TIER B SITS *UNDER* THE CLASS AND *UNDER* THE DISTANCE — IT SEPARATES ONLY
+    WHAT TIER A CANNOT. Under the class, because a learned preference is evidence
+    about the OPERATOR and the class is evidence about the REPOSITORY: no number
+    of past picks makes a repo with zero references able to answer `#1291`.
+
+    🔴 AND UNDER THE DISTANCE, WHICH IS A REVERSAL — THE SECOND HALF OF THIS
+    PARAGRAPH USED TO ARGUE THE OPPOSITE AND THE DATA REFUTED IT. It read: "Over
+    the distance, because an actual past pick at a nearby number is a
+    measurement, while `max_ref - num` is a heuristic about heads; and because
+    only rows the operator has really chosen carry a non-zero score, so this
+    reorders a handful of rows rather than the list." Both clauses are wrong in
+    the same direction. A pick is a measurement of what the operator WANTED LAST
+    TIME, not of which repo can hold THIS number; and "a handful of rows" decays
+    — every repo ever picked earns a non-zero score, so a warm log lets more and
+    more rows outrank Tier A's correct first choice.
+
+    MEASURED by causal replay, 115 picks over 6.7 days, each scored only by the
+    picks BEFORE it (top-1 = the chosen repo ranked FIRST):
+
+        (klass, -score, distance)   top-1 62.6%   top-3 89.6%   mean 3.18
+        (klass, distance)           top-1 73.0%   top-3 90.4%   mean 9.54
+        (klass, distance, -score)   top-1 73.0%   top-3 96.5%   mean 2.75  <- this
+
+    And it DEGRADED WITH USE, which is the finding that decided it: on the first
+    half of the log the old key scored 82.5% and on the second half 43.1%, while
+    this one goes 68.4% -> 77.6%. The operator's report — "the wrong repo sits at
+    the top" — was not a static defect but a worsening one.
+
+    ⚠ TIER B IS NOT SILENCED, AND THAT IS WHY IT STAYS IN THE KEY AT ALL.
+    `distance` is 0 for every row outside `PLAUSIBLE`, so in `BELOW`/`UNKNOWN`/
+    `IMPOSSIBLE` the score is still the only separator — which is where its tail
+    win lives (mean rank 9.54 with Tier B removed, 2.75 with it underneath).
+    Dropping Tier B and demoting it are NOT the same change, and
+    `test_a_learned_preference_STILL_orders_rows_TIER_A_cannot_separate` is what
+    keeps them apart.
+
+    ⚠ NO CONSTANT WAS TUNED, AND A SWEEP SAYS NONE SHOULD BE. A confidence floor
+    below which a score may not reorder was measured at 0.5/1.0/2.0/5.0: top-1 is
+    62.6% at every one, identical to the old key. Same inertness the half-life ×
+    proximity sweep showed. The STRUCTURE was the lever.
 
     🔴 IT RETURNS EVERY ROW IT WAS GIVEN. Ranking is the whole intervention —
     see `CLASS_IMPOSSIBLE` for why filtering is not. Pinned by
@@ -936,7 +970,9 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
                     if klass == CLASS_PLAUSIBLE and target is not None
                        and max_ref is not None
                     else 0)
-        return (klass, -scores.get(low, 0.0), distance)
+        # 🔴 DISTANCE BEFORE SCORE — see the docstring. Tier B breaks ties Tier A
+        # leaves; it does not overrule Tier A's first choice.
+        return (klass, distance, -scores.get(low, 0.0))
 
     return sorted(universe, key=key)
 

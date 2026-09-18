@@ -9361,3 +9361,137 @@ def test_every_click_row_names_the_HOST_it_was_clicked_on(spy, spool):
         f"the host is a LINE field, not a dim — duplicating it into the payload "
         f"spends one of the collector's capped dim slots on a column the "
         f"consumer already has: {events[0]['payload']}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 TIER B SEPARATES ONLY WHAT TIER A CANNOT — the 2026-09-18 key change
+#
+# Operator decision: optimise for TOP-1, not mean rank, because top-1 is the only
+# metric that maps to an action — at rank 1 you press Enter, at rank 3 you arrow
+# or you TYPE, and typing hands ordering to fzf's own score (see `PICKER_SH`).
+# MEASURED by causal replay over 115 picks: moving Tier B BELOW the distance term
+# took top-1 62.6% -> 73.0% and top-3 89.6% -> 96.5%, with mean rank 3.18 -> 2.75.
+#
+# Both halves are pinned below, and the pair is the point: the first assertion
+# alone is satisfied by DELETING Tier B, which would throw away the tail win the
+# second one protects.
+# --------------------------------------------------------------------------- #
+def test_TIER_A_s_distance_term_OUTRANKS_a_learned_preference(monkeypatch):
+    """🔴 THE ROW TIER A PREFERS COMES FIRST EVEN WHEN TIER B PREFERS ANOTHER.
+    Asserted as WHICH ROW IS ON TOP, never by restating the key tuple — an
+    assertion built out of the thing it tests is invariant under changing it,
+    which is the shape this repo has been bitten by before.
+
+    ⚠ THE FIXTURE MAKES THE TWO TIERS DISAGREE ON PURPOSE, and every number in
+    it is distinct from every other. `#500`: the NEAR repo's head is 510 (a
+    distance of 10) and it has NEVER been picked; the FAR repo's head is 9000 (a
+    distance of 8500) and carries a large learned score. Both are PLAUSIBLE, so
+    the class cannot separate them and only the tier ORDER decides.
+
+    Under the pre-change key the score won and the FAR repo was first — which is
+    the operator's reported symptom, "the wrong repo sits at the top",
+    reproduced in a unit test."""
+    near, far = "acme/near-head", "acme/far-head"
+    ranges = {near: 510, far: 9000}
+    # Only the FAR repo has ever been picked, and heavily.
+    scores = {far: 12.5}
+    ordered = MO.order_universe([far, near], "500", ranges, scores)
+
+    # POSITIVE CONTROL: the fixture really does put both rows in ONE class, so
+    # the assertion below is about the tier order and not about plausibility.
+    assert (MO.plausibility_class("500", ranges[near])
+            == MO.plausibility_class("500", ranges[far])
+            == MO.CLASS_PLAUSIBLE), "the fixture no longer pits tier vs tier"
+
+    assert ordered[0] == near, (
+        f"the repository whose head is NEAREST #500 must be offered first; a "
+        f"learned preference for {far!r} may not displace it. Got {ordered!r} "
+        f"— this is 'the wrong repo sits at the top'")
+
+
+def test_a_learned_preference_STILL_orders_rows_TIER_A_cannot_separate(
+        monkeypatch):
+    """🔴 THE OTHER HALF, AND WITHOUT IT THE FIX IS 'DELETE TIER B'. Demoting the
+    score below the distance term must not silence it: where Tier A has nothing
+    to say — no range-table entry, so every row is UNKNOWN and the distance term
+    is 0 for all of them — the operator's own picks are the only signal left, and
+    they are where Tier B's measured tail win comes from (mean rank 9.54 with
+    Tier B off, 2.75 with it underneath).
+
+    ⚠ NO RANGE TABLE AT ALL here, so nothing can be attributed to the class or
+    to the distance; the ONLY difference between the two rows is the pick log."""
+    picked, never = "acme/picked-before", "acme/never-picked"
+    ordered = MO.order_universe([never, picked], "500", {}, {picked: 3.5})
+
+    # POSITIVE CONTROL: Tier A really is silent here, so this measures Tier B.
+    assert (MO.plausibility_class("500", None)
+            == MO.CLASS_UNKNOWN), "the fixture gained a range table"
+
+    assert ordered[0] == picked, (
+        f"Tier A cannot separate these rows — no table, so both are UNKNOWN and "
+        f"the distance term is 0 for each — and the learned preference was "
+        f"IGNORED rather than used as the tiebreak: {ordered!r}")
+
+
+def test_the_two_tiers_DISAGREEING_is_what_the_key_change_is_about(monkeypatch):
+    """⚠ AN INVARIANT GUARD ON THE PAIR ABOVE, labelled because it pins no new
+    behaviour. It fails if a future fixture edit makes the two tests agree — at
+    which point neither would be measuring the tier ORDER any more, and both
+    would stay green through a key change in either direction.
+
+    It is the cheapest defence against the pair quietly becoming vacuous."""
+    near, far = "acme/near-head", "acme/far-head"
+    ranges, scores = {near: 510, far: 9000}, {far: 12.5}
+    # Tier A's preference, taken from the distance alone.
+    by_distance = sorted([near, far],
+                         key=lambda r: ranges[r] - 500)
+    # Tier B's preference, taken from the score alone.
+    by_score = sorted([near, far], key=lambda r: -scores.get(r, 0.0))
+    assert by_distance[0] != by_score[0], (
+        f"the fixture no longer pits the tiers against each other — Tier A "
+        f"wants {by_distance[0]!r} and Tier B wants {by_score[0]!r}, so the "
+        f"ordering tests above cannot see which one the key prefers")
+
+
+def test_main_OFFERS_the_nearest_head_FIRST_even_when_the_pick_log_disagrees(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE SAME PROPERTY THROUGH `main()`, because the ordering could be
+    perfectly right and applied to the wrong slice. This is the click path: a
+    bare `#N` with no pane repo, so the clawgate row is pinned and the ordered
+    block starts at row 1.
+
+    The pick log is REAL on disk — written through `record_pick`, not a stubbed
+    score dict — so the whole Tier B read is exercised rather than mocked."""
+    near, far = "acme/near-head", "acme/far-head"
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [far, near])
+    monkeypatch.setattr(MO, "open_url", lambda u: 0)
+    _ranges_on_disk(monkeypatch, tmp_path, {near: 1310, far: 9000})
+    # The operator has picked the FAR repo, repeatedly and recently.
+    for _ in range(4):
+        assert MO.record_pick(far, "1291", MO.PICKS_PATH,
+                              via=MO.PICK_VIA_PICKER)
+
+    seen: dict = {}
+
+    def _capture(c, mesg=""):
+        seen["repos"] = [MO.repo_of_github_url(x["url"]) for x in c]
+        MO.set_pick_reason(MO.PICK_REASON_SELECTED)
+        return c[1]["url"]
+
+    monkeypatch.setattr(MO, "pick", _capture)
+    assert MO.main(["#1291"]) == 0
+
+    # POSITIVE CONTROL: the pick log really was read — without it the two rows
+    # would be ordered by distance alone and this test could not tell the key
+    # change from Tier B being absent.
+    payload = _click_events(spool)[0]["payload"]
+    assert payload["tier_b"] == 1, (
+        f"the pick log was not in this sort, so the ordering below is not the "
+        f"two-tier one: {payload}")
+
+    assert seen["repos"][1] == near, (
+        f"the FIRST ordered row is {seen['repos'][1]!r}; the repository whose "
+        f"head is nearest #1291 must lead, even though the operator has picked "
+        f"the other one four times: {seen['repos']}")

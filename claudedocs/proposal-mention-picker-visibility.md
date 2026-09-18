@@ -278,28 +278,88 @@ scrolls and after they type. (B) is worth keeping on the table but should not be
 before the `queried` rate is known — it trades away the fuzzy narrowing that makes a
 394-row picker usable at all.
 
-### Symptom 2 — is the weighting defensible?
+### Symptom 2 — DECIDED: optimise for top-1. The sort key changed.
 
-Yes, with a caveat, and the evidence is §1.2–§1.4. Two candidate changes, both
-**not recommended without the operator's call**:
+🔴 **Operator decision, 2026-09-18: optimise for top-1, not mean rank.** The reasoning, on
+the record because it is what makes the trade below legible: **top-1 is the only metric that
+maps to an action.** At rank 1 the operator presses Enter and is done. At rank 3 they arrow
+or they type — and the moment they type, fzf's own score takes over and the pre-computed
+ordering stops mattering at all (§3). Mean rank 1.90 improves a number nobody acts on, and
+the configuration that produced it is the one that produced the reported symptom.
 
-1. **Leave it.** Tier B's cost is one arrow-down on ~24% of clicks and its benefit is a
-   mean rank of 1.90 instead of 5.17. On a 6.7-day, 10-repository sample that is a
-   defensible trade.
-2. **Move Tier B below the distance term** in `order_universe`'s sort key
-   (`(klass, distance, -score)` instead of `(klass, -score, distance)`). On this sample
-   that recovers the 10 points of top-1 while keeping Tier B as the tiebreak among rows
-   the distance term cannot separate. **Untested** — the replay above measured
-   *Tier B on/off*, not *key reordering* — so it is a hypothesis with a measurement
-   attached, not a recommendation.
+**The change:** `order_universe`'s key moves Tier B from **above** the distance term to
+**below** it — `(klass, -score, distance)` → `(klass, distance, -score)`. Tier B now
+separates only what Tier A *cannot*: within `PLAUSIBLE`, the distance term (`max_ref - num`)
+decides first and the learned score breaks its ties; in `BELOW`/`UNKNOWN`/`IMPOSSIBLE` the
+distance term is 0 for every row, so Tier B still orders them exactly as before — which is
+where its tail benefit always came from.
 
-Do **not** re-tune `PICKS_HALF_LIFE_DAYS` or `PICKS_PROXIMITY_SCALE`: §1.3 shows top-1 is
-completely insensitive to both.
+**No constant was moved, and the sweep says none should be.** A confidence floor below which
+a learned score does not reorder was measured at 0.5 / 1.0 / 2.0 / 5.0: top-1 is **62.6% at
+every one of them**, identical to shipped. That is the same inertness the half-life ×
+proximity sweep showed. The structure was the lever; it still is.
 
-⚠ Sample caveats, stated rather than buried: 109 picks over 6.7 days on one host, 10
-distinct repositories, and the range table used for the replay is **today's**, not the one
-in force at each pick. A `stale` table would have produced an unordered list that the
-replay scores as if it were ordered, in the *optimistic* direction.
+#### The numbers — same corpus, before and after
+
+Corpus: **115 picks, 2026-09-11 → 2026-09-18**, 394-row universe, 394-entry range table.
+(The log grew from 109 to 115 while this work was in progress; all rows below are the
+**current** corpus, re-measured, so they do not match the 109-pick figures reported earlier
+in §1.)
+
+| key | top-1 | top-3 | mean rank | p90 |
+|---|---|---|---|---|
+| **SHIPPED** `(klass, -score, distance)` | 72/115 (**62.6%**) | 103/115 (89.6%) | 3.18 | 3 |
+| Tier A only `(klass, distance)` | 84/115 (73.0%) | 104/115 (90.4%) | 9.54 | 2 |
+| **NEW** `(klass, distance, -score)` | 84/115 (**73.0%**) | 111/115 (**96.5%**) | **2.75** | 1 |
+
+**top-1 +10.4 pp · top-3 +6.9 pp · mean rank 3.18 → 2.75.**
+
+🔴 **The mean-rank cost the decision was prepared to pay did not arrive** — and that is worth
+stating plainly rather than presented as cleverness. The new key recovers *all* of Tier A's
+top-1 **and** beats both prior configurations on top-3 **and** improves mean rank. Tier A
+alone would have cost mean rank (9.54); keeping Tier B underneath the distance term is what
+avoids that. There is no Pareto trade here to disclose because the measurement did not
+produce one.
+
+Per-click movement: **27 top-1s won, 15 lost**, 31 ranks improved / 16 worsened / 68
+unchanged. Every regression is small — the four worst are **one row** (0 → 1) and the single
+worst is two (2 → 4).
+
+#### 🔴 The finding that actually justifies the change: the shipped key DEGRADES as the log grows
+
+| slice | shipped top-1 | new top-1 |
+|---|---|---|
+| first half (n=57, cold log) | **82.5%** | 68.4% |
+| second half (n=58, warmer) | **43.1%** | **77.6%** |
+| last 30 | **33.3%** | **66.7%** |
+| picker-via only (n=71 — the clicks that actually show a picker) | 49.3% | **80.3%** |
+| auto-via only (n=9) | 88.9% | 100.0% |
+
+**On a cold log the shipped key is better** — 82.5% vs 68.4% — and that is a real regression
+this change accepts, disclosed rather than buried. But the log only grows, and as it does the
+shipped key collapses (82.5% → 43.1% → 33.3%) while the new key climbs (68.4% → 77.6%). The
+mechanism is visible in the key itself: every repository the operator has ever picked earns a
+non-zero score, so with a warm log *more and more* rows outrank Tier A's correct first choice.
+"The wrong repo sits at the top" is therefore not a static defect — **it was getting worse**,
+and it would have kept getting worse.
+
+The largest win is on `via=picker` (49.3% → 80.3%), which is precisely the ambiguous
+population the operator sees a picker for and complains about.
+
+#### The instrument was validated before its verdict was read
+
+The replay now decides a product change, so it was fed rankers known to be wrong:
+
+| control | top-1 | mean rank |
+|---|---|---|
+| reversed key | **0.0%** | 391.22 |
+| name-only (every signal ignored) | **0.0%** | 176.06 |
+
+Both collapse to zero. A replay that cannot produce a bad number is not measuring the ranker;
+this one can, so its 73.0% is a measurement rather than an artefact of the harness.
+
+⚠ Unchanged caveats: 115 picks over 6.7 days on one host, 10 distinct repositories, and the
+range table used is **today's**, not the one in force at each pick.
 
 ### Symptom 3 — should the pinned rows still sit on top?
 
