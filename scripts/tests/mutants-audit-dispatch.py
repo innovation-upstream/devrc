@@ -84,6 +84,20 @@ TESTLIB_RELS = (
     "scripts/testlib/__init__.py",
     "scripts/testlib/hermetic_git.py",
 )
+# 🔴 A FOURTH INPUT, for the same reason as `HARNESS_REL` above: the suite now
+# carries a SEAM test that reads `claude/skills/audit-pr/SKILL.md` — the other
+# owner of the attribution gate's mechanism — so a sandbox without it fails the
+# baseline and every row below is refused.
+#
+# 🔴 AND IT MUST BE THE REPO'S COPY, NOT THE DEPLOYED ONE. The test falls back
+# to `~/.claude/skills/...` when the repo path misses, which is a nix-store
+# copy of whatever was last `home-manager switch`ed — i.e. of `main`. Without
+# this copy the sandbox took that fallback and graded the seam against a stale
+# deployment: MEASURED, the baseline went red on the very edit that satisfies
+# the seam in the repo.
+SKILL_RELS = (
+    "claude/skills/audit-pr/SKILL.md",
+)
 
 # 🔴 A COLLAPSE floor, not a growth floor — same rule as
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
@@ -173,7 +187,12 @@ TESTLIB_RELS = (
 # Negative control WATCHED, not assumed: at `MIN_TESTS = 999` the harness
 # refuses with `🔴 THE HARNESS could not run: only 163 test(s) ran (floor
 # 999) — the harness, not the tree`. So the check is reached and enforcing.
-MIN_TESTS = 155
+# 🔴 RAISED AGAIN 2026-09-17, 155 -> 162, at m = 170 — COUNTED from a green run
+# of the module (`170 passed`) and put through the same formula,
+# `170 - min(50, max(1, 170 // 20))` = 170 - 8 = 162. NOT derived by adding the
+# attribution gate's seven new tests to 155, which is the arithmetic the
+# paragraphs above record going wrong three times.
+MIN_TESTS = 162
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -1868,11 +1887,20 @@ def the_toolchain_reason_names_the_shared_checkout_again(t):
 
 
 def the_emitted_block_loses_its_legend(t):
+    """🔴 RETARGETED when the legend gained its `payload=` sentence.
+
+    MEASURED before the retarget: `MUTATION DID NOT APPLY — target absent`,
+    which is the failure this harness's header calls the most flattering
+    possible wrong answer — an unmutated file reporting "the guard held". The
+    trailing `"",` also left this list, so the target is the legend STRING
+    alone now.
+    """
     return _swap(
         t,
         '        "  legend: `<from>` = the tip THIS round\'s audit READ · `<to>` = the "\n'
-        '        "head THIS round\'s FIXES produced. Different shas — `<from>` is older.",\n'
-        '        "",\n',
+        '        "head THIS round\'s FIXES produced. Different shas — `<from>` is older. "\n'
+        '        "`payload=` = the payload lines THIS round\'s fixes changed, from YOUR "\n'
+        '        "classification of the ledger\'s file list.",\n',
         "",
     )
 
@@ -2502,6 +2530,153 @@ DELETION_CONTROL = "test_control_a_clause_deleted_from_the_constant_is_detected"
 NO_WRITE_SCOPE_GUARD = (
     "test_the_no_write_forward_reference_states_the_clauses_own_scope"
 )
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ATTRIBUTION GATE (G-series).
+#
+# The gate is the skill's own stop condition made into a BRANCH, and it is the
+# one guard in this script whose FALSE POSITIVE is worse than its false
+# negative: the skill rejects a round cap outright, so a gate that stops a
+# converging ladder is the expensive failure. Every row below therefore mutates
+# the NARROWEST expression that can be wrong, and half of them mutate it in the
+# FAIL-CLOSED direction — a gate that fires when it should not is exactly what
+# a suite of "it fired correctly" tests cannot see.
+# --------------------------------------------------------------------------- #
+
+def gate_never_fires(t):
+    """G1 — the verdict inverted at the one `return` that says it fired."""
+    return _swap(
+        t,
+        "        return AttributionStop(\n            True, newer, older,",
+        "        return AttributionStop(\n            False, newer, older,",
+    )
+
+
+def gate_fires_on_one_zero_round(t):
+    """G2 — `and` -> `or`: ONE zero round ends the ladder. Two is the floor."""
+    return _swap(
+        t,
+        "    if newer.payload == 0 and older.payload == 0:",
+        "    if newer.payload == 0 or older.payload == 0:",
+    )
+
+
+def the_emitted_block_loses_its_override_record(t):
+    """G10 — the override's record ON THE PR, deleted from the EMITTER.
+
+    🔴 MEASURED SURVIVING, which is why this row exists. The only test that
+    claims this — `test_the_gate_override_is_refused_without_a_reason_and_
+    records_one_given` — asked whether the reason appears "before the fence",
+    and the BRIEF is printed to the same stream, carries the same reason and
+    sits before every fence. So this deletion left the suite green in BOTH
+    spellings that test has had: `split("```audit-claims")[0]` and
+    `rsplit("```audit-claims", 1)[0]`. The brief stays in the auditor's
+    terminal; the BLOCK is what gets pasted onto the PR, so the half that was
+    unguarded is the half the record exists for.
+    """
+    return _swap(
+        t,
+        '    if facts.gate_override:\n'
+        '        lines.append(\n'
+        '            "  🔴 attribution gate OVERRIDDEN for this round — stated '
+        'reason: "\n'
+        '            f"{facts.gate_override}"\n'
+        '        )\n',
+        "",
+    )
+
+
+def absent_payload_field_reads_as_zero(t):
+    """G3 — the FAIL-CLOSED mutation: an absent field becomes a measured 0.
+
+    This is the one that would have made the gate permanently red on its first
+    day — every block posted before it shipped carries no field at all.
+    """
+    return _swap(
+        t,
+        "        return None, present.group(1)\n    return None, None",
+        "        return None, present.group(1)\n    return 0, None",
+    )
+
+
+def a_no_count_emit_writes_a_zero(t):
+    """G4 — the EMITTER writes 0 instead of the placeholder when no count was
+    stated. Fail-closed one station earlier: every `--emit-claims` run without
+    `--payload` would put a zero nobody measured into the field the next round's
+    gate consumes, so two such rounds would end a ladder on nothing.
+
+    🔴 IT TARGETS THE EMITTER, AND THE PARSER SIDE CANNOT BE MUTATED IN
+    ISOLATION AT ALL. MEASURED: `PAYLOAD_PLACEHOLDER = "<count>"` -> `"0"`, and
+    equally `payload_from_header`'s placeholder branch returning `0, None`, make
+    the emitted header's field parse back as a number — which
+    `emitted_payload_reads_back_as_written` correctly refuses, at rc 4, on EVERY
+    no-count emit. 22 tests then fail, so the row measures the blast radius of
+    the round-trip refusal rather than the placeholder's meaning. That cascade
+    is not a defect (it proves that guard's placeholder branch is REACHABLE from
+    `main`, which no valid input can demonstrate); it just cannot be a row that
+    isolates. This mutation keeps the placeholder constant intact, so the round
+    trip passes and only the emitter's choice is under test.
+    """
+    return _swap(
+        t,
+        "    payload = PAYLOAD_PLACEHOLDER if facts.payload is None else facts.payload",
+        "    payload = 0 if facts.payload is None else facts.payload",
+    )
+
+
+def override_recorded_when_the_gate_did_not_fire(t):
+    """G5 — the record becomes a claim about a stop that never happened."""
+    return _swap(
+        t,
+        "        gate_override=args.gate_override if stop.fires else None,",
+        "        gate_override=args.gate_override,",
+    )
+
+
+def empty_override_reason_accepted(t):
+    """G6 — `.strip()` dropped, so a whitespace-only reason records nothing."""
+    return _swap(
+        t,
+        "    if args.gate_override is not None and not args.gate_override.strip():",
+        "    if args.gate_override is not None and not args.gate_override:",
+    )
+
+
+def the_override_stops_overriding(t):
+    """G7 — the escape hatch removed from the firing condition.
+
+    The rejected round cap, re-entering through the one condition that makes
+    this gate not one.
+    """
+    return _swap(
+        t,
+        "    if stop.fires and brief_refused is None and not args.gate_override:",
+        "    if stop.fires and brief_refused is None:",
+    )
+
+
+def the_consecutive_requirement_becomes_the_two_newest(t):
+    """G8 — two zero rounds with a GAP between them fire the gate.
+
+    A missing intermediate block is an ordinary state this script already warns
+    about (`gh pr view --json comments` returns ISSUE comments only), so this
+    mutation stops ladders on an unknown round.
+    """
+    return _swap(
+        t,
+        "    older = by_round.get(newer.round_no - 1)",
+        "    older = by_round[sorted(by_round)[-2]]",
+    )
+
+
+def a_negative_payload_count_is_accepted(t):
+    """G9 — the input check widened past the value it exists to reject."""
+    return _swap(
+        t,
+        "    if args.payload is not None and args.payload < 0:",
+        "    if args.payload is not None and args.payload < -99:",
+    )
+
 
 # (label, expected killer set, mutation)
 ROWS = [
@@ -3822,6 +3997,47 @@ ROWS = [
      {"test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition"},
      det_one_command_check_dropped),
 
+    # ------------------------------------------------------------------- #
+    # 🔴 G1-G10 — THE ATTRIBUTION GATE. Killer sets MEASURED by this harness,
+    # not predicted: the rows below were run and the reported sets copied in.
+    # ------------------------------------------------------------------- #
+    ("G1  the gate never fires — the verdict inverted",
+     {"test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
+      "test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less",
+      "test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     gate_never_fires),
+    ("G2  ONE zero round ends the ladder (`and` -> `or`)",
+     {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
+     gate_fires_on_one_zero_round),
+    ("G3  an ABSENT payload field reads as a measured zero",
+     {"test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field",
+      "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
+     absent_payload_field_reads_as_zero),
+    ("G4  a no-count emit writes a ZERO instead of the placeholder",
+     {"test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
+     a_no_count_emit_writes_a_zero),
+    ("G5  an override is RECORDED for a gate that never fired",
+     {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     override_recorded_when_the_gate_did_not_fire),
+    ("G6  a whitespace-only override reason is accepted",
+     {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     empty_override_reason_accepted),
+    ("G7  the override stops overriding (the rejected cap, re-entering)",
+     {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     the_override_stops_overriding),
+    ("G8  CONSECUTIVE becomes the two NEWEST blocks, gap and all",
+     {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
+     the_consecutive_requirement_becomes_the_two_newest),
+    ("G9  a NEGATIVE payload count reaches the header",
+     {"test_a_negative_payload_count_is_refused_at_the_input"},
+     a_negative_payload_count_is_accepted),
+    # 🔴 G10 WAS ADDED BECAUSE IT SURVIVED. The row is the one that was missing
+    # when the override's PR-side record went unguarded — see the mutator's
+    # docstring for the measurement, and the assertion it now holds in
+    # `test_the_gate_override_is_refused_without_a_reason_and_records_one_given`.
+    ("G10 the emitted block loses its override record",
+     {"test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
+     the_emitted_block_loses_its_override_record),
 ]
 
 
@@ -3982,6 +4198,9 @@ def main() -> int:
         # floor check below catches it, and this comment is where to look.
         (root / "scripts" / "testlib").mkdir(parents=True, exist_ok=True)
         for rel in TESTLIB_RELS:
+            shutil.copy(REPO / rel, root / rel)
+        for rel in SKILL_RELS:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / rel, root / rel)
         if (root / ".git").exists():
             print("🔴 the copy carries a .git — refusing to run")
