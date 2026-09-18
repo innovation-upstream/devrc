@@ -245,10 +245,13 @@ def test_the_stubbed_launcher_set_is_pinned():
 ACKNOWLEDGED_UNSTUBBED = {
     "nvim-octo": (
         {"mention-open.py"},
-        "PROSE ONLY — there is no call site left. The click path was flipped to "
-        "`mention-review` (see the row below), and octo is now spawned by "
-        "nothing: it is absent from `REVIEW_EXE`, from the Alacritty wrapper's "
-        "`makeBinPath`, and from every `Popen` in the tree. What still names it "
+        "PROSE ONLY — there is no call site left, and since PHASE 4 there is no "
+        "PACKAGE left either. The click path was flipped to `mention-review` "
+        "(see the row below), and octo is now spawned by nothing: it is absent "
+        "from `REVIEW_EXE`, from the Alacritty wrapper's `makeBinPath`, and from "
+        "every `Popen` in the tree. Phase 4 then deleted the derivation "
+        "(`nix/pkgs/tools/nvim-octo/`), its flake overlay, and its two suites, "
+        "so no tier can build or resolve the binary at all. What still names it "
         "is THREE COMMENTS in `mention-open.py` recording what the constant "
         "used to be and that the argv contract (64/65/66) was inherited "
         "deliberately, plus this repo's docs. "
@@ -265,8 +268,19 @@ ACKNOWLEDGED_UNSTUBBED = {
         "grows-or-shrinks, and the two-way wrapper ledger requires the `-e` "
         "payload and `makeBinPath` to name the SAME binary. So if octo ever "
         "regains a call site, it fails THERE — this row cannot hide it. "
-        "⚠ DELETE THIS ROW IN PHASE 4, when the package and its 75 tests go; "
-        "it is load-bearing only while the rollback path is real."),
+        "🔴 THIS ROW SAID 'DELETE ME IN PHASE 4' AND THAT INSTRUCTION WAS "
+        "WRONG — IT STAYS. Phase 4 has now happened, and deleting the row is "
+        "what would turn this suite RED, not what would tidy it: the scan is "
+        "TEXT over the top level of `scripts/`, `nvim-octo` is still in "
+        "`launcher_scan.HAZARD_VOCABULARY` (deliberately — see the comment "
+        "there), and `mention-open.py` still carries the three comments above, "
+        "which the paragraph above this one forbids editing away. So the hit "
+        "survives the retirement and an unacknowledged hit is a FAILURE. The "
+        "old instruction assumed the token would leave the tree with the "
+        "package; it did not, because the comments are the record of WHY the "
+        "spawn looks the way it does and are worth more than a clean grep. "
+        "⚠ The FILE SET is unchanged by Phase 4 and was re-measured on the "
+        "post-deletion tree: `{'mention-open.py'}`, exactly as pinned."),
     "mention-review": (
         {"mention-open.py", "run-go-tests.sh"},
         "TWO FILES, AND ONLY ONE OF THEM IS ABOUT A SPAWN. `run-go-tests.sh` "
