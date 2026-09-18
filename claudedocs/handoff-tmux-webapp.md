@@ -26,84 +26,51 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
   recorded over it. The arc's LIVE cards are 602 and 603.
 
 ## Status
-- Branch / PR: `devrc` on `main`, clean of this session's work — **this session wrote no code.**
-  The implementation lives in `ZacxDev/homelab-infra` and is being done by dispatched agents on
-  their own worktrees off `origin/trunk`.
-- Queue lock held: `claim-work tmux-webapp-feedback-r2` (release when round 2 lands).
-- 🔴 **Rank 54 CLOSED and EVICTED from the queue in this update** — "the operator-facing half
-  of 519/517/518; `/ui/tmux` needs a signed-in human". The visit happened TWICE (round 1 on
-  `0.8.36`, round 2 on `0.8.38`), so the item is finished. Its verbatim text is recoverable
-  from this doc's git history rather than copied to `refs/` — a path-limited handoff commit
-  cannot carry a second file, and a rank left in the list reading as open is the failure this
-  doc has now measured twice. 🔴 The number is NOT reusable: a rank is half a `claim-work`
-  identity.
 
-### 🔴 The doc was TWO RELEASES STALE and that is why this round started blind
-Everything above `0.8.36` in the previous revision was current; nothing recorded `0.8.37` or
-`0.8.38`. Re-measured live this session:
-- `0.8.38` is deployed and serving: deployment pin `0.8.38`, one ReplicaSet `1/1` (`clawgate-574cb4b4b8`),
-  every older RS at 0, pod on digest `sha256:432873965ca4…`, LAN `/health` →
-  `{"status":"ok","version":"0.8.38"}`.
-- `658069955` (`#832`, round 1's seven fixes) is an **ancestor of the pin commit `a772d5805`** —
-  so what is running contains them. Confirmed structurally at the pin, not from PR prose:
-  `tmuxGroupWindowCount`, `data-tmux-jump-count`, `hx-preserve`, `tmuxTranscriptScript`,
-  `cg:tmux-transcript-refresh`, `ArrowRight`, `TestTheFriendlyLabelDoesNotMoveTheWriteTarget`
-  all present; negative control 0.
-- `0.8.38` itself is `#833` + `#834` (attention-queue `resolved_by`), not tmux-page work.
+**Round 2 of the operator's tmux-page feedback SHIPPED, and the chief tier went from
+built-but-switched-off to ARMED, DEPLOYED and EXERCISED — all in one session.** Live: clawgate
+**0.8.41**.
 
-### ✅ The shipping record — carried forward, this is the durable half of the old status
-| card | items | PR | squash | live in |
-|---|---|---|---|---|
-| 593 | 1 collapsed by default | `#824` | `81b10cddc` | `0.8.35` |
-| 593 | 2, 3, 9 host header, per-card toggle, contradicting age | `#826` | `248a0c4ed` | `0.8.35` |
-| 593 | 4–8 the chat-rendering batch | `#829` | `9b1828606` | `0.8.35` |
-| 595 | 10 + carousel, bulk expand/collapse, bulk Chat/Raw | `#830` | `e846d87b5` | `0.8.36` (pin `f2dbfbcc1`) |
-| — | round 1's seven operator items | `#832` | `658069955` | `0.8.37` |
-| — | attention `resolved_by` (not tmux) | `#833`/`#834` | — | `0.8.38` (pin `a772d5805`) |
+⚠ Front matter still reads `clawgate-task: 595` and was deliberately left alone. This session
+resolved **7 WORKED tasks** (rc 6) — 595, 593, 517, 518, 375, 521, 522 — so there is no single
+owner to record; the existing readable field stands rather than being guessed at.
 
-**593 is `ready_for_review` with all ten items merged — waiting on review, not on work. 595 is
-`complete`, 16/16 criteria evidenced.** 517/518 are `ready_for_review` (shipped `#754`/`#753`,
-never seen in a browser; 518 auto-tagged stale by the retention sweep). 🔴 **519 is genuinely
-`open`** — criterion 1 has a workbench number (2.0s/3.1s) and NO laptop number (blocked on an
-idle machine, not a defect), and criterion 4 has never been tested.
-🔴 **Card 602 retires 595's criteria 8–16 and changes 593 item 1's meaning** — the dispatched
-agent owes both cards a comment recording that in the same change.
+### Releases cut and verified this session
+| version | pin commit | what |
+|---|---|---|
+| `0.8.39` | `5c8243a75` | tmux round 2 (`#837`), transcript archive (`#835`), chief auth ledgers (`#836`) |
+| `0.8.40` | `2273a9dab`… (`d42bd6ca4`) | task 607 — `#839` re-tier + `#840` transcript grant |
+| `0.8.41` | `2273a9dab` | task 522 — chief slide-out + per-window recap (`#842`) |
 
-### ✅ Round 2 feedback — six items, dispositioned
-| item | disposition |
-|---|---|
-| remove the `aria-label="reporting hosts"` strip | card **602** |
-| remove the "All chat / All raw" toggle | card **602** (and "Expand all/Collapse all" with it — operator chose both) |
-| session collapse → **window** collapse | card **602**; operator chose sessions ALWAYS EXPANDED, per-window state persisted |
-| "only the most recent part of this session is stored" | card **603**; operator chose archive-to-object-storage + page-in |
-| periodic refresh resets chat scroll | 🔴 **reframed as a PERFORMANCE investigation** — see Open investigations |
-| did chief and other initiatives land? | answered by recon below; **needs an operator decision**, no card |
+Each verified the same way: image proved to carry the code **before** the pin moved (markers + a
+positive and a negative control), smoke container answered the version, **running pod digest ==
+pushed digest**, 1/1/1, old ReplicaSets at 0, consumer `/health` answered.
 
-### 🔴 chief: built, and switched OFF in production
-Read from the running pod's own boot banner:
-`terminal write surface (AGENT-IDENTIFIED door): DISABLED (fail-closed) — CLAWGATE_CHIEF_TOKEN is not set. Agent-attributed writes answer 503.`
-The Deployment's env carries `CLAWGATE_HOOK_TOKEN`, `CLAWGATE_TERMINAL_TOKEN`,
-`CLAWGATE_TERMINAL_UI_WRITES`, `CLAWGATE_TERMINAL_UI_HOSTS`, `CLAWGATE_GITHUB_TOKEN` — **no chief token.**
-- **Exists:** `internal/api/chief.go` (`/api/term/chief/send-keys`, `/api/term/chief/new-session`,
-  approval-gated), `clawgatectl chief ask|write|launch`, per-agent attribution (521 PR1 = `#804`,
-  live since `0.8.33`).
-- **Does not exist:** any UI. `internal/ui/*.go` carries ZERO chief surface (one unrelated string
-  in `notes.go:1140`). The tmux-page half is **task 522** (slide-out + per-session recap), `open`,
-  untouched since 2026-09-07, blocked behind **521**, blocked behind **375**.
+### 🔴 The chief door is ARMED — and proven, not merely configured
+Commit `70d689337`. Banner: `AGENT-IDENTIFIED door: CONFIGURED`.
+- Credential is agent **id 71**'s `hooks_token` — canonical name **`zesty-stoat`**, displayName
+  `chief`, namespace `devpod-zesty-stoat`. 🔴 **The canonical name is NOT `chief`** (`POST /agents`
+  generates it and it is the namespace identity); `#842` ships a fixture with a **decoy agent
+  slugged `chief`** so a slug lookup fails loudly. Resolve by id or displayName.
+- Verified distinct from the hook and terminal tokens **before** writing — the server refuses to
+  serve if they collide. Written with `sops set`, read back from the ciphertext, all five
+  pre-existing keys confirmed intact.
+- **Exercised, not assumed**: `GET /api/tmux/snapshot` and `GET /api/transcripts/{id}` both return
+  **200 on the chief token, byte-identical to the hook token** (178,910 B and 1,132,239 B), junk
+  bearer 401. And from **inside chief's own pod**, `clawgatectl tmux ls` returns the live read model.
+- The pod holds only `CLAWGATE_API_URL` + `CLAWGATE_HOOK_TOKEN` (**`#838` is still held**), and that
+  hook value IS row 71's own token — which is why the existing verb reaches the new tier.
 
-### 🔴 An agent CAN now read `/ui/tmux` — the "structurally unreachable" claim was too wide
-`/ui/tmux` is still **401 on the LAN NodePort** (re-measured on `0.8.38`, `/health` 200 as the
-control), so no curl and no shell reaches it — that part holds. But the browser bridge into the
-operator's own authenticated Brave does: `bw://laptop/work/484078947` resolves to a live tab on
-`https://clawgate.zacx.dev/tmux`. **Rendering questions can now be measured by an agent.**
-Judgement is still the operator's; the instrument is not.
+### Cards closed
+**602** `complete` · **593**, **517**, **518**, **375**, **595** `complete` · **607**, **522**,
+**603**, **521** `ready_for_review`. 🔴 593/517/518 were closed by **operator decision** — none
+carries author-written criteria, so the gate would have held them; what closed them is two real
+browser review rounds.
 
-### Agents in flight at write time
-| what | scope |
-|---|---|
-| perf audit | read-only against `bw://laptop/work/484078947`; no nav/click/`activate` |
-| task 602 | implementation → tests → PR off `origin/trunk`, own worktree, no pin bump |
-| task 603 | **phase 1 only** — measure + design, no code, no PR |
+### 🔴 Merged but NOT yet exercised by a human
+`0.8.41`'s slide-out and recap have never been used. Live DOM confirms they RENDER — 79 cards, **79
+recap elements**, `#chief-panel` present (positive control `#panel-tmux` 1, negative 0) — but
+rendering is not working. **An opencode dogfood run is IN FLIGHT** (see Open investigations).
 
 ## Platform: this is a clawgate feature
 | | |
@@ -260,16 +227,6 @@ From the analyze-service index (**recall — verify before relying on**):
 
 🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
 
-48. **Re-spec task 521 around a per-agent token.** `tier` discriminates the DOOR (`token` vs
-   `browser`), not the caller; one shared `CLAWGATE_TERMINAL_TOKEN` makes every machine caller
-   identical. `requireAgentToken` (`internal/api/agent.go:30-46`) already resolves a per-agent
-   token to a named row — that is the shape. Blocked until 375 closes.
-   forcing: security — 521 concentrates send-keys-into-any-pane plus process launch behind a chat
-   box, on an auth tier whose attribution is measured non-existent.
-49. **Task 522** needs 521 AND an LLM-client decision — clawgate's `go.mod` carries no
-   anthropic/openai dependency, so an "agent" there is a kubeclaw pod it provisions.
-   forcing: none
-
 53. **Measure criterion 1 of task 519 on the LAPTOP — WORKBENCH IS NOW DONE, laptop is not.**
     ⏳ **RE-VERIFIED STILL BLOCKED 2026-09-12T17:3xZ, and the block is unchanged:** the laptop's
     freshest Claude pane is `%29` (`vetr`) at **35,378s ≈ 9.8h** old (`last_activity_ts`
@@ -315,198 +272,35 @@ From the analyze-service index (**recall — verify before relying on**):
     forcing: none
 
 
-64. **Land clawgate task 602 — the tmux page's structural round-2 change.** Remove the visible
-    host strip (KEEPING `data-tmux-host-reachable` / `data-tmux-host-windows`, which the
-    collapse-prune reads to tell "session gone" from "host stopped reporting"), remove BOTH bulk
-    controls, and move the collapse unit from session to WINDOW with sessions always expanded.
-    Repo `ZacxDev/homelab-infra`, `containers/clawgate/internal/ui/tmux.go` + its Go and e2e
-    tiers. 🔴 Owes comments on cards **595** (retires criteria 8–16) and **593** (changes item 1's
-    meaning) in the SAME change.
-    forcing: user — every item is verbatim operator feedback from a browser session on `0.8.38`.
-65. **Land clawgate task 603 — store the whole transcript.** Archive complete sessions to object
-    storage and page earlier messages in; the 256 KiB truncation is `transcript.MaxTailBytes`
-    (`internal/transcript/transcript.go:37`), enforced on ingest. 🔴 **Gated on two things before
-    any code:** the measured size distribution of session `.jsonl` across both hosts, and the
-    in-flight MinIO tenant-backend swap (a live `minio-chat-storage` claim) — wiring against
-    today's bucket layout risks it moving underneath.
-    forcing: user — operator asked directly for full retention; the current message tells them
-    their history is gone.
-66. **Act on the perf audit's verdict for the choppy scrolling** — see the Open investigations
-    block. 🔴 Do not pre-build a fix: one fix for this symptom already shipped (`0.8.37`) and did
-    not resolve it, so the next change must be pointed at whatever the numbers name.
-    forcing: user — reported against live `0.8.38` and unresolved.
-67. **Operator decision — is chief parked, or armed?** The door is built and fail-closed
-    (`CLAWGATE_CHIEF_TOKEN` unset on the Deployment; boot banner says so), and the tmux-page UI
-    (task 522) was never built, behind 521, behind 375. Nothing proceeds without a direction:
-    arm the token and unblock 522, or record chief as parked so the three cards stop reading as
-    live work.
-    forcing: user — the operator asked where chief went; the answer is a decision, not a build.
+
+68. **Grade the four `ready_for_review` cards — 607, 522, 603, 521 — on the LIVE page.** Every one
+    ends there for the same reason: a criterion only the operator can close. 522's closing condition
+    names *"the operator on the live page"*; 603's "load earlier" has never been clicked; 607's
+    criteria were written by a `claude-code` session (see its comment 1515) so grading them here
+    would be self-grading. `clawgate.zacx.dev/tmux` on `0.8.41`.
+    forcing: user — the operator asked for chief to be usable and these are the cards that say so.
+69. **Decide `ZacxDev/homelab-infra#838` now that 607 has landed.** It is a HELD draft that renders
+    `CLAWGATE_CHIEF_TOKEN` into **every** agent pod. When it was held the credential opened ONE
+    approval-gated route; after 607 it opens **tmux windows, attention raise/resolve and the
+    transcript read**, and the transcript return is ~1.1 MB of raw JSONL whose majority is tool
+    RESULTS — file contents and command output. 🔴 That is the "review it once against its FINAL
+    blast radius" moment the hold was created for. Its base was retargeted to `trunk` and the stack
+    hazard is recorded on the PR.
+    forcing: security — it widens a credential that reaches session content, to the whole fleet.
+70. **`devrc/claude/skills/clawgate/reference/chief.md` is now FALSE.** Its table says the four
+    capabilities answer 401 from a pod; since `0.8.40` they answer 200 for the chief row. It was
+    correct until today and deliberately not fixed pre-merge — fixing it early would have made it
+    wrong. Needs a devrc PR, and the content depends on what `#838` decides.
+    forcing: regression — a shipped doc now contradicts the shipped code.
+🔴 **Rank 71 — "read the opencode dogfood REPORT" — is CLOSED and EVICTED in this change.** There
+is no REPORT: the run died ~3 minutes in on a rejected write to the system temp dir, having reached
+capabilities 1–4 of 8. The verdict, the four PROVEN rows, the four COULD-NOT-TEST rows and the
+correction of its one apparent defect are in `claudedocs/refs/tmux-webapp-closed-investigations.md`.
+🔴 The number is NOT reusable — a rank is half a `claim-work` identity.
 
 ## Open investigations — live diagnosis state
 
-🔴 **THE WORKBENCH STILL CANNOT PULL FROM `docker.io`. BUILD CLAWGATE IMAGES ON THE LAPTOP.**
-Measured 2026-08-29, and the state is subtler than "it is broken":
-
-- **Root cause is the LAN router, not this host.** `192.168.50.1` answers
-  `registry-1.docker.io` with a PINNED 8-address set carrying a TTL of **~42,048,000 s = 487
-  days** (a normal docker.io TTL is 30–60 s). Of those eight, 4 serve the correct
-  `*.docker.com` certificate, **2 serve certificates for unrelated third-party sites** (old EC2
-  elastic IPs Docker released and AWS reassigned), and 2 do not complete a handshake. Every
-  connection round-robins, so ~half of all pulls fail TLS verification **against a different
-  wrong hostname each time** — which is what makes it read as interception rather than staleness.
-- **Flushing does not help**: restarting dnsmasq re-asks the router and gets the same pinned
-  record back. The fix has to be "do not ask the router for this name."
-- **The host-side bypass is WRITTEN AND HALF-APPLIED.** `devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`
-  adds `"/docker.io/1.1.1.1"` ahead of the router in `services.dnsmasq.servers`. 🔴 **The
-  `/etc/nixos/configuration.nix` edit IS in place (mtime 12:27) but the rebuild that activates it
-  has NOT run** — measured directly, not inferred: the **running** unit's config
-  (`-C /nix/store/…-dnsmasq.conf`) contains only `server=192.168.50.1` and `server=1.1.1.1`, with
-  **no** `server=/docker.io/` line, and `dig` still returns the 487-day record while `dig @1.1.1.1`
-  returns a disjoint set with a 33 s TTL. **`sudo nixos-rebuild switch` is the remaining step**; I
-  cannot sudo. The script is idempotent and refuses if the config has drifted.
-- **Router-side is the real repair** and is untouched: clearing the stale entry on
-  `192.168.50.1` fixes every machine on the LAN. The script fixes one hostname on one host.
-
-⚠ **The laptop build path has a SECOND credential leg that is easy to misread as a broken
-build.** `DOCKER_HOST=ssh://zach@10.42.0.100 docker build …` works, but **`docker push` sends
-registry auth from the LOCAL client**, and the workbench's `~/.docker/config.json` has **no
-`harbor.homelab.lan` entry** (only `127.0.0.1:30022` and `ghcr.io`) while the laptop's does. So
-the push failed `unauthorized to access repository: library/clawgate`, which reads like a Harbor
-permissions problem and is not. **Run the push ON the laptop** —
-`ssh zach@10.42.0.100 'docker push harbor.homelab.lan/library/clawgate:<v>'` — the image is
-already on that daemon from the build.
-
-⚠ **The kickoff for this session pointed at an "Open investigations" section of THIS doc that
-did not exist.** The docker.io diagnosis lived only in the header comment of an **untracked**
-`nix/system/apply-dnsmasq-docker-io-pin.sh` — one routine `checkout` from silent deletion. Both
-are fixed: the script is committed, and this section exists.
-
 🔴 **CLOSED investigations are DEMOTED, not deleted — verbatim in `claudedocs/refs/tmux-webapp-closed-investigations.md`.** Every block whose thread reached a verdict was moved there when this doc came within 63 B of its size ceiling. They are lessons, not status, which is why they were demoted and not dropped. ⚠ A `refs/` file is NOT indexed by `handoff_search` — search will not surface them, so **this pointer is the only index into that file**. 🔴 **That is exactly why the COUNT and the list of threads are deliberately NOT restated here.** Both are derived facts that go stale in the very commit that evicts the next block, and this pointer has already been wrong that way: it read *"21 blocks"* and enumerated five threads while the file held **24**, because the commit that evicted the extra three did not touch it. List them at the moment you need them, which also cannot go stale: `grep -n '^### ' claudedocs/refs/tmux-webapp-closed-investigations.md`.
-
-### `devrc#1056` (the tmux server sentinel) is merged-blocked, and the reason CHANGED mid-session
-- **Symptom:** the producer half of rank 6 — `session-manager` publishing `tmux_server_id` per host —
-  is complete, mutation-swept 8/8, verified against real tmux on both hosts (52/52 and 28/28 rows
-  parsed through the real ssh path), and has been sitting open since 2026-08-29.
-- **Observed (with values):** first blocker was devrc `main` red on
-  `test_espanso_detect.py::test_live_existing_resolutions_not_made_ambiguous`, asserting
-  `{'ask': (':acq', None, [':dacq', ':acq']), 'clarify': (':acq', None, [':dacq', ':acq'])}`.
-  Discriminating control run: **the identical assertion fails on a clean `origin/main`** in an
-  unrelated checkout, so it is not this diff. Claimed by another session as
-  `espanso-ask-tiebreak-main-red`. **As of 2026-08-30 06:30Z the checks read
-  `tekton/devrc-nodetests=ERROR` and `tekton/devrc-pytests=ERROR`, not `failure`** — per devrc's own
-  CLAUDE.md that distinction matters: `error` means the gate stopped before a leg reported, i.e. a
-  broken gate rather than a bad change.
-- **Ruled out:** this PR's own diff. It touches `scripts/session-manager` and its test only; the
-  espanso test is in `scripts/collector/keylog/`, and the full suite was green on the branch apart
-  from that one pre-existing failure (`failed=1` of 18,713 collected).
-- **Leading hypothesis:** two unrelated blockers in sequence — a real main-red (someone else's, being
-  fixed) followed by an infrastructure error on the gate itself.
-- **Next probe:** `gh pr checks 1056 --repo innovation-upstream/devrc` and, if still ERROR, read the
-  PipelineRun rather than the status — a check posted as `error` with `COULD NOT RUN: <leg>` is a
-  broken gate and must not be debugged against the diff.
-- 🔴 **Consequence while it stays open:** `tmux_server_id` is NULL on both hosts, so the resolver's
-  window-id tier disables itself (unknown sentinel ≠ agreement) and panels resolve by
-  codename/name. Verified live — that is the designed degradation, not a fault. **Claim
-  `tmux-webapp-6` is deliberately still held** until this lands and the sentinel is observed
-  non-null end to end.
-
-### The layout tab has never been exercised in a browser
-- **Symptom:** rank 7 is a UI feature whose every claim rests on Go tests and rendered-HTML
-  assertions.
-- **Observed:** `clawgate-e2e` is GREEN on the merged tip — `stats: passed=118 failed=0 skipped=2
-  flaky=0 rc=0` — but it ran 20 spec files (`requests`, `tasks`, `agent-chat`, `operator`,
-  `routing`, `responsive`, …) and **`grep -ic layout` over the whole run log returns 0**. That green
-  says nothing about this feature.
-- **Ruled out:** "e2e covers it" — measured above. Also ruled out: that the run hid a failure; an
-  earlier read of "118 failed" was a grep straddling the fields of `passed=118 failed=0`.
-- **Leading hypothesis:** no hypothesis needed — it is simply uncovered. The specific risks are the
-  htmx swap whose target contains the issuing button (`hx-disabled-elt="this"` has four precedents
-  here, so low but unmeasured), a real axe scan on the new fragment, and rank 11's drawer behaviour.
-- **Next probe:** write `containers/clawgate/e2e/tests/layout.spec.ts` and run `make e2e`. 🔴 **COUNT
-  what runs** — without Docker, `test.skip` on `!dockerAvailable()` leaves 11 of 18 spec files and
-  goes green.
-
-### `MIN_PASSED` in the e2e pipeline is stale, and it was deliberately NOT re-derived
-- **Symptom + exact repro:** `clusters/homelab/apps/tekton-pipelines/triggers/clawgate-e2e-pipeline.yaml`
-  line ~550 sets `MIN_PASSED: "110"`, derived from a CI run measured at **118 passed / 2 skipped**.
-  A local full run on the 8b branch collects **126**.
-- **Observed (with values):** `Running 126 tests using 1 worker` (local `make e2e`, no filter; 31
-  passed / 0 failed at the point this handoff was written — the run was still going). The pipeline
-  header says: *"🔴 BOTH ARE MEASURED AND WILL DRIFT. Re-derive them when the suite changes size —
-  from a real run, the way these were, not by adjusting until green."*
-- **Ruled out:** raising it from the **local** number. The dev-host tier and the CI tier are
-  different environments with different skip sets; a floor CI cannot meet is the permanently-red
-  gate this repo warns about, which is strictly worse than a loose one.
-- **Leading hypothesis:** the floor was ALREADY stale before 8b — 126 collected locally against a
-  118-derived floor means trunk grew by ~6 tests that nobody re-derived for.
-- **Next probe:** read passed/skipped off the **first `clawgate-e2e` run that includes
-  `layout.spec.ts`**, then set `MIN_PASSED` to ~93% of it, the way the existing comment derives 110
-  from 118. It is a `-lt` floor, so nothing is broken meanwhile.
-
-### 🔴 `TaskRunTimeout` IN clawgate-ci HAS TWO DISTINCT CAUSES, AND `#572` ONLY FIXES ONE
-- **Symptom:** both present as `tekton/clawgate-ci` red with
-  `COULD NOT RUN: clawgate-ci stopped before any leg reported`.
-- **Observed (with values), and they are NOT the same failure:**
-  - `clawgate-ci-czshq` (rev `751aabaa`): `mint-token`, `clone`, `status-pending`, `wait-postgres`,
-    `build-css` all **`exit=0 Completed`**; `go`/`extension`/`hook`/`verdict` `exit=1
-    TaskRunTimeout`. The pod ran and **the budget was consumed inside the `go` step**.
-  - `clawgate-ci-z5pdm` (rev `d2d2346e`): **ALL TEN steps `exit=None running`** — not one
-    executed. TaskRun reason `ExceededNodeResources`, pod `0/10 Pending` for 14 min. The pod
-    **never scheduled**; the 25m budget elapsed while unschedulable.
-  - Cluster at the time: 9 pods Pending in `tekton-ci`, node CPU requests 16/61/55/**89**%, CPU
-    limits oversubscribed to 228/493/268%. After it drained (0 pending, requests 16/61/24/16%,
-    tekton-ci running 16 → 1) the identical spec passed in ~10 min.
-- **Ruled out:** the diff, in both cases. #592 contains zero Go files so it cannot slow `go`, and
-  #591 — which does touch Go — passed the same pipeline nine minutes after czshq failed.
-- 🔴 **Consequence for `ZacxDev/homelab-infra#572` (raise the task budget 25m → 40m), MERGED
-  2026-08-31 18:36Z:** it fixes the czshq shape and does **nothing** for the z5pdm shape — a longer budget just waits longer for
-  a pod that never lands. **Do not let the bump be recorded as the fix for both.** The z5pdm shape
-  needs scheduling headroom (requests/limits, priority class, or concurrency caps), which is a
-  different change.
-- **Next probe when it recurs:** read the per-step `terminated.reason` FIRST —
-  `kubectl -n tekton-ci get taskruns -l tekton.dev/pipelineRun=<run> -o json`. If early steps show
-  `exit=0 Completed` it is a budget problem; if every step is `exit=None running` it is a
-  scheduling problem, and `kubectl get pods -A --field-selector=status.phase=Pending` plus node
-  `Allocated resources` is the confirming read.
-
-### ⚠ CORRECTION 2026-08-31 — the workbench CAN pull `docker.io` today, and the root cause is STILL UNFIXED
-🔴 **This corrects the "THE WORKBENCH STILL CANNOT PULL FROM `docker.io`" block above in BOTH
-directions. Read both halves — either one alone is wrong.**
-
-- **The instruction "build clawgate images on the laptop" is no longer true as a hard constraint.**
-  Measured on the workbench: `docker pull docker.io/bats/bats:1.11.1` **succeeded** (`Downloaded
-  newer image`), and so did `docker.io/library/alpine:3.20`. I followed the old block this session
-  and routed a bats run to the laptop **without testing the workbench first** — which is the
-  "an open-investigation block reads as current forever" trap this doc warns about, walked into by
-  the session that was reading the warning.
-- 🔴 **But it is NOT fixed, and "docker.io works now" is the more dangerous wrong conclusion.**
-  The router is still serving the poisoned record, unchanged:
-  ```
-  dig @<the LAN router> registry-1.docker.io  ->  TTL 41879636 (~485 days), 4 addresses
-  dig @<a public resolver> registry-1.docker.io  ->  TTL 49, a DISJOINT set of 4
-  ```
-  ⚠ The addresses are deliberately NOT written down: they are ephemeral third-party allocations of
-  no lasting value, this repo is PUBLIC, and `scripts/tests/test_no_public_ips.py` rejects a public
-  IP literal (it caught this paragraph's first draft — an allowlist entry would have been the wrong
-  fix, since every exemption there is path-scoped and must keep matching something). **Re-derive
-  them with the two `dig`s above; the DISJOINTNESS and the TTL are the finding, not the values.**
-  TLS against the addresses the ROUTER hands out still presents certificates for unrelated sites —
-  measured one generic infrastructure CN and one wildcard CN belonging to an unrelated third-party
-  domain (not named here, same reason), plus one address that completes no handshake. That is the
-  documented symptom, intact.
-- **The host-side pin is still NOT applied.** `server=/docker.io/` appears **0** times in the
-  RUNNING dnsmasq config. `nix/system/apply-dnsmasq-docker-io-pin.sh` remains staged-not-applied
-  and still needs `sudo nixos-rebuild switch`, which an agent cannot run.
-- **So why do pulls work?** The system resolver is currently answering from the good upstream
-  (`dig registry-1.docker.io` with no `@` returns a TTL-25 correct answer), i.e. dnsmasq is
-  preferring `1.1.1.1` over the router for this name **by luck of upstream selection, not by
-  configuration**. Nothing pins that. It can flip back with no change by anyone.
-- 🔴 **Practical guidance, replacing the old block's:** do NOT hard-route image builds to the
-  laptop as a standing rule, and do NOT delete `apply-dnsmasq-docker-io-pin.sh` as obsolete.
-  **Test the pull at the moment you need it** — one `docker pull` is the whole check — and treat a
-  failure as this same unfixed router bug rather than re-diagnosing it. The durable fixes are
-  unchanged: the pin (needs sudo, one host) or clearing the record on `192.168.50.1` (fixes every
-  machine on the LAN, and is still untouched).
 
 ### The ux-audit funnel walk still SKIPS `auto-approve-armed`, and the arming failure is unexplained
 
@@ -2028,25 +1822,61 @@ before deciding it does not apply.
   rule was already in this section for `origin/<x>`; recording that it fired again, on `trunk`,
   in the ordinary course of setting up a feature branch.)
 
+- 🔴 **`POST /agents` GENERATES the agent name; the `name` form field belongs to the RENAME route.**
+  Creating "chief" produced `zesty-stoat`; `POST /agents/{id}/name` then sets `displayName` only —
+  the canonical name is immutable because it is the namespace + ServiceAccount identity
+  (`devpod-zesty-stoat`). Nothing server-side keys on the name, only the token, so this is cosmetic
+  — but any lookup keyed on the string `chief` is wrong, and `#842` ships a decoy agent slugged
+  `chief` to make that fail loudly.
+- 🔴 **`action=save` provisions at 0 replicas.** That is how to mint an identity that holds a
+  credential without running a pod. `action=dispatch` kicks off immediately.
+- 🔴 **A grep COUNT is not a finding — twice in one session it nearly became one.** `data-tmux-bulk-view`
+  returned 3 files on `origin/trunk` after `#837` removed it (all comments and absence-assertions —
+  a test that forbids a string necessarily contains it), and `archive_start` returned 2 hits in the
+  0.8.40 image after D4 dropped the column (both explanatory SQL comments). **Read the hits.**
+- 🔴 **A red check's control expires.** `tekton/gitops-validate` was red on `trunk` itself for most
+  of this session, which made it safe to ignore — and by merge time `trunk` was GREEN, so the stale
+  control would have waved `#842`'s red through. The real answer: `#842`'s branch lacked **exactly
+  one** trunk commit, `6f798e0ef` (`#841`), which fixes the very leg that was failing, and the PR
+  touched zero files under the scanned directory. **Re-measure a control at the moment you use it.**
+- 🔴 **`open` DISCARDS its url when the session already owns a tab** — it returns the owned tab. A
+  "fresh tab" control built on it reported STILL ANONYMOUS for a browser that was signed in. Use
+  `nav` to move an existing tab.
+- 🔴 **The `browser` skill's `reference/` tree does NOT ship to opencode.**
+  `~/.config/opencode/skills/browser/` holds exactly `SKILL.md` + the CLI. A brief that lets the
+  agent follow the skill's own `reference/<topic>.md` pointers dies ~16 s in as `external_directory`.
+  Name `scripts/browser-bridge/reference/` relative to `--dir` instead.
+- ⚠ **`opencode-dispatch preflight` scans PROSE textually** — it refused a brief over the URL path
+  `/tmux`, read as a filesystem path. Write such fragments as prose.
+- ⚠ **A pipe eats the exit status** — bit this session three times (`go build | head` reading
+  `head`'s rc, `nix build`, `preflight | tail`). Capture with `out=$(cmd); rc=$?`.
+- 🔴 **A sweep in the wrong TIER silently skips.** `internal/attention` runs 63 tests with
+  `CLAWGATE_TEST_DATABASE_URL` and 31 without — **30 skipped** inside a run reporting "25 packages
+  ok", which is how a mutant survived undetected. Name the tier in any mutation claim.
+- ⚠ **An agent's cleanup claim is not evidence.** `#842`'s author said its worktree `node_modules`
+  was a symlink into the base clone; it was a real directory. `rm -f` on a directory is a harmless
+  no-op, so nothing was lost — but the removal ran on an unverified claim.
+
 ## How to verify
 ```bash
-# what is actually deployed (the consumer's own answer, not the pin)
-curl -s http://192.168.50.250:30302/health          # LAN; public URL 302s to Authelia
-KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate get deploy,rs -o wide | head
+# what is actually deployed (the consumer's own answer, never the pin)
+curl -s http://192.168.50.250:30302/health
 
-# the two live cards for this arc
-clawgatectl task get 602 | head -40
-clawgatectl task get 603 | head -40
+# is the chief door armed, and does it say so?
+KC=/home/zach/workspace/homelab-talos/workbench-kubeconfig
+kubectl --kubeconfig $KC -n clawgate logs deploy/clawgate --since=10m | grep "AGENT-IDENTIFIED door"
 
-# is a fix actually IN the running image? (ancestry against the pin commit, never PR prose)
-git -C $HOMELAB merge-base --is-ancestor <feature-sha> <pin-sha> && echo "in the pin"
+# chief's capabilities, from INSIDE its own pod — the end-to-end proof
+P=$(kubectl --kubeconfig $KC -n devpod-zesty-stoat get pods -o jsonpath='{.items[0].metadata.name}')
+kubectl --kubeconfig $KC -n devpod-zesty-stoat exec "$P" -c agent -- clawgatectl tmux ls | head -20
 
-# the operator's own tab — READ ONLY; never nav/click/activate it
-~/workspace/devrc/scripts/browser-bridge/browser bw://laptop/work/484078947 context
+# the dogfood run
+tail -n 60 /home/zach/workspace/devrc/.opencode-dispatch/20260917-201600-chief-capability-dogfood.log
 ```
-🔴 `/ui/tmux` is **401 without a session** on the public URL AND on the LAN NodePort, so no curl
-verifies the page. The bridge into the operator's authenticated tab is the only agent-reachable
-route, and it is a READ of their live browser — no navigation, no clicks, no `activate`.
+🔴 `/ui/tmux` needs a signed-in human — no curl reaches it. The workbench Brave `work` profile is
+now signed in to the LAN address, so the bridge can read it; the public name still needs a passkey.
+🔴 **`clawgatectl health` reports the SERVER. A pin bump is not a deploy and a deploy is not a
+consumer** — check the running pod's `imageID` against the digest that was pushed.
 ## Run this first — the index, one read-only command
 ```bash
 cairn recall --repo ~/workspace/devrc
