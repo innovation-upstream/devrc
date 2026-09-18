@@ -8875,7 +8875,10 @@ def test_an_AUTO_OPEN_names_NO_ordering_and_NO_tier_counts(spy, spool):
     adding them to this arm, which is the obvious-looking tidy-up. Mutant M4
     (the auto emit gains `ordering=order_state, tier_a=…, tier_b=…`) is KILLED
     by this test, with this message."""
-    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    # ⚠ A SYNTHETIC `owner/repo`, NOT ONE OF THE REAL NAMES THIS FILE CARRIES
+    # ELSEWHERE. An explicit `owner/repo#N` needs no mapping, so nothing here
+    # requires a real repository — and this repo is PUBLIC.
+    assert MO.main(["zzzsynthorg/zzzsynthrepo#1065"]) == 0
     payload = _click_events(spool)[0]["payload"]
     assert payload["outcome"] == MO.CLICK_AUTO_OPEN, payload
     for absent in ("ordering", "tier_a", "tier_b", "queried"):
@@ -9201,7 +9204,8 @@ def test_every_click_row_names_the_HOST_it_was_clicked_on(spy, spool):
     way that matters: one has no `picks.jsonl`, so Tier B is inert there. A row
     without a host makes `tier_b=0` unattributable, and the field lives in
     another module whose own tests have no reason to keep it."""
-    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    # Synthetic, for the reason the auto-path test above states.
+    assert MO.main(["zzzsynthorg/zzzsynthrepo#1065"]) == 0
     events = _click_events(spool)
     assert len(events) == 1, events
     host = events[0].get("host")
