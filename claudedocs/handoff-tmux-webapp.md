@@ -27,13 +27,28 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Four clawgate releases shipped and verified this session — `0.8.41` → `0.8.44`. The arc's
-closing condition is UNCHANGED and still NOT met: 602 is `complete`, 603 is
-`ready_for_review`.** Everything below descends from rank 68 (grade the four review-ready
-cards), which is what surfaced the defects.
+**Rank 72 is CLAIMED and DISPATCHED — nothing merged, nothing deployed, and the arc's closing
+condition is UNCHANGED and still NOT met: 602 is `complete`, 603 is `ready_for_review`.** This
+session did recon and two dispatches; it shipped no code.
 
-Live: **`0.8.44`**, pod digest `sha256:9412719c…`, both hosts converged, `drift-check` rc 0.
+Live: **`0.8.44`** (unchanged this session), both hosts converged.
 
+- Branch: devrc `main`, clean. No devrc change was needed.
+- Claim: `tmux-webapp-72` (rc 0; `claim-work --release tmux-webapp-72` when done).
+- IN FLIGHT: `ZacxDev/homelab-infra` branch `fix/transcript-pagination-survives-refresh`,
+  worktree `/home/zach/workspace/homelab-talos-pagination`, cut from `9e7ef98b3`, pushed,
+  **no PR yet**. Scoped to `containers/clawgate/internal/ui/session_view.go`,
+  `session_archive.go` and `containers/clawgate/e2e/tests/`.
+- 🔴 **The base has MOVED under it**: the base clone's `trunk` is `5f410f8ed`, the branch was
+  cut at `9e7ef98b3`. Re-fetch and **test-merge** before merging — a file-overlap check is a
+  different, cheaper claim than a merged-tree run.
+- A SECOND arc was opened this session with its own doc,
+  `claudedocs/handoff-chief-panel-threads.md` (branch `feat/chief-intro-and-threads`, claim
+  `chief-panel-intro-and-threads`). A NEW arc, not round 3 of this one — this doc is frozen at
+  round 2 and says so.
+- Still unreleased from the previous session: claim `clawgate-task-603-transcript-archive`.
+  `#835` (the archive half) merged; whether the feeder-tail-raise half landed was NOT checked,
+  so the claim was left in place rather than released on a guess.
 ### Releases cut and verified
 | version | ships | proved before the pin moved |
 |---|---|---|
@@ -44,8 +59,17 @@ Live: **`0.8.44`**, pod digest `sha256:9412719c…`, both hosts converged, `drif
 Each: image markers read from the **extracted binary** with a positive and negative control
 BEFORE the pin moved, pushed digest == running pod digest, `/health` answered.
 
-### 🔴 ONE BUG CLASS, FOUND FOUR TIMES — a periodic/SSE `innerHTML` swap discarding user state
-An audit of **all 68 swap sites** (`internal/ui/*.go`) found the shape at seven. Three fixed:
+### 🔴 ONE BUG CLASS, FOUND FIVE TIMES — a periodic/SSE `innerHTML` swap discarding user state
+An audit of **all 68 swap sites** (`internal/ui/*.go`) found the shape at seven. Five instances
+are known; 1–3 are fixed and shipped, 4–5 are not:
+
+🔴 **The count is of INSTANCES, not sites, and the fifth proves why the distinction matters:
+it is a SECOND piece of state lost at a site instance 1 already "fixed".** Fixing the typed
+input at `#chief-panel-body` did nothing for a SELECTED THREAD at the same target, because the
+loaded-mark addressed the refetch FREQUENCY and not the fact that the refetch URL is static.
+**A site is not closed when one of its lost states is closed** — ask what else that target
+holds. Rank 74's static guard must therefore assert the target→descendant RELATIONSHIP, which
+would have caught all of them at once; a per-site ledger would have marked this one done.
 
 1. **`#chief-panel-body`** — `restore()` bound to `htmx:afterSettle` dispatched the panel's open
    event unconditionally, re-fetching the body ~1×/s and destroying the chat form. Measured:
@@ -59,10 +83,20 @@ An audit of **all 68 swap sites** (`internal/ui/*.go`) found the shape at seven.
    `reply.go` keyed on `ReplyViewDOMID`, not a save/restore per mount.
 3. **recap session fork** — see Open investigations; fixed `0.8.44` (`#848`).
 
-🔴 **Still OPEN, same class, no PR:** the two **pagination** cases (`#chat-body`'s "load earlier"
-and the tmux card transcript mount — these are a periodic refetch issuing a URL that forgot its
-cursor, NOT lost drafts, so a restore script patches the wrong layer), plus `<details>` open
-state and scroll position on `#raw-body`/`#chat-body`.
+4. **the two PAGINATION cases** (`#chat-body`'s "load earlier" and the tmux card transcript
+   mount) — a periodic refetch issuing a URL that forgot its cursor, NOT lost drafts, so a
+   restore script patches the wrong layer. **IN FLIGHT** on
+   `fix/transcript-pagination-survives-refresh`, no PR yet; recon and the decided fix direction
+   are under Gotchas → "Added 2026-09-18".
+5. **a thread selected in the chief panel** — `#chief-panel-body`'s `hx-get` is the static
+   `/ui/chief/panel` and it refetches on **every** open (no `once`, by design), so a thread
+   picked from the list holds until the panel is closed and reopened, then snaps back to
+   "latest" with nothing on screen saying so. Found by recon BEFORE it shipped, which is the
+   only one of the five that can be said of. Tracked in
+   `claudedocs/handoff-chief-panel-threads.md`.
+
+🔴 **Still OPEN, same class, no PR:** `<details>` open state and scroll position on
+`#raw-body`/`#chat-body`.
 
 ### The machine-tier chat read — the operator's own ask, closed end to end
 `GET /api/agents/{name}/messages` + `clawgatectl agent messages` (`#847`, `0.8.43`). Before it,
@@ -1958,6 +1992,46 @@ before deciding it does not apply.
   page", or a full `http://…` URL.
 - ⚠ **Laptop `nix/system/apply-networkmanager-openvpn.sh` is UNTRACKED** — a staged sudo script that
   exists on that host and in no commit. Not touched; one `checkout` from silent deletion.
+
+### Added 2026-09-18 — rank 72 recon, at `9e7ef98b3`
+
+- 🔴 **Rank 72 is ONE relationship, not two bugs, and the recon sharpened the diagnosis the
+  rank was written from.** `sessionEarlierControl` (`internal/ui/session_archive.go:133`) is
+  rendered INSIDE `sessionChatBody` (`internal/ui/session_view.go:654`), and the control
+  replaces ITSELF with `hx-swap="outerHTML"` emitting `[next control][earlier events]` — so
+  every page loaded becomes a CHILD of whatever target `sessionChatBody` was swapped into.
+  Both mounts then refetch a cursor-less URL: `#chat-body` (`session_view.go:505-523`,
+  `every 30s` + three SSE/DOM events) and `TmuxTranscriptMount` (`internal/ui/tmux.go:4034-4049`,
+  `?embed=1`, `cg:tmux-transcript-refresh`). The tail comes back, the archive pages are gone.
+- **DECIDED: the region goes OUTSIDE the refreshing swap. NOT a cursor in the refetch URL.**
+  Both were sanctioned by rank 72's own text; the cursor option was rejected because archived
+  content is IMMUTABLE, so re-reading it from object storage every 30 s / 60 s is pure waste —
+  and it contradicts `TmuxTranscriptMount`'s own load-bearing laziness argument (~88 windows
+  × 256 KB). Recommended mechanic: a wrapper rendered UNCONDITIONALLY by `sessionChatBody`
+  carrying `hx-preserve="true"` and a session-scoped id, with the control inside it.
+  🔴 **`hx-preserve` was NOT verified against the vendored htmx — the agent was told to prove
+  it in a browser and to fall back to a true sibling + a one-time hoist if it does not hold.**
+  Treat the mechanic as UNVERIFIED until that comes back.
+- 🔴 **A latent duplicate-id defect in the same code, found by this recon and not by any
+  audit:** `SessionEarlierControlID` (`session_archive.go`) is the BARE constant
+  `"session-earlier"`, and `sessionChatBody` serves the standalone page AND every tmux card —
+  so on `/tmux` with two cards loaded that id exists twice and `hx-target="#session-earlier"`
+  resolves to the first. The second card's button drives the FIRST card's transcript. This is
+  the exact collision `chatBodyID()` (`session_view.go:802-808`) and `SessionChatEmbedParam`
+  (`session_view.go:356-382`) were added to prevent. `RenderSessionEarlier` must keep emitting
+  the same id the page emits — its own comment says the second click silently stops working
+  otherwise, so it is a two-way pin, not a rename.
+- ⚠ **`e2e/tests/chief-panel.spec.ts:361` is a known-bad neighbour to copy from** — it marks
+  `#chief-panel` (the never-swapped shell) while its comment claims it protects what is
+  half-typed in the swap target `#chief-panel-body`.
+- **The swap class now has FIVE known instances, not four.** The fifth is in the chief panel
+  and is recorded in that arc's own doc: a thread picked in the panel is reverted when the
+  panel is reopened, because `#chief-panel-body`'s `hx-get` is the static `/ui/chief/panel`
+  and it refetches on every open by design. Rank 74 (the static guard for this class) would
+  have caught it, which is the strongest argument for rank 74 that exists.
+- **`clawgate_handoff.sh resolve` exited 6 for this session**: 595/602/603 all linked,
+  every one `role=read`, none WORKED. The existing `clawgate-task: 595` field was left as-is;
+  no field was added or changed on the strength of a read.
 
 ## How to verify
 
