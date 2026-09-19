@@ -81,7 +81,7 @@ pgrep picom && echo "WARNING: picom running (causes flicker with NVIDIA)"
 
 ## i3 (after a home-manager switch + i3 reload)
 ```bash
-grep -E 'rofi|flameshot gui|Shift\+x.*i3lock|\+5%|Shift\+h move' ~/.config/i3/config
+grep -E 'rofi|ksnip --rectarea|Shift\+x.*i3lock|\+5%|Shift\+h move' ~/.config/i3/config
 ```
 
 ## Shell

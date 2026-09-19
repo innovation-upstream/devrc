@@ -132,11 +132,11 @@ xdotool type --delay 8 "https://example.com" && sleep 0.05 && xdotool key Return
 
 **Screenshot → verify → act loop**
 ```bash
-flameshot full -p /tmp/claude-i3-screenshot.png   # 1. capture
+ksnip --fullscreen --saveto /tmp/claude-i3-screenshot.png   # 1. capture
 # 2. Read the image (multimodal) — analyze what is visible
 # 3. Decide the action
 # 4. Execute it (click, type, …)
-flameshot full -p /tmp/claude-i3-screenshot.png   # 5. capture again
+ksnip --fullscreen --saveto /tmp/claude-i3-screenshot.png   # 5. capture again
 # 6. Read and confirm
 rm -f /tmp/claude-i3-screenshot.png               # 7. clean up
 ```

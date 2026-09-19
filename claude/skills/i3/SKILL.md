@@ -82,7 +82,7 @@ returns `[{"success": true|false}]`. Command vocabulary → `~/.claude/skills/i3
 Claude is multimodal, so a screenshot gives real visual awareness of the desktop.
 
 ```bash
-flameshot full -p /tmp/claude-i3-screenshot.png          # full screen
+ksnip --fullscreen --saveto /tmp/claude-i3-screenshot.png  # full screen, no editor
 
 # A specific window: focus it, then use its geometry
 WID=$(xdotool search --class "Brave-browser" | head -1)

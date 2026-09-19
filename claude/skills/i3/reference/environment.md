@@ -15,7 +15,7 @@
 - **Notifications**: dunst (gruvbox-themed)
 - **Terminal**: alacritty (via `$I3CONFIG_DEFAULT_TERMINAL`)
 - **Browser**: brave
-- **Screenshots**: flameshot
+- **Screenshots**: ksnip
 
 ## Tool inventory
 | Tool | Path | Purpose |
@@ -24,7 +24,7 @@
 | `xdotool` | `~/.nix-profile/bin/xdotool` | Keyboard/mouse simulation, window geometry |
 | `xprop` | `/run/current-system/sw/bin/xprop` | X11 window properties and atoms |
 | `xclip` | `/run/current-system/sw/bin/xclip` | Clipboard read/write |
-| `flameshot` | `/run/current-system/sw/bin/flameshot` | Screenshot capture |
+| `ksnip` | `~/.nix-profile/bin/ksnip` | Screenshot capture (region/full, save without editor) |
 | `notify-send` | `~/.nix-profile/bin/notify-send` | Desktop notifications (dunst) |
 | `jq` | system PATH | JSON parsing for i3 IPC responses |
 

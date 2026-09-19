@@ -352,9 +352,9 @@ bindsym $mod+Shift+q kill
 # Application launcher (rofi replaces fragile dmenu filter pipeline)
 bindsym $mod+d exec --no-startup-id rofi -show drun -show-icons -theme gruvbox-dark-hard
 
-# Screenshots (flameshot)
-bindsym Print exec --no-startup-id flameshot gui
-bindsym $mod+Print exec --no-startup-id flameshot full -p ~/Pictures
+# Screenshots (ksnip)
+bindsym Print exec --no-startup-id ksnip --rectarea
+bindsym $mod+Print exec --no-startup-id ksnip --fullscreen --save
 
 # Screen lock
 bindsym $mod+Shift+x exec --no-startup-id i3lock -c 282828
