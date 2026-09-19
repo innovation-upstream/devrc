@@ -135,12 +135,20 @@ is the PRIVATE proposal, not this doc.
   # 1. refresh both caches, THEN diff every flipped scope byte-for-byte.
   cairn sync
   P=~/.cache/subsystem-store; C=~/.cache/subsystem-store-civitai
-  FLIPPED="civitai-app-model-benchmarking civitai-app-sensei
-           civitai-block-generate-from-model civitai-developer-docs
-           civitai-gpu-fleet claude-pool"
 
+  # 🔴 THE SCOPE NAMES ARE A LITERAL LIST, NOT A VARIABLE, AND THAT IS
+  # DELIBERATE. An earlier revision of this block set
+  # `FLIPPED="a b c …"` and looped `for s in $FLIPPED`. That works in bash and
+  # is WRONG IN ZSH, which does not field-split an unquoted parameter — so the
+  # loop runs ONCE with `$s` set to the whole string. This operator's shell is
+  # zsh. Measured when it happened: `scopes seen: 0 … defects: 1`, i.e. the
+  # counters added directly above caught it, which is the only reason it did
+  # not read as a clean run. Do not "tidy" these names back into a variable;
+  # if you must, use a real array or `${=FLIPPED}`.
   bad=0; files=0; scopes=0
-  for s in $FLIPPED; do
+  for s in civitai-app-model-benchmarking civitai-app-sensei \
+           civitai-block-generate-from-model civitai-developer-docs \
+           civitai-gpu-fleet claude-pool; do
     # A scope name that matches NEITHER side is a TYPO, not a clean scope.
     if [ ! -d "$P/$s" ] && [ ! -d "$C/$s" ]; then
       echo "UNKNOWN-SCOPE $s"; bad=$((bad+1)); continue
