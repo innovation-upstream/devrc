@@ -22,11 +22,9 @@ is the PRIVATE proposal, not this doc.
   ✅ **MET 2026-09-18 by phase D** (see `State now`): two entries written by a civitai session,
   byte-identical on the PVC, served to BOTH hosts; personal unaffected **on entry counts** — which
   cannot see the routing change phase D also made, recorded in `State now`.
-  🔴 **ONE QUALIFIER ON *THIS CONDITION*, not on the arc (several items remain open — see
-  `Next steps`): the route came from a `$CAIRN_ROUTES` OVERRIDE, NOT THE SHIPPED TABLE**, which is
-  still all-`personal` by a deliberate tested invariant. Met as WORDED; NOT yet reproducible from
-  committed config, since a session without that override gets **rc 11**, correctly. Making it
-  durable is **phase E**.
+  ✅ **And reproducible from COMMITTED config since phase E** (2026-09-18) — phase D reached it
+  through a `$CAIRN_ROUTES` override; six scopes now ship as `civitai` in the table itself. The
+  remaining scopes are phase E's later slices. Several arc items stay open — see `Next steps`.
 
 ## State now
 
@@ -52,16 +50,13 @@ is the PRIVATE proposal, not this doc.
     an independent check that the right row was taken). `len(instances) > 1` is now TRUE on both, and
     it has **two** consequences, not one:
     - cosmetic: every `recall` banners `cairn[personal]:` / `cairn[civitai]:` where it said `cairn:`.
-    - 🔴 **BEHAVIOURAL, AND THIS IS THE ONE THAT BITES: A SCOPE THE TABLE DOES NOT NAME NOW REFUSES
-      AT rc 11 ON BOTH HOSTS. It used to resolve to `personal`.** `Routing.alias_for` returns
-      `DEFAULT_ALIAS` for an unnamed scope **only** `if not self.multi_instance`; at two instances it
-      raises `UnroutedScope`. So the FIRST write to any scope not in the 25-row table — a new repo, a
-      new subsystem — now fails, and unblocking it is a devrc PR editing `claude/cairn-routes.json`
-      plus a `home-manager switch` on both hosts. **Measured 2026-09-18: latent, not firing** — live
-      scopes 25, table 25, symmetric difference EMPTY on *both* hosts, so no existing scope is
-      affected. It fires on the next NEW one.
-      ⚠ Phase D changed the CLIENT's routing behaviour, and "personal unaffected" was measured on
-      ENTRY COUNTS, which cannot see that. Both claims are true; they are about different things.
+    - 🔴 **BEHAVIOURAL, AND IT BITES: A SCOPE THE TABLE DOES NOT NAME NOW REFUSES AT rc 11 ON BOTH
+      HOSTS — it used to resolve to `personal`.** `alias_for` returns `DEFAULT_ALIAS` for an unnamed
+      scope **only** `if not self.multi_instance`. Unblocking one is a devrc PR plus a
+      `home-manager switch` on both hosts. **Latent, not firing:** live scopes and table rows agree
+      exactly on both (25/25, then 26/26 after phase E). It fires on the next NEW scope.
+      ⚠ "Personal unaffected" was measured on ENTRY COUNTS, which cannot see a routing change. Both
+      claims are true and they are about different things.
   - ⚠ **STILL ORPHANED: `civitai-app-requests/app-requests.md`** (1,803 B) exists only in the frozen
     mirror. Surfaced by `doctor`'s `personal/token-scopes` PROBLEM, which is **pre-existing** and is
     the check earning its keep. Moving it is a decision, not a cleanup.
@@ -85,39 +80,19 @@ is the PRIVATE proposal, not this doc.
   `kubectl -n cairn exec deploy/cairn -- sh -c 'T=$(cut -d" " -f1 /run/secrets/cairn/token); wget -SqO- --header="Authorization: Bearer $T" http://127.0.0.1:8102/api/v1/recall/<scope>'`
   → `401` without the token, `200` + `X-Store-Status:` with it.
 
-- 🔴 **THE IMAGE PULL NEEDS A PACKAGE-LEVEL GRANT NO API CAN SET.** `cairn-store` has
-  `repository: null`, so a classic PAT inherits nothing and `ghcr-cred` 403s until `civitai-deploy`
-  is invited with Read **through the GitHub UI** (org → Packages → cairn-store → Package settings);
-  done 2026-09-17. 🔴 **A re-mirror under a new name needs it AGAIN, and it presents as
-  `ImagePullBackOff`, not as an auth error.** The mirror stays MANUAL — public CI pushing to the
-  civitai org would put a client credential in a public repo — and `skopeo copy` by DIGEST is what
-  makes "both clusters pull the same image" checkable.
+- 🔴 **PHASE C's dated evidence is DEMOTED** to `claudedocs/refs/cairn-oss-multi-instance.md`
+  § DEMOTED 2026-09-18 (pass 4); the runbook is
+  `civitai/talos-infra:clusters/production/apps/cairn/README.md`. **The four lessons that outlive it:**
+  (a) the ghcr pull needs a **package-level grant no API can set**, and a re-mirror under a new name
+  needs it AGAIN — it presents as `ImagePullBackOff`, never as an auth error; (b) 🔴 **the backup
+  CronJob could not have gone green AT ALL** (`readOnly` on the claim reference, not the mount), so
+  alerting on backup SUCCESS would have fired only once someone depended on it — now pinned
+  cross-file by gate 23; (c) the drill passed by DESTROY-and-restore, which `backup.py`'s in-job
+  restore-check cannot supply because it never writes to a volume; (d) the backup credential has
+  **no `s3:DeleteObject`** and reaches one bucket, proven by exercise with a negative control.
 
-- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** `readOnly: true` on
-  the **claim reference** made the CSI driver mount the block device `-o ro` while the server held it
-  **rw** on the same node; ext4 refuses (`would change RO state`). **`ReadWriteOnce` is NOT the
-  cause** — both pods are on one node and RWO is per-node. Fix: `readOnly` belongs on the container's
-  `volumeMounts`, never the claim. ⚠ Probable, stated as probable: a LINSTOR block device does not
-  tolerate a ro co-mount where a hostpath does. 🔴 **The shape worth keeping: this job could not have
-  gone green AT ALL, so alerting on backup success would have fired only once someone depended on it
-  — and it ships suspended, so it would have surfaced only after phase D seeded.** Now pinned
-  cross-file by gate 23 (`ro-pvc-comount`), watched RED against the pre-fix manifests.
-  ✅ **EXERCISED at phase D over real content** — a manual run of the fixed CronJob completed,
-  round-trip verified and restore-checked.
 
-- ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
-  written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
-  restored **byte-identical** (`c4de5e4e…`) and served again. **Drill artifacts removed** —
-  re-verified 2026-09-18, `/data` holds only `civitai-developer-docs/`. The whole procedure, the
-  `mc cat` extraction, the entry-shape trap, and why `backup.py`'s in-job restore-check cannot
-  supply this evidence, are all in
-  `civitai/talos-infra:clusters/production/apps/cairn/README.md` — read it there, not here.
 
-- 🔴 **THE BACKUP CREDENTIAL IS SCOPED AND CANNOT DELETE — verified on the live policy, not the
-  manifest.** `cairn-backup-write` grants `ListBucket/ListBucketMultipartUploads/GetBucketLocation`
-  on `cairn-backups` and `AbortMultipartUpload/GetObject/ListMultipartUploadParts/PutObject` on
-  `cairn-backups/*`. **No `s3:DeleteObject`**, one bucket only. ILM `daily/` 90 days. Scoping also
-  proven by exercise with a negative control (`mc ls` against another bucket → Access Denied).
 
 - 🔴 **FOUR OPERATOR DECISIONS, 2026-09-17, NOT TO BE RE-LITIGATED.**
   1. **Residency (decision 4) is NO LONGER BINDING** — "don't care". A local copy of client notes is
@@ -144,42 +119,82 @@ is the PRIVATE proposal, not this doc.
   `cairn routes` reports two instances on both, and only then flip the table.** Miss one host and
   ~110 entries' worth of scopes refuse on it. §7 step 6 does not state this order.
 
+  🔴 **THE CUTOVER PROCEDURE — WRITTEN 2026-09-18 (round 2 of #1769, finding 🔴-A). RUN IT
+  IMMEDIATELY BEFORE THE `home-manager switch`, NOT EARLIER.** The re-point is only safe if the
+  destination store holds each flipped scope's entries **byte-for-byte**, and that is a
+  perishable property: until the table flips, writes still route to `personal`, so a scope
+  verified this morning is stale this afternoon. Measured 2026-09-18: 4 diverged entries at
+  19:20Z, **13 by 22:26Z** — and two of those had crossed into a scope this PR flips.
+  🔴 **A REF-NAME COMPARISON IS NOT SUFFICIENT AND WILL TELL YOU EVERYTHING IS FINE.** The live
+  failure was `civitai-gpu-fleet`, where the name sets matched exactly and two entries were
+  behind by one bullet each — one of them a 🔴 record of a measured security incident. Post-flip
+  that read returns **rc 0, full entry list, clean banner, content silently gone**. Compare
+  BYTES. (A `revision` is the leading 16 hex of the entry's own sha256, so this is checkable.)
+
+  ```bash
+  # 1. refresh both caches, THEN diff every flipped scope byte-for-byte.
+  cairn sync
+  P=~/.cache/subsystem-store; C=~/.cache/subsystem-store-civitai
+  FLIPPED="civitai-app-model-benchmarking civitai-app-sensei
+           civitai-block-generate-from-model civitai-developer-docs
+           civitai-gpu-fleet claude-pool"
+
+  bad=0; files=0; scopes=0
+  for s in $FLIPPED; do
+    # A scope name that matches NEITHER side is a TYPO, not a clean scope.
+    if [ ! -d "$P/$s" ] && [ ! -d "$C/$s" ]; then
+      echo "UNKNOWN-SCOPE $s"; bad=$((bad+1)); continue
+    fi
+    scopes=$((scopes+1))
+    # The property is personal ⊆ civitai BY CONTENT: nothing readable today may
+    # become unreadable after the flip. An entry only on the civitai side is
+    # fine — that is the destination's own, and `civitai-developer-docs` is
+    # exactly that case (0 personal entries, 2 civitai) by design.
+    for f in $(ls -1 "$P/$s" 2>/dev/null | grep '\.md$'); do
+      files=$((files+1))
+      [ -f "$C/$s/$f" ] || { echo "MISSING  $s/$f"; bad=$((bad+1)); continue; }
+      cmp -s "$P/$s/$f" "$C/$s/$f" || { echo "DIVERGED $s/$f"; bad=$((bad+1)); }
+    done
+  done
+  echo "scopes seen: $scopes (MUST be 6)  files compared: $files (MUST be >= 16)  defects: $bad (MUST be 0)"
+
+  # 2. NEGATIVE CONTROL. It must prove the ONE behaviour step 1's zero rests on:
+  #    that `cmp -s` detects a byte difference between two files that BOTH
+  #    exist. Counting "absent" and "diverged" together does NOT prove it — on a
+  #    day when every held-back defect is an absence, a merely-non-zero control
+  #    passes while never exercising `cmp` at all.
+  hb_div=0; hb_abs=0
+  for f in $(ls -1 "$P/datapacket-talos" 2>/dev/null | grep '\.md$'); do
+    if [ ! -f "$C/datapacket-talos/$f" ]; then hb_abs=$((hb_abs+1))
+    elif ! cmp -s "$P/datapacket-talos/$f" "$C/datapacket-talos/$f"; then hb_div=$((hb_div+1)); fi
+  done
+  echo "held-back diverged: $hb_div (MUST be >= 1)  absent: $hb_abs"
+  ```
+
+  🔴 **THE THREE `MUST`s ON THAT FIRST LINE ARE THE POINT, AND THEY WERE ADDED AFTER THIS EXACT
+  PROCEDURE WAS CAUGHT PASSING VACUOUSLY.** Its first version reported only `defects: 0`, and
+  round 3 of #1769 measured two ways it lied: run it with all six scope names mistyped by one
+  character and it prints `flipped-scope defects: 0` having compared **nothing**; and as
+  originally shipped it silently checked **5 of 6** scopes, because
+  `~/.cache/subsystem-store/civitai-developer-docs` does not exist and
+  `cd … 2>/dev/null && ls … 2>/dev/null` swallows both failures. The old negative control could
+  not see either, because it walked a DIFFERENT scope that does exist — so "loop 1 enumerated
+  nothing" produced the procedure's own pass condition. **A zero is a fact about the loop until
+  the loop says how much it looked at.** The repo already had this right elsewhere:
+  `scripts/subsystem-store-api/verify-byte-identity.sh` exits 4 on a zero-scope run rather than
+  passing trivially.
+
+  **Any defect ⇒ do not switch.** Repair with a routing override that names only the scopes you
+  are repairing, so a typo cannot write somewhere else — `CAIRN_ROUTES=<file> cairn put --scope
+  <s> --ref <r> --file <the personal copy>` — then re-run step 1.
+  🔴 **`put` REPLACES the whole entry, so check the direction first.** Personal is not always the
+  superset: measured the same day, **3 of 13** diverged entries had a bullet that existed only on
+  the `civitai` side, and a blind copy would have destroyed it. Diff both ways and only copy
+  where the destination has nothing unique; anything else is a union-merge by hand.
+
 - ✅ **DECIDED 2026-09-18 — (a) FAIL-LOUD ROUTING + FRESHNESS OBSERVABILITY; mirroring REJECTED.
-  This UNBLOCKS PHASE E.** The decision itself lives in `## Gotchas / decisions / dead-ends` (an
-  APPEND section, so it outlives this one). **Its NAMED EVIDENCE — three phase-D measurements, each
-  one a reason (b) lost:**
-  1. **"Which copy is current" is ALREADY answered, automatically, in one line.** With the civitai
-     store unreachable and the cache warm, `recall` returns **rc 0** and banners
-     `⚠ cairn[civitai]: cached — <url> unreachable: [Errno -2] … — SERVED FROM CACHE, cache 3m old`.
-     Reads survive an outage, and the answer carries its own provenance AND age. The operator's
-     stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
-     duplication makes it harder, not easier. via: measurement
-  2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
-     unconditional rewrite.** `scripts/subsystem-store-api/server.py:233-234` — the SERVER contract,
-     in this repo — states `PUT /api/v1/entry/<scope>/<ref>` *"replaces the whole file behind a
-     **REQUIRED `If-Match`**; a stale revision is a **412** and the file is untouched"*, and `create`
-     refuses an existing ref. So two writers do not silently clobber; the second gets a 412. A merge
-     rule is still absent, but the failure it would have to cover is **fail-loud, not silent loss**,
-     which removes (b)'s strongest argument. 🔴 **That contract predates the premise it refutes** —
-     so the doc asserted an unconditional rewrite while the repo already said otherwise, and the
-     check was one `grep` away the whole time. ⚠ Still NOT exercised: no live 412 was provoked.
-     ⚠ And the server scopes its attribution guarantee to `POST /bullets` — **a PUT writes the
-     caller's bytes verbatim**, so `[cairn: actor/session]` does not self-populate on that path.
-     via: code
-  3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
-     (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
-     (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
-  🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
-  already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
-  remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
-  adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
-  the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
-  configures*. 🔴 **THE GUARD PHASE E MUST EDIT, NAMED HERE SO IT IS NOT MET AS A SURPRISE RED:**
-  `devrc:scripts/tests/test_cairn_routes.py:120`
-  `test_every_scope_routes_to_the_default_instance_today`, whose docstring says *"Do not 'finish the
-  migration' by editing this file"* and whose assert message states the precondition — a scope may
-  be re-pointed only once some host carries `instances/<alias>.env`. **That precondition is now
-  satisfied on both hosts.**
+  This UNBLOCKED PHASE E.** The decision AND its three measurements now live in
+  `## Gotchas / decisions / dead-ends` — an APPEND section, so they outlive this one.
 
 - ⚠ **Carried forward (durable — a REPLACE would drop these):** 🔴 **the ROUTING DURABILITY decision
   is in `## Gotchas / decisions / dead-ends`** — an APPEND heading, so it survives a REPLACE without
@@ -238,45 +253,16 @@ is the PRIVATE proposal, not this doc.
   evidence, not a command.
 
 ### EVICTED 2026-09-14 — the cairn full-suite intermittent and the nine-round ladder (CLOSED)
-🔴 **CLOSED and MERGED as `ZacxDev/cairn` #3 `8e4ef84`**; the intermittent is recorded as NOT
-REPRODUCING and is **not** claimed fixed. Block evicted for size to pay for rank 29, per the
-2026-09-07 convention; it had already superseded an earlier 2026-09-13 eviction — do not
-resurrect either from git history and re-derive its probes.
-🔴 **The lesson that survives, and it is about EVIDENCE not rate:** ≈43 runs with 1 failure
-closed **nothing**, because that one failure has no traceback and never will — it was read
-through `pytest -q | tail -1`, so the transcript holds only the short summary and which of
-three branches fired is unknowable. **A run count cannot substitute for a captured failure.**
-Four residuals were left open **in the code** (an irreducible over-credit inside `send_signal`;
-a redundant `was_running` whose mutant survives; a suite-level property no test in the suite
-can assert about itself, `filterwarnings = error` weighed and REJECTED; and historical comment
-figures no round can re-check) — read them at `8e4ef84`, not here. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:a092ebd30956f0c5`.
 
 ### EVICTED 2026-09-16 — the OSS client fork AND the cost of consolidating (rank 3, DELIVERED, #1508 `44bd8b0e`)
-🔴 **Two lessons outlive these, and nothing else does.** (a) **A raw line count of a file under
-active edit RESTALES INSIDE ITS OWN PR** — the figures were falsified by a rebase before they
-merged, and nothing asserts on a count in prose, so no test can ever catch one; derive it and
-name the rev, or do not quote it. (b) **The METHOD that made the fork diffable:** render both
-copies docstring-free before diffing, and watch BOTH controls (a file against itself → 0 lines;
-one renamed identifier → 4) — an instrument that cannot go red, and cannot see a rename, returns
-the same reassuring number. Full text is in `claudedocs/refs/cairn-oss-multi-instance.md`. (The
-decision — CONSOLIDATE ONTO THE PIN, 2026-09-08 — is in `State now`, not to be re-asked.)
-**Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:e0cad938864045fa`.
 
 ### EVICTED — the SECOND cairn intermittent (CLOSED, `ZacxDev/cairn` #5 `9213726`)
-🔴 **The lesson:** the failing assertion was a test's POSITIVE CONTROL ABOUT ITSELF and was RIGHT
-to refuse — one shared budget bounded both the samplers and the reload driver, so the deadline
-could starve the control the test existed to police. The fix reads `ATOMICITY_MIN_RELOADS` in
-BOTH the loop and the assertion so they cannot drift, **and gates the SAMPLERS on it too** —
-gating only the driver satisfies the minimum after every observer has stopped, which makes the
-verdict vacuous. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:2bc998c6ee6ef0eb`.
 
 ### EVICTED — rank 12, leakscan's coverage was an enumeration (CLOSED, `ZacxDev/cairn` #6 `9d58f02`)
-🔴 **The lesson:** a scanner whose coverage is a hand-written suffix ENUMERATION prints
-`0 findings across N file(s)` where N is files SCANNED, never files present — so nothing in the
-output distinguishes *clean* from *did not look*. The fix was to DERIVE coverage
-(`partition_tracked_files()` buckets every enumerated file, so `scanned | skipped` equals the
-enumeration by construction). Full block — suffix census, 8/8 mutation battery, regression matrix
-— is on the PR. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:d2c69f14bf304074`.
 
 ### `cairn validate` is NO LONGER SILENT, and it is STILL NOT the write-protocol check — the CLASS is open
 🔴 **THE LIVE IMPERATIVE: the mandated post-write check stays pointed at `cairn-validate`, the
@@ -309,36 +295,13 @@ round-1 audit closed. Fix the sentence wherever it appears.
   `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17 (pass 2).
 
 ### EVICTED — the client's missing FOCUS WINDOW (CLOSED, `ZacxDev/cairn` #9 `a3c84db`)
-🔴 **Two lessons.** (a) The client's fallback asserted *"no handoff doc to read a path window
-from"* when the doc was right there — **a fallback that explains itself is making a claim about
-the world, and that claim can be false.** (b) This block's "next probe" named a `/tmp` log:
-**a next probe pointing into `/tmp` expires silently and reads as actionable forever.** Closure
-verified two ways, neither ancestry — `focus_window`/`focus_paths`/`focus_source` occur 3× in
-`origin/main:cairn` against a control of 3, and a live `recall` prints `resolved via claudedocs/…`
-rather than the `most-recent fallback` that was the symptom. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:ca47f023311a33aa`.
 
 ### EVICTED 2026-09-14 — the three reds only the MERGED tree could find (CLOSED)
-🔴 **Fixed in `29f16402`, gate green on `48bb44e3` from two runners.** Evicted for size per the
-2026-09-07 convention. **The three lessons, which is all that outlives it:** (a) a SEAM LEDGER
-that fails when the router set GROWS as well as shrinks is doing its job, not obstructing —
-a new reader must not quietly start answering "where do I read?" for itself; (b) a guard can
-be STRUCTURALLY INCAPABLE of passing in one of two tiers and dev-host green is what hides it —
-an assertion on STDOUT broke where the sandbox `$HOME` has no cache and the tool takes its
-not-found path, printing to STDERR; the implementing round wrote *"I believe they are
-sandbox-safe, but that is reasoning, not a measurement"*, and it was wrong; (c) a scan hit is
-fixed by pinning a RELATIONSHIP, not by allowlisting a string. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:7650a6d82d9b4ab3`.
 
 ### EVICTED 2026-09-14 — round 1 and round 3's guards, the mutation evidence (CLOSED)
-🔴 **Every matrix is on PR #1406's round-2 and round-3 comments** — read them there. Evicted for
-size to pay for rank 29. **The three transferable shapes, kept because each cost a round:**
-(a) a decoy must carry the STRING the assertion looks for — `pkgs.hello` alone was killed, but
-`pkgs.hello` **plus** a second binding naming the real package SURVIVED while the deployed
-symlink was dangling (home-manager's `insertFileEntry` `ln -s`s unconditionally, so a broken
-pin BUILDS); (b) a bracket walk that never returns to depth 0 silently widens `header` to the
-WHOLE FILE, and a symbol occurring twice in the body then passes the assertion vacuously — a
-false RED fixed into a path to a false GREEN; (c) the round-3 mutant that SURVIVED was
-**unreachable**, not wrong: an earlier fixture closed correctly so the branch never ran, and
-only a case no earlier assertion rejects killed it. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:035dcf8568a9054c`.
 
 ### STILL OPEN by decision — five round-2 🟡s the operator chose not to block the merge on
 - 🟡2 `count == 1` false-reds two legal nix spellings, and a one-line
@@ -420,27 +383,10 @@ EVICTED 2026-09-13; the two facts worth carrying out of them are here:
   blocks everyone.** Whichever is chosen, `MECHANISM =` is now the first thing to grep.
 
 ### EVICTED 2026-09-17 — `test_check_sops_enc_payloads.py`'s single `homelab-infra` CI failure (CLOSED, no repro)
-One failure observed by a round-2 audit of `ZacxDev/homelab-infra#786` at head `993643baa`;
-**52 of 52 in six separate full-suite runs** on this host, including at that same head. Leading
-hypothesis: contention between two concurrent full-suite runs (the audit's ran 18:50–19:33Z
-against mine 19:00–19:32Z), which is a documented evidence-corruption shape on this box.
-🔴 **If it recurs, capture whether another suite was running at that instant BEFORE re-running
-anything** — that observation is the only thing that separates the two mechanisms, and it is
-unrecoverable afterwards. Body moved verbatim to
-`claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:c3ac10aade5e0e70`.
 
 ### EVICTED 2026-09-17 — both of `#1508`'s round-1 blockers came from measuring the environment in the wrong shell (CLOSED)
-🔴 **Every environment claim in `#1508`'s body was measured from a shell that has `cairn` on
-PATH, and the three environments that decide whether this repo's SCHEDULED work runs do not** —
-which is how two deploy-blockers sat under `collected=22153 failed=0` plus three green Tekton
-legs. The fix is `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib` in each unit's `Environment`, NOT
-a widened PATH (`analyze-service-index-backup.service` sets `ProtectHome=tmpfs`, so
-`%h/.local/bin` does not exist inside its namespace). 🔴 **The durable check: when a change adds
-a hard import-time requirement, enumerate every SCHEDULED consumer (systemd unit, cron,
-container ENTRYPOINT) and re-run the import under that consumer's OWN environment** — read the
-PATH from `systemctl --user show <unit> -p Environment`, never from `nix/home.nix` and never
-from your own shell. Body moved verbatim to
-`claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17. **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:d17bd962164fc55f`.
 
 ### `--emit-claims`, and why a delta round can be structurally impossible
 - **Symptom + exact repro:** `audit-dispatch.py <pr> --round 2` REFUSES when no parseable
@@ -496,35 +442,13 @@ from your own shell. Body moved verbatim to
   against the **PR head**, not against a worktree HEAD, every round.
 
 ### EVICTED 2026-09-17 — the `FAILING:` line is a 140-char status description, not a failure list (CLOSED)
-`gh pr checks <n>` truncates it. On `#1525` it named ONE test while the same line's own counts
-gave **2 failed**, with the second name cut mid-token. Three bites in one session: it hid a live
-failure; it is why `handoff-gate-flake-store-api.md` rank 7's closing condition must **not** key
-on "no test appears in a `FAILING:` line" (a rename, skip or deselect satisfies that with nothing
-fixed); and it produced a regression in another session's PR (`#1522`'s `480b014f` removed two
-correct ledger rows on the premise "a mention that does not exist" — reasonable against a
-truncated line, false against the file). 🔴 **Read the file, not the status line.** Body moved
-verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17.
-**Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:6bb5ca8a7e8ee845`.
 
 ### EVICTED 2026-09-17 — `#1522`'s double kill-guard red (CLOSED; #1522 MERGED 2026-09-12 `05:50:05Z`)
-🔴 **THE ONE LIVE CONSTRAINT, AND IT BINDS ANYONE EDITING THIS DOC: the wide-kill verb is ELIDED
-here on purpose, and elision ALONE was not enough.** An earlier revision quoted it literally and
-made THIS doc an offender, red on `origin/main`; eliding it dropped 2 failures to 1 and the doc
-**still** matched at two sites written by OTHER sessions documenting the same breakage. So this
-doc IS ledgered in **both** allowlists (`_KILL_MENTION_LEDGER` and `quoting_is_the_point`), and
-the elision stays as the cheap half — **do not add the sixth, seventh and eighth mention while
-the row already covers you.** The class itself was closed structurally by devrc #1561
-(`c0bbd6d9`, `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`), which is what retired this block's own
-next probe. Body moved verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED
-2026-09-17 (pass 2). **Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:6832e28ea6b65415`.
 
 ### EVICTED 2026-09-14 — the kill-ledger treadmill (CLOSED)
-🔴 **Closed STRUCTURALLY by devrc #1561 (`c0bbd6d9`)**: `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`
-makes the scanners skip tracked prose. Block evicted for size per the 2026-09-07 convention.
-**The lesson that survives:** three PRs of per-instance classification were the WRONG ALTITUDE,
-and the design fix landed while they were still being written. When you find yourself writing
-the third PR that classifies instances of one class, the class itself is the bug.
-**Next probe: none.**
+- DEMOTED 2026-09-18 (pass 5) to `claudedocs/refs/cairn-oss-multi-instance.md` — verbatim, `sha256:7a2f884f32f6550a`.
 
 ### An unexplained backup archive at 2026-09-17T21:03:27Z that no surviving Job accounts for
 - as-of: 2026-09-17
@@ -545,6 +469,26 @@ the third PR that classifies instances of one class, the class itself is the bug
 - **Next probe:** ask that agent directly, or read its transcript for a `kubectl create job`
   between 20:31 and 21:05. If neither shows it, the open question is what else can write to
   `cairn-backups` — the credential is `PutObject`-capable and lives in the namespace.
+
+### 🔴 127 entries of client data on one node, and the backup has NEVER run on a schedule
+- as-of: 2026-09-18
+- **Symptom + exact repro:** `KUBECONFIG=$KC_DPPROD kubectl -n cairn get cronjobs -o custom-columns='NAME:.metadata.name,SUSPEND:.spec.suspend,LASTSCHEDULE:.status.lastScheduleTime'`
+- **Observed:** `cairn-backup true <none>` · `cairn-backup-mirror-b2 true <none>`. `<none>` is the
+  load-bearing part — **neither has ever fired.** Store: **13 scopes / 127 entries**;
+  `kubectl -n cairn get jobs` → `No resources found`. via: measurement
+- **Ruled out: that phase D's backup covers this.** That was a hand-made Job when the store held
+  **2** entries (`census: scopes=1 entries=2`). ~125 entries have no off-node copy. via: measurement
+- **Ruled out: that the personal store is a copy.** 4 entries have DIVERGED
+  (`datapacket-talos/{claude-pool,minio,postgres,search-meilisearch}.md`) and `civitai/feedback.md`
+  is personal-only. Byte-compared with a negative control. via: measurement
+- **Leading hypothesis:** not a defect — phase D seeded and nobody unsuspended. The app README's
+  *"until phase D unsuspends them this store has one node and no copy"* is still literally true.
+- **Next probe — this is the ACTION:** drop `suspend: true` from
+  `civitai/talos-infra:clusters/production/apps/cairn/backup-cronjob.yaml` (worktree recipe, that
+  repo's `CLAUDE.md` rule 10), then watch ONE scheduled run reach `Complete` and read its `census:` /
+  `restore: verified` lines. #1551's mount fix is live and was exercised at phase D. 🔴 **Do NOT
+  unsuspend the B2 mirror in the same change** — it mirrors what MinIO holds, so it is worthless
+  until the primary has run once.
 
 ## Next steps (ranked)
 
@@ -619,31 +563,14 @@ done":**
 10. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`.**
     forcing: none — done
 
-11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.**
-    **RE-VERIFIED LIVE 2026-09-08, still refused:** `cairn create --scope cairn --ref
-    rank11-probe --file <f>` → **rc 6**, `🔴 cairn: the store REFUSED the write [not-found]`.
-    Nothing was written. The local cache still holds **23** scopes with `cairn` absent, and
-    `subsystem_recall.py --repo ~/workspace/cairn` reports `status=scope-absent`.
-    ⚠ This is what made THIS session's `/handoff` step 4 dead-end: the rank-12 lessons could
-    not be recorded under a `cairn` scope and live in this doc's Gotchas instead — the exact
-    "cairn-repo lessons keep landing elsewhere" cost this item names.
-    ⚠ Note the invocation: `--file` is REQUIRED, and omitting it exits **2** (argparse) —
-    which is NOT the refusal and must not be read as one.
-    🔨 **DECIDED AND IN A PR 2026-09-09 — `ZacxDev/homelab-infra` #785**, `tekton/gitops-validate`
-    **pass**. Adds `cairn` to the token's scope allowlist: 23 → 24 scopes, all 23 originals
-    still present (sorted set difference `removed: []` / `added: [cairn]`), decrypted
-    before/after diff a SINGLE line. Live pod and the tracked secret agreed on the before
-    state, so this was not a git-only claim.
-    ⚠ **A `sops` trap worth keeping:** `sops` resolves `.sops.yaml` from the INVOKING CWD, not
-    from the file path. Run from another checkout it loads that repo's rules and dies with
-    `no matching creation rules found` on a file this repo's catch-all covers perfectly well.
-    Pin it with `--config`, do not `cd`.
-    ✅ **CLOSED 2026-09-10 — CONDITION EXERCISED, NOT INFERRED.** After #785 merged and
-    the pod rolled, `cairn create --scope cairn --ref ci-leg --file <f>` returned
-    `created scope=cairn ref=ci-leg revision=dc4d8212`, **rc 0** — it had returned rc 6
-    `[not-found]` for this item's entire life. The rc was CAPTURED, not piped (a pipe
-    returns `tail`'s status and reads a refusal as a write). The scope now holds a real
-    first entry, verified round-tripping from the pod: `1 of 1 entry in cairn/`.
+11. ✅ **CLOSED 2026-09-10 — the `cairn` scope was added to the store token's allowlist
+    (`ZacxDev/homelab-infra` #785), and the condition was EXERCISED not inferred:** `cairn create`
+    returned `created scope=cairn ref=ci-leg revision=dc4d8212` **rc 0** after returning rc 6
+    `[not-found]` for this item's entire life. Body demoted.
+    🔴 **Two lessons:** the rc was CAPTURED, not piped — **a pipe returns `tail`'s status and reads
+    a refusal as a write**; and `sops` resolves `.sops.yaml` from the INVOKING CWD, not the file
+    path, so running it from another checkout dies with `no matching creation rules found` on a file
+    this repo's catch-all covers — pin it with `--config`, do not `cd`.
     forcing: none — done
 
 13. ✅ **CLOSED 2026-09-10 — `ZacxDev/cairn` #8 `3167e44`; published `…:0.8.0`.** Body demoted.
@@ -931,9 +858,48 @@ done":**
 🔴 **Operator decision, NOT to be re-litigated.** Per-scope bidirectional mirroring is rejected;
 routing fails loud and freshness is observable. **Recorded HERE, in an APPEND section, because that
 is what "recorded in this doc's decisions" required** — the fuller block in `State now` sits under a
-REPLACE heading and will not survive the next `/handoff`. The three measurements behind it, and what
-phase E therefore does NOT have to build, are in that block while it lasts; the decision itself is
-this paragraph.
+REPLACE heading. 🔴 **The three measurements were MOVED here on 2026-09-18 rather than left there
+to be dropped** — durable content under a REPLACE heading is deleted on the next update, which is
+the hazard `handoff_doc.py` warns about and this arc walked into once already.
+
+**THE NAMED EVIDENCE — three phase-D measurements, each one a reason (b) lost:**
+
+1. **"Which copy is current" is ALREADY answered, automatically, in one line.** With the civitai
+   store unreachable and the cache warm, `recall` returns **rc 0** and banners
+   `⚠ cairn[civitai]: cached — <url> unreachable: [Errno -2] … — SERVED FROM CACHE, cache 3m old`.
+   Reads survive an outage, and the answer carries its own provenance AND age. The operator's
+   stated worry — *"not knowing WHICH copy is current"* — is a solved problem in (a), and
+   duplication makes it harder, not easier. via: measurement
+2. 🔴 **THE PREMISE THIS ITEM WAS WRITTEN ON IS PARTLY REFUTED. `cairn put` is NOT an
+   unconditional rewrite.** `scripts/subsystem-store-api/server.py:233-234` — the SERVER contract,
+   in this repo — states `PUT /api/v1/entry/<scope>/<ref>` *"replaces the whole file behind a
+   **REQUIRED `If-Match`**; a stale revision is a **412** and the file is untouched"*, and `create`
+   refuses an existing ref. So two writers do not silently clobber; the second gets a 412. A merge
+   rule is still absent, but the failure it would have to cover is **fail-loud, not silent loss**,
+   which removes (b)'s strongest argument. 🔴 **That contract predates the premise it refutes** —
+   so the doc asserted an unconditional rewrite while the repo already said otherwise, and the
+   check was one `grep` away the whole time. ⚠ Still NOT exercised: no live 412 was provoked.
+   ⚠ And the server scopes its attribution guarantee to `POST /bullets` — **a PUT writes the
+   caller's bytes verbatim**, so `[cairn: actor/session]` does not self-populate on that path.
+   via: code
+3. **A two-instance `cairn doctor` works and reports per-instance** — every `civitai/*` check OK
+   (reader-resolution, cache-stamp, pod, cache-vs-pod, token-scopes), caches are siblings
+   (`~/.cache/subsystem-store-civitai`), personal untouched. via: measurement
+🔴 **WHAT (a) COMMITS THE NEXT PHASE TO, so nobody re-derives it:** every mechanism (a) needs
+already exists and has been watched working — `UnroutedScope` refusals at **rc 11** carrying a
+remedial message, cache-age labelling, If-Match writes, per-instance `doctor`. Phase E therefore
+adds **no new machinery**; it re-points scopes in `devrc:claude/cairn-routes.json` and replaces
+the all-`personal` invariant with the (a)-shaped one: *every value names an alias this host
+configures*. ✅ **DONE 2026-09-18 — that guard has been replaced.**
+`test_every_scope_routes_to_the_default_instance_today` (the all-`personal` pin, phase B's closing
+condition) is retired; `devrc:scripts/tests/test_cairn_routes.py` now carries
+`test_every_scope_routes_to_a_CONFIGURED_instance` over a `CONFIGURED_ALIASES` set. ⚠ **A second
+test PINNING that set was written and then DELETED** — with one source three lines above the
+assertion it compared a constant to its own literal. **So widening the set is caught by REVIEW,
+not by a test.** 🔴 **CI cannot observe the real precondition** — no instance files — and the set
+covers neither REMOVAL nor whether a scope's ENTRIES were migrated; see its comment. **Adding an
+alias is only correct AFTER every host carries `instances/<alias>.env`; say which hosts you
+checked in the commit message.**
 
 ### 2026-09-10 — SIX AUDIT ROUNDS ON `homelab-infra#786`, AND WHAT ENDED THEM (body DEMOTED)
 🔴 **A CLASSIFIER GRADED BY READING WILL BE REWRITTEN UNTIL SOMETHING EXECUTES IT.** The cairn
@@ -1120,6 +1086,29 @@ proves nothing. Also run a LOSS detector — content present before and absent f
 after — and positive-control it (an empty corpus must report a large number, not zero).
 ⚠ **And check the substance, not the spelling:** verifying a restore by grepping the ORIGINAL
 strings after rewording them returns 0 and reads as a failed restore. That happened here.
+
+### 2026-09-18 — PHASE E FIRST SIX: shipped, INERT, and what blocks the rest
+🔴 **`innovation-upstream/devrc` #1769 OPEN** (`feat/cairn-phase-e-first-six`), gates green, **rounds
+0–1 audited, round 2 NOT run.** Six rows → `civitai`: **five re-pointed + one NEW row**
+(`civitai-developer-docs`) — two different acts; the PR title's "six re-pointed" is wrong and is
+corrected in a PR comment, not silently edited.
+🔴 **INERT UNTIL BOTH HOSTS SWITCH.** `nix/home.nix` ships the table as a `home.file` STORE COPY, so
+nothing changes until `home-manager switch` per host; both still read `25 {'personal': 25}`. **Switch
+BOTH, then `cairn routes` on each** — while only one has switched, the same scope routes to different
+stores on the two machines, silently.
+🔴 **WHY ONLY SIX.** 125 entries were migrated FIRST (127/127 byte-identical, negative-controlled),
+because re-pointing does not move entries and a flip-before-migrate reads `scope-empty` at **rc 0**
+with reassuring prose — caught by no test and no client refusal. The other 7 carry a `README.md`
+**scope policy file** (`cairn recall` calls it *"authoritative for this scope"*); it has no
+`service:` field, so it is not an entry and **no cairn verb writes one**.
+`datapacket-talos/prometheus-stack` is separately blocked: `monitoring.md` claims it in `aliases:`
+while it also exists as its own 11.5 KB entry — personal tolerates the ambiguity, civitai resolves
+the alias first and refuses. Enumerated across all 12 scopes: **exactly one collision**.
+⚠ **devrc is PUBLIC** (`isPrivate=false`) and three sites in that PR's own prose justify the table
+living here with *"a public tool that shipped somebody's scope list would be publishing their org
+chart"*. Incremental exposure is small — `main` already carries the endpoint, namespace and token
+fingerprint — but the reasoning does not survive contact with its destination. Operator-facing,
+undecided.
 
 ## How to verify
 

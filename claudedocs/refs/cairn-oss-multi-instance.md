@@ -1869,3 +1869,251 @@ never here.**
     forcing: gate — it has turned a Tekton check red on four PRs, including a docs-only one.
     Advisory, not blocking (see the retraction above)
 
+## DEMOTED 2026-09-18 (pass 4) — phase C's dated evidence, moved VERBATIM
+
+Phase C is CLOSED and its operational runbook lives in
+`civitai/talos-infra:clusters/production/apps/cairn/README.md`. Evicted under step 2 of the
+eviction playbook (DEMOTE DATED EVIDENCE). The handoff keeps each one's transferable LESSON.
+
+### (demoted 2026-09-18, sha256 8c0b2c4b9fa596a2)
+
+- 🔴 **THE IMAGE PULL NEEDS A PACKAGE-LEVEL GRANT NO API CAN SET.** `cairn-store` has
+  `repository: null`, so a classic PAT inherits nothing and `ghcr-cred` 403s until `civitai-deploy`
+  is invited with Read **through the GitHub UI** (org → Packages → cairn-store → Package settings);
+  done 2026-09-17. 🔴 **A re-mirror under a new name needs it AGAIN, and it presents as
+  `ImagePullBackOff`, not as an auth error.** The mirror stays MANUAL — public CI pushing to the
+  civitai org would put a client credential in a public repo — and `skopeo copy` by DIGEST is what
+  makes "both clusters pull the same image" checkable.
+
+### (demoted 2026-09-18, sha256 2a2bd2886beedc0c)
+
+- 🔴 **THE RESTORE DRILL FOUND A STRUCTURAL DEFECT: THE BACKUP COULD NEVER RUN.** `readOnly: true` on
+  the **claim reference** made the CSI driver mount the block device `-o ro` while the server held it
+  **rw** on the same node; ext4 refuses (`would change RO state`). **`ReadWriteOnce` is NOT the
+  cause** — both pods are on one node and RWO is per-node. Fix: `readOnly` belongs on the container's
+  `volumeMounts`, never the claim. ⚠ Probable, stated as probable: a LINSTOR block device does not
+  tolerate a ro co-mount where a hostpath does. 🔴 **The shape worth keeping: this job could not have
+  gone green AT ALL, so alerting on backup success would have fired only once someone depended on it
+  — and it ships suspended, so it would have surfaced only after phase D seeded.** Now pinned
+  cross-file by gate 23 (`ro-pvc-comount`), watched RED against the pre-fix manifests.
+  ✅ **EXERCISED at phase D over real content** — a manual run of the fixed CronJob completed,
+  round-trip verified and restore-checked.
+
+### (demoted 2026-09-18, sha256 cc9aed7299522b73)
+
+- ✅ **THE DRILL PASSED, and "a restore, not a green CronJob" was the closing condition.** Canary
+  written → backed up → **destroyed** (store reported `scope-empty`, so the loss was real) →
+  restored **byte-identical** (`c4de5e4e…`) and served again. **Drill artifacts removed** —
+  re-verified 2026-09-18, no drill canary remains. ⚠ `/data` now holds **13 scopes / 127
+  entries** after phase E's migration, not one. The whole procedure, the
+  `mc cat` extraction, the entry-shape trap, and why `backup.py`'s in-job restore-check cannot
+  supply this evidence, are all in
+  `civitai/talos-infra:clusters/production/apps/cairn/README.md` — read it there, not here.
+
+### (demoted 2026-09-18, sha256 1e1c6d444e0834b8)
+
+- 🔴 **THE BACKUP CREDENTIAL IS SCOPED AND CANNOT DELETE — verified on the live policy, not the
+  manifest.** `cairn-backup-write` grants `ListBucket/ListBucketMultipartUploads/GetBucketLocation`
+  on `cairn-backups` and `AbortMultipartUpload/GetObject/ListMultipartUploadParts/PutObject` on
+  `cairn-backups/*`. **No `s3:DeleteObject`**, one bucket only. ILM `daily/` 90 days. Scoping also
+  proven by exercise with a negative control (`mc ls` against another bucket → Access Denied).
+
+### rank 11 (demoted 2026-09-18, sha256 7c1131cf2d7b53b1)
+
+11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.**
+    **RE-VERIFIED LIVE 2026-09-08, still refused:** `cairn create --scope cairn --ref
+    rank11-probe --file <f>` → **rc 6**, `🔴 cairn: the store REFUSED the write [not-found]`.
+    Nothing was written. The local cache still holds **23** scopes with `cairn` absent, and
+    `subsystem_recall.py --repo ~/workspace/cairn` reports `status=scope-absent`.
+    ⚠ This is what made THIS session's `/handoff` step 4 dead-end: the rank-12 lessons could
+    not be recorded under a `cairn` scope and live in this doc's Gotchas instead — the exact
+    "cairn-repo lessons keep landing elsewhere" cost this item names.
+    ⚠ Note the invocation: `--file` is REQUIRED, and omitting it exits **2** (argparse) —
+    which is NOT the refusal and must not be read as one.
+    🔨 **DECIDED AND IN A PR 2026-09-09 — `ZacxDev/homelab-infra` #785**, `tekton/gitops-validate`
+    **pass**. Adds `cairn` to the token's scope allowlist: 23 → 24 scopes, all 23 originals
+    still present (sorted set difference `removed: []` / `added: [cairn]`), decrypted
+    before/after diff a SINGLE line. Live pod and the tracked secret agreed on the before
+    state, so this was not a git-only claim.
+    ⚠ **A `sops` trap worth keeping:** `sops` resolves `.sops.yaml` from the INVOKING CWD, not
+    from the file path. Run from another checkout it loads that repo's rules and dies with
+    `no matching creation rules found` on a file this repo's catch-all covers perfectly well.
+    Pin it with `--config`, do not `cd`.
+    ✅ **CLOSED 2026-09-10 — CONDITION EXERCISED, NOT INFERRED.** After #785 merged and
+    the pod rolled, `cairn create --scope cairn --ref ci-leg --file <f>` returned
+    `created scope=cairn ref=ci-leg revision=dc4d8212`, **rc 0** — it had returned rc 6
+    `[not-found]` for this item's entire life. The rc was CAPTURED, not piped (a pipe
+    returns `tail`'s status and reads a refusal as a write). The scope now holds a real
+    first entry, verified round-tripping from the pod: `1 of 1 entry in cairn/`.
+    forcing: none — done
+
+
+## DEMOTED 2026-09-18 (pass 5) — the CLOSED `### EVICTED` investigation blocks
+
+Moved VERBATIM from `claudedocs/handoff-cairn-oss-multi-instance.md` to buy the
+headroom phase E's cutover procedure needs; that doc was 86 bytes from its
+98,304 B allowance.
+
+🔴 **THE STAMP RECIPE, STATED — without it a verifier gets a FALSE ALARM on the last block.**
+The hashed unit is the block **as it stood in the handoff at `a888abaf0`**: from its `### ` heading
+through the blank line that separated it from the next heading, trailing newline included — i.e.
+`git show a888abaf0:claudedocs/handoff-cairn-oss-multi-instance.md`, split on `^### `, hash each
+chunk. It is **not** "the bytes between this stamp and the next one here". For eleven of the
+twelve those happen to coincide; for the **last** block (`7a2f884f…`) they do not, because nothing
+follows it in this file and so it carries no trailing blank line. A reader who re-derives the
+naive way computes `aaf272bd…` for that one and concludes the demotion was not verbatim. It was —
+all twelve were verified byte-identical at demotion time against a mutated-copy negative control.
+
+Each block is stamped with the sha256 of the exact text
+that was moved, so the verbatim claim is checkable rather than asserted.
+
+<!-- sha256:a092ebd30956f0c51e26b2bdbb37e4e8e42977dcfd72c1194129b6bf26da0951 -->
+
+### EVICTED 2026-09-14 — the cairn full-suite intermittent and the nine-round ladder (CLOSED)
+🔴 **CLOSED and MERGED as `ZacxDev/cairn` #3 `8e4ef84`**; the intermittent is recorded as NOT
+REPRODUCING and is **not** claimed fixed. Block evicted for size to pay for rank 29, per the
+2026-09-07 convention; it had already superseded an earlier 2026-09-13 eviction — do not
+resurrect either from git history and re-derive its probes.
+🔴 **The lesson that survives, and it is about EVIDENCE not rate:** ≈43 runs with 1 failure
+closed **nothing**, because that one failure has no traceback and never will — it was read
+through `pytest -q | tail -1`, so the transcript holds only the short summary and which of
+three branches fired is unknowable. **A run count cannot substitute for a captured failure.**
+Four residuals were left open **in the code** (an irreducible over-credit inside `send_signal`;
+a redundant `was_running` whose mutant survives; a suite-level property no test in the suite
+can assert about itself, `filterwarnings = error` weighed and REJECTED; and historical comment
+figures no round can re-check) — read them at `8e4ef84`, not here. **Next probe: none.**
+
+<!-- sha256:e0cad938864045fa5d9578425d4355617e0818621801c79c597183f8302b7eb4 -->
+
+### EVICTED 2026-09-16 — the OSS client fork AND the cost of consolidating (rank 3, DELIVERED, #1508 `44bd8b0e`)
+🔴 **Two lessons outlive these, and nothing else does.** (a) **A raw line count of a file under
+active edit RESTALES INSIDE ITS OWN PR** — the figures were falsified by a rebase before they
+merged, and nothing asserts on a count in prose, so no test can ever catch one; derive it and
+name the rev, or do not quote it. (b) **The METHOD that made the fork diffable:** render both
+copies docstring-free before diffing, and watch BOTH controls (a file against itself → 0 lines;
+one renamed identifier → 4) — an instrument that cannot go red, and cannot see a rename, returns
+the same reassuring number. Full text is in `claudedocs/refs/cairn-oss-multi-instance.md`. (The
+decision — CONSOLIDATE ONTO THE PIN, 2026-09-08 — is in `State now`, not to be re-asked.)
+**Next probe: none.**
+
+<!-- sha256:2bc998c6ee6ef0ebd86821a9f3a830dfced60c021db413808d2f1cbeb7159c5e -->
+
+### EVICTED — the SECOND cairn intermittent (CLOSED, `ZacxDev/cairn` #5 `9213726`)
+🔴 **The lesson:** the failing assertion was a test's POSITIVE CONTROL ABOUT ITSELF and was RIGHT
+to refuse — one shared budget bounded both the samplers and the reload driver, so the deadline
+could starve the control the test existed to police. The fix reads `ATOMICITY_MIN_RELOADS` in
+BOTH the loop and the assertion so they cannot drift, **and gates the SAMPLERS on it too** —
+gating only the driver satisfies the minimum after every observer has stopped, which makes the
+verdict vacuous. **Next probe: none.**
+
+<!-- sha256:d2c69f14bf304074b6854999b44f431431775dd2ed2d93b7777636d64f1a89da -->
+
+### EVICTED — rank 12, leakscan's coverage was an enumeration (CLOSED, `ZacxDev/cairn` #6 `9d58f02`)
+🔴 **The lesson:** a scanner whose coverage is a hand-written suffix ENUMERATION prints
+`0 findings across N file(s)` where N is files SCANNED, never files present — so nothing in the
+output distinguishes *clean* from *did not look*. The fix was to DERIVE coverage
+(`partition_tracked_files()` buckets every enumerated file, so `scanned | skipped` equals the
+enumeration by construction). Full block — suffix census, 8/8 mutation battery, regression matrix
+— is on the PR. **Next probe: none.**
+
+<!-- sha256:ca47f023311a33aa48db60285e38c9ea447435e4ffd7768b9aae6853c5dcc33a -->
+
+### EVICTED — the client's missing FOCUS WINDOW (CLOSED, `ZacxDev/cairn` #9 `a3c84db`)
+🔴 **Two lessons.** (a) The client's fallback asserted *"no handoff doc to read a path window
+from"* when the doc was right there — **a fallback that explains itself is making a claim about
+the world, and that claim can be false.** (b) This block's "next probe" named a `/tmp` log:
+**a next probe pointing into `/tmp` expires silently and reads as actionable forever.** Closure
+verified two ways, neither ancestry — `focus_window`/`focus_paths`/`focus_source` occur 3× in
+`origin/main:cairn` against a control of 3, and a live `recall` prints `resolved via claudedocs/…`
+rather than the `most-recent fallback` that was the symptom. **Next probe: none.**
+
+<!-- sha256:7650a6d82d9b4ab325e1a67cfc15eaff470e18e3e482619617679a45f4a3ef40 -->
+
+### EVICTED 2026-09-14 — the three reds only the MERGED tree could find (CLOSED)
+🔴 **Fixed in `29f16402`, gate green on `48bb44e3` from two runners.** Evicted for size per the
+2026-09-07 convention. **The three lessons, which is all that outlives it:** (a) a SEAM LEDGER
+that fails when the router set GROWS as well as shrinks is doing its job, not obstructing —
+a new reader must not quietly start answering "where do I read?" for itself; (b) a guard can
+be STRUCTURALLY INCAPABLE of passing in one of two tiers and dev-host green is what hides it —
+an assertion on STDOUT broke where the sandbox `$HOME` has no cache and the tool takes its
+not-found path, printing to STDERR; the implementing round wrote *"I believe they are
+sandbox-safe, but that is reasoning, not a measurement"*, and it was wrong; (c) a scan hit is
+fixed by pinning a RELATIONSHIP, not by allowlisting a string. **Next probe: none.**
+
+<!-- sha256:035dcf8568a9054c3c08c77e183f3e84c42fb7de3a1d07cdebafe17b6a42d312 -->
+
+### EVICTED 2026-09-14 — round 1 and round 3's guards, the mutation evidence (CLOSED)
+🔴 **Every matrix is on PR #1406's round-2 and round-3 comments** — read them there. Evicted for
+size to pay for rank 29. **The three transferable shapes, kept because each cost a round:**
+(a) a decoy must carry the STRING the assertion looks for — `pkgs.hello` alone was killed, but
+`pkgs.hello` **plus** a second binding naming the real package SURVIVED while the deployed
+symlink was dangling (home-manager's `insertFileEntry` `ln -s`s unconditionally, so a broken
+pin BUILDS); (b) a bracket walk that never returns to depth 0 silently widens `header` to the
+WHOLE FILE, and a symbol occurring twice in the body then passes the assertion vacuously — a
+false RED fixed into a path to a false GREEN; (c) the round-3 mutant that SURVIVED was
+**unreachable**, not wrong: an earlier fixture closed correctly so the branch never ran, and
+only a case no earlier assertion rejects killed it. **Next probe: none.**
+
+<!-- sha256:c3ac10aade5e0e708b2cd957f84264ce2a83482517acff60475ee8e04aa9d90d -->
+
+### EVICTED 2026-09-17 — `test_check_sops_enc_payloads.py`'s single `homelab-infra` CI failure (CLOSED, no repro)
+One failure observed by a round-2 audit of `ZacxDev/homelab-infra#786` at head `993643baa`;
+**52 of 52 in six separate full-suite runs** on this host, including at that same head. Leading
+hypothesis: contention between two concurrent full-suite runs (the audit's ran 18:50–19:33Z
+against mine 19:00–19:32Z), which is a documented evidence-corruption shape on this box.
+🔴 **If it recurs, capture whether another suite was running at that instant BEFORE re-running
+anything** — that observation is the only thing that separates the two mechanisms, and it is
+unrecoverable afterwards. Body moved verbatim to
+`claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17. **Next probe: none.**
+
+<!-- sha256:d17bd962164fc55f05ec398319d05e953340dad5c9c84ab722015dee2487aa3f -->
+
+### EVICTED 2026-09-17 — both of `#1508`'s round-1 blockers came from measuring the environment in the wrong shell (CLOSED)
+🔴 **Every environment claim in `#1508`'s body was measured from a shell that has `cairn` on
+PATH, and the three environments that decide whether this repo's SCHEDULED work runs do not** —
+which is how two deploy-blockers sat under `collected=22153 failed=0` plus three green Tekton
+legs. The fix is `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib` in each unit's `Environment`, NOT
+a widened PATH (`analyze-service-index-backup.service` sets `ProtectHome=tmpfs`, so
+`%h/.local/bin` does not exist inside its namespace). 🔴 **The durable check: when a change adds
+a hard import-time requirement, enumerate every SCHEDULED consumer (systemd unit, cron,
+container ENTRYPOINT) and re-run the import under that consumer's OWN environment** — read the
+PATH from `systemctl --user show <unit> -p Environment`, never from `nix/home.nix` and never
+from your own shell. Body moved verbatim to
+`claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17. **Next probe: none.**
+
+<!-- sha256:6bb5ca8a7e8ee84553ed5363e1abb1dab81381a3d326f2676d061f1a3b956ca7 -->
+
+### EVICTED 2026-09-17 — the `FAILING:` line is a 140-char status description, not a failure list (CLOSED)
+`gh pr checks <n>` truncates it. On `#1525` it named ONE test while the same line's own counts
+gave **2 failed**, with the second name cut mid-token. Three bites in one session: it hid a live
+failure; it is why `handoff-gate-flake-store-api.md` rank 7's closing condition must **not** key
+on "no test appears in a `FAILING:` line" (a rename, skip or deselect satisfies that with nothing
+fixed); and it produced a regression in another session's PR (`#1522`'s `480b014f` removed two
+correct ledger rows on the premise "a mention that does not exist" — reasonable against a
+truncated line, false against the file). 🔴 **Read the file, not the status line.** Body moved
+verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED 2026-09-17.
+**Next probe: none.**
+
+<!-- sha256:6832e28ea6b65415010a3d75189a71f93c676ce4b7311b988abb98d0385d7497 -->
+
+### EVICTED 2026-09-17 — `#1522`'s double kill-guard red (CLOSED; #1522 MERGED 2026-09-12 `05:50:05Z`)
+🔴 **THE ONE LIVE CONSTRAINT, AND IT BINDS ANYONE EDITING THIS DOC: the wide-kill verb is ELIDED
+here on purpose, and elision ALONE was not enough.** An earlier revision quoted it literally and
+made THIS doc an offender, red on `origin/main`; eliding it dropped 2 failures to 1 and the doc
+**still** matched at two sites written by OTHER sessions documenting the same breakage. So this
+doc IS ledgered in **both** allowlists (`_KILL_MENTION_LEDGER` and `quoting_is_the_point`), and
+the elision stays as the cheap half — **do not add the sixth, seventh and eighth mention while
+the row already covers you.** The class itself was closed structurally by devrc #1561
+(`c0bbd6d9`, `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`), which is what retired this block's own
+next probe. Body moved verbatim to `claudedocs/refs/cairn-oss-multi-instance.md` § DEMOTED
+2026-09-17 (pass 2). **Next probe: none.**
+
+<!-- sha256:7a2f884f32f6550a8373a97aff401aaca85daf3bfe626fbff8ebc3f03afb5c5b -->
+
+### EVICTED 2026-09-14 — the kill-ledger treadmill (CLOSED)
+🔴 **Closed STRUCTURALLY by devrc #1561 (`c0bbd6d9`)**: `_PROSE_ONLY_PREFIXES = ("claudedocs/",)`
+makes the scanners skip tracked prose. Block evicted for size per the 2026-09-07 convention.
+**The lesson that survives:** three PRs of per-instance classification were the WRONG ALTITUDE,
+and the design fix landed while they were still being written. When you find yourself writing
+the third PR that classifies instances of one class, the class itself is the bug.
+**Next probe: none.**

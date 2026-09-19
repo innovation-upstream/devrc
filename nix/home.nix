@@ -1595,8 +1595,10 @@ in
   # table. `scripts/lib/cairn_routes.py` carries the documentation the JSON
   # cannot (see below) and `scripts/tests/test_cairn_routes.py` grades it.
   #
-  # 🔴 NOTHING GRADES THIS FILE AGAINST THE LIVE STORE, AND THAT IS DELIBERATE
-  # AS OF THIS COMMIT. A `drift-check.sh` arm running `cairn routes --check`
+  # 🔴 NOTHING GRADES THIS FILE AGAINST THE LIVE STORE. That was DELIBERATE while
+  # one instance existed; as of phase E (2026-09-18) both hosts are
+  # multi-instance and the withdrawn arm below is REACHABLE — it is owed work,
+  # not a settled decision. The history that follows is why it was withdrawn. A `drift-check.sh` arm running `cairn routes --check`
   # was written and then withdrawn: at ONE configured instance, over a table
   # whose every value is the default alias, `Routing.check` cannot produce a
   # PROBLEM at all — an unnamed live scope resolves to the sole instance rather
