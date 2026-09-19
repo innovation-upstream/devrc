@@ -674,14 +674,14 @@ MUTANTS: list[tuple] = [
      "FILTERED, not ranked"),
     ("K66", "widening", "Tier B is compared BEFORE the Tier A class, so a learned "
                         "preference can float an IMPOSSIBLE repository to the top",
-     "        return (klass, distance, -scores.get(low, 0.0))\n",
-     "        return (-scores.get(low, 0.0), klass, distance)\n",
+     "        return (klass, distance, -scores.get(full.lower(), 0.0))\n",
+     "        return (-scores.get(full.lower(), 0.0), klass, distance)\n",
      "promoted an IMPOSSIBLE"),
     ("K67", "widening", "the sort key regains a NAME, so it ALPHABETISES instead "
                         "of refining — a cold-start host silently loses the "
                         "order repo_universe gave it",
-     "        return (klass, distance, -scores.get(low, 0.0))\n",
-     "        return (klass, distance, -scores.get(low, 0.0), low)\n",
+     "        return (klass, distance, -scores.get(full.lower(), 0.0))\n",
+     "        return (klass, distance, -scores.get(full.lower(), 0.0), full.lower())\n",
      "COLD START REGRESSION"),
     ("K68", "deletion", "a STALE range table is trusted and ordered on anyway — "
                         "its two misclassifications point in OPPOSITE directions, "

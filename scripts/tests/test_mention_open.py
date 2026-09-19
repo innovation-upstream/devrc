@@ -7980,7 +7980,12 @@ def test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked(
                         lambda *a, **k: sorted(FAKE_UNIVERSE.values()))
     monkeypatch.setattr(MO, "open_url", lambda u: 0)
     _ranges_on_disk(monkeypatch, tmp_path,
-                    {v: 9000 for v in FAKE_UNIVERSE.values()})
+                    # 🔴 A UNIQUELY PLAUSIBLE TOP ROW. `{v: 9000 …}` gives every
+                    # row the SAME class AND distance, so nothing is separated
+                    # and the narrowed gate (correctly) suppresses the
+                    # promotion — this test needs it to FIRE.
+                    {v: (9000 if v == RANKED_FIRST else 5)
+                     for v in FAKE_UNIVERSE.values()})
     # 🔴 A bare `#N` the pane attributes, AFTER THE 2026-09-19 PROMOTION: row 0
     # is the clawgate task, row 1 is the PROMOTED top-ranked universe row, and
     # row 2 is the PINNED pane repo. The pinned row and an ordered row are now
@@ -9153,8 +9158,16 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
 
     monkeypatch.setattr(MO, "pick", _capture)
     assert MO.main(["#1291"]) == 0
+    # 🔴 THE SLICE IS NOT "THE PINNED ROWS" ANY MORE, AND SAYING SO MATTERS.
+    # Round 1 measured that on shape 2 `platforms[:2]` is
+    # [clawgate, PROMOTED universe row] — the pane guess sits at index 2, below
+    # the promoted row. The old message called that slice "the rows above the
+    # ordered block", which is false once the block is interleaved, and the
+    # assertion silently stopped pinning that the pane guess is never-ranked.
+    # Assert the SCREEN PREFIX by kind (what the operator sees at the top) and
+    # pin the pane guess's never-ranked status separately, below.
     assert tuple(seen["platforms"][:expect_pinned]) == kinds, (
-        f"{shape}: the rows above the ordered block are "
+        f"{shape}: the top {expect_pinned} row kind(s) are "
         f"{seen['platforms'][:expect_pinned]}, expected {list(kinds)}")
 
     payload = _click_events(spool)[0]["payload"]
@@ -9693,19 +9706,33 @@ def test_every_arm_that_sets_pinned_above_also_sets_ordered_urls():
     # it to be REACHABLE — a binding inside `if False:` satisfied the name check
     # too.
     def _binds_a_url_set(body):
+        """🔴 A RECURSIVE DESCENT THAT ACTUALLY PRUNES, because `ast.walk` DOES
+        NOT. The first draft used `ast.walk` and `continue`-d on a falsey `if`,
+        which prunes NOTHING — `walk` is a flat traversal, so the dead branch's
+        body is yielded independently and the binding was found anyway.
+        MEASURED by `/audit-pr` round 1: moving the guessed arm's binding under
+        `if False:` left this guard GREEN, while production would report every
+        ordered row as `ordered=False`. Recursing by hand is the only way to
+        skip a subtree."""
         for stmt in body:
-            for sub in ast.walk(stmt):
-                if isinstance(sub, ast.If) and isinstance(sub.test, ast.Constant)                         and not sub.test.value:
-                    continue          # unreachable branch — does not count
-                if not isinstance(sub, ast.Assign):
-                    continue
-                if not any(isinstance(t, ast.Name) and t.id == "ordered_urls"
-                           for t in sub.targets):
-                    continue
-                if isinstance(sub.value, ast.SetComp):
-                    src = ast.dump(sub.value)
-                    if "'url'" in src or '"url"' in src:
-                        return True
+            if (isinstance(stmt, ast.If)
+                    and isinstance(stmt.test, ast.Constant)
+                    and not stmt.test.value):
+                # Statically dead — its body cannot bind anything at runtime.
+                if _binds_a_url_set(stmt.orelse):
+                    return True
+                continue
+            if (isinstance(stmt, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "ordered_urls"
+                            for t in stmt.targets)
+                    and isinstance(stmt.value, ast.SetComp)):
+                src = ast.dump(stmt.value)
+                if "'url'" in src or '"url"' in src:
+                    return True
+            for field in ("body", "orelse", "finalbody"):
+                inner = getattr(stmt, field, None)
+                if isinstance(inner, list) and _binds_a_url_set(inner):
+                    return True
         return False
 
     empty = [i for i, body in enumerate(suites) if not _binds_a_url_set(body)]
@@ -9732,8 +9759,11 @@ def test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS(
     `universe_note` and reads "nothing here knows #1291" — FALSE here, and
     non-empty, so a bare `assert seen["mesg"]` passes straight over it. The
     assertions below pin WHICH note was chosen."""
+    # The lone row must be PLAUSIBLE for `#1291`, or the narrowed gate
+    # suppresses the promotion and there is no `below == 0` shape to test.
     seen = _guessed_picker(monkeypatch, text="#1291", universe=[ALPHA_FIRST],
-                           mapping={}, ranges=DISCRIMINATING_RANGES,
+                           mapping={},
+                           ranges={ALPHA_FIRST: 9000, PANE_GUESS: 5},
                            tmp_path=tmp_path)
     urls = [c["url"] for c in seen["rows"]]
     assert ALPHA_FIRST in urls[1], (
@@ -9857,3 +9887,112 @@ def test_NO_promotion_when_the_ORDERINGS_top_row_IS_the_pane_guess(
     assert "best-ranked repository" not in seen["mesg"], (
         f"the note credits a promoted row while the ordering's own first pick "
         f"is the guess itself: {seen['mesg']}")
+
+
+def test_NO_promotion_when_the_ordering_SEPARATED_NOTHING(monkeypatch, tmp_path):
+    """🔴 ROUND 1's 🔴, PINNED. `order_state == ORDER_APPLIED` says a table was
+    read — NOT that it ranked anything. `sorted` is STABLE, so a table that is
+    present, fresh and complete but UNINFORMATIVE reproduces the incoming order
+    exactly, and the incoming order is `repo_universe`'s ALPHABETICAL sort. The
+    promotion then splices an alphabetical accident above the pane guess and
+    `guessed_note` calls it "this host's best-ranked repository".
+
+    MEASURED on the operator's laptop (394 rows, 117 picks, Tier B loaded):
+    rows TIED with row 1 were 28 for `#1`, 5 for `#3`, 6 for `#10` — ordinary
+    low-numbered clicks. Tier B separated `#5000` and did nothing for those.
+
+    Every row here shares one class AND one distance, so the ordering separates
+    nothing and the promotion must not fire. The note must not claim a ranking.
+    """
+    flat = {v: 9000 for v in FAKE_UNIVERSE.values()}
+    flat[ALPHA_FIRST] = 9000
+    flat[PANE_GUESS] = 9000
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                           ranges=flat, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
+    assert PANE_GUESS in urls[1], (
+        f"the ordering separated NOTHING (every row ties), so the pane guess "
+        f"must keep its row — the row above it would be an alphabetical "
+        f"accident: {urls}")
+    assert "best-ranked repository" not in seen["mesg"], (
+        f"the note credits a ranking that separated nothing: {seen['mesg']}")
+
+
+def test_NO_promotion_when_the_top_row_is_NOT_PLAUSIBLE(monkeypatch, tmp_path):
+    """🔴 THE OTHER HALF OF THE OPERATOR'S CHOSEN CONDITION (2026-09-19): the
+    promoted row must be class PLAUSIBLE — this repository demonstrably has
+    references as high as the clicked `#N`. A uniquely-separated BELOW row is
+    still the best of a bad set, and calling it "best-ranked" oversells it.
+
+    MEASURED: on the laptop, `#5000` and `#99999` land here — no repository has
+    references that high, so nothing is promoted however cleanly it sorts.
+
+    🔴 THE TOP ROW MUST BE UNIQUELY SEPARATED HERE, OR THIS TEST PASSES FOR THE
+    WRONG REASON — and the first draft did. It gave every row `BELOW`, and
+    `distance` is 0 outside `PLAUSIBLE`, so all keys were `(1, 0)`: they TIED,
+    the uniqueness half suppressed the promotion, and the PLAUSIBLE half was
+    never exercised. Caught by mutating `top_key[0] == CLASS_PLAUSIBLE` away and
+    watching this test STAY GREEN. The fixture now separates by CLASS — one
+    `BELOW` row against `IMPOSSIBLE` ones — so uniqueness holds and only the
+    PLAUSIBLE requirement can refuse."""
+    low = {v: 0 for v in FAKE_UNIVERSE.values()}   # IMPOSSIBLE (class 3)
+    low[ALPHA_FIRST] = 7          # BELOW (class 1) — uniquely separated, not PLAUSIBLE
+    low[PANE_GUESS] = 0
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                           ranges=low, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    assert PANE_GUESS in urls[1], (
+        f"the top row is BELOW, not PLAUSIBLE — nothing may be promoted: {urls}")
+    assert "best-ranked repository" not in seen["mesg"], seen["mesg"]
+
+
+def test_the_PROMOTED_note_wordings_are_pinned_WHOLE(monkeypatch, tmp_path):
+    """🔴 THE STANDARD THIS FILE ALREADY STATES, APPLIED TO THE NEW WORDINGS.
+    `test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION` pins its string
+    WHOLE "because a guard on the words `guess` and `tmux pane` is walkable by a
+    reword that still names the wrong row". Round 1 measured that the two
+    PROMOTED wordings — the ones this change introduced — carried only fragment
+    assertions (`"best-ranked repository"`, `"Row 3"`), i.e. exactly the guard
+    those tests call walkable.
+
+    Both promoted shapes are pinned here, whole and normalised:
+      * `below > 0`  — a guess with ranked rows above AND below it;
+      * `below == 0` — the single-universe-row shape.
+
+    ⚠ A cosmetic reword will fail this. That is the trade the sibling tests
+    already made and it is paid deliberately: these sentences make a CLAIM about
+    the ordering, and a claim needs a machine-readable pin."""
+    many = {v: 5 for v in FAKE_UNIVERSE.values()}
+    many[RANKED_FIRST] = 9000
+    many[ALPHA_FIRST] = 5
+    many[PANE_GUESS] = 5
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                           ranges=many, tmp_path=tmp_path)
+    assert seen["mesg"] == (
+        "#1291 names no repository. Row 3 is a guess from the tmux pane, which "
+        "may not be the pane you clicked in — row 2 is this host's best-ranked "
+        "repository, and the 4 rows below it are the rest. Type to search, or "
+        "dismiss. · ordered by plausibility for #1291: 1 could have it, 0 have "
+        "no references at all"), seen["mesg"]
+    _no_universe_token_anywhere(seen["mesg"], "PROMOTED GUESS-NOTE DISCLOSURE")
+
+
+def test_the_PROMOTED_note_passes_the_DISCLOSURE_guards(monkeypatch, tmp_path):
+    """🔴 ROUND 1's COVERAGE GAP. Every `_no_universe_token_anywhere` site drove
+    `_guessed_picker` with NO range table, so the promotion was gated off and
+    only the PRE-change strings were ever checked against the token guards —
+    while `guessed_note`'s docstring claimed those guards "hold that line".
+
+    This repo is PUBLIC and the universe holds private repository names, so the
+    claim has to be tested on the strings that actually ship. Both promoted
+    wordings, through both token guards."""
+    one = {ALPHA_FIRST: 9000, PANE_GUESS: 5}
+    lone = _guessed_picker(monkeypatch, text="#1291", universe=[ALPHA_FIRST],
+                           mapping={}, ranges=one, tmp_path=tmp_path)
+    assert "the only one it knows" in lone["mesg"], lone["mesg"]
+    _no_universe_token_anywhere(lone["mesg"], "PROMOTED LONE-ROW DISCLOSURE")
+    _no_guessed_repo_token_anywhere(lone["mesg"], "PROMOTED LONE-ROW GUESS")
