@@ -145,6 +145,45 @@ SINGLE_MENU_CAPTURE = (
     "  ↑↓ to select · enter to confirm\n"
 )
 
+#: 🔴 THE SHAPE A REAL ASK ACTUALLY HAS, AND THE ONE THE DETECTOR COULD NOT SEE.
+#: MEASURED over all 57 live tmux panes on this host: the three panes showing a
+#: real `AskUserQuestion` modal all render each option's DESCRIPTION on the lines
+#: beneath it, indented further, with NO blank line anywhere in the run — so
+#: consecutive option rows sat 7, 5, 4 and 2 lines apart. At `MENU_ROW_GAP = 4`
+#: `menu_block` returned ZERO rows for every one of them, the pane classified as
+#: `text`, and a sweep of the whole fleet found not one menu this agent could
+#: drive. The first inter-row span here is 7 lines — the measured MAXIMUM, chosen
+#: to OVERSHOOT the old bound of 4 rather than sit on it: at a span of 3 or 4 a
+#: mutant restoring `MENU_ROW_GAP = 4` passes this fixture and SURVIVES, having
+#: never executed the thing under test. The two trailing rows are the short
+#: standard ones, matching the measurement (label lengths 38/38/38/15/15).
+DESCRIBED_MENU_CAPTURE = (
+    "● Which store should the queue use?\n"
+    "\n"
+    "  ☐ Store\n"
+    "\n"
+    "  ❯ 1. Ledger\n"
+    "     keeps an append-only journal and replays it on start\n"
+    "     costs one extra fsync per write\n"
+    "     survives a crash mid-batch without a repair pass\n"
+    "     needs a compaction job once the journal is large\n"
+    "     the compaction job is not written yet\n"
+    "     so this is the slower of the two today\n"
+    "    2. Flatfile\n"
+    "     one file per row, no journal at all\n"
+    "     simplest thing that could work\n"
+    "    3. Type something.\n"
+    "     write your own answer\n"
+    "    4. Chat about this\n"
+    "\n"
+    "  ↑↓ to select · enter to confirm\n"
+)
+
+#: The same render carrying a `✔ Submit` tab strip — a MULTI-question chain, which
+#: must still be refused once its rows become visible.
+DESCRIBED_MULTI_QUESTION_CAPTURE = DESCRIBED_MENU_CAPTURE.replace(
+    "  ☐ Store\n", "  ←  ☐ Store  ☐ Region  ✔ Submit  →\n")
+
 #: The SAME four options in a DIFFERENT order. A digit derived from the order
 #: clawgate sent — rather than from the order the pane shows — answers the wrong
 #: row here and nowhere else.
@@ -212,14 +251,54 @@ MULTI_SELECT_MENU_CAPTURE = (
     "      Submit\n"
 )
 
-#: A numbered, cursored menu with NO free-text row — so a reply that matches no
-#: row has nowhere to go. Not an AskUserQuestion ask; the agent must refuse it
-#: rather than guess which shape it is looking at.
-UNKNOWN_MENU_CAPTURE = (
+#: A numbered, cursored menu with NO free-text row. A reply naming one of its rows
+#: EXACTLY is delivered by that row's digit — the row is right there on screen; a
+#: reply naming nothing has no route and is refused BY THE DELIVERY, after the
+#: match has been tried. Both directions are pinned below.
+NO_FREE_TEXT_MENU_CAPTURE = (
     "  ☐ Proceed?\n"
     "\n"
     "  ❯ 1. Ledger\n"
     "    2. Flatfile\n"
+)
+
+#: Numbered rows with TWO cursor glyphs — whether a live menu is up at all cannot
+#: be decided, so this is the shape `PANE_UNKNOWN_MENU` now names.
+TWO_CURSOR_MENU_CAPTURE = (
+    "  ☐ Proceed?\n"
+    "\n"
+    "  ❯ 1. Ledger\n"
+    "  ❯ 2. Flatfile\n"
+)
+
+#: 🔴 THE FOUR LIVE SHAPES THAT USED TO BE REFUSED, taken from a sweep of all 53
+#: tmux panes on this host: every one carries a question marker, a `✔ Submit`
+#: strip or a checkbox WITHOUT a single numbered option row and WITHOUT a cursor
+#: row — quoted text in a transcript, not a live modal. They are ordinary panes a
+#: reply belongs in, and the shipped classifier refused all four.
+QUOTED_MENU_SHAPES = (
+    # A transcript quoting an earlier single-question ask's marker.
+    ("● I asked you about the store earlier:\n"
+     "  ☐ Store\n"
+     "\n"
+     "● Carrying on with the flatfile plan.\n", "a quoted ☐ question marker"),
+    # A transcript quoting a multi-question TAB STRIP. Measured at visible lines 4
+    # and 8 of 31 on two live panes, with zero numbered rows and zero cursor rows.
+    ("● Earlier I put up a two-part ask:\n"
+     "\n"
+     "  ←  ☐ Store  ☐ Region  ✔ Submit  →\n"
+     "\n"
+     "● Both are answered; wiring it now.\n", "a quoted ✔ Submit tab strip"),
+    # Prose naming the review screen.
+    ("● The chain ends on a `Review your answers` screen.\n"
+     "\n"
+     "devrc git:(main) $ \n", "the words Review your answers in prose"),
+    # A markdown task list — two `[ ]` on adjacent lines, no cursor anywhere.
+    ("● The remaining work:\n"
+     "  - [ ] wire the store\n"
+     "  - [x] read the pane\n"
+     "\n"
+     "devrc git:(main) $ \n", "a markdown task list"),
 )
 
 
@@ -3138,7 +3217,8 @@ def test_a_capture_that_FAILS_refuses_rather_than_typing_BLIND(server, tmux_stub
     (MULTI_QUESTION_MENU_CAPTURE, "MULTI-question", "a multi-question tab strip"),
     (MULTI_QUESTION_REVIEW_CAPTURE, "MULTI-question", "its review screen"),
     (MULTI_SELECT_MENU_CAPTURE, "multi-select", "a multiSelect checkbox list"),
-    (UNKNOWN_MENU_CAPTURE, "no free-text row", "a numbered menu with no free-text row"),
+    (TWO_CURSOR_MENU_CAPTURE, "exactly one cursor row",
+     "numbered rows with two cursor glyphs"),
 ])
 def test_a_menu_shape_this_agent_cannot_drive_is_REFUSED_with_no_send(
         server, tmux_stub, tmp_path, capture, needle, what):
@@ -3154,8 +3234,13 @@ def test_a_menu_shape_this_agent_cannot_drive_is_REFUSED_with_no_send(
       * multiSelect — a digit TOGGLES in place and the completing `Submit` row is
         UNNUMBERED, reachable only by arrow keys, which `termwrite.textIsAllowed`
         refuses to carry by design;
-      * an unrecognised numbered menu — no free-text row, so a reply that matches
-        no option has no route and a typed one would be discarded.
+      * numbered rows carrying TWO cursor glyphs — whether a live menu is up at
+        all cannot be decided, so neither a digit nor a typed reply is safe.
+
+    ⚠ A NUMBERED MENU WITH NO FREE-TEXT ROW IS NO LONGER IN THIS LIST, and that
+    is `NO_FREE_TEXT_MENU_CAPTURE`'s own two tests below: an exactly-matching reply
+    is DELIVERED by its row's digit, and only a reply matching nothing is refused —
+    by the delivery, after the match has been tried.
 
     The assertion is NO send-keys, not merely that the state says `refused`: a
     refusal reported after the keys have gone is not a refusal.
@@ -3376,15 +3461,28 @@ def test_the_pane_classifier_is_exercised_directly():
             (MULTI_QUESTION_MENU_CAPTURE, AGENT.PANE_MULTI_QUESTION),
             (MULTI_QUESTION_REVIEW_CAPTURE, AGENT.PANE_MULTI_QUESTION),
             (MULTI_SELECT_MENU_CAPTURE, AGENT.PANE_MULTI_SELECT),
-            (UNKNOWN_MENU_CAPTURE, AGENT.PANE_UNKNOWN_MENU)):
+            (TWO_CURSOR_MENU_CAPTURE, AGENT.PANE_UNKNOWN_MENU)):
         kind, labels, why = AGENT.classify_pane(capture)
         assert kind == want, f"{want}: got {kind}"
         assert labels == [] and why, (kind, labels, why)
 
-    # A numbered block with NO cursor row is not a live menu, and one with TWO is
-    # not a shape this agent recognises either.
+    # A cursored numbered menu with NO free-text row is a MENU, with its labels —
+    # the free-text row decides whether an UNMATCHED reply has a route, which is
+    # `deliver_to_menu`'s question and not this one.
+    kind, labels, why = AGENT.classify_pane(NO_FREE_TEXT_MENU_CAPTURE)
+    assert (kind, labels, why) == (AGENT.PANE_MENU, ["Ledger", "Flatfile"], ""), (
+        kind, labels, why)
+
+    # A numbered block and a question marker with NO cursor row is refused: that is
+    # also what a menu caught half-drawn looks like. It needs BOTH signals — the
+    # same block with the marker stripped is an ordinary numbered list.
+    nocursor = SINGLE_MENU_CAPTURE.replace("  ❯ 1.", "    1.")
+    assert AGENT.classify_pane(nocursor)[0] == AGENT.PANE_UNKNOWN_MENU
+    assert "half-drawn" in AGENT.classify_pane(nocursor)[2], AGENT.classify_pane(nocursor)[2]
     assert AGENT.classify_pane(
-        SINGLE_MENU_CAPTURE.replace("  ❯ 1.", "    1."))[0] == AGENT.PANE_UNKNOWN_MENU
+        nocursor.replace("  ☐ Store\n", ""))[0] == AGENT.PANE_TEXT
+
+    # And numbered rows carrying TWO cursor glyphs are undecidable, not a menu.
     assert AGENT.classify_pane(
         SINGLE_MENU_CAPTURE.replace("    2. Flatfile", "  ❯ 2. Flatfile")
     )[0] == AGENT.PANE_UNKNOWN_MENU
@@ -3492,6 +3590,555 @@ def test_the_menu_path_refuses_an_empty_text_rather_than_ABORTING_the_tool():
 
 
 # --------------------------------------------------------------------------- #
+# 16h. 🔴 THE FALSE-POSITIVE DIRECTION, MEASURED ON THE LIVE FLEET.
+#
+# The shipped classifier entered its refusing branches on a question marker ALONE,
+# with no cursor row and no numbered option block required. Swept over all 53 live
+# tmux panes on this host it produced `text 49 · multi-question 2 · unknown-menu 2`
+# — 4 refused (7.5%), every one of them `pane_current_command=claude`, and ZERO
+# panes classified as a menu this agent can drive. All four carried a marker or a
+# `✔ Submit` strip quoted in a transcript, with zero numbered rows and zero cursor
+# rows. So the refusals were not conservatism: they were the detector reading
+# scrollback.
+#
+# The precondition is now `a numbered block carrying the cursor, or a cursored run
+# of checkbox rows` — for EVERY branch, not just the numbered one.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("capture,what", QUOTED_MENU_SHAPES)
+def test_a_QUOTED_menu_marker_is_a_TEXT_pane_and_is_DELIVERED_to(
+        server, tmux_stub, tmp_path, capture, what):
+    """🔴 EACH OF THESE WAS A LIVE REFUSAL, and each is a pane a reply belongs in.
+
+    The assertion is the full argv pair, not merely that the state says
+    `delivered`: what makes this pane ordinary is that it gets the LITERAL text and
+    an Enter, exactly as it did before the menu surface existed.
+
+    ⚠ TWO OF THE FOUR ARE REGRESSION GUARDS AND TWO ARE INVARIANT GUARDS — measured
+    at `18cfe7df`, not assumed. The `☐` marker and the `✔ Submit` tab strip are RED
+    at the shipped code (a marker alone opened the refusing branches). The prose
+    naming `Review your answers` and the bare markdown task list were already GREEN
+    there, because neither carries a `☐`/`☒` and the shipped precondition keyed on
+    that count alone — they pin the live SHAPES against a future widening, and are
+    not evidence about this fix. `test_a_TASK_LIST_above_a_REAL_menu_…` is the one
+    that catches the checkbox signal, and it is red at base.
+    """
+    assert AGENT.classify_pane(capture)[0] == AGENT.PANE_TEXT, (
+        f"{what} classified as {AGENT.classify_pane(capture)[0]}; it carries no numbered "
+        f"option row and no cursor row, so it is scrollback, not a live modal")
+
+    tmux_stub.set_captures(capture)
+    server.claim_batches = [[write(text="yes, go ahead")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "yes, go ahead"],
+        ["send-keys", "-t", "%12", "Enter"],
+    ], f"the reply to a pane showing {what} was not delivered: {tmux_stub.send_keys_calls()}"
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+
+
+def test_a_menu_whose_options_carry_DESCRIPTIONS_is_a_MENU_and_is_ANSWERED(
+        server, tmux_stub, tmp_path):
+    """🔴 THE SHAPE EVERY REAL ASK ON THIS HOST HAS, AND THE DETECTOR WAS BLIND TO IT.
+
+    `MENU_ROW_GAP = 4` could not span an option's own description, so `menu_block`
+    returned ZERO rows for all three live modals, every one of them classified
+    `text`, and the fleet sweep found not one drivable menu — a zero that read like
+    "no menus were up" and was actually "the detector cannot see one".
+
+    🔴 AND THE FIRST ATTEMPT AT THE AUDIT'S OWN FIX WOULD HAVE TYPED INTO THEM.
+    Requiring a cursored block before the refusing branches is right, but with a
+    block nothing could satisfy it turned three LIVE menus from `refused` into
+    `text` — the original defect, restored, on the exact panes the sweep was
+    supposed to be evidence about. The rule is now "no BLANK line between two
+    option rows", which is what the measurement says separates a menu from an
+    unrelated numbered list.
+    """
+    # The fixture must OVERSHOOT the old bound, or a mutant restoring it survives
+    # this test without the widened rule ever executing.
+    spans = [b["line"] - a["line"] for a, b in
+             zip(AGENT.menu_option_rows(DESCRIBED_MENU_CAPTURE),
+                 AGENT.menu_option_rows(DESCRIBED_MENU_CAPTURE)[1:])]
+    assert max(spans) >= 7, (
+        f"the fixture's widest inter-row span is {max(spans)}; the measured render's is 7 "
+        f"and the bound this test exists to move was 4 — at {max(spans)} it proves nothing")
+
+    kind, labels, why = AGENT.classify_pane(DESCRIBED_MENU_CAPTURE)
+    assert kind == AGENT.PANE_MENU, (
+        f"a real ask with described options classified as {kind} ({why}) — its option rows "
+        f"are {len(AGENT.menu_block(DESCRIBED_MENU_CAPTURE))} apart-by-description rows")
+    assert labels == ["Ledger", "Flatfile", "Type something.", "Chat about this"], labels
+
+    tmux_stub.set_captures(DESCRIBED_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        f"a described menu was not answered by its row's digit: "
+        f"{tmux_stub.send_keys_calls()}")
+
+
+def test_a_DESCRIBED_multi_question_chain_is_still_REFUSED(server, tmux_stub, tmp_path):
+    """The other direction of the same widening, and the one that could go wrong.
+
+    Making the rows visible must not make a multi-question chain answerable: two of
+    the three live modals measured carried a `✔ Submit` tab strip, so this is the
+    majority case, and half-answering it is its own wrong answer.
+    """
+    assert (AGENT.classify_pane(DESCRIBED_MULTI_QUESTION_CAPTURE)[0]
+            == AGENT.PANE_MULTI_QUESTION), AGENT.classify_pane(DESCRIBED_MULTI_QUESTION_CAPTURE)
+
+    tmux_stub.set_captures(DESCRIBED_MULTI_QUESTION_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+    assert "MULTI-question" in body["detail"], body
+
+
+def test_a_BLANK_line_between_two_numbered_rows_breaks_the_block():
+    """🔴 WHAT THE WIDENING MUST NOT COST, pinned in both directions.
+
+    The blank line is the signal, not the distance: an option's description never
+    contains one (measured on every live modal), and two unrelated numbers on a
+    pane are separated by one. So a pair six lines apart with PROSE between them is
+    one block and a pair one line apart with a BLANK between them is not.
+    """
+    prose = ("  ❯ 1. Ledger\n"
+             "     it keeps a journal\n"
+             "     and replays it\n"
+             "     and costs an fsync\n"
+             "    2. Flatfile\n")
+    assert len(AGENT.menu_block(prose)) == 2, AGENT.menu_block(prose)
+
+    blanked = "  ❯ 1. Ledger\n\n    2. Flatfile\n"
+    assert AGENT.menu_block(blanked) == [], AGENT.menu_block(blanked)
+
+    # And MENU_ROW_GAP is still a live bound: prose longer than it does NOT join.
+    far = ("  ❯ 1. Ledger\n"
+           + "     more description\n" * (AGENT.MENU_ROW_GAP + 1)
+           + "    2. Flatfile\n")
+    assert AGENT.menu_block(far) == [], (
+        f"MENU_ROW_GAP={AGENT.MENU_ROW_GAP} is not enforced, so an arbitrarily long span of "
+        f"prose joins two unrelated numbers: {AGENT.menu_block(far)}")
+
+
+def test_a_TASK_LIST_above_a_REAL_menu_does_not_make_it_a_multiSelect(
+        server, tmux_stub, tmp_path):
+    """🔴 THE CHECKBOX SIGNAL USED TO MATCH ANYWHERE IN THE CAPTURE.
+
+    A markdown task list in the transcript above a genuine single-question ask made
+    the whole pane read as a multiSelect list, so every reply to that ask was
+    refused. The task list has no cursor glyph and stands nowhere near the option
+    rows; the multiSelect signal is a CURSORED run of checkbox rows.
+    """
+    mixed = ("● Remaining:\n  - [ ] wire the store\n  - [x] read the pane\n\n"
+             + SINGLE_MENU_CAPTURE)
+    assert AGENT.classify_pane(mixed)[0] == AGENT.PANE_MENU, AGENT.classify_pane(mixed)
+
+    tmux_stub.set_captures(mixed, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        "a markdown task list above the menu made it unanswerable: "
+        f"{tmux_stub.send_keys_calls()}")
+
+
+def test_the_checkbox_ROW_pattern_requires_the_box_where_the_NUMBER_would_stand():
+    """The pattern's contract, asserted directly — and NOT pinned by mutation.
+
+    🔴 STATED PLAINLY BECAUSE A CLAIM OF COVERAGE HERE WOULD BE FALSE. Three
+    mutants were run against the anchoring and all three SURVIVED the whole file:
+    removing the `^`, swapping `.match` for `.search`, and removing BOTH together.
+    The first two are equivalent mutants — with `^` in the pattern and no
+    MULTILINE, `.search` anchors exactly as `.match` does, so neither spelling is
+    individually breakable. The third genuinely widens the pattern, and no
+    REALISTIC pane distinguishes it: a mid-line `[x]` yields `cursor=False`, so it
+    still cannot form the CURSORED run the multiSelect branch needs. Constructing a
+    pane that does (`1. Ledger ❯ [x] more`) would be inventing a render nobody has
+    measured, and a test built on that would assert a fiction.
+
+    So this pins the pattern's SEMANTICS rather than pretending to a kill: the
+    checkbox must stand where the number would, first thing on the row after an
+    optional cursor and an optional bullet. It catches a rewrite of the pattern; it
+    does not catch a change of the anchoring alone, and that gap is recorded rather
+    than papered over.
+    """
+    m = AGENT.MENU_CHECKBOX_ROW_RE
+    # The measured multiSelect render, cursored and not.
+    assert m.match("  ❯ [ ] 1. Ledger")
+    assert m.match("    [x] 2. Flatfile")
+    assert m.match("  ❯ [✔] 1. Ledger")
+    # A markdown task list is row-shaped too — the CURSOR is what excludes it, and
+    # `menu_checkbox_block` is where that lives, not here.
+    assert m.match("  - [ ] wire the store")
+    # A checkbox that is NOT where the number would stand.
+    assert not m.match("    2. Flatfile [x] (current)")
+    assert not m.match("devrc $ grep -c '[ ]' TODO.md")
+    assert not m.match("  ❯ 1. Ledger [x]")
+    # And the cursor group is what `menu_checkbox_block` reads.
+    assert m.match("  ❯ [ ] 1. Ledger").group(1) == AGENT.MENU_CURSOR
+    assert m.match("    [ ] 2. Flatfile").group(1) is None
+
+
+def test_an_option_LABEL_containing_a_checkbox_does_not_refuse_the_menu():
+    """The same signal, reached the other way: `[x]` inside a row's own label."""
+    labelled = SINGLE_MENU_CAPTURE.replace(
+        "    2. Flatfile\n", "    2. Flatfile [x] (current)\n")
+    kind, labels, why = AGENT.classify_pane(labelled)
+    assert kind == AGENT.PANE_MENU, (kind, why)
+    assert labels[1] == "Flatfile [x] (current)", labels
+
+
+def test_a_REAL_multiSelect_list_is_STILL_refused_and_the_CURSOR_is_why():
+    """🔴 THE OTHER DIRECTION OF THE SAME CHANGE, PINNED SO IT CANNOT DRIFT.
+
+    Narrowing the checkbox signal must not reopen the hole it closes: a live
+    multiSelect list is still refused, and `menu_block` cannot see it at all
+    (the checkbox stands before the number), so this is the ONLY thing standing
+    between a multiSelect ask and a blind type-and-Enter.
+
+    ⚠ THE RESIDUAL THIS TEST ALSO STATES: the cursor glyph is load-bearing. Strip
+    it and the same list reads as a TEXT pane, because there is no numbered block
+    to fall back on. A live Claude Code modal always draws the cursor — that is the
+    repo's own measured live-modal signal in `waiting-signal.md` — so what is lost
+    is coverage of an UNFOCUSED checkbox list, which is not a modal awaiting an
+    answer. Stated rather than left for someone to find.
+    """
+    assert AGENT.classify_pane(MULTI_SELECT_MENU_CAPTURE)[0] == AGENT.PANE_MULTI_SELECT
+    assert AGENT.menu_block(MULTI_SELECT_MENU_CAPTURE) == [], (
+        "the numbered block now sees a multiSelect row, so the checkbox signal is no "
+        "longer the only thing refusing one")
+
+    uncursored = MULTI_SELECT_MENU_CAPTURE.replace("  ❯ [ ] 1.", "    [ ] 1.")
+    assert AGENT.classify_pane(uncursored)[0] == AGENT.PANE_TEXT, (
+        "the stated residual has changed — update the docstring, not this assertion")
+
+    # And a single cursored checkbox row is not a list: MENU_MIN_OPTIONS applies
+    # here exactly as it does to the numbered block.
+    lone = "● Noting one item:\n  ❯ [ ] wire the store\n\ndevrc git:(main) $ \n"
+    assert AGENT.classify_pane(lone)[0] == AGENT.PANE_TEXT, AGENT.classify_pane(lone)
+
+
+# --------------------------------------------------------------------------- #
+# 16i. A reply that names a row EXACTLY has a route even with no free-text row.
+# --------------------------------------------------------------------------- #
+def test_a_reply_naming_a_row_EXACTLY_is_delivered_with_NO_free_text_row(
+        server, tmux_stub, tmp_path):
+    """🔴 THE PRECONDITION THAT REFUSED THIS WAS BOTH REDUNDANT AND WRONG.
+
+    `classify_pane` used to refuse a cursored numbered menu carrying no recognised
+    free-text row BEFORE any label matching happened, with the reason "a reply that
+    matches no option has no route" — a statement about a reply it had not looked
+    at. This reply names row 2 exactly. The row is on screen; its digit answers it.
+    """
+    tmux_stub.set_captures(NO_FREE_TEXT_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        "an exactly-matching reply was refused because the menu offers no free-text row: "
+        f"{tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+
+
+def test_a_reply_matching_NOTHING_with_no_free_text_row_is_refused_BY_THE_DELIVERY(
+        server, tmux_stub, tmp_path):
+    """The pair to the test above, and what makes deleting the precondition safe.
+
+    The refusal still happens — it just happens at the point where it is TRUE, and
+    it names the count it measured. `0 free-text rows` is reachable only because the
+    precondition is gone.
+    """
+    tmux_stub.set_captures(NO_FREE_TEXT_MENU_CAPTURE)
+    server.claim_batches = [[write(text="neither, use the ledger for now")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+    assert "offers 0 free-text rows" in body["detail"], body
+
+
+# --------------------------------------------------------------------------- #
+# 16j. 🔴 `ctrl+g` ANYWHERE IS NOT FOCUS — the FOURTH instance of this PR's own
+#      defect, and the two clauses that shielded each other from the mutants.
+# --------------------------------------------------------------------------- #
+#: The free-text row UNFOCUSED (cursor on row 1) while `ctrl+g` is on screen for an
+#: unrelated reason. The shipped guard substring-matched the whole capture, so it
+#: called this focused, typed the reply into an unfocused menu, pressed Enter, and
+#: reported `delivered` — "typed the reply into menu row 3 and committed it".
+CTRL_G_BUT_UNFOCUSED_CAPTURE = SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE.replace(
+    "    1. Ledger\n", "  ❯ 1. Ledger\n").replace(
+    "  ❯ 3. Type something.\n", "    3. Type something.\n")
+
+
+def test_ctrl_g_ANYWHERE_is_not_the_free_text_row_TAKING_FOCUS(
+        server, tmux_stub, tmp_path):
+    """🔴 RED AT 18cfe7df: the reply was typed and Enter pressed into an UNFOCUSED
+    menu, and the agent reported `delivered`.
+
+    The capture carries `ctrl+g to edit in Nvim` in its footer and the cursor on
+    ROW 1 — the state that exists whenever the hint is drawn for its own reasons.
+    The only correct outcome is the digit alone, no text, no Enter, and `failed`.
+    """
+    assert "ctrl+g" in CTRL_G_BUT_UNFOCUSED_CAPTURE, "the fixture lost its hint"
+    rows = AGENT.menu_block(CTRL_G_BUT_UNFOCUSED_CAPTURE)
+    assert [r["cursor"] for r in rows] == [True, False, False, False], rows
+
+    tmux_stub.set_captures(CTRL_G_BUT_UNFOCUSED_CAPTURE)   # repeats for ever
+    server.claim_batches = [[write(text="neither, use the ledger for now")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "3"]], (
+        "`ctrl+g` somewhere in the pane was read as the free-text row taking focus, so "
+        "the reply was typed into an unfocused menu and the Enter answered whichever row "
+        f"is highlighted: {tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "did not take focus" in body["detail"], body
+    assert "Enter was NOT pressed" in body["detail"], body
+
+
+def test_the_focus_predicate_reads_the_CURSOR_ON_THAT_ROW_and_nothing_else(monkeypatch):
+    """The predicate driven directly, both directions, with the hint present in BOTH.
+
+    🔴 WHY THIS EXISTS AS WELL AS THE AGENT-RUN TEST ABOVE. The two clauses of the
+    old `or` shielded each other from mutation: deleting either one left the whole
+    suite green at `149 passed`, because the measured focused render satisfies both.
+    With the hint clause gone the cursor clause is the only one there is, and this
+    pins it against a capture where the hint would answer differently.
+    """
+    calls = {"n": 0}
+
+    def capture_of(text):
+        def fake(pane):
+            calls["n"] += 1
+            return text, ""
+        return fake
+
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 2)
+
+    monkeypatch.setattr(AGENT, "capture_pane",
+                        capture_of(SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE))
+    assert AGENT.menu_free_text_focused("%12", 2) is True, (
+        "the cursor on row 3 is the focus signal and it was not read")
+
+    monkeypatch.setattr(AGENT, "capture_pane",
+                        capture_of(CTRL_G_BUT_UNFOCUSED_CAPTURE))
+    assert AGENT.menu_free_text_focused("%12", 2) is False, (
+        "a capture carrying `ctrl+g` with the cursor on row 1 was called focused")
+    assert calls["n"] >= 3, f"the predicate never read the pane: {calls}"
+
+
+# --------------------------------------------------------------------------- #
+# 16k. 🔴 A WRAPPED ROW — the third instance, inside the guard written for the
+#      second. A reply too long for the row renders with NO truncation mark.
+# --------------------------------------------------------------------------- #
+def test_a_reply_WRAPPED_in_its_row_is_not_reported_delivered(server, tmux_stub, tmp_path):
+    """🔴 RED AT 18cfe7df, reporting `delivered` for an uncommitted reply.
+
+    `menu_committed` asked `label_matches`, which REQUIRES a truncation mark before
+    it will prefix-match — correct for deciding which row to press, and wrong for
+    deciding whether the reply is still sitting in one. A row too narrow for the
+    reply renders as `N. <head>` with no mark at all, so nothing matched, the
+    function concluded the reply had left the menu, and the card said `Delivered`.
+    """
+    long_reply = "neither of those, keep the ledger until the migration lands"
+    wrapped = SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE.replace(
+        "  ❯ 3. Type something.\n", "  ❯ 3. neither of those, keep the led\n")
+    assert "…" not in wrapped and "..." not in wrapped, "the fixture is the MARKED case"
+
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE,
+                           SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE,
+                           wrapped)   # repeats for ever: Enter never took
+    server.claim_batches = [[write(text=long_reply)]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "3"],
+        ["send-keys", "-t", "%12", "-l", "--", long_reply],
+        ["send-keys", "-t", "%12", "Enter"],
+    ], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", (
+        "a reply wrapped into its row read as committed, so an uncommitted answer was "
+        f"reported as delivered: {body}")
+    assert "still sitting in a menu row" in body["detail"], body
+
+
+def test_the_readback_predicate_is_WIDER_than_the_row_MATCHING_one():
+    """The two predicates, side by side, because folding them would be the bug.
+
+    `label_matches` decides which row to PRESS — an unmarked prefix match there
+    would select a short row for a longer, different reply. `menu_row_holds_reply`
+    decides whether a reply is still SITTING in a row, where the same looseness is
+    the safe direction: a false positive costs a `failed` on a good delivery.
+    """
+    reply = "neither of those, keep the ledger until the migration lands"
+    head = "neither of those, keep the led"
+
+    assert not AGENT.label_matches(head, reply), (
+        "label_matches now prefix-matches WITHOUT a truncation mark, so a short option "
+        "row can be selected for a longer, different reply")
+    assert AGENT.menu_row_holds_reply(head, reply)
+    assert AGENT.menu_row_holds_reply(reply, reply)
+    assert AGENT.menu_row_holds_reply("neither of those, keep the led…", reply)
+
+    # Too short to be evidence of anything, and an unrelated row.
+    assert not AGENT.menu_row_holds_reply("neither", reply)
+    assert not AGENT.menu_row_holds_reply("Ledger", reply)
+    # A row LONGER than the reply is not a rendering of it — the reply cannot be a
+    # wrap of something longer than itself.
+    assert not AGENT.menu_row_holds_reply(reply + " and more", reply)
+
+
+def test_a_committed_reply_is_not_read_off_a_pane_that_KEEPS_CHANGING(
+        server, tmux_stub, tmp_path):
+    """🔴 `menu_committed` CONCLUDES FROM AN ABSENCE TOO, so it reads it twice.
+
+    Its verdict is "no row holds the reply", and a half-drawn frame shows no rows
+    at all — so one read of a pane mid-redraw reported `delivered` for a reply that
+    was still sitting in its row on the very next frame. The fixture alternates
+    between the reply sitting in row 3 and a pane with no rows, so no consecutive
+    pair of reads ever agrees that the reply has gone.
+    """
+    reply = "neither, use the ledger for now"
+    typed = SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE.replace(
+        "  ❯ 3. Type something.\n", f"  ❯ 3. {reply}\n")
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE,
+                           SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE,
+                           *([ANSWERED_CAPTURE, typed] * 6))
+    server.claim_batches = [[write(text=reply)]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "3"],
+        ["send-keys", "-t", "%12", "-l", "--", reply],
+        ["send-keys", "-t", "%12", "Enter"],
+    ], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", (
+        "one frame showing no menu rows was read as the reply having been committed: "
+        f"{body}")
+    assert "still sitting in a menu row" in body["detail"], body
+
+
+# --------------------------------------------------------------------------- #
+# 16l. 🔴 `delivered` MUST NOT BE READ OFF A HALF-DRAWN FRAME, and the detail must
+#      not claim a selection nothing measured.
+# --------------------------------------------------------------------------- #
+def test_a_pane_that_never_HOLDS_STILL_is_reported_UNKNOWN_not_delivered(
+        server, tmux_stub, tmp_path):
+    """🔴 THE READ-BACK USED TO RETURN TRUE ON THE FIRST NON-MATCHING READ.
+
+    Its verdict rests on NOT seeing the menu, and that is also what a half-drawn
+    frame looks like — so a pane whose state never settles reported `delivered`,
+    while the SAME frame at classify time is one this agent would type into. Two
+    ends of one delivery, two answers.
+
+    The fixture alternates between two states that are each not the original menu
+    and never equal to each other, so no pair of consecutive reads ever agrees.
+    """
+    other = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
+    flicker = [ANSWERED_CAPTURE, other] * 5
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, *flicker)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        f"the agent re-sent the answer: {tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", (
+        "a pane that never held one state long enough to be read twice was reported as a "
+        f"delivery: {body}")
+    assert "never held one state" in body["detail"], body
+    assert "UNKNOWN" in body["detail"], body
+    assert "nothing was re-sent" in body["detail"], body
+
+
+def test_the_delivered_detail_says_what_was_OBSERVED_not_that_a_row_was_SELECTED(
+        server, tmux_stub, tmp_path):
+    """🔴 EVERY SENTENCE IN AN AUDIT ROW IS A CLAIM.
+
+    The old detail read `selected menu row 2 by its digit` — a selection nothing on
+    this path measures. What the read-back can vouch for is that the menu is gone,
+    or that a different one is up, and that is what it now says.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+    assert body["detail"] == "menu row 2 was sent and the menu is no longer on screen", body
+
+    tmux_stub.reset()
+    server.requests.clear()
+    second = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, second)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+    assert body["detail"] == "menu row 2 was sent and a different menu is now on screen", body
+
+
+def test_the_settle_verdict_is_driven_directly_through_all_FOUR_outcomes(monkeypatch):
+    """Each verdict with its own observed string, so none can be reached by accident.
+
+    🔴 THE TWO FALSE ONES ARE DIFFERENT FACTS AND MUST NOT SHARE A SENTENCE. "the
+    menu did not move" says the ask is still up; "never held one state" says the
+    pane could not be read consistently at all. An operator acts differently on
+    each, and a single wording would have hidden the second behind the first — which
+    is how the half-drawn frame went unnoticed.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 4)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+    other = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
+
+    def feed(*records):
+        seq = list(records)
+
+        def fake(pane):
+            return (seq.pop(0) if len(seq) > 1 else seq[0]), ""
+        monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    feed(ANSWERED_CAPTURE)
+    assert AGENT.menu_settled("%12", labels) == (
+        True, "the menu is no longer on screen")
+
+    feed(other)
+    assert AGENT.menu_settled("%12", labels) == (
+        True, "a different menu is now on screen")
+
+    feed(SINGLE_MENU_CAPTURE)
+    assert AGENT.menu_settled("%12", labels) == (False, "the menu did not move")
+
+    feed(ANSWERED_CAPTURE, other, ANSWERED_CAPTURE, other)
+    assert AGENT.menu_settled("%12", labels) == (
+        False, "the pane never held one state long enough to be read twice")
+
+    # An UNREADABLE read is not an observation, so it cannot be half of an
+    # agreeing pair — two `gone` reads separated by one error must not settle on
+    # the strength of the pair straddling it.
+    reads = {"n": 0}
+
+    def flaky(pane):
+        reads["n"] += 1
+        return ("", "tmux exited 1") if reads["n"] == 2 else (ANSWERED_CAPTURE, "")
+    monkeypatch.setattr(AGENT, "capture_pane", flaky)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 3)
+    assert AGENT.menu_settled("%12", labels) == (
+        False, "the pane never held one state long enough to be read twice")
+
+
+# --------------------------------------------------------------------------- #
 # 16g. REAL tmux. The stub cannot prove `capture-pane -p -t %N` is a call real
 #      tmux accepts, nor that the detector works on bytes a terminal produced.
 # --------------------------------------------------------------------------- #
@@ -3573,3 +4220,112 @@ def test_a_capture_of_a_pane_that_does_NOT_EXIST_is_an_ERROR_not_an_empty_read(
     captured, err = AGENT.capture_pane("%9301")
     assert captured == "", captured
     assert err, "a capture of a non-existent pane reported no error"
+
+
+# --------------------------------------------------------------------------- #
+# 16m. 🔴 THE SEAM WITH `session-manager`'S OWN MENU PREDICATE.
+#
+# `scripts/session-manager` decides "is a modal up" for its `waiting` signal, from
+# `_MENU_SELECTED_RE` + `_MENU_OPTION_RE`, with the measured render facts in
+# `claude/skills/session-manager/reference/waiting-signal.md`. This agent decides
+# "which row carries which label, and is this a shape I can drive". Two predicates
+# over the same bytes, worded independently — the shape this repo already
+# consolidated for the TEXT policy (`scripts/lib/tmux_text_policy.py`, pinned two
+# ways) and has not for the MENU one.
+#
+# 🔴 THEY ARE NOT MERGED, AND THAT IS A DECISION WITH A REASON. session-manager's
+# predicate feeds a signal with a measured 11/11 precision; changing it is a change
+# to that detector and belongs in its own PR with its own dogfood. What is pinned
+# here instead is the RELATIONSHIP, because that is what found the blocker: on the
+# live fleet session-manager saw a modal on the three panes this agent's
+# `menu_block` could not see, and that disagreement is how `MENU_ROW_GAP = 4` was
+# caught. A ledger that fails when either side drifts is the cheap half of
+# consolidation and the half that does the finding.
+# --------------------------------------------------------------------------- #
+def test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus():
+    """🔴 A RELATIONSHIP, NOT A COMPONENT — and the ONE divergence is enumerated.
+
+    Every capture in the corpus is labelled with whether a live modal is up, and
+    BOTH predicates are checked against that label. So the ledger fails when this
+    agent stops seeing a modal (the blocker: `MENU_ROW_GAP = 4` blinded it to every
+    real render), when it starts seeing one that is not there (the live
+    false-positive direction), and when session-manager drifts either way.
+
+    ⚠ THE TWO ENUMERATED DIVERGENCES ARE FINDINGS, NOT CARVE-OUTS, and BOTH were
+    measured by this guard rather than assumed:
+
+      1. session-manager's `_MENU_OPTION_RE` requires the number first, so
+         `❯ [ ] 1. Ledger` matches nothing and it does **not** see a multiSelect
+         modal at all — a gap in the `waiting` detector.
+      2. session-manager has no adjacency rule, so two numbered rows separated by a
+         BLANK line read as a modal to it and not to this agent. Its predicate is
+         the broader of the two in both cases; for a `waiting` signal that is
+         checked by its own measured precision, and for a surface that PRESSES KEYS
+         it would be unsafe.
+
+    Neither is fixed here — changing that detector belongs in its own PR. Each is
+    one literal row below rather than a silent mismatch, so closing either moves
+    this test. Both sides' verdicts are written out, so the ledger fails when
+    EITHER predicate drifts, in either direction.
+    """
+    sm = _load_collector()
+    sm_selected = sm._MENU_SELECTED_RE
+    sm_option = sm._MENU_OPTION_RE
+
+    def session_manager_sees_a_modal(captured):
+        lines = captured.splitlines()
+        if not any(sm_selected.match(l) for l in lines):
+            return False
+        return sum(1 for l in lines if sm_option.match(l)) >= 2
+
+    def agent_sees_a_modal(captured):
+        return AGENT.classify_pane(captured)[0] != AGENT.PANE_TEXT
+
+    # (capture, this agent's verdict, session-manager's verdict) — BOTH written
+    # out, so a drift on either side fails rather than being absorbed.
+    CORPUS = [
+        (SINGLE_MENU_CAPTURE, True, True),
+        (DESCRIBED_MENU_CAPTURE, True, True),
+        (DESCRIBED_MULTI_QUESTION_CAPTURE, True, True),
+        (MULTI_QUESTION_MENU_CAPTURE, True, True),
+        (MULTI_QUESTION_REVIEW_CAPTURE, True, True),
+        (NO_FREE_TEXT_MENU_CAPTURE, True, True),
+        (TWO_CURSOR_MENU_CAPTURE, True, True),
+        (SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE, True, True),
+        # 🔴 DIVERGENCE 1: session-manager cannot see a multiSelect row at all.
+        (MULTI_SELECT_MENU_CAPTURE, True, False),
+        # 🔴 DIVERGENCE 2: session-manager has no adjacency rule, so a BLANK line
+        # between two numbered rows still reads as a modal to it.
+        ("  ❯ 1. Ledger\n\n    2. Flatfile\n", False, True),
+        (DEFAULT_PROMPT_CAPTURE, False, False),
+        (CLAUDE_TEXT_PROMPT_CAPTURE, False, False),
+        (ANSWERED_CAPTURE, False, False),
+        ("", False, False),
+        ("1. install the thing\n2. run the thing\n3. profit\n", False, False),
+        ("  ❯ 1. Ledger\n", False, False),
+    ] + [(cap, False, False) for cap, _ in QUOTED_MENU_SHAPES]
+
+    disagreements = []
+    for capture, want_agent, want_sm in CORPUS:
+        got_agent = agent_sees_a_modal(capture)
+        got_sm = session_manager_sees_a_modal(capture)
+        if got_agent is not want_agent:
+            disagreements.append(("agent", want_agent, got_agent, capture[:60]))
+        if got_sm is not want_sm:
+            disagreements.append(("session-manager", want_sm, got_sm, capture[:60]))
+    assert not disagreements, (
+        "the two menu predicates no longer match the ledger. A row where the AGENT "
+        "moved is a live defect — this is the guard the MENU_ROW_GAP blocker was "
+        "found by. A row where SESSION-MANAGER moved means its `waiting` detector "
+        f"changed and this ledger needs re-deriving:\n"
+        + "\n".join(f"  {who}: wanted {want}, got {got}, capture={cap!r}"
+                    for who, want, got, cap in disagreements))
+
+    # 🔴 THE POSITIVE CONTROLS. A corpus of one kind proves nothing, and a ledger
+    # whose two columns are identical everywhere is not measuring a relationship —
+    # it is measuring one predicate twice.
+    assert sum(1 for _, a, _ in CORPUS if a) >= 8, "the corpus has no modal rows"
+    assert sum(1 for _, a, _ in CORPUS if not a) >= 8, "the corpus has no text rows"
+    assert sum(1 for _, a, s in CORPUS if a is not s) == 2, (
+        "the enumerated divergences are no longer exactly the two the docstring "
+        "names — re-derive them rather than adjusting the count")
