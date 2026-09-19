@@ -43,14 +43,27 @@ notifications and repo browse are dropped.
   `KILLED(attributed)` (killed for its OWN stated reason, not an unrelated error) with its
   killer tests named. Control pristine **733 passed / 0 failed**; observation floor 366 tests
   must RUN, met by every row; **P1 positive control KILLED — the battery can observe.**
-  `restore: OK` with all four file hashes. This upgrades the rows from *"apply"* to *"kill"* —
-  the two claims this doc was careful to separate.
-- 🔴 **DRIFT-CHECK EXITS rc 17 ON BOTH HOSTS — real, and OUTSIDE this arc.**
+  This upgrades the rows from *"apply"* to *"kill"* — the two claims this doc was careful to
+  separate. 🔴 **Restore verified INDEPENDENTLY, not from the battery's own `restore: OK`** —
+  a `git -C <worktree> status --porcelain` after the run returned empty. The self-report is a
+  claim about the instrument; the `git status` is the evidence.
+- **DRIFT-CHECK EXITS rc 17 ON BOTH HOSTS — real, OUTSIDE this arc, and OWNED BY THE DEADMAN.**
   `homelab-talos/containers/clawgate` is the `srcDir` subtree a `nix/pkgs` package is BUILT
-  FROM, and it is **3 behind `origin/trunk` on workbench AND laptop** (repo-wide 4 / 7 behind).
-  Whatever version string that binary carries, the code in it is the code in that subtree.
-  ⚠ That tree is **DIRTY on both** (11 paths workbench, 1 laptop) and those paths are IN the
-  built binary — so a `pull --ff-only` there is not a safe blind action. Not acted on; see rank 2.
+  FROM, and it is behind `origin/trunk` on workbench AND laptop. No ranked item is minted for
+  it: `drift-check.sh` already reports it every 6 h with an escalation ladder and
+  `notify-failure@` toasts, so a hand-written mirror here would be a second, staler copy of a
+  live check. Recorded as context, not as work.
+  🔴 **AND THE FIRST DRAFT OF THIS BULLET WAS FALSE IN THIS PR'S OWN HEADLINE WAY.** It said
+  the tree is *"DIRTY on both (11 paths workbench, 1 laptop) and those paths are IN the built
+  binary — so a `pull --ff-only` is not a safe blind action."* **MEASURED 2026-09-19, both
+  hosts: the SUBTREE is 0 dirty.** `clawgatectl.nix:131` is
+  `src = cleanSource (/. + srcDir)` with `srcDir = …/containers/clawgate`, so the build reads
+  that subtree ALONE; all 11 workbench paths are untracked and OUTSIDE it (`claudedocs/`,
+  five `__pycache__/`, `go.mod`, `opencode.json`, `tests/`) and the laptop's single path is a
+  `result` build symlink. **I applied the SUBTREE unit to the behind-count and the REPO unit
+  to the dirtiness, in the same sentence** — caught by `/audit-pr` round 0 and re-measured
+  here before accepting. A unit that is right for one half of a claim is not thereby right
+  for the other half.
 - **CARRIED FORWARD — durable decisions a replace would otherwise drop:**
   - **The three PRs of 2026-09-18, PR → squash sha** (verified by CONTENT on `origin/main`
     with a positive control, never by ancestry — a squash is never an ancestor):
@@ -63,7 +76,10 @@ notifications and repo browse are dropped.
     `apiMessage` read GitHub's top-level `message` and discarded `errors[]`, which is where
     every validation failure puts its reason. The shipped renderer surfaces `errors[]`, so the
     next occurrence names its own reason. Diagnosis preserved under Open investigations.
-- **The `forcing: none` ratchet:** this doc's previous list carried 2; this one carries 1.
+- **The `forcing: none` ratchet:** this doc's previous list carried 2; this one carries **0** —
+  the one item that would have been `none` was deleted by `/audit-pr` round 0 as a duplicate of
+  a live check, not re-tagged. ⚠ This line read "carries 1" until that deletion; a count in
+  prose goes stale the moment the thing it counts moves, and the fix round is what staled it.
 - **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again (nothing
   resolved). Its positive control confirms the board is reachable and the token accepted, but
   a wrong session id ALSO answers 200 with an empty array, so this is NOT a clean bill of
@@ -247,16 +263,14 @@ notifications and repo browse are dropped.
    pinned above it; the original rationale is quoted in the doc. Nothing was implemented for
    either, deliberately. Repo: devrc.
    forcing: user — both are look-and-feel calls on the operator's own daily tool.
-2. **Bring `homelab-talos/containers/clawgate` current on both hosts, or say why not.**
-   `drift-check.sh` exits **rc 17** on workbench AND laptop: the built-source subtree is 3
-   behind `origin/trunk`, so both hosts' `clawgatectl` is built from stale source under
-   whatever version string it prints. 🔴 **Not a blind `pull --ff-only`** — the tree is DIRTY on
-   both hosts (11 paths / 1 path) and the build reads the TREE, so those edits are already in
-   the binary; read them before moving the branch. Fix per host is
-   `git -C ~/workspace/homelab-talos pull --ff-only` then a `home-manager switch`.
-   Closes when `scripts/drift-check.sh` no longer reports rc 17 for that scope on either host.
-   Repo: homelab-talos (+ a switch on each devrc host).
-   forcing: none
+⚠ **A rank 2 was drafted here and DELETED by `/audit-pr` round 0 — recorded so it is not
+re-minted.** It asked a later session to bring `homelab-talos/containers/clawgate` current
+because `drift-check.sh` reports rc 17. `drift-check.sh` **already** checks that property
+against reality every 6 h, with an escalation ladder and `notify-failure@` toasts, so the item
+was a hand-written mirror of a live deadman — staler than the thing it copied, and tagged
+`forcing: none`, which declares it **not eligible to be worked** while its gate keeps firing.
+🔴 **The test round 0 applied is the one worth keeping: does something else already check this
+against reality?** A ranked item that duplicates a running check is not a work item.
 
 ## Defects (batched)
 - 🔴 **`mention-review --version` CANNOT distinguish builds.** `version.go` stayed `0.3.0`
@@ -289,8 +303,6 @@ notifications and repo browse are dropped.
 - `coldopen_test.go`'s `TestTabCyclesEveryPanelDuringTheSkeleton` seeds `visited` with the
   starting focus, so `seen[PanelDiff]` proves nothing there. Its unseeded sibling catches the
   case, so fixing it changes nothing anyone does.
-- ⚠ **REMOVED from this list: the eight mutation rows.** They are no longer unverified — see the
-  RESOLVED block under Open investigations. 9/9 KILLED(attributed), P1 control KILLED.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **"Local git first (~0ms)" is WRONG on the FIRST read, and that framing came from me.**
@@ -638,9 +650,17 @@ notifications and repo browse are dropped.
   **isolated**; and the restore moved OUT of a `finally` inside the killable process into a
   **wrapper** that restores by explicit path and then verifies with an **independent
   `git status`**. Paths taken from the battery's own constants, never retyped.
-- 🔴 **A `finally` CANNOT RESTORE A PROCESS THAT IS KILLED — and this cost a live mutant in a
-  working tree TWICE.** Both times the battery died and left a one-line mutation staged for
-  nothing, a silent-commit hazard. The tell the second time: exactly one dirty path.
+- 🔴 **A `finally` CANNOT RESTORE A PROCESS THAT IS KILLED — three times now, and the THIRD
+  names the mechanism the first two did not.** Each time the battery died and left a one-line
+  mutation in a working tree, a silent-commit hazard; the tell is exactly one dirty path.
+  **The third (2026-09-19) was caused by the HARNESS, not the battery: the Bash tool caps a
+  call at 10 minutes and SILENTLY CLAMPS a larger `timeout` argument**, so a 2,400 s run was
+  SIGTERM'd (exit 143) mid-battery, leaving a live `emit_click`/`surface` reordering mutant in
+  `scripts/mention-open.py`. 🔴 **The fix is not a bigger `timeout` value — it is
+  `run_in_background`, which is not subject to the cap.** The base clone was CLEAN only because
+  the run was in a throwaway worktree; that isolation is what made it harmless. Restore by
+  explicit path, then verify with an INDEPENDENT `git status` scoped to the battery's own
+  paths.
 - 🔴 **`pgrep -f <pattern>` MATCHED ITS OWN SHELL AND I READ IT AS EVIDENCE — twice, by two
   different actors in one session.** `pgrep -c -f 'mutation_battery'` returned a non-zero count
   with **no battery running**; "it's still running, just slow" was never a measurement. Resolve
@@ -688,21 +708,9 @@ notifications and repo browse are dropped.
   cause. It cleared on its own; re-trigger by merging `main` in (which also gates the merged
   tree) rather than an empty commit.
 
-- 🔴 **A KILLED MUTATION BATTERY STRANDED A LIVE MUTANT FOR THE THIRD TIME — AND WORKTREE
-  ISOLATION IS WHAT MADE IT HARMLESS.** The Bash tool caps a call at **10 minutes and silently
-  CLAMPS a larger `timeout` argument**, so a 2,400 s battery was SIGTERM'd (exit 143) mid-run.
-  `git status` immediately after showed `M scripts/mention-open.py` — a live `emit_click`/
-  `surface` reordering mutant sitting in the tree. **The base clone was CLEAN**, because the
-  battery had been run in a throwaway worktree rather than in place. Restore by explicit path,
-  then verify with an INDEPENDENT `git status`. 🔴 **The general fix is not a bigger `timeout`
-  value — it is `run_in_background`**, which is not subject to the cap. A `finally` still cannot
-  restore a process that is killed; this doc has now recorded that three times.
-- 🔴 **`| tail` ATE A NON-ZERO EXIT CODE AND I PRINTED `DRIFT_RC=0` OVER AN rc 17.** Piping
-  `scripts/drift-check.sh` through `tail -60` returned **tail's** status *and* cut off the
-  per-host block — the very lines this repo's CLAUDE.md says to read instead of the verdict. The
-  rc was recoverable only because the script also PRINTS its verdict in the text. **Redirect a
-  gate/checker to a FILE and read the file; never pipe one.** Same family as the documented
-  `nix build … | tail` trap, in a new tool.
+- **The `| tail` exit-code trap fired on `drift-check.sh`** — CLAUDE.md already documents it for
+  `nix build`; the one NEW clause is that the pipe also **cut off the per-host block**, which is
+  the half this repo tells you to read instead of the verdict. Redirect a checker to a file.
 - 🔴 **A STORED DEPLOY READING IS A HYPOTHESIS ABOUT *NOW*.** This doc's rank 1 asserted a store
   path and `ReadIntents`=0 as the reason to ship. Both were false by the time anyone read it —
   a switch had happened in between. The ranked item was still worth doing, but for payload the
@@ -726,19 +734,27 @@ notifications and repo browse are dropped.
 B=$(readlink -f "$(command -v mention-review)")
 R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
 grep -ac 'usage: mention-review' "$R"   # POSITIVE CONTROL — must be 1
-grep -ac 'ReadIntents' "$R"             # Phase 3 shipped — expect 2; 0 means NOT DEPLOYED
+grep -ac 'ReadIntents' "$R"             # Phase 3 shipped — NON-ZERO; 0 means NOT DEPLOYED
+#   🔴 Read zero-vs-non-zero ONLY. `grep -ac` counts NUL/newline chunks in a stripped
+#   binary, so the exact number is a layout artefact — pinning it would read a healthy
+#   rebuild as a broken deploy. The positive control is what scopes the zero.
 
-# Host convergence + the rc 17 finding. 🔴 REDIRECT, never pipe — `| tail` eats the status
-#   AND cuts the per-host block, which is the half you are told to read.
-scripts/drift-check.sh > /tmp/drift.txt 2>&1; echo "rc=$?"   # rc 17 = built-source stale
-grep -E '^\[(workbench|laptop)\]' /tmp/drift.txt
+# Host convergence. 🔴 REDIRECT, never pipe — `| tail` eats the status AND cuts the
+#   per-host block, which is the half you are told to read. Per-run path: a fixed
+#   /tmp name is truncated by every sibling agent on this box.
+D=$(mktemp -t drift.XXXXXX); scripts/drift-check.sh > "$D" 2>&1; echo "rc=$?"
+grep -E '^\[(workbench|laptop)\]' "$D"
 
-# The eight mutation rows (rank 3's evidence). 🔴 run_in_background — a 10-min tool cap
-#   SIGTERMs this mid-battery and strands a live mutant. Use a throwaway worktree.
+# The eight mutation rows. 🔴 run_in_background — a 10-min tool cap SIGTERMs this
+#   mid-battery and strands a live mutant. Use a throwaway worktree.
 PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 \
   scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K66,K67,K82,K92
-#   expect: CONTROL 733 passed · P1 KILLED · 9/9 killed · problems: none · restore: OK
-git status --porcelain   # MUST be empty afterwards — a killed run leaves a live mutant
+#   expect: CONTROL 733 passed · P1 KILLED · 9/9 killed · problems: none
+#   🔴 Then verify the restore INDEPENDENTLY of the battery's own `restore: OK`, scoped
+#   to the four paths it touches — a bare --porcelain false-fires in a worktree on
+#   .envrc / result / __pycache__:
+git status --porcelain -- nix/pkgs/tools/default.nix scripts/collector/claude/session-tailer.py \
+  scripts/lib/mention_scan.py scripts/mention-open.py   # MUST be empty
 
 # The picker's sort key on main (Tier B BELOW distance):
 git -C $DEVRC grep -n 'return (klass, distance' origin/main -- scripts/mention-open.py
