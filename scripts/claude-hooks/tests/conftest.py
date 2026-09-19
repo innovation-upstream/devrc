@@ -278,3 +278,69 @@ except ModuleNotFoundError as _guard9_exc:  # pragma: no cover - harness-only pa
         "PYTHONPATH=<repo>/scripts (see `_pytest` in "
         "scripts/tests/test_hook_tests_dir_collects.py)."
     ) from _guard9_exc
+
+
+# 🔴 GUARD 8's SECOND ENTRY POINT — the same ARRANGEMENT as GUARD 9 above: one
+# implementation, two registrations, no per-directory copy of the rule.
+# `scripts/run-tests.sh` loads `testlib/spool_plugin.py` with `-p` for every target;
+# this import is what gives a BARE `pytest scripts/claude-hooks/tests/...` — the
+# documented way to run one of these files — the same session-wide floor.
+#
+# ⚠ THE ARRANGEMENT IS THE SAME; THE IMPORT IS NOT, AND THIS COMMENT USED TO SAY "THE
+# SAME SHAPE AS GUARD 9" WITHOUT QUALIFYING IT. GUARD 9's import is wrapped in
+# `try/except ModuleNotFoundError` re-raising a named `RuntimeError`; this one is BARE,
+# deliberately. The diagnostic GUARD 9 prints names the only cause either import has
+# ever had — a COPY of this conftest whose harness did not export
+# `PYTHONPATH=<repo>/scripts` — and that cause makes `testlib` unimportable for BOTH.
+# GUARD 9's import runs FIRST, so a second copy of the same message here could never
+# execute for it: an unreachable guard, which reads as coverage while providing none.
+# The one case GUARD 9 does not cover is a `testlib` that imports while
+# `spool_plugin` is missing, and there the bare `ModuleNotFoundError` naming
+# `testlib.spool_plugin` already IS the diagnosis. So: comment corrected, code left
+# alone, and the reason written down rather than the symmetry restored.
+#
+# 🔴 IT BUYS OBSERVABILITY, WHICH THE AUTOUSE FIXTURE BELOW CANNOT. The fixture
+# redirects the spool and that is all: "0 rows leaked" from it is the same reassuring
+# zero a guard wired to nothing prints. The plugin writes a per-session MARKER
+# recording the `ACTIVITY_SPOOL_DIR` the process actually saw, and deliberately emits
+# one row down the REAL fallback path to prove the leak counter for this target can
+# move at all — the positive/negative control pair `run-tests.sh` requires and fails a
+# target for lacking. `scripts/tests/conftest.py` has carried this exact line through
+# the runner for months, which is the evidence it does not double-count a target's
+# session markers: the conftest's copy SHADOWS the plugin's for items in this
+# directory, so exactly one fixture instance runs.
+#
+# `test_hook_telemetry.py::test_this_directorys_conftest_is_a_spool_guard_entry_point`
+# asserts the module OBJECT, not the spelling — a mutant that moves this import under
+# `if False:` leaves both words on the page and must still go red.
+from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 PER-TEST SPOOL NARROWING — measured, not precautionary, and DEFENCE IN DEPTH
+# beside the session-wide floor imported above (the same pairing
+# `scripts/tests/conftest.py` documents: the floor protects, this narrows).
+#
+# `scripts/claude-hooks/hook_telemetry.py` appends a `source=hook` row to
+# `<ACTIVITY_SPOOL_DIR>/current.log` on every Stop-hook decision, and the activity
+# collector ships that spool to the operator's production ClickHouse. Several suites
+# here drive a hook's `main()` IN PROCESS, so the row lands wherever this process
+# resolves the spool — and `spool_emit.default_spool_dir()` falls back to
+# `${XDG_STATE_HOME:-~/.local/state}/activity/spool` when the variable is absent.
+#
+# MEASURED on this branch: `pytest scripts/claude-hooks/tests/test_next_step_nudge.py
+# -k main` with `ACTIVITY_SPOOL_DIR` unset wrote **2 rows** into the fallback spool.
+# `scripts/run-tests.sh` exports the variable (GUARD 8) so the gate never saw it; a
+# bare `pytest`, which is the documented way to run one of these files, did.
+#
+# This is the same fix GUARD 8 applied one level up, attached where it covers every
+# module in this directory rather than in the one suite that noticed. It is autouse
+# and unconditional: a test that wants its own spool simply sets the variable again
+# (monkeypatch is per-test and ordered), and a test that wants the REAL spool has no
+# business existing.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _devrc_hook_spool_isolation(tmp_path_factory, monkeypatch):
+    spool = tmp_path_factory.mktemp("hook-spool")
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(spool))
+    return spool

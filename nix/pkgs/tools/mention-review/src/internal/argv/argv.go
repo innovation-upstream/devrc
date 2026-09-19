@@ -2,11 +2,25 @@
 //
 // 🔴 THE CONTRACT IS INHERITED, NOT INVENTED. `scripts/mention-open.py` spawns
 // `alacritty … -e <review-exe> <owner/repo> <number>` — two plain argv entries,
-// no quoting anywhere. `nvim-octo.sh` validates them today and exits 64/65/66;
-// `scripts/tests/test_nvim_octo.py` pins that table. This package reproduces it
-// so the contract survives an implementation swap rather than being re-derived,
-// and `argv_test.go` carries the same cases so the two implementations can be
-// compared case for case.
+// no quoting anywhere. `nvim-octo.sh` validated them and exited 64/65/66;
+// `scripts/tests/test_nvim_octo.py` pinned that table. This package reproduces
+// it so the contract survived the implementation swap rather than being
+// re-derived, and `argv_test.go` carries the same cases so the two
+// implementations could be compared case for case.
+//
+// ⚠ BOTH CITED FILES WERE DELETED IN PHASE 4, and this comment is left stating
+// the provenance it actually has rather than being rewritten to claim a new
+// one. The contract is what it is BECAUSE it was copied; that is a fact about
+// the past and stays true. To read the sources, use git:
+//
+//	git log --diff-filter=D -- scripts/tests/test_nvim_octo.py
+//	git show <that-sha>^:scripts/tests/test_nvim_octo.py
+//	git show <that-sha>^:nix/pkgs/tools/nvim-octo/nvim-octo.sh
+//
+// 🔴 THIS PACKAGE IS NOW THE ONLY EXECUTABLE STATEMENT OF THE CONTRACT. Nothing
+// cross-checks it against a second implementation any more, so `argv_test.go`'s
+// hand-written literals are the whole guard — see its header, which says the
+// same thing from the test side.
 //
 // 🔴 THREE DISTINCT EXIT CODES, ON PURPOSE. A mutation test that breaks the
 // repository check and watches "a test fail" is green for the wrong reason if
@@ -131,13 +145,18 @@ const maxNum = 1 << 40
 // the shell contract rejects with code 66. The digit walk IS the contract;
 // the accumulator is incidental.
 //
-// 🔴 `"0"` IS ACCEPTED, DELIBERATELY, BECAUSE THE SHELL CONTRACT ACCEPTS IT.
-// `case "$num" in "" | *[!0-9]*)` rejects only the empty string and non-digits,
-// so `0` reaches octo today. Rejecting it here would make this binary and
-// `nvim-octo` disagree about a reachable input while both claim to implement
-// one contract — and `0` is not silently wrong, it produces the `NOT FOUND`
-// card §6.1 specifies. Matching the existing behaviour is worth more than
-// being marginally stricter than it.
+// 🔴 `"0"` IS ACCEPTED, DELIBERATELY, BECAUSE THE SHELL CONTRACT ACCEPTED IT.
+// `case "$num" in "" | *[!0-9]*)` rejected only the empty string and
+// non-digits, so `0` reached octo. Rejecting it here would have made the two
+// implementations disagree about a reachable input while both claimed to
+// implement one contract.
+//
+// ⚠ THAT ORIGINAL REASON EXPIRED IN PHASE 4 — octo is deleted, so there is no
+// second implementation left to agree with, and this comment does NOT invent a
+// replacement. What remains is the weaker reason the original already gave:
+// `0` is not silently wrong, it produces the `NOT FOUND` card §6.1 specifies.
+// So the behaviour is KEPT because changing it now would be a gratuitous
+// change with no defect behind it, not because agreement still requires it.
 //
 // ⚠ ONE KNOWN DIVERGENCE, AND IT IS STATED RATHER THAN HIDDEN: a digit string
 // long enough to overflow `int` is rejected with 66 where the shell would pass

@@ -9803,6 +9803,41 @@ RED_AT_BASE_R21: frozenset[str] = frozenset({
     "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition",
 })
 
+# 🔴 THE ATTRIBUTION GATE. Base `93685e1d`, the branch point for
+# `feat/audit-gate-enforce`. ONE test here, and the rest of that round's tests
+# are GUARDS — deliberately, and the reason is the one this module's header
+# gives: at `93685e1d` the script has no `ATTRIBUTION_STOP_RC`, no
+# `payload_from_header` and no `payload` field on `ClaimsBlock`, so every test
+# that NAMES one of those ERRORS there for want of a symbol, which is not
+# evidence of anything.
+#
+# The one below is different: it drives `main` with two consecutive
+# `payload=0` blocks and asserts a REFUSAL. At `93685e1d` that reaches an
+# assertion and fails on the ANSWER — rc 0 and a full delta brief, which is the
+# shipped defect. Measured by restoring that script into a scratch tree with
+# this module copied in unchanged, under `PYTHONDONTWRITEBYTECODE=1
+# -p no:cacheprovider`.
+RED_AT_BASE_R22: frozenset[str] = frozenset({
+    "test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
+})
+
+# 🔴 THE OVERLOADED EXIT CODE. Base `80379e83`, the branch point for
+# `fix/audit-dispatch-rc5-overload`. BOTH are regression coverage, not guards,
+# and the distinction from `RED_AT_BASE_R22` above is the point: every symbol
+# these two name — `ATTRIBUTION_STOP_RC`, `OVERRIDE_REFUSAL_HEADER`,
+# `OVERRIDE_FLAG` — already EXISTS at `80379e83` (#1765 shipped them), so a red
+# there is a wrong ANSWER and not an `AttributeError` about a missing name.
+#
+# MEASURED at `80379e83` with this module copied in unchanged, under
+# `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`: both fail on rc 5 where 4 is
+# required — the empty-`--override-attribution-gate` refusal returned the
+# attribution gate's own verdict from argument validation, including at round 1
+# with no claims blocks at all, where the gate cannot fire.
+RED_AT_BASE_R23: frozenset[str] = frozenset({
+    "test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict",
+    "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -9820,10 +9855,43 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "4552b745": RED_AT_BASE_R19,
     "b9a53101": RED_AT_BASE_R20,
     "6bf15a8f": RED_AT_BASE_R21,
+    "93685e1d": RED_AT_BASE_R22,
+    "80379e83": RED_AT_BASE_R23,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 THE ATTRIBUTION GATE'S GUARDS. Every one of these names something the
+    # gate INTRODUCED, so a red at `93685e1d` is that thing's absence and not a
+    # wrong answer — the vacuous shape this module refuses to count as
+    # regression coverage. MEASURED there (7 failed, 163 passed), the six break
+    # down as: four `AttributeError: module 'audit_dispatch' has no attribute
+    # 'ATTRIBUTION_REFUSAL_HEADER' / 'ATTRIBUTION_STOP_RC' /
+    # 'ATTRIBUTION_GATE_ENFORCEMENT'`, and two `SystemExit: 2` out of
+    # `argparse` — `--payload` is not a flag there. Note the FAIL-OPEN test's
+    # first assertion (`rc == 0`) PASSES at the base, which is the clearest
+    # statement of why it is a guard: a gate that does not exist fails open
+    # trivially, and what the test is worth is the other direction.
+    # Their evidence is their own in-test controls plus mutants G1-G9:
+    #   * the FAIL-OPEN test drives three distinct fail-open states and would
+    #     pass with the gate deleted, which is why it is not the regression
+    #     row — its value is the opposite direction, and `G4` (fail CLOSED on a
+    #     missing field) is the mutant that reaches it;
+    #   * the CONSECUTIVE test carries a positive control asserting the gate
+    #     still fires at all, so a does-not-fire suite cannot silently become a
+    #     claim about a gate wired to nothing;
+    #   * the OVERRIDE test asserts both directions (a reason is recorded, an
+    #     empty one is refused) and that a no-op override records NOTHING;
+    #   * the ROUND TRIP asserts `is not None` beside `== 0`, which is what
+    #     sees `payload or None` collapsing the consequential value;
+    #   * the SEAM is the only test in either module that reads the real skill
+    #     against the constant the refusal ships.
+    "test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field",
+    "test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less",
+    "test_the_gate_override_is_refused_without_a_reason_and_records_one_given",
+    "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads",
+    "test_a_negative_payload_count_is_refused_at_the_input",
+    "test_the_payload_field_the_gate_enforces_is_documented_in_the_skill",
     # 🔴 ROUND 0 — the requirements & deletion pass. Every entry below is a
     # guard, for the reason stated above their definitions: `--round 0` exists at no base
     # in `RED_AT_BASE_REFS`, so a red there would be argparse accepting an
@@ -10823,6 +10891,44 @@ FIX_MATRIX = (
      "command is covered ALONE rather than as a side effect of Q8",
      "test_the_determination_mandates_the_whitespace_and_move_blame_flags",
      "GUARD", "Q8, Q22"),
+    # --------------------------------------------------------------------- #
+    # THE ATTRIBUTION GATE. Base `93685e1d`. Not a finding against a previous
+    # round of this module at all — a finding against the SKILL, which stated
+    # the ladder's stop condition in prose with nothing evaluating it.
+    # --------------------------------------------------------------------- #
+    ("gate/1 the skill's stop condition was PROSE, so it was declined: on "
+     "`civitai/talos-infra` #1531 two consecutive zero-payload rounds were "
+     "recorded in writing at the end of round 3 and the ladder ran nine more "
+     "rounds (33 findings, all prose, the shipped payload unmoved since round "
+     "0, the last five commits byte-identical under `kustomize build`); devrc "
+     "#1712 reached round 24 printing `payload lines changed THIS round: 0`. "
+     "The per-round count was not machine-readable either — "
+     "`payload_summary_line` shipped a literal `X` — so the condition could "
+     "not have been evaluated by anything",
+     "test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
+     "RED@93685e1d", "G1-G3"),
+
+    # --------------------------------------------------------------------- #
+    # THE OVERLOADED EXIT CODE. Base `80379e83`. A finding against the round
+    # that shipped the gate: the refusal message was right and the NUMBER was
+    # not, which is the half a caller branches on.
+    # --------------------------------------------------------------------- #
+    ("gate/2 `ATTRIBUTION_STOP_RC` was returned by an INPUT refusal as well as "
+     "by the gate, so one number carried two claims. "
+     "`--override-attribution-gate \"\"` answered 5 — 'the ladder has left the "
+     "PR, post the remaining findings and stop' — from argument validation, "
+     "before any claims block was read; MEASURED at `80379e83` it answered 5 "
+     "at round 1 with no claims blocks in existence, where the gate is "
+     "structurally unable to fire. The stderr was unambiguous throughout, so "
+     "only a caller reading the code was misled — and the code is what an exit "
+     "code is for",
+     "test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict",
+     "RED@80379e83", "G11"),
+    ("gate/2b the two codes were never asserted to DIFFER, so nothing would "
+     "have caught the collapse in either direction — including a fix that "
+     "moved the GATE's own verdict instead of the input refusal",
+     "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
+     "RED@80379e83", "G1, G11"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -11255,4 +11361,633 @@ def test_the_two_ledgers_partition_this_modules_tests():
     assert not stale, (
         f"ledger entries naming no test: {sorted(stale)}. A ledger that names "
         "a deleted test reads as coverage that no longer runs."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ATTRIBUTION GATE — the ladder's own stop condition, as a BRANCH
+# --------------------------------------------------------------------------- #
+# `claude/skills/audit-pr/SKILL.md` has said "two consecutive rounds whose fixes
+# changed zero payload lines ⇒ the ladder has left the PR. Stop." since
+# 2026-08-26, with nothing evaluating it. MEASURED on `civitai/talos-infra`
+# #1531: the condition was met AND STATED IN WRITING at the end of round 3 —
+# round 2's ledger reads "zero payload lines changed" verbatim and rounds 3-11
+# each repeat it — and the ladder ran NINE MORE ROUNDS. 33 findings, every one
+# prose in a comment; the functional payload (two `image:` references) unmoved
+# since round 0; the last five commits rendering a byte-identical `kustomize
+# build` (10,843 B, `cmp` rc 0). devrc #1712 reached ROUND 24 with `payload
+# lines changed THIS round: 0`.
+#
+# 🔴 THE FIXTURE COUNTS ARE PAIRWISE DISTINCT AND NONE OF THEM IS 1, 2 OR A
+# ROUND NUMBER. `claude/RULES.md`: a fixture that can only ever produce the
+# constant's own value cannot see a mutant that hardcodes the literal. A
+# non-zero payload of `1` here would be indistinguishable from
+# `ATTRIBUTION_STOP_ROUNDS`, from a round number, and from an off-by-one in the
+# consecutive-rounds check; 7, 41 and 113 can only come from the header.
+PAYLOAD_NONZERO_A = 41
+PAYLOAD_NONZERO_B = 113
+PAYLOAD_NONZERO_C = 7
+
+# 🔴 LITERALS, AND THAT IS THE WHOLE POINT OF THEM. The regression test below
+# must fail at `93685e1d` on the ANSWER — rc 0 and a full delta brief — and a
+# test spelled `rc == ad.ATTRIBUTION_STOP_RC` fails there with
+# `AttributeError: module 'audit_dispatch' has no attribute
+# 'ATTRIBUTION_STOP_RC'`, which is a claim about a symbol's absence and not
+# about any behaviour. MEASURED: spelled that way it errored at the base, which
+# this module's own header says is not evidence of anything. So the regression
+# test names the numbers and strings directly, and
+# `test_the_gate_override_is_refused_without_a_reason_and_records_one_given`
+# carries the two-way check that these literals are still the script's own
+# constants — a guard may reference them, because a guard's evidence is the
+# mutation battery rather than a base ref.
+EXPECTED_GATE_RC = 5
+EXPECTED_GATE_REFUSAL = "🔴 REFUSING TO ASSEMBLE another round"
+EXPECTED_OVERRIDE_FLAG = "--override-attribution-gate"
+
+# 🔴 A LITERAL FOR THE SAME REASON, AND IT HAS NO CONSTANT TO NAME ANYWAY. The
+# input-refusal family in `main` is spelled as a bare `4` at all eight of its
+# sites, so there is nothing to import; and even if there were, the regression
+# tests below must fail at `80379e83` on the ANSWER (rc 5 — the gate's verdict
+# returned for an empty flag value) rather than on a missing symbol.
+#
+# 🔴 THE PAIR IS WHAT MATTERS, NOT EITHER NUMBER. The defect these two describe
+# is that ONE number meant TWO things, so the tests below assert the two are
+# DIFFERENT as well as asserting each value, and
+# `test_the_gate_override_is_refused_without_a_reason_and_records_one_given`
+# carries the two-way check against the script's own constant.
+EXPECTED_INPUT_REFUSAL_RC = 4
+
+
+def payload_block(round_no, payload, frm="aaaa1111", to="bbbb2222",
+                  claim=None, field=True):
+    """One `audit-claims` block, with or without a `payload=` field.
+
+    `field=False` is the LEGACY spelling — every block posted before the gate
+    shipped — and `payload` may be any raw string, so the unreadable cases are
+    built by this same function rather than by a second, divergent fixture.
+    """
+    head = f"round={round_no}"
+    if field:
+        head += f" payload={payload}"
+    head += f" audited={frm}..{to}"
+    body = claim or f"round {round_no} claims one thing"
+    return f"```audit-claims {head}\n1. {body}\n```"
+
+
+def two_zero_payload_rounds(older=3, newer=4):
+    """The corpus that MUST fire the gate: consecutive rounds, both zero."""
+    return [
+        payload_block(older, 0, "aaaa1111", "bbbb2222"),
+        payload_block(newer, 0, "bbbb2222", "cccc3333"),
+    ]
+
+
+def test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds():
+    """🔴 REGRESSION. Red at `93685e1d` — where this returned rc 0 and a brief.
+
+    The gate's whole failure mode is that it was a sentence: on #1531 it was
+    stated in writing and declined nine times, and on devrc #1712 the ladder
+    reached round 24 printing `payload lines changed THIS round: 0`. So the
+    assertion is on a REFUSAL, not on a warning: a stop condition that emits
+    the brief anyway is the state that was measured failing.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "5"], comments=two_zero_payload_rounds()
+    )
+    assert rc == EXPECTED_GATE_RC, (
+        f"expected the attribution gate's own rc {EXPECTED_GATE_RC}, got "
+        f"{rc}.\nstderr:\n{err}"
+    )
+    assert EXPECTED_GATE_REFUSAL in err, (
+        f"the refusal does not name itself:\n{err}"
+    )
+    assert not out.strip(), (
+        "the gate fired AND a brief was emitted — which is exactly the state "
+        f"#1531 ran twelve rounds in:\n{out[:400]}"
+    )
+    # It must say WHAT it read, per round. A refusal nobody can check against
+    # the PR is one an operator overrides on faith.
+    for fragment in ("round 3 —", "round 4 —", "`payload=0`"):
+        assert fragment in err, (
+            f"the refusal does not report {fragment!r}, so nobody can check it "
+            f"against the PR:\n{err}"
+        )
+    # And it must say that stopping is CORRECT, and how to continue anyway.
+    # "ending it is CORRECT" is a clause this script's own history records
+    # being LOST from hand-written briefs for seven rounds.
+    assert "CORRECT OUTCOME" in err, (
+        "the refusal does not say that ending the ladder is the correct "
+        f"outcome, which is how a stop reads as a tool failure:\n{err}"
+    )
+    assert EXPECTED_OVERRIDE_FLAG in err, (
+        f"the refusal names no way past itself:\n{err}"
+    )
+
+
+def test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field():
+    """🔴 EVERY BLOCK POSTED BEFORE THIS SHIPPED IS THIS CASE.
+
+    A gate that fired on a legacy corpus would have been a permanently-red one
+    from its first day — `claude/RULES.md`: that trains everyone to click
+    through. And an ABSENT field is not a zero: "a zero you did not watch the
+    command EARN is not a zero", which is the same rule the skill states as
+    "Ambiguous is not zero: the gate does not fire and the ladder continues".
+
+    THREE fail-open states, driven separately because they are different facts:
+    no field at all, an unreadable field, and a MIXED pair where only the newest
+    round states a zero. The third is the one a two-state check would miss.
+    """
+    legacy = [
+        payload_block(3, None, "aaaa1111", "bbbb2222", field=False),
+        payload_block(4, None, "bbbb2222", "cccc3333", field=False),
+    ]
+    rc, out, err = run_main(["900", "--round", "5"], comments=legacy)
+    assert rc == 0, (
+        f"a legacy corpus with no `payload=` field was refused (rc {rc}) — "
+        f"every block in the wild is this shape:\n{err}"
+    )
+    assert ad.ATTRIBUTION_REFUSAL_HEADER not in err
+    assert "DELTA re-audit" in out, "no brief was emitted for a legacy corpus"
+    # SILENT, not merely non-refusing: this is the state of every existing PR,
+    # so a warning here would be noise on every run forever.
+    assert "attribution gate" not in err.lower(), (
+        f"the gate is not silent on a legacy corpus:\n{err}"
+    )
+
+    unreadable = [
+        payload_block(3, "lots", "aaaa1111", "bbbb2222"),
+        payload_block(4, "-0", "bbbb2222", "cccc3333"),
+    ]
+    rc2, out2, err2 = run_main(["900", "--round", "5"], comments=unreadable)
+    assert rc2 == 0, (
+        f"an unreadable `payload=` field was treated as a stop (rc {rc2}). It "
+        f"is not a zero — it is not a number at all:\n{err2}"
+    )
+    assert "DELTA re-audit" in out2
+    # Unreadable IS worth a word, unlike absent: the operator typed something.
+    assert "not a non-negative integer" in err2, (
+        f"a garbled `payload=` field was read and never reported:\n{err2}"
+    )
+
+    mixed = [
+        payload_block(3, None, "aaaa1111", "bbbb2222", field=False),
+        payload_block(4, 0, "bbbb2222", "cccc3333"),
+    ]
+    rc3, out3, err3 = run_main(["900", "--round", "5"], comments=mixed)
+    assert rc3 == 0, (
+        "ONE zero round beside a round with no field at all fired the gate "
+        f"(rc {rc3}) — that is one measured zero, not two:\n{err3}"
+    )
+    assert "DELTA re-audit" in out3
+
+
+def test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less():
+    """🔴 THE THREE NEAR-MISSES, and each needs its own case.
+
+    A guard that only ever sees the firing corpus and the empty one cannot tell
+    `payload == 0` from `payload is not None`, nor a CONSECUTIVE-rounds check
+    from a two-newest-blocks one. So: a zero followed by a round that touched
+    payload; a round that touched payload followed by a zero (the same pair in
+    the other order, which an implementation reading only the newest block gets
+    wrong in one direction only); and two zero rounds with a GAP between them,
+    which is the documented ordinary state of a ladder whose intermediate block
+    was posted as a REVIEW comment — `gh pr view --json comments` cannot see
+    those, and this script says so in its own missing-block warning.
+    """
+    zero_then_payload = [
+        payload_block(3, 0, "aaaa1111", "bbbb2222"),
+        payload_block(4, PAYLOAD_NONZERO_A, "bbbb2222", "cccc3333"),
+    ]
+    rc, out, err = run_main(
+        ["900", "--round", "5"], comments=zero_then_payload
+    )
+    assert rc == 0 and "DELTA re-audit" in out, (
+        f"the gate fired over a round that changed {PAYLOAD_NONZERO_A} payload "
+        f"line(s) — a round that touches payload never trips this:\n{err}"
+    )
+
+    payload_then_zero = [
+        payload_block(3, PAYLOAD_NONZERO_B, "aaaa1111", "bbbb2222"),
+        payload_block(4, 0, "bbbb2222", "cccc3333"),
+    ]
+    rc2, out2, err2 = run_main(
+        ["900", "--round", "5"], comments=payload_then_zero
+    )
+    assert rc2 == 0 and "DELTA re-audit" in out2, (
+        "the gate fired on the FIRST zero-payload round. Two is the floor and "
+        f"no rule may move it:\n{err2}"
+    )
+
+    gapped = [
+        payload_block(2, 0, "aaaa1111", "bbbb2222"),
+        payload_block(4, 0, "cccc3333", "dddd4444"),
+    ]
+    rc3, out3, err3 = run_main(["900", "--round", "5"], comments=gapped)
+    assert rc3 == 0 and "DELTA re-audit" in out3, (
+        "two zero rounds with round 3 unaccounted for fired the gate. Those "
+        "are not two CONSECUTIVE zero rounds — the missing block is a "
+        f"documented ordinary state, not an implied zero:\n{err3}"
+    )
+    # POSITIVE CONTROL: each fixture above differs from the firing corpus in ONE
+    # field, so this asserts the gate can still fire at all — a suite of
+    # does-not-fire cases is indistinguishable from a gate wired to nothing.
+    rc4, _out4, _err4 = run_main(
+        ["900", "--round", "5"], comments=two_zero_payload_rounds()
+    )
+    assert rc4 == ad.ATTRIBUTION_STOP_RC, (
+        "the gate did not fire on the corpus that MUST fire it, so the three "
+        "does-not-fire assertions above prove nothing"
+    )
+
+
+def test_the_gate_override_is_refused_without_a_reason_and_records_one_given():
+    """🔴 BOTH HALVES, because either alone is the wrong feature.
+
+    A gate with no override is the round cap the skill REJECTS outright (#505's
+    round 4 caught a ReDoS that round 3's own fix introduced, so a false stop is
+    the expensive direction). An override with no record is a bypass: #1531's
+    twelve rounds each carried a rationale in prose that nobody could check.
+
+    So the reason is REQUIRED, it is recorded where the next reader meets it —
+    the brief, and above the block that gets pasted onto the PR — and an
+    override of a gate that did NOT fire records nothing, because a false
+    "this ladder ran past its stop condition" is a claim too.
+    """
+    # 🔴 THE TWO-WAY CHECK FOR THE REGRESSION TEST'S LITERALS. That test may
+    # not name these constants (it would error at `93685e1d` instead of
+    # answering wrongly — see the comment on `EXPECTED_GATE_RC`), so the
+    # literals and the script's own constants are compared HERE, where a red is
+    # a guard's red. Without this, renaming the rc or the header leaves the
+    # regression test pinning strings nothing emits.
+    assert (ad.ATTRIBUTION_STOP_RC, ad.OVERRIDE_FLAG) == (
+        EXPECTED_GATE_RC, EXPECTED_OVERRIDE_FLAG
+    ), (
+        "the literals the regression test asserts on are no longer the "
+        f"script's constants: rc {ad.ATTRIBUTION_STOP_RC} vs "
+        f"{EXPECTED_GATE_RC}, flag {ad.OVERRIDE_FLAG!r} vs "
+        f"{EXPECTED_OVERRIDE_FLAG!r}"
+    )
+    assert ad.ATTRIBUTION_REFUSAL_HEADER.startswith(EXPECTED_GATE_REFUSAL), (
+        f"the refusal header {ad.ATTRIBUTION_REFUSAL_HEADER!r} no longer opens "
+        f"with {EXPECTED_GATE_REFUSAL!r}, which the regression test greps for"
+    )
+    # 🔴 THE TWO CODES MUST STAY DISTINCT. The gate's verdict ("the ladder has
+    # left the PR, stop") and an input refusal ("fix what you typed") demand
+    # different actions from a caller that branches on the number, so collapsing
+    # them back into one value is the defect `80379e83` shipped.
+    assert ad.ATTRIBUTION_STOP_RC != EXPECTED_INPUT_REFUSAL_RC, (
+        f"the attribution gate's verdict is now rc {ad.ATTRIBUTION_STOP_RC}, "
+        f"the same number as the input-refusal family. One number for two "
+        "claims is what the empty-reason refusal shipped as, and the stderr "
+        "being unambiguous does not help a caller reading the code."
+    )
+
+    reason = "round 4 fixed a blocker whose payload landed in round 3's commit"
+    rc, out, err = run_main(
+        ["900", "--round", "5", ad.OVERRIDE_FLAG, reason],
+        comments=two_zero_payload_rounds(),
+    )
+    assert rc == 0, (
+        f"the override did not let the brief through (rc {rc}):\n{err}"
+    )
+    assert ad.GATE_OVERRIDE_HEAD in out, (
+        f"the brief carries no record of the override:\n{out[-1500:]}"
+    )
+    assert reason in out, (
+        f"the brief records an override with no stated reason:\n{out[-1500:]}"
+    )
+
+    # The reason must reach the PR, not only the auditor: the block is what
+    # gets pasted into the comment.
+    rc_e, out_e, _err_e = run_main(
+        ["900", "--round", "5", "--emit-claims", "--audited", "cccc3333",
+         "--payload", str(PAYLOAD_NONZERO_C), ad.OVERRIDE_FLAG, reason],
+        comments=two_zero_payload_rounds(),
+    )
+    assert rc_e == 0, f"the override run refused the emit half (rc {rc_e})"
+    # 🔴 THE WINDOW STARTS AT THE PASTE INSTRUCTION, AND THAT IS THE WHOLE
+    # ASSERTION. "Before a fence" was VACUOUS in BOTH earlier spellings —
+    # MEASURED: delete the EMITTER's override line from
+    # `emit_claims_skeleton` and this test stayed green under
+    # `split("```audit-claims")[0]` (as fa08be10 shipped it) AND under
+    # `rsplit(..., 1)[0]` (as 848fac8b repaired it), because the BRIEF goes to
+    # the same stream, carries `GATE_OVERRIDE_HEAD` and this same reason, and
+    # sits before every fence. The brief's copy is asserted separately above;
+    # what this one is about is the text that gets PASTED onto the PR, so the
+    # window is the block's own preamble. Mutant `G10` now holds it.
+    #
+    # `rsplit` is kept for the reason 848fac8b gives — mutant C2 (claims read
+    # from the whole comment) can put a fence in reproduced claim text — but
+    # that fence is in the BRIEF, so the marker already excludes it and C2 goes
+    # on isolating what it names.
+    paste_marker = "Paste this into the PR comment"
+    assert paste_marker in out_e, (
+        f"the emit half printed no {paste_marker!r} line, so this assertion "
+        f"cannot find the block it is about — it would otherwise pass on the "
+        f"brief's copy of the reason:\n{out_e}"
+    )
+    above_the_block = out_e[out_e.index(paste_marker):].rsplit(
+        "```audit-claims", 1)[0]
+    assert reason in above_the_block, (
+        "the emitted block carries no override record ABOVE its fence, so "
+        f"pasting it onto the PR leaves no trace of the stop:\n{out_e}"
+    )
+
+    for empty in ("", "   "):
+        rc2, out2, err2 = run_main(
+            ["900", "--round", "5", ad.OVERRIDE_FLAG, empty],
+            comments=two_zero_payload_rounds(),
+        )
+        # 🔴 THE INPUT-REFUSAL CODE, NOT THE GATE'S. This is a bad flag VALUE
+        # caught in argument validation, not a verdict about the ladder — see
+        # the two regression tests below, which pin the distinction.
+        assert rc2 == EXPECTED_INPUT_REFUSAL_RC, (
+            f"an override with reason {empty!r} was accepted or mis-coded "
+            f"(rc {rc2}, want {EXPECTED_INPUT_REFUSAL_RC}) — it suppresses the "
+            f"stop and records nothing:\n{err2}"
+        )
+        assert ad.OVERRIDE_REFUSAL_HEADER in err2, (
+            f"the empty-reason refusal does not name itself:\n{err2}"
+        )
+        assert not out2.strip(), "a brief was emitted for a refused override"
+
+    # An override that overrode nothing must not leave the record.
+    rc3, out3, err3 = run_main(
+        ["900", "--round", "5", ad.OVERRIDE_FLAG, reason],
+        comments=[payload_block(3, PAYLOAD_NONZERO_A, "aaaa1111", "bbbb2222"),
+                  payload_block(4, PAYLOAD_NONZERO_B, "bbbb2222", "cccc3333")],
+    )
+    assert rc3 == 0
+    assert ad.GATE_OVERRIDE_HEAD not in out3 and reason not in out3, (
+        "a brief whose gate never fired carries an override record, which "
+        "says this ladder ran past its stop condition when it did not:\n"
+        f"{out3[-1200:]}"
+    )
+    assert "did NOT fire" in err3, (
+        f"the no-op override is silent, which reads as recorded:\n{err3}"
+    )
+
+
+def test_an_empty_override_reason_is_refused_as_INPUT_not_as_the_gates_verdict():
+    """🔴 REGRESSION. Red at `80379e83` — where this returned rc 5.
+
+    `ATTRIBUTION_STOP_RC` is a VERDICT ABOUT THE LADDER: "the gate has fired,
+    post the remaining findings and stop." The empty-reason refusal is a
+    different claim — "the flag value you typed was empty" — and it fires in
+    argument validation, BEFORE any claims block is read and before
+    `attribution_stop` is evaluated at all. At `80379e83` both returned 5.
+
+    🔴 THE UNCONDITIONAL CASE IS THE ONE THAT PROVES IT. Round 1 with NO claims
+    blocks in existence is a corpus where the gate is structurally unable to
+    fire, and `--override-attribution-gate ""` returned 5 there too — a stop
+    verdict for a ladder that had not taken a second step. A caller branching
+    on the number alone was told the ladder was done.
+
+    The stderr was never ambiguous (it carries `OVERRIDE_REFUSAL_HEADER` and
+    none of the gate's prose), which is why this went unnoticed; asserted below
+    so the fix is not read as having moved the message.
+    """
+    for corpus, what in (
+        (two_zero_payload_rounds(), "a corpus where the gate FIRES"),
+        ([], "a corpus where the gate CANNOT fire"),
+    ):
+        # Round 1 for the empty corpus: round >= 2 with no parseable block is
+        # its own refusal (exit 2), which would answer a different question.
+        round_no = "5" if corpus else "1"
+        rc, out, err = run_main(
+            ["900", "--round", round_no, EXPECTED_OVERRIDE_FLAG, ""],
+            comments=corpus,
+        )
+        assert rc == EXPECTED_INPUT_REFUSAL_RC, (
+            f"an EMPTY `{EXPECTED_OVERRIDE_FLAG}` reason returned rc {rc} on "
+            f"{what}, not the input-refusal code "
+            f"{EXPECTED_INPUT_REFUSAL_RC}. At `80379e83` it returned "
+            f"{EXPECTED_GATE_RC} — the attribution gate's own verdict — which "
+            f"tells a caller the ladder has left the PR when the truth is that "
+            f"a flag value was empty:\n{err}"
+        )
+        assert ad.OVERRIDE_REFUSAL_HEADER in err, (
+            f"the empty-reason refusal does not name itself on {what}:\n{err}"
+        )
+        assert ad.ATTRIBUTION_REFUSAL_HEADER not in err, (
+            f"an INPUT refusal printed the attribution gate's refusal header "
+            f"on {what}, so the message now agrees with the wrong code rather "
+            f"than the fix agreeing with the message:\n{err}"
+        )
+        assert not out.strip(), (
+            f"a brief was emitted for a refused override on {what}:\n"
+            f"{out[:400]}"
+        )
+
+    # 🔴 THE FAMILY, driven rather than asserted about. Its immediate sibling
+    # twenty lines up in the same function is a bad flag VALUE caught at the
+    # same station, and it has always returned this code. If these two ever
+    # disagree again, one of them is mis-filed.
+    rc_sib, _out_sib, err_sib = run_main(
+        ["900", "--round", "3", "--emit-claims", "--audited", "bbbb2222",
+         "--payload", "-3"],
+        comments=[],
+    )
+    assert rc_sib == EXPECTED_INPUT_REFUSAL_RC, (
+        f"the sibling input refusal (a negative `--payload`) returned rc "
+        f"{rc_sib}, so this test's notion of the input-refusal family is not "
+        f"the script's:\n{err_sib}"
+    )
+
+
+def test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers():
+    """🔴 REGRESSION, and it pins the DISTINCTION rather than either value.
+
+    Red at `80379e83`: one corpus, driven two ways, produced 5 BOTH times, so
+    the number carried no information a caller could act on. The defect was
+    never "5 is wrong" — it was that 5 meant two things.
+
+    🔴 THIS IS ALSO THE HALF THAT MUST NOT MOVE. The real gate stop — two
+    consecutive `payload=0` rounds, no override flag — still returns
+    `ATTRIBUTION_STOP_RC`, and splitting the input refusal out of it is exactly
+    the change that could have taken it with it. Asserted here beside its twin
+    so a fix in either direction cannot quietly collapse them again.
+    """
+    corpus = two_zero_payload_rounds()
+
+    rc_gate, out_gate, err_gate = run_main(["900", "--round", "5"],
+                                           comments=corpus)
+    assert rc_gate == EXPECTED_GATE_RC, (
+        f"the attribution gate's own stop returned rc {rc_gate}, not "
+        f"{EXPECTED_GATE_RC}. Splitting the empty-reason refusal out of this "
+        f"code must not change what the GATE returns:\n{err_gate}"
+    )
+    assert EXPECTED_GATE_REFUSAL in err_gate and not out_gate.strip()
+
+    rc_input, _out_input, err_input = run_main(
+        ["900", "--round", "5", EXPECTED_OVERRIDE_FLAG, ""], comments=corpus
+    )
+    assert rc_input == EXPECTED_INPUT_REFUSAL_RC, (
+        f"the empty-reason refusal returned rc {rc_input} on the same corpus, "
+        f"not {EXPECTED_INPUT_REFUSAL_RC}:\n{err_input}"
+    )
+
+    assert rc_gate != rc_input, (
+        f"ONE corpus, TWO different failures, ONE exit code ({rc_gate}). That "
+        "is the defect: a caller branching on the number is told 'the ladder "
+        "has left the PR — post the remaining findings and stop' when the "
+        "truth is 'your flag value was empty, fix it and re-run'. The two "
+        "demand different actions, so they may not share a code."
+    )
+
+
+def test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads():
+    """🔴 THE ROUND TRIP, and it is the precedent `--audited` set in round 5.
+
+    The gate is exactly as good as this number's survival: a header that prints
+    `payload=0` and parses back as None is the ladder's stop condition silently
+    unevaluable, and a PLACEHOLDER that parses as a number is a count nobody
+    stated stopping a converging ladder. Both directions are driven here through
+    the REAL emitter and the REAL parser.
+
+    0 is asserted with `is not None` as well as `== 0`, because those are
+    different facts and `payload or None` collapses them — which would make
+    every zero round invisible to the gate it exists to feed.
+    """
+    for stated in (0, PAYLOAD_NONZERO_A, PAYLOAD_NONZERO_B):
+        rc, out, err = run_main(
+            ["900", "--round", "3", "--emit-claims", "--audited", "bbbb2222",
+             "--payload", str(stated)],
+            comments=[CLAIMS_BLOCK_R2],
+        )
+        assert rc == 0, f"--payload {stated} was refused (rc {rc}):\n{err}"
+        assert f"payload={stated}" in out, (
+            f"the emitted header does not carry `payload={stated}`:\n{out}"
+        )
+        blocks, malformed = ad.parse_claims_blocks([out])
+        assert len(blocks) == 1, (
+            f"the emitted block does not parse as exactly one: {malformed}"
+        )
+        assert blocks[0].payload is not None, (
+            f"`payload={stated}` came back as None — the gate reads this field"
+        )
+        assert blocks[0].payload == stated, (
+            f"`payload={stated}` came back as {blocks[0].payload!r}"
+        )
+
+    # No `--payload`: a PLACEHOLDER, warned about, and unreadable BY DESIGN.
+    rc2, out2, err2 = run_main(
+        ["900", "--round", "3", "--emit-claims", "--audited", "bbbb2222"],
+        comments=[CLAIMS_BLOCK_R2],
+    )
+    assert rc2 == 0, f"an emit with no --payload was refused:\n{err2}"
+    assert f"payload={ad.PAYLOAD_PLACEHOLDER}" in out2, (
+        f"the no-count emit wrote something other than the placeholder:\n{out2}"
+    )
+    blocks2, _ = ad.parse_claims_blocks([out2])
+    assert blocks2[0].payload is None, (
+        "the placeholder parses as a NUMBER, so the next round's gate would "
+        f"consume a count nobody stated: {blocks2[0].payload!r}"
+    )
+    assert "--payload was not passed" in err2, (
+        f"nothing told the operator the gate cannot evaluate this round:\n{err2}"
+    )
+
+    # And the pure-function halves, driven directly: `payload_from_header` is
+    # the only reader of the field, and it must never answer 0 for a value it
+    # could not read.
+    assert ad.payload_from_header("round=3 payload=0 audited=a..b") == (0, None)
+    assert ad.payload_from_header("round=3 audited=a..b") == (None, None)
+    assert ad.payload_from_header(
+        f"round=3 payload={ad.PAYLOAD_PLACEHOLDER} audited=a..b"
+    ) == (None, None)
+    assert ad.payload_from_header("round=3 payload=0abc audited=a..b") == (
+        None, "0abc"
+    ), "`payload=0abc` was truncated to a readable 0 — the round-5 shape"
+    assert ad.payload_from_header("round=3 payload=-4 audited=a..b") == (
+        None, "-4"
+    )
+
+
+def test_a_negative_payload_count_is_refused_at_the_input():
+    """A count of lines is 0 or more, and 0 is CONSEQUENTIAL.
+
+    Refused at the input rather than caught by the round trip a station later:
+    `argparse` accepts `-4`, the emitted `payload=-4` is then unreadable, and
+    the refusal that DOES fire talks about a parser instead of about the number
+    the operator typed. Same reasoning as the empty `--audited` check.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--emit-claims", "--audited", "bbbb2222",
+         "--payload", "-4"],
+        comments=[CLAIMS_BLOCK_R2],
+    )
+    assert rc == 4, f"expected the emit refusal rc 4, got {rc}:\n{err}"
+    assert ad.EMIT_REFUSAL_HEADER in err and "NEGATIVE" in err, (
+        f"the refusal does not say what is wrong with the value:\n{err}"
+    )
+    assert "```audit-claims" not in out, (
+        "a block was emitted with a negative payload count in its header"
+    )
+    # The no-op direction: `--payload` is written by `--emit-claims` and by
+    # nothing else, so a plain assembly run must say the flag changed nothing.
+    rc2, _out2, err2 = run_main(
+        ["900", "--round", "3", "--payload", str(PAYLOAD_NONZERO_C)],
+        comments=[CLAIMS_BLOCK_R2],
+    )
+    assert rc2 == 0 and "changed NOTHING" in err2, (
+        f"--payload without --emit-claims was a silent no-op:\n{err2}"
+    )
+
+
+def skill_body_the_script_reads():
+    """The skill text, by `audit-dispatch.py`'s own candidate paths."""
+    for cand in (
+        REPO / "claude" / "skills" / "audit-pr" / "SKILL.md",
+        Path.home() / ".claude" / "skills" / "audit-pr" / "SKILL.md",
+    ):
+        try:
+            return cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return ""
+
+
+def _norm_ws(text):
+    """Whitespace-normalised, so a re-wrap of either file is not a failure."""
+    return " ".join((text or "").split())
+
+
+def test_the_payload_field_the_gate_enforces_is_documented_in_the_skill():
+    """🔴 THE SEAM. The gate has two owners and neither can move it alone.
+
+    Same construction and the same measured reason as
+    `test_the_determinations_SCOPE_matches_the_one_every_emit_claims_run_ships`
+    in `scripts/tests/test_audit_ladder_stop_rule.py`: the MECHANISM lives in
+    two files, and a pin inside one of them is refreshed by the very edit that
+    breaks it.
+
+    The halves fail in opposite directions. Delete the enforcement here and the
+    skill goes on promising a refusal that no longer happens; delete the
+    `--payload` instruction from the skill and the field is never written, so
+    the gate evaluates nothing — and a gate nobody evaluates never fires, which
+    is the state `civitai/talos-infra` #1531 ran twelve rounds in.
+
+    It reads the REAL skill by the script's OWN candidate paths (repo first,
+    `~/.claude` second), so it is hermetic in this repo and still resolves in a
+    sandbox that carries only the script.
+    """
+    body = skill_body_the_script_reads()
+    assert body, (
+        "claude/skills/audit-pr/SKILL.md was not readable from either the repo "
+        f"({REPO}) or ~/.claude, so this seam asserted nothing"
+    )
+    claim = _norm_ws(ad.ATTRIBUTION_GATE_ENFORCEMENT)
+    assert claim in _norm_ws(body), (
+        "\n\n`audit-dispatch.py`'s `ATTRIBUTION_GATE_ENFORCEMENT` is no longer "
+        "verbatim in claude/skills/audit-pr/SKILL.md.\n"
+        f"  the refusal ships:\n    {claim}\n\n"
+        "  Change BOTH files in one commit. If you REMOVED the enforcement, "
+        "say in the message that the skill's stop condition is prose again — "
+        "it was prose for three weeks and was declined nine times on one PR."
+    )
+    # POSITIVE CONTROL for the reader: a sentence that is NOT in the skill must
+    # come back absent, or this is a scan wired to nothing.
+    assert _norm_ws("the gate is advisory and may be skipped") not in _norm_ws(
+        body
     )

@@ -76,6 +76,19 @@ func TestA403WithBudgetLeftIsNotCalledRateLimited(t *testing.T) {
 
 // --- decodeSnapshot ----------------------------------------------------------
 
+// decodeFixture decodes a body through a real client, because `decodeSnapshot`
+// is a METHOD now — it has to reach `Client.redact` before it can put a server
+// string into an error.
+//
+// ⚠ THE TOKEN IS A NON-EMPTY FIXTURE THAT APPEARS IN NO BODY BELOW. An empty
+// token would make `redact` a no-op, so every test in this file would be
+// decoding through a client that structurally cannot redact — a green that
+// proves nothing about the shipped path. The leak tests further down supply
+// their own token and their own body carrying it.
+func decodeFixture(body []byte, repo string, num int) (*Snapshot, error) {
+	return NewClient("tok-decode-fixture-appears-in-no-body", nil).decodeSnapshot(body, repo, num)
+}
+
 const prFixture = `{"data":{
   "viewer":{"login":"a-reviewer"},
   "repository":{"issueOrPullRequest":{
@@ -122,7 +135,7 @@ const prFixture = `{"data":{
 }}`
 
 func TestDecodeAPullRequestPopulatesEveryPanel(t *testing.T) {
-	s, err := decodeSnapshot([]byte(prFixture), "gardenersguild/trowelcast", 1559)
+	s, err := decodeFixture([]byte(prFixture), "gardenersguild/trowelcast", 1559)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +217,7 @@ func TestAPagedFileListIsMarkedTruncated(t *testing.T) {
 	node["files"].(map[string]any)["pageInfo"].(map[string]any)["hasNextPage"] = true
 	raw, _ := json.Marshal(doc)
 
-	s, err := decodeSnapshot(raw, "gardenersguild/trowelcast", 1559)
+	s, err := decodeFixture(raw, "gardenersguild/trowelcast", 1559)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +226,7 @@ func TestAPagedFileListIsMarkedTruncated(t *testing.T) {
 	}
 	// And the negative control, from the unmodified fixture, so "true" above is
 	// a claim about the field rather than about a constant.
-	s2, _ := decodeSnapshot([]byte(prFixture), "gardenersguild/trowelcast", 1559)
+	s2, _ := decodeFixture([]byte(prFixture), "gardenersguild/trowelcast", 1559)
 	if s2.FilesTruncated {
 		t.Error("the unmodified fixture also reports truncated — the field is ignored")
 	}
@@ -238,7 +251,7 @@ const issueFixture = `{"data":{
 // kind — and must not find out, because it carries a test-pinned property that
 // THE CLICK PATH MAKES NO NETWORK CALL.
 func TestDecodeAnIssueYieldsTheCardFieldsAndNoPRFields(t *testing.T) {
-	s, err := decodeSnapshot([]byte(issueFixture), "gardenersguild/trowelcast", 1656)
+	s, err := decodeFixture([]byte(issueFixture), "gardenersguild/trowelcast", 1656)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +271,7 @@ func TestDecodeAnIssueYieldsTheCardFieldsAndNoPRFields(t *testing.T) {
 }
 
 func TestANullRepositoryIsReportedAsNotFound(t *testing.T) {
-	s, err := decodeSnapshot([]byte(`{"data":{"viewer":{"login":"x"},"repository":null}}`),
+	s, err := decodeFixture([]byte(`{"data":{"viewer":{"login":"x"},"repository":null}}`),
 		"gardenersguild/trowelcast", 1559)
 	if s != nil {
 		t.Errorf("returned a snapshot for a null repository: %+v", s)
@@ -277,10 +290,134 @@ func TestANullRepositoryIsReportedAsNotFound(t *testing.T) {
 
 func TestAGraphQLNotFoundErrorIsReportedAsNotFound(t *testing.T) {
 	body := `{"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"}]}`
-	_, err := decodeSnapshot([]byte(body), "gardenersguild/trowelcast", 1559)
+	_, err := decodeFixture([]byte(body), "gardenersguild/trowelcast", 1559)
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.State != AuthNotFound {
 		t.Fatalf("err = %v, want a NOT_FOUND APIError", err)
+	}
+}
+
+// 🔴 "I COULD NOT READ THIS RESPONSE" MUST NOT BE REPORTED AS "NOT FOUND".
+//
+// Consolidating the `errors[]` mapping into `Client.decodeGQLError` deleted the
+// `Errors` field from `gqlResponse` and from `Mergeability`'s local struct, so
+// neither caller decodes `errors` for itself any more. `decodeGQLError` returned
+// nil on ANY unmarshal failure, which turned "present but not decodable" into
+// "absent" — and the arm below the call site then answered NOT FOUND.
+//
+// MEASURED at `d2ec72c3`, body `{"errors":{"message":"you may not do that"}}`:
+//
+//	Fetch        -> NOT FOUND — o/n#1 is not visible to this token
+//	Mergeability -> NOT FOUND — o/n#1 is not a pull request this token can read
+//
+// At `264a567f` both answered `AuthOther — unreadable response: …`. A confident,
+// false diagnosis sends the operator to fix a token permission that is fine,
+// which is strictly worse than saying the response could not be read.
+//
+// ⚠ BOTH DIRECTIONS ARE IN ONE TABLE ON PURPOSE. Making "undecodable" loud is
+// only half the claim; the other half is that a body with NO `errors` — or a
+// null one, or an empty array — still gets the NOT-FOUND answer, which is the
+// right one. A fix that reported everything as unreadable would pass the first
+// three cases and fail the last three.
+func TestAnUnreadableGraphQLErrorsKeyIsNotReportedAsNotFound(t *testing.T) {
+	// ⚠ WRITTEN OUT HERE, not composed from the strings under test: these are the
+	// two false diagnoses the measurement above produced.
+	notFoundWords := []string{
+		"is not visible to this token",
+		"is not a pull request this token can read",
+	}
+
+	shapes := []struct {
+		name      string
+		body      string
+		wantState AuthState
+		// wantUnreadable says the detail must be the could-not-read answer and
+		// must NOT be either NOT-FOUND sentence.
+		wantUnreadable bool
+	}{
+		{
+			name:           "`errors` is an OBJECT — present, and not an array",
+			body:           `{"errors":{"message":"you may not do that"}}`,
+			wantState:      AuthOther,
+			wantUnreadable: true,
+		},
+		{
+			name:           "`errors` is a STRING — present, and not an array",
+			body:           `{"errors":"you may not do that"}`,
+			wantState:      AuthOther,
+			wantUnreadable: true,
+		},
+		{
+			name:           "`errors` is an array of the WRONG element type",
+			body:           `{"errors":[42,17]}`,
+			wantState:      AuthOther,
+			wantUnreadable: true,
+		},
+		{
+			name:      "no `errors` key at all — NOT FOUND is the correct answer",
+			body:      `{"data":{"repository":null}}`,
+			wantState: AuthNotFound,
+		},
+		{
+			name:      "`errors` is null",
+			body:      `{"errors":null,"data":{"repository":null}}`,
+			wantState: AuthNotFound,
+		},
+		{
+			name:      "`errors` is an EMPTY array",
+			body:      `{"errors":[],"data":{"repository":null}}`,
+			wantState: AuthNotFound,
+		},
+	}
+
+	callers := map[string]func(*Client) error{
+		"the panel read": func(c *Client) error {
+			_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+			return err
+		},
+		"the merge gate's read": func(c *Client) error {
+			_, err := c.Mergeability(context.Background(), "gardenersguild", "trowelcast", 1559)
+			return err
+		},
+	}
+
+	for _, sh := range shapes {
+		for callerName, call := range callers {
+			t.Run(sh.name+", "+callerName, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(sh.body))
+				}))
+				defer srv.Close()
+				c := NewClient("tok-errors-shape-fixture", srv.Client())
+				c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+
+				err := call(c)
+				if err == nil {
+					t.Fatal("the response was reported as a success")
+				}
+				var ae *APIError
+				if !errors.As(err, &ae) {
+					t.Fatalf("err is %T, want *APIError: %v", err, err)
+				}
+				if ae.State != sh.wantState {
+					t.Errorf("State = %v, want %v — detail was %q", ae.State, sh.wantState, ae.Detail)
+				}
+				if !sh.wantUnreadable {
+					return
+				}
+				if !strings.Contains(ae.Detail, "unreadable response") {
+					t.Errorf("an `errors` key that is PRESENT and does not decode was not "+
+						"reported as unreadable: %q", ae.Detail)
+				}
+				for _, w := range notFoundWords {
+					if strings.Contains(ae.Detail, w) {
+						t.Errorf("a response nobody managed to read was diagnosed as %q — that "+
+							"sends the operator to fix a token permission that is fine: %q",
+							w, ae.Detail)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -359,32 +496,334 @@ func TestAnEmptyTokenShortCircuitsBeforeTheNetwork(t *testing.T) {
 
 // 🔴 THE TOKEN IS NEVER IN AN ERROR. §10.4: the cards say which condition holds
 // and nothing more.
+//
+// 🔴 THE NAME IS A UNIVERSAL CLAIM, SO THE IMPLEMENTATION HAS TO BE ONE — AND
+// FOR A WHILE IT WAS NOT. This test used to exercise exactly one path: an HTTP
+// 401 whose BODY echoed the credential, decoded by `do`. It read as coverage of
+// every error path while providing coverage of one, which is worse than no
+// coverage because it stops anyone looking. It did not cover the GraphQL 200
+// carrying `errors[0].message`, and that path was genuinely leaking: both
+// `Fetch` and `Mergeability` returned `Detail: r.Errors[0].Message` raw, with no
+// `redact` and no `clipDetail`.
+//
+// 🔴 THE LEDGER BELOW IS THE CLAIM, AND IT HAS BEEN SHORT TWICE. Every one of
+// these is a path that turns SERVER-SUPPLIED text into an `APIError.Detail` the
+// UI renders:
+//
+//  1. an HTTP failure status, body decoded by `apiMessage` inside `do`;
+//  2. a GraphQL 200 whose `errors[]` is decoded by the panel read (`Fetch`);
+//  3. a GraphQL 200 whose `errors[]` is decoded by the merge gate's read
+//     (`Mergeability`);
+//  4. the merge gate's `default:` refusal, which interpolates the SERVER's
+//     `mergeable` word (`NormalizeMergeable` of `pr.Mergeable`) into the card;
+//  5. `do`'s transport error, whose `url.Error` names the LAST request URL —
+//     which a server chooses, because this client follows redirects and sets no
+//     `CheckRedirect`. ⚠ IT IS NOT EXERCISED BY THE TABLE BELOW, and that is
+//     deliberate rather than an omission: no credential is known to reach it
+//     (the token is header-only and Go strips userinfo passwords), so it is the
+//     unbounded-card hazard and not a leak. Its clip is pinned by
+//     `TestATransportErrorNeverCarriesAnUnclippedRedirectTarget`.
+//
+// 🔴 ENTRY 4 IS THE ONE A COMMENT SAID COULD NOT EXIST. Round 1 added entries 2
+// and 3 and closed the ledger with "Paths NOT listed carry no server text at
+// all" — while `write.go`'s `default:` arm interpolated `read.Mergeable` with no
+// `redact` and no `clipDetail`, measured at 5,081 unclipped runes from a probe
+// server (`mergegate_test.go`'s fixture reproduces that length).
+// `mergeable` is a GraphQL ENUM, so a CONFORMING server cannot send text
+// there — which is exactly as true of `errors[0].message`, and this file treats
+// that one as a real defect. The threat model is a proxy or a gateway, not the
+// schema, and it does not stop at one field.
+//
+// ⚠ ENTRY 4 REDACTS AT A DIFFERENT POINT, AND THAT IS NOT A STYLE CHOICE.
+// `NormalizeMergeable` UPPERCASES the server's string, so a redaction applied
+// after it would be looking for a needle that no longer exists in the haystack.
+// `Mergeability` redacts BEFORE normalising, which is why this case expects the
+// marker in upper case.
+//
+// Paths NOT listed carry no server text at all: the NOT-FOUND details are
+// composed from the owner/name/number this program already holds, and the
+// `unreadable response: …` / `unreadable files response: …` details are the JSON
+// decoder's own prose — which can quote one offending byte of the body, so they
+// go through `Client.detail` too rather than resting on that being harmless.
+//
+// 🔴 THIS LEDGER IS AN INSTRUCTION TO MAINTAINERS. NOTHING ABOUT IT IS
+// ENFORCED, AND `query.go` USED TO SAY OTHERWISE. The table below is
+// hand-written and walked by a `for` loop: it enumerates no call site, counts no
+// `Client.detail` invocation and inspects no source, so a sixth reflecting path
+// added tomorrow leaves it green. `query.go` claimed this test "fails if a fifth
+// appears unledgered" while entry 5 above already existed unledgered — the third
+// time a completeness sentence in this change has been false. What IS enforced,
+// mechanically, is narrower and lives elsewhere:
+// `TestEveryAPIErrorDetailIsRoutedOrLedgered` parses this package's own non-test
+// `.go` files and fails on a `Detail` — set either as an `APIError` literal's
+// keyed `Detail:` element or by assignment to a `.Detail` selector — that is
+// neither a literal, nor routed through `Client.detail`, nor ledgered at its own
+// `file:function` site with a reason. That is the whole of it: it reads syntax,
+// in one package, so it cannot tell you whether a path carries SERVER text, and
+// it cannot see a `Detail` set outside this package, through an interface, or by
+// reflection. It is a check on the shapes it parses, not a proof about the UI.
 func TestNoErrorPathEverCarriesTheToken(t *testing.T) {
 	const secret = "gho_thisisnotarealtokenitisatestfixture"
+
+	// Each case answers ONE canned body and then calls ONE client method.
+	paths := []struct {
+		name   string
+		status int
+		body   string
+		call   func(*Client) error
+		// marker is the redaction marker this path leaves behind. It is upper
+		// case for the one path that normalises the string after redacting it.
+		marker string
+	}{
+		{
+			name:   "an HTTP failure body decoded by `do`",
+			status: http.StatusUnauthorized,
+			body:   `{"message":"Bad credentials for ` + secret + `"}`,
+			call: func(c *Client) error {
+				_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+				return err
+			},
+		},
+		{
+			name:   "a GraphQL errors[] entry on the panel read",
+			status: http.StatusOK,
+			body: `{"errors":[{"type":"FORBIDDEN","message":"the credential ` + secret +
+				` may not read this"}]}`,
+			call: func(c *Client) error {
+				_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+				return err
+			},
+		},
+		{
+			name:   "a GraphQL errors[] entry on the merge gate's read",
+			status: http.StatusOK,
+			body: `{"errors":[{"type":"FORBIDDEN","message":"the credential ` + secret +
+				` may not read this"}]}`,
+			call: func(c *Client) error {
+				_, err := c.Mergeability(context.Background(), "gardenersguild", "trowelcast", 1559)
+				return err
+			},
+		},
+		{
+			// 🔴 THE FOURTH PATH. A pull request that is OPEN and not merged, so
+			// the gate reaches its mergeability switch, answering a `mergeable`
+			// the server made up. Nothing is ever PUT — the `default:` arm refuses.
+			name:   "the server's `mergeable` word reflected by the merge gate's refusal",
+			status: http.StatusOK,
+			body: `{"data":{"repository":{"pullRequest":{"mergeable":"` + secret +
+				`","state":"OPEN","merged":false}}}}`,
+			call: func(c *Client) error {
+				return c.Merge(context.Background(), "gardenersguild", "trowelcast", 1559, "squash")
+			},
+			marker: "<REDACTED>",
+		},
+	}
+
+	for _, p := range paths {
+		t.Run(p.name, func(t *testing.T) {
+			marker := p.marker
+			if marker == "" {
+				marker = "<redacted>"
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Even a server that echoes the credential back must not get it
+				// into an error the UI renders.
+				w.WriteHeader(p.status)
+				_, _ = w.Write([]byte(p.body))
+			}))
+			defer srv.Close()
+
+			c := NewClient(secret, srv.Client())
+			c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+			err := p.call(c)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			// ⚠ THE SERVER ECHOED IT, SO THIS *CAN* FAIL — which is what makes the
+			// assertion evidence rather than a tautology. The client must not
+			// reflect the credential out of a response body it did not construct.
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("the token leaked into an error string: %q", err.Error())
+			}
+			// 🔴 AND NOT IN ANY CASE EITHER. `NormalizeMergeable` uppercases the
+			// server's word, so a redaction applied AFTER it would miss the
+			// credential entirely and ship `GHO_…` to the card — the whole secret
+			// with its case changed. Checking only the exact spelling would call
+			// that a pass.
+			if strings.Contains(strings.ToUpper(err.Error()), strings.ToUpper(secret)) {
+				t.Errorf("the token leaked into an error string in a different case — a "+
+					"transform between the redaction and the card moved it out from under "+
+					"the needle: %q", err.Error())
+			}
+			// POSITIVE CONTROL 1: the error is not empty, so "does not contain" is
+			// not satisfied by there being no error text at all.
+			if err.Error() == "" {
+				t.Fatal("the error is empty — the leak check observed nothing")
+			}
+			// POSITIVE CONTROL 2: the redaction MARKER is present, so the check
+			// above is not satisfied by the whole message having been dropped.
+			if !strings.Contains(err.Error(), marker) {
+				t.Errorf("the server's message was discarded rather than redacted, so "+
+					"this case would pass with no redaction at all: %q", err.Error())
+			}
+		})
+	}
+}
+
+// 🔴 A GRAPHQL `errors[0].message` IS CLIPPED LIKE EVERY OTHER DETAIL, AND IT
+// USED NOT TO BE.
+//
+// `maxDetailRunes`' own docstring says it "caps the WHOLE composed detail, after
+// redaction", and that sentence was false: the cap lived at the single call site
+// inside `do`, so a GraphQL 200 carrying a 5,000-rune `errors[0].message` went
+// to the UI at full length. Both GraphQL decoders share `decodeGQLError` now,
+// which is where the cap moved to.
+//
+// ⚠ THE CEILING IS ABSOLUTE AND IS NOT MADE OF THE CONSTANT UNDER TEST. A
+// mutant that raises `maxDetailRunes` still "clips", at its own number, so an
+// assertion phrased only against that constant cannot see it. Same trap, same
+// control, as `TestOnePathologicalEntryCannotBlowUpTheCard`.
+func TestAGraphQLErrorMessageIsClippedLikeEveryOtherDetail(t *testing.T) {
+	// 5,000 runes in one entry — the shape the auditor measured coming out
+	// intact at 5,057.
+	huge := strings.Repeat("qwertyuiop", 500)
+	body := `{"errors":[{"type":"INTERNAL","message":"` + huge + `"}]}`
+
+	calls := map[string]func(*Client) error{
+		"the panel read": func(c *Client) error {
+			_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+			return err
+		},
+		"the merge gate's read": func(c *Client) error {
+			_, err := c.Mergeability(context.Background(), "gardenersguild", "trowelcast", 1559)
+			return err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			c := NewClient("tok-graphql-clip-fixture", srv.Client())
+			c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+
+			err := call(c)
+			if err == nil {
+				t.Fatal("a GraphQL errors[] response was reported as a success")
+			}
+			var ae *APIError
+			if !errors.As(err, &ae) {
+				t.Fatalf("err is %T, want *APIError: %v", err, err)
+			}
+			const cardCeiling = 600
+			n := len([]rune(ae.Detail))
+			if n > cardCeiling {
+				t.Errorf("the detail is %d runes — past the %d-rune ceiling a single "+
+					"terminal line can carry, whatever `maxDetailRunes` says", n, cardCeiling)
+			}
+			if n != maxDetailRunes {
+				t.Errorf("the detail is %d runes, want it clipped to exactly %d", n, maxDetailRunes)
+			}
+			if !strings.HasSuffix(ae.Detail, "…") {
+				t.Errorf("a clipped detail must say it was clipped: %q", ae.Detail)
+			}
+			// POSITIVE CONTROL: a SHORT GraphQL message is not padded or cut, so
+			// the equality above is a claim about clipping rather than about a
+			// decoder that always emits the same length.
+			srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"errors":[{"type":"INTERNAL","message":"something went wrong"}]}`))
+			}))
+			defer srv2.Close()
+			c2 := NewClient("tok-graphql-clip-fixture", srv2.Client())
+			c2.SetBaseURLs(srv2.URL+"/graphql", srv2.URL)
+			err2 := call(c2)
+			var ae2 *APIError
+			if !errors.As(err2, &ae2) {
+				t.Fatalf("err2 is %T, want *APIError: %v", err2, err2)
+			}
+			if ae2.Detail != "something went wrong" {
+				t.Errorf("a short GraphQL message came back as %q, want it verbatim", ae2.Detail)
+			}
+		})
+	}
+}
+
+// 🔴 THE FIFTH REFLECTING PATH: A REDIRECT TARGET THE SERVER CHOSE.
+//
+// `do` reported a transport failure as `"could not reach api.github.com: " +
+// err.Error()` with no `Client.detail`. This client sets no `CheckRedirect`, so
+// Go follows redirects and the resulting `url.Error` names the LAST request URL
+// — a string the SERVER supplied, in a `Location` header. MEASURED at
+// `cb7c7949`: a 5,000-rune redirect path produced a detail past 5,000 runes,
+// longer than the merge-gate path the same change was fixing, while `query.go`
+// asserted that a fifth such path could not appear unnoticed. ⚠ NO EXACT LENGTH
+// IS QUOTED, because it moves with the ephemeral port inside the reflected URL —
+// the assertion below is a ceiling, not an equality, for that reason.
+//
+// ⚠ THIS IS AN UNBOUNDED CARD, NOT A LEAK, AND THE TEST CLAIMS ONLY THAT. The
+// token is header-only and Go strips userinfo passwords out of a `url.Error`, so
+// nothing here says a credential can reach this string.
+//
+// ⚠ THE CEILING IS ABSOLUTE AND IS NOT MADE OF THE CONSTANT UNDER TEST. A mutant
+// that raises `maxDetailRunes` still "clips", at its own number.
+func TestATransportErrorNeverCarriesAnUnclippedRedirectTarget(t *testing.T) {
+	var target string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		// Even a server that echoes the credential back must not get it into
-		// an error the UI renders.
-		_, _ = w.Write([]byte(`{"message":"Bad credentials for ` + secret + `"}`))
+		w.Header().Set("Location", target)
+		w.WriteHeader(http.StatusFound)
 	}))
 	defer srv.Close()
+	// ⚠ IT REDIRECTS TO ITSELF, so the client gives up after ten hops rather than
+	// dialling a port this test guessed at — the failure is deterministic and
+	// stays on loopback.
+	target = srv.URL + "/" + strings.Repeat("z", 5000)
 
-	c := NewClient(secret, srv.Client())
+	c := NewClient("tok-redirect-clip-fixture", srv.Client())
 	c.SetBaseURLs(srv.URL+"/graphql", srv.URL)
+
 	_, err := c.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
 	if err == nil {
-		t.Fatal("expected an error")
+		t.Fatal("a redirect loop was reported as a success")
 	}
-	// ⚠ THE SERVER ECHOED IT, SO THIS *CAN* FAIL — which is what makes the
-	// assertion evidence rather than a tautology. The client must not reflect
-	// the credential out of a response body it did not construct.
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("the token leaked into an error string: %q", err.Error())
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err is %T, want *APIError: %v", err, err)
 	}
-	// The positive control: the error is not empty, so "does not contain" is
-	// not satisfied by there being no error text at all.
-	if err.Error() == "" {
-		t.Error("the error is empty — the leak check observed nothing")
+	// This case proves nothing unless it went down the transport arm.
+	if !strings.HasPrefix(ae.Detail, "could not reach api.github.com: ") {
+		t.Fatalf("this is not `do`'s transport path: %.160q", ae.Detail)
+	}
+	const cardCeiling = 600
+	if n := len([]rune(ae.Detail)); n > cardCeiling {
+		t.Errorf("the detail is %d runes — past the %d-rune ceiling a single terminal "+
+			"line can carry, whatever `maxDetailRunes` says. The server's redirect "+
+			"target reached the card unclipped: %.160q", n, cardCeiling, ae.Detail)
+	}
+	if !strings.HasSuffix(ae.Detail, "…") {
+		t.Errorf("a 5,000-rune redirect target produced a detail with no clip marker: %.160q",
+			ae.Detail)
+	}
+
+	// 🔴 POSITIVE CONTROL: AN ORDINARY SHORT TRANSPORT FAILURE COMES THROUGH
+	// WHOLE. Without it the assertions above are satisfied by a path that
+	// truncates everything, including the one word that says what went wrong.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	c2 := NewClient("tok-redirect-clip-fixture", nil)
+	c2.SetBaseURLs(deadURL+"/graphql", deadURL)
+	_, err2 := c2.Fetch(context.Background(), "gardenersguild", "trowelcast", 1559)
+	var ae2 *APIError
+	if !errors.As(err2, &ae2) {
+		t.Fatalf("err2 is %T, want *APIError: %v", err2, err2)
+	}
+	if strings.Contains(ae2.Detail, "…") {
+		t.Errorf("a short dial failure was clipped — the bound is wired to something much "+
+			"smaller than a card: %q", ae2.Detail)
+	}
+	if !strings.HasPrefix(ae2.Detail, "could not reach api.github.com: ") {
+		t.Errorf("a short dial failure lost the sentence that names the condition: %q", ae2.Detail)
 	}
 }
 

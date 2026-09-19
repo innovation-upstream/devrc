@@ -174,6 +174,26 @@ func TestMergeWords(t *testing.T) {
 		{"", "", false, "UNKNOWN"},
 		// Merged wins over everything, including a stale CONFLICTING.
 		{"CONFLICTING", "DIRTY", true, "MERGED"},
+
+		// 🔴 THE ENUM IS READ THROUGH `ghapi.NormalizeMergeable`, SO CASE AND
+		// SURROUNDING SPACE FOLD. This switch used to open-code the predicate and
+		// disagreed with the merge gate's copy on exactly these inputs.
+		//
+		// ⚠ THE `stateStatus` COLUMN IS CHOSEN SO THE TWO BRANCHES CANNOT AGREE
+		// BY ACCIDENT. `DIRTY` also renders CONFLICT, so pairing a lower-case
+		// `conflicting` with it would pass whether or not the fold happened;
+		// `CLEAN` renders CLEAN, a word neither expectation below can reach any
+		// other way.
+		{" conflicting ", "CLEAN", false, "CONFLICT"},
+		{" unknown ", "CLEAN", false, "UNKNOWN"},
+		{"", "CLEAN", false, "UNKNOWN"},
+		// POSITIVE CONTROL on the same column: a value that normalises to
+		// MERGEABLE still falls through to `stateStatus`, so the two rows above
+		// are the fold and not a blanket capture of everything paired with CLEAN.
+		{" mergeable ", "CLEAN", false, "CLEAN"},
+		// And a word the vocabulary does not know still falls through, rather
+		// than being swept into UNKNOWN by the normalisation.
+		{"SOMETHING_NEW", "BEHIND", false, "BEHIND"},
 	}
 	for _, c := range cases {
 		if got := MergeWord(c.mergeable, c.state, c.merged).Word; got != c.want {

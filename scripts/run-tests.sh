@@ -667,25 +667,32 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           this FATAL naming the binary. `flake.nix`'s `gateTools` carries the
 #           package so both tiers and `nix develop` satisfy it.
 #
-# luajit:   scripts/tests/test_nvim_octo.py EXECUTES the review TUI's
-#           `octo-init.lua` under it — luajit is the Lua
-#           dialect neovim embeds — with `vim` and `require` stubbed. Same shape
-#           as tmux and zsh above: the thing under test CANNOT be reached by the
-#           structural reader beside it. That file installs a merge keystroke
-#           which must pass through a confirmation, and a keymap set by
-#           `vim.keymap.set` is not a config-table entry, so the Lua-table
-#           reader is blind to it — a merge key can appear, and an UNCONFIRMED
-#           one can appear, with every structural assertion green. That is not
-#           hypothetical: the guard named "no merge keystroke is declared" kept
-#           passing when a merge keystroke was added. The behavioural guards
-#           drive a `no` answer and watch the merge NOT happen, so without this
-#           binary they would report merge safety nobody measured. flake.nix's
-#           `gateTools` carries it for the sandbox and for `nix develop`.
+# ⚠ luajit: USED TO BE HERE and is REMOVED (Phase 4, the review-TUI
+#           retirement). Its sole consumer was `scripts/tests/test_nvim_octo.py`,
+#           which EXECUTED the retired TUI's `octo-init.lua` under it — luajit
+#           being the Lua dialect neovim embeds — to drive a `no` answer and
+#           watch a merge NOT happen, because a keymap set by `vim.keymap.set`
+#           is invisible to a structural Lua-table reader. Both that suite and
+#           the Lua file are deleted and NO suite runs Lua now, so the entry
+#           would be a precondition nothing needs. `flake.nix`'s `gateTools`
+#           dropped `pkgs.luajit` in the SAME commit — these two lists are
+#           pinned two-way, and an entry surviving in one of them is an orphan
+#           whose comment points at files that no longer exist.
+#           ⚠ THE SPELLING HERE IS DELIBERATE, and it is NOT a grep dodge.
+#           `launcher_scan.HAZARD_VOCABULARY` matches the HYPHENATED name as a
+#           word anywhere in a top-level `scripts/` file, and its acknowledgement
+#           table in `test_no_real_launchers.py` pins the reaching FILE SET both
+#           ways. This file has never had a call site and cannot gain one from a
+#           comment, so spelling the retired package's directory path here would
+#           only widen that acknowledged set — which is the direction that makes
+#           a FUTURE real invocation from this file pre-approved. Naming the
+#           suite by its underscore filename says the same thing and keeps the
+#           acknowledged set at exactly the one file that genuinely names it.
 #
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf cairn luajit)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash fzf cairn)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -1027,6 +1034,20 @@ HERMETIC_TARGETS=(
   # orphaned by the switch that deploys it. Gated here because it is the only test
   # that asserts a property ACROSS the hook modules, so no per-hook target owns it.
   scripts/claude-hooks/tests/test_on_disk_artifact_names.py
+  # Same reason again — a FILE, not the directory. The Stop-hook DECISION EMITTER and
+  # the two hooks wired to it. Seven Stop hooks fire ~20,700 times per six weeks on
+  # this host and none of them reached activity.events, so every question about what a
+  # hook decided had to be inferred from transcript prose — which returned a bogus
+  # 100.0% compliance rate, a lift figure wrong by 4.8pp (no per-entity key) and one
+  # hypothesis that could not be tested at all. What is gated here is the CONTRACT that
+  # lets the emitter exist on a Stop path: exit 0 with byte-identical stdout and empty
+  # stderr under four hostile spool states (with its own negative control, an emitter
+  # that raises), the structural privacy boundary that keeps captured text out of the
+  # payload (with its positive control, the same keys carrying ids), and the
+  # positive/negative control pair for the instrument itself — a zero from an emitter
+  # wired to nothing is indistinguishable from a clean pass, so no zero here is
+  # asserted without a sibling that watches the count move.
+  scripts/claude-hooks/tests/test_hook_telemetry.py
   # Same reason again — a FILE, not the directory. The backgrounded-command
   # capture log (ClickUp 868ktvqf9). It fires PreToolUse AND PostToolUse on every
   # Bash call, so its fail-open contract is felt on every command the operator
@@ -2075,6 +2096,15 @@ TARGET_FLOORS=(
   # ⚠ The `age`/`opencode` 7 that were red the same morning are GONE; main fixed
   # them. This baseline has gone stale twice in one day: RE-DERIVE it with a
   # control run, never quote these numbers.
+  # ⚠ PHASE 4 (the review-TUI retirement) deleted a 67-test file from this
+  # target and this entry is DELIBERATELY UNCHANGED. Measured on the Phase 4
+  # tree: 15262 collected against a floor of 13026, so the deletion crossed
+  # nothing, the gate raised no drift error, and it therefore printed NO
+  # replacement number to copy. Lowering the floor on a deletion would be
+  # backwards, and RAISING it to `_suggested_floor 15262` is a ratchet this
+  # change did not measure its way into and would collide with every
+  # concurrent branch — the table's own rule is to copy what the gate prints,
+  # and the gate printed nothing here.
   "scripts/tests|13026"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
@@ -2606,6 +2636,27 @@ TARGET_FLOORS=(
   # the three satisfaction routes, each checked alone plus its negative control.
   #   _suggested_floor 69 = 69 - min(50, max(1, 69/20 = 3)) = 66.
   "scripts/claude-hooks/tests/test_handoff_write_guard.py|66"
+  # 2026-09-17, the Stop-hook DECISION EMITTER arrives as a NEW target: 96 collected,
+  # 0 skipped, measured by pytest on this branch. The count is dominated by the
+  # fail-open battery (two hooks x four hostile spool states, each asserting exit
+  # status, byte-identical stdout, empty stderr AND a zero row count so a case that
+  # stopped being hostile goes red; plus an emitter that raises at import and on call,
+  # x both hooks) and by the coercion table's rejected/admitted pairs. No new skips,
+  # so EXPECTED_SKIPS is untouched.
+  #
+  # ⚠ IT WAS 55 AND THE AUDIT FIXES TOOK IT TO 96. What the 41 buy, in one line each:
+  # the unmeasurable Stop is a ROW and not a silence (five hostile payloads x two
+  # hooks, plus a decision path that raises, plus the pure mapping) — the 🔴 finding
+  # the emission being inside main()'s single handler produced; the call site's half of
+  # the privacy boundary (a laundered doc name cannot reach the payload, with its
+  # positive control and the predicate's own table); a FIFO spool that must not HANG a
+  # Stop hook; the extras cap counting its own drops; and the per-Stop id that gives
+  # this hook a denominator of its own.
+  #   _suggested_floor 96 = 96 - min(50, max(1, 96/20 = 4)) = 96 - 4 = 92.
+  # The number is the gate's own function applied to the collected count, not
+  # arithmetic reconciled by hand — if this line conflicts, re-run the gate on the
+  # MERGED tree and copy what it prints.
+  "scripts/claude-hooks/tests/test_hook_telemetry.py|92"
   # 2026-08-21, the backgrounded-command capture log (868ktvqf9) arrives as a NEW
   # target: 80 collected, 0 skipped, measured by this gate on this branch.
   #   _suggested_floor 80 = 80 - min(50, max(1, 80/20 = 4)) = 76.
@@ -2644,6 +2695,28 @@ TARGET_FLOORS=(
   # GUARD 3a reports it unfloored.
   # 2026-08-29 (+3): the $DEVRC_DIR off-session config tests joined it.
   # `_suggested_floor 7` = 7 - min(50, max(1, 7/20 = 0 -> 1)) = 6.
+  #
+  # 🔴 THE TWO LINES ABOVE WERE STALE AND THE FLOOR COULD NOT SAY SO — READ
+  # THIS BEFORE TRUSTING A GREEN HERE. They describe a SEVEN-test target, and
+  # between 2026-08-29 and Phase 4 this directory held FIFTEEN: an 8-test
+  # `test_nvim_octo_diff_motions.py` arrived and nothing updated either the
+  # count or the floor, because a floor is a LOWER BOUND and only errors when
+  # it is crossed. 15 never crossed 6, so the gate was silent in BOTH
+  # directions — silent when the tests arrived, and silent again in Phase 4
+  # when all 8 were deleted. A deletion of more than half this target's tests
+  # is exactly the event a floor is for, and this one would have passed
+  # unremarked.
+  # ⚠ MEASURED on the Phase 4 tree: 7 collected, so `_suggested_floor 7` is
+  # still 6 and the entry needs no edit — it lands back on the state the two
+  # lines above describe, which makes them true again by coincidence rather
+  # than by anyone maintaining them. The gate printed NO replacement number
+  # for this target, because there was no drift error to print one on; do not
+  # read this comment as one being copied.
+  # ⚠ THE GAP IS NOT CLOSED, and it is not this line's to close: a floor
+  # cannot detect a shrink that stays above it, at ANY value. A target this
+  # small would need an exact pin, which is a different mechanism and a
+  # different change. Recorded here so the next reader knows the silence was
+  # understood rather than unnoticed.
   "scripts/devhost-tests|6"
 )
 

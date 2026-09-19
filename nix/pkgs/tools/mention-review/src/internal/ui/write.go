@@ -141,6 +141,42 @@ func (a App) proposeMerge() (App, []Intent) {
 			"with a method nobody chose is the wrong commit shape."
 		return a.settled(), nil
 	}
+	// 🔴 A PULL REQUEST THAT IS ALREADY MERGED OR CLOSED IS REFUSED HERE TOO, AND
+	// THE REDUNDANCY WITH `ghapi.Merge` IS WANTED — THEY ANSWER DIFFERENT
+	// QUESTIONS OFF DIFFERENT DATA.
+	//
+	// This one reads the SNAPSHOT: it is free, it is instant, and it stops the
+	// operator from confirming a merge that a round trip is about to refuse. So:
+	// this is the UX, `ghapi.Merge` is the safety net, and neither subsumes the
+	// other. Both call `ghapi.TerminalPRState`, so "already over" has one
+	// definition rather than two.
+	//
+	// ⚠ THE SNAPSHOT CAN BE STALE BOTH WAYS. A pull request merged by somebody
+	// else since the fetch still looks OPEN here — harmless, because the live
+	// read catches it. One REOPENED since the fetch still looks CLOSED, and this
+	// refuses a merge that would have been fine. That is the cheaper of the two
+	// mistakes and it is chosen, not overlooked.
+	//
+	// ⚠ RECOVERING FROM IT DOES NOT REQUIRE A RELAUNCH, AND THIS COMMENT USED TO
+	// SAY IT DID. `r` is inert on a healthy screen (see `ActRetry`), which is the
+	// true half — but `stepWriteDone` emits `FetchPR` after EVERY successful
+	// write, and the terminal refusal here covers `m` alone (`c` on a merged pull
+	// request stays legitimate, as `write_test.go` asserts directly). So posting
+	// a comment refreshes the snapshot and clears a stale CLOSED, and relaunching
+	// is one route out rather than the only one.
+	//
+	// ⚠ IT IS NOT IN `writeGate`. That gate covers all five verbs, and commenting
+	// on a merged pull request is a perfectly reasonable thing to do — putting
+	// this there would refuse the four verbs that are still legitimate.
+	if over := ghapi.TerminalPRState(a.Snap.State, a.Snap.Merged); over != "" {
+		a.notice = "REFUSED — this pull request is already " + over +
+			", so there is nothing to merge. NOTHING WAS SENT."
+		return a.settled(), nil
+	}
+	// ⚠ THE SNAPSHOT'S MERGEABILITY IS NOT READ HERE AND MUST NOT BE. The panel
+	// shows it, and what the panel shows is a fact about when the snapshot was
+	// fetched. `ghapi.Merge` re-reads it at the moment of the write; carrying
+	// this value along would be offering that gate the stale answer.
 	return a.propose(MergePR{
 		Owner: a.Owner, Name: a.Name, Num: a.Num, Method: a.MergeMethod,
 	})
@@ -315,7 +351,12 @@ func (a App) stepWriteDone(m WriteDone) (App, []Intent) {
 	// 🔴 RE-READ, because every panel still describes the PR as it was BEFORE
 	// the write. A screen that says OPEN after a successful merge is the same
 	// class of lie as a file list that is quietly short.
-	return a, []Intent{FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+	//
+	// 🔴 BOTH READS, VIA `ReadIntents`. `PRLoaded` no longer chases the diff
+	// itself — see `ReadIntents`' header — so a re-read that asked only for the
+	// pull request would leave the Diff panel showing the pre-write patch
+	// forever. That is the same lie one pane to the right.
+	return a, a.ReadIntents()
 }
 
 // settled re-lays-out after anything that changes the BAR.

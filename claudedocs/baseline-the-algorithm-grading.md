@@ -73,8 +73,8 @@ B  guard-file churn           +392092 / -34369  (net +357723)
 C  tree LOC guard/product     445447 / 253067   ratio 1.76:1
 C  tree files guard/product   491 / 537
 D  guard files ADDED          324
-E  Bash calls (14d)           20900
-E  ...that are test/gate runs 4111  (19.7%)
+E  Bash calls  [2026-08-04..2026-09-15)   41832        <- v2, windowed correctly
+E  ...that are test/gate runs             8527  (20.4%)
 ```
 ⚠ **C is a property of the TREE, not the window** — it does not vary by window
 and is only comparable across re-runs at different dates.
@@ -130,6 +130,66 @@ prose** against a 0-headroom listing ceiling. It should have to earn that.
 skill merged, the tier ledger was applied to both hosts, making 13 skills
 name-only. Routing changed for everything at once, so any adoption shift after
 2026-09-14 has two plausible causes.
+
+## FIRST READING — 2026-09-18 (4 days in; the criterion date is 2026-10-27)
+
+⚠ **PREMATURE BY DESIGN.** Four days against a six-week criterion, so nothing
+below closes anything. Recorded now because the transcript corpus and the firing
+attribution get harder to reconstruct later, not because a verdict is due.
+
+### Q1 — does it fire? YES, and the part most at risk is the part that worked
+`find-session --skill the-algorithm`, whole corpus:
+
+| | |
+|---|---|
+| sessions | **7**, in 4 days |
+| repos | 4 — datapacket-talos (4), devrc (1), civit-cli (1), scratch-vetr (1) |
+| **non-devrc** | **6 of 7** — so they cannot be meta-sessions editing the skill |
+| **auto-fired from the description** | **4** |
+| typed `/the-algorithm` | 2 |
+| unmeasured | 1 (laptop-only transcript) |
+| by day | 09-15: 1 · 09-16: 2 · 09-17: 1 · 09-18: 3 |
+
+The kill criterion — *0 unprompted firings by 2026-10-27* — is **cleared**. The
+4 auto-fires are the load-bearing number: they say the DESCRIPTION is routing,
+which is the half that admitting a tier-A skill actually paid for.
+⚠ **7 is a FLOOR**: `--skill` cannot see opencode at all, and one matched
+transcript lives only on the laptop.
+
+### Q2 — does it change the outcome? SUGGESTIVE, NOT CONFIRMED
+The transcripts carry the skill's own structure — *"Step 1 — question the
+requirement, name the maker"*, *"Step 2 — Delete `submit_ceiling_godoc_test.go`
+— 139 lines, delete"* — and, more encouragingly, a case where **step 2 was
+correctly OVERRULED** by a constraint, which is the add-back discipline working
+rather than deletion for its own sake.
+
+🔴 **But the one concrete deletion that could be checked was NOT confirmed to
+land.** `submit_ceiling_godoc_test.go` appears in NO repo searched
+(datapacket-talos, civit/cli, civitai, homelab-talos, devrc) — never added,
+never deleted. So it was PROPOSED and its execution is unverified. That is
+exactly the `fired` ≠ `caught` gap the sweep warns about, and it is the question
+the six-week read has to answer by reading sessions, not by counting them.
+
+### Aggregate — 4d either side of the merge, frozen classifier
+| metric | pre 09-10→09-14 | post 09-14→09-18 |
+|---|---|---|
+| non-merge commits | 230 | 77 |
+| guard-touching | 40.0% | 32.5% |
+| guard-only | 10.4% | 9.1% |
+| guard files ADDED | 34 | 5 |
+| …per commit | 0.148 | **0.065** |
+| E test/gate share (v2) | 18.5% | **15.2%** |
+| tree LOC guard:product | 1.76:1 | 1.66:1 |
+
+**Nothing here confirms anything, per this document's own rule.** No metric
+returned above ~50%, so nothing FALSIFIES the skill either. The guard-share
+decline continues the pre-merge trend exactly (59.9 → 52.0 → 37.6 → 32.5), and
+**commit volume fell 3×**, which moves every ratio's denominator. The
+guard-files-added rate halving is the most interesting number and also the
+weakest powered — it rests on 5 files.
+
+**Verdict at 4 days: ADOPTION CONFIRMED, EFFICACY UNMEASURED.** Keep it; re-read
+at the criterion date.
 
 ## The frozen method
 
@@ -210,19 +270,22 @@ print(f"C  tree files guard/product   {nfiles['guard']} / {nfiles['product']}")
 print(f"D  guard files ADDED          {added_guard}")
 
 if TDIR and TDIR.is_dir():
-    cutoff = time.time() - 14 * 86400
     TESTRE = re.compile(r"pytest|run-tests\.sh|run-node-tests\.sh|gate\.sh|"
                         r"scoped-tests\.sh|node --test|nix build .*#checks|mutation_")
     nbash = ntest = 0
     for f in TDIR.glob("*.jsonl"):
-        if f.stat().st_mtime < cutoff:
-            continue
         try:
             for line in f.open(errors="ignore"):
                 if '"Bash"' not in line:
                     continue
                 try: rec = json.loads(line)
                 except Exception: continue
+                # 🔴 v2: filter per RECORD on its own timestamp. v1 selected
+                # whole FILES by mtime over a hard-coded 14 days and ignored
+                # SINCE/UNTIL — see the retraction above.
+                ts = (rec.get("timestamp") or "")[:10]
+                if not ts or ts < SINCE or ts >= UNTIL:
+                    continue
                 for c in (rec.get("message") or {}).get("content") or []:
                     if isinstance(c, dict) and c.get("type") == "tool_use" \
                             and c.get("name") == "Bash":
@@ -231,8 +294,9 @@ if TDIR and TDIR.is_dir():
                             ntest += 1
         except Exception:
             continue
-    print(f"E  Bash calls (14d)           {nbash}")
-    print(f"E  ...that are test/gate runs {ntest}  ({100*ntest/max(nbash,1):.1f}%)")
+    print(f"E  Bash calls  [{SINCE}..{UNTIL})   {nbash}")
+    print(f"E  ...that are test/gate runs             {ntest}"
+          f"  ({100*ntest/max(nbash,1):.1f}%)")
 ```
 
 Run as:
@@ -241,6 +305,25 @@ python3 baseline.py ~/workspace/devrc 2026-08-04 2026-09-15 \
   /home/zach/.claude/projects/-home-zach-workspace-devrc
 ```
 
-⚠ **Metric E reads Claude transcripts only** and selects files by mtime, so it
-is a 14-day window regardless of the `--since`/`--until` arguments. It is also
-blind to opencode, like the firing count.
+⚠ **Metric E reads Claude transcripts only**, so it is blind to opencode, like
+the firing count.
+
+🔴 **METRIC E v1 IS RETRACTED — it never honoured the window, and it undercounted.**
+Found 2026-09-18 while taking the first reading. v1 selected whole transcript
+FILES by `mtime` over a hard-coded 14 days and ignored `SINCE`/`UNTIL` entirely,
+which broke it two ways at once:
+
+* **It answered the wrong question.** Every "pre" and "post" E was the same
+  overlapping trailing-14-day window wearing two different labels, so comparing
+  them was close to meaningless.
+* **It undercounted by half.** A file whose LAST write is older than 14 days can
+  still contain in-window records, and v1 dropped the whole file. Re-measured on
+  the identical t=0 window: **41,832 Bash calls, not 20,900** — so the v1 rate
+  (19.7%) was computed over half the corpus.
+
+v2 filters per RECORD on the record's own `timestamp`. The corrected t=0 value is
+**20.4%**, and it is the one to compare against.
+
+⚠ **A–D are UNAFFECTED and remain frozen** — they read git, never transcripts, and
+every A–D number in this document was produced by the same classifier that is
+still printed above. Only E moved.

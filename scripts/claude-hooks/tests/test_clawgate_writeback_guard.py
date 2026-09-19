@@ -18,9 +18,9 @@ WHAT THIS FILE IS FOR
 
   3. 🔴 THE LADDER IS DRIVEN WITH LITERALS THE CONSTANTS CANNOT EQUAL. This repo has
      been bitten five times by a fixture whose value equals the constant it tests, so
-     `MAX_BLOCKS = 2` is never checked by something that produces 2 by construction:
-     the counter is seeded at 0 and at 8 (neither of which is 2 or 3) and the
-     decision is watched to MOVE from block to context to silence.
+     `MAX_BLOCKS = 1` is never checked by something that produces 1 by construction:
+     the counter is seeded at 0 and at 8 (neither of which is 1 or 3) and the
+     decision is watched to MOVE from block to notice to silence.
 
   4. 🔴 EVERY "CANNOT MEASURE" PATH IS A NOTICE, NEVER A BLOCK. A hook that goes
      silent when the board is unreachable reports the same observable as a hook that
@@ -781,7 +781,7 @@ def test_a_delegated_card_SPENDS_NO_COUNTER(home):
     """🔴 Asserted through the LADDER, not by reading the counter file: a long agent
     run must not exhaust the budget a genuinely missing write-back will need.
 
-    Four delegated Stops is strictly more than MAX_FIRES (3) and MAX_BLOCKS (2) — and
+    Four delegated Stops is strictly more than MAX_FIRES (3) and MAX_BLOCKS (1) — and
     4 equals neither constant, so this cannot pass by construction. If `delegated`
     burned a fire, the ladder would be spent and the final Stop — where the agent has
     DIED with no write-back — would come back silent instead of blocking.
@@ -1004,7 +1004,7 @@ def test_an_unmeasurable_board_goes_quiet_rather_than_notifying_forever(home,
                                                                         capsys):
     """The other side of that separation: its own counter is still a CAP, so an
     outage cannot produce one notice per Stop indefinitely. 3 notices, then silence —
-    driven with a range of 6, a length neither MAX_FIRES (3) nor MAX_BLOCKS (2)."""
+    driven with a range of 6, a length neither MAX_FIRES (3) nor MAX_BLOCKS (1)."""
     seed()
     wrote = []
     for _ in range(6):
@@ -1018,13 +1018,13 @@ def test_an_unmeasurable_board_goes_quiet_rather_than_notifying_forever(home,
 # 9. THE ESCALATION LADDER
 # =========================================================================== #
 def test_the_ladder_constants_are_what_the_docstring_claims():
-    assert guard.MAX_BLOCKS == 2
+    assert guard.MAX_BLOCKS == 1
     assert guard.MAX_FIRES == 3
     assert guard.MAX_TASKS == 5
 
 
 @pytest.mark.parametrize("fire,rung", [
-    (1, "block"), (2, "block"), (3, "notice"), (4, "silent"), (9, "silent"),
+    (1, "block"), (2, "notice"), (3, "notice"), (4, "silent"), (9, "silent"),
 ])
 def test_escalate_maps_each_fire_number_to_its_rung(fire, rung):
     assert guard.escalate(fire) == rung
@@ -1033,8 +1033,9 @@ def test_escalate_maps_each_fire_number_to_its_rung(fire, rung):
 def test_the_ladder_end_to_end_on_one_task(home, capsys):
     """🔴 Literal expected sequence, pinned from the ladder in the docstring — NOT
     derived from MAX_BLOCKS/MAX_FIRES, which is how a test comes to agree with a
-    mutated implementation. Read as the EMITTED JSON, so "the third rung relents" is
-    a claim about what the CLI receives rather than about a string this file chose."""
+    mutated implementation. Read as the EMITTED JSON, so "the rungs above the first
+    relent" is a claim about what the CLI receives rather than about a string this
+    file chose."""
     seed()
     shapes = []
     for _ in range(5):
@@ -1042,25 +1043,29 @@ def test_the_ladder_end_to_end_on_one_task(home, capsys):
         out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r))
         shapes.append(None if out is None
                       else ("block" if "decision" in out else sorted(out)[0]))
-    assert shapes == ["block", "block", "systemMessage", None, None]
+    assert shapes == ["block", "systemMessage", "systemMessage", None, None]
 
 
-def test_the_ladder_costs_EXACTLY_TWO_forced_continuations(home, capsys):
-    """🔴 THE NUMBER IN THE DOCSTRING, MEASURED. It said two and delivered three: the
-    third rung's `additionalContext` went into the CLI's `blockingErrors` array
-    exactly like a block. Counted here off the emitted JSON, over a 5-Stop run whose
-    length equals neither MAX_BLOCKS (2) nor MAX_FIRES (3)."""
+def test_the_ladder_costs_EXACTLY_ONE_forced_continuation(home, capsys):
+    """🔴 THE NUMBER IN THE DOCSTRING, MEASURED. Two earlier versions of this claim
+    were wrong in turn: it said two and delivered three (the third rung's
+    `additionalContext` went into the CLI's `blockingErrors` array exactly like a
+    block), and then it said two and MEANT two, which the corpus showed was one block
+    too many — 35 of the 37 fire-2 ladders in the corpus punished a session for
+    complying with fire 1 (unit: (transcript file, task id)). Counted here off the
+    emitted JSON, over a 5-Stop run whose
+    length equals neither MAX_BLOCKS (1) nor MAX_FIRES (3)."""
     seed()
     forced = 0
     for _ in range(5):
         r = Reader(result=task(comments=[]))
         v = guard.stop_decision(payload("Stop"), reader=r)
         forced += bool(forces_a_continuation(emitted(capsys, v)))
-    assert forced == 2
+    assert forced == 1
 
 
 def test_a_counter_seeded_far_past_the_cap_is_silent(home):
-    """🔴 THE FIXTURE-EQUALS-CONSTANT CONTROL. 8 is a value MAX_BLOCKS (2) and
+    """🔴 THE FIXTURE-EQUALS-CONSTANT CONTROL. 8 is a value MAX_BLOCKS (1) and
     MAX_FIRES (3) cannot equal, so a mutant that hardcodes either literal cannot
     survive this: the next fire is 9 and the only correct answer is silence."""
     sd = seed()
@@ -1071,7 +1076,7 @@ def test_a_counter_seeded_far_past_the_cap_is_silent(home):
 
 
 def test_a_counter_seeded_at_zero_still_blocks(home):
-    """The other end of the same control: 0 is also not 2 or 3, and the output MOVES."""
+    """The other end of the same control: 0 is also not 1 or 3, and the output MOVES."""
     sd = seed()
     with open(guard._fires_path(sd, 193), "w") as fh:
         fh.write("0")
@@ -1700,9 +1705,18 @@ def test_the_dismiss_command_names_an_absolute_interpreter(home, tmp_path):
 
 
 def test_the_positive_control_for_that_dismissal(home, tmp_path):
-    """Without the dismiss step the same sequence blocks a SECOND time — so the
+    """Without the dismiss step the same sequence still FIRES a SECOND time — so the
     silence above is the mechanism working, not a session that had gone quiet anyway
-    (the ladder still has a rung left at this point)."""
+    (the ladder still has a rung left at this point).
+
+    🔴 THIS CONTROL USED TO ASSERT A SECOND *BLOCK*, AND THAT IS THE ONE PRE-EXISTING
+    ASSERTION THE ONE-RUNG LADDER LEGITIMATELY MOVES. `MAX_BLOCKS = 1` makes fire 2 a
+    `systemMessage`. What the control actually needs is that the un-dismissed session
+    had NOT gone quiet, and an emitted notice proves that exactly as well as a block
+    did — so the discriminating power is unchanged while the claim stops asserting a
+    retired design. Asserted as "emitted something naming the card", not as a kind
+    string, so it cannot pass on an empty stdout.
+    """
     b = tmp_path / "dismissbin2"
     b.mkdir()
     mockbin.write_exec(b / "clawgatectl",
@@ -1712,7 +1726,10 @@ def test_the_positive_control_for_that_dismissal(home, tmp_path):
              path_extra=b)
     run_hook(payload("Stop"), home, path_extra=b)
     second = run_hook(payload("Stop"), home, path_extra=b)
-    assert json.loads(second.stdout)["decision"] == "block"
+    assert second.stdout.strip(), "the un-dismissed session went quiet on its own"
+    out = json.loads(second.stdout)
+    assert "clawgate write-back MISSING for task 193." in (
+        out.get("reason") or out.get("systemMessage") or ""), out
 
 
 def test_the_cli_refuses_a_dismiss_without_a_session_rather_than_guessing(home):
@@ -1840,8 +1857,14 @@ def test_MULTI_TURN_work_fires_once_per_turn_and_then_STOPS(home, capsys):
     """🔴 THE COST OF THE ANCHOR, BOUNDED AND MEASURED RATHER THAN DISCOVERED LATER.
     Work spanning several turns, with a Done comment each time that the NEXT turn's
     work then outdates, fires once per turn — until the per-task ladder is spent. Four
-    turns: block, block, systemMessage, silence. Driven with 4, which is neither
-    MAX_BLOCKS (2) nor MAX_FIRES (3)."""
+    turns: block, systemMessage, systemMessage, silence. Driven with 4, which is
+    neither MAX_BLOCKS (1) nor MAX_FIRES (3).
+
+    🔴 THIS IS THE SHAPE THAT WAS MEASURED WRONG 35 TIMES OUT OF 37 — a session that
+    COMPLIED (it wrote the Done comment) and then kept working, outdating its own
+    comment by doing so. It used to cost TWO forced continuations; it now costs one,
+    and every later turn reaches the operator without re-querying the model. The
+    remaining single block is deliberate and is asserted at index 0."""
     sd = seed(work=False)
     done_at = "2026-08-15T12:45:00.000000Z"
     shapes = []
@@ -1852,7 +1875,7 @@ def test_MULTI_TURN_work_fires_once_per_turn_and_then_STOPS(home, capsys):
         out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r))
         shapes.append(None if out is None
                       else ("block" if "decision" in out else sorted(out)[0]))
-    assert shapes == ["block", "block", "systemMessage", None]
+    assert shapes == ["block", "systemMessage", "systemMessage", None]
 
 
 def test_MULTI_TURN_work_that_KEEPS_writing_back_never_fires_at_all(home):
@@ -2382,7 +2405,7 @@ def test_the_negative_control_a_normal_dotted_component_is_untouched(raw):
 # =========================================================================== #
 SESSION_B = "sess-writeback-2"
 # 200/201 are the production ids. Neither can be produced by MAX_TASKS (5), MAX_BLOCKS
-# (2) or MAX_FIRES (3), and neither equals the 193/194 the rest of this file uses — so
+# (1) or MAX_FIRES (3), and neither equals the 193/194 the rest of this file uses — so
 # no fixture here can pass by being a constant it is testing.
 DISMISSED_TASK = 200
 NEIGHBOUR_TASK = 201
@@ -3309,7 +3332,7 @@ def test_the_same_card_read_NOT_created_still_blocks(home):
 
 def test_authored_NEVER_climbs_to_a_block_however_many_stops(home):
     """🔴 Through the LADDER, like the delegated-counter test. Four is strictly more
-    than MAX_BLOCKS (2) and MAX_FIRES (3), and equals neither, so this cannot pass by
+    than MAX_BLOCKS (1) and MAX_FIRES (3), and equals neither, so this cannot pass by
     construction. `authored` rides its own counter kind, so it can neither reach a
     block nor spend the budget a genuinely missing write-back would need."""
     seed()
@@ -3317,3 +3340,248 @@ def test_authored_NEVER_climbs_to_a_block_however_many_stops(home):
                                  reader=Reader(result=sessioned("created")))[0]
              for _ in range(4)]
     assert "block" not in kinds
+
+
+# =========================================================================== #
+# THE ONE-RUNG LADDER — MAX_BLOCKS = 1
+#
+# 🔴 WHAT THIS SECTION IS AND IS NOT — MEASURED AGAINST THE BASE HOOK, NOT ASSERTED.
+# This comment used to say exactly ONE test here was a regression test and that
+# everything else "behaved this way before the change too". That justifying clause was
+# FALSE of fire 2, which is the new behaviour. MEASURED by running this file's seven
+# tests against the base hook (`b34cdbe0`, MAX_BLOCKS = 2) — THREE go red:
+#
+#   test_REGRESSION_a_COMPLYING_session_is_not_blocked_a_SECOND_time   RED at base
+#   test_the_SECOND_Stop_still_REACHES_the_operator_as_a_systemMessage RED at base
+#   test_the_notice_rung_is_reached_at_fire_2_AND_fire_3_then_silence  RED at base
+#
+# All three pin fire 2, which at base was a second `decision: "block"`. The remaining
+# four ARE invariant guards — fire 1, its negative control, the could-not-measure
+# ladder and the dismiss escape all behaved this way before the change, and are pinned
+# here because lowering a block cap is exactly the kind of edit that quietly takes a
+# rung with it. Labelled rather than counted as regression coverage, per RULES.md; the
+# old wording under-claimed coverage, which is the safe direction and still wrong.
+#
+# 🔴 THE TRADE THIS SECTION ENCODES, STATED SO NO READER MISTAKES IT FOR A PURE WIN.
+# Rung 2 fired 37 times in the corpus — unit `(transcript file, task id)`, subagent
+# transcripts included: 35 re-arms (a write-back landed between fire 1 and fire 2 and
+# later work outdated it) and 2 legitimate — and BOTH of those WORKED, producing a
+# write-back after fire 2 on tasks 430 and 525. (The "31 wrong for 1 right" this
+# section used to quote came from a scan that captured only the first task id in a
+# multi-task blocking message; see the module docstring of
+# `claudedocs/clawgate-writeback-rung2-corpus-scan.py`.) The lost case degrades to a
+# `systemMessage` the operator sees and the model does not — for at most two more
+# turns, since MAX_FIRES caps notices as well as blocks — and whether a notice alone
+# would have produced the same write-back is NOT MEASURABLE; nothing here asserts that
+# it would.
+# =========================================================================== #
+#: A comment that EXISTS but that later work has OUTDATED — the re-arm shape, and the
+#: one that accounts for 35 of the 37 fire-2 ladders in the corpus.
+#:
+#: 🔴 TWO CONSTANTS, BECAUSE THE TWO HARNESSES PUT "the last work event" IN DIFFERENT
+#: PLACES AND ONE VALUE CANNOT SERVE BOTH. The unit-level fixtures seed work at a FIXED
+#: instant (WORK_TS, 12:30), so the comment must predate that; the real-process tests
+#: let the hook stamp work from the live clock, so any 2026 timestamp is already stale
+#: there. A first cut used one value for both and the unit-level tests went SILENT —
+#: the comment was NEWER than the seeded work, i.e. the fixture built `written`, the
+#: opposite of the shape under test. Both values are distinct from READ_TS (12:00),
+#: WORK_TS (12:30) and the 13:00 `comment()` default, so neither can pass by
+#: collapsing two anchors.
+REARM_COMMENT_TS = "2026-08-15T12:10:00.000000Z"    # after the read, before the work
+STALE_WRITEBACK_TS = "2026-08-15T12:45:00.000000Z"  # stale against a live-clock stamp
+
+
+def _reader_stale_comment():
+    """A card carrying a real `claude-code` comment that later work has outdated,
+    against the FIXED work stamp `seed()` writes."""
+    return Reader(result=task(comments=[comment(created=REARM_COMMENT_TS)]))
+
+
+def test_REGRESSION_a_COMPLYING_session_is_not_blocked_a_SECOND_time(home, tmp_path):
+    """🔴 THE REGRESSION, DRIVEN THROUGH THE REAL HOOK AS SEPARATE PROCESSES, WITH NO
+    NEW API. The production sequence: read the card, do work, Stop (blocked), COMPLY by
+    commenting, keep working, Stop again.
+
+    At pre-change code the second Stop returned `decision: "block"` — a session was
+    forced to continue for having obeyed the first block and then kept working. That
+    is 35 of the 37 fire-2 ladders in the corpus. Here the second Stop must NOT force
+    a continuation.
+
+    The board fixture carries a `claude-code` comment the whole time; it is the LAST
+    WORK EVENT moving past it that re-arms the guard, which is why this is the
+    complying shape and not the #193/#194 shape.
+    """
+    b = tmp_path / "onerungbin"
+    b.mkdir()
+    body = json.dumps(task(comments=[comment(created=STALE_WRITEBACK_TS)]))
+    mockbin.write_exec(b / "clawgatectl", "printf '%%s\\n' '%s'\n" % body)
+
+    run_hook(bash("clawgatectl task get 193"), home, path_extra=b)
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/x"}), home,
+             path_extra=b)
+    first = run_hook(payload("Stop"), home, path_extra=b)
+    assert first.returncode == 0
+    out1 = json.loads(first.stdout)
+    assert out1.get("decision") == "block", out1      # fire 1: unchanged
+
+    # COMPLY: write the card back, exactly as the block text instructs.
+    run_hook(bash('clawgatectl task comment 193 --body "shipped X"'), home,
+             path_extra=b)
+    # ...and then keep working, which is what outdates the comment just written.
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/y"}), home,
+             path_extra=b)
+
+    second = run_hook(payload("Stop"), home, path_extra=b)
+    assert second.returncode == 0
+    out2 = json.loads(second.stdout) if second.stdout.strip() else None
+    assert not forces_a_continuation(out2), second.stdout
+    assert out2 is not None and "decision" not in out2, out2
+
+
+def test_the_SECOND_Stop_still_REACHES_the_operator_as_a_systemMessage(home,
+                                                                       tmp_path):
+    """🔴 THE OTHER HALF OF THE SAME CLAIM, AND THE REASON THE TRADE IS ACCEPTABLE.
+    Not blocking is not the same as going quiet, and a change that silently deleted
+    rung 2 rather than relenting it would pass the regression above. STEP 1 OF THIS
+    WORK MEASURED THIS RATHER THAN ASSUMING IT: the emitted object is exactly
+    `{"systemMessage": …}` and its text is the SAME missing-write-back body fire 1
+    carried, so the operator loses the forced continuation and nothing else."""
+    b = tmp_path / "noticebin"
+    b.mkdir()
+    body = json.dumps(task(comments=[comment(created=STALE_WRITEBACK_TS)]))
+    mockbin.write_exec(b / "clawgatectl", "printf '%%s\\n' '%s'\n" % body)
+
+    run_hook(bash("clawgatectl task get 193"), home, path_extra=b)
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/x"}), home,
+             path_extra=b)
+    first = json.loads(run_hook(payload("Stop"), home, path_extra=b).stdout)
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/y"}), home,
+             path_extra=b)
+    second = json.loads(run_hook(payload("Stop"), home, path_extra=b).stdout)
+
+    assert sorted(second) == ["systemMessage"], second
+    assert second["systemMessage"] == first["reason"], (second, first)
+    assert "clawgate write-back MISSING for task 193." in second["systemMessage"]
+
+
+def test_the_notice_rung_is_reached_at_fire_2_AND_fire_3_then_silence(home, capsys):
+    """MAX_FIRES is unchanged at 3, so there are TWO relenting rungs now rather than
+    one. Pinned as the literal emitted sequence over 5 Stops — a length equal to
+    neither MAX_BLOCKS (1) nor MAX_FIRES (3) — because the docstring states it and a
+    reader who assumed one notice rung would be wrong about how long the operator
+    keeps hearing about the miss."""
+    seed()
+    shapes = []
+    for _ in range(5):
+        out = emitted(capsys, guard.stop_decision(payload("Stop"),
+                                                  reader=_reader_stale_comment()))
+        shapes.append(None if out is None
+                      else ("block" if "decision" in out else sorted(out)[0]))
+    assert shapes == ["block", "systemMessage", "systemMessage", None, None]
+
+
+#: Every board shape that resolves to a MEASURED missing write-back. Lowering the
+#: block cap must not narrow this set — fire 1 is where the entire yield lives.
+FIRE_1_MUST_BLOCK = {
+    "no comments at all (the #193/#194 shape)": task(comments=[]),
+    "only an OLDER comment": task(comments=[comment(created="2026-08-15T11:00:00.000000Z")]),
+    "a comment by someone else": task(comments=[comment(author="user")]),
+    "a RETRACTED comment": task(comments=[comment(body="", retracted=True)]),
+    "an agent that DIED (stopped)": task(comments=[], agent=agent_obj(status="stopped")),
+    "an agent that DIED (error)": task(comments=[], agent=agent_obj(status="error")),
+    "an in_progress card with no write-back": task(status="in_progress", comments=[]),
+    "the complying re-arm shape": task(comments=[comment(created=REARM_COMMENT_TS)]),
+}
+
+
+@pytest.mark.parametrize("label", sorted(FIRE_1_MUST_BLOCK))
+def test_the_INVARIANT_GUARD_fire_1_still_blocks_on_every_path_it_blocked_before(
+        home, capsys, label):
+    """🔴 THE SAFETY PROPERTY, PINNED HARD AND LABELLED HONESTLY. This is an INVARIANT
+    GUARD, not regression coverage: every one of these blocked at fire 1 before the
+    change too. It exists because lowering `MAX_BLOCKS` from 2 to 1 is one keystroke
+    away from lowering it to 0, and a ladder whose first rung relents has given up the
+    whole measured yield — the #193/#194 cards that shipped with zero comments.
+
+    Asserted through `forces_a_continuation` on the EMITTED JSON, so "blocks" is a
+    claim about what the CLI receives, not about an internal kind string.
+    """
+    seed()
+    out = emitted(capsys, guard.stop_decision(
+        payload("Stop"), reader=Reader(result=FIRE_1_MUST_BLOCK[label])))
+    assert forces_a_continuation(out), (label, out)
+    assert "clawgatectl task comment 193 --body" in out["reason"], label
+
+
+def test_the_NEGATIVE_CONTROL_a_real_write_back_still_silences_fire_1(home):
+    """The control for the parametrisation above: change one thing — a `claude-code`
+    comment NEWER than the last work event — and the same fixture goes silent. Without
+    this, "fire 1 blocks" could mean the Stop gate blocks unconditionally."""
+    fresh = comment(created=guard.now_iso(WORK_EPOCH + 60))
+    r = Reader(result=task(comments=[fresh]))
+    seed()
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+
+
+def test_the_INVARIANT_GUARD_the_could_not_measure_ladder_is_INDEPENDENT_of_the_cap(
+        home, capsys, monkeypatch):
+    """🔴 A RELATIONSHIP, NOT A COMPONENT. "Could not measure" runs on its own counter
+    kind and is clamped to `notices` regardless of which rung `escalate` returns, so
+    changing the block cap must not move it at all. Asserted by driving the SAME six
+    Stops at MAX_BLOCKS = 1 and at MAX_BLOCKS = 2 and requiring the two emitted
+    sequences to be EQUAL — an independence claim a single-value run cannot make.
+
+    6 is a length equal to neither constant, and the pair (1, 2) brackets the shipped
+    value from above so a mutant that hardcodes either literal still has to produce
+    the same answer for both.
+    """
+    seqs = {}
+    for cap in (1, 2):
+        monkeypatch.setattr(guard, "MAX_BLOCKS", cap)
+        sd = seed(session="unknown-ladder-%d" % cap)
+        assert os.path.isdir(sd)
+        shapes = []
+        for _ in range(6):
+            v = guard.stop_decision(
+                payload("Stop", session_id="unknown-ladder-%d" % cap),
+                reader=Reader(raises=guard.LiveReadError("boom")))
+            out = emitted(capsys, v)
+            shapes.append(None if out is None
+                          else ("block" if "decision" in out else sorted(out)[0]))
+        seqs[cap] = shapes
+    assert seqs[1] == seqs[2], seqs
+    # ...and the sequence itself, pinned as a literal so "equal" cannot mean
+    # "equally broken": three notices, then silence, and NEVER a block.
+    assert seqs[1] == ["systemMessage"] * 3 + [None] * 3, seqs
+
+
+def test_the_INVARIANT_GUARD_the_dismiss_ESCAPE_still_reaches_the_model_at_fire_1(
+        home, tmp_path):
+    """🔴 THE ESCAPE HATCH SURVIVES THE CAP, AND THAT IS NOT FREE REASONING — IT IS THE
+    ONE THING THE ONE-RUNG LADDER COULD HAVE BROKEN. `--dismiss` is how a session says
+    "this work was not for that card", and the model only ever learns the command from
+    a rung whose text is fed BACK to it. A `systemMessage` is not: the CLI renders it
+    to the operator and its attachment is `hook_system_message: () => []`. With one
+    block rung left, fire 1 is the ONLY turn at which the model can be told — so the
+    dismiss line must still be in fire 1's `reason`, and running it must still end the
+    nagging. Driven end to end through the real processes, taking the command out of
+    the block text rather than reconstructing it."""
+    b = tmp_path / "dismissbin"
+    b.mkdir()
+    mockbin.write_exec(b / "clawgatectl",
+                       "printf '%%s\\n' '%s'\n" % json.dumps(task(comments=[])))
+    run_hook(bash("clawgatectl task get 193"), home, path_extra=b)
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/x"}), home,
+             path_extra=b)
+    first = run_hook(payload("Stop"), home, path_extra=b)
+    reason = json.loads(first.stdout)["reason"]
+    line = [ln.strip() for ln in reason.splitlines() if "--dismiss" in ln]
+    assert len(line) == 1, reason
+
+    assert run_cli(line[0].split()[2:], home).returncode == 0
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/y"}), home,
+             path_extra=b)
+    after = run_hook(payload("Stop"), home, path_extra=b)
+    assert after.returncode == 0
+    assert after.stdout == ""
+    assert after.stderr == ""

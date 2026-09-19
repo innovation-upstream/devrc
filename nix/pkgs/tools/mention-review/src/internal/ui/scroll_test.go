@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/innovation-upstream/devrc/mention-review/internal/ghapi"
 	"github.com/innovation-upstream/devrc/mention-review/internal/udiff"
 )
 
@@ -87,13 +88,31 @@ func syntheticDiffFiles(totalLines int) []udiff.FileInput {
 
 func bigApp(t testing.TB, lines int) App {
 	t.Helper()
-	d, err := udiff.Parse(syntheticDiffFiles(lines))
+	in := syntheticDiffFiles(lines)
+	d, err := udiff.Parse(in)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 🔴 THE SNAPSHOT'S FILE LIST IS THE DIFF'S OWN, AND THAT IS A FIXTURE FIX
+	// RATHER THAN A CONVENIENCE. This helper used to pair the two-file
+	// `fixturePR()` snapshot with a diff of GENERATED files, so `Snap.Files` and
+	// `Diff.Files` named different files entirely — invisible while one integer
+	// indexed both lists positionally, and meaningless the moment the Files
+	// panel resolves its rows against the diff BY PATH. Both halves now describe
+	// the same change, the way the real API's two reads do.
+	snap := fixturePR()
+	snap.Files = make([]ghapi.File, 0, len(in))
+	for _, f := range in {
+		snap.Files = append(snap.Files, ghapi.File{
+			Path:       f.Path,
+			Additions:  f.Additions,
+			Deletions:  f.Deletions,
+			ChangeType: f.ChangeType,
+		})
+	}
 	a := New(fxOwner, fxName, fxNum)
 	a.Width, a.Height = 140, 40
-	a, _ = a.Step(PRLoaded{Snap: fixturePR()})
+	a, _ = a.Step(PRLoaded{Snap: snap})
 	a, _ = a.Step(DiffLoaded{Diff: d})
 	return a
 }
