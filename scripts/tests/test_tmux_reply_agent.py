@@ -3496,12 +3496,29 @@ def test_the_menu_path_refuses_an_empty_text_rather_than_ABORTING_the_tool():
 #      tmux accepts, nor that the detector works on bytes a terminal produced.
 # --------------------------------------------------------------------------- #
 def _real_pane_showing(real_tmux, body: str, tmp_path, name: str) -> str:
-    """A pane on the private server whose VISIBLE content is `body`."""
+    """A pane on the private server whose VISIBLE content is `body`.
+
+    🔴 `sys.executable <script>` RATHER THAN `sh -c "cat …; sleep …"`, and both
+    halves of that are deliberate. The gate has TWO tiers and the `nix build`
+    sandbox is the one CI runs: a pane command that needs `sh`, `cat` and `sleep`
+    to be resolvable there is a dependency this file did not declare, and its
+    failure would present as "the detector is broken" rather than as a missing
+    tool. `sys.executable` is an absolute path that is present by construction.
+    TWO arguments, so it also cannot be mangled if tmux joins them and hands the
+    result to a shell — a `-c` program string could be.
+    """
     src = tmp_path / name
     src.write_text(body, encoding="utf-8")
+    holder = tmp_path / (name + ".show.py")
+    holder.write_text(
+        "import sys, time\n"
+        f"sys.stdout.write(open({str(src)!r}, encoding='utf-8').read())\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n",
+        encoding="utf-8")
     out = real_tmux["tmux"](
         "new-window", "-d", "-t", "=keep:", "-P", "-F", "#{pane_id}",
-        "sh", "-c", f"cat {src}; sleep 120").stdout
+        sys.executable, str(holder)).stdout
     return out.splitlines()[0].strip()
 
 
