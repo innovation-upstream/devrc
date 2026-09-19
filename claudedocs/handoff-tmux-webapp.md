@@ -27,59 +27,34 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Four clawgate releases shipped and verified this session — `0.8.41` → `0.8.44`. The arc's
-closing condition is UNCHANGED and still NOT met: 602 is `complete`, 603 is
-`ready_for_review`.** Everything below descends from rank 68 (grade the four review-ready
-cards), which is what surfaced the defects.
+**Rank 72 SHIPPED and LIVE in clawgate `0.8.45`. The arc's closing condition is STILL NOT MET:
+602 is `complete`, 603 is `ready_for_review`.**
 
-Live: **`0.8.44`**, pod digest `sha256:9412719c…`, both hosts converged, `drift-check` rc 0.
+Merged to `trunk`: `#851` → `5c1da3414` · `#852` → `8438cdb34` · `#853` → `0141b62fd` · pin `7aee536fc`.
+Image `sha256:6de86031e147…`; 🔴 **pushed digest == RUNNING POD digest**, verified not assumed;
+`clawgatectl health` → `0.8.45`. Markers read from the **extracted binary** with positive AND negative
+controls before the pin moved. CI 4/4 green on every head including `clawgate-e2e` at 268 tests.
 
-### Releases cut and verified
-| version | ships | proved before the pin moved |
-|---|---|---|
-| `0.8.42` | `#843` chief panel input | `data-chief-panel-loaded` 1, neg 0 |
-| `0.8.43` | `#846` grid drafts + `#847` machine chat read | `__cgReplyDrafts` 2, `api/agents/{name}/messages` 1 |
-| `0.8.44` | `#848` recap session fork | `webchat:recap` 1 + all three prior markers as regression controls |
+**Why 603 is not `complete`, and it is not a formality:** it carries **author-specified** criteria and
+rank 72 addressed **criterion 4 only**. Criteria 1/2/3/5 are phase-2 (`#835`) work this session never
+validated, so under the clawgate status gate they are not mine to grade — the verdict was already
+frozen at `ready_for_review` by an earlier read. The criterion-4 evidence is recorded as comment
+**1599** on card 603, including the three pre-existing defects found while fixing it.
+The per-instance recon, the decided fix directions and the three process failures that cost
+real time are under Gotchas → "Added 2026-09-18" and "Added 2026-09-19".
 
-Each: image markers read from the **extracted binary** with a positive and negative control
-BEFORE the pin moved, pushed digest == running pod digest, `/health` answered.
+### 🔴 THE SWAP CLASS IS CLOSED — five instances, all five now fixed and deployed
+An audit of all 68 swap sites (`internal/ui/*.go`) found the shape at seven. The durable lesson, which
+outlives the fixes: **the count is of INSTANCES, not sites, and a site is not closed when one of its
+lost states is closed.** Instance 5 was a SECOND piece of state lost at a target instance 1 had already
+"fixed" — the loaded-mark addressed refetch FREQUENCY, not the fact that the refetch URL was static.
+So a per-site ledger would have marked it done. **Ask what else the target holds.**
+1–3 shipped `0.8.42`–`0.8.44` (chief panel body · `#panel-tmux` reply box · recap session fork).
+4 the two pagination cases → `#851`+`#853`, `0.8.45`. 5 a thread picked in the chief panel → `#852`.
 
-### 🔴 ONE BUG CLASS, FOUND FOUR TIMES — a periodic/SSE `innerHTML` swap discarding user state
-An audit of **all 68 swap sites** (`internal/ui/*.go`) found the shape at seven. Three fixed:
-
-1. **`#chief-panel-body`** — `restore()` bound to `htmx:afterSettle` dispatched the panel's open
-   event unconditionally, re-fetching the body ~1×/s and destroying the chat form. Measured:
-   **111 `/ui/chief/panel` in 5 min** live; **449 and 546 refetches across THREE settles** in e2e
-   at `2273a9dab`. Fixed `0.8.42` by a loaded-mark on the body element (NOT a `once` on the
-   trigger — that breaks the re-open case). **Verified by typing**: a dogfood run typed a string,
-   waited 95 s across **80 grid settles**, text survived.
-2. **`#panel-tmux`** — `replyFreeText` is a bare `Input` with **no server-rendered value**, inside a
-   target that re-swaps on a 60 s poll + every snapshot push, holding **~88 reply boxes** on the
-   control whose action is `tmux send-keys` + ENTER. Fixed `0.8.43` (`#846`) by ONE module in
-   `reply.go` keyed on `ReplyViewDOMID`, not a save/restore per mount.
-3. **recap session fork** — see Open investigations; fixed `0.8.44` (`#848`).
-
-🔴 **Still OPEN, same class, no PR:** the two **pagination** cases (`#chat-body`'s "load earlier"
-and the tmux card transcript mount — these are a periodic refetch issuing a URL that forgot its
-cursor, NOT lost drafts, so a restore script patches the wrong layer), plus `<details>` open
-state and scroll position on `#raw-body`/`#chat-body`.
-
-### The machine-tier chat read — the operator's own ask, closed end to end
-`GET /api/agents/{name}/messages` + `clawgatectl agent messages` (`#847`, `0.8.43`). Before it,
-NO machine credential could read an agent's chat: the only reader was
-`GET /ui/agents/{name}/chat-log` behind `requireSession`. Verified live: **200** on the hook
-token, **401** on no credential and **401** on junk; default read returns the operator's
-conversation with no `?session=`. The `kubectl exec` into `chat_messages` used earlier is retired.
-
-### Operator actions taken (destructive, recorded)
-- **Deleted `chat_sessions` 54 and 56** for `zesty-stoat` — empty orphans from earlier rollouts
-  that sorted ahead of session 55. The `DELETE` carried its own `NOT EXISTS (… chat_messages …)`
-  guard, so it could not have removed content; both confirmed empty at the moment of deletion.
-- **Re-raised attention entry 16499 as 16614** (datapacket-talos `#477` access question). It had
-  been resolved by a dogfood agent, not by the operator. Structured options were not restorable
-  via the CLI and ride in the body as text.
-- **`home-manager switch` on BOTH hosts**, and the laptop's `homelab-talos` fast-forwarded
-  (it was **38 behind**, **16 within `containers/clawgate`**), closing a `drift-check` rc 17.
+⚠ **Releases `0.8.41`–`0.8.44` and their verification detail are HISTORY now** — the pattern they
+established is all that matters and it is stated above: markers from the extracted binary, positive and
+negative controls, digest equality, before the pin moves.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -227,107 +202,71 @@ From the analyze-service index (**recall — verify before relying on**):
 
 ## Next steps (ranked)
 
+🔴 **Ranks 1–47, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:**
+`claudedocs/refs/tmux-webapp-closed-ranks.md`. They are lessons rather than status. Rank 18 joined them
+2026-09-14 when `ZacxDev/homelab-infra#820` merged.
 
-🔴 **Ranks 1–47, 50–52, 55, 58, 61–62 are CLOSED and were DEMOTED — verbatim, not deleted:** `claudedocs/refs/tmux-webapp-closed-ranks.md`. They are lessons rather than status, which is why they were demoted and not dropped. 🔴 Rank 18 joined them 2026-09-14 when `ZacxDev/homelab-infra#820` merged — an item completed AFTER a sweep must be evicted in the same change that closes it, or the queue offers finished work to the next session.
+🔴 **A SECOND SWEEP 2026-09-14 EVICTED SIX MORE — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED
+FOR DAYS WHILE STILL READING AS OPEN.** The mechanism is measured: the first sweep keyed on each rank's
+HEADING LINE, so every closure recorded only in a rank's BODY survived it. 🔴 **THE MARKER LIVES IN THREE
+PLACES** — heading (58 of 62, evicted) · body only (17, 25, 26, survived) · a `###` heading in ANOTHER
+section (61, evicted) · nowhere at all (42, 45, 46, 62). **When you sweep: read each rank's WHOLE body,
+read the `###` headings elsewhere, and re-measure anything with no marker against the code.**
 
-🔴 **A SECOND SWEEP 2026-09-14 EVICTED SIX MORE — 9, 17, 25, 26, 42, 45 — AND EVERY ONE HAD BEEN CLOSED FOR DAYS WHILE STILL READING AS OPEN.** Six of the fifteen entries the queue advertised were finished or fictional. **The mechanism is measured, not guessed: the first sweep keyed on each rank's HEADING LINE — a heading carrying `✅`, `DONE` or `CLOSED` — and every closure recorded only in a rank's BODY survived it**, predicting eviction for 58 of 62 ranks. Of the four exceptions, 53 is a false positive of the predicate (`WORKBENCH IS NOW DONE` in the heading, laptop half genuinely open); 61's closure was written as a `### ✅ RESOLVED` heading in the **Open investigations** section, a THIRD location; and 46 and 62 carried no marker anywhere and were evicted anyway — 🔴 **why is NOT explained, and an earlier draft of this sentence guessed "closed by the sweep session itself", which was false for two of the three it named.** What IS established is the false-NEGATIVE direction: **no rank with a body-only marker was ever evicted**, measured over all 62.
+🔴 **Ranks 68, 71 and 72 are CLOSED and EVICTED.** 68 graded the four review-ready cards on the live page
+(522 slide-out PROVEN; 603 criterion 4 FAILED live → became 72; 607 not gradable on a page; 521 at 2.5/5).
+71 had no REPORT to read — the opencode dogfood run died ~3 min in on a rejected write to the system temp
+dir; its verdict is in `claudedocs/refs/tmux-webapp-closed-investigations.md`. **72 shipped in `0.8.45`.**
+🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.**
+A rank is half a `claim-work` identity (`claim-work --slug-for <this doc> <rank>`), so renumbering
+silently re-points every live claim and reusing a number points a new claim at closed work.
 
-🔴 **THE MARKER LIVES IN THREE PLACES, AND A SCAN THAT READS ONLY THE RANK BODY MISSES THE THIRD.** Heading line → 58 of 62, evicted. Body only → 17, 25, 26, **survived**. A `###` heading in another section → 61, evicted. Nowhere at all → **42, 45, 46, 62**. **When you sweep: read each rank's WHOLE body, read the `###` headings elsewhere in the doc, and re-measure anything still carrying no marker against the code.** 🔴 **This class recurred THIS session in a different section** — the `#1718` eviction set was enumerated from HEADINGS and left three closed investigations behind, one of whose closure was declared in a *different file*, so no same-file scan could have found it.
-
-🔴 **The surviving numbering is SPARSE ON PURPOSE — do not renumber and do not reuse an evicted number.** A rank is half a `claim-work` claim's identity (`claim-work --slug-for <this doc> <rank>`), so renumbering silently re-points every live claim, and reusing an evicted number points a new claim at closed work.
-
-53. **Measure criterion 1 of task 519 on the LAPTOP — WORKBENCH IS NOW DONE, laptop is not.**
-    ⏳ **RE-VERIFIED STILL BLOCKED 2026-09-12T17:3xZ, and the block is unchanged:** the laptop's
-    freshest Claude pane is `%29` (`vetr`) at **35,378s ≈ 9.8h** old (`last_activity_ts`
-    07:32:49Z); 9 claude panes there, next freshest 15.7h. Nothing to measure until a human types
-    on that machine — an idle host still cannot demonstrate stream latency, so this needs the
-    operator, not a fix.
-    🔴 The workbench number exists: **2.0s and 3.1s**, induced-append, measured twice with
-    `.opencode-dispatch/tmux-ui-verify/scratch/measure519.py` (in devrc, git-ignored) — it uses
-    THIS KIND OF SESSION as the subject, because a Claude Code session appends to its own
-    `.jsonl` on every tool call, so the append is guaranteed rather than waited for. Both
-    timestamps are taken by one process on one machine, so no cross-host clock is involved. Both
-    are far under the 30s htmx fallback and the 300s bulk push, which is what makes it the
-    stream. **Re-run that same script from a session ON THE LAPTOP and the laptop number
-    follows** — no clawgate change needed, only an active session there.
-    forcing: gate — task 519's own closing condition names both hosts and a measured number, and
-    that is the only criterion still unmet.
+53. **Measure criterion 1 of task 519 on the LAPTOP — workbench is DONE, laptop is not.**
+    ⏳ **RE-VERIFIED STILL BLOCKED 2026-09-12T17:3xZ and the block is unchanged:** the laptop's freshest
+    Claude pane was `%29` (`vetr`) at **35,378s ≈ 9.8h** old; 9 claude panes there, next freshest 15.7h.
+    An idle host cannot demonstrate stream latency — this needs the operator, not a fix. The workbench
+    numbers exist: **2.0s and 3.1s**, induced-append, measured twice with
+    `.opencode-dispatch/tmux-ui-verify/scratch/measure519.py` (in devrc, git-ignored), which uses THIS
+    KIND OF SESSION as the subject because a Claude Code session appends to its own `.jsonl` on every
+    tool call. Both far under the 30s htmx fallback and the 300s bulk push, which is what makes it the
+    stream. **Re-run that script from a session ON THE LAPTOP and the number follows** — no clawgate
+    change needed, only an active session there.
+    forcing: gate — task 519's closing condition names both hosts and a measured number.
 56. **Decide whether 519's criterion 1 should keep naming the RENDER hop.** What is measured is
-    propagation to clawgate's READ MODEL (2.0s/3.1s). The criterion says "visible on
-    `/session/<id>`". The page carries `hx-trigger="… sse:transcript.changed …"` but the render
-    hop itself is unmeasured, and an earlier attempt in this arc FAILED by treating that
-    attribute as behaviour. Either measure the render or reword the criterion to the read model.
+    propagation to the read model; the criterion says "visible on `/session/<id>`". Either measure the
+    render or reword to the read model.
     forcing: none
-57. **Task 519 criterion 4 — the deliberately-induced stream gap — has never been tested.**
-    Present evidence is incidental only (idle laptop sessions carrying rows newer than their last
-    host activity). Inducing a real gap means stopping the host agent or rolling the pod, which
-    is a deploy-class action; decide whether it is worth it before doing it.
+57. **Task 519 criterion 4 — the deliberately-induced stream gap — has never been tested.** Inducing a
+    real gap means stopping the host agent or rolling the pod; decide if it is worth it first.
     forcing: none
 59. **PR B — the grid's free-form reply delivery axis**, parked at `hold/grid-freeform-axis`
-    (`aa11176c8`, ~460 payload lines + a JS hydrator + a new authed route + a new store read).
-    🔴 **Cut it from `trunk`, NEVER stacked on a merged branch** (this repo's CLAUDE.md bans stacked
-    PRs by name). Round 0 on #811 judged it worth its own review: by its author's own statement the
-    axis exists only in the tab that sent the reply and **goes blank on reload**. The alternative it
-    names — a per-session actor on the write row, letting the render-time lookup be "newest write
-    for this (host,pane) BY THIS SESSION" — would fix the reload gap too, but changes the meaning of
-    an audited credential column. Decide that before building.
+    (`aa11176c8`). Cut from `trunk`, never stacked. By its author's own statement the axis exists only
+    in the tab that sent the reply and goes blank on reload.
     forcing: none
 60. **The other half of the delivery freeze: the axis still sticks when the host agent DIES.**
-    `pending`+stale → `failed` (90 s TTL) and `claimed`+stale → `unknown` (10 min grace) are
-    TIME-driven; nothing broadcasts them (correctly — no row moves) and `#panel-attention` has no
-    poll. The session page (30 s) and tmux grid (60 s) self-heal; the attention panel does not.
-    Pre-existing, and the post-fix frozen text (`sending`) is the safer error — but "stop the axis
-    freezing" closed one half of the class.
+    `#panel-attention` has no poll; the session page (30s) and tmux grid (60s) self-heal, it does not.
     forcing: none
-
-
-
-🔴 **Rank 68 — "grade the four `ready_for_review` cards on the LIVE page" — is CLOSED and EVICTED in
-this change.** All four were graded on `0.8.42`–`0.8.44`. 522: slide-out open/resize/persist PROVEN;
-recaps 78/79 naming their input; c2/c3/c5/c6 COULD NOT TEST. 603: criterion 4 FAILS live — "load
-earlier" fires, the server answers, and a periodic refetch reverts it (now rank 72). 607: not
-gradable on a page by construction — its criteria are a credential matrix; the chat read shipped on
-`requireHookToken`, not the agent tier. 521 criterion 4: 2.5 of 5 — layout management and a pane
-write never demonstrated, and `chief write` is untestable from this host (see Open investigations).
-🔴 The number is NOT reusable — a rank is half a `claim-work` identity.
-
-69. **Decide `ZacxDev/homelab-infra#838` now that 607 has landed.** It is a HELD draft that renders
-    `CLAWGATE_CHIEF_TOKEN` into **every** agent pod. When it was held the credential opened ONE
-    approval-gated route; after 607 it opens **tmux windows, attention raise/resolve and the
-    transcript read**, and the transcript return is ~1.1 MB of raw JSONL whose majority is tool
-    RESULTS — file contents and command output. 🔴 That is the "review it once against its FINAL
-    blast radius" moment the hold was created for. Its base was retargeted to `trunk` and the stack
-    hazard is recorded on the PR.
+69. **Decide `ZacxDev/homelab-infra#838` — HELD draft rendering `CLAWGATE_CHIEF_TOKEN` into EVERY agent
+    pod.** 🔴 **Its blast radius went FINAL when 607 landed**: the credential now opens tmux windows,
+    attention raise/resolve and the transcript read, and that read returns ~1.1 MB of raw JSONL whose
+    majority is tool RESULTS — file contents and command output. This is the review-once-against-the-
+    final-radius moment the hold was created for, and it is the highest-stakes open item in this doc.
     forcing: security — it widens a credential that reaches session content, to the whole fleet.
-70. **`devrc/claude/skills/clawgate/reference/chief.md` is now FALSE.** Its table says the four
-    capabilities answer 401 from a pod; since `0.8.40` they answer 200 for the chief row. It was
-    correct until today and deliberately not fixed pre-merge — fixing it early would have made it
-    wrong. Needs a devrc PR, and the content depends on what `#838` decides.
-    forcing: regression — a shipped doc now contradicts the shipped code.
-🔴 **Rank 71 — "read the opencode dogfood REPORT" — is CLOSED and EVICTED in this change.** There
-is no REPORT: the run died ~3 minutes in on a rejected write to the system temp dir, having reached
-capabilities 1–4 of 8. The verdict, the four PROVEN rows, the four COULD-NOT-TEST rows and the
-correction of its one apparent defect are in `claudedocs/refs/tmux-webapp-closed-investigations.md`.
-🔴 The number is NOT reusable — a rank is half a `claim-work` identity.
-
-72. **Fix the two PAGINATION cases from the swap audit** — `#chat-body`'s "load earlier" and the
-    tmux card transcript mount. 🔴 These are NOT lost drafts: the periodic refetch issues a URL that
-    has forgotten its `before=` cursor, so a draft-restore script patches the wrong layer. The fix is
-    for the refetch to carry the cursor, or for the earlier-pages region to be a SIBLING of the
-    polled region the way `#chat-form` is a sibling of `#chat-log`. Repo `ZacxDev/homelab-infra`,
-    `containers/clawgate/internal/ui/session_view.go` + `tmux.go`.
-    forcing: user — the operator asked for full transcript retention (card 603); measured live, the
-    41 earlier messages appear and are reverted within 2–12 s, so the feature does not work.
-74. **Add a STATIC guard for the swap class** — a Go test that renders each shell, finds every
-    element carrying a periodic or SSE `hx-trigger`, and fails when an `<input>`/`<textarea>`/
-    `<details>`/`overflow-auto` node sits INSIDE its target without an allowlist entry. Assert the
-    RELATIONSHIP (target id → descendant set), not the presence of an attribute. Would have caught
-    all seven sites at once.
-    forcing: regression — the same class shipped four times and every instance reached production.
-75. **`devrc/claude/skills/clawgate/reference/chief.md` is still FALSE** (carried from rank 70,
-    which names the 401-from-a-pod table). Now ALSO stale on the chat read's tier: `#847` shipped on
-    `requireHookToken`, NOT the agent tier, so a reader is told an agent credential reaches it.
+70. **`devrc/claude/skills/clawgate/reference/chief.md` is FALSE on two counts.** Its table says the
+    four capabilities answer 401 from a pod; since `0.8.40` they answer 200 for the chief row. Also
+    stale on the chat read's tier: `#847` shipped on `requireHookToken`, NOT the agent tier. Content
+    depends on what `#838` decides, so this queues behind 69.
     forcing: regression — a shipped doc contradicts shipped code.
+74. **Add a STATIC guard for the swap class** — render each shell, find every element carrying a
+    periodic or SSE `hx-trigger`, fail when an `<input>`/`<textarea>`/`<details>`/`overflow-auto` node
+    sits INSIDE its target without an allowlist entry. Assert the RELATIONSHIP (target id → descendant
+    set), not the presence of an attribute. 🔴 **Five instances now argue for it, and instance 5 is the
+    argument**: a per-site ledger would have called `#chief-panel-body` done after instance 1.
+    forcing: regression — the same class reached production four times before it was closed.
+75. **Grade or hand over clawgate task 603.** Criteria 1/2/3/5 need validating by someone who can grade
+    them; criterion 4's evidence is on the card as comment 1599. This is the ONE item standing between
+    this arc and its closing condition.
+    forcing: gate — it IS the arc's closing condition.
 
 ## Open investigations — live diagnosis state
 
@@ -1959,6 +1898,78 @@ before deciding it does not apply.
 - ⚠ **Laptop `nix/system/apply-networkmanager-openvpn.sh` is UNTRACKED** — a staged sudo script that
   exists on that host and in no commit. Not touched; one `checkout` from silent deletion.
 
+### Added 2026-09-18 — rank 72 recon, at `9e7ef98b3`
+
+- 🔴 **Rank 72 is ONE relationship, not two bugs, and the recon sharpened the diagnosis the
+  rank was written from.** `sessionEarlierControl` (`internal/ui/session_archive.go:133`) is
+  rendered INSIDE `sessionChatBody` (`internal/ui/session_view.go:654`), and the control
+  replaces ITSELF with `hx-swap="outerHTML"` emitting `[next control][earlier events]` — so
+  every page loaded becomes a CHILD of whatever target `sessionChatBody` was swapped into.
+  Both mounts then refetch a cursor-less URL: `#chat-body` (`session_view.go:505-523`,
+  `every 30s` + three SSE/DOM events) and `TmuxTranscriptMount` (`internal/ui/tmux.go:4034-4049`,
+  `?embed=1`, `cg:tmux-transcript-refresh`). The tail comes back, the archive pages are gone.
+- **DECIDED: the region goes OUTSIDE the refreshing swap. NOT a cursor in the refetch URL.**
+  Both were sanctioned by rank 72's own text; the cursor option was rejected because archived
+  content is IMMUTABLE, so re-reading it from object storage every 30 s / 60 s is pure waste —
+  and it contradicts `TmuxTranscriptMount`'s own load-bearing laziness argument (~88 windows
+  × 256 KB). Recommended mechanic: a wrapper rendered UNCONDITIONALLY by `sessionChatBody`
+  carrying `hx-preserve="true"` and a session-scoped id, with the control inside it.
+  🔴 **`hx-preserve` was NOT verified against the vendored htmx — the agent was told to prove
+  it in a browser and to fall back to a true sibling + a one-time hoist if it does not hold.**
+  Treat the mechanic as UNVERIFIED until that comes back.
+- 🔴 **A latent duplicate-id defect in the same code, found by this recon and not by any
+  audit:** `SessionEarlierControlID` (`session_archive.go`) is the BARE constant
+  `"session-earlier"`, and `sessionChatBody` serves the standalone page AND every tmux card —
+  so on `/tmux` with two cards loaded that id exists twice and `hx-target="#session-earlier"`
+  resolves to the first. The second card's button drives the FIRST card's transcript. This is
+  the exact collision `chatBodyID()` (`session_view.go:802-808`) and `SessionChatEmbedParam`
+  (`session_view.go:356-382`) were added to prevent. `RenderSessionEarlier` must keep emitting
+  the same id the page emits — its own comment says the second click silently stops working
+  otherwise, so it is a two-way pin, not a rename.
+- ⚠ **`e2e/tests/chief-panel.spec.ts:361` is a known-bad neighbour to copy from** — it marks
+  `#chief-panel` (the never-swapped shell) while its comment claims it protects what is
+  half-typed in the swap target `#chief-panel-body`.
+- **The swap class now has FIVE known instances, not four.** The fifth is in the chief panel
+  and is recorded in that arc's own doc: a thread picked in the panel is reverted when the
+  panel is reopened, because `#chief-panel-body`'s `hx-get` is the static `/ui/chief/panel`
+  and it refetches on every open by design. Rank 74 (the static guard for this class) would
+  have caught it, which is the strongest argument for rank 74 that exists.
+- **`clawgate_handoff.sh resolve` exited 6 for this session**: 595/602/603 all linked,
+  every one `role=read`, none WORKED. The existing `clawgate-task: 595` field was left as-is;
+  no field was added or changed on the strength of a read.
+
+### Added 2026-09-19 — shipped; the three process failures worth carrying
+
+- 🔴 **A cherry-pick deleted a constant and left THREE live references, and nothing static could see
+  it.** `908f2688c` (the `TAIL_START` re-seed) was authored against an earlier `#851` head; `#851`'s
+  later rounds added four latch subtests that still spelled `TAIL_START`. The deletion hunk and those
+  lines are disjoint, so **git had nothing to conflict on** — the pick applied cleanly and produced
+  `ReferenceError: TAIL_START is not defined`, four reds, neither test reaching a single assertion.
+  ⚠ **`containers/clawgate/e2e/` has no `tsconfig.json`, no `typescript` devDependency and no typecheck
+  script**, so an undeclared identifier is an esbuild-emitted global lookup that throws only when the
+  line executes. **Only running the spec finds this.** My first hypothesis (offsets / archive shape) was
+  wrong and is recorded so nobody re-derives it.
+- 🔴 **A green at one head and a red at another is NOT attribution when the symptom is intermittent.**
+  I told an agent "the deletions commit introduced it" from exactly that pair; the control it ran —
+  reproduce at the earlier head — came back **2 of 2**, refuting me. The defect pre-dated the commit and
+  the earlier CI pass was luck.
+- 🔴 **Binary-marker greps silently find nothing.** `grep -c '<marker>'` against the 66 MB clawgate
+  binary returned 0 for **every** marker; the only reason it was caught is that every POSITIVE and
+  every NEGATIVE control read "absent" simultaneously. Route through `strings` and keep an instrument
+  control (`clawgate` → 6,700 hits).
+- ⚠ **zsh's lack of word-splitting bit three times in one session**, each time returning a confident
+  wrong value: a payload measurement where BOTH the number and its control came back 0 from a pathspec
+  matching nothing; a `browser` invocation where `$T` became one argument; and a `| head -1` that made
+  `$?` report `head`'s status instead of the script's. **Pass paths and flags as separate arguments, and
+  never read `$?` through a pipe.**
+- **The audit ladders' own bookkeeping was wrong once, in the direction that kept a ladder alive.** A
+  claims block asserted "both counts agree at 82"; measured, shipped-behaviour was **6** — sixty of the
+  63 added lines were comment text. Corrected publicly on the PR. **Two counts under different names,
+  and say which one the stop is taken on.**
+- ⚠ **`clawgatectl` prints `note: server 0.8.45, clawgatectl built for 0.8.44` until a
+  `home-manager switch`** — nix builds it from a LOCAL checkout, so the deploy pin and the client binary
+  move independently. Documented, not a bug.
+
 ## How to verify
 
 ```bash
@@ -2000,16 +2011,32 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 `homelab-talos` (remote `ZacxDev/homelab-infra`) under `containers/clawgate/`.
 ## Defects (batched)
 
-- `internal/api/machine_agents_chat_test.go` — the "browser route unchanged" check was
-  `if rec.Code == StatusOK { t.Log(…) }`, asserting on neither branch. Made real it FAILED at 404:
-  the fixture has a nil `Provisioner` and that route registers after the provisioner gate. Deleted
-  rather than propped up; `routes.golden` + `agentRowRoutes` already pin the claim. FIXED in `#847`.
+- 🔴 **Bytes-unreachable is fixed; MESSAGES-unreachable is not.** `internal/transcript/parse.go` caps a
+  render at `maxEvents = 400` keeping the **newest**, while the next cursor is the page's **byte**
+  start — so a page's oldest events are dropped from the render and the cursor then moves below them,
+  rendered by no click ever. Measured with the CORRECTED cursor on a 2,633,728-byte archive: **0 of 643**
+  unreachable at 4096 B records, **1372/2572 (53%)** at 1024 B, **3944/5144 (77%)** at 512 B,
+  **9088/10288 (88%)** at 256 B. **Larger than what `#853` closed.** On card 603.
+- 🔴 **`SessionArchiveComplete` asserts completeness over a real hole.** Measured with the archive
+  500,000 bytes behind the tail: the page covers `[1060921, 2109497)`, the block below begins at
+  `2609497`, and with `Truncated` set the footer says *"the rest is archived and can be loaded"* — while
+  the state's own doc claims "everything from its start to the beginning of the shown tail,
+  contiguously". Pre-dates the PRs (both lines are context in `git diff origin/trunk...HEAD`). On card 603.
+- **A render-time/click-time window where the clamp discards unseen bytes.** `before` is `st.End` as of
+  the RENDER; `earlierPage` re-lists and bounds only against `st.Start`. The duplicate-offset-longer
+  state `internal/archive/store.go`'s own sort comment documents moves the end across `before`:
+  measured, `Range` overruns by 1,036,231 bytes of which **500,000 were never on screen**. Narrow
+  window; the bytes fall inside the previous defect's gap. On card 603.
+- **`internal/api/transcript_archive_test.go:246`** carries a comment `#853` makes FALSE — it asserts
+  the error div "is the common first-click outcome today … for an archive of <= 1 MiB", and it also
+  points at a `TAIL_START` header that no longer exists.
+- `internal/api/machine_agents_chat_test.go` — the "browser route unchanged" check asserted on neither
+  branch. Deleted rather than propped up. FIXED in `#847`.
 - `chief_recap_test.go::TestTheRecapSessionIsSeparateFromTheOperatorsOwnThread` — its "created ONCE"
-  half called `recapSessionKey` twice on the SAME `*Server`, so the in-memory cache answered the
-  second call and the store was never reached. Vacuous w.r.t. the defect. DELETED in `#848`.
-- `e2e/tests/chief-panel.spec.ts:361` — marks `#chief-panel` (the shell, never swapped) while its
-  comment claims it protects "whatever is half-typed in it". The swap target is
-  `#chief-panel-body`. Still present; the new case beside it marks the BODY.
-- `e2e/tests/tmux-page.spec.ts` — "a reply sent from a GRID CARD…" ends on `toHaveValue('')` after a
-  Send. Correct as written, but **indistinguishable from a refresh that ate the text**. Not a bug;
-  the new sibling case separates send from refresh. Left as-is deliberately.
+  half called `recapSessionKey` twice on the SAME `*Server`, so the cache answered and the store was
+  never reached. Vacuous. DELETED in `#848`.
+- `e2e/tests/chief-panel.spec.ts:361` — marks `#chief-panel` (the never-swapped shell) while its comment
+  claims it protects what is half-typed in the swap target `#chief-panel-body`. Still present.
+- `e2e/tests/tmux-page.spec.ts` — a Send test ending on `toHaveValue('')` is correct but
+  indistinguishable from a refresh that ate the text. Left as-is deliberately; a sibling case separates
+  send from refresh.
