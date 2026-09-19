@@ -1092,6 +1092,39 @@ def arc_seed_to_doc(seed, root=None):
     return handoff_arc.doc_basename(seed)
 
 
+#: The only inputs `--arc` HONOURS. Everything else the parser declares is
+#: ignored by the arc path, so the notice is DERIVED from the parser rather than
+#: from a second hand-written list.
+ARC_HONOURED_DESTS = frozenset({"arc", "json"})
+
+
+def arc_ignored_inputs(a):
+    """Every input the caller supplied that `--arc` will NOT apply, spelled.
+
+    🔴 DERIVED FROM THE PARSER, NOT ENUMERATED. The first version of this was an
+    inline tuple in `main()` — the exact shape the comment above
+    `ARCHIVE_ONLY_FLAGS` forbids ("data rather than an inline list closed by a
+    completeness sentence"). It omitted `--tail`, `--since` and `--limit`, all of
+    which `--arc` silently discards: the reader walk is a fresh
+    `parse_args([basename, "--all-time", "--claude-only"])`, so a caller's
+    `--limit` and `--since` never reach it, and `--tail` can never produce the
+    exit 3/4 its own contract documents. A list built from `parser_dests()` gains
+    the next flag automatically instead of silently missing it.
+    """
+    parser = build_parser()
+    defaults = {act.dest: act.default for act in parser._actions
+                if act.dest != "help"}
+    spellings = {act.dest: (act.option_strings[0] if act.option_strings
+                            else act.dest)
+                 for act in parser._actions if act.dest != "help"}
+    out = []
+    for dest in sorted(parser_dests() - ARC_HONOURED_DESTS):
+        value = getattr(a, dest, None)
+        if value and value != defaults.get(dest):
+            out.append(spellings.get(dest, dest))
+    return out
+
+
 def arc_repo_for(basename, env=None):
     """`(repo_path, relpath)` for the repo holding this doc, or `(None, None)`.
 
@@ -1121,7 +1154,10 @@ def render_arc(report, unresolved_note=None):
         out.append("  no sessions resolved")
     for i, m in enumerate(report.members, 1):
         when = (m.first_seen or "")[:16].replace("T", " ")
-        out.append(f"{i}. [{when or 'time UNMEASURED'}] {m.role.upper():10} "
+        # 16, not 10: `EARLIEST-STAMPED` is 16 chars and is the COMMON rendering
+        # (45% of corpus doc commits are unstamped), so the narrow column
+        # misaligned the normal case, not an edge one.
+        out.append(f"{i}. [{when or 'time UNMEASURED'}] {m.role.upper():16} "
                    f"{m.session_id}")
         out.append(f"   resume: {m.resume_command()}")
         if m.commits:
@@ -1270,10 +1306,14 @@ def arc_writer_counts(rows, repo_lookup=None):
         seen.add(basename)
         if budget <= 0:
             continue
-        budget -= 1
         repo, rel = lookup(basename)
         if repo is None:
+            # 🔴 NO BUDGET SPENT: this doc costs zero git calls, and an earlier
+            # revision decremented BEFORE the lookup — so 12 unresolvable docs
+            # exhausted the budget having walked nothing, and the docstring's
+            # "docs the annotation will walk git for" was false.
             continue
+        budget -= 1
         try:
             commits = handoff_arc.doc_commits(repo, rel)
         except handoff_arc.GitUnavailable:
@@ -1516,12 +1556,7 @@ def main(argv=None):
         # `redis --live --arc <doc> --project foo --any` printed "the LIVE
         # section below is NOT filtered by them" and there was no LIVE section
         # below, while `redis`, `--project` and `--any` were silently discarded.
-        ignored = [name for name, val in (
-            ("terms", a.terms), ("--live", a.live), ("--deep", a.deep),
-            ("--project", a.project), ("--any", a.any),
-            ("--skill", a.skill), ("--opencode-only", a.opencode_only),
-            ("--claude-only", a.claude_only), ("--all", a.all),
-        ) if val]
+        ignored = arc_ignored_inputs(a)
         if ignored:
             print(f"(--arc names its own query, so these were NOT applied: "
                   f"{', '.join(ignored)})", file=sys.stderr)

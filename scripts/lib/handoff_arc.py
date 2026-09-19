@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Sequence
@@ -72,12 +73,28 @@ TRAILER_KEY = "Claude-Session-Id"
 #: directions and both are load-bearing.
 _TRAILER_RE = re.compile(rf"^{TRAILER_KEY}:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
-#: What a session id may look like. Deliberately narrow: a UUID as Claude Code
-#: writes them, or an opencode `ses_`-prefixed token. Anything else is dropped
-#: rather than sanitised — a value we cannot recognise is not one we should be
-#: handing anybody to paste into a shell.
-_ID_SHAPE = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                       r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|ses_[A-Za-z0-9_-]{1,64})$")
+#: 🔴 SAFETY, NOT SHAPE — and an earlier revision of this file got that wrong.
+#: It filtered reads against a UUID-or-`ses_` regex, which contradicts an explicit
+#: 🔴 in `scripts/lib/session_trailer.py`: "DO NOT ASSUME UUID SHAPE … treated as
+#: an OPAQUE STRING everywhere: validated for safety, never parsed, normalised,
+#: lowercased or shape-checked", citing a measured case where 2 of 41 windows
+#: carried a `ses_…` token from another runtime and a shape-assuming join
+#: "silently matches nothing and reports a clean 'no live window'".
+#:
+#: 🔴 AND ITS JUSTIFYING COMMENT WAS FALSE. It claimed symmetry — "the write side
+#: already validates" — but `session_trailer.valid_id` validates only what could
+#: CORRUPT a commit message, never what an id looks like. The read side was
+#: therefore STRICTER than the write side, so the stamping hook could legitimately
+#: write an id this module would then refuse. Worse, a refused value made
+#: `ArcCommit.stamped` False, so the coverage line reported a commit that DOES
+#: carry an id as "carries no session id" — the measured-vs-unmeasured conflation
+#: this module exists to refuse, reintroduced by a fix for a different one.
+#:
+#: The hazard is real but it lives at the RENDER layer: the value becomes
+#: `claude --resume <value>` for a human to paste. So validate for safety here
+#: (the same predicate the writer uses) and QUOTE at the point of rendering.
+_UNSAFE_CHARS = "\r\n\t\x00"
+_MAX_ID_LEN = 256
 
 #: A handoff doc path as it appears in prose. `archive/` is included because
 #: `#1627` renamed 35 docs under it and an arc must not end at a rename.
@@ -132,7 +149,14 @@ class ArcMember:
     commits: tuple[str, ...] = ()
 
     def resume_command(self) -> str:
-        return f"claude --resume {self.session_id}"
+        """🔴 QUOTED, because this string is rendered for a human to PASTE.
+
+        This is the layer where an odd id can do harm, and it is the right place
+        to handle it — filtering by SHAPE on read instead would discard real ids
+        from runtimes this tool does not know about yet. `shlex.quote` is a no-op
+        for every ordinary id and makes a hostile one inert.
+        """
+        return f"claude --resume {shlex.quote(self.session_id)}"
 
 
 @dataclass
@@ -175,8 +199,22 @@ def doc_basename(seed: str) -> str:
     return f"handoff-{name}.md"
 
 
+def _is_safe_id(value: str) -> bool:
+    """Safety only, mirroring `session_trailer.valid_id`'s contract.
+
+    A `ses_…` token, a uuid and any future spelling all pass — that is the point.
+    """
+    if not value or len(value) > _MAX_ID_LEN:
+        return False
+    return not any(c in value for c in _UNSAFE_CHARS)
+
+
 def trailer_ids(body: str) -> tuple[str, ...]:
-    """Every `Claude-Session-Id:` value in a commit BODY, de-duplicated, in order.
+    """Every SAFE `Claude-Session-Id:` value in a commit BODY, de-duped, in order.
+
+    "Safe" is the only filter: a value carrying a control character or exceeding
+    the length cap is dropped, matching what the writer refuses to emit. Shape is
+    never judged — see `_UNSAFE_CHARS`.
 
     De-duplicated because a squash of N commits from one session carries the id N
     times — the arc wants distinct sessions, not a write count. Order is first
@@ -184,16 +222,10 @@ def trailer_ids(body: str) -> tuple[str, ...]:
     """
     seen: list[str] = []
     for sid in _TRAILER_RE.findall(body or ""):
-        if not _ID_SHAPE.match(sid):
-            # 🔴 THE INPUT IS ANY COMMIT BODY IN ANY OF FOUR REPOS' HISTORY,
-            # INCLUDING IMPORTED AND SQUASHED CONTRIBUTIONS, and the output is
-            # printed to a terminal AND rendered as `claude --resume <value>` for
-            # the reader to paste. MEASURED before this filter:
-            # `Claude-Session-Id: x;rm` parsed to `x;rm` and rendered as
-            # `claude --resume x;rm`; ANSI escapes and a 100,000-char value were
-            # accepted too. Note the asymmetry this closes — the WRITE side
-            # already validates (`session_trailer.valid_id`); the read side did
-            # not, and a reader is exactly where an unvalidated value does harm.
+        if not _is_safe_id(sid):
+            # Dropped for SAFETY only — a control character or an absurd
+            # length, i.e. exactly what the writer refuses to emit. Shape is
+            # deliberately NOT judged here; see `_UNSAFE_CHARS` above.
             continue
         if sid not in seen:
             seen.append(sid)

@@ -592,27 +592,39 @@ class TestGitIsCalledWithoutAmbientOverrides:
             "an ambient GIT_DIR redirected the walk and the arc rendered as "
             "measured-empty")
 
-    def test_the_override_ledger_is_scrubbed_from_the_child_env(self):
-        env = {k: "x" for k in ha._GIT_ENV_OVERRIDES}
-        import os as _os
-        for k, v in env.items():
-            _os.environ[k] = v
-        try:
-            scrubbed = ha._git_env()
-        finally:
-            for k in env:
-                _os.environ.pop(k, None)
-        assert not [k for k in ha._GIT_ENV_OVERRIDES if k in scrubbed]
+    def test_the_override_ledger_is_scrubbed_from_the_child_env(self, monkeypatch):
+        """🔴 THE NAMES ARE LITERAL HERE, NOT READ BACK FROM THE LEDGER.
+
+        An earlier version built its environment BY ITERATING
+        `_GIT_ENV_OVERRIDES` and then asserted none of `_GIT_ENV_OVERRIDES`
+        survived — which is true of ANY ledger, an empty one included. Measured:
+        emptying the ledger left that version GREEN while the behavioural test
+        went red. It read as coverage of five names and covered none.
+        """
+        names = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+        for name in names:
+            monkeypatch.setenv(name, "/nonexistent/decoy")
+        scrubbed = ha._git_env()
+        for name in names:
+            assert name not in scrubbed, f"{name} reached the child environment"
+        assert "PATH" in scrubbed, "the scrub removed more than the git overrides"
+
 
 
 class TestTrailerValuesAreValidatedOnREAD:
-    """🔴 The WRITE side validates and the READ side did not — and the read side
-    is where the value becomes `claude --resume <value>` for a human to paste."""
+    """🔴 SAFETY ONLY — and an earlier revision of these tests pinned SHAPE.
 
-    @pytest.mark.parametrize("bad", [
-        "x;rm -rf /", "$(whoami)", "`id`", "\x1b[2Jboo", "a" * 5000, "../../etc",
-    ])
-    def test_a_non_id_shaped_value_is_DROPPED(self, bad):
+    That revision asserted a UUID-or-`ses_` filter, which contradicts an explicit
+    🔴 in `session_trailer.py` ("DO NOT ASSUME UUID SHAPE … never shape-checked")
+    and made the reader STRICTER than the writer, so a legitimately-stamped commit
+    was re-reported as carrying no session id. The hazard it was reaching for is
+    real but lives at RENDER; see the quoting test below.
+    """
+
+    @pytest.mark.parametrize("bad", ["a" * 5000, "x\x00y", "a\tb"])
+    def test_an_UNSAFE_value_is_DROPPED(self, bad):
+        """Length and control characters — exactly what the WRITER refuses."""
         assert ha.trailer_ids(f"subject\n\n{ha.TRAILER_KEY}: {bad}\n") == ()
 
     def test_a_real_uuid_still_parses(self):
@@ -622,6 +634,30 @@ class TestTrailerValuesAreValidatedOnREAD:
     def test_an_opencode_session_id_still_parses(self):
         sid = "ses_abc123"
         assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {sid}\n") == (sid,)
+
+    def test_an_UNKNOWN_SHAPE_id_is_KEPT(self):
+        """🔴 THE REGRESSION GUARD FOR THE FIX THAT WAS ITSELF WRONG. A future
+        runtime's id must survive the read, or this tool silently reports its
+        commits as unstamped — the measured failure `cairn_who.py` records."""
+        sid = "fable_2026_09_18_abcdef"
+        assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {sid}\n") == (sid,)
+
+    def test_the_READ_side_is_no_stricter_than_the_WRITE_side(self):
+        """Asserted against the writer's OWN predicate rather than restated —
+        the symmetry an earlier comment claimed falsely."""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+        import session_trailer as st
+        for sid in ("6b88ffe8-ec33-4662-b169-a42e8008a69a", "ses_abc123",
+                    "fable_2026_09_18_abcdef", "x;rm"):
+            assert st.valid_id(sid) is True
+            assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {sid}\n") == (sid,), (
+                f"the writer accepts {sid!r} but the reader refuses it")
+
+    def test_a_hostile_id_is_QUOTED_where_it_becomes_a_command(self):
+        """The paste hazard, handled at the layer where it exists."""
+        cmd = ha.ArcMember("x;rm -rf /", ha.ROLE_WROTE).resume_command()
+        assert cmd != "claude --resume x;rm -rf /"
+        assert "'" in cmd, f"an odd id reached a pasteable command unquoted: {cmd}"
 
 
 class TestEverySessionOnTheOldestCommitIsOriginated:
@@ -634,3 +670,65 @@ class TestEverySessionOnTheOldestCommitIsOriginated:
                                       "22222222-2222-4222-8222-222222222222"))
         members = ha.writer_members([c])
         assert {m.role for m in members} == {ha.ROLE_ORIGINATED}
+
+
+class TestTheRoundTwoFixesAreActuallyWired:
+    """🔴 ROUND 2 MEASURED THAT THREE OF THE PREVIOUS ROUND'S OWN FIXES COULD BE
+    DELETED WHOLESALE WITH THE SUITE STILL GREEN — the same "tested in isolation,
+    wired up by nothing" shape round 1 had just fixed twice. A round that writes
+    guards is a round that can write vacuous ones; these are the guards for the
+    guards, and each was confirmed by re-running the mutation that survived."""
+
+    def test_the_doc_walk_BUDGET_bounds_the_ordinary_path(self):
+        calls = []
+
+        def lookup(basename):
+            calls.append(basename)
+            return "/nonexistent/repo", "claudedocs/x.md"
+
+        rows = [{"genesis": f"claudedocs/handoff-d{i}.md"} for i in range(40)]
+        fs.arc_writer_counts(rows, repo_lookup=lookup)
+        assert len(calls) <= fs.MAX_ANNOTATION_DOC_WALKS, (
+            f"the bound did not bind: {len(calls)} lookups for 40 docs")
+
+    def test_a_doc_that_costs_NO_git_walk_does_not_spend_budget(self):
+        """The decrement must sit BELOW the lookup, or docs that resolve nowhere
+        — which cost zero git calls — exhaust a budget measured in git walks."""
+        calls = []
+
+        def lookup(basename):
+            calls.append(basename)
+            return None, None
+
+        rows = [{"genesis": f"claudedocs/handoff-n{i}.md"} for i in range(30)]
+        fs.arc_writer_counts(rows, repo_lookup=lookup)
+        assert len(calls) == 30, (
+            f"budget was spent on docs that cost nothing: only {len(calls)} of "
+            "30 were looked at")
+
+    def test_arc_NAMES_every_input_it_ignores_including_tail_since_and_limit(self):
+        """The hand-written list omitted `--tail`, `--since` and `--limit`, all
+        of which `--arc` silently discards."""
+        a = fs.parse_args(["--arc", "handoff-x", "--live", "--tail", "80",
+                           "--since", "2026-01-01", "--limit", "99",
+                           "--project", "p", "--any", "redis"])
+        ignored = fs.arc_ignored_inputs(a)
+        for flag in ("--tail", "--since", "--limit", "--project", "--any",
+                     "--live"):
+            assert flag in ignored, f"{flag} is discarded but not named: {ignored}"
+        assert "--arc" not in ignored
+
+    def test_the_ignored_list_is_DERIVED_so_a_new_flag_cannot_be_missed(self):
+        assert fs.ARC_HONOURED_DESTS <= fs.parser_dests()
+        a = fs.parse_args(["--arc", "handoff-x"])
+        assert fs.arc_ignored_inputs(a) == []
+
+    def test_live_arc_does_NOT_print_the_archive_only_notice(self, capsys,
+                                                             monkeypatch):
+        """Reverting the `and not a.arc` guard makes the run promise a LIVE
+        section that `run_arc` then never emits."""
+        monkeypatch.setattr(fs, "arc_repo_for", lambda b: (None, None))
+        fs.main(["--arc", "handoff-x", "--live", "redis"])
+        err = capsys.readouterr().err
+        assert "LIVE section below" not in err
+        assert "NOT applied" in err
