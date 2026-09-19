@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Usage Tracker",
+  "version": "0.1.0",
+  "description": "Snapshots every Claude account's usage when claude.ai is open, toasts the current account's quota, and lists all known accounts with reset countdowns. Local-only, personal automation.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://claude.ai/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content_probe.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Claude Usage Tracker",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png"
+  }
+}

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Claude Usage Tracker</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font: 13px/1.45 system-ui, sans-serif;
+      background: #1d2021;
+      color: #ebdbb2;
+      width: 420px;
+      margin: 0;
+      padding: 10px 12px 12px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    h1 { font-size: 13px; font-weight: 600; margin: 0; color: #b8bb26; }
+    button {
+      font: inherit;
+      background: #3c3836;
+      color: #ebdbb2;
+      border: 1px solid #504945;
+      border-radius: 4px;
+      padding: 2px 10px;
+      cursor: pointer;
+    }
+    button:hover { background: #504945; }
+    .account {
+      border: 1px solid #3c3836;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      background: #282828;
+    }
+    .account.active { border-color: #b8bb26; }
+    .row1 { display: flex; justify-content: space-between; gap: 8px; }
+    .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .asof { color: #a89984; white-space: nowrap; }
+    .metrics { display: flex; gap: 14px; margin-top: 4px; color: #d5c4a1; }
+    .stale { color: #928374; font-style: italic; }
+    .spark { margin-top: 4px; }
+    .empty { color: #a89984; padding: 14px 4px; text-align: center; }
+    .credits { color: #8ec07c; }
+    .credits.off { color: #fb4934; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Claude Usage Tracker</h1>
+    <button id="refresh" type="button">Refresh</button>
+  </header>
+  <div id="accounts"></div>
+  <div id="empty" class="empty" hidden>
+    No accounts yet &mdash; open claude.ai once and this fills in.
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
