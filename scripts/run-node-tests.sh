@@ -234,6 +234,10 @@ SUITES=(
   # Ungated for the same reason. Small, but 21 tests reporting safety they never
   # measured is the same defect as 508 of them.
   "scripts/collector/browser-ext/tests|2|20"
+  # claude-usage tracker (2026-09-19): 8 files / 85 tests measured on the
+  # claude-usage-tracker branch. Floors: 8 - min(50, max(1, 8/20)) = 7 files;
+  # 85 - min(50, max(1, 85/20)) = 81 tests.
+  "scripts/claude-usage/tests|7|81"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:
