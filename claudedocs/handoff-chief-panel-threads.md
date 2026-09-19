@@ -30,24 +30,33 @@ verbatim, 2026-09-18.
 
 ## State now
 
-**Nothing merged, nothing deployed.** This session did recon, settled four design questions with
-the operator, and dispatched one agent. Live clawgate is `0.8.44`, which does not contain any of
-this.
+**SHIPPED AND LIVE in clawgate `0.8.45`.** All three asks merged; the panel was verified against the live pod.
 
-- Repo: `ZacxDev/homelab-infra` (checked out at `/home/zach/workspace/homelab-talos`; the
-  directory name differs from the GitHub repo name, which is correct). Default branch `trunk`.
-- IN FLIGHT: branch `feat/chief-intro-and-threads`, worktree
-  `/home/zach/workspace/homelab-talos-chief-threads`, cut from `origin/trunk`. **No PR yet**, and
-  as of this writing **not yet pushed** — check `git ls-remote --heads origin 'feat/chief*'`.
-- Claim: `chief-panel-intro-and-threads` (rc 0; release it when done or abandoned).
-- A sibling agent is live in the same repo on `fix/transcript-pagination-survives-refresh`
-  (tmux-webapp rank 72), editing `internal/ui/session_view.go`, `session_archive.go` and
-  `e2e/tests/session-*.spec.ts` / `tmux-page.spec.ts`. This arc was told not to touch those.
-  🔴 **Test-merge current `trunk` before merging either** — the base moved during the session
-  (`5f410f8ed`), and disjoint files are not safety.
-- **No `clawgate-task:` field on purpose.** `clawgate_handoff.sh resolve` exited **6**: 595/602/603
-  all linked to the session, every one `role=read`, none WORKED. A read is not doing a task's work,
-  so no field was recorded. **This arc has no card yet** — opening one is ranked below.
+- PR `ZacxDev/homelab-infra#852` → squash **`8438cdb34`**. Deploy pin **`7aee536fc`**.
+- Image `sha256:6de86031e14764133bf9c43c6fe331bf54355d98d4772ef2d64a81ac5266da48`.
+  🔴 **Pushed digest == RUNNING POD digest** — verified, not assumed. `clawgatectl health` → `0.8.45`.
+- Markers read from the **extracted binary** with positive AND negative controls before the pin moved:
+  present — `What needs my attention?`, `blocked right now`, `Tapping one fills the box`,
+  `Could not search threads`, `data-chief-threads-state`; absent — `enumerate the tmux windows`
+  (the deleted capability sentence), `older threads` (the deleted truncation footer).
+  ⚠ The instrument needed fixing first: `grep -c` on the 66 MB binary found **nothing at all**, and
+  only the fact that *every* positive AND *every* negative control read "absent" exposed it. Routed
+  through `strings`; control `clawgate` → 6,700 hits.
+- **Verified live in the operator's real Brave**, background tab, no screen taken (`open` + `wake`,
+  never `activate`): `#chief-panel-actions` present, panel body 1,359 chars, `#chat-log` +
+  `#chat-input` present, `missingState: 0`, and the **thread list rendering two real threads with
+  relative timestamps** — the feature that did not exist before this release.
+  ⚠ `data-chief-intro` and `data-chief-quick-action` read **0**, which is CORRECT: the intro renders
+  only on an empty thread and the active thread has 2 bubbles.
+- Ladder: round 0 (3 deletions) → r1 → r2 → r3 → r4 → r5 **cancelled by the operator** ("enough
+  audits, merge now and deploy"). Shipped-behaviour per fix round: **63 → 46 → 34 → 0**.
+- CI on the merged head: **4/4 green including `clawgate-e2e` at 268 tests**.
+
+🔴 **NOT verified, and these are the gap:** the quick-action prefill, the new-thread button and the
+close-and-reopen thread persistence were **never clicked against the live pod**. All three render only
+on an **empty thread**, so proving them writes a real `chat_sessions` row in the live database — not
+done unasked. The four e2e cases covering them passed in CI on the merged source that built the
+deployed image (digest chain + marker check tie the two), but no live click was performed.
 
 ## Open investigations — live diagnosis state
 
@@ -131,29 +140,27 @@ as-of: 2026-09-18
 
 ## Next steps (ranked)
 
-1. **Land `feat/chief-intro-and-threads`** — review the agent's PR against `trunk` in
-   `ZacxDev/homelab-infra`, test-merge current `trunk` first, then merge.
-   Files: `containers/clawgate/internal/ui/chief_panel.go`, `internal/ui/agents_detail.go`,
-   `internal/api/chief_panel_ui.go`, `internal/api/agents.go`, `e2e/tests/chief-panel.spec.ts`.
-   forcing: user — the operator asked for these three changes by name on 2026-09-18.
-2. **Cut a clawgate release and verify the four e2e cases against the DEPLOYED version**, not
-   against a local tree. Read the live pin before numbering — the operator ships concurrently and
-   a mutable-tag clobber has happened before.
-   forcing: user — the feature is not delivered until the operator can use it on the real page.
-3. **Rank 74 of the sibling arc — the STATIC guard for the swap class — now has a fifth
-   instance arguing for it, and this one was caught by recon rather than by any test.** A guard
-   asserting the target→descendant RELATIONSHIP would have caught all five at once; a per-site
-   ledger would have marked `#chief-panel-body` done after the typed-input fix and missed the
-   selected thread entirely. Tracked in `claudedocs/handoff-tmux-webapp.md`, not here.
-   forcing: regression — the same class has now reached production four times.
-4. **Open a clawgate card for this arc.** It has none: `resolve` exited 6 with three `read`-only
-   links. Authoring one is its own interviewed flow
-   (`claude/skills/clawgate/flows/task-authoring.md`, enforced by a PreToolUse hook) and must not
-   be minted as a side effect of a handoff.
+1. **Click the three empty-thread paths against the live pod** — open the chief panel, tap New
+   thread, confirm the intro + three quick actions render, tap one and confirm it PREFILLS
+   `#chat-input` without sending, then close and reopen the panel and confirm the picked thread
+   survives. ⚠ This writes a real `chat_sessions` row; `handleAgentSessionCreate` reuses an empty
+   latest session, so the cost is bounded to one row. Repo `ZacxDev/homelab-infra`, no code change.
+   forcing: user — the operator asked for these three behaviours by name on 2026-09-18, and only the
+   thread list has been seen working on the live pod.
+2. **Add the chief panel to the ux-audit surfaces walk.** `containers/clawgate/e2e/ux-audit/clawgate-surfaces.audit.ts`
+   contains **zero** occurrences of `chief` or `tmux` (measured), so `tekton/ux-audit-clawgate` has
+   never run axe over the panel or its thread list — and its green was once cited as evidence it had.
+   **IN FLIGHT** on `feat/ux-audit-chief-panel`. Closing condition the operator named: the view
+   appears in a run's `findings.md`.
+   forcing: user — explicitly selected when the ceiling question was answered.
+3. **Decide whether `@axe-core/playwright` belongs in the GATING e2e tier.** It exists only under
+   `e2e/ux-audit/`, which by design "can never red `make e2e`", and is absent from `package.json`.
+   ⚠ The `axe` hits in `e2e/tests/*.spec.ts` are the word *axes*, plural of axis — a substring match
+   that read as a present capability and sent one brief chasing a helper that does not exist.
    forcing: none
-5. **Follow-ups deliberately cut from scope:** an unread dot in the thread list (`ReadAt` is
-   already tracked per session and `MarkSessionRead` is already called, so it is nearly free), and
-   scrolling to the matched message from a search result.
+4. **`internal/ui/notifications_test.go:32`** still asserts `hx-boost="false"` absent from the WHOLE
+   document on a different render — the same page-wide-claim-about-two-anchors trap that was narrowed
+   in `agents_detail_test.go`, un-narrowed and out of that PR's range.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -266,6 +273,51 @@ as-of: 2026-09-18
   the latest"* PASSES under the mutant that removes the `configRequest` listener, because
   falling back to latest is also exactly what a BROKEN memory does. It guards the fallback,
   not the mechanism.
+
+### Added 2026-09-19 — shipped; what the five-round ladder actually bought
+
+- 🔴 **Three of the four defects this arc fixed were NOT in the operator's feedback**, and each was
+  found by a different instrument than the one being audited:
+  **(a)** pressing Send **deleted the chat box** — a verb-less `#chat-form` inheriting `hx-boost` from
+  `<body>` and swapping a whole-page response into `#chief-panel-body`'s `hx-target="this"`. Found by
+  **CI's browser tier** after three rounds of Go-level probing (hostile SQL through psql, the auth tier
+  traced from route registration, duplicate ids counted after an OOB swap) had missed it.
+  **(b)** a failed thread read rendered as **"No threads yet"** on the panel's FIRST PAINT — the round
+  that fixed the *search* route wrote a comment calling that sentence "THE WORST OF THE THREE" and left
+  it on the path its own comment called "the FREQUENT path".
+  **(c)** a **truncated** read (rows AND an error) rendered as the complete answer.
+- 🔴 **(c)'s real cause is the generalisable lesson: `fakeAgents.ListSessions` could only express
+  `(nil, err)`.** So two rounds of guards — all of them real — ran at the one row count where the
+  defect did not manifest. **A guard can only observe states its fixture can construct**; no amount of
+  additional guarding finds this until the fixture grows a shape.
+- 🔴 **A positive control has to ENTER the branch it certifies.** A control cleared the error and saw
+  rows appear — proving the fake's `return out, nil` arm works, and saying nothing about
+  `return out, err`, the arm the whole axis depended on. Neutering that arm left the package `ok`.
+  New category: not a guard that cannot fail, but a guard whose *control* tests the wrong path.
+- **The boost message was wrong TWICE in consecutive rounds** — one round fixed the verb arm and broke
+  the no-verb arm (`"so htmx WILL boost it"` is false for a non-local link, a bare `<a>`, and
+  `href="#…"`). Resolved by implementing htmx 2.0.4's real rule with a third outcome that says the
+  verdict depends on the deployment hostname rather than asserting what htmx does.
+- **The strongest guard in the arc pins the vendored bundle:** exactly-one-occurrence assertions on
+  `version:"2.0.4"` and three source fragments, each labelled with the predicate arm it backs, a
+  remediation message, **and a negative control** — because every other assertion is a presence check
+  and a presence check that matches nothing is indistinguishable from a broken one. Watched to fail
+  four ways including a simulated upgrade applied to the bundle itself, restored and hash-verified.
+- **A mutant reported SURVIVED when it had not compiled.** The sweep counted `--- FAIL` lines only.
+  Build detection added. One sub-expression (`!ok`, redundant with `href == ""`) is structurally
+  unmutatable and is recorded as **unverified by mutation** rather than folded into a clean sweep.
+- ⚠ **An intermittency that inverts the usual intuition:** the Send defect's boosted GET fired in
+  **100%** of probe runs while the test failed only 3 of 7 locally. It is a race between the response
+  landing and Playwright's first probe — `send()` clears the input synchronously, the fetch is async —
+  so **a faster server makes the test fail MORE and a loaded one makes it pass.** The guard was
+  deliberately moved onto the request log (deterministic) rather than the symptom.
+- **Two operator decisions worth not re-litigating:** the quick actions **prefill and never send**
+  (a stray tap would otherwise spend an orchestrator turn with no undo), and the intro renders **only
+  on an empty thread**. A later round then found the prefill was *destroying a half-typed draft*,
+  which falsified the very property prefill was chosen for; it now appends below the draft.
+- ⚠ **`clawgatectl` prints `note: server 0.8.45, clawgatectl built for 0.8.44` until a
+  `home-manager switch`** — it is built by nix from a LOCAL checkout of this repo, so the deploy pin
+  and the client binary move independently. Not a bug; the documented stale-local-build case.
 
 ## Defects (batched)
 
