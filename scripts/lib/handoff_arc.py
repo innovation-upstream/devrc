@@ -35,11 +35,17 @@ the same trap from the writing side. Everything here reads `%B`.
 from __future__ import annotations
 
 import os
+import os.path
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Sequence
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import session_trailer  # noqa: E402
 
 __all__ = [
     "TRAILER_KEY",
@@ -92,9 +98,19 @@ _TRAILER_RE = re.compile(rf"^{TRAILER_KEY}:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 #:
 #: The hazard is real but it lives at the RENDER layer: the value becomes
 #: `claude --resume <value>` for a human to paste. So validate for safety here
-#: (the same predicate the writer uses) and QUOTE at the point of rendering.
-_UNSAFE_CHARS = "\r\n\t\x00"
-_MAX_ID_LEN = 256
+#: and QUOTE at the point of rendering.
+#:
+#: 🔴 AND THE SAFETY CHECK IS THE WRITER'S OWN FUNCTION, NOT A COPY OF IT. An
+#: earlier revision re-spelled it as `_UNSAFE_CHARS = "\r\n\t\x00"` and four
+#: separate prose sites then claimed it was "the same predicate the writer uses".
+#: It was not, and the divergence ran the dangerous way: `valid_id` rejects EVERY
+#: C0 control, this rejected four characters — three of which (`\r`, `\n`, `\t`)
+#: `_TRAILER_RE`'s `(\S+)` can never capture anyway. So every control character
+#: REACHABLE through this parser was the set the copy did not check, and
+#: `\x1b[2J\x1b]0;PWNED\x07…` in any commit body in any of four repos reached the
+#: terminal raw. `shlex.quote` does not help: an escape inside quotes still
+#: executes when written to a tty. One rule, one place — call it, do not restate
+#: it.
 
 #: A handoff doc path as it appears in prose. `archive/` is included because
 #: `#1627` renamed 35 docs under it and an arc must not end at a rename.
@@ -200,21 +216,20 @@ def doc_basename(seed: str) -> str:
 
 
 def _is_safe_id(value: str) -> bool:
-    """Safety only, mirroring `session_trailer.valid_id`'s contract.
+    """Safety only — DELEGATED to the writer's predicate, never re-spelled.
 
-    A `ses_…` token, a uuid and any future spelling all pass — that is the point.
+    A `ses_…` token, a uuid and any future spelling all pass; that is the point,
+    and it is `session_trailer`'s point, which is why this calls it.
     """
-    if not value or len(value) > _MAX_ID_LEN:
-        return False
-    return not any(c in value for c in _UNSAFE_CHARS)
+    return bool(session_trailer.valid_id(value))
 
 
 def trailer_ids(body: str) -> tuple[str, ...]:
     """Every SAFE `Claude-Session-Id:` value in a commit BODY, de-duped, in order.
 
-    "Safe" is the only filter: a value carrying a control character or exceeding
-    the length cap is dropped, matching what the writer refuses to emit. Shape is
-    never judged — see `_UNSAFE_CHARS`.
+    "Safe" is the only filter, and it is `session_trailer.valid_id` itself: a
+    value carrying a control character or exceeding the length cap is dropped.
+    Shape is never judged.
 
     De-duplicated because a squash of N commits from one session carries the id N
     times — the arc wants distinct sessions, not a write count. Order is first
@@ -223,9 +238,9 @@ def trailer_ids(body: str) -> tuple[str, ...]:
     seen: list[str] = []
     for sid in _TRAILER_RE.findall(body or ""):
         if not _is_safe_id(sid):
-            # Dropped for SAFETY only — a control character or an absurd
-            # length, i.e. exactly what the writer refuses to emit. Shape is
-            # deliberately NOT judged here; see `_UNSAFE_CHARS` above.
+            # Dropped for SAFETY only, by the WRITER'S OWN predicate — a
+            # control character or an absurd length. Shape is deliberately NOT
+            # judged here.
             continue
         if sid not in seen:
             seen.append(sid)

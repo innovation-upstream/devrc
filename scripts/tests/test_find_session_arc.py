@@ -622,10 +622,52 @@ class TestTrailerValuesAreValidatedOnREAD:
     real but lives at RENDER; see the quoting test below.
     """
 
-    @pytest.mark.parametrize("bad", ["a" * 5000, "x\x00y", "a\tb"])
+    @pytest.mark.parametrize("bad", ["a" * 5000, "x\x00y", "a\x1bb", "a\x07b"])
     def test_an_UNSAFE_value_is_DROPPED(self, bad):
-        """Length and control characters — exactly what the WRITER refuses."""
+        """Length and control characters — exactly what the WRITER refuses.
+
+        ⚠ `\r`, `\n` and `\t` are NOT usable here: `_TRAILER_RE`'s `(\S+)` can
+        never capture a value containing them, so such a param passes with the
+        filter entirely DELETED. An earlier revision used a space for this reason
+        and an audit caught it; the replacement used a tab, which has the same
+        defect. ESC and BEL are reachable AND dangerous — they are the ones that
+        reach a terminal.
+        """
         assert ha.trailer_ids(f"subject\n\n{ha.TRAILER_KEY}: {bad}\n") == ()
+
+    @pytest.mark.parametrize("bad", ["a\tb", "a\rb", "a\nb"])
+    def test_a_control_char_the_REGEX_cannot_carry_is_still_refused(self, bad):
+        """Tested against the PREDICATE directly, because the parser can never
+        deliver these — asserting them through `trailer_ids` would pass with no
+        predicate at all."""
+        assert ha._is_safe_id(bad) is False
+
+    def test_the_predicate_IS_the_writers_not_a_copy_of_it(self):
+        """🔴 THE REGRESSION GUARD FOR A DUPLICATED PREDICATE THAT DIVERGED.
+
+        An earlier revision re-spelled the check as four characters and claimed
+        in four places that it was the writer's. It was looser: `valid_id`
+        refuses every C0 control, the copy refused `\r\n\t\x00` — and three of
+        those four are unreachable through the trailer regex, so every REACHABLE
+        control character was unchecked and an ANSI escape from any commit body
+        reached the terminal raw.
+        """
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+        import session_trailer as st
+        for value in ("6b88ffe8-ec33-4662-b169-a42e8008a69a", "ses_abc123",
+                      "fable_x", "x;rm", "a\x1bb", "a\x07b", "a\x00b",
+                      "a" * 300, "", "a\tb"):
+            assert ha._is_safe_id(value) == bool(st.valid_id(value)), (
+                f"reader and writer disagree about {value!r}")
+
+    def test_an_ANSI_escape_never_reaches_the_rendered_arc(self, arc_repo,
+                                                           monkeypatch, capsys):
+        """The end-to-end form: an escape in a commit body must not reach the
+        tty. `shlex.quote` does NOT close this — an escape inside quotes still
+        executes when written to a terminal — so the read-side refusal is what
+        does the work."""
+        hostile = "\x1b[2J\x1b]0;PWNED\x07evil"
+        assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {hostile}\n") == ()
 
     def test_a_real_uuid_still_parses(self):
         sid = "6b88ffe8-ec33-4662-b169-a42e8008a69a"
@@ -718,10 +760,39 @@ class TestTheRoundTwoFixesAreActuallyWired:
             assert flag in ignored, f"{flag} is discarded but not named: {ignored}"
         assert "--arc" not in ignored
 
-    def test_the_ignored_list_is_DERIVED_so_a_new_flag_cannot_be_missed(self):
+    def test_the_ignored_list_is_DERIVED_so_a_new_flag_cannot_be_missed(self,
+                                                                        monkeypatch):
+        """🔴 ASSERTS THE DERIVATION, NOT ITS OUTPUT. An earlier version checked
+        only that honoured dests exist and that a bare `--arc` names nothing —
+        both true of a hand-written tuple, which an audit proved by swapping the
+        derived body for one and watching the suite stay green. This adds a
+        SYNTHETIC flag the parser has never seen and requires it to appear."""
+        real_build = fs.build_parser
+
+        def parser_with_extra():
+            p = real_build()
+            p.add_argument("--zz-synthetic", default="", help="test-only")
+            return p
+
+        monkeypatch.setattr(fs, "build_parser", parser_with_extra)
+        a = parser_with_extra().parse_args(["--arc", "handoff-x",
+                                            "--zz-synthetic", "v"])
+        assert "--zz-synthetic" in fs.arc_ignored_inputs(a), (
+            "a flag the parser declares was not picked up — the list is not "
+            "derived from the parser")
+
+    def test_the_honoured_dests_are_really_applied_by_the_arc_walk(self):
+        """🔴 The other direction, and it caught a false sentence in OUTPUT:
+        `--all-time` and `--claude-only` were reported as NOT applied while
+        `run_arc` hardcodes both."""
         assert fs.ARC_HONOURED_DESTS <= fs.parser_dests()
-        a = fs.parse_args(["--arc", "handoff-x"])
-        assert fs.arc_ignored_inputs(a) == []
+        src = Path(fs.__file__).read_text(encoding="utf-8") if hasattr(
+            fs, "__file__") else ""
+        assert '"--all-time", "--claude-only"' in src, (
+            "run_arc no longer hardcodes these; re-check ARC_HONOURED_DESTS")
+        a = fs.parse_args(["--arc", "handoff-x", "--all-time", "--claude-only"])
+        ignored = fs.arc_ignored_inputs(a)
+        assert "--all-time" not in ignored and "--claude-only" not in ignored
 
     def test_live_arc_does_NOT_print_the_archive_only_notice(self, capsys,
                                                              monkeypatch):

@@ -1095,7 +1095,14 @@ def arc_seed_to_doc(seed, root=None):
 #: The only inputs `--arc` HONOURS. Everything else the parser declares is
 #: ignored by the arc path, so the notice is DERIVED from the parser rather than
 #: from a second hand-written list.
-ARC_HONOURED_DESTS = frozenset({"arc", "json"})
+#:
+#: 🔴 `all_time` AND `claude_only` ARE HONOURED, and omitting them made the notice
+#: print a sentence the SAME RUN contradicted: `run_arc` builds its reader walk as
+#: `parse_args([basename, "--all-time", "--claude-only"])`, so the arc applies
+#: both — while the notice told the caller they were "NOT applied" and the report
+#: below it said "the arc walk is --claude-only". An operator passing `--all-time`
+#: to be sure the arc was not date-windowed was told the opposite of the truth.
+ARC_HONOURED_DESTS = frozenset({"arc", "json", "all_time", "claude_only"})
 
 
 def arc_ignored_inputs(a):
