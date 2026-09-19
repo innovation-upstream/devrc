@@ -145,7 +145,8 @@ python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, 
   difference between a chain and a chain that merely looks complete.
 - **Ordinary results are annotated too**, so you do not need to know this flag exists: a hit
   whose genesis names a handoff doc prints `arc: handoff-<slug>` and the ready-made command.
-- **Corpus-wide, always** — an arc spans the whole effort (one doc runs to 64 commits), so a
+- **Corpus-wide, always** — an arc spans the whole effort (one doc runs to 64 commits on
+  `origin/main` — 152 counting unmerged refs; the arc walks mainline), so a
   12-day default would truncate the chain and present the tail as the whole thing. 🔴 **Unlike
   `--skill`, an explicit `--since` does NOT narrow it**: `--arc` replaces the query entirely
   (the reader walk is built as `--all-time --claude-only`), so `--since`, `--limit`, `--tail`,

@@ -643,14 +643,23 @@ class TestTrailerValuesAreValidatedOnREAD:
         assert ha._is_safe_id(bad) is False
 
     def test_the_predicate_IS_the_writers_not_a_copy_of_it(self):
-        """🔴 THE REGRESSION GUARD FOR A DUPLICATED PREDICATE THAT DIVERGED.
+        r"""🔴 THE REGRESSION GUARD FOR A DUPLICATED PREDICATE THAT DIVERGED.
 
         An earlier revision re-spelled the check as four characters and claimed
         in four places that it was the writer's. It was looser: `valid_id`
         refuses every C0 control, the copy refused `\r\n\t\x00` — and three of
-        those four are unreachable through the trailer regex, so every REACHABLE
-        control character was unchecked and an ANSI escape from any commit body
-        reached the terminal raw.
+        those four are unreachable through the trailer regex. Of the **24**
+        control characters that ARE reachable through `(\S+)` (`0x00-0x08`,
+        `0x0e-0x1b`, `0x7f`), the copy checked exactly **one** — NUL — and missed
+        23, so an ANSI escape from any commit body reached the terminal raw.
+
+        ⚠ This docstring is the TWIN of the comment at `handoff_arc.py`'s
+        `_UNSAFE_CHARS` note, and it carried the same false "every reachable
+        control character" claim for one round AFTER that one was corrected: the
+        fix landed at one site and not the other. `grep -n "every REACHABLE
+        control"` returns ZERO here because the phrase is line-wrapped — a
+        single-line grep over wrapped prose is a confident false zero, and
+        `git log -S` is what found it.
         """
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
         import session_trailer as st
@@ -821,3 +830,29 @@ class TestTheRoundTwoFixesAreActuallyWired:
         err = capsys.readouterr().err
         assert "LIVE section below" not in err
         assert "NOT applied" in err
+
+
+def test_this_module_compiles_clean_under_W_error_SyntaxWarning():
+    r"""🔴 THIS DEFECT WAS FIXED AND THEN REINTRODUCED ONE ROUND LATER, BY ME.
+
+    A docstring here containing `\S` or `\x1b` outside a raw string raises a
+    `SyntaxWarning` today and a `SyntaxError` when CPython promotes it. Round 4
+    fixed one occurrence; the round-5 fix for a DIFFERENT finding wrote a new one
+    into the docstring three lines above, in the very edit that was correcting a
+    false claim about escape sequences. Nothing caught it but a hand-run
+    `py_compile` — pytest does not fail on `SyntaxWarning`, so the module stayed
+    green both times.
+
+    ⚠ DELIBERATELY SCOPED TO THIS FILE. A repo-wide version would be RED ON DAY
+    ONE — `scripts/tests/test_transcript_search.py` emits two such warnings today
+    and is untouched by this work — and a permanently-red gate is worse than no
+    gate. Widening it means fixing those first; that is a separate change.
+    """
+    import py_compile
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SyntaxWarning)
+        py_compile.compile(str(Path(__file__).resolve()), doraise=True,
+                           cfile=str(Path(__file__).with_suffix(".guardcheck")))
+    Path(__file__).with_suffix(".guardcheck").unlink(missing_ok=True)
