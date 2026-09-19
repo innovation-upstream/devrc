@@ -105,8 +105,10 @@ _TRAILER_RE = re.compile(rf"^{TRAILER_KEY}:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 #: separate prose sites then claimed it was "the same predicate the writer uses".
 #: It was not, and the divergence ran the dangerous way: `valid_id` rejects EVERY
 #: C0 control, this rejected four characters — three of which (`\r`, `\n`, `\t`)
-#: `_TRAILER_RE`'s `(\S+)` can never capture anyway. So every control character
-#: REACHABLE through this parser was the set the copy did not check, and
+#: `_TRAILER_RE`'s `(\S+)` can never capture anyway. So of the 24 control
+#: characters REACHABLE through this parser, the copy checked exactly ONE (NUL)
+#: and missed 23 — ⚠ not "all of them", which an earlier draft of this very
+#: comment claimed while the commit message beside it got it right. And
 #: `\x1b[2J\x1b]0;PWNED\x07…` in any commit body in any of four repos reached the
 #: terminal raw. `shlex.quote` does not help: an escape inside quotes still
 #: executes when written to a tty. One rule, one place — call it, do not restate

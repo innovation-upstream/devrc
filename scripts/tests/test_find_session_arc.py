@@ -624,7 +624,7 @@ class TestTrailerValuesAreValidatedOnREAD:
 
     @pytest.mark.parametrize("bad", ["a" * 5000, "x\x00y", "a\x1bb", "a\x07b"])
     def test_an_UNSAFE_value_is_DROPPED(self, bad):
-        """Length and control characters — exactly what the WRITER refuses.
+        r"""Length and control characters — exactly what the WRITER refuses.
 
         ⚠ `\r`, `\n` and `\t` are NOT usable here: `_TRAILER_RE`'s `(\S+)` can
         never capture a value containing them, so such a param passes with the
@@ -660,14 +660,32 @@ class TestTrailerValuesAreValidatedOnREAD:
             assert ha._is_safe_id(value) == bool(st.valid_id(value)), (
                 f"reader and writer disagree about {value!r}")
 
-    def test_an_ANSI_escape_never_reaches_the_rendered_arc(self, arc_repo,
-                                                           monkeypatch, capsys):
-        """The end-to-end form: an escape in a commit body must not reach the
-        tty. `shlex.quote` does NOT close this — an escape inside quotes still
-        executes when written to a terminal — so the read-side refusal is what
-        does the work."""
+    def test_an_ANSI_escape_never_reaches_the_RENDERED_arc(self, arc_repo):
+        """🔴 THIS ONE ACTUALLY RENDERS. An earlier version requested `arc_repo`,
+        `monkeypatch` and `capsys`, used NONE of them, and asserted only
+        `trailer_ids(...) == ()` — a duplicate of the parametrised ESC case
+        wearing an end-to-end docstring. It read as coverage of the render path
+        and provided none.
+
+        The render path is the one that matters here: `shlex.quote` does NOT
+        neutralise an escape, because an escape inside quotes still executes when
+        written to a tty. So the guarantee is that no escape survives to be
+        rendered at all.
+        """
         hostile = "\x1b[2J\x1b]0;PWNED\x07evil"
-        assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {hostile}\n") == ()
+        doc = arc_repo / DOC
+        doc.write_text("# fixture\n\nhostile\n", encoding="utf-8")
+        _sh("git", "add", "--", DOC, cwd=arc_repo)
+        _sh("git", "commit", "-q", "-m",
+            f"docs(handoff): hostile\n\n{ha.TRAILER_KEY}: {hostile}\n", cwd=arc_repo)
+
+        report = ha.resolve_arc(str(arc_repo), DOC, readers_measured=True)
+        rendered = fs.render_arc(report)
+        assert "\x1b" not in rendered and "\x07" not in rendered, (
+            "an escape from a commit body reached the rendered arc")
+        assert "PWNED" not in rendered
+        for m in report.members:
+            assert "\x1b" not in m.resume_command()
 
     def test_a_real_uuid_still_parses(self):
         sid = "6b88ffe8-ec33-4662-b169-a42e8008a69a"
