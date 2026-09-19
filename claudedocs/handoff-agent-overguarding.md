@@ -68,6 +68,44 @@ Apply the 5-step algorithm (question requirements → delete → simplify → ac
   at 37.3h active silence, last ClickHouse row `2026-09-09 16:50:25` UTC, every other laptop
   pair ok in the same run.)
 
+### 🔴 RETRACTED 2026-09-19 — `workbench/keys` is NOT broken. The "positive control" below was AGENT traffic.
+
+**The SPLIT entry below is WRONG and is kept only so the mistake is legible. There is no
+`keys` defect. Do not work it.**
+
+- **What refuted it, in one sentence from the operator:** *"I'm on laptop, sshing into
+  workbench, I don't currently have physical access to workbench."* Nobody has typed at the
+  workbench's X display since ~09-09, so a keylogger on that display recording nothing is
+  CORRECT BEHAVIOUR. That statement outranks every inference below it.
+- 🔴 **The control was built out of the rival mechanism, and it was NAMED IN THE SKILL I HAD
+  LOADED.** The `activity` skill says plainly: the browser-bridge agent drives the same Brave
+  profile the activity extension instruments, so **agent navigation emits `browser` rows** —
+  and it is excluded from `PRESENCE_SOURCES` for exactly that reason. Measured 2026-09-19:
+  the 2026-09-15 03:54–04:03 window I called "confirmed HUMAN activity" contains **234
+  `browser-bridge kind=cmd` rows**, beginning `ping`/`whoami`/**`wake`** at 03:54:02–03:54:14.
+  `wake` RAISES the browser window — which is what produced the `i3 window-focus
+  Brave-browser` at 03:54:16 that I read as a human sitting down. The 10 `browser nav` rows
+  are that agent's navigation. **Zero `keys` rows in an agent-driven window is the EXPECTED
+  reading, not a defect.**
+- **The lesson, which is the durable part:** an absence (`keys` silent) cannot distinguish
+  "the collector is broken" from "nobody was there". I picked the mechanism I already
+  suspected and then built a control that could not tell them apart — out of a source whose
+  agent-drivability is documented in the skill open in front of me. **Before concluding from
+  an absence, name the rival mechanism and find the upstream signal the two disagree about.**
+  Here that signal existed and was one query away: `source='browser-bridge' AND kind='cmd'`.
+
+### 🔴 A REAL finding that came out of the retraction — `i3` is INDIRECTLY agent-drivable
+`i3` IS in `deadman.PRESENCE_SOURCES`, and the bridge's `wake`/activate raises a window,
+which emits an `i3 window-focus` row. By the skill's own criterion — *"anything an agent can
+drive, directly or indirectly, stays out"* — that qualifies. **Magnitude, measured 2026-09-19
+over 30 days on the workbench:** 2,251 `i3` five-minute buckets, **352 (15.6%)** co-occur with
+a browser-bridge command, but only **10** of those 352 have no `keys` row in the same bucket.
+So in 342 of 352 a human was typing anyway and the bucket was legitimately active.
+**Mechanism real, magnitude small (10 buckets in 30 days).** It is NOT the main contaminator
+of the workbench's presence clock — `tmux` (10,089 rows/7d) and `zsh` are — but it means the
+presence allowlist has a THIRD agent-drivable member, not two.
+
+### ⚠ SUPERSEDED — retained for the record only (see the retraction directly above)
 ### 🔴 SPLIT 2026-09-18 — `workbench/keys` is BROKEN (a real defect); `browser`/`i3` are the model defect
 
 🔴 **READ THIS BEFORE THE 2026-09-14 ENTRY BELOW — it is PARTLY RETRACTED.** That entry
