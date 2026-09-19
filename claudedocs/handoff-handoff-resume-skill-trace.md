@@ -13,39 +13,38 @@ reading, and it may describe a gotcha already fixed. Non-blocking: if it exits
 non-zero, print the stderr line and carry on.
 
 ## Goal
-Trace the handoff and resume skills end-to-end: their flows, cross-references,
-shared infrastructure, and usage patterns. No code changes — pure analysis.
+Started as: trace the handoff and resume skills end-to-end — flows, cross-references, shared
+infrastructure, usage patterns; no code changes. 🔴 **That goal is SUPERSEDED and the doc should
+be read as what it became:** unbreak `main`, then ship the `resume` skill prune the trace
+identified. Nine PRs merged.
+- **closing-condition:** `check` — (a) the five named gates green at `origin/main`
+  (`test_handoff_doc_size`, `RETRACTED_two_entry_boundary`, `test_mutation_battery_anchors`,
+  `test_runtime_shebangs`, `test_audit_rule_firing_sweep`), and (b) `readlink -f
+  ~/.claude/skills/resume/SKILL.md` resolving into `/nix/store` at 20,731 B on BOTH hosts.
+  **VERDICT 2026-09-17: ADDRESSED — arc CLOSED.** Both halves measured; commands in
+  "How to verify". The three ranked items below are leftovers from EARLIER arcs, carry
+  `forcing: none`, and are not this arc's work — they do not keep it open.
 
 ## State now
-- Base clone on `main`; all work lands via PRs from worktrees. `origin/main` moves ~30 commits
-  a day — **re-fetch and re-measure before trusting any number in this doc, including one
-  written minutes ago.** Four of this doc's ranked lists have gone stale within hours.
-- ✅ **BOTH HOSTS CONVERGED AND DEPLOYED at `c9e9867f`** (`ship.sh` rc 0): workbench 616
-  managed artifacts resolve / 0 dangling / 0 stale, laptop 575 / 0 / 0, cross-host agreement
-  COMPARED. ⚠ The laptop's LAN address did not answer; it converged over nebula
-  (`zach@10.42.0.100`). That is the documented fallback, not a failure.
-- ✅ **The `resume` skill prune is SHIPPED AND LIVE, verified on the DEPLOYED artifact** —
-  not merely merged. `readlink -f ~/.claude/skills/resume/SKILL.md` resolves into
-  `/nix/store/r6rbi9r1…-devrc-claude-skills/` on **both** hosts at **20,731 B** (from
-  51,356 B, −59.6%), with all six `reference/` sidecars present. ~30 KB / ~8k tokens no
-  longer loads on every `/resume`.
-- ✅ **All FOUR reds are closed.** The three this arc targeted (doc-ceiling `#1650`, needle
-  `#1655`, battery anchors `#1665`) plus the runtime-shebang guard, which was closed by
-  **`#1692`** — somebody else, while this doc still listed it as rank 1.
-- ✅ **A FIFTH red, found and closed after those:** `test_audit_rule_firing_sweep.py` went red
-  the moment `#1739` landed, and `#1746` (`c9e9867f`) closed it. All three of its 🔴
-  paragraphs were **registered as rules, none exempted**.
-- **Merged this arc:** `#1655` `18a95e23` · `#1650` `d4c7d5b7` · `#1651` `22ae0817` ·
+- 🔴 **THE ARC IS CLOSED.** Nothing here is in flight, no claims are held, no worktrees of mine
+  remain. What follows is a record, not a queue.
+- ✅ **Deployed and verified on the ARTIFACT, on both hosts** — `readlink -f
+  ~/.claude/skills/resume/SKILL.md` → `/nix/store/r6rbi9r1…-devrc-claude-skills/` at
+  **20,731 B** (from 51,356, −59.6%), six `reference/` sidecars present. `ship.sh` rc 0, both
+  hosts at `c9e9867f`, cross-host agreement COMPARED. Merged ≠ deployed for a `home.file`
+  skill: the ~8k tokens per `/resume` only stopped loading when `ship.sh` ran.
+- ✅ **Five reds closed.** `#1650` doc-ceiling · `#1655` needle · `#1665` battery anchors ·
+  `#1692` runtime-shebang (someone else, while this doc listed it as rank 1) · `#1746`
+  audit-rule sweep.
+- **Nine PRs merged:** `#1655` `18a95e23` · `#1650` `d4c7d5b7` · `#1651` `22ae0817` ·
   `#1665` `c1600c93` · `#1663` `f9ef66e4` · `#1675` `70c4a006` · `#1745` `2d462bd6` ·
-  `#1746` `c9e9867f`.
-- ⚠ **One thing is NOT settled:** `tekton/devrc-pytests` was red on `#1746` for
-  `test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor`, and it was merged
-  through deliberately. That test **passes on the dev-host tier** at `c9e9867f` — but CI
-  failed it in the **`nix build` sandbox tier**, which is blind to different things. Those
-  are different claims and only the sandbox tier settles it.
-- 🔴 NO `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** — 0 tasks, its
-  positive control confirming the board is reachable. A REAL reading, but it does NOT prove
-  the session id is right, so it is not a statement that the board is fine.
+  `#1746` `c9e9867f` · `#1751` `702c1c32`.
+- ⚠ `origin/main` has moved past this work (`1bfc402a` at time of writing) and other sessions
+  are actively pruning handoff docs on the same pattern (`#1750`: 27,419 → 19,421 B, "fix an
+  UNREACHABLE sidecar, tighten the ceiling"). Re-measure before acting on any figure here.
+- 🔴 NO `clawgate-task:` field. `clawgate_handoff.sh resolve` exited **5** — 0 tasks, its
+  positive control confirming the board is reachable (11 links for another session). A REAL
+  reading, but it does NOT prove this session's id is right, so it is not a clean bill.
 
 ## Open investigations — live diagnosis state
 
@@ -319,10 +318,41 @@ that produced the wrong number. Kept below as originally written, not silently r
   the repo, which had **no `reference/` dir** (19 other skills did) and **no ceiling**. All
   three of those facts are now false, which is the point.
 
+### The fzf sandbox-tier question CANNOT be answered from `c9e9867f` — it was never validated
+- as-of: 2026-09-17
+- **Symptom + exact repro:** `tekton/devrc-pytests` was red on `#1746` for
+  `test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor`
+  (`scripts/tests/test_mention_open.py`), and `#1746` was merged through it deliberately. The
+  open question was whether that failure is real in the **`nix build` sandbox tier**, which is
+  blind to different things than a dev-host run.
+  ```bash
+  gh api /repos/innovation-upstream/devrc/commits/<sha>/statuses \
+    --jq 'group_by(.context)[] | max_by(.created_at) | "\(.context) \(.state) — \(.description[0:80])"'
+  ```
+- **Observed (with values):** the test **passes on the dev-host tier** at `c9e9867f`
+  (`1 passed, 453 deselected`). And `main`'s own sandbox-tier checks for that sha are all four
+  `error`, newest-per-context, with the description **"superseded by a newer run or a closed
+  pull request — this commit was not validated"** (20:04:17Z). So that sha has **no
+  authoritative sandbox verdict and will never get one.**
+- **Ruled out:** that the four `error` rows mean the change broke the gate — `error` is not
+  `failure`, and the description names supersession explicitly. `CLAUDE.md` measures this
+  exact shape at **59.5%** of main-commit statuses. via: measurement (GitHub statuses API)
+- **Ruled out:** that a dev-host pass settles it — different tier, different blind spots (the
+  sandbox builds from a `cp -r` store copy with no `.git`). Those are two claims, not one.
+  via: code (`CLAUDE.md`'s two-tier rule)
+- **Leading hypothesis:** a pty-driven fzf test is environment-sensitive and flaked under the
+  sandbox tier. UNCONFIRMED — and note `CLAUDE.md` says only ~21% of main commits get an
+  authoritative verdict at all, so absence of one is the norm, not evidence.
+- **Next probe:** read the newest per-context status on a LATER `main` sha that did get
+  validated (the command above), or run the sandbox tier directly:
+  `nix build ~/workspace/devrc#checks.x86_64-linux.pytests --no-link -L` — 🔴 one derivation at
+  a time, and a silent run is the CACHED case, not a pass; recover the verdict with
+  `nix log`. It predates all of this arc's work if it is real.
+
 ## Next steps (ranked)
-<!-- Renumbered 2026-09-17: the previous ranks 1 (shebang guard, closed by #1692) and 2
-     (resume prune, shipped as #1745 and DEPLOYED) are both done. This is the FOURTH
-     renumbering of this list, each stale within hours — see the Gotchas entry. -->
+<!-- Unchanged 2026-09-17: all three are leftovers from EARLIER arcs, none is this arc's work,
+     and the arc's closing-condition is met. Numbering held stable so live claims keep
+     pointing at the same items. -->
 1. **Build the `source='tool'` emission watcher** designed in the block below — per-session
    cross-source consistency (`scripts/collector/tool_emission_watch.py`), sibling to
    `deadman.py`, verdicts `ok`/`gap`/`cannot-tell`. Positive control is the confirmed
@@ -652,16 +682,26 @@ that produced the wrong number. Kept below as originally written, not silently r
   That is the designed behaviour; do not read the "unreachable" line as a failed ship — read
   the per-host VERIFIED lines and the final cross-host comparison.
 
+- 🔴 **`error` ON A CI CHECK USUALLY MEANS "NOT VALIDATED", NOT "FAILED" — AND THE DESCRIPTION
+  IS THE ONLY PLACE THAT SAYS SO.** All four legs on `c9e9867f` read `error`; the description
+  reads *"superseded by a newer run or a closed pull request — this commit was not
+  validated"*. Read the **newest per-context** status and its description
+  (`group_by(.context)[] | max_by(.created_at)`), never the roll-up — `CLAUDE.md` measured the
+  roll-up mapping `error` onto `failure`, turning 9 real failures in 200 rows into 48 of 60
+  pushes reading RED. **An unanswered question stays unanswered; a superseded check is not a
+  verdict in either direction.**
+- 🔴 **THE ARC'S ACTUAL YIELD WAS THE FAILURE PATTERN, NOT THE PRs.** Two of the five reds were
+  found only by running a CONTROL on `main` — no gate, alert or deadman surfaced them first,
+  and in both cases a PR's red colour pointed at the wrong change. `gh pr list --state open`
+  prevented duplicate work **twice**; `claim-work` prevented it **zero** times, because its
+  slug is `<doc>-<rank>` and two sessions naming the same work differently both get granted.
+  And the same scoped-run error recurred **three times in one arc — the third after it was
+  written into this doc as a gotcha**, which is the strongest evidence here that prose does
+  not change behaviour and a shape that fails loudly does.
+
 ## How to verify
-- Both hosts are converged AND the prune is actually DEPLOYED (merged ≠ deployed; `readlink`
-  is the arbiter, never a diff):
-  ```bash
-  readlink -f ~/.claude/skills/resume/SKILL.md     # → /nix/store/…-devrc-claude-skills/…
-  wc -c ~/.claude/skills/resume/SKILL.md           # 20,731  (was 51,356)
-  ls ~/.claude/skills/resume/reference/ | wc -l    # 6
-  ssh zach@10.42.0.100 'wc -c < ~/.claude/skills/resume/SKILL.md'   # 20,731
-  ```
-- All five reds, at whatever `origin/main` is now (re-fetch first — it moves constantly):
+- 🔴 **The closing-condition, both halves.** (a) the five gates, at whatever `origin/main` is
+  now — re-fetch first, it moves ~30 commits/day:
   ```bash
   git -C ~/workspace/devrc fetch origin -q
   git -C ~/workspace/devrc worktree add -f /tmp/mchk --detach origin/main
@@ -675,8 +715,18 @@ that produced the wrong number. Kept below as originally written, not silently r
     /tmp/mchk/scripts/tests/test_subsystem_store_api.py -q -k RETRACTED_two_entry_boundary
   git -C ~/workspace/devrc worktree remove /tmp/mchk --force
   ```
-- 🔴 **The unsettled one** — the fzf test failed in the SANDBOX tier and passes on the
-  dev-host tier. Only the sandbox tier answers it:
+  (b) the deploy — 🔴 `readlink` is the arbiter, never a diff, and `wc -c` in the clone is not
+  the deployed copy:
   ```bash
-  gh api /repos/innovation-upstream/devrc/commits/<sha>/statuses --jq '.[]|"\(.context) \(.state)"'
+  readlink -f ~/.claude/skills/resume/SKILL.md     # → /nix/store/…-devrc-claude-skills/…
+  wc -c ~/.claude/skills/resume/SKILL.md           # 20,731   (was 51,356)
+  ls ~/.claude/skills/resume/reference/ | wc -l    # 6
+  ssh zach@10.42.0.100 'wc -c < ~/.claude/skills/resume/SKILL.md'   # 20,731
+  ```
+- The nine PRs, by CONTENT not ancestry (a squash merge never makes the branch head an
+  ancestor):
+  ```bash
+  git -C ~/workspace/devrc cat-file -s origin/main:claude/skills/resume/SKILL.md            # 20731
+  git -C ~/workspace/devrc ls-tree -r --name-only origin/main claude/skills/resume/ | wc -l  # 7
+  git -C ~/workspace/devrc show origin/main:scripts/tests/mutation_battery_handoff_archive_and_cap.py | grep -c "SH, CAP, IDX, BUD"   # 1
   ```

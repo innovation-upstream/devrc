@@ -245,6 +245,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import difflib
+import os
 import re
 import subprocess
 import sys
@@ -284,6 +285,7 @@ from subsystem_resolver import parse_journal_bullets  # noqa: E402
 # branch the rest of the toolchain does not consider mainline.
 import git_mainline  # noqa: E402
 import handoff_budget  # noqa: E402
+import session_trailer  # noqa: E402
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -3829,6 +3831,69 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+#: 🔴 THE SAME PRECEDENCE `scripts/lib/clawgate_handoff.sh` USES, AND THE ORDER
+#: IS NOT COSMETIC. Inside opencode, an `OPENCODE_SESSION_ID` is per-call while a
+#: `CLAUDE_CODE_SESSION_ID` in scope may be one INHERITED from an ancestor Claude
+#: Code session — reading the claude var first therefore attributes an opencode
+#: commit to whichever session happened to spawn it. There is no
+#: `CLAUDE_SESSION_ID`; that name does not exist and reading it yields nothing.
+SESSION_ID_ENV_ORDER = ("OPENCODE_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
+
+
+def resolve_session_id(env: typing.Mapping[str, str] | None = None) -> str:
+    """This session's id for the commit trailer, or '' when none is resolvable.
+
+    Environment first (this tool runs INSIDE the session, so the vars are right
+    there), then `session_trailer.lookup()`, which walks /proc for a Claude
+    ancestor and is what the `prepare-commit-msg` hook uses when there is no env
+    to read.
+
+    🔴 RETURNS '' RATHER THAN A PLACEHOLDER. An unresolvable id must produce NO
+    trailer at all: a trailer carrying `unknown` is worse than none, because the
+    arc reader would count the commit as stamped and then resolve every such
+    commit across every repo to one imaginary session.
+    """
+    src = os.environ if env is None else env
+    for name in SESSION_ID_ENV_ORDER:
+        value = (src.get(name) or "").strip()
+        if value and session_trailer.valid_id(value):
+            return value
+    try:
+        return (session_trailer.lookup() or "").strip()
+    except Exception:
+        # Best-effort by design: attribution must never break the write the
+        # operator actually asked for.
+        return ""
+
+
+def commit_message(subject: str, session_id: str | None = None) -> str:
+    """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known.
+
+    🔴 THE TRAILER IS WHAT MAKES A HANDOFF DOC'S ARC RECONSTRUCTIBLE — it is the
+    WRITER half `scripts/lib/handoff_arc.py` reads, and the half that includes
+    the ORIGINATING session, which by definition never resumed from the doc it
+    created and so appears in no transcript search.
+
+    🔴 AND IT DOES NOT DOUBLE-STAMP. MEASURED 2026-09-18: a `--confirm --push`
+    run from a worktree of `~/workspace/devrc` produced a commit ALREADY carrying
+    this trailer, because `install-session-stamp.sh` had armed
+    `prepare-commit-msg` in that clone's COMMON git dir, which every worktree
+    shares. So the hook-present case is the DEFAULT on a developed clone, not an
+    edge case, and a naive append here would have emitted two trailers on its
+    very first run. `session_trailer.append_trailer` is idempotent for the same
+    id and corrective for a different one, so reusing it — rather than writing a
+    second appender here — is what makes the two writers compose. One rule, one
+    place.
+
+    The clones this function exists FOR are the ones with no hook: this arc's own
+    originating commit is unstamped for exactly that reason.
+    """
+    sid = resolve_session_id() if session_id is None else session_id
+    if not sid:
+        return subject
+    return session_trailer.append_trailer(subject, sid)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -4441,9 +4506,14 @@ def main(argv: list[str] | None = None) -> int:
         doc.write_text(merged_text, encoding="utf-8")
         git(repo, "add", "--", relpath)
         subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
+        # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILER IS ADDED AFTER IT.
+        # `[:100]` bounds the summary line; applying it to the whole message
+        # would have cut the trailer off exactly when the summary was longest,
+        # i.e. silently and on the busiest commits.
+        message = commit_message(subject)
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
-        git(repo, "commit", "-m", subject, "--", relpath)
+        git(repo, "commit", "-m", message, "--", relpath)
         committed = True
         sha = git(repo, "rev-parse", "HEAD").strip()
     except (GitError, OSError) as exc:

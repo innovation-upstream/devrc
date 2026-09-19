@@ -15,9 +15,12 @@ import (
 // the parser tests structurally cannot: that `main` WIRES it to `os.Exit` with
 // the right code, before drawing anything and before touching the network.
 //
-// Ported from `scripts/tests/test_nvim_octo.py`, which pins the same contract
-// for the implementation this one replaces, so the contract survives the swap
-// rather than being re-derived.
+// Ported from `scripts/tests/test_nvim_octo.py`, which pinned the same contract
+// for the implementation this one replaced, so the contract survived the swap
+// rather than being re-derived. ⚠ That file was deleted in Phase 4 — see
+// `internal/argv`'s package comment for the git incantation that recovers it,
+// and note that these cases are now the only binary-level statement of the
+// contract rather than a second opinion on it.
 //
 // 🔴 EXIT CODES ARE ASSERTED BY VALUE, NEVER AS "NON-ZERO". Non-zero is also
 // what a missing binary, a panic and a failed dynamic link produce — and

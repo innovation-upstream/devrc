@@ -69,6 +69,25 @@ debugging, changing or copying a specific pipeline.
    cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
    Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
    emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
+   🔴 **A THIRD congestion shape, and it posts a check that says NOTHING — measured 2026-09-17
+   on the `vetr-app-unit` gate.** The two above kill a RUNNING step (exit 255 / 137, a
+   `NOT RUN: <leg>` description). This one never gets a pod: the gate TaskRun's own condition
+   reads **`ExceededNodeResources`**, or it sits unscheduled until it trips
+   **`TaskRunTimeout`** (`failed to finish within "35m0s"`) with **not one of its steps in a
+   terminated state**. GitHub then shows `ERROR` with an **EMPTY description** on every leg the
+   pipeline reports — no `NOT RUN:`, no `FAILED:`, nothing to read — which is indistinguishable
+   from a red on the contributor's diff. Observed on a **one-character** PR while a 250-line PR
+   passed the same pipeline 80 minutes earlier; cluster at that moment: 10 concurrent
+   PipelineRuns in `tekton-ci`, 7 Pending pods.
+   🔴 **So an empty-description ERROR is never readable as a verdict — go to the TaskRun:**
+   `kubectl -n tekton-ci get taskrun -l tekton.dev/pipelineRun=<run> -o custom-columns='TASK:.metadata.labels.tekton\.dev/pipelineTask,REASON:.status.conditions[0].reason'`.
+   `ExceededNodeResources` / `TaskRunTimeout`-with-no-terminated-step ⇒ **broken gate, not a bad
+   change.** ⚠ **Re-running does not escape it** — a re-run submitted into the same saturated
+   window lands on `ExceededNodeResources` itself; wait for the queue to drain first.
+   🔴 **And it mis-scopes the ISSUE you file:** this presents as "a slow test near its timeout"
+   (vetr-app#306 was filed that way), so the fix reads as raising a per-test budget — which
+   cannot help a pod that never got a node. Check the TaskRun reason **before** writing the
+   issue, not after.
    🔴 **FIXED 2026-08-25 BY homelab-infra #396 — the paragraphs below are HISTORY, kept so
    the signature is recognisable if it ever returns. Do not go hunting this.** #396 gave
    `gitops-validate` its own nix cache and node, so the two pipelines no longer share one.

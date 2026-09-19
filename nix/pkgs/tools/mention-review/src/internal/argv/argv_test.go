@@ -3,9 +3,17 @@ package argv
 import "testing"
 
 // 🔴 THE EXPECTED VALUES ARE WRITTEN BY HAND FROM THE CONTRACT, NEVER DERIVED
-// FROM THE IMPLEMENTATION. The contract is `nvim-octo.sh` plus the table in
-// `scripts/tests/test_nvim_octo.py`, and these cases are ported from it case
-// for case so the contract survives the implementation swap.
+// FROM THE IMPLEMENTATION. The contract was `nvim-octo.sh` plus the table in
+// `scripts/tests/test_nvim_octo.py`, and these cases were ported from it case
+// for case so the contract survived the implementation swap.
+//
+// ⚠ BOTH OF THOSE FILES WERE DELETED IN PHASE 4 — see the provenance note in
+// `argv.go`, which names the git incantation that recovers them. The
+// consequence for THIS file is the one that matters: these literals are no
+// longer a SECOND opinion that can be diffed against a live shell script, they
+// are the contract's only executable statement. Hand-writing them is therefore
+// not a stylistic preference any more, it is the entire guard, and deriving any
+// of them from `argv.go` would leave nothing pinning it at all.
 
 // 🔴 THE THREE CODES ARE PINNED AS LITERALS, AND THIS TEST EXISTS BECAUSE A
 // MUTATION SURVIVED WITHOUT IT.
@@ -20,9 +28,10 @@ import "testing"
 //
 // The control is mechanical — assert values the constants CANNOT supply.
 func TestTheExitCodesAreTheSYSEXITSVALUESTheShellContractUses(t *testing.T) {
-	// Literals, deliberately. `nvim-octo.sh` exits 64/65/66 and
-	// `test_nvim_octo.py` pins those numbers; these are those numbers, typed
-	// again rather than referenced.
+	// Literals, deliberately. They are the BSD `sysexits.h` values:
+	// EX_USAGE 64, EX_DATAERR 65, EX_NOINPUT 66. `nvim-octo.sh` exited with
+	// them and `test_nvim_octo.py` pinned those numbers (both deleted in Phase
+	// 4); these are those numbers, typed again rather than referenced.
 	for _, c := range []struct {
 		name string
 		got  int
@@ -72,8 +81,10 @@ func TestAGoodInvocationSplitsOwnerAndName(t *testing.T) {
 	}
 }
 
-// badRepos is ported verbatim from test_nvim_octo.py's parametrize list, plus
-// the cases §5.3(e) names explicitly.
+// badRepos was ported verbatim from `test_nvim_octo.py`'s parametrize list
+// (deleted in Phase 4; see argv.go's provenance note), plus the cases §5.3(e)
+// names explicitly. ⚠ The list is now maintained HERE and nowhere else — there
+// is no upstream to re-sync it with, so a case added here is simply added.
 var badRepos = []string{
 	"notarepo",         // no slash at all
 	"too/many/slashes", // a second slash
@@ -183,14 +194,19 @@ func TestRealShapedRepositoryNamesAreACCEPTED(t *testing.T) {
 	}
 }
 
-// ⚠ `"0"` IS ACCEPTED, MATCHING THE SHELL CONTRACT. `nvim-octo.sh` rejects only
-// the empty string and non-digits, so `0` reaches octo today. This test pins
-// the AGREEMENT rather than an improvement: two implementations of one contract
-// disagreeing about a reachable input is worse than being marginally stricter.
+// ⚠ `"0"` IS ACCEPTED, MATCHING THE SHELL CONTRACT. `nvim-octo.sh` rejected
+// only the empty string and non-digits, so `0` reached octo. This test pinned
+// the AGREEMENT rather than an improvement. ⚠ Since Phase 4 deleted that
+// implementation the agreement has no counterparty, so what this now pins is
+// simply that the accepted set did not narrow silently — see argv.go, which
+// states plainly that the original reason expired and why the behaviour is
+// kept anyway. The test name is left alone deliberately: it records the reason
+// the case exists, and renaming it would erase that.
 func TestZeroIsAcceptedBecauseTheShellContractAcceptsIt(t *testing.T) {
 	got, err := Parse([]string{"rivalorg/spadeworks", "0"})
 	if err != nil {
-		t.Fatalf("rejected %q, which nvim-octo.sh accepts: %v", "0", err.Msg)
+		t.Fatalf("rejected %q, which the inherited shell contract accepted: %v",
+			"0", err.Msg)
 	}
 	if got.Num != 0 {
 		t.Errorf("Num = %d, want 0", got.Num)

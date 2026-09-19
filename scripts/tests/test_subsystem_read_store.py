@@ -169,11 +169,21 @@ WIRE_CONSTANTS: tuple[tuple[object, str, object], ...] = (
     # 🔴 AN ALIAS THAT IS BOTH A FILE'S CONTENT AND A DIRECTORY NAME — arrived
     # with the `baee2f0` pin bump, and the sweep below caught it with no pin.
     # Two boundaries, either of which makes it a wire fact:
-    #   * every VALUE in devrc's checked-in routing table `claude/cairn-routes.json`
-    #     is this literal — all 25 of them — and `scripts/tests/test_cairn_routes.py`
-    #     asserts they equal this constant. Change it upstream with no pin here and
-    #     that table silently stops naming a configured instance, which is a
-    #     REFUSED read/write per `Routing.alias_for`'s row 3, not a warning.
+    #   * devrc's checked-in routing table `claude/cairn-routes.json` routes
+    #     scopes to this literal, and `scripts/tests/test_cairn_routes.py`
+    #     requires every value to name an alias some host CONFIGURES — this one
+    #     among them. Change it upstream with no pin here and that table silently
+    #     stops naming a configured instance, which is a REFUSED read/write per
+    #     `Routing.alias_for`'s row 3, not a warning.
+    #     ⚠ CORRECTED 2026-09-18 (phase E). This read "every VALUE … is this
+    #     literal — all 25 of them — and test_cairn_routes.py asserts they EQUAL
+    #     this constant". Both halves are now false: the table has 26 rows of
+    #     which 6 are `civitai`, and the test that asserted equality
+    #     (`test_every_scope_routes_to_the_default_instance_today`) was DELETED
+    #     by that phase and replaced with a MEMBERSHIP check against the
+    #     configured-alias set. The boundary itself is unchanged — what was
+    #     wrong was the inventory of guarantees, which is the worse kind of
+    #     stale: it reads as coverage and stops anyone looking.
     #   * `cache_root_for` returns `root.parent / f"{root.name}-{alias}"` for any
     #     other alias and `DEFAULT_CACHE_ROOT` UNCHANGED for this one. So this
     #     string is the sentinel that keeps every existing host's populated cache
