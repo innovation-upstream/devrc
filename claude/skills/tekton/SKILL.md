@@ -69,7 +69,7 @@ debugging, changing or copying a specific pipeline.
    cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
    Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
    emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
-   🔴 **A THIRD congestion shape, and it posts a check that says NOTHING — measured 2026-09-17
+   🔴 **A THIRD shape, and it posts a check that says NOTHING — measured 2026-09-17
    on the `vetr-app-unit` gate.** The two above kill a RUNNING step (exit 255 / 137, a
    `NOT RUN: <leg>` description). This one never gets a pod: the gate TaskRun's own condition
    reads **`ExceededNodeResources`**, or it sits unscheduled until it trips
@@ -77,13 +77,29 @@ debugging, changing or copying a specific pipeline.
    terminated state**. GitHub then shows `ERROR` with an **EMPTY description** on every leg the
    pipeline reports — no `NOT RUN:`, no `FAILED:`, nothing to read — which is indistinguishable
    from a red on the contributor's diff. Observed on a **one-character** PR while a 250-line PR
-   passed the same pipeline 80 minutes earlier; cluster at that moment: 10 concurrent
-   PipelineRuns in `tekton-ci`, 7 Pending pods.
+   passed the same pipeline 80 minutes earlier.
+   🔴 **RETRACTED 2026-09-19 — THIS IS NOT CONGESTION, AND THE ORIGINAL WORDING HERE ("a third
+   congestion shape", "wait for the queue to drain") WAS WRONG.** Root cause, found by another
+   session and better evidenced: `vetr-app-unit-gate` declared CPU/memory requests on all **six
+   SEQUENTIAL steps**, and Tekton sums them into the POD request — 3200m/6400Mi reserved, so
+   there was room for exactly **ONE such pod in the whole cluster**. It was **reproduced on a
+   QUIET cluster**, which is the control that refutes the load reading outright. Fix in
+   homelab-infra **#844** → regressed (`clone`/`verdict` kept `limits` while losing `requests`,
+   and k8s defaults an undeclared request TO the limit, giving **3800m** — worse than before) →
+   **#845** open.
+   🔴 **WHY I GOT IT WRONG, because the error is reusable:** I watched the queue drain and the
+   same commit go green, and read that as proof of congestion. It is not — **"one slot
+   cluster-wide, freed when another pipeline finished" predicts exactly the same observation.**
+   Both theories explain drain-then-green, so that evidence discriminates NOTHING; only the
+   quiet-cluster reproduction does. When a remedy and a rival mechanism predict the same
+   recovery, the recovery is not evidence for either.
    🔴 **So an empty-description ERROR is never readable as a verdict — go to the TaskRun:**
    `kubectl -n tekton-ci get taskrun -l tekton.dev/pipelineRun=<run> -o custom-columns='TASK:.metadata.labels.tekton\.dev/pipelineTask,REASON:.status.conditions[0].reason'`.
    `ExceededNodeResources` / `TaskRunTimeout`-with-no-terminated-step ⇒ **broken gate, not a bad
-   change.** ⚠ **Re-running does not escape it** — a re-run submitted into the same saturated
-   window lands on `ExceededNodeResources` itself; wait for the queue to drain first.
+   change.** That reading STANDS — only its cause changed. ⚠ **Re-running does not escape it**,
+   and the reason is NOT a busy window: the pod is too big to schedule, so a re-run at 3am fails
+   the same way. **Check the Task's summed step requests before blaming load** —
+   `scripts/tests/test_ci_step_requests.py` is the ledger that scores this.
    🔴 **And it mis-scopes the ISSUE you file:** this presents as "a slow test near its timeout"
    (vetr-app#306 was filed that way), so the fix reads as raising a per-test budget — which
    cannot help a pod that never got a node. Check the TaskRun reason **before** writing the
